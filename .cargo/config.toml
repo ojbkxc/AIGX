@@ -1,0 +1,3 @@
+[build]
+# 使用 GNU 工具链（native-tls 不需要 ring C 编译）
+target = "x86_64-pc-windows-gnu"

@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  cf-ai-gw:
+    build: .
+    container_name: cf-ai-gw
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - cf-ai-gw-data:/root/.cf-ai-gw
+
+volumes:
+  cf-ai-gw-data:

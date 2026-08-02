@@ -1,0 +1,67 @@
+.mappings-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.mappings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mapping-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 16px;
+  background: var(--section-item-bg);
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  transition: border-color 0.3s, background 0.3s;
+}
+
+.mapping-row:hover {
+  border-color: rgba(168, 85, 247, 0.25);
+}
+
+.mapping-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.mapping-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+
+.mapping-arrow {
+  font-size: 18px;
+  color: var(--text-muted);
+  padding-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.mapping-remove {
+  flex-shrink: 0;
+  margin-bottom: 0;
+}
+
+@media (max-width: 600px) {
+  .mapping-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .mapping-arrow {
+    display: none;
+  }
+
+  .mapping-remove {
+    align-self: flex-end;
+  }
+}

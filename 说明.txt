@@ -1,0 +1,8 @@
+我想用rust做一个类似于newapi这样的ai中转站项目是C:\GitHub\AIGX
+ 参照了newapi项目C:\GitHub\new-api、C:\GitHub\cc-switch、C:\GitHub\engine_linux01 
+ 最后想实现的可以是跟C:\GitHub\new-api差不多的功能且支持cloudflare所以要包括C:\GitHub\cf-ai-gw\_worker.js 
+ 然后还参照了C:\GitHub\ds2api 
+ 所以你要完成的是C:\GitHub\cf-ai-gw-rs项目UI可以参照_worker.js的审美
+rust代码跟中转站还要参照C:\GitHub\aisix项目
+对了必须支持newapi里对接的易支付
+在github上的编译版本发布命名参照下C:\GitHub\RustSync项目
