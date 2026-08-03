@@ -29,6 +29,7 @@ hmac = "0.12"
 hex = "0.4"
 md5 = "0.7"
 uuid = { version = "1", features = ["v4"] }
+argon2 = "0.5"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }

@@ -3,12 +3,17 @@
 //! 仿 new-api 的用户与额度模型：每个用户拥有可消费配额 (quota) 与已用配额
 //! (used_quota)。API Key 可绑定到用户，调用推理时按 token 估算扣费。
 //! 管理员通过 /api/users 进行用户管理，并通过易支付充值订单入账。
+//!
+//! 登录方式：统一使用邮箱(email)作为唯一标识，username 仅作展示昵称。
 
 use anyhow::Result;
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use parking_lot::RwLock;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -32,8 +37,12 @@ impl Default for Role {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: String,
+    /// 邮箱（唯一标识，用于登录）
+    pub email: String,
+    /// 用户名（展示昵称，可空）
+    #[serde(default)]
     pub username: String,
-    /// 密码哈希 (SHA256 hex)
+    /// 密码哈希 (argon2)
     pub password: String,
     #[serde(default)]
     pub role: Role,
@@ -64,13 +73,19 @@ impl User {
     pub fn is_admin(&self) -> bool {
         matches!(self.role, Role::Admin)
     }
+
+    /// 显示名称：优先用 username，否则用 email
+    pub fn display_name(&self) -> &str {
+        if self.username.is_empty() { &self.email } else { &self.username }
+    }
 }
 
 /// 用户存储
 pub struct UserStore {
     store: Arc<FileStore>,
     by_id: RwLock<HashMap<String, User>>,
-    by_name: RwLock<HashMap<String, String>>, // username -> id
+    /// email -> id 索引
+    by_email: RwLock<HashMap<String, String>>,
 }
 
 impl UserStore {
@@ -78,7 +93,7 @@ impl UserStore {
         let s = Self {
             store,
             by_id: RwLock::new(HashMap::new()),
-            by_name: RwLock::new(HashMap::new()),
+            by_email: RwLock::new(HashMap::new()),
         };
         let _ = s.load();
         s
@@ -87,13 +102,21 @@ impl UserStore {
     pub fn load(&self) -> Result<()> {
         let keys = self.store.list("user:")?;
         let mut by_id = self.by_id.write();
-        let mut by_name = self.by_name.write();
+        let mut by_email = self.by_email.write();
         by_id.clear();
-        by_name.clear();
+        by_email.clear();
         for key in &keys {
             if let Some(u) = self.store.get::<User>(key)? {
                 by_id.insert(u.id.clone(), u.clone());
-                by_name.insert(u.username.clone(), u.id);
+                if !u.email.is_empty() {
+                    by_email.insert(u.email.clone(), u.id.clone());
+                }
+            }
+        }
+        // 向后兼容旧数据：无 email 字段的用户以 username 作为 email
+        for (_, user) in by_id.iter() {
+            if user.email.is_empty() && !user.username.is_empty() {
+                by_email.entry(user.username.clone()).or_insert_with(|| user.id.clone());
             }
         }
         Ok(())
@@ -104,16 +127,48 @@ impl UserStore {
         Ok(())
     }
 
-    /// 创建用户
-    pub fn create(&self, username: &str, password: &str, role: Role, quota: i64) -> Result<User> {
-        if username.is_empty() {
-            anyhow::bail!("username cannot be empty");
+    /// 创建用户（email 必填，username 可选）
+    pub fn create(&self, email: &str, password: &str, role: Role, quota: i64) -> Result<User> {
+        if email.is_empty() {
+            anyhow::bail!("email cannot be empty");
         }
-        if self.by_name.read().contains_key(username) {
-            anyhow::bail!("username already exists");
+        if !is_valid_email(email) {
+            anyhow::bail!("invalid email format");
+        }
+        if self.by_email.read().contains_key(email) {
+            anyhow::bail!("email already exists");
         }
         let user = User {
             id: uuid::Uuid::new_v4().to_string(),
+            email: email.to_string(),
+            username: String::new(),
+            password: hash_password(password),
+            role,
+            quota,
+            used_quota: 0,
+            status: "active".into(),
+            created_at: chrono::Utc::now().timestamp(),
+        };
+        self.persist(&user)?;
+        self.by_id.write().insert(user.id.clone(), user.clone());
+        self.by_email.write().insert(user.email.clone(), user.id.clone());
+        Ok(user)
+    }
+
+    /// 创建用户（带邮箱和用户名）
+    pub fn create_with_username(&self, email: &str, username: &str, password: &str, role: Role, quota: i64) -> Result<User> {
+        if email.is_empty() {
+            anyhow::bail!("email cannot be empty");
+        }
+        if !is_valid_email(email) {
+            anyhow::bail!("invalid email format");
+        }
+        if self.by_email.read().contains_key(email) {
+            anyhow::bail!("email already exists");
+        }
+        let user = User {
+            id: uuid::Uuid::new_v4().to_string(),
+            email: email.to_string(),
             username: username.to_string(),
             password: hash_password(password),
             role,
@@ -124,7 +179,7 @@ impl UserStore {
         };
         self.persist(&user)?;
         self.by_id.write().insert(user.id.clone(), user.clone());
-        self.by_name.write().insert(user.username.clone(), user.id.clone());
+        self.by_email.write().insert(user.email.clone(), user.id.clone());
         Ok(user)
     }
 
@@ -138,18 +193,36 @@ impl UserStore {
         self.by_id.read().get(id).cloned()
     }
 
-    pub fn get_by_username(&self, name: &str) -> Option<User> {
-        let id = self.by_name.read().get(name)?.clone();
+    /// 通过邮箱查找用户
+    pub fn get_by_email(&self, email: &str) -> Option<User> {
+        let id = self.by_email.read().get(email)?.clone();
         self.by_id.read().get(&id).cloned()
     }
 
-    /// 校验密码并返回用户
-    pub fn authenticate(&self, username: &str, password: &str) -> Option<User> {
-        let user = self.get_by_username(username)?;
+    /// 兼容旧接口：通过 username 查找（优先 email 索引）
+    pub fn get_by_username(&self, name: &str) -> Option<User> {
+        if let Some(u) = self.get_by_email(name) {
+            return Some(u);
+        }
+        // 回退：遍历查找 username 匹配
+        for user in self.by_id.read().values() {
+            if user.username == name {
+                return Some(user.clone());
+            }
+        }
+        None
+    }
+
+    /// 校验密码并返回用户（通过 email 登录）
+    pub fn authenticate(&self, email: &str, password: &str) -> Option<User> {
+        let user = self.get_by_email(email).or_else(|| {
+            // 兼容旧模式：允许用 username 登录（无 email 字段的用户）
+            self.get_by_username(email)
+        })?;
         if user.status != "active" {
             return None;
         }
-        if hash_password(password) == user.password {
+        if verify_password(password, &user.password) {
             Some(user)
         } else {
             None
@@ -163,19 +236,30 @@ impl UserStore {
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("user not found"))?;
-        let old_username = user.username.clone();
+        let old_email = user.email.clone();
         mutator(&mut user);
-        if user.username != old_username
-            && self.by_name.read().contains_key(&user.username)
-            && self.by_name.read().get(&user.username) != Some(&id.to_string())
-        {
-            anyhow::bail!("username already exists");
+        if user.email != old_email {
+            if user.email.is_empty() {
+                anyhow::bail!("email cannot be empty");
+            }
+            if !is_valid_email(&user.email) {
+                anyhow::bail!("invalid email format");
+            }
+            if self.by_email.read().contains_key(&user.email)
+                && self.by_email.read().get(&user.email) != Some(&id.to_string())
+            {
+                anyhow::bail!("email already exists");
+            }
         }
         self.persist(&user)?;
         self.by_id.write().insert(user.id.clone(), user.clone());
-        let mut by_name = self.by_name.write();
-        by_name.remove(&old_username);
-        by_name.insert(user.username.clone(), user.id.clone());
+        let mut by_email = self.by_email.write();
+        if !old_email.is_empty() {
+            by_email.remove(&old_email);
+        }
+        if !user.email.is_empty() {
+            by_email.insert(user.email.clone(), user.id.clone());
+        }
         Ok(user)
     }
 
@@ -184,7 +268,9 @@ impl UserStore {
         if let Some(u) = user {
             self.store.delete(&format!("user:{id}"))?;
             self.by_id.write().remove(id);
-            self.by_name.write().remove(&u.username);
+            if !u.email.is_empty() {
+                self.by_email.write().remove(&u.email);
+            }
         }
         Ok(())
     }
@@ -233,11 +319,49 @@ impl UserStore {
     }
 }
 
-/// SHA256 密码哈希
+/// 验证邮箱格式
+fn is_valid_email(email: &str) -> bool {
+    let email = email.trim();
+    if email.is_empty() || email.len() > 254 {
+        return false;
+    }
+    let parts: Vec<&str> = email.splitn(2, '@').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    let (local, domain) = (parts[0], parts[1]);
+    if local.is_empty() || local.len() > 64 || domain.is_empty() || domain.len() > 255 {
+        return false;
+    }
+    if !domain.contains('.') {
+        return false;
+    }
+    true
+}
+
+/// Argon2 密码哈希
 pub fn hash_password(password: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(password.as_bytes());
-    hex::encode(hasher.finalize())
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("argon2 hash")
+        .to_string()
+}
+
+/// 验证密码
+pub fn verify_password(password: &str, hash: &str) -> bool {
+    // 兼容旧 SHA256 格式
+    if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(password.as_bytes());
+        let expected = hex::encode(hasher.finalize());
+        return expected == hash;
+    }
+    // argon2 验证
+    PasswordHash::new(hash)
+        .and_then(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed))
+        .is_ok()
 }
 
 /// 生成随机 trade_no
@@ -270,26 +394,41 @@ mod tests {
     #[test]
     fn create_and_auth() {
         let s = store();
-        let u = s.create("alice", "pw", Role::User, 1000).unwrap();
+        let u = s.create("alice@test.com", "pw", Role::User, 1000).unwrap();
         assert_eq!(u.quota, 1000);
-        assert!(s.authenticate("alice", "pw").is_some());
-        assert!(s.authenticate("alice", "bad").is_none());
+        assert!(s.authenticate("alice@test.com", "pw").is_some());
+        assert!(s.authenticate("alice@test.com", "bad").is_none());
     }
 
     #[test]
     fn charge_quota() {
         let s = store();
-        let u = s.create("bob", "pw", Role::User, 100).unwrap();
+        let u = s.create("bob@test.com", "pw", Role::User, 100).unwrap();
         assert!(s.try_charge(&u.id, 30));
         assert_eq!(s.get_by_id(&u.id).unwrap().used_quota, 30);
-        assert!(s.try_charge(&u.id, 70)); // remaining = 70, ok
-        assert!(!s.try_charge(&u.id, 1)); // remaining = 0
+        assert!(s.try_charge(&u.id, 70));
+        assert!(!s.try_charge(&u.id, 1));
     }
 
     #[test]
-    fn duplicate_username() {
+    fn duplicate_email() {
         let s = store();
-        s.create("dup", "pw", Role::User, 0).unwrap();
-        assert!(s.create("dup", "pw", Role::User, 0).is_err());
+        s.create("dup@test.com", "pw", Role::User, 0).unwrap();
+        assert!(s.create("dup@test.com", "pw", Role::User, 0).is_err());
+    }
+
+    #[test]
+    fn invalid_email() {
+        let s = store();
+        assert!(s.create("", "pw", Role::User, 0).is_err());
+        assert!(s.create("notanemail", "pw", Role::User, 0).is_err());
+    }
+
+    #[test]
+    fn get_by_email() {
+        let s = store();
+        s.create("test@example.com", "pw", Role::User, 0).unwrap();
+        assert!(s.get_by_email("test@example.com").is_some());
+        assert!(s.get_by_email("nonexist@example.com").is_none());
     }
 }

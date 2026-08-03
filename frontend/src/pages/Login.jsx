@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { api } from '../api';
 
 export default function Login() {
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -12,16 +12,17 @@ export default function Login() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
-    if (!username || !password) {
-      setError('请输入用户名和密码');
+    if (!email || !password) {
+      setError('请输入邮箱和密码');
       return;
     }
     setLoading(true);
     try {
-      const res = await api.login(username, password);
+      const res = await api.login(email, password);
       if (res.success && res.data) {
         localStorage.setItem('token', res.data.token);
-        localStorage.setItem('username', res.data.username);
+        localStorage.setItem('email', res.data.email);
+        localStorage.setItem('username', res.data.username || res.data.email);
         localStorage.setItem('expires_at', String(res.data.expires_at));
         navigate('/');
       } else {
@@ -114,7 +115,7 @@ export default function Login() {
             ⚡
           </div>
           <h1 style={{ fontSize: '22px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '4px', fontFamily: "'Outfit', sans-serif" }}>
-            CF AI Gateway
+            AIGX Gateway
           </h1>
           <p style={{ fontSize: '14px', color: 'var(--text-muted)' }}>
             登录管理面板
@@ -127,14 +128,14 @@ export default function Login() {
 
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
           <div className="form-group">
-            <label htmlFor="username">用户名</label>
+            <label htmlFor="email">邮箱</label>
             <input
-              id="username"
-              type="text"
+              id="email"
+              type="email"
               className="form-input"
-              placeholder="请输入用户名"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              placeholder="请输入邮箱"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
               autoFocus
               disabled={loading}
             />
@@ -160,6 +161,12 @@ export default function Login() {
             {loading ? '登录中...' : '登录'}
           </button>
         </form>
+
+        <div style={{ textAlign: 'center', marginTop: '16px' }}>
+          <Link to="/register" style={{ fontSize: '13px', color: 'var(--primary-color)', textDecoration: 'none' }}>
+            还没有账号？立即注册
+          </Link>
+        </div>
       </div>
     </div>
   );

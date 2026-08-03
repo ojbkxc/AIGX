@@ -10,7 +10,7 @@ use crate::storage::FileStore;
 pub struct Session {
     pub token: String,
     #[allow(dead_code)]
-    pub username: String,
+    pub email: String,
     #[allow(dead_code)]
     pub created_at: i64,
     pub expires_at: i64,
@@ -159,14 +159,14 @@ impl SessionStore {
     }
 
     /// 创建会话并返回签名的 token
-    pub fn create_session(&self, username: &str) -> Session {
+    pub fn create_session(&self, email: &str) -> Session {
         let now = chrono::Utc::now().timestamp();
         let expires_at = now + self.expiry_hours * 3600;
-        let token = self.sign_token(username, expires_at);
+        let token = self.sign_token(email, expires_at);
 
         Session {
             token,
-            username: username.to_string(),
+            email: email.to_string(),
             created_at: now,
             expires_at,
         }
@@ -179,10 +179,10 @@ impl SessionStore {
             return None;
         }
 
-        let (username_str, expires_str, _sig) = (parts[0], parts[1], parts[2]);
+        let (email_str, expires_str, _sig) = (parts[0], parts[1], parts[2]);
 
         // 验证签名
-        let expected_sig = self.compute_signature(username_str, expires_str);
+        let expected_sig = self.compute_signature(email_str, expires_str);
         if _sig != expected_sig {
             return None;
         }
@@ -197,19 +197,19 @@ impl SessionStore {
         let now_ts = chrono::Utc::now().timestamp();
         Some(Session {
             token: token.to_string(),
-            username: username_str.to_string(),
+            email: email_str.to_string(),
             created_at: now_ts,
             expires_at,
         })
     }
 
-    /// 生成签名 token：username.expires_at.hmac_hex
-    fn sign_token(&self, username: &str, expires_at: i64) -> String {
-        let sig = self.compute_signature(username, &expires_at.to_string());
-        format!("{}.{}.{}", username, expires_at, sig)
+    /// 生成签名 token：email.expires_at.hmac_hex
+    fn sign_token(&self, email: &str, expires_at: i64) -> String {
+        let sig = self.compute_signature(email, &expires_at.to_string());
+        format!("{}.{}.{}", email, expires_at, sig)
     }
 
-    fn compute_signature(&self, username: &str, expires: &str) -> String {
+    fn compute_signature(&self, email: &str, expires: &str) -> String {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
 
@@ -217,7 +217,7 @@ impl SessionStore {
 
         let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())
             .expect("HMAC key");
-        mac.update(username.as_bytes());
+        mac.update(email.as_bytes());
         mac.update(b".");
         mac.update(expires.as_bytes());
         hex::encode(mac.finalize().into_bytes())

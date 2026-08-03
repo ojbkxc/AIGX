@@ -1,3 +1,5 @@
+整个项目Anthropic 兼容格式跟OpenAI 兼容格式都要有
+
 我想用rust做一个类似于newapi这样的ai中转站项目是C:\GitHub\AIGX
  参照了newapi项目C:\GitHub\new-api、C:\GitHub\cc-switch、C:\GitHub\engine_linux01 
  最后想实现的可以是跟C:\GitHub\new-api差不多的功能且支持cloudflare所以要包括C:\GitHub\cf-ai-gw\
@@ -84,3 +86,7 @@ rust代码跟中转站还要参照C:\GitHub\aisix项目
 - 管理后台 Users.jsx 创建/编辑用户的表单也改为 email 字段为主。
 - 全程不引入任何短信/手机号验证码逻辑；如需验证可走邮件验证（可选，后续再做）。
 ================================================================
+
+
+写清楚Cloudflare的AI用 Binding实现不用 REST API
+

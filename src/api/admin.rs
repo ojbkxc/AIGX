@@ -6,7 +6,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 use crate::account::CfAccount;
@@ -21,8 +20,16 @@ use super::openai::AppState;
 /// 登录请求
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
-    pub username: String,
+    pub email: String,
     pub password: String,
+}
+
+/// 注册请求
+#[derive(Debug, Deserialize)]
+pub struct RegisterRequest {
+    pub email: String,
+    pub password: String,
+    pub username: Option<String>,
 }
 
 /// 账号请求
@@ -83,14 +90,16 @@ async fn verify_admin(state: &AppState, headers: &HeaderMap) -> Result<AppConfig
     let session_store = SessionStore::new(&config.admin.session_secret, 24);
     if let Some(sess) = session_store.validate_session(&token) {
         // 若存在用户系统，校验该用户仍为管理员且启用
-        if let Some(u) = state.user_store.get_by_username(&sess.username) {
+        if let Some(u) = state.user_store.get_by_email(&sess.email) {
             if u.status == "active" && u.is_admin() {
                 return Ok(config);
             }
             return Err(error_response("User disabled or not admin", StatusCode::UNAUTHORIZED));
         }
-        // 用户系统为空时回退到旧 admin 模式
-        return Ok(config);
+        // 兼容模式：旧 admin 账户
+        if sess.email == "admin" {
+            return Ok(config);
+        }
     }
 
     Err(error_response("Invalid session", StatusCode::UNAUTHORIZED))
@@ -107,12 +116,13 @@ async fn verify_user(state: &AppState, headers: &HeaderMap) -> Result<User, (Sta
         .ok_or_else(|| error_response("Invalid session", StatusCode::UNAUTHORIZED))?;
     let user = state
         .user_store
-        .get_by_username(&sess.username)
+        .get_by_email(&sess.email)
         .or_else(|| {
             // 回退：用户系统为空时合成 admin 用户
-            if sess.username == "admin" {
+            if sess.email == "admin" {
                 Some(User {
                     id: "admin".into(),
+                    email: "admin".into(),
                     username: "admin".into(),
                     password: String::new(),
                     role: Role::Admin,
@@ -158,7 +168,7 @@ fn extract_session_token(headers: &HeaderMap) -> Option<String> {
 // 认证 API
 // ============================================================
 
-/// POST /api/auth/login - 管理员登录
+/// POST /api/auth/login - 管理员/用户登录（邮箱）
 pub async fn handle_login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
@@ -166,18 +176,19 @@ pub async fn handle_login(
     let config = state.config_manager.get().await;
 
     // 优先走用户系统
-    if let Some(u) = state.user_store.authenticate(&body.username, &body.password) {
+    if let Some(u) = state.user_store.authenticate(&body.email, &body.password) {
         let session_secret = if config.admin.session_secret.is_empty() {
             uuid::Uuid::new_v4().to_string()
         } else {
             config.admin.session_secret.clone()
         };
         let session_store = SessionStore::new(&session_secret, 24);
-        let session = session_store.create_session(&u.username);
+        let session = session_store.create_session(&u.email);
         return Ok(Json(serde_json::json!({
             "success": true,
             "data": {
                 "token": session.token,
+                "email": u.email,
                 "username": u.username,
                 "role": match u.role { Role::Admin => "admin", Role::User => "user" },
                 "expires_at": session.expires_at
@@ -185,8 +196,8 @@ pub async fn handle_login(
         })));
     }
 
-    // 回退：旧 admin 模式
-    if body.username != "admin" {
+    // 回退：旧 admin 模式（首次使用）
+    if body.email != "admin" {
         return Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED));
     }
 
@@ -194,29 +205,70 @@ pub async fn handle_login(
     let is_first_login = config.admin.password.is_empty();
 
     if is_first_login {
-        // 首次登录：设置密码
         let mut new_config = config.clone();
         new_config.admin.password = password_hash;
         new_config.admin.session_secret = uuid::Uuid::new_v4().to_string();
         if let Err(e) = state.config_manager.update(new_config.clone()).await {
             tracing::error!("Failed to save config: {e}");
         }
-        // 同步创建管理员用户
-        let _ = state.user_store.create("admin", &body.password, Role::Admin, 0);
+        let _ = state.user_store.create_with_username("admin", "admin", &body.password, Role::Admin, 0);
     } else if password_hash != config.admin.password {
         return Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED));
     }
 
     let session_store = SessionStore::new(&config.admin.session_secret, 24);
-    let session = session_store.create_session(&body.username);
+    let session = session_store.create_session(&body.email);
 
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
             "token": session.token,
-            "username": body.username,
+            "email": body.email,
+            "username": "admin",
             "role": "admin",
             "expires_at": session.expires_at
+        }
+    })))
+}
+
+/// POST /api/auth/register - 公开邮箱注册
+pub async fn handle_register(
+    State(state): State<AppState>,
+    Json(body): Json<RegisterRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if body.email.trim().is_empty() {
+        return Err(error_response("邮箱不能为空", StatusCode::BAD_REQUEST));
+    }
+    if body.password.len() < 6 {
+        return Err(error_response("密码长度至少6位", StatusCode::BAD_REQUEST));
+    }
+    let config = state.config_manager.get().await;
+    let default_quota = config.usage.monthly_limit as i64;
+    let user = if let Some(username) = &body.username {
+        if !username.trim().is_empty() {
+            // 检查 username 是否已被使用
+            if state.user_store.get_by_username(username.trim()).is_some() {
+                return Err(error_response("用户名已存在", StatusCode::CONFLICT));
+            }
+            state.user_store.create_with_username(body.email.trim(), username.trim(), &body.password, Role::User, default_quota)
+                .map_err(|e| error_response(&format!("注册失败: {e}"), StatusCode::BAD_REQUEST))?
+        } else {
+            state.user_store.create(body.email.trim(), &body.password, Role::User, default_quota)
+                .map_err(|e| error_response(&format!("注册失败: {e}"), StatusCode::BAD_REQUEST))?
+        }
+    } else {
+        state.user_store.create(body.email.trim(), &body.password, Role::User, default_quota)
+            .map_err(|e| error_response(&format!("注册失败: {e}"), StatusCode::BAD_REQUEST))?
+    };
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "role": "user",
+            "quota": user.quota,
         }
     })))
 }
@@ -745,11 +797,9 @@ pub async fn handle_usage_models(
     })))
 }
 
-/// 计算密码哈希
+/// 计算密码哈希（兼容旧 admin 模式，使用 user 模块的 hash_password）
 fn hash_password(password: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(password.as_bytes());
-    hex::encode(hasher.finalize())
+    user::hash_password(password)
 }
 
 // ============================================================
@@ -758,8 +808,9 @@ fn hash_password(password: &str) -> String {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {
-    pub username: String,
+    pub email: String,
     pub password: String,
+    pub username: Option<String>,
     #[serde(default = "default_user_role")]
     pub role: String,
     #[serde(default)]
@@ -772,6 +823,8 @@ fn default_user_role() -> String {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateUserRequest {
+    pub email: Option<String>,
+    pub username: Option<String>,
     pub password: Option<String>,
     pub role: Option<String>,
     pub quota: Option<i64>,
@@ -781,6 +834,7 @@ pub struct UpdateUserRequest {
 fn mask_user(u: &User) -> Value {
     serde_json::json!({
         "id": u.id,
+        "email": u.email,
         "username": u.username,
         "role": match u.role { Role::Admin => "admin", Role::User => "user" },
         "quota": u.quota,
@@ -812,7 +866,16 @@ pub async fn handle_create_user(
         "admin" => Role::Admin,
         _ => Role::User,
     };
-    match state.user_store.create(&body.username, &body.password, role, body.quota) {
+    let result = if let Some(username) = &body.username {
+        if !username.trim().is_empty() {
+            state.user_store.create_with_username(&body.email, username.trim(), &body.password, role, body.quota)
+        } else {
+            state.user_store.create(&body.email, &body.password, role, body.quota)
+        }
+    } else {
+        state.user_store.create(&body.email, &body.password, role, body.quota)
+    };
+    match result {
         Ok(u) => Ok(Json(serde_json::json!({ "success": true, "data": mask_user(&u) }))),
         Err(e) => Err(error_response(&format!("Failed to create user: {e}"), StatusCode::BAD_REQUEST)),
     }
@@ -827,6 +890,14 @@ pub async fn handle_update_user(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
     match state.user_store.update(&id, |u| {
+        if let Some(e) = &body.email {
+            if !e.is_empty() {
+                u.email = e.clone();
+            }
+        }
+        if let Some(n) = &body.username {
+            u.username = n.clone();
+        }
         if let Some(p) = &body.password {
             if !p.is_empty() {
                 u.password = user::hash_password(p);

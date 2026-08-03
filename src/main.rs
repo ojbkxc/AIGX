@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     let user_store = Arc::new(UserStore::new(store.clone()));
     // 首次启动若不存在任何用户，则用旧 admin 密码哈希迁移，或保持空（仍可单用户模式登录）
     if user_store.list().is_empty() && !config.admin.password.is_empty() {
-        let _ = user_store.create("admin", &config.admin.password, user::Role::Admin, 0);
+        let _ = user_store.create_with_username("admin", "admin", &config.admin.password, user::Role::Admin, 0);
     }
 
     // 初始化订单存储
@@ -136,6 +136,7 @@ fn build_router(state: AppState) -> Router {
     // 管理 API 路由
     let admin_routes = Router::new()
         .route("/api/auth/login", post(api::admin::handle_login))
+        .route("/api/auth/register", post(api::admin::handle_register))
         .route("/api/auth/logout", post(api::admin::handle_logout))
         .route("/api/usage/summary", get(api::admin::handle_usage_summary))
         .route("/api/usage/summary", post(api::admin::handle_refresh_usage))

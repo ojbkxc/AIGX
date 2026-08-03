@@ -29,8 +29,11 @@ async function request(method, path, body = null) {
 
 export const api = {
   // Auth
-  login: (username, password) =>
-    request('POST', '/api/auth/login', { username, password }),
+  login: (email, password) =>
+    request('POST', '/api/auth/login', { email, password }),
+
+  register: (email, password, username) =>
+    request('POST', '/api/auth/register', { email, password, username }),
 
   logout: () =>
     request('POST', '/api/auth/logout'),
