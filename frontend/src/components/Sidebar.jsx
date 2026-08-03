@@ -85,10 +85,10 @@ export default function Sidebar() {
             WebkitBackgroundClip: 'text',
             WebkitTextFillColor: 'transparent',
           }}>
-            CF AI GW
+            AIGX
           </div>
           <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 500 }}>
-            管理面板
+            AI 中转网关
           </div>
         </div>
       </div>

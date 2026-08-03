@@ -19,8 +19,10 @@ use crate::bridge::{
 use crate::config::ConfigManager;
 use crate::hub::Hub;
 use crate::model::ModelMapper;
+use crate::payment::order_store::OrderStore;
 use crate::proxy::CfApiClient;
 use crate::usage::UsageTracker;
+use crate::user::UserStore;
 
 use super::auth::ApiKeyStore;
 
@@ -34,6 +36,8 @@ pub struct AppState {
     pub api_key_store: Arc<ApiKeyStore>,
     pub config_manager: Arc<ConfigManager>,
     pub hub: Arc<Hub>,
+    pub user_store: Arc<UserStore>,
+    pub order_store: Arc<OrderStore>,
 }
 
 /// 创建 OpenAI 兼容的错误响应

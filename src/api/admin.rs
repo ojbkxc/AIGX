@@ -1,15 +1,19 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Redirect, Response},
     Json,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 use crate::account::CfAccount;
 use crate::config::AppConfig;
 use crate::graphql;
+use crate::payment::{Device, EpayConfig, PurchaseArgs};
+use crate::user::{self, Role, User};
 
 use super::auth::SessionStore;
 use super::openai::AppState;
@@ -77,11 +81,55 @@ async fn verify_admin(state: &AppState, headers: &HeaderMap) -> Result<AppConfig
 
     // 使用 session store 验证
     let session_store = SessionStore::new(&config.admin.session_secret, 24);
-    if session_store.validate_session(&token).is_some() {
+    if let Some(sess) = session_store.validate_session(&token) {
+        // 若存在用户系统，校验该用户仍为管理员且启用
+        if let Some(u) = state.user_store.get_by_username(&sess.username) {
+            if u.status == "active" && u.is_admin() {
+                return Ok(config);
+            }
+            return Err(error_response("User disabled or not admin", StatusCode::UNAUTHORIZED));
+        }
+        // 用户系统为空时回退到旧 admin 模式
         return Ok(config);
     }
 
     Err(error_response("Invalid session", StatusCode::UNAUTHORIZED))
+}
+
+/// 验证任意已登录用户，返回用户记录
+async fn verify_user(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, Json<Value>)> {
+    let token = extract_session_token(headers)
+        .ok_or_else(|| error_response("Not authenticated", StatusCode::UNAUTHORIZED))?;
+    let config = state.config_manager.get().await;
+    let session_store = SessionStore::new(&config.admin.session_secret, 24);
+    let sess = session_store
+        .validate_session(&token)
+        .ok_or_else(|| error_response("Invalid session", StatusCode::UNAUTHORIZED))?;
+    let user = state
+        .user_store
+        .get_by_username(&sess.username)
+        .or_else(|| {
+            // 回退：用户系统为空时合成 admin 用户
+            if sess.username == "admin" {
+                Some(User {
+                    id: "admin".into(),
+                    username: "admin".into(),
+                    password: String::new(),
+                    role: Role::Admin,
+                    quota: 0,
+                    used_quota: 0,
+                    status: "active".into(),
+                    created_at: 0,
+                })
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| error_response("User not found", StatusCode::UNAUTHORIZED))?;
+    if user.status != "active" {
+        return Err(error_response("User disabled", StatusCode::UNAUTHORIZED));
+    }
+    Ok(user)
 }
 
 /// 从请求中提取会话 token
@@ -117,12 +165,31 @@ pub async fn handle_login(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let config = state.config_manager.get().await;
 
-    // 验证用户名和密码
+    // 优先走用户系统
+    if let Some(u) = state.user_store.authenticate(&body.username, &body.password) {
+        let session_secret = if config.admin.session_secret.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            config.admin.session_secret.clone()
+        };
+        let session_store = SessionStore::new(&session_secret, 24);
+        let session = session_store.create_session(&u.username);
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "data": {
+                "token": session.token,
+                "username": u.username,
+                "role": match u.role { Role::Admin => "admin", Role::User => "user" },
+                "expires_at": session.expires_at
+            }
+        })));
+    }
+
+    // 回退：旧 admin 模式
     if body.username != "admin" {
         return Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED));
     }
 
-    // 验证密码
     let password_hash = hash_password(&body.password);
     let is_first_login = config.admin.password.is_empty();
 
@@ -131,14 +198,15 @@ pub async fn handle_login(
         let mut new_config = config.clone();
         new_config.admin.password = password_hash;
         new_config.admin.session_secret = uuid::Uuid::new_v4().to_string();
-        if let Err(e) = state.config_manager.update(new_config).await {
+        if let Err(e) = state.config_manager.update(new_config.clone()).await {
             tracing::error!("Failed to save config: {e}");
         }
+        // 同步创建管理员用户
+        let _ = state.user_store.create("admin", &body.password, Role::Admin, 0);
     } else if password_hash != config.admin.password {
         return Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED));
     }
 
-    // 生成会话 token
     let session_store = SessionStore::new(&config.admin.session_secret, 24);
     let session = session_store.create_session(&body.username);
 
@@ -147,6 +215,7 @@ pub async fn handle_login(
         "data": {
             "token": session.token,
             "username": body.username,
+            "role": "admin",
             "expires_at": session.expires_at
         }
     })))
@@ -681,4 +750,432 @@ fn hash_password(password: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(password.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+// ============================================================
+// 用户管理 API
+// ============================================================
+
+#[derive(Debug, Deserialize)]
+pub struct CreateUserRequest {
+    pub username: String,
+    pub password: String,
+    #[serde(default = "default_user_role")]
+    pub role: String,
+    #[serde(default)]
+    pub quota: i64,
+}
+
+fn default_user_role() -> String {
+    "user".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateUserRequest {
+    pub password: Option<String>,
+    pub role: Option<String>,
+    pub quota: Option<i64>,
+    pub status: Option<String>,
+}
+
+fn mask_user(u: &User) -> Value {
+    serde_json::json!({
+        "id": u.id,
+        "username": u.username,
+        "role": match u.role { Role::Admin => "admin", Role::User => "user" },
+        "quota": u.quota,
+        "used_quota": u.used_quota,
+        "remaining": u.remaining(),
+        "status": u.status,
+        "created_at": u.created_at,
+    })
+}
+
+/// GET /api/users - 列出用户
+pub async fn handle_list_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let users: Vec<Value> = state.user_store.list().iter().map(mask_user).collect();
+    Ok(Json(serde_json::json!({ "success": true, "data": users })))
+}
+
+/// POST /api/users - 创建用户
+pub async fn handle_create_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateUserRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let role = match body.role.as_str() {
+        "admin" => Role::Admin,
+        _ => Role::User,
+    };
+    match state.user_store.create(&body.username, &body.password, role, body.quota) {
+        Ok(u) => Ok(Json(serde_json::json!({ "success": true, "data": mask_user(&u) }))),
+        Err(e) => Err(error_response(&format!("Failed to create user: {e}"), StatusCode::BAD_REQUEST)),
+    }
+}
+
+/// PUT /api/users/:id - 更新用户
+pub async fn handle_update_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateUserRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    match state.user_store.update(&id, |u| {
+        if let Some(p) = &body.password {
+            if !p.is_empty() {
+                u.password = user::hash_password(p);
+            }
+        }
+        if let Some(r) = &body.role {
+            u.role = match r.as_str() {
+                "admin" => Role::Admin,
+                _ => Role::User,
+            };
+        }
+        if let Some(q) = body.quota {
+            u.quota = q;
+        }
+        if let Some(s) = &body.status {
+            u.status = s.clone();
+        }
+    }) {
+        Ok(u) => Ok(Json(serde_json::json!({ "success": true, "data": mask_user(&u) }))),
+        Err(e) => Err(error_response(&format!("Failed to update user: {e}"), StatusCode::BAD_REQUEST)),
+    }
+}
+
+/// DELETE /api/users/:id - 删除用户
+pub async fn handle_delete_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    match state.user_store.delete(&id) {
+        Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": null }))),
+        Err(e) => Err(error_response(&format!("Failed to delete user: {e}"), StatusCode::BAD_REQUEST)),
+    }
+}
+
+/// GET /api/users/me - 当前登录用户信息
+pub async fn handle_me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let u = verify_user(&state, &headers).await?;
+    Ok(Json(serde_json::json!({ "success": true, "data": mask_user(&u) })))
+}
+
+// ============================================================
+// 易支付配置 API
+// ============================================================
+
+/// GET /api/epay/config - 读取易支付配置（仅管理员）
+pub async fn handle_get_epay_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "pay_address": _config.epay.pay_address,
+            "epay_id": _config.epay.epay_id,
+            "epay_key": _config.epay.epay_key,
+            "pay_methods": _config.epay.pay_methods,
+            "price": _config.epay.price,
+            "min_topup": _config.epay.min_topup,
+            "custom_callback_address": _config.epay.custom_callback_address,
+            "server_address": _config.server_address,
+        }
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateEpayConfigRequest {
+    pub pay_address: Option<String>,
+    pub epay_id: Option<String>,
+    pub epay_key: Option<String>,
+    pub pay_methods: Option<Vec<String>>,
+    pub price: Option<f64>,
+    pub min_topup: Option<i64>,
+    pub custom_callback_address: Option<String>,
+    pub server_address: Option<String>,
+}
+
+/// PUT /api/epay/config - 更新易支付配置（仅管理员）
+pub async fn handle_update_epay_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateEpayConfigRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut config = verify_admin(&state, &headers).await?;
+    if let Some(v) = body.pay_address { config.epay.pay_address = v; }
+    if let Some(v) = body.epay_id { config.epay.epay_id = v; }
+    if let Some(v) = body.epay_key { config.epay.epay_key = v; }
+    if let Some(v) = body.pay_methods { config.epay.pay_methods = v; }
+    if let Some(v) = body.price { config.epay.price = v; }
+    if let Some(v) = body.min_topup { config.epay.min_topup = v; }
+    if let Some(v) = body.custom_callback_address { config.epay.custom_callback_address = v; }
+    if let Some(v) = body.server_address { config.server_address = v; }
+    state.config_manager.update(config.clone()).await.map_err(|e| {
+        error_response(&format!("Failed to save config: {e}"), StatusCode::INTERNAL_SERVER_ERROR)
+    })?;
+    Ok(Json(serde_json::json!({ "success": true, "data": null })))
+}
+
+// ============================================================
+// 订单与充值 API
+// ============================================================
+
+#[derive(Debug, Deserialize)]
+pub struct TopupRequest {
+    /// 充值数量（元，按 price 转换为配额）
+    pub amount: i64,
+    pub payment_method: String,
+}
+
+fn pay_money(epay: &EpayConfig, amount: i64) -> f64 {
+    let discount = *epay.amount_discount.get(&amount).filter(|d| **d > 0.0).unwrap_or(&1.0);
+    let money = (amount as f64) * epay.price * discount;
+    (money * 100.0).round() / 100.0
+}
+
+fn callback_address(state: &AppState, config: &AppConfig) -> String {
+    if !config.epay.custom_callback_address.is_empty() {
+        return config.epay.custom_callback_address.clone();
+    }
+    config.server_address.clone()
+}
+
+fn make_return_path(suffix: &str) -> String {
+    let base = "/wallet";
+    if suffix.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?pay={suffix}")
+    }
+}
+
+/// POST /api/topup - 用户发起充值
+pub async fn handle_topup_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TopupRequest>,
+) -> Response {
+    let user = match verify_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    let config = state.config_manager.get().await;
+    let epay = crate::payment::EpayClient::new(config.epay.clone());
+    if !epay.config().ready() {
+        return error_response("Epay not configured", StatusCode::BAD_REQUEST).into_response();
+    }
+    if body.amount < epay.config().min_topup {
+        return error_response("Amount below minimum", StatusCode::BAD_REQUEST).into_response();
+    }
+    if !epay.config().contains_pay_method(&body.payment_method) {
+        return error_response("Payment method not supported", StatusCode::BAD_REQUEST).into_response();
+    }
+    let money = pay_money(epay.config(), body.amount);
+    if money < 0.01 {
+        return error_response("Amount too low", StatusCode::BAD_REQUEST).into_response();
+    }
+    let callback = callback_address(&state, &config);
+    let return_url = format!("{}{}", callback, make_return_path(""));
+    let notify_url = format!("{}/api/user/epay/notify", callback.trim_end_matches('/'));
+    let trade_no = user::new_trade_no("USR", &user.id);
+
+    let order = crate::payment::TopUpOrder {
+        trade_no: trade_no.clone(),
+        user_id: user.id.clone(),
+        amount: body.amount,
+        money,
+        payment_method: body.payment_method.clone(),
+        status: "pending".into(),
+        create_time: chrono::Utc::now().timestamp(),
+        paid_time: None,
+    };
+    if let Err(e) = state.order_store.insert(&order) {
+        tracing::error!("Failed to create order: {e}");
+        return error_response("Failed to create order", StatusCode::INTERNAL_SERVER_ERROR).into_response();
+    }
+    let args = PurchaseArgs {
+        pay_type: body.payment_method.clone(),
+        out_trade_no: trade_no.clone(),
+        name: format!("TUC{}", body.amount),
+        money: format!("{:.2}", money),
+        notify_url,
+        return_url,
+        device: Device::PC,
+    };
+    match epay.purchase(&args) {
+        Ok(res) => {
+            let params: HashMap<String, String> = res.params.into_iter().collect();
+            Json(serde_json::json!({
+                "success": true,
+                "data": params,
+                "url": res.url,
+                "trade_no": trade_no,
+            })).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Epay purchase failed: {e}");
+            error_response("Failed to start payment", StatusCode::BAD_GATEWAY).into_response()
+        }
+    }
+}
+
+/// GET /api/orders - 管理员查询所有订单
+pub async fn handle_list_orders(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let orders = state.order_store.list_all();
+    Ok(Json(serde_json::json!({ "success": true, "data": orders })))
+}
+
+/// GET /api/orders/me - 当前用户查询自己的订单
+pub async fn handle_my_orders(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let u = verify_user(&state, &headers).await?;
+    let orders = state.order_store.list_by_user(&u.id);
+    Ok(Json(serde_json::json!({ "success": true, "data": orders })))
+}
+
+/// 解析易支付回调参数（支持 GET query 与 POST form）
+fn collect_params(query: Option<&str>, body_bytes: &bytes::Bytes) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if let Some(q) = query {
+        for pair in q.split('&') {
+            let mut it = pair.splitn(2, '=');
+            let k = urlencoding_decode(it.next().unwrap_or(""));
+            let v = urlencoding_decode(it.next().unwrap_or(""));
+            if !k.is_empty() {
+                map.insert(k, v);
+            }
+        }
+    }
+    if !body_bytes.is_empty() {
+        let s = String::from_utf8_lossy(body_bytes);
+        for pair in s.split('&') {
+            let mut it = pair.splitn(2, '=');
+            let k = urlencoding_decode(it.next().unwrap_or(""));
+            let v = urlencoding_decode(it.next().unwrap_or(""));
+            if !k.is_empty() {
+                map.insert(k, v);
+            }
+        }
+    }
+    map
+}
+
+fn urlencoding_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'+' {
+            out.push(' ');
+            i += 1;
+        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
+                16,
+            ) {
+                out.push(b as char);
+                i += 3;
+                continue;
+            }
+            out.push('%');
+            i += 1;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// POST/GET /api/user/epay/notify - 易支付异步通知
+pub async fn handle_epay_notify(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    body: axum::body::Body,
+) -> Response {
+    let bytes = match axum::body::to_bytes(body, 64 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return "fail".into_response(),
+    };
+    let params = collect_params(None, &bytes);
+    let mut params = if params.is_empty() { query.clone() } else { params };
+    if params.is_empty() && !query.is_empty() {
+        params = query.clone();
+    }
+    if params.is_empty() {
+        return "fail".into_response();
+    }
+    let config = state.config_manager.get().await;
+    let epay = crate::payment::EpayClient::new(config.epay.clone());
+    let verify = match epay.verify(&params) {
+        Ok(v) => v,
+        Err(_) => return "fail".into_response(),
+    };
+    if !verify.verify_status || verify.trade_status != "TRADE_SUCCESS" {
+        return "fail".into_response();
+    }
+    if let Some(order) = state.order_store.get(&verify.out_trade_no) {
+        if order.is_pending() {
+            // 入账：amount 即元数，按 epay.price 转为配额
+            let quota_to_add = (order.amount as f64 * config.epay.price).round() as i64;
+            let _ = state.user_store.add_quota(&order.user_id, quota_to_add);
+            let _ = state.order_store.complete(&order.trade_no);
+            tracing::info!("Epay order completed: trade_no={} user={} quota=+{}", order.trade_no, order.user_id, quota_to_add);
+        }
+    }
+    "success".into_response()
+}
+
+/// POST/GET /api/user/epay/return - 易支付同步跳转
+pub async fn handle_epay_return(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    body: axum::body::Body,
+) -> Response {
+    let bytes = axum::body::to_bytes(body, 64 * 1024).await.unwrap_or_default();
+    let params = collect_params(None, &bytes);
+    let params = if params.is_empty() { query.clone() } else { params };
+    if params.is_empty() {
+        return Redirect::to(&make_return_path("fail")).into_response();
+    }
+    let config = state.config_manager.get().await;
+    let epay = crate::payment::EpayClient::new(config.epay.clone());
+    let verify = match epay.verify(&params) {
+        Ok(v) => v,
+        Err(_) => return Redirect::to(&make_return_path("fail")).into_response(),
+    };
+    if !verify.verify_status {
+        return Redirect::to(&make_return_path("fail")).into_response();
+    }
+    if verify.trade_status == "TRADE_SUCCESS" {
+        if let Some(order) = state.order_store.get(&verify.out_trade_no) {
+            if order.is_pending() {
+                let quota_to_add = (order.amount as f64 * config.epay.price).round() as i64;
+                let _ = state.user_store.add_quota(&order.user_id, quota_to_add);
+                let _ = state.order_store.complete(&order.trade_no);
+            }
+        }
+        return Redirect::to(&make_return_path("success")).into_response();
+    }
+    Redirect::to(&make_return_path("pending")).into_response()
 }

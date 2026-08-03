@@ -1,6 +1,6 @@
 //! Cloudflare Workers AI 桥接实现
 //!
-//! 将 cf-ai-gw-rs 的 CfApiClient 适配为 Bridge trait 实现，
+//! 将 AIGX 的 CfApiClient 适配为 Bridge trait 实现，
 //! 使 Cloudflare 提供商可以通过统一的 Bridge/Hub 架构进行调度。
 
 use async_trait::async_trait;

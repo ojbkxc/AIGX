@@ -33,13 +33,13 @@ RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 
 # 复制后端二进制
-COPY --from=backend-builder /app/target/x86_64-unknown-linux-musl/release/cf-ai-gw .
+COPY --from=backend-builder /app/target/x86_64-unknown-linux-musl/release/aigx .
 
 # 复制前端静态文件
 COPY --from=frontend-builder /app/dist ./static
 
 EXPOSE 8080
 
-VOLUME ["/root/.cf-ai-gw"]
+VOLUME ["/root/.aigx"]
 
-CMD ["./cf-ai-gw"]
+CMD ["./aigx"]

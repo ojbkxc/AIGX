@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::sync::RwLock;
 
+use crate::payment::EpayConfig;
+
+use crate::payment::EpayConfig;
+
 // ── Default value functions ──────────────────────────────────────────
 
 fn default_host() -> String {
@@ -13,7 +17,7 @@ fn default_port() -> u16 {
 }
 
 fn default_data_dir() -> String {
-    "~/.cf-ai-gw".to_string()
+    "~/.aigx".to_string()
 }
 
 fn default_daily_limit() -> u64 {
@@ -61,6 +65,12 @@ pub struct AppConfig {
     pub admin: AdminConfig,
     #[serde(default)]
     pub usage: UsageConfig,
+    /// 易支付配置
+    #[serde(default)]
+    pub epay: EpayConfig,
+    /// 站点对外访问地址，用于构造回调 URL
+    #[serde(default)]
+    pub server_address: String,
 }
 
 // ── Default implementations ──────────────────────────────────────────
@@ -100,6 +110,8 @@ impl Default for AppConfig {
             server: ServerConfig::default(),
             admin: AdminConfig::default(),
             usage: UsageConfig::default(),
+            epay: EpayConfig::default(),
+            server_address: String::new(),
         }
     }
 }
@@ -112,7 +124,7 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    /// 创建 ConfigManager。如果未指定路径，默认使用 ~/.cf-ai-gw/config.toml。
+    /// 创建 ConfigManager。如果未指定路径，默认使用 ~/.aigx/config.toml。
     pub async fn new(path: Option<PathBuf>) -> Self {
         let path = path.unwrap_or_else(default_config_path);
         // 确保父目录存在
@@ -171,10 +183,10 @@ impl ConfigManager {
     }
 }
 
-/// 返回默认的配置文件路径：~/.cf-ai-gw/config.toml
+/// 返回默认的配置文件路径：~/.aigx/config.toml
 fn default_config_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_default();
-    home.join(".cf-ai-gw").join("config.toml")
+    home.join(".aigx").join("config.toml")
 }
 
 /// 展开 ~ 为 home 目录

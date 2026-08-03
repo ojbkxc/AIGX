@@ -5,9 +5,11 @@ mod config;
 mod graphql;
 mod hub;
 mod model;
+mod payment;
 mod proxy;
 mod storage;
 mod usage;
+mod user;
 mod web;
 
 use std::sync::Arc;
@@ -24,8 +26,10 @@ use storage::FileStore;
 use account::AccountPool;
 use hub::Hub;
 use model::ModelMapper;
+use payment::order_store::OrderStore;
 use proxy::CfApiClient;
 use usage::UsageTracker;
+use user::UserStore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -60,6 +64,19 @@ async fn main() -> anyhow::Result<()> {
     let api_key_store = Arc::new(ApiKeyStore::new(store.clone()));
     let _ = api_key_store.load();
 
+    // 初始化用户系统
+    let user_store = Arc::new(UserStore::new(store.clone()));
+    // 首次启动若不存在任何用户，则用旧 admin 密码哈希迁移，或保持空（仍可单用户模式登录）
+    if user_store.list().is_empty() && !config.admin.password.is_empty() {
+        let _ = user_store.create("admin", &config.admin.password, user::Role::Admin, 0);
+    }
+
+    // 初始化订单存储
+    let order_store = Arc::new(OrderStore::new(store.clone()));
+
+    // 初始化易支付客户端（运行时按配置即时构造，无需常驻）
+    let _ = EpayClient::new(config.epay.clone());
+
     // 初始化 CF API 客户端
     let api_client = Arc::new(CfApiClient::new(
         account_pool.clone(),
@@ -86,14 +103,18 @@ async fn main() -> anyhow::Result<()> {
         api_key_store,
         config_manager: config_manager.clone(),
         hub,
+        user_store,
+        order_store,
     };
 
     tracing::info!(
-        "Configuration loaded: {}:{} | Accounts: {} | API Keys: {}",
+        "Configuration loaded: {}:{} | Accounts: {} | API Keys: {} | Users: {} | EpayReady: {}",
         config.server.host,
         config.server.port,
         state.account_pool.list().len(),
         state.api_key_store.len(),
+        state.user_store.list().len(),
+        state.epay_client.config().ready(),
     );
 
     // 构建路由
@@ -130,7 +151,26 @@ fn build_router(state: AppState) -> Router {
         .route("/api/limits", put(api::admin::handle_update_limits))
         .route("/api/tokens/today", get(api::admin::handle_tokens_today))
         .route("/api/usage/trend", get(api::admin::handle_usage_trend))
-        .route("/api/usage/models", get(api::admin::handle_usage_models));
+        .route("/api/usage/models", get(api::admin::handle_usage_models))
+        // 用户管理
+        .route("/api/users", get(api::admin::handle_list_users))
+        .route("/api/users", post(api::admin::handle_create_user))
+        .route("/api/users/{id}", put(api::admin::handle_update_user))
+        .route("/api/users/{id}", delete(api::admin::handle_delete_user))
+        .route("/api/users/me", get(api::admin::handle_me))
+        // 易支付配置
+        .route("/api/epay/config", get(api::admin::handle_get_epay_config))
+        .route("/api/epay/config", put(api::admin::handle_update_epay_config))
+        // 订单查询
+        .route("/api/orders", get(api::admin::handle_list_orders))
+        .route("/api/orders/me", get(api::admin::handle_my_orders))
+        // 充值下单
+        .route("/api/topup", post(api::admin::handle_topup_request));
+
+    // 易支付回调（异步通知 + 同步跳转）— 无需鉴权
+    let epay_callback_routes = Router::new()
+        .route("/api/user/epay/notify", post(api::admin::handle_epay_notify).get(api::admin::handle_epay_notify))
+        .route("/api/user/epay/return", post(api::admin::handle_epay_return).get(api::admin::handle_epay_return));
 
     // OpenAI 兼容 API 路由
     let openai_routes = Router::new()
@@ -146,6 +186,7 @@ fn build_router(state: AppState) -> Router {
 
     Router::new()
         .merge(admin_routes)
+        .merge(epay_callback_routes)
         .merge(openai_routes)
         .fallback_service(web::serve_static_files())
         .layer(CorsLayer::permissive())

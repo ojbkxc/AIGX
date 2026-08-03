@@ -1,14 +1,14 @@
 version: "3.8"
 
 services:
-  cf-ai-gw:
+  aigx:
     build: .
-    container_name: cf-ai-gw
+    container_name: aigx
     restart: unless-stopped
     ports:
       - "8080:8080"
     volumes:
-      - cf-ai-gw-data:/root/.cf-ai-gw
+      - aigx-data:/root/.aigx
 
 volumes:
-  cf-ai-gw-data:
+  aigx-data:
