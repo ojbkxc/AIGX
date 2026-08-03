@@ -214,7 +214,7 @@ pub async fn handle_login(
             tracing::error!("Failed to save config: {e}");
         }
         let _ = state.user_store.create_with_username("admin", "admin", &body.password, Role::Admin, 0);
-    } else if password_hash != config.admin.password {
+    } else if !user::verify_password(&body.password, &config.admin.password) {
         return Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED));
     }
 

@@ -156,9 +156,9 @@ fn build_router(state: AppState) -> Router {
         // 用户管理
         .route("/api/users", get(api::admin::handle_list_users))
         .route("/api/users", post(api::admin::handle_create_user))
+        .route("/api/users/me", get(api::admin::handle_me))
         .route("/api/users/{id}", put(api::admin::handle_update_user))
         .route("/api/users/{id}", delete(api::admin::handle_delete_user))
-        .route("/api/users/me", get(api::admin::handle_me))
         // 易支付配置
         .route("/api/epay/config", get(api::admin::handle_get_epay_config))
         .route("/api/epay/config", put(api::admin::handle_update_epay_config))

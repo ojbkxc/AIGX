@@ -61,6 +61,10 @@ export default function Wallet() {
       const res = await api.topup(amt, method);
       const params = res.data || {};
       const url = res.url;
+      if (!url) {
+        setError('支付网关未返回跳转地址，请检查易支付配置');
+        return;
+      }
       // 构造表单并提交
       const form = document.createElement('form');
       form.method = 'POST';
