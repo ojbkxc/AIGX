@@ -19,8 +19,6 @@ use std::collections::HashMap;
 
 pub mod order_store;
 
-pub mod order_store;
-
 /// 易支付配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EpayConfig {
