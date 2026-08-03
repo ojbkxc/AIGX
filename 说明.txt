@@ -1,8 +1,86 @@
-我想用rust做一个类似于newapi这样的ai中转站项目是D:\GitHub\AIGX
- 参照了newapi项目D:\GitHub\new-api、D:\GitHub\cc-switch、D:\GitHub\engine_linux01 
- 最后想实现的可以是跟D:\GitHub\new-api差不多的功能且支持cloudflare所以要包括D:\GitHub\cf-ai-gw\
- 然后还参照了D:\GitHub\ds2api 
- 所以你要完成的是D:\GitHub\AIGX项目、UI可以参照D:\GitHub\cf-ai-gw的审美
-rust代码跟中转站还要参照D:\GitHub\aisix项目
+我想用rust做一个类似于newapi这样的ai中转站项目是C:\GitHub\AIGX
+ 参照了newapi项目C:\GitHub\new-api、C:\GitHub\cc-switch、C:\GitHub\engine_linux01 
+ 最后想实现的可以是跟C:\GitHub\new-api差不多的功能且支持cloudflare所以要包括C:\GitHub\cf-ai-gw\
+ 然后还参照了C:\GitHub\ds2api 
+ 所以你要完成的是C:\GitHub\AIGX项目、UI可以参照C:\GitHub\cf-ai-gw的审美
+rust代码跟中转站还要参照C:\GitHub\aisix项目
 对了必须支持newapi里对接的易支付
-在github上的编译版本发布命名参照下D:\GitHub\RustSync项目
+在github上的编译版本发布命名参照下C:\GitHub\RustSync项目
+
+================== 项目当前进度分析（2026-08-03）==================
+
+【整体状态】
+- 已搭好 Rust 后端骨架（axum），共 ~5300 行 Rust 代码，分模块：api/admin、api/openai、account、user、payment、bridge(cf)、proxy、storage、sse、graphql、usage、web 等。
+- 前端为 React + Vite，已实现页面：Login、Dashboard、Accounts、Keys、Mappings、Orders、Wallet、Epay、Settings、Users、Sidebar，并已构建到 static/（index.html + assets）。
+- 已能编译，target/ 下有 debug/release 产物。Git 最近提交：新增易支付、用户管理、部分订阅管理基础。
+
+【已完成】
+1. 配置管理：src/config.rs，含 admin 配置、session_secret。
+2. 用户系统：src/user/mod.rs，User 含 id/username/password(SHA256)/role/quota/used_quota/status/created_at；UserStore 支持 create/authenticate/update/list；密码用 SHA256（注：建议后续改 bcrypt/argon2 更安全）。
+3. 会话：src/api/auth.rs，HMAC-SHA256 签名 token（username.expires_at.sig），无状态校验。
+4. 登录接口：POST /api/auth/login，先走 user_store 校验，回退到旧 admin 模式（首次登录自动设密码并建 admin 账号）。登出 POST /api/auth/logout。
+5. API Key：生成 sk- 开头，SHA256 哈希存储，支持校验/列出/删除。
+6. OpenAI 兼容接口：/v1/chat/completions、/v1/completions 等（src/api/openai.rs 710 行）。
+7. Cloudflare 桥接：src/bridge/cf.rs + bridge/mod.rs，对接 CF Workers AI 账号池、graphql 查询用量。
+8. 易支付：src/payment/mod.rs + order_store.rs，含 /api/topup 充值下单、/api/user/epay/notify 回调、/api/user/epay/return 同步返回；前端 Epay.jsx + Orders.jsx + Wallet.jsx 已有页面。
+9. 用户管理：/api/users 增删改查、/api/users/me；前端 Users.jsx 可由管理员创建/编辑用户（当前用 username+password）。
+10. 用量统计：/api/usage/summary、/api/usage/trend、/api/usage/models、/api/tokens/today。
+11. 静态资源：static/ 已含构建产物，tower-http 处理前端路由。
+
+【尚未完成 / 需注意】
+1. 注册接口缺失：当前只有登录 /api/auth/login，无公开注册 /api/auth/register；用户只能由管理员在 /api/users 创建。
+2. 登录字段是 username（用户名），尚未使用邮箱；需按下方"登录方式"要求改造为邮箱。
+3. 密码哈希用 SHA256（弱），后续建议升级到 argon2/bcrypt。
+4. README/docker-compose/Dockerfile 已有，但完整 README 文档与发布流程未对齐 RustSync 的命名规范。
+5. 仍未完整对齐 new-api 的全部功能（模型映射 Mappings、令牌分组、日志审计、限流等部分仅有基础）。
+6. UI 审美已参照 cf-ai-gw（玻璃拟态、渐变 orb 背景、明暗主题切换）。
+
+================== 登录方式（明确要求）==================
+本项目【不使用手机号】登录/注册，统一采用【邮箱】：
+- 注册字段：邮箱（email）+ 密码（password），可选用户名昵称。
+- 登录字段：邮箱（email）+ 密码（password）。
+- 后端 User 结构把唯一标识由 username 改为 email（保留 username 仅作展示昵称，可空）；authenticate/get_by_* 以 email 为主键查询；/api/auth/login 接收 email。
+- 新增公开接口 POST /api/auth/register（邮箱注册）：校验邮箱格式、唯一性、密码强度；创建普通用户（role=User，初始 quota 由配置项决定）。
+- 前端 Login.jsx 改为 email+password 输入，并增加"注册"入口/页面（Register.jsx），用 email 注册。
+- 管理后台 Users.jsx 创建/编辑用户的表单也改为 email 字段为主。
+- 全程不引入任何短信/手机号验证码逻辑；如需验证可走邮件验证（可选，后续再做）。
+================================================================
+
+================== 项目当前进度分析（2026-08-03）==================
+
+【整体状态】
+- 已搭好 Rust 后端骨架（axum），共 ~5300 行 Rust 代码，分模块：api/admin、api/openai、account、user、payment、bridge(cf)、proxy、storage、sse、graphql、usage、web 等。
+- 前端为 React + Vite，已实现页面：Login、Dashboard、Accounts、Keys、Mappings、Orders、Wallet、Epay、Settings、Users、Sidebar，并已构建到 static/（index.html + assets）。
+- 已能编译，target/ 下有 debug/release 产物。Git 最近提交：新增易支付、用户管理、部分订阅管理基础。
+
+【已完成】
+1. 配置管理：src/config.rs，含 admin 配置、session_secret。
+2. 用户系统：src/user/mod.rs，User 含 id/username/password(SHA256)/role/quota/used_quota/status/created_at；UserStore 支持 create/authenticate/update/list；密码用 SHA256（注：建议后续改 bcrypt/argon2 更安全）。
+3. 会话：src/api/auth.rs，HMAC-SHA256 签名 token（username.expires_at.sig），无状态校验。
+4. 登录接口：POST /api/auth/login，先走 user_store 校验，回退到旧 admin 模式（首次登录自动设密码并建 admin 账号）。登出 POST /api/auth/logout。
+5. API Key：生成 sk- 开头，SHA256 哈希存储，支持校验/列出/删除。
+6. OpenAI 兼容接口：/v1/chat/completions、/v1/completions 等（src/api/openai.rs 710 行）。
+7. Cloudflare 桥接：src/bridge/cf.rs + bridge/mod.rs，对接 CF Workers AI 账号池、graphql 查询用量。
+8. 易支付：src/payment/mod.rs + order_store.rs，含 /api/topup 充值下单、/api/user/epay/notify 回调、/api/user/epay/return 同步返回；前端 Epay.jsx + Orders.jsx + Wallet.jsx 已有页面。
+9. 用户管理：/api/users 增删改查、/api/users/me；前端 Users.jsx 可由管理员创建/编辑用户（当前用 username+password）。
+10. 用量统计：/api/usage/summary、/api/usage/trend、/api/usage/models、/api/tokens/today。
+11. 静态资源：static/ 已含构建产物，tower-http 处理前端路由。
+
+【尚未完成 / 需注意】
+1. 注册接口缺失：当前只有登录 /api/auth/login，无公开注册 /api/auth/register；用户只能由管理员在 /api/users 创建。
+2. 登录字段是 username（用户名），尚未使用邮箱；需按下方"登录方式"要求改造为邮箱。
+3. 密码哈希用 SHA256（弱），后续建议升级到 argon2/bcrypt。
+4. README/docker-compose/Dockerfile 已有，但完整 README 文档与发布流程未对齐 RustSync 的命名规范。
+5. 仍未完整对齐 new-api 的全部功能（模型映射 Mappings、令牌分组、日志审计、限流等部分仅有基础）。
+6. UI 审美已参照 cf-ai-gw（玻璃拟态、渐变 orb 背景、明暗主题切换）。
+
+================== 登录方式（明确要求）==================
+本项目【不使用手机号】登录/注册，统一采用【邮箱】：
+- 注册字段：邮箱（email）+ 密码（password），可选用户名昵称。
+- 登录字段：邮箱（email）+ 密码（password）。
+- 后端 User 结构把唯一标识由 username 改为 email（保留 username 仅作展示昵称，可空）；authenticate/get_by_* 以 email 为主键查询；/api/auth/login 接收 email。
+- 新增公开接口 POST /api/auth/register（邮箱注册）：校验邮箱格式、唯一性、密码强度；创建普通用户（role=User，初始 quota 由配置项决定）。
+- 前端 Login.jsx 改为 email+password 输入，并增加"注册"入口/页面（Register.jsx），用 email 注册。
+- 管理后台 Users.jsx 创建/编辑用户的表单也改为 email 字段为主。
+- 全程不引入任何短信/手机号验证码逻辑；如需验证可走邮件验证（可选，后续再做）。
+================================================================
