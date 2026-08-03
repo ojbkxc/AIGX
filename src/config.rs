@@ -4,8 +4,6 @@ use tokio::sync::RwLock;
 
 use crate::payment::EpayConfig;
 
-use crate::payment::EpayConfig;
-
 // ── Default value functions ──────────────────────────────────────────
 
 fn default_host() -> String {
