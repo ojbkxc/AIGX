@@ -27,6 +27,7 @@ use account::AccountPool;
 use hub::Hub;
 use model::ModelMapper;
 use payment::order_store::OrderStore;
+use payment::EpayClient;
 use proxy::CfApiClient;
 use usage::UsageTracker;
 use user::UserStore;
@@ -75,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
     let order_store = Arc::new(OrderStore::new(store.clone()));
 
     // 初始化易支付客户端（运行时按配置即时构造，无需常驻）
-    let _ = EpayClient::new(config.epay.clone());
+    let epay_client = Arc::new(EpayClient::new(config.epay.clone()));
 
     // 初始化 CF API 客户端
     let api_client = Arc::new(CfApiClient::new(
@@ -105,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         hub,
         user_store,
         order_store,
+        epay_client,
     };
 
     tracing::info!(

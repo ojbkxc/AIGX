@@ -7,6 +7,10 @@ const navItems = [
   { path: '/accounts', label: '账号管理', icon: '🔑' },
   { path: '/keys', label: 'API 密钥', icon: '🔐' },
   { path: '/mappings', label: '模型映射', icon: '🔄' },
+  { path: '/users', label: '用户管理', icon: '👥' },
+  { path: '/wallet', label: '钱包充值', icon: '💰' },
+  { path: '/orders', label: '订单记录', icon: '🧾' },
+  { path: '/epay', label: '易支付', icon: '💳' },
   { path: '/settings', label: '系统设置', icon: '⚙️' },
 ];
 

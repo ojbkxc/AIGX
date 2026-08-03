@@ -4,8 +4,39 @@ use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+/// 将任意 key 编码为文件名安全的形式：ASCII 字母数字及 `-_.` 保持原样，
+/// 其余字符以 `%XX` 形式转义。可逆，避免 Windows 下 `:`/`/` 等非法字符问题。
+fn encode_key(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    for b in key.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+fn decode_key(enc: &str) -> String {
+    let bytes = enc.as_bytes();
+    let mut out = Vec::with_capacity(enc.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// 基于文件的 KV 存储，类似 Cloudflare Workers KV。
-/// 每个键存储为 `{dir}/{key}.json`。
+/// 每个键存储为 `{dir}/{encoded_key}.json`。
 pub struct FileStore {
     dir: PathBuf,
     cache: RwLock<HashMap<String, String>>,
@@ -21,9 +52,13 @@ impl FileStore {
         }
     }
 
+    fn path_of(&self, key: &str) -> PathBuf {
+        self.dir.join(format!("{}.json", encode_key(key)))
+    }
+
     /// 读取 JSON 值
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> anyhow::Result<Option<T>> {
-        let path = self.dir.join(format!("{}.json", key));
+        let path = self.path_of(key);
         if !path.exists() {
             return Ok(None);
         }
@@ -35,7 +70,10 @@ impl FileStore {
 
     /// 写入 JSON 值
     pub fn put<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<()> {
-        let path = self.dir.join(format!("{}.json", key));
+        let path = self.path_of(key);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let content = serde_json::to_string_pretty(value)?;
         std::fs::write(&path, &content)?;
         self.cache.write().insert(key.to_string(), content);
@@ -44,7 +82,7 @@ impl FileStore {
 
     /// 删除键
     pub fn delete(&self, key: &str) -> anyhow::Result<()> {
-        let path = self.dir.join(format!("{}.json", key));
+        let path = self.path_of(key);
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
@@ -63,8 +101,9 @@ impl FileStore {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    if stem.starts_with(prefix) {
-                        keys.push(stem.to_string());
+                    let key = decode_key(stem);
+                    if key.starts_with(prefix) {
+                        keys.push(key);
                     }
                 }
             }

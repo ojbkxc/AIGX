@@ -287,10 +287,23 @@ mod tests {
         let res = client.purchase(&args).unwrap();
         assert!(res.params.contains_key("sign"));
         assert_eq!(res.params.get("sign_type").unwrap(), "MD5");
-        // 验签
-        let mut map: HashMap<String, String> = res.params.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        // 模拟回传 + trade_status
+        // 模拟网关回传：原参数 + trade_status，并按相同规则重新签名
+        let mut map: HashMap<String, String> = res
+            .params
+            .iter()
+            .filter(|(k, _)| *k != "sign" && *k != "sign_type")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         map.insert("trade_status".into(), "TRADE_SUCCESS".into());
+        // 用客户端同样的签名规则生成回传 sign
+        let mut filtered = BTreeMap::new();
+        for (k, v) in &map {
+            if !v.is_empty() {
+                filtered.insert(k.clone(), v.clone());
+            }
+        }
+        map.insert("sign".into(), client.sign(&filtered));
+        map.insert("sign_type".into(), "MD5".into());
         let v = client.verify(&map).unwrap();
         assert!(v.verify_status);
         assert_eq!(v.trade_status, "TRADE_SUCCESS");

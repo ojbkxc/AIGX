@@ -92,17 +92,17 @@ jobs:
       - name: Package binary
         shell: bash
         run: |
-          BIN_NAME="cf-ai-gw-${{ matrix.target }}"
+          BIN_NAME="AIGX-${{ matrix.target }}"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "${BIN_NAME}.zip" ./target/${{ matrix.target }}/release/cf-ai-gw.exe ./target/${{ matrix.target }}/release/static/
+            7z a "${BIN_NAME}.zip" ./target/${{ matrix.target }}/release/aigx.exe ./target/${{ matrix.target }}/release/static/
           else
-            tar czf "${BIN_NAME}.tar.gz" -C ./target/${{ matrix.target }}/release cf-ai-gw static/
+            tar czf "${BIN_NAME}.tar.gz" -C ./target/${{ matrix.target }}/release aigx static/
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cf-ai-gw-${{ matrix.target }}
-          path: cf-ai-gw-${{ matrix.target }}.*
+          name: AIGX-${{ matrix.target }}
+          path: AIGX-${{ matrix.target }}.*
           retention-days: 1
 
   # ============================================================
@@ -161,7 +161,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: cf-ai-gw-*
+          pattern: AIGX-*
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:

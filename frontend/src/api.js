@@ -90,4 +90,21 @@ export const api = {
   // Model Usage
   getModelUsage: () =>
     request('GET', '/api/usage/models'),
+
+  // Users
+  listUsers: () => request('GET', '/api/users'),
+  createUser: (data) => request('POST', '/api/users', data),
+  updateUser: (id, data) => request('PUT', `/api/users/${id}`, data),
+  deleteUser: (id) => request('DELETE', `/api/users/${id}`),
+  getMe: () => request('GET', '/api/users/me'),
+
+  // Epay
+  getEpayConfig: () => request('GET', '/api/epay/config'),
+  updateEpayConfig: (data) => request('PUT', '/api/epay/config', data),
+
+  // Orders & Topup
+  listOrders: () => request('GET', '/api/orders'),
+  myOrders: () => request('GET', '/api/orders/me'),
+  topup: (amount, payment_method) =>
+    request('POST', '/api/topup', { amount, payment_method }),
 };

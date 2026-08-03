@@ -7,6 +7,10 @@ import Dashboard from './pages/Dashboard';
 import Accounts from './pages/Accounts';
 import Keys from './pages/Keys';
 import Mappings from './pages/Mappings';
+import Users from './pages/Users';
+import Wallet from './pages/Wallet';
+import Orders from './pages/Orders';
+import Epay from './pages/Epay';
 import Settings from './pages/Settings';
 
 function isAuthenticated() {
@@ -50,6 +54,10 @@ export default function App() {
         <Route path="/accounts" element={<ProtectedLayout><Accounts /></ProtectedLayout>} />
         <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
         <Route path="/mappings" element={<ProtectedLayout><Mappings /></ProtectedLayout>} />
+        <Route path="/users" element={<ProtectedLayout><Users /></ProtectedLayout>} />
+        <Route path="/wallet" element={<ProtectedLayout><Wallet /></ProtectedLayout>} />
+        <Route path="/orders" element={<ProtectedLayout><Orders /></ProtectedLayout>} />
+        <Route path="/epay" element={<ProtectedLayout><Epay /></ProtectedLayout>} />
         <Route path="/settings" element={<ProtectedLayout><Settings /></ProtectedLayout>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

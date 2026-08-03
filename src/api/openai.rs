@@ -38,6 +38,7 @@ pub struct AppState {
     pub hub: Arc<Hub>,
     pub user_store: Arc<UserStore>,
     pub order_store: Arc<OrderStore>,
+    pub epay_client: Arc<crate::payment::EpayClient>,
 }
 
 /// 创建 OpenAI 兼容的错误响应

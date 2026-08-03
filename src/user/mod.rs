@@ -124,7 +124,7 @@ impl UserStore {
         };
         self.persist(&user)?;
         self.by_id.write().insert(user.id.clone(), user.clone());
-        self.by_name.write().insert(user.username.clone(), user.id);
+        self.by_name.write().insert(user.username.clone(), user.id.clone());
         Ok(user)
     }
 
@@ -175,7 +175,7 @@ impl UserStore {
         self.by_id.write().insert(user.id.clone(), user.clone());
         let mut by_name = self.by_name.write();
         by_name.remove(&old_username);
-        by_name.insert(user.username.clone(), user.id);
+        by_name.insert(user.username.clone(), user.id.clone());
         Ok(user)
     }
 
@@ -282,7 +282,7 @@ mod tests {
         let u = s.create("bob", "pw", Role::User, 100).unwrap();
         assert!(s.try_charge(&u.id, 30));
         assert_eq!(s.get_by_id(&u.id).unwrap().used_quota, 30);
-        assert!(s.try_charge(&u.id, 100)); // remaining = 70, ok
+        assert!(s.try_charge(&u.id, 70)); // remaining = 70, ok
         assert!(!s.try_charge(&u.id, 1)); // remaining = 0
     }
 
