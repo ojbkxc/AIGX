@@ -24,6 +24,7 @@ export default function Sidebar() {
       // Ignore logout errors
     }
     localStorage.removeItem('token');
+    localStorage.removeItem('email');
     localStorage.removeItem('username');
     localStorage.removeItem('expires_at');
     navigate('/login');
@@ -36,7 +37,8 @@ export default function Sidebar() {
     localStorage.setItem('theme', isLight ? 'dark' : 'light');
   };
 
-  const username = localStorage.getItem('username') || 'Admin';
+  const email = localStorage.getItem('email') || 'Admin';
+  const username = localStorage.getItem('username') || '';
 
   return (
     <aside style={{
@@ -160,11 +162,16 @@ export default function Sidebar() {
             fontWeight: 600,
             flexShrink: 0,
           }}>
-            {username.charAt(0).toUpperCase()}
+            {email.charAt(0).toUpperCase()}
           </div>
-          <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {username}
-          </span>
+          <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {email}
+            </span>
+            {username && <span style={{ fontSize: '11px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              @{username}
+            </span>}
+          </div>
         </div>
         <div style={{ display: 'flex', gap: '6px' }}>
           <button

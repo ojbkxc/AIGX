@@ -18,6 +18,8 @@ pub struct CfAccount {
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
+    pub last_used_at: Option<i64>,
+    #[serde(default)]
     pub created_at: i64,
 }
 
@@ -149,6 +151,14 @@ impl AccountPool {
         }
     }
 
+    /// 标记账号已使用（更新 last_used_at）
+    pub fn mark_used(&self, id: &str) {
+        let mut accounts = self.accounts.write();
+        if let Some(account) = accounts.iter_mut().find(|a| a.id == id) {
+            account.last_used_at = Some(chrono::Utc::now().timestamp());
+        }
+    }
+
     /// 测试账号连接。向 Cloudflare API 发送 3 个测试请求：
     ///
     /// 1. `GET /accounts/{id}/ai/models/search?per_page=1` — 验证 Workers AI Read 权限
@@ -247,6 +257,7 @@ mod tests {
             api_token: "test-token".to_string(),
             status: "active".to_string(),
             last_error: None,
+            last_used_at: None,
             created_at: 1_000_000,
         }
     }

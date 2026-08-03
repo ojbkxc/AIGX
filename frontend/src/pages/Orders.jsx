@@ -58,7 +58,7 @@ export default function Orders() {
                 <tbody>
                   {orders.map((o) => (
                     <tr key={o.trade_no}>
-                      <td><code className="key-value" style={{ maxWdith: 240 }}>{o.trade_no}</code></td>
+                      <td><code className="key-value" style={{ maxWidth: 240 }}>{o.trade_no}</code></td>
                       <td style={{ fontSize: 12 }}>{o.user_id?.slice(0, 8)}…</td>
                       <td>¥{Number(o.money || 0).toFixed(2)}</td>
                       <td>{o.amount}</td>

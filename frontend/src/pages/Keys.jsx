@@ -112,6 +112,7 @@ export default function Keys() {
                     <th>名称</th>
                     <th>密钥</th>
                     <th>创建时间</th>
+                    <th>最后使用</th>
                     <th>操作</th>
                   </tr>
                 </thead>
@@ -125,6 +126,11 @@ export default function Keys() {
                       <td>
                         {key.created_at
                           ? new Date(key.created_at).toLocaleDateString()
+                          : '—'}
+                      </td>
+                      <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                        {key.last_used_at
+                          ? new Date(key.last_used_at * 1000).toLocaleString()
                           : '—'}
                       </td>
                       <td>

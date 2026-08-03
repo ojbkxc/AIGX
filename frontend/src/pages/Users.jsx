@@ -12,7 +12,7 @@ export default function Users() {
 
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ username: '', password: '', role: 'user', quota: 0, status: 'active' });
+  const [form, setForm] = useState({ email: '', username: '', password: '', role: 'user', quota: 0, status: 'active' });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -35,13 +35,13 @@ export default function Users() {
 
   const openCreate = () => {
     setEditing(null);
-    setForm({ username: '', password: '', role: 'user', quota: 0, status: 'active' });
+    setForm({ email: '', username: '', password: '', role: 'user', quota: 0, status: 'active' });
     setShowModal(true);
   };
 
   const openEdit = (u) => {
     setEditing(u);
-    setForm({ username: u.username, password: '', role: u.role || 'user', quota: u.quota || 0, status: u.status || 'active' });
+    setForm({ email: u.email || '', username: u.username || '', password: '', role: u.role || 'user', quota: u.quota || 0, status: u.status || 'active' });
     setShowModal(true);
   };
 
@@ -50,9 +50,15 @@ export default function Users() {
     setEditing(null);
   };
 
+  const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
   const handleSave = async () => {
-    if (!form.username.trim()) {
-      setError('用户名为必填项');
+    if (!form.email.trim()) {
+      setError('邮箱为必填项');
+      return;
+    }
+    if (!isValidEmail(form.email.trim())) {
+      setError('邮箱格式不正确');
       return;
     }
     if (!editing && !form.password) {
@@ -64,12 +70,15 @@ export default function Users() {
     try {
       if (editing) {
         const payload = { role: form.role, quota: Number(form.quota), status: form.status };
+        if (form.email.trim() !== editing.email) payload.email = form.email.trim();
+        if (form.username.trim()) payload.username = form.username.trim();
         if (form.password) payload.password = form.password;
         await api.updateUser(editing.id, payload);
         addToast('用户已更新');
       } else {
         await api.createUser({
-          username: form.username.trim(),
+          email: form.email.trim(),
+          username: form.username.trim() || undefined,
           password: form.password,
           role: form.role,
           quota: Number(form.quota),
@@ -120,7 +129,8 @@ export default function Users() {
           <div className="card-body" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
             <div>
               <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>当前登录</div>
-              <div style={{ fontSize: 18, fontWeight: 600 }}>{me.username}</div>
+              <div style={{ fontSize: 18, fontWeight: 600 }}>{me.email}</div>
+              {me.username && <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>@{me.username}</div>}
             </div>
             <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
               <div>
@@ -149,7 +159,8 @@ export default function Users() {
               <table>
                 <thead>
                   <tr>
-                    <th>用户名</th>
+                    <th>邮箱</th>
+                    <th>昵称</th>
                     <th>角色</th>
                     <th>总配额</th>
                     <th>已用</th>
@@ -162,7 +173,8 @@ export default function Users() {
                 <tbody>
                   {users.map((u) => (
                     <tr key={u.id}>
-                      <td><strong>{u.username}</strong></td>
+                      <td><strong>{u.email}</strong></td>
+                      <td>{u.username || '—'}</td>
                       <td>{u.role === 'admin' ? '管理员' : '普通用户'}</td>
                       <td>{fmtQuota(u.quota)}</td>
                       <td>{fmtQuota(u.used_quota)}</td>
@@ -201,14 +213,20 @@ export default function Users() {
             </div>
             <div className="modal-body">
               <div className="form-group">
-                <label>用户名</label>
-                <input className="form-input" disabled={!!editing}
-                  value={form.username}
-                  onChange={(e) => setForm({ ...form, username: e.target.value })}
+                <label>邮箱 *</label>
+                <input className="form-input" placeholder="user@example.com"
+                  value={form.email}
+                  onChange={(e) => setForm({ ...form, email: e.target.value })}
                   autoFocus />
               </div>
               <div className="form-group">
-                <label>密码 {editing && <span style={{ color: 'var(--text-muted)' }}>(留空则不修改)</span>}</label>
+                <label>昵称 <span style={{ color: 'var(--text-muted)' }}>(可选)</span></label>
+                <input className="form-input" placeholder="显示名称"
+                  value={form.username}
+                  onChange={(e) => setForm({ ...form, username: e.target.value })} />
+              </div>
+              <div className="form-group">
+                <label>密码 {editing ? <span style={{ color: 'var(--text-muted)' }}>(留空则不修改)</span> : <span style={{ color: 'var(--text-danger)' }}>*</span>}</label>
                 <input className="form-input" type="password"
                   value={form.password}
                   onChange={(e) => setForm({ ...form, password: e.target.value })} />
@@ -222,7 +240,7 @@ export default function Users() {
                 </select>
               </div>
               <div className="form-group">
-                <label>配额（整数）</label>
+                <label>配额</label>
                 <input className="form-input" type="number"
                   value={form.quota}
                   onChange={(e) => setForm({ ...form, quota: e.target.value })} />

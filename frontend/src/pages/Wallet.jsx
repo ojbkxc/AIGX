@@ -109,7 +109,8 @@ export default function Wallet() {
             <div className="card-body" style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
               <div>
                 <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>当前账户</div>
-                <div style={{ fontSize: 18, fontWeight: 600 }}>{me?.username || '—'}</div>
+                <div style={{ fontSize: 18, fontWeight: 600 }}>{me?.email || '—'}</div>
+                {me?.username && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>@{me.username}</div>}
               </div>
               <div>
                 <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>剩余配额</div>
@@ -176,7 +177,7 @@ export default function Wallet() {
                 <tbody>
                   {orders.map((o) => (
                     <tr key={o.trade_no}>
-                      <td><code className="key-value" style={{ maxWdith: 240 }}>{o.trade_no}</code></td>
+                      <td><code className="key-value" style={{ maxWidth: 240 }}>{o.trade_no}</code></td>
                       <td>¥{Number(o.money || 0).toFixed(2)}</td>
                       <td>{fmtQuota(o.amount * (epay?.price || 1))}</td>
                       <td>{o.payment_method}</td>

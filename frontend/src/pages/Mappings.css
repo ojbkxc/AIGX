@@ -51,6 +51,45 @@
   margin-bottom: 0;
 }
 
+.default-models-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.default-model-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--section-item-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 12px;
+  transition: border-color 0.2s;
+  cursor: default;
+}
+
+.default-model-chip:hover {
+  border-color: rgba(168, 85, 247, 0.35);
+}
+
+.default-model-chip .model-key {
+  font-weight: 600;
+  color: var(--text-color);
+}
+
+.default-model-chip .model-arrow {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.default-model-chip .model-value {
+  color: var(--text-muted);
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 11px;
+}
+
 @media (max-width: 600px) {
   .mapping-row {
     flex-direction: column;
@@ -63,5 +102,15 @@
 
   .mapping-remove {
     align-self: flex-end;
+  }
+
+  .default-model-chip {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+
+  .default-model-chip .model-arrow {
+    display: none;
   }
 }

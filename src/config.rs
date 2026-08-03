@@ -53,6 +53,18 @@ pub struct UsageConfig {
     pub monthly_limit: u64,
     #[serde(default)]
     pub threshold: f64,
+    #[serde(default = "default_api_timeout")]
+    pub api_timeout_secs: u64,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+}
+
+fn default_api_timeout() -> u64 {
+    120
+}
+
+fn default_max_retries() -> u32 {
+    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +110,8 @@ impl Default for UsageConfig {
             daily_limit: default_daily_limit(),
             monthly_limit: default_monthly_limit(),
             threshold: 0.0,
+            api_timeout_secs: default_api_timeout(),
+            max_retries: default_max_retries(),
         }
     }
 }

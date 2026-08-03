@@ -61,6 +61,8 @@ pub struct LimitsRequest {
     pub daily_limit: Option<u64>,
     pub monthly_limit: Option<u64>,
     pub threshold: Option<f64>,
+    pub api_timeout_secs: Option<u64>,
+    pub max_retries: Option<u32>,
 }
 
 /// 创建错误响应
@@ -416,6 +418,7 @@ pub async fn handle_list_accounts(
                 "api_token": masked_token,
                 "status": a.status,
                 "last_error": a.last_error,
+                "last_used_at": a.last_used_at,
                 "created_at": a.created_at,
             })
         })
@@ -445,6 +448,7 @@ pub async fn handle_add_account(
         api_token: body.api_token,
         status: body.status.unwrap_or_else(|| "active".to_string()),
         last_error: None,
+        last_used_at: None,
         created_at: now,
     };
 
@@ -477,6 +481,7 @@ pub async fn handle_test_account(
         api_token: body.api_token,
         status: "active".to_string(),
         last_error: None,
+        last_used_at: None,
         created_at: 0,
     };
 
@@ -522,6 +527,7 @@ pub async fn handle_update_account(
         api_token: body.api_token,
         status: body.status.unwrap_or(existing.status),
         last_error: existing.last_error,
+        last_used_at: existing.last_used_at,
         created_at: existing.created_at,
     };
 
@@ -706,6 +712,8 @@ pub async fn handle_get_limits(
             "monthly_limit": config.usage.monthly_limit,
             "monthly_used": monthly.total(),
             "threshold": config.usage.threshold,
+            "api_timeout_secs": config.usage.api_timeout_secs,
+            "max_retries": config.usage.max_retries,
         }
     })))
 }
@@ -726,6 +734,12 @@ pub async fn handle_update_limits(
     }
     if let Some(v) = body.threshold {
         config.usage.threshold = v;
+    }
+    if let Some(v) = body.api_timeout_secs {
+        config.usage.api_timeout_secs = v;
+    }
+    if let Some(v) = body.max_retries {
+        config.usage.max_retries = v;
     }
 
     match state.config_manager.update(config).await {

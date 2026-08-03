@@ -114,6 +114,25 @@ export default function Accounts() {
     }
   };
 
+  const fmtTime = (ts) => {
+    if (!ts) return '—';
+    return new Date(ts * 1000).toLocaleString();
+  };
+
+  const statusBadge = (acc) => {
+    if (acc.status === 'active') {
+      return <span className="badge badge-success">正常</span>;
+    }
+    if (acc.status === 'error') {
+      return (
+        <span className="badge badge-danger" title={acc.last_error || ''}>
+          异常
+        </span>
+      );
+    }
+    return <span className="badge badge-warning">{acc.status || '未知'}</span>;
+  };
+
   if (loading) return <div className="loading">加载账号列表</div>;
 
   return (
@@ -144,6 +163,7 @@ export default function Accounts() {
                     <th>名称</th>
                     <th>账号 ID</th>
                     <th>状态</th>
+                    <th>最后使用</th>
                     <th>操作</th>
                   </tr>
                 </thead>
@@ -152,13 +172,8 @@ export default function Accounts() {
                     <tr key={acc.id}>
                       <td><strong>{acc.name}</strong></td>
                       <td><code className="account-id">{acc.account_id}</code></td>
-                      <td>
-                        {acc.status === 'active' ? (
-                          <span className="badge badge-success">正常</span>
-                        ) : (
-                          <span className="badge badge-warning">{acc.status || '未知'}</span>
-                        )}
-                      </td>
+                      <td>{statusBadge(acc)}</td>
+                      <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>{fmtTime(acc.last_used_at)}</td>
                       <td>
                         <div className="actions-cell">
                           <button className="btn btn-outline btn-sm" onClick={() => openEdit(acc)}>编辑</button>

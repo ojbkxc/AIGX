@@ -1,3 +1,5 @@
+use futures::stream::BoxStream;
+use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -70,6 +72,7 @@ impl CfApiClient {
                             match resp.json::<CfResponse>().await {
                                 Ok(cf_resp) => {
                                     if cf_resp.success {
+                                        self.account_pool.mark_used(&account.id);
                                         return Ok(cf_resp);
                                     }
                                     last_error = CfError::ServerError(
@@ -180,6 +183,62 @@ impl CfApiClient {
         Ok(resp.result.unwrap_or_default())
     }
 
+    /// 流式调用 CF Workers AI（`stream: true`）。
+    ///
+    /// 返回原始字节流，调用方用 `crate::sse::SseDecoder` 解析为 SSE 事件。
+    /// 使用 CF REST API（Bearer Token）调用 `/ai/run/{model}`，请求体中带
+    /// `stream: true` 时 CF 会以 `text/event-stream` 返回 OpenAI 风格 SSE。
+    pub async fn run_text_stream(
+        &self,
+        model: &str,
+        body: Value,
+    ) -> std::result::Result<BoxStream<'static, std::result::Result<bytes::Bytes, CfError>>, CfError> {
+        let cf_model = self.model_mapper.resolve(model);
+        let active_accounts = self.account_pool.active_accounts();
+        if active_accounts.is_empty() {
+            return Err(CfError::AuthError("No active Cloudflare accounts configured".into()));
+        }
+
+        let mut last_error = CfError::AllAccountsFailed("All accounts exhausted".into());
+        for account in &active_accounts {
+            let url = Self::build_url(&account.account_id, &format!("run/{}", cf_model));
+            let result = self
+                .http
+                .post(&url)
+                .bearer_auth(&account.api_token)
+                .json(&body)
+                .send()
+                .await;
+
+            match result {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        self.account_pool.mark_used(&account.id);
+                        let stream = resp
+                            .bytes_stream()
+                            .map(|chunk| chunk.map_err(|e| CfError::NetworkError(format!("stream read error: {e}"))));
+                        return Ok(Box::pin(stream));
+                    } else if is_auth_error(status.as_u16()) {
+                        return Err(CfError::AuthError(format!("Auth failed: {status}")));
+                    } else if status.as_u16() == 429 {
+                        last_error = CfError::RateLimited { retry_after: None };
+                        continue;
+                    } else if status.as_u16() == 404 {
+                        return Err(CfError::ModelNotFound(format!("Model {cf_model} not found")));
+                    } else {
+                        let body_text = resp.text().await.unwrap_or_default();
+                        last_error = CfError::ServerError(format!("CF API status {status}: {body_text}"));
+                    }
+                }
+                Err(e) => {
+                    last_error = CfError::NetworkError(format!("Connection error: {e}"));
+                }
+            }
+        }
+        Err(last_error)
+    }
+
     /// 调用 CF 语音识别 API（二进制上传）
     pub async fn run_audio(
         &self,
@@ -219,6 +278,7 @@ impl CfApiClient {
                             match resp.json::<CfResponse>().await {
                                 Ok(cf_resp) => {
                                     if cf_resp.success {
+                                        self.account_pool.mark_used(&account.id);
                                         return Ok(cf_resp.result.unwrap_or_default());
                                     }
                                 }

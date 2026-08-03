@@ -4,6 +4,7 @@
 //! 使 Cloudflare 提供商可以通过统一的 Bridge/Hub 架构进行调度。
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
@@ -83,6 +84,145 @@ fn split_text_chunks(text: &str, chunk_size: usize) -> Vec<String> {
         chunks.push(String::new());
     }
     chunks
+}
+
+/// 解析 OpenAI 风格 SSE chunk（CF stream:true 输出格式），转为内部 ChatChunk
+fn parse_openai_chunk(
+    json_str: &str,
+    id: &str,
+    model: &str,
+) -> Option<std::result::Result<ChatChunk, BridgeError>> {
+    let v: Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(Err(BridgeError::UpstreamDecode(format!(
+                "failed to parse SSE chunk: {e}"
+            ))));
+        }
+    };
+
+    let delta_content = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("delta"))
+        .and_then(|d| d.get("content"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+
+    let finish_reason = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("finish_reason"))
+        .and_then(|f| f.as_str())
+        .map(|s| match s {
+            "stop" => FinishReason::Stop,
+            "length" => FinishReason::Length,
+            "content_filter" => FinishReason::ContentFilter,
+            "tool_calls" => FinishReason::ToolCalls,
+            _ => FinishReason::Stop,
+        });
+
+    if delta_content.is_none() && finish_reason.is_none() {
+        return None;
+    }
+
+    Some(Ok(ChatChunk {
+        id: id.to_string(),
+        model: model.to_string(),
+        delta: ChatDelta {
+            content: delta_content,
+        },
+        finish_reason,
+    }))
+}
+
+/// 解析 OpenAI 风格 SSE chunk（CF stream:true 输出格式），转为内部 ChatChunk
+fn parse_openai_chunk(
+    json_str: &str,
+    id: &str,
+    model: &str,
+) -> Option<std::result::Result<ChatChunk, BridgeError>> {
+    let v: Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(Err(BridgeError::UpstreamDecode(format!(
+                "failed to parse SSE chunk: {e}"
+            ))));
+        }
+    };
+
+    let delta_content = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("delta"))
+        .and_then(|d| d.get("content"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+
+    let finish_reason = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("finish_reason"))
+        .and_then(|f| f.as_str())
+        .map(|s| match s {
+            "stop" => FinishReason::Stop,
+            "length" => FinishReason::Length,
+            "content_filter" => FinishReason::ContentFilter,
+            "tool_calls" => FinishReason::ToolCalls,
+            _ => FinishReason::Stop,
+        });
+
+    if delta_content.is_none() && finish_reason.is_none() {
+        return None;
+    }
+
+    Some(Ok(ChatChunk {
+        id: id.to_string(),
+        model: model.to_string(),
+        delta: ChatDelta {
+            content: delta_content,
+        },
+        finish_reason,
+    }))
+}
+
+/// 解析 OpenAI 风格的 SSE chunk 为 ChatChunk
+fn parse_openai_chunk(
+    json_str: &str,
+    id: &str,
+    model: &str,
+) -> Option<std::result::Result<ChatChunk, BridgeError>> {
+    let parsed: Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    let choices = parsed.get("choices")?.as_array()?;
+    let first = choices.first()?;
+    let delta = first.get("delta")?;
+    let content = delta
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+    let finish_reason = first
+        .get("finish_reason")
+        .and_then(|fr| fr.as_str())
+        .and_then(|fr| match fr {
+            "stop" => Some(FinishReason::Stop),
+            "length" => Some(FinishReason::Length),
+            "content_filter" => Some(FinishReason::ContentFilter),
+            "tool_calls" => Some(FinishReason::ToolCalls),
+            _ => None,
+        });
+    Some(Ok(ChatChunk {
+        id: id.to_string(),
+        model: model.to_string(),
+        delta: ChatDelta { content },
+        finish_reason,
+    }))
 }
 
 /// Cloudflare Workers AI Bridge
@@ -206,30 +346,49 @@ impl Bridge for CloudflareBridge {
         _ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
         let cf_model = self.model_mapper.resolve(&req.model);
-        let cf_body = self.build_cf_body(req);
+        let mut cf_body = self.build_cf_body(req);
+        // CF Workers AI: 流式输出需显式带 stream:true，返回 OpenAI 风格 SSE
+        cf_body["stream"] = Value::Bool(true);
 
-        let result = self
+        let byte_stream = self
             .client
-            .run_text(&cf_model, cf_body)
+            .run_text_stream(&cf_model, cf_body)
             .await
             .map_err(|e| Self::map_cf_error(&e))?;
 
-        let response_text = extract_text_from_cf_response(&result).unwrap_or_default();
-
-        let chunks = split_text_chunks(&response_text, 5);
-        let model = req.model.clone();
         let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+        let model = req.model.clone();
 
-        let stream = futures::stream::iter(chunks.into_iter().map(move |chunk| {
-            Ok(ChatChunk {
-                id: id.clone(),
-                model: model.clone(),
-                delta: ChatDelta {
-                    content: Some(chunk),
-                },
-                finish_reason: None,
-            })
-        }));
+        let mut decoder = crate::sse::SseDecoder::new();
+        let id_clone = id.clone();
+        let model_clone = model.clone();
+
+        let stream = byte_stream
+            .flat_map(move |res: std::result::Result<bytes::Bytes, crate::proxy::CfError>| {
+                let id = id_clone.clone();
+                let model = model_clone.clone();
+                let iter: Vec<std::result::Result<ChatChunk, BridgeError>> = match res {
+                    Ok(bytes) => {
+                        let events = decoder.feed(bytes.as_ref());
+                        events
+                            .into_iter()
+                            .filter_map(|ev| match ev {
+                                crate::sse::SseEvent::Data(json_str) => {
+                                    parse_openai_chunk(&json_str, &id, &model)
+                                }
+                                crate::sse::SseEvent::Done => Some(Ok(ChatChunk {
+                                    id: id.clone(),
+                                    model: model.clone(),
+                                    delta: ChatDelta { content: None },
+                                    finish_reason: Some(FinishReason::Stop),
+                                })),
+                            })
+                            .collect()
+                    }
+                    Err(e) => vec![Err(Self::map_cf_error(&e))],
+                };
+                futures::stream::iter(iter)
+            });
 
         Ok(Box::pin(stream))
     }

@@ -19,12 +19,6 @@ function fmtTok(val) {
   return n.toLocaleString();
 }
 
-const statCards = [
-  { key: 'requests', icon: '📊', title: '今日请求', gradient: 'linear-gradient(135deg, #6366f1, #a855f7)' },
-  { key: 'tokens', icon: '🔤', title: 'Token 统计', gradient: 'linear-gradient(135deg, #a855f7, #ec4899)' },
-  { key: 'monthly', icon: '📅', title: '本月用量限额', gradient: 'linear-gradient(135deg, #10b981, #06b6d4)' },
-];
-
 function TrendChart({ data }) {
   if (!data || data.length === 0) return null;
   const maxVal = Math.max(...data.map((d) => d.value), 1);
