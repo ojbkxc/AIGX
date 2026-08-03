@@ -118,7 +118,7 @@ export default function Epay() {
                   <label key={m} style={{
                     display: 'flex', alignItems: 'center', gap: 6,
                     padding: '8px 14px', borderRadius: 10, cursor: 'pointer',
-                    border: `1px solid ${cfg.pay_methods.includes(m) ? 'var(--primary)' : 'var(--border-color)'}`,
+                    border: `1px solid ${cfg.pay_methods.includes(m) ? 'var(--accent-color)' : 'var(--border-color)'}`,
                     background: cfg.pay_methods.includes(m) ? 'rgba(99,102,241,0.12)' : 'transparent',
                   }}>
                     <input type="checkbox" checked={cfg.pay_methods.includes(m)} onChange={() => toggleMethod(m)} />

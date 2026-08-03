@@ -63,6 +63,7 @@ export default function Wallet() {
       const url = res.url;
       if (!url) {
         setError('支付网关未返回跳转地址，请检查易支付配置');
+        setSubmitting(false);
         return;
       }
       // 构造表单并提交

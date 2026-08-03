@@ -186,8 +186,8 @@ export default function Dashboard() {
           </div>
           <div className="stat-value" style={{ fontSize: '32px' }}>{fmtTok(u.total_tokens)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>
-            <div>上传: {fmtTok(u.total_input_tokens || u.total_tokens)}</div>
-            <div>下载: {fmtTok(u.total_output_tokens || 0)}</div>
+            <div>输入: {fmtTok(u.total_input_tokens || u.total_tokens || 0)}</div>
+            <div>输出: {fmtTok(u.total_output_tokens || 0)}</div>
           </div>
         </div>
 
