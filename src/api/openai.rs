@@ -1,4 +1,4 @@
-﻿use axum::{
+use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{
@@ -94,7 +94,7 @@ fn verify_api_key(
 /// 参考 aisix 的 dispatch_two_tier 模式：
 /// 先查专用提供商（specialized），再查适配器族（family）。
 /// 当前仅注册了 Cloudflare 专用桥接。
-fn resolve_bridge(hub: &Hub, _model: &str) -> Option<Arc<dyn Bridge>> {
+pub fn resolve_bridge(hub: &Hub, _model: &str) -> Option<Arc<dyn Bridge>> {
     hub.get_specialized("cloudflare")
 }
 

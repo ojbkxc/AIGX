@@ -67,10 +67,6 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化用户系统
     let user_store = Arc::new(UserStore::new(store.clone()));
-    // 首次启动若不存在任何用户，则用旧 admin 密码哈希迁移，或保持空（仍可单用户模式登录）
-    if user_store.list().is_empty() && !config.admin.password.is_empty() {
-        let _ = user_store.create_with_username("admin", "admin", &config.admin.password, user::Role::Admin, 0);
-    }
 
     // 初始化订单存储
     let order_store = Arc::new(OrderStore::new(store.clone()));
@@ -187,10 +183,15 @@ fn build_router(state: AppState) -> Router {
         .route("/v1/models", get(api::openai::handle_list_models))
         .route("/v1/models/{model}", get(api::openai::handle_get_model));
 
+    // Anthropic 兼容 API 路由
+    let anthropic_routes = Router::new()
+        .route("/v1/messages", post(api::anthropic::handle_messages));
+
     Router::new()
         .merge(admin_routes)
         .merge(epay_callback_routes)
         .merge(openai_routes)
+        .merge(anthropic_routes)
         .fallback_service(web::serve_static_files())
         .layer(CorsLayer::permissive())
         .with_state(state)

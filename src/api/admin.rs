@@ -1018,7 +1018,7 @@ fn pay_money(epay: &EpayConfig, amount: i64) -> f64 {
     (money * 100.0).round() / 100.0
 }
 
-fn callback_address(state: &AppState, config: &AppConfig) -> String {
+fn callback_address(_state: &AppState, config: &AppConfig) -> String {
     if !config.epay.custom_callback_address.is_empty() {
         return config.epay.custom_callback_address.clone();
     }

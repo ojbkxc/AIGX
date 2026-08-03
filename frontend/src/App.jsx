@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import { ToastProvider } from './components/Toast';
 import Login from './pages/Login';
+import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import Accounts from './pages/Accounts';
 import Keys from './pages/Keys';
@@ -50,6 +51,7 @@ export default function App() {
     <ToastProvider>
       <Routes>
         <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
+        <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
         <Route path="/" element={<ProtectedLayout><Dashboard /></ProtectedLayout>} />
         <Route path="/accounts" element={<ProtectedLayout><Accounts /></ProtectedLayout>} />
         <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
