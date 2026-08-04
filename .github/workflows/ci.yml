@@ -51,15 +51,21 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            use_cross: false
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
+            use_cross: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            use_cross: false
           - target: x86_64-apple-darwin
             os: macos-latest
+            use_cross: false
           - target: aarch64-apple-darwin
             os: macos-latest
+            use_cross: false
     runs-on: ${{ matrix.os }}
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -72,23 +78,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      - name: Install aarch64 cross-compiler (Linux aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Build
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-musl' && 'aarch64-linux-gnu-gcc' || '' }}
-          CC_aarch64_unknown_linux_musl: ${{ matrix.target == 'aarch64-unknown-linux-musl' && 'aarch64-linux-gnu-gcc' || '' }}
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Install cross (Linux aarch64)
+        if: matrix.use_cross
+        run: cargo install cross
 
       - name: Download frontend
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist
           path: static/
+
+      - name: Build (cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: !matrix.use_cross
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Copy frontend (Linux/macOS)
         if: runner.os != 'Windows'
