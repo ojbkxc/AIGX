@@ -12,7 +12,7 @@ RUN npm run build
 # ============================================================
 # Stage 2: 构建 Rust 后端
 # ============================================================
-FROM rust:1.87-alpine AS backend-builder
+FROM rust:alpine AS backend-builder
 
 RUN apk add --no-cache musl-dev make
 
