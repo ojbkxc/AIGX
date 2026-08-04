@@ -811,11 +811,6 @@ pub async fn handle_usage_models(
     })))
 }
 
-/// 计算密码哈希（兼容旧 admin 模式，使用 user 模块的 hash_password）
-fn hash_password(password: &str) -> String {
-    user::hash_password(password)
-}
-
 // ============================================================
 // 用户管理 API
 // ============================================================

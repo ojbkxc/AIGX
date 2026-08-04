@@ -1,6 +1,7 @@
 //! 订阅管理服务
 
 use anyhow::Result;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ pub struct SubscriptionService {
 /// 订阅管理器（线程安全版本）
 #[derive(Debug, Clone)]
 pub struct SubscriptionManager {
-    inner: Arc<std::sync::RwLock<SubscriptionService>>,
+    inner: Arc<RwLock<SubscriptionService>>,
 }
 
 impl SubscriptionService {
