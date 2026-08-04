@@ -118,12 +118,13 @@ jobs:
           retention-days: 1
 
   # ============================================================
-  # Docker 构建（仅 amd64，多平台二进制由 backend job 提供）
+  # Docker 构建（非阻塞，失败不影响整体 CI）
   # ============================================================
   docker:
     needs: [frontend]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
+    continue-on-error: true
     env:
       DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
     steps:
