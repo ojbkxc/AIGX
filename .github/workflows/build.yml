@@ -213,7 +213,6 @@ jobs:
     env:
       VERSION: ${{ needs.get-version.outputs.version }}
       DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -291,7 +290,7 @@ jobs:
           body: |
             ## AIGX ${{ needs.get-version.outputs.version }}
 
-            Rust 实现的 OpenAI 兼容 AI 中转网关，多账号 Cloudflare Workers AI + 易支付 + 多用户配额。
+            Rust 实现的 AI 中转网关，同时支持 OpenAI 与 Anthropic 兼容格式，多账号 Cloudflare Workers AI + 易支付 + 多用户配额。
 
             ### 产物
             - **Linux**: `AIGX-${{ needs.get-version.outputs.version }}-linux-amd64.tar.gz` / `AIGX-${{ needs.get-version.outputs.version }}-linux-arm64.tar.gz`
@@ -303,11 +302,12 @@ jobs:
             - **Linux/macOS**: `tar xzf` 解压后运行 `./AIGX-*`
             - **Windows**: 解压后运行 `AIGX-${{ needs.get-version.outputs.version }}-windows-amd64.exe`
             - **Docker**: `docker-compose up -d`
-            - 默认监听 `127.0.0.1:8080`，首次用 `admin` 任意密码登录并设置密码
+            - 默认监听 `127.0.0.1:8080`，首次用邮箱 `admin@aigx.local` 登录并设置密码
 
-            ### OpenAI 兼容端点
+            ### API 端点
             ```
-            POST /v1/chat/completions
+            POST /v1/chat/completions  (OpenAI 兼容)
+            POST /v1/messages           (Anthropic 兼容)
             POST /v1/embeddings
             POST /v1/audio/transcriptions
             GET  /v1/models

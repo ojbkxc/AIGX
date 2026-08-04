@@ -2,6 +2,22 @@
 //!
 //! 将 AIGX 的 CfApiClient 适配为 Bridge trait 实现，
 //! 使 Cloudflare 提供商可以通过统一的 Bridge/Hub 架构进行调度。
+//!
+//! ## 架构说明：AI Binding 方式
+//!
+//! 本模块通过 HTTP 调用 cf-ai-gw Worker（Cloudflare Workers 上部署的网关），
+//! cf-ai-gw 内部使用 **AI Binding**（`env.AI.run(model, input)`）直接调用
+//! Cloudflare Workers AI 模型，而非通过 REST API 调用 `api.cloudflare.com`。
+//!
+//! 架构链路：
+//! ```text
+//! AIGX (Rust) --HTTP--> cf-ai-gw Worker --AI Binding--> Cloudflare Workers AI
+//! ```
+//!
+//! 优势：
+//! - AI Binding 在 Worker 内部零延迟调用，无需额外 API Token
+//! - 自动享受 Cloudflare 免费额度（@cf/ 开头的模型）
+//! - 多账号负载均衡在 AIGX 层面实现，cf-ai-gw Worker 保持无状态
 
 use async_trait::async_trait;
 use futures::StreamExt;

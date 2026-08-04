@@ -31,7 +31,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: frontend-dist
-          path: frontend/dist/
+          path: static/
           retention-days: 1
 
   # ============================================================
@@ -137,7 +137,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: frontend-dist
-          path: frontend/dist/
+          path: static/
 
       - name: Build and push
         uses: docker/build-push-action@v6
