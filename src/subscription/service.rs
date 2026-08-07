@@ -110,21 +110,21 @@ impl Default for SubscriptionService {
 impl SubscriptionManager {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(std::sync::RwLock::new(SubscriptionService::new())),
+            inner: Arc::new(RwLock::new(SubscriptionService::new())),
         }
     }
 
     pub fn register_plan(&self, plan: Plan) -> Result<()> {
-        self.inner.write().unwrap().register_plan(plan);
+        self.inner.write().register_plan(plan);
         Ok(())
     }
 
     pub fn get_plan(&self, id: &str) -> Option<Plan> {
-        self.inner.read().unwrap().get_plan(id).cloned()
+        self.inner.read().get_plan(id).cloned()
     }
 
     pub fn list_plans(&self) -> Vec<Plan> {
-        self.inner.read().unwrap().list_plans().into_iter().cloned().collect()
+        self.inner.read().list_plans().into_iter().cloned().collect()
     }
 
     pub fn create_subscription(
@@ -133,19 +133,19 @@ impl SubscriptionManager {
         plan_id: &str,
         auto_renew: bool,
     ) -> Result<UserSubscription> {
-        self.inner.write().unwrap().create_subscription(user_id, plan_id, auto_renew)
+        self.inner.write().create_subscription(user_id, plan_id, auto_renew)
     }
 
     pub fn get_user_subscriptions(&self, user_id: &str) -> Vec<UserSubscription> {
-        self.inner.read().unwrap().get_user_subscriptions(user_id).into_iter().cloned().collect()
+        self.inner.read().get_user_subscriptions(user_id).into_iter().cloned().collect()
     }
 
     pub fn has_active_subscription(&self, user_id: &str) -> bool {
-        self.inner.read().unwrap().has_active_subscription(user_id)
+        self.inner.read().has_active_subscription(user_id)
     }
 
     pub fn cancel_subscription(&self, user_id: &str, subscription_id: &str) -> Result<()> {
-        self.inner.write().unwrap().cancel_subscription(user_id, subscription_id)
+        self.inner.write().cancel_subscription(user_id, subscription_id)
     }
 }
 

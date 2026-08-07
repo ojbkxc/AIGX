@@ -15,7 +15,7 @@ use std::time::Duration;
 /// 内存缓存包装器
 pub struct MemoryCache<K, V>
 where
-    K: moka::cache::Key + Send + Sync + 'static,
+    K: std::hash::Hash + Eq + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
     inner: moka::future::Cache<K, V>,
@@ -23,7 +23,7 @@ where
 
 impl<K, V> MemoryCache<K, V>
 where
-    K: moka::cache::Key + Send + Sync + 'static + std::fmt::Debug,
+    K: std::hash::Hash + Eq + Send + Sync + 'static + std::fmt::Debug,
     V: Clone + Send + Sync + 'static,
 {
     /// 创建新缓存
@@ -75,7 +75,7 @@ where
 
 impl<K, V> std::fmt::Debug for MemoryCache<K, V>
 where
-    K: moka::cache::Key + Send + Sync + 'static + std::fmt::Debug,
+    K: std::hash::Hash + Eq + Send + Sync + 'static + std::fmt::Debug,
     V: Clone + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

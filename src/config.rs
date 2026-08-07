@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::sync::RwLock;
 
+use crate::notify::NotifyConfig;
 use crate::payment::EpayConfig;
 
 // ── Default value functions ──────────────────────────────────────────
@@ -45,6 +46,49 @@ pub struct AdminConfig {
     pub session_secret: String,
 }
 
+/// 数据库配置 — 多数据库后端支持。
+///
+/// 渐进式迁移策略：
+/// - `url` 为空（默认）：使用现有 FileStore（rusqlite bundled SQLite），零配置零依赖
+/// - `url` 有值：启用 SeaORM 连接，支持 PostgreSQL/MySQL
+///
+/// 支持的 URL 格式：
+/// - `postgres://user:pass@localhost:5432/aigx` — PostgreSQL
+/// - `mysql://user:pass@localhost:3306/aigx` — MySQL
+///
+/// 注意：启用 SeaORM 后端需要编译时启用对应 feature：
+/// ```text
+/// cargo build --no-default-features --features "sea-orm,postgres"
+/// cargo build --no-default-features --features "sea-orm,mysql"
+/// ```
+///
+/// SQLite 场景由默认的 FileStore/rusqlite 后端覆盖，无需 SeaORM。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DatabaseConfig {
+    /// 数据库连接 URL。留空则使用默认 FileStore（rusqlite）。
+    ///
+    /// 示例：
+    /// - `sqlite://./data/aigx.db`
+    /// - `postgres://user:pass@localhost:5432/aigx`
+    /// - `mysql://user:pass@localhost:3306/aigx`
+    #[serde(default)]
+    pub url: String,
+    /// 连接池最大连接数（默认 10）
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+}
+
+fn default_max_connections() -> u32 {
+    10
+}
+
+impl DatabaseConfig {
+    /// 是否启用 SeaORM 后端（url 非空时启用）。
+    pub fn is_enabled(&self) -> bool {
+        !self.url.trim().is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageConfig {
     #[serde(default = "default_daily_limit")]
@@ -81,6 +125,20 @@ pub struct AppConfig {
     /// 站点对外访问地址，用于构造回调 URL
     #[serde(default)]
     pub server_address: String,
+    /// 通知系统配置（Telegram + SMTP）
+    #[serde(default)]
+    pub notify: NotifyConfig,
+    /// 数据库配置（多数据库后端支持）
+    ///
+    /// 留空则使用默认 FileStore（rusqlite），填 URL 则启用 SeaORM。
+    #[serde(default)]
+    pub database: DatabaseConfig,
+    /// CORS 允许的来源列表。
+    ///
+    /// 生产环境应显式配置允许的前端来源（如 `["https://admin.example.com"]`）。
+    /// 留空时默认允许 localhost 开发来源（见 main.rs build_cors_layer）。
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
 }
 
 // ── Default implementations ──────────────────────────────────────────

@@ -16,6 +16,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 pub mod cf;
+pub mod openai;
 
 /// 聊天消息角色
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

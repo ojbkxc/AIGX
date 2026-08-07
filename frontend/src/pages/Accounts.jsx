@@ -1,30 +1,50 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import './Accounts.css';
 
+const CHANNEL_TYPES = [
+  { value: 'cloudflare', labelKey: 'Cloudflare Workers AI', isRaw: true },
+  { value: 'openai_compatible', labelKey: 'OpenAI 兼容 (DeepSeek/OpenRouter/...)' },
+  { value: 'anthropic', labelKey: 'Anthropic 兼容' },
+];
+
 export default function Accounts() {
-  const [accounts, setAccounts] = useState([]);
+  const [channels, setChannels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const addToast = useToast();
+  const { t } = useTranslation();
 
   const [showModal, setShowModal] = useState(false);
-  const [editAccount, setEditAccount] = useState(null);
-  const [form, setForm] = useState({ name: '', account_id: '', api_token: '' });
+  const [editChannel, setEditChannel] = useState(null);
+  const [form, setForm] = useState(defaultForm());
   const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] = useState(null);
 
-  useEffect(() => {
-    loadAccounts();
-  }, []);
+  function defaultForm() {
+    return {
+      name: '',
+      channel_type: 'openai_compatible',
+      base_url: '',
+      api_key: '',
+      priority: 0,
+      weight: 1,
+      status: 'enabled',
+      models: '',
+      account_id: '',
+    };
+  }
 
-  const loadAccounts = async () => {
+  useEffect(() => { loadChannels(); }, []);
+
+  const loadChannels = async () => {
     setLoading(true);
     setError('');
     try {
-      const res = await api.listAccounts();
-      setAccounts(res.data || res || []);
+      const res = await api.listChannels();
+      setChannels(res.data || []);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -33,50 +53,65 @@ export default function Accounts() {
   };
 
   const openAdd = () => {
-    setEditAccount(null);
-    setForm({ name: '', account_id: '', api_token: '' });
+    setEditChannel(null);
+    setForm(defaultForm());
     setTestResult(null);
     setShowModal(true);
   };
 
-  const openEdit = (account) => {
-    setEditAccount(account);
-    setForm({ name: account.name || '', account_id: account.account_id || '', api_token: '' });
+  const openEdit = (ch) => {
+    setEditChannel(ch);
+    setForm({
+      name: ch.name || '',
+      channel_type: ch.channel_type || 'openai_compatible',
+      base_url: ch.base_url || '',
+      api_key: '',
+      priority: ch.priority ?? 0,
+      weight: ch.weight ?? 1,
+      status: ch.status || 'enabled',
+      models: (ch.models || []).join(', '),
+      account_id: ch.account_id || '',
+    });
     setTestResult(null);
     setShowModal(true);
   };
 
   const closeModal = () => {
     setShowModal(false);
-    setEditAccount(null);
-    setForm({ name: '', account_id: '', api_token: '' });
+    setEditChannel(null);
+    setForm(defaultForm());
     setTestResult(null);
   };
 
+  const buildPayload = () => ({
+    name: form.name,
+    channel_type: form.channel_type,
+    base_url: form.base_url,
+    api_key: form.api_key,
+    priority: parseInt(form.priority, 10) || 0,
+    weight: parseInt(form.weight, 10) || 1,
+    status: form.status,
+    models: form.models.split(',').map((s) => s.trim()).filter(Boolean),
+    account_id: form.account_id,
+  });
+
   const handleSave = async () => {
-    if (!form.name || !form.account_id) {
-      setError('名称和账号 ID 为必填项');
-      return;
-    }
+    if (!form.name) { setError(t('名称为必填项')); return; }
+    if (form.channel_type !== 'cloudflare' && !form.base_url) { setError(t('非 Cloudflare 渠道需填写 Base URL')); return; }
     setSaving(true);
     setError('');
     try {
-      if (editAccount) {
-        const payload = { name: form.name, account_id: form.account_id };
-        if (form.api_token) payload.api_token = form.api_token;
-        await api.updateAccount(editAccount.id, payload);
-        addToast('账号更新成功');
+      const payload = buildPayload();
+      if (editChannel) {
+        await api.updateChannel(editChannel.id, payload);
+        addToast(t('渠道更新成功'));
       } else {
-        if (!form.api_token) {
-          setError('新账号必填 API Token');
-          setSaving(false);
-          return;
-        }
-        await api.addAccount(form.name, form.account_id, form.api_token);
-        addToast('账号添加成功');
+        if (!form.api_key) { setError(t('新渠道必填 API Key')); setSaving(false); return; }
+        await api.addChannel(payload);
+        addToast(t('渠道添加成功'));
       }
       closeModal();
-      loadAccounts();
+      loadChannels();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -84,100 +119,103 @@ export default function Accounts() {
     }
   };
 
-  const handleTest = async () => {
-    if (!form.name || !form.account_id || !form.api_token) {
-      setError('测试连接需要填写名称、账号 ID 和 API Token');
-      return;
-    }
-    setSaving(true);
+  const handleTest = async (id) => {
     setError('');
-    setTestResult(null);
     try {
-      const res = await api.testAccount(form.name, form.account_id, form.api_token);
-      setTestResult({ success: true, message: res.message || '连接成功！' });
+      const res = await api.testChannel(id);
+      const data = res.data || {};
+      addToast(data.success ? `${t('连通')}: ${data.message || ''}` : `${t('失败')}: ${data.message || ''}`);
+      loadChannels();
     } catch (err) {
-      setTestResult({ success: false, message: err.message });
-    } finally {
-      setSaving(false);
+      addToast(`${t('测试失败')}: ${err.message}`);
+    }
+  };
+
+  const handleToggle = async (ch) => {
+    try {
+      const newStatus = ch.status === 'enabled' ? 'disabled' : 'enabled';
+      await api.patchChannel(ch.id, { status: newStatus });
+      loadChannels();
+    } catch (err) {
+      setError(err.message);
     }
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm('确定删除此账号？')) return;
+    if (!window.confirm(t('确定删除此渠道？'))) return;
     setError('');
     try {
-      await api.deleteAccount(id);
-      addToast('账号已删除');
-      loadAccounts();
+      await api.deleteChannel(id);
+      addToast(t('渠道已删除'));
+      loadChannels();
     } catch (err) {
       setError(err.message);
     }
   };
 
-  const fmtTime = (ts) => {
-    if (!ts) return '—';
-    return new Date(ts * 1000).toLocaleString();
+  const fmtTime = (ts) => ts ? new Date(ts * 1000).toLocaleString() : '—';
+
+  const typeLabel = (val) => {
+    const found = CHANNEL_TYPES.find((x) => x.value === val);
+    if (!found) return val;
+    return found.isRaw ? found.labelKey : t(found.labelKey);
   };
 
-  const statusBadge = (acc) => {
-    if (acc.status === 'active') {
-      return <span className="badge badge-success">正常</span>;
-    }
-    if (acc.status === 'error') {
-      return (
-        <span className="badge badge-danger" title={acc.last_error || ''}>
-          异常
-        </span>
-      );
-    }
-    return <span className="badge badge-warning">{acc.status || '未知'}</span>;
-  };
-
-  if (loading) return <div className="loading">加载账号列表</div>;
+  if (loading) return <div className="loading">{t('加载渠道列表')}</div>;
 
   return (
     <div>
       <div className="page-header">
-        <h1>账号管理</h1>
-        <p>管理 Cloudflare AI 网关账号</p>
+        <h1>{t('渠道管理')}</h1>
+        <p>{t('管理上游 AI 渠道（支持混用 Cloudflare + 第三方 OpenAI 兼容上游）')}</p>
       </div>
 
       {error && <div className="error-message">{error}</div>}
 
       <div className="card">
         <div className="card-header">
-          <h2>所有账号 ({accounts.length})</h2>
-          <button className="btn btn-primary" onClick={openAdd}>+ 添加账号</button>
+          <h2>{t('所有渠道')} ({channels.length})</h2>
+          <button className="btn btn-primary" onClick={openAdd}>{t('+ 添加渠道')}</button>
         </div>
         <div className="card-body">
-          {accounts.length === 0 ? (
+          {channels.length === 0 ? (
             <div className="empty-state">
-              <p>暂无账号</p>
-              <button className="btn btn-primary" onClick={openAdd}>添加第一个账号</button>
+              <p>{t('暂无渠道')}</p>
+              <button className="btn btn-primary" onClick={openAdd}>{t('添加第一个渠道')}</button>
             </div>
           ) : (
             <div className="table-wrapper">
               <table>
                 <thead>
                   <tr>
-                    <th>名称</th>
-                    <th>账号 ID</th>
-                    <th>状态</th>
-                    <th>最后使用</th>
-                    <th>操作</th>
+                    <th>{t('名称')}</th>
+                    <th>{t('类型')}</th>
+                    <th>Base URL</th>
+                    <th>{t('优先级/权重')}</th>
+                    <th>{t('模型')}</th>
+                    <th>{t('状态')}</th>
+                    <th>{t('操作')}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {accounts.map((acc) => (
-                    <tr key={acc.id}>
-                      <td><strong>{acc.name}</strong></td>
-                      <td><code className="account-id">{acc.account_id}</code></td>
-                      <td>{statusBadge(acc)}</td>
-                      <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>{fmtTime(acc.last_used_at)}</td>
+                  {channels.map((ch) => (
+                    <tr key={ch.id}>
+                      <td><strong>{ch.name}</strong></td>
+                      <td>{typeLabel(ch.channel_type)}</td>
+                      <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>{ch.base_url || ch.account_id || '—'}</td>
+                      <td>{ch.priority} / {ch.weight}</td>
+                      <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>{(ch.models || []).join(', ') || t('全部')}</td>
+                      <td>
+                        {ch.status === 'enabled'
+                          ? <span className="badge badge-success">{t('启用')}</span>
+                          : <span className="badge badge-danger" title={ch.last_error || ''}>{t('禁用')}</span>}
+                      </td>
                       <td>
                         <div className="actions-cell">
-                          <button className="btn btn-outline btn-sm" onClick={() => openEdit(acc)}>编辑</button>
-                          <button className="btn btn-danger btn-sm" onClick={() => handleDelete(acc.id)}>删除</button>
+                          <button className="btn btn-outline btn-sm" onClick={() => handleTest(ch.id)}>{t('测试')}</button>
+                          <button className="btn btn-outline btn-sm" onClick={() => handleToggle(ch)}>{ch.status === 'enabled' ? t('停用') : t('启用')}</button>
+                          <button className="btn btn-outline btn-sm" onClick={() => openEdit(ch)}>{t('编辑')}</button>
+                          <button className="btn btn-danger btn-sm" onClick={() => handleDelete(ch.id)}>{t('删除')}</button>
                         </div>
                       </td>
                     </tr>
@@ -193,7 +231,7 @@ export default function Accounts() {
         <div className="modal-overlay" onClick={closeModal}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h3>{editAccount ? '编辑账号' : '添加账号'}</h3>
+              <h3>{editChannel ? t('编辑渠道') : t('添加渠道')}</h3>
               <button className="modal-close" onClick={closeModal}>&times;</button>
             </div>
             <div className="modal-body">
@@ -203,25 +241,56 @@ export default function Accounts() {
                 </div>
               )}
               <div className="form-group">
-                <label>名称</label>
-                <input className="form-input" placeholder="例如：我的账号" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+                <label>{t('名称')}</label>
+                <input className="form-input" placeholder={t('名称')} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
               </div>
               <div className="form-group">
-                <label>账号 ID</label>
-                <input className="form-input" placeholder="Cloudflare 账号 ID" value={form.account_id} onChange={(e) => setForm({ ...form, account_id: e.target.value })} />
+                <label>{t('渠道类型')}</label>
+                <select className="form-input" value={form.channel_type} onChange={(e) => setForm({ ...form, channel_type: e.target.value })}>
+                  {CHANNEL_TYPES.map((tp) => <option key={tp.value} value={tp.value}>{tp.isRaw ? tp.labelKey : t(tp.labelKey)}</option>)}
+                </select>
+              </div>
+              {form.channel_type === 'cloudflare' ? (
+                <div className="form-group">
+                  <label>{t('Cloudflare 账号 ID')}</label>
+                  <input className="form-input" placeholder={t('Cloudflare 账号 ID')} value={form.account_id} onChange={(e) => setForm({ ...form, account_id: e.target.value })} />
+                </div>
+              ) : (
+                <div className="form-group">
+                  <label>Base URL</label>
+                  <input className="form-input" placeholder="https://api.deepseek.com" value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} />
+                </div>
+              )}
+              <div className="form-group">
+                <label>API Key {editChannel && t('（留空则保持不变）')}</label>
+                <input className="form-input" type="password" placeholder={editChannel ? t('留空保持当前值') : 'API Key'} value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} />
               </div>
               <div className="form-group">
-                <label>API Token {editAccount && '（留空则保持不变）'}</label>
-                <input className="form-input" type="password" placeholder={editAccount ? '留空保持当前值' : 'API Token'} value={form.api_token} onChange={(e) => setForm({ ...form, api_token: e.target.value })} />
+                <label>{t('支持的模型（逗号分隔，留空=全部）')}</label>
+                <input className="form-input" placeholder="deepseek-chat, deepseek-coder" value={form.models} onChange={(e) => setForm({ ...form, models: e.target.value })} />
+              </div>
+              <div style={{ display: 'flex', gap: 12 }}>
+                <div className="form-group" style={{ flex: 1 }}>
+                  <label>{t('优先级（越大越优先）')}</label>
+                  <input className="form-input" type="number" value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })} />
+                </div>
+                <div className="form-group" style={{ flex: 1 }}>
+                  <label>{t('权重')}</label>
+                  <input className="form-input" type="number" value={form.weight} onChange={(e) => setForm({ ...form, weight: e.target.value })} />
+                </div>
+              </div>
+              <div className="form-group">
+                <label>{t('状态')}</label>
+                <select className="form-input" value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
+                  <option value="enabled">{t('启用')}</option>
+                  <option value="disabled">{t('禁用')}</option>
+                </select>
               </div>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={handleTest} disabled={saving}>
-                {saving ? '测试中...' : '测试连接'}
-              </button>
-              <button className="btn btn-outline" onClick={closeModal}>取消</button>
+              <button className="btn btn-outline" onClick={closeModal}>{t('取消')}</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-                {saving ? '保存中...' : (editAccount ? '更新' : '添加')}
+                {saving ? t('保存中...') : (editChannel ? t('更新') : t('添加'))}
               </button>
             </div>
           </div>

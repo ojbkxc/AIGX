@@ -42,31 +42,9 @@ export const api = {
   getUsageSummary: () =>
     request('GET', '/api/usage/summary'),
 
-  // Accounts
-  listAccounts: () =>
-    request('GET', '/api/accounts'),
-
-  addAccount: (name, account_id, api_token) =>
-    request('POST', '/api/accounts', { name, account_id, api_token }),
-
-  testAccount: (name, account_id, api_token) =>
-    request('POST', '/api/accounts/test', { name, account_id, api_token }),
-
-  updateAccount: (id, data) =>
-    request('PUT', `/api/accounts/${id}`, data),
-
-  deleteAccount: (id) =>
-    request('DELETE', `/api/accounts/${id}`),
-
   // API Keys
   listKeys: () =>
     request('GET', '/api/keys'),
-
-  generateKey: (name) =>
-    request('POST', '/api/keys', { name }),
-
-  deleteKey: (id) =>
-    request('DELETE', `/api/keys/${id}`),
 
   // Settings / Model Mappings
   getSettings: () =>
@@ -90,9 +68,6 @@ export const api = {
   getTrend: () =>
     request('GET', '/api/usage/trend'),
 
-  // Model Usage
-  getModelUsage: () =>
-    request('GET', '/api/usage/models'),
 
   // Users
   listUsers: () => request('GET', '/api/users'),
@@ -110,4 +85,63 @@ export const api = {
   myOrders: () => request('GET', '/api/orders/me'),
   topup: (amount, payment_method) =>
     request('POST', '/api/topup', { amount, payment_method }),
+
+  // ── 通用渠道管理（功能 1）──
+  listChannels: () => request('GET', '/api/channels'),
+  addChannel: (data) => request('POST', '/api/channels', data),
+  updateChannel: (id, data) => request('PUT', `/api/channels/${id}`, data),
+  patchChannel: (id, data) => request('PATCH', `/api/channels/${id}`, data),
+  deleteChannel: (id) => request('DELETE', `/api/channels/${id}`),
+  testChannel: (id) => request('POST', `/api/channels/${id}/test`),
+
+  // ── 令牌管理增强（功能 2）──
+  listTokens: () => request('GET', '/api/tokens'),
+  addToken: (data) => request('POST', '/api/tokens', data),
+  updateToken: (id, data) => request('PUT', `/api/tokens/${id}`, data),
+  deleteToken: (id) => request('DELETE', `/api/tokens/${id}`),
+  resetTokenUsed: (id) => request('POST', `/api/tokens/${id}/reset_used`),
+
+  // ── 模型定价目录（功能 3）──
+  listPrices: () => request('GET', '/api/prices'),
+  upsertPrice: (data) => request('POST', '/api/prices', data),
+
+  deletePrice: (model) => request('DELETE', `/api/prices/${model}`),
+
+  // ── 倍率配置 ──
+  getRatios: () => request('GET', '/api/ratios'),
+  updateRatios: (data) => request('PUT', '/api/ratios', data),
+
+  // ── 用户分组管理（功能 4）──
+  listGroups: () => request('GET', '/api/groups'),
+  upsertGroup: (data) => request('POST', '/api/groups', data),
+
+  deleteGroup: (name) => request('DELETE', `/api/groups/${name}`),
+
+  // ── 日志与审计（功能 1）──
+  listRequestLogs: (params = {}) => request('GET', `/api/logs/requests?${new URLSearchParams(params)}`),
+  listAuditLogs: (params = {}) => request('GET', `/api/logs/audits?${new URLSearchParams(params)}`),
+
+
+  // ── 兑换码（功能 2）──
+  listRedemptions: (params = {}) => request('GET', `/api/redemptions?${new URLSearchParams(params)}`),
+  batchRedemptions: (data) => request('POST', '/api/redemptions/batch', data),
+  deleteRedemption: (id) => request('DELETE', `/api/redemptions/${id}`),
+  redeem: (code) => request('POST', '/api/redemptions/redeem', { code }),
+
+  // ── 限流配置（功能 3）──
+  getRateLimitConfig: () => request('GET', '/api/ratelimit/config'),
+  updateRateLimitConfig: (data) => request('PUT', '/api/ratelimit/config', data),
+
+  // ── 数据看板增强（功能 4）──
+  getConsumptionTrend: () => request('GET', '/api/dashboard/consumption_trend'),
+  getModelDistribution: () => request('GET', '/api/dashboard/model_distribution'),
+  getUserRanking: () => request('GET', '/api/dashboard/user_ranking'),
+  getChannelHealth: () => request('GET', '/api/dashboard/channel_health'),
+  getRealtime: () => request('GET', '/api/dashboard/realtime'),
+
+  // ── 通知系统（Telegram + SMTP）──
+  getNotifyConfig: () => request('GET', '/api/notify/config'),
+  updateNotifyConfig: (data) => request('PUT', '/api/notify/config', data),
+  testTelegram: () => request('POST', '/api/notify/test-telegram'),
+  testEmail: (to) => request('POST', '/api/notify/test-email', { to }),
 };

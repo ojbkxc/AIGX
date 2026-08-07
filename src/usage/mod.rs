@@ -23,9 +23,7 @@ impl TokenStats {
     /// 计算平均每秒 token 数
     pub fn avg_tok_per_sec(&self) -> u64 {
         self.tok_per_sec_sum.checked_div(self.tok_per_sec_count).unwrap_or(0)
-        } else {
-            0
-        }
+
     }
 
     /// 总 token 数

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import './Keys.css';
@@ -10,10 +11,15 @@ export default function Wallet() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const addToast = useToast();
+  const { t } = useTranslation();
 
   const [amount, setAmount] = useState(10);
   const [method, setMethod] = useState('alipay');
   const [submitting, setSubmitting] = useState(false);
+
+  // 兑换码
+  const [redeemCode, setRedeemCode] = useState('');
+  const [redeeming, setRedeeming] = useState(false);
 
   useEffect(() => {
     load();
@@ -46,13 +52,14 @@ export default function Wallet() {
   };
 
   const handleTopup = async () => {
-    const amt = Number(amount);
+    const amt = Math.floor(Number(amount));
+
     if (!amt || amt <= 0) {
-      setError('请输入有效金额');
+      setError(t('请输入有效金额'));
       return;
     }
     if (epay && amt < (epay.min_topup || 1)) {
-      setError(`最低充值 ${epay.min_topup} 元`);
+      setError(`${t('最低充值')} ${epay.min_topup} ${t('元')}`);
       return;
     }
     setSubmitting(true);
@@ -62,23 +69,23 @@ export default function Wallet() {
       const params = res.data || {};
       const url = res.url;
       if (!url) {
-        setError('支付网关未返回跳转地址，请检查易支付配置');
+        setError(t('支付网关未返回跳转地址，请检查易支付配置'));
         setSubmitting(false);
         return;
       }
       // 构造表单并提交
-      const form = document.createElement('form');
-      form.method = 'POST';
-      form.action = url;
+      const formEl = document.createElement('form');
+      formEl.method = 'POST';
+      formEl.action = url;
       for (const [k, v] of Object.entries(params)) {
         const input = document.createElement('input');
         input.type = 'hidden';
         input.name = k;
         input.value = v;
-        form.appendChild(input);
+        formEl.appendChild(input);
       }
-      document.body.appendChild(form);
-      form.submit();
+      document.body.appendChild(formEl);
+      formEl.submit();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -86,7 +93,29 @@ export default function Wallet() {
     }
   };
 
-  if (loading) return <div className="loading">加载钱包</div>;
+  if (loading) return <div className="loading">{t('加载钱包')}</div>;
+
+  const handleRedeem = async () => {
+    if (!redeemCode.trim()) {
+      setError(t('请输入兑换码'));
+      return;
+    }
+    setRedeeming(true);
+    setError('');
+    try {
+      const res = await api.redeem(redeemCode.trim());
+      const msg = res.message || res.msg || t('兑换成功');
+      addToast(msg);
+      setRedeemCode('');
+      // 刷新账户信息
+      const meRes = await api.getMe();
+      if (meRes) setMe(meRes.data || null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRedeeming(false);
+    }
+  };
 
   const remaining = me ? (me.quota || 0) - (me.used_quota || 0) : 0;
   const methods = (epay && epay.pay_methods) || ['alipay', 'wxpay'];
@@ -94,8 +123,8 @@ export default function Wallet() {
   return (
     <div>
       <div className="page-header">
-        <h1>钱包充值</h1>
-        <p>通过易支付为账户充值配额</p>
+        <h1>{t('钱包充值')}</h1>
+        <p>{t('通过易支付为账户充值配额')}</p>
       </div>
 
       {error && <div className="error-message">{error}</div>}
@@ -104,7 +133,7 @@ export default function Wallet() {
         <div className="card">
           <div className="card-body">
             <div className="empty-state">
-              <p>管理员尚未配置易支付，暂无法充值。请联系管理员在「易支付」页面完成配置。</p>
+              <p>{t('管理员尚未配置易支付，暂无法充值。请联系管理员在「易支付」页面完成配置。')}</p>
             </div>
           </div>
         </div>
@@ -113,47 +142,47 @@ export default function Wallet() {
           <div className="card" style={{ marginBottom: 16 }}>
             <div className="card-body" style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
               <div>
-                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>当前账户</div>
+                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('当前账户')}</div>
                 <div style={{ fontSize: 18, fontWeight: 600 }}>{me?.email || '—'}</div>
                 {me?.username && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>@{me.username}</div>}
               </div>
               <div>
-                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>剩余配额</div>
+                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('剩余配额')}</div>
                 <div style={{ fontSize: 22, fontWeight: 700, background: 'var(--primary-gradient)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
                   {fmtQuota(remaining)}
                 </div>
               </div>
               <div>
-                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>兑换倍率</div>
-                <div style={{ fontSize: 16, fontWeight: 600 }}>1 元 = {epay.price || 1} 配额</div>
+                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('兑换倍率')}</div>
+                <div style={{ fontSize: 16, fontWeight: 600 }}>{t('1 元 =')} {epay.price || 1} {t('配额')}</div>
               </div>
             </div>
           </div>
 
           <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-header"><h2>充值</h2></div>
+            <div className="card-header"><h2>{t('充值')}</h2></div>
             <div className="card-body">
               <div style={{ display: 'grid', gap: 16, maxWidth: 480 }}>
                 <div className="form-group">
-                  <label>充值金额（元）</label>
-                  <input className="form-input" type="number" min={epay.min_topup || 1} value={amount}
+                  <label>{t('充值金额（元）')}</label>
+                  <input className="form-input" type="number" step="1" min={epay.min_topup || 1} value={amount}
                     onChange={(e) => setAmount(e.target.value)} />
                   <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-                    最低 {epay.min_topup || 1} 元，将获得 {fmtQuota((Number(amount) || 0) * (epay.price || 1))} 配额
+                    {t('最低')} {epay.min_topup || 1} {t('元，将获得')} {fmtQuota((Number(amount) || 0) * (epay.price || 1))} {t('配额')}
                   </div>
                 </div>
                 <div className="form-group">
-                  <label>支付方式</label>
+                  <label>{t('支付方式')}</label>
                   <select className="form-input" value={method} onChange={(e) => setMethod(e.target.value)}>
                     {methods.map((m) => (
                       <option key={m} value={m}>
-                        {m === 'alipay' ? '支付宝' : m === 'wxpay' ? '微信支付' : m}
+                        {m === 'alipay' ? t('支付宝') : m === 'wxpay' ? t('微信支付') : m}
                       </option>
                     ))}
                   </select>
                 </div>
                 <button className="btn btn-primary" onClick={handleTopup} disabled={submitting}>
-                  {submitting ? '正在跳转...' : '立即充值'}
+                  {submitting ? t('正在跳转...') : t('立即充值')}
                 </button>
               </div>
             </div>
@@ -161,22 +190,44 @@ export default function Wallet() {
         </>
       )}
 
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-header"><h2>{t('兑换码充值')}</h2></div>
+        <div className="card-body">
+          <div style={{ display: 'grid', gap: 16, maxWidth: 480 }}>
+            <div className="form-group">
+              <label>{t('兑换码')}</label>
+              <input
+                className="form-input"
+                value={redeemCode}
+                onChange={(e) => setRedeemCode(e.target.value)}
+                placeholder={t('输入兑换码直接充值配额')}
+                style={{ fontFamily: 'monospace', letterSpacing: 1 }}
+              />
+              <span className="form-hint">{t('输入管理员发放的兑换码，即可将对应配额充入账户。')}</span>
+            </div>
+            <button className="btn btn-primary" onClick={handleRedeem} disabled={redeeming}>
+              {redeeming ? t('兑换中...') : t('立即兑换')}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div className="card">
-        <div className="card-header"><h2>我的订单 ({orders.length})</h2></div>
+        <div className="card-header"><h2>{t('我的订单')} ({orders.length})</h2></div>
         <div className="card-body">
           {orders.length === 0 ? (
-            <div className="empty-state"><p>暂无订单</p></div>
+            <div className="empty-state"><p>{t('暂无订单')}</p></div>
           ) : (
             <div className="table-wrapper">
               <table>
                 <thead>
                   <tr>
-                    <th>订单号</th>
-                    <th>金额</th>
-                    <th>配额</th>
-                    <th>支付方式</th>
-                    <th>状态</th>
-                    <th>创建时间</th>
+                    <th>{t('订单号')}</th>
+                    <th>{t('金额')}</th>
+                    <th>{t('配额')}</th>
+                    <th>{t('支付方式')}</th>
+                    <th>{t('状态')}</th>
+                    <th>{t('创建时间')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -192,7 +243,7 @@ export default function Wallet() {
                           background: o.status === 'paid' ? 'rgba(34,197,94,0.15)' : o.status === 'expired' ? 'rgba(148,163,184,0.15)' : 'rgba(234,179,8,0.15)',
                           color: o.status === 'paid' ? 'rgb(34,197,94)' : o.status === 'expired' ? 'rgb(148,163,184)' : 'rgb(234,179,8)',
                         }}>
-                          {o.status === 'paid' ? '已支付' : o.status === 'expired' ? '已过期' : '待支付'}
+                          {o.status === 'paid' ? t('已支付') : o.status === 'expired' ? t('已过期') : t('待支付')}
                         </span>
                       </td>
                       <td>{o.create_time ? new Date(o.create_time * 1000).toLocaleString() : '—'}</td>

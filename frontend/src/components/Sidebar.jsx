@@ -1,21 +1,25 @@
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 
 const navItems = [
-  { path: '/', label: '仪表盘', icon: '📊', end: true },
-  { path: '/accounts', label: '账号管理', icon: '🔑' },
-  { path: '/keys', label: 'API 密钥', icon: '🔐' },
-  { path: '/mappings', label: '模型映射', icon: '🔄' },
-  { path: '/users', label: '用户管理', icon: '👥' },
-  { path: '/wallet', label: '钱包充值', icon: '💰' },
-  { path: '/orders', label: '订单记录', icon: '🧾' },
-  { path: '/epay', label: '易支付', icon: '💳' },
-  { path: '/settings', label: '系统设置', icon: '⚙️' },
+  { path: '/', labelKey: '仪表盘', icon: '📊', end: true },
+  { path: '/accounts', labelKey: '账号管理', icon: '🔑' },
+  { path: '/keys', labelKey: 'API 密钥', icon: '🔐' },
+  { path: '/mappings', labelKey: '模型映射', icon: '🔄' },
+  { path: '/users', labelKey: '用户管理', icon: '👥' },
+  { path: '/wallet', labelKey: '钱包充值', icon: '💰' },
+  { path: '/orders', labelKey: '订单记录', icon: '🧾' },
+  { path: '/redemptions', labelKey: '兑换码', icon: '🎟️' },
+  { path: '/logs', labelKey: '日志审计', icon: '📋' },
+  { path: '/epay', labelKey: '易支付', icon: '💳' },
+  { path: '/settings', labelKey: '系统设置', icon: '⚙️' },
 ];
 
 export default function Sidebar() {
   const navigate = useNavigate();
+  const { t, i18n } = useTranslation();
 
   const handleLogout = async () => {
     try {
@@ -35,6 +39,12 @@ export default function Sidebar() {
     const isLight = html.getAttribute('data-theme') === 'light';
     html.setAttribute('data-theme', isLight ? 'dark' : 'light');
     localStorage.setItem('theme', isLight ? 'dark' : 'light');
+  };
+
+  const toggleLanguage = () => {
+    const next = i18n.language === 'zh' ? 'en' : 'zh';
+    localStorage.setItem('i18n_lang', next);
+    i18n.changeLanguage(next);
   };
 
   const email = localStorage.getItem('email') || 'Admin';
@@ -94,7 +104,7 @@ export default function Sidebar() {
             AIGX
           </div>
           <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 500 }}>
-            AI 中转网关
+            {t('AI 中转网关')}
           </div>
         </div>
       </div>
@@ -135,7 +145,7 @@ export default function Sidebar() {
             <span style={{ fontSize: '16px', width: '20px', textAlign: 'center', flexShrink: 0 }}>
               {item.icon}
             </span>
-            <span>{item.label}</span>
+            <span>{t(item.labelKey)}</span>
           </NavLink>
         ))}
       </nav>
@@ -178,15 +188,27 @@ export default function Sidebar() {
             className="btn btn-outline btn-sm"
             onClick={toggleTheme}
             style={{ flex: 1 }}
-            title="切换主题"
+            title={t('切换主题')}
           >
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" style={{ width: '14px', height: '14px' }}>
               <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
             </svg>
-            主题
+            {t('主题')}
+          </button>
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={toggleLanguage}
+            style={{ flex: 1 }}
+            title={t('语言切换')}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" style={{ width: '14px', height: '14px' }}>
+              <circle cx="12" cy="12" r="10" />
+              <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+            </svg>
+            {i18n.language === 'zh' ? 'EN' : '中'}
           </button>
           <button className="btn btn-outline btn-sm" onClick={handleLogout}>
-            退出
+            {t('退出')}
           </button>
         </div>
       </div>

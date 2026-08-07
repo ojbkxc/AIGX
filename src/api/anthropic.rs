@@ -39,19 +39,45 @@ fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-/// 验证 API Key
-fn verify_api_key(
+/// 从请求头提取客户端 IP
+fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = xff.split(',').next() {
+            let ip = first.trim();
+            if !ip.is_empty() {
+                return Some(ip.to_string());
+            }
+        }
+    }
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 验证 API Key 并执行全部鉴权检查（状态/过期/模型白名单/额度/IP）。
+///
+/// 参照 new-api token.go 校验逻辑。
+fn verify_api_key_full(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<String, (StatusCode, Json<Value>)> {
+    model: &str,
+) -> Result<super::auth::ApiKey, (StatusCode, Json<Value>)> {
     let key = extract_api_key(headers)
         .ok_or_else(|| anthropic_error("authentication_error", "Missing API key", StatusCode::UNAUTHORIZED))?;
-
+    let ip = extract_client_ip(headers);
     state
         .api_key_store
-        .validate(&key)
-        .map(|k| k.id)
-        .ok_or_else(|| anthropic_error("authentication_error", "Invalid API key", StatusCode::UNAUTHORIZED))
+        .validate_request(&key, model, ip.as_deref())
+        .map_err(|msg| {
+            let status = if msg.contains("not allowed") || msg.contains("quota") || msg.contains("expired") {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::UNAUTHORIZED
+            };
+            anthropic_error("authentication_error", &msg, status)
+        })
 }
 
 /// Anthropic 错误格式
@@ -136,10 +162,9 @@ pub async fn handle_messages(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let _key_id = match verify_api_key(&state, &headers) {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
+    let request_start = std::time::Instant::now();
+    let request_id = format!("req-{}", uuid::Uuid::new_v4());
+    let client_ip = extract_client_ip(&headers);
 
     let model = match body.get("model").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
@@ -149,8 +174,38 @@ pub async fn handle_messages(
         }
     };
 
-    let bridge = match super::openai::resolve_bridge(&state.hub, &model) {
-        Some(b) => b,
+    // 完整鉴权：校验状态/过期/模型白名单/额度/IP
+    let api_key = match verify_api_key_full(&state, &headers, &model) {
+        Ok(k) => k,
+        Err(e) => return e.into_response(),
+    };
+
+    // 限流检查（功能 3）
+    let rate_bundle = match state.rate_limiter.check(
+        &api_key.id,
+        &model,
+        api_key.user_id.as_deref(),
+        client_ip.as_deref(),
+    ).await {
+        Ok(b) => b,
+        Err(e) => {
+            let retry_after = e.retry_after_secs().unwrap_or(60);
+            return anthropic_error(
+                "rate_limit_error",
+                &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
+                StatusCode::TOO_MANY_REQUESTS,
+            ).into_response();
+        }
+    };
+
+    // 校验用户分组模型权限并解析计费分组（问题 5）
+    let billing_group = match super::openai::check_group_model_permission(&state, &api_key, &model) {
+        Ok(g) => g,
+        Err(e) => return e.into_response(),
+    };
+
+    let (bridge, channel_id) = match super::openai::resolve_bridge(&state, &model) {
+        Some(pair) => pair,
         None => {
             return anthropic_error(
                 "service_unavailable",
@@ -160,6 +215,10 @@ pub async fn handle_messages(
             .into_response()
         }
     };
+    // 标记渠道已使用（问题 4）
+    if let Some(cid) = &channel_id {
+        state.channel_store.mark_used(cid);
+    }
 
     let is_stream = body
         .get("stream")
@@ -208,78 +267,190 @@ pub async fn handle_messages(
         stream: is_stream,
     };
 
-    let ctx = BridgeContext::new(format!("req-{}", uuid::Uuid::new_v4()), model.clone());
+    let ctx = BridgeContext::new(request_id.clone(), model.clone());
 
     if is_stream {
         match bridge.chat_stream(&chat_req, &ctx).await {
             Ok(stream) => {
-                let _msg_id = format!("msg_{}", uuid::Uuid::new_v4());
-                let _model_clone = model.clone();
+                // 累积输出文本用于流结束时估算 token（问题 3）
+                let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
+                let acc_for_map = acc.clone();
 
-                let sse_stream = stream.map(move |chunk_result| {
-                    match chunk_result {
-                        Ok(chunk) => {
-                            let finish = chunk.finish_reason.as_ref();
-                            let sse_data = if let Some(fr) = finish {
-                                // 结束事件
+                // 前缀事件：message_start + content_block_start（问题 7）
+                let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
+                let input_tokens_est =
+                    crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
+                let prefix = futures::stream::iter([
+                    Ok::<_, Infallible>(
+                        Event::default()
+                            .event("message_start")
+                            .data(
                                 serde_json::json!({
-                                    "type": "message_delta",
-                                    "delta": {
-                                        "stop_reason": to_anthropic_stop_reason(fr),
-                                        "stop_sequence": null
-                                    },
-                                    "usage": {
-                                        "output_tokens": 0
+                                    "type": "message_start",
+                                    "message": {
+                                        "id": msg_id,
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [],
+                                        "model": model,
+                                        "stop_reason": null,
+                                        "stop_sequence": null,
+                                        "usage": {"input_tokens": input_tokens_est, "output_tokens": 0}
                                     }
                                 })
-                            } else {
-                                // 内容增量
-                                let text = chunk.delta.content.unwrap_or_default();
-                                if text.is_empty() {
-                                    serde_json::json!({
-                                        "type": "content_block_delta",
-                                        "index": 0,
-                                        "delta": {
-                                            "type": "text_delta",
-                                            "text": ""
-                                        }
-                                    })
-                                } else {
-                                    serde_json::json!({
-                                        "type": "content_block_delta",
-                                        "index": 0,
-                                        "delta": {
-                                            "type": "text_delta",
-                                            "text": text
-                                        }
-                                    })
-                                }
-                            };
-                            Ok::<_, Infallible>(Event::default().data(sse_data.to_string()))
+                                .to_string(),
+                            ),
+                    ),
+                    Ok::<_, Infallible>(
+                        Event::default()
+                            .event("content_block_start")
+                            .data(
+                                serde_json::json!({
+                                    "type": "content_block_start",
+                                    "index": 0,
+                                    "content_block": {"type": "text", "text": ""}
+                                })
+                                .to_string(),
+                            ),
+                    ),
+                ]);
+
+                // 中间流：content_block_delta（累积内容）
+                let middle = stream.map(move |chunk_result| match chunk_result {
+                    Ok(chunk) => {
+                        if let Some(text) = &chunk.delta.content {
+                            let mut buf = acc_for_map.lock();
+                            crate::token_estimate::push_capped(&mut buf, text);
                         }
-                        Err(e) => {
-                            let err = serde_json::json!({
-                                "type": "error",
-                                "error": {
-                                    "type": "api_error",
-                                    "message": e.to_string()
-                                }
-                            });
-                            Ok(Event::default().data(err.to_string()))
-                        }
+                        let text = chunk.delta.content.unwrap_or_default();
+                        let sse_data = serde_json::json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "text_delta", "text": text}
+                        })
+                        .to_string();
+                        Ok::<_, Infallible>(
+                            Event::default().event("content_block_delta").data(sse_data),
+                        )
+                    }
+                    Err(e) => {
+                        let err = serde_json::json!({
+                            "type": "error",
+                            "error": {"type": "api_error", "message": e.to_string()}
+                        })
+                        .to_string();
+                        Ok(Event::default().event("error").data(err))
                     }
                 });
 
-                Sse::new(sse_stream).into_response()
+                // 后缀：计费 + content_block_stop + message_delta + message_stop（问题 3/7）
+                let state_fin = state.clone();
+                let api_key_fin = api_key.clone();
+                let model_fin = model.clone();
+                let client_ip_fin = client_ip.clone();
+                let request_id_fin = request_id.clone();
+                let group_fin = billing_group.clone();
+                let channel_id_fin = channel_id.clone();
+                let chat_req_fin = chat_req.clone();
+                let suffix = futures::stream::once(async move {
+                    let output_text = acc.lock().clone();
+                    let completion_tokens =
+                        crate::token_estimate::count_text(&model_fin, &output_text) as u64;
+                    let prompt_tokens =
+                        crate::token_estimate::count_chat_prompt(&model_fin, &chat_req_fin) as u64;
+
+                    // 累计用量
+                    state_fin.usage_tracker.accumulate(
+                        prompt_tokens,
+                        completion_tokens,
+                        0,
+                        0,
+                        0,
+                        0.0,
+                    );
+
+                    // 扣费（问题 2/5/6）
+                    let cost = super::openai::charge_usage(
+                        &state_fin,
+                        &api_key_fin,
+                        &model_fin,
+                        &group_fin,
+                        prompt_tokens,
+                        completion_tokens,
+                    );
+
+                    // 事后限流记账
+                    let total_tokens = prompt_tokens + completion_tokens;
+                    rate_bundle.commit_tokens(total_tokens).await;
+
+                    // 记录请求日志（含 channel_id，问题 4）
+                    let mut log = crate::log::RequestLog::new();
+                    log.user_id = api_key_fin.user_id.clone();
+                    log.key_id = Some(api_key_fin.id.clone());
+                    log.channel_id = channel_id_fin;
+                    log.model = model_fin.clone();
+                    log.input_tokens = prompt_tokens;
+                    log.output_tokens = completion_tokens;
+                    log.cost = cost;
+                    log.latency_ms = 0;
+                    log.status_code = 200;
+                    log.ip = client_ip_fin;
+                    log.request_id = Some(request_id_fin);
+                    state_fin.log_store.record_request(log);
+
+                    // 结束事件序列
+                    vec![
+                        Ok::<_, Infallible>(
+                            Event::default().event("content_block_stop").data(
+                                serde_json::json!({"type": "content_block_stop", "index": 0})
+                                    .to_string(),
+                            ),
+                        ),
+                        Ok::<_, Infallible>(
+                            Event::default().event("message_delta").data(
+                                serde_json::json!({
+                                    "type": "message_delta",
+                                    "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                                    "usage": {"output_tokens": completion_tokens}
+                                })
+                                .to_string(),
+                            ),
+                        ),
+                        Ok::<_, Infallible>(
+                            Event::default()
+                                .event("message_stop")
+                                .data(serde_json::json!({"type": "message_stop"}).to_string()),
+                        ),
+                    ]
+                })
+                .map(futures::stream::iter)
+                .flatten();
+
+                let combined = prefix.chain(middle).chain(suffix);
+                Sse::new(combined).into_response()
             }
             Err(e) => {
-                let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                anthropic_error(e.error_type(), &e.to_string(), status).into_response()
+                let latency_ms = request_start.elapsed().as_millis() as u64;
+                let status_code = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let mut log = crate::log::RequestLog::new();
+                log.user_id = api_key.user_id.clone();
+                log.key_id = Some(api_key.id.clone());
+                log.channel_id = channel_id.clone();
+                log.model = model.clone();
+                log.latency_ms = latency_ms;
+                log.status_code = status_code.as_u16();
+                log.error_msg = Some(e.to_string());
+                log.ip = client_ip.clone();
+                log.request_id = Some(request_id.clone());
+                state.log_store.record_request(log);
+                rate_bundle.commit_tokens(0).await;
+                anthropic_error(e.error_type(), &e.to_string(), status_code).into_response()
             }
         }
     } else {
         match bridge.chat(&chat_req, &ctx).await {
             Ok(response) => {
+                let latency_ms = request_start.elapsed().as_millis() as u64;
                 state.usage_tracker.accumulate(
                     response.usage.prompt_tokens,
                     response.usage.completion_tokens,
@@ -288,6 +459,42 @@ pub async fn handle_messages(
                     0,
                     0.0,
                 );
+
+                // 计费扣减（用解析的 billing_group，问题 5；余额不足跳过 key 扣费，问题 6）
+                let cost = state.pricing_store.calculate_cost_quoted(
+                    &model,
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                    &billing_group,
+                );
+                if cost > 0 {
+                    if let Some(uid) = &api_key.user_id {
+                        if state.user_store.try_charge(uid, cost) {
+                            let _ = state.api_key_store.charge_quota(&api_key.id, cost);
+                        }
+                    } else {
+                        let _ = state.api_key_store.charge_quota(&api_key.id, cost);
+                    }
+                }
+
+                // 事后限流记账
+                let total_tokens = response.usage.prompt_tokens + response.usage.completion_tokens;
+                rate_bundle.commit_tokens(total_tokens).await;
+
+                // 记录请求日志（含 channel_id，问题 4）
+                let mut log = crate::log::RequestLog::new();
+                log.user_id = api_key.user_id.clone();
+                log.key_id = Some(api_key.id.clone());
+                log.channel_id = channel_id.clone();
+                log.model = model.clone();
+                log.input_tokens = response.usage.prompt_tokens;
+                log.output_tokens = response.usage.completion_tokens;
+                log.cost = cost;
+                log.latency_ms = latency_ms;
+                log.status_code = 200;
+                log.ip = client_ip.clone();
+                log.request_id = Some(request_id.clone());
+                state.log_store.record_request(log);
 
                 let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
                 let anthropic_resp = serde_json::json!({
@@ -309,8 +516,21 @@ pub async fn handle_messages(
                 Json(anthropic_resp).into_response()
             }
             Err(e) => {
-                let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                anthropic_error(e.error_type(), &e.to_string(), status).into_response()
+                let latency_ms = request_start.elapsed().as_millis() as u64;
+                let status_code = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let mut log = crate::log::RequestLog::new();
+                log.user_id = api_key.user_id.clone();
+                log.key_id = Some(api_key.id.clone());
+                log.channel_id = channel_id.clone();
+                log.model = model.clone();
+                log.latency_ms = latency_ms;
+                log.status_code = status_code.as_u16();
+                log.error_msg = Some(e.to_string());
+                log.ip = client_ip.clone();
+                log.request_id = Some(request_id.clone());
+                state.log_store.record_request(log);
+                rate_bundle.commit_tokens(0).await;
+                anthropic_error(e.error_type(), &e.to_string(), status_code).into_response()
             }
         }
     }

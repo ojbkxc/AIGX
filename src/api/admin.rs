@@ -9,10 +9,13 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::account::CfAccount;
+use crate::channel::{Channel, ChannelType};
 use crate::config::AppConfig;
 use crate::graphql;
 use crate::payment::{Device, EpayConfig, PurchaseArgs};
+use crate::pricing::{ModelPrice, RatioConfig};
 use crate::user::{self, hash_password, Role, User};
+use crate::user_group::UserGroup;
 
 use super::auth::SessionStore;
 use super::openai::AppState;
@@ -41,11 +44,6 @@ pub struct AccountRequest {
     pub status: Option<String>,
 }
 
-/// 密钥请求
-#[derive(Debug, Deserialize)]
-pub struct KeyRequest {
-    pub name: String,
-}
 
 /// 设置请求
 #[derive(Debug, Deserialize)]
@@ -131,6 +129,7 @@ async fn verify_user(state: &AppState, headers: &HeaderMap) -> Result<User, (Sta
                     quota: 0,
                     used_quota: 0,
                     status: "active".into(),
+                    group: "default".into(),
                     created_at: 0,
                 })
             } else {
@@ -164,6 +163,25 @@ fn extract_session_token(headers: &HeaderMap) -> Option<String> {
         }
     }
     None
+}
+
+/// 从请求头提取客户端 IP（取 X-Forwarded-For 首段或 X-Real-IP）。
+///
+/// 用于公开注册速率限制。无代理时返回 None，调用方回退到 "unknown"。
+fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = xff.split(',').next() {
+            let ip = first.trim();
+            if !ip.is_empty() {
+                return Some(ip.to_string());
+            }
+        }
+    }
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 // ============================================================
@@ -206,19 +224,28 @@ pub async fn handle_login(
     let password_hash = hash_password(&body.password);
     let is_first_login = config.admin.password.is_empty();
 
-    if is_first_login {
+    let session_secret = if is_first_login {
         let mut new_config = config.clone();
         new_config.admin.password = password_hash;
-        new_config.admin.session_secret = uuid::Uuid::new_v4().to_string();
+        new_config.admin.session_secret = if config.admin.session_secret.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            config.admin.session_secret.clone()
+        };
         if let Err(e) = state.config_manager.update(new_config.clone()).await {
             tracing::error!("Failed to save config: {e}");
         }
-        let _ = state.user_store.create_with_username("admin", "admin", &body.password, Role::Admin, 0);
+        if let Err(e) = state.user_store.create_with_username("admin", "admin", &body.password, Role::Admin, 0) {
+            tracing::error!("Failed to create admin user on first login: {e}");
+        }
+        new_config.admin.session_secret
     } else if !user::verify_password(&body.password, &config.admin.password) {
         return Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED));
-    }
+    } else {
+        config.admin.session_secret.clone()
+    };
 
-    let session_store = SessionStore::new(&config.admin.session_secret, 24);
+    let session_store = SessionStore::new(&session_secret, 24);
     let session = session_store.create_session(&body.email);
 
     Ok(Json(serde_json::json!({
@@ -234,10 +261,29 @@ pub async fn handle_login(
 }
 
 /// POST /api/auth/register - 公开邮箱注册
+///
+/// 安全：对同一 IP 每 60 秒最多允许 5 次注册请求，超出返回 429 Too Many Requests。
+/// 限流基于 moka TTL 缓存（key=IP, value=计数），窗口 60s。
 pub async fn handle_register(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // ── 速率限制：同 IP 每分钟最多 5 次 ──
+    const REGISTER_RATE_LIMIT_PER_MINUTE: u32 = 5;
+    let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+    let current_count = state.register_limiter.get(&client_ip).await.unwrap_or(0);
+    if current_count >= REGISTER_RATE_LIMIT_PER_MINUTE {
+        return Err(error_response(
+            "注册请求过于频繁，请稍后再试",
+            StatusCode::TOO_MANY_REQUESTS,
+        ));
+    }
+    state
+        .register_limiter
+        .insert(client_ip, current_count + 1)
+        .await;
+
     if body.email.trim().is_empty() {
         return Err(error_response("邮箱不能为空", StatusCode::BAD_REQUEST));
     }
@@ -405,8 +451,8 @@ pub async fn handle_list_accounts(
     let masked: Vec<Value> = accounts
         .into_iter()
         .map(|a| {
-            let masked_token = if a.api_token.len() > 8 {
-                format!("{}...{}", &a.api_token[..4], &a.api_token[a.api_token.len() - 4..])
+            let masked_token = if a.api_token.chars().count() > 8 {
+                mask_with(&a.api_token, 4, 4, "...")
             } else {
                 "****".to_string()
             };
@@ -578,8 +624,8 @@ pub async fn handle_list_keys(
     let masked: Vec<Value> = keys
         .into_iter()
         .map(|k| {
-            let masked_key = if k.key.len() > 8 {
-                format!("{}...{}", &k.key[..4], &k.key[k.key.len() - 4..])
+            let masked_key = if k.key.chars().count() > 8 {
+                mask_with(&k.key, 4, 4, "...")
             } else {
                 "****".to_string()
             };
@@ -677,14 +723,20 @@ pub async fn handle_update_settings(
 
     if body.replace_all {
         // 替换所有映射（重置自定义映射，再逐个添加）
-        state.model_mapper.reset().ok();
+        if let Err(e) = state.model_mapper.reset() {
+            tracing::error!("Failed to reset model mappings: {}", e);
+        }
         for (source, target) in &body.mappings {
-            state.model_mapper.set_custom(source.clone(), target.clone()).ok();
+            if let Err(e) = state.model_mapper.set_custom(source.clone(), target.clone()) {
+                tracing::error!("Failed to set mapping {} -> {}: {}", source, target, e);
+            }
         }
     } else {
         // 逐个添加/更新
         for (source, target) in &body.mappings {
-            state.model_mapper.set_custom(source.clone(), target.clone()).ok();
+            if let Err(e) = state.model_mapper.set_custom(source.clone(), target.clone()) {
+                tracing::error!("Failed to set mapping {} -> {}: {}", source, target, e);
+            }
         }
     }
 
@@ -824,10 +876,16 @@ pub struct CreateUserRequest {
     pub role: String,
     #[serde(default)]
     pub quota: i64,
+    #[serde(default = "default_user_group")]
+    pub group: String,
 }
 
 fn default_user_role() -> String {
     "user".to_string()
+}
+
+fn default_user_group() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -838,6 +896,7 @@ pub struct UpdateUserRequest {
     pub role: Option<String>,
     pub quota: Option<i64>,
     pub status: Option<String>,
+    pub group: Option<String>,
 }
 
 fn mask_user(u: &User) -> Value {
@@ -850,6 +909,7 @@ fn mask_user(u: &User) -> Value {
         "used_quota": u.used_quota,
         "remaining": u.remaining(),
         "status": u.status,
+        "group": u.group,
         "created_at": u.created_at,
     })
 }
@@ -885,7 +945,18 @@ pub async fn handle_create_user(
         state.user_store.create(&body.email, &body.password, role, body.quota)
     };
     match result {
-        Ok(u) => Ok(Json(serde_json::json!({ "success": true, "data": mask_user(&u) }))),
+        Ok(u) => {
+            // 应用请求指定的 group（非空且非默认时更新）
+            let final_user = if !body.group.is_empty() && body.group != "default" {
+                match state.user_store.update(&u.id, |x| x.group = body.group.clone()) {
+                    Ok(updated) => updated,
+                    Err(_) => u,
+                }
+            } else {
+                u
+            };
+            Ok(Json(serde_json::json!({ "success": true, "data": mask_user(&final_user) })))
+        }
         Err(e) => Err(error_response(&format!("Failed to create user: {e}"), StatusCode::BAD_REQUEST)),
     }
 }
@@ -923,6 +994,11 @@ pub async fn handle_update_user(
         }
         if let Some(s) = &body.status {
             u.status = s.clone();
+        }
+        if let Some(g) = &body.group {
+            if !g.is_empty() {
+                u.group = g.clone();
+            }
         }
     }) {
         Ok(u) => Ok(Json(serde_json::json!({ "success": true, "data": mask_user(&u) }))),
@@ -984,11 +1060,24 @@ pub async fn handle_get_epay_config(
 }
 
 /// 脱敏字符串：保留前3后3字符，中间用 *** 替代
+///
+/// 使用 `chars()` 而非字节切片，避免多字节 UTF-8 字符（如中文）在边界处 panic。
 fn mask_sensitive(s: &str) -> String {
-    if s.len() <= 6 {
-        return "***".to_string();
+    mask_with(s, 3, 3, "***")
+}
+
+/// 通用脱敏辅助函数：保留前 `prefix` 个字符与后 `suffix` 个字符，中间用 `mask` 替代。
+///
+/// 使用按字符（非字节）切片，安全处理多字节 UTF-8 字符。
+/// 当字符总数 <= prefix + suffix 时，直接返回 `mask` 以避免泄露过多信息。
+fn mask_with(s: &str, prefix: usize, suffix: usize, mask: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= prefix + suffix {
+        return mask.to_string();
     }
-    format!("{}***{}", &s[..3], &s[s.len() - 3..])
+    let head: String = chars[..prefix].iter().collect();
+    let tail: String = chars[chars.len() - suffix..].iter().collect();
+    format!("{}{}{}", head, mask, tail)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1113,7 +1202,7 @@ pub async fn handle_topup_request(
         clientip: "127.0.0.1".into(), // 参照 VFaka：部分易支付网关要求必填
         device: Device::PC,
     };
-    match epay.purchase(&args) {
+    match epay.purchase(&args).await {
         Ok(res) => {
             let params: HashMap<String, String> = res.params.into_iter().collect();
             Json(serde_json::json!({
@@ -1267,12 +1356,28 @@ pub async fn handle_epay_notify(
         } else {
             order.amount
         };
-        let _ = state.user_store.add_quota(&order.user_id, quota_to_add);
-        let _ = state.order_store.complete(&order.trade_no);
+        if let Err(e) = state.user_store.add_quota(&order.user_id, quota_to_add) {
+            tracing::error!("Epay notify: failed to add quota for order {}: {}", order.trade_no, e);
+        }
+        if let Err(e) = state.order_store.complete(&order.trade_no) {
+            tracing::error!("Epay notify: failed to complete order {}: {}", order.trade_no, e);
+        }
         tracing::info!(
             "Epay order completed: trade_no={} user={} amount={} money={} quota=+{}",
             order.trade_no, order.user_id, order.amount, order.money, quota_to_add
         );
+
+        // 通知：充值成功（异步，不阻塞回调）
+        let user_email = state
+            .user_store
+            .get_by_id(&order.user_id)
+            .map(|u| u.email)
+            .unwrap_or_default();
+        state.notify_service.notify_spawn(crate::notify::NotifyEvent::PaymentSuccess {
+            user_email,
+            amount: order.money,
+            quota: quota_to_add,
+        });
     }
     "success".into_response()
 }
@@ -1328,8 +1433,12 @@ pub async fn handle_epay_return(
                 } else {
                     order.amount
                 };
-                let _ = state.user_store.add_quota(&order.user_id, quota_to_add);
-                let _ = state.order_store.complete(&order.trade_no);
+                if let Err(e) = state.user_store.add_quota(&order.user_id, quota_to_add) {
+                    tracing::error!("Epay return: failed to add quota for order {}: {}", order.trade_no, e);
+                }
+                if let Err(e) = state.order_store.complete(&order.trade_no) {
+                    tracing::error!("Epay return: failed to complete order {}: {}", order.trade_no, e);
+                }
                 tracing::info!(
                     "Epay return completed: trade_no={} user={} quota=+{}",
                     order.trade_no, order.user_id, quota_to_add
@@ -1339,4 +1448,1162 @@ pub async fn handle_epay_return(
         return Redirect::to(&make_return_path("success")).into_response();
     }
     Redirect::to(&make_return_path("pending")).into_response()
+}
+
+// ============================================================
+// 通用渠道管理（功能 2 - 核心数据层）
+// ============================================================
+
+#[derive(Debug, Deserialize)]
+pub struct ChannelRequest {
+    pub name: String,
+    #[serde(default)]
+    pub channel_type: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default = "default_weight")]
+    pub weight: u32,
+    #[serde(default = "default_enabled_status")]
+    pub status: String,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub account_id: String,
+}
+
+fn default_weight() -> u32 {
+    1
+}
+
+fn default_enabled_status() -> String {
+    "enabled".to_string()
+}
+
+impl ChannelRequest {
+    fn to_channel(&self, id: String) -> Channel {
+        let now = chrono::Utc::now().timestamp();
+        Channel {
+            id,
+            name: self.name.clone(),
+            channel_type: ChannelType::from_str_lossy(&self.channel_type),
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            priority: self.priority,
+            weight: self.weight,
+            status: self.status.clone(),
+            models: self.models.clone(),
+            account_id: self.account_id.clone(),
+            last_error: None,
+            last_used_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+fn mask_channel(ch: &Channel) -> Value {
+    let masked_key = if ch.api_key.is_empty() {
+        String::new()
+    } else if ch.api_key.chars().count() > 12 {
+        mask_with(&ch.api_key, 8, 4, "...")
+    } else {
+        "****".to_string()
+    };
+    serde_json::json!({
+        "id": ch.id,
+        "name": ch.name,
+        "channel_type": ch.channel_type.as_str(),
+        "base_url": ch.base_url,
+        "api_key": masked_key,
+        "priority": ch.priority,
+        "weight": ch.weight,
+        "status": ch.status,
+        "models": ch.models,
+        "account_id": ch.account_id,
+        "last_error": ch.last_error,
+        "last_used_at": ch.last_used_at,
+        "created_at": ch.created_at,
+        "updated_at": ch.updated_at,
+    })
+}
+
+pub async fn handle_list_channels(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let channels: Vec<Value> = state.channel_store.list().iter().map(mask_channel).collect();
+    Ok(Json(serde_json::json!({ "success": true, "data": channels })))
+}
+
+pub async fn handle_add_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ChannelRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let ch = body.to_channel(String::new());
+    match state.channel_store.add(ch) {
+        Ok(c) => Ok(Json(serde_json::json!({ "success": true, "data": mask_channel(&c) }))),
+        Err(e) => Err(error_response(&format!("Failed to add channel: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
+}
+
+pub async fn handle_update_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ChannelRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let existing = state.channel_store.get(&id);
+    let mut ch = body.to_channel(id.clone());
+    if let Some(e) = existing {
+        ch.created_at = e.created_at;
+        ch.last_error = e.last_error;
+        ch.last_used_at = e.last_used_at;
+        if ch.api_key.is_empty() {
+            ch.api_key = e.api_key;
+        }
+    }
+    match state.channel_store.update(&id, ch) {
+        Ok(c) => Ok(Json(serde_json::json!({ "success": true, "data": mask_channel(&c) }))),
+        Err(e) => Err(error_response(&format!("Failed to update channel: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
+}
+
+/// PATCH /api/channels/{id} - 渠道部分更新（仅更新传入的字段，未传入字段保留现有值）
+///
+/// 与 PUT 不同，PATCH 不要求提供完整 ChannelRequest，仅更新 JSON body 中出现的字段。
+/// 典型用途：前端 handleToggle 仅传 `{status}` 切换启用/禁用，避免脱敏 api_key 覆盖真实密钥。
+///
+/// 支持的部分更新字段：name / channel_type / base_url / api_key / priority / weight /
+/// status / models / account_id / enabled。其中 api_key 为空字符串时保留现有值。
+pub async fn handle_patch_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let mut ch = state
+        .channel_store
+        .get(&id)
+        .ok_or_else(|| error_response("Channel not found", StatusCode::NOT_FOUND))?;
+
+    // 逐字段部分更新：仅在 JSON 中出现该 key 时更新
+    if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+        ch.name = name.to_string();
+    }
+    if let Some(channel_type) = body.get("channel_type").and_then(|v| v.as_str()) {
+        ch.channel_type = ChannelType::from_str_lossy(channel_type);
+    }
+    if let Some(base_url) = body.get("base_url").and_then(|v| v.as_str()) {
+        ch.base_url = base_url.to_string();
+    }
+    // api_key：非空才更新，空字符串保留现有（避免脱敏值覆盖真实密钥）
+    if let Some(api_key) = body.get("api_key").and_then(|v| v.as_str()) {
+        if !api_key.is_empty() {
+            ch.api_key = api_key.to_string();
+        }
+    }
+    if let Some(priority) = body.get("priority").and_then(|v| v.as_i64()) {
+        ch.priority = priority;
+    }
+    if let Some(weight) = body.get("weight").and_then(|v| v.as_u64()) {
+        ch.weight = weight as u32;
+    }
+    if let Some(status) = body.get("status").and_then(|v| v.as_str()) {
+        ch.status = status.to_string();
+    }
+    if let Some(models) = body.get("models").and_then(|v| v.as_array()) {
+        ch.models = models
+            .iter()
+            .filter_map(|m| m.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    if let Some(account_id) = body.get("account_id").and_then(|v| v.as_str()) {
+        ch.account_id = account_id.to_string();
+    }
+    // 兼容布尔 enabled 字段：true → "enabled"，false → "disabled"
+    if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
+        ch.status = if enabled { "enabled".to_string() } else { "disabled".to_string() };
+    }
+
+    match state.channel_store.update(&id, ch) {
+        Ok(c) => Ok(Json(serde_json::json!({ "success": true, "data": mask_channel(&c) }))),
+        Err(e) => Err(error_response(&format!("Failed to patch channel: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
+}
+
+pub async fn handle_delete_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    match state.channel_store.remove(&id) {
+        Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": null }))),
+        Err(e) => Err(error_response(&format!("Failed to delete channel: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
+}
+
+pub async fn handle_test_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let ch = state.channel_store.get(&id).ok_or_else(|| error_response("Channel not found", StatusCode::NOT_FOUND))?;
+    let result = state.channel_store.test(&ch).await;
+    if result.success {
+        state.channel_store.mark_healthy(&id);
+    } else {
+        state.channel_store.mark_unhealthy(&id, result.message.clone());
+    }
+    Ok(Json(serde_json::json!({ "success": true, "data": result })))
+}
+
+// ============================================================
+// 令牌管理增强（功能 2 - 核心数据层）
+// ============================================================
+
+#[derive(Debug, Deserialize)]
+pub struct KeyRequest {
+    pub name: String,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub allowed_models: Option<Vec<String>>,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub quota_limit: Option<i64>,
+    #[serde(default)]
+    pub ip_limit: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTokenRequest {
+    pub name: Option<String>,
+    pub group: Option<String>,
+    pub allowed_models: Option<Vec<String>>,
+    pub expires_at: Option<i64>,
+    pub quota_limit: Option<i64>,
+    pub ip_limit: Option<Vec<String>>,
+    pub status: Option<String>,
+}
+
+fn mask_token(k: &super::auth::ApiKey) -> Value {
+    let masked_key = if k.key.chars().count() > 8 {
+        mask_with(&k.key, 4, 4, "...")
+    } else {
+        "****".to_string()
+    };
+    serde_json::json!({
+        "id": k.id,
+        "key": masked_key,
+        "name": k.name,
+        "status": k.status,
+        "is_active": k.is_active,
+        "user_id": k.user_id,
+        "group": k.group,
+        "allowed_models": k.allowed_models,
+        "expires_at": k.expires_at,
+        "quota_limit": k.quota_limit,
+        "used_quota": k.used_quota,
+        "ip_limit": k.ip_limit,
+        "created_at": k.created_at,
+        "updated_at": k.updated_at,
+        "last_used_at": k.last_used_at,
+    })
+}
+
+pub async fn handle_list_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let tokens: Vec<Value> = state.api_key_store.list().iter().map(mask_token).collect();
+    Ok(Json(serde_json::json!({ "success": true, "data": tokens })))
+}
+
+pub async fn handle_add_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<KeyRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let opts = super::auth::CreateApiKeyOptions {
+        name: body.name,
+        user_id: body.user_id,
+        group: body.group.unwrap_or_else(|| "default".to_string()),
+        allowed_models: body.allowed_models,
+        expires_at: body.expires_at,
+        quota_limit: body.quota_limit,
+        ip_limit: body.ip_limit,
+    };
+    match state.api_key_store.generate_with_options(opts) {
+        Ok(k) => Ok(Json(serde_json::json!({ "success": true, "data": mask_token(&k) }))),
+        Err(e) => Err(error_response(&format!("Failed to create token: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
+}
+
+pub async fn handle_update_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateTokenRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    match state.api_key_store.update(&id, |k| {
+        if let Some(n) = &body.name { k.name = n.clone(); }
+        if let Some(g) = &body.group { k.group = g.clone(); }
+        if let Some(m) = &body.allowed_models { k.allowed_models = Some(m.clone()); }
+        if let Some(e) = body.expires_at { k.expires_at = Some(e); }
+        if let Some(q) = body.quota_limit { k.quota_limit = Some(q); }
+        if let Some(ip) = &body.ip_limit { k.ip_limit = Some(ip.clone()); }
+        if let Some(s) = &body.status { k.status = s.clone(); }
+    }) {
+        Ok(k) => Ok(Json(serde_json::json!({ "success": true, "data": mask_token(&k) }))),
+        Err(e) => Err(error_response(&format!("Failed to update token: {e}"), StatusCode::BAD_REQUEST)),
+    }
+}
+
+pub async fn handle_delete_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    match state.api_key_store.delete(&id) {
+        Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": null }))),
+        Err(e) => Err(error_response(&format!("Failed to delete token: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
+}
+
+pub async fn handle_reset_token_used(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    if state.api_key_store.reset_used_quota(&id) {
+        Ok(Json(serde_json::json!({ "success": true, "data": null })))
+    } else {
+        Err(error_response("Token not found", StatusCode::NOT_FOUND))
+    }
+}
+
+// ============================================================
+// 模型定价目录（功能 2 - 核心数据层）
+// ============================================================
+
+#[derive(Debug, Deserialize)]
+pub struct PriceRequest {
+    pub model_name: String,
+    #[serde(default)]
+    pub input_price: f64,
+    #[serde(default)]
+    pub output_price: f64,
+    #[serde(default)]
+    pub cache_price: Option<f64>,
+    #[serde(default = "default_price_type")]
+    pub price_type: String,
+}
+
+fn default_price_type() -> String {
+    "token".to_string()
+}
+
+impl PriceRequest {
+    fn to_model_price(&self) -> ModelPrice {
+        let now = chrono::Utc::now().timestamp();
+        ModelPrice {
+            model_name: self.model_name.clone(),
+            input_price: self.input_price,
+            output_price: self.output_price,
+            cache_price: self.cache_price,
+            price_type: self.price_type.clone(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+pub async fn handle_list_prices(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let prices = state.pricing_store.list_prices();
+    Ok(Json(serde_json::json!({ "success": true, "data": prices })))
+}
+
+pub async fn handle_upsert_price(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PriceRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let price = body.to_model_price();
+    match state.pricing_store.upsert_price(price) {
+        Ok(p) => Ok(Json(serde_json::json!({ "success": true, "data": p }))),
+        Err(e) => Err(error_response(&format!("Failed to save price: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
+}
+
+pub async fn handle_upsert_price_by_model(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(model): Path<String>,
+    Json(mut body): Json<PriceRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    body.model_name = model;
+    let price = body.to_model_price();
+    match state.pricing_store.upsert_price(price) {
+        Ok(p) => Ok(Json(serde_json::json!({ "success": true, "data": p }))),
+        Err(e) => Err(error_response(&format!("Failed to save price: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
+}
+
+pub async fn handle_delete_price(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(model): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    match state.pricing_store.delete_price(&model) {
+        Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": null }))),
+        Err(e) => Err(error_response(&format!("Failed to delete price: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
+}
+
+pub async fn handle_get_ratios(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let ratios = state.pricing_store.get_ratios();
+    Ok(Json(serde_json::json!({ "success": true, "data": ratios })))
+}
+
+pub async fn handle_update_ratios(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<RatioConfig>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    match state.pricing_store.update_ratios(body) {
+        Ok(r) => Ok(Json(serde_json::json!({ "success": true, "data": r }))),
+        Err(e) => Err(error_response(&format!("Failed to update ratios: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
+}
+
+// ============================================================
+// 用户分组管理（功能 2 - 核心数据层）
+// ============================================================
+
+#[derive(Debug, Deserialize)]
+pub struct GroupRequest {
+    pub name: String,
+    #[serde(default = "default_group_ratio")]
+    pub ratio: f64,
+    #[serde(default)]
+    pub allowed_models: Option<Vec<String>>,
+    #[serde(default)]
+    pub description: String,
+}
+
+fn default_group_ratio() -> f64 {
+    1.0
+}
+
+impl GroupRequest {
+    fn to_user_group(&self) -> UserGroup {
+        let now = chrono::Utc::now().timestamp();
+        UserGroup {
+            name: self.name.clone(),
+            ratio: self.ratio,
+            allowed_models: self.allowed_models.clone(),
+            description: self.description.clone(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+pub async fn handle_list_groups(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let groups = state.user_group_store.list();
+    Ok(Json(serde_json::json!({ "success": true, "data": groups })))
+}
+
+pub async fn handle_upsert_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<GroupRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let group = body.to_user_group();
+    match state.user_group_store.upsert(group) {
+        Ok(g) => Ok(Json(serde_json::json!({ "success": true, "data": g }))),
+        Err(e) => Err(error_response(&format!("Failed to save group: {e}"), StatusCode::BAD_REQUEST)),
+    }
+}
+
+pub async fn handle_upsert_group_by_name(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(mut body): Json<GroupRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    body.name = name;
+    let group = body.to_user_group();
+    match state.user_group_store.upsert(group) {
+        Ok(g) => Ok(Json(serde_json::json!({ "success": true, "data": g }))),
+        Err(e) => Err(error_response(&format!("Failed to save group: {e}"), StatusCode::BAD_REQUEST)),
+    }
+}
+
+pub async fn handle_delete_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    match state.user_group_store.remove(&name) {
+        Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": null }))),
+        Err(e) => Err(error_response(&format!("Failed to delete group: {e}"), StatusCode::BAD_REQUEST)),
+    }
+}
+
+// ============================================================
+// 日志与审计 API（功能 1）
+// ============================================================
+
+pub(crate) fn record_audit(
+    state: &AppState,
+    admin_id: &str,
+    action: &str,
+    target: &str,
+    before: Option<Value>,
+    after: Option<Value>,
+) {
+    state.log_store.record_audit(admin_id, action, target, before, after);
+}
+
+async fn admin_id_from_session(state: &AppState, headers: &HeaderMap) -> String {
+    if let Some(token) = extract_session_token(headers) {
+        let config = state.config_manager.get().await;
+        let session_store = SessionStore::new(&config.admin.session_secret, 24);
+        if let Some(sess) = session_store.validate_session(&token) {
+            return sess.email;
+        }
+    }
+    "unknown".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RequestLogQuery {
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub end: Option<i64>,
+    #[serde(default = "default_page")]
+    pub page: usize,
+    #[serde(default = "default_size")]
+    pub size: usize,
+}
+
+fn default_page() -> usize {
+    1
+}
+
+fn default_size() -> usize {
+    20
+}
+
+pub async fn handle_list_request_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<RequestLogQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let (logs, total) = state.log_store.requests.list_with_filter(
+        q.user.as_deref(),
+        q.model.as_deref(),
+        q.channel.as_deref(),
+        q.start,
+        q.end,
+        q.page,
+        q.size,
+    );
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": logs,
+        "total": total,
+        "page": q.page,
+        "size": q.size,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuditLogQuery {
+    #[serde(default = "default_page")]
+    pub page: usize,
+    #[serde(default = "default_size")]
+    pub size: usize,
+}
+
+pub async fn handle_list_audit_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<AuditLogQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let (logs, total) = state.log_store.audits.list_paged(q.page, q.size);
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": logs,
+        "total": total,
+        "page": q.page,
+        "size": q.size,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportQuery {
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+pub async fn handle_export_request_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ExportQuery>,
+) -> Response {
+    if verify_admin(&state, &headers).await.is_err() {
+        return error_response("Not authenticated", StatusCode::UNAUTHORIZED).into_response();
+    }
+    let fmt = q.format.as_deref().unwrap_or("json").to_lowercase();
+    if fmt == "csv" {
+        let csv = state.log_store.requests.export_csv();
+        (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"request_logs.csv\"".to_string(),
+                ),
+            ],
+            csv,
+        )
+            .into_response()
+    } else {
+        let json = state.log_store.requests.export_json();
+        (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "application/json; charset=utf-8".to_string()),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"request_logs.json\"".to_string(),
+                ),
+            ],
+            json,
+        )
+            .into_response()
+    }
+}
+
+// ============================================================
+// 兑换码 API（功能 2）
+// ============================================================
+
+#[derive(Debug, Deserialize)]
+pub struct BatchRedemptionRequest {
+    pub count: usize,
+    pub quota: i64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub expires_at: i64,
+}
+
+pub async fn handle_batch_redemptions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BatchRedemptionRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    match state.redemption_store.batch_generate(body.count, body.quota, &body.name, body.expires_at) {
+        Ok(codes) => {
+            let admin_id = admin_id_from_session(&state, &headers).await;
+            record_audit(
+                &state,
+                &admin_id,
+                "create",
+                "redemptions:batch",
+                None,
+                Some(serde_json::json!({ "count": body.count, "quota": body.quota })),
+            );
+            Ok(Json(serde_json::json!({ "success": true, "data": codes })))
+        }
+        Err(e) => Err(error_response(&format!("Failed to generate redemptions: {e}"), StatusCode::BAD_REQUEST)),
+    }
+}
+
+pub async fn handle_list_redemptions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<AuditLogQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let (items, total) = state.redemption_store.list_paged(q.page, q.size);
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": items,
+        "total": total,
+        "page": q.page,
+        "size": q.size,
+    })))
+}
+
+pub async fn handle_delete_redemption(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    match state.redemption_store.delete(&id) {
+        Ok(_) => {
+            let admin_id = admin_id_from_session(&state, &headers).await;
+            record_audit(&state, &admin_id, "delete", &format!("redemption:{id}"), None, None);
+            Ok(Json(serde_json::json!({ "success": true, "data": null })))
+        }
+        Err(e) => Err(error_response(&format!("Failed to delete redemption: {e}"), StatusCode::BAD_REQUEST)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RedeemRequest {
+    pub code: String,
+}
+
+pub async fn handle_redeem(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<RedeemRequest>,
+) -> Response {
+    let user = match verify_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    match state.redemption_store.redeem(&body.code, &user.id) {
+        Ok(quota) => {
+            if let Err(e) = state.user_store.add_quota(&user.id, quota) {
+                tracing::error!("Failed to add quota after redemption: {e}");
+                return error_response("Failed to add quota", StatusCode::INTERNAL_SERVER_ERROR).into_response();
+            }
+            let admin_id = admin_id_from_session(&state, &headers).await;
+            record_audit(
+                &state,
+                &admin_id,
+                "redeem",
+                &format!("redemption:{}", body.code),
+                None,
+                Some(serde_json::json!({ "user_id": user.id, "quota": quota })),
+            );
+            Json(serde_json::json!({
+                "success": true,
+                "data": { "quota": quota },
+                "message": format!("兑换成功，获得 {} 配额", quota),
+            }))
+            .into_response()
+        }
+        Err(e) => error_response(&e.to_string(), StatusCode::BAD_REQUEST).into_response(),
+    }
+}
+
+// ============================================================
+// 限流配置 API（功能 3）
+// ============================================================
+
+pub async fn handle_get_ratelimit_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let cfg = state.rate_limiter.config();
+    Ok(Json(serde_json::json!({ "success": true, "data": cfg })))
+}
+
+pub async fn handle_update_ratelimit_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::ratelimit::RateLimitConfig>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    match state.rate_limiter.update_config(body) {
+        Ok(cfg) => {
+            let admin_id = admin_id_from_session(&state, &headers).await;
+            record_audit(&state, &admin_id, "update", "ratelimit:config", None, Some(serde_json::json!(cfg.clone())));
+            Ok(Json(serde_json::json!({ "success": true, "data": cfg })))
+        }
+        Err(e) => Err(error_response(&format!("Failed to update ratelimit config: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
+}
+
+// ============================================================
+// 数据看板增强 API（功能 4）
+// ============================================================
+
+/// Dashboard 查询参数：时间范围（天数）。
+///
+/// - 默认 30 天，最大 90 天，最小 1 天。
+/// - 用于限制全量日志加载，避免性能退化。
+#[derive(Debug, Deserialize)]
+pub struct DashboardQuery {
+    #[serde(default = "default_dashboard_days")]
+    pub days: u32,
+}
+
+fn default_dashboard_days() -> u32 {
+    30
+}
+
+/// 将 days 限制在 [1, 90] 区间，并返回对应的 unix timestamp 下界。
+fn dashboard_start_ts(days: u32) -> i64 {
+    let days = days.clamp(1, 90) as i64;
+    chrono::Utc::now().timestamp() - days * 24 * 3600
+}
+
+pub async fn handle_consumption_trend(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<DashboardQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let start = dashboard_start_ts(q.days);
+    let logs = state.log_store.requests.all_sorted_asc();
+    let mut daily: std::collections::BTreeMap<String, (i64, u64)> = std::collections::BTreeMap::new();
+    for l in &logs {
+        if l.created_at < start {
+            continue;
+        }
+        let day = chrono::DateTime::<chrono::Utc>::from_timestamp(l.created_at, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
+        let entry = daily.entry(day).or_insert((0, 0));
+        entry.0 += l.cost;
+        entry.1 += 1;
+    }
+    let data: Vec<Value> = daily
+        .into_iter()
+        .map(|(day, (cost, count))| {
+            serde_json::json!({ "date": day, "cost": cost, "count": count })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "success": true, "data": data })))
+}
+
+pub async fn handle_model_distribution(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<DashboardQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let start = dashboard_start_ts(q.days);
+    let logs = state.log_store.requests.list_all();
+    let mut by_model: HashMap<String, (u64, i64, u64)> = HashMap::new();
+    for l in &logs {
+        if l.created_at < start {
+            continue;
+        }
+        let entry = by_model.entry(l.model.clone()).or_insert((0, 0, 0));
+        entry.0 += 1;
+        entry.1 += l.cost;
+        entry.2 += l.input_tokens + l.output_tokens;
+    }
+    let data: Vec<Value> = by_model
+        .into_iter()
+        .map(|(model, (count, cost, tokens))| {
+            serde_json::json!({ "model": model, "count": count, "cost": cost, "tokens": tokens })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "success": true, "data": data })))
+}
+
+pub async fn handle_user_ranking(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<DashboardQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let start = dashboard_start_ts(q.days);
+    let logs = state.log_store.requests.list_all();
+    let mut by_user: HashMap<String, (u64, i64, u64)> = HashMap::new();
+    for l in &logs {
+        if l.created_at < start {
+            continue;
+        }
+        if let Some(uid) = &l.user_id {
+            let entry = by_user.entry(uid.clone()).or_insert((0, 0, 0));
+            entry.0 += 1;
+            entry.1 += l.cost;
+            entry.2 += l.input_tokens + l.output_tokens;
+        }
+    }
+    let mut ranking: Vec<(String, u64, i64, u64)> = by_user
+        .into_iter()
+        .map(|(uid, (count, cost, tokens))| (uid, count, cost, tokens))
+        .collect();
+    ranking.sort_by(|a, b| b.2.cmp(&a.2));
+    let data: Vec<Value> = ranking
+        .into_iter()
+        .take(20)
+        .map(|(uid, count, cost, tokens)| {
+            let email = state
+                .user_store
+                .get_by_id(&uid)
+                .map(|u| u.email)
+                .unwrap_or_else(|| uid.clone());
+            serde_json::json!({ "user_id": uid, "email": email, "count": count, "cost": cost, "tokens": tokens })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "success": true, "data": data })))
+}
+
+pub async fn handle_channel_health(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<DashboardQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let start = dashboard_start_ts(q.days);
+    let channels = state.channel_store.list();
+    let logs = state.log_store.requests.list_all();
+    let mut by_channel: HashMap<String, (u64, u64, u64)> = HashMap::new();
+    for l in &logs {
+        if l.created_at < start {
+            continue;
+        }
+        if let Some(cid) = &l.channel_id {
+            let entry = by_channel.entry(cid.clone()).or_insert((0, 0, 0));
+            entry.0 += 1;
+            if l.status_code < 400 {
+                entry.1 += 1;
+            }
+            entry.2 += l.latency_ms;
+        }
+    }
+    let data: Vec<Value> = channels
+        .iter()
+        .map(|ch| {
+            let (total, success, total_latency) = by_channel.get(&ch.id).copied().unwrap_or((0, 0, 0));
+            let success_rate = if total > 0 {
+                (success as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
+            let avg_latency = if total > 0 {
+                total_latency / total
+            } else {
+                0
+            };
+            serde_json::json!({
+                "id": ch.id,
+                "name": ch.name,
+                "status": ch.status,
+                "last_error": ch.last_error,
+                "total_requests": total,
+                "success_rate": success_rate,
+                "avg_latency_ms": avg_latency,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "success": true, "data": data })))
+}
+
+pub async fn handle_realtime(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let logs = state.log_store.requests.list_all();
+    let now = chrono::Utc::now().timestamp();
+    let window_secs = 5 * 60;
+    let start = now - window_secs;
+    let recent: Vec<_> = logs.into_iter().filter(|l| l.created_at >= start).collect();
+    let total = recent.len() as u64;
+    let errors = recent.iter().filter(|l| l.status_code >= 400).count() as u64;
+    let avg_latency = if total > 0 {
+        recent.iter().map(|l| l.latency_ms).sum::<u64>() / total
+    } else {
+        0
+    };
+    let qps = total as f64 / window_secs as f64;
+    let error_rate = if total > 0 {
+        (errors as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "window_secs": window_secs,
+            "total_requests": total,
+            "qps": qps,
+            "avg_latency_ms": avg_latency,
+            "error_rate": error_rate,
+            "errors": errors,
+        }
+    })))
+}
+
+// ============================================================
+// 通知系统 API（Telegram + SMTP）
+// ============================================================
+
+/// GET /api/notify/config - 获取通知配置（敏感字段脱敏）
+pub async fn handle_get_notify_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let cfg = state.notify_service.get_config().await;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "enabled": cfg.enabled,
+            "telegram_bot_token": mask_sensitive(&cfg.telegram_bot_token),
+            "telegram_chat_id": cfg.telegram_chat_id,
+            "smtp_host": cfg.smtp_host,
+            "smtp_port": cfg.smtp_port,
+            "smtp_username": cfg.smtp_username,
+            "smtp_password": mask_sensitive(&cfg.smtp_password),
+            "smtp_from": cfg.smtp_from,
+            "telegram_ready": cfg.telegram_ready(),
+            "smtp_ready": cfg.smtp_ready(),
+        }
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateNotifyConfigRequest {
+    pub enabled: Option<bool>,
+    pub telegram_bot_token: Option<String>,
+    pub telegram_chat_id: Option<String>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<u16>,
+    pub smtp_username: Option<String>,
+    pub smtp_password: Option<String>,
+    pub smtp_from: Option<String>,
+}
+
+/// PUT /api/notify/config - 更新通知配置（仅管理员）
+///
+/// 密码类字段：若提交的值形如脱敏格式（含 ***）则保留原值，否则覆盖。
+pub async fn handle_update_notify_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateNotifyConfigRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let mut cfg = state.notify_service.get_config().await;
+
+    if let Some(v) = body.enabled { cfg.enabled = v; }
+    if let Some(v) = body.telegram_bot_token {
+        if !v.contains("***") { cfg.telegram_bot_token = v; }
+    }
+    if let Some(v) = body.telegram_chat_id { cfg.telegram_chat_id = v; }
+    if let Some(v) = body.smtp_host { cfg.smtp_host = v; }
+    if let Some(v) = body.smtp_port { cfg.smtp_port = v; }
+    if let Some(v) = body.smtp_username { cfg.smtp_username = v; }
+    if let Some(v) = body.smtp_password {
+        if !v.contains("***") { cfg.smtp_password = v; }
+    }
+    if let Some(v) = body.smtp_from { cfg.smtp_from = v; }
+
+    // 同步到 ConfigManager（持久化）
+    let mut app_config = state.config_manager.get().await;
+    app_config.notify = cfg.clone();
+    state.config_manager.update(app_config).await.map_err(|e| {
+        error_response(&format!("Failed to save notify config: {e}"), StatusCode::INTERNAL_SERVER_ERROR)
+    })?;
+
+    // 同步到 NotifyService 运行时
+    state.notify_service.update_config(cfg).await;
+
+    Ok(Json(serde_json::json!({ "success": true, "data": null })))
+}
+
+/// POST /api/notify/test-telegram - 测试 Telegram（发送一条测试消息）
+pub async fn handle_test_telegram(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let cfg = state.notify_service.get_config().await;
+    if !cfg.telegram_ready() {
+        return Err(error_response(
+            "Telegram bot_token 或 chat_id 未配置",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let text = "<b>🔔 AIGX 测试通知</b>\n\nTelegram 通知配置成功！";
+    match state.notify_service.send_telegram(text).await {
+        Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": "Telegram 测试消息已发送" }))),
+        Err(e) => Err(error_response(&format!("发送失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TestEmailRequest {
+    pub to: String,
+}
+
+/// POST /api/notify/test-email - 测试邮件（body: {to}）
+pub async fn handle_test_email(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TestEmailRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let cfg = state.notify_service.get_config().await;
+    if !cfg.smtp_ready() {
+        return Err(error_response(
+            "SMTP host/port 未配置",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if body.to.is_empty() {
+        return Err(error_response("收件邮箱不能为空", StatusCode::BAD_REQUEST));
+    }
+    let subject = "AIGX 测试邮件";
+    let body_text = "这是一封来自 AIGX 的测试邮件。如果您收到此邮件，说明 SMTP 配置正确。";
+    match state.notify_service.send_email(&body.to, subject, body_text).await {
+        Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": format!("测试邮件已发送至 {}", body.to) }))),
+        Err(e) => Err(error_response(&format!("发送失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
 }

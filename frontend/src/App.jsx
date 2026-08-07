@@ -13,6 +13,8 @@ import Wallet from './pages/Wallet';
 import Orders from './pages/Orders';
 import Epay from './pages/Epay';
 import Settings from './pages/Settings';
+import Logs from './pages/Logs';
+import Redemptions from './pages/Redemptions';
 
 function isAuthenticated() {
   const token = localStorage.getItem('token');
@@ -60,6 +62,8 @@ export default function App() {
         <Route path="/wallet" element={<ProtectedLayout><Wallet /></ProtectedLayout>} />
         <Route path="/orders" element={<ProtectedLayout><Orders /></ProtectedLayout>} />
         <Route path="/epay" element={<ProtectedLayout><Epay /></ProtectedLayout>} />
+        <Route path="/logs" element={<ProtectedLayout><Logs /></ProtectedLayout>} />
+        <Route path="/redemptions" element={<ProtectedLayout><Redemptions /></ProtectedLayout>} />
         <Route path="/settings" element={<ProtectedLayout><Settings /></ProtectedLayout>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

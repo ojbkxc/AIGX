@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import './Keys.css';
 
@@ -6,6 +7,7 @@ export default function Orders() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const { t } = useTranslation();
 
   useEffect(() => {
     load();
@@ -24,35 +26,35 @@ export default function Orders() {
     }
   };
 
-  if (loading) return <div className="loading">加载订单</div>;
+  if (loading) return <div className="loading">{t('加载订单')}</div>;
 
   return (
     <div>
       <div className="page-header">
-        <h1>订单记录</h1>
-        <p>所有用户的充值订单（管理员视图）</p>
+        <h1>{t('订单记录')}</h1>
+        <p>{t('所有用户的充值订单（管理员视图）')}</p>
       </div>
 
       {error && <div className="error-message">{error}</div>}
 
       <div className="card">
-        <div className="card-header"><h2>所有订单 ({orders.length})</h2></div>
+        <div className="card-header"><h2>{t('所有订单')} ({orders.length})</h2></div>
         <div className="card-body">
           {orders.length === 0 ? (
-            <div className="empty-state"><p>暂无订单</p></div>
+            <div className="empty-state"><p>{t('暂无订单')}</p></div>
           ) : (
             <div className="table-wrapper">
               <table>
                 <thead>
                   <tr>
-                    <th>订单号</th>
-                    <th>用户ID</th>
-                    <th>金额</th>
-                    <th>配额</th>
-                    <th>支付方式</th>
-                    <th>状态</th>
-                    <th>创建时间</th>
-                    <th>支付时间</th>
+                    <th>{t('订单号')}</th>
+                    <th>{t('用户ID')}</th>
+                    <th>{t('金额')}</th>
+                    <th>{t('配额')}</th>
+                    <th>{t('支付方式')}</th>
+                    <th>{t('状态')}</th>
+                    <th>{t('创建时间')}</th>
+                    <th>{t('支付时间')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -69,7 +71,7 @@ export default function Orders() {
                           background: o.status === 'paid' ? 'rgba(34,197,94,0.15)' : o.status === 'expired' ? 'rgba(148,163,184,0.15)' : 'rgba(234,179,8,0.15)',
                           color: o.status === 'paid' ? 'rgb(34,197,94)' : o.status === 'expired' ? 'rgb(148,163,184)' : 'rgb(234,179,8)',
                         }}>
-                          {o.status === 'paid' ? '已支付' : o.status === 'expired' ? '已过期' : '待支付'}
+                          {o.status === 'paid' ? t('已支付') : o.status === 'expired' ? t('已过期') : t('待支付')}
                         </span>
                       </td>
                       <td>{o.create_time ? new Date(o.create_time * 1000).toLocaleString() : '—'}</td>

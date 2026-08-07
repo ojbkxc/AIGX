@@ -16,6 +16,8 @@ use md5::compute;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::time::Duration;
+use tracing::{debug, info, warn};
 
 pub mod order_store;
 
@@ -122,19 +124,62 @@ pub struct VerifyResult {
     pub pay_type: String,
 }
 
+/// mapi.php JSON 响应体
+///
+/// 易支付 mapi.php 返回 `{code, msg, trade_no, payurl, qrcode}`。
+/// `code == 1` 表示成功，此时 `payurl`（或 `qrcode`）为真实支付网关地址。
+/// 字段名在不同实现中可能有别名（pay_url / qr_code / qr），用 serde alias 兼容。
+#[derive(Debug, Deserialize)]
+struct EpayApiResponse {
+    code: Option<i32>,
+    #[serde(default)]
+    msg: Option<String>,
+    #[serde(default)]
+    trade_no: Option<String>,
+    #[serde(default, alias = "pay_url")]
+    payurl: Option<String>,
+    #[serde(default, alias = "qr_code", alias = "qr")]
+    qrcode: Option<String>,
+}
+
 /// 易支付客户端
+///
+/// 采用双策略下单：优先 mapi.php（server-to-server，返回真实支付网关地址，
+/// 用户浏览器不接触 EPay CDN，避免地区封锁），失败则回退 submit.php 重定向。
 #[derive(Debug, Clone)]
 pub struct EpayClient {
     config: EpayConfig,
+    /// 内嵌 HTTP 客户端：禁用重定向、10s 超时，用于 mapi.php server-to-server 调用
+    client: reqwest::Client,
 }
 
 impl EpayClient {
     pub fn new(config: EpayConfig) -> Self {
-        Self { config }
+        // 禁用重定向：mapi.php 应直接返回 JSON，任何 3xx 都视为异常
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+        Self { config, client }
     }
 
     pub fn config(&self) -> &EpayConfig {
         &self.config
+    }
+
+    /// 规范化网关地址：去除尾部斜杠与已知端点后缀（submit.php / mapi.php / api.php），
+    /// 以便后续拼接 `{base}/mapi.php` 或 `{base}/submit.php`。
+    /// 参照 VFaka `EpayProvider::normalize_base_url`。
+    fn normalize_base_url(url: &str) -> String {
+        let mut base = url.trim().trim_end_matches('/').to_string();
+        for suffix in &["/submit.php", "/mapi.php", "/api.php"] {
+            if base.ends_with(suffix) {
+                base.truncate(base.len() - suffix.len());
+                break;
+            }
+        }
+        base
     }
 
     /// 构造签名 — 参照 VFaka 的易支付签名算法：
@@ -153,8 +198,94 @@ impl EpayClient {
         format!("{:x}", compute(input.as_bytes()))
     }
 
-    /// 下单：构造已签名的参数与跳转 URL
-    pub fn purchase(&self, args: &PurchaseArgs) -> Result<PurchaseResult> {
+    /// 尝试 mapi.php server-to-server API 调用。
+    ///
+    /// GET `{base}/mapi.php` 带签名参数作为 query，解析 JSON 响应。
+    /// `code == 1` 时返回真实支付网关地址（优先 `payurl`，回退 `qrcode`）。
+    /// 参照 VFaka `EpayProvider::try_mapi`。
+    async fn try_mapi(
+        &self,
+        mapi_url: &str,
+        params: &BTreeMap<String, String>,
+    ) -> Result<String> {
+        let resp = self
+            .client
+            .get(mapi_url)
+            .query(params)
+            .send()
+            .await
+            .map_err(|e| anyhow!("mapi request failed: {}", e))?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| anyhow!("mapi response read failed: {}", e))?;
+
+        if body.trim().is_empty() {
+            return Err(anyhow!("mapi returned empty body"));
+        }
+        if !status.is_success() {
+            return Err(anyhow!(
+                "mapi returned HTTP {}: {}",
+                status,
+                body.chars().take(200).collect::<String>()
+            ));
+        }
+
+        let epay_resp: EpayApiResponse = serde_json::from_str(&body).map_err(|e| {
+            anyhow!(
+                "mapi parse failed: {} body={}",
+                e,
+                body.chars().take(200).collect::<String>()
+            )
+        })?;
+
+        debug!(
+            code = ?epay_resp.code,
+            payurl = ?epay_resp.payurl,
+            qrcode = ?epay_resp.qrcode,
+            trade_no = ?epay_resp.trade_no,
+            msg = ?epay_resp.msg,
+            "EPay mapi.php raw response"
+        );
+
+        match epay_resp.code {
+            Some(1) => {}
+            Some(code) => {
+                return Err(anyhow!(
+                    "mapi error code={}: {}",
+                    code,
+                    epay_resp.msg.unwrap_or_default()
+                ));
+            }
+            None => {
+                return Err(anyhow!(
+                    "mapi missing code field: {}",
+                    body.chars().take(200).collect::<String>()
+                ));
+            }
+        }
+
+        let pay_url = epay_resp
+            .payurl
+            .filter(|u| !u.is_empty())
+            .or_else(|| epay_resp.qrcode.clone().filter(|u| !u.is_empty()));
+
+        pay_url.ok_or_else(|| {
+            anyhow!(
+                "mapi returned no payurl or qrcode: {}",
+                body.chars().take(300).collect::<String>()
+            )
+        })
+    }
+
+    /// 下单：构造已签名的参数与跳转 URL（双策略）。
+    ///
+    /// 1. 先尝试 mapi.php（server-to-server）：成功则 `url` 为真实支付网关地址，
+    ///    用户浏览器不接触 EPay CDN，避免地区封锁。
+    /// 2. mapi.php 失败则回退 submit.php 重定向：`url` 为 `{base}/submit.php?{query}`。
+    pub async fn purchase(&self, args: &PurchaseArgs) -> Result<PurchaseResult> {
         if !self.config.ready() {
             return Err(anyhow!("epay not configured"));
         }
@@ -173,13 +304,36 @@ impl EpayClient {
         params.insert("sign".into(), sign);
         params.insert("sign_type".into(), "MD5".into());
 
-        // submit.php 接受 GET query 与 POST form
-        let mut url = self.config.pay_address.clone();
-        if !url.ends_with('/') {
-            url.push('/');
-        }
-        url.push_str("submit.php");
+        let base = Self::normalize_base_url(&self.config.pay_address);
 
+        // 策略 1：mapi.php server-to-server
+        let mapi_url = format!("{}/mapi.php", base);
+        info!(url = %mapi_url, order_no = %args.out_trade_no, "Trying EPay mapi.php API");
+        match self.try_mapi(&mapi_url, &params).await {
+            Ok(pay_url) => {
+                info!(
+                    order_no = %args.out_trade_no,
+                    pay_url = %pay_url,
+                    "EPay mapi.php succeeded"
+                );
+                return Ok(PurchaseResult { url: pay_url, params });
+            }
+            Err(e) => {
+                warn!(
+                    order_no = %args.out_trade_no,
+                    error = %e,
+                    "EPay mapi.php failed, falling back to submit.php redirect"
+                );
+            }
+        }
+
+        // 策略 2：submit.php 重定向回退（带 query string，浏览器直接跳转）
+        let qs: String = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(params.iter())
+            .finish();
+        let url = format!("{}/submit.php?{}", base, qs);
+
+        info!(order_no = %args.out_trade_no, "EPay submit.php fallback URL generated");
         Ok(PurchaseResult { url, params })
     }
 
@@ -273,8 +427,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sign_roundtrip() {
+    #[tokio::test]
+    async fn sign_roundtrip() {
         let client = EpayClient::new(cfg());
         let args = PurchaseArgs {
             pay_type: "alipay".into(),
@@ -286,7 +440,7 @@ mod tests {
             clientip: "127.0.0.1".into(),
             device: Device::PC,
         };
-        let res = client.purchase(&args).unwrap();
+        let res = client.purchase(&args).await.unwrap();
         assert!(res.params.contains_key("sign"));
         assert_eq!(res.params.get("sign_type").unwrap(), "MD5");
         // 模拟网关回传：原参数 + trade_status，并按相同规则重新签名

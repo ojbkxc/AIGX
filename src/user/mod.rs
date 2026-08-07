@@ -52,12 +52,19 @@ pub struct User {
     /// 状态: active / disabled
     #[serde(default = "default_status")]
     pub status: String,
+    /// 用户分组（计费倍率与模型权限依据，参照 new-api user.group）
+    #[serde(default = "default_group")]
+    pub group: String,
     #[serde(default)]
     pub created_at: i64,
 }
 
 fn default_status() -> String {
     "active".to_string()
+}
+
+fn default_group() -> String {
+    "default".to_string()
 }
 
 impl User {
@@ -144,6 +151,7 @@ impl UserStore {
             quota,
             used_quota: 0,
             status: "active".into(),
+            group: "default".into(),
             created_at: chrono::Utc::now().timestamp(),
         };
         self.persist(&user)?;
@@ -172,6 +180,7 @@ impl UserStore {
             quota,
             used_quota: 0,
             status: "active".into(),
+            group: "default".into(),
             created_at: chrono::Utc::now().timestamp(),
         };
         self.persist(&user)?;
@@ -296,7 +305,9 @@ impl UserStore {
         user.used_quota += amount;
         let snapshot = user.clone();
         drop(by_id);
-        let _ = self.persist(&snapshot);
+        if let Err(e) = self.persist(&snapshot) {
+            tracing::error!("Failed to persist user {} try_charge: {}", id, e);
+        }
         true
     }
 

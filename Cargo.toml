@@ -5,6 +5,29 @@ description = "AIGX — OpenAI-compatible AI gateway with multi-account Cloudfla
 edition = "2021"
 license = "MIT"
 
+# ── Feature flags ────────────────────────────────────────────────────
+# 多数据库支持：默认使用 FileStore + rusqlite KV 存储，零配置零依赖。
+# 启用 sea-orm 后可通过 [database] url 切换 PostgreSQL/MySQL 后端。
+#
+# 注意：rusqlite（libsqlite3-sys 0.28）与 sea-orm 的 sqlx-sqlite（libsqlite3-sys 0.26）
+# 存在原生库 links 冲突，不能同时出现在依赖图中。因此不提供 sea-orm 的 sqlite 驱动——
+# SQLite 场景已由默认的 FileStore/rusqlite 覆盖，SeaORM 后端仅支持 PostgreSQL/MySQL。
+#
+# 用法示例：
+# - 默认构建（FileStore + rusqlite）：cargo build
+# - PostgreSQL 后端：cargo build --no-default-features --features "sea-orm,postgres"
+# - MySQL 后端：cargo build --no-default-features --features "sea-orm,mysql"
+[features]
+default = ["sqlite-kv"]
+# rusqlite KV 存储（SqliteStore）— 默认启用，提供 SQLite KV 后端
+sqlite-kv = ["dep:rusqlite"]
+# 启用 SeaORM 后端（与 FileStore 共存，由 config.database.url 决定实际使用哪个）
+sea-orm = ["dep:sea-orm", "dep:sea-orm-migration"]
+# SeaORM PostgreSQL 驱动
+postgres = ["sea-orm/sqlx-postgres", "sea-orm-migration/sqlx-postgres"]
+# SeaORM MySQL 驱动
+mysql = ["sea-orm/sqlx-mysql", "sea-orm-migration/sqlx-mysql"]
+
 [dependencies]
 # HTTP
 axum = { version = "0.7", features = ["macros"] }
@@ -17,6 +40,8 @@ http-body-util = "0.1"
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "fs", "compression-gzip"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# url crate — reqwest 的传递依赖，显式声明用于 form_urlencoded 构造 submit.php 回退 query string
+url = "2"
 bytes = "1"
 
 # Serialization
@@ -61,7 +86,21 @@ tokio-stream = "0.1"
 async-trait = "0.1"
 
 # Database (SQLite via rusqlite with bundled SQLite)
-rusqlite = { version = "0.31", features = ["bundled"] }
+# rusqlite KV 存储（SqliteStore）— 可选后端，通过 sqlite-kv feature 启用（默认启用）。
+#
+# 注意：rusqlite（libsqlite3-sys 0.28）与 sea-orm 的 sqlx-sqlite（libsqlite3-sys 0.26）
+# 存在原生库 links 冲突。当启用 sea-orm + sqlite 时需用 --no-default-features 禁用 sqlite-kv。
+# FileStore（storage/mod.rs）不依赖 rusqlite，始终可用。
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+
+# SeaORM — 多数据库 ORM（SQLite/PostgreSQL/MySQL），可选后端。
+# 仅当启用 `sea-orm` feature 时编译；通过 `sqlite`/`postgres`/`mysql` feature 选择驱动。
+# 参照 VFaka crates/aff-entity/Cargo.toml 的 sea-orm 依赖配置模式。
+#
+# 使用 default-features = false 避免默认引入 sqlx-sqlite（与 rusqlite 的 libsqlite3-sys 产生 links 冲突）。
+# 驱动通过本 crate 的 sqlite/postgres/mysql feature 显式启用。
+sea-orm = { version = "1", default-features = false, features = ["runtime-tokio-rustls", "macros"], optional = true }
+sea-orm-migration = { version = "1", default-features = false, features = ["runtime-tokio-rustls"], optional = true }
 
 # Token estimation (BPE-based, same as aisix)
 tiktoken-rs = "0.12"

@@ -166,6 +166,7 @@ impl From<HealthLevel> for u8 {
 const DEGRADED_THRESHOLD: u32 = 4;
 const DOWN_THRESHOLD: u32 = 8;
 
+#[derive(Debug)]
 struct Entry {
     consecutive_failures: AtomicU32,
 }

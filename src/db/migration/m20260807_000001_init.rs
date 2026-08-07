@@ -1,0 +1,636 @@
+//! 初始迁移 — 创建 AIGX 所有核心表结构。
+//!
+//! 表清单：
+//! 1. users — 用户表
+//! 2. api_keys — API 密钥表
+//! 3. channels — 通用上游渠道表
+//! 4. model_prices — 模型定价目录表
+//! 5. user_groups — 用户分组表
+//! 6. request_logs — 请求日志表
+//! 7. redemptions — 兑换码表
+//! 8. audit_logs — 管理员操作审计日志表
+//!
+//! 设计要点：
+//! - 主键采用 String（UUID），不使用 auto_increment，与现有 FileStore 模型兼容
+//! - 时间戳采用 BigInt（i64 unix timestamp），与现有 schema 一致
+//! - JSON 数组字段（allowed_models/ip_limit/models）以 Text 存储 JSON 字符串
+//! - 为常用查询创建索引
+
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // 1. users — 用户表
+        manager
+            .create_table(
+                Table::create()
+                    .table(Users::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Users::Id)
+                            .string_len(64)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Users::Email)
+                            .string_len(255)
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(Users::Username).string_len(128).not_null())
+                    .col(ColumnDef::new(Users::Password).string_len(255).not_null())
+                    .col(
+                        ColumnDef::new(Users::Role)
+                            .string_len(32)
+                            .not_null()
+                            .default("user"),
+                    )
+                    .col(ColumnDef::new(Users::Quota).big_integer().not_null().default(0))
+                    .col(
+                        ColumnDef::new(Users::UsedQuota)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Users::Status)
+                            .string_len(32)
+                            .not_null()
+                            .default("active"),
+                    )
+                    .col(
+                        ColumnDef::new(Users::Group)
+                            .string_len(64)
+                            .not_null()
+                            .default("default"),
+                    )
+                    .col(ColumnDef::new(Users::CreatedAt).big_integer().not_null().default(0))
+                    .to_owned(),
+            )
+            .await?;
+
+        // 2. api_keys — API 密钥表
+        manager
+            .create_table(
+                Table::create()
+                    .table(ApiKeys::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(ApiKeys::Id)
+                            .string_len(64)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(ApiKeys::Key)
+                            .string_len(255)
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(ApiKeys::Name).string_len(128).not_null())
+                    .col(
+                        ColumnDef::new(ApiKeys::IsActive)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(ColumnDef::new(ApiKeys::CreatedAt).big_integer().not_null().default(0))
+                    .col(ColumnDef::new(ApiKeys::LastUsedAt).big_integer().null())
+                    .col(ColumnDef::new(ApiKeys::UserId).string_len(64).null())
+                    .col(
+                        ColumnDef::new(ApiKeys::Group)
+                            .string_len(64)
+                            .not_null()
+                            .default("default"),
+                    )
+                    .col(ColumnDef::new(ApiKeys::AllowedModels).text().null())
+                    .col(ColumnDef::new(ApiKeys::ExpiresAt).big_integer().null())
+                    .col(ColumnDef::new(ApiKeys::QuotaLimit).big_integer().null())
+                    .col(
+                        ColumnDef::new(ApiKeys::UsedQuota)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(ColumnDef::new(ApiKeys::IpLimit).text().null())
+                    .col(
+                        ColumnDef::new(ApiKeys::Status)
+                            .string_len(32)
+                            .not_null()
+                            .default("active"),
+                    )
+                    .col(ColumnDef::new(ApiKeys::UpdatedAt).big_integer().not_null().default(0))
+                    .foreign_key(
+                        ForeignKey::create()
+                            .from(ApiKeys::Table, ApiKeys::UserId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // 3. channels — 通用上游渠道表
+        manager
+            .create_table(
+                Table::create()
+                    .table(Channels::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Channels::Id)
+                            .string_len(64)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Channels::Name).string_len(128).not_null())
+                    .col(
+                        ColumnDef::new(Channels::ChannelType)
+                            .string_len(32)
+                            .not_null()
+                            .default("cloudflare"),
+                    )
+                    .col(ColumnDef::new(Channels::BaseUrl).string_len(512).not_null().default(""))
+                    .col(ColumnDef::new(Channels::ApiKey).text().not_null().default(""))
+                    .col(
+                        ColumnDef::new(Channels::Priority)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Channels::Weight)
+                            .integer()
+                            .not_null()
+                            .default(1),
+                    )
+                    .col(
+                        ColumnDef::new(Channels::Status)
+                            .string_len(32)
+                            .not_null()
+                            .default("enabled"),
+                    )
+                    .col(ColumnDef::new(Channels::Models).text().not_null().default("[]"))
+                    .col(
+                        ColumnDef::new(Channels::Group)
+                            .string_len(64)
+                            .not_null()
+                            .default("default"),
+                    )
+                    .col(
+                        ColumnDef::new(Channels::Healthy)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(Channels::FailCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(ColumnDef::new(Channels::CreatedAt).big_integer().not_null().default(0))
+                    .col(ColumnDef::new(Channels::UpdatedAt).big_integer().not_null().default(0))
+                    .to_owned(),
+            )
+            .await?;
+
+        // 4. model_prices — 模型定价目录表
+        manager
+            .create_table(
+                Table::create()
+                    .table(ModelPrices::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(ModelPrices::ModelName)
+                            .string_len(128)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(ModelPrices::InputPrice)
+                            .double()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(
+                        ColumnDef::new(ModelPrices::OutputPrice)
+                            .double()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(ColumnDef::new(ModelPrices::CachePrice).double().null())
+                    .col(
+                        ColumnDef::new(ModelPrices::PriceType)
+                            .string_len(16)
+                            .not_null()
+                            .default("token"),
+                    )
+                    .col(
+                        ColumnDef::new(ModelPrices::CreatedAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(ModelPrices::UpdatedAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // 5. user_groups — 用户分组表
+        manager
+            .create_table(
+                Table::create()
+                    .table(UserGroups::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(UserGroups::Name)
+                            .string_len(64)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(UserGroups::Ratio)
+                            .double()
+                            .not_null()
+                            .default(1.0),
+                    )
+                    .col(ColumnDef::new(UserGroups::AllowedModels).text().null())
+                    .col(ColumnDef::new(UserGroups::Description).text().not_null().default(""))
+                    .col(
+                        ColumnDef::new(UserGroups::CreatedAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(UserGroups::UpdatedAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // 6. request_logs — 请求日志表
+        manager
+            .create_table(
+                Table::create()
+                    .table(RequestLogs::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(RequestLogs::Id)
+                            .string_len(64)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(RequestLogs::UserId).string_len(64).null())
+                    .col(ColumnDef::new(RequestLogs::KeyId).string_len(64).null())
+                    .col(ColumnDef::new(RequestLogs::ChannelId).string_len(64).null())
+                    .col(ColumnDef::new(RequestLogs::Model).string_len(128).not_null().default(""))
+                    .col(
+                        ColumnDef::new(RequestLogs::InputTokens)
+                            .big_unsigned()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(RequestLogs::OutputTokens)
+                            .big_unsigned()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(RequestLogs::Cost)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(RequestLogs::LatencyMs)
+                            .big_unsigned()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(RequestLogs::StatusCode)
+                            .small_integer()
+                            .not_null()
+                            .default(200),
+                    )
+                    .col(ColumnDef::new(RequestLogs::ErrorMsg).text().null())
+                    .col(ColumnDef::new(RequestLogs::Ip).string_len(64).null())
+                    .col(ColumnDef::new(RequestLogs::RequestId).string_len(64).null())
+                    .col(
+                        ColumnDef::new(RequestLogs::CreatedAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // 7. redemptions — 兑换码表
+        manager
+            .create_table(
+                Table::create()
+                    .table(Redemptions::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Redemptions::Id)
+                            .string_len(64)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Redemptions::Code)
+                            .string_len(64)
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(ColumnDef::new(Redemptions::Name).string_len(128).not_null().default(""))
+                    .col(
+                        ColumnDef::new(Redemptions::Quota)
+                            .big_integer()
+                            .not_null()
+                            .default(100),
+                    )
+                    .col(
+                        ColumnDef::new(Redemptions::Status)
+                            .integer()
+                            .not_null()
+                            .default(1),
+                    )
+                    .col(ColumnDef::new(Redemptions::UsedBy).string_len(64).null())
+                    .col(ColumnDef::new(Redemptions::UsedAt).big_integer().null())
+                    .col(
+                        ColumnDef::new(Redemptions::CreatedAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Redemptions::ExpiresAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // 8. audit_logs — 管理员操作审计日志表
+        manager
+            .create_table(
+                Table::create()
+                    .table(AuditLogs::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(AuditLogs::Id)
+                            .string_len(64)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(AuditLogs::ActorId).string_len(64).not_null())
+                    .col(ColumnDef::new(AuditLogs::ActorEmail).string_len(255).not_null())
+                    .col(ColumnDef::new(AuditLogs::Action).string_len(32).not_null())
+                    .col(ColumnDef::new(AuditLogs::ResourceType).string_len(64).not_null())
+                    .col(ColumnDef::new(AuditLogs::ResourceId).string_len(64).not_null())
+                    .col(ColumnDef::new(AuditLogs::Before).text().null())
+                    .col(ColumnDef::new(AuditLogs::After).text().null())
+                    .col(ColumnDef::new(AuditLogs::Ip).string_len(64).null())
+                    .col(
+                        ColumnDef::new(AuditLogs::CreatedAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // 创建索引以加速常用查询
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_api_keys_user_id")
+                    .table(ApiKeys::Table)
+                    .col(ApiKeys::UserId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_request_logs_user_id")
+                    .table(RequestLogs::Table)
+                    .col(RequestLogs::UserId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_request_logs_created_at")
+                    .table(RequestLogs::Table)
+                    .col(RequestLogs::CreatedAt)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_request_logs_model")
+                    .table(RequestLogs::Table)
+                    .col(RequestLogs::Model)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_redemptions_status")
+                    .table(Redemptions::Table)
+                    .col(Redemptions::Status)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_audit_logs_created_at")
+                    .table(AuditLogs::Table)
+                    .col(AuditLogs::CreatedAt)
+                    .to_owned(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(AuditLogs::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(Redemptions::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(RequestLogs::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(UserGroups::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(ModelPrices::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(Channels::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(ApiKeys::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(Users::Table).to_owned())
+            .await?;
+        Ok(())
+    }
+}
+
+// ── Iden enums for type-safe table/column references ─────────────────
+
+#[derive(DeriveIden)]
+enum Users {
+    Table,
+    Id,
+    Email,
+    Username,
+    Password,
+    Role,
+    Quota,
+    UsedQuota,
+    Status,
+    Group,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum ApiKeys {
+    Table,
+    Id,
+    Key,
+    Name,
+    IsActive,
+    CreatedAt,
+    LastUsedAt,
+    UserId,
+    Group,
+    AllowedModels,
+    ExpiresAt,
+    QuotaLimit,
+    UsedQuota,
+    IpLimit,
+    Status,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum Channels {
+    Table,
+    Id,
+    Name,
+    ChannelType,
+    BaseUrl,
+    ApiKey,
+    Priority,
+    Weight,
+    Status,
+    Models,
+    Group,
+    Healthy,
+    FailCount,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum ModelPrices {
+    Table,
+    ModelName,
+    InputPrice,
+    OutputPrice,
+    CachePrice,
+    PriceType,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum UserGroups {
+    Table,
+    Name,
+    Ratio,
+    AllowedModels,
+    Description,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum RequestLogs {
+    Table,
+    Id,
+    UserId,
+    KeyId,
+    ChannelId,
+    Model,
+    InputTokens,
+    OutputTokens,
+    Cost,
+    LatencyMs,
+    StatusCode,
+    ErrorMsg,
+    Ip,
+    RequestId,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum Redemptions {
+    Table,
+    Id,
+    Code,
+    Name,
+    Quota,
+    Status,
+    UsedBy,
+    UsedAt,
+    CreatedAt,
+    ExpiresAt,
+}
+
+#[derive(DeriveIden)]
+enum AuditLogs {
+    Table,
+    Id,
+    ActorId,
+    ActorEmail,
+    Action,
+    ResourceType,
+    ResourceId,
+    Before,
+    After,
+    Ip,
+    CreatedAt,
+}

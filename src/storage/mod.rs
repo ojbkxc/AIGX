@@ -4,6 +4,12 @@ use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+// rusqlite KV 存储模块 — 仅当启用 sqlite-kv feature 时编译。
+//
+// 注意：rusqlite（libsqlite3-sys 0.28）与 sea-orm 的 sqlx-sqlite（libsqlite3-sys 0.26）
+// 存在原生库 links 冲突，不能同时启用。当启用 sea-orm + sqlite 时需用
+// --no-default-features 禁用 sqlite-kv，此时 SqliteStore 不可用但 FileStore 仍可用。
+#[cfg(feature = "sqlite-kv")]
 pub mod sqlite;
 
 /// 将任意 key 编码为文件名安全的形式：ASCII 字母数字及 `-_.` 保持原样，
