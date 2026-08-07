@@ -229,7 +229,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKER_IMAGE || 'ojbkxc/ds2api' }}
+          images: ${{ secrets.DOCKER_IMAGE || 'ojbkxc/aigx' }}
           tags: |
             type=raw,value=latest
             type=semver,pattern={{version}}
