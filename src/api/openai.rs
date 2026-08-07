@@ -23,6 +23,7 @@ use crate::payment::order_store::OrderStore;
 use crate::proxy::CfApiClient;
 use crate::usage::UsageTracker;
 use crate::user::UserStore;
+use crate::health::{HealthTracker, LivezState};
 
 use super::auth::ApiKeyStore;
 
@@ -39,6 +40,8 @@ pub struct AppState {
     pub user_store: Arc<UserStore>,
     pub order_store: Arc<OrderStore>,
     pub epay_client: Arc<crate::payment::EpayClient>,
+    pub health_tracker: Arc<HealthTracker>,
+    pub livez_state: Arc<LivezState>,
 }
 
 /// 创建 OpenAI 兼容的错误响应

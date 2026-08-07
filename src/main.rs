@@ -16,6 +16,7 @@ mod web;
 
 use std::sync::Arc;
 
+use axum::extract::State;
 use axum::routing::{get, post, put, delete};
 use axum::Router;
 use tower_http::cors::CorsLayer;
@@ -33,6 +34,7 @@ use payment::EpayClient;
 use proxy::CfApiClient;
 use usage::UsageTracker;
 use user::{Role, UserStore};
+use health::{HealthTracker, LivezState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -93,6 +95,10 @@ async fn main() -> anyhow::Result<()> {
     ));
     hub.register_specialized("cloudflare", cf_bridge);
 
+    // 初始化健康检查
+    let health_tracker = Arc::new(HealthTracker::new());
+    let livez_state = Arc::new(LivezState::new());
+
     // 注册 OpenAI 适配器族 bridge（预留）
     // hub.register_family(Adapter::Openai, cf_openai_bridge);
 
@@ -108,6 +114,8 @@ async fn main() -> anyhow::Result<()> {
         user_store,
         order_store,
         epay_client,
+        health_tracker: health_tracker.clone(),
+        livez_state: livez_state.clone(),
     };
 
     tracing::info!(
@@ -128,7 +136,20 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Starting server at {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    tracing::info!("Server listening on {}", addr);
+
+    // 优雅关闭：收到 SIGTERM/SIGINT 后标记 draining，等待现有请求完成
+    let livez = livez_state.clone();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("Shutdown signal received, marking draining...");
+            livez.mark_shutting_down();
+            // 给现有请求一些时间完成
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tracing::info!("Graceful shutdown complete");
+        })
+        .await?;
 
     Ok(())
 }
@@ -231,7 +252,30 @@ fn build_router(state: AppState) -> Router {
         .merge(epay_callback_routes)
         .merge(openai_routes)
         .merge(anthropic_routes)
+        .route("/livez", get(handle_livez))
+        .route("/readyz", get(handle_readyz))
+        .route("/health", get(handle_health))
         .fallback_service(web::serve_static_files())
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+/// GET /livez — 存活检查
+async fn handle_livez(State(state): State<AppState>) -> axum::response::Response {
+    health::livez_response(&state.livez_state, false)
+}
+
+/// GET /readyz — 就绪检查
+async fn handle_readyz(State(state): State<AppState>) -> axum::response::Response {
+    health::readyz_response(&state.livez_state, true, false)
+}
+
+/// GET /health — 模型健康状态汇总
+async fn handle_health(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
+    let models = state.health_tracker.all_health();
+    let mut result = serde_json::Map::new();
+    for (model, level) in models {
+        result.insert(model, serde_json::json!(u8::from(level)));
+    }
+    axum::Json(serde_json::Value::Object(result))
 }

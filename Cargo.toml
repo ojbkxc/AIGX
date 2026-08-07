@@ -60,5 +60,17 @@ tokio-stream = "0.1"
 # Async
 async-trait = "0.1"
 
+# Database (SQLite via rusqlite with bundled SQLite)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Token estimation (BPE-based, same as aisix)
+tiktoken-rs = "0.12"
+
+# In-memory cache (same as aisix)
+moka = { version = "0.12", features = ["future"] }
+
+# Regex for keyword guardrail
+regex = "1"
+
 [dev-dependencies]
 tempfile = "3"

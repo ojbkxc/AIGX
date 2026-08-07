@@ -4,6 +4,8 @@ use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+pub mod sqlite;
+
 /// 将任意 key 编码为文件名安全的形式：ASCII 字母数字及 `-_.` 保持原样，
 /// 其余字符以 `%XX` 形式转义。可逆，避免 Windows 下 `:`/`/` 等非法字符问题。
 fn encode_key(key: &str) -> String {
