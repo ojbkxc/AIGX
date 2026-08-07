@@ -266,6 +266,9 @@ pub fn check_group_model_permission(
 ///
 /// 参照 new-api：优先扣 key 绑定用户 quota，再扣 key 自身额度；
 /// 用户余额不足时跳过 key 扣费以保持计费一致性。
+///
+/// 当 `try_charge` 失败或扣费后余额低于阈值时，发送 `QuotaLow` 通知
+/// （参照非流式分支阈值计算，与 handle_chat_completions 非流式分支一致）。
 pub fn charge_usage(
     state: &AppState,
     api_key: &super::auth::ApiKey,
@@ -280,7 +283,23 @@ pub fn charge_usage(
     if cost > 0 {
         if let Some(uid) = &api_key.user_id {
             // 用户余额不足时跳过 key 扣费（问题 6）
-            if state.user_store.try_charge(uid, cost) {
+            let charged = state.user_store.try_charge(uid, cost);
+            // 额度不足或剩余过低通知（与非流式分支一致）
+            if let Some(u) = state.user_store.get_by_id(uid) {
+                let remaining = u.remaining();
+                // 阈值：固定 1000 或 quota 的 10%，取较小者；扣费失败必通知
+                let threshold = (u.quota / 10).max(1000).min(10000);
+                if !charged || remaining < threshold {
+                    state.notify_service.notify_spawn(
+                        crate::notify::NotifyEvent::QuotaLow {
+                            user_email: u.email.clone(),
+                            remaining,
+                        },
+                    );
+                }
+            }
+            // 问题 6：try_charge 失败时跳过 charge_quota，保持计费一致性
+            if charged {
                 let _ = state.api_key_store.charge_quota(&api_key.id, cost);
             }
         } else {
@@ -688,6 +707,10 @@ pub async fn handle_completions(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let request_start = std::time::Instant::now();
+    let request_id = format!("req-{}", uuid::Uuid::new_v4());
+    let client_ip = extract_client_ip(&headers);
+
     let model = body
         .get("model")
         .and_then(|m| m.as_str())
@@ -695,6 +718,23 @@ pub async fn handle_completions(
 
     // 完整鉴权（问题 1）
     let api_key = verify_api_key_full(&state, &headers, model)?;
+
+    // 限流检查（功能 3）：鉴权后、推理前
+    let rate_bundle = match state
+        .rate_limiter
+        .check(&api_key.id, model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            let retry_after = e.retry_after_secs().unwrap_or(60);
+            return Err(error_response(
+                "rate_limit_exceeded",
+                &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
+                StatusCode::TOO_MANY_REQUESTS,
+            ));
+        }
+    };
 
     // 校验用户分组模型权限并解析计费分组（问题 5）
     let billing_group = check_group_model_permission(&state, &api_key, model)?;
@@ -706,10 +746,11 @@ pub async fn handle_completions(
         state.channel_store.mark_used(cid);
     }
 
-    let ctx = BridgeContext::new(format!("req-{}", uuid::Uuid::new_v4()), model.to_string());
+    let ctx = BridgeContext::new(request_id.clone(), model.to_string());
 
     match bridge.complete(&body, &ctx).await {
         Ok(result) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
             let prompt_tokens = result
                 .get("usage")
                 .and_then(|u| u.get("prompt_tokens"))
@@ -725,7 +766,7 @@ pub async fn handle_completions(
                 .accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
 
             // 计费扣减（问题 2/5/6）
-            let _ = charge_usage(
+            let cost = charge_usage(
                 &state,
                 &api_key,
                 model,
@@ -734,9 +775,54 @@ pub async fn handle_completions(
                 completion_tokens,
             );
 
+            // 事后限流记账（TPM）
+            let total_tokens = prompt_tokens + completion_tokens;
+            rate_bundle.commit_tokens(total_tokens).await;
+
+            // 记录请求日志（功能 1）
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = channel_id.clone();
+            log.model = model.to_string();
+            log.input_tokens = prompt_tokens;
+            log.output_tokens = completion_tokens;
+            log.cost = cost;
+            log.latency_ms = latency_ms;
+            log.status_code = 200;
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
+
             Ok(Json(result))
         }
-        Err(e) => Err(bridge_error_response(e)),
+        Err(e) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
+            let status_code =
+                StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = channel_id.clone();
+            log.model = model.to_string();
+            log.latency_ms = latency_ms;
+            log.status_code = status_code.as_u16();
+            log.error_msg = Some(e.to_string());
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
+            rate_bundle.commit_tokens(0).await;
+            // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
+            if status_code.as_u16() >= 500 {
+                state
+                    .notify_service
+                    .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                        channel_name: model.to_string(),
+                        error: e.to_string(),
+                    });
+            }
+            Err(bridge_error_response(e))
+        }
     }
 }
 
@@ -748,12 +834,33 @@ pub async fn handle_embeddings(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let request_start = std::time::Instant::now();
+    let request_id = format!("req-{}", uuid::Uuid::new_v4());
+    let client_ip = extract_client_ip(&headers);
+
     let model = body
         .get("model")
         .and_then(|m| m.as_str())
         .ok_or_else(|| error_response("invalid_model", "Missing model field", StatusCode::BAD_REQUEST))?;
 
     let api_key = verify_api_key_full(&state, &headers, model)?;
+
+    // 限流检查（功能 3）：鉴权后、推理前
+    let rate_bundle = match state
+        .rate_limiter
+        .check(&api_key.id, model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            let retry_after = e.retry_after_secs().unwrap_or(60);
+            return Err(error_response(
+                "rate_limit_exceeded",
+                &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
+                StatusCode::TOO_MANY_REQUESTS,
+            ));
+        }
+    };
 
     // 校验用户分组模型权限并解析计费分组（问题 5）
     let billing_group = check_group_model_permission(&state, &api_key, model)?;
@@ -785,10 +892,11 @@ pub async fn handle_embeddings(
         model: model.to_string(),
         input: texts,
     };
-    let ctx = BridgeContext::new(format!("req-{}", uuid::Uuid::new_v4()), model.to_string());
+    let ctx = BridgeContext::new(request_id.clone(), model.to_string());
 
     match bridge.embed(&embed_req, &ctx).await {
         Ok(response) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
             let data: Vec<Value> = response
                 .data
                 .iter()
@@ -807,7 +915,25 @@ pub async fn handle_embeddings(
                 .accumulate(prompt_tokens, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（问题 2/5/6）
-            let _ = charge_usage(&state, &api_key, model, &billing_group, prompt_tokens, 0);
+            let cost = charge_usage(&state, &api_key, model, &billing_group, prompt_tokens, 0);
+
+            // 事后限流记账（TPM）
+            rate_bundle.commit_tokens(prompt_tokens).await;
+
+            // 记录请求日志（功能 1）
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = channel_id.clone();
+            log.model = model.to_string();
+            log.input_tokens = prompt_tokens;
+            log.output_tokens = 0;
+            log.cost = cost;
+            log.latency_ms = latency_ms;
+            log.status_code = 200;
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
 
             Ok(Json(serde_json::json!({
                 "object": "list",
@@ -819,7 +945,33 @@ pub async fn handle_embeddings(
                 }
             })))
         }
-        Err(e) => Err(bridge_error_response(e)),
+        Err(e) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
+            let status_code =
+                StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = channel_id.clone();
+            log.model = model.to_string();
+            log.latency_ms = latency_ms;
+            log.status_code = status_code.as_u16();
+            log.error_msg = Some(e.to_string());
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
+            rate_bundle.commit_tokens(0).await;
+            // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
+            if status_code.as_u16() >= 500 {
+                state
+                    .notify_service
+                    .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                        channel_name: model.to_string(),
+                        error: e.to_string(),
+                    });
+            }
+            Err(bridge_error_response(e))
+        }
     }
 }
 
@@ -831,12 +983,33 @@ pub async fn handle_images_generations(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let request_start = std::time::Instant::now();
+    let request_id = format!("req-{}", uuid::Uuid::new_v4());
+    let client_ip = extract_client_ip(&headers);
+
     let model = body
         .get("model")
         .and_then(|m| m.as_str())
         .ok_or_else(|| error_response("invalid_model", "Missing model field", StatusCode::BAD_REQUEST))?;
 
     let api_key = verify_api_key_full(&state, &headers, model)?;
+
+    // 限流检查（功能 3）：鉴权后、推理前
+    let rate_bundle = match state
+        .rate_limiter
+        .check(&api_key.id, model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            let retry_after = e.retry_after_secs().unwrap_or(60);
+            return Err(error_response(
+                "rate_limit_exceeded",
+                &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
+                StatusCode::TOO_MANY_REQUESTS,
+            ));
+        }
+    };
 
     // 校验用户分组模型权限并解析计费分组（问题 5）
     let billing_group = check_group_model_permission(&state, &api_key, model)?;
@@ -848,20 +1021,65 @@ pub async fn handle_images_generations(
         state.channel_store.mark_used(cid);
     }
 
-    let ctx = BridgeContext::new(format!("req-{}", uuid::Uuid::new_v4()), model.to_string());
+    let ctx = BridgeContext::new(request_id.clone(), model.to_string());
 
     match bridge.generate_image(&body, &ctx).await {
         Ok(result) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
             state
                 .usage_tracker
                 .accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
-            let _ = charge_usage(&state, &api_key, model, &billing_group, 0, 0);
+            let cost = charge_usage(&state, &api_key, model, &billing_group, 0, 0);
+
+            // 事后限流记账（按次计价，记 1 个请求 token 占位以维持 RPM 一致性）
+            rate_bundle.commit_tokens(0).await;
+
+            // 记录请求日志（功能 1）— 图片生成按次计价，tokens 设为 0
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = channel_id.clone();
+            log.model = model.to_string();
+            log.input_tokens = 0;
+            log.output_tokens = 0;
+            log.cost = cost;
+            log.latency_ms = latency_ms;
+            log.status_code = 200;
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
 
             Ok(Json(result))
         }
-        Err(e) => Err(bridge_error_response(e)),
+        Err(e) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
+            let status_code =
+                StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = channel_id.clone();
+            log.model = model.to_string();
+            log.latency_ms = latency_ms;
+            log.status_code = status_code.as_u16();
+            log.error_msg = Some(e.to_string());
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
+            rate_bundle.commit_tokens(0).await;
+            // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
+            if status_code.as_u16() >= 500 {
+                state
+                    .notify_service
+                    .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                        channel_name: model.to_string(),
+                        error: e.to_string(),
+                    });
+            }
+            Err(bridge_error_response(e))
+        }
     }
 }
 
@@ -873,6 +1091,10 @@ pub async fn handle_audio_transcriptions(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let request_start = std::time::Instant::now();
+    let request_id = format!("req-{}", uuid::Uuid::new_v4());
+    let client_ip = extract_client_ip(&headers);
+
     let content_type = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -901,6 +1123,24 @@ pub async fn handle_audio_transcriptions(
 
     // 完整鉴权（问题 1）
     let api_key = verify_api_key_full(&state, &headers, &model)?;
+
+    // 限流检查（功能 3）：鉴权后、推理前
+    let rate_bundle = match state
+        .rate_limiter
+        .check(&api_key.id, &model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            let retry_after = e.retry_after_secs().unwrap_or(60);
+            return Err(error_response(
+                "rate_limit_exceeded",
+                &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
+                StatusCode::TOO_MANY_REQUESTS,
+            ));
+        }
+    };
+
     // 校验用户分组模型权限并解析计费分组（问题 5）
     let billing_group = check_group_model_permission(&state, &api_key, &model)?;
 
@@ -914,6 +1154,7 @@ pub async fn handle_audio_transcriptions(
         .await
     {
         Ok(result) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
             let text = result.get("text").and_then(|t| t.as_str()).unwrap_or("");
 
             state
@@ -921,15 +1162,51 @@ pub async fn handle_audio_transcriptions(
                 .accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
-            let _ = charge_usage(&state, &api_key, &model, &billing_group, 0, 0);
+            let cost = charge_usage(&state, &api_key, &model, &billing_group, 0, 0);
+
+            // 事后限流记账（按次计价，记 0 token）
+            rate_bundle.commit_tokens(0).await;
+
+            // 记录请求日志（功能 1）— 音频转写按次计价，tokens 设为 0
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.model = model.clone();
+            log.cost = cost;
+            log.latency_ms = latency_ms;
+            log.status_code = 200;
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
 
             Ok(Json(serde_json::json!({ "text": text })))
         }
-        Err(e) => Err(error_response(
-            "api_error",
-            &format!("Transcription error: {e}"),
-            StatusCode::BAD_GATEWAY,
-        )),
+        Err(e) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.model = model.clone();
+            log.latency_ms = latency_ms;
+            log.status_code = 502;
+            log.error_msg = Some(format!("Transcription error: {e}"));
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
+            rate_bundle.commit_tokens(0).await;
+            // 渠道故障通知
+            state
+                .notify_service
+                .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                    channel_name: model.clone(),
+                    error: format!("Transcription error: {e}"),
+                });
+            Err(error_response(
+                "api_error",
+                &format!("Transcription error: {e}"),
+                StatusCode::BAD_GATEWAY,
+            ))
+        }
     }
 }
 
@@ -941,6 +1218,10 @@ pub async fn handle_audio_translations(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let request_start = std::time::Instant::now();
+    let request_id = format!("req-{}", uuid::Uuid::new_v4());
+    let client_ip = extract_client_ip(&headers);
+
     let content_type = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -969,6 +1250,24 @@ pub async fn handle_audio_translations(
 
     // 完整鉴权（问题 1）
     let api_key = verify_api_key_full(&state, &headers, &model)?;
+
+    // 限流检查（功能 3）：鉴权后、推理前
+    let rate_bundle = match state
+        .rate_limiter
+        .check(&api_key.id, &model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            let retry_after = e.retry_after_secs().unwrap_or(60);
+            return Err(error_response(
+                "rate_limit_exceeded",
+                &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
+                StatusCode::TOO_MANY_REQUESTS,
+            ));
+        }
+    };
+
     // 校验用户分组模型权限并解析计费分组（问题 5）
     let billing_group = check_group_model_permission(&state, &api_key, &model)?;
 
@@ -982,6 +1281,7 @@ pub async fn handle_audio_translations(
         .await
     {
         Ok(result) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
             let text = result.get("text").and_then(|t| t.as_str()).unwrap_or("");
 
             state
@@ -989,15 +1289,51 @@ pub async fn handle_audio_translations(
                 .accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
-            let _ = charge_usage(&state, &api_key, &model, &billing_group, 0, 0);
+            let cost = charge_usage(&state, &api_key, &model, &billing_group, 0, 0);
+
+            // 事后限流记账（按次计价，记 0 token）
+            rate_bundle.commit_tokens(0).await;
+
+            // 记录请求日志（功能 1）— 音频翻译按次计价，tokens 设为 0
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.model = model.clone();
+            log.cost = cost;
+            log.latency_ms = latency_ms;
+            log.status_code = 200;
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
 
             Ok(Json(serde_json::json!({ "text": text })))
         }
-        Err(e) => Err(error_response(
-            "api_error",
-            &format!("Translation error: {e}"),
-            StatusCode::BAD_GATEWAY,
-        )),
+        Err(e) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.model = model.clone();
+            log.latency_ms = latency_ms;
+            log.status_code = 502;
+            log.error_msg = Some(format!("Translation error: {e}"));
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
+            rate_bundle.commit_tokens(0).await;
+            // 渠道故障通知
+            state
+                .notify_service
+                .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                    channel_name: model.clone(),
+                    error: format!("Translation error: {e}"),
+                });
+            Err(error_response(
+                "api_error",
+                &format!("Translation error: {e}"),
+                StatusCode::BAD_GATEWAY,
+            ))
+        }
     }
 }
 
@@ -1009,6 +1345,10 @@ pub async fn handle_audio_speech(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let request_start = std::time::Instant::now();
+    let request_id = format!("req-{}", uuid::Uuid::new_v4());
+    let client_ip = extract_client_ip(&headers);
+
     let model = body
         .get("model")
         .and_then(|m| m.as_str())
@@ -1016,6 +1356,24 @@ pub async fn handle_audio_speech(
 
     // 完整鉴权（问题 1）
     let api_key = verify_api_key_full(&state, &headers, model)?;
+
+    // 限流检查（功能 3）：鉴权后、推理前
+    let rate_bundle = match state
+        .rate_limiter
+        .check(&api_key.id, model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            let retry_after = e.retry_after_secs().unwrap_or(60);
+            return Err(error_response(
+                "rate_limit_exceeded",
+                &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
+                StatusCode::TOO_MANY_REQUESTS,
+            ));
+        }
+    };
+
     // 校验用户分组模型权限并解析计费分组（问题 5）
     let billing_group = check_group_model_permission(&state, &api_key, model)?;
 
@@ -1036,6 +1394,7 @@ pub async fn handle_audio_speech(
 
     match state.api_client.run_text(model, cf_body).await {
         Ok(result) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
             let audio_data = result.get("audio").and_then(|a| a.as_str()).unwrap_or("");
 
             state
@@ -1043,18 +1402,54 @@ pub async fn handle_audio_speech(
                 .accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
-            let _ = charge_usage(&state, &api_key, model, &billing_group, 0, 0);
+            let cost = charge_usage(&state, &api_key, model, &billing_group, 0, 0);
+
+            // 事后限流记账（按次计价，记 0 token）
+            rate_bundle.commit_tokens(0).await;
+
+            // 记录请求日志（功能 1）— 文本转语音按次计价，tokens 设为 0
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.model = model.to_string();
+            log.cost = cost;
+            log.latency_ms = latency_ms;
+            log.status_code = 200;
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
 
             Ok(Json(serde_json::json!({
                 "audio_base64": audio_data,
                 "content_type": "audio/wav"
             })))
         }
-        Err(e) => Err(error_response(
-            "api_error",
-            &format!("Text-to-speech error: {e}"),
-            StatusCode::BAD_GATEWAY,
-        )),
+        Err(e) => {
+            let latency_ms = request_start.elapsed().as_millis() as u64;
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.model = model.to_string();
+            log.latency_ms = latency_ms;
+            log.status_code = 502;
+            log.error_msg = Some(format!("Text-to-speech error: {e}"));
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
+            rate_bundle.commit_tokens(0).await;
+            // 渠道故障通知
+            state
+                .notify_service
+                .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                    channel_name: model.to_string(),
+                    error: format!("Text-to-speech error: {e}"),
+                });
+            Err(error_response(
+                "api_error",
+                &format!("Text-to-speech error: {e}"),
+                StatusCode::BAD_GATEWAY,
+            ))
+        }
     }
 }
 
