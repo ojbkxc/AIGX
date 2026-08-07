@@ -957,24 +957,38 @@ pub async fn handle_me(
 // ============================================================
 
 /// GET /api/epay/config - 读取易支付配置（仅管理员）
+/// 参照 VFaka：敏感字段 epay_key 做脱敏处理（保留前3后3，中间 ***）
 pub async fn handle_get_epay_config(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
+    let config = verify_admin(&state, &headers).await?;
+
+    // 脱敏 epay_key：保留前3后3字符，中间用 *** 替代
+    let masked_key = mask_sensitive(&config.epay.epay_key);
+
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
-            "pay_address": _config.epay.pay_address,
-            "epay_id": _config.epay.epay_id,
-            "epay_key": _config.epay.epay_key,
-            "pay_methods": _config.epay.pay_methods,
-            "price": _config.epay.price,
-            "min_topup": _config.epay.min_topup,
-            "custom_callback_address": _config.epay.custom_callback_address,
-            "server_address": _config.server_address,
+            "pay_address": config.epay.pay_address,
+            "epay_id": config.epay.epay_id,
+            "epay_key": masked_key,
+            "pay_methods": config.epay.pay_methods,
+            "price": config.epay.price,
+            "amount_discount": config.epay.amount_discount,
+            "min_topup": config.epay.min_topup,
+            "custom_callback_address": config.epay.custom_callback_address,
+            "server_address": config.server_address,
         }
     })))
+}
+
+/// 脱敏字符串：保留前3后3字符，中间用 *** 替代
+fn mask_sensitive(s: &str) -> String {
+    if s.len() <= 6 {
+        return "***".to_string();
+    }
+    format!("{}***{}", &s[..3], &s[s.len() - 3..])
 }
 
 #[derive(Debug, Deserialize)]
@@ -984,6 +998,7 @@ pub struct UpdateEpayConfigRequest {
     pub epay_key: Option<String>,
     pub pay_methods: Option<Vec<String>>,
     pub price: Option<f64>,
+    pub amount_discount: Option<std::collections::HashMap<i64, f64>>,
     pub min_topup: Option<i64>,
     pub custom_callback_address: Option<String>,
     pub server_address: Option<String>,
@@ -1001,6 +1016,7 @@ pub async fn handle_update_epay_config(
     if let Some(v) = body.epay_key { config.epay.epay_key = v; }
     if let Some(v) = body.pay_methods { config.epay.pay_methods = v; }
     if let Some(v) = body.price { config.epay.price = v; }
+    if let Some(v) = body.amount_discount { config.epay.amount_discount = v; }
     if let Some(v) = body.min_topup { config.epay.min_topup = v; }
     if let Some(v) = body.custom_callback_address { config.epay.custom_callback_address = v; }
     if let Some(v) = body.server_address { config.server_address = v; }
@@ -1094,6 +1110,7 @@ pub async fn handle_topup_request(
         money: format!("{:.2}", money),
         notify_url,
         return_url,
+        clientip: "127.0.0.1".into(), // 参照 VFaka：部分易支付网关要求必填
         device: Device::PC,
     };
     match epay.purchase(&args) {
@@ -1188,6 +1205,8 @@ fn urlencoding_decode(s: &str) -> String {
 }
 
 /// POST/GET /api/user/epay/notify - 易支付异步通知
+/// 参照 VFaka 回调实现：合并 query + body 参数，优先 body（POST 更可靠），
+/// 签名验证后做金额校验（2% 容忍度），使用 order.money / price 计算配额（处理折扣）
 pub async fn handle_epay_notify(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -1197,11 +1216,14 @@ pub async fn handle_epay_notify(
         Ok(b) => b,
         Err(_) => return "fail".into_response(),
     };
-    let params = collect_params(None, &bytes);
-    let mut params = if params.is_empty() { query.clone() } else { params };
-    if params.is_empty() && !query.is_empty() {
-        params = query.clone();
+
+    // 合并 query + body 参数，body 优先（POST form 更可靠）
+    let mut params = query.clone();
+    let body_params = collect_params(None, &bytes);
+    for (k, v) in body_params {
+        params.insert(k, v);
     }
+
     if params.is_empty() {
         return "fail".into_response();
     }
@@ -1212,29 +1234,62 @@ pub async fn handle_epay_notify(
         Err(_) => return "fail".into_response(),
     };
     if !verify.verify_status || verify.trade_status != "TRADE_SUCCESS" {
+        tracing::warn!("Epay notify: verify failed or trade not success, trade_status={}", verify.trade_status);
         return "fail".into_response();
     }
+
+    // 提取回调金额用于校验
+    let callback_money: f64 = params
+        .get("money")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+
     if let Some(order) = state.order_store.get(&verify.out_trade_no) {
-        if order.is_pending() {
-            // 入账：amount 即元数，按 epay.price 转为配额
-            let quota_to_add = (order.amount as f64 * config.epay.price).round() as i64;
-            let _ = state.user_store.add_quota(&order.user_id, quota_to_add);
-            let _ = state.order_store.complete(&order.trade_no);
-            tracing::info!("Epay order completed: trade_no={} user={} quota=+{}", order.trade_no, order.user_id, quota_to_add);
+        if !order.is_pending() {
+            return "success".into_response(); // 幂等：已处理
         }
+
+        // 金额校验：容忍度 max(订单金额 * 2%, 0.01元)，参照 VFaka
+        let tolerance = (order.money * 0.02).max(0.01);
+        let amount_diff = (callback_money - order.money).abs();
+        if amount_diff > tolerance {
+            tracing::error!(
+                "Epay notify amount mismatch: trade_no={} expected={} received={} diff={}",
+                order.trade_no, order.money, callback_money, amount_diff
+            );
+            return "fail".into_response();
+        }
+
+        // 入账：使用 order.money / price 计算配额（正确处理折扣场景）
+        // 下单时 pay_money 已应用折扣，回调时用实际支付金额反算配额
+        let quota_to_add = if config.epay.price > 0.0 {
+            (order.money / config.epay.price).round() as i64
+        } else {
+            order.amount
+        };
+        let _ = state.user_store.add_quota(&order.user_id, quota_to_add);
+        let _ = state.order_store.complete(&order.trade_no);
+        tracing::info!(
+            "Epay order completed: trade_no={} user={} amount={} money={} quota=+{}",
+            order.trade_no, order.user_id, order.amount, order.money, quota_to_add
+        );
     }
     "success".into_response()
 }
 
 /// POST/GET /api/user/epay/return - 易支付同步跳转
+/// 参照 VFaka：签名验证 + 金额校验 + 折扣正确计算配额
 pub async fn handle_epay_return(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
     body: axum::body::Body,
 ) -> Response {
     let bytes = axum::body::to_bytes(body, 64 * 1024).await.unwrap_or_default();
-    let params = collect_params(None, &bytes);
-    let params = if params.is_empty() { query.clone() } else { params };
+    let mut params = query.clone();
+    let body_params = collect_params(None, &bytes);
+    for (k, v) in body_params {
+        params.insert(k, v);
+    }
     if params.is_empty() {
         return Redirect::to(&make_return_path("fail")).into_response();
     }
@@ -1247,12 +1302,38 @@ pub async fn handle_epay_return(
     if !verify.verify_status {
         return Redirect::to(&make_return_path("fail")).into_response();
     }
+
+    // 提取回调金额
+    let callback_money: f64 = params
+        .get("money")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+
     if verify.trade_status == "TRADE_SUCCESS" {
         if let Some(order) = state.order_store.get(&verify.out_trade_no) {
             if order.is_pending() {
-                let quota_to_add = (order.amount as f64 * config.epay.price).round() as i64;
+                // 金额校验：容忍度 max(订单金额 * 2%, 0.01元)
+                let tolerance = (order.money * 0.02).max(0.01);
+                if (callback_money - order.money).abs() > tolerance {
+                    tracing::error!(
+                        "Epay return amount mismatch: trade_no={} expected={} received={}",
+                        order.trade_no, order.money, callback_money
+                    );
+                    return Redirect::to(&make_return_path("fail")).into_response();
+                }
+
+                // 使用 order.money / price 计算配额（正确处理折扣）
+                let quota_to_add = if config.epay.price > 0.0 {
+                    (order.money / config.epay.price).round() as i64
+                } else {
+                    order.amount
+                };
                 let _ = state.user_store.add_quota(&order.user_id, quota_to_add);
                 let _ = state.order_store.complete(&order.trade_no);
+                tracing::info!(
+                    "Epay return completed: trade_no={} user={} quota=+{}",
+                    order.trade_no, order.user_id, quota_to_add
+                );
             }
         }
         return Redirect::to(&make_return_path("success")).into_response();

@@ -98,6 +98,8 @@ pub struct PurchaseArgs {
     pub notify_url: String,
     /// 同步跳转地址
     pub return_url: String,
+    /// 客户端 IP（部分易支付网关必填）
+    pub clientip: String,
     pub device: Device,
 }
 
@@ -135,22 +137,20 @@ impl EpayClient {
         &self.config
     }
 
-    /// 构造签名
+    /// 构造签名 — 参照 VFaka 的易支付签名算法：
+    /// 1. 按 key 字典序排序（BTreeMap 保证）
+    /// 2. 拼接为 `k1=v1&k2=v2...` 形式
+    /// 3. 末尾直接追加商户密钥（不加 `&` 分隔符）
+    /// 4. MD5 取小写十六进制
     fn sign(&self, params: &BTreeMap<String, String>) -> String {
-        let mut buf = String::new();
-        for (k, v) in params {
-            if v.is_empty() {
-                continue;
-            }
-            if !buf.is_empty() {
-                buf.push('&');
-            }
-            buf.push_str(k);
-            buf.push('=');
-            buf.push_str(v);
-        }
-        buf.push_str(&format!("&{}", self.config.epay_key));
-        format!("{:x}", compute(buf.as_bytes()))
+        let sign_str: String = params
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("&");
+        let input = format!("{}{}", sign_str, self.config.epay_key);
+        format!("{:x}", compute(input.as_bytes()))
     }
 
     /// 下单：构造已签名的参数与跳转 URL
@@ -166,6 +166,7 @@ impl EpayClient {
         params.insert("return_url".into(), args.return_url.clone());
         params.insert("name".into(), args.name.clone());
         params.insert("money".into(), args.money.clone());
+        params.insert("clientip".into(), args.clientip.clone());
         params.insert("device".into(), args.device.as_str().to_string());
 
         let sign = self.sign(&params);
@@ -282,6 +283,7 @@ mod tests {
             money: "1.00".into(),
             notify_url: "https://x/notify".into(),
             return_url: "https://x/return".into(),
+            clientip: "127.0.0.1".into(),
             device: Device::PC,
         };
         let res = client.purchase(&args).unwrap();
@@ -320,6 +322,7 @@ mod tests {
         map.insert("return_url".into(), "https://x/return".into());
         map.insert("name".into(), "TopUp".into());
         map.insert("money".into(), "1.00".into());
+        map.insert("clientip".into(), "127.0.0.1".into());
         map.insert("device".into(), "pc".into());
         map.insert("trade_status".into(), "TRADE_SUCCESS".into());
         map.insert("sign".into(), "badsign".into());
