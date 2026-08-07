@@ -42,6 +42,7 @@ pub struct AppState {
     pub epay_client: Arc<crate::payment::EpayClient>,
     pub health_tracker: Arc<HealthTracker>,
     pub livez_state: Arc<LivezState>,
+<<<<<<< HEAD
 }
 
 /// 创建 OpenAI 兼容的错误响应
@@ -710,4 +711,6 @@ fn parse_multipart_audio(
         )
     })
     .map(|(data, filename)| (data, model, filename))
+=======
+>>>>>>> ee15e7fbfeb81da01c35045c9eb257bce0b7a8dd
 }
