@@ -22,8 +22,7 @@ pub struct TokenStats {
 impl TokenStats {
     /// 计算平均每秒 token 数
     pub fn avg_tok_per_sec(&self) -> u64 {
-        if self.tok_per_sec_count > 0 {
-            self.tok_per_sec_sum / self.tok_per_sec_count
+        self.tok_per_sec_sum.checked_div(self.tok_per_sec_count).unwrap_or(0)
         } else {
             0
         }

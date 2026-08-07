@@ -135,7 +135,6 @@ async fn main() -> anyhow::Result<()> {
 
 /// 确保默认管理员账户存在
 /// 邮箱: admin@gmail.com
-<<<<<<< HEAD
 /// 密码: admin123456
 fn ensure_default_admin(user_store: &UserStore) {
     const DEFAULT_ADMIN_EMAIL: &str = "admin@gmail.com";
@@ -148,17 +147,6 @@ fn ensure_default_admin(user_store: &UserStore) {
     }
 
     // 创建新的管理员账户
-=======
-/// 密码: 123456
-fn ensure_default_admin(user_store: &UserStore) {
-    const DEFAULT_ADMIN_EMAIL: &str = "admin@gmail.com";
-    const DEFAULT_ADMIN_PASSWORD: &str = "123456";
-
-    if user_store.get_by_email(DEFAULT_ADMIN_EMAIL).is_some() {
-        return;
-    }
-
->>>>>>> 4345362d665ae9f8efaca43563421956d13ab8cd
     match user_store.create_with_username(
         DEFAULT_ADMIN_EMAIL,
         "admin",
@@ -167,22 +155,14 @@ fn ensure_default_admin(user_store: &UserStore) {
         0,
     ) {
         Ok(_) => {
-<<<<<<< HEAD
-            tracing::success!(
-=======
             tracing::info!(
->>>>>>> 4345362d665ae9f8efaca43563421956d13ab8cd
                 "Default admin account created: {} (password: {})",
                 DEFAULT_ADMIN_EMAIL,
                 DEFAULT_ADMIN_PASSWORD
             );
         }
         Err(e) => {
-<<<<<<< HEAD
             tracing::error!("Failed to create default admin account: {}", e);
-=======
-            tracing::warn!("Failed to create default admin account: {}", e);
->>>>>>> 4345362d665ae9f8efaca43563421956d13ab8cd
         }
     }
 }

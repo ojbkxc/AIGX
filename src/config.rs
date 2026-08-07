@@ -38,7 +38,7 @@ pub struct ServerConfig {
     pub data_dir: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AdminConfig {
     pub password: String,
     #[serde(default)]
@@ -67,7 +67,7 @@ fn default_max_retries() -> u32 {
     2
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub server: ServerConfig,
@@ -95,14 +95,6 @@ impl Default for ServerConfig {
     }
 }
 
-impl Default for AdminConfig {
-    fn default() -> Self {
-        Self {
-            password: String::new(),
-            session_secret: String::new(),
-        }
-    }
-}
 
 impl Default for UsageConfig {
     fn default() -> Self {
@@ -116,17 +108,6 @@ impl Default for UsageConfig {
     }
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            admin: AdminConfig::default(),
-            usage: UsageConfig::default(),
-            epay: EpayConfig::default(),
-            server_address: String::new(),
-        }
-    }
-}
 
 // ── ConfigManager ────────────────────────────────────────────────────
 

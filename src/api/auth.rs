@@ -142,6 +142,10 @@ impl ApiKeyStore {
     pub fn len(&self) -> usize {
         self.keys.read().len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.read().is_empty()
+    }
 }
 
 /// 会话存储 - 使用 HMAC 签名方式，无需共享内存状态

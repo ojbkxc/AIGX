@@ -30,16 +30,17 @@ pub enum Adapter {
     Vertex,
 }
 
-impl Adapter {
-    /// 从字符串解析适配器
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for Adapter {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "openai" => Some(Self::Openai),
-            "anthropic" => Some(Self::Anthropic),
-            "azure" | "azure-openai" | "azure_openai" => Some(Self::AzureOpenai),
-            "bedrock" => Some(Self::Bedrock),
-            "vertex" | "vertex-ai" | "vertex_ai" => Some(Self::Vertex),
-            _ => None,
+            "openai" => Ok(Self::Openai),
+            "anthropic" => Ok(Self::Anthropic),
+            "azure" | "azure-openai" | "azure_openai" => Ok(Self::AzureOpenai),
+            "bedrock" => Ok(Self::Bedrock),
+            "vertex" | "vertex-ai" | "vertex_ai" => Ok(Self::Vertex),
+            _ => Err(format!("unknown adapter: {}", s)),
         }
     }
 }

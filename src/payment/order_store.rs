@@ -70,13 +70,13 @@ impl OrderStore {
             .filter(|o| o.user_id == user_id)
             .cloned()
             .collect();
-        list.sort_by(|a, b| b.create_time.cmp(&a.create_time));
+        list.sort_by_key(|b| std::cmp::Reverse(b.create_time));
         list
     }
 
     pub fn list_all(&self) -> Vec<TopUpOrder> {
         let mut list: Vec<TopUpOrder> = self.by_no.read().values().cloned().collect();
-        list.sort_by(|a, b| b.create_time.cmp(&a.create_time));
+        list.sort_by_key(|b| std::cmp::Reverse(b.create_time));
         list
     }
 }

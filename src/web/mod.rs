@@ -59,11 +59,5 @@ fn find_static_dir() -> Option<PathBuf> {
             .map(|p| p.join("..").join("static")),
     ];
 
-    for candidate in candidates.into_iter().flatten() {
-        if candidate.exists() && candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-
-    None
+    candidates.into_iter().flatten().find(|candidate| candidate.exists() && candidate.is_dir())
 }

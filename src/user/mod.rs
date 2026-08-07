@@ -20,18 +20,15 @@ use std::sync::Arc;
 use crate::storage::FileStore;
 
 /// 用户角色
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Admin,
+    #[default]
     User,
 }
 
-impl Default for Role {
-    fn default() -> Self {
-        Role::User
-    }
-}
+// Default impl removed — derived via #[derive(Default)]
 
 /// 用户记录
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,7 +182,7 @@ impl UserStore {
 
     pub fn list(&self) -> Vec<User> {
         let mut users: Vec<User> = self.by_id.read().values().cloned().collect();
-        users.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        users.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         users
     }
 

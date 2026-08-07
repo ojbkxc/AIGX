@@ -12,7 +12,7 @@ use crate::account::CfAccount;
 use crate::config::AppConfig;
 use crate::graphql;
 use crate::payment::{Device, EpayConfig, PurchaseArgs};
-use crate::user::{self, Role, User};
+use crate::user::{self, hash_password, Role, User};
 
 use super::auth::SessionStore;
 use super::openai::AppState;

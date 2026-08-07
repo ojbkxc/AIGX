@@ -64,7 +64,7 @@ impl AccountPool {
             }
         }
         // 按创建时间排序
-        accounts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        accounts.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         *self.accounts.write() = accounts;
         Ok(())
     }
