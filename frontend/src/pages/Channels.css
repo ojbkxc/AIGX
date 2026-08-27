@@ -1,0 +1,113 @@
+/* Channels.css — 渠道管理页面样式
+ * 保持 cf-ai-gw 玻璃拟态：复用 App.css 的 CSS 变量体系
+ * 融入 deepseek-pp 结构模式：shell + page-intro + content 分层 */
+
+.channels-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* PageIntro 标题区 — 参照 deepseek-pp PageIntro 组件 */
+.page-intro {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+  gap: 16px;
+}
+
+.page-intro-text h1 {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  font-family: 'Outfit', sans-serif;
+}
+
+.page-intro-text p {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.channels-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: fadeIn 0.3s ease;
+}
+
+/* 渠道类型徽章 — 不同类型用不同色调 */
+.channel-type-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--code-bg);
+  color: var(--code-color);
+  border: 1px solid var(--code-border);
+  white-space: nowrap;
+}
+
+.channel-type-badge[data-type="cloudflare"] {
+  background: rgba(247, 144, 9, 0.12);
+  color: #f59e0b;
+  border-color: rgba(247, 144, 9, 0.25);
+}
+
+.channel-type-badge[data-type="openai_compatible"] {
+  background: rgba(16, 185, 129, 0.12);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.25);
+}
+
+.channel-type-badge[data-type="anthropic"] {
+  background: rgba(168, 85, 247, 0.12);
+  color: #c084fc;
+  border-color: rgba(168, 85, 247, 0.25);
+}
+
+:root[data-theme="light"] .channel-type-badge[data-type="cloudflare"] {
+  background: rgba(247, 144, 9, 0.08);
+  color: #d97706;
+}
+
+:root[data-theme="light"] .channel-type-badge[data-type="openai_compatible"] {
+  background: rgba(16, 185, 129, 0.08);
+  color: #059669;
+}
+
+:root[data-theme="light"] .channel-type-badge[data-type="anthropic"] {
+  background: rgba(168, 85, 247, 0.08);
+  color: #9333ea;
+}
+
+/* 优先级/权重展示 */
+.priority-weight {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.pw-priority {
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.pw-sep {
+  color: var(--text-muted);
+}
+
+.pw-weight {
+  color: var(--text-muted);
+}
+
+@media (max-width: 768px) {
+  .page-intro {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

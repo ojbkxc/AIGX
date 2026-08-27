@@ -1,0 +1,122 @@
+/* Pricing.css — 定价倍率页面样式
+ * 保持 cf-ai-gw 玻璃拟态，融入 deepseek-pp SubTabs 模式 */
+
+.pricing-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pricing-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: fadeIn 0.3s ease;
+}
+
+/* 子标签页 — 参照 deepseek-pp SubTabs */
+.sub-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  margin-bottom: 16px;
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  width: fit-content;
+}
+
+.sub-tab {
+  padding: 8px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  font-family: inherit;
+}
+
+.sub-tab:hover {
+  color: var(--text-main);
+  background: var(--btn-secondary-hover);
+}
+
+.sub-tab.active {
+  background: var(--primary-gradient);
+  color: white;
+  box-shadow: 0 2px 8px rgba(168, 85, 247, 0.3);
+}
+
+/* 价格单元格 */
+.price-cell {
+  font-family: 'Outfit', sans-serif;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+/* 计价类型徽章 */
+.price-type-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--code-bg);
+  color: var(--code-color);
+  border: 1px solid var(--code-border);
+  text-transform: lowercase;
+}
+
+/* 定价表单行 */
+.price-form-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  padding: 16px;
+  background: var(--section-item-bg);
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+}
+
+/* 倍率配置 */
+.ratio-hint {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+.ratio-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.ratio-textarea {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  resize: vertical;
+  min-height: 180px;
+  line-height: 1.5;
+}
+
+@media (max-width: 768px) {
+  .ratio-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .price-form-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .sub-tabs {
+    width: 100%;
+  }
+}

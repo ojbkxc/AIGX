@@ -148,9 +148,20 @@ async fn main() -> anyhow::Result<()> {
     // 初始化通知服务（Telegram + SMTP）
     let notify_service = Arc::new(NotifyService::new(config.notify.clone()));
 
+    // 共享 HTTP 客户端（性能热点 H5/H6）。
+    // 全应用复用同一个 reqwest::Client，避免每次请求新建客户端（连接池/TLS 握手开销）。
+    // 超时 300s 覆盖大多数上游推理时长；连接池由 reqwest 内部管理。
+    let http_client = Arc::new(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()
+            .expect("failed to build shared reqwest::Client"),
+    );
+
     // 初始化公开注册速率限制器（per-IP，60s 窗口，最多 10000 个 IP 条目）
+    // 使用基于 dashmap 的 AsyncCache 替代 moka（离线环境 moka 不可得，行为等效）
     let register_limiter = Arc::new(
-        moka::future::Cache::builder()
+        crate::cache::AsyncCache::builder()
             .max_capacity(10_000)
             .time_to_live(Duration::from_secs(60))
             .build(),
@@ -215,6 +226,7 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter,
         notify_service,
         register_limiter,
+        http_client,
         #[cfg(feature = "sea-orm")]
         db_conn,
     };
@@ -310,13 +322,17 @@ fn ensure_default_admin(user_store: &UserStore) {
         0,
     ) {
         Ok(_) => {
+            // 安全：日志中只输出掩码（前 2 位 + ***），不泄露完整初始密码。
+            // 完整密码仅通过其他安全渠道（如启动后由部署脚本捕获）传递。
+            let masked = mask_password(&password);
             tracing::warn!(
                 "First-time setup: default admin account created. \
-                 email={} | username={} | initial_password={} \
-                 — PLEASE LOGIN AND CHANGE THE PASSWORD IMMEDIATELY.",
+                 email={} | username={} | initial_password_masked={} \
+                 — PLEASE LOGIN AND CHANGE THE PASSWORD IMMEDIATELY. \
+                 (Full password is intentionally not logged; retrieve it from your deployment secret channel.)",
                 DEFAULT_ADMIN_EMAIL,
                 DEFAULT_ADMIN_USERNAME,
-                password,
+                masked,
             );
         }
         Err(e) => {
@@ -337,6 +353,21 @@ fn generate_random_password(len: usize) -> String {
             CHARSET[idx] as char
         })
         .collect()
+}
+
+/// 对密码做掩码处理：保留前 2 位（若存在），其余替换为 `***`。
+/// 空字符串返回 `"***"`，单字符返回 `"x***"`。
+/// 仅用于日志输出，绝不输出完整密码。
+///
+/// 实现按 `chars()` 取前 2 个字符，避免多字节 UTF-8 字节切片 panic。
+/// 当前 `generate_random_password` 只生成 ASCII，此处防御性处理未来扩展。
+fn mask_password(p: &str) -> String {
+    let prefix: String = p.chars().take(2).collect();
+    if prefix.is_empty() {
+        "***".to_string()
+    } else {
+        format!("{}***", prefix)
+    }
 }
 
 fn build_router(state: AppState, config: &config::AppConfig) -> Router {

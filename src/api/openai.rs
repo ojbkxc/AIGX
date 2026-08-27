@@ -71,7 +71,7 @@ pub struct AppState {
     ///
     /// key=客户端 IP，value=当前 60 秒窗口内已发起的注册请求数。
     /// TTL=60s，超限（>5）返回 429 Too Many Requests。
-    pub register_limiter: Arc<moka::future::Cache<String, u32>>,
+    pub register_limiter: Arc<crate::cache::AsyncCache<String, u32>>,
     /// SeaORM 数据库连接（可选后端）。
     ///
     /// - `None`：使用默认 FileStore（rusqlite bundled SQLite），零配置
@@ -80,6 +80,12 @@ pub struct AppState {
     /// 仅当启用 `sea-orm` feature 且 `config.database.url` 非空时为 `Some`。
     #[cfg(feature = "sea-orm")]
     pub db_conn: Option<DatabaseConnection>,
+    /// 共享 HTTP 客户端（性能热点 H5/H6）。
+    ///
+    /// 全应用复用同一个 `reqwest::Client`，避免每次请求新建客户端带来的
+    /// 连接池/TLS 握手开销。供 `bridge::openai::make_bridge` 与 admin 用量
+    /// 刷新等 HTTP 调用使用。`reqwest::Client` 内部已基于 Arc，clone 廉价。
+    pub http_client: Arc<reqwest::Client>,
 }
 
 impl AppState {
@@ -114,39 +120,10 @@ fn error_response(code: &str, message: &str, status: StatusCode) -> (StatusCode,
     )
 }
 
-/// 从请求中提取 API Key
-fn extract_api_key(headers: &HeaderMap) -> Option<String> {
-    if let Some(auth) = headers.get("authorization") {
-        if let Ok(auth_str) = auth.to_str() {
-            if let Some(key) = auth_str.strip_prefix("Bearer ") {
-                return Some(key.to_string());
-            }
-        }
-    }
-    if let Some(key) = headers.get("x-api-key") {
-        if let Ok(key_str) = key.to_str() {
-            return Some(key_str.to_string());
-        }
-    }
-    None
-}
-
-/// 从请求头提取客户端 IP（取 X-Forwarded-For 首段或 X-Real-IP）
-fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = xff.split(',').next() {
-            let ip = first.trim();
-            if !ip.is_empty() {
-                return Some(ip.to_string());
-            }
-        }
-    }
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
+/// 从请求中提取 API Key（H8：实现移至 `api::common`，此处通过 use 别名保持调用不变）
+use super::common::extract_api_key_bearer_first as extract_api_key;
+/// 从请求头提取客户端 IP（H8：实现移至 `api::common`）
+use super::common::extract_client_ip;
 
 /// 验证请求中的 API Key（简化版，仅校验存在性与有效性，返回 key id）
 fn verify_api_key(
@@ -202,7 +179,7 @@ pub fn resolve_bridge(state: &AppState, model: &str) -> Option<(Arc<dyn Bridge>,
                 let key = ch.decode_api_key();
                 if !key.is_empty() {
                     return Some((
-                        crate::bridge::openai::make_bridge(&ch.base_url, &key),
+                        crate::bridge::openai::make_bridge(&ch.base_url, &key, &state.http_client),
                         Some(ch.id.clone()),
                     ));
                 }
@@ -212,7 +189,7 @@ pub fn resolve_bridge(state: &AppState, model: &str) -> Option<(Arc<dyn Bridge>,
                 let key = ch.decode_api_key();
                 if !key.is_empty() {
                     return Some((
-                        crate::bridge::openai::make_bridge(&ch.base_url, &key),
+                        crate::bridge::openai::make_bridge(&ch.base_url, &key, &state.http_client),
                         Some(ch.id.clone()),
                     ));
                 }
@@ -333,11 +310,36 @@ fn parse_messages(value: Option<&Value>) -> Option<Vec<ChatMessage>> {
             .get("tool_call_id")
             .and_then(|t| t.as_str())
             .map(|s| s.to_string());
+        let tool_calls = msg
+            .get("tool_calls")
+            .and_then(|tc| tc.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        Some(crate::bridge::ToolCall {
+                            id: t.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
+                            function_name: t
+                                .get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            arguments: t
+                                .get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        })
+                    })
+                    .collect()
+            });
         messages.push(ChatMessage {
             role,
             content,
             name,
             tool_call_id,
+            tool_calls,
         });
     }
     Some(messages)
@@ -443,7 +445,11 @@ pub async fn handle_chat_completions(
     let chat_req = ChatFormat {
         model: model.clone(),
         messages,
-        max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
+        tools: body
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map(|arr| arr.to_vec()),
+        max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
         temperature: body.get("temperature").and_then(|v| v.as_f64()),
         top_p: body.get("top_p").and_then(|v| v.as_f64()),
         stream: is_stream,
@@ -465,6 +471,27 @@ pub async fn handle_chat_completions(
                             let mut buf = acc_for_map.lock();
                             crate::token_estimate::push_capped(&mut buf, text);
                         }
+                        let mut delta = serde_json::json!({
+                            "content": chunk.delta.content.unwrap_or_default(),
+                        });
+                        if let Some(tool_calls) = &chunk.delta.tool_calls {
+                            delta["tool_calls"] = Value::Array(
+                                tool_calls
+                                    .iter()
+                                    .map(|t| {
+                                        serde_json::json!({
+                                            "index": t.index,
+                                            "id": t.id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": t.function_name,
+                                                "arguments": t.arguments,
+                                            }
+                                        })
+                                    })
+                                    .collect(),
+                            );
+                        }
                         let sse_data = serde_json::json!({
                             "id": chunk.id,
                             "object": "chat.completion.chunk",
@@ -472,9 +499,7 @@ pub async fn handle_chat_completions(
                             "model": chunk.model,
                             "choices": [{
                                 "index": 0,
-                                "delta": {
-                                    "content": chunk.delta.content.unwrap_or_default(),
-                                },
+                                "delta": delta,
                                 "finish_reason": chunk.finish_reason.as_ref().map(|fr| finish_reason_str(fr)),
                             }]
                         })
@@ -598,38 +623,17 @@ pub async fn handle_chat_completions(
                     0.0,
                 );
 
-                // 计费扣减（用解析的 billing_group，问题 5；余额不足跳过 key 扣费，问题 6）
-                let cost = state.pricing_store.calculate_cost_quoted(
+                // 计费扣减（M10：复用 charge_usage，消除与非流式分支的重复实现）。
+                // 逻辑等价：calculate_cost_quoted → try_charge（用户余额不足跳过 key 扣费）→
+                // QuotaLow 通知 → charge_quota。返回 cost 供日志记录。
+                let cost = charge_usage(
+                    &state,
+                    &api_key,
                     &model,
+                    &billing_group,
                     response.usage.prompt_tokens,
                     response.usage.completion_tokens,
-                    &billing_group,
                 );
-                if cost > 0 {
-                    if let Some(uid) = &api_key.user_id {
-                        let charged = state.user_store.try_charge(uid, cost);
-                        // 额度不足或剩余过低通知
-                        if let Some(u) = state.user_store.get_by_id(uid) {
-                            let remaining = u.remaining();
-                            // 阈值：固定 1000 或 quota 的 10%，取较小者；扣费失败必通知
-                            let threshold = (u.quota / 10).max(1000).min(10000);
-                            if !charged || remaining < threshold {
-                                state.notify_service.notify_spawn(
-                                    crate::notify::NotifyEvent::QuotaLow {
-                                        user_email: u.email.clone(),
-                                        remaining,
-                                    },
-                                );
-                            }
-                        }
-                        // 问题 6：try_charge 失败时跳过 charge_quota，保持计费一致性
-                        if charged {
-                            let _ = state.api_key_store.charge_quota(&api_key.id, cost);
-                        }
-                    } else {
-                        let _ = state.api_key_store.charge_quota(&api_key.id, cost);
-                    }
-                }
 
                 // 事后限流记账（TPM）
                 let total_tokens = response.usage.prompt_tokens + response.usage.completion_tokens;
@@ -650,6 +654,27 @@ pub async fn handle_chat_completions(
                 log.request_id = Some(request_id.clone());
                 state.log_store.record_request(log);
 
+                let mut message = serde_json::json!({
+                    "role": "assistant",
+                    "content": response.message.content_str(),
+                });
+                if let Some(tool_calls) = &response.message.tool_calls {
+                    message["tool_calls"] = Value::Array(
+                        tool_calls
+                            .iter()
+                            .map(|tc| {
+                                serde_json::json!({
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.function_name,
+                                        "arguments": tc.arguments,
+                                    }
+                                })
+                            })
+                            .collect(),
+                    );
+                }
                 let json = serde_json::json!({
                     "id": response.id,
                     "object": "chat.completion",
@@ -657,10 +682,7 @@ pub async fn handle_chat_completions(
                     "model": response.model,
                     "choices": [{
                         "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": response.message.content_str(),
-                        },
+                        "message": message,
                         "finish_reason": finish_reason_str(&response.finish_reason),
                     }],
                     "usage": {

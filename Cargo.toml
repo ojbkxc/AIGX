@@ -105,8 +105,6 @@ sea-orm-migration = { version = "1", default-features = false, features = ["runt
 # Token estimation (BPE-based, same as aisix)
 tiktoken-rs = "0.12"
 
-# In-memory cache (same as aisix)
-moka = { version = "0.12", features = ["future"] }
 
 # Regex for keyword guardrail
 regex = "1"

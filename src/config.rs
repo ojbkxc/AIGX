@@ -41,6 +41,11 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AdminConfig {
+    /// [L7 遗留] 旧 admin 密码哈希。
+    ///
+    /// 当前首选流程：启动时 `ensure_default_admin` 用 user_store 创建随机密码管理员，
+    /// 登录走 user_store 校验，不依赖此字段。保留供旧 admin 回退分支（admin.rs handle_login）
+    /// 兜底使用。后续可在确认 user_store 初始化可靠后移除。
     pub password: String,
     #[serde(default)]
     pub session_secret: String,

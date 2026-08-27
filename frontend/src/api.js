@@ -10,6 +10,22 @@ function authHeaders() {
   return { 'Authorization': `Bearer ${token}` };
 }
 
+// 清除本地登录态并跳转登录页（401 / 鉴权失败时调用）
+function handleUnauthorized() {
+  try {
+    localStorage.removeItem('token');
+    localStorage.removeItem('email');
+    localStorage.removeItem('username');
+    localStorage.removeItem('expires_at');
+  } catch {
+    // 忽略 localStorage 异常
+  }
+  // 避免在已在登录页时再次跳转造成循环
+  if (window.location.pathname !== '/login') {
+    window.location.href = '/login';
+  }
+}
+
 async function request(method, path, body = null) {
   const headers = {
     'Content-Type': 'application/json',
@@ -20,9 +36,44 @@ async function request(method, path, body = null) {
     options.body = JSON.stringify(body);
   }
   const res = await fetch(`${BASE_URL}${path}`, options);
-  const data = await res.json();
+
+  // 401 未授权：清登录态并跳登录
+  if (res.status === 401) {
+    handleUnauthorized();
+    throw new Error('Unauthorized');
+  }
+
+  // 204 No Content：直接返回 null，不尝试解析 body
+  if (res.status === 204) {
+    return null;
+  }
+
+  // 先取文本，再按 Content-Type 决定是否解析为 JSON
+  const text = await res.text();
+  const contentType = res.headers.get('Content-Type') || '';
+  let data = null;
+  if (text) {
+    if (contentType.includes('application/json')) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // 声明是 JSON 但解析失败：把原文当作错误信息
+        if (!res.ok) throw new Error(text || `Request failed with status ${res.status}`);
+        data = text;
+      }
+    } else if (res.ok) {
+      // 非 JSON 成功响应：返回原始文本
+      data = text;
+    }
+    // 非 JSON 且失败：fallthrough 到下面的错误处理
+  }
+
   if (!res.ok) {
-    throw new Error(data.error || data.message || `Request failed with status ${res.status}`);
+    const errMsg =
+      (data && typeof data === 'object' && (data.error || data.message)) ||
+      (typeof text === 'string' && text) ||
+      `Request failed with status ${res.status}`;
+    throw new Error(errMsg);
   }
   return data;
 }

@@ -18,6 +18,7 @@ use crate::user::{self, hash_password, Role, User};
 use crate::user_group::UserGroup;
 
 use super::auth::SessionStore;
+use super::common::extract_client_ip;
 use super::openai::AppState;
 
 /// 登录请求
@@ -165,24 +166,6 @@ fn extract_session_token(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-/// 从请求头提取客户端 IP（取 X-Forwarded-For 首段或 X-Real-IP）。
-///
-/// 用于公开注册速率限制。无代理时返回 None，调用方回退到 "unknown"。
-fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = xff.split(',').next() {
-            let ip = first.trim();
-            if !ip.is_empty() {
-                return Some(ip.to_string());
-            }
-        }
-    }
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
 
 // ============================================================
 // 认证 API
@@ -197,6 +180,17 @@ pub async fn handle_login(
 
     // 优先走用户系统
     if let Some(u) = state.user_store.authenticate(&body.email, &body.password) {
+        // H3：旧 SHA256 密码登录成功后自动升级为 argon2（best-effort rehash）
+        // 旧版本用无盐 SHA256（64 位十六进制）存储密码，新版本统一用 argon2。
+        // rehash 失败不阻止登录，仅记录告警。
+        if u.password.len() == 64 && u.password.chars().all(|c| c.is_ascii_hexdigit()) {
+            let new_hash = hash_password(&body.password);
+            if let Err(e) = state.user_store.update(&u.id, |user| {
+                user.password = new_hash;
+            }) {
+                tracing::warn!("Failed to rehash legacy SHA256 password for {}: {e}", u.email);
+            }
+        }
         let session_secret = if config.admin.session_secret.is_empty() {
             uuid::Uuid::new_v4().to_string()
         } else {
@@ -217,6 +211,11 @@ pub async fn handle_login(
     }
 
     // 回退：旧 admin 模式（首次使用）
+    //
+    // [L7 遗留] 旧 admin 密码模式：使用 config.admin.password（明文哈希）而非 user_store。
+    // 当前启动时 `ensure_default_admin` 已用 user_store 创建随机密码管理员，正常流程
+    // 不会走到此分支。保留作为 user_store 创建失败时的兜底回退，避免首次登录完全不可用。
+    // 后续可在确认 user_store 初始化可靠后移除，并删除 config.admin.password 字段。
     if body.email != "admin" {
         return Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED));
     }
@@ -242,6 +241,17 @@ pub async fn handle_login(
     } else if !user::verify_password(&body.password, &config.admin.password) {
         return Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED));
     } else {
+        // H3：旧 SHA256 密码登录成功后自动升级为 argon2（best-effort rehash）
+        if config.admin.password.len() == 64
+            && config.admin.password.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            let new_hash = hash_password(&body.password);
+            let mut new_config = config.clone();
+            new_config.admin.password = new_hash;
+            if let Err(e) = state.config_manager.update(new_config).await {
+                tracing::warn!("Failed to rehash legacy admin password: {e}");
+            }
+        }
         config.admin.session_secret.clone()
     };
 
@@ -346,7 +356,8 @@ pub async fn handle_usage_summary(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
 
-    let http_client = reqwest::Client::new();
+    // 性能（H5/H6）：复用 AppState 的共享 reqwest::Client，避免每次请求新建客户端。
+    let http_client = state.http_client.clone();
     let accounts = state.account_pool.list();
     let mut graphql_results = Vec::new();
 
@@ -394,7 +405,8 @@ pub async fn handle_refresh_usage(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
 
-    let http_client = reqwest::Client::new();
+    // 性能（H5/H6）：复用 AppState 的共享 reqwest::Client，避免每次请求新建客户端。
+    let http_client = state.http_client.clone();
     let accounts = state.account_pool.list();
     let mut graphql_results = Vec::new();
 

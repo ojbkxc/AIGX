@@ -22,6 +22,10 @@ use super::{
 ///
 /// 每个 Channel（openai_compatible 类型）对应一个 OpenaiCompatibleBridge 实例。
 /// 由 ChannelStore 在调度时构造（或缓存）。
+///
+/// 性能：`client` 由调用方共享传入（AppState.http_client），避免每次请求新建
+/// reqwest::Client（含连接池/TLS 握手开销）。reqwest::Client 内部已基于 Arc，
+/// clone 廉价。
 pub struct OpenaiCompatibleBridge {
     name: String,
     base_url: String,
@@ -30,17 +34,29 @@ pub struct OpenaiCompatibleBridge {
 }
 
 impl OpenaiCompatibleBridge {
-    pub fn new(name: impl Into<String>, base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .build()
-            .expect("reqwest client");
+    /// 构造 Bridge，复用外部传入的 `reqwest::Client`（推荐从 AppState.http_client 取）。
+    pub fn with_client(
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        client: reqwest::Client,
+    ) -> Self {
         Self {
             name: name.into(),
             base_url: base_url.into(),
             api_key: api_key.into(),
             client,
         }
+    }
+
+    /// 兼容旧调用：内部新建 Client。不推荐，优先用 `with_client`。
+    #[deprecated(note = "use with_client to share a reqwest::Client from AppState")]
+    pub fn new(name: impl Into<String>, base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .expect("reqwest client");
+        Self::with_client(name, base_url, api_key, client)
     }
 
     fn chat_url(&self) -> String {
@@ -59,10 +75,31 @@ impl OpenaiCompatibleBridge {
                     Role::Assistant => "assistant",
                     Role::Tool => "tool",
                 };
-                serde_json::json!({
+                let mut msg = serde_json::json!({
                     "role": role,
                     "content": m.content.clone().unwrap_or_default(),
-                })
+                });
+                if let Some(tid) = &m.tool_call_id {
+                    msg["tool_call_id"] = Value::String(tid.clone());
+                }
+                if let Some(tool_calls) = &m.tool_calls {
+                    msg["tool_calls"] = Value::Array(
+                        tool_calls
+                            .iter()
+                            .map(|tc| {
+                                serde_json::json!({
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.function_name,
+                                        "arguments": tc.arguments,
+                                    }
+                                })
+                            })
+                            .collect(),
+                    );
+                }
+                msg
             })
             .collect();
 
@@ -71,6 +108,9 @@ impl OpenaiCompatibleBridge {
             "messages": messages,
             "stream": req.stream,
         });
+        if let Some(tools) = &req.tools {
+            body["tools"] = serde_json::json!(tools);
+        }
         if let Some(mt) = req.max_tokens {
             body["max_tokens"] = serde_json::json!(mt);
         }
@@ -138,7 +178,50 @@ impl Bridge for OpenaiCompatibleBridge {
                 .and_then(|c| c.as_str())
                 .unwrap_or("")
                 .to_string();
-            ChatMessage::assistant(content)
+            let tool_calls = json
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("tool_calls"))
+                .and_then(|tc| tc.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| {
+                            Some(super::ToolCall {
+                                id: t
+                                    .get("id")
+                                    .and_then(|i| i.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                function_name: t
+                                    .get("function")
+                                    .and_then(|f| f.get("name"))
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                arguments: t
+                                    .get("function")
+                                    .and_then(|f| f.get("arguments"))
+                                    .and_then(|a| a.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            })
+                        })
+                        .collect()
+                })
+                .map(|calls: Vec<super::ToolCall>| {
+                    // 对上游返回的参数做健壮化，保证下游拿到合法 JSON
+                    calls
+                        .into_iter()
+                        .map(|mut tc| {
+                            tc.arguments = super::tool_repair::repair_tool_arguments(&tc.arguments);
+                            tc
+                        })
+                        .collect()
+                });
+            let mut msg = ChatMessage::assistant(content);
+            msg.tool_calls = tool_calls;
+            msg
         };
 
         let finish_reason = json
@@ -349,7 +432,7 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
                 return Some(ChatChunk {
                     id: id.to_string(),
                     model: model.to_string(),
-                    delta: super::ChatDelta { content: None },
+                    delta: super::ChatDelta::default(),
                     finish_reason: Some(FinishReason::Stop),
                 });
             }
@@ -361,6 +444,35 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
                     .and_then(|d| d.get("content"))
                     .and_then(|c| c.as_str())
                     .map(String::from);
+                let tool_calls = v
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("delta"))
+                    .and_then(|d| d.get("tool_calls"))
+                    .and_then(|tc| tc.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|t| {
+                                Some(super::ToolCallDelta {
+                                    index: t
+                                        .get("index")
+                                        .and_then(|i| i.as_u64())
+                                        .unwrap_or(0) as usize,
+                                    id: t.get("id").and_then(|i| i.as_str()).map(String::from),
+                                    function_name: t
+                                        .get("function")
+                                        .and_then(|f| f.get("name"))
+                                        .and_then(|n| n.as_str())
+                                        .map(String::from),
+                                    arguments: t
+                                        .get("function")
+                                        .and_then(|f| f.get("arguments"))
+                                        .and_then(|a| a.as_str())
+                                        .map(String::from),
+                                })
+                            })
+                            .collect()
+                    });
                 let finish = v
                     .get("choices")
                     .and_then(|c| c.get(0))
@@ -370,7 +482,7 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
                 return Some(ChatChunk {
                     id: id.to_string(),
                     model: model.to_string(),
-                    delta: super::ChatDelta { content },
+                    delta: super::ChatDelta { content, tool_calls },
                     finish_reason: finish,
                 });
             }
@@ -379,11 +491,15 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
     None
 }
 
-/// 构造一个 OpenAI 兼容 Bridge 的 Arc 实例（供 ChannelStore/Hub 调度使用）
-pub fn make_bridge(base_url: &str, api_key: &str) -> Arc<dyn Bridge> {
-    Arc::new(OpenaiCompatibleBridge::new(
+/// 构造一个 OpenAI 兼容 Bridge 的 Arc 实例（供 ChannelStore/Hub 调度使用）。
+///
+/// 性能：复用外部传入的 `client`（应来自 AppState.http_client），避免每次请求
+/// 新建 reqwest::Client。`client.clone()` 廉价（内部 Arc）。
+pub fn make_bridge(base_url: &str, api_key: &str, client: &reqwest::Client) -> Arc<dyn Bridge> {
+    Arc::new(OpenaiCompatibleBridge::with_client(
         "openai_compatible",
         base_url,
         api_key,
+        client.clone(),
     ))
 }

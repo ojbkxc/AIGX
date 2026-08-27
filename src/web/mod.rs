@@ -24,16 +24,23 @@ pub fn serve_static_files() -> Router {
             tower::service_fn(move |_req: Request<Body>| {
                 let index_path = index_path.clone();
                 async move {
+                    // L1：Response::builder()...unwrap() 在 header/body 构造理论上不会失败，
+                    // 但 unwrap 在 panic=unwind 下会终止服务线程。改为降级返回 500，增强健壮性。
                     let result: Result<Response<Body>, Infallible> = match tokio::fs::read_to_string(&index_path).await {
                         Ok(content) => Ok(Response::builder()
                             .status(StatusCode::OK)
                             .header("content-type", "text/html; charset=utf-8")
                             .body(Body::from(content))
-                            .unwrap()),
+                            .unwrap_or_else(|_| {
+                                Response::builder()
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .body(Body::from("Internal Server Error"))
+                                    .unwrap_or_else(|_| Response::new(Body::from("Internal Server Error")))
+                            })),
                         Err(_) => Ok(Response::builder()
                             .status(StatusCode::NOT_FOUND)
                             .body(Body::from("Not Found"))
-                            .unwrap()),
+                            .unwrap_or_else(|_| Response::new(Body::from("Not Found")))),
                     };
                     result
                 }

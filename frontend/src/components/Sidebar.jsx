@@ -5,15 +5,19 @@ import { api } from '../api';
 
 const navItems = [
   { path: '/', labelKey: '仪表盘', icon: '📊', end: true },
-  { path: '/accounts', labelKey: '账号管理', icon: '🔑' },
+
+  { path: '/channels', labelKey: '渠道管理', icon: '🛰️' },
   { path: '/keys', labelKey: 'API 密钥', icon: '🔐' },
   { path: '/mappings', labelKey: '模型映射', icon: '🔄' },
+  { path: '/pricing', labelKey: '定价倍率', icon: '💲' },
   { path: '/users', labelKey: '用户管理', icon: '👥' },
+  { path: '/groups', labelKey: '用户分组', icon: '🏷️' },
   { path: '/wallet', labelKey: '钱包充值', icon: '💰' },
   { path: '/orders', labelKey: '订单记录', icon: '🧾' },
   { path: '/redemptions', labelKey: '兑换码', icon: '🎟️' },
   { path: '/logs', labelKey: '日志审计', icon: '📋' },
   { path: '/epay', labelKey: '易支付', icon: '💳' },
+  { path: '/notify', labelKey: '通知设置', icon: '🔔' },
   { path: '/settings', labelKey: '系统设置', icon: '⚙️' },
 ];
 

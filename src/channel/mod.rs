@@ -286,6 +286,10 @@ impl ChannelStore {
             // 加权随机抽取
             while !group.is_empty() {
                 let pick = if total_weight == 0 {
+                    // L2 安全性说明：此处 group 非空（外层 while 条件保证），
+                    // 故 slice::choose 必返回 Some，unwrap 不会 panic。
+                    // 实际上 total_weight 由各 weight.max(1) 累加，每项 ≥1，
+                    // group 非空时 total_weight ≥1，此分支理论上不可达，属防御性回退。
                     group.choose(&mut rng).copied().unwrap()
                 } else {
                     let mut r = rng.gen_range(0..total_weight);

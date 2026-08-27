@@ -20,41 +20,10 @@ use std::convert::Infallible;
 use super::openai::AppState;
 use crate::bridge::{BridgeContext, ChatFormat, ChatMessage, FinishReason, Role};
 
-/// 从请求中提取 API Key
-fn extract_api_key(headers: &HeaderMap) -> Option<String> {
-    // x-api-key header (Anthropic standard)
-    if let Some(key) = headers.get("x-api-key") {
-        if let Ok(key_str) = key.to_str() {
-            return Some(key_str.to_string());
-        }
-    }
-    // Authorization: Bearer sk-xxx (OpenAI compatible)
-    if let Some(auth) = headers.get("authorization") {
-        if let Ok(auth_str) = auth.to_str() {
-            if let Some(key) = auth_str.strip_prefix("Bearer ") {
-                return Some(key.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// 从请求头提取客户端 IP
-fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = xff.split(',').next() {
-            let ip = first.trim();
-            if !ip.is_empty() {
-                return Some(ip.to_string());
-            }
-        }
-    }
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
+// H8：extract_api_key / extract_client_ip 实现移至 `api::common`，此处通过 use 别名保持调用不变。
+// Anthropic 协议优先 x-api-key，故使用 xapi_first 变体。
+use super::common::extract_api_key_xapi_first as extract_api_key;
+use super::common::extract_client_ip;
 
 /// 验证 API Key 并执行全部鉴权检查（状态/过期/模型白名单/额度/IP）。
 ///
@@ -125,29 +94,85 @@ fn parse_anthropic_messages(messages: &[Value]) -> Vec<ChatMessage> {
         };
 
         let content = msg.get("content");
-        let text = match content {
-            Some(Value::String(s)) => s.clone(),
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut tool_calls: Vec<crate::bridge::ToolCall> = Vec::new();
+        let mut tool_results: Vec<(String, String)> = Vec::new();
+        match content {
+            Some(Value::String(s)) => text_parts.push(s.clone()),
             Some(Value::Array(parts)) => {
-                parts
-                    .iter()
-                    .filter_map(|p| {
-                        if p.get("type").and_then(|t| t.as_str()) == Some("text") {
-                            p.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
-                        } else {
-                            None
+                for p in parts {
+                    match p.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
+                                text_parts.push(t.to_string());
+                            }
                         }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                        Some("tool_use") => {
+                            let id = p.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                            let name = p
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let arguments = p
+                                .get("input")
+                                .map(|i| serde_json::to_string(i).unwrap_or_else(|_| "{}".into()))
+                                .unwrap_or_else(|| "{}".into());
+                            tool_calls.push(crate::bridge::ToolCall {
+                                id,
+                                function_name: name,
+                                arguments,
+                            });
+                        }
+                        Some("tool_result") => {
+                            let tid = p
+                                .get("tool_use_id")
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let t = p
+                                .get("content")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            tool_results.push((tid, t));
+                        }
+                        _ => {}
+                    }
+                }
             }
-            _ => String::new(),
-        };
+            _ => {}
+        }
 
+        // tool_result 转为 OpenAI tool 角色消息，供上游理解多轮工具调用
+        if !tool_results.is_empty() {
+            for (tid, t) in tool_results {
+                result.push(ChatMessage {
+                    role: Role::Tool,
+                    content: Some(t),
+                    name: None,
+                    tool_call_id: Some(tid),
+                    tool_calls: None,
+                });
+            }
+            continue;
+        }
+
+        let text = text_parts.join("\n");
         result.push(ChatMessage {
             role,
-            content: if text.is_empty() { None } else { Some(text) },
+            content: if text.is_empty() && tool_calls.is_empty() {
+                None
+            } else {
+                Some(text)
+            },
             name: None,
             tool_call_id: None,
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
         });
     }
     result
@@ -254,6 +279,7 @@ pub async fn handle_messages(
                 content: Some(system_text),
                 name: None,
                 tool_call_id: None,
+                tool_calls: None,
             });
         }
     }
@@ -261,7 +287,25 @@ pub async fn handle_messages(
     let chat_req = ChatFormat {
         model: model.clone(),
         messages: all_messages,
-        max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
+        // Anthropic tools 格式 → OpenAI tools 格式（上游统一 OpenAI 协议）
+        tools: body
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|tool| {
+                        serde_json::json!({
+                            "type": "function",
+                            "function": {
+                                "name": tool.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                                "description": tool.get("description").and_then(|d| d.as_str()).unwrap_or(""),
+                                "parameters": tool.get("input_schema").cloned().unwrap_or(Value::Object(Default::default())),
+                            }
+                        })
+                    })
+                    .collect()
+            }),
+        max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
         temperature: body.get("temperature").and_then(|v| v.as_f64()),
         top_p: body.get("top_p").and_then(|v| v.as_f64()),
         stream: is_stream,
@@ -315,32 +359,78 @@ pub async fn handle_messages(
                     ),
                 ]);
 
-                // 中间流：content_block_delta（累积内容）
-                let middle = stream.map(move |chunk_result| match chunk_result {
-                    Ok(chunk) => {
-                        if let Some(text) = &chunk.delta.content {
-                            let mut buf = acc_for_map.lock();
-                            crate::token_estimate::push_capped(&mut buf, text);
+                // 中间流：文本增量 + tool_use 增量
+                let has_tool = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let has_tool_middle = has_tool.clone();
+                let mut tool_started = false;
+                let middle = stream.flat_map(move |chunk_result| {
+                    use std::sync::atomic::Ordering;
+                    let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
+                    match chunk_result {
+                        Ok(chunk) => {
+                            if let Some(text) = &chunk.delta.content {
+                                let mut buf = acc_for_map.lock();
+                                crate::token_estimate::push_capped(&mut buf, text);
+                                events.push(Ok(Event::default().event("content_block_delta").data(
+                                    serde_json::json!({
+                                        "type": "content_block_delta",
+                                        "index": 0,
+                                        "delta": {"type": "text_delta", "text": text}
+                                    })
+                                    .to_string(),
+                                )));
+                            }
+                            if let Some(tool_calls) = &chunk.delta.tool_calls {
+                                has_tool_middle.store(true, Ordering::Relaxed);
+                                for tc in tool_calls {
+                                    // 首帧带 id/name，用于启动 tool_use 块
+                                    if !tool_started
+                                        && (tc.id.is_some() || tc.function_name.is_some())
+                                    {
+                                        let id = tc.id.clone().unwrap_or_else(|| {
+                                            format!("toolu_{}", uuid::Uuid::new_v4())
+                                        });
+                                        let name = tc.function_name.clone().unwrap_or_default();
+                                        events.push(Ok(
+                                            Event::default().event("content_block_start").data(
+                                                serde_json::json!({
+                                                    "type": "content_block_start",
+                                                    "index": tc.index,
+                                                    "content_block": {"type": "tool_use", "id": id, "name": name}
+                                                })
+                                                .to_string(),
+                                            ),
+                                        ));
+                                        tool_started = true;
+                                    }
+                                    if let Some(pj) = &tc.arguments {
+                                        events.push(Ok(
+                                            Event::default().event("content_block_delta").data(
+                                                serde_json::json!({
+                                                    "type": "content_block_delta",
+                                                    "index": tc.index,
+                                                    "delta": {"type": "input_json_delta", "partial_json": pj}
+                                                })
+                                                .to_string(),
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
+                            if events.is_empty() {
+                                events.push(Ok(Event::default().event("ping").data("{}")));
+                            }
                         }
-                        let text = chunk.delta.content.unwrap_or_default();
-                        let sse_data = serde_json::json!({
-                            "type": "content_block_delta",
-                            "index": 0,
-                            "delta": {"type": "text_delta", "text": text}
-                        })
-                        .to_string();
-                        Ok::<_, Infallible>(
-                            Event::default().event("content_block_delta").data(sse_data),
-                        )
+                        Err(e) => {
+                            let err = serde_json::json!({
+                                "type": "error",
+                                "error": {"type": "api_error", "message": e.to_string()}
+                            })
+                            .to_string();
+                            events.push(Ok(Event::default().event("error").data(err)));
+                        }
                     }
-                    Err(e) => {
-                        let err = serde_json::json!({
-                            "type": "error",
-                            "error": {"type": "api_error", "message": e.to_string()}
-                        })
-                        .to_string();
-                        Ok(Event::default().event("error").data(err))
-                    }
+                    futures::stream::iter(events)
                 });
 
                 // 后缀：计费 + content_block_stop + message_delta + message_stop（问题 3/7）
@@ -352,6 +442,7 @@ pub async fn handle_messages(
                 let group_fin = billing_group.clone();
                 let channel_id_fin = channel_id.clone();
                 let chat_req_fin = chat_req.clone();
+                let has_tool_fin = has_tool.clone();
                 let suffix = futures::stream::once(async move {
                     let output_text = acc.lock().clone();
                     let completion_tokens =
@@ -398,7 +489,12 @@ pub async fn handle_messages(
                     log.request_id = Some(request_id_fin);
                     state_fin.log_store.record_request(log);
 
-                    // 结束事件序列
+                    // 结束事件序列（工具调用时 stop_reason=tool_use）
+                    let stop_reason = if has_tool_fin.load(std::sync::atomic::Ordering::Relaxed) {
+                        "tool_use"
+                    } else {
+                        "end_turn"
+                    };
                     vec![
                         Ok::<_, Infallible>(
                             Event::default().event("content_block_stop").data(
@@ -410,7 +506,7 @@ pub async fn handle_messages(
                             Event::default().event("message_delta").data(
                                 serde_json::json!({
                                     "type": "message_delta",
-                                    "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                                    "delta": {"stop_reason": stop_reason, "stop_sequence": null},
                                     "usage": {"output_tokens": completion_tokens}
                                 })
                                 .to_string(),
@@ -460,22 +556,16 @@ pub async fn handle_messages(
                     0.0,
                 );
 
-                // 计费扣减（用解析的 billing_group，问题 5；余额不足跳过 key 扣费，问题 6）
-                let cost = state.pricing_store.calculate_cost_quoted(
+                // 计费扣减：复用 charge_usage 以保证 QuotaLow 通知等行为与流式分支一致
+                // （问题 5/6；M10 同类问题。原内联实现缺少 QuotaLow 通知，属行为 bug）
+                let cost = super::openai::charge_usage(
+                    &state,
+                    &api_key,
                     &model,
+                    &billing_group,
                     response.usage.prompt_tokens,
                     response.usage.completion_tokens,
-                    &billing_group,
                 );
-                if cost > 0 {
-                    if let Some(uid) = &api_key.user_id {
-                        if state.user_store.try_charge(uid, cost) {
-                            let _ = state.api_key_store.charge_quota(&api_key.id, cost);
-                        }
-                    } else {
-                        let _ = state.api_key_store.charge_quota(&api_key.id, cost);
-                    }
-                }
 
                 // 事后限流记账
                 let total_tokens = response.usage.prompt_tokens + response.usage.completion_tokens;
@@ -497,14 +587,32 @@ pub async fn handle_messages(
                 state.log_store.record_request(log);
 
                 let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
+                // 工具调用时输出 tool_use 内容块（与流式分支保持一致）
+                let mut content_blocks: Vec<Value> = Vec::new();
+                if let Some(tool_calls) = &response.message.tool_calls {
+                    for tc in tool_calls {
+                        let input = serde_json::from_str::<Value>(&tc.arguments)
+                            .unwrap_or_else(|_| Value::Object(Default::default()));
+                        content_blocks.push(serde_json::json!({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.function_name,
+                            "input": input,
+                        }));
+                    }
+                }
+                let text = response.message.content_str();
+                if !text.is_empty() {
+                    content_blocks.push(serde_json::json!({
+                        "type": "text",
+                        "text": text,
+                    }));
+                }
                 let anthropic_resp = serde_json::json!({
                     "id": msg_id,
                     "type": "message",
                     "role": "assistant",
-                    "content": [{
-                        "type": "text",
-                        "text": response.message.content_str()
-                    }],
+                    "content": content_blocks,
                     "model": response.model,
                     "stop_reason": to_anthropic_stop_reason(&response.finish_reason),
                     "stop_sequence": null,

@@ -450,5 +450,28 @@
   "mappingsPlaceholderModelValue": "e.g. @cf/meta/llama-3",
   "keysPlaceholderExpiresAt": "e.g. 1735689600",
   "keysPlaceholderQuotaLimit": "e.g. 5000000",
-  "keysPlaceholderIpLimit": "e.g. 192.168.1.1, 10.0.0.0/8"
+  "keysPlaceholderIpLimit": "e.g. 192.168.1.1, 10.0.0.0/8",
+
+  "定价倍率": "Pricing & Ratios",
+  "价格目录": "Price Directory",
+  "倍率配置": "Ratio Configuration",
+  "管理模型定价目录与全局倍率配置，支持按 token 计费与分组倍率": "Manage model pricing directory and global ratio configuration; supports token-based billing and group ratios",
+  "最终费用 = 基础费用 × 模型倍率 × 分组倍率。缺省倍率为 1.0。": "Final cost = base cost × model ratio × group ratio. Default ratio is 1.0.",
+  "模型名 → 倍率。例如": "Model name → ratio. e.g.",
+  "分组名 → 倍率。例如": "Group name → ratio. e.g.",
+
+  "管理用户分组与计费倍率，控制不同分组的模型访问权限与费率": "Manage user groups and billing ratios; control model access and rates per group",
+  "所有分组": "All Groups",
+  "新建分组": "New Group",
+  "加载用户分组": "Loading user groups",
+  "默认": "default",
+
+  "通知设置": "Notifications",
+  "已就绪": "Ready",
+
+  "出错了": "Something went wrong",
+  "页面渲染时发生异常，可以重试或返回首页。": "An error occurred while rendering the page. You can retry or go back to home.",
+  "未知错误": "Unknown error",
+  "重试": "Retry",
+  "返回首页": "Back to Home"
 }

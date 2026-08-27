@@ -17,6 +17,26 @@ use std::time::Duration;
 
 pub mod cf;
 pub mod openai;
+/// 工具调用健壮解析（借鉴 ds-free-api tool_parser 的归一化/修复思路，独立实现）
+pub mod tool_repair;
+
+/// 完整的工具调用（非流式响应）
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolCall {
+    pub id: String,
+    pub function_name: String,
+    /// 函数参数（JSON 字符串）
+    pub arguments: String,
+}
+
+/// 流式工具调用增量（对应 OpenAI delta.tool_calls 结构）
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolCallDelta {
+    pub index: usize,
+    pub id: Option<String>,
+    pub function_name: Option<String>,
+    pub arguments: Option<String>,
+}
 
 /// 聊天消息角色
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +54,8 @@ pub struct ChatMessage {
     pub content: Option<String>,
     pub name: Option<String>,
     pub tool_call_id: Option<String>,
+    /// 助手消息携带的工具调用（多轮对话回传）
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 impl ChatMessage {
@@ -43,6 +65,7 @@ impl ChatMessage {
             content: Some(content.into()),
             name: None,
             tool_call_id: None,
+            tool_calls: None,
         }
     }
 
@@ -57,6 +80,8 @@ impl ChatMessage {
 pub struct ChatFormat {
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    /// 工具定义列表（OpenAI 格式，透传给上游）
+    pub tools: Option<Vec<Value>>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
@@ -110,9 +135,11 @@ pub struct ChatChunk {
 }
 
 /// 聊天增量
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ChatDelta {
     pub content: Option<String>,
+    /// 流式工具调用增量（OpenAI delta.tool_calls）
+    pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
 /// 流式聊天块流

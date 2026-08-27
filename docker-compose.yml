@@ -13,6 +13,15 @@ services:
     volumes:
       # 数据目录挂载到 /data（非 root 用户可写，与 Dockerfile VOLUME 对齐）
       - aigx-data:/data
+    # L8：健康检查 — 探测 8080 端口连通性（应用暴露 /livez 存活探针，但 bash /dev/tcp
+    # 仅做 TCP 握手不依赖镜像内 wget/curl，最小化镜像可能未安装这些工具）。
+    # start_period 给启动留 30s 缓冲；连续 3 次失败才标记 unhealthy。
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/8080' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
   aigx-data:

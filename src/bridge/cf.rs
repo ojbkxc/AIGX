@@ -44,10 +44,31 @@ fn convert_to_cf_messages(msgs: &[ChatMessage]) -> Vec<Value> {
                 Role::Assistant => "assistant",
                 Role::Tool => "tool",
             };
-            serde_json::json!({
+            let mut msg = serde_json::json!({
                 "role": role,
                 "content": m.content_str(),
-            })
+            });
+            if let Some(tid) = &m.tool_call_id {
+                msg["tool_call_id"] = Value::String(tid.clone());
+            }
+            if let Some(tool_calls) = &m.tool_calls {
+                msg["tool_calls"] = Value::Array(
+                    tool_calls
+                        .iter()
+                        .map(|tc| {
+                            serde_json::json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function_name,
+                                    "arguments": tc.arguments,
+                                }
+                            })
+                        })
+                        .collect(),
+                );
+            }
+            msg
         })
         .collect()
 }
@@ -126,6 +147,34 @@ fn parse_openai_chunk(
         .and_then(|c| c.as_str())
         .map(|s| s.to_string());
 
+    let tool_calls = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("delta"))
+        .and_then(|d| d.get("tool_calls"))
+        .and_then(|tc| tc.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    Some(super::ToolCallDelta {
+                        index: t.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize,
+                        id: t.get("id").and_then(|i| i.as_str()).map(String::from),
+                        function_name: t
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                            .map(String::from),
+                        arguments: t
+                            .get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(|a| a.as_str())
+                            .map(String::from),
+                    })
+                })
+                .collect()
+        });
+
     let finish_reason = v
         .get("choices")
         .and_then(|c| c.as_array())
@@ -140,7 +189,7 @@ fn parse_openai_chunk(
             _ => FinishReason::Stop,
         });
 
-    if delta_content.is_none() && finish_reason.is_none() {
+    if delta_content.is_none() && tool_calls.is_none() && finish_reason.is_none() {
         return None;
     }
 
@@ -149,6 +198,7 @@ fn parse_openai_chunk(
         model: model.to_string(),
         delta: ChatDelta {
             content: delta_content,
+            tool_calls,
         },
         finish_reason,
     }))
@@ -174,12 +224,16 @@ impl CloudflareBridge {
     /// 构建 CF 聊天请求体
     fn build_cf_body(&self, req: &ChatFormat) -> Value {
         let messages = convert_to_cf_messages(&req.messages);
-        serde_json::json!({
+        let mut body = serde_json::json!({
             "messages": messages,
             "max_tokens": req.max_tokens.unwrap_or(2048),
             "temperature": req.temperature.unwrap_or(1.0),
             "top_p": req.top_p.unwrap_or(1.0),
-        })
+        });
+        if let Some(tools) = &req.tools {
+            body["tools"] = serde_json::json!(tools);
+        }
+        body
     }
 
     /// 将 CF 错误映射为 BridgeError
@@ -253,6 +307,49 @@ impl Bridge for CloudflareBridge {
 
         let response_text = extract_text_from_cf_response(&result).unwrap_or_default();
 
+        // 提取 CF 非流式响应中的工具调用（OpenAI 兼容结构）
+        let tool_calls = result
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|first| first.get("message"))
+            .and_then(|m| m.get("tool_calls"))
+            .and_then(|tc| tc.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        Some(super::ToolCall {
+                            id: t
+                                .get("id")
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            function_name: t
+                                .get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            arguments: t
+                                .get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .map(|calls: Vec<super::ToolCall>| {
+                calls
+                    .into_iter()
+                    .map(|mut tc| {
+                        tc.arguments = super::tool_repair::repair_tool_arguments(&tc.arguments);
+                        tc
+                    })
+                    .collect()
+            });
+
         let prompt_tokens = req
             .messages
             .iter()
@@ -260,11 +357,29 @@ impl Bridge for CloudflareBridge {
             .sum();
         let completion_tokens = estimate_tokens(&response_text);
 
+        let mut msg = ChatMessage::assistant(&response_text);
+        msg.tool_calls = tool_calls;
+
+        let finish_reason = result
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|first| first.get("finish_reason"))
+            .and_then(|f| f.as_str())
+            .map(|s| match s {
+                "stop" => FinishReason::Stop,
+                "length" => FinishReason::Length,
+                "content_filter" => FinishReason::ContentFilter,
+                "tool_calls" => FinishReason::ToolCalls,
+                _ => FinishReason::Stop,
+            })
+            .unwrap_or(FinishReason::Stop);
+
         Ok(ChatResponse {
             id: format!("chatcmpl-{}", uuid::Uuid::new_v4()),
             model: req.model.clone(),
-            message: ChatMessage::assistant(&response_text),
-            finish_reason: FinishReason::Stop,
+            message: msg,
+            finish_reason,
             usage: UsageStats::new(prompt_tokens, completion_tokens),
         })
     }
@@ -308,7 +423,7 @@ impl Bridge for CloudflareBridge {
                                 crate::sse::SseEvent::Done => Some(Ok(ChatChunk {
                                     id: id.clone(),
                                     model: model.clone(),
-                                    delta: ChatDelta { content: None },
+                                    delta: ChatDelta::default(),
                                     finish_reason: Some(FinishReason::Stop),
                                 })),
                             })
