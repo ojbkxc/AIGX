@@ -104,25 +104,6 @@ fn estimate_tokens(text: &str) -> u64 {
     (text.len() as f64 / 4.0).ceil() as u64
 }
 
-/// 将文本拆分为多个小块用于流式响应
-fn split_text_chunks(text: &str, chunk_size: usize) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut chunks = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let end = (i + chunk_size * 3).min(chars.len());
-        let chunk: String = chars[i..end].iter().collect();
-        if !chunk.is_empty() {
-            chunks.push(chunk);
-        }
-        i = end;
-    }
-    if chunks.is_empty() {
-        chunks.push(String::new());
-    }
-    chunks
-}
-
 /// 解析 OpenAI 风格 SSE chunk（CF stream:true 输出格式），转为内部 ChatChunk
 fn parse_openai_chunk(
     json_str: &str,

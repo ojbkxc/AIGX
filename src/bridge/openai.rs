@@ -7,7 +7,6 @@
 //! 请求体，执行 HTTP 调用，解析响应。流式响应转为 ChatChunk 流。
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;

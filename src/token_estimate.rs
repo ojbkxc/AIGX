@@ -124,7 +124,7 @@ pub fn fill_missing(
     upstream_completion: u32,
     output_text: Option<&str>,
 ) -> (u32, u32, bool) {
-    let mut prompt = upstream_prompt;
+    let prompt = upstream_prompt;
     let mut completion = upstream_completion;
     let mut estimated = false;
 

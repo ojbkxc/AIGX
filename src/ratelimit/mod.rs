@@ -20,12 +20,9 @@ pub mod limiter;
 pub mod store;
 pub mod window;
 
-pub use clock::{Clock, SystemClock, TestClock};
-pub use error::{RateLimitError, RateLimitScope};
-pub use limiter::{Limiter, RateLimitStatus, Reservation};
-pub use store::local::LocalStore;
-pub use store::{RateLimit, RateStore};
-pub use window::{FixedWindowCounter, WindowCheck};
+pub use error::RateLimitError;
+pub use limiter::{Limiter, Reservation};
+pub use store::RateLimit;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};

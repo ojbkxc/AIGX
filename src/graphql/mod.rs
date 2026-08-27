@@ -215,7 +215,6 @@ struct GraphQLSum {
 #[serde(rename_all = "camelCase")]
 struct GraphQLDimensions {
     date: String,
-    model_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

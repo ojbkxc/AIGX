@@ -6,10 +6,8 @@
 //! - 订阅购买和续费
 //! - 自动续费检查
 
-use anyhow::{anyhow, Result};
-use chrono::{DateTime, Utc, Duration};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 pub mod plan;
 pub mod user_subscription;

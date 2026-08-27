@@ -13,7 +13,7 @@
 
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use axum::http::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use axum::http::StatusCode;
