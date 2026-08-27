@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
     // 初始化公开注册速率限制器（per-IP，60s 窗口，最多 10000 个 IP 条目）
     // 使用基于 dashmap 的 AsyncCache 替代 moka（离线环境 moka 不可得，行为等效）
     let register_limiter = Arc::new(
-        crate::cache::AsyncCache::builder()
+        crate::cache::AsyncCache::<String, u32>::builder()
             .max_capacity(10_000)
             .time_to_live(Duration::from_secs(60))
             .build(),
@@ -169,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化登录限流器（per-IP，60s 窗口，最多 10000 个 IP 条目）
     let login_limiter = Arc::new(
-        crate::cache::AsyncCache::builder()
+        crate::cache::AsyncCache::<String, u32>::builder()
             .max_capacity(10_000)
             .time_to_live(Duration::from_secs(60))
             .build(),

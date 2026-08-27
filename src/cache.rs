@@ -223,11 +223,12 @@ where
     /// - `max_capacity`: 最大条目数
     /// - `ttl`: 条目存活时间
     pub fn new(max_capacity: u64, ttl: Duration) -> Self {
-        let inner: AsyncCache<K, V> = AsyncCache::builder()
-            .max_capacity(max_capacity)
-            .time_to_live(ttl)
-            .build();
-        Self { inner }
+        Self {
+            inner: AsyncCache::<K, V>::builder()
+                .max_capacity(max_capacity)
+                .time_to_live(ttl)
+                .build(),
+        }
     }
 
     /// 获取或插入。如果 key 不存在，调用 init 函数生成值并缓存。
@@ -312,7 +313,7 @@ mod tests {
     #[tokio::test]
     async fn test_async_cache_builder_and_ttl() {
         // 验证 AsyncCache builder + TTL 过期
-        let cache: AsyncCache<String, u32> = AsyncCache::builder()
+        let cache: AsyncCache<String, u32> = AsyncCache::<String, u32>::builder()
             .max_capacity(10)
             .time_to_live(Duration::from_millis(50))
             .build();
@@ -328,7 +329,7 @@ mod tests {
     #[tokio::test]
     async fn test_async_cache_capacity_eviction() {
         // max_capacity=2，插入 3 个不同 key 应触发驱逐
-        let cache: AsyncCache<u32, u32> = AsyncCache::builder()
+        let cache: AsyncCache<u32, u32> = AsyncCache::<u32, u32>::builder()
             .max_capacity(2)
             .time_to_live(Duration::MAX)
             .build();
@@ -342,7 +343,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_async_cache_invalidate_all() {
-        let cache: AsyncCache<u32, u32> = AsyncCache::builder()
+        let cache: AsyncCache<u32, u32> = AsyncCache::<u32, u32>::builder()
             .max_capacity(100)
             .time_to_live(Duration::from_secs(60))
             .build();
