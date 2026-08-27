@@ -149,6 +149,7 @@ mod tests {
                     content: Some(content.to_string()),
                     name: None,
                     tool_call_id: None,
+                    tool_calls: None,
                 }
             })
             .collect();

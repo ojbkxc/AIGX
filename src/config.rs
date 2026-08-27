@@ -41,14 +41,16 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AdminConfig {
-    /// [L7 遗留] 旧 admin 密码哈希。
-    ///
-    /// 当前首选流程：启动时 `ensure_default_admin` 用 user_store 创建随机密码管理员，
-    /// 登录走 user_store 校验，不依赖此字段。保留供旧 admin 回退分支（admin.rs handle_login）
-    /// 兜底使用。后续可在确认 user_store 初始化可靠后移除。
-    pub password: String,
+    /// 会话签名密钥。为空时首次启动由 `ensure_session_secret` 生成并持久化。
     #[serde(default)]
     pub session_secret: String,
+    /// 会话有效期（小时），默认 24。
+    #[serde(default = "default_session_ttl")]
+    pub session_ttl_hours: i64,
+}
+
+fn default_session_ttl() -> i64 {
+    24
 }
 
 /// 数据库配置 — 多数据库后端支持。

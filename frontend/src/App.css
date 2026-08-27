@@ -44,6 +44,7 @@
   --text-muted: #64748b;
   --primary-gradient: linear-gradient(135deg, #4f46e5 0%, #9333ea 50%, #db2777 100%);
   --accent-color: #9333ea;
+  --primary-color: #9333ea;
   --input-bg: rgba(241, 245, 249, 0.8);
   --input-border: rgba(0, 0, 0, 0.08);
   --input-text: #0f172a;
@@ -285,6 +286,28 @@ h1, h2, h3, h4 {
   transform: translateY(-1px);
 }
 
+/* 次要按钮（等宽于 outline，但带渐变底衬的轻量样式） */
+.btn-secondary {
+  background: rgba(168, 85, 247, 0.12);
+  color: var(--accent-color);
+  border: 1px solid rgba(168, 85, 247, 0.25);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: rgba(168, 85, 247, 0.2);
+  border-color: var(--accent-color);
+  transform: translateY(-1px);
+}
+
+:root[data-theme="light"] .btn-secondary {
+  background: rgba(147, 51, 234, 0.08);
+  border-color: rgba(147, 51, 234, 0.25);
+}
+
+:root[data-theme="light"] .btn-secondary:hover:not(:disabled) {
+  background: rgba(147, 51, 234, 0.14);
+}
+
 .btn-sm {
   padding: 6px 12px;
   font-size: 12px;
@@ -418,6 +441,32 @@ table tr:hover td {
 :root[data-theme="light"] .badge-danger {
   background: rgba(239, 68, 68, 0.1);
   color: #dc2626;
+}
+
+/* 中性/待处理状态徽章（与 success/warning/danger 同体系） */
+.badge-neutral {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+:root[data-theme="light"] .badge-neutral {
+  background: rgba(100, 116, 139, 0.1);
+  color: #64748b;
+}
+
+/* 密钥/订单号等长串文本（全局通用，替代 Keys.css 私有类） */
+.key-value {
+  font-family: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
+  font-size: 12px;
+  color: var(--code-color);
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  padding: 3px 8px;
+  border-radius: 6px;
+  word-break: break-all;
+  display: inline-block;
+  max-width: 100%;
 }
 
 /* Empty State */
@@ -636,11 +685,27 @@ table tr:hover td {
   background-color: var(--card-bg);
   border: 1px solid var(--border-color);
   border-radius: 18px;
-  padding: 30px;
+  padding: 0;
   box-shadow: var(--card-shadow);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
   margin-bottom: 24px;
+  overflow: hidden;
+}
+
+.section-card-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.section-card-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+
+.section-card-body {
+  padding: 20px 24px;
 }
 
 /* Code */
@@ -705,26 +770,6 @@ code {
   background-color: #f59e0b;
   color: #ffffff;
   border: none;
-}
-
-/* Progress Bar */
-.usage-progress-container {
-  width: 100%;
-  height: 6px;
-  background-color: rgba(255, 255, 255, 0.06);
-  border-radius: 3px;
-  overflow: hidden;
-}
-
-:root[data-theme="light"] .usage-progress-container {
-  background-color: rgba(0, 0, 0, 0.05);
-}
-
-.usage-progress-bar {
-  height: 100%;
-  background: var(--primary-gradient);
-  border-radius: 3px;
-  transition: width 1.2s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 /* Responsive */

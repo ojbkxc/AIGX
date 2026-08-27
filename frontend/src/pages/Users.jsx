@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import './Keys.css';
 
 export default function Users() {
   const [users, setUsers] = useState([]);
@@ -17,11 +16,6 @@ export default function Users() {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ email: '', username: '', password: '', role: 'user', quota: 0, status: 'active', group: 'default' });
   const [saving, setSaving] = useState(false);
-
-  // ── 用户分组管理状态 ──
-  const [showGroupModal, setShowGroupModal] = useState(false);
-  const [groupForm, setGroupForm] = useState({ name: '', ratio: '1', allowed_models: '', description: '' });
-  const [savingGroup, setSavingGroup] = useState(false);
 
   useEffect(() => {
     load();
@@ -120,69 +114,6 @@ export default function Users() {
     }
   };
 
-  // ── 用户分组管理 ──
-  const openGroupCreate = () => {
-    setGroupForm({ name: '', ratio: '1', allowed_models: '', description: '' });
-    setShowGroupModal(true);
-  };
-
-  const openGroupEdit = (g) => {
-    setGroupForm({
-      name: g.name || '',
-      ratio: String(g.ratio != null ? g.ratio : 1),
-      allowed_models: Array.isArray(g.allowed_models) ? g.allowed_models.join(', ') : (g.allowed_models || ''),
-      description: g.description || '',
-    });
-    setShowGroupModal(true);
-  };
-
-  const closeGroupModal = () => setShowGroupModal(false);
-
-  const handleSaveGroup = async () => {
-    if (!groupForm.name.trim()) {
-      setError(t('分组名称为必填项'));
-      return;
-    }
-    setSavingGroup(true);
-    setError('');
-    try {
-      const allowedModels = groupForm.allowed_models
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const payload = {
-        name: groupForm.name.trim(),
-        ratio: Number(groupForm.ratio) || 1,
-        allowed_models: allowedModels,
-        description: groupForm.description || '',
-      };
-      await api.upsertGroup(payload);
-      addToast(t('用户分组已保存'));
-      closeGroupModal();
-      load();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSavingGroup(false);
-    }
-  };
-
-  const handleDeleteGroup = async (name) => {
-    if (name === 'default') {
-      setError(t('不能删除默认分组'));
-      return;
-    }
-    if (!window.confirm(`${t('确定删除分组')} ${name}?`)) return;
-    setError('');
-    try {
-      await api.deleteGroup(name);
-      addToast(t('用户分组已删除'));
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-
   const fmtQuota = (q) => {
     const n = Number(q || 0);
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
@@ -223,55 +154,6 @@ export default function Users() {
         </div>
       )}
 
-      {/* ── 用户分组管理 ── */}
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-header">
-          <h2>{t('用户分组')} ({groups.length})</h2>
-          <button className="btn btn-primary" onClick={openGroupCreate}>{t('+ 新建分组')}</button>
-        </div>
-        <div className="card-body">
-          {groups.length === 0 ? (
-            <div className="empty-state"><p>{t('暂无自定义分组，使用默认分组 (倍率 1.0)')}</p></div>
-          ) : (
-            <div className="table-wrapper">
-              <table>
-                <thead>
-                  <tr>
-                    <th>{t('分组名称')}</th>
-                    <th>{t('倍率')}</th>
-                    <th>{t('允许模型')}</th>
-                    <th>{t('描述')}</th>
-                    <th>{t('操作')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {groups.map((g) => (
-                    <tr key={g.name}>
-                      <td><strong>{g.name}</strong></td>
-                      <td>{g.ratio != null ? g.ratio : 1}</td>
-                      <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                        {Array.isArray(g.allowed_models) && g.allowed_models.length > 0
-                          ? g.allowed_models.join(', ')
-                          : t('全部')}
-                      </td>
-                      <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{g.description || '—'}</td>
-                      <td>
-                        <div className="actions-cell">
-                          <button className="btn btn-outline btn-sm" onClick={() => openGroupEdit(g)}>{t('编辑')}</button>
-                          {g.name !== 'default' && (
-                            <button className="btn btn-danger btn-sm" onClick={() => handleDeleteGroup(g.name)}>{t('删除')}</button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </div>
-
       <div className="card">
         <div className="card-header">
           <h2>{t('所有用户')} ({users.length})</h2>
@@ -308,11 +190,7 @@ export default function Users() {
                       <td>{fmtQuota(u.used_quota)}</td>
                       <td>{fmtQuota((u.quota || 0) - (u.used_quota || 0))}</td>
                       <td>
-                        <span style={{
-                          padding: '2px 10px', borderRadius: 999, fontSize: 12,
-                          background: u.status === 'active' ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)',
-                          color: u.status === 'active' ? 'rgb(34,197,94)' : 'rgb(239,68,68)',
-                        }}>
+                        <span className={u.status === 'active' ? 'badge badge-success' : 'badge badge-danger'}>
                           {u.status === 'active' ? t('启用') : t('禁用')}
                         </span>
                       </td>
@@ -398,51 +276,6 @@ export default function Users() {
               <button className="btn btn-outline" onClick={closeModal}>{t('取消')}</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
                 {saving ? t('保存中...') : t('保存')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── 用户分组弹窗 ── */}
-      {showGroupModal && (
-        <div className="modal-overlay" onClick={closeGroupModal}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3>{t('用户分组')}</h3>
-              <button className="modal-close" onClick={closeGroupModal}>&times;</button>
-            </div>
-            <div className="modal-body">
-              <div className="form-group">
-                <label>{t('分组名称')} *</label>
-                <input className="form-input" placeholder={t('例如：vip')}
-                  value={groupForm.name}
-                  onChange={(e) => setGroupForm({ ...groupForm, name: e.target.value })}
-                  autoFocus />
-              </div>
-              <div className="form-group">
-                <label>{t('计费倍率')}</label>
-                <input className="form-input" type="number" step="0.01" placeholder="1.0"
-                  value={groupForm.ratio}
-                  onChange={(e) => setGroupForm({ ...groupForm, ratio: e.target.value })} />
-              </div>
-              <div className="form-group">
-                <label>{t('允许模型')} <span style={{ color: 'var(--text-muted)' }}>{t('(逗号分隔，留空则允许全部)')}</span></label>
-                <input className="form-input" placeholder="glm-5.2, deepseek-v3"
-                  value={groupForm.allowed_models}
-                  onChange={(e) => setGroupForm({ ...groupForm, allowed_models: e.target.value })} />
-              </div>
-              <div className="form-group">
-                <label>{t('描述')} <span style={{ color: 'var(--text-muted)' }}>{t('(可选)')}</span></label>
-                <input className="form-input" placeholder={t('分组描述')}
-                  value={groupForm.description}
-                  onChange={(e) => setGroupForm({ ...groupForm, description: e.target.value })} />
-              </div>
-            </div>
-            <div className="modal-footer">
-              <button className="btn btn-outline" onClick={closeGroupModal}>{t('取消')}</button>
-              <button className="btn btn-primary" onClick={handleSaveGroup} disabled={savingGroup}>
-                {savingGroup ? t('保存中...') : t('保存')}
               </button>
             </div>
           </div>

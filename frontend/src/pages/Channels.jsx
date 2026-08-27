@@ -169,9 +169,9 @@ export default function Channels() {
 
   return (
     <div className="channels-shell">
-      {/* PageIntro 标题区 — 参照 deepseek-pp 结构 */}
-      <div className="page-intro">
-        <div className="page-intro-text">
+      {/* PageIntro 标题区 */}
+      <div className="page-header">
+        <div>
           <h1>{t('渠道管理')}</h1>
           <p>{t('管理上游 AI 渠道（支持混用 Cloudflare + 第三方 OpenAI 兼容上游）')}</p>
         </div>

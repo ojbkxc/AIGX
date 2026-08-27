@@ -198,7 +198,7 @@ export default function Register() {
         </form>
 
         <div style={{ textAlign: 'center', marginTop: '16px' }}>
-          <Link to="/login" style={{ fontSize: '13px', color: 'var(--primary-color)', textDecoration: 'none' }}>
+          <Link to="/login" style={{ fontSize: '13px', color: 'var(--accent-color)', textDecoration: 'none' }}>
             {t('已有账号？立即登录')}
           </Link>
         </div>

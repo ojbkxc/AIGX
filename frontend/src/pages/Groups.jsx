@@ -104,8 +104,8 @@ export default function Groups() {
   return (
     <div className="groups-shell">
       {/* PageIntro 标题区 */}
-      <div className="page-intro">
-        <div className="page-intro-text">
+      <div className="page-header">
+        <div>
           <h1>{t('用户分组')}</h1>
           <p>{t('管理用户分组与计费倍率，控制不同分组的模型访问权限与费率')}</p>
         </div>

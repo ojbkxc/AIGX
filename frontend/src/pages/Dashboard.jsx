@@ -319,15 +319,8 @@ export default function Dashboard() {
           <div className="stat-value" style={{ fontSize: '32px' }}>{monthlyLimit != null ? fmtLimit(monthlyLimit) : '∞'}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>
             <span>{t('已用')} {fmtTok(monthlyUsed)}</span>
+            {monthlyPct != null && <span style={{ marginLeft: 12 }}>{monthlyPct.toFixed(1)}%</span>}
           </div>
-          {monthlyPct != null && (
-            <div className="stat-progress">
-              <div className="usage-progress-container">
-                <div className="usage-progress-bar" style={{ width: `${monthlyPct}%` }} />
-              </div>
-              <span className="stat-progress-label">{monthlyPct.toFixed(1)}%</span>
-            </div>
-          )}
         </div>
       </div>
 

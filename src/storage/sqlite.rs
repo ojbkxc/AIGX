@@ -76,6 +76,28 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// 写入已序列化的原始 JSON 字符串（迁移旧 FileStore 数据时使用，
+    /// 避免对已是 JSON 的内容二次序列化产生转义）
+    pub fn put_raw(&self, key: &str, raw_json: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())",
+            rusqlite::params![key, raw_json],
+        )?;
+        Ok(())
+    }
+
+    /// 判断键是否存在
+    pub fn contains(&self, key: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM kv WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// 删除键
     pub fn delete(&self, key: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock();

@@ -243,11 +243,7 @@ export default function Keys() {
                           {expired && t('(已过期)')}
                         </td>
                         <td>
-                          <span style={{
-                            padding: '2px 10px', borderRadius: 999, fontSize: 12,
-                            background: disabled ? 'rgba(239,68,68,0.15)' : 'rgba(34,197,94,0.15)',
-                            color: disabled ? 'rgb(239,68,68)' : 'rgb(34,197,94)',
-                          }}>
+                          <span className={disabled ? 'badge badge-danger' : 'badge badge-success'}>
                             {disabled ? t('禁用') : t('启用')}
                           </span>
                         </td>

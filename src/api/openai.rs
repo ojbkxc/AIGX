@@ -72,6 +72,11 @@ pub struct AppState {
     /// key=客户端 IP，value=当前 60 秒窗口内已发起的注册请求数。
     /// TTL=60s，超限（>5）返回 429 Too Many Requests。
     pub register_limiter: Arc<crate::cache::AsyncCache<String, u32>>,
+    /// 登录限流器（per-IP 计数缓存，同 IP 每分钟最多 10 次尝试）。
+    ///
+    /// key=客户端 IP，value=当前 60 秒窗口内已发起的登录尝试数。
+    /// TTL=60s，超限返回 429 Too Many Requests。
+    pub login_limiter: Arc<crate::cache::AsyncCache<String, u32>>,
     /// SeaORM 数据库连接（可选后端）。
     ///
     /// - `None`：使用默认 FileStore（rusqlite bundled SQLite），零配置

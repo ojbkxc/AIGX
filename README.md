@@ -84,8 +84,8 @@ data_dir = "~/.aigx"
 server_address = ""
 
 [admin]
-password = ""          # 首次登录后自动写入 SHA256 哈希
-session_secret = ""    # 自动生成
+session_secret = ""       # 会话签名密钥，首次启动自动生成并持久化
+session_ttl_hours = 24    # 会话有效期（小时）
 
 [usage]
 daily_limit = 0        # 0 表示不限
@@ -100,6 +100,11 @@ pay_methods = ["alipay", "wxpay"]
 price = 1.0            # 1 元 = 1 配额
 min_topup = 1
 custom_callback_address = ""
+
+# 数据库（可选，默认使用内置 SQLite KV，无需配置）
+[database]
+url = ""               # 留空使用 SQLite；例如 postgres://user:pass@host:5432/aigx
+max_connections = 10
 ```
 
 也可在管理面板「易支付」页直接配置。

@@ -81,6 +81,7 @@ async fn verify_admin(state: &AppState, headers: &HeaderMap) -> Result<AppConfig
         .ok_or_else(|| error_response("Not authenticated", StatusCode::UNAUTHORIZED))?;
 
     let config = state.config_manager.get().await;
+    let session_ttl = config.admin.session_ttl_hours.max(1);
 
     // 备用验证：直接比较 token 与 session_secret（简化模式）
     if !config.admin.session_secret.is_empty() && token == config.admin.session_secret {
@@ -88,7 +89,7 @@ async fn verify_admin(state: &AppState, headers: &HeaderMap) -> Result<AppConfig
     }
 
     // 使用 session store 验证
-    let session_store = SessionStore::new(&config.admin.session_secret, 24);
+    let session_store = SessionStore::new(&config.admin.session_secret, session_ttl);
     if let Some(sess) = session_store.validate_session(&token) {
         // 若存在用户系统，校验该用户仍为管理员且启用
         if let Some(u) = state.user_store.get_by_email(&sess.email) {
@@ -111,7 +112,8 @@ async fn verify_user(state: &AppState, headers: &HeaderMap) -> Result<User, (Sta
     let token = extract_session_token(headers)
         .ok_or_else(|| error_response("Not authenticated", StatusCode::UNAUTHORIZED))?;
     let config = state.config_manager.get().await;
-    let session_store = SessionStore::new(&config.admin.session_secret, 24);
+    let session_ttl = config.admin.session_ttl_hours.max(1);
+    let session_store = SessionStore::new(&config.admin.session_secret, session_ttl);
     let sess = session_store
         .validate_session(&token)
         .ok_or_else(|| error_response("Invalid session", StatusCode::UNAUTHORIZED))?;
@@ -174,11 +176,28 @@ fn extract_session_token(headers: &HeaderMap) -> Option<String> {
 /// POST /api/auth/login - 管理员/用户登录（邮箱）
 pub async fn handle_login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let config = state.config_manager.get().await;
+    // ── 登录限流：同 IP 每分钟最多 10 次 ──
+    const LOGIN_RATE_LIMIT_PER_MINUTE: u32 = 10;
+    let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+    let attempts = state.login_limiter.get(&client_ip).await.unwrap_or(0);
+    if attempts >= LOGIN_RATE_LIMIT_PER_MINUTE {
+        return Err(error_response(
+            "登录尝试过于频繁，请稍后再试",
+            StatusCode::TOO_MANY_REQUESTS,
+        ));
+    }
+    state
+        .login_limiter
+        .insert(client_ip, attempts + 1)
+        .await;
 
-    // 优先走用户系统
+    let config = state.config_manager.get().await;
+    let session_ttl = config.admin.session_ttl_hours.max(1);
+
+    // 用户系统认证（唯一路径；旧 admin.password 遗留已移除，admin 由 ensure_default_admin 建号）
     if let Some(u) = state.user_store.authenticate(&body.email, &body.password) {
         // H3：旧 SHA256 密码登录成功后自动升级为 argon2（best-effort rehash）
         // 旧版本用无盐 SHA256（64 位十六进制）存储密码，新版本统一用 argon2。
@@ -196,7 +215,7 @@ pub async fn handle_login(
         } else {
             config.admin.session_secret.clone()
         };
-        let session_store = SessionStore::new(&session_secret, 24);
+        let session_store = SessionStore::new(&session_secret, session_ttl);
         let session = session_store.create_session(&u.email);
         return Ok(Json(serde_json::json!({
             "success": true,
@@ -210,64 +229,30 @@ pub async fn handle_login(
         })));
     }
 
-    // 回退：旧 admin 模式（首次使用）
-    //
-    // [L7 遗留] 旧 admin 密码模式：使用 config.admin.password（明文哈希）而非 user_store。
-    // 当前启动时 `ensure_default_admin` 已用 user_store 创建随机密码管理员，正常流程
-    // 不会走到此分支。保留作为 user_store 创建失败时的兜底回退，避免首次登录完全不可用。
-    // 后续可在确认 user_store 初始化可靠后移除，并删除 config.admin.password 字段。
-    if body.email != "admin" {
-        return Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED));
+    // 用户名也是合法登录标识（与 user_store.authenticate 的 email 校验互补）
+    if let Some(u) = state.user_store.get_by_username(&body.email) {
+        if user::verify_password(&body.password, &u.password) {
+            let session_secret = if config.admin.session_secret.is_empty() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                config.admin.session_secret.clone()
+            };
+            let session_store = SessionStore::new(&session_secret, session_ttl);
+            let session = session_store.create_session(&u.email);
+            return Ok(Json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "token": session.token,
+                    "email": u.email,
+                    "username": u.username,
+                    "role": match u.role { Role::Admin => "admin", Role::User => "user" },
+                    "expires_at": session.expires_at
+                }
+            })));
+        }
     }
 
-    let password_hash = hash_password(&body.password);
-    let is_first_login = config.admin.password.is_empty();
-
-    let session_secret = if is_first_login {
-        let mut new_config = config.clone();
-        new_config.admin.password = password_hash;
-        new_config.admin.session_secret = if config.admin.session_secret.is_empty() {
-            uuid::Uuid::new_v4().to_string()
-        } else {
-            config.admin.session_secret.clone()
-        };
-        if let Err(e) = state.config_manager.update(new_config.clone()).await {
-            tracing::error!("Failed to save config: {e}");
-        }
-        if let Err(e) = state.user_store.create_with_username("admin", "admin", &body.password, Role::Admin, 0) {
-            tracing::error!("Failed to create admin user on first login: {e}");
-        }
-        new_config.admin.session_secret
-    } else if !user::verify_password(&body.password, &config.admin.password) {
-        return Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED));
-    } else {
-        // H3：旧 SHA256 密码登录成功后自动升级为 argon2（best-effort rehash）
-        if config.admin.password.len() == 64
-            && config.admin.password.chars().all(|c| c.is_ascii_hexdigit())
-        {
-            let new_hash = hash_password(&body.password);
-            let mut new_config = config.clone();
-            new_config.admin.password = new_hash;
-            if let Err(e) = state.config_manager.update(new_config).await {
-                tracing::warn!("Failed to rehash legacy admin password: {e}");
-            }
-        }
-        config.admin.session_secret.clone()
-    };
-
-    let session_store = SessionStore::new(&session_secret, 24);
-    let session = session_store.create_session(&body.email);
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "data": {
-            "token": session.token,
-            "email": body.email,
-            "username": "admin",
-            "role": "admin",
-            "expires_at": session.expires_at
-        }
-    })))
+    Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED))
 }
 
 /// POST /api/auth/register - 公开邮箱注册
@@ -2019,7 +2004,7 @@ pub(crate) fn record_audit(
 async fn admin_id_from_session(state: &AppState, headers: &HeaderMap) -> String {
     if let Some(token) = extract_session_token(headers) {
         let config = state.config_manager.get().await;
-        let session_store = SessionStore::new(&config.admin.session_secret, 24);
+        let session_store = SessionStore::new(&config.admin.session_secret, config.admin.session_ttl_hours.max(1));
         if let Some(sess) = session_store.validate_session(&token) {
             return sess.email;
         }

@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import './Keys.css';
 
 export default function Redemptions() {
   const [items, setItems] = useState([]);
@@ -68,9 +67,8 @@ export default function Redemptions() {
 
   const statusBadge = (r) => {
     const text = r.status === 1 ? (r.expires_at > 0 && r.expires_at < Date.now() / 1000 ? t('已过期') : t('未使用')) : r.status === 2 ? t('已使用') : t('已禁用');
-    const color = r.status === 1 ? 'rgba(34,197,94,0.15)' : r.status === 2 ? 'rgba(148,163,184,0.15)' : 'rgba(239,68,68,0.15)';
-    const textColor = r.status === 1 ? 'rgb(34,197,94)' : r.status === 2 ? 'rgb(148,163,184)' : 'rgb(239,68,68)';
-    return <span style={{ padding: '2px 10px', borderRadius: 999, fontSize: 12, background: color, color: textColor }}>{text}</span>;
+    const cls = r.status === 1 ? 'badge badge-success' : r.status === 2 ? 'badge badge-neutral' : 'badge badge-danger';
+    return <span className={cls}>{text}</span>;
   };
 
   const totalPages = Math.ceil(total / 20);

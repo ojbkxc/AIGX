@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import './Keys.css';
 
 export default function Epay() {
   const [cfg, setCfg] = useState({

@@ -94,8 +94,8 @@ export default function Notify() {
   return (
     <div className="notify-shell">
       {/* PageIntro 标题区 */}
-      <div className="page-intro">
-        <div className="page-intro-text">
+      <div className="page-header">
+        <div>
           <h1>{t('通知设置')}</h1>
           <p>{t('配置 Telegram Bot 与 SMTP 邮件通知。事件触发时推送：充值成功 / 额度不足 / 渠道故障。')}</p>
         </div>

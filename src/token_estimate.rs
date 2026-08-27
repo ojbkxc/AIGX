@@ -182,6 +182,7 @@ mod tests {
                 content: Some("Hello".into()),
                 name: None,
                 tool_call_id: None,
+                tool_calls: None,
             }],
             max_tokens: None,
             temperature: None,

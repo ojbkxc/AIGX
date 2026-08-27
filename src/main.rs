@@ -74,10 +74,10 @@ async fn main() -> anyhow::Result<()> {
     ensure_session_secret(&config_manager).await;
     let config = config_manager.get().await;
 
-    // 初始化存储
+    // 初始化存储（默认 SQLite 后端；--no-default-features 构建降级为 JSON 文件）
     let data_dir = crate::config::expand_path(&config.server.data_dir);
     tokio::fs::create_dir_all(&data_dir).await?;
-    let store = Arc::new(FileStore::new(data_dir.join("data")));
+    let store = Arc::new(FileStore::open(data_dir.join("data"))?);
 
     // 初始化账号池
     let account_pool = Arc::new(AccountPool::new(store.clone()));
@@ -167,6 +167,14 @@ async fn main() -> anyhow::Result<()> {
             .build(),
     );
 
+    // 初始化登录限流器（per-IP，60s 窗口，最多 10000 个 IP 条目）
+    let login_limiter = Arc::new(
+        crate::cache::AsyncCache::builder()
+            .max_capacity(10_000)
+            .time_to_live(Duration::from_secs(60))
+            .build(),
+    );
+
     // 初始化 SeaORM 数据库连接（可选后端）
     //
     // 渐进式迁移策略：
@@ -226,6 +234,7 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter,
         notify_service,
         register_limiter,
+        login_limiter,
         http_client,
         #[cfg(feature = "sea-orm")]
         db_conn,

@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import './Keys.css';
 
 export default function Wallet() {
   const [me, setMe] = useState(null);
@@ -238,11 +237,11 @@ export default function Wallet() {
                       <td>{fmtQuota(o.amount * (epay?.price || 1))}</td>
                       <td>{o.payment_method}</td>
                       <td>
-                        <span style={{
-                          padding: '2px 10px', borderRadius: 999, fontSize: 12,
-                          background: o.status === 'paid' ? 'rgba(34,197,94,0.15)' : o.status === 'expired' ? 'rgba(148,163,184,0.15)' : 'rgba(234,179,8,0.15)',
-                          color: o.status === 'paid' ? 'rgb(34,197,94)' : o.status === 'expired' ? 'rgb(148,163,184)' : 'rgb(234,179,8)',
-                        }}>
+                        <span className={
+                          o.status === 'paid' ? 'badge badge-success'
+                            : o.status === 'expired' ? 'badge badge-neutral'
+                              : 'badge badge-warning'
+                        }>
                           {o.status === 'paid' ? t('已支付') : o.status === 'expired' ? t('已过期') : t('待支付')}
                         </span>
                       </td>

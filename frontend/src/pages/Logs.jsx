@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import './Keys.css';
 
 export default function Logs() {
   const [tab, setTab] = useState('requests');
@@ -169,11 +168,7 @@ export default function Logs() {
                         <td>{l.cost}</td>
                         <td>{l.latency_ms}ms</td>
                         <td>
-                          <span style={{
-                            padding: '2px 8px', borderRadius: 999, fontSize: 11,
-                            background: l.status_code < 400 ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)',
-                            color: l.status_code < 400 ? 'rgb(34,197,94)' : 'rgb(239,68,68)',
-                          }}>{l.status_code}</span>
+                          <span className={l.status_code < 400 ? 'badge badge-success' : 'badge badge-danger'}>{l.status_code}</span>
                         </td>
                         <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {l.error_msg || '—'}

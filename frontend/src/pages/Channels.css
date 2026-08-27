@@ -1,34 +1,11 @@
 /* Channels.css — 渠道管理页面样式
  * 保持 cf-ai-gw 玻璃拟态：复用 App.css 的 CSS 变量体系
- * 融入 deepseek-pp 结构模式：shell + page-intro + content 分层 */
+ * 融入 deepseek-pp 结构模式：shell + content 分层（标题区统一使用全局 page-header） */
 
 .channels-shell {
   display: flex;
   flex-direction: column;
   gap: 4px;
-}
-
-/* PageIntro 标题区 — 参照 deepseek-pp PageIntro 组件 */
-.page-intro {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 24px;
-  gap: 16px;
-}
-
-.page-intro-text h1 {
-  font-size: 24px;
-  font-weight: 700;
-  letter-spacing: -0.5px;
-  font-family: 'Outfit', sans-serif;
-}
-
-.page-intro-text p {
-  font-size: 14px;
-  color: var(--text-muted);
-  margin-top: 6px;
-  line-height: 1.5;
 }
 
 .channels-content {
@@ -103,11 +80,4 @@
 
 .pw-weight {
   color: var(--text-muted);
-}
-
-@media (max-width: 768px) {
-  .page-intro {
-    flex-direction: column;
-    align-items: flex-start;
-  }
 }

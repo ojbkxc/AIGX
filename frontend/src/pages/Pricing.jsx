@@ -138,8 +138,8 @@ export default function Pricing() {
   return (
     <div className="pricing-shell">
       {/* PageIntro 标题区 */}
-      <div className="page-intro">
-        <div className="page-intro-text">
+      <div className="page-header">
+        <div>
           <h1>{t('定价倍率')}</h1>
           <p>{t('管理模型定价目录与全局倍率配置，支持按 token 计费与分组倍率')}</p>
         </div>
