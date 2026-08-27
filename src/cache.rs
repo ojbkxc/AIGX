@@ -223,12 +223,11 @@ where
     /// - `max_capacity`: 最大条目数
     /// - `ttl`: 条目存活时间
     pub fn new(max_capacity: u64, ttl: Duration) -> Self {
-        Self {
-            inner: AsyncCache::builder()
-                .max_capacity(max_capacity)
-                .time_to_live(ttl)
-                .build(),
-        }
+        let inner: AsyncCache<K, V> = AsyncCache::builder()
+            .max_capacity(max_capacity)
+            .time_to_live(ttl)
+            .build();
+        Self { inner }
     }
 
     /// 获取或插入。如果 key 不存在，调用 init 函数生成值并缓存。
