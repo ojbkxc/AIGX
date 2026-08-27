@@ -1,6 +1,7 @@
 mod account;
 mod api;
 mod bridge;
+mod cache;
 mod channel;
 mod config;
 mod error_translate;
