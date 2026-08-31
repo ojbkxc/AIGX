@@ -483,8 +483,8 @@ impl Drop for StreamUsageGuard {
 /// 还是被 hyper 中途 drop（客户端断连），守卫都会随之 drop 并触发兜底计费。
 /// 守卫与后缀事件通过原子标志互斥，计费恰好执行一次。
 pub(crate) struct GuardedStream<S> {
-    inner: std::pin::Pin<Box<S>>,
-    _guard: StreamUsageGuard,
+    pub(crate) inner: std::pin::Pin<Box<S>>,
+    pub(crate) _guard: StreamUsageGuard,
 }
 
 impl<S: futures::Stream> futures::Stream for GuardedStream<S> {
