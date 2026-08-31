@@ -91,7 +91,10 @@ impl CfApiClient {
                                 }
                             }
                         } else if is_auth_error(status.as_u16()) {
-                            return Err(CfError::AuthError(format!("Auth failed: {status}")));
+                            // B07：认证失败只代表当前账号 token 失效，
+                            // 记录后跳过本账号剩余重试、继续尝试下一账号，避免一坏全坏
+                            last_error = CfError::AuthError(format!("Auth failed: {status}"));
+                            break;
                         } else if status.as_u16() == 429 {
                             let retry_after = resp
                                 .headers()
@@ -220,7 +223,9 @@ impl CfApiClient {
                             .map(|chunk| chunk.map_err(|e| CfError::NetworkError(format!("stream read error: {e}"))));
                         return Ok(Box::pin(stream));
                     } else if is_auth_error(status.as_u16()) {
-                        return Err(CfError::AuthError(format!("Auth failed: {status}")));
+                        // B07：认证失败只代表当前账号 token 失效，继续尝试下一账号
+                        last_error = CfError::AuthError(format!("Auth failed: {status}"));
+                        continue;
                     } else if status.as_u16() == 429 {
                         last_error = CfError::RateLimited { retry_after: None };
                         continue;
@@ -287,7 +292,10 @@ impl CfApiClient {
                                 }
                             }
                         } else if is_auth_error(status.as_u16()) {
-                            return Err(CfError::AuthError(format!("Auth failed: {status}")));
+                            // B07：认证失败只代表当前账号 token 失效，
+                            // 记录后跳过本账号剩余重试、继续尝试下一账号，避免一坏全坏
+                            last_error = CfError::AuthError(format!("Auth failed: {status}"));
+                            break;
                         } else if status.as_u16() == 429 {
                             break;
                         } else if !is_retryable_status(status.as_u16()) {

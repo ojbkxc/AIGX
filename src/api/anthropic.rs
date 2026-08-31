@@ -36,16 +36,22 @@ fn verify_api_key_full(
     let key = extract_api_key(headers)
         .ok_or_else(|| anthropic_error("authentication_error", "Missing API key", StatusCode::UNAUTHORIZED))?;
     let ip = extract_client_ip(headers);
+    // B22：按结构化错误变体映射状态码，取代原先的 msg.contains(...) 文本匹配
     state
         .api_key_store
         .validate_request(&key, model, ip.as_deref())
-        .map_err(|msg| {
-            let status = if msg.contains("not allowed") || msg.contains("quota") || msg.contains("expired") {
-                StatusCode::FORBIDDEN
-            } else {
-                StatusCode::UNAUTHORIZED
+        .map_err(|e| {
+            use super::auth::ApiKeyError;
+            let status = match e {
+                // 凭证本身无效：401
+                ApiKeyError::Invalid | ApiKeyError::Disabled => StatusCode::UNAUTHORIZED,
+                // 凭证有效但无权限/过期/超额：403
+                ApiKeyError::Expired
+                | ApiKeyError::ModelNotAllowed(_)
+                | ApiKeyError::QuotaExhausted
+                | ApiKeyError::IpNotAllowed(_) => StatusCode::FORBIDDEN,
             };
-            anthropic_error("authentication_error", &msg, status)
+            anthropic_error("authentication_error", &e.to_string(), status)
         })
 }
 
@@ -229,20 +235,20 @@ pub async fn handle_messages(
         Err(e) => return e.into_response(),
     };
 
-    let (bridge, channel_id) = match super::openai::resolve_bridge(&state, &model) {
-        Some(pair) => pair,
-        None => {
-            return anthropic_error(
-                "service_unavailable",
-                "No bridge available for the requested model",
-                StatusCode::SERVICE_UNAVAILABLE,
-            )
-            .into_response()
-        }
-    };
-    // 标记渠道已使用（问题 4）
-    if let Some(cid) = &channel_id {
-        state.channel_store.mark_used(cid);
+    // B09：前置校验模型定价——未配置价格的模型拒绝请求，避免免费用量
+    if let Err(e) = super::openai::ensure_model_priced(&state, &model) {
+        return e.into_response();
+    }
+
+    // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
+    let candidates = super::openai::resolve_bridges(&state, &model);
+    if candidates.is_empty() {
+        return anthropic_error(
+            "service_unavailable",
+            "No bridge available for the requested model",
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+        .into_response();
     }
 
     let is_stream = body
@@ -314,8 +320,65 @@ pub async fn handle_messages(
     let ctx = BridgeContext::new(request_id.clone(), model.clone());
 
     if is_stream {
-        match bridge.chat_stream(&chat_req, &ctx).await {
-            Ok(stream) => {
+        // B06：failover 循环——依次尝试候选渠道建立流，仅对上游可重试错误切换
+        let mut stream_opt = None;
+        let mut used_channel_id: Option<String> = None;
+        let mut last_error: Option<crate::bridge::BridgeError> = None;
+        for (bridge, cid) in candidates {
+            if let Some(c) = &cid {
+                state.channel_store.mark_used(c);
+            }
+            match bridge.chat_stream(&chat_req, &ctx).await {
+                Ok(s) => {
+                    stream_opt = Some(s);
+                    used_channel_id = cid;
+                    break;
+                }
+                Err(e) => {
+                    if !super::openai::is_retryable_bridge_error(&e) {
+                        // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
+                        last_error = Some(e);
+                        used_channel_id = cid;
+                        break;
+                    }
+                    tracing::warn!("messages stream failover: channel {cid:?} failed: {e}, trying next channel");
+                    last_error = Some(e);
+                }
+            }
+        }
+        let stream = match stream_opt {
+            Some(s) => s,
+            None => {
+                let e = last_error.unwrap_or_else(|| {
+                    crate::bridge::BridgeError::AllAccountsFailed(
+                        "all channels failed for streaming request".into(),
+                    )
+                });
+                let latency_ms = request_start.elapsed().as_millis() as u64;
+                let status_code = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let mut log = crate::log::RequestLog::new();
+                log.user_id = api_key.user_id.clone();
+                log.key_id = Some(api_key.id.clone());
+                log.channel_id = used_channel_id.clone();
+                log.model = model.clone();
+                log.latency_ms = latency_ms;
+                log.status_code = status_code.as_u16();
+                log.error_msg = Some(e.to_string());
+                log.ip = client_ip.clone();
+                log.request_id = Some(request_id.clone());
+                state.log_store.record_request(log);
+                rate_bundle.commit_tokens(0).await;
+                // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
+                if status_code.as_u16() >= 500 {
+                    state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                        channel_name: model.clone(),
+                        error: e.to_string(),
+                    });
+                }
+                return anthropic_error(e.error_type(), &e.to_string(), status_code).into_response();
+            }
+        };
+        {
                 // 累积输出文本用于流结束时估算 token（问题 3）
                 let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
                 let acc_for_map = acc.clone();
@@ -434,60 +497,40 @@ pub async fn handle_messages(
                 });
 
                 // 后缀：计费 + content_block_stop + message_delta + message_stop（问题 3/7）
-                let state_fin = state.clone();
-                let api_key_fin = api_key.clone();
-                let model_fin = model.clone();
-                let client_ip_fin = client_ip.clone();
-                let request_id_fin = request_id.clone();
-                let group_fin = billing_group.clone();
-                let channel_id_fin = channel_id.clone();
-                let chat_req_fin = chat_req.clone();
+                // B05：计费状态由后缀事件与 Drop 守卫共享（原子标志互斥）——
+                // 正常结束时后缀事件计费；客户端断连导致流被 drop 时由守卫兜底。
+                let billing = std::sync::Arc::new(super::openai::StreamBillingState {
+                    state: state.clone(),
+                    api_key: api_key.clone(),
+                    model: model.clone(),
+                    group: billing_group.clone(),
+                    chat_req: chat_req.clone(),
+                    acc: acc.clone(),
+                    charged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    rate_bundle: Some(rate_bundle.clone()),
+                    request_start,
+                    client_ip: client_ip.clone(),
+                    request_id: request_id.clone(),
+                    channel_id: used_channel_id.clone(),
+                });
+                let billing_fin = billing.clone();
                 let has_tool_fin = has_tool.clone();
                 let suffix = futures::stream::once(async move {
-                    let output_text = acc.lock().clone();
-                    let completion_tokens =
-                        crate::token_estimate::count_text(&model_fin, &output_text) as u64;
-                    let prompt_tokens =
-                        crate::token_estimate::count_chat_prompt(&model_fin, &chat_req_fin) as u64;
+                    // completion tokens 需在 message_delta 事件中回显，先估算
+                    let completion_tokens = {
+                        let output_text = billing_fin.acc.lock().clone();
+                        crate::token_estimate::count_text(&billing_fin.model, &output_text) as u64
+                    };
 
-                    // 累计用量
-                    state_fin.usage_tracker.accumulate(
-                        prompt_tokens,
-                        completion_tokens,
-                        0,
-                        0,
-                        0,
-                        0.0,
-                    );
-
-                    // 扣费（问题 2/5/6）
-                    let cost = super::openai::charge_usage(
-                        &state_fin,
-                        &api_key_fin,
-                        &model_fin,
-                        &group_fin,
-                        prompt_tokens,
-                        completion_tokens,
-                    );
-
-                    // 事后限流记账
-                    let total_tokens = prompt_tokens + completion_tokens;
-                    rate_bundle.commit_tokens(total_tokens).await;
-
-                    // 记录请求日志（含 channel_id，问题 4）
-                    let mut log = crate::log::RequestLog::new();
-                    log.user_id = api_key_fin.user_id.clone();
-                    log.key_id = Some(api_key_fin.id.clone());
-                    log.channel_id = channel_id_fin;
-                    log.model = model_fin.clone();
-                    log.input_tokens = prompt_tokens;
-                    log.output_tokens = completion_tokens;
-                    log.cost = cost;
-                    log.latency_ms = 0;
-                    log.status_code = 200;
-                    log.ip = client_ip_fin;
-                    log.request_id = Some(request_id_fin);
-                    state_fin.log_store.record_request(log);
+                    // 原子抢占计费权：断连场景守卫可能已兜底计费，双保险防重复
+                    if !billing_fin
+                        .charged
+                        .swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        let (prompt_tokens, completion_tokens) = billing_fin.finalize();
+                        // 事后限流记账
+                        rate_bundle.commit_tokens(prompt_tokens + completion_tokens).await;
+                    }
 
                     // 结束事件序列（工具调用时 stop_reason=tool_use）
                     let stop_reason = if has_tool_fin.load(std::sync::atomic::Ordering::Relaxed) {
@@ -523,15 +566,55 @@ pub async fn handle_messages(
                 .flatten();
 
                 let combined = prefix.chain(middle).chain(suffix);
-                Sse::new(combined).into_response()
+
+                // B05：包装守卫流——流被 drop（含客户端断连）时兜底计费
+                let guarded = super::openai::GuardedStream {
+                    inner: Box::pin(combined),
+                    _guard: super::openai::StreamUsageGuard::new(billing),
+                };
+                return Sse::new(guarded).into_response();
+        }
+    } else {
+        // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
+        let mut response_opt = None;
+        let mut used_channel_id: Option<String> = None;
+        let mut last_error: Option<crate::bridge::BridgeError> = None;
+        for (bridge, cid) in candidates {
+            if let Some(c) = &cid {
+                state.channel_store.mark_used(c);
             }
-            Err(e) => {
+            match bridge.chat(&chat_req, &ctx).await {
+                Ok(resp) => {
+                    response_opt = Some(resp);
+                    used_channel_id = cid;
+                    break;
+                }
+                Err(e) => {
+                    if !super::openai::is_retryable_bridge_error(&e) {
+                        // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
+                        last_error = Some(e);
+                        used_channel_id = cid;
+                        break;
+                    }
+                    tracing::warn!("messages failover: channel {cid:?} failed: {e}, trying next channel");
+                    last_error = Some(e);
+                }
+            }
+        }
+        let response = match response_opt {
+            Some(r) => r,
+            None => {
+                let e = last_error.unwrap_or_else(|| {
+                    crate::bridge::BridgeError::AllAccountsFailed(
+                        "all channels failed for non-streaming request".into(),
+                    )
+                });
                 let latency_ms = request_start.elapsed().as_millis() as u64;
                 let status_code = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                 let mut log = crate::log::RequestLog::new();
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
-                log.channel_id = channel_id.clone();
+                log.channel_id = used_channel_id.clone();
                 log.model = model.clone();
                 log.latency_ms = latency_ms;
                 log.status_code = status_code.as_u16();
@@ -540,12 +623,17 @@ pub async fn handle_messages(
                 log.request_id = Some(request_id.clone());
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
-                anthropic_error(e.error_type(), &e.to_string(), status_code).into_response()
+                // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
+                if status_code.as_u16() >= 500 {
+                    state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                        channel_name: model.clone(),
+                        error: e.to_string(),
+                    });
+                }
+                return anthropic_error(e.error_type(), &e.to_string(), status_code).into_response();
             }
-        }
-    } else {
-        match bridge.chat(&chat_req, &ctx).await {
-            Ok(response) => {
+        };
+        {
                 let latency_ms = request_start.elapsed().as_millis() as u64;
                 state.usage_tracker.accumulate(
                     response.usage.prompt_tokens,
@@ -575,7 +663,7 @@ pub async fn handle_messages(
                 let mut log = crate::log::RequestLog::new();
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
-                log.channel_id = channel_id.clone();
+                log.channel_id = used_channel_id.clone();
                 log.model = model.clone();
                 log.input_tokens = response.usage.prompt_tokens;
                 log.output_tokens = response.usage.completion_tokens;
@@ -621,25 +709,7 @@ pub async fn handle_messages(
                         "output_tokens": response.usage.completion_tokens,
                     }
                 });
-                Json(anthropic_resp).into_response()
-            }
-            Err(e) => {
-                let latency_ms = request_start.elapsed().as_millis() as u64;
-                let status_code = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                let mut log = crate::log::RequestLog::new();
-                log.user_id = api_key.user_id.clone();
-                log.key_id = Some(api_key.id.clone());
-                log.channel_id = channel_id.clone();
-                log.model = model.clone();
-                log.latency_ms = latency_ms;
-                log.status_code = status_code.as_u16();
-                log.error_msg = Some(e.to_string());
-                log.ip = client_ip.clone();
-                log.request_id = Some(request_id.clone());
-                state.log_store.record_request(log);
-                rate_bundle.commit_tokens(0).await;
-                anthropic_error(e.error_type(), &e.to_string(), status_code).into_response()
-            }
+                return Json(anthropic_resp).into_response();
         }
     }
 }

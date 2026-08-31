@@ -87,6 +87,17 @@ impl RatioConfig {
     }
 }
 
+// ── PricingError ────────────────────────────────────────────────────
+
+/// 计费错误：模型未配置定价。
+///
+/// B09：原先无定价条目时静默按 0 计费（免费放行），未配置价格的模型
+/// 会产生免费用量；现改为显式错误，由调用方前置拦截
+/// （`openai.rs::ensure_model_priced`）或记录告警。
+#[derive(Debug, thiserror::Error)]
+#[error("no price configured for model: {0}")]
+pub struct PricingError(pub String);
+
 // ── PricingStore ────────────────────────────────────────────────────
 
 /// 定价存储 — 管理 ModelPrice 目录与 RatioConfig 倍率配置。
@@ -184,18 +195,19 @@ impl PricingStore {
     /// - price_type=token: (input * input_price + output * output_price) / 1000 * model_ratio * group_ratio
     /// - price_type=count: input_price * model_ratio * group_ratio（按次计价，input_price 即每次价格）
     ///
-    /// 无定价条目时返回 0.0（免费/未配置）。
+    /// B09：无定价条目时返回 `Err(PricingError)` 而非静默按 0 计费——
+    /// 未配置定价的模型若被放行调用将产生免费用量，调用方应前置拦截
+    /// （见 `openai.rs::ensure_model_priced`）或对 Err 记告警日志。
     pub fn calculate_cost(
         &self,
         model: &str,
         input_tokens: u64,
         output_tokens: u64,
         group: &str,
-    ) -> f64 {
-        let price = match self.get_price(model) {
-            Some(p) => p,
-            None => return 0.0,
-        };
+    ) -> Result<f64, PricingError> {
+        let price = self
+            .get_price(model)
+            .ok_or_else(|| PricingError(model.to_string()))?;
         let ratios = self.ratios.read();
         let model_ratio = ratios.model_ratio(model);
         let group_ratio = ratios.group_ratio(group);
@@ -205,7 +217,7 @@ impl PricingStore {
         } else {
             (input_tokens as f64 * price.input_price + output_tokens as f64 * price.output_price) / 1000.0
         };
-        base * model_ratio * group_ratio
+        Ok(base * model_ratio * group_ratio)
     }
 
     /// 计算费用并向上取整为 i64 配额单位（避免浮点扣费）。
@@ -215,13 +227,13 @@ impl PricingStore {
         input_tokens: u64,
         output_tokens: u64,
         group: &str,
-    ) -> i64 {
-        let cost = self.calculate_cost(model, input_tokens, output_tokens, group);
+    ) -> Result<i64, PricingError> {
+        let cost = self.calculate_cost(model, input_tokens, output_tokens, group)?;
         if cost <= 0.0 {
-            return 0;
+            return Ok(0);
         }
         // 向上取整，最低 1 配额单位
-        (cost + 0.999999) as i64
+        Ok((cost + 0.999999) as i64)
     }
 }
 
@@ -250,7 +262,7 @@ mod tests {
         let s = store();
         s.upsert_price(ModelPrice::new("gpt-4", 0.03, 0.06)).unwrap();
         // 1000 input * 0.03/1k + 500 output * 0.06/1k = 0.03 + 0.03 = 0.06
-        let cost = s.calculate_cost("gpt-4", 1000, 500, "default");
+        let cost = s.calculate_cost("gpt-4", 1000, 500, "default").unwrap();
         assert!((cost - 0.06).abs() < 1e-9);
     }
 
@@ -263,7 +275,7 @@ mod tests {
         ratios.group_ratio.insert("vip".to_string(), 0.5);
         s.update_ratios(ratios).unwrap();
         // 0.06 * 2.0 * 0.5 = 0.06
-        let cost = s.calculate_cost("gpt-4", 1000, 500, "vip");
+        let cost = s.calculate_cost("gpt-4", 1000, 500, "vip").unwrap();
         assert!((cost - 0.06).abs() < 1e-9);
     }
 
@@ -274,13 +286,14 @@ mod tests {
         p.price_type = "count".to_string();
         s.upsert_price(p).unwrap();
         // 按次计价：input_price = 0.04
-        let cost = s.calculate_cost("dall-e", 0, 0, "default");
+        let cost = s.calculate_cost("dall-e", 0, 0, "default").unwrap();
         assert!((cost - 0.04).abs() < 1e-9);
     }
 
     #[test]
-    fn no_price_is_free() {
+    fn no_price_is_error() {
+        // B09：无定价不再静默按 0 计费（免费放行），而是显式返回错误
         let s = store();
-        assert_eq!(s.calculate_cost("unknown", 1000, 1000, "default"), 0.0);
+        assert!(s.calculate_cost("unknown", 1000, 1000, "default").is_err());
     }
 }

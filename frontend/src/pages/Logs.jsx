@@ -16,9 +16,11 @@ export default function Logs() {
 
   const [filters, setFilters] = useState({ user: '', model: '', channel: '', start: '', end: '' });
 
+  // 仅 tab / 分页变化时自动加载；筛选条件由「查询」按钮显式触发，避免每键一请求
   useEffect(() => {
     load();
-  }, [tab, page, size, filters.user, filters.model, filters.channel, filters.start, filters.end]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, page, size]);
 
   const load = async () => {
     setLoading(true);
@@ -64,6 +66,16 @@ export default function Logs() {
       addToast(t('导出成功'));
     } catch (err) {
       setError(err.message);
+    }
+  };
+
+  // 查询按钮触发筛选：已在第 1 页时直接加载，否则重置页码由 useEffect 自动加载（保证单次请求）
+  const handleSearch = (e) => {
+    e.preventDefault();
+    if (page === 1) {
+      load();
+    } else {
+      setPage(1);
     }
   };
 
@@ -115,7 +127,7 @@ export default function Logs() {
               </div>
             </div>
             <div style={{ marginTop: 12 }}>
-              <button className="btn btn-primary btn-sm" onClick={() => { setPage(1); load(); }}>{t('查询')}</button>
+              <button className="btn btn-primary btn-sm" onClick={handleSearch}>{t('查询')}</button>
             </div>
           </div>
         </div>

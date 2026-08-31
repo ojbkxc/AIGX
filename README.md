@@ -20,7 +20,7 @@ AIGX 通过 **cf-ai-gw Worker** 桥接 Cloudflare Workers AI，cf-ai-gw 内部�
 
 - **OpenAI 兼容 API**：`/v1/chat/completions`（含 SSE 流式）、`/v1/completions`、`/v1/embeddings`、`/v1/images/generations`、`/v1/audio/transcriptions|translations|speech`、`/v1/models`
 - **Anthropic 兼容 API**：`/v1/messages`（含 SSE 流式），支持 Claude Messages 格式
-- **通用上游 Bridge**：channel 模块支持 Cloudflare / OpenAI 兼容 / Anthropic 三种渠道**混用**，按 priority/weight 调度 + failover，已接入 `resolve_bridge` 统一选路
+- **通用上游 Bridge**：channel 模块支持 Cloudflare / OpenAI 兼容 / Anthropic 三种渠道**混用**，按 priority/weight 多候选调度 + 上游故障自动 failover，无可用渠道时回退 CF Hub
 - **多账号 Cloudflare Workers AI**：多账号负载均衡 + 故障切换，账号信息加密落盘，AI 调用使用 Binding 方式
 - **多用户与配额**：邮箱注册/登录，管理员 / 普通用户角色，配额按 token 估算扣费，argon2 密码哈希
 - **易支付（Epay）对接**：MD5 签名下单、异步通知验签、同步跳转，签名规则与 new-api 一致
@@ -36,7 +36,7 @@ AIGX 通过 **cf-ai-gw Worker** 桥接 Cloudflare Workers AI，cf-ai-gw 内部�
 - **Dashboard 高级统计**：`consumption_trend`、`model_distribution`、`user_ranking`、`channel_health`、`realtime`
 - **健康检查**：`/livez`（存活）、`/readyz`（就绪）、`/health`（模型健康汇总），支持优雅关闭
 - **多数据库后端**：默认 FileStore + rusqlite KV，可选 SeaORM（PostgreSQL / MySQL），按 `config.database.url` 自动切换
-- **关键词 guardrail**：请求/响应关键词过滤；**token 估算**：tiktoken；**缓存**：moka
+- **关键词 guardrail**：请求/响应关键词过滤；**token 估算**：tiktoken；**缓存**：自研 dashmap 异步缓存（src/cache.rs）
 - **管理面板**：cf-ai-gw 风格的玻璃拟态暗色 UI，明暗主题切换
 - **单文件部署**：前端静态资源内嵌，二进制 + `static/` 即可运行
 
@@ -51,7 +51,7 @@ tar xzf AIGX-*-linux-amd64.tar.gz
 # 浏览器访问 http://127.0.0.1:8080
 ```
 
-首次启动用邮箱 `admin@aigx.local` + 任意密码登录并设置密码。
+首次启动自动创建管理员账户 `admin@aigx.local`（用户名 `admin`），初始密码为随机生成的 16 位字符串——完整密码不落日志（仅输出掩码），请通过部署渠道获取，登录后立即修改。
 
 ### Docker
 

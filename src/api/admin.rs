@@ -83,10 +83,8 @@ async fn verify_admin(state: &AppState, headers: &HeaderMap) -> Result<AppConfig
     let config = state.config_manager.get().await;
     let session_ttl = config.admin.session_ttl_hours.max(1);
 
-    // 备用验证：直接比较 token 与 session_secret（简化模式）
-    if !config.admin.session_secret.is_empty() && token == config.admin.session_secret {
-        return Ok(config);
-    }
+    // B08：移除“token == session_secret 直通”后门——会话必须经 SessionStore
+    // 签名校验，且用户系统未启用时旧 admin 兼容路径同样需要有效签名会话
 
     // 使用 session store 验证
     let session_store = SessionStore::new(&config.admin.session_secret, session_ttl);
@@ -117,28 +115,11 @@ async fn verify_user(state: &AppState, headers: &HeaderMap) -> Result<User, (Sta
     let sess = session_store
         .validate_session(&token)
         .ok_or_else(|| error_response("Invalid session", StatusCode::UNAUTHORIZED))?;
+    // B10：移除 email=="admin" 时合成管理员的回退——会话必须对应真实存在的用户，
+    // 防止伪造/残留的旧会话绕过用户系统的状态与权限校验
     let user = state
         .user_store
         .get_by_email(&sess.email)
-        .or_else(|| {
-            // 回退：用户系统为空时合成 admin 用户
-            if sess.email == "admin" {
-                Some(User {
-                    id: "admin".into(),
-                    email: "admin".into(),
-                    username: "admin".into(),
-                    password: String::new(),
-                    role: Role::Admin,
-                    quota: 0,
-                    used_quota: 0,
-                    status: "active".into(),
-                    group: "default".into(),
-                    created_at: 0,
-                })
-            } else {
-                None
-            }
-        })
         .ok_or_else(|| error_response("User not found", StatusCode::UNAUTHORIZED))?;
     if user.status != "active" {
         return Err(error_response("User disabled", StatusCode::UNAUTHORIZED));
@@ -282,7 +263,9 @@ pub async fn handle_register(
     if body.email.trim().is_empty() {
         return Err(error_response("邮箱不能为空", StatusCode::BAD_REQUEST));
     }
-    if body.password.len() < 6 {
+    // B25：按字符数而非字节数校验长度，避免中文等非 ASCII 密码被误判
+    //（原实现“中文密码4字=12字节”可绕过 6 位下限）
+    if body.password.chars().count() < 6 {
         return Err(error_response("密码长度至少6位", StatusCode::BAD_REQUEST));
     }
     let config = state.config_manager.get().await;
@@ -1099,7 +1082,15 @@ pub async fn handle_update_epay_config(
     let mut config = verify_admin(&state, &headers).await?;
     if let Some(v) = body.pay_address { config.epay.pay_address = v; }
     if let Some(v) = body.epay_id { config.epay.epay_id = v; }
-    if let Some(v) = body.epay_key { config.epay.epay_key = v; }
+    // F03（契约3）：商户密钥防覆盖——前端回显时密钥以脱敏形式展示，
+    // 保存时若原值未修改会带 *** 占位，空值/脱敏值均跳过更新，
+    // 仅在管理员输入了新完整密钥时才覆盖。
+    if let Some(v) = body.epay_key {
+        let t = v.trim();
+        if !t.is_empty() && !t.contains("***") {
+            config.epay.epay_key = t.to_string();
+        }
+    }
     if let Some(v) = body.pay_methods { config.epay.pay_methods = v; }
     if let Some(v) = body.price { config.epay.price = v; }
     if let Some(v) = body.amount_discount { config.epay.amount_discount = v; }
@@ -1123,10 +1114,21 @@ pub struct TopupRequest {
     pub payment_method: String,
 }
 
+/// F02（契约2）：实付金额 = amount × discount。
+///
+/// 旧实现误将倍率 price 计入实付（money = amount × price × discount），
+/// 用户会被多收 price 倍；倍率只应作用于入账配额（见 `topup_quota`）。
 fn pay_money(epay: &EpayConfig, amount: i64) -> f64 {
     let discount = *epay.amount_discount.get(&amount).filter(|d| **d > 0.0).unwrap_or(&1.0);
-    let money = (amount as f64) * epay.price * discount;
+    let money = (amount as f64) * discount;
     (money * 100.0).round() / 100.0
+}
+
+/// F02（契约2）：入账配额 = amount × price × discount（向上取整，
+/// 与 pricing 模块 `calculate_cost_quoted` 的取整惯例一致）。
+fn topup_quota(epay: &EpayConfig, amount: i64) -> i64 {
+    let discount = *epay.amount_discount.get(&amount).filter(|d| **d > 0.0).unwrap_or(&1.0);
+    ((amount as f64) * epay.price * discount + 0.999999) as i64
 }
 
 fn callback_address(_state: &AppState, config: &AppConfig) -> String {
@@ -1180,6 +1182,8 @@ pub async fn handle_topup_request(
         user_id: user.id.clone(),
         amount: body.amount,
         money,
+        // F02（契约2）：下单时锁定入账配额，回调直接使用（见 TopUpOrder.quota）
+        quota: topup_quota(epay.config(), body.amount),
         payment_method: body.payment_method.clone(),
         status: "pending".into(),
         create_time: chrono::Utc::now().timestamp(),
@@ -1263,31 +1267,38 @@ fn collect_params(query: Option<&str>, body_bytes: &bytes::Bytes) -> HashMap<Str
     map
 }
 
+/// 解码 application/x-www-form-urlencoded（UTF-8 感知）
+///
+/// B18：原实现 `b as char` 逐字节解码为 Latin-1 字符，%E4%B8%AD 这类 UTF-8
+/// 多字节序列会被拆成三个独立字符导致中文参数乱码。现先把 %XX 还原为原始
+/// 字节，再整体按 UTF-8 解码；非法序列回退 lossy，保证不 panic。
 fn urlencoding_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'+' {
-            out.push(' ');
+            out.push(b' ');
             i += 1;
         } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            // %XX 十六进制转义还原为原始字节
             if let Ok(b) = u8::from_str_radix(
                 std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
                 16,
             ) {
-                out.push(b as char);
+                out.push(b);
                 i += 3;
                 continue;
             }
-            out.push('%');
+            out.push(b'%');
             i += 1;
         } else {
-            out.push(bytes[i] as char);
+            out.push(bytes[i]);
             i += 1;
         }
     }
-    out
+    String::from_utf8(out)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// POST/GET /api/user/epay/notify - 易支付异步通知
@@ -1331,10 +1342,6 @@ pub async fn handle_epay_notify(
         .unwrap_or(0.0);
 
     if let Some(order) = state.order_store.get(&verify.out_trade_no) {
-        if !order.is_pending() {
-            return "success".into_response(); // 幂等：已处理
-        }
-
         // 金额校验：容忍度 max(订单金额 * 2%, 0.01元)，参照 VFaka
         let tolerance = (order.money * 0.02).max(0.01);
         let amount_diff = (callback_money - order.money).abs();
@@ -1346,35 +1353,49 @@ pub async fn handle_epay_notify(
             return "fail".into_response();
         }
 
-        // 入账：使用 order.money / price 计算配额（正确处理折扣场景）
-        // 下单时 pay_money 已应用折扣，回调时用实际支付金额反算配额
-        let quota_to_add = if config.epay.price > 0.0 {
-            (order.money / config.epay.price).round() as i64
-        } else {
-            order.amount
-        };
-        if let Err(e) = state.user_store.add_quota(&order.user_id, quota_to_add) {
-            tracing::error!("Epay notify: failed to add quota for order {}: {}", order.trade_no, e);
-        }
-        if let Err(e) = state.order_store.complete(&order.trade_no) {
-            tracing::error!("Epay notify: failed to complete order {}: {}", order.trade_no, e);
-        }
-        tracing::info!(
-            "Epay order completed: trade_no={} user={} amount={} money={} quota=+{}",
-            order.trade_no, order.user_id, order.amount, order.money, quota_to_add
-        );
+        // B01 修复：先原子完成订单（CAS pending → paid），仅当本次回调真正
+        // 抢到订单时才入账。notify 与 return 并发到达时只有一方能成功，
+        // 杜绝双倍入账；重复回调直接幂等跳过。
+        let completed = state.order_store.complete_if_pending(&order.trade_no);
+        if let Some(order) = completed {
+            // F02（契约2）：优先使用下单时锁定的 quota（amount × price × discount）；
+            // 旧订单（quota=0，serde default 反序列化）回退 money/price 反推
+            let quota_to_add = if order.quota > 0 {
+                order.quota
+            } else if order.money > 0.0 && config.epay.price > 0.0 {
+                (order.money / config.epay.price).round() as i64
+            } else {
+                order.quota
+            };
+            // B01/B02：使用原子加款；失败仅告警不回滚订单状态（订单已支付，
+            // 绝不能让网关重试造成二次加钱），由管理员依据告警人工补偿。
+            if let Err(e) = state.user_store.add_quota(&order.user_id, quota_to_add) {
+                tracing::error!(
+                    "Epay notify: CRITICAL quota compensation required: order={} user={} quota={} error={}",
+                    order.trade_no, order.user_id, quota_to_add, e
+                );
+                state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                    channel_name: format!("payment/order:{}", order.trade_no),
+                    error: format!("add_quota failed, manual compensation required: quota=+{quota_to_add}, err={e}"),
+                });
+            }
+            tracing::info!(
+                "Epay order completed: trade_no={} user={} amount={} money={} quota=+{}",
+                order.trade_no, order.user_id, order.amount, order.money, quota_to_add
+            );
 
-        // 通知：充值成功（异步，不阻塞回调）
-        let user_email = state
-            .user_store
-            .get_by_id(&order.user_id)
-            .map(|u| u.email)
-            .unwrap_or_default();
-        state.notify_service.notify_spawn(crate::notify::NotifyEvent::PaymentSuccess {
-            user_email,
-            amount: order.money,
-            quota: quota_to_add,
-        });
+            // 通知：充值成功（异步，不阻塞回调）
+            let user_email = state
+                .user_store
+                .get_by_id(&order.user_id)
+                .map(|u| u.email)
+                .unwrap_or_default();
+            state.notify_service.notify_spawn(crate::notify::NotifyEvent::PaymentSuccess {
+                user_email,
+                amount: order.money,
+                quota: quota_to_add,
+            });
+        }
     }
     "success".into_response()
 }
@@ -1413,28 +1434,39 @@ pub async fn handle_epay_return(
 
     if verify.trade_status == "TRADE_SUCCESS" {
         if let Some(order) = state.order_store.get(&verify.out_trade_no) {
-            if order.is_pending() {
-                // 金额校验：容忍度 max(订单金额 * 2%, 0.01元)
-                let tolerance = (order.money * 0.02).max(0.01);
-                if (callback_money - order.money).abs() > tolerance {
-                    tracing::error!(
-                        "Epay return amount mismatch: trade_no={} expected={} received={}",
-                        order.trade_no, order.money, callback_money
-                    );
-                    return Redirect::to(&make_return_path("fail")).into_response();
-                }
+            // 金额校验：容忍度 max(订单金额 * 2%, 0.01元)
+            let tolerance = (order.money * 0.02).max(0.01);
+            if (callback_money - order.money).abs() > tolerance {
+                tracing::error!(
+                    "Epay return amount mismatch: trade_no={} expected={} received={}",
+                    order.trade_no, order.money, callback_money
+                );
+                return Redirect::to(&make_return_path("fail")).into_response();
+            }
 
-                // 使用 order.money / price 计算配额（正确处理折扣）
-                let quota_to_add = if config.epay.price > 0.0 {
+            // B01 修复：先原子完成订单（CAS pending → paid），仅本次抢到订单
+            // 才入账，与 notify 并发时不会双倍入账。
+            let completed = state.order_store.complete_if_pending(&order.trade_no);
+            if let Some(order) = completed {
+                // F02（契约2）：优先使用下单时锁定的 quota（amount × price × discount）；
+                // 旧订单（quota=0，serde default 反序列化）回退 money/price 反推
+                let quota_to_add = if order.quota > 0 {
+                    order.quota
+                } else if order.money > 0.0 && config.epay.price > 0.0 {
                     (order.money / config.epay.price).round() as i64
                 } else {
-                    order.amount
+                    order.quota
                 };
+                // B01/B02：原子加款；失败仅告警（订单已支付，不回滚、不重复加钱）
                 if let Err(e) = state.user_store.add_quota(&order.user_id, quota_to_add) {
-                    tracing::error!("Epay return: failed to add quota for order {}: {}", order.trade_no, e);
-                }
-                if let Err(e) = state.order_store.complete(&order.trade_no) {
-                    tracing::error!("Epay return: failed to complete order {}: {}", order.trade_no, e);
+                    tracing::error!(
+                        "Epay return: CRITICAL quota compensation required: order={} user={} quota={} error={}",
+                        order.trade_no, order.user_id, quota_to_add, e
+                    );
+                    state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                        channel_name: format!("payment/order:{}", order.trade_no),
+                        error: format!("add_quota failed, manual compensation required: quota=+{quota_to_add}, err={e}"),
+                    });
                 }
                 tracing::info!(
                     "Epay return completed: trade_no={} user={} quota=+{}",
@@ -1747,7 +1779,14 @@ pub async fn handle_add_token(
         ip_limit: body.ip_limit,
     };
     match state.api_key_store.generate_with_options(opts) {
-        Ok(k) => Ok(Json(serde_json::json!({ "success": true, "data": mask_token(&k) }))),
+        Ok(k) => {
+            // F01（契约1）：创建响应一次性返回完整明文密钥——存储侧仅落哈希，
+            // 明文离开本响应后无法再次获取；列表/更新接口仍走 mask_token 脱敏。
+            // 前端 Keys.jsx 读取 created.plain_key || created.key 展示。
+            let mut data = mask_token(&k);
+            data["plain_key"] = serde_json::json!(k.key.clone());
+            Ok(Json(serde_json::json!({ "success": true, "data": data })))
+        }
         Err(e) => Err(error_response(&format!("Failed to create token: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
     }
 }
@@ -2219,6 +2258,14 @@ pub async fn handle_redeem(
         Ok(quota) => {
             if let Err(e) = state.user_store.add_quota(&user.id, quota) {
                 tracing::error!("Failed to add quota after redemption: {e}");
+                // B03 修复：入账失败时回滚兑换码为 unused，允许用户重试，
+                // 避免配额永久丢失后反复报 already used。
+                if let Err(re) = state.redemption_store.rollback_redeem(&body.code, &user.id) {
+                    tracing::error!(
+                        "CRITICAL: failed to rollback redemption {}: {re} (quota={} user={}), manual compensation required",
+                        body.code, quota, user.id
+                    );
+                }
                 return error_response("Failed to add quota", StatusCode::INTERNAL_SERVER_ERROR).into_response();
             }
             let admin_id = admin_id_from_session(&state, &headers).await;
@@ -2531,14 +2578,18 @@ pub async fn handle_update_notify_config(
 
     if let Some(v) = body.enabled { cfg.enabled = v; }
     if let Some(v) = body.telegram_bot_token {
-        if !v.contains("***") { cfg.telegram_bot_token = v; }
+        // F09: 空串与脱敏占位值不应覆盖已保存的凭据，先 trim 再判空
+        let t = v.trim();
+        if !t.is_empty() && !t.contains("***") { cfg.telegram_bot_token = t.to_string(); }
     }
     if let Some(v) = body.telegram_chat_id { cfg.telegram_chat_id = v; }
     if let Some(v) = body.smtp_host { cfg.smtp_host = v; }
     if let Some(v) = body.smtp_port { cfg.smtp_port = v; }
     if let Some(v) = body.smtp_username { cfg.smtp_username = v; }
     if let Some(v) = body.smtp_password {
-        if !v.contains("***") { cfg.smtp_password = v; }
+        // F09: 空串与脱敏占位值不应覆盖已保存的凭据，先 trim 再判空
+        let t = v.trim();
+        if !t.is_empty() && !t.contains("***") { cfg.smtp_password = t.to_string(); }
     }
     if let Some(v) = body.smtp_from { cfg.smtp_from = v; }
 

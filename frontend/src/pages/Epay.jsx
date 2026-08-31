@@ -29,7 +29,8 @@ export default function Epay() {
       setCfg({
         pay_address: d.pay_address || '',
         epay_id: String(d.epay_id || ''),
-        epay_key: d.epay_key || '',
+        // 脱敏值（含 ***）不回填表单：显示为空，避免保存时用脱敏值覆盖真实商户密钥
+        epay_key: d.epay_key && !d.epay_key.includes('***') ? d.epay_key : '',
         pay_methods: d.pay_methods || ['alipay', 'wxpay'],
         price: d.price ?? 1,
         min_topup: d.min_topup ?? 1,
@@ -47,16 +48,18 @@ export default function Epay() {
     setSaving(true);
     setError('');
     try {
-      await api.updateEpayConfig({
+      const payload = {
         pay_address: cfg.pay_address,
         epay_id: cfg.epay_id,
-        epay_key: cfg.epay_key,
         pay_methods: cfg.pay_methods,
         price: Number(cfg.price),
         min_topup: Number(cfg.min_topup),
         custom_callback_address: cfg.custom_callback_address,
         server_address: cfg.server_address,
-      });
+      };
+      // 仅当用户输入了新密钥才提交该字段；空值不带字段，防止覆盖真实商户密钥
+      if (cfg.epay_key && cfg.epay_key.trim()) payload.epay_key = cfg.epay_key.trim();
+      await api.updateEpayConfig(payload);
       addToast(t('易支付配置已保存'));
       load();
     } catch (err) {

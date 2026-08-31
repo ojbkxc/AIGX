@@ -345,9 +345,22 @@ async fn send_smtp_raw(
     }
 
     // 邮件内容（点号结束）
+    // B12：SMTP dot-stuffing——正文行以 '.' 开头时需再加一个 '.' 前缀，
+    // 否则会被服务器误认为 DATA 结束标记导致邮件被截断（RFC 5321 §4.5.2）
+    let stuffed_body = body
+        .lines()
+        .map(|line| {
+            if line.starts_with('.') {
+                format!(".{line}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
     let msg = format!(
         "From: {}\r\nTo: {}\r\nSubject: {}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n{}\r\n.\r\n",
-        cfg.smtp_from, to, subject, body
+        cfg.smtp_from, to, subject, stuffed_body
     );
     write_smtp(&mut stream, &msg).await?;
     let r = read_smtp_line(&mut stream).await?;

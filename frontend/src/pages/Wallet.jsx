@@ -92,8 +92,7 @@ export default function Wallet() {
     }
   };
 
-  if (loading) return <div className="loading">{t('加载钱包')}</div>;
-
+  // 兑换码兑换（放在 loading 早退之前，保证 hooks 与事件处理函数定义顺序稳定）
   const handleRedeem = async () => {
     if (!redeemCode.trim()) {
       setError(t('请输入兑换码'));
@@ -115,6 +114,8 @@ export default function Wallet() {
       setRedeeming(false);
     }
   };
+
+  if (loading) return <div className="loading">{t('加载钱包')}</div>;
 
   const remaining = me ? (me.quota || 0) - (me.used_quota || 0) : 0;
   const methods = (epay && epay.pay_methods) || ['alipay', 'wxpay'];
@@ -234,7 +235,7 @@ export default function Wallet() {
                     <tr key={o.trade_no}>
                       <td><code className="key-value" style={{ maxWidth: 240 }}>{o.trade_no}</code></td>
                       <td>¥{Number(o.money || 0).toFixed(2)}</td>
-                      <td>{fmtQuota(o.amount * (epay?.price || 1))}</td>
+                      <td>{fmtQuota(o.quota != null ? o.quota : o.amount * (epay?.price || 1))}</td>
                       <td>{o.payment_method}</td>
                       <td>
                         <span className={

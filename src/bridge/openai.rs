@@ -426,7 +426,9 @@ fn parse_openai_error(body: &[u8]) -> Option<super::UpstreamErrorView> {
 /// 解析单个 SSE 事件为 ChatChunk
 fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
     for line in event.lines() {
-        if let Some(data) = line.strip_prefix("data: ") {
+        // B17：兼容 "data:" 后无空格的 SSE 实现（规范允许仅一个冒号，
+        // 部分网关/代理会剥掉空格），原先只匹配 "data: " 会导致整帧被忽略
+        if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
             if data.trim() == "[DONE]" {
                 return Some(ChatChunk {
                     id: id.to_string(),

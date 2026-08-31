@@ -37,7 +37,7 @@ export default function Keys() {
     setError('');
     try {
       const [tokenRes, groupRes] = await Promise.all([
-        api.listTokens().catch(() => api.listKeys()),
+        api.listTokens(),
         api.listGroups().catch(() => null),
       ]);
       setTokens(tokenRes.data || tokenRes || []);
@@ -109,15 +109,15 @@ export default function Keys() {
       } else {
         const res = await api.addToken(payload);
         const created = res.data || res;
-        if (created && (created.key || created.api_key)) {
-          setGeneratedKey(created);
+        // 契约：创建响应额外返回 plain_key（一次性明文），优先展示明文而非脱敏密钥
+        if (created && (created.plain_key || created.key || created.api_key)) {
+          setGeneratedKey({ ...created, key: created.plain_key || created.key || created.api_key });
         }
         addToast(t('令牌创建成功'));
       }
       load();
-      if (!editing || !generatedKey) {
-        if (editing) closeModal();
-      }
+      // 编辑保存后关闭弹窗；创建路径保持弹窗以展示一次性密钥
+      if (editing) closeModal();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -319,25 +319,25 @@ export default function Keys() {
                   </div>
                   <div className="form-group">
                     <label>{t('模型白名单')} <span style={{ color: 'var(--text-muted)' }}>{t('(逗号分隔，留空则允许全部)')}</span></label>
-                    <input className="form-input" placeholder="glm-5.2, deepseek-v3, kimi-k2.6"
+                    <input className="form-input" placeholder={editing ? t('留空表示不修改') : "glm-5.2, deepseek-v3, kimi-k2.6"}
                       value={form.allowed_models}
                       onChange={(e) => setForm({ ...form, allowed_models: e.target.value })} />
                   </div>
                   <div className="form-group">
                     <label>{t('过期时间')} <span style={{ color: 'var(--text-muted)' }}>{t('(Unix 时间戳，留空则永不过期)')}</span></label>
-                    <input className="form-input" type="number" placeholder={t('keysPlaceholderExpiresAt')}
+                    <input className="form-input" type="number" placeholder={editing ? t('留空表示不修改') : t('keysPlaceholderExpiresAt')}
                       value={form.expires_at}
                       onChange={(e) => setForm({ ...form, expires_at: e.target.value })} />
                   </div>
                   <div className="form-group">
                     <label>{t('额度上限')} <span style={{ color: 'var(--text-muted)' }}>{t('(留空则无上限)')}</span></label>
-                    <input className="form-input" type="number" placeholder={t('keysPlaceholderQuotaLimit')}
+                    <input className="form-input" type="number" placeholder={editing ? t('留空表示不修改') : t('keysPlaceholderQuotaLimit')}
                       value={form.quota_limit}
                       onChange={(e) => setForm({ ...form, quota_limit: e.target.value })} />
                   </div>
                   <div className="form-group">
                     <label>{t('IP 限制')} <span style={{ color: 'var(--text-muted)' }}>{t('(逗号分隔，留空则不限制)')}</span></label>
-                    <input className="form-input" placeholder={t('keysPlaceholderIpLimit')}
+                    <input className="form-input" placeholder={editing ? t('留空表示不修改') : t('keysPlaceholderIpLimit')}
                       value={form.ip_limit}
                       onChange={(e) => setForm({ ...form, ip_limit: e.target.value })} />
                   </div>
