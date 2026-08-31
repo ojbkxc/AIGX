@@ -271,6 +271,10 @@ impl Default for RateLimiter {
 }
 
 /// 多维度预留句柄集合。commit_tokens 时将 tokens 加到所有维度。
+///
+/// B05：Reservation 本身 Clone，此处派生 Clone 以便流式计费守卫
+///（兜底计费路径）与后缀事件（正常结束路径）各持一份独立提交。
+#[derive(Clone)]
 pub struct ReservationBundle {
     reservations: Vec<Reservation>,
 }

@@ -133,13 +133,28 @@ impl AuditLog {
 /// 请求日志存储。
 ///
 /// key 格式：`reqlog:{created_at}:{id}`，时间戳前缀便于按时间范围扫描。
+///
+/// B13：设置容量上限防止无界增长撑爆磁盘——写入路径每
+/// `PURGE_CHECK_EVERY` 次触发一次容量检查，超限时删除最旧一批。
 pub struct RequestLogStore {
     store: Arc<FileStore>,
+    /// 写入计数：摊薄容量检查频率（每 PURGE_CHECK_EVERY 次写入触发一次）
+    writes: std::sync::atomic::AtomicU64,
 }
 
 impl RequestLogStore {
+    /// B13：请求日志容量上限
+    const MAX_LOGS: usize = 100_000;
+    /// B13：超限时每批清理的最旧日志条数
+    const PURGE_BATCH: usize = 10_000;
+    /// B13：每隔多少次写入触发一次容量检查
+    const PURGE_CHECK_EVERY: u64 = 1000;
+
     pub fn new(store: Arc<FileStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            writes: std::sync::atomic::AtomicU64::new(0),
+        }
     }
 
     fn key_of(log: &RequestLog) -> String {
@@ -154,9 +169,49 @@ impl RequestLogStore {
         if log.created_at == 0 {
             log.created_at = chrono::Utc::now().timestamp();
         }
+        // B13：定期检查容量，超限清理最旧一批（检查失败不影响本次写入）
+        let writes = self
+            .writes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if writes % Self::PURGE_CHECK_EVERY == 0 {
+            if let Err(e) = self.purge_overflow() {
+                tracing::warn!("request log purge check failed: {e}");
+            }
+        }
         let key = Self::key_of(&log);
         self.store.put(&key, &log)?;
         Ok(log)
+    }
+
+    /// B13：容量超限时删除最旧一批日志。
+    ///
+    /// key 中 created_at 为数字字符串，字典序与数值序不一致
+    ///（如 "999" > "1000"），需 parse 后按数值排序再取最旧。
+    fn purge_overflow(&self) -> anyhow::Result<()> {
+        let keys = self.store.list("reqlog:")?;
+        if keys.len() < Self::MAX_LOGS {
+            return Ok(());
+        }
+        let mut timed: Vec<(i64, String)> = keys
+            .into_iter()
+            .map(|k| {
+                let ts = k
+                    .strip_prefix("reqlog:")
+                    .and_then(|rest| rest.split(':').next())
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(i64::MAX);
+                (ts, k)
+            })
+            .collect();
+        timed.sort_by_key(|(ts, _)| *ts);
+        let excess = (timed.len().saturating_sub(Self::MAX_LOGS) + Self::PURGE_BATCH)
+            .min(timed.len());
+        for (_, k) in timed.into_iter().take(excess) {
+            if let Err(e) = self.store.delete(&k) {
+                tracing::warn!("request log purge failed for {k}: {e}");
+            }
+        }
+        Ok(())
     }
 
     /// 列出全部请求日志（按时间倒序）

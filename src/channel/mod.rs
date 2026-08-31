@@ -129,7 +129,14 @@ impl Channel {
         self.models.iter().any(|m| m == model)
     }
 
-    /// 编码 api_key 用于存储
+    /// 编码 api_key 用于存储。
+    ///
+    /// ⚠️ B11（已知风险，保留现状）：这是可逆的 Base64“混淆”而非加密——
+    /// 密钥与密文同存于同一存储，无法防御能读取存储文件的攻击者，仅避免
+    /// 明文密钥在浏览配置/备份/日志时被直接看到。
+    /// 升级路径（后续版本）：引入 master key（环境变量或独立 KMS）做
+    /// AES-GCM 对称加密，并为存量 `enc:` 数据提供迁移解码；因涉及存储
+    /// 格式兼容与部署流程变更，超出本次修复范围，此处仅文档化。
     pub fn encode_api_key(plain: &str) -> String {
         if plain.is_empty() {
             return String::new();
@@ -137,7 +144,7 @@ impl Channel {
         format!("enc:{}", general_purpose::STANDARD.encode(plain.as_bytes()))
     }
 
-    /// 解码存储中的 api_key
+    /// 解码存储中的 api_key（安全性说明见 `encode_api_key`）
     pub fn decode_api_key(&self) -> String {
         if let Some(rest) = self.api_key.strip_prefix("enc:") {
             general_purpose::STANDARD
@@ -377,12 +384,24 @@ impl ChannelStore {
         };
 
         let key = ch.decode_api_key();
-        let result = match ch.channel_type {
+        // B24：各分支返回 (是否成功, 消息)。401/403 是密钥认证失败，
+        // 必须判测试失败并给出明确提示（原先 Anthropic 分支把 401/403
+        // 也判为成功，密钥失效的渠道会被误标记为健康）。
+        let (result, message) = match ch.channel_type {
             ChannelType::OpenaiCompatible => {
                 let url = format!("{}/models", ch.base_url.trim_end_matches('/'));
                 let resp = client.get(&url).bearer_auth(&key).send().await;
                 match resp {
-                    Ok(r) => r.status().is_success(),
+                    Ok(r) => {
+                        let s = r.status().as_u16();
+                        if s == 401 || s == 403 {
+                            (false, format!("Auth failed: HTTP {s} (invalid api key?)"))
+                        } else if (200..300).contains(&s) {
+                            (true, "Channel reachable".to_string())
+                        } else {
+                            (false, format!("Channel returned HTTP {s}"))
+                        }
+                    }
                     Err(e) => {
                         return ChannelTestResult {
                             success: false,
@@ -408,9 +427,15 @@ impl ChannelStore {
                     .await;
                 match resp {
                     Ok(r) => {
-                        let s = r.status();
-                        // 401/403 表示密钥问题但渠道可达；200/400 表示完全可达
-                        s.is_success() || s.as_u16() == 400 || s.as_u16() == 401 || s.as_u16() == 403
+                        let s = r.status().as_u16();
+                        // 200/400 表示渠道与密钥均正常（400 为模型名不匹配等请求错误）
+                        if s == 401 || s == 403 {
+                            (false, format!("Auth failed: HTTP {s} (invalid api key?)"))
+                        } else if s == 200 || s == 400 {
+                            (true, "Channel reachable".to_string())
+                        } else {
+                            (false, format!("Channel returned HTTP {s}"))
+                        }
                     }
                     Err(e) => {
                         return ChannelTestResult {
@@ -432,11 +457,7 @@ impl ChannelStore {
 
         ChannelTestResult {
             success: result,
-            message: if result {
-                "Channel reachable".to_string()
-            } else {
-                "Channel returned non-success status".to_string()
-            },
+            message,
             latency_ms: start.elapsed().as_millis() as u64,
         }
     }

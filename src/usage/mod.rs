@@ -37,11 +37,18 @@ pub struct UsageTracker {
     store: Arc<FileStore>,
     #[allow(dead_code)]
     account_pool: Arc<AccountPool>,
+    /// B26：串行化 accumulate 的读-改-写——原先无锁，两个并发请求
+    /// 同时读到旧值再各自写回，先写入方的累加会被覆盖导致统计丢失
+    lock: parking_lot::Mutex<()>,
 }
 
 impl UsageTracker {
     pub fn new(store: Arc<FileStore>, account_pool: Arc<AccountPool>) -> Self {
-        Self { store, account_pool }
+        Self {
+            store,
+            account_pool,
+            lock: parking_lot::Mutex::new(()),
+        }
     }
 
     /// 获取今日 token 统计键名
@@ -66,6 +73,10 @@ impl UsageTracker {
         cache_write: u64,
         duration_sec: f64,
     ) {
+        // B26：读-改-写全程持锁（今日 + 月度两个 key 必须在同一临界区内完成，
+        // 避免并发请求互相覆盖导致统计丢失）
+        let _guard = self.lock.lock();
+
         // 今日统计
         let daily_key = Self::daily_key();
         let mut daily: TokenStats = self

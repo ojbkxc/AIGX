@@ -109,6 +109,26 @@ impl ApiKey {
     }
 }
 
+/// API Key 鉴权失败原因（B22：结构化错误）。
+///
+/// 调用方按变体映射 HTTP 状态码，取代原先对错误消息文本的
+/// `contains(...)` 匹配（消息措辞变化会静默改变 API 行为）。
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ApiKeyError {
+    #[error("Invalid API key")]
+    Invalid,
+    #[error("API key is disabled")]
+    Disabled,
+    #[error("API key has expired")]
+    Expired,
+    #[error("Model '{0}' is not allowed for this API key")]
+    ModelNotAllowed(String),
+    #[error("API key quota exhausted")]
+    QuotaExhausted,
+    #[error("IP '{0}' is not allowed for this API key")]
+    IpNotAllowed(String),
+}
+
 /// API 密钥存储
 pub struct ApiKeyStore {
     store: Arc<FileStore>,
@@ -256,23 +276,32 @@ impl ApiKeyStore {
     /// 校验 API Key 并执行全部鉴权检查。
     ///
     /// 参照 new-api token.go：状态、过期、模型白名单、额度上限、IP 限制。
-    pub fn validate_request(&self, key: &str, model: &str, ip: Option<&str>) -> Result<ApiKey, String> {
-        let api_key = self.validate(key).ok_or_else(|| "Invalid API key".to_string())?;
+    ///
+    /// B22：返回结构化错误 `ApiKeyError`——原先返回裸 String，调用方只能靠
+    /// `msg.contains(...)` 字符串匹配判断 HTTP 状态码（401/403），错误消息
+    /// 一旦调整措辞就会静默改变 API 行为。
+    pub fn validate_request(
+        &self,
+        key: &str,
+        model: &str,
+        ip: Option<&str>,
+    ) -> Result<ApiKey, ApiKeyError> {
+        let api_key = self.validate(key).ok_or(ApiKeyError::Invalid)?;
         if !api_key.is_enabled() {
-            return Err("API key is disabled".to_string());
+            return Err(ApiKeyError::Disabled);
         }
         if api_key.is_expired() {
-            return Err("API key has expired".to_string());
+            return Err(ApiKeyError::Expired);
         }
         if !api_key.allows_model(model) {
-            return Err(format!("Model '{model}' is not allowed for this API key"));
+            return Err(ApiKeyError::ModelNotAllowed(model.to_string()));
         }
         if api_key.is_quota_exhausted() {
-            return Err("API key quota exhausted".to_string());
+            return Err(ApiKeyError::QuotaExhausted);
         }
         if let Some(ip) = ip {
             if !api_key.allows_ip(ip) {
-                return Err(format!("IP '{ip}' is not allowed for this API key"));
+                return Err(ApiKeyError::IpNotAllowed(ip.to_string()));
             }
         }
         Ok(api_key)

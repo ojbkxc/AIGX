@@ -281,11 +281,27 @@ impl UserStore {
         Ok(())
     }
 
-    /// 增加配额（充值入账）
+    /// 原子增加配额（充值入账）。
+    ///
+    /// B02 修复：原 `add_quota` 走非原子的 `update`（读-克隆-改-写回），
+    /// 与原子的 `try_charge` 并发时会产生丢失更新（后写覆盖前写）。
+    /// 本方法与 `try_charge` 一样在写锁内完成读-改-写并持久化，
+    /// 保证与扣费路径并发安全。返回更新后的用户快照。
+    pub fn add_quota_atomic(&self, id: &str, delta: i64) -> Result<User> {
+        let mut by_id = self.by_id.write();
+        let user = by_id
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("user not found"))?;
+        user.quota += delta;
+        let snapshot = user.clone();
+        drop(by_id);
+        self.persist(&snapshot)?;
+        Ok(snapshot)
+    }
+
+    /// 增加配额（充值入账，委托原子实现）
     pub fn add_quota(&self, id: &str, amount: i64) -> Result<()> {
-        self.update(id, |u| {
-            u.quota += amount;
-        })?;
+        self.add_quota_atomic(id, amount)?;
         Ok(())
     }
 

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import { api } from '../api';
 import './Dashboard.css';
 
@@ -25,9 +26,15 @@ function fmtMoney(val) {
   return '¥' + Number(val).toFixed(2);
 }
 
+// 趋势数据点取值：后端消费趋势返回 cost 字段，兼容 value/tokens；
+// 使用 ?? 而非 ||，避免成本为 0 的合法数据点被短路误判为无值
+function trendVal(d) {
+  return d.value ?? d.cost ?? d.tokens ?? 0;
+}
+
 function TrendChart({ data }) {
   if (!data || data.length === 0) return null;
-  const maxVal = Math.max(...data.map((d) => d.value || d.tokens || 0), 1);
+  const maxVal = Math.max(...data.map(trendVal), 1);
   const w = 600;
   const h = 200;
   const pad = { top: 20, right: 20, bottom: 30, left: 50 };
@@ -36,7 +43,7 @@ function TrendChart({ data }) {
 
   const points = data.map((d, i) => {
     const x = pad.left + (i + 0.5) * (chartW / data.length);
-    const y = pad.top + chartH - ((d.value || d.tokens || 0) / maxVal) * chartH;
+    const y = pad.top + chartH - (trendVal(d) / maxVal) * chartH;
     return `${x},${y}`;
   });
 
@@ -76,7 +83,7 @@ function TrendChart({ data }) {
 
       {data.map((d, i) => {
         const x = pad.left + (i + 0.5) * (chartW / data.length);
-        const y = pad.top + chartH - ((d.value || d.tokens || 0) / maxVal) * chartH;
+        const y = pad.top + chartH - (trendVal(d) / maxVal) * chartH;
         return (
           <g key={i}>
             <circle cx={x} cy={y} r="3" fill="var(--accent-color)" stroke="var(--card-bg)" strokeWidth="2" />
@@ -253,7 +260,7 @@ export default function Dashboard() {
             <div className="stat-title">{t('实时 RPS')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#34d399' }}>⚡</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '28px' }}>{fmtLimit(rt.rps || rt.requests_per_second || 0)}</div>
+          <div className="stat-value" style={{ fontSize: '28px' }}>{fmtLimit(rt.qps ?? rt.rps ?? 0)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>{t('每秒请求数')}</div>
         </div>
         <div className="stat-card">
@@ -261,7 +268,7 @@ export default function Dashboard() {
             <div className="stat-title">{t('活跃用户')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8' }}>👥</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '28px' }}>{fmtLimit(rt.active_users || 0)}</div>
+          <div className="stat-value" style={{ fontSize: '28px' }}>{fmtLimit(ur.length)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟')}</div>
         </div>
         <div className="stat-card">
@@ -269,7 +276,7 @@ export default function Dashboard() {
             <div className="stat-title">{t('活跃渠道')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc' }}>🔗</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '28px' }}>{fmtLimit(rt.active_channels || 0)}</div>
+          <div className="stat-value" style={{ fontSize: '28px' }}>{fmtLimit(ch.length)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>{t('在线渠道数')}</div>
         </div>
         <div className="stat-card">
@@ -381,7 +388,7 @@ export default function Dashboard() {
                       <tr key={i}>
                         <td style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
                         <td>{r.email || r.username || `User#${r.user_id}`}</td>
-                        <td>{fmtLimit(r.request_count || r.requests || 0)}</td>
+                        <td>{fmtLimit(r.request_count || r.requests || r.count || 0)}</td>
                         <td>{fmtTok(r.total_tokens || r.tokens || 0)}</td>
                         <td>{fmtMoney(r.total_cost || r.cost || 0)}</td>
                       </tr>
@@ -449,12 +456,12 @@ export default function Dashboard() {
           <h2>{t('快捷操作')}</h2>
         </div>
         <div className="card-body quick-actions">
-          <a href="/accounts" className="btn btn-primary">{t('管理账号')}</a>
-          <a href="/keys" className="btn btn-outline">{t('管理 API 密钥')}</a>
-          <a href="/mappings" className="btn btn-outline">{t('配置模型映射')}</a>
-          <a href="/logs" className="btn btn-outline">{t('查看日志')}</a>
-          <a href="/redemptions" className="btn btn-outline">{t('兑换码管理')}</a>
-          <a href="/settings" className="btn btn-outline">{t('调整限额')}</a>
+          <Link to="/channels" className="btn btn-primary">{t('管理账号')}</Link>
+          <Link to="/keys" className="btn btn-outline">{t('管理 API 密钥')}</Link>
+          <Link to="/mappings" className="btn btn-outline">{t('配置模型映射')}</Link>
+          <Link to="/logs" className="btn btn-outline">{t('查看日志')}</Link>
+          <Link to="/redemptions" className="btn btn-outline">{t('兑换码管理')}</Link>
+          <Link to="/settings" className="btn btn-outline">{t('调整限额')}</Link>
         </div>
       </div>
     </div>

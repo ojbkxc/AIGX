@@ -71,6 +71,12 @@ impl JsonFileStore {
 
     /// 读取 JSON 值
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> anyhow::Result<Option<T>> {
+        // B19：优先从缓存读取——原先 get 只写缓存从不读，缓存形同虚设；
+        // 命中时避免一次磁盘 IO 与文件存在性检查（clone 出内容后立即释放读锁）
+        if let Some(content) = self.cache.read().get(key).cloned() {
+            let value = serde_json::from_str(&content)?;
+            return Ok(Some(value));
+        }
         let path = self.path_of(key);
         if !path.exists() {
             return Ok(None);

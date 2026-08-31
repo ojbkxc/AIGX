@@ -40,16 +40,25 @@ export default function Notify() {
     setSaving(true);
     setError('');
     try {
-      await api.updateNotifyConfig({
+      const payload = {
         enabled: notify.enabled,
-        telegram_bot_token: notify.telegram_bot_token,
         telegram_chat_id: notify.telegram_chat_id,
         smtp_host: notify.smtp_host,
         smtp_port: notify.smtp_port ? Number(notify.smtp_port) : 0,
         smtp_username: notify.smtp_username,
-        smtp_password: notify.smtp_password,
         smtp_from: notify.smtp_from,
-      });
+      };
+      // 敏感凭据字段：仅当输入了新的非脱敏值才提交；空串/未修改的脱敏占位不带该字段，
+      // 避免把真实 Bot Token / SMTP 密码覆盖为空（后端契约：缺省字段保持原值）
+      const botToken = (notify.telegram_bot_token || '').trim();
+      if (botToken && !botToken.includes('***')) {
+        payload.telegram_bot_token = botToken;
+      }
+      const smtpPassword = (notify.smtp_password || '').trim();
+      if (smtpPassword && !smtpPassword.includes('***')) {
+        payload.smtp_password = smtpPassword;
+      }
+      await api.updateNotifyConfig(payload);
       addToast(t('通知配置保存成功'));
       loadConfig();
     } catch (err) {

@@ -30,6 +30,7 @@
   "登录中...": "Signing in...",
   "登录": "Sign In",
   "还没有账号？立即注册": "No account yet? Register now",
+  "首次启动请查看服务日志获取初始管理员密码": "On first launch, check the server logs for the initial admin password",
 
   "请填写邮箱和密码": "Please fill in email and password",
   "密码长度至少6位": "Password must be at least 6 characters",
@@ -362,6 +363,8 @@
   "全系统每分钟最大 Token 数": "Max tokens per minute system-wide",
   "保存限流配置": "Save Rate Limit Config",
   "限流配置未启用或加载失败": "Rate limit config not enabled or failed to load",
+  "启用限流总开关": "Enable Rate Limiting (Master Switch)",
+  "开启后限流规则才会生效": "Rate limit rules take effect only when enabled",
   "通知配置": "Notification Configuration",
   "加载通知配置": "Loading notification config",
   "配置 Telegram Bot 与 SMTP 邮件通知。事件触发时推送：充值成功 / 额度不足 / 渠道故障。": "Configure Telegram Bot and SMTP email notifications. Pushed on events: top-up success / quota insufficient / channel failure.",
@@ -382,6 +385,7 @@
   "通知配置加载失败": "Failed to load notification config",
 
   "导出成功": "Exported successfully",
+  "导出失败": "Export failed",
   "日志与审计": "Logs & Audit",
   "请求日志检索与管理员操作审计": "Request log search and admin operation audit",
   "请求日志": "Request Logs",
@@ -457,12 +461,14 @@
   "倍率配置": "Ratio Configuration",
   "管理模型定价目录与全局倍率配置，支持按 token 计费与分组倍率": "Manage model pricing directory and global ratio configuration; supports token-based billing and group ratios",
   "最终费用 = 基础费用 × 模型倍率 × 分组倍率。缺省倍率为 1.0。": "Final cost = base cost × model ratio × group ratio. Default ratio is 1.0.",
+  "最终费用 = 基础费用 × 模型倍率 × 分组倍率": "Final cost = base cost × model ratio × group ratio",
   "模型名 → 倍率。例如": "Model name → ratio. e.g.",
   "分组名 → 倍率。例如": "Group name → ratio. e.g.",
 
   "管理用户分组与计费倍率，控制不同分组的模型访问权限与费率": "Manage user groups and billing ratios; control model access and rates per group",
   "所有分组": "All Groups",
   "新建分组": "New Group",
+  "编辑分组": "Edit Group",
   "加载用户分组": "Loading user groups",
   "默认": "default",
 

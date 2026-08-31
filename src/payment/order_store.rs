@@ -62,6 +62,37 @@ impl OrderStore {
         Ok(Some(snapshot))
     }
 
+    /// 原子完成订单（CAS：仅 pending → paid 转换成功才返回订单）。
+    ///
+    /// B01 修复：原回调流程为 get(订单) → add_quota → complete 三步非原子，
+    /// notify 与 return 并发到达时同一订单会被处理两次（双倍入账）。
+    /// 本方法在写锁内完成状态判定与转换：仅当订单存在且当前为 pending 时
+    /// 才置为 paid 并持久化，返回订单快照供入账；否则返回 None 表示
+    /// 订单已被处理过（或不存在），调用方绝不能再次加款。
+    pub fn complete_if_pending(&self, trade_no: &str) -> Option<TopUpOrder> {
+        let mut by_no = self.by_no.write();
+        let order = by_no.get_mut(trade_no)?;
+        if order.status != "pending" {
+            // 已处理（幂等）或不存在有效 pending 状态，拒绝二次入账
+            return None;
+        }
+        order.status = "paid".into();
+        order.paid_time = Some(chrono::Utc::now().timestamp());
+        let snapshot = order.clone();
+        drop(by_no);
+        if let Err(e) = self.store.put(&format!("order:{trade_no}"), &snapshot) {
+            tracing::error!("Failed to persist order {trade_no} completion: {e}");
+            // 持久化失败：回退内存状态，避免出现"内存已 paid 但磁盘 pending"
+            // 的不一致（下次重启后仍可重新入账，宁可重试不可丢单）
+            if let Some(o) = self.by_no.write().get_mut(trade_no) {
+                o.status = "pending".into();
+                o.paid_time = None;
+            }
+            return None;
+        }
+        Some(snapshot)
+    }
+
     pub fn list_by_user(&self, user_id: &str) -> Vec<TopUpOrder> {
         let mut list: Vec<TopUpOrder> = self
             .by_no

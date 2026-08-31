@@ -23,18 +23,9 @@ export default function Settings() {
   const [rlLoading, setRlLoading] = useState(false);
   const [rlSaving, setRlSaving] = useState(false);
 
-  // 通知配置
-  const [notify, setNotify] = useState(null);
-  const [notifyLoading, setNotifyLoading] = useState(false);
-  const [notifySaving, setNotifySaving] = useState(false);
-  const [testEmailTo, setTestEmailTo] = useState('');
-  const [testingTg, setTestingTg] = useState(false);
-  const [testingEmail, setTestingEmail] = useState(false);
-
   useEffect(() => {
     loadLimits();
     loadRateLimitConfig();
-    loadNotifyConfig();
   }, []);
 
   const loadRateLimitConfig = async () => {
@@ -86,75 +77,7 @@ export default function Settings() {
     }
   };
 
-  // ── 通知配置 ──
-  const loadNotifyConfig = async () => {
-    setNotifyLoading(true);
-    try {
-      const res = await api.getNotifyConfig();
-      setNotify(res.data || res);
-    } catch (err) {
-      // 静默处理
-    } finally {
-      setNotifyLoading(false);
-    }
-  };
-
-  const handleNotifyChange = (field, value) => {
-    setNotify({ ...notify, [field]: value });
-  };
-
-  const handleNotifySave = async () => {
-    setNotifySaving(true);
-    setError('');
-    try {
-      await api.updateNotifyConfig({
-        enabled: notify.enabled,
-        telegram_bot_token: notify.telegram_bot_token,
-        telegram_chat_id: notify.telegram_chat_id,
-        smtp_host: notify.smtp_host,
-        smtp_port: notify.smtp_port ? Number(notify.smtp_port) : 0,
-        smtp_username: notify.smtp_username,
-        smtp_password: notify.smtp_password,
-        smtp_from: notify.smtp_from,
-      });
-      addToast(t('通知配置保存成功'));
-      loadNotifyConfig();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setNotifySaving(false);
-    }
-  };
-
-  const handleTestTelegram = async () => {
-    setTestingTg(true);
-    setError('');
-    try {
-      const res = await api.testTelegram();
-      addToast(res.data || t('Telegram 测试消息已发送'));
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setTestingTg(false);
-    }
-  };
-
-  const handleTestEmail = async () => {
-    if (!testEmailTo) {
-      setError(t('请输入收件邮箱'));
-      return;
-    }
-    setTestingEmail(true);
-    setError('');
-    try {
-      const res = await api.testEmail(testEmailTo);
-      addToast(res.data || t('测试邮件已发送'));
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setTestingEmail(false);
-    }
-  };
+  // ── 通知配置已迁移至独立「通知设置」页面（/notify），此处不再承载 ──
 
   const handleChange = (field, value) => {
     setLimits({ ...limits, [field]: value });
@@ -265,6 +188,18 @@ export default function Settings() {
               <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
                 {t('配置多维度 RPM（每分钟请求数）/ TPM（每分钟 Token 数）限流。留空或 0 = 不限制。')}
               </p>
+              {/* 启用限流总开关：不开启时任何限流维度都不生效 */}
+              <div className="form-group">
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={rlConfig.enabled ?? false}
+                    onChange={(e) => setRlConfig({ ...rlConfig, enabled: e.target.checked })}
+                  />
+                  {t('启用限流总开关')}
+                </label>
+                <span className="form-hint">{t('开启后限流规则才会生效')}</span>
+              </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 16 }}>
                 <div className="form-group">
                   <label>{t('每 Key RPM')}</label>
@@ -288,13 +223,7 @@ export default function Settings() {
                   <span className="form-hint">{t('单个模型每分钟最大请求数')}</span>
                 </div>
                 <div className="form-group">
-                  <label>{t('每模型 TPM')}</label>
-                  <input className="form-input" type="number" min="0" placeholder="0"
-                    value={rlConfig.per_model_tpm ?? ''}
-                    onChange={(e) => handleRlChange('per_model_tpm', e.target.value)} />
-                  <span className="form-hint">{t('单个模型每分钟最大 Token 数')}</span>
-                </div>
-                <div className="form-group">
+
                   <label>{t('每用户 RPM')}</label>
                   <input className="form-input" type="number" min="0" placeholder="0"
                     value={rlConfig.per_user_rpm ?? ''}
@@ -316,13 +245,7 @@ export default function Settings() {
                   <span className="form-hint">{t('单个 IP 每分钟最大请求数')}</span>
                 </div>
                 <div className="form-group">
-                  <label>{t('每 IP TPM')}</label>
-                  <input className="form-input" type="number" min="0" placeholder="0"
-                    value={rlConfig.per_ip_tpm ?? ''}
-                    onChange={(e) => handleRlChange('per_ip_tpm', e.target.value)} />
-                  <span className="form-hint">{t('单个 IP 每分钟最大 Token 数')}</span>
-                </div>
-                <div className="form-group">
+
                   <label>{t('全局 RPM')}</label>
                   <input className="form-input" type="number" min="0" placeholder="0"
                     value={rlConfig.global_rpm ?? ''}
@@ -351,157 +274,7 @@ export default function Settings() {
         </div>
       </div>
 
-      {/* 通知配置 */}
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-header">
-          <h2>{t('通知配置')}</h2>
-        </div>
-        <div className="card-body">
-          {notifyLoading ? (
-            <div className="loading">{t('加载通知配置')}</div>
-          ) : notify ? (
-            <div className="settings-form">
-              <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
-                {t('配置 Telegram Bot 与 SMTP 邮件通知。事件触发时推送：充值成功 / 额度不足 / 渠道故障。')}
-              </p>
 
-              <div className="form-group">
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <input
-                    type="checkbox"
-                    checked={notify.enabled ?? false}
-                    onChange={(e) => handleNotifyChange('enabled', e.target.checked)}
-                  />
-                  {t('启用通知')}
-                </label>
-                <span className="form-hint">{t('总开关，关闭后不发送任何通知')}</span>
-              </div>
-
-              <h3 style={{ marginTop: 20, marginBottom: 12, fontSize: 15 }}>{t('Telegram 通知')}</h3>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                <div className="form-group">
-                  <label>Bot Token</label>
-                  <input
-                    className="form-input"
-                    type="text"
-                    placeholder="123456:ABC-DEF..."
-                    value={notify.telegram_bot_token ?? ''}
-                    onChange={(e) => handleNotifyChange('telegram_bot_token', e.target.value)}
-                  />
-                  <span className="form-hint">{t('从 @BotFather 获取的 Bot Token')}</span>
-                </div>
-                <div className="form-group">
-                  <label>Chat ID</label>
-                  <input
-                    className="form-input"
-                    type="text"
-                    placeholder="-1001234567890"
-                    value={notify.telegram_chat_id ?? ''}
-                    onChange={(e) => handleNotifyChange('telegram_chat_id', e.target.value)}
-                  />
-                  <span className="form-hint">{t('群组/频道 Chat ID')}</span>
-                </div>
-              </div>
-              <div className="settings-actions" style={{ marginTop: 8 }}>
-                <button
-                  className="btn btn-secondary"
-                  onClick={handleTestTelegram}
-                  disabled={testingTg}
-                >
-                  {testingTg ? t('发送中...') : t('测试 Telegram')}
-                </button>
-              </div>
-
-              <h3 style={{ marginTop: 24, marginBottom: 12, fontSize: 15 }}>{t('SMTP 邮件通知')}</h3>
-              <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
-                {t('注：当前为原生 TCP SMTP（AUTH LOGIN，明文），适用于本地邮件中继或内网 SMTP（端口 25）。TLS（465/587）后续支持。')}
-              </p>
-              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
-                <div className="form-group">
-                  <label>SMTP Host</label>
-                  <input
-                    className="form-input"
-                    type="text"
-                    placeholder="smtp.example.com"
-                    value={notify.smtp_host ?? ''}
-                    onChange={(e) => handleNotifyChange('smtp_host', e.target.value)}
-                  />
-                </div>
-                <div className="form-group">
-                  <label>SMTP Port</label>
-                  <input
-                    className="form-input"
-                    type="number"
-                    placeholder="25"
-                    value={notify.smtp_port ?? ''}
-                    onChange={(e) => handleNotifyChange('smtp_port', e.target.value)}
-                  />
-                </div>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                <div className="form-group">
-                  <label>{t('用户名')}</label>
-                  <input
-                    className="form-input"
-                    type="text"
-                    value={notify.smtp_username ?? ''}
-                    onChange={(e) => handleNotifyChange('smtp_username', e.target.value)}
-                  />
-                </div>
-                <div className="form-group">
-                  <label>{t('密码')}</label>
-                  <input
-                    className="form-input"
-                    type="password"
-                    placeholder={t('留空表示不修改')}
-                    value={notify.smtp_password ?? ''}
-                    onChange={(e) => handleNotifyChange('smtp_password', e.target.value)}
-                  />
-                </div>
-              </div>
-              <div className="form-group">
-                <label>{t('发件人地址')}</label>
-                <input
-                  className="form-input"
-                  type="text"
-                  placeholder="noreply@example.com"
-                  value={notify.smtp_from ?? ''}
-                  onChange={(e) => handleNotifyChange('smtp_from', e.target.value)}
-                />
-              </div>
-              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-                <div className="form-group" style={{ flex: 1, minWidth: 240 }}>
-                  <label>{t('测试收件邮箱')}</label>
-                  <input
-                    className="form-input"
-                    type="email"
-                    placeholder="you@example.com"
-                    value={testEmailTo}
-                    onChange={(e) => setTestEmailTo(e.target.value)}
-                  />
-                </div>
-                <button
-                  className="btn btn-secondary"
-                  onClick={handleTestEmail}
-                  disabled={testingEmail}
-                >
-                  {testingEmail ? t('发送中...') : t('测试邮件')}
-                </button>
-              </div>
-
-              <div className="settings-actions" style={{ marginTop: 16 }}>
-                <button className="btn btn-primary" onClick={handleNotifySave} disabled={notifySaving}>
-                  {notifySaving ? t('保存中...') : t('保存通知配置')}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="empty-state">
-              <p>{t('通知配置加载失败')}</p>
-            </div>
-          )}
-        </div>
-      </div>
     </div>
   );
 }

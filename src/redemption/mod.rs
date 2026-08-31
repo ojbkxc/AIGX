@@ -255,7 +255,8 @@ impl RedemptionStore {
     /// 兑换码兑换。
     ///
     /// 校验有效性（未使用/未过期），标记已使用，返回面额（quota）。
-    /// 调用方负责将 quota 加到用户余额（user_store.add_quota）。
+    /// 调用方负责将 quota 加到用户余额（user_store.add_quota）；
+    /// 若入账失败，应调用 [`Self::rollback_redeem`] 回滚状态以便用户重试。
     pub fn redeem(&self, code: &str, user_id: &str) -> anyhow::Result<i64> {
         let mut by_id = self.by_id.write();
         let r = by_id
@@ -282,6 +283,38 @@ impl RedemptionStore {
             tracing::error!("Failed to persist redemption {} redeem: {}", snapshot.id, e);
         }
         Ok(quota)
+    }
+
+    /// 回滚兑换（B03 修复）：兑换码已标记 USED 但配额入账失败时，
+    /// 将兑换码恢复为 unused 状态（清除使用人与使用时间），允许用户重试，
+    /// 避免配额永久丢失后用户反复收到 already used 错误。
+    ///
+    /// 仅当兑换码当前确为 USED 且使用人匹配时才回滚，防止误回滚他人记录。
+    pub fn rollback_redeem(&self, code: &str, user_id: &str) -> anyhow::Result<()> {
+        let mut by_id = self.by_id.write();
+        let id = self
+            .by_code
+            .read()
+            .get(code)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("invalid redemption code"))?;
+        let r = by_id
+            .get_mut(&id)
+            .ok_or_else(|| anyhow::anyhow!("redemption not found"))?;
+        if r.status != STATUS_USED {
+            // 状态已不是 USED（如被管理员处理），无需回滚
+            return Ok(());
+        }
+        if r.used_by.as_deref() != Some(user_id) {
+            anyhow::bail!("redemption was used by another user, cannot rollback");
+        }
+        r.status = STATUS_UNUSED;
+        r.used_by = None;
+        r.used_at = None;
+        let snapshot = r.clone();
+        drop(by_id);
+        self.store.put(&format!("redemption:{}", snapshot.id), &snapshot)?;
+        Ok(())
     }
 }
 

@@ -4,6 +4,7 @@ import { api } from '../api';
 
 export default function Orders() {
   const [orders, setOrders] = useState([]);
+  const [epay, setEpay] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const { t } = useTranslation();
@@ -16,13 +17,26 @@ export default function Orders() {
     setLoading(true);
     setError('');
     try {
-      const res = await api.listOrders();
-      setOrders(res.data || []);
+      // 并行拉取订单与易支付配置（旧订单无 quota 字段时按 amount × price 回退计算配额）
+      const [orderRes, epayRes] = await Promise.all([
+        api.listOrders(),
+        api.getEpayConfig().catch(() => null),
+      ]);
+      setOrders(orderRes.data || []);
+      if (epayRes) setEpay(epayRes.data || null);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
+  };
+
+  // 配额数值格式化（与 Wallet 页保持一致）
+  const fmtQuota = (q) => {
+    const n = Number(q || 0);
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+    if (n >= 1_000) return (n / 1_000).toFixed(2) + 'K';
+    return String(n);
   };
 
   if (loading) return <div className="loading">{t('加载订单')}</div>;
@@ -62,7 +76,7 @@ export default function Orders() {
                       <td><code className="key-value" style={{ maxWidth: 240 }}>{o.trade_no}</code></td>
                       <td style={{ fontSize: 12 }}>{o.user_id?.slice(0, 8)}…</td>
                       <td>¥{Number(o.money || 0).toFixed(2)}</td>
-                      <td>{o.amount}</td>
+                      <td>{fmtQuota(o.quota != null ? o.quota : o.amount * (epay?.price || 1))}</td>
                       <td>{o.payment_method}</td>
                       <td>
                         <span className={

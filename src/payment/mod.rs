@@ -8,7 +8,8 @@
 //! 1. 过滤 sign / sign_type 与值为空的参数
 //! 2. 按 key 字典序排序
 //! 3. 拼接为 `k1=v1&k2=v2...` 形式
-//! 4. 末尾追加 `&key=PARTNER_KEY`（注意前面是 `&`）
+//! 4. 末尾直接追加商户密钥（无 `&` 分隔符，与易支付官方及 new-api go-epay 一致，
+//!    见下方 `sign` 实现）
 //! 5. 取 MD5 小写十六进制即 sign
 
 use anyhow::{anyhow, Result};
@@ -155,12 +156,20 @@ pub struct EpayClient {
 
 impl EpayClient {
     pub fn new(config: EpayConfig) -> Self {
-        // 禁用重定向：mapi.php 应直接返回 JSON，任何 3xx 都视为异常
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap_or_default();
+        // 禁用重定向：mapi.php 应直接返回 JSON，任何 3xx 都视为异常。
+        // B23：进程级复用连接池——原先每次 new 都重建 reqwest::Client，
+        // 连接池/线程池无法复用，高频下单场景徒增 TCP 握手与句柄开销；
+        // reqwest::Client 内部为 Arc，clone 廉价，配置固定无 per-instance 差异。
+        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let client = CLIENT
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_secs(10))
+                    .build()
+                    .unwrap_or_default()
+            })
+            .clone();
         Self { config, client }
     }
 
@@ -390,6 +399,12 @@ pub struct TopUpOrder {
     pub amount: i64,
     /// 实际支付金额（元）
     pub money: f64,
+    /// F02（契约2）：下单时锁定的入账配额（amount × price × discount）。
+    /// 回调直接使用该值入账，不再用 money/price 反推——下单与入账之间
+    /// 管理员调整倍率/折扣会导致反推结果偏离用户下单时的承诺。
+    /// 旧订单缺失该字段时反序列化为 0，入账回退 money/price 公式。
+    #[serde(default)]
+    pub quota: i64,
     /// 支付方式
     pub payment_method: String,
     /// 状态: pending / paid / expired
