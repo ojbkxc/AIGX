@@ -118,6 +118,10 @@ impl Default for Limiter {
 
 /// 预留句柄。不调用 commit_tokens 就 drop 是安全的 — 并发槽位会释放，
 /// 只是不记录 token。
+///
+/// Clone 语义：克隆体与原件恰好一方 commit（记账+不释放槽位），
+/// 另一方 Drop 时释放并发槽位；由调用方保证 commit 只发生一次。
+#[derive(Clone)]
 pub struct Reservation {
     store: Arc<dyn RateStore>,
     key: String,
