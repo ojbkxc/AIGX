@@ -1,5 +1,9 @@
 {
   "仪表盘": "Dashboard",
+  "接入与密钥": "Access & Keys",
+  "模型与定价": "Models & Pricing",
+  "用户与分组": "Users & Groups",
+  "财务与额度": "Finance & Quota",
   "账号管理": "Accounts",
   "API 密钥": "API Keys",
   "模型映射": "Model Mappings",

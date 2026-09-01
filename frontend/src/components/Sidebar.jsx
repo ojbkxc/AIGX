@@ -21,9 +21,66 @@ const navItems = [
   { path: '/settings', labelKey: '系统设置', icon: '⚙️' },
 ];
 
+// 分组定义：14 个一级菜单合并为 7 组，减少侧边栏长度。
+// 仪表盘与日志审计保持独立（高频/独立职能），其余按职能合并。
+const navGroups = [
+  { key: 'top', items: [navItems[0]] }, // 仪表盘
+  {
+    key: 'access',
+    labelKey: '接入与密钥',
+    icon: '🔌',
+    items: [navItems[1], navItems[2]], // 渠道管理、API 密钥
+  },
+  {
+    key: 'model',
+    labelKey: '模型与定价',
+    icon: '🧠',
+    items: [navItems[3], navItems[4]], // 模型映射、定价倍率
+  },
+  {
+    key: 'user',
+    labelKey: '用户与分组',
+    icon: '👤',
+    items: [navItems[5], navItems[6]], // 用户管理、用户分组
+  },
+  {
+    key: 'finance',
+    labelKey: '财务与额度',
+    icon: '💼',
+    items: [navItems[7], navItems[8], navItems[9]], // 钱包充值、订单记录、兑换码
+  },
+  { key: 'logs', items: [navItems[10]] }, // 日志审计
+  {
+    key: 'system',
+    labelKey: '系统设置',
+    icon: '🛠️',
+    items: [navItems[11], navItems[12], navItems[13]], // 易支付、通知设置、系统设置
+  },
+];
+
 export default function Sidebar() {
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
+  // 分组折叠状态：默认全部展开，记忆到 localStorage
+  const [collapsedGroups, setCollapsedGroups] = React.useState(() => {
+    try {
+      const saved = localStorage.getItem('sidebar_collapsed');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const toggleGroup = (key) => {
+    setCollapsedGroups((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      try { localStorage.setItem('sidebar_collapsed', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+
+  // 判断分组是否含当前激活项（用于自动展开）
+  const isGroupActive = (items) => items.some((it) => window.location.pathname === it.path);
 
   const handleLogout = async () => {
     try {
@@ -120,38 +177,114 @@ export default function Sidebar() {
         gap: '6px',
         flex: 1,
       }}>
-        {navItems.map((item) => (
-          <NavLink
-            key={item.path}
-            to={item.path}
-            end={item.end}
-            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-            style={({ isActive }) => ({
-              display: 'flex',
-              alignItems: 'center',
-              gap: '12px',
-              padding: '12px 14px',
-              borderRadius: '10px',
-              cursor: 'pointer',
-              fontSize: '14px',
-              fontWeight: 500,
-              color: isActive ? 'white' : 'var(--text-muted)',
-              background: isActive ? 'var(--primary-gradient)' : 'transparent',
-              boxShadow: isActive
-                ? '0 0 18px rgba(168, 85, 247, 0.35), 0 0 40px rgba(99, 102, 241, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.1)'
-                : 'none',
-              textDecoration: 'none',
-              transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
-              position: 'relative',
-              overflow: 'hidden',
-            })}
-          >
-            <span style={{ fontSize: '16px', width: '20px', textAlign: 'center', flexShrink: 0 }}>
-              {item.icon}
-            </span>
-            <span>{t(item.labelKey)}</span>
-          </NavLink>
-        ))}
+        {navGroups.map((group) => {
+          // 无 label 的分组（仪表盘、日志）直接平铺，不渲染分组标题
+          if (!group.labelKey) {
+            return group.items.map((item) => (
+              <NavLink
+                key={item.path}
+                to={item.path}
+                end={item.end}
+                className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                style={({ isActive }) => ({
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px',
+                  padding: '12px 14px',
+                  borderRadius: '10px',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontWeight: 500,
+                  color: isActive ? 'white' : 'var(--text-muted)',
+                  background: isActive ? 'var(--primary-gradient)' : 'transparent',
+                  boxShadow: isActive
+                    ? '0 0 18px rgba(168, 85, 247, 0.35), 0 0 40px rgba(99, 102, 241, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.1)'
+                    : 'none',
+                  textDecoration: 'none',
+                  transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
+                  position: 'relative',
+                  overflow: 'hidden',
+                })}
+              >
+                <span style={{ fontSize: '16px', width: '20px', textAlign: 'center', flexShrink: 0 }}>
+                  {item.icon}
+                </span>
+                <span>{t(item.labelKey)}</span>
+              </NavLink>
+            ));
+          }
+          // 可折叠分组
+          const collapsed = collapsedGroups[group.key] && !isGroupActive(group.items);
+          const groupActive = isGroupActive(group.items);
+          return (
+            <div key={group.key} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+              <button
+                onClick={() => toggleGroup(group.key)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  padding: '8px 12px',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  letterSpacing: '0.4px',
+                  textTransform: 'uppercase',
+                  color: groupActive ? 'var(--text-main)' : 'var(--text-muted)',
+                  background: 'transparent',
+                  border: 'none',
+                  width: '100%',
+                  textAlign: 'left',
+                  transition: 'all 0.2s ease',
+                }}
+              >
+                <span style={{ fontSize: '14px', width: '20px', textAlign: 'center', flexShrink: 0 }}>
+                  {group.icon}
+                </span>
+                <span style={{ flex: 1 }}>{t(group.labelKey)}</span>
+                <span style={{
+                  fontSize: '10px',
+                  transition: 'transform 0.25s ease',
+                  transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
+                  opacity: 0.6,
+                }}>▼</span>
+              </button>
+              {!collapsed && group.items.map((item) => (
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  end={item.end}
+                  className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                  style={({ isActive }) => ({
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px',
+                    padding: '10px 14px 10px 34px',
+                    borderRadius: '10px',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    fontWeight: 500,
+                    color: isActive ? 'white' : 'var(--text-muted)',
+                    background: isActive ? 'var(--primary-gradient)' : 'transparent',
+                    boxShadow: isActive
+                      ? '0 0 18px rgba(168, 85, 247, 0.35), 0 0 40px rgba(99, 102, 241, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.1)'
+                      : 'none',
+                    textDecoration: 'none',
+                    transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
+                    position: 'relative',
+                    overflow: 'hidden',
+                  })}
+                >
+                  <span style={{ fontSize: '16px', width: '20px', textAlign: 'center', flexShrink: 0 }}>
+                    {item.icon}
+                  </span>
+                  <span>{t(item.labelKey)}</span>
+                </NavLink>
+              ))}
+            </div>
+          );
+        })}
       </nav>
 
       {/* Footer */}
