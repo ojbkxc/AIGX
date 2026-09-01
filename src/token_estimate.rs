@@ -184,6 +184,7 @@ mod tests {
                 tool_call_id: None,
                 tool_calls: None,
             }],
+            tools: None,
             max_tokens: None,
             temperature: None,
             top_p: None,

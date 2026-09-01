@@ -5,6 +5,13 @@ use tokio::sync::RwLock;
 use crate::notify::NotifyConfig;
 use crate::payment::EpayConfig;
 
+/// 默认 cf-ai-gw Worker 地址（AI Binding 方式调用 Cloudflare Workers AI）。
+///
+/// AIGX 不再直接调用 Cloudflare REST API（`api.cloudflare.com`），而是通过
+/// cf-ai-gw Worker 桥接——Worker 内部使用 **AI Binding**（`env.AI.run()`）调用
+/// Workers AI。本地址即 cf-ai-gw Worker 的部署地址。
+pub const DEFAULT_CF_BINDING_URL: &str = "http://127.0.0.1:8787";
+
 // ── Default value functions ──────────────────────────────────────────
 
 fn default_host() -> String {
@@ -51,6 +58,10 @@ pub struct AdminConfig {
 
 fn default_session_ttl() -> i64 {
     24
+}
+
+fn default_cf_binding_url() -> String {
+    DEFAULT_CF_BINDING_URL.to_string()
 }
 
 /// 数据库配置 — 多数据库后端支持。
@@ -135,6 +146,13 @@ pub struct AppConfig {
     /// 通知系统配置（Telegram + SMTP）
     #[serde(default)]
     pub notify: NotifyConfig,
+    /// cf-ai-gw Worker 部署地址（AI Binding 桥接）。
+    ///
+    /// AIGX 通过该地址调用 cf-ai-gw Worker，Worker 内部使用 **AI Binding**
+    /// （`env.AI.run()`）调用 Cloudflare Workers AI，而非 REST API。
+    /// 默认 `http://127.0.0.1:8787`（wrangler dev 本地调试）。
+    #[serde(default = "default_cf_binding_url")]
+    pub cf_binding_url: String,
     /// 数据库配置（多数据库后端支持）
     ///
     /// 留空则使用默认 FileStore（rusqlite），填 URL 则启用 SeaORM。

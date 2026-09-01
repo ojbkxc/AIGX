@@ -424,36 +424,45 @@ impl Bridge for CloudflareBridge {
         _ctx: &BridgeContext,
     ) -> Result<EmbeddingResponse, BridgeError> {
         let mut embeddings = Vec::new();
-        let mut total_tokens = 0u64;
 
-        for (i, text) in req.input.iter().enumerate() {
-            let cf_body = serde_json::json!({ "text": text });
-            let result = self
-                .client
-                .run_embedding(&req.model, cf_body)
-                .await
-                .map_err(|e| Self::map_cf_error(&e))?;
+        // AI Binding 方式：cf-ai-gw 的 /v1/embeddings 一次接收 input 数组
+        let cf_body = serde_json::json!({ "input": req.input });
+        let result = self
+            .client
+            .run_embedding(&req.model, cf_body)
+            .await
+            .map_err(|e| Self::map_cf_error(&e))?;
 
-            let data = result
-                .get("data")
-                .and_then(|d| d.as_array())
-                .cloned()
-                .unwrap_or_default();
+        // cf-ai-gw 返回 OpenAI 格式 { object:"list", data:[{embedding,index}] }
+        let data = result
+            .get("data")
+            .and_then(|d| d.as_array())
+            .cloned()
+            .unwrap_or_default();
 
-            for (j, embedding_data) in data.iter().enumerate() {
-                if let Some(vector) = embedding_data.get("embedding").and_then(|e| e.as_array()) {
-                    let vec_f64: Vec<f64> =
-                        vector.iter().filter_map(|v| v.as_f64()).collect();
-                    embeddings.push(EmbeddingObject {
-                        index: i * data.len() + j,
-                        embedding: vec_f64,
-                    });
-                }
+        for embedding_data in &data {
+            if let Some(vector) = embedding_data.get("embedding").and_then(|e| e.as_array()) {
+                let vec_f64: Vec<f64> = vector.iter().filter_map(|v| v.as_f64()).collect();
+                embeddings.push(EmbeddingObject {
+                    index: embedding_data
+                        .get("index")
+                        .and_then(|i| i.as_u64())
+                        .unwrap_or(0) as usize,
+                    embedding: vec_f64,
+                });
             }
-
-            let tokens = estimate_tokens(text);
-            total_tokens += tokens;
         }
+
+        // 用量从响应 usage 提取，否则估算
+        let total_tokens = if let Some(usage) = result.get("usage") {
+            usage
+                .get("total_tokens")
+                .or_else(|| usage.get("prompt_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or_else(|| req.input.iter().map(|t| estimate_tokens(t)).sum())
+        } else {
+            req.input.iter().map(|t| estimate_tokens(t)).sum()
+        };
 
         Ok(EmbeddingResponse {
             data: embeddings,
@@ -526,36 +535,35 @@ impl Bridge for CloudflareBridge {
             .and_then(|p| p.as_str())
             .ok_or_else(|| BridgeError::Config("missing prompt field".into()))?;
 
-        let n = body
-            .get("n")
-            .and_then(|n| n.as_u64())
-            .unwrap_or(1)
-            .min(10) as usize;
+        // AI Binding 方式：cf-ai-gw 的 /v1/images/generations 返回
+        // OpenAI 格式 { data: [ { b64_json | url } ] }（内部经 AI Binding 生成）
+        let cf_body = serde_json::json!({ "prompt": prompt });
+        let result = self
+            .client
+            .run_image(model, cf_body)
+            .await
+            .map_err(|e| Self::map_cf_error(&e))?;
 
-        let mut images = Vec::new();
-
-        for _ in 0..n {
-            let cf_body = serde_json::json!({ "prompt": prompt });
-            let result = self
-                .client
-                .run_image(model, cf_body)
-                .await
-                .map_err(|e| Self::map_cf_error(&e))?;
-
-            let image_data = if let Some(img) = result.get("image").and_then(|i| i.as_str()) {
-                serde_json::json!({ "b64_json": img })
-            } else if let Some(url) = result.get("url").and_then(|u| u.as_str()) {
-                serde_json::json!({ "url": url })
-            } else {
-                serde_json::json!({ "b64_json": result.to_string() })
-            };
-
-            images.push(image_data);
+        // cf-ai-gw 已按 OpenAI 兼容格式返回 data 数组
+        if let Some(data) = result.get("data").and_then(|d| d.as_array()) {
+            return Ok(serde_json::json!({
+                "created": chrono::Utc::now().timestamp(),
+                "data": data
+            }));
         }
+
+        // 兜底：单张图片结果
+        let image_data = if let Some(img) = result.get("image").and_then(|i| i.as_str()) {
+            serde_json::json!({ "b64_json": img })
+        } else if let Some(url) = result.get("url").and_then(|u| u.as_str()) {
+            serde_json::json!({ "url": url })
+        } else {
+            serde_json::json!({ "b64_json": result.to_string() })
+        };
 
         Ok(serde_json::json!({
             "created": chrono::Utc::now().timestamp(),
-            "data": images
+            "data": [image_data]
         }))
     }
 }

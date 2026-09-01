@@ -39,7 +39,7 @@ http = "1"
 http-body-util = "0.1"
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "fs", "compression-gzip"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls"] }
 # url crate — reqwest 的传递依赖，显式声明用于 form_urlencoded 构造 submit.php 回退 query string
 url = "2"
 bytes = "1"

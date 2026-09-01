@@ -159,76 +159,88 @@ impl AccountPool {
         }
     }
 
-    /// 测试账号连接。向 Cloudflare API 发送 3 个测试请求：
+    /// 测试账号连接。账号在 Binding 架构下即 cf-ai-gw Worker 部署：
+    /// `account_id` 为 Worker 地址，`api_token` 为 Worker API Key（可空）。
+    /// 向 Worker 发送 2 个测试请求（OpenAI 兼容端点）：
     ///
-    /// 1. `GET /accounts/{id}/ai/models/search?per_page=1` — 验证 Workers AI Read 权限
-    /// 2. `POST /accounts/{id}/ai/run/@cf/baai/bge-base-en-v1.5` — 验证 Workers AI Edit 权限
-    /// 3. GraphQL 查询 — 验证 Account Analytics Read 权限
+    /// 1. `GET /v1/models` — 验证 Worker 可达、代理鉴权通过（如启用）
+    /// 2. `POST /v1/chat/completions` — 验证 AI Binding 推理可用
     pub async fn test(&self, account: &CfAccount) -> Result<TestResult, String> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-        let base_url = format!(
-            "https://api.cloudflare.com/client/v4/accounts/{}",
-            account.account_id
-        );
-        let auth_header = format!("Bearer {}", account.api_token);
+        // account_id 即 cf-ai-gw Worker 地址；兼容裸域名/本地地址
+        let mut base_url = account.account_id.trim().trim_end_matches('/').to_string();
+        if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+            let is_localhost = base_url.starts_with("127.0.0.1")
+                || base_url.starts_with("localhost")
+                || base_url.starts_with("::1");
+            base_url = if is_localhost {
+                format!("http://{base_url}")
+            } else {
+                format!("https://{base_url}")
+            };
+        }
 
-        // ── Test 1: Workers AI — 搜索模型 ──────────────────────────────
-        let models_ok = match client
-            .get(format!("{}/ai/models/search?per_page=1", base_url))
-            .header("Authorization", &auth_header)
-            .send()
-            .await
-        {
-            Ok(resp) => resp.status().is_success(),
-            Err(e) => {
-                return Err(format!("Models API test failed: {}", e));
+        let build_req = |client: &reqwest::Client, url: &str| {
+            let mut req = client.get(url);
+            if !account.api_token.trim().is_empty() {
+                req = req.bearer_auth(account.api_token.trim());
             }
+            req
         };
 
-        // ── Test 2: Workers AI — 运行推理 ──────────────────────────────
-        let inference_ok = match client
-            .post(format!(
-                "{}/ai/run/@cf/baai/bge-base-en-v1.5",
-                base_url
-            ))
-            .header("Authorization", &auth_header)
-            .json(&serde_json::json!({ "text": "test"}))
+        // ── Test 1: GET /v1/models — Worker 可达性 + 代理鉴权 ──────────
+        let models_ok = match build_req(&client, &format!("{base_url}/v1/models"))
             .send()
             .await
         {
             Ok(resp) => {
                 let status = resp.status();
-                // 429 (rate limited) 也算通过 — 说明 API 可达
-                status.is_success() || status == 429
+                // 401/403 表示鉴权未通过；其余可达性（含 404 端点差异）判失败
+                if status == reqwest::StatusCode::UNAUTHORIZED
+                    || status == reqwest::StatusCode::FORBIDDEN
+                {
+                    return Err(format!(
+                        "Proxy auth failed (HTTP {status}) — check API Key / cf-ai-gw proxy auth"
+                    ));
+                }
+                status.is_success()
             }
             Err(e) => {
-                return Err(format!("Inference API test failed: {}", e));
+                return Err(format!("Worker /v1/models test failed: {e}"));
             }
         };
 
-        // ── Test 3: GraphQL — 查询用量分析 ─────────────────────────────
-        let analytics_query = format!(
-            "{{ viewer {{ accounts(filter: {{ accountTag: \"{}\" }}) {{ aiWorkersUsageAdaptiveGroups(limit: 1) {{ dimensions {{ modelId }} }} }} }} }}",
-            account.account_id
-        );
-        let analytics_ok = match client
-            .post("https://api.cloudflare.com/client/v4/graphql")
-            .header("Authorization", &auth_header)
-            .json(&serde_json::json!({ "query": analytics_query }))
+        // ── Test 2: POST /v1/chat/completions — AI Binding 推理可用 ────
+        let inference_ok = match client
+            .post(format!("{base_url}/v1/chat/completions"))
+            .bearer_auth(account.api_token.trim())
+            .json(&serde_json::json!({
+                "model": "@cf/baai/bge-base-en-v1.5",
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 8,
+            }))
             .send()
             .await
         {
-            Ok(resp) => resp.status().is_success(),
+            Ok(resp) => {
+                let status = resp.status();
+                // 429 (rate limited) 也算通过 — 说明 Worker 可达且已受理
+                status.is_success() || status == 429
+            }
             Err(e) => {
-                return Err(format!("Analytics GraphQL test failed: {}", e));
+                return Err(format!("Inference API test failed: {e}"));
             }
         };
 
-        let success = models_ok && inference_ok && analytics_ok;
+        // Binding 架构下无独立 GraphQL 用量分析端点；analytics 字段保留
+        // 为 true 以兼容前端，实际用量由 AIGX 本地 usage_tracker 统计。
+        let analytics_ok = true;
+
+        let success = models_ok && inference_ok;
         Ok(TestResult {
             success,
             models: models_ok,

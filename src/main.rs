@@ -33,7 +33,6 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::routing::{get, post, put, delete, patch};
 use axum::Router;
-use rand::Rng;
 use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -110,11 +109,11 @@ async fn main() -> anyhow::Result<()> {
     // 初始化易支付客户端（运行时按配置即时构造，无需常驻）
     let epay_client = Arc::new(EpayClient::new(config.epay.clone()));
 
-    // 初始化 CF API 客户端
-    let api_client = Arc::new(CfApiClient::new(
-        account_pool.clone(),
-        model_mapper.clone(),
-    ));
+    // 初始化 CF API 客户端（AI Binding 桥接方式）
+    let mut cf_api_client = CfApiClient::new(account_pool.clone(), model_mapper.clone());
+    // 配置兜底 cf-ai-gw Worker 地址（无账号时使用），保证“零账号即可跑通”
+    cf_api_client.with_fallback(config.cf_binding_url.clone(), String::new());
+    let api_client = Arc::new(cf_api_client);
 
     // 初始化 Hub 并注册 Cloudflare Bridge
     let hub = Arc::new(Hub::new());
@@ -301,15 +300,16 @@ async fn ensure_session_secret(config_manager: &ConfigManager) {
 
 /// 确保默认管理员账户存在（仅首次启动时创建）
 ///
-/// 安全策略：
-/// - 仅当系统中不存在任何 Admin 角色用户时，才创建一个随机密码的管理员账户；
-/// - 已存在 Admin 用户时直接跳过，绝不删除或重建已存在的管理员；
-/// - 初始密码通过 `tracing::warn!` 输出到日志，提示用户首次登录后立即修改；
-/// - 不再硬编码明文密码常量。
+/// 首次启动（系统中尚不存在任何 Admin 角色用户）时自动创建写死的内置管理员账户：
+/// - 邮箱：`admin@gmail.com`
+/// - 用户名：`admin`
+/// - 密码：`123456`（写死，用户明确要求内置固定密码）
+///
+/// 已存在 Admin 用户时直接跳过，绝不删除或重建已存在的管理员。
 fn ensure_default_admin(user_store: &UserStore) {
-    const DEFAULT_ADMIN_EMAIL: &str = "admin@aigx.local";
+    const DEFAULT_ADMIN_EMAIL: &str = "admin@gmail.com";
     const DEFAULT_ADMIN_USERNAME: &str = "admin";
-    const PASSWORD_LEN: usize = 16;
+    const DEFAULT_ADMIN_PASSWORD: &str = "123456";
 
     // 检查是否已存在任意 Admin 角色用户；若已存在则跳过，绝不删除/重建
     let has_admin = user_store.list().iter().any(|u| u.role == Role::Admin);
@@ -320,63 +320,27 @@ fn ensure_default_admin(user_store: &UserStore) {
         return;
     }
 
-    // 首次启动：随机生成 16 位字母数字密码
-    let password = generate_random_password(PASSWORD_LEN);
-
-    // 创建管理员账户
+    // 创建写死凭据的内置管理员账户
     match user_store.create_with_username(
         DEFAULT_ADMIN_EMAIL,
         DEFAULT_ADMIN_USERNAME,
-        &password,
+        DEFAULT_ADMIN_PASSWORD,
         Role::Admin,
         0,
     ) {
         Ok(_) => {
-            // 安全：日志中只输出掩码（前 2 位 + ***），不泄露完整初始密码。
-            // 完整密码仅通过其他安全渠道（如启动后由部署脚本捕获）传递。
-            let masked = mask_password(&password);
             tracing::warn!(
-                "First-time setup: default admin account created. \
-                 email={} | username={} | initial_password_masked={} \
-                 — PLEASE LOGIN AND CHANGE THE PASSWORD IMMEDIATELY. \
-                 (Full password is intentionally not logged; retrieve it from your deployment secret channel.)",
+                "First-time setup: built-in admin account created. \
+                 email={} | username={} | password={} \
+                 — PLEASE LOGIN AND CHANGE THE PASSWORD IMMEDIATELY.",
                 DEFAULT_ADMIN_EMAIL,
                 DEFAULT_ADMIN_USERNAME,
-                masked,
+                DEFAULT_ADMIN_PASSWORD,
             );
         }
         Err(e) => {
             tracing::error!("Failed to create default admin account: {}", e);
         }
-    }
-}
-
-/// 生成指定长度的随机字母数字密码
-fn generate_random_password(len: usize) -> String {
-    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ\
-                             abcdefghijklmnopqrstuvwxyz\
-                             0123456789";
-    let mut rng = rand::thread_rng();
-    (0..len)
-        .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
-            CHARSET[idx] as char
-        })
-        .collect()
-}
-
-/// 对密码做掩码处理：保留前 2 位（若存在），其余替换为 `***`。
-/// 空字符串返回 `"***"`，单字符返回 `"x***"`。
-/// 仅用于日志输出，绝不输出完整密码。
-///
-/// 实现按 `chars()` 取前 2 个字符，避免多字节 UTF-8 字节切片 panic。
-/// 当前 `generate_random_password` 只生成 ASCII，此处防御性处理未来扩展。
-fn mask_password(p: &str) -> String {
-    let prefix: String = p.chars().take(2).collect();
-    if prefix.is_empty() {
-        "***".to_string()
-    } else {
-        format!("{}***", prefix)
     }
 }
 

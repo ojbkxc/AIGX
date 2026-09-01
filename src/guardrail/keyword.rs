@@ -156,6 +156,7 @@ mod tests {
         ChatFormat {
             model: "test".into(),
             messages: msgs,
+            tools: None,
             max_tokens: None,
             temperature: None,
             top_p: None,

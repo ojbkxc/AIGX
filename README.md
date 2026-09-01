@@ -11,10 +11,11 @@ AIGX 通过 **cf-ai-gw Worker** 桥接 Cloudflare Workers AI，cf-ai-gw 内部�
 ```
 
 - **cf-ai-gw Worker**：部署在 Cloudflare Workers 上，使用 `wrangler.toml` 配置 AI Binding，通过 `env.AI.run(model, input)` 直接调用模型
-- **AIGX Bridge**：`src/bridge/cf.rs` 通过 HTTP 调用 cf-ai-gw Worker，实现多账号负载均衡、故障切换、串行重试
-- **优势**：AI Binding 零延迟（Worker 内部调用），无需额外 API Token 鉴权，免费额度由 Cloudflare 提供
+- **AIGX Bridge**：`src/proxy/mod.rs` 与 `src/bridge/cf.rs` 通过 HTTP 调用 cf-ai-gw Worker 的 `/v1/*` 端点（chat/completions、embeddings、audio、images 等），实现多账号负载均衡、故障切换、串行重试
+- **配置**：`config.toml` 中 `cf_binding_url` 指定 cf-ai-gw Worker 地址（默认 `http://127.0.0.1:8787`，即 `wrangler dev` 本地调试地址）；在「渠道/账号」页填写的账号即 cf-ai-gw Worker 部署地址与 API Key
+- **优势**：AI Binding 零延迟（Worker 内部调用），无需 REST API Token 鉴权，免费额度由 Cloudflare 提供
 
-> 详细说明见 [cf-ai-gw 项目](https://github.com/ojbkxc/cf-ai-gw) 的 `_worker.js` 实现。
+> 详细说明见 [cf-ai-gw 项目](https://github.com/ojbkxc/cf-ai-gw) 的 `src/index.js`（AI Binding 单账号）与 `_worker.js`（REST API 多账号）实现。
 
 ## 特性
 
@@ -51,7 +52,7 @@ tar xzf AIGX-*-linux-amd64.tar.gz
 # 浏览器访问 http://127.0.0.1:8080
 ```
 
-首次启动自动创建管理员账户 `admin@aigx.local`（用户名 `admin`），初始密码为随机生成的 16 位字符串——完整密码不落日志（仅输出掩码），请通过部署渠道获取，登录后立即修改。
+首次启动自动创建内置管理员账户：邮箱 `admin@gmail.com`、用户名 `admin`、密码 `123456`（写死）。请在登录后立即修改密码。
 
 ### Docker
 
@@ -91,6 +92,9 @@ session_ttl_hours = 24    # 会话有效期（小时）
 daily_limit = 0        # 0 表示不限
 monthly_limit = 0
 threshold = 0.9
+
+# cf-ai-gw Worker 地址（AI Binding 桥接），默认 wrangler dev 本地地址
+cf_binding_url = "http://127.0.0.1:8787"
 
 [epay]
 pay_address = ""       # 易支付网关地址

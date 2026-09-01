@@ -6,14 +6,40 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::account::AccountPool;
+use crate::account::{AccountPool, CfAccount};
 use crate::model::ModelMapper;
 
-/// CF Workers AI API 客户端
+/// CF Workers AI API 客户端（AI Binding 桥接方式）。
+///
+/// ## 架构说明：Binding 方式（不使用 REST API）
+///
+/// AIGX 不再直接调用 Cloudflare REST API（`api.cloudflare.com/client/v4/accounts/...`）。
+/// 而是通过 HTTP 调用 **cf-ai-gw Worker**（Cloudflare Workers 上部署的网关），
+/// Worker 内部使用 **AI Binding**（`env.AI.run(model, input)`）直接调用 Workers AI。
+///
+/// 链路：
+/// ```text
+/// AIGX (Rust) --HTTP--> cf-ai-gw Worker --AI Binding--> Cloudflare Workers AI
+/// ```
+///
+/// 好处：
+/// - AI Binding 是 Worker 内部 RPC，零额外网络跳转，无需 API Token 鉴权
+/// - 自动享受 Cloudflare 免费额度（`@cf/` 开头的模型）
+/// - 风控规避最佳（cf-ai-gw 的模式 A），无需暴露 API Token
+///
+/// 每个 cf-ai-gw Worker 对应一个「账号」（账号 = Worker 部署），账号的
+/// `account_id` / `api_token` 字段语义变为：`account_id` = Worker 地址，
+/// `api_token` = 调用该 Worker 时使用的 API Key（cf-ai-gw 管理面板中创建；
+/// 空则匿名调用，需 cf-ai-gw 未启用代理鉴权）。多账号负载均衡与故障切换
+/// 仍在 AIGX 层面按账号池实现。
 pub struct CfApiClient {
     http: Client,
     account_pool: Arc<AccountPool>,
     model_mapper: Arc<ModelMapper>,
+    /// 兜底 cf-ai-gw Worker 地址（无账号时使用，取自配置 `cf_binding_url`）
+    fallback_url: String,
+    /// 兜底调用凭证（空则匿名）
+    fallback_key: String,
 }
 
 impl CfApiClient {
@@ -27,28 +53,54 @@ impl CfApiClient {
             http,
             account_pool,
             model_mapper,
+            fallback_url: String::new(),
+            fallback_key: String::new(),
         }
     }
 
-    /// 构建 CF API URL
-    fn build_url(account_id: &str, path: &str) -> String {
-        format!(
-            "https://api.cloudflare.com/client/v4/accounts/{}/ai/{}",
-            account_id, path
-        )
+    /// 配置兜底 cf-ai-gw Worker 地址与凭证（启动时由 `AppState` 调用）。
+    pub fn with_fallback(&mut self, url: String, key: String) {
+        self.fallback_url = url.trim().trim_end_matches('/').to_string();
+        self.fallback_key = key;
     }
 
-    /// 调用 CF Workers AI API（带多账号故障转移）
-    /// 类似 _worker.js 的 callCFRunAPI
+    /// 解析账号 → (worker_url, api_key) 的桥接目标。
+    fn resolve_target(&self, account: &CfAccount) -> (String, String) {
+        // account_id 即 cf-ai-gw Worker 部署地址（含 scheme 的 URL 或裸域名）。
+        // 兼容 wrangler dev 本地调试地址：127.0.0.1 / localhost 视为 http://，
+        // 其余裸域名默认补 https://。
+        let mut url = account.account_id.trim().trim_end_matches('/').to_string();
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            let is_localhost =
+                url.starts_with("127.0.0.1") || url.starts_with("localhost") || url.starts_with("::1");
+            url = if is_localhost {
+                format!("http://{url}")
+            } else {
+                format!("https://{url}")
+            };
+        }
+        let key = account.api_token.trim().to_string();
+        (url, key)
+    }
+
+    /// 调用 cf-ai-gw Worker（AI Binding），带多账号故障转移。
+    ///
+    /// - 优先遍历账号池中的活跃账号，把请求转发到对应的 cf-ai-gw Worker
+    /// - 无账号时回退到配置的兜底 `cf_binding_url`
     pub async fn call_ai(&self, model: &str, body: Value) -> std::result::Result<CfResponse, CfError> {
         let cf_model = self.model_mapper.resolve(model);
         let active_accounts = self.account_pool.active_accounts();
 
         if active_accounts.is_empty() {
-            return Err(CfError::AuthError("No active Cloudflare accounts configured".into()));
+            if self.fallback_url.is_empty() {
+                return Err(CfError::AuthError(
+                    "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
+                ));
+            }
+            return self.call_worker(&self.fallback_url, &self.fallback_key, &cf_model, body).await;
         }
 
-        let mut last_error = CfError::AllAccountsFailed("All accounts exhausted".into());
+        let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
 
         for account in &active_accounts {
             for attempt in 0..2 {
@@ -56,70 +108,31 @@ impl CfApiClient {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
 
-                let url = Self::build_url(&account.account_id, &format!("run/{}", cf_model));
-                let result = self
-                    .http
-                    .post(&url)
-                    .bearer_auth(&account.api_token)
-                    .json(&body)
-                    .send()
-                    .await;
+                let (url, key) = self.resolve_target(account);
+                let result = self.call_worker(&url, &key, &cf_model, body.clone()).await;
 
                 match result {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        if status.is_success() {
-                            match resp.json::<CfResponse>().await {
-                                Ok(cf_resp) => {
-                                    if cf_resp.success {
-                                        self.account_pool.mark_used(&account.id);
-                                        return Ok(cf_resp);
-                                    }
-                                    last_error = CfError::ServerError(
-                                        cf_resp
-                                            .errors
-                                            .first()
-                                            .and_then(|e| e.message.clone())
-                                            .unwrap_or_else(|| "Unknown CF API error".into()),
-                                    );
-                                    if !is_retryable_status(status.as_u16()) {
-                                        return Err(last_error);
-                                    }
-                                }
-                                Err(e) => {
-                                    last_error = CfError::NetworkError(format!("Failed to parse response: {e}"));
-                                }
-                            }
-                        } else if is_auth_error(status.as_u16()) {
-                            // B07：认证失败只代表当前账号 token 失效，
-                            // 记录后跳过本账号剩余重试、继续尝试下一账号，避免一坏全坏
-                            last_error = CfError::AuthError(format!("Auth failed: {status}"));
+                    Ok(cf_resp) => {
+                        self.account_pool.mark_used(&account.id);
+                        return Ok(cf_resp);
+                    }
+                    Err(e) => match &e {
+                        // 认证失败只代表该 Worker 的 API Key 失效，跳过本账号剩余重试、继续下一账号
+                        CfError::AuthError(_) => {
+                            last_error = e;
                             break;
-                        } else if status.as_u16() == 429 {
-                            let retry_after = resp
-                                .headers()
-                                .get("retry-after")
-                                .and_then(|v| v.to_str().ok())
-                                .and_then(|v| v.parse::<u64>().ok());
-                            last_error = CfError::RateLimited { retry_after };
-                            // 限流时跳过当前账号剩余重试
-                            break;
-                        } else if status.as_u16() == 404 {
-                            last_error = CfError::ModelNotFound(format!("Model {cf_model} not found"));
-                            // 模型不存在，不可重试
-                            return Err(last_error);
-                        } else if !is_retryable_status(status.as_u16()) {
-                            let body_text = resp.text().await.unwrap_or_default();
-                            last_error = CfError::ServerError(format!("CF API status {status}: {body_text}"));
-                            return Err(last_error);
-                        } else {
-                            let body_text = resp.text().await.unwrap_or_default();
-                            last_error = CfError::ServerError(format!("CF API status {status}: {body_text}"));
                         }
-                    }
-                    Err(e) => {
-                        last_error = CfError::NetworkError(format!("Connection error: {e}"));
-                    }
+                        // 限流时跳过当前账号剩余重试
+                        CfError::RateLimited { .. } => {
+                            last_error = e;
+                            break;
+                        }
+                        // 模型不存在，不可重试
+                        CfError::ModelNotFound(_) => return Err(e),
+                        _ => {
+                            last_error = e;
+                        }
+                    },
                 }
             }
         }
@@ -127,45 +140,149 @@ impl CfApiClient {
         Err(last_error)
     }
 
-    /// 调用 CF 模型列表 API
+    /// 向单个 cf-ai-gw Worker 发起一次调用（内部 HTTP POST）。
+    ///
+    /// 目标端点固定为 `/v1/chat/completions`（cf-ai-gw 的 OpenAI 兼容代理入口，
+    /// 内部经 AI Binding 转发到 Workers AI）。注意：`/v1/chat/completions`
+    /// 的 `/v1/completions`、`/v1/embeddings`、`/v1/images/generations`、
+    /// `/v1/audio/transcriptions` 路由在 cf-ai-gw 中均存在；统一走
+    /// `/v1/chat/completions` 会在 chat 模型上误用文本补全请求，因此
+    /// 各调用方需要按语义选择正确端点。
+    ///
+    /// 当前实现将 `body` 直接透传给 Worker，Worker 侧的模型名解析
+    /// （自定义映射 / `@cf/` 直通 / 兜底）与用量统计都由 Worker 处理。
+    async fn call_worker(
+        &self,
+        worker_url: &str,
+        api_key: &str,
+        cf_model: &str,
+        body: Value,
+    ) -> std::result::Result<CfResponse, CfError> {
+        let url = format!("{worker_url}/v1/chat/completions");
+        let mut req = self
+            .http
+            .post(&url)
+            .json(&body);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(api_key);
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(CfError::NetworkError(format!("Connection error: {e}")));
+            }
+        };
+
+        let status = resp.status();
+        if status.is_success() {
+            let v: Value = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(CfError::NetworkError(format!("Failed to parse response: {e}")));
+                }
+            };
+            // cf-ai-gw 返回 OpenAI 兼容结构 { choices: [...], usage: {...} }
+            Ok(CfResponse {
+                success: true,
+                result: Some(v),
+                errors: Vec::new(),
+            })
+        } else if is_auth_error(status.as_u16()) {
+            Err(CfError::AuthError(format!("Auth failed: {status}")))
+        } else if status.as_u16() == 429 {
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+            Err(CfError::RateLimited { retry_after })
+        } else if status.as_u16() == 404 {
+            Err(CfError::ModelNotFound(format!("Model {cf_model} not found")))
+        } else if !is_retryable_status(status.as_u16()) {
+            let body_text = resp.text().await.unwrap_or_default();
+            Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
+        } else {
+            let body_text = resp.text().await.unwrap_or_default();
+            Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
+        }
+    }
+
+    /// 调用 cf-ai-gw Worker 的 `/v1/models`（AI Binding 方式）。
+    ///
+    /// 返回 Worker 内置模型映射（`@cf/...`）。AIGX 的模型列表主要来自
+    /// `ModelMapper`（默认映射 + 自定义映射），此方法作为动态发现补充。
     pub async fn list_models(&self) -> std::result::Result<Vec<CfModelInfo>, CfError> {
         let active_accounts = self.account_pool.active_accounts();
 
         if active_accounts.is_empty() {
-            return Err(CfError::AuthError("No active Cloudflare accounts configured".into()));
+            if self.fallback_url.is_empty() {
+                return Err(CfError::AuthError(
+                    "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
+                ));
+            }
+            return self.list_models_from_worker(&self.fallback_url, &self.fallback_key).await;
         }
 
-        for account in &active_accounts {
-            let url = Self::build_url(&account.account_id, "models/search");
-            let result = self
-                .http
-                .get(&url)
-                .bearer_auth(&account.api_token)
-                .send()
-                .await;
+        let mut last_error = CfError::AllAccountsFailed("Failed to list models from all workers".into());
 
-            match result {
-                Ok(resp) => {
-                    if resp.status().is_success() {
-                        let cf_resp = resp.json::<CfResponse>().await.map_err(|e| {
-                            CfError::NetworkError(format!("Failed to parse models response: {e}"))
-                        })?;
-                        if cf_resp.success {
-                            let models: Vec<CfModelInfo> = cf_resp
-                                .result
-                                .and_then(|v| serde_json::from_value(v).ok())
-                                .unwrap_or_default();
-                            return Ok(models);
-                        }
-                    }
-                }
+        for account in &active_accounts {
+            let (url, key) = self.resolve_target(account);
+            match self.list_models_from_worker(&url, &key).await {
+                Ok(models) => return Ok(models),
                 Err(e) => {
-                    tracing::warn!("Failed to list models from account {}: {e}", account.name);
+                    tracing::warn!("Failed to list models from worker {}: {e}", account.name);
+                    last_error = e;
                 }
             }
         }
 
-        Err(CfError::AllAccountsFailed("Failed to list models from all accounts".into()))
+        Err(last_error)
+    }
+
+    async fn list_models_from_worker(
+        &self,
+        worker_url: &str,
+        api_key: &str,
+    ) -> std::result::Result<Vec<CfModelInfo>, CfError> {
+        let url = format!("{worker_url}/v1/models");
+        let mut req = self.http.get(&url);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(api_key);
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => return Err(CfError::NetworkError(format!("Connection error: {e}"))),
+        };
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(CfError::ServerError(format!("list models status {status}")));
+        }
+
+        let v: Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => return Err(CfError::NetworkError(format!("Failed to parse models response: {e}"))),
+        };
+
+        let models: Vec<CfModelInfo> = v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| {
+                        let name = m.get("id").and_then(|i| i.as_str())?.to_string();
+                        Some(CfModelInfo {
+                            name,
+                            task: None,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(models)
     }
 
     /// 调用 CF 文本生成 API
@@ -186,11 +303,11 @@ impl CfApiClient {
         Ok(resp.result.unwrap_or_default())
     }
 
-    /// 流式调用 CF Workers AI（`stream: true`）。
+    /// 流式调用 cf-ai-gw Worker（AI Binding，`stream: true`）。
     ///
     /// 返回原始字节流，调用方用 `crate::sse::SseDecoder` 解析为 SSE 事件。
-    /// 使用 CF REST API（Bearer Token）调用 `/ai/run/{model}`，请求体中带
-    /// `stream: true` 时 CF 会以 `text/event-stream` 返回 OpenAI 风格 SSE。
+    /// 请求体带 `stream: true` 时 cf-ai-gw 会以 `text/event-stream` 返回
+    /// OpenAI 风格 SSE（内部经 AI Binding 流式输出）。
     pub async fn run_text_stream(
         &self,
         model: &str,
@@ -198,67 +315,107 @@ impl CfApiClient {
     ) -> std::result::Result<BoxStream<'static, std::result::Result<bytes::Bytes, CfError>>, CfError> {
         let cf_model = self.model_mapper.resolve(model);
         let active_accounts = self.account_pool.active_accounts();
+
         if active_accounts.is_empty() {
-            return Err(CfError::AuthError("No active Cloudflare accounts configured".into()));
+            if self.fallback_url.is_empty() {
+                return Err(CfError::AuthError(
+                    "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
+                ));
+            }
+            return self.stream_from_worker(&self.fallback_url, &self.fallback_key, &cf_model, body).await;
         }
 
-        let mut last_error = CfError::AllAccountsFailed("All accounts exhausted".into());
+        let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
         for account in &active_accounts {
-            let url = Self::build_url(&account.account_id, &format!("run/{}", cf_model));
-            let result = self
-                .http
-                .post(&url)
-                .bearer_auth(&account.api_token)
-                .json(&body)
-                .send()
-                .await;
-
-            match result {
-                Ok(resp) => {
-                    let status = resp.status();
-                    if status.is_success() {
-                        self.account_pool.mark_used(&account.id);
-                        let stream = resp
-                            .bytes_stream()
-                            .map(|chunk| chunk.map_err(|e| CfError::NetworkError(format!("stream read error: {e}"))));
-                        return Ok(Box::pin(stream));
-                    } else if is_auth_error(status.as_u16()) {
-                        // B07：认证失败只代表当前账号 token 失效，继续尝试下一账号
-                        last_error = CfError::AuthError(format!("Auth failed: {status}"));
+            let (url, key) = self.resolve_target(account);
+            match self.stream_from_worker(&url, &key, &cf_model, body.clone()).await {
+                Ok(stream) => {
+                    self.account_pool.mark_used(&account.id);
+                    return Ok(stream);
+                }
+                Err(e) => match &e {
+                    // 认证失败只代表该 Worker 的 API Key 失效，继续尝试下一账号
+                    CfError::AuthError(_) => {
+                        last_error = e;
                         continue;
-                    } else if status.as_u16() == 429 {
-                        last_error = CfError::RateLimited { retry_after: None };
-                        continue;
-                    } else if status.as_u16() == 404 {
-                        return Err(CfError::ModelNotFound(format!("Model {cf_model} not found")));
-                    } else {
-                        let body_text = resp.text().await.unwrap_or_default();
-                        last_error = CfError::ServerError(format!("CF API status {status}: {body_text}"));
                     }
-                }
-                Err(e) => {
-                    last_error = CfError::NetworkError(format!("Connection error: {e}"));
-                }
+                    CfError::RateLimited { .. } => {
+                        last_error = e;
+                        continue;
+                    }
+                    CfError::ModelNotFound(_) => return Err(e),
+                    _ => {
+                        last_error = e;
+                    }
+                },
             }
         }
         Err(last_error)
     }
 
-    /// 调用 CF 语音识别 API（二进制上传）
+    async fn stream_from_worker(
+        &self,
+        worker_url: &str,
+        api_key: &str,
+        cf_model: &str,
+        body: Value,
+    ) -> std::result::Result<BoxStream<'static, std::result::Result<bytes::Bytes, CfError>>, CfError> {
+        let url = format!("{worker_url}/v1/chat/completions");
+        let mut req = self
+            .http
+            .post(&url)
+            .json(&body);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(api_key);
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => return Err(CfError::NetworkError(format!("Connection error: {e}"))),
+        };
+
+        let status = resp.status();
+        if status.is_success() {
+            let stream = resp
+                .bytes_stream()
+                .map(|chunk| chunk.map_err(|e| CfError::NetworkError(format!("stream read error: {e}"))));
+            Ok(Box::pin(stream))
+        } else if is_auth_error(status.as_u16()) {
+            Err(CfError::AuthError(format!("Auth failed: {status}")))
+        } else if status.as_u16() == 429 {
+            Err(CfError::RateLimited { retry_after: None })
+        } else if status.as_u16() == 404 {
+            Err(CfError::ModelNotFound(format!("Model {cf_model} not found")))
+        } else {
+            let body_text = resp.text().await.unwrap_or_default();
+            Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
+        }
+    }
+
+    /// 调用 cf-ai-gw Worker 语音识别（AI Binding）。
+    ///
+    /// cf-ai-gw 的 `/v1/audio/transcriptions` 接收 multipart/form-data
+    /// （字段 `file` + `model`），内部通过 AI Binding 调用 Whisper。
+    /// 这里将原始音频字节以 multipart 形式转发到 Worker。
     pub async fn run_audio(
         &self,
         model: &str,
         data: Vec<u8>,
-        content_type: &str,
+        _content_type: &str,
     ) -> std::result::Result<Value, CfError> {
         let cf_model = self.model_mapper.resolve(model);
         let active_accounts = self.account_pool.active_accounts();
 
         if active_accounts.is_empty() {
-            return Err(CfError::AuthError("No active Cloudflare accounts configured".into()));
+            if self.fallback_url.is_empty() {
+                return Err(CfError::AuthError(
+                    "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
+                ));
+            }
+            return self.audio_from_worker(&self.fallback_url, &self.fallback_key, &cf_model, data).await;
         }
 
-        let mut last_error = CfError::AllAccountsFailed("All accounts exhausted".into());
+        let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
 
         for account in &active_accounts {
             for attempt in 0..2 {
@@ -266,50 +423,82 @@ impl CfApiClient {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
 
-                let url = Self::build_url(&account.account_id, &format!("run/{}", cf_model));
-                let result = self
-                    .http
-                    .post(&url)
-                    .bearer_auth(&account.api_token)
-                    .header("Content-Type", content_type)
-                    .body(data.clone())
-                    .send()
-                    .await;
-
-                match result {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        if status.is_success() {
-                            match resp.json::<CfResponse>().await {
-                                Ok(cf_resp) => {
-                                    if cf_resp.success {
-                                        self.account_pool.mark_used(&account.id);
-                                        return Ok(cf_resp.result.unwrap_or_default());
-                                    }
-                                }
-                                Err(e) => {
-                                    last_error = CfError::NetworkError(format!("Failed to parse audio response: {e}"));
-                                }
-                            }
-                        } else if is_auth_error(status.as_u16()) {
-                            // B07：认证失败只代表当前账号 token 失效，
-                            // 记录后跳过本账号剩余重试、继续尝试下一账号，避免一坏全坏
-                            last_error = CfError::AuthError(format!("Auth failed: {status}"));
+                let (url, key) = self.resolve_target(account);
+                match self.audio_from_worker(&url, &key, &cf_model, data.clone()).await {
+                    Ok(v) => {
+                        self.account_pool.mark_used(&account.id);
+                        return Ok(v);
+                    }
+                    Err(e) => match &e {
+                        CfError::AuthError(_) => {
+                            last_error = e;
                             break;
-                        } else if status.as_u16() == 429 {
-                            break;
-                        } else if !is_retryable_status(status.as_u16()) {
-                            return Err(CfError::ServerError(format!("CF API status {status}")));
                         }
-                    }
-                    Err(e) => {
-                        last_error = CfError::NetworkError(format!("Connection error: {e}"));
-                    }
+                        CfError::RateLimited { .. } => {
+                            last_error = e;
+                            break;
+                        }
+                        CfError::ModelNotFound(_) => return Err(e),
+                        _ => {
+                            last_error = e;
+                        }
+                    },
                 }
             }
         }
 
         Err(last_error)
+    }
+
+    async fn audio_from_worker(
+        &self,
+        worker_url: &str,
+        api_key: &str,
+        cf_model: &str,
+        data: Vec<u8>,
+    ) -> std::result::Result<Value, CfError> {
+        let url = format!("{worker_url}/v1/audio/transcriptions");
+
+        // 构造 multipart 表单：字段 file（音频字节，泛型文件名）+ model
+        let mut form = reqwest::multipart::Form::new();
+        form = form.part(
+            "file",
+            reqwest::multipart::Part::bytes(data)
+                .file_name("audio.bin")
+                .mime_str("application/octet-stream")
+                .map_err(|e| CfError::ServerError(format!("mime error: {e}")))?,
+        );
+        form = form.text("model", cf_model.to_string());
+
+        let mut req = self.http.post(&url).multipart(form);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(api_key);
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => return Err(CfError::NetworkError(format!("Connection error: {e}"))),
+        };
+
+        let status = resp.status();
+        if status.is_success() {
+            let v: Value = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(CfError::NetworkError(format!("Failed to parse audio response: {e}")));
+                }
+            };
+            Ok(v)
+        } else if is_auth_error(status.as_u16()) {
+            Err(CfError::AuthError(format!("Auth failed: {status}")))
+        } else if status.as_u16() == 429 {
+            Err(CfError::RateLimited { retry_after: None })
+        } else if status.as_u16() == 404 {
+            Err(CfError::ModelNotFound(format!("Model {cf_model} not found")))
+        } else {
+            let body_text = resp.text().await.unwrap_or_default();
+            Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
+        }
     }
 }
 
