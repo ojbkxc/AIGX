@@ -38,7 +38,10 @@ export default function Login() {
         localStorage.setItem('token', res.data.token);
         localStorage.setItem('email', res.data.email);
         localStorage.setItem('username', res.data.username || res.data.email);
-        localStorage.setItem('expires_at', String(res.data.expires_at));
+        // 后端 expires_at 为秒级 Unix 时间戳，统一转成毫秒存储，
+        // 与 App.jsx 中 isAuthenticated() 使用的 Date.now()（毫秒）单位一致，
+        // 否则 isAuthenticated() 永远判定过期，登录后立即被弹回 /login。
+        localStorage.setItem('expires_at', String(Number(res.data.expires_at) * 1000));
         navigate('/');
       } else {
         setError(t('登录失败：响应格式错误'));
