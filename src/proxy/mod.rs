@@ -500,6 +500,119 @@ impl CfApiClient {
             Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
         }
     }
+
+    /// Responses API（`/v1/responses`）透传调用（AI Binding 桥接）。
+    ///
+    /// body 原样转发给 cf-ai-gw Worker 的 `/v1/responses` 端点（含
+    /// model / input 等全部字段），鉴权用账号的 API Key（Bearer，空则
+    /// 匿名）。多账号故障转移与 `run_text` / `run_text_stream` 一致：
+    /// 认证失败 / 限流跳过当前账号继续，模型不存在直接返回。
+    pub async fn run_responses_passthrough(
+        &self,
+        model: &str,
+        body: Value,
+        stream: bool,
+    ) -> std::result::Result<CfResponsesOutcome, CfError> {
+        let active_accounts = self.account_pool.active_accounts();
+
+        if active_accounts.is_empty() {
+            if self.fallback_url.is_empty() {
+                return Err(CfError::AuthError(
+                    "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
+                ));
+            }
+            return self
+                .responses_from_worker(&self.fallback_url, &self.fallback_key, model, body, stream)
+                .await;
+        }
+
+        let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
+        for account in &active_accounts {
+            let (url, key) = self.resolve_target(account);
+            match self
+                .responses_from_worker(&url, &key, model, body.clone(), stream)
+                .await
+            {
+                Ok(outcome) => {
+                    self.account_pool.mark_used(&account.id);
+                    return Ok(outcome);
+                }
+                Err(e) => match &e {
+                    // 认证失败只代表该 Worker 的 API Key 失效，继续尝试下一账号
+                    CfError::AuthError(_) | CfError::RateLimited { .. } => {
+                        last_error = e;
+                        continue;
+                    }
+                    CfError::ModelNotFound(_) => return Err(e),
+                    _ => {
+                        last_error = e;
+                    }
+                },
+            }
+        }
+
+        Err(last_error)
+    }
+
+    /// 向单个 cf-ai-gw Worker 发起一次 Responses 透传调用。
+    ///
+    /// 目标端点固定为 `/v1/responses`：body 原样透传（不重写 model、
+    /// 不增删字段），`stream=true` 时 Worker 返回 `text/event-stream`，
+    /// 原始字节流原样交回调用方（旁路解析仅供计费）。
+    async fn responses_from_worker(
+        &self,
+        worker_url: &str,
+        api_key: &str,
+        cf_model: &str,
+        body: Value,
+        stream: bool,
+    ) -> std::result::Result<CfResponsesOutcome, CfError> {
+        let url = format!("{worker_url}/v1/responses");
+        let mut req = self.http.post(&url).json(&body);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(api_key);
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(CfError::NetworkError(format!("Connection error: {e}")));
+            }
+        };
+
+        let status = resp.status();
+        if status.is_success() {
+            if stream {
+                // SSE 原始字节流原样透传，调用方旁路解析提取 usage
+                let stream = resp.bytes_stream().map(|chunk| {
+                    chunk.map_err(|e| CfError::NetworkError(format!("stream read error: {e}")))
+                });
+                Ok(CfResponsesOutcome::Stream(Box::pin(stream)))
+            } else {
+                let v: Value = match resp.json().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err(CfError::NetworkError(format!("Failed to parse response: {e}")));
+                    }
+                };
+                Ok(CfResponsesOutcome::Json(v))
+            }
+        } else if is_auth_error(status.as_u16()) {
+            Err(CfError::AuthError(format!("Auth failed: {status}")))
+        } else if status.as_u16() == 429 {
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+            Err(CfError::RateLimited { retry_after })
+        } else if status.as_u16() == 404 {
+            Err(CfError::ModelNotFound(format!("Model {cf_model} not found")))
+        } else {
+            let body_text = resp.text().await.unwrap_or_default();
+            Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
+        }
+    }
 }
 
 /// CF API 响应
@@ -509,6 +622,18 @@ pub struct CfResponse {
     pub result: Option<Value>,
     #[serde(default)]
     pub errors: Vec<CfErrorInfo>,
+}
+
+/// Responses API（`/v1/responses`）透传单次调用结果。
+///
+/// - 非流式：上游完整 JSON body
+/// - 流式：上游 SSE 原始字节流（调用方原样透传给客户端）
+///
+/// 不派生 Debug：Stream 变体持有 `Pin<Box<dyn Stream>>`，无法满足
+/// derive 约束。
+pub enum CfResponsesOutcome {
+    Json(Value),
+    Stream(BoxStream<'static, std::result::Result<bytes::Bytes, CfError>>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -28,7 +28,7 @@ use std::time::Duration;
 use super::{
     Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream, ChatDelta, ChatFormat,
     ChatMessage, ChatResponse, EmbeddingObject, EmbeddingRequest, EmbeddingResponse,
-    EmbeddingUsage, FinishReason, Role, UpstreamWire, UsageStats,
+    EmbeddingUsage, FinishReason, ResponsesPassthrough, Role, UpstreamWire, UsageStats,
 };
 
 use crate::model::ModelMapper;
@@ -565,5 +565,33 @@ impl Bridge for CloudflareBridge {
             "created": chrono::Utc::now().timestamp(),
             "data": [image_data]
         }))
+    }
+
+    /// Responses API 透传：body 原样转发给 cf-ai-gw Worker 的 /v1/responses
+    async fn responses_passthrough(
+        &self,
+        body: &Value,
+        stream: bool,
+        _ctx: &BridgeContext,
+    ) -> Result<ResponsesPassthrough, BridgeError> {
+        // body 含 model 字段，透传时原样保留；映射仅用于错误信息展示
+        let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("");
+        let cf_model = self.model_mapper.resolve(model);
+
+        let outcome = self
+            .client
+            .run_responses_passthrough(&cf_model, body.clone(), stream)
+            .await
+            .map_err(|e| Self::map_cf_error(&e))?;
+
+        Ok(match outcome {
+            crate::proxy::CfResponsesOutcome::Json(v) => ResponsesPassthrough::Json(v),
+            crate::proxy::CfResponsesOutcome::Stream(s) => {
+                // 字节流中的 CfError 惰性映射为 BridgeError（复用统一映射）
+                ResponsesPassthrough::Stream(Box::pin(
+                    s.map(|res| res.map_err(|e| Self::map_cf_error(&e))),
+                ))
+            }
+        })
     }
 }

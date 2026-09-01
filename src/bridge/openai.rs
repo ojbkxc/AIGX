@@ -7,14 +7,15 @@
 //! 请求体，执行 HTTP 调用，解析响应。流式响应转为 ChatChunk 流。
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
     Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream, ChatFormat, ChatMessage,
-    ChatResponse, EmbeddingRequest, EmbeddingResponse, FinishReason, Role, UpstreamWire,
-    UsageStats,
+    ChatResponse, EmbeddingRequest, EmbeddingResponse, FinishReason, ResponsesPassthrough, Role,
+    UpstreamWire, UsageStats,
 };
 
 /// OpenAI 兼容上游 Bridge。
@@ -60,6 +61,14 @@ impl OpenaiCompatibleBridge {
 
     fn chat_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+    }
+
+    /// Responses API 端点。与 chat_url 同规则：渠道 base_url 习惯上已含
+    /// `/v1` 前缀（chat 拼接 `/chat/completions`），此处对称拼接
+    /// `/responses`，避免对已含 `/v1` 的 base_url 重复拼出
+    /// `/v1/v1/responses`（SDK 双前缀问题，参考 aisix build_v1_url）。
+    fn responses_url(&self) -> String {
+        format!("{}/responses", self.base_url.trim_end_matches('/'))
     }
 
     /// 将 ChatFormat 转为 OpenAI 请求体
@@ -383,6 +392,52 @@ impl Bridge for OpenaiCompatibleBridge {
                 total_tokens,
             },
         })
+    }
+
+    /// Responses API 透传：body 原样转发给上游的 /responses 端点。
+    ///
+    /// body（含 model/input/stream 等全部字段）不重写、不增删，
+    /// 上游 2xx 时非流式返回完整 JSON、流式返回 SSE 原始字节流；
+    /// 非流式默认共享 Client 的 120s 请求超时（与 chat 一致）。
+    async fn responses_passthrough(
+        &self,
+        body: &Value,
+        stream: bool,
+        _ctx: &BridgeContext,
+    ) -> Result<ResponsesPassthrough, BridgeError> {
+        let resp = self
+            .client
+            .post(self.responses_url())
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(super::capture_upstream_error_http(
+                resp.status(),
+                resp,
+                UpstreamWire::OpenAI,
+                parse_openai_error,
+            )
+            .await);
+        }
+
+        if stream {
+            // SSE 原始字节流原样透传（保留 text/event-stream wire 格式），
+            // 调用方旁路解析提取 usage 计费
+            let byte_stream = resp.bytes_stream().map(|chunk| {
+                chunk.map_err(|e| BridgeError::Transport(e.to_string()))
+            });
+            Ok(ResponsesPassthrough::Stream(Box::pin(byte_stream)))
+        } else {
+            let json: Value = resp
+                .json()
+                .await
+                .map_err(|e| BridgeError::UpstreamDecode(e.to_string()))?;
+            Ok(ResponsesPassthrough::Json(json))
+        }
     }
 }
 

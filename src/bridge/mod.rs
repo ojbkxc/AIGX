@@ -173,6 +173,20 @@ pub struct EmbeddingUsage {
     pub total_tokens: u64,
 }
 
+/// Responses API（`/v1/responses`）透传结果。
+///
+/// 透传方案（参考 aisix 的 responses_to_target）：AIGX 不做协议转换
+/// （不经过 ChatFormat），请求 body 原样转发给上游的同名端点，响应也
+/// 原样转回客户端——非流式为上游 JSON body，流式为上游 SSE 原始字节流。
+/// 计费所需的 usage 由调用方从响应中旁路提取（Responses 格式的
+/// `input_tokens` / `output_tokens`，非 chat 的 prompt/completion 命名）。
+pub enum ResponsesPassthrough {
+    /// 非流式：上游完整 JSON body（原样转回客户端）
+    Json(Value),
+    /// 流式：上游 SSE 原始字节流（原样透传给客户端，保留 wire 格式）
+    Stream(BoxStream<'static, Result<bytes::Bytes, BridgeError>>),
+}
+
 /// 桥接上下文，参考 aisix BridgeContext 设计
 #[derive(Debug, Clone)]
 pub struct BridgeContext {
@@ -473,6 +487,23 @@ pub trait Bridge: Send + Sync + 'static {
     ) -> Result<Value, BridgeError> {
         Err(BridgeError::Config(
             "this provider does not support image generation".into(),
+        ))
+    }
+
+    /// OpenAI Responses API（`/v1/responses`）透传。
+    ///
+    /// 将请求 body 原样转发给上游的 `/v1/responses` 端点，不经过
+    /// ChatFormat 协议转换；`stream` 与 body 中的 `stream` 字段一致，
+    /// 决定返回完整 JSON 还是 SSE 原始字节流。默认不支持（返回
+    /// Config 错误，failover 循环会切换到下一渠道）。
+    async fn responses_passthrough(
+        &self,
+        _body: &Value,
+        _stream: bool,
+        _ctx: &BridgeContext,
+    ) -> Result<ResponsesPassthrough, BridgeError> {
+        Err(BridgeError::Config(
+            "this provider does not support the Responses API".into(),
         ))
     }
 }

@@ -443,6 +443,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     // OpenAI 兼容 API 路由
     let openai_routes = Router::new()
         .route("/v1/chat/completions", post(api::openai::handle_chat_completions))
+        .route("/v1/responses", post(api::openai::handle_responses))
         .route("/v1/completions", post(api::openai::handle_completions))
         .route("/v1/embeddings", post(api::openai::handle_embeddings))
         .route("/v1/images/generations", post(api::openai::handle_images_generations))

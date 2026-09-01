@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use crate::account::AccountPool;
 use crate::bridge::{
-    Bridge, BridgeContext, ChatFormat, ChatMessage, EmbeddingRequest, FinishReason, Role,
+    Bridge, BridgeContext, ChatFormat, ChatMessage, EmbeddingRequest, FinishReason,
+    ResponsesPassthrough, Role,
 };
 use crate::channel::ChannelStore;
 use crate::config::ConfigManager;
@@ -482,12 +483,18 @@ impl Drop for StreamUsageGuard {
 /// 守卫作为字段随流存活：无论流被完整消费（正常结束，后缀事件已计费）
 /// 还是被 hyper 中途 drop（客户端断连），守卫都会随之 drop 并触发兜底计费。
 /// 守卫与后缀事件通过原子标志互斥，计费恰好执行一次。
-pub(crate) struct GuardedStream<S> {
+///
+/// 泛型 `G` 允许不同端点挂接各自的守卫类型（chat 的
+/// StreamUsageGuard / responses 的 ResponsesStreamGuard）。
+pub(crate) struct GuardedStream<S, G> {
     pub(crate) inner: std::pin::Pin<Box<S>>,
-    pub(crate) _guard: StreamUsageGuard,
+    pub(crate) _guard: G,
 }
 
-impl<S: futures::Stream> futures::Stream for GuardedStream<S> {
+// G 仅需 Unpin：poll_next 通过 get_mut 访问 inner，要求整个结构体
+// Unpin；两个守卫（StreamUsageGuard/ResponsesStreamGuard）只含 Arc，
+// 天然满足。
+impl<S: futures::Stream, G: std::marker::Unpin> futures::Stream for GuardedStream<S, G> {
     type Item = S::Item;
 
     fn poll_next(
@@ -496,6 +503,115 @@ impl<S: futures::Stream> futures::Stream for GuardedStream<S> {
     ) -> std::task::Poll<Option<Self::Item>> {
         // GuardedStream 所有字段均为 Unpin（Pin<Box<S>> 与普通结构体），可安全 get_mut
         self.get_mut().inner.as_mut().poll_next(cx)
+    }
+}
+
+// ── Responses 流式计费（透传方案）───────────────────────────────────
+
+/// Responses 流式计费共享状态（透传方案中 StreamBillingState 的对应物）。
+///
+/// 与 chat 的差异：透传流不能往客户端 SSE 里塞自定义后缀事件，计费
+/// 全部由 [`ResponsesStreamGuard`] 在流 drop 时执行——正常结束（流被
+/// hyper 完整消费后 drop）与客户端断连（流被中途 drop）都经过 Drop，
+/// 天然恰好一次，无需原子标志互斥。
+pub(crate) struct ResponsesBillingState {
+    pub(crate) state: AppState,
+    pub(crate) api_key: super::auth::ApiKey,
+    pub(crate) model: String,
+    pub(crate) group: String,
+    /// 请求侧 input 文本快照（上游未上报 usage 时估算 prompt tokens 用）
+    pub(crate) input_text: String,
+    /// 上游 usage（input_tokens, output_tokens）——旁路解析
+    /// `response.completed` 等终止事件的 `.response.usage` 填充
+    pub(crate) usage: Arc<parking_lot::Mutex<Option<(u64, u64)>>>,
+    /// 输出文本累积器（估算 completion tokens 兜底）
+    pub(crate) acc: Arc<parking_lot::Mutex<String>>,
+    /// 事后限流记账句柄
+    pub(crate) rate_bundle: Option<crate::ratelimit::ReservationBundle>,
+    pub(crate) request_start: std::time::Instant,
+    pub(crate) client_ip: Option<String>,
+    pub(crate) request_id: String,
+    pub(crate) channel_id: Option<String>,
+}
+
+impl ResponsesBillingState {
+    /// 计费三件套：usage 累计 + charge_usage + 请求日志。
+    ///
+    /// 上游 usage（权威值）优先；缺失的侧逐项回退 token 估算
+    /// （能估就估，拿不到就 0）。返回 (prompt_tokens, completion_tokens)
+    /// 供限流记账。
+    pub(crate) fn finalize(&self) -> (u64, u64) {
+        let (mut prompt_tokens, mut completion_tokens) = self.usage.lock().unwrap_or((0, 0));
+        let output_text = self.acc.lock().clone();
+        // 上游未上报 usage 的侧逐项估算
+        if prompt_tokens == 0 {
+            prompt_tokens =
+                crate::token_estimate::count_text(&self.model, &self.input_text) as u64;
+        }
+        if completion_tokens == 0 {
+            completion_tokens =
+                crate::token_estimate::count_text(&self.model, &output_text) as u64;
+        }
+
+        // 累计用量
+        self.state.usage_tracker.accumulate(
+            prompt_tokens,
+            completion_tokens,
+            0,
+            0,
+            0,
+            0.0,
+        );
+
+        // 扣费（try_charge + QuotaLow 通知 + key 扣减）
+        let cost = charge_usage(
+            &self.state,
+            &self.api_key,
+            &self.model,
+            &self.group,
+            prompt_tokens,
+            completion_tokens,
+        );
+
+        // 记录请求日志（真实耗时）
+        let mut log = crate::log::RequestLog::new();
+        log.user_id = self.api_key.user_id.clone();
+        log.key_id = Some(self.api_key.id.clone());
+        log.channel_id = self.channel_id.clone();
+        log.model = self.model.clone();
+        log.input_tokens = prompt_tokens;
+        log.output_tokens = completion_tokens;
+        log.cost = cost;
+        log.latency_ms = self.request_start.elapsed().as_millis() as u64;
+        log.status_code = 200;
+        log.ip = self.client_ip.clone();
+        log.request_id = Some(self.request_id.clone());
+        self.state.log_store.record_request(log);
+
+        (prompt_tokens, completion_tokens)
+    }
+}
+
+/// Responses 流式计费 Drop 守卫（透传方案）。
+///
+/// 随透传字节流存活（见泛型化的 [`GuardedStream`]）：流被 drop 时
+/// （正常结束或客户端断连）在 Drop 中执行计费。Drop 中不能 await：
+/// 计费本身（usage 提取/token 估算/扣费/日志）全为同步操作，异步的
+/// 事后限流记账交由后台任务补交（同 StreamUsageGuard）。
+pub(crate) struct ResponsesStreamGuard {
+    pub(crate) billing: Arc<ResponsesBillingState>,
+}
+
+impl Drop for ResponsesStreamGuard {
+    fn drop(&mut self) {
+        let (prompt_tokens, completion_tokens) = self.billing.finalize();
+        if let Some(bundle) = self.billing.rate_bundle.clone() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    bundle.commit_tokens(prompt_tokens + completion_tokens).await;
+                });
+            }
+        }
     }
 }
 
@@ -974,6 +1090,396 @@ pub async fn handle_chat_completions(
                 });
                 return Json(json).into_response();
         }
+    }
+}
+
+/// POST /v1/responses - OpenAI Responses API 透传
+///
+/// 与 handle_chat_completions 不同，本端点不做协议转换（不构建
+/// ChatFormat / 不走 Bridge::chat），而是把请求 body 原样转发给上游
+/// 的 /v1/responses 端点（参考 aisix 的 responses_to_target 透传方案）：
+/// 1. 认证 → 2. 限流 → 3. 分组权限 → 4. 定价校验 → 5. resolve_bridges
+/// 6. failover 循环调用 Bridge::responses_passthrough
+/// 7. 计费从 Responses 格式 usage（input_tokens/output_tokens）提取，
+///    流式缺 usage 时回退 token 估算
+pub async fn handle_responses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let request_start = std::time::Instant::now();
+    let request_id = format!("req-{}", uuid::Uuid::new_v4());
+    let client_ip = extract_client_ip(&headers);
+
+    let model = match body.get("model").and_then(|m| m.as_str()) {
+        Some(m) => m.to_string(),
+        None => {
+            return error_response("invalid_model", "Missing model field", StatusCode::BAD_REQUEST)
+                .into_response()
+        }
+    };
+
+    // 完整鉴权：校验状态/过期/模型白名单/额度/IP
+    let api_key = match verify_api_key_full(&state, &headers, &model) {
+        Ok(k) => k,
+        Err(e) => return e.into_response(),
+    };
+
+    // 限流检查：鉴权后、推理前（Responses 端点同样纳入限流）
+    let rate_bundle = match state
+        .rate_limiter
+        .check(&api_key.id, &model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            let retry_after = e.retry_after_secs().unwrap_or(60);
+            return error_response(
+                "rate_limit_exceeded",
+                &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
+                StatusCode::TOO_MANY_REQUESTS,
+            )
+            .into_response();
+        }
+    };
+
+    // 校验用户分组模型权限并解析计费分组
+    let billing_group = match check_group_model_permission(&state, &api_key, &model) {
+        Ok(g) => g,
+        Err(e) => return e.into_response(),
+    };
+
+    // B09：前置校验模型定价——未配置价格的模型拒绝请求，避免免费用量
+    if let Err(e) = ensure_model_priced(&state, &model) {
+        return e.into_response();
+    }
+
+    // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
+    let candidates = resolve_bridges(&state, &model);
+    if candidates.is_empty() {
+        return error_response(
+            "no_bridge",
+            "No bridge available for the requested model",
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+        .into_response();
+    }
+
+    let is_stream = body
+        .get("stream")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+
+    // Responses 协议以 input 字段承载输入（字符串或 item 数组均可），
+    // 不使用 chat 的 messages 字段；缺失即 400
+    if !matches!(
+        body.get("input"),
+        Some(Value::String(_)) | Some(Value::Array(_))
+    ) {
+        return error_response(
+            "invalid_input",
+            "input field is required",
+            StatusCode::BAD_REQUEST,
+        )
+        .into_response();
+    }
+
+    let ctx = BridgeContext::new(request_id.clone(), model.clone());
+
+    // B06：failover 循环——依次尝试候选渠道透传，仅对上游可重试错误切换
+    let mut result_opt = None;
+    let mut used_channel_id: Option<String> = None;
+    let mut last_error: Option<crate::bridge::BridgeError> = None;
+    for (bridge, cid) in candidates {
+        if let Some(c) = &cid {
+            state.channel_store.mark_used(c);
+        }
+        match bridge.responses_passthrough(&body, is_stream, &ctx).await {
+            Ok(r) => {
+                result_opt = Some(r);
+                used_channel_id = cid;
+                break;
+            }
+            Err(e) => {
+                if !is_retryable_bridge_error(&e) {
+                    // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
+                    last_error = Some(e);
+                    used_channel_id = cid;
+                    break;
+                }
+                tracing::warn!("responses failover: channel {cid:?} failed: {e}, trying next channel");
+                last_error = Some(e);
+            }
+        }
+    }
+    let passthrough = match result_opt {
+        Some(r) => r,
+        None => {
+            let e = last_error.unwrap_or_else(|| {
+                crate::bridge::BridgeError::AllAccountsFailed(
+                    "all channels failed for responses request".into(),
+                )
+            });
+            let latency_ms = request_start.elapsed().as_millis() as u64;
+            let status_code = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = used_channel_id.clone();
+            log.model = model.clone();
+            log.latency_ms = latency_ms;
+            log.status_code = status_code.as_u16();
+            log.error_msg = Some(e.to_string());
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id.clone());
+            state.log_store.record_request(log);
+            rate_bundle.commit_tokens(0).await;
+            // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
+            if status_code.as_u16() >= 500 {
+                state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                    channel_name: model.clone(),
+                    error: e.to_string(),
+                });
+            }
+            return bridge_error_response(e).into_response();
+        }
+    };
+
+    match passthrough {
+        ResponsesPassthrough::Json(json) => {
+            // 非流式：上游 JSON body 原样转回客户端，
+            // usage 为 Responses 格式（input_tokens/output_tokens）
+            let latency_ms = request_start.elapsed().as_millis() as u64;
+            let usage = json.get("usage");
+            let mut prompt_tokens = usage
+                .and_then(|u| u.get("input_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let mut completion_tokens = usage
+                .and_then(|u| u.get("output_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            // 上游未携带 usage 时用 token 估算兜底（能估就估，拿不到就 0）
+            if prompt_tokens == 0 && completion_tokens == 0 {
+                let input_text = responses_input_text(&body);
+                let output_text = responses_output_text(&json);
+                prompt_tokens = crate::token_estimate::count_text(&model, &input_text) as u64;
+                completion_tokens =
+                    crate::token_estimate::count_text(&model, &output_text) as u64;
+            }
+
+            // 记录用量
+            state.usage_tracker.accumulate(
+                prompt_tokens,
+                completion_tokens,
+                0,
+                0,
+                0,
+                0.0,
+            );
+
+            // 计费扣减（用户 quota + key used_quota）
+            let cost = charge_usage(
+                &state,
+                &api_key,
+                &model,
+                &billing_group,
+                prompt_tokens,
+                completion_tokens,
+            );
+
+            // 事后限流记账（TPM）
+            let total_tokens = prompt_tokens + completion_tokens;
+            rate_bundle.commit_tokens(total_tokens).await;
+
+            // 记录请求日志
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = used_channel_id.clone();
+            log.model = model.clone();
+            log.input_tokens = prompt_tokens;
+            log.output_tokens = completion_tokens;
+            log.cost = cost;
+            log.latency_ms = latency_ms;
+            log.status_code = 200;
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id.clone());
+            state.log_store.record_request(log);
+
+            Json(json).into_response()
+        }
+        ResponsesPassthrough::Stream(byte_stream) => {
+            // 流式：上游 SSE 字节流原样透传给客户端，旁路解析 SSE
+            // 提取 usage / 累积输出文本，流 drop 时由守卫计费
+            let billing = Arc::new(ResponsesBillingState {
+                state: state.clone(),
+                api_key: api_key.clone(),
+                model: model.clone(),
+                group: billing_group.clone(),
+                input_text: responses_input_text(&body),
+                usage: Arc::new(parking_lot::Mutex::new(None)),
+                acc: Arc::new(parking_lot::Mutex::new(String::new())),
+                rate_bundle: Some(rate_bundle.clone()),
+                request_start,
+                client_ip: client_ip.clone(),
+                request_id: request_id.clone(),
+                channel_id: used_channel_id.clone(),
+            });
+
+            // 旁路解析：每个 chunk 原样转发（yield 不变），同时喂给
+            // SseDecoder 解析终止事件 usage 与输出文本增量
+            let billing_for_map = billing.clone();
+            let mut sse_decoder = crate::sse::SseDecoder::new();
+            let passthrough_stream = byte_stream.map(move |chunk| {
+                if let Ok(bytes) = &chunk {
+                    for ev in sse_decoder.feed(bytes.as_ref()) {
+                        if let crate::sse::SseEvent::Data(json_str) = ev {
+                            if let Ok(json) = serde_json::from_str::<Value>(&json_str) {
+                                observe_responses_sse_event(&json, &billing_for_map);
+                            }
+                        }
+                    }
+                }
+                chunk
+            });
+
+            let guarded = GuardedStream {
+                inner: Box::pin(passthrough_stream),
+                _guard: ResponsesStreamGuard { billing },
+            };
+
+            let mut response = Response::new(axum::body::Body::from_stream(guarded));
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            response
+        }
+    }
+}
+
+/// 提取 Responses 请求体的 input 文本（token 估算兜底用）。
+///
+/// input 为字符串，或 item 数组（item 为裸字符串或对象；对象的
+/// content / output / reason 槽位可为字符串或 typed parts 数组）；
+/// 顶层 instructions 一并计入。参考 aisix 的 responses_input_to_chat
+/// / responses_item_text。
+fn responses_input_text(body: &Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(instructions) = body.get("instructions").and_then(|v| v.as_str()) {
+        if !instructions.is_empty() {
+            parts.push(instructions.to_string());
+        }
+    }
+    match body.get("input") {
+        Some(Value::String(s)) => {
+            if !s.is_empty() {
+                parts.push(s.clone());
+            }
+        }
+        Some(Value::Array(items)) => {
+            for item in items {
+                // 裸字符串元素视为用户文本
+                if let Some(s) = item.as_str() {
+                    if !s.is_empty() {
+                        parts.push(s.to_string());
+                    }
+                    continue;
+                }
+                // 对象元素：收集 content / output / reason 槽位的文本
+                for key in ["content", "output", "reason"] {
+                    if let Some(v) = item.get(key) {
+                        let text = responses_value_text(v);
+                        if !text.is_empty() {
+                            parts.push(text);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    parts.join("\n")
+}
+
+/// 提取 Responses 内容槽位的纯文本：裸字符串或 typed parts
+/// 数组（取各 part 的 text 字段，忽略图片等非文本 part）。
+fn responses_value_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// 提取 Responses 非流式响应的输出文本（token 估算兜底用）。
+///
+/// 遍历 output 数组：message item 的 content parts 的 text，以及
+/// 工具调用 item 顶层的 name / arguments / input。参考 aisix 的
+/// responses_output_text。
+fn responses_output_text(resp: &Value) -> String {
+    let Some(items) = resp.get("output").and_then(|v| v.as_array()) else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for it in items {
+        if let Some(content) = it.get("content").and_then(|c| c.as_array()) {
+            for p in content {
+                if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
+                    if !t.is_empty() {
+                        parts.push(t.to_string());
+                    }
+                }
+            }
+        }
+        // 工具调用 item 的输出在顶层 name / arguments / input 字段
+        for key in ["name", "arguments", "input"] {
+            if let Some(s) = it.get(key).and_then(|v| v.as_str()) {
+                if !s.is_empty() {
+                    parts.push(s.to_string());
+                }
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+/// 从一个 Responses SSE 事件中旁路提取计费信息（不影响原样转发）。
+///
+/// - `response.completed` / `response.incomplete` / `response.failed`
+///   终止事件：从 `.response.usage` 提取权威 usage（参考 aisix 的
+///   parse_responses_terminal_usage，三者在 `max_output_tokens` 截断
+///   / 失败场景下同样携带完整 usage）
+/// - `response.output_text.delta`：累积输出文本增量（估算兜底用）
+fn observe_responses_sse_event(json: &Value, billing: &ResponsesBillingState) {
+    match json.get("type").and_then(|t| t.as_str()) {
+        Some("response.completed" | "response.incomplete" | "response.failed") => {
+            if let Some(usage) = json.get("response").and_then(|r| r.get("usage")) {
+                let input_tokens = usage
+                    .get("input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let output_tokens = usage
+                    .get("output_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                *billing.usage.lock() = Some((input_tokens, output_tokens));
+            }
+        }
+        Some("response.output_text.delta") => {
+            if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
+                let mut buf = billing.acc.lock();
+                crate::token_estimate::push_capped(&mut buf, delta);
+            }
+        }
+        _ => {}
     }
 }
 
