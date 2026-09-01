@@ -23,6 +23,7 @@ export default function Channels() {
   const [form, setForm] = useState(defaultForm());
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState(null);
+  const [fetchingModels, setFetchingModels] = useState(false);
 
   function defaultForm() {
     return {
@@ -135,6 +136,35 @@ export default function Channels() {
       addToast(`${t('测试失败')}: ${err.message}`);
     } finally {
       setTestingId(null);
+    }
+  };
+
+  // 拉取上游模型列表 — 后端代理转发（避免浏览器 CORS）
+  const handleFetchModels = async () => {
+    if (form.channel_type !== 'cloudflare' && !form.base_url.trim()) {
+      setError(t('请先填写 Base URL'));
+      return;
+    }
+    setFetchingModels(true);
+    setError('');
+    try {
+      const res = await api.fetchChannelModels({
+        channel_type: form.channel_type,
+        base_url: form.base_url,
+        api_key: form.api_key,
+        channel_id: editChannel ? editChannel.id : '',
+      });
+      const models = res.data?.models || [];
+      if (models.length === 0) {
+        addToast(t('未拉取到模型（上游未返回模型列表）'));
+      } else {
+        setForm((f) => ({ ...f, models: models.join(', ') }));
+        addToast(`${t('已拉取')} ${models.length} ${t('个模型')}`);
+      }
+    } catch (err) {
+      addToast(`${t('拉取失败')}: ${err.message}`);
+    } finally {
+      setFetchingModels(false);
     }
   };
 
@@ -307,8 +337,20 @@ export default function Channels() {
               </div>
               <div className="form-group">
                 <label>{t('支持的模型（逗号分隔，留空=全部）')}</label>
-                <input className="form-input" placeholder="deepseek-chat, deepseek-coder" value={form.models}
-                  onChange={(e) => setForm({ ...form, models: e.target.value })} />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input className="form-input" placeholder="deepseek-chat, deepseek-coder" value={form.models}
+                    onChange={(e) => setForm({ ...form, models: e.target.value })} />
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+                    onClick={handleFetchModels}
+                    disabled={fetchingModels}
+                    title={t('从上游拉取模型列表')}
+                  >
+                    {fetchingModels ? t('拉取中...') : t('拉取模型')}
+                  </button>
+                </div>
               </div>
               <div style={{ display: 'flex', gap: 12 }}>
                 <div className="form-group" style={{ flex: 1 }}>

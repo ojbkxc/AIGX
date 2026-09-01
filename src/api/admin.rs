@@ -1697,6 +1697,196 @@ pub async fn handle_test_channel(
     Ok(Json(serde_json::json!({ "success": true, "data": result })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct FetchModelsRequest {
+    /// 渠道类型：cloudflare / openai_compatible / anthropic
+    #[serde(default)]
+    pub channel_type: String,
+    /// 上游 Base URL（openai_compatible / anthropic）
+    #[serde(default)]
+    pub base_url: String,
+    /// 明文 API Key（编辑已有渠道时可留空，从存储解码）
+    #[serde(default)]
+    pub api_key: String,
+    /// 已有渠道 ID（编辑时用于回填密钥）
+    #[serde(default)]
+    pub channel_id: String,
+}
+
+/// POST /api/channels/fetch_models - 拉取上游支持的模型列表。
+///
+/// 前端浏览器直接请求第三方 /v1/models 会被 CORS 拦截，
+/// 因此由后端代理转发：
+/// - openai_compatible：GET {base_url}/models（Bearer 认证），兼容 /v1/models
+/// - anthropic：GET {base_url}/v1/models（x-api-key + anthropic-version）
+/// - cloudflare：走 cf-ai-gw Worker 的 /v1/models（用 cf_binding_url 或账号池）
+#[axum::debug_handler]
+pub async fn handle_fetch_channel_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FetchModelsRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+
+    // 密钥优先级：body 明文 > 已存渠道解码 > 空
+    let api_key = if !body.api_key.is_empty() {
+        body.api_key.clone()
+    } else if !body.channel_id.is_empty() {
+        state
+            .channel_store
+            .get(&body.channel_id)
+            .map(|ch| ch.decode_api_key())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let channel_type = crate::channel::ChannelType::from_str_lossy(&body.channel_type);
+    let (url, models) = match channel_type {
+        crate::channel::ChannelType::OpenaiCompatible => {
+            let base = body.base_url.trim().trim_end_matches('/');
+            if base.is_empty() {
+                return Err(error_response("base_url is required", StatusCode::BAD_REQUEST));
+            }
+            let mut url = format!("{base}/models");
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| error_response(&format!("HTTP client error: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
+            let mut req = client.get(&url).bearer_auth(&api_key);
+            // 部分上游（如 OpenRouter）要求 /v1 前缀，若 /models 404 再试 /v1/models
+            let resp = req.send().await;
+            let resp = match resp {
+                Ok(r) if r.status().as_u16() == 404 => {
+                    url = format!("{base}/v1/models");
+                    req = client.get(&url).bearer_auth(&api_key);
+                    req.send().await.map_err(|e| {
+                        error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
+                    })?
+                }
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY));
+                }
+            };
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            if status == 401 || status == 403 {
+                return Err(error_response(&format!("Auth failed: HTTP {status} (invalid api key?)"), StatusCode::BAD_REQUEST));
+            }
+            if !(200..300).contains(&status) {
+                return Err(error_response(&format!("Upstream returned HTTP {status}"), StatusCode::BAD_GATEWAY));
+            }
+            let json: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|_| error_response("Upstream returned non-JSON response", StatusCode::BAD_GATEWAY))?;
+            let models: Vec<String> = json
+                .get("data")
+                .and_then(|d| d.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (url, models)
+        }
+        crate::channel::ChannelType::Anthropic => {
+            let base = body.base_url.trim().trim_end_matches('/');
+            if base.is_empty() {
+                return Err(error_response("base_url is required", StatusCode::BAD_REQUEST));
+            }
+            let url = format!("{base}/v1/models");
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| error_response(&format!("HTTP client error: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
+            let resp = client
+                .get(&url)
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .send()
+                .await
+                .map_err(|e| error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY))?;
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            if status == 401 || status == 403 {
+                return Err(error_response(&format!("Auth failed: HTTP {status} (invalid api key?)"), StatusCode::BAD_REQUEST));
+            }
+            if !(200..300).contains(&status) {
+                return Err(error_response(&format!("Upstream returned HTTP {status}"), StatusCode::BAD_GATEWAY));
+            }
+            let json: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|_| error_response("Upstream returned non-JSON response", StatusCode::BAD_GATEWAY))?;
+            let models: Vec<String> = json
+                .get("data")
+                .and_then(|d| d.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (url, models)
+        }
+        crate::channel::ChannelType::Cloudflare => {
+            // Cloudflare 渠道：走 cf-ai-gw Worker（Binding 架构）
+            let worker_url = if !body.base_url.trim().is_empty() {
+                body.base_url.trim().trim_end_matches('/').to_string()
+            } else {
+                state
+                    .config_manager
+                    .get()
+                    .await
+                    .cf_binding_url
+                    .trim()
+                    .trim_end_matches('/')
+                    .to_string()
+            };
+            let url = format!("{worker_url}/v1/models");
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| error_response(&format!("HTTP client error: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
+            let mut req = client.get(&url);
+            if !api_key.is_empty() {
+                req = req.bearer_auth(&api_key);
+            }
+            let resp = req.send().await.map_err(|e| {
+                error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
+            })?;
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            if status == 401 || status == 403 {
+                return Err(error_response(&format!("Auth failed: HTTP {status} (invalid api key?)"), StatusCode::BAD_REQUEST));
+            }
+            if !(200..300).contains(&status) {
+                return Err(error_response(&format!("Upstream returned HTTP {status}"), StatusCode::BAD_GATEWAY));
+            }
+            let json: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|_| error_response("Upstream returned non-JSON response", StatusCode::BAD_GATEWAY))?;
+            let models: Vec<String> = json
+                .get("data")
+                .and_then(|d| d.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (url, models)
+        }
+    };
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "url": url,
+            "models": models,
+            "count": models.len(),
+        }
+    })))
+}
+
 // ============================================================
 // 令牌管理增强（功能 2 - 核心数据层）
 // ============================================================

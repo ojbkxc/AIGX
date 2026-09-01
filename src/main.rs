@@ -345,6 +345,9 @@ fn ensure_default_admin(user_store: &UserStore) {
 }
 
 fn build_router(state: AppState, config: &config::AppConfig) -> Router {
+    // 注意：axum 0.7（matchit 0.7）的路由参数语法是 `:id`，不是 `{id}`。
+    // `{id}` 是 axum 0.8（matchit 0.8）的语法，在 0.7 下会被当作字面量路径段，
+    // 导致所有带参数路由匹配失败、请求掉到 fallback_service 返回 405/404。
     // 管理 API 路由
     let admin_routes = Router::new()
         .route("/api/auth/login", post(api::admin::handle_login))
@@ -355,11 +358,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/accounts", get(api::admin::handle_list_accounts))
         .route("/api/accounts", post(api::admin::handle_add_account))
         .route("/api/accounts/test", post(api::admin::handle_test_account))
-        .route("/api/accounts/{id}", put(api::admin::handle_update_account))
-        .route("/api/accounts/{id}", delete(api::admin::handle_delete_account))
+        .route("/api/accounts/:id", put(api::admin::handle_update_account))
+        .route("/api/accounts/:id", delete(api::admin::handle_delete_account))
         .route("/api/keys", get(api::admin::handle_list_keys))
         .route("/api/keys", post(api::admin::handle_add_key))
-        .route("/api/keys/{id}", delete(api::admin::handle_delete_key))
+        .route("/api/keys/:id", delete(api::admin::handle_delete_key))
         .route("/api/settings", get(api::admin::handle_get_settings))
         .route("/api/settings", put(api::admin::handle_update_settings))
         .route("/api/limits", get(api::admin::handle_get_limits))
@@ -371,8 +374,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/users", get(api::admin::handle_list_users))
         .route("/api/users", post(api::admin::handle_create_user))
         .route("/api/users/me", get(api::admin::handle_me))
-        .route("/api/users/{id}", put(api::admin::handle_update_user))
-        .route("/api/users/{id}", delete(api::admin::handle_delete_user))
+        .route("/api/users/:id", put(api::admin::handle_update_user))
+        .route("/api/users/:id", delete(api::admin::handle_delete_user))
         // 易支付配置
         .route("/api/epay/config", get(api::admin::handle_get_epay_config))
         .route("/api/epay/config", put(api::admin::handle_update_epay_config))
@@ -384,29 +387,30 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 通用渠道管理
         .route("/api/channels", get(api::admin::handle_list_channels))
         .route("/api/channels", post(api::admin::handle_add_channel))
-        .route("/api/channels/{id}", put(api::admin::handle_update_channel))
-        .route("/api/channels/{id}", patch(api::admin::handle_patch_channel))
-        .route("/api/channels/{id}", delete(api::admin::handle_delete_channel))
-        .route("/api/channels/{id}/test", post(api::admin::handle_test_channel))
+        .route("/api/channels/fetch_models", post(api::admin::handle_fetch_channel_models))
+        .route("/api/channels/:id", put(api::admin::handle_update_channel))
+        .route("/api/channels/:id", patch(api::admin::handle_patch_channel))
+        .route("/api/channels/:id", delete(api::admin::handle_delete_channel))
+        .route("/api/channels/:id/test", post(api::admin::handle_test_channel))
         // 令牌管理（增强）
         .route("/api/tokens", get(api::admin::handle_list_tokens))
         .route("/api/tokens", post(api::admin::handle_add_token))
-        .route("/api/tokens/{id}", put(api::admin::handle_update_token))
-        .route("/api/tokens/{id}", delete(api::admin::handle_delete_token))
-        .route("/api/tokens/{id}/reset_used", post(api::admin::handle_reset_token_used))
+        .route("/api/tokens/:id", put(api::admin::handle_update_token))
+        .route("/api/tokens/:id", delete(api::admin::handle_delete_token))
+        .route("/api/tokens/:id/reset_used", post(api::admin::handle_reset_token_used))
         // 模型定价目录
         .route("/api/prices", get(api::admin::handle_list_prices))
         .route("/api/prices", post(api::admin::handle_upsert_price))
-        .route("/api/prices/{model}", put(api::admin::handle_upsert_price_by_model))
-        .route("/api/prices/{model}", delete(api::admin::handle_delete_price))
+        .route("/api/prices/:model", put(api::admin::handle_upsert_price_by_model))
+        .route("/api/prices/:model", delete(api::admin::handle_delete_price))
         // 倍率配置
         .route("/api/ratios", get(api::admin::handle_get_ratios))
         .route("/api/ratios", put(api::admin::handle_update_ratios))
         // 用户分组管理
         .route("/api/groups", get(api::admin::handle_list_groups))
         .route("/api/groups", post(api::admin::handle_upsert_group))
-        .route("/api/groups/{name}", put(api::admin::handle_upsert_group_by_name))
-        .route("/api/groups/{name}", delete(api::admin::handle_delete_group))
+        .route("/api/groups/:name", put(api::admin::handle_upsert_group_by_name))
+        .route("/api/groups/:name", delete(api::admin::handle_delete_group))
         // 日志与审计（功能 1）
         .route("/api/logs/requests", get(api::admin::handle_list_request_logs))
         .route("/api/logs/audits", get(api::admin::handle_list_audit_logs))
@@ -414,7 +418,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 兑换码（功能 2）
         .route("/api/redemptions", get(api::admin::handle_list_redemptions))
         .route("/api/redemptions/batch", post(api::admin::handle_batch_redemptions))
-        .route("/api/redemptions/{id}", delete(api::admin::handle_delete_redemption))
+        .route("/api/redemptions/:id", delete(api::admin::handle_delete_redemption))
         .route("/api/redemptions/redeem", post(api::admin::handle_redeem))
         // 限流配置（功能 3）
         .route("/api/ratelimit/config", get(api::admin::handle_get_ratelimit_config))
@@ -446,7 +450,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/v1/audio/translations", post(api::openai::handle_audio_translations))
         .route("/v1/audio/speech", post(api::openai::handle_audio_speech))
         .route("/v1/models", get(api::openai::handle_list_models))
-        .route("/v1/models/{model}", get(api::openai::handle_get_model));
+        .route("/v1/models/:model", get(api::openai::handle_get_model));
 
     // Anthropic 兼容 API 路由
     let anthropic_routes = Router::new()

@@ -389,8 +389,18 @@ impl ChannelStore {
         // 也判为成功，密钥失效的渠道会被误标记为健康）。
         let (result, message) = match ch.channel_type {
             ChannelType::OpenaiCompatible => {
-                let url = format!("{}/models", ch.base_url.trim_end_matches('/'));
+                // 标准 OpenAI 路径是 /v1/models，但部分网关只有 /models，
+                // 因此先试 /v1/models，404 时回退 /models。
+                let base = ch.base_url.trim_end_matches('/');
+                let url = format!("{base}/v1/models");
                 let resp = client.get(&url).bearer_auth(&key).send().await;
+                let resp = match resp {
+                    Ok(r) if r.status().as_u16() == 404 => {
+                        let fallback = format!("{base}/models");
+                        client.get(&fallback).bearer_auth(&key).send().await
+                    }
+                    other => other,
+                };
                 match resp {
                     Ok(r) => {
                         let s = r.status().as_u16();

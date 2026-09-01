@@ -145,6 +145,10 @@ export const api = {
   deleteChannel: (id) => request('DELETE', `/api/channels/${id}`),
   testChannel: (id) => request('POST', `/api/channels/${id}/test`),
 
+  // 拉取上游模型列表（后端代理转发，避免浏览器 CORS 限制）
+  fetchChannelModels: (data) =>
+    request('POST', '/api/channels/fetch_models', data),
+
   // ── 令牌管理增强（功能 2）──
   listTokens: () => request('GET', '/api/tokens'),
   addToken: (data) => request('POST', '/api/tokens', data),
