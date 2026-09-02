@@ -170,3 +170,69 @@ mod tests {
         assert_eq!(events[1], SseEvent::Done);
     }
 }
+// ????????? SSE Keepalive Stream ?????????
+
+// Wrapper stream that injects ": keepalive\n\n" SSE comment events
+// during idle periods. Used for passthrough SSE streams (Responses API)
+// that cannot use axum Sse::keep_alive. Prevents CDN/proxy timeout.
+
+pub struct KeepaliveStream<S> {
+    inner: std::pin::Pin<Box<S>>,
+    interval: tokio::time::Interval,
+    done: bool,
+}
+
+impl<S> KeepaliveStream<S> {
+    pub fn new(inner: S, interval: std::time::Duration) -> Self {
+        let mut i = tokio::time::interval(interval);
+        // First tick fires immediately ? we want to wait first
+        i.reset();
+        Self {
+            inner: Box::pin(inner),
+            interval: i,
+            done: false,
+        }
+    }
+}
+
+impl<S: futures::Stream<Item = Result<bytes::Bytes, E>>, E: std::fmt::Debug>
+    futures::Stream for KeepaliveStream<S>
+{
+    type Item = Result<bytes::Bytes, E>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+
+        if this.done {
+            return std::task::Poll::Ready(None);
+        }
+
+        // Try inner stream first using poll_select-like approach:
+        // We poll inner, and if pending, we check the timer.
+        match this.inner.as_mut().poll_next(cx) {
+            std::task::Poll::Ready(Some(item)) => {
+                // Reset interval on data
+                this.interval.reset();
+                std::task::Poll::Ready(Some(item))
+            }
+            std::task::Poll::Ready(None) => {
+                this.done = true;
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Pending => {
+                // Check interval timer
+                match this.interval.poll_tick(cx) {
+                    std::task::Poll::Ready(_) => {
+                        std::task::Poll::Ready(Some(Ok(bytes::Bytes::from_static(
+                            b": keepalive\n\n",
+                        ))))
+                    }
+                    std::task::Poll::Pending => std::task::Poll::Pending,
+                }
+            }
+        }
+    }
+}

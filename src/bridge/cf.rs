@@ -128,6 +128,16 @@ fn parse_openai_chunk(
         .and_then(|c| c.as_str())
         .map(|s| s.to_string());
 
+    // 流式推理内容增量（OpenAI delta.reasoning_content，Anthropic thinking）
+    let delta_reasoning = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("delta"))
+        .and_then(|d| d.get("reasoning_content"))
+        .and_then(|r| r.as_str())
+        .map(|s| s.to_string());
+
     let tool_calls = v
         .get("choices")
         .and_then(|c| c.as_array())
@@ -170,7 +180,11 @@ fn parse_openai_chunk(
             _ => FinishReason::Stop,
         });
 
-    if delta_content.is_none() && tool_calls.is_none() && finish_reason.is_none() {
+    if delta_content.is_none()
+        && delta_reasoning.is_none()
+        && tool_calls.is_none()
+        && finish_reason.is_none()
+    {
         return None;
     }
 
@@ -180,6 +194,7 @@ fn parse_openai_chunk(
         delta: ChatDelta {
             content: delta_content,
             tool_calls,
+            reasoning: delta_reasoning,
         },
         finish_reason,
     }))

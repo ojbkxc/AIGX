@@ -95,9 +95,24 @@ impl AccountPool {
             .collect()
     }
 
-    /// 获取一个可用账号（随机负载均衡）
-    #[allow(dead_code)]
+    /// 获取一个可用账号（空闲最久优先，最大化每次使用间隔，绕免费 API 会话级限速）
     pub fn acquire(&self) -> Option<CfAccount> {
+        let now = chrono::Utc::now().timestamp();
+        self.accounts
+            .read()
+            .iter()
+            .filter(|a| a.status == "active")
+            .max_by_key(|a| {
+                // 从未使用过（last_used_at=None）视为最早，优先选择；
+                // 使用时间戳越小（越久未用）优先级越高。
+                a.last_used_at.map(|t| now - t).unwrap_or(i64::MAX)
+            })
+            .cloned()
+    }
+
+    /// 获取一个可用账号（随机负载均衡——遗留方法，新增调用方请用 `acquire` 空闲优先）
+    #[allow(dead_code)]
+    pub fn acquire_random(&self) -> Option<CfAccount> {
         let active: Vec<CfAccount> = self
             .accounts
             .read()
@@ -322,6 +337,38 @@ mod tests {
         let acquired = pool.acquire();
         assert!(acquired.is_some());
         assert_eq!(acquired.unwrap().id, "test-1");
+    }
+
+    #[test]
+    fn test_acquire_idle_longest_first() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(FileStore::new(dir.path().to_path_buf()));
+        let pool = AccountPool::new(store);
+
+        let mut a1 = create_test_account();
+        a1.id = "idle-1".to_string();
+        a1.last_used_at = Some(1_000_000); // 很久前使用
+
+        let mut a2 = create_test_account();
+        a2.id = "idle-2".to_string();
+        a2.last_used_at = Some(2_000_000); // 较近使用
+
+        let mut a3 = create_test_account();
+        a3.id = "idle-3".to_string();
+        a3.last_used_at = None; // 从未使用，应最先被选中
+
+        pool.add(a1).unwrap();
+        pool.add(a2).unwrap();
+        pool.add(a3).unwrap();
+
+        // 从未使用过的最优先
+        let first = pool.acquire().unwrap();
+        assert_eq!(first.id, "idle-3");
+        pool.mark_used("idle-3");
+
+        // 空闲最久的 idle-1 其次
+        let second = pool.acquire().unwrap();
+        assert_eq!(second.id, "idle-1");
     }
 
     #[test]

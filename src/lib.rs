@@ -25,6 +25,10 @@ pub mod cache;
 pub mod log;
 pub mod notify;
 pub mod redemption;
+pub mod metrics;
+pub mod quota_monitor;
+pub mod semantic;
+pub mod oauth;
 
 // SeaORM 多数据库后端模块（仅当启用 sea-orm feature 时编译）。
 //

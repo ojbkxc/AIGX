@@ -4,6 +4,8 @@ use tokio::sync::RwLock;
 
 use crate::notify::NotifyConfig;
 use crate::payment::EpayConfig;
+use crate::payment::stripe::StripeConfig;
+use crate::oauth::github::GithubOauthConfig;
 
 /// 默认 cf-ai-gw Worker 地址（AI Binding 方式调用 Cloudflare Workers AI）。
 ///
@@ -140,6 +142,12 @@ pub struct AppConfig {
     /// 易支付配置
     #[serde(default)]
     pub epay: EpayConfig,
+    /// Stripe 支付配置
+    #[serde(default)]
+    pub stripe: StripeConfig,
+    /// GitHub OAuth configuration
+    #[serde(default)]
+    pub github_oauth: GithubOauthConfig,
     /// 站点对外访问地址，用于构造回调 URL
     #[serde(default)]
     pub server_address: String,
@@ -158,10 +166,11 @@ pub struct AppConfig {
     /// 留空则使用默认 FileStore（rusqlite），填 URL 则启用 SeaORM。
     #[serde(default)]
     pub database: DatabaseConfig,
-    /// CORS 允许的来源列表。
+    /// CORS 允许的来源列表（对外暴露时务必显式配置）。
     ///
     /// 生产环境应显式配置允许的前端来源（如 `["https://admin.example.com"]`）。
-    /// 留空时默认允许 localhost 开发来源（见 main.rs build_cors_layer）。
+    /// 留空时优先使用 `server_address` 作为唯一允许来源；两者皆空则不发 CORS 头
+    /// （跨源请求被浏览器拦截，同源不受影响），见 main.rs build_cors_layer。
     #[serde(default)]
     pub cors_origins: Vec<String>,
 }

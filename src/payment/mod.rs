@@ -21,6 +21,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 pub mod order_store;
+pub mod stripe;
 
 /// 易支付配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

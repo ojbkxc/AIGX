@@ -162,6 +162,7 @@ pub async fn handle_login(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // ── 登录限流：同 IP 每分钟最多 10 次 ──
     const LOGIN_RATE_LIMIT_PER_MINUTE: u32 = 10;
+    const LOGIN_FAIL_LOCK_THRESHOLD: u32 = 5; // 连续失败 ≥5 次锁定
     let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
     let attempts = state.login_limiter.get(&client_ip).await.unwrap_or(0);
     if attempts >= LOGIN_RATE_LIMIT_PER_MINUTE {
@@ -172,14 +173,25 @@ pub async fn handle_login(
     }
     state
         .login_limiter
-        .insert(client_ip, attempts + 1)
+        .insert(client_ip.clone(), attempts + 1)
         .await;
+
+    // ── 失败锁定：连续失败 ≥5 次 → 锁定 5 分钟（TTL 由 login_failures 控制）──
+    let fail_count = state.login_failures.get(&client_ip).await.unwrap_or(0);
+    if fail_count >= LOGIN_FAIL_LOCK_THRESHOLD {
+        return Err(error_response(
+            "登录失败次数过多，请稍后再试",
+            StatusCode::TOO_MANY_REQUESTS,
+        ));
+    }
 
     let config = state.config_manager.get().await;
     let session_ttl = config.admin.session_ttl_hours.max(1);
 
     // 用户系统认证（唯一路径；旧 admin.password 遗留已移除，admin 由 ensure_default_admin 建号）
     if let Some(u) = state.user_store.authenticate(&body.email, &body.password) {
+        // 登录成功：清除失败计数
+        state.login_failures.remove(&client_ip).await;
         // H3：旧 SHA256 密码登录成功后自动升级为 argon2（best-effort rehash）
         // 旧版本用无盐 SHA256（64 位十六进制）存储密码，新版本统一用 argon2。
         // rehash 失败不阻止登录，仅记录告警。
@@ -213,6 +225,8 @@ pub async fn handle_login(
     // 用户名也是合法登录标识（与 user_store.authenticate 的 email 校验互补）
     if let Some(u) = state.user_store.get_by_username(&body.email) {
         if user::verify_password(&body.password, &u.password) {
+            // 登录成功：清除失败计数
+            state.login_failures.remove(&client_ip).await;
             let session_secret = if config.admin.session_secret.is_empty() {
                 uuid::Uuid::new_v4().to_string()
             } else {
@@ -231,6 +245,15 @@ pub async fn handle_login(
                 }
             })));
         }
+    }
+
+    // 认证失败：累计失败计数（TTL=5 分钟，达阈值后锁定）
+    let next_fail = fail_count + 1;
+    state.login_failures.insert(client_ip.clone(), next_fail).await;
+    if next_fail >= LOGIN_FAIL_LOCK_THRESHOLD {
+        tracing::warn!(
+            "Login failed {next_fail} times from {client_ip}; locked for 5 minutes"
+        );
     }
 
     Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED))
@@ -1528,6 +1551,7 @@ impl ChannelRequest {
             account_id: self.account_id.clone(),
             last_error: None,
             last_used_at: None,
+            discovered_models: Vec::new(),
             created_at: now,
             updated_at: now,
         }
@@ -1742,6 +1766,7 @@ pub async fn handle_fetch_channel_models(
     };
 
     let channel_type = crate::channel::ChannelType::from_str_lossy(&body.channel_type);
+    let channel_id_for_save = body.channel_id.clone();
     let (url, models) = match channel_type {
         crate::channel::ChannelType::OpenaiCompatible => {
             let base = body.base_url.trim().trim_end_matches('/');
@@ -1876,6 +1901,15 @@ pub async fn handle_fetch_channel_models(
             (url, models)
         }
     };
+
+    // 模型自动发现：拉取成功后把上游模型快照写回渠道（仅当渠道已存在时）。
+    if let Some(cid) = channel_id_for_save.split(',').next() {
+        if !cid.trim().is_empty() && state.channel_store.get(cid).is_some() {
+            if let Err(e) = state.channel_store.save_discovered_models(cid, models.clone()) {
+                tracing::error!("Failed to persist discovered models for channel {cid}: {e}");
+            }
+        }
+    }
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -2844,4 +2878,247 @@ pub async fn handle_test_email(
         Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": format!("测试邮件已发送至 {}", body.to) }))),
         Err(e) => Err(error_response(&format!("发送失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
     }
+}
+
+
+// ????????? Stripe ?? ?????????
+
+/// POST /api/stripe/topup ? ?? Stripe Checkout Session
+pub async fn handle_stripe_topup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let user = match verify_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    let stripe = &state.stripe_client;
+    if !stripe.config().ready() {
+        return error_response("Stripe is not configured", StatusCode::BAD_REQUEST)
+            .into_response();
+    }
+    let amount = body.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
+    if amount <= 0 {
+        return error_response("amount must be positive", StatusCode::BAD_REQUEST)
+            .into_response();
+    }
+    let config = state.config_manager.get().await;
+    let callback = callback_address(&state, &config);
+    let success_url = if !stripe.config().success_url.is_empty() {
+        stripe.config().success_url.clone()
+    } else {
+        format!("{}{}", callback, "/api/user/stripe/return")
+    };
+    let cancel_url = if !stripe.config().cancel_url.is_empty() {
+        stripe.config().cancel_url.clone()
+    } else {
+        format!("{}{}", callback, "/api/user/stripe/cancel")
+    };
+    let trade_no = user::new_trade_no("STP", &user.id);
+    let amount_cents = amount * 100;
+    let quota = amount * 10000; // 1 cent = 10000 quota units (same ratio as epay)
+
+    let order = crate::payment::TopUpOrder {
+        trade_no: trade_no.clone(),
+        user_id: user.id.clone(),
+        amount,
+        money: amount as f64,
+        quota,
+        payment_method: "stripe".into(),
+        status: "pending".into(),
+        create_time: chrono::Utc::now().timestamp(),
+        paid_time: None,
+    };
+    if let Err(e) = state.order_store.insert(&order) {
+        tracing::error!("Failed to create stripe order: {e}");
+        return error_response("Failed to create order", StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response();
+    }
+    let params = crate::payment::stripe::CheckoutParams {
+        trade_no: trade_no.clone(),
+        user_id: user.id.clone(),
+        amount_cents,
+        quota,
+        success_url,
+        cancel_url,
+    };
+    match stripe.create_checkout_session(params).await {
+        Ok(session) => Json(serde_json::json!({
+            "success": true,
+            "session_id": session.id,
+            "url": session.url,
+            "trade_no": trade_no,
+        })).into_response(),
+        Err(e) => {
+            tracing::error!("Stripe checkout failed: {e}");
+            error_response(&e.to_string(), StatusCode::BAD_GATEWAY).into_response()
+        }
+    }
+}
+
+/// POST /api/user/stripe/webhook ? Stripe Webhook ??
+pub async fn handle_stripe_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let stripe = &state.stripe_client;
+    if !stripe.config().ready() {
+        return error_response("Stripe is not configured", StatusCode::BAD_REQUEST)
+            .into_response();
+    }
+    let sig_header = match headers.get("stripe-signature").and_then(|v| v.to_str().ok()) {
+        Some(s) => s.to_string(),
+        None => return error_response("Missing stripe-signature header", StatusCode::BAD_REQUEST)
+            .into_response(),
+    };
+    let event = match stripe.verify_webhook(&body, &sig_header) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("Stripe webhook verification failed: {e}");
+            return error_response("Invalid webhook signature", StatusCode::BAD_REQUEST)
+                .into_response();
+        }
+    };
+    // Only process checkout.session.completed
+    if event.event_type != "checkout.session.completed" {
+        return Json(serde_json::json!({"received": true})).into_response();
+    }
+    let obj = &event.data.object;
+    if !obj.is_paid() {
+        return Json(serde_json::json!({"received": true, "status": "unpaid"})).into_response();
+    }
+    let trade_no = match obj.trade_no() {
+        Some(t) => t,
+        None => return error_response("No trade_no in event", StatusCode::BAD_REQUEST)
+            .into_response(),
+    };
+    // Atomically complete the order and credit quota
+    match state.order_store.complete_if_pending(&trade_no) {
+        Some(order) => {
+            if let Err(e) = state.user_store.add_quota(&order.user_id, order.quota) {
+                tracing::error!("Failed to add quota for order {}: {e}", trade_no);
+                return error_response("Failed to add quota", StatusCode::INTERNAL_SERVER_ERROR)
+                    .into_response();
+            }
+            tracing::info!("Stripe payment completed: order={}, user={}, quota={}", trade_no, order.user_id, order.quota);
+            state.notify_service.notify_spawn(crate::notify::NotifyEvent::PaymentSuccess {
+                user_email: order.user_id.clone(),
+                amount: order.amount as f64,
+                quota: order.quota,
+            });
+            Json(serde_json::json!({"received": true, "completed": true})).into_response()
+        }
+        None => {
+            // Already processed or doesn't exist ? idempotent success
+            Json(serde_json::json!({"received": true, "already_processed": true})).into_response()
+        }
+    }
+}
+
+
+// ????????? GitHub OAuth ?????????
+
+/// GET /api/auth/github ? ???? GitHub OAuth ????
+pub async fn handle_github_oauth_authorize(
+    State(state): State<AppState>,
+) -> Response {
+    let config = state.config_manager.get().await;
+    let oauth = &config.github_oauth;
+    if !oauth.ready() {
+        return error_response("GitHub OAuth not configured", StatusCode::BAD_REQUEST).into_response();
+    }
+    let state_param = uuid::Uuid::new_v4().to_string();
+    let url = format!(
+        "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=user:email&state={}",
+        oauth.client_id,
+        &oauth.redirect_uri,
+        state_param,
+    );
+    Redirect::to(&url).into_response()
+}
+
+/// GET /api/auth/github/callback ? GitHub OAuth ??
+pub async fn handle_github_oauth_callback(
+    State(state): State<AppState>,
+    Query(params): Query<GithubCallbackParams>,
+) -> Response {
+    let config = state.config_manager.get().await;
+    let oauth = config.github_oauth.clone();
+    if !oauth.ready() {
+        return error_response("GitHub OAuth not configured", StatusCode::BAD_REQUEST).into_response();
+    }
+    let code = match params.code {
+        Some(c) => c,
+        None => return error_response("Missing authorization code", StatusCode::BAD_REQUEST).into_response(),
+    };
+    // Exchange code for access token
+    let access_token = match crate::oauth::github::exchange_code(&oauth, &code, &state.http_client).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("GitHub OAuth token exchange failed: {e}");
+            return error_response("OAuth token exchange failed", StatusCode::BAD_GATEWAY).into_response();
+        }
+    };
+    // Fetch user info
+    let gh_user = match crate::oauth::github::get_user_info(&access_token, &state.http_client).await {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!("GitHub OAuth user info failed: {e}");
+            return error_response("Failed to fetch GitHub user info", StatusCode::BAD_GATEWAY).into_response();
+        }
+    };
+    // Determine email: prefer primary email, fallback to github id pseudo-email
+    let email = gh_user.email.clone()
+        .unwrap_or_else(|| format!("{}@github.local", gh_user.login));
+    // Find or create user
+    let user = match state.user_store.get_by_email(&email) {
+        Some(u) => u,
+        None => {
+            // Auto-create user for GitHub OAuth
+            match state.user_store.create_with_username(
+                &email,
+                &gh_user.login,
+                &uuid::Uuid::new_v4().to_string(), // random password (OAuth users don't use password login)
+                crate::user::Role::User,
+                0,
+            ) {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::error!("Failed to create OAuth user: {e}");
+                    return error_response("Failed to create user", StatusCode::INTERNAL_SERVER_ERROR).into_response();
+                }
+            }
+        }
+    };
+    // Create session
+    let session_ttl = config.admin.session_ttl_hours.max(1);
+    let session_secret = if config.admin.session_secret.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        config.admin.session_secret.clone()
+    };
+    let session_store = super::auth::SessionStore::new(&session_secret, session_ttl);
+    let session = session_store.create_session(&user.email);
+    Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "token": session.token,
+            "email": user.email,
+            "username": user.username,
+            "role": match user.role {
+                crate::user::Role::Admin => "admin",
+                crate::user::Role::User => "user",
+            },
+            "expires_at": session.expires_at,
+        }
+    })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct GithubCallbackParams {
+    pub code: Option<String>,
+    #[allow(dead_code)]
+    pub state: Option<String>,
 }

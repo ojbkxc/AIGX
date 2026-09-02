@@ -71,6 +71,14 @@ impl OpenaiCompatibleBridge {
         format!("{}/responses", self.base_url.trim_end_matches('/'))
     }
 
+    fn completions_url(&self) -> String {
+        format!("{}/completions", self.base_url.trim_end_matches('/'))
+    }
+
+    fn images_url(&self) -> String {
+        format!("{}/images/generations", self.base_url.trim_end_matches('/'))
+    }
+
     /// 将 ChatFormat 转为 OpenAI 请求体
     fn build_body(&self, req: &ChatFormat) -> Value {
         let messages: Vec<Value> = req
@@ -227,7 +235,21 @@ impl Bridge for OpenaiCompatibleBridge {
                         })
                         .collect()
                 });
+            let reasoning = json
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("reasoning_content"))
+                .or_else(|| {
+                    json.get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("message"))
+                        .and_then(|m| m.get("reasoning"))
+                })
+                .and_then(|r| r.as_str())
+                .map(String::from);
             let mut msg = ChatMessage::assistant(content);
+            msg.reasoning = reasoning;
             msg.tool_calls = tool_calls;
             msg
         };
@@ -394,6 +416,73 @@ impl Bridge for OpenaiCompatibleBridge {
         })
     }
 
+    /// 文本补全：透传 /completions 请求体，返回 OpenAI 格式结果。
+    ///
+    /// 与 Chat Completions 不同，text_completion 使用顶层 `prompt` 字段。
+    /// body 原样转发给上游的 /completions 端点，上游 2xx 时返回完整 JSON。
+    async fn complete(
+        &self,
+        body: &Value,
+        _ctx: &BridgeContext,
+    ) -> Result<Value, BridgeError> {
+        let resp = self
+            .client
+            .post(self.completions_url())
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(super::capture_upstream_error_http(
+                resp.status(),
+                resp,
+                UpstreamWire::OpenAI,
+                parse_openai_error,
+            )
+            .await);
+        }
+
+        let json: Value = resp
+            .json()
+            .await
+            .map_err(|e| BridgeError::UpstreamDecode(e.to_string()))?;
+        Ok(json)
+    }
+
+    /// 图片生成：透传 /images/generations 请求体，返回 OpenAI 格式结果。
+    async fn generate_image(
+        &self,
+        body: &Value,
+        _ctx: &BridgeContext,
+    ) -> Result<Value, BridgeError> {
+        let resp = self
+            .client
+            .post(self.images_url())
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(super::capture_upstream_error_http(
+                resp.status(),
+                resp,
+                UpstreamWire::OpenAI,
+                parse_openai_error,
+            )
+            .await);
+        }
+
+        let json: Value = resp
+            .json()
+            .await
+            .map_err(|e| BridgeError::UpstreamDecode(e.to_string()))?;
+        Ok(json)
+    }
+
     /// Responses API 透传：body 原样转发给上游的 /responses 端点。
     ///
     /// body（含 model/input/stream 等全部字段）不重写、不增删，
@@ -529,6 +618,17 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
                             })
                             .collect()
                     });
+                // 流式推理增量：DeepSeek 系用 reasoning_content，OpenAI o 系列用 reasoning
+                let reasoning = v
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("delta"))
+                    .and_then(|d| {
+                        d.get("reasoning_content")
+                            .or_else(|| d.get("reasoning"))
+                    })
+                    .and_then(|r| r.as_str())
+                    .map(String::from);
                 let finish = v
                     .get("choices")
                     .and_then(|c| c.get(0))
@@ -538,7 +638,7 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
                 return Some(ChatChunk {
                     id: id.to_string(),
                     model: model.to_string(),
-                    delta: super::ChatDelta { content, tool_calls },
+                    delta: super::ChatDelta { content, tool_calls, reasoning },
                     finish_reason: finish,
                 });
             }

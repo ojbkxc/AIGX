@@ -9,8 +9,12 @@ mod graphql;
 mod health;
 mod hub;
 mod log;
+mod metrics;
+mod quota_monitor;
+mod semantic;
 mod model;
 mod notify;
+mod oauth;
 mod payment;
 mod pricing;
 mod proxy;
@@ -49,6 +53,7 @@ use model::ModelMapper;
 use notify::NotifyService;
 use payment::order_store::OrderStore;
 use payment::EpayClient;
+use payment::stripe::StripeClient;
 use pricing::PricingStore;
 use proxy::CfApiClient;
 use ratelimit::RateLimiter;
@@ -108,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化易支付客户端（运行时按配置即时构造，无需常驻）
     let epay_client = Arc::new(EpayClient::new(config.epay.clone()));
+    let stripe_client = Arc::new(StripeClient::new(config.stripe.clone()));
 
     // 初始化 CF API 客户端（AI Binding 桥接方式）
     let mut cf_api_client = CfApiClient::new(account_pool.clone(), model_mapper.clone());
@@ -175,6 +181,14 @@ async fn main() -> anyhow::Result<()> {
             .build(),
     );
 
+    // 登录失败锁定状态：<ip> → 连续失败次数（TTL=5 分钟，连续失败 ≥5 次锁 5 分钟）
+    let login_failures = Arc::new(
+        crate::cache::AsyncCache::<String, u32>::builder()
+            .max_capacity(10_000)
+            .time_to_live(Duration::from_secs(300))
+            .build(),
+    );
+
     // 初始化 SeaORM 数据库连接（可选后端）
     //
     // 渐进式迁移策略：
@@ -213,6 +227,14 @@ async fn main() -> anyhow::Result<()> {
     // hub.register_family(Adapter::Openai, cf_openai_bridge);
 
     // 构建应用状态
+    let semantic_router = std::sync::Arc::new(crate::semantic::SemanticRouter::new());
+
+    let response_cache = crate::cache::AsyncCache::<String, serde_json::Value>::builder()
+        .max_capacity(1000)
+        .time_to_live(std::time::Duration::from_secs(300))
+        .build();
+    let response_cache = std::sync::Arc::new(response_cache);
+
     let state = AppState {
         api_client,
         model_mapper,
@@ -224,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         user_store,
         order_store,
         epay_client,
+        stripe_client,
         health_tracker: health_tracker.clone(),
         livez_state: livez_state.clone(),
         channel_store,
@@ -235,7 +258,10 @@ async fn main() -> anyhow::Result<()> {
         notify_service,
         register_limiter,
         login_limiter,
+        login_failures,
         http_client,
+        response_cache,
+        semantic_router,
         #[cfg(feature = "sea-orm")]
         db_conn,
     };
@@ -251,7 +277,27 @@ async fn main() -> anyhow::Result<()> {
         if state.has_sea_orm_backend() { "enabled" } else { "disabled (FileStore)" },
     );
 
+    // Prometheus 初始快照：渠道数量 + 模型健康等级（/metrics 查询用）。
+    // 请求处理路径会持续更新请求/token/latency 指标；此处在启动时一次性填充
+    // 渠道与健康状态。后续渠道增删/健康变化由各自调用点刷新（set_channels/set_health）。
+    {
+        let channels = state.channel_store.list();
+        let enabled = channels.iter().filter(|c| c.is_enabled()).count() as u64;
+        let disabled = channels.len() as u64 - enabled;
+        crate::metrics::global().set_channels(enabled, disabled);
+        for (model, level) in state.health_tracker.all_health() {
+            crate::metrics::global().set_health(&model, level.into());
+        }
+    }
+
     // 构建路由
+    // Start CF quota monitoring background task
+    crate::quota_monitor::spawn_monitor(
+        state.account_pool.clone(),
+        state.notify_service.clone(),
+        state.http_client.as_ref().clone(),
+    );
+
     let app = build_router(state, &config);
 
     // 启动服务器
@@ -352,6 +398,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     let admin_routes = Router::new()
         .route("/api/auth/login", post(api::admin::handle_login))
         .route("/api/auth/register", post(api::admin::handle_register))
+        .route("/api/auth/github", get(api::admin::handle_github_oauth_authorize))
+        .route("/api/auth/github/callback", get(api::admin::handle_github_oauth_callback))
         .route("/api/auth/logout", post(api::admin::handle_logout))
         .route("/api/usage/summary", get(api::admin::handle_usage_summary))
         .route("/api/usage/summary", post(api::admin::handle_refresh_usage))
@@ -433,12 +481,17 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/notify/config", get(api::admin::handle_get_notify_config))
         .route("/api/notify/config", put(api::admin::handle_update_notify_config))
         .route("/api/notify/test-telegram", post(api::admin::handle_test_telegram))
-        .route("/api/notify/test-email", post(api::admin::handle_test_email));
+        .route("/api/notify/test-email", post(api::admin::handle_test_email))
+        // Prometheus 指标（仅管理员）
+        .route("/api/metrics", get(handle_metrics));
 
     // 易支付回调（异步通知 + 同步跳转）— 无需鉴权
     let epay_callback_routes = Router::new()
         .route("/api/user/epay/notify", post(api::admin::handle_epay_notify).get(api::admin::handle_epay_notify))
         .route("/api/user/epay/return", post(api::admin::handle_epay_return).get(api::admin::handle_epay_return));
+    let stripe_callback_routes = Router::new()
+        .route("/api/stripe/topup", post(api::admin::handle_stripe_topup))
+        .route("/api/user/stripe/webhook", post(api::admin::handle_stripe_webhook));
 
     // OpenAI 兼容 API 路由
     let openai_routes = Router::new()
@@ -460,11 +513,13 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     Router::new()
         .merge(admin_routes)
         .merge(epay_callback_routes)
+        .merge(stripe_callback_routes)
         .merge(openai_routes)
         .merge(anthropic_routes)
         .route("/livez", get(handle_livez))
         .route("/readyz", get(handle_readyz))
         .route("/health", get(handle_health))
+        .route("/metrics", get(handle_metrics))
         .fallback_service(web::serve_static_files())
         .layer(build_cors_layer(&config))
         .with_state(state)
@@ -495,18 +550,10 @@ fn build_cors_layer(config: &config::AppConfig) -> CorsLayer {
             .into_iter()
             .collect()
     } else {
-        // 开发环境默认来源
-        [
-            "http://127.0.0.1:5173",
-            "http://localhost:5173",
-            "http://127.0.0.1:8080",
-            "http://localhost:8080",
-            "http://127.0.0.1:3000",
-            "http://localhost:3000",
-        ]
-        .iter()
-        .filter_map(|s| s.parse::<HeaderValue>().ok())
-        .collect()
+        // 无配置：不发 CORS 头（AllowOrigin::list 为空数组 → 不匹配任何外部来源），
+        // 浏览器同源请求不受影响；跨源请求将被浏览器拦截。
+        // 对外暴露时务必在 config 中显式配置 `cors_origins`。
+        Vec::new()
     };
 
     if origins.is_empty() {
@@ -531,6 +578,16 @@ fn build_cors_layer(config: &config::AppConfig) -> CorsLayer {
             axum::http::header::ACCEPT,
         ])
         .allow_credentials(true)
+}
+
+/// GET /metrics — Prometheus 指标文本输出
+async fn handle_metrics() -> axum::response::Response {
+    use axum::http::{header::CONTENT_TYPE, HeaderValue, StatusCode};
+    use axum::response::IntoResponse;
+    let headers = [
+        (CONTENT_TYPE, HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8")),
+    ];
+    (StatusCode::OK, headers, metrics::global().render()).into_response()
 }
 
 /// GET /livez — 存活检查

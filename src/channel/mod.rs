@@ -16,6 +16,7 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::storage::FileStore;
 
@@ -101,6 +102,12 @@ pub struct Channel {
     /// 最近使用时间戳
     #[serde(default)]
     pub last_used_at: Option<i64>,
+    /// 上游最近一次返回的成功模型列表快照（模型自动发现）。
+    ///
+    /// 拉取自渠道的 `/models` 端点；调度时若渠道已显式配置 models 则优先用
+    /// 配置，未配置时尝试用该快照判断模型支持度。仅在"自动发现模型"场景填充。
+    #[serde(default)]
+    pub discovered_models: Vec<String>,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -175,6 +182,8 @@ pub struct ChannelTestResult {
 pub struct ChannelStore {
     channels: RwLock<Vec<Channel>>,
     store: Arc<FileStore>,
+    /// channel cooldown table: channel_id -> cooldown expiry. Cooled-down channels are skipped during scheduling.
+    cooldowns: dashmap::DashMap<String, Instant>,
 }
 
 impl ChannelStore {
@@ -182,6 +191,7 @@ impl ChannelStore {
         let s = Self {
             channels: RwLock::new(Vec::new()),
             store,
+            cooldowns: dashmap::DashMap::new(),
         };
         let _ = s.load();
         s
@@ -272,7 +282,14 @@ impl ChannelStore {
             .channels
             .read()
             .iter()
-            .filter(|c| c.is_enabled() && c.supports_model(model))
+            .filter(|c| {
+                c.is_enabled()
+                    && (c.supports_model(model)
+                        || (!c.models.is_empty()
+                            && !c.discovered_models.is_empty()
+                            && c.discovered_models.iter().any(|m| m == model)))
+                    && !self.is_in_cooldown(&c.id)
+            })
             .cloned()
             .collect();
 
@@ -319,6 +336,38 @@ impl ChannelStore {
         result
     }
 
+    /// 渠道是否处于冷却期。
+    pub fn is_in_cooldown(&self, id: &str) -> bool {
+        if let Some(entry) = self.cooldowns.get(id) {
+            if *entry > Instant::now() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 将渠道置入冷却期（暂时不调度，冷却到期后自动恢复）。
+    ///
+    /// 参照 aisix RuntimeStatus::Cooldown：可重试错误发生时短期冷却，
+    /// 而非永久 disable。冷却到期后在 `select_for_model` 中自然恢复。
+    pub fn mark_cooldown(&self, id: &str, error: String, duration_secs: u64) {
+        if !error.is_empty() {
+            let mut channels = self.channels.write();
+            if let Some(ch) = channels.iter_mut().find(|c| c.id == id) {
+                ch.last_error = Some(error);
+                ch.updated_at = chrono::Utc::now().timestamp();
+            }
+        }
+        let expiry = Instant::now() + Duration::from_secs(duration_secs);
+        self.cooldowns.insert(id.to_string(), expiry);
+        tracing::warn!("channel {} cooled down for {}s", id, duration_secs);
+    }
+
+    /// 清除渠道冷却（手动恢复或健康检查通过后调用）。
+    pub fn clear_cooldown(&self, id: &str) {
+        self.cooldowns.remove(id);
+    }
+
     /// 标记渠道不健康（记录错误信息，禁用）
     pub fn mark_unhealthy(&self, id: &str, error: String) {
         let mut channels = self.channels.write();
@@ -360,6 +409,24 @@ impl ChannelStore {
                 tracing::error!("Failed to persist channel {} mark_used: {}", id, e);
             }
         }
+    }
+
+    /// 保存渠道的上游模型发现快照（模型自动发现）。
+    ///
+    /// 覆盖 `discovered_models` 并持久化。仅在渠道未显式配置 models 时，
+    /// 调度才会参考该快照（见 `select_for_model`）。
+    pub fn save_discovered_models(&self, id: &str, models: Vec<String>) -> anyhow::Result<()> {
+        let mut channels = self.channels.write();
+        let ch = channels
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
+        ch.discovered_models = models;
+        ch.updated_at = chrono::Utc::now().timestamp();
+        let snapshot = ch.clone();
+        drop(channels);
+        self.persist(&snapshot)?;
+        Ok(())
     }
 
     /// 测试渠道连通性。
@@ -498,6 +565,7 @@ mod tests {
             account_id: String::new(),
             last_error: None,
             last_used_at: None,
+            discovered_models: Vec::new(),
             created_at: 1,
             updated_at: 1,
         }

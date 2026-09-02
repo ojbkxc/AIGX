@@ -8,7 +8,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{
-        sse::{Event, Sse},
+        sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
     Json,
@@ -159,6 +159,7 @@ fn parse_anthropic_messages(messages: &[Value]) -> Vec<ChatMessage> {
                     name: None,
                     tool_call_id: Some(tid),
                     tool_calls: None,
+                    reasoning: None,
                 });
             }
             continue;
@@ -179,6 +180,7 @@ fn parse_anthropic_messages(messages: &[Value]) -> Vec<ChatMessage> {
             } else {
                 Some(tool_calls)
             },
+            reasoning: None,
         });
     }
     result
@@ -286,6 +288,7 @@ pub async fn handle_messages(
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning: None,
             });
         }
     }
@@ -341,6 +344,9 @@ pub async fn handle_messages(
                         used_channel_id = cid;
                         break;
                     }
+                    if let Some(cid) = &cid {
+                        state.channel_store.mark_cooldown(cid, e.to_string(), 60);
+                    }
                     tracing::warn!("messages stream failover: channel {cid:?} failed: {e}, trying next channel");
                     last_error = Some(e);
                 }
@@ -368,6 +374,12 @@ pub async fn handle_messages(
                 log.request_id = Some(request_id.clone());
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
+                crate::metrics::global().record_request(
+                    &model,
+                    used_channel_id.as_deref().unwrap_or("unknown"),
+                    "error",
+                    latency_ms,
+                );
                 // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
                 if status_code.as_u16() >= 500 {
                     state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
@@ -383,11 +395,14 @@ pub async fn handle_messages(
                 let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
                 let acc_for_map = acc.clone();
 
-                // 前缀事件：message_start + content_block_start（问题 7）
+                // 前缀事件：仅 message_start（内容块统一由 middle 动态开启，
+                // 参照 aisix AnthropicSseEncoder：文本块在首个文本增量到达时才开块，
+                // 避免 thinking/文本/tool 块 index 冲突）
                 let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
                 let input_tokens_est =
                     crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
-                let prefix = futures::stream::iter([
+                let model_for_prefix = model.clone();
+                let prefix = futures::stream::once(async move {
                     Ok::<_, Infallible>(
                         Event::default()
                             .event("message_start")
@@ -399,7 +414,7 @@ pub async fn handle_messages(
                                         "type": "message",
                                         "role": "assistant",
                                         "content": [],
-                                        "model": model,
+                                        "model": model_for_prefix,
                                         "stop_reason": null,
                                         "stop_sequence": null,
                                         "usage": {"input_tokens": input_tokens_est, "output_tokens": 0}
@@ -407,37 +422,110 @@ pub async fn handle_messages(
                                 })
                                 .to_string(),
                             ),
-                    ),
-                    Ok::<_, Infallible>(
-                        Event::default()
-                            .event("content_block_start")
-                            .data(
-                                serde_json::json!({
-                                    "type": "content_block_start",
-                                    "index": 0,
-                                    "content_block": {"type": "text", "text": ""}
-                                })
-                                .to_string(),
-                            ),
-                    ),
-                ]);
+                    )
+                });
 
-                // 中间流：文本增量 + tool_use 增量
+                // 中间流：动态开块（thinking/文本/tool 共用递增 index）+ 增量
                 let has_tool = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let has_tool_middle = has_tool.clone();
-                let mut tool_started = false;
+                let has_reasoning = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let has_reasoning_middle = has_reasoning.clone();
+                // 是否开启过任意内容块（thinking/文本/tool）——空流兜底用
+                let has_any_block = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let has_any_block_middle = has_any_block.clone();
+                // 块 index 状态：thinking_block_index / text_block_index 首次开启时
+                // 取 next_block_index 并自增，此后固定。tool_use 沿用 OpenAI 的
+                // tc.index（参照 aisix：tool_use 块 index = 下一个可用块 index）。
+                let mut next_block_index = 0usize;
+                let mut thinking_block_index: Option<usize> = None;
+                let mut text_block_index: Option<usize> = None;
+                let mut tool_block_indexes_mid: std::collections::BTreeMap<usize, usize> =
+                    std::collections::BTreeMap::new();
+                // 已发过 content_block_stop（finish_reason 分支置位）——force_finish 兜底用
+                let stop_emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let stop_emitted_middle = stop_emitted.clone();
                 let middle = stream.flat_map(move |chunk_result| {
                     use std::sync::atomic::Ordering;
                     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
                     match chunk_result {
                         Ok(chunk) => {
+                            // 推理内容增量 → Anthropic thinking 块（首个增量开块）
+                            if let Some(reasoning) = &chunk.delta.reasoning {
+                                has_reasoning_middle.store(true, Ordering::Relaxed);
+                                has_any_block_middle.store(true, Ordering::Relaxed);
+                                // 推理内容计入 completion token 估算（与 cf-ai-gw reasoningTokens 对齐）
+                                let mut buf = acc_for_map.lock();
+                                crate::token_estimate::push_capped(&mut buf, reasoning);
+                                drop(buf);
+                                let idx = match thinking_block_index {
+                                    Some(i) => i,
+                                    None => {
+                                        let i = next_block_index;
+                                        next_block_index += 1;
+                                        thinking_block_index = Some(i);
+                                        events.push(Ok(
+                                            Event::default().event("content_block_start").data(
+                                                serde_json::json!({
+                                                    "type": "content_block_start",
+                                                    "index": i,
+                                                    "content_block": {"type": "thinking", "thinking": ""}
+                                                })
+                                                .to_string(),
+                                            ),
+                                        ));
+                                        i
+                                    }
+                                };
+                                events.push(Ok(
+                                    Event::default().event("content_block_delta").data(
+                                        serde_json::json!({
+                                            "type": "content_block_delta",
+                                            "index": idx,
+                                            "delta": {"type": "thinking_delta", "thinking": reasoning}
+                                        })
+                                        .to_string(),
+                                    ),
+                                ));
+                            }
                             if let Some(text) = &chunk.delta.content {
+                                has_any_block_middle.store(true, Ordering::Relaxed);
                                 let mut buf = acc_for_map.lock();
                                 crate::token_estimate::push_capped(&mut buf, text);
+                                // 工具调用参数计入 completion token 估算
+                                if let Some(tcs) = &chunk.delta.tool_calls {
+                                    for tc in tcs {
+                                        if let Some(name) = &tc.function_name {
+                                            crate::token_estimate::push_capped(&mut buf, name);
+                                        }
+                                        if let Some(args) = &tc.arguments {
+                                            crate::token_estimate::push_capped(&mut buf, args);
+                                        }
+                                    }
+                                }
+                                drop(buf);
+                                let idx = match text_block_index {
+                                    Some(i) => i,
+                                    None => {
+                                        let i = next_block_index;
+                                        next_block_index += 1;
+                                        text_block_index = Some(i);
+                                        events.push(Ok(
+                                            Event::default().event("content_block_start").data(
+                                                serde_json::json!({
+                                                    "type": "content_block_start",
+                                                    "index": i,
+                                                    "content_block": {"type": "text", "text": ""}
+                                                })
+                                                .to_string(),
+                                            ),
+                                        ));
+                                        i
+                                    }
+                                };
                                 events.push(Ok(Event::default().event("content_block_delta").data(
                                     serde_json::json!({
                                         "type": "content_block_delta",
-                                        "index": 0,
+                                        "index": idx,
                                         "delta": {"type": "text_delta", "text": text}
                                     })
                                     .to_string(),
@@ -445,11 +533,17 @@ pub async fn handle_messages(
                             }
                             if let Some(tool_calls) = &chunk.delta.tool_calls {
                                 has_tool_middle.store(true, Ordering::Relaxed);
+                                has_any_block_middle.store(true, Ordering::Relaxed);
                                 for tc in tool_calls {
+                                    let idx = *tool_block_indexes_mid
+                                        .entry(tc.index)
+                                        .or_insert_with(|| {
+                                            let i = next_block_index;
+                                            next_block_index += 1;
+                                            i
+                                        });
                                     // 首帧带 id/name，用于启动 tool_use 块
-                                    if !tool_started
-                                        && (tc.id.is_some() || tc.function_name.is_some())
-                                    {
+                                    if tc.id.is_some() || tc.function_name.is_some() {
                                         let id = tc.id.clone().unwrap_or_else(|| {
                                             format!("toolu_{}", uuid::Uuid::new_v4())
                                         });
@@ -458,20 +552,19 @@ pub async fn handle_messages(
                                             Event::default().event("content_block_start").data(
                                                 serde_json::json!({
                                                     "type": "content_block_start",
-                                                    "index": tc.index,
+                                                    "index": idx,
                                                     "content_block": {"type": "tool_use", "id": id, "name": name}
                                                 })
                                                 .to_string(),
                                             ),
                                         ));
-                                        tool_started = true;
                                     }
                                     if let Some(pj) = &tc.arguments {
                                         events.push(Ok(
                                             Event::default().event("content_block_delta").data(
                                                 serde_json::json!({
                                                     "type": "content_block_delta",
-                                                    "index": tc.index,
+                                                    "index": idx,
                                                     "delta": {"type": "input_json_delta", "partial_json": pj}
                                                 })
                                                 .to_string(),
@@ -479,6 +572,32 @@ pub async fn handle_messages(
                                         ));
                                     }
                                 }
+                            }
+                            // 收尾块（方案 A，参照 aisix AnthropicSseEncoder）：
+                            // finish_reason chunk 到达时，用中间流自己的块 index 状态
+                            // 发 content_block_stop——此时这些状态才是实际开启过的块。
+                            // 后缀只负责 message_delta + message_stop，不再重复发 stop。
+                            if chunk.finish_reason.is_some() {
+                                if let Some(i) = thinking_block_index {
+                                    events.push(Ok(Event::default().event("content_block_stop").data(
+                                        serde_json::json!({"type": "content_block_stop", "index": i})
+                                            .to_string(),
+                                    )));
+                                }
+                                if let Some(i) = text_block_index {
+                                    events.push(Ok(Event::default().event("content_block_stop").data(
+                                        serde_json::json!({"type": "content_block_stop", "index": i})
+                                            .to_string(),
+                                    )));
+                                }
+                                for i in tool_block_indexes_mid.values() {
+                                    events.push(Ok(Event::default().event("content_block_stop").data(
+                                        serde_json::json!({"type": "content_block_stop", "index": i})
+                                            .to_string(),
+                                    )));
+                                }
+                                // 已收尾：后缀无需再补
+                                stop_emitted_middle.store(true, Ordering::Relaxed);
                             }
                             if events.is_empty() {
                                 events.push(Ok(Event::default().event("ping").data("{}")));
@@ -496,7 +615,7 @@ pub async fn handle_messages(
                     futures::stream::iter(events)
                 });
 
-                // 后缀：计费 + content_block_stop + message_delta + message_stop（问题 3/7）
+                // 后缀：计费 + 按块序收尾 content_block_stop + message_delta + message_stop（问题 3/7）
                 // B05：计费状态由后缀事件与 Drop 守卫共享（原子标志互斥）——
                 // 正常结束时后缀事件计费；客户端断连导致流被 drop 时由守卫兜底。
                 let billing = std::sync::Arc::new(super::openai::StreamBillingState {
@@ -515,6 +634,8 @@ pub async fn handle_messages(
                 });
                 let billing_fin = billing.clone();
                 let has_tool_fin = has_tool.clone();
+                let has_any_block_fin = has_any_block.clone();
+                let stop_emitted_fin = stop_emitted.clone();
                 let suffix = futures::stream::once(async move {
                     // completion tokens 需在 message_delta 事件中回显，先估算
                     let completion_tokens = {
@@ -523,44 +644,98 @@ pub async fn handle_messages(
                     };
 
                     // 原子抢占计费权：断连场景守卫可能已兜底计费，双保险防重复
-                    if !billing_fin
+                    let (prompt_tokens, completion_tokens) = if !billing_fin
                         .charged
                         .swap(true, std::sync::atomic::Ordering::SeqCst)
                     {
-                        let (prompt_tokens, completion_tokens) = billing_fin.finalize();
+                        let (pt, ct) = billing_fin.finalize();
                         // 事后限流记账
-                        rate_bundle.commit_tokens(prompt_tokens + completion_tokens).await;
-                    }
+                        rate_bundle.commit_tokens(pt + ct).await;
+                        (pt, ct)
+                    } else {
+                        // 守卫已兜底计费：此处仅取估算值供 message_delta 回显
+                        // 与 Prometheus 指标上报，不再重复扣费
+                        let prompt_tokens =
+                            crate::token_estimate::count_chat_prompt(&billing_fin.model, &billing_fin.chat_req)
+                                as u64;
+                        (prompt_tokens, completion_tokens)
+                    };
 
-                    // 结束事件序列（工具调用时 stop_reason=tool_use）
-                    let stop_reason = if has_tool_fin.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Prometheus 指标
+                    crate::metrics::global().record_request(
+                        &billing_fin.model,
+                        billing_fin.channel_id.as_deref().unwrap_or("unknown"),
+                        "ok",
+                        billing_fin.request_start.elapsed().as_millis() as u64,
+                    );
+                    crate::metrics::global().record_tokens(
+                        &billing_fin.model,
+                        "prompt",
+                        prompt_tokens,
+                    );
+                    crate::metrics::global().record_tokens(
+                        &billing_fin.model,
+                        "completion",
+                        completion_tokens,
+                    );
+
+                    // 结束事件序列（方案 A）：content_block_stop 已由中间流在
+                    // finish_reason chunk 处发出（用中间流自己的块 index 状态），
+                    // 后缀只负责：空流兜底 + force_finish 兜底 + message_delta + message_stop。
+                    let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
+                    let has_tool = has_tool_fin.load(std::sync::atomic::Ordering::Relaxed);
+                    let has_any_block = has_any_block_fin.load(std::sync::atomic::Ordering::Relaxed);
+                    let stop_sent = stop_emitted_fin.load(std::sync::atomic::Ordering::Relaxed);
+                    // force_finish 兜底（参照 aisix AnthropicSseEncoder::force_finish）：
+                    // 上游没发过 finish_reason，直接流结束。此时：
+                    // - 若开过块但 stop 未发 → 补发 stop（非空流漏 stop）
+                    // - 若一个块都没开过 → 补空文本块 + stop（空流兜底）
+                    // 两者都用 index 0（此场景下中间流必然只有一个活动块，
+                    // 多个块混排时上游必然发了 finish_reason 走中间流收尾）。
+                    if !stop_sent {
+                        let i = 0;
+                        if has_any_block {
+                            events.push(Ok(Event::default().event("content_block_stop").data(
+                                serde_json::json!({"type": "content_block_stop", "index": i})
+                                    .to_string(),
+                            )));
+                        } else {
+                            events.push(Ok(Event::default().event("content_block_start").data(
+                                serde_json::json!({
+                                    "type": "content_block_start",
+                                    "index": i,
+                                    "content_block": {"type": "text", "text": ""}
+                                })
+                                .to_string(),
+                            )));
+                            events.push(Ok(Event::default().event("content_block_stop").data(
+                                serde_json::json!({"type": "content_block_stop", "index": i})
+                                    .to_string(),
+                            )));
+                        }
+                    }
+                    // 结束事件（工具调用时 stop_reason=tool_use）
+                    let stop_reason = if has_tool {
                         "tool_use"
                     } else {
                         "end_turn"
                     };
-                    vec![
-                        Ok::<_, Infallible>(
-                            Event::default().event("content_block_stop").data(
-                                serde_json::json!({"type": "content_block_stop", "index": 0})
-                                    .to_string(),
-                            ),
+                    events.push(Ok(
+                        Event::default().event("message_delta").data(
+                            serde_json::json!({
+                                "type": "message_delta",
+                                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+                                "usage": {"output_tokens": completion_tokens}
+                            })
+                            .to_string(),
                         ),
-                        Ok::<_, Infallible>(
-                            Event::default().event("message_delta").data(
-                                serde_json::json!({
-                                    "type": "message_delta",
-                                    "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                                    "usage": {"output_tokens": completion_tokens}
-                                })
-                                .to_string(),
-                            ),
-                        ),
-                        Ok::<_, Infallible>(
-                            Event::default()
-                                .event("message_stop")
-                                .data(serde_json::json!({"type": "message_stop"}).to_string()),
-                        ),
-                    ]
+                    ));
+                    events.push(Ok(
+                        Event::default()
+                            .event("message_stop")
+                            .data(serde_json::json!({"type": "message_stop"}).to_string()),
+                    ));
+                    events
                 })
                 .map(futures::stream::iter)
                 .flatten();
@@ -572,7 +747,7 @@ pub async fn handle_messages(
                     inner: Box::pin(combined),
                     _guard: super::openai::StreamUsageGuard::new(billing),
                 };
-                return Sse::new(guarded).into_response();
+                return Sse::new(guarded).keep_alive(axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15))).into_response();
         }
     } else {
         // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
@@ -595,6 +770,9 @@ pub async fn handle_messages(
                         last_error = Some(e);
                         used_channel_id = cid;
                         break;
+                    }
+                    if let Some(cid) = &cid {
+                        state.channel_store.mark_cooldown(cid, e.to_string(), 60);
                     }
                     tracing::warn!("messages failover: channel {cid:?} failed: {e}, trying next channel");
                     last_error = Some(e);
@@ -623,6 +801,12 @@ pub async fn handle_messages(
                 log.request_id = Some(request_id.clone());
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
+                crate::metrics::global().record_request(
+                    &model,
+                    used_channel_id.as_deref().unwrap_or("unknown"),
+                    "error",
+                    latency_ms,
+                );
                 // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
                 if status_code.as_u16() >= 500 {
                     state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
@@ -673,6 +857,24 @@ pub async fn handle_messages(
                 log.ip = client_ip.clone();
                 log.request_id = Some(request_id.clone());
                 state.log_store.record_request(log);
+
+                // Prometheus 指标
+                crate::metrics::global().record_request(
+                    &model,
+                    used_channel_id.as_deref().unwrap_or("unknown"),
+                    "ok",
+                    latency_ms,
+                );
+                crate::metrics::global().record_tokens(
+                    &model,
+                    "prompt",
+                    response.usage.prompt_tokens,
+                );
+                crate::metrics::global().record_tokens(
+                    &model,
+                    "completion",
+                    response.usage.completion_tokens,
+                );
 
                 let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
                 // 工具调用时输出 tool_use 内容块（与流式分支保持一致）

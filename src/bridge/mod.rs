@@ -56,6 +56,8 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     /// 助手消息携带的工具调用（多轮对话回传）
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// 非流式推理内容（DeepSeek reasoning_content / OpenAI reasoning）
+    pub reasoning: Option<String>,
 }
 
 impl ChatMessage {
@@ -66,6 +68,7 @@ impl ChatMessage {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning: None,
         }
     }
 
@@ -140,6 +143,8 @@ pub struct ChatDelta {
     pub content: Option<String>,
     /// 流式工具调用增量（OpenAI delta.tool_calls）
     pub tool_calls: Option<Vec<ToolCallDelta>>,
+    /// 流式推理内容增量（OpenAI delta.reasoning_content，Anthropic thinking）
+    pub reasoning: Option<String>,
 }
 
 /// 流式聊天块流

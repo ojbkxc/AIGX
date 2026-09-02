@@ -183,6 +183,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning: None,
             }],
             tools: None,
             max_tokens: None,

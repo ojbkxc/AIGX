@@ -87,7 +87,7 @@ impl CfApiClient {
     ///
     /// - 优先遍历账号池中的活跃账号，把请求转发到对应的 cf-ai-gw Worker
     /// - 无账号时回退到配置的兜底 `cf_binding_url`
-    pub async fn call_ai(&self, model: &str, body: Value) -> std::result::Result<CfResponse, CfError> {
+    pub async fn call_ai(&self, model: &str, body: Value, endpoint: &str) -> std::result::Result<CfResponse, CfError> {
         let cf_model = self.model_mapper.resolve(model);
         let active_accounts = self.account_pool.active_accounts();
 
@@ -97,7 +97,7 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
-            return self.call_worker(&self.fallback_url, &self.fallback_key, &cf_model, body).await;
+            return self.call_worker(&self.fallback_url, &self.fallback_key, &cf_model, body, endpoint).await;
         }
 
         let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
@@ -105,11 +105,17 @@ impl CfApiClient {
         for account in &active_accounts {
             for attempt in 0..2 {
                 if attempt > 0 {
+                    tracing::warn!(
+                        "cf-ai-gw call retry {}/2 for worker {} (model {}): backoff 1s",
+                        attempt + 1,
+                        account.name,
+                        cf_model
+                    );
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
 
                 let (url, key) = self.resolve_target(account);
-                let result = self.call_worker(&url, &key, &cf_model, body.clone()).await;
+                let result = self.call_worker(&url, &key, &cf_model, body.clone(), endpoint).await;
 
                 match result {
                     Ok(cf_resp) => {
@@ -119,17 +125,32 @@ impl CfApiClient {
                     Err(e) => match &e {
                         // 认证失败只代表该 Worker 的 API Key 失效，跳过本账号剩余重试、继续下一账号
                         CfError::AuthError(_) => {
+                            tracing::warn!(
+                                "cf-ai-gw worker {} auth failed for model {}: {e}; skipping",
+                                account.name,
+                                cf_model
+                            );
                             last_error = e;
                             break;
                         }
                         // 限流时跳过当前账号剩余重试
                         CfError::RateLimited { .. } => {
+                            tracing::warn!(
+                                "cf-ai-gw worker {} rate limited for model {}: {e}; skipping",
+                                account.name,
+                                cf_model
+                            );
                             last_error = e;
                             break;
                         }
                         // 模型不存在，不可重试
                         CfError::ModelNotFound(_) => return Err(e),
                         _ => {
+                            tracing::warn!(
+                                "cf-ai-gw worker {} failed for model {}: {e}",
+                                account.name,
+                                cf_model
+                            );
                             last_error = e;
                         }
                     },
@@ -137,6 +158,7 @@ impl CfApiClient {
             }
         }
 
+        tracing::warn!("All cf-ai-gw workers exhausted for model {cf_model}: {last_error}");
         Err(last_error)
     }
 
@@ -157,8 +179,9 @@ impl CfApiClient {
         api_key: &str,
         cf_model: &str,
         body: Value,
+        endpoint: &str,
     ) -> std::result::Result<CfResponse, CfError> {
-        let url = format!("{worker_url}/v1/chat/completions");
+        let url = format!("{worker_url}{endpoint}");
         let mut req = self
             .http
             .post(&url)
@@ -287,19 +310,19 @@ impl CfApiClient {
 
     /// 调用 CF 文本生成 API
     pub async fn run_text(&self, model: &str, body: Value) -> std::result::Result<Value, CfError> {
-        let resp = self.call_ai(model, body).await?;
+        let resp = self.call_ai(model, body, "/v1/chat/completions").await?;
         Ok(resp.result.unwrap_or_default())
     }
 
     /// 调用 CF 嵌入 API
     pub async fn run_embedding(&self, model: &str, body: Value) -> std::result::Result<Value, CfError> {
-        let resp = self.call_ai(model, body).await?;
+        let resp = self.call_ai(model, body, "/v1/embeddings").await?;
         Ok(resp.result.unwrap_or_default())
     }
 
     /// 调用 CF 图片生成 API
     pub async fn run_image(&self, model: &str, body: Value) -> std::result::Result<Value, CfError> {
-        let resp = self.call_ai(model, body).await?;
+        let resp = self.call_ai(model, body, "/v1/images/generations").await?;
         Ok(resp.result.unwrap_or_default())
     }
 
@@ -336,20 +359,36 @@ impl CfApiClient {
                 Err(e) => match &e {
                     // 认证失败只代表该 Worker 的 API Key 失效，继续尝试下一账号
                     CfError::AuthError(_) => {
+                        tracing::warn!(
+                            "cf-ai-gw stream worker {} auth failed for model {}: {e}",
+                            account.name,
+                            cf_model
+                        );
                         last_error = e;
                         continue;
                     }
                     CfError::RateLimited { .. } => {
+                        tracing::warn!(
+                            "cf-ai-gw stream worker {} rate limited for model {}: {e}",
+                            account.name,
+                            cf_model
+                        );
                         last_error = e;
                         continue;
                     }
                     CfError::ModelNotFound(_) => return Err(e),
                     _ => {
+                        tracing::warn!(
+                            "cf-ai-gw stream worker {} failed for model {}: {e}",
+                            account.name,
+                            cf_model
+                        );
                         last_error = e;
                     }
                 },
             }
         }
+        tracing::warn!("All cf-ai-gw stream workers exhausted for model {cf_model}: {last_error}");
         Err(last_error)
     }
 
@@ -402,6 +441,7 @@ impl CfApiClient {
         model: &str,
         data: Vec<u8>,
         _content_type: &str,
+        endpoint: &str,
     ) -> std::result::Result<Value, CfError> {
         let cf_model = self.model_mapper.resolve(model);
         let active_accounts = self.account_pool.active_accounts();
@@ -412,7 +452,7 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
-            return self.audio_from_worker(&self.fallback_url, &self.fallback_key, &cf_model, data).await;
+            return self.audio_from_worker(&self.fallback_url, &self.fallback_key, &cf_model, data, endpoint).await;
         }
 
         let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
@@ -420,26 +460,47 @@ impl CfApiClient {
         for account in &active_accounts {
             for attempt in 0..2 {
                 if attempt > 0 {
+                    tracing::warn!(
+                        "cf-ai-gw audio retry {}/2 for worker {} (model {}): backoff 1s",
+                        attempt + 1,
+                        account.name,
+                        cf_model
+                    );
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
 
                 let (url, key) = self.resolve_target(account);
-                match self.audio_from_worker(&url, &key, &cf_model, data.clone()).await {
+                match self.audio_from_worker(&url, &key, &cf_model, data.clone(), endpoint).await {
                     Ok(v) => {
                         self.account_pool.mark_used(&account.id);
                         return Ok(v);
                     }
                     Err(e) => match &e {
                         CfError::AuthError(_) => {
+                            tracing::warn!(
+                                "cf-ai-gw audio worker {} auth failed (model {}): {e}; skipping",
+                                account.name,
+                                cf_model
+                            );
                             last_error = e;
                             break;
                         }
                         CfError::RateLimited { .. } => {
+                            tracing::warn!(
+                                "cf-ai-gw audio worker {} rate limited (model {}): {e}; skipping",
+                                account.name,
+                                cf_model
+                            );
                             last_error = e;
                             break;
                         }
                         CfError::ModelNotFound(_) => return Err(e),
                         _ => {
+                            tracing::warn!(
+                                "cf-ai-gw audio worker {} failed (model {}): {e}",
+                                account.name,
+                                cf_model
+                            );
                             last_error = e;
                         }
                     },
@@ -447,6 +508,7 @@ impl CfApiClient {
             }
         }
 
+        tracing::warn!("All cf-ai-gw audio workers exhausted for model {cf_model}: {last_error}");
         Err(last_error)
     }
 
@@ -456,8 +518,9 @@ impl CfApiClient {
         api_key: &str,
         cf_model: &str,
         data: Vec<u8>,
+        endpoint: &str,
     ) -> std::result::Result<Value, CfError> {
-        let url = format!("{worker_url}/v1/audio/transcriptions");
+        let url = format!("{worker_url}{endpoint}");
 
         // 构造 multipart 表单：字段 file（音频字节，泛型文件名）+ model
         let mut form = reqwest::multipart::Form::new();
@@ -495,6 +558,132 @@ impl CfApiClient {
             Err(CfError::RateLimited { retry_after: None })
         } else if status.as_u16() == 404 {
             Err(CfError::ModelNotFound(format!("Model {cf_model} not found")))
+        } else {
+            let body_text = resp.text().await.unwrap_or_default();
+            Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
+        }
+    }
+
+    /// 调用 cf-ai-gw Worker 文本转语音（AI Binding）。
+    ///
+    /// cf-ai-gw 的 `/v1/audio/speech` 接收 OpenAI 格式 JSON body
+    /// （`model` / `input` / `voice`），内部经 AI Binding（aura-2 等）
+    /// 合成音频并返回**原始音频二进制**（`Content-Type` 为音频类型）。
+    /// 多账号故障转移与 `run_text` / `run_audio` 一致。
+    pub async fn run_audio_speech(
+        &self,
+        _model: &str,
+        body: Value,
+    ) -> std::result::Result<CfAudio, CfError> {
+        let active_accounts = self.account_pool.active_accounts();
+
+        if active_accounts.is_empty() {
+            if self.fallback_url.is_empty() {
+                return Err(CfError::AuthError(
+                    "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
+                ));
+            }
+            return self.speech_from_worker(&self.fallback_url, &self.fallback_key, body).await;
+        }
+
+        let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
+
+        for account in &active_accounts {
+            for attempt in 0..2 {
+                if attempt > 0 {
+                    tracing::warn!(
+                        "cf-ai-gw audio/speech retry {}/2 for worker {} (model {}): backoff 1s",
+                        attempt + 1,
+                        account.name,
+                        _model
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+
+                let (url, key) = self.resolve_target(account);
+                match self.speech_from_worker(&url, &key, body.clone()).await {
+                    Ok(audio) => {
+                        self.account_pool.mark_used(&account.id);
+                        return Ok(audio);
+                    }
+                    Err(e) => match &e {
+                        CfError::AuthError(_) => {
+                            tracing::warn!(
+                                "cf-ai-gw audio/speech worker {} auth failed (model {}): {e}; skipping",
+                                account.name,
+                                _model
+                            );
+                            last_error = e;
+                            break;
+                        }
+                        CfError::RateLimited { .. } => {
+                            tracing::warn!(
+                                "cf-ai-gw audio/speech worker {} rate limited (model {}): {e}; skipping",
+                                account.name,
+                                _model
+                            );
+                            last_error = e;
+                            break;
+                        }
+                        CfError::ModelNotFound(_) => return Err(e),
+                        _ => {
+                            tracing::warn!(
+                                "cf-ai-gw audio/speech worker {} failed (model {}): {e}",
+                                account.name,
+                                _model
+                            );
+                            last_error = e;
+                        }
+                    },
+                }
+            }
+        }
+
+        tracing::warn!("All cf-ai-gw audio/speech workers exhausted for model {_model}: {last_error}");
+        Err(last_error)
+    }
+
+    async fn speech_from_worker(
+        &self,
+        worker_url: &str,
+        api_key: &str,
+        body: Value,
+    ) -> std::result::Result<CfAudio, CfError> {
+        let url = format!("{worker_url}/v1/audio/speech");
+        let mut req = self.http.post(&url).json(&body);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(api_key);
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => return Err(CfError::NetworkError(format!("Connection error: {e}"))),
+        };
+
+        let status = resp.status();
+        if status.is_success() {
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("audio/wav")
+                .to_string();
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(CfError::NetworkError(format!("Failed to read audio bytes: {e}")));
+                }
+            };
+            Ok(CfAudio {
+                content_type,
+                bytes: bytes.to_vec(),
+            })
+        } else if is_auth_error(status.as_u16()) {
+            Err(CfError::AuthError(format!("Auth failed: {status}")))
+        } else if status.as_u16() == 429 {
+            Err(CfError::RateLimited { retry_after: None })
+        } else if status.as_u16() == 404 {
+            Err(CfError::ModelNotFound(format!("Model not found")))
         } else {
             let body_text = resp.text().await.unwrap_or_default();
             Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
@@ -540,17 +729,28 @@ impl CfApiClient {
                 Err(e) => match &e {
                     // 认证失败只代表该 Worker 的 API Key 失效，继续尝试下一账号
                     CfError::AuthError(_) | CfError::RateLimited { .. } => {
+                        tracing::warn!(
+                            "cf-ai-gw responses worker {} failed (model {}, stream={stream}): {e}",
+                            account.name,
+                            model
+                        );
                         last_error = e;
                         continue;
                     }
                     CfError::ModelNotFound(_) => return Err(e),
                     _ => {
+                        tracing::warn!(
+                            "cf-ai-gw responses worker {} failed (model {}, stream={stream}): {e}",
+                            account.name,
+                            model
+                        );
                         last_error = e;
                     }
                 },
             }
         }
 
+        tracing::warn!("All cf-ai-gw responses workers exhausted for model {model}: {last_error}");
         Err(last_error)
     }
 
@@ -613,6 +813,12 @@ impl CfApiClient {
             Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
         }
     }
+}
+
+/// 文本转语音（TTS）结果：原始音频字节 + 音频 MIME 类型。
+pub struct CfAudio {
+    pub content_type: String,
+    pub bytes: Vec<u8>,
 }
 
 /// CF API 响应

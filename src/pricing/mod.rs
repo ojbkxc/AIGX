@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::storage::FileStore;
+use tracing::error;
 
 // ── ModelPrice ──────────────────────────────────────────────────────
 
@@ -111,6 +112,83 @@ pub struct PricingStore {
 }
 
 const RATIO_KEY: &str = "ratio_config";
+/// 首次启动种子定价的标志位（见 `ensure_default_prices`）。
+const PRICING_SEEDED_KEY: &str = "pricing_seeded";
+
+/// 内置默认定价目录（单位：每 1k token 美元，USD）。
+///
+/// 与 `model::default_model_map` 的默认模型对齐，价格参照 Cloudflare Workers AI
+/// 公开价目（`@cf/` 免费额度模型按 0 计费；付费模型取近似官方价）。
+/// 首次启动时若目录为空则自动种子（`ensure_default_prices`）。
+fn default_prices() -> Vec<ModelPrice> {
+    let mut p = |m: &str, i: f64, o: f64| ModelPrice::new(m, i, o);
+    let mut c = |m: &str, price: f64| {
+        let mut x = ModelPrice::new(m, price, 0.0);
+        x.price_type = "count".to_string();
+        x
+    };
+    vec![
+        // 文本生成（对话 / 推理）
+        p("glm-5.2", 0.0015, 0.0025),
+        p("glm-4.7-flash", 0.0003, 0.0006),
+        p("kimi-k2.7-code", 0.0004, 0.0009),
+        p("kimi-k2.6", 0.0004, 0.0009),
+        p("gemma-4-26b-a4b-it", 0.0002, 0.0004),
+        p("nemotron-3-120b-a12b", 0.0002, 0.0004),
+        p("gpt-oss-20b", 0.0002, 0.0004),
+        p("gpt-oss-120b", 0.0002, 0.0004),
+        p("llama-3.1-8b", 0.0001, 0.0001),
+        p("llama-3.3-70b", 0.0002, 0.0002),
+        p("llama-4-scout", 0.0002, 0.0004),
+        p("llama-4-maverick", 0.0002, 0.0004),
+        p("deepseek-r1-distill", 0.0002, 0.0004),
+        p("deepseek-v3", 0.0003, 0.0006),
+        p("deepseek-r1-distill-qwen-32b", 0.0002, 0.0004),
+        p("qwen-2.5-72b", 0.0002, 0.0004),
+        p("qwen-2.5-coder-32b", 0.0002, 0.0004),
+        p("qwen-2.5-7b", 0.0001, 0.0002),
+        p("qwen1.5-14b", 0.0001, 0.0002),
+        p("qwen1.5-7b", 0.0001, 0.0002),
+        p("mistral-7b", 0.0001, 0.0001),
+        p("deepseek-coder-6.7b", 0.0001, 0.0002),
+        p("llama-3.2-3b", 0.0001, 0.0001),
+        p("llama-3.2-1b", 0.0001, 0.0001),
+        p("codellama-34b", 0.0001, 0.0001),
+        p("codellama-13b", 0.0001, 0.0001),
+        p("codellama-7b", 0.0001, 0.0001),
+        p("mixtral-8x7b", 0.0001, 0.0001),
+        p("gemma-4", 0.0001, 0.0002),
+        p("gemma-4-9b-it", 0.0001, 0.0002),
+        p("gemma-4-27b-it", 0.0001, 0.0002),
+        p("gemma-2-27b", 0.0001, 0.0002),
+        p("gemma-2-9b", 0.0001, 0.0002),
+        p("gemma-2-2b", 0.0001, 0.0002),
+        p("phi-3-mini", 0.0001, 0.0001),
+        p("phi-2", 0.0001, 0.0001),
+        p("internlm2-7b", 0.0001, 0.0001),
+        // 向量嵌入（按 token 计费）
+        p("bge-m3", 0.0002, 0.0),
+        p("bge-base-en-v1.5", 0.0002, 0.0),
+        p("bge-large-en", 0.0002, 0.0),
+        p("qwen3-embedding", 0.0002, 0.0),
+        p("qwen3-embedding-0.6b", 0.0002, 0.0),
+        p("embeddinggemma-300m", 0.0002, 0.0),
+        // 多模态 / 图片生成（按次计价）
+        c("llava-1.5", 0.0),
+        c("llava-1.5-7b", 0.0),
+        c("flux-1-schnell", 0.0),
+        c("flux-1-dev", 0.0),
+        c("sdxl", 0.0),
+        // 语音识别（Whisper，按次计价）
+        c("whisper", 0.0),
+        c("whisper-1", 0.0),
+        c("whisper-tiny-en", 0.0),
+        c("whisper-large-v3-turbo", 0.0),
+        // 视觉 / 语音合成（按次计价）
+        c("moondream3.1-9B-A2B", 0.0),
+        c("tts", 0.0),
+    ]
+}
 
 impl PricingStore {
     pub fn new(store: Arc<FileStore>) -> Self {
@@ -120,7 +198,40 @@ impl PricingStore {
             store,
         };
         let _ = s.load();
+        s.ensure_default_prices();
         s
+    }
+
+    /// 首次启动种子内置默认定价目录。
+    ///
+    /// 仅当目录为空（尚无任何定价条目）且未打过种子标记时执行一次：
+    /// 将 `default_prices()` 逐条 upsert 到存储并置位标记。标记落盘可保证
+    /// 管理员之后删光所有定价也不会被重新种子（尊重管理员意图）。
+    fn ensure_default_prices(&self) {
+        // 目录非空 → 管理员已配置过，跳过
+        if !self.prices.read().is_empty() {
+            return;
+        }
+        // 已打过种子标记 → 尊重管理员删光定价的操作，跳过
+        if self
+            .store
+            .get::<bool>(PRICING_SEEDED_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let mut seeded = 0;
+        for price in default_prices() {
+            if self.upsert_price(price).is_ok() {
+                seeded += 1;
+            }
+        }
+        if self.store.put(PRICING_SEEDED_KEY, &true).is_err() {
+            error!("failed to persist pricing seed marker");
+        }
+        tracing::info!("Seeded default pricing catalog: {seeded} models");
     }
 
     /// 从存储加载定价与倍率

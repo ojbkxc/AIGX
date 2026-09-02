@@ -2,11 +2,12 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{
-        sse::{Event, Sse},
+        sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
     Json,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures::StreamExt;
 use serde_json::Value;
 use std::convert::Infallible;
@@ -14,7 +15,7 @@ use std::sync::Arc;
 
 use crate::account::AccountPool;
 use crate::bridge::{
-    Bridge, BridgeContext, ChatFormat, ChatMessage, EmbeddingRequest, FinishReason,
+    tool_repair, Bridge, BridgeContext, ChatFormat, ChatMessage, EmbeddingRequest, FinishReason,
     ResponsesPassthrough, Role,
 };
 use crate::channel::ChannelStore;
@@ -52,6 +53,8 @@ pub struct AppState {
     pub user_store: Arc<UserStore>,
     pub order_store: Arc<OrderStore>,
     pub epay_client: Arc<crate::payment::EpayClient>,
+    /// Stripe 支付客户端
+    pub stripe_client: Arc<crate::payment::stripe::StripeClient>,
     pub health_tracker: Arc<HealthTracker>,
     pub livez_state: Arc<LivezState>,
     /// 通用渠道存储（混用 CF + 第三方 OpenAI 兼容上游）
@@ -78,6 +81,12 @@ pub struct AppState {
     /// key=客户端 IP，value=当前 60 秒窗口内已发起的登录尝试数。
     /// TTL=60s，超限返回 429 Too Many Requests。
     pub login_limiter: Arc<crate::cache::AsyncCache<String, u32>>,
+    /// 登录失败锁定状态（per-IP 连续失败计数）。
+    ///
+    /// key=客户端 IP，value=连续失败次数。连续失败 ≥5 次时锁定该 IP
+    /// 5 分钟（登录失败时重置 TTL；锁定期间直接返回 429）。
+    /// 成功登录清除计数。
+    pub login_failures: Arc<crate::cache::AsyncCache<String, u32>>,
     /// SeaORM 数据库连接（可选后端）。
     ///
     /// - `None`：使用默认 FileStore（rusqlite bundled SQLite），零配置
@@ -92,6 +101,13 @@ pub struct AppState {
     /// 连接池/TLS 握手开销。供 `bridge::openai::make_bridge` 与 admin 用量
     /// 刷新等 HTTP 调用使用。`reqwest::Client` 内部已基于 Arc，clone 廉价。
     pub http_client: Arc<reqwest::Client>,
+    /// ????????exact-match?model+messages hash key??
+    ///
+    /// ?? aisix aisix-cache???? prompt ??????????????
+    /// ?????????????????
+    pub response_cache: Arc<crate::cache::AsyncCache<String, Value>>,
+    /// Semantic routing (prompt embedding match)
+    pub semantic_router: Arc<crate::semantic::SemanticRouter>,
 }
 
 impl AppState {
@@ -468,6 +484,15 @@ impl Drop for StreamUsageGuard {
         // Drop 中不能 await：计费本身（token 估算/扣费/日志）全为同步操作，
         // 直接执行；异步的事后限流记账交由后台任务补交。
         let (prompt_tokens, completion_tokens) = self.billing.finalize();
+        // Prometheus 指标（断连兜底路径上报；正常路径由后缀事件上报）
+        crate::metrics::global().record_request(
+            &self.billing.model,
+            self.billing.channel_id.as_deref().unwrap_or("unknown"),
+            "ok",
+            self.billing.request_start.elapsed().as_millis() as u64,
+        );
+        crate::metrics::global().record_tokens(&self.billing.model, "prompt", prompt_tokens);
+        crate::metrics::global().record_tokens(&self.billing.model, "completion", completion_tokens);
         if let Some(bundle) = self.billing.rate_bundle.clone() {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
@@ -605,6 +630,15 @@ pub(crate) struct ResponsesStreamGuard {
 impl Drop for ResponsesStreamGuard {
     fn drop(&mut self) {
         let (prompt_tokens, completion_tokens) = self.billing.finalize();
+        // Prometheus 指标（透传流没有后缀事件，Drop 即唯一上报点）
+        crate::metrics::global().record_request(
+            &self.billing.model,
+            self.billing.channel_id.as_deref().unwrap_or("unknown"),
+            "ok",
+            self.billing.request_start.elapsed().as_millis() as u64,
+        );
+        crate::metrics::global().record_tokens(&self.billing.model, "prompt", prompt_tokens);
+        crate::metrics::global().record_tokens(&self.billing.model, "completion", completion_tokens);
         if let Some(bundle) = self.billing.rate_bundle.clone() {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
@@ -669,6 +703,7 @@ fn parse_messages(value: Option<&Value>) -> Option<Vec<ChatMessage>> {
             name,
             tool_call_id,
             tool_calls,
+            reasoning: None,
         });
     }
     Some(messages)
@@ -807,6 +842,9 @@ pub async fn handle_chat_completions(
                         used_channel_id = cid;
                         break;
                     }
+                    if let Some(cid) = &cid {
+                        state.channel_store.mark_cooldown(cid, e.to_string(), 60);
+                    }
                     tracing::warn!("chat_stream failover: channel {cid:?} failed: {e}, trying next channel");
                     last_error = Some(e);
                 }
@@ -834,6 +872,12 @@ pub async fn handle_chat_completions(
                 log.request_id = Some(request_id.clone());
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
+                crate::metrics::global().record_request(
+                    &model,
+                    used_channel_id.as_deref().unwrap_or("unknown"),
+                    "error",
+                    latency_ms,
+                );
                 // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
                 if status_code.as_u16() >= 500 {
                     state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
@@ -852,25 +896,49 @@ pub async fn handle_chat_completions(
                 let sse_stream = stream.map(move |chunk_result| match chunk_result {
                     Ok(chunk) => {
                         // 累积内容文本用于事后估算 completion tokens
+                        // （含 thinking 推理内容与工具调用参数，与 cf-ai-gw 的
+                        //   reasoningTokens/output 计量口径对齐）
+                        let mut buf = acc_for_map.lock();
                         if let Some(text) = &chunk.delta.content {
-                            let mut buf = acc_for_map.lock();
                             crate::token_estimate::push_capped(&mut buf, text);
                         }
+                        if let Some(reasoning) = &chunk.delta.reasoning {
+                            crate::token_estimate::push_capped(&mut buf, reasoning);
+                        }
+                        if let Some(tool_calls) = &chunk.delta.tool_calls {
+                            for tc in tool_calls {
+                                if let Some(name) = &tc.function_name {
+                                    crate::token_estimate::push_capped(&mut buf, name);
+                                }
+                                if let Some(args) = &tc.arguments {
+                                    crate::token_estimate::push_capped(&mut buf, args);
+                                }
+                            }
+                        }
+                        drop(buf);
                         let mut delta = serde_json::json!({
                             "content": chunk.delta.content.unwrap_or_default(),
                         });
+                        // 流式推理内容增量透传给 OpenAI 客户端（OpenAI 协议字段）
+                        if let Some(reasoning) = &chunk.delta.reasoning {
+                            delta["reasoning_content"] = Value::String(reasoning.clone());
+                        }
                         if let Some(tool_calls) = &chunk.delta.tool_calls {
+                            // 按 index 聚合流式参数分片，并对完整 arguments 做三层自修复
+                            // （同一次 chunk 内的多个 index 并行聚合，修复彼此独立）
+                            let repaired =
+                                tool_repair::accumulate_tool_call_arguments(tool_calls);
                             delta["tool_calls"] = Value::Array(
-                                tool_calls
+                                repaired
                                     .iter()
-                                    .map(|t| {
+                                    .map(|(idx, id, name, args)| {
                                         serde_json::json!({
-                                            "index": t.index,
-                                            "id": t.id,
+                                            "index": idx,
+                                            "id": id,
                                             "type": "function",
                                             "function": {
-                                                "name": t.function_name,
-                                                "arguments": t.arguments,
+                                                "name": name,
+                                                "arguments": args,
                                             }
                                         })
                                     })
@@ -928,14 +996,44 @@ pub async fn handle_chat_completions(
                 let billing_fin = billing.clone();
                 let final_event = async move {
                     // 原子抢占计费权：断连场景守卫可能已兜底计费，双保险防重复
-                    if !billing_fin
+                    let (prompt_tokens, completion_tokens) = if !billing_fin
                         .charged
                         .swap(true, std::sync::atomic::Ordering::SeqCst)
                     {
-                        let (prompt_tokens, completion_tokens) = billing_fin.finalize();
+                        let (pt, ct) = billing_fin.finalize();
                         // 事后限流记账（TPM）
-                        rate_bundle.commit_tokens(prompt_tokens + completion_tokens).await;
-                    }
+                        rate_bundle.commit_tokens(pt + ct).await;
+                        (pt, ct)
+                    } else {
+                        // 守卫已兜底计费：这里只取估算值供指标上报，不再重复扣费
+                        let output_text = billing_fin.acc.lock().clone();
+                        (
+                            crate::token_estimate::count_chat_prompt(
+                                &billing_fin.model,
+                                &billing_fin.chat_req,
+                            ) as u64,
+                            crate::token_estimate::count_text(&billing_fin.model, &output_text)
+                                as u64,
+                        )
+                    };
+
+                    // Prometheus 指标
+                    crate::metrics::global().record_request(
+                        &billing_fin.model,
+                        billing_fin.channel_id.as_deref().unwrap_or("unknown"),
+                        "ok",
+                        billing_fin.request_start.elapsed().as_millis() as u64,
+                    );
+                    crate::metrics::global().record_tokens(
+                        &billing_fin.model,
+                        "prompt",
+                        prompt_tokens,
+                    );
+                    crate::metrics::global().record_tokens(
+                        &billing_fin.model,
+                        "completion",
+                        completion_tokens,
+                    );
 
                     Ok::<_, Infallible>(Event::default().data("[DONE]"))
                 };
@@ -947,9 +1045,22 @@ pub async fn handle_chat_completions(
                     _guard: StreamUsageGuard::new(billing),
                 };
 
-                return Sse::new(guarded).into_response();
+                return Sse::new(guarded).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15))).into_response();
         }
     } else {
+        // 响应缓存：非流式请求尝试缓存命中
+        let cache_key = serde_json::to_string(&serde_json::json!({
+            "model": &model,
+            "messages": body.get("messages").cloned().unwrap_or(Value::Null),
+            "temperature": body.get("temperature").cloned().unwrap_or(Value::Null),
+            "max_tokens": body.get("max_tokens").cloned().unwrap_or(Value::Null),
+        })).unwrap_or_default();
+        if let Some(cached) = state.response_cache.get(&cache_key).await {
+            tracing::debug!("response cache hit for model {}", model);
+            let mut resp = Json(cached).into_response();
+            resp.headers_mut().insert("x-aigx-cache", "hit".parse().unwrap());
+            return resp;
+        }
         // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
         let mut response_opt = None;
         let mut used_channel_id: Option<String> = None;
@@ -970,6 +1081,9 @@ pub async fn handle_chat_completions(
                         last_error = Some(e);
                         used_channel_id = cid;
                         break;
+                    }
+                    if let Some(cid) = &cid {
+                        state.channel_store.mark_cooldown(cid, e.to_string(), 60);
                     }
                     tracing::warn!("chat failover: channel {cid:?} failed: {e}, trying next channel");
                     last_error = Some(e);
@@ -998,6 +1112,12 @@ pub async fn handle_chat_completions(
                 log.request_id = Some(request_id.clone());
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
+                crate::metrics::global().record_request(
+                    &model,
+                    used_channel_id.as_deref().unwrap_or("unknown"),
+                    "error",
+                    latency_ms,
+                );
                 // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
                 if status_code.as_u16() >= 500 {
                     state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
@@ -1051,10 +1171,31 @@ pub async fn handle_chat_completions(
                 log.request_id = Some(request_id.clone());
                 state.log_store.record_request(log);
 
+                // Prometheus 指标
+                crate::metrics::global().record_request(
+                    &model,
+                    used_channel_id.as_deref().unwrap_or("unknown"),
+                    "ok",
+                    latency_ms,
+                );
+                crate::metrics::global().record_tokens(
+                    &model,
+                    "prompt",
+                    response.usage.prompt_tokens,
+                );
+                crate::metrics::global().record_tokens(
+                    &model,
+                    "completion",
+                    response.usage.completion_tokens,
+                );
+
                 let mut message = serde_json::json!({
                     "role": "assistant",
                     "content": response.message.content_str(),
                 });
+                if let Some(reasoning) = &response.message.reasoning {
+                    message["reasoning_content"] = Value::String(reasoning.clone());
+                }
                 if let Some(tool_calls) = &response.message.tool_calls {
                     message["tool_calls"] = Value::Array(
                         tool_calls
@@ -1088,7 +1229,10 @@ pub async fn handle_chat_completions(
                         "total_tokens": response.usage.total_tokens,
                     }
                 });
-                return Json(json).into_response();
+                state.response_cache.insert(cache_key, json.clone()).await;
+                let mut resp = Json(json).into_response();
+                resp.headers_mut().insert("x-aigx-cache", "miss".parse().unwrap());
+                return resp;
         }
     }
 }
@@ -1207,6 +1351,9 @@ pub async fn handle_responses(
                     used_channel_id = cid;
                     break;
                 }
+                if let Some(cid) = &cid {
+                    state.channel_store.mark_cooldown(cid, e.to_string(), 60);
+                }
                 tracing::warn!("responses failover: channel {cid:?} failed: {e}, trying next channel");
                 last_error = Some(e);
             }
@@ -1234,6 +1381,12 @@ pub async fn handle_responses(
             log.request_id = Some(request_id.clone());
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
+            crate::metrics::global().record_request(
+                &model,
+                used_channel_id.as_deref().unwrap_or("unknown"),
+                "error",
+                latency_ms,
+            );
             // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
             if status_code.as_u16() >= 500 {
                 state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
@@ -1308,6 +1461,16 @@ pub async fn handle_responses(
             log.request_id = Some(request_id.clone());
             state.log_store.record_request(log);
 
+            // Prometheus 指标
+            crate::metrics::global().record_request(
+                &model,
+                used_channel_id.as_deref().unwrap_or("unknown"),
+                "ok",
+                latency_ms,
+            );
+            crate::metrics::global().record_tokens(&model, "prompt", prompt_tokens);
+            crate::metrics::global().record_tokens(&model, "completion", completion_tokens);
+
             Json(json).into_response()
         }
         ResponsesPassthrough::Stream(byte_stream) => {
@@ -1345,8 +1508,9 @@ pub async fn handle_responses(
                 chunk
             });
 
+            let keepalive_stream = crate::sse::KeepaliveStream::new(passthrough_stream, std::time::Duration::from_secs(15));
             let guarded = GuardedStream {
-                inner: Box::pin(passthrough_stream),
+                inner: Box::pin(keepalive_stream),
                 _guard: ResponsesStreamGuard { billing },
             };
 
@@ -1502,11 +1666,12 @@ pub async fn handle_completions(
 
     // 完整鉴权（问题 1）
     let api_key = verify_api_key_full(&state, &headers, model)?;
+    let model_owned = model.to_string();
 
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
-        .check(&api_key.id, model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .check(&api_key.id, &model_owned, api_key.user_id.as_deref(), client_ip.as_deref())
         .await
     {
         Ok(b) => b,
@@ -1521,18 +1686,18 @@ pub async fn handle_completions(
     };
 
     // 校验用户分组模型权限并解析计费分组（问题 5）
-    let billing_group = check_group_model_permission(&state, &api_key, model)?;
+    let billing_group = check_group_model_permission(&state, &api_key, &model_owned)?;
 
     // B09：前置校验模型定价——未配置价格的模型拒绝请求，避免免费用量
-    ensure_model_priced(&state, model)?;
+    ensure_model_priced(&state, &model_owned)?;
 
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
-    let candidates = resolve_bridges(&state, model);
+    let candidates = resolve_bridges(&state, &model_owned);
     if candidates.is_empty() {
         return Err(error_response("no_bridge", "No bridge available", StatusCode::SERVICE_UNAVAILABLE));
     }
 
-    let ctx = BridgeContext::new(request_id.clone(), model.to_string());
+    let ctx = BridgeContext::new(request_id.clone(), model_owned.clone());
 
     // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
     let mut result_opt = None;
@@ -1556,6 +1721,9 @@ pub async fn handle_completions(
                     used_channel_id = cid;
                     break;
                 }
+                if let Some(cid) = &cid {
+                    state.channel_store.mark_cooldown(cid, e.to_string(), 60);
+                }
                 tracing::warn!("completions failover: channel {cid:?} failed: {e}, trying next channel");
                 last_error = Some(e);
             }
@@ -1576,7 +1744,7 @@ pub async fn handle_completions(
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = used_channel_id.clone();
-            log.model = model.to_string();
+            log.model = model_owned.clone();
             log.latency_ms = latency_ms;
             log.status_code = status_code.as_u16();
             log.error_msg = Some(e.to_string());
@@ -1584,12 +1752,18 @@ pub async fn handle_completions(
             log.request_id = Some(request_id);
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
+            crate::metrics::global().record_request(
+                &model_owned,
+                used_channel_id.as_deref().unwrap_or("unknown"),
+                "error",
+                latency_ms,
+            );
             // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
             if status_code.as_u16() >= 500 {
                 state
                     .notify_service
                     .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
-                        channel_name: model.to_string(),
+                        channel_name: model_owned.clone(),
                         error: e.to_string(),
                     });
             }
@@ -1616,7 +1790,7 @@ pub async fn handle_completions(
             let cost = charge_usage(
                 &state,
                 &api_key,
-                model,
+                &model_owned,
                 &billing_group,
                 prompt_tokens,
                 completion_tokens,
@@ -1631,7 +1805,7 @@ pub async fn handle_completions(
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = used_channel_id.clone();
-            log.model = model.to_string();
+            log.model = model_owned.clone();
             log.input_tokens = prompt_tokens;
             log.output_tokens = completion_tokens;
             log.cost = cost;
@@ -1640,6 +1814,16 @@ pub async fn handle_completions(
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
             state.log_store.record_request(log);
+
+            // Prometheus 指标
+            crate::metrics::global().record_request(
+                &model_owned,
+                used_channel_id.as_deref().unwrap_or("unknown"),
+                "ok",
+                latency_ms,
+            );
+            crate::metrics::global().record_tokens(&model_owned, "prompt", prompt_tokens);
+            crate::metrics::global().record_tokens(&model_owned, "completion", completion_tokens);
 
             return Ok(Json(result));
     }
@@ -1663,11 +1847,12 @@ pub async fn handle_embeddings(
         .ok_or_else(|| error_response("invalid_model", "Missing model field", StatusCode::BAD_REQUEST))?;
 
     let api_key = verify_api_key_full(&state, &headers, model)?;
+    let model_owned = model.to_string();
 
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
-        .check(&api_key.id, model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .check(&api_key.id, &model_owned, api_key.user_id.as_deref(), client_ip.as_deref())
         .await
     {
         Ok(b) => b,
@@ -1682,13 +1867,13 @@ pub async fn handle_embeddings(
     };
 
     // 校验用户分组模型权限并解析计费分组（问题 5）
-    let billing_group = check_group_model_permission(&state, &api_key, model)?;
+    let billing_group = check_group_model_permission(&state, &api_key, &model_owned)?;
 
     // B09：前置校验模型定价——未配置价格的模型拒绝请求，避免免费用量
-    ensure_model_priced(&state, model)?;
+    ensure_model_priced(&state, &model_owned)?;
 
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
-    let candidates = resolve_bridges(&state, model);
+    let candidates = resolve_bridges(&state, &model_owned);
     if candidates.is_empty() {
         return Err(error_response("no_bridge", "No bridge available", StatusCode::SERVICE_UNAVAILABLE));
     }
@@ -1710,10 +1895,10 @@ pub async fn handle_embeddings(
     };
 
     let embed_req = EmbeddingRequest {
-        model: model.to_string(),
+        model: model_owned.clone(),
         input: texts,
     };
-    let ctx = BridgeContext::new(request_id.clone(), model.to_string());
+    let ctx = BridgeContext::new(request_id.clone(), model_owned.clone());
 
     // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
     let mut response_opt = None;
@@ -1737,6 +1922,9 @@ pub async fn handle_embeddings(
                     used_channel_id = cid;
                     break;
                 }
+                if let Some(cid) = &cid {
+                    state.channel_store.mark_cooldown(cid, e.to_string(), 60);
+                }
                 tracing::warn!("embeddings failover: channel {cid:?} failed: {e}, trying next channel");
                 last_error = Some(e);
             }
@@ -1757,7 +1945,7 @@ pub async fn handle_embeddings(
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = used_channel_id.clone();
-            log.model = model.to_string();
+            log.model = model_owned.clone();
             log.latency_ms = latency_ms;
             log.status_code = status_code.as_u16();
             log.error_msg = Some(e.to_string());
@@ -1765,12 +1953,18 @@ pub async fn handle_embeddings(
             log.request_id = Some(request_id);
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
+            crate::metrics::global().record_request(
+                &model_owned,
+                used_channel_id.as_deref().unwrap_or("unknown"),
+                "error",
+                latency_ms,
+            );
             // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
             if status_code.as_u16() >= 500 {
                 state
                     .notify_service
                     .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
-                        channel_name: model.to_string(),
+                        channel_name: model_owned.clone(),
                         error: e.to_string(),
                     });
             }
@@ -1797,7 +1991,7 @@ pub async fn handle_embeddings(
                 .accumulate(prompt_tokens, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（问题 2/5/6）
-            let cost = charge_usage(&state, &api_key, model, &billing_group, prompt_tokens, 0);
+            let cost = charge_usage(&state, &api_key, &model_owned, &billing_group, prompt_tokens, 0);
 
             // 事后限流记账（TPM）
             rate_bundle.commit_tokens(prompt_tokens).await;
@@ -1807,7 +2001,7 @@ pub async fn handle_embeddings(
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = used_channel_id.clone();
-            log.model = model.to_string();
+            log.model = model_owned.clone();
             log.input_tokens = prompt_tokens;
             log.output_tokens = 0;
             log.cost = cost;
@@ -1817,10 +2011,19 @@ pub async fn handle_embeddings(
             log.request_id = Some(request_id);
             state.log_store.record_request(log);
 
+            // Prometheus 指标
+            crate::metrics::global().record_request(
+                &model_owned,
+                used_channel_id.as_deref().unwrap_or("unknown"),
+                "ok",
+                latency_ms,
+            );
+            crate::metrics::global().record_tokens(&model_owned, "prompt", prompt_tokens);
+
             return Ok(Json(serde_json::json!({
                 "object": "list",
                 "data": data,
-                "model": model,
+                "model": &model_owned,
                 "usage": {
                     "prompt_tokens": response.usage.prompt_tokens,
                     "total_tokens": response.usage.total_tokens,
@@ -1847,11 +2050,12 @@ pub async fn handle_images_generations(
         .ok_or_else(|| error_response("invalid_model", "Missing model field", StatusCode::BAD_REQUEST))?;
 
     let api_key = verify_api_key_full(&state, &headers, model)?;
+    let model_owned = model.to_string();
 
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
-        .check(&api_key.id, model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .check(&api_key.id, &model_owned, api_key.user_id.as_deref(), client_ip.as_deref())
         .await
     {
         Ok(b) => b,
@@ -1866,18 +2070,18 @@ pub async fn handle_images_generations(
     };
 
     // 校验用户分组模型权限并解析计费分组（问题 5）
-    let billing_group = check_group_model_permission(&state, &api_key, model)?;
+    let billing_group = check_group_model_permission(&state, &api_key, &model_owned)?;
 
     // B09：前置校验模型定价——未配置价格的模型拒绝请求，避免免费用量
-    ensure_model_priced(&state, model)?;
+    ensure_model_priced(&state, &model_owned)?;
 
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
-    let candidates = resolve_bridges(&state, model);
+    let candidates = resolve_bridges(&state, &model_owned);
     if candidates.is_empty() {
         return Err(error_response("no_bridge", "No bridge available", StatusCode::SERVICE_UNAVAILABLE));
     }
 
-    let ctx = BridgeContext::new(request_id.clone(), model.to_string());
+    let ctx = BridgeContext::new(request_id.clone(), model_owned.clone());
 
     // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
     let mut result_opt = None;
@@ -1901,6 +2105,9 @@ pub async fn handle_images_generations(
                     used_channel_id = cid;
                     break;
                 }
+                if let Some(cid) = &cid {
+                    state.channel_store.mark_cooldown(cid, e.to_string(), 60);
+                }
                 tracing::warn!("images failover: channel {cid:?} failed: {e}, trying next channel");
                 last_error = Some(e);
             }
@@ -1921,7 +2128,7 @@ pub async fn handle_images_generations(
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = used_channel_id.clone();
-            log.model = model.to_string();
+            log.model = model_owned.clone();
             log.latency_ms = latency_ms;
             log.status_code = status_code.as_u16();
             log.error_msg = Some(e.to_string());
@@ -1929,12 +2136,18 @@ pub async fn handle_images_generations(
             log.request_id = Some(request_id);
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
+            crate::metrics::global().record_request(
+                &model_owned,
+                used_channel_id.as_deref().unwrap_or("unknown"),
+                "error",
+                latency_ms,
+            );
             // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
             if status_code.as_u16() >= 500 {
                 state
                     .notify_service
                     .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
-                        channel_name: model.to_string(),
+                        channel_name: model_owned.clone(),
                         error: e.to_string(),
                     });
             }
@@ -1948,7 +2161,7 @@ pub async fn handle_images_generations(
                 .accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
-            let cost = charge_usage(&state, &api_key, model, &billing_group, 0, 0);
+            let cost = charge_usage(&state, &api_key, &model_owned, &billing_group, 0, 0);
 
             // 事后限流记账（按次计价，记 1 个请求 token 占位以维持 RPM 一致性）
             rate_bundle.commit_tokens(0).await;
@@ -1958,7 +2171,7 @@ pub async fn handle_images_generations(
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = used_channel_id.clone();
-            log.model = model.to_string();
+            log.model = model_owned.clone();
             log.input_tokens = 0;
             log.output_tokens = 0;
             log.cost = cost;
@@ -1967,6 +2180,14 @@ pub async fn handle_images_generations(
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
             state.log_store.record_request(log);
+
+            // Prometheus 指标（图片按次计价，tokens 记 0）
+            crate::metrics::global().record_request(
+                &model_owned,
+                used_channel_id.as_deref().unwrap_or("unknown"),
+                "ok",
+                latency_ms,
+            );
 
             return Ok(Json(result));
     }
@@ -2042,7 +2263,7 @@ pub async fn handle_audio_transcriptions(
 
     match state
         .api_client
-        .run_audio(&model, audio_data.to_vec(), &mime_type)
+        .run_audio(&model, audio_data.to_vec(), &mime_type, "/v1/audio/transcriptions")
         .await
     {
         Ok(result) => {
@@ -2071,6 +2292,9 @@ pub async fn handle_audio_transcriptions(
             log.request_id = Some(request_id);
             state.log_store.record_request(log);
 
+            // Prometheus 指标
+            crate::metrics::global().record_request(&model, "unknown", "ok", latency_ms);
+
             Ok(Json(serde_json::json!({ "text": text })))
         }
         Err(e) => {
@@ -2086,6 +2310,7 @@ pub async fn handle_audio_transcriptions(
             log.request_id = Some(request_id);
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
+            crate::metrics::global().record_request(&model, "unknown", "error", latency_ms);
             // 渠道故障通知
             state
                 .notify_service
@@ -2172,7 +2397,7 @@ pub async fn handle_audio_translations(
 
     match state
         .api_client
-        .run_audio(&model, audio_data.to_vec(), &mime_type)
+        .run_audio(&model, audio_data.to_vec(), &mime_type, "/v1/audio/transcriptions")
         .await
     {
         Ok(result) => {
@@ -2201,6 +2426,9 @@ pub async fn handle_audio_translations(
             log.request_id = Some(request_id);
             state.log_store.record_request(log);
 
+            // Prometheus 指标
+            crate::metrics::global().record_request(&model, "unknown", "ok", latency_ms);
+
             Ok(Json(serde_json::json!({ "text": text })))
         }
         Err(e) => {
@@ -2216,6 +2444,7 @@ pub async fn handle_audio_translations(
             log.request_id = Some(request_id);
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
+            crate::metrics::global().record_request(&model, "unknown", "error", latency_ms);
             // 渠道故障通知
             state
                 .notify_service
@@ -2251,11 +2480,12 @@ pub async fn handle_audio_speech(
 
     // 完整鉴权（问题 1）
     let api_key = verify_api_key_full(&state, &headers, model)?;
+    let model_owned = model.to_string();
 
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
-        .check(&api_key.id, model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .check(&api_key.id, &model_owned, api_key.user_id.as_deref(), client_ip.as_deref())
         .await
     {
         Ok(b) => b,
@@ -2270,10 +2500,10 @@ pub async fn handle_audio_speech(
     };
 
     // 校验用户分组模型权限并解析计费分组（问题 5）
-    let billing_group = check_group_model_permission(&state, &api_key, model)?;
+    let billing_group = check_group_model_permission(&state, &api_key, &model_owned)?;
 
     // B09：前置校验模型定价——未配置价格的模型拒绝请求，避免免费用量
-    ensure_model_priced(&state, model)?;
+    ensure_model_priced(&state, &model_owned)?;
 
     let input = body
         .get("input")
@@ -2286,21 +2516,21 @@ pub async fn handle_audio_speech(
         .unwrap_or("default");
 
     let cf_body = serde_json::json!({
+        "model": model,
         "input": input,
         "voice": voice,
     });
 
-    match state.api_client.run_text(model, cf_body).await {
-        Ok(result) => {
+    match state.api_client.run_audio_speech(&model_owned, cf_body).await {
+        Ok(audio) => {
             let latency_ms = request_start.elapsed().as_millis() as u64;
-            let audio_data = result.get("audio").and_then(|a| a.as_str()).unwrap_or("");
 
             state
                 .usage_tracker
                 .accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
-            let cost = charge_usage(&state, &api_key, model, &billing_group, 0, 0);
+            let cost = charge_usage(&state, &api_key, &model_owned, &billing_group, 0, 0);
 
             // 事后限流记账（按次计价，记 0 token）
             rate_bundle.commit_tokens(0).await;
@@ -2309,7 +2539,7 @@ pub async fn handle_audio_speech(
             let mut log = crate::log::RequestLog::new();
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
-            log.model = model.to_string();
+            log.model = model_owned.clone();
             log.cost = cost;
             log.latency_ms = latency_ms;
             log.status_code = 200;
@@ -2317,9 +2547,12 @@ pub async fn handle_audio_speech(
             log.request_id = Some(request_id);
             state.log_store.record_request(log);
 
+            // Prometheus 指标
+            crate::metrics::global().record_request(&model_owned, "unknown", "ok", latency_ms);
+
             Ok(Json(serde_json::json!({
-                "audio_base64": audio_data,
-                "content_type": "audio/wav"
+                "audio_base64": BASE64.encode(&audio.bytes),
+                "content_type": audio.content_type
             })))
         }
         Err(e) => {
@@ -2327,7 +2560,7 @@ pub async fn handle_audio_speech(
             let mut log = crate::log::RequestLog::new();
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
-            log.model = model.to_string();
+            log.model = model_owned.clone();
             log.latency_ms = latency_ms;
             log.status_code = 502;
             log.error_msg = Some(format!("Text-to-speech error: {e}"));
@@ -2335,11 +2568,12 @@ pub async fn handle_audio_speech(
             log.request_id = Some(request_id);
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
+            crate::metrics::global().record_request(&model_owned, "unknown", "error", latency_ms);
             // 渠道故障通知
             state
                 .notify_service
                 .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
-                    channel_name: model.to_string(),
+                    channel_name: model_owned.clone(),
                     error: format!("Text-to-speech error: {e}"),
                 });
             Err(error_response(
