@@ -12,6 +12,7 @@
 //! - `aigx_requests_inflight` 当前在途请求数
 //! - `aigx_health_level{model}` 模型健康等级（0/1/2）
 //! - `aigx_channels{status}` 渠道数量（enabled/disabled）
+//! - `aigx_cost_usd_total` / `aigx_cost_cny_total` 累计请求成本（美元/人民币）
 //!
 //! 全部线程安全、无锁读取。`Metrics::record_request` 由请求处理路径在
 //! 收尾处调用（见 main.rs 挂载的 tower middleware）。
@@ -44,6 +45,8 @@ pub struct Metrics {
     inflight: AtomicI64,
     channels_enabled: AtomicU64,
     channels_disabled: AtomicU64,
+    cost_usd: AtomicU64,
+    cost_cny: AtomicU64,
 }
 
 impl Metrics {
@@ -57,6 +60,8 @@ impl Metrics {
             inflight: AtomicI64::new(0),
             channels_enabled: AtomicU64::new(0),
             channels_disabled: AtomicU64::new(0),
+            cost_usd: AtomicU64::new(0),
+            cost_cny: AtomicU64::new(0),
         }
     }
 
@@ -91,6 +96,16 @@ impl Metrics {
     pub fn record_tokens(&self, model: &str, ty: &str, tokens: u64) {
         let mut map = self.tokens.lock().unwrap();
         map.entry((model.to_string(), ty.to_string())).or_default().fetch_add(tokens, Ordering::Relaxed);
+    }
+
+    /// 记录一次请求成本（微单位）。`currency` 取 `"usd"` / `"cny"`。
+    /// 成本在微单位累加（1e-6 美元 / 1e-6 人民币），`render` 时按 1e-6 换算展示。
+    pub fn record_cost(&self, currency: &str, cost_micro: u64) {
+        if currency == "cny" {
+            self.cost_cny.fetch_add(cost_micro, Ordering::Relaxed);
+        } else {
+            self.cost_usd.fetch_add(cost_micro, Ordering::Relaxed);
+        }
     }
 
     /// 渠道数量快照（调度层在每次渠道增删后刷新）。
@@ -176,6 +191,22 @@ impl Metrics {
             "# TYPE aigx_channels_disabled gauge\naigx_channels_disabled {}\n",
             self.channels_disabled.load(Ordering::Relaxed)
         ));
+        let usd = self.cost_usd.load(Ordering::Relaxed) as f64 / 1e6;
+        let cny = self.cost_cny.load(Ordering::Relaxed) as f64 / 1e6;
+        out.push_str(&format!(
+            "# HELP aigx_cost_usd_total Accumulated request cost in USD.\n"
+        ));
+        out.push_str(&format!(
+            "# TYPE aigx_cost_usd_total counter\naigx_cost_usd_total {}\n",
+            usd
+        ));
+        out.push_str(&format!(
+            "# HELP aigx_cost_cny_total Accumulated request cost in CNY.\n"
+        ));
+        out.push_str(&format!(
+            "# TYPE aigx_cost_cny_total counter\naigx_cost_cny_total {}\n",
+            cny
+        ));
         out
     }
 }
@@ -200,6 +231,7 @@ mod tests {
         m.request_started();
         m.request_finished();
         m.set_channels(3, 1);
+        m.record_cost("usd", 500_000);
 
         let out = m.render();
         assert!(out.contains("aigx_requests_total{model=\"gpt-4\",channel=\"ch1\",status=\"ok\"} 2"));
@@ -210,6 +242,8 @@ mod tests {
         assert!(out.contains("aigx_requests_inflight 0"));
         assert!(out.contains("aigx_channels_enabled 3"));
         assert!(out.contains("aigx_channels_disabled 1"));
+        assert!(out.contains("aigx_cost_usd_total 0.5"));
+        assert!(out.contains("aigx_cost_cny_total 0"));
     }
 
     #[test]

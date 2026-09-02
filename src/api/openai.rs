@@ -347,7 +347,13 @@ pub fn charge_usage(
             0
         }
     };
+    // Prometheus 成本指标：pricing 以 USD 计价，cost 即向上取整后的美元配额
+    // （单位 1 美元），统一折算为微美元累加，供 /metrics 展示 aigx_cost_usd_total。
     if cost > 0 {
+        crate::metrics::global().record_cost(
+            "usd",
+            (cost as u64).saturating_mul(1_000_000),
+        );
         if let Some(uid) = &api_key.user_id {
             // 用户余额不足时跳过 key 扣费（问题 6）
             let charged = state.user_store.try_charge(uid, cost);
