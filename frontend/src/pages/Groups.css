@@ -10,7 +10,7 @@
 .groups-content {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   animation: fadeIn 0.3s ease;
 }
 
@@ -38,9 +38,9 @@
 /* 倍率徽章 — 高倍率(>1)用警告色，低倍率用成功色 */
 .ratio-badge {
   display: inline-block;
-  padding: 2px 10px;
+  padding: 2px 8px;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   font-family: 'Outfit', sans-serif;
   font-variant-numeric: tabular-nums;

@@ -260,7 +260,7 @@ export default function Dashboard() {
             <div className="stat-title">{t('实时 RPS')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#34d399' }}>⚡</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '28px' }}>{fmtLimit(rt.qps ?? rt.rps ?? 0)}</div>
+          <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(rt.qps ?? rt.rps ?? 0)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>{t('每秒请求数')}</div>
         </div>
         <div className="stat-card">
@@ -268,7 +268,7 @@ export default function Dashboard() {
             <div className="stat-title">{t('活跃用户')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8' }}>👥</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '28px' }}>{fmtLimit(ur.length)}</div>
+          <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(ur.length)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟')}</div>
         </div>
         <div className="stat-card">
@@ -276,7 +276,7 @@ export default function Dashboard() {
             <div className="stat-title">{t('活跃渠道')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc' }}>🔗</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '28px' }}>{fmtLimit(ch.length)}</div>
+          <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(ch.length)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>{t('在线渠道数')}</div>
         </div>
         <div className="stat-card">
@@ -284,7 +284,7 @@ export default function Dashboard() {
             <div className="stat-title">{t('平均延迟')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(251, 146, 60, 0.15)', color: '#fb923c' }}>⏱️</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '28px' }}>{fmtLimit(rt.avg_latency_ms || 0)}ms</div>
+          <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(rt.avg_latency_ms || 0)}ms</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟平均')}</div>
         </div>
       </div>
@@ -296,7 +296,7 @@ export default function Dashboard() {
             <div className="stat-title">{t('今日用量')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8' }}>📊</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '32px' }}>{fmtTok(todayTokens)}</div>
+          <div className="stat-value" style={{ fontSize: '26px' }}>{fmtTok(todayTokens)}</div>
           <div className="stat-desc" style={{ display: 'flex', gap: '16px', fontSize: '11px' }}>
             <span>↑ {t('输入')} {fmtTok(todayInput)}</span>
             <span>↓ {t('输出')} {fmtTok(todayOutput)}</span>
@@ -311,7 +311,7 @@ export default function Dashboard() {
             <div className="stat-title">{t('Token 统计')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc' }}>🔤</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '32px' }}>{fmtTok(u.total_tokens)}</div>
+          <div className="stat-value" style={{ fontSize: '26px' }}>{fmtTok(u.total_tokens)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>
             <div>{t('输入')}: {fmtTok(u.total_input_tokens || u.total_tokens || 0)}</div>
             <div>{t('输出')}: {fmtTok(u.total_output_tokens || 0)}</div>
@@ -323,7 +323,7 @@ export default function Dashboard() {
             <div className="stat-title">{t('本月用量限额')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399' }}>📅</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '32px' }}>{monthlyLimit != null ? fmtLimit(monthlyLimit) : '∞'}</div>
+          <div className="stat-value" style={{ fontSize: '26px' }}>{monthlyLimit != null ? fmtLimit(monthlyLimit) : '∞'}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>
             <span>{t('已用')} {fmtTok(monthlyUsed)}</span>
             {monthlyPct != null && <span style={{ marginLeft: 12 }}>{monthlyPct.toFixed(1)}%</span>}
@@ -342,7 +342,7 @@ export default function Dashboard() {
           ) : trendData.length > 0 ? (
             <TrendChart data={trendData} />
           ) : (
-            <div className="empty-state" style={{ padding: '30px' }}>
+            <div className="empty-state" style={{ padding: '22px' }}>
               <p>{t('暂无趋势数据')}</p>
             </div>
           )}
@@ -359,7 +359,7 @@ export default function Dashboard() {
             {md.length > 0 ? (
               <PieChart data={md} />
             ) : (
-              <div className="empty-state" style={{ padding: '30px' }}>
+              <div className="empty-state" style={{ padding: '22px' }}>
                 <p>{t('暂无模型分布数据')}</p>
               </div>
             )}
@@ -397,7 +397,7 @@ export default function Dashboard() {
                 </table>
               </div>
             ) : (
-              <div className="empty-state" style={{ padding: '30px' }}>
+              <div className="empty-state" style={{ padding: '22px' }}>
                 <p>{t('暂无用户排行数据')}</p>
               </div>
             )}
@@ -443,7 +443,7 @@ export default function Dashboard() {
               })}
             </div>
           ) : (
-            <div className="empty-state" style={{ padding: '30px' }}>
+            <div className="empty-state" style={{ padding: '22px' }}>
               <p>{t('暂无渠道健康数据')}</p>
             </div>
           )}

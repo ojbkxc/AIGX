@@ -43,7 +43,10 @@ impl OpenaiCompatibleBridge {
     ) -> Self {
         Self {
             name: name.into(),
-            base_url: base_url.into(),
+            // 归一化 base_url：去掉末尾斜杠；若不带路径（host 直连，如
+            // `https://cf-ai-gw.pages.dev`）则自动补 `/v1`，与 OpenAI SDK 约定一致，
+            // 避免构造出 `https://host/chat/completions`（上游 404）。
+            base_url: normalize_base_url(base_url.into()),
             api_key: api_key.into(),
             client,
         }
@@ -531,6 +534,61 @@ impl Bridge for OpenaiCompatibleBridge {
 }
 
 // ── 辅助解析函数 ────────────────────────────────────────────────────
+
+/// 归一化 OpenAI 兼容上游 base_url：
+/// - 去除末尾 `/`
+/// - 若 URL 路径为空或仅为 `/`（host 直连，未带 `/v1`），自动补 `/v1`
+///
+/// 覆盖 cf-ai-gw（`https://cf-ai-gw.pages.dev`）这类“host 即 OpenAI 兼容根”
+/// 的上游：其真实端点需 `/v1` 前缀（`/v1/chat/completions`）。
+fn normalize_base_url(base_url: String) -> String {
+    let trimmed = base_url.trim_end_matches('/').to_string();
+    // 判断 host 之后是否已有路径段（如 /v1、/foo）。scheme 后的首段斜杠用于
+    // 分隔 host 与路径；若无额外路径 → 补 /v1，与 OpenAI SDK 约定一致。
+    let has_path_segment = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .map(|rest| rest.contains('/'))
+        .unwrap_or(false);
+    if has_path_segment {
+        trimmed
+    } else {
+        format!("{trimmed}/v1")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_base_url;
+
+    #[test]
+    fn normalizes_host_only_base_url() {
+        assert_eq!(
+            normalize_base_url("https://cf-ai-gw.pages.dev".into()),
+            "https://cf-ai-gw.pages.dev/v1"
+        );
+        assert_eq!(
+            normalize_base_url("https://cf-ai-gw.pages.dev/".into()),
+            "https://cf-ai-gw.pages.dev/v1"
+        );
+    }
+
+    #[test]
+    fn keeps_existing_path_segments() {
+        assert_eq!(
+            normalize_base_url("https://api.deepseek.com/v1".into()),
+            "https://api.deepseek.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url("https://openrouter.ai/api/v1".into()),
+            "https://openrouter.ai/api/v1"
+        );
+        assert_eq!(
+            normalize_base_url("https://api.deepseek.com".into()),
+            "https://api.deepseek.com/v1"
+        );
+    }
+}
 
 fn parse_finish_reason(s: &str) -> FinishReason {
     match s {

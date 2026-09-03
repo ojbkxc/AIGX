@@ -107,35 +107,35 @@ export default function Login() {
       <div style={{
         background: 'var(--card-bg)',
         border: '1px solid var(--border-color)',
-        borderRadius: '20px',
-        padding: '40px',
+        borderRadius: '16px',
+        padding: '32px',
         width: '100%',
-        maxWidth: '400px',
+        maxWidth: '380px',
         boxShadow: 'var(--card-shadow)',
         backdropFilter: 'blur(var(--glass-blur))',
         WebkitBackdropFilter: 'blur(var(--glass-blur))',
         animation: 'fadeInUp 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
       }}>
-        <div style={{ textAlign: 'center', marginBottom: '28px' }}>
+        <div style={{ textAlign: 'center', marginBottom: '22px' }}>
           <div style={{
-            width: '56px',
-            height: '56px',
+            width: '48px',
+            height: '48px',
             background: 'var(--primary-gradient)',
-            borderRadius: '14px',
+            borderRadius: '12px',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontSize: '28px',
-            margin: '0 auto 16px',
+            fontSize: '24px',
+            margin: '0 auto 14px',
             color: 'white',
             boxShadow: '0 4px 14px rgba(168, 85, 247, 0.25)',
           }}>
             ⚡
           </div>
-          <h1 style={{ fontSize: '22px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '4px', fontFamily: "'Outfit', sans-serif" }}>
+          <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '4px', fontFamily: "'Outfit', sans-serif" }}>
             AIGX Gateway
           </h1>
-          <p style={{ fontSize: '14px', color: 'var(--text-muted)' }}>
+          <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
             {t('登录管理面板')}
           </p>
         </div>
@@ -178,7 +178,7 @@ export default function Login() {
             type="submit"
             className="btn btn-primary"
             disabled={loading}
-            style={{ width: '100%', justifyContent: 'center', padding: '12px', marginTop: '8px', fontSize: '15px' }}
+            style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: '8px', fontSize: '13px' }}
           >
             {loading ? t('登录中...') : t('登录')}
           </button>

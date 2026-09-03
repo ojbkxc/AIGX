@@ -10,7 +10,7 @@
 .notify-content {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   animation: fadeIn 0.3s ease;
 }
 
@@ -27,14 +27,14 @@
   align-items: center;
   gap: 10px;
   cursor: pointer;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text-main);
 }
 
 .notify-toggle input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   cursor: pointer;
   accent-color: var(--accent-color);
 }
@@ -47,22 +47,22 @@
 .notify-form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: 14px;
 }
 
 .notify-form-grid-2 {
   display: flex;
-  gap: 16px;
+  gap: 14px;
   flex-wrap: wrap;
 }
 
 /* 提示说明 */
 .notify-note {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-muted);
-  margin-bottom: 16px;
+  margin-bottom: 12px;
   line-height: 1.6;
-  padding: 10px 14px;
+  padding: 8px 12px;
   background: var(--section-item-bg);
   border-radius: 8px;
   border-left: 3px solid var(--warning-color);

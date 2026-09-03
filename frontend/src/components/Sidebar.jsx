@@ -118,7 +118,7 @@ export default function Sidebar() {
       borderRight: '1px solid var(--border-color)',
       display: 'flex',
       flexDirection: 'column',
-      padding: '30px 16px',
+      padding: '20px 12px',
       position: 'fixed',
       top: 0,
       bottom: 0,
@@ -132,21 +132,21 @@ export default function Sidebar() {
       <div style={{
         display: 'flex',
         alignItems: 'center',
-        gap: '12px',
-        marginBottom: '36px',
-        paddingLeft: '8px',
+        gap: '10px',
+        marginBottom: '24px',
+        paddingLeft: '6px',
       }}>
         <div style={{
-          width: '38px',
-          height: '38px',
-          borderRadius: '10px',
+          width: '30px',
+          height: '30px',
+          borderRadius: '8px',
           background: 'var(--primary-gradient)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           fontWeight: 'bold',
           color: 'white',
-          fontSize: '18px',
+          fontSize: '14px',
           fontFamily: "'Outfit', sans-serif",
           boxShadow: '0 4px 12px rgba(99, 102, 241, 0.2)',
         }}>
@@ -154,7 +154,7 @@ export default function Sidebar() {
         </div>
         <div>
           <div style={{
-            fontSize: '18px',
+            fontSize: '14px',
             fontWeight: 700,
             fontFamily: "'Outfit', sans-serif",
             letterSpacing: '-0.5px',
@@ -164,7 +164,7 @@ export default function Sidebar() {
           }}>
             AIGX
           </div>
-          <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 500 }}>
+          <div style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 500 }}>
             {t('AI 中转网关')}
           </div>
         </div>
@@ -174,7 +174,7 @@ export default function Sidebar() {
       <nav style={{
         display: 'flex',
         flexDirection: 'column',
-        gap: '6px',
+        gap: '4px',
         flex: 1,
       }}>
         {navGroups.map((group) => {
@@ -189,11 +189,11 @@ export default function Sidebar() {
                 style={({ isActive }) => ({
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '12px',
-                  padding: '12px 14px',
-                  borderRadius: '10px',
+                  gap: '8px',
+                  padding: '7px 10px',
+                  borderRadius: '8px',
                   cursor: 'pointer',
-                  fontSize: '14px',
+                  fontSize: '12.5px',
                   fontWeight: 500,
                   color: isActive ? 'white' : 'var(--text-muted)',
                   background: isActive ? 'var(--primary-gradient)' : 'transparent',
@@ -206,7 +206,7 @@ export default function Sidebar() {
                   overflow: 'hidden',
                 })}
               >
-                <span style={{ fontSize: '16px', width: '20px', textAlign: 'center', flexShrink: 0 }}>
+                <span style={{ fontSize: '13px', width: '18px', textAlign: 'center', flexShrink: 0 }}>
                   {item.icon}
                 </span>
                 <span>{t(item.labelKey)}</span>
@@ -223,11 +223,11 @@ export default function Sidebar() {
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '10px',
-                  padding: '8px 12px',
-                  borderRadius: '8px',
+                  gap: '8px',
+                  padding: '6px 8px',
+                  borderRadius: '7px',
                   cursor: 'pointer',
-                  fontSize: '12px',
+                  fontSize: '11px',
                   fontWeight: 600,
                   letterSpacing: '0.4px',
                   textTransform: 'uppercase',
@@ -239,12 +239,12 @@ export default function Sidebar() {
                   transition: 'all 0.2s ease',
                 }}
               >
-                <span style={{ fontSize: '14px', width: '20px', textAlign: 'center', flexShrink: 0 }}>
+                <span style={{ fontSize: '12px', width: '18px', textAlign: 'center', flexShrink: 0 }}>
                   {group.icon}
                 </span>
                 <span style={{ flex: 1 }}>{t(group.labelKey)}</span>
                 <span style={{
-                  fontSize: '10px',
+                  fontSize: '9px',
                   transition: 'transform 0.25s ease',
                   transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
                   opacity: 0.6,
@@ -259,11 +259,11 @@ export default function Sidebar() {
                   style={({ isActive }) => ({
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '12px',
-                    padding: '10px 14px 10px 34px',
-                    borderRadius: '10px',
+                    gap: '8px',
+                    padding: '6px 10px 6px 26px',
+                    borderRadius: '8px',
                     cursor: 'pointer',
-                    fontSize: '14px',
+                    fontSize: '12.5px',
                     fontWeight: 500,
                     color: isActive ? 'white' : 'var(--text-muted)',
                     background: isActive ? 'var(--primary-gradient)' : 'transparent',
@@ -276,7 +276,7 @@ export default function Sidebar() {
                     overflow: 'hidden',
                   })}
                 >
-                  <span style={{ fontSize: '16px', width: '20px', textAlign: 'center', flexShrink: 0 }}>
+                  <span style={{ fontSize: '13px', width: '18px', textAlign: 'center', flexShrink: 0 }}>
                     {item.icon}
                   </span>
                   <span>{t(item.labelKey)}</span>
@@ -291,43 +291,43 @@ export default function Sidebar() {
       <div style={{
         display: 'flex',
         flexDirection: 'column',
-        gap: '12px',
+        gap: '10px',
         borderTop: '1px solid var(--border-color)',
-        paddingTop: '16px',
+        paddingTop: '12px',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '0 6px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '0 4px' }}>
           <div style={{
-            width: '28px',
-            height: '28px',
+            width: '24px',
+            height: '24px',
             borderRadius: '50%',
             background: 'var(--primary-gradient)',
             color: 'white',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontSize: '12px',
+            fontSize: '11px',
             fontWeight: 600,
             flexShrink: 0,
           }}>
             {email.charAt(0).toUpperCase()}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <span style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {email}
             </span>
-            {username && <span style={{ fontSize: '11px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {username && <span style={{ fontSize: '10px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               @{username}
             </span>}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '6px' }}>
+        <div style={{ display: 'flex', gap: '5px' }}>
           <button
             className="btn btn-outline btn-sm"
             onClick={toggleTheme}
             style={{ flex: 1 }}
             title={t('切换主题')}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" style={{ width: '14px', height: '14px' }}>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" style={{ width: '12px', height: '12px' }}>
               <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
             </svg>
             {t('主题')}
@@ -338,7 +338,7 @@ export default function Sidebar() {
             style={{ flex: 1 }}
             title={t('语言切换')}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" style={{ width: '14px', height: '14px' }}>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" style={{ width: '12px', height: '12px' }}>
               <circle cx="12" cy="12" r="10" />
               <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
             </svg>

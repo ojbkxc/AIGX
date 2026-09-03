@@ -325,8 +325,9 @@ export default function Channels() {
               ) : (
                 <div className="form-group">
                   <label>Base URL</label>
-                  <input className="form-input" placeholder="https://api.deepseek.com" value={form.base_url}
+                  <input className="form-input" placeholder="https://cf-ai-gw.pages.dev 或 https://api.deepseek.com/v1" value={form.base_url}
                     onChange={(e) => setForm({ ...form, base_url: e.target.value })} />
+                  <div className="form-hint">{t('未带 /v1 时会自动补齐；例如 cf-ai-gw 填 https://cf-ai-gw.pages.dev 即可')}</div>
                 </div>
               )}
               <div className="form-group">

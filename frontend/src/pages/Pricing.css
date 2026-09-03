@@ -10,7 +10,7 @@
 .pricing-content {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   animation: fadeIn 0.3s ease;
 }
 
@@ -29,9 +29,9 @@
 }
 
 .sub-tab {
-  padding: 8px 18px;
-  border-radius: 8px;
-  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: 7px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   border: none;
@@ -78,24 +78,24 @@
   gap: 8px;
   flex-wrap: wrap;
   align-items: flex-end;
-  padding: 16px;
+  padding: 12px;
   background: var(--section-item-bg);
-  border-radius: 12px;
+  border-radius: 10px;
   border: 1px solid var(--border-color);
 }
 
 /* 倍率配置 */
 .ratio-hint {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-muted);
-  margin-bottom: 16px;
+  margin-bottom: 14px;
   line-height: 1.5;
 }
 
 .ratio-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: 14px;
 }
 
 .ratio-textarea {

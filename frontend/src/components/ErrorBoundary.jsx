@@ -55,8 +55,8 @@ class ErrorBoundary extends React.Component {
           style={{
             width: '100%',
             maxWidth: '520px',
-            padding: '40px 32px',
-            borderRadius: '20px',
+            padding: '28px 24px',
+            borderRadius: '16px',
             background: 'var(--card-bg, rgba(30,41,59,0.45))',
             border: '1px solid var(--border-color, rgba(255,255,255,0.08))',
             backdropFilter: 'blur(var(--glass-blur, 20px))',
@@ -67,15 +67,15 @@ class ErrorBoundary extends React.Component {
         >
           <div
             style={{
-              width: '64px',
-              height: '64px',
-              margin: '0 auto 20px',
-              borderRadius: '16px',
+              width: '56px',
+              height: '56px',
+              margin: '0 auto 16px',
+              borderRadius: '14px',
               background: 'var(--primary-gradient, linear-gradient(135deg,#6366f1,#a855f7,#ec4899))',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              fontSize: '32px',
+              fontSize: '28px',
               color: 'white',
               boxShadow: '0 8px 24px rgba(168,85,247,0.35)',
             }}
@@ -86,7 +86,7 @@ class ErrorBoundary extends React.Component {
 
           <h1
             style={{
-              fontSize: '24px',
+              fontSize: '20px',
               fontWeight: 700,
               margin: '0 0 8px',
               letterSpacing: '-0.5px',
@@ -96,9 +96,9 @@ class ErrorBoundary extends React.Component {
           </h1>
           <p
             style={{
-              fontSize: '14px',
+              fontSize: '13px',
               color: 'var(--text-muted, #94a3b8)',
-              margin: '0 0 20px',
+              margin: '0 0 16px',
               lineHeight: 1.6,
             }}
           >
