@@ -122,54 +122,6 @@ fn decode_message(message: &str, events: &mut Vec<SseEvent>) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn single_data_event() {
-        let mut decoder = SseDecoder::new();
-        let events = decoder.feed(b"data: hello\n\n");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0], SseEvent::Data("hello".into()));
-    }
-
-    #[test]
-    fn done_event() {
-        let mut decoder = SseDecoder::new();
-        let events = decoder.feed(b"data: [DONE]\n\n");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0], SseEvent::Done);
-    }
-
-    #[test]
-    fn multiple_events_in_one_feed() {
-        let mut decoder = SseDecoder::new();
-        let events = decoder.feed(b"data: first\n\ndata: second\n\n");
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0], SseEvent::Data("first".into()));
-        assert_eq!(events[1], SseEvent::Data("second".into()));
-    }
-
-    #[test]
-    fn partial_message_across_feeds() {
-        let mut decoder = SseDecoder::new();
-        let events = decoder.feed(b"data: hel");
-        assert!(events.is_empty());
-        let events = decoder.feed(b"lo\n\n");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0], SseEvent::Data("hello".into()));
-    }
-
-    #[test]
-    fn data_with_done() {
-        let mut decoder = SseDecoder::new();
-        let events = decoder.feed(b"data: progress\n\ndata: [DONE]\n\n");
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0], SseEvent::Data("progress".into()));
-        assert_eq!(events[1], SseEvent::Done);
-    }
-}
 // ????????? SSE Keepalive Stream ?????????
 
 // Wrapper stream that injects ": keepalive\n\n" SSE comment events
@@ -234,5 +186,54 @@ impl<S: futures::Stream<Item = Result<bytes::Bytes, E>>, E: std::fmt::Debug>
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_data_event() {
+        let mut decoder = SseDecoder::new();
+        let events = decoder.feed(b"data: hello\n\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], SseEvent::Data("hello".into()));
+    }
+
+    #[test]
+    fn done_event() {
+        let mut decoder = SseDecoder::new();
+        let events = decoder.feed(b"data: [DONE]\n\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], SseEvent::Done);
+    }
+
+    #[test]
+    fn multiple_events_in_one_feed() {
+        let mut decoder = SseDecoder::new();
+        let events = decoder.feed(b"data: first\n\ndata: second\n\n");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], SseEvent::Data("first".into()));
+        assert_eq!(events[1], SseEvent::Data("second".into()));
+    }
+
+    #[test]
+    fn partial_message_across_feeds() {
+        let mut decoder = SseDecoder::new();
+        let events = decoder.feed(b"data: hel");
+        assert!(events.is_empty());
+        let events = decoder.feed(b"lo\n\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], SseEvent::Data("hello".into()));
+    }
+
+    #[test]
+    fn data_with_done() {
+        let mut decoder = SseDecoder::new();
+        let events = decoder.feed(b"data: progress\n\ndata: [DONE]\n\n");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], SseEvent::Data("progress".into()));
+        assert_eq!(events[1], SseEvent::Done);
     }
 }

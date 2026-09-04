@@ -2885,7 +2885,7 @@ pub async fn handle_user_ranking(
         .into_iter()
         .map(|(uid, (count, cost, tokens))| (uid, count, cost, tokens))
         .collect();
-    ranking.sort_by(|a, b| b.2.cmp(&a.2));
+    ranking.sort_by_key(|b| std::cmp::Reverse(b.2));
     let data: Vec<Value> = ranking
         .into_iter()
         .take(20)
@@ -2933,11 +2933,7 @@ pub async fn handle_channel_health(
             } else {
                 0.0
             };
-            let avg_latency = if total > 0 {
-                total_latency / total
-            } else {
-                0
-            };
+            let avg_latency = total_latency.checked_div(total).unwrap_or(0);
             serde_json::json!({
                 "id": ch.id,
                 "name": ch.name,
@@ -2964,11 +2960,8 @@ pub async fn handle_realtime(
     let recent: Vec<_> = logs.into_iter().filter(|l| l.created_at >= start).collect();
     let total = recent.len() as u64;
     let errors = recent.iter().filter(|l| l.status_code >= 400).count() as u64;
-    let avg_latency = if total > 0 {
-        recent.iter().map(|l| l.latency_ms).sum::<u64>() / total
-    } else {
-        0
-    };
+    let total_latency: u64 = recent.iter().map(|l| l.latency_ms).sum();
+    let avg_latency = total_latency.checked_div(total).unwrap_or(0);
     let qps = total as f64 / window_secs as f64;
     let error_rate = if total > 0 {
         (errors as f64 / total as f64) * 100.0

@@ -204,7 +204,7 @@ impl RedemptionStore {
     /// 列出所有兑换码（按创建时间倒序）
     pub fn list(&self) -> Vec<Redemption> {
         let mut all: Vec<Redemption> = self.by_id.read().values().cloned().collect();
-        all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        all.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         all
     }
 

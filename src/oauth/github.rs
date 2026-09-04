@@ -23,6 +23,7 @@ impl GithubOauthConfig {
 struct GithubTokenResponse {
     access_token: String,
     #[serde(default)]
+    #[allow(dead_code)] // 反序列化容忍字段：GitHub 返回但当前登录流程不消费
     token_type: String,
 }
 

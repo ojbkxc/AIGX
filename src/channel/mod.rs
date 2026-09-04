@@ -28,8 +28,10 @@ use crate::storage::FileStore;
 /// 新增 OpenAI 兼容与 Anthropic 兼容类型，支持混用上游。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ChannelType {
     /// Cloudflare Workers AI（专用桥接）
+    #[default]
     Cloudflare,
     /// OpenAI 兼容协议（DeepSeek/OpenRouter/Together 等）
     OpenaiCompatible,
@@ -37,11 +39,6 @@ pub enum ChannelType {
     Anthropic,
 }
 
-impl Default for ChannelType {
-    fn default() -> Self {
-        Self::Cloudflare
-    }
-}
 
 impl ChannelType {
     /// 从字符串解析渠道类型
@@ -294,7 +291,7 @@ impl ChannelStore {
             .collect();
 
         // 按 priority 降序分组，组内按 weight 加权随机
-        candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.priority));
         let mut result = Vec::with_capacity(candidates.len());
         let mut i = 0;
         let mut rng = rand::thread_rng();

@@ -227,7 +227,7 @@ impl HealthTracker {
         let entry = self
             .entries
             .entry(model.to_string())
-            .or_insert_with(Entry::default);
+            .or_default();
         entry.on_failure();
     }
 

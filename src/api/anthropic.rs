@@ -8,7 +8,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{
-        sse::{Event, KeepAlive, Sse},
+        sse::{Event, Sse},
         IntoResponse, Response,
     },
     Json,
@@ -747,7 +747,7 @@ pub async fn handle_messages(
                     inner: Box::pin(combined),
                     _guard: super::openai::StreamUsageGuard::new(billing),
                 };
-                return Sse::new(guarded).keep_alive(axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15))).into_response();
+                Sse::new(guarded).keep_alive(axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15))).into_response()
         }
     } else {
         // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
@@ -911,7 +911,7 @@ pub async fn handle_messages(
                         "output_tokens": response.usage.completion_tokens,
                     }
                 });
-                return Json(anthropic_resp).into_response();
+                Json(anthropic_resp).into_response()
         }
     }
 }

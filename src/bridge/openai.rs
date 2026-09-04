@@ -10,7 +10,6 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::Value;
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::{
     Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream, ChatFormat, ChatMessage,
@@ -27,7 +26,6 @@ use super::{
 /// reqwest::Client（含连接池/TLS 握手开销）。reqwest::Client 内部已基于 Arc，
 /// clone 廉价。
 pub struct OpenaiCompatibleBridge {
-    name: String,
     base_url: String,
     api_key: String,
     client: reqwest::Client,
@@ -36,13 +34,11 @@ pub struct OpenaiCompatibleBridge {
 impl OpenaiCompatibleBridge {
     /// 构造 Bridge，复用外部传入的 `reqwest::Client`（推荐从 AppState.http_client 取）。
     pub fn with_client(
-        name: impl Into<String>,
         base_url: impl Into<String>,
         api_key: impl Into<String>,
         client: reqwest::Client,
     ) -> Self {
         Self {
-            name: name.into(),
             // 归一化 base_url：去掉末尾斜杠；若不带路径（host 直连，如
             // `https://cf-ai-gw.pages.dev`）则自动补 `/v1`，与 OpenAI SDK 约定一致，
             // 避免构造出 `https://host/chat/completions`（上游 404）。
@@ -50,16 +46,6 @@ impl OpenaiCompatibleBridge {
             api_key: api_key.into(),
             client,
         }
-    }
-
-    /// 兼容旧调用：内部新建 Client。不推荐，优先用 `with_client`。
-    #[deprecated(note = "use with_client to share a reqwest::Client from AppState")]
-    pub fn new(name: impl Into<String>, base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .build()
-            .expect("reqwest client");
-        Self::with_client(name, base_url, api_key, client)
     }
 
     fn chat_url(&self) -> String {
@@ -205,26 +191,24 @@ impl Bridge for OpenaiCompatibleBridge {
                 .and_then(|tc| tc.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|t| {
-                            Some(super::ToolCall {
-                                id: t
-                                    .get("id")
-                                    .and_then(|i| i.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                function_name: t
-                                    .get("function")
-                                    .and_then(|f| f.get("name"))
-                                    .and_then(|n| n.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                arguments: t
-                                    .get("function")
-                                    .and_then(|f| f.get("arguments"))
-                                    .and_then(|a| a.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                            })
+                        .map(|t| super::ToolCall {
+                            id: t
+                                .get("id")
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            function_name: t
+                                .get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            arguments: t
+                                .get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("")
+                                .to_string(),
                         })
                         .collect()
                 })
@@ -557,39 +541,6 @@ pub(crate) fn normalize_base_url(base_url: String) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::normalize_base_url;
-
-    #[test]
-    fn normalizes_host_only_base_url() {
-        assert_eq!(
-            normalize_base_url("https://cf-ai-gw.pages.dev".into()),
-            "https://cf-ai-gw.pages.dev/v1"
-        );
-        assert_eq!(
-            normalize_base_url("https://cf-ai-gw.pages.dev/".into()),
-            "https://cf-ai-gw.pages.dev/v1"
-        );
-    }
-
-    #[test]
-    fn keeps_existing_path_segments() {
-        assert_eq!(
-            normalize_base_url("https://api.deepseek.com/v1".into()),
-            "https://api.deepseek.com/v1"
-        );
-        assert_eq!(
-            normalize_base_url("https://openrouter.ai/api/v1".into()),
-            "https://openrouter.ai/api/v1"
-        );
-        assert_eq!(
-            normalize_base_url("https://api.deepseek.com".into()),
-            "https://api.deepseek.com/v1"
-        );
-    }
-}
-
 fn parse_finish_reason(s: &str) -> FinishReason {
     match s {
         "stop" => FinishReason::Stop,
@@ -655,24 +606,22 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
                     .and_then(|tc| tc.as_array())
                     .map(|arr| {
                         arr.iter()
-                            .filter_map(|t| {
-                                Some(super::ToolCallDelta {
-                                    index: t
-                                        .get("index")
-                                        .and_then(|i| i.as_u64())
-                                        .unwrap_or(0) as usize,
-                                    id: t.get("id").and_then(|i| i.as_str()).map(String::from),
-                                    function_name: t
-                                        .get("function")
-                                        .and_then(|f| f.get("name"))
-                                        .and_then(|n| n.as_str())
-                                        .map(String::from),
-                                    arguments: t
-                                        .get("function")
-                                        .and_then(|f| f.get("arguments"))
-                                        .and_then(|a| a.as_str())
-                                        .map(String::from),
-                                })
+                            .map(|t| super::ToolCallDelta {
+                                index: t
+                                    .get("index")
+                                    .and_then(|i| i.as_u64())
+                                    .unwrap_or(0) as usize,
+                                id: t.get("id").and_then(|i| i.as_str()).map(String::from),
+                                function_name: t
+                                    .get("function")
+                                    .and_then(|f| f.get("name"))
+                                    .and_then(|n| n.as_str())
+                                    .map(String::from),
+                                arguments: t
+                                    .get("function")
+                                    .and_then(|f| f.get("arguments"))
+                                    .and_then(|a| a.as_str())
+                                    .map(String::from),
                             })
                             .collect()
                     });
@@ -711,9 +660,41 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
 /// 新建 reqwest::Client。`client.clone()` 廉价（内部 Arc）。
 pub fn make_bridge(base_url: &str, api_key: &str, client: &reqwest::Client) -> Arc<dyn Bridge> {
     Arc::new(OpenaiCompatibleBridge::with_client(
-        "openai_compatible",
         base_url,
         api_key,
         client.clone(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_base_url;
+
+    #[test]
+    fn normalizes_host_only_base_url() {
+        assert_eq!(
+            normalize_base_url("https://cf-ai-gw.pages.dev".into()),
+            "https://cf-ai-gw.pages.dev/v1"
+        );
+        assert_eq!(
+            normalize_base_url("https://cf-ai-gw.pages.dev/".into()),
+            "https://cf-ai-gw.pages.dev/v1"
+        );
+    }
+
+    #[test]
+    fn keeps_existing_path_segments() {
+        assert_eq!(
+            normalize_base_url("https://api.deepseek.com/v1".into()),
+            "https://api.deepseek.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url("https://openrouter.ai/api/v1".into()),
+            "https://openrouter.ai/api/v1"
+        );
+        assert_eq!(
+            normalize_base_url("https://api.deepseek.com".into()),
+            "https://api.deepseek.com/v1"
+        );
+    }
 }

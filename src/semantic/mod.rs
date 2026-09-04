@@ -75,11 +75,10 @@ impl SemanticRouter {
                     continue;
                 }
                 let sim = cosine_similarity(&prompt_vec, &example_vec);
-                if sim >= route.threshold {
-                    if best_match.is_none() || sim > best_match.as_ref().unwrap().1 {
+                if sim >= route.threshold
+                    && (best_match.is_none() || sim > best_match.as_ref().unwrap().1) {
                         best_match = Some((route.target_model.clone(), sim));
                     }
-                }
             }
         }
 

@@ -147,21 +147,19 @@ fn parse_openai_chunk(
         .and_then(|tc| tc.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|t| {
-                    Some(super::ToolCallDelta {
-                        index: t.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize,
-                        id: t.get("id").and_then(|i| i.as_str()).map(String::from),
-                        function_name: t
-                            .get("function")
-                            .and_then(|f| f.get("name"))
-                            .and_then(|n| n.as_str())
-                            .map(String::from),
-                        arguments: t
-                            .get("function")
-                            .and_then(|f| f.get("arguments"))
-                            .and_then(|a| a.as_str())
-                            .map(String::from),
-                    })
+                .map(|t| super::ToolCallDelta {
+                    index: t.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize,
+                    id: t.get("id").and_then(|i| i.as_str()).map(String::from),
+                    function_name: t
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .map(String::from),
+                    arguments: t
+                        .get("function")
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|a| a.as_str())
+                        .map(String::from),
                 })
                 .collect()
         });
@@ -313,26 +311,24 @@ impl Bridge for CloudflareBridge {
             .and_then(|tc| tc.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|t| {
-                        Some(super::ToolCall {
-                            id: t
-                                .get("id")
-                                .and_then(|i| i.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            function_name: t
-                                .get("function")
-                                .and_then(|f| f.get("name"))
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            arguments: t
-                                .get("function")
-                                .and_then(|f| f.get("arguments"))
-                                .and_then(|a| a.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                        })
+                    .map(|t| super::ToolCall {
+                        id: t
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        function_name: t
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        arguments: t
+                            .get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                     })
                     .collect()
             })

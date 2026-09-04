@@ -361,7 +361,7 @@ pub fn charge_usage(
             if let Some(u) = state.user_store.get_by_id(uid) {
                 let remaining = u.remaining();
                 // 阈值：固定 1000 或 quota 的 10%，取较小者；扣费失败必通知
-                let threshold = (u.quota / 10).max(1000).min(10000);
+                let threshold = (u.quota / 10).clamp(1000, 10000);
                 if !charged || remaining < threshold {
                     state.notify_service.notify_spawn(
                         crate::notify::NotifyEvent::QuotaLow {
@@ -389,7 +389,10 @@ pub fn charge_usage(
 /// 通过 `charged` 原子标志保证计费恰好执行一次：
 /// - 流正常结束：后缀事件先 `swap` 抢到计费权并完成计费，守卫 drop 时直接跳过；
 /// - 客户端断连：SSE 流被中途 drop，后缀事件不会执行，守卫在 Drop 中兜底计费。
+///
 /// 两条路径互斥，同时杜绝"双计费"与"断连零计费"。
+///
+/// 若客户端在计费完成前断连，守卫的 Drop 实现会负责兜底计费，确保请求最终被正确记账。
 pub(crate) struct StreamBillingState {
     pub(crate) state: AppState,
     pub(crate) api_key: super::auth::ApiKey,
@@ -684,22 +687,20 @@ fn parse_messages(value: Option<&Value>) -> Option<Vec<ChatMessage>> {
             .and_then(|tc| tc.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|t| {
-                        Some(crate::bridge::ToolCall {
-                            id: t.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
-                            function_name: t
-                                .get("function")
-                                .and_then(|f| f.get("name"))
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            arguments: t
-                                .get("function")
-                                .and_then(|f| f.get("arguments"))
-                                .and_then(|a| a.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                        })
+                    .map(|t| crate::bridge::ToolCall {
+                        id: t.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
+                        function_name: t
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        arguments: t
+                            .get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                     })
                     .collect()
             });
@@ -1051,7 +1052,7 @@ pub async fn handle_chat_completions(
                     _guard: StreamUsageGuard::new(billing),
                 };
 
-                return Sse::new(guarded).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15))).into_response();
+                Sse::new(guarded).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15))).into_response()
         }
     } else {
         // 响应缓存：非流式请求尝试缓存命中
@@ -1238,7 +1239,7 @@ pub async fn handle_chat_completions(
                 state.response_cache.insert(cache_key, json.clone()).await;
                 let mut resp = Json(json).into_response();
                 resp.headers_mut().insert("x-aigx-cache", "miss".parse().unwrap());
-                return resp;
+                resp
         }
     }
 }
@@ -1831,7 +1832,7 @@ pub async fn handle_completions(
             crate::metrics::global().record_tokens(&model_owned, "prompt", prompt_tokens);
             crate::metrics::global().record_tokens(&model_owned, "completion", completion_tokens);
 
-            return Ok(Json(result));
+            Ok(Json(result))
     }
 }
 
@@ -2026,7 +2027,7 @@ pub async fn handle_embeddings(
             );
             crate::metrics::global().record_tokens(&model_owned, "prompt", prompt_tokens);
 
-            return Ok(Json(serde_json::json!({
+            Ok(Json(serde_json::json!({
                 "object": "list",
                 "data": data,
                 "model": &model_owned,
@@ -2034,7 +2035,7 @@ pub async fn handle_embeddings(
                     "prompt_tokens": response.usage.prompt_tokens,
                     "total_tokens": response.usage.total_tokens,
                 }
-            })));
+            })))
     }
 }
 
@@ -2195,7 +2196,7 @@ pub async fn handle_images_generations(
                 latency_ms,
             );
 
-            return Ok(Json(result));
+            Ok(Json(result))
     }
 }
 

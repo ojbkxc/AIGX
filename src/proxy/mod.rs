@@ -222,9 +222,6 @@ impl CfApiClient {
             Err(CfError::RateLimited { retry_after })
         } else if status.as_u16() == 404 {
             Err(CfError::ModelNotFound(format!("Model {cf_model} not found")))
-        } else if !is_retryable_status(status.as_u16()) {
-            let body_text = resp.text().await.unwrap_or_default();
-            Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
         } else {
             let body_text = resp.text().await.unwrap_or_default();
             Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
@@ -683,7 +680,7 @@ impl CfApiClient {
         } else if status.as_u16() == 429 {
             Err(CfError::RateLimited { retry_after: None })
         } else if status.as_u16() == 404 {
-            Err(CfError::ModelNotFound(format!("Model not found")))
+            Err(CfError::ModelNotFound("Model not found".to_string()))
         } else {
             let body_text = resp.text().await.unwrap_or_default();
             Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
@@ -896,11 +893,6 @@ impl std::fmt::Display for CfError {
 }
 
 impl std::error::Error for CfError {}
-
-/// 判断 HTTP 状态码是否可重试
-fn is_retryable_status(status: u16) -> bool {
-    matches!(status, 408 | 409 | 429 | 500..=599)
-}
 
 /// 判断是否为认证错误
 fn is_auth_error(status: u16) -> bool {

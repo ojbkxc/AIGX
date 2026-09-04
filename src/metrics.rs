@@ -193,16 +193,12 @@ impl Metrics {
         ));
         let usd = self.cost_usd.load(Ordering::Relaxed) as f64 / 1e6;
         let cny = self.cost_cny.load(Ordering::Relaxed) as f64 / 1e6;
-        out.push_str(&format!(
-            "# HELP aigx_cost_usd_total Accumulated request cost in USD.\n"
-        ));
+        out.push_str("# HELP aigx_cost_usd_total Accumulated request cost in USD.\n");
         out.push_str(&format!(
             "# TYPE aigx_cost_usd_total counter\naigx_cost_usd_total {}\n",
             usd
         ));
-        out.push_str(&format!(
-            "# HELP aigx_cost_cny_total Accumulated request cost in CNY.\n"
-        ));
+        out.push_str("# HELP aigx_cost_cny_total Accumulated request cost in CNY.\n");
         out.push_str(&format!(
             "# TYPE aigx_cost_cny_total counter\naigx_cost_cny_total {}\n",
             cny

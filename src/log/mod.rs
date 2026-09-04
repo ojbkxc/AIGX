@@ -9,6 +9,7 @@
 //! 持久化使用 FileStore KV：
 //! - 请求日志 key: `reqlog:{created_at}:{id}`
 //! - 审计日志 key: `auditlog:{created_at}:{id}`
+//!
 //! 时间戳前缀便于按时间范围扫描与排序。
 
 use parking_lot::RwLock;
@@ -64,6 +65,12 @@ pub struct RequestLog {
     pub request_id: Option<String>,
     /// 创建时间（unix timestamp）
     pub created_at: i64,
+}
+
+impl Default for RequestLog {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RequestLog {
@@ -173,7 +180,7 @@ impl RequestLogStore {
         let writes = self
             .writes
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if writes % Self::PURGE_CHECK_EVERY == 0 {
+        if writes.is_multiple_of(Self::PURGE_CHECK_EVERY) {
             if let Err(e) = self.purge_overflow() {
                 tracing::warn!("request log purge check failed: {e}");
             }
@@ -224,7 +231,7 @@ impl RequestLogStore {
             .into_iter()
             .filter_map(|k| self.store.get::<RequestLog>(&k).ok().flatten())
             .collect();
-        logs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        logs.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         logs
     }
 
@@ -236,6 +243,7 @@ impl RequestLogStore {
     /// - channel_id：按渠道过滤
     /// - start/end：时间范围（unix timestamp，闭区间）
     /// - page/size：分页（1-based）
+    #[allow(clippy::too_many_arguments)]
     pub fn list_with_filter(
         &self,
         user_id: Option<&str>,
@@ -291,18 +299,6 @@ impl RequestLogStore {
         (paged, total)
     }
 
-    /// 计数（按可选过滤条件）
-    pub fn count(
-        &self,
-        user_id: Option<&str>,
-        model: Option<&str>,
-        channel_id: Option<&str>,
-        start: Option<i64>,
-        end: Option<i64>,
-    ) -> usize {
-        self.list_with_filter(user_id, model, channel_id, start, end, 1, usize::MAX).1
-    }
-
     /// 导出全部（或按过滤条件）为 JSON 字符串
     pub fn export_json(&self) -> String {
         let all = self.list_all();
@@ -342,7 +338,7 @@ impl RequestLogStore {
     /// 返回所有请求日志（按时间正序），便于上层聚合。
     pub fn all_sorted_asc(&self) -> Vec<RequestLog> {
         let mut all = self.list_all();
-        all.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        all.sort_by_key(|a| a.created_at);
         all
     }
 }
@@ -401,7 +397,7 @@ impl AuditLogStore {
             .into_iter()
             .filter_map(|k| self.store.get::<AuditLog>(&k).ok().flatten())
             .collect();
-        logs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        logs.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         logs
     }
 

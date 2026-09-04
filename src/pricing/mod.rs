@@ -121,8 +121,8 @@ const PRICING_SEEDED_KEY: &str = "pricing_seeded";
 /// 公开价目（`@cf/` 免费额度模型按 0 计费；付费模型取近似官方价）。
 /// 首次启动时若目录为空则自动种子（`ensure_default_prices`）。
 fn default_prices() -> Vec<ModelPrice> {
-    let mut p = |m: &str, i: f64, o: f64| ModelPrice::new(m, i, o);
-    let mut c = |m: &str, price: f64| {
+    let p = |m: &str, i: f64, o: f64| ModelPrice::new(m, i, o);
+    let c = |m: &str, price: f64| {
         let mut x = ModelPrice::new(m, price, 0.0);
         x.price_type = "count".to_string();
         x

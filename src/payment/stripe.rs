@@ -2,7 +2,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::TopUpOrder;
 
 /// Stripe 配置
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

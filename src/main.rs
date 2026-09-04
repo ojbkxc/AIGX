@@ -1,3 +1,8 @@
+// lib+bin 双 target 共享 src/*.rs：lib 将模块 pub 导出（视为对外 API 不报 dead），
+// bin 以私有 mod 引入同一批文件，内部未直接调用的预留 API 会被 dead_code 误报。
+// 此处统一豁免 bin 视角的结构性 dead_code，lib 视角的警告已单独清理干净。
+#![allow(dead_code)]
+
 mod account;
 mod api;
 mod bridge;
@@ -523,7 +528,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
         .fallback_service(web::serve_static_files())
-        .layer(build_cors_layer(&config))
+        .layer(build_cors_layer(config))
         .with_state(state)
 }
 
