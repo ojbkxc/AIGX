@@ -145,8 +145,7 @@ fn render_upstream_error(
     let upstream_kind = view.kind.as_deref();
     let derived_code = match wire {
         UpstreamWire::OpenAI | UpstreamWire::Unknown => view.code.clone(),
-        UpstreamWire::AzureOpenAI => derive_azure_code(upstream_kind)
-            .or_else(|| view.code.clone()),
+        UpstreamWire::AzureOpenAI => derive_azure_code(upstream_kind).or_else(|| view.code.clone()),
         UpstreamWire::Anthropic => derive_anthropic_code(upstream_kind),
         UpstreamWire::Bedrock => derive_bedrock_code(upstream_kind),
         UpstreamWire::Vertex => derive_vertex_code(upstream_kind),

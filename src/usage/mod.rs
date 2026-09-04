@@ -22,8 +22,9 @@ pub struct TokenStats {
 impl TokenStats {
     /// 计算平均每秒 token 数
     pub fn avg_tok_per_sec(&self) -> u64 {
-        self.tok_per_sec_sum.checked_div(self.tok_per_sec_count).unwrap_or(0)
-
+        self.tok_per_sec_sum
+            .checked_div(self.tok_per_sec_count)
+            .unwrap_or(0)
     }
 
     /// 总 token 数
@@ -54,7 +55,12 @@ impl UsageTracker {
     /// 获取今日 token 统计键名
     fn daily_key() -> String {
         let now = Utc::now();
-        format!("token_daily_{:04}{:02}{:02}", now.year(), now.month(), now.day())
+        format!(
+            "token_daily_{:04}{:02}{:02}",
+            now.year(),
+            now.month(),
+            now.day()
+        )
     }
 
     /// 获取月度 token 统计键名
@@ -123,13 +129,21 @@ impl UsageTracker {
     /// 获取今日统计
     pub fn today_stats(&self) -> TokenStats {
         let key = Self::daily_key();
-        self.store.get::<TokenStats>(&key).ok().flatten().unwrap_or_default()
+        self.store
+            .get::<TokenStats>(&key)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
     }
 
     /// 获取月度统计
     pub fn monthly_stats(&self) -> TokenStats {
         let key = Self::monthly_key();
-        self.store.get::<TokenStats>(&key).ok().flatten().unwrap_or_default()
+        self.store
+            .get::<TokenStats>(&key)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
     }
 
     /// 检查是否超过限额，返回警告信息
@@ -196,8 +210,18 @@ impl UsageTracker {
         let mut trend = Vec::new();
         for i in (0..7).rev() {
             let day = Utc::now() - Duration::days(i);
-            let key = format!("token_daily_{:04}{:02}{:02}", day.year(), day.month(), day.day());
-            let stats: TokenStats = self.store.get::<TokenStats>(&key).ok().flatten().unwrap_or_default();
+            let key = format!(
+                "token_daily_{:04}{:02}{:02}",
+                day.year(),
+                day.month(),
+                day.day()
+            );
+            let stats: TokenStats = self
+                .store
+                .get::<TokenStats>(&key)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             trend.push(serde_json::json!({
                 "label": day.format("%m/%d").to_string(),
                 "value": stats.total(),

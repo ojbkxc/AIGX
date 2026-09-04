@@ -100,7 +100,10 @@ impl DatabaseManager {
             anyhow::anyhow!("failed to connect to {} database: {}", backend.as_str(), e)
         })?;
 
-        tracing::info!("{} database connected, running migrations...", backend.as_str());
+        tracing::info!(
+            "{} database connected, running migrations...",
+            backend.as_str()
+        );
 
         // 执行迁移
         migration::Migrator::up(&conn, None)
@@ -124,7 +127,6 @@ impl DatabaseManager {
     pub fn backend(&self) -> DatabaseBackend {
         self.backend
     }
-
 
     /// 是否为 PostgreSQL 后端。
     pub fn is_postgres(&self) -> bool {
@@ -163,7 +165,6 @@ mod tests {
     #[test]
     fn test_backend_from_url() {
         assert_eq!(
-
             DatabaseBackend::from_url("postgres://user:pass@localhost:5432/aigx"),
             Some(DatabaseBackend::Postgres)
         );

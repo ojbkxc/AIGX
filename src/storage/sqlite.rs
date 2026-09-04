@@ -90,11 +90,10 @@ impl SqliteStore {
     /// 判断键是否存在
     pub fn contains(&self, key: &str) -> anyhow::Result<bool> {
         let conn = self.conn.lock();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM kv WHERE key = ?1",
-            [key],
-            |row| row.get(0),
-        )?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM kv WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })?;
         Ok(count > 0)
     }
 
@@ -109,9 +108,7 @@ impl SqliteStore {
     pub fn list(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
         let conn = self.conn.lock();
         let pattern = format!("{prefix}%");
-        let mut stmt = conn.prepare_cached(
-            "SELECT key FROM kv WHERE key LIKE ?1 ORDER BY key",
-        )?;
+        let mut stmt = conn.prepare_cached("SELECT key FROM kv WHERE key LIKE ?1 ORDER BY key")?;
         let keys: Vec<String> = stmt
             .query_map([&pattern], |row| row.get(0))?
             .filter_map(|r| r.ok())
@@ -126,9 +123,8 @@ impl SqliteStore {
     ) -> anyhow::Result<Vec<(String, T)>> {
         let conn = self.conn.lock();
         let pattern = format!("{prefix}%");
-        let mut stmt = conn.prepare_cached(
-            "SELECT key, value FROM kv WHERE key LIKE ?1 ORDER BY key",
-        )?;
+        let mut stmt =
+            conn.prepare_cached("SELECT key, value FROM kv WHERE key LIKE ?1 ORDER BY key")?;
         let pairs: Vec<(String, T)> = stmt
             .query_map([&pattern], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -175,11 +171,7 @@ impl SqliteStore {
     /// 返回数据库中总条目数
     pub fn count(&self) -> anyhow::Result<u64> {
         let conn = self.conn.lock();
-        let count: u64 = conn.query_row(
-            "SELECT COUNT(*) FROM kv",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: u64 = conn.query_row("SELECT COUNT(*) FROM kv", [], |row| row.get(0))?;
         Ok(count)
     }
 

@@ -201,7 +201,10 @@ impl ApiKeyStore {
     }
 
     /// 生成新密钥（带完整选项）
-    pub fn generate_with_options(&self, opts: CreateApiKeyOptions) -> Result<ApiKey, anyhow::Error> {
+    pub fn generate_with_options(
+        &self,
+        opts: CreateApiKeyOptions,
+    ) -> Result<ApiKey, anyhow::Error> {
         let id = uuid::Uuid::new_v4().to_string();
         let key = format!("sk-{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
         let now = chrono::Utc::now().timestamp();
@@ -224,15 +227,9 @@ impl ApiKeyStore {
             updated_at: now,
         };
 
-        let hash = hash_api_key(
-            api_key
-                .key
-                .strip_prefix("sk-")
-                .unwrap_or(&api_key.key),
-        );
+        let hash = hash_api_key(api_key.key.strip_prefix("sk-").unwrap_or(&api_key.key));
 
-        self.store
-            .put(&format!("apikey_{id}"), &api_key)?;
+        self.store.put(&format!("apikey_{id}"), &api_key)?;
         self.keys.write().insert(id.clone(), api_key.clone());
         self.key_hash_map.write().insert(hash, id);
 
@@ -240,7 +237,11 @@ impl ApiKeyStore {
     }
 
     /// 更新密钥（读取-修改-写入）
-    pub fn update(&self, id: &str, mutator: impl FnOnce(&mut ApiKey)) -> Result<ApiKey, anyhow::Error> {
+    pub fn update(
+        &self,
+        id: &str,
+        mutator: impl FnOnce(&mut ApiKey),
+    ) -> Result<ApiKey, anyhow::Error> {
         let mut api_key = self
             .keys
             .read()
@@ -353,12 +354,7 @@ impl ApiKeyStore {
     pub fn delete(&self, id: &str) -> Result<(), anyhow::Error> {
         let keys = self.keys.read();
         if let Some(api_key) = keys.get(id) {
-            let hash = hash_api_key(
-                api_key
-                    .key
-                    .strip_prefix("sk-")
-                    .unwrap_or(&api_key.key),
-            );
+            let hash = hash_api_key(api_key.key.strip_prefix("sk-").unwrap_or(&api_key.key));
             self.key_hash_map.write().remove(&hash);
         }
         drop(keys);
@@ -393,7 +389,6 @@ pub struct CreateApiKeyOptions {
     pub quota_limit: Option<i64>,
     pub ip_limit: Option<Vec<String>>,
 }
-
 
 /// 会话存储 - 使用 HMAC 签名方式，无需共享内存状态
 pub struct SessionStore {
@@ -474,8 +469,7 @@ impl SessionStore {
 
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())
-            .expect("HMAC key");
+        let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes()).expect("HMAC key");
         mac.update(email.as_bytes());
         mac.update(b".");
         mac.update(expires.as_bytes());

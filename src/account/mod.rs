@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use parking_lot::RwLock;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::storage::FileStore;
 

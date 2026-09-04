@@ -1,7 +1,6 @@
-﻿use anyhow::Result;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-
 
 /// Stripe 配置
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -71,23 +70,14 @@ impl StripeClient {
     ///
     /// POST https://api.stripe.com/v1/checkout/sessions
     /// 参考 new-api controller/topup_stripe.go
-    pub async fn create_checkout_session(
-        &self,
-        params: CheckoutParams,
-    ) -> Result<CheckoutSession> {
+    pub async fn create_checkout_session(&self, params: CheckoutParams) -> Result<CheckoutSession> {
         let url = "https://api.stripe.com/v1/checkout/sessions";
         let mut form = BTreeMap::new();
         form.insert("mode", "payment".to_string());
         form.insert("success_url", params.success_url);
         form.insert("cancel_url", params.cancel_url);
-        form.insert(
-            "line_items[0][quantity]",
-            "1".to_string(),
-        );
-        form.insert(
-            "line_items[0][price_data][currency]",
-            "usd".to_string(),
-        );
+        form.insert("line_items[0][quantity]", "1".to_string());
+        form.insert("line_items[0][price_data][currency]", "usd".to_string());
         form.insert(
             "line_items[0][price_data][unit_amount]",
             params.amount_cents.to_string(),
@@ -96,10 +86,7 @@ impl StripeClient {
             "line_items[0][price_data][product_data][name]",
             format!("AIGX Quota Top-up (Order {})", params.trade_no),
         );
-        form.insert(
-            "client_reference_id",
-            params.trade_no.clone(),
-        );
+        form.insert("client_reference_id", params.trade_no.clone());
         form.insert("metadata[trade_no]", params.trade_no.clone());
         form.insert("metadata[user_id]", params.user_id);
         form.insert("metadata[quota]", params.quota.to_string());
@@ -146,7 +133,10 @@ impl StripeClient {
 
         let ts = timestamp.ok_or_else(|| anyhow::anyhow!("missing t= in stripe signature"))?;
         let expected_input = format!("{}.{}", ts, String::from_utf8_lossy(payload));
-        let expected = hmac_sha256_hex(self.config.webhook_secret.as_bytes(), expected_input.as_bytes());
+        let expected = hmac_sha256_hex(
+            self.config.webhook_secret.as_bytes(),
+            expected_input.as_bytes(),
+        );
 
         let valid = signatures.iter().any(|s| {
             // timing-safe comparison
@@ -229,9 +219,9 @@ impl StripeObject {
 }
 
 fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
     use sha2::Sha256;
-use hmac::{Hmac, Mac};
-    
+
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC key");
     mac.update(msg);
     let bytes = mac.finalize().into_bytes();

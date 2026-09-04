@@ -80,10 +80,19 @@ impl OpenaiCompatibleBridge {
                     Role::Assistant => "assistant",
                     Role::Tool => "tool",
                 };
-                let mut msg = serde_json::json!({
-                    "role": role,
-                    "content": m.content.clone().unwrap_or_default(),
-                });
+                // 优先转发 content_blocks（vision/多模态 typed-block 数组），
+                // 否则用 content（含 None → null，保留 OpenAI assistant
+                // with tool_calls 的 content:null 历史回放形状）。
+                let mut msg = match &m.content_blocks {
+                    Some(blocks) => serde_json::json!({
+                        "role": role,
+                        "content": Value::Array(blocks.clone()),
+                    }),
+                    None => serde_json::json!({
+                        "role": role,
+                        "content": m.content.clone(),
+                    }),
+                };
                 if let Some(tid) = &m.tool_call_id {
                     msg["tool_call_id"] = Value::String(tid.clone());
                 }
@@ -116,6 +125,15 @@ impl OpenaiCompatibleBridge {
         if let Some(tools) = &req.tools {
             body["tools"] = serde_json::json!(tools);
         }
+        if let Some(tool_choice) = &req.tool_choice {
+            body["tool_choice"] = serde_json::json!(tool_choice);
+        }
+        if let Some(effort) = &req.reasoning_effort {
+            body["reasoning_effort"] = serde_json::json!(effort);
+        }
+        if let Some(web) = &req.web_search_options {
+            body["web_search_options"] = serde_json::json!(web);
+        }
         if let Some(mt) = req.max_tokens {
             body["max_tokens"] = serde_json::json!(mt);
         }
@@ -124,6 +142,16 @@ impl OpenaiCompatibleBridge {
         }
         if let Some(p) = req.top_p {
             body["top_p"] = serde_json::json!(p);
+        }
+        if let Some(stop) = &req.stop {
+            body["stop"] = serde_json::json!(stop);
+        }
+        if let Some(extra) = &req.extra {
+            if let Some(obj) = extra.as_object() {
+                for (k, v) in obj {
+                    body[k] = v.clone();
+                }
+            }
         }
         body
     }
@@ -135,7 +163,11 @@ impl Bridge for OpenaiCompatibleBridge {
         "openai_compatible"
     }
 
-    async fn chat(&self, req: &ChatFormat, _ctx: &BridgeContext) -> Result<ChatResponse, BridgeError> {
+    async fn chat(
+        &self,
+        req: &ChatFormat,
+        _ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError> {
         let mut body = self.build_body(req);
         body["stream"] = serde_json::json!(false);
 
@@ -372,11 +404,7 @@ impl Bridge for OpenaiCompatibleBridge {
                         embedding: obj
                             .get("embedding")
                             .and_then(|e| e.as_array())
-                            .map(|vals| {
-                                vals.iter()
-                                    .filter_map(|v| v.as_f64())
-                                    .collect()
-                            })
+                            .map(|vals| vals.iter().filter_map(|v| v.as_f64()).collect())
                             .unwrap_or_default(),
                     })
                     .collect()
@@ -407,11 +435,7 @@ impl Bridge for OpenaiCompatibleBridge {
     ///
     /// 与 Chat Completions 不同，text_completion 使用顶层 `prompt` 字段。
     /// body 原样转发给上游的 /completions 端点，上游 2xx 时返回完整 JSON。
-    async fn complete(
-        &self,
-        body: &Value,
-        _ctx: &BridgeContext,
-    ) -> Result<Value, BridgeError> {
+    async fn complete(&self, body: &Value, _ctx: &BridgeContext) -> Result<Value, BridgeError> {
         let resp = self
             .client
             .post(self.completions_url())
@@ -503,9 +527,9 @@ impl Bridge for OpenaiCompatibleBridge {
         if stream {
             // SSE 原始字节流原样透传（保留 text/event-stream wire 格式），
             // 调用方旁路解析提取 usage 计费
-            let byte_stream = resp.bytes_stream().map(|chunk| {
-                chunk.map_err(|e| BridgeError::Transport(e.to_string()))
-            });
+            let byte_stream = resp
+                .bytes_stream()
+                .map(|chunk| chunk.map_err(|e| BridgeError::Transport(e.to_string())));
             Ok(ResponsesPassthrough::Stream(Box::pin(byte_stream)))
         } else {
             let json: Value = resp
@@ -552,17 +576,51 @@ fn parse_finish_reason(s: &str) -> FinishReason {
 }
 
 fn parse_usage(json: &Value) -> UsageStats {
-    let prompt = json
-        .get("usage")
+    let u = json.get("usage");
+    let prompt = u
         .and_then(|u| u.get("prompt_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let completion = json
-        .get("usage")
+    let completion = u
         .and_then(|u| u.get("completion_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    UsageStats::new(prompt, completion)
+    // OpenAI 形状缓存命中子集（prompt_tokens_details.cached_tokens）
+    let cached_prompt_tokens = u
+        .and_then(|u| u.get("prompt_tokens_details"))
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    UsageStats {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: prompt + completion,
+        cached_prompt_tokens,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+    }
+}
+
+/// 从 usage 子对象解析（流式 include_usage 终帧用）
+fn parse_usage_from_value(u: &Value) -> UsageStats {
+    let prompt = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let completion = u
+        .get("completion_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cached_prompt_tokens = u
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    UsageStats {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: prompt + completion,
+        cached_prompt_tokens,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+    }
 }
 
 fn parse_openai_error(body: &[u8]) -> Option<super::UpstreamErrorView> {
@@ -570,7 +628,10 @@ fn parse_openai_error(body: &[u8]) -> Option<super::UpstreamErrorView> {
     let err = v.get("error")?;
     Some(super::UpstreamErrorView {
         kind: err.get("type").and_then(|t| t.as_str()).map(String::from),
-        message: err.get("message").and_then(|m| m.as_str()).map(String::from),
+        message: err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(String::from),
         code: err.get("code").and_then(|c| c.as_str()).map(String::from),
         param: err.get("param").and_then(|p| p.as_str()).map(String::from),
     })
@@ -588,6 +649,7 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
                     model: model.to_string(),
                     delta: super::ChatDelta::default(),
                     finish_reason: Some(FinishReason::Stop),
+                    usage: None,
                 });
             }
             if let Ok(v) = serde_json::from_str::<Value>(data) {
@@ -607,10 +669,8 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
                     .map(|arr| {
                         arr.iter()
                             .map(|t| super::ToolCallDelta {
-                                index: t
-                                    .get("index")
-                                    .and_then(|i| i.as_u64())
-                                    .unwrap_or(0) as usize,
+                                index: t.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
+                                    as usize,
                                 id: t.get("id").and_then(|i| i.as_str()).map(String::from),
                                 function_name: t
                                     .get("function")
@@ -630,10 +690,7 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
                     .get("choices")
                     .and_then(|c| c.get(0))
                     .and_then(|c| c.get("delta"))
-                    .and_then(|d| {
-                        d.get("reasoning_content")
-                            .or_else(|| d.get("reasoning"))
-                    })
+                    .and_then(|d| d.get("reasoning_content").or_else(|| d.get("reasoning")))
                     .and_then(|r| r.as_str())
                     .map(String::from);
                 let finish = v
@@ -642,11 +699,18 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
                     .and_then(|c| c.get("finish_reason"))
                     .and_then(|f| f.as_str())
                     .map(parse_finish_reason);
+                // stream_options.include_usage 终帧：usage 出现在顶层
+                let usage = v.get("usage").map(parse_usage_from_value);
                 return Some(ChatChunk {
                     id: id.to_string(),
                     model: model.to_string(),
-                    delta: super::ChatDelta { content, tool_calls, reasoning },
+                    delta: super::ChatDelta {
+                        content,
+                        tool_calls,
+                        reasoning,
+                    },
                     finish_reason: finish,
+                    usage,
                 });
             }
         }

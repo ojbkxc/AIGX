@@ -94,11 +94,7 @@ pub fn livez_response(livez: &LivezState, verbose: bool) -> Response {
 }
 
 /// 响应 /readyz 请求
-pub fn readyz_response(
-    livez: &LivezState,
-    config_ready: bool,
-    verbose: bool,
-) -> Response {
+pub fn readyz_response(livez: &LivezState, config_ready: bool, verbose: bool) -> Response {
     let mut body = String::new();
     let mut failed = false;
 
@@ -224,10 +220,7 @@ impl HealthTracker {
 
     /// 记录一次失败
     pub fn on_failure(&self, model: &str) {
-        let entry = self
-            .entries
-            .entry(model.to_string())
-            .or_default();
+        let entry = self.entries.entry(model.to_string()).or_default();
         entry.on_failure();
     }
 

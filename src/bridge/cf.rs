@@ -195,6 +195,7 @@ fn parse_openai_chunk(
             reasoning: delta_reasoning,
         },
         finish_reason,
+        usage: None,
     }))
 }
 
@@ -205,10 +206,7 @@ pub struct CloudflareBridge {
 }
 
 impl CloudflareBridge {
-    pub fn new(
-        client: Arc<CfApiClient>,
-        model_mapper: Arc<ModelMapper>,
-    ) -> Self {
+    pub fn new(client: Arc<CfApiClient>, model_mapper: Arc<ModelMapper>) -> Self {
         Self {
             client,
             model_mapper,
@@ -399,8 +397,8 @@ impl Bridge for CloudflareBridge {
         let id_clone = id.clone();
         let model_clone = model.clone();
 
-        let stream = byte_stream
-            .flat_map(move |res: std::result::Result<bytes::Bytes, crate::proxy::CfError>| {
+        let stream = byte_stream.flat_map(
+            move |res: std::result::Result<bytes::Bytes, crate::proxy::CfError>| {
                 let id = id_clone.clone();
                 let model = model_clone.clone();
                 let iter: Vec<std::result::Result<ChatChunk, BridgeError>> = match res {
@@ -417,6 +415,7 @@ impl Bridge for CloudflareBridge {
                                     model: model.clone(),
                                     delta: ChatDelta::default(),
                                     finish_reason: Some(FinishReason::Stop),
+                                    usage: None,
                                 })),
                             })
                             .collect()
@@ -424,7 +423,8 @@ impl Bridge for CloudflareBridge {
                     Err(e) => vec![Err(Self::map_cf_error(&e))],
                 };
                 futures::stream::iter(iter)
-            });
+            },
+        );
 
         Ok(Box::pin(stream))
     }
@@ -484,19 +484,9 @@ impl Bridge for CloudflareBridge {
         })
     }
 
-    async fn complete(
-        &self,
-        body: &Value,
-        _ctx: &BridgeContext,
-    ) -> Result<Value, BridgeError> {
-        let model = body
-            .get("model")
-            .and_then(|m| m.as_str())
-            .unwrap_or("");
-        let prompt = body
-            .get("prompt")
-            .and_then(|p| p.as_str())
-            .unwrap_or("");
+    async fn complete(&self, body: &Value, _ctx: &BridgeContext) -> Result<Value, BridgeError> {
+        let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("");
+        let prompt = body.get("prompt").and_then(|p| p.as_str()).unwrap_or("");
 
         let cf_body = serde_json::json!({
             "messages": [{"role": "user", "content": prompt}],
@@ -537,10 +527,7 @@ impl Bridge for CloudflareBridge {
         body: &Value,
         _ctx: &BridgeContext,
     ) -> Result<Value, BridgeError> {
-        let model = body
-            .get("model")
-            .and_then(|m| m.as_str())
-            .unwrap_or("sdxl");
+        let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("sdxl");
         let prompt = body
             .get("prompt")
             .and_then(|p| p.as_str())

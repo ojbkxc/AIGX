@@ -80,7 +80,11 @@ impl User {
 
     /// 显示名称：优先用 username，否则用 email
     pub fn display_name(&self) -> &str {
-        if self.username.is_empty() { &self.email } else { &self.username }
+        if self.username.is_empty() {
+            &self.email
+        } else {
+            &self.username
+        }
     }
 }
 
@@ -120,7 +124,9 @@ impl UserStore {
         // 向后兼容旧数据：无 email 字段的用户以 username 作为 email
         for (_, user) in by_id.iter() {
             if user.email.is_empty() && !user.username.is_empty() {
-                by_email.entry(user.username.clone()).or_insert_with(|| user.id.clone());
+                by_email
+                    .entry(user.username.clone())
+                    .or_insert_with(|| user.id.clone());
             }
         }
         Ok(())
@@ -156,12 +162,21 @@ impl UserStore {
         };
         self.persist(&user)?;
         self.by_id.write().insert(user.id.clone(), user.clone());
-        self.by_email.write().insert(user.email.clone(), user.id.clone());
+        self.by_email
+            .write()
+            .insert(user.email.clone(), user.id.clone());
         Ok(user)
     }
 
     /// 创建用户（带邮箱和用户名）
-    pub fn create_with_username(&self, email: &str, username: &str, password: &str, role: Role, quota: i64) -> Result<User> {
+    pub fn create_with_username(
+        &self,
+        email: &str,
+        username: &str,
+        password: &str,
+        role: Role,
+        quota: i64,
+    ) -> Result<User> {
         if email.is_empty() {
             anyhow::bail!("email cannot be empty");
         }
@@ -185,7 +200,9 @@ impl UserStore {
         };
         self.persist(&user)?;
         self.by_id.write().insert(user.id.clone(), user.clone());
-        self.by_email.write().insert(user.email.clone(), user.id.clone());
+        self.by_email
+            .write()
+            .insert(user.email.clone(), user.id.clone());
         Ok(user)
     }
 

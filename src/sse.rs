@@ -89,10 +89,12 @@ impl SseDecoder {
         if valid_len < bytes.len() {
             // 保留未完成部分
             let rest = bytes.split_off(valid_len);
-            self.buffer.push_str(std::str::from_utf8(&bytes).unwrap_or(""));
+            self.buffer
+                .push_str(std::str::from_utf8(&bytes).unwrap_or(""));
             self.byte_buf = rest;
         } else {
-            self.buffer.push_str(std::str::from_utf8(&bytes).unwrap_or(""));
+            self.buffer
+                .push_str(std::str::from_utf8(&bytes).unwrap_or(""));
             self.byte_buf.clear();
         }
     }
@@ -122,7 +124,7 @@ fn decode_message(message: &str, events: &mut Vec<SseEvent>) {
     }
 }
 
-// ????????? SSE Keepalive Stream ?????????
+// ────────────────────────────────────────────────────────────────
 
 // Wrapper stream that injects ": keepalive\n\n" SSE comment events
 // during idle periods. Used for passthrough SSE streams (Responses API)
@@ -147,8 +149,8 @@ impl<S> KeepaliveStream<S> {
     }
 }
 
-impl<S: futures::Stream<Item = Result<bytes::Bytes, E>>, E: std::fmt::Debug>
-    futures::Stream for KeepaliveStream<S>
+impl<S: futures::Stream<Item = Result<bytes::Bytes, E>>, E: std::fmt::Debug> futures::Stream
+    for KeepaliveStream<S>
 {
     type Item = Result<bytes::Bytes, E>;
 
@@ -177,11 +179,9 @@ impl<S: futures::Stream<Item = Result<bytes::Bytes, E>>, E: std::fmt::Debug>
             std::task::Poll::Pending => {
                 // Check interval timer
                 match this.interval.poll_tick(cx) {
-                    std::task::Poll::Ready(_) => {
-                        std::task::Poll::Ready(Some(Ok(bytes::Bytes::from_static(
-                            b": keepalive\n\n",
-                        ))))
-                    }
+                    std::task::Poll::Ready(_) => std::task::Poll::Ready(Some(Ok(
+                        bytes::Bytes::from_static(b": keepalive\n\n"),
+                    ))),
                     std::task::Poll::Pending => std::task::Poll::Pending,
                 }
             }

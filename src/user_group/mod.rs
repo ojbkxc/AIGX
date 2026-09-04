@@ -131,7 +131,9 @@ impl UserGroupStore {
         }
         group.updated_at = now;
         self.persist(&group)?;
-        self.groups.write().insert(group.name.clone(), group.clone());
+        self.groups
+            .write()
+            .insert(group.name.clone(), group.clone());
         Ok(group)
     }
 
@@ -147,11 +149,7 @@ impl UserGroupStore {
 
     /// 获取分组的计费倍率（不存在返回 1.0）
     pub fn ratio(&self, name: &str) -> f64 {
-        self.groups
-            .read()
-            .get(name)
-            .map(|g| g.ratio)
-            .unwrap_or(1.0)
+        self.groups.read().get(name).map(|g| g.ratio).unwrap_or(1.0)
     }
 
     /// 检查分组是否允许使用指定模型

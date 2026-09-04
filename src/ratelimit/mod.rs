@@ -235,7 +235,11 @@ impl RateLimiter {
         // per-model
         let ml = cfg.model_limits();
         if ml.rpm.is_some() {
-            reservations.push(self.limiter.pre_commit(&format!("model:{model}"), &ml).await?);
+            reservations.push(
+                self.limiter
+                    .pre_commit(&format!("model:{model}"), &ml)
+                    .await?,
+            );
         }
 
         // per-user
@@ -282,7 +286,9 @@ pub struct ReservationBundle {
 impl ReservationBundle {
     /// 空预留（限流未启用时返回）
     pub fn empty() -> Self {
-        Self { reservations: Vec::new() }
+        Self {
+            reservations: Vec::new(),
+        }
     }
 
     /// 事后记账：将 tokens 加到所有维度的 tpm 计数器。
@@ -300,7 +306,10 @@ mod tests {
     #[tokio::test]
     async fn no_config_allows_all() {
         let limiter = RateLimiter::new();
-        let bundle = limiter.check("k1", "gpt-4", Some("u1"), Some("1.2.3.4")).await.unwrap();
+        let bundle = limiter
+            .check("k1", "gpt-4", Some("u1"), Some("1.2.3.4"))
+            .await
+            .unwrap();
         bundle.commit_tokens(100).await;
     }
 

@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use tokio::sync::RwLock;
 
 use crate::notify::NotifyConfig;
-use crate::payment::EpayConfig;
-use crate::payment::stripe::StripeConfig;
 use crate::oauth::github::GithubOauthConfig;
+use crate::payment::stripe::StripeConfig;
+use crate::payment::EpayConfig;
 
 /// 默认 cf-ai-gw Worker 地址（AI Binding 方式调用 Cloudflare Workers AI）。
 ///
@@ -187,7 +187,6 @@ impl Default for ServerConfig {
     }
 }
 
-
 impl Default for UsageConfig {
     fn default() -> Self {
         Self {
@@ -199,7 +198,6 @@ impl Default for UsageConfig {
         }
     }
 }
-
 
 // ── ConfigManager ────────────────────────────────────────────────────
 

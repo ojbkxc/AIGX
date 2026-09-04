@@ -122,7 +122,11 @@ pub struct AuditLog {
 }
 
 impl AuditLog {
-    pub fn new(admin_id: impl Into<String>, action: impl Into<String>, target: impl Into<String>) -> Self {
+    pub fn new(
+        admin_id: impl Into<String>,
+        action: impl Into<String>,
+        target: impl Into<String>,
+    ) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             admin_id: admin_id.into(),
@@ -211,8 +215,8 @@ impl RequestLogStore {
             })
             .collect();
         timed.sort_by_key(|(ts, _)| *ts);
-        let excess = (timed.len().saturating_sub(Self::MAX_LOGS) + Self::PURGE_BATCH)
-            .min(timed.len());
+        let excess =
+            (timed.len().saturating_sub(Self::MAX_LOGS) + Self::PURGE_BATCH).min(timed.len());
         for (_, k) in timed.into_iter().take(excess) {
             if let Err(e) = self.store.delete(&k) {
                 tracing::warn!("request log purge failed for {k}: {e}");
@@ -500,7 +504,9 @@ mod tests {
             log.model = m.to_string();
             s.requests.add(log).unwrap();
         }
-        let (gpt4, total) = s.requests.list_with_filter(None, Some("gpt-4"), None, None, None, 1, 10);
+        let (gpt4, total) =
+            s.requests
+                .list_with_filter(None, Some("gpt-4"), None, None, None, 1, 10);
         assert_eq!(total, 2);
         assert_eq!(gpt4.len(), 2);
     }
@@ -508,7 +514,13 @@ mod tests {
     #[test]
     fn audit_log() {
         let s = store();
-        s.record_audit("admin-id", "create", "user:abc", None, Some(serde_json::json!({"email": "a@b.c"})));
+        s.record_audit(
+            "admin-id",
+            "create",
+            "user:abc",
+            None,
+            Some(serde_json::json!({"email": "a@b.c"})),
+        );
         let all = s.audits.list();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].action, "create");
@@ -523,10 +535,14 @@ mod tests {
             log.model = format!("m{i}");
             s.requests.add(log).unwrap();
         }
-        let (page1, total) = s.requests.list_with_filter(None, None, None, None, None, 1, 10);
+        let (page1, total) = s
+            .requests
+            .list_with_filter(None, None, None, None, None, 1, 10);
         assert_eq!(total, 15);
         assert_eq!(page1.len(), 10);
-        let (page2, _) = s.requests.list_with_filter(None, None, None, None, None, 2, 10);
+        let (page2, _) = s
+            .requests
+            .list_with_filter(None, None, None, None, None, 2, 10);
         assert_eq!(page2.len(), 5);
     }
 }

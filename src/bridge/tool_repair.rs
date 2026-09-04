@@ -330,6 +330,8 @@ mod tests {
         ];
         let out = super::super::tool_repair::accumulate_tool_call_arguments(&deltas);
         assert_eq!(out.len(), 2);
-        assert!(out.iter().all(|(_, _, _, a)| serde_json::from_str::<Value>(a).is_ok()));
+        assert!(out
+            .iter()
+            .all(|(_, _, _, a)| serde_json::from_str::<Value>(a).is_ok()));
     }
 }

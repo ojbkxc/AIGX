@@ -68,17 +68,28 @@ impl Metrics {
     /// 记录一次请求。`status` 取 `"ok"` / `"error"`；`channel` 为空时用 `"unknown"`。
     pub fn record_request(&self, model: &str, channel: &str, status: &str, latency_ms: u64) {
         let model = model.to_string();
-        let channel = if channel.is_empty() { "unknown".to_string() } else { channel.to_string() };
+        let channel = if channel.is_empty() {
+            "unknown".to_string()
+        } else {
+            channel.to_string()
+        };
         let status = status.to_string();
         {
             let mut map = self.requests.lock().unwrap();
-            map.entry((model.clone(), channel, status)).or_default().fetch_add(1, Ordering::Relaxed);
+            map.entry((model.clone(), channel, status))
+                .or_default()
+                .fetch_add(1, Ordering::Relaxed);
         }
         {
             let mut sum = self.latency_sum_ms.lock().unwrap();
-            sum.entry(model.clone()).or_default().fetch_add(latency_ms, Ordering::Relaxed);
+            sum.entry(model.clone())
+                .or_default()
+                .fetch_add(latency_ms, Ordering::Relaxed);
             let mut count = self.latency_count.lock().unwrap();
-            count.entry(model).or_default().fetch_add(1, Ordering::Relaxed);
+            count
+                .entry(model)
+                .or_default()
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -95,7 +106,9 @@ impl Metrics {
     /// 记录 token 用量。`ty` 取 `"prompt"` / `"completion"`。
     pub fn record_tokens(&self, model: &str, ty: &str, tokens: u64) {
         let mut map = self.tokens.lock().unwrap();
-        map.entry((model.to_string(), ty.to_string())).or_default().fetch_add(tokens, Ordering::Relaxed);
+        map.entry((model.to_string(), ty.to_string()))
+            .or_default()
+            .fetch_add(tokens, Ordering::Relaxed);
     }
 
     /// 记录一次请求成本（微单位）。`currency` 取 `"usd"` / `"cny"`。
@@ -116,7 +129,10 @@ impl Metrics {
 
     /// 模型健康等级（0/1/2）快照，由健康追踪层刷新。
     pub fn set_health(&self, model: &str, level: u8) {
-        self.health.lock().unwrap().insert(model.to_string(), level.min(2));
+        self.health
+            .lock()
+            .unwrap()
+            .insert(model.to_string(), level.min(2));
     }
 
     /// 渲染 Prometheus 文本格式。
@@ -154,7 +170,13 @@ impl Metrics {
         {
             let sum = self.latency_sum_ms.lock().unwrap();
             for (model, v) in sum.iter() {
-                let count = self.latency_count.lock().unwrap().get(model).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0);
+                let count = self
+                    .latency_count
+                    .lock()
+                    .unwrap()
+                    .get(model)
+                    .map(|c| c.load(Ordering::Relaxed))
+                    .unwrap_or(0);
                 out.push_str(&format!(
                     "aigx_latency_ms_sum{{model=\"{}\"}} {}\n",
                     escape(model),
@@ -167,7 +189,9 @@ impl Metrics {
                 ));
             }
         }
-        out.push_str("# HELP aigx_health_level Model health level (0=healthy,1=degraded,2=down).\n");
+        out.push_str(
+            "# HELP aigx_health_level Model health level (0=healthy,1=degraded,2=down).\n",
+        );
         out.push_str("# TYPE aigx_health_level gauge\n");
         {
             let map = self.health.lock().unwrap();
@@ -230,8 +254,12 @@ mod tests {
         m.record_cost("usd", 500_000);
 
         let out = m.render();
-        assert!(out.contains("aigx_requests_total{model=\"gpt-4\",channel=\"ch1\",status=\"ok\"} 2"));
-        assert!(out.contains("aigx_requests_total{model=\"claude-3\",channel=\"ch2\",status=\"error\"} 1"));
+        assert!(
+            out.contains("aigx_requests_total{model=\"gpt-4\",channel=\"ch1\",status=\"ok\"} 2")
+        );
+        assert!(out.contains(
+            "aigx_requests_total{model=\"claude-3\",channel=\"ch2\",status=\"error\"} 1"
+        ));
         assert!(out.contains("aigx_tokens_total{model=\"gpt-4\",type=\"prompt\"} 1000"));
         assert!(out.contains("aigx_latency_ms_sum{model=\"gpt-4\"} 200"));
         assert!(out.contains("aigx_latency_ms_count{model=\"gpt-4\"} 2"));

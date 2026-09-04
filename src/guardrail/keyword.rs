@@ -147,6 +147,7 @@ mod tests {
                 ChatMessage {
                     role,
                     content: Some(content.to_string()),
+                    content_blocks: None,
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
@@ -162,6 +163,12 @@ mod tests {
             temperature: None,
             top_p: None,
             stream: false,
+            top_k: None,
+            stop: None,
+            tool_choice: None,
+            reasoning_effort: None,
+            web_search_options: None,
+            extra: None,
         }
     }
 
@@ -194,7 +201,7 @@ mod tests {
     #[tokio::test]
     async fn regex_pattern_matches() {
         let g = KeywordBlocklist::new(vec![
-            KeywordRule::regex(r"\bssn:\s*\d{3}-\d{2}-\d{4}").unwrap(),
+            KeywordRule::regex(r"\bssn:\s*\d{3}-\d{2}-\d{4}").unwrap()
         ]);
         let v = g
             .check_input(&req(&[("user", "the user's ssn: 123-45-6789 is")]))

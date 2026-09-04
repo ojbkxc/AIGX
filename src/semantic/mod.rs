@@ -47,11 +47,7 @@ impl SemanticRouter {
     }
 
     /// Match prompt against routes, returning best target model if any
-    pub async fn match_route<F, Fut>(
-        &self,
-        prompt: &str,
-        embed_fn: F,
-    ) -> Option<String>
+    pub async fn match_route<F, Fut>(&self, prompt: &str, embed_fn: F) -> Option<String>
     where
         F: Fn(&str) -> Fut,
         Fut: std::future::Future<Output = Option<Vec<f32>>>,
@@ -76,9 +72,10 @@ impl SemanticRouter {
                 }
                 let sim = cosine_similarity(&prompt_vec, &example_vec);
                 if sim >= route.threshold
-                    && (best_match.is_none() || sim > best_match.as_ref().unwrap().1) {
-                        best_match = Some((route.target_model.clone(), sim));
-                    }
+                    && (best_match.is_none() || sim > best_match.as_ref().unwrap().1)
+                {
+                    best_match = Some((route.target_model.clone(), sim));
+                }
             }
         }
 

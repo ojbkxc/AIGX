@@ -17,6 +17,8 @@ use std::time::Duration;
 
 pub mod cf;
 pub mod openai;
+/// Anthropic Messages API（`/v1/messages`）原生 bridge
+pub mod anthropic;
 /// 工具调用健壮解析（借鉴 ds-free-api tool_parser 的归一化/修复思路，独立实现）
 pub mod tool_repair;
 
@@ -52,6 +54,14 @@ pub enum Role {
 pub struct ChatMessage {
     pub role: Role,
     pub content: Option<String>,
+    /// 原始 content-block 数组（vision/多模态 `content:[{type:image_url,...}]`）。
+    ///
+    /// 参照 aisix ChatMessage.content_blocks：调用方发送 typed-block 形式时
+    /// 原样保留，支持 content blocks 的 bridge（OpenAI 兼容）将其 verbatim
+    /// 转发给上游，使 vision/音频输入到达上游不变；不支持 blocks 的 bridge
+    /// 只读 `content`（拼接文本），静默丢弃非文本块。
+    /// `None` 表示调用方发送的是 bare-string 或 `null` 形式。
+    pub content_blocks: Option<Vec<Value>>,
     pub name: Option<String>,
     pub tool_call_id: Option<String>,
     /// 助手消息携带的工具调用（多轮对话回传）
@@ -65,6 +75,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content: Some(content.into()),
+            content_blocks: None,
             name: None,
             tool_call_id: None,
             tool_calls: None,
@@ -89,6 +100,31 @@ pub struct ChatFormat {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub stream: bool,
+    /// Anthropic top_k（仅 Anthropic 协议支持，透传给 Anthropic bridge）
+    pub top_k: Option<u32>,
+    /// 停止序列（OpenAI `stop` / Anthropic `stop_sequences`）
+    pub stop: Option<Vec<String>>,
+    /// 工具选择策略（OpenAI `tool_choice`，字符串或 `{type,function:{name}}`）。
+    /// 与 `tools` 一致，内部统一存 OpenAI 形状；Anthropic bridge 在
+    /// `build_body` 里翻译为 Anthropic `tool_choice`。
+    pub tool_choice: Option<Value>,
+    /// OpenAI 推理强度（`reasoning_effort`：low/medium/high）。
+    /// OpenAI bridge 原样透传；Anthropic bridge 在无原生 `thinking` 配置时
+    /// 翻译为 Claude `thinking` 块。
+    pub reasoning_effort: Option<String>,
+    /// OpenAI `web_search_options`（`{search_context_size?, user_location?}`）。
+    /// Anthropic bridge 据此注入 `web_search_20250305` 内置工具。
+    pub web_search_options: Option<Value>,
+    /// 透传给上游的额外顶层字段（metadata 等），原样合并进请求体
+    pub extra: Option<Value>,
+}
+
+impl ChatFormat {
+    /// Anthropic Messages API 要求 max_tokens 必填，缺失时兜底 4096
+    /// （参照 aisix DEFAULT_MAX_TOKENS）。
+    pub fn anthropic_max_tokens(&self) -> u32 {
+        self.max_tokens.unwrap_or(4096)
+    }
 }
 
 /// 聊天完成原因
@@ -116,6 +152,15 @@ pub struct UsageStats {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// OpenAI 形状：已包含在 prompt_tokens 内的缓存命中子集
+    /// （`prompt_tokens_details.cached_tokens`）。
+    pub cached_prompt_tokens: u64,
+    /// Anthropic 形状：在 prompt_tokens 之上的缓存创建计数
+    /// （`cache_creation_input_tokens`）。
+    pub cache_creation_tokens: u64,
+    /// Anthropic 形状：在 prompt_tokens 之上的缓存读取计数
+    /// （`cache_read_input_tokens`）。
+    pub cache_read_tokens: u64,
 }
 
 impl UsageStats {
@@ -124,6 +169,9 @@ impl UsageStats {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: prompt + completion,
+            cached_prompt_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
         }
     }
 }
@@ -135,6 +183,9 @@ pub struct ChatChunk {
     pub model: String,
     pub delta: ChatDelta,
     pub finish_reason: Option<FinishReason>,
+    /// 流式 usage 帧（OpenAI `stream_options.include_usage` 终帧 /
+    /// Anthropic `message_delta.usage`）。`None` 表示该 chunk 不携带 usage。
+    pub usage: Option<UsageStats>,
 }
 
 /// 聊天增量
@@ -453,7 +504,11 @@ pub trait Bridge: Send + Sync + 'static {
     fn name(&self) -> &'static str;
 
     /// 非流式聊天补全
-    async fn chat(&self, req: &ChatFormat, ctx: &BridgeContext) -> Result<ChatResponse, BridgeError>;
+    async fn chat(
+        &self,
+        req: &ChatFormat,
+        ctx: &BridgeContext,
+    ) -> Result<ChatResponse, BridgeError>;
 
     /// 流式聊天补全
     async fn chat_stream(
@@ -474,11 +529,7 @@ pub trait Bridge: Send + Sync + 'static {
     }
 
     /// 文本补全
-    async fn complete(
-        &self,
-        _body: &Value,
-        _ctx: &BridgeContext,
-    ) -> Result<Value, BridgeError> {
+    async fn complete(&self, _body: &Value, _ctx: &BridgeContext) -> Result<Value, BridgeError> {
         Err(BridgeError::Config(
             "this provider does not support text completions".into(),
         ))

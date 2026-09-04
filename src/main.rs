@@ -15,16 +15,16 @@ mod health;
 mod hub;
 mod log;
 mod metrics;
-mod quota_monitor;
-mod semantic;
 mod model;
 mod notify;
 mod oauth;
 mod payment;
 mod pricing;
 mod proxy;
+mod quota_monitor;
 mod ratelimit;
 mod redemption;
+mod semantic;
 mod sse;
 mod storage;
 mod token_estimate;
@@ -40,41 +40,40 @@ mod db;
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::routing::{get, post, put, delete, patch};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use account::AccountPool;
 use api::auth::ApiKeyStore;
 use api::openai::AppState;
 use bridge::cf::CloudflareBridge;
 use channel::ChannelStore;
 use config::ConfigManager;
-use storage::FileStore;
-use account::AccountPool;
+use health::{HealthTracker, LivezState};
 use hub::Hub;
 use log::LogStore;
 use model::ModelMapper;
 use notify::NotifyService;
 use payment::order_store::OrderStore;
-use payment::EpayClient;
 use payment::stripe::StripeClient;
+use payment::EpayClient;
 use pricing::PricingStore;
 use proxy::CfApiClient;
 use ratelimit::RateLimiter;
 use redemption::RedemptionStore;
+use storage::FileStore;
 use usage::UsageTracker;
 use user::{Role, UserStore};
 use user_group::UserGroupStore;
-use health::{HealthTracker, LivezState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 初始化日志
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -87,7 +86,10 @@ async fn main() -> anyhow::Result<()> {
     // 初始化存储（默认 SQLite 后端；--no-default-features 构建降级为 JSON 文件）
     let data_dir = crate::config::expand_path(&config.server.data_dir);
     tokio::fs::create_dir_all(&data_dir).await?;
+    #[cfg(feature = "sqlite-kv")]
     let store = Arc::new(FileStore::open(data_dir.join("data"))?);
+    #[cfg(not(feature = "sqlite-kv"))]
+    let store = Arc::new(FileStore::new(data_dir.join("data")));
 
     // 初始化账号池
     let account_pool = Arc::new(AccountPool::new(store.clone()));
@@ -365,9 +367,7 @@ fn ensure_default_admin(user_store: &UserStore) {
     // 检查是否已存在任意 Admin 角色用户；若已存在则跳过，绝不删除/重建
     let has_admin = user_store.list().iter().any(|u| u.role == Role::Admin);
     if has_admin {
-        tracing::info!(
-            "Admin account already exists, skip default admin initialization"
-        );
+        tracing::info!("Admin account already exists, skip default admin initialization");
         return;
     }
 
@@ -403,8 +403,14 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     let admin_routes = Router::new()
         .route("/api/auth/login", post(api::admin::handle_login))
         .route("/api/auth/register", post(api::admin::handle_register))
-        .route("/api/auth/github", get(api::admin::handle_github_oauth_authorize))
-        .route("/api/auth/github/callback", get(api::admin::handle_github_oauth_callback))
+        .route(
+            "/api/auth/github",
+            get(api::admin::handle_github_oauth_authorize),
+        )
+        .route(
+            "/api/auth/github/callback",
+            get(api::admin::handle_github_oauth_callback),
+        )
         .route("/api/auth/logout", post(api::admin::handle_logout))
         .route("/api/usage/summary", get(api::admin::handle_usage_summary))
         .route("/api/usage/summary", post(api::admin::handle_refresh_usage))
@@ -412,7 +418,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/accounts", post(api::admin::handle_add_account))
         .route("/api/accounts/test", post(api::admin::handle_test_account))
         .route("/api/accounts/:id", put(api::admin::handle_update_account))
-        .route("/api/accounts/:id", delete(api::admin::handle_delete_account))
+        .route(
+            "/api/accounts/:id",
+            delete(api::admin::handle_delete_account),
+        )
         .route("/api/keys", get(api::admin::handle_list_keys))
         .route("/api/keys", post(api::admin::handle_add_key))
         .route("/api/keys/:id", delete(api::admin::handle_delete_key))
@@ -431,7 +440,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/users/:id", delete(api::admin::handle_delete_user))
         // 易支付配置
         .route("/api/epay/config", get(api::admin::handle_get_epay_config))
-        .route("/api/epay/config", put(api::admin::handle_update_epay_config))
+        .route(
+            "/api/epay/config",
+            put(api::admin::handle_update_epay_config),
+        )
         // 订单查询
         .route("/api/orders", get(api::admin::handle_list_orders))
         .route("/api/orders/me", get(api::admin::handle_my_orders))
@@ -440,82 +452,169 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 通用渠道管理
         .route("/api/channels", get(api::admin::handle_list_channels))
         .route("/api/channels", post(api::admin::handle_add_channel))
-        .route("/api/channels/fetch_models", post(api::admin::handle_fetch_channel_models))
+        .route(
+            "/api/channels/fetch_models",
+            post(api::admin::handle_fetch_channel_models),
+        )
         .route("/api/channels/:id", put(api::admin::handle_update_channel))
         .route("/api/channels/:id", patch(api::admin::handle_patch_channel))
-        .route("/api/channels/:id", delete(api::admin::handle_delete_channel))
-        .route("/api/channels/:id/test", post(api::admin::handle_test_channel))
+        .route(
+            "/api/channels/:id",
+            delete(api::admin::handle_delete_channel),
+        )
+        .route(
+            "/api/channels/:id/test",
+            post(api::admin::handle_test_channel),
+        )
         // 渠道对话调试（OpenAI / Anthropic 协议直连上游验证）
-        .route("/api/channels/chat_test", post(api::admin::handle_channel_chat_test))
+        .route(
+            "/api/channels/chat_test",
+            post(api::admin::handle_channel_chat_test),
+        )
         // 令牌管理（增强）
         .route("/api/tokens", get(api::admin::handle_list_tokens))
         .route("/api/tokens", post(api::admin::handle_add_token))
         .route("/api/tokens/:id", put(api::admin::handle_update_token))
         .route("/api/tokens/:id", delete(api::admin::handle_delete_token))
-        .route("/api/tokens/:id/reset_used", post(api::admin::handle_reset_token_used))
+        .route(
+            "/api/tokens/:id/reset_used",
+            post(api::admin::handle_reset_token_used),
+        )
         // 模型定价目录
         .route("/api/prices", get(api::admin::handle_list_prices))
         .route("/api/prices", post(api::admin::handle_upsert_price))
-        .route("/api/prices/:model", put(api::admin::handle_upsert_price_by_model))
-        .route("/api/prices/:model", delete(api::admin::handle_delete_price))
+        .route(
+            "/api/prices/:model",
+            put(api::admin::handle_upsert_price_by_model),
+        )
+        .route(
+            "/api/prices/:model",
+            delete(api::admin::handle_delete_price),
+        )
         // 倍率配置
         .route("/api/ratios", get(api::admin::handle_get_ratios))
         .route("/api/ratios", put(api::admin::handle_update_ratios))
         // 用户分组管理
         .route("/api/groups", get(api::admin::handle_list_groups))
         .route("/api/groups", post(api::admin::handle_upsert_group))
-        .route("/api/groups/:name", put(api::admin::handle_upsert_group_by_name))
+        .route(
+            "/api/groups/:name",
+            put(api::admin::handle_upsert_group_by_name),
+        )
         .route("/api/groups/:name", delete(api::admin::handle_delete_group))
         // 日志与审计（功能 1）
-        .route("/api/logs/requests", get(api::admin::handle_list_request_logs))
+        .route(
+            "/api/logs/requests",
+            get(api::admin::handle_list_request_logs),
+        )
         .route("/api/logs/audits", get(api::admin::handle_list_audit_logs))
-        .route("/api/logs/requests/export", get(api::admin::handle_export_request_logs))
+        .route(
+            "/api/logs/requests/export",
+            get(api::admin::handle_export_request_logs),
+        )
         // 兑换码（功能 2）
         .route("/api/redemptions", get(api::admin::handle_list_redemptions))
-        .route("/api/redemptions/batch", post(api::admin::handle_batch_redemptions))
-        .route("/api/redemptions/:id", delete(api::admin::handle_delete_redemption))
+        .route(
+            "/api/redemptions/batch",
+            post(api::admin::handle_batch_redemptions),
+        )
+        .route(
+            "/api/redemptions/:id",
+            delete(api::admin::handle_delete_redemption),
+        )
         .route("/api/redemptions/redeem", post(api::admin::handle_redeem))
         // 限流配置（功能 3）
-        .route("/api/ratelimit/config", get(api::admin::handle_get_ratelimit_config))
-        .route("/api/ratelimit/config", put(api::admin::handle_update_ratelimit_config))
+        .route(
+            "/api/ratelimit/config",
+            get(api::admin::handle_get_ratelimit_config),
+        )
+        .route(
+            "/api/ratelimit/config",
+            put(api::admin::handle_update_ratelimit_config),
+        )
         // 数据看板增强（功能 4）
-        .route("/api/dashboard/consumption_trend", get(api::admin::handle_consumption_trend))
-        .route("/api/dashboard/model_distribution", get(api::admin::handle_model_distribution))
-        .route("/api/dashboard/user_ranking", get(api::admin::handle_user_ranking))
-        .route("/api/dashboard/channel_health", get(api::admin::handle_channel_health))
+        .route(
+            "/api/dashboard/consumption_trend",
+            get(api::admin::handle_consumption_trend),
+        )
+        .route(
+            "/api/dashboard/model_distribution",
+            get(api::admin::handle_model_distribution),
+        )
+        .route(
+            "/api/dashboard/user_ranking",
+            get(api::admin::handle_user_ranking),
+        )
+        .route(
+            "/api/dashboard/channel_health",
+            get(api::admin::handle_channel_health),
+        )
         .route("/api/dashboard/realtime", get(api::admin::handle_realtime))
         // 通知系统配置（Telegram + SMTP）
-        .route("/api/notify/config", get(api::admin::handle_get_notify_config))
-        .route("/api/notify/config", put(api::admin::handle_update_notify_config))
-        .route("/api/notify/test-telegram", post(api::admin::handle_test_telegram))
-        .route("/api/notify/test-email", post(api::admin::handle_test_email))
+        .route(
+            "/api/notify/config",
+            get(api::admin::handle_get_notify_config),
+        )
+        .route(
+            "/api/notify/config",
+            put(api::admin::handle_update_notify_config),
+        )
+        .route(
+            "/api/notify/test-telegram",
+            post(api::admin::handle_test_telegram),
+        )
+        .route(
+            "/api/notify/test-email",
+            post(api::admin::handle_test_email),
+        )
         // Prometheus 指标（仅管理员）
         .route("/api/metrics", get(handle_metrics));
 
     // 易支付回调（异步通知 + 同步跳转）— 无需鉴权
     let epay_callback_routes = Router::new()
-        .route("/api/user/epay/notify", post(api::admin::handle_epay_notify).get(api::admin::handle_epay_notify))
-        .route("/api/user/epay/return", post(api::admin::handle_epay_return).get(api::admin::handle_epay_return));
+        .route(
+            "/api/user/epay/notify",
+            post(api::admin::handle_epay_notify).get(api::admin::handle_epay_notify),
+        )
+        .route(
+            "/api/user/epay/return",
+            post(api::admin::handle_epay_return).get(api::admin::handle_epay_return),
+        );
     let stripe_callback_routes = Router::new()
         .route("/api/stripe/topup", post(api::admin::handle_stripe_topup))
-        .route("/api/user/stripe/webhook", post(api::admin::handle_stripe_webhook));
+        .route(
+            "/api/user/stripe/webhook",
+            post(api::admin::handle_stripe_webhook),
+        );
 
     // OpenAI 兼容 API 路由
     let openai_routes = Router::new()
-        .route("/v1/chat/completions", post(api::openai::handle_chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(api::openai::handle_chat_completions),
+        )
         .route("/v1/responses", post(api::openai::handle_responses))
         .route("/v1/completions", post(api::openai::handle_completions))
         .route("/v1/embeddings", post(api::openai::handle_embeddings))
-        .route("/v1/images/generations", post(api::openai::handle_images_generations))
-        .route("/v1/audio/transcriptions", post(api::openai::handle_audio_transcriptions))
-        .route("/v1/audio/translations", post(api::openai::handle_audio_translations))
+        .route(
+            "/v1/images/generations",
+            post(api::openai::handle_images_generations),
+        )
+        .route(
+            "/v1/audio/transcriptions",
+            post(api::openai::handle_audio_transcriptions),
+        )
+        .route(
+            "/v1/audio/translations",
+            post(api::openai::handle_audio_translations),
+        )
         .route("/v1/audio/speech", post(api::openai::handle_audio_speech))
         .route("/v1/models", get(api::openai::handle_list_models))
         .route("/v1/models/:model", get(api::openai::handle_get_model));
 
     // Anthropic 兼容 API 路由
-    let anthropic_routes = Router::new()
-        .route("/v1/messages", post(api::anthropic::handle_messages));
+    let anthropic_routes =
+        Router::new().route("/v1/messages", post(api::anthropic::handle_messages));
 
     Router::new()
         .merge(admin_routes)
@@ -591,9 +690,10 @@ fn build_cors_layer(config: &config::AppConfig) -> CorsLayer {
 async fn handle_metrics() -> axum::response::Response {
     use axum::http::{header::CONTENT_TYPE, HeaderValue, StatusCode};
     use axum::response::IntoResponse;
-    let headers = [
-        (CONTENT_TYPE, HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8")),
-    ];
+    let headers = [(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    )];
     (StatusCode::OK, headers, metrics::global().render()).into_response()
 }
 

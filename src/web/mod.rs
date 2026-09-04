@@ -19,14 +19,14 @@ pub fn serve_static_files() -> Router {
 
     let index_path = static_dir.join("index.html");
 
-    Router::new().fallback_service(
-        ServeDir::new(&static_dir).fallback(
-            tower::service_fn(move |_req: Request<Body>| {
-                let index_path = index_path.clone();
-                async move {
-                    // L1：Response::builder()...unwrap() 在 header/body 构造理论上不会失败，
-                    // 但 unwrap 在 panic=unwind 下会终止服务线程。改为降级返回 500，增强健壮性。
-                    let result: Result<Response<Body>, Infallible> = match tokio::fs::read_to_string(&index_path).await {
+    Router::new().fallback_service(ServeDir::new(&static_dir).fallback(tower::service_fn(
+        move |_req: Request<Body>| {
+            let index_path = index_path.clone();
+            async move {
+                // L1：Response::builder()...unwrap() 在 header/body 构造理论上不会失败，
+                // 但 unwrap 在 panic=unwind 下会终止服务线程。改为降级返回 500，增强健壮性。
+                let result: Result<Response<Body>, Infallible> =
+                    match tokio::fs::read_to_string(&index_path).await {
                         Ok(content) => Ok(Response::builder()
                             .status(StatusCode::OK)
                             .header("content-type", "text/html; charset=utf-8")
@@ -35,18 +35,19 @@ pub fn serve_static_files() -> Router {
                                 Response::builder()
                                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                                     .body(Body::from("Internal Server Error"))
-                                    .unwrap_or_else(|_| Response::new(Body::from("Internal Server Error")))
+                                    .unwrap_or_else(|_| {
+                                        Response::new(Body::from("Internal Server Error"))
+                                    })
                             })),
                         Err(_) => Ok(Response::builder()
                             .status(StatusCode::NOT_FOUND)
                             .body(Body::from("Not Found"))
                             .unwrap_or_else(|_| Response::new(Body::from("Not Found")))),
                     };
-                    result
-                }
-            }),
-        ),
-    )
+                result
+            }
+        },
+    )))
 }
 
 /// 查找静态文件目录
@@ -66,5 +67,8 @@ fn find_static_dir() -> Option<PathBuf> {
             .map(|p| p.join("..").join("static")),
     ];
 
-    candidates.into_iter().flatten().find(|candidate| candidate.exists() && candidate.is_dir())
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.exists() && candidate.is_dir())
 }

@@ -10,11 +10,11 @@
 //!
 //! 仅当启用 `sea-orm` feature 时编译。
 
-pub mod user;
 pub mod api_key;
+pub mod audit_log;
 pub mod channel;
 pub mod model_price;
-pub mod user_group;
-pub mod request_log;
 pub mod redemption;
-pub mod audit_log;
+pub mod request_log;
+pub mod user;
+pub mod user_group;

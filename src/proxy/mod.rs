@@ -71,8 +71,9 @@ impl CfApiClient {
         // 其余裸域名默认补 https://。
         let mut url = account.account_id.trim().trim_end_matches('/').to_string();
         if !url.starts_with("http://") && !url.starts_with("https://") {
-            let is_localhost =
-                url.starts_with("127.0.0.1") || url.starts_with("localhost") || url.starts_with("::1");
+            let is_localhost = url.starts_with("127.0.0.1")
+                || url.starts_with("localhost")
+                || url.starts_with("::1");
             url = if is_localhost {
                 format!("http://{url}")
             } else {
@@ -87,7 +88,12 @@ impl CfApiClient {
     ///
     /// - 优先遍历账号池中的活跃账号，把请求转发到对应的 cf-ai-gw Worker
     /// - 无账号时回退到配置的兜底 `cf_binding_url`
-    pub async fn call_ai(&self, model: &str, body: Value, endpoint: &str) -> std::result::Result<CfResponse, CfError> {
+    pub async fn call_ai(
+        &self,
+        model: &str,
+        body: Value,
+        endpoint: &str,
+    ) -> std::result::Result<CfResponse, CfError> {
         let cf_model = self.model_mapper.resolve(model);
         let active_accounts = self.account_pool.active_accounts();
 
@@ -97,7 +103,15 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
-            return self.call_worker(&self.fallback_url, &self.fallback_key, &cf_model, body, endpoint).await;
+            return self
+                .call_worker(
+                    &self.fallback_url,
+                    &self.fallback_key,
+                    &cf_model,
+                    body,
+                    endpoint,
+                )
+                .await;
         }
 
         let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
@@ -115,7 +129,9 @@ impl CfApiClient {
                 }
 
                 let (url, key) = self.resolve_target(account);
-                let result = self.call_worker(&url, &key, &cf_model, body.clone(), endpoint).await;
+                let result = self
+                    .call_worker(&url, &key, &cf_model, body.clone(), endpoint)
+                    .await;
 
                 match result {
                     Ok(cf_resp) => {
@@ -182,10 +198,7 @@ impl CfApiClient {
         endpoint: &str,
     ) -> std::result::Result<CfResponse, CfError> {
         let url = format!("{worker_url}{endpoint}");
-        let mut req = self
-            .http
-            .post(&url)
-            .json(&body);
+        let mut req = self.http.post(&url).json(&body);
         if !api_key.is_empty() {
             req = req.bearer_auth(api_key);
         }
@@ -202,7 +215,9 @@ impl CfApiClient {
             let v: Value = match resp.json().await {
                 Ok(v) => v,
                 Err(e) => {
-                    return Err(CfError::NetworkError(format!("Failed to parse response: {e}")));
+                    return Err(CfError::NetworkError(format!(
+                        "Failed to parse response: {e}"
+                    )));
                 }
             };
             // cf-ai-gw 返回 OpenAI 兼容结构 { choices: [...], usage: {...} }
@@ -221,10 +236,14 @@ impl CfApiClient {
                 .and_then(|v| v.parse::<u64>().ok());
             Err(CfError::RateLimited { retry_after })
         } else if status.as_u16() == 404 {
-            Err(CfError::ModelNotFound(format!("Model {cf_model} not found")))
+            Err(CfError::ModelNotFound(format!(
+                "Model {cf_model} not found"
+            )))
         } else {
             let body_text = resp.text().await.unwrap_or_default();
-            Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
+            Err(CfError::ServerError(format!(
+                "cf-ai-gw status {status}: {body_text}"
+            )))
         }
     }
 
@@ -241,10 +260,13 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
-            return self.list_models_from_worker(&self.fallback_url, &self.fallback_key).await;
+            return self
+                .list_models_from_worker(&self.fallback_url, &self.fallback_key)
+                .await;
         }
 
-        let mut last_error = CfError::AllAccountsFailed("Failed to list models from all workers".into());
+        let mut last_error =
+            CfError::AllAccountsFailed("Failed to list models from all workers".into());
 
         for account in &active_accounts {
             let (url, key) = self.resolve_target(account);
@@ -283,7 +305,11 @@ impl CfApiClient {
 
         let v: Value = match resp.json().await {
             Ok(v) => v,
-            Err(e) => return Err(CfError::NetworkError(format!("Failed to parse models response: {e}"))),
+            Err(e) => {
+                return Err(CfError::NetworkError(format!(
+                    "Failed to parse models response: {e}"
+                )))
+            }
         };
 
         let models: Vec<CfModelInfo> = v
@@ -293,10 +319,7 @@ impl CfApiClient {
                 arr.iter()
                     .filter_map(|m| {
                         let name = m.get("id").and_then(|i| i.as_str())?.to_string();
-                        Some(CfModelInfo {
-                            name,
-                            task: None,
-                        })
+                        Some(CfModelInfo { name, task: None })
                     })
                     .collect()
             })
@@ -312,7 +335,11 @@ impl CfApiClient {
     }
 
     /// 调用 CF 嵌入 API
-    pub async fn run_embedding(&self, model: &str, body: Value) -> std::result::Result<Value, CfError> {
+    pub async fn run_embedding(
+        &self,
+        model: &str,
+        body: Value,
+    ) -> std::result::Result<Value, CfError> {
         let resp = self.call_ai(model, body, "/v1/embeddings").await?;
         Ok(resp.result.unwrap_or_default())
     }
@@ -332,7 +359,8 @@ impl CfApiClient {
         &self,
         model: &str,
         body: Value,
-    ) -> std::result::Result<BoxStream<'static, std::result::Result<bytes::Bytes, CfError>>, CfError> {
+    ) -> std::result::Result<BoxStream<'static, std::result::Result<bytes::Bytes, CfError>>, CfError>
+    {
         let cf_model = self.model_mapper.resolve(model);
         let active_accounts = self.account_pool.active_accounts();
 
@@ -342,13 +370,18 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
-            return self.stream_from_worker(&self.fallback_url, &self.fallback_key, &cf_model, body).await;
+            return self
+                .stream_from_worker(&self.fallback_url, &self.fallback_key, &cf_model, body)
+                .await;
         }
 
         let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
         for account in &active_accounts {
             let (url, key) = self.resolve_target(account);
-            match self.stream_from_worker(&url, &key, &cf_model, body.clone()).await {
+            match self
+                .stream_from_worker(&url, &key, &cf_model, body.clone())
+                .await
+            {
                 Ok(stream) => {
                     self.account_pool.mark_used(&account.id);
                     return Ok(stream);
@@ -395,12 +428,10 @@ impl CfApiClient {
         api_key: &str,
         cf_model: &str,
         body: Value,
-    ) -> std::result::Result<BoxStream<'static, std::result::Result<bytes::Bytes, CfError>>, CfError> {
+    ) -> std::result::Result<BoxStream<'static, std::result::Result<bytes::Bytes, CfError>>, CfError>
+    {
         let url = format!("{worker_url}/v1/chat/completions");
-        let mut req = self
-            .http
-            .post(&url)
-            .json(&body);
+        let mut req = self.http.post(&url).json(&body);
         if !api_key.is_empty() {
             req = req.bearer_auth(api_key);
         }
@@ -412,19 +443,23 @@ impl CfApiClient {
 
         let status = resp.status();
         if status.is_success() {
-            let stream = resp
-                .bytes_stream()
-                .map(|chunk| chunk.map_err(|e| CfError::NetworkError(format!("stream read error: {e}"))));
+            let stream = resp.bytes_stream().map(|chunk| {
+                chunk.map_err(|e| CfError::NetworkError(format!("stream read error: {e}")))
+            });
             Ok(Box::pin(stream))
         } else if is_auth_error(status.as_u16()) {
             Err(CfError::AuthError(format!("Auth failed: {status}")))
         } else if status.as_u16() == 429 {
             Err(CfError::RateLimited { retry_after: None })
         } else if status.as_u16() == 404 {
-            Err(CfError::ModelNotFound(format!("Model {cf_model} not found")))
+            Err(CfError::ModelNotFound(format!(
+                "Model {cf_model} not found"
+            )))
         } else {
             let body_text = resp.text().await.unwrap_or_default();
-            Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
+            Err(CfError::ServerError(format!(
+                "cf-ai-gw status {status}: {body_text}"
+            )))
         }
     }
 
@@ -449,7 +484,15 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
-            return self.audio_from_worker(&self.fallback_url, &self.fallback_key, &cf_model, data, endpoint).await;
+            return self
+                .audio_from_worker(
+                    &self.fallback_url,
+                    &self.fallback_key,
+                    &cf_model,
+                    data,
+                    endpoint,
+                )
+                .await;
         }
 
         let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
@@ -467,7 +510,10 @@ impl CfApiClient {
                 }
 
                 let (url, key) = self.resolve_target(account);
-                match self.audio_from_worker(&url, &key, &cf_model, data.clone(), endpoint).await {
+                match self
+                    .audio_from_worker(&url, &key, &cf_model, data.clone(), endpoint)
+                    .await
+                {
                     Ok(v) => {
                         self.account_pool.mark_used(&account.id);
                         return Ok(v);
@@ -545,7 +591,9 @@ impl CfApiClient {
             let v: Value = match resp.json().await {
                 Ok(v) => v,
                 Err(e) => {
-                    return Err(CfError::NetworkError(format!("Failed to parse audio response: {e}")));
+                    return Err(CfError::NetworkError(format!(
+                        "Failed to parse audio response: {e}"
+                    )));
                 }
             };
             Ok(v)
@@ -554,10 +602,14 @@ impl CfApiClient {
         } else if status.as_u16() == 429 {
             Err(CfError::RateLimited { retry_after: None })
         } else if status.as_u16() == 404 {
-            Err(CfError::ModelNotFound(format!("Model {cf_model} not found")))
+            Err(CfError::ModelNotFound(format!(
+                "Model {cf_model} not found"
+            )))
         } else {
             let body_text = resp.text().await.unwrap_or_default();
-            Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
+            Err(CfError::ServerError(format!(
+                "cf-ai-gw status {status}: {body_text}"
+            )))
         }
     }
 
@@ -580,7 +632,9 @@ impl CfApiClient {
                     "No cf-ai-gw Worker accounts configured and no fallback cf_binding_url".into(),
                 ));
             }
-            return self.speech_from_worker(&self.fallback_url, &self.fallback_key, body).await;
+            return self
+                .speech_from_worker(&self.fallback_url, &self.fallback_key, body)
+                .await;
         }
 
         let mut last_error = CfError::AllAccountsFailed("All cf-ai-gw Workers exhausted".into());
@@ -636,7 +690,9 @@ impl CfApiClient {
             }
         }
 
-        tracing::warn!("All cf-ai-gw audio/speech workers exhausted for model {_model}: {last_error}");
+        tracing::warn!(
+            "All cf-ai-gw audio/speech workers exhausted for model {_model}: {last_error}"
+        );
         Err(last_error)
     }
 
@@ -668,7 +724,9 @@ impl CfApiClient {
             let bytes = match resp.bytes().await {
                 Ok(b) => b,
                 Err(e) => {
-                    return Err(CfError::NetworkError(format!("Failed to read audio bytes: {e}")));
+                    return Err(CfError::NetworkError(format!(
+                        "Failed to read audio bytes: {e}"
+                    )));
                 }
             };
             Ok(CfAudio {
@@ -683,7 +741,9 @@ impl CfApiClient {
             Err(CfError::ModelNotFound("Model not found".to_string()))
         } else {
             let body_text = resp.text().await.unwrap_or_default();
-            Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
+            Err(CfError::ServerError(format!(
+                "cf-ai-gw status {status}: {body_text}"
+            )))
         }
     }
 
@@ -789,7 +849,9 @@ impl CfApiClient {
                 let v: Value = match resp.json().await {
                     Ok(v) => v,
                     Err(e) => {
-                        return Err(CfError::NetworkError(format!("Failed to parse response: {e}")));
+                        return Err(CfError::NetworkError(format!(
+                            "Failed to parse response: {e}"
+                        )));
                     }
                 };
                 Ok(CfResponsesOutcome::Json(v))
@@ -804,10 +866,14 @@ impl CfApiClient {
                 .and_then(|v| v.parse::<u64>().ok());
             Err(CfError::RateLimited { retry_after })
         } else if status.as_u16() == 404 {
-            Err(CfError::ModelNotFound(format!("Model {cf_model} not found")))
+            Err(CfError::ModelNotFound(format!(
+                "Model {cf_model} not found"
+            )))
         } else {
             let body_text = resp.text().await.unwrap_or_default();
-            Err(CfError::ServerError(format!("cf-ai-gw status {status}: {body_text}")))
+            Err(CfError::ServerError(format!(
+                "cf-ai-gw status {status}: {body_text}"
+            )))
         }
     }
 }

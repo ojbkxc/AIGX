@@ -62,7 +62,12 @@ fn default_status() -> i32 {
 }
 
 impl Redemption {
-    pub fn new(code: impl Into<String>, quota: i64, name: impl Into<String>, expires_at: i64) -> Self {
+    pub fn new(
+        code: impl Into<String>,
+        quota: i64,
+        name: impl Into<String>,
+        expires_at: i64,
+    ) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             code: code.into(),
@@ -95,7 +100,13 @@ impl Redemption {
     /// 状态文本
     pub fn status_text(&self) -> &'static str {
         match self.status {
-            STATUS_UNUSED => if self.is_expired() { "expired" } else { "unused" },
+            STATUS_UNUSED => {
+                if self.is_expired() {
+                    "expired"
+                } else {
+                    "unused"
+                }
+            }
             STATUS_USED => "used",
             STATUS_DISABLED => "disabled",
             _ => "unknown",
@@ -144,7 +155,8 @@ impl RedemptionStore {
 
     fn persist(&self, r: &Redemption) -> anyhow::Result<()> {
         self.store.put(&format!("redemption:{}", r.id), r)?;
-        self.store.put(&format!("redemption_code:{}", r.code), &r.id)?;
+        self.store
+            .put(&format!("redemption_code:{}", r.code), &r.id)?;
         Ok(())
     }
 
@@ -279,7 +291,10 @@ impl RedemptionStore {
         r.used_at = Some(chrono::Utc::now().timestamp());
         let snapshot = r.clone();
         drop(by_id);
-        if let Err(e) = self.store.put(&format!("redemption:{}", snapshot.id), &snapshot) {
+        if let Err(e) = self
+            .store
+            .put(&format!("redemption:{}", snapshot.id), &snapshot)
+        {
             tracing::error!("Failed to persist redemption {} redeem: {}", snapshot.id, e);
         }
         Ok(quota)
@@ -313,7 +328,8 @@ impl RedemptionStore {
         r.used_at = None;
         let snapshot = r.clone();
         drop(by_id);
-        self.store.put(&format!("redemption:{}", snapshot.id), &snapshot)?;
+        self.store
+            .put(&format!("redemption:{}", snapshot.id), &snapshot)?;
         Ok(())
     }
 }

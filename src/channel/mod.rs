@@ -39,7 +39,6 @@ pub enum ChannelType {
     Anthropic,
 }
 
-
 impl ChannelType {
     /// 从字符串解析渠道类型
     pub fn from_str_lossy(s: &str) -> Self {
@@ -203,7 +202,11 @@ impl ChannelStore {
                 channels.push(ch);
             }
         }
-        channels.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.created_at.cmp(&b.created_at)));
+        channels.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then(a.created_at.cmp(&b.created_at))
+        });
         *self.channels.write() = channels;
         Ok(())
     }
@@ -240,9 +243,11 @@ impl ChannelStore {
         self.persist(&ch)?;
         self.channels.write().push(ch.clone());
         // 维持排序
-        self.channels
-            .write()
-            .sort_by(|a, b| b.priority.cmp(&a.priority).then(a.created_at.cmp(&b.created_at)));
+        self.channels.write().sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then(a.created_at.cmp(&b.created_at))
+        });
         Ok(ch)
     }
 
@@ -260,7 +265,11 @@ impl ChannelStore {
         } else {
             channels.push(ch.clone());
         }
-        channels.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.created_at.cmp(&b.created_at)));
+        channels.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then(a.created_at.cmp(&b.created_at))
+        });
         Ok(ch)
     }
 

@@ -33,8 +33,13 @@ fn verify_api_key_full(
     headers: &HeaderMap,
     model: &str,
 ) -> Result<super::auth::ApiKey, (StatusCode, Json<Value>)> {
-    let key = extract_api_key(headers)
-        .ok_or_else(|| anthropic_error("authentication_error", "Missing API key", StatusCode::UNAUTHORIZED))?;
+    let key = extract_api_key(headers).ok_or_else(|| {
+        anthropic_error(
+            "authentication_error",
+            "Missing API key",
+            StatusCode::UNAUTHORIZED,
+        )
+    })?;
     let ip = extract_client_ip(headers);
     // B22：按结构化错误变体映射状态码，取代原先的 msg.contains(...) 文本匹配
     state
@@ -56,7 +61,11 @@ fn verify_api_key_full(
 }
 
 /// Anthropic 错误格式
-fn anthropic_error(error_type: &str, message: &str, status: StatusCode) -> (StatusCode, Json<Value>) {
+fn anthropic_error(
+    error_type: &str,
+    message: &str,
+    status: StatusCode,
+) -> (StatusCode, Json<Value>) {
     (
         status,
         Json(serde_json::json!({
@@ -80,11 +89,17 @@ fn anthropic_role_to_internal(role: &str) -> Option<Role> {
 }
 
 /// 将内部 FinishReason 转为 Anthropic stop_reason
+///
+/// 参照 new-api `reasonmap.OpenAIFinishReasonToClaudeStopReason`：
+/// - Stop → end_turn
+/// - Length → max_tokens
+/// - ContentFilter → refusal（不是 stop_sequence）
+/// - ToolCalls → tool_use
 fn to_anthropic_stop_reason(fr: &FinishReason) -> &'static str {
     match fr {
         FinishReason::Stop => "end_turn",
         FinishReason::Length => "max_tokens",
-        FinishReason::ContentFilter => "stop_sequence",
+        FinishReason::ContentFilter => "refusal",
         FinishReason::ToolCalls => "tool_use",
     }
 }
@@ -114,7 +129,11 @@ fn parse_anthropic_messages(messages: &[Value]) -> Vec<ChatMessage> {
                             }
                         }
                         Some("tool_use") => {
-                            let id = p.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                            let id = p
+                                .get("id")
+                                .and_then(|i| i.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             let name = p
                                 .get("name")
                                 .and_then(|n| n.as_str())
@@ -156,6 +175,7 @@ fn parse_anthropic_messages(messages: &[Value]) -> Vec<ChatMessage> {
                 result.push(ChatMessage {
                     role: Role::Tool,
                     content: Some(t),
+                    content_blocks: None,
                     name: None,
                     tool_call_id: Some(tid),
                     tool_calls: None,
@@ -173,6 +193,7 @@ fn parse_anthropic_messages(messages: &[Value]) -> Vec<ChatMessage> {
             } else {
                 Some(text)
             },
+            content_blocks: None,
             name: None,
             tool_call_id: None,
             tool_calls: if tool_calls.is_empty() {
@@ -202,8 +223,12 @@ pub async fn handle_messages(
     let model = match body.get("model").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
         None => {
-            return anthropic_error("invalid_request_error", "Missing model field", StatusCode::BAD_REQUEST)
-                .into_response()
+            return anthropic_error(
+                "invalid_request_error",
+                "Missing model field",
+                StatusCode::BAD_REQUEST,
+            )
+            .into_response()
         }
     };
 
@@ -214,12 +239,16 @@ pub async fn handle_messages(
     };
 
     // 限流检查（功能 3）
-    let rate_bundle = match state.rate_limiter.check(
-        &api_key.id,
-        &model,
-        api_key.user_id.as_deref(),
-        client_ip.as_deref(),
-    ).await {
+    let rate_bundle = match state
+        .rate_limiter
+        .check(
+            &api_key.id,
+            &model,
+            api_key.user_id.as_deref(),
+            client_ip.as_deref(),
+        )
+        .await
+    {
         Ok(b) => b,
         Err(e) => {
             let retry_after = e.retry_after_secs().unwrap_or(60);
@@ -227,12 +256,14 @@ pub async fn handle_messages(
                 "rate_limit_error",
                 &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
                 StatusCode::TOO_MANY_REQUESTS,
-            ).into_response();
+            )
+            .into_response();
         }
     };
 
     // 校验用户分组模型权限并解析计费分组（问题 5）
-    let billing_group = match super::openai::check_group_model_permission(&state, &api_key, &model) {
+    let billing_group = match super::openai::check_group_model_permission(&state, &api_key, &model)
+    {
         Ok(g) => g,
         Err(e) => return e.into_response(),
     };
@@ -265,8 +296,12 @@ pub async fn handle_messages(
         .unwrap_or_default();
 
     if messages.is_empty() {
-        return anthropic_error("invalid_request_error", "No valid messages", StatusCode::BAD_REQUEST)
-            .into_response();
+        return anthropic_error(
+            "invalid_request_error",
+            "No valid messages",
+            StatusCode::BAD_REQUEST,
+        )
+        .into_response();
     }
 
     // 处理 system prompt（Anthropic 顶级 system 字段）
@@ -276,20 +311,28 @@ pub async fn handle_messages(
             Value::String(s) => s.clone(),
             Value::Array(parts) => parts
                 .iter()
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                .filter_map(|p| {
+                    p.get("text")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
             _ => String::new(),
         };
         if !system_text.is_empty() {
-            all_messages.insert(0, ChatMessage {
-                role: Role::System,
-                content: Some(system_text),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-                reasoning: None,
-            });
+            all_messages.insert(
+                0,
+                ChatMessage {
+                    role: Role::System,
+                    content: Some(system_text),
+                    content_blocks: None,
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                    reasoning: None,
+                },
+            );
         }
     }
 
@@ -318,6 +361,21 @@ pub async fn handle_messages(
         temperature: body.get("temperature").and_then(|v| v.as_f64()),
         top_p: body.get("top_p").and_then(|v| v.as_f64()),
         stream: is_stream,
+        top_k: body.get("top_k").and_then(|v| v.as_u64()).map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+        stop: body
+            .get("stop_sequences")
+            .and_then(|s| s.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            }),
+        // Anthropic `tool_choice` 原样透传（上游 Anthropic bridge 在 build_body
+        // 里已识别 Anthropic 形状的 tool_choice）。同时兼容 OpenAI 形状。
+        tool_choice: body.get("tool_choice").cloned(),
+        reasoning_effort: None,
+        web_search_options: None,
+        extra: body.get("metadata").cloned(),
     };
 
     let ctx = BridgeContext::new(request_id.clone(), model.clone());
@@ -361,7 +419,8 @@ pub async fn handle_messages(
                     )
                 });
                 let latency_ms = request_start.elapsed().as_millis() as u64;
-                let status_code = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let status_code = StatusCode::from_u16(e.http_status())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                 let mut log = crate::log::RequestLog::new();
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
@@ -382,69 +441,75 @@ pub async fn handle_messages(
                 );
                 // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
                 if status_code.as_u16() >= 500 {
-                    state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
-                        channel_name: model.clone(),
-                        error: e.to_string(),
-                    });
+                    state
+                        .notify_service
+                        .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                            channel_name: model.clone(),
+                            error: e.to_string(),
+                        });
                 }
-                return anthropic_error(e.error_type(), &e.to_string(), status_code).into_response();
+                return anthropic_error(e.error_type(), &e.to_string(), status_code)
+                    .into_response();
             }
         };
         {
-                // 累积输出文本用于流结束时估算 token（问题 3）
-                let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
-                let acc_for_map = acc.clone();
+            // 累积输出文本用于流结束时估算 token（问题 3）
+            let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
+            let acc_for_map = acc.clone();
+            // 工具按次调用计数表（流式过程统计 tool_use 起始块）
+            let tool_calls = std::sync::Arc::new(parking_lot::Mutex::new(
+                crate::pricing::ToolCallCounts::new(),
+            ));
+            let tool_calls_for_map = tool_calls.clone();
 
-                // 前缀事件：仅 message_start（内容块统一由 middle 动态开启，
-                // 参照 aisix AnthropicSseEncoder：文本块在首个文本增量到达时才开块，
-                // 避免 thinking/文本/tool 块 index 冲突）
-                let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
-                let input_tokens_est =
-                    crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
-                let model_for_prefix = model.clone();
-                let prefix = futures::stream::once(async move {
-                    Ok::<_, Infallible>(
-                        Event::default()
-                            .event("message_start")
-                            .data(
-                                serde_json::json!({
-                                    "type": "message_start",
-                                    "message": {
-                                        "id": msg_id,
-                                        "type": "message",
-                                        "role": "assistant",
-                                        "content": [],
-                                        "model": model_for_prefix,
-                                        "stop_reason": null,
-                                        "stop_sequence": null,
-                                        "usage": {"input_tokens": input_tokens_est, "output_tokens": 0}
-                                    }
-                                })
-                                .to_string(),
-                            ),
-                    )
-                });
+            // 前缀事件：仅 message_start（内容块统一由 middle 动态开启，
+            // 参照 aisix AnthropicSseEncoder：文本块在首个文本增量到达时才开块，
+            // 避免 thinking/文本/tool 块 index 冲突）
+            let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
+            let input_tokens_est =
+                crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
+            let model_for_prefix = model.clone();
+            let prefix = futures::stream::once(async move {
+                Ok::<_, Infallible>(
+                    Event::default().event("message_start").data(
+                        serde_json::json!({
+                            "type": "message_start",
+                            "message": {
+                                "id": msg_id,
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [],
+                                "model": model_for_prefix,
+                                "stop_reason": null,
+                                "stop_sequence": null,
+                                "usage": {"input_tokens": input_tokens_est, "output_tokens": 0}
+                            }
+                        })
+                        .to_string(),
+                    ),
+                )
+            });
 
-                // 中间流：动态开块（thinking/文本/tool 共用递增 index）+ 增量
-                let has_tool = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let has_tool_middle = has_tool.clone();
-                let has_reasoning = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let has_reasoning_middle = has_reasoning.clone();
-                // 是否开启过任意内容块（thinking/文本/tool）——空流兜底用
-                let has_any_block = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let has_any_block_middle = has_any_block.clone();
-                // 块 index 状态：thinking_block_index / text_block_index 首次开启时
-                // 取 next_block_index 并自增，此后固定。tool_use 沿用 OpenAI 的
-                // tc.index（参照 aisix：tool_use 块 index = 下一个可用块 index）。
-                let mut next_block_index = 0usize;
-                let mut thinking_block_index: Option<usize> = None;
-                let mut text_block_index: Option<usize> = None;
-                let mut tool_block_indexes_mid: std::collections::BTreeMap<usize, usize> =
-                    std::collections::BTreeMap::new();
-                // 已发过 content_block_stop（finish_reason 分支置位）——force_finish 兜底用
-                let stop_emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let stop_emitted_middle = stop_emitted.clone();
-                let middle = stream.flat_map(move |chunk_result| {
+            // 中间流：动态开块（thinking/文本/tool 共用递增 index）+ 增量
+            let has_tool = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let has_tool_middle = has_tool.clone();
+            let has_reasoning = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let has_reasoning_middle = has_reasoning.clone();
+            // 是否开启过任意内容块（thinking/文本/tool）——空流兜底用
+            let has_any_block = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let has_any_block_middle = has_any_block.clone();
+            // 块 index 状态：thinking_block_index / text_block_index 首次开启时
+            // 取 next_block_index 并自增，此后固定。tool_use 沿用 OpenAI 的
+            // tc.index（参照 aisix：tool_use 块 index = 下一个可用块 index）。
+            let mut next_block_index = 0usize;
+            let mut thinking_block_index: Option<usize> = None;
+            let mut text_block_index: Option<usize> = None;
+            let mut tool_block_indexes_mid: std::collections::BTreeMap<usize, usize> =
+                std::collections::BTreeMap::new();
+            // 已发过 content_block_stop（finish_reason 分支置位）——force_finish 兜底用
+            let stop_emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop_emitted_middle = stop_emitted.clone();
+            let middle = stream.flat_map(move |chunk_result| {
                     use std::sync::atomic::Ordering;
                     let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
                     match chunk_result {
@@ -548,6 +613,13 @@ pub async fn handle_messages(
                                             format!("toolu_{}", uuid::Uuid::new_v4())
                                         });
                                         let name = tc.function_name.clone().unwrap_or_default();
+                                        // 统计工具调用（仅首帧），计费时折算附加费
+                                        if tc.id.is_some() && tc.function_name.is_some() {
+                                            *tool_calls_for_map
+                                                .lock()
+                                                .entry(name.clone())
+                                                .or_insert(0) += 1;
+                                        }
                                         events.push(Ok(
                                             Event::default().event("content_block_start").data(
                                                 serde_json::json!({
@@ -615,139 +687,134 @@ pub async fn handle_messages(
                     futures::stream::iter(events)
                 });
 
-                // 后缀：计费 + 按块序收尾 content_block_stop + message_delta + message_stop（问题 3/7）
-                // B05：计费状态由后缀事件与 Drop 守卫共享（原子标志互斥）——
-                // 正常结束时后缀事件计费；客户端断连导致流被 drop 时由守卫兜底。
-                let billing = std::sync::Arc::new(super::openai::StreamBillingState {
-                    state: state.clone(),
-                    api_key: api_key.clone(),
-                    model: model.clone(),
-                    group: billing_group.clone(),
-                    chat_req: chat_req.clone(),
-                    acc: acc.clone(),
-                    charged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    rate_bundle: Some(rate_bundle.clone()),
-                    request_start,
-                    client_ip: client_ip.clone(),
-                    request_id: request_id.clone(),
-                    channel_id: used_channel_id.clone(),
-                });
-                let billing_fin = billing.clone();
-                let has_tool_fin = has_tool.clone();
-                let has_any_block_fin = has_any_block.clone();
-                let stop_emitted_fin = stop_emitted.clone();
-                let suffix = futures::stream::once(async move {
-                    // completion tokens 需在 message_delta 事件中回显，先估算
-                    let completion_tokens = {
-                        let output_text = billing_fin.acc.lock().clone();
-                        crate::token_estimate::count_text(&billing_fin.model, &output_text) as u64
-                    };
+            // 后缀：计费 + 按块序收尾 content_block_stop + message_delta + message_stop（问题 3/7）
+            // B05：计费状态由后缀事件与 Drop 守卫共享（原子标志互斥）——
+            // 正常结束时后缀事件计费；客户端断连导致流被 drop 时由守卫兜底。
+            let billing = std::sync::Arc::new(super::openai::StreamBillingState {
+                state: state.clone(),
+                api_key: api_key.clone(),
+                model: model.clone(),
+                group: billing_group.clone(),
+                chat_req: chat_req.clone(),
+                tool_calls: tool_calls.clone(),
+                acc: acc.clone(),
+                charged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                rate_bundle: Some(rate_bundle.clone()),
+                request_start,
+                client_ip: client_ip.clone(),
+                request_id: request_id.clone(),
+                channel_id: used_channel_id.clone(),
+            });
+            let billing_fin = billing.clone();
+            let has_tool_fin = has_tool.clone();
+            let has_any_block_fin = has_any_block.clone();
+            let stop_emitted_fin = stop_emitted.clone();
+            let suffix = futures::stream::once(async move {
+                // completion tokens 需在 message_delta 事件中回显，先估算
+                let completion_tokens = {
+                    let output_text = billing_fin.acc.lock().clone();
+                    crate::token_estimate::count_text(&billing_fin.model, &output_text) as u64
+                };
 
-                    // 原子抢占计费权：断连场景守卫可能已兜底计费，双保险防重复
-                    let (prompt_tokens, completion_tokens) = if !billing_fin
-                        .charged
-                        .swap(true, std::sync::atomic::Ordering::SeqCst)
-                    {
-                        let (pt, ct) = billing_fin.finalize();
-                        // 事后限流记账
-                        rate_bundle.commit_tokens(pt + ct).await;
-                        (pt, ct)
-                    } else {
-                        // 守卫已兜底计费：此处仅取估算值供 message_delta 回显
-                        // 与 Prometheus 指标上报，不再重复扣费
-                        let prompt_tokens =
-                            crate::token_estimate::count_chat_prompt(&billing_fin.model, &billing_fin.chat_req)
-                                as u64;
-                        (prompt_tokens, completion_tokens)
-                    };
+                // 原子抢占计费权：断连场景守卫可能已兜底计费，双保险防重复
+                let (prompt_tokens, completion_tokens) = if !billing_fin
+                    .charged
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    let (pt, ct) = billing_fin.finalize();
+                    // 事后限流记账
+                    rate_bundle.commit_tokens(pt + ct).await;
+                    (pt, ct)
+                } else {
+                    // 守卫已兜底计费：此处仅取估算值供 message_delta 回显
+                    // 与 Prometheus 指标上报，不再重复扣费
+                    let prompt_tokens = crate::token_estimate::count_chat_prompt(
+                        &billing_fin.model,
+                        &billing_fin.chat_req,
+                    ) as u64;
+                    (prompt_tokens, completion_tokens)
+                };
 
-                    // Prometheus 指标
-                    crate::metrics::global().record_request(
-                        &billing_fin.model,
-                        billing_fin.channel_id.as_deref().unwrap_or("unknown"),
-                        "ok",
-                        billing_fin.request_start.elapsed().as_millis() as u64,
-                    );
-                    crate::metrics::global().record_tokens(
-                        &billing_fin.model,
-                        "prompt",
-                        prompt_tokens,
-                    );
-                    crate::metrics::global().record_tokens(
-                        &billing_fin.model,
-                        "completion",
-                        completion_tokens,
-                    );
+                // Prometheus 指标
+                crate::metrics::global().record_request(
+                    &billing_fin.model,
+                    billing_fin.channel_id.as_deref().unwrap_or("unknown"),
+                    "ok",
+                    billing_fin.request_start.elapsed().as_millis() as u64,
+                );
+                crate::metrics::global().record_tokens(&billing_fin.model, "prompt", prompt_tokens);
+                crate::metrics::global().record_tokens(
+                    &billing_fin.model,
+                    "completion",
+                    completion_tokens,
+                );
 
-                    // 结束事件序列（方案 A）：content_block_stop 已由中间流在
-                    // finish_reason chunk 处发出（用中间流自己的块 index 状态），
-                    // 后缀只负责：空流兜底 + force_finish 兜底 + message_delta + message_stop。
-                    let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
-                    let has_tool = has_tool_fin.load(std::sync::atomic::Ordering::Relaxed);
-                    let has_any_block = has_any_block_fin.load(std::sync::atomic::Ordering::Relaxed);
-                    let stop_sent = stop_emitted_fin.load(std::sync::atomic::Ordering::Relaxed);
-                    // force_finish 兜底（参照 aisix AnthropicSseEncoder::force_finish）：
-                    // 上游没发过 finish_reason，直接流结束。此时：
-                    // - 若开过块但 stop 未发 → 补发 stop（非空流漏 stop）
-                    // - 若一个块都没开过 → 补空文本块 + stop（空流兜底）
-                    // 两者都用 index 0（此场景下中间流必然只有一个活动块，
-                    // 多个块混排时上游必然发了 finish_reason 走中间流收尾）。
-                    if !stop_sent {
-                        let i = 0;
-                        if has_any_block {
-                            events.push(Ok(Event::default().event("content_block_stop").data(
-                                serde_json::json!({"type": "content_block_stop", "index": i})
-                                    .to_string(),
-                            )));
-                        } else {
-                            events.push(Ok(Event::default().event("content_block_start").data(
-                                serde_json::json!({
-                                    "type": "content_block_start",
-                                    "index": i,
-                                    "content_block": {"type": "text", "text": ""}
-                                })
+                // 结束事件序列（方案 A）：content_block_stop 已由中间流在
+                // finish_reason chunk 处发出（用中间流自己的块 index 状态），
+                // 后缀只负责：空流兜底 + force_finish 兜底 + message_delta + message_stop。
+                let mut events: Vec<std::result::Result<Event, Infallible>> = Vec::new();
+                let has_tool = has_tool_fin.load(std::sync::atomic::Ordering::Relaxed);
+                let has_any_block = has_any_block_fin.load(std::sync::atomic::Ordering::Relaxed);
+                let stop_sent = stop_emitted_fin.load(std::sync::atomic::Ordering::Relaxed);
+                // force_finish 兜底（参照 aisix AnthropicSseEncoder::force_finish）：
+                // 上游没发过 finish_reason，直接流结束。此时：
+                // - 若开过块但 stop 未发 → 补发 stop（非空流漏 stop）
+                // - 若一个块都没开过 → 补空文本块 + stop（空流兜底）
+                // 两者都用 index 0（此场景下中间流必然只有一个活动块，
+                // 多个块混排时上游必然发了 finish_reason 走中间流收尾）。
+                if !stop_sent {
+                    let i = 0;
+                    if has_any_block {
+                        events.push(Ok(Event::default().event("content_block_stop").data(
+                            serde_json::json!({"type": "content_block_stop", "index": i})
                                 .to_string(),
-                            )));
-                            events.push(Ok(Event::default().event("content_block_stop").data(
-                                serde_json::json!({"type": "content_block_stop", "index": i})
-                                    .to_string(),
-                            )));
-                        }
-                    }
-                    // 结束事件（工具调用时 stop_reason=tool_use）
-                    let stop_reason = if has_tool {
-                        "tool_use"
+                        )));
                     } else {
-                        "end_turn"
-                    };
-                    events.push(Ok(
-                        Event::default().event("message_delta").data(
+                        events.push(Ok(Event::default().event("content_block_start").data(
                             serde_json::json!({
-                                "type": "message_delta",
-                                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                                "usage": {"output_tokens": completion_tokens}
+                                "type": "content_block_start",
+                                "index": i,
+                                "content_block": {"type": "text", "text": ""}
                             })
                             .to_string(),
-                        ),
-                    ));
-                    events.push(Ok(
-                        Event::default()
-                            .event("message_stop")
-                            .data(serde_json::json!({"type": "message_stop"}).to_string()),
-                    ));
-                    events
-                })
-                .map(futures::stream::iter)
-                .flatten();
+                        )));
+                        events.push(Ok(Event::default().event("content_block_stop").data(
+                            serde_json::json!({"type": "content_block_stop", "index": i})
+                                .to_string(),
+                        )));
+                    }
+                }
+                // 结束事件（工具调用时 stop_reason=tool_use）
+                let stop_reason = if has_tool { "tool_use" } else { "end_turn" };
+                events.push(Ok(Event::default().event("message_delta").data(
+                    serde_json::json!({
+                        "type": "message_delta",
+                        "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+                        "usage": {"output_tokens": completion_tokens}
+                    })
+                    .to_string(),
+                )));
+                events.push(Ok(Event::default()
+                    .event("message_stop")
+                    .data(serde_json::json!({"type": "message_stop"}).to_string())));
+                events
+            })
+            .map(futures::stream::iter)
+            .flatten();
 
-                let combined = prefix.chain(middle).chain(suffix);
+            let combined = prefix.chain(middle).chain(suffix);
 
-                // B05：包装守卫流——流被 drop（含客户端断连）时兜底计费
-                let guarded = super::openai::GuardedStream {
-                    inner: Box::pin(combined),
-                    _guard: super::openai::StreamUsageGuard::new(billing),
-                };
-                Sse::new(guarded).keep_alive(axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15))).into_response()
+            // B05：包装守卫流——流被 drop（含客户端断连）时兜底计费
+            let guarded = super::openai::GuardedStream {
+                inner: Box::pin(combined),
+                _guard: super::openai::StreamUsageGuard::new(billing),
+            };
+            Sse::new(guarded)
+                .keep_alive(
+                    axum::response::sse::KeepAlive::new()
+                        .interval(std::time::Duration::from_secs(15)),
+                )
+                .into_response()
         }
     } else {
         // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
@@ -774,7 +841,9 @@ pub async fn handle_messages(
                     if let Some(cid) = &cid {
                         state.channel_store.mark_cooldown(cid, e.to_string(), 60);
                     }
-                    tracing::warn!("messages failover: channel {cid:?} failed: {e}, trying next channel");
+                    tracing::warn!(
+                        "messages failover: channel {cid:?} failed: {e}, trying next channel"
+                    );
                     last_error = Some(e);
                 }
             }
@@ -788,7 +857,8 @@ pub async fn handle_messages(
                     )
                 });
                 let latency_ms = request_start.elapsed().as_millis() as u64;
-                let status_code = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let status_code = StatusCode::from_u16(e.http_status())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                 let mut log = crate::log::RequestLog::new();
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
@@ -809,109 +879,108 @@ pub async fn handle_messages(
                 );
                 // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
                 if status_code.as_u16() >= 500 {
-                    state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
-                        channel_name: model.clone(),
-                        error: e.to_string(),
-                    });
+                    state
+                        .notify_service
+                        .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                            channel_name: model.clone(),
+                            error: e.to_string(),
+                        });
                 }
-                return anthropic_error(e.error_type(), &e.to_string(), status_code).into_response();
+                return anthropic_error(e.error_type(), &e.to_string(), status_code)
+                    .into_response();
             }
         };
         {
-                let latency_ms = request_start.elapsed().as_millis() as u64;
-                state.usage_tracker.accumulate(
-                    response.usage.prompt_tokens,
-                    response.usage.completion_tokens,
-                    0,
-                    0,
-                    0,
-                    0.0,
-                );
+            let latency_ms = request_start.elapsed().as_millis() as u64;
+            state.usage_tracker.accumulate(
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+                0,
+                0,
+                0,
+                0.0,
+            );
 
-                // 计费扣减：复用 charge_usage 以保证 QuotaLow 通知等行为与流式分支一致
-                // （问题 5/6；M10 同类问题。原内联实现缺少 QuotaLow 通知，属行为 bug）
-                let cost = super::openai::charge_usage(
-                    &state,
-                    &api_key,
-                    &model,
-                    &billing_group,
-                    response.usage.prompt_tokens,
-                    response.usage.completion_tokens,
-                );
+            // 计费扣减：复用 charge_usage 以保证 QuotaLow 通知等行为与流式分支一致
+            // （问题 5/6；M10 同类问题。原内联实现缺少 QuotaLow 通知，属行为 bug）
+            let cost = super::openai::charge_usage(
+                &state,
+                &api_key,
+                &model,
+                &billing_group,
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+            );
 
-                // 事后限流记账
-                let total_tokens = response.usage.prompt_tokens + response.usage.completion_tokens;
-                rate_bundle.commit_tokens(total_tokens).await;
+            // 事后限流记账
+            let total_tokens = response.usage.prompt_tokens + response.usage.completion_tokens;
+            rate_bundle.commit_tokens(total_tokens).await;
 
-                // 记录请求日志（含 channel_id，问题 4）
-                let mut log = crate::log::RequestLog::new();
-                log.user_id = api_key.user_id.clone();
-                log.key_id = Some(api_key.id.clone());
-                log.channel_id = used_channel_id.clone();
-                log.model = model.clone();
-                log.input_tokens = response.usage.prompt_tokens;
-                log.output_tokens = response.usage.completion_tokens;
-                log.cost = cost;
-                log.latency_ms = latency_ms;
-                log.status_code = 200;
-                log.ip = client_ip.clone();
-                log.request_id = Some(request_id.clone());
-                state.log_store.record_request(log);
+            // 记录请求日志（含 channel_id，问题 4）
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = used_channel_id.clone();
+            log.model = model.clone();
+            log.input_tokens = response.usage.prompt_tokens;
+            log.output_tokens = response.usage.completion_tokens;
+            log.cost = cost;
+            log.latency_ms = latency_ms;
+            log.status_code = 200;
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id.clone());
+            state.log_store.record_request(log);
 
-                // Prometheus 指标
-                crate::metrics::global().record_request(
-                    &model,
-                    used_channel_id.as_deref().unwrap_or("unknown"),
-                    "ok",
-                    latency_ms,
-                );
-                crate::metrics::global().record_tokens(
-                    &model,
-                    "prompt",
-                    response.usage.prompt_tokens,
-                );
-                crate::metrics::global().record_tokens(
-                    &model,
-                    "completion",
-                    response.usage.completion_tokens,
-                );
+            // Prometheus 指标
+            crate::metrics::global().record_request(
+                &model,
+                used_channel_id.as_deref().unwrap_or("unknown"),
+                "ok",
+                latency_ms,
+            );
+            crate::metrics::global().record_tokens(&model, "prompt", response.usage.prompt_tokens);
+            crate::metrics::global().record_tokens(
+                &model,
+                "completion",
+                response.usage.completion_tokens,
+            );
 
-                let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
-                // 工具调用时输出 tool_use 内容块（与流式分支保持一致）
-                let mut content_blocks: Vec<Value> = Vec::new();
-                if let Some(tool_calls) = &response.message.tool_calls {
-                    for tc in tool_calls {
-                        let input = serde_json::from_str::<Value>(&tc.arguments)
-                            .unwrap_or_else(|_| Value::Object(Default::default()));
-                        content_blocks.push(serde_json::json!({
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.function_name,
-                            "input": input,
-                        }));
-                    }
-                }
-                let text = response.message.content_str();
-                if !text.is_empty() {
+            let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
+            // 工具调用时输出 tool_use 内容块（与流式分支保持一致）
+            let mut content_blocks: Vec<Value> = Vec::new();
+            if let Some(tool_calls) = &response.message.tool_calls {
+                for tc in tool_calls {
+                    let input = serde_json::from_str::<Value>(&tc.arguments)
+                        .unwrap_or_else(|_| Value::Object(Default::default()));
                     content_blocks.push(serde_json::json!({
-                        "type": "text",
-                        "text": text,
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.function_name,
+                        "input": input,
                     }));
                 }
-                let anthropic_resp = serde_json::json!({
-                    "id": msg_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "content": content_blocks,
-                    "model": response.model,
-                    "stop_reason": to_anthropic_stop_reason(&response.finish_reason),
-                    "stop_sequence": null,
-                    "usage": {
-                        "input_tokens": response.usage.prompt_tokens,
-                        "output_tokens": response.usage.completion_tokens,
-                    }
-                });
-                Json(anthropic_resp).into_response()
+            }
+            let text = response.message.content_str();
+            if !text.is_empty() {
+                content_blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": text,
+                }));
+            }
+            let anthropic_resp = serde_json::json!({
+                "id": msg_id,
+                "type": "message",
+                "role": "assistant",
+                "content": content_blocks,
+                "model": response.model,
+                "stop_reason": to_anthropic_stop_reason(&response.finish_reason),
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": response.usage.prompt_tokens,
+                    "output_tokens": response.usage.completion_tokens,
+                }
+            });
+            Json(anthropic_resp).into_response()
         }
     }
 }

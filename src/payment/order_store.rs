@@ -5,8 +5,8 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::storage::FileStore;
 use super::TopUpOrder;
+use crate::storage::FileStore;
 
 pub struct OrderStore {
     store: Arc<FileStore>,
@@ -36,8 +36,11 @@ impl OrderStore {
     }
 
     pub fn insert(&self, order: &TopUpOrder) -> Result<()> {
-        self.store.put(&format!("order:{}", order.trade_no), order)?;
-        self.by_no.write().insert(order.trade_no.clone(), order.clone());
+        self.store
+            .put(&format!("order:{}", order.trade_no), order)?;
+        self.by_no
+            .write()
+            .insert(order.trade_no.clone(), order.clone());
         Ok(())
     }
 

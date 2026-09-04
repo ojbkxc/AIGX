@@ -20,6 +20,7 @@ use crate::bridge::{
 };
 use crate::channel::ChannelStore;
 use crate::config::ConfigManager;
+use crate::health::{HealthTracker, LivezState};
 use crate::hub::Hub;
 use crate::log::LogStore;
 use crate::model::ModelMapper;
@@ -32,7 +33,6 @@ use crate::redemption::RedemptionStore;
 use crate::usage::UsageTracker;
 use crate::user::UserStore;
 use crate::user_group::UserGroupStore;
-use crate::health::{HealthTracker, LivezState};
 
 // SeaORM 数据库连接（仅当启用 sea-orm feature 时可用）
 #[cfg(feature = "sea-orm")]
@@ -101,10 +101,10 @@ pub struct AppState {
     /// 连接池/TLS 握手开销。供 `bridge::openai::make_bridge` 与 admin 用量
     /// 刷新等 HTTP 调用使用。`reqwest::Client` 内部已基于 Arc，clone 廉价。
     pub http_client: Arc<reqwest::Client>,
-    /// ????????exact-match?model+messages hash key??
+    /// 响应缓存（exact-match：model + messages hash 作 key）。
     ///
-    /// ?? aisix aisix-cache???? prompt ??????????????
-    /// ?????????????????
+    /// 参照 aisix aisix-cache 的 prompt 缓存设计：相同请求直接命中缓存，
+    /// 避免重复计费与上游调用；命中时旁路计费与渠道调度。
     pub response_cache: Arc<crate::cache::AsyncCache<String, Value>>,
     /// Semantic routing (prompt embedding match)
     pub semantic_router: Arc<crate::semantic::SemanticRouter>,
@@ -204,7 +204,6 @@ fn verify_api_key_full(
 pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<(Arc<dyn Bridge>, Option<String>)> {
     let mut result: Vec<(Arc<dyn Bridge>, Option<String>)> = Vec::new();
 
-
     // 第一级：通用渠道（按 priority/weight 选取支持该 model 的渠道）
     let candidates = state.channel_store.select_for_model(model);
     for ch in &candidates {
@@ -219,11 +218,17 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<(Arc<dyn Bridge>, O
                 }
             }
             crate::channel::ChannelType::Anthropic => {
-                // Anthropic 兼容暂复用 OpenAI bridge（多数上游兼容 OpenAI 协议）
+                // Anthropic 原生上游走 AnthropicBridge（/v1/messages + x-api-key +
+                // anthropic-version），而非复用 OpenAI bridge。对接真正的 Anthropic
+                // 原生 API 必须用本 bridge，否则 401/400（参见 bridge/anthropic.rs）
                 let key = ch.decode_api_key();
                 if !key.is_empty() {
                     result.push((
-                        crate::bridge::openai::make_bridge(&ch.base_url, &key, &state.http_client),
+                        crate::bridge::anthropic::make_bridge(
+                            &ch.base_url,
+                            &key,
+                            &state.http_client,
+                        ),
                         Some(ch.id.clone()),
                     ));
                 }
@@ -264,8 +269,12 @@ pub(crate) fn is_retryable_bridge_error(e: &crate::bridge::BridgeError) -> bool 
         | BridgeError::UpstreamDecode(_)
         | BridgeError::AuthError(_)
         | BridgeError::InvalidUpstreamCredentials(_) => true,
-        BridgeError::UpstreamStatus { status, .. } => *status >= 500 || *status == 401 || *status == 403 || *status == 429,
-        BridgeError::Config(_) | BridgeError::InvalidUpstreamConfig(_) | BridgeError::ModelNotFound(_) => false,
+        BridgeError::UpstreamStatus { status, .. } => {
+            *status >= 500 || *status == 401 || *status == 403 || *status == 429
+        }
+        BridgeError::Config(_)
+        | BridgeError::InvalidUpstreamConfig(_)
+        | BridgeError::ModelNotFound(_) => false,
     }
 }
 
@@ -306,10 +315,7 @@ pub fn check_group_model_permission(
 ///
 /// 未配置价格的模型若被放行，事后计费将静默为 0（产生免费用量）；
 /// 在入口处拦截可避免“管理员忘记配置价格 → 用户免费白嫖”的资金损失。
-pub fn ensure_model_priced(
-    state: &AppState,
-    model: &str,
-) -> Result<(), (StatusCode, Json<Value>)> {
+pub fn ensure_model_priced(state: &AppState, model: &str) -> Result<(), (StatusCode, Json<Value>)> {
     if state.pricing_store.get_price(model).is_none() {
         return Err(error_response(
             "model_not_priced",
@@ -335,25 +341,55 @@ pub fn charge_usage(
     prompt_tokens: u64,
     completion_tokens: u64,
 ) -> i64 {
+    charge_usage_with_tools(
+        state,
+        api_key,
+        model,
+        group,
+        prompt_tokens,
+        completion_tokens,
+        None,
+    )
+}
+
+/// 计费扣减（带工具按次调用附加费）。
+///
+/// 与 `charge_usage` 相同，额外将 `tool_calls`（工具名 → 调用次数）按
+/// `PricingStore::calculate_tool_surcharge` 折算为附加费并入总 cost。
+pub fn charge_usage_with_tools(
+    state: &AppState,
+    api_key: &super::auth::ApiKey,
+    model: &str,
+    group: &str,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    tool_calls: Option<&crate::pricing::ToolCallCounts>,
+) -> i64 {
     // B09：无定价时记告警并按 0 计费兜底——请求已在入口被 ensure_model_priced
     // 拦截，此处仅防御“请求进行中价格被删除”的竞态场景
-    let cost = match state
-        .pricing_store
-        .calculate_cost_quoted(model, prompt_tokens, completion_tokens, group)
-    {
+    let mut cost = match state.pricing_store.calculate_cost_quoted(
+        model,
+        prompt_tokens,
+        completion_tokens,
+        group,
+    ) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("charge_usage: {e}, billing as 0 (price removed mid-request?)");
             0
         }
     };
+    if let Some(tools) = tool_calls {
+        cost = cost.saturating_add(
+            state
+                .pricing_store
+                .calculate_tool_surcharge(tools, model, group),
+        );
+    }
     // Prometheus 成本指标：pricing 以 USD 计价，cost 即向上取整后的美元配额
     // （单位 1 美元），统一折算为微美元累加，供 /metrics 展示 aigx_cost_usd_total。
     if cost > 0 {
-        crate::metrics::global().record_cost(
-            "usd",
-            (cost as u64).saturating_mul(1_000_000),
-        );
+        crate::metrics::global().record_cost("usd", (cost as u64).saturating_mul(1_000_000));
         if let Some(uid) = &api_key.user_id {
             // 用户余额不足时跳过 key 扣费（问题 6）
             let charged = state.user_store.try_charge(uid, cost);
@@ -363,12 +399,12 @@ pub fn charge_usage(
                 // 阈值：固定 1000 或 quota 的 10%，取较小者；扣费失败必通知
                 let threshold = (u.quota / 10).clamp(1000, 10000);
                 if !charged || remaining < threshold {
-                    state.notify_service.notify_spawn(
-                        crate::notify::NotifyEvent::QuotaLow {
+                    state
+                        .notify_service
+                        .notify_spawn(crate::notify::NotifyEvent::QuotaLow {
                             user_email: u.email.clone(),
                             remaining,
-                        },
-                    );
+                        });
                 }
             }
             // 问题 6：try_charge 失败时跳过 charge_quota，保持计费一致性
@@ -400,6 +436,8 @@ pub(crate) struct StreamBillingState {
     pub(crate) group: String,
     /// 请求快照（用于估算 prompt tokens）
     pub(crate) chat_req: ChatFormat,
+    /// 工具按次调用计数表（流式过程中统计 tool_use 起始块）
+    pub(crate) tool_calls: Arc<parking_lot::Mutex<crate::pricing::ToolCallCounts>>,
     /// 输出文本累积器（用于估算 completion tokens）
     pub(crate) acc: Arc<parking_lot::Mutex<String>>,
     /// 计费权标志：false=未计费，true=已计费
@@ -420,29 +458,30 @@ impl StreamBillingState {
     /// 返回 (prompt_tokens, completion_tokens) 供调用方提交限流记账。
     pub(crate) fn finalize(&self) -> (u64, u64) {
         let output_text = self.acc.lock().clone();
-        let completion_tokens =
-            crate::token_estimate::count_text(&self.model, &output_text) as u64;
+        let completion_tokens = crate::token_estimate::count_text(&self.model, &output_text) as u64;
         let prompt_tokens =
             crate::token_estimate::count_chat_prompt(&self.model, &self.chat_req) as u64;
 
         // 累计用量
-        self.state.usage_tracker.accumulate(
-            prompt_tokens,
-            completion_tokens,
-            0,
-            0,
-            0,
-            0.0,
-        );
+        self.state
+            .usage_tracker
+            .accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
 
-        // 扣费（try_charge + QuotaLow 通知 + key 扣减）
-        let cost = charge_usage(
+        // 扣费（try_charge + QuotaLow 通知 + key 扣减，含工具附加费）
+        let tool_calls = self.tool_calls.lock().clone();
+        let tool_calls_opt = if tool_calls.is_empty() {
+            None
+        } else {
+            Some(&tool_calls)
+        };
+        let cost = charge_usage_with_tools(
             &self.state,
             &self.api_key,
             &self.model,
             &self.group,
             prompt_tokens,
             completion_tokens,
+            tool_calls_opt,
         );
 
         // 记录请求日志（B20：真实耗时）
@@ -501,11 +540,17 @@ impl Drop for StreamUsageGuard {
             self.billing.request_start.elapsed().as_millis() as u64,
         );
         crate::metrics::global().record_tokens(&self.billing.model, "prompt", prompt_tokens);
-        crate::metrics::global().record_tokens(&self.billing.model, "completion", completion_tokens);
+        crate::metrics::global().record_tokens(
+            &self.billing.model,
+            "completion",
+            completion_tokens,
+        );
         if let Some(bundle) = self.billing.rate_bundle.clone() {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
-                    bundle.commit_tokens(prompt_tokens + completion_tokens).await;
+                    bundle
+                        .commit_tokens(prompt_tokens + completion_tokens)
+                        .await;
                 });
             }
         }
@@ -579,23 +624,16 @@ impl ResponsesBillingState {
         let output_text = self.acc.lock().clone();
         // 上游未上报 usage 的侧逐项估算
         if prompt_tokens == 0 {
-            prompt_tokens =
-                crate::token_estimate::count_text(&self.model, &self.input_text) as u64;
+            prompt_tokens = crate::token_estimate::count_text(&self.model, &self.input_text) as u64;
         }
         if completion_tokens == 0 {
-            completion_tokens =
-                crate::token_estimate::count_text(&self.model, &output_text) as u64;
+            completion_tokens = crate::token_estimate::count_text(&self.model, &output_text) as u64;
         }
 
         // 累计用量
-        self.state.usage_tracker.accumulate(
-            prompt_tokens,
-            completion_tokens,
-            0,
-            0,
-            0,
-            0.0,
-        );
+        self.state
+            .usage_tracker
+            .accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
 
         // 扣费（try_charge + QuotaLow 通知 + key 扣减）
         let cost = charge_usage(
@@ -647,11 +685,17 @@ impl Drop for ResponsesStreamGuard {
             self.billing.request_start.elapsed().as_millis() as u64,
         );
         crate::metrics::global().record_tokens(&self.billing.model, "prompt", prompt_tokens);
-        crate::metrics::global().record_tokens(&self.billing.model, "completion", completion_tokens);
+        crate::metrics::global().record_tokens(
+            &self.billing.model,
+            "completion",
+            completion_tokens,
+        );
         if let Some(bundle) = self.billing.rate_bundle.clone() {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
-                    bundle.commit_tokens(prompt_tokens + completion_tokens).await;
+                    bundle
+                        .commit_tokens(prompt_tokens + completion_tokens)
+                        .await;
                 });
             }
         }
@@ -670,10 +714,29 @@ fn parse_messages(value: Option<&Value>) -> Option<Vec<ChatMessage>> {
             Some("tool") => Role::Tool,
             _ => continue,
         };
-        let content = msg
-            .get("content")
-            .and_then(|c| c.as_str())
-            .map(|s| s.to_string());
+        // content 支持三种 wire 形状：string / null / typed-block 数组。
+        // 数组形式时：content_blocks 原样保留供支持 blocks 的 bridge verbatim 转发
+        // （vision/多模态），content 拼接所有 text 块供不支持 blocks 的 bridge 使用。
+        let raw_content = msg.get("content");
+        let (content, content_blocks) = match raw_content {
+            Some(Value::String(s)) => (Some(s.clone()), None),
+            Some(Value::Array(blocks)) => {
+                let text = blocks
+                    .iter()
+                    .filter_map(|b| {
+                        if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            b.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                let text = if text.is_empty() { None } else { Some(text) };
+                (text, Some(blocks.clone()))
+            }
+            _ => (None, None),
+        };
         let name = msg
             .get("name")
             .and_then(|n| n.as_str())
@@ -688,7 +751,11 @@ fn parse_messages(value: Option<&Value>) -> Option<Vec<ChatMessage>> {
             .map(|arr| {
                 arr.iter()
                     .map(|t| crate::bridge::ToolCall {
-                        id: t.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
+                        id: t
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         function_name: t
                             .get("function")
                             .and_then(|f| f.get("name"))
@@ -707,6 +774,7 @@ fn parse_messages(value: Option<&Value>) -> Option<Vec<ChatMessage>> {
         messages.push(ChatMessage {
             role,
             content,
+            content_blocks,
             name,
             tool_call_id,
             tool_calls,
@@ -748,8 +816,12 @@ pub async fn handle_chat_completions(
     let model = match body.get("model").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
         None => {
-            return error_response("invalid_model", "Missing model field", StatusCode::BAD_REQUEST)
-                .into_response()
+            return error_response(
+                "invalid_model",
+                "Missing model field",
+                StatusCode::BAD_REQUEST,
+            )
+            .into_response()
         }
     };
 
@@ -760,12 +832,16 @@ pub async fn handle_chat_completions(
     };
 
     // 限流检查（功能 3）：鉴权后、推理前
-    let rate_bundle = match state.rate_limiter.check(
-        &api_key.id,
-        &model,
-        api_key.user_id.as_deref(),
-        client_ip.as_deref(),
-    ).await {
+    let rate_bundle = match state
+        .rate_limiter
+        .check(
+            &api_key.id,
+            &model,
+            api_key.user_id.as_deref(),
+            client_ip.as_deref(),
+        )
+        .await
+    {
         Ok(b) => b,
         Err(e) => {
             let retry_after = e.retry_after_secs().unwrap_or(60);
@@ -773,7 +849,8 @@ pub async fn handle_chat_completions(
                 "rate_limit_exceeded",
                 &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
                 StatusCode::TOO_MANY_REQUESTS,
-            ).into_response();
+            )
+            .into_response();
         }
     };
 
@@ -807,8 +884,12 @@ pub async fn handle_chat_completions(
     // 解析消息列表
     let messages = parse_messages(body.get("messages")).unwrap_or_default();
     if messages.is_empty() {
-        return error_response("invalid_messages", "No valid messages", StatusCode::BAD_REQUEST)
-            .into_response();
+        return error_response(
+            "invalid_messages",
+            "No valid messages",
+            StatusCode::BAD_REQUEST,
+        )
+        .into_response();
     }
 
     // 构建 ChatFormat
@@ -819,10 +900,29 @@ pub async fn handle_chat_completions(
             .get("tools")
             .and_then(|t| t.as_array())
             .map(|arr| arr.to_vec()),
-        max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+        max_tokens: body
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
         temperature: body.get("temperature").and_then(|v| v.as_f64()),
         top_p: body.get("top_p").and_then(|v| v.as_f64()),
         stream: is_stream,
+        top_k: None,
+        stop: body
+            .get("stop")
+            .and_then(|s| s.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            }),
+        tool_choice: body.get("tool_choice").cloned(),
+        reasoning_effort: body
+            .get("reasoning_effort")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        web_search_options: body.get("web_search_options").cloned(),
+        extra: None,
     };
 
     let ctx = BridgeContext::new(request_id.clone(), model.clone());
@@ -852,7 +952,9 @@ pub async fn handle_chat_completions(
                     if let Some(cid) = &cid {
                         state.channel_store.mark_cooldown(cid, e.to_string(), 60);
                     }
-                    tracing::warn!("chat_stream failover: channel {cid:?} failed: {e}, trying next channel");
+                    tracing::warn!(
+                        "chat_stream failover: channel {cid:?} failed: {e}, trying next channel"
+                    );
                     last_error = Some(e);
                 }
             }
@@ -866,7 +968,8 @@ pub async fn handle_chat_completions(
                     )
                 });
                 let latency_ms = request_start.elapsed().as_millis() as u64;
-                let status_code = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let status_code = StatusCode::from_u16(e.http_status())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                 let mut log = crate::log::RequestLog::new();
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
@@ -887,10 +990,12 @@ pub async fn handle_chat_completions(
                 );
                 // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
                 if status_code.as_u16() >= 500 {
-                    state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
-                        channel_name: model.clone(),
-                        error: e.to_string(),
-                    });
+                    state
+                        .notify_service
+                        .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                            channel_name: model.clone(),
+                            error: e.to_string(),
+                        });
                 }
                 return bridge_error_response(e).into_response();
             }
@@ -899,8 +1004,13 @@ pub async fn handle_chat_completions(
             // 累积输出文本用于流结束时估算 token（问题 3）
             let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
             let acc_for_map = acc.clone();
+            // 工具按次调用计数表（流式过程统计 tool_use 起始块，计费时折算附加费）
+            let tool_calls = std::sync::Arc::new(parking_lot::Mutex::new(
+                crate::pricing::ToolCallCounts::new(),
+            ));
+            let tool_calls_for_map = tool_calls.clone();
 
-                let sse_stream = stream.map(move |chunk_result| match chunk_result {
+            let sse_stream = stream.map(move |chunk_result| match chunk_result {
                     Ok(chunk) => {
                         // 累积内容文本用于事后估算 completion tokens
                         // （含 thinking 推理内容与工具调用参数，与 cf-ai-gw 的
@@ -919,6 +1029,17 @@ pub async fn handle_chat_completions(
                                 }
                                 if let Some(args) = &tc.arguments {
                                     crate::token_estimate::push_capped(&mut buf, args);
+                                }
+                                // 仅统计 tool_use 起始帧（带 id/name 的首帧），
+                                // 避免对参数分片帧重复计数（与 new-api
+                                // `content_block_start tool_use` 的计数口径一致）。
+                                if tc.function_name.is_some() && tc.id.is_some() {
+                                    if let Some(name) = &tc.function_name {
+                                        *tool_calls_for_map
+                                            .lock()
+                                            .entry(name.clone())
+                                            .or_insert(0) += 1;
+                                    }
                                 }
                             }
                         }
@@ -983,76 +1104,74 @@ pub async fn handle_chat_completions(
                     }
                 });
 
-                // 流结束：估算 token、扣费、commit_tokens、记录日志（问题 3）
-                // B05：计费状态由后缀事件与 Drop 守卫共享（原子标志互斥）——
-                // 正常结束时后缀事件计费；客户端断连导致流被 drop 时由守卫兜底。
-                let billing = Arc::new(StreamBillingState {
-                    state: state.clone(),
-                    api_key: api_key.clone(),
-                    model: model.clone(),
-                    group: billing_group.clone(),
-                    chat_req: chat_req.clone(),
-                    acc: acc.clone(),
-                    charged: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    rate_bundle: Some(rate_bundle.clone()),
-                    request_start,
-                    client_ip: client_ip.clone(),
-                    request_id: request_id.clone(),
-                    channel_id: used_channel_id.clone(),
-                });
-                let billing_fin = billing.clone();
-                let final_event = async move {
-                    // 原子抢占计费权：断连场景守卫可能已兜底计费，双保险防重复
-                    let (prompt_tokens, completion_tokens) = if !billing_fin
-                        .charged
-                        .swap(true, std::sync::atomic::Ordering::SeqCst)
-                    {
-                        let (pt, ct) = billing_fin.finalize();
-                        // 事后限流记账（TPM）
-                        rate_bundle.commit_tokens(pt + ct).await;
-                        (pt, ct)
-                    } else {
-                        // 守卫已兜底计费：这里只取估算值供指标上报，不再重复扣费
-                        let output_text = billing_fin.acc.lock().clone();
-                        (
-                            crate::token_estimate::count_chat_prompt(
-                                &billing_fin.model,
-                                &billing_fin.chat_req,
-                            ) as u64,
-                            crate::token_estimate::count_text(&billing_fin.model, &output_text)
-                                as u64,
-                        )
-                    };
-
-                    // Prometheus 指标
-                    crate::metrics::global().record_request(
-                        &billing_fin.model,
-                        billing_fin.channel_id.as_deref().unwrap_or("unknown"),
-                        "ok",
-                        billing_fin.request_start.elapsed().as_millis() as u64,
-                    );
-                    crate::metrics::global().record_tokens(
-                        &billing_fin.model,
-                        "prompt",
-                        prompt_tokens,
-                    );
-                    crate::metrics::global().record_tokens(
-                        &billing_fin.model,
-                        "completion",
-                        completion_tokens,
-                    );
-
-                    Ok::<_, Infallible>(Event::default().data("[DONE]"))
-                };
-                let combined = sse_stream.chain(futures::stream::once(final_event));
-
-                // B05：包装守卫流——流被 drop（含客户端断连）时兜底计费
-                let guarded = GuardedStream {
-                    inner: Box::pin(combined),
-                    _guard: StreamUsageGuard::new(billing),
+            // 流结束：估算 token、扣费、commit_tokens、记录日志（问题 3）
+            // B05：计费状态由后缀事件与 Drop 守卫共享（原子标志互斥）——
+            // 正常结束时后缀事件计费；客户端断连导致流被 drop 时由守卫兜底。
+            let billing = Arc::new(StreamBillingState {
+                state: state.clone(),
+                api_key: api_key.clone(),
+                model: model.clone(),
+                group: billing_group.clone(),
+                chat_req: chat_req.clone(),
+                tool_calls: tool_calls.clone(),
+                acc: acc.clone(),
+                charged: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                rate_bundle: Some(rate_bundle.clone()),
+                request_start,
+                client_ip: client_ip.clone(),
+                request_id: request_id.clone(),
+                channel_id: used_channel_id.clone(),
+            });
+            let billing_fin = billing.clone();
+            let final_event = async move {
+                // 原子抢占计费权：断连场景守卫可能已兜底计费，双保险防重复
+                let (prompt_tokens, completion_tokens) = if !billing_fin
+                    .charged
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    let (pt, ct) = billing_fin.finalize();
+                    // 事后限流记账（TPM）
+                    rate_bundle.commit_tokens(pt + ct).await;
+                    (pt, ct)
+                } else {
+                    // 守卫已兜底计费：这里只取估算值供指标上报，不再重复扣费
+                    let output_text = billing_fin.acc.lock().clone();
+                    (
+                        crate::token_estimate::count_chat_prompt(
+                            &billing_fin.model,
+                            &billing_fin.chat_req,
+                        ) as u64,
+                        crate::token_estimate::count_text(&billing_fin.model, &output_text) as u64,
+                    )
                 };
 
-                Sse::new(guarded).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15))).into_response()
+                // Prometheus 指标
+                crate::metrics::global().record_request(
+                    &billing_fin.model,
+                    billing_fin.channel_id.as_deref().unwrap_or("unknown"),
+                    "ok",
+                    billing_fin.request_start.elapsed().as_millis() as u64,
+                );
+                crate::metrics::global().record_tokens(&billing_fin.model, "prompt", prompt_tokens);
+                crate::metrics::global().record_tokens(
+                    &billing_fin.model,
+                    "completion",
+                    completion_tokens,
+                );
+
+                Ok::<_, Infallible>(Event::default().data("[DONE]"))
+            };
+            let combined = sse_stream.chain(futures::stream::once(final_event));
+
+            // B05：包装守卫流——流被 drop（含客户端断连）时兜底计费
+            let guarded = GuardedStream {
+                inner: Box::pin(combined),
+                _guard: StreamUsageGuard::new(billing),
+            };
+
+            Sse::new(guarded)
+                .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+                .into_response()
         }
     } else {
         // 响应缓存：非流式请求尝试缓存命中
@@ -1061,11 +1180,13 @@ pub async fn handle_chat_completions(
             "messages": body.get("messages").cloned().unwrap_or(Value::Null),
             "temperature": body.get("temperature").cloned().unwrap_or(Value::Null),
             "max_tokens": body.get("max_tokens").cloned().unwrap_or(Value::Null),
-        })).unwrap_or_default();
+        }))
+        .unwrap_or_default();
         if let Some(cached) = state.response_cache.get(&cache_key).await {
             tracing::debug!("response cache hit for model {}", model);
             let mut resp = Json(cached).into_response();
-            resp.headers_mut().insert("x-aigx-cache", "hit".parse().unwrap());
+            resp.headers_mut()
+                .insert("x-aigx-cache", "hit".parse().unwrap());
             return resp;
         }
         // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
@@ -1092,7 +1213,9 @@ pub async fn handle_chat_completions(
                     if let Some(cid) = &cid {
                         state.channel_store.mark_cooldown(cid, e.to_string(), 60);
                     }
-                    tracing::warn!("chat failover: channel {cid:?} failed: {e}, trying next channel");
+                    tracing::warn!(
+                        "chat failover: channel {cid:?} failed: {e}, trying next channel"
+                    );
                     last_error = Some(e);
                 }
             }
@@ -1106,7 +1229,8 @@ pub async fn handle_chat_completions(
                     )
                 });
                 let latency_ms = request_start.elapsed().as_millis() as u64;
-                let status_code = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let status_code = StatusCode::from_u16(e.http_status())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                 let mut log = crate::log::RequestLog::new();
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
@@ -1127,119 +1251,118 @@ pub async fn handle_chat_completions(
                 );
                 // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
                 if status_code.as_u16() >= 500 {
-                    state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
-                        channel_name: model.clone(),
-                        error: e.to_string(),
-                    });
+                    state
+                        .notify_service
+                        .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                            channel_name: model.clone(),
+                            error: e.to_string(),
+                        });
                 }
                 return bridge_error_response(e).into_response();
             }
         };
         {
-                let latency_ms = request_start.elapsed().as_millis() as u64;
-                // 记录用量
-                state.usage_tracker.accumulate(
-                    response.usage.prompt_tokens,
-                    response.usage.completion_tokens,
-                    0,
-                    0,
-                    0,
-                    0.0,
-                );
+            let latency_ms = request_start.elapsed().as_millis() as u64;
+            // 记录用量
+            state.usage_tracker.accumulate(
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+                0,
+                0,
+                0,
+                0.0,
+            );
 
-                // 计费扣减（M10：复用 charge_usage，消除与非流式分支的重复实现）。
-                // 逻辑等价：calculate_cost_quoted → try_charge（用户余额不足跳过 key 扣费）→
-                // QuotaLow 通知 → charge_quota。返回 cost 供日志记录。
-                let cost = charge_usage(
-                    &state,
-                    &api_key,
-                    &model,
-                    &billing_group,
-                    response.usage.prompt_tokens,
-                    response.usage.completion_tokens,
-                );
+            // 计费扣减（M10：复用 charge_usage，消除与非流式分支的重复实现）。
+            // 逻辑等价：calculate_cost_quoted → try_charge（用户余额不足跳过 key 扣费）→
+            // QuotaLow 通知 → charge_quota。返回 cost 供日志记录。
+            let cost = charge_usage(
+                &state,
+                &api_key,
+                &model,
+                &billing_group,
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+            );
 
-                // 事后限流记账（TPM）
-                let total_tokens = response.usage.prompt_tokens + response.usage.completion_tokens;
-                rate_bundle.commit_tokens(total_tokens).await;
+            // 事后限流记账（TPM）
+            let total_tokens = response.usage.prompt_tokens + response.usage.completion_tokens;
+            rate_bundle.commit_tokens(total_tokens).await;
 
-                // 记录请求日志（功能 1）
-                let mut log = crate::log::RequestLog::new();
-                log.user_id = api_key.user_id.clone();
-                log.key_id = Some(api_key.id.clone());
-                log.channel_id = used_channel_id.clone();
-                log.model = model.clone();
-                log.input_tokens = response.usage.prompt_tokens;
-                log.output_tokens = response.usage.completion_tokens;
-                log.cost = cost;
-                log.latency_ms = latency_ms;
-                log.status_code = 200;
-                log.ip = client_ip.clone();
-                log.request_id = Some(request_id.clone());
-                state.log_store.record_request(log);
+            // 记录请求日志（功能 1）
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = used_channel_id.clone();
+            log.model = model.clone();
+            log.input_tokens = response.usage.prompt_tokens;
+            log.output_tokens = response.usage.completion_tokens;
+            log.cost = cost;
+            log.latency_ms = latency_ms;
+            log.status_code = 200;
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id.clone());
+            state.log_store.record_request(log);
 
-                // Prometheus 指标
-                crate::metrics::global().record_request(
-                    &model,
-                    used_channel_id.as_deref().unwrap_or("unknown"),
-                    "ok",
-                    latency_ms,
-                );
-                crate::metrics::global().record_tokens(
-                    &model,
-                    "prompt",
-                    response.usage.prompt_tokens,
-                );
-                crate::metrics::global().record_tokens(
-                    &model,
-                    "completion",
-                    response.usage.completion_tokens,
-                );
+            // Prometheus 指标
+            crate::metrics::global().record_request(
+                &model,
+                used_channel_id.as_deref().unwrap_or("unknown"),
+                "ok",
+                latency_ms,
+            );
+            crate::metrics::global().record_tokens(&model, "prompt", response.usage.prompt_tokens);
+            crate::metrics::global().record_tokens(
+                &model,
+                "completion",
+                response.usage.completion_tokens,
+            );
 
-                let mut message = serde_json::json!({
-                    "role": "assistant",
-                    "content": response.message.content_str(),
-                });
-                if let Some(reasoning) = &response.message.reasoning {
-                    message["reasoning_content"] = Value::String(reasoning.clone());
-                }
-                if let Some(tool_calls) = &response.message.tool_calls {
-                    message["tool_calls"] = Value::Array(
-                        tool_calls
-                            .iter()
-                            .map(|tc| {
-                                serde_json::json!({
-                                    "id": tc.id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": tc.function_name,
-                                        "arguments": tc.arguments,
-                                    }
-                                })
+            let mut message = serde_json::json!({
+                "role": "assistant",
+                "content": response.message.content_str(),
+            });
+            if let Some(reasoning) = &response.message.reasoning {
+                message["reasoning_content"] = Value::String(reasoning.clone());
+            }
+            if let Some(tool_calls) = &response.message.tool_calls {
+                message["tool_calls"] = Value::Array(
+                    tool_calls
+                        .iter()
+                        .map(|tc| {
+                            serde_json::json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function_name,
+                                    "arguments": tc.arguments,
+                                }
                             })
-                            .collect(),
-                    );
+                        })
+                        .collect(),
+                );
+            }
+            let json = serde_json::json!({
+                "id": response.id,
+                "object": "chat.completion",
+                "created": chrono::Utc::now().timestamp(),
+                "model": response.model,
+                "choices": [{
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": finish_reason_str(&response.finish_reason),
+                }],
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens,
                 }
-                let json = serde_json::json!({
-                    "id": response.id,
-                    "object": "chat.completion",
-                    "created": chrono::Utc::now().timestamp(),
-                    "model": response.model,
-                    "choices": [{
-                        "index": 0,
-                        "message": message,
-                        "finish_reason": finish_reason_str(&response.finish_reason),
-                    }],
-                    "usage": {
-                        "prompt_tokens": response.usage.prompt_tokens,
-                        "completion_tokens": response.usage.completion_tokens,
-                        "total_tokens": response.usage.total_tokens,
-                    }
-                });
-                state.response_cache.insert(cache_key, json.clone()).await;
-                let mut resp = Json(json).into_response();
-                resp.headers_mut().insert("x-aigx-cache", "miss".parse().unwrap());
-                resp
+            });
+            state.response_cache.insert(cache_key, json.clone()).await;
+            let mut resp = Json(json).into_response();
+            resp.headers_mut()
+                .insert("x-aigx-cache", "miss".parse().unwrap());
+            resp
         }
     }
 }
@@ -1265,8 +1388,12 @@ pub async fn handle_responses(
     let model = match body.get("model").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
         None => {
-            return error_response("invalid_model", "Missing model field", StatusCode::BAD_REQUEST)
-                .into_response()
+            return error_response(
+                "invalid_model",
+                "Missing model field",
+                StatusCode::BAD_REQUEST,
+            )
+            .into_response()
         }
     };
 
@@ -1279,7 +1406,12 @@ pub async fn handle_responses(
     // 限流检查：鉴权后、推理前（Responses 端点同样纳入限流）
     let rate_bundle = match state
         .rate_limiter
-        .check(&api_key.id, &model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .check(
+            &api_key.id,
+            &model,
+            api_key.user_id.as_deref(),
+            client_ip.as_deref(),
+        )
         .await
     {
         Ok(b) => b,
@@ -1361,7 +1493,9 @@ pub async fn handle_responses(
                 if let Some(cid) = &cid {
                     state.channel_store.mark_cooldown(cid, e.to_string(), 60);
                 }
-                tracing::warn!("responses failover: channel {cid:?} failed: {e}, trying next channel");
+                tracing::warn!(
+                    "responses failover: channel {cid:?} failed: {e}, trying next channel"
+                );
                 last_error = Some(e);
             }
         }
@@ -1375,7 +1509,8 @@ pub async fn handle_responses(
                 )
             });
             let latency_ms = request_start.elapsed().as_millis() as u64;
-            let status_code = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status_code =
+                StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut log = crate::log::RequestLog::new();
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
@@ -1396,10 +1531,12 @@ pub async fn handle_responses(
             );
             // 渠道故障通知（仅 5xx，避免 4xx 刷屏）
             if status_code.as_u16() >= 500 {
-                state.notify_service.notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
-                    channel_name: model.clone(),
-                    error: e.to_string(),
-                });
+                state
+                    .notify_service
+                    .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                        channel_name: model.clone(),
+                        error: e.to_string(),
+                    });
             }
             return bridge_error_response(e).into_response();
         }
@@ -1425,19 +1562,13 @@ pub async fn handle_responses(
                 let input_text = responses_input_text(&body);
                 let output_text = responses_output_text(&json);
                 prompt_tokens = crate::token_estimate::count_text(&model, &input_text) as u64;
-                completion_tokens =
-                    crate::token_estimate::count_text(&model, &output_text) as u64;
+                completion_tokens = crate::token_estimate::count_text(&model, &output_text) as u64;
             }
 
             // 记录用量
-            state.usage_tracker.accumulate(
-                prompt_tokens,
-                completion_tokens,
-                0,
-                0,
-                0,
-                0.0,
-            );
+            state
+                .usage_tracker
+                .accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
 
             // 计费扣减（用户 quota + key used_quota）
             let cost = charge_usage(
@@ -1515,7 +1646,10 @@ pub async fn handle_responses(
                 chunk
             });
 
-            let keepalive_stream = crate::sse::KeepaliveStream::new(passthrough_stream, std::time::Duration::from_secs(15));
+            let keepalive_stream = crate::sse::KeepaliveStream::new(
+                passthrough_stream,
+                std::time::Duration::from_secs(15),
+            );
             let guarded = GuardedStream {
                 inner: Box::pin(keepalive_stream),
                 _guard: ResponsesStreamGuard { billing },
@@ -1666,10 +1800,13 @@ pub async fn handle_completions(
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
     let client_ip = extract_client_ip(&headers);
 
-    let model = body
-        .get("model")
-        .and_then(|m| m.as_str())
-        .ok_or_else(|| error_response("invalid_model", "Missing model field", StatusCode::BAD_REQUEST))?;
+    let model = body.get("model").and_then(|m| m.as_str()).ok_or_else(|| {
+        error_response(
+            "invalid_model",
+            "Missing model field",
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
     // 完整鉴权（问题 1）
     let api_key = verify_api_key_full(&state, &headers, model)?;
@@ -1678,7 +1815,12 @@ pub async fn handle_completions(
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
-        .check(&api_key.id, &model_owned, api_key.user_id.as_deref(), client_ip.as_deref())
+        .check(
+            &api_key.id,
+            &model_owned,
+            api_key.user_id.as_deref(),
+            client_ip.as_deref(),
+        )
         .await
     {
         Ok(b) => b,
@@ -1701,7 +1843,11 @@ pub async fn handle_completions(
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
     let candidates = resolve_bridges(&state, &model_owned);
     if candidates.is_empty() {
-        return Err(error_response("no_bridge", "No bridge available", StatusCode::SERVICE_UNAVAILABLE));
+        return Err(error_response(
+            "no_bridge",
+            "No bridge available",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
     }
 
     let ctx = BridgeContext::new(request_id.clone(), model_owned.clone());
@@ -1731,7 +1877,9 @@ pub async fn handle_completions(
                 if let Some(cid) = &cid {
                     state.channel_store.mark_cooldown(cid, e.to_string(), 60);
                 }
-                tracing::warn!("completions failover: channel {cid:?} failed: {e}, trying next channel");
+                tracing::warn!(
+                    "completions failover: channel {cid:?} failed: {e}, trying next channel"
+                );
                 last_error = Some(e);
             }
         }
@@ -1778,61 +1926,61 @@ pub async fn handle_completions(
         }
     };
     {
-            let latency_ms = request_start.elapsed().as_millis() as u64;
-            let prompt_tokens = result
-                .get("usage")
-                .and_then(|u| u.get("prompt_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let completion_tokens = result
-                .get("usage")
-                .and_then(|u| u.get("completion_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            state
-                .usage_tracker
-                .accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
+        let latency_ms = request_start.elapsed().as_millis() as u64;
+        let prompt_tokens = result
+            .get("usage")
+            .and_then(|u| u.get("prompt_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let completion_tokens = result
+            .get("usage")
+            .and_then(|u| u.get("completion_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        state
+            .usage_tracker
+            .accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
 
-            // 计费扣减（问题 2/5/6）
-            let cost = charge_usage(
-                &state,
-                &api_key,
-                &model_owned,
-                &billing_group,
-                prompt_tokens,
-                completion_tokens,
-            );
+        // 计费扣减（问题 2/5/6）
+        let cost = charge_usage(
+            &state,
+            &api_key,
+            &model_owned,
+            &billing_group,
+            prompt_tokens,
+            completion_tokens,
+        );
 
-            // 事后限流记账（TPM）
-            let total_tokens = prompt_tokens + completion_tokens;
-            rate_bundle.commit_tokens(total_tokens).await;
+        // 事后限流记账（TPM）
+        let total_tokens = prompt_tokens + completion_tokens;
+        rate_bundle.commit_tokens(total_tokens).await;
 
-            // 记录请求日志（功能 1）
-            let mut log = crate::log::RequestLog::new();
-            log.user_id = api_key.user_id.clone();
-            log.key_id = Some(api_key.id.clone());
-            log.channel_id = used_channel_id.clone();
-            log.model = model_owned.clone();
-            log.input_tokens = prompt_tokens;
-            log.output_tokens = completion_tokens;
-            log.cost = cost;
-            log.latency_ms = latency_ms;
-            log.status_code = 200;
-            log.ip = client_ip.clone();
-            log.request_id = Some(request_id);
-            state.log_store.record_request(log);
+        // 记录请求日志（功能 1）
+        let mut log = crate::log::RequestLog::new();
+        log.user_id = api_key.user_id.clone();
+        log.key_id = Some(api_key.id.clone());
+        log.channel_id = used_channel_id.clone();
+        log.model = model_owned.clone();
+        log.input_tokens = prompt_tokens;
+        log.output_tokens = completion_tokens;
+        log.cost = cost;
+        log.latency_ms = latency_ms;
+        log.status_code = 200;
+        log.ip = client_ip.clone();
+        log.request_id = Some(request_id);
+        state.log_store.record_request(log);
 
-            // Prometheus 指标
-            crate::metrics::global().record_request(
-                &model_owned,
-                used_channel_id.as_deref().unwrap_or("unknown"),
-                "ok",
-                latency_ms,
-            );
-            crate::metrics::global().record_tokens(&model_owned, "prompt", prompt_tokens);
-            crate::metrics::global().record_tokens(&model_owned, "completion", completion_tokens);
+        // Prometheus 指标
+        crate::metrics::global().record_request(
+            &model_owned,
+            used_channel_id.as_deref().unwrap_or("unknown"),
+            "ok",
+            latency_ms,
+        );
+        crate::metrics::global().record_tokens(&model_owned, "prompt", prompt_tokens);
+        crate::metrics::global().record_tokens(&model_owned, "completion", completion_tokens);
 
-            Ok(Json(result))
+        Ok(Json(result))
     }
 }
 
@@ -1848,10 +1996,13 @@ pub async fn handle_embeddings(
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
     let client_ip = extract_client_ip(&headers);
 
-    let model = body
-        .get("model")
-        .and_then(|m| m.as_str())
-        .ok_or_else(|| error_response("invalid_model", "Missing model field", StatusCode::BAD_REQUEST))?;
+    let model = body.get("model").and_then(|m| m.as_str()).ok_or_else(|| {
+        error_response(
+            "invalid_model",
+            "Missing model field",
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
     let api_key = verify_api_key_full(&state, &headers, model)?;
     let model_owned = model.to_string();
@@ -1859,7 +2010,12 @@ pub async fn handle_embeddings(
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
-        .check(&api_key.id, &model_owned, api_key.user_id.as_deref(), client_ip.as_deref())
+        .check(
+            &api_key.id,
+            &model_owned,
+            api_key.user_id.as_deref(),
+            client_ip.as_deref(),
+        )
         .await
     {
         Ok(b) => b,
@@ -1882,7 +2038,11 @@ pub async fn handle_embeddings(
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
     let candidates = resolve_bridges(&state, &model_owned);
     if candidates.is_empty() {
-        return Err(error_response("no_bridge", "No bridge available", StatusCode::SERVICE_UNAVAILABLE));
+        return Err(error_response(
+            "no_bridge",
+            "No bridge available",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
     }
 
     let input = body.get("input");
@@ -1932,7 +2092,9 @@ pub async fn handle_embeddings(
                 if let Some(cid) = &cid {
                     state.channel_store.mark_cooldown(cid, e.to_string(), 60);
                 }
-                tracing::warn!("embeddings failover: channel {cid:?} failed: {e}, trying next channel");
+                tracing::warn!(
+                    "embeddings failover: channel {cid:?} failed: {e}, trying next channel"
+                );
                 last_error = Some(e);
             }
         }
@@ -1979,63 +2141,70 @@ pub async fn handle_embeddings(
         }
     };
     {
-            let latency_ms = request_start.elapsed().as_millis() as u64;
-            let data: Vec<Value> = response
-                .data
-                .iter()
-                .map(|obj| {
-                    serde_json::json!({
-                        "object": "embedding",
-                        "index": obj.index,
-                        "embedding": obj.embedding,
-                    })
+        let latency_ms = request_start.elapsed().as_millis() as u64;
+        let data: Vec<Value> = response
+            .data
+            .iter()
+            .map(|obj| {
+                serde_json::json!({
+                    "object": "embedding",
+                    "index": obj.index,
+                    "embedding": obj.embedding,
                 })
-                .collect();
+            })
+            .collect();
 
-            let prompt_tokens = response.usage.prompt_tokens as u64;
-            state
-                .usage_tracker
-                .accumulate(prompt_tokens, 0, 0, 0, 0, 0.0);
+        let prompt_tokens = response.usage.prompt_tokens as u64;
+        state
+            .usage_tracker
+            .accumulate(prompt_tokens, 0, 0, 0, 0, 0.0);
 
-            // 计费扣减（问题 2/5/6）
-            let cost = charge_usage(&state, &api_key, &model_owned, &billing_group, prompt_tokens, 0);
+        // 计费扣减（问题 2/5/6）
+        let cost = charge_usage(
+            &state,
+            &api_key,
+            &model_owned,
+            &billing_group,
+            prompt_tokens,
+            0,
+        );
 
-            // 事后限流记账（TPM）
-            rate_bundle.commit_tokens(prompt_tokens).await;
+        // 事后限流记账（TPM）
+        rate_bundle.commit_tokens(prompt_tokens).await;
 
-            // 记录请求日志（功能 1）
-            let mut log = crate::log::RequestLog::new();
-            log.user_id = api_key.user_id.clone();
-            log.key_id = Some(api_key.id.clone());
-            log.channel_id = used_channel_id.clone();
-            log.model = model_owned.clone();
-            log.input_tokens = prompt_tokens;
-            log.output_tokens = 0;
-            log.cost = cost;
-            log.latency_ms = latency_ms;
-            log.status_code = 200;
-            log.ip = client_ip.clone();
-            log.request_id = Some(request_id);
-            state.log_store.record_request(log);
+        // 记录请求日志（功能 1）
+        let mut log = crate::log::RequestLog::new();
+        log.user_id = api_key.user_id.clone();
+        log.key_id = Some(api_key.id.clone());
+        log.channel_id = used_channel_id.clone();
+        log.model = model_owned.clone();
+        log.input_tokens = prompt_tokens;
+        log.output_tokens = 0;
+        log.cost = cost;
+        log.latency_ms = latency_ms;
+        log.status_code = 200;
+        log.ip = client_ip.clone();
+        log.request_id = Some(request_id);
+        state.log_store.record_request(log);
 
-            // Prometheus 指标
-            crate::metrics::global().record_request(
-                &model_owned,
-                used_channel_id.as_deref().unwrap_or("unknown"),
-                "ok",
-                latency_ms,
-            );
-            crate::metrics::global().record_tokens(&model_owned, "prompt", prompt_tokens);
+        // Prometheus 指标
+        crate::metrics::global().record_request(
+            &model_owned,
+            used_channel_id.as_deref().unwrap_or("unknown"),
+            "ok",
+            latency_ms,
+        );
+        crate::metrics::global().record_tokens(&model_owned, "prompt", prompt_tokens);
 
-            Ok(Json(serde_json::json!({
-                "object": "list",
-                "data": data,
-                "model": &model_owned,
-                "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                }
-            })))
+        Ok(Json(serde_json::json!({
+            "object": "list",
+            "data": data,
+            "model": &model_owned,
+            "usage": {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+        })))
     }
 }
 
@@ -2051,10 +2220,13 @@ pub async fn handle_images_generations(
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
     let client_ip = extract_client_ip(&headers);
 
-    let model = body
-        .get("model")
-        .and_then(|m| m.as_str())
-        .ok_or_else(|| error_response("invalid_model", "Missing model field", StatusCode::BAD_REQUEST))?;
+    let model = body.get("model").and_then(|m| m.as_str()).ok_or_else(|| {
+        error_response(
+            "invalid_model",
+            "Missing model field",
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
     let api_key = verify_api_key_full(&state, &headers, model)?;
     let model_owned = model.to_string();
@@ -2062,7 +2234,12 @@ pub async fn handle_images_generations(
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
-        .check(&api_key.id, &model_owned, api_key.user_id.as_deref(), client_ip.as_deref())
+        .check(
+            &api_key.id,
+            &model_owned,
+            api_key.user_id.as_deref(),
+            client_ip.as_deref(),
+        )
         .await
     {
         Ok(b) => b,
@@ -2085,7 +2262,11 @@ pub async fn handle_images_generations(
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
     let candidates = resolve_bridges(&state, &model_owned);
     if candidates.is_empty() {
-        return Err(error_response("no_bridge", "No bridge available", StatusCode::SERVICE_UNAVAILABLE));
+        return Err(error_response(
+            "no_bridge",
+            "No bridge available",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
     }
 
     let ctx = BridgeContext::new(request_id.clone(), model_owned.clone());
@@ -2162,41 +2343,39 @@ pub async fn handle_images_generations(
         }
     };
     {
-            let latency_ms = request_start.elapsed().as_millis() as u64;
-            state
-                .usage_tracker
-                .accumulate(0, 0, 0, 0, 0, 0.0);
+        let latency_ms = request_start.elapsed().as_millis() as u64;
+        state.usage_tracker.accumulate(0, 0, 0, 0, 0, 0.0);
 
-            // 计费扣减（按次计价，问题 2/5/6）
-            let cost = charge_usage(&state, &api_key, &model_owned, &billing_group, 0, 0);
+        // 计费扣减（按次计价，问题 2/5/6）
+        let cost = charge_usage(&state, &api_key, &model_owned, &billing_group, 0, 0);
 
-            // 事后限流记账（按次计价，记 1 个请求 token 占位以维持 RPM 一致性）
-            rate_bundle.commit_tokens(0).await;
+        // 事后限流记账（按次计价，记 1 个请求 token 占位以维持 RPM 一致性）
+        rate_bundle.commit_tokens(0).await;
 
-            // 记录请求日志（功能 1）— 图片生成按次计价，tokens 设为 0
-            let mut log = crate::log::RequestLog::new();
-            log.user_id = api_key.user_id.clone();
-            log.key_id = Some(api_key.id.clone());
-            log.channel_id = used_channel_id.clone();
-            log.model = model_owned.clone();
-            log.input_tokens = 0;
-            log.output_tokens = 0;
-            log.cost = cost;
-            log.latency_ms = latency_ms;
-            log.status_code = 200;
-            log.ip = client_ip.clone();
-            log.request_id = Some(request_id);
-            state.log_store.record_request(log);
+        // 记录请求日志（功能 1）— 图片生成按次计价，tokens 设为 0
+        let mut log = crate::log::RequestLog::new();
+        log.user_id = api_key.user_id.clone();
+        log.key_id = Some(api_key.id.clone());
+        log.channel_id = used_channel_id.clone();
+        log.model = model_owned.clone();
+        log.input_tokens = 0;
+        log.output_tokens = 0;
+        log.cost = cost;
+        log.latency_ms = latency_ms;
+        log.status_code = 200;
+        log.ip = client_ip.clone();
+        log.request_id = Some(request_id);
+        state.log_store.record_request(log);
 
-            // Prometheus 指标（图片按次计价，tokens 记 0）
-            crate::metrics::global().record_request(
-                &model_owned,
-                used_channel_id.as_deref().unwrap_or("unknown"),
-                "ok",
-                latency_ms,
-            );
+        // Prometheus 指标（图片按次计价，tokens 记 0）
+        crate::metrics::global().record_request(
+            &model_owned,
+            used_channel_id.as_deref().unwrap_or("unknown"),
+            "ok",
+            latency_ms,
+        );
 
-            Ok(Json(result))
+        Ok(Json(result))
     }
 }
 
@@ -2217,13 +2396,17 @@ pub async fn handle_audio_transcriptions(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let boundary = content_type.split("boundary=").nth(1).map(|s| s.to_string()).ok_or_else(|| {
-        error_response(
-            "invalid_request",
-            "Missing boundary in content-type",
-            StatusCode::BAD_REQUEST,
-        )
-    })?;
+    let boundary = content_type
+        .split("boundary=")
+        .nth(1)
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            error_response(
+                "invalid_request",
+                "Missing boundary in content-type",
+                StatusCode::BAD_REQUEST,
+            )
+        })?;
 
     let bytes = match axum::body::to_bytes(body, 25 * 1024 * 1024).await {
         Ok(b) => b,
@@ -2244,7 +2427,12 @@ pub async fn handle_audio_transcriptions(
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
-        .check(&api_key.id, &model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .check(
+            &api_key.id,
+            &model,
+            api_key.user_id.as_deref(),
+            client_ip.as_deref(),
+        )
         .await
     {
         Ok(b) => b,
@@ -2270,16 +2458,19 @@ pub async fn handle_audio_transcriptions(
 
     match state
         .api_client
-        .run_audio(&model, audio_data.to_vec(), &mime_type, "/v1/audio/transcriptions")
+        .run_audio(
+            &model,
+            audio_data.to_vec(),
+            &mime_type,
+            "/v1/audio/transcriptions",
+        )
         .await
     {
         Ok(result) => {
             let latency_ms = request_start.elapsed().as_millis() as u64;
             let text = result.get("text").and_then(|t| t.as_str()).unwrap_or("");
 
-            state
-                .usage_tracker
-                .accumulate(0, 0, 0, 0, 0, 0.0);
+            state.usage_tracker.accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
             let cost = charge_usage(&state, &api_key, &model, &billing_group, 0, 0);
@@ -2351,13 +2542,17 @@ pub async fn handle_audio_translations(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let boundary = content_type.split("boundary=").nth(1).map(|s| s.to_string()).ok_or_else(|| {
-        error_response(
-            "invalid_request",
-            "Missing boundary in content-type",
-            StatusCode::BAD_REQUEST,
-        )
-    })?;
+    let boundary = content_type
+        .split("boundary=")
+        .nth(1)
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            error_response(
+                "invalid_request",
+                "Missing boundary in content-type",
+                StatusCode::BAD_REQUEST,
+            )
+        })?;
 
     let bytes = match axum::body::to_bytes(body, 25 * 1024 * 1024).await {
         Ok(b) => b,
@@ -2378,7 +2573,12 @@ pub async fn handle_audio_translations(
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
-        .check(&api_key.id, &model, api_key.user_id.as_deref(), client_ip.as_deref())
+        .check(
+            &api_key.id,
+            &model,
+            api_key.user_id.as_deref(),
+            client_ip.as_deref(),
+        )
         .await
     {
         Ok(b) => b,
@@ -2404,16 +2604,19 @@ pub async fn handle_audio_translations(
 
     match state
         .api_client
-        .run_audio(&model, audio_data.to_vec(), &mime_type, "/v1/audio/transcriptions")
+        .run_audio(
+            &model,
+            audio_data.to_vec(),
+            &mime_type,
+            "/v1/audio/transcriptions",
+        )
         .await
     {
         Ok(result) => {
             let latency_ms = request_start.elapsed().as_millis() as u64;
             let text = result.get("text").and_then(|t| t.as_str()).unwrap_or("");
 
-            state
-                .usage_tracker
-                .accumulate(0, 0, 0, 0, 0, 0.0);
+            state.usage_tracker.accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
             let cost = charge_usage(&state, &api_key, &model, &billing_group, 0, 0);
@@ -2480,10 +2683,7 @@ pub async fn handle_audio_speech(
     let request_id = format!("req-{}", uuid::Uuid::new_v4());
     let client_ip = extract_client_ip(&headers);
 
-    let model = body
-        .get("model")
-        .and_then(|m| m.as_str())
-        .unwrap_or("tts");
+    let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("tts");
 
     // 完整鉴权（问题 1）
     let api_key = verify_api_key_full(&state, &headers, model)?;
@@ -2492,7 +2692,12 @@ pub async fn handle_audio_speech(
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
-        .check(&api_key.id, &model_owned, api_key.user_id.as_deref(), client_ip.as_deref())
+        .check(
+            &api_key.id,
+            &model_owned,
+            api_key.user_id.as_deref(),
+            client_ip.as_deref(),
+        )
         .await
     {
         Ok(b) => b,
@@ -2512,10 +2717,13 @@ pub async fn handle_audio_speech(
     // B09：前置校验模型定价——未配置价格的模型拒绝请求，避免免费用量
     ensure_model_priced(&state, &model_owned)?;
 
-    let input = body
-        .get("input")
-        .and_then(|i| i.as_str())
-        .ok_or_else(|| error_response("invalid_input", "Missing input field", StatusCode::BAD_REQUEST))?;
+    let input = body.get("input").and_then(|i| i.as_str()).ok_or_else(|| {
+        error_response(
+            "invalid_input",
+            "Missing input field",
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
     let voice = body
         .get("voice")
@@ -2528,13 +2736,15 @@ pub async fn handle_audio_speech(
         "voice": voice,
     });
 
-    match state.api_client.run_audio_speech(&model_owned, cf_body).await {
+    match state
+        .api_client
+        .run_audio_speech(&model_owned, cf_body)
+        .await
+    {
         Ok(audio) => {
             let latency_ms = request_start.elapsed().as_millis() as u64;
 
-            state
-                .usage_tracker
-                .accumulate(0, 0, 0, 0, 0, 0.0);
+            state.usage_tracker.accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
             let cost = charge_usage(&state, &api_key, &model_owned, &billing_group, 0, 0);
@@ -2742,13 +2952,13 @@ fn parse_multipart_audio(
         }
     }
 
-    file_data.ok_or_else(|| {
-        error_response(
-            "invalid_request",
-            "Missing audio file in request",
-            StatusCode::BAD_REQUEST,
-        )
-    })
-    .map(|(data, filename)| (data, model, filename))
-
+    file_data
+        .ok_or_else(|| {
+            error_response(
+                "invalid_request",
+                "Missing audio file in request",
+                StatusCode::BAD_REQUEST,
+            )
+        })
+        .map(|(data, filename)| (data, model, filename))
 }

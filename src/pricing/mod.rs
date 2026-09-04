@@ -16,6 +16,23 @@ use std::sync::Arc;
 use crate::storage::FileStore;
 use tracing::error;
 
+/// 内置工具名（与 new-api `dto.BuildInTool*` 对齐）
+pub const TOOL_WEB_SEARCH: &str = "web_search";
+pub const TOOL_WEB_SEARCH_PREVIEW: &str = "web_search_preview";
+pub const TOOL_FILE_SEARCH: &str = "file_search";
+pub const TOOL_GOOGLE_SEARCH: &str = "google_search";
+pub const TOOL_IMAGE_GENERATION: &str = "image_generation";
+
+/// 内置工具保留名集合——这些名字不计入自定义工具按次计费
+///（对齐 new-api `reservedBillableToolNames`）。
+const RESERVED_TOOL_NAMES: &[&str] = &[
+    TOOL_WEB_SEARCH,
+    TOOL_WEB_SEARCH_PREVIEW,
+    TOOL_FILE_SEARCH,
+    TOOL_GOOGLE_SEARCH,
+    TOOL_IMAGE_GENERATION,
+];
+
 // ── ModelPrice ──────────────────────────────────────────────────────
 
 /// 单模型定价条目。
@@ -108,12 +125,18 @@ pub struct PricingError(pub String);
 pub struct PricingStore {
     prices: RwLock<HashMap<String, ModelPrice>>,
     ratios: RwLock<RatioConfig>,
+    /// 工具价格表（tool_name 或 `tool_name:model_prefix*` -> $/1K calls）。
+    /// 读路径按需解析，不做预计算索引（与 new-api 的原子索引对应，
+    /// 但 AIGX 规模下线性查找足够）。
+    tool_prices: RwLock<HashMap<String, f64>>,
     store: Arc<FileStore>,
 }
 
 const RATIO_KEY: &str = "ratio_config";
 /// 首次启动种子定价的标志位（见 `ensure_default_prices`）。
 const PRICING_SEEDED_KEY: &str = "pricing_seeded";
+/// 工具价格存储键（JSON map: tool_name -> $/1K calls）。
+const TOOL_PRICES_KEY: &str = "tool_price_setting.prices";
 
 /// 内置默认定价目录（单位：每 1k token 美元，USD）。
 ///
@@ -195,11 +218,30 @@ impl PricingStore {
         let s = Self {
             prices: RwLock::new(HashMap::new()),
             ratios: RwLock::new(RatioConfig::default()),
+            tool_prices: RwLock::new(HashMap::new()),
             store,
         };
         let _ = s.load();
         s.ensure_default_prices();
         s
+    }
+
+    /// 内置工具价格硬编码兜底（与 new-api `seedHardcodedToolPrices` 对齐）。
+    fn hardcoded_tool_prices() -> HashMap<String, f64> {
+        let mut m = HashMap::new();
+        m.insert(TOOL_WEB_SEARCH.to_string(), 10.0);
+        m.insert(TOOL_WEB_SEARCH_PREVIEW.to_string(), 10.0);
+        m.insert(TOOL_FILE_SEARCH.to_string(), 2.5);
+        m.insert(TOOL_GOOGLE_SEARCH.to_string(), 14.0);
+        m.insert(TOOL_IMAGE_GENERATION.to_string(), 150.0);
+        // 模型前缀覆盖（gpt-4o / gpt-4.1 系列的 web_search_preview 更高价）
+        for prefix in ["gpt-4o", "gpt-4.1", "gpt-4o-mini", "gpt-4.1-mini"] {
+            m.insert(
+                format!("{TOOL_WEB_SEARCH_PREVIEW}:{prefix}*"),
+                25.0,
+            );
+        }
+        m
     }
 
     /// 首次启动种子内置默认定价目录。
@@ -248,6 +290,16 @@ impl PricingStore {
         if let Some(r) = self.store.get::<RatioConfig>(RATIO_KEY)? {
             *self.ratios.write() = r;
         }
+
+        let mut tool_prices = Self::hardcoded_tool_prices();
+        if let Some(op) = self.store.get::<HashMap<String, f64>>(TOOL_PRICES_KEY)? {
+            for (k, v) in op {
+                if is_valid_tool_price(v) {
+                    tool_prices.insert(k, v);
+                }
+            }
+        }
+        *self.tool_prices.write() = tool_prices;
         Ok(())
     }
 
@@ -272,8 +324,11 @@ impl PricingStore {
             price.created_at = now;
         }
         price.updated_at = now;
-        self.store.put(&format!("price:{}", price.model_name), &price)?;
-        self.prices.write().insert(price.model_name.clone(), price.clone());
+        self.store
+            .put(&format!("price:{}", price.model_name), &price)?;
+        self.prices
+            .write()
+            .insert(price.model_name.clone(), price.clone());
         Ok(price)
     }
 
@@ -326,12 +381,23 @@ impl PricingStore {
         let base = if price.price_type == "count" {
             price.input_price
         } else {
-            (input_tokens as f64 * price.input_price + output_tokens as f64 * price.output_price) / 1000.0
+            (input_tokens as f64 * price.input_price + output_tokens as f64 * price.output_price)
+                / 1000.0
         };
         Ok(base * model_ratio * group_ratio)
     }
 
-    /// 计算费用并向上取整为 i64 配额单位（避免浮点扣费）。
+    /// 工具价格是否合法（>=0 且非 NaN/Inf）。
+fn is_valid_tool_price(price: f64) -> bool {
+    price >= 0.0 && !price.is_nan() && !price.is_infinite()
+}
+
+/// 工具名是否属于内置保留名（这些名字不计入自定义工具按次计费）。
+pub fn is_reserved_tool_name(name: &str) -> bool {
+    RESERVED_TOOL_NAMES.contains(&name)
+}
+
+/// 计算费用并向上取整为 i64 配额单位（避免浮点扣费）。
     pub fn calculate_cost_quoted(
         &self,
         model: &str,
@@ -346,7 +412,86 @@ impl PricingStore {
         // 向上取整，最低 1 配额单位
         Ok((cost + 0.999999) as i64)
     }
+
+    // ── 工具价格表 ──────────────────────────────────────────────────
+
+    /// 获取工具价格（$/1K calls），未配置返回 0。
+    ///
+    /// 参照 new-api `GetToolPriceForModel` 查找规则：
+    /// 1. 精确匹配 `tool_name` 默认价；
+    /// 2. `tool_name:model_prefix*` 最长前缀匹配模型；
+    /// 3. 都没有 → 0。
+    pub fn get_tool_price(&self, tool_name: &str, model: &str) -> f64 {
+        let prices = self.tool_prices.read();
+        // 1) 默认价
+        let default = prices.get(tool_name).copied().unwrap_or(0.0);
+        // 2) 最长前缀覆盖（key 形如 `tool:prefix*`）
+        let mut best: Option<f64> = None;
+        let mut best_len = 0usize;
+        let prefix_key = format!("{tool_name}:");
+        for (k, v) in prices.iter() {
+            let Some(rest) = k.strip_prefix(&prefix_key) else {
+                continue;
+            };
+            let Some(prefix) = rest.strip_suffix('*') else {
+                continue;
+            };
+            if !model.starts_with(prefix) {
+                continue;
+            }
+            if prefix.len() > best_len {
+                best_len = prefix.len();
+                best = Some(*v);
+            }
+        }
+        best.unwrap_or(default)
+    }
+
+    /// 更新工具价格表（覆盖式，与 new-api `LoadToolPricesFromJSONString` 对齐）。
+    pub fn set_tool_prices(&self, prices: HashMap<String, f64>) -> anyhow::Result<()> {
+        let mut merged = Self::hardcoded_tool_prices();
+        for (k, v) in prices {
+            if is_valid_tool_price(v) {
+                merged.insert(k, v);
+            }
+        }
+        self.store.put(TOOL_PRICES_KEY, &merged)?;
+        *self.tool_prices.write() = merged;
+        Ok(())
+    }
+
+    /// 计算工具按次调用附加费（配额单位，向上取整）。
+    ///
+    /// 参照 new-api `calculateTextToolCallSurcharge`：
+    ///   surcharge = Σ (price/1000 * count) * group_ratio，向上取整为配额单位。
+    /// 内置保留名按内置价计费；自定义函数名仅在显式配置了价格时计费。
+    pub fn calculate_tool_surcharge(
+        &self,
+        tool_calls: &HashMap<String, u64>,
+        model: &str,
+        group: &str,
+    ) -> i64 {
+        let group_ratio = self.ratios.read().group_ratio(group);
+        let mut total = 0.0f64;
+        for (name, count) in tool_calls {
+            if *count == 0 {
+                continue;
+            }
+            let price = self.get_tool_price(name, model);
+            if price <= 0.0 || price.is_nan() || price.is_infinite() {
+                continue;
+            }
+            total += price * (*count as f64) / 1000.0 * group_ratio;
+        }
+        if total <= 0.0 {
+            return 0;
+        }
+        (total + 0.999999) as i64
+    }
 }
+
+/// 工具按次计费使用的内置/自定义工具调用计数表。
+pub type ToolCallCounts = HashMap<String, u64>;
 
 #[cfg(test)]
 mod tests {
@@ -362,7 +507,8 @@ mod tests {
     #[test]
     fn upsert_and_get() {
         let s = store();
-        s.upsert_price(ModelPrice::new("gpt-4", 0.03, 0.06)).unwrap();
+        s.upsert_price(ModelPrice::new("gpt-4", 0.03, 0.06))
+            .unwrap();
         let p = s.get_price("gpt-4").unwrap();
         assert_eq!(p.input_price, 0.03);
         assert_eq!(p.output_price, 0.06);
@@ -371,7 +517,8 @@ mod tests {
     #[test]
     fn calculate_token_cost() {
         let s = store();
-        s.upsert_price(ModelPrice::new("gpt-4", 0.03, 0.06)).unwrap();
+        s.upsert_price(ModelPrice::new("gpt-4", 0.03, 0.06))
+            .unwrap();
         // 1000 input * 0.03/1k + 500 output * 0.06/1k = 0.03 + 0.03 = 0.06
         let cost = s.calculate_cost("gpt-4", 1000, 500, "default").unwrap();
         assert!((cost - 0.06).abs() < 1e-9);
@@ -380,7 +527,8 @@ mod tests {
     #[test]
     fn calculate_with_ratios() {
         let s = store();
-        s.upsert_price(ModelPrice::new("gpt-4", 0.03, 0.06)).unwrap();
+        s.upsert_price(ModelPrice::new("gpt-4", 0.03, 0.06))
+            .unwrap();
         let mut ratios = RatioConfig::default();
         ratios.model_ratio.insert("gpt-4".to_string(), 2.0);
         ratios.group_ratio.insert("vip".to_string(), 0.5);

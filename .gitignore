@@ -18,6 +18,9 @@ static/
 *.swp
 *.swo
 
+# AI tools (local config)
+.codex/
+
 # OS
 .DS_Store
 Thumbs.db

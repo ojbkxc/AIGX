@@ -67,21 +67,12 @@ pub enum NotifyEvent {
         quota: i64,
     },
     /// 额度不足
-    QuotaLow {
-        user_email: String,
-        remaining: i64,
-    },
+    QuotaLow { user_email: String, remaining: i64 },
     /// 渠道故障
-    ChannelFailure {
-        channel_name: String,
-        error: String,
-    },
+    ChannelFailure { channel_name: String, error: String },
     /// 提现请求
     #[allow(dead_code)]
-    WithdrawRequest {
-        user_email: String,
-        amount: f64,
-    },
+    WithdrawRequest { user_email: String, amount: f64 },
 }
 
 // ── 服务 ─────────────────────────────────────────────────────────────
@@ -122,11 +113,7 @@ impl NotifyService {
         self.send_telegram_with(&cfg, message).await
     }
 
-    async fn send_telegram_with(
-        &self,
-        cfg: &NotifyConfig,
-        message: &str,
-    ) -> Result<(), String> {
+    async fn send_telegram_with(&self, cfg: &NotifyConfig, message: &str) -> Result<(), String> {
         if !cfg.telegram_ready() {
             return Err("Telegram bot_token or chat_id not configured".into());
         }
@@ -254,10 +241,7 @@ fn render_event(event: &NotifyEvent) -> (Option<String>, Option<String>, String,
             );
             (Some(tg), None, String::new(), String::new())
         }
-        NotifyEvent::WithdrawRequest {
-            user_email,
-            amount,
-        } => {
+        NotifyEvent::WithdrawRequest { user_email, amount } => {
             let tg = format!(
                 "<b>💰 提现请求</b>\n\n用户: {}\n金额: {:.2}",
                 user_email, amount
@@ -309,14 +293,20 @@ async fn send_smtp_raw(
         if !r.starts_with("334") {
             return Err(format!("SMTP AUTH LOGIN rejected: {}", r));
         }
-        write_smtp(&mut stream, &format!("{}\r\n", STANDARD.encode(cfg.smtp_username.as_bytes())))
-            .await?;
+        write_smtp(
+            &mut stream,
+            &format!("{}\r\n", STANDARD.encode(cfg.smtp_username.as_bytes())),
+        )
+        .await?;
         let r = read_smtp_line(&mut stream).await?;
         if !r.starts_with("334") {
             return Err(format!("SMTP username rejected: {}", r));
         }
-        write_smtp(&mut stream, &format!("{}\r\n", STANDARD.encode(cfg.smtp_password.as_bytes())))
-            .await?;
+        write_smtp(
+            &mut stream,
+            &format!("{}\r\n", STANDARD.encode(cfg.smtp_password.as_bytes())),
+        )
+        .await?;
         let r = read_smtp_line(&mut stream).await?;
         if !r.starts_with("235") {
             return Err(format!("SMTP auth failed: {}", r));

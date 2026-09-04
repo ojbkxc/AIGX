@@ -60,9 +60,7 @@ fn default_min_topup() -> i64 {
 impl EpayConfig {
     /// 是否已配置完整
     pub fn ready(&self) -> bool {
-        !self.pay_address.is_empty()
-            && !self.epay_id.is_empty()
-            && !self.epay_key.is_empty()
+        !self.pay_address.is_empty() && !self.epay_id.is_empty() && !self.epay_key.is_empty()
     }
 
     /// 是否包含某支付方式
@@ -213,11 +211,7 @@ impl EpayClient {
     /// GET `{base}/mapi.php` 带签名参数作为 query，解析 JSON 响应。
     /// `code == 1` 时返回真实支付网关地址（优先 `payurl`，回退 `qrcode`）。
     /// 参照 VFaka `EpayProvider::try_mapi`。
-    async fn try_mapi(
-        &self,
-        mapi_url: &str,
-        params: &BTreeMap<String, String>,
-    ) -> Result<String> {
+    async fn try_mapi(&self, mapi_url: &str, params: &BTreeMap<String, String>) -> Result<String> {
         let resp = self
             .client
             .get(mapi_url)
@@ -326,7 +320,10 @@ impl EpayClient {
                     pay_url = %pay_url,
                     "EPay mapi.php succeeded"
                 );
-                return Ok(PurchaseResult { url: pay_url, params });
+                return Ok(PurchaseResult {
+                    url: pay_url,
+                    params,
+                });
             }
             Err(e) => {
                 warn!(
@@ -364,23 +361,12 @@ impl EpayClient {
         }
 
         let expected = self.sign(&filtered);
-        let got = params
-            .get("sign")
-            .ok_or_else(|| anyhow!("missing sign"))?;
+        let got = params.get("sign").ok_or_else(|| anyhow!("missing sign"))?;
         let verify_status = got == &expected;
 
-        let trade_status = params
-            .get("trade_status")
-            .cloned()
-            .unwrap_or_default();
-        let out_trade_no = params
-            .get("out_trade_no")
-            .cloned()
-            .unwrap_or_default();
-        let pay_type = params
-            .get("type")
-            .cloned()
-            .unwrap_or_default();
+        let trade_status = params.get("trade_status").cloned().unwrap_or_default();
+        let out_trade_no = params.get("out_trade_no").cloned().unwrap_or_default();
+        let pay_type = params.get("type").cloned().unwrap_or_default();
 
         Ok(VerifyResult {
             verify_status,

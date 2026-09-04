@@ -1,10 +1,10 @@
+use parking_lot::RwLock;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::collections::HashMap;
 #[cfg(feature = "sqlite-kv")]
 use std::path::Path;
 use std::path::PathBuf;
-use parking_lot::RwLock;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 
 // rusqlite KV 存储模块 — 仅当启用 sqlite-kv feature 时编译。
 //
@@ -33,7 +33,9 @@ fn decode_key(enc: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
+            if let Ok(b) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 out.push(b);
                 i += 3;
                 continue;
@@ -303,10 +305,12 @@ mod tests {
         store.put("counter", &0u64).unwrap();
 
         // 原子更新：递增
-        let old: Option<u64> = store.update("counter", |val| match val {
-            Some(n) => n + 1,
-            None => 1,
-        }).unwrap();
+        let old: Option<u64> = store
+            .update("counter", |val| match val {
+                Some(n) => n + 1,
+                None => 1,
+            })
+            .unwrap();
         assert_eq!(old, Some(0));
 
         let val: Option<u64> = store.get("counter").unwrap();

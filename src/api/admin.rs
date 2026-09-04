@@ -46,7 +46,6 @@ pub struct AccountRequest {
     pub status: Option<String>,
 }
 
-
 /// 设置请求
 #[derive(Debug, Deserialize)]
 pub struct SettingsRequest {
@@ -77,7 +76,10 @@ fn error_response(message: &str, status: StatusCode) -> (StatusCode, Json<Value>
 }
 
 /// 验证管理员认证
-async fn verify_admin(state: &AppState, headers: &HeaderMap) -> Result<AppConfig, (StatusCode, Json<Value>)> {
+async fn verify_admin(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AppConfig, (StatusCode, Json<Value>)> {
     let token = extract_session_token(headers)
         .ok_or_else(|| error_response("Not authenticated", StatusCode::UNAUTHORIZED))?;
 
@@ -95,7 +97,10 @@ async fn verify_admin(state: &AppState, headers: &HeaderMap) -> Result<AppConfig
             if u.status == "active" && u.is_admin() {
                 return Ok(config);
             }
-            return Err(error_response("User disabled or not admin", StatusCode::UNAUTHORIZED));
+            return Err(error_response(
+                "User disabled or not admin",
+                StatusCode::UNAUTHORIZED,
+            ));
         }
         // 兼容模式：旧 admin 账户
         if sess.email == "admin" {
@@ -107,7 +112,10 @@ async fn verify_admin(state: &AppState, headers: &HeaderMap) -> Result<AppConfig
 }
 
 /// 验证任意已登录用户，返回用户记录
-async fn verify_user(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, Json<Value>)> {
+async fn verify_user(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<User, (StatusCode, Json<Value>)> {
     let token = extract_session_token(headers)
         .ok_or_else(|| error_response("Not authenticated", StatusCode::UNAUTHORIZED))?;
     let config = state.config_manager.get().await;
@@ -149,7 +157,6 @@ fn extract_session_token(headers: &HeaderMap) -> Option<String> {
     }
     None
 }
-
 
 // ============================================================
 // 认证 API
@@ -201,7 +208,10 @@ pub async fn handle_login(
             if let Err(e) = state.user_store.update(&u.id, |user| {
                 user.password = new_hash;
             }) {
-                tracing::warn!("Failed to rehash legacy SHA256 password for {}: {e}", u.email);
+                tracing::warn!(
+                    "Failed to rehash legacy SHA256 password for {}: {e}",
+                    u.email
+                );
             }
         }
         let session_secret = if config.admin.session_secret.is_empty() {
@@ -250,14 +260,18 @@ pub async fn handle_login(
 
     // 认证失败：累计失败计数（TTL=5 分钟，达阈值后锁定）
     let next_fail = fail_count + 1;
-    state.login_failures.insert(client_ip.clone(), next_fail).await;
+    state
+        .login_failures
+        .insert(client_ip.clone(), next_fail)
+        .await;
     if next_fail >= LOGIN_FAIL_LOCK_THRESHOLD {
-        tracing::warn!(
-            "Login failed {next_fail} times from {client_ip}; locked for 5 minutes"
-        );
+        tracing::warn!("Login failed {next_fail} times from {client_ip}; locked for 5 minutes");
     }
 
-    Err(error_response("Invalid credentials", StatusCode::UNAUTHORIZED))
+    Err(error_response(
+        "Invalid credentials",
+        StatusCode::UNAUTHORIZED,
+    ))
 }
 
 /// POST /api/auth/register - 公开邮箱注册
@@ -300,14 +314,26 @@ pub async fn handle_register(
             if state.user_store.get_by_username(username.trim()).is_some() {
                 return Err(error_response("用户名已存在", StatusCode::CONFLICT));
             }
-            state.user_store.create_with_username(body.email.trim(), username.trim(), &body.password, Role::User, default_quota)
+            state
+                .user_store
+                .create_with_username(
+                    body.email.trim(),
+                    username.trim(),
+                    &body.password,
+                    Role::User,
+                    default_quota,
+                )
                 .map_err(|e| error_response(&format!("注册失败: {e}"), StatusCode::BAD_REQUEST))?
         } else {
-            state.user_store.create(body.email.trim(), &body.password, Role::User, default_quota)
+            state
+                .user_store
+                .create(body.email.trim(), &body.password, Role::User, default_quota)
                 .map_err(|e| error_response(&format!("注册失败: {e}"), StatusCode::BAD_REQUEST))?
         }
     } else {
-        state.user_store.create(body.email.trim(), &body.password, Role::User, default_quota)
+        state
+            .user_store
+            .create(body.email.trim(), &body.password, Role::User, default_quota)
             .map_err(|e| error_response(&format!("注册失败: {e}"), StatusCode::BAD_REQUEST))?
     };
 
@@ -536,18 +562,16 @@ pub async fn handle_test_account(
     };
 
     match state.account_pool.test(&test_account).await {
-        Ok(result) => {
-            Ok(Json(serde_json::json!({
-                "success": true,
-                "data": {
-                    "message": result.message,
-                    "models": result.models,
-                    "inference": result.inference,
-                    "analytics": result.analytics,
-                    "overall": result.success,
-                }
-            })))
-        }
+        Ok(result) => Ok(Json(serde_json::json!({
+            "success": true,
+            "data": {
+                "message": result.message,
+                "models": result.models,
+                "inference": result.inference,
+                "analytics": result.analytics,
+                "overall": result.success,
+            }
+        }))),
         Err(e) => Err(error_response(
             &format!("Account test failed: {e}"),
             StatusCode::BAD_GATEWAY,
@@ -731,14 +755,20 @@ pub async fn handle_update_settings(
             tracing::error!("Failed to reset model mappings: {}", e);
         }
         for (source, target) in &body.mappings {
-            if let Err(e) = state.model_mapper.set_custom(source.clone(), target.clone()) {
+            if let Err(e) = state
+                .model_mapper
+                .set_custom(source.clone(), target.clone())
+            {
                 tracing::error!("Failed to set mapping {} -> {}: {}", source, target, e);
             }
         }
     } else {
         // 逐个添加/更新
         for (source, target) in &body.mappings {
-            if let Err(e) = state.model_mapper.set_custom(source.clone(), target.clone()) {
+            if let Err(e) = state
+                .model_mapper
+                .set_custom(source.clone(), target.clone())
+            {
                 tracing::error!("Failed to set mapping {} -> {}: {}", source, target, e);
             }
         }
@@ -941,27 +971,45 @@ pub async fn handle_create_user(
     };
     let result = if let Some(username) = &body.username {
         if !username.trim().is_empty() {
-            state.user_store.create_with_username(&body.email, username.trim(), &body.password, role, body.quota)
+            state.user_store.create_with_username(
+                &body.email,
+                username.trim(),
+                &body.password,
+                role,
+                body.quota,
+            )
         } else {
-            state.user_store.create(&body.email, &body.password, role, body.quota)
+            state
+                .user_store
+                .create(&body.email, &body.password, role, body.quota)
         }
     } else {
-        state.user_store.create(&body.email, &body.password, role, body.quota)
+        state
+            .user_store
+            .create(&body.email, &body.password, role, body.quota)
     };
     match result {
         Ok(u) => {
             // 应用请求指定的 group（非空且非默认时更新）
             let final_user = if !body.group.is_empty() && body.group != "default" {
-                match state.user_store.update(&u.id, |x| x.group = body.group.clone()) {
+                match state
+                    .user_store
+                    .update(&u.id, |x| x.group = body.group.clone())
+                {
                     Ok(updated) => updated,
                     Err(_) => u,
                 }
             } else {
                 u
             };
-            Ok(Json(serde_json::json!({ "success": true, "data": mask_user(&final_user) })))
+            Ok(Json(
+                serde_json::json!({ "success": true, "data": mask_user(&final_user) }),
+            ))
         }
-        Err(e) => Err(error_response(&format!("Failed to create user: {e}"), StatusCode::BAD_REQUEST)),
+        Err(e) => Err(error_response(
+            &format!("Failed to create user: {e}"),
+            StatusCode::BAD_REQUEST,
+        )),
     }
 }
 
@@ -1005,8 +1053,13 @@ pub async fn handle_update_user(
             }
         }
     }) {
-        Ok(u) => Ok(Json(serde_json::json!({ "success": true, "data": mask_user(&u) }))),
-        Err(e) => Err(error_response(&format!("Failed to update user: {e}"), StatusCode::BAD_REQUEST)),
+        Ok(u) => Ok(Json(
+            serde_json::json!({ "success": true, "data": mask_user(&u) }),
+        )),
+        Err(e) => Err(error_response(
+            &format!("Failed to update user: {e}"),
+            StatusCode::BAD_REQUEST,
+        )),
     }
 }
 
@@ -1019,7 +1072,10 @@ pub async fn handle_delete_user(
     let _config = verify_admin(&state, &headers).await?;
     match state.user_store.delete(&id) {
         Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": null }))),
-        Err(e) => Err(error_response(&format!("Failed to delete user: {e}"), StatusCode::BAD_REQUEST)),
+        Err(e) => Err(error_response(
+            &format!("Failed to delete user: {e}"),
+            StatusCode::BAD_REQUEST,
+        )),
     }
 }
 
@@ -1029,7 +1085,9 @@ pub async fn handle_me(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let u = verify_user(&state, &headers).await?;
-    Ok(Json(serde_json::json!({ "success": true, "data": mask_user(&u) })))
+    Ok(Json(
+        serde_json::json!({ "success": true, "data": mask_user(&u) }),
+    ))
 }
 
 // ============================================================
@@ -1104,8 +1162,12 @@ pub async fn handle_update_epay_config(
     Json(body): Json<UpdateEpayConfigRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut config = verify_admin(&state, &headers).await?;
-    if let Some(v) = body.pay_address { config.epay.pay_address = v; }
-    if let Some(v) = body.epay_id { config.epay.epay_id = v; }
+    if let Some(v) = body.pay_address {
+        config.epay.pay_address = v;
+    }
+    if let Some(v) = body.epay_id {
+        config.epay.epay_id = v;
+    }
     // F03（契约3）：商户密钥防覆盖——前端回显时密钥以脱敏形式展示，
     // 保存时若原值未修改会带 *** 占位，空值/脱敏值均跳过更新，
     // 仅在管理员输入了新完整密钥时才覆盖。
@@ -1115,15 +1177,34 @@ pub async fn handle_update_epay_config(
             config.epay.epay_key = t.to_string();
         }
     }
-    if let Some(v) = body.pay_methods { config.epay.pay_methods = v; }
-    if let Some(v) = body.price { config.epay.price = v; }
-    if let Some(v) = body.amount_discount { config.epay.amount_discount = v; }
-    if let Some(v) = body.min_topup { config.epay.min_topup = v; }
-    if let Some(v) = body.custom_callback_address { config.epay.custom_callback_address = v; }
-    if let Some(v) = body.server_address { config.server_address = v; }
-    state.config_manager.update(config.clone()).await.map_err(|e| {
-        error_response(&format!("Failed to save config: {e}"), StatusCode::INTERNAL_SERVER_ERROR)
-    })?;
+    if let Some(v) = body.pay_methods {
+        config.epay.pay_methods = v;
+    }
+    if let Some(v) = body.price {
+        config.epay.price = v;
+    }
+    if let Some(v) = body.amount_discount {
+        config.epay.amount_discount = v;
+    }
+    if let Some(v) = body.min_topup {
+        config.epay.min_topup = v;
+    }
+    if let Some(v) = body.custom_callback_address {
+        config.epay.custom_callback_address = v;
+    }
+    if let Some(v) = body.server_address {
+        config.server_address = v;
+    }
+    state
+        .config_manager
+        .update(config.clone())
+        .await
+        .map_err(|e| {
+            error_response(
+                &format!("Failed to save config: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
     Ok(Json(serde_json::json!({ "success": true, "data": null })))
 }
 
@@ -1143,7 +1224,11 @@ pub struct TopupRequest {
 /// 旧实现误将倍率 price 计入实付（money = amount × price × discount），
 /// 用户会被多收 price 倍；倍率只应作用于入账配额（见 `topup_quota`）。
 fn pay_money(epay: &EpayConfig, amount: i64) -> f64 {
-    let discount = *epay.amount_discount.get(&amount).filter(|d| **d > 0.0).unwrap_or(&1.0);
+    let discount = *epay
+        .amount_discount
+        .get(&amount)
+        .filter(|d| **d > 0.0)
+        .unwrap_or(&1.0);
     let money = (amount as f64) * discount;
     (money * 100.0).round() / 100.0
 }
@@ -1151,7 +1236,11 @@ fn pay_money(epay: &EpayConfig, amount: i64) -> f64 {
 /// F02（契约2）：入账配额 = amount × price × discount（向上取整，
 /// 与 pricing 模块 `calculate_cost_quoted` 的取整惯例一致）。
 fn topup_quota(epay: &EpayConfig, amount: i64) -> i64 {
-    let discount = *epay.amount_discount.get(&amount).filter(|d| **d > 0.0).unwrap_or(&1.0);
+    let discount = *epay
+        .amount_discount
+        .get(&amount)
+        .filter(|d| **d > 0.0)
+        .unwrap_or(&1.0);
     ((amount as f64) * epay.price * discount + 0.999999) as i64
 }
 
@@ -1190,7 +1279,8 @@ pub async fn handle_topup_request(
         return error_response("Amount below minimum", StatusCode::BAD_REQUEST).into_response();
     }
     if !epay.config().contains_pay_method(&body.payment_method) {
-        return error_response("Payment method not supported", StatusCode::BAD_REQUEST).into_response();
+        return error_response("Payment method not supported", StatusCode::BAD_REQUEST)
+            .into_response();
     }
     let money = pay_money(epay.config(), body.amount);
     if money < 0.01 {
@@ -1215,7 +1305,8 @@ pub async fn handle_topup_request(
     };
     if let Err(e) = state.order_store.insert(&order) {
         tracing::error!("Failed to create order: {e}");
-        return error_response("Failed to create order", StatusCode::INTERNAL_SERVER_ERROR).into_response();
+        return error_response("Failed to create order", StatusCode::INTERNAL_SERVER_ERROR)
+            .into_response();
     }
     let args = PurchaseArgs {
         pay_type: body.payment_method.clone(),
@@ -1235,7 +1326,8 @@ pub async fn handle_topup_request(
                 "data": params,
                 "url": res.url,
                 "trade_no": trade_no,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => {
             tracing::error!("Epay purchase failed: {e}");
@@ -1306,10 +1398,9 @@ fn urlencoding_decode(s: &str) -> String {
             i += 1;
         } else if bytes[i] == b'%' && i + 2 < bytes.len() {
             // %XX 十六进制转义还原为原始字节
-            if let Ok(b) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
+            if let Ok(b) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 out.push(b);
                 i += 3;
                 continue;
@@ -1321,8 +1412,7 @@ fn urlencoding_decode(s: &str) -> String {
             i += 1;
         }
     }
-    String::from_utf8(out)
-        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// POST/GET /api/user/epay/notify - 易支付异步通知
@@ -1355,7 +1445,10 @@ pub async fn handle_epay_notify(
         Err(_) => return "fail".into_response(),
     };
     if !verify.verify_status || verify.trade_status != "TRADE_SUCCESS" {
-        tracing::warn!("Epay notify: verify failed or trade not success, trade_status={}", verify.trade_status);
+        tracing::warn!(
+            "Epay notify: verify failed or trade not success, trade_status={}",
+            verify.trade_status
+        );
         return "fail".into_response();
     }
 
@@ -1372,7 +1465,10 @@ pub async fn handle_epay_notify(
         if amount_diff > tolerance {
             tracing::error!(
                 "Epay notify amount mismatch: trade_no={} expected={} received={} diff={}",
-                order.trade_no, order.money, callback_money, amount_diff
+                order.trade_no,
+                order.money,
+                callback_money,
+                amount_diff
             );
             return "fail".into_response();
         }
@@ -1405,7 +1501,11 @@ pub async fn handle_epay_notify(
             }
             tracing::info!(
                 "Epay order completed: trade_no={} user={} amount={} money={} quota=+{}",
-                order.trade_no, order.user_id, order.amount, order.money, quota_to_add
+                order.trade_no,
+                order.user_id,
+                order.amount,
+                order.money,
+                quota_to_add
             );
 
             // 通知：充值成功（异步，不阻塞回调）
@@ -1414,11 +1514,13 @@ pub async fn handle_epay_notify(
                 .get_by_id(&order.user_id)
                 .map(|u| u.email)
                 .unwrap_or_default();
-            state.notify_service.notify_spawn(crate::notify::NotifyEvent::PaymentSuccess {
-                user_email,
-                amount: order.money,
-                quota: quota_to_add,
-            });
+            state
+                .notify_service
+                .notify_spawn(crate::notify::NotifyEvent::PaymentSuccess {
+                    user_email,
+                    amount: order.money,
+                    quota: quota_to_add,
+                });
         }
     }
     "success".into_response()
@@ -1431,7 +1533,9 @@ pub async fn handle_epay_return(
     Query(query): Query<HashMap<String, String>>,
     body: axum::body::Body,
 ) -> Response {
-    let bytes = axum::body::to_bytes(body, 64 * 1024).await.unwrap_or_default();
+    let bytes = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .unwrap_or_default();
     let mut params = query.clone();
     let body_params = collect_params(None, &bytes);
     for (k, v) in body_params {
@@ -1463,7 +1567,9 @@ pub async fn handle_epay_return(
             if (callback_money - order.money).abs() > tolerance {
                 tracing::error!(
                     "Epay return amount mismatch: trade_no={} expected={} received={}",
-                    order.trade_no, order.money, callback_money
+                    order.trade_no,
+                    order.money,
+                    callback_money
                 );
                 return Redirect::to(&make_return_path("fail")).into_response();
             }
@@ -1494,7 +1600,9 @@ pub async fn handle_epay_return(
                 }
                 tracing::info!(
                     "Epay return completed: trade_no={} user={} quota=+{}",
-                    order.trade_no, order.user_id, quota_to_add
+                    order.trade_no,
+                    order.user_id,
+                    quota_to_add
                 );
             }
         }
@@ -1590,8 +1698,15 @@ pub async fn handle_list_channels(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let channels: Vec<Value> = state.channel_store.list().iter().map(mask_channel).collect();
-    Ok(Json(serde_json::json!({ "success": true, "data": channels })))
+    let channels: Vec<Value> = state
+        .channel_store
+        .list()
+        .iter()
+        .map(mask_channel)
+        .collect();
+    Ok(Json(
+        serde_json::json!({ "success": true, "data": channels }),
+    ))
 }
 
 pub async fn handle_add_channel(
@@ -1602,8 +1717,13 @@ pub async fn handle_add_channel(
     let _config = verify_admin(&state, &headers).await?;
     let ch = body.to_channel(String::new());
     match state.channel_store.add(ch) {
-        Ok(c) => Ok(Json(serde_json::json!({ "success": true, "data": mask_channel(&c) }))),
-        Err(e) => Err(error_response(&format!("Failed to add channel: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Ok(c) => Ok(Json(
+            serde_json::json!({ "success": true, "data": mask_channel(&c) }),
+        )),
+        Err(e) => Err(error_response(
+            &format!("Failed to add channel: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -1625,8 +1745,13 @@ pub async fn handle_update_channel(
         }
     }
     match state.channel_store.update(&id, ch) {
-        Ok(c) => Ok(Json(serde_json::json!({ "success": true, "data": mask_channel(&c) }))),
-        Err(e) => Err(error_response(&format!("Failed to update channel: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Ok(c) => Ok(Json(
+            serde_json::json!({ "success": true, "data": mask_channel(&c) }),
+        )),
+        Err(e) => Err(error_response(
+            &format!("Failed to update channel: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -1685,12 +1810,21 @@ pub async fn handle_patch_channel(
     }
     // 兼容布尔 enabled 字段：true → "enabled"，false → "disabled"
     if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
-        ch.status = if enabled { "enabled".to_string() } else { "disabled".to_string() };
+        ch.status = if enabled {
+            "enabled".to_string()
+        } else {
+            "disabled".to_string()
+        };
     }
 
     match state.channel_store.update(&id, ch) {
-        Ok(c) => Ok(Json(serde_json::json!({ "success": true, "data": mask_channel(&c) }))),
-        Err(e) => Err(error_response(&format!("Failed to patch channel: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Ok(c) => Ok(Json(
+            serde_json::json!({ "success": true, "data": mask_channel(&c) }),
+        )),
+        Err(e) => Err(error_response(
+            &format!("Failed to patch channel: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -1702,7 +1836,10 @@ pub async fn handle_delete_channel(
     let _config = verify_admin(&state, &headers).await?;
     match state.channel_store.remove(&id) {
         Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": null }))),
-        Err(e) => Err(error_response(&format!("Failed to delete channel: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Err(e) => Err(error_response(
+            &format!("Failed to delete channel: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -1712,12 +1849,17 @@ pub async fn handle_test_channel(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let ch = state.channel_store.get(&id).ok_or_else(|| error_response("Channel not found", StatusCode::NOT_FOUND))?;
+    let ch = state
+        .channel_store
+        .get(&id)
+        .ok_or_else(|| error_response("Channel not found", StatusCode::NOT_FOUND))?;
     let result = state.channel_store.test(&ch).await;
     if result.success {
         state.channel_store.mark_healthy(&id);
     } else {
-        state.channel_store.mark_unhealthy(&id, result.message.clone());
+        state
+            .channel_store
+            .mark_unhealthy(&id, result.message.clone());
     }
     Ok(Json(serde_json::json!({ "success": true, "data": result })))
 }
@@ -1772,13 +1914,21 @@ pub async fn handle_fetch_channel_models(
         crate::channel::ChannelType::OpenaiCompatible => {
             let base = body.base_url.trim().trim_end_matches('/');
             if base.is_empty() {
-                return Err(error_response("base_url is required", StatusCode::BAD_REQUEST));
+                return Err(error_response(
+                    "base_url is required",
+                    StatusCode::BAD_REQUEST,
+                ));
             }
             let mut url = format!("{base}/models");
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
-                .map_err(|e| error_response(&format!("HTTP client error: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
+                .map_err(|e| {
+                    error_response(
+                        &format!("HTTP client error: {e}"),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    )
+                })?;
             let mut req = client.get(&url).bearer_auth(&api_key);
             // 部分上游（如 OpenRouter）要求 /v1 前缀，若 /models 404 再试 /v1/models
             let resp = req.send().await;
@@ -1792,19 +1942,32 @@ pub async fn handle_fetch_channel_models(
                 }
                 Ok(r) => r,
                 Err(e) => {
-                    return Err(error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY));
+                    return Err(error_response(
+                        &format!("Request failed: {e}"),
+                        StatusCode::BAD_GATEWAY,
+                    ));
                 }
             };
             let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
             if status == 401 || status == 403 {
-                return Err(error_response(&format!("Auth failed: HTTP {status} (invalid api key?)"), StatusCode::BAD_REQUEST));
+                return Err(error_response(
+                    &format!("Auth failed: HTTP {status} (invalid api key?)"),
+                    StatusCode::BAD_REQUEST,
+                ));
             }
             if !(200..300).contains(&status) {
-                return Err(error_response(&format!("Upstream returned HTTP {status}"), StatusCode::BAD_GATEWAY));
+                return Err(error_response(
+                    &format!("Upstream returned HTTP {status}"),
+                    StatusCode::BAD_GATEWAY,
+                ));
             }
-            let json: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|_| error_response("Upstream returned non-JSON response", StatusCode::BAD_GATEWAY))?;
+            let json: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+                error_response(
+                    "Upstream returned non-JSON response",
+                    StatusCode::BAD_GATEWAY,
+                )
+            })?;
             let models: Vec<String> = json
                 .get("data")
                 .and_then(|d| d.as_array())
@@ -1819,30 +1982,50 @@ pub async fn handle_fetch_channel_models(
         crate::channel::ChannelType::Anthropic => {
             let base = body.base_url.trim().trim_end_matches('/');
             if base.is_empty() {
-                return Err(error_response("base_url is required", StatusCode::BAD_REQUEST));
+                return Err(error_response(
+                    "base_url is required",
+                    StatusCode::BAD_REQUEST,
+                ));
             }
             let url = format!("{base}/v1/models");
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
-                .map_err(|e| error_response(&format!("HTTP client error: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
+                .map_err(|e| {
+                    error_response(
+                        &format!("HTTP client error: {e}"),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    )
+                })?;
             let resp = client
                 .get(&url)
                 .header("x-api-key", &api_key)
                 .header("anthropic-version", "2023-06-01")
                 .send()
                 .await
-                .map_err(|e| error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY))?;
+                .map_err(|e| {
+                    error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
+                })?;
             let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
             if status == 401 || status == 403 {
-                return Err(error_response(&format!("Auth failed: HTTP {status} (invalid api key?)"), StatusCode::BAD_REQUEST));
+                return Err(error_response(
+                    &format!("Auth failed: HTTP {status} (invalid api key?)"),
+                    StatusCode::BAD_REQUEST,
+                ));
             }
             if !(200..300).contains(&status) {
-                return Err(error_response(&format!("Upstream returned HTTP {status}"), StatusCode::BAD_GATEWAY));
+                return Err(error_response(
+                    &format!("Upstream returned HTTP {status}"),
+                    StatusCode::BAD_GATEWAY,
+                ));
             }
-            let json: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|_| error_response("Upstream returned non-JSON response", StatusCode::BAD_GATEWAY))?;
+            let json: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+                error_response(
+                    "Upstream returned non-JSON response",
+                    StatusCode::BAD_GATEWAY,
+                )
+            })?;
             let models: Vec<String> = json
                 .get("data")
                 .and_then(|d| d.as_array())
@@ -1872,7 +2055,12 @@ pub async fn handle_fetch_channel_models(
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
-                .map_err(|e| error_response(&format!("HTTP client error: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
+                .map_err(|e| {
+                    error_response(
+                        &format!("HTTP client error: {e}"),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    )
+                })?;
             let mut req = client.get(&url);
             if !api_key.is_empty() {
                 req = req.bearer_auth(&api_key);
@@ -1883,13 +2071,23 @@ pub async fn handle_fetch_channel_models(
             let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
             if status == 401 || status == 403 {
-                return Err(error_response(&format!("Auth failed: HTTP {status} (invalid api key?)"), StatusCode::BAD_REQUEST));
+                return Err(error_response(
+                    &format!("Auth failed: HTTP {status} (invalid api key?)"),
+                    StatusCode::BAD_REQUEST,
+                ));
             }
             if !(200..300).contains(&status) {
-                return Err(error_response(&format!("Upstream returned HTTP {status}"), StatusCode::BAD_GATEWAY));
+                return Err(error_response(
+                    &format!("Upstream returned HTTP {status}"),
+                    StatusCode::BAD_GATEWAY,
+                ));
             }
-            let json: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|_| error_response("Upstream returned non-JSON response", StatusCode::BAD_GATEWAY))?;
+            let json: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+                error_response(
+                    "Upstream returned non-JSON response",
+                    StatusCode::BAD_GATEWAY,
+                )
+            })?;
             let models: Vec<String> = json
                 .get("data")
                 .and_then(|d| d.as_array())
@@ -1906,7 +2104,10 @@ pub async fn handle_fetch_channel_models(
     // 模型自动发现：拉取成功后把上游模型快照写回渠道（仅当渠道已存在时）。
     if let Some(cid) = channel_id_for_save.split(',').next() {
         if !cid.trim().is_empty() && state.channel_store.get(cid).is_some() {
-            if let Err(e) = state.channel_store.save_discovered_models(cid, models.clone()) {
+            if let Err(e) = state
+                .channel_store
+                .save_discovered_models(cid, models.clone())
+            {
                 tracing::error!("Failed to persist discovered models for channel {cid}: {e}");
             }
         }
@@ -1974,10 +2175,7 @@ pub async fn handle_channel_chat_test(
 
     let ch = match state.channel_store.get(&body.channel_id) {
         Some(c) => c,
-        None => {
-            return error_response("Channel not found", StatusCode::NOT_FOUND)
-                .into_response()
-        }
+        None => return error_response("Channel not found", StatusCode::NOT_FOUND).into_response(),
     };
 
     // 确定目标模型
@@ -2016,8 +2214,11 @@ pub async fn handle_channel_chat_test(
     {
         Ok(c) => c,
         Err(e) => {
-            return error_response(&format!("HTTP client error: {e}"), StatusCode::INTERNAL_SERVER_ERROR)
-                .into_response()
+            return error_response(
+                &format!("HTTP client error: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+            .into_response()
         }
     };
 
@@ -2049,15 +2250,13 @@ pub async fn handle_channel_chat_test(
                 if stream {
                     // 流式：SSE 原样透传（将字节块包装为 sse::Event 事件）
                     let body = resp.bytes_stream();
-                    let sse = axum::response::sse::Sse::new(
-                        body.map(|chunk| match chunk {
+                    let sse = axum::response::sse::Sse::new(body.map(|chunk| {
+                        match chunk {
                             Ok(bytes) => Ok(axum::response::sse::Event::default()
-                .data(String::from_utf8_lossy(&bytes))),
-                            Err(e) => {
-                                Err(axum::Error::new(format!("upstream stream error: {e}")))
-                            }
-                        }),
-                    );
+                                .data(String::from_utf8_lossy(&bytes))),
+                            Err(e) => Err(axum::Error::new(format!("upstream stream error: {e}"))),
+                        }
+                    }));
                     sse.into_response()
                 } else {
                     match resp.json::<Value>().await {
@@ -2117,15 +2316,12 @@ pub async fn handle_channel_chat_test(
             }
             if stream {
                 let body = resp.bytes_stream();
-                let sse = axum::response::sse::Sse::new(
-                    body.map(|chunk| match chunk {
-                        Ok(bytes) => Ok(axum::response::sse::Event::default()
-                .data(String::from_utf8_lossy(&bytes))),
-                        Err(e) => {
-                            Err(axum::Error::new(format!("upstream stream error: {e}")))
-                        }
-                    }),
-                );
+                let sse = axum::response::sse::Sse::new(body.map(|chunk| match chunk {
+                    Ok(bytes) => Ok(
+                        axum::response::sse::Event::default().data(String::from_utf8_lossy(&bytes)),
+                    ),
+                    Err(e) => Err(axum::Error::new(format!("upstream stream error: {e}"))),
+                }));
                 sse.into_response()
             } else {
                 match resp.json::<Value>().await {
@@ -2133,7 +2329,11 @@ pub async fn handle_channel_chat_test(
                         let text = json
                             .get("content")
                             .and_then(|c| c.as_array())
-                            .and_then(|arr| arr.iter().find(|p| p.get("type").and_then(|t| t.as_str()) == Some("text")))
+                            .and_then(|arr| {
+                                arr.iter().find(|p| {
+                                    p.get("type").and_then(|t| t.as_str()) == Some("text")
+                                })
+                            })
                             .and_then(|p| p.get("text"))
                             .and_then(|t| t.as_str())
                             .unwrap_or("")
@@ -2156,8 +2356,9 @@ pub async fn handle_channel_chat_test(
                 }
             }
         }
-        Err(e) => error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
-            .into_response(),
+        Err(e) => {
+            error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY).into_response()
+        }
     }
 }
 
@@ -2251,7 +2452,10 @@ pub async fn handle_add_token(
             data["plain_key"] = serde_json::json!(k.key.clone());
             Ok(Json(serde_json::json!({ "success": true, "data": data })))
         }
-        Err(e) => Err(error_response(&format!("Failed to create token: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Err(e) => Err(error_response(
+            &format!("Failed to create token: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -2263,16 +2467,35 @@ pub async fn handle_update_token(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
     match state.api_key_store.update(&id, |k| {
-        if let Some(n) = &body.name { k.name = n.clone(); }
-        if let Some(g) = &body.group { k.group = g.clone(); }
-        if let Some(m) = &body.allowed_models { k.allowed_models = Some(m.clone()); }
-        if let Some(e) = body.expires_at { k.expires_at = Some(e); }
-        if let Some(q) = body.quota_limit { k.quota_limit = Some(q); }
-        if let Some(ip) = &body.ip_limit { k.ip_limit = Some(ip.clone()); }
-        if let Some(s) = &body.status { k.status = s.clone(); }
+        if let Some(n) = &body.name {
+            k.name = n.clone();
+        }
+        if let Some(g) = &body.group {
+            k.group = g.clone();
+        }
+        if let Some(m) = &body.allowed_models {
+            k.allowed_models = Some(m.clone());
+        }
+        if let Some(e) = body.expires_at {
+            k.expires_at = Some(e);
+        }
+        if let Some(q) = body.quota_limit {
+            k.quota_limit = Some(q);
+        }
+        if let Some(ip) = &body.ip_limit {
+            k.ip_limit = Some(ip.clone());
+        }
+        if let Some(s) = &body.status {
+            k.status = s.clone();
+        }
     }) {
-        Ok(k) => Ok(Json(serde_json::json!({ "success": true, "data": mask_token(&k) }))),
-        Err(e) => Err(error_response(&format!("Failed to update token: {e}"), StatusCode::BAD_REQUEST)),
+        Ok(k) => Ok(Json(
+            serde_json::json!({ "success": true, "data": mask_token(&k) }),
+        )),
+        Err(e) => Err(error_response(
+            &format!("Failed to update token: {e}"),
+            StatusCode::BAD_REQUEST,
+        )),
     }
 }
 
@@ -2284,7 +2507,10 @@ pub async fn handle_delete_token(
     let _config = verify_admin(&state, &headers).await?;
     match state.api_key_store.delete(&id) {
         Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": null }))),
-        Err(e) => Err(error_response(&format!("Failed to delete token: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Err(e) => Err(error_response(
+            &format!("Failed to delete token: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -2355,7 +2581,10 @@ pub async fn handle_upsert_price(
     let price = body.to_model_price();
     match state.pricing_store.upsert_price(price) {
         Ok(p) => Ok(Json(serde_json::json!({ "success": true, "data": p }))),
-        Err(e) => Err(error_response(&format!("Failed to save price: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Err(e) => Err(error_response(
+            &format!("Failed to save price: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -2370,7 +2599,10 @@ pub async fn handle_upsert_price_by_model(
     let price = body.to_model_price();
     match state.pricing_store.upsert_price(price) {
         Ok(p) => Ok(Json(serde_json::json!({ "success": true, "data": p }))),
-        Err(e) => Err(error_response(&format!("Failed to save price: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Err(e) => Err(error_response(
+            &format!("Failed to save price: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -2382,7 +2614,10 @@ pub async fn handle_delete_price(
     let _config = verify_admin(&state, &headers).await?;
     match state.pricing_store.delete_price(&model) {
         Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": null }))),
-        Err(e) => Err(error_response(&format!("Failed to delete price: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Err(e) => Err(error_response(
+            &format!("Failed to delete price: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -2403,7 +2638,10 @@ pub async fn handle_update_ratios(
     let _config = verify_admin(&state, &headers).await?;
     match state.pricing_store.update_ratios(body) {
         Ok(r) => Ok(Json(serde_json::json!({ "success": true, "data": r }))),
-        Err(e) => Err(error_response(&format!("Failed to update ratios: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Err(e) => Err(error_response(
+            &format!("Failed to update ratios: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -2458,7 +2696,10 @@ pub async fn handle_upsert_group(
     let group = body.to_user_group();
     match state.user_group_store.upsert(group) {
         Ok(g) => Ok(Json(serde_json::json!({ "success": true, "data": g }))),
-        Err(e) => Err(error_response(&format!("Failed to save group: {e}"), StatusCode::BAD_REQUEST)),
+        Err(e) => Err(error_response(
+            &format!("Failed to save group: {e}"),
+            StatusCode::BAD_REQUEST,
+        )),
     }
 }
 
@@ -2473,7 +2714,10 @@ pub async fn handle_upsert_group_by_name(
     let group = body.to_user_group();
     match state.user_group_store.upsert(group) {
         Ok(g) => Ok(Json(serde_json::json!({ "success": true, "data": g }))),
-        Err(e) => Err(error_response(&format!("Failed to save group: {e}"), StatusCode::BAD_REQUEST)),
+        Err(e) => Err(error_response(
+            &format!("Failed to save group: {e}"),
+            StatusCode::BAD_REQUEST,
+        )),
     }
 }
 
@@ -2485,7 +2729,10 @@ pub async fn handle_delete_group(
     let _config = verify_admin(&state, &headers).await?;
     match state.user_group_store.remove(&name) {
         Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": null }))),
-        Err(e) => Err(error_response(&format!("Failed to delete group: {e}"), StatusCode::BAD_REQUEST)),
+        Err(e) => Err(error_response(
+            &format!("Failed to delete group: {e}"),
+            StatusCode::BAD_REQUEST,
+        )),
     }
 }
 
@@ -2501,13 +2748,18 @@ pub(crate) fn record_audit(
     before: Option<Value>,
     after: Option<Value>,
 ) {
-    state.log_store.record_audit(admin_id, action, target, before, after);
+    state
+        .log_store
+        .record_audit(admin_id, action, target, before, after);
 }
 
 async fn admin_id_from_session(state: &AppState, headers: &HeaderMap) -> String {
     if let Some(token) = extract_session_token(headers) {
         let config = state.config_manager.get().await;
-        let session_store = SessionStore::new(&config.admin.session_secret, config.admin.session_ttl_hours.max(1));
+        let session_store = SessionStore::new(
+            &config.admin.session_secret,
+            config.admin.session_ttl_hours.max(1),
+        );
         if let Some(sess) = session_store.validate_session(&token) {
             return sess.email;
         }
@@ -2609,7 +2861,10 @@ pub async fn handle_export_request_logs(
         (
             StatusCode::OK,
             [
-                (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "text/csv; charset=utf-8".to_string(),
+                ),
                 (
                     axum::http::header::CONTENT_DISPOSITION,
                     "attachment; filename=\"request_logs.csv\"".to_string(),
@@ -2623,7 +2878,10 @@ pub async fn handle_export_request_logs(
         (
             StatusCode::OK,
             [
-                (axum::http::header::CONTENT_TYPE, "application/json; charset=utf-8".to_string()),
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "application/json; charset=utf-8".to_string(),
+                ),
                 (
                     axum::http::header::CONTENT_DISPOSITION,
                     "attachment; filename=\"request_logs.json\"".to_string(),
@@ -2655,7 +2913,10 @@ pub async fn handle_batch_redemptions(
     Json(body): Json<BatchRedemptionRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    match state.redemption_store.batch_generate(body.count, body.quota, &body.name, body.expires_at) {
+    match state
+        .redemption_store
+        .batch_generate(body.count, body.quota, &body.name, body.expires_at)
+    {
         Ok(codes) => {
             let admin_id = admin_id_from_session(&state, &headers).await;
             record_audit(
@@ -2668,7 +2929,10 @@ pub async fn handle_batch_redemptions(
             );
             Ok(Json(serde_json::json!({ "success": true, "data": codes })))
         }
-        Err(e) => Err(error_response(&format!("Failed to generate redemptions: {e}"), StatusCode::BAD_REQUEST)),
+        Err(e) => Err(error_response(
+            &format!("Failed to generate redemptions: {e}"),
+            StatusCode::BAD_REQUEST,
+        )),
     }
 }
 
@@ -2697,10 +2961,20 @@ pub async fn handle_delete_redemption(
     match state.redemption_store.delete(&id) {
         Ok(_) => {
             let admin_id = admin_id_from_session(&state, &headers).await;
-            record_audit(&state, &admin_id, "delete", &format!("redemption:{id}"), None, None);
+            record_audit(
+                &state,
+                &admin_id,
+                "delete",
+                &format!("redemption:{id}"),
+                None,
+                None,
+            );
             Ok(Json(serde_json::json!({ "success": true, "data": null })))
         }
-        Err(e) => Err(error_response(&format!("Failed to delete redemption: {e}"), StatusCode::BAD_REQUEST)),
+        Err(e) => Err(error_response(
+            &format!("Failed to delete redemption: {e}"),
+            StatusCode::BAD_REQUEST,
+        )),
     }
 }
 
@@ -2730,7 +3004,8 @@ pub async fn handle_redeem(
                         body.code, quota, user.id
                     );
                 }
-                return error_response("Failed to add quota", StatusCode::INTERNAL_SERVER_ERROR).into_response();
+                return error_response("Failed to add quota", StatusCode::INTERNAL_SERVER_ERROR)
+                    .into_response();
             }
             let admin_id = admin_id_from_session(&state, &headers).await;
             record_audit(
@@ -2774,10 +3049,20 @@ pub async fn handle_update_ratelimit_config(
     match state.rate_limiter.update_config(body) {
         Ok(cfg) => {
             let admin_id = admin_id_from_session(&state, &headers).await;
-            record_audit(&state, &admin_id, "update", "ratelimit:config", None, Some(serde_json::json!(cfg.clone())));
+            record_audit(
+                &state,
+                &admin_id,
+                "update",
+                "ratelimit:config",
+                None,
+                Some(serde_json::json!(cfg.clone())),
+            );
             Ok(Json(serde_json::json!({ "success": true, "data": cfg })))
         }
-        Err(e) => Err(error_response(&format!("Failed to update ratelimit config: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Err(e) => Err(error_response(
+            &format!("Failed to update ratelimit config: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -2813,7 +3098,8 @@ pub async fn handle_consumption_trend(
     let _config = verify_admin(&state, &headers).await?;
     let start = dashboard_start_ts(q.days);
     let logs = state.log_store.requests.all_sorted_asc();
-    let mut daily: std::collections::BTreeMap<String, (i64, u64)> = std::collections::BTreeMap::new();
+    let mut daily: std::collections::BTreeMap<String, (i64, u64)> =
+        std::collections::BTreeMap::new();
     for l in &logs {
         if l.created_at < start {
             continue;
@@ -2827,9 +3113,9 @@ pub async fn handle_consumption_trend(
     }
     let data: Vec<Value> = daily
         .into_iter()
-        .map(|(day, (cost, count))| {
-            serde_json::json!({ "date": day, "cost": cost, "count": count })
-        })
+        .map(
+            |(day, (cost, count))| serde_json::json!({ "date": day, "cost": cost, "count": count }),
+        )
         .collect();
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
@@ -2927,7 +3213,8 @@ pub async fn handle_channel_health(
     let data: Vec<Value> = channels
         .iter()
         .map(|ch| {
-            let (total, success, total_latency) = by_channel.get(&ch.id).copied().unwrap_or((0, 0, 0));
+            let (total, success, total_latency) =
+                by_channel.get(&ch.id).copied().unwrap_or((0, 0, 0));
             let success_rate = if total > 0 {
                 (success as f64 / total as f64) * 100.0
             } else {
@@ -3033,28 +3320,47 @@ pub async fn handle_update_notify_config(
     let _ = verify_admin(&state, &headers).await?;
     let mut cfg = state.notify_service.get_config().await;
 
-    if let Some(v) = body.enabled { cfg.enabled = v; }
+    if let Some(v) = body.enabled {
+        cfg.enabled = v;
+    }
     if let Some(v) = body.telegram_bot_token {
         // F09: 空串与脱敏占位值不应覆盖已保存的凭据，先 trim 再判空
         let t = v.trim();
-        if !t.is_empty() && !t.contains("***") { cfg.telegram_bot_token = t.to_string(); }
+        if !t.is_empty() && !t.contains("***") {
+            cfg.telegram_bot_token = t.to_string();
+        }
     }
-    if let Some(v) = body.telegram_chat_id { cfg.telegram_chat_id = v; }
-    if let Some(v) = body.smtp_host { cfg.smtp_host = v; }
-    if let Some(v) = body.smtp_port { cfg.smtp_port = v; }
-    if let Some(v) = body.smtp_username { cfg.smtp_username = v; }
+    if let Some(v) = body.telegram_chat_id {
+        cfg.telegram_chat_id = v;
+    }
+    if let Some(v) = body.smtp_host {
+        cfg.smtp_host = v;
+    }
+    if let Some(v) = body.smtp_port {
+        cfg.smtp_port = v;
+    }
+    if let Some(v) = body.smtp_username {
+        cfg.smtp_username = v;
+    }
     if let Some(v) = body.smtp_password {
         // F09: 空串与脱敏占位值不应覆盖已保存的凭据，先 trim 再判空
         let t = v.trim();
-        if !t.is_empty() && !t.contains("***") { cfg.smtp_password = t.to_string(); }
+        if !t.is_empty() && !t.contains("***") {
+            cfg.smtp_password = t.to_string();
+        }
     }
-    if let Some(v) = body.smtp_from { cfg.smtp_from = v; }
+    if let Some(v) = body.smtp_from {
+        cfg.smtp_from = v;
+    }
 
     // 同步到 ConfigManager（持久化）
     let mut app_config = state.config_manager.get().await;
     app_config.notify = cfg.clone();
     state.config_manager.update(app_config).await.map_err(|e| {
-        error_response(&format!("Failed to save notify config: {e}"), StatusCode::INTERNAL_SERVER_ERROR)
+        error_response(
+            &format!("Failed to save notify config: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
     })?;
 
     // 同步到 NotifyService 运行时
@@ -3078,8 +3384,13 @@ pub async fn handle_test_telegram(
     }
     let text = "<b>🔔 AIGX 测试通知</b>\n\nTelegram 通知配置成功！";
     match state.notify_service.send_telegram(text).await {
-        Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": "Telegram 测试消息已发送" }))),
-        Err(e) => Err(error_response(&format!("发送失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Ok(_) => Ok(Json(
+            serde_json::json!({ "success": true, "data": "Telegram 测试消息已发送" }),
+        )),
+        Err(e) => Err(error_response(
+            &format!("发送失败: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -3107,16 +3418,24 @@ pub async fn handle_test_email(
     }
     let subject = "AIGX 测试邮件";
     let body_text = "这是一封来自 AIGX 的测试邮件。如果您收到此邮件，说明 SMTP 配置正确。";
-    match state.notify_service.send_email(&body.to, subject, body_text).await {
-        Ok(_) => Ok(Json(serde_json::json!({ "success": true, "data": format!("测试邮件已发送至 {}", body.to) }))),
-        Err(e) => Err(error_response(&format!("发送失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    match state
+        .notify_service
+        .send_email(&body.to, subject, body_text)
+        .await
+    {
+        Ok(_) => Ok(Json(
+            serde_json::json!({ "success": true, "data": format!("测试邮件已发送至 {}", body.to) }),
+        )),
+        Err(e) => Err(error_response(
+            &format!("发送失败: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
+// ────────────────────────────────────────────────────────────────
 
-// ????????? Stripe ?? ?????????
-
-/// POST /api/stripe/topup ? ?? Stripe Checkout Session
+/// POST /api/stripe/topup — 创建 Stripe Checkout Session
 pub async fn handle_stripe_topup(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3128,13 +3447,11 @@ pub async fn handle_stripe_topup(
     };
     let stripe = &state.stripe_client;
     if !stripe.config().ready() {
-        return error_response("Stripe is not configured", StatusCode::BAD_REQUEST)
-            .into_response();
+        return error_response("Stripe is not configured", StatusCode::BAD_REQUEST).into_response();
     }
     let amount = body.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
     if amount <= 0 {
-        return error_response("amount must be positive", StatusCode::BAD_REQUEST)
-            .into_response();
+        return error_response("amount must be positive", StatusCode::BAD_REQUEST).into_response();
     }
     let config = state.config_manager.get().await;
     let callback = callback_address(&state, &config);
@@ -3182,7 +3499,8 @@ pub async fn handle_stripe_topup(
             "session_id": session.id,
             "url": session.url,
             "trade_no": trade_no,
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => {
             tracing::error!("Stripe checkout failed: {e}");
             error_response(&e.to_string(), StatusCode::BAD_GATEWAY).into_response()
@@ -3190,7 +3508,7 @@ pub async fn handle_stripe_topup(
     }
 }
 
-/// POST /api/user/stripe/webhook ? Stripe Webhook ??
+/// POST /api/user/stripe/webhook — Stripe Webhook 回调
 pub async fn handle_stripe_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3198,13 +3516,17 @@ pub async fn handle_stripe_webhook(
 ) -> Response {
     let stripe = &state.stripe_client;
     if !stripe.config().ready() {
-        return error_response("Stripe is not configured", StatusCode::BAD_REQUEST)
-            .into_response();
+        return error_response("Stripe is not configured", StatusCode::BAD_REQUEST).into_response();
     }
-    let sig_header = match headers.get("stripe-signature").and_then(|v| v.to_str().ok()) {
+    let sig_header = match headers
+        .get("stripe-signature")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(s) => s.to_string(),
-        None => return error_response("Missing stripe-signature header", StatusCode::BAD_REQUEST)
-            .into_response(),
+        None => {
+            return error_response("Missing stripe-signature header", StatusCode::BAD_REQUEST)
+                .into_response()
+        }
     };
     let event = match stripe.verify_webhook(&body, &sig_header) {
         Ok(e) => e,
@@ -3224,8 +3546,9 @@ pub async fn handle_stripe_webhook(
     }
     let trade_no = match obj.trade_no() {
         Some(t) => t,
-        None => return error_response("No trade_no in event", StatusCode::BAD_REQUEST)
-            .into_response(),
+        None => {
+            return error_response("No trade_no in event", StatusCode::BAD_REQUEST).into_response()
+        }
     };
     // Atomically complete the order and credit quota
     match state.order_store.complete_if_pending(&trade_no) {
@@ -3235,12 +3558,19 @@ pub async fn handle_stripe_webhook(
                 return error_response("Failed to add quota", StatusCode::INTERNAL_SERVER_ERROR)
                     .into_response();
             }
-            tracing::info!("Stripe payment completed: order={}, user={}, quota={}", trade_no, order.user_id, order.quota);
-            state.notify_service.notify_spawn(crate::notify::NotifyEvent::PaymentSuccess {
-                user_email: order.user_id.clone(),
-                amount: order.amount as f64,
-                quota: order.quota,
-            });
+            tracing::info!(
+                "Stripe payment completed: order={}, user={}, quota={}",
+                trade_no,
+                order.user_id,
+                order.quota
+            );
+            state
+                .notify_service
+                .notify_spawn(crate::notify::NotifyEvent::PaymentSuccess {
+                    user_email: order.user_id.clone(),
+                    amount: order.amount as f64,
+                    quota: order.quota,
+                });
             Json(serde_json::json!({"received": true, "completed": true})).into_response()
         }
         None => {
@@ -3250,17 +3580,15 @@ pub async fn handle_stripe_webhook(
     }
 }
 
+// ────────────────────────────────────────────────────────────────
 
-// ????????? GitHub OAuth ?????????
-
-/// GET /api/auth/github ? ???? GitHub OAuth ????
-pub async fn handle_github_oauth_authorize(
-    State(state): State<AppState>,
-) -> Response {
+/// GET /api/auth/github — 跳转到 GitHub OAuth 授权页
+pub async fn handle_github_oauth_authorize(State(state): State<AppState>) -> Response {
     let config = state.config_manager.get().await;
     let oauth = &config.github_oauth;
     if !oauth.ready() {
-        return error_response("GitHub OAuth not configured", StatusCode::BAD_REQUEST).into_response();
+        return error_response("GitHub OAuth not configured", StatusCode::BAD_REQUEST)
+            .into_response();
     }
     let state_param = uuid::Uuid::new_v4().to_string();
     let url = format!(
@@ -3272,7 +3600,7 @@ pub async fn handle_github_oauth_authorize(
     Redirect::to(&url).into_response()
 }
 
-/// GET /api/auth/github/callback ? GitHub OAuth ??
+/// GET /api/auth/github/callback — GitHub OAuth 回调处理
 pub async fn handle_github_oauth_callback(
     State(state): State<AppState>,
     Query(params): Query<GithubCallbackParams>,
@@ -3280,30 +3608,40 @@ pub async fn handle_github_oauth_callback(
     let config = state.config_manager.get().await;
     let oauth = config.github_oauth.clone();
     if !oauth.ready() {
-        return error_response("GitHub OAuth not configured", StatusCode::BAD_REQUEST).into_response();
+        return error_response("GitHub OAuth not configured", StatusCode::BAD_REQUEST)
+            .into_response();
     }
     let code = match params.code {
         Some(c) => c,
-        None => return error_response("Missing authorization code", StatusCode::BAD_REQUEST).into_response(),
-    };
-    // Exchange code for access token
-    let access_token = match crate::oauth::github::exchange_code(&oauth, &code, &state.http_client).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("GitHub OAuth token exchange failed: {e}");
-            return error_response("OAuth token exchange failed", StatusCode::BAD_GATEWAY).into_response();
+        None => {
+            return error_response("Missing authorization code", StatusCode::BAD_REQUEST)
+                .into_response()
         }
     };
+    // Exchange code for access token
+    let access_token =
+        match crate::oauth::github::exchange_code(&oauth, &code, &state.http_client).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("GitHub OAuth token exchange failed: {e}");
+                return error_response("OAuth token exchange failed", StatusCode::BAD_GATEWAY)
+                    .into_response();
+            }
+        };
     // Fetch user info
-    let gh_user = match crate::oauth::github::get_user_info(&access_token, &state.http_client).await {
+    let gh_user = match crate::oauth::github::get_user_info(&access_token, &state.http_client).await
+    {
         Ok(u) => u,
         Err(e) => {
             tracing::error!("GitHub OAuth user info failed: {e}");
-            return error_response("Failed to fetch GitHub user info", StatusCode::BAD_GATEWAY).into_response();
+            return error_response("Failed to fetch GitHub user info", StatusCode::BAD_GATEWAY)
+                .into_response();
         }
     };
     // Determine email: prefer primary email, fallback to github id pseudo-email
-    let email = gh_user.email.clone()
+    let email = gh_user
+        .email
+        .clone()
         .unwrap_or_else(|| format!("{}@github.local", gh_user.login));
     // Find or create user
     let user = match state.user_store.get_by_email(&email) {
@@ -3320,7 +3658,11 @@ pub async fn handle_github_oauth_callback(
                 Ok(u) => u,
                 Err(e) => {
                     tracing::error!("Failed to create OAuth user: {e}");
-                    return error_response("Failed to create user", StatusCode::INTERNAL_SERVER_ERROR).into_response();
+                    return error_response(
+                        "Failed to create user",
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    )
+                    .into_response();
                 }
             }
         }
@@ -3346,7 +3688,8 @@ pub async fn handle_github_oauth_callback(
             },
             "expires_at": session.expires_at,
         }
-    })).into_response()
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]

@@ -21,21 +21,28 @@ pub async fn query_usage_summary(account: &CfAccount, client: &Client) -> Result
     );
 
     // 月初 00:00 UTC
-    let month_start = format!(
-        "{:04}-{:02}-{:02}T00:00:00Z",
-        now.year(),
-        now.month(),
-        1
-    );
+    let month_start = format!("{:04}-{:02}-{:02}T00:00:00Z", now.year(), now.month(), 1);
 
     // 查询今天的数据
-    let today_groups = query_graphql(&account.account_id, &account.api_token, &today_start, client).await?;
+    let today_groups = query_graphql(
+        &account.account_id,
+        &account.api_token,
+        &today_start,
+        client,
+    )
+    .await?;
 
     // 查询本月的数据（如果月初不是今天）
     let month_groups = if today_start == month_start {
         today_groups.clone()
     } else {
-        query_graphql(&account.account_id, &account.api_token, &month_start, client).await?
+        query_graphql(
+            &account.account_id,
+            &account.api_token,
+            &month_start,
+            client,
+        )
+        .await?
     };
 
     let today_neurons: u64 = today_groups.iter().map(|g| g.sum.total_neurons).sum();

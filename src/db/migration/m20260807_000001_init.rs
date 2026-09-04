@@ -50,7 +50,12 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default("user"),
                     )
-                    .col(ColumnDef::new(Users::Quota).big_integer().not_null().default(0))
+                    .col(
+                        ColumnDef::new(Users::Quota)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .col(
                         ColumnDef::new(Users::UsedQuota)
                             .big_integer()
@@ -69,7 +74,12 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default("default"),
                     )
-                    .col(ColumnDef::new(Users::CreatedAt).big_integer().not_null().default(0))
+                    .col(
+                        ColumnDef::new(Users::CreatedAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -99,7 +109,12 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default(true),
                     )
-                    .col(ColumnDef::new(ApiKeys::CreatedAt).big_integer().not_null().default(0))
+                    .col(
+                        ColumnDef::new(ApiKeys::CreatedAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .col(ColumnDef::new(ApiKeys::LastUsedAt).big_integer().null())
                     .col(ColumnDef::new(ApiKeys::UserId).string_len(64).null())
                     .col(
@@ -124,7 +139,12 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default("active"),
                     )
-                    .col(ColumnDef::new(ApiKeys::UpdatedAt).big_integer().not_null().default(0))
+                    .col(
+                        ColumnDef::new(ApiKeys::UpdatedAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .from(ApiKeys::Table, ApiKeys::UserId)
@@ -154,8 +174,18 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default("cloudflare"),
                     )
-                    .col(ColumnDef::new(Channels::BaseUrl).string_len(512).not_null().default(""))
-                    .col(ColumnDef::new(Channels::ApiKey).text().not_null().default(""))
+                    .col(
+                        ColumnDef::new(Channels::BaseUrl)
+                            .string_len(512)
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(Channels::ApiKey)
+                            .text()
+                            .not_null()
+                            .default(""),
+                    )
                     .col(
                         ColumnDef::new(Channels::Priority)
                             .integer()
@@ -174,7 +204,12 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default("enabled"),
                     )
-                    .col(ColumnDef::new(Channels::Models).text().not_null().default("[]"))
+                    .col(
+                        ColumnDef::new(Channels::Models)
+                            .text()
+                            .not_null()
+                            .default("[]"),
+                    )
                     .col(
                         ColumnDef::new(Channels::Group)
                             .string_len(64)
@@ -193,8 +228,18 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default(0),
                     )
-                    .col(ColumnDef::new(Channels::CreatedAt).big_integer().not_null().default(0))
-                    .col(ColumnDef::new(Channels::UpdatedAt).big_integer().not_null().default(0))
+                    .col(
+                        ColumnDef::new(Channels::CreatedAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Channels::UpdatedAt)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -265,7 +310,12 @@ impl MigrationTrait for Migration {
                             .default(1.0),
                     )
                     .col(ColumnDef::new(UserGroups::AllowedModels).text().null())
-                    .col(ColumnDef::new(UserGroups::Description).text().not_null().default(""))
+                    .col(
+                        ColumnDef::new(UserGroups::Description)
+                            .text()
+                            .not_null()
+                            .default(""),
+                    )
                     .col(
                         ColumnDef::new(UserGroups::CreatedAt)
                             .big_integer()
@@ -297,7 +347,12 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(RequestLogs::UserId).string_len(64).null())
                     .col(ColumnDef::new(RequestLogs::KeyId).string_len(64).null())
                     .col(ColumnDef::new(RequestLogs::ChannelId).string_len(64).null())
-                    .col(ColumnDef::new(RequestLogs::Model).string_len(128).not_null().default(""))
+                    .col(
+                        ColumnDef::new(RequestLogs::Model)
+                            .string_len(128)
+                            .not_null()
+                            .default(""),
+                    )
                     .col(
                         ColumnDef::new(RequestLogs::InputTokens)
                             .big_unsigned()
@@ -359,7 +414,12 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .unique_key(),
                     )
-                    .col(ColumnDef::new(Redemptions::Name).string_len(128).not_null().default(""))
+                    .col(
+                        ColumnDef::new(Redemptions::Name)
+                            .string_len(128)
+                            .not_null()
+                            .default(""),
+                    )
                     .col(
                         ColumnDef::new(Redemptions::Quota)
                             .big_integer()
@@ -403,10 +463,22 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(AuditLogs::ActorId).string_len(64).not_null())
-                    .col(ColumnDef::new(AuditLogs::ActorEmail).string_len(255).not_null())
+                    .col(
+                        ColumnDef::new(AuditLogs::ActorEmail)
+                            .string_len(255)
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(AuditLogs::Action).string_len(32).not_null())
-                    .col(ColumnDef::new(AuditLogs::ResourceType).string_len(64).not_null())
-                    .col(ColumnDef::new(AuditLogs::ResourceId).string_len(64).not_null())
+                    .col(
+                        ColumnDef::new(AuditLogs::ResourceType)
+                            .string_len(64)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AuditLogs::ResourceId)
+                            .string_len(64)
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(AuditLogs::Before).text().null())
                     .col(ColumnDef::new(AuditLogs::After).text().null())
                     .col(ColumnDef::new(AuditLogs::Ip).string_len(64).null())

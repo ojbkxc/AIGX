@@ -180,6 +180,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: Role::User,
                 content: Some("Hello".into()),
+                content_blocks: None,
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
@@ -190,6 +191,12 @@ mod tests {
             temperature: None,
             top_p: None,
             stream: false,
+            top_k: None,
+            stop: None,
+            tool_choice: None,
+            reasoning_effort: None,
+            web_search_options: None,
+            extra: None,
         };
         // 3 (per-message) + 1 ("user") + 1 ("Hello") + 3 (reply priming) = 8
         assert_eq!(count_chat_prompt("gpt-4", &req), 8);
