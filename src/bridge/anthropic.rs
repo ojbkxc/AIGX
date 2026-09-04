@@ -870,6 +870,7 @@ fn parse_stream_event(
                         let block_index =
                             v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                         // 密集索引重映射（参照 new-api ClaudeToChatStreamState）：
+                        // 密集索引重映射（参照 new-api ClaudeToChatStreamState）：
                         // tool_use 的 content_block index 与文本/thinking 块共用同一
                         // 序号空间，直接透传会在下游 tool_calls 数组留下空洞。这里
                         // 将工具块映射为独立的密集索引。
@@ -902,13 +903,9 @@ fn parse_stream_event(
     if event_type == "content_block_start" {
         if let Some(block) = v.get("content_block") {
             if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                let block_index =
-                    v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                let block_index = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                 let id = block.get("id").and_then(|i| i.as_str()).map(String::from);
-                let name = block
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .map(String::from);
+                let name = block.get("name").and_then(|n| n.as_str()).map(String::from);
                 // 密集索引重映射（与 input_json_delta 分支一致）
                 let tool_index = state.tool_index(block_index);
                 return Some(Ok(ChatChunk {
