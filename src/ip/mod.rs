@@ -306,6 +306,7 @@ pub fn check_ip(filter: &IpFilter, ip: &str) -> Result<(), IpFilterError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
@@ -402,7 +403,7 @@ mod tests {
         let mut filter = IpFilter::default();
         filter.enabled = true;
         filter.add_whitelist("192.168.0.0/24", "internal");
-        assert!(filter.allows_ip("192.168.1.1"));
+        assert!(filter.allows_ip("192.168.0.1"));
         assert!(!filter.allows_ip("10.0.0.1"));
     }
 
