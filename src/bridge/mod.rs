@@ -18,9 +18,13 @@ use std::time::Duration;
 /// Anthropic Messages API（`/v1/messages`）原生 bridge
 pub mod anthropic;
 pub mod cf;
+/// Google Gemini 原生 bridge（`/v1beta/models/{model}:generateContent`）
+pub mod gemini;
 pub mod openai;
 /// 工具调用健壮解析（借鉴 ds-free-api tool_parser 的归一化/修复思路，独立实现）
 pub mod tool_repair;
+/// 智谱 AI（Z.AI）bridge — Anthropic 兼容协议 + Bearer 鉴权
+pub mod zai;
 
 /// 完整的工具调用（非流式响应）
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

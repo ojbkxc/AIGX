@@ -9,6 +9,7 @@ pub mod graphql;
 pub mod guardrail;
 pub mod health;
 pub mod hub;
+pub mod ip;
 pub mod log;
 pub mod metrics;
 pub mod model;

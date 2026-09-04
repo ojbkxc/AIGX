@@ -262,6 +262,29 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<(Arc<dyn Bridge>, O
                     ));
                 }
             }
+            crate::channel::ChannelType::Gemini => {
+                // Google Gemini 原生上游走 GeminiBridge（/v1beta/models/{model}:generateContent
+                // + x-goog-api-key 鉴权）。非 OpenAI 兼容形状，必须用本 bridge。
+                let key = ch.decode_api_key();
+                if !key.is_empty() {
+                    result.push((
+                        crate::bridge::gemini::make_bridge(&ch.base_url, &key, &state.http_client),
+                        Some(ch.id.clone()),
+                    ));
+                }
+            }
+            crate::channel::ChannelType::Zai => {
+                // 智谱 AI（Z.AI）上游走 ZaiBridge（Anthropic 兼容协议 + Bearer 鉴权）。
+                // 与 AnthropicBridge 的区别：用 Bearer 而非 x-api-key，
+                // 不需要 anthropic-version 头。
+                let key = ch.decode_api_key();
+                if !key.is_empty() {
+                    result.push((
+                        crate::bridge::zai::make_bridge(&ch.base_url, &key, &state.http_client),
+                        Some(ch.id.clone()),
+                    ));
+                }
+            }
             crate::channel::ChannelType::Cloudflare => {
                 // CF 渠道走 Hub 专用桥接
                 if let Some(b) = state.hub.get_specialized("cloudflare") {

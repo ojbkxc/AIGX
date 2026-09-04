@@ -55,6 +55,10 @@ pub enum ChannelType {
     OpenaiCompatible,
     /// Anthropic 兼容协议
     Anthropic,
+    /// Google Gemini 原生协议（`/v1beta/models/{model}:generateContent`）
+    Gemini,
+    /// 智谱 AI（Z.AI）协议（Anthropic 兼容 + Bearer 鉴权）
+    Zai,
 }
 
 impl ChannelType {
@@ -63,6 +67,8 @@ impl ChannelType {
         match s.to_lowercase().as_str() {
             "openai_compatible" | "openai-compatible" | "openai" => Self::OpenaiCompatible,
             "anthropic" => Self::Anthropic,
+            "gemini" | "google" | "google_gemini" => Self::Gemini,
+            "zai" | "z_ai" | "zhipu" | "glm" => Self::Zai,
             _ => Self::Cloudflare,
         }
     }
@@ -73,6 +79,8 @@ impl ChannelType {
             Self::Cloudflare => "cloudflare",
             Self::OpenaiCompatible => "openai_compatible",
             Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
+            Self::Zai => "zai",
         }
     }
 }
@@ -599,6 +607,76 @@ impl ChannelStore {
                     success: false,
                     message: "Cloudflare channels are tested via account pool".to_string(),
                     latency_ms: start.elapsed().as_millis() as u64,
+                }
+            }
+            ChannelType::Gemini => {
+                // Gemini 健康检查：GET {base_url}/models，用 x-goog-api-key 鉴权
+                let base = ch.base_url.trim_end_matches('/');
+                let base = if base.is_empty() {
+                    "https://generativelanguage.googleapis.com/v1beta"
+                } else {
+                    base
+                };
+                let url = format!("{base}/models");
+                let resp = client.get(&url).header("x-goog-api-key", &key).send().await;
+                match resp {
+                    Ok(r) => {
+                        let s = r.status().as_u16();
+                        if s == 401 || s == 403 {
+                            (false, format!("Auth failed: HTTP {s} (invalid api key?)"))
+                        } else if (200..300).contains(&s) {
+                            (true, "Channel reachable".to_string())
+                        } else {
+                            (false, format!("Channel returned HTTP {s}"))
+                        }
+                    }
+                    Err(e) => {
+                        return ChannelTestResult {
+                            success: false,
+                            message: format!("Request failed: {e}"),
+                            latency_ms: start.elapsed().as_millis() as u64,
+                        }
+                    }
+                }
+            }
+            ChannelType::Zai => {
+                // 智谱 AI 健康检查：POST {base_url}/messages，用 Bearer 鉴权
+                let base = ch.base_url.trim_end_matches('/');
+                let base = if base.is_empty() {
+                    "https://api.z.ai/api/v2"
+                } else {
+                    base
+                };
+                let url = format!("{base}/messages");
+                let body = serde_json::json!({
+                    "model": "glm-4-flash",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "ping"}]
+                });
+                let resp = client
+                    .post(&url)
+                    .header("authorization", format!("Bearer {key}"))
+                    .json(&body)
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) => {
+                        let s = r.status().as_u16();
+                        if s == 401 || s == 403 {
+                            (false, format!("Auth failed: HTTP {s} (invalid api key?)"))
+                        } else if s == 200 || s == 400 {
+                            (true, "Channel reachable".to_string())
+                        } else {
+                            (false, format!("Channel returned HTTP {s}"))
+                        }
+                    }
+                    Err(e) => {
+                        return ChannelTestResult {
+                            success: false,
+                            message: format!("Request failed: {e}"),
+                            latency_ms: start.elapsed().as_millis() as u64,
+                        }
+                    }
                 }
             }
         };

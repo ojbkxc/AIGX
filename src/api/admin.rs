@@ -2099,9 +2099,92 @@ pub async fn handle_fetch_channel_models(
                 .unwrap_or_default();
             (url, models)
         }
+        crate::channel::ChannelType::Gemini => {
+            // Google Gemini 模型发现：GET {base_url}/models，用 x-goog-api-key 鉴权
+            // 响应格式：{models: [{name: "models/gemini-pro", ...}]}
+            let base = body.base_url.trim().trim_end_matches('/');
+            let base = if base.is_empty() {
+                "https://generativelanguage.googleapis.com/v1beta"
+            } else {
+                base
+            };
+            let url = format!("{base}/models");
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| {
+                    error_response(
+                        &format!("HTTP client error: {e}"),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    )
+                })?;
+            let resp = client
+                .get(&url)
+                .header("x-goog-api-key", &api_key)
+                .send()
+                .await
+                .map_err(|e| {
+                    error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
+                })?;
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            if status == 401 || status == 403 {
+                return Err(error_response(
+                    &format!("Auth failed: HTTP {status} (invalid api key?)"),
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+            if !(200..300).contains(&status) {
+                return Err(error_response(
+                    &format!("Upstream returned HTTP {status}"),
+                    StatusCode::BAD_GATEWAY,
+                ));
+            }
+            let json: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+                error_response(
+                    "Upstream returned non-JSON response",
+                    StatusCode::BAD_GATEWAY,
+                )
+            })?;
+            // Gemini 响应：{models: [{name: "models/gemini-pro", ...}]}
+            // 提取 name 字段并去掉 "models/" 前缀
+            let models: Vec<String> = json
+                .get("models")
+                .and_then(|d| d.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| {
+                            m.get("name")
+                                .and_then(|i| i.as_str())
+                                .map(|s| s.strip_prefix("models/").unwrap_or(s).to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            (url, models)
+        }
+        crate::channel::ChannelType::Zai => {
+            // 智谱 AI（Z.AI）模型发现：智谱 AI 无公开 models 列表端点，
+            // 返回常见 GLM 模型作为候选列表（管理员可手动调整）。
+            let base = body.base_url.trim().trim_end_matches('/');
+            let base = if base.is_empty() {
+                "https://api.z.ai/api/v2"
+            } else {
+                base
+            };
+            let url = format!("{base}/models");
+            // 智谱 AI 常见模型列表（无上游 API 可拉取，硬编码候选）
+            let models: Vec<String> = vec![
+                "glm-4-plus".to_string(),
+                "glm-4-flash".to_string(),
+                "glm-4-long".to_string(),
+                "glm-4-air".to_string(),
+                "glm-4-airx".to_string(),
+                "glm-5".to_string(),
+            ];
+            (url, models)
+        }
     };
-
-    // 模型自动发现：拉取成功后把上游模型快照写回渠道（仅当渠道已存在时）。
     if let Some(cid) = channel_id_for_save.split(',').next() {
         if !cid.trim().is_empty() && state.channel_store.get(cid).is_some() {
             if let Err(e) = state
