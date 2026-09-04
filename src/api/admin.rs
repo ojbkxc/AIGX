@@ -3594,7 +3594,7 @@ pub async fn handle_github_oauth_authorize(State(state): State<AppState>) -> Res
     let url = format!(
         "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=user:email&state={}",
         oauth.client_id,
-        &oauth.redirect_uri,
+        oauth.redirect_uri,
         state_param,
     );
     Redirect::to(&url).into_response()

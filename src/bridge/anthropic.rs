@@ -932,7 +932,7 @@ fn parse_stream_event(
 }
 
 /// 流式状态：跨事件携带 message id / model / prompt token 计数
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct StreamState {
     id: String,
     model: String,
@@ -943,20 +943,6 @@ struct StreamState {
     /// `ClaudeToChatStreamState.toolIndexByContentBlock`）
     tool_index_by_block: std::collections::BTreeMap<usize, usize>,
     next_tool_index: usize,
-}
-
-impl Default for StreamState {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            model: String::new(),
-            input_tokens: 0,
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-            tool_index_by_block: std::collections::BTreeMap::new(),
-            next_tool_index: 0,
-        }
-    }
 }
 
 impl StreamState {

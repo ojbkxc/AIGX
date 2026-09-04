@@ -122,7 +122,7 @@ impl UserStore {
             }
         }
         // 向后兼容旧数据：无 email 字段的用户以 username 作为 email
-        for (_, user) in by_id.iter() {
+        for user in by_id.values() {
             if user.email.is_empty() && !user.username.is_empty() {
                 by_email
                     .entry(user.username.clone())
