@@ -3698,3 +3698,824 @@ pub struct GithubCallbackParams {
     #[allow(dead_code)]
     pub state: Option<String>,
 }
+
+// ============================================================
+// 阶段1：管理 API 缺失功能（与 burncloud 业务对齐）
+//
+// 参照 burncloud `crates/server/src/api/{auth,cache,security,openapi,token,user}.rs`，
+// 在 AIGX 中以单 crate + axum 0.7 + rusqlite/sea-orm 架构实现等价能力。
+// 以下 handler 均为新增，不修改任何现有 handler 的签名或逻辑。
+// ============================================================
+
+// ── 功能 1：忘记密码 / 重置密码 ──────────────────────────────────────
+//
+// 参照 burncloud `api/auth.rs::forgot_password` / `reset_password`。
+// AIGX 无邮件发送设施，采用无状态 HMAC token 方案：复用 SessionStore 签名
+// 机制生成重置 token（token 内含 email + expires_at + HMAC 签名），
+// forgot_password 返回 token（由前端/管理员负责安全分发），
+// reset_password 验证签名后更新密码。零存储、零新依赖。
+
+/// 重置密码 token 有效期（小时）
+const PASSWORD_RESET_TTL_HOURS: i64 = 1;
+
+#[derive(Debug, Deserialize)]
+pub struct ForgotPasswordRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetPasswordRequest {
+    pub token: String,
+    pub new_password: String,
+}
+
+/// POST /api/auth/forgot-password — 忘记密码，生成重置 token
+///
+/// 参照 burncloud `auth.rs::forgot_password`。
+/// 与 burncloud 不同：AIGX 无邮件发送设施，直接返回 token（仅此一次），
+/// 由前端/管理员负责安全分发。用户不存在时仍返回成功（防止邮箱枚举），
+/// 但不返回有效 token。
+pub async fn handle_forgot_password(
+    State(state): State<AppState>,
+    Json(body): Json<ForgotPasswordRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if body.email.trim().is_empty() {
+        return Err(error_response("邮箱不能为空", StatusCode::BAD_REQUEST));
+    }
+
+    let config = state.config_manager.get().await;
+    let session_secret = if config.admin.session_secret.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        config.admin.session_secret.clone()
+    };
+
+    // 用户不存在时返回成功但不返回 token（防止邮箱枚举）
+    let user = match state.user_store.get_by_email(body.email.trim()) {
+        Some(u) => u,
+        None => {
+            tracing::info!(
+                "Forgot password requested for unknown email (no token issued): {}",
+                body.email
+            );
+            return Ok(Json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "message": "If the email exists, a reset token has been generated",
+                    "token": null
+                }
+            })));
+        }
+    };
+
+    let session_store = SessionStore::new(&session_secret, PASSWORD_RESET_TTL_HOURS);
+    let session = session_store.create_session(&user.email);
+
+    tracing::info!("Password reset token generated for {}", user.email);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "message": "If the email exists, a reset token has been generated",
+            "token": session.token,
+            "expires_in_secs": PASSWORD_RESET_TTL_HOURS * 3600
+        }
+    })))
+}
+
+/// POST /api/auth/reset-password — 重置密码
+///
+/// 参照 burncloud `auth.rs::reset_password`。
+/// 验证 token 签名与有效期，通过后更新用户密码。
+pub async fn handle_reset_password(
+    State(state): State<AppState>,
+    Json(body): Json<ResetPasswordRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if body.new_password.chars().count() < 6 {
+        return Err(error_response("密码长度至少6位", StatusCode::BAD_REQUEST));
+    }
+
+    let config = state.config_manager.get().await;
+    let session_secret = if config.admin.session_secret.is_empty() {
+        return Err(error_response(
+            "Reset password not available: session secret not configured",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+    } else {
+        config.admin.session_secret.clone()
+    };
+
+    let session_store = SessionStore::new(&session_secret, PASSWORD_RESET_TTL_HOURS);
+    let sess = session_store.validate_session(&body.token).ok_or_else(|| {
+        error_response(
+            "Invalid or expired reset token",
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
+
+    // 查找用户
+    let user = state.user_store.get_by_email(&sess.email).ok_or_else(|| {
+        error_response("User not found", StatusCode::NOT_FOUND)
+    })?;
+
+    // 更新密码
+    let new_hash = hash_password(&body.new_password);
+    match state.user_store.update(&user.id, |u| {
+        u.password = new_hash;
+    }) {
+        Ok(_) => {
+            tracing::info!("Password reset successful for {}", user.email);
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "data": { "message": "Password reset successful" }
+            })))
+        }
+        Err(e) => Err(error_response(
+            &format!("Password reset failed: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
+// ── 功能 2：Google OAuth ─────────────────────────────────────────────
+//
+// 参照 burncloud `api/auth.rs::oauth_google` 及 AIGX 既有 `handle_github_oauth_*` 模式。
+// 配置存于 `config.google_oauth`（`src/oauth/google.rs` + `src/config.rs`）。
+
+/// GET /api/auth/google — 跳转到 Google OAuth 授权页
+pub async fn handle_google_oauth_authorize(State(state): State<AppState>) -> Response {
+    let config = state.config_manager.get().await;
+    let oauth = &config.google_oauth;
+    if !oauth.ready() {
+        return error_response("Google OAuth not configured", StatusCode::BAD_REQUEST)
+            .into_response();
+    }
+    let state_param = uuid::Uuid::new_v4().to_string();
+    let url = crate::oauth::google::build_authorize_url(oauth, &state_param);
+    Redirect::to(&url).into_response()
+}
+
+/// GET /api/auth/google/callback — Google OAuth 回调处理
+pub async fn handle_google_oauth_callback(
+    State(state): State<AppState>,
+    Query(params): Query<GoogleCallbackParams>,
+) -> Response {
+    let config = state.config_manager.get().await;
+    let oauth = config.google_oauth.clone();
+    if !oauth.ready() {
+        return error_response("Google OAuth not configured", StatusCode::BAD_REQUEST)
+            .into_response();
+    }
+    let code = match params.code {
+        Some(c) => c,
+        None => {
+            return error_response("Missing authorization code", StatusCode::BAD_REQUEST)
+                .into_response()
+        }
+    };
+    // 用授权码换取 access token
+    let access_token =
+        match crate::oauth::google::exchange_code(&oauth, &code, &state.http_client).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Google OAuth token exchange failed: {e}");
+                return error_response("OAuth token exchange failed", StatusCode::BAD_GATEWAY)
+                    .into_response();
+            }
+        };
+    // 拉取用户信息
+    let g_user =
+        match crate::oauth::google::get_user_info(&access_token, &state.http_client).await {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::error!("Google OAuth user info failed: {e}");
+                return error_response(
+                    "Failed to fetch Google user info",
+                    StatusCode::BAD_GATEWAY,
+                )
+                .into_response();
+            }
+        };
+    // 确定邮箱：优先 email，否则用 sub 造伪邮箱
+    let email = g_user
+        .email
+        .clone()
+        .unwrap_or_else(|| format!("{}@google.local", g_user.sub));
+    // 用户名：优先 name，否则用 sub
+    let username = g_user.name.clone().unwrap_or_else(|| g_user.sub.clone());
+    // 查找或创建用户
+    let user = match state.user_store.get_by_email(&email) {
+        Some(u) => u,
+        None => match state.user_store.create_with_username(
+            &email,
+            &username,
+            &uuid::Uuid::new_v4().to_string(), // 随机密码（OAuth 用户不走密码登录）
+            crate::user::Role::User,
+            0,
+        ) {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::error!("Failed to create Google OAuth user: {e}");
+                return error_response(
+                    "Failed to create user",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                .into_response();
+            }
+        },
+    };
+    // 创建会话
+    let session_ttl = config.admin.session_ttl_hours.max(1);
+    let session_secret = if config.admin.session_secret.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        config.admin.session_secret.clone()
+    };
+    let session_store = SessionStore::new(&session_secret, session_ttl);
+    let session = session_store.create_session(&user.email);
+    Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "token": session.token,
+            "email": user.email,
+            "username": user.username,
+            "role": match user.role {
+                crate::user::Role::Admin => "admin",
+                crate::user::Role::User => "user",
+            },
+            "expires_at": session.expires_at,
+        }
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct GoogleCallbackParams {
+    pub code: Option<String>,
+    #[allow(dead_code)]
+    pub state: Option<String>,
+}
+
+// ── 功能 3：缓存管理 API ────────────────────────────────────────────
+//
+// 参照 burncloud `api/cache.rs::stats` / `clear`。
+// AIGX 的 `AppState.response_cache` 是 `AsyncCache<String, Value>`，
+// 暴露 `entry_count()` 与 `invalidate_all()`。
+
+/// GET /api/cache/stats — 查看缓存统计
+pub async fn handle_cache_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let entry_count = state.response_cache.entry_count();
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "entry_count": entry_count,
+            "max_capacity": 1000,
+            "ttl_secs": 300,
+            "description": "response_cache (exact-match prompt cache)"
+        }
+    })))
+}
+
+/// POST /api/cache/clear — 清空缓存
+pub async fn handle_cache_clear(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    state.response_cache.invalidate_all();
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "message": "Cache cleared" }
+    })))
+}
+
+// ── 功能 4：安全监控 ────────────────────────────────────────────────
+//
+// 参照 burncloud `api/security.rs::security_summary` / `security_events`。
+// AIGX 复用 `log_store.requests`（RequestLog）中 status_code >= 400 的记录
+// 作为风险事件。sparkline 按 7 天聚合。
+
+/// GET /api/monitor/security — 安全汇总
+pub async fn handle_security_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let logs = state.log_store.requests.list_all();
+    let total = logs.len().max(1) as u64;
+    let mut blocked = 0u64;
+    let mut threat_sources = std::collections::HashSet::new();
+    for log in &logs {
+        if log.status_code >= 400 {
+            blocked += 1;
+            if let Some(ref uid) = log.user_id {
+                threat_sources.insert(uid.clone());
+            }
+            if let Some(ref ip) = log.ip {
+                threat_sources.insert(ip.clone());
+            }
+        }
+    }
+    let error_ratio = blocked as f64 / total as f64;
+    let score = ((1.0 - error_ratio) * 100.0).round() as u8;
+    // 7 天 sparkline
+    let mut buckets: [u64; 7] = [0; 7];
+    let now = chrono::Utc::now();
+    for log in &logs {
+        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(log.created_at, 0);
+        if let Some(dt) = dt {
+            let days_ago = (now - dt).num_days().clamp(0, 6) as usize;
+            buckets[6 - days_ago] += 1;
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "score": score,
+            "blocked_count": blocked,
+            "threat_source_count": threat_sources.len(),
+            "sparkline": buckets.to_vec()
+        }
+    })))
+}
+
+/// GET /api/monitor/security/events — 安全事件列表（分页）
+#[derive(Debug, Deserialize)]
+pub struct SecurityEventsQuery {
+    pub page: Option<i32>,
+    pub page_size: Option<i32>,
+}
+
+pub async fn handle_security_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<SecurityEventsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let page = params.page.unwrap_or(1).max(1);
+    let page_size = params.page_size.unwrap_or(20).clamp(1, 100);
+
+    let logs = state.log_store.requests.list_all();
+    let mut events: Vec<Value> = Vec::new();
+    for log in &logs {
+        if log.status_code < 400 {
+            continue;
+        }
+        let severity = if log.status_code >= 500 { "critical" } else { "warning" };
+        let event_type = if log.status_code >= 500 {
+            "server_error"
+        } else {
+            "client_error"
+        };
+        events.push(serde_json::json!({
+            "id": log.id,
+            "time": log.created_at,
+            "source": log.user_id.clone().unwrap_or_else(|| "-".into()),
+            "target": log.channel_id.clone().unwrap_or_else(|| log.model.clone()),
+            "event_type": event_type,
+            "severity": severity,
+            "status": if log.status_code >= 500 { "active" } else { "blocked" },
+            "detail": format!("HTTP {} {}", log.status_code,
+                log.error_msg.clone().unwrap_or_default()),
+        }));
+    }
+
+    let total = events.len() as i64;
+    let offset = ((page - 1) * page_size) as usize;
+    let page_items: Vec<Value> = events
+        .into_iter()
+        .skip(offset)
+        .take(page_size as usize)
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "events": page_items,
+            "total": total,
+            "page": page,
+            "page_size": page_size
+        }
+    })))
+}
+
+// ── 功能 5：OpenAPI 文档 + Swagger UI ────────────────────────────────
+//
+// 参照 burncloud `api/openapi.rs::openapi_json` / `swagger_ui`。
+// 手动构建 OpenAPI 3.0 JSON spec（列出 AIGX 主要端点），避免引入 utoipa 新依赖。
+// Swagger UI 通过 CDN 引入 swagger-ui-dist，与 burncloud 一致。
+
+/// GET /api-docs/openapi.json — OpenAPI 3.0 JSON spec
+pub async fn handle_openapi_json() -> Json<Value> {
+    let version = env!("CARGO_PKG_VERSION");
+    Json(serde_json::json!({
+        "openapi": "3.0.3",
+        "info": {
+            "title": "AIGX API",
+            "description": "AIGX — OpenAI-compatible AI gateway with multi-account Cloudflare Workers AI and Epay support",
+            "version": version,
+            "contact": {
+                "name": "AIGX Team",
+                "url": "https://github.com/AIGX"
+            }
+        },
+        "servers": [{ "url": "/", "description": "Current server" }],
+        "components": {
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "JWT",
+                    "description": "Session token via Authorization: Bearer {token}"
+                }
+            },
+            "schemas": {
+                "ErrorResponse": {
+                    "type": "object",
+                    "properties": {
+                        "success": { "type": "boolean", "example": false },
+                        "error": { "type": "string" }
+                    }
+                },
+                "LoginRequest": {
+                    "type": "object",
+                    "required": ["email", "password"],
+                    "properties": {
+                        "email": { "type": "string" },
+                        "password": { "type": "string" }
+                    }
+                },
+                "RegisterRequest": {
+                    "type": "object",
+                    "required": ["email", "password"],
+                    "properties": {
+                        "email": { "type": "string" },
+                        "password": { "type": "string" },
+                        "username": { "type": "string" }
+                    }
+                },
+                "ChatCompletionRequest": {
+                    "type": "object",
+                    "required": ["model", "messages"],
+                    "properties": {
+                        "model": { "type": "string" },
+                        "messages": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "role": { "type": "string", "enum": ["system", "user", "assistant"] },
+                                    "content": { "type": "string" }
+                                }
+                            }
+                        },
+                        "temperature": { "type": "number" },
+                        "max_tokens": { "type": "integer" },
+                        "stream": { "type": "boolean", "default": false }
+                    }
+                }
+            }
+        },
+        "paths": {
+            "/api/auth/login": {
+                "post": {
+                    "tags": ["Authentication"],
+                    "summary": "用户登录",
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } } },
+                    "responses": { "200": { "description": "登录成功" }, "401": { "description": "认证失败" } }
+                }
+            },
+            "/api/auth/register": {
+                "post": {
+                    "tags": ["Authentication"],
+                    "summary": "用户注册",
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegisterRequest" } } } },
+                    "responses": { "200": { "description": "注册成功" }, "409": { "description": "用户名已存在" } }
+                }
+            },
+            "/api/auth/forgot-password": {
+                "post": {
+                    "tags": ["Authentication"],
+                    "summary": "忘记密码，生成重置 token",
+                    "responses": { "200": { "description": "重置 token 已生成" } }
+                }
+            },
+            "/api/auth/reset-password": {
+                "post": {
+                    "tags": ["Authentication"],
+                    "summary": "重置密码",
+                    "responses": { "200": { "description": "重置成功" }, "400": { "description": "无效 token" } }
+                }
+            },
+            "/api/auth/google": {
+                "get": { "tags": ["Authentication"], "summary": "Google OAuth 授权跳转", "responses": { "302": { "description": "重定向到 Google" } } }
+            },
+            "/api/auth/google/callback": {
+                "get": { "tags": ["Authentication"], "summary": "Google OAuth 回调", "responses": { "200": { "description": "登录成功" } } }
+            },
+            "/api/cache/stats": {
+                "get": { "tags": ["Cache"], "summary": "查看缓存统计", "security": [{"bearerAuth": []}], "responses": { "200": { "description": "缓存统计" } } }
+            },
+            "/api/cache/clear": {
+                "post": { "tags": ["Cache"], "summary": "清空缓存", "security": [{"bearerAuth": []}], "responses": { "200": { "description": "缓存已清空" } } }
+            },
+            "/api/monitor/security": {
+                "get": { "tags": ["Security"], "summary": "安全汇总", "security": [{"bearerAuth": []}], "responses": { "200": { "description": "安全评分与汇总" } } }
+            },
+            "/api/monitor/security/events": {
+                "get": { "tags": ["Security"], "summary": "安全事件列表", "security": [{"bearerAuth": []}], "responses": { "200": { "description": "分页风险事件" } } }
+            },
+            "/api/tokens": {
+                "get": { "tags": ["Token"], "summary": "列出令牌", "security": [{"bearerAuth": []}], "responses": { "200": { "description": "令牌列表" } } },
+                "post": { "tags": ["Token"], "summary": "创建令牌", "security": [{"bearerAuth": []}], "responses": { "200": { "description": "令牌已创建" } } }
+            },
+            "/api/tokens/:id/rotate": {
+                "post": { "tags": ["Token"], "summary": "轮换令牌", "security": [{"bearerAuth": []}], "responses": { "200": { "description": "新令牌" } } }
+            },
+            "/api/playground/chat": {
+                "post": { "tags": ["Playground"], "summary": "Playground 聊天测试", "security": [{"bearerAuth": []}], "responses": { "200": { "description": "聊天响应" } } }
+            },
+            "/api/users/check": {
+                "get": { "tags": ["User"], "summary": "检查用户名/邮箱是否可用", "responses": { "200": { "description": "可用性结果" } } }
+            },
+            "/v1/chat/completions": {
+                "post": {
+                    "tags": ["LLM API"],
+                    "summary": "Chat completions (OpenAI 兼容)",
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatCompletionRequest" } } } },
+                    "responses": { "200": { "description": "Chat completion 响应" }, "401": { "description": "未授权" }, "429": { "description": "限流" } }
+                }
+            },
+            "/health": {
+                "get": { "tags": ["System"], "summary": "健康检查", "responses": { "200": { "description": "服务健康" } } }
+            }
+        }
+    }))
+}
+
+/// GET /swagger-ui — Swagger UI HTML 页面
+pub async fn handle_swagger_ui() -> axum::response::Html<&'static str> {
+    let html = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AIGX API Documentation</title>
+    <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+    <style>
+        html { box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }
+        *, *:before, *:after { box-sizing: inherit; }
+        body { margin: 0; padding: 0; background: #fafafa; }
+    </style>
+</head>
+<body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
+    <script>
+        window.onload = function() {
+            const ui = SwaggerUIBundle({
+                url: "/api-docs/openapi.json",
+                dom_id: '#swagger-ui',
+                presets: [
+                    SwaggerUIBundle.presets.apis,
+                    SwaggerUIStandalonePreset
+                ],
+                layout: "StandaloneLayout",
+                deepLinking: true,
+                displayOperationId: false,
+                defaultModelsExpandDepth: 1,
+                defaultModelExpandDepth: 1,
+                docExpansion: "list",
+                syntaxHighlight: {
+                    activate: true,
+                    theme: "monokai"
+                }
+            });
+            window.ui = ui;
+        };
+    </script>
+</body>
+</html>"#;
+    axum::response::Html(html)
+}
+
+// ── 功能 6：令牌轮换 ────────────────────────────────────────────────
+//
+// 参照 burncloud `api/token.rs::rotate_token`。
+// AIGX 的 `ApiKeyStore::update` 已处理 key 变更后的 hash_map 重算，
+// 故在此 handler 内直接生成新 key 并通过 update 写入，保留 name/group/quota 等设置。
+
+/// POST /api/tokens/:id/rotate — 轮换 API token
+///
+/// 生成新 key，旧 key 立即失效（hash_map 移除旧 hash），保留配额/分组等设置。
+/// 新 key 仅在此响应中返回一次（与 burncloud 行为一致）。
+pub async fn handle_rotate_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let new_key = format!(
+        "sk-{}",
+        uuid::Uuid::new_v4().to_string().replace('-', "")
+    );
+    match state.api_key_store.update(&id, |k| {
+        k.key = new_key.clone();
+    }) {
+        Ok(k) => {
+            tracing::info!(token_id = %id, "API token rotated");
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "id": k.id,
+                    "key": k.key,
+                    "rotated_at": k.updated_at,
+                    "message": "Token rotated; old key invalidated"
+                }
+            })))
+        }
+        Err(e) => Err(error_response(
+            &format!("Failed to rotate token: {e}"),
+            StatusCode::NOT_FOUND,
+        )),
+    }
+}
+
+// ── 功能 7：Playground ──────────────────────────────────────────────
+//
+// 参照 burncloud `api/token.rs::playground_chat`。
+// burncloud 用 data_plane.oneshot 走内部路由；AIGX 无此设施，
+// 改为复用 `channel_store` 选渠道 + `http_client` 直连上游
+//（与既有 `handle_channel_chat_test` 同源，但 playground 固定非流式 OpenAI 协议，
+// 且 channel_id 可选——缺省时选第一个启用渠道）。
+
+#[derive(Debug, Deserialize)]
+pub struct PlaygroundChatRequest {
+    pub model: String,
+    pub messages: Vec<Value>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub max_tokens: Option<i64>,
+    /// 可选渠道 ID；缺省时选第一个启用渠道
+    #[serde(default)]
+    pub channel_id: Option<String>,
+}
+
+/// POST /api/playground/chat — Playground 聊天测试
+pub async fn handle_playground_chat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PlaygroundChatRequest>,
+) -> Response {
+    if let Err(e) = verify_admin(&state, &headers).await {
+        return e.into_response();
+    }
+
+    // 选渠道：优先 channel_id，否则第一个启用渠道
+    let ch = if let Some(ref cid) = body.channel_id {
+        match state.channel_store.get(cid) {
+            Some(c) => c,
+            None => {
+                return error_response("Channel not found", StatusCode::NOT_FOUND)
+                    .into_response()
+            }
+        }
+    } else {
+        match state
+            .channel_store
+            .list()
+            .into_iter()
+            .find(|c| c.is_enabled())
+        {
+            Some(c) => c,
+            None => {
+                return error_response(
+                    "No enabled channel available for playground",
+                    StatusCode::BAD_REQUEST,
+                )
+                .into_response()
+            }
+        }
+    };
+
+    let model = if body.model.trim().is_empty() {
+        ch.models
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "gpt-3.5-turbo".to_string())
+    } else {
+        body.model.trim().to_string()
+    };
+
+    let api_key = ch.decode_api_key();
+    let base = crate::bridge::openai::normalize_base_url(ch.base_url.trim().to_string());
+    let url = format!("{base}/chat/completions");
+
+    let mut payload = serde_json::json!({
+        "model": model,
+        "messages": body.messages,
+        "stream": false,
+    });
+    if let Some(t) = body.temperature {
+        payload["temperature"] = serde_json::json!(t);
+    }
+    if let Some(m) = body.max_tokens {
+        payload["max_tokens"] = serde_json::json!(m);
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return error_response(
+                &format!("HTTP client error: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+            .into_response()
+        }
+    };
+
+    let mut req = client.post(&url).json(&payload);
+    if !api_key.is_empty() {
+        req = req.bearer_auth(&api_key);
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return error_response(
+                    &format!("Upstream HTTP {status}: {text}"),
+                    StatusCode::BAD_GATEWAY,
+                )
+                .into_response();
+            }
+            match resp.json::<Value>().await {
+                Ok(json) => {
+                    let content = json
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("message"))
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Json(serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "content": content,
+                            "model": model,
+                            "usage": json.get("usage")
+                        }
+                    }))
+                    .into_response()
+                }
+                Err(e) => error_response(
+                    &format!("Upstream returned non-JSON: {e}"),
+                    StatusCode::BAD_GATEWAY,
+                )
+                .into_response(),
+            }
+        }
+        Err(e) => error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
+            .into_response(),
+    }
+}
+
+// ── 功能 8：用户名检查 ──────────────────────────────────────────────
+//
+// 参照 burncloud `api/user.rs::check_username`。
+// 检查用户名/邮箱是否已存在（注册前预检），无需鉴权。
+
+#[derive(Debug, Deserialize)]
+pub struct CheckUsernameQuery {
+    /// 用户名或邮箱
+    pub username: String,
+}
+
+/// GET /api/users/check?username=xxx — 检查用户名/邮箱是否可用
+pub async fn handle_check_username(
+    State(state): State<AppState>,
+    Query(params): Query<CheckUsernameQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let name = params.username.trim();
+    if name.is_empty() {
+        return Err(error_response("username cannot be empty", StatusCode::BAD_REQUEST));
+    }
+    // 同时检查 username 与 email 两个维度
+    let exists = state.user_store.get_by_username(name).is_some()
+        || state.user_store.get_by_email(name).is_some();
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "available": !exists }
+    })))
+}

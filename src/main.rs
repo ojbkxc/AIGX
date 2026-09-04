@@ -411,6 +411,29 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/auth/github/callback",
             get(api::admin::handle_github_oauth_callback),
         )
+        // 阶段1：忘记密码 / 重置密码（参照 burncloud auth.rs）
+        .route(
+            "/api/auth/forgot-password",
+            post(api::admin::handle_forgot_password),
+        )
+        .route(
+            "/api/auth/reset-password",
+            post(api::admin::handle_reset_password),
+        )
+        // 阶段1：Google OAuth（参照 burncloud auth.rs::oauth_google）
+        .route(
+            "/api/auth/google",
+            get(api::admin::handle_google_oauth_authorize),
+        )
+        .route(
+            "/api/auth/google/callback",
+            get(api::admin::handle_google_oauth_callback),
+        )
+        // 阶段1：用户名检查（参照 burncloud user.rs::check_username）
+        .route(
+            "/api/users/check",
+            get(api::admin::handle_check_username),
+        )
         .route("/api/auth/logout", post(api::admin::handle_logout))
         .route("/api/usage/summary", get(api::admin::handle_usage_summary))
         .route("/api/usage/summary", post(api::admin::handle_refresh_usage))
@@ -479,6 +502,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/tokens/:id/reset_used",
             post(api::admin::handle_reset_token_used),
+        )
+        // 阶段1：令牌轮换（参照 burncloud token.rs::rotate_token）
+        .route(
+            "/api/tokens/:id/rotate",
+            post(api::admin::handle_rotate_token),
         )
         // 模型定价目录
         .route("/api/prices", get(api::admin::handle_list_prices))
@@ -567,6 +595,23 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/notify/test-email",
             post(api::admin::handle_test_email),
         )
+        // 阶段1：缓存管理 API（参照 burncloud cache.rs）
+        .route("/api/cache/stats", get(api::admin::handle_cache_stats))
+        .route("/api/cache/clear", post(api::admin::handle_cache_clear))
+        // 阶段1：安全监控（参照 burncloud security.rs）
+        .route(
+            "/api/monitor/security",
+            get(api::admin::handle_security_summary),
+        )
+        .route(
+            "/api/monitor/security/events",
+            get(api::admin::handle_security_events),
+        )
+        // 阶段1：Playground（参照 burncloud token.rs::playground_chat）
+        .route(
+            "/api/playground/chat",
+            post(api::admin::handle_playground_chat),
+        )
         // Prometheus 指标（仅管理员）
         .route("/api/metrics", get(handle_metrics));
 
@@ -626,6 +671,9 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/readyz", get(handle_readyz))
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
+        // 阶段1：OpenAPI 文档 + Swagger UI（参照 burncloud openapi.rs，公开无需鉴权）
+        .route("/api-docs/openapi.json", get(api::admin::handle_openapi_json))
+        .route("/swagger-ui", get(api::admin::handle_swagger_ui))
         .fallback_service(web::serve_static_files())
         .layer(build_cors_layer(config))
         .with_state(state)
