@@ -809,15 +809,6 @@ impl ChannelStore {
         c.lock().on_rate_limited(retry_after);
     }
 
-    /// 记入 429 到 AIMD（降限额/进冷却）。
-    pub fn aimd_on_rate_limited(&self, channel_id: &str, retry_after: Option<u64>) {
-        let mut c = self
-            .aimd
-            .entry(channel_id.to_string())
-            .or_insert_with(|| parking_lot::Mutex::new(aimd::AimdController::with_defaults()));
-        c.lock().on_rate_limited(retry_after);
-    }
-
     /// AIMD 是否放行该渠道（调度过滤用）。
     pub fn aimd_allows(&self, channel_id: &str) -> bool {
         self.aimd
