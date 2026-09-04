@@ -38,7 +38,7 @@ pub struct IpRule {
 /// IP 过滤配置 — 白名单 + 黑名单。
 ///
 /// 持久化到 FileStore，通过 `IpFilterStore` 加载/保存。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IpFilter {
     /// 白名单（None 或空 = 不限制）
     #[serde(default)]
@@ -65,17 +65,14 @@ impl IpFilter {
         }
 
         // 白名单非空：必须匹配
-        if !self.whitelist.is_empty() {
-            if !self.whitelist.iter().any(|r| matches_ip(ip, &r.pattern)) {
-                return false;
-            }
+        if !self.whitelist.is_empty() && !self.whitelist.iter().any(|r| matches_ip(ip, &r.pattern))
+        {
+            return false;
         }
 
         // 黑名单非空：不能匹配
-        if !self.blacklist.is_empty() {
-            if self.blacklist.iter().any(|r| matches_ip(ip, &r.pattern)) {
-                return false;
-            }
+        if !self.blacklist.is_empty() && self.blacklist.iter().any(|r| matches_ip(ip, &r.pattern)) {
+            return false;
         }
 
         true
