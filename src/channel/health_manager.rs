@@ -103,6 +103,8 @@ impl ModelState {
     /// 记录一次成功，更新延迟 EMA 与成功计数。
     fn record_success(&mut self, latency_ms: u64) {
         self.success_count += 1;
+        // 成功后清除临时错误计数（恢复健康状态）
+        self.failure_count = 0;
         // EMA: new = alpha * sample + (1 - alpha) * old
         let sample = latency_ms as f64;
         self.avg_latency_ms =
@@ -339,10 +341,10 @@ impl ChannelStateTracker {
 
     /// 记入一次成功 — 清除临时错误状态，更新延迟 EMA。
     pub fn record_success(&self, channel_id: &str, model: Option<&str>, latency_ms: u64) {
-        let mut channel_state = match self.channel_states.get_mut(channel_id) {
-            Some(s) => s,
-            None => return,
-        };
+        let mut channel_state = self
+            .channel_states
+            .entry(channel_id.to_string())
+            .or_insert_with(|| ChannelState::new(channel_id.to_string()));
         // 成功后恢复认证与余额状态
         channel_state.auth_ok = true;
         if channel_state.balance_status == BalanceStatus::Exhausted {

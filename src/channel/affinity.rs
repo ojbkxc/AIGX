@@ -131,11 +131,11 @@ where
 {
     let mut best: Option<(String, f64)> = None;
     for (ch_id, weight) in candidates {
-        let health = health_of(*ch_id);
+        let health = health_of(ch_id);
         if health <= 0.0 {
             continue;
         }
-        let h = mix_hash(session_id, *ch_id);
+        let h = mix_hash(session_id, ch_id);
         // u64 哈希映射到 (0, 1] 均匀浮点，再乘权重与健康分
         let r = (h as f64 + 1.0) / (u64::MAX as f64 + 1.0);
         let score = r * (*weight as f64).max(1.0) * health;
