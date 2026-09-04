@@ -455,7 +455,8 @@ mod tests {
         t.record_success("c1", Some("m"), 100);
         let h = t.get_health("c1").unwrap();
         assert!(h.auth_ok);
-        assert_eq!(h.overall_error_rate, 0.0);
+        // 1 失败 + 1 成功 → 错误率 1/2（计数是累计的，成功不清零失败计数）
+        assert!((h.overall_error_rate - 0.5).abs() < 1e-9);
     }
 
     #[test]
