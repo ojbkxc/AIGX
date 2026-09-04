@@ -181,8 +181,7 @@ mod tests {
         let c = EmptyResponseCounter::with_threshold(2);
         assert!(!c.record_empty("ch1"));
         assert!(!c.record_empty("ch2")); // ch2 第一次，未达阈值 2
-        // ch2 第二次达到阈值 → 返回 true
-        assert!(c.record_empty("ch2"));
+        assert!(c.record_empty("ch2")); // ch2 第二次达到阈值 → 返回 true
         assert_eq!(c.get_count("ch1"), 1);
         assert_eq!(c.get_count("ch2"), 2);
     }
