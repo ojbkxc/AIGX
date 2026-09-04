@@ -793,11 +793,20 @@ impl ChannelStore {
 
     /// 记入渠道请求成功到 AIMD（学习/上调限额）。
     pub fn aimd_on_success(&self, channel_id: &str, upstream_limit: Option<u32>) {
-        let mut c = self
+        let c = self
             .aimd
             .entry(channel_id.to_string())
             .or_insert_with(|| parking_lot::Mutex::new(aimd::AimdController::with_defaults()));
         c.lock().on_success(upstream_limit);
+    }
+
+    /// 记入 429 到 AIMD（降限额/进冷却）。
+    pub fn aimd_on_rate_limited(&self, channel_id: &str, retry_after: Option<u64>) {
+        let c = self
+            .aimd
+            .entry(channel_id.to_string())
+            .or_insert_with(|| parking_lot::Mutex::new(aimd::AimdController::with_defaults()));
+        c.lock().on_rate_limited(retry_after);
     }
 
     /// 记入 429 到 AIMD（降限额/进冷却）。

@@ -138,7 +138,7 @@ impl CombinedScheduler {
         let r_range = if r_degen { 0.0 } else { r_max - r_min };
 
         let mut scores = HashMap::with_capacity(n);
-        for ((ch_id, admin_w), f) in candidates.iter().zip(raw.iter()) {
+        for ((ch_id, admin_w, _), f) in candidates.iter().zip(raw.iter()) {
             let h = if h_degen {
                 0.75
             } else {
