@@ -142,7 +142,7 @@ impl AimdController {
 
         // 学习上游上限
         if let Some(limit) = upstream_limit {
-            if limit > 0 && limit <= self.config.max_limit {
+            if limit > 0 {
                 self.learned_limit = Some(limit);
                 if limit > self.current_limit {
                     self.current_limit = limit.min(self.config.max_limit);

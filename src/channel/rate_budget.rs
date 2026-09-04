@@ -100,6 +100,7 @@ impl ChannelReservation {
         (0.99..=1.01).contains(&sum) && self.green >= 0.0 && self.yellow >= 0.0 && self.red >= 0.0
     }
 
+    #[allow(dead_code)]
     fn share(&self, color: TrafficColor) -> f64 {
         match color {
             TrafficColor::Green => self.green,
@@ -434,12 +435,12 @@ mod tests {
     #[test]
     fn red_rejected_when_all_empty() {
         let b = InMemoryBudget::new();
-        // 极小容量：1 RPM
-        b.configure("ch-1", 1, 100, ChannelReservation::default());
+        // 容量：10 RPM, 100 TPM（默认预留 0.4/0.4/0.2）
+        b.configure("ch-1", 10, 100, ChannelReservation::default());
         assert!(b.try_consume("ch-1", TrafficColor::Green, 10).admitted());
-        // 全部扣干 → Red 被拒
+        // Red 桶 TPM=20，消耗 50 超过所有桶剩余 → 被拒
         assert_eq!(
-            b.try_consume("ch-1", TrafficColor::Red, 10),
+            b.try_consume("ch-1", TrafficColor::Red, 50),
             ConsumeOutcome::Rejected
         );
     }

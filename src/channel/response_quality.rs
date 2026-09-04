@@ -190,8 +190,7 @@ impl ResponseQualityDetector {
         }
 
         // 2.5 SSE 流式错误（HTTP 200 + data: {...error...}）
-        if body.starts_with("data: ") {
-            let json_str = &body[6..];
+        if let Some(json_str) = body.strip_prefix("data: ") {
             if json_str.trim() != "[DONE]" {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
                     if let Some(error) = json.get("error") {
@@ -293,7 +292,7 @@ impl ResponseQualityDetector {
             402 => UpstreamErrorType::PaymentRequired,
             404 => UpstreamErrorType::ModelNotFound,
             500 => UpstreamErrorType::ServerError,
-            502 | 503 | 504 => UpstreamErrorType::GatewayError,
+            502..=504 => UpstreamErrorType::GatewayError,
             code if code >= 500 => UpstreamErrorType::ServerError,
             _ => UpstreamErrorType::ServerError,
         };
@@ -519,11 +518,7 @@ impl ResponseQualityDetector {
 
     /// 解析流式 chunk 中的错误。
     fn parse_stream_error(&self, chunk: &str, channel_type: &str) -> Option<UpstreamErrorType> {
-        let json_str = if chunk.starts_with("data: ") {
-            &chunk[6..]
-        } else {
-            chunk
-        };
+        let json_str = chunk.strip_prefix("data: ").unwrap_or(chunk);
 
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
             let error_type = json.get("type").and_then(|t| t.as_str());
