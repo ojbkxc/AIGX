@@ -25,10 +25,18 @@ use crate::storage::FileStore;
 // 参照 burncloud `crates/router/src/` 的对应模块，在 AIGX 单 crate 内以子模块
 // 形式实现。各模块自包含、可独立测试，由 `ChannelStore` 持有并集成到渠道选择。
 pub mod affinity;
+pub mod aimd;
 pub mod balancer;
 pub mod circuit_breaker;
 pub mod empty_response;
 pub mod health_manager;
+pub mod rate_budget;
+// ── 阶段3：响应质量分级（喂给断路器/调度器）──────────────────────────
+//
+// 参照 burncloud `crates/router/src/response_quality.rs`，评估上游响应质量
+// （延迟/错误率/吞吐量），用于渠道选择。
+pub mod response_quality;
+pub mod scheduler;
 
 // ── 渠道类型 ─────────────────────────────────────────────────────────
 
@@ -192,6 +200,9 @@ pub struct ChannelTestResult {
 /// - `health_tracker`：per-channel/model 健康状态追踪，`record_channel_*` 时记录
 /// - `empty_response_counter`：连续空响应计数，超阈值由调用方触发故障处理
 /// - `balancer`：RoundRobin 负载均衡，`select_for_model_round_robin` 使用
+/// - `aimd`：per-channel AIMD 自适应限速（批次3）
+/// - `rate_budget`：per-channel 三色令牌桶预算（批次3）
+/// - `scheduler`：CombinedScheduler 多因子调度（批次3）
 pub struct ChannelStore {
     channels: RwLock<Vec<Channel>>,
     store: Arc<FileStore>,
@@ -207,6 +218,14 @@ pub struct ChannelStore {
     empty_response_counter: empty_response::EmptyResponseCounter,
     /// RoundRobin 负载均衡器（阶段2）
     balancer: balancer::RoundRobinBalancer,
+    /// per-channel AIMD 自适应限速器（批次3）
+    aimd: dashmap::DashMap<String, parking_lot::Mutex<aimd::AimdController>>,
+    /// 三色令牌桶预算（批次3）
+    rate_budget: rate_budget::InMemoryBudget,
+    /// 组合调度器（批次3）
+    scheduler: parking_lot::RwLock<scheduler::CombinedScheduler>,
+    /// 调度器权重配置缓存（读取用）
+    scheduler_config_cache: parking_lot::RwLock<scheduler::SchedulerPolicyConfig>,
 }
 
 impl ChannelStore {
@@ -220,6 +239,12 @@ impl ChannelStore {
             health_tracker: health_manager::ChannelStateTracker::new(),
             empty_response_counter: empty_response::EmptyResponseCounter::new(),
             balancer: balancer::RoundRobinBalancer::new(),
+            aimd: dashmap::DashMap::new(),
+            rate_budget: rate_budget::InMemoryBudget::new(),
+            scheduler: parking_lot::RwLock::new(scheduler::CombinedScheduler::default()),
+            scheduler_config_cache: parking_lot::RwLock::new(
+                scheduler::SchedulerPolicyConfig::default(),
+            ),
         };
         let _ = s.load();
         s
@@ -319,6 +344,8 @@ impl ChannelStore {
     /// 阶段2增强：过滤阶段额外跳过断路器打开的渠道（`circuit_breaker.allow_request`）。
     /// 该增强向后兼容——断路器默认全 Closed（`allow_request` 对未知渠道返回 true），
     /// 不影响既有行为；仅在 `record_channel_failure` 累计达阈值后才生效。
+    ///
+    /// 批次3增强：过滤阶段额外跳过 AIMD 冷却中的渠道（`aimd_allows`）。
     pub fn select_for_model(&self, model: &str) -> Vec<Channel> {
         let mut candidates: Vec<Channel> = self
             .channels
@@ -332,6 +359,7 @@ impl ChannelStore {
                             && c.discovered_models.iter().any(|m| m == model)))
                     && !self.is_in_cooldown(&c.id)
                     && self.circuit_breaker.allow_request(&c.id)
+                    && self.aimd_allows(&c.id)
             })
             .cloned()
             .collect();
@@ -662,6 +690,11 @@ impl ChannelStore {
         self.health_tracker
             .record_error(channel_id, model, &failure_type, error_message);
 
+        // 批次3：限速类失败同步喂给 AIMD（降限额/进冷却）
+        if let circuit_breaker::FailureType::RateLimited { retry_after, .. } = &failure_type {
+            self.aimd_on_rate_limited(channel_id, *retry_after);
+        }
+
         // P0-1 亲和性清除策略
         let should_evict = matches!(
             failure_type,
@@ -754,6 +787,55 @@ impl ChannelStore {
     /// RoundRobin 负载均衡器引用（管理面/测试用）。
     pub fn balancer(&self) -> &balancer::RoundRobinBalancer {
         &self.balancer
+    }
+
+    // ── 批次3：AIMD / 三色预算 / 组合调度 集成点 ───────────────────────
+
+    /// 记入渠道请求成功到 AIMD（学习/上调限额）。
+    pub fn aimd_on_success(&self, channel_id: &str, upstream_limit: Option<u32>) {
+        let mut c = self
+            .aimd
+            .entry(channel_id.to_string())
+            .or_insert_with(|| parking_lot::Mutex::new(aimd::AimdController::with_defaults()));
+        c.lock().on_success(upstream_limit);
+    }
+
+    /// 记入 429 到 AIMD（降限额/进冷却）。
+    pub fn aimd_on_rate_limited(&self, channel_id: &str, retry_after: Option<u64>) {
+        let mut c = self
+            .aimd
+            .entry(channel_id.to_string())
+            .or_insert_with(|| parking_lot::Mutex::new(aimd::AimdController::with_defaults()));
+        c.lock().on_rate_limited(retry_after);
+    }
+
+    /// AIMD 是否放行该渠道（调度过滤用）。
+    pub fn aimd_allows(&self, channel_id: &str) -> bool {
+        self.aimd
+            .get(channel_id)
+            .map(|c| c.lock().check_available())
+            .unwrap_or(true) // 未追踪 = 不限制
+    }
+
+    /// AIMD 只读快照（监控用）。
+    pub fn aimd_snapshot(&self, channel_id: &str) -> Option<aimd::AimdSnapshot> {
+        self.aimd.get(channel_id).map(|c| c.lock().snapshot())
+    }
+
+    /// 三色预算引用（try_consume/refund/配置）。
+    pub fn rate_budget(&self) -> &rate_budget::InMemoryBudget {
+        &self.rate_budget
+    }
+
+    /// 更新调度器权重配置。
+    pub fn set_scheduler_config(&self, config: scheduler::SchedulerPolicyConfig) {
+        *self.scheduler_config_cache.write() = config.clone();
+        *self.scheduler.write() = scheduler::CombinedScheduler::new(config);
+    }
+
+    /// 调度器当前权重配置。
+    pub fn scheduler_config(&self) -> scheduler::SchedulerPolicyConfig {
+        self.scheduler_config_cache.read().clone()
     }
 }
 

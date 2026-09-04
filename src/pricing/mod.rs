@@ -16,6 +16,14 @@ use std::sync::Arc;
 use crate::storage::FileStore;
 use tracing::error;
 
+// ── 阶段3：Router 高级功能子模块 ─────────────────────────────────────
+//
+// 参照 burncloud `crates/router/src/` 对应文件，在 AIGX 单 crate 内以子模块形式实现。
+// 各模块自包含、可独立测试，由调用方按需集成。
+pub mod exchange_rate;
+pub mod price_sync;
+pub mod video_billing;
+
 /// 内置工具名（与 new-api `dto.BuildInTool*` 对齐）
 pub const TOOL_WEB_SEARCH: &str = "web_search";
 pub const TOOL_WEB_SEARCH_PREVIEW: &str = "web_search_preview";

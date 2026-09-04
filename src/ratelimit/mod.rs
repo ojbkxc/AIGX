@@ -20,6 +20,12 @@ pub mod limiter;
 pub mod store;
 pub mod window;
 
+// ── 阶段3：AIMD 自适应限流器 ──────────────────────────────────────────
+//
+// 参照 burncloud `crates/router/src/aimd_limiter.rs`，per-channel 自适应限流，
+// 与既有固定阈值 `Limiter` 共存：AIMD 由调度器/代理层按需调用。
+pub mod aimd_limiter;
+
 pub use error::RateLimitError;
 pub use limiter::{Limiter, Reservation};
 pub use store::RateLimit;
