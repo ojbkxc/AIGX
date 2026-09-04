@@ -210,16 +210,16 @@ export const api = {
     }
     // 非流式：走通用 request 解析
     const text = await res.text();
-    let data = null;
+    let parsed = null;
     if (text) {
-      try { data = JSON.parse(text); } catch { /* ignore */ }
+      try { parsed = JSON.parse(text); } catch { /* ignore */ }
     }
     if (!res.ok) {
       const errMsg =
-        (data && typeof data === 'object' && (data.error || data.message)) || text || `Request failed with status ${res.status}`;
+        (parsed && typeof parsed === 'object' && (parsed.error || parsed.message)) || text || `Request failed with status ${res.status}`;
       throw new Error(errMsg);
     }
-    return data;
+    return parsed;
   },
 
   // ── 令牌管理增强（功能 2）──

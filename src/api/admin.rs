@@ -1975,7 +1975,7 @@ pub async fn handle_channel_chat_test(
     let ch = match state.channel_store.get(&body.channel_id) {
         Some(c) => c,
         None => {
-            return error_response("channel_not_found", "Channel not found", StatusCode::NOT_FOUND)
+            return error_response("Channel not found", StatusCode::NOT_FOUND)
                 .into_response()
         }
     };
@@ -2047,11 +2047,15 @@ pub async fn handle_channel_chat_test(
                     .into_response();
                 }
                 if stream {
-                    // 流式：SSE 原样透传
+                    // 流式：SSE 原样透传（将字节块包装为 sse::Event 事件）
                     let body = resp.bytes_stream();
                     let sse = axum::response::sse::Sse::new(
-                        body.map(|chunk| {
-                            chunk.map_err(|e| axum::Error::new(format!("upstream stream error: {e}")))
+                        body.map(|chunk| match chunk {
+                            Ok(bytes) => Ok(axum::response::sse::Event::default()
+                .data(String::from_utf8_lossy(&bytes))),
+                            Err(e) => {
+                                Err(axum::Error::new(format!("upstream stream error: {e}")))
+                            }
                         }),
                     );
                     sse.into_response()
@@ -2114,8 +2118,12 @@ pub async fn handle_channel_chat_test(
             if stream {
                 let body = resp.bytes_stream();
                 let sse = axum::response::sse::Sse::new(
-                    body.map(|chunk| {
-                        chunk.map_err(|e| axum::Error::new(format!("upstream stream error: {e}")))
+                    body.map(|chunk| match chunk {
+                        Ok(bytes) => Ok(axum::response::sse::Event::default()
+                .data(String::from_utf8_lossy(&bytes))),
+                        Err(e) => {
+                            Err(axum::Error::new(format!("upstream stream error: {e}")))
+                        }
                     }),
                 );
                 sse.into_response()
