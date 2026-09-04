@@ -20,6 +20,16 @@ use std::time::{Duration, Instant};
 
 use crate::storage::FileStore;
 
+// ── Router 核心增强子模块（阶段2）─────────────────────────────────────
+//
+// 参照 burncloud `crates/router/src/` 的对应模块，在 AIGX 单 crate 内以子模块
+// 形式实现。各模块自包含、可独立测试，由 `ChannelStore` 持有并集成到渠道选择。
+pub mod affinity;
+pub mod balancer;
+pub mod circuit_breaker;
+pub mod empty_response;
+pub mod health_manager;
+
 // ── 渠道类型 ─────────────────────────────────────────────────────────
 
 /// 渠道类型枚举。
@@ -175,11 +185,28 @@ pub struct ChannelTestResult {
 /// 渠道存储 — 管理通用上游渠道，支持 CRUD、按模型调度选取与健康检查。
 ///
 /// 参照 aisix Hub 的两级分发 + new-api channel_cache 的选取逻辑。
+///
+/// 阶段2增强（参照 burncloud crates/router/src/）：
+/// - `circuit_breaker`：per-channel 断路器，`select_for_model` 过滤时跳过 Open 渠道
+/// - `affinity_cache`：session+model 粘性路由，`select_for_model_with_affinity` 优先命中
+/// - `health_tracker`：per-channel/model 健康状态追踪，`record_channel_*` 时记录
+/// - `empty_response_counter`：连续空响应计数，超阈值由调用方触发故障处理
+/// - `balancer`：RoundRobin 负载均衡，`select_for_model_round_robin` 使用
 pub struct ChannelStore {
     channels: RwLock<Vec<Channel>>,
     store: Arc<FileStore>,
     /// channel cooldown table: channel_id -> cooldown expiry. Cooled-down channels are skipped during scheduling.
     cooldowns: dashmap::DashMap<String, Instant>,
+    /// per-channel 断路器（阶段2）
+    circuit_breaker: circuit_breaker::CircuitBreaker,
+    /// session+model 亲和性缓存（阶段2）
+    affinity_cache: affinity::AffinityCache,
+    /// per-channel/model 健康状态追踪器（阶段2）
+    health_tracker: health_manager::ChannelStateTracker,
+    /// 连续空响应计数器（阶段2）
+    empty_response_counter: empty_response::EmptyResponseCounter,
+    /// RoundRobin 负载均衡器（阶段2）
+    balancer: balancer::RoundRobinBalancer,
 }
 
 impl ChannelStore {
@@ -188,6 +215,11 @@ impl ChannelStore {
             channels: RwLock::new(Vec::new()),
             store,
             cooldowns: dashmap::DashMap::new(),
+            circuit_breaker: circuit_breaker::CircuitBreaker::with_defaults(),
+            affinity_cache: affinity::AffinityCache::default(),
+            health_tracker: health_manager::ChannelStateTracker::new(),
+            empty_response_counter: empty_response::EmptyResponseCounter::new(),
+            balancer: balancer::RoundRobinBalancer::new(),
         };
         let _ = s.load();
         s
@@ -283,6 +315,10 @@ impl ChannelStore {
     /// 选取支持指定模型的可用渠道列表（按 priority 降序；同优先级按 weight 加权随机）。
     ///
     /// 参照 aisix routing：failover 时调用方依次尝试返回的渠道列表。
+    ///
+    /// 阶段2增强：过滤阶段额外跳过断路器打开的渠道（`circuit_breaker.allow_request`）。
+    /// 该增强向后兼容——断路器默认全 Closed（`allow_request` 对未知渠道返回 true），
+    /// 不影响既有行为；仅在 `record_channel_failure` 累计达阈值后才生效。
     pub fn select_for_model(&self, model: &str) -> Vec<Channel> {
         let mut candidates: Vec<Channel> = self
             .channels
@@ -295,6 +331,7 @@ impl ChannelStore {
                             && !c.discovered_models.is_empty()
                             && c.discovered_models.iter().any(|m| m == model)))
                     && !self.is_in_cooldown(&c.id)
+                    && self.circuit_breaker.allow_request(&c.id)
             })
             .cloned()
             .collect();
@@ -543,6 +580,180 @@ impl ChannelStore {
             message,
             latency_ms: start.elapsed().as_millis() as u64,
         }
+    }
+
+    // ── 阶段2：Router 核心增强集成点 ──────────────────────────────────
+    //
+    // 以下方法把 circuit_breaker / affinity / health_manager / empty_response /
+    // balancer 集成到 ChannelStore。既有方法（mark_cooldown/mark_unhealthy/
+    // mark_healthy/mark_used/select_for_model）签名与逻辑保留不变，仅新增。
+
+    /// 带亲和性的渠道选取 — 先查 `(session_id, model)` 亲和缓存，命中且可用则置顶。
+    ///
+    /// 返回的列表与 `select_for_model` 同样按 priority/weight 排序，仅当亲和命中时
+    /// 把命中渠道移到列表首位（若该渠道仍在候选池中）。
+    ///
+    /// `session_id` 为 None 时退化为 `select_for_model`。
+    pub fn select_for_model_with_affinity(
+        &self,
+        model: &str,
+        session_id: Option<&str>,
+    ) -> Vec<Channel> {
+        let mut candidates = self.select_for_model(model);
+        if let Some(sid) = session_id {
+            if let Some(affinity_id) = self.affinity_cache.lookup(sid, model) {
+                // 把亲和命中渠道移到首位（若仍在候选池且断路器放行）
+                if let Some(pos) = candidates.iter().position(|c| c.id == affinity_id) {
+                    if pos > 0 {
+                        let ch = candidates.remove(pos);
+                        candidates.insert(0, ch);
+                    }
+                }
+            }
+        }
+        candidates
+    }
+
+    /// 用 RoundRobin 从候选渠道中选下一个（同 priority 组内轮询）。
+    ///
+    /// 与 `select_for_model` 的加权随机不同，本方法提供确定性轮询，适合需要
+    /// 均匀分布的场景。组 ID 用 model（同模型的候选组内轮询）。
+    pub fn select_for_model_round_robin(&self, model: &str) -> Option<Channel> {
+        let candidates = self.select_for_model(model);
+        let group_id = format!("model:{model}");
+        self.balancer.next(&group_id, &candidates).cloned()
+    }
+
+    /// 记入渠道请求成功 — 同步更新断路器、健康管理器、亲和性、空响应计数。
+    ///
+    /// 调用方在渠道请求成功后调用。`session_id` 与 `model` 用于建立亲和性；
+    /// `latency_ms` 用于健康管理的延迟 EMA。
+    pub fn record_channel_success(
+        &self,
+        channel_id: &str,
+        model: Option<&str>,
+        latency_ms: u64,
+        session_id: Option<&str>,
+    ) {
+        self.circuit_breaker.record_success(channel_id);
+        self.health_tracker
+            .record_success(channel_id, model, latency_ms);
+        self.empty_response_counter.reset(channel_id);
+        if let (Some(sid), Some(m)) = (session_id, model) {
+            self.affinity_cache.insert(sid, m, channel_id);
+        }
+    }
+
+    /// 计入渠道请求失败 — 同步更新断路器与健康管理器，并按失败类型决定是否清除亲和性。
+    ///
+    /// 参照 burncloud P0-1 策略：ServerError/Timeout/ConnectionError → 清除亲和性
+    /// （病渠道不应再被粘到）；RateLimited/AuthFailed/PaymentRequired/ModelNotFound/
+    /// EmptyResponse → 保留亲和性（临时或永久故障，下次可能恢复）。
+    pub fn record_channel_failure(
+        &self,
+        channel_id: &str,
+        model: Option<&str>,
+        failure_type: circuit_breaker::FailureType,
+        error_message: &str,
+        session_id: Option<&str>,
+    ) {
+        self.circuit_breaker
+            .record_failure(channel_id, failure_type.clone());
+        self.health_tracker
+            .record_error(channel_id, model, &failure_type, error_message);
+
+        // P0-1 亲和性清除策略
+        let should_evict = matches!(
+            failure_type,
+            circuit_breaker::FailureType::ServerError
+                | circuit_breaker::FailureType::Timeout
+                | circuit_breaker::FailureType::ConnectionError
+        );
+        if should_evict {
+            if let (Some(sid), Some(m)) = (session_id, model) {
+                self.affinity_cache.evict(sid, m);
+            }
+        }
+    }
+
+    /// 计入一次空响应 — 返回 `true` 表示连续空响应已超阈值（应触发故障处理）。
+    ///
+    /// 调用方在响应处理时检查 token 计数，零 token 则调用本方法；非零则调用
+    /// `record_channel_success`（其内部会 reset 空响应计数）。
+    /// 返回 `true` 时，调用方应额外调用 `record_channel_failure` 记入
+    /// `FailureType::EmptyResponse`，或调用 `mark_cooldown` 置入冷却。
+    pub fn record_empty_response(&self, channel_id: &str) -> bool {
+        self.empty_response_counter.record_empty(channel_id)
+    }
+
+    /// 把 `BridgeError` 分类为断路器 `FailureType`（供 failover 集成用）。
+    ///
+    /// 调用方在 bridge 调用失败时，用本函数把 `BridgeError` 转成 `FailureType`，
+    /// 再调用 `record_channel_failure`。本函数不依赖 `bridge` 模块的内部细节，
+    /// 仅按 `BridgeError` 的公开变体映射。
+    pub fn classify_bridge_error(e: &crate::bridge::BridgeError) -> circuit_breaker::FailureType {
+        use crate::bridge::BridgeError;
+        match e {
+            BridgeError::AuthError(_) | BridgeError::InvalidUpstreamCredentials(_) => {
+                circuit_breaker::FailureType::AuthFailed
+            }
+            BridgeError::RateLimited => circuit_breaker::FailureType::RateLimited {
+                scope: circuit_breaker::RateLimitScope::Unknown,
+                retry_after: None,
+            },
+            BridgeError::UpstreamStatus {
+                status,
+                retry_after,
+                ..
+            } => match *status {
+                401 | 403 => circuit_breaker::FailureType::AuthFailed,
+                402 => circuit_breaker::FailureType::PaymentRequired,
+                404 => circuit_breaker::FailureType::ModelNotFound,
+                429 => circuit_breaker::FailureType::RateLimited {
+                    scope: circuit_breaker::RateLimitScope::Unknown,
+                    retry_after: retry_after.as_ref().map(|d| d.as_secs()),
+                },
+                s if s >= 500 => circuit_breaker::FailureType::ServerError,
+                _ => circuit_breaker::FailureType::ServerError,
+            },
+            BridgeError::Timeout { .. } => circuit_breaker::FailureType::Timeout,
+            BridgeError::Transport(_) | BridgeError::StreamAborted => {
+                circuit_breaker::FailureType::ConnectionError
+            }
+            BridgeError::ModelNotFound(_) => circuit_breaker::FailureType::ModelNotFound,
+            // 解析失败/配置错误视为服务端错误（上游返回了坏数据）
+            BridgeError::UpstreamDecode(_)
+            | BridgeError::Config(_)
+            | BridgeError::InvalidUpstreamConfig(_)
+            | BridgeError::AllAccountsFailed(_) => circuit_breaker::FailureType::ServerError,
+        }
+    }
+
+    // ── 阶段2：访问器（供管理面/监控面读取子模块状态）──────────────────
+
+    /// 断路器引用（管理面重置/监控用）。
+    pub fn circuit_breaker(&self) -> &circuit_breaker::CircuitBreaker {
+        &self.circuit_breaker
+    }
+
+    /// 亲和性缓存引用（管理面/监控用）。
+    pub fn affinity_cache(&self) -> &affinity::AffinityCache {
+        &self.affinity_cache
+    }
+
+    /// 健康状态追踪器引用（管理面查询渠道健康汇总用）。
+    pub fn health_tracker(&self) -> &health_manager::ChannelStateTracker {
+        &self.health_tracker
+    }
+
+    /// 空响应计数器引用（管理面/监控用）。
+    pub fn empty_response_counter(&self) -> &empty_response::EmptyResponseCounter {
+        &self.empty_response_counter
+    }
+
+    /// RoundRobin 负载均衡器引用（管理面/测试用）。
+    pub fn balancer(&self) -> &balancer::RoundRobinBalancer {
+        &self.balancer
     }
 }
 

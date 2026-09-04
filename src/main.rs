@@ -430,10 +430,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             get(api::admin::handle_google_oauth_callback),
         )
         // 阶段1：用户名检查（参照 burncloud user.rs::check_username）
-        .route(
-            "/api/users/check",
-            get(api::admin::handle_check_username),
-        )
+        .route("/api/users/check", get(api::admin::handle_check_username))
         .route("/api/auth/logout", post(api::admin::handle_logout))
         .route("/api/usage/summary", get(api::admin::handle_usage_summary))
         .route("/api/usage/summary", post(api::admin::handle_refresh_usage))
@@ -672,7 +669,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
         // 阶段1：OpenAPI 文档 + Swagger UI（参照 burncloud openapi.rs，公开无需鉴权）
-        .route("/api-docs/openapi.json", get(api::admin::handle_openapi_json))
+        .route(
+            "/api-docs/openapi.json",
+            get(api::admin::handle_openapi_json),
+        )
         .route("/swagger-ui", get(api::admin::handle_swagger_ui))
         .fallback_service(web::serve_static_files())
         .layer(build_cors_layer(config))

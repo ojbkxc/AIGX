@@ -3806,17 +3806,15 @@ pub async fn handle_reset_password(
     };
 
     let session_store = SessionStore::new(&session_secret, PASSWORD_RESET_TTL_HOURS);
-    let sess = session_store.validate_session(&body.token).ok_or_else(|| {
-        error_response(
-            "Invalid or expired reset token",
-            StatusCode::BAD_REQUEST,
-        )
-    })?;
+    let sess = session_store
+        .validate_session(&body.token)
+        .ok_or_else(|| error_response("Invalid or expired reset token", StatusCode::BAD_REQUEST))?;
 
     // 查找用户
-    let user = state.user_store.get_by_email(&sess.email).ok_or_else(|| {
-        error_response("User not found", StatusCode::NOT_FOUND)
-    })?;
+    let user = state
+        .user_store
+        .get_by_email(&sess.email)
+        .ok_or_else(|| error_response("User not found", StatusCode::NOT_FOUND))?;
 
     // 更新密码
     let new_hash = hash_password(&body.new_password);
@@ -3884,18 +3882,15 @@ pub async fn handle_google_oauth_callback(
             }
         };
     // 拉取用户信息
-    let g_user =
-        match crate::oauth::google::get_user_info(&access_token, &state.http_client).await {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::error!("Google OAuth user info failed: {e}");
-                return error_response(
-                    "Failed to fetch Google user info",
-                    StatusCode::BAD_GATEWAY,
-                )
+    let g_user = match crate::oauth::google::get_user_info(&access_token, &state.http_client).await
+    {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!("Google OAuth user info failed: {e}");
+            return error_response("Failed to fetch Google user info", StatusCode::BAD_GATEWAY)
                 .into_response();
-            }
-        };
+        }
+    };
     // 确定邮箱：优先 email，否则用 sub 造伪邮箱
     let email = g_user
         .email
@@ -3916,11 +3911,8 @@ pub async fn handle_google_oauth_callback(
             Ok(u) => u,
             Err(e) => {
                 tracing::error!("Failed to create Google OAuth user: {e}");
-                return error_response(
-                    "Failed to create user",
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                )
-                .into_response();
+                return error_response("Failed to create user", StatusCode::INTERNAL_SERVER_ERROR)
+                    .into_response();
             }
         },
     };
@@ -4065,7 +4057,11 @@ pub async fn handle_security_events(
         if log.status_code < 400 {
             continue;
         }
-        let severity = if log.status_code >= 500 { "critical" } else { "warning" };
+        let severity = if log.status_code >= 500 {
+            "critical"
+        } else {
+            "warning"
+        };
         let event_type = if log.status_code >= 500 {
             "server_error"
         } else {
@@ -4320,10 +4316,7 @@ pub async fn handle_rotate_token(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let new_key = format!(
-        "sk-{}",
-        uuid::Uuid::new_v4().to_string().replace('-', "")
-    );
+    let new_key = format!("sk-{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
     match state.api_key_store.update(&id, |k| {
         k.key = new_key.clone();
     }) {
@@ -4382,8 +4375,7 @@ pub async fn handle_playground_chat(
         match state.channel_store.get(cid) {
             Some(c) => c,
             None => {
-                return error_response("Channel not found", StatusCode::NOT_FOUND)
-                    .into_response()
+                return error_response("Channel not found", StatusCode::NOT_FOUND).into_response()
             }
         }
     } else {
@@ -4486,8 +4478,9 @@ pub async fn handle_playground_chat(
                 .into_response(),
             }
         }
-        Err(e) => error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
-            .into_response(),
+        Err(e) => {
+            error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY).into_response()
+        }
     }
 }
 
@@ -4509,7 +4502,10 @@ pub async fn handle_check_username(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let name = params.username.trim();
     if name.is_empty() {
-        return Err(error_response("username cannot be empty", StatusCode::BAD_REQUEST));
+        return Err(error_response(
+            "username cannot be empty",
+            StatusCode::BAD_REQUEST,
+        ));
     }
     // 同时检查 username 与 email 两个维度
     let exists = state.user_store.get_by_username(name).is_some()
