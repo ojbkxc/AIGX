@@ -201,6 +201,35 @@ fn verify_api_key_full(
 ///
 /// 返回按 priority/weight 排序的候选列表（bridge, channel_id），
 /// 调用方依次尝试：失败（上游可重试错误）时切换下一个渠道。
+///
+/// 阶段2：`resolve_bridges_with_affinity` 在此之上叠加 session 粘性路由——
+/// 亲和缓存命中的渠道被移到候选列表首位（若仍在候选池且未被断路器拦截）。
+pub fn resolve_bridges_with_affinity(
+    state: &AppState,
+    model: &str,
+    session_id: Option<&str>,
+) -> Vec<(Arc<dyn Bridge>, Option<String>)> {
+    let mut result = resolve_bridges(state, model);
+    if let Some(sid) = session_id {
+        if let Some(affinity_id) = state.channel_store.affinity_cache().lookup(sid, model) {
+            if let Some(pos) = result
+                .iter()
+                .position(|(_, cid)| cid.as_deref() == Some(affinity_id.as_str()))
+            {
+                if pos > 0 {
+                    let item = result.remove(pos);
+                    result.insert(0, item);
+                    tracing::debug!(
+                        "affinity hit: session {sid} model {model} -> channel {affinity_id}"
+                    );
+                }
+            }
+        }
+    }
+    result
+}
+
+/// 无亲和性版本（既有端点沿用：embeddings/images/audio 等无会话语义的请求）。
 pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<(Arc<dyn Bridge>, Option<String>)> {
     let mut result: Vec<(Arc<dyn Bridge>, Option<String>)> = Vec::new();
 
@@ -867,8 +896,17 @@ pub async fn handle_chat_completions(
         return e.into_response();
     }
 
-    // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
-    let candidates = resolve_bridges(&state, &model);
+    // 阶段2：亲和性 session 标识——优先 body.user 字段（OpenAI SDK 常见透传），
+    // 否则用 api_key 所属 user_id，保证同用户会话粘到同一渠道（保留上游 KV 缓存）
+    let session_id: Option<String> = body
+        .get("user")
+        .and_then(|u| u.as_str())
+        .map(String::from)
+        .or_else(|| api_key.user_id.clone());
+
+    // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover。
+    // 阶段2：带亲和性选取——粘性窗口内命中渠道置顶
+    let candidates = resolve_bridges_with_affinity(&state, &model, session_id.as_deref());
     if candidates.is_empty() {
         return error_response(
             "no_bridge",
@@ -935,13 +973,35 @@ pub async fn handle_chat_completions(
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
+            let attempt_start = std::time::Instant::now();
             match bridge.chat_stream(&chat_req, &ctx).await {
                 Ok(s) => {
+                    // 阶段2：流建立成功——记入健康/亲和（断路器成功、延迟 EMA、
+                    // 空响应计数清零、粘性路由建立）。流中途失败由计费守卫兜底，
+                    // 此处只记"建流成功"。
+                    if let Some(c) = &cid {
+                        state.channel_store.record_channel_success(
+                            c,
+                            Some(&model),
+                            attempt_start.elapsed().as_millis() as u64,
+                            session_id.as_deref(),
+                        );
+                    }
                     stream_opt = Some(s);
                     used_channel_id = cid;
                     break;
                 }
                 Err(e) => {
+                    // 阶段2：失败分类记入断路器/健康追踪/亲和清除
+                    if let Some(c) = &cid {
+                        state.channel_store.record_channel_failure(
+                            c,
+                            Some(&model),
+                            ChannelStore::classify_bridge_error(&e),
+                            &e.to_string(),
+                            session_id.as_deref(),
+                        );
+                    }
                     if !is_retryable_bridge_error(&e) {
                         // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
                         last_error = Some(e);
@@ -1196,13 +1256,33 @@ pub async fn handle_chat_completions(
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
+            let attempt_start = std::time::Instant::now();
             match bridge.chat(&chat_req, &ctx).await {
                 Ok(resp) => {
+                    // 阶段2：成功——记入断路器/健康追踪/亲和性/空响应计数
+                    if let Some(c) = &cid {
+                        state.channel_store.record_channel_success(
+                            c,
+                            Some(&model),
+                            attempt_start.elapsed().as_millis() as u64,
+                            session_id.as_deref(),
+                        );
+                    }
                     response_opt = Some(resp);
                     used_channel_id = cid;
                     break;
                 }
                 Err(e) => {
+                    // 阶段2：失败分类记入断路器/健康追踪/亲和清除
+                    if let Some(c) = &cid {
+                        state.channel_store.record_channel_failure(
+                            c,
+                            Some(&model),
+                            ChannelStore::classify_bridge_error(&e),
+                            &e.to_string(),
+                            session_id.as_deref(),
+                        );
+                    }
                     if !is_retryable_bridge_error(&e) {
                         // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
                         last_error = Some(e);
@@ -1436,8 +1516,12 @@ pub async fn handle_responses(
         return e.into_response();
     }
 
-    // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
-    let candidates = resolve_bridges(&state, &model);
+    // 阶段2：亲和性 session 标识（Responses 透传：user_id 兜底）
+    let session_id: Option<String> = api_key.user_id.clone();
+
+    // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover。
+    // 阶段2：带亲和性选取——粘性窗口内命中渠道置顶
+    let candidates = resolve_bridges_with_affinity(&state, &model, session_id.as_deref());
     if candidates.is_empty() {
         return error_response(
             "no_bridge",
@@ -1476,13 +1560,33 @@ pub async fn handle_responses(
         if let Some(c) = &cid {
             state.channel_store.mark_used(c);
         }
+        let attempt_start = std::time::Instant::now();
         match bridge.responses_passthrough(&body, is_stream, &ctx).await {
             Ok(r) => {
+                // 阶段2：成功——记入断路器/健康追踪/亲和性
+                if let Some(c) = &cid {
+                    state.channel_store.record_channel_success(
+                        c,
+                        Some(&model),
+                        attempt_start.elapsed().as_millis() as u64,
+                        session_id.as_deref(),
+                    );
+                }
                 result_opt = Some(r);
                 used_channel_id = cid;
                 break;
             }
             Err(e) => {
+                // 阶段2：失败分类记入断路器/健康追踪/亲和清除
+                if let Some(c) = &cid {
+                    state.channel_store.record_channel_failure(
+                        c,
+                        Some(&model),
+                        ChannelStore::classify_bridge_error(&e),
+                        &e.to_string(),
+                        session_id.as_deref(),
+                    );
+                }
                 if !is_retryable_bridge_error(&e) {
                     // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
                     last_error = Some(e);

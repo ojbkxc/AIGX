@@ -24,7 +24,7 @@ pub const DEFAULT_HARD_TTL: Duration = Duration::from_secs(30 * 60);
 type CacheKey = (String, String);
 
 /// 缓存条目：渠道 ID + 创建时间（用于 TTL 判断）。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct CacheEntry {
     channel_id: String,
     created_at: Instant,

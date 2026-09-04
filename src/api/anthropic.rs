@@ -273,8 +273,19 @@ pub async fn handle_messages(
         return e.into_response();
     }
 
-    // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
-    let candidates = super::openai::resolve_bridges(&state, &model);
+    // 阶段2：亲和性 session 标识——优先 body.metadata.user_id（Anthropic SDK 标准透传），
+    // 否则用 api_key 所属 user_id，保证同用户会话粘到同一渠道
+    let session_id: Option<String> = body
+        .get("metadata")
+        .and_then(|m| m.get("user_id"))
+        .and_then(|u| u.as_str())
+        .map(String::from)
+        .or_else(|| api_key.user_id.clone());
+
+    // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover。
+    // 阶段2：带亲和性选取——粘性窗口内命中渠道置顶
+    let candidates =
+        super::openai::resolve_bridges_with_affinity(&state, &model, session_id.as_deref());
     if candidates.is_empty() {
         return anthropic_error(
             "service_unavailable",
@@ -395,13 +406,33 @@ pub async fn handle_messages(
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
+            let attempt_start = std::time::Instant::now();
             match bridge.chat_stream(&chat_req, &ctx).await {
                 Ok(s) => {
+                    // 阶段2：流建立成功——记入断路器/健康追踪/亲和性
+                    if let Some(c) = &cid {
+                        state.channel_store.record_channel_success(
+                            c,
+                            Some(&model),
+                            attempt_start.elapsed().as_millis() as u64,
+                            session_id.as_deref(),
+                        );
+                    }
                     stream_opt = Some(s);
                     used_channel_id = cid;
                     break;
                 }
                 Err(e) => {
+                    // 阶段2：失败分类记入断路器/健康追踪/亲和清除
+                    if let Some(c) = &cid {
+                        state.channel_store.record_channel_failure(
+                            c,
+                            Some(&model),
+                            crate::channel::ChannelStore::classify_bridge_error(&e),
+                            &e.to_string(),
+                            session_id.as_deref(),
+                        );
+                    }
                     if !super::openai::is_retryable_bridge_error(&e) {
                         // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
                         last_error = Some(e);
@@ -831,13 +862,33 @@ pub async fn handle_messages(
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
+            let attempt_start = std::time::Instant::now();
             match bridge.chat(&chat_req, &ctx).await {
                 Ok(resp) => {
+                    // 阶段2：成功——记入断路器/健康追踪/亲和性
+                    if let Some(c) = &cid {
+                        state.channel_store.record_channel_success(
+                            c,
+                            Some(&model),
+                            attempt_start.elapsed().as_millis() as u64,
+                            session_id.as_deref(),
+                        );
+                    }
                     response_opt = Some(resp);
                     used_channel_id = cid;
                     break;
                 }
                 Err(e) => {
+                    // 阶段2：失败分类记入断路器/健康追踪/亲和清除
+                    if let Some(c) = &cid {
+                        state.channel_store.record_channel_failure(
+                            c,
+                            Some(&model),
+                            crate::channel::ChannelStore::classify_bridge_error(&e),
+                            &e.to_string(),
+                            session_id.as_deref(),
+                        );
+                    }
                     if !super::openai::is_retryable_bridge_error(&e) {
                         // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
                         last_error = Some(e);
