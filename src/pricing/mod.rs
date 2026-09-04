@@ -236,10 +236,7 @@ impl PricingStore {
         m.insert(TOOL_IMAGE_GENERATION.to_string(), 150.0);
         // 模型前缀覆盖（gpt-4o / gpt-4.1 系列的 web_search_preview 更高价）
         for prefix in ["gpt-4o", "gpt-4.1", "gpt-4o-mini", "gpt-4.1-mini"] {
-            m.insert(
-                format!("{TOOL_WEB_SEARCH_PREVIEW}:{prefix}*"),
-                25.0,
-            );
+            m.insert(format!("{TOOL_WEB_SEARCH_PREVIEW}:{prefix}*"), 25.0);
         }
         m
     }
@@ -387,17 +384,7 @@ impl PricingStore {
         Ok(base * model_ratio * group_ratio)
     }
 
-    /// 工具价格是否合法（>=0 且非 NaN/Inf）。
-fn is_valid_tool_price(price: f64) -> bool {
-    price >= 0.0 && !price.is_nan() && !price.is_infinite()
-}
-
-/// 工具名是否属于内置保留名（这些名字不计入自定义工具按次计费）。
-pub fn is_reserved_tool_name(name: &str) -> bool {
-    RESERVED_TOOL_NAMES.contains(&name)
-}
-
-/// 计算费用并向上取整为 i64 配额单位（避免浮点扣费）。
+    /// 计算费用并向上取整为 i64 配额单位（避免浮点扣费）。
     pub fn calculate_cost_quoted(
         &self,
         model: &str,
@@ -488,6 +475,16 @@ pub fn is_reserved_tool_name(name: &str) -> bool {
         }
         (total + 0.999999) as i64
     }
+}
+
+/// 工具名是否属于内置保留名（这些名字不计入自定义工具按次计费）。
+pub fn is_reserved_tool_name(name: &str) -> bool {
+    RESERVED_TOOL_NAMES.contains(&name)
+}
+
+/// 工具价格是否合法（>=0 且非 NaN/Inf）。
+fn is_valid_tool_price(price: f64) -> bool {
+    price >= 0.0 && !price.is_nan() && !price.is_infinite()
 }
 
 /// 工具按次计费使用的内置/自定义工具调用计数表。

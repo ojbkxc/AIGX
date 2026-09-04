@@ -15,10 +15,10 @@ use futures::stream::BoxStream;
 use serde_json::Value;
 use std::time::Duration;
 
-pub mod cf;
-pub mod openai;
 /// Anthropic Messages API（`/v1/messages`）原生 bridge
 pub mod anthropic;
+pub mod cf;
+pub mod openai;
 /// 工具调用健壮解析（借鉴 ds-free-api tool_parser 的归一化/修复思路，独立实现）
 pub mod tool_repair;
 

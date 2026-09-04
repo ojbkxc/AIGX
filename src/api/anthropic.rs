@@ -357,11 +357,17 @@ pub async fn handle_messages(
                     })
                     .collect()
             }),
-        max_tokens: body.get("max_tokens").and_then(|v| v.as_u64()).map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+        max_tokens: body
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
         temperature: body.get("temperature").and_then(|v| v.as_f64()),
         top_p: body.get("top_p").and_then(|v| v.as_f64()),
         stream: is_stream,
-        top_k: body.get("top_k").and_then(|v| v.as_u64()).map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
+        top_k: body
+            .get("top_k")
+            .and_then(|v| v.as_u64())
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
         stop: body
             .get("stop_sequences")
             .and_then(|s| s.as_array())

@@ -207,7 +207,11 @@ impl AnthropicBridge {
                     // 参照 new-api：tool_result 合并进前一条 user 轮次（若存在），
                     // 否则独立成一条 user 轮次；空 content 兜底 "..."。
                     let result_content = m.content_str();
-                    let result_content = if result_content.is_empty() { "..." } else { result_content };
+                    let result_content = if result_content.is_empty() {
+                        "..."
+                    } else {
+                        result_content
+                    };
                     let result_block = serde_json::json!({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
@@ -216,7 +220,9 @@ impl AnthropicBridge {
                     if let Some(last) = messages.last_mut() {
                         if last.get("role").and_then(|r| r.as_str()) == Some("user") {
                             // 前一条 user 的 content 是数组 → 直接追加 tool_result
-                            if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                            if let Some(arr) =
+                                last.get_mut("content").and_then(|c| c.as_array_mut())
+                            {
                                 arr.push(result_block);
                                 continue;
                             }
@@ -393,13 +399,11 @@ fn translate_image_block(b: &Value) -> Option<Value> {
     // 两种 OpenAI 形状：
     // 1. {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}
     // 2. {"type":"input_image","image_url":"data:..."}（Responses API 形状）
-    let url = b
-        .get("image_url")
-        .and_then(|u| {
-            u.as_str()
-                .map(String::from)
-                .or_else(|| u.get("url").and_then(|x| x.as_str()).map(String::from))
-        })?;
+    let url = b.get("image_url").and_then(|u| {
+        u.as_str()
+            .map(String::from)
+            .or_else(|| u.get("url").and_then(|x| x.as_str()).map(String::from))
+    })?;
 
     let (media_type, data) = parse_data_uri(&url)?;
 
@@ -495,10 +499,7 @@ fn normalize_input_schema(params: &Value) -> Value {
             obj.insert("type".into(), Value::String("object".into()));
         }
         if !obj.contains_key("properties") {
-            obj.insert(
-                "properties".into(),
-                Value::Object(Default::default()),
-            );
+            obj.insert("properties".into(), Value::Object(Default::default()));
         }
     }
     schema
@@ -559,7 +560,11 @@ fn parse_response(json: &Value, fallback_model: &str) -> ChatResponse {
                         return None;
                     }
                     Some(super::ToolCall {
-                        id: b.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
+                        id: b
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         function_name: b
                             .get("name")
                             .and_then(|n| n.as_str())
@@ -750,7 +755,10 @@ fn parse_stream_event(
             {
                 state.cache_creation_tokens = state.cache_creation_tokens.max(t);
             }
-            if let Some(t) = usage.get("cache_read_input_tokens").and_then(|t| t.as_u64()) {
+            if let Some(t) = usage
+                .get("cache_read_input_tokens")
+                .and_then(|t| t.as_u64())
+            {
                 state.cache_read_tokens = state.cache_read_tokens.max(t);
             }
         }
@@ -859,10 +867,8 @@ fn parse_stream_event(
                 // content_block 的 index），供下游流式编码器拼装 tool_use 块。
                 Some("input_json_delta") => {
                     if let Some(pj) = delta.get("partial_json").and_then(|p| p.as_str()) {
-                        let block_index = v
-                            .get("index")
-                            .and_then(|i| i.as_u64())
-                            .unwrap_or(0) as usize;
+                        let block_index =
+                            v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                         // 密集索引重映射（参照 new-api ClaudeToChatStreamState）：
                         // tool_use 的 content_block index 与文本/thinking 块共用同一
                         // 序号空间，直接透传会在下游 tool_calls 数组留下空洞。这里
@@ -896,14 +902,9 @@ fn parse_stream_event(
     if event_type == "content_block_start" {
         if let Some(block) = v.get("content_block") {
             if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                let block_index = v
-                    .get("index")
-                    .and_then(|i| i.as_u64())
-                    .unwrap_or(0) as usize;
-                let id = block
-                    .get("id")
-                    .and_then(|i| i.as_str())
-                    .map(String::from);
+                let block_index =
+                    v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                let id = block.get("id").and_then(|i| i.as_str()).map(String::from);
                 let name = block
                     .get("name")
                     .and_then(|n| n.as_str())
@@ -988,7 +989,7 @@ impl Bridge for AnthropicBridge {
     ) -> Result<ChatResponse, BridgeError> {
         let body = self.build_body(req, false);
         let resp = self
-            .post(self.messages_url(), &body)
+            .post(&self.messages_url(), &body)
             .send()
             .await
             .map_err(|e| BridgeError::Transport(e.to_string()))?;
@@ -1018,7 +1019,7 @@ impl Bridge for AnthropicBridge {
     ) -> Result<ChatChunkStream, BridgeError> {
         let body = self.build_body(req, true);
         let resp = self
-            .post(self.messages_url(), &body)
+            .post(&self.messages_url(), &body)
             .send()
             .await
             .map_err(|e| BridgeError::Transport(e.to_string()))?;

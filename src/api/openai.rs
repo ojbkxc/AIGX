@@ -725,7 +725,9 @@ fn parse_messages(value: Option<&Value>) -> Option<Vec<ChatMessage>> {
                     .iter()
                     .filter_map(|b| {
                         if b.get("type").and_then(|t| t.as_str()) == Some("text") {
-                            b.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                            b.get("text")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
                         } else {
                             None
                         }
@@ -908,14 +910,11 @@ pub async fn handle_chat_completions(
         top_p: body.get("top_p").and_then(|v| v.as_f64()),
         stream: is_stream,
         top_k: None,
-        stop: body
-            .get("stop")
-            .and_then(|s| s.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|s| s.as_str().map(String::from))
-                    .collect()
-            }),
+        stop: body.get("stop").and_then(|s| s.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        }),
         tool_choice: body.get("tool_choice").cloned(),
         reasoning_effort: body
             .get("reasoning_effort")
