@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import ConfirmDialog from '../components/ConfirmDialog';
 import './Channels.css';
 
 // 支持的对话协议选项 — 与后端 ChatTester 对齐
@@ -31,6 +32,9 @@ export default function Channels() {
   const [testingId, setTestingId] = useState(null);
   const [fetchingModels, setFetchingModels] = useState(false);
 
+  // ── 确认弹窗状态 ──
+  const [confirmState, setConfirmState] = useState(null);
+
   // ── 对话调试器状态 ──
   const [showChat, setShowChat] = useState(false);
   const [chatChannel, setChatChannel] = useState(null);
@@ -39,6 +43,7 @@ export default function Channels() {
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
+  const [chatModels, setChatModels] = useState([]);
   const chatEndRef = React.useRef(null);
 
   function defaultForm() {
@@ -185,6 +190,8 @@ export default function Channels() {
   };
 
   // ── 对话调试器 ──
+  // 打开聊天时异步拉取网关可用模型列表（/v1/models），与渠道自身 models 合并；
+  // 拉取失败则静默退回渠道 models，避免调试被模型列表接口拖累。
   const openChat = (ch) => {
     setChatChannel(ch);
     setChatProtocol(ch.channel_type === 'anthropic' ? 'anthropic' : 'openai');
@@ -193,25 +200,39 @@ export default function Channels() {
     setChatMessages([]);
     setChatInput('');
     setShowChat(true);
+    setChatModels([]);
+    api.listModels()
+      .then((res) => {
+        const list = res?.data || res || [];
+        if (Array.isArray(list) && list.length) {
+          setChatModels(list);
+          // 若渠道 models 为空，用网关模型列表的第一个作为默认
+          if (!models.length && chatModel === 'glm-4.7-flash') {
+            setChatModel(list[0]);
+          }
+        }
+      })
+      .catch(() => {
+        // 忽略模型列表接口失败，退回渠道 models
+      });
   };
 
   const closeChat = () => {
     setShowChat(false);
     setChatChannel(null);
     setChatMessages([]);
+    setChatModels([]);
   };
 
   const chatModelOptions = () => {
     const ch = chatChannel;
     if (!ch) return [];
-    const list = ch.models || [];
-    // cloudflare 渠道：附加 ModelMapper 默认模型（若未在列表中）
-    const extra = ['glm-4.7-flash', 'deepseek-v4-flash-0731'];
-    const merged = list.slice();
-    for (const m of extra) {
-      if (!merged.includes(m)) merged.push(m);
+    const list = (ch.models || []).slice();
+    // 合并网关可用模型（去重，渠道配置优先）
+    for (const m of chatModels) {
+      if (!list.includes(m)) list.push(m);
     }
-    return merged.length ? merged : ['glm-4.7-flash'];
+    return list.length ? list : ['glm-4.7-flash'];
   };
 
   const appendChatMessage = (role, content) => {
@@ -222,7 +243,8 @@ export default function Channels() {
     const ch = chatChannel;
     const text = chatInput.trim();
     if (!ch || !text || chatBusy) return;
-    appendChatMessage('user', text);
+    // 用函数式更新追加用户消息，避免与流式累积的 assistant 消息发生竞态
+    setChatMessages((prev) => [...prev, { role: 'user', content: text }]);
     setChatInput('');
     setChatBusy(true);
     try {
@@ -294,15 +316,22 @@ export default function Channels() {
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm(t('确定删除此渠道？'))) return;
-    setError('');
-    try {
-      await api.deleteChannel(id);
-      addToast(t('渠道已删除'));
-      loadChannels();
-    } catch (err) {
-      setError(err.message);
-    }
+    setConfirmState({
+      title: t('删除渠道'),
+      message: t('确定删除此渠道？'),
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        setError('');
+        try {
+          await api.deleteChannel(id);
+          addToast(t('渠道已删除'));
+          loadChannels();
+        } catch (err) {
+          setError(err.message);
+        }
+      },
+    });
   };
 
   const typeLabel = (val) => {
@@ -504,6 +533,8 @@ export default function Channels() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
       {showChat && chatChannel && (
         <div className="modal-overlay" onClick={closeChat}>

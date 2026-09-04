@@ -53,7 +53,8 @@ export default function Wallet() {
   const handleTopup = async () => {
     const amt = Math.floor(Number(amount));
 
-    if (!amt || amt <= 0) {
+    // 空串/NaN 会得到 NaN，NaN <= 0 为 false，会绕过校验直接进 topup → 用 isFinite 兜底
+    if (!Number.isFinite(amt) || amt <= 0) {
       setError(t('请输入有效金额'));
       return;
     }

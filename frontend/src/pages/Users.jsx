@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import ConfirmDialog from '../components/ConfirmDialog';
 
 export default function Users() {
   const [users, setUsers] = useState([]);
@@ -11,6 +12,8 @@ export default function Users() {
   const [error, setError] = useState('');
   const addToast = useToast();
   const { t } = useTranslation();
+
+  const [confirmState, setConfirmState] = useState(null);
 
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -61,15 +64,15 @@ export default function Users() {
 
   const handleSave = async () => {
     if (!form.email.trim()) {
-      setError(t('邮箱为必填项'));
+      addToast(t('邮箱为必填项'), 'error');
       return;
     }
     if (!isValidEmail(form.email.trim())) {
-      setError(t('邮箱格式不正确'));
+      addToast(t('邮箱格式不正确'), 'error');
       return;
     }
     if (!editing && !form.password) {
-      setError(t('密码为必填项'));
+      addToast(t('密码为必填项'), 'error');
       return;
     }
     setSaving(true);
@@ -103,15 +106,22 @@ export default function Users() {
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm(t('确定删除该用户？'))) return;
-    setError('');
-    try {
-      await api.deleteUser(id);
-      addToast(t('用户已删除'));
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
+    setConfirmState({
+      title: t('删除用户'),
+      message: t('确定删除该用户？'),
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        setError('');
+        try {
+          await api.deleteUser(id);
+          addToast(t('用户已删除'));
+          load();
+        } catch (err) {
+          setError(err.message);
+        }
+      },
+    });
   };
 
   const fmtQuota = (q) => {
@@ -209,6 +219,8 @@ export default function Users() {
           )}
         </div>
       </div>
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
       {showModal && (
         <div className="modal-overlay" onClick={closeModal}>

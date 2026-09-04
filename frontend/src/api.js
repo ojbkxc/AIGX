@@ -93,6 +93,10 @@ export const api = {
   getUsageSummary: () =>
     request('GET', '/api/usage/summary'),
 
+  // Models（网关可用模型列表，用于对话调试模型下拉）
+  listModels: () =>
+    request('GET', '/v1/models'),
+
   // API Keys
   listKeys: () =>
     request('GET', '/api/keys'),

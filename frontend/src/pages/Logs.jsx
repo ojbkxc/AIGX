@@ -62,7 +62,8 @@ export default function Logs() {
       a.href = url;
       a.download = `request_logs.${format}`;
       a.click();
-      URL.revokeObjectURL(url);
+      // Safari/Firefox 在同一帧内 revoke 会导致下载被取消，延迟到下一帧再释放
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
       addToast(t('导出成功'));
     } catch (err) {
       setError(err.message);

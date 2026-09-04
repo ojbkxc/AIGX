@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import ConfirmDialog from '../components/ConfirmDialog';
 import './Pricing.css';
 
 // 子标签定义 — 参照 deepseek-pp SUB_TABS 模式
@@ -15,6 +16,7 @@ export default function Pricing() {
   const addToast = useToast();
   const [sub, setSub] = useState('prices');
   const [error, setError] = useState('');
+  const [confirmState, setConfirmState] = useState(null);
 
   // ── 价格目录状态 ──
   const [prices, setPrices] = useState([]);
@@ -77,18 +79,37 @@ export default function Pricing() {
   };
 
   const handleDeletePrice = async (model) => {
-    if (!window.confirm(`${t('确定删除模型')} ${model} ${t('的定价？')}`)) return;
-    setError('');
-    try {
-      await api.deletePrice(model);
-      addToast(t('定价已删除'));
-      loadPrices();
-    } catch (err) {
-      setError(err.message);
-    }
+    setConfirmState({
+      title: t('删除定价'),
+      message: `${t('确定删除模型')} ${model} ${t('的定价？')}`,
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        setError('');
+        try {
+          await api.deletePrice(model);
+          addToast(t('定价已删除'));
+          loadPrices();
+        } catch (err) {
+          setError(err.message);
+        }
+      },
+    });
   };
 
   // ── 倍率配置 ──
+  // 输入合法性标记：ratioError 为 null 表示合法，否则存非法原因文案
+  const [ratioError, setRatioError] = useState(null);
+
+  const handleRatioBlur = (field, value) => {
+    try {
+      JSON.parse(value || '{}');
+      setRatioError(null);
+    } catch {
+      setRatioError(field === 'model' ? t('模型倍率 JSON 格式错误') : t('分组倍率 JSON 格式错误'));
+    }
+  };
+
   const loadRatios = async () => {
     setRatioLoading(true);
     try {
@@ -276,6 +297,8 @@ export default function Pricing() {
                         rows={10}
                         value={ratioText}
                         onChange={(e) => setRatioText(e.target.value)}
+                        onBlur={() => handleRatioBlur('model', ratioText)}
+                        style={ratioError ? { borderColor: 'rgb(239,68,68)' } : undefined}
                         placeholder='{"glm-5.2": 1, "deepseek-v3": 0.5}'
                       />
                       <span className="form-hint">
@@ -289,6 +312,8 @@ export default function Pricing() {
                         rows={10}
                         value={groupRatioText}
                         onChange={(e) => setGroupRatioText(e.target.value)}
+                        onBlur={() => handleRatioBlur('group', groupRatioText)}
+                        style={ratioError ? { borderColor: 'rgb(239,68,68)' } : undefined}
                         placeholder='{"default": 1, "vip": 0.8}'
                       />
                       <span className="form-hint">
@@ -296,6 +321,13 @@ export default function Pricing() {
                       </span>
                     </div>
                   </div>
+
+                  {ratioError && (
+                    <div style={{ color: 'rgb(239,68,68)', fontSize: 12, marginTop: 8 }}>
+                      {ratioError}
+                    </div>
+                  )}
+
                   <div style={{ marginTop: 16 }}>
                     <button className="btn btn-primary" onClick={handleSaveRatios} disabled={savingRatios}>
                       {savingRatios ? t('保存中...') : t('保存倍率配置')}
@@ -307,6 +339,8 @@ export default function Pricing() {
           </div>
         )}
       </div>
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }

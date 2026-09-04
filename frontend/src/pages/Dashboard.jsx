@@ -99,18 +99,29 @@ function TrendChart({ data }) {
 
 function PieChart({ data }) {
   if (!data || data.length === 0) return null;
-  const total = data.reduce((s, d) => s + (d.value || d.count || 0), 0);
-  if (total === 0) return null;
+  const raw = data.map((d) => ({
+    label: d.label || d.model || d.name || '—',
+    val: Number(d.value || d.count || 0),
+  })).filter((d) => d.val > 0);
+  if (raw.length === 0) return null;
 
-  const colors = ['#818cf8', '#c084fc', '#f472b6', '#fb923c', '#fbbf24', '#34d399', '#22d3ee', '#60a5fa', '#a78bfa', '#f87171'];
+  // 超过 9 个模型时，第 10 名及之后聚合为「其他」扇区，避免扇区过多难读
+  const MAX_SLICES = 10;
+  const top = raw.slice(0, MAX_SLICES - 1);
+  const rest = raw.slice(MAX_SLICES - 1);
+  const slicesRaw = rest.length
+    ? [...top, { label: `其他 (${rest.length})`, val: rest.reduce((s, d) => s + d.val, 0) }]
+    : top;
+  const total = slicesRaw.reduce((s, d) => s + d.val, 0);
+
+  const colors = ['#818cf8', '#c084fc', '#f472b6', '#fb923c', '#fbbf24', '#34d399', '#22d3ee', '#60a5fa', '#a78bfa', '#94a3b8'];
   const cx = 120;
   const cy = 120;
   const r = 90;
   let cumAngle = -Math.PI / 2;
 
-  const slices = data.slice(0, 10).map((d, i) => {
-    const val = d.value || d.count || 0;
-    const angle = (val / total) * 2 * Math.PI;
+  const slices = slicesRaw.map((d, i) => {
+    const angle = (d.val / total) * 2 * Math.PI;
     const x1 = cx + r * Math.cos(cumAngle);
     const y1 = cy + r * Math.sin(cumAngle);
     const x2 = cx + r * Math.cos(cumAngle + angle);
@@ -122,8 +133,8 @@ function PieChart({ data }) {
     const slice = {
       path: `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`,
       color: colors[i % colors.length],
-      pct: (val / total) * 100,
-      label: d.label || d.model || d.name || '—',
+      pct: (d.val / total) * 100,
+      label: d.label,
       labelX,
       labelY,
     };
@@ -169,7 +180,28 @@ export default function Dashboard() {
 
   useEffect(() => {
     loadData();
+    // 实时指标轮询：30s 刷新一次 RPS / 活跃用户 / 活跃渠道 / 平均延迟
+    const timer = setInterval(() => {
+      loadRealtimeOnly();
+    }, 30000);
+    return () => clearInterval(timer);
   }, []);
+
+  // 仅刷新实时指标，避免整页 loading 闪烁
+  const loadRealtimeOnly = async () => {
+    try {
+      const [rtData, urData, chData] = await Promise.all([
+        api.getRealtime().catch(() => null),
+        api.getUserRanking().catch(() => null),
+        api.getChannelHealth().catch(() => null),
+      ]);
+      setRealtime(rtData?.data || rtData);
+      if (urData) setUserRanking(urData.data || urData);
+      if (chData) setChannelHealth(chData.data || chData);
+    } catch {
+      // 轮询失败静默，不打扰用户
+    }
+  };
 
   const loadData = async () => {
     setLoading(true);

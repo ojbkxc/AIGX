@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import ConfirmDialog from '../components/ConfirmDialog';
 import './Keys.css';
 
 const EMPTY_FORM = {
@@ -21,6 +22,8 @@ export default function Keys() {
   const [error, setError] = useState('');
   const addToast = useToast();
   const { t } = useTranslation();
+
+  const [confirmState, setConfirmState] = useState(null);
 
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -79,7 +82,7 @@ export default function Keys() {
 
   const handleSave = async () => {
     if (!form.name.trim()) {
-      setError(t('密钥名称为必填项'));
+      addToast(t('密钥名称为必填项'), 'error');
       return;
     }
     setSaving(true);
@@ -126,15 +129,22 @@ export default function Keys() {
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm(t('确定删除此令牌？'))) return;
-    setError('');
-    try {
-      await api.deleteToken(id);
-      addToast(t('令牌已删除'));
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
+    setConfirmState({
+      title: t('删除令牌'),
+      message: t('确定删除此令牌？'),
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        setError('');
+        try {
+          await api.deleteToken(id);
+          addToast(t('令牌已删除'));
+          load();
+        } catch (err) {
+          setError(err.message);
+        }
+      },
+    });
   };
 
   const handleToggleStatus = async (tk) => {
@@ -150,22 +160,29 @@ export default function Keys() {
   };
 
   const handleResetUsed = async (id) => {
-    if (!window.confirm(t('确定重置已用额度为 0？'))) return;
-    setError('');
-    try {
-      await api.resetTokenUsed(id);
-      addToast(t('已重置已用额度'));
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
+    setConfirmState({
+      title: t('重置已用'),
+      message: t('确定重置已用额度为 0？'),
+      confirmText: t('重置已用'),
+      danger: false,
+      onConfirm: async () => {
+        setError('');
+        try {
+          await api.resetTokenUsed(id);
+          addToast(t('已重置已用额度'));
+          load();
+        } catch (err) {
+          setError(err.message);
+        }
+      },
+    });
   };
 
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text).then(() => {
       addToast(t('已复制到剪贴板'));
     }).catch(() => {
-      setError(t('复制失败'));
+      addToast(t('复制失败'), 'error');
     });
   };
 
@@ -275,6 +292,8 @@ export default function Keys() {
           )}
         </div>
       </div>
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
       {showModal && (
         <div className="modal-overlay" onClick={closeModal}>

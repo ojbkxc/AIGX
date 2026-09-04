@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import ConfirmDialog from '../components/ConfirmDialog';
 import './Groups.css';
 
 export default function Groups() {
@@ -10,6 +11,8 @@ export default function Groups() {
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  const [confirmState, setConfirmState] = useState(null);
 
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -90,15 +93,22 @@ export default function Groups() {
       setError(t('不能删除默认分组'));
       return;
     }
-    if (!window.confirm(`${t('确定删除分组')} ${name}?`)) return;
-    setError('');
-    try {
-      await api.deleteGroup(name);
-      addToast(t('用户分组已删除'));
-      loadGroups();
-    } catch (err) {
-      setError(err.message);
-    }
+    setConfirmState({
+      title: t('删除分组'),
+      message: `${t('确定删除分组')} ${name}?`,
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        setError('');
+        try {
+          await api.deleteGroup(name);
+          addToast(t('用户分组已删除'));
+          loadGroups();
+        } catch (err) {
+          setError(err.message);
+        }
+      },
+    });
   };
 
   return (
@@ -184,6 +194,8 @@ export default function Groups() {
           </div>
         )}
       </div>
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
       {showModal && (
         <div className="modal-overlay" onClick={closeModal}>

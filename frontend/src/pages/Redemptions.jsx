@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import ConfirmDialog from '../components/ConfirmDialog';
 
 export default function Redemptions() {
   const [items, setItems] = useState([]);
@@ -11,6 +12,8 @@ export default function Redemptions() {
   const [error, setError] = useState('');
   const addToast = useToast();
   const { t } = useTranslation();
+
+  const [confirmState, setConfirmState] = useState(null);
 
   const [showGen, setShowGen] = useState(false);
   const [genForm, setGenForm] = useState({ count: 10, quota: 100, name: '', expires_at: 0 });
@@ -50,14 +53,21 @@ export default function Redemptions() {
   };
 
   const handleDelete = async (id) => {
-    if (!confirm(t('确定删除此兑换码？'))) return;
-    try {
-      await api.deleteRedemption(id);
-      addToast(t('删除成功'));
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
+    setConfirmState({
+      title: t('删除兑换码'),
+      message: t('确定删除此兑换码？'),
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await api.deleteRedemption(id);
+          addToast(t('删除成功'));
+          load();
+        } catch (err) {
+          setError(err.message);
+        }
+      },
+    });
   };
 
   const fmtTime = (ts) => {
@@ -180,6 +190,8 @@ export default function Redemptions() {
               <button className="btn btn-outline btn-sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>{t('下一页')}</button>
             </div>
           )}
+
+          <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
         </div>
       </div>
     </div>
