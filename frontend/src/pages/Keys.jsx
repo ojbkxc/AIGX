@@ -31,6 +31,9 @@ export default function Keys() {
   const [saving, setSaving] = useState(false);
   const [generatedKey, setGeneratedKey] = useState(null);
 
+  // ── 令牌轮换后展示的新密钥（一次性显示，提示用户立即保存）──
+  const [rotatedKey, setRotatedKey] = useState(null);
+
   useEffect(() => {
     load();
   }, []);
@@ -178,6 +181,32 @@ export default function Keys() {
     });
   };
 
+  // 令牌轮换：生成新密钥，旧密钥立即失效；新密钥仅此一次展示
+  const handleRotate = (tk) => {
+    setConfirmState({
+      title: t('轮换令牌密钥'),
+      message: t('轮换将生成新密钥，旧密钥立即失效。确定继续？'),
+      confirmText: t('轮换'),
+      danger: true,
+      onConfirm: async () => {
+        setError('');
+        try {
+          const res = await api.rotateToken(tk.id);
+          const data = res?.data || res || {};
+          // 后端返回新密钥明文（plain_key / key / api_key）
+          const newKey = data.plain_key || data.key || data.api_key;
+          if (newKey) {
+            setRotatedKey({ name: tk.name, key: newKey });
+          }
+          addToast(t('令牌已轮换，请立即保存新密钥'));
+          load();
+        } catch (err) {
+          setError(err.message);
+        }
+      },
+    });
+  };
+
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text).then(() => {
       addToast(t('已复制到剪贴板'));
@@ -280,6 +309,10 @@ export default function Keys() {
                                 {t('重置已用')}
                               </button>
                             )}
+                            {/* 令牌轮换：生成新密钥，旧密钥立即失效 */}
+                            <button className="btn btn-outline btn-sm" onClick={() => handleRotate(tk)}>
+                              {t('轮换')}
+                            </button>
                             <button className="btn btn-danger btn-sm" onClick={() => handleDelete(tk.id)}>{t('删除')}</button>
                           </div>
                         </td>
@@ -294,6 +327,38 @@ export default function Keys() {
       </div>
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
+
+      {/* 令牌轮换后新密钥展示模态框：新密钥仅此一次显示 */}
+      {rotatedKey && (
+        <div className="modal-overlay" onClick={() => setRotatedKey(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('令牌已轮换')} — {rotatedKey.name}</h3>
+              <button className="modal-close" onClick={() => setRotatedKey(null)}>&times;</button>
+            </div>
+            <div className="modal-body">
+              <div className="success-message">{t('轮换成功！请立即保存新密钥，此为最后一次显示。')}</div>
+              <div className="form-group">
+                <label>{t('新 API 密钥')}</label>
+                <div className="generated-key-box">
+                  <code className="generated-key">{rotatedKey.key}</code>
+                </div>
+                <p className="key-warning">{t('旧密钥已立即失效，请将新密钥保存到安全位置，关闭后将无法再次查看。')}</p>
+              </div>
+              <button
+                className="btn btn-primary"
+                onClick={() => copyToClipboard(rotatedKey.key)}
+                style={{ width: '100%' }}
+              >
+                {t('复制到剪贴板')}
+              </button>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-primary" onClick={() => setRotatedKey(null)}>{t('我已保存')}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showModal && (
         <div className="modal-overlay" onClick={closeModal}>

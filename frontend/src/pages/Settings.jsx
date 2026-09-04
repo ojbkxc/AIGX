@@ -2,7 +2,17 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import ConfirmDialog from '../components/ConfirmDialog';
 import './Settings.css';
+
+// 格式化字节数为人类可读单位
+function fmtBytes(bytes) {
+  const n = Number(bytes || 0);
+  if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
+  if (n >= 1048576) return (n / 1048576).toFixed(2) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(2) + ' KB';
+  return n + ' B';
+}
 
 export default function Settings() {
   const [limits, setLimits] = useState({
@@ -23,9 +33,31 @@ export default function Settings() {
   const [rlLoading, setRlLoading] = useState(false);
   const [rlSaving, setRlSaving] = useState(false);
 
+  // ── 缓存管理 ──
+  const [cacheStats, setCacheStats] = useState(null);
+  const [cacheLoading, setCacheLoading] = useState(false);
+  const [cacheClearing, setCacheClearing] = useState(false);
+
+  // ── 价格同步配置 ──
+  const [priceSyncConfig, setPriceSyncConfig] = useState(null);
+  const [priceSyncLoading, setPriceSyncLoading] = useState(false);
+  const [priceSyncSaving, setPriceSyncSaving] = useState(false);
+  const [priceSyncTriggering, setPriceSyncTriggering] = useState(false);
+
+  // ── 汇率配置 ──
+  const [exchangeRates, setExchangeRates] = useState(null);
+  const [exchangeRatesLoading, setExchangeRatesLoading] = useState(false);
+  const [exchangeRatesSaving, setExchangeRatesSaving] = useState(false);
+
+  // ── 通用确认弹窗（用于清空缓存等危险操作）──
+  const [confirmState, setConfirmState] = useState(null);
+
   useEffect(() => {
     loadLimits();
     loadRateLimitConfig();
+    loadCacheStats();
+    loadPriceSyncConfig();
+    loadExchangeRates();
   }, []);
 
   const loadRateLimitConfig = async () => {
@@ -54,6 +86,110 @@ export default function Settings() {
       setError(err.message);
     } finally {
       setRlSaving(false);
+    }
+  };
+
+  // ── 缓存管理 ──
+  const loadCacheStats = async () => {
+    setCacheLoading(true);
+    try {
+      const res = await api.getCacheStats();
+      setCacheStats(res?.data || res);
+    } catch {
+      // 缓存统计可能未启用，静默处理
+    } finally {
+      setCacheLoading(false);
+    }
+  };
+
+  const handleClearCache = () => {
+    setConfirmState({
+      title: t('清空缓存'),
+      message: t('确定清空所有缓存？此操作不可撤销，可能短暂影响性能。'),
+      confirmText: t('清空'),
+      danger: true,
+      onConfirm: async () => {
+        setCacheClearing(true);
+        setError('');
+        try {
+          await api.clearCache();
+          addToast(t('缓存已清空'));
+          loadCacheStats();
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setCacheClearing(false);
+        }
+      },
+    });
+  };
+
+  // ── 价格同步配置 ──
+  const loadPriceSyncConfig = async () => {
+    setPriceSyncLoading(true);
+    try {
+      const res = await api.getPriceSyncConfig();
+      setPriceSyncConfig(res?.data || res);
+    } catch {
+      // 价格同步可能未启用，静默处理
+    } finally {
+      setPriceSyncLoading(false);
+    }
+  };
+
+  const handlePriceSyncSave = async () => {
+    setPriceSyncSaving(true);
+    setError('');
+    try {
+      await api.updatePriceSyncConfig(priceSyncConfig);
+      addToast(t('价格同步配置已更新'));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setPriceSyncSaving(false);
+    }
+  };
+
+  const handlePriceSyncTrigger = async () => {
+    setPriceSyncTriggering(true);
+    setError('');
+    try {
+      await api.triggerPriceSync();
+      addToast(t('价格同步已触发，请稍后查看同步结果'));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setPriceSyncTriggering(false);
+    }
+  };
+
+  // ── 汇率配置 ──
+  const loadExchangeRates = async () => {
+    setExchangeRatesLoading(true);
+    try {
+      const res = await api.getExchangeRates();
+      setExchangeRates(res?.data || res);
+    } catch {
+      // 汇率配置可能未启用，静默处理
+    } finally {
+      setExchangeRatesLoading(false);
+    }
+  };
+
+  const handleExchangeRateChange = (currency, value) => {
+    setExchangeRates({ ...exchangeRates, [currency]: value === '' ? '' : Number(value) });
+  };
+
+  const handleExchangeRatesSave = async () => {
+    setExchangeRatesSaving(true);
+    setError('');
+    try {
+      await api.updateExchangeRates(exchangeRates);
+      addToast(t('汇率配置已更新'));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setExchangeRatesSaving(false);
     }
   };
 
@@ -273,6 +409,159 @@ export default function Settings() {
           )}
         </div>
       </div>
+
+      {/* ── 缓存管理面板 ── */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-header">
+          <h2>{t('缓存管理')}</h2>
+        </div>
+        <div className="card-body">
+          {cacheLoading ? (
+            <div className="loading">{t('加载缓存统计')}</div>
+          ) : cacheStats ? (
+            <div className="settings-form">
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16, marginBottom: 16 }}>
+                <div className="form-group">
+                  <label>{t('缓存条目数')}</label>
+                  <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-main)' }}>
+                    {Number(cacheStats.entries || cacheStats.count || 0).toLocaleString()}
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label>{t('命中率')}</label>
+                  <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-main)' }}>
+                    {Number(cacheStats.hit_rate || 0).toFixed(1)}%
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label>{t('内存占用')}</label>
+                  <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-main)' }}>
+                    {fmtBytes(cacheStats.memory_bytes || cacheStats.size_bytes || 0)}
+                  </div>
+                </div>
+              </div>
+              <div className="settings-actions">
+                <button
+                  className="btn btn-danger"
+                  onClick={handleClearCache}
+                  disabled={cacheClearing}
+                >
+                  {cacheClearing ? t('清空中...') : t('清空缓存')}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="empty-state">
+              <p>{t('缓存统计未启用或加载失败')}</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── 价格同步配置面板 ── */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-header">
+          <h2>{t('价格同步')}</h2>
+        </div>
+        <div className="card-body">
+          {priceSyncLoading ? (
+            <div className="loading">{t('加载价格同步配置')}</div>
+          ) : priceSyncConfig ? (
+            <div className="settings-form">
+              <div className="form-group">
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={priceSyncConfig.enabled ?? false}
+                    onChange={(e) => setPriceSyncConfig({ ...priceSyncConfig, enabled: e.target.checked })}
+                  />
+                  {t('启用自动同步')}
+                </label>
+                <span className="form-hint">{t('开启后按间隔自动从同步 URL 拉取最新价格')}</span>
+              </div>
+              <div className="form-group">
+                <label>{t('同步 URL')}</label>
+                <input
+                  className="form-input"
+                  placeholder="https://example.com/prices.json"
+                  value={priceSyncConfig.sync_url || ''}
+                  onChange={(e) => setPriceSyncConfig({ ...priceSyncConfig, sync_url: e.target.value })}
+                />
+                <span className="form-hint">{t('价格数据源的 JSON URL')}</span>
+              </div>
+              <div className="form-group">
+                <label>{t('同步间隔（秒）')}</label>
+                <input
+                  className="form-input"
+                  type="number"
+                  min="60"
+                  placeholder="3600"
+                  value={priceSyncConfig.interval_secs ?? ''}
+                  onChange={(e) => setPriceSyncConfig({ ...priceSyncConfig, interval_secs: e.target.value === '' ? null : Number(e.target.value) })}
+                />
+                <span className="form-hint">{t('自动同步间隔，建议 >= 300 秒')}</span>
+              </div>
+              <div className="settings-actions" style={{ display: 'flex', gap: 12 }}>
+                <button className="btn btn-primary" onClick={handlePriceSyncSave} disabled={priceSyncSaving}>
+                  {priceSyncSaving ? t('保存中...') : t('保存配置')}
+                </button>
+                <button className="btn btn-outline" onClick={handlePriceSyncTrigger} disabled={priceSyncTriggering}>
+                  {priceSyncTriggering ? t('同步中...') : t('立即同步')}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="empty-state">
+              <p>{t('价格同步未启用或加载失败')}</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── 汇率配置面板 ── */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-header">
+          <h2>{t('汇率配置')}</h2>
+        </div>
+        <div className="card-body">
+          {exchangeRatesLoading ? (
+            <div className="loading">{t('加载汇率配置')}</div>
+          ) : exchangeRates ? (
+            <div className="settings-form">
+              <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
+                {t('各币种相对于 USD 的汇率。例如 CNY=7.2 表示 1 USD = 7.2 CNY。')}
+              </p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16 }}>
+                {Object.keys(exchangeRates).map((currency) => (
+                  <div key={currency} className="form-group">
+                    <label>{currency} / USD</label>
+                    <input
+                      className="form-input"
+                      type="number"
+                      step="0.0001"
+                      min="0"
+                      placeholder="1.0"
+                      value={exchangeRates[currency] ?? ''}
+                      onChange={(e) => handleExchangeRateChange(currency, e.target.value)}
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="settings-actions">
+                <button className="btn btn-primary" onClick={handleExchangeRatesSave} disabled={exchangeRatesSaving}>
+                  {exchangeRatesSaving ? t('保存中...') : t('保存汇率')}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="empty-state">
+              <p>{t('汇率配置未启用或加载失败')}</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
 
     </div>

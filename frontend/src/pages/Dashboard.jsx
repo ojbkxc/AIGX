@@ -447,8 +447,13 @@ export default function Dashboard() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
               {ch.map((c, i) => {
                 const successRate = c.success_rate != null ? c.success_rate : (c.total_requests > 0 ? (c.success_count / c.total_requests) * 100 : 0);
+                const errorRate = c.error_rate != null ? c.error_rate : (c.total_requests > 0 ? ((c.total_requests - (c.success_count || 0)) / c.total_requests) * 100 : 0);
                 const isHealthy = successRate >= 95;
                 const isWarning = successRate >= 80 && successRate < 95;
+                // 断路器状态：Closed(正常,绿) / Open(熔断,红) / HalfOpen(半开,黄)
+                const breakerState = (c.breaker_state || c.circuit_state || 'closed').toLowerCase();
+                const breakerColor = breakerState === 'open' ? 'rgb(239,68,68)' : breakerState === 'halfopen' || breakerState === 'half_open' ? 'rgb(234,179,8)' : 'rgb(34,197,94)';
+                const breakerLabel = breakerState === 'open' ? t('熔断') : (breakerState === 'halfopen' || breakerState === 'half_open') ? t('半开') : t('正常');
                 return (
                   <div key={i} className="stat-card" style={{ padding: 16 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
@@ -461,14 +466,38 @@ export default function Dashboard() {
                         {isHealthy ? t('健康') : isWarning ? t('警告') : t('异常')}
                       </span>
                     </div>
+                    {/* 断路器状态：用圆点 + 文字标识 */}
+                    <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: breakerColor, display: 'inline-block' }} />
+                      {t('断路器')}: <span style={{ color: breakerColor, fontWeight: 600 }}>{breakerLabel}</span>
+                    </div>
                     <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>
                       {t('成功率')}: <span style={{ color: 'var(--text-main)', fontWeight: 600 }}>{successRate.toFixed(1)}%</span>
                     </div>
+                    {/* 错误率：百分比 + 进度条 */}
                     <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>
-                      {t('请求数')}: <span style={{ color: 'var(--text-main)' }}>{fmtLimit(c.total_requests || c.requests || 0)}</span>
+                      {t('错误率')}: <span style={{ color: errorRate > 20 ? 'rgb(239,68,68)' : 'var(--text-main)', fontWeight: 600 }}>{errorRate.toFixed(1)}%</span>
                     </div>
-                    <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                    <div style={{ height: 4, background: 'var(--bg-color)', borderRadius: 2, marginBottom: 4, overflow: 'hidden' }}>
+                      <div style={{
+                        width: `${Math.min(100, errorRate)}%`,
+                        height: '100%',
+                        background: errorRate > 20 ? 'rgb(239,68,68)' : errorRate > 5 ? 'rgb(234,179,8)' : 'rgb(34,197,94)',
+                        borderRadius: 2,
+                        transition: 'width 0.3s ease',
+                      }} />
+                    </div>
+                    <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>
                       {t('平均延迟')}: <span style={{ color: 'var(--text-main)' }}>{fmtLimit(c.avg_latency_ms || 0)}ms</span>
+                    </div>
+                    {/* 连续空响应计数：超过阈值提示风险 */}
+                    {c.consecutive_empty != null && c.consecutive_empty > 0 && (
+                      <div style={{ fontSize: 13, color: c.consecutive_empty >= 3 ? 'rgb(239,68,68)' : 'var(--text-muted)' }}>
+                        {t('连续空响应')}: <span style={{ fontWeight: 600 }}>{c.consecutive_empty}</span>
+                      </div>
+                    )}
+                    <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 4 }}>
+                      {t('请求数')}: <span style={{ color: 'var(--text-main)' }}>{fmtLimit(c.total_requests || c.requests || 0)}</span>
                     </div>
                   </div>
                 );

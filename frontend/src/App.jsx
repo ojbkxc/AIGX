@@ -19,6 +19,9 @@ import Channels from './pages/Channels';
 import Pricing from './pages/Pricing';
 import Groups from './pages/Groups';
 import Notify from './pages/Notify';
+import Playground from './pages/Playground';
+import Security from './pages/Security';
+import IpManagement from './pages/IpManagement';
 
 function isAuthenticated() {
   const token = localStorage.getItem('token');
@@ -73,6 +76,9 @@ export default function App() {
           <Route path="/logs" element={<ProtectedLayout><Logs /></ProtectedLayout>} />
           <Route path="/redemptions" element={<ProtectedLayout><Redemptions /></ProtectedLayout>} />
           <Route path="/notify" element={<ProtectedLayout><Notify /></ProtectedLayout>} />
+          <Route path="/playground" element={<ProtectedLayout><Playground /></ProtectedLayout>} />
+          <Route path="/security" element={<ProtectedLayout><Security /></ProtectedLayout>} />
+          <Route path="/ip-management" element={<ProtectedLayout><IpManagement /></ProtectedLayout>} />
           <Route path="/settings" element={<ProtectedLayout><Settings /></ProtectedLayout>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

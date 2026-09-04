@@ -1,0 +1,74 @@
+/* ── Security 页面样式 ── */
+.security-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 概览卡片行 */
+.security-overview {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+@media (max-width: 720px) {
+  .security-overview {
+    grid-template-columns: 1fr;
+  }
+}
+
+.security-stat-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.security-stat-card .card-body {
+  padding: 18px 20px;
+}
+
+.security-stat-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 8px;
+}
+
+.security-stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  font-family: 'Outfit', sans-serif;
+  color: var(--text-main);
+  line-height: 1.2;
+}
+
+/* 严重事件卡片：左侧紫色色条 */
+.security-stat-critical {
+  border-left: 3px solid rgb(168, 85, 247);
+}
+
+/* 近 24h 卡片：左侧蓝色色条 */
+.security-stat-recent {
+  border-left: 3px solid rgb(59, 130, 246);
+}
+
+/* 筛选行 */
+.security-filter-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 12px;
+  align-items: end;
+}
+
+@media (max-width: 600px) {
+  .security-filter-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.security-filter-action {
+  display: flex;
+  align-items: flex-end;
+}

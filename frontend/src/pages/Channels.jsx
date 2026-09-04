@@ -16,7 +16,21 @@ const CHANNEL_TYPES = [
   { value: 'cloudflare', labelKey: 'Cloudflare Workers AI', isRaw: true },
   { value: 'openai_compatible', labelKey: 'OpenAI 兼容 (DeepSeek/OpenRouter/...)' },
   { value: 'anthropic', labelKey: 'Anthropic 兼容' },
+  { value: 'gemini', labelKey: 'Gemini (Google AI)', isRaw: true },
+  { value: 'zai', labelKey: 'Zai (智谱AI)', isRaw: true },
 ];
+
+// 各渠道类型的默认 Base URL（创建时自动填充，减少用户手动输入）
+const DEFAULT_BASE_URL = {
+  gemini: 'https://generativelanguage.googleapis.com/v1beta',
+  zai: 'https://api.z.ai/api/v2',
+};
+
+// 各渠道类型的鉴权方式提示
+const AUTH_HINT = {
+  gemini: '鉴权方式：x-goog-api-key（在 API Key 字段填入 Google AI Studio 密钥）',
+  zai: '鉴权方式：Bearer token（在 API Key 字段填入智谱 API Key）',
+};
 
 export default function Channels() {
   const [channels, setChannels] = useState([]);
@@ -458,13 +472,28 @@ export default function Channels() {
               <div className="form-group">
                 <label>{t('渠道类型')}</label>
                 <select className="form-input" value={form.channel_type}
-                  onChange={(e) => setForm({ ...form, channel_type: e.target.value })}>
+                  onChange={(e) => {
+                    const newType = e.target.value;
+                    // 切换类型时：若当前 base_url 为空或是某个类型的默认值，则自动填充新类型的默认 URL
+                    const isUsingDefault = Object.values(DEFAULT_BASE_URL).includes(form.base_url) || !form.base_url;
+                    setForm({
+                      ...form,
+                      channel_type: newType,
+                      base_url: isUsingDefault ? (DEFAULT_BASE_URL[newType] || '') : form.base_url,
+                    });
+                  }}>
                   {CHANNEL_TYPES.map((tp) => (
                     <option key={tp.value} value={tp.value}>
                       {tp.isRaw ? tp.labelKey : t(tp.labelKey)}
                     </option>
                   ))}
                 </select>
+                {/* Gemini / Zai 鉴权方式提示 */}
+                {AUTH_HINT[form.channel_type] && (
+                  <div className="form-hint" style={{ color: 'var(--accent-color)' }}>
+                    {t(AUTH_HINT[form.channel_type])}
+                  </div>
+                )}
               </div>
               {form.channel_type === 'cloudflare' ? (
                 <div className="form-group">

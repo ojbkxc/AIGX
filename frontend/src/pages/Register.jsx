@@ -13,6 +13,82 @@ export default function Register() {
   const navigate = useNavigate();
   const { t } = useTranslation();
 
+  // ── 用户名实时可用性检查（防抖 300ms）──
+  // 状态：'idle' 未检查 / 'checking' 检查中 / 'available' 可用 / 'taken' 已占用 / 'error' 检查失败
+  const [usernameStatus, setUsernameStatus] = useState('idle');
+  const usernameTimerRef = React.useRef(null);
+  const usernameCheckedRef = React.useRef('');
+
+  // 防抖检查用户名是否可用，300ms 内若再次输入则取消上次未发出的请求
+  const checkUsernameAvailability = (value) => {
+    if (usernameTimerRef.current) {
+      clearTimeout(usernameTimerRef.current);
+    }
+    if (!value.trim()) {
+      setUsernameStatus('idle');
+      return;
+    }
+    setUsernameStatus('checking');
+    usernameTimerRef.current = setTimeout(async () => {
+      try {
+        const res = await api.checkUsername(value.trim());
+        // 后端返回 { available: true/false } 或 { data: { available: ... } }
+        const data = res?.data ?? res;
+        const available = data?.available ?? !data?.exists;
+        setUsernameStatus(available ? 'available' : 'taken');
+        usernameCheckedRef.current = value.trim();
+      } catch {
+        setUsernameStatus('error');
+      }
+    }, 300);
+  };
+
+  const handleUsernameChange = (e) => {
+    const value = e.target.value;
+    setUsername(value);
+    checkUsernameAvailability(value);
+  };
+
+  // 渲染用户名输入框右侧的状态提示
+  const renderUsernameHint = () => {
+    if (!username.trim() || usernameStatus === 'idle') {
+      return null;
+    }
+    if (usernameStatus === 'checking') {
+      return (
+        <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 6 }}>
+          {t('检查中...')}
+        </span>
+      );
+    }
+    if (usernameStatus === 'available') {
+      return (
+        <span style={{ fontSize: 12, color: 'rgb(34,197,94)', marginLeft: 6 }}>
+          ✓ {t('可用')}
+        </span>
+      );
+    }
+    if (usernameStatus === 'taken') {
+      return (
+        <span style={{ fontSize: 12, color: 'rgb(239,68,68)', marginLeft: 6 }}>
+          ✗ {t('已占用')}
+        </span>
+      );
+    }
+    return (
+      <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 6 }}>
+        {t('检查失败')}
+      </span>
+    );
+  };
+
+  // 组件卸载时清理防抖定时器
+  React.useEffect(() => {
+    return () => {
+      if (usernameTimerRef.current) clearTimeout(usernameTimerRef.current);
+    };
+  }, []);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
@@ -159,9 +235,10 @@ export default function Register() {
               className="form-input"
               placeholder={t('设置一个昵称（选填）')}
               value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              onChange={handleUsernameChange}
               disabled={loading}
             />
+            {renderUsernameHint()}
           </div>
           <div className="form-group">
             <label htmlFor="password">{t('密码 *')}</label>

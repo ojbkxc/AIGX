@@ -276,4 +276,42 @@ export const api = {
   updateNotifyConfig: (data) => request('PUT', '/api/notify/config', data),
   testTelegram: () => request('POST', '/api/notify/test-telegram'),
   testEmail: (to) => request('POST', '/api/notify/test-email', { to }),
+
+  // ── Playground ──
+  playgroundChat: (data) => request('POST', '/api/playground/chat', data),
+
+  // ── 安全监控 ──
+  getSecurityOverview: () => request('GET', '/api/monitor/security'),
+  getSecurityEvents: (params = {}) => request('GET', `/api/security/events?${new URLSearchParams(params)}`),
+
+  // ── IP 管理 ──
+  getIpFilter: () => request('GET', '/api/ip/filter'),
+  updateIpFilter: (data) => request('PUT', '/api/ip/filter', data),
+  addWhitelist: (pattern, note) => request('POST', '/api/ip/whitelist', { pattern, note }),
+  removeWhitelist: (pattern) => request('DELETE', `/api/ip/whitelist/${encodeURIComponent(pattern)}`),
+  addBlacklist: (pattern, note) => request('POST', '/api/ip/blacklist', { pattern, note }),
+  removeBlacklist: (pattern) => request('DELETE', `/api/ip/blacklist/${encodeURIComponent(pattern)}`),
+
+  // ── 缓存管理 ──
+  getCacheStats: () => request('GET', '/api/cache/stats'),
+  clearCache: () => request('POST', '/api/cache/clear'),
+
+  // ── 令牌轮换 ──
+  rotateToken: (id) => request('POST', `/api/tokens/${id}/rotate`),
+
+  // ── 忘记密码/重置密码 ──
+  forgotPassword: (email) => request('POST', '/api/auth/forgot-password', { email }),
+  resetPassword: (token, password) => request('POST', '/api/auth/reset-password', { token, password }),
+
+  // ── 用户名检查 ──
+  checkUsername: (username) => request('GET', `/api/users/check?username=${encodeURIComponent(username)}`),
+
+  // ── 价格同步 ──
+  getPriceSyncConfig: () => request('GET', '/api/pricing/sync-config'),
+  updatePriceSyncConfig: (data) => request('PUT', '/api/pricing/sync-config', data),
+  triggerPriceSync: () => request('POST', '/api/pricing/sync'),
+
+  // ── 汇率配置 ──
+  getExchangeRates: () => request('GET', '/api/pricing/exchange-rates'),
+  updateExchangeRates: (data) => request('PUT', '/api/pricing/exchange-rates', data),
 };

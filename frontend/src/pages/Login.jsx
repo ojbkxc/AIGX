@@ -14,6 +14,45 @@ export default function Login() {
   const { t } = useTranslation();
   const registeredHandled = React.useRef(false);
 
+  // ── 忘记密码模态框状态 ──
+  const [showForgot, setShowForgot] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [forgotError, setForgotError] = useState('');
+  const [forgotSuccess, setForgotSuccess] = useState('');
+
+  // 打开忘记密码弹窗，预填当前邮箱
+  const openForgot = () => {
+    setForgotEmail(email || '');
+    setForgotError('');
+    setForgotSuccess('');
+    setShowForgot(true);
+  };
+
+  // 提交忘记密码请求，调用后端发送重置链接
+  const handleForgotSubmit = async (e) => {
+    e.preventDefault();
+    setForgotError('');
+    if (!forgotEmail) {
+      setForgotError(t('请输入邮箱'));
+      return;
+    }
+    setForgotLoading(true);
+    try {
+      await api.forgotPassword(forgotEmail);
+      setForgotSuccess(t('重置链接已发送，请查收邮件'));
+    } catch (err) {
+      setForgotError(err.message || t('发送重置链接失败'));
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+  // Google OAuth 登录：跳转后端 OAuth 入口，由后端完成 OAuth 流程后回调
+  const handleGoogleLogin = () => {
+    window.location.href = '/api/auth/google';
+  };
+
   React.useEffect(() => {
     if (location.state?.registered && !registeredHandled.current) {
       registeredHandled.current = true;
@@ -184,6 +223,47 @@ export default function Login() {
           </button>
         </form>
 
+        {/* 忘记密码链接：位于登录按钮下方 */}
+        <div style={{ textAlign: 'right', marginTop: '8px' }}>
+          <button
+            type="button"
+            onClick={openForgot}
+            style={{
+              fontSize: '12px',
+              color: 'var(--accent-color)',
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            {t('忘记密码？')}
+          </button>
+        </div>
+
+        {/* 分隔线 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', margin: '16px 0' }}>
+          <div style={{ flex: 1, height: '1px', background: 'var(--border-color)' }} />
+          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('或')}</span>
+          <div style={{ flex: 1, height: '1px', background: 'var(--border-color)' }} />
+        </div>
+
+        {/* Google OAuth 登录按钮：跳转后端 OAuth 入口 */}
+        <button
+          type="button"
+          onClick={handleGoogleLogin}
+          className="btn btn-outline"
+          style={{ width: '100%', justifyContent: 'center', padding: '9px', fontSize: '13px', gap: '8px' }}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" style={{ width: '16px', height: '16px' }}>
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" />
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+          </svg>
+          {t('使用 Google 登录')}
+        </button>
+
         <div style={{ textAlign: 'center', marginTop: '16px' }}>
           <Link to="/register" style={{ fontSize: '13px', color: 'var(--accent-color)', textDecoration: 'none' }}>
             {t('还没有账号？立即注册')}
@@ -204,6 +284,58 @@ export default function Login() {
           {t('首次启动请查看服务日志获取初始管理员密码')}
         </div>
       </div>
+
+      {/* 忘记密码模态框：输入邮箱后调用后端发送重置链接 */}
+      {showForgot && (
+        <div className="modal-overlay" onClick={() => setShowForgot(false)}>
+          <div className="modal" style={{ maxWidth: 380, width: '90%' }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('忘记密码')}</h3>
+              <button className="modal-close" onClick={() => setShowForgot(false)}>&times;</button>
+            </div>
+            <div className="modal-body">
+              {forgotSuccess ? (
+                <div className="success-message">{forgotSuccess}</div>
+              ) : (
+                <>
+                  <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>
+                    {t('输入注册邮箱，我们将发送密码重置链接到您的邮箱')}
+                  </p>
+                  {forgotError && <div className="error-message">{forgotError}</div>}
+                  <form onSubmit={handleForgotSubmit}>
+                    <div className="form-group">
+                      <label htmlFor="forgot-email">{t('邮箱')}</label>
+                      <input
+                        id="forgot-email"
+                        type="email"
+                        className="form-input"
+                        placeholder={t('请输入邮箱')}
+                        value={forgotEmail}
+                        onChange={(e) => setForgotEmail(e.target.value)}
+                        autoFocus
+                        disabled={forgotLoading}
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      className="btn btn-primary"
+                      disabled={forgotLoading}
+                      style={{ width: '100%', justifyContent: 'center', padding: '9px', fontSize: '13px' }}
+                    >
+                      {forgotLoading ? t('发送中...') : t('发送重置链接')}
+                    </button>
+                  </form>
+                </>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setShowForgot(false)}>
+                {forgotSuccess ? t('关闭') : t('取消')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

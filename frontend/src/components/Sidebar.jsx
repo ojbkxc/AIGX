@@ -19,9 +19,12 @@ const navItems = [
   { path: '/epay', labelKey: '易支付', icon: '💳' },
   { path: '/notify', labelKey: '通知设置', icon: '🔔' },
   { path: '/settings', labelKey: '系统设置', icon: '⚙️' },
+  { path: '/playground', labelKey: 'Playground', icon: '🎮' },
+  { path: '/security', labelKey: '安全监控', icon: '🛡️' },
+  { path: '/ip-management', labelKey: 'IP 管理', icon: '🌐' },
 ];
 
-// 分组定义：14 个一级菜单合并为 7 组，减少侧边栏长度。
+// 分组定义：17 个一级菜单合并为 8 组，减少侧边栏长度。
 // 仪表盘与日志审计保持独立（高频/独立职能），其余按职能合并。
 const navGroups = [
   { key: 'top', items: [navItems[0]] }, // 仪表盘
@@ -50,6 +53,12 @@ const navGroups = [
     items: [navItems[7], navItems[8], navItems[9]], // 钱包充值、订单记录、兑换码
   },
   { key: 'logs', items: [navItems[10]] }, // 日志审计
+  {
+    key: 'tools',
+    labelKey: '工具与安全',
+    icon: '🔧',
+    items: [navItems[14], navItems[15], navItems[16]], // Playground、安全监控、IP 管理
+  },
   {
     key: 'system',
     labelKey: '系统设置',
