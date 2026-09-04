@@ -149,6 +149,79 @@ export const api = {
   fetchChannelModels: (data) =>
     request('POST', '/api/channels/fetch_models', data),
 
+  // 渠道对话调试（OpenAI / Anthropic 协议，流式时返回 SSE 事件数组）
+  testChannelChat: async (data) => {
+    const headers = {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    };
+    const res = await fetch(`${BASE_URL}/api/channels/chat_test`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(data),
+    });
+    if (res.status === 401) {
+      handleUnauthorized();
+      throw new Error('Unauthorized');
+    }
+    const contentType = res.headers.get('Content-Type') || '';
+    if (contentType.includes('text/event-stream')) {
+      // 流式：把 SSE 逐条解析为 { content } 增量数组
+      const text = await res.text();
+      const chunks = [];
+      let buf = '';
+      for (const line of text.split('\n')) {
+        const t = line.trim();
+        if (t.startsWith('data:')) {
+          buf += t.slice(5).trim();
+        } else if (t === '') {
+          if (buf && buf !== '[DONE]') {
+            try {
+              const parsed = JSON.parse(buf);
+              const content =
+                (parsed.choices && parsed.choices[0] && parsed.choices[0].delta &&
+                  (parsed.choices[0].delta.content || parsed.choices[0].delta.text)) ||
+                (parsed.delta && parsed.delta.text) ||
+                (parsed.content && parsed.content[0] && parsed.content[0].text) || '';
+              if (content) chunks.push({ content });
+            } catch {
+              // 忽略非 JSON 帧
+            }
+          }
+          buf = '';
+        } else {
+          buf += t;
+        }
+      }
+      if (buf && buf !== '[DONE]') {
+        try {
+          const parsed = JSON.parse(buf);
+          const content =
+            (parsed.choices && parsed.choices[0] && parsed.choices[0].delta &&
+              (parsed.choices[0].delta.content || parsed.choices[0].delta.text)) ||
+            (parsed.delta && parsed.delta.text) ||
+            (parsed.content && parsed.content[0] && parsed.content[0].text) || '';
+          if (content) chunks.push({ content });
+        } catch {
+          // ignore
+        }
+      }
+      return { stream: chunks };
+    }
+    // 非流式：走通用 request 解析
+    const text = await res.text();
+    let data = null;
+    if (text) {
+      try { data = JSON.parse(text); } catch { /* ignore */ }
+    }
+    if (!res.ok) {
+      const errMsg =
+        (data && typeof data === 'object' && (data.error || data.message)) || text || `Request failed with status ${res.status}`;
+      throw new Error(errMsg);
+    }
+    return data;
+  },
+
   // ── 令牌管理增强（功能 2）──
   listTokens: () => request('GET', '/api/tokens'),
   addToken: (data) => request('POST', '/api/tokens', data),

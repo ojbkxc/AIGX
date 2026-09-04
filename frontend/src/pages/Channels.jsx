@@ -4,6 +4,12 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import './Channels.css';
 
+// 支持的对话协议选项 — 与后端 ChatTester 对齐
+const CHAT_PROTOCOLS = [
+  { value: 'openai', labelKey: 'OpenAI /v1/chat/completions' },
+  { value: 'anthropic', labelKey: 'Anthropic /v1/messages' },
+];
+
 // 渠道类型选项 — 与后端 ChannelType 枚举对齐（snake_case）
 const CHANNEL_TYPES = [
   { value: 'cloudflare', labelKey: 'Cloudflare Workers AI', isRaw: true },
@@ -24,6 +30,16 @@ export default function Channels() {
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState(null);
   const [fetchingModels, setFetchingModels] = useState(false);
+
+  // ── 对话调试器状态 ──
+  const [showChat, setShowChat] = useState(false);
+  const [chatChannel, setChatChannel] = useState(null);
+  const [chatProtocol, setChatProtocol] = useState('openai');
+  const [chatModel, setChatModel] = useState('glm-4.7-flash');
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatBusy, setChatBusy] = useState(false);
+  const chatEndRef = React.useRef(null);
 
   function defaultForm() {
     return {
@@ -168,6 +184,104 @@ export default function Channels() {
     }
   };
 
+  // ── 对话调试器 ──
+  const openChat = (ch) => {
+    setChatChannel(ch);
+    setChatProtocol(ch.channel_type === 'anthropic' ? 'anthropic' : 'openai');
+    const models = ch.models || [];
+    setChatModel(models.length ? models[0] : 'glm-4.7-flash');
+    setChatMessages([]);
+    setChatInput('');
+    setShowChat(true);
+  };
+
+  const closeChat = () => {
+    setShowChat(false);
+    setChatChannel(null);
+    setChatMessages([]);
+  };
+
+  const chatModelOptions = () => {
+    const ch = chatChannel;
+    if (!ch) return [];
+    const list = ch.models || [];
+    // cloudflare 渠道：附加 ModelMapper 默认模型（若未在列表中）
+    const extra = ['glm-4.7-flash', 'deepseek-v4-flash-0731'];
+    const merged = list.slice();
+    for (const m of extra) {
+      if (!merged.includes(m)) merged.push(m);
+    }
+    return merged.length ? merged : ['glm-4.7-flash'];
+  };
+
+  const appendChatMessage = (role, content) => {
+    setChatMessages((prev) => [...prev, { role, content }]);
+  };
+
+  const handleChatSend = async () => {
+    const ch = chatChannel;
+    const text = chatInput.trim();
+    if (!ch || !text || chatBusy) return;
+    appendChatMessage('user', text);
+    setChatInput('');
+    setChatBusy(true);
+    try {
+      const history = chatMessages.map((m) => ({ role: m.role, content: m.content }));
+      const res = await api.testChannelChat({
+        channel_id: ch.id,
+        protocol: chatProtocol,
+        model: chatModel,
+        message: text,
+        history,
+        stream: true,
+      });
+      if (res && res.stream) {
+        // 流式：逐增量累积
+        let acc = '';
+        for (const chk of res.stream) {
+          acc += chk.content || '';
+          setChatMessages((prev) => {
+            const next = prev.slice();
+            if (next.length && next[next.length - 1].role === 'assistant') {
+              next[next.length - 1] = { role: 'assistant', content: acc };
+            } else {
+              next.push({ role: 'assistant', content: acc });
+            }
+            return next;
+          });
+        }
+        setChatMessages((prev) => {
+          if (!prev.length || prev[prev.length - 1].role !== 'assistant') {
+            return [...prev, { role: 'assistant', content: acc }];
+          }
+          return prev;
+        });
+      } else {
+        const data = (res && res.data) || {};
+        if (data.content) {
+          appendChatMessage('assistant', data.content);
+        } else if (data.error) {
+          appendChatMessage('assistant', `⚠️ ${data.error}`);
+        }
+      }
+    } catch (err) {
+      appendChatMessage('assistant', `⚠️ ${err.message}`);
+    } finally {
+      setChatBusy(false);
+    }
+  };
+
+  const handleChatKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleChatSend();
+    }
+  };
+
+  React.useEffect(() => {
+    if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [chatMessages]);
+
   // PATCH 部分更新 — 仅传 status 字段，避免脱敏 api_key 覆盖真实密钥
   const handleToggle = async (ch) => {
     try {
@@ -269,10 +383,17 @@ export default function Channels() {
                             <div className="actions-cell">
                               <button
                                 className="btn btn-outline btn-sm"
+                                onClick={() => openChat(ch)}
+                                title={t('对话调试')}
+                              >
+                                {t('对话')}
+                              </button>
+                              <button
+                                className="btn btn-outline btn-sm"
                                 onClick={() => handleTest(ch.id)}
                                 disabled={testingId === ch.id}
                               >
-                                {testingId === ch.id ? '...' : t('测试')}
+                                {testingId === ch.id ? '...' : t('连通')}
                               </button>
                               <button className="btn btn-outline btn-sm" onClick={() => handleToggle(ch)}>
                                 {ch.status === 'enabled' ? t('停用') : t('启用')}
@@ -379,6 +500,74 @@ export default function Channels() {
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
                 {saving ? t('保存中...') : (editChannel ? t('更新') : t('添加'))}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showChat && chatChannel && (
+        <div className="modal-overlay" onClick={closeChat}>
+          <div className="modal modal-chat" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('对话调试')} — {chatChannel.name}</h3>
+              <button className="modal-close" onClick={closeChat}>&times;</button>
+            </div>
+            <div className="modal-body chat-modal-body">
+              <div className="chat-toolbar">
+                <label className="chat-field">
+                  <span>{t('协议')}</span>
+                  <select className="form-input" value={chatProtocol}
+                    onChange={(e) => {
+                      setChatProtocol(e.target.value);
+                      setChatMessages([]);
+                    }}>
+                    {CHAT_PROTOCOLS.map((p) => (
+                      <option key={p.value} value={p.value}>{t(p.labelKey)}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="chat-field">
+                  <span>{t('模型')}</span>
+                  <select className="form-input" value={chatModel}
+                    onChange={(e) => {
+                      setChatModel(e.target.value);
+                      setChatMessages([]);
+                    }}>
+                    {chatModelOptions().map((m) => (
+                      <option key={m} value={m}>
+                        {chatChannel.name} / {m}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="chat-messages">
+                {chatMessages.length === 0 && (
+                  <div className="chat-empty">{t('输入消息开始对话，用于验证当前渠道能否正常对话')}</div>
+                )}
+                {chatMessages.map((m, i) => (
+                  <div key={i} className={`chat-msg chat-msg-${m.role}`}>
+                    <span className="chat-msg-role">{m.role === 'user' ? t('用户') : t('助手')}</span>
+                    <div className="chat-msg-content">{m.content}</div>
+                  </div>
+                ))}
+                {chatBusy && <div className="chat-busy">{t('思考中...')}</div>}
+                <div ref={chatEndRef} />
+              </div>
+              <div className="chat-input-row">
+                <textarea
+                  className="form-input chat-input"
+                  rows="2"
+                  placeholder={t('输入消息，Enter 发送，Shift+Enter 换行')}
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={handleChatKeyDown}
+                  disabled={chatBusy}
+                />
+                <button className="btn btn-primary" onClick={handleChatSend} disabled={chatBusy || !chatInput.trim()}>
+                  {t('发送')}
+                </button>
+              </div>
             </div>
           </div>
         </div>

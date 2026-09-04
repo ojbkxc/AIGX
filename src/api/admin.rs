@@ -4,6 +4,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     Json,
 };
+use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -1919,6 +1920,237 @@ pub async fn handle_fetch_channel_models(
             "count": models.len(),
         }
     })))
+}
+
+// ── 渠道对话调试（Chat Tester）────────────────────────────────────────
+// 在渠道管理页直接向某个渠道发起对话，验证上游能否正常出字。
+// 与 /v1/chat/completions 走完整鉴权/计费链路不同，这里仅校验管理员，
+// 并让前端自由选择协议（openai / anthropic）、模型与消息历史。
+
+#[derive(Debug, Deserialize)]
+pub struct ChannelChatTestRequest {
+    pub channel_id: String,
+    /// 协议：openai（/v1/chat/completions）或 anthropic（/v1/messages）
+    #[serde(default = "default_chat_protocol")]
+    pub protocol: String,
+    /// 要发送的用户消息
+    pub message: String,
+    /// 对话历史（role/content），用于多轮调试
+    #[serde(default)]
+    pub history: Vec<Value>,
+    /// 目标模型（默认取渠道 models[0] 或兜底 glm-4.7-flash）
+    #[serde(default)]
+    pub model: String,
+    /// 是否流式返回（默认 true；流式时以 SSE 原样透传，前端解析增量）
+    #[serde(default = "default_true")]
+    pub stream: bool,
+}
+
+fn default_chat_protocol() -> String {
+    "openai".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 渠道对话调试入口。
+///
+/// 用渠道自身配置（type/base_url/api_key）直连上游，绕过 AIGX 的
+/// 鉴权/定价/计费/调度，专注验证“这个渠道到底能不能对话”。
+/// 返回：
+/// - stream=true：`text/event-stream` SSE（OpenAI/Anthropic 原生增量）
+/// - stream=false：`{success, data:{content, model, usage}}`
+///
+/// 说明：直接透传上游的 HTTP 状态/错误体，便于前端展示原始报错。
+pub async fn handle_channel_chat_test(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ChannelChatTestRequest>,
+) -> Response {
+    if let Err(e) = verify_admin(&state, &headers).await {
+        return e.into_response();
+    }
+
+    let ch = match state.channel_store.get(&body.channel_id) {
+        Some(c) => c,
+        None => {
+            return error_response("channel_not_found", "Channel not found", StatusCode::NOT_FOUND)
+                .into_response()
+        }
+    };
+
+    // 确定目标模型
+    let model = if body.model.trim().is_empty() {
+        ch.models
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "glm-4.7-flash".to_string())
+    } else {
+        body.model.trim().to_string()
+    };
+
+    // 构建消息列表：history + 当前消息
+    let mut messages: Vec<Value> = body.history.clone();
+    messages.push(serde_json::json!({ "role": "user", "content": body.message }));
+
+    let api_key = ch.decode_api_key();
+    let protocol = body.protocol.to_lowercase();
+    let is_anthropic = protocol == "anthropic";
+
+    // 构造上游 URL
+    let base = {
+        let b = if is_anthropic {
+            // Anthropic：base_url 通常不含 /v1（上游根就是 api.anthropic.com）
+            ch.base_url.trim().trim_end_matches('/').to_string()
+        } else {
+            // OpenAI 兼容：归一化补 /v1（与 bridge::openai::normalize_base_url 一致）
+            crate::bridge::openai::normalize_base_url(ch.base_url.trim().to_string())
+        };
+        b
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return error_response(&format!("HTTP client error: {e}"), StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
+        }
+    };
+
+    let stream = body.stream;
+
+    // ── OpenAI 协议 ──
+    if !is_anthropic {
+        let url = format!("{base}/chat/completions");
+        let payload = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "stream": stream,
+        });
+        let mut req = client.post(&url).json(&payload);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(&api_key);
+        }
+        return match req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if !status.is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    return error_response(
+                        &format!("Upstream HTTP {status}: {text}"),
+                        StatusCode::BAD_GATEWAY,
+                    )
+                    .into_response();
+                }
+                if stream {
+                    // 流式：SSE 原样透传
+                    let body = resp.bytes_stream();
+                    let sse = axum::response::sse::Sse::new(
+                        body.map(|chunk| {
+                            chunk.map_err(|e| axum::Error::new(format!("upstream stream error: {e}")))
+                        }),
+                    );
+                    sse.into_response()
+                } else {
+                    match resp.json::<Value>().await {
+                        Ok(json) => {
+                            let content = json
+                                .get("choices")
+                                .and_then(|c| c.get(0))
+                                .and_then(|c| c.get("message"))
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            Json(serde_json::json!({
+                                "success": true,
+                                "data": { "content": content, "model": model, "usage": json.get("usage") }
+                            }))
+                            .into_response()
+                        }
+                        Err(e) => error_response(
+                            &format!("Upstream returned non-JSON: {e}"),
+                            StatusCode::BAD_GATEWAY,
+                        )
+                        .into_response(),
+                    }
+                }
+            }
+            Err(e) => error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
+                .into_response(),
+        };
+    }
+
+    // ── Anthropic 协议 ──
+    let url = format!("{base}/v1/messages");
+    let mut payload = serde_json::json!({
+        "model": model,
+        "max_tokens": 1024,
+        "messages": messages,
+    });
+    if stream {
+        payload["stream"] = serde_json::json!(true);
+    }
+    let mut req = client.post(&url).json(&payload);
+    if !api_key.is_empty() {
+        req = req.header("x-api-key", &api_key);
+    }
+    req = req.header("anthropic-version", "2023-06-01");
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return error_response(
+                    &format!("Upstream HTTP {status}: {text}"),
+                    StatusCode::BAD_GATEWAY,
+                )
+                .into_response();
+            }
+            if stream {
+                let body = resp.bytes_stream();
+                let sse = axum::response::sse::Sse::new(
+                    body.map(|chunk| {
+                        chunk.map_err(|e| axum::Error::new(format!("upstream stream error: {e}")))
+                    }),
+                );
+                sse.into_response()
+            } else {
+                match resp.json::<Value>().await {
+                    Ok(json) => {
+                        let text = json
+                            .get("content")
+                            .and_then(|c| c.as_array())
+                            .and_then(|arr| arr.iter().find(|p| p.get("type").and_then(|t| t.as_str()) == Some("text")))
+                            .and_then(|p| p.get("text"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        Json(serde_json::json!({
+                            "success": true,
+                            "data": {
+                                "content": text,
+                                "model": json.get("model"),
+                                "usage": json.get("usage")
+                            }
+                        }))
+                        .into_response()
+                    }
+                    Err(e) => error_response(
+                        &format!("Upstream returned non-JSON: {e}"),
+                        StatusCode::BAD_GATEWAY,
+                    )
+                    .into_response(),
+                }
+            }
+        }
+        Err(e) => error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
+            .into_response(),
+    }
 }
 
 // ============================================================

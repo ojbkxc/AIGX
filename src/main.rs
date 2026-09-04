@@ -440,6 +440,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/channels/:id", patch(api::admin::handle_patch_channel))
         .route("/api/channels/:id", delete(api::admin::handle_delete_channel))
         .route("/api/channels/:id/test", post(api::admin::handle_test_channel))
+        // 渠道对话调试（OpenAI / Anthropic 协议直连上游验证）
+        .route("/api/channels/chat_test", post(api::admin::handle_channel_chat_test))
         // 令牌管理（增强）
         .route("/api/tokens", get(api::admin::handle_list_tokens))
         .route("/api/tokens", post(api::admin::handle_add_token))

@@ -541,7 +541,7 @@ impl Bridge for OpenaiCompatibleBridge {
 ///
 /// 覆盖 cf-ai-gw（`https://cf-ai-gw.pages.dev`）这类“host 即 OpenAI 兼容根”
 /// 的上游：其真实端点需 `/v1` 前缀（`/v1/chat/completions`）。
-fn normalize_base_url(base_url: String) -> String {
+pub(crate) fn normalize_base_url(base_url: String) -> String {
     let trimmed = base_url.trim_end_matches('/').to_string();
     // 判断 host 之后是否已有路径段（如 /v1、/foo）。scheme 后的首段斜杠用于
     // 分隔 host 与路径；若无额外路径 → 补 /v1，与 OpenAI SDK 约定一致。
