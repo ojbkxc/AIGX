@@ -157,8 +157,8 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!("Failed to load IP filter: {e}");
     }
 
-    // 初始化价格同步服务（多源定价同步，批次3）
-    let price_sync = Arc::new(std::sync::Mutex::new(PriceSyncService::new(
+    // 初始化价格同步服务（多源定价同步，批次3；tokio Mutex 跨 await 持锁）
+    let price_sync = Arc::new(tokio::sync::Mutex::new(PriceSyncService::new(
         pricing_store.clone(),
     )));
 

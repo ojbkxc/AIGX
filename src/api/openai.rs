@@ -80,8 +80,8 @@ pub struct AppState {
     pub alert_store: Arc<crate::storage::FileStore>,
     /// 全局 IP 白名单/黑名单过滤（批次3 IP 管理）
     pub ip_filter: Arc<IpFilterStore>,
-    /// 价格同步服务（批次3 多源定价同步）
-    pub price_sync: Arc<std::sync::Mutex<PriceSyncService>>,
+    /// 价格同步服务（批次3 多源定价同步；tokio Mutex 以便跨 await 持锁）
+    pub price_sync: Arc<tokio::sync::Mutex<PriceSyncService>>,
     /// 汇率服务（批次4 多币种转换）
     pub exchange_rate: Arc<ExchangeRateService>,
     /// 公开注册速率限制器（per-IP 计数缓存）。

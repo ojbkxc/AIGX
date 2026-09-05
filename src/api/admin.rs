@@ -5125,7 +5125,7 @@ pub async fn handle_get_price_sync_config(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    let svc = state.price_sync.lock().unwrap();
+    let svc = state.price_sync.lock().await;
     let cfg = svc.config();
     let last_sync = svc.last_remote_sync().map(|t| t.to_rfc3339());
     Ok(Json(serde_json::json!({
@@ -5155,7 +5155,7 @@ pub async fn handle_update_price_sync_config(
     Json(body): Json<UpdatePriceSyncConfigRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    let mut svc = state.price_sync.lock().unwrap();
+    let mut svc = state.price_sync.lock().await;
     if let Some(v) = body.enabled {
         svc.set_remote_sync_enabled(v);
     }
@@ -5179,17 +5179,20 @@ pub async fn handle_trigger_price_sync(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    // 先锁住服务，跨 await 期间 guard 存活会导致 future 非 Send；
-    // 用块作用域包裹 sync_all(true).await，让 guard 在 await 后立即释放。
-    let result = {
-        let mut svc = state.price_sync.lock().unwrap();
-        svc.sync_all(true).await.map_err(|e| {
+    // tokio::sync::Mutex 可跨 await 持锁（MutexGuard 是 Send），
+    // 直接调用 sync_all(true).await
+    let result = state
+        .price_sync
+        .lock()
+        .await
+        .sync_all(true)
+        .await
+        .map_err(|e| {
             error_response(
                 &format!("Price sync failed: {e}"),
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
-        })?
-    };
+        })?;
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
