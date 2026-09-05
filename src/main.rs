@@ -54,12 +54,15 @@ use channel::ChannelStore;
 use config::ConfigManager;
 use health::{HealthTracker, LivezState};
 use hub::Hub;
+use ip::IpFilterStore;
 use log::LogStore;
 use model::ModelMapper;
 use notify::NotifyService;
 use payment::order_store::OrderStore;
 use payment::stripe::StripeClient;
 use payment::EpayClient;
+use pricing::exchange_rate::ExchangeRateService;
+use pricing::price_sync::PriceSyncService;
 use pricing::PricingStore;
 use proxy::CfApiClient;
 use ratelimit::RateLimiter;
@@ -146,6 +149,20 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化模型定价目录
     let pricing_store = Arc::new(PricingStore::new(store.clone()));
+
+    // 初始化全局 IP 过滤（白名单/黑名单，批次3）
+    let ip_filter = Arc::new(IpFilterStore::new(store.clone()));
+    if let Err(e) = ip_filter.load() {
+        tracing::error!("Failed to load IP filter: {e}");
+    }
+
+    // 初始化价格同步服务（多源定价同步，批次3）
+    let price_sync = Arc::new(std::sync::Mutex::new(PriceSyncService::new(
+        pricing_store.clone(),
+    )));
+
+    // 初始化汇率服务（多币种转换，批次4）
+    let exchange_rate = Arc::new(ExchangeRateService::with_store(store.clone()));
 
     // 初始化用户分组存储
     let user_group_store = Arc::new(UserGroupStore::new(store.clone()));
@@ -269,6 +286,9 @@ async fn main() -> anyhow::Result<()> {
         notify_service,
         alert_evaluator,
         alert_store: store.clone(),
+        ip_filter,
+        price_sync,
+        exchange_rate,
         register_limiter,
         login_limiter,
         login_failures,
@@ -499,6 +519,46 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/channels/:id/reset-circuit",
             post(api::admin::handle_reset_channel_circuit),
+        )
+        // 批次3/4：IP 过滤管理（前端 IpManagement 页）
+        .route("/api/ip/filter", get(api::admin::handle_get_ip_filter))
+        .route("/api/ip/filter", put(api::admin::handle_update_ip_filter))
+        .route(
+            "/api/ip/whitelist",
+            post(api::admin::handle_add_ip_whitelist),
+        )
+        .route(
+            "/api/ip/blacklist",
+            post(api::admin::handle_add_ip_blacklist),
+        )
+        .route(
+            "/api/ip/whitelist/:pattern",
+            delete(api::admin::handle_remove_ip_whitelist),
+        )
+        .route(
+            "/api/ip/blacklist/:pattern",
+            delete(api::admin::handle_remove_ip_blacklist),
+        )
+        // 批次3/4：价格同步 + 汇率（前端 Settings 页）
+        .route(
+            "/api/pricing/sync-config",
+            get(api::admin::handle_get_price_sync_config),
+        )
+        .route(
+            "/api/pricing/sync-config",
+            put(api::admin::handle_update_price_sync_config),
+        )
+        .route(
+            "/api/pricing/sync",
+            post(api::admin::handle_trigger_price_sync),
+        )
+        .route(
+            "/api/pricing/exchange-rates",
+            get(api::admin::handle_get_exchange_rates),
+        )
+        .route(
+            "/api/pricing/exchange-rates",
+            put(api::admin::handle_update_exchange_rates),
         )
         .route("/api/channels/:id", put(api::admin::handle_update_channel))
         .route("/api/channels/:id", patch(api::admin::handle_patch_channel))

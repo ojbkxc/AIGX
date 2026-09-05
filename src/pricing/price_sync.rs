@@ -333,6 +333,33 @@ impl PriceSyncService {
         self.last_remote_sync
     }
 
+    // ── 配置访问器/设置器（供管理 API 用） ─────────────────────────
+
+    /// 获取当前配置快照。
+    pub fn config(&self) -> &PriceSyncConfig {
+        &self.config
+    }
+
+    /// 设置是否启用远程同步。
+    pub fn set_remote_sync_enabled(&mut self, enabled: bool) {
+        self.config.remote_sync_enabled = enabled;
+    }
+
+    /// 设置远程定价 URL。
+    pub fn set_remote_url(&mut self, url: String) {
+        self.config.remote_url = url;
+    }
+
+    /// 设置回退 URL。
+    pub fn set_remote_url_fallback(&mut self, url: Option<String>) {
+        self.config.remote_url_fallback = url;
+    }
+
+    /// 设置远程同步间隔（秒）。
+    pub fn set_remote_sync_interval(&mut self, secs: u64) {
+        self.config.remote_sync_interval_secs = secs;
+    }
+
     /// 启动后台周期同步任务（每小时检查一次）。
     pub fn start_periodic_sync(self: Arc<Self>, interval_secs: u64) {
         tokio::spawn(async move {

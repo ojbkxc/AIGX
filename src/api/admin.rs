@@ -4984,3 +4984,271 @@ pub async fn handle_check_username(
         "data": { "available": !exists }
     })))
 }
+
+// ============================================================
+// 批次3/4 补齐：IP 过滤 + 价格同步 + 汇率管理 API
+// （此前前端已调用这些端点但后端未实现，属前后端契约断裂）
+// ============================================================
+
+/// GET /api/ip/filter - 获取全局 IP 过滤配置
+pub async fn handle_get_ip_filter(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let filter = state.ip_filter.get();
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "enabled": filter.enabled,
+            "whitelist": filter.whitelist,
+            "blacklist": filter.blacklist,
+        }
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateIpFilterRequest {
+    pub enabled: Option<bool>,
+}
+
+/// PUT /api/ip/filter - 更新 IP 过滤开关
+pub async fn handle_update_ip_filter(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateIpFilterRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    if let Some(enabled) = body.enabled {
+        state.ip_filter.set_enabled(enabled).map_err(|e| {
+            error_response(
+                &format!("Failed to update IP filter: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+    }
+    Ok(Json(serde_json::json!({ "success": true, "data": null })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddIpRuleRequest {
+    pub pattern: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// POST /api/ip/whitelist - 添加白名单规则
+pub async fn handle_add_ip_whitelist(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AddIpRuleRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    if body.pattern.trim().is_empty() {
+        return Err(error_response(
+            "pattern is required",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    state
+        .ip_filter
+        .add_whitelist(body.pattern.trim(), body.note.trim())
+        .map_err(|e| {
+            error_response(
+                &format!("Failed to add whitelist: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+    Ok(Json(serde_json::json!({ "success": true, "data": null })))
+}
+
+/// POST /api/ip/blacklist - 添加黑名单规则
+pub async fn handle_add_ip_blacklist(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AddIpRuleRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    if body.pattern.trim().is_empty() {
+        return Err(error_response(
+            "pattern is required",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    state
+        .ip_filter
+        .add_blacklist(body.pattern.trim(), body.note.trim())
+        .map_err(|e| {
+            error_response(
+                &format!("Failed to add blacklist: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+    Ok(Json(serde_json::json!({ "success": true, "data": null })))
+}
+
+/// DELETE /api/ip/whitelist/:pattern - 移除白名单规则
+pub async fn handle_remove_ip_whitelist(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(pattern): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    state.ip_filter.remove_whitelist(&pattern).map_err(|e| {
+        error_response(
+            &format!("Failed to remove whitelist: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "success": true, "data": null })))
+}
+
+/// DELETE /api/ip/blacklist/:pattern - 移除黑名单规则
+pub async fn handle_remove_ip_blacklist(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(pattern): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    state.ip_filter.remove_blacklist(&pattern).map_err(|e| {
+        error_response(
+            &format!("Failed to remove blacklist: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "success": true, "data": null })))
+}
+
+/// GET /api/pricing/sync-config - 获取价格同步配置
+pub async fn handle_get_price_sync_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let cfg = &state.price_sync.lock().unwrap().config();
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "enabled": cfg.remote_sync_enabled,
+            "sync_url": cfg.remote_url,
+            "sync_url_fallback": cfg.remote_url_fallback,
+            "interval_secs": cfg.remote_sync_interval_secs,
+            "last_sync": state.price_sync.lock().unwrap().last_remote_sync().map(|t| t.to_rfc3339()),
+        }
+    })))
+}
+
+/// PUT /api/pricing/sync-config - 更新价格同步配置
+#[derive(Debug, Deserialize)]
+pub struct UpdatePriceSyncConfigRequest {
+    pub enabled: Option<bool>,
+    pub sync_url: Option<String>,
+    pub sync_url_fallback: Option<String>,
+    pub interval_secs: Option<u64>,
+}
+
+pub async fn handle_update_price_sync_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<UpdatePriceSyncConfigRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let mut svc = state.price_sync.lock().unwrap();
+    if let Some(v) = body.enabled {
+        svc.set_remote_sync_enabled(v);
+    }
+    if let Some(v) = body.sync_url {
+        if !v.trim().is_empty() {
+            svc.set_remote_url(v);
+        }
+    }
+    if let Some(v) = body.sync_url_fallback {
+        svc.set_remote_url_fallback(Some(v));
+    }
+    if let Some(v) = body.interval_secs {
+        svc.set_remote_sync_interval(v);
+    }
+    Ok(Json(serde_json::json!({ "success": true, "data": null })))
+}
+
+/// POST /api/pricing/sync - 手动触发价格同步
+pub async fn handle_trigger_price_sync(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let result = state
+        .price_sync
+        .lock()
+        .unwrap()
+        .sync_all(true)
+        .await
+        .map_err(|e| {
+            error_response(
+                &format!("Price sync failed: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "models_synced": result.models_synced,
+            "errors": result.errors,
+            "source": result.source,
+        }
+    })))
+}
+
+/// GET /api/pricing/exchange-rates - 获取全部汇率（扁平对象：{CNY: 7.2, ...}）
+pub async fn handle_get_exchange_rates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    // 返回 {币种: 相对 USD 的汇率}，USD 恒为 1.0
+    let mut map = serde_json::Map::new();
+    map.insert("USD".to_string(), serde_json::json!(1.0));
+    for (from, to, rate, _updated) in state.exchange_rate.list_rates() {
+        if from.code() == "USD" {
+            map.insert(to.code().to_string(), serde_json::json!(rate));
+        }
+    }
+    Ok(Json(serde_json::json!({ "success": true, "data": map })))
+}
+
+/// PUT /api/pricing/exchange-rates - 更新汇率（扁平对象：{CNY: 7.2, ...}）
+pub async fn handle_update_exchange_rates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<HashMap<String, f64>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    for (currency, rate) in &body {
+        if currency == "USD" {
+            continue; // USD 是基准，忽略
+        }
+        if rate <= &0.0 {
+            return Err(error_response(
+                "rate must be positive",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        let cur: crate::pricing::exchange_rate::Currency =
+            currency
+                .parse()
+                .map_err(|e: crate::pricing::exchange_rate::CurrencyParseError| {
+                    error_response(&format!("invalid currency: {e}"), StatusCode::BAD_REQUEST)
+                })?;
+        // 存储 USD -> 该币种 的汇率（1 USD = rate 币种）
+        state
+            .exchange_rate
+            .set_rate_persisted(crate::pricing::exchange_rate::Currency::Usd, cur, *rate)
+            .map_err(|e| {
+                error_response(
+                    &format!("Failed to persist rate: {e}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+            })?;
+    }
+    Ok(Json(serde_json::json!({ "success": true, "data": null })))
+}

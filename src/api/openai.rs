@@ -22,10 +22,13 @@ use crate::channel::ChannelStore;
 use crate::config::ConfigManager;
 use crate::health::{HealthTracker, LivezState};
 use crate::hub::Hub;
+use crate::ip::IpFilterStore;
 use crate::log::LogStore;
 use crate::model::ModelMapper;
 use crate::notify::NotifyService;
 use crate::payment::order_store::OrderStore;
+use crate::pricing::exchange_rate::ExchangeRateService;
+use crate::pricing::price_sync::PriceSyncService;
 use crate::pricing::PricingStore;
 use crate::proxy::CfApiClient;
 use crate::ratelimit::RateLimiter;
@@ -75,6 +78,12 @@ pub struct AppState {
     pub alert_evaluator: std::sync::Arc<std::sync::Mutex<crate::notify::alert::AlertRuleEvaluator>>,
     /// 底层 FileStore（告警规则/历史持久化等轻量 KV 用）
     pub alert_store: Arc<crate::storage::FileStore>,
+    /// 全局 IP 白名单/黑名单过滤（批次3 IP 管理）
+    pub ip_filter: Arc<IpFilterStore>,
+    /// 价格同步服务（批次3 多源定价同步）
+    pub price_sync: Arc<std::sync::Mutex<PriceSyncService>>,
+    /// 汇率服务（批次4 多币种转换）
+    pub exchange_rate: Arc<ExchangeRateService>,
     /// 公开注册速率限制器（per-IP 计数缓存）。
     ///
     /// key=客户端 IP，value=当前 60 秒窗口内已发起的注册请求数。
@@ -178,6 +187,16 @@ fn verify_api_key_full(
     let key = extract_api_key(headers)
         .ok_or_else(|| error_response("auth_error", "Missing API key", StatusCode::UNAUTHORIZED))?;
     let ip = extract_client_ip(headers);
+    // 全局 IP 过滤（批次3）：白名单/黑名单优先于 token 级校验
+    if let Some(ip_str) = ip.as_deref() {
+        if let Err(ip_err) = crate::ip::check_ip(&state.ip_filter.get(), ip_str) {
+            return Err(error_response(
+                "ip_blocked",
+                &ip_err.to_string(),
+                StatusCode::FORBIDDEN,
+            ));
+        }
+    }
     // B22：按结构化错误变体映射状态码，取代原先的 msg.contains(...) 文本匹配
     state
         .api_key_store
