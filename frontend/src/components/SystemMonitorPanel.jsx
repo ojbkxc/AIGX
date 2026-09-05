@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { api as networkApi } from '../api/network';
+import * as networkApi from '../api/network';
 import { Metrics } from '../types/network';
-import SystemMonitorPanel.css';
+import './SystemMonitorPanel.css';
 import { Signal, Activity, Server, Database, Cloud, Percent, Zap } from 'lucide-react';
 
 function MetricCard({ title, value, extra, color }) {
