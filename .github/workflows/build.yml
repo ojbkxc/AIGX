@@ -63,6 +63,7 @@ jobs:
 
       - name: Build Linux AMD64
         run: |
+          mkdir -p build/2024-Linux-x86_64
           cross build --release --target x86_64-unknown-linux-gnu
           mv target/x86_64-unknown-linux-gnu/release/aigx build/2024-Linux-x86_64/aigx
 
@@ -111,6 +112,9 @@ jobs:
       - name: Add ARM64 target
         run: rustup target add aarch64-unknown-linux-gnu
 
+      - name: Install aarch64 strip
+        run: sudo apt-get install -y binutils-aarch64-linux-gnu
+
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
@@ -130,7 +134,7 @@ jobs:
 
       - name: Strip binary
         run: |
-          strip build/2024-Linux-arm64/aigx
+          aarch64-linux-gnu-strip build/2024-Linux-arm64/aigx
           file build/2024-Linux-arm64/aigx
 
       - name: Upload ARM64 artifact
@@ -178,6 +182,7 @@ jobs:
           key: ${{ runner.os }}-cargo-win-amd64-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build Windows AMD64
+        shell: cmd
         run: |
           cargo build --release --target x86_64-pc-windows-gnu
           if not exist build mkdir build
@@ -229,6 +234,7 @@ jobs:
 
       - name: Build macOS Intel
         run: |
+          rustup target add x86_64-apple-darwin
           cargo build --release --target x86_64-apple-darwin
           mkdir -p build/2024-macOS-x86_64
           cp target/x86_64-apple-darwin/release/aigx build/2024-macOS-x86_64/aigx
@@ -280,10 +286,10 @@ jobs:
 
       - name: Build macOS Apple Silicon
         run: |
+          mkdir -p build/2024-macOS-arm64
           cargo build --release --target aarch64-apple-darwin
-          if not exist build mkdir build
-          if not exist build\2024-macOS-arm64 mkdir build\2024-macOS-arm64
-          copy target\aarch64-apple-darwin\release\aigx build\2024-macOS-arm64\aigx
+          cp target/aarch64-apple-darwin/release/aigx build/2024-macOS-arm64/aigx
+          strip build/2024-macOS-arm64/aigx
 
       - name: Upload macOS ARM64 artifact
         uses: actions/upload-artifact@v4

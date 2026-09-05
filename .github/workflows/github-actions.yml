@@ -71,6 +71,9 @@ jobs:
       - name: Add ARM64 target
         run: rustup target add aarch64-unknown-linux-gnu
 
+      - name: Install aarch64 strip
+        run: sudo apt-get install -y binutils-aarch64-linux-gnu
+
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
@@ -87,7 +90,7 @@ jobs:
           cargo build --release --target aarch64-unknown-linux-gnu --no-default-features
           mkdir -p build/2024-Linux-arm64
           mv target/aarch64-unknown-linux-gnu/release/aigx build/2024-Linux-arm64/
-          strip build/2024-Linux-arm64/aigx
+          aarch64-linux-gnu-strip build/2024-Linux-arm64/aigx
           file build/2024-Linux-arm64/aigx
 
       - uses: actions/upload-artifact@v4
@@ -158,6 +161,7 @@ jobs:
 
       - name: Build macOS Intel
         run: |
+          rustup target add x86_64-apple-darwin
           cargo build --release --target x86_64-apple-darwin --no-default-features
           mkdir -p build/2024-macOS-x86_64
           cp target/x86_64-apple-darwin/release/aigx build/2024-macOS-x86_64/
