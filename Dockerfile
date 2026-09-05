@@ -52,14 +52,23 @@ RUN useradd -r -u 1000 -g nogroup -s /sbin/nologin -d /app aigx && \
     mkdir -p /app/data /app/logs /app/config && \
     chown -R aigx:nogroup /app
 
+# 默认配置：容器内必须监听 0.0.0.0，否则端口映射失效
+# （应用配置来自 ~/.aigx/config.toml，未提供环境变量覆盖）
+RUN mkdir -p /app/.aigx && \
+    printf '[server]\nhost = "0.0.0.0"\nport = 8080\n' > /app/.aigx/config.toml && \
+    chown -R aigx:nogroup /app/.aigx
+
 USER aigx
 
-# 暴露端口
-EXPOSE 9527
+# 确保 HOME 指向 aigx 用户目录（配置与数据均位于 /app/.aigx）
+ENV HOME=/app
+
+# 暴露端口（与 Rust 默认监听端口一致，可由 ~/.aigx/config.toml 覆盖）
+EXPOSE 8080
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --spider -q http://localhost:9527/healthz || exit 1
+    CMD wget --spider -q http://localhost:8080/livez || exit 1
 
 # 启动应用
 CMD ["./aigx"]

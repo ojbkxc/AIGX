@@ -15,12 +15,13 @@ services:
     platform: "${PLATFORM:-linux/amd64}"
 
     ports:
-      - "9527:9527"
+      - "9527:8080"
 
     volumes:
       # 持久化数据
-      - aigx_data:/aigx/data
-      - aigx_logs:/aigx/logs
+      # 注意：仅挂载数据目录，避免覆盖镜像内置的 /app/.aigx/config.toml
+      - aigx_data:/app/.aigx/data
+      - aigx_logs:/app/logs
 
     # 网络配置
     networks:
@@ -38,9 +39,11 @@ services:
 
     # 环境变量
     environment:
+      # 注意：应用配置实际读取 ~/.aigx/config.toml（容器内 /app/.aigx/config.toml），
+      # 以下变量为部署文档用途，端口已与镜像默认 8080 对齐。
       # 服务器配置
       - SERVER_HOST=0.0.0.0
-      - SERVER_PORT=9527
+      - SERVER_PORT=8080
       - WORKER_COUNT=4
 
       # 数据库配置 - SQLite (默认)
@@ -78,7 +81,7 @@ services:
 
     # 健康检查
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9527/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/livez"]
       interval: 30s
       timeout: 10s
       retries: 3
