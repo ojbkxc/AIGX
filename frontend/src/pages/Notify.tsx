@@ -1,8 +1,4 @@
-import React, { useState } from 'react';
-
-interface NotifyProps {
-  children?: React.ReactNode;
-}
+import { useState } from 'react';
 
 export default function Notify(): JSX.Element {
   const [telegramConfig, setTelegramConfig] = useState({ apiKey: '', chatId: '' });

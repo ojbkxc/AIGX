@@ -2,28 +2,6 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../api';
 
-interface LoginFormData {
-  email: string;
-  password: string;
-}
-
-interface ForgotPasswordFormData {
-  email: string;
-}
-
-interface LoginPageState {
-  email: string;
-  password: string;
-  error: string;
-  success: string;
-  loading: boolean;
-  showForgot: boolean;
-  forgotEmail: string;
-  forgotLoading: boolean;
-  forgotError: string;
-  forgotSuccess: string;
-}
-
 export default function Login(): JSX.Element {
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
@@ -74,14 +52,15 @@ export default function Login(): JSX.Element {
   };
 
   useEffect(() => {
-    if (location.state?.registered && !registeredHandled.current) {
+    const state = location.state as { registered?: boolean; email?: string } | null;
+    if (state?.registered && !registeredHandled.current) {
       registeredHandled.current = true;
       setSuccess('注册成功，请登录');
-      setEmail(location.state.email || '');
+      setEmail(state.email || '');
       // 清除 state 防止重复提示
       window.history.replaceState({}, document.title);
     }
-  }, [location, t]);
+  }, [location]);
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();

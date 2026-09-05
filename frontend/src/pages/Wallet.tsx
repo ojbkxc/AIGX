@@ -1,9 +1,5 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api';
-
-interface WalletProps {
-  children?: React.ReactNode;
-}
 
 export default function Wallet(): JSX.Element {
   const [balance, setBalance] = useState<number>(0);

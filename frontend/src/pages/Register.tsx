@@ -2,12 +2,6 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 
-interface RegisterFormData {
-  username: string;
-  email: string;
-  password: string;
-}
-
 export default function Register(): JSX.Element {
   const [username, setUsername] = useState<string>('');
   const [email, setEmail] = useState<string>('');

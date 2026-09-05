@@ -1,9 +1,5 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api';
-
-interface OrdersProps {
-  children?: React.ReactNode;
-}
 
 export default function Orders(): JSX.Element {
   const [orders, setOrders] = useState<Order[]>([]);

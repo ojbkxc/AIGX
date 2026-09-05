@@ -1,9 +1,5 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api';
-
-interface MappingsProps {
-  children?: React.ReactNode;
-}
 
 export default function Mappings(): JSX.Element {
   const [mappings, setMappings] = useState<any[]>([]);

@@ -734,8 +734,6 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/keys", get(api::admin::handle_list_keys))
         .route("/api/keys", post(api::admin::handle_add_key))
         .route("/api/keys/:id", delete(api::admin::handle_delete_key))
-        .route("/api/limits", get(api::admin::handle_get_limits))
-        .route("/api/limits", put(api::admin::handle_update_limits))
         .route("/api/tokens/:id/rotate", post(api::admin::handle_rotate_token))
         // 网络层管理路由（新增 AIGX Network Layer）
         .route("/api/network/status", get(api::admin::health_check))

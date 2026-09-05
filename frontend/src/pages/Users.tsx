@@ -1,9 +1,5 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import type { User } from '../types';
-
-interface UsersProps {
-  children?: React.ReactNode;
-}
 
 export default function Users(): JSX.Element {
   // 状态定义

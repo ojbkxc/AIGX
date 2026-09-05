@@ -1,9 +1,5 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import type { Channel } from '../types';
-
-interface ChannelsProps {
-  children?: React.ReactNode;
-}
 
 export default function Channels(): JSX.Element {
   // 状态定义

@@ -1,9 +1,5 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api';
-
-interface PricingProps {
-  children?: React.ReactNode;
-}
 
 export default function Pricing(): JSX.Element {
   const [prices, setPrices] = useState<any[]>([]);

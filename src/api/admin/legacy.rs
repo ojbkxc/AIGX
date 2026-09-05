@@ -2561,6 +2561,7 @@ pub async fn handle_update_exchange_rates(
             })?;
     }
     Ok(Json(serde_json::json!({ "success": true, "data": null })))
+}
 
 
 // ============================================================

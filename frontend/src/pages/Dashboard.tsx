@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 
 // Dashboard 类型定义
 interface DashboardUsage {
@@ -41,7 +41,10 @@ interface UserRanking {
   email?: string;
   username?: string;
   request_count?: number;
+  requests?: number;
+  count?: number;
   total_tokens?: number;
+  tokens?: number;
   total_cost?: number;
 }
 
@@ -68,23 +71,14 @@ interface RealtimeStats {
   avg_latency_ms?: number;
 }
 
-// 工具函数类型定义
-interface DaysFormatter {
-  (val: number | null | undefined): string;
-}
-
 // 趋势图表组件 Props
 interface TrendChartProps {
-  TrendData[];
+  data: TrendData[];
 }
 
 // 饼图组件 Props
 interface PieChartProps {
-  ModelDist[];
-}
-
-interface DashboardProps {
-  children?: React.ReactNode;
+  data: ModelDist[];
 }
 
 /**
@@ -104,13 +98,9 @@ export default function Dashboard(): JSX.Element {
   const [channelHealth, setChannelHealth] = useState<ChannelHealth[]>([]);
   const [realtime, setRealtime] = useState<RealtimeStats>({});
 
-  /**
-   * 增强看板数据
-   */
-  const [realtimeData, setRealtimeData] = useState<DashboardProps>();
   const [consumptionTrendData, setConsumptionTrendData] = useState<TrendData[]>();
   const [modelDistributionData, setModelDistributionData] = useState<ModelDist[]>();
-  const [userRankingData, setUserRankingData] = useState<UserRanking[]>();
+  const [userRankingData, setUserRankingData] = useState<UserRanking[]>([]);
   const [channelHealthData, setChannelHealthData] = useState<ChannelHealth[]>();
 
   // 数据加载函数（占位）
@@ -153,8 +143,11 @@ export default function Dashboard(): JSX.Element {
 
   // 计算显示数值
   const todayTokens = tokenStats?.total_tokens || 0;
+  const inputTokens = tokenStats?.input_tokens || 0;
+  const outputTokens = tokenStats?.output_tokens || 0;
   const monthlyUsed = limits?.monthly_used || 0;
   const monthlyLimit = limits?.monthly_limit;
+  const usageSafe = usage ?? { total_tokens: 0, total_input_tokens: 0, total_output_tokens: 0 };
 
   const monthlyPct = monthlyLimit && monthlyLimit > 0 ? Math.min(100, (monthlyUsed / monthlyLimit) * 100) : null;
 
@@ -180,7 +173,7 @@ export default function Dashboard(): JSX.Element {
             <div className="stat-title">实时 RPS</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#34d399' }}>⚡</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '24px' }}>{': getFmtLimit(realtime.qps ?? 'rt.rps' ?? 0)')}</div>
+          <div className="stat-value" style={{ fontSize: '24px' }}>{getFmtLimit(realtime.qps ?? realtime.rps ?? 0)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>每秒请求数</div>
         </div>
 
@@ -189,7 +182,7 @@ export default function Dashboard(): JSX.Element {
             <div className="stat-title">活跃用户</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8' }}>👥</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '24px' }}>{': getFmtLimit(userRanking.length)')}</div>
+          <div className="stat-value" style={{ fontSize: '24px' }}>{getFmtLimit(userRanking.length)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>近 5 分钟</div>
         </div>
 
@@ -198,7 +191,7 @@ export default function Dashboard(): JSX.Element {
             <div className="stat-title">活跃渠道</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc' }}>🔗</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '24px' }}>{': getFmtLimit(channelHealth.length)')}</div>
+          <div className="stat-value" style={{ fontSize: '24px' }}>{getFmtLimit(channelHealth.length)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>在线渠道数</div>
         </div>
 
@@ -207,7 +200,7 @@ export default function Dashboard(): JSX.Element {
             <div className="stat-title">平均延迟</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(251, 146, 60, 0.15)', color: '#fb923c' }}>⏱️</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '24px' }}>{': getFmtLimit(realtime.avg_latency_ms || 0)}ms'</div>
+          <div className="stat-value" style={{ fontSize: '24px' }}>{getFmtLimit(realtime.avg_latency_ms || 0)}ms</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>近 5 分钟平均</div>
         </div>
       </div>
@@ -219,10 +212,10 @@ export default function Dashboard(): JSX.Element {
             <div className="stat-title">今日用量</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8' }}>📊</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '26px' }}>{': getFmtTok(todayTokens)')}</div>
+          <div className="stat-value" style={{ fontSize: '26px' }}>{getFmtTok(todayTokens)}</div>
           <div className="stat-desc" style={{ display: 'flex', gap: '16px', fontSize: '11px' }}>
-            <span>↑ 输入 {': getFmtTok(inputTokens)'}</span>
-            <span>↓ 输出 {': getFmtTok(outputTokens)'}</span>
+          <span>↑ 输入 {getFmtTok(inputTokens)}</span>
+          <span>↓ 输出 {getFmtTok(outputTokens)}</span>
           </div>
         </div>
 
@@ -231,10 +224,10 @@ export default function Dashboard(): JSX.Element {
             <div className="stat-title">Token 统计</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc' }}>🔤</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '26px' }}>{': getFmtTok(usage.total_tokens)')}</div>
+          <div className="stat-value" style={{ fontSize: '26px' }}>{getFmtTok(usageSafe.total_tokens)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>
-            <div>输入: {': getFmtTok(usage.total_input_tokens)'}</div>
-            <div>输出: {': getFmtTok(usage.total_output_tokens)'}</div>
+          <div>输入: {getFmtTok(usageSafe.total_input_tokens)}</div>
+          <div>输出: {getFmtTok(usageSafe.total_output_tokens)}</div>
           </div>
         </div>
 
@@ -243,9 +236,9 @@ export default function Dashboard(): JSX.Element {
             <div className="stat-title">本月用量限额</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399' }}>📅</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '26px' }}>{monthlyLimit != null ? ': getFmtLimit(monthlyLimit)' : '∞'}</div>
+          <div className="stat-value" style={{ fontSize: '26px' }}>{monthlyLimit != null ? getFmtLimit(monthlyLimit) : '∞'}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>
-            <span>已用 {': getFmtTok(monthlyUsed)'}</span>
+          <span>已用 {getFmtTok(monthlyUsed)}</span>
             {monthlyPct != null && <span style={{ marginLeft: 12 }}>{monthlyPct.toFixed(1)}%</span>}
           </div>
         </div>
@@ -305,8 +298,8 @@ export default function Dashboard(): JSX.Element {
                       <tr key={i}>
                         <td style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
                         <td>{r.email || `User#${r.user_id}`}</td>
-                        <td>{': getFmtLimit(r.request_count || r.requests || r.count || 0)'}</td>
-                        <td>{': getFmtTok(r.total_tokens || r.tokens || 0)'}</td>
+          <td>{getFmtLimit(r.request_count || r.requests || r.count || 0)}</td>
+          <td>{getFmtTok(r.total_tokens || r.tokens || 0)}</td>
                       </tr>
                     ))}
                   </tbody>

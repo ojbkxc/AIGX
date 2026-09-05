@@ -1,9 +1,5 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api';
-
-interface PlaygroundProps {
-  children?: React.ReactNode;
-}
 
 interface PlaygroundMessage {
   role: 'user' | 'assistant' | 'system';

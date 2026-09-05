@@ -1,9 +1,5 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api';
-
-interface SecurityProps {
-  children?: React.ReactNode;
-}
 
 export default function Security(): JSX.Element {
   const [incidents, setIncidents] = useState<any[]>([]);

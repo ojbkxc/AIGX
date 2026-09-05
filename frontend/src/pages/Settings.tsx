@@ -1,9 +1,5 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api';
-
-interface SettingsProps {
-  children?: React.ReactNode;
-}
 
 export default function Settings(): JSX.Element {
   const [usage, setUsage] = useState<TokenStats | null>(null);

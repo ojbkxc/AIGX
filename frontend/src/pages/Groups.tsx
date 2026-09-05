@@ -1,9 +1,5 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api';
-
-interface GroupsProps {
-  children?: React.ReactNode;
-}
 
 export default function Groups(): JSX.Element {
   const [groups, setGroups] = useState<any[]>([]);

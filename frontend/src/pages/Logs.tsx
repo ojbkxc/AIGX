@@ -1,9 +1,5 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api';
-
-interface LogsProps {
-  children?: React.ReactNode;
-}
 
 export default function Logs(): JSX.Element {
   const [logs, setLogs] = useState<any[]>([]);

@@ -329,9 +329,9 @@ export interface FormValues<T> {
   isSubmitting: boolean;
 }
 
-export interface FormErrors<T> {
+export type FormErrors<T> = {
   [K in keyof T]?: string[];
-}
+};
 
 // ============================================================================
 // 图表数据类型

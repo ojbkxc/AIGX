@@ -1,9 +1,5 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { api } from '../api';
-
-interface EpayProps {
-  children?: React.ReactNode;
-}
 
 export default function Epay(): JSX.Element {
   const [config, setConfig] = useState<EpayConfig>({
