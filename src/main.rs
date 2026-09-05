@@ -16,6 +16,7 @@ mod hub;
 mod log;
 mod metrics;
 mod model;
+mod monitor;
 mod notify;
 mod oauth;
 mod payment;
@@ -638,6 +639,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/playground/chat",
             post(api::admin::handle_playground_chat),
+        )
+        // 批次6：系统监控（CPU/内存/负载/进程，参照 burncloud monitor collectors）
+        .route(
+            "/api/monitor/system",
+            get(api::admin::handle_monitor_system),
         )
         // Prometheus 指标（仅管理员）
         .route("/api/metrics", get(handle_metrics));

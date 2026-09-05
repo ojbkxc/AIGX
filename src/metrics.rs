@@ -24,6 +24,12 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 #[allow(dead_code)]
 const HEALTH_LEVELS: [&str; 3] = ["healthy", "degraded", "down"];
 
+/// 延迟直方图分桶边界（毫秒）。参照 Prometheus 客户端常用桶：
+/// 覆盖 10ms ~ 60s 的推理延迟谱系，便于 Grafana p95/p99 计算。
+const LATENCY_BUCKETS_MS: [u64; 12] = [
+    10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 20_000, 40_000, 60_000,
+];
+
 /// 全局指标注册表（进程级单例）。
 static METRICS: std::sync::OnceLock<Metrics> = std::sync::OnceLock::new();
 
@@ -41,6 +47,8 @@ pub struct Metrics {
     tokens: std::sync::Mutex<BTreeMap<(String, String), AtomicU64>>,
     latency_sum_ms: std::sync::Mutex<BTreeMap<String, AtomicU64>>,
     latency_count: std::sync::Mutex<BTreeMap<String, AtomicU64>>,
+    /// 延迟直方图（批次6）：model → 每桶累计计数（+Inf 在 render 时由 count 补）
+    latency_hist: std::sync::Mutex<BTreeMap<String, Vec<AtomicU64>>>,
     health: std::sync::Mutex<BTreeMap<String, u8>>,
     inflight: AtomicI64,
     channels_enabled: AtomicU64,
@@ -62,6 +70,7 @@ impl Metrics {
             channels_disabled: AtomicU64::new(0),
             cost_usd: AtomicU64::new(0),
             cost_cny: AtomicU64::new(0),
+            latency_hist: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -87,9 +96,21 @@ impl Metrics {
                 .fetch_add(latency_ms, Ordering::Relaxed);
             let mut count = self.latency_count.lock().unwrap();
             count
-                .entry(model)
+                .entry(model.clone())
                 .or_default()
                 .fetch_add(1, Ordering::Relaxed);
+        }
+        // 批次6：延迟直方图分桶（cumulative 计数，render 时按 Prometheus 习惯输出）
+        {
+            let mut hist = self.latency_hist.lock().unwrap();
+            let buckets = hist
+                .entry(model)
+                .or_insert_with(|| LATENCY_BUCKETS_MS.map(|_| AtomicU64::new(0)).to_vec());
+            for (i, bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
+                if latency_ms <= *bound {
+                    buckets[i].fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
     }
 
@@ -189,6 +210,48 @@ impl Metrics {
                 ));
             }
         }
+        out.push_str("# HELP aigx_request_latency_bucket Cumulative latency buckets.\n");
+        out.push_str("# TYPE aigx_request_latency histogram\n");
+        {
+            let hist = self.latency_hist.lock().unwrap();
+            for (model, buckets) in hist.iter() {
+                let count = self
+                    .latency_count
+                    .lock()
+                    .unwrap()
+                    .get(model)
+                    .map(|c| c.load(Ordering::Relaxed))
+                    .unwrap_or(0);
+                for (i, bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
+                    out.push_str(&format!(
+                        "aigx_request_latency_bucket{{model=\"{}\",le=\"{}\"}} {}\n",
+                        escape(model),
+                        bound,
+                        buckets[i].load(Ordering::Relaxed)
+                    ));
+                }
+                out.push_str(&format!(
+                    "aigx_request_latency_bucket{{model=\"{}\",le=\"+Inf\"}} {}\n",
+                    escape(model),
+                    count
+                ));
+                out.push_str(&format!(
+                    "aigx_request_latency_sum{{model=\"{}\"}} {}\n",
+                    escape(model),
+                    self.latency_sum_ms
+                        .lock()
+                        .unwrap()
+                        .get(model)
+                        .map(|v| v.load(Ordering::Relaxed))
+                        .unwrap_or(0)
+                ));
+                out.push_str(&format!(
+                    "aigx_request_latency_count{{model=\"{}\"}} {}\n",
+                    escape(model),
+                    count
+                ));
+            }
+        }
         out.push_str(
             "# HELP aigx_health_level Model health level (0=healthy,1=degraded,2=down).\n",
         );
@@ -276,5 +339,20 @@ mod tests {
         m.record_request("model\"x", "ch\"1", "ok", 1);
         let out = m.render();
         assert!(out.contains("model=\"model\\\"x\""));
+    }
+
+    #[test]
+    fn latency_histogram_buckets() {
+        let m = Metrics::new();
+        // 120ms 落入 le=250 及以上所有桶
+        m.record_request("gpt-4", "ch1", "ok", 120);
+        // 5ms 只落入 le=10 桶（含全部更大桶）
+        m.record_request("gpt-4", "ch1", "ok", 5);
+        let out = m.render();
+        assert!(out.contains("aigx_request_latency_bucket{model=\"gpt-4\",le=\"10\"} 1"));
+        assert!(out.contains("aigx_request_latency_bucket{model=\"gpt-4\",le=\"250\"} 2"));
+        assert!(out.contains("aigx_request_latency_bucket{model=\"gpt-4\",le=\"+Inf\"} 2"));
+        assert!(out.contains("aigx_request_latency_count{model=\"gpt-4\"} 2"));
+        assert!(out.contains("aigx_request_latency_sum{model=\"gpt-4\"} 125"));
     }
 }

@@ -3293,6 +3293,8 @@ pub async fn handle_channel_health(
             entry.2 += l.latency_ms;
         }
     }
+    // 批次6：补充断路器状态与健康追踪快照（巡检同款信号源）
+    let cb_status = state.channel_store.circuit_breaker().get_status_map();
     let data: Vec<Value> = channels
         .iter()
         .map(|ch| {
@@ -3304,6 +3306,23 @@ pub async fn handle_channel_health(
                 0.0
             };
             let avg_latency = total_latency.checked_div(total).unwrap_or(0);
+            let breaker = cb_status
+                .get(&ch.id)
+                .cloned()
+                .unwrap_or_else(|| "Closed".into());
+            let health = state
+                .channel_store
+                .health_tracker()
+                .get_health(&ch.id)
+                .map(|h| {
+                    serde_json::json!({
+                        "error_rate": h.overall_error_rate,
+                        "avg_latency_ms": h.overall_avg_latency_ms,
+                        "auth_ok": h.auth_ok,
+                        "last_error": h.last_error,
+                    })
+                })
+                .unwrap_or(serde_json::Value::Null);
             serde_json::json!({
                 "id": ch.id,
                 "name": ch.name,
@@ -3312,6 +3331,8 @@ pub async fn handle_channel_health(
                 "total_requests": total,
                 "success_rate": success_rate,
                 "avg_latency_ms": avg_latency,
+                "circuit_breaker": breaker,
+                "health": health,
             })
         })
         .collect();
@@ -3745,6 +3766,26 @@ pub async fn handle_alert_test(
             "data": { "triggered": false, "message": "低于阈值或处于静默期，未触发" }
         }))),
     }
+}
+
+// ────────────────────────────────────────────────────────────────
+
+/// 批次6：系统监控采集器（进程级单例——CPU 差分采样需要跨请求保留上次值）
+static SYSTEM_COLLECTOR: std::sync::OnceLock<crate::monitor::SystemCollector> =
+    std::sync::OnceLock::new();
+
+/// GET /api/monitor/system - 系统资源快照（CPU/内存/负载/进程）
+///
+/// 参照 burncloud monitor collectors：CPU 差分采样需要两次请求，
+/// 首次返回 usage 0（前端轮询场景天然满足）。
+pub async fn handle_monitor_system(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let collector = SYSTEM_COLLECTOR.get_or_init(crate::monitor::SystemCollector::new);
+    let snap = collector.snapshot();
+    Ok(Json(serde_json::json!({ "success": true, "data": snap })))
 }
 
 // ────────────────────────────────────────────────────────────────
