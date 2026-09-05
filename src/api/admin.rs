@@ -5179,18 +5179,17 @@ pub async fn handle_trigger_price_sync(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    let result = state
-        .price_sync
-        .lock()
-        .unwrap()
-        .sync_all(true)
-        .await
-        .map_err(|e| {
+    // 先锁住服务，跨 await 期间 guard 存活会导致 future 非 Send；
+    // 用块作用域包裹 sync_all(true).await，让 guard 在 await 后立即释放。
+    let result = {
+        let mut svc = state.price_sync.lock().unwrap();
+        svc.sync_all(true).await.map_err(|e| {
             error_response(
                 &format!("Price sync failed: {e}"),
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
-        })?;
+        })?
+    };
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
