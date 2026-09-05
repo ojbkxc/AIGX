@@ -532,8 +532,9 @@ export default function Dashboard(): JSX.Element {
           {ch.length > 0 ? (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
               {ch.map((c, i) => {
-                const successRate = c.success_rate != null ? c.success_rate : (c.total_requests > 0 ? ((c.success_count ?? 0) / c.total_requests) * 100 : 0);
-                const errorRate = c.error_rate != null ? c.error_rate : (c.total_requests > 0 ? ((c.total_requests - (c.success_count ?? 0)) / c.total_requests) * 100 : 0);
+                const totalReq = c.total_requests ?? 0;
+                const successRate = c.success_rate != null ? c.success_rate : (totalReq > 0 ? ((c.success_count ?? 0) / totalReq) * 100 : 0);
+                const errorRate = c.error_rate != null ? c.error_rate : (totalReq > 0 ? ((totalReq - (c.success_count ?? 0)) / totalReq) * 100 : 0);
                 const isHealthy = successRate >= 95;
                 const isWarning = successRate >= 80 && successRate < 95;
                 // 断路器状态：后端 circuit_breaker 已为机器可读小写枚举

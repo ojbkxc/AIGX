@@ -202,7 +202,7 @@ pub async fn add_network_account(
             .as_ref()
             .filter(|r| !r.name.is_empty())
             .map(|r| r.name.clone())
-            .unwrap_or_else(|| format!("network-{}", &account_id)),
+            .unwrap_or_else(|| format!("network-{}", account_id)),
         account_id: request
             .as_ref()
             .filter(|r| !r.account_id.is_empty())

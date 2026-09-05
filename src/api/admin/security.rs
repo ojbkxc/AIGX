@@ -1,7 +1,6 @@
 //! 安全管理 API（P0-W1 自 `admin.rs` 迁移）
 //!
 //! 提供安全监控和事件查询功能。
-
 use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
@@ -60,13 +59,11 @@ pub async fn handle_security_events(
         };
         Some(chrono::Utc::now().timestamp() - secs)
     });
-    let (events, total) = state.log_store.security.list_paged(
-        params.r#type.as_deref(),
-        start,
-        None,
-        page as usize,
-        page_size as usize,
-    );
+    let (events, total) =
+        state
+            .log_store
+            .security
+            .list_paged(params.r#type.as_deref(), start, None, page, page_size);
     let data: Vec<Value> = events
         .into_iter()
         .map(|ev| {

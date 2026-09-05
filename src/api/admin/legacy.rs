@@ -6,9 +6,7 @@
 //!
 //! 后续重构（如 network 层接入）可按资源域把这些 handler 逐步
 //! 迁入对应子模块，本文件仅保留过渡结构。
-
 use axum::{
-    body::Body,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
@@ -20,7 +18,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::account::CfAccount;
-use crate::channel::{Channel, ChannelType};
+use crate::channel::ChannelType;
 use crate::config::AppConfig;
 use crate::graphql;
 use crate::pricing::RatioConfig;
@@ -115,7 +113,6 @@ pub async fn handle_usage_summary(
 }
 
 /// POST /api/usage/summary - 强制刷新用量
-
 pub async fn handle_refresh_usage(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -201,7 +198,6 @@ pub async fn handle_list_accounts(
 }
 
 /// POST /api/accounts - 添加账号
-
 pub async fn handle_add_account(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -238,7 +234,6 @@ pub async fn handle_add_account(
 }
 
 /// POST /api/accounts/test - 测试账号连接
-
 pub async fn handle_test_account(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -276,7 +271,6 @@ pub async fn handle_test_account(
 }
 
 /// PUT /api/accounts/:id - 更新账号
-
 pub async fn handle_update_account(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -315,7 +309,6 @@ pub async fn handle_update_account(
 }
 
 /// DELETE /api/accounts/:id - 删除账号
-
 pub async fn handle_delete_account(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -340,7 +333,6 @@ pub async fn handle_delete_account(
 // ============================================================
 
 /// GET /api/keys - 列出 API 密钥
-
 pub async fn handle_list_keys(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -375,7 +367,6 @@ pub async fn handle_list_keys(
 }
 
 /// POST /api/keys - 生成 API 密钥
-
 pub async fn handle_add_key(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -401,7 +392,6 @@ pub async fn handle_add_key(
 }
 
 /// DELETE /api/keys/:id - 删除 API 密钥
-
 pub async fn handle_delete_key(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -426,7 +416,6 @@ pub async fn handle_delete_key(
 // ============================================================
 
 /// GET /api/settings - 获取模型映射
-
 pub async fn handle_tokens_today(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -451,7 +440,6 @@ pub async fn handle_tokens_today(
 }
 
 /// GET /api/usage/trend - 近 7 日消耗趋势
-
 pub async fn handle_usage_trend(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -467,7 +455,6 @@ pub async fn handle_usage_trend(
 }
 
 /// GET /api/usage/models - 模型用量统计
-
 pub async fn handle_usage_models(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -502,7 +489,6 @@ pub async fn handle_me(
 
 /// GET /api/epay/config - 读取易支付配置（仅管理员）
 /// 参照 VFaka：敏感字段 epay_key 做脱敏处理（保留前3后3，中间 ***）
-
 pub async fn handle_get_epay_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -563,7 +549,6 @@ pub struct UpdateEpayConfigRequest {
 }
 
 /// PUT /api/epay/config - 更新易支付配置（仅管理员）
-
 pub async fn handle_update_epay_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -637,7 +622,6 @@ fn make_return_path(suffix: &str) -> String {
 }
 
 /// POST /api/topup - 用户发起充值
-
 pub async fn handle_my_orders(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -709,7 +693,6 @@ fn urlencoding_decode(s: &str) -> String {
 /// POST/GET /api/user/epay/notify - 易支付异步通知
 /// 参照 VFaka 回调实现：合并 query + body 参数，优先 body（POST 更可靠），
 /// 签名验证后做金额校验（2% 容忍度），使用 order.money / price 计算配额（处理折扣）
-
 pub async fn handle_epay_notify(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -820,7 +803,6 @@ pub async fn handle_epay_notify(
 
 /// POST/GET /api/user/epay/return - 易支付同步跳转
 /// 参照 VFaka：签名验证 + 金额校验 + 折扣正确计算配额
-
 pub async fn handle_epay_return(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -1538,7 +1520,6 @@ pub async fn handle_update_ratelimit_config(
 ///
 /// - 默认 30 天，最大 90 天，最小 1 天。
 /// - 用于限制全量日志加载，避免性能退化。
-
 pub async fn handle_user_ranking(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1646,7 +1627,6 @@ pub async fn handle_channel_health(
 }
 
 /// POST /api/channels/:id/reset-circuit - 手动重置渠道断路器（管理面用）
-
 pub async fn handle_reset_channel_circuit(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1703,7 +1683,6 @@ pub async fn handle_realtime(
 // ============================================================
 
 /// GET /api/notify/config - 获取通知配置（敏感字段脱敏）
-
 pub async fn handle_alert_rules_list(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1720,7 +1699,6 @@ pub struct UpdateAlertRulesRequest {
 }
 
 /// PUT /api/alerts/rules - 更新告警规则集（全量替换 + 持久化）
-
 pub async fn handle_alert_rules_update(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1746,7 +1724,6 @@ pub async fn handle_alert_rules_update(
 }
 
 /// GET /api/alerts/active - 当前活跃告警（静默期跟踪表）
-
 pub async fn handle_alerts_active(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1797,7 +1774,6 @@ pub struct AlertTestRequest {
 }
 
 /// POST /api/alerts/test - 手动触发一条测试告警（走完整分发链路）
-
 pub async fn handle_alert_test(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1952,7 +1928,6 @@ pub async fn handle_stripe_topup(
 }
 
 /// POST /api/user/stripe/webhook — Stripe Webhook 回调
-
 pub async fn handle_stripe_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2027,7 +2002,6 @@ pub async fn handle_stripe_webhook(
 // ────────────────────────────────────────────────────────────────
 
 /// GET /api/auth/github — 跳转到 GitHub OAuth 授权页
-
 pub async fn handle_openapi_json() -> Json<Value> {
     let version = env!("CARGO_PKG_VERSION");
     Json(serde_json::json!({
@@ -2176,7 +2150,6 @@ pub async fn handle_openapi_json() -> Json<Value> {
 }
 
 /// GET /swagger-ui — Swagger UI HTML 页面
-
 pub async fn handle_swagger_ui() -> axum::response::Html<&'static str> {
     let html = r#"<!DOCTYPE html>
 <html lang="en">
@@ -2233,7 +2206,6 @@ pub async fn handle_swagger_ui() -> axum::response::Html<&'static str> {
 ///
 /// 生成新 key，旧 key 立即失效（hash_map 移除旧 hash），保留配额/分组等设置。
 /// 新 key 仅在此响应中返回一次（与 burncloud 行为一致）。
-
 pub async fn handle_rotate_token(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2297,7 +2269,6 @@ pub async fn handle_check_username(
 // ============================================================
 
 /// GET /api/ip/filter - 获取全局 IP 过滤配置
-
 pub async fn handle_get_ip_filter(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2320,7 +2291,6 @@ pub struct UpdateIpFilterRequest {
 }
 
 /// PUT /api/ip/filter - 更新 IP 过滤开关
-
 pub async fn handle_update_ip_filter(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2346,7 +2316,6 @@ pub struct AddIpRuleRequest {
 }
 
 /// POST /api/ip/whitelist - 添加白名单规则
-
 pub async fn handle_add_ip_whitelist(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2372,7 +2341,6 @@ pub async fn handle_add_ip_whitelist(
 }
 
 /// POST /api/ip/blacklist - 添加黑名单规则
-
 pub async fn handle_add_ip_blacklist(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2398,7 +2366,6 @@ pub async fn handle_add_ip_blacklist(
 }
 
 /// DELETE /api/ip/whitelist/:pattern - 移除白名单规则
-
 pub async fn handle_remove_ip_whitelist(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2415,7 +2382,6 @@ pub async fn handle_remove_ip_whitelist(
 }
 
 /// DELETE /api/ip/blacklist/:pattern - 移除黑名单规则
-
 pub async fn handle_remove_ip_blacklist(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2432,7 +2398,6 @@ pub async fn handle_remove_ip_blacklist(
 }
 
 /// GET /api/pricing/sync-config - 获取价格同步配置
-
 pub async fn handle_get_price_sync_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2487,7 +2452,6 @@ pub async fn handle_update_price_sync_config(
 }
 
 /// POST /api/pricing/sync - 手动触发价格同步
-
 pub async fn handle_trigger_price_sync(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2518,7 +2482,6 @@ pub async fn handle_trigger_price_sync(
 }
 
 /// GET /api/pricing/exchange-rates - 获取全部汇率（扁平对象：{CNY: 7.2, ...}）
-
 pub async fn handle_get_exchange_rates(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2536,7 +2499,6 @@ pub async fn handle_get_exchange_rates(
 }
 
 /// PUT /api/pricing/exchange-rates - 更新汇率（扁平对象：{CNY: 7.2, ...}）
-
 pub async fn handle_update_exchange_rates(
     State(state): State<AppState>,
     headers: HeaderMap,

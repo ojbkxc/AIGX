@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
     Json,
@@ -7,15 +7,13 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::common::admin_id_from_session;
 use super::common::error_response;
 use super::common::extract_client_ip;
 use super::common::extract_session_token;
-use super::common::verify_admin;
 
 use super::super::auth::SessionStore;
 use super::super::openai::AppState;
-use crate::user::{self, hash_password, Role, User};
+use crate::user::{self, hash_password, Role};
 
 use uuid::Uuid;
 
@@ -81,9 +79,7 @@ pub async fn handle_login(
     // ── 登录限流：同 IP 每分钟最多 10 次 ──
     const LOGIN_RATE_LIMIT_PER_MINUTE: u32 = 10;
     const LOGIN_FAIL_LOCK_THRESHOLD: u32 = 5; // 连续失败 ≥5 次锁定
-    let client_ip = extract_client_ip(&headers)
-        .ok_or_else(|| "无法提取客户端IP")
-        .unwrap_or_else(|_| "unknown".to_string());
+    let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
     let attempts = state.login_limiter.get(&client_ip).await.unwrap_or(0);
     if attempts >= LOGIN_RATE_LIMIT_PER_MINUTE {
         state.log_store.record_security(
@@ -227,9 +223,7 @@ pub async fn handle_register(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // ── 速率限制：同 IP 每分钟最多 5 次 ──
     const REGISTER_RATE_LIMIT_PER_MINUTE: u32 = 5;
-    let client_ip = extract_client_ip(&headers)
-        .ok_or_else(|| "无法提取客户端IP")
-        .unwrap_or_else(|_| "unknown".to_string());
+    let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
     let current_count = state.register_limiter.get(&client_ip).await.unwrap_or(0);
     if current_count >= REGISTER_RATE_LIMIT_PER_MINUTE {
         state.log_store.record_security(

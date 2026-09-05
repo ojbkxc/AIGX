@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{admin_id_from_session, error_response, record_audit, verify_admin};
+use super::common::{error_response, verify_admin};
 
 // 这里需要引用主 crate 的 Channel 和相关类型
 use crate::channel::{Channel, ChannelType};

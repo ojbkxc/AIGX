@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, extract_client_ip, verify_admin};
+use super::common::verify_admin;
 
 // Dashboard 查询参数：时间范围（天数）。
 #[derive(Debug, Deserialize)]

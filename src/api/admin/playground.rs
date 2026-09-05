@@ -3,7 +3,7 @@
 //! 提供在线聊天 Playground 功能，直接测试渠道连接。
 
 use axum::{
-    extract::{Path, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
 };
