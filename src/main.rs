@@ -496,6 +496,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/channels/fetch_models",
             post(api::admin::handle_fetch_channel_models),
         )
+        .route(
+            "/api/channels/:id/reset-circuit",
+            post(api::admin::handle_reset_channel_circuit),
+        )
         .route("/api/channels/:id", put(api::admin::handle_update_channel))
         .route("/api/channels/:id", patch(api::admin::handle_patch_channel))
         .route(

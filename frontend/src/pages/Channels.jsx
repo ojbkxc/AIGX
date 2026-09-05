@@ -174,6 +174,18 @@ export default function Channels() {
     }
   };
 
+  // 手动重置渠道断路器（渠道被熔断后恢复）
+  const handleResetCircuit = async (id) => {
+    setError('');
+    try {
+      await api.resetChannelCircuit(id);
+      addToast(t('断路器已重置'));
+      loadChannels();
+    } catch (err) {
+      addToast(`${t('重置失败')}: ${err.message}`);
+    }
+  };
+
   // 拉取上游模型列表 — 后端代理转发（避免浏览器 CORS）
   const handleFetchModels = async () => {
     if (form.channel_type !== 'cloudflare' && !form.base_url.trim()) {
@@ -440,6 +452,13 @@ export default function Channels() {
                               </button>
                               <button className="btn btn-outline btn-sm" onClick={() => handleToggle(ch)}>
                                 {ch.status === 'enabled' ? t('停用') : t('启用')}
+                              </button>
+                              <button
+                                className="btn btn-outline btn-sm"
+                                onClick={() => handleResetCircuit(ch.id)}
+                                title={t('重置断路器（渠道被熔断后恢复）')}
+                              >
+                                {t('重置')}
                               </button>
                               <button className="btn btn-outline btn-sm" onClick={() => openEdit(ch)}>{t('编辑')}</button>
                               <button className="btn btn-danger btn-sm" onClick={() => handleDelete(ch.id)}>{t('删除')}</button>

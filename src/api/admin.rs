@@ -3376,6 +3376,25 @@ pub async fn handle_channel_health(
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
 
+/// POST /api/channels/:id/reset-circuit - 手动重置渠道断路器（管理面用）
+pub async fn handle_reset_channel_circuit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    if state.channel_store.get(&id).is_none() {
+        return Err(error_response("Channel not found", StatusCode::NOT_FOUND));
+    }
+    state.channel_store.circuit_breaker().reset(&id);
+    // 一并重置健康追踪状态，让渠道恢复后重新统计
+    state.channel_store.health_tracker().reset(&id);
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "message": "Circuit breaker reset" }
+    })))
+}
+
 pub async fn handle_realtime(
     State(state): State<AppState>,
     headers: HeaderMap,

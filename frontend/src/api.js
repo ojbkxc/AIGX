@@ -148,6 +148,7 @@ export const api = {
   patchChannel: (id, data) => request('PATCH', `/api/channels/${id}`, data),
   deleteChannel: (id) => request('DELETE', `/api/channels/${id}`),
   testChannel: (id) => request('POST', `/api/channels/${id}/test`),
+  resetChannelCircuit: (id) => request('POST', `/api/channels/${id}/reset-circuit`),
 
   // 拉取上游模型列表（后端代理转发，避免浏览器 CORS 限制）
   fetchChannelModels: (data) =>
