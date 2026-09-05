@@ -9,7 +9,7 @@
 use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
 };
 use serde::Deserialize;
 use serde_json::Value;
