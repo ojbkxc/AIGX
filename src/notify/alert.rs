@@ -504,7 +504,7 @@ mod tests {
         // 修改规则集并持久化 → 再加载应保留修改
         let mut rules = ev2.rules().to_vec();
         rules[0].threshold = 12345;
-        let mut ev3 = AlertRuleEvaluator::new(rules);
+        let ev3 = AlertRuleEvaluator::new(rules);
         ev3.persist_rules(&store);
         let ev4 = AlertRuleEvaluator::load_or_default(&store);
         assert_eq!(ev4.rules()[0].threshold, 12345);

@@ -367,9 +367,12 @@ fn render_event(event: &NotifyEvent) -> (Option<String>, Option<String>, String,
 
 /// SMTP 会话流：抽象明文 TcpStream 与 STARTTLS 升级后的 TlsStream，
 /// 使 EHLO/AUTH/MAIL/DATA 阶段代码在两种传输下复用。
+///
+/// TLS 变体比明文大很多（~1KB vs 40B），用 `Box` 压缩枚举体积——否则
+/// clippy::large-enum-variant 报错。状态机热路径不敏感（每封邮件仅构造一次）。
 enum SmtpTransport {
     Plain(TcpStream),
-    Tls(tokio_rustls::client::TlsStream<TcpStream>),
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
 }
 
 impl SmtpTransport {
@@ -615,7 +618,7 @@ async fn smtp_starttls_upgrade(
         .connect(server_name, plain)
         .await
         .map_err(|e| format!("SMTP TLS handshake failed: {e}"))?;
-    Ok(SmtpTransport::Tls(tls))
+    Ok(SmtpTransport::Tls(Box::new(tls)))
 }
 
 /// 从 "host:port" 提取 host。
