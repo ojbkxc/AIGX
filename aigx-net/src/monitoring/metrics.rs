@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use tracing::debug;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Metrics {

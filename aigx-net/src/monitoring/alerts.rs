@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
+use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlertLevel {
