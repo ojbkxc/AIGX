@@ -1,59 +1,89 @@
-# AIGX CI 工作流 - 基础的持续集成检查
-
-name: CI - Basic Check
+name: CI
 
 on:
-  push:
-    branches: [ main, develop ]
   pull_request:
-    branches: [ main ]
+    types: [opened, reopened, synchronize]
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  ci-basic:
-    name: Basic CI Checks
+  lint:
+    name: lint (fmt + clippy)
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
 
-      - name: Check if .github/workflows exist
+  frontend:
+    name: build frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
         run: |
-          if [ -d ".github/workflows" ]; then
-            echo "✓ .github/workflows 不存在，需要创建"
-            exit 1
-          else
-            echo "✓ .github/workflows 目录存在"
-            ls -la .github/workflows/
-          fi
+          npm ci
+          npm run build
+      - name: Verify frontend output
+        run: |
+          test -f static/index.html
+          echo "Frontend output verified: static/index.html"
 
-      - name: Verify workflow files
-        run: |
-          echo "检查工作流文件..."
-          for file in .github/workflows/*.yml; do
-            echo "  - $file"
-            if [ ! -s "$file" ]; then
-              echo "  ⚠️  文件为空"
-            fi
-          done
+  rust-matrix:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      # 每个 feature 组合都是独立产品面：SeaORM(PostgreSQL/MySQL) 后端
+      # 编译失败不代表默认后端有问题，反之亦然，互不取消。
+      fail-fast: false
+      matrix:
+        include:
+          - name: check (default / sqlite-kv)
+            args: ""
+          - name: check (no-default-features / JSON FileStore)
+            args: "--no-default-features"
+          - name: check (sea-orm + postgres)
+            args: "--no-default-features --features sea-orm,postgres"
+          - name: check (sea-orm + mysql)
+            args: "--no-default-features --features sea-orm,mysql"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - name: ${{ matrix.name }}
+        run: cargo check --locked ${{ matrix.args }}
 
-      # Rust 版本检查
-      - name: Check Rust version
-        run: |
-          if command -v rustc &> /dev/null; then
-            rustc --version
-            cargo --version
-          else
-            echo "Rust 未安装，将从 workflow 中构建"
-          fi
-
-      - name: Check project structure
-        run: |
-          echo "项目结构检查..."
-          ls -la
-          echo ""
-          echo "源文件:"
-          find . -type f -name "*.rs" 2>/dev/null | head -10
-          echo ""
-          echo "前端文件:"
-          find frontend -type f -name "*.jsx" 2>/dev/null | head -10
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --locked
+      - name: Verify release build
+        run: cargo build --release --locked
