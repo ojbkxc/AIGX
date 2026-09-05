@@ -14,7 +14,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::bridge::{Bridge, BridgeContext, BridgeError, ChatFormat, ChatMessage, Role};
+use crate::bridge::{Bridge, BridgeContext, ChatFormat, ChatMessage, Role};
+
+#[cfg(test)]
+use crate::bridge::BridgeError;
 use crate::channel::ChannelStore;
 
 /// 探测周期（秒）。
@@ -185,6 +188,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning: None,
             }],
             tools: None,
             max_tokens: Some(1),

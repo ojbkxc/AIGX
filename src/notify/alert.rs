@@ -207,7 +207,7 @@ impl AlertRuleEvaluator {
 
     /// 从 FileStore 加载规则集（无记录时用默认规则并回写）。
     pub fn load_or_default(store: &crate::storage::FileStore) -> Self {
-        let rules: Vec<AlertRule> = match store.get(RULES_STORE_KEY) {
+        let rules: Vec<AlertRule> = match store.get::<Vec<AlertRule>>(RULES_STORE_KEY) {
             Ok(Some(rules)) if !rules.is_empty() => rules,
             _ => {
                 let defaults = AlertRule::defaults();
