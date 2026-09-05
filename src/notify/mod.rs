@@ -14,7 +14,6 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -366,21 +365,79 @@ fn render_event(event: &NotifyEvent) -> (Option<String>, Option<String>, String,
 
 // ── 原生 SMTP 实现 ───────────────────────────────────────────────────
 
+/// SMTP 会话流：抽象明文 TcpStream 与 STARTTLS 升级后的 TlsStream，
+/// 使 EHLO/AUTH/MAIL/DATA 阶段代码在两种传输下复用。
+enum SmtpTransport {
+    Plain(TcpStream),
+    Tls(tokio_rustls::client::TlsStream<TcpStream>),
+}
+
+impl SmtpTransport {
+    async fn write_line(&mut self, data: &str) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+        match self {
+            Self::Plain(s) => s
+                .write_all(data.as_bytes())
+                .await
+                .map_err(|e| format!("SMTP write failed: {e}")),
+            Self::Tls(s) => s
+                .write_all(data.as_bytes())
+                .await
+                .map_err(|e| format!("SMTP write failed: {e}")),
+        }
+    }
+
+    async fn read_line(&mut self) -> Result<String, String> {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            let n = match self {
+                Self::Plain(s) => s.read(&mut byte).await,
+                Self::Tls(s) => s.read(&mut byte).await,
+            }
+            .map_err(|e| format!("SMTP read failed: {e}"))?;
+            if n == 0 {
+                return Err("SMTP connection closed".into());
+            }
+            buf.push(byte[0]);
+            if buf.ends_with(b"\r\n") {
+                break;
+            }
+            if buf.len() > 8192 {
+                return Err("SMTP line too long".into());
+            }
+        }
+        String::from_utf8(buf)
+            .map(|s| s.trim_end_matches(['\r', '\n']).to_string())
+            .map_err(|e| format!("SMTP non-utf8: {e}"))
+    }
+
+    /// 读取多行 SMTP 响应（直到最后一行以 "code " 而非 "code-" 结束）
+    async fn read_multiline(&mut self) -> Result<String, String> {
+        let mut last: String;
+        loop {
+            let line = self.read_line().await?;
+            let is_last = line.len() >= 4 && line.as_bytes()[3] == b' ';
+            last = line;
+            if is_last {
+                break;
+            }
+        }
+        Ok(last)
+    }
+}
+
 /// 原生 TCP SMTP 发送（AUTH LOGIN，可选 STARTTLS）
 ///
 /// 流程：connect → EHLO → [STARTTLS + TLS handshake + EHLO] → AUTH LOGIN
 ///       → MAIL FROM → RCPT TO → DATA → QUIT
 ///
-/// STARTTLS 说明：AIGX 不引入 lettre/tokio-rustls 到 SMTP 路径（保持
-/// 零额外依赖）。用 reqwest 已带的 rustls 栈无法直接包装 TcpStream，
-/// 因此 STARTTLS 在无 rustls 手写握手的情况下不可行 —— 这里采用
-/// 「587 端口 + smtp_starttls=true 时探测服务器 220 应答后直接回退
-/// 明文 AUTH」的保守策略并不安全，故改为：
-/// - smtp_starttls=false（默认）：明文 SMTP（25 端口本地中继，与原行为一致）
-/// - smtp_starttls=true：要求服务器支持 STARTTLS 且完成 TLS 升级——
-///   实现为连接 mail relay 的 465/587 时由中继自身终结 TLS（如本地
-///   postfix+stunnel / msmtp 桥），AIGX 侧仍走明文 loopback。
-///   配置文档中注明该约束。
+/// STARTTLS（批次7c）：smtp_starttls=true 时用 tokio-rustls 做真正的
+/// TLS 升级——EHLO 检测到服务器宣告 STARTTLS 能力才发送 STARTTLS，
+/// 握手后重新 EHLO 再 AUTH。服务器不支持或握手失败则报错（不静默
+/// 降级明文——明文降级会把凭据暴露给中间人）。
+/// smtp_starttls=false（默认）保持明文行为（25 端口本地中继）。
 async fn send_smtp_raw(
     cfg: &NotifyConfig,
     to: &str,
@@ -395,66 +452,81 @@ async fn send_smtp_raw(
     }
 
     let addr = format!("{}:{}", cfg.smtp_host, cfg.smtp_port);
-    let mut stream = TcpStream::connect(&addr)
+    let stream = TcpStream::connect(&addr)
         .await
         .map_err(|e| format!("SMTP connect failed: {}", e))?;
     // 设置读写超时（避免挂死）
     let _ = stream.set_nodelay(true);
+    let mut transport = SmtpTransport::Plain(stream);
 
     // 读取欢迎信息（220）
-    let greet = read_smtp_line(&mut stream).await?;
+    let greet = transport.read_line().await?;
     if !greet.starts_with("220") {
         return Err(format!("SMTP unexpected greeting: {}", greet));
     }
 
-    // EHLO
-    write_smtp(&mut stream, "EHLO aigx.local\r\n").await?;
-    read_smtp_multiline(&mut stream).await?;
+    // EHLO（明文）
+    transport.write_line("EHLO aigx.local\r\n").await?;
+    let ehlo_caps = transport.read_multiline().await?;
+
+    // STARTTLS 升级（可选）
+    if cfg.smtp_starttls {
+        transport = smtp_starttls_upgrade(transport, &addr, &ehlo_caps).await?;
+        // TLS 会话需重新 EHLO（RFC 3207 §4.2：握手后服务器遗忘先前状态）
+        transport.write_line("EHLO aigx.local\r\n").await?;
+        transport.read_multiline().await?;
+    }
 
     // AUTH LOGIN
     if !cfg.smtp_username.is_empty() {
-        write_smtp(&mut stream, "AUTH LOGIN\r\n").await?;
-        let r = read_smtp_line(&mut stream).await?;
+        transport.write_line("AUTH LOGIN\r\n").await?;
+        let r = transport.read_line().await?;
         if !r.starts_with("334") {
             return Err(format!("SMTP AUTH LOGIN rejected: {}", r));
         }
-        write_smtp(
-            &mut stream,
-            &format!("{}\r\n", STANDARD.encode(cfg.smtp_username.as_bytes())),
-        )
-        .await?;
-        let r = read_smtp_line(&mut stream).await?;
+        transport
+            .write_line(&format!(
+                "{}\r\n",
+                STANDARD.encode(cfg.smtp_username.as_bytes())
+            ))
+            .await?;
+        let r = transport.read_line().await?;
         if !r.starts_with("334") {
             return Err(format!("SMTP username rejected: {}", r));
         }
-        write_smtp(
-            &mut stream,
-            &format!("{}\r\n", STANDARD.encode(cfg.smtp_password.as_bytes())),
-        )
-        .await?;
-        let r = read_smtp_line(&mut stream).await?;
+        transport
+            .write_line(&format!(
+                "{}\r\n",
+                STANDARD.encode(cfg.smtp_password.as_bytes())
+            ))
+            .await?;
+        let r = transport.read_line().await?;
         if !r.starts_with("235") {
             return Err(format!("SMTP auth failed: {}", r));
         }
     }
 
     // MAIL FROM
-    write_smtp(&mut stream, &format!("MAIL FROM:<{}>\r\n", cfg.smtp_from)).await?;
-    let r = read_smtp_line(&mut stream).await?;
+    transport
+        .write_line(&format!("MAIL FROM:<{}>\r\n", cfg.smtp_from))
+        .await?;
+    let r = transport.read_line().await?;
     if !r.starts_with("250") {
         return Err(format!("SMTP MAIL FROM rejected: {}", r));
     }
 
     // RCPT TO
-    write_smtp(&mut stream, &format!("RCPT TO:<{}>\r\n", to)).await?;
-    let r = read_smtp_line(&mut stream).await?;
+    transport
+        .write_line(&format!("RCPT TO:<{}>\r\n", to))
+        .await?;
+    let r = transport.read_line().await?;
     if !r.starts_with("250") {
         return Err(format!("SMTP RCPT TO rejected: {}", r));
     }
 
     // DATA
-    write_smtp(&mut stream, "DATA\r\n").await?;
-    let r = read_smtp_line(&mut stream).await?;
+    transport.write_line("DATA\r\n").await?;
+    let r = transport.read_line().await?;
     if !r.starts_with("354") {
         return Err(format!("SMTP DATA rejected: {}", r));
     }
@@ -477,15 +549,78 @@ async fn send_smtp_raw(
         "From: {}\r\nTo: {}\r\nSubject: {}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n{}\r\n.\r\n",
         cfg.smtp_from, to, subject, stuffed_body
     );
-    write_smtp(&mut stream, &msg).await?;
-    let r = read_smtp_line(&mut stream).await?;
+    transport.write_line(&msg).await?;
+    let r = transport.read_line().await?;
     if !r.starts_with("250") {
         return Err(format!("SMTP data send failed: {}", r));
     }
 
     // QUIT
-    write_smtp(&mut stream, "QUIT\r\n").await?;
+    transport.write_line("QUIT\r\n").await?;
     Ok(())
+}
+
+/// STARTTLS 升级：明文流 → TLS 流。
+///
+/// `ehlo_caps` 为明文阶段 EHLO 的多行响应原文，用于检测服务器是否
+/// 宣告 STARTTLS 能力（RFC 3207）。未宣告时返回错误（调用方要求
+/// STARTTLS 却不可用，视为配置问题，不静默降级）。
+async fn smtp_starttls_upgrade(
+    mut transport: SmtpTransport,
+    addr: &str,
+    ehlo_caps: &str,
+) -> Result<SmtpTransport, String> {
+    if !ehlo_caps.to_uppercase().contains("STARTTLS") {
+        return Err(format!(
+            "SMTP server does not advertise STARTTLS (EHLO caps: {})",
+            ehlo_caps.trim()
+        ));
+    }
+    transport.write_line("STARTTLS\r\n").await?;
+    let r = transport.read_line().await?;
+    if !r.starts_with("220") {
+        return Err(format!("SMTP STARTTLS rejected: {}", r));
+    }
+
+    // TLS 握手（rustls，ring 后端）
+    let plain = match transport {
+        SmtpTransport::Plain(s) => s,
+        SmtpTransport::Tls(_) => return Err("SMTP already TLS".into()),
+    };
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    // 系统信任库（Linux 常见路径；不可读时为空信任库——握手将失败，
+    // 错误信息足以定位）
+    if let Ok(iter) =
+        rustls_pki_types::pem::PemObject::pem_file_iter("/etc/ssl/certs/ca-certificates.crt")
+    {
+        for cert in iter.flatten() {
+            roots.add_parsable_certificates([cert]);
+        }
+    } else if let Ok(iter) =
+        rustls_pki_types::pem::PemObject::pem_file_iter("/etc/pki/tls/certs/ca-bundle.crt")
+    {
+        for cert in iter.flatten() {
+            roots.add_parsable_certificates([cert]);
+        }
+    }
+    let config = tokio_rustls::rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+
+    // SNI 用主机名（非 IP 字面量——rustls 拒绝 IP SNI）
+    let server_name = rustls_pki_types::ServerName::try_from(cfg_host(addr).to_string())
+        .map_err(|e| format!("SMTP SNI invalid: {e}"))?;
+    let tls = connector
+        .connect(server_name, plain)
+        .await
+        .map_err(|e| format!("SMTP TLS handshake failed: {e}"))?;
+    Ok(SmtpTransport::Tls(tls))
+}
+
+/// 从 "host:port" 提取 host。
+fn cfg_host(addr: &str) -> &str {
+    addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr)
 }
 
 /// Webhook HMAC-SHA256 签名（GitHub Webhook 同款约定）。
@@ -505,51 +640,6 @@ fn webhook_hmac(secret: &str, body: &str) -> String {
         let _ = write!(hex, "{b:02x}");
     }
     hex
-}
-
-async fn write_smtp(stream: &mut TcpStream, data: &str) -> Result<(), String> {
-    stream
-        .write_all(data.as_bytes())
-        .await
-        .map_err(|e| format!("SMTP write failed: {}", e))
-}
-
-async fn read_smtp_line(stream: &mut TcpStream) -> Result<String, String> {
-    let mut buf = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        let n = stream
-            .read(&mut byte)
-            .await
-            .map_err(|e| format!("SMTP read failed: {}", e))?;
-        if n == 0 {
-            return Err("SMTP connection closed".into());
-        }
-        buf.push(byte[0]);
-        if buf.ends_with(b"\r\n") {
-            break;
-        }
-        if buf.len() > 8192 {
-            return Err("SMTP line too long".into());
-        }
-    }
-    String::from_utf8(buf)
-        .map(|s| s.trim_end_matches(['\r', '\n']).to_string())
-        .map_err(|e| format!("SMTP non-utf8: {}", e))
-}
-
-/// 读取多行 SMTP 响应（直到最后一行以 "code " 而非 "code-" 结束）
-async fn read_smtp_multiline(stream: &mut TcpStream) -> Result<String, String> {
-    let mut last: String;
-    loop {
-        let line = read_smtp_line(stream).await?;
-        let is_last = line.len() >= 4 && line.as_bytes()[3] == b' ';
-        last = line;
-        if is_last {
-            break;
-        }
-    }
-    Ok(last)
 }
 
 // ── 测试 ─────────────────────────────────────────────────────────────

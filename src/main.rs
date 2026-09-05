@@ -162,8 +162,8 @@ async fn main() -> anyhow::Result<()> {
     // 初始化通知服务（Telegram + SMTP + Slack + Webhook）
     let notify_service = Arc::new(NotifyService::new(config.notify.clone()));
 
-    // 初始化告警规则评估器（批次5：alert 巡检 + 管理 API 共享）
-    let alert_evaluator = notify::alert_patrol::shared_evaluator();
+    // 初始化告警规则评估器（持久化：FileStore 加载规则集与历史）
+    let alert_evaluator = notify::alert_patrol::shared_evaluator_persistent(&store);
 
     // 共享 HTTP 客户端（性能热点 H5/H6）。
     // 全应用复用同一个 reqwest::Client，避免每次请求新建客户端（连接池/TLS 握手开销）。
@@ -268,6 +268,7 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter,
         notify_service,
         alert_evaluator,
+        alert_store: store.clone(),
         register_limiter,
         login_limiter,
         login_failures,
@@ -315,6 +316,13 @@ async fn main() -> anyhow::Result<()> {
         state.channel_store.clone(),
         state.notify_service.clone(),
         state.alert_evaluator.clone(),
+        store.clone(),
+    );
+
+    // 启动渠道探活后台任务（批次7c：周期 1-token 探测 → 断路器/健康追踪）
+    channel::prober::spawn_channel_prober(
+        state.channel_store.clone(),
+        state.http_client.as_ref().clone(),
     );
 
     let app = build_router(state, &config);
@@ -622,6 +630,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             put(api::admin::handle_alert_rules_update),
         )
         .route("/api/alerts/active", get(api::admin::handle_alerts_active))
+        .route(
+            "/api/alerts/history",
+            get(api::admin::handle_alerts_history),
+        )
         .route("/api/alerts/test", post(api::admin::handle_alert_test))
         // 阶段1：缓存管理 API（参照 burncloud cache.rs）
         .route("/api/cache/stats", get(api::admin::handle_cache_stats))

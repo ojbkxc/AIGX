@@ -177,6 +177,14 @@ impl AlertRule {
 
 // ── 规则评估器 ───────────────────────────────────────────────────────
 
+/// 告警历史环形缓冲上限（超出丢弃最旧）。
+pub const ALERT_HISTORY_LIMIT: usize = 500;
+
+/// 持久化 key：FileStore 中的规则集 JSON。
+const RULES_STORE_KEY: &str = "alert_rules";
+/// 持久化 key：FileStore 中的历史记录 JSON。
+const HISTORY_STORE_KEY: &str = "alert_history";
+
 /// 告警规则评估器（线程安全版本——burncloud 为 &mut self，AIGX 部署在
 /// 后台巡检任务里用 Mutex 包裹）
 pub struct AlertRuleEvaluator {
@@ -184,6 +192,8 @@ pub struct AlertRuleEvaluator {
     active_alerts: HashMap<String, Alert>,
     /// 已配置规则
     rules: Vec<AlertRule>,
+    /// 触发历史（环形，最新在前）
+    history: Vec<Alert>,
 }
 
 impl AlertRuleEvaluator {
@@ -191,7 +201,49 @@ impl AlertRuleEvaluator {
         Self {
             active_alerts: HashMap::new(),
             rules,
+            history: Vec::new(),
         }
+    }
+
+    /// 从 FileStore 加载规则集（无记录时用默认规则并回写）。
+    pub fn load_or_default(store: &crate::storage::FileStore) -> Self {
+        let rules: Vec<AlertRule> = match store.get(RULES_STORE_KEY) {
+            Ok(Some(rules)) if !rules.is_empty() => rules,
+            _ => {
+                let defaults = AlertRule::defaults();
+                if let Err(e) = store.put(RULES_STORE_KEY, &defaults) {
+                    tracing::warn!("persist default alert rules failed: {e}");
+                }
+                defaults
+            }
+        };
+        let mut ev = Self::new(rules);
+        // 历史记录加载（失败不阻塞启动）
+        match store.get::<Vec<Alert>>(HISTORY_STORE_KEY) {
+            Ok(Some(h)) => ev.history = h,
+            Ok(None) => {}
+            Err(e) => tracing::warn!("load alert history failed: {e}"),
+        }
+        ev
+    }
+
+    /// 把当前规则集持久化到 FileStore。
+    pub fn persist_rules(&self, store: &crate::storage::FileStore) {
+        if let Err(e) = store.put(RULES_STORE_KEY, &self.rules) {
+            tracing::warn!("persist alert rules failed: {e}");
+        }
+    }
+
+    /// 把历史记录持久化到 FileStore。
+    pub fn persist_history(&self, store: &crate::storage::FileStore) {
+        if let Err(e) = store.put(HISTORY_STORE_KEY, &self.history) {
+            tracing::warn!("persist alert history failed: {e}");
+        }
+    }
+
+    /// 触发历史（最新在前，环形上限 500）。
+    pub fn history(&self) -> &[Alert] {
+        &self.history
     }
 
     pub fn add_rule(&mut self, rule: AlertRule) {
@@ -269,15 +321,22 @@ impl AlertRuleEvaluator {
                 .unwrap_or(1),
         };
         self.active_alerts.insert(alert_key, alert.clone());
+        // 记入历史环形缓冲（最新在前，超限丢最旧）
+        self.history.insert(0, alert.clone());
+        self.history.truncate(ALERT_HISTORY_LIMIT);
         Some(alert)
     }
 
-    /// 标记告警解决
+    /// 标记告警解决（同步记入历史）
     pub fn resolve(&mut self, kind: &AlertKind) -> Option<Alert> {
         let alert_key = kind.to_string();
         if let Some(mut alert) = self.active_alerts.remove(&alert_key) {
             alert.status = AlertStatus::Resolved;
             alert.resolved_at = Some(Utc::now().timestamp());
+            self.history.insert(0, alert.clone());
+            if self.history.len() > ALERT_HISTORY_LIMIT {
+                self.history.truncate(ALERT_HISTORY_LIMIT);
+            }
             Some(alert)
         } else {
             None
@@ -397,5 +456,59 @@ mod tests {
         };
         let mut ev = AlertRuleEvaluator::new(vec![rule]);
         assert!(ev.evaluate(&AlertKind::MemoryHigh, 90).is_none());
+    }
+
+    #[test]
+    fn history_records_triggers_and_resolves() {
+        let mut ev = AlertRuleEvaluator::new(AlertRule::defaults());
+        let k = AlertKind::MemoryHigh;
+        ev.evaluate(&k, 90);
+        ev.evaluate(&k, 95); // 静默期内，不重复记历史
+        assert_eq!(ev.history().len(), 1);
+        ev.resolve(&k);
+        // 触发 + 解决 = 2 条历史
+        assert_eq!(ev.history().len(), 2);
+        assert_eq!(ev.history()[0].status, AlertStatus::Resolved);
+    }
+
+    #[test]
+    fn history_ring_buffer_truncates() {
+        let rule = AlertRule {
+            name: "always".into(),
+            kind: AlertKind::QueueBacklog,
+            threshold: 1,
+            silence_period_secs: 0,
+            level: AlertLevel::Info,
+            enabled: true,
+        };
+        let mut ev = AlertRuleEvaluator::new(vec![rule]);
+        // 静默期 0：每次都触发
+        for _ in 0..(ALERT_HISTORY_LIMIT + 50) {
+            ev.evaluate(&AlertKind::QueueBacklog, 5);
+        }
+        assert_eq!(ev.history().len(), ALERT_HISTORY_LIMIT);
+    }
+
+    #[test]
+    fn rules_roundtrip_via_store() {
+        let dir = std::env::temp_dir().join(format!("aigx-alert-test-{}", uuid::Uuid::new_v4()));
+        let store = crate::storage::FileStore::new(dir.clone());
+        let ev = AlertRuleEvaluator::load_or_default(&store);
+        let n = ev.rules().len();
+        ev.persist_rules(&store);
+
+        // 重新加载：规则数量一致
+        let ev2 = AlertRuleEvaluator::load_or_default(&store);
+        assert_eq!(ev2.rules().len(), n);
+
+        // 修改规则集并持久化 → 再加载应保留修改
+        let mut rules = ev2.rules().to_vec();
+        rules[0].threshold = 12345;
+        let mut ev3 = AlertRuleEvaluator::new(rules);
+        ev3.persist_rules(&store);
+        let ev4 = AlertRuleEvaluator::load_or_default(&store);
+        assert_eq!(ev4.rules()[0].threshold, 12345);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

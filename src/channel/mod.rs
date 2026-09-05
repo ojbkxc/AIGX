@@ -30,6 +30,7 @@ pub mod balancer;
 pub mod circuit_breaker;
 pub mod empty_response;
 pub mod health_manager;
+pub mod prober;
 pub mod rate_budget;
 // ── 阶段3：响应质量分级（喂给断路器/调度器）──────────────────────────
 //

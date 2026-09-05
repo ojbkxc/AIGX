@@ -73,6 +73,8 @@ pub struct AppState {
     pub notify_service: Arc<NotifyService>,
     /// 告警规则评估器（alert_patrol 巡检 + 管理 API 共享）
     pub alert_evaluator: std::sync::Arc<std::sync::Mutex<crate::notify::alert::AlertRuleEvaluator>>,
+    /// 底层 FileStore（告警规则/历史持久化等轻量 KV 用）
+    pub alert_store: Arc<crate::storage::FileStore>,
     /// 公开注册速率限制器（per-IP 计数缓存）。
     ///
     /// key=客户端 IP，value=当前 60 秒窗口内已发起的注册请求数。

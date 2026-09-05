@@ -3655,7 +3655,7 @@ pub struct UpdateAlertRulesRequest {
     pub rules: Vec<crate::notify::alert::AlertRule>,
 }
 
-/// PUT /api/alerts/rules - 更新告警规则集（全量替换）
+/// PUT /api/alerts/rules - 更新告警规则集（全量替换 + 持久化）
 pub async fn handle_alert_rules_update(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3669,7 +3669,11 @@ pub async fn handle_alert_rules_update(
         ));
     }
     let count = body.rules.len();
-    state.alert_evaluator.lock().unwrap().set_rules(body.rules);
+    {
+        let mut ev = state.alert_evaluator.lock().unwrap();
+        ev.set_rules(body.rules);
+        ev.persist_rules(&state.alert_store);
+    }
     Ok(Json(serde_json::json!({
         "success": true,
         "data": { "updated": count }
@@ -3684,6 +3688,38 @@ pub async fn handle_alerts_active(
     let _ = verify_admin(&state, &headers).await?;
     let alerts = state.alert_evaluator.lock().unwrap().active_alerts();
     Ok(Json(serde_json::json!({ "success": true, "data": alerts })))
+}
+
+/// GET /api/alerts/history - 告警触发历史（最新在前，环形 500 条）
+#[derive(Debug, Deserialize)]
+pub struct AlertHistoryQuery {
+    /// 限制返回条数（默认 100，上限 500）
+    pub limit: Option<usize>,
+}
+
+pub async fn handle_alerts_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<AlertHistoryQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let limit = q
+        .limit
+        .unwrap_or(100)
+        .min(crate::notify::alert::ALERT_HISTORY_LIMIT);
+    let history: Vec<_> = state
+        .alert_evaluator
+        .lock()
+        .unwrap()
+        .history()
+        .iter()
+        .take(limit)
+        .cloned()
+        .collect();
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "total": history.len(), "items": history }
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3727,7 +3763,14 @@ pub async fn handle_alert_test(
         }
     };
     let value = b.value.unwrap_or(99);
-    let alert = state.alert_evaluator.lock().unwrap().evaluate(&kind, value);
+    let alert = {
+        let mut ev = state.alert_evaluator.lock().unwrap();
+        let alert = ev.evaluate(&kind, value);
+        if alert.is_some() {
+            ev.persist_history(&state.alert_store);
+        }
+        alert
+    };
     match alert {
         Some(a) => {
             // 走完整分发（Telegram/Email/Slack/Webhook）

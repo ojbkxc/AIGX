@@ -20,22 +20,29 @@ use crate::notify::NotifyService;
 /// 共享告警评估器（管理 API 与巡检任务共用）
 pub type SharedAlertEvaluator = Arc<Mutex<AlertRuleEvaluator>>;
 
-/// 创建默认评估器（AlertRule::defaults 规则集）
+/// 创建默认评估器（AlertRule::defaults 规则集，不持久化——测试用）
 pub fn shared_evaluator() -> SharedAlertEvaluator {
     Arc::new(Mutex::new(AlertRuleEvaluator::new(AlertRule::defaults())))
 }
 
-/// 启动告警巡检协程
+/// 创建持久化评估器：从 FileStore 加载规则集与历史（无记录时落默认规则）。
+pub fn shared_evaluator_persistent(store: &Arc<crate::storage::FileStore>) -> SharedAlertEvaluator {
+    Arc::new(Mutex::new(AlertRuleEvaluator::load_or_default(store)))
+}
+
+/// 启动告警巡检协程（每次巡检后把告警历史落盘）
 pub fn spawn_alert_patrol(
     channel_store: Arc<ChannelStore>,
     notify_service: Arc<NotifyService>,
     evaluator: SharedAlertEvaluator,
+    store: Arc<crate::storage::FileStore>,
 ) {
     tokio::spawn(async move {
         let interval = tokio::time::Duration::from_secs(60);
         loop {
             tokio::time::sleep(interval).await;
             patrol_once(&channel_store, &notify_service, &evaluator).await;
+            evaluator.lock().unwrap().persist_history(&store);
         }
     });
 }
