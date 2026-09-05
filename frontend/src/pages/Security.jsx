@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
+import SystemMonitorPanel from '../components/SystemMonitorPanel';
 import './Security.css';
 
 // 安全事件类型选项（用于筛选下拉）
@@ -112,6 +113,14 @@ export default function Security() {
       </div>
 
       {error && <div className="error-message">{error}</div>}
+
+      {/* 批次6：系统资源监控（CPU/内存/负载/进程，10s 轮询） */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-header"><h2>{t('系统资源')}</h2></div>
+        <div className="card-body">
+          <SystemMonitorPanel />
+        </div>
+      </div>
 
       {/* 概览卡片 */}
       <div className="security-overview">

@@ -451,7 +451,10 @@ export default function Dashboard() {
                 const isHealthy = successRate >= 95;
                 const isWarning = successRate >= 80 && successRate < 95;
                 // 断路器状态：Closed(正常,绿) / Open(熔断,红) / HalfOpen(半开,黄)
-                const breakerState = (c.breaker_state || c.circuit_state || 'closed').toLowerCase();
+                // 批次6：后端新增 circuit_breaker 字段（"Closed"/"Open"/"HalfOpen"）
+                const breakerState = (
+                  c.circuit_breaker || c.breaker_state || c.circuit_state || 'closed'
+                ).toLowerCase();
                 const breakerColor = breakerState === 'open' ? 'rgb(239,68,68)' : breakerState === 'halfopen' || breakerState === 'half_open' ? 'rgb(234,179,8)' : 'rgb(34,197,94)';
                 const breakerLabel = breakerState === 'open' ? t('熔断') : (breakerState === 'halfopen' || breakerState === 'half_open') ? t('半开') : t('正常');
                 return (
@@ -494,6 +497,19 @@ export default function Dashboard() {
                     {c.consecutive_empty != null && c.consecutive_empty > 0 && (
                       <div style={{ fontSize: 13, color: c.consecutive_empty >= 3 ? 'rgb(239,68,68)' : 'var(--text-muted)' }}>
                         {t('连续空响应')}: <span style={{ fontWeight: 600 }}>{c.consecutive_empty}</span>
+                      </div>
+                    )}
+                    {/* 批次6：health_tracker 实时快照（错误率 EMA 视角） */}
+                    {c.health && c.health.error_rate != null && c.health.error_rate > 0 && (
+                      <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                        {t('实时错误率')}: <span style={{ color: c.health.error_rate > 0.5 ? 'rgb(234,179,8)' : 'var(--text-main)', fontWeight: 600 }}>
+                          {(c.health.error_rate * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    )}
+                    {c.health && c.health.last_error && (
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.health.last_error}>
+                        {t('最近错误')}: {c.health.last_error}
                       </div>
                     )}
                     <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 4 }}>

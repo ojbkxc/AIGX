@@ -271,11 +271,22 @@ export const api = {
   getChannelHealth: () => request('GET', '/api/dashboard/channel_health'),
   getRealtime: () => request('GET', '/api/dashboard/realtime'),
 
-  // ── 通知系统（Telegram + SMTP）──
+  // ── 通知系统（Telegram + SMTP + Slack + Webhook）──
   getNotifyConfig: () => request('GET', '/api/notify/config'),
   updateNotifyConfig: (data) => request('PUT', '/api/notify/config', data),
   testTelegram: () => request('POST', '/api/notify/test-telegram'),
   testEmail: (to) => request('POST', '/api/notify/test-email', { to }),
+  testSlack: () => request('POST', '/api/notify/test-slack'),
+  testWebhook: (message) => request('POST', '/api/notify/test-webhook', { message }),
+
+  // ── 告警规则（批次5）──
+  getAlertRules: () => request('GET', '/api/alerts/rules'),
+  updateAlertRules: (rules) => request('PUT', '/api/alerts/rules', { rules }),
+  getActiveAlerts: () => request('GET', '/api/alerts/active'),
+  testAlert: (kind, value) => request('POST', '/api/alerts/test', { kind, value }),
+
+  // ── 系统监控（批次6）──
+  getSystemMonitor: () => request('GET', '/api/monitor/system'),
 
   // ── Playground ──
   playgroundChat: (data) => request('POST', '/api/playground/chat', data),
