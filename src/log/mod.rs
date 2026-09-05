@@ -537,7 +537,8 @@ impl SecurityEventStore {
         let Ok(keys) = self.store.list("security_event:") else {
             return;
         };
-        if keys.len() <= self.max_events {
+        let total = keys.len();
+        if total <= self.max_events {
             return;
         }
         let mut timed: Vec<(i64, String)> = keys
@@ -552,7 +553,7 @@ impl SecurityEventStore {
             })
             .collect();
         timed.sort_by_key(|(ts, _)| *ts);
-        let excess = keys.len() - self.max_events;
+        let excess = total - self.max_events;
         for (_, k) in timed.into_iter().take(excess) {
             let _ = self.store.delete(&k);
         }
