@@ -174,6 +174,14 @@ pub async fn handle_login(
     let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
     let attempts = state.login_limiter.get(&client_ip).await.unwrap_or(0);
     if attempts >= LOGIN_RATE_LIMIT_PER_MINUTE {
+        state.log_store.record_security(
+            crate::log::SecurityEvent::new(
+                crate::log::SecurityEventType::RateLimit,
+                "warning",
+                format!("登录限流触发：IP {client_ip} 每分钟超过 {LOGIN_RATE_LIMIT_PER_MINUTE} 次"),
+            )
+            .with_ip(Some(client_ip.clone())),
+        );
         return Err(error_response(
             "登录尝试过于频繁，请稍后再试",
             StatusCode::TOO_MANY_REQUESTS,
@@ -187,6 +195,14 @@ pub async fn handle_login(
     // ── 失败锁定：连续失败 ≥5 次 → 锁定 5 分钟（TTL 由 login_failures 控制）──
     let fail_count = state.login_failures.get(&client_ip).await.unwrap_or(0);
     if fail_count >= LOGIN_FAIL_LOCK_THRESHOLD {
+        state.log_store.record_security(
+            crate::log::SecurityEvent::new(
+                crate::log::SecurityEventType::IpBlocked,
+                "critical",
+                format!("IP {client_ip} 连续失败 {fail_count} 次，已锁定 5 分钟"),
+            )
+            .with_ip(Some(client_ip.clone())),
+        );
         return Err(error_response(
             "登录失败次数过多，请稍后再试",
             StatusCode::TOO_MANY_REQUESTS,
@@ -264,6 +280,20 @@ pub async fn handle_login(
         .login_failures
         .insert(client_ip.clone(), next_fail)
         .await;
+    // 安全事件：认证失败（每次失败都记录，锁定阈值时升级 critical）
+    let severity = if next_fail >= LOGIN_FAIL_LOCK_THRESHOLD {
+        "critical"
+    } else {
+        "warning"
+    };
+    state.log_store.record_security(
+        crate::log::SecurityEvent::new(
+            crate::log::SecurityEventType::AuthFailure,
+            severity,
+            format!("登录认证失败（邮箱/用户名: {}）", body.email),
+        )
+        .with_ip(Some(client_ip.clone())),
+    );
     if next_fail >= LOGIN_FAIL_LOCK_THRESHOLD {
         tracing::warn!("Login failed {next_fail} times from {client_ip}; locked for 5 minutes");
     }
@@ -288,6 +318,16 @@ pub async fn handle_register(
     let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
     let current_count = state.register_limiter.get(&client_ip).await.unwrap_or(0);
     if current_count >= REGISTER_RATE_LIMIT_PER_MINUTE {
+        state.log_store.record_security(
+            crate::log::SecurityEvent::new(
+                crate::log::SecurityEventType::RateLimit,
+                "warning",
+                format!(
+                    "注册限流触发：IP {client_ip} 每分钟超过 {REGISTER_RATE_LIMIT_PER_MINUTE} 次"
+                ),
+            )
+            .with_ip(Some(client_ip.clone())),
+        );
         return Err(error_response(
             "注册请求过于频繁，请稍后再试",
             StatusCode::TOO_MANY_REQUESTS,
@@ -4393,30 +4433,38 @@ pub async fn handle_security_summary(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let logs = state.log_store.requests.list_all();
-    let total = logs.len().max(1) as u64;
-    let mut blocked = 0u64;
+    // 优先基于结构化安全事件计算概览；请求日志仅作兜底
+    let events = state.log_store.security.list_all();
+    let total = events.len().max(1) as u64;
+    let mut critical = 0u64;
     let mut threat_sources = std::collections::HashSet::new();
-    for log in &logs {
-        if log.status_code >= 400 {
-            blocked += 1;
-            if let Some(ref uid) = log.user_id {
-                threat_sources.insert(uid.clone());
-            }
-            if let Some(ref ip) = log.ip {
-                threat_sources.insert(ip.clone());
-            }
+    let mut recent_24h = 0u64;
+    let now = chrono::Utc::now().timestamp();
+    for ev in &events {
+        if ev.severity == "critical" {
+            critical += 1;
+        }
+        if let Some(ref ip) = ev.ip {
+            threat_sources.insert(ip.clone());
+        }
+        if let Some(ref uid) = ev.user_id {
+            threat_sources.insert(uid.clone());
+        }
+        if now - ev.created_at <= 24 * 3600 {
+            recent_24h += 1;
         }
     }
-    let error_ratio = blocked as f64 / total as f64;
-    let score = ((1.0 - error_ratio) * 100.0).round() as u8;
+    let score = if events.is_empty() {
+        100
+    } else {
+        (100.0 - (critical as f64 / total as f64) * 100.0).round() as u8
+    };
     // 7 天 sparkline
     let mut buckets: [u64; 7] = [0; 7];
-    let now = chrono::Utc::now();
-    for log in &logs {
-        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(log.created_at, 0);
+    for ev in &events {
+        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(ev.created_at, 0);
         if let Some(dt) = dt {
-            let days_ago = (now - dt).num_days().clamp(0, 6) as usize;
+            let days_ago = (chrono::Utc::now() - dt).num_days().clamp(0, 6) as usize;
             buckets[6 - days_ago] += 1;
         }
     }
@@ -4424,7 +4472,10 @@ pub async fn handle_security_summary(
         "success": true,
         "data": {
             "score": score,
-            "blocked_count": blocked,
+            "total_events": total,
+            "critical_events": critical,
+            "recent_24h": recent_24h,
+            "blocked_count": total,
             "threat_source_count": threat_sources.len(),
             "sparkline": buckets.to_vec()
         }
@@ -4436,6 +4487,8 @@ pub async fn handle_security_summary(
 pub struct SecurityEventsQuery {
     pub page: Option<i32>,
     pub page_size: Option<i32>,
+    pub r#type: Option<String>,
+    pub range: Option<String>,
 }
 
 pub async fn handle_security_events(
@@ -4447,41 +4500,43 @@ pub async fn handle_security_events(
     let page = params.page.unwrap_or(1).max(1);
     let page_size = params.page_size.unwrap_or(20).clamp(1, 100);
 
-    let logs = state.log_store.requests.list_all();
-    let mut events: Vec<Value> = Vec::new();
-    for log in &logs {
-        if log.status_code < 400 {
-            continue;
-        }
-        let severity = if log.status_code >= 500 {
-            "critical"
-        } else {
-            "warning"
+    // 时间范围：1h/24h/7d/30d → start 时间戳
+    let start = params.range.as_deref().and_then(|r| {
+        let secs = match r {
+            "1h" => 3600,
+            "24h" => 24 * 3600,
+            "7d" => 7 * 24 * 3600,
+            "30d" => 30 * 24 * 3600,
+            _ => return None,
         };
-        let event_type = if log.status_code >= 500 {
-            "server_error"
-        } else {
-            "client_error"
-        };
-        events.push(serde_json::json!({
-            "id": log.id,
-            "time": log.created_at,
-            "source": log.user_id.clone().unwrap_or_else(|| "-".into()),
-            "target": log.channel_id.clone().unwrap_or_else(|| log.model.clone()),
-            "event_type": event_type,
-            "severity": severity,
-            "status": if log.status_code >= 500 { "active" } else { "blocked" },
-            "detail": format!("HTTP {} {}", log.status_code,
-                log.error_msg.clone().unwrap_or_default()),
-        }));
-    }
+        Some(chrono::Utc::now().timestamp() - secs)
+    });
 
-    let total = events.len() as i64;
-    let offset = ((page - 1) * page_size) as usize;
+    let (events, total) = state.log_store.security.list_paged(
+        params.r#type.as_deref(),
+        start,
+        None,
+        page as usize,
+        page_size as usize,
+    );
+
     let page_items: Vec<Value> = events
         .into_iter()
-        .skip(offset)
-        .take(page_size as usize)
+        .map(|ev| {
+            serde_json::json!({
+                "id": ev.id,
+                "created_at": ev.created_at,
+                "time": ev.created_at,
+                "event_type": ev.event_type.as_str(),
+                "type": ev.event_type.as_str(),
+                "severity": ev.severity,
+                "ip": ev.ip,
+                "client_ip": ev.ip,
+                "user_id": ev.user_id,
+                "request_id": ev.request_id,
+                "detail": ev.detail,
+            })
+        })
         .collect();
 
     Ok(Json(serde_json::json!({

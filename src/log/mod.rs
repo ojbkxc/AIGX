@@ -422,21 +422,223 @@ impl AuditLogStore {
     }
 }
 
+// ── 安全事件存储 ──────────────────────────────────────────────────────
+
+/// 安全事件类型（结构化分类，供安全中心展示与告警规则引用）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityEventType {
+    /// 认证失败（登录/API key 校验失败）
+    AuthFailure,
+    /// 限流触发（登录/注册/API 限流）
+    RateLimit,
+    /// IP 拦截（IP 黑名单命中）
+    IpBlocked,
+    /// 滥用检测（额度耗尽后继续尝试等）
+    Abuse,
+    /// 入侵尝试（路径遍历/异常 UA 等）
+    Intrusion,
+}
+
+impl SecurityEventType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AuthFailure => "auth_failure",
+            Self::RateLimit => "rate_limit",
+            Self::IpBlocked => "ip_blocked",
+            Self::Abuse => "abuse",
+            Self::Intrusion => "intrusion",
+        }
+    }
+}
+
+/// 单条结构化安全事件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityEvent {
+    pub id: String,
+    /// 事件类型
+    pub event_type: SecurityEventType,
+    /// 严重程度：info / warning / critical
+    pub severity: String,
+    /// 事件来源（IP）
+    pub ip: Option<String>,
+    /// 关联用户（若可归因）
+    pub user_id: Option<String>,
+    /// 关联请求 ID（若在请求路径内）
+    pub request_id: Option<String>,
+    /// 人类可读详情（脱敏）
+    pub detail: String,
+    pub created_at: i64,
+}
+
+impl SecurityEvent {
+    pub fn new(event_type: SecurityEventType, severity: &str, detail: String) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            event_type,
+            severity: severity.to_string(),
+            ip: None,
+            user_id: None,
+            request_id: None,
+            detail,
+            created_at: chrono::Utc::now().timestamp(),
+        }
+    }
+
+    pub fn with_ip(mut self, ip: Option<String>) -> Self {
+        self.ip = ip;
+        self
+    }
+
+    pub fn with_user(mut self, user_id: Option<String>) -> Self {
+        self.user_id = user_id;
+        self
+    }
+}
+
+/// 安全事件存储——FileStore 持久化，环形上限 1000 条。
+///
+/// key 格式：`security_event:{created_at}:{id}`
+pub struct SecurityEventStore {
+    store: Arc<FileStore>,
+    /// 环形缓冲容量上限
+    max_events: usize,
+}
+
+impl SecurityEventStore {
+    const MAX_EVENTS: usize = 1000;
+
+    pub fn new(store: Arc<FileStore>) -> Self {
+        Self {
+            store,
+            max_events: Self::MAX_EVENTS,
+        }
+    }
+
+    fn key_of(ev: &SecurityEvent) -> String {
+        format!("security_event:{}:{}", ev.created_at, ev.id)
+    }
+
+    /// 追加一条安全事件（超出容量清理最旧）。
+    pub fn add(&self, mut ev: SecurityEvent) -> anyhow::Result<SecurityEvent> {
+        if ev.id.is_empty() {
+            ev.id = uuid::Uuid::new_v4().to_string();
+        }
+        if ev.created_at == 0 {
+            ev.created_at = chrono::Utc::now().timestamp();
+        }
+        self.store.put(&Self::key_of(&ev), &ev)?;
+        self.purge_overflow();
+        Ok(ev)
+    }
+
+    /// 容量超限时删除最旧事件（best-effort，失败仅告警）。
+    fn purge_overflow(&self) {
+        let Ok(keys) = self.store.list("security_event:") else {
+            return;
+        };
+        if keys.len() <= self.max_events {
+            return;
+        }
+        let mut timed: Vec<(i64, String)> = keys
+            .into_iter()
+            .map(|k| {
+                let ts = k
+                    .strip_prefix("security_event:")
+                    .and_then(|rest| rest.split(':').next())
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(i64::MAX);
+                (ts, k)
+            })
+            .collect();
+        timed.sort_by_key(|(ts, _)| *ts);
+        let excess = keys.len() - self.max_events;
+        for (_, k) in timed.into_iter().take(excess) {
+            let _ = self.store.delete(&k);
+        }
+    }
+
+    /// 列出全部事件（按时间倒序）。
+    pub fn list_all(&self) -> Vec<SecurityEvent> {
+        let keys = match self.store.list("security_event:") {
+            Ok(k) => k,
+            Err(_) => return Vec::new(),
+        };
+        let mut events: Vec<SecurityEvent> = keys
+            .into_iter()
+            .filter_map(|k| self.store.get::<SecurityEvent>(&k).ok().flatten())
+            .collect();
+        events.sort_by_key(|b| std::cmp::Reverse(b.created_at));
+        events
+    }
+
+    /// 过滤 + 分页。
+    ///
+    /// - `event_type`：按类型过滤（None=全部）
+    /// - `start`：时间下限（unix ts，None=不限）
+    /// - `end`：时间上限（unix ts，None=不限）
+    /// - `page/size`：分页（1-based）
+    pub fn list_paged(
+        &self,
+        event_type: Option<&str>,
+        start: Option<i64>,
+        end: Option<i64>,
+        page: usize,
+        size: usize,
+    ) -> (Vec<SecurityEvent>, usize) {
+        let all = self.list_all();
+        let filtered: Vec<SecurityEvent> = all
+            .into_iter()
+            .filter(|e| {
+                if let Some(ty) = event_type {
+                    if e.event_type.as_str() != ty {
+                        return false;
+                    }
+                }
+                if let Some(s) = start {
+                    if e.created_at < s {
+                        return false;
+                    }
+                }
+                if let Some(en) = end {
+                    if e.created_at > en {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+        let total = filtered.len();
+        let page = page.max(1);
+        let size = size.max(1);
+        let start_idx = (page - 1) * size;
+        let paged = if start_idx >= total {
+            Vec::new()
+        } else {
+            let end_idx = (start_idx + size).min(total);
+            filtered[start_idx..end_idx].to_vec()
+        };
+        (paged, total)
+    }
+}
+
 // ── 全局组合 Store ──────────────────────────────────────────────────
 
-/// 组合日志存储（请求日志 + 审计日志）。
+/// 组合日志存储（请求日志 + 审计日志 + 安全事件）。
 ///
 /// 加入 AppState 供各处使用。
 pub struct LogStore {
     pub requests: RequestLogStore,
     pub audits: AuditLogStore,
+    pub security: SecurityEventStore,
 }
 
 impl LogStore {
     pub fn new(store: Arc<FileStore>) -> Self {
         Self {
             requests: RequestLogStore::new(store.clone()),
-            audits: AuditLogStore::new(store),
+            audits: AuditLogStore::new(store.clone()),
+            security: SecurityEventStore::new(store),
         }
     }
 
@@ -461,6 +663,13 @@ impl LogStore {
         entry.after = after.map(|v| serde_json::to_string(&v).unwrap_or_default());
         if let Err(e) = self.audits.add(entry) {
             tracing::warn!("Failed to record audit log: {e}");
+        }
+    }
+
+    /// 便捷方法：记录安全事件（忽略错误，仅 tracing）
+    pub fn record_security(&self, event: SecurityEvent) {
+        if let Err(e) = self.security.add(event) {
+            tracing::warn!("Failed to record security event: {e}");
         }
     }
 }
