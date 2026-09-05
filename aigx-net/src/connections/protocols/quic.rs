@@ -9,7 +9,7 @@ use super::super::ProtocolHandler;
 pub struct QuicHandler;
 
 impl ProtocolHandler for QuicHandler {
-    fn handle(&self, &[u8]) -> Vec<u8> {
+    fn handle(&self, data: &[u8]) -> Vec<u8> {
         // QUIC 分包和加密
         data.to_vec()
     }

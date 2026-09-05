@@ -24,11 +24,6 @@ import Security from './pages/Security';
 import IpManagement from './pages/IpManagement';
 import NetworkLayer from './pages/NetworkLayer';
 
-interface AuthToken {
-  token: string;
-  expiresAt: number;
-}
-
 function isAuthenticated(): boolean {
   const token = localStorage.getItem('token');
   const expiresAt = localStorage.getItem('expires_at');

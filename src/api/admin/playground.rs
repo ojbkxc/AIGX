@@ -155,11 +155,11 @@ pub async fn handle_playground_channels(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let channels = state.channel_store.list().iter().map(|c| json!({
-        "id": c.id,
-        "name": c.name,
-        "status": c.status,
-        "models": c.models,
+    let channels: Vec<Value> = state.channel_store.list().iter().map(|c| json!({
+        "id": &c.id,
+        "name": &c.name,
+        "status": &c.status,
+        "models": &c.models,
     })).collect();
     Ok(Json(json!({ "success": true, "data": channels })))
 }

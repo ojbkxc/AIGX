@@ -1,6 +1,6 @@
 //! 会话管理模块
 //!
-//! 管理AI服务的会话生命周期和智能路由
+//! 管理 AI 服务的会话生命周期和智能路由
 //!
 //! 特性：
 //! - 会话池复用
@@ -8,29 +8,25 @@
 //! - 生命周期管理
 //! - 会话健康度监控
 
+pub mod router;
 pub mod session;
 pub mod session_pool;
-pub mod router;
+pub use router::*;
 pub use session::*;
 pub use session_pool::*;
-pub use router::*;
 
-use std::time::{Duration, UNIX_EPOCH};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use tokio::sync::RwLock as AsyncRwLock;
-use dashmap::DashMap;
-use anyhow::{Result, Context};
-use tracing::{debug, error, info, warn};
+use std::time::Duration;
 
 /// 会话状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
     /// 创建中
     Creating,
-    /// 已创建
+    /// 已创建（空闲可用）
     Active,
-    /// 活动中
+    /// 使用中
     ActiveUsing,
     /// 销毁中
     Destroying,
@@ -38,8 +34,27 @@ pub enum SessionState {
     Destroyed,
 }
 
-/// AI服务提供商类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+impl SessionState {
+    /// 状态是否可被调度
+    pub fn is_available(self) -> bool {
+        matches!(self, Self::Active | Self::ActiveUsing)
+    }
+
+    /// 机器可读的状态名
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Creating => "creating",
+            Self::Active => "active",
+            Self::ActiveUsing => "active_using",
+            Self::Destroying => "destroying",
+            Self::Destroyed => "destroyed",
+        }
+    }
+}
+
+/// AI 服务提供商类型
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AICloudProvider {
     OpenAI,
     Anthropic,
@@ -53,7 +68,7 @@ pub enum AICloudProvider {
 pub struct SessionConfig {
     /// 服务提供商
     pub provider: AICloudProvider,
-    /// 模型ID
+    /// 模型 ID
     pub model_id: String,
     /// 会话名称
     pub session_name: Option<String>,
@@ -72,13 +87,13 @@ impl Default for SessionConfig {
             model_id: "gpt-3.5-turbo".to_string(),
             session_name: None,
             max_messages: 50,
-            session_ttl: Duration::from_secs(72 * 3600), // 72小时
+            session_ttl: Duration::from_secs(72 * 3600), // 72 小时
             message_chunk_size: 10,
         }
     }
 }
 
-/// 会话信息
+/// 会话信息快照
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub id: String,
@@ -89,31 +104,7 @@ pub struct SessionInfo {
     pub last_message_id: i64,
     pub created_at: i64,
     pub last_used_at: i64,
-    pub metaHashMap<String, String>,
-}
-
-/// 智能会话路由
-pub struct SmartRouter {
-    /// 日志记录器
-    logger: Arc<dyn Logging + Send + Sync>,
-    /// 路由策略
-    strategy: RouterStrategy,
-    /// 负载均衡器
-    load_balancer: LoadBalancer,
-}
-
-/// 日志接口
-pub trait Logging: Send + Sync {
-    fn log(&self, message: String, level: LogLevel);
-}
-
-/// 日志级别
-#[derive(Debug, Clone, Copy)]
-pub enum LogLevel {
-    Debug,
-    Info,
-    Warn,
-    Error,
+    pub metadata: HashMap<String, String>,
 }
 
 /// 路由策略
@@ -121,110 +112,51 @@ pub enum LogLevel {
 pub enum RouterStrategy {
     /// 基于延迟
     LatencyAware,
-    /// 基于权重
-    Weighted,
-    /// 基于成功率
-    SuccessRate,
+    /// 基于最近使用（LRU）
+    LeastRecentlyUsed,
     /// 随机选择
     Random,
-    /// 最近最少使用
-    LeastRecentlyUsed,
+}
+
+/// 智能会话路由
+pub struct SmartRouter {
+    strategy: RouterStrategy,
 }
 
 impl SmartRouter {
-    /// 创建新的智能路由
+    /// 创建新的智能路由（默认延迟感知）
     pub fn new() -> Self {
         Self {
-            logger: Arc::new(DefaultLogger),
             strategy: RouterStrategy::LatencyAware,
-            load_balancer: LoadBalancer::default(),
         }
     }
 
-    /// 选择最佳会话
-    pub async fn select_session(&self, sessions: &[Arc<Session>]) -> Option<Arc<Session>> {
-        if sessions.is_empty() {
+    /// 选择最佳会话（延迟感知 = 最近使用的连接复用度最高）
+    pub fn select_session(&self, sessions: &[std::sync::Arc<Session>]) -> Option<std::sync::Arc<Session>> {
+        let available: Vec<_> = sessions
+            .iter()
+            .filter(|s| s.is_available())
+            .cloned()
+            .collect();
+
+        if available.is_empty() {
             return None;
         }
 
         match self.strategy {
-            RouterStrategy::LatencyAware => {
-                self.latency_aware_selection(sessions)
-            }
-            RouterStrategy::Weighted => {
-                self.weighted_selection(sessions)
-            }
-            RouterStrategy::SuccessRate => {
-                self.success_rate_selection(sessions)
-            }
-            RouterStrategy::Random => {
-                self.random_selection(sessions)
-            }
-            RouterStrategy::LeastRecentlyUsed => {
-                self.lru_selection(sessions)
-            }
+            RouterStrategy::LatencyAware => available
+                .into_iter()
+                .max_by_key(|s| s.last_used())
+                .map(std::sync::Arc::clone),
+            RouterStrategy::LeastRecentlyUsed => available
+                .into_iter()
+                .min_by_key(|s| s.last_used())
+                .map(std::sync::Arc::clone),
+            RouterStrategy::Random => available
+                .into_iter()
+                .nth(fastrand_usize(available.len()))
+                .map(std::sync::Arc::clone),
         }
-    }
-
-    /// 延迟感知选择
-    fn latency_aware_selection(&self, sessions: &[Arc<Session>]) -> Option<Arc<Session>> {
-        let mut sessions_by_latency: Vec<_> = sessions.iter()
-            .filter_map(|s| s.current_latency().map(|latency| (latency, s)))
-            .collect();
-
-        if sessions_by_latency.is_empty() {
-            return None;
-        }
-
-        sessions_by_latency.sort_by_key(|(latency, _)| *latency);
-        sessions_by_latency[0].1.clone()
-    }
-
-    /// 权重选择
-    fn weighted_selection(&self, sessions: &[Arc<Session>]) -> Option<Arc<Session>> {
-        let total_weight: u64 = sessions.iter()
-            .map(|s| s.current_weight() as u64)
-            .sum();
-
-        if total_weight == 0 {
-            return None;
-        }
-
-        let random = rand::random::<u64>() % total_weight;
-        let mut accumulated = 0;
-
-        for session in sessions {
-            accumulated += session.current_weight() as u64;
-            if random < accumulated {
-                return Some(Arc::clone(session));
-            }
-        }
-
-        // Fallback: return random session
-        sessions[rand::random::<usize>() % sessions.len()].clone()
-    }
-
-    /// 成功率选择
-    fn success_rate_selection(&self, sessions: &[Arc<Session>]) -> Option<Arc<Session>> {
-        sessions.iter()
-            .max_by_key(|s| s.success_rate())
-            .cloned()
-    }
-
-    /// 随机选择
-    fn random_selection(&self, sessions: &[Arc<Session>]) -> Option<Arc<Session>> {
-        if sessions.is_empty() {
-            return None;
-        }
-
-        sessions[rand::random::<usize>() % sessions.len()].clone()
-    }
-
-    /// LRU选择
-    fn lru_selection(&self, sessions: &[Arc<Session>]) -> Option<Arc<Session>> {
-        sessions.iter()
-            .min_by_key(|s| s.last_used().unwrap_or(i64::MAX))
-            .cloned()
     }
 
     /// 设置路由策略
@@ -238,106 +170,53 @@ impl SmartRouter {
     }
 }
 
-/// 负载均衡器
-pub struct LoadBalancer {
-    /// 策略
-    strategy: LoadBalanceStrategy,
-    /// 负载均衡器名称
-    name: String,
-}
-
-impl LoadBalancer {
-    /// 创建负载均衡器
-    pub fn new(strategy: LoadBalanceStrategy, name: impl Into<String>) -> Self {
-        Self {
-            strategy,
-            name: name.into(),
-        }
-    }
-
-    /// 计算最优会话
-    pub fn balance(&self, sessions: &[Arc<Session>]) -> Option<Arc<Session>> {
-        match self.strategy {
-            LoadBalanceStrategy::RoundRobin => {
-                let idx = (self.name.len() as usize % sessions.len());
-                Some(sessions[idx].clone())
-            }
-            LoadBalanceStrategy::LeastLoaded => {
-                sessions.iter()
-                    .min_by_key(|s| s.current_load())
-                    .cloned()
-            }
-            LoadBalanceStrategy::LeastFailed => {
-                sessions.iter()
-                    .min_by(|a, b| a.error_count().cmp(&b.error_count()))
-                    .cloned()
-            }
-        }
-    }
-}
-
-/// 负载均衡策略
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoadBalanceStrategy {
-    /// 轮询
-    RoundRobin,
-    /// 最空闲
-    LeastLoaded,
-    /// 最少失败
-    LeastFailed,
-}
-
-impl Default for LoadBalancer {
+impl Default for SmartRouter {
     fn default() -> Self {
-        Self::new(LoadBalanceStrategy::LeastLoaded, "default")
+        Self::new()
     }
 }
 
-/// 默认日志实现
-struct DefaultLogger;
-impl Logging for DefaultLogger {
-    fn log(&self, message: String, level: LogLevel) {
-        match level {
-            LogLevel::Debug => debug!("{}", message),
-            LogLevel::Info => info!("{}", message),
-            LogLevel::Warn => warn!("{}", message),
-            LogLevel::Error => error!("{}", message),
-        }
+/// 轻量随机（避免引入 rand 依赖：基于时间的伪随机下标）
+fn fastrand_usize(bound: usize) -> usize {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    if bound == 0 {
+        return 0;
     }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as usize;
+    nanos % bound
 }
 
-/// 模拟状态转换表
+/// 会话状态转换表（供诊断/展示使用）
 pub struct SessionTransitionTable {
-    /// 转换规则
-    transitions: Vec<(String, String, bool)>,
+    transitions: Vec<(String, String)>,
 }
 
 impl SessionTransitionTable {
     pub fn new() -> Self {
         Self {
             transitions: vec![
-                ("creating".to_string(), "active".to_string(), true),
-                ("creating".to_string(), "destroyed".to_string(), true),
-                ("active".to_string(), "active_using".to_string(), true),
-                ("active_using".to_string(), "active".to_string(), true),
-                ("active_using".to_string(), "destroying".to_string(), true),
-                ("active".to_string(), "destroying".to_string(), true),
-                ("destroying".to_string(), "destroyed".to_string(), true),
-                ("active_using".to_string(), "destroyed".to_string(), true),
-                ("active_using".to_string(), "active".to_string(), true), // 也会回到active
-            ],
+                ("creating", "active"),
+                ("creating", "destroyed"),
+                ("active", "active_using"),
+                ("active_using", "active"),
+                ("active", "destroying"),
+                ("active_using", "destroying"),
+                ("destroying", "destroyed"),
+            ]
+            .into_iter()
+            .map(|(f, t)| (f.to_string(), t.to_string()))
+            .collect(),
         }
     }
 
     pub fn can_transition(&self, from: &str, to: &str) -> bool {
-        self.transitions.iter()
-            .any(|(f, t, _)| f == from && t == to)
+        self.transitions.iter().any(|(f, t)| f == from && t == to)
     }
 
     pub fn transitions(&self) -> Vec<(String, String)> {
-        self.transitions.iter()
-            .filter(|(_, _, valid)| *valid)
-            .map(|(f, t, _)| (f.clone(), t.clone()))
-            .collect()
+        self.transitions.clone()
     }
 }

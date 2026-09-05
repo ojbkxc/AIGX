@@ -27,7 +27,7 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 # 默认x86_64平台构建
-FROM builders AS builder-x86_64
+FROM builder-multiplatform AS builder-x86_64
 FROM builder-multiplatform AS builder-aarch64
 
 # 生产环境基础镜像（多平台）
@@ -36,7 +36,7 @@ FROM debian:bookworm-slim
 WORKDIR /app
 
 # 安装运行时依赖（arm64和amd64都需要）
-RUN apt-get Update && \
+RUN apt-get update && \
     apt-get install -y \
     ca-certificates \
     libssl3 \

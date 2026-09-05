@@ -92,7 +92,7 @@ pub async fn handle_topup_request(
     let callback = callback_address(&state, &config);
     let return_url = format!("{}{}", callback, make_return_path(""));
     let notify_url = format!("{}/api/user/epay/notify", callback.trim_end_matches('/'));
-    let trade_no = user::new_trade_no("USR", &user.id);
+    let trade_no = new_trade_no("USR", &user.id);
     let order = TopUpOrder {
         trade_no: trade_no.clone(),
         user_id: user.id.clone(),
@@ -112,7 +112,7 @@ pub async fn handle_topup_request(
     }
     // 注意：这里需要返回完整的订单创建响应，但具体实现依赖于EpayClient
     // 暂时返回订单创建成功
-    Ok(Json(json!({
+    Json(json!({
         "success": true,
         "data": {
             "trade_no": trade_no,
@@ -125,7 +125,7 @@ pub async fn handle_topup_request(
             "return_url": return_url,
         }
     }))
-    .into_response())
+    .into_response()
 }
 
 /// GET /api/orders - 列出所有订单

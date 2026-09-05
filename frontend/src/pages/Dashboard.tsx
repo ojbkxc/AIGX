@@ -115,7 +115,14 @@ export default function Dashboard(): JSX.Element {
 
   const loadRealtimeOnly = async (): Promise<void> => {
     try {
-      // 实现调用同步逻辑...
+      const res = await api.getRealtime().catch(() => null);
+      if (res?.data) {
+        setRealtime({
+          qps: res.data.qps,
+          rps: res.data.rps,
+          avg_latency_ms: res.data.avg_latency_ms,
+        });
+      }
     } catch {
       // 轮询失败静默处理
     }
@@ -125,13 +132,25 @@ export default function Dashboard(): JSX.Element {
     setLoading(true);
     setError('');
     try {
-      const data = await Promise.all([
+      const [usageRes, tokensRes, limitsRes, trendRes] = await Promise.all([
         api.getUsageSummary().catch(() => null),
         api.getTodayTokens().catch(() => null),
         api.getLimits().catch(() => null),
         api.getTrend().catch(() => null),
       ]);
-      // 解析数据...
+      setUsage(usageRes?.data ?? usageRes ?? null);
+      setTokenStats(tokensRes?.data ?? tokensRes ?? null);
+      setLimits(limitsRes?.data ?? limitsRes ?? null);
+      const trendList: TrendData[] = Array.isArray(trendRes?.data) ? trendRes.data : [];
+      setTrend(trendList);
+      setConsumptionTrend(trendList);
+      setConsumptionTrendData(trendList);
+      setModelDist(Array.isArray(usageRes?.data?.model_dist) ? usageRes.data.model_dist : []);
+      setModelDistributionData(Array.isArray(usageRes?.data?.model_dist) ? usageRes.data.model_dist : []);
+      setUserRanking(Array.isArray(usageRes?.data?.user_ranking) ? usageRes.data.user_ranking : []);
+      setUserRankingData(Array.isArray(usageRes?.data?.user_ranking) ? usageRes.data.user_ranking : []);
+      setChannelHealth(Array.isArray(usageRes?.data?.channel_health) ? usageRes.data.channel_health : []);
+      setChannelHealthData(Array.isArray(usageRes?.data?.channel_health) ? usageRes.data.channel_health : []);
     } catch (err: any) {
       setError(err.message || '加载数据失败');
     } finally {
@@ -374,9 +393,27 @@ function getTrendVal(d: TrendData): number {
 
 // 辅助组件占位
 function TrendChart({ data }: TrendChartProps): JSX.Element | null {
-  return null;
+  if (!data.length) return null;
+  return (
+    <div className="trend-chart">
+      {data.map((point, i) => (
+        <div key={i} className="trend-point">
+          {point.label || point.date}: {point.value ?? point.tokens ?? point.cost ?? 0}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function PieChart({ data }: PieChartProps): JSX.Element | null {
-  return null;
+  if (!data.length) return null;
+  return (
+    <div className="pie-chart">
+      {data.map((item, i) => (
+        <div key={i} className="pie-item">
+          {item.label || item.model || item.name}: {item.value ?? item.count ?? 0}
+        </div>
+      ))}
+    </div>
+  );
 }

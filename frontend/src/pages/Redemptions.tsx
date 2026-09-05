@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../api';
+import type { Redemption } from './types';
 
 export default function Redemptions(): JSX.Element {
   const [redemptions, setRedemptions] = useState<Redemption[]>([]);
@@ -16,7 +17,7 @@ export default function Redemptions(): JSX.Element {
   };
 
   useEffect(() => {
-    loadRedemptions();
+    void loadRedemptions();
   }, []);
 
   return (

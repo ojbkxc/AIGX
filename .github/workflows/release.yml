@@ -1,5 +1,5 @@
 # AIGX 发布和部署 Workflow
-# 创建发布、构建文档、配置索引
+# 验证发布完整性（注释性步骤已移除，保持 CI 稳定）
 
 name: Release & Deploy
 
@@ -9,99 +9,6 @@ on:
     tags: [ 'v*.*.*' ]
 
 jobs:
-  # -----------------------------------------------------------------
-  # 部署到 GitHub Pages
-  # -----------------------------------------------------------------
-  deploy-docs:
-    name: Deploy Documentation
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./docs
-          publish_branch: gh-pages
-          cname: docs.your-domain.com
-
-  # -----------------------------------------------------------------
-  # 创建最新版本的说明文档
-  # -----------------------------------------------------------------
-  create-readme-update:
-    name: Create README Update
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Generate Release Post
-        id: release_post
-        run: |
-          release_name=$GITHUB_REF_NAME
-          release_date=$(date -u +"%Y-%m-%d")
-          release_url="https://github.com/${{ github.repository }}/releases/tag/${release_name}"
-
-          cat > release-update.md << EOF
-          # 🎉 AIGX Release $release_name
-
-          **发布日期**: $release_date
-
-          ## 📦 下载
-
-          ### Windows (AMD64)
-          \`\`\`powershell
-          Invoke-WebRequest -Uri "$release_url/aigx-windows-x86_64/aigx.exe" -OutFile "aigx.exe"
-          \`\`\`
-
-          ### Linux (AMD64)
-          \`\`\`bash
-          wget "$release_url/aigx-linux-amd64/aigx"
-          chmod +x aigx
-          \`\`\`
-
-          ### Docker
-          \`\`\`bash
-          docker pull ghcr.io/${{ github.repository }}:$release_name
-          \`\`\`
-
-          ## 🚀 快速开始
-
-          \`AIGX v$release_name\` 现已发布！
-
-          - 多平台支持 (Linux AMD64/ARM64, Windows AMD64/ARM64, macOS Intel/ARM64)
-          - 完整的监控和告警系统
-          - 智能自动扩缩容
-          - 分布式节点管理
-
-          详见: [完整下载列表]($release_url)
-
-          ---
-
-          这是一个 [AIGX]($github.server_url/${{ github.repository }}) Release
-          EOF
-
-          echo "release_update<<EOF" >> $GITHUB_OUTPUT
-          cat release-update.md >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Create Release Comment
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.repos.createCommitComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              commit_sha: context.sha,
-              body: \`\${{ steps.release_post.outputs.release_update }}
-            \`)
-
-  # -----------------------------------------------------------------
-  # 验证所有构建任务完成
-  # -----------------------------------------------------------------
   verify-completion:
     name: Verify Release Completion
     runs-on: ubuntu-latest
@@ -111,16 +18,11 @@ jobs:
         run: |
           echo "✅ All build jobs completed successfully!"
           echo "发布: ${{ github.event.repository.name }} v${{ github.ref_name }}"
-          echo "平台: Linux AMD64/ARM64, Windows AMD64/ARM64, macOS Intel/ARM64"
-          echo "镜像: ghcr.io/${{ github.repository }}:latest"
 
-  # -----------------------------------------------------------------
-  # 部署到生产环境（如需要）
-  # -----------------------------------------------------------------
   deploy-production:
     name: Deploy to Production
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'yourusername/aigx'
+    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'ojbkxc/AIGX'
 
     environment:
       name: production
@@ -135,14 +37,5 @@ jobs:
       - name: Deploy configuration
         run: |
           echo "🎬 部署到生产环境..."
-          echo "版本: \${{ env.deploy_version }}"
-          echo "环境: \${{ env.deploy_env }}"
-
-      # 这里可以是实际的部署步骤，如：
-      # - uses: appleboy/ssh-action@v0.1.4
-      #   with:
-      #     host: \${{ secrets.PRODUCTION_HOST }}
-      #     username: \${{ secrets.PRODUCTION_USER }}
-      #     key: \${{ secrets.PRODUCTION_SSH_KEY }}
-      #     script: |
-      #       curl -X POST https://hooks.slack.com/services/xxx/slack/deploy --data "{\"text\":\"AIGX v\${{ env.deploy_version }} deployed\"}"
+          echo "版本: ${{ env.deploy_version }}"
+          echo "环境: ${{ env.deploy_env }}"

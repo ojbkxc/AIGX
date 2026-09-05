@@ -80,8 +80,7 @@ pub fn mask_channel(ch: &Channel) -> Value {
     let masked_key = if ch.api_key.is_empty() {
         String::new()
     } else if ch.api_key.chars().count() > 12 {
-        // 假设有 mask_with 函数，实际上应该在 common.rs
-        format!("{}{}...", &ch.api_key[..8], "...", &ch.api_key[ch.api_key.len() - 4..])
+        format!("{}...{}", &ch.api_key[..8], &ch.api_key[ch.api_key.len() - 4..])
     } else {
         "****".to_string()
     };

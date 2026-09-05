@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../api';
 
 export default function IpManagement(): JSX.Element {
   const [whitelist, setWhitelist] = useState<string[]>([]);
   const [blacklist, setBlacklist] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [whiteInput, setWhiteInput] = useState('');
+  const [blackInput, setBlackInput] = useState('');
 
   const loadIpLists = async () => {
     setLoading(true);
@@ -58,7 +60,7 @@ export default function IpManagement(): JSX.Element {
   };
 
   useEffect(() => {
-    loadIpLists();
+    void loadIpLists();
   }, []);
 
   return (
@@ -75,8 +77,10 @@ export default function IpManagement(): JSX.Element {
           <input
             type="text"
             placeholder="输入 IP 地址或端口范围（如 192.168.1.1 或 :8080）"
+            value={whiteInput}
+            onChange={(e) => setWhiteInput(e.target.value)}
           />
-          <button onClick={() => {/* 添加逻辑 */}}>添加到白名单</button>
+          <button onClick={() => void addToWhitelist(whiteInput)}>添加到白名单</button>
         </div>
         <div className="ip-list">
           {loading ? (
@@ -101,8 +105,10 @@ export default function IpManagement(): JSX.Element {
           <input
             type="text"
             placeholder="输入 IP 地址或端口范围"
+            value={blackInput}
+            onChange={(e) => setBlackInput(e.target.value)}
           />
-          <button onClick={() => {/* 添加逻辑 */}}>添加到黑名单</button>
+          <button onClick={() => void addToBlacklist(blackInput)}>添加到黑名单</button>
         </div>
         <div className="ip-list">
           {loading ? (

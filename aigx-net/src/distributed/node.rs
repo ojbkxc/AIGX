@@ -175,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_seen: Instant::now(),
         data_center: Some("dc1".to_string()),
         is_leader: true,
-        additional_metastd::collections::HashMap::new(),
+        additional_metadata: std::collections::HashMap::new(),
     };
 
     registry.register(node).await?;

@@ -246,7 +246,7 @@ pub async fn handle_delete_user(
     // 获取管理员 ID 用于审计
     let admin_id = admin_id_from_session_local(&state, &headers).await;
     // 查询用户用于记录审计
-    let user_before = state.user_store.get_by_id(&id).map(mask_user);
+    let user_before = state.user_store.get_by_id(&id).map(|u| mask_user(&u));
     match state.user_store.delete(&id) {
         Ok(_) => {
             // 记录审计日志

@@ -9,15 +9,13 @@
 //! - TLS 1.3 双向认证
 //! - 智能连接策略
 
-pub mod connection;
 pub mod connection_pool;
-pub mod protocols;
 pub mod health_check;
+pub mod protocols;
 
-pub use connection::*;
 pub use connection_pool::*;
-pub use protocols::*;
 pub use health_check::*;
+pub use protocols::*;
 
 use std::time::Duration;
 use anyhow::{Result, Context};
@@ -163,7 +161,8 @@ impl ConnectionMetadata {
 
 /// 连接接口
 ///
-/// 定义所有连接类型共有的操作
+/// 定义所有连接类型共有的操作（async-trait 以支持 dyn Connection）
+#[async_trait::async_trait]
 pub trait Connection: Send + Sync {
     /// 连接标识
     fn id(&self) -> &str;
@@ -174,11 +173,8 @@ pub trait Connection: Send + Sync {
     /// 连接地址
     fn address(&self) -> &str;
 
-    /// 升级连接
-    async fn upgrade(&self) -> Result<Box<dyn Connection>>;
-
     /// 发送数据
-    async fn send(&self, &[u8]) -> Result<usize>;
+    async fn send(&self, data: &[u8]) -> Result<usize>;
 
     /// 接收数据
     async fn recv(&self, buffer: &mut [u8]) -> Result<usize>;
@@ -190,7 +186,7 @@ pub trait Connection: Send + Sync {
     fn is_active(&self) -> bool;
 
     /// 指标收集
-    fn metrics(&self) -> ConnectionMetadata;
+    fn metadata(&self) -> ConnectionMetadata;
 }
 
 /// 创建连接配置

@@ -127,28 +127,12 @@ pub trait ConnectionStateTable: Send + Sync {
     /// 获取所有允许的转换
     fn transitions(&self) -> Vec<(String, String)>;
 
-    /// 获取默认转换表
-    fn default_transitions() -> Vec<(String, String)> {
-        vec![
-            ("idle".to_string(), "connecting".to_string()),
-            ("connecting".to_string(), "connected".to_string()),
-            ("connected".to_string(), "idle".to_string()),
-            ("connected".to_string(), "reconnecting".to_string()),
-            ("reconnecting".to_string(), "connected".to_string()),
-            ("reconnecting".to_string(), "idle".to_string()),
-            ("connected".to_string(), "disconnected".to_string()),
-            ("disconnected".to_string(), "connecting".to_string()),
-            ("idle".to_string(), "disconnected".to_string()),
-            ("error".to_string(), "connecting".to_string()),
-            ("error".to_string(), "disconnected".to_string()),
-        ]
-    }
 }
 
 impl Default for ConnectionStateManager {
     fn default() -> Self {
         Self::new(Arc::new(StateTransitionTable {
-            transitions: ConnectionStateManager::default_transitions(),
+            transitions: default_connection_transitions(),
         }))
     }
 }
@@ -234,4 +218,20 @@ impl HealthMetrics {
 
         latency_score * 0.6 + consistency_score * 0.4
     }
+}
+/// 默认连接状态转换表
+pub fn default_connection_transitions() -> Vec<(String, String)> {
+    vec![
+        ("idle".to_string(), "connecting".to_string()),
+        ("connecting".to_string(), "connected".to_string()),
+        ("connected".to_string(), "idle".to_string()),
+        ("connected".to_string(), "reconnecting".to_string()),
+        ("reconnecting".to_string(), "connected".to_string()),
+        ("reconnecting".to_string(), "idle".to_string()),
+        ("connected".to_string(), "disconnected".to_string()),
+        ("disconnected".to_string(), "connecting".to_string()),
+        ("idle".to_string(), "disconnected".to_string()),
+        ("error".to_string(), "connecting".to_string()),
+        ("error".to_string(), "disconnected".to_string()),
+    ]
 }

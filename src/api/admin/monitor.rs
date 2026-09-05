@@ -49,8 +49,8 @@ pub async fn handle_health(
 
 /// GET /api/monitor/healthz
 pub async fn handle_healthz(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    _headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     Ok(Json(json!({ "ok": true })))
 }

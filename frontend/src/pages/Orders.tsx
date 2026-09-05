@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../api';
+import type { Order } from './types';
 
 export default function Orders(): JSX.Element {
   const [orders, setOrders] = useState<Order[]>([]);

@@ -1,10 +1,23 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { api } from '../api';
 import type { User } from '../types';
 
 export default function Users(): JSX.Element {
   // 状态定义
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    void (async () => {
+      setLoading(true);
+      try {
+        const res = await api.listUsers();
+        setUsers(Array.isArray(res?.data) ? res.data : []);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
 
   return (
     <div>

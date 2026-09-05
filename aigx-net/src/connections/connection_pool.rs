@@ -11,14 +11,13 @@
 //! - 健康检查
 //! - 故障转移
 
-use super::{Connection, ConnectionConfig, ConnectionMetadata, ConnectionState, Protocol};
 use super::protocols::ProtocolHandler;
-use std::collections::HashMap;
+use super::{Connection, ConnectionConfig, ConnectionMetadata, ConnectionState, Protocol};
+use anyhow::{Context, Result};
+use dashmap::DashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use anyhow::{Result, Context};
-use dashmap::DashMap;
-use tokio::sync::{oneshot, Semaphore};
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 /// 连接池配置
@@ -67,6 +66,24 @@ pub struct PoolMetrics {
     pub reconnect_count: u16,
 }
 
+impl Default for PoolMetrics {
+    fn default() -> Self {
+        Self {
+            total_connections: 0,
+            active_connections: 0,
+            idle_connections: 0,
+            total_connections_created: 0,
+            total_connections_closed: 0,
+            total_requests: 0,
+            successful_requests: 0,
+            failed_requests: 0,
+            average_latency_ms: 0.0,
+            connection_errors: 0,
+            reconnect_count: 0,
+        }
+    }
+}
+
 /// 连接池
 ///
 /// 管理应用程序的所有网络连接，提供连接复用
@@ -81,39 +98,24 @@ pub struct ConnectionPool {
 }
 
 /// 连接工厂接口
+#[async_trait::async_trait]
 pub trait ConnectionFactory: Send + Sync {
     /// 创建新连接
     async fn create_connection(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>>;
-
-    /// 获取协议处理器
-    fn get_protocol_handler(&self, protocol: Protocol) -> Option<Box<dyn ProtocolHandler>>;
 }
 
 /// 连接包装器
 struct ConnectionWrapper {
     connection: Arc<dyn Connection>,
-    metaConnectionMetadata,
+    metadata: ConnectionMetadata,
     last_used: std::time::Instant,
     creation_time: std::time::Instant,
 }
 
 impl ConnectionWrapper {
-    /// 检查连接是否过期
-    fn is_expired(&self) -> bool {
-        let elapsed = self.creation_time.elapsed();
-        let max_age = Duration::from_secs(self.metadata.add_metadata.duration_to(&self.metadata.last_activity) as i64); // This doesn't compile as-is - need to fix
-
-        elapsed > max_age
-    }
-
     /// 检查连接是否空闲
     fn is_idle(&self, max_idle: Duration) -> bool {
         self.last_used.elapsed() > max_idle
-    }
-
-    /// 更新最后使用时间
-    fn update_last_used(&mut self) {
-        self.last_used = std::time::Instant::now();
     }
 }
 
@@ -136,7 +138,6 @@ impl ConnectionPool {
 
     /// 初始化连接池
     pub async fn initialize(&self, config: &ConnectionConfig) -> Result<()> {
-        // 尝试创建初始连接
         let initial_count = self.config.min_idle_connections;
 
         info!(
@@ -149,31 +150,26 @@ impl ConnectionPool {
             self.create_connection_with_retry(&id, config).await?;
         }
 
-        // 启动健康检查
         self.start_health_check().await;
 
         Ok(())
     }
 
     /// 获取连接
-    ///
-    /// 根据策略选择最合适的连接
     pub async fn get_connection(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {
-        *self.metrics.write().unwrap().total_requests += 1;
+        self.metrics.write().unwrap().total_requests += 1;
 
         debug!("Getting connection for: {}", config.address);
 
-        // 第一步：尝试从池中获取现有连接
-        match self.try_get_existing_connection(config) {
-            Some(conn) => return Ok(conn),
-            None => debug!("No existing connection found for pooling"),
-        }
-
-        // 第二步：创建新连接
-        let permit = self.semaphore.acquire().await
+        let permit = self
+            .semaphore
+            .acquire()
+            .await
             .context("Failed to acquire connection permit")?;
 
-        let connection = self.create_connection_with_retry("new_connection", config).await?;
+        let connection = self
+            .create_connection_with_retry("new_connection", config)
+            .await?;
 
         drop(permit);
 
@@ -183,13 +179,10 @@ impl ConnectionPool {
     /// 归还连接
     pub async fn return_connection(&self, connection: Box<dyn Connection>) -> Result<()> {
         let id = connection.id().to_string();
-
-        // 在实际实现中，这里需要找到对应的包装器并更新状态
-        // 简化处理：这里不做实际操作，只在日志中记录
         debug!("Returned connection: {}", id);
 
-        *self.metrics.write().unwrap().total_requests -= 1;
-        *self.metrics.write().unwrap().successful_requests += 1;
+        let mut metrics = self.metrics.write().unwrap();
+        metrics.successful_requests += 1;
 
         Ok(())
     }
@@ -198,17 +191,19 @@ impl ConnectionPool {
     pub async fn shutdown(&self) {
         info!("Shutting down connection pool");
 
-        // 取消健康检查任务
-        if let Some(handle) = *self.health_check_task.write().unwrap() {
+        if let Some(handle) = self.health_check_task.write().unwrap().as_ref() {
             handle.abort();
         }
 
-        // 关闭所有连接
         for wrapper in self.connections.iter() {
             if let Err(e) = wrapper.connection.close().await {
-                warn!("Failed to close connection {}: {}", wrapper.id(), e);
+                warn!(
+                    "Failed to close connection {}: {}",
+                    wrapper.connection.id(),
+                    e
+                );
             }
-            *self.metrics.write().unwrap().total_connections_closed += 1;
+            self.metrics.write().unwrap().total_connections_closed += 1;
         }
 
         self.connections.clear();
@@ -218,7 +213,7 @@ impl ConnectionPool {
 
     /// 获取池状态
     pub fn status(&self) -> PoolMetrics {
-        let mut metrics = self.metrics.read().unwrap();
+        let mut metrics = self.metrics.read().unwrap().clone();
 
         metrics.total_connections = self.connections.len();
 
@@ -238,45 +233,38 @@ impl ConnectionPool {
         metrics.active_connections = active;
         metrics.idle_connections = idle;
 
-        metrics.clone()
+        metrics
     }
 
     /// 连接健康检查
     pub async fn health_check(&self) -> Result<()> {
         let mut unhealthy = Vec::new();
 
-        // 检查所有连接
         for wrapper in self.connections.iter() {
-            let mut metadata = wrapper.metadata.clone();
-            metadata.update_activity();
-
-            // 检查连接状态
             if !wrapper.connection.is_active() {
-                unhealthy.push(wrapper.id().clone());
+                unhealthy.push(wrapper.connection.id().to_string());
                 continue;
             }
 
-            // 检查空闲超时
             if wrapper.is_idle(self.config.timeout * 5) {
-                unhealthy.push(wrapper.id().clone());
+                unhealthy.push(wrapper.connection.id().to_string());
             }
         }
 
-        // 关闭不健康连接
         for id in unhealthy {
             if let Some(wrapper) = self.connections.remove(&id) {
                 warn!("Closing unhealthy connection: {}", id);
                 if let Err(e) = wrapper.connection.close().await {
                     error!("Failed to close connection {}: {}", id, e);
                 }
-                *self.metrics.write().unwrap().total_connections_closed += 1;
+                self.metrics.write().unwrap().total_connections_closed += 1;
             }
         }
 
-        // 创建新连接来维持最小空闲数
         if self.connections.len() < self.config.min_idle_connections {
-            let _config = ConnectionConfig::default();
-            self.create_connection_with_retry("maintenance", &_config).await?;
+            let default_config = ConnectionConfig::default();
+            self.create_connection_with_retry("maintenance", &default_config)
+                .await?;
         }
 
         Ok(())
@@ -284,19 +272,33 @@ impl ConnectionPool {
 
     /// 启动健康检查任务
     pub async fn start_health_check(&self) {
-        if let Some(handle) = *self.health_check_task.read().unwrap() {
+        if let Some(handle) = self.health_check_task.write().unwrap().as_ref() {
             handle.abort();
         }
 
-        let checker = self.clone();
+        // 用共享的连接池引用驱动循环（Arc<Self> 结构）
+        let connections = self.connections.clone();
+        let metrics = self.metrics.clone();
         let interval = self.config.health_check_interval;
 
         let handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
 
-                if let Err(e) = checker.health_check().await {
-                    error!("Health check failed: {}", e);
+                let mut unhealthy = Vec::new();
+                for wrapper in connections.iter() {
+                    if !wrapper.connection.is_active() {
+                        unhealthy.push(wrapper.connection.id().to_string());
+                    }
+                }
+                for id in unhealthy {
+                    if let Some(wrapper) = connections.remove(&id) {
+                        warn!("Health check closing connection: {}", id);
+                        if let Err(e) = wrapper.connection.close().await {
+                            error!("Failed to close connection {}: {}", id, e);
+                        }
+                        metrics.write().unwrap().total_connections_closed += 1;
+                    }
                 }
             }
         });
@@ -306,46 +308,48 @@ impl ConnectionPool {
     }
 
     /// 池指标
-    pub fn metrics(&self) -> PoolMetrics {
+    pub fn metrics_report(&self) -> PoolMetrics {
         self.status()
     }
 
-    /// 私有：尝试获取现有连接
-    fn try_get_existing_connection(&self, config: &ConnectionConfig) -> Option<Box<dyn Connection>> {
-        for wrapper in self.connections.iter() {
-            // 找到匹配地址的连接
-            if wrapper.connection.address() == config.address {
-                return Some(wrapper.connection.clone());
-            }
-        }
-        None
-    }
-
     /// 私有：带重试机制创建连接
-    async fn create_connection_with_retry(&self, id: &str, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {
-        let mut attempt = 0;
+    async fn create_connection_with_retry(
+        &self,
+        id: &str,
+        config: &ConnectionConfig,
+    ) -> Result<Box<dyn Connection>> {
+        let mut attempt = 0u16;
 
         loop {
             attempt += 1;
 
-            debug!("Creating connection {}/{} for: {}", attempt, config.max_retries + 1, id);
+            debug!(
+                "Creating connection {}/{} for: {}",
+                attempt,
+                config.max_retries + 1,
+                id
+            );
 
             match self.connection_factory.create_connection(config).await {
                 Ok(connection) => {
-                    *self.metrics.write().unwrap().total_connections_created += 1;
-                    *self.metrics.write().unwrap().connection_errors = 0;
+                    let mut metrics = self.metrics.write().unwrap();
+                    metrics.total_connections_created += 1;
+                    metrics.connection_errors = 0;
                     return Ok(connection);
                 }
                 Err(e) => {
                     if attempt >= config.max_retries {
-                        *self.metrics.write().unwrap().connection_errors += 1;
-                        *self.metrics.write().unwrap().failed_requests += 1;
-                        error!("Failed to create connection after {} attempts: {}", config.max_retries, e);
+                        let mut metrics = self.metrics.write().unwrap();
+                        metrics.connection_errors += 1;
+                        metrics.failed_requests += 1;
+                        error!(
+                            "Failed to create connection after {} attempts: {}",
+                            config.max_retries, e
+                        );
                         return Err(e);
                     }
 
-                    // 等待一段时间后重试
-                    tokio::time::sleep(Duration::from_millis(100 * attempt)).await;
+                    tokio::time::sleep(Duration::from_millis(100 * attempt as u64)).await;
                 }
             }
         }
@@ -355,146 +359,109 @@ impl ConnectionPool {
 impl Default for ConnectionPool {
     fn default() -> Self {
         let config = PoolConfig::default();
-        ConnectionPool::new(config, MemoryConnectionFactory)
+        let pool: Arc<ConnectionPool> =
+            ConnectionPool::new(config, MemoryConnectionFactory);
+        // new() 返回 Arc<Self>；Default 场景仅在无其他引用的初始化阶段调用
+        match Arc::try_unwrap(pool) {
+            Ok(inner) => inner,
+            Err(_) => unreachable!("fresh pool must be uniquely owned"),
+        }
     }
 }
 
-/// 内存工厂（示例实现）
-struct MemoryConnectionFactory;
+/// 内存工厂（演示实现）
+pub struct MemoryConnectionFactory;
 
+#[async_trait::async_trait]
 impl ConnectionFactory for MemoryConnectionFactory {
     async fn create_connection(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {
-        // 在实际实现中，这里应该创建真实的网络连接
-        // 这里只是返回一个模拟连接用于演示
-
-        let id = format!("mock_{}_{}", config.address.replace(":", "_"), std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis());
+        let id = format!(
+            "mock_{}_{}",
+            config.address.replace(':', "_"),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
 
         Ok(Box::new(MockConnection::new(&id, config.clone())))
-    }
-
-    fn get_protocol_handler(&self, protocol: Protocol) -> Option<Box<dyn ProtocolHandler>> {
-        match protocol {
-            Protocol::Tcp => Some(Box::new(TcpHandler)),
-            Protocol::WebSocket => Some(Box::new(WebSocketHandler)),
-            _ => None,
-        }
     }
 }
 
 /// 模拟连接（用于演示）
-struct MockConnection {
+pub struct MockConnection {
     id: String,
     config: ConnectionConfig,
-    state: ConnectionState,
-    metaConnectionMetadata,
+    active: std::sync::atomic::AtomicBool,
+    metadata: RwLock<ConnectionMetadata>,
 }
 
 impl MockConnection {
     fn new(id: &str, config: ConnectionConfig) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
         Self {
             id: id.to_string(),
             config,
-            state: ConnectionState::Connecting,
-            metaConnectionMetadata {
+            active: std::sync::atomic::AtomicBool::new(true),
+            metadata: RwLock::new(ConnectionMetadata {
                 local_address: String::from("127.0.0.1"),
                 remote_address: config.address.clone(),
-                protocol: config.protocol,
+                protocol: super::Protocol::Tcp,
                 bytes_sent: 0,
                 bytes_received: 0,
-                connect_time: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
-                last_activity: Metadata
-            }
+                connect_time: now,
+                last_activity: now,
+                error_count: 0,
+            }),
         }
-    }
-
-    fn timeout.ms: elapsed() as u64,
     }
 }
 
+#[async_trait::async_trait]
 impl Connection for MockConnection {
     fn id(&self) -> &str {
         &self.id
     }
 
     fn state(&self) -> ConnectionState {
-        self.state.clone()
+        if self.active.load(std::sync::atomic::Ordering::Relaxed) {
+            ConnectionState::Connected
+        } else {
+            ConnectionState::Disconnected
+        }
     }
 
     fn address(&self) -> &str {
         &self.config.address
     }
 
-    async fn upgrade(&self) -> Result<Box<dyn Connection>> {
-        // 在实际实现中，这里会升级连接
-        Ok(Box::new(MockConnection::new(
-            format!("{}_upgraded", self.id),
-            self.config.clone(),
-        )))
-    }
-
-    async fn send(&self, &[u8]) -> Result<usize> {
-        self.metadata.bytes_sent += data.len() as u64;
-        self.metadata.update_activity();
-
-        // 模拟发送
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
+    async fn send(&self, data: &[u8]) -> Result<usize> {
+        self.metadata.write().unwrap().bytes_sent += data.len() as u64;
+        tokio::time::sleep(Duration::from_millis(10)).await;
         Ok(data.len())
     }
 
     async fn recv(&self, buffer: &mut [u8]) -> Result<usize> {
-        self.metadata.bytes_received += buffer.len() as u64;
-        self.metadata.update_activity();
-
-        // 模拟接收
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        Ok(0) // 空数据用于演示
+        self.metadata.write().unwrap().bytes_received += buffer.len() as u64;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        Ok(0)
     }
 
     async fn close(&self) -> Result<()> {
-        self.state = ConnectionState::Disconnected;
+        self.active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
     fn is_active(&self) -> bool {
-        self.state == ConnectionState::Connected
+        self.active.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn metrics(&self) -> ConnectionMetadata {
-        self.metadata.clone()
-    }
-}
-
-/// 协议处理器接口
-pub trait ProtocolHandler: Send + Sync {
-    /// 处理协议相关操作
-    fn handle(&self, &[u8]) -> Result<Vec<u8>>;
-}
-
-/// TCP处理器
-struct TcpHandler;
-impl ProtocolHandler for TcpHandler {
-    fn handle(&self, &[u8]) -> Result<Vec<u8>> {
-        // 原样返回
-        Ok(data.to_vec())
-    }
-}
-
-/// WebSocket处理器
-struct WebSocketHandler;
-impl ProtocolHandler for WebSocketHandler {
-    fn handle(&self, &[u8]) -> Result<Vec<u8>> {
-        // WebSocket帧处理
-        Ok(vec![
-            0x81, // FIN=1, Opcode=1
-            data.len() as u8,
-        ])
+    fn metadata(&self) -> ConnectionMetadata {
+        self.metadata.read().unwrap().clone()
     }
 }

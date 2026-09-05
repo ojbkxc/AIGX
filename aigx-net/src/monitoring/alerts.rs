@@ -33,7 +33,7 @@ pub struct Alert {
     pub source: String,
     pub timestamp: DateTime<Utc>,
     pub resolved: bool,
-    pub metastd::collections::HashMap<String, String>,
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,7 +204,7 @@ impl AlertSender {
                 source: "system".to_string(),
                 timestamp: Utc::now(),
                 resolved: false,
-                metastd::collections::HashMap::from([
+                std::collections::HashMap::from([
                     ("cpu_usage".to_string(), metrics.cpu_usage.to_string()),
                     ("threshold".to_string(), self.config.thresholds.cpu_usage.to_string()),
                 ]),
@@ -226,7 +226,7 @@ impl AlertSender {
                 source: "system".to_string(),
                 timestamp: Utc::now(),
                 resolved: false,
-                metastd::collections::HashMap::from([
+                std::collections::HashMap::from([
                     ("memory_usage".to_string(), metrics.memory_usage.to_string()),
                     ("threshold".to_string(), self.config.thresholds.memory_usage.to_string()),
                 ]),
@@ -248,7 +248,7 @@ impl AlertSender {
                 source: "system".to_string(),
                 timestamp: Utc::now(),
                 resolved: false,
-                metastd::collections::HashMap::from([
+                std::collections::HashMap::from([
                     ("disk_usage".to_string(), metrics.disk_usage.to_string()),
                     ("threshold".to_string(), self.config.thresholds.disk_usage.to_string()),
                 ]),
@@ -270,7 +270,7 @@ impl AlertSender {
                 source: "performance".to_string(),
                 timestamp: Utc::now(),
                 resolved: false,
-                metastd::collections::HashMap::from([
+                std::collections::HashMap::from([
                     ("error_rate".to_string(), metrics.error_rate.to_string()),
                     ("threshold".to_string(), (self.config.thresholds.error_rate * 100.0).to_string()),
                 ]),

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../api';
 
 export default function Security(): JSX.Element {
@@ -7,7 +7,7 @@ export default function Security(): JSX.Element {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    loadSecurityData();
+    void loadSecurityData();
   }, []);
 
   const loadSecurityData = async () => {

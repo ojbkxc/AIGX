@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../api';
 
 export default function Pricing(): JSX.Element {
@@ -16,7 +16,7 @@ export default function Pricing(): JSX.Element {
   };
 
   useEffect(() => {
-    loadPrices();
+    void loadPrices();
   }, []);
 
   return (

@@ -3,10 +3,8 @@
 //! 管理单个账号的状态、配置和属性。
 
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use uuid::Uuid;
+
 use chrono::{DateTime, Utc};
-use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
@@ -26,7 +24,7 @@ pub struct Account {
     pub total_requests: u64,
     pub failed_requests: u64,
     pub success_rate: f64,
-    pub metastd::collections::HashMap<String, String>,
+    pub metadata: std::collections::HashMap<String, String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -57,11 +55,9 @@ pub enum ProxyType {
     HTTP,
     HTTPS,
     SOCKS5,
-    SOCKS5,
-    SOCKS5,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AccountStatus {
     Active,
     Inactive,
@@ -70,57 +66,14 @@ pub enum AccountStatus {
     Maintenance,
 }
 
-#[derive(Clone)]
-pub struct AccountGuard {
-    account: Arc<Account>,
-    start_time: Instant,
-    in_use: Arc<Mutex<bool>>,
-}
-
-impl AccountGuard {
-    pub fn new(account: Account) -> Self {
-        Self {
-            account: Arc::new(account),
-            start_time: Instant::now(),
-            in_use: Arc::new(Mutex::new(true)),
-        }
-    }
-
-    pub fn account(&self) -> &Account {
-        &self.account
-    }
-
-    pub fn start_time(&self) -> Instant {
-        self.start_time
-    }
-
-    pub fn duration(&self) -> Duration {
-        self.start_time.elapsed()
-    }
-
-    pub fn in_use(&self) -> bool {
-        *self.in_use.lock().unwrap()
-    }
-
-    pub fn release(&self) -> bool {
-        let mut in_use = self.in_use.lock().unwrap();
-        if *in_use {
-            *in_use = false;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-impl Arc<Account> {
+impl Account {
     pub fn is_available(&self) -> bool {
         matches!(self.status, AccountStatus::Active)
     }
 
     pub fn increase_success_count(&mut self) {
         self.total_requests += 1;
-        self.success_rate = self.successed_requests as f64 / self.total_requests as f64;
+        self.calculate_success_rate();
     }
 
     pub fn increase_failure_count(&mut self) {
@@ -132,10 +85,8 @@ impl Arc<Account> {
     pub fn reset_failure(&mut self) {
         if self.failed_requests > 0 {
             self.failed_requests = 0;
-            if self.failed_requests < u8::MAX {
-                self.last_error = None;
-                self.last_error_time = None;
-            }
+            self.last_error = None;
+            self.last_error_time = None;
         }
     }
 
@@ -174,7 +125,7 @@ impl Account {
             total_requests: 0,
             failed_requests: 0,
             success_rate: 1.0,
-            metastd::collections::HashMap::new(),
+            metadata: std::collections::HashMap::new(),
             created_at: now,
             updated_at: now,
         }
@@ -226,4 +177,20 @@ mod tests {
         assert_eq!(account.metadata.get("region"), Some(&"us-west".to_string()));
         assert_eq!(account.metadata.get("speed"), Some(&"fast".to_string()));
     }
+}
+/// 账号池配置项（供 AccountPool::init 使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountConfig {
+    /// 账号标识（邮箱或手机号）
+    pub id: String,
+    /// 密码 / API 凭据
+    pub password: String,
+    /// 用户名（可选）
+    pub username: Option<String>,
+    /// 代理地址（可选）
+    pub proxy_url: Option<String>,
+    /// 优先级（权重）
+    pub priority: u8,
+    /// 重试次数上限
+    pub max_retries: u16,
 }

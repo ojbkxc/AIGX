@@ -9,7 +9,7 @@ use super::super::ProtocolHandler;
 pub struct KcpHandler;
 
 impl ProtocolHandler for KcpHandler {
-    fn handle(&self, &[u8]) -> Vec<u8> {
+    fn handle(&self, data: &[u8]) -> Vec<u8> {
         // KCP 加密/重新打包
         data.to_vec()
     }

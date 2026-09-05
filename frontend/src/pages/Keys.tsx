@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../api';
+import type { ApiKey } from '../types';
 
 export default function Keys(): JSX.Element {
   const [keys, setKeys] = useState<ApiKey[]>([]);
@@ -14,6 +15,10 @@ export default function Keys(): JSX.Element {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    void loadKeys();
+  }, []);
 
   return (
     <div>

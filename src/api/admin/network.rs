@@ -120,7 +120,7 @@ pub async fn health_check(
     // 渠道失败数通过断路器打开数估算；成功数 = 已启用渠道数
     let failed_requests = channels
         .iter()
-        .filter(|c| c.circuit_breaker().get_state(&c.id) == "open")
+        .filter(|c| state.channel_store.circuit_breaker().get_state(&c.id) == "open")
         .count() as u64;
 
     // 会话：亲和路由会话数 + 活跃用户会话（按分组数与活跃用户数近似）
@@ -254,8 +254,8 @@ pub async fn restart_network(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
     for ch in state.channel_store.list() {
-        ch.circuit_breaker().reset(&ch.id);
-        ch.health_tracker().reset(&ch.id);
+        state.channel_store.circuit_breaker().reset(&ch.id);
+        state.channel_store.health_tracker().reset(&ch.id);
     }
     Ok(Json(json!({
         "success": true,

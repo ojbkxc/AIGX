@@ -25,7 +25,7 @@ fn default_dashboard_days() -> u32 {
 }
 
 /// 将 days 限制在 [1, 90] 区间，并返回对应的 unix timestamp 下界。
-fn dashboard_start_ts(days: u32) -> i64 {
+pub fn dashboard_start_ts(days: u32) -> i64 {
     let days = days.clamp(1, 90) as i64;
     chrono::Utc::now().timestamp() - days * 24 * 3600
 }

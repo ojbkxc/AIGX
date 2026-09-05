@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../api';
 
 export default function Wallet(): JSX.Element {
@@ -27,8 +27,8 @@ export default function Wallet(): JSX.Element {
   };
 
   useEffect(() => {
-    loadBalance();
-    loadTransactions();
+    void loadBalance();
+    void loadTransactions();
   }, []);
 
   return (

@@ -2,6 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
+    Json,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -28,6 +29,17 @@ pub struct LoginRequest {
 }
 
 /// 注册请求
+#[derive(Debug, Deserialize)]
+pub struct ForgotPasswordRequest {
+    pub email: String,
+}
+
+/// 重置密码请求
+#[derive(Debug, Deserialize)]
+pub struct ResetPasswordRequest {
+    pub token: String,
+    pub new_password: String,
+}
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     pub email: String,
@@ -73,7 +85,7 @@ pub async fn handle_login(
     const LOGIN_FAIL_LOCK_THRESHOLD: u32 = 5; // 连续失败 ≥5 次锁定
     let client_ip = extract_client_ip(&headers)
         .ok_or_else(|| "无法提取客户端IP")
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|_| "unknown".to_string());
     let attempts = state.login_limiter.get(&client_ip).await.unwrap_or(0);
     if attempts >= LOGIN_RATE_LIMIT_PER_MINUTE {
         state.log_store.record_security(
@@ -219,7 +231,7 @@ pub async fn handle_register(
     const REGISTER_RATE_LIMIT_PER_MINUTE: u32 = 5;
     let client_ip = extract_client_ip(&headers)
         .ok_or_else(|| "无法提取客户端IP")
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|_| "unknown".to_string());
     let current_count = state.register_limiter.get(&client_ip).await.unwrap_or(0);
     if current_count >= REGISTER_RATE_LIMIT_PER_MINUTE {
         state.log_store.record_security(

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../api';
 
 export default function Mappings(): JSX.Element {
@@ -6,7 +6,7 @@ export default function Mappings(): JSX.Element {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    loadMappings();
+    void loadMappings();
   }, []);
 
   const loadMappings = async () => {

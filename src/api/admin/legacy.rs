@@ -35,6 +35,35 @@ use super::super::openai::AppState;
 use super::dashboard::{dashboard_start_ts, DashboardQuery};
 use super::pricing::PriceRequest;
 use super::tokens::KeyRequest;
+use super::users::mask_user;
+use super::channels::mask_channel;
+
+/// 账号请求（add/update 共用）
+#[derive(Debug, Deserialize)]
+pub struct AccountRequest {
+    pub name: String,
+    pub account_id: String,
+    pub api_token: String,
+    pub status: Option<String>,
+}
+
+/// 拉取渠道模型请求
+#[derive(Debug, Deserialize)]
+pub struct FetchModelsRequest {
+    #[serde(default)]
+    pub channel_type: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+}
+
+/// 检查用户名/邮箱是否可用
+#[derive(Debug, Deserialize)]
+pub struct CheckUsernameQuery {
+    pub username: String,
+}
+
 pub async fn handle_usage_summary(
     State(state): State<AppState>,
     headers: HeaderMap,

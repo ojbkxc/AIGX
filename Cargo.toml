@@ -1,3 +1,21 @@
+# ── Workspace ────────────────────────────────────────────────────────
+# 多 crate 工作区：主网关 + 独立网络层（aigx-net）
+[workspace]
+members = [".", "aigx-net"]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+dashmap = "6.0"
+async-trait = "0.1"
+
 [package]
 name = "aigx"
 version = "1.0.1"
@@ -32,7 +50,7 @@ mysql = ["sea-orm/sqlx-mysql", "sea-orm-migration/sqlx-mysql"]
 # HTTP
 axum = { version = "0.7", features = ["macros"] }
 axum-extra = "0.9"
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http = "1"
@@ -57,14 +75,14 @@ sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 md5 = "0.7"
-uuid = { version = "1", features = ["v4"] }
+uuid = { workspace = true }
 argon2 = "0.5"
 
 # Time
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true }
 
 # Logging
-tracing = "0.1"
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 

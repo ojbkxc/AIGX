@@ -122,6 +122,21 @@ class ServerError extends ApiError {
   }
 }
 
+function handleApiError(response: Response): never {
+  switch (response.status) {
+    case 401:
+      throw new UnauthorizedError();
+    case 403:
+      throw new ForbiddenError();
+    case 404:
+      throw new NotFoundError();
+    case 422:
+      throw new ValidationError();
+    default:
+      throw new ServerError();
+  }
+}
+
 export const api = {
   // ==================== 顶层便捷方法（页面直调，沿用后端路由契约） ====================
   login: (email: string, password: string): Promise<any> =>
@@ -183,7 +198,7 @@ export const api = {
       });
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -202,7 +217,7 @@ export const api = {
       });
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -217,7 +232,7 @@ export const api = {
       });
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
     },
 
@@ -234,7 +249,7 @@ export const api = {
       });
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -252,7 +267,7 @@ export const api = {
       const response = await fetch(`${API_BASE}/users/me`);
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -279,7 +294,7 @@ export const api = {
       );
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -292,7 +307,7 @@ export const api = {
       const response = await fetch(`${API_BASE}/users/${id}`);
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -318,7 +333,7 @@ export const api = {
       const response = await fetch(`${API_BASE}/channels`);
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -331,7 +346,7 @@ export const api = {
       const response = await fetch(`${API_BASE}/channels/${id}`);
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -350,7 +365,7 @@ export const api = {
       });
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -369,7 +384,7 @@ export const api = {
       });
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -384,7 +399,7 @@ export const api = {
       });
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
     },
 
@@ -397,7 +412,7 @@ export const api = {
       });
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -428,7 +443,7 @@ export const api = {
       );
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -447,7 +462,7 @@ export const api = {
       });
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -462,7 +477,7 @@ export const api = {
       });
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
     },
 
@@ -475,7 +490,7 @@ export const api = {
       });
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -493,7 +508,7 @@ export const api = {
       const response = await fetch(`${API_BASE}/dashboard/stats`);
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -506,7 +521,7 @@ export const api = {
       const response = await fetch(`${API_BASE}/dashboard/realtime`);
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
@@ -528,29 +543,11 @@ export const api = {
       );
 
       if (!response.ok) {
-        throw this.handleError(response);
+        throw handleApiError(response);
       }
 
       return response.json();
     },
-  },
-
-  /**
-   * 通用错误处理
-   */
-  handleError(response: Response): never {
-    switch (response.status) {
-      case 401:
-        throw new UnauthorizedError();
-      case 403:
-        throw new ForbiddenError();
-      case 404:
-        throw new NotFoundError();
-      case 422:
-        throw new ValidationError();
-      default:
-        throw new ServerError();
-    }
   },
 
   // ==================== 网络层 API ====================
@@ -558,13 +555,13 @@ export const api = {
   network: {
     async getStatus(): Promise<ApiResponse<Record<string, any>>> {
       const response = await fetch(`${API_BASE}/network/status`);
-      if (!response.ok) throw this.handleError(response);
+      if (!response.ok) throw handleApiError(response);
       return response.json();
     },
 
     async getConfig(configId: string): Promise<ApiResponse<Record<string, any>>> {
       const response = await fetch(`${API_BASE}/network/config/${configId}`);
-      if (!response.ok) throw this.handleError(response);
+      if (!response.ok) throw handleApiError(response);
       return response.json();
     },
 
@@ -581,25 +578,25 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),
       });
-      if (!response.ok) throw this.handleError(response);
+      if (!response.ok) throw handleApiError(response);
       return response.json();
     },
 
     async restart(): Promise<ApiResponse<Record<string, any>>> {
       const response = await fetch(`${API_BASE}/network/restart`, { method: 'POST' });
-      if (!response.ok) throw this.handleError(response);
+      if (!response.ok) throw handleApiError(response);
       return response.json();
     },
 
     async addAccount(accountId: string): Promise<ApiResponse<Record<string, any>>> {
       const response = await fetch(`${API_BASE}/network/accounts/${accountId}`, { method: 'POST' });
-      if (!response.ok) throw this.handleError(response);
+      if (!response.ok) throw handleApiError(response);
       return response.json();
     },
 
     async removeAccount(accountId: string): Promise<ApiResponse<Record<string, any>>> {
       const response = await fetch(`${API_BASE}/network/accounts/${accountId}`, { method: 'DELETE' });
-      if (!response.ok) throw this.handleError(response);
+      if (!response.ok) throw handleApiError(response);
       return response.json();
     },
   },

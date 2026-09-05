@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { api } from '../api';
+import type { TokenStats, Limits, NotifyConfig } from './types';
 
 export default function Settings(): JSX.Element {
-  const [usage, setUsage] = useState<TokenStats | null>(null);
+  const [usage] = useState<TokenStats | null>(null);
   const [limits, setLimits] = useState<Limits | null>(null);
   const [saving, setSaving] = useState(false);
-  const [notification, setNotification] = useState<NotifyConfig | null>(null);
+  const [notification] = useState<NotifyConfig | null>(null);
 
   const handleSave = async () => {
     setSaving(true);
@@ -33,7 +34,7 @@ export default function Settings(): JSX.Element {
           <input
             type="number"
             value={limits?.monthly_limit || ''}
-            onChange={(e) => setLimits({ ...limits, monthly_limit: Number(e.target.value) })}
+            onChange={(e) => setLimits({ ...(limits ?? { monthly_used: 0, monthly_limit: 0 }), monthly_limit: Number(e.target.value) })}
           />
         </div>
         <div className="form-group">

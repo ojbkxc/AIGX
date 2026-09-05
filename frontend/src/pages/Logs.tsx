@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../api';
 
 export default function Logs(): JSX.Element {
@@ -15,6 +15,10 @@ export default function Logs(): JSX.Element {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    void loadLogs();
+  }, []);
 
   return (
     <div>
@@ -36,9 +40,9 @@ export default function Logs(): JSX.Element {
                 <span>{log.timestamp}</span>
               </div>
               <div className="log-details">
-                <Button onClick={() => setSelectedLog(log)}>
+                <button onClick={() => setSelectedLog(log)}>
                   查看详情
-                </Button>
+                </button>
               </div>
             </div>
           ))

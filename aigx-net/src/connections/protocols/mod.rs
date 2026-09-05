@@ -1,11 +1,11 @@
 //! 协议实现模块
 //!
-//! 具体的协议传输层实现
+//! 具体的协议传输层实现：TCP / KCP / WebSocket / QUIC
 
-pub mod tcp;
 pub mod kcp;
-pub mod websocket;
 pub mod quic;
+pub mod tcp;
+pub mod websocket;
 
 use super::Protocol;
 use crate::connections::connection_pool::ProtocolHandler;
@@ -20,3 +20,4 @@ pub fn create_handler(protocol: Protocol) -> Option<Box<dyn ProtocolHandler>> {
         _ => None,
     }
 }
+
