@@ -1,6 +1,10 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+// tailwindcss @tailwindcss/vite 插件将在依赖安装后的 Phase 2 启用：
+// import tailwindcss from '@tailwindcss/vite';
+// plugins: [react(), tailwindcss()]
+
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -13,5 +17,14 @@ export default defineConfig({
   build: {
     outDir: '../static',
     emptyOutDir: true,
+    // 代码分割：vendor 与业务代码分离，利于缓存（产物体积变化由 CI 验证）
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+          'vendor-i18n': ['i18next', 'react-i18next'],
+        }
+      }
+    }
   }
 });

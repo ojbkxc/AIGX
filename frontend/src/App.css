@@ -1,3 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── 玻璃拟态设计系统（Tailwind 桥接层）────────────────────────────
+ * 现有 CSS 变量保留为唯一真源，Tailwind 通过 glass-* 色板引用；
+ * 新组件用 @apply 复用，旧页面无需改动。 */
+
+@layer components {
+  .glass-card {
+    @apply rounded-card border border-glass-border;
+    background-color: var(--card-bg);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    box-shadow: var(--card-shadow);
+  }
+
+  .glass-input {
+    @apply rounded-control border border-glass-border text-glass-text;
+    background: var(--input-bg);
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  }
+
+  .glass-input:focus {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.2);
+    outline: none;
+  }
+}
+
 * {
   margin: 0;
   padding: 0;
