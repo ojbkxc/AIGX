@@ -80,6 +80,7 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning: None,
             }],
             tools: None,
             max_tokens: Some(1),
