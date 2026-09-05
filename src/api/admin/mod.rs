@@ -16,70 +16,47 @@ pub mod settings;
 pub mod tokens;
 pub mod users; // 网络层管理模块
 
-// 模块公开接口（保持 main.rs 零改动）
-pub use common::{
-    admin_id_from_session, default_page, default_size, error_response, extract_session_token,
-    record_audit, verify_admin, verify_user,
-};
-
 pub use auth::{
     handle_forgot_password, handle_github_oauth_authorize, handle_github_oauth_callback,
     handle_google_oauth_authorize, handle_google_oauth_callback, handle_login, handle_logout,
-    handle_register, handle_reset_password, GithubCallbackParams, GoogleCallbackParams,
-    LoginRequest, OAuthCallback, RegisterRequest,
+    handle_register, handle_reset_password,
 };
 
-pub use users::{
-    handle_create_user, handle_delete_user, handle_list_users, handle_update_user, mask_user,
-    CreateUserRequest, UpdateUserRequest,
-};
+pub use users::{handle_create_user, handle_delete_user, handle_list_users, handle_update_user};
 
 pub use logs::{handle_export_request_logs, handle_list_audit_logs, handle_list_request_logs};
 
 pub use channels::{
     handle_add_channel, handle_delete_channel, handle_list_channels, handle_update_channel,
-    mask_channel, ChannelRequest,
 };
 
 pub use tokens::{
     handle_add_token, handle_delete_token, handle_list_tokens, handle_reset_token_used,
-    handle_update_token, mask_token, KeyRequest, UpdateTokenRequest,
+    handle_update_token,
 };
 
-pub use pricing::{handle_add_pricing, handle_delete_pricing, handle_list_pricing, PriceRequest};
+pub use pricing::{handle_add_pricing, handle_delete_pricing, handle_list_pricing};
 
-pub use orders::{
-    handle_delete_order, handle_get_order, handle_list_orders, handle_topup_request, TopupRequest,
-};
+pub use orders::{handle_delete_order, handle_list_orders, handle_topup_request};
 
-pub use dashboard::{
-    handle_api_stats, handle_channel_stats, handle_consumption_trend, handle_model_distribution,
-    handle_overview, handle_user_stats, DashboardQuery,
-};
+pub use dashboard::{handle_consumption_trend, handle_model_distribution};
 
 pub use settings::{
     handle_get_limits, handle_get_settings, handle_update_limits, handle_update_settings,
-    SettingsRequest,
 };
 
-pub use notify::{
-    handle_get_notify_config, handle_send_test_notify, handle_update_notify_config,
-    UpdateNotifyConfigRequest,
-};
+pub use notify::{handle_get_notify_config, handle_update_notify_config};
 
-pub use security::{
-    handle_reset_security, handle_security_events, handle_security_summary, SecurityEventsQuery,
-};
+pub use security::{handle_security_events, handle_security_summary};
 
-pub use monitor::{handle_health, handle_healthz, handle_monitor_system};
+pub use monitor::handle_monitor_system;
 
-pub use cache::{handle_cache_clear, handle_cache_info, handle_cache_stats};
+pub use cache::{handle_cache_clear, handle_cache_stats};
 pub use redemptions::{
     handle_batch_redemptions, handle_delete_redemption, handle_list_redemptions, handle_redeem,
-    AuditLogQuery, BatchRedemptionRequest, RedeemRequest,
 };
 
-pub use playground::{handle_playground_channels, handle_playground_chat, PlaygroundChatRequest};
+pub use playground::handle_playground_chat;
 
 // 后续模块的 pub use 将按迁移顺序补充...
 
