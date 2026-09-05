@@ -5125,7 +5125,9 @@ pub async fn handle_get_price_sync_config(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    let cfg = &state.price_sync.lock().unwrap().config();
+    let svc = state.price_sync.lock().unwrap();
+    let cfg = svc.config();
+    let last_sync = svc.last_remote_sync().map(|t| t.to_rfc3339());
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
@@ -5133,7 +5135,7 @@ pub async fn handle_get_price_sync_config(
             "sync_url": cfg.remote_url,
             "sync_url_fallback": cfg.remote_url_fallback,
             "interval_secs": cfg.remote_sync_interval_secs,
-            "last_sync": state.price_sync.lock().unwrap().last_remote_sync().map(|t| t.to_rfc3339()),
+            "last_sync": last_sync,
         }
     })))
 }
