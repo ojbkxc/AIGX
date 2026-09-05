@@ -14,7 +14,7 @@ export interface TextareaProps extends React.TextareaHTMLAttributes<HTMLTextArea
  * Textarea — 多行文本输入，复用 App.css 的 .form-input 样式体系。
  */
 export default function Textarea({ label, hint, error, className, id, ...rest }: TextareaProps) {
-  const areaId = id ?? (label ? 	extarea- : undefined);
+  const areaId = id ?? (label ? 'textarea-' + label.replace(/\s+/g, '-') : undefined);
   return (
     <div className="form-group">
       {label && <label htmlFor={areaId}>{label}</label>}

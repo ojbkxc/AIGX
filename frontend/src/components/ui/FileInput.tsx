@@ -22,7 +22,7 @@ export default function FileInput({
   className,
   onChange
 }: FileInputProps) {
-  const inputId = label ? ile- : undefined;
+  const inputId = label ? 'file-' + label.replace(/\s+/g, '-') : undefined;
   const inputRef = useRef<HTMLInputElement>(null);
   const [fileName, setFileName] = useState<string>('');
 

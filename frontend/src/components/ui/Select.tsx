@@ -14,7 +14,7 @@ export interface SelectProps extends React.SelectHTMLAttributes<HTMLSelectElemen
  * Select — 下拉选择框，复用 App.css 的 .form-input 样式体系。
  */
 export default function Select({ label, hint, error, className, id, children, ...rest }: SelectProps) {
-  const selectId = id ?? (label ? select- : undefined);
+  const selectId = id ?? (label ? 'select-' + label.replace(/\s+/g, '-') : undefined);
   return (
     <div className="form-group">
       {label && <label htmlFor={selectId}>{label}</label>}

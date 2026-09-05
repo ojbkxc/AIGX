@@ -15,7 +15,7 @@ export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> 
  * 与页面现有 <input className="form-input"> 完全兼容，标签/提示可选。
  */
 export default function Input({ label, hint, error, className, id, ...rest }: InputProps) {
-  const inputId = id ?? (label ? input- : undefined);
+  const inputId = id ?? (label ? 'input-' + label.replace(/\s+/g, '-') : undefined);
   return (
     <div className="form-group">
       {label && <label htmlFor={inputId}>{label}</label>}
