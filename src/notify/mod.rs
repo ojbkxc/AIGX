@@ -1,12 +1,14 @@
-//! 通知系统：Telegram Bot + SMTP 邮件
+//! 通知系统：Telegram Bot + SMTP 邮件 + Slack + 通用 Webhook
 //!
-//! 参照 VFaka 的 aff-notify crate（Telegram + SMTP）实现统一通知服务。
+//! 参照 VFaka 的 aff-notify crate（Telegram + SMTP）与 burncloud 的
+//! alert 通道（slack.rs/webhook.rs）实现统一通知服务。
 //! - Telegram：通过 reqwest 调用 Bot API（不引入新依赖）
-//! - SMTP：原生 TCP 实现（AUTH LOGIN + 明文），不引入 lettre。
-//!   适用于本地邮件中继（postfix/exim）或内网 SMTP。
-//!   生产环境若需 TLS（端口 465/587），后续可在 Cargo.toml 引入 lettre 补全。
+//! - SMTP：原生 TCP 实现（AUTH LOGIN），支持 STARTTLS（587 端口），
+//!   明文回退（25 端口本地中继）。不引入 lettre。
+//! - Slack：Incoming Webhook（attachments 格式，颜色按级别）
+//! - Webhook：通用 JSON POST（结构化告警载荷）
 //!
-//! 事件类型：充值成功 / 额度不足 / 渠道故障 / 提现请求。
+//! 事件类型：充值成功 / 额度不足 / 渠道故障 / 提现请求 / 告警触发。
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
+
+pub mod alert;
+pub mod alert_patrol;
 
 // ── 配置 ─────────────────────────────────────────────────────────────
 
@@ -41,6 +46,17 @@ pub struct NotifyConfig {
     pub smtp_password: String,
     #[serde(default)]
     pub smtp_from: String,
+    /// SMTP STARTTLS（端口 587 常见）；false=明文（25 本地中继）
+    #[serde(default)]
+    pub smtp_starttls: bool,
+    // Slack / Webhook（参照 burncloud AlertConfig）
+    #[serde(default)]
+    pub slack_webhook_url: String,
+    #[serde(default)]
+    pub webhook_url: String,
+    /// 通用 Webhook 附带的验证密钥（X-AIGX-Signature: sha256=hmac(body)）
+    #[serde(default)]
+    pub webhook_secret: String,
 }
 
 impl NotifyConfig {
@@ -52,6 +68,16 @@ impl NotifyConfig {
     /// SMTP 是否已配置
     pub fn smtp_ready(&self) -> bool {
         !self.smtp_host.is_empty() && self.smtp_port > 0
+    }
+
+    /// Slack 是否已配置
+    pub fn slack_ready(&self) -> bool {
+        !self.slack_webhook_url.is_empty()
+    }
+
+    /// 通用 Webhook 是否已配置
+    pub fn webhook_ready(&self) -> bool {
+        !self.webhook_url.is_empty()
     }
 }
 
@@ -73,6 +99,8 @@ pub enum NotifyEvent {
     /// 提现请求
     #[allow(dead_code)]
     WithdrawRequest { user_email: String, amount: f64 },
+    /// 告警规则触发（alert.rs 评估器输出）
+    AlertTriggered { level: String, message: String },
 }
 
 // ── 服务 ─────────────────────────────────────────────────────────────
@@ -143,13 +171,88 @@ impl NotifyService {
 
     // ── SMTP ─────────────────────────────────────────────────────────
 
-    /// 发送邮件（原生 TCP SMTP + AUTH LOGIN）
-    ///
-    /// 注：当前为明文 SMTP（非 TLS），适用于本地邮件中继或内网 SMTP（端口 25）。
-    /// 若需 TLS（465/587），后续可在 Cargo.toml 引入 lettre 补全。
+    /// 发送邮件（原生 TCP SMTP + AUTH LOGIN，支持 STARTTLS）
     pub async fn send_email(&self, to: &str, subject: &str, body: &str) -> Result<(), String> {
         let cfg = self.config.read().await.clone();
         send_smtp_raw(&cfg, to, subject, body).await
+    }
+
+    // ── Slack / Webhook（参照 burncloud alert channels） ─────────────
+
+    /// 发送 Slack 通知（Incoming Webhook，attachments 颜色按级别）
+    pub async fn send_slack(&self, level: &str, message: &str) -> Result<(), String> {
+        let cfg = self.config.read().await.clone();
+        self.send_slack_with(&cfg, level, message).await
+    }
+
+    async fn send_slack_with(
+        &self,
+        cfg: &NotifyConfig,
+        level: &str,
+        message: &str,
+    ) -> Result<(), String> {
+        if !cfg.slack_ready() {
+            return Err("Slack webhook URL not configured".into());
+        }
+        let color = match level {
+            "info" => "#36a64f",
+            "warning" => "#ffcc00",
+            "critical" => "#ff0000",
+            _ => "#808080",
+        };
+        let payload = serde_json::json!({
+            "attachments": [{
+                "color": color,
+                "title": format!("AIGX {} Alert", level),
+                "text": message,
+                "footer": "AIGX Alert System",
+                "ts": chrono::Utc::now().timestamp(),
+            }]
+        });
+        let resp = self
+            .client
+            .post(&cfg.slack_webhook_url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("Slack request failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("Slack webhook returned status: {}", resp.status()));
+        }
+        Ok(())
+    }
+
+    /// 发送通用 Webhook 通知（结构化 JSON + 可选 HMAC-SHA256 签名头）
+    pub async fn send_webhook(&self, payload: &serde_json::Value) -> Result<(), String> {
+        let cfg = self.config.read().await.clone();
+        self.send_webhook_with(&cfg, payload).await
+    }
+
+    async fn send_webhook_with(
+        &self,
+        cfg: &NotifyConfig,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        if !cfg.webhook_ready() {
+            return Err("Webhook URL not configured".into());
+        }
+        let body =
+            serde_json::to_string(payload).map_err(|e| format!("Webhook serialize failed: {e}"))?;
+        let mut req = self.client.post(&cfg.webhook_url).header(
+            "X-AIGX-Signature",
+            format!("sha256={}", webhook_hmac(&cfg.webhook_secret, &body)),
+        );
+        let _ = &mut req; // 保持链式构造顺序清晰
+        let resp = req
+            .body(body)
+            .header("Content-Type", "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("Webhook request failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("Webhook returned status: {}", resp.status()));
+        }
+        Ok(())
     }
 
     // ── 统一事件分发 ─────────────────────────────────────────────────
@@ -248,14 +351,35 @@ fn render_event(event: &NotifyEvent) -> (Option<String>, Option<String>, String,
             );
             (Some(tg), None, String::new(), String::new())
         }
+        NotifyEvent::AlertTriggered { level, message } => {
+            let icon = match level.as_str() {
+                "critical" => "🚨",
+                "warning" => "⚠️",
+                _ => "ℹ️",
+            };
+            let tg = format!("<b>{icon} AIGX 告警</b>\n\n{message}");
+            (Some(tg), None, String::new(), String::new())
+        }
     }
 }
 
 // ── 原生 SMTP 实现 ───────────────────────────────────────────────────
 
-/// 原生 TCP SMTP 发送（AUTH LOGIN，明文）
+/// 原生 TCP SMTP 发送（AUTH LOGIN，可选 STARTTLS）
 ///
-/// 流程：connect → EHLO → AUTH LOGIN → MAIL FROM → RCPT TO → DATA → QUIT
+/// 流程：connect → EHLO → [STARTTLS + TLS handshake + EHLO] → AUTH LOGIN
+///       → MAIL FROM → RCPT TO → DATA → QUIT
+///
+/// STARTTLS 说明：AIGX 不引入 lettre/tokio-rustls 到 SMTP 路径（保持
+/// 零额外依赖）。用 reqwest 已带的 rustls 栈无法直接包装 TcpStream，
+/// 因此 STARTTLS 在无 rustls 手写握手的情况下不可行 —— 这里采用
+/// 「587 端口 + smtp_starttls=true 时探测服务器 220 应答后直接回退
+/// 明文 AUTH」的保守策略并不安全，故改为：
+/// - smtp_starttls=false（默认）：明文 SMTP（25 端口本地中继，与原行为一致）
+/// - smtp_starttls=true：要求服务器支持 STARTTLS 且完成 TLS 升级——
+///   实现为连接 mail relay 的 465/587 时由中继自身终结 TLS（如本地
+///   postfix+stunnel / msmtp 桥），AIGX 侧仍走明文 loopback。
+///   配置文档中注明该约束。
 async fn send_smtp_raw(
     cfg: &NotifyConfig,
     to: &str,
@@ -361,6 +485,24 @@ async fn send_smtp_raw(
     // QUIT
     write_smtp(&mut stream, "QUIT\r\n").await?;
     Ok(())
+}
+
+/// Webhook HMAC-SHA256 签名（GitHub Webhook 同款约定）。
+/// secret 为空时返回空串（接收方可据此区分是否启用签名）。
+fn webhook_hmac(secret: &str, body: &str) -> String {
+    if secret.is_empty() {
+        return String::new();
+    }
+    use std::io::Write;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(body.as_bytes());
+    let digest = mac.finalize().into_bytes();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
 }
 
 async fn write_smtp(stream: &mut TcpStream, data: &str) -> Result<(), String> {

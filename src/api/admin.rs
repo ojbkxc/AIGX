@@ -3374,8 +3374,14 @@ pub async fn handle_get_notify_config(
             "smtp_username": cfg.smtp_username,
             "smtp_password": mask_sensitive(&cfg.smtp_password),
             "smtp_from": cfg.smtp_from,
+            "smtp_starttls": cfg.smtp_starttls,
+            "slack_webhook_url": mask_sensitive(&cfg.slack_webhook_url),
+            "webhook_url": cfg.webhook_url,
+            "webhook_secret": mask_sensitive(&cfg.webhook_secret),
             "telegram_ready": cfg.telegram_ready(),
             "smtp_ready": cfg.smtp_ready(),
+            "slack_ready": cfg.slack_ready(),
+            "webhook_ready": cfg.webhook_ready(),
         }
     })))
 }
@@ -3390,6 +3396,10 @@ pub struct UpdateNotifyConfigRequest {
     pub smtp_username: Option<String>,
     pub smtp_password: Option<String>,
     pub smtp_from: Option<String>,
+    pub smtp_starttls: Option<bool>,
+    pub slack_webhook_url: Option<String>,
+    pub webhook_url: Option<String>,
+    pub webhook_secret: Option<String>,
 }
 
 /// PUT /api/notify/config - 更新通知配置（仅管理员）
@@ -3434,6 +3444,24 @@ pub async fn handle_update_notify_config(
     }
     if let Some(v) = body.smtp_from {
         cfg.smtp_from = v;
+    }
+    if let Some(v) = body.smtp_starttls {
+        cfg.smtp_starttls = v;
+    }
+    if let Some(v) = body.slack_webhook_url {
+        let t = v.trim().to_string();
+        if !t.is_empty() && !t.contains("***") {
+            cfg.slack_webhook_url = t;
+        }
+    }
+    if let Some(v) = body.webhook_url {
+        cfg.webhook_url = v;
+    }
+    if let Some(v) = body.webhook_secret {
+        let t = v.trim().to_string();
+        if !t.is_empty() && !t.contains("***") {
+            cfg.webhook_secret = t;
+        }
     }
 
     // 同步到 ConfigManager（持久化）
@@ -3518,7 +3546,208 @@ pub async fn handle_test_email(
 
 // ────────────────────────────────────────────────────────────────
 
-/// POST /api/stripe/topup — 创建 Stripe Checkout Session
+/// POST /api/notify/test-slack - 测试 Slack Webhook
+pub async fn handle_test_slack(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let cfg = state.notify_service.get_config().await;
+    if !cfg.slack_ready() {
+        return Err(error_response(
+            "Slack Webhook URL 未配置",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    match state
+        .notify_service
+        .send_slack("info", "🔔 AIGX 测试告警 - Slack 通知配置成功！")
+        .await
+    {
+        Ok(_) => Ok(Json(
+            serde_json::json!({ "success": true, "data": "Slack 测试消息已发送" }),
+        )),
+        Err(e) => Err(error_response(
+            &format!("发送失败: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TestWebhookRequest {
+    /// 可选：自定义测试载荷内容（默认 "AIGX 测试告警"）
+    pub message: Option<String>,
+}
+
+/// POST /api/notify/test-webhook - 测试通用 Webhook
+pub async fn handle_test_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<TestWebhookRequest>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let cfg = state.notify_service.get_config().await;
+    if !cfg.webhook_ready() {
+        return Err(error_response(
+            "Webhook URL 未配置",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let message = body
+        .and_then(|Json(b)| b.message)
+        .unwrap_or_else(|| "AIGX 测试告警".to_string());
+    let payload = serde_json::json!({
+        "source": "aigx",
+        "event": "test",
+        "message": message,
+        "triggered_at": chrono::Utc::now().to_rfc3339(),
+    });
+    match state.notify_service.send_webhook(&payload).await {
+        Ok(_) => Ok(Json(
+            serde_json::json!({ "success": true, "data": "Webhook 测试消息已发送" }),
+        )),
+        Err(e) => Err(error_response(
+            &format!("发送失败: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
+// ============================================================
+// 批次5：告警规则管理 API（参照 burncloud alert rules）
+// ============================================================
+
+/// GET /api/alerts/rules - 列出告警规则
+pub async fn handle_alert_rules_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let rules = state.alert_evaluator.lock().unwrap().rules().to_vec();
+    Ok(Json(serde_json::json!({ "success": true, "data": rules })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateAlertRulesRequest {
+    /// 全量替换规则集
+    pub rules: Vec<crate::notify::alert::AlertRule>,
+}
+
+/// PUT /api/alerts/rules - 更新告警规则集（全量替换）
+pub async fn handle_alert_rules_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateAlertRulesRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    if body.rules.is_empty() {
+        return Err(error_response(
+            "规则集不能为空（如需禁用请设置 enabled=false）",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let count = body.rules.len();
+    state.alert_evaluator.lock().unwrap().set_rules(body.rules);
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "updated": count }
+    })))
+}
+
+/// GET /api/alerts/active - 当前活跃告警（静默期跟踪表）
+pub async fn handle_alerts_active(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let alerts = state.alert_evaluator.lock().unwrap().active_alerts();
+    Ok(Json(serde_json::json!({ "success": true, "data": alerts })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AlertTestRequest {
+    /// 模拟的告警类型 kind（如 "memory_high"）
+    pub kind: Option<String>,
+    /// 模拟的当前值
+    pub value: Option<u64>,
+}
+
+/// POST /api/alerts/test - 手动触发一条测试告警（走完整分发链路）
+pub async fn handle_alert_test(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<AlertTestRequest>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let (Json(b),) = match body {
+        Some(j) => (j,),
+        None => (Json(AlertTestRequest {
+            kind: None,
+            value: None,
+        }),),
+    };
+    let kind = match b.kind.as_deref() {
+        Some("channel_failure") => crate::notify::alert::AlertKind::ChannelFailure {
+            channel_id: "test-channel".into(),
+        },
+        Some("channel_high_latency") => crate::notify::alert::AlertKind::ChannelHighLatency {
+            channel_id: "test-channel".into(),
+        },
+        Some("memory_high") | None => crate::notify::alert::AlertKind::MemoryHigh,
+        Some("queue_backlog") => crate::notify::alert::AlertKind::QueueBacklog,
+        Some("abnormal_traffic") => crate::notify::alert::AlertKind::AbnormalTraffic,
+        Some("cost_anomaly") => crate::notify::alert::AlertKind::CostAnomaly,
+        Some(other) => {
+            return Err(error_response(
+                &format!("未知告警类型: {other}"),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+    };
+    let value = b.value.unwrap_or(99);
+    let alert = state.alert_evaluator.lock().unwrap().evaluate(&kind, value);
+    match alert {
+        Some(a) => {
+            // 走完整分发（Telegram/Email/Slack/Webhook）
+            let level_str = match a.level {
+                crate::notify::alert::AlertLevel::Info => "info",
+                crate::notify::alert::AlertLevel::Warning => "warning",
+                crate::notify::alert::AlertLevel::Critical => "critical",
+            };
+            state
+                .notify_service
+                .notify_spawn(crate::notify::NotifyEvent::AlertTriggered {
+                    level: level_str.to_string(),
+                    message: a.message.clone(),
+                });
+            let cfg = state.notify_service.get_config().await;
+            if cfg.slack_ready() {
+                let _ = state.notify_service.send_slack(level_str, &a.message).await;
+            }
+            if cfg.webhook_ready() {
+                let payload = serde_json::json!({
+                    "source": "aigx",
+                    "event": "test",
+                    "level": level_str,
+                    "message": a.message,
+                    "triggered_at": chrono::Utc::now().to_rfc3339(),
+                });
+                let _ = state.notify_service.send_webhook(&payload).await;
+            }
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "data": { "triggered": true, "message": a.message }
+            })))
+        }
+        None => Ok(Json(serde_json::json!({
+            "success": true,
+            "data": { "triggered": false, "message": "低于阈值或处于静默期，未触发" }
+        }))),
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
 pub async fn handle_stripe_topup(
     State(state): State<AppState>,
     headers: HeaderMap,

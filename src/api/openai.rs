@@ -69,8 +69,10 @@ pub struct AppState {
     pub redemption_store: Arc<RedemptionStore>,
     /// 限流器（多维度 RPM/TPM）
     pub rate_limiter: Arc<RateLimiter>,
-    /// 通知服务（Telegram + SMTP）
+    /// 通知服务（Telegram + SMTP + Slack + Webhook）
     pub notify_service: Arc<NotifyService>,
+    /// 告警规则评估器（alert_patrol 巡检 + 管理 API 共享）
+    pub alert_evaluator: std::sync::Arc<std::sync::Mutex<crate::notify::alert::AlertRuleEvaluator>>,
     /// 公开注册速率限制器（per-IP 计数缓存）。
     ///
     /// key=客户端 IP，value=当前 60 秒窗口内已发起的注册请求数。
@@ -1266,6 +1268,42 @@ pub async fn handle_chat_completions(
         .unwrap_or_default();
         if let Some(cached) = state.response_cache.get(&cache_key).await {
             tracing::debug!("response cache hit for model {}", model);
+            // 计费修复：缓存命中不再免放行——按命中 0 token 记账并写请求日志，
+            // 保持用量可观测（usage 累计 + 日志留痕可审计），费用为 0
+            // （缓存命中不重复扣费，但请求必须留痕）。
+            let prompt_tokens = cached
+                .get("usage")
+                .and_then(|u| u.get("prompt_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let completion_tokens = cached
+                .get("usage")
+                .and_then(|u| u.get("completion_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            state
+                .usage_tracker
+                .accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = Some("cache".to_string());
+            log.model = model.clone();
+            log.input_tokens = prompt_tokens;
+            log.output_tokens = completion_tokens;
+            log.cost = 0;
+            log.latency_ms = request_start.elapsed().as_millis() as u64;
+            log.status_code = 200;
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id.clone());
+            log.error_msg = Some("cache_hit".to_string());
+            state.log_store.record_request(log);
+            crate::metrics::global().record_request(
+                &model,
+                "cache",
+                "ok",
+                request_start.elapsed().as_millis() as u64,
+            );
             let mut resp = Json(cached).into_response();
             resp.headers_mut()
                 .insert("x-aigx-cache", "hit".parse().unwrap());

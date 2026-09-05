@@ -158,8 +158,11 @@ async fn main() -> anyhow::Result<()> {
     // 初始化限流器（功能 3，带持久化配置）
     let rate_limiter = Arc::new(RateLimiter::with_store(store.clone()));
 
-    // 初始化通知服务（Telegram + SMTP）
+    // 初始化通知服务（Telegram + SMTP + Slack + Webhook）
     let notify_service = Arc::new(NotifyService::new(config.notify.clone()));
+
+    // 初始化告警规则评估器（批次5：alert 巡检 + 管理 API 共享）
+    let alert_evaluator = notify::alert_patrol::shared_evaluator();
 
     // 共享 HTTP 客户端（性能热点 H5/H6）。
     // 全应用复用同一个 reqwest::Client，避免每次请求新建客户端（连接池/TLS 握手开销）。
@@ -263,6 +266,7 @@ async fn main() -> anyhow::Result<()> {
         redemption_store,
         rate_limiter,
         notify_service,
+        alert_evaluator,
         register_limiter,
         login_limiter,
         login_failures,
@@ -303,6 +307,13 @@ async fn main() -> anyhow::Result<()> {
         state.account_pool.clone(),
         state.notify_service.clone(),
         state.http_client.as_ref().clone(),
+    );
+
+    // 启动告警巡检后台任务（批次5：渠道健康/内存 → 规则评估 → 多渠道分发）
+    notify::alert_patrol::spawn_alert_patrol(
+        state.channel_store.clone(),
+        state.notify_service.clone(),
+        state.alert_evaluator.clone(),
     );
 
     let app = build_router(state, &config);
@@ -592,6 +603,25 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/notify/test-email",
             post(api::admin::handle_test_email),
         )
+        .route(
+            "/api/notify/test-slack",
+            post(api::admin::handle_test_slack),
+        )
+        .route(
+            "/api/notify/test-webhook",
+            post(api::admin::handle_test_webhook),
+        )
+        // 批次5：告警规则管理（参照 burncloud alert rules API）
+        .route(
+            "/api/alerts/rules",
+            get(api::admin::handle_alert_rules_list),
+        )
+        .route(
+            "/api/alerts/rules",
+            put(api::admin::handle_alert_rules_update),
+        )
+        .route("/api/alerts/active", get(api::admin::handle_alerts_active))
+        .route("/api/alerts/test", post(api::admin::handle_alert_test))
         // 阶段1：缓存管理 API（参照 burncloud cache.rs）
         .route("/api/cache/stats", get(api::admin::handle_cache_stats))
         .route("/api/cache/clear", post(api::admin::handle_cache_clear))
