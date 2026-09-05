@@ -26,6 +26,8 @@ export default function Playground() {
   const [temperature, setTemperature] = useState('0.7');
   const [maxTokens, setMaxTokens] = useState('1024');
   const [stream, setStream] = useState(true);
+  // P2：系统提示词模板与参数预设
+  const [systemPrompt, setSystemPrompt] = useState('');
 
   const messagesEndRef = useRef(null);
 
@@ -168,10 +170,18 @@ export default function Playground() {
     setBusy(true);
     setError('');
     try {
+      // 后端契约：playground 请求体为 messages 数组（旧 message/history 字段已废弃）
+      const outgoing = [];
+      if (systemPrompt.trim()) {
+        outgoing.push({ role: 'system', content: systemPrompt.trim() });
+      }
+      outgoing.push(
+        ...messages.map((m) => ({ role: m.role, content: m.content })),
+        { role: 'user', content: text }
+      );
       const payload = {
         model,
-        message: text,
-        history: messages.map((m) => ({ role: m.role, content: m.content })),
+        messages: outgoing,
         temperature: Number(temperature) || 0.7,
         max_tokens: Number(maxTokens) || 1024,
       };
@@ -199,6 +209,22 @@ export default function Playground() {
     setError('');
   };
 
+  // 参数预设：直接写入当前表单状态
+  const SYSTEM_PRESETS = [
+    { value: '', labelKey: '无（默认）' },
+    { value: 'You are a helpful assistant. Answer concisely and accurately.', labelKey: '通用助手' },
+    { value: 'You are a senior software engineer. Provide clear, correct code with brief explanations.', labelKey: '代码助手' },
+    { value: 'You are a professional translator. Translate faithfully and preserve tone.', labelKey: '翻译助手' },
+  ];
+
+  const TEMPERATURE_PRESETS = [
+    { value: '0.2', labelKey: '严谨' },
+    { value: '0.7', labelKey: '平衡' },
+    { value: '1.2', labelKey: '创意' },
+  ];
+
+  const MAX_TOKENS_PRESETS = ['256', '1024', '4096'];
+
   return (
     <div className="playground-shell">
       <div className="page-header">
@@ -217,6 +243,32 @@ export default function Playground() {
             <h2>{t('参数设置')}</h2>
           </div>
           <div className="card-body">
+            <div className="form-group">
+              <label>{t('系统提示词')}</label>
+              <textarea
+                className="form-input playground-system-input"
+                rows="3"
+                placeholder={t('设置系统提示词（可选）')}
+                value={systemPrompt}
+                onChange={(e) => setSystemPrompt(e.target.value)}
+                disabled={busy}
+              />
+              <span className="form-hint">{t('系统提示词预设')}</span>
+              <div className="playground-preset-row">
+                {SYSTEM_PRESETS.map((p) => (
+                  <button
+                    key={p.labelKey}
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    disabled={busy}
+                    onClick={() => setSystemPrompt(p.value)}
+                  >
+                    {t(p.labelKey)}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="form-group">
               <label>{t('模型')}</label>
               <select
@@ -245,6 +297,19 @@ export default function Playground() {
                 onChange={(e) => setTemperature(e.target.value)}
               />
               <span className="form-hint">{t('采样温度，越高越随机，0-2 之间')}</span>
+              <div className="playground-preset-row">
+                {TEMPERATURE_PRESETS.map((p) => (
+                  <button
+                    key={p.labelKey}
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    disabled={busy}
+                    onClick={() => setTemperature(p.value)}
+                  >
+                    {t(p.labelKey)}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="form-group">
@@ -256,6 +321,19 @@ export default function Playground() {
                 value={maxTokens}
                 onChange={(e) => setMaxTokens(e.target.value)}
               />
+              <div className="playground-preset-row">
+                {MAX_TOKENS_PRESETS.map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    disabled={busy}
+                    onClick={() => setMaxTokens(v)}
+                  >
+                    {v}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="form-group playground-stream-row">

@@ -96,6 +96,15 @@ impl OrderStore {
         Some(snapshot)
     }
 
+    /// 删除订单（管理面用）。
+    pub fn delete(&self, trade_no: &str) -> bool {
+        let removed = self.by_no.write().remove(trade_no).is_some();
+        if removed {
+            let _ = self.store.delete(&format!("order:{trade_no}"));
+        }
+        removed
+    }
+
     pub fn list_by_user(&self, user_id: &str) -> Vec<TopUpOrder> {
         let mut list: Vec<TopUpOrder> = self
             .by_no

@@ -143,6 +143,8 @@ export default function Settings() {
     try {
       await api.updatePriceSyncConfig(priceSyncConfig);
       addToast(t('价格同步配置已更新'));
+      // P1：保存后立即刷新 last_sync 等后端派生字段
+      await loadPriceSyncConfig();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -156,6 +158,7 @@ export default function Settings() {
     try {
       await api.triggerPriceSync();
       addToast(t('价格同步已触发，请稍后查看同步结果'));
+      await loadPriceSyncConfig();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -542,8 +545,12 @@ export default function Settings() {
                       min="0"
                       placeholder="1.0"
                       value={exchangeRates[currency] ?? ''}
+                      disabled={currency.toUpperCase() === 'USD'}
                       onChange={(e) => handleExchangeRateChange(currency, e.target.value)}
                     />
+                    {currency.toUpperCase() === 'USD' && (
+                      <span className="form-hint">{t('USD 为基准货币，不可编辑')}</span>
+                    )}
                   </div>
                 ))}
               </div>

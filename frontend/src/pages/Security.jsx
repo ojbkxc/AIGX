@@ -45,11 +45,11 @@ export default function Security() {
     loadOverview();
   }, []);
 
-  // 事件列表：分页变化自动加载
+  // 事件列表：分页/筛选条件变化自动加载（不再依赖查询按钮显式触发）
   useEffect(() => {
     loadEvents();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, size]);
+  }, [page, size, timeRange, eventType]);
 
   const loadOverview = async () => {
     try {

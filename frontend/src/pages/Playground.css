@@ -53,6 +53,19 @@
   margin-top: 4px;
 }
 
+.playground-system-input {
+  resize: vertical;
+  min-height: 60px;
+  font-size: 13px;
+}
+
+.playground-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
 /* 右侧对话区 */
 .playground-chat {
   min-height: 520px;

@@ -1,0 +1,12 @@
+# AIGX 项目级 Codex 配置
+# 作用域：仅在 C:\GitHub\AIGX 工作区内生效，不影响其他项目。
+# 允许在工作区内读写文件（workspace-write），命令需用户批准（on-request）。
+
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[projects.'c:\github\aigx']
+trust_level = "trusted"
+
+[projects.'c:\github\aisix']
+trust_level = "trusted"

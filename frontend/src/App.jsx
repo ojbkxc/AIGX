@@ -22,6 +22,7 @@ import Notify from './pages/Notify';
 import Playground from './pages/Playground';
 import Security from './pages/Security';
 import IpManagement from './pages/IpManagement';
+import NetworkLayer from './pages/NetworkLayer';
 
 function isAuthenticated() {
   const token = localStorage.getItem('token');
@@ -79,6 +80,7 @@ export default function App() {
           <Route path="/playground" element={<ProtectedLayout><Playground /></ProtectedLayout>} />
           <Route path="/security" element={<ProtectedLayout><Security /></ProtectedLayout>} />
           <Route path="/ip-management" element={<ProtectedLayout><IpManagement /></ProtectedLayout>} />
+          <Route path="/network-layer" element={<ProtectedLayout><NetworkLayer /></ProtectedLayout>} />
           <Route path="/settings" element={<ProtectedLayout><Settings /></ProtectedLayout>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

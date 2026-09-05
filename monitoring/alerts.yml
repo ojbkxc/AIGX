@@ -1,0 +1,194 @@
+groups:
+  - name: aigx_alerts
+    interval: 30s
+    rules:
+      # 系统资源告警
+      - alert: HighCPUUsage
+        expr: aigx_cpu_usage_percent > 80
+        for: 5m
+        labels:
+          severity: critical
+          component: system
+        annotations:
+          summary: "CPU使用率过高"
+          description: "{{ $labels.instance }} 当前CPU使用率 {{ $value }}%"
+          runbook: "https://runbooks.aigx.io/cpu-high"
+
+      - alert: HighMemoryUsage
+        expr: aigx_memory_usage_percent > 80
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "内存使用率过高"
+          description: "{{ $labels.instance }} 当前内存使用率 {{ $value }}%"
+
+      - alert: HighDiskUsage
+        expr: aigx_disk_usage_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "磁盘使用率过高"
+          description: "{{ $labels.instance }} 当前磁盘使用率 {{ $value }}%"
+
+      # 应用指标告警
+      - alert: HighLatency
+        expr: aigx_avg_latency_ms > 500
+        for: 10m
+        labels:
+          severity: warning
+          component: performance
+        annotations:
+          summary: "请求延迟过高"
+          description: "{{ $labels.instance }} 平均延迟 {{ $value }}ms"
+
+      - alert: HighErrorRate
+        expr: aigx_error_rate_percent > 5
+        for: 10m
+        labels:
+          severity: critical
+          component: performance
+        annotations:
+          summary: "错误率过高"
+          description: "{{ $labels.instance }} 错误率 {{ $value }}%"
+          runbook: "https://runbooks.aigx.io/error-high"
+
+      - alert: LowResponsiveNodes
+        expr: count(aigx_node_status{node=~"aigx-node.*"} == 1) < 2
+        for: 5m
+        labels:
+          severity: critical
+          component: distributed
+        annotations:
+          summary: "分布式节点响应不足"
+          description: "仅 {{ $value }} 节点响应，需要至少 2 个"
+
+      - alert: replica_failed
+        expr: aigx_replication_failed_total > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: distributed
+        annotations:
+          summary: "复制失败"
+          description: "{{ $labels.instance }} 复制失败计数: {{ $value }}"
+          runbook: "https://runbooks.aigx.io/replication-failed"
+      - target_metric(my_urls, lambda-> 未来明确命名)
+        系列: [alización]
+        指标: (RAT_)
+        事件: GOTO_specific
+        冷却: 300
+        等待: 300
+        placement:
+
+      # 存储告警
+      - alert: DiskAvailableCritical
+        expr: aigx_disk_available_bytes < 10 * 1024 * 1024 * 1024  # < 10GB
+        for: 5m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: "磁盘空间不足"
+          description: "{{ $labels.instance }} 可用空间仅剩 {{ $value }}"
+
+      # 数据库告警
+      - alert: PostgreSQLDown
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "PostgreSQL 不可用"
+          description: "{{ $labels.instance }} 数据库不可用"
+
+      # Redis 告警
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: cache
+        annotations:
+          summary: "Redis 不可用"
+          description: "{{ $labels.instance }} 缓存服务不可用"
+
+      # 容量告警
+      - alert: QueueLengthCritical
+        expr: aigx_queue_length > 1000
+        for: 5m
+        labels:
+          severity: warning
+          component: capacity
+        annotations:
+          summary: "队列长度严重"
+          description: "{{ $labels.instance }} 队列长度: {{ $value }}"
+
+  - name: aigx_business_alerts
+    interval: 1m
+    rules:
+      # 业务指标告警
+      - alert: LowAccountBytes
+        expr: aigx_requests_per_minute < 10
+        for: 20m
+        labels:
+          severity: warning
+          component: business
+        annotations:
+          summary: "业务请求量过低"
+          description: "每分钟请求量: {{ $value }}"
+
+  - name: aigx_node_alerts
+    interval: 15s
+    rules:
+      # 节点特定的告警
+      - alert: NodeTemperatureHigh
+        expr: aigx_system_temp_celsius > 85
+        for: 5m
+        labels:
+          severity: warning
+          component: node
+        annotations:
+          summary: "节点温度过高"
+          description: "节点 {{ $labels.node }} 温度: {{ $value }}°C"
+
+      # 扩容告警
+      - alert: RequestThroughputHigh
+        expr: aigx_request_throughput_per_hour > 1000000
+        for: 10m
+        labels:
+          severity: warning
+          component: capacity
+        annotations:
+          summary: "吞吐量持续高涨"
+          description: "{{ $labels.instance }} 达到 {{ $value }} 请求/小时"
+        # 添加扩容建议
+        on_resolve: send_alert_manager_payload(data={"action":"scaling_up","reason":"throughput_high"})
+
+      - alert: WaitForMoreData
+        expr: count(rate(aigx_request_count{instance=~".+"}[5m])) < 5
+        for: 0s
+        annotations:
+          summary: "等待更多数据"
+          description: "请求量不足"
+        on_resolve: 跳过告警
+
+# 可以导入其他告警文件
+# rule_files:
+#   - 'local-alerts.yml'
+#   - 'specific-alerts.yml'
+
+# 告警分组配置
+groups:
+  - name: aigx_system_alerts
+    interval: 5m
+    rules:
+      - alert: SystemAlerts
+        expr: alertstatus{}
+        for: 356
+        labels:
+          severity: warning

@@ -574,5 +574,16 @@
   "当前平台不可用": "unavailable on this platform",
   "运行": "uptime",
   "实时错误率": "Live error rate",
-  "最近错误": "Last error"
+  "最近错误": "Last error",
+  "USD 为基准货币，不可编辑": "USD is the base currency and cannot be edited",
+  "系统提示词": "System Prompt",
+  "设置系统提示词（可选）": "Set a system prompt (optional)",
+  "系统提示词预设": "System prompt presets",
+  "无（默认）": "None (default)",
+  "通用助手": "General Assistant",
+  "代码助手": "Coding Assistant",
+  "翻译助手": "Translator",
+  "严谨": "Precise",
+  "平衡": "Balanced",
+  "创意": "Creative"
 }

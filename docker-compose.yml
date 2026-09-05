@@ -1,27 +1,185 @@
-version: "3.8"
+version: '3.8'
 
 services:
-  aigx:
-    build: .
-    container_name: aigx
+  aigx-backend:
+    image: aigx/aigx:latest
+    # 替换为您的镜像仓库
+    # image: registry.example.com/aigx/aigx:latest
+    container_name: aigx-backend
     restart: unless-stopped
-    # 以非 root 用户（uid:gid = 10001:10001）运行，与 Dockerfile 中
-    # 的 USER aigx 一致，双重保险防止提权。
-    user: "10001:10001"
+
+    # 多平台支持配置
+    # 根据 CPU 架构自动选择：
+    # x86_64 机器 -> 使用 docker-amd64.Dockerfile
+    # arm64    机器 -> 使用 docker-arm64.Dockerfile
+    platform: "${PLATFORM:-linux/amd64}"
+
     ports:
-      - "8080:8080"
+      - "9527:9527"
+
     volumes:
-      # 数据目录挂载到 /data（非 root 用户可写，与 Dockerfile VOLUME 对齐）
-      - aigx-data:/data
-    # L8：健康检查 — 探测 8080 端口连通性（应用暴露 /livez 存活探针，但 bash /dev/tcp
-    # 仅做 TCP 握手不依赖镜像内 wget/curl，最小化镜像可能未安装这些工具）。
-    # start_period 给启动留 30s 缓冲；连续 3 次失败才标记 unhealthy。
+      # 持久化数据
+      - aigx_data:/aigx/data
+      - aigx_logs:/aigx/logs
+
+    # 网络配置
+    networks:
+      - aigx-network
+
+    # CPU/内存限制
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+
+    # 环境变量
+    environment:
+      # 服务器配置
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=9527
+      - WORKER_COUNT=4
+
+      # 数据库配置 - SQLite (默认)
+      - DATABASE_MODE=sqlite
+      - DATABASE_URL=sqlite:///aigx/data/aigx.db
+
+      # 配置文件路径
+      - CONFIG_PATH=/aigx/config
+
+      # 日志配置
+      - RUST_LOG=info
+
+      # 安全配置 (生产环境请更改)
+      - JWT_SECRET=${JWT_SECRET:-your-very-secure-random-secret-key-here}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+      - SIGNUP_ENABLED=true
+
+      # 功能开关
+      - NETWORK_ENABLED=true
+      - STORAGE_ENABLED=true
+      - BACKEND_ENABLED=true
+
+      # 性能配置
+      - CACHE_ENABLED=true
+      - CACHE_SIZE=${CACHE_SIZE:-512}
+      - CACHE_EXPIRE_TTL=${CACHE_EXPIRE_TTL:-3600}
+
+      # 监控配置
+      - ENABLE_METRICS=true
+      - METRICS_PORT=9528
+      - ALERT_ENABLED=${ALERT_ENABLED:-false}
+
+      # Prometheus 兼容性
+      - PROMETHEUS_ENABLED=true
+
+    # 健康检查
     healthcheck:
-      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/8080' || exit 1"]
+      test: ["CMD", "curl", "-f", "http://localhost:9527/healthz"]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
-      start_period: 30s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  aigx-frontend:
+    image: aigx/aigx-frontend:latest
+    container_name: aigx-frontend
+    restart: unless-stopped
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    environment:
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:9527}
+
+    volumes:
+      # SSL 证书（如果使用 HTTPS）
+      # - ./ssl/cert.pem:/etc/nginx/ssl/cert.pem
+      # - ./ssl/key.pem:/etc/nginx/ssl/key.pem
+
+      # 自定义 nginx 配置
+      # - ./nginx.conf:/etc/nginx/nginx.conf
+
+    networks:
+      - aigx-network
+
+    depends_on:
+      aigx-backend:
+        condition: service_healthy
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 前端开发环境（可选，不包含在生产部署中）
+  aigx-frontend-dev:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: builder
+    container_name: aigx-frontend-dev
+    restart: unless-stopped
+
+    ports:
+      - "3000:5173"
+
+    environment:
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:9527}
+      - VITE_ENABLE_DEVTOOLS=true
+
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/assets:/app/assets
+
+    networks:
+      - aigx-network
+
+    command: npm run dev -- --host 0.0.0.0
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
-  aigx-data:
+  aigx_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/aigx_data
+
+  aigx_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/aigx_logs
+
+networks:
+  aigx-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# 如果需要使用环境变量文件
+# .env 文件示例：
+# PLATFORM=linux/arm64
+# JWT_SECRET=your-secure-key
+# ADMIN_PASSWORD=your-password
+# CACHE_SIZE=1024
+# ALERT_ENABLED=false
+# VITE_API_BASE_URL=https://api.your-domain.com

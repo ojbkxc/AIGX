@@ -233,10 +233,10 @@ alert_patrol(60s) → 断路器 open/延迟 EMA/内存 → AlertRuleEvaluator.ev
 - [x] 安全事件路径 `/api/security/events` → `/api/monitor/security/events`
 
 ### P1 — 建议优化
-- [ ] **Dashboard 断路器状态**：后端已返回机器可读 `circuit_breaker`，前端 `Dashboard.jsx` 的 `breakerState` 逻辑可简化为直接读该字段（当前兼容多字段但逻辑冗余）
-- [ ] **Settings 价格同步**：`enabled/sync_url/interval_secs` 与后端 `PriceSyncConfig` 字段对齐后，保存后应立即 `loadPriceSyncConfig()` 刷新 `last_sync` 展示
-- [ ] **汇率配置**：前端 `Object.keys(exchangeRates)` 需处理 USD 基准（后端返回含 `USD:1.0`），建议前端隐藏/禁用 USD 输入
-- [ ] **安全事件筛选**：`timeRange` 与 `eventType` 变化后，前端 `loadEvents` 的 useEffect 依赖未包含这两个字段（需显式触发），交互略不跟手
+- [x] **Dashboard 断路器状态**：后端已返回机器可读 `circuit_breaker`，前端 `Dashboard.jsx` 的 `breakerState` 逻辑可简化为直接读该字段（当前兼容多字段但逻辑冗余）
+- [x] **Settings 价格同步**：`enabled/sync_url/interval_secs` 与后端 `PriceSyncConfig` 字段对齐后，保存后应立即 `loadPriceSyncConfig()` 刷新 `last_sync` 展示
+- [x] **汇率配置**：前端 `Object.keys(exchangeRates)` 需处理 USD 基准（后端返回含 `USD:1.0`），建议前端隐藏/禁用 USD 输入
+- [x] **安全事件筛选**：`timeRange` 与 `eventType` 变化后，前端 `loadEvents` 的 useEffect 依赖未包含这两个字段（需显式触发），交互略不跟手
 
 ### P2 — 长期增强
 - [ ] 全局搜索（跨用户/密钥/订单/日志）

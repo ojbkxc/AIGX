@@ -57,7 +57,7 @@ const navGroups = [
     key: 'tools',
     labelKey: '工具与安全',
     icon: '🔧',
-    items: [navItems[14], navItems[15], navItems[16]], // Playground、安全监控、IP 管理
+    items: [navItems[17], navItems[18], navItems[19], navItems[20]], // 网络、Playground、安全监控、IP 管理
   },
   {
     key: 'system',

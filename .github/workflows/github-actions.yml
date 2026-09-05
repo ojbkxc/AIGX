@@ -1,0 +1,274 @@
+# AIGX GitHub Actions - 多平台编译工作流
+# Target: https://github.com/ojbkxc/AIGX
+
+name: AIGX Multi-platform Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  release:
+    types: [ created ]
+  workflow_dispatch:
+
+env:
+  RUST_TOOLCHAIN: stable
+
+jobs:
+  # Linux AMD64 构建
+  build-linux-amd64:
+    name: Build Linux AMD64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          override: true
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Linux AMD64
+        run: |
+          cargo build --release --no-default-features
+          mkdir -p build/2024-Linux-x86_64
+          mv target/release/aigx build/2024-Linux-x86_64/
+          strip build/2024-Linux-x86_64/aigx
+          file build/2024-Linux-x86_64/aigx
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aigx-linux-amd64
+          path: build/2024-Linux-x86_64/
+
+  # Linux ARM64 构建
+  build-linux-arm64:
+    name: Build Linux ARM64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          override: true
+
+      - name: Install cross compiler for ARM64
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-arm64-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Linux ARM64
+        run: |
+          cargo build --release --target aarch64-unknown-linux-gnu --no-default-features
+          mkdir -p build/2024-Linux-arm64
+          mv target/aarch64-unknown-linux-gnu/release/aigx build/2024-Linux-arm64/
+          strip build/2024-Linux-arm64/aigx
+          file build/2024-Linux-arm64/aigx
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aigx-linux-arm64
+          path: build/2024-Linux-arm64/
+
+  # Windows AMD64 构建
+  build-windows-amd64:
+    name: Build Windows AMD64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          override: true
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-win-amd64-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Windows AMD64
+        run: |
+          cargo build --release --no-default-features
+          mkdir -p build/2024-Windows-x86_64
+          copy target\release\aigx.exe build\2024-Windows-x86_64\
+          wc -c build\2024-Windows-x86_64\aigx.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aigx-windows-amd64
+          path: build/2024-Windows-x86_64/
+
+  # macOS Intel 构建
+  build-macos-intel:
+    name: Build macOS Intel
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          override: true
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-darwin-x86_64-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build macOS Intel
+        run: |
+          cargo build --release --target x86_64-apple-darwin --no-default-features
+          mkdir -p build/2024-macOS-x86_64
+          cp target/x86_64-apple-darwin/release/aigx build/2024-macOS-x86_64/
+          strip build/2024-macOS-x86_64/aigx
+          file build/2024-macOS-x86_64/aigx
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aigx-macos-x86_64
+          path: build/2024-macOS-x86_64/
+
+  # macOS ARM64 构建
+  build-macos-arm64:
+    name: Build macOS ARM64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          override: true
+          targets: aarch64-apple-darwin
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-darwin-arm64-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build macOS ARM64
+        run: |
+          cargo build --release --target aarch64-apple-darwin --no-default-features
+          mkdir -p build/2024-macOS-arm64
+          cp target/aarch64-apple-darwin/release/aigx build/2024-macOS-arm64/
+          strip build/2024-macOS-arm64/aigx
+          file build/2024-macOS-arm64/aigx
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aigx-macos-arm64
+          path: build/2024-macOS-arm64/
+
+  # 检查并验证构建结果
+  verify-builds:
+    name: Verify All Builds
+    needs: [build-linux-amd64, build-linux-arm64, build-windows-amd64, build-macos-intel, build-macos-arm64]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Verify Linux AMD64
+        run: |
+          if [ -f artifacts/aigx-linux-amd64/aigx ]; then
+            echo "✅ Linux AMD64 构建成功"
+            echo "大小: $(wc -c < artifacts/aigx-linux-amd64/aigc)"
+          else
+            echo "❌ Linux AMD64 构建失败"
+            exit 1
+          fi
+
+      - name: Verify Linux ARM64
+        run: |
+          if [ -f artifacts/aigx-linux-arm64/aigx ]; then
+            echo "✅ Linux ARM64 构建成功"
+          else
+            echo "❌ Linux ARM64 构建失败"
+            exit 1
+          fi
+
+      - name: Verify Windows AMD64
+        run: |
+          if [ -f artifacts/aigx-windows-amd64/aigx.exe ]; then
+            echo "✅ Windows AMD64 构建成功"
+          else
+            echo "❌ Windows AMD64 构建失败"
+            exit 1
+          fi
+
+      - name: Verify macOS Intel
+        run: |
+          if [ -f artifacts/aigx-macos-x86_64/aigx ]; then
+            echo "✅ macOS Intel 构建成功"
+          else
+            echo "❌ macOS Intel 构建失败"
+            exit 1
+          fi
+
+      - name: Verify macOS ARM64
+        run: |
+          if [ -f artifacts/aigx-macos-arm64/aigx ]; then
+            echo "✅ macOS ARM64 构建成功"
+          else
+            echo "❌ macOS ARM64 构建失败"
+            exit 1
+          fi
+
+      - name: Summary
+        run: |
+          echo ""
+          echo "=============================================="
+          echo "✅ 所有平台构建成功！"
+          echo "=============================================="
+          echo ""
+          echo "🎉 发布 v1.0.0"
+          echo "     git tag v1.0.0 && git push origin v1.0.0"
+          echo ""
+          echo "📊 查看发布列表："
+          echo "     https://github.com/ojbkxc/AIGX/releases"
+          echo ""

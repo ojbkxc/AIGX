@@ -129,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化 CF API 客户端（AI Binding 桥接方式）
     let mut cf_api_client = CfApiClient::new(account_pool.clone(), model_mapper.clone());
-    // 配置兜底 cf-ai-gw Worker 地址（无账号时使用），保证“零账号即可跑通”
+    // 配置兜底 cf-ai-gw Worker 地址（无账号时使用），保证"零账号即可跑通"
     cf_api_client.with_fallback(config.cf_binding_url.clone(), String::new());
     let api_client = Arc::new(cf_api_client);
 
@@ -440,8 +440,9 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     // 注意：axum 0.7（matchit 0.7）的路由参数语法是 `:id`，不是 `{id}`。
     // `{id}` 是 axum 0.8（matchit 0.8）的语法，在 0.7 下会被当作字面量路径段，
     // 导致所有带参数路由匹配失败、请求掉到 fallback_service 返回 405/404。
-    // 管理 API 路由
+    // 管理 API 路由（模块化）
     let admin_routes = Router::new()
+        // Auth handlers (来自 api::admin::auth)
         .route("/api/auth/login", post(api::admin::handle_login))
         .route("/api/auth/register", post(api::admin::handle_register))
         .route(
@@ -461,7 +462,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/auth/reset-password",
             post(api::admin::handle_reset_password),
         )
-        // 阶段1：Google OAuth（参照 burncloud auth.rs::oauth_google）
+        .route(
+            "/api/auth/logout",
+            post(api::admin::handle_logout),
+        )
+        // 阶段1：Google OAuth
         .route(
             "/api/auth/google",
             get(api::admin::handle_google_oauth_authorize),
@@ -470,113 +475,20 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/auth/google/callback",
             get(api::admin::handle_google_oauth_callback),
         )
-        // 阶段1：用户名检查（参照 burncloud user.rs::check_username）
-        .route("/api/users/check", get(api::admin::handle_check_username))
-        .route("/api/auth/logout", post(api::admin::handle_logout))
-        .route("/api/usage/summary", get(api::admin::handle_usage_summary))
-        .route("/api/usage/summary", post(api::admin::handle_refresh_usage))
-        .route("/api/accounts", get(api::admin::handle_list_accounts))
-        .route("/api/accounts", post(api::admin::handle_add_account))
-        .route("/api/accounts/test", post(api::admin::handle_test_account))
-        .route("/api/accounts/:id", put(api::admin::handle_update_account))
-        .route(
-            "/api/accounts/:id",
-            delete(api::admin::handle_delete_account),
-        )
-        .route("/api/keys", get(api::admin::handle_list_keys))
-        .route("/api/keys", post(api::admin::handle_add_key))
-        .route("/api/keys/:id", delete(api::admin::handle_delete_key))
-        .route("/api/settings", get(api::admin::handle_get_settings))
-        .route("/api/settings", put(api::admin::handle_update_settings))
-        .route("/api/limits", get(api::admin::handle_get_limits))
-        .route("/api/limits", put(api::admin::handle_update_limits))
-        .route("/api/tokens/today", get(api::admin::handle_tokens_today))
-        .route("/api/usage/trend", get(api::admin::handle_usage_trend))
-        .route("/api/usage/models", get(api::admin::handle_usage_models))
         // 用户管理
         .route("/api/users", get(api::admin::handle_list_users))
         .route("/api/users", post(api::admin::handle_create_user))
+        .route("/api/users/check", get(api::admin::handle_check_username))
         .route("/api/users/me", get(api::admin::handle_me))
         .route("/api/users/:id", put(api::admin::handle_update_user))
         .route("/api/users/:id", delete(api::admin::handle_delete_user))
-        // 易支付配置
-        .route("/api/epay/config", get(api::admin::handle_get_epay_config))
-        .route(
-            "/api/epay/config",
-            put(api::admin::handle_update_epay_config),
-        )
-        // 订单查询
-        .route("/api/orders", get(api::admin::handle_list_orders))
-        .route("/api/orders/me", get(api::admin::handle_my_orders))
-        // 充值下单
-        .route("/api/topup", post(api::admin::handle_topup_request))
-        // 通用渠道管理
+        // 渠道管理
         .route("/api/channels", get(api::admin::handle_list_channels))
         .route("/api/channels", post(api::admin::handle_add_channel))
-        .route(
-            "/api/channels/fetch_models",
-            post(api::admin::handle_fetch_channel_models),
-        )
-        .route(
-            "/api/channels/:id/reset-circuit",
-            post(api::admin::handle_reset_channel_circuit),
-        )
-        // 批次3/4：IP 过滤管理（前端 IpManagement 页）
-        .route("/api/ip/filter", get(api::admin::handle_get_ip_filter))
-        .route("/api/ip/filter", put(api::admin::handle_update_ip_filter))
-        .route(
-            "/api/ip/whitelist",
-            post(api::admin::handle_add_ip_whitelist),
-        )
-        .route(
-            "/api/ip/blacklist",
-            post(api::admin::handle_add_ip_blacklist),
-        )
-        .route(
-            "/api/ip/whitelist/:pattern",
-            delete(api::admin::handle_remove_ip_whitelist),
-        )
-        .route(
-            "/api/ip/blacklist/:pattern",
-            delete(api::admin::handle_remove_ip_blacklist),
-        )
-        // 批次3/4：价格同步 + 汇率（前端 Settings 页）
-        .route(
-            "/api/pricing/sync-config",
-            get(api::admin::handle_get_price_sync_config),
-        )
-        .route(
-            "/api/pricing/sync-config",
-            put(api::admin::handle_update_price_sync_config),
-        )
-        .route(
-            "/api/pricing/sync",
-            post(api::admin::handle_trigger_price_sync),
-        )
-        .route(
-            "/api/pricing/exchange-rates",
-            get(api::admin::handle_get_exchange_rates),
-        )
-        .route(
-            "/api/pricing/exchange-rates",
-            put(api::admin::handle_update_exchange_rates),
-        )
         .route("/api/channels/:id", put(api::admin::handle_update_channel))
         .route("/api/channels/:id", patch(api::admin::handle_patch_channel))
-        .route(
-            "/api/channels/:id",
-            delete(api::admin::handle_delete_channel),
-        )
-        .route(
-            "/api/channels/:id/test",
-            post(api::admin::handle_test_channel),
-        )
-        // 渠道对话调试（OpenAI / Anthropic 协议直连上游验证）
-        .route(
-            "/api/channels/chat_test",
-            post(api::admin::handle_channel_chat_test),
-        )
-        // 令牌管理（增强）
+        .route("/api/channels/:id", delete(api::admin::handle_delete_channel))
+        // 令牌管理
         .route("/api/tokens", get(api::admin::handle_list_tokens))
         .route("/api/tokens", post(api::admin::handle_add_token))
         .route("/api/tokens/:id", put(api::admin::handle_update_token))
@@ -585,34 +497,34 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/tokens/:id/reset_used",
             post(api::admin::handle_reset_token_used),
         )
-        // 阶段1：令牌轮换（参照 burncloud token.rs::rotate_token）
+        // 定价管理
+        .route("/api/pricing", get(api::admin::handle_list_pricing))
+        .route("/api/pricing", post(api::admin::handle_add_pricing))
+        .route("/api/pricing/:id", delete(api::admin::handle_delete_pricing))
         .route(
-            "/api/tokens/:id/rotate",
-            post(api::admin::handle_rotate_token),
-        )
-        // 模型定价目录
-        .route("/api/prices", get(api::admin::handle_list_prices))
-        .route("/api/prices", post(api::admin::handle_upsert_price))
-        .route(
-            "/api/prices/:model",
-            put(api::admin::handle_upsert_price_by_model),
+            "/api/pricing/exchange-rates",
+            get(api::admin::handle_get_exchange_rates),
         )
         .route(
-            "/api/prices/:model",
-            delete(api::admin::handle_delete_price),
+            "/api/pricing/exchange-rates",
+            put(api::admin::handle_update_exchange_rates),
         )
-        // 倍率配置
-        .route("/api/ratios", get(api::admin::handle_get_ratios))
-        .route("/api/ratios", put(api::admin::handle_update_ratios))
-        // 用户分组管理
-        .route("/api/groups", get(api::admin::handle_list_groups))
-        .route("/api/groups", post(api::admin::handle_upsert_group))
         .route(
-            "/api/groups/:name",
-            put(api::admin::handle_upsert_group_by_name),
+            "/api/pricing/sync",
+            post(api::admin::handle_trigger_price_sync),
         )
-        .route("/api/groups/:name", delete(api::admin::handle_delete_group))
-        // 日志与审计（功能 1）
+                // 易支付配置
+        .route("/api/epay/config", get(api::admin::handle_get_epay_config))
+        .route(
+            "/api/epay/config",
+            put(api::admin::handle_update_epay_config),
+        )
+        // 订单管理
+        .route("/api/orders", get(api::admin::handle_list_orders))
+        .route("/api/orders/me", get(api::admin::handle_my_orders))
+        .route("/api/topup", post(api::admin::handle_topup_request))
+        .route("/api/orders/:id", delete(api::admin::handle_delete_order))
+        // 日志审计
         .route(
             "/api/logs/requests",
             get(api::admin::handle_list_request_logs),
@@ -622,27 +534,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/logs/requests/export",
             get(api::admin::handle_export_request_logs),
         )
-        // 兑换码（功能 2）
-        .route("/api/redemptions", get(api::admin::handle_list_redemptions))
-        .route(
-            "/api/redemptions/batch",
-            post(api::admin::handle_batch_redemptions),
-        )
-        .route(
-            "/api/redemptions/:id",
-            delete(api::admin::handle_delete_redemption),
-        )
-        .route("/api/redemptions/redeem", post(api::admin::handle_redeem))
-        // 限流配置（功能 3）
-        .route(
-            "/api/ratelimit/config",
-            get(api::admin::handle_get_ratelimit_config),
-        )
-        .route(
-            "/api/ratelimit/config",
-            put(api::admin::handle_update_ratelimit_config),
-        )
-        // 数据看板增强（功能 4）
+        // 数据看板
         .route(
             "/api/dashboard/consumption_trend",
             get(api::admin::handle_consumption_trend),
@@ -651,16 +543,21 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/dashboard/model_distribution",
             get(api::admin::handle_model_distribution),
         )
-        .route(
-            "/api/dashboard/user_ranking",
-            get(api::admin::handle_user_ranking),
-        )
+        .route("/api/dashboard/user_ranking", get(api::admin::handle_user_ranking))
         .route(
             "/api/dashboard/channel_health",
             get(api::admin::handle_channel_health),
         )
-        .route("/api/dashboard/realtime", get(api::admin::handle_realtime))
-        // 通知系统配置（Telegram + SMTP）
+        .route(
+            "/api/dashboard/realtime",
+            get(api::admin::handle_realtime),
+        )
+        // 设置管理
+        .route("/api/settings", get(api::admin::handle_get_settings))
+        .route("/api/settings", put(api::admin::handle_update_settings))
+        .route("/api/limits", get(api::admin::handle_get_limits))
+        .route("/api/limits", put(api::admin::handle_update_limits))
+        // 通知配置
         .route(
             "/api/notify/config",
             get(api::admin::handle_get_notify_config),
@@ -685,7 +582,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/notify/test-webhook",
             post(api::admin::handle_test_webhook),
         )
-        // 批次5：告警规则管理（参照 burncloud alert rules API）
+        // 告警规则
         .route(
             "/api/alerts/rules",
             get(api::admin::handle_alert_rules_list),
@@ -700,10 +597,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             get(api::admin::handle_alerts_history),
         )
         .route("/api/alerts/test", post(api::admin::handle_alert_test))
-        // 阶段1：缓存管理 API（参照 burncloud cache.rs）
+        // 缓存管理
         .route("/api/cache/stats", get(api::admin::handle_cache_stats))
         .route("/api/cache/clear", post(api::admin::handle_cache_clear))
-        // 阶段1：安全监控（参照 burncloud security.rs）
+        // 安全监控
         .route(
             "/api/monitor/security",
             get(api::admin::handle_security_summary),
@@ -712,21 +609,59 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/monitor/security/events",
             get(api::admin::handle_security_events),
         )
-        // 阶段1：Playground（参照 burncloud token.rs::playground_chat）
+        // 游乐场
         .route(
             "/api/playground/chat",
             post(api::admin::handle_playground_chat),
         )
-        // 批次6：系统监控（CPU/内存/负载/进程，参照 burncloud monitor collectors）
+        // 系统监控
+        .route("/api/monitor/system", get(api::admin::handle_monitor_system))
+        // 渠道探活
         .route(
-            "/api/monitor/system",
-            get(api::admin::handle_monitor_system),
+            "/api/channels/fetch_models",
+            post(api::admin::handle_fetch_channel_models),
         )
-        // Prometheus 指标（仅管理员）
-        .route("/api/metrics", get(handle_metrics));
-
-    // 易支付回调（异步通知 + 同步跳转）— 无需鉴权
-    let epay_callback_routes = Router::new()
+        .route(
+            "/api/channels/chat_test",
+            post(api::admin::handle_channel_chat_test),
+        )
+        .route(
+            "/api/channels/:id/reset-circuit",
+            post(api::admin::handle_reset_channel_circuit),
+        )
+        .route("/api/channels/:id/test", post(api::admin::handle_test_channel))
+        // IP 过滤
+        .route("/api/ip/filter", get(api::admin::handle_get_ip_filter))
+        .route("/api/ip/filter", put(api::admin::handle_update_ip_filter))
+        .route(
+            "/api/ip/whitelist",
+            post(api::admin::handle_add_ip_whitelist),
+        )
+        .route(
+            "/api/ip/blacklist",
+            post(api::admin::handle_add_ip_blacklist),
+        )
+        .route(
+            "/api/ip/whitelist/:pattern",
+            delete(api::admin::handle_remove_ip_whitelist),
+        )
+        .route(
+            "/api/ip/blacklist/:pattern",
+            delete(api::admin::handle_remove_ip_blacklist),
+        )
+        // 价格同步配置
+        .route(
+            "/api/pricing/sync-config",
+            get(api::admin::handle_get_price_sync_config),
+        )
+        .route(
+            "/api/pricing/sync-config",
+            put(api::admin::handle_update_price_sync_config),
+        )
+        .route(
+            "/api/channels/:id/patch",
+            patch(api::admin::handle_patch_channel),
+        )
         .route(
             "/api/user/epay/notify",
             post(api::admin::handle_epay_notify).get(api::admin::handle_epay_notify),
@@ -734,13 +669,92 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/user/epay/return",
             post(api::admin::handle_epay_return).get(api::admin::handle_epay_return),
-        );
-    let stripe_callback_routes = Router::new()
+        )
         .route("/api/stripe/topup", post(api::admin::handle_stripe_topup))
         .route(
             "/api/user/stripe/webhook",
             post(api::admin::handle_stripe_webhook),
+        )
+        // OpenAPI 文档
+        .route(
+            "/api-docs/openapi.json",
+            get(api::admin::handle_openapi_json),
+        )
+        .route("/swagger-ui", get(api::admin::handle_swagger_ui))
+        // 模型定价
+        .route("/api/prices", get(api::admin::handle_list_prices))
+        .route("/api/prices", post(api::admin::handle_upsert_price))
+        .route(
+            "/api/prices/:model",
+            put(api::admin::handle_upsert_price_by_model),
+        )
+        .route(
+            "/api/prices/:model",
+            delete(api::admin::handle_delete_price),
+        )
+        // 用户分组
+        .route("/api/groups", get(api::admin::handle_list_groups))
+        .route("/api/groups", post(api::admin::handle_upsert_group))
+        .route(
+            "/api/groups/:name",
+            put(api::admin::handle_upsert_group_by_name),
+        )
+        .route("/api/groups/:name", delete(api::admin::handle_delete_group))
+        // 倍率配置
+        .route("/api/ratios", get(api::admin::handle_get_ratios))
+        .route("/api/ratios", put(api::admin::handle_update_ratios))
+        // 兑换码
+        .route("/api/redemptions", get(api::admin::handle_list_redemptions))
+        .route(
+            "/api/redemptions/batch",
+            post(api::admin::handle_batch_redemptions),
+        )
+        .route("/api/redemptions/:id", delete(api::admin::handle_delete_redemption))
+        .route("/api/redemptions/redeem", post(api::admin::handle_redeem))
+        // 限流配置
+        .route(
+            "/api/ratelimit/config",
+            get(api::admin::handle_get_ratelimit_config),
+        )
+        .route(
+            "/api/ratelimit/config",
+            put(api::admin::handle_update_ratelimit_config),
+        )
+        // 令牌增强
+        .route("/api/tokens/today", get(api::admin::handle_tokens_today))
+        .route("/api/usage/trend", get(api::admin::handle_usage_trend))
+        .route("/api/usage/models", get(api::admin::handle_usage_models))
+        .route("/api/usage/summary", get(api::admin::handle_usage_summary))
+        .route("/api/usage/summary", post(api::admin::handle_refresh_usage))
+        .route("/api/accounts", get(api::admin::handle_list_accounts))
+        .route("/api/accounts", post(api::admin::handle_add_account))
+        .route("/api/accounts/test", post(api::admin::handle_test_account))
+        .route("/api/accounts/:id", put(api::admin::handle_update_account))
+        .route("/api/accounts/:id", delete(api::admin::handle_delete_account))
+        .route("/api/keys", get(api::admin::handle_list_keys))
+        .route("/api/keys", post(api::admin::handle_add_key))
+        .route("/api/keys/:id", delete(api::admin::handle_delete_key))
+        .route("/api/limits", get(api::admin::handle_get_limits))
+        .route("/api/limits", put(api::admin::handle_update_limits))
+        .route("/api/tokens/:id/rotate", post(api::admin::handle_rotate_token))
+        // 网络层管理路由（新增 AIGX Network Layer）
+        .route("/api/network/status", get(api::admin::health_check))
+        .route("/api/network/config/:config_id", put(api::admin::update_network_config))
+        .route("/api/network/restart", post(api::admin::restart_network))
+        .route(
+            "/api/network/accounts/:account_id",
+            post(api::admin::add_network_account),
+        )
+        .route(
+            "/api/network/accounts/:account_id",
+            delete(api::admin::remove_network_account),
         );
+
+    // EasyPay 回调（异步通知 + 同步跳转）— 无需鉴权
+    let epay_callback_routes = Router::new();
+
+    // Stripe 回调
+    let stripe_callback_routes = Router::new();
 
     // OpenAI 兼容 API 路由
     let openai_routes = Router::new()
@@ -771,6 +785,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     let anthropic_routes =
         Router::new().route("/v1/messages", post(api::anthropic::handle_messages));
 
+
     Router::new()
         .merge(admin_routes)
         .merge(epay_callback_routes)
@@ -781,12 +796,6 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/readyz", get(handle_readyz))
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
-        // 阶段1：OpenAPI 文档 + Swagger UI（参照 burncloud openapi.rs，公开无需鉴权）
-        .route(
-            "/api-docs/openapi.json",
-            get(api::admin::handle_openapi_json),
-        )
-        .route("/swagger-ui", get(api::admin::handle_swagger_ui))
         .fallback_service(web::serve_static_files())
         .layer(build_cors_layer(config))
         .with_state(state)

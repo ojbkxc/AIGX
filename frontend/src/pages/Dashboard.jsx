@@ -450,13 +450,11 @@ export default function Dashboard() {
                 const errorRate = c.error_rate != null ? c.error_rate : (c.total_requests > 0 ? ((c.total_requests - (c.success_count || 0)) / c.total_requests) * 100 : 0);
                 const isHealthy = successRate >= 95;
                 const isWarning = successRate >= 80 && successRate < 95;
-                // 断路器状态：Closed(正常,绿) / Open(熔断,红) / HalfOpen(半开,黄)
-                // 批次6：后端新增 circuit_breaker 字段（"Closed"/"Open"/"HalfOpen"）
-                const breakerState = (
-                  c.circuit_breaker || c.breaker_state || c.circuit_state || 'closed'
-                ).toLowerCase();
-                const breakerColor = breakerState === 'open' ? 'rgb(239,68,68)' : breakerState === 'halfopen' || breakerState === 'half_open' ? 'rgb(234,179,8)' : 'rgb(34,197,94)';
-                const breakerLabel = breakerState === 'open' ? t('熔断') : (breakerState === 'halfopen' || breakerState === 'half_open') ? t('半开') : t('正常');
+                // 断路器状态：后端 circuit_breaker 已为机器可读小写枚举
+                // ("open"/"halfopen"/"closed"，见 channel/circuit_breaker.rs get_state)
+                const breakerState = String(c.circuit_breaker || 'closed').toLowerCase();
+                const breakerColor = breakerState === 'open' ? 'rgb(239,68,68)' : breakerState === 'halfopen' ? 'rgb(234,179,8)' : 'rgb(34,197,94)';
+                const breakerLabel = breakerState === 'open' ? t('熔断') : breakerState === 'halfopen' ? t('半开') : t('正常');
                 return (
                   <div key={i} className="stat-card" style={{ padding: 16 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>

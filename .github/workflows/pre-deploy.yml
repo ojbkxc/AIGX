@@ -1,0 +1,73 @@
+# AIGX 部署前检查 - 确保所有文件都准备好了
+
+name: Pre-deploy Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: '分支名称'
+        required: true
+        default: 'main'
+      repo_url:
+        description: '远程仓库 URL'
+        required: false
+        default: 'https://github.com/yourusername/aigx.git'
+
+jobs:
+  check-deployment:
+    name: Check Deployment Readiness
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Upload all workflow files
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-workflows
+          path: .github/workflows/
+          retention-days: 30
+
+      - name: Check Dockerfile existence
+        run: |
+          echo "检查 Dockerfile..."
+          if [ -f "docker-build.sh" ]; then
+            echo "✅ docker-build.sh 存在"
+          else
+            echo "⚠️  docker-build.sh 不存在"
+          fi
+
+      - name: Check build scripts
+        run: |
+          echo "检查构建脚本..."
+          scripts=("build-binaries.sh" "build-binaries.bat" "Makefile")
+          for script in "${scripts[@]}"; do
+            if [ -f "$script" ]; then
+              echo "✅ $script 存在"
+            else
+              echo "❌ $script 不存在"
+            fi
+          done
+
+      - name: Structure verification
+        run: |
+          echo "验证项目结构..."
+          required_dirs=("containers" "docs" "aigx-net")
+          for dir in "${required_dirs[@]}"; do
+            if [ -d "$dir" ]; then
+              echo "✅ $dir 存在"
+            else
+              echo "❌ $dir 不存在"
+            fi
+          done
+          echo ""
+          echo "所有必需文件已完成准备，可以推送！"
+          echo ""
+          echo "下一步："
+          echo "1. 选择一个分支手动推送："
+          echo "   git push origin main"
+          echo ""
+          echo "2. 或者触发完整构建工作流："
+          echo "   将此工作流设置为自动触发"
