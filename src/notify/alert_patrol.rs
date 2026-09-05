@@ -70,6 +70,7 @@ async fn patrol_once(
             channel_id: channel.id.clone(),
         };
         if cb_open {
+            // 在独立语句中求值并让 MutexGuard 立即释放，避免 guard 跨 await
             let alert = evaluator.lock().unwrap().evaluate(&kind_failure, 1);
             if let Some(alert) = alert {
                 dispatch_alert(notify_service, &alert.level, &alert.message).await;

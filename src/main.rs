@@ -13,6 +13,7 @@ mod error_translate;
 mod graphql;
 mod health;
 mod hub;
+mod ip;
 mod log;
 mod metrics;
 mod model;
