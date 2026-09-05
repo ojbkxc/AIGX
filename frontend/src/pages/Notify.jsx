@@ -528,6 +528,11 @@ export default function Notify() {
                 <option value="memory_high">MemoryHigh</option>
                 <option value="channel_failure">ChannelFailure</option>
                 <option value="channel_high_latency">ChannelHighLatency</option>
+                <option value="channel_quota_low">ChannelQuotaLow</option>
+                <option value="user_quota_exhausted">UserQuotaExhausted</option>
+                <option value="queue_backlog">QueueBacklog</option>
+                <option value="abnormal_traffic">AbnormalTraffic</option>
+                <option value="cost_anomaly">CostAnomaly</option>
               </select>
               <button className="btn btn-outline" onClick={handleTestAlert}>
                 {t('触发测试告警')}

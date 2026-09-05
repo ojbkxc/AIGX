@@ -3788,8 +3788,14 @@ pub async fn handle_alert_test(
         Some("channel_high_latency") => crate::notify::alert::AlertKind::ChannelHighLatency {
             channel_id: "test-channel".into(),
         },
+        Some("channel_quota_low") => crate::notify::alert::AlertKind::ChannelQuotaLow {
+            channel_id: "test-channel".into(),
+        },
         Some("memory_high") | None => crate::notify::alert::AlertKind::MemoryHigh,
         Some("queue_backlog") => crate::notify::alert::AlertKind::QueueBacklog,
+        Some("user_quota_exhausted") => crate::notify::alert::AlertKind::UserQuotaExhausted {
+            user_id: "test-user".into(),
+        },
         Some("abnormal_traffic") => crate::notify::alert::AlertKind::AbnormalTraffic,
         Some("cost_anomaly") => crate::notify::alert::AlertKind::CostAnomaly,
         Some(other) => {
