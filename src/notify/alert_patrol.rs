@@ -63,7 +63,8 @@ async fn patrol_once(
             channel_id: channel.id.clone(),
         };
         if cb_open {
-            if let Some(alert) = evaluator.lock().unwrap().evaluate(&kind_failure, 1) {
+            let alert = evaluator.lock().unwrap().evaluate(&kind_failure, 1);
+            if let Some(alert) = alert {
                 dispatch_alert(notify_service, &alert.level, &alert.message).await;
             }
         }
@@ -74,7 +75,8 @@ async fn patrol_once(
                 channel_id: channel.id.clone(),
             };
             let avg_ms = s.overall_avg_latency_ms as u64;
-            if let Some(alert) = evaluator.lock().unwrap().evaluate(&kind_latency, avg_ms) {
+            let alert = evaluator.lock().unwrap().evaluate(&kind_latency, avg_ms);
+            if let Some(alert) = alert {
                 dispatch_alert(notify_service, &alert.level, &alert.message).await;
             }
         }
@@ -85,11 +87,11 @@ async fn patrol_once(
     // 非 Linux 平台计算 usage_percent 不可得则跳过（evaluate 传入 0 永不触发）
     let mem_percent = memory_usage_percent();
     if mem_percent > 0 {
-        if let Some(alert) = evaluator
+        let alert = evaluator
             .lock()
             .unwrap()
-            .evaluate(&AlertKind::MemoryHigh, mem_percent)
-        {
+            .evaluate(&AlertKind::MemoryHigh, mem_percent);
+        if let Some(alert) = alert {
             dispatch_alert(notify_service, &alert.level, &alert.message).await;
         }
     }
