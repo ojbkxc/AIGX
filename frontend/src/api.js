@@ -283,6 +283,7 @@ export const api = {
   getAlertRules: () => request('GET', '/api/alerts/rules'),
   updateAlertRules: (rules) => request('PUT', '/api/alerts/rules', { rules }),
   getActiveAlerts: () => request('GET', '/api/alerts/active'),
+  getAlertHistory: (limit = 100) => request('GET', `/api/alerts/history?limit=${limit}`),
   testAlert: (kind, value) => request('POST', '/api/alerts/test', { kind, value }),
 
   // ── 系统监控（批次6）──
@@ -293,7 +294,7 @@ export const api = {
 
   // ── 安全监控 ──
   getSecurityOverview: () => request('GET', '/api/monitor/security'),
-  getSecurityEvents: (params = {}) => request('GET', `/api/security/events?${new URLSearchParams(params)}`),
+  getSecurityEvents: (params = {}) => request('GET', `/api/monitor/security/events?${new URLSearchParams(params)}`),
 
   // ── IP 管理 ──
   getIpFilter: () => request('GET', '/api/ip/filter'),

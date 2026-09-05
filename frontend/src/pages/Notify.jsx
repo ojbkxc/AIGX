@@ -21,6 +21,7 @@ export default function Notify() {
   // 告警规则（批次5）
   const [rules, setRules] = useState([]);
   const [activeAlerts, setActiveAlerts] = useState([]);
+  const [alertHistory, setAlertHistory] = useState([]);
   const [rulesSaving, setRulesSaving] = useState(false);
   const [testingAlertKind, setTestingAlertKind] = useState('memory_high');
 
@@ -145,12 +146,14 @@ export default function Notify() {
   // ── 告警规则 ──────────────────────────────────────────────
   const loadAlerts = async () => {
     try {
-      const [rulesRes, activeRes] = await Promise.all([
+      const [rulesRes, activeRes, historyRes] = await Promise.all([
         api.getAlertRules(),
         api.getActiveAlerts(),
+        api.getAlertHistory(50),
       ]);
       setRules((rulesRes.data || []));
       setActiveAlerts(activeRes.data || []);
+      setAlertHistory((historyRes.data?.items) || (historyRes.data) || []);
     } catch {
       // 告警 API 失败不阻塞通知配置页
     }
@@ -542,6 +545,24 @@ export default function Notify() {
                     <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>×{a.trigger_count}</span>
                   </div>
                 ))}
+              </div>
+            )}
+            {alertHistory.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <h3 style={{ fontSize: 13, marginBottom: 6 }}>{t('告警历史')} ({alertHistory.length})</h3>
+                <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {alertHistory.map((h) => (
+                    <div key={h.id} className="notify-note" style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 }}>
+                      <span className={`badge ${h.level === 'critical' ? 'badge-danger' : h.level === 'warning' ? 'badge-warning' : 'badge-neutral'}`}>
+                        {h.level}
+                      </span>
+                      <span style={{ flex: 1 }}>{h.message}</span>
+                      <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+                        {new Date(h.triggered_at * 1000).toLocaleString()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>
