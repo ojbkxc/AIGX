@@ -80,12 +80,20 @@ export interface Limits {
  * 订单信息接口
  */
 export interface Order {
-  id: string;
-  amount: number;
-  method: string;
-  status: string;
-  created_at: string;
+  /** 订单号（后端以 trade_no 为主键展示） */
+  id?: string;
   trade_no?: string;
+  user_id?: string;
+  amount?: number;
+  money?: number;
+  /** 结算配额（新订单有，旧订单按 amount × epay.price 回退） */
+  quota?: number | null;
+  method?: string;
+  payment_method?: string;
+  status?: string;
+  created_at?: string;
+  create_time?: number;
+  paid_time?: number | null;
 }
 
 /**

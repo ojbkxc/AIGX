@@ -742,6 +742,56 @@ table tr:hover td {
   padding: 14px 18px;
 }
 
+/* ── 通用标签页（components/ui/Tabs.tsx）────────────────────────── */
+.ui-tabs {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  background: var(--btn-secondary-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  flex-wrap: wrap;
+}
+
+.ui-tab {
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.ui-tab:hover:not(:disabled) {
+  color: var(--text-main);
+  background: var(--btn-secondary-hover);
+}
+
+.ui-tab.active {
+  color: white;
+  background: var(--primary-gradient);
+  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.3);
+}
+
+.ui-tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.form-input-error {
+  border-color: var(--danger-color);
+}
+
+.form-input-error:focus {
+  border-color: var(--danger-color);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+}
+
 /* Code */
 code {
   background: var(--code-bg);

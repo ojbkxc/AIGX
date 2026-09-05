@@ -141,8 +141,13 @@ export const api = {
   // ==================== 顶层便捷方法（页面直调，沿用后端路由契约） ====================
   login: (email: string, password: string): Promise<any> =>
     request('POST', `${API_BASE}/auth/login`, { email, password }),
-  register: (username: string, email: string, password: string): Promise<any> =>
-    request('POST', `${API_BASE}/auth/register`, { email, password, username }),
+  // 兼容历史调用顺序 (email, password, username?)：后端仅使用 email/password/username 字段
+  register: (emailOrUsername: string, password: string, username?: string): Promise<any> =>
+    request('POST', `${API_BASE}/auth/register`, {
+      email: emailOrUsername,
+      password,
+      username: username ?? undefined,
+    }),
   forgotPassword: (email: string): Promise<any> =>
     request('POST', `${API_BASE}/auth/forgot-password`, { email }),
   getUsageSummary: (): Promise<any> => request('GET', `${API_BASE}/usage/summary`),
@@ -186,6 +191,249 @@ export const api = {
     request('PUT', `${API_BASE}/settings`, { usage, limits, notification }),
   getBalance: (): Promise<any> => request('GET', `${API_BASE}/users/me`),
   getTransactions: (): Promise<any> => request('GET', `${API_BASE}/orders/me`),
+
+  // ==================== 迁移自 api.js 的顶层方法（页面直调契约） ====================
+
+  // Auth
+  logout: (): Promise<any> => request('POST', `${API_BASE}/auth/logout`),
+
+  // Models（网关可用模型列表，用于对话调试模型下拉）
+  listModels: (): Promise<any> => request('GET', '/v1/models'),
+
+  // Settings / Model Mappings
+  getSettings: (): Promise<any> => request('GET', `${API_BASE}/settings`),
+  updateSettings: (mappings: any, replace_all = false): Promise<any> =>
+    request('PUT', `${API_BASE}/settings`, { mappings, replace_all }),
+
+  // Limits
+  updateLimits: (data: any): Promise<any> => request('PUT', `${API_BASE}/limits`, data),
+
+  // Users
+  listUsers: (): Promise<any> => request('GET', `${API_BASE}/users`),
+  createUser: (data: any): Promise<any> => request('POST', `${API_BASE}/users`, data),
+  updateUser: (id: string | number, data: any): Promise<any> =>
+    request('PUT', `${API_BASE}/users/${id}`, data),
+  deleteUser: (id: string | number): Promise<any> =>
+    request('DELETE', `${API_BASE}/users/${id}`),
+  getMe: (): Promise<any> => request('GET', `${API_BASE}/users/me`),
+  checkUsername: (username: string): Promise<any> =>
+    request('GET', `${API_BASE}/users/check?username=${encodeURIComponent(username)}`),
+
+  // Epay
+  getEpayConfig: (): Promise<any> => request('GET', `${API_BASE}/epay/config`),
+  updateEpayConfig: (data: any): Promise<any> => request('PUT', `${API_BASE}/epay/config`, data),
+
+  // Orders & Topup
+  myOrders: (): Promise<any> => request('GET', `${API_BASE}/orders/me`),
+  topup: (amount: number, payment_method: string): Promise<any> =>
+    request('POST', `${API_BASE}/topup`, { amount, payment_method }),
+
+  // 通用渠道管理
+  listChannels: (): Promise<any> => request('GET', `${API_BASE}/channels`),
+  addChannel: (data: any): Promise<any> => request('POST', `${API_BASE}/channels`, data),
+  updateChannel: (id: string | number, data: any): Promise<any> =>
+    request('PUT', `${API_BASE}/channels/${id}`, data),
+  patchChannel: (id: string | number, data: any): Promise<any> =>
+    request('PATCH', `${API_BASE}/channels/${id}`, data),
+  deleteChannel: (id: string | number): Promise<any> =>
+    request('DELETE', `${API_BASE}/channels/${id}`),
+  testChannel: (id: string | number): Promise<any> =>
+    request('POST', `${API_BASE}/channels/${id}/test`),
+  resetChannelCircuit: (id: string | number): Promise<any> =>
+    request('POST', `${API_BASE}/channels/${id}/reset-circuit`),
+  fetchChannelModels: (data: any): Promise<any> =>
+    request('POST', `${API_BASE}/channels/fetch_models`, data),
+  // 渠道对话调试：流式（text/event-stream）返回 { stream: [{ content }] }，
+  // 非流式返回后端 JSON。与 Playground 页共用 SSE 解析模式。
+  testChannelChat: async (data: any): Promise<any> => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    };
+    const res = await fetch(`${API_BASE}/channels/chat_test`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(data),
+    });
+    if (res.status === 401) {
+      try {
+        localStorage.removeItem('token');
+        localStorage.removeItem('email');
+        localStorage.removeItem('username');
+        localStorage.removeItem('expires_at');
+      } catch {
+        // ignore
+      }
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
+      throw new Error('Unauthorized');
+    }
+    const contentType = res.headers.get('Content-Type') || '';
+    if (contentType.includes('text/event-stream')) {
+      // 流式：把 SSE 逐条解析为 { content } 增量数组
+      const text = await res.text();
+      const chunks: { content: string }[] = [];
+      let buf = '';
+      const pushBuf = () => {
+        if (buf && buf !== '[DONE]') {
+          try {
+            const parsed: any = JSON.parse(buf);
+            const content =
+              (parsed.choices && parsed.choices[0] && parsed.choices[0].delta &&
+                (parsed.choices[0].delta.content || parsed.choices[0].delta.text)) ||
+              (parsed.delta && parsed.delta.text) ||
+              (parsed.content && parsed.content[0] && parsed.content[0].text) ||
+              '';
+            if (content) chunks.push({ content });
+          } catch {
+            // 忽略非 JSON 帧
+          }
+        }
+        buf = '';
+      };
+      for (const line of text.split('\n')) {
+        const t = line.trim();
+        if (t.startsWith('data:')) {
+          buf += t.slice(5).trim();
+        } else if (t === '') {
+          pushBuf();
+        } else {
+          buf += t;
+        }
+      }
+      pushBuf();
+      return { stream: chunks };
+    }
+    // 非流式：解析 JSON，错误时抛出后端错误信息
+    const text = await res.text();
+    let parsed: any = null;
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        // ignore
+      }
+    }
+    if (!res.ok) {
+      const errMsg =
+        (parsed && typeof parsed === 'object' && (parsed.error || parsed.message)) ||
+        text ||
+        `Request failed with status ${res.status}`;
+      throw new Error(errMsg);
+    }
+    return parsed;
+  },
+
+  // 令牌管理
+  listTokens: (): Promise<any> => request('GET', `${API_BASE}/tokens`),
+  addToken: (data: any): Promise<any> => request('POST', `${API_BASE}/tokens`, data),
+  updateToken: (id: string | number, data: any): Promise<any> =>
+    request('PUT', `${API_BASE}/tokens/${id}`, data),
+  deleteToken: (id: string | number): Promise<any> =>
+    request('DELETE', `${API_BASE}/tokens/${id}`),
+  resetTokenUsed: (id: string | number): Promise<any> =>
+    request('POST', `${API_BASE}/tokens/${id}/reset_used`),
+  rotateToken: (id: string | number): Promise<any> =>
+    request('POST', `${API_BASE}/tokens/${id}/rotate`),
+
+  // 模型定价目录
+  upsertPrice: (data: any): Promise<any> => request('POST', `${API_BASE}/prices`, data),
+  deletePrice: (model: string): Promise<any> =>
+    request('DELETE', `${API_BASE}/prices/${encodeURIComponent(model)}`),
+
+  // 倍率配置
+  getRatios: (): Promise<any> => request('GET', `${API_BASE}/ratios`),
+  updateRatios: (data: any): Promise<any> => request('PUT', `${API_BASE}/ratios`, data),
+
+  // 用户分组管理
+  upsertGroup: (data: any): Promise<any> => request('POST', `${API_BASE}/groups`, data),
+  deleteGroup: (name: string): Promise<any> =>
+    request('DELETE', `${API_BASE}/groups/${encodeURIComponent(name)}`),
+
+  // 日志与审计
+  listRequestLogs: (params: Record<string, string> = {}): Promise<any> =>
+    request('GET', `${API_BASE}/logs/requests?${new URLSearchParams(params)}`),
+  listAuditLogs: (params: Record<string, string> = {}): Promise<any> =>
+    request('GET', `${API_BASE}/logs/audits?${new URLSearchParams(params)}`),
+
+  // 兑换码
+  batchRedemptions: (data: any): Promise<any> =>
+    request('POST', `${API_BASE}/redemptions/batch`, data),
+  deleteRedemption: (id: string | number): Promise<any> =>
+    request('DELETE', `${API_BASE}/redemptions/${id}`),
+  redeem: (code: string): Promise<any> =>
+    request('POST', `${API_BASE}/redemptions/redeem`, { code }),
+
+  // 限流配置
+  getRateLimitConfig: (): Promise<any> => request('GET', `${API_BASE}/ratelimit/config`),
+  updateRateLimitConfig: (data: any): Promise<any> =>
+    request('PUT', `${API_BASE}/ratelimit/config`, data),
+
+  // 通知系统（Telegram + SMTP + Slack + Webhook）
+  getNotifyConfig: (): Promise<any> => request('GET', `${API_BASE}/notify/config`),
+  updateNotifyConfig: (data: any): Promise<any> =>
+    request('PUT', `${API_BASE}/notify/config`, data),
+  testTelegram: (): Promise<any> => request('POST', `${API_BASE}/notify/test-telegram`),
+  testEmail: (to: string): Promise<any> =>
+    request('POST', `${API_BASE}/notify/test-email`, { to }),
+  testSlack: (): Promise<any> => request('POST', `${API_BASE}/notify/test-slack`),
+  testWebhook: (message: string): Promise<any> =>
+    request('POST', `${API_BASE}/notify/test-webhook`, { message }),
+
+  // 告警规则
+  getAlertRules: (): Promise<any> => request('GET', `${API_BASE}/alerts/rules`),
+  updateAlertRules: (rules: any): Promise<any> =>
+    request('PUT', `${API_BASE}/alerts/rules`, { rules }),
+  getActiveAlerts: (): Promise<any> => request('GET', `${API_BASE}/alerts/active`),
+  getAlertHistory: (limit = 100): Promise<any> =>
+    request('GET', `${API_BASE}/alerts/history?limit=${limit}`),
+  testAlert: (kind: string, value: unknown): Promise<any> =>
+    request('POST', `${API_BASE}/alerts/test`, { kind, value }),
+
+  // 系统监控
+  getSystemMonitor: (): Promise<any> => request('GET', `${API_BASE}/monitor/system`),
+
+  // Playground
+  playgroundChat: (data: any): Promise<any> =>
+    request('POST', `${API_BASE}/playground/chat`, data),
+
+  // 安全监控
+  getSecurityOverview: (): Promise<any> => request('GET', `${API_BASE}/monitor/security`),
+  getSecurityEvents: (params: Record<string, string> = {}): Promise<any> =>
+    request('GET', `${API_BASE}/monitor/security/events?${new URLSearchParams(params)}`),
+
+  // IP 管理
+  getIpFilter: (): Promise<any> => request('GET', `${API_BASE}/ip/filter`),
+  updateIpFilter: (data: any): Promise<any> => request('PUT', `${API_BASE}/ip/filter`, data),
+  addWhitelist: (pattern: string, note: string): Promise<any> =>
+    request('POST', `${API_BASE}/ip/whitelist`, { pattern, note }),
+  removeWhitelist: (pattern: string): Promise<any> =>
+    request('DELETE', `${API_BASE}/ip/whitelist/${encodeURIComponent(pattern)}`),
+  addBlacklist: (pattern: string, note: string): Promise<any> =>
+    request('POST', `${API_BASE}/ip/blacklist`, { pattern, note }),
+  removeBlacklist: (pattern: string): Promise<any> =>
+    request('DELETE', `${API_BASE}/ip/blacklist/${encodeURIComponent(pattern)}`),
+
+  // 缓存管理
+  getCacheStats: (): Promise<any> => request('GET', `${API_BASE}/cache/stats`),
+  clearCache: (): Promise<any> => request('POST', `${API_BASE}/cache/clear`),
+
+  // 忘记密码/重置密码
+  resetPassword: (token: string, password: string): Promise<any> =>
+    request('POST', `${API_BASE}/auth/reset-password`, { token, password }),
+
+  // 价格同步
+  getPriceSyncConfig: (): Promise<any> => request('GET', `${API_BASE}/pricing/sync-config`),
+  updatePriceSyncConfig: (data: any): Promise<any> =>
+    request('PUT', `${API_BASE}/pricing/sync-config`, data),
+  triggerPriceSync: (): Promise<any> => request('POST', `${API_BASE}/pricing/sync`),
+
+  // 汇率配置
+  getExchangeRates: (): Promise<any> => request('GET', `${API_BASE}/pricing/exchange-rates`),
+  updateExchangeRates: (data: any): Promise<any> =>
+    request('PUT', `${API_BASE}/pricing/exchange-rates`, data),
+
   /**
    * 认证相关API
    */
