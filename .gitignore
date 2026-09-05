@@ -47,3 +47,4 @@ coverage/
 *.exe
 *.dmg
 *.pkg
+aigx-net/target/
