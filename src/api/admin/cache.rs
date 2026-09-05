@@ -4,12 +4,12 @@
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json, Response},
+    response::Json,
 };
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, verify_admin};
+use super::common::verify_admin;
 
 /// GET /api/cache/stats - 获取缓存统计信息
 pub async fn handle_cache_stats(

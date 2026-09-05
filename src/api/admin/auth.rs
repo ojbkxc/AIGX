@@ -69,7 +69,6 @@ pub struct GithubCallbackParams {
 /// ============================================================
 /// 认证 API Handlers
 /// ============================================================
-
 /// POST /api/auth/login - 管理员登录
 pub async fn handle_login(
     State(state): State<AppState>,

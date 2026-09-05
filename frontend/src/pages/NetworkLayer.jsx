@@ -477,7 +477,7 @@ export default function NetworkLayer() {
                   <div className="bg-gray-800/30 rounded-xl p-4">
                     <p className="text-gray-400 text-sm mb-2">平均延迟</p>
                     <p className="text-2xl font-bold text-white">{fmtLatency(networkStatus.connection_pool.avg_latency_ms)}</p>
-                    <p className="text-xs text-yellow-500">目标: <100ms</p>
+                    <p className="text-xs text-yellow-500">{'目标: <100ms'}</p>
                   </div>
                   <div className="bg-gray-800/30 rounded-xl p-4">
                     <p className="text-gray-400 text-sm mb-2">成功率</p>

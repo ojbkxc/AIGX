@@ -5,12 +5,12 @@
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json, Response},
+    response::Json,
 };
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, verify_admin};
+use super::common::verify_admin;
 
 /// 监控系统收集器（未来实现）
 static SYSTEM_COLLECTOR: std::sync::OnceLock<std::sync::Arc<crate::monitor::SystemCollector>> =
