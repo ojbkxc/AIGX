@@ -30,6 +30,17 @@ pub enum AlertLevel {
     Critical,
 }
 
+impl AlertLevel {
+    /// 小写字符串形式（供通知渠道/Webhook 载荷用）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AlertLevel::Info => "info",
+            AlertLevel::Warning => "warning",
+            AlertLevel::Critical => "critical",
+        }
+    }
+}
+
 impl std::fmt::Display for AlertLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

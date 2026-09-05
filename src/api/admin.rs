@@ -3334,7 +3334,7 @@ pub async fn handle_channel_health(
         }
     }
     // 批次6：补充断路器状态与健康追踪快照（巡检同款信号源）
-    let cb_status = state.channel_store.circuit_breaker().get_status_map();
+    let cb = state.channel_store.circuit_breaker();
     let data: Vec<Value> = channels
         .iter()
         .map(|ch| {
@@ -3346,10 +3346,7 @@ pub async fn handle_channel_health(
                 0.0
             };
             let avg_latency = total_latency.checked_div(total).unwrap_or(0);
-            let breaker = cb_status
-                .get(&ch.id)
-                .cloned()
-                .unwrap_or_else(|| "Closed".into());
+            let breaker = cb.get_state(&ch.id);
             let health = state
                 .channel_store
                 .health_tracker()
@@ -3814,11 +3811,7 @@ pub async fn handle_alert_test(
     match alert {
         Some(a) => {
             // 走完整分发（Telegram/Email/Slack/Webhook）
-            let level_str = match a.level {
-                crate::notify::alert::AlertLevel::Info => "info",
-                crate::notify::alert::AlertLevel::Warning => "warning",
-                crate::notify::alert::AlertLevel::Critical => "critical",
-            };
+            let level_str = a.level.as_str();
             state
                 .notify_service
                 .notify_spawn(crate::notify::NotifyEvent::AlertTriggered {

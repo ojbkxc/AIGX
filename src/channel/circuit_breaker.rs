@@ -241,30 +241,67 @@ impl CircuitBreaker {
         tripped
     }
 
-    /// 获取所有渠道的断路器状态（监控/管理面用）。
+    /// 返回全部渠道的断路器状态（机器可读枚举值，供巡检/前端/监控使用）。
+    ///
+    /// 返回值：`"open"` / `"halfopen"` / `"closed"`。
+    /// 注意：只有出现失败记录的渠道才会出现在 map 中（从未失败的渠道无状态）。
     pub fn get_status_map(&self) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
         for r in self.states.iter() {
-            let count = r.value().failure_count.load(Ordering::Relaxed);
-            let status = if count >= self.failure_threshold {
-                if let Some(last) = r.value().last_failure_time {
-                    if last.elapsed() < self.cooldown_duration {
-                        format!(
-                            "Open (剩余 {}s)",
-                            (self.cooldown_duration - last.elapsed()).as_secs()
-                        )
-                    } else {
-                        "HalfOpen (试探中)".to_string()
-                    }
-                } else {
-                    "Open".to_string()
-                }
-            } else {
-                "Closed (健康)".to_string()
-            };
-            map.insert(r.key().clone(), status);
+            map.insert(r.key().clone(), self.get_state(r.key()).to_string());
         }
         map
+    }
+
+    /// 查询单个渠道的断路器状态（机器可读枚举值）。
+    ///
+    /// 返回 `"open"` / `"halfopen"` / `"closed"`。
+    /// 无状态（从未失败）的渠道视为 `"closed"`。
+    pub fn get_state(&self, channel_id: &str) -> &'static str {
+        let entry = match self.states.get(channel_id) {
+            Some(e) => e,
+            None => return "closed",
+        };
+        // 限流未到期视为 open（拒绝请求）
+        if let Some(rate_limit_until) = entry.rate_limit_until {
+            if rate_limit_until > Instant::now() {
+                return "open";
+            }
+        }
+        let count = entry.failure_count.load(Ordering::Relaxed);
+        if count < self.failure_threshold {
+            return "closed";
+        }
+        if let Some(last_failure) = entry.last_failure_time {
+            if last_failure.elapsed() < self.cooldown_duration {
+                "open"
+            } else {
+                "halfopen"
+            }
+        } else {
+            "open"
+        }
+    }
+
+    /// 返回人类可读的状态描述（含剩余冷却秒数，供日志/调试）。
+    pub fn get_status_human(&self, channel_id: &str) -> String {
+        match self.get_state(channel_id) {
+            "open" => {
+                let entry = self.states.get(channel_id);
+                let remaining = entry
+                    .and_then(|e| e.last_failure_time)
+                    .map(|last| {
+                        self.cooldown_duration
+                            .checked_sub(last.elapsed())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0)
+                    })
+                    .unwrap_or(0);
+                format!("Open (剩余 {}s)", remaining)
+            }
+            "halfopen" => "HalfOpen (试探中)".to_string(),
+            _ => "Closed (健康)".to_string(),
+        }
     }
 
     /// 手动重置指定渠道的断路器（管理面用）。
@@ -346,5 +383,32 @@ mod tests {
         cb.record_failure("ch1", FailureType::ServerError);
         // 冷却 0s，elapsed >= 0 总成立 → 放试探
         assert!(cb.allow_request("ch1"));
+    }
+
+    #[test]
+    fn get_state_reports_machine_readable() {
+        let cb = CircuitBreaker::new(3, 30);
+        // 未失败渠道：closed
+        assert_eq!(cb.get_state("ch1"), "closed");
+        // 失败达到阈值：open
+        for _ in 0..3 {
+            cb.record_failure("ch1", FailureType::ServerError);
+        }
+        assert_eq!(cb.get_state("ch1"), "open");
+        // 成功重置：closed
+        cb.record_success("ch1");
+        assert_eq!(cb.get_state("ch1"), "closed");
+    }
+
+    #[test]
+    fn get_status_map_values_are_machine_readable() {
+        let cb = CircuitBreaker::new(2, 30);
+        cb.record_failure("ch1", FailureType::ServerError);
+        cb.record_failure("ch1", FailureType::ServerError);
+        let map = cb.get_status_map();
+        // map 只含出现过失败的渠道
+        assert_eq!(map.get("ch1").map(|s| s.as_str()), Some("open"));
+        // 从未失败的渠道不出现在 map
+        assert!(!map.contains_key("ch2"));
     }
 }

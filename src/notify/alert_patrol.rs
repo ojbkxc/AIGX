@@ -58,11 +58,11 @@ async fn patrol_once(
     for channel in channel_store.list() {
         let hm = channel_store.health_tracker();
         let summary = hm.get_health(&channel.id);
-        // 断路器状态：Open = 已达失败阈值，视为持续故障信号（threshold 已到，
-        // 用规则阈值 1 触发告警语义；Closed/HalfOpen 不触发）
+        // 断路器状态：open = 已达失败阈值，视为持续故障信号（threshold 已到，
+        // 用规则阈值 1 触发告警语义；closed/halfopen 不触发）
         let cb_open = cb_status
             .get(&channel.id)
-            .map(|s| s == "Open")
+            .map(|s| s == "open")
             .unwrap_or(false);
 
         // 渠道连续失败（circuit breaker 打开时告警）
@@ -106,11 +106,7 @@ async fn patrol_once(
 
 /// 分发一条告警到全部已配置渠道
 async fn dispatch_alert(notify_service: &Arc<NotifyService>, level: &AlertLevel, message: &str) {
-    let level_str = match level {
-        AlertLevel::Info => "info",
-        AlertLevel::Warning => "warning",
-        AlertLevel::Critical => "critical",
-    };
+    let level_str = level.as_str();
     tracing::warn!(level = level_str, "alert triggered: {message}");
 
     // Telegram + Email（复用统一事件分发）
