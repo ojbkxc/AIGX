@@ -2,13 +2,15 @@
 //!
 //! 提供系统性能指标、网络指标和应用指标收集。
 
+use lazy_static::lazy_static;
+use prometheus::{
+    Counter, CounterVec, Encoder, Histogram, HistogramOpts, HistogramVec, Opts, Registry,
+};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
-use prometheus::{Counter, Histogram, HistogramOpts, Encoder, Registry, Opts, HistogramVec, CounterVec};
-use lazy_static::lazy_static;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Metrics {
@@ -20,8 +22,8 @@ pub struct Metrics {
     pub memory_temp: Option<f32>,
 
     // 网络指标
-    pub network_tx: u64,      // 上传字节
-    pub network_rx: u64,      // 下载字节
+    pub network_tx: u64, // 上传字节
+    pub network_rx: u64, // 下载字节
     pub active_connections: usize,
     pub total_requests: u64,
     pub failed_requests: u64,
@@ -33,7 +35,7 @@ pub struct Metrics {
     pub success_rate: f64,
 
     // 资源指标
-    pub uptime: u64,          // 运行时间（秒）
+    pub uptime: u64, // 运行时间（秒）
     pub memory: MemoryInfo,
     pub disk: DiskInfo,
 }
@@ -87,21 +89,30 @@ impl MetricsCollector {
         // 计数器
         let request_total = CounterVec::new(
             Opts::new("aigx_request_total", "Total number of requests"),
-            &["method", "status"]
-        ).unwrap();
+            &["method", "status"],
+        )
+        .unwrap();
         _ = registry.register(Box::new(request_total));
 
         let failed_requests = CounterVec::new(
-            Opts::new("aigx_failed_requests_total", "Total number of failed requests"),
-            &["error_type"]
-        ).unwrap();
+            Opts::new(
+                "aigx_failed_requests_total",
+                "Total number of failed requests",
+            ),
+            &["error_type"],
+        )
+        .unwrap();
         _ = registry.register(Box::new(failed_requests));
 
         // 直方图
         let request_duration = HistogramVec::new(
-            HistogramOpts::new("aigx_request_duration_seconds", "Request duration in seconds"),
-            &["method", "endpoint"]
-        ).unwrap();
+            HistogramOpts::new(
+                "aigx_request_duration_seconds",
+                "Request duration in seconds",
+            ),
+            &["method", "endpoint"],
+        )
+        .unwrap();
         _ = registry.register(Box::new(request_duration));
 
         // 指标计数器
@@ -127,12 +138,12 @@ impl MetricsCollector {
         let mut last_stats = self.last_network_stats.write().await;
         let current_stats = Self::generate_network_stats();
 
-        let tx_diff = current_stats.tx.saturating_sub(
-            last_stats.get("tx").copied().unwrap_or(0)
-        );
-        let rx_diff = current_stats.rx.saturating_sub(
-            last_stats.get("rx").copied().unwrap_or(0)
-        );
+        let tx_diff = current_stats
+            .tx
+            .saturating_sub(last_stats.get("tx").copied().unwrap_or(0));
+        let rx_diff = current_stats
+            .rx
+            .saturating_sub(last_stats.get("rx").copied().unwrap_or(0));
 
         let total_bytes = tx_diff + rx_diff;
         if total_bytes > 0 {
@@ -157,7 +168,8 @@ impl MetricsCollector {
     }
 
     pub fn record_request(&self, method: &str, status: u16) {
-        let counter = self.registry
+        let counter = self
+            .registry
             .with_label_values(&["GET", "200"])
             .expect("Failed to get counter");
 
@@ -165,7 +177,8 @@ impl MetricsCollector {
     }
 
     pub fn record_failure(&self, error_type: &str) {
-        let counter = self.registry
+        let counter = self
+            .registry
             .with_label_values(&[error_type])
             .expect("Failed to get failure counter");
 
@@ -173,7 +186,8 @@ impl MetricsCollector {
     }
 
     pub fn record_request_duration(&self, method: &str, endpoint: &str, duration_secs: f64) {
-        let histogram = self.registry
+        let histogram = self
+            .registry
             .with_label_values(&[method, endpoint])
             .expect("Failed to get histogram");
 

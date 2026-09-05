@@ -14,10 +14,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::common::{
-    admin_id_from_session, error_response, record_audit, verify_admin,
-};
 use super::super::openai::AppState;
+use super::common::{admin_id_from_session, error_response, record_audit, verify_admin};
 
 // 这里需要引用主 crate 的 Channel 和相关类型
 use crate::channel::{Channel, ChannelType};
@@ -80,7 +78,11 @@ pub fn mask_channel(ch: &Channel) -> Value {
     let masked_key = if ch.api_key.is_empty() {
         String::new()
     } else if ch.api_key.chars().count() > 12 {
-        format!("{}...{}", &ch.api_key[..8], &ch.api_key[ch.api_key.len() - 4..])
+        format!(
+            "{}...{}",
+            &ch.api_key[..8],
+            &ch.api_key[ch.api_key.len() - 4..]
+        )
     } else {
         "****".to_string()
     };

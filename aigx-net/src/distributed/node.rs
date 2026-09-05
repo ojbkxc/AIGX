@@ -22,7 +22,7 @@ pub struct DistributedNode {
     pub last_seen: Instant,
     pub data_center: Option<String>,
     pub is_leader: bool,
-    pub additional_std::collections::HashMap<String, String>,
+    pub additional_metadata: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -79,7 +79,8 @@ impl NodeRegistry {
 
     pub async fn get_online_nodes(&self) -> Vec<DistributedNode> {
         let nodes = self.nodes.read().await;
-        nodes.values()
+        nodes
+            .values()
             .filter(|n| matches!(n.status, NodeStatus::Online))
             .cloned()
             .collect()
@@ -87,7 +88,8 @@ impl NodeRegistry {
 
     pub async fn get_leader(&self) -> Option<DistributedNode> {
         let nodes = self.nodes.read().await;
-        nodes.values()
+        nodes
+            .values()
             .find(|n| n.is_leader && matches!(n.status, NodeStatus::Online))
             .cloned()
     }
@@ -105,7 +107,10 @@ impl NodeRegistry {
     pub async fn update_heartbeat(&self, id: &str) -> Result<(), String> {
         let mut nodes = self.nodes.write().await;
         let now = SystemTime::now();
-        let timestamp = now.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let timestamp = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
 
         if let Some(node) = nodes.get_mut(id) {
             node.last_heartbeat = Some(timestamp);
@@ -171,7 +176,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cpu_usage: 30.0,
         memory_usage: 50.0,
         replication_status: vec![],
-        last_heartbeat: Some(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64),
+        last_heartbeat: Some(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        ),
         last_seen: Instant::now(),
         data_center: Some("dc1".to_string()),
         is_leader: true,

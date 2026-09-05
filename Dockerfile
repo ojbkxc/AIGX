@@ -1,73 +1,45 @@
 # AIGX 完整构建 Dockerfile
+# ─────────────────────────────────────────────────────────────
+# 多阶段构建：Rust 后端（workspace：主网关 + aigx-net）→ 前端（可选）→ 生产镜像
+# 构建上下文为仓库根目录；--platform 由 buildx 传入。
 
-# 构建阶段 - Rust 后端（多平台支持）
-# 首先为交叉编译安装必要的工具
-FROM rust:1.75-slim AS builder-multiplatform
+# ── 构建阶段：Rust workspace（编译主网关与 aigx-net） ─────────
+FROM rust:1.83-slim AS builder
 
 WORKDIR /app
 
-# 多平台构建时安装cross编译工具链
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER=qemu-aarch64-static
-ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
-
+# 安装构建依赖（pkg-config + openssl；sqlite 走 bundled feature 无需系统库）
 RUN apt-get update && \
-    apt-get install -y \
-    binutils-aarch64-linux-gnu \
-    qemu-user-static \
-    gcc-aarch64-linux-gnu \
-    gcc-x86-64-linux-gnu \
+    apt-get install -y --no-install-recommends \
     pkg-config \
-    libssl-dev:arm64 \
-    libsqlite3-dev:arm64 \
-    libjemalloc-dev \
-    git \
-    wget \
-    zlib1g-dev:arm64 \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 默认x86_64平台构建
-FROM builder-multiplatform AS builder-x86_64
-FROM builder-multiplatform AS builder-aarch64
+# 先复制清单文件以利用 Docker 层缓存
+COPY Cargo.toml Cargo.lock ./
+COPY aigx-net/Cargo.toml ./aigx-net/Cargo.toml
 
-# 生产环境基础镜像（多平台）
-FROM debian:bookworm-slim
+# 源码（清单缓存失效时才会重新复制）
+COPY src ./src
+COPY aigx-net/src ./aigx-net/src
 
-WORKDIR /app
+# 编译 release（默认 features：sqlite-kv）
+RUN cargo build --release --bin aigx && \
+    strip target/release/aigx
 
-# 安装运行时依赖（arm64和amd64都需要）
-RUN apt-get update && \
-    apt-get install -y \
-    ca-certificates \
-    libssl3 \
-    libgcc1 \
-    libstdc++6 \
-    libc6 \
-    libsqlite3-0 \
-    libjemalloc2 \
-    wget \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# 从构建阶段复制二进制文件（amd64或aarch64）
-COPY --from=builder-x86_64 /app/target/release/aigx /app/aigx
-# COPY --from=builder-aarch64 /app/target/release/aigx /app/aigx
-
-# 生产环境基础镜像 - 性能优化
+# ── 生产环境基础镜像 ─────────────────────────────────────────
 FROM debian:bookworm-slim
 
 WORKDIR /app
 
 # 安装运行时依赖
-RUN apt-get Update && \
-    apt-get install -y \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
-    libgcc1 \
+    libgcc-s1 \
     libstdc++6 \
     libc6 \
-    libsqlite3-0 \
-    libjemalloc2 \
     wget \
     curl \
     && rm -rf /var/lib/apt/lists/*
@@ -75,10 +47,10 @@ RUN apt-get Update && \
 # 从构建阶段复制二进制文件
 COPY --from=builder /app/target/release/aigx /app/aigx
 
-# 创建用户
+# 创建非特权用户与数据目录
 RUN useradd -r -u 1000 -g nogroup -s /sbin/nologin -d /app aigx && \
     mkdir -p /app/data /app/logs /app/config && \
-    chown -R aigx:aigx /app
+    chown -R aigx:nogroup /app
 
 USER aigx
 

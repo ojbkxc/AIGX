@@ -9,11 +9,8 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use super::common::{
-    error_response,
-    verify_admin,
-};
 use super::super::openai::AppState;
+use super::common::{error_response, verify_admin};
 
 /// 监控系统收集器（未来实现）
 static SYSTEM_COLLECTOR: std::sync::OnceLock<std::sync::Arc<crate::monitor::SystemCollector>> =
@@ -25,7 +22,8 @@ pub async fn handle_monitor_system(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    let collector = SYSTEM_COLLECTOR.get_or_init(|| std::sync::Arc::new(crate::monitor::SystemCollector::new()));
+    let collector = SYSTEM_COLLECTOR
+        .get_or_init(|| std::sync::Arc::new(crate::monitor::SystemCollector::new()));
     let snap = collector.snapshot();
     Ok(Json(json!({ "success": true, "data": snap })))
 }

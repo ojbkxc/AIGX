@@ -2,10 +2,12 @@
 //!
 //! 提供基于负载的自动扩缩容功能。
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::RwLock;
+use tracing::info;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -63,7 +65,7 @@ pub struct ScalingNode {
     pub cpu_usage: f32,
     pub memory_usage: f32,
     pub connections: usize,
-    pub sortstatd_time: i64,
+    pub last_stats_time: std::time::SystemTime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -76,7 +78,7 @@ pub enum NodeStatus {
 
 #[derive(Clone)]
 pub struct ScalingManager {
-    config: Arc<ScalingConfig>,
+    config: Arc<RwLock<ScalingConfig>>,
     scaling_history: Arc<RwLock<Vec<ScalingRecord>>>,
     last_scaled_time: Arc<RwLock<Instant>>,
 }
@@ -84,27 +86,28 @@ pub struct ScalingManager {
 impl ScalingManager {
     pub fn new(initial_config: ScalingConfig) -> Self {
         Self {
-            config: Arc::new(initial_config),
+            config: Arc::new(RwLock::new(initial_config)),
             scaling_history: Arc::new(RwLock::new(vec![])),
             last_scaled_time: Arc::new(Instant::now()),
         }
     }
 
     pub async fn assess_scaling_needs(&self) -> Option<ScalingAction> {
-        if !self.config.enabled {
+        let config = self.config.read().await;
+        if !config.enabled {
             return None;
         }
 
-        let avg_load = self.calculate_average_load();
-        let metrics = self.get_current_metrics();
+        let avg_load = self.calculate_average_load().await;
+        let metrics = self.get_current_metrics().await;
 
         // 根据平均负载和当前配置判断扩缩容需求
-        match self.config.mode {
+        match config.mode {
             ScalingMode::Auto => {
-                if metrics.total_load > self.config.thresholds.cpu_high_threshold {
+                if metrics.total_load > config.thresholds.cpu_high_threshold {
                     self.request_scaling(ScalingAction::ScaleUp).await
-                } else if metrics.total_load < self.config.thresholds.cpu_low_threshold
-                    && self.config.current_nodes.len() > self.config.min_nodes
+                } else if metrics.total_load < config.thresholds.cpu_low_threshold
+                    && config.current_nodes.len() > config.min_nodes
                 {
                     self.request_scaling(ScalingAction::ScaleDown).await
                 } else {
@@ -119,26 +122,32 @@ impl ScalingManager {
     async fn request_scaling(&self, action: ScalingAction) -> Option<ScalingAction> {
         // 检查冷却期
         let last_scaled = self.last_scaled_time.read().await;
-        if last_scaled.elapsed() < self.config.cooldown_period {
-            info!("Scaling action {} is not allowed yet due to cooldown", action);
+        let config = self.config.read().await;
+        if last_scaled.elapsed() < config.cooldown_period {
+            info!(
+                "Scaling action {} is not allowed yet due to cooldown",
+                action
+            );
             return None;
         }
 
         let new_config = match action {
             ScalingAction::ScaleUp => {
-                if self.config.current_nodes.len() < self.config.max_nodes {
-                    self.config.clone() {
-                        self.config.min_nodes + 1
+                if config.current_nodes.len() < config.max_nodes {
+                    let mut new_config = config.clone();
+                    if let Some(template) = new_config.current_nodes.first().cloned() {
+                        new_config.current_nodes.push(template);
                     }
+                    new_config
                 } else {
                     return None;
                 }
             }
             ScalingAction::ScaleDown => {
-                if self.config.current_nodes.len() > self.config.min_nodes {
-                    self.config.clone() {
-                        self.config.current_nodes.len().saturating_sub(1)
-                    }
+                if config.current_nodes.len() > config.min_nodes {
+                    let mut new_config = config.clone();
+                    new_config.current_nodes.pop();
+                    new_config
                 } else {
                     return None;
                 }
@@ -151,23 +160,35 @@ impl ScalingManager {
     }
 
     async fn calculate_average_load(&self) -> f32 {
-        if self.config.current_nodes.is_empty() {
+        let config = self.config.read().await;
+        if config.current_nodes.is_empty() {
             return 0.0;
         }
 
-        let total_cpu = self.config.current_nodes.iter().map(|node| node.cpu_usage).sum::<f32>();
-        (total_cpu / self.config.current_nodes.len() as f32)
+        let total_cpu = config
+            .current_nodes
+            .iter()
+            .map(|node| node.cpu_usage)
+            .sum::<f32>();
+        (total_cpu / config.current_nodes.len() as f32)
     }
 
-    fn get_current_metrics(&self) -> ScalingMetrics {
+    async fn get_current_metrics(&self) -> ScalingMetrics {
+        let config = self.config.read().await;
         ScalingMetrics {
-            total_load: self.config.current_nodes.iter()
+            total_load: config
+                .current_nodes
+                .iter()
                 .map(|node| node.cpu_usage + node.memory_usage / 2.0)
                 .sum::<f32>(),
-            request_rate: self.config.current_nodes.iter()
+            request_rate: config
+                .current_nodes
+                .iter()
                 .map(|node| node.connections as f64)
                 .sum::<f64>(),
-            concurrent_connections: self.config.current_nodes.iter()
+            concurrent_connections: config
+                .current_nodes
+                .iter()
                 .map(|node| node.connections)
                 .sum::<usize>(),
         }
@@ -178,55 +199,62 @@ impl ScalingManager {
         *config = new_config;
 
         // 记录扩缩容历史
+        let current_nodes = config.current_nodes.len();
         let record = ScalingRecord {
             id: uuid::Uuid::new_v4().to_string(),
-            action: ScalingAction::ScaleUp,  // 或者 ScaleDown
+            action: ScalingAction::ScaleUp, // 或者 ScaleDown
             timestamp: Utc::now(),
-            nodes_count: self.config.current_nodes.len(),
+            nodes_count: current_nodes,
             reason: "auto scaling".to_string(),
         };
 
         let mut history = self.scaling_history.write().await;
         history.push(record);
 
-        self.last_scaled_time.write().await = Instant::now();
+        *self.last_scaled_time.write().await = Instant::now();
 
-        info!("Scaling updated to {} nodes", self.config.current_nodes.len());
+        info!("Scaling updated to {} nodes", current_nodes);
     }
 
     pub async fn get_scaling_status(&self) -> ScalingStatus {
-        let current_nodes = self.config.current_nodes.len();
-        let avg_load = self.calculate_average_load();
-        let metrics = self.get_current_metrics();
-        let cooldown_remaining = self.config.cooldown_period
+        let config = self.config.read().await;
+        let current_nodes = config.current_nodes.len();
+        let avg_load = self.calculate_average_load().await;
+        let metrics = self.get_current_metrics().await;
+        let cooldown_remaining = config
+            .cooldown_period
             .saturating_sub(self.last_scaled_time.read().await.elapsed());
 
         ScalingStatus {
             current_nodes,
-            max_nodes: self.config.max_nodes,
-            min_nodes: self.config.min_nodes,
+            max_nodes: config.max_nodes,
+            min_nodes: config.min_nodes,
             average_load: avg_load,
-            is_scaling: self.is_scaling(),
+            is_scaling: self.is_scaling().await,
             cooldown_remaining_seconds: cooldown_remaining.as_secs(),
             scaling_history_len: self.scaling_history.read().await.len(),
-            appropriate_action: None,  // 可以根据负载智能判断
+            appropriate_action: None, // 可以根据负载智能判断
         }
     }
 
-    fn is_scaling(&self) -> bool {
-        self.config.current_nodes.iter()
+    async fn is_scaling(&self) -> bool {
+        let config = self.config.read().await;
+        config
+            .current_nodes
+            .iter()
             .any(|node| node.status == NodeStatus::Scaling)
     }
 
-    pub fn predict_scaling(&self) -> ScalingPrediction {
-        let current_nodes = self.config.current_nodes.len();
-        let metrics = self.get_current_metrics();
+    pub async fn predict_scaling(&self) -> ScalingPrediction {
+        let config = self.config.read().await;
+        let current_nodes = config.current_nodes.len();
+        let metrics = self.get_current_metrics().await;
         let predicted_load = (current_nodes as f32) * (metrics.total_load / current_nodes as f32);
 
-        let is_underutilized = metrics.request_rate < self.config.thresholds.request_rate_low_threshold
-            && current_nodes > self.config.min_nodes;
+        let is_underutilized = metrics.request_rate < config.thresholds.request_rate_low_threshold
+            && current_nodes > config.min_nodes;
 
-        let is_overloaded = metrics.request_rate > self.config.thresholds.request_rate_high_threshold;
+        let is_overloaded = metrics.request_rate > config.thresholds.request_rate_high_threshold;
 
         let recommended_action = if is_overloaded {
             ScalingAction::ScaleUp
@@ -238,7 +266,13 @@ impl ScalingManager {
 
         ScalingPrediction {
             current_nodes,
-            target_nodes: recommended_action.unwrap_or(current_nodes),
+            target_nodes: match recommended_action {
+                Some(ScalingAction::ScaleUp) => (current_nodes + 1).min(config.max_nodes),
+                Some(ScalingAction::ScaleDown) => {
+                    current_nodes.saturating_sub(1).max(config.min_nodes)
+                }
+                _ => current_nodes,
+            },
             reason: if is_overloaded {
                 "request_rate_high".to_string()
             } else if is_underutilized {
@@ -246,7 +280,7 @@ impl ScalingManager {
             } else {
                 "no_action".to_string()
             },
-            estimated_time: recommended_action.map(|_| Instant::now()),  // 简化计算
+            estimated_time: recommended_action.map(|_| Instant::now()), // 简化计算
         }
     }
 }
@@ -258,7 +292,7 @@ pub struct ScalingMetrics {
     pub concurrent_connections: usize,
 }
 
-#[derive(Debug, clone)]
+#[derive(Debug, Clone)]
 pub struct ScalingStatus {
     pub current_nodes: usize,
     pub min_nodes: usize,
@@ -270,7 +304,7 @@ pub struct ScalingStatus {
     pub appropriate_action: Option<ScalingAction>,
 }
 
-#[derive(Debug, clone)]
+#[derive(Debug, Clone)]
 pub struct ScalingRecord {
     pub id: String,
     pub action: ScalingAction,
@@ -279,7 +313,7 @@ pub struct ScalingRecord {
     pub reason: String,
 }
 
-#[derive(Debug, clone)]
+#[derive(Debug, Clone)]
 pub struct ScalingPrediction {
     pub current_nodes: usize,
     pub target_nodes: usize,
@@ -297,18 +331,16 @@ mod tests {
             enabled: true,
             min_nodes: 1,
             max_nodes: 5,
-            current_nodes: vec![
-                ScalingNode {
-                    id: "1".to_string(),
-                    name: "Node 1".to_string(),
-                    status: NodeStatus::Ready,
-                    load: 80.0,
-                    cpu_usage: 80.0,
-                    memory_usage: 80.0,
-                    connections: 1000,
-                    sortstatd_time: SystemTime::now(),
-                },
-            ],
+            current_nodes: vec![ScalingNode {
+                id: "1".to_string(),
+                name: "Node 1".to_string(),
+                status: NodeStatus::Ready,
+                load: 80.0,
+                cpu_usage: 80.0,
+                memory_usage: 80.0,
+                connections: 1000,
+                last_stats_time: SystemTime::now(),
+            }],
             mode: ScalingMode::Auto,
             thresholds: ScalingThresholds {
                 cpu_high_threshold: 60.0,
@@ -364,18 +396,16 @@ mod tests {
             enabled: true,
             min_nodes: 1,
             max_nodes: 5,
-            current_nodes: vec![
-                ScalingNode {
-                    id: "1".to_string(),
-                    name: "Node 1".to_string(),
-                    status: NodeStatus::Ready,
-                    load: 80.0,
-                    cpu_usage: 80.0,
-                    memory_usage: 60.0,
-                    connections: 1000,
-                    sortstatd_time: SystemTime::now(),
-                },
-            ],
+            current_nodes: vec![ScalingNode {
+                id: "1".to_string(),
+                name: "Node 1".to_string(),
+                status: NodeStatus::Ready,
+                load: 80.0,
+                cpu_usage: 80.0,
+                memory_usage: 60.0,
+                connections: 1000,
+                last_stats_time: SystemTime::now(),
+            }],
             mode: ScalingMode::Auto,
             thresholds: ScalingThresholds {
                 cpu_high_threshold: 60.0,
@@ -392,12 +422,10 @@ mod tests {
         };
 
         let manager = ScalingManager::new(config);
-        let prediction = manager.predict_scaling();
+        let prediction = manager.predict_scaling().await;
 
         assert_eq!(prediction.current_nodes, 1);
         assert_eq!(prediction.reason, "request_rate_high");
         assert_eq!(prediction.target_nodes, 2);
     }
 }
-
-use std::time::{SystemTime, UNIX_EPOCH};

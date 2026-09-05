@@ -15,8 +15,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::common::{error_response, record_audit, verify_admin};
 use super::super::openai::AppState;
+use super::common::{error_response, record_audit, verify_admin};
 
 use crate::user::{Role, User};
 
@@ -75,10 +75,8 @@ async fn admin_id_from_session_local(state: &AppState, headers: &HeaderMap) -> S
     if let Some(token) = super::common::extract_session_token(headers) {
         let config = state.config_manager.get().await;
         let session_ttl = config.admin.session_ttl_hours.max(1);
-        let session_store = super::super::auth::SessionStore::new(
-            &config.admin.session_secret,
-            session_ttl,
-        );
+        let session_store =
+            super::super::auth::SessionStore::new(&config.admin.session_secret, session_ttl);
         if let Some(sess) = session_store.validate_session(&token) {
             return sess.email;
         }
@@ -115,15 +113,13 @@ pub async fn handle_create_user(
             if state.user_store.get_by_username(username.trim()).is_some() {
                 return Err(error_response("用户名已存在", StatusCode::CONFLICT));
             }
-            state
-                .user_store
-                .create_with_username(
-                    body.email.trim(),
-                    username.trim(),
-                    &body.password,
-                    role,
-                    body.quota,
-                )
+            state.user_store.create_with_username(
+                body.email.trim(),
+                username.trim(),
+                &body.password,
+                role,
+                body.quota,
+            )
         } else {
             state
                 .user_store

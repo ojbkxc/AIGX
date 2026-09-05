@@ -149,6 +149,11 @@ export const api = {
   getTodayTokens: (): Promise<any> => request('GET', `${API_BASE}/tokens/today`),
   getLimits: (): Promise<any> => request('GET', `${API_BASE}/limits`),
   getTrend: (): Promise<any> => request('GET', `${API_BASE}/usage/trend`),
+  getConsumptionTrend: (): Promise<any> => request('GET', `${API_BASE}/dashboard/consumption_trend`),
+  getModelDistribution: (): Promise<any> => request('GET', `${API_BASE}/dashboard/model_distribution`),
+  getUserRanking: (): Promise<any> => request('GET', `${API_BASE}/dashboard/user_ranking`),
+  getChannelHealth: (): Promise<any> => request('GET', `${API_BASE}/dashboard/channel_health`),
+  getRealtime: (): Promise<any> => request('GET', `${API_BASE}/dashboard/realtime`),
   saveEpayConfig: (config: any): Promise<any> =>
     request('PUT', `${API_BASE}/epay/config`, config),
   listGroups: (): Promise<any> => request('GET', `${API_BASE}/groups`),

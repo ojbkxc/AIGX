@@ -17,20 +17,20 @@ pub use connection_pool::*;
 pub use health_check::*;
 pub use protocols::*;
 
+use anyhow::{Context, Result};
 use std::time::Duration;
-use anyhow::{Result, Context};
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
 
 /// 连接协议类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Protocol {
-    Tcp,           // 标准 TCP
-    Kcp,           // KCP 传输协议
-    WebSocket,     // WebSocket 连接
-    Quic,          // QUIC 协议
-    Http1,         // HTTP/1.1
-    Http3,         // HTTP/3
+    Tcp,       // 标准 TCP
+    Kcp,       // KCP 传输协议
+    WebSocket, // WebSocket 连接
+    Quic,      // QUIC 协议
+    Http1,     // HTTP/1.1
+    Http3,     // HTTP/3
 }
 
 /// 网络连接配置
@@ -204,9 +204,7 @@ pub fn create_connection_config(
 }
 
 /// 创建HTTP连接配置
-pub fn create_http_connection_config(
-    address: impl Into<String>,
-) -> ConnectionConfig {
+pub fn create_http_connection_config(address: impl Into<String>) -> ConnectionConfig {
     ConnectionConfig {
         address: address.into(),
         protocol: Protocol::Http1,
@@ -216,9 +214,7 @@ pub fn create_http_connection_config(
 }
 
 /// 创建WebSocket连接配置
-pub fn create_websocket_connection_config(
-    address: impl Into<String>,
-) -> ConnectionConfig {
+pub fn create_websocket_connection_config(address: impl Into<String>) -> ConnectionConfig {
     ConnectionConfig {
         address: address.into(),
         protocol: Protocol::WebSocket,

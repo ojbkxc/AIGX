@@ -3,18 +3,15 @@
 //! 提供在线聊天 Playground 功能，直接测试渠道连接。
 
 use axum::{
-    extract::{State, Path},
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::common::{
-    error_response,
-    verify_admin,
-};
 use super::super::openai::AppState;
+use super::common::{error_response, verify_admin};
 
 #[derive(Debug, Deserialize)]
 pub struct PlaygroundChatRequest {
@@ -155,11 +152,18 @@ pub async fn handle_playground_channels(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let channels: Vec<Value> = state.channel_store.list().iter().map(|c| json!({
-        "id": &c.id,
-        "name": &c.name,
-        "status": &c.status,
-        "models": &c.models,
-    })).collect();
+    let channels: Vec<Value> = state
+        .channel_store
+        .list()
+        .iter()
+        .map(|c| {
+            json!({
+                "id": &c.id,
+                "name": &c.name,
+                "status": &c.status,
+                "models": &c.models,
+            })
+        })
+        .collect();
     Ok(Json(json!({ "success": true, "data": channels })))
 }

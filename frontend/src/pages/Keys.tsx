@@ -34,7 +34,7 @@ export default function Keys(): JSX.Element {
           keys.map((key) => (
             <div key={key.id} className="key-item">
               <h3>{key.name}</h3>
-              <p>{key.key}</p>
+              <p>{key.key_prefix}</p>
               <span className="key-meta">
                 创建时间: {key.created_at}
               </span>

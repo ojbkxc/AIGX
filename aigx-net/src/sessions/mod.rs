@@ -132,7 +132,10 @@ impl SmartRouter {
     }
 
     /// 选择最佳会话（延迟感知 = 最近使用的连接复用度最高）
-    pub fn select_session(&self, sessions: &[std::sync::Arc<Session>]) -> Option<std::sync::Arc<Session>> {
+    pub fn select_session(
+        &self,
+        sessions: &[std::sync::Arc<Session>],
+    ) -> Option<std::sync::Arc<Session>> {
         let available: Vec<_> = sessions
             .iter()
             .filter(|s| s.is_available())

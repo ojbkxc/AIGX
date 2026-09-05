@@ -3,8 +3,8 @@
 //! 管理账号的租借与释放：业务层持有 Guard 期间账号标记为占用，
 //! Guard 离开作用域（Drop）时自动归还账号池。
 
-use super::account_pool::AccountPool;
 use super::account::Account;
+use super::account_pool::AccountPool;
 use std::sync::{Arc, RwLock};
 
 /// 账号租用守卫

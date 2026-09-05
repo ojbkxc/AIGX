@@ -10,8 +10,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::common::{error_response, extract_client_ip, verify_admin};
 use super::super::openai::AppState;
+use super::common::{error_response, extract_client_ip, verify_admin};
 
 // Dashboard 查询参数：时间范围（天数）。
 #[derive(Debug, Deserialize)]
@@ -92,13 +92,15 @@ pub async fn handle_channel_stats(
         .channel_store
         .list()
         .iter()
-        .map(|c| json!({
-            "id": c.id,
-            "name": c.name,
-            "status": c.status,
-            "last_error": c.last_error,
-            "last_used_at": c.last_used_at,
-        }))
+        .map(|c| {
+            json!({
+                "id": c.id,
+                "name": c.name,
+                "status": c.status,
+                "last_error": c.last_error,
+                "last_used_at": c.last_used_at,
+            })
+        })
         .collect();
     Ok(Json(json!({
         "success": true,

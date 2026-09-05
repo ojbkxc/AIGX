@@ -3,11 +3,13 @@
 //! 提供 Prometheus 格式的指标导出和 HTTP 端点。
 
 use super::metrics::Metrics;
+use lazy_static::lazy_static;
+use prometheus::{
+    CounterVec, Encoder, Gauge, Histogram, HistogramVec, IntGauge, Registry, TextEncoder,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use prometheus::{Encoder, TextEncoder, Gauge, Histogram, Registry, IntGauge, CounterVec, HistogramVec};
-use lazy_static::lazy_static;
 
 lazy_static! {
     // 指标注册表
@@ -33,35 +35,43 @@ impl PrometheusExporter {
 
     pub async fn register_metrics(&self) {
         // 账号池指标
-        let account_healthy = IntGauge::new("aigx_account_pool_healthy", "Number of healthy accounts")?;
+        let account_healthy =
+            IntGauge::new("aigx_account_pool_healthy", "Number of healthy accounts")?;
         MetricsRegistry::register(Box::new(account_healthy))?;
 
         let account_busy = IntGauge::new("aigx_account_pool_busy", "Number of busy accounts")?;
         MetricsRegistry::register(Box::new(account_busy))?;
 
         // 连接池指标
-        let connection_active = IntGauge::new("aigx_connection_pool_active", "Number of active connections")?;
+        let connection_active = IntGauge::new(
+            "aigx_connection_pool_active",
+            "Number of active connections",
+        )?;
         MetricsRegistry::register(Box::new(connection_active))?;
 
-        let connection_idle = IntGauge::new("aigx_connection_pool_idle", "Number of idle connections")?;
+        let connection_idle =
+            IntGauge::new("aigx_connection_pool_idle", "Number of idle connections")?;
         MetricsRegistry::register(Box::new(connection_idle))?;
 
         // 会话池指标
-        let session_active = IntGauge::new("aigx_session_pool_active", "Number of active sessions")?;
+        let session_active =
+            IntGauge::new("aigx_session_pool_active", "Number of active sessions")?;
         MetricsRegistry::register(Box::new(session_active))?;
 
         let session_idle = IntGauge::new("aigx_session_pool_idle", "Number of idle sessions")?;
         MetricsRegistry::register(Box::new(session_idle))?;
 
         // 性能指标
-        let aigx_avg_latency = Histogram::with_opts(
-            &prometheus::HistogramOpts::new("aigx_avg_latency_ms", "Average request latency in milliseconds")
-        )?;
+        let aigx_avg_latency = Histogram::with_opts(&prometheus::HistogramOpts::new(
+            "aigx_avg_latency_ms",
+            "Average request latency in milliseconds",
+        ))?;
         MetricsRegistry::register(Box::new(aigx_avg_latency))?;
 
-        let aigx_throughput = Histogram::with_opts(
-            &prometheus::HistogramOpts::new("aigx_throughput_req_s", "Request throughput per second")
-        )?;
+        let aigx_throughput = Histogram::with_opts(&prometheus::HistogramOpts::new(
+            "aigx_throughput_req_s",
+            "Request throughput per second",
+        ))?;
         MetricsRegistry::register(Box::new(aigx_throughput))?;
 
         // 成功率指标
@@ -75,7 +85,8 @@ impl PrometheusExporter {
         let system_cpu_usage = Gauge::new("aigx_cpu_usage_percent", "System CPU usage percent")?;
         MetricsRegistry::register(Box::new(system_cpu_usage))?;
 
-        let system_memory_usage = Gauge::new("aigx_memory_usage_percent", "System memory usage percent")?;
+        let system_memory_usage =
+            Gauge::new("aigx_memory_usage_percent", "System memory usage percent")?;
         MetricsRegistry::register(Box::new(system_memory_usage))?;
 
         let system_disk_usage = Gauge::new("aigx_disk_usage_percent", "System disk usage percent")?;
@@ -89,28 +100,24 @@ impl PrometheusExporter {
         let encoder = TextEncoder::new();
 
         // 添加基础指标
-        let metric_family_vec = vec![
-            prometheus::proto::MetricFamily {
-                name: Some("aigx_network_mode".to_string()),
-                help: Some("Network layer operation mode".to_string()),
-                type_: prometheus::proto::MetricType::Gauge as i32,
-                metric: vec![
-                    prometheus::proto::Metric {
-                        label: vec![],
-                        gauge: Some(prometheus::proto::Gauge {
-                            value: 1.0,
-                            ..Default::default()
-                        }),
-                        counter: None,
-                        summary: None,
-                        summary_sample_count: None,
-                        summary_sample_sum: None,
-                        histogram: None,
-                        ..Default::default()
-                    }
-                ],
-            }
-        ];
+        let metric_family_vec = vec![prometheus::proto::MetricFamily {
+            name: Some("aigx_network_mode".to_string()),
+            help: Some("Network layer operation mode".to_string()),
+            type_: prometheus::proto::MetricType::Gauge as i32,
+            metric: vec![prometheus::proto::Metric {
+                label: vec![],
+                gauge: Some(prometheus::proto::Gauge {
+                    value: 1.0,
+                    ..Default::default()
+                }),
+                counter: None,
+                summary: None,
+                summary_sample_count: None,
+                summary_sample_sum: None,
+                histogram: None,
+                ..Default::default()
+            }],
+        }];
 
         encoder.encode(&metric_family_vec, &mut buffer).unwrap();
 
@@ -130,11 +137,11 @@ impl PrometheusExporter {
         tokio::spawn(async move {
             let addr = format!("0.0.0.0:{}", self.port);
 
-            #[cfg(feature = "localhost")]
-            use axum::{routing::get, Router};
             #[cfg(not(feature = "localhost"))]
             use axum::routing::get;
-            use axum::{Response, Request, http::StatusCode};
+            use axum::{http::StatusCode, Request, Response};
+            #[cfg(feature = "localhost")]
+            use axum::{routing::get, Router};
             use std::convert::Infallible;
 
             let app = Router::new().route("/metrics", get(handler));

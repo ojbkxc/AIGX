@@ -178,10 +178,7 @@ impl AccountPool {
                 // 延迟感知：成功率最高者优先（近似）
                 available
                     .iter()
-                    .max_by(|a, b| {
-                        a.total_requests
-                            .cmp(&b.total_requests)
-                    })
+                    .max_by(|a, b| a.total_requests.cmp(&b.total_requests))
                     .cloned()
                     .unwrap_or_else(|| available[0].clone())
             }
@@ -257,16 +254,11 @@ impl AccountPool {
                 AccountStatusSnapshot {
                     id: a.id.clone(),
                     state: a.status.clone(),
-                    last_used_ms: a
-                        .last_used_at
-                        .map(|t| t.timestamp_millis())
-                        .unwrap_or(0),
+                    last_used_ms: a.last_used_at.map(|t| t.timestamp_millis()).unwrap_or(0),
                     error_count: a.failed_requests.min(u8::MAX as u64) as u8,
                     consecutive_errors: a.failed_requests.min(u16::MAX as u64) as u16,
                     priority: a.priority,
-                    last_error_time_ms: a
-                        .last_error_time
-                        .map(|t| t.timestamp_millis()),
+                    last_error_time_ms: a.last_error_time.map(|t| t.timestamp_millis()),
                 }
             })
             .collect()

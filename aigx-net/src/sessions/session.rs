@@ -3,11 +3,11 @@
 //! 具体的会话对象实现和操作
 
 use super::{AICloudProvider, SessionConfig, SessionInfo, SessionState};
+use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use anyhow::Result;
 
 /// 会话传输层
 #[async_trait::async_trait]

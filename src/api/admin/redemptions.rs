@@ -10,16 +10,11 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::common::{
-    error_response,
-    verify_admin,
-    verify_user,
-    record_audit,
-    admin_id_from_session,
-    default_page,
-    default_size,
-};
 use super::super::openai::AppState;
+use super::common::{
+    admin_id_from_session, default_page, default_size, error_response, record_audit, verify_admin,
+    verify_user,
+};
 
 /// 批量生成兑换码请求
 #[derive(Debug, Deserialize)]

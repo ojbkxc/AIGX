@@ -56,7 +56,10 @@ impl HealthChecker {
         // 数据完整性检查
         match self.data_integrity_check(&connection).await {
             Ok(_) => {
-                debug!("Data integrity check passed for connection: {}", connection.id());
+                debug!(
+                    "Data integrity check passed for connection: {}",
+                    connection.id()
+                );
             }
             Err(e) => {
                 warn!("Data integrity check failed for {}: {}", connection.id(), e);
@@ -68,7 +71,11 @@ impl HealthChecker {
         is_healthy = errors == 0;
 
         if !is_healthy && errors >= self.max_errors {
-            error!("Connection {} marked as unhealthy after {} errors", connection.id(), errors);
+            error!(
+                "Connection {} marked as unhealthy after {} errors",
+                connection.id(),
+                errors
+            );
             // 自动重连逻辑应该在连接池调用
         }
 
@@ -126,7 +133,6 @@ pub trait ConnectionStateTable: Send + Sync {
 
     /// 获取所有允许的转换
     fn transitions(&self) -> Vec<(String, String)>;
-
 }
 
 impl Default for ConnectionStateManager {
@@ -144,8 +150,7 @@ struct StateTransitionTable {
 
 impl ConnectionStateTable for StateTransitionTable {
     fn can_transition(&self, from: &str, to: &str) -> bool {
-        self.transitions.iter()
-            .any(|(f, t)| f == from && t == to)
+        self.transitions.iter().any(|(f, t)| f == from && t == to)
     }
 
     fn transitions(&self) -> Vec<(String, String)> {
@@ -185,7 +190,10 @@ impl HealthMetrics {
         } else {
             // 恢复健康状态时重置计数器
             if self.consecutive_failures > 0 {
-                debug!("Connection recovered after {} consecutive failures", self.consecutive_failures);
+                debug!(
+                    "Connection recovered after {} consecutive failures",
+                    self.consecutive_failures
+                );
                 self.consecutive_failures = 0;
                 self.is_healthy = true;
             }

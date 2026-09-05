@@ -10,8 +10,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::common::{error_response, verify_admin};
 use super::super::openai::AppState;
+use super::common::{error_response, verify_admin};
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateNotifyConfigRequest {

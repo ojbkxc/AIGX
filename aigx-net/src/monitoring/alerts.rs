@@ -2,10 +2,10 @@
 //!
 //! 提供告警配置、发送和通知功能。
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
 use tokio::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,9 +173,7 @@ impl AlertSender {
     async fn is_authorized(&self, alert_id: String) -> bool {
         let cooldown_buffer = self.cooldown_buffer.read().await;
         match cooldown_buffer.get(&alert_id) {
-            Some(last_sent) if last_sent.elapsed() < self.config.cooldown_duration => {
-                false
-            }
+            Some(last_sent) if last_sent.elapsed() < self.config.cooldown_duration => false,
             _ => true,
         }
     }
@@ -194,7 +192,10 @@ impl AlertSender {
             alerts.push(Alert {
                 id: uuid::Uuid::new_v4().to_string(),
                 title: "CPU 使用率过高".to_string(),
-                message: format!("CPU 使用率为 {}%，超过阈值 {}%", metrics.cpu_usage, self.config.thresholds.cpu_usage),
+                message: format!(
+                    "CPU 使用率为 {}%，超过阈值 {}%",
+                    metrics.cpu_usage, self.config.thresholds.cpu_usage
+                ),
                 level: AlertLevel::Warning,
                 severity: if metrics.cpu_usage > self.config.thresholds.cpu_usage * 1.2 {
                     AlertSeverity::Critical
@@ -204,9 +205,12 @@ impl AlertSender {
                 source: "system".to_string(),
                 timestamp: Utc::now(),
                 resolved: false,
-                std::collections::HashMap::from([
+                metadata: std::collections::HashMap::from([
                     ("cpu_usage".to_string(), metrics.cpu_usage.to_string()),
-                    ("threshold".to_string(), self.config.thresholds.cpu_usage.to_string()),
+                    (
+                        "threshold".to_string(),
+                        self.config.thresholds.cpu_usage.to_string(),
+                    ),
                 ]),
             });
         }
@@ -216,7 +220,10 @@ impl AlertSender {
             alerts.push(Alert {
                 id: uuid::Uuid::new_v4().to_string(),
                 title: "内存使用率过高".to_string(),
-                message: format!("内存使用率为 {}%，超过阈值 {}%", metrics.memory_usage, self.config.thresholds.memory_usage),
+                message: format!(
+                    "内存使用率为 {}%，超过阈值 {}%",
+                    metrics.memory_usage, self.config.thresholds.memory_usage
+                ),
                 level: AlertLevel::Warning,
                 severity: if metrics.memory_usage > self.config.thresholds.memory_usage * 1.2 {
                     AlertSeverity::Critical
@@ -226,9 +233,12 @@ impl AlertSender {
                 source: "system".to_string(),
                 timestamp: Utc::now(),
                 resolved: false,
-                std::collections::HashMap::from([
+                metadata: std::collections::HashMap::from([
                     ("memory_usage".to_string(), metrics.memory_usage.to_string()),
-                    ("threshold".to_string(), self.config.thresholds.memory_usage.to_string()),
+                    (
+                        "threshold".to_string(),
+                        self.config.thresholds.memory_usage.to_string(),
+                    ),
                 ]),
             });
         }
@@ -238,7 +248,10 @@ impl AlertSender {
             alerts.push(Alert {
                 id: uuid::Uuid::new_v4().to_string(),
                 title: "磁盘使用率过高".to_string(),
-                message: format!("磁盘使用率为 {}%，超过阈值 {}%", metrics.disk_usage, self.config.thresholds.disk_usage),
+                message: format!(
+                    "磁盘使用率为 {}%，超过阈值 {}%",
+                    metrics.disk_usage, self.config.thresholds.disk_usage
+                ),
                 level: AlertLevel::Error,
                 severity: if metrics.disk_usage > self.config.thresholds.disk_usage * 1.2 {
                     AlertSeverity::Critical
@@ -248,9 +261,12 @@ impl AlertSender {
                 source: "system".to_string(),
                 timestamp: Utc::now(),
                 resolved: false,
-                std::collections::HashMap::from([
+                metadata: std::collections::HashMap::from([
                     ("disk_usage".to_string(), metrics.disk_usage.to_string()),
-                    ("threshold".to_string(), self.config.thresholds.disk_usage.to_string()),
+                    (
+                        "threshold".to_string(),
+                        self.config.thresholds.disk_usage.to_string(),
+                    ),
                 ]),
             });
         }
@@ -260,7 +276,11 @@ impl AlertSender {
             alerts.push(Alert {
                 id: uuid::Uuid::new_v4().to_string(),
                 title: "错误率过高".to_string(),
-                message: format!("错误率为 {:.2}%，超过阈值 {}%", metrics.error_rate, self.config.thresholds.error_rate * 100.0),
+                message: format!(
+                    "错误率为 {:.2}%，超过阈值 {}%",
+                    metrics.error_rate,
+                    self.config.thresholds.error_rate * 100.0
+                ),
                 level: AlertLevel::Error,
                 severity: if metrics.error_rate > self.config.thresholds.error_rate * 1.5 {
                     AlertSeverity::Critical
@@ -270,9 +290,12 @@ impl AlertSender {
                 source: "performance".to_string(),
                 timestamp: Utc::now(),
                 resolved: false,
-                std::collections::HashMap::from([
+                metadata: std::collections::HashMap::from([
                     ("error_rate".to_string(), metrics.error_rate.to_string()),
-                    ("threshold".to_string(), (self.config.thresholds.error_rate * 100.0).to_string()),
+                    (
+                        "threshold".to_string(),
+                        (self.config.thresholds.error_rate * 100.0).to_string(),
+                    ),
                 ]),
             });
         }

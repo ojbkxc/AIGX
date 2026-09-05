@@ -10,8 +10,10 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::common::{admin_id_from_session, error_response, record_audit, verify_admin, verify_user};
 use super::super::openai::AppState;
+use super::common::{
+    admin_id_from_session, error_response, record_audit, verify_admin, verify_user,
+};
 
 // 这里需要引用主 crate 的订单相关类型
 use crate::payment::{EpayConfig, TopUpOrder};
@@ -138,19 +140,23 @@ pub async fn handle_list_orders(
         .order_store
         .list_all()
         .iter()
-        .map(|o| json!({
-            "trade_no": o.trade_no,
-            "user_id": o.user_id,
-            "amount": o.amount,
-            "money": o.money,
-            "quota": o.quota,
-            "payment_method": o.payment_method,
-            "status": o.status,
-            "create_time": o.create_time,
-            "paid_time": o.paid_time,
-        }))
+        .map(|o| {
+            json!({
+                "trade_no": o.trade_no,
+                "user_id": o.user_id,
+                "amount": o.amount,
+                "money": o.money,
+                "quota": o.quota,
+                "payment_method": o.payment_method,
+                "status": o.status,
+                "create_time": o.create_time,
+                "paid_time": o.paid_time,
+            })
+        })
         .collect();
-    Ok(Json(json!({ "success": true, "data": orders, "total": orders.len() })))
+    Ok(Json(
+        json!({ "success": true, "data": orders, "total": orders.len() }),
+    ))
 }
 
 /// GET /api/orders/:trade_no - 查询订单详情

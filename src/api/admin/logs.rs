@@ -14,12 +14,11 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::common::{error_response, verify_admin, default_page, default_size};
 use super::super::openai::AppState;
+use super::common::{default_page, default_size, error_response, verify_admin};
 
 // 这里我们实际上需要引用主 crate 的 log_store
 // 由于子模块内 super 跳到了 api::admin，需要主级引用
-
 
 /// 请求日志查询参数
 #[derive(Debug, Deserialize)]
@@ -105,8 +104,7 @@ pub async fn handle_export_request_logs(
     Query(q): Query<ExportQuery>,
 ) -> Response {
     if verify_admin(&state, &headers).await.is_err() {
-        return error_response("Not authenticated", StatusCode::UNAUTHORIZED)
-            .into_response();
+        return error_response("Not authenticated", StatusCode::UNAUTHORIZED).into_response();
     }
     let fmt = q.format.as_deref().unwrap_or("json").to_lowercase();
 
@@ -116,8 +114,14 @@ pub async fn handle_export_request_logs(
             (
                 StatusCode::OK,
                 [
-                    (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
-                    (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\\\"request_logs.csv\\\"".to_string()),
+                    (
+                        axum::http::header::CONTENT_TYPE,
+                        "text/csv; charset=utf-8".to_string(),
+                    ),
+                    (
+                        axum::http::header::CONTENT_DISPOSITION,
+                        "attachment; filename=\\\"request_logs.csv\\\"".to_string(),
+                    ),
                 ],
                 csv,
             )
@@ -127,15 +131,24 @@ pub async fn handle_export_request_logs(
             (
                 StatusCode::OK,
                 [
-                    (axum::http::header::CONTENT_TYPE, "application/json; charset=utf-8".to_string()),
-                    (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\\\"request_logs.json\\\"".to_string()),
+                    (
+                        axum::http::header::CONTENT_TYPE,
+                        "application/json; charset=utf-8".to_string(),
+                    ),
+                    (
+                        axum::http::header::CONTENT_DISPOSITION,
+                        "attachment; filename=\\\"request_logs.json\\\"".to_string(),
+                    ),
                 ],
                 json,
             )
         }
         _ => {
-            return error_response("Unsupported format, use 'csv' or 'json'", StatusCode::BAD_REQUEST)
-                .into_response();
+            return error_response(
+                "Unsupported format, use 'csv' or 'json'",
+                StatusCode::BAD_REQUEST,
+            )
+            .into_response();
         }
     };
 

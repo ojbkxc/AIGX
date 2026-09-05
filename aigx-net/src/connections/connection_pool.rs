@@ -359,8 +359,7 @@ impl ConnectionPool {
 impl Default for ConnectionPool {
     fn default() -> Self {
         let config = PoolConfig::default();
-        let pool: Arc<ConnectionPool> =
-            ConnectionPool::new(config, MemoryConnectionFactory);
+        let pool: Arc<ConnectionPool> = ConnectionPool::new(config, MemoryConnectionFactory);
         // new() 返回 Arc<Self>；Default 场景仅在无其他引用的初始化阶段调用
         match Arc::try_unwrap(pool) {
             Ok(inner) => inner,

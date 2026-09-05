@@ -20,4 +20,3 @@ pub fn create_handler(protocol: Protocol) -> Option<Box<dyn ProtocolHandler>> {
         _ => None,
     }
 }
-

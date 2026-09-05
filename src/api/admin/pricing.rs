@@ -10,8 +10,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::common::{error_response, verify_admin};
 use super::super::openai::AppState;
+use super::common::{error_response, verify_admin};
 
 // 这里需要引用主 crate 的定价相关类型
 use crate::pricing::ModelPrice;
@@ -58,15 +58,17 @@ pub async fn handle_list_pricing(
         .pricing_store
         .list_prices()
         .iter()
-        .map(|p| json!({
-            "model_name": p.model_name,
-            "input_price": p.input_price,
-            "output_price": p.output_price,
-            "cache_price": p.cache_price,
-            "price_type": p.price_type,
-            "created_at": p.created_at,
-            "updated_at": p.updated_at,
-        }))
+        .map(|p| {
+            json!({
+                "model_name": p.model_name,
+                "input_price": p.input_price,
+                "output_price": p.output_price,
+                "cache_price": p.cache_price,
+                "price_type": p.price_type,
+                "created_at": p.created_at,
+                "updated_at": p.updated_at,
+            })
+        })
         .collect();
     Ok(Json(json!({ "success": true, "data": prices })))
 }
@@ -114,4 +116,3 @@ pub async fn handle_delete_pricing(
         )),
     }
 }
-

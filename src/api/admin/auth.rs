@@ -7,17 +7,15 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 
-
+use super::common::admin_id_from_session;
 use super::common::error_response;
 use super::common::extract_client_ip;
-use super::common::verify_admin;
 use super::common::extract_session_token;
-use super::common::admin_id_from_session;
+use super::common::verify_admin;
 
-use crate::user::{self, hash_password, Role, User};
 use super::super::auth::SessionStore;
 use super::super::openai::AppState;
-
+use crate::user::{self, hash_password, Role, User};
 
 use uuid::Uuid;
 
@@ -450,9 +448,7 @@ pub async fn handle_reset_password(
 // 配置存于 `config.google_oauth`（`src/oauth/google.rs` + `src/config.rs`）。
 
 /// GET /api/auth/google — 跳转到 Google OAuth 授权页
-pub async fn handle_google_oauth_authorize(
-    State(state): State<AppState>,
-) -> Response {
+pub async fn handle_google_oauth_authorize(State(state): State<AppState>) -> Response {
     let config = state.config_manager.get().await;
     let oauth = &config.google_oauth;
     if !oauth.ready() {
@@ -483,16 +479,18 @@ pub async fn handle_google_oauth_callback(
         }
     };
     // 用授权码换取 access token
-    let access_token = match crate::oauth::google::exchange_code(&oauth, &code, &state.http_client).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Google OAuth token exchange failed: {e}");
-            return error_response("OAuth token exchange failed", StatusCode::BAD_GATEWAY)
-                .into_response();
-        }
-    };
+    let access_token =
+        match crate::oauth::google::exchange_code(&oauth, &code, &state.http_client).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Google OAuth token exchange failed: {e}");
+                return error_response("OAuth token exchange failed", StatusCode::BAD_GATEWAY)
+                    .into_response();
+            }
+        };
     // 拉取用户信息
-    let g_user = match crate::oauth::google::get_user_info(&access_token, &state.http_client).await {
+    let g_user = match crate::oauth::google::get_user_info(&access_token, &state.http_client).await
+    {
         Ok(u) => u,
         Err(e) => {
             tracing::error!("Google OAuth user info failed: {e}");
@@ -502,7 +500,8 @@ pub async fn handle_google_oauth_callback(
     };
     // 确定邮箱：优先 email，否则用 sub 造伪邮箱
     let email = g_user
-        .email.clone()
+        .email
+        .clone()
         .unwrap_or_else(|| format!("{}@google.local", g_user.sub));
     // 用户名：优先 name，否则用 sub
     let username = g_user.name.clone().unwrap_or_else(|| g_user.sub.clone());
@@ -555,9 +554,7 @@ pub async fn handle_google_oauth_callback(
 // 配置存于 `config.github_oauth`（`src/oauth/github.rs` + `src/config.rs`）。
 
 /// GET /api/auth/github — 跳转到 GitHub OAuth 授权页
-pub async fn handle_github_oauth_authorize(
-    State(state): State<AppState>,
-) -> Response {
+pub async fn handle_github_oauth_authorize(State(state): State<AppState>) -> Response {
     let config = state.config_manager.get().await;
     let oauth = &config.github_oauth;
     if !oauth.ready() {
@@ -593,16 +590,18 @@ pub async fn handle_github_oauth_callback(
         }
     };
     // Exchange code for access token
-    let access_token = match crate::oauth::github::exchange_code(&oauth, &code, &state.http_client).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("GitHub OAuth token exchange failed: {e}");
-            return error_response("OAuth token exchange failed", StatusCode::BAD_GATEWAY)
-                .into_response();
-        }
-    };
+    let access_token =
+        match crate::oauth::github::exchange_code(&oauth, &code, &state.http_client).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("GitHub OAuth token exchange failed: {e}");
+                return error_response("OAuth token exchange failed", StatusCode::BAD_GATEWAY)
+                    .into_response();
+            }
+        };
     // Fetch user info
-    let gh_user = match crate::oauth::github::get_user_info(&access_token, &state.http_client).await {
+    let gh_user = match crate::oauth::github::get_user_info(&access_token, &state.http_client).await
+    {
         Ok(u) => u,
         Err(e) => {
             tracing::error!("GitHub OAuth user info failed: {e}");
@@ -612,7 +611,8 @@ pub async fn handle_github_oauth_callback(
     };
     // Determine email: prefer primary email, fallback to github id pseudo-email
     let email = gh_user
-        .email.clone()
+        .email
+        .clone()
         .unwrap_or_else(|| format!("{}@github.local", gh_user.login));
     // Find or create user
     let user = match state.user_store.get_by_email(&email) {
@@ -636,7 +636,7 @@ pub async fn handle_github_oauth_callback(
                     .into_response();
                 }
             }
-        },
+        }
     };
     // Create session
     let session_ttl = config.admin.session_ttl_hours.max(1);

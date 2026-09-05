@@ -50,9 +50,9 @@ pub mod utils {
 }
 
 // 向后兼容的导出
-pub use accounts::{AccountPool, AccountStatus, PoolStatus, LoadBalanceStrategy, PoolConfig};
+pub use accounts::{AccountPool, AccountStatus, LoadBalanceStrategy, PoolConfig, PoolStatus};
 pub use connections::{
-    ConnectionPool, ConnectionConfig, PoolConfig as ConnectionPoolConfig, PoolMetrics, Protocol,
+    ConnectionConfig, ConnectionPool, PoolConfig as ConnectionPoolConfig, PoolMetrics, Protocol,
 };
 pub use sessions::{
     PoolStatus as SessionPoolStatus, SessionConfig, SessionInfo, SessionPool, SmartRouter,
@@ -120,7 +120,9 @@ impl NetworkLayerManager {
     {
         use std::sync::OnceLock;
         static NETWORK_INITIALIZED: OnceLock<Arc<NetworkLayer>> = OnceLock::new();
-        NETWORK_INITIALIZED.get_or_init(|| Arc::new(init_fn())).clone()
+        NETWORK_INITIALIZED
+            .get_or_init(|| Arc::new(init_fn()))
+            .clone()
     }
 }
 

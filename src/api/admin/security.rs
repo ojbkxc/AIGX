@@ -10,8 +10,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::common::{error_response, verify_admin};
 use super::super::openai::AppState;
+use super::common::{error_response, verify_admin};
 
 #[derive(Debug, Deserialize)]
 pub struct SecurityEventsQuery {
@@ -69,15 +69,17 @@ pub async fn handle_security_events(
     );
     let data: Vec<Value> = events
         .into_iter()
-        .map(|ev| json!({
-            "id": ev.id,
-            "created_at": ev.created_at,
-            "event_type": ev.event_type.as_str(),
-            "severity": ev.severity,
-            "ip": ev.ip,
-            "user_id": ev.user_id,
-            "detail": ev.detail,
-        }))
+        .map(|ev| {
+            json!({
+                "id": ev.id,
+                "created_at": ev.created_at,
+                "event_type": ev.event_type.as_str(),
+                "severity": ev.severity,
+                "ip": ev.ip,
+                "user_id": ev.user_id,
+                "detail": ev.detail,
+            })
+        })
         .collect();
     Ok(Json(json!({
         "success": true,

@@ -27,16 +27,16 @@ use crate::pricing::RatioConfig;
 use crate::user;
 use crate::user_group::UserGroup;
 
+use super::super::openai::AppState;
 use super::common::{
     admin_id_from_session, error_response, record_audit, verify_admin, verify_user,
 };
-use super::super::openai::AppState;
 
+use super::channels::mask_channel;
 use super::dashboard::{dashboard_start_ts, DashboardQuery};
 use super::pricing::PriceRequest;
 use super::tokens::KeyRequest;
 use super::users::mask_user;
-use super::channels::mask_channel;
 
 /// 账号请求（add/update 共用）
 #[derive(Debug, Deserialize)]
@@ -56,6 +56,8 @@ pub struct FetchModelsRequest {
     pub base_url: String,
     #[serde(default)]
     pub api_key: String,
+    #[serde(default)]
+    pub channel_id: String,
 }
 
 /// 检查用户名/邮箱是否可用
@@ -484,7 +486,6 @@ pub async fn handle_usage_models(
 // 用户管理 API
 // ============================================================
 
-
 pub async fn handle_me(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -907,7 +908,6 @@ pub async fn handle_epay_return(
 // 通用渠道管理（功能 2 - 核心数据层）
 // ============================================================
 
-
 pub async fn handle_patch_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -974,7 +974,6 @@ pub async fn handle_patch_channel(
     }
 }
 
-
 pub async fn handle_test_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -995,7 +994,6 @@ pub async fn handle_test_channel(
     }
     Ok(Json(serde_json::json!({ "success": true, "data": result })))
 }
-
 
 pub async fn handle_fetch_channel_models(
     State(state): State<AppState>,
@@ -1320,7 +1318,6 @@ pub async fn handle_fetch_channel_models(
 // 与 /v1/chat/completions 走完整鉴权/计费链路不同，这里仅校验管理员，
 // 并让前端自由选择协议（openai / anthropic）、模型与消息历史。
 
-
 pub async fn handle_list_prices(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1329,7 +1326,6 @@ pub async fn handle_list_prices(
     let prices = state.pricing_store.list_prices();
     Ok(Json(serde_json::json!({ "success": true, "data": prices })))
 }
-
 
 pub async fn handle_upsert_price(
     State(state): State<AppState>,
@@ -1346,7 +1342,6 @@ pub async fn handle_upsert_price(
         )),
     }
 }
-
 
 pub async fn handle_upsert_price_by_model(
     State(state): State<AppState>,
@@ -1366,7 +1361,6 @@ pub async fn handle_upsert_price_by_model(
     }
 }
 
-
 pub async fn handle_delete_price(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1382,7 +1376,6 @@ pub async fn handle_delete_price(
     }
 }
 
-
 pub async fn handle_get_ratios(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1391,7 +1384,6 @@ pub async fn handle_get_ratios(
     let ratios = state.pricing_store.get_ratios();
     Ok(Json(serde_json::json!({ "success": true, "data": ratios })))
 }
-
 
 pub async fn handle_update_ratios(
     State(state): State<AppState>,
@@ -1441,7 +1433,6 @@ impl GroupRequest {
     }
 }
 
-
 pub async fn handle_list_groups(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1450,7 +1441,6 @@ pub async fn handle_list_groups(
     let groups = state.user_group_store.list();
     Ok(Json(serde_json::json!({ "success": true, "data": groups })))
 }
-
 
 pub async fn handle_upsert_group(
     State(state): State<AppState>,
@@ -1467,7 +1457,6 @@ pub async fn handle_upsert_group(
         )),
     }
 }
-
 
 pub async fn handle_upsert_group_by_name(
     State(state): State<AppState>,
@@ -1486,7 +1475,6 @@ pub async fn handle_upsert_group_by_name(
         )),
     }
 }
-
 
 pub async fn handle_delete_group(
     State(state): State<AppState>,
@@ -1507,7 +1495,6 @@ pub async fn handle_delete_group(
 // 日志与审计 API（功能 1）
 // ============================================================
 
-
 pub async fn handle_get_ratelimit_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1516,7 +1503,6 @@ pub async fn handle_get_ratelimit_config(
     let cfg = state.rate_limiter.config();
     Ok(Json(serde_json::json!({ "success": true, "data": cfg })))
 }
-
 
 pub async fn handle_update_ratelimit_config(
     State(state): State<AppState>,
@@ -1592,7 +1578,6 @@ pub async fn handle_user_ranking(
         .collect();
     Ok(Json(serde_json::json!({ "success": true, "data": data })))
 }
-
 
 pub async fn handle_channel_health(
     State(state): State<AppState>,
@@ -1679,7 +1664,6 @@ pub async fn handle_reset_channel_circuit(
         "data": { "message": "Circuit breaker reset" }
     })))
 }
-
 
 pub async fn handle_realtime(
     State(state): State<AppState>,
@@ -1778,7 +1762,6 @@ pub struct AlertHistoryQuery {
     /// 限制返回条数（默认 100，上限 500）
     pub limit: Option<usize>,
 }
-
 
 pub async fn handle_alerts_history(
     State(state): State<AppState>,
@@ -2288,7 +2271,6 @@ pub async fn handle_rotate_token(
 //（与既有 `handle_channel_chat_test` 同源，但 playground 固定非流式 OpenAI 协议，
 // 且 channel_id 可选——缺省时选第一个启用渠道）。
 
-
 pub async fn handle_check_username(
     State(state): State<AppState>,
     Query(params): Query<CheckUsernameQuery>,
@@ -2480,7 +2462,6 @@ pub struct UpdatePriceSyncConfigRequest {
     pub interval_secs: Option<u64>,
 }
 
-
 pub async fn handle_update_price_sync_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2591,7 +2572,6 @@ pub async fn handle_update_exchange_rates(
     }
     Ok(Json(serde_json::json!({ "success": true, "data": null })))
 }
-
 
 // ============================================================
 // 渠道对话调试 + 通知测试端点（补充：前端仍在调用）

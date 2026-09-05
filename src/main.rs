@@ -462,10 +462,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/auth/reset-password",
             post(api::admin::handle_reset_password),
         )
-        .route(
-            "/api/auth/logout",
-            post(api::admin::handle_logout),
-        )
+        .route("/api/auth/logout", post(api::admin::handle_logout))
         // 阶段1：Google OAuth
         .route(
             "/api/auth/google",
@@ -487,7 +484,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/channels", post(api::admin::handle_add_channel))
         .route("/api/channels/:id", put(api::admin::handle_update_channel))
         .route("/api/channels/:id", patch(api::admin::handle_patch_channel))
-        .route("/api/channels/:id", delete(api::admin::handle_delete_channel))
+        .route(
+            "/api/channels/:id",
+            delete(api::admin::handle_delete_channel),
+        )
         // 令牌管理
         .route("/api/tokens", get(api::admin::handle_list_tokens))
         .route("/api/tokens", post(api::admin::handle_add_token))
@@ -500,7 +500,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 定价管理
         .route("/api/pricing", get(api::admin::handle_list_pricing))
         .route("/api/pricing", post(api::admin::handle_add_pricing))
-        .route("/api/pricing/:id", delete(api::admin::handle_delete_pricing))
+        .route(
+            "/api/pricing/:id",
+            delete(api::admin::handle_delete_pricing),
+        )
         .route(
             "/api/pricing/exchange-rates",
             get(api::admin::handle_get_exchange_rates),
@@ -513,7 +516,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/pricing/sync",
             post(api::admin::handle_trigger_price_sync),
         )
-                // 易支付配置
+        // 易支付配置
         .route("/api/epay/config", get(api::admin::handle_get_epay_config))
         .route(
             "/api/epay/config",
@@ -543,15 +546,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/dashboard/model_distribution",
             get(api::admin::handle_model_distribution),
         )
-        .route("/api/dashboard/user_ranking", get(api::admin::handle_user_ranking))
+        .route(
+            "/api/dashboard/user_ranking",
+            get(api::admin::handle_user_ranking),
+        )
         .route(
             "/api/dashboard/channel_health",
             get(api::admin::handle_channel_health),
         )
-        .route(
-            "/api/dashboard/realtime",
-            get(api::admin::handle_realtime),
-        )
+        .route("/api/dashboard/realtime", get(api::admin::handle_realtime))
         // 设置管理
         .route("/api/settings", get(api::admin::handle_get_settings))
         .route("/api/settings", put(api::admin::handle_update_settings))
@@ -615,7 +618,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             post(api::admin::handle_playground_chat),
         )
         // 系统监控
-        .route("/api/monitor/system", get(api::admin::handle_monitor_system))
+        .route(
+            "/api/monitor/system",
+            get(api::admin::handle_monitor_system),
+        )
         // 渠道探活
         .route(
             "/api/channels/fetch_models",
@@ -629,7 +635,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/channels/:id/reset-circuit",
             post(api::admin::handle_reset_channel_circuit),
         )
-        .route("/api/channels/:id/test", post(api::admin::handle_test_channel))
+        .route(
+            "/api/channels/:id/test",
+            post(api::admin::handle_test_channel),
+        )
         // IP 过滤
         .route("/api/ip/filter", get(api::admin::handle_get_ip_filter))
         .route("/api/ip/filter", put(api::admin::handle_update_ip_filter))
@@ -709,7 +718,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/redemptions/batch",
             post(api::admin::handle_batch_redemptions),
         )
-        .route("/api/redemptions/:id", delete(api::admin::handle_delete_redemption))
+        .route(
+            "/api/redemptions/:id",
+            delete(api::admin::handle_delete_redemption),
+        )
         .route("/api/redemptions/redeem", post(api::admin::handle_redeem))
         // 限流配置
         .route(
@@ -730,14 +742,23 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/accounts", post(api::admin::handle_add_account))
         .route("/api/accounts/test", post(api::admin::handle_test_account))
         .route("/api/accounts/:id", put(api::admin::handle_update_account))
-        .route("/api/accounts/:id", delete(api::admin::handle_delete_account))
+        .route(
+            "/api/accounts/:id",
+            delete(api::admin::handle_delete_account),
+        )
         .route("/api/keys", get(api::admin::handle_list_keys))
         .route("/api/keys", post(api::admin::handle_add_key))
         .route("/api/keys/:id", delete(api::admin::handle_delete_key))
-        .route("/api/tokens/:id/rotate", post(api::admin::handle_rotate_token))
+        .route(
+            "/api/tokens/:id/rotate",
+            post(api::admin::handle_rotate_token),
+        )
         // 网络层管理路由（新增 AIGX Network Layer）
         .route("/api/network/status", get(api::admin::health_check))
-        .route("/api/network/config/:config_id", put(api::admin::update_network_config))
+        .route(
+            "/api/network/config/:config_id",
+            put(api::admin::update_network_config),
+        )
         .route("/api/network/restart", post(api::admin::restart_network))
         .route(
             "/api/network/accounts/:account_id",
@@ -782,7 +803,6 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     // Anthropic 兼容 API 路由
     let anthropic_routes =
         Router::new().route("/v1/messages", post(api::anthropic::handle_messages));
-
 
     Router::new()
         .merge(admin_routes)

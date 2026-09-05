@@ -31,10 +31,10 @@ pub struct Account {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AccountType {
-    Direct,       // 直接连接
-    Proxy,        // 代理连接
-    Vip,          // VIP账号
-    Enterprise,   // 企业账号
+    Direct,     // 直接连接
+    Proxy,      // 代理连接
+    Vip,        // VIP账号
+    Enterprise, // 企业账号
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,7 +145,8 @@ impl Account {
 
     pub fn calculate_success_rate(&mut self) {
         if self.total_requests > 0 {
-            self.success_rate = (self.total_requests - self.failed_requests) as f64 / self.total_requests as f64;
+            self.success_rate =
+                (self.total_requests - self.failed_requests) as f64 / self.total_requests as f64;
         }
     }
 

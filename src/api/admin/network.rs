@@ -17,8 +17,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::account::CfAccount;
 use super::super::openai::AppState;
+use crate::account::CfAccount;
 
 /// 网络层状态信息
 #[derive(Debug, Serialize)]
@@ -104,9 +104,7 @@ pub struct AccountConfigRequest {
 ///
 /// 聚合主 crate 各子系统（账号池 / 渠道 / 健康追踪 / 断路器）的真实状态，
 /// 供管理后台「网络层」面板展示。
-pub async fn health_check(
-    State(state): State<AppState>,
-) -> Json<NetworkStatus> {
+pub async fn health_check(State(state): State<AppState>) -> Json<NetworkStatus> {
     let accounts = state.account_pool.list();
     let total_accounts = accounts.len();
     let available_accounts = accounts.iter().filter(|a| a.status == "active").count();
@@ -250,9 +248,7 @@ pub async fn remove_network_account(
 /// 重启网络层
 ///
 /// 复位所有渠道的断路器与健康追踪状态；渠道探活由后台 prober 周期执行。
-pub async fn restart_network(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn restart_network(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     for ch in state.channel_store.list() {
         state.channel_store.circuit_breaker().reset(&ch.id);
         state.channel_store.health_tracker().reset(&ch.id);

@@ -27,7 +27,8 @@ impl ClusterManager {
         let nodes = self.registry.get_all_nodes().await;
 
         // 简单的领导者选举：选择健康且ip地址最小的节点
-        if let Some(leader) = nodes.into_iter()
+        if let Some(leader) = nodes
+            .into_iter()
             .filter(|n| n.status == NodeStatus::Online && n.is_leader)
             .min_by_key(|n| n.address.clone())
         {
@@ -49,11 +50,15 @@ impl ClusterManager {
                 interval.tick().await;
 
                 // 检查选举超时
-                if last_propagate_time.elapsed() > timeout && std::thread::park_timeout(Duration::from_millis(10)).was_interrupted() {
+                if last_propagate_time.elapsed() > timeout
+                    && std::thread::park_timeout(Duration::from_millis(10)).was_interrupted()
+                {
                     let nodes = registry.get_all_nodes().await;
 
                     // 只有当前节点在线时才参与选举
-                    if nodes.iter().any(|n| n.id == registry.get_my_id()) && !nodes.iter().any(|n| n.is_leader) {
+                    if nodes.iter().any(|n| n.id == registry.get_my_id())
+                        && !nodes.iter().any(|n| n.is_leader)
+                    {
                         self.maybe_become_leader(nodes).await;
                     }
 
@@ -72,7 +77,8 @@ impl ClusterManager {
         // 简单的领导者选举算法
         // 实际项目中可以使用 Raft 等算法
 
-        let available_nodes = nodes.iter()
+        let available_nodes = nodes
+            .iter()
             .filter(|n| n.status == NodeStatus::Online)
             .collect::<Vec<_>>();
 
@@ -82,7 +88,8 @@ impl ClusterManager {
         }
 
         // 选择健康分数最高的作为领导者
-        if let Some(highest_score) = available_nodes.iter()
+        if let Some(highest_score) = available_nodes
+            .iter()
             .filter(|n| n.health_score >= 80 && n.cpu_usage <= 30 && n.memory_usage <= 70)
             .max_by_key(|n| n.health_score)
         {
@@ -114,16 +121,24 @@ impl ClusterManager {
         debug!("Cluster status update");
     }
 
-    pub async fn get_best_node_for_task(&self, requirements: &TaskRequirements) -> Option<DistributedNode> {
+    pub async fn get_best_node_for_task(
+        &self,
+        requirements: &TaskRequirements,
+    ) -> Option<DistributedNode> {
         let nodes = self.registry.get_online_nodes().await;
 
-        nodes.into_iter()
+        nodes
+            .into_iter()
             .filter(|n| self.meets_requirements(n, requirements))
             .min_by_key(|n| self.calculate_node_score(n, requirements))
             .cloned()
     }
 
-    fn meets_requirements(&self, _node: &DistributedNode, _requirements: &TaskRequirements) -> bool {
+    fn meets_requirements(
+        &self,
+        _node: &DistributedNode,
+        _requirements: &TaskRequirements,
+    ) -> bool {
         // 实现节点要求检查
         // 例如：星座空间要求、延迟要求、负载要求等
         true
@@ -156,7 +171,7 @@ pub struct TaskRequirements {
     pub max_memory_usage: f32,
     pub max_latency_ms: u64,
     pub min_health_score: u8,
-    pub required_replication_factor:usize,
+    pub required_replication_factor: usize,
     pub regions: Vec<String>,
 }
 
@@ -190,8 +205,14 @@ pub trait ClusterHealthChecker {
 
         ClusterHealth {
             total_nodes: nodes.len(),
-            healthy_nodes: nodes.iter().filter(|n| n.status == NodeStatus::Online && n.health_score >= 80).count(),
-            offline_nodes: nodes.iter().filter(|n| n.status == NodeStatus::Offline).count(),
+            healthy_nodes: nodes
+                .iter()
+                .filter(|n| n.status == NodeStatus::Online && n.health_score >= 80)
+                .count(),
+            offline_nodes: nodes
+                .iter()
+                .filter(|n| n.status == NodeStatus::Offline)
+                .count(),
             leader_nodes: nodes.iter().filter(|n| n.is_leader).count(),
             average_cpu: nodes.iter().map(|n| n.cpu_usage).sum::<f32>() / nodes.len() as f32,
             average_memory: nodes.iter().map(|n| n.memory_usage).sum::<f32>() / nodes.len() as f32,
@@ -207,8 +228,14 @@ impl ClusterHealthChecker for ClusterManager {
 
         ClusterHealth {
             total_nodes: nodes.len(),
-            healthy_nodes: nodes.iter().filter(|n| n.status == NodeStatus::Online && n.health_score >= 80).count(),
-            offline_nodes: nodes.iter().filter(|n| n.status == NodeStatus::Offline).count(),
+            healthy_nodes: nodes
+                .iter()
+                .filter(|n| n.status == NodeStatus::Online && n.health_score >= 80)
+                .count(),
+            offline_nodes: nodes
+                .iter()
+                .filter(|n| n.status == NodeStatus::Offline)
+                .count(),
             leader_nodes: nodes.iter().filter(|n| n.is_leader).count(),
             average_cpu: nodes.iter().map(|n| n.cpu_usage).sum::<f32>() / nodes.len() as f32,
             average_memory: nodes.iter().map(|n| n.memory_usage).sum::<f32>() / nodes.len() as f32,
@@ -237,11 +264,16 @@ mod tests {
             cpu_usage: 20.0,
             memory_usage: 40.0,
             replication_status: vec![],
-            last_heartbeat: Some(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64),
+            last_heartbeat: Some(
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64,
+            ),
             last_seen: Instant::now(),
             data_center: Some("dc1".to_string()),
             is_leader: true,
-            additional_std::collections::HashMap::new(),
+            additional_metadata: std::collections::HashMap::new(),
         };
 
         registry.register(node).await.unwrap();
