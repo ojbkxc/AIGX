@@ -4,7 +4,7 @@
 # 构建上下文为仓库根目录；--platform 由 buildx 传入。
 
 # ── 构建阶段：Rust workspace（编译主网关与 aigx-net） ─────────
-FROM rust:1.83-slim AS builder
+FROM rust:1-slim AS builder
 
 WORKDIR /app
 
