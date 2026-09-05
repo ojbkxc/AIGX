@@ -103,9 +103,12 @@ impl Metrics {
         // 批次6：延迟直方图分桶（cumulative 计数，render 时按 Prometheus 习惯输出）
         {
             let mut hist = self.latency_hist.lock().unwrap();
-            let buckets = hist
-                .entry(model)
-                .or_insert_with(|| LATENCY_BUCKETS_MS.map(|_| AtomicU64::new(0)).to_vec());
+            let buckets = hist.entry(model).or_insert_with(|| {
+                LATENCY_BUCKETS_MS
+                    .iter()
+                    .map(|_| AtomicU64::new(0))
+                    .collect()
+            });
             for (i, bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
                 if latency_ms <= *bound {
                     buckets[i].fetch_add(1, Ordering::Relaxed);
