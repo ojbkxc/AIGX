@@ -49,7 +49,7 @@ async fn patrol_once(
     // 遍历全部渠道，取 health_manager 汇总（错误率/延迟）与断路器状态
     let cb_status = channel_store.circuit_breaker().get_status_map();
     for channel in channel_store.list() {
-        let hm = channel_store.health_manager();
+        let hm = channel_store.health_tracker();
         let summary = hm.get_health(&channel.id);
         // 断路器状态：Open = 已达失败阈值，视为持续故障信号（threshold 已到，
         // 用规则阈值 1 触发告警语义；Closed/HalfOpen 不触发）

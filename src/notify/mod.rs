@@ -238,14 +238,15 @@ impl NotifyService {
         }
         let body =
             serde_json::to_string(payload).map_err(|e| format!("Webhook serialize failed: {e}"))?;
-        let mut req = self.client.post(&cfg.webhook_url).header(
-            "X-AIGX-Signature",
-            format!("sha256={}", webhook_hmac(&cfg.webhook_secret, &body)),
-        );
-        let _ = &mut req; // 保持链式构造顺序清晰
-        let resp = req
-            .body(body)
+        let resp = self
+            .client
+            .post(&cfg.webhook_url)
+            .header(
+                "X-AIGX-Signature",
+                format!("sha256={}", webhook_hmac(&cfg.webhook_secret, &body)),
+            )
             .header("Content-Type", "application/json")
+            .body(body)
             .send()
             .await
             .map_err(|e| format!("Webhook request failed: {e}"))?;
@@ -493,8 +494,9 @@ fn webhook_hmac(secret: &str, body: &str) -> String {
     if secret.is_empty() {
         return String::new();
     }
-    use std::io::Write;
-    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
+    use hmac::Mac;
+    use std::fmt::Write;
+    let mut mac = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(secret.as_bytes())
         .expect("HMAC can take key of any size");
     mac.update(body.as_bytes());
     let digest = mac.finalize().into_bytes();

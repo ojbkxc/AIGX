@@ -117,7 +117,7 @@ pub struct AlertRule {
     #[serde(default = "default_silence")]
     pub silence_period_secs: u64,
     pub level: AlertLevel,
-    #[serde(default = "true")]
+    #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
