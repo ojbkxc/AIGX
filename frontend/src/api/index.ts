@@ -50,6 +50,7 @@ async function request(method: string, path: string, body: unknown = null): Prom
       localStorage.removeItem('token');
       localStorage.removeItem('email');
       localStorage.removeItem('username');
+      localStorage.removeItem('role');
       localStorage.removeItem('expires_at');
     } catch {
       // ignore

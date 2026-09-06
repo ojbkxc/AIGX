@@ -2,26 +2,28 @@ import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
+import { isAdmin } from '../lib/utils';
 
 const navItems = [
   { path: '/', labelKey: '仪表盘', icon: '📊', end: true },
 
-  { path: '/channels', labelKey: '渠道管理', icon: '🛰️' },
-  { path: '/keys', labelKey: 'API 密钥', icon: '🔐' },
-  { path: '/mappings', labelKey: '模型映射', icon: '🔄' },
-  { path: '/pricing', labelKey: '定价倍率', icon: '💲' },
-  { path: '/users', labelKey: '用户管理', icon: '👥' },
-  { path: '/groups', labelKey: '用户分组', icon: '🏷️' },
+  { path: '/channels', labelKey: '渠道管理', icon: '🛰️', adminOnly: true },
+  { path: '/keys', labelKey: 'API 密钥', icon: '🔐', adminOnly: true },
+  { path: '/mappings', labelKey: '模型映射', icon: '🔄', adminOnly: true },
+  { path: '/pricing', labelKey: '定价倍率', icon: '💲', adminOnly: true },
+  { path: '/users', labelKey: '用户管理', icon: '👥', adminOnly: true },
+  { path: '/groups', labelKey: '用户分组', icon: '🏷️', adminOnly: true },
   { path: '/wallet', labelKey: '钱包充值', icon: '💰' },
-  { path: '/orders', labelKey: '订单记录', icon: '🧾' },
-  { path: '/redemptions', labelKey: '兑换码', icon: '🎟️' },
-  { path: '/logs', labelKey: '日志审计', icon: '📋' },
-  { path: '/epay', labelKey: '易支付', icon: '💳' },
-  { path: '/notify', labelKey: '通知设置', icon: '🔔' },
-  { path: '/settings', labelKey: '系统设置', icon: '⚙️' },
-  { path: '/playground', labelKey: 'Playground', icon: '🎮' },
-  { path: '/security', labelKey: '安全监控', icon: '🛡️' },
-  { path: '/ip-management', labelKey: 'IP 管理', icon: '🌐' },
+  { path: '/orders', labelKey: '订单记录', icon: '🧾', adminOnly: true },
+  { path: '/redemptions', labelKey: '兑换码', icon: '🎟️', adminOnly: true },
+  { path: '/logs', labelKey: '日志审计', icon: '📋', adminOnly: true },
+  { path: '/epay', labelKey: '易支付', icon: '💳', adminOnly: true },
+  { path: '/notify', labelKey: '通知设置', icon: '🔔', adminOnly: true },
+  { path: '/settings', labelKey: '系统设置', icon: '⚙️', adminOnly: true },
+  { path: '/playground', labelKey: 'Playground', icon: '🎮', adminOnly: true },
+  { path: '/security', labelKey: '安全监控', icon: '🛡️', adminOnly: true },
+  { path: '/ip-management', labelKey: 'IP 管理', icon: '🌐', adminOnly: true },
+  { path: '/network-layer', labelKey: '网络层概览', icon: '🏗️', adminOnly: true },
 ];
 
 // 分组定义：17 个一级菜单合并为 8 组，减少侧边栏长度。
@@ -57,7 +59,7 @@ const navGroups = [
     key: 'tools',
     labelKey: '工具与安全',
     icon: '🔧',
-    items: [navItems[17], navItems[18], navItems[19], navItems[20]], // 网络、Playground、安全监控、IP 管理
+    items: [navItems[14], navItems[15], navItems[16], navItems[17]], // Playground、安全监控、IP 管理、网络层
   },
   {
     key: 'system',
@@ -66,6 +68,12 @@ const navGroups = [
     items: [navItems[11], navItems[12], navItems[13]], // 易支付、通知设置、系统设置
   },
 ];
+
+// 角色过滤：普通用户仅见无 adminOnly 标记的菜单（展示层过滤，权限由后端强制）
+function roleFilter(items) {
+  if (isAdmin()) return items;
+  return items.filter((it) => !it.adminOnly);
+}
 
 export default function Sidebar() {
   const navigate = useNavigate();
@@ -100,6 +108,7 @@ export default function Sidebar() {
     localStorage.removeItem('token');
     localStorage.removeItem('email');
     localStorage.removeItem('username');
+    localStorage.removeItem('role');
     localStorage.removeItem('expires_at');
     navigate('/login');
   };
@@ -187,9 +196,12 @@ export default function Sidebar() {
         flex: 1,
       }}>
         {navGroups.map((group) => {
+          // 角色过滤：普通用户不渲染管理员专属菜单；整组为空则隐藏
+          const visibleItems = roleFilter(group.items);
+          if (visibleItems.length === 0) return null;
           // 无 label 的分组（仪表盘、日志）直接平铺，不渲染分组标题
           if (!group.labelKey) {
-            return group.items.map((item) => (
+            return visibleItems.map((item) => (
               <NavLink
                 key={item.path}
                 to={item.path}
@@ -223,8 +235,8 @@ export default function Sidebar() {
             ));
           }
           // 可折叠分组
-          const collapsed = collapsedGroups[group.key] && !isGroupActive(group.items);
-          const groupActive = isGroupActive(group.items);
+          const collapsed = collapsedGroups[group.key] && !isGroupActive(visibleItems);
+          const groupActive = isGroupActive(visibleItems);
           return (
             <div key={group.key} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
               <button
@@ -259,7 +271,7 @@ export default function Sidebar() {
                   opacity: 0.6,
                 }}>▼</span>
               </button>
-              {!collapsed && group.items.map((item) => (
+              {!collapsed && visibleItems.map((item) => (
                 <NavLink
                   key={item.path}
                   to={item.path}

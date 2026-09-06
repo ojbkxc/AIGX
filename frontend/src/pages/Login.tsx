@@ -76,6 +76,7 @@ export default function Login(): JSX.Element {
         localStorage.setItem('token', res.data.token);
         localStorage.setItem('email', res.data.email);
         localStorage.setItem('username', res.data.username || res.data.email);
+        localStorage.setItem('role', res.data.role || 'user');
         localStorage.setItem('expires_at', String(Number(res.data.expires_at) * 1000));
         navigate('/');
       } else {

@@ -293,6 +293,8 @@ export default function Dashboard(): JSX.Element {
     setLoading(true);
     setError('');
     try {
+      // 普通用户兼容：管理员统计端点（verify_admin）403 时回退到 /users/me 个人配额数据，
+      // 保证非管理员登录后仪表盘仍展示个人配额而非全空。
       const [
         usageData,
         tokenData,
@@ -323,6 +325,23 @@ export default function Dashboard(): JSX.Element {
       setUserRanking((urData?.data ?? urData) as UserRanking[] | null);
       setChannelHealth((chData?.data ?? chData) as ChannelHealth[] | null);
       setRealtime((rtData?.data ?? rtData) as RealtimeStats | null);
+
+      // 普通用户回退：无任何管理员数据时拉取个人配额展示
+      const hasAnyData = usageData || tokenData || limitsData;
+      if (!hasAnyData) {
+        try {
+          const me = await api.users.getMe();
+          const meData = me?.data ?? me;
+          if (meData) {
+            setLimits({
+              monthly_used: meData.used_quota ?? 0,
+              monthly_limit: meData.quota ?? null,
+            });
+          }
+        } catch {
+          // 静默：保持空态展示
+        }
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
