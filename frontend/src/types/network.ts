@@ -174,3 +174,48 @@ export interface NetworkDashboardData {
   scalingStatus: string;
   recentErrors: string[];
 }
+
+/** 系统监控面板指标（从网络层状态聚合换算） */
+export interface Metrics {
+  cpuUsage: number;
+  memoryUsage: number;
+  diskUsage: number;
+  networkTx: number;
+  networkRx: number;
+  activeConnections: number;
+  throughput: number;
+  errorRate: number;
+  successRate: number;
+  avgLatency: number;
+  currentLoad: number;
+  uptime: number;
+}
+
+/** 后端 /api/network/status 的 snake_case 原始结构 */
+export interface NetworkStatusRaw {
+  enabled: boolean;
+  account_pool: {
+    total_accounts: number;
+    available_accounts: number;
+    busy_accounts: number;
+    error_accounts: number;
+    invalid_accounts: number;
+    total_requests: number;
+    failed_requests: number;
+  };
+  connection_pool: {
+    total_connections: number;
+    active_connections: number;
+    idle_connections: number;
+    successful_requests: number;
+    failed_requests: number;
+    avg_latency_ms: number;
+  };
+  session_pool: {
+    total_sessions: number;
+    active_sessions: number;
+    idle_sessions: number;
+  };
+  load_balance_strategy: string;
+  last_check_at: number;
+}

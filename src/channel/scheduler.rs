@@ -891,8 +891,13 @@ mod scheduler_trait_tests {
         );
     }
 
+    /// 环境变量测试互斥锁：并行测试下 set_var/remove_var 竞态
+    /// （missing_env 测试偶发读到其他测试残留的 SCHEDULER_POLICIES）
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn load_scheduler_config_missing_env_returns_empty() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
         std::env::remove_var("SCHEDULER_POLICIES");
         let policies = load_scheduler_config();
         assert!(policies.is_empty());
@@ -900,6 +905,7 @@ mod scheduler_trait_tests {
 
     #[test]
     fn load_scheduler_config_parses_combined() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
         std::env::set_var(
             "SCHEDULER_POLICIES",
             r#"{"vip":{"type":"combined","health_weight":0.5,"cost_weight":0.3,"rpm_weight":0.2}}"#,
@@ -914,6 +920,7 @@ mod scheduler_trait_tests {
 
     #[test]
     fn load_scheduler_config_invalid_json_returns_empty() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
         std::env::set_var("SCHEDULER_POLICIES", "not json");
         let policies = load_scheduler_config();
         assert!(policies.is_empty());

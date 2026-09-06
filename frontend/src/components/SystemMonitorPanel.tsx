@@ -70,7 +70,7 @@ export default function SystemMonitorPanel() {
     try {
       setLoading(true);
       const data = await networkApi.getNetworkMetrics();
-      setMetrics(data);
+      setMetrics(toMetrics((data?.data ?? data) as NetworkStatusRaw));
     } catch (error) {
       console.error('Failed to fetch metrics:', error);
     } finally {
