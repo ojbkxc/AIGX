@@ -40,7 +40,7 @@ pub async fn handle_playground_chat(
         && body
             .channel_id
             .as_deref()
-            .map_or(false, |s| !s.trim().is_empty())
+            .is_some_and(|s| !s.trim().is_empty())
     {
         return error_response(
             "Only administrators can target a specific channel",
