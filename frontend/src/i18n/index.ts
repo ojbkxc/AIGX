@@ -24,7 +24,6 @@ const initOptions: InitOptions = {
   // 允许 key 中包含点号、括号等特殊字符，按原样查找
   keySeparator: false,
   nsSeparator: false,
-  pluralSeparator: null,
   interpolation: {
     escapeValue: false, // React 已防 XSS
   },
