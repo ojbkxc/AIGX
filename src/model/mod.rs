@@ -94,7 +94,11 @@ mod tests {
     use super::*;
 
     fn mapper() -> ModelMapper {
-        let dir = std::env::temp_dir().join(format!("aigx-map-test-{}", std::process::id()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        // 每个测试独立目录（pid + 原子序号），避免并行测试共用 SQLite 文件导致 database is locked
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("aigx-map-test-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(FileStore::new(dir));
         ModelMapper::new(store)
