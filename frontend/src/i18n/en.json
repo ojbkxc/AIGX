@@ -678,5 +678,12 @@
 "暂无时间线数据": "No timeline data",
 "请求时间线": "Request timeline",
 "视图切换": "View switcher",
-"当前页日志按小时聚合": "Aggregated hourly from current page logs"
+"当前页日志按小时聚合": "Aggregated hourly from current page logs",
+"全局搜索": "Global search",
+"页面": "Pages",
+"渠道": "Channels",
+"令牌": "Tokens",
+"无匹配结果": "No matches",
+"关闭": "Close",
+"搜索页面、渠道、用户、令牌…": "Search pages, channels, users, tokens…"
 }

@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
+import GlobalSearch from './GlobalSearch';
 
 interface NavItem {
   path: string;
@@ -118,6 +119,8 @@ export default function Sidebar(): JSX.Element {
   const { t, i18n } = useTranslation();
   // 移动端抽屉开关：仅 ≤768px 由汉堡按钮触发
   const [mobileOpen, setMobileOpen] = React.useState<boolean>(false);
+  // Ctrl/Cmd+K 全局搜索面板
+  const [searchOpen, setSearchOpen] = React.useState<boolean>(false);
 
   // 分组折叠状态：默认全展开（ofox 风格平铺）；
   // 当前路由所在组始终视为展开，但用户点击组头仍可手动收起。
@@ -134,6 +137,18 @@ export default function Sidebar(): JSX.Element {
   React.useEffect(() => {
     setMobileOpen(false);
   }, [location.pathname]);
+
+  // Ctrl/Cmd+K 唤起全局搜索
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const toggleGroup = (key: string): void => {
     setCollapsedGroups((prev) => {
@@ -394,6 +409,11 @@ export default function Sidebar(): JSX.Element {
       <MobileDrawer open={mobileOpen} onClose={() => setMobileOpen(false)} ariaLabel={t('导航菜单')}>
         {sidebarBody}
       </MobileDrawer>
+      <GlobalSearch
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        navItems={navItems.map(({ path, labelKey, adminOnly }) => ({ path, labelKey, adminOnly }))}
+      />
     </>
   );
 }
