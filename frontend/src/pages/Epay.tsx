@@ -10,6 +10,7 @@ interface EpayConfigForm {
   pay_methods: string[];
   price: string | number;
   min_topup: string | number;
+  amount_discount: Record<string, number>;
   custom_callback_address: string;
   server_address: string;
 }
@@ -21,6 +22,7 @@ interface EpayConfigResponse {
   pay_methods?: string[];
   price?: number;
   min_topup?: number;
+  amount_discount?: Record<string, number>;
   custom_callback_address?: string;
   server_address?: string;
   data?: Partial<Omit<EpayConfigResponse, 'data'>>;
@@ -30,6 +32,7 @@ export default function Epay() {
   const [cfg, setCfg] = useState<EpayConfigForm>({
     pay_address: '', epay_id: '', epay_key: '',
     pay_methods: ['alipay', 'wxpay'], price: 1, min_topup: 1,
+    amount_discount: {},
     custom_callback_address: '', server_address: '',
   });
   const [loading, setLoading] = useState(true);
@@ -57,6 +60,7 @@ export default function Epay() {
         pay_methods: d.pay_methods || ['alipay', 'wxpay'],
         price: d.price ?? 1,
         min_topup: d.min_topup ?? 1,
+        amount_discount: d.amount_discount || {},
         custom_callback_address: d.custom_callback_address || '',
         server_address: d.server_address || '',
       });
@@ -77,6 +81,11 @@ export default function Epay() {
         pay_methods: cfg.pay_methods,
         price: Number(cfg.price),
         min_topup: Number(cfg.min_topup),
+        amount_discount: Object.fromEntries(
+          Object.entries(cfg.amount_discount)
+            .filter(([k, v]) => k.trim() !== '' && Number.isFinite(Number(v)))
+            .map(([k, v]) => [Number(k), Number(v)]),
+        ),
         custom_callback_address: cfg.custom_callback_address,
         server_address: cfg.server_address,
       };
@@ -98,6 +107,30 @@ export default function Epay() {
       return { ...c, pay_methods: has ? c.pay_methods.filter((x) => x !== m) : [...c.pay_methods, m] };
     });
   };
+
+  const updateDiscount = (amountKey: string, field: 'amount' | 'discount', value: string) => {
+    setCfg((c) => {
+      const next = { ...c.amount_discount };
+      const currentValue = next[amountKey];
+      if (field === 'discount') {
+        if (value === '') {
+          // 空折扣视为删除该档位（按钮也走这里）；保留空行时该 key 会在保存前被过滤
+          delete next[amountKey];
+        } else {
+          next[amountKey] = Number(value);
+        }
+      } else {
+        // 改金额：旧 key 删除，新 key 写入（保留折扣值）
+        const oldAmount = Number(amountKey);
+        if (!Number.isNaN(oldAmount)) delete next[amountKey];
+        const newAmount = Number(value);
+        if (!Number.isNaN(newAmount)) next[value] = currentValue ?? 1;
+      }
+      return { ...c, amount_discount: next };
+    });
+  };
+
+  const discountEntries: Array<[string, number]> = Object.entries(cfg.amount_discount);
 
   if (loading) return <div className="loading">{t('加载易支付配置')}</div>;
 
@@ -175,6 +208,50 @@ export default function Epay() {
                 <input className="form-input" type="number" value={cfg.min_topup}
                   onChange={(e) => setCfg({ ...cfg, min_topup: e.target.value })} />
               </div>
+            </div>
+
+            {/* 充值档位折扣（对齐 new-api EpayAmountDiscount：金额 → 折扣比例） */}
+            <div className="form-group">
+              <label>{t('充值档位折扣')} <code style={{ fontSize: 11 }}>amount_discount</code></label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {[...discountEntries, ['', Number.NaN] as [string, number]].map(([amountKey, discount], i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input
+                      className="form-input"
+                      type="number"
+                      min="0"
+                      placeholder={t('充值金额（元）')}
+                      value={amountKey}
+                      onChange={(e) => updateDiscount(amountKey, 'amount', e.target.value)}
+                      style={{ flex: 1 }}
+                    />
+                    <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>→</span>
+                    <input
+                      className="form-input"
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      placeholder={t('折扣比例')}
+                      disabled={amountKey === ''}
+                      value={Number.isNaN(discount) ? '' : discount}
+                      onChange={(e) => updateDiscount(amountKey, 'discount', e.target.value)}
+                      style={{ flex: 1 }}
+                    />
+                    {i < discountEntries.length && (
+                      <button
+                        className="btn btn-outline btn-sm"
+                        type="button"
+                        title={t('删除此档位')}
+                        onClick={() => updateDiscount(amountKey, 'discount', '')}
+                        style={{ flexShrink: 0 }}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <span className="form-hint">{t('例如 100 元 → 0.9 表示充值 100 元按 9 折入账。对应 new-api 的 EpayAmountDiscount。')}</span>
             </div>
 
             <div className="form-group">
