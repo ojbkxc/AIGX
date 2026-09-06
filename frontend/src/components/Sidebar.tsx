@@ -1,8 +1,9 @@
 import React from 'react';
-import { NavLink, useNavigate } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { isAdmin } from '../lib/utils';
+import MobileDrawer from './ui/MobileDrawer';
 
 interface NavItem {
   path: string;
@@ -92,7 +93,11 @@ function roleFilter(items: NavItem[]): NavItem[] {
 
 export default function Sidebar(): JSX.Element {
   const navigate = useNavigate();
+  const location = useLocation();
   const { t, i18n } = useTranslation();
+  // 移动端抽屉开关：仅 ≤768px 由汉堡按钮触发
+  const [mobileOpen, setMobileOpen] = React.useState<boolean>(false);
+
   // 分组折叠状态：默认全部展开，记忆到 localStorage
   const [collapsedGroups, setCollapsedGroups] = React.useState<Record<string, boolean>>(() => {
     try {
@@ -102,6 +107,11 @@ export default function Sidebar(): JSX.Element {
       return {};
     }
   });
+
+  // 路由切换后自动收起移动端抽屉
+  React.useEffect(() => {
+    setMobileOpen(false);
+  }, [location.pathname]);
 
   const toggleGroup = (key: string): void => {
     setCollapsedGroups((prev) => {
@@ -113,7 +123,7 @@ export default function Sidebar(): JSX.Element {
 
   // 判断分组是否含当前激活项（用于自动展开）
   const isGroupActive = (items: NavItem[]): boolean =>
-    items.some((it) => window.location.pathname === it.path);
+    items.some((it) => location.pathname === it.path);
 
   const handleLogout = async (): Promise<void> => {
     try {
@@ -145,7 +155,8 @@ export default function Sidebar(): JSX.Element {
   const email = localStorage.getItem('email') || 'Admin';
   const username = localStorage.getItem('username') || '';
 
-  return (
+  // 侧栏主体：桌面端常驻 fixed；移动端由 CSS media query 隐藏、抽屉承载
+  const sidebarBody = (
     <aside style={{
       width: 'var(--sidebar-width)',
       background: 'var(--sidebar-bg)',
@@ -387,5 +398,25 @@ export default function Sidebar(): JSX.Element {
         </div>
       </div>
     </aside>
+  );
+
+  return (
+    <>
+      {/* 移动端汉堡按钮 */}
+      <button
+        type="button"
+        className="mobile-menu-btn"
+        onClick={() => setMobileOpen(true)}
+        aria-label={t('打开菜单')}
+      >
+        ☰
+      </button>
+      {/* 桌面端常驻侧栏（≤768px 由 CSS 隐藏） */}
+      <div className="sidebar-desktop">{sidebarBody}</div>
+      {/* 移动端抽屉 */}
+      <MobileDrawer open={mobileOpen} onClose={() => setMobileOpen(false)} ariaLabel={t('导航菜单')}>
+        {sidebarBody}
+      </MobileDrawer>
+    </>
   );
 }
