@@ -9,7 +9,6 @@ import type {
   Channel,
   ChannelUsage,
   ApiKey,
-  DashboardStats,
   RealtimeMetrics,
   LoginRequest,
   RegisterRequest,
@@ -499,23 +498,8 @@ export const api = {
     },
 
     /**
-     * 刷新Token
+     * 登出（后端无 /auth/refresh 端点，会话由 expires_at 控制有效期）
      */
-    async refreshToken(refreshToken: string): Promise<AuthResponse> {
-      const response = await fetch(`${API_BASE}/auth/refresh`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ refresh_token: refreshToken }),
-      });
-
-      if (!response.ok) {
-        throw handleApiError(response);
-      }
-
-      return response.json();
-    },
   },
 
   /**
@@ -763,19 +747,6 @@ export const api = {
    * Dashboard相关API
    */
   dashboard: {
-    /**
-     * 获取仪表盘统计数据
-     */
-    async getStats(): Promise<DashboardStats> {
-      const response = await fetch(`${API_BASE}/dashboard/stats`);
-
-      if (!response.ok) {
-        throw handleApiError(response);
-      }
-
-      return response.json();
-    },
-
     /**
      * 获取实时指标
      */

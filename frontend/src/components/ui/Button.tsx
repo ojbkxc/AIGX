@@ -6,6 +6,7 @@ export interface ButtonProps {
   variant?: 'primary' | 'outline' | 'secondary' | 'danger';
   size?: 'sm';
   className?: string;
+  style?: React.CSSProperties;
   type?: 'button' | 'submit' | 'reset';
   onClick?: React.MouseEventHandler<HTMLButtonElement>;
   disabled?: boolean;
@@ -27,6 +28,7 @@ export default function Button({
   variant = 'primary',
   size,
   className,
+  style,
   type = 'button',
   onClick,
   disabled,
@@ -36,6 +38,7 @@ export default function Button({
     <button
       type={type}
       className={cn(variants[variant] || variants.primary, size === 'sm' && 'btn-sm', className)}
+      style={style}
       onClick={onClick}
       disabled={disabled}
       {...rest}

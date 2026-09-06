@@ -1,4 +1,4 @@
-import { useState, useEffect, type MouseEvent, type FormEvent } from 'react';
+import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
