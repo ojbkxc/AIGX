@@ -334,7 +334,24 @@ jobs:
       - name: Create Release Package
         run: |
           mkdir -p release-package
-          find artifacts -type f -exec cp {} release-package/ \;
+          # artifacts/<artifact-name>/aigx|aigx.exe —— 按平台重命名，避免互相覆盖
+          for dir in artifacts/*/; do
+            name=$(basename "$dir")
+            case "$name" in
+              aigx-linux-amd64)    out="aigx-linux-amd64" ;;
+              aigx-linux-arm64)    out="aigx-linux-arm64" ;;
+              aigx-windows-amd64) out="aigx-windows-amd64.exe" ;;
+              aigx-macos-x86_64)   out="aigx-macos-x86_64" ;;
+              aigx-macos-arm64)    out="aigx-macos-arm64" ;;
+              *) out="$name" ;;
+            esac
+            if [ -f "$dir/aigx" ]; then
+              cp "$dir/aigx" "release-package/$out"
+            elif [ -f "$dir/aigx.exe" ]; then
+              cp "$dir/aigx.exe" "release-package/$out"
+            fi
+          done
+          ls -la release-package/
 
       - name: Generate Release Notes
         id: release_notes
@@ -395,10 +412,20 @@ jobs:
           cat release-notes.md >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
+      - name: Package release archives
+        run: |
+          cd release-package
+          for f in aigx-linux-amd64 aigx-linux-arm64 aigx-macos-x86_64 aigx-macos-arm64; do
+            [ -f "$f" ] && tar -czf "$f.tar.gz" "$f"
+          done
+          [ -f aigx-windows-amd64.exe ] && zip -q aigx-windows-amd64.zip aigx-windows-amd64.exe
+          rm -f aigx-linux-amd64 aigx-linux-arm64 aigx-macos-x86_64 aigx-macos-arm64 aigx-windows-amd64.exe || true
+          ls -la
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          files: artifacts/**
+          files: release-package/*
           body: ${{ steps.release_notes.outputs.notes }}
           draft: false
           prerelease: false
