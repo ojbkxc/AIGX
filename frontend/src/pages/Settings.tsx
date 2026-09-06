@@ -241,11 +241,11 @@ export default function Settings() {
     setError('');
     try {
       const res = (await api.getLimits()) as DataResponse<Partial<LimitsForm> & { threshold?: number }>;
-      const data = res.data || res;
+      const data = res.data ?? (res as unknown as Partial<LimitsForm> & { threshold?: number });
       setLimits({
         daily_limit: data.daily_limit ?? '',
         monthly_limit: data.monthly_limit ?? '',
-        threshold: data.threshold != null ? data.threshold * 100 : '',
+        threshold: data.threshold != null ? String(data.threshold * 100) : '',
         api_timeout_secs: data.api_timeout_secs ?? '',
         max_retries: data.max_retries ?? '',
       });

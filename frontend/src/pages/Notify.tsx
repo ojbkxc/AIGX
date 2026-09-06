@@ -513,7 +513,7 @@ export default function Notify() {
                   {rules.map((r, i) => (
                     <tr key={r.name}>
                       <td>{r.name}</td>
-                      <td style={{ fontSize: 11 }}>{(r.kind?.kind || '').replace(/_/g, ' ')}</td>
+                      <td style={{ fontSize: 11 }}>{(typeof r.kind === 'string' ? r.kind : r.kind?.kind || '').replace(/_/g, ' ')}</td>
                       <td>
                         <input
                           className="form-input"
