@@ -118,6 +118,7 @@ function trendVal(d: TrendData): number {
 // ── 图表组件 ──────────────────────────────────────────────
 
 function TrendChart({ data }: TrendChartProps): JSX.Element | null {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   if (!data || data.length === 0) return null;
   const maxVal = Math.max(...data.map(trendVal), 1);
   const w = 600;
@@ -132,8 +133,35 @@ function TrendChart({ data }: TrendChartProps): JSX.Element | null {
     return `${x},${y}`;
   });
 
+  const hover = hoverIdx != null ? data[hoverIdx] : null;
+  const hoverX = hoverIdx != null ? pad.left + (hoverIdx + 0.5) * (chartW / data.length) : 0;
+  const hoverY = hoverIdx != null ? pad.top + chartH - (trendVal(data[hoverIdx]) / maxVal) * chartH : 0;
+  const hoverVal = hover ? (hover.value ?? hover.cost ?? hover.tokens ?? 0) : 0;
+  // tooltip 框位置：靠近右缘时左移，避免溢出
+  const tipW = 110;
+  const tipX = hoverX > w - pad.right - tipW - 8 ? hoverX - tipW - 12 : hoverX + 12;
+  const tipY = Math.max(pad.top, hoverY - 44);
+
+  const onMove = (e: React.MouseEvent<SVGSVGElement>): void => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    // viewBox 600 宽映射到实际渲染宽度
+    const ratio = w / rect.width;
+    const x = (e.clientX - rect.left) * ratio;
+    if (x < pad.left || x > w - pad.right) {
+      setHoverIdx(null);
+      return;
+    }
+    const idx = Math.floor(((x - pad.left) / chartW) * data.length);
+    setHoverIdx(Math.max(0, Math.min(data.length - 1, idx)));
+  };
+
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', height: 'auto' }}>
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      style={{ width: '100%', height: 'auto', display: 'block' }}
+      onMouseMove={onMove}
+      onMouseLeave={() => setHoverIdx(null)}
+    >
       {[0, 0.25, 0.5, 0.75, 1].map((r) => {
         const y = pad.top + chartH * (1 - r);
         return (
@@ -171,18 +199,51 @@ function TrendChart({ data }: TrendChartProps): JSX.Element | null {
         const y = pad.top + chartH - (trendVal(d) / maxVal) * chartH;
         return (
           <g key={i}>
-            <circle cx={x} cy={y} r="3" fill="var(--accent-color)" stroke="var(--card-bg)" strokeWidth="2" />
+            <circle
+              cx={x}
+              cy={y}
+              r={hoverIdx === i ? 5 : 3}
+              fill="var(--accent-color)"
+              stroke="var(--card-bg)"
+              strokeWidth="2"
+              style={{ transition: 'r 0.15s ease' }}
+            />
             <text x={x} y={pad.top + chartH + 16} textAnchor="middle" fill="var(--text-muted)" fontSize="9">
               {d.label || d.date || ''}
             </text>
           </g>
         );
       })}
+
+      {/* 悬停参考线 + 数值提示 */}
+      {hoverIdx != null && (
+        <g pointerEvents="none">
+          <line
+            x1={hoverX}
+            y1={pad.top}
+            x2={hoverX}
+            y2={pad.top + chartH}
+            stroke="var(--accent-color)"
+            strokeWidth="1"
+            strokeDasharray="4 3"
+            opacity={0.6}
+          />
+          <rect x={tipX} y={tipY} width={tipW} height={40} rx="7" fill="var(--card-bg)" stroke="var(--border-color)" />
+          <text x={tipX + 10} y={tipY + 17} fill="var(--text-main)" fontSize="11" fontWeight="600">
+            {hover?.label || hover?.date || ''}
+          </text>
+          <text x={tipX + 10} y={tipY + 32} fill="var(--text-muted)" fontSize="10">
+            {fmtMoney(hoverVal)}
+          </text>
+        </g>
+      )}
     </svg>
   );
 }
 
 function PieChart({ data }: PieChartProps): JSX.Element | null {
+  const [hoverSlice, setHoverSlice] = useState<number | null>(null);
+  const { t } = useTranslation();
   if (!data || data.length === 0) return null;
   const raw = data.map((d) => ({
     label: d.label || d.model || d.name || '—',
@@ -231,8 +292,33 @@ function PieChart({ data }: PieChartProps): JSX.Element | null {
     <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
       <svg viewBox="0 0 240 240" style={{ width: 240, height: 240, flexShrink: 0 }}>
         {slices.map((s, i) => (
-          <path key={i} d={s.path} fill={s.color} stroke="var(--card-bg)" strokeWidth="2" />
+          <path
+            key={i}
+            d={s.path}
+            fill={s.color}
+            stroke="var(--card-bg)"
+            strokeWidth="2"
+            opacity={hoverSlice === null || hoverSlice === i ? 1 : 0.35}
+            style={{ transition: 'opacity 0.2s ease', cursor: 'pointer' }}
+            onMouseEnter={() => setHoverSlice(i)}
+            onMouseLeave={() => setHoverSlice(null)}
+          />
         ))}
+        {/* 中心统计：悬停显示该扇区数值，默认显示总量 */}
+        {hoverSlice != null ? (
+          <text x={cx} y={cy - 2} textAnchor="middle" fill="var(--text-main)" fontSize="13" fontWeight="700">
+            {slices[hoverSlice].pct.toFixed(1)}%
+          </text>
+        ) : (
+          <text x={cx} y={cy - 2} textAnchor="middle" fill="var(--text-main)" fontSize="16" fontWeight="700">
+            {fmtLimit(total)}
+          </text>
+        )}
+        <text x={cx} y={cy + 16} textAnchor="middle" fill="var(--text-muted)" fontSize="10">
+          {hoverSlice != null ? slices[hoverSlice].label.length > 12
+            ? slices[hoverSlice].label.slice(0, 12) + '…'
+            : slices[hoverSlice].label : t('总量')}
+        </text>
       </svg>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1, minWidth: 200 }}>
         {slices.map((s, i) => (

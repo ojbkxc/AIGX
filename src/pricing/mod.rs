@@ -148,9 +148,8 @@ const TOOL_PRICES_KEY: &str = "tool_price_setting.prices";
 
 /// 内置默认定价目录（单位：每 1k token 美元，USD）。
 ///
-/// 与 `model::default_model_map` 的默认模型对齐，价格参照 Cloudflare Workers AI
-/// 公开价目（`@cf/` 免费额度模型按 0 计费；付费模型取近似官方价）。
-/// 首次启动时若目录为空则自动种子（`ensure_default_prices`）。
+/// 仅作首次启动的种子数据，方便开箱即有参考价；管理员可在「定价倍率」
+/// 页面任意增删改。价格为常见模型的近似公开价，非权威数据。
 fn default_prices() -> Vec<ModelPrice> {
     let p = |m: &str, i: f64, o: f64| ModelPrice::new(m, i, o);
     let c = |m: &str, price: f64| {

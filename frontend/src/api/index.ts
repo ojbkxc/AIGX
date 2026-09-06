@@ -216,13 +216,23 @@ export const api = {
   logout: (): Promise<any> => request('POST', `${API_BASE}/auth/logout`),
 
   // Models（网关可用模型列表，用于对话调试模型下拉）
-  // 走管理面 /api/settings 的 mappings keys（管理 token 可访问），
-  // 不再用 /v1/models —— 那是数据面接口需要 sk-xxx 密钥，管理 token 会 401，
-  // 触发全局 401 处理清 localStorage 并跳转登录页（已登录用户被误踢）。
+  // 通用网关语义：模型来自渠道声明的 models 聚合（管理面 /api/channels，
+  // 管理 token 可访问）。不用 /v1/models（数据面需 sk-xxx，会 401 误踢登录），
+  // 也不用 /api/settings 的 mappings keys（映射只是可选别名，不再是模型主数据源）。
   listModels: async (): Promise<any> => {
-    const res = await request('GET', `${API_BASE}/settings`);
-    const mappings = res?.data?.mappings || {};
-    const ids = Object.keys(mappings);
+    const res = await request('GET', `${API_BASE}/channels`);
+    const channels = res?.data || [];
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    for (const ch of channels) {
+      if (ch.status === 'disabled') continue;
+      for (const m of ch.models || []) {
+        if (m && !seen.has(m)) {
+          seen.add(m);
+          ids.push(m);
+        }
+      }
+    }
     return { data: ids.map((id) => ({ id, object: 'model', owned_by: 'aigx' })) };
   },
 

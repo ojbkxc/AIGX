@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
+import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
+import ChatDebugger from '../components/ChatDebugger';
 import './Channels.css';
 
 interface ChannelItem {
@@ -33,26 +34,6 @@ interface ChannelFormState {
   models: string;
   account_id: string;
 }
-
-interface ChatMsg {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-interface TestChatStreamChunk {
-  content?: string;
-}
-
-interface TestChatResponse {
-  stream?: TestChatStreamChunk[];
-  data?: { content?: string; error?: string };
-}
-
-// 支持的对话协议选项 — 与后端 ChatTester 对齐
-const CHAT_PROTOCOLS = [
-  { value: 'openai', labelKey: 'OpenAI /v1/chat/completions' },
-  { value: 'anthropic', labelKey: 'Anthropic /v1/messages' },
-];
 
 // 渠道类型选项 — 与后端 ChannelType 枚举对齐（snake_case）
 const CHANNEL_TYPES = [
@@ -96,13 +77,6 @@ export default function Channels(): JSX.Element {
   // ── 对话调试器状态 ──
   const [showChat, setShowChat] = useState(false);
   const [chatChannel, setChatChannel] = useState<ChannelItem | null>(null);
-  const [chatProtocol, setChatProtocol] = useState('openai');
-  const [chatModel, setChatModel] = useState('glm-4.7-flash');
-  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
-  const [chatInput, setChatInput] = useState('');
-  const [chatBusy, setChatBusy] = useState(false);
-  const [chatModels, setChatModels] = useState<string[]>([]);
-  const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   function defaultForm(): ChannelFormState {
     return {

@@ -2994,21 +2994,39 @@ pub async fn handle_list_models(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _key_id = verify_api_key(&state, &headers)?;
 
-    let mappings = state.model_mapper.all_mappings();
+    // 通用网关语义：模型列表 = 所有启用渠道声明/发现的模型 ∪ 别名映射的 key。
+    // 渠道 models 是主数据源（管理员在渠道上配置），映射只是可选别名。
     let now = chrono::Utc::now().timestamp();
+    let mut seen = std::collections::HashSet::new();
+    let mut model_list: Vec<Value> = Vec::new();
 
-    let model_list: Vec<Value> = mappings
-        .into_iter()
-        .map(|(name, cf_model)| {
-            let owned_by = crate::proxy::get_model_owned_by(&cf_model);
-            serde_json::json!({
+    for ch in state.channel_store.list() {
+        if !ch.is_enabled() {
+            continue;
+        }
+        for m in ch.models.iter().chain(ch.discovered_models.iter()) {
+            if m.is_empty() || !seen.insert(m.clone()) {
+                continue;
+            }
+            model_list.push(serde_json::json!({
+                "id": m,
+                "object": "model",
+                "created": now,
+                "owned_by": "aigx"
+            }));
+        }
+    }
+    // 别名映射的对外名也暴露（供客户端按别名调用）
+    for name in state.model_mapper.all_mappings().keys() {
+        if seen.insert(name.clone()) {
+            model_list.push(serde_json::json!({
                 "id": name,
                 "object": "model",
                 "created": now,
-                "owned_by": owned_by
-            })
-        })
-        .collect();
+                "owned_by": "aigx"
+            }));
+        }
+    }
 
     Ok(Json(serde_json::json!({
         "object": "list",
@@ -3024,16 +3042,20 @@ pub async fn handle_get_model(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _key_id = verify_api_key(&state, &headers)?;
 
-    let mappings = state.model_mapper.all_mappings();
-    if mappings.contains_key(&model) {
+    // 通用语义：渠道声明或映射可解析即认为存在
+    let in_channels = state.channel_store.list().iter().any(|ch| {
+        ch.is_enabled()
+            && (ch.models.iter().any(|m| m == &model)
+                || ch.discovered_models.iter().any(|m| m == &model))
+    });
+    let mapped = state.model_mapper.all_mappings().contains_key(&model);
+    if in_channels || mapped {
         let now = chrono::Utc::now().timestamp();
-        let cf_model = state.model_mapper.resolve(&model);
-        let owned_by = crate::proxy::get_model_owned_by(&cf_model);
         Ok(Json(serde_json::json!({
             "id": model,
             "object": "model",
             "created": now,
-            "owned_by": owned_by,
+            "owned_by": "aigx",
             "permission": []
         })))
     } else {
