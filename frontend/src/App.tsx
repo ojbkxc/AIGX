@@ -2,6 +2,7 @@ import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import ErrorBoundary from './components/ErrorBoundary';
+import RouteErrorPage from './components/RouteErrorPage';
 import { ToastProvider } from './components/Toast';
 import Login from './pages/Login';
 import Register from './pages/Register';
@@ -36,6 +37,7 @@ interface ProtectedLayoutProps {
 }
 
 function ProtectedLayout({ children }: ProtectedLayoutProps) {
+  const location = window.location.pathname;
   if (!isAuthenticated()) {
     return <Navigate to="/login" replace />;
   }
@@ -46,8 +48,8 @@ function ProtectedLayout({ children }: ProtectedLayoutProps) {
         <div className="bg-orb bg-orb-2"></div>
       </div>
       <Sidebar />
-      <main className="main-content">
-        {children}
+      <main className="main-content" key={location}>
+        <div className="page-fade-enter">{children}</div>
       </main>
     </div>
   );
@@ -91,6 +93,7 @@ export default function App(): JSX.Element {
           <Route path="/network-layer" element={<ProtectedLayout><NetworkLayer /></ProtectedLayout>} />
           <Route path="/settings" element={<ProtectedLayout><Settings /></ProtectedLayout>} />
           <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<RouteErrorPage />} />
         </Routes>
       </ToastProvider>
     </ErrorBoundary>

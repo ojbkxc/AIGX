@@ -44,7 +44,16 @@ async function request(method: string, path: string, body: unknown = null): Prom
   if (body !== null) {
     options.body = JSON.stringify(body);
   }
-  const res = await fetch(path, options);
+  let res: Response;
+  try {
+    res = await fetch(path, options);
+  } catch (networkErr) {
+    // 请求层 L1：网络中断/DNS 失败 → 统一可读错误（不上抛 TypeError 到页面组件）
+    if (networkErr instanceof DOMException && networkErr.name === 'AbortError') {
+      throw networkErr;
+    }
+    throw new Error('网络连接失败，请检查网络后重试');
+  }
   if (res.status === 401) {
     try {
       localStorage.removeItem('token');
@@ -298,7 +307,10 @@ export const api = {
             const parsed: any = JSON.parse(buf);
             const content =
               (parsed.choices && parsed.choices[0] && parsed.choices[0].delta &&
-                (parsed.choices[0].delta.content || parsed.choices[0].delta.text)) ||
+                (parsed.choices[0].delta.content ||
+                  parsed.choices[0].delta.text ||
+                  parsed.choices[0].delta.reasoning_content ||
+                  parsed.choices[0].delta.reasoning)) ||
               (parsed.delta && parsed.delta.text) ||
               (parsed.content && parsed.content[0] && parsed.content[0].text) ||
               '';
