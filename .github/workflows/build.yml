@@ -318,6 +318,8 @@ jobs:
     needs: [build-linux-amd64, build-linux-arm64, build-windows-amd64, build-macos-intel, build-macos-arm64]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
 
     steps:
       - name: Download all artifacts
