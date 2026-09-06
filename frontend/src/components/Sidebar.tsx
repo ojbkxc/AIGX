@@ -6,7 +6,7 @@ import { isAdmin } from '../lib/utils';
 import {
   LayoutDashboard, Satellite, KeyRound, ArrowLeftRight, CircleDollarSign,
   Users, Tags, Wallet, Receipt, Ticket, ScrollText, CreditCard, Bell,
-  Settings, Play, Shield, Globe, Network, Zap, ChevronDown, Menu,
+  Settings, Play, Shield, Globe, Network, Zap, ChevronDown, Menu, Layers,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
