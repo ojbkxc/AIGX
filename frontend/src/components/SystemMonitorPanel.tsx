@@ -4,28 +4,6 @@ import type { Metrics, NetworkStatusRaw } from '../types/network';
 import './SystemMonitorPanel.css';
 import { Signal, Activity, Server, Database, Cloud, Zap } from 'lucide-react';
 
-/** 将后端网络层状态（snake_case）映射为面板指标 */
-function toMetrics(s: NetworkStatusRaw): Metrics {
-  const cp = s.connection_pool || { active_connections: 0, total_connections: 0, idle_connections: 0, avg_latency_ms: 0 };
-  const ap = s.account_pool || { total_requests: 0, failed_requests: 0 };
-  const totalReq = ap.total_requests || 0;
-  const failedReq = ap.failed_requests || 0;
-  return {
-    cpuUsage: cp.total_connections ? (cp.active_connections / cp.total_connections) * 100 : 0,
-    memoryUsage: cp.total_connections ? ((cp.total_connections - (cp.idle_connections || 0)) / cp.total_connections) * 100 : 0,
-    diskUsage: 0,
-    networkTx: 0,
-    networkRx: 0,
-    activeConnections: cp.active_connections || 0,
-    throughput: totalReq,
-    errorRate: totalReq ? (failedReq / totalReq) * 100 : 0,
-    successRate: totalReq ? ((totalReq - failedReq) / totalReq) * 100 : 100,
-    avgLatency: cp.avg_latency_ms || 0,
-    currentLoad: cp.active_connections || 0,
-    uptime: s.last_check_at || 0,
-  };
-}
-
 interface MetricCardProps {
   title: string;
   value: string | number;
@@ -382,7 +360,6 @@ function toMetrics(raw: NetworkStatusRaw): Metrics {
 }
 
 function formatDuration(seconds: number | null | undefined): string {
-  if (seconds == null) return '—';
   if (seconds === null || seconds === undefined || isNaN(seconds)) {
     return '0秒';
   }
