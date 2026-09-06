@@ -184,14 +184,26 @@ pub async fn handle_update_oauth_config(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut config = verify_admin(&state, &headers).await?;
     if let Some(g) = body.github {
-        if let Some(v) = g.client_id { config.github_oauth.client_id = v; }
-        if let Some(v) = g.client_secret { config.github_oauth.client_secret = v; }
-        if let Some(v) = g.redirect_uri { config.github_oauth.redirect_uri = v; }
+        if let Some(v) = g.client_id {
+            config.github_oauth.client_id = v;
+        }
+        if let Some(v) = g.client_secret {
+            config.github_oauth.client_secret = v;
+        }
+        if let Some(v) = g.redirect_uri {
+            config.github_oauth.redirect_uri = v;
+        }
     }
     if let Some(g) = body.google {
-        if let Some(v) = g.client_id { config.google_oauth.client_id = v; }
-        if let Some(v) = g.client_secret { config.google_oauth.client_secret = v; }
-        if let Some(v) = g.redirect_uri { config.google_oauth.redirect_uri = v; }
+        if let Some(v) = g.client_id {
+            config.google_oauth.client_id = v;
+        }
+        if let Some(v) = g.client_secret {
+            config.google_oauth.client_secret = v;
+        }
+        if let Some(v) = g.redirect_uri {
+            config.google_oauth.redirect_uri = v;
+        }
     }
     match state.config_manager.update(config).await {
         Ok(_) => {

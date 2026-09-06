@@ -31,7 +31,7 @@ const navItems: NavItem[] = [
   { path: '/', labelKey: '仪表盘', icon: LayoutDashboard, end: true },
   { path: '/playground', labelKey: 'Playground', icon: Play },
   { path: '/channels', labelKey: '渠道管理', icon: Satellite, adminOnly: true },
-  { path: '/keys', labelKey: 'API 密钥', icon: KeyRound, adminOnly: true },
+  { path: '/keys', labelKey: 'API 密钥', icon: KeyRound },
   { path: '/mappings', labelKey: '模型映射', icon: ArrowLeftRight, adminOnly: true },
   { path: '/logs', labelKey: '日志审计', icon: ScrollText, adminOnly: true },
   { path: '/security', labelKey: '安全监控', icon: Shield, adminOnly: true },

@@ -453,8 +453,14 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     let admin_routes = Router::new()
         // Auth handlers (来自 api::admin::auth)
         .route("/api/auth/login", post(api::admin::handle_login))
-        .route("/api/auth/login/send-code", post(api::admin::handle_login_send_code))
-        .route("/api/auth/login/code", post(api::admin::handle_login_with_code))
+        .route(
+            "/api/auth/login/send-code",
+            post(api::admin::handle_login_send_code),
+        )
+        .route(
+            "/api/auth/login/code",
+            post(api::admin::handle_login_with_code),
+        )
         .route("/api/auth/register", post(api::admin::handle_register))
         .route(
             "/api/auth/github",

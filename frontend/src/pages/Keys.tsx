@@ -68,6 +68,8 @@ export default function Keys(): JSX.Element {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   const [showModal, setShowModal] = useState(false);
+  // 明文 key 展开状态（普通用户列表自带 plain_key；管理员经创建/轮换弹窗复制）
+  const [revealedKeys, setRevealedKeys] = useState<Record<string | number, boolean>>({});
   const [editing, setEditing] = useState<TokenItem | null>(null);
   const [form, setForm] = useState<KeyFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
@@ -321,6 +323,7 @@ export default function Keys(): JSX.Element {
               <thead>
                 <tr>
                   <th>{t('名称')}</th>
+                  <th>{t('密钥')}</th>
                   <th>{t('分组')}</th>
                   <th>{t('模型白名单')}</th>
                   <th>{t('额度')}</th>
@@ -337,6 +340,45 @@ export default function Keys(): JSX.Element {
                   return (
                     <tr key={tk.id}>
                       <td><strong>{tk.name}</strong></td>
+                      <td style={{ fontSize: 12 }}>
+                        {tk.plain_key ? (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                            <code style={{
+                              fontSize: 11,
+                              maxWidth: 220,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              display: 'inline-block',
+                              verticalAlign: 'middle',
+                            }}>
+                              {revealedKeys[tk.id] ? tk.plain_key : tk.key || '••••••••••••'}
+                            </code>
+                            <button
+                              type="button"
+                              className="btn btn-outline btn-sm"
+                              title={revealedKeys[tk.id] ? t('隐藏密钥') : t('查看密钥')}
+                              onClick={() => setRevealedKeys((prev) => ({ ...prev, [tk.id]: !prev[tk.id] }))}
+                              style={{ padding: '2px 6px', flexShrink: 0 }}
+                            >
+                              {revealedKeys[tk.id] ? t('隐藏') : t('查看')}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-outline btn-sm"
+                              title={t('复制密钥')}
+                              onClick={() => copyToClipboard(tk.plain_key || '')}
+                              style={{ padding: '2px 6px', flexShrink: 0 }}
+                            >
+                              {t('复制')}
+                            </button>
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)' }}>
+                            {tk.key || '••••••••••••'}
+                          </span>
+                        )}
+                      </td>
                       <td>{tk.group || 'default'}</td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                         {Array.isArray(tk.allowed_models) && tk.allowed_models.length > 0

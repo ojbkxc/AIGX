@@ -27,6 +27,11 @@ use super::super::openai::AppState;
 /// 从请求头提取客户端 IP（复用 `api::common::extract_client_ip`）。
 pub use super::super::common::extract_client_ip;
 
+/// 从验证结果判断是否管理员
+pub fn is_admin_user(user: &User) -> bool {
+    user.is_admin()
+}
+
 /// 创建错误响应
 pub fn error_response(message: &str, status: StatusCode) -> (StatusCode, Json<Value>) {
     (

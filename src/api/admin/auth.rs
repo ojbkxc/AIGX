@@ -15,8 +15,8 @@ use super::super::auth::SessionStore;
 use super::super::openai::AppState;
 use crate::user::{self, hash_password, Role};
 
-use uuid::Uuid;
 use rand::Rng;
+use uuid::Uuid;
 
 /// 登录请求
 #[derive(Debug, Deserialize)]
@@ -882,7 +882,10 @@ pub async fn handle_login_with_code(
     let email = body.email.trim().to_lowercase();
     let code = body.code.trim();
     if email.is_empty() || code.is_empty() {
-        return Err(error_response("邮箱和验证码不能为空", StatusCode::BAD_REQUEST));
+        return Err(error_response(
+            "邮箱和验证码不能为空",
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
