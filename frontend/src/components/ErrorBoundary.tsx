@@ -1,21 +1,31 @@
 import React from 'react';
-import { withTranslation } from 'react-i18next';
+import { withTranslation, type WithTranslation } from 'react-i18next';
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+  info: { componentStack?: string } | null;
+}
+
+type ErrorBoundaryProps = WithTranslation & {
+  children?: React.ReactNode;
+};
 
 /**
  * ErrorBoundary — 捕获子树渲染异常，展示友好错误页。
  * 保持 cf-ai-gw 玻璃拟态风格，复用 App.css 中的 CSS 变量。
  */
-class ErrorBoundary extends React.Component {
-  constructor(props) {
+class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
     super(props);
     this.state = { hasError: false, error: null, info: null };
   }
 
-  static getDerivedStateFromError(error) {
-    return { hasError: true, error };
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error, info: null };
   }
 
-  componentDidCatch(error, info) {
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
     // 仅在控制台留痕，不外发
     // eslint-disable-next-line no-console
     console.error('[ErrorBoundary]', error, info);
