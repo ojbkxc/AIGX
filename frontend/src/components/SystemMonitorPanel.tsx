@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import * as networkApi from '../api/network';
-import type { Metrics } from '../types/network';
+import type { Metrics, NetworkStatusRaw } from '../types/network';
 import './SystemMonitorPanel.css';
 import { Signal, Activity, Server, Database, Cloud, Zap } from 'lucide-react';
 
@@ -57,7 +57,7 @@ interface StatusIndicatorProps {
 }
 
 function StatusIndicator({ status }: StatusIndicatorProps) {
-  const styles = {
+  const styles: Record<string, { bg: string; text: string; pulse: string }> = {
     online: { bg: 'bg-green-500', text: 'text-green-500', pulse: 'pulse-green' },
     offline: { bg: 'bg-gray-500', text: 'text-gray-500', pulse: '' },
     syncing: { bg: 'bg-yellow-500', text: 'text-yellow-500', pulse: 'pulse-yellow' },
@@ -88,7 +88,7 @@ export default function SystemMonitorPanel() {
     try {
       setLoading(true);
       const data = await networkApi.getNetworkMetrics();
-      setMetrics(toMetrics((data?.data ?? data) as NetworkStatusRaw));
+      setMetrics(toMetrics(data));
     } catch (error) {
       console.error('Failed to fetch metrics:', error);
     } finally {
@@ -335,6 +335,9 @@ export default function SystemMonitorPanel() {
 }
 
 function formatDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || isNaN(seconds)) {
+    return '0秒';
+  }
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);

@@ -4,7 +4,7 @@ import type {
   NetworkStatus,
   NetworkConfigRequest,
   AccountConfigRequest,
-  Metrics,
+  NetworkStatusRaw,
 } from '../types/network';
 
 const BASE_URL = '';
@@ -79,15 +79,15 @@ export async function removeNetworkAccount(accountId: string | number): Promise<
   return request('DELETE', `/api/network/accounts/${accountId}`);
 }
 
-// 获取网络层指标（聚合自 /api/network/status）
-export async function getNetworkMetrics(): Promise<Metrics> {
+// 获取网络层原始状态（供监控面板聚合换算为指标）
+export async function getNetworkMetrics(): Promise<NetworkStatusRaw> {
   const res = await fetch(`${BASE_URL}/api/network/status`, {
     headers: authHeaders(),
   });
   if (res.status === 401) {
     throw new Error('Unauthorized');
   }
-  return res.json() as Promise<Metrics>;
+  return res.json() as Promise<NetworkStatusRaw>;
 }
 
 // 保持与旧 import { api as networkApi } 用法兼容的聚合对象

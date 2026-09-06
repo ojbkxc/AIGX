@@ -130,25 +130,6 @@ export interface DistributedNode {
   isLeader: boolean;
 }
 
-/** 系统监控指标（SystemMonitorPanel 消费） */
-export interface Metrics {
-  cpuUsage: number;
-  memoryUsage: number;
-  diskUsage: number;
-  networkTx: number;
-  networkRx: number;
-  activeConnections: number;
-  totalRequests: number;
-  failedRequests: number;
-  successRate: number;
-  avgLatency: number;
-  throughput: number;
-  errorRate: number;
-  uptime: number;
-  startTime: number;
-  currentLoad?: number;
-}
-
 /** 自动扩缩容配置 */
 export interface ScalingConfig {
   minNodes: number;
