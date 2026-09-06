@@ -76,13 +76,16 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
     return { channel, user, token };
   }, [q, channels, users, tokens]);
 
-  type Row = { kind: 'page'; path: string; title: string; sub: string } | { kind: 'entity'; path: string; title: string; sub: string };
+  type EntityKind = 'channel' | 'user' | 'token';
+  type Row =
+    | { kind: 'page'; path: string; title: string; sub: string }
+    | { kind: 'entity'; entity: EntityKind; path: string; title: string; sub: string };
   const rows: Row[] = useMemo(() => {
     const out: Row[] = [];
     for (const p of pageHits) out.push({ kind: 'page', path: p.path, title: t(p.labelKey), sub: t('页面') });
-    for (const c of hits.channel.slice(0, 8)) out.push({ kind: 'entity', path: '/channels', title: c.name || '—', sub: c.base_url || '渠道' });
-    for (const u of hits.user.slice(0, 8)) out.push({ kind: 'entity', path: '/users', title: u.email || u.username || '—', sub: u.role || '用户' });
-    for (const k of hits.token.slice(0, 8)) out.push({ kind: 'entity', path: '/keys', title: k.name || '—', sub: k.group || '令牌' });
+    for (const c of hits.channel.slice(0, 8)) out.push({ kind: 'entity', entity: 'channel', path: '/channels', title: c.name || '—', sub: c.base_url || '渠道' });
+    for (const u of hits.user.slice(0, 8)) out.push({ kind: 'entity', entity: 'user', path: '/users', title: u.email || u.username || '—', sub: u.role || '用户' });
+    for (const k of hits.token.slice(0, 8)) out.push({ kind: 'entity', entity: 'token', path: '/keys', title: k.name || '—', sub: k.group || '令牌' });
     return out;
   }, [pageHits, hits, t]);
 
@@ -152,9 +155,9 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
                 >
                   {row.kind === 'page' ? (
                     <FileText size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
-                  ) : row.sub === '渠道' ? (
+                  ) : row.entity === 'channel' ? (
                     <Satellite size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
-                  ) : row.sub === '用户' ? (
+                  ) : row.entity === 'user' ? (
                     <Users size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                   ) : (
                     <KeyRound size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
