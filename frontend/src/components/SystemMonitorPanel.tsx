@@ -334,31 +334,6 @@ export default function SystemMonitorPanel() {
   );
 }
 
-function toMetrics(raw: NetworkStatusRaw): Metrics {
-  const connection = raw.connection_pool;
-  const account = raw.account_pool;
-  const session = raw.session_pool;
-  const totalRequests = connection.successful_requests + connection.failed_requests;
-  const errorRate = totalRequests > 0 ? connection.failed_requests / totalRequests : 0;
-  const pct = (part: number, whole: number): number =>
-    whole > 0 ? Math.min(100, Math.round((part / whole) * 100)) : 0;
-
-  return {
-    cpuUsage: pct(connection.active_connections, connection.total_connections),
-    memoryUsage: pct(account.busy_accounts + account.error_accounts, account.total_accounts),
-    diskUsage: pct(session.active_sessions, session.total_sessions),
-    networkTx: connection.successful_requests,
-    networkRx: connection.failed_requests,
-    activeConnections: connection.active_connections,
-    throughput: totalRequests,
-    errorRate: Number(errorRate.toFixed(4)),
-    successRate: Number((1 - errorRate).toFixed(4)),
-    avgLatency: connection.avg_latency_ms,
-    currentLoad: pct(account.busy_accounts, account.total_accounts),
-    uptime: 0,
-  };
-}
-
 function formatDuration(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined || isNaN(seconds)) {
     return '0秒';
