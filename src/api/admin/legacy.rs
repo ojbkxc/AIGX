@@ -7,6 +7,7 @@
 //! 后续重构（如 network 层接入）可按资源域把这些 handler 逐步
 //! 迁入对应子模块，本文件仅保留过渡结构。
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
@@ -2651,16 +2652,20 @@ pub async fn handle_channel_chat_test(
                     .into_response();
                 }
                 if stream {
-                    // 流式：SSE 原样透传（将字节块包装为 sse::Event 事件）
-                    let body = resp.bytes_stream();
-                    let sse = axum::response::sse::Sse::new(body.map(|chunk| {
-                        match chunk {
-                            Ok(bytes) => Ok(axum::response::sse::Event::default()
-                                .data(String::from_utf8_lossy(&bytes))),
-                            Err(e) => Err(axum::Error::new(format!("upstream stream error: {e}"))),
+                    // 流式：上游 SSE 字节流原样透传。
+                    // 不能再包一层 Sse::Event —— 那会产出 data: data: {...}
+                    // 嵌套帧，前端按 OpenAI SSE 解析时全部丢弃，表现为无回复。
+                    let upstream_headers = [
+                        ("Content-Type", "text/event-stream; charset=utf-8"),
+                        ("Cache-Control", "no-cache"),
+                    ];
+                    let mut response = Body::from_stream(resp.bytes_stream()).into_response();
+                    for (name, value) in upstream_headers {
+                        if let Ok(value) = axum::http::HeaderValue::from_str(value) {
+                            response.headers_mut().insert(name, value);
                         }
-                    }));
-                    sse.into_response()
+                    }
+                    response
                 } else {
                     match resp.json::<Value>().await {
                         Ok(json) => {
@@ -2718,14 +2723,17 @@ pub async fn handle_channel_chat_test(
                 .into_response();
             }
             if stream {
-                let body = resp.bytes_stream();
-                let sse = axum::response::sse::Sse::new(body.map(|chunk| match chunk {
-                    Ok(bytes) => Ok(
-                        axum::response::sse::Event::default().data(String::from_utf8_lossy(&bytes)),
-                    ),
-                    Err(e) => Err(axum::Error::new(format!("upstream stream error: {e}"))),
-                }));
-                sse.into_response()
+                let upstream_headers = [
+                    ("Content-Type", "text/event-stream; charset=utf-8"),
+                    ("Cache-Control", "no-cache"),
+                ];
+                let mut response = Body::from_stream(resp.bytes_stream()).into_response();
+                for (name, value) in upstream_headers {
+                    if let Ok(value) = axum::http::HeaderValue::from_str(value) {
+                        response.headers_mut().insert(name, value);
+                    }
+                }
+                response
             } else {
                 match resp.json::<Value>().await {
                     Ok(json) => {

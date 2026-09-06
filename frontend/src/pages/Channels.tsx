@@ -278,11 +278,16 @@ export default function Channels(): JSX.Element {
     setChatModels([]);
     api.listModels()
       .then((res) => {
-        const list = res?.data || res || [];
-        if (Array.isArray(list) && list.length) {
+        const raw = Array.isArray(res) ? res : res?.data;
+        const list: string[] = Array.isArray(raw)
+          ? (raw as Array<string | { id?: string }>)
+            .map((m) => (typeof m === 'string' ? m : m.id))
+            .filter((v): v is string => Boolean(v))
+          : [];
+        if (list.length) {
           setChatModels(list);
           // 若渠道 models 为空，用网关模型列表的第一个作为默认
-          if (!models.length && chatModel === 'glm-4.7-flash') {
+          if (!models.length) {
             setChatModel(list[0]);
           }
         }
@@ -327,7 +332,7 @@ export default function Channels(): JSX.Element {
       const res = (await api.testChannelChat({
         channel_id: ch.id,
         protocol: chatProtocol,
-        model: chatModel,
+        model: String(chatModel || '').trim(),
         message: text,
         history,
         stream: true,
