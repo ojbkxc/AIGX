@@ -791,7 +791,7 @@ pub struct LoginWithCodeRequest {
 /// - SMTP 已配置时发送真实邮件（正文注明 5 分钟有效期）；
 /// - 未配置 SMTP 时（内网/开发环境）直接返回验证码，便于调试，
 ///   同时记录 warning 日志提示生产环境必须配置 SMTP。
-/// 用户不存在时仍返回成功（防邮箱枚举），但不生成验证码。
+///   用户不存在时仍返回成功（防邮箱枚举），但不生成验证码。
 pub async fn handle_login_send_code(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -843,7 +843,7 @@ pub async fn handle_login_send_code(
         );
         match state
             .notify_service
-            .send_email(&user.email, &subject, &body)
+            .send_email(&user.email, subject, &body)
             .await
         {
             Ok(_) => {
