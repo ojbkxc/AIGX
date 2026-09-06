@@ -5,6 +5,49 @@ import { useToast } from '../components/Toast';
 import ConfirmDialog from '../components/ConfirmDialog';
 import './Channels.css';
 
+interface ChannelItem {
+  id: string | number;
+  name: string;
+  channel_type: string;
+  base_url: string;
+  api_key: string;
+  priority: number;
+  weight: number;
+  status: string;
+  models: string[];
+  account_id: string;
+  last_error?: string | null;
+  last_used_at?: number | null;
+  created_at?: number;
+  updated_at?: number;
+}
+
+interface ChannelFormState {
+  name: string;
+  channel_type: string;
+  base_url: string;
+  api_key: string;
+  priority: number | string;
+  weight: number | string;
+  status: string;
+  models: string;
+  account_id: string;
+}
+
+interface ChatMsg {
+  role: string;
+  content: string;
+}
+
+interface TestChatStreamChunk {
+  content?: string;
+}
+
+interface TestChatResponse {
+  stream?: TestChatStreamChunk[];
+  data?: { content?: string; error?: string };
+}
+
 // 支持的对话协议选项 — 与后端 ChatTester 对齐
 const CHAT_PROTOCOLS = [
   { value: 'openai', labelKey: 'OpenAI /v1/chat/completions' },
@@ -32,35 +75,36 @@ const AUTH_HINT = {
   zai: '鉴权方式：Bearer token（在 API Key 字段填入智谱 API Key）',
 };
 
-export default function Channels() {
-  const [channels, setChannels] = useState([]);
+export default function Channels(): JSX.Element {
+  const [channels, setChannels] = useState<ChannelItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const addToast = useToast();
   const { t } = useTranslation();
 
   const [showModal, setShowModal] = useState(false);
-  const [editChannel, setEditChannel] = useState(null);
-  const [form, setForm] = useState(defaultForm());
+  const [editChannel, setEditChannel] = useState<ChannelItem | null>(null);
+  const [form, setForm] = useState<ChannelFormState>(defaultForm());
   const [saving, setSaving] = useState(false);
-  const [testingId, setTestingId] = useState(null);
+  const [testingId, setTestingId] = useState<string | number | null>(null);
   const [fetchingModels, setFetchingModels] = useState(false);
 
   // ── 确认弹窗状态 ──
-  const [confirmState, setConfirmState] = useState(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [confirmState, setConfirmState] = useState<any>(null);
 
   // ── 对话调试器状态 ──
   const [showChat, setShowChat] = useState(false);
-  const [chatChannel, setChatChannel] = useState(null);
+  const [chatChannel, setChatChannel] = useState<ChannelItem | null>(null);
   const [chatProtocol, setChatProtocol] = useState('openai');
   const [chatModel, setChatModel] = useState('glm-4.7-flash');
-  const [chatMessages, setChatMessages] = useState([]);
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
-  const [chatModels, setChatModels] = useState([]);
-  const chatEndRef = React.useRef(null);
+  const [chatModels, setChatModels] = useState<string[]>([]);
+  const chatEndRef = React.useRef<HTMLDivElement | null>(null);
 
-  function defaultForm() {
+  function defaultForm(): ChannelFormState {
     return {
       name: '',
       channel_type: 'openai_compatible',
@@ -76,26 +120,26 @@ export default function Channels() {
 
   useEffect(() => { loadChannels(); }, []);
 
-  const loadChannels = async () => {
+  const loadChannels = async (): Promise<void> => {
     setLoading(true);
     setError('');
     try {
       const res = await api.listChannels();
       setChannels(res.data || []);
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
   };
 
-  const openAdd = () => {
+  const openAdd = (): void => {
     setEditChannel(null);
     setForm(defaultForm());
     setShowModal(true);
   };
 
-  const openEdit = (ch) => {
+  const openEdit = (ch: ChannelItem): void => {
     setEditChannel(ch);
     setForm({
       name: ch.name || '',
@@ -111,7 +155,7 @@ export default function Channels() {
     setShowModal(true);
   };
 
-  const closeModal = () => {
+  const closeModal = (): void => {
     setShowModal(false);
     setEditChannel(null);
     setForm(defaultForm());
@@ -130,7 +174,7 @@ export default function Channels() {
     account_id: form.account_id,
   });
 
-  const handleSave = async () => {
+  const handleSave = async (): Promise<void> => {
     if (!form.name) { setError(t('名称为必填项')); return; }
     if (form.channel_type !== 'cloudflare' && !form.base_url) {
       setError(t('非 Cloudflare 渠道需填写 Base URL'));
@@ -151,13 +195,13 @@ export default function Channels() {
       closeModal();
       loadChannels();
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
   };
 
-  const handleTest = async (id) => {
+  const handleTest = async (id: string | number): Promise<void> => {
     setTestingId(id);
     setError('');
     try {
@@ -168,26 +212,26 @@ export default function Channels() {
         : `${t('失败')}: ${data.message || ''}`);
       loadChannels();
     } catch (err) {
-      addToast(`${t('测试失败')}: ${err.message}`);
+      addToast(`${t('测试失败')}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setTestingId(null);
     }
   };
 
   // 手动重置渠道断路器（渠道被熔断后恢复）
-  const handleResetCircuit = async (id) => {
+  const handleResetCircuit = async (id: string | number): Promise<void> => {
     setError('');
     try {
       await api.resetChannelCircuit(id);
       addToast(t('断路器已重置'));
       loadChannels();
     } catch (err) {
-      addToast(`${t('重置失败')}: ${err.message}`);
+      addToast(`${t('重置失败')}: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
   // 拉取上游模型列表 — 后端代理转发（避免浏览器 CORS）
-  const handleFetchModels = async () => {
+  const handleFetchModels = async (): Promise<void> => {
     if (form.channel_type !== 'cloudflare' && !form.base_url.trim()) {
       setError(t('请先填写 Base URL'));
       return;
@@ -209,7 +253,7 @@ export default function Channels() {
         addToast(`${t('已拉取')} ${models.length} ${t('个模型')}`);
       }
     } catch (err) {
-      addToast(`${t('拉取失败')}: ${err.message}`);
+      addToast(`${t('拉取失败')}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setFetchingModels(false);
     }
@@ -218,10 +262,10 @@ export default function Channels() {
   // ── 对话调试器 ──
   // 打开聊天时异步拉取网关可用模型列表（/v1/models），与渠道自身 models 合并；
   // 拉取失败则静默退回渠道 models，避免调试被模型列表接口拖累。
-  const openChat = (ch) => {
+  const openChat = (ch: ChannelItem): void => {
     setChatChannel(ch);
     setChatProtocol(ch.channel_type === 'anthropic' ? 'anthropic' : 'openai');
-    const models = ch.models || [];
+    const models: string[] = ch.models || [];
     setChatModel(models.length ? models[0] : 'glm-4.7-flash');
     setChatMessages([]);
     setChatInput('');
@@ -243,14 +287,14 @@ export default function Channels() {
       });
   };
 
-  const closeChat = () => {
+  const closeChat = (): void => {
     setShowChat(false);
     setChatChannel(null);
     setChatMessages([]);
     setChatModels([]);
   };
 
-  const chatModelOptions = () => {
+  const chatModelOptions = (): string[] => {
     const ch = chatChannel;
     if (!ch) return [];
     const list = (ch.models || []).slice();
@@ -261,11 +305,11 @@ export default function Channels() {
     return list.length ? list : ['glm-4.7-flash'];
   };
 
-  const appendChatMessage = (role, content) => {
+  const appendChatMessage = (role: string, content: string): void => {
     setChatMessages((prev) => [...prev, { role, content }]);
   };
 
-  const handleChatSend = async () => {
+  const handleChatSend = async (): Promise<void> => {
     const ch = chatChannel;
     const text = chatInput.trim();
     if (!ch || !text || chatBusy) return;
@@ -275,14 +319,14 @@ export default function Channels() {
     setChatBusy(true);
     try {
       const history = chatMessages.map((m) => ({ role: m.role, content: m.content }));
-      const res = await api.testChannelChat({
+      const res = (await api.testChannelChat({
         channel_id: ch.id,
         protocol: chatProtocol,
         model: chatModel,
         message: text,
         history,
         stream: true,
-      });
+      })) as TestChatResponse;
       if (res && res.stream) {
         // 流式：逐增量累积
         let acc = '';
@@ -313,13 +357,13 @@ export default function Channels() {
         }
       }
     } catch (err) {
-      appendChatMessage('assistant', `⚠️ ${err.message}`);
+      appendChatMessage('assistant', `⚠️ ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setChatBusy(false);
     }
   };
 
-  const handleChatKeyDown = (e) => {
+  const handleChatKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleChatSend();
@@ -331,17 +375,17 @@ export default function Channels() {
   }, [chatMessages]);
 
   // PATCH 部分更新 — 仅传 status 字段，避免脱敏 api_key 覆盖真实密钥
-  const handleToggle = async (ch) => {
+  const handleToggle = async (ch: ChannelItem): Promise<void> => {
     try {
       const newStatus = ch.status === 'enabled' ? 'disabled' : 'enabled';
       await api.patchChannel(ch.id, { status: newStatus });
       loadChannels();
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     }
   };
 
-  const handleDelete = async (id) => {
+  const handleDelete = (id: string | number): void => {
     setConfirmState({
       title: t('删除渠道'),
       message: t('确定删除此渠道？'),
@@ -354,13 +398,13 @@ export default function Channels() {
           addToast(t('渠道已删除'));
           loadChannels();
         } catch (err) {
-          setError(err.message);
+          setError(err instanceof Error ? err.message : String(err));
         }
       },
     });
   };
 
-  const typeLabel = (val) => {
+  const typeLabel = (val: string): string => {
     const found = CHANNEL_TYPES.find((x) => x.value === val);
     if (!found) return val;
     return found.isRaw ? found.labelKey : t(found.labelKey);

@@ -1,15 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { api as networkApi } from '../api/network';
-
 import { getNetworkStatus, updateNetworkConfig, restartNetwork } from '../api/network';
+import type { NetworkStatusRaw } from '../types/network';
 import './NetworkLayer.css';
 
-function fmtLatency(ms) {
+interface NetworkLayerConfig {
+  enabled: boolean;
+  strategy: string;
+}
+
+type HealthStatusKind = 'healthy' | 'warning' | 'error';
+
+function fmtLatency(ms: number | null | undefined): string {
   if (ms === undefined || ms === null) return '—';
   return ms.toFixed(1) + 'ms';
 }
 
-function fmtPercent(val) {
+function fmtPercent(val: number | null | undefined): string {
   if (val === undefined || val === null) return '—';
   if (val > 1) return (val / 100).toFixed(2) + '%';
   return val.toFixed(2) + '%';
@@ -44,7 +51,11 @@ function GearIcon() {
   );
 }
 
-function HealthCheckIcon({ status }) {
+interface HealthCheckIconProps {
+  status: HealthStatusKind;
+}
+
+function HealthCheckIcon({ status }: HealthCheckIconProps) {
   if (status === 'healthy') {
     return (
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2">
@@ -71,8 +82,12 @@ function HealthCheckIcon({ status }) {
   return null;
 }
 
-function StatusBadge({ status }) {
-  const styles = {
+interface StatusBadgeProps {
+  status: string;
+}
+
+function StatusBadge({ status }: StatusBadgeProps) {
+  const styles: Record<string, { bg: string; text: string; border: string }> = {
     enabled: { bg: 'bg-green-500/10', text: 'text-green-500', border: 'border-green-500' },
     disabled: { bg: 'bg-gray-500/10', text: 'text-gray-500', border: 'border-gray-500' },
   };
@@ -85,7 +100,11 @@ function StatusBadge({ status }) {
   );
 }
 
-function LatencyBars({ latency }) {
+interface LatencyBarsProps {
+  latency: number | null | undefined;
+}
+
+function LatencyBars({ latency }: LatencyBarsProps) {
   if (latency === undefined || latency === null || isNaN(latency)) {
     return <span className="text-gray-500">—</span>;
   }
@@ -104,15 +123,21 @@ function LatencyBars({ latency }) {
   );
 }
 
-function formatTime(ms) {
+function formatTime(ms: number): string {
   return ms < 1000 ? ms.toFixed(0) + 'ms' : (ms / 1000).toFixed(2) + 's';
 }
 
-export default function NetworkLayer() {
+// 时间戳格式化（此前缺失，运行时崩溃点）
+function formatTimestamp(ts: number | undefined): string {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toLocaleString();
+}
+
+export default function NetworkLayer(): JSX.Element {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [networkStatus, setNetworkStatus] = useState(null);
-  const [config, setConfig] = useState({ enabled: true, strategy: 'latency-aware' });
+  const [networkStatus, setNetworkStatus] = useState<NetworkStatusRaw | null>(null);
+  const [config, setConfig] = useState<NetworkLayerConfig>({ enabled: true, strategy: 'latency-aware' });
   const [showSettings, setShowSettings] = useState(false);
   const [showRestartConfirm, setShowRestartConfirm] = useState(false);
   const [restartPending, setRestartPending] = useState(false);
@@ -121,7 +146,7 @@ export default function NetworkLayer() {
     fetchStatus();
   }, []);
 
-  const fetchStatus = async () => {
+  const fetchStatus = async (): Promise<void> => {
     try {
       setLoading(true);
       const data = await getNetworkStatus();
@@ -133,7 +158,7 @@ export default function NetworkLayer() {
     }
   };
 
-  const handleRefresh = async () => {
+  const handleRefresh = async (): Promise<void> => {
     try {
       setRefreshing(true);
       await fetchStatus();
@@ -142,7 +167,7 @@ export default function NetworkLayer() {
     }
   };
 
-  const handleUpdateConfig = async () => {
+  const handleUpdateConfig = async (): Promise<void> => {
     try {
       setShowSettings(false);
       await updateNetworkConfig('default', config);
@@ -153,7 +178,7 @@ export default function NetworkLayer() {
     }
   };
 
-  const handleRestart = async () => {
+  const handleRestart = async (): Promise<void> => {
     try {
       setRestartPending(true);
       await restartNetwork();
