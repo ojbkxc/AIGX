@@ -1,13 +1,53 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import './Notify.css';
 
+interface NotifyConfig {
+  enabled?: boolean;
+  telegram_ready?: boolean;
+  telegram_bot_token?: string;
+  telegram_chat_id?: string;
+  smtp_ready?: boolean;
+  smtp_host?: string;
+  smtp_port?: string | number;
+  smtp_username?: string;
+  smtp_password?: string;
+  smtp_from?: string;
+  smtp_starttls?: boolean;
+  slack_ready?: boolean;
+  slack_webhook_url?: string;
+  webhook_ready?: boolean;
+  webhook_url?: string;
+  webhook_secret?: string;
+}
+
+interface AlertRule {
+  name: string;
+  kind?: { kind?: string } | string;
+  threshold: number;
+  silence_period_secs: number;
+  level: string;
+  enabled: boolean;
+}
+
+interface AlertEvent {
+  id?: string | number;
+  level: string;
+  message: string;
+  trigger_count?: number;
+  triggered_at: number;
+}
+
+interface ListResponse<T> {
+  data?: T;
+}
+
 export default function Notify() {
   const { t } = useTranslation();
   const addToast = useToast();
-  const [notify, setNotify] = useState(null);
+  const [notify, setNotify] = useState<NotifyConfig>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -19,9 +59,9 @@ export default function Notify() {
   const [testingWebhook, setTestingWebhook] = useState(false);
 
   // 告警规则（批次5）
-  const [rules, setRules] = useState([]);
-  const [activeAlerts, setActiveAlerts] = useState([]);
-  const [alertHistory, setAlertHistory] = useState([]);
+  const [rules, setRules] = useState<AlertRule[]>([]);
+  const [activeAlerts, setActiveAlerts] = useState<AlertEvent[]>([]);
+  const [alertHistory, setAlertHistory] = useState<AlertEvent[]>([]);
   const [rulesSaving, setRulesSaving] = useState(false);
   const [testingAlertKind, setTestingAlertKind] = useState('memory_high');
 
@@ -31,16 +71,16 @@ export default function Notify() {
     setLoading(true);
     setError('');
     try {
-      const res = await api.getNotifyConfig();
-      setNotify(res.data || res);
+      const res = (await api.getNotifyConfig()) as ListResponse<NotifyConfig> | NotifyConfig;
+      setNotify((res as ListResponse<NotifyConfig>).data || (res as NotifyConfig));
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
   };
 
-  const handleChange = (field, value) => {
+  const handleChange = (field: keyof NotifyConfig, value: string | boolean) => {
     setNotify({ ...notify, [field]: value });
   };
 
@@ -49,13 +89,13 @@ export default function Notify() {
     setSaving(true);
     setError('');
     try {
-      const payload = {
-        enabled: notify.enabled,
-        telegram_chat_id: notify.telegram_chat_id,
-        smtp_host: notify.smtp_host,
+      const payload: Record<string, unknown> = {
+        enabled: notify.enabled ?? false,
+        telegram_chat_id: notify.telegram_chat_id ?? '',
+        smtp_host: notify.smtp_host ?? '',
         smtp_port: notify.smtp_port ? Number(notify.smtp_port) : 0,
-        smtp_username: notify.smtp_username,
-        smtp_from: notify.smtp_from,
+        smtp_username: notify.smtp_username ?? '',
+        smtp_from: notify.smtp_from ?? '',
         smtp_starttls: notify.smtp_starttls ?? false,
         webhook_url: notify.webhook_url ?? '',
       };
@@ -81,7 +121,7 @@ export default function Notify() {
       addToast(t('通知配置保存成功'));
       loadConfig();
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
@@ -92,9 +132,9 @@ export default function Notify() {
     setError('');
     try {
       const res = await api.testTelegram();
-      addToast(res.data || t('Telegram 测试消息已发送'));
+      addToast(String((res as ListResponse<string>).data || t('Telegram 测试消息已发送')));
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setTestingTg(false);
     }
@@ -109,9 +149,9 @@ export default function Notify() {
     setError('');
     try {
       const res = await api.testEmail(testEmailTo);
-      addToast(res.data || t('测试邮件已发送'));
+      addToast(String((res as ListResponse<string>).data || t('测试邮件已发送')));
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setTestingEmail(false);
     }
@@ -122,9 +162,9 @@ export default function Notify() {
     setError('');
     try {
       const res = await api.testSlack();
-      addToast(res.data || t('Slack 测试消息已发送'));
+      addToast(String((res as ListResponse<string>).data || t('Slack 测试消息已发送')));
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setTestingSlack(false);
     }
@@ -135,9 +175,9 @@ export default function Notify() {
     setError('');
     try {
       const res = await api.testWebhook('AIGX 测试告警');
-      addToast(res.data || t('Webhook 测试消息已发送'));
+      addToast(String((res as ListResponse<string>).data || t('Webhook 测试消息已发送')));
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setTestingWebhook(false);
     }
@@ -151,15 +191,16 @@ export default function Notify() {
         api.getActiveAlerts(),
         api.getAlertHistory(50),
       ]);
-      setRules((rulesRes.data || []));
-      setActiveAlerts(activeRes.data || []);
-      setAlertHistory((historyRes.data?.items) || (historyRes.data) || []);
+      setRules(((rulesRes as ListResponse<AlertRule[]>).data || []));
+      setActiveAlerts(((activeRes as ListResponse<AlertEvent[]>).data || []));
+      const historyData = (historyRes as ListResponse<{ items?: AlertEvent[] } | AlertEvent[]>).data;
+      setAlertHistory(Array.isArray(historyData) ? historyData : (historyData?.items || []));
     } catch {
       // 告警 API 失败不阻塞通知配置页
     }
   };
 
-  const updateRule = (idx, field, value) => {
+  const updateRule = (idx: number, field: keyof AlertRule, value: string | number | boolean) => {
     setRules((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: value } : r)));
   };
 
@@ -171,7 +212,7 @@ export default function Notify() {
       addToast(t('告警规则已保存'));
       loadAlerts();
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRulesSaving(false);
     }
@@ -181,11 +222,11 @@ export default function Notify() {
     setError('');
     try {
       const res = await api.testAlert(testingAlertKind, 99);
-      const d = res.data || {};
+      const d = ((res as ListResponse<{ triggered?: boolean; message?: string }>).data || {});
       addToast(d.triggered ? `🚨 ${d.message}` : t('未触发（低于阈值或静默期）'));
       loadAlerts();
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     }
   };
 
