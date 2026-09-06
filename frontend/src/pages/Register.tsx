@@ -200,17 +200,16 @@ export default function Register() {
       }}>
         <div style={{ textAlign: 'center', marginBottom: '22px' }}>
           <div style={{
-            width: '48px',
-            height: '48px',
-            background: 'var(--primary-gradient)',
-            borderRadius: '12px',
+            width: '44px',
+            height: '44px',
+            background: 'var(--accent-color)',
+            borderRadius: '10px',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontSize: '24px',
+            fontSize: '20px',
             margin: '0 auto 14px',
             color: 'white',
-            boxShadow: '0 4px 14px rgba(47, 111, 237, 0.25)',
           }}>
             ⚡
           </div>

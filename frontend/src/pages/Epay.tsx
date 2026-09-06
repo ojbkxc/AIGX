@@ -105,7 +105,7 @@ export default function Epay() {
     <div>
       <div className="page-header">
         <h1>{t('易支付配置')}</h1>
-        <p>{t('对接易支付（Epay）以支持在线充值，签名规则与 new-api 一致')}</p>
+        <p>{t('对接易支付（Epay）实现在线充值。字段与 new-api 保持一致：网关地址 / 商户 ID / 商户密钥 / 兑换比例 / 回调地址。')}</p>
       </div>
 
       {error && <div className="error-message">{error}</div>}
@@ -113,23 +113,31 @@ export default function Epay() {
       <div className="card">
         <div className="card-header"><h2>{t('商户参数')}</h2></div>
         <div className="card-body">
+          <div className="notify-note" style={{ marginBottom: 16, fontSize: 12.5, lineHeight: 1.7 }}>
+            {t('易支付由第三方支付平台提供接口（如彩虹易支付）。')}
+            <b>{t('下单参数为必填，回调地址为可选：')}</b>
+            {t('易支付平台通常有固定的异步通知地址，留空时 AIGX 自动拼接「站点地址 /api/user/epay/notify」，')}
+            {t('如果您的易支付后台不允许自定义回调地址，请将「站点对外访问地址」填为易支付平台要求的域名。')}
+          </div>
           <div style={{ display: 'grid', gap: 16, maxWidth: 640 }}>
             <div className="form-group">
-              <label>{t('易支付网关地址 (pay_address)')}</label>
+              <label>{t('易支付网关地址')} <code style={{ fontSize: 11 }}>pay_address</code></label>
               <input className="form-input" placeholder="https://pay.example.com"
                 value={cfg.pay_address}
                 onChange={(e) => setCfg({ ...cfg, pay_address: e.target.value })} />
+              <span className="form-hint">{t('易支付接口地址，例如 https://pay.example.com，不要带 /submit.php 等后缀')}</span>
             </div>
             <div className="form-group">
-              <label>{t('商户 ID (PID)')}</label>
-              <input className="form-input" value={cfg.epay_id}
+              <label>{t('商户 ID')} <code style={{ fontSize: 11 }}>epay_id</code></label>
+              <input className="form-input" placeholder={t('易支付商户 PID，在易支付后台获取')} value={cfg.epay_id}
                 onChange={(e) => setCfg({ ...cfg, epay_id: e.target.value })} />
+              <span className="form-hint">{t('对应 new-api 的 EpayPid')}</span>
             </div>
             <div className="form-group">
-              <label>{t('商户密钥 (KEY)')}</label>
+              <label>{t('商户密钥')} <code style={{ fontSize: 11 }}>epay_key</code></label>
               <div style={{ display: 'flex', gap: 8 }}>
                 <input className="form-input" type={showKey ? 'text' : 'password'}
-                  placeholder={t('留空则不修改')}
+                  placeholder={t('留空则不修改（对应 new-api 的 EpayKey）')}
                   value={cfg.epay_key}
                   onChange={(e) => setCfg({ ...cfg, epay_key: e.target.value })} />
                 <button className="btn btn-outline" onClick={() => setShowKey(!showKey)}>
@@ -157,32 +165,35 @@ export default function Epay() {
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
               <div className="form-group">
-                <label>{t('兑换倍率 (1 元 = ? 配额)')}</label>
+                <label>{t('兑换比例')} <code style={{ fontSize: 11 }}>price</code></label>
                 <input className="form-input" type="number" step="0.01" value={cfg.price}
                   onChange={(e) => setCfg({ ...cfg, price: e.target.value })} />
+                <span className="form-hint">{t('1 元 = 多少配额。对应 new-api 的 EpayPrice')}</span>
               </div>
               <div className="form-group">
-                <label>{t('最低充值 (元)')}</label>
+                <label>{t('最低充值金额')} <code style={{ fontSize: 11 }}>min_topup</code></label>
                 <input className="form-input" type="number" value={cfg.min_topup}
                   onChange={(e) => setCfg({ ...cfg, min_topup: e.target.value })} />
               </div>
             </div>
 
             <div className="form-group">
-              <label>{t('站点对外访问地址 (server_address)')}</label>
+              <label>{t('站点对外访问地址')} <code style={{ fontSize: 11 }}>server_address</code></label>
               <input className="form-input" placeholder="https://your-aigx.example.com"
                 value={cfg.server_address}
                 onChange={(e) => setCfg({ ...cfg, server_address: e.target.value })} />
               <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-                {t('用于构造易支付异步通知 (notify_url) 与同步跳转 (return_url)')}
+                {t('AIGX 用它拼接异步通知地址：')}<br />
+                <code style={{ fontSize: 11 }}>{cfg.server_address ? cfg.server_address.replace(/\/$/, '') + '/api/user/epay/notify' : '{server_address}/api/user/epay/notify'}</code>
               </div>
             </div>
 
             <div className="form-group">
-              <label>{t('自定义回调地址 (可留空)')}</label>
-              <input className="form-input" placeholder={t('留空则使用站点地址')}
+              <label>{t('自定义回调地址')} <code style={{ fontSize: 11 }}>custom_callback_address</code></label>
+              <input className="form-input" placeholder={t('留空则使用站点地址（对应 new-api 的 EpayReturnUrl）')}
                 value={cfg.custom_callback_address}
                 onChange={(e) => setCfg({ ...cfg, custom_callback_address: e.target.value })} />
+              <span className="form-hint">{t('易支付平台强制要求自定义域名时填写，留空自动使用站点地址')}</span>
             </div>
 
             <div>

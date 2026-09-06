@@ -213,21 +213,20 @@ export default function Login(): JSX.Element {
       }}>
         <div style={{ textAlign: 'center', marginBottom: '22px' }}>
           <div style={{
-            width: '48px',
-            height: '48px',
-            background: 'var(--primary-gradient)',
-            borderRadius: '12px',
+            width: '44px',
+            height: '44px',
+            background: 'var(--accent-color)',
+            borderRadius: '10px',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontSize: '24px',
+            fontSize: '20px',
             margin: '0 auto 14px',
             color: 'white',
-            boxShadow: '0 4px 14px rgba(47, 111, 237, 0.25)',
           }}>
             ⚡
           </div>
-          <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '4px', fontFamily: "'Inter', sans-serif" }}>
+          <h1 style={{ fontSize: '20px', fontWeight: 600, color: 'var(--text-main)', marginBottom: '4px', fontFamily: "'Inter', sans-serif", letterSpacing: '-0.4px' }}>
             AIGX Gateway
           </h1>
           <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>

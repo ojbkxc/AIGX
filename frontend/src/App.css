@@ -1260,3 +1260,14 @@ code {
   }
 }
 
+
+/* Epay 说明卡（避免依赖 Notify.css） */
+.notify-note {
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--section-item-bg);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}

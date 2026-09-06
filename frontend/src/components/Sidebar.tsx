@@ -197,9 +197,7 @@ export default function Sidebar(): JSX.Element {
             fontWeight: 700,
             fontFamily: "'Inter', sans-serif",
             letterSpacing: '-0.5px',
-            background: 'var(--primary-gradient)',
-            WebkitBackgroundClip: 'text',
-            WebkitTextFillColor: 'transparent',
+            color: 'var(--text-main)',
           }}>
             AIGX
           </div>
@@ -237,10 +235,10 @@ export default function Sidebar(): JSX.Element {
                   cursor: 'pointer',
                   fontSize: '12.5px',
                   fontWeight: 500,
-                  color: isActive ? 'white' : 'var(--text-muted)',
-                  background: isActive ? 'var(--primary-gradient)' : 'transparent',
+                  color: isActive ? 'var(--text-main)' : 'var(--text-muted)',
+                  background: isActive ? 'rgba(47, 111, 237, 0.16)' : 'transparent',
                   boxShadow: isActive
-                    ? '0 0 18px rgba(47, 111, 237, 0.35), 0 0 40px rgba(47, 111, 237, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.1)'
+                    ? 'inset 2px 0 0 var(--accent-color)'
                     : 'none',
                   textDecoration: 'none',
                   transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
@@ -306,10 +304,10 @@ export default function Sidebar(): JSX.Element {
                     cursor: 'pointer',
                     fontSize: '12px',
                     fontWeight: 500,
-                    color: isActive ? 'white' : 'var(--text-muted)',
-                    background: isActive ? 'var(--primary-gradient)' : 'transparent',
+                    color: isActive ? 'var(--text-main)' : 'var(--text-muted)',
+                    background: isActive ? 'rgba(47, 111, 237, 0.16)' : 'transparent',
                     boxShadow: isActive
-                      ? '0 0 18px rgba(47, 111, 237, 0.35), 0 0 40px rgba(47, 111, 237, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.1)'
+                      ? 'inset 2px 0 0 var(--accent-color)'
                       : 'none',
                     textDecoration: 'none',
                     transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
