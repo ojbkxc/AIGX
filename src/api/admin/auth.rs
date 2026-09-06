@@ -844,7 +844,11 @@ pub async fn handle_login_send_code(
             "您的 AIGX 登录验证码是：{}\n\n5 分钟内有效。如果这不是您的操作，请忽略本邮件。",
             code
         );
-        match state.notify_service.send_email(&user.email, &subject, &body).await {
+        match state
+            .notify_service
+            .send_email(&user.email, &subject, &body)
+            .await
+        {
             Ok(_) => {
                 tracing::info!("Login code email sent to {}", user.email);
                 return Ok(Json(serde_json::json!({
@@ -913,17 +917,11 @@ pub async fn handle_login_with_code(
             .login_failures
             .insert(client_ip.clone(), fail_count + 1)
             .await;
-        return Err(error_response(
-            "验证码错误",
-            StatusCode::UNAUTHORIZED,
-        ));
+        return Err(error_response("验证码错误", StatusCode::UNAUTHORIZED));
     }
 
     let Some(user) = state.user_store.get_by_email(&email) else {
-        return Err(error_response(
-            "用户不存在",
-            StatusCode::UNAUTHORIZED,
-        ));
+        return Err(error_response("用户不存在", StatusCode::UNAUTHORIZED));
     };
     if user.status != "active" {
         return Err(error_response("账号已禁用", StatusCode::FORBIDDEN));

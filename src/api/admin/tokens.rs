@@ -108,7 +108,11 @@ pub async fn handle_add_token(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let user = verify_user(&state, &headers).await?;
     // 普通用户创建的令牌强制归属本人（对齐 new-api：用户只能创建自己的令牌）
-    let user_id = if user.is_admin() { body.user_id } else { Some(user.id.clone()) };
+    let user_id = if user.is_admin() {
+        body.user_id
+    } else {
+        Some(user.id.clone())
+    };
     let opts = CreateApiKeyOptions {
         name: body.name,
         user_id,
@@ -152,7 +156,10 @@ pub async fn handle_update_token(
         }
         // 普通用户不修改归属/分组（防止提权改到其他分组）
         if body.group.is_some() && body.group.as_deref() != Some("default") {
-            return Err(error_response("普通用户不能修改分组", StatusCode::FORBIDDEN));
+            return Err(error_response(
+                "普通用户不能修改分组",
+                StatusCode::FORBIDDEN,
+            ));
         }
     }
     match state.api_key_store.update(&id, |k| {
