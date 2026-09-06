@@ -2,6 +2,7 @@ import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import { isAdmin } from '../lib/utils';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
 import './Keys.css';
@@ -68,8 +69,10 @@ export default function Keys(): JSX.Element {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   const [showModal, setShowModal] = useState(false);
-  // 明文 key 展开状态（普通用户列表自带 plain_key；管理员经创建/轮换弹窗复制）
+  // 明文 key 展开状态（列表脱敏；明文经「查看/复制」按需取回）
   const [revealedKeys, setRevealedKeys] = useState<Record<string | number, boolean>>({});
+  // 按需取回的明文缓存（管理员列表脱敏，点击查看/复制时经 GET /api/tokens/:id/key 取回）
+  const [plainKeys, setPlainKeys] = useState<Record<string | number, string>>({});
   const [editing, setEditing] = useState<TokenItem | null>(null);
   const [form, setForm] = useState<KeyFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
@@ -89,7 +92,7 @@ export default function Keys(): JSX.Element {
     try {
       const [tokenRes, groupRes] = await Promise.all([
         api.listTokens(),
-        api.listGroups().catch(() => null),
+        isAdmin() ? api.listGroups().catch(() => null) : Promise.resolve(null),
       ]);
       setTokens(Array.isArray(tokenRes?.data) ? tokenRes.data : tokenRes || []);
       if (groupRes) setGroups(Array.isArray(groupRes?.data) ? groupRes.data : groupRes || []);
@@ -288,6 +291,24 @@ export default function Keys(): JSX.Element {
     }
   };
 
+  // 取回令牌明文：本地已有则直接用；否则请求后端（失败时提示）
+  const fetchPlainKey = async (tk: TokenItem): Promise<string | null> => {
+    const cached = plainKeys[tk.id] || tk.plain_key;
+    if (cached) return cached;
+    try {
+      const res = await api.getTokenKey(tk.id);
+      const key = res?.data?.plain_key || res?.plain_key;
+      if (key) {
+        setPlainKeys((prev) => ({ ...prev, [tk.id]: String(key) }));
+        return String(key);
+      }
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : t('获取密钥失败'), 'error');
+      return null;
+    }
+    return null;
+  };
+
   const fmtQuota = (q: number | undefined): string => {
     const n = Number(q || 0);
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
@@ -341,7 +362,7 @@ export default function Keys(): JSX.Element {
                     <tr key={tk.id}>
                       <td><strong>{tk.name}</strong></td>
                       <td style={{ fontSize: 12 }}>
-                        {tk.plain_key ? (
+                        {tk.plain_key || plainKeys[tk.id] ? (
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
                             <code style={{
                               fontSize: 11,
@@ -352,13 +373,18 @@ export default function Keys(): JSX.Element {
                               display: 'inline-block',
                               verticalAlign: 'middle',
                             }}>
-                              {revealedKeys[tk.id] ? tk.plain_key : tk.key || '••••••••••••'}
+                              {revealedKeys[tk.id] ? (plainKeys[tk.id] || tk.plain_key) : tk.key || '••••••••••••'}
                             </code>
                             <button
                               type="button"
                               className="btn btn-outline btn-sm"
                               title={revealedKeys[tk.id] ? t('隐藏密钥') : t('查看密钥')}
-                              onClick={() => setRevealedKeys((prev) => ({ ...prev, [tk.id]: !prev[tk.id] }))}
+                              onClick={() => {
+                                if (!revealedKeys[tk.id] && !plainKeys[tk.id] && !tk.plain_key) {
+                                  void fetchPlainKey(tk);
+                                }
+                                setRevealedKeys((prev) => ({ ...prev, [tk.id]: !prev[tk.id] }));
+                              }}
                               style={{ padding: '2px 6px', flexShrink: 0 }}
                             >
                               {revealedKeys[tk.id] ? t('隐藏') : t('查看')}
@@ -367,7 +393,7 @@ export default function Keys(): JSX.Element {
                               type="button"
                               className="btn btn-outline btn-sm"
                               title={t('复制密钥')}
-                              onClick={() => copyToClipboard(tk.plain_key || '')}
+                              onClick={() => void fetchPlainKey(tk).then((key) => key && copyToClipboard(key))}
                               style={{ padding: '2px 6px', flexShrink: 0 }}
                             >
                               {t('复制')}

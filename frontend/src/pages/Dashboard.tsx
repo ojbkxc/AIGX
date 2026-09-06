@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
+import { isAdmin } from '../lib/utils';
 import { SkeletonCards } from '../components/ui';
 import './Dashboard.css';
 
@@ -354,8 +355,9 @@ export default function Dashboard(): JSX.Element {
   useEffect(() => {
     loadData();
     // 实时指标轮询：30s 刷新一次 RPS / 活跃用户 / 活跃渠道 / 平均延迟
+    // 仅管理员轮询管理指标，普通用户静默展示个人配额视图
     const timer = setInterval(() => {
-      loadRealtimeOnly();
+      if (isAdmin()) loadRealtimeOnly();
     }, 30000);
     return () => clearInterval(timer);
   }, []);
@@ -733,19 +735,28 @@ export default function Dashboard(): JSX.Element {
         </div>
       </div>
 
-      {/* 快捷操作 */}
+      {/* 快捷操作（按角色渲染：普通用户只看到自己的工具箱） */}
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-header">
           <h2>{t('快捷操作')}</h2>
         </div>
-        <div className="card-body quick-actions">
-          <Link to="/channels" className="btn btn-primary">{t('管理账号')}</Link>
-          <Link to="/keys" className="btn btn-outline">{t('管理 API 密钥')}</Link>
-          <Link to="/mappings" className="btn btn-outline">{t('配置模型映射')}</Link>
-          <Link to="/logs" className="btn btn-outline">{t('查看日志')}</Link>
-          <Link to="/redemptions" className="btn btn-outline">{t('兑换码管理')}</Link>
-          <Link to="/settings" className="btn btn-outline">{t('调整限额')}</Link>
-        </div>
+        {isAdmin() ? (
+          <div className="card-body quick-actions">
+            <Link to="/channels" className="btn btn-primary">{t('管理账号')}</Link>
+            <Link to="/keys" className="btn btn-outline">{t('管理 API 密钥')}</Link>
+            <Link to="/mappings" className="btn btn-outline">{t('配置模型映射')}</Link>
+            <Link to="/logs" className="btn btn-outline">{t('查看日志')}</Link>
+            <Link to="/redemptions" className="btn btn-outline">{t('兑换码管理')}</Link>
+            <Link to="/settings" className="btn btn-outline">{t('调整限额')}</Link>
+          </div>
+        ) : (
+          <div className="card-body quick-actions">
+            <Link to="/playground" className="btn btn-primary">{t('去 Playground 调试')}</Link>
+            <Link to="/keys" className="btn btn-outline">{t('管理 API 密钥')}</Link>
+            <Link to="/wallet" className="btn btn-outline">{t('钱包充值')}</Link>
+            <Link to="/profile" className="btn btn-outline">{t('个人中心')}</Link>
+          </div>
+        )}
       </div>
     </div>
   );

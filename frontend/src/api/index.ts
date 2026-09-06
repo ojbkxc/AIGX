@@ -54,18 +54,23 @@ async function request(method: string, path: string, body: unknown = null): Prom
     }
     throw new Error('网络连接失败，请检查网络后重试');
   }
+  // 仅真实登录态失效才清除会话并跳转登录页；避免「已登录但访问
+  // 无权限页面」时被误踢（后端对越权访问返回 403，而非 401）。
   if (res.status === 401) {
-    try {
-      localStorage.removeItem('token');
-      localStorage.removeItem('email');
-      localStorage.removeItem('username');
-      localStorage.removeItem('role');
-      localStorage.removeItem('expires_at');
-    } catch {
-      // ignore
-    }
-    if (window.location.pathname !== '/login') {
-      window.location.href = '/login';
+    const token = getToken();
+    if (token && !window.location.pathname.startsWith('/login')) {
+      try {
+        localStorage.removeItem('token');
+        localStorage.removeItem('email');
+        localStorage.removeItem('username');
+        localStorage.removeItem('role');
+        localStorage.removeItem('expires_at');
+      } catch {
+        // ignore
+      }
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
     }
     throw new Error('Unauthorized');
   }
@@ -222,23 +227,12 @@ export const api = {
   logout: (): Promise<any> => request('POST', `${API_BASE}/auth/logout`),
 
   // Models（网关可用模型列表，用于对话调试模型下拉）
-  // 通用网关语义：模型来自渠道声明的 models 聚合（管理面 /api/channels，
-  // 管理 token 可访问）。不用 /v1/models（数据面需 sk-xxx，会 401 误踢登录），
-  // 也不用 /api/settings 的 mappings keys（映射只是可选别名，不再是模型主数据源）。
+  // 通用网关语义：模型来自渠道声明的 models 聚合。登录用户均可访问
+  // /api/models/available（对齐 new-api /api/user/models）；不用 /v1/models
+  //（数据面需 sk-xxx，会 401 误踢登录），也不用 mappings keys。
   listModels: async (): Promise<any> => {
-    const res = await request('GET', `${API_BASE}/channels`);
-    const channels = res?.data || [];
-    const seen = new Set<string>();
-    const ids: string[] = [];
-    for (const ch of channels) {
-      if (ch.status === 'disabled') continue;
-      for (const m of ch.models || []) {
-        if (m && !seen.has(m)) {
-          seen.add(m);
-          ids.push(m);
-        }
-      }
-    }
+    const res = await request('GET', `${API_BASE}/models/available`);
+    const ids: string[] = Array.isArray(res?.data) ? res.data : [];
     return { data: ids.map((id) => ({ id, object: 'model', owned_by: 'aigx' })) };
   },
 
@@ -263,6 +257,8 @@ export const api = {
 
   // Epay
   getEpayConfig: (): Promise<any> => request('GET', `${API_BASE}/epay/config`),
+  // 用户侧充值页信息（对齐 new-api /api/user/topup/info）
+  getEpayInfo: (): Promise<any> => request('GET', `${API_BASE}/epay/info`),
   updateEpayConfig: (data: any): Promise<any> => request('PUT', `${API_BASE}/epay/config`, data),
 
   // Orders & Topup
@@ -298,16 +294,19 @@ export const api = {
       body: JSON.stringify(data),
     });
     if (res.status === 401) {
-      try {
-        localStorage.removeItem('token');
-        localStorage.removeItem('email');
-        localStorage.removeItem('username');
-        localStorage.removeItem('expires_at');
-      } catch {
-        // ignore
-      }
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login';
+      const token = getToken();
+      if (token && !window.location.pathname.startsWith('/login')) {
+        try {
+          localStorage.removeItem('token');
+          localStorage.removeItem('email');
+          localStorage.removeItem('username');
+          localStorage.removeItem('expires_at');
+        } catch {
+          // ignore
+        }
+        if (window.location.pathname !== '/login') {
+          window.location.href = '/login';
+        }
       }
       throw new Error('Unauthorized');
     }
@@ -377,6 +376,9 @@ export const api = {
     request('PUT', `${API_BASE}/tokens/${id}`, data),
   deleteToken: (id: string | number): Promise<any> =>
     request('DELETE', `${API_BASE}/tokens/${id}`),
+  // 按需取回明文密钥：登录用户可随时查看/复制自己的令牌（对齐 new-api）
+  getTokenKey: (id: string | number): Promise<any> =>
+    request('GET', `${API_BASE}/tokens/${id}/key`),
   resetTokenUsed: (id: string | number): Promise<any> =>
     request('POST', `${API_BASE}/tokens/${id}/reset_used`),
   rotateToken: (id: string | number): Promise<any> =>

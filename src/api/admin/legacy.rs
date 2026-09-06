@@ -514,6 +514,27 @@ pub async fn handle_get_epay_config(
     })))
 }
 
+/// GET /api/epay/info - 用户侧充值页信息（登录即可读）
+///
+/// 对齐 new-api `/api/user/topup/info`：钱包页需要的公开价格/方式/限额，
+/// 不泄露商户密钥与回调地址。
+pub async fn handle_get_epay_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _user = verify_user(&state, &headers).await?;
+    let config = state.config_manager.get().await;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "enabled": config.epay.ready(),
+            "pay_methods": config.epay.pay_methods,
+            "price": config.epay.price,
+            "min_topup": config.epay.min_topup,
+        }
+    })))
+}
+
 /// 脱敏字符串：保留前3后3字符，中间用 *** 替代
 ///
 /// 使用 `chars()` 而非字节切片，避免多字节 UTF-8 字符（如中文）在边界处 panic。
@@ -2211,7 +2232,17 @@ pub async fn handle_rotate_token(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
+    // 权限对齐 tokens.rs 的新模型：登录用户可轮换自己的令牌，管理员可轮换任意
+    let user = verify_user(&state, &headers).await?;
+    if !user.is_admin()
+        && !state
+            .api_key_store
+            .list()
+            .iter()
+            .any(|k| k.id == id && k.user_id.as_deref() == Some(user.id.as_str()))
+    {
+        return Err(error_response("Token not found", StatusCode::NOT_FOUND));
+    }
     let new_key = format!("sk-{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
     match state.api_key_store.update(&id, |k| {
         k.key = new_key.clone();
@@ -2577,8 +2608,19 @@ pub async fn handle_channel_chat_test(
     headers: HeaderMap,
     Json(body): Json<ChannelChatTestRequest>,
 ) -> Response {
-    if let Err(e) = verify_admin(&state, &headers).await {
-        return e.into_response();
+    // 权限对齐 new-api：Playground 是用户/管理员共用的调试沙盒。
+    // 登录用户即可对话，但普通用户不得指定 channel_id（防止探测他人渠道），
+    // 只能走「自动选择启用渠道」路径。
+    let user = match verify_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    if !user.is_admin() && !body.channel_id.trim().is_empty() {
+        return error_response(
+            "Only administrators can target a specific channel",
+            StatusCode::FORBIDDEN,
+        )
+        .into_response();
     }
 
     // Playground 不绑定渠道：自动选择优先级最高的启用渠道

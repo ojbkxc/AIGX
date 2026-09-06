@@ -28,12 +28,13 @@ pub use users::{handle_create_user, handle_delete_user, handle_list_users, handl
 pub use logs::{handle_export_request_logs, handle_list_audit_logs, handle_list_request_logs};
 
 pub use channels::{
-    handle_add_channel, handle_delete_channel, handle_list_channels, handle_update_channel,
+    handle_add_channel, handle_available_models, handle_delete_channel, handle_list_channels,
+    handle_update_channel,
 };
 
 pub use tokens::{
-    handle_add_token, handle_delete_token, handle_list_tokens, handle_reset_token_used,
-    handle_update_token,
+    handle_add_token, handle_delete_token, handle_get_token_key, handle_list_tokens,
+    handle_reset_token_used, handle_update_token,
 };
 
 pub use pricing::{handle_add_pricing, handle_delete_pricing, handle_list_pricing};
@@ -85,9 +86,9 @@ pub use legacy::{
 
 // 用户侧端点与未迁移端点（main.rs 恢复路由时需要）
 pub use legacy::{
-    handle_check_username, handle_get_epay_config, handle_get_ratios, handle_me, handle_my_orders,
-    handle_trigger_price_sync, handle_update_epay_config, handle_update_exchange_rates,
-    handle_update_ratios, handle_upsert_group_by_name,
+    handle_check_username, handle_get_epay_config, handle_get_epay_info, handle_get_ratios,
+    handle_me, handle_my_orders, handle_trigger_price_sync, handle_update_epay_config,
+    handle_update_exchange_rates, handle_update_ratios, handle_upsert_group_by_name,
 };
 
 // 网络层管理（main.rs /api/network/* 路由）

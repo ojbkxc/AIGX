@@ -44,6 +44,10 @@ pub fn error_response(message: &str, status: StatusCode) -> (StatusCode, Json<Va
 }
 
 /// 验证管理员认证
+///
+/// 权限语义：
+/// - 无会话/会话失效/账号被禁用 → 401（前端据此踢出登录态）。
+/// - 已登录但非管理员 → 403（前端不应误踢，仅提示无权限）。
 pub async fn verify_admin(
     state: &AppState,
     headers: &HeaderMap,
@@ -64,6 +68,12 @@ pub async fn verify_admin(
         if let Some(u) = state.user_store.get_by_email(&sess.email) {
             if u.status == "active" && u.is_admin() {
                 return Ok(config);
+            }
+            if u.status == "active" {
+                return Err(error_response(
+                    "Admin access required",
+                    StatusCode::FORBIDDEN,
+                ));
             }
             return Err(error_response(
                 "User disabled or not admin",

@@ -7,7 +7,7 @@ import {
   LayoutDashboard, Satellite, KeyRound, ArrowLeftRight, CircleDollarSign,
   Users, Tags, Wallet, Receipt, Ticket, ScrollText, CreditCard, Bell,
   Settings, Play, Shield, Globe, Network, Zap, ChevronDown, Menu,
-  Code2, BarChart3, UserCircle2,
+  Code2, BarChart3, UserCircle2, UserRound,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -24,6 +24,7 @@ interface NavGroup {
   key: string;
   labelKey?: string;
   icon?: LucideIcon;
+  adminOnly?: boolean;
   items: NavItem[];
 }
 
@@ -46,10 +47,13 @@ const navItems: NavItem[] = [
   { path: '/notify', labelKey: '通知设置', icon: Bell, adminOnly: true },
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
   { path: '/network-layer', labelKey: '网络层概览', icon: Network, adminOnly: true },
+  { path: '/profile', labelKey: '个人中心', icon: UserRound },
 ];
 
-// 参照 app.ofox.ai 的分组平铺设计：短分组标签 + 组内直接平铺，
-// 不再用「更多管理」大折叠组。普通用户只看到无 adminOnly 的项。
+// 参照 app.ofox.ai 的分组平铺设计：短分组标签 + 组内直接平铺。
+// 角色分层对齐 new-api：
+// - 普通用户（user）：开发组只有 Playground/API 密钥，账户组含钱包 + 个人中心。
+// - 管理员（admin）：开发组追加渠道/映射，用量/管理组完整展开。
 const navGroups: NavGroup[] = [
   {
     key: 'develop',
@@ -67,6 +71,7 @@ const navGroups: NavGroup[] = [
     key: 'usage',
     labelKey: '用量',
     icon: BarChart3,
+    adminOnly: true,
     items: [
       navItems[5],  // 日志审计
       navItems[6],  // 安全监控
@@ -81,12 +86,14 @@ const navGroups: NavGroup[] = [
       navItems[8],  // 钱包充值
       navItems[9],  // 订单记录
       navItems[10], // 兑换码
+      navItems[18], // 个人中心
     ],
   },
   {
     key: 'admin',
     labelKey: '管理',
     icon: Settings,
+    adminOnly: true,
     items: [
       navItems[11], // 用户管理
       navItems[12], // 用户分组
@@ -228,6 +235,7 @@ export default function Sidebar(): JSX.Element {
       <nav style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
         {navGroups.map((group) => {
           // 角色过滤：普通用户不渲染管理员专属菜单；整组为空则隐藏
+          if (group.adminOnly && !isAdmin()) return null;
           const visibleItems = roleFilter(group.items);
           if (visibleItems.length === 0) return null;
           const collapsed = collapsedGroups[group.key] ?? false;

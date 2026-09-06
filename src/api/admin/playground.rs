@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, verify_admin};
+use super::common::{error_response, verify_user};
 
 #[derive(Debug, Deserialize)]
 pub struct PlaygroundChatRequest {
@@ -23,13 +23,30 @@ pub struct PlaygroundChatRequest {
 }
 
 /// POST /api/admin/playground/chat - Playground 聊天
+///
+/// 权限对齐 new-api：Playground 是普通用户与管理员共用的调试沙盒，
+/// 登录即可使用；channel_id 为空时自动选择第一个启用渠道。
 pub async fn handle_playground_chat(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<PlaygroundChatRequest>,
 ) -> Response {
-    if let Err(e) = verify_admin(&state, &headers).await {
-        return e.into_response();
+    let user = match verify_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    // 普通用户不得指定 channel_id（与 /api/channels/chat_test 守卫一致）
+    if !user.is_admin()
+        && body
+            .channel_id
+            .as_deref()
+            .map_or(false, |s| !s.trim().is_empty())
+    {
+        return error_response(
+            "Only administrators can target a specific channel",
+            StatusCode::FORBIDDEN,
+        )
+        .into_response();
     }
 
     // 选渠道：优先 channel_id，否则第一个启用渠道
@@ -146,12 +163,12 @@ pub async fn handle_playground_chat(
     }
 }
 
-/// GET /api/admin/playground/channels - 列出可用渠道
+/// GET /api/admin/playground/channels - 列出可用渠道（登录即可，列表已脱敏）
 pub async fn handle_playground_channels(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
+    let _user = verify_user(&state, &headers).await?;
     let channels: Vec<Value> = state
         .channel_store
         .list()

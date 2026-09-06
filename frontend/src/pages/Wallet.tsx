@@ -12,6 +12,7 @@ interface WalletUser {
 }
 
 interface EpayConfig {
+  enabled?: boolean;
   pay_address?: string;
   min_topup?: number;
   price?: number;
@@ -59,7 +60,7 @@ export default function Wallet(): JSX.Element {
     try {
       const [meRes, epayRes, orderRes] = await Promise.all([
         api.getMe().catch(() => null),
-        api.getEpayConfig().catch(() => null),
+        api.getEpayInfo().catch(() => null),
         api.myOrders().catch(() => null),
       ]);
       if (meRes) setMe(meRes.data || null);
@@ -159,7 +160,7 @@ export default function Wallet(): JSX.Element {
 
       {error && <div className="error-message">{error}</div>}
 
-      {!epay || !epay.pay_address ? (
+      {!epay || epay.enabled === false ? (
         <Card>
           <EmptyState
             message={t('管理员尚未配置易支付，暂无法充值。请联系管理员在「易支付」页面完成配置。')}

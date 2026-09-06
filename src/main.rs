@@ -502,6 +502,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/users/:id", delete(api::admin::handle_delete_user))
         // 渠道管理
         .route("/api/channels", get(api::admin::handle_list_channels))
+        // 用户侧可用模型聚合（对齐 new-api /api/user/models）
+        .route(
+            "/api/models/available",
+            get(api::admin::handle_available_models),
+        )
         .route("/api/channels", post(api::admin::handle_add_channel))
         .route("/api/channels/:id", put(api::admin::handle_update_channel))
         .route("/api/channels/:id", patch(api::admin::handle_patch_channel))
@@ -512,6 +517,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 令牌管理
         .route("/api/tokens", get(api::admin::handle_list_tokens))
         .route("/api/tokens", post(api::admin::handle_add_token))
+        // 按需取回明文密钥（对齐 new-api POST /api/token/:id/key）
+        .route("/api/tokens/:id/key", get(api::admin::handle_get_token_key))
         .route("/api/tokens/:id", put(api::admin::handle_update_token))
         .route("/api/tokens/:id", delete(api::admin::handle_delete_token))
         .route(
@@ -539,6 +546,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         // 易支付配置
         .route("/api/epay/config", get(api::admin::handle_get_epay_config))
+        // 用户侧充值页信息（对齐 new-api /api/user/topup/info）
+        .route("/api/epay/info", get(api::admin::handle_get_epay_info))
         .route(
             "/api/epay/config",
             put(api::admin::handle_update_epay_config),
