@@ -28,6 +28,14 @@ function authHeaders(): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
 }
 
+/** 把分页/筛选参数安全转成查询串（数字自动字符串化） */
+function buildQuery(params: Record<string, string | number>): string {
+  const entries = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => [k, String(v)] as [string, string]);
+  return new URLSearchParams(entries).toString();
+}
+
 async function request(method: string, path: string, body: unknown = null): Promise<any> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -182,8 +190,8 @@ export const api = {
   chatCompletions: (payload: any): Promise<any> =>
     request('POST', '/v1/chat/completions', payload),
   listPrices: (): Promise<any> => request('GET', `${API_BASE}/prices`),
-  listRedemptions: (params: Record<string, string> = {}): Promise<any> =>
-    request('GET', `${API_BASE}/redemptions?${new URLSearchParams(params)}`),
+  listRedemptions: (params: Record<string, string | number> = {}): Promise<any> =>
+    request('GET', `${API_BASE}/redemptions?${buildQuery(params)}`),
   getSecurityIncidents: (): Promise<any> =>
     request('GET', `${API_BASE}/monitor/security/events`),
   getSecurityAlerts: (): Promise<any> =>
@@ -353,10 +361,10 @@ export const api = {
     request('DELETE', `${API_BASE}/groups/${encodeURIComponent(name)}`),
 
   // 日志与审计
-  listRequestLogs: (params: Record<string, string> = {}): Promise<any> =>
-    request('GET', `${API_BASE}/logs/requests?${new URLSearchParams(params)}`),
-  listAuditLogs: (params: Record<string, string> = {}): Promise<any> =>
-    request('GET', `${API_BASE}/logs/audits?${new URLSearchParams(params)}`),
+  listRequestLogs: (params: Record<string, string | number> = {}): Promise<any> =>
+    request('GET', `${API_BASE}/logs/requests?${buildQuery(params)}`),
+  listAuditLogs: (params: Record<string, string | number> = {}): Promise<any> =>
+    request('GET', `${API_BASE}/logs/audits?${buildQuery(params)}`),
 
   // 兑换码
   batchRedemptions: (data: any): Promise<any> =>
@@ -401,8 +409,8 @@ export const api = {
 
   // 安全监控
   getSecurityOverview: (): Promise<any> => request('GET', `${API_BASE}/monitor/security`),
-  getSecurityEvents: (params: Record<string, string> = {}): Promise<any> =>
-    request('GET', `${API_BASE}/monitor/security/events?${new URLSearchParams(params)}`),
+  getSecurityEvents: (params: Record<string, string | number> = {}): Promise<any> =>
+    request('GET', `${API_BASE}/monitor/security/events?${buildQuery(params)}`),
 
   // IP 管理
   getIpFilter: (): Promise<any> => request('GET', `${API_BASE}/ip/filter`),
