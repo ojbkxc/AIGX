@@ -4,7 +4,22 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { isAdmin } from '../lib/utils';
 
-const navItems = [
+interface NavItem {
+  path: string;
+  labelKey: string;
+  icon: string;
+  end?: boolean;
+  adminOnly?: boolean;
+}
+
+interface NavGroup {
+  key: string;
+  labelKey?: string;
+  icon?: string;
+  items: NavItem[];
+}
+
+const navItems: NavItem[] = [
   { path: '/', labelKey: '仪表盘', icon: '📊', end: true },
 
   { path: '/channels', labelKey: '渠道管理', icon: '🛰️', adminOnly: true },
@@ -28,7 +43,7 @@ const navItems = [
 
 // 分组定义：17 个一级菜单合并为 8 组，减少侧边栏长度。
 // 仪表盘与日志审计保持独立（高频/独立职能），其余按职能合并。
-const navGroups = [
+const navGroups: NavGroup[] = [
   { key: 'top', items: [navItems[0]] }, // 仪表盘
   {
     key: 'access',
@@ -70,16 +85,16 @@ const navGroups = [
 ];
 
 // 角色过滤：普通用户仅见无 adminOnly 标记的菜单（展示层过滤，权限由后端强制）
-function roleFilter(items) {
+function roleFilter(items: NavItem[]): NavItem[] {
   if (isAdmin()) return items;
   return items.filter((it) => !it.adminOnly);
 }
 
-export default function Sidebar() {
+export default function Sidebar(): JSX.Element {
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
   // 分组折叠状态：默认全部展开，记忆到 localStorage
-  const [collapsedGroups, setCollapsedGroups] = React.useState(() => {
+  const [collapsedGroups, setCollapsedGroups] = React.useState<Record<string, boolean>>(() => {
     try {
       const saved = localStorage.getItem('sidebar_collapsed');
       return saved ? JSON.parse(saved) : {};
@@ -88,7 +103,7 @@ export default function Sidebar() {
     }
   });
 
-  const toggleGroup = (key) => {
+  const toggleGroup = (key: string): void => {
     setCollapsedGroups((prev) => {
       const next = { ...prev, [key]: !prev[key] };
       try { localStorage.setItem('sidebar_collapsed', JSON.stringify(next)); } catch {}
@@ -97,12 +112,13 @@ export default function Sidebar() {
   };
 
   // 判断分组是否含当前激活项（用于自动展开）
-  const isGroupActive = (items) => items.some((it) => window.location.pathname === it.path);
+  const isGroupActive = (items: NavItem[]): boolean =>
+    items.some((it) => window.location.pathname === it.path);
 
-  const handleLogout = async () => {
+  const handleLogout = async (): Promise<void> => {
     try {
       await api.logout();
-    } catch (e) {
+    } catch {
       // Ignore logout errors
     }
     localStorage.removeItem('token');
@@ -113,14 +129,14 @@ export default function Sidebar() {
     navigate('/login');
   };
 
-  const toggleTheme = () => {
+  const toggleTheme = (): void => {
     const html = document.documentElement;
     const isLight = html.getAttribute('data-theme') === 'light';
     html.setAttribute('data-theme', isLight ? 'dark' : 'light');
     localStorage.setItem('theme', isLight ? 'dark' : 'light');
   };
 
-  const toggleLanguage = () => {
+  const toggleLanguage = (): void => {
     const next = i18n.language === 'zh' ? 'en' : 'zh';
     localStorage.setItem('i18n_lang', next);
     i18n.changeLanguage(next);

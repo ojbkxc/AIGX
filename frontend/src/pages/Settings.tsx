@@ -1,12 +1,52 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import ConfirmDialog from '../components/ConfirmDialog';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import './Settings.css';
 
+interface LimitsForm {
+  daily_limit: string;
+  monthly_limit: string;
+  threshold: string;
+  api_timeout_secs: string;
+  max_retries: string;
+}
+
+interface RateLimitConfig {
+  enabled?: boolean;
+  per_key_rpm?: number | null;
+  per_key_tpm?: number | null;
+  per_model_rpm?: number | null;
+  per_user_rpm?: number | null;
+  per_user_tpm?: number | null;
+  per_ip_rpm?: number | null;
+  global_rpm?: number | null;
+  global_tpm?: number | null;
+}
+
+interface CacheStats {
+  entries?: number;
+  count?: number;
+  hit_rate?: number;
+  memory_bytes?: number;
+  size_bytes?: number;
+}
+
+interface PriceSyncConfig {
+  enabled?: boolean;
+  sync_url?: string;
+  interval_secs?: number | null;
+}
+
+type ExchangeRates = Record<string, string | number>;
+
+interface DataResponse<T> {
+  data?: T;
+}
+
 // 格式化字节数为人类可读单位
-function fmtBytes(bytes) {
+function fmtBytes(bytes: number | null | undefined): string {
   const n = Number(bytes || 0);
   if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
   if (n >= 1048576) return (n / 1048576).toFixed(2) + ' MB';
@@ -15,7 +55,7 @@ function fmtBytes(bytes) {
 }
 
 export default function Settings() {
-  const [limits, setLimits] = useState({
+  const [limits, setLimits] = useState<LimitsForm>({
     daily_limit: '',
     monthly_limit: '',
     threshold: '',
@@ -29,28 +69,28 @@ export default function Settings() {
   const { t } = useTranslation();
 
   // 限流配置
-  const [rlConfig, setRlConfig] = useState(null);
+  const [rlConfig, setRlConfig] = useState<RateLimitConfig | null>(null);
   const [rlLoading, setRlLoading] = useState(false);
   const [rlSaving, setRlSaving] = useState(false);
 
   // ── 缓存管理 ──
-  const [cacheStats, setCacheStats] = useState(null);
+  const [cacheStats, setCacheStats] = useState<CacheStats | null>(null);
   const [cacheLoading, setCacheLoading] = useState(false);
   const [cacheClearing, setCacheClearing] = useState(false);
 
   // ── 价格同步配置 ──
-  const [priceSyncConfig, setPriceSyncConfig] = useState(null);
+  const [priceSyncConfig, setPriceSyncConfig] = useState<PriceSyncConfig | null>(null);
   const [priceSyncLoading, setPriceSyncLoading] = useState(false);
   const [priceSyncSaving, setPriceSyncSaving] = useState(false);
   const [priceSyncTriggering, setPriceSyncTriggering] = useState(false);
 
   // ── 汇率配置 ──
-  const [exchangeRates, setExchangeRates] = useState(null);
+  const [exchangeRates, setExchangeRates] = useState<ExchangeRates | null>(null);
   const [exchangeRatesLoading, setExchangeRatesLoading] = useState(false);
   const [exchangeRatesSaving, setExchangeRatesSaving] = useState(false);
 
   // ── 通用确认弹窗（用于清空缓存等危险操作）──
-  const [confirmState, setConfirmState] = useState(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   useEffect(() => {
     loadLimits();
@@ -63,8 +103,8 @@ export default function Settings() {
   const loadRateLimitConfig = async () => {
     setRlLoading(true);
     try {
-      const res = await api.getRateLimitConfig();
-      setRlConfig(res.data || res);
+      const res = (await api.getRateLimitConfig()) as DataResponse<RateLimitConfig> | RateLimitConfig;
+      setRlConfig((res as DataResponse<RateLimitConfig>).data || (res as RateLimitConfig));
     } catch (err) {
       // 限流配置可能未启用，静默处理
     } finally {
@@ -72,8 +112,8 @@ export default function Settings() {
     }
   };
 
-  const handleRlChange = (field, value) => {
-    setRlConfig({ ...rlConfig, [field]: value === '' ? null : Number(value) });
+  const handleRlChange = (field: keyof RateLimitConfig, value: string) => {
+    setRlConfig({ ...(rlConfig as RateLimitConfig), [field]: value === '' ? null : Number(value) });
   };
 
   const handleRlSave = async () => {
@@ -83,7 +123,7 @@ export default function Settings() {
       await api.updateRateLimitConfig(rlConfig);
       addToast(t('限流配置更新成功'));
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRlSaving(false);
     }
@@ -93,8 +133,8 @@ export default function Settings() {
   const loadCacheStats = async () => {
     setCacheLoading(true);
     try {
-      const res = await api.getCacheStats();
-      setCacheStats(res?.data || res);
+      const res = (await api.getCacheStats()) as DataResponse<CacheStats> | CacheStats;
+      setCacheStats((res as DataResponse<CacheStats>).data || (res as CacheStats));
     } catch {
       // 缓存统计可能未启用，静默处理
     } finally {
@@ -116,7 +156,7 @@ export default function Settings() {
           addToast(t('缓存已清空'));
           loadCacheStats();
         } catch (err) {
-          setError(err.message);
+          setError(err instanceof Error ? err.message : String(err));
         } finally {
           setCacheClearing(false);
         }
@@ -128,8 +168,8 @@ export default function Settings() {
   const loadPriceSyncConfig = async () => {
     setPriceSyncLoading(true);
     try {
-      const res = await api.getPriceSyncConfig();
-      setPriceSyncConfig(res?.data || res);
+      const res = (await api.getPriceSyncConfig()) as DataResponse<PriceSyncConfig> | PriceSyncConfig;
+      setPriceSyncConfig((res as DataResponse<PriceSyncConfig>).data || (res as PriceSyncConfig));
     } catch {
       // 价格同步可能未启用，静默处理
     } finally {
@@ -146,7 +186,7 @@ export default function Settings() {
       // P1：保存后立即刷新 last_sync 等后端派生字段
       await loadPriceSyncConfig();
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setPriceSyncSaving(false);
     }
@@ -160,7 +200,7 @@ export default function Settings() {
       addToast(t('价格同步已触发，请稍后查看同步结果'));
       await loadPriceSyncConfig();
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setPriceSyncTriggering(false);
     }
@@ -170,8 +210,8 @@ export default function Settings() {
   const loadExchangeRates = async () => {
     setExchangeRatesLoading(true);
     try {
-      const res = await api.getExchangeRates();
-      setExchangeRates(res?.data || res);
+      const res = (await api.getExchangeRates()) as DataResponse<ExchangeRates> | ExchangeRates;
+      setExchangeRates((res as DataResponse<ExchangeRates>).data || (res as ExchangeRates));
     } catch {
       // 汇率配置可能未启用，静默处理
     } finally {
@@ -179,8 +219,8 @@ export default function Settings() {
     }
   };
 
-  const handleExchangeRateChange = (currency, value) => {
-    setExchangeRates({ ...exchangeRates, [currency]: value === '' ? '' : Number(value) });
+  const handleExchangeRateChange = (currency: string, value: string) => {
+    setExchangeRates({ ...(exchangeRates as ExchangeRates), [currency]: value === '' ? '' : Number(value) });
   };
 
   const handleExchangeRatesSave = async () => {
@@ -190,7 +230,7 @@ export default function Settings() {
       await api.updateExchangeRates(exchangeRates);
       addToast(t('汇率配置已更新'));
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setExchangeRatesSaving(false);
     }
@@ -200,7 +240,7 @@ export default function Settings() {
     setLoading(true);
     setError('');
     try {
-      const res = await api.getLimits();
+      const res = (await api.getLimits()) as DataResponse<Partial<LimitsForm> & { threshold?: number }>;
       const data = res.data || res;
       setLimits({
         daily_limit: data.daily_limit ?? '',
@@ -210,7 +250,7 @@ export default function Settings() {
         max_retries: data.max_retries ?? '',
       });
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -218,12 +258,12 @@ export default function Settings() {
 
   // ── 通知配置已迁移至独立「通知设置」页面（/notify），此处不再承载 ──
 
-  const handleChange = (field, value) => {
+  const handleChange = (field: keyof LimitsForm, value: string) => {
     setLimits({ ...limits, [field]: value });
   };
 
   const handleSave = async () => {
-    const payload = {};
+    const payload: Record<string, number> = {};
     if (limits.daily_limit !== '') payload.daily_limit = Number(limits.daily_limit);
     if (limits.monthly_limit !== '') payload.monthly_limit = Number(limits.monthly_limit);
     if (limits.threshold !== '') payload.threshold = Number(limits.threshold) / 100;
@@ -249,7 +289,7 @@ export default function Settings() {
       await api.updateLimits(payload);
       addToast(t('设置更新成功'));
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
