@@ -1197,3 +1197,102 @@ code {
   font-size: 12px;
   line-height: 1.7;
 }
+
+/* ── Wallet 充值（new-api 式档位 + 支付方式网格 + 结算块） ── */
+.wallet-amount-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.wallet-amount-preset {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 12px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.wallet-amount-preset:hover {
+  border-color: var(--accent-color);
+}
+
+.wallet-amount-preset.active {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 1px var(--accent-color), 0 2px 8px rgba(47, 111, 237, 0.15);
+}
+
+.wallet-amount-num {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.wallet-amount-quota {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.wallet-method-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.wallet-method {
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.wallet-method:hover {
+  border-color: var(--accent-color);
+}
+
+.wallet-method.active {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 1px var(--accent-color), 0 2px 8px rgba(47, 111, 237, 0.15);
+}
+
+.wallet-method-icon {
+  display: block;
+}
+
+.wallet-pay-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--hover-bg, rgba(0, 0, 0, 0.03));
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.wallet-pay-amount {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--accent-color);
+}
+
+.wallet-pay-arrow {
+  color: var(--text-muted);
+}
+
+.wallet-pay-quota {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-main);
+}

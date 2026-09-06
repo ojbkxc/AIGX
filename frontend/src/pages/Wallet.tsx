@@ -2,7 +2,7 @@ import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import { Button, Card, Input, Loading, EmptyState, Select } from '../components/ui';
+import { Button, Card, Input, Loading, EmptyState } from '../components/ui';
 
 interface WalletUser {
   email?: string;
@@ -27,6 +27,9 @@ interface WalletOrder {
   status?: string;
   create_time?: number;
 }
+
+// 预设充值档位（new-api 式快捷金额）
+const AMOUNT_PRESETS = [10, 50, 100, 500];
 
 export default function Wallet(): JSX.Element {
   const [me, setMe] = useState<WalletUser | null>(null);
@@ -186,7 +189,24 @@ export default function Wallet(): JSX.Element {
           </Card>
 
           <Card title={t('充值')} bodyClassName="">
-            <form onSubmit={(e: FormEvent) => { e.preventDefault(); void handleTopup(); }} style={{ display: 'grid', gap: 16, maxWidth: 480 }}>
+            {/* 预设档位（new-api 式）：快捷选择 + 实时换算 */}
+            <div className="wallet-amount-grid">
+              {AMOUNT_PRESETS.map((v) => {
+                const active = Math.floor(Number(amount)) === v;
+                return (
+                  <button
+                    key={v}
+                    type="button"
+                    className={`wallet-amount-preset ${active ? 'active' : ''}`}
+                    onClick={() => setAmount(String(v))}
+                  >
+                    <span className="wallet-amount-num">¥{v}</span>
+                    <span className="wallet-amount-quota">{fmtQuota(v * (epay.price || 1))} {t('配额')}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <form onSubmit={(e: FormEvent) => { e.preventDefault(); void handleTopup(); }} style={{ display: 'grid', gap: 16, maxWidth: 480, marginTop: 14 }}>
               <Input
                 label={t('充值金额（元）')}
                 type="number"
@@ -196,13 +216,30 @@ export default function Wallet(): JSX.Element {
                 onChange={(e) => setAmount(e.target.value)}
                 hint={`${t('最低')} ${epay.min_topup || 1} ${t('元，将获得')} ${fmtQuota((Number(amount) || 0) * (epay.price || 1))} ${t('配额')}`}
               />
-              <Select label={t('支付方式')} value={method} onChange={(e) => setMethod(e.target.value)}>
-                {methods.map((m) => (
-                  <option key={m} value={m}>
-                    {m === 'alipay' ? t('支付宝') : m === 'wxpay' ? t('微信支付') : m}
-                  </option>
-                ))}
-              </Select>
+              {/* 支付方式按钮网格（new-api 式） */}
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8 }}>{t('支付方式')}</div>
+                <div className="wallet-method-grid">
+                  {methods.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      className={`wallet-method ${method === m ? 'active' : ''}`}
+                      onClick={() => setMethod(m)}
+                    >
+                      <span className="wallet-method-icon">{m === 'alipay' ? '支付宝' : m === 'wxpay' ? '微信' : m}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {/* 实付结算块 */}
+              <div className="wallet-pay-summary">
+                <span>{t('实付金额')}</span>
+                <span className="wallet-pay-amount">¥{Math.floor(Number(amount)) || 0}</span>
+                <span className="wallet-pay-arrow">→</span>
+                <span>{t('获得配额')}</span>
+                <span className="wallet-pay-quota">{fmtQuota((Number(amount) || 0) * (epay.price || 1))}</span>
+              </div>
               <Button type="submit" disabled={submitting}>
                 {submitting ? t('正在跳转...') : t('立即充值')}
               </Button>
