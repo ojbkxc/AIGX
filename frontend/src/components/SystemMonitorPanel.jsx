@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import * as networkApi from '../api/network';
-import { Metrics } from '../types/network';
+import type { Metrics } from '../types/network';
 import './SystemMonitorPanel.css';
 import { Signal, Activity, Server, Database, Cloud, Percent, Zap } from 'lucide-react';
 

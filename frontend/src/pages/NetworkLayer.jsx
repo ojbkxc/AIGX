@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api as networkApi } from '../api/network';
-import { NetworkStatus as NetworkStatusType } from '../types/network';
+import type { NetworkStatus as NetworkStatusType } from '../types/network';
 import { getNetworkStatus, updateNetworkConfig, restartNetwork } from '../api/network';
 import './NetworkLayer.css';
 
