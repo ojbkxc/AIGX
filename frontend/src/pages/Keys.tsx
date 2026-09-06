@@ -435,27 +435,27 @@ export default function Keys(): JSX.Element {
                     ))}
                   </Select>
                   <Input
-                    label={`${t('模型白名单')} (${t('逗号分隔，留空则允许全部')})`}
+                    label={`${t('模型白名单')} ${t('(逗号分隔，留空则允许全部)')}`}
                     placeholder={editing ? t('留空表示不修改') : 'glm-5.2, deepseek-v3, kimi-k2.6'}
                     value={form.allowed_models}
                     onChange={(e) => setForm({ ...form, allowed_models: e.target.value })}
                   />
                   <Input
-                    label={`${t('过期时间')} (${t('Unix 时间戳，留空则永不过期')})`}
+                    label={`${t('过期时间')} ${t('(Unix 时间戳，留空则永不过期)')}`}
                     type="number"
                     placeholder={editing ? t('留空表示不修改') : t('keysPlaceholderExpiresAt')}
                     value={form.expires_at}
                     onChange={(e) => setForm({ ...form, expires_at: e.target.value })}
                   />
                   <Input
-                    label={`${t('额度上限')} (${t('留空则无上限')})`}
+                    label={`${t('额度上限')} ${t('(留空则无上限)')}`}
                     type="number"
                     placeholder={editing ? t('留空表示不修改') : t('keysPlaceholderQuotaLimit')}
                     value={form.quota_limit}
                     onChange={(e) => setForm({ ...form, quota_limit: e.target.value })}
                   />
                   <Input
-                    label={`${t('IP 限制')} (${t('逗号分隔，留空则不限制')})`}
+                    label={`${t('IP 限制')} ${t('(逗号分隔，留空则不限制)')}`}
                     placeholder={editing ? t('留空表示不修改') : t('keysPlaceholderIpLimit')}
                     value={form.ip_limit}
                     onChange={(e) => setForm({ ...form, ip_limit: e.target.value })}
