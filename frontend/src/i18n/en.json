@@ -668,5 +668,8 @@
 "导航菜单": "Navigation menu",
 "暂无数据": "No data yet",
 "总量": "Total",
-"渠道是上游 AI 服务的接入点：填入 Base URL 与密钥后即可转发请求。": "A channel is an upstream AI endpoint: fill in Base URL and API key to start forwarding requests."
+"渠道是上游 AI 服务的接入点：填入 Base URL 与密钥后即可转发请求。": "A channel is an upstream AI endpoint: fill in Base URL and API key to start forwarding requests.",
+"参数预设": "Parameter presets",
+"上下文 ≈": "Context ≈",
+"复制消息": "Copy message"
 }

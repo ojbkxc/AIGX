@@ -274,6 +274,38 @@
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+  position: relative;
+}
+
+.chat-debugger-copy-btn {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.chat-debugger-msg:hover .chat-debugger-copy-btn {
+  opacity: 1;
+}
+
+.chat-debugger-copy-btn:hover {
+  color: var(--accent-color, #2f6fed);
+}
+
+@media (hover: none) {
+  .chat-debugger-copy-btn {
+    opacity: 0.55;
+  }
 }
 
 .chat-debugger-msg-media {
@@ -317,6 +349,14 @@
   display: flex;
   gap: 8px;
   align-items: flex-end;
+}
+
+.chat-debugger-context {
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.75;
+  line-height: 1;
 }
 
 .chat-debugger-input-row textarea {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Search, Send, Trash2, Image, Video, AudioLines, Loader2, Bot, User } from 'lucide-react';
+import { Search, Send, Trash2, Image, Video, AudioLines, Loader2, Bot, User, Copy, Check } from 'lucide-react';
 import { api } from '../api';
 import './ChatDebugger.css';
 
@@ -53,6 +53,10 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const [protocol, setProtocol] = useState<'openai' | 'anthropic'>(initialProtocol);
   const [stream, setStream] = useState(true);
   const [systemPrompt, setSystemPrompt] = useState('');
+  // 系统提示词预设：无（默认）/通用/代码/翻译
+  const [promptPreset, setPromptPreset] = useState('');
+  // 参数预设：平衡/严谨/创意（联动温度）
+  const [tempPreset, setTempPreset] = useState('');
   const [temperature, setTemperature] = useState('0.7');
   const [maxTokens, setMaxTokens] = useState('1024');
   const [query, setQuery] = useState('');
@@ -64,6 +68,62 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const [attachments, setAttachments] = useState<Array<{ kind: 'image' | 'video' | 'audio'; url: string }>>([]);
   const [attachKind, setAttachKind] = useState<'image' | 'video' | 'audio'>('image');
   const [attachUrl, setAttachUrl] = useState('');
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+
+  // 系统提示词预设（与 i18n 词条保持一致）
+  const PROMPT_PRESETS: Record<string, string> = {
+    general: '你是一个乐于助人的 AI 助手，请用简洁清晰的语言回答。',
+    code: '你是一位资深软件工程师。请给出可运行的代码示例，优先使用主流最佳实践，并简要解释关键点。',
+    translate: '你是一名专业翻译。请把用户输入准确翻译为目标语言，保持原意、语气与格式。',
+  };
+
+  // 参数预设：温度（严谨 0.2 / 平衡 0.7 / 创意 1.3）
+  const TEMP_PRESETS: Record<string, string> = {
+    precise: '0.2',
+    balanced: '0.7',
+    creative: '1.3',
+  };
+
+  // 上下文估算：中文按 1 字≈1 token，其他按 4 字符≈1 token，仅作展示
+  const contextEstimate = messages.reduce((n, m) => {
+    const text = m.content || '';
+    const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+    const other = text.length - cjk;
+    return n + cjk + Math.ceil(other / 4);
+  }, 0) + input.length;
+
+  const copyMessage = (text: string, idx: number): void => {
+    const fallbackCopy = (): boolean => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch {
+        return false;
+      }
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => {
+        setCopiedIdx(idx);
+        setTimeout(() => setCopiedIdx(null), 1500);
+      }).catch(() => {
+        if (fallbackCopy()) {
+          setCopiedIdx(idx);
+          setTimeout(() => setCopiedIdx(null), 1500);
+        }
+      });
+    } else if (fallbackCopy()) {
+      setCopiedIdx(idx);
+      setTimeout(() => setCopiedIdx(null), 1500);
+    }
+  };
 
   // 合并模型：渠道模型优先，网关映射模型兜底（去重）
   useEffect(() => {
@@ -227,6 +287,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const clearAll = (): void => {
     setMessages([]);
     setError('');
+    setPromptPreset('');
+    setTempPreset('');
   };
 
   return (
@@ -300,6 +362,43 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
           <option value="openai">OpenAI /v1/chat/completions</option>
           <option value="anthropic">Anthropic /v1/messages</option>
         </select>
+
+        {!compact && (
+          <>
+            <select
+              className="form-input chat-debugger-protocol"
+              style={{ minWidth: 150 }}
+              value={promptPreset}
+              onChange={(e) => {
+                const v = e.target.value;
+                setPromptPreset(v);
+                setSystemPrompt(PROMPT_PRESETS[v] || '');
+              }}
+              title={t('系统提示词预设')}
+            >
+              <option value="">{t('系统提示词预设')}</option>
+              <option value="general">{t('通用助手')}</option>
+              <option value="code">{t('代码助手')}</option>
+              <option value="translate">{t('翻译助手')}</option>
+            </select>
+            <select
+              className="form-input chat-debugger-protocol"
+              style={{ minWidth: 130 }}
+              value={tempPreset}
+              onChange={(e) => {
+                const v = e.target.value;
+                setTempPreset(v);
+                if (TEMP_PRESETS[v]) setTemperature(TEMP_PRESETS[v]);
+              }}
+              title={t('参数预设')}
+            >
+              <option value="">{t('参数预设')}</option>
+              <option value="balanced">{t('平衡')}</option>
+              <option value="precise">{t('严谨')}</option>
+              <option value="creative">{t('创意')}</option>
+            </select>
+          </>
+        )}
 
         <label className="chat-debugger-stream">
           <input
@@ -398,6 +497,14 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
                 </div>
               ))}
               <div className="chat-debugger-msg-content">{m.content}</div>
+              <button
+                type="button"
+                className="chat-debugger-copy-btn"
+                title={t('复制消息')}
+                onClick={() => copyMessage(m.content, i)}
+              >
+                {copiedIdx === i ? <Check size={12} /> : <Copy size={12} />}
+              </button>
             </div>
           </div>
         ))}
@@ -413,6 +520,12 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       </div>
 
       {error && <div className="error-message">{error}</div>}
+
+      {!compact && messages.length > 0 && (
+        <div className="chat-debugger-context" title={t('上下文 ≈')}>
+          {t('上下文 ≈')} {contextEstimate.toLocaleString()} tokens
+        </div>
+      )}
 
       <div className="chat-debugger-input-row">
         <textarea
