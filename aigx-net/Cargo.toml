@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 authors = ["AIGX Team"]
 description = "AIGX Network Layer - Professional Network Connection Management"
-license = "MIT"
+license-file = "../LICENSE"
 
 [features]
 default = []

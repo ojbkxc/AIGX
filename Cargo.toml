@@ -21,7 +21,7 @@ name = "aigx"
 version = "1.0.1"
 description = "AIGX — OpenAI-compatible AI gateway with multi-account Cloudflare Workers AI and Epay support"
 edition = "2021"
-license = "MIT"
+license-file = "LICENSE"
 
 # ── Feature flags ────────────────────────────────────────────────────
 # 多数据库支持：默认使用 FileStore + rusqlite KV 存储，零配置零依赖。
