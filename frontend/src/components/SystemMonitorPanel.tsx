@@ -4,6 +4,31 @@ import type { Metrics, NetworkStatusRaw } from '../types/network';
 import './SystemMonitorPanel.css';
 import { Signal, Activity, Server, Database, Cloud, Zap } from 'lucide-react';
 
+/** 将后端网络层状态（snake_case）映射为面板指标 */
+function toMetrics(raw: NetworkStatusRaw): Metrics {
+  const cp = raw.connection_pool;
+  const ap = raw.account_pool;
+  const totalRequests = cp.successful_requests + cp.failed_requests;
+  const errorRate = totalRequests > 0 ? cp.failed_requests / totalRequests : 0;
+  const pct = (part: number, whole: number): number =>
+    whole > 0 ? Math.min(100, Math.round((part / whole) * 100)) : 0;
+
+  return {
+    cpuUsage: pct(cp.active_connections, cp.total_connections),
+    memoryUsage: pct(ap.busy_accounts + ap.error_accounts, ap.total_accounts),
+    diskUsage: pct(raw.session_pool.active_sessions, raw.session_pool.total_sessions),
+    networkTx: cp.successful_requests,
+    networkRx: cp.failed_requests,
+    activeConnections: cp.active_connections,
+    throughput: totalRequests,
+    errorRate: Number(errorRate.toFixed(4)),
+    successRate: Number((1 - errorRate).toFixed(4)),
+    avgLatency: cp.avg_latency_ms,
+    currentLoad: pct(ap.busy_accounts, ap.total_accounts),
+    uptime: raw.last_check_at,
+  };
+}
+
 interface MetricCardProps {
   title: string;
   value: string | number;
