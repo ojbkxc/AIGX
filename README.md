@@ -2,12 +2,12 @@
 
 <div align="center">
 
-**高性能 · 多协议 · 可扩展的 AI 中转网关**
+**多协议 · 可扩展的 AI 中转网关**
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange)](https://www.rust-lang.org)
 [![React](https://img.shields.io/badge/React-18+-61DAFB)](https://react.dev)
 [![License](https://img.shields.io/badge/License-Free_Personal_Use-blue)](#许可证)
-[![Docker](https://img.shields.io/badge/Docker-Supported-2496ED)](https://www.docker.com)
+[![Version](https://img.shields.io/badge/Version-1.0.1-blue)](#快速开始)
 
 [English](#english) · [中文](#中文)
 
@@ -17,7 +17,7 @@
 
 ## 项目简介
 
-AIGX 是一个 **OpenAI / Anthropic 兼容的 AI 中转网关**。它聚合多个上游 AI 服务（Cloudflare Workers AI、OpenAI 兼容上游、Anthropic、Gemini、智谱 Z.AI），向下游客户端暴露统一的 API 入口，并在网关层提供认证鉴权、多维度限流、分组权限、模型定价与倍率、多渠道智能调度、支付充值、日志审计与安全监控等完整能力。
+AIGX 是一个 **OpenAI / Anthropic 兼容的 AI 中转网关**。它聚合多个上游 AI 服务（Cloudflare Workers AI、OpenAI 兼容上游、Anthropic、Gemini、智谱 Z.AI），向下游客户端暴露统一的 API 入口，并在网关层提供认证鉴权、多维度限流、分组权限、模型定价与倍率、多渠道智能调度、支付充值、日志审计与安全监控等能力。
 
 架构上参照了 [new-api](https://github.com/QuantumNous/new-api) 的功能布局与 [aisix](https://github.com/aisix/aisix) 的 Rust 实现思路，UI 设计借鉴了 [cf-ai-gw](https://github.com/o-t-w/cf-ai-gw) 的玻璃拟态风格。
 
@@ -77,41 +77,43 @@ AIGX 是一个 **OpenAI / Anthropic 兼容的 AI 中转网关**。它聚合多�
 - **React 前端**：React 18 + TypeScript（全量类型化）+ Vite，玻璃拟态管理后台，支持中英文切换与暗色主题
 - **存储灵活**：默认 FileStore（bundled SQLite KV，零配置）；可选 SeaORM 接入 PostgreSQL / MySQL
 - **多平台**：Linux / Windows / macOS，AMD64 / ARM64 预编译产物
-- **容器化**：多阶段 Dockerfile，非特权用户运行，健康检查内建
+- **零依赖部署**：单二进制 + 静态前端，无需外部运行时；Docker/K8s 部署方式见[部署指南](./DEPLOYMENT.md)
 
 ---
 
 ## 快速开始
 
-### Docker Compose（推荐）
+### 预编译二进制（推荐）
+
+从 [GitHub Releases](https://github.com/ojbkxc/AIGX/releases) 下载对应平台的二进制，解压后直接运行即可（前端管理面板已内置在 `static/`，与二进制同目录部署）：
 
 ```bash
-# 克隆仓库
-git clone https://github.com/ojbkxc/AIGX.git
-cd AIGX
+# Linux / macOS
+chmod +x aigx-linux-amd64
+./aigx-linux-amd64
 
-# 1. 构建镜像（仅首次，或代码更新后）
-docker compose build
-
-# 2. 启动服务（后端默认映射到宿主 9527，前端映射到 80）
-docker compose up -d
+# Windows
+aigx-windows-amd64.exe
 ```
 
-启动后访问 `http://localhost`（前端管理面板），API 数据面入口为 `http://localhost:9527`。
+启动后管理面板与数据面共用同一端口（默认 `8080`，见 `~/.aigx/config.toml` 的 `[server]`）：
 
-> **初始管理员**：首次启动内置管理员 `admin`，初始密码为 `123456`；容器默认配置在 `docker-compose.yml` 中。**生产环境部署前必须**通过环境变量修改 `ADMIN_PASSWORD` 与 `JWT_SECRET`。
+- 管理面板：`http://127.0.0.1:8080/`
+- 数据面入口：`http://127.0.0.1:8080/v1`
 
-### 本地构建运行
+> **初始管理员**：首次启动自动创建内置管理员（用户名 `admin`，密码 `123456`，邮箱 `admin@gmail.com`）。**生产环境部署后请立即登录并在「用户」页面修改密码**；如有外网暴露，建议通过反向代理加 TLS 与访问控制。
+
+### 从源码构建
 
 ```bash
 # 后端（默认 FileStore + SQLite，零外部依赖）
 cargo build --release
 ./target/release/aigx
 
-# 前端（开发模式，端口 3000）
+# 前端（产物输出到 ../static，由后端同目录托管）
 cd frontend
 npm install
-npm run dev
+npm run build
 ```
 
 后端配置保存在 `~/.aigx/config.toml`，数据保存在 `~/.aigx/data`。配置文件在首次启动时自动生成，常用配置项包括：
@@ -129,15 +131,6 @@ url = ""
 [usage]
 daily_limit = 10000
 monthly_limit = 100000
-```
-
-### 预编译二进制
-
-从 [GitHub Releases](https://github.com/ojbkxc/AIGX/releases) 下载对应平台的二进制，直接运行即可。Linux 下需先赋予执行权限：
-
-```bash
-chmod +x aigx-linux-x86_64
-./aigx-linux-x86_64
 ```
 
 ### 对接你的 AI 应用
@@ -167,10 +160,9 @@ API Key:  sk-xxxxxxxxxxxxxxxx（网关创建的令牌）
 │   └── storage/       #   FileStore / SQLite KV
 ├── aigx-net/          # 独立网络层 crate
 ├── frontend/          # React + Vite 管理后台
-├── containers/        # 容器构建辅助
 ├── monitoring/        # 监控配置
 ├── docs/              # 详细文档
-└── Dockerfile         # 多阶段生产镜像
+└── static/            # 前端构建产物（随二进制分发）
 ```
 
 ---
@@ -210,7 +202,7 @@ API Key:  sk-xxxxxxxxxxxxxxxx（网关创建的令牌）
 
 - ✅ **允许**：个人学习、研究、自用、非商业用途的部署与修改
 - ❌ **禁止**：未经授权的商业使用，包括但不限于对外售卖、SaaS 化服务、集成到商业产品、以本项目为基础提供付费服务
-- 📩 **商业授权**：如需将 AIGX 用于商业场景，请联系作者获取书面授权
+- 📩 **商业授权**：如需将 AIGX 用于商业场景，请通过 [GitHub Issues](https://github.com/ojbkxc/AIGX/issues) 或作者邮箱（见提交记录）联系作者获取书面授权
 
 > 本说明不构成法律意见。任何超出上述范围的使用，请务必事先与作者确认。
 

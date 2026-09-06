@@ -1,5 +1,5 @@
 /**
- * AIGX 前端共享工具（100年不过时的接口层）
+ * AIGX 前端共享工具
  * clsx + tailwind-merge 组合，参照 new-api / ds-free-api 的 cn() 惯例
  */
 

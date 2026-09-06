@@ -1,4 +1,4 @@
-// UI 组件库导出（100年不过时的接口层）
+// UI 组件库导出
 export { default as Button } from './Button';
 export { default as Badge } from './Badge';
 export { default as Loading } from './Loading';
