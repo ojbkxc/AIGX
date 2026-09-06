@@ -16,6 +16,7 @@ interface EpayConfig {
   pay_address?: string;
   min_topup?: number;
   price?: number;
+  amount_discount?: Record<string, number>;
   pay_methods?: string[];
 }
 
@@ -78,6 +79,24 @@ export default function Wallet(): JSX.Element {
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
     if (n >= 1_000) return (n / 1_000).toFixed(2) + 'K';
     return String(n);
+  };
+
+  // 与后端 pay_money/topup_quota 对齐：档位折扣（金额 → 折扣比例）
+  const discountFor = (amt: number): number => {
+    const d = epay?.amount_discount;
+    if (!d) return 1;
+    const v = d[String(amt)] ?? d[amt];
+    return typeof v === 'number' && v > 0 ? v : 1;
+  };
+
+  const payMoney = (amt: number): number => {
+    const money = amt * discountFor(amt);
+    return Math.round(money * 100) / 100;
+  };
+
+  const quotaFor = (amt: number): number => {
+    const quota = amt * (epay?.price || 1) * discountFor(amt);
+    return quota;
   };
 
   const handleTopup = async () => {
@@ -202,7 +221,10 @@ export default function Wallet(): JSX.Element {
                     onClick={() => setAmount(String(v))}
                   >
                     <span className="wallet-amount-num">¥{v}</span>
-                    <span className="wallet-amount-quota">{fmtQuota(v * (epay.price || 1))} {t('配额')}</span>
+                    <span className="wallet-amount-quota">
+                      {fmtQuota(quotaFor(v))} {t('配额')}
+                      {discountFor(v) < 1 && <em style={{ marginLeft: 4, fontStyle: 'normal', color: '#34d399' }}>{t('折扣')} {discountFor(v)}</em>}
+                    </span>
                   </button>
                 );
               })}
@@ -215,7 +237,7 @@ export default function Wallet(): JSX.Element {
                 min={epay.min_topup || 1}
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
-                hint={`${t('最低')} ${epay.min_topup || 1} ${t('元，将获得')} ${fmtQuota((Number(amount) || 0) * (epay.price || 1))} ${t('配额')}`}
+                hint={`${t('最低')} ${epay.min_topup || 1} ${t('元，将获得')} ${fmtQuota(quotaFor(Number(amount) || 0))} ${t('配额')}`}
               />
               {/* 支付方式按钮网格（new-api 式） */}
               <div>
@@ -236,10 +258,10 @@ export default function Wallet(): JSX.Element {
               {/* 实付结算块 */}
               <div className="wallet-pay-summary">
                 <span>{t('实付金额')}</span>
-                <span className="wallet-pay-amount">¥{Math.floor(Number(amount)) || 0}</span>
+                <span className="wallet-pay-amount">¥{payMoney(Number(amount) || 0)}</span>
                 <span className="wallet-pay-arrow">→</span>
                 <span>{t('获得配额')}</span>
-                <span className="wallet-pay-quota">{fmtQuota((Number(amount) || 0) * (epay.price || 1))}</span>
+                <span className="wallet-pay-quota">{fmtQuota(quotaFor(Number(amount) || 0))}</span>
               </div>
               <Button type="submit" disabled={submitting}>
                 {submitting ? t('正在跳转...') : t('立即充值')}

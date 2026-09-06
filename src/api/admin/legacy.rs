@@ -530,6 +530,7 @@ pub async fn handle_get_epay_info(
             "enabled": config.epay.ready(),
             "pay_methods": config.epay.pay_methods,
             "price": config.epay.price,
+            "amount_discount": config.epay.amount_discount,
             "min_topup": config.epay.min_topup,
         }
     })))

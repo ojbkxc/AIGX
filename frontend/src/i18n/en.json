@@ -690,5 +690,6 @@
 "充值金额（元）": "Amount (CNY)",
 "折扣比例": "Discount ratio",
 "删除此档位": "Remove this tier",
-"例如 100 元 → 0.9 表示充值 100 元按 9 折入账。对应 new-api 的 EpayAmountDiscount。": "e.g. 100 CNY → 0.9 credits at 90%. Maps to new-api EpayAmountDiscount."
+"例如 100 元 → 0.9 表示充值 100 元按 9 折入账。对应 new-api 的 EpayAmountDiscount。": "e.g. 100 CNY → 0.9 credits at 90%. Maps to new-api EpayAmountDiscount.",
+"折扣": "Discount"
 }

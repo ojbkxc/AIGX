@@ -690,5 +690,6 @@
 "充值金额（元）": "充值金额（元）",
 "折扣比例": "折扣比例",
 "删除此档位": "删除此档位",
-"例如 100 元 → 0.9 表示充值 100 元按 9 折入账。对应 new-api 的 EpayAmountDiscount。": "例如 100 元 → 0.9 表示充值 100 元按 9 折入账。对应 new-api 的 EpayAmountDiscount。"
+"例如 100 元 → 0.9 表示充值 100 元按 9 折入账。对应 new-api 的 EpayAmountDiscount。": "例如 100 元 → 0.9 表示充值 100 元按 9 折入账。对应 new-api 的 EpayAmountDiscount。",
+"折扣": "折扣"
 }
