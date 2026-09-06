@@ -58,7 +58,8 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # ghcr 要求镜像名小写
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -95,11 +96,19 @@ jobs:
       (github.event_name == 'workflow_dispatch' && inputs.push_to_registry == true)
 
     steps:
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Check multi-platform availability
         id: check-manifest
         run: |
-          # 检查 Docker 镜像清单
-          MANIFEST=$(docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest 2>&1)
+          # 检查 Docker 镜像清单（镜像大小写规范化：ghcr 要求小写）
+          IMAGE=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          MANIFEST=$(docker manifest inspect ${{ env.REGISTRY }}/${IMAGE}:latest 2>&1)
           if echo "$MANIFEST" | grep -q '"architecture"'; then
             echo "✓ Multi-platform image verified"
             echo "platforms<<EOF" >> $GITHUB_OUTPUT
