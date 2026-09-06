@@ -47,6 +47,12 @@ jobs:
         run: |
           test -f static/index.html
           echo "Frontend output verified: static/index.html"
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aigx-static
+          path: static/
+          retention-days: 7
 
   rust-matrix:
     name: ${{ matrix.name }}
