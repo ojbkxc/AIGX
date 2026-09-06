@@ -4,6 +4,28 @@ import type { Metrics, NetworkStatusRaw } from '../types/network';
 import './SystemMonitorPanel.css';
 import { Signal, Activity, Server, Database, Cloud, Zap } from 'lucide-react';
 
+/** 将后端网络层状态（snake_case）映射为面板指标 */
+function toMetrics(s: NetworkStatusRaw): Metrics {
+  const cp = s.connection_pool || { active_connections: 0, total_connections: 0, idle_connections: 0, avg_latency_ms: 0 };
+  const ap = s.account_pool || { total_requests: 0, failed_requests: 0 };
+  const totalReq = ap.total_requests || 0;
+  const failedReq = ap.failed_requests || 0;
+  return {
+    cpuUsage: cp.total_connections ? (cp.active_connections / cp.total_connections) * 100 : 0,
+    memoryUsage: cp.total_connections ? ((cp.total_connections - (cp.idle_connections || 0)) / cp.total_connections) * 100 : 0,
+    diskUsage: 0,
+    networkTx: 0,
+    networkRx: 0,
+    activeConnections: cp.active_connections || 0,
+    throughput: totalReq,
+    errorRate: totalReq ? (failedReq / totalReq) * 100 : 0,
+    successRate: totalReq ? ((totalReq - failedReq) / totalReq) * 100 : 100,
+    avgLatency: cp.avg_latency_ms || 0,
+    currentLoad: cp.active_connections || 0,
+    uptime: s.last_check_at || 0,
+  };
+}
+
 interface MetricCardProps {
   title: string;
   value: string | number;
@@ -324,8 +346,8 @@ export default function SystemMonitorPanel() {
                 </div>
               </div>
             </div>
-            <div className="scaling-bar-background" style={{ width: `${metrics.currentLoad}%` }}>
-              <div className="scaling-bar-indicator" style={{ left: `${metrics.currentLoad}%`, borderColor: metrics.currentLoad > 90 ? '#ef4444' : '#22c55e' }} />
+            <div className="scaling-bar-background" style={{ width: `${metrics.currentLoad ?? 0}%` }}>
+              <div className="scaling-bar-indicator" style={{ left: `${metrics.currentLoad ?? 0}%`, borderColor: metrics.currentLoad > 90 ? '#ef4444' : '#22c55e' }} />
             </div>
           </div>
         </div>
@@ -334,7 +356,33 @@ export default function SystemMonitorPanel() {
   );
 }
 
+function toMetrics(raw: NetworkStatusRaw): Metrics {
+  const connection = raw.connection_pool;
+  const account = raw.account_pool;
+  const session = raw.session_pool;
+  const totalRequests = connection.successful_requests + connection.failed_requests;
+  const errorRate = totalRequests > 0 ? connection.failed_requests / totalRequests : 0;
+  const pct = (part: number, whole: number): number =>
+    whole > 0 ? Math.min(100, Math.round((part / whole) * 100)) : 0;
+
+  return {
+    cpuUsage: pct(connection.active_connections, connection.total_connections),
+    memoryUsage: pct(account.busy_accounts + account.error_accounts, account.total_accounts),
+    diskUsage: pct(session.active_sessions, session.total_sessions),
+    networkTx: connection.successful_requests,
+    networkRx: connection.failed_requests,
+    activeConnections: connection.active_connections,
+    throughput: totalRequests,
+    errorRate: Number(errorRate.toFixed(4)),
+    successRate: Number((1 - errorRate).toFixed(4)),
+    avgLatency: connection.avg_latency_ms,
+    currentLoad: pct(account.busy_accounts, account.total_accounts),
+    uptime: 0,
+  };
+}
+
 function formatDuration(seconds: number | null | undefined): string {
+  if (seconds == null) return '—';
   if (seconds === null || seconds === undefined || isNaN(seconds)) {
     return '0秒';
   }
