@@ -17,6 +17,9 @@ package-lock.json
 .env.local
 .env.development.local
 
+# 服务器部署助手（含服务器凭据，禁止提交）
+scripts/
+
 # Docker
 .docker/
 
