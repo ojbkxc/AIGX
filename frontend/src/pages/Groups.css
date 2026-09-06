@@ -22,17 +22,17 @@
   border-radius: 10px;
   font-size: 10px;
   font-weight: 600;
-  background: rgba(168, 85, 247, 0.15);
-  color: #c084fc;
-  border: 1px solid rgba(168, 85, 247, 0.25);
+  background: rgba(47, 111, 237, 0.15);
+  color: #7ca4f5;
+  border: 1px solid rgba(47, 111, 237, 0.25);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   vertical-align: middle;
 }
 
 :root[data-theme="light"] .default-tag {
-  background: rgba(168, 85, 247, 0.08);
-  color: #9333ea;
+  background: rgba(47, 111, 237, 0.08);
+  color: #2f6fed;
 }
 
 /* 倍率徽章 — 高倍率(>1)用警告色，低倍率用成功色 */
@@ -42,7 +42,7 @@
   border-radius: 6px;
   font-size: 12px;
   font-weight: 600;
-  font-family: 'Outfit', sans-serif;
+  font-family: 'Inter', sans-serif;
   font-variant-numeric: tabular-nums;
 }
 

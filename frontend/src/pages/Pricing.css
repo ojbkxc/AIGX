@@ -49,12 +49,12 @@
 .sub-tab.active {
   background: var(--primary-gradient);
   color: white;
-  box-shadow: 0 2px 8px rgba(168, 85, 247, 0.3);
+  box-shadow: 0 2px 8px rgba(47, 111, 237, 0.3);
 }
 
 /* 价格单元格 */
 .price-cell {
-  font-family: 'Outfit', sans-serif;
+  font-family: 'Inter', sans-serif;
   font-variant-numeric: tabular-nums;
   font-weight: 500;
 }

@@ -23,7 +23,7 @@
 
   .glass-input:focus {
     border-color: var(--accent-color);
-    box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.2);
+    box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.2);
     outline: none;
   }
 
@@ -44,7 +44,7 @@
   .glass-switch-on {
     background: var(--primary-gradient);
     border-color: transparent;
-    box-shadow: 0 2px 10px rgba(168, 85, 247, 0.35);
+    box-shadow: 0 2px 10px rgba(47, 111, 237, 0.35);
   }
 
   .glass-switch-thumb {
@@ -105,35 +105,38 @@
 }
 
 :root {
-  --bg-color: #0b0f19;
-  --card-bg: rgba(30, 41, 59, 0.45);
-  --border-color: rgba(255, 255, 255, 0.08);
-  --text-main: #f8fafc;
-  --text-muted: #94a3b8;
-  --primary-gradient: linear-gradient(135deg, #6366f1 0%, #a855f7 50%, #ec4899 100%);
-  --accent-color: #a855f7;
-  --input-bg: rgba(15, 23, 42, 0.6);
-  --input-border: rgba(255, 255, 255, 0.1);
-  --input-text: #f8fafc;
-  --btn-secondary-bg: rgba(255, 255, 255, 0.06);
-  --btn-secondary-hover: rgba(255, 255, 255, 0.12);
-  --btn-secondary-text: #f8fafc;
-  --modal-overlay-bg: rgba(8, 10, 18, 0.6);
-  --glass-blur: 20px;
-  --card-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
-  --orb-1-color: rgba(99, 102, 241, 0.15);
-  --orb-2-color: rgba(236, 72, 153, 0.12);
+  /* 设计令牌对齐 open-webui：中性灰阶（oklch）+ 单一蓝色强调色，
+   * 去掉紫色玻璃拟态渐变与装饰性光斑，保持克制的圆角/阴影。 */
+  --bg-color: #101010;
+  --card-bg: #1a1a1a;
+  --border-color: rgba(255, 255, 255, 0.09);
+  --text-main: #ededed;
+  --text-muted: #9a9a9a;
+  --primary-gradient: linear-gradient(180deg, #2f6fed 0%, #2a5fdd 100%);
+  --accent-color: #2f6fed;
+  --primary-color: #2f6fed;
+  --input-bg: #1a1a1a;
+  --input-border: rgba(255, 255, 255, 0.11);
+  --input-text: #ededed;
+  --btn-secondary-bg: rgba(255, 255, 255, 0.05);
+  --btn-secondary-hover: rgba(255, 255, 255, 0.1);
+  --btn-secondary-text: #ededed;
+  --modal-overlay-bg: rgba(0, 0, 0, 0.6);
+  --glass-blur: 12px;
+  --card-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  --orb-1-color: rgba(47, 111, 237, 0.06);
+  --orb-2-color: rgba(47, 111, 237, 0.04);
   --success-color: #10b981;
   --warning-color: #f59e0b;
   --danger-color: #ef4444;
-  --sidebar-bg: rgba(15, 23, 42, 0.6);
-  --sidebar-menu-hover: rgba(255, 255, 255, 0.04);
-  --table-header-bg: rgba(0, 0, 0, 0.2);
-  --section-item-bg: rgba(255, 255, 255, 0.02);
-  --code-bg: rgba(0, 0, 0, 0.25);
-  --code-color: #e9d5ff;
-  --code-border: rgba(255, 255, 255, 0.04);
-  --sidebar-width: 216px;
+  --sidebar-bg: rgba(18, 18, 18, 0.85);
+  --sidebar-menu-hover: rgba(255, 255, 255, 0.05);
+  --table-header-bg: rgba(255, 255, 255, 0.03);
+  --section-item-bg: rgba(255, 255, 255, 0.03);
+  --code-bg: rgba(47, 111, 237, 0.12);
+  --code-color: #7ca4f5;
+  --code-border: rgba(47, 111, 237, 0.25);
+  --sidebar-width: 224px;
   --font-size-sm: 12px;
   --font-size-md: 13px;
   --control-pad-y: 6px;
@@ -141,31 +144,31 @@
 }
 
 :root[data-theme="light"] {
-  --bg-color: #f1f5f9;
-  --card-bg: rgba(255, 255, 255, 0.7);
-  --border-color: rgba(0, 0, 0, 0.06);
-  --text-main: #0f172a;
-  --text-muted: #64748b;
-  --primary-gradient: linear-gradient(135deg, #4f46e5 0%, #9333ea 50%, #db2777 100%);
-  --accent-color: #9333ea;
-  --primary-color: #9333ea;
-  --input-bg: rgba(241, 245, 249, 0.8);
-  --input-border: rgba(0, 0, 0, 0.08);
-  --input-text: #0f172a;
+  --bg-color: #f9f9f9;
+  --card-bg: #ffffff;
+  --border-color: rgba(0, 0, 0, 0.09);
+  --text-main: #1a1a1a;
+  --text-muted: #6e6e6e;
+  --primary-gradient: linear-gradient(180deg, #2f6fed 0%, #2a5fdd 100%);
+  --accent-color: #2f6fed;
+  --primary-color: #2f6fed;
+  --input-bg: #ffffff;
+  --input-border: rgba(0, 0, 0, 0.12);
+  --input-text: #1a1a1a;
   --btn-secondary-bg: rgba(0, 0, 0, 0.04);
   --btn-secondary-hover: rgba(0, 0, 0, 0.08);
-  --btn-secondary-text: #0f172a;
-  --modal-overlay-bg: rgba(241, 245, 249, 0.5);
-  --card-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.07);
-  --orb-1-color: rgba(99, 102, 241, 0.08);
-  --orb-2-color: rgba(236, 72, 153, 0.06);
-  --sidebar-bg: rgba(255, 255, 255, 0.6);
+  --btn-secondary-text: #1a1a1a;
+  --modal-overlay-bg: rgba(0, 0, 0, 0.35);
+  --card-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  --orb-1-color: rgba(47, 111, 237, 0.04);
+  --orb-2-color: rgba(47, 111, 237, 0.03);
+  --sidebar-bg: #ffffff;
   --sidebar-menu-hover: rgba(0, 0, 0, 0.04);
   --table-header-bg: rgba(0, 0, 0, 0.03);
-  --section-item-bg: rgba(0, 0, 0, 0.01);
-  --code-bg: rgba(79, 70, 229, 0.07);
-  --code-color: #4f46e5;
-  --code-border: rgba(79, 70, 229, 0.15);
+  --section-item-bg: rgba(0, 0, 0, 0.02);
+  --code-bg: rgba(47, 111, 237, 0.08);
+  --code-color: #2a5fdd;
+  --code-border: rgba(47, 111, 237, 0.2);
 }
 
 body {
@@ -178,7 +181,7 @@ body {
 }
 
 h1, h2, h3, h4 {
-  font-family: 'Outfit', sans-serif;
+  font-family: 'Inter', sans-serif;
 }
 
 /* Background Orbs */
@@ -300,8 +303,8 @@ h1, h2, h3, h4 {
 }
 
 .card:hover {
-  border-color: rgba(168, 85, 247, 0.35);
-  box-shadow: 0 16px 40px rgba(168, 85, 247, 0.12);
+  border-color: rgba(47, 111, 237, 0.35);
+  box-shadow: 0 16px 40px rgba(47, 111, 237, 0.12);
 }
 
 .card:hover::before {
@@ -354,12 +357,11 @@ h1, h2, h3, h4 {
 .btn-primary {
   background: var(--primary-gradient);
   color: white;
-  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.3);
+  box-shadow: 0 4px 14px rgba(47, 111, 237, 0.3);
 }
 
 .btn-primary:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(168, 85, 247, 0.5);
+  box-shadow: 0 6px 20px rgba(47, 111, 237, 0.35);
   opacity: 0.95;
 }
 
@@ -376,7 +378,6 @@ h1, h2, h3, h4 {
 .btn-danger:hover:not(:disabled) {
   background: rgba(239, 68, 68, 0.1);
   border-color: var(--danger-color);
-  transform: translateY(-1px);
 }
 
 .btn-outline {
@@ -387,29 +388,27 @@ h1, h2, h3, h4 {
 
 .btn-outline:hover:not(:disabled) {
   background: var(--btn-secondary-hover);
-  transform: translateY(-1px);
 }
 
 /* 次要按钮（等宽于 outline，但带渐变底衬的轻量样式） */
 .btn-secondary {
-  background: rgba(168, 85, 247, 0.12);
+  background: rgba(47, 111, 237, 0.12);
   color: var(--accent-color);
-  border: 1px solid rgba(168, 85, 247, 0.25);
+  border: 1px solid rgba(47, 111, 237, 0.25);
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background: rgba(168, 85, 247, 0.2);
+  background: rgba(47, 111, 237, 0.2);
   border-color: var(--accent-color);
-  transform: translateY(-1px);
 }
 
 :root[data-theme="light"] .btn-secondary {
-  background: rgba(147, 51, 234, 0.08);
-  border-color: rgba(147, 51, 234, 0.25);
+  background: rgba(47, 111, 237, 0.08);
+  border-color: rgba(47, 111, 237, 0.25);
 }
 
 :root[data-theme="light"] .btn-secondary:hover:not(:disabled) {
-  background: rgba(147, 51, 234, 0.14);
+  background: rgba(47, 111, 237, 0.14);
 }
 
 .btn-sm {
@@ -447,13 +446,13 @@ h1, h2, h3, h4 {
 
 .form-input:focus {
   border-color: var(--accent-color);
-  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.2);
-  background-color: rgba(15, 23, 42, 0.8);
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.2);
+  background-color: var(--input-bg);
 }
 
 :root[data-theme="light"] .form-input:focus {
-  background-color: rgba(255, 255, 255, 0.95);
-  box-shadow: 0 0 0 3px rgba(147, 51, 234, 0.15);
+  background-color: #ffffff;
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.15);
 }
 
 .form-hint {
@@ -825,9 +824,8 @@ table tr:hover td {
 }
 
 .stat-card:hover {
-  transform: translateY(-4px);
-  border-color: rgba(168, 85, 247, 0.35);
-  box-shadow: 0 16px 40px rgba(168, 85, 247, 0.12);
+  border-color: rgba(47, 111, 237, 0.4);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
 }
 
 .stat-card:hover::before {
@@ -845,7 +843,7 @@ table tr:hover td {
 .stat-value {
   font-size: 28px;
   font-weight: 700;
-  font-family: 'Outfit', sans-serif;
+  font-family: 'Inter', sans-serif;
   letter-spacing: -0.02em;
   line-height: 1;
 }
@@ -927,7 +925,7 @@ table tr:hover td {
 .ui-tab.active {
   color: white;
   background: var(--primary-gradient);
-  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.3);
+  box-shadow: 0 4px 14px rgba(47, 111, 237, 0.3);
 }
 
 .ui-tab:disabled {
@@ -1069,7 +1067,7 @@ code {
   justify-content: center;
   font-size: 28px;
   background: var(--primary-gradient);
-  box-shadow: 0 8px 24px rgba(168, 85, 247, 0.35);
+  box-shadow: 0 8px 24px rgba(47, 111, 237, 0.35);
 }
 
 .route-error-card h1 {

@@ -21,7 +21,7 @@
 }
 
 .mapping-row:hover {
-  border-color: rgba(168, 85, 247, 0.25);
+  border-color: rgba(47, 111, 237, 0.25);
 }
 
 .mapping-field {
@@ -71,7 +71,7 @@
 }
 
 .default-model-chip:hover {
-  border-color: rgba(168, 85, 247, 0.35);
+  border-color: rgba(47, 111, 237, 0.35);
 }
 
 .default-model-chip .model-key {

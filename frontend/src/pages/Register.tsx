@@ -210,11 +210,11 @@ export default function Register() {
             fontSize: '24px',
             margin: '0 auto 14px',
             color: 'white',
-            boxShadow: '0 4px 14px rgba(168, 85, 247, 0.25)',
+            boxShadow: '0 4px 14px rgba(47, 111, 237, 0.25)',
           }}>
             ⚡
           </div>
-          <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '4px', fontFamily: "'Outfit', sans-serif" }}>
+          <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '4px', fontFamily: "'Inter', sans-serif" }}>
             {t('创建账号')}
           </h1>
           <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>

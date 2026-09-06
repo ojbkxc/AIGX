@@ -39,14 +39,14 @@
 .security-stat-value {
   font-size: 28px;
   font-weight: 700;
-  font-family: 'Outfit', sans-serif;
+  font-family: 'Inter', sans-serif;
   color: var(--text-main);
   line-height: 1.2;
 }
 
 /* 严重事件卡片：左侧紫色色条 */
 .security-stat-critical {
-  border-left: 3px solid rgb(168, 85, 247);
+  border-left: 3px solid rgb(47, 111, 237);
 }
 
 /* 近 24h 卡片：左侧蓝色色条 */

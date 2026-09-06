@@ -176,7 +176,7 @@ function TrendChart({ data }: TrendChartProps): JSX.Element | null {
 
       <defs>
         <linearGradient id="trendGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="rgba(168, 85, 247, 0.4)" />
+          <stop offset="0%" stopColor="rgba(47, 111, 237, 0.4)" />
           <stop offset="100%" stopColor="rgba(168, 85, 247, 0)" />
         </linearGradient>
       </defs>
@@ -260,7 +260,7 @@ function PieChart({ data }: PieChartProps): JSX.Element | null {
     : top;
   const total = slicesRaw.reduce((s, d) => s + d.val, 0);
 
-  const colors = ['#818cf8', '#c084fc', '#f472b6', '#fb923c', '#fbbf24', '#34d399', '#22d3ee', '#60a5fa', '#a78bfa', '#94a3b8'];
+  const colors = ['#7ca4f5', '#7ca4f5', '#f472b6', '#fb923c', '#fbbf24', '#34d399', '#22d3ee', '#60a5fa', '#a78bfa', '#94a3b8'];
   const cx = 120;
   const cy = 120;
   const r = 90;
@@ -505,7 +505,7 @@ export default function Dashboard(): JSX.Element {
         <div className="stat-card">
           <div className="stat-card-top">
             <div className="stat-title">{t('活跃用户')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8' }}>👥</div>
+            <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>👥</div>
           </div>
           <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(ur.length)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟')}</div>
@@ -513,7 +513,7 @@ export default function Dashboard(): JSX.Element {
         <div className="stat-card">
           <div className="stat-card-top">
             <div className="stat-title">{t('活跃渠道')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc' }}>🔗</div>
+            <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>🔗</div>
           </div>
           <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(ch.length)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>{t('在线渠道数')}</div>
@@ -533,7 +533,7 @@ export default function Dashboard(): JSX.Element {
         <div className="stat-card">
           <div className="stat-card-top">
             <div className="stat-title">{t('今日用量')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8' }}>📊</div>
+            <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>📊</div>
           </div>
           <div className="stat-value" style={{ fontSize: '26px' }}>{fmtTok(todayTokens)}</div>
           <div className="stat-desc" style={{ display: 'flex', gap: '16px', fontSize: '11px' }}>
@@ -548,7 +548,7 @@ export default function Dashboard(): JSX.Element {
         <div className="stat-card">
           <div className="stat-card-top">
             <div className="stat-title">{t('Token 统计')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc' }}>🔤</div>
+            <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>🔤</div>
           </div>
           <div className="stat-value" style={{ fontSize: '26px' }}>{fmtTok(u.total_tokens)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>

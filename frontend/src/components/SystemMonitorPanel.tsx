@@ -214,7 +214,7 @@ export default function SystemMonitorPanel() {
             <MetricCard title="活动连接" value={metrics.activeConnections} extra="总连接数: -" color="#3b82f6" />
           </div>
           <div className="metric-row-other">
-            <MetricCard title="吞吐量" value={metrics.throughput} extra="请求/秒" color="#a855f7" />
+            <MetricCard title="吞吐量" value={metrics.throughput} extra="请求/秒" color="#2f6fed" />
           </div>
         </div>
 
@@ -229,7 +229,7 @@ export default function SystemMonitorPanel() {
               { title: "平均延迟", value: formatLatency(metrics.avgLatency), unit: "ms", color: "#22c55e" },
               { title: "请求成功率", value: formatPercent(metrics.successRate), unit: "%", color: "#3b82f6" },
               { title: "错误率", value: formatPercent(metrics.errorRate), unit: "%", color: "#ef4444" },
-              { title: "吞吐量", value: metrics.throughput, unit: "req/s", color: "#a855f7" },
+              { title: "吞吐量", value: metrics.throughput, unit: "req/s", color: "#2f6fed" },
             ].map((metric, index) => (
               <div key={index} className="performance-item">
                 <div className="metric-bars">

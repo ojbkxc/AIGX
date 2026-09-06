@@ -223,11 +223,11 @@ export default function Login(): JSX.Element {
             fontSize: '24px',
             margin: '0 auto 14px',
             color: 'white',
-            boxShadow: '0 4px 14px rgba(168, 85, 247, 0.25)',
+            boxShadow: '0 4px 14px rgba(47, 111, 237, 0.25)',
           }}>
             ⚡
           </div>
-          <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '4px', fontFamily: "'Outfit', sans-serif" }}>
+          <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '4px', fontFamily: "'Inter', sans-serif" }}>
             AIGX Gateway
           </h1>
           <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
@@ -304,7 +304,7 @@ export default function Login(): JSX.Element {
 
         <button
           type="button"
-          onClick={handleOAuthLogin('google')}
+          onClick={() => handleOAuthLogin('google')}
           className="btn btn-outline"
           style={{ width: '100%', justifyContent: 'center', padding: '9px', fontSize: '13px', gap: '8px' }}
         >

@@ -254,7 +254,7 @@
 }
 
 .chat-debugger-msg-user .chat-debugger-msg-icon {
-  background: var(--primary-gradient, linear-gradient(135deg, #6366f1, #8b5cf6));
+  background: var(--primary-gradient, linear-gradient(180deg, #2f6fed, #2a5fdd));
   color: white;
   border: none;
 }
@@ -297,7 +297,7 @@
 }
 
 .chat-debugger-msg-user .chat-debugger-msg-content {
-  background: var(--primary-gradient, linear-gradient(135deg, #6366f1, #8b5cf6));
+  background: var(--primary-gradient, linear-gradient(180deg, #2f6fed, #2a5fdd));
   color: white;
   border: none;
 }
