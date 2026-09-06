@@ -347,7 +347,7 @@ export default function SystemMonitorPanel() {
               </div>
             </div>
             <div className="scaling-bar-background" style={{ width: `${metrics.currentLoad ?? 0}%` }}>
-              <div className="scaling-bar-indicator" style={{ left: `${metrics.currentLoad ?? 0}%`, borderColor: metrics.currentLoad > 90 ? '#ef4444' : '#22c55e' }} />
+              <div className="scaling-bar-indicator" style={{ left: `${metrics.currentLoad ?? 0}%`, borderColor: (metrics.currentLoad ?? 0) > 90 ? '#ef4444' : '#22c55e' }} />
             </div>
           </div>
         </div>
