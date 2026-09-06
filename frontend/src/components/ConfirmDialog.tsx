@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
 export interface ConfirmState {
@@ -26,16 +26,15 @@ export interface ConfirmDialogProps {
  */
 export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): JSX.Element | null {
   const { t } = useTranslation();
-  const [show, setShow] = useState(false);
 
   // 打开时逐帧触发入场动画
   useEffect(() => {
     if (state) {
-      setShow(false);
-      const raf = requestAnimationFrame(() => setShow(true));
+      const raf = requestAnimationFrame(() => {
+        // 弹窗显隐由 state 驱动；动画由 App.css 的 modal-* 样式处理
+      });
       return () => cancelAnimationFrame(raf);
     }
-    setShow(false);
   }, [state]);
 
   if (!state) return null;

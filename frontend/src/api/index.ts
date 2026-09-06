@@ -182,7 +182,8 @@ export const api = {
   chatCompletions: (payload: any): Promise<any> =>
     request('POST', '/v1/chat/completions', payload),
   listPrices: (): Promise<any> => request('GET', `${API_BASE}/prices`),
-  listRedemptions: (): Promise<any> => request('GET', `${API_BASE}/redemptions`),
+  listRedemptions: (params: Record<string, string> = {}): Promise<any> =>
+    request('GET', `${API_BASE}/redemptions?${new URLSearchParams(params)}`),
   getSecurityIncidents: (): Promise<any> =>
     request('GET', `${API_BASE}/monitor/security/events`),
   getSecurityAlerts: (): Promise<any> =>
