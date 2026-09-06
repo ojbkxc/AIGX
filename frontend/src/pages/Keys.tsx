@@ -362,48 +362,42 @@ export default function Keys(): JSX.Element {
                     <tr key={tk.id}>
                       <td><strong>{tk.name}</strong></td>
                       <td style={{ fontSize: 12 }}>
-                        {tk.plain_key || plainKeys[tk.id] ? (
-                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                            <code style={{
-                              fontSize: 11,
-                              maxWidth: 220,
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                              display: 'inline-block',
-                              verticalAlign: 'middle',
-                            }}>
-                              {revealedKeys[tk.id] ? (plainKeys[tk.id] || tk.plain_key) : tk.key || '••••••••••••'}
-                            </code>
-                            <button
-                              type="button"
-                              className="btn btn-outline btn-sm"
-                              title={revealedKeys[tk.id] ? t('隐藏密钥') : t('查看密钥')}
-                              onClick={() => {
-                                if (!revealedKeys[tk.id] && !plainKeys[tk.id] && !tk.plain_key) {
-                                  void fetchPlainKey(tk);
-                                }
-                                setRevealedKeys((prev) => ({ ...prev, [tk.id]: !prev[tk.id] }));
-                              }}
-                              style={{ padding: '2px 6px', flexShrink: 0 }}
-                            >
-                              {revealedKeys[tk.id] ? t('隐藏') : t('查看')}
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-outline btn-sm"
-                              title={t('复制密钥')}
-                              onClick={() => void fetchPlainKey(tk).then((key) => key && copyToClipboard(key))}
-                              style={{ padding: '2px 6px', flexShrink: 0 }}
-                            >
-                              {t('复制')}
-                            </button>
-                          </span>
-                        ) : (
-                          <span style={{ color: 'var(--text-muted)' }}>
-                            {tk.key || '••••••••••••'}
-                          </span>
-                        )}
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                          <code style={{
+                            fontSize: 11,
+                            maxWidth: 220,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            display: 'inline-block',
+                            verticalAlign: 'middle',
+                          }}>
+                            {revealedKeys[tk.id] ? (plainKeys[tk.id] || tk.plain_key) : tk.key || '••••••••••••'}
+                          </code>
+                          <button
+                            type="button"
+                            className="btn btn-outline btn-sm"
+                            title={revealedKeys[tk.id] ? t('隐藏密钥') : t('查看密钥')}
+                            onClick={() => {
+                              if (!revealedKeys[tk.id] && !plainKeys[tk.id] && !tk.plain_key) {
+                                void fetchPlainKey(tk);
+                              }
+                              setRevealedKeys((prev) => ({ ...prev, [tk.id]: !prev[tk.id] }));
+                            }}
+                            style={{ padding: '2px 6px', flexShrink: 0 }}
+                          >
+                            {revealedKeys[tk.id] ? t('隐藏') : t('查看')}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-outline btn-sm"
+                            title={t('复制密钥')}
+                            onClick={() => void fetchPlainKey(tk).then((key) => key && copyToClipboard(key))}
+                            style={{ padding: '2px 6px', flexShrink: 0 }}
+                          >
+                            {t('复制')}
+                          </button>
+                        </span>
                       </td>
                       <td>{tk.group || 'default'}</td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
