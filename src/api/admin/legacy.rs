@@ -2541,16 +2541,21 @@ pub async fn handle_update_exchange_rates(
 
 #[derive(Debug, Deserialize)]
 pub struct ChannelChatTestRequest {
+    /// 渠道 ID；Playground（不绑定渠道）传空字符串，由后端自动选择
+    /// 优先级最高的启用渠道。
+    #[serde(default)]
     pub channel_id: String,
     /// 协议：openai（/v1/chat/completions）或 anthropic（/v1/messages）
     #[serde(default = "default_chat_protocol")]
     pub protocol: String,
-    /// 要发送的用户消息
-    pub message: String,
+    /// 要发送的用户消息。
+    /// 接受字符串或 OpenAI content blocks 数组（多模态：
+    /// image_url / video_url / audio_url / text 块）。
+    pub message: Value,
     /// 对话历史（role/content），用于多轮调试
     #[serde(default)]
     pub history: Vec<Value>,
-    /// 目标模型（默认取渠道 models[0] 或兜底 glm-4.7-flash）
+    /// 目标模型（默认取渠道 models[0]；Playground 下取启用渠道首个模型）
     #[serde(default)]
     pub model: String,
     /// 是否流式返回（默认 true；流式时以 SSE 原样透传，前端解析增量）
@@ -2576,22 +2581,47 @@ pub async fn handle_channel_chat_test(
         return e.into_response();
     }
 
-    let ch = match state.channel_store.get(&body.channel_id) {
-        Some(c) => c,
-        None => return error_response("Channel not found", StatusCode::NOT_FOUND).into_response(),
-    };
-
-    // 确定目标模型
-    let model = if body.model.trim().is_empty() {
-        ch.models
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "glm-4.7-flash".to_string())
+    // Playground 不绑定渠道：自动选择优先级最高的启用渠道
+    let ch = if body.channel_id.trim().is_empty() {
+        match state
+            .channel_store
+            .list()
+            .into_iter()
+            .filter(|c| c.is_enabled())
+            .max_by_key(|c| c.priority)
+        {
+            Some(c) => c,
+            None => {
+                return error_response("No enabled channel available", StatusCode::BAD_REQUEST)
+                    .into_response()
+            }
+        }
     } else {
-        body.model.trim().to_string()
+        match state.channel_store.get(&body.channel_id) {
+            Some(c) => c,
+            None => {
+                return error_response("Channel not found", StatusCode::NOT_FOUND).into_response()
+            }
+        }
     };
 
-    // 构建消息列表：history + 当前消息
+    // 确定目标模型：渠道未配置模型时使用第一个启用渠道声明的模型，
+    // 再无则透传空字符串（不再硬编码 glm-4.7-flash 兜底）。
+    let model = if !body.model.trim().is_empty() {
+        body.model.trim().to_string()
+    } else if let Some(m) = ch.models.first() {
+        m.clone()
+    } else {
+        state
+            .channel_store
+            .list()
+            .into_iter()
+            .filter(|c| c.is_enabled())
+            .find_map(|c| c.models.into_iter().find(|m| !m.is_empty()))
+            .unwrap_or_default()
+    };
+
+    // 构建消息列表：history + 当前消息（多模态时 content 为块数组）
     let mut messages: Vec<Value> = body.history.clone();
     messages.push(serde_json::json!({ "role": "user", "content": body.message }));
 
