@@ -591,7 +591,7 @@ export default function Dashboard(): JSX.Element {
       </div>
 
       {/* 模型分布 + 用户排行 */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))', gap: 16, marginTop: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(400px, 100%), 1fr))', gap: 16, marginTop: 16 }}>
         <div className="section-card">
           <div className="section-card-header">
             <h2>{t('模型调用分布')}</h2>
