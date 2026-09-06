@@ -56,6 +56,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const [temperature, setTemperature] = useState('0.7');
   const [maxTokens, setMaxTokens] = useState('1024');
   const [query, setQuery] = useState('');
+  const [pickerIdx, setPickerIdx] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -249,19 +250,39 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
                   autoFocus
                   placeholder={t('搜索模型…')}
                   value={query}
-                  onChange={(e) => setQuery(e.target.value)}
+                  onChange={(e) => { setQuery(e.target.value); setPickerIdx(0); }}
+                  onKeyDown={(e) => {
+                    // 键盘导航：↑/↓ 选择，Enter 确认，Esc 关闭
+                    if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      setPickerIdx((i) => Math.min(i + 1, visibleModels.length - 1));
+                    } else if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      setPickerIdx((i) => Math.max(i - 1, 0));
+                    } else if (e.key === 'Enter') {
+                      e.preventDefault();
+                      const pick = visibleModels[pickerIdx];
+                      if (pick) { setModel(pick); setPickerOpen(false); setMessages([]); setQuery(''); }
+                    } else if (e.key === 'Escape') {
+                      setPickerOpen(false); setQuery('');
+                    }
+                  }}
                 />
+                {visibleModels.length > 0 && (
+                  <span className="chat-debugger-picker-count">{visibleModels.length}</span>
+                )}
               </div>
               <div className="chat-debugger-picker-list">
                 {visibleModels.length === 0 && (
                   <div className="chat-debugger-picker-empty">{t('无匹配模型')}</div>
                 )}
-                {visibleModels.map((m) => (
+                {visibleModels.map((m, i) => (
                   <button
                     type="button"
                     key={m}
-                    className={`chat-debugger-picker-item ${m === model ? 'active' : ''}`}
-                    onClick={() => { setModel(m); setPickerOpen(false); setMessages([]); }}
+                    className={`chat-debugger-picker-item ${m === model ? 'active' : ''} ${i === pickerIdx ? 'hover' : ''}`}
+                    onMouseEnter={() => setPickerIdx(i)}
+                    onClick={() => { setModel(m); setPickerOpen(false); setMessages([]); setQuery(''); }}
                   >
                     {m}
                   </button>

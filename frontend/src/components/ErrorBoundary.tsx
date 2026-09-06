@@ -81,7 +81,7 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
               height: '56px',
               margin: '0 auto 16px',
               borderRadius: '14px',
-              background: 'var(--primary-gradient, linear-gradient(180deg,#2f6fed,#2a5fdd))',
+              background: 'var(--accent-color, #2f6fed)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -147,7 +147,7 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
                 fontWeight: 600,
                 fontSize: '14px',
                 color: 'white',
-                background: 'var(--primary-gradient, linear-gradient(180deg,#2f6fed,#2a5fdd))',
+                background: 'var(--accent-color, #2f6fed)',
                 boxShadow: '0 6px 18px rgba(99,102,241,0.3)',
               }}
             >

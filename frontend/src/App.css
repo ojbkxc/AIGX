@@ -42,9 +42,9 @@
   }
 
   .glass-switch-on {
-    background: var(--primary-gradient);
+    background: var(--accent-color);
     border-color: transparent;
-    box-shadow: 0 2px 10px rgba(47, 111, 237, 0.35);
+    box-shadow: none;
   }
 
   .glass-switch-thumb {
@@ -112,9 +112,10 @@
   --border-color: rgba(255, 255, 255, 0.09);
   --text-main: #ededed;
   --text-muted: #9a9a9a;
-  --primary-gradient: linear-gradient(180deg, #2f6fed 0%, #2a5fdd 100%);
+  --primary-gradient: #2f6fed;
   --accent-color: #2f6fed;
   --primary-color: #2f6fed;
+  --primary-hover: #2a5fdd;
   --input-bg: #1a1a1a;
   --input-border: rgba(255, 255, 255, 0.11);
   --input-text: #ededed;
@@ -149,9 +150,10 @@
   --border-color: rgba(0, 0, 0, 0.09);
   --text-main: #1a1a1a;
   --text-muted: #6e6e6e;
-  --primary-gradient: linear-gradient(180deg, #2f6fed 0%, #2a5fdd 100%);
+  --primary-gradient: #2f6fed;
   --accent-color: #2f6fed;
   --primary-color: #2f6fed;
+  --primary-hover: #2a5fdd;
   --input-bg: #ffffff;
   --input-border: rgba(0, 0, 0, 0.12);
   --input-text: #1a1a1a;
@@ -184,48 +186,7 @@ h1, h2, h3, h4 {
   font-family: 'Inter', sans-serif;
 }
 
-/* Background Orbs */
-.bg-orbs-container {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  z-index: -1;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.bg-orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(100px);
-  animation: float 25s infinite alternate ease-in-out;
-}
-
-.bg-orb-1 {
-  top: -10%;
-  left: -10%;
-  width: 50vw;
-  height: 50vw;
-  background: var(--orb-1-color);
-  animation-duration: 20s;
-}
-
-.bg-orb-2 {
-  bottom: -10%;
-  right: -10%;
-  width: 60vw;
-  height: 60vw;
-  background: var(--orb-2-color);
-  animation-duration: 30s;
-  animation-delay: -5s;
-}
-
-@keyframes float {
-  0% { transform: translate(0, 0) scale(1); }
-  100% { transform: translate(5%, 5%) scale(1.1); }
-}
+/* Background Orbs 已移除：对齐 open-webui 中性背景，保留类名避免破坏结构 */
 
 @keyframes fadeInUp {
   from { opacity: 0; transform: translateY(24px); }
@@ -283,32 +244,13 @@ h1, h2, h3, h4 {
   border-radius: 14px;
   overflow: hidden;
   box-shadow: var(--card-shadow);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
   margin-bottom: 18px;
-  transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.35s, border-color 0.35s;
+  transition: border-color 0.2s ease;
   position: relative;
 }
 
-.card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--primary-gradient);
-  opacity: 0;
-  transition: opacity 0.35s;
-}
-
 .card:hover {
-  border-color: rgba(47, 111, 237, 0.35);
-  box-shadow: 0 16px 40px rgba(47, 111, 237, 0.12);
-}
-
-.card:hover::before {
-  opacity: 1;
+  border-color: var(--input-border);
 }
 
 .card-header {
@@ -355,14 +297,16 @@ h1, h2, h3, h4 {
 }
 
 .btn-primary {
-  background: var(--primary-gradient);
+  background: var(--accent-color);
   color: white;
-  box-shadow: 0 4px 14px rgba(47, 111, 237, 0.3);
 }
 
 .btn-primary:hover:not(:disabled) {
-  box-shadow: 0 6px 20px rgba(47, 111, 237, 0.35);
-  opacity: 0.95;
+  background: var(--primary-hover);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .btn-primary:active:not(:disabled) {
@@ -732,7 +676,7 @@ table tr:hover td {
 .modal {
   background: var(--card-bg);
   border: 1px solid var(--border-color);
-  border-radius: 20px;
+  border-radius: 14px;
   width: 100%;
   max-width: 500px;
   max-height: 90vh;
@@ -740,7 +684,7 @@ table tr:hover td {
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
-  animation: fadeInUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: fadeIn 0.18s ease;
 }
 
 .modal-header {
@@ -797,7 +741,7 @@ table tr:hover td {
 .stat-card {
   background-color: var(--card-bg);
   border: 1px solid var(--border-color);
-  border-radius: 16px;
+  border-radius: 14px;
   padding: 18px 20px;
   display: flex;
   flex-direction: column;
@@ -805,31 +749,15 @@ table tr:hover td {
   box-shadow: var(--card-shadow);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
-  transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.35s, border-color 0.35s;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
   min-width: 0;
   overflow: hidden;
   position: relative;
 }
 
-.stat-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--primary-gradient);
-  opacity: 0;
-  transition: opacity 0.35s;
-}
-
 .stat-card:hover {
-  border-color: rgba(47, 111, 237, 0.4);
+  border-color: var(--input-border);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
-}
-
-.stat-card:hover::before {
-  opacity: 1;
 }
 
 .stat-title {
@@ -924,8 +852,7 @@ table tr:hover td {
 
 .ui-tab.active {
   color: white;
-  background: var(--primary-gradient);
-  box-shadow: 0 4px 14px rgba(47, 111, 237, 0.3);
+  background: var(--accent-color);
 }
 
 .ui-tab:disabled {
@@ -1047,7 +974,7 @@ code {
   width: 100%;
   max-width: 460px;
   padding: 32px 28px;
-  border-radius: 16px;
+  border-radius: 14px;
   text-align: center;
   background: var(--card-bg);
   border: 1px solid var(--border-color);
@@ -1066,8 +993,7 @@ code {
   align-items: center;
   justify-content: center;
   font-size: 28px;
-  background: var(--primary-gradient);
-  box-shadow: 0 8px 24px rgba(47, 111, 237, 0.35);
+  background: var(--accent-color);
 }
 
 .route-error-card h1 {

@@ -153,10 +153,6 @@ export default function Register() {
       position: 'relative',
       overflow: 'hidden',
     }}>
-      <div className="bg-orbs-container">
-        <div className="bg-orb bg-orb-1"></div>
-        <div className="bg-orb bg-orb-2"></div>
-      </div>
 
       <button
         onClick={toggleTheme}
@@ -196,7 +192,7 @@ export default function Register() {
         boxShadow: 'var(--card-shadow)',
         backdropFilter: 'blur(var(--glass-blur))',
         WebkitBackdropFilter: 'blur(var(--glass-blur))',
-        animation: 'fadeInUp 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+        animation: 'fadeIn 0.25s ease',
       }}>
         <div style={{ textAlign: 'center', marginBottom: '22px' }}>
           <div style={{

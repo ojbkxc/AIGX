@@ -174,7 +174,7 @@ export default function Wallet(): JSX.Element {
               </div>
               <div>
                 <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('剩余配额')}</div>
-                <div style={{ fontSize: 22, fontWeight: 700, background: 'var(--primary-gradient)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+                <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--accent-color)' }}>
                   {fmtQuota(remaining)}
                 </div>
               </div>

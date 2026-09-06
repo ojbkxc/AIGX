@@ -176,7 +176,7 @@
 }
 
 .chat-msg-user .chat-msg-content {
-  background: var(--primary-gradient);
+  background: var(--accent-color);
   color: white;
   border: none;
 }

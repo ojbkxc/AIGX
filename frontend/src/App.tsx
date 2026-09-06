@@ -43,10 +43,6 @@ function ProtectedLayout({ children }: ProtectedLayoutProps) {
   }
   return (
     <div className="app-container">
-      <div className="bg-orbs-container">
-        <div className="bg-orb bg-orb-1"></div>
-        <div className="bg-orb bg-orb-2"></div>
-      </div>
       <Sidebar />
       <main className="main-content" key={location}>
         <div className="page-fade-enter">{children}</div>

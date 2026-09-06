@@ -69,7 +69,7 @@
 }
 
 .ipm-toggle input:checked + .ipm-toggle-slider {
-  background: var(--primary-gradient);
+  background: var(--accent-color);
   border: none;
 }
 

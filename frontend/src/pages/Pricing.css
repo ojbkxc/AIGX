@@ -47,9 +47,8 @@
 }
 
 .sub-tab.active {
-  background: var(--primary-gradient);
+  background: var(--accent-color);
   color: white;
-  box-shadow: 0 2px 8px rgba(47, 111, 237, 0.3);
 }
 
 /* 价格单元格 */

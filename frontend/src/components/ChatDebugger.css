@@ -107,12 +107,22 @@
   cursor: pointer;
 }
 
-.chat-debugger-picker-item:hover {
+.chat-debugger-picker-item:hover,
+.chat-debugger-picker-item.hover {
   background: var(--hover-bg, rgba(0, 0, 0, 0.04));
 }
 
+.chat-debugger-picker-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+
 .chat-debugger-picker-item.active {
-  background: var(--primary-soft, rgba(99, 102, 241, 0.12));
+  background: var(--primary-soft, rgba(47, 111, 237, 0.12));
   color: var(--accent-color);
   font-weight: 600;
 }
@@ -254,7 +264,7 @@
 }
 
 .chat-debugger-msg-user .chat-debugger-msg-icon {
-  background: var(--primary-gradient, linear-gradient(180deg, #2f6fed, #2a5fdd));
+  background: var(--accent-color, #2f6fed);
   color: white;
   border: none;
 }
@@ -297,7 +307,7 @@
 }
 
 .chat-debugger-msg-user .chat-debugger-msg-content {
-  background: var(--primary-gradient, linear-gradient(180deg, #2f6fed, #2a5fdd));
+  background: var(--accent-color, #2f6fed);
   color: white;
   border: none;
 }

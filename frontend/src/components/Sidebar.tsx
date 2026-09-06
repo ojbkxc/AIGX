@@ -3,12 +3,18 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { isAdmin } from '../lib/utils';
+import {
+  LayoutDashboard, Satellite, KeyRound, ArrowLeftRight, CircleDollarSign,
+  Users, Tags, Wallet, Receipt, Ticket, ScrollText, CreditCard, Bell,
+  Settings, Play, Shield, Globe, Network, Zap, ChevronDown, Menu,
+} from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
 
 interface NavItem {
   path: string;
   labelKey: string;
-  icon: string;
+  icon: LucideIcon;
   end?: boolean;
   adminOnly?: boolean;
 }
@@ -16,30 +22,30 @@ interface NavItem {
 interface NavGroup {
   key: string;
   labelKey?: string;
-  icon?: string;
+  icon?: LucideIcon;
   items: NavItem[];
 }
 
 const navItems: NavItem[] = [
-  { path: '/', labelKey: '仪表盘', icon: '📊', end: true },
+  { path: '/', labelKey: '仪表盘', icon: LayoutDashboard, end: true },
 
-  { path: '/channels', labelKey: '渠道管理', icon: '🛰️', adminOnly: true },
-  { path: '/keys', labelKey: 'API 密钥', icon: '🔐', adminOnly: true },
-  { path: '/mappings', labelKey: '模型映射', icon: '🔄', adminOnly: true },
-  { path: '/pricing', labelKey: '定价倍率', icon: '💲', adminOnly: true },
-  { path: '/users', labelKey: '用户管理', icon: '👥', adminOnly: true },
-  { path: '/groups', labelKey: '用户分组', icon: '🏷️', adminOnly: true },
-  { path: '/wallet', labelKey: '钱包充值', icon: '💰' },
-  { path: '/orders', labelKey: '订单记录', icon: '🧾', adminOnly: true },
-  { path: '/redemptions', labelKey: '兑换码', icon: '🎟️', adminOnly: true },
-  { path: '/logs', labelKey: '日志审计', icon: '📋', adminOnly: true },
-  { path: '/epay', labelKey: '易支付', icon: '💳', adminOnly: true },
-  { path: '/notify', labelKey: '通知设置', icon: '🔔', adminOnly: true },
-  { path: '/settings', labelKey: '系统设置', icon: '⚙️', adminOnly: true },
-  { path: '/playground', labelKey: 'Playground', icon: '🎮', adminOnly: true },
-  { path: '/security', labelKey: '安全监控', icon: '🛡️', adminOnly: true },
-  { path: '/ip-management', labelKey: 'IP 管理', icon: '🌐', adminOnly: true },
-  { path: '/network-layer', labelKey: '网络层概览', icon: '🏗️', adminOnly: true },
+  { path: '/channels', labelKey: '渠道管理', icon: Satellite, adminOnly: true },
+  { path: '/keys', labelKey: 'API 密钥', icon: KeyRound, adminOnly: true },
+  { path: '/mappings', labelKey: '模型映射', icon: ArrowLeftRight, adminOnly: true },
+  { path: '/pricing', labelKey: '定价倍率', icon: CircleDollarSign, adminOnly: true },
+  { path: '/users', labelKey: '用户管理', icon: Users, adminOnly: true },
+  { path: '/groups', labelKey: '用户分组', icon: Tags, adminOnly: true },
+  { path: '/wallet', labelKey: '钱包充值', icon: Wallet },
+  { path: '/orders', labelKey: '订单记录', icon: Receipt, adminOnly: true },
+  { path: '/redemptions', labelKey: '兑换码', icon: Ticket, adminOnly: true },
+  { path: '/logs', labelKey: '日志审计', icon: ScrollText, adminOnly: true },
+  { path: '/epay', labelKey: '易支付', icon: CreditCard, adminOnly: true },
+  { path: '/notify', labelKey: '通知设置', icon: Bell, adminOnly: true },
+  { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
+  { path: '/playground', labelKey: 'Playground', icon: Play, adminOnly: true },
+  { path: '/security', labelKey: '安全监控', icon: Shield, adminOnly: true },
+  { path: '/ip-management', labelKey: 'IP 管理', icon: Globe, adminOnly: true },
+  { path: '/network-layer', labelKey: '网络层概览', icon: Network, adminOnly: true },
 ];
 
 // 精简分组：高频入口（仪表盘/渠道/密钥/Playground/日志）平铺直达，
@@ -54,7 +60,7 @@ const navGroups: NavGroup[] = [
   {
     key: 'more',
     labelKey: '更多管理',
-    icon: '☰',
+    icon: Layers,
     items: [
       navItems[3],   // 模型映射
       navItems[4],   // 定价倍率
@@ -179,7 +185,7 @@ export default function Sidebar(): JSX.Element {
           width: '26px',
           height: '26px',
           borderRadius: '7px',
-          background: 'var(--primary-gradient)',
+          background: 'var(--accent-color)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -187,9 +193,9 @@ export default function Sidebar(): JSX.Element {
           color: 'white',
           fontSize: '13px',
           fontFamily: "'Inter', sans-serif",
-          boxShadow: '0 4px 12px rgba(47, 111, 237, 0.2)',
+          boxShadow: 'none',
         }}>
-          ⚡
+          <Zap size={14} strokeWidth={2} />
         </div>
         <div>
           <div style={{
@@ -246,8 +252,8 @@ export default function Sidebar(): JSX.Element {
                   overflow: 'hidden',
                 })}
               >
-                <span style={{ fontSize: '13px', width: '18px', textAlign: 'center', flexShrink: 0 }}>
-                  {item.icon}
+                <span style={{ fontSize: '14px', width: '18px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <item.icon size={15} strokeWidth={1.8} />
                 </span>
                 <span>{t(item.labelKey)}</span>
               </NavLink>
@@ -278,16 +284,18 @@ export default function Sidebar(): JSX.Element {
                   transition: 'all 0.2s ease',
                 }}
               >
-                <span style={{ fontSize: '12px', width: '18px', textAlign: 'center', flexShrink: 0 }}>
-                  {group.icon}
+                <span style={{ fontSize: '14px', width: '18px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  {group.icon ? <group.icon size={15} strokeWidth={1.8} /> : null}
                 </span>
                 <span style={{ flex: 1 }}>{t(group.labelKey)}</span>
                 <span style={{
-                  fontSize: '9px',
-                  transition: 'transform 0.25s ease',
+                  display: 'inline-flex',
+                  transition: 'transform 0.2s ease',
                   transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
                   opacity: 0.6,
-                }}>▼</span>
+                }}>
+                  <ChevronDown size={13} strokeWidth={1.8} />
+                </span>
               </button>
               {!collapsed && visibleItems.map((item) => (
                 <NavLink
@@ -315,8 +323,8 @@ export default function Sidebar(): JSX.Element {
                     overflow: 'hidden',
                   })}
                 >
-                  <span style={{ fontSize: '13px', width: '18px', textAlign: 'center', flexShrink: 0 }}>
-                    {item.icon}
+                  <span style={{ fontSize: '14px', width: '18px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <item.icon size={15} strokeWidth={1.8} />
                   </span>
                   <span>{t(item.labelKey)}</span>
                 </NavLink>
@@ -339,7 +347,7 @@ export default function Sidebar(): JSX.Element {
             width: '24px',
             height: '24px',
             borderRadius: '50%',
-            background: 'var(--primary-gradient)',
+            background: 'var(--accent-color)',
             color: 'white',
             display: 'flex',
             alignItems: 'center',
@@ -400,7 +408,7 @@ export default function Sidebar(): JSX.Element {
         onClick={() => setMobileOpen(true)}
         aria-label={t('打开菜单')}
       >
-        ☰
+        <Menu size={18} strokeWidth={2} />
       </button>
       {/* 桌面端常驻侧栏（≤768px 由 CSS 隐藏） */}
       <div className="sidebar-desktop">{sidebarBody}</div>
