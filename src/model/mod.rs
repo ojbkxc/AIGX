@@ -111,7 +111,8 @@ mod tests {
     #[test]
     fn test_alias_mapping() {
         let m = mapper();
-        m.set_custom("gpt-4o".into(), "gpt-4o-2024-08-06".into()).unwrap();
+        m.set_custom("gpt-4o".into(), "gpt-4o-2024-08-06".into())
+            .unwrap();
         assert_eq!(m.resolve("gpt-4o"), "gpt-4o-2024-08-06");
         // 其它模型不受影响
         assert_eq!(m.resolve("claude-3"), "claude-3");
