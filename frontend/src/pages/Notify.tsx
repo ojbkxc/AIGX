@@ -568,7 +568,6 @@ export default function Notify() {
                 })}
               </div>
             )}
-            )}
             <div className="notify-actions" style={{ display: 'flex', gap: 10, marginTop: 12 }}>
               <button className="btn btn-primary" onClick={handleSaveRules} disabled={rulesSaving}>
                 {rulesSaving ? t('保存中...') : t('保存告警规则')}

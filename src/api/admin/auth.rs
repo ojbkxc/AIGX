@@ -316,7 +316,10 @@ pub async fn handle_change_password(
         return Err(error_response("密码长度至少6位", StatusCode::BAD_REQUEST));
     }
     if body.old_password == body.new_password {
-        return Err(error_response("新密码不能与旧密码相同", StatusCode::BAD_REQUEST));
+        return Err(error_response(
+            "新密码不能与旧密码相同",
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     // 会话校验（复用 verify_user 语义，但不重复取 user）
@@ -347,13 +350,13 @@ pub async fn handle_change_password(
         u.password = new_hash;
     }) {
         Ok(_) => {
-            state.log_store.record_security(
-                crate::log::SecurityEvent::new(
+            state
+                .log_store
+                .record_security(crate::log::SecurityEvent::new(
                     crate::log::SecurityEventType::AuthFailure,
                     "info",
                     format!("用户 {} 修改了密码", user.email),
-                ),
-            );
+                ));
             Ok(Json(serde_json::json!({
                 "success": true,
                 "data": { "message": "Password changed" }
@@ -446,10 +449,7 @@ pub async fn handle_forgot_password(
     // 否则退回 token 直出（便于内网/未配邮件环境使用）。
     let notify_config = state.notify_service.get_config().await;
     if notify_config.smtp_ready() && !notify_config.smtp_from.is_empty() {
-        let base = config
-            .server_address
-            .trim_end_matches('/')
-            .to_string();
+        let base = config.server_address.trim_end_matches('/').to_string();
         let reset_url = if base.is_empty() {
             format!("?reset_token={}", session.token)
         } else {
@@ -460,7 +460,11 @@ pub async fn handle_forgot_password(
             "您正在为账号 {} 重置密码。\n\n请在 1 小时内打开以下链接并设置新密码：\n{}\n\n如果这不是您的操作，请忽略本邮件。",
             user.email, reset_url
         );
-        match state.notify_service.send_email(&user.email, subject, &body).await {
+        match state
+            .notify_service
+            .send_email(&user.email, subject, &body)
+            .await
+        {
             Ok(_) => {
                 tracing::info!("Password reset email sent to {}", user.email);
                 return Ok(Json(serde_json::json!({
