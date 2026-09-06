@@ -1,10 +1,33 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 
+interface EpayConfigForm {
+  pay_address: string;
+  epay_id: string;
+  epay_key: string;
+  pay_methods: string[];
+  price: string | number;
+  min_topup: string | number;
+  custom_callback_address: string;
+  server_address: string;
+}
+
+interface EpayConfigResponse {
+  pay_address?: string;
+  epay_id?: string | number;
+  epay_key?: string;
+  pay_methods?: string[];
+  price?: number;
+  min_topup?: number;
+  custom_callback_address?: string;
+  server_address?: string;
+  data?: Partial<Omit<EpayConfigResponse, 'data'>>;
+}
+
 export default function Epay() {
-  const [cfg, setCfg] = useState({
+  const [cfg, setCfg] = useState<EpayConfigForm>({
     pay_address: '', epay_id: '', epay_key: '',
     pay_methods: ['alipay', 'wxpay'], price: 1, min_topup: 1,
     custom_callback_address: '', server_address: '',
@@ -24,7 +47,7 @@ export default function Epay() {
     setLoading(true);
     setError('');
     try {
-      const res = await api.getEpayConfig();
+      const res = (await api.getEpayConfig()) as EpayConfigResponse;
       const d = res.data || {};
       setCfg({
         pay_address: d.pay_address || '',
@@ -38,7 +61,7 @@ export default function Epay() {
         server_address: d.server_address || '',
       });
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -48,7 +71,7 @@ export default function Epay() {
     setSaving(true);
     setError('');
     try {
-      const payload = {
+      const payload: Record<string, unknown> = {
         pay_address: cfg.pay_address,
         epay_id: cfg.epay_id,
         pay_methods: cfg.pay_methods,
@@ -63,13 +86,13 @@ export default function Epay() {
       addToast(t('易支付配置已保存'));
       load();
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
   };
 
-  const toggleMethod = (m) => {
+  const toggleMethod = (m: string) => {
     setCfg((c) => {
       const has = c.pay_methods.includes(m);
       return { ...c, pay_methods: has ? c.pay_methods.filter((x) => x !== m) : [...c.pay_methods, m] };

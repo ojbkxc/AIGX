@@ -1,8 +1,26 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import './Playground.css';
+
+interface ChatMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
+interface PlaygroundPayload {
+  model: string;
+  messages: Array<{ role: string; content: string }>;
+  temperature: number;
+  max_tokens: number;
+}
+
+interface PlaygroundChatResponse {
+  content?: string;
+  error?: string;
+  data?: { content?: string };
+}
 
 // Playground 页面：交互式对话调试。
 // 复用 Channels.jsx 中 chat_test 的 SSE 解析模式，但独立为全页面布局：
@@ -12,11 +30,11 @@ export default function Playground() {
   const addToast = useToast();
 
   // 模型列表
-  const [models, setModels] = useState([]);
+  const [models, setModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
 
   // 对话状态
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -29,7 +47,7 @@ export default function Playground() {
   // P2：系统提示词模板与参数预设
   const [systemPrompt, setSystemPrompt] = useState('');
 
-  const messagesEndRef = useRef(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   // 初始化：拉取网关可用模型列表
   useEffect(() => {
@@ -39,15 +57,18 @@ export default function Playground() {
       .then((res) => {
         if (!mounted) return;
         // /v1/models 可能返回 { data: [{ id }] } 或字符串数组
-        const list = Array.isArray(res) ? res
-          : Array.isArray(res?.data) ? res.data.map((m) => (typeof m === 'string' ? m : m.id)).filter(Boolean)
+        const list: string[] = Array.isArray(res) ? res as string[]
+          : Array.isArray(res?.data)
+            ? (res.data as Array<string | { id?: string }>)
+              .map((m) => (typeof m === 'string' ? m : m.id))
+              .filter((v): v is string => Boolean(v))
           : [];
         setModels(list);
         if (list.length) setModel(list[0]);
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         if (!mounted) return;
-        setError(err.message);
+        setError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => {
         if (mounted) setModelsLoading(false);
@@ -63,7 +84,7 @@ export default function Playground() {
   }, [messages, busy]);
 
   // 流式发送：直接 fetch /api/playground/chat，复用 testChannelChat 的 SSE 解析模式
-  const sendStream = async (payload, userText) => {
+  const sendStream = async (payload: PlaygroundPayload) => {
     const token = localStorage.getItem('token');
     const res = await fetch('/api/playground/chat', {
       method: 'POST',
@@ -80,7 +101,7 @@ export default function Playground() {
     if (!contentType.includes('text/event-stream')) {
       // 后端未走流式：按普通 JSON 处理
       const text = await res.text();
-      let parsed = null;
+      let parsed: Record<string, unknown> | null = null;
       if (text) {
         try { parsed = JSON.parse(text); } catch { /* ignore */ }
       }
@@ -88,9 +109,9 @@ export default function Playground() {
         const errMsg = (parsed && (parsed.error || parsed.message)) || text || `Request failed with status ${res.status}`;
         throw new Error(errMsg);
       }
-      const content = parsed?.content || parsed?.data?.content || '';
+      const content = (parsed?.content as string | undefined) || ((parsed?.data as { content?: string } | undefined)?.content) || '';
       if (content) {
-        setMessages((prev) => [...prev, { role: 'assistant', content }]);
+        setMessages((prev) => [...prev, { role: 'assistant' as const, content }]);
       }
       return;
     }
@@ -102,12 +123,15 @@ export default function Playground() {
     const flush = () => {
       if (buf && buf !== '[DONE]') {
         try {
-          const parsed = JSON.parse(buf);
+          const parsed = JSON.parse(buf) as Record<string, unknown>;
+          const choices = parsed.choices as Array<{ delta?: { content?: string; text?: string } }> | undefined;
+          const delta = parsed.delta as { text?: string } | undefined;
+          const anthropicContent = parsed.content as Array<{ text?: string }> | undefined;
           const content =
-            (parsed.choices && parsed.choices[0] && parsed.choices[0].delta &&
-              (parsed.choices[0].delta.content || parsed.choices[0].delta.text)) ||
-            (parsed.delta && parsed.delta.text) ||
-            (parsed.content && parsed.content[0] && parsed.content[0].text) || '';
+            (choices && choices[0] && choices[0].delta &&
+              (choices[0].delta.content || choices[0].delta.text)) ||
+            (delta && delta.text) ||
+            (anthropicContent && anthropicContent[0] && anthropicContent[0].text) || '';
           if (content) {
             acc += content;
             setMessages((prev) => {
@@ -147,8 +171,8 @@ export default function Playground() {
   };
 
   // 非流式发送：走 api.playgroundChat
-  const sendNormal = async (payload) => {
-    const res = await api.playgroundChat({ ...payload, stream: false });
+  const sendNormal = async (payload: PlaygroundPayload) => {
+    const res = (await api.playgroundChat({ ...payload, stream: false })) as PlaygroundChatResponse;
     const content = res?.content || res?.data?.content || '';
     if (content) {
       setMessages((prev) => [...prev, { role: 'assistant', content }]);
@@ -171,7 +195,7 @@ export default function Playground() {
     setError('');
     try {
       // 后端契约：playground 请求体为 messages 数组（旧 message/history 字段已废弃）
-      const outgoing = [];
+    const outgoing: Array<{ role: string; content: string }> = [];
       if (systemPrompt.trim()) {
         outgoing.push({ role: 'system', content: systemPrompt.trim() });
       }
@@ -186,18 +210,19 @@ export default function Playground() {
         max_tokens: Number(maxTokens) || 1024,
       };
       if (stream) {
-        await sendStream(payload, text);
+        await sendStream(payload);
       } else {
         await sendNormal(payload);
       }
     } catch (err) {
-      setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${err.message}` }]);
+      const msg = err instanceof Error ? err.message : String(err);
+      setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${msg}` }]);
     } finally {
       setBusy(false);
     }
   };
 
-  const handleKeyDown = (e) => {
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();

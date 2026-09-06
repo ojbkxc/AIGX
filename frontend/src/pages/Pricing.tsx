@@ -1,12 +1,35 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import ConfirmDialog from '../components/ConfirmDialog';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import './Pricing.css';
 
+type SubTabKey = 'prices' | 'ratios';
+
+interface PriceEntry {
+  model_name: string;
+  input_price: number;
+  output_price: number;
+  cache_price?: number;
+  price_type?: string;
+}
+
+interface PriceForm {
+  model_name: string;
+  input_price: string;
+  output_price: string;
+  cache_price: string;
+  price_type: string;
+}
+
+interface RatiosState {
+  model_ratio: Record<string, number>;
+  group_ratio: Record<string, number>;
+}
+
 // 子标签定义 — 参照 deepseek-pp SUB_TABS 模式
-const SUB_TABS = [
+const SUB_TABS: Array<{ key: SubTabKey; labelKey: string }> = [
   { key: 'prices', labelKey: '价格目录' },
   { key: 'ratios', labelKey: '倍率配置' },
 ];
@@ -14,20 +37,20 @@ const SUB_TABS = [
 export default function Pricing() {
   const { t } = useTranslation();
   const addToast = useToast();
-  const [sub, setSub] = useState('prices');
+  const [sub, setSub] = useState<SubTabKey>('prices');
   const [error, setError] = useState('');
-  const [confirmState, setConfirmState] = useState(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   // ── 价格目录状态 ──
-  const [prices, setPrices] = useState([]);
+  const [prices, setPrices] = useState<PriceEntry[]>([]);
   const [priceLoading, setPriceLoading] = useState(true);
-  const [priceForm, setPriceForm] = useState({
+  const [priceForm, setPriceForm] = useState<PriceForm>({
     model_name: '', input_price: '', output_price: '', cache_price: '', price_type: 'token',
   });
   const [savingPrice, setSavingPrice] = useState(false);
 
   // ── 倍率配置状态 ──
-  const [ratios, setRatios] = useState({ model_ratio: {}, group_ratio: {} });
+  const [ratios, setRatios] = useState<RatiosState>({ model_ratio: {}, group_ratio: {} });
   const [ratioLoading, setRatioLoading] = useState(true);
   const [ratioText, setRatioText] = useState('');
   const [groupRatioText, setGroupRatioText] = useState('');
@@ -42,10 +65,10 @@ export default function Pricing() {
   const loadPrices = async () => {
     setPriceLoading(true);
     try {
-      const res = await api.listPrices();
-      setPrices(res.data || res || []);
+      const res = (await api.listPrices()) as { data?: PriceEntry[] };
+      setPrices(res.data || (res as unknown as PriceEntry[]) || []);
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setPriceLoading(false);
     }
@@ -72,13 +95,13 @@ export default function Pricing() {
       setPriceForm({ model_name: '', input_price: '', output_price: '', cache_price: '', price_type: 'token' });
       loadPrices();
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSavingPrice(false);
     }
   };
 
-  const handleDeletePrice = async (model) => {
+  const handleDeletePrice = async (model: string) => {
     setConfirmState({
       title: t('删除定价'),
       message: `${t('确定删除模型')} ${model} ${t('的定价？')}`,
@@ -91,7 +114,7 @@ export default function Pricing() {
           addToast(t('定价已删除'));
           loadPrices();
         } catch (err) {
-          setError(err.message);
+          setError(err instanceof Error ? err.message : String(err));
         }
       },
     });
@@ -99,9 +122,9 @@ export default function Pricing() {
 
   // ── 倍率配置 ──
   // 输入合法性标记：ratioError 为 null 表示合法，否则存非法原因文案
-  const [ratioError, setRatioError] = useState(null);
+  const [ratioError, setRatioError] = useState<string | null>(null);
 
-  const handleRatioBlur = (field, value) => {
+  const handleRatioBlur = (field: 'model' | 'group', value: string) => {
     try {
       JSON.parse(value || '{}');
       setRatioError(null);
@@ -113,13 +136,13 @@ export default function Pricing() {
   const loadRatios = async () => {
     setRatioLoading(true);
     try {
-      const res = await api.getRatios();
+      const res = (await api.getRatios()) as { data?: RatiosState } & RatiosState;
       const r = res.data || res || {};
       setRatios(r);
       setRatioText(JSON.stringify(r.model_ratio || {}, null, 2));
       setGroupRatioText(JSON.stringify(r.group_ratio || {}, null, 2));
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRatioLoading(false);
     }
@@ -129,8 +152,8 @@ export default function Pricing() {
     setSavingRatios(true);
     setError('');
     try {
-      let modelRatio = {};
-      let groupRatio = {};
+      let modelRatio: Record<string, number> = {};
+      let groupRatio: Record<string, number> = {};
       try {
         modelRatio = JSON.parse(ratioText || '{}');
       } catch {
@@ -150,7 +173,7 @@ export default function Pricing() {
       addToast(t('倍率配置已保存'));
       loadRatios();
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSavingRatios(false);
     }

@@ -1,10 +1,22 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import './Mappings.css';
 
-const DEFAULT_MODELS = [
+interface ModelMapping {
+  key: string;
+  value: string;
+}
+
+type MappingMap = Record<string, unknown>;
+
+interface SettingsResponse {
+  mappings?: MappingMap;
+  data?: { mappings?: MappingMap };
+}
+
+const DEFAULT_MODELS: ModelMapping[] = [
   { key: 'glm-5.2', value: '@cf/zai-org/glm-5.2' },
   { key: 'glm-4.7-flash', value: '@cf/zai-org/glm-4.7-flash' },
   { key: 'kimi-k2.7-code', value: '@cf/moonshotai/kimi-k2.7-code' },
@@ -27,15 +39,15 @@ const DEFAULT_MODELS = [
 ];
 
 export default function Mappings() {
-  const [mappings, setMappings] = useState({});
-  const [customMappings, setCustomMappings] = useState({});
+  const [mappings, setMappings] = useState<MappingMap>({});
+  const [customMappings, setCustomMappings] = useState<MappingMap>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState('');
   const [showDefaults, setShowDefaults] = useState(true);
   const addToast = useToast();
-  const [entries, setEntries] = useState([]);
+  const [entries, setEntries] = useState<ModelMapping[]>([]);
   const { t } = useTranslation();
 
   useEffect(() => {
@@ -46,24 +58,24 @@ export default function Mappings() {
     setLoading(true);
     setError('');
     try {
-      const res = await api.getSettings();
-      const data = (res.data || res || {});
-      const allMappings = data.mappings || data || {};
+      const res = (await api.getSettings()) as SettingsResponse;
+      const data = res.data || res || {};
+      const allMappings: MappingMap = data.mappings || (data as MappingMap) || {};
       setMappings(allMappings);
 
-      const customOnly = {};
-      const customEntries = [];
+      const customOnly: MappingMap = {};
+      const customEntries: ModelMapping[] = [];
       for (const [key, value] of Object.entries(allMappings)) {
         const isDefault = DEFAULT_MODELS.some(d => d.key === key && d.value === value);
         if (!isDefault) {
           customOnly[key] = value;
-          customEntries.push({ key, value });
+          customEntries.push({ key, value: String(value) });
         }
       }
       setCustomMappings(customOnly);
       setEntries(customEntries);
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -73,11 +85,11 @@ export default function Mappings() {
     setEntries([...entries, { key: '', value: '' }]);
   };
 
-  const removeEntry = (index) => {
+  const removeEntry = (index: number) => {
     setEntries(entries.filter((_, i) => i !== index));
   };
 
-  const updateEntry = (index, field, val) => {
+  const updateEntry = (index: number, field: keyof ModelMapping, val: string) => {
     setEntries(entries.map((entry, i) =>
       i === index ? { ...entry, [field]: val } : entry
     ));
@@ -85,7 +97,7 @@ export default function Mappings() {
 
   const handleSave = async () => {
     const filtered = entries.filter((e) => e.key.trim() && e.value.trim());
-    const newMappings = {};
+    const newMappings: Record<string, string> = {};
     filtered.forEach((e) => {
       newMappings[e.key.trim()] = e.value.trim();
     });
@@ -97,7 +109,7 @@ export default function Mappings() {
       setMappings({ ...DEFAULT_MODELS.reduce((acc, d) => ({ ...acc, [d.key]: d.value }), {}), ...newMappings });
       setCustomMappings(newMappings);
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
