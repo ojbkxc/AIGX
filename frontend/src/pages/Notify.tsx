@@ -48,6 +48,7 @@ interface ListResponse<T> {
 const RULE_META: Record<string, { label: string; unit: string; desc: string }> = {
   channel_failure: { label: '渠道连续失败', unit: '次', desc: '同一渠道连续失败达到该次数时告警' },
   channel_high_latency: { label: '渠道响应延迟', unit: 'ms', desc: '渠道平均响应时间超过该值时告警' },
+  channel_quota_low: { label: '渠道剩余额度', unit: '%', desc: '渠道剩余额度低于该百分比时告警' },
   memory_high: { label: '内存使用率', unit: '%', desc: '进程内存占用超过该百分比时告警' },
   user_quota_exhausted: { label: '用户额度耗尽', unit: '次', desc: '用户额度用尽时告警（阈值固定为 1）' },
   queue_backlog: { label: '请求队列积压', unit: '条', desc: '等待处理的请求数超过该值时告警' },
@@ -58,6 +59,18 @@ const RULE_META: Record<string, { label: string; unit: string; desc: string }> =
 function ruleMeta(name: string): { label: string; unit: string; desc: string } {
   return RULE_META[name] || { label: name.replace(/_/g, ' '), unit: '', desc: '' };
 }
+
+/** 可手动触发测试的告警类型（与后端 AlertTestRequest.kind 对齐） */
+const TEST_KINDS = [
+  'memory_high',
+  'channel_failure',
+  'channel_high_latency',
+  'channel_quota_low',
+  'user_quota_exhausted',
+  'queue_backlog',
+  'abnormal_traffic',
+  'cost_anomaly',
+];
 
 export default function Notify() {
   const { t } = useTranslation();
@@ -236,7 +249,11 @@ export default function Notify() {
   const handleTestAlert = async () => {
     setError('');
     try {
-      const res = await api.testAlert(testingAlertKind, 99);
+      // 测试值取该规则阈值 +1，保证超过阈值从而真实触发，而不是固定 99 导致
+      // 阈值更大的规则（如渠道延迟 30000ms）永远“未触发”
+      const matchedRule = rules.find((r) => r.name === testingAlertKind);
+      const testValue = matchedRule ? matchedRule.threshold + 1 : 99;
+      const res = await api.testAlert(testingAlertKind, testValue);
       const d = ((res as ListResponse<{ triggered?: boolean; message?: string }>).data || {});
       addToast(d.triggered ? `🚨 ${d.message}` : t('未触发（低于阈值或静默期）'));
       loadAlerts();
@@ -578,14 +595,11 @@ export default function Notify() {
                 value={testingAlertKind}
                 onChange={(e) => setTestingAlertKind(e.target.value)}
               >
-                <option value="memory_high">MemoryHigh</option>
-                <option value="channel_failure">ChannelFailure</option>
-                <option value="channel_high_latency">ChannelHighLatency</option>
-                <option value="channel_quota_low">ChannelQuotaLow</option>
-                <option value="user_quota_exhausted">UserQuotaExhausted</option>
-                <option value="queue_backlog">QueueBacklog</option>
-                <option value="abnormal_traffic">AbnormalTraffic</option>
-                <option value="cost_anomaly">CostAnomaly</option>
+                {TEST_KINDS.map((kind) => (
+                  <option key={kind} value={kind}>
+                    {ruleMeta(kind).label}
+                  </option>
+                ))}
               </select>
               <button className="btn btn-outline" onClick={handleTestAlert}>
                 {t('触发测试告警')}
@@ -597,7 +611,7 @@ export default function Notify() {
                 {activeAlerts.map((a) => (
                   <div key={a.id} className="notify-note" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     <span className={`badge ${a.level === 'critical' ? 'badge-danger' : a.level === 'warning' ? 'badge-warning' : 'badge-neutral'}`}>
-                      {a.level}
+                      {a.level === 'critical' ? t('严重') : a.level === 'warning' ? t('警告') : t('提示')}
                     </span>
                     <span>{a.message}</span>
                     <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>×{a.trigger_count}</span>
@@ -612,7 +626,7 @@ export default function Notify() {
                   {alertHistory.map((h) => (
                     <div key={h.id} className="notify-note" style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 }}>
                       <span className={`badge ${h.level === 'critical' ? 'badge-danger' : h.level === 'warning' ? 'badge-warning' : 'badge-neutral'}`}>
-                        {h.level}
+                        {h.level === 'critical' ? t('严重') : h.level === 'warning' ? t('警告') : t('提示')}
                       </span>
                       <span style={{ flex: 1 }}>{h.message}</span>
                       <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
