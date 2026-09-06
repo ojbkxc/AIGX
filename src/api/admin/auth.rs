@@ -16,6 +16,7 @@ use super::super::openai::AppState;
 use crate::user::{self, hash_password, Role};
 
 use uuid::Uuid;
+use rand::Rng;
 
 /// 登录请求
 #[derive(Debug, Deserialize)]
@@ -769,4 +770,184 @@ pub async fn handle_github_oauth_callback(
         }
     }))
     .into_response()
+}
+
+/// 邮箱验证码登录 — 发送验证码请求
+#[derive(Debug, Deserialize)]
+pub struct LoginCodeRequest {
+    pub email: String,
+}
+
+/// 邮箱验证码登录 — 验证并登录请求
+#[derive(Debug, Deserialize)]
+pub struct LoginWithCodeRequest {
+    pub email: String,
+    pub code: String,
+}
+
+/// POST /api/auth/login/send-code — 发送登录验证码（6 位，5 分钟有效）
+///
+/// 对齐 v2board/new-api 的邮箱验证码登录：
+/// - SMTP 已配置时发送真实邮件（正文注明 5 分钟有效期）；
+/// - 未配置 SMTP 时（内网/开发环境）直接返回验证码，便于调试，
+///   同时记录 warning 日志提示生产环境必须配置 SMTP。
+/// 用户不存在时仍返回成功（防邮箱枚举），但不生成验证码。
+pub async fn handle_login_send_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LoginCodeRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let email = body.email.trim().to_lowercase();
+    if email.is_empty() {
+        return Err(error_response("邮箱不能为空", StatusCode::BAD_REQUEST));
+    }
+
+    let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+    // 每 IP 每分钟最多 5 次发送（防刷邮件）
+    const SEND_CODE_RATE_LIMIT: u32 = 5;
+    let sent_count = state.login_limiter.get(&client_ip).await.unwrap_or(0);
+    if sent_count >= SEND_CODE_RATE_LIMIT {
+        return Err(error_response(
+            "验证码发送过于频繁，请稍后再试",
+            StatusCode::TOO_MANY_REQUESTS,
+        ));
+    }
+    state
+        .login_limiter
+        .insert(client_ip, sent_count + 1)
+        .await;
+
+    // 防枚举：用户不存在时返回成功但不生成验证码
+    let Some(user) = state.user_store.get_by_email(&email) else {
+        tracing::info!("Login code requested for unknown email (no code issued): {email}");
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "data": { "sent": false, "message": "If the email exists, a code has been sent" }
+        })));
+    };
+
+    // 生成 6 位数字验证码（加密安全随机源）
+    let code: String = {
+        let mut rng = rand::thread_rng();
+        let digits: Vec<u32> = (0..6).map(|_| rng.gen_range(0..10)).collect();
+        digits.iter().map(|d| d.to_string()).collect()
+    };
+    state
+        .login_code_cache
+        .insert(user.email.clone(), code.clone())
+        .await;
+
+    let notify_config = state.notify_service.get_config().await;
+    if notify_config.smtp_ready() && !notify_config.smtp_from.is_empty() {
+        let subject = "AIGX 登录验证码";
+        let body = format!(
+            "您的 AIGX 登录验证码是：{}\n\n5 分钟内有效。如果这不是您的操作，请忽略本邮件。",
+            code
+        );
+        match state.notify_service.send_email(&user.email, &subject, &body).await {
+            Ok(_) => {
+                tracing::info!("Login code email sent to {}", user.email);
+                return Ok(Json(serde_json::json!({
+                    "success": true,
+                    "data": { "sent": true, "expires_in_secs": 300 }
+                })));
+            }
+            Err(e) => {
+                tracing::warn!("Failed to send login code email to {}: {e}", user.email);
+                return Err(error_response(
+                    "验证码邮件发送失败，请检查 SMTP 配置",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ));
+            }
+        }
+    }
+
+    // 未配置 SMTP：直接返回验证码（仅限内网/开发；生产环境必须配置 SMTP）
+    tracing::warn!(
+        "SMTP not configured, returning login code in response for {} (dev only)",
+        user.email
+    );
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "sent": false, "code": code, "expires_in_secs": 300 }
+    })))
+}
+
+/// POST /api/auth/login/code — 邮箱验证码登录
+pub async fn handle_login_with_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LoginWithCodeRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let email = body.email.trim().to_lowercase();
+    let code = body.code.trim();
+    if email.is_empty() || code.is_empty() {
+        return Err(error_response("邮箱和验证码不能为空", StatusCode::BAD_REQUEST));
+    }
+
+    let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+    let fail_count = state.login_failures.get(&client_ip).await.unwrap_or(0);
+    if fail_count >= 5 {
+        return Err(error_response(
+            "登录失败次数过多，请稍后再试",
+            StatusCode::TOO_MANY_REQUESTS,
+        ));
+    }
+
+    let Some(expected) = state.login_code_cache.get(&email).await else {
+        state
+            .login_failures
+            .insert(client_ip.clone(), fail_count + 1)
+            .await;
+        return Err(error_response(
+            "验证码已过期或不存在，请重新获取",
+            StatusCode::UNAUTHORIZED,
+        ));
+    };
+
+    if expected != code {
+        state
+            .login_failures
+            .insert(client_ip.clone(), fail_count + 1)
+            .await;
+        return Err(error_response(
+            "验证码错误",
+            StatusCode::UNAUTHORIZED,
+        ));
+    }
+
+    let Some(user) = state.user_store.get_by_email(&email) else {
+        return Err(error_response(
+            "用户不存在",
+            StatusCode::UNAUTHORIZED,
+        ));
+    };
+    if user.status != "active" {
+        return Err(error_response("账号已禁用", StatusCode::FORBIDDEN));
+    }
+
+    // 登录成功：消耗验证码 + 清除失败计数
+    state.login_code_cache.remove(&email).await;
+    state.login_failures.remove(&client_ip).await;
+
+    let config = state.config_manager.get().await;
+    let session_ttl = config.admin.session_ttl_hours.max(1);
+    let session_secret = if config.admin.session_secret.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        config.admin.session_secret.clone()
+    };
+    let session_store = SessionStore::new(&session_secret, session_ttl);
+    let session = session_store.create_session(&user.email);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "token": session.token,
+            "email": user.email,
+            "username": user.username,
+            "role": match user.role { Role::Admin => "admin", Role::User => "user" },
+            "expires_at": session.expires_at
+        }
+    })))
 }

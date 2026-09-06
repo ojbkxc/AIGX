@@ -100,6 +100,10 @@ pub struct AppState {
     /// 5 分钟（登录失败时重置 TTL；锁定期间直接返回 429）。
     /// 成功登录清除计数。
     pub login_failures: Arc<crate::cache::AsyncCache<String, u32>>,
+    /// 邮箱验证码登录（登录方式之一，对齐 v2board/new-api）。
+    ///
+    /// key=邮箱（小写），value=6 位验证码。TTL=5 分钟；验证成功即移除。
+    pub login_code_cache: Arc<crate::cache::AsyncCache<String, String>>,
     /// SeaORM 数据库连接（可选后端）。
     ///
     /// - `None`：使用默认 FileStore（rusqlite bundled SQLite），零配置

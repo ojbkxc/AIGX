@@ -12,6 +12,13 @@ export default function Login(): JSX.Element {
   const location = useLocation();
   const registeredHandled = useRef(false);
 
+  // 登录方式：password | code（邮箱验证码）
+  const [loginMode, setLoginMode] = useState<'password' | 'code'>('password');
+  const [code, setCode] = useState('');
+  const [codeSending, setCodeSending] = useState(false);
+  const [codeCountdown, setCodeCountdown] = useState(0);
+  const codeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // 忘记密码模态框状态（两步：输入邮箱 → 设置新密码）
   const [showForgot, setShowForgot] = useState(false);
   const [forgotEmail, setForgotEmail] = useState('');
@@ -21,6 +28,77 @@ export default function Login(): JSX.Element {
   const [resetToken, setResetToken] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+
+  // 发送验证码（邮箱验证码登录）
+  const handleSendCode = async (): Promise<void> => {
+    setError('');
+    if (!email) {
+      setError('请先输入邮箱');
+      return;
+    }
+    setCodeSending(true);
+    try {
+      const res = await api.loginSendCode(email);
+      const data = res?.data || {};
+      if (data.code) {
+        // 未配置 SMTP（开发环境）：直接填入返回的验证码
+        setCode(data.code);
+        setSuccess('未配置邮件服务，验证码已自动填入');
+      } else {
+        setSuccess('验证码已发送至邮箱，5 分钟内有效');
+      }
+      // 60 秒重发倒计时
+      setCodeCountdown(60);
+      codeTimerRef.current = setInterval(() => {
+        setCodeCountdown((c) => {
+          if (c <= 1 && codeTimerRef.current) {
+            clearInterval(codeTimerRef.current);
+            codeTimerRef.current = null;
+            return 0;
+          }
+          return c - 1;
+        });
+      }, 1000);
+    } catch (err: any) {
+      setError(err.message || '验证码发送失败');
+    } finally {
+      setCodeSending(false);
+    }
+  };
+
+  React.useEffect(() => {
+    return () => {
+      if (codeTimerRef.current) clearInterval(codeTimerRef.current);
+    };
+  }, []);
+
+  // 提交验证码登录
+  const handleCodeSubmit = async (e: React.FormEvent): Promise<void> => {
+    e.preventDefault();
+    setError('');
+    if (!email || !code.trim()) {
+      setError('请输入邮箱和验证码');
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await api.loginWithCode(email, code.trim());
+      if (res.success && res.data) {
+        localStorage.setItem('token', res.data.token);
+        localStorage.setItem('email', res.data.email);
+        localStorage.setItem('username', res.data.username || res.data.email);
+        localStorage.setItem('role', res.data.role || 'user');
+        localStorage.setItem('expires_at', String(Number(res.data.expires_at) * 1000));
+        navigate('/');
+      } else {
+        setError('登录失败：响应格式错误');
+      }
+    } catch (err: any) {
+      setError(err.message || '登录失败');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // 打开忘记密码弹窗，预填当前邮箱
   const openForgot = (): void => {
@@ -184,9 +262,8 @@ export default function Login(): JSX.Element {
           alignItems: 'center',
           justifyContent: 'center',
           boxShadow: 'var(--card-shadow)',
-          backdropFilter: 'blur(var(--glass-blur))',
           zIndex: 1000,
-          transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+          transition: 'border-color 0.2s ease',
         }}
         title="切换主题"
       >
@@ -198,14 +275,12 @@ export default function Login(): JSX.Element {
       <div style={{
         background: 'var(--card-bg)',
         border: '1px solid var(--border-color)',
-        borderRadius: '16px',
+        borderRadius: '14px',
         padding: '32px',
         width: '100%',
         maxWidth: '380px',
         boxShadow: 'var(--card-shadow)',
-        backdropFilter: 'blur(var(--glass-blur))',
-        WebkitBackdropFilter: 'blur(var(--glass-blur))',
-        animation: 'fadeIn 0.25s ease',
+        animation: 'fadeIn 0.2s ease',
       }}>
         <div style={{ textAlign: 'center', marginBottom: '22px' }}>
           <div style={{
@@ -238,58 +313,146 @@ export default function Login(): JSX.Element {
           <div className="success-message">{success}</div>
         )}
 
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <div className="form-group">
-            <label htmlFor="email">邮箱 / 用户名</label>
-            <input
-              id="email"
-              type="text"
-              className="form-input"
-              placeholder="邮箱或用户名均可登录"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoFocus
-              disabled={loading}
-            />
-          </div>
-          <div className="form-group">
-            <label htmlFor="password">密码</label>
-            <input
-              id="password"
-              type="password"
-              className="form-input"
-              placeholder="请输入密码"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={loading}
-            />
-          </div>
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={loading}
-            style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: '8px', fontSize: '13px' }}
-          >
-            {loading ? '登录中...' : '登录'}
-          </button>
-        </form>
-
-        <div style={{ textAlign: 'right', marginTop: '8px' }}>
-          <button
-            type="button"
-            onClick={openForgot}
-            style={{
-              fontSize: '12px',
-              color: 'var(--accent-color)',
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              padding: 0,
-            }}
-          >
-            忘记密码？
-          </button>
+        {/* 登录方式切换：密码 / 邮箱验证码 */}
+        <div style={{
+          display: 'flex',
+          background: 'var(--btn-secondary-bg)',
+          borderRadius: '8px',
+          padding: '3px',
+          marginBottom: '14px',
+        }}>
+          {[
+            { key: 'password' as const, label: '密码登录' },
+            { key: 'code' as const, label: '验证码登录' },
+          ].map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => { setLoginMode(tab.key); setError(''); setSuccess(''); }}
+              style={{
+                flex: 1,
+                padding: '6px 0',
+                borderRadius: '6px',
+                fontSize: '12.5px',
+                fontWeight: 500,
+                cursor: 'pointer',
+                border: 'none',
+                background: loginMode === tab.key ? 'var(--card-bg)' : 'transparent',
+                color: loginMode === tab.key ? 'var(--text-main)' : 'var(--text-muted)',
+                boxShadow: loginMode === tab.key ? '0 1px 3px rgba(0,0,0,0.2)' : 'none',
+                transition: 'background 0.15s ease, color 0.15s ease',
+              }}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
+
+        {loginMode === 'password' ? (
+          <>
+            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <div className="form-group">
+                <label htmlFor="email">邮箱 / 用户名</label>
+                <input
+                  id="email"
+                  type="text"
+                  className="form-input"
+                  placeholder="邮箱或用户名均可登录"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  autoFocus
+                  disabled={loading}
+                />
+              </div>
+              <div className="form-group">
+                <label htmlFor="password">密码</label>
+                <input
+                  id="password"
+                  type="password"
+                  className="form-input"
+                  placeholder="请输入密码"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={loading}
+                />
+              </div>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={loading}
+                style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: '8px', fontSize: '13px' }}
+              >
+                {loading ? '登录中...' : '登录'}
+              </button>
+            </form>
+
+            <div style={{ textAlign: 'right', marginTop: '8px' }}>
+              <button
+                type="button"
+                onClick={openForgot}
+                style={{
+                  fontSize: '12px',
+                  color: 'var(--accent-color)',
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 0,
+                }}
+              >
+                忘记密码？
+              </button>
+            </div>
+          </>
+        ) : (
+          <form onSubmit={handleCodeSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <div className="form-group">
+              <label htmlFor="code-email">邮箱</label>
+              <input
+                id="code-email"
+                type="text"
+                className="form-input"
+                placeholder="请输入邮箱"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoFocus
+                disabled={loading}
+              />
+            </div>
+            <div className="form-group">
+              <label htmlFor="login-code">验证码</label>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  id="login-code"
+                  type="text"
+                  className="form-input"
+                  placeholder="6 位验证码"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  disabled={loading}
+                  maxLength={6}
+                  style={{ flex: 1, margin: 0 }}
+                />
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={handleSendCode}
+                  disabled={codeSending || codeCountdown > 0}
+                  style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+                >
+                  {codeSending ? '发送中...' : codeCountdown > 0 ? `${codeCountdown}s` : '发送验证码'}
+                </button>
+              </div>
+            </div>
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={loading}
+              style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: '8px', fontSize: '13px' }}
+            >
+              {loading ? '验证中...' : '验证码登录'}
+            </button>
+          </form>
+        )}
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', margin: '16px 0' }}>
           <div style={{ flex: 1, height: '1px', background: 'var(--border-color)' }} />
@@ -388,6 +551,7 @@ export default function Login(): JSX.Element {
                   <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>
                     输入邮件中的重置 Token 并设置新密码（1 小时内有效）。
                   </p>
+
                   {forgotError && <div className="error-message">{forgotError}</div>}
                   <form onSubmit={handleResetSubmit}>
                     <div className="form-group">
@@ -396,7 +560,7 @@ export default function Login(): JSX.Element {
                         id="reset-token"
                         type="text"
                         className="form-input"
-                        placeholder="粘贴邮件中的 Token"
+                        placeholder="邮件中的重置 Token"
                         value={resetToken}
                         onChange={(e) => setResetToken(e.target.value)}
                         autoFocus
@@ -404,9 +568,9 @@ export default function Login(): JSX.Element {
                       />
                     </div>
                     <div className="form-group">
-                      <label htmlFor="reset-pw">新密码</label>
+                      <label htmlFor="new-password">新密码</label>
                       <input
-                        id="reset-pw"
+                        id="new-password"
                         type="password"
                         className="form-input"
                         placeholder="至少 6 位"
@@ -416,9 +580,9 @@ export default function Login(): JSX.Element {
                       />
                     </div>
                     <div className="form-group">
-                      <label htmlFor="reset-pw2">确认新密码</label>
+                      <label htmlFor="confirm-password">确认新密码</label>
                       <input
-                        id="reset-pw2"
+                        id="confirm-password"
                         type="password"
                         className="form-input"
                         placeholder="再次输入新密码"
@@ -437,16 +601,6 @@ export default function Login(): JSX.Element {
                     </button>
                   </form>
                 </>
-              )}
-            </div>
-            <div className="modal-footer">
-              <button className="btn btn-outline" onClick={() => setShowForgot(false)}>
-                关闭
-              </button>
-              {forgotStep === 'token' && (
-                <button className="btn btn-outline" onClick={() => { setForgotStep('email'); setForgotError(''); }}>
-                  返回上一步
-                </button>
               )}
             </div>
           </div>

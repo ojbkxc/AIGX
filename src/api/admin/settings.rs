@@ -138,3 +138,85 @@ pub async fn handle_update_limits(
         )),
     }
 }
+#[derive(Debug, Deserialize)]
+pub struct OauthConfigRequest {
+    pub github: Option<OauthProviderFields>,
+    pub google: Option<OauthProviderFields>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OauthProviderFields {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub redirect_uri: Option<String>,
+}
+
+/// 获取 GitHub / Google OAuth 配置与就绪状态
+pub async fn handle_get_oauth_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = verify_admin(&state, &headers).await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "github": {
+                "client_id": config.github_oauth.client_id,
+                "client_secret": config.github_oauth.client_secret,
+                "redirect_uri": config.github_oauth.redirect_uri,
+                "ready": config.github_oauth.ready(),
+            },
+            "google": {
+                "client_id": config.google_oauth.client_id,
+                "client_secret": config.google_oauth.client_secret,
+                "redirect_uri": config.google_oauth.redirect_uri,
+                "ready": config.google_oauth.ready(),
+            },
+        }
+    })))
+}
+
+/// 更新 GitHub / Google OAuth 配置（未提供的字段保持原值）
+pub async fn handle_update_oauth_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<OauthConfigRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut config = verify_admin(&state, &headers).await?;
+    if let Some(g) = body.github {
+        if let Some(v) = g.client_id { config.github_oauth.client_id = v; }
+        if let Some(v) = g.client_secret { config.github_oauth.client_secret = v; }
+        if let Some(v) = g.redirect_uri { config.github_oauth.redirect_uri = v; }
+    }
+    if let Some(g) = body.google {
+        if let Some(v) = g.client_id { config.google_oauth.client_id = v; }
+        if let Some(v) = g.client_secret { config.google_oauth.client_secret = v; }
+        if let Some(v) = g.redirect_uri { config.google_oauth.redirect_uri = v; }
+    }
+    match state.config_manager.update(config).await {
+        Ok(_) => {
+            let updated = state.config_manager.get().await;
+            Ok(Json(json!({
+                "success": true,
+                "data": {
+                    "github": {
+                        "client_id": updated.github_oauth.client_id,
+                        "client_secret": updated.github_oauth.client_secret,
+                        "redirect_uri": updated.github_oauth.redirect_uri,
+                        "ready": updated.github_oauth.ready(),
+                    },
+                    "google": {
+                        "client_id": updated.google_oauth.client_id,
+                        "client_secret": updated.google_oauth.client_secret,
+                        "redirect_uri": updated.google_oauth.redirect_uri,
+                        "ready": updated.google_oauth.ready(),
+                    },
+                }
+            })))
+        }
+        Err(e) => Err(error_response(
+            &format!("Failed to save oauth config: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}

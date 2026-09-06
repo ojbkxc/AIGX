@@ -254,11 +254,36 @@ export default function Keys(): JSX.Element {
   };
 
   const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text).then(() => {
+    // navigator.clipboard 仅在安全上下文（HTTPS/localhost）可用；AIGX 常以
+    // http://IP:9527 部署，需降级 execCommand 方案，否则复制静默失败。
+    const fallbackCopy = (): boolean => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch {
+        return false;
+      }
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => {
+        addToast(t('已复制到剪贴板'));
+      }).catch(() => {
+        if (!fallbackCopy()) addToast(t('复制失败，请手动选择复制'), 'error');
+        else addToast(t('已复制到剪贴板'));
+      });
+    } else if (fallbackCopy()) {
       addToast(t('已复制到剪贴板'));
-    }).catch(() => {
-      addToast(t('复制失败'), 'error');
-    });
+    } else {
+      addToast(t('复制失败，请手动选择复制'), 'error');
+    }
   };
 
   const fmtQuota = (q: number | undefined): string => {

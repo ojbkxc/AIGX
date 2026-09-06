@@ -6,7 +6,8 @@ import { isAdmin } from '../lib/utils';
 import {
   LayoutDashboard, Satellite, KeyRound, ArrowLeftRight, CircleDollarSign,
   Users, Tags, Wallet, Receipt, Ticket, ScrollText, CreditCard, Bell,
-  Settings, Play, Shield, Globe, Network, Zap, ChevronDown, Menu, Layers,
+  Settings, Play, Shield, Globe, Network, Zap, ChevronDown, Menu,
+  Code2, BarChart3, UserCircle2,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -28,53 +29,72 @@ interface NavGroup {
 
 const navItems: NavItem[] = [
   { path: '/', labelKey: '仪表盘', icon: LayoutDashboard, end: true },
-
+  { path: '/playground', labelKey: 'Playground', icon: Play },
   { path: '/channels', labelKey: '渠道管理', icon: Satellite, adminOnly: true },
   { path: '/keys', labelKey: 'API 密钥', icon: KeyRound, adminOnly: true },
   { path: '/mappings', labelKey: '模型映射', icon: ArrowLeftRight, adminOnly: true },
-  { path: '/pricing', labelKey: '定价倍率', icon: CircleDollarSign, adminOnly: true },
-  { path: '/users', labelKey: '用户管理', icon: Users, adminOnly: true },
-  { path: '/groups', labelKey: '用户分组', icon: Tags, adminOnly: true },
+  { path: '/logs', labelKey: '日志审计', icon: ScrollText, adminOnly: true },
+  { path: '/security', labelKey: '安全监控', icon: Shield, adminOnly: true },
+  { path: '/ip-management', labelKey: 'IP 管理', icon: Globe, adminOnly: true },
   { path: '/wallet', labelKey: '钱包充值', icon: Wallet },
   { path: '/orders', labelKey: '订单记录', icon: Receipt, adminOnly: true },
   { path: '/redemptions', labelKey: '兑换码', icon: Ticket, adminOnly: true },
-  { path: '/logs', labelKey: '日志审计', icon: ScrollText, adminOnly: true },
+  { path: '/users', labelKey: '用户管理', icon: Users, adminOnly: true },
+  { path: '/groups', labelKey: '用户分组', icon: Tags, adminOnly: true },
+  { path: '/pricing', labelKey: '定价倍率', icon: CircleDollarSign, adminOnly: true },
   { path: '/epay', labelKey: '易支付', icon: CreditCard, adminOnly: true },
   { path: '/notify', labelKey: '通知设置', icon: Bell, adminOnly: true },
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
-  { path: '/playground', labelKey: 'Playground', icon: Play, adminOnly: true },
-  { path: '/security', labelKey: '安全监控', icon: Shield, adminOnly: true },
-  { path: '/ip-management', labelKey: 'IP 管理', icon: Globe, adminOnly: true },
   { path: '/network-layer', labelKey: '网络层概览', icon: Network, adminOnly: true },
 ];
 
-// 精简分组：高频入口（仪表盘/渠道/密钥/Playground/日志）平铺直达，
-// 低频管理合并进「更多管理」单一折叠组，侧栏总高度减半。
-// 手风琴模式：同组子项展开时其余组自动收起，点击组头永远可切换收/展。
+// 参照 app.ofox.ai 的分组平铺设计：短分组标签 + 组内直接平铺，
+// 不再用「更多管理」大折叠组。普通用户只看到无 adminOnly 的项。
 const navGroups: NavGroup[] = [
-  { key: 'top', items: [navItems[0]] },                                    // 仪表盘
-  { key: 'quick1', items: [navItems[1]] },                                 // 渠道管理
-  { key: 'quick2', items: [navItems[2]] },                                 // API 密钥
-  { key: 'quick3', items: [navItems[14]] },                                // Playground
-  { key: 'logs', items: [navItems[10]] },                                   // 日志审计
   {
-    key: 'more',
-    labelKey: '更多管理',
-    icon: Layers,
+    key: 'develop',
+    labelKey: '开发',
+    icon: Code2,
     items: [
-      navItems[3],   // 模型映射
-      navItems[4],   // 定价倍率
-      navItems[5],   // 用户管理
-      navItems[6],   // 用户分组
-      navItems[7],   // 钱包充值
-      navItems[8],   // 订单记录
-      navItems[9],   // 兑换码
-      navItems[15],  // 安全监控
-      navItems[16],  // IP 管理
-      navItems[17],  // 网络层概览
-      navItems[11],  // 易支付
-      navItems[12],  // 通知设置
-      navItems[13],  // 系统设置
+      navItems[0],  // 仪表盘
+      navItems[1],  // Playground
+      navItems[2],  // 渠道管理
+      navItems[3],  // API 密钥
+      navItems[4],  // 模型映射
+    ],
+  },
+  {
+    key: 'usage',
+    labelKey: '用量',
+    icon: BarChart3,
+    items: [
+      navItems[5],  // 日志审计
+      navItems[6],  // 安全监控
+      navItems[7],  // IP 管理
+    ],
+  },
+  {
+    key: 'account',
+    labelKey: '账户',
+    icon: UserCircle2,
+    items: [
+      navItems[8],  // 钱包充值
+      navItems[9],  // 订单记录
+      navItems[10], // 兑换码
+    ],
+  },
+  {
+    key: 'admin',
+    labelKey: '管理',
+    icon: Settings,
+    items: [
+      navItems[11], // 用户管理
+      navItems[12], // 用户分组
+      navItems[13], // 定价倍率
+      navItems[14], // 易支付
+      navItems[15], // 通知设置
+      navItems[16], // 系统设置
+      navItems[17], // 网络层概览
     ],
   },
 ];
@@ -92,8 +112,8 @@ export default function Sidebar(): JSX.Element {
   // 移动端抽屉开关：仅 ≤768px 由汉堡按钮触发
   const [mobileOpen, setMobileOpen] = React.useState<boolean>(false);
 
-  // 分组折叠状态：手风琴语义——默认全收起，点开一个组时其余组自动收起。
-  // 当前路由所在的组始终视为展开（isGroupActive），但用户点击组头仍可手动收起。
+  // 分组折叠状态：默认全展开（ofox 风格平铺）；
+  // 当前路由所在组始终视为展开，但用户点击组头仍可手动收起。
   const [collapsedGroups, setCollapsedGroups] = React.useState<Record<string, boolean>>(() => {
     try {
       const saved = localStorage.getItem('sidebar_collapsed');
@@ -110,18 +130,14 @@ export default function Sidebar(): JSX.Element {
 
   const toggleGroup = (key: string): void => {
     setCollapsedGroups((prev) => {
-      // 手风琴：展开该组 = 收起其它所有组；再次点击 = 收起该组
-      const next: Record<string, boolean> = {};
-      for (const g of navGroups) {
-        if (!g.labelKey) continue; // 平铺组无折叠语义
-        next[g.key] = g.key === key ? !prev[key] : true;
-      }
+      const next: Record<string, boolean> = { ...prev };
+      next[key] = !next[key];
       try { localStorage.setItem('sidebar_collapsed', JSON.stringify(next)); } catch {}
       return next;
     });
   };
 
-  // 判断分组是否含当前激活项（用于自动展开）
+  // 判断分组是否含当前激活项（用于高亮组头）
   const isGroupActive = (items: NavItem[]): boolean =>
     items.some((it) => location.pathname === it.path);
 
@@ -169,8 +185,6 @@ export default function Sidebar(): JSX.Element {
       bottom: 0,
       left: 0,
       zIndex: 100,
-      backdropFilter: 'blur(var(--glass-blur))',
-      WebkitBackdropFilter: 'blur(var(--glass-blur))',
       transition: 'transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
     }}>
       {/* Logo */}
@@ -189,10 +203,7 @@ export default function Sidebar(): JSX.Element {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          fontWeight: 'bold',
           color: 'white',
-          fontSize: '13px',
-          fontFamily: "'Inter', sans-serif",
           boxShadow: 'none',
         }}>
           <Zap size={14} strokeWidth={2} />
@@ -213,88 +224,47 @@ export default function Sidebar(): JSX.Element {
         </div>
       </div>
 
-      {/* Navigation */}
-      <nav style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '2px',
-        flex: 1,
-      }}>
+      {/* Nav */}
+      <nav style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
         {navGroups.map((group) => {
           // 角色过滤：普通用户不渲染管理员专属菜单；整组为空则隐藏
           const visibleItems = roleFilter(group.items);
           if (visibleItems.length === 0) return null;
-          // 无 label 的分组（高频直达项）平铺，不渲染分组标题
-          if (!group.labelKey) {
-            return visibleItems.map((item) => (
-              <NavLink
-                key={item.path}
-                to={item.path}
-                end={item.end}
-                className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-                style={({ isActive }) => ({
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  padding: '6px 10px',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '12.5px',
-                  fontWeight: 500,
-                  color: isActive ? 'var(--text-main)' : 'var(--text-muted)',
-                  background: isActive ? 'rgba(47, 111, 237, 0.16)' : 'transparent',
-                  boxShadow: isActive
-                    ? 'inset 2px 0 0 var(--accent-color)'
-                    : 'none',
-                  textDecoration: 'none',
-                  transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
-                  position: 'relative',
-                  overflow: 'hidden',
-                })}
-              >
-                <span style={{ fontSize: '14px', width: '18px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                  <item.icon size={15} strokeWidth={1.8} />
-                </span>
-                <span>{t(item.labelKey)}</span>
-              </NavLink>
-            ));
-          }
-          // 可折叠分组：collapsed 仅由用户状态决定——激活组也允许手动收起
-          const collapsed = collapsedGroups[group.key] ?? true;
+          const collapsed = collapsedGroups[group.key] ?? false;
           const groupActive = isGroupActive(visibleItems);
           return (
             <div key={group.key} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+              {/* 分组标签（ofox 风格：小号大写 muted 标签） */}
               <button
                 onClick={() => toggleGroup(group.key)}
                 aria-expanded={!collapsed}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '8px',
-                  padding: '6px 10px',
-                  borderRadius: '8px',
+                  gap: '6px',
+                  padding: '4px 10px',
                   cursor: 'pointer',
-                  fontSize: '12.5px',
-                  fontWeight: groupActive ? 600 : 500,
-                  color: groupActive ? 'var(--text-main)' : 'var(--text-muted)',
+                  fontSize: '10.5px',
+                  fontWeight: 600,
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                  color: groupActive ? 'var(--accent-color)' : 'var(--text-muted)',
                   background: 'transparent',
                   border: 'none',
                   width: '100%',
                   textAlign: 'left',
-                  transition: 'all 0.2s ease',
+                  transition: 'color 0.2s ease',
                 }}
               >
-                <span style={{ fontSize: '14px', width: '18px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                  {group.icon ? <group.icon size={15} strokeWidth={1.8} /> : null}
-                </span>
-                <span style={{ flex: 1 }}>{t(group.labelKey)}</span>
+                {group.icon ? <group.icon size={13} strokeWidth={2} /> : null}
+                <span style={{ flex: 1 }}>{t(group.labelKey || '')}</span>
                 <span style={{
                   display: 'inline-flex',
                   transition: 'transform 0.2s ease',
                   transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
-                  opacity: 0.6,
+                  opacity: 0.55,
                 }}>
-                  <ChevronDown size={13} strokeWidth={1.8} />
+                  <ChevronDown size={12} strokeWidth={2} />
                 </span>
               </button>
               {!collapsed && visibleItems.map((item) => (
@@ -307,18 +277,18 @@ export default function Sidebar(): JSX.Element {
                     display: 'flex',
                     alignItems: 'center',
                     gap: '8px',
-                    padding: '5px 10px 5px 28px',
+                    padding: '6px 10px 6px 12px',
                     borderRadius: '8px',
                     cursor: 'pointer',
-                    fontSize: '12px',
+                    fontSize: '12.5px',
                     fontWeight: 500,
                     color: isActive ? 'var(--text-main)' : 'var(--text-muted)',
-                    background: isActive ? 'rgba(47, 111, 237, 0.16)' : 'transparent',
+                    background: isActive ? 'rgba(47, 111, 237, 0.12)' : 'transparent',
                     boxShadow: isActive
                       ? 'inset 2px 0 0 var(--accent-color)'
                       : 'none',
                     textDecoration: 'none',
-                    transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
+                    transition: 'background 0.15s ease, color 0.15s ease',
                     position: 'relative',
                     overflow: 'hidden',
                   })}
@@ -387,7 +357,7 @@ export default function Sidebar(): JSX.Element {
           >
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" style={{ width: '12px', height: '12px' }}>
               <circle cx="12" cy="12" r="10" />
-              <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+              <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1-4-10z" />
             </svg>
             {i18n.language === 'zh' ? 'EN' : '中'}
           </button>

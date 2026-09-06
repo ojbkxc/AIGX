@@ -218,6 +218,14 @@ async fn main() -> anyhow::Result<()> {
             .build(),
     );
 
+    // 邮箱验证码登录：<email> → 6 位验证码（TTL=5 分钟）
+    let login_code_cache = Arc::new(
+        crate::cache::AsyncCache::<String, String>::builder()
+            .max_capacity(10_000)
+            .time_to_live(Duration::from_secs(300))
+            .build(),
+    );
+
     // 初始化 SeaORM 数据库连接（可选后端）
     //
     // 渐进式迁移策略：
@@ -293,6 +301,7 @@ async fn main() -> anyhow::Result<()> {
         register_limiter,
         login_limiter,
         login_failures,
+        login_code_cache,
         http_client,
         response_cache,
         semantic_router,
@@ -444,6 +453,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     let admin_routes = Router::new()
         // Auth handlers (来自 api::admin::auth)
         .route("/api/auth/login", post(api::admin::handle_login))
+        .route("/api/auth/login/send-code", post(api::admin::handle_login_send_code))
+        .route("/api/auth/login/code", post(api::admin::handle_login_with_code))
         .route("/api/auth/register", post(api::admin::handle_register))
         .route(
             "/api/auth/github",
@@ -562,6 +573,14 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 设置管理
         .route("/api/settings", get(api::admin::handle_get_settings))
         .route("/api/settings", put(api::admin::handle_update_settings))
+        .route(
+            "/api/oauth/config",
+            get(api::admin::handle_get_oauth_config),
+        )
+        .route(
+            "/api/oauth/config",
+            put(api::admin::handle_update_oauth_config),
+        )
         .route("/api/limits", get(api::admin::handle_get_limits))
         .route("/api/limits", put(api::admin::handle_update_limits))
         // 通知配置
@@ -802,11 +821,27 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         .route("/v1/audio/speech", post(api::openai::handle_audio_speech))
         .route("/v1/models", get(api::openai::handle_list_models))
-        .route("/v1/models/:model", get(api::openai::handle_get_model));
+        .route("/v1/models/:model", get(api::openai::handle_get_model))
+        // 无前缀兼容：客户端 base_url 填根地址（http://host:9527）时
+        // 请求 /chat/completions 等无 /v1 路径 —— new-api 同样双挂，避免 405。
+        .route(
+            "/chat/completions",
+            post(api::openai::handle_chat_completions),
+        )
+        .route("/responses", post(api::openai::handle_responses))
+        .route("/completions", post(api::openai::handle_completions))
+        .route("/embeddings", post(api::openai::handle_embeddings))
+        .route(
+            "/images/generations",
+            post(api::openai::handle_images_generations),
+        )
+        .route("/models", get(api::openai::handle_list_models))
+        .route("/models/:model", get(api::openai::handle_get_model));
 
-    // Anthropic 兼容 API 路由
-    let anthropic_routes =
-        Router::new().route("/v1/messages", post(api::anthropic::handle_messages));
+    // Anthropic 兼容 API 路由（同样双挂无前缀 /messages）
+    let anthropic_routes = Router::new()
+        .route("/v1/messages", post(api::anthropic::handle_messages))
+        .route("/messages", post(api::anthropic::handle_messages));
 
     Router::new()
         .merge(admin_routes)

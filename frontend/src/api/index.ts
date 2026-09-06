@@ -158,6 +158,10 @@ export const api = {
   // ==================== 顶层便捷方法（页面直调，沿用后端路由契约） ====================
   login: (email: string, password: string): Promise<any> =>
     request('POST', `${API_BASE}/auth/login`, { email, password }),
+  loginSendCode: (email: string): Promise<any> =>
+    request('POST', `${API_BASE}/auth/login/send-code`, { email }),
+  loginWithCode: (email: string, code: string): Promise<any> =>
+    request('POST', `${API_BASE}/auth/login/code`, { email, code }),
   // 兼容历史调用顺序 (email, password, username?)：后端仅使用 email/password/username 字段
   register: (emailOrUsername: string, password: string, username?: string): Promise<any> =>
     request('POST', `${API_BASE}/auth/register`, {
