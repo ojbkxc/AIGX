@@ -1,7 +1,20 @@
-import React, { useState } from 'react';
+import { useState, useEffect, useRef, type ChangeEvent, type FormEvent } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
+
+type UsernameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error';
+
+interface UsernameCheckResponse {
+  available?: boolean;
+  exists?: boolean;
+  data?: { available?: boolean; exists?: boolean };
+}
+
+interface RegisterResponse {
+  success?: boolean;
+  error?: string;
+}
 
 export default function Register() {
   const [email, setEmail] = useState('');
@@ -15,12 +28,12 @@ export default function Register() {
 
   // ── 用户名实时可用性检查（防抖 300ms）──
   // 状态：'idle' 未检查 / 'checking' 检查中 / 'available' 可用 / 'taken' 已占用 / 'error' 检查失败
-  const [usernameStatus, setUsernameStatus] = useState('idle');
-  const usernameTimerRef = React.useRef(null);
-  const usernameCheckedRef = React.useRef('');
+  const [usernameStatus, setUsernameStatus] = useState<UsernameStatus>('idle');
+  const usernameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const usernameCheckedRef = useRef('');
 
   // 防抖检查用户名是否可用，300ms 内若再次输入则取消上次未发出的请求
-  const checkUsernameAvailability = (value) => {
+  const checkUsernameAvailability = (value: string) => {
     if (usernameTimerRef.current) {
       clearTimeout(usernameTimerRef.current);
     }
@@ -31,7 +44,7 @@ export default function Register() {
     setUsernameStatus('checking');
     usernameTimerRef.current = setTimeout(async () => {
       try {
-        const res = await api.checkUsername(value.trim());
+        const res = (await api.checkUsername(value.trim())) as UsernameCheckResponse;
         // 后端返回 { available: true/false } 或 { data: { available: ... } }
         const data = res?.data ?? res;
         const available = data?.available ?? !data?.exists;
@@ -43,7 +56,7 @@ export default function Register() {
     }, 300);
   };
 
-  const handleUsernameChange = (e) => {
+  const handleUsernameChange = (e: ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setUsername(value);
     checkUsernameAvailability(value);
@@ -83,13 +96,13 @@ export default function Register() {
   };
 
   // 组件卸载时清理防抖定时器
-  React.useEffect(() => {
+  useEffect(() => {
     return () => {
       if (usernameTimerRef.current) clearTimeout(usernameTimerRef.current);
     };
   }, []);
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setError('');
 
@@ -108,7 +121,7 @@ export default function Register() {
 
     setLoading(true);
     try {
-      const res = await api.register(email, password, username || undefined);
+      const res = (await api.register(email, password, username || undefined)) as RegisterResponse;
       if (res.success) {
         // 注册成功后自动跳转登录页
         navigate('/login', { state: { registered: true, email } });
@@ -116,7 +129,7 @@ export default function Register() {
         setError(res.error || t('注册失败'));
       }
     } catch (err) {
-      setError(err.message || t('注册失败'));
+      setError(err instanceof Error ? err.message : t('注册失败'));
     } finally {
       setLoading(false);
     }

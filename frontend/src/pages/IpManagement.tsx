@@ -1,9 +1,23 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import ConfirmDialog from '../components/ConfirmDialog';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import './IpManagement.css';
+
+type TabKey = 'whitelist' | 'blacklist';
+type IpRule = string | { pattern?: string; ip?: string; note?: string; remark?: string };
+
+interface IpFilterResponse {
+  enabled?: boolean;
+  whitelist?: IpRule[];
+  blacklist?: IpRule[];
+  data?: {
+    enabled?: boolean;
+    whitelist?: IpRule[];
+    blacklist?: IpRule[];
+  };
+}
 
 // IpManagement 页面：IP 白名单/黑名单管理。
 // 参照 Groups.jsx / Keys.jsx 的 CRUD 界面模式。
@@ -14,20 +28,20 @@ export default function IpManagement() {
 
   // 全局开关与规则列表
   const [enabled, setEnabled] = useState(false);
-  const [whitelist, setWhitelist] = useState([]);
-  const [blacklist, setBlacklist] = useState([]);
+  const [whitelist, setWhitelist] = useState<IpRule[]>([]);
+  const [blacklist, setBlacklist] = useState<IpRule[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [savingSwitch, setSavingSwitch] = useState(false);
 
   // 添加规则表单（白名单 / 黑名单共用一套状态，由 activeTab 区分）
-  const [activeTab, setActiveTab] = useState('whitelist');
+  const [activeTab, setActiveTab] = useState<TabKey>('whitelist');
   const [pattern, setPattern] = useState('');
   const [note, setNote] = useState('');
   const [adding, setAdding] = useState(false);
 
   // 确认弹窗
-  const [confirmState, setConfirmState] = useState(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   useEffect(() => {
     loadFilter();
@@ -38,13 +52,13 @@ export default function IpManagement() {
     setLoading(true);
     setError('');
     try {
-      const res = await api.getIpFilter();
+      const res = (await api.getIpFilter()) as IpFilterResponse;
       const data = res?.data || res || {};
       setEnabled(!!data.enabled);
       setWhitelist(Array.isArray(data.whitelist) ? data.whitelist : []);
       setBlacklist(Array.isArray(data.blacklist) ? data.blacklist : []);
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -60,14 +74,14 @@ export default function IpManagement() {
       setEnabled(next);
       addToast(next ? t('IP 过滤已启用') : t('IP 过滤已禁用'));
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSavingSwitch(false);
     }
   };
 
   // 简单校验 IP / CIDR 格式（宽松校验，允许 IPv4、IPv6、CIDR）
-  const isValidPattern = (p) => {
+  const isValidPattern = (p: string) => {
     if (!p) return false;
     // IPv4 CIDR
     if (/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(p)) return true;
@@ -101,14 +115,14 @@ export default function IpManagement() {
       setNote('');
       loadFilter();
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setAdding(false);
     }
   };
 
   // 删除规则
-  const handleRemove = (item) => {
+  const handleRemove = (item: IpRule) => {
     const p = typeof item === 'string' ? item : (item.pattern || item.ip || '');
     const isWhite = activeTab === 'whitelist';
     setConfirmState({
@@ -128,15 +142,15 @@ export default function IpManagement() {
           }
           loadFilter();
         } catch (err) {
-          setError(err.message);
+          setError(err instanceof Error ? err.message : String(err));
         }
       },
     });
   };
 
   // 渲染规则项：兼容字符串数组与对象数组两种后端返回格式
-  const renderPattern = (item) => typeof item === 'string' ? item : (item.pattern || item.ip || '');
-  const renderNote = (item) => typeof item === 'string' ? '' : (item.note || item.remark || '');
+  const renderPattern = (item: IpRule) => typeof item === 'string' ? item : (item.pattern || item.ip || '');
+  const renderNote = (item: IpRule) => typeof item === 'string' ? '' : (item.note || item.remark || '');
 
   const currentList = activeTab === 'whitelist' ? whitelist : blacklist;
 
