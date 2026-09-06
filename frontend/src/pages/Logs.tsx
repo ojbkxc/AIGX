@@ -43,7 +43,7 @@ export default function Logs(): JSX.Element {
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [size, setSize] = useState(20);
+  const size = 20;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const addToast = useToast();
@@ -118,7 +118,7 @@ export default function Logs(): JSX.Element {
   const fmtTime = (ts: number | undefined): string => (ts ? new Date(ts * 1000).toLocaleString() : '—');
   const totalPages = Math.ceil(total / size);
 
-  const isRequest = (l: LogItem): l is RequestLogItem => tab === 'requests';
+  const isRequest = (_l: LogItem): _l is RequestLogItem => tab === 'requests';
 
   return (
     <div>
