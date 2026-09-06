@@ -16,7 +16,7 @@ export default function Playground(): JSX.Element {
       <div className="page-header">
         <div>
           <h1>{t('Playground')}</h1>
-          <p>{t('在线调试沙盒：不写代码，直接与网关对话验证模型、协议与渠道。')}</p>
+          <p>{t('在线调试沙盒：像聊天一样测试你的 AI 网关——模型、协议、多模态附件，与渠道管理里的「对话调试」完全一致。')}</p>
         </div>
       </div>
       <div className="playground-body">

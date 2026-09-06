@@ -10,8 +10,8 @@
   .glass-card {
     @apply rounded-card border border-glass-border;
     background-color: var(--card-bg);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
     box-shadow: var(--card-shadow);
   }
 
