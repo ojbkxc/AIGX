@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, Input, Loading, EmptyState, Select } from '../components/ui';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
 import './Keys.css';
 
 interface TokenItem {
@@ -273,7 +273,7 @@ export default function Keys(): JSX.Element {
     return Number(tk.expires_at) < Math.floor(Date.now() / 1000);
   };
 
-  if (loading) return <Loading text={t('加载令牌列表')} />;
+  if (loading) return <SkeletonTable columns={5} rows={6} />;
 
   return (
     <div>

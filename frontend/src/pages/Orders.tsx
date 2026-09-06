@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
-import { Card, Badge, EmptyState, Loading } from '../components/ui';
+import { Card, Badge, EmptyState, SkeletonTable } from '../components/ui';
 import type { Order, EpayConfig } from './types';
 
 /** 易支付配置（仅取展示需要的字段，其余保持后端形状） */
@@ -56,7 +56,7 @@ export default function Orders(): JSX.Element {
   const statusLabel = (status: string | undefined): string =>
     status === 'paid' ? t('已支付') : status === 'expired' ? t('已过期') : t('待支付');
 
-  if (loading) return <Loading text={t('加载订单')} />;
+  if (loading) return <SkeletonTable columns={5} rows={6} />;
 
   return (
     <div>

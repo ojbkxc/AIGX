@@ -15,3 +15,4 @@ export { default as DataTable } from './DataTable';
 export { default as MobileDrawer } from './MobileDrawer';
 export { default as Switch } from './Switch';
 export { default as Tooltip } from './Tooltip';
+export { default as Skeleton, SkeletonList, SkeletonTable, SkeletonCards } from './Skeleton';

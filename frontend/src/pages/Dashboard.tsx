@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
+import { SkeletonCards } from '../components/ui';
 import './Dashboard.css';
 
 // ── 类型定义 ──────────────────────────────────────────────
@@ -352,7 +353,19 @@ export default function Dashboard(): JSX.Element {
     }
   };
 
-  if (loading) return <div className="loading">{t('加载看板数据')}</div>;
+  if (loading) {
+    return (
+      <div>
+        <div className="page-header">
+          <div>
+            <h1>{t('仪表盘')}</h1>
+            <p>{t('AI 网关使用概览')}</p>
+          </div>
+        </div>
+        <SkeletonCards count={6} />
+      </div>
+    );
+  }
 
   const u = usage || {};
   const ts = tokenStats || {};

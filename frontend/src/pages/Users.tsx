@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, Input, Loading, EmptyState, Select } from '../components/ui';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
 
 interface UserItem {
   id: string | number;
@@ -183,7 +183,7 @@ export default function Users(): JSX.Element {
     return String(n);
   };
 
-  if (loading) return <Loading text={t('加载用户列表')} />;
+  if (loading) return <SkeletonTable columns={6} rows={7} />;
 
   return (
     <div>
