@@ -1,21 +1,21 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import ConfirmDialog from '../components/ConfirmDialog';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import './Channels.css';
 
 interface ChannelItem {
   id: string | number;
   name: string;
   channel_type: string;
-  base_url: string;
-  api_key: string;
+  base_url?: string;
+  api_key?: string;
   priority: number;
   weight: number;
   status: string;
-  models: string[];
-  account_id: string;
+  models?: string[];
+  account_id?: string;
   last_error?: string | null;
   last_used_at?: number | null;
   created_at?: number;
@@ -35,7 +35,7 @@ interface ChannelFormState {
 }
 
 interface ChatMsg {
-  role: string;
+  role: 'user' | 'assistant';
   content: string;
 }
 
@@ -91,7 +91,7 @@ export default function Channels(): JSX.Element {
 
   // ── 确认弹窗状态 ──
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [confirmState, setConfirmState] = useState<any>(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   // ── 对话调试器状态 ──
   const [showChat, setShowChat] = useState(false);
@@ -102,7 +102,7 @@ export default function Channels(): JSX.Element {
   const [chatInput, setChatInput] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
   const [chatModels, setChatModels] = useState<string[]>([]);
-  const chatEndRef = React.useRef<HTMLDivElement | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   function defaultForm(): ChannelFormState {
     return {
@@ -118,7 +118,12 @@ export default function Channels(): JSX.Element {
     };
   }
 
-  useEffect(() => { loadChannels(); }, []);
+  // 挂载时加载一次渠道列表
+  useEffect(() => {
+    loadChannels().catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : String(err));
+    });
+  }, []);
 
   const loadChannels = async (): Promise<void> => {
     setLoading(true);
@@ -167,8 +172,8 @@ export default function Channels(): JSX.Element {
     channel_type: form.channel_type,
     base_url: form.base_url,
     api_key: form.api_key,
-    priority: parseInt(form.priority, 10) || 0,
-    weight: parseInt(form.weight, 10) || 1,
+    priority: parseInt(String(form.priority), 10) || 0,
+    weight: parseInt(String(form.weight), 10) || 1,
     status: form.status,
     models: form.models.split(',').map((s) => s.trim()).filter(Boolean),
     account_id: form.account_id,
@@ -305,7 +310,7 @@ export default function Channels(): JSX.Element {
     return list.length ? list : ['glm-4.7-flash'];
   };
 
-  const appendChatMessage = (role: string, content: string): void => {
+  const appendChatMessage = (role: 'user' | 'assistant', content: string): void => {
     setChatMessages((prev) => [...prev, { role, content }]);
   };
 
@@ -363,14 +368,14 @@ export default function Channels(): JSX.Element {
     }
   };
 
-  const handleChatKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+  const handleChatKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleChatSend();
     }
   };
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [chatMessages]);
 
@@ -542,7 +547,7 @@ export default function Channels(): JSX.Element {
                     setForm({
                       ...form,
                       channel_type: newType,
-                      base_url: isUsingDefault ? (DEFAULT_BASE_URL[newType] || '') : form.base_url,
+                      base_url: isUsingDefault ? (DEFAULT_BASE_URL[newType as keyof typeof DEFAULT_BASE_URL] || '') : form.base_url,
                     });
                   }}>
                   {CHANNEL_TYPES.map((tp) => (
@@ -552,9 +557,9 @@ export default function Channels(): JSX.Element {
                   ))}
                 </select>
                 {/* Gemini / Zai 鉴权方式提示 */}
-                {AUTH_HINT[form.channel_type] && (
+                {AUTH_HINT[form.channel_type as keyof typeof AUTH_HINT] && (
                   <div className="form-hint" style={{ color: 'var(--accent-color)' }}>
-                    {t(AUTH_HINT[form.channel_type])}
+                    {t(AUTH_HINT[form.channel_type as keyof typeof AUTH_HINT]!)}
                   </div>
                 )}
               </div>
@@ -680,7 +685,7 @@ export default function Channels(): JSX.Element {
               <div className="chat-input-row">
                 <textarea
                   className="form-input chat-input"
-                  rows="2"
+                  rows={2}
                   placeholder={t('输入消息，Enter 发送，Shift+Enter 换行')}
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}

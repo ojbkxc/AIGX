@@ -1,5 +1,4 @@
-import React, { useState, useEffect } from 'react';
-import { api as networkApi } from '../api/network';
+import { useState, useEffect } from 'react';
 import { getNetworkStatus, updateNetworkConfig, restartNetwork } from '../api/network';
 import type { NetworkStatusRaw } from '../types/network';
 import './NetworkLayer.css';
@@ -7,9 +6,10 @@ import './NetworkLayer.css';
 interface NetworkLayerConfig {
   enabled: boolean;
   strategy: string;
+  minAccounts: number;
+  maxConnections: number;
+  maxSessions: number;
 }
-
-type HealthStatusKind = 'healthy' | 'warning' | 'error';
 
 function fmtLatency(ms: number | null | undefined): string {
   if (ms === undefined || ms === null) return '—';
@@ -18,8 +18,8 @@ function fmtLatency(ms: number | null | undefined): string {
 
 function fmtPercent(val: number | null | undefined): string {
   if (val === undefined || val === null) return '—';
-  if (val > 1) return (val / 100).toFixed(2) + '%';
-  return val.toFixed(2) + '%';
+  const clamped = Math.min(Math.max(val, 0), 1);
+  return (clamped * 100).toFixed(1) + '%';
 }
 
 function RebootIcon() {
@@ -51,37 +51,6 @@ function GearIcon() {
   );
 }
 
-interface HealthCheckIconProps {
-  status: HealthStatusKind;
-}
-
-function HealthCheckIcon({ status }: HealthCheckIconProps) {
-  if (status === 'healthy') {
-    return (
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2">
-        <path d="m9 12 2 2 4-4"></path>
-        <circle cx="12" cy="12" r="10"></circle>
-      </svg>
-    );
-  } else if (status === 'warning') {
-    return (
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2">
-        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"></path>
-        <path d="m12 9 1 4"></path>
-        <path d="m12 17h.01"></path>
-      </svg>
-    );
-  } else if (status === 'error') {
-    return (
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2">
-        <path d="m9 12 2 2 4-4"></path>
-        <circle cx="12" cy="12" r="10"></circle>
-      </svg>
-    );
-  }
-  return null;
-}
-
 interface StatusBadgeProps {
   status: string;
 }
@@ -100,33 +69,6 @@ function StatusBadge({ status }: StatusBadgeProps) {
   );
 }
 
-interface LatencyBarsProps {
-  latency: number | null | undefined;
-}
-
-function LatencyBars({ latency }: LatencyBarsProps) {
-  if (latency === undefined || latency === null || isNaN(latency)) {
-    return <span className="text-gray-500">—</span>;
-  }
-
-  const maxLatency = 150;
-  const widthpercent = Math.min((latency / maxLatency) * 100, 100);
-  const barClass = latency < 50 ? 'bg-green-500' : latency < 100 ? 'bg-yellow-500' : 'bg-red-500';
-
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-gray-600 w-12">{formatTime(latency)}</span>
-      <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-        <div className={`h-full ${barClass}`} style={{ width: `${widthpercent}%` }}></div>
-      </div>
-    </div>
-  );
-}
-
-function formatTime(ms: number): string {
-  return ms < 1000 ? ms.toFixed(0) + 'ms' : (ms / 1000).toFixed(2) + 's';
-}
-
 // 时间戳格式化（此前缺失，运行时崩溃点）
 function formatTimestamp(ts: number | undefined): string {
   if (!ts) return '—';
@@ -137,7 +79,13 @@ export default function NetworkLayer(): JSX.Element {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [networkStatus, setNetworkStatus] = useState<NetworkStatusRaw | null>(null);
-  const [config, setConfig] = useState<NetworkLayerConfig>({ enabled: true, strategy: 'latency-aware' });
+  const [config, setConfig] = useState<NetworkLayerConfig>({
+    enabled: true,
+    strategy: 'latency-aware',
+    minAccounts: 2,
+    maxConnections: 10,
+    maxSessions: 50,
+  });
   const [showSettings, setShowSettings] = useState(false);
   const [showRestartConfirm, setShowRestartConfirm] = useState(false);
   const [restartPending, setRestartPending] = useState(false);
@@ -150,7 +98,7 @@ export default function NetworkLayer(): JSX.Element {
     try {
       setLoading(true);
       const data = await getNetworkStatus();
-      setNetworkStatus(data);
+      setNetworkStatus(data ?? null);
     } catch (error) {
       console.error('Failed to fetch network status:', error);
     } finally {
@@ -170,7 +118,7 @@ export default function NetworkLayer(): JSX.Element {
   const handleUpdateConfig = async (): Promise<void> => {
     try {
       setShowSettings(false);
-      await updateNetworkConfig('default', config);
+      await updateNetworkConfig('default', { enabled: config.enabled, strategy: config.strategy });
       await fetchStatus();
     } catch (error) {
       console.error('Failed to update config:', error);
@@ -280,7 +228,7 @@ export default function NetworkLayer(): JSX.Element {
                 <div className="mt-3 pt-3 border-t border-gray-700">
                   <div className="flex items-center justify-between text-xs text-gray-400">
                     <span>请求成功率</span>
-                    <span className="text-green-500">{fmtPercent(networkStatus.total_requests > 0 ? (1 - networkStatus.failed_requests / networkStatus.total_requests) : 1)}</span>
+                    <span className="text-green-500">{fmtPercent(networkStatus.account_pool.total_requests > 0 ? (1 - networkStatus.account_pool.failed_requests / networkStatus.account_pool.total_requests) : 1)}</span>
                   </div>
                 </div>
               </div>
@@ -312,7 +260,7 @@ export default function NetworkLayer(): JSX.Element {
                 <div className="mt-3 pt-3 border-t border-gray-700">
                   <div className="flex items-center justify-between text-xs text-gray-400">
                     <span>请求成功率</span>
-                    <span className="text-green-500">{fmtPercent(networkStatus.connection_pool.successful_requests / networkStatus.connection_pool.total_requests)}</span>
+                    <span className="text-green-500">{fmtPercent(networkStatus.connection_pool.successful_requests + networkStatus.connection_pool.failed_requests > 0 ? networkStatus.connection_pool.successful_requests / (networkStatus.connection_pool.successful_requests + networkStatus.connection_pool.failed_requests) : 1)}</span>
                   </div>
                 </div>
               </div>
@@ -341,7 +289,7 @@ export default function NetworkLayer(): JSX.Element {
                 <div className="mt-3 pt-3 border-t border-gray-700">
                   <div className="flex items-center justify-between text-xs text-gray-400">
                     <span>会话 TTL</span>
-                    <span className="text-blue-500">{networkStatus.session_pool.session_ttl_hours} 小时</span>
+                    <span className="text-blue-500">{networkStatus.session_pool.session_ttl_hours ?? 72} 小时</span>
                   </div>
                 </div>
               </div>
@@ -481,7 +429,7 @@ export default function NetworkLayer(): JSX.Element {
                         <div className="w-full h-2 bg-gray-800 rounded-full overflow-hidden">
                           <div
                             className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all"
-                            style={{ width: `${(protocol.count / protocol.total) * 100}%` }}
+                            style={{ width: `${protocol.total > 0 ? (protocol.count / protocol.total) * 100 : 0}%` }}
                           ></div>
                         </div>
                       </div>
@@ -506,7 +454,7 @@ export default function NetworkLayer(): JSX.Element {
                   </div>
                   <div className="bg-gray-800/30 rounded-xl p-4">
                     <p className="text-gray-400 text-sm mb-2">成功率</p>
-                    <p className="text-2xl font-bold text-white">{fmtPercent(networkStatus.connection_pool.successful_requests / networkStatus.connection_pool.total_requests)}</p>
+                    <p className="text-2xl font-bold text-white">{fmtPercent(networkStatus.connection_pool.successful_requests + networkStatus.connection_pool.failed_requests > 0 ? networkStatus.connection_pool.successful_requests / (networkStatus.connection_pool.successful_requests + networkStatus.connection_pool.failed_requests) : 1)}</p>
                     <p className="text-xs text-green-500">99.9%+</p>
                   </div>
                   <div className="bg-gray-800/30 rounded-xl p-4">

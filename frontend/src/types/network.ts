@@ -196,6 +196,7 @@ export interface NetworkStatusRaw {
     total_sessions: number;
     active_sessions: number;
     idle_sessions: number;
+    session_ttl_hours?: number;
   };
   load_balance_strategy: string;
   last_check_at: number;

@@ -1,7 +1,6 @@
 // 网络层 API 调用模块
 // 仅保留后端已实现的路由（/api/network/*），未实现端点的方法已移除
 import type {
-  NetworkStatus,
   NetworkConfigRequest,
   AccountConfigRequest,
   NetworkStatusRaw,
@@ -54,9 +53,9 @@ async function request<T = unknown>(method: string, path: string, body: unknown 
   return data as T;
 }
 
-// 获取网络层健康状态
-export async function getNetworkStatus(): Promise<NetworkStatus> {
-  return request<NetworkStatus>('GET', '/api/network/status');
+// 获取网络层健康状态（后端返回 snake_case 原始结构）
+export async function getNetworkStatus(): Promise<NetworkStatusRaw> {
+  return request<NetworkStatusRaw>('GET', '/api/network/status');
 }
 
 // 更新网络层配置
