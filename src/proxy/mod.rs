@@ -46,7 +46,7 @@ impl CfApiClient {
     pub fn new(account_pool: Arc<AccountPool>, model_mapper: Arc<ModelMapper>) -> Self {
         let http = Client::builder()
             .timeout(Duration::from_secs(120))
-            .user_agent("aigx/0.1.0")
+            .user_agent(concat!("aigx/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("Failed to create HTTP client");
         Self {
