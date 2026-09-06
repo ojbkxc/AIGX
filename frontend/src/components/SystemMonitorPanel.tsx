@@ -1,10 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import * as networkApi from '../api/network';
 import type { Metrics } from '../types/network';
 import './SystemMonitorPanel.css';
-import { Signal, Activity, Server, Database, Cloud, Percent, Zap } from 'lucide-react';
+import { Signal, Activity, Server, Database, Cloud, Zap } from 'lucide-react';
 
-function MetricCard({ title, value, extra, color }) {
+interface MetricCardProps {
+  title: string;
+  value: string | number;
+  extra?: string;
+  unit?: string;
+  color?: string;
+}
+
+function MetricCard({ title, value, extra, color }: MetricCardProps) {
   return (
     <div className="metric-card" style={{ borderColor: color }}>
       <div className="metric-icon" style={{ color }}>
@@ -19,7 +27,13 @@ function MetricCard({ title, value, extra, color }) {
   );
 }
 
-function TrendChart({ value, max, label }) {
+interface TrendChartProps {
+  value: number | null | undefined;
+  max?: number;
+  label?: string;
+}
+
+function TrendChart({ value, max, label }: TrendChartProps) {
   if (value === null || value === undefined || isNaN(value)) {
     return <span className="text-gray-500">—</span>;
   }
@@ -38,7 +52,11 @@ function TrendChart({ value, max, label }) {
   );
 }
 
-function StatusIndicator({ status }) {
+interface StatusIndicatorProps {
+  status: string;
+}
+
+function StatusIndicator({ status }: StatusIndicatorProps) {
   const styles = {
     online: { bg: 'bg-green-500', text: 'text-green-500', pulse: 'pulse-green' },
     offline: { bg: 'bg-gray-500', text: 'text-gray-500', pulse: '' },
@@ -316,7 +334,7 @@ export default function SystemMonitorPanel() {
   );
 }
 
-function formatDuration(seconds) {
+function formatDuration(seconds: number | null | undefined): string {
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
@@ -329,7 +347,7 @@ function formatDuration(seconds) {
   return parts.length > 0 ? parts.join(' ') : '0秒';
 }
 
-function formatLatency(ms) {
+function formatLatency(ms: number | null | undefined): string {
   if (ms === null || ms === undefined || isNaN(ms)) return '—';
 
   if (ms < 1000) {
@@ -338,7 +356,7 @@ function formatLatency(ms) {
   return `${(ms / 1000).toFixed(2)}s`;
 }
 
-function formatPercent(value) {
+function formatPercent(value: number | null | undefined): string {
   if (value === null || value === undefined || isNaN(value)) return '0%';
 
   const percent = value * 100;
@@ -348,7 +366,7 @@ function formatPercent(value) {
   return `${percent.toFixed(2)}%`;
 }
 
-function formatThroughput(bytes) {
+function formatThroughput(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined || isNaN(bytes)) return '—';
 
   if (bytes > 1024 * 1024 * 1024) {
