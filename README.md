@@ -4,9 +4,9 @@
 
 **高性能 · 多协议 · 可扩展的 AI 中转网关**
 
-[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange)](https://www.rust-lang.org)
 [![React](https://img.shields.io/badge/React-18+-61DAFB)](https://react.dev)
-[![License](https://img.shields.io/badge/License-Source_Available-blue)](#许可证)
+[![License](https://img.shields.io/badge/License-Free_Personal_Use-blue)](#许可证)
 [![Docker](https://img.shields.io/badge/Docker-Supported-2496ED)](https://www.docker.com)
 
 [English](#english) · [中文](#中文)
@@ -27,7 +27,7 @@ AIGX 是一个 **OpenAI / Anthropic 兼容的 AI 中转网关**。它聚合多�
 - **模型能力聚合**：将 Cloudflare Workers AI、第三方 OpenAI 兼容服务与官方模型聚合为一个端点，客户端无需关心上游差异。
 - **内部网关**：通过用户分组、模型白名单、IP 黑白名单、RPM/TPM 限流与审计日志，构建企业内部的模型访问入口。
 
-> 本项目**开源免费**，供个人与非商业用途使用。**任何商业用途（包括但不限于对外售卖、SaaS 化部署、集成到商业产品中）须获得作者书面授权**，详见[许可证](#许可证)。
+> **许可说明**：本项目源代码对**个人与非商业用途免费开放**（学习、研究、自用部署与修改）。**任何商业用途——包括对外售卖、SaaS 化运营、集成到商业产品或提供付费服务——均须事先取得作者书面授权**。详见[许可证](#许可证)。
 
 ---
 
@@ -74,7 +74,7 @@ AIGX 是一个 **OpenAI / Anthropic 兼容的 AI 中转网关**。它聚合多�
 ### 架构特性
 
 - **Rust 后端**：Axum 0.7 + Tokio 异步运行时，单二进制交付
-- **React 前端**：React 18 + Vite，玻璃拟态管理后台，支持中英文切换与暗色主题
+- **React 前端**：React 18 + TypeScript（全量类型化）+ Vite，玻璃拟态管理后台，支持中英文切换与暗色主题
 - **存储灵活**：默认 FileStore（bundled SQLite KV，零配置）；可选 SeaORM 接入 PostgreSQL / MySQL
 - **多平台**：Linux / Windows / macOS，AMD64 / ARM64 预编译产物
 - **容器化**：多阶段 Dockerfile，非特权用户运行，健康检查内建
@@ -90,13 +90,16 @@ AIGX 是一个 **OpenAI / Anthropic 兼容的 AI 中转网关**。它聚合多�
 git clone https://github.com/ojbkxc/AIGX.git
 cd AIGX
 
-# 启动服务（后端默认映射到宿主 9527，前端映射到 80）
+# 1. 构建镜像（仅首次，或代码更新后）
+docker compose build
+
+# 2. 启动服务（后端默认映射到宿主 9527，前端映射到 80）
 docker compose up -d
 ```
 
 启动后访问 `http://localhost`（前端管理面板），API 数据面入口为 `http://localhost:9527`。
 
-> 首次启动时，查看后端日志获取初始管理员密码；生产环境请务必通过环境变量修改 `ADMIN_PASSWORD` 与 `JWT_SECRET`。
+> **初始管理员**：首次启动内置管理员 `admin`，初始密码为 `123456`；容器默认配置在 `docker-compose.yml` 中。**生产环境部署前必须**通过环境变量修改 `ADMIN_PASSWORD` 与 `JWT_SECRET`。
 
 ### 本地构建运行
 
@@ -143,7 +146,7 @@ chmod +x aigx-linux-x86_64
 
 ```text
 Base URL: https://your-gateway.example.com/v1
-API Key:  sk-aigx-xxxx（网关创建的令牌）
+API Key:  sk-xxxxxxxxxxxxxxxx（网关创建的令牌）
 ```
 
 支持 OpenRouter / DeepSeek / Kimi / Claude Code 等主流客户端的 `base_url + api_key` 对接方式。
@@ -224,6 +227,10 @@ API Key:  sk-aigx-xxxx（网关创建的令牌）
 - [SeaORM](https://www.sea-ql.org/SeaORM/) — Rust ORM
 - [React](https://react.dev/) — UI 框架
 
+## 免责声明
+
+本软件按“现状”提供，作者不对其可用性、准确性或适用性作任何明示或暗示的担保；因使用本软件造成的任何损失，作者不承担责任。请在生产环境部署前自行完成安全评估与合规审查。
+
 ---
 
 <div align="center">
@@ -238,6 +245,6 @@ API Key:  sk-aigx-xxxx（网关创建的令牌）
 
 **AIGX** is an OpenAI / Anthropic-compatible AI gateway that aggregates upstream AI services (Cloudflare Workers AI, OpenAI-compatible providers, Anthropic, Gemini, Zhipu Z.AI) behind a unified API endpoint, adding authentication, rate limiting, group permissions, pricing, multi-channel scheduling, payments, audit logging and security monitoring.
 
-The source code is **free for personal, research and non-commercial use**. **Commercial use (including resale, SaaS hosting, or integration into commercial products) requires written authorization from the author.** See [License](#许可证) for details.
+The source code is **free for personal, educational, research and non-commercial use**. **Commercial use (including resale, SaaS hosting, or integration into commercial products) requires prior written authorization from the author.** See [License](#许可证) for details.
 
 For setup instructions, configuration, and API details, refer to the Chinese sections above and the [docs](./docs) directory.
