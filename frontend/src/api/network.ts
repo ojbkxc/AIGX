@@ -1,20 +1,27 @@
 // 网络层 API 调用模块
 // 仅保留后端已实现的路由（/api/network/*），未实现端点的方法已移除
-const BASE_URL = '';
-const getToken = () => localStorage.getItem('token');
+import type {
+  NetworkStatus,
+  NetworkConfigRequest,
+  AccountConfigRequest,
+  Metrics,
+} from '../types/network';
 
-function authHeaders() {
+const BASE_URL = '';
+const getToken = (): string | null => localStorage.getItem('token');
+
+function authHeaders(): Record<string, string> {
   const token = getToken();
   if (!token) return {};
-  return { 'Authorization': `Bearer ${token}` };
+  return { Authorization: `Bearer ${token}` };
 }
 
-async function request(method, path, body = null) {
-  const headers = {
+async function request<T = unknown>(method: string, path: string, body: unknown = null): Promise<T> {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...authHeaders(),
   };
-  const options = { method, headers };
+  const options: RequestInit = { method, headers };
   if (body !== null) {
     options.body = JSON.stringify(body);
   }
@@ -37,48 +44,58 @@ async function request(method, path, body = null) {
   }
 
   if (res.status === 204) {
-    return null;
+    return null as T;
   }
 
-  const data = await res.json();
+  const data = await res.json() as Record<string, unknown>;
   if (!res.ok) {
-    throw new Error(data.detail || data.error || '请求失败');
+    throw new Error(String(data.detail || data.error || '请求失败'));
   }
-  return data;
+  return data as T;
 }
 
 // 获取网络层健康状态
-export async function getNetworkStatus() {
-  return request('GET', '/api/network/status');
+export async function getNetworkStatus(): Promise<NetworkStatus> {
+  return request<NetworkStatus>('GET', '/api/network/status');
 }
 
 // 更新网络层配置
-export async function updateNetworkConfig(configId, config) {
+export async function updateNetworkConfig(configId: string | number, config: NetworkConfigRequest): Promise<unknown> {
   return request('PUT', `/api/network/config/${configId}`, config);
 }
 
 // 重启网络层
-export async function restartNetwork() {
+export async function restartNetwork(): Promise<unknown> {
   return request('POST', '/api/network/restart');
 }
 
 // 添加网络层账号
-export async function addNetworkAccount(accountId, accountConfig) {
+export async function addNetworkAccount(accountId: string | number, accountConfig: AccountConfigRequest): Promise<unknown> {
   return request('POST', `/api/network/accounts/${accountId}`, accountConfig);
 }
 
 // 删除网络层账号
-export async function removeNetworkAccount(accountId) {
+export async function removeNetworkAccount(accountId: string | number): Promise<unknown> {
   return request('DELETE', `/api/network/accounts/${accountId}`);
 }
 
 // 获取网络层指标（聚合自 /api/network/status）
-export async function getNetworkMetrics() {
+export async function getNetworkMetrics(): Promise<Metrics> {
   const res = await fetch(`${BASE_URL}/api/network/status`, {
     headers: authHeaders(),
   });
   if (res.status === 401) {
     throw new Error('Unauthorized');
   }
-  return await res.json();
+  return res.json() as Promise<Metrics>;
 }
+
+// 保持与旧 import { api as networkApi } 用法兼容的聚合对象
+export const api = {
+  getNetworkStatus,
+  updateNetworkConfig,
+  restartNetwork,
+  addNetworkAccount,
+  removeNetworkAccount,
+  getNetworkMetrics,
+};
