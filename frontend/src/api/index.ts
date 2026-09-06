@@ -207,7 +207,15 @@ export const api = {
   logout: (): Promise<any> => request('POST', `${API_BASE}/auth/logout`),
 
   // Models（网关可用模型列表，用于对话调试模型下拉）
-  listModels: (): Promise<any> => request('GET', '/v1/models'),
+  // 走管理面 /api/settings 的 mappings keys（管理 token 可访问），
+  // 不再用 /v1/models —— 那是数据面接口需要 sk-xxx 密钥，管理 token 会 401，
+  // 触发全局 401 处理清 localStorage 并跳转登录页（已登录用户被误踢）。
+  listModels: async (): Promise<any> => {
+    const res = await request('GET', `${API_BASE}/settings`);
+    const mappings = res?.data?.mappings || {};
+    const ids = Object.keys(mappings);
+    return { data: ids.map((id) => ({ id, object: 'model', owned_by: 'aigx' })) };
+  },
 
   // Settings / Model Mappings
   getSettings: (): Promise<any> => request('GET', `${API_BASE}/settings`),
