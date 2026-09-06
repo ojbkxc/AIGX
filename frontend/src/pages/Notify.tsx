@@ -44,6 +44,21 @@ interface ListResponse<T> {
   data?: T;
 }
 
+/** 告警规则的人类可读元数据：名称、阈值单位、一句话说明 */
+const RULE_META: Record<string, { label: string; unit: string; desc: string }> = {
+  channel_failure: { label: '渠道连续失败', unit: '次', desc: '同一渠道连续失败达到该次数时告警' },
+  channel_high_latency: { label: '渠道响应延迟', unit: 'ms', desc: '渠道平均响应时间超过该值时告警' },
+  memory_high: { label: '内存使用率', unit: '%', desc: '进程内存占用超过该百分比时告警' },
+  user_quota_exhausted: { label: '用户额度耗尽', unit: '次', desc: '用户额度用尽时告警（阈值固定为 1）' },
+  queue_backlog: { label: '请求队列积压', unit: '条', desc: '等待处理的请求数超过该值时告警' },
+  abnormal_traffic: { label: '流量异常', unit: 'req/min', desc: '每分钟请求数超过该值时告警' },
+  cost_anomaly: { label: '成本异常', unit: '%', desc: '成本较基线涨幅超过该百分比时告警' },
+};
+
+function ruleMeta(name: string): { label: string; unit: string; desc: string } {
+  return RULE_META[name] || { label: name.replace(/_/g, ' '), unit: '', desc: '' };
+}
+
 export default function Notify() {
   const { t } = useTranslation();
   const addToast = useToast();
@@ -498,63 +513,61 @@ export default function Notify() {
             {rules.length === 0 ? (
               <p className="notify-note">{t('暂无规则')}</p>
             ) : (
-              <table className="table" style={{ width: '100%' }}>
-                <thead>
-                  <tr>
-                    <th>{t('规则')}</th>
-                    <th>{t('类型')}</th>
-                    <th>{t('阈值')}</th>
-                    <th>{t('静默期(秒)')}</th>
-                    <th>{t('级别')}</th>
-                    <th>{t('启用')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rules.map((r, i) => (
-                    <tr key={r.name}>
-                      <td>{r.name}</td>
-                      <td style={{ fontSize: 11 }}>{(typeof r.kind === 'string' ? r.kind : r.kind?.kind || '').replace(/_/g, ' ')}</td>
-                      <td>
-                        <input
-                          className="form-input"
-                          type="number"
-                          style={{ width: 90 }}
-                          value={r.threshold}
-                          onChange={(e) => updateRule(i, 'threshold', Number(e.target.value))}
-                        />
-                      </td>
-                      <td>
-                        <input
-                          className="form-input"
-                          type="number"
-                          style={{ width: 90 }}
-                          value={r.silence_period_secs}
-                          onChange={(e) => updateRule(i, 'silence_period_secs', Number(e.target.value))}
-                        />
-                      </td>
-                      <td>
-                        <select
-                          className="form-input"
-                          style={{ width: 100 }}
-                          value={r.level}
-                          onChange={(e) => updateRule(i, 'level', e.target.value)}
-                        >
-                          <option value="info">Info</option>
-                          <option value="warning">Warning</option>
-                          <option value="critical">Critical</option>
-                        </select>
-                      </td>
-                      <td>
-                        <input
-                          type="checkbox"
-                          checked={r.enabled}
-                          onChange={(e) => updateRule(i, 'enabled', e.target.checked)}
-                        />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <div className="alert-rule-grid">
+                {rules.map((r, i) => {
+                  const meta = ruleMeta(r.name);
+                  return (
+                    <div key={r.name} className={`alert-rule-card ${r.enabled ? '' : 'is-off'}`}>
+                      <div className="alert-rule-head">
+                        <span className="alert-rule-title">{meta.label}</span>
+                        <label className="alert-rule-switch" title={t('启用/停用此规则')}>
+                          <input
+                            type="checkbox"
+                            checked={r.enabled}
+                            onChange={(e) => updateRule(i, 'enabled', e.target.checked)}
+                          />
+                          <span className="alert-rule-switch-track" />
+                        </label>
+                      </div>
+                      <p className="alert-rule-desc">{meta.desc}</p>
+                      <div className="alert-rule-fields">
+                        <label className="alert-rule-field">
+                          <span>{t('触发阈值')}{meta.unit ? `（${meta.unit}）` : ''}</span>
+                          <input
+                            className="form-input"
+                            type="number"
+                            value={r.threshold}
+                            onChange={(e) => updateRule(i, 'threshold', Number(e.target.value))}
+                          />
+                        </label>
+                        <label className="alert-rule-field">
+                          <span>{t('静默期（分钟）')}</span>
+                          <input
+                            className="form-input"
+                            type="number"
+                            min="1"
+                            value={Math.max(1, Math.round(r.silence_period_secs / 60))}
+                            onChange={(e) => updateRule(i, 'silence_period_secs', Math.max(60, Math.round(Number(e.target.value) * 60)))}
+                          />
+                        </label>
+                        <label className="alert-rule-field">
+                          <span>{t('级别')}</span>
+                          <select
+                            className="form-input"
+                            value={r.level}
+                            onChange={(e) => updateRule(i, 'level', e.target.value)}
+                          >
+                            <option value="info">{t('提示')}</option>
+                            <option value="warning">{t('警告')}</option>
+                            <option value="critical">{t('严重')}</option>
+                          </select>
+                        </label>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             )}
             <div className="notify-actions" style={{ display: 'flex', gap: 10, marginTop: 12 }}>
               <button className="btn btn-primary" onClick={handleSaveRules} disabled={rulesSaving}>

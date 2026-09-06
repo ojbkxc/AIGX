@@ -167,6 +167,8 @@ export const api = {
     }),
   forgotPassword: (email: string): Promise<any> =>
     request('POST', `${API_BASE}/auth/forgot-password`, { email }),
+  changePassword: (old_password: string, new_password: string): Promise<any> =>
+    request('POST', `${API_BASE}/auth/change-password`, { old_password, new_password }),
   getUsageSummary: (): Promise<any> => request('GET', `${API_BASE}/usage/summary`),
   getTodayTokens: (): Promise<any> => request('GET', `${API_BASE}/tokens/today`),
   getLimits: (): Promise<any> => request('GET', `${API_BASE}/limits`),

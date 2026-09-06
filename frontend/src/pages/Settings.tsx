@@ -92,6 +92,30 @@ export default function Settings() {
   // ── 通用确认弹窗（用于清空缓存等危险操作）──
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
+  // ── 账户安全（修改密码）──
+  const [oldPw, setOldPw] = useState('');
+  const [newPw, setNewPw] = useState('');
+  const [confirmPw, setConfirmPw] = useState('');
+  const [pwSaving, setPwSaving] = useState(false);
+  const [pwError, setPwError] = useState('');
+
+  const handleChangePassword = async () => {
+    setPwError('');
+    if (!oldPw) { setPwError(t('请输入当前密码')); return; }
+    if (newPw.length < 6) { setPwError(t('新密码至少 6 位')); return; }
+    if (newPw !== confirmPw) { setPwError(t('两次输入的新密码不一致')); return; }
+    setPwSaving(true);
+    try {
+      await api.changePassword(oldPw, newPw);
+      addToast(t('密码已修改，下次登录请使用新密码'));
+      setOldPw(''); setNewPw(''); setConfirmPw('');
+    } catch (err) {
+      setPwError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPwSaving(false);
+    }
+  };
+
   useEffect(() => {
     loadLimits();
     loadRateLimitConfig();
@@ -326,6 +350,38 @@ export default function Settings() {
               <label>{t('告警阈值 (%)')}</label>
               <input className="form-input" type="number" min="0" max="100" placeholder={t('settingsPlaceholderThreshold')} value={limits.threshold} onChange={(e) => handleChange('threshold', e.target.value)} />
               <span className="form-hint">{t('触发告警的限额使用百分比（0-100）。')}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-header">
+          <h2>{t('账户安全')}</h2>
+        </div>
+        <div className="card-body">
+          <div className="settings-form">
+            <div className="form-group">
+              <label>{t('当前密码')}</label>
+              <input className="form-input" type="password" value={oldPw}
+                onChange={(e) => setOldPw(e.target.value)} autoComplete="current-password" />
+            </div>
+            <div className="form-group">
+              <label>{t('新密码')}</label>
+              <input className="form-input" type="password" value={newPw}
+                onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
+              <span className="form-hint">{t('至少 6 位，建议混合字母与数字')}</span>
+            </div>
+            <div className="form-group">
+              <label>{t('确认新密码')}</label>
+              <input className="form-input" type="password" value={confirmPw}
+                onChange={(e) => setConfirmPw(e.target.value)} autoComplete="new-password" />
+            </div>
+            {pwError && <div className="error-message">{pwError}</div>}
+            <div className="settings-actions">
+              <button className="btn btn-primary" onClick={handleChangePassword} disabled={pwSaving}>
+                {pwSaving ? t('修改中...') : t('修改密码')}
+              </button>
             </div>
           </div>
         </div>

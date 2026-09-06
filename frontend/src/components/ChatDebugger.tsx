@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Search, Send, Trash2, Image, Video, AudioLines, Loader2, Bot, User } from 'lucide-react';
 import { api } from '../api';
+import './ChatDebugger.css';
 
 interface DebugMessage {
   role: 'user' | 'assistant';

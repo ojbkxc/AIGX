@@ -463,6 +463,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             post(api::admin::handle_reset_password),
         )
         .route("/api/auth/logout", post(api::admin::handle_logout))
+        .route(
+            "/api/auth/change-password",
+            post(api::admin::handle_change_password),
+        )
         // 阶段1：Google OAuth
         .route(
             "/api/auth/google",

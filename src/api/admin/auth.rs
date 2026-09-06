@@ -36,6 +36,13 @@ pub struct ResetPasswordRequest {
     pub token: String,
     pub new_password: String,
 }
+
+/// 登录后修改密码请求（需有效会话，先校验旧密码）
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub old_password: String,
+    pub new_password: String,
+}
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     pub email: String,
@@ -296,6 +303,69 @@ pub async fn handle_register(
     })))
 }
 
+/// POST /api/auth/change-password — 登录后修改密码
+///
+/// 需要有效会话；先校验旧密码（防止会话泄露被直接改密），
+/// 新密码至少 6 位，成功后旧会话继续有效（v2board 语义）。
+pub async fn handle_change_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ChangePasswordRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if body.new_password.chars().count() < 6 {
+        return Err(error_response("密码长度至少6位", StatusCode::BAD_REQUEST));
+    }
+    if body.old_password == body.new_password {
+        return Err(error_response("新密码不能与旧密码相同", StatusCode::BAD_REQUEST));
+    }
+
+    // 会话校验（复用 verify_user 语义，但不重复取 user）
+    let token = extract_session_token(&headers)
+        .ok_or_else(|| error_response("Not authenticated", StatusCode::UNAUTHORIZED))?;
+    let config = state.config_manager.get().await;
+    let session_ttl = config.admin.session_ttl_hours.max(1);
+    let session_store = SessionStore::new(&config.admin.session_secret, session_ttl);
+    let sess = session_store
+        .validate_session(&token)
+        .ok_or_else(|| error_response("Invalid session", StatusCode::UNAUTHORIZED))?;
+
+    let user = state
+        .user_store
+        .get_by_email(&sess.email)
+        .ok_or_else(|| error_response("User not found", StatusCode::UNAUTHORIZED))?;
+    if user.status != "active" {
+        return Err(error_response("User disabled", StatusCode::UNAUTHORIZED));
+    }
+
+    // 旧密码校验（OAuth 用户的随机密码无法校验，明确拒绝改密并提示走找回流程）
+    if !crate::user::verify_password(&body.old_password, &user.password) {
+        return Err(error_response("旧密码不正确", StatusCode::BAD_REQUEST));
+    }
+
+    let new_hash = hash_password(&body.new_password);
+    match state.user_store.update(&user.id, |u| {
+        u.password = new_hash;
+    }) {
+        Ok(_) => {
+            state.log_store.record_security(
+                crate::log::SecurityEvent::new(
+                    crate::log::SecurityEventType::AuthFailure,
+                    "info",
+                    format!("用户 {} 修改了密码", user.email),
+                ),
+            );
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "data": { "message": "Password changed" }
+            })))
+        }
+        Err(e) => Err(error_response(
+            &format!("Password change failed: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
 /// POST /api/auth/logout - 管理员登出
 pub async fn handle_logout(
     State(_state): State<AppState>,
@@ -370,14 +440,55 @@ pub async fn handle_forgot_password(
 
     let session_store = SessionStore::new(&session_secret, PASSWORD_RESET_TTL_HOURS);
     let session = session_store.create_session(&user.email);
-
     tracing::info!("Password reset token generated for {}", user.email);
+
+    // 邮件已配置时真正发出重置邮件（new-api/v2board 式自助找回）；
+    // 否则退回 token 直出（便于内网/未配邮件环境使用）。
+    let notify_config = state.notify_service.get_config().await;
+    if notify_config.smtp_ready() && !notify_config.smtp_from.is_empty() {
+        let base = config
+            .server_address
+            .trim_end_matches('/')
+            .to_string();
+        let reset_url = if base.is_empty() {
+            format!("?reset_token={}", session.token)
+        } else {
+            format!("{}/login?reset_token={}", base, session.token)
+        };
+        let subject = "AIGX 密码重置";
+        let body = format!(
+            "您正在为账号 {} 重置密码。\n\n请在 1 小时内打开以下链接并设置新密码：\n{}\n\n如果这不是您的操作，请忽略本邮件。",
+            user.email, reset_url
+        );
+        match state.notify_service.send_email(&user.email, subject, &body).await {
+            Ok(_) => {
+                tracing::info!("Password reset email sent to {}", user.email);
+                return Ok(Json(serde_json::json!({
+                    "success": true,
+                    "data": {
+                        "message": "Reset link sent to your email",
+                        "sent": true,
+                        "expires_in_secs": PASSWORD_RESET_TTL_HOURS * 3600
+                    }
+                })));
+            }
+            Err(e) => {
+                tracing::warn!("Failed to send reset email to {}: {e}", user.email);
+                // 邮件失败不回退泄露 token，返回明确错误提示管理员配置邮件
+                return Err(error_response(
+                    "Reset email send failed; please check SMTP config",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ));
+            }
+        }
+    }
 
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
             "message": "If the email exists, a reset token has been generated",
             "token": session.token,
+            "sent": false,
             "expires_in_secs": PASSWORD_RESET_TTL_HOURS * 3600
         }
     })))

@@ -1,0 +1,340 @@
+/* ── ChatDebugger — 统一对话调试器（Playground 与渠道对话调试共用） ── */
+
+.chat-debugger {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+/* 顶部工具条：模型搜索选择 + 协议 + 流式 + 参数 */
+.chat-debugger-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-debugger-model {
+  position: relative;
+  flex: 1;
+  min-width: 180px;
+}
+
+.chat-debugger-model-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.chat-debugger-model-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 模型搜索下拉 */
+.chat-debugger-picker {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+  animation: chat-debugger-pop 0.14s ease;
+}
+
+@keyframes chat-debugger-pop {
+  from { opacity: 0; transform: translateY(-4px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.chat-debugger-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-muted);
+}
+
+.chat-debugger-search .form-input {
+  border: none;
+  background: transparent;
+  padding: 4px 0;
+  font-size: 13px;
+  box-shadow: none;
+}
+
+.chat-debugger-search .form-input:focus {
+  box-shadow: none;
+  border: none;
+}
+
+.chat-debugger-picker-list {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.chat-debugger-picker-empty {
+  padding: 14px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.chat-debugger-picker-item {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-debugger-picker-item:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.04));
+}
+
+.chat-debugger-picker-item.active {
+  background: var(--primary-soft, rgba(99, 102, 241, 0.12));
+  color: var(--accent-color);
+  font-weight: 600;
+}
+
+.chat-debugger-protocol {
+  min-width: 210px;
+}
+
+.chat-debugger-stream {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chat-debugger-stream input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--accent-color);
+}
+
+.chat-debugger-temp {
+  width: 86px;
+}
+
+.chat-debugger-max {
+  width: 110px;
+}
+
+.chat-debugger-system {
+  flex: 1;
+  min-width: 180px;
+}
+
+/* 附件区 */
+.chat-debugger-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-debugger-attachments select.form-input {
+  width: 110px;
+}
+
+.chat-debugger-attach-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+}
+
+.chat-debugger-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  background: var(--bg-color);
+  border: 1px dashed var(--border-color);
+  border-radius: 999px;
+  color: var(--text-muted);
+  max-width: 320px;
+}
+
+.chat-debugger-chip button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.chat-debugger-chip button:hover {
+  color: var(--danger-color, #ef4444);
+}
+
+/* 消息区 */
+.chat-debugger-messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--bg-color);
+  min-height: 280px;
+}
+
+.chat-debugger-compact .chat-debugger-messages {
+  min-height: 240px;
+}
+
+.chat-debugger-empty {
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+  margin: auto;
+  max-width: 420px;
+  line-height: 1.7;
+}
+
+.chat-debugger-msg {
+  display: flex;
+  gap: 8px;
+  max-width: 88%;
+}
+
+.chat-debugger-msg-user {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+}
+
+.chat-debugger-msg-assistant {
+  align-self: flex-start;
+}
+
+.chat-debugger-msg-icon {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+}
+
+.chat-debugger-msg-user .chat-debugger-msg-icon {
+  background: var(--primary-gradient, linear-gradient(135deg, #6366f1, #8b5cf6));
+  color: white;
+  border: none;
+}
+
+.chat-debugger-msg-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chat-debugger-msg-media {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-debugger-msg-media img,
+.chat-debugger-msg-media video {
+  max-width: 260px;
+  max-height: 180px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+}
+
+.chat-debugger-msg-media audio {
+  max-width: 260px;
+}
+
+.chat-debugger-msg-content {
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text-main);
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 9px 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-debugger-msg-user .chat-debugger-msg-content {
+  background: var(--primary-gradient, linear-gradient(135deg, #6366f1, #8b5cf6));
+  color: white;
+  border: none;
+}
+
+/* 输入行 */
+.chat-debugger-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.chat-debugger-input-row textarea {
+  flex: 1;
+  resize: vertical;
+  min-height: 42px;
+  max-height: 160px;
+  font-size: 13.5px;
+}
+
+.chat-debugger-spin {
+  animation: chat-debugger-rotate 0.9s linear infinite;
+  vertical-align: -2px;
+}
+
+@keyframes chat-debugger-rotate {
+  to { transform: rotate(360deg); }
+}
+
+/* 响应式 */
+@media (max-width: 720px) {
+  .chat-debugger-protocol,
+  .chat-debugger-system {
+    flex-basis: 100%;
+    min-width: 0;
+  }
+
+  .chat-debugger-msg {
+    max-width: 96%;
+  }
+}
