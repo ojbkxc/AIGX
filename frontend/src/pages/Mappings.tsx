@@ -39,8 +39,8 @@ const DEFAULT_MODELS: ModelMapping[] = [
 ];
 
 export default function Mappings() {
-  const [mappings, setMappings] = useState<MappingMap>({});
-  const [customMappings, setCustomMappings] = useState<MappingMap>({});
+  const [, setMappings] = useState<MappingMap>({});
+  const [, setCustomMappings] = useState<MappingMap>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');

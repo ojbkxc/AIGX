@@ -106,7 +106,7 @@ export default function Playground() {
         try { parsed = JSON.parse(text); } catch { /* ignore */ }
       }
       if (!res.ok) {
-        const errMsg = (parsed && (parsed.error || parsed.message)) || text || `Request failed with status ${res.status}`;
+        const errMsg = String((parsed && (parsed.error || parsed.message)) || text || `Request failed with status ${res.status}`);
         throw new Error(errMsg);
       }
       const content = (parsed?.content as string | undefined) || ((parsed?.data as { content?: string } | undefined)?.content) || '';
@@ -272,7 +272,7 @@ export default function Playground() {
               <label>{t('系统提示词')}</label>
               <textarea
                 className="form-input playground-system-input"
-                rows="3"
+                rows={3}
                 placeholder={t('设置系统提示词（可选）')}
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
@@ -403,7 +403,7 @@ export default function Playground() {
             <div className="chat-input-row">
               <textarea
                 className="form-input chat-input"
-                rows="3"
+                rows={3}
                 placeholder={t('输入消息，Enter 发送，Shift+Enter 换行')}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}

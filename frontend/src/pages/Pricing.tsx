@@ -50,7 +50,7 @@ export default function Pricing() {
   const [savingPrice, setSavingPrice] = useState(false);
 
   // ── 倍率配置状态 ──
-  const [ratios, setRatios] = useState<RatiosState>({ model_ratio: {}, group_ratio: {} });
+  const [, setRatios] = useState<RatiosState>({ model_ratio: {}, group_ratio: {} });
   const [ratioLoading, setRatioLoading] = useState(true);
   const [ratioText, setRatioText] = useState('');
   const [groupRatioText, setGroupRatioText] = useState('');
