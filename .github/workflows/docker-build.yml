@@ -26,6 +26,11 @@ concurrency:
   group: docker-build-${{ github.ref }}
   cancel-in-progress: false
 
+# GITHUB_TOKEN 需要写包权限才能推送 ghcr.io
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   # -----------------------------------------------------------------
   # Docker 构建和推送 (多平台)
