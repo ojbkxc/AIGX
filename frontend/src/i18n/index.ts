@@ -3,8 +3,10 @@ import { initReactI18next } from 'react-i18next';
 import zh from './zh.json';
 import en from './en.json';
 
+export type AppLanguage = 'zh' | 'en';
+
 // 语言检测：优先 localStorage 的 'i18n_lang'，其次浏览器 navigator.language，默认 zh
-function detectLanguage() {
+function detectLanguage(): AppLanguage {
   const saved = localStorage.getItem('i18n_lang');
   if (saved === 'zh' || saved === 'en') return saved;
   const nav = (navigator.language || '').toLowerCase();
@@ -12,7 +14,7 @@ function detectLanguage() {
   return 'zh';
 }
 
-i18n
+void i18n
   .use(initReactI18next)
   .init({
     resources: {
@@ -38,8 +40,8 @@ export default i18n;
  * 切换界面语言并持久化到 localStorage。
  * 供 Sidebar / 设置页语言切换器调用。
  */
-export function setLanguage(lang) {
-  const next = lang === 'en' ? 'en' : 'zh';
+export function setLanguage(lang: AppLanguage): AppLanguage {
+  const next: AppLanguage = lang === 'en' ? 'en' : 'zh';
   localStorage.setItem('i18n_lang', next);
   void i18n.changeLanguage(next);
   return next;
@@ -48,6 +50,6 @@ export function setLanguage(lang) {
 /**
  * 当前界面语言（'zh' | 'en'）。
  */
-export function getLanguage() {
+export function getLanguage(): AppLanguage {
   return i18n.language && i18n.language.startsWith('en') ? 'en' : 'zh';
 }
