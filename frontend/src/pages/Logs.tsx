@@ -5,6 +5,7 @@ import { useToast } from '../components/Toast';
 import { Button, Card, Loading, EmptyState } from '../components/ui';
 
 type LogTab = 'requests' | 'audits';
+type LogView = 'table' | 'timeline';
 
 interface RequestLogItem {
   id: string | number;
@@ -40,6 +41,7 @@ interface Filters {
 
 export default function Logs(): JSX.Element {
   const [tab, setTab] = useState<LogTab>('requests');
+  const [view, setView] = useState<LogView>('table');
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -117,8 +119,76 @@ export default function Logs(): JSX.Element {
 
   const fmtTime = (ts: number | undefined): string => (ts ? new Date(ts * 1000).toLocaleString() : '—');
   const totalPages = Math.ceil(total / size);
-
   const isRequest = (_l: LogItem): _l is RequestLogItem => tab === 'requests';
+
+  // ── 时间线聚合：当前页日志按小时分桶（成功/失败计数 + 总费用） ──
+  const timelineBuckets = (() => {
+    const map = new Map<number, { ok: number; fail: number; cost: number; models: Set<string> }>();
+    for (const l of logs) {
+      if (!isRequest(l) || !l.created_at) continue;
+      const hour = Math.floor(l.created_at / 3600) * 3600;
+      const b = map.get(hour) || { ok: 0, fail: 0, cost: 0, models: new Set<string>() };
+      if ((l.status_code ?? 0) < 400) b.ok += 1;
+      else b.fail += 1;
+      b.cost += l.cost ?? 0;
+      if (l.model) b.models.add(l.model);
+      map.set(hour, b);
+    }
+    return Array.from(map.entries()).sort((a, b) => a[0] - b[0]);
+  })();
+
+  const renderTimeline = (): JSX.Element => {
+    const buckets = timelineBuckets;
+    if (buckets.length === 0) return <EmptyState message={t('暂无时间线数据')} />;
+    const W = 720;
+    const H = 160;
+    const PAD_L = 46;
+    const PAD_B = 26;
+    const PAD_T = 12;
+    const PAD_R = 12;
+    const plotW = W - PAD_L - PAD_R;
+    const plotH = H - PAD_T - PAD_B;
+    const maxCount = Math.max(1, ...buckets.map(([, b]) => b.ok + b.fail));
+    const barGap = 3;
+    const barW = Math.max(2, Math.floor((plotW - barGap * (buckets.length - 1)) / buckets.length));
+    const yFor = (n: number): number => PAD_T + plotH - (n / maxCount) * plotH;
+    const ticks = [0, Math.round(maxCount / 2), maxCount];
+    return (
+      <div className="log-timeline">
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: '100%', height: 'auto' }} role="img" aria-label={t('请求时间线')}>
+          {ticks.map((tk) => (
+            <g key={tk}>
+              <line x1={PAD_L} y1={yFor(tk)} x2={W - PAD_R} y2={yFor(tk)} stroke="var(--border-color)" strokeWidth={1} />
+              <text x={PAD_L - 6} y={yFor(tk) + 3} fontSize={9} fill="var(--text-muted)" textAnchor="end">{tk}</text>
+            </g>
+          ))}
+          {buckets.map(([hour, b], i) => {
+            const x = PAD_L + i * (barW + barGap);
+            const okH = (b.ok / maxCount) * plotH;
+            const failH = (b.fail / maxCount) * plotH;
+            const totalH = okH + failH;
+            const label = new Date(hour * 1000).toLocaleString(undefined, { month: '2-digit', day: '2-digit', hour: '2-digit' });
+            return (
+              <g key={hour} data-hour={hour}>
+                <title>{`${label} — ${t('成功')} ${b.ok} / ${t('失败')} ${b.fail}`}</title>
+                <rect x={x} y={PAD_T + plotH - totalH} width={barW} height={totalH} rx={2} fill="rgba(47,111,237,0.25)" />
+                <rect x={x} y={PAD_T + plotH - okH} width={barW} height={okH} rx={2} fill="#34d399" />
+                {b.fail > 0 && <rect x={x} y={PAD_T + plotH - totalH} width={barW} height={failH} rx={2} fill="rgba(239,68,68,0.8)" />}
+                {buckets.length <= 14 && (
+                  <text x={x + barW / 2} y={H - PAD_B + 12} fontSize={8} fill="var(--text-muted)" textAnchor="middle">{label}</text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+        <div className="log-timeline-legend">
+          <span><i style={{ background: '#34d399' }} />{t('成功')}</span>
+          <span><i style={{ background: 'rgba(239,68,68,0.8)' }} />{t('失败')}</span>
+          <span className="log-timeline-note">{t('当前页日志按小时聚合')}</span>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div>
@@ -131,10 +201,10 @@ export default function Logs(): JSX.Element {
 
       <Card bodyClassName="">
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-          <Button variant={tab === 'requests' ? 'primary' : 'outline'} onClick={() => { setTab('requests'); setPage(1); }}>
+          <Button variant={tab === 'requests' ? 'primary' : 'outline'} onClick={() => { setTab('requests'); setPage(1); setView('table'); }}>
             {t('请求日志')}
           </Button>
-          <Button variant={tab === 'audits' ? 'primary' : 'outline'} onClick={() => { setTab('audits'); setPage(1); }}>
+          <Button variant={tab === 'audits' ? 'primary' : 'outline'} onClick={() => { setTab('audits'); setPage(1); setView('table'); }}>
             {t('审计日志')}
           </Button>
           {tab === 'requests' && (
@@ -142,6 +212,16 @@ export default function Logs(): JSX.Element {
               <Button variant="outline" size="sm" onClick={() => void handleExport('json')}>{t('导出 JSON')}</Button>
               <Button variant="outline" size="sm" onClick={() => void handleExport('csv')}>{t('导出 CSV')}</Button>
             </>
+          )}
+          {tab === 'requests' && (
+            <div className="ui-tabs" role="tablist" aria-label={t('视图切换')}>
+              <button type="button" className={`ui-tab ${view === 'table' ? 'active' : ''}`} onClick={() => setView('table')}>
+                {t('表格')}
+              </button>
+              <button type="button" className={`ui-tab ${view === 'timeline' ? 'active' : ''}`} onClick={() => setView('timeline')}>
+                {t('时间线')}
+              </button>
+            </div>
           )}
         </div>
       </Card>
@@ -171,6 +251,8 @@ export default function Logs(): JSX.Element {
       <Card title={`${tab === 'requests' ? t('请求日志') : t('审计日志')} (${total})`}>
         {loading ? (
           <Loading text={t('加载中')} />
+        ) : view === 'timeline' && tab === 'requests' ? (
+          renderTimeline()
         ) : logs.length === 0 ? (
           <EmptyState message={t('暂无日志')} />
         ) : (

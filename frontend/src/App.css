@@ -1198,6 +1198,44 @@ code {
   line-height: 1.7;
 }
 
+/* ── 日志时间线视图（Logs.tsx）────────────────────────────── */
+.log-timeline {
+  padding: 8px 4px;
+}
+
+.log-timeline svg {
+  display: block;
+  border-radius: 10px;
+  background: var(--card-bg);
+}
+
+.log-timeline-legend {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.log-timeline-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.log-timeline-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.log-timeline-note {
+  margin-left: auto;
+  font-size: 11px;
+}
+
 /* ── Wallet 充值（new-api 式档位 + 支付方式网格 + 结算块） ── */
 .wallet-amount-grid {
   display: grid;
