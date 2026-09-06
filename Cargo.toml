@@ -18,7 +18,7 @@ async-trait = "0.1"
 
 [package]
 name = "aigx"
-version = "1.0.1"
+version = "1.0.0"
 description = "AIGX — OpenAI-compatible AI gateway with multi-account Cloudflare Workers AI and Epay support"
 edition = "2021"
 license-file = "LICENSE"
