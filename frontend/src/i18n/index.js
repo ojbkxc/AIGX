@@ -33,3 +33,21 @@ i18n
   });
 
 export default i18n;
+
+/**
+ * 切换界面语言并持久化到 localStorage。
+ * 供 Sidebar / 设置页语言切换器调用。
+ */
+export function setLanguage(lang) {
+  const next = lang === 'en' ? 'en' : 'zh';
+  localStorage.setItem('i18n_lang', next);
+  void i18n.changeLanguage(next);
+  return next;
+}
+
+/**
+ * 当前界面语言（'zh' | 'en'）。
+ */
+export function getLanguage() {
+  return i18n.language && i18n.language.startsWith('en') ? 'en' : 'zh';
+}
