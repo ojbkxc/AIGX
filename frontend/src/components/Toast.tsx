@@ -1,22 +1,44 @@
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react';
 
-const ToastContext = createContext(null);
+export type ToastType = 'success' | 'error' | 'warning';
 
-export function useToast() {
-  return useContext(ToastContext);
+interface ToastItemState {
+  id: number;
+  message: string;
+  type: ToastType;
+  duration: number;
+}
+
+type AddToast = (message: string, type?: ToastType, duration?: number) => void;
+
+const ToastContext = createContext<AddToast | null>(null);
+
+export function useToast(): AddToast {
+  const ctx = useContext(ToastContext);
+  if (!ctx) {
+    // 未包 ToastProvider 时降级为 console 输出，避免崩溃
+    return (message: string, type: ToastType = 'success') => {
+      console.log(`[toast:${type}]`, message);
+    };
+  }
+  return ctx;
 }
 
 let toastId = 0;
 
-export function ToastProvider({ children }) {
-  const [toasts, setToasts] = useState([]);
+export interface ToastProviderProps {
+  children?: React.ReactNode;
+}
 
-  const addToast = useCallback((message, type = 'success', duration = 3000) => {
+export function ToastProvider({ children }: ToastProviderProps): JSX.Element {
+  const [toasts, setToasts] = useState<ToastItemState[]>([]);
+
+  const addToast = useCallback<AddToast>((message, type = 'success', duration = 3000) => {
     const id = ++toastId;
     setToasts((prev) => [...prev, { id, message, type, duration }]);
   }, []);
 
-  const removeToast = useCallback((id) => {
+  const removeToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
@@ -32,7 +54,12 @@ export function ToastProvider({ children }) {
   );
 }
 
-function ToastItem({ toast, onRemove }) {
+interface ToastItemProps {
+  toast: ToastItemState;
+  onRemove: (id: number) => void;
+}
+
+function ToastItem({ toast, onRemove }: ToastItemProps): JSX.Element {
   const [show, setShow] = useState(false);
 
   useEffect(() => {
