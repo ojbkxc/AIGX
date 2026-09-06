@@ -4,6 +4,7 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ChatDebugger from '../components/ChatDebugger';
+import { GuideEmptyState } from '../components/ui';
 import './Channels.css';
 
 interface ChannelItem {
@@ -239,124 +240,17 @@ export default function Channels(): JSX.Element {
   };
 
   // ── 对话调试器 ──
-  // 打开聊天时异步拉取网关可用模型列表（/v1/models），与渠道自身 models 合并；
-  // 拉取失败则静默退回渠道 models，避免调试被模型列表接口拖累。
+  // 弹窗内渲染统一的 ChatDebugger 组件（与 Playground 共用同一后端入口
+  // /api/channels/chat_test），协议/模型/流式/多模态行为完全一致。
   const openChat = (ch: ChannelItem): void => {
     setChatChannel(ch);
-    setChatProtocol(ch.channel_type === 'anthropic' ? 'anthropic' : 'openai');
-    const models: string[] = ch.models || [];
-    setChatModel(models.length ? models[0] : 'glm-4.7-flash');
-    setChatMessages([]);
-    setChatInput('');
     setShowChat(true);
-    setChatModels([]);
-    api.listModels()
-      .then((res) => {
-        const raw = Array.isArray(res) ? res : res?.data;
-        const list: string[] = Array.isArray(raw)
-          ? (raw as Array<string | { id?: string }>)
-            .map((m) => (typeof m === 'string' ? m : m.id))
-            .filter((v): v is string => Boolean(v))
-          : [];
-        if (list.length) {
-          setChatModels(list);
-          // 若渠道 models 为空，用网关模型列表的第一个作为默认
-          if (!models.length) {
-            setChatModel(list[0]);
-          }
-        }
-      })
-      .catch(() => {
-        // 忽略模型列表接口失败，退回渠道 models
-      });
   };
 
   const closeChat = (): void => {
     setShowChat(false);
     setChatChannel(null);
-    setChatMessages([]);
-    setChatModels([]);
   };
-
-  const chatModelOptions = (): string[] => {
-    const ch = chatChannel;
-    if (!ch) return [];
-    const list = (ch.models || []).slice();
-    // 合并网关可用模型（去重，渠道配置优先）
-    for (const m of chatModels) {
-      if (!list.includes(m)) list.push(m);
-    }
-    return list.length ? list : ['glm-4.7-flash'];
-  };
-
-  const appendChatMessage = (role: 'user' | 'assistant', content: string): void => {
-    setChatMessages((prev) => [...prev, { role, content }]);
-  };
-
-  const handleChatSend = async (): Promise<void> => {
-    const ch = chatChannel;
-    const text = chatInput.trim();
-    if (!ch || !text || chatBusy) return;
-    // 用函数式更新追加用户消息，避免与流式累积的 assistant 消息发生竞态
-    setChatMessages((prev) => [...prev, { role: 'user', content: text }]);
-    setChatInput('');
-    setChatBusy(true);
-    try {
-      const history = chatMessages.map((m) => ({ role: m.role, content: m.content }));
-      const res = (await api.testChannelChat({
-        channel_id: ch.id,
-        protocol: chatProtocol,
-        model: String(chatModel || '').trim(),
-        message: text,
-        history,
-        stream: true,
-      })) as TestChatResponse;
-      if (res && res.stream) {
-        // 流式：逐增量累积
-        let acc = '';
-        for (const chk of res.stream) {
-          acc += chk.content || '';
-          setChatMessages((prev) => {
-            const next = prev.slice();
-            if (next.length && next[next.length - 1].role === 'assistant') {
-              next[next.length - 1] = { role: 'assistant', content: acc };
-            } else {
-              next.push({ role: 'assistant', content: acc });
-            }
-            return next;
-          });
-        }
-        setChatMessages((prev) => {
-          if (!prev.length || prev[prev.length - 1].role !== 'assistant') {
-            return [...prev, { role: 'assistant', content: acc }];
-          }
-          return prev;
-        });
-      } else {
-        const data = (res && res.data) || {};
-        if (data.content) {
-          appendChatMessage('assistant', data.content);
-        } else if (data.error) {
-          appendChatMessage('assistant', `⚠️ ${data.error}`);
-        }
-      }
-    } catch (err) {
-      appendChatMessage('assistant', `⚠️ ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setChatBusy(false);
-    }
-  };
-
-  const handleChatKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleChatSend();
-    }
-  };
-
-  useEffect(() => {
-    if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [chatMessages]);
 
   // PATCH 部分更新 — 仅传 status 字段，避免脱敏 api_key 覆盖真实密钥
   const handleToggle = async (ch: ChannelItem): Promise<void> => {
@@ -417,10 +311,12 @@ export default function Channels(): JSX.Element {
             </div>
             <div className="card-body">
               {channels.length === 0 ? (
-                <div className="empty-state">
-                  <p>{t('暂无渠道')}</p>
-                  <button className="btn btn-primary" onClick={openAdd}>{t('添加第一个渠道')}</button>
-                </div>
+                <GuideEmptyState
+                  icon="🛰️"
+                  title={t('暂无渠道')}
+                  hint={t('渠道是上游 AI 服务的接入点：填入 Base URL 与密钥后即可转发请求。')}
+                  action={<button className="btn btn-primary" onClick={openAdd}>{t('添加第一个渠道')}</button>}
+                />
               ) : (
                 <div className="table-wrapper">
                   <table>
@@ -620,61 +516,12 @@ export default function Channels(): JSX.Element {
               <button className="modal-close" onClick={closeChat}>&times;</button>
             </div>
             <div className="modal-body chat-modal-body">
-              <div className="chat-toolbar">
-                <label className="chat-field">
-                  <span>{t('协议')}</span>
-                  <select className="form-input" value={chatProtocol}
-                    onChange={(e) => {
-                      setChatProtocol(e.target.value);
-                      setChatMessages([]);
-                    }}>
-                    {CHAT_PROTOCOLS.map((p) => (
-                      <option key={p.value} value={p.value}>{t(p.labelKey)}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="chat-field">
-                  <span>{t('模型')}</span>
-                  <select className="form-input" value={chatModel}
-                    onChange={(e) => {
-                      setChatModel(e.target.value);
-                      setChatMessages([]);
-                    }}>
-                    {chatModelOptions().map((m) => (
-                      <option key={m} value={m}>
-                        {chatChannel.name} / {m}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <div className="chat-messages">
-                {chatMessages.length === 0 && (
-                  <div className="chat-empty">{t('输入消息开始对话，用于验证当前渠道能否正常对话')}</div>
-                )}
-                {chatMessages.map((m, i) => (
-                  <div key={i} className={`chat-msg chat-msg-${m.role}`}>
-                    <span className="chat-msg-role">{m.role === 'user' ? t('用户') : t('助手')}</span>
-                    <div className="chat-msg-content">{m.content}</div>
-                  </div>
-                ))}
-                {chatBusy && <div className="chat-busy">{t('思考中...')}</div>}
-                <div ref={chatEndRef} />
-              </div>
-              <div className="chat-input-row">
-                <textarea
-                  className="form-input chat-input"
-                  rows={2}
-                  placeholder={t('输入消息，Enter 发送，Shift+Enter 换行')}
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={handleChatKeyDown}
-                  disabled={chatBusy}
-                />
-                <button className="btn btn-primary" onClick={handleChatSend} disabled={chatBusy || !chatInput.trim()}>
-                  {t('发送')}
-                </button>
-              </div>
+              <ChatDebugger
+                channelId={String(chatChannel.id)}
+                channelModels={chatChannel.models || []}
+                initialProtocol={chatChannel.channel_type === 'anthropic' ? 'anthropic' : 'openai'}
+                compact
+              />
             </div>
           </div>
         </div>
