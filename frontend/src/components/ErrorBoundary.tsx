@@ -4,7 +4,7 @@ import { withTranslation, type WithTranslation } from 'react-i18next';
 interface ErrorBoundaryState {
   hasError: boolean;
   error: Error | null;
-  info: { componentStack?: string } | null;
+  info: { componentStack?: string | null } | null;
 }
 
 type ErrorBoundaryProps = WithTranslation & {

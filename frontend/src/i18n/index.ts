@@ -1,4 +1,4 @@
-import i18n from 'i18next';
+import i18n, { type InitOptions } from 'i18next';
 import { initReactI18next } from 'react-i18next';
 import zh from './zh.json';
 import en from './en.json';
@@ -14,25 +14,25 @@ function detectLanguage(): AppLanguage {
   return 'zh';
 }
 
-void i18n
-  .use(initReactI18next)
-  .init({
-    resources: {
-      zh: { translation: zh },
-      en: { translation: en },
-    },
-    lng: detectLanguage(),
-    fallbackLng: 'zh',
-    // 允许 key 中包含点号、括号等特殊字符，按原样查找
-    keySeparator: false,
-    nsSeparator: false,
-    pluralSeparator: false,
-    interpolation: {
-      escapeValue: false, // React 已防 XSS
-    },
-    returnNull: false,
-    returnEmptyString: true,
-  });
+const initOptions: InitOptions = {
+  resources: {
+    zh: { translation: zh },
+    en: { translation: en },
+  },
+  lng: detectLanguage(),
+  fallbackLng: 'zh',
+  // 允许 key 中包含点号、括号等特殊字符，按原样查找
+  keySeparator: false,
+  nsSeparator: false,
+  pluralSeparator: false,
+  interpolation: {
+    escapeValue: false, // React 已防 XSS
+  },
+  returnNull: false,
+  returnEmptyString: true,
+};
+
+void i18n.use(initReactI18next).init(initOptions);
 
 export default i18n;
 

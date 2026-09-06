@@ -331,7 +331,10 @@ export default function Dashboard(): JSX.Element {
       if (!hasAnyData) {
         try {
           const me = await api.users.getMe();
-          const meData = me?.data ?? me;
+          const meData = (me ?? null) as unknown as {
+            used_quota?: number;
+            quota?: number | null;
+          } | null;
           if (meData) {
             setLimits({
               monthly_used: meData.used_quota ?? 0,
