@@ -6,7 +6,7 @@ name: Multi-platform Build
 on:
   push:
     branches: [ main, develop ]
-  # 仅在创建 tag 时触发（如 v1.0.0）
+    tags: [ 'v*.*.*' ]
   release:
     types: [ created ]
   # 允许手动触发
