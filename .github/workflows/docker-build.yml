@@ -122,7 +122,7 @@ jobs:
       - name: Display supported architectures
         run: |
           echo "Supported architectures:"
-          echo ${{ steps.check-manifest.outputs.platforms }}
+          echo "${{ steps.check-manifest.outputs.platforms }}"
 
   # -----------------------------------------------------------------
   # 安装包构建
