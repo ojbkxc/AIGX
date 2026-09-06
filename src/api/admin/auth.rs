@@ -812,10 +812,7 @@ pub async fn handle_login_send_code(
             StatusCode::TOO_MANY_REQUESTS,
         ));
     }
-    state
-        .login_limiter
-        .insert(client_ip, sent_count + 1)
-        .await;
+    state.login_limiter.insert(client_ip, sent_count + 1).await;
 
     // 防枚举：用户不存在时返回成功但不生成验证码
     let Some(user) = state.user_store.get_by_email(&email) else {
@@ -832,10 +829,7 @@ pub async fn handle_login_send_code(
         let digits: Vec<u32> = (0..6).map(|_| rng.gen_range(0..10)).collect();
         digits.iter().map(|d| d.to_string()).collect()
     };
-    state
-        .login_code_cache
-        .insert(user.email.clone(), code.clone())
-        .await;
+    state.login_code_cache.insert(user.email.clone(), code.clone()).await;
 
     let notify_config = state.notify_service.get_config().await;
     if notify_config.smtp_ready() && !notify_config.smtp_from.is_empty() {
@@ -902,10 +896,7 @@ pub async fn handle_login_with_code(
     }
 
     let Some(expected) = state.login_code_cache.get(&email).await else {
-        state
-            .login_failures
-            .insert(client_ip.clone(), fail_count + 1)
-            .await;
+        state.login_failures.insert(client_ip.clone(), fail_count + 1).await;
         return Err(error_response(
             "验证码已过期或不存在，请重新获取",
             StatusCode::UNAUTHORIZED,
@@ -913,10 +904,7 @@ pub async fn handle_login_with_code(
     };
 
     if expected != code {
-        state
-            .login_failures
-            .insert(client_ip.clone(), fail_count + 1)
-            .await;
+        state.login_failures.insert(client_ip.clone(), fail_count + 1).await;
         return Err(error_response("验证码错误", StatusCode::UNAUTHORIZED));
     }
 
