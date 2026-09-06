@@ -27,6 +27,10 @@ on:
 env:
   RUST_TOOLCHAIN: stable
 
+# workflow_dispatch 触发的 tag 重建也需要写 Release 的权限
+permissions:
+  contents: write
+
 jobs:
   # -----------------------------------------------------------------
   # Linux AMD64 构建任务
