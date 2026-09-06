@@ -42,46 +42,34 @@ const navItems: NavItem[] = [
   { path: '/network-layer', labelKey: '网络层概览', icon: '🏗️', adminOnly: true },
 ];
 
-// 分组定义：17 个一级菜单合并为 8 组，减少侧边栏长度。
-// 仪表盘与日志审计保持独立（高频/独立职能），其余按职能合并。
+// 精简分组：高频入口（仪表盘/渠道/密钥/Playground/日志）平铺直达，
+// 低频管理合并进「更多管理」单一折叠组，侧栏总高度减半。
+// 手风琴模式：同组子项展开时其余组自动收起，点击组头永远可切换收/展。
 const navGroups: NavGroup[] = [
-  { key: 'top', items: [navItems[0]] }, // 仪表盘
+  { key: 'top', items: [navItems[0]] },                                    // 仪表盘
+  { key: 'quick1', items: [navItems[1]] },                                 // 渠道管理
+  { key: 'quick2', items: [navItems[2]] },                                 // API 密钥
+  { key: 'quick3', items: [navItems[14]] },                                // Playground
+  { key: 'logs', items: [navItems[10]] },                                   // 日志审计
   {
-    key: 'access',
-    labelKey: '接入与密钥',
-    icon: '🔌',
-    items: [navItems[1], navItems[2]], // 渠道管理、API 密钥
-  },
-  {
-    key: 'model',
-    labelKey: '模型与定价',
-    icon: '🧠',
-    items: [navItems[3], navItems[4]], // 模型映射、定价倍率
-  },
-  {
-    key: 'user',
-    labelKey: '用户与分组',
-    icon: '👤',
-    items: [navItems[5], navItems[6]], // 用户管理、用户分组
-  },
-  {
-    key: 'finance',
-    labelKey: '财务与额度',
-    icon: '💼',
-    items: [navItems[7], navItems[8], navItems[9]], // 钱包充值、订单记录、兑换码
-  },
-  { key: 'logs', items: [navItems[10]] }, // 日志审计
-  {
-    key: 'tools',
-    labelKey: '工具与安全',
-    icon: '🔧',
-    items: [navItems[14], navItems[15], navItems[16], navItems[17]], // Playground、安全监控、IP 管理、网络层
-  },
-  {
-    key: 'system',
-    labelKey: '系统设置',
-    icon: '🛠️',
-    items: [navItems[11], navItems[12], navItems[13]], // 易支付、通知设置、系统设置
+    key: 'more',
+    labelKey: '更多管理',
+    icon: '☰',
+    items: [
+      navItems[3],   // 模型映射
+      navItems[4],   // 定价倍率
+      navItems[5],   // 用户管理
+      navItems[6],   // 用户分组
+      navItems[7],   // 钱包充值
+      navItems[8],   // 订单记录
+      navItems[9],   // 兑换码
+      navItems[15],  // 安全监控
+      navItems[16],  // IP 管理
+      navItems[17],  // 网络层概览
+      navItems[11],  // 易支付
+      navItems[12],  // 通知设置
+      navItems[13],  // 系统设置
+    ],
   },
 ];
 
@@ -98,7 +86,8 @@ export default function Sidebar(): JSX.Element {
   // 移动端抽屉开关：仅 ≤768px 由汉堡按钮触发
   const [mobileOpen, setMobileOpen] = React.useState<boolean>(false);
 
-  // 分组折叠状态：默认全部展开，记忆到 localStorage
+  // 分组折叠状态：手风琴语义——默认全收起，点开一个组时其余组自动收起。
+  // 当前路由所在的组始终视为展开（isGroupActive），但用户点击组头仍可手动收起。
   const [collapsedGroups, setCollapsedGroups] = React.useState<Record<string, boolean>>(() => {
     try {
       const saved = localStorage.getItem('sidebar_collapsed');
@@ -115,7 +104,12 @@ export default function Sidebar(): JSX.Element {
 
   const toggleGroup = (key: string): void => {
     setCollapsedGroups((prev) => {
-      const next = { ...prev, [key]: !prev[key] };
+      // 手风琴：展开该组 = 收起其它所有组；再次点击 = 收起该组
+      const next: Record<string, boolean> = {};
+      for (const g of navGroups) {
+        if (!g.labelKey) continue; // 平铺组无折叠语义
+        next[g.key] = g.key === key ? !prev[key] : true;
+      }
       try { localStorage.setItem('sidebar_collapsed', JSON.stringify(next)); } catch {}
       return next;
     });
@@ -163,7 +157,7 @@ export default function Sidebar(): JSX.Element {
       borderRight: '1px solid var(--border-color)',
       display: 'flex',
       flexDirection: 'column',
-      padding: '20px 12px',
+      padding: '14px 10px',
       position: 'fixed',
       top: 0,
       bottom: 0,
@@ -178,20 +172,20 @@ export default function Sidebar(): JSX.Element {
         display: 'flex',
         alignItems: 'center',
         gap: '10px',
-        marginBottom: '24px',
+        marginBottom: '14px',
         paddingLeft: '6px',
       }}>
         <div style={{
-          width: '30px',
-          height: '30px',
-          borderRadius: '8px',
+          width: '26px',
+          height: '26px',
+          borderRadius: '7px',
           background: 'var(--primary-gradient)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           fontWeight: 'bold',
           color: 'white',
-          fontSize: '14px',
+          fontSize: '13px',
           fontFamily: "'Outfit', sans-serif",
           boxShadow: '0 4px 12px rgba(99, 102, 241, 0.2)',
         }}>
@@ -219,14 +213,14 @@ export default function Sidebar(): JSX.Element {
       <nav style={{
         display: 'flex',
         flexDirection: 'column',
-        gap: '4px',
+        gap: '2px',
         flex: 1,
       }}>
         {navGroups.map((group) => {
           // 角色过滤：普通用户不渲染管理员专属菜单；整组为空则隐藏
           const visibleItems = roleFilter(group.items);
           if (visibleItems.length === 0) return null;
-          // 无 label 的分组（仪表盘、日志）直接平铺，不渲染分组标题
+          // 无 label 的分组（高频直达项）平铺，不渲染分组标题
           if (!group.labelKey) {
             return visibleItems.map((item) => (
               <NavLink
@@ -238,7 +232,7 @@ export default function Sidebar(): JSX.Element {
                   display: 'flex',
                   alignItems: 'center',
                   gap: '8px',
-                  padding: '7px 10px',
+                  padding: '6px 10px',
                   borderRadius: '8px',
                   cursor: 'pointer',
                   fontSize: '12.5px',
@@ -261,24 +255,23 @@ export default function Sidebar(): JSX.Element {
               </NavLink>
             ));
           }
-          // 可折叠分组
-          const collapsed = collapsedGroups[group.key] && !isGroupActive(visibleItems);
+          // 可折叠分组：collapsed 仅由用户状态决定——激活组也允许手动收起
+          const collapsed = collapsedGroups[group.key] ?? true;
           const groupActive = isGroupActive(visibleItems);
           return (
             <div key={group.key} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
               <button
                 onClick={() => toggleGroup(group.key)}
+                aria-expanded={!collapsed}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
                   gap: '8px',
-                  padding: '6px 8px',
-                  borderRadius: '7px',
+                  padding: '6px 10px',
+                  borderRadius: '8px',
                   cursor: 'pointer',
-                  fontSize: '11px',
-                  fontWeight: 600,
-                  letterSpacing: '0.4px',
-                  textTransform: 'uppercase',
+                  fontSize: '12.5px',
+                  fontWeight: groupActive ? 600 : 500,
                   color: groupActive ? 'var(--text-main)' : 'var(--text-muted)',
                   background: 'transparent',
                   border: 'none',
@@ -308,10 +301,10 @@ export default function Sidebar(): JSX.Element {
                     display: 'flex',
                     alignItems: 'center',
                     gap: '8px',
-                    padding: '6px 10px 6px 26px',
+                    padding: '5px 10px 5px 28px',
                     borderRadius: '8px',
                     cursor: 'pointer',
-                    fontSize: '12.5px',
+                    fontSize: '12px',
                     fontWeight: 500,
                     color: isActive ? 'white' : 'var(--text-muted)',
                     background: isActive ? 'var(--primary-gradient)' : 'transparent',

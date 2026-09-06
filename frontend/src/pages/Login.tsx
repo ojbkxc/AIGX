@@ -66,7 +66,7 @@ export default function Login(): JSX.Element {
     e.preventDefault();
     setError('');
     if (!email || !password) {
-      setError('请输入邮箱和密码');
+      setError('请输入邮箱/用户名和密码');
       return;
     }
     setLoading(true);
@@ -186,12 +186,12 @@ export default function Login(): JSX.Element {
 
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
           <div className="form-group">
-            <label htmlFor="email">邮箱</label>
+            <label htmlFor="email">邮箱 / 用户名</label>
             <input
               id="email"
-              type="email"
+              type="text"
               className="form-input"
-              placeholder="请输入邮箱"
+              placeholder="邮箱或用户名均可登录"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               autoFocus
