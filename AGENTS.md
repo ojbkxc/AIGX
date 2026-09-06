@@ -1,6 +1,42 @@
 # AGENTS.md
 > AIGX项目开发行为规范 - 确保代码可追溯、可接手、高质量
 
+## 0. 项目速览（新会话必读）
+
+**AIGX** 是 OpenAI/Anthropic 兼容的 AI 中转网关（对标 new-api）：
+Rust (axum 0.7) 后端 + React 18 + TypeScript + Vite 前端，SQLite KV 存储，单二进制交付（前端构建产物内嵌仓库 `static/`）。
+
+- **仓库**：https://github.com/ojbkxc/AIGX（main 分支；GitHub 凭据见服务器本地 git remote 或用户私有记录）
+- **生产**：http://104.223.65.202:9527（美国服务器，systemd 服务 `aigx`，二进制 `/opt/aigx/aigx`，数据 `~/.aigx/`；SSH 凭据见用户私有记录，勿写入任何入库文件）
+- **当前管理员**：`admin / 123456`（username 或 email `admin@aigx.local` 均可登录）
+
+### 硬性约束（违反会导致返工，全部踩过的坑）
+
+1. **本地不编译 Rust**——本机无完整验证工具链，所有 Rust 编译验证走 GitHub CI（push 后用 GitHub API 查 actions runs）。本地只做：`cd frontend && node_modules/.bin/tsc --noEmit && npm run build`。
+2. **axum 0.7 路由参数是 `:id` 不是 `{id}`**——`{id}` 是 0.8 语法，在 0.7 下被当字面量导致所有带参路由 405。
+3. **`--locked` 编译**——改 `Cargo.toml` 版本必须同步 `Cargo.lock`，否则 CI 全红。
+4. **rustfmt 强制**——CI 跑 `cargo fmt --check`；长链式调用（`error_response("长中文", StatusCode::X)` 单行超宽）会被要求拆行，按 CI fmt diff 手工应用。
+5. **并行会话共存**——常有另一个 AI 会话同时编辑本仓库。开工前 `git status` 检查工作区；**只 add/commit 自己改的文件**（不 `git add -A`），发现他人未提交改动时避让。
+6. **Rust 测试用独立目录**——`temp_dir + pid + AtomicU64 序号`，并行测试共用 SQLite 会 `database is locked`。
+7. **React `onClick={() => fn(args)}`**——`onClick={fn(args)}` 渲染期立即执行，TS2322。
+8. **部署二进制后检查 config**——新二进制首启可能把 `~/.aigx/config.toml` 重置回 `127.0.0.1:8080`，需 sed 回 `0.0.0.0:9527` 再重启。
+9. **`scripts/` 目录被 gitignore**（含服务器凭据的部署助手）——可入库的工具脚本放 `tools/`。
+
+### 架构关键点
+
+- 数据面 `/v1/*` 与无前缀**双挂**（`/v1/chat/completions` 和 `/chat/completions` 都通，兼容两种 base_url 填法）
+- 管理面 `/api/*`；**前端管理后台永远不调 `/v1/*`**（数据面要 sk-xxx 密钥，管理 token 会 401 触发全局误踢登录）
+- 模型映射是**可选别名**（new-api 语义）：渠道 `models` 是主数据源，未命中映射时模型名原样透传；`/v1/models` = 启用渠道 models 聚合
+- 令牌权限：`verify_user` + 本人过滤；普通用户可见自己 key 明文，管理员看脱敏
+- E2E：`cd frontend && node ../tests/e2e/run-e2e.mjs`（Playwright Chromium 直连生产，12 项断言含真实上游对话）
+- 同步脚本：`tools/newapi_sync.py`（new-api MySQL → AIGX 渠道/分组/定价，凭据走环境变量）
+
+### 参考项目（本机路径）
+
+- `C:\GitHub\rustapi\new-api-main\new-api-main` — 功能对标（用户中心/充值/权限模型）
+- `C:\GitHub\rustapi\open-webui-main\open-webui-main` — UI 审美基准（中性灰阶+蓝色强调）
+- `C:\GitHub\v2board` — 用户账户/找回密码逻辑
+
 ## 1. 思考优先编码（Think Before Coding）
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**
