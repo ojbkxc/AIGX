@@ -238,6 +238,7 @@ impl ConfigManager {
             .await
             .unwrap_or_default();
         let config: AppConfig = toml::from_str(&content).unwrap_or_default();
+        let config = apply_env_overrides(config);
         let cfg = config.clone();
         *self.config.write().await = config;
         cfg
@@ -286,4 +287,31 @@ pub fn expand_path(path: &str) -> PathBuf {
     } else {
         PathBuf::from(path)
     }
+}
+
+/// 环境变量覆盖配置（容器部署用）。
+///
+/// 格式：`AIGX_<SECTION>__<FIELD>`，双下划线分隔 section 与 field，field 用小写。
+/// 例如 `AIGX_SERVER__HOST=0.0.0.0` 覆盖 `config.server.host`，
+/// `AIGX_SERVER__PORT=9527` 覆盖 `config.server.port`。
+/// 仅支持标量覆盖（String / 整数），在 config.toml 加载后应用。
+fn apply_env_overrides(mut config: AppConfig) -> AppConfig {
+    if let Ok(v) = std::env::var("AIGX_SERVER__HOST") {
+        config.server.host = v;
+    }
+    if let Ok(v) = std::env::var("AIGX_SERVER__PORT") {
+        if let Ok(port) = v.parse() {
+            config.server.port = port;
+        }
+    }
+    if let Ok(v) = std::env::var("AIGX_SERVER__DATA_DIR") {
+        config.server.data_dir = v;
+    }
+    if let Ok(v) = std::env::var("AIGX_CF_BINDING_URL") {
+        config.cf_binding_url = v;
+    }
+    if let Ok(v) = std::env::var("AIGX_SERVER_ADDRESS") {
+        config.server_address = v;
+    }
+    config
 }
