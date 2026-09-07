@@ -1,0 +1,13 @@
+target/
+frontend/node_modules/
+frontend/dist/
+static/
+.git/
+.github/
+*.md
+tools/
+scripts/
+frontend/tests/
+*.log
+.env
+config.toml
