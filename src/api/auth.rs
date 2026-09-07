@@ -154,7 +154,9 @@ impl ApiKeyStore {
         for key in &keys {
             if let Some(api_key) = self.store.get::<ApiKey>(key)? {
                 let id = key.strip_prefix("apikey_").unwrap_or(key).to_string();
-                let hash = hash_api_key(&api_key.key);
+                // 与 validate()/generate_with_options() 保持同一口径：
+                // 对去掉 "sk-" 前缀的 key 计算哈希，否则重启加载后鉴权全部失配
+                let hash = hash_api_key(api_key.key.strip_prefix("sk-").unwrap_or(&api_key.key));
                 hash_map.insert(hash, id.clone());
                 map.insert(id, api_key);
             }
