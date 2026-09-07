@@ -125,6 +125,8 @@ pub enum ApiKeyError {
     ModelNotAllowed(String),
     #[error("API key quota exhausted")]
     QuotaExhausted,
+    #[error("User quota exhausted, please top up")]
+    UserQuotaExhausted,
     #[error("IP '{0}' is not allowed for this API key")]
     IpNotAllowed(String),
 }
@@ -134,6 +136,8 @@ pub struct ApiKeyStore {
     store: Arc<FileStore>,
     keys: Arc<RwLock<HashMap<String, ApiKey>>>,
     key_hash_map: Arc<RwLock<HashMap<String, String>>>, // hash -> id
+    /// 用户存储（余额预检用；None 时跳过用户级检查）
+    user_store: Option<std::sync::Arc<crate::user::UserStore>>,
 }
 
 impl ApiKeyStore {
@@ -142,7 +146,13 @@ impl ApiKeyStore {
             store,
             keys: Arc::new(RwLock::new(HashMap::new())),
             key_hash_map: Arc::new(RwLock::new(HashMap::new())),
+            user_store: None,
         }
+    }
+
+    /// 注入用户存储（启动时由 main 调用，供余额预检）。
+    pub fn with_user_store(&mut self, user_store: std::sync::Arc<crate::user::UserStore>) {
+        self.user_store = Some(user_store);
     }
 
     /// 从存储加载密钥
@@ -305,6 +315,17 @@ impl ApiKeyStore {
         if let Some(ip) = ip {
             if !api_key.allows_ip(ip) {
                 return Err(ApiKeyError::IpNotAllowed(ip.to_string()));
+            }
+        }
+        // 绑定用户余额预检：计费在响应完成后才发生（try_charge 后置），
+        // 不预检则余额耗尽的用户仍可无限消费，上游成本由站方承担。
+        if let Some(uid) = &api_key.user_id {
+            if let Some(store) = &self.user_store {
+                if let Some(user) = store.get_by_id(uid) {
+                    if user.remaining() <= 0 {
+                        return Err(ApiKeyError::UserQuotaExhausted);
+                    }
+                }
             }
         }
         Ok(api_key)

@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_account_metadata() {
-        let mut account = Account::new("test", "test_key", AccountType::Enterprise)
+        let account = Account::new("test", "test_key", AccountType::Enterprise)
             .with_metadata("region", "us-west")
             .with_metadata("speed", "fast");
 

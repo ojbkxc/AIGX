@@ -3,6 +3,7 @@
 //! 监控连接的健康状态并执行必要的恢复操作
 
 use super::Connection;
+use anyhow::Result;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, error, warn};
@@ -10,10 +11,12 @@ use tracing::{debug, error, warn};
 /// 健康检查器
 pub struct HealthChecker {
     /// 检查间隔
+    #[allow(dead_code)] // 由连接池的巡检任务驱动间隔，此处保留配置供扩展
     interval: Duration,
     /// 最大容忍的错误次数
     max_errors: u16,
     /// 重新连接超时
+    #[allow(dead_code)] // 预留：重连超时（自动重连在连接池实现）
     reconnect_timeout: Duration,
 }
 
@@ -40,7 +43,6 @@ impl HealthChecker {
     /// 执行健康检查
     pub async fn check(&self, connection: Arc<dyn Connection>) -> Result<bool> {
         let mut errors = 0;
-        let mut is_healthy = true;
 
         // 心跳检查
         match self.heartbeat(&connection).await {
@@ -68,7 +70,7 @@ impl HealthChecker {
         }
 
         // 判断是否健康
-        is_healthy = errors == 0;
+        let is_healthy = errors == 0;
 
         if !is_healthy && errors >= self.max_errors {
             error!(
@@ -95,7 +97,7 @@ impl HealthChecker {
     }
 
     /// 数据完整性检查
-    async fn data_integrity_check(&self, connection: &Arc<dyn Connection>) -> Result<()> {
+    async fn data_integrity_check(&self, _connection: &Arc<dyn Connection>) -> Result<()> {
         // 在实际实现中，这里应该发送测试数据包并验证响应
         Ok(())
     }
@@ -168,6 +170,12 @@ pub struct HealthMetrics {
     pub response_times: Vec<u64>,
 }
 
+impl Default for HealthMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HealthMetrics {
     /// 创建新的健康指标
     pub fn new() -> Self {
@@ -218,7 +226,7 @@ impl HealthMetrics {
     /// 获取健康度评分（0.0 - 100.0）
     pub fn health_score(&self) -> f64 {
         if !self.is_healthy {
-            return self.consecutive_failures as f64 * 2;
+            return self.consecutive_failures as f64 * 2.0;
         }
 
         let latency_score = (1.0 - (self.average_latency_ms / 1000.0).min(1.0)) * 100.0;

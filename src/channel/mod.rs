@@ -482,7 +482,15 @@ impl ChannelStore {
     pub fn mark_used(&self, id: &str) {
         let mut channels = self.channels.write();
         if let Some(ch) = channels.iter_mut().find(|c| c.id == id) {
-            ch.last_used_at = Some(chrono::Utc::now().timestamp());
+            let now = chrono::Utc::now().timestamp();
+            // 节流：60 秒内重复使用不重复落盘，避免热路径每次请求都同步写存储
+            if ch
+                .last_used_at
+                .is_some_and(|last| now - last < 60)
+            {
+                return;
+            }
+            ch.last_used_at = Some(now);
             let snapshot = ch.clone();
             drop(channels);
             if let Err(e) = self.persist(&snapshot) {
@@ -746,6 +754,8 @@ impl ChannelStore {
         self.health_tracker
             .record_success(channel_id, model, latency_ms);
         self.empty_response_counter.reset(channel_id);
+        // AIMD 学习：成功请求上调限额（当前未提供上游限额头，传 None）
+        self.aimd_on_success(channel_id, None);
         if let (Some(sid), Some(m)) = (session_id, model) {
             self.affinity_cache.insert(sid, m, channel_id);
         }

@@ -319,7 +319,18 @@ impl AnthropicBridge {
         // 未显式传采样参数则清除，避免 Anthropic 因 temperature/top_k 与
         // thinking 冲突而 400。
         if body.get("thinking").is_none() {
-            if let Some(thinking) = Self::translate_reasoning_effort(&req.reasoning_effort) {
+            if let Some(mut thinking) = Self::translate_reasoning_effort(&req.reasoning_effort) {
+                // Anthropic 要求 thinking.budget_tokens < max_tokens，
+                // 否则 400。按 new-api 做法把 budget 限制在 max_tokens 的 80% 以内。
+                if let (Some(max_tokens), Some(budget)) = (
+                    body.get("max_tokens").and_then(|v| v.as_u64()),
+                    thinking.get("budget_tokens").and_then(|v| v.as_u64()),
+                ) {
+                    let capped = budget.min((max_tokens as f64 * 0.8) as u64).max(1024);
+                    if capped < budget {
+                        thinking["budget_tokens"] = Value::from(capped);
+                    }
+                }
                 body["thinking"] = thinking;
                 if req.temperature.is_none() {
                     body.as_object_mut().map(|o| o.remove("temperature"));

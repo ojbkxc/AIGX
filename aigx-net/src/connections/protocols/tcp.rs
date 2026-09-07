@@ -1,6 +1,6 @@
 //! TCP 协议实现
 
-use super::super::ProtocolHandler;
+use super::ProtocolHandler;
 
 /// TCP处理器实现
 pub struct TcpHandler;

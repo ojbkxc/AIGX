@@ -23,6 +23,7 @@ pub struct SettingsRequest {
 pub struct LimitsRequest {
     pub daily_limit: Option<u64>,
     pub monthly_limit: Option<u64>,
+    pub register_quota: Option<i64>,
     pub threshold: Option<f64>,
     pub api_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
@@ -95,6 +96,7 @@ pub async fn handle_get_limits(
             "daily_used": daily.total(),
             "monthly_limit": config.usage.monthly_limit,
             "monthly_used": monthly.total(),
+            "register_quota": config.usage.register_quota,
             "threshold": config.usage.threshold,
             "api_timeout_secs": config.usage.api_timeout_secs,
             "max_retries": config.usage.max_retries,
@@ -114,6 +116,9 @@ pub async fn handle_update_limits(
     }
     if let Some(v) = body.monthly_limit {
         config.usage.monthly_limit = v;
+    }
+    if let Some(v) = body.register_quota {
+        config.usage.register_quota = v;
     }
     if let Some(v) = body.threshold {
         config.usage.threshold = v;

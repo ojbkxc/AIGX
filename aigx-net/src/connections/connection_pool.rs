@@ -11,8 +11,7 @@
 //! - 健康检查
 //! - 故障转移
 
-use super::protocols::ProtocolHandler;
-use super::{Connection, ConnectionConfig, ConnectionMetadata, ConnectionState, Protocol};
+use super::{Connection, ConnectionConfig, ConnectionMetadata, ConnectionState};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use std::sync::{Arc, RwLock};
@@ -107,8 +106,10 @@ pub trait ConnectionFactory: Send + Sync {
 /// 连接包装器
 struct ConnectionWrapper {
     connection: Arc<dyn Connection>,
+    #[allow(dead_code)] // 预留：连接级元数据快照（监控用）
     metadata: ConnectionMetadata,
     last_used: std::time::Instant,
+    #[allow(dead_code)] // 预留：连接创建时间（监控用）
     creation_time: std::time::Instant,
 }
 
@@ -125,6 +126,7 @@ impl ConnectionPool {
     where
         F: ConnectionFactory + Send + Sync + 'static,
     {
+        let semaphore = Arc::new(Semaphore::new(config.max_connections));
         Arc::new(Self {
             config: Arc::new(config),
             connections: DashMap::new(),
@@ -132,7 +134,7 @@ impl ConnectionPool {
             metrics: Arc::new(RwLock::new(PoolMetrics::default())),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             health_check_task: Arc::new(RwLock::new(None)),
-            semaphore: Arc::new(Semaphore::new(config.max_connections)),
+            semaphore,
         })
     }
 
@@ -240,7 +242,8 @@ impl ConnectionPool {
     pub async fn health_check(&self) -> Result<()> {
         let mut unhealthy = Vec::new();
 
-        for wrapper in self.connections.iter() {
+        for entry in self.connections.iter() {
+            let wrapper = entry.value();
             if !wrapper.connection.is_active() {
                 unhealthy.push(wrapper.connection.id().to_string());
                 continue;
@@ -252,7 +255,7 @@ impl ConnectionPool {
         }
 
         for id in unhealthy {
-            if let Some(wrapper) = self.connections.remove(&id) {
+            if let Some((_, wrapper)) = self.connections.remove(&id) {
                 warn!("Closing unhealthy connection: {}", id);
                 if let Err(e) = wrapper.connection.close().await {
                     error!("Failed to close connection {}: {}", id, e);
@@ -286,13 +289,14 @@ impl ConnectionPool {
                 tokio::time::sleep(interval).await;
 
                 let mut unhealthy = Vec::new();
-                for wrapper in connections.iter() {
+                for entry in connections.iter() {
+                    let wrapper = entry.value();
                     if !wrapper.connection.is_active() {
                         unhealthy.push(wrapper.connection.id().to_string());
                     }
                 }
                 for id in unhealthy {
-                    if let Some(wrapper) = connections.remove(&id) {
+                    if let Some((_, wrapper)) = connections.remove(&id) {
                         warn!("Health check closing connection: {}", id);
                         if let Err(e) = wrapper.connection.close().await {
                             error!("Failed to close connection {}: {}", id, e);
@@ -402,13 +406,14 @@ impl MockConnection {
             .unwrap()
             .as_millis() as u64;
 
+        let remote = config.address.clone();
         Self {
             id: id.to_string(),
             config,
             active: std::sync::atomic::AtomicBool::new(true),
             metadata: RwLock::new(ConnectionMetadata {
                 local_address: String::from("127.0.0.1"),
-                remote_address: config.address.clone(),
+                remote_address: remote,
                 protocol: super::Protocol::Tcp,
                 bytes_sent: 0,
                 bytes_received: 0,

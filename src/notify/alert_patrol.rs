@@ -11,7 +11,9 @@
 //! 评估器状态（active_alerts 静默期表）由 Mutex 保护，管理 API
 //! （admin.rs 的告警规则 CRUD）共享同一实例。
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use crate::channel::ChannelStore;
 use crate::notify::alert::{AlertKind, AlertLevel, AlertRule, AlertRuleEvaluator};
@@ -42,7 +44,7 @@ pub fn spawn_alert_patrol(
         loop {
             tokio::time::sleep(interval).await;
             patrol_once(&channel_store, &notify_service, &evaluator).await;
-            evaluator.lock().unwrap().persist_history(&store);
+            evaluator.lock().persist_history(&store);
         }
     });
 }
@@ -71,7 +73,7 @@ async fn patrol_once(
         };
         if cb_open {
             // 在独立语句中求值并让 MutexGuard 立即释放，避免 guard 跨 await
-            let alert = evaluator.lock().unwrap().evaluate(&kind_failure, 1);
+            let alert = evaluator.lock().evaluate(&kind_failure, 1);
             if let Some(alert) = alert {
                 dispatch_alert(notify_service, &alert.level, &alert.message).await;
             }
@@ -83,7 +85,7 @@ async fn patrol_once(
                 channel_id: channel.id.clone(),
             };
             let avg_ms = s.overall_avg_latency_ms as u64;
-            let alert = evaluator.lock().unwrap().evaluate(&kind_latency, avg_ms);
+            let alert = evaluator.lock().evaluate(&kind_latency, avg_ms);
             if let Some(alert) = alert {
                 dispatch_alert(notify_service, &alert.level, &alert.message).await;
             }
@@ -97,7 +99,6 @@ async fn patrol_once(
     if mem_percent > 0 {
         let alert = evaluator
             .lock()
-            .unwrap()
             .evaluate(&AlertKind::MemoryHigh, mem_percent);
         if let Some(alert) = alert {
             dispatch_alert(notify_service, &alert.level, &alert.message).await;
@@ -177,9 +178,9 @@ mod tests {
     fn evaluator_shared_lock_works() {
         let ev = shared_evaluator();
         let k = AlertKind::MemoryHigh;
-        assert!(ev.lock().unwrap().evaluate(&k, 90).is_some());
+        assert!(ev.lock().evaluate(&k, 90).is_some());
         // 静默期内第二次被压制
-        assert!(ev.lock().unwrap().evaluate(&k, 95).is_none());
+        assert!(ev.lock().evaluate(&k, 95).is_none());
     }
 
     #[cfg(target_os = "linux")]

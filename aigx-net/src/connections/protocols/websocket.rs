@@ -1,6 +1,6 @@
 //! WebSocket 协议实现
 
-use super::super::ProtocolHandler;
+use super::ProtocolHandler;
 
 /// WebSocket 处理器
 pub struct WebSocketHandler;

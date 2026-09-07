@@ -324,14 +324,15 @@ impl Bridge for OpenaiCompatibleBridge {
         let byte_stream = resp.bytes_stream();
 
         let chunk_stream = futures::stream::unfold(
-            (byte_stream, String::new(), id, model),
+            (byte_stream, Vec::<u8>::new(), id, model),
             |(mut byte_stream, mut buf, id, model)| async move {
                 use futures::StreamExt;
                 loop {
-                    // 尝试从缓冲区解析一个 SSE 事件
-                    if let Some(newline_pos) = buf.find("\n\n") {
-                        let event = buf[..newline_pos].to_string();
-                        buf = buf[newline_pos + 2..].to_string();
+                    // 以字节方式缓冲，多字节 UTF-8 字符跨 chunk 边界不会被截断损坏。
+                    // 事件分隔符兼容 \n\n / \r\n\r\n / \r\r（部分上游输出 CRLF 行尾）
+                    if let Some(end) = crate::sse::find_event_end_bytes(&buf) {
+                        let event = String::from_utf8_lossy(&buf[..end]).to_string();
+                        buf.drain(..end);
                         if let Some(chunk) = parse_sse_event(&event, &id, &model) {
                             return Some((Ok(chunk), (byte_stream, buf, id, model)));
                         }
@@ -340,7 +341,7 @@ impl Bridge for OpenaiCompatibleBridge {
                     // 拉取更多数据
                     match byte_stream.next().await {
                         Some(Ok(bytes)) => {
-                            buf.push_str(&String::from_utf8_lossy(&bytes));
+                            buf.extend_from_slice(&bytes);
                         }
                         Some(Err(e)) => {
                             return Some((

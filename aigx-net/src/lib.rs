@@ -59,7 +59,6 @@ pub use sessions::{
 };
 
 use std::sync::Arc;
-use std::time::Duration;
 
 /// 全局网络层实例
 pub struct NetworkLayer {

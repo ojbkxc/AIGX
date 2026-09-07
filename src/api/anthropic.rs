@@ -41,6 +41,17 @@ fn verify_api_key_full(
         )
     })?;
     let ip = extract_client_ip(headers);
+    // 全局 IP 过滤（与 openai.rs verify_api_key_full 对齐）：白名单/黑名单
+    // 优先于 token 级校验。原先 /v1/messages 缺失此检查，可绕过 IP 封禁。
+    if let Some(ip_str) = ip.as_deref() {
+        if let Err(ip_err) = crate::ip::check_ip(&state.ip_filter.get(), ip_str) {
+            return Err(anthropic_error(
+                "invalid_request_error",
+                &ip_err.to_string(),
+                StatusCode::FORBIDDEN,
+            ));
+        }
+    }
     // B22：按结构化错误变体映射状态码，取代原先的 msg.contains(...) 文本匹配
     state
         .api_key_store
@@ -54,6 +65,7 @@ fn verify_api_key_full(
                 ApiKeyError::Expired
                 | ApiKeyError::ModelNotAllowed(_)
                 | ApiKeyError::QuotaExhausted
+                | ApiKeyError::UserQuotaExhausted
                 | ApiKeyError::IpNotAllowed(_) => StatusCode::FORBIDDEN,
             };
             anthropic_error("authentication_error", &e.to_string(), status)

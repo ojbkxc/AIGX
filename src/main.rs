@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     let usage_tracker = Arc::new(UsageTracker::new(store.clone(), account_pool.clone()));
 
     // 初始化 API 密钥存储
-    let api_key_store = Arc::new(ApiKeyStore::new(store.clone()));
+    let mut api_key_store = ApiKeyStore::new(store.clone());
     if let Err(e) = api_key_store.load() {
         tracing::error!("Failed to load API key store: {e}");
     }
@@ -119,6 +119,10 @@ async fn main() -> anyhow::Result<()> {
 
     // 确保默认管理员账户存在
     ensure_default_admin(&user_store);
+
+    // 注入用户存储到 API Key 存储（余额预检：零余额用户拒绝请求）
+    api_key_store.with_user_store(user_store.clone());
+    let api_key_store = Arc::new(api_key_store);
 
     // 初始化订单存储
     let order_store = Arc::new(OrderStore::new(store.clone()));
@@ -272,6 +276,13 @@ async fn main() -> anyhow::Result<()> {
         .build();
     let response_cache = std::sync::Arc::new(response_cache);
 
+    let oauth_state_cache = std::sync::Arc::new(
+        crate::cache::AsyncCache::<String, i64>::builder()
+            .max_capacity(10_000)
+            .time_to_live(std::time::Duration::from_secs(600))
+            .build(),
+    );
+
     let state = AppState {
         api_client,
         model_mapper,
@@ -305,6 +316,7 @@ async fn main() -> anyhow::Result<()> {
         http_client,
         response_cache,
         semantic_router,
+        oauth_state_cache,
         #[cfg(feature = "sea-orm")]
         db_conn,
     };

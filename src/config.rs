@@ -37,6 +37,11 @@ fn default_monthly_limit() -> u64 {
     100_000
 }
 
+/// 注册赠送配额默认 0（与 Epay price 口径一致：1 元 = price 单位配额）。
+fn default_register_quota() -> i64 {
+    0
+}
+
 // ── Config structs ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +121,10 @@ pub struct UsageConfig {
     pub daily_limit: u64,
     #[serde(default = "default_monthly_limit")]
     pub monthly_limit: u64,
+    /// 新用户注册赠送配额（与 monthly_limit 分离，避免"月度限额"被当作
+    /// 充值配额赠送——原实现二者混用导致计费口径错乱）。
+    #[serde(default = "default_register_quota")]
+    pub register_quota: i64,
     #[serde(default)]
     pub threshold: f64,
     #[serde(default = "default_api_timeout")]
@@ -196,6 +205,7 @@ impl Default for UsageConfig {
         Self {
             daily_limit: default_daily_limit(),
             monthly_limit: default_monthly_limit(),
+            register_quota: default_register_quota(),
             threshold: 0.0,
             api_timeout_secs: default_api_timeout(),
             max_retries: default_max_retries(),

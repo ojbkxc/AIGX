@@ -74,8 +74,9 @@ pub struct AppState {
     pub rate_limiter: Arc<RateLimiter>,
     /// 通知服务（Telegram + SMTP + Slack + Webhook）
     pub notify_service: Arc<NotifyService>,
-    /// 告警规则评估器（alert_patrol 巡检 + 管理 API 共享）
-    pub alert_evaluator: std::sync::Arc<std::sync::Mutex<crate::notify::alert::AlertRuleEvaluator>>,
+    /// 告警规则评估器（alert_patrol 巡检 + 管理 API 共享）。
+    /// parking_lot::Mutex：无中毒语义，持锁 panic 不会永久破坏告警端点。
+    pub alert_evaluator: std::sync::Arc<parking_lot::Mutex<crate::notify::alert::AlertRuleEvaluator>>,
     /// 底层 FileStore（告警规则/历史持久化等轻量 KV 用）
     pub alert_store: Arc<crate::storage::FileStore>,
     /// 全局 IP 白名单/黑名单过滤（批次3 IP 管理）
@@ -125,6 +126,11 @@ pub struct AppState {
     pub response_cache: Arc<crate::cache::AsyncCache<String, Value>>,
     /// Semantic routing (prompt embedding match)
     pub semantic_router: Arc<crate::semantic::SemanticRouter>,
+    /// OAuth state 参数缓存（CSRF 防护）。
+    ///
+    /// authorize 时生成随机 state 存入，callback 时校验并一次性消费。
+    /// key=state 值，value=生成时间戳（TTL 10 分钟由 AsyncCache 清扫）。
+    pub oauth_state_cache: Arc<crate::cache::AsyncCache<String, i64>>,
 }
 
 impl AppState {
@@ -214,6 +220,7 @@ fn verify_api_key_full(
                 ApiKeyError::Expired
                 | ApiKeyError::ModelNotAllowed(_)
                 | ApiKeyError::QuotaExhausted
+                | ApiKeyError::UserQuotaExhausted
                 | ApiKeyError::IpNotAllowed(_) => StatusCode::FORBIDDEN,
             };
             error_response("auth_error", &e.to_string(), status)
@@ -1283,12 +1290,25 @@ pub async fn handle_chat_completions(
                 .into_response()
         }
     } else {
-        // 响应缓存：非流式请求尝试缓存命中
+        // 响应缓存：非流式请求尝试缓存命中。
+        // P1 修复：key 必须包含用户隔离维度与全部生成参数——
+        // 原先仅 model/messages/temperature/max_tokens，导致
+        // (a) 跨用户响应泄漏（他人相同 prompt 可命中你的缓存）
+        // (b) tools/tool_choice/stop/top_p 不同的请求命中同一条目，返回错误结果
         let cache_key = serde_json::to_string(&serde_json::json!({
+            "key_id": &api_key.id,
             "model": &model,
             "messages": body.get("messages").cloned().unwrap_or(Value::Null),
             "temperature": body.get("temperature").cloned().unwrap_or(Value::Null),
             "max_tokens": body.get("max_tokens").cloned().unwrap_or(Value::Null),
+            "tools": body.get("tools").cloned().unwrap_or(Value::Null),
+            "tool_choice": body.get("tool_choice").cloned().unwrap_or(Value::Null),
+            "stop": body.get("stop").cloned().unwrap_or(Value::Null),
+            "top_p": body.get("top_p").cloned().unwrap_or(Value::Null),
+            "presence_penalty": body.get("presence_penalty").cloned().unwrap_or(Value::Null),
+            "frequency_penalty": body.get("frequency_penalty").cloned().unwrap_or(Value::Null),
+            "seed": body.get("seed").cloned().unwrap_or(Value::Null),
+            "response_format": body.get("response_format").cloned().unwrap_or(Value::Null),
         }))
         .unwrap_or_default();
         if let Some(cached) = state.response_cache.get(&cache_key).await {
@@ -2797,7 +2817,7 @@ pub async fn handle_audio_translations(
             &model,
             audio_data.to_vec(),
             &mime_type,
-            "/v1/audio/transcriptions",
+            "/v1/audio/translations",
         )
         .await
     {

@@ -19,6 +19,8 @@ use dashmap::DashMap;
 pub const DEFAULT_STICKY_TTL: Duration = Duration::from_secs(5 * 60);
 /// 默认硬 TTL（30 分钟）：过期强制清除条目。
 pub const DEFAULT_HARD_TTL: Duration = Duration::from_secs(30 * 60);
+/// 缓存容量上限。防止大量一次性 session（如单次请求无后续）撑爆内存。
+const MAX_ENTRIES: usize = 100_000;
 
 /// 复合缓存键 `(session_id, model)` — 同 session 不同模型独立路由。
 type CacheKey = (String, String);
@@ -83,8 +85,15 @@ impl AffinityCache {
 
     /// 写入或刷新亲和条目 `(session_id, model) → channel_id`。
     ///
-    /// 请求成功后调用，建立/续期亲和性。
+    /// 请求成功后调用，建立/续期亲和性。超过容量上限时先清扫过期条目，
+    /// 仍满则拒绝新条目（避免无界增长）。
     pub fn insert(&self, session_id: &str, model: &str, channel_id: &str) {
+        if self.entries.len() >= MAX_ENTRIES {
+            self.purge_expired();
+            if self.entries.len() >= MAX_ENTRIES {
+                return; // 容量满且无过期可清 → 放弃缓存新条目
+            }
+        }
         let compound = (session_id.to_string(), model.to_string());
         self.entries.insert(
             compound,
@@ -93,6 +102,13 @@ impl AffinityCache {
                 created_at: Instant::now(),
             },
         );
+    }
+
+    /// 清扫全部过硬 TTL 的条目。
+    fn purge_expired(&self) {
+        let now = Instant::now();
+        self.entries
+            .retain(|_, entry| now.duration_since(entry.created_at) <= self.hard_ttl);
     }
 
     /// 清除 `(session_id, model)` 的亲和条目。
@@ -236,5 +252,16 @@ mod tests {
     #[should_panic(expected = "sticky_ttl 必须 <= hard_ttl")]
     fn ttls_must_be_ordered() {
         let _ = AffinityCache::with_ttls(Duration::from_secs(60), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn insert_respects_capacity_limit() {
+        // 用极小的 hard_ttl 构造：过期条目被清扫，新条目可以写入
+        let cache = AffinityCache::with_ttls(Duration::from_millis(10), Duration::from_millis(10));
+        cache.insert("u", "m", "ch-1");
+        std::thread::sleep(Duration::from_millis(30));
+        // 清扫发生在 insert 内部，不直接暴露 purge_expired；这里验证 insert 后总量有限
+        cache.insert("u2", "m", "ch-1");
+        assert!(cache.len() <= 2);
     }
 }

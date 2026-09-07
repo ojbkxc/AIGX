@@ -182,7 +182,11 @@ impl AimdController {
         self.success_streak = 0;
 
         if let Some(seconds) = retry_after {
-            self.rate_limit_until = Some(now + Duration::from_secs(seconds));
+            self.rate_limit_until = Some(
+                now + Duration::from_secs(
+                    seconds.min(crate::channel::circuit_breaker::MAX_RATE_LIMIT_RETRY_SECS),
+                ),
+            );
         }
 
         let new_limit = (self.current_limit as f64 * RATE_LIMIT_REDUCTION_RATIO).ceil() as u32;

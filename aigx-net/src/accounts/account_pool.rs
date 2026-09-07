@@ -8,7 +8,7 @@
 //! - 账号状态实时跟踪
 //! - 自动故障恢复
 
-use super::account::{Account, AccountConfig, AccountStatus, AccountType};
+use super::account::{Account, AccountConfig, AccountType};
 use anyhow::Result;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -162,8 +162,7 @@ impl AccountPool {
             LoadBalanceStrategy::Weighted => {
                 // 基于优先级的加权选择
                 let total_weight: u64 = available.iter().map(|a| a.priority as u64 + 1).sum();
-                let mut pick =
-                    self.rr_counter.fetch_add(1, Ordering::Relaxed) as u64 % total_weight;
+                let mut pick = self.rr_counter.fetch_add(1, Ordering::Relaxed) % total_weight;
                 let mut chosen = available[0].clone();
                 for acc in &available {
                     pick = pick.saturating_sub(acc.priority as u64 + 1);
@@ -197,22 +196,18 @@ impl AccountPool {
 
     /// 标记账号出错
     pub fn mark_error(&self, id: &str) {
-        if self.accounts.contains_key(id) {
-            self.accounts.alter(id, |_, mut acc| {
-                acc.increase_failure_count();
-                acc
-            });
+        if let Some(mut entry) = self.accounts.get_mut(id) {
+            let acc = Arc::make_mut(&mut *entry.value_mut());
+            acc.increase_failure_count();
             self.failed_requests.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     /// 重置账号状态
     pub fn reset_account(&self, id: &str) {
-        if self.accounts.contains_key(id) {
-            self.accounts.alter(id, |_, mut acc| {
-                acc.reset_failure();
-                acc
-            });
+        if let Some(mut entry) = self.accounts.get_mut(id) {
+            let acc = Arc::make_mut(&mut *entry.value_mut());
+            acc.reset_failure();
         }
     }
 

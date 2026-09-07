@@ -281,7 +281,11 @@ impl ChannelStateTracker {
             FailureType::RateLimited { scope, retry_after } => {
                 let dur = retry_after
                     .as_ref()
-                    .map(|r| Duration::from_secs(*r))
+                    .map(|r| {
+                        Duration::from_secs(
+                            (*r).min(crate::channel::circuit_breaker::MAX_RATE_LIMIT_RETRY_SECS),
+                        )
+                    })
                     .unwrap_or_else(|| Duration::from_secs(DEFAULT_RATE_LIMIT_RETRY_SECS));
                 let retry_until = now + dur;
                 match scope {

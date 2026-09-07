@@ -62,7 +62,6 @@ pub struct OAuthCallback {
 #[derive(Debug, Deserialize)]
 pub struct GoogleCallbackParams {
     pub code: Option<String>,
-    #[allow(dead_code)]
     pub state: Option<String>,
 }
 
@@ -70,7 +69,6 @@ pub struct GoogleCallbackParams {
 #[derive(Deserialize)]
 pub struct GithubCallbackParams {
     pub code: Option<String>,
-    #[allow(dead_code)]
     pub state: Option<String>,
 }
 
@@ -262,7 +260,9 @@ pub async fn handle_register(
         return Err(error_response("密码长度至少6位", StatusCode::BAD_REQUEST));
     }
     let config = state.config_manager.get().await;
-    let default_quota = config.usage.monthly_limit as i64;
+    // 注册赠送配额与月度限额分离（原实现把 monthly_limit 当赠送额度，
+    // 与充值配额口径混淆）
+    let default_quota = config.usage.register_quota;
     let user = if let Some(username) = &body.username {
         if !username.trim().is_empty() {
             // 检查 username 是否已被使用
@@ -565,6 +565,11 @@ pub async fn handle_google_oauth_authorize(State(state): State<AppState>) -> Res
             .into_response();
     }
     let state_param = Uuid::new_v4().to_string();
+    // CSRF 防护：state 存入缓存，callback 校验并一次性消费
+    state
+        .oauth_state_cache
+        .insert(state_param.clone(), chrono::Utc::now().timestamp())
+        .await;
     let url = crate::oauth::google::build_authorize_url(oauth, &state_param);
     Redirect::to(&url).into_response()
 }
@@ -587,6 +592,18 @@ pub async fn handle_google_oauth_callback(
                 .into_response()
         }
     };
+    // CSRF 防护：校验 state（一次性消费，防重放/伪造回调）
+    let state_param = match params.state {
+        Some(ref s) if !s.is_empty() => s.clone(),
+        _ => {
+            return error_response("Missing OAuth state", StatusCode::BAD_REQUEST).into_response()
+        }
+    };
+    if state.oauth_state_cache.get(&state_param).await.is_none() {
+        tracing::warn!("Google OAuth callback: invalid or expired state (CSRF check failed)");
+        return error_response("Invalid OAuth state", StatusCode::BAD_REQUEST).into_response();
+    }
+    state.oauth_state_cache.remove(&state_param).await;
     // 用授权码换取 access token
     let access_token =
         match crate::oauth::google::exchange_code(&oauth, &code, &state.http_client).await {
@@ -622,7 +639,7 @@ pub async fn handle_google_oauth_callback(
             &username,
             &Uuid::new_v4().to_string(), // 随机密码（OAuth 用户不走密码登录）
             crate::user::Role::User,
-            0,
+            config.usage.register_quota,
         ) {
             Ok(u) => u,
             Err(e) => {
@@ -671,6 +688,11 @@ pub async fn handle_github_oauth_authorize(State(state): State<AppState>) -> Res
             .into_response();
     }
     let state_param = Uuid::new_v4().to_string();
+    // CSRF 防护：state 存入缓存，callback 校验并一次性消费
+    state
+        .oauth_state_cache
+        .insert(state_param.clone(), chrono::Utc::now().timestamp())
+        .await;
     let url = format!(
         "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=user:email&state={}",
         oauth.client_id,
@@ -698,6 +720,18 @@ pub async fn handle_github_oauth_callback(
                 .into_response()
         }
     };
+    // CSRF 防护：校验 state（一次性消费，防重放/伪造回调）
+    let state_param = match params.state {
+        Some(ref s) if !s.is_empty() => s.clone(),
+        _ => {
+            return error_response("Missing OAuth state", StatusCode::BAD_REQUEST).into_response()
+        }
+    };
+    if state.oauth_state_cache.get(&state_param).await.is_none() {
+        tracing::warn!("GitHub OAuth callback: invalid or expired state (CSRF check failed)");
+        return error_response("Invalid OAuth state", StatusCode::BAD_REQUEST).into_response();
+    }
+    state.oauth_state_cache.remove(&state_param).await;
     // Exchange code for access token
     let access_token =
         match crate::oauth::github::exchange_code(&oauth, &code, &state.http_client).await {
@@ -733,7 +767,7 @@ pub async fn handle_github_oauth_callback(
                 &gh_user.login,
                 &Uuid::new_v4().to_string(), // random password (OAuth users don't use password login)
                 crate::user::Role::User,
-                0,
+                config.usage.register_quota,
             ) {
                 Ok(u) => u,
                 Err(e) => {

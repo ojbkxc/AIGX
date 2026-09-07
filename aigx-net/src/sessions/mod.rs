@@ -11,7 +11,6 @@
 pub mod router;
 pub mod session;
 pub mod session_pool;
-pub use router::*;
 pub use session::*;
 pub use session_pool::*;
 
@@ -149,16 +148,12 @@ impl SmartRouter {
         match self.strategy {
             RouterStrategy::LatencyAware => available
                 .into_iter()
-                .max_by_key(|s| s.last_used())
-                .map(std::sync::Arc::clone),
-            RouterStrategy::LeastRecentlyUsed => available
-                .into_iter()
-                .min_by_key(|s| s.last_used())
-                .map(std::sync::Arc::clone),
-            RouterStrategy::Random => available
-                .into_iter()
-                .nth(fastrand_usize(available.len()))
-                .map(std::sync::Arc::clone),
+                .max_by_key(|s| s.last_used()),
+            RouterStrategy::LeastRecentlyUsed => available.into_iter().min_by_key(|s| s.last_used()),
+            RouterStrategy::Random => {
+                let idx = fastrand_usize(available.len());
+                available.into_iter().nth(idx)
+            }
         }
     }
 
@@ -195,6 +190,12 @@ fn fastrand_usize(bound: usize) -> usize {
 /// 会话状态转换表（供诊断/展示使用）
 pub struct SessionTransitionTable {
     transitions: Vec<(String, String)>,
+}
+
+impl Default for SessionTransitionTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionTransitionTable {

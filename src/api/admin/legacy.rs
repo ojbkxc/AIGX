@@ -1710,7 +1710,7 @@ pub async fn handle_alert_rules_list(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    let rules = state.alert_evaluator.lock().unwrap().rules().to_vec();
+    let rules = state.alert_evaluator.lock().rules().to_vec();
     Ok(Json(serde_json::json!({ "success": true, "data": rules })))
 }
 
@@ -1735,7 +1735,7 @@ pub async fn handle_alert_rules_update(
     }
     let count = body.rules.len();
     {
-        let mut ev = state.alert_evaluator.lock().unwrap();
+        let mut ev = state.alert_evaluator.lock();
         ev.set_rules(body.rules);
         ev.persist_rules(&state.alert_store);
     }
@@ -1751,7 +1751,7 @@ pub async fn handle_alerts_active(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    let alerts = state.alert_evaluator.lock().unwrap().active_alerts();
+    let alerts = state.alert_evaluator.lock().active_alerts();
     Ok(Json(serde_json::json!({ "success": true, "data": alerts })))
 }
 
@@ -1775,7 +1775,6 @@ pub async fn handle_alerts_history(
     let history: Vec<_> = state
         .alert_evaluator
         .lock()
-        .unwrap()
         .history()
         .iter()
         .take(limit)
@@ -1835,7 +1834,7 @@ pub async fn handle_alert_test(
     };
     let value = b.value.unwrap_or(99);
     let alert = {
-        let mut ev = state.alert_evaluator.lock().unwrap();
+        let mut ev = state.alert_evaluator.lock();
         let alert = ev.evaluate(&kind, value);
         if alert.is_some() {
             ev.persist_history(&state.alert_store);
@@ -1908,7 +1907,10 @@ pub async fn handle_stripe_topup(
     };
     let trade_no = user::new_trade_no("STP", &user.id);
     let amount_cents = amount * 100;
-    let quota = amount * 10000; // 1 cent = 10000 quota units (same ratio as epay)
+    // 配额换算与 Epay 对齐：quota = amount × epay.price（充值倍率）。
+    // 原实现写死 1 美元 = 10000 单位，与 Epay 的 1 元 = price 单位口径
+    // 不一致，两个支付渠道充值等值金额入账配额不同。
+    let quota = (amount as f64 * config.epay.price).round() as i64;
 
     let order = crate::payment::TopUpOrder {
         trade_no: trade_no.clone(),
@@ -1956,8 +1958,9 @@ pub async fn handle_stripe_webhook(
     body: axum::body::Bytes,
 ) -> Response {
     let stripe = &state.stripe_client;
-    if !stripe.config().ready() {
-        return error_response("Stripe is not configured", StatusCode::BAD_REQUEST).into_response();
+    if !stripe.config().webhook_ready() {
+        return error_response("Stripe webhook is not configured", StatusCode::BAD_REQUEST)
+            .into_response();
     }
     let sig_header = match headers
         .get("stripe-signature")

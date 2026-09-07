@@ -87,7 +87,9 @@ impl Default for UpstreamState {
 }
 
 /// 无 `retry_after` 头时的默认限流时长（秒）。
-const DEFAULT_RATE_LIMIT_RETRY_SECS: u64 = 60;
+pub(crate) const DEFAULT_RATE_LIMIT_RETRY_SECS: u64 = 60;
+/// `retry_after` 上限（秒）。防上游返回异常大值导致 `Instant` 加法溢出 panic。
+pub(crate) const MAX_RATE_LIMIT_RETRY_SECS: u64 = 3600;
 /// AuthFailed / PaymentRequired 的强制冷却时长（30 分钟）。
 const PERMANENT_FAILURE_COOLDOWN_SECS: u64 = 1800;
 
@@ -134,7 +136,15 @@ impl CircuitBreaker {
             Some(e) => e,
             None => return true, // 无状态 = 从未失败 = 放行
         };
+        Self::state_allows(&entry, self.failure_threshold, self.cooldown_duration)
+    }
 
+    /// 基于 entry 值判定是否放行（不查 map，避免在 iter 持锁期间嵌套 get 死锁）。
+    fn state_allows(
+        entry: &UpstreamState,
+        failure_threshold: u32,
+        cooldown_duration: Duration,
+    ) -> bool {
         // 限流未到期 → 拒绝
         if let Some(rate_limit_until) = entry.rate_limit_until {
             if rate_limit_until > Instant::now() {
@@ -143,13 +153,13 @@ impl CircuitBreaker {
         }
 
         let current_failures = entry.failure_count.load(Ordering::Relaxed);
-        if current_failures < self.failure_threshold {
+        if current_failures < failure_threshold {
             return true; // Closed
         }
 
         // Open：检查冷却是否已过
         if let Some(last_failure) = entry.last_failure_time {
-            if last_failure.elapsed() >= self.cooldown_duration {
+            if last_failure.elapsed() >= cooldown_duration {
                 return true; // HalfOpen 放一个试探
             }
         }
@@ -195,7 +205,7 @@ impl CircuitBreaker {
             FailureType::RateLimited { retry_after, .. } => {
                 let duration = retry_after
                     .as_ref()
-                    .map(|r| Duration::from_secs(*r))
+                    .map(|r| Duration::from_secs((*r).min(MAX_RATE_LIMIT_RETRY_SECS)))
                     .unwrap_or_else(|| Duration::from_secs(DEFAULT_RATE_LIMIT_RETRY_SECS));
                 entry.rate_limit_until = Some(Instant::now() + duration);
                 let new_count = entry.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -248,7 +258,8 @@ impl CircuitBreaker {
     pub fn get_status_map(&self) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
         for r in self.states.iter() {
-            map.insert(r.key().clone(), self.get_state(r.key()).to_string());
+            // 直接基于 entry 值计算，不嵌套 get（避免 DashMap 迭代中同 key 二次加锁死锁）
+            map.insert(r.key().clone(), Self::state_of(r.value(), self.failure_threshold, self.cooldown_duration).to_string());
         }
         map
     }
@@ -262,6 +273,15 @@ impl CircuitBreaker {
             Some(e) => e,
             None => return "closed",
         };
+        Self::state_of(&entry, self.failure_threshold, self.cooldown_duration)
+    }
+
+    /// 基于 entry 值计算状态（不查 map）。
+    fn state_of(
+        entry: &UpstreamState,
+        failure_threshold: u32,
+        cooldown_duration: Duration,
+    ) -> &'static str {
         // 限流未到期视为 open（拒绝请求）
         if let Some(rate_limit_until) = entry.rate_limit_until {
             if rate_limit_until > Instant::now() {
@@ -269,11 +289,11 @@ impl CircuitBreaker {
             }
         }
         let count = entry.failure_count.load(Ordering::Relaxed);
-        if count < self.failure_threshold {
+        if count < failure_threshold {
             return "closed";
         }
         if let Some(last_failure) = entry.last_failure_time {
-            if last_failure.elapsed() < self.cooldown_duration {
+            if last_failure.elapsed() < cooldown_duration {
                 "open"
             } else {
                 "halfopen"
@@ -318,7 +338,9 @@ impl CircuitBreaker {
     pub fn open_count(&self) -> usize {
         self.states
             .iter()
-            .filter(|r| !self.allow_request(r.key()))
+            .filter(|r| {
+                !Self::state_allows(r.value(), self.failure_threshold, self.cooldown_duration)
+            })
             .count()
     }
 }

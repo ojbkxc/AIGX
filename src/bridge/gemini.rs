@@ -96,6 +96,8 @@ impl GeminiBridge {
     /// - `assistant` → `model`，其他角色 → `user`
     /// - `content` → `parts: [{text}]`
     /// - `temperature`/`max_tokens` → `generationConfig`（camelCase）
+    /// - `tools` → `functionDeclarations`；assistant `tool_calls` →
+    ///   `functionCall` parts；tool 角色消息 → `functionResponse` part
     fn build_body(&self, req: &ChatFormat, stream: bool) -> Value {
         let mut system_parts: Vec<String> = Vec::new();
         let mut contents: Vec<Value> = Vec::new();
@@ -113,10 +115,38 @@ impl GeminiBridge {
                     } else {
                         "user"
                     };
-                    let text = m.content_str().to_string();
+                    let mut parts: Vec<Value> = Vec::new();
+                    // tool 角色消息 → functionResponse part（content 是工具结果，
+                    // 不作为纯文本 part）
+                    if matches!(m.role, Role::Tool) {
+                        let name = m.name.as_deref().unwrap_or("");
+                        let response: Value = serde_json::from_str(m.content_str())
+                            .unwrap_or_else(|_| serde_json::json!({ "result": m.content_str() }));
+                        parts.push(serde_json::json!({
+                            "functionResponse": { "name": name, "response": response }
+                        }));
+                    } else {
+                        let text = m.content_str();
+                        if !text.is_empty() {
+                            parts.push(serde_json::json!({ "text": text }));
+                        }
+                    }
+                    // assistant 轮的 tool_calls → functionCall parts（多轮工具回放）
+                    if let Some(tool_calls) = &m.tool_calls {
+                        for tc in tool_calls {
+                            let args: Value = serde_json::from_str(&tc.arguments)
+                                .unwrap_or_else(|_| serde_json::json!({}));
+                            parts.push(serde_json::json!({
+                                "functionCall": { "name": tc.function_name, "args": args }
+                            }));
+                        }
+                    }
+                    if parts.is_empty() {
+                        parts.push(serde_json::json!({ "text": "" }));
+                    }
                     contents.push(serde_json::json!({
                         "role": role,
-                        "parts": [{"text": text}]
+                        "parts": parts
                     }));
                 }
             }
@@ -151,6 +181,14 @@ impl GeminiBridge {
             body["generationConfig"] = Value::Object(gen_config);
         }
 
+        // 工具定义：OpenAI 形状 → Gemini functionDeclarations
+        if let Some(tools) = &req.tools {
+            let declarations = translate_tools(tools);
+            if !declarations.is_empty() {
+                body["tools"] = serde_json::json!([{ "functionDeclarations": declarations }]);
+            }
+        }
+
         // 流式标志（Gemini 用 URL 区分，但部分代理需要 body 中 stream=true）
         if stream {
             body["stream"] = serde_json::json!(true);
@@ -167,6 +205,31 @@ impl GeminiBridge {
 
         body
     }
+}
+
+/// OpenAI 形状 tools → Gemini `functionDeclarations` 形状：
+/// `{type:"function",function:{name,description,parameters}}`
+/// → `{name, description?, parameters?}`
+fn translate_tools(tools: &[Value]) -> Vec<Value> {
+    tools
+        .iter()
+        .filter_map(|t| {
+            if t.get("type").and_then(|v| v.as_str()) != Some("function") {
+                return None;
+            }
+            let function = t.get("function")?.as_object()?;
+            let name = function.get("name")?.as_str()?;
+            let mut tool = serde_json::Map::new();
+            tool.insert("name".into(), Value::String(name.to_string()));
+            if let Some(desc) = function.get("description") {
+                tool.insert("description".into(), desc.clone());
+            }
+            if let Some(params) = function.get("parameters") {
+                tool.insert("parameters".into(), params.clone());
+            }
+            Some(Value::Object(tool))
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -368,19 +431,29 @@ fn parse_response(json: &Value, fallback_model: &str) -> ChatResponse {
     // 错误响应由 capture_upstream_error_http 处理，此处仅解析成功响应
     let candidate = json.get("candidates").and_then(|c| c.get(0));
 
-    // 拼接所有 parts 的 text（多 part 情况）
-    let text = candidate
+    // 拼接所有 parts 的 text（多 part 情况），同时收集 functionCall（工具调用）
+    let mut text = String::new();
+    let mut tool_calls: Vec<super::ToolCall> = Vec::new();
+    if let Some(parts) = candidate
         .and_then(|c| c.get("content"))
         .and_then(|c| c.get("parts"))
         .and_then(|p| p.as_array())
-        .map(|parts| {
-            parts
-                .iter()
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(String::from))
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default();
+    {
+        for p in parts {
+            if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
+                text.push_str(t);
+            }
+            if let Some(fc) = p.get("functionCall") {
+                let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let args = fc.get("args").cloned().unwrap_or(serde_json::json!({}));
+                tool_calls.push(super::ToolCall {
+                    id: format!("call_{}", uuid::Uuid::new_v4().simple()),
+                    function_name: name.to_string(),
+                    arguments: args.to_string(),
+                });
+            }
+        }
+    }
 
     let finish_reason = candidate
         .and_then(|c| c.get("finishReason"))
@@ -390,7 +463,10 @@ fn parse_response(json: &Value, fallback_model: &str) -> ChatResponse {
 
     let usage = parse_usage(json);
 
-    let msg = ChatMessage::assistant(text);
+    let mut msg = ChatMessage::assistant(text);
+    if !tool_calls.is_empty() {
+        msg.tool_calls = Some(tool_calls);
+    }
 
     ChatResponse {
         id: format!("gemini_{}", uuid::Uuid::new_v4()),
@@ -462,16 +538,33 @@ fn parse_stream_event(
 
     let candidate = v.get("candidates").and_then(|c| c.get(0));
 
-    // 提取文本增量
-    let text = candidate
+    // 提取文本增量与 functionCall（工具调用，通常单帧完整到达）
+    let mut text: Option<String> = None;
+    let mut tool_calls: Vec<super::ToolCallDelta> = Vec::new();
+    if let Some(parts) = candidate
         .and_then(|c| c.get("content"))
         .and_then(|c| c.get("parts"))
         .and_then(|p| p.as_array())
-        .and_then(|parts| {
-            parts
-                .iter()
-                .find_map(|p| p.get("text").and_then(|t| t.as_str()).map(String::from))
-        });
+    {
+        for p in parts {
+            if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
+                text = Some(match text.take() {
+                    Some(prev) => format!("{}{}", prev, t),
+                    None => t.to_string(),
+                });
+            }
+            if let Some(fc) = p.get("functionCall") {
+                let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let args = fc.get("args").cloned().unwrap_or(serde_json::json!({}));
+                tool_calls.push(super::ToolCallDelta {
+                    index: tool_calls.len(),
+                    id: Some(format!("call_{}", uuid::Uuid::new_v4().simple())),
+                    function_name: Some(name.to_string()),
+                    arguments: Some(args.to_string()),
+                });
+            }
+        }
+    }
 
     // 提取 finishReason
     let finish = candidate
@@ -482,8 +575,8 @@ fn parse_stream_event(
     // 提取 usageMetadata（终帧携带）
     let usage = v.get("usageMetadata").map(parse_usage_from_value);
 
-    // 跳过空帧（无文本、无 finish、无 usage）
-    if text.is_none() && finish.is_none() && usage.is_none() {
+    // 跳过空帧（无文本、无 finish、无 usage、无工具调用）
+    if text.is_none() && finish.is_none() && usage.is_none() && tool_calls.is_empty() {
         return None;
     }
 
@@ -497,7 +590,7 @@ fn parse_stream_event(
         model: model.to_string(),
         delta: ChatDelta {
             content: text,
-            tool_calls: None,
+            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
             reasoning: None,
         },
         finish_reason: finish,
@@ -538,6 +631,7 @@ pub fn make_bridge(base_url: &str, api_key: &str, client: &reqwest::Client) -> A
 mod tests {
     use super::*;
     use serde_json::json;
+    use crate::bridge::ToolCall;
 
     #[test]
     fn build_body_converts_messages_to_contents() {
@@ -677,6 +771,120 @@ mod tests {
         assert_eq!(chunk.usage.as_ref().unwrap().prompt_tokens, 5);
         assert_eq!(chunk.usage.as_ref().unwrap().completion_tokens, 10);
         assert!(state.sent_finish);
+    }
+
+    #[test]
+    fn build_body_translates_tools_and_tool_calls() {
+        let req = ChatFormat {
+            model: "gemini-pro".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::User,
+                    content: Some("What's the weather?".to_string()),
+                    content_blocks: None,
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                    reasoning: None,
+                },
+                ChatMessage {
+                    role: Role::Assistant,
+                    content: None,
+                    content_blocks: None,
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_1".to_string(),
+                        function_name: "get_weather".to_string(),
+                        arguments: r#"{"city":"Beijing"}"#.to_string(),
+                    }]),
+                    reasoning: None,
+                },
+                ChatMessage {
+                    role: Role::Tool,
+                    content: Some(r#"{"temp":25}"#.to_string()),
+                    content_blocks: None,
+                    name: Some("get_weather".to_string()),
+                    tool_call_id: Some("call_1".to_string()),
+                    tool_calls: None,
+                    reasoning: None,
+                },
+            ],
+            tools: Some(vec![serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+                }
+            })]),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: false,
+            top_k: None,
+            stop: None,
+            tool_choice: None,
+            reasoning_effort: None,
+            web_search_options: None,
+            extra: None,
+        };
+
+        let bridge = GeminiBridge::with_client("", "test-key", reqwest::Client::new());
+        let body = bridge.build_body(&req, false);
+
+        // 工具定义翻译为 functionDeclarations
+        assert_eq!(
+            body["tools"][0]["functionDeclarations"][0]["name"], "get_weather"
+        );
+        // assistant 的 tool_calls 翻译为 functionCall
+        assert_eq!(
+            body["contents"][1]["parts"][0]["functionCall"]["name"], "get_weather"
+        );
+        // tool 消息翻译为 functionResponse（parts[0] 即 functionResponse，无文本 part）
+        assert_eq!(
+            body["contents"][2]["parts"][0]["functionResponse"]["name"], "get_weather"
+        );
+        assert_eq!(
+            body["contents"][2]["parts"][0]["functionResponse"]["response"]["temp"], 25
+        );
+    }
+
+    #[test]
+    fn parse_response_extracts_function_calls() {
+        let gemini_resp = json!({
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"text": "Let me check. "},
+                            {"functionCall": {"name": "get_weather", "args": {"city": "Beijing"}}}
+                        ],
+                        "role": "model"
+                    },
+                    "finishReason": "STOP",
+                    "index": 0
+                }
+            ]
+        });
+
+        let resp = parse_response(&gemini_resp, "gemini-pro");
+        assert_eq!(resp.message.content.as_deref(), Some("Let me check. "));
+        let tool_calls = resp.message.tool_calls.expect("should have tool calls");
+        assert_eq!(tool_calls[0].function_name, "get_weather");
+        assert_eq!(tool_calls[0].arguments, r#"{"city":"Beijing"}"#);
+    }
+
+    #[test]
+    fn parse_stream_event_extracts_function_call() {
+        let payload = r#"{"candidates": [{"content": {"parts": [{"functionCall": {"name": "get_weather", "args": {"city": "Beijing"}}}], "role": "model"}, "index": 0}]}"#;
+        let mut state = StreamState::default();
+        let chunk = parse_stream_event(payload, "test", "gemini-pro", &mut state)
+            .expect("should parse")
+            .expect("should be ok");
+        let tool_calls = chunk.delta.tool_calls.expect("should have tool calls");
+        assert_eq!(tool_calls[0].function_name.as_deref(), Some("get_weather"));
+        assert_eq!(tool_calls[0].arguments.as_deref(), Some(r#"{"city":"Beijing"}"#));
     }
 
     #[test]

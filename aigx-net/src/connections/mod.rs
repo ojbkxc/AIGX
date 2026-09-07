@@ -17,10 +17,8 @@ pub use connection_pool::*;
 pub use health_check::*;
 pub use protocols::*;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::time::Duration;
-use tokio::net::TcpListener;
-use tracing::{debug, error, info, warn};
 
 /// 连接协议类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

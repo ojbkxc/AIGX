@@ -45,8 +45,11 @@ impl SseDecoder {
         self.decode_buffered_bytes();
 
         let mut events = Vec::new();
-        while let Some(idx) = self.buffer.find("\n\n") {
-            let message: String = self.buffer.drain(..idx + 2).collect();
+        // SSE 规范允许事件以 \n\n、\r\n\r\n 或 \r\r 分隔。
+        // 部分上游/代理会输出 CRLF 行尾，只匹配 \n\n 会把两条事件
+        // 粘成一条导致 JSON 解析失败，此处归一化处理。
+        while let Some(idx) = find_event_end(&self.buffer) {
+            let message: String = self.buffer.drain(..idx).collect();
             decode_message(&message, &mut events);
         }
         events
@@ -98,6 +101,32 @@ impl SseDecoder {
             self.byte_buf.clear();
         }
     }
+}
+
+/// 在缓冲区中查找 SSE 事件终结符（`\n\n` / `\r\n\r\n` / `\r\r`）。
+///
+/// 返回从缓冲区开头到终结符（含）的字节数。未找到返回 `None`。
+fn find_event_end(buffer: &str) -> Option<usize> {
+    find_event_end_bytes(buffer.as_bytes())
+}
+
+/// 字节版事件终结符查找（供字节缓冲的流式 bridge 复用）。
+pub(crate) fn find_event_end_bytes(bytes: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        match (bytes[i], bytes[i + 1]) {
+            (b'\r', b'\r') => return Some(i + 2),
+            (b'\n', b'\n') => return Some(i + 2),
+            (b'\r', b'\n')
+                if i + 3 < bytes.len() && bytes[i + 2] == b'\r' && bytes[i + 3] == b'\n' =>
+            {
+                return Some(i + 4)
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// 解析一条 SSE 消息，提取 `data:` 行。
@@ -235,5 +264,35 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0], SseEvent::Data("progress".into()));
         assert_eq!(events[1], SseEvent::Done);
+    }
+
+    #[test]
+    fn crlf_event_separator() {
+        // 部分上游/代理输出 CRLF 行尾的 SSE
+        let mut decoder = SseDecoder::new();
+        let events = decoder.feed(b"data: first\r\n\r\ndata: second\r\n\r\n");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], SseEvent::Data("first".into()));
+        assert_eq!(events[1], SseEvent::Data("second".into()));
+    }
+
+    #[test]
+    fn mixed_lf_and_crlf_lines() {
+        // 消息内 \r\n 行尾 + \r\n\r\n 终结符
+        let mut decoder = SseDecoder::new();
+        let events = decoder.feed(b"data: line1\r\ndata: line2\r\n\r\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], SseEvent::Data("line1\nline2".into()));
+    }
+
+    #[test]
+    fn partial_crlf_across_feeds() {
+        // \r\n\r\n 终结符跨 chunk 边界（先到 \r\n\r，再到 \n）
+        let mut decoder = SseDecoder::new();
+        let events = decoder.feed(b"data: hello\r\n\r");
+        assert!(events.is_empty());
+        let events = decoder.feed(b"\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], SseEvent::Data("hello".into()));
     }
 }

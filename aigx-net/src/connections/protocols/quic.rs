@@ -3,7 +3,7 @@
 // 在实际项目中，这里应该使用 quinn 库来实现
 // 目前提供接口定义用于未来的实现
 
-use super::super::ProtocolHandler;
+use super::ProtocolHandler;
 
 /// QUIC 处理器
 pub struct QuicHandler;

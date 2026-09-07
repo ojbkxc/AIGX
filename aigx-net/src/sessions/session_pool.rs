@@ -148,13 +148,21 @@ impl SessionPool {
 
     /// 查找可用会话
     fn find_available_session(&self) -> Option<Arc<Session>> {
-        for entry in self.sessions.iter() {
-            let session = entry.value();
-            if session.is_available() && !session.is_expired() {
-                return Some(session.clone());
-            }
+        // 收集候选后交给路由策略选择（延迟感知/LRU/随机）
+        let candidates: Vec<Arc<Session>> = self
+            .sessions
+            .iter()
+            .filter(|entry| {
+                let s = entry.value();
+                s.is_available() && !s.is_expired()
+            })
+            .map(|entry| entry.value().clone())
+            .collect();
+        if candidates.is_empty() {
+            return None;
         }
-        None
+        let refs: Vec<Arc<Session>> = candidates;
+        self.router.select_session(&refs)
     }
 
     /// 清理过期会话

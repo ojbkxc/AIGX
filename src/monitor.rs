@@ -15,11 +15,14 @@
 //! CPU 使用率：两次采样差分（与 burncloud CpuCollector 相同算法）。
 //! 采集器持有上次采样，由 `/api/monitor` handler 持有单例。
 
+#[cfg(target_os = "linux")]
 use std::sync::Mutex;
+#[cfg(target_os = "linux")]
 use std::time::Instant;
 
 /// CPU 采样（jiffies）
 #[derive(Debug, Clone, Copy)]
+#[cfg(target_os = "linux")]
 struct CpuTimes {
     idle: u64,
     total: u64,
@@ -78,6 +81,7 @@ pub struct SystemSnapshot {
 
 /// 系统采集器（持有 CPU 上次采样以做差分；线程安全）
 pub struct SystemCollector {
+    #[cfg(target_os = "linux")]
     last_cpu: Mutex<Option<(CpuTimes, Instant)>>,
 }
 
@@ -90,6 +94,7 @@ impl Default for SystemCollector {
 impl SystemCollector {
     pub fn new() -> Self {
         Self {
+            #[cfg(target_os = "linux")]
             last_cpu: Mutex::new(None),
         }
     }

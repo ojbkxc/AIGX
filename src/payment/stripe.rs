@@ -23,6 +23,16 @@ impl StripeConfig {
     pub fn ready(&self) -> bool {
         !self.secret_key.is_empty()
     }
+
+    /// Webhook 回调是否可安全入账。
+    ///
+    /// P0 修复：`ready()` 只校验 secret_key——漏配 webhook_secret 时
+    /// `verify_webhook` 用空 key 计算 HMAC，攻击者可自签
+    /// `checkout.session.completed` 回调免费入账配额。
+    /// 入账路径必须同时要求 whsec 非空。
+    pub fn webhook_ready(&self) -> bool {
+        !self.secret_key.is_empty() && !self.webhook_secret.is_empty()
+    }
 }
 
 /// Stripe 支付客户端
