@@ -42,6 +42,9 @@ import type {
   TotpDisableResult,
   PlaygroundChatRequest,
   PlaygroundChatResult,
+  PlaygroundChatData,
+  PlaygroundImagesRequest,
+  PlaygroundRawResult,
   ChatStreamCallback,
   UsageSummaryItem,
   TrendItem,
@@ -545,8 +548,10 @@ export const api = {
     request<ApiResponse<SystemMonitorItem>>('GET', `${API_BASE}/monitor/system`),
 
   // Playground
-  playgroundChat: (data: PlaygroundChatRequest): Promise<ApiResponse<PlaygroundChatResult>> =>
-    request<ApiResponse<PlaygroundChatResult>>('POST', `${API_BASE}/playground/chat`, data),
+  playgroundChat: (data: PlaygroundChatRequest): Promise<ApiResponse<PlaygroundChatData>> =>
+    request<ApiResponse<PlaygroundChatData>>('POST', `${API_BASE}/playground/chat`, data),
+  playgroundImages: (data: PlaygroundImagesRequest): Promise<ApiResponse<PlaygroundRawResult>> =>
+    request<ApiResponse<PlaygroundRawResult>>('POST', `${API_BASE}/playground/images`, data),
 
   // 安全监控
   getSecurityOverview: (): Promise<ApiResponse<DashboardItem>> =>

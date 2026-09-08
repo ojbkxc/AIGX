@@ -800,6 +800,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/playground/chat",
             post(api::admin::handle_playground_chat),
         )
+        .route(
+            "/api/playground/images",
+            post(api::admin::handle_playground_images),
+        )
         // 系统监控
         .route(
             "/api/monitor/system",

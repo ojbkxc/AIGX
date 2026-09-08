@@ -462,6 +462,22 @@ export interface PlaygroundChatRequest {
   temperature?: number;
   max_tokens?: number;
   system_prompt?: string;
+  /** Playground V2 Completions 模式：顶层 prompt（缺省走 chat messages） */
+  prompt?: string;
+  top_p?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
+  response_format?: unknown;
+  json_mode?: boolean;
+  [key: string]: unknown;
+}
+
+export interface PlaygroundImagesRequest {
+  channel_id?: string;
+  model: string;
+  prompt: string;
+  n?: number;
+  size?: string;
   [key: string]: unknown;
 }
 
@@ -470,6 +486,22 @@ export interface PlaygroundChatResult {
   data?: { content?: string; error?: string; usage?: unknown };
   error?: string;
   success?: boolean;
+}
+
+/** /api/playground/chat 的响应 data（Playground V2） */
+export interface PlaygroundChatData {
+  content?: string;
+  model?: string;
+  usage?: unknown;
+  error?: string;
+}
+
+/** Playground V2 双栏 JSON 展示：原始响应 + 预格式化文本 */
+export interface PlaygroundRawResult {
+  data?: unknown;
+  success?: boolean;
+  error?: string;
+  message?: string;
 }
 
 /**

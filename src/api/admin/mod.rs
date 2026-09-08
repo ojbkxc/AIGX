@@ -65,6 +65,7 @@ pub use redemptions::{
 };
 
 pub use playground::handle_playground_chat;
+pub use playground::handle_playground_images;
 
 // 后续模块的 pub use 将按迁移顺序补充...
 
