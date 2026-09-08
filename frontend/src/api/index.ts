@@ -364,7 +364,7 @@ export const api = {
     if (data.stream) {
       let acc = '';
       await testChannelChatStream(data, (d) => {
-        if (!d.isEnd) acc += d.content;
+        if (!d.isEnd && d.kind !== 'reasoning') acc += d.content;
       });
       return acc ? { stream: [{ content: acc }] } : { stream: [] };
     }
@@ -1040,13 +1040,12 @@ export function parseSseFrame(
       const choices = parsed.choices as Array<{ delta?: Record<string, unknown> }> | undefined;
       const firstDelta = choices?.[0]?.delta;
       if (firstDelta) {
-        const content = ([
-          firstDelta.content,
-          firstDelta.text,
-          firstDelta.reasoning_content,
-          firstDelta.reasoning,
-        ].find((v) => typeof v === 'string') ?? '') as string;
-        if (content) onDelta({ content, isEnd: false });
+        const reasoning = [firstDelta.reasoning_content, firstDelta.reasoning]
+          .find((v) => typeof v === 'string') as string | undefined;
+        if (reasoning) onDelta({ content: reasoning, isEnd: false, kind: 'reasoning' });
+        const content = ([firstDelta.content, firstDelta.text]
+          .find((v) => typeof v === 'string') ?? '') as string;
+        if (content) onDelta({ content, isEnd: false, kind: 'content' });
       }
     } catch {
       // 非 JSON 帧（心跳/注释）忽略

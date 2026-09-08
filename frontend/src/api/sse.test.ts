@@ -13,7 +13,7 @@ describe('parseSseFrame — OpenAI SSE', () => {
   it('解析单条 OpenAI delta', () => {
     const frame = 'data: {"choices":[{"delta":{"content":"你好"}}]}\n\n';
     const { deltas, ended } = collect(frame);
-    expect(deltas).toEqual([{ content: '你好', isEnd: false }]);
+    expect(deltas).toEqual([{ content: '你好', isEnd: false, kind: 'content' }]);
     expect(ended).toBe(false);
   });
 
@@ -23,8 +23,8 @@ describe('parseSseFrame — OpenAI SSE', () => {
       'data: {"choices":[{"delta":{"content":"好"}}]}\n\n';
     const { deltas } = collect(frame);
     expect(deltas).toEqual([
-      { content: '你', isEnd: false },
-      { content: '好', isEnd: false },
+      { content: '你', isEnd: false, kind: 'content' },
+      { content: '好', isEnd: false, kind: 'content' },
     ]);
   });
 
@@ -44,7 +44,17 @@ describe('parseSseFrame — OpenAI SSE', () => {
   it('解析 reasoning_content 增量', () => {
     const frame = 'data: {"choices":[{"delta":{"reasoning_content":"思考"}}]}\n\n';
     const { deltas } = collect(frame);
-    expect(deltas).toEqual([{ content: '思考', isEnd: false }]);
+    expect(deltas).toEqual([{ content: '思考', isEnd: false, kind: 'reasoning' }]);
+  });
+
+  it('同一帧内 reasoning 与 content 分离为两条增量', () => {
+    const frame =
+      'data: {"choices":[{"delta":{"reasoning_content":"想","content":"答"}}]}\n\n';
+    const { deltas } = collect(frame);
+    expect(deltas).toEqual([
+      { content: '想', isEnd: false, kind: 'reasoning' },
+      { content: '答', isEnd: false, kind: 'content' },
+    ]);
   });
 });
 

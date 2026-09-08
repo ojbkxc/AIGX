@@ -475,8 +475,14 @@ export interface PlaygroundChatResult {
 /**
  * 真·流式回调：SSE 每解析到一个增量（OpenAI delta / Anthropic delta.text）
  * 立即回调一次。isEnd 标记 [DONE] / message_stop 帧。
+ * kind 区分内容增量：reasoning 为深度思考（DeepSeek 式折叠面板），
+ * content 为正文。error/end 帧沿用 content。
  */
-export type ChatStreamDelta = { content: string; isEnd: boolean };
+export type ChatStreamDelta = {
+  content: string;
+  isEnd: boolean;
+  kind?: 'content' | 'reasoning';
+};
 
 export type ChatStreamCallback = (delta: ChatStreamDelta) => void;
 

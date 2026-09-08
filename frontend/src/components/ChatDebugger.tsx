@@ -2,11 +2,14 @@ import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Search, Send, Square, Trash2, Image, Video, AudioLines, Loader2, Bot, User, Copy, Check } from 'lucide-react';
 import { api, testChannelChatStream } from '../api';
+import MessageViewer from './MessageViewer';
 import './ChatDebugger.css';
 
 export interface DebugMessage {
   role: 'user' | 'assistant';
   content: string;
+  /** DeepSeek 式深度思考（SSE 的 reasoning_content，与正文分离） */
+  reasoning?: string;
   /** 用户消息可选的多模态附件（URL 或 base64 data URI） */
   attachments?: Array<{ kind: 'image' | 'video' | 'audio'; url: string }>;
 }
@@ -266,12 +269,15 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             const next = prev.slice();
             const last = next[next.length - 1];
             if (last && last.role === 'assistant') {
-              // 第一个增量到达时清掉占位「…」
-              const base = last.content === '…' ? '' : last.content;
-              next[next.length - 1] = {
-                ...last,
-                content: delta.isEnd ? base : base + delta.content,
-              };
+              // reasoning 与正文分流：思考走折叠面板，正文清占位「…」
+              const patch: DebugMessage = { ...last };
+              if (delta.kind === 'reasoning') {
+                patch.reasoning = (last.reasoning ?? '') + delta.content;
+              } else {
+                const base = last.content === '…' ? '' : last.content;
+                patch.content = delta.isEnd ? base : base + delta.content;
+              }
+              next[next.length - 1] = patch;
             }
             return next;
           });
@@ -281,7 +287,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         setMessages((prev) => {
           const next = prev.slice();
           const last = next[next.length - 1];
-          if (last && last.role === 'assistant' && (last.content === '…' || !last.content.trim())) {
+          if (last && last.role === 'assistant' && !last.reasoning && (last.content === '…' || !last.content.trim())) {
             next[next.length - 1] = { ...last, content: `⚠️ ${t('上游未返回内容')}` };
           }
           return next;
@@ -560,12 +566,14 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
                   {a.kind === 'audio' && <audio src={a.url} controls />}
                 </div>
               ))}
-              <div className="chat-debugger-msg-content">{m.content}</div>
+              <div className="chat-debugger-msg-content">
+                <MessageViewer content={m.content} reasoning={m.reasoning} />
+              </div>
               <button
                 type="button"
                 className="chat-debugger-copy-btn"
                 title={t('复制消息')}
-                onClick={() => copyMessage(m.content, i)}
+                onClick={() => copyMessage(m.reasoning ? `${m.reasoning}\n\n${m.content}` : m.content, i)}
               >
                 {copiedIdx === i ? <Check size={12} /> : <Copy size={12} />}
               </button>
