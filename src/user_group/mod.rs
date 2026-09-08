@@ -9,12 +9,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::api::auth::normalize_model_list;
 use crate::storage::FileStore;
 
 /// 用户分组定义。
 ///
 /// 参照 new-api group：name/ratio/allowed_models。ratio 为计费倍率（1.0=原价）。
-/// allowed_models 为组内模型权限白名单（None 表示不限，Some(空) 表示全禁）。
+/// allowed_models 为组内模型权限白名单（None 与 Some(空) 均表示不限，对齐 new-api）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserGroup {
     /// 分组名（唯一键）
@@ -132,6 +133,7 @@ impl UserGroupStore {
             group.created_at = now;
         }
         group.updated_at = now;
+        group.allowed_models = normalize_model_list(group.allowed_models.take());
         self.persist(&group)?;
         self.groups
             .write()
@@ -212,5 +214,15 @@ mod tests {
         s.upsert(g).unwrap();
         assert!(s.allows_model("open", "gpt-4"));
         assert!(s.allows_model("open", "gpt-3.5"));
+    }
+
+    #[test]
+    fn upsert_normalizes_empty_allowed_models() {
+        let s = store();
+        let mut g = UserGroup::new("normalized", 1.0);
+        g.allowed_models = Some(vec![]);
+        let saved = s.upsert(g).unwrap();
+        assert!(saved.allowed_models.is_none());
+        assert!(s.allows_model("normalized", "gpt-4"));
     }
 }

@@ -90,7 +90,7 @@ impl ApiKey {
 
     /// 是否允许使用指定模型。
     ///
-    /// None 与 Some(vec![]) 均表示不限（对齐 new-api：空列表 = 全部放行）。
+    /// `None` 与 `Some(vec![])` 均表示不限（对齐 new-api：空列表 = 全部放行）。
     pub fn allows_model(&self, model: &str) -> bool {
         match &self.allowed_models {
             None => true,
@@ -236,7 +236,7 @@ impl ApiKeyStore {
             last_used_at: None,
             user_id: opts.user_id,
             group: opts.group,
-            allowed_models: opts.allowed_models,
+            allowed_models: normalize_model_list(opts.allowed_models),
             expires_at: opts.expires_at,
             quota_limit: opts.quota_limit,
             used_quota: 0,
@@ -269,6 +269,7 @@ impl ApiKeyStore {
             .ok_or_else(|| anyhow::anyhow!("api key not found"))?;
         let old_hash = hash_api_key(api_key.key.strip_prefix("sk-").unwrap_or(&api_key.key));
         mutator(&mut api_key);
+        api_key.allowed_models = normalize_model_list(api_key.allowed_models.take());
         api_key.updated_at = chrono::Utc::now().timestamp();
         api_key.is_active = api_key.status == "active";
         let new_hash = hash_api_key(api_key.key.strip_prefix("sk-").unwrap_or(&api_key.key));
@@ -491,6 +492,15 @@ pub struct CreateApiKeyOptions {
     pub expires_at: Option<i64>,
     pub quota_limit: Option<i64>,
     pub ip_limit: Option<Vec<String>>,
+}
+
+/// 空白名单归一化为 `None`：`Some(vec![])` 与 `None` 语义相同（均不限），
+/// 统一存储形态，避免历史数据与判断逻辑出现双语义。
+pub(crate) fn normalize_model_list(list: Option<Vec<String>>) -> Option<Vec<String>> {
+    match list {
+        Some(v) if v.is_empty() => None,
+        other => other,
+    }
 }
 
 // ── 会话注册表（P1：会话撤销）──────────────────────────────────────────
@@ -820,5 +830,37 @@ mod session_registry_tests {
         assert!(!reg.is_revoked("jti-old"));
         assert!(reg.is_revoked("jti-new"));
         assert_eq!(reg.revoked_len(), 1);
+    }
+
+    /// 生成时 Some([]) 归一化为 None（语义：不限）。
+    #[test]
+    fn generate_normalizes_empty_allowed_models() {
+        let s = key_store();
+        let opts = CreateApiKeyOptions {
+            name: "n1".to_string(),
+            user_id: None,
+            group: "default".to_string(),
+            allowed_models: Some(vec![]),
+            expires_at: None,
+            quota_limit: None,
+            ip_limit: None,
+        };
+        let k = s.generate_with_options(opts).unwrap();
+        assert!(k.allowed_models.is_none());
+        assert!(s.validate(&k.key).unwrap().allows_model("any-model"));
+    }
+
+    /// update 后空列表归一化为 None（防写入双语义）。
+    #[test]
+    fn update_normalizes_empty_allowed_models() {
+        let s = key_store();
+        let k = s.generate("n2").unwrap();
+        s.update(&k.id, |key| {
+            key.allowed_models = Some(vec![]);
+        })
+        .unwrap();
+        let after = s.validate(&k.key).unwrap();
+        assert!(after.allowed_models.is_none());
+        assert!(after.allows_model("any-model"));
     }
 }
