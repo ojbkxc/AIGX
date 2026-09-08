@@ -1,3 +1,31 @@
+## 2026-09-08 · Playground V2：三模式 + 参数透传 + Images 端点
+
+### 做了什么
+- 前端 Playground V2（`frontend/src/pages/Playground.tsx` + `.css`）：
+  Chat / Completions / Images 三模式 Tabs。
+  - Chat：复用 ChatDebugger（真流式/多模态/多轮，无回归）。
+  - Completions：参数左栏（temperature/top_p/存在惩罚/频率惩罚/JSON 模式）
+    + 响应右栏 JSON（复制按钮），走 `/api/playground/chat` 顶层 prompt。
+  - Images：prompt + n + size，走新端点 `/api/playground/images`，
+    图片网格 + JSON 双展示。
+  - 响应区双栏布局与空态/加载态对齐 open-webui playground。
+- 后端 `src/api/admin/playground.rs`：`PlaygroundChatRequest` 扩展
+  `prompt`（Completions 顶层 prompt，路由 /completions）、`top_p`、
+  `presence_penalty`、`frequency_penalty`、`response_format`、`json_mode`
+  （快捷开关 = `{"type":"json_object"}`），`messages` 改为可缺省。
+- 新增 `handle_playground_images`（POST `/api/playground/images`）：
+  与 chat 同权限语义（登录即可用、普通用户不得指定 channel_id），
+  自动选择启用渠道并透传上游 /images/generations。
+
+### 为什么
+- P1 前端体验跃升第一项就是 Playground V2 三模式；此前只有 Chat 一模式
+  且无参数调节。Images 不能走管理 token 直调 /v1（管理面永远不调 /v1），
+  所以新增管理侧透传端点而非复用数据面。
+
+### 验证结论
+- 前端 `typecheck` / `lint` / `build` 全绿；后端 Rust 编译验证走 CI。
+- 本地 build 产物还原 static，未触碰同事并行编辑文件。
+
 ## 2026-09-08 · P0 收尾：reasoning 折叠 + Markdown/代码块渲染
 
 ### 做了什么
