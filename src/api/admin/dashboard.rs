@@ -181,3 +181,48 @@ pub async fn handle_overview(
         })
     })))
 }
+/// 缓存命中节省看板（B1）。
+///
+/// 聚合 `cache_hit = true` 的请求日志：
+/// - hit_count：缓存命中次数
+/// - cache_tokens：缓存回放的 prompt tokens 合计
+/// - billed_cost：实际向用户收取的缓存读费用
+/// - saved_estimate：若按普通 input_price 计费的差额（节省）
+///
+/// 节省估算用「当前定价表 input_price × tokens / 1000」减去实际已收费用。
+/// 日志不存 group ratio（历史记录不可追溯），此处按当前 default 分组倍率近似；
+/// 看板定位是运营感知「缓存值多少钱」，不是审计级精确账本。
+pub async fn handle_cache_savings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<DashboardQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let start = dashboard_start_ts(q.days);
+    let logs = state.log_store.requests.all_sorted_asc();
+
+    let mut hit_count: u64 = 0;
+    let mut cache_tokens: u64 = 0;
+    let mut billed_cost: i64 = 0;
+    let mut saved_estimate: f64 = 0.0;
+
+    for log in logs.iter().filter(|l| l.cache_hit && l.created_at >= start) {
+        hit_count += 1;
+        cache_tokens = cache_tokens.saturating_add(log.input_tokens);
+        billed_cost = billed_cost.saturating_add(log.cost);
+        if let Some(price) = state.pricing_store.get_price(&log.model) {
+            let full_price_cost = price.input_price * log.input_tokens as f64 / 1000.0;
+            saved_estimate += (full_price_cost - log.cost as f64).max(0.0);
+        }
+    }
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "hit_count": hit_count,
+            "cache_tokens": cache_tokens,
+            "billed_cost": billed_cost,
+            "saved_estimate": (saved_estimate * 100.0).round() / 100.0,
+        }
+    })))
+}

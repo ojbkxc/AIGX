@@ -189,6 +189,7 @@ export const api = {
   getUserRanking: (): Promise<any> => request('GET', `${API_BASE}/dashboard/user_ranking`),
   getChannelHealth: (): Promise<any> => request('GET', `${API_BASE}/dashboard/channel_health`),
   getRealtime: (): Promise<any> => request('GET', `${API_BASE}/dashboard/realtime`),
+  getCacheSavings: (): Promise<any> => request('GET', `${API_BASE}/dashboard/cache_savings`),
   saveEpayConfig: (config: any): Promise<any> =>
     request('PUT', `${API_BASE}/epay/config`, config),
   listGroups: (): Promise<any> => request('GET', `${API_BASE}/groups`),

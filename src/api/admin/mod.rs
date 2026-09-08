@@ -46,7 +46,7 @@ pub use pricing::{
 
 pub use orders::{handle_delete_order, handle_list_orders, handle_topup_request};
 
-pub use dashboard::{handle_consumption_trend, handle_model_distribution};
+pub use dashboard::{handle_cache_savings, handle_consumption_trend, handle_model_distribution};
 
 pub use settings::{
     handle_get_limits, handle_get_oauth_config, handle_get_settings, handle_update_limits,

@@ -78,6 +78,13 @@ interface LimitsInfo {
   monthly_limit?: number | null;
 }
 
+interface CacheSavings {
+  hit_count?: number;
+  cache_tokens?: number;
+  billed_cost?: number;
+  saved_estimate?: number;
+}
+
 interface TrendChartProps {
   data: TrendData[];
 }
@@ -351,6 +358,7 @@ export default function Dashboard(): JSX.Element {
   const [userRanking, setUserRanking] = useState<UserRanking[] | null>(null);
   const [channelHealth, setChannelHealth] = useState<ChannelHealth[] | null>(null);
   const [realtime, setRealtime] = useState<RealtimeStats | null>(null);
+  const [cacheSavings, setCacheSavings] = useState<CacheSavings | null>(null);
 
   useEffect(() => {
     loadData();
@@ -394,6 +402,7 @@ export default function Dashboard(): JSX.Element {
         urData,
         chData,
         rtData,
+        csData,
       ] = await Promise.all([
         api.getUsageSummary().catch(() => null),
         api.getTodayTokens().catch(() => null),
@@ -404,6 +413,7 @@ export default function Dashboard(): JSX.Element {
         api.getUserRanking().catch(() => null),
         api.getChannelHealth().catch(() => null),
         api.getRealtime().catch(() => null),
+        api.getCacheSavings().catch(() => null),
       ]);
       setUsage((usageData?.data ?? usageData) as UsageStats | null);
       setTokenStats((tokenData?.data ?? tokenData) as TodayTokens | null);
@@ -414,6 +424,7 @@ export default function Dashboard(): JSX.Element {
       setUserRanking((urData?.data ?? urData) as UserRanking[] | null);
       setChannelHealth((chData?.data ?? chData) as ChannelHealth[] | null);
       setRealtime((rtData?.data ?? rtData) as RealtimeStats | null);
+      setCacheSavings((csData?.data ?? csData) as CacheSavings | null);
 
       // 普通用户回退：无任何管理员数据时拉取个人配额展示
       const hasAnyData = usageData || tokenData || limitsData;
@@ -474,6 +485,7 @@ export default function Dashboard(): JSX.Element {
   const ur = userRanking || [];
   const ch = channelHealth || [];
   const rt = realtime || {};
+  const cs = cacheSavings || {};
 
   return (
     <div>
@@ -568,6 +580,18 @@ export default function Dashboard(): JSX.Element {
           <div className="stat-desc" style={{ fontSize: '11px' }}>
             <span>{t('已用')} {fmtTok(monthlyUsed)}</span>
             {monthlyPct != null && <span style={{ marginLeft: 12 }}>{monthlyPct.toFixed(1)}%</span>}
+          </div>
+        </div>
+
+        <div className="stat-card">
+          <div className="stat-card-top">
+            <div className="stat-title">{t('缓存节省')}</div>
+            <div className="stat-icon-badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#34d399' }}>💾</div>
+          </div>
+          <div className="stat-value" style={{ fontSize: '26px' }}>{fmtTok(cs.saved_estimate)}</div>
+          <div className="stat-desc" style={{ fontSize: '11px' }}>
+            <span>{t('命中')} {fmtLimit(cs.hit_count)} {t('次')}</span>
+            <span style={{ marginLeft: 12 }}>{t('缓存 Token')} {fmtTok(cs.cache_tokens)}</span>
           </div>
         </div>
       </div>

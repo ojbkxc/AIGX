@@ -709,6 +709,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             get(api::admin::handle_channel_health),
         )
         .route("/api/dashboard/realtime", get(api::admin::handle_realtime))
+        .route(
+            "/api/dashboard/cache_savings",
+            get(api::admin::handle_cache_savings),
+        )
         // 设置管理
         .route("/api/settings", get(api::admin::handle_get_settings))
         .route("/api/settings", put(api::admin::handle_update_settings))
