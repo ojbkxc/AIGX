@@ -200,7 +200,7 @@ export default function Users(): JSX.Element {
             <div>
               <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('当前登录')}</div>
               <div style={{ fontSize: 18, fontWeight: 600 }}>{me.email}</div>
-              {me.username && <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>@{me.username}</div>}
+              {me.username && <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{me.username}</div>}
             </div>
             <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
               <div>

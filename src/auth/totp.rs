@@ -284,6 +284,24 @@ mod tests {
     }
 
     #[test]
+    fn recovery_code_hash_matches_normalized_input() {
+        // G3 口径回归：生成时按规范化（去连字符）形式哈希，
+        // 校验时用户输入带不带连字符都必须命中同一个哈希。
+        let code = generate_recovery_code();
+        let hash = sha256_hex(normalize_recovery_code(&code).as_bytes());
+        // 校验路径：用户输入原样码 / 小写 / 去掉连字符，均命中
+        for variant in [
+            code.clone(),
+            code.to_lowercase(),
+            code.replace('-', ""),
+            code.to_lowercase().replace('-', ""),
+        ] {
+            let h = sha256_hex(normalize_recovery_code(&variant).as_bytes());
+            assert_eq!(h, hash, "variant {variant} must hash to stored value");
+        }
+    }
+
+    #[test]
     fn sha1_nist_vectors() {
         // NIST FIPS 180-1 / RFC 3174 §7.3 官方向量
         let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();

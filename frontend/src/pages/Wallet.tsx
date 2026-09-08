@@ -193,7 +193,7 @@ export default function Wallet(): JSX.Element {
               <div>
                 <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('当前账户')}</div>
                 <div style={{ fontSize: 18, fontWeight: 600 }}>{me?.email || '—'}</div>
-                {me?.username && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>@{me.username}</div>}
+                {me?.username && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{me.username}</div>}
               </div>
               <div>
                 <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('剩余配额')}</div>

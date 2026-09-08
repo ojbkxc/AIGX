@@ -1004,7 +1004,11 @@ pub async fn handle_totp_enable(
         .collect();
     let recovery_hashes: Vec<String> = recovery_codes
         .iter()
-        .map(|code| crate::auth::totp::sha256_hex(code.as_bytes()))
+        .map(|code| {
+            crate::auth::totp::sha256_hex(
+                crate::auth::totp::normalize_recovery_code(code).as_bytes(),
+            )
+        })
         .collect();
 
     // 落库：secret + enabled + 恢复码哈希（原子更新，含 FileStore 持久化）

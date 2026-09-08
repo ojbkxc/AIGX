@@ -356,7 +356,7 @@ export default function Sidebar(): JSX.Element {
               {email}
             </span>
             {username && <span style={{ fontSize: '10px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              @{username}
+              {username}
             </span>}
           </div>
         </div>
