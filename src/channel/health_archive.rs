@@ -24,10 +24,11 @@ use std::sync::Arc;
 
 use crate::storage::FileStore;
 
-/// 延迟直方图桶数：13 桶覆盖 0ms → 无限（16ms 起步，指数 ×2）。
-const BUCKET_COUNT: usize = 13;
-/// 桶下界（毫秒）。桶 i 覆盖 `[LO[i], LO[i+1])`，最后一桶 `[16384, ∞)`。
-const BUCKET_LO: [u64; BUCKET_COUNT] = [
+/// 延迟直方图桶数：12 桶覆盖 0ms → 无限（16ms 起步，指数 ×2）。
+/// 桶 i 覆盖 `[LO[i], LO[i+1])`，最后一桶 `[16384, ∞)`。
+const BUCKET_COUNT: usize = 12;
+/// 桶下界（毫秒）。比桶数多一个哨兵值（末桶上界无穷大，用 u64::MAX 占位）。
+const BUCKET_LO: [u64; BUCKET_COUNT + 1] = [
     0,
     16,
     32,
@@ -270,10 +271,8 @@ impl HealthArchive {
                 Some(d) => d,
                 None => continue,
             };
-            if day < cutoff {
-                if self.store.delete(&key).is_ok() {
-                    removed += 1;
-                }
+            if day < cutoff && self.store.delete(&key).is_ok() {
+                removed += 1;
             }
         }
         removed
@@ -341,9 +340,11 @@ mod tests {
         assert_eq!(bucket_for(0), 0);
         assert_eq!(bucket_for(15), 0);
         assert_eq!(bucket_for(16), 1);
-        assert_eq!(bucket_for(16383), 11);
-        assert_eq!(bucket_for(16384), 12);
-        assert_eq!(bucket_for(u64::MAX), 12);
+        assert_eq!(bucket_for(8191), 9);
+        assert_eq!(bucket_for(8192), 10);
+        assert_eq!(bucket_for(16383), 10);
+        assert_eq!(bucket_for(16384), 11);
+        assert_eq!(bucket_for(u64::MAX), 11);
     }
 
     #[test]
@@ -428,6 +429,6 @@ mod tests {
         );
         a.note_success("c1", 10);
         assert_eq!(a.prune(), 1);
-        assert!(a.query("c1", 30).iter().all(|s| s.day >= today() - 30 + 1));
+        assert!(a.query("c1", 30).iter().all(|s| s.day > today() - 30));
     }
 }
