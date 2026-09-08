@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Card, Input } from '../components/ui';
+import QRCode from 'react-qr-code';
 
 interface Me {
   email?: string;
@@ -236,15 +237,22 @@ export default function Profile(): JSX.Element {
               {totpSetup.otpauth_uri && (
                 <div className="form-group">
                   <label>{t('扫码录入')}</label>
-                  <code style={{
-                    display: 'block', padding: '8px 10px', fontSize: '11px',
-                    wordBreak: 'break-all', background: 'var(--bg-color)',
-                    border: '1px solid var(--border-color)', borderRadius: '6px',
+                  <div style={{
+                    display: 'inline-flex', padding: 12, background: '#ffffff',
+                    border: '1px solid var(--border-color)', borderRadius: 10,
+                    boxShadow: '0 1px 3px rgba(0, 0, 0, 0.06)', margin: '6px 0 2px',
                   }}>
-                    {totpSetup.otpauth_uri}
-                  </code>
+                    <QRCode
+                      value={totpSetup.otpauth_uri}
+                      size={176}
+                      bgColor="#ffffff"
+                      fgColor="#111827"
+                      level="M"
+                      aria-label={t('两步验证二维码')}
+                    />
+                  </div>
                   <span className="form-hint">
-                    {t('将此 URI 生成二维码后用认证器扫描（5 分钟内有效）')}
+                    {t('用认证器扫码录入（5 分钟内有效），或手动输入上方密钥')}
                   </span>
                 </div>
               )}
