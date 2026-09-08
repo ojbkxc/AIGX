@@ -997,12 +997,23 @@ pub async fn handle_totp_enable(
         ));
     }
 
-    // 落库：secret + enabled（原子更新，含 FileStore 持久化）
+    // 生成 10 个一次性恢复码（G3）：明文只在此次响应中展示一次，
+    // 落库仅存 SHA-256 哈希。换设备/丢失认证器时可用恢复码登录。
+    let recovery_codes: Vec<String> = (0..10)
+        .map(|_| crate::auth::totp::generate_recovery_code())
+        .collect();
+    let recovery_hashes: Vec<String> = recovery_codes
+        .iter()
+        .map(|code| crate::auth::totp::sha256_hex(code.as_bytes()))
+        .collect();
+
+    // 落库：secret + enabled + 恢复码哈希（原子更新，含 FileStore 持久化）
     state
         .user_store
         .update(&user.id, |u| {
             u.totp_secret = secret_b32;
             u.totp_enabled = true;
+            u.totp_recovery_codes = recovery_hashes.clone();
         })
         .map_err(|e| {
             error_response(&format!("启用失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)
@@ -1013,12 +1024,18 @@ pub async fn handle_totp_enable(
         .record_security(crate::log::SecurityEvent::new(
             crate::log::SecurityEventType::AuthFailure,
             "info",
-            format!("用户 {} 启用了 TOTP 两步验证", user.email),
+            format!("用户 {} 启用了 TOTP 两步验证（含恢复码）", user.email),
         ));
 
     Ok(Json(serde_json::json!({
         "success": true,
-        "data": { "enabled": true }
+        "data": {
+            "enabled": true,
+            // 明文恢复码仅此一次返回；前端展示后即丢弃，
+            // 服务端只保留哈希，无法再查询明文。
+            "recovery_codes": recovery_codes,
+            "recovery_codes_remaining": recovery_codes.len()
+        }
     })))
 }
 
@@ -1057,6 +1074,7 @@ pub async fn handle_totp_disable(
         .update(&user.id, |u| {
             u.totp_secret = String::new();
             u.totp_enabled = false;
+            u.totp_recovery_codes = Vec::new();
         })
         .map_err(|e| {
             error_response(&format!("停用失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)
@@ -1119,30 +1137,59 @@ pub async fn handle_login_totp(
         return Err(error_response("账号已禁用", StatusCode::FORBIDDEN));
     }
 
-    // 验证 TOTP（window=1 容忍 ±30s 时钟偏移）
+    // 验证 TOTP（window=1 容忍 ±30s 时钟偏移）；TOTP 失败时
+    // 回退验证一次性恢复码（G3：换设备/丢失认证器场景）。
     let code = body.code.trim();
     let secret_ok = crate::auth::totp::base32_decode(&user.totp_secret)
         .map(|raw| crate::auth::totp::verify(&raw, code, 1));
-    match secret_ok {
-        Some(true) => {}
-        _ => {
-            // 失败计入锁定计数（不移除 tmp_token：窗口内允许重试，
-            // 但每次失败都逼近 5 次锁定阈值）
-            state
-                .login_failures
-                .insert(client_ip.clone(), fail_count + 1)
-                .await;
-            state.log_store.record_security(
-                crate::log::SecurityEvent::new(
-                    crate::log::SecurityEventType::AuthFailure,
-                    "warning",
-                    format!("TOTP 二次验证失败（邮箱: {email}）"),
-                )
-                .with_ip(Some(client_ip)),
-            );
-            return Err(error_response("验证码错误", StatusCode::UNAUTHORIZED));
-        }
+    let recovery_code = crate::auth::totp::normalize_recovery_code(code);
+    let recovery_hash = (!recovery_code.is_empty())
+        .then(|| crate::auth::totp::sha256_hex(recovery_code.as_bytes()));
+    let recovery_matched = recovery_hash
+        .as_deref()
+        .is_some_and(|h| user.totp_recovery_codes.iter().any(|stored| stored == h));
+    let auth_ok = matches!(secret_ok, Some(true)) || recovery_matched;
+    if !auth_ok {
+        // 失败计入锁定计数（不移除 tmp_token：窗口内允许重试，
+        // 但每次失败都逼近 5 次锁定阈值）
+        state
+            .login_failures
+            .insert(client_ip.clone(), fail_count + 1)
+            .await;
+        state.log_store.record_security(
+            crate::log::SecurityEvent::new(
+                crate::log::SecurityEventType::AuthFailure,
+                "warning",
+                format!("TOTP 二次验证失败（邮箱: {email}）"),
+            )
+            .with_ip(Some(client_ip.clone())),
+        );
+        return Err(error_response("验证码错误", StatusCode::UNAUTHORIZED));
     }
+
+    // 恢复码命中：立即消费该码（用完即焚），避免重放。
+    let remaining_codes = if recovery_matched {
+        let hash = recovery_hash.unwrap_or_default();
+        let mut remaining = 0usize;
+        let _ = state.user_store.update(&user.id, |u| {
+            u.totp_recovery_codes.retain(|stored| stored != &hash);
+            remaining = u.totp_recovery_codes.len();
+        });
+        state.log_store.record_security(
+            crate::log::SecurityEvent::new(
+                crate::log::SecurityEventType::AuthFailure,
+                "info",
+                format!(
+                    "用户 {} 使用一次性恢复码完成二次验证（剩余 {remaining} 个）",
+                    user.email
+                ),
+            )
+            .with_ip(Some(client_ip.clone())),
+        );
+        Some(remaining)
+    } else {
+        None
+    };
 
     // 全部通过：消耗 tmp_token + 签发 session
     state.totp_pending_cache.remove(&tmp_token).await;
@@ -1168,6 +1215,7 @@ pub async fn handle_login_totp(
             "email": user.email,
             "username": user.username,
             "role": match user.role { Role::Admin => "admin", Role::User => "user" },
+            "recovery_codes_remaining": remaining_codes,
             "expires_at": session.expires_at
         }
     })))

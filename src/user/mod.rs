@@ -70,6 +70,14 @@ pub struct User {
     /// 是否已启用 TOTP 二次验证（secret 已绑定且经过一次有效验证）
     #[serde(default)]
     pub totp_enabled: bool,
+    /// TOTP 一次性恢复码的 SHA-256 哈希（G3：备换设备时使用）。
+    ///
+    /// 只存哈希不存明文：恢复码明文仅在生成时展示一次，落盘即
+    /// 不可逆。存哈希意味着「备份/恢复场景下用户看到自己的 secret
+    /// 明文」的泄露面不会扩展到恢复码。空数组 = 未生成恢复码
+    /// （兼容旧数据与未启用 TOTP 的用户）。
+    #[serde(default)]
+    pub totp_recovery_codes: Vec<String>,
     #[serde(default)]
     pub created_at: i64,
 }
@@ -177,6 +185,7 @@ impl UserStore {
             group: "default".into(),
             totp_secret: String::new(),
             totp_enabled: false,
+            totp_recovery_codes: Vec::new(),
             created_at: chrono::Utc::now().timestamp(),
         };
         self.persist(&user)?;
@@ -219,6 +228,7 @@ impl UserStore {
             group: "default".into(),
             totp_secret: String::new(),
             totp_enabled: false,
+            totp_recovery_codes: Vec::new(),
             created_at: chrono::Utc::now().timestamp(),
         };
         self.persist(&user)?;
@@ -608,6 +618,30 @@ mod tests {
         let s = store();
         assert!(s.create("", "pw", Role::User, 0).is_err());
         assert!(s.create("notanemail", "pw", Role::User, 0).is_err());
+    }
+
+    /// G3：旧 JSON 用户数据无 `totp_recovery_codes` 字段时，
+    /// serde default 将其解析为空数组（向后兼容，不破坏老库）。
+    #[test]
+    fn user_json_without_recovery_codes_parses() {
+        let legacy = r#"{
+            "id": "u1",
+            "email": "legacy@test.com",
+            "username": "",
+            "password": "hash",
+            "role": "user",
+            "quota": 0,
+            "used_quota": 0,
+            "reserved_quota": 0,
+            "status": "active",
+            "group": "default",
+            "totp_secret": "SECRET",
+            "totp_enabled": true,
+            "created_at": 0
+        }"#;
+        let user: User = serde_json::from_str(legacy).unwrap();
+        assert!(user.totp_recovery_codes.is_empty());
+        assert!(user.totp_enabled);
     }
 
     // ── 预留/结算/释放语义测试（P1 两段式，2026-09-08 G1/G5 修复）──

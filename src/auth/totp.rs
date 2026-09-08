@@ -11,6 +11,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rand::RngCore;
+use sha2::{Digest, Sha256};
+
 // ── SHA-1（RFC 3174）────────────────────────────────────────────────
 
 /// SHA-1 哈希（RFC 3174 标准 80 轮实现）。
@@ -137,6 +140,37 @@ pub fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+// ── 一次性恢复码（G3）───────────────────────────────────────────────
+
+/// 生成一个恢复码：RFC 3548 无填充 base32 编码 8 字节随机数
+/// （编码后 13 字符，按 XXXX-XXXX 分段）。60 bit 熵 / 码，
+/// 远高于 6 位 TOTP（约 20 bit），无需暴力破解锁定。
+pub fn generate_recovery_code() -> String {
+    let mut raw = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut raw);
+    let encoded = base32_encode(&raw);
+    format!("{}-{}", &encoded[..4], &encoded[4..])
+}
+
+/// 规范化用户输入的恢复码：去空格/连字符并转大写。
+/// 输入不含任何有效字符时返回空串。
+pub fn normalize_recovery_code(input: &str) -> String {
+    input
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace() && *b != b'-')
+        .map(|b| b.to_ascii_uppercase() as char)
+        .collect()
+}
+
+/// 恢复码哈希：SHA-256（项目既有依赖），hex 输出。
+///
+/// 存储时以哈希为准，杜绝明文泄漏；校验恢复码输入时对规范化
+/// 后的明文做同样哈希后与库存比对。
+pub fn sha256_hex(input: &[u8]) -> String {
+    let digest = Sha256::digest(input);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// 验证 TOTP 码——允许 ±window 个时间步的时钟偏移（常量时间比较）。
 ///
 /// 返回 true 当且仅当 code 与 [now-window, now+window] 内任一步匹配。
@@ -214,6 +248,40 @@ pub fn base32_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_code_format_and_entropy_shape() {
+        let code = generate_recovery_code();
+        // 13 字符 + 连字符 = 14；两段各 4 字符，无填充 base32 字母表
+        assert_eq!(code.len(), 14);
+        assert_eq!(code.as_bytes()[4], b'-');
+        assert!(code
+            .chars()
+            .filter(|&c| c != '-')
+            .all(|c| B32_ALPHABET.contains(&(c as u8))));
+        // 随机性抽查：连续生成不重复（60 bit 熵下碰撞概率可忽略）
+        let another = generate_recovery_code();
+        assert_ne!(code, another);
+    }
+
+    #[test]
+    fn normalize_recovery_code_strips_noise() {
+        assert_eq!(
+            normalize_recovery_code(" abcd-EFGH "),
+            "ABCDEFGH".to_string()
+        );
+        assert_eq!(normalize_recovery_code("1234-5678"), "12345678".to_string());
+        assert_eq!(normalize_recovery_code(""), "");
+    }
+
+    #[test]
+    fn recovery_code_hash_is_sha256_hex() {
+        // SHA-256("A") 官方向量
+        assert_eq!(
+            sha256_hex(b"A"),
+            "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"
+        );
+    }
 
     #[test]
     fn sha1_nist_vectors() {
