@@ -30,7 +30,7 @@ pub fn sha1(msg: &[u8]) -> [u8; 20] {
     data.extend_from_slice(&ml.to_be_bytes());
 
     // 分块处理（每块 64 字节 = 16 个大端 u32）
-    for block in data.chunks_exact(64) {
+    for block in data.as_chunks::<64>().0 {
         let mut w = [0u32; 80];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
