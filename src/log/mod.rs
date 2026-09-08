@@ -65,6 +65,22 @@ pub struct RequestLog {
     pub request_id: Option<String>,
     /// 创建时间（unix timestamp）
     pub created_at: i64,
+    /// 调度决策回放（P1-7）：候选渠道列表
+    #[serde(default)]
+    pub candidate_channels: Vec<String>,
+    /// 调度决策回放（P1-7）：被过滤的渠道及原因
+    #[serde(default)]
+    pub filtered_channels: Vec<FilteredChannel>,
+    /// 调度决策回放（P1-7）：最终选中渠道
+    #[serde(default)]
+    pub selected_channel: Option<String>,
+}
+
+/// 被过滤的渠道信息（P1-7 调度决策回放）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilteredChannel {
+    pub channel_id: String,
+    pub reason: String,
 }
 
 impl Default for RequestLog {
@@ -90,6 +106,9 @@ impl RequestLog {
             ip: None,
             request_id: None,
             created_at: chrono::Utc::now().timestamp(),
+            candidate_channels: Vec::new(),
+            filtered_channels: Vec::new(),
+            selected_channel: None,
         }
     }
 }

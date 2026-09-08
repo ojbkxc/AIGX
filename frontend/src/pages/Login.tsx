@@ -29,6 +29,10 @@ export default function Login(): JSX.Element {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
+  // 2FA/TOTP 二次验证状态：密码/验证码通过后需要 TOTP 码
+  const [totpPending, setTotpPending] = useState<string | null>(null); // tmp_token
+  const [totpCode, setTotpCode] = useState('');
+
   // 发送验证码（邮箱验证码登录）
   const handleSendCode = async (): Promise<void> => {
     setError('');
@@ -72,6 +76,39 @@ export default function Login(): JSX.Element {
     };
   }, []);
 
+  // 登录成功后写入会话并跳转（密码/TOTP 两条路径共用）
+  const completeLogin = (data: { token: string; email: string; username?: string; role?: string; expires_at?: number }): void => {
+    localStorage.setItem('token', data.token);
+    localStorage.setItem('email', data.email);
+    localStorage.setItem('username', data.username || data.email);
+    localStorage.setItem('role', data.role || 'user');
+    localStorage.setItem('expires_at', String(Number(data.expires_at) * 1000));
+    navigate('/');
+  };
+
+  // 提交 TOTP 二次验证（require_2fa 流程的第二步）
+  const handleTotpSubmit = async (e: React.FormEvent): Promise<void> => {
+    e.preventDefault();
+    setError('');
+    if (!totpCode.trim()) {
+      setError('请输入两步验证码');
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await api.loginTotp(totpPending as string, totpCode.trim());
+      if (res.success && res.data) {
+        completeLogin(res.data);
+      } else {
+        setError('验证失败：响应格式错误');
+      }
+    } catch (err: any) {
+      setError(err.message || '两步验证失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // 提交验证码登录
   const handleCodeSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
@@ -83,13 +120,11 @@ export default function Login(): JSX.Element {
     setLoading(true);
     try {
       const res = await api.loginWithCode(email, code.trim());
-      if (res.success && res.data) {
-        localStorage.setItem('token', res.data.token);
-        localStorage.setItem('email', res.data.email);
-        localStorage.setItem('username', res.data.username || res.data.email);
-        localStorage.setItem('role', res.data.role || 'user');
-        localStorage.setItem('expires_at', String(Number(res.data.expires_at) * 1000));
-        navigate('/');
+      if (res.success && res.data?.require_2fa) {
+        setTotpPending(res.data.tmp_token);
+        setTotpCode('');
+      } else if (res.success && res.data) {
+        completeLogin(res.data);
       } else {
         setError('登录失败：响应格式错误');
       }
@@ -209,13 +244,12 @@ export default function Login(): JSX.Element {
     setLoading(true);
     try {
       const res = await api.login(email, password);
-      if (res.success && res.data) {
-        localStorage.setItem('token', res.data.token);
-        localStorage.setItem('email', res.data.email);
-        localStorage.setItem('username', res.data.username || res.data.email);
-        localStorage.setItem('role', res.data.role || 'user');
-        localStorage.setItem('expires_at', String(Number(res.data.expires_at) * 1000));
-        navigate('/');
+      if (res.success && res.data?.require_2fa) {
+        // 2FA/TOTP：密码已通过，进入二次验证步骤
+        setTotpPending(res.data.tmp_token);
+        setTotpCode('');
+      } else if (res.success && res.data) {
+        completeLogin(res.data);
       } else {
         setError('登录失败：响应格式错误');
       }
@@ -309,9 +343,53 @@ export default function Login(): JSX.Element {
           <div className="error-message">{error}</div>
         )}
 
-        {success && (
+        {success && !totpPending && (
           <div className="success-message">{success}</div>
         )}
+
+        {/* 2FA/TOTP 二次验证：密码/验证码通过后进入此步骤 */}
+        {totpPending ? (
+          <form onSubmit={handleTotpSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: '0 0 10px' }}>
+              账号已开启两步验证，请输入认证器中的 6 位验证码
+            </p>
+            <div className="form-group">
+              <label htmlFor="totp-code">两步验证码</label>
+              <input
+                id="totp-code"
+                type="text"
+                className="form-input"
+                placeholder="6 位验证码"
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value)}
+                autoFocus
+                disabled={loading}
+                maxLength={6}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+              />
+            </div>
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={loading}
+              style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: '8px', fontSize: '13px' }}
+            >
+              {loading ? '验证中...' : '验证并登录'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setTotpPending(null); setTotpCode(''); setError(''); }}
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                fontSize: '12px', color: 'var(--text-muted)', padding: '8px 0 0',
+              }}
+            >
+              返回重新登录
+            </button>
+          </form>
+        ) : (
+        <>
 
         {/* 登录方式切换：密码 / 邮箱验证码 */}
         <div style={{
@@ -452,6 +530,8 @@ export default function Login(): JSX.Element {
               {loading ? '验证中...' : '验证码登录'}
             </button>
           </form>
+        )}
+        </>
         )}
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', margin: '16px 0' }}>

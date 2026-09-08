@@ -375,6 +375,32 @@ impl PricingStore {
         output_tokens: u64,
         group: &str,
     ) -> Result<f64, PricingError> {
+        // 旧签名委托缓存感知版本（cached_tokens=0），保持全部旧调用点零改动
+        self.calculate_cost_with_cache(model, input_tokens, output_tokens, 0, group)
+    }
+
+    /// 计算单次请求费用（缓存感知版）。
+    ///
+    /// 公式：
+    /// - price_type=token: ((input - cached) * input_price + cached * cache_price + output * output_price) / 1000 * model_ratio * group_ratio
+    /// - price_type=count: input_price * model_ratio * group_ratio（按次计价，cached_tokens 不参与）
+    ///
+    /// cached_tokens 语义：**网关内部响应缓存命中**时，整个 prompt 按缓存读价格计费
+    /// （cache_price 未配置时该部分为 0，即维持旧的命中免费行为）。
+    /// 注意与上游侧 prompt 缓存（bridge UsageStats.cached_prompt_tokens）是两回事：
+    /// 上游缓存折扣应由各 bridge 在解析 usage 时折算，不经过本方法。
+    ///
+    /// B09：无定价条目时返回 `Err(PricingError)` 而非静默按 0 计费——
+    /// 未配置定价的模型若被放行调用将产生免费用量，调用方应前置拦截
+    /// （见 `openai.rs::ensure_model_priced`）或对 Err 记告警日志。
+    pub fn calculate_cost_with_cache(
+        &self,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_tokens: u64,
+        group: &str,
+    ) -> Result<f64, PricingError> {
         let price = self
             .get_price(model)
             .ok_or_else(|| PricingError(model.to_string()))?;
@@ -385,7 +411,19 @@ impl PricingStore {
         let base = if price.price_type == "count" {
             price.input_price
         } else {
-            (input_tokens as f64 * price.input_price + output_tokens as f64 * price.output_price)
+            // 命中计费的调用形态是 input=0, cached=prompt_tokens：
+            // cached 表示「这 prompt_tokens 全部按缓存读价格计」，不受 input 数量钳制；
+            // 仅当 cached 与 fresh 并存（上游部分缓存）时才做钳制防超收。
+            let cached = if input_tokens == 0 {
+                cached_tokens
+            } else {
+                cached_tokens.min(input_tokens)
+            };
+            let fresh = input_tokens.saturating_sub(cached);
+            let cache_price = price.cache_price.unwrap_or(0.0);
+            (fresh as f64 * price.input_price
+                + cached as f64 * cache_price
+                + output_tokens as f64 * price.output_price)
                 / 1000.0
         };
         Ok(base * model_ratio * group_ratio)
@@ -399,7 +437,25 @@ impl PricingStore {
         output_tokens: u64,
         group: &str,
     ) -> Result<i64, PricingError> {
-        let cost = self.calculate_cost(model, input_tokens, output_tokens, group)?;
+        self.calculate_cost_quoted_with_cache(model, input_tokens, output_tokens, 0, group)
+    }
+
+    /// 缓存感知版配额计费（向上取整，最低 1 配额单位）。
+    pub fn calculate_cost_quoted_with_cache(
+        &self,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_tokens: u64,
+        group: &str,
+    ) -> Result<i64, PricingError> {
+        let cost = self.calculate_cost_with_cache(
+            model,
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            group,
+        )?;
         if cost <= 0.0 {
             return Ok(0);
         }
@@ -526,6 +582,64 @@ mod tests {
         // 1000 input * 0.03/1k + 500 output * 0.06/1k = 0.03 + 0.03 = 0.06
         let cost = s.calculate_cost("gpt-4", 1000, 500, "default").unwrap();
         assert!((cost - 0.06).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cache_price_none_keeps_cached_free() {
+        // cache_price 未配置时：cached 部分计 0（维持旧的命中免费行为）
+        let s = store();
+        s.upsert_price(ModelPrice::new("gpt-4", 0.03, 0.06))
+            .unwrap();
+        let cost = s
+            .calculate_cost_with_cache("gpt-4", 0, 0, 1000, "default")
+            .unwrap();
+        assert!((cost - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cache_price_some_charges_cached_tokens() {
+        // 命中分支：input=0, cached=1000, output=0 → 1000 * 0.001 / 1k = 0.001
+        let s = store();
+        let mut p = ModelPrice::new("gpt-4", 0.03, 0.06);
+        p.cache_price = Some(0.001);
+        s.upsert_price(p).unwrap();
+        let cost = s
+            .calculate_cost_with_cache("gpt-4", 0, 0, 1000, "default")
+            .unwrap();
+        assert!((cost - 0.001).abs() < 1e-9);
+        // 混合场景：fresh 500 + cached 500 → 500*0.03/1k + 500*0.001/1k = 0.0155
+        let cost = s
+            .calculate_cost_with_cache("gpt-4", 1000, 0, 500, "default")
+            .unwrap();
+        assert!((cost - 0.0155).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cache_price_count_type_unaffected() {
+        // count 型计价不参与 cached_tokens
+        let s = store();
+        let mut p = ModelPrice::new("dall-e", 0.04, 0.0);
+        p.price_type = "count".to_string();
+        p.cache_price = Some(0.99);
+        s.upsert_price(p).unwrap();
+        let cost = s
+            .calculate_cost_with_cache("dall-e", 999, 0, 999, "default")
+            .unwrap();
+        assert!((cost - 0.04).abs() < 1e-9);
+    }
+
+    #[test]
+    fn legacy_calculate_cost_delegates_with_zero_cached() {
+        // 旧签名 = 新签名 cached_tokens=0 的委托，回归保护
+        let s = store();
+        let mut p = ModelPrice::new("gpt-4", 0.03, 0.06);
+        p.cache_price = Some(0.001);
+        s.upsert_price(p).unwrap();
+        let legacy = s.calculate_cost("gpt-4", 1000, 500, "default").unwrap();
+        let with_cache = s
+            .calculate_cost_with_cache("gpt-4", 1000, 500, 0, "default")
+            .unwrap();
+        assert!((legacy - with_cache).abs() < 1e-12);
     }
 
     #[test]

@@ -64,6 +64,10 @@ pub async fn verify_admin(
     // 使用 session store 验证
     let session_store = SessionStore::new(&config.admin.session_secret, session_ttl);
     if let Some(sess) = session_store.validate_session(&token) {
+        // 撤销检查（P1：会话撤销）——被撤销的 jti 即使签名有效也立即失效
+        if state.session_registry.is_revoked(&sess.session_id) {
+            return Err(error_response("Session revoked", StatusCode::UNAUTHORIZED));
+        }
         // 若存在用户系统，校验该用户仍为管理员且启用
         if let Some(u) = state.user_store.get_by_email(&sess.email) {
             if u.status == "active" && u.is_admin() {
@@ -102,6 +106,10 @@ pub async fn verify_user(
     let sess = session_store
         .validate_session(&token)
         .ok_or_else(|| error_response("Invalid session", StatusCode::UNAUTHORIZED))?;
+    // 撤销检查（P1：会话撤销）
+    if state.session_registry.is_revoked(&sess.session_id) {
+        return Err(error_response("Session revoked", StatusCode::UNAUTHORIZED));
+    }
     // B10：移除 email=="admin" 时合成管理员的回退——会话必须对应真实存在的用户，
     // 防止伪造/残留的旧会话绕过用户系统的状态与权限校验
     let user = state

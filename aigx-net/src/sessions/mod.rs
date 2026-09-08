@@ -146,10 +146,10 @@ impl SmartRouter {
         }
 
         match self.strategy {
-            RouterStrategy::LatencyAware => available
-                .into_iter()
-                .max_by_key(|s| s.last_used()),
-            RouterStrategy::LeastRecentlyUsed => available.into_iter().min_by_key(|s| s.last_used()),
+            RouterStrategy::LatencyAware => available.into_iter().max_by_key(|s| s.last_used()),
+            RouterStrategy::LeastRecentlyUsed => {
+                available.into_iter().min_by_key(|s| s.last_used())
+            }
             RouterStrategy::Random => {
                 let idx = fastrand_usize(available.len());
                 available.into_iter().nth(idx)

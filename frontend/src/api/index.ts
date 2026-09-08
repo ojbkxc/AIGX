@@ -167,6 +167,8 @@ export const api = {
     request('POST', `${API_BASE}/auth/login/send-code`, { email }),
   loginWithCode: (email: string, code: string): Promise<any> =>
     request('POST', `${API_BASE}/auth/login/code`, { email, code }),
+  loginTotp: (tmp_token: string, code: string): Promise<any> =>
+    request('POST', `${API_BASE}/auth/login/totp`, { tmp_token, code }),
   // 兼容历史调用顺序 (email, password, username?)：后端仅使用 email/password/username 字段
   register: (emailOrUsername: string, password: string, username?: string): Promise<any> =>
     request('POST', `${API_BASE}/auth/register`, {
@@ -230,10 +232,18 @@ export const api = {
   // 通用网关语义：模型来自渠道声明的 models 聚合。登录用户均可访问
   // /api/models/available（对齐 new-api /api/user/models）；不用 /v1/models
   //（数据面需 sk-xxx，会 401 误踢登录），也不用 mappings keys。
+  // P1：后端已附带元信息（owned_by/context_length/capabilities），兼容旧
+  // 字符串数组与新对象数组两种形状。
   listModels: async (): Promise<any> => {
     const res = await request('GET', `${API_BASE}/models/available`);
-    const ids: string[] = Array.isArray(res?.data) ? res.data : [];
-    return { data: ids.map((id) => ({ id, object: 'model', owned_by: 'aigx' })) };
+    const list: any[] = Array.isArray(res?.data) ? res.data : [];
+    return {
+      data: list.map((item) =>
+        typeof item === 'string'
+          ? { id: item, object: 'model', owned_by: 'aigx' }
+          : item,
+      ),
+    };
   },
 
   // Settings / Model Mappings
@@ -469,6 +479,13 @@ export const api = {
   // 忘记密码/重置密码
   resetPassword: (token: string, password: string): Promise<any> =>
     request('POST', `${API_BASE}/auth/reset-password`, { token, password }),
+
+  // 2FA/TOTP（P1）：用户侧自助管理
+  totpSetup: (): Promise<any> => request('POST', `${API_BASE}/auth/totp/setup`),
+  totpEnable: (code: string): Promise<any> =>
+    request('POST', `${API_BASE}/auth/totp/enable`, { code }),
+  totpDisable: (password: string): Promise<any> =>
+    request('POST', `${API_BASE}/auth/totp/disable`, { password }),
 
   // 价格同步
   getPriceSyncConfig: (): Promise<any> => request('GET', `${API_BASE}/pricing/sync-config`),

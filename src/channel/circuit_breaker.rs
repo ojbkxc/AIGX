@@ -259,7 +259,11 @@ impl CircuitBreaker {
         let mut map = std::collections::HashMap::new();
         for r in self.states.iter() {
             // 直接基于 entry 值计算，不嵌套 get（避免 DashMap 迭代中同 key 二次加锁死锁）
-            map.insert(r.key().clone(), Self::state_of(r.value(), self.failure_threshold, self.cooldown_duration).to_string());
+            map.insert(
+                r.key().clone(),
+                Self::state_of(r.value(), self.failure_threshold, self.cooldown_duration)
+                    .to_string(),
+            );
         }
         map
     }

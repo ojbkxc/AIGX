@@ -1,9 +1,11 @@
 pub mod account;
 pub mod api;
+pub mod auth;
 pub mod bridge;
 pub mod cache;
 pub mod channel;
 pub mod config;
+pub mod cron;
 pub mod error_translate;
 pub mod graphql;
 pub mod guardrail;

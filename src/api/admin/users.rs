@@ -66,6 +66,8 @@ pub fn mask_user(u: &User) -> Value {
         "remaining": u.remaining(),
         "status": u.status,
         "group": u.group,
+        // 2FA 状态（不含 secret 本体）：前端 Profile 页据此显示 TOTP 开关
+        "totp_enabled": u.totp_enabled,
         "created_at": u.created_at,
     })
 }

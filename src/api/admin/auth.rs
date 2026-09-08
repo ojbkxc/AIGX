@@ -16,6 +16,7 @@ use super::super::openai::AppState;
 use crate::user::{self, hash_password, Role};
 
 use rand::Rng;
+use rand::RngCore;
 use uuid::Uuid;
 
 /// 登录请求
@@ -129,6 +130,31 @@ pub async fn handle_login(
     if let Some(u) = state.user_store.authenticate(&body.email, &body.password) {
         // 登录成功：清除失败计数
         state.login_failures.remove(&client_ip).await;
+        // 2FA/TOTP（P1）：用户已开启 TOTP 时不下发 session，
+        // 返回 require_2fa + 一次性 tmp_token，客户端二次提交验证码。
+        // totp_enabled=false 的用户走原路径，行为不变（向后兼容）。
+        if u.totp_enabled && !u.totp_secret.is_empty() {
+            let tmp_token = Uuid::new_v4().to_string();
+            state
+                .totp_pending_cache
+                .insert(tmp_token.clone(), u.email.clone())
+                .await;
+            state.log_store.record_security(
+                crate::log::SecurityEvent::new(
+                    crate::log::SecurityEventType::AuthFailure,
+                    "info",
+                    format!("登录密码通过，等待 TOTP 二次验证（邮箱: {}）", u.email),
+                )
+                .with_ip(Some(client_ip)),
+            );
+            return Ok(Json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "require_2fa": true,
+                    "tmp_token": tmp_token
+                }
+            })));
+        }
         // H3：旧 SHA256 密码登录成功后自动升级为 argon2（best-effort rehash）
         // 旧版本用无盐 SHA256（64 位十六进制）存储密码，新版本统一用 argon2。
         // rehash 失败不阻止登录，仅记录告警。
@@ -150,6 +176,9 @@ pub async fn handle_login(
         };
         let session_store = SessionStore::new(&session_secret, session_ttl);
         let session = session_store.create_session(&u.email);
+        state
+            .session_registry
+            .register(&u.email, &session.session_id);
         return Ok(Json(serde_json::json!({
             "success": true,
             "data": {
@@ -174,6 +203,9 @@ pub async fn handle_login(
             };
             let session_store = SessionStore::new(&session_secret, session_ttl);
             let session = session_store.create_session(&u.email);
+            state
+                .session_registry
+                .register(&u.email, &session.session_id);
             return Ok(Json(serde_json::json!({
                 "success": true,
                 "data": {
@@ -351,12 +383,20 @@ pub async fn handle_change_password(
         u.password = new_hash;
     }) {
         Ok(_) => {
+            // 改密成功 → 撤销该用户全部会话（旧密码签发的 token 全部失效，
+            // 用户需用新密码重新登录；new-api 的全端踢出语义）
+            let revoked = state.session_registry.revoke_all(&user.email);
+            tracing::info!(
+                "Password changed for {}: {} session(s) revoked",
+                user.email,
+                revoked
+            );
             state
                 .log_store
                 .record_security(crate::log::SecurityEvent::new(
                     crate::log::SecurityEventType::AuthFailure,
                     "info",
-                    format!("用户 {} 修改了密码", user.email),
+                    format!("用户 {} 修改了密码（撤销 {} 个会话）", user.email, revoked),
                 ));
             Ok(Json(serde_json::json!({
                 "success": true,
@@ -370,13 +410,31 @@ pub async fn handle_change_password(
     }
 }
 
-/// POST /api/auth/logout - 管理员登出
+/// POST /api/auth/logout - 登出（撤销当前会话）
+///
+/// P1 会话撤销：登出时把当前 jti 加入撤销表，旧 token 立即失效
+/// （此前只是前端删 localStorage，token 本身到过期前一直有效）。
 pub async fn handle_logout(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _token = extract_session_token(&headers)
+    let token = extract_session_token(&headers)
         .ok_or_else(|| error_response("Not authenticated", StatusCode::UNAUTHORIZED))?;
+    let config = state.config_manager.get().await;
+    let session_store = SessionStore::new(
+        &config.admin.session_secret,
+        config.admin.session_ttl_hours.max(1),
+    );
+    if let Some(sess) = session_store.validate_session(&token) {
+        state.session_registry.revoke(&sess.email, &sess.session_id);
+        state
+            .log_store
+            .record_security(crate::log::SecurityEvent::new(
+                crate::log::SecurityEventType::AuthFailure,
+                "info",
+                format!("用户 {} 登出（会话已撤销）", sess.email),
+            ));
+    }
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -538,7 +596,13 @@ pub async fn handle_reset_password(
         u.password = new_hash;
     }) {
         Ok(_) => {
-            tracing::info!("Password reset successful for {}", user.email);
+            // 重置密码成功 → 撤销该用户全部会话（改密的踢出语义）
+            let revoked = state.session_registry.revoke_all(&user.email);
+            tracing::info!(
+                "Password reset successful for {}: {} session(s) revoked",
+                user.email,
+                revoked
+            );
             Ok(Json(serde_json::json!({
                 "success": true,
                 "data": { "message": "Password reset successful" }
@@ -595,9 +659,7 @@ pub async fn handle_google_oauth_callback(
     // CSRF 防护：校验 state（一次性消费，防重放/伪造回调）
     let state_param = match params.state {
         Some(ref s) if !s.is_empty() => s.clone(),
-        _ => {
-            return error_response("Missing OAuth state", StatusCode::BAD_REQUEST).into_response()
-        }
+        _ => return error_response("Missing OAuth state", StatusCode::BAD_REQUEST).into_response(),
     };
     if state.oauth_state_cache.get(&state_param).await.is_none() {
         tracing::warn!("Google OAuth callback: invalid or expired state (CSRF check failed)");
@@ -658,6 +720,9 @@ pub async fn handle_google_oauth_callback(
     };
     let session_store = SessionStore::new(&session_secret, session_ttl);
     let session = session_store.create_session(&user.email);
+    state
+        .session_registry
+        .register(&user.email, &session.session_id);
     Json(serde_json::json!({
         "success": true,
         "data": {
@@ -723,9 +788,7 @@ pub async fn handle_github_oauth_callback(
     // CSRF 防护：校验 state（一次性消费，防重放/伪造回调）
     let state_param = match params.state {
         Some(ref s) if !s.is_empty() => s.clone(),
-        _ => {
-            return error_response("Missing OAuth state", StatusCode::BAD_REQUEST).into_response()
-        }
+        _ => return error_response("Missing OAuth state", StatusCode::BAD_REQUEST).into_response(),
     };
     if state.oauth_state_cache.get(&state_param).await.is_none() {
         tracing::warn!("GitHub OAuth callback: invalid or expired state (CSRF check failed)");
@@ -790,6 +853,9 @@ pub async fn handle_github_oauth_callback(
     };
     let session_store = SessionStore::new(&session_secret, session_ttl);
     let session = session_store.create_session(&user.email);
+    state
+        .session_registry
+        .register(&user.email, &session.session_id);
     Json(serde_json::json!({
         "success": true,
         "data": {
@@ -817,6 +883,294 @@ pub struct LoginCodeRequest {
 pub struct LoginWithCodeRequest {
     pub email: String,
     pub code: String,
+}
+
+/// TOTP 二次验证登录 — 请求（P1：2FA）
+#[derive(Debug, Deserialize)]
+pub struct LoginTotpRequest {
+    /// 密码/验证码阶段下发的一次性令牌
+    pub tmp_token: String,
+    /// 6 位 TOTP 验证码
+    pub code: String,
+}
+
+// ── TOTP 管理端（P1：2FA 收尾）─────────────────────────────────────────
+//
+// 用户侧自助启用/停用 TOTP 的三接口：
+//   1. POST /api/auth/totp/setup   — 生成新 secret（不落库），返回 otpauth URI
+//   2. POST /api/auth/totp/enable  — 提交一次有效验证码，把 secret 落库启用
+//   3. POST /api/auth/totp/disable — 校验当前密码后关闭 TOTP 并清空 secret
+//
+// 安全语义：
+// - setup 生成的 secret 暂存于 totp_setup_cache（key=user.id，TTL 5 分钟），
+//   enable 时一次性消费；未在窗口内启用则作废，防止半途丢弃的 secret 残留
+// - 已启用用户重复 setup 会覆盖暂存（旧已启用 secret 不受影响，直到 enable 成功）
+// - disable 需当前密码（防止会话被劫持后直接关掉 2FA）
+
+/// POST /api/auth/totp/setup — 生成 TOTP secret（不落库）
+///
+/// 随机 20 字节 secret（base32 编码后 32 字符），返回 otpauth URI 供
+/// 认证器扫码/手动录入。真正的落库发生在 enable（用户验证一次后）。
+pub async fn handle_totp_setup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user = super::common::verify_user(&state, &headers).await?;
+
+    // 生成 20 字节随机 secret（加密安全随机源；base32 后 32 字符，
+    // 与 Google/Microsoft Authenticator 的推荐长度一致）
+    let mut raw = [0u8; 20];
+    rand::thread_rng().fill_bytes(&mut raw);
+    let secret_b32 = crate::auth::totp::base32_encode(&raw);
+
+    // 暂存（key=user.id）：enable 时一次性消费
+    state
+        .totp_setup_cache
+        .insert(user.id.clone(), secret_b32.clone())
+        .await;
+
+    // otpauth URI（RFC 6238 惯例格式，认证器扫码录入）。
+    // email 仅需 percent-encode 到 query/path 安全字符，用 url crate
+    // （既有依赖）的 form 字节转义——email 字符集（字母数字+@._-）转义后
+    // 与主流认证器的解析行为兼容。
+    let issuer = "AIGX";
+    let email_escaped: String = user
+        .email
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'@' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    let otpauth = format!(
+        "otpauth://totp/{issuer}:{email_escaped}?secret={secret_b32}&issuer={issuer}&algorithm=SHA1&digits=6&period=30"
+    );
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "secret": secret_b32,
+            "otpauth_uri": otpauth,
+            // 前端可据此渲染二维码（本地生成，不经第三方服务）
+            "qr_content": otpauth
+        }
+    })))
+}
+
+/// POST /api/auth/totp/enable — 启用 TOTP（验证一次后落库）
+#[derive(Debug, Deserialize)]
+pub struct TotpEnableRequest {
+    /// 6 位 TOTP 验证码（来自认证器）
+    pub code: String,
+}
+
+pub async fn handle_totp_enable(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TotpEnableRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user = super::common::verify_user(&state, &headers).await?;
+    let code = body.code.trim();
+    if code.is_empty() {
+        return Err(error_response("验证码不能为空", StatusCode::BAD_REQUEST));
+    }
+
+    // 取出暂存的 secret（一次性消费：取出即移除，防止重放）
+    let Some(secret_b32) = state.totp_setup_cache.get(&user.id).await else {
+        return Err(error_response(
+            "请先调用 setup 生成密钥（或密钥已过期，请重新生成）",
+            StatusCode::BAD_REQUEST,
+        ));
+    };
+    state.totp_setup_cache.remove(&user.id).await;
+
+    // 验证一次：通过才落库启用（确保用户扫码成功、时钟大致同步）
+    let valid = crate::auth::totp::base32_decode(&secret_b32)
+        .map(|raw| crate::auth::totp::verify(&raw, code, 1))
+        .unwrap_or(false);
+    if !valid {
+        return Err(error_response(
+            "验证码错误，请确认认证器时间同步后重试（需重新 setup）",
+            StatusCode::UNAUTHORIZED,
+        ));
+    }
+
+    // 落库：secret + enabled（原子更新，含 FileStore 持久化）
+    state
+        .user_store
+        .update(&user.id, |u| {
+            u.totp_secret = secret_b32;
+            u.totp_enabled = true;
+        })
+        .map_err(|e| {
+            error_response(&format!("启用失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)
+        })?;
+
+    state
+        .log_store
+        .record_security(crate::log::SecurityEvent::new(
+            crate::log::SecurityEventType::AuthFailure,
+            "info",
+            format!("用户 {} 启用了 TOTP 两步验证", user.email),
+        ));
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "enabled": true }
+    })))
+}
+
+/// POST /api/auth/totp/disable — 停用 TOTP（需当前密码）
+#[derive(Debug, Deserialize)]
+pub struct TotpDisableRequest {
+    pub password: String,
+}
+
+pub async fn handle_totp_disable(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TotpDisableRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user = super::common::verify_user(&state, &headers).await?;
+
+    // 已启用才能停用
+    if !user.totp_enabled {
+        return Err(error_response("未启用 TOTP", StatusCode::BAD_REQUEST));
+    }
+
+    // 密码确认（防止会话被劫持后直接关掉 2FA）
+    if !crate::user::verify_password(body.password.trim(), &user.password) {
+        state
+            .log_store
+            .record_security(crate::log::SecurityEvent::new(
+                crate::log::SecurityEventType::AuthFailure,
+                "warning",
+                format!("用户 {} 尝试停用 TOTP 但密码校验失败", user.email),
+            ));
+        return Err(error_response("密码不正确", StatusCode::UNAUTHORIZED));
+    }
+
+    state
+        .user_store
+        .update(&user.id, |u| {
+            u.totp_secret = String::new();
+            u.totp_enabled = false;
+        })
+        .map_err(|e| {
+            error_response(&format!("停用失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)
+        })?;
+
+    state
+        .log_store
+        .record_security(crate::log::SecurityEvent::new(
+            crate::log::SecurityEventType::AuthFailure,
+            "info",
+            format!("用户 {} 停用了 TOTP 两步验证", user.email),
+        ));
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "enabled": false }
+    })))
+}
+
+/// POST /api/auth/login/totp — TOTP 二次验证登录（P1：2FA）
+///
+/// 流程：密码（或邮箱验证码）验证通过且用户开启 TOTP 时，登录接口
+/// 返回 require_2fa + tmp_token；客户端携 TOTP 码调本接口完成登录。
+/// - tmp_token 5 分钟有效（totp_pending_cache），一次性（验证后即移除）
+/// - 验证失败计入 login_failures（复用 5 次锁定机制，防暴力破解 6 位码）
+pub async fn handle_login_totp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LoginTotpRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+
+    // 5 次锁定检查（与密码登录共用计数器）
+    let fail_count = state.login_failures.get(&client_ip).await.unwrap_or(0);
+    if fail_count >= 5 {
+        return Err(error_response(
+            "登录失败次数过多，请稍后再试",
+            StatusCode::TOO_MANY_REQUESTS,
+        ));
+    }
+
+    let tmp_token = body.tmp_token.trim().to_string();
+    if tmp_token.is_empty() || body.code.trim().is_empty() {
+        return Err(error_response("参数不能为空", StatusCode::BAD_REQUEST));
+    }
+
+    // 取出挂起的 email（一次性：取出即移除，防 tmp_token 重放）
+    let Some(email) = state.totp_pending_cache.get(&tmp_token).await else {
+        return Err(error_response(
+            "二次验证会话已过期，请重新登录",
+            StatusCode::UNAUTHORIZED,
+        ));
+    };
+    let Some(user) = state.user_store.get_by_email(&email) else {
+        state.totp_pending_cache.remove(&tmp_token).await;
+        return Err(error_response("用户不存在", StatusCode::UNAUTHORIZED));
+    };
+    if user.status != "active" {
+        state.totp_pending_cache.remove(&tmp_token).await;
+        return Err(error_response("账号已禁用", StatusCode::FORBIDDEN));
+    }
+
+    // 验证 TOTP（window=1 容忍 ±30s 时钟偏移）
+    let code = body.code.trim();
+    let secret_ok = crate::auth::totp::base32_decode(&user.totp_secret)
+        .map(|raw| crate::auth::totp::verify(&raw, code, 1));
+    match secret_ok {
+        Some(true) => {}
+        _ => {
+            // 失败计入锁定计数（不移除 tmp_token：窗口内允许重试，
+            // 但每次失败都逼近 5 次锁定阈值）
+            state
+                .login_failures
+                .insert(client_ip.clone(), fail_count + 1)
+                .await;
+            state.log_store.record_security(
+                crate::log::SecurityEvent::new(
+                    crate::log::SecurityEventType::AuthFailure,
+                    "warning",
+                    format!("TOTP 二次验证失败（邮箱: {email}）"),
+                )
+                .with_ip(Some(client_ip)),
+            );
+            return Err(error_response("验证码错误", StatusCode::UNAUTHORIZED));
+        }
+    }
+
+    // 全部通过：消耗 tmp_token + 签发 session
+    state.totp_pending_cache.remove(&tmp_token).await;
+    state.login_failures.remove(&client_ip).await;
+
+    let config = state.config_manager.get().await;
+    let session_ttl = config.admin.session_ttl_hours.max(1);
+    let session_secret = if config.admin.session_secret.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        config.admin.session_secret.clone()
+    };
+    let session_store = SessionStore::new(&session_secret, session_ttl);
+    let session = session_store.create_session(&user.email);
+    state
+        .session_registry
+        .register(&user.email, &session.session_id);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "token": session.token,
+            "email": user.email,
+            "username": user.username,
+            "role": match user.role { Role::Admin => "admin", Role::User => "user" },
+            "expires_at": session.expires_at
+        }
+    })))
 }
 
 /// POST /api/auth/login/send-code — 发送登录验证码（6 位，5 分钟有效）
@@ -958,6 +1312,22 @@ pub async fn handle_login_with_code(
         return Err(error_response("账号已禁用", StatusCode::FORBIDDEN));
     }
 
+    // 2FA/TOTP（P1）：验证码登录同样要过 TOTP 关（若已启用）
+    if user.totp_enabled && !user.totp_secret.is_empty() {
+        let tmp_token = Uuid::new_v4().to_string();
+        state
+            .totp_pending_cache
+            .insert(tmp_token.clone(), user.email.clone())
+            .await;
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "data": {
+                "require_2fa": true,
+                "tmp_token": tmp_token
+            }
+        })));
+    }
+
     // 登录成功：消耗验证码 + 清除失败计数
     state.login_code_cache.remove(&email).await;
     state.login_failures.remove(&client_ip).await;
@@ -971,6 +1341,9 @@ pub async fn handle_login_with_code(
     };
     let session_store = SessionStore::new(&session_secret, session_ttl);
     let session = session_store.create_session(&user.email);
+    state
+        .session_registry
+        .register(&user.email, &session.session_id);
 
     Ok(Json(serde_json::json!({
         "success": true,

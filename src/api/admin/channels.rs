@@ -123,19 +123,33 @@ pub async fn handle_list_channels(
 ///
 /// 聚合所有启用渠道声明的模型，供 Playground 模型下拉使用。
 /// 不返回渠道明细/密钥，普通用户与管理员共用同一份可用模型清单。
+/// P1：附带元信息（owned_by/context_length/capabilities）。
 pub async fn handle_available_models(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _user = verify_user(&state, &headers).await?;
     let mut seen = std::collections::HashSet::new();
-    let models: Vec<String> = state
+    let models: Vec<Value> = state
         .channel_store
         .list()
         .into_iter()
         .filter(|c| c.is_enabled())
-        .flat_map(|c| c.models)
-        .filter(|m| !m.is_empty() && seen.insert(m.clone()))
+        .flat_map(|c| {
+            let owned_by =
+                crate::model::metadata::owned_by_for_channel_type(c.channel_type.as_str());
+            c.models.into_iter().map(move |m| (m, owned_by))
+        })
+        .filter(|(m, _)| !m.is_empty() && seen.insert(m.clone()))
+        .map(|(m, owned_by)| {
+            let meta = state.model_metadata.get(&m, owned_by);
+            json!({
+                "id": m,
+                "owned_by": meta.owned_by,
+                "context_length": meta.context_length,
+                "capabilities": meta.capabilities,
+            })
+        })
         .collect();
     Ok(Json(json!({ "success": true, "data": models })))
 }

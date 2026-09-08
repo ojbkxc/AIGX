@@ -233,6 +233,39 @@ pub struct EmbeddingUsage {
     pub total_tokens: u64,
 }
 
+/// 重排序请求（`/v1/rerank`）。
+///
+/// 语义参照 Cohere/Jina/OpenAI 兼容上游的 rerank 端点：
+/// 对 `documents` 按 `query` 的相关性打分并按分数降序返回。
+#[derive(Debug, Clone)]
+pub struct RerankRequest {
+    pub model: String,
+    pub query: String,
+    pub documents: Vec<RerankDocument>,
+    /// 只返回前 N 条（None = 全量返回）
+    pub top_n: Option<usize>,
+}
+
+/// 重排序文档
+#[derive(Debug, Clone)]
+pub struct RerankDocument {
+    pub content: String,
+}
+
+/// 重排序响应
+#[derive(Debug, Clone)]
+pub struct RerankResponse {
+    pub results: Vec<RerankResult>,
+    pub usage: EmbeddingUsage,
+}
+
+/// 重排序结果项（index 指向请求 documents 的下标）
+#[derive(Debug, Clone)]
+pub struct RerankResult {
+    pub index: usize,
+    pub relevance_score: f64,
+}
+
 /// Responses API（`/v1/responses`）透传结果。
 ///
 /// 透传方案（参考 aisix 的 responses_to_target）：AIGX 不做协议转换
@@ -529,6 +562,18 @@ pub trait Bridge: Send + Sync + 'static {
     ) -> Result<EmbeddingResponse, BridgeError> {
         Err(BridgeError::Config(
             "this provider does not support embeddings".into(),
+        ))
+    }
+
+    /// 重排序调用（`/v1/rerank`）。默认不支持（返回 Config 错误，
+    /// failover 循环会切换到下一渠道）。
+    async fn rerank(
+        &self,
+        _req: &RerankRequest,
+        _ctx: &BridgeContext,
+    ) -> Result<RerankResponse, BridgeError> {
+        Err(BridgeError::Config(
+            "this provider does not support reranking".into(),
         ))
     }
 

@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use crate::storage::FileStore;
 
+pub mod metadata;
+
 /// 模型映射管理器（new-api 式通用语义）
 ///
 /// 映射是**可选的别名转换**：`客户端模型名 → 上游真实模型名`。

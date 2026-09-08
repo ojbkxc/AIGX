@@ -8,6 +8,7 @@
 //! 仅当启用 `sea-orm` feature 时编译。
 
 pub mod m20260807_000001_init;
+pub mod m20260908_000002_add_totp;
 
 use sea_orm_migration::prelude::*;
 
@@ -17,6 +18,9 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m20260807_000001_init::Migration)]
+        vec![
+            Box::new(m20260807_000001_init::Migration),
+            Box::new(m20260908_000002_add_totp::Migration),
+        ]
     }
 }

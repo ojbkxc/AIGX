@@ -19,8 +19,9 @@ pub mod users; // 网络层管理模块
 pub use auth::{
     handle_change_password, handle_forgot_password, handle_github_oauth_authorize,
     handle_github_oauth_callback, handle_google_oauth_authorize, handle_google_oauth_callback,
-    handle_login, handle_login_send_code, handle_login_with_code, handle_logout, handle_register,
-    handle_reset_password,
+    handle_login, handle_login_send_code, handle_login_totp, handle_login_with_code, handle_logout,
+    handle_register, handle_reset_password, handle_totp_disable, handle_totp_enable,
+    handle_totp_setup,
 };
 
 pub use users::{handle_create_user, handle_delete_user, handle_list_users, handle_update_user};
@@ -37,7 +38,11 @@ pub use tokens::{
     handle_reset_token_used, handle_update_token,
 };
 
-pub use pricing::{handle_add_pricing, handle_delete_pricing, handle_list_pricing};
+pub use pricing::{
+    handle_add_pricing, handle_cost_estimate, handle_delete_pricing, handle_list_pricing,
+    handle_missing_pricing_models, handle_model_meta_delete, handle_model_meta_list,
+    handle_model_meta_set,
+};
 
 pub use orders::{handle_delete_order, handle_list_orders, handle_topup_request};
 

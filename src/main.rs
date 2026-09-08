@@ -5,10 +5,12 @@
 
 mod account;
 mod api;
+mod auth;
 mod bridge;
 mod cache;
 mod channel;
 mod config;
+mod cron;
 mod error_translate;
 mod graphql;
 mod health;
@@ -103,6 +105,12 @@ async fn main() -> anyhow::Result<()> {
     let model_mapper = Arc::new(ModelMapper::new(store.clone()));
     if let Err(e) = model_mapper.load() {
         tracing::error!("Failed to load model mapper: {e}");
+    }
+
+    // 初始化模型元信息注册表（P1：owned_by/上下文长度/能力 + 管理员覆盖）
+    let model_metadata = Arc::new(model::metadata::ModelMetadataRegistry::new(store.clone()));
+    if let Err(e) = model_metadata.load() {
+        tracing::error!("Failed to load model metadata registry: {e}");
     }
 
     // 初始化用量追踪
@@ -230,6 +238,29 @@ async fn main() -> anyhow::Result<()> {
             .build(),
     );
 
+    // 2FA/TOTP 待验证缓存：<tmp_token> → email（TTL=5 分钟）
+    // 密码验证成功且用户开启 TOTP 时，先生成 tmp_token 挂起，
+    // 客户端二次提交 TOTP 码后才签发 session。
+    let totp_pending_cache = Arc::new(
+        crate::cache::AsyncCache::<String, String>::builder()
+            .max_capacity(10_000)
+            .time_to_live(Duration::from_secs(300))
+            .build(),
+    );
+
+    // 2FA/TOTP 启用暂存缓存：<user_id> → base32 secret（TTL=5 分钟）
+    // setup 生成的新 secret 先暂存，enable 验证一次后落库；
+    // 未在窗口内启用则作废，不产生残留。
+    let totp_setup_cache = Arc::new(
+        crate::cache::AsyncCache::<String, String>::builder()
+            .max_capacity(10_000)
+            .time_to_live(Duration::from_secs(300))
+            .build(),
+    );
+
+    // 会话注册表（P1：会话撤销）——无状态 HMAC token 的服务端撤销层
+    let session_registry = Arc::new(api::auth::SessionRegistry::new());
+
     // 初始化 SeaORM 数据库连接（可选后端）
     //
     // 渐进式迁移策略：
@@ -286,6 +317,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         api_client,
         model_mapper,
+        model_metadata,
         usage_tracker,
         account_pool,
         api_key_store,
@@ -313,6 +345,9 @@ async fn main() -> anyhow::Result<()> {
         login_limiter,
         login_failures,
         login_code_cache,
+        totp_pending_cache,
+        totp_setup_cache,
+        session_registry,
         http_client,
         response_cache,
         semantic_router,
@@ -366,6 +401,34 @@ async fn main() -> anyhow::Result<()> {
         state.channel_store.clone(),
         state.http_client.as_ref().clone(),
     );
+
+    // P1-17 定时任务框架：注册会话撤销表清扫（第一个接入的任务）。
+    // 撤销记录与会话 TTL 对齐：会话自然过期后撤销记录无意义，
+    // 周期清扫避免注册表无限膨胀。清扫门槛 = now - session_ttl，
+    // 保证在有效期内被撤销的会话仍被拦截。
+    {
+        let session_registry = state.session_registry.clone();
+        let config_manager = state.config_manager.clone();
+        let scheduler = cron::Scheduler::new();
+        scheduler.spawn(cron::TaskSpec {
+            name: "session-registry-sweep",
+            interval: Duration::from_secs(3600),
+            first_run_delay: Duration::from_secs(600),
+            run: Box::new(move || {
+                let reg = session_registry.clone();
+                let cfg = config_manager.clone();
+                Box::pin(async move {
+                    let ttl_hours = cfg.get().await.admin.session_ttl_hours.max(1);
+                    let cutoff = chrono::Utc::now().timestamp() - ttl_hours * 3600;
+                    reg.sweep_expired_revocations(cutoff) as u64
+                })
+            }),
+        });
+        tracing::info!(
+            "cron scheduler started: {} task(s) (session-registry-sweep)",
+            scheduler.task_count()
+        );
+    }
 
     let app = build_router(state, &config);
 
@@ -473,6 +536,17 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/auth/login/code",
             post(api::admin::handle_login_with_code),
         )
+        .route("/api/auth/login/totp", post(api::admin::handle_login_totp))
+        // 2FA/TOTP 用户侧自助管理（P1 收尾）
+        .route("/api/auth/totp/setup", post(api::admin::handle_totp_setup))
+        .route(
+            "/api/auth/totp/enable",
+            post(api::admin::handle_totp_enable),
+        )
+        .route(
+            "/api/auth/totp/disable",
+            post(api::admin::handle_totp_disable),
+        )
         .route("/api/auth/register", post(api::admin::handle_register))
         .route(
             "/api/auth/github",
@@ -545,6 +619,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             delete(api::admin::handle_delete_pricing),
         )
         .route(
+            "/api/pricing/estimate",
+            post(api::admin::handle_cost_estimate),
+        )
+        .route(
             "/api/pricing/exchange-rates",
             get(api::admin::handle_get_exchange_rates),
         )
@@ -555,6 +633,21 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/pricing/sync",
             post(api::admin::handle_trigger_price_sync),
+        )
+        // P1 缺失模型检测：启用渠道模型 vs 定价目录差集
+        .route(
+            "/api/pricing/missing-models",
+            get(api::admin::handle_missing_pricing_models),
+        )
+        // P1 模型元信息覆盖管理
+        .route("/api/models/meta", get(api::admin::handle_model_meta_list))
+        .route(
+            "/api/models/meta/:model",
+            put(api::admin::handle_model_meta_set),
+        )
+        .route(
+            "/api/models/meta/:model",
+            delete(api::admin::handle_model_meta_delete),
         )
         // 易支付配置
         .route("/api/epay/config", get(api::admin::handle_get_epay_config))
@@ -834,6 +927,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/v1/responses", post(api::openai::handle_responses))
         .route("/v1/completions", post(api::openai::handle_completions))
         .route("/v1/embeddings", post(api::openai::handle_embeddings))
+        .route("/v1/rerank", post(api::openai::handle_rerank))
         .route(
             "/v1/images/generations",
             post(api::openai::handle_images_generations),
@@ -858,6 +952,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/responses", post(api::openai::handle_responses))
         .route("/completions", post(api::openai::handle_completions))
         .route("/embeddings", post(api::openai::handle_embeddings))
+        .route("/rerank", post(api::openai::handle_rerank))
         .route(
             "/images/generations",
             post(api::openai::handle_images_generations),

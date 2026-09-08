@@ -484,10 +484,7 @@ impl ChannelStore {
         if let Some(ch) = channels.iter_mut().find(|c| c.id == id) {
             let now = chrono::Utc::now().timestamp();
             // 节流：60 秒内重复使用不重复落盘，避免热路径每次请求都同步写存储
-            if ch
-                .last_used_at
-                .is_some_and(|last| now - last < 60)
-            {
+            if ch.last_used_at.is_some_and(|last| now - last < 60) {
                 return;
             }
             ch.last_used_at = Some(now);

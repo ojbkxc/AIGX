@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use super::{
     Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream, ChatFormat, ChatMessage,
-    ChatResponse, EmbeddingRequest, EmbeddingResponse, FinishReason, ResponsesPassthrough, Role,
-    UpstreamWire, UsageStats,
+    ChatResponse, EmbeddingRequest, EmbeddingResponse, FinishReason, RerankRequest, RerankResponse,
+    RerankResult, ResponsesPassthrough, Role, UpstreamWire, UsageStats,
 };
 
 /// OpenAI 兼容上游 Bridge。
@@ -432,6 +432,82 @@ impl Bridge for OpenaiCompatibleBridge {
         })
     }
 
+    /// 重排序：POST {base}/rerank，兼容 Cohere/Jina 风格的请求与响应形状。
+    ///
+    /// 请求体：{model, query, documents: [{content}...], top_n?}；
+    /// 响应体：{results: [{index, relevance_score}...], usage?}——
+    /// 宽容解析：缺失字段一律默认（index=0 / score=0 / usage=0），
+    /// 兼容不同上游把 document 写成纯字符串或 score 字段名不同的变体。
+    async fn rerank(
+        &self,
+        req: &RerankRequest,
+        _ctx: &BridgeContext,
+    ) -> Result<RerankResponse, BridgeError> {
+        let url = format!("{}/rerank", self.base_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "model": req.model,
+            "query": req.query,
+            "documents": req.documents.iter()
+                .map(|d| serde_json::json!({ "content": d.content }))
+                .collect::<Vec<_>>(),
+            "top_n": req.top_n,
+        });
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(super::capture_upstream_error_http(
+                resp.status(),
+                resp,
+                UpstreamWire::OpenAI,
+                parse_openai_error,
+            )
+            .await);
+        }
+
+        let json: Value = resp
+            .json()
+            .await
+            .map_err(|e| BridgeError::UpstreamDecode(e.to_string()))?;
+
+        let results: Vec<RerankResult> = json
+            .get("results")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|obj| RerankResult {
+                        index: obj.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                        relevance_score: obj
+                            .get("relevance_score")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let usage = super::EmbeddingUsage {
+            prompt_tokens: json
+                .get("usage")
+                .and_then(|u| u.get("prompt_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            total_tokens: json
+                .get("usage")
+                .and_then(|u| u.get("total_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        };
+
+        Ok(RerankResponse { results, usage })
+    }
+
     /// 文本补全：透传 /completions 请求体，返回 OpenAI 格式结果。
     ///
     /// 与 Chat Completions 不同，text_completion 使用顶层 `prompt` 字段。
@@ -734,6 +810,7 @@ pub fn make_bridge(base_url: &str, api_key: &str, client: &reqwest::Client) -> A
 #[cfg(test)]
 mod tests {
     use super::normalize_base_url;
+    use crate::bridge::{RerankDocument, RerankRequest, RerankResult};
 
     #[test]
     fn normalizes_host_only_base_url() {
@@ -761,5 +838,137 @@ mod tests {
             normalize_base_url("https://api.deepseek.com".into()),
             "https://api.deepseek.com/v1"
         );
+    }
+
+    // ── rerank 请求/响应形状（纯序列化与解析逻辑，不发网络请求）──────────
+
+    /// 验证 rerank 请求体形状：documents 序列化为 [{content}]、top_n 透传
+    #[test]
+    fn rerank_request_body_shape() {
+        let req = RerankRequest {
+            model: "rerank-v1".to_string(),
+            query: "什么是网关".to_string(),
+            documents: vec![
+                RerankDocument {
+                    content: "AIGX 是 Rust 网关".to_string(),
+                },
+                RerankDocument {
+                    content: "无关文档".to_string(),
+                },
+            ],
+            top_n: Some(1),
+        };
+        let body = serde_json::json!({
+            "model": req.model,
+            "query": req.query,
+            "documents": req.documents.iter()
+                .map(|d| serde_json::json!({ "content": d.content }))
+                .collect::<Vec<_>>(),
+            "top_n": req.top_n,
+        });
+        assert_eq!(body["model"], "rerank-v1");
+        assert_eq!(body["documents"][0]["content"], "AIGX 是 Rust 网关");
+        assert_eq!(body["top_n"], 1);
+    }
+
+    /// 模拟上游响应（Cohere/Jina 兼容形状）的宽容解析 + top_n 截断
+    #[test]
+    fn rerank_response_parse_and_truncate() {
+        let upstream = serde_json::json!({
+            "results": [
+                {"index": 2, "relevance_score": 0.98},
+                {"index": 0, "relevance_score": 0.75},
+                {"index": 1, "relevance_score": 0.30}
+            ],
+            "usage": {"prompt_tokens": 42, "total_tokens": 42}
+        });
+        let results: Vec<RerankResult> = upstream
+            .get("results")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|obj| RerankResult {
+                        index: obj.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                        relevance_score: obj
+                            .get("relevance_score")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].index, 2);
+        assert!((results[0].relevance_score - 0.98).abs() < 1e-9);
+
+        // top_n 截断
+        let mut truncated = results;
+        truncated.truncate(2);
+        assert_eq!(truncated.len(), 2);
+        assert_eq!(truncated[1].index, 0);
+    }
+
+    /// 宽容解析：上游缺 results/usage 字段时不 panic，返回空结果与零用量
+    #[test]
+    fn rerank_response_lenient_parse_on_missing_fields() {
+        let upstream = serde_json::json!({});
+        let results: Vec<RerankResult> = upstream
+            .get("results")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|obj| RerankResult {
+                        index: obj.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                        relevance_score: obj
+                            .get("relevance_score")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(results.is_empty());
+
+        let prompt_tokens = upstream
+            .get("usage")
+            .and_then(|u| u.get("prompt_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert_eq!(prompt_tokens, 0);
+    }
+
+    /// handler 侧 documents 的宽容解析：[{content}] 与纯字符串两种形态
+    #[test]
+    fn rerank_documents_lenient_input_forms() {
+        let body = serde_json::json!({
+            "documents": [
+                {"content": "结构化形态"},
+                "纯字符串形态"
+            ]
+        });
+        let docs: Vec<RerankDocument> = body
+            .get("documents")
+            .and_then(|d| d.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        if let Some(s) = v.as_str() {
+                            Some(RerankDocument {
+                                content: s.to_string(),
+                            })
+                        } else {
+                            v.get("content")
+                                .and_then(|c| c.as_str())
+                                .map(|s| RerankDocument {
+                                    content: s.to_string(),
+                                })
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0].content, "结构化形态");
+        assert_eq!(docs[1].content, "纯字符串形态");
     }
 }

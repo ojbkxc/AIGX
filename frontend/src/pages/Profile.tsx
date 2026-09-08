@@ -11,6 +11,7 @@ interface Me {
   quota?: number | null;
   used_quota?: number;
   created_at?: number;
+  totp_enabled?: boolean;
 }
 
 export default function Profile(): JSX.Element {
@@ -26,6 +27,14 @@ export default function Profile(): JSX.Element {
   const [pwSaving, setPwSaving] = useState(false);
   const [pwError, setPwError] = useState('');
 
+  // 2FA/TOTP 状态（P1）
+  const [totpEnabled, setTotpEnabled] = useState(false);
+  const [totpSetup, setTotpSetup] = useState<{ secret: string; otpauth_uri: string } | null>(null);
+  const [totpCode, setTotpCode] = useState('');
+  const [totpPw, setTotpPw] = useState('');
+  const [totpBusy, setTotpBusy] = useState(false);
+  const [totpError, setTotpError] = useState('');
+
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -35,7 +44,9 @@ export default function Profile(): JSX.Element {
     setLoading(true);
     try {
       const res = await api.getMe();
-      setMe(res?.data || res || null);
+      const data = res?.data || res || null;
+      setMe(data);
+      setTotpEnabled(Boolean(data?.totp_enabled));
     } catch {
       setMe(null);
     } finally {
@@ -65,6 +76,63 @@ export default function Profile(): JSX.Element {
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
     if (n >= 1_000) return (n / 1_000).toFixed(2) + 'K';
     return String(n);
+  };
+
+  // ── 2FA/TOTP ──────────────────────────────────────────────
+
+  // 生成新 secret（不落库）：显示 secret + otpauth URI 供认证器录入
+  const handleTotpSetup = async (): Promise<void> => {
+    setTotpError('');
+    setTotpBusy(true);
+    try {
+      const res = await api.totpSetup();
+      const data = res?.data || {};
+      if (data.secret) {
+        setTotpSetup({ secret: data.secret, otpauth_uri: data.otpauth_uri || '' });
+        setTotpCode('');
+      } else {
+        setTotpError(t('生成密钥失败'));
+      }
+    } catch (err) {
+      setTotpError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTotpBusy(false);
+    }
+  };
+
+  // 提交一次验证码启用（secret 落库）
+  const handleTotpEnable = async (): Promise<void> => {
+    setTotpError('');
+    if (!totpCode.trim()) { setTotpError(t('请输入验证码')); return; }
+    setTotpBusy(true);
+    try {
+      await api.totpEnable(totpCode.trim());
+      setTotpEnabled(true);
+      setTotpSetup(null);
+      setTotpCode('');
+      addToast(t('两步验证已启用'));
+    } catch (err) {
+      setTotpError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTotpBusy(false);
+    }
+  };
+
+  // 停用（需当前密码）
+  const handleTotpDisable = async (): Promise<void> => {
+    setTotpError('');
+    if (!totpPw) { setTotpError(t('请输入当前密码')); return; }
+    setTotpBusy(true);
+    try {
+      await api.totpDisable(totpPw);
+      setTotpEnabled(false);
+      setTotpPw('');
+      addToast(t('两步验证已停用'));
+    } catch (err) {
+      setTotpError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTotpBusy(false);
+    }
   };
 
   return (
@@ -135,6 +203,86 @@ export default function Profile(): JSX.Element {
               {pwSaving ? t('修改中...') : t('修改密码')}
             </button>
           </div>
+        </div>
+      </Card>
+
+      <Card title={t('两步验证（TOTP）')}>
+        <div className="settings-form">
+          <div className="form-group">
+            <label>{t('状态')}</label>
+            <Input value={totpEnabled ? t('已启用') : t('未启用')} disabled />
+            <span className="form-hint">
+              {totpEnabled
+                ? t('登录时需输入认证器中的 6 位验证码')
+                : t('启用后登录需密码 + 动态验证码双重确认')}
+            </span>
+          </div>
+
+          {!totpEnabled && !totpSetup && (
+            <div className="settings-actions">
+              <button className="btn btn-primary" onClick={() => void handleTotpSetup()} disabled={totpBusy}>
+                {totpBusy ? t('生成中...') : t('开始设置')}
+              </button>
+            </div>
+          )}
+
+          {totpSetup && (
+            <>
+              <div className="form-group">
+                <label>{t('密钥（Base32）')}</label>
+                <Input value={totpSetup.secret} disabled />
+                <span className="form-hint">{t('在认证器中选择「手动录入」，粘贴上方密钥')}</span>
+              </div>
+              {totpSetup.otpauth_uri && (
+                <div className="form-group">
+                  <label>{t('扫码录入')}</label>
+                  <code style={{
+                    display: 'block', padding: '8px 10px', fontSize: '11px',
+                    wordBreak: 'break-all', background: 'var(--bg-color)',
+                    border: '1px solid var(--border-color)', borderRadius: '6px',
+                  }}>
+                    {totpSetup.otpauth_uri}
+                  </code>
+                  <span className="form-hint">
+                    {t('将此 URI 生成二维码后用认证器扫描（5 分钟内有效）')}
+                  </span>
+                </div>
+              )}
+              <div className="form-group">
+                <label>{t('验证码')}</label>
+                <input className="form-input" type="text" value={totpCode}
+                  onChange={(e) => setTotpCode(e.target.value)} maxLength={6}
+                  inputMode="numeric" autoComplete="one-time-code" />
+                <span className="form-hint">{t('输入认证器显示的 6 位验证码完成启用')}</span>
+              </div>
+              {totpError && <div className="error-message">{totpError}</div>}
+              <div className="settings-actions">
+                <button className="btn btn-primary" onClick={() => void handleTotpEnable()} disabled={totpBusy}>
+                  {totpBusy ? t('验证中...') : t('确认启用')}
+                </button>
+                <button className="btn btn-outline" onClick={() => { setTotpSetup(null); setTotpError(''); }} disabled={totpBusy}>
+                  {t('取消')}
+                </button>
+              </div>
+            </>
+          )}
+
+          {totpEnabled && (
+            <>
+              <div className="form-group">
+                <label>{t('当前密码')}</label>
+                <input className="form-input" type="password" value={totpPw}
+                  onChange={(e) => setTotpPw(e.target.value)} autoComplete="current-password" />
+                <span className="form-hint">{t('停用两步验证需确认密码')}</span>
+              </div>
+              {totpError && <div className="error-message">{totpError}</div>}
+              <div className="settings-actions">
+                <button className="btn btn-danger" onClick={() => void handleTotpDisable()} disabled={totpBusy}>
+                  {totpBusy ? t('停用中...') : t('停用两步验证')}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </Card>
     </div>

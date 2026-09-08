@@ -28,6 +28,12 @@ pub struct Model {
     pub status: String,
     /// 用户分组（计费倍率与模型权限依据）
     pub group: String,
+    /// TOTP 密钥（base32，空=未设置 2FA；与 FileStore User.totp_secret 对齐）
+    #[sea_orm(default_value = "")]
+    pub totp_secret: String,
+    /// 是否已启用 TOTP 二次验证
+    #[sea_orm(default_value = false)]
+    pub totp_enabled: bool,
     /// 创建时间（unix timestamp）
     pub created_at: i64,
 }

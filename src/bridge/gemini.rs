@@ -590,7 +590,11 @@ fn parse_stream_event(
         model: model.to_string(),
         delta: ChatDelta {
             content: text,
-            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
             reasoning: None,
         },
         finish_reason: finish,
@@ -630,8 +634,8 @@ pub fn make_bridge(base_url: &str, api_key: &str, client: &reqwest::Client) -> A
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use crate::bridge::ToolCall;
+    use serde_json::json;
 
     #[test]
     fn build_body_converts_messages_to_contents() {
@@ -835,18 +839,22 @@ mod tests {
 
         // 工具定义翻译为 functionDeclarations
         assert_eq!(
-            body["tools"][0]["functionDeclarations"][0]["name"], "get_weather"
+            body["tools"][0]["functionDeclarations"][0]["name"],
+            "get_weather"
         );
         // assistant 的 tool_calls 翻译为 functionCall
         assert_eq!(
-            body["contents"][1]["parts"][0]["functionCall"]["name"], "get_weather"
+            body["contents"][1]["parts"][0]["functionCall"]["name"],
+            "get_weather"
         );
         // tool 消息翻译为 functionResponse（parts[0] 即 functionResponse，无文本 part）
         assert_eq!(
-            body["contents"][2]["parts"][0]["functionResponse"]["name"], "get_weather"
+            body["contents"][2]["parts"][0]["functionResponse"]["name"],
+            "get_weather"
         );
         assert_eq!(
-            body["contents"][2]["parts"][0]["functionResponse"]["response"]["temp"], 25
+            body["contents"][2]["parts"][0]["functionResponse"]["response"]["temp"],
+            25
         );
     }
 
@@ -884,7 +892,10 @@ mod tests {
             .expect("should be ok");
         let tool_calls = chunk.delta.tool_calls.expect("should have tool calls");
         assert_eq!(tool_calls[0].function_name.as_deref(), Some("get_weather"));
-        assert_eq!(tool_calls[0].arguments.as_deref(), Some(r#"{"city":"Beijing"}"#));
+        assert_eq!(
+            tool_calls[0].arguments.as_deref(),
+            Some(r#"{"city":"Beijing"}"#)
+        );
     }
 
     #[test]

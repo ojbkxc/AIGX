@@ -49,12 +49,24 @@ pub struct User {
     /// 已用配额
     #[serde(default)]
     pub used_quota: i64,
+    /// 已预留但未结算的配额（P1：配额预留/结算两段式）
+    #[serde(default)]
+    pub reserved_quota: i64,
     /// 状态: active / disabled
     #[serde(default = "default_status")]
     pub status: String,
     /// 用户分组（计费倍率与模型权限依据，参照 new-api user.group）
     #[serde(default = "default_group")]
     pub group: String,
+    /// TOTP 密钥（base32，空=未设置 2FA）。
+    ///
+    /// 明文存储：位于管理后台文件权限范围内（与密码哈希同级机密度），
+    /// 后续可增加静态加密（见 ROADMAP）。
+    #[serde(default)]
+    pub totp_secret: String,
+    /// 是否已启用 TOTP 二次验证（secret 已绑定且经过一次有效验证）
+    #[serde(default)]
+    pub totp_enabled: bool,
     #[serde(default)]
     pub created_at: i64,
 }
@@ -68,9 +80,9 @@ fn default_group() -> String {
 }
 
 impl User {
-    /// 剩余可用配额
+    /// 剩余可用配额（扣除已用 + 已预留）
     pub fn remaining(&self) -> i64 {
-        (self.quota - self.used_quota).max(0)
+        (self.quota - self.used_quota - self.reserved_quota).max(0)
     }
 
     /// 是否为管理员
@@ -156,8 +168,11 @@ impl UserStore {
             role,
             quota,
             used_quota: 0,
+            reserved_quota: 0,
             status: "active".into(),
             group: "default".into(),
+            totp_secret: String::new(),
+            totp_enabled: false,
             created_at: chrono::Utc::now().timestamp(),
         };
         self.persist(&user)?;
@@ -194,8 +209,11 @@ impl UserStore {
             role,
             quota,
             used_quota: 0,
+            reserved_quota: 0,
             status: "active".into(),
             group: "default".into(),
+            totp_secret: String::new(),
+            totp_enabled: false,
             created_at: chrono::Utc::now().timestamp(),
         };
         self.persist(&user)?;
@@ -344,6 +362,91 @@ impl UserStore {
         true
     }
 
+    /// 预留配额（P1：两段式计费第一步）。
+    ///
+    /// 在请求发起前调用，将 `amount` 从可用余额中「冻结」到 `reserved_quota`。
+    /// 请求完成后由 `settle_quota` 把实际消费从 reserved 转入 used_quota，
+    /// 多预留的部分由 `release_quota` 归还。
+    ///
+    /// 返回 true 表示预留成功，false 表示余额不足。
+    pub fn reserve_quota(&self, id: &str, amount: i64) -> bool {
+        if amount <= 0 {
+            return true;
+        }
+        let mut by_id = self.by_id.write();
+        let user = match by_id.get_mut(id) {
+            Some(u) => u,
+            None => return false,
+        };
+        if user.remaining() < amount {
+            return false;
+        }
+        user.reserved_quota += amount;
+        let snapshot = user.clone();
+        drop(by_id);
+        if let Err(e) = self.persist(&snapshot) {
+            tracing::error!("Failed to persist user {} reserve_quota: {}", id, e);
+        }
+        true
+    }
+
+    /// 结算预留配额（P1：两段式计费第二步）。
+    ///
+    /// `reserved` 是之前预留的总额，`actual` 是实际消费额（≤ reserved）。
+    /// 将 actual 转入 used_quota，剩余 (reserved - actual) 归还到可用余额。
+    ///
+    /// 若 actual > reserved（罕见：估算严重不足），超出部分直接从余额扣。
+    pub fn settle_quota(&self, id: &str, reserved: i64, actual: i64) {
+        if reserved <= 0 {
+            return;
+        }
+        let actual = actual.max(0);
+        let mut by_id = self.by_id.write();
+        let user = match by_id.get_mut(id) {
+            Some(u) => u,
+            None => return,
+        };
+        // 释放预留（不超过已预留量）
+        let release = reserved.min(user.reserved_quota);
+        user.reserved_quota -= release;
+        // 实际消费转入 used_quota
+        user.used_quota += actual;
+        let snapshot = user.clone();
+        drop(by_id);
+        if let Err(e) = self.persist(&snapshot) {
+            tracing::error!("Failed to persist user {} settle_quota: {}", id, e);
+        }
+    }
+
+    /// 释放预留配额（P1：两段式计费的取消/回滚路径）。
+    ///
+    /// 与 `settle_quota` 的区别：settle 是「结算」——解冻预留并把实际消费
+    /// 转入 used_quota；release 是「取消」——只把预留解冻归还余额，
+    /// 不产生任何消费。请求失败、预留回滚、预留超时回收都走这里。
+    ///
+    /// 为什么必须独立成方法：settle 语义下 `actual=0` 看似等价于 release，
+    /// 但 settle 内部对并发场景有 `reserved.min(user.reserved_quota)` 的
+    /// 钳制，同一用户多请求并发时可能解冻到他人刚建立的预留（2026-09-08
+    /// 二轮审查 G1）。release 按「本次预留的实际持有量」精确归还，语义
+    /// 可审计且不依赖钳制。
+    pub fn release_quota(&self, id: &str, amount: i64) {
+        if amount <= 0 {
+            return;
+        }
+        let mut by_id = self.by_id.write();
+        let user = match by_id.get_mut(id) {
+            Some(u) => u,
+            None => return,
+        };
+        // 最多归还当前预留量：预留可能已被其他路径结算（防御性上限）
+        let release = amount.min(user.reserved_quota);
+        user.reserved_quota -= release;
+        let snapshot = user.clone();
+        drop(by_id);
+        if let Err(e) = self.persist(&snapshot) {
+            tracing::error!("Failed to persist user {} release_quota: {}", id, e);
+        }
+    }
     /// 生成随机默认密码 (8 位)
     pub fn random_password() -> String {
         let mut rng = rand::thread_rng();
@@ -465,6 +568,46 @@ mod tests {
         assert!(s.create("notanemail", "pw", Role::User, 0).is_err());
     }
 
+    // ── 预留/结算/释放语义测试（P1 两段式，2026-09-08 G1/G5 修复）──
+
+    /// 预留 → 结算：reserved 解冻，used 增加实际消费，余额正确。
+    #[test]
+    fn reserve_then_settle() {
+        let s = store();
+        let u = s.create("rs1@test.com", "pw", Role::User, 1000).unwrap();
+        assert!(s.reserve_quota(&u.id, 300));
+        assert_eq!(s.get_by_id(&u.id).unwrap().reserved_quota, 300);
+        s.settle_quota(&u.id, 300, 180);
+        let after = s.get_by_id(&u.id).unwrap();
+        assert_eq!(after.reserved_quota, 0);
+        assert_eq!(after.used_quota, 180);
+        assert_eq!(after.remaining(), 820);
+    }
+
+    /// 预留 → 释放：reserved 解冻，used 不变（无消费归还）。
+    #[test]
+    fn reserve_then_release() {
+        let s = store();
+        let u = s.create("rs2@test.com", "pw", Role::User, 1000).unwrap();
+        assert!(s.reserve_quota(&u.id, 300));
+        s.release_quota(&u.id, 300);
+        let after = s.get_by_id(&u.id).unwrap();
+        assert_eq!(after.reserved_quota, 0);
+        assert_eq!(after.used_quota, 0);
+        assert_eq!(after.remaining(), 1000);
+    }
+
+    /// 释放量超过当前预留时只归还当前量（防御性上限）。
+    #[test]
+    fn release_clamped() {
+        let s = store();
+        let u = s.create("rs3@test.com", "pw", Role::User, 1000).unwrap();
+        assert!(s.reserve_quota(&u.id, 50));
+        s.release_quota(&u.id, 500);
+        let after = s.get_by_id(&u.id).unwrap();
+        assert_eq!(after.reserved_quota, 0);
+        assert_eq!(after.used_quota, 0);
+    }
     #[test]
     fn get_by_email() {
         let s = store();

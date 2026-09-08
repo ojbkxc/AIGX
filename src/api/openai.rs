@@ -48,6 +48,8 @@ use super::auth::ApiKeyStore;
 pub struct AppState {
     pub api_client: Arc<CfApiClient>,
     pub model_mapper: Arc<ModelMapper>,
+    /// 模型元信息注册表（P1：owned_by/上下文长度/能力）
+    pub model_metadata: Arc<crate::model::metadata::ModelMetadataRegistry>,
     pub usage_tracker: Arc<UsageTracker>,
     pub account_pool: Arc<AccountPool>,
     pub api_key_store: Arc<ApiKeyStore>,
@@ -76,7 +78,8 @@ pub struct AppState {
     pub notify_service: Arc<NotifyService>,
     /// 告警规则评估器（alert_patrol 巡检 + 管理 API 共享）。
     /// parking_lot::Mutex：无中毒语义，持锁 panic 不会永久破坏告警端点。
-    pub alert_evaluator: std::sync::Arc<parking_lot::Mutex<crate::notify::alert::AlertRuleEvaluator>>,
+    pub alert_evaluator:
+        std::sync::Arc<parking_lot::Mutex<crate::notify::alert::AlertRuleEvaluator>>,
     /// 底层 FileStore（告警规则/历史持久化等轻量 KV 用）
     pub alert_store: Arc<crate::storage::FileStore>,
     /// 全局 IP 白名单/黑名单过滤（批次3 IP 管理）
@@ -105,6 +108,18 @@ pub struct AppState {
     ///
     /// key=邮箱（小写），value=6 位验证码。TTL=5 分钟；验证成功即移除。
     pub login_code_cache: Arc<crate::cache::AsyncCache<String, String>>,
+    /// 2FA/TOTP 待验证缓存（P1）。
+    ///
+    /// 密码验证成功但用户开启 TOTP 时，不下发 session，而是生成
+    /// 一次性 tmp_token 存入本缓存（key=tmp_token，value=email），
+    /// 客户端携 TOTP 码调 /api/auth/login/totp 完成二次验证。
+    /// TTL=5 分钟，超时未验证即失效。
+    pub totp_pending_cache: Arc<crate::cache::AsyncCache<String, String>>,
+    /// 2FA/TOTP 启用暂存缓存（P1）。
+    ///
+    /// setup 接口生成的新 secret 暂存于此（key=user.id，value=base32 secret），
+    /// enable 接口一次性消费后落库。TTL=5 分钟，防止半途丢弃的 secret 残留。
+    pub totp_setup_cache: Arc<crate::cache::AsyncCache<String, String>>,
     /// SeaORM 数据库连接（可选后端）。
     ///
     /// - `None`：使用默认 FileStore（rusqlite bundled SQLite），零配置
@@ -131,6 +146,12 @@ pub struct AppState {
     /// authorize 时生成随机 state 存入，callback 时校验并一次性消费。
     /// key=state 值，value=生成时间戳（TTL 10 分钟由 AsyncCache 清扫）。
     pub oauth_state_cache: Arc<crate::cache::AsyncCache<String, i64>>,
+    /// 会话注册表（P1：会话撤销）。
+    ///
+    /// 无状态 HMAC token 的服务端撤销层：登录注册 jti、验证查
+    /// revocation、logout/改密/管理端踢人时撤销。重启后注册表为空
+    ///（未撤销 token 仍有效，撤销中的会话恢复——见 SessionRegistry 注释）。
+    pub session_registry: Arc<super::auth::SessionRegistry>,
 }
 
 impl AppState {
@@ -504,6 +525,187 @@ pub fn charge_usage_with_tools(
     cost
 }
 
+// ── 配额预留/结算两段式（P1）────────────────────────────────────────────
+
+/// 预留记录（P1：两段式计费）
+pub struct Reservation {
+    pub reserved_user: i64,
+    pub reserved_key: i64,
+}
+
+/// 预留配额（P1：两段式计费第一步）。
+///
+/// 在请求发起前调用，估算 token 并预留相应配额。返回预留记录供后续结算使用。
+/// 若预留失败（余额不足），返回错误。
+pub fn reserve_usage(
+    state: &AppState,
+    api_key: &super::auth::ApiKey,
+    model: &str,
+    group: &str,
+    estimated_prompt_tokens: u64,
+    estimated_completion_tokens: u64,
+) -> Result<Reservation, (StatusCode, Json<Value>)> {
+    let estimated_cost = state
+        .pricing_store
+        .calculate_cost_quoted(
+            model,
+            estimated_prompt_tokens,
+            estimated_completion_tokens,
+            group,
+        )
+        .map_err(|e| {
+            error_response(
+                "pricing_error",
+                &format!("Failed to estimate cost: {}", e),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+
+    if estimated_cost <= 0 {
+        return Ok(Reservation {
+            reserved_user: 0,
+            reserved_key: 0,
+        });
+    }
+
+    // 预留用户配额
+    let reserved_user = if let Some(uid) = &api_key.user_id {
+        if !state.user_store.reserve_quota(uid, estimated_cost) {
+            return Err(error_response(
+                "insufficient_quota",
+                "User quota insufficient",
+                StatusCode::PAYMENT_REQUIRED,
+            ));
+        }
+        estimated_cost
+    } else {
+        0
+    };
+
+    // 预留 API key 配额
+    let reserved_key = if !state
+        .api_key_store
+        .reserve_quota(&api_key.id, estimated_cost)
+    {
+        // 回滚用户预留——必须用 release 语义（G1：settle 的并发钳制
+        // 可能归还到他人刚建立的预留；release 只解冻不产生消费）
+        if reserved_user > 0 {
+            if let Some(uid) = &api_key.user_id {
+                state.user_store.release_quota(uid, reserved_user);
+            }
+        }
+        return Err(error_response(
+            "insufficient_quota",
+            "API key quota insufficient",
+            StatusCode::PAYMENT_REQUIRED,
+        ));
+    } else {
+        estimated_cost
+    };
+
+    Ok(Reservation {
+        reserved_user,
+        reserved_key,
+    })
+}
+
+/// 结算预留配额（P1：两段式计费第二步）。
+///
+/// 请求完成后调用，根据实际 token 消耗结算费用，释放多预留的部分。
+// 参数是计费语义的完整集合（调用上下文 + 预留记录 + 实际消耗 + 工具附加费），
+// 与 charge_usage_with_tools 同构，不为规避参数计数拆散语义
+#[allow(clippy::too_many_arguments)]
+pub fn settle_usage(
+    state: &AppState,
+    api_key: &super::auth::ApiKey,
+    model: &str,
+    group: &str,
+    reservation: &Reservation,
+    actual_prompt_tokens: u64,
+    actual_completion_tokens: u64,
+    tool_calls: Option<&crate::pricing::ToolCallCounts>,
+) -> i64 {
+    let mut actual_cost = match state.pricing_store.calculate_cost_quoted(
+        model,
+        actual_prompt_tokens,
+        actual_completion_tokens,
+        group,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("settle_usage: {e}, billing as 0");
+            0
+        }
+    };
+
+    if let Some(tools) = tool_calls {
+        actual_cost = actual_cost.saturating_add(
+            state
+                .pricing_store
+                .calculate_tool_surcharge(tools, model, group),
+        );
+    }
+
+    if actual_cost > 0 {
+        crate::metrics::global().record_cost("usd", (actual_cost as u64).saturating_mul(1_000_000));
+    }
+
+    // 结算用户配额
+    if reservation.reserved_user > 0 {
+        if let Some(uid) = &api_key.user_id {
+            state
+                .user_store
+                .settle_quota(uid, reservation.reserved_user, actual_cost);
+            // 余额通知
+            if let Some(u) = state.user_store.get_by_id(uid) {
+                let remaining = u.remaining();
+                let threshold = (u.quota / 10).clamp(1000, 10000);
+                if remaining < threshold {
+                    state
+                        .notify_service
+                        .notify_spawn(crate::notify::NotifyEvent::QuotaLow {
+                            user_email: u.email.clone(),
+                            remaining,
+                        });
+                }
+            }
+        }
+    }
+
+    // 结算 API key 配额
+    if reservation.reserved_key > 0 {
+        state
+            .api_key_store
+            .settle_quota(&api_key.id, reservation.reserved_key, actual_cost);
+    }
+
+    actual_cost
+}
+
+/// 释放预留（P1：两段式计费的取消路径）。
+///
+/// 请求失败（渠道全败/客户端错误）时调用：按 `Reservation` 记录把
+/// user 与 key 两侧的预留全部解冻归还。与 `settle_usage` 对称——
+/// settle 是「结算消费」，release 是「无消费归还」。
+/// 2026-09-08 二轮审查 G5：失败路径原先不释放，预留永久冻结。
+pub fn release_reservation(
+    state: &AppState,
+    api_key: &super::auth::ApiKey,
+    reservation: &Reservation,
+) {
+    if reservation.reserved_user > 0 {
+        if let Some(uid) = &api_key.user_id {
+            state
+                .user_store
+                .release_quota(uid, reservation.reserved_user);
+        }
+    }
+    if reservation.reserved_key > 0 {
+        state
+            .api_key_store
+            .release_quota(&api_key.id, reservation.reserved_key);
+    }
+}
 // ── 流式计费守卫（B05/B20）────────────────────────────────────────────
 
 /// 流式计费共享状态：后缀事件（正常结束）与 Drop 守卫（断连兜底）共用。
@@ -534,6 +736,8 @@ pub(crate) struct StreamBillingState {
     pub(crate) client_ip: Option<String>,
     pub(crate) request_id: String,
     pub(crate) channel_id: Option<String>,
+    /// P1：预留记录（两段式计费）
+    pub(crate) reservation: Option<Reservation>,
 }
 
 impl StreamBillingState {
@@ -553,22 +757,35 @@ impl StreamBillingState {
             .usage_tracker
             .accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
 
-        // 扣费（try_charge + QuotaLow 通知 + key 扣减，含工具附加费）
+        // 扣费：P1 两段式——若存在预留记录则走 settle_usage，否则回退到旧路径
         let tool_calls = self.tool_calls.lock().clone();
         let tool_calls_opt = if tool_calls.is_empty() {
             None
         } else {
             Some(&tool_calls)
         };
-        let cost = charge_usage_with_tools(
-            &self.state,
-            &self.api_key,
-            &self.model,
-            &self.group,
-            prompt_tokens,
-            completion_tokens,
-            tool_calls_opt,
-        );
+        let cost = if let Some(reservation) = &self.reservation {
+            settle_usage(
+                &self.state,
+                &self.api_key,
+                &self.model,
+                &self.group,
+                reservation,
+                prompt_tokens,
+                completion_tokens,
+                tool_calls_opt,
+            )
+        } else {
+            charge_usage_with_tools(
+                &self.state,
+                &self.api_key,
+                &self.model,
+                &self.group,
+                prompt_tokens,
+                completion_tokens,
+                tool_calls_opt,
+            )
+        };
 
         // 记录请求日志（B20：真实耗时）
         let mut log = crate::log::RequestLog::new();
@@ -1021,11 +1238,36 @@ pub async fn handle_chat_completions(
 
     let ctx = BridgeContext::new(request_id.clone(), model.clone());
 
+    // P1：配额预留/结算两段式——在请求发起前预留预估费用，
+    // 请求完成后按实际 token 结算，多预留的部分归还。
+    // 估算：prompt 用 token 计数器精确估算，completion 用保守默认值 256。
+    let estimated_prompt_tokens =
+        crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
+    let estimated_completion_tokens: u64 = 256;
+    let reservation = match reserve_usage(
+        &state,
+        &api_key,
+        &model,
+        &billing_group,
+        estimated_prompt_tokens,
+        estimated_completion_tokens,
+    ) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+
+    // P1-7：调度决策回放——记录候选渠道列表
+    let candidate_channel_ids: Vec<String> = candidates
+        .iter()
+        .filter_map(|(_, cid)| cid.clone())
+        .collect();
+
     if is_stream {
         // B06：failover 循环——依次尝试候选渠道建立流，仅对上游可重试错误切换
         let mut stream_opt = None;
         let mut used_channel_id: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
         for (bridge, cid) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
@@ -1049,8 +1291,12 @@ pub async fn handle_chat_completions(
                     break;
                 }
                 Err(e) => {
-                    // 阶段2：失败分类记入断路器/健康追踪/亲和清除
+                    // P1-7：记录被过滤的渠道及原因
                     if let Some(c) = &cid {
+                        filtered_channels.push(crate::log::FilteredChannel {
+                            channel_id: c.clone(),
+                            reason: e.to_string(),
+                        });
                         state.channel_store.record_channel_failure(
                             c,
                             Some(&model),
@@ -1113,6 +1359,9 @@ pub async fn handle_chat_completions(
                             error: e.to_string(),
                         });
                 }
+                // G5：失败路径释放预留——渠道全败/客户端错误时解冻，
+                // 防止预留永久冻结（2026-09-08 二轮审查）
+                release_reservation(&state, &api_key, &reservation);
                 return bridge_error_response(e).into_response();
             }
         };
@@ -1237,6 +1486,7 @@ pub async fn handle_chat_completions(
                 client_ip: client_ip.clone(),
                 request_id: request_id.clone(),
                 channel_id: used_channel_id.clone(),
+                reservation: Some(reservation),
             });
             let billing_fin = billing.clone();
             let final_event = async move {
@@ -1313,9 +1563,10 @@ pub async fn handle_chat_completions(
         .unwrap_or_default();
         if let Some(cached) = state.response_cache.get(&cache_key).await {
             tracing::debug!("response cache hit for model {}", model);
-            // 计费修复：缓存命中不再免放行——按命中 0 token 记账并写请求日志，
-            // 保持用量可观测（usage 累计 + 日志留痕可审计），费用为 0
-            // （缓存命中不重复扣费，但请求必须留痕）。
+            // 计费：缓存命中按 cache_price 差异化计费（P1）——
+            // 命中意味着整个 prompt 由网关内部响应缓存直接回放（未消耗上游资源），
+            // prompt_tokens 全部按「缓存读」价格计费；cache_price 未配置的模型
+            // 该部分为 0，维持旧的命中免费行为（升级零破坏）。
             let prompt_tokens = cached
                 .get("usage")
                 .and_then(|u| u.get("prompt_tokens"))
@@ -1326,6 +1577,45 @@ pub async fn handle_chat_completions(
                 .and_then(|u| u.get("completion_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
+            // 命中计费：input=0, cached=prompt_tokens（与上游无关，
+            // 输出 token 也由缓存回放，不再计费——缓存命中的输出本就是已付费结果的回放）
+            let cache_cost = match state.pricing_store.calculate_cost_quoted_with_cache(
+                &model,
+                0,
+                0,
+                prompt_tokens,
+                &billing_group,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("cache hit billing: {e}, billing as 0");
+                    0
+                }
+            };
+            if cache_cost > 0 {
+                crate::metrics::global()
+                    .record_cost("usd", (cache_cost as u64).saturating_mul(1_000_000));
+                if let Some(uid) = &api_key.user_id {
+                    let charged = state.user_store.try_charge(uid, cache_cost);
+                    if let Some(u) = state.user_store.get_by_id(uid) {
+                        let remaining = u.remaining();
+                        let threshold = (u.quota / 10).clamp(1000, 10000);
+                        if !charged || remaining < threshold {
+                            state.notify_service.notify_spawn(
+                                crate::notify::NotifyEvent::QuotaLow {
+                                    user_email: u.email.clone(),
+                                    remaining,
+                                },
+                            );
+                        }
+                    }
+                    if charged {
+                        let _ = state.api_key_store.charge_quota(&api_key.id, cache_cost);
+                    }
+                } else {
+                    let _ = state.api_key_store.charge_quota(&api_key.id, cache_cost);
+                }
+            }
             state
                 .usage_tracker
                 .accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
@@ -1336,7 +1626,7 @@ pub async fn handle_chat_completions(
             log.model = model.clone();
             log.input_tokens = prompt_tokens;
             log.output_tokens = completion_tokens;
-            log.cost = 0;
+            log.cost = cache_cost;
             log.latency_ms = request_start.elapsed().as_millis() as u64;
             log.status_code = 200;
             log.ip = client_ip.clone();
@@ -1358,6 +1648,7 @@ pub async fn handle_chat_completions(
         let mut response_opt = None;
         let mut used_channel_id: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
         for (bridge, cid) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
@@ -1379,8 +1670,12 @@ pub async fn handle_chat_completions(
                     break;
                 }
                 Err(e) => {
-                    // 阶段2：失败分类记入断路器/健康追踪/亲和清除
+                    // P1-7：记录被过滤的渠道及原因
                     if let Some(c) = &cid {
+                        filtered_channels.push(crate::log::FilteredChannel {
+                            channel_id: c.clone(),
+                            reason: e.to_string(),
+                        });
                         state.channel_store.record_channel_failure(
                             c,
                             Some(&model),
@@ -1426,6 +1721,10 @@ pub async fn handle_chat_completions(
                 log.error_msg = Some(e.to_string());
                 log.ip = client_ip.clone();
                 log.request_id = Some(request_id.clone());
+                // P1-7：调度决策回放
+                log.candidate_channels = candidate_channel_ids.clone();
+                log.filtered_channels = filtered_channels.clone();
+                log.selected_channel = used_channel_id.clone();
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 crate::metrics::global().record_request(
@@ -1443,6 +1742,9 @@ pub async fn handle_chat_completions(
                             error: e.to_string(),
                         });
                 }
+                // G5：失败路径释放预留——渠道全败/客户端错误时解冻，
+                // 防止预留永久冻结（2026-09-08 二轮审查）
+                release_reservation(&state, &api_key, &reservation);
                 return bridge_error_response(e).into_response();
             }
         };
@@ -1458,16 +1760,17 @@ pub async fn handle_chat_completions(
                 0.0,
             );
 
-            // 计费扣减（M10：复用 charge_usage，消除与非流式分支的重复实现）。
-            // 逻辑等价：calculate_cost_quoted → try_charge（用户余额不足跳过 key 扣费）→
-            // QuotaLow 通知 → charge_quota。返回 cost 供日志记录。
-            let cost = charge_usage(
+            // 计费扣减：P1 两段式——用 settle_usage 结算之前预留的配额。
+            // 若无预留记录（旧路径），回退到 charge_usage。
+            let cost = settle_usage(
                 &state,
                 &api_key,
                 &model,
                 &billing_group,
+                &reservation,
                 response.usage.prompt_tokens,
                 response.usage.completion_tokens,
+                None,
             );
 
             // 事后限流记账（TPM）
@@ -2417,6 +2720,252 @@ pub async fn handle_embeddings(
     }
 }
 
+/// POST /v1/rerank - 重排序
+///
+/// 通过 Bridge::rerank 委托给 Bridge 处理（P1：RAG 客户刚需端点）。
+/// 请求体（Cohere/Jina 兼容形状）：
+///   { "model": "...", "query": "...", "documents": [{"content": "..."}...], "top_n": N? }
+/// 响应体：{ "results": [{"index": i, "relevance_score": s}...], "usage": {...} }
+pub async fn handle_rerank(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let request_start = std::time::Instant::now();
+    let request_id = format!("req-{}", uuid::Uuid::new_v4());
+    let client_ip = extract_client_ip(&headers);
+
+    let model = body.get("model").and_then(|m| m.as_str()).ok_or_else(|| {
+        error_response(
+            "invalid_model",
+            "Missing model field",
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
+    let query = body.get("query").and_then(|q| q.as_str()).ok_or_else(|| {
+        error_response(
+            "invalid_query",
+            "Missing query field",
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
+
+    let api_key = verify_api_key_full(&state, &headers, model)?;
+    let model_owned = model.to_string();
+    let query_owned = query.to_string();
+
+    // 限流检查（功能 3）：鉴权后、推理前
+    let rate_bundle = match state
+        .rate_limiter
+        .check(
+            &api_key.id,
+            &model_owned,
+            api_key.user_id.as_deref(),
+            client_ip.as_deref(),
+        )
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            let retry_after = e.retry_after_secs().unwrap_or(60);
+            return Err(error_response(
+                "rate_limit_exceeded",
+                &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
+                StatusCode::TOO_MANY_REQUESTS,
+            ));
+        }
+    };
+
+    // 校验用户分组模型权限并解析计费分组（问题 5）
+    let billing_group = check_group_model_permission(&state, &api_key, &model_owned)?;
+
+    // B09：前置校验模型定价——未配置价格的模型拒绝请求，避免免费用量
+    ensure_model_priced(&state, &model_owned)?;
+
+    // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
+    let candidates = resolve_bridges(&state, &model_owned);
+    if candidates.is_empty() {
+        return Err(error_response(
+            "no_bridge",
+            "No bridge available",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+
+    // documents 宽容解析：[{content}] | [纯字符串]
+    let documents: Vec<crate::bridge::RerankDocument> = body
+        .get("documents")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    if let Some(s) = v.as_str() {
+                        Some(crate::bridge::RerankDocument {
+                            content: s.to_string(),
+                        })
+                    } else {
+                        v.get("content").and_then(|c| c.as_str()).map(|s| {
+                            crate::bridge::RerankDocument {
+                                content: s.to_string(),
+                            }
+                        })
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if documents.is_empty() {
+        return Err(error_response(
+            "invalid_documents",
+            "documents must be a non-empty array",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let top_n: Option<usize> = body
+        .get("top_n")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+
+    let rerank_req = crate::bridge::RerankRequest {
+        model: model_owned.clone(),
+        query: query_owned,
+        documents,
+        top_n,
+    };
+    let ctx = BridgeContext::new(request_id.clone(), model_owned.clone());
+
+    // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
+    let mut response_opt = None;
+    let mut used_channel_id: Option<String> = None;
+    let mut last_error: Option<crate::bridge::BridgeError> = None;
+    for (bridge, cid) in candidates {
+        if let Some(c) = &cid {
+            state.channel_store.mark_used(c);
+        }
+        match bridge.rerank(&rerank_req, &ctx).await {
+            Ok(resp) => {
+                response_opt = Some(resp);
+                used_channel_id = cid;
+                break;
+            }
+            Err(e) => {
+                if !is_retryable_bridge_error(&e) {
+                    last_error = Some(e);
+                    used_channel_id = cid;
+                    break;
+                }
+                if let Some(cid) = &cid {
+                    state.channel_store.mark_cooldown(cid, e.to_string(), 60);
+                }
+                tracing::warn!("rerank failover: channel {cid:?} failed: {e}, trying next channel");
+                last_error = Some(e);
+            }
+        }
+    }
+    let mut response = match response_opt {
+        Some(r) => r,
+        None => {
+            let e = last_error.unwrap_or_else(|| {
+                crate::bridge::BridgeError::AllAccountsFailed(
+                    "all channels failed for rerank request".into(),
+                )
+            });
+            let latency_ms = request_start.elapsed().as_millis() as u64;
+            let status_code =
+                StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let mut log = crate::log::RequestLog::new();
+            log.user_id = api_key.user_id.clone();
+            log.key_id = Some(api_key.id.clone());
+            log.channel_id = used_channel_id.clone();
+            log.model = model_owned.clone();
+            log.latency_ms = latency_ms;
+            log.status_code = status_code.as_u16();
+            log.error_msg = Some(e.to_string());
+            log.ip = client_ip.clone();
+            log.request_id = Some(request_id);
+            state.log_store.record_request(log);
+            rate_bundle.commit_tokens(0).await;
+            crate::metrics::global().record_request(
+                &model_owned,
+                used_channel_id.as_deref().unwrap_or("unknown"),
+                "error",
+                latency_ms,
+            );
+            if status_code.as_u16() >= 500 {
+                state
+                    .notify_service
+                    .notify_spawn(crate::notify::NotifyEvent::ChannelFailure {
+                        channel_name: model_owned.clone(),
+                        error: e.to_string(),
+                    });
+            }
+            return Err(bridge_error_response(e));
+        }
+    };
+
+    // top_n 截断（上游未截断时由网关兜底）
+    if let Some(n) = top_n {
+        response.results.truncate(n);
+    }
+
+    {
+        let latency_ms = request_start.elapsed().as_millis() as u64;
+        let prompt_tokens = response.usage.prompt_tokens as u64;
+        state
+            .usage_tracker
+            .accumulate(prompt_tokens, 0, 0, 0, 0, 0.0);
+
+        // 计费扣减（rerank 按 prompt token 计费，输出侧无 token）
+        let cost = charge_usage(
+            &state,
+            &api_key,
+            &model_owned,
+            &billing_group,
+            prompt_tokens,
+            0,
+        );
+
+        // 事后限流记账（TPM）
+        rate_bundle.commit_tokens(prompt_tokens).await;
+
+        // 记录请求日志（功能 1）
+        let mut log = crate::log::RequestLog::new();
+        log.user_id = api_key.user_id.clone();
+        log.key_id = Some(api_key.id.clone());
+        log.channel_id = used_channel_id.clone();
+        log.model = model_owned.clone();
+        log.input_tokens = prompt_tokens;
+        log.output_tokens = 0;
+        log.cost = cost;
+        log.latency_ms = latency_ms;
+        log.status_code = 200;
+        log.ip = client_ip.clone();
+        log.request_id = Some(request_id);
+        state.log_store.record_request(log);
+
+        // Prometheus 指标
+        crate::metrics::global().record_request(
+            &model_owned,
+            used_channel_id.as_deref().unwrap_or("unknown"),
+            "ok",
+            latency_ms,
+        );
+        crate::metrics::global().record_tokens(&model_owned, "prompt", prompt_tokens);
+
+        Ok(Json(serde_json::json!({
+            "model": &model_owned,
+            "results": response.results.iter().map(|r| serde_json::json!({
+                "index": r.index,
+                "relevance_score": r.relevance_score,
+            })).collect::<Vec<_>>(),
+            "usage": {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+        })))
+    }
+}
+
 /// POST /v1/images/generations - 图片生成
 ///
 /// 通过 Bridge::generate_image 委托给 Bridge 处理
@@ -3020,35 +3569,41 @@ pub async fn handle_list_models(
 
     // 通用网关语义：模型列表 = 所有启用渠道声明/发现的模型 ∪ 别名映射的 key。
     // 渠道 models 是主数据源（管理员在渠道上配置），映射只是可选别名。
+    // P1 模型元信息：owned_by 由渠道类型/名字推断 + 管理员覆盖，
+    // 附带 context_length 与能力标签（非标准扩展字段，客户端可忽略）。
     let now = chrono::Utc::now().timestamp();
     let mut seen = std::collections::HashSet::new();
     let mut model_list: Vec<Value> = Vec::new();
+
+    let build_entry = |name: &str, channel_owned_by: Option<&str>| {
+        let meta = state.model_metadata.get(name, channel_owned_by);
+        serde_json::json!({
+            "id": name,
+            "object": "model",
+            "created": now,
+            "owned_by": meta.owned_by,
+            "context_length": meta.context_length,
+            "capabilities": meta.capabilities,
+        })
+    };
 
     for ch in state.channel_store.list() {
         if !ch.is_enabled() {
             continue;
         }
+        let channel_owned_by =
+            crate::model::metadata::owned_by_for_channel_type(ch.channel_type.as_str());
         for m in ch.models.iter().chain(ch.discovered_models.iter()) {
             if m.is_empty() || !seen.insert(m.clone()) {
                 continue;
             }
-            model_list.push(serde_json::json!({
-                "id": m,
-                "object": "model",
-                "created": now,
-                "owned_by": "aigx"
-            }));
+            model_list.push(build_entry(m, channel_owned_by));
         }
     }
-    // 别名映射的对外名也暴露（供客户端按别名调用）
+    // 别名映射的对外名也暴露（供客户端按别名调用；别名无渠道归属，纯名字推断）
     for name in state.model_mapper.all_mappings().keys() {
         if seen.insert(name.clone()) {
-            model_list.push(serde_json::json!({
-                "id": name,
-                "object": "model",
-                "created": now,
-                "owned_by": "aigx"
-            }));
+            model_list.push(build_entry(name, None));
         }
     }
 
@@ -3075,11 +3630,14 @@ pub async fn handle_get_model(
     let mapped = state.model_mapper.all_mappings().contains_key(&model);
     if in_channels || mapped {
         let now = chrono::Utc::now().timestamp();
+        let meta = state.model_metadata.get(&model, None);
         Ok(Json(serde_json::json!({
             "id": model,
             "object": "model",
             "created": now,
-            "owned_by": "aigx",
+            "owned_by": meta.owned_by,
+            "context_length": meta.context_length,
+            "capabilities": meta.capabilities,
             "permission": []
         })))
     } else {
