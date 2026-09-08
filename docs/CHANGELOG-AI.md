@@ -1,3 +1,25 @@
+## 2026-09-08 · P0 补课：/chat 用户聊天工作区落地
+
+### 做了什么
+- `frontend/src/pages/Chat.tsx` + `Chat.css`：三段式聊天工作区。左侧会话列表
+  （新建/切换/删除，首条用户消息前 20 字自动标题），右侧复用
+  `ChatDebugger`（`hideToolbar` 精简形态，顶部居中模型 pill）。
+- 会话持久化走 `localStorage`（key `aigx_chat_sessions`，含 id/title/messages/
+  updated_at，按更新时间倒序），后端 API 保持可替换；http 非 secure context
+  下 `crypto.randomUUID` 自动回退时间戳随机串。
+- `ChatDebugger.tsx`：导出 `DebugMessage`，新增 `initialMessages` /
+  `onMessagesChange` / `hideToolbar` props；消息变化实时回调宿主页面做持久化；
+  工具条与精简条共用同一份 `modelPicker` JSX（↑↓/Enter/Esc 键盘导航保持）。
+- `App.tsx` 加 `/chat` 路由（ProtectedLayout 保护），`Sidebar.tsx` 开发组加
+  「聊天」入口（普通用户可见），i18n zh/en 补齐 6 条词条。
+
+### 为什么
+- 二轮审查发现 P0 宣称完成但 `/chat` 页面与路由从未落地，这是 P0 验收的
+  核心缺口；审美继续对齐 open-webui（窄会话栏 + 居中对话流 + 悬浮模型 pill）。
+
+### 验证结论
+- 前端 `typecheck` / `lint` / `test`（29）/ `build` 全绿。
+- 本地 build 产物还原 static，未触碰同事并行编辑文件。
 
 ## 2026-09-08 · B2 成本预估器：原始消息直出预估
 
