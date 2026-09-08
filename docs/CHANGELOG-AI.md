@@ -1,3 +1,31 @@
+## 2026-09-08 · P0 收尾：reasoning 折叠 + Markdown/代码块渲染
+
+### 做了什么
+- 新增 `MessageViewer`（`frontend/src/components/MessageViewer.tsx` + `.css`）：
+  消息可读渲染组件。DeepSeek 式「深度思考」折叠面板（默认收起、可展开、
+  `aria-expanded` + 键盘可达）；行级 Markdown（粗体/行内 code/标题/列表/
+  引用/链接/分割线）；fenced code 独立成块——语言标签 + 一键复制 +
+  流式截断兜底闭合。自写解析器，零新增依赖（外部依赖是负债），全部
+  HTML 先转义再渲染，上游内容永不执行。
+- SSE 层 reasoning/content 分流：`ChatStreamDelta` 加 `kind`，`parseSseFrame`
+  把 OpenAI `reasoning_content` / Anthropic `reasoning` 与正文分离为独立增量；
+  同一帧两者共存时各发一条（不再混进正文）。
+- `ChatDebugger`：`DebugMessage` 加 `reasoning` 字段；流式拼装按 kind 分流
+  （思考进折叠面板、正文清占位）；消息复制含思考内容；消息渲染切到
+  MessageViewer。
+- 测试：sse 10 项（新增同帧 reasoning+content 分离用例）、MessageViewer 5 项
+  （粗体/行内 code、fenced code、截断兜底、XSS 转义、折叠交互），前端合计 35。
+
+### 为什么
+- ROADMAP P0 验收要求「fenced code 可复制、reasoning 默认收起可展开」；
+  此前 reasoning_content 被混进正文，展示层不消费，本轮补齐 P0 最后两块。
+- 不引入 react-markdown/highlight.js：解析器仅覆盖对话高价值子集，可控、
+  无供应链，符合「一百年项目」的外部依赖最小化原则。
+
+### 验证结论
+- 前端 `typecheck` / `lint` / `test`（35）/ `build` 全绿。
+- 本地 build 产物还原 static，未触碰同事并行编辑文件。
+
 ## 2026-09-08 · P0 补课：/chat 用户聊天工作区落地
 
 ### 做了什么

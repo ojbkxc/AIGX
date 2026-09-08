@@ -16,7 +16,7 @@
 | 阶段 | 主题 | 状态 |
 |---|---|---|
 | 阶段一 | 提案：差距矩阵 + 演进路线 + 头脑风暴 + 分期路线图 + UI 迁移方案 | 已完成 |
-| P0 | 用户侧聊天中心 + 工程基座 | 基本完成（2026-09-08 落地 `/chat` 三段式工作区；reasoning 折叠与 fenced code 高亮待补） |
+| P0 | 用户侧聊天中心 + 工程基座 | **已完成**（2026-09-08：`/chat` 三段式工作区 + reasoning 折叠 + fenced code 复制，验收标准全项落地） |
 | P1 | 体验跃升：计费正确性 + 安全水位 + Playground V2 + 分区设置 | 进行中（第一波完成） |
 | P2 | 锦上添花：长任务框架 + Realtime + 调度智能运营化 | 未开始 |
 
@@ -116,9 +116,9 @@
 
 ## 下一步行动（按顺序）
 
-1. P0 收尾：ChatDebugger 消息层补 reasoning 折叠展示 + fenced code 块高亮
-   （SSE 已解析 reasoning_content，展示层未消费）。
-2. P1 第二波：计费闭环完整性（G1/G2/G5 + G4）→ 会话撤销收尾 → 模型元信息同步。
+1. P1 第二波：计费闭环完整性（G1/G2/G5 + G4）→ 会话撤销收尾 → 模型元信息同步。
+2. P1 前端体验跃升：Playground V2（三模式 + 参数调节）、Settings 分区式、
+   模型预设（Models workspace）+ 提示词库（Prompts workspace）。
 3. 每轮迭代出口：clippy 零警告 + test 全绿 + typecheck/build 通过 + 更新 `CHANGELOG-AI.md` + 推进本文件状态。
 4. 遗留技术债（P2 清债）：Workspace_B780A2 分支计费语义落后主链路（G9）。
 

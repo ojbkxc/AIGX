@@ -27,15 +27,23 @@ export interface ConfirmDialogProps {
 export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): JSX.Element | null {
   const { t } = useTranslation();
 
-  // 打开时逐帧触发入场动画
+  // 打开时逐帧触发入场动画；Escape 关闭（键盘可达性，P0 验收）
   useEffect(() => {
     if (state) {
       const raf = requestAnimationFrame(() => {
         // 弹窗显隐由 state 驱动；动画由 App.css 的 modal-* 样式处理
       });
-      return () => cancelAnimationFrame(raf);
+      const onKey = (e: KeyboardEvent): void => {
+        if (e.key === 'Escape') onClose?.();
+      };
+      document.addEventListener('keydown', onKey);
+      return () => {
+        cancelAnimationFrame(raf);
+        document.removeEventListener('keydown', onKey);
+      };
     }
-  }, [state]);
+    return undefined;
+  }, [state, onClose]);
 
   if (!state) return null;
 
