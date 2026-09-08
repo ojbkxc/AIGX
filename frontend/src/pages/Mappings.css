@@ -13,15 +13,15 @@
   display: flex;
   align-items: flex-end;
   gap: 10px;
-  padding: 12px;
+  padding: 16px;
   background: var(--section-item-bg);
-  border-radius: 10px;
+  border-radius: 12px;
   border: 1px solid var(--border-color);
-  transition: border-color 0.3s, background 0.3s;
+  transition: border-color 0.2s ease, background 0.2s ease;
 }
 
 .mapping-row:hover {
-  border-color: rgba(47, 111, 237, 0.25);
+  border-color: var(--line-strong);
 }
 
 .mapping-field {
@@ -31,11 +31,9 @@
 
 .mapping-label {
   display: block;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   margin-bottom: 6px;
 }
 
@@ -61,22 +59,22 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 10px;
+  padding: 6px 12px;
   background: var(--section-item-bg);
   border: 1px solid var(--border-color);
-  border-radius: 7px;
-  font-size: 11px;
-  transition: border-color 0.2s;
+  border-radius: 8px;
+  font-size: 12px;
+  transition: border-color 0.2s ease;
   cursor: default;
 }
 
 .default-model-chip:hover {
-  border-color: rgba(47, 111, 237, 0.35);
+  border-color: var(--line-strong);
 }
 
 .default-model-chip .model-key {
   font-weight: 600;
-  color: var(--text-color);
+  color: var(--text-main);
 }
 
 .default-model-chip .model-arrow {
@@ -86,8 +84,8 @@
 
 .default-model-chip .model-value {
   color: var(--text-muted);
-  font-family: 'SF Mono', 'Consolas', monospace;
-  font-size: 11px;
+  font-family: 'JetBrainsMono', 'SF Mono', 'Consolas', monospace;
+  font-size: 12px;
 }
 
 @media (max-width: 600px) {

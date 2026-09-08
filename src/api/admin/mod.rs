@@ -29,8 +29,8 @@ pub use users::{handle_create_user, handle_delete_user, handle_list_users, handl
 pub use logs::{handle_export_request_logs, handle_list_audit_logs, handle_list_request_logs};
 
 pub use channels::{
-    handle_add_channel, handle_available_models, handle_delete_channel, handle_list_channels,
-    handle_update_channel,
+    handle_add_channel, handle_available_models, handle_channel_health_archive,
+    handle_delete_channel, handle_list_channels, handle_update_channel,
 };
 
 pub use tokens::{

@@ -1510,6 +1510,19 @@ pub async fn handle_chat_completions(
                     .swap(true, std::sync::atomic::Ordering::SeqCst)
                 {
                     let (pt, ct) = billing_fin.finalize();
+                    // C1 健康档案：流正常完成，按真实总时延补记延迟样本。
+                    // 建流时已 note_success（清零断路器）；此处只补延迟，
+                    // 不重复计成功次数（见 health_archive::note_latency）。
+                    if let Some(channel_id) = &billing_fin.channel_id {
+                        billing_fin
+                            .state
+                            .channel_store
+                            .health_archive()
+                            .note_latency(
+                                channel_id,
+                                billing_fin.request_start.elapsed().as_millis() as u64,
+                            );
+                    }
                     // 事后限流记账（TPM）
                     rate_bundle.commit_tokens(pt + ct).await;
                     (pt, ct)

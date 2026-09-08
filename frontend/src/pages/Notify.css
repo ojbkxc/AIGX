@@ -58,12 +58,12 @@
 
 /* 提示说明 */
 .notify-note {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   margin-bottom: 12px;
   line-height: 1.6;
   padding: 8px 12px;
-  background: var(--section-item-bg);
+  background: var(--card-bg);
   border-radius: 8px;
   border-left: 3px solid var(--warning-color);
 }
@@ -92,7 +92,6 @@
 @media (max-width: 768px) {
   .notify-form-grid {
     grid-template-columns: 1fr;
-
   }
 
   .notify-test-email-row {
@@ -161,7 +160,7 @@
 }
 
 .alert-rule-field span {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   font-weight: 500;
 }
@@ -189,7 +188,7 @@
 .alert-rule-switch-track {
   width: 34px;
   height: 18px;
-  border-radius: 999px;
+  border-radius: 9999px;
   background: var(--border-color);
   transition: background 0.2s ease;
 }

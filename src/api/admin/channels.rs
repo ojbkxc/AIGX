@@ -20,6 +20,45 @@ use super::common::{error_response, verify_admin, verify_user};
 // 这里需要引用主 crate 的 Channel 和相关类型
 use crate::channel::{Channel, ChannelType};
 
+/// GET /api/channels/:id/health-archive — 渠道健康档案（C1）。
+///
+/// 返回该渠道最近 N 天（默认 30，上限 30）的健康趋势：
+/// 每日成功率 / P95 延迟 / 熔断次数 / 最后错误。用于渠道行展开的
+/// 「健康档案」面板（ROADMAP P1-14）。
+pub async fn handle_channel_health_archive(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+
+    let days = 30u32;
+    let snapshots = state.channel_store.health_archive().query(&id, days);
+    let data: Vec<Value> = snapshots
+        .iter()
+        .map(|s| {
+            json!({
+                "day": s.day,
+                "success": s.success,
+                "failure": s.failure,
+                "trips": s.trips,
+                "success_rate": (s.success_rate() * 100.0).round() / 100.0,
+                "p95_ms": s.p95_ms(),
+                "last_error": s.last_error,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "channel_id": id,
+            "days": days,
+            "snapshots": data,
+        }
+    })))
+}
+
 /// 渠道创建请求
 #[derive(Debug, Deserialize)]
 pub struct ChannelRequest {

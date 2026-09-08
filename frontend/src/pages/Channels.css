@@ -1,6 +1,5 @@
 /* Channels.css — 渠道管理页面样式
- * 保持 cf-ai-gw 玻璃拟态：复用 App.css 的 CSS 变量体系
- * 融入 deepseek-pp 结构模式：shell + content 分层（标题区统一使用全局 page-header） */
+ * 对齐 open-webui 设计系统：中性灰度 + 现代圆角 */
 
 .channels-shell {
   display: flex;
@@ -15,50 +14,31 @@
   animation: fadeIn 0.3s ease;
 }
 
-/* 渠道类型徽章 — 不同类型用不同色调 */
+/* 渠道类型徽章 — 药丸形 */
 .channel-type-badge {
   display: inline-block;
-  padding: 2px 10px;
-  border-radius: 6px;
+  padding: 4px 10px;
+  border-radius: 9999px;
   font-size: 12px;
   font-weight: 500;
   background: var(--code-bg);
   color: var(--code-color);
-  border: 1px solid var(--code-border);
   white-space: nowrap;
 }
 
 .channel-type-badge[data-type="cloudflare"] {
-  background: rgba(247, 144, 9, 0.12);
-  color: #f59e0b;
-  border-color: rgba(247, 144, 9, 0.25);
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--warning-color);
 }
 
 .channel-type-badge[data-type="openai_compatible"] {
-  background: rgba(16, 185, 129, 0.12);
-  color: #34d399;
-  border-color: rgba(16, 185, 129, 0.25);
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--success-color);
 }
 
-.channel-type-badge[data-type="anthropic"] {
-  background: rgba(47, 111, 237, 0.12);
-  color: #7ca4f5;
-  border-color: rgba(47, 111, 237, 0.25);
-}
-
-:root[data-theme="light"] .channel-type-badge[data-type="cloudflare"] {
-  background: rgba(247, 144, 9, 0.08);
-  color: #d97706;
-}
-
-:root[data-theme="light"] .channel-type-badge[data-type="openai_compatible"] {
-  background: rgba(16, 185, 129, 0.08);
-  color: #059669;
-}
-
-:root[data-theme="light"] .channel-type-badge[data-type="anthropic"] {
-  background: rgba(47, 111, 237, 0.08);
-  color: #2f6fed;
+.channel-type-badge[data-type="Workspace_B780A2"] {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--cyan);
 }
 
 /* 优先级/权重展示 */
@@ -66,7 +46,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .pw-priority {
@@ -110,11 +90,9 @@
 }
 
 .chat-field span {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
+  font-weight: 500;
 }
 
 .chat-messages {
@@ -123,9 +101,9 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 12px;
+  padding: 16px;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--bg-color);
   margin-bottom: 12px;
   min-height: 260px;
@@ -133,7 +111,7 @@
 
 .chat-empty {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 14px;
   text-align: center;
   margin: auto;
 }
@@ -156,28 +134,26 @@
 }
 
 .chat-msg-role {
-  font-size: 10px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
 }
 
 .chat-msg-content {
-  font-size: 13.5px;
+  font-size: 14px;
   line-height: 1.6;
   color: var(--text-main);
   background: var(--card-bg);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
-  padding: 8px 12px;
+  border-radius: 12px;
+  padding: 10px 14px;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .chat-msg-user .chat-msg-content {
   background: var(--accent-color);
-  color: white;
+  color: var(--bg-color);
   border: none;
 }
 
@@ -197,5 +173,5 @@
 .chat-input {
   flex: 1;
   resize: none;
-  font-size: 13.5px;
+  font-size: 14px;
 }

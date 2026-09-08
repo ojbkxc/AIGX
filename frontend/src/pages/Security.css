@@ -29,24 +29,21 @@
 
 .security-stat-label {
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
   margin-bottom: 8px;
 }
 
 .security-stat-value {
   font-size: 28px;
-  font-weight: 700;
-  font-family: 'Inter', sans-serif;
+  font-weight: 600;
   color: var(--text-main);
   line-height: 1.2;
 }
 
-/* 严重事件卡片：左侧紫色色条 */
+/* 严重事件卡片：左侧强调色条 */
 .security-stat-critical {
-  border-left: 3px solid rgb(47, 111, 237);
+  border-left: 3px solid var(--accent-color);
 }
 
 /* 近 24h 卡片：左侧蓝色色条 */

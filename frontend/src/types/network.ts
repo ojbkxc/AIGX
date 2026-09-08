@@ -101,7 +101,6 @@ export interface NetworkChannelInfo {
   name: string;
   provider: string;
   baseUrls: string[];
-  apiKey: string;
   isCircuitOpen: boolean;
   healthStatus: 'healthy' | 'warning' | 'error';
   trafficRatio: number;

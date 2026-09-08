@@ -29,6 +29,7 @@ pub mod aimd;
 pub mod balancer;
 pub mod circuit_breaker;
 pub mod empty_response;
+pub mod health_archive;
 pub mod health_manager;
 pub mod prober;
 pub mod rate_budget;
@@ -223,6 +224,8 @@ pub struct ChannelStore {
     affinity_cache: affinity::AffinityCache,
     /// per-channel/model 健康状态追踪器（阶段2）
     health_tracker: health_manager::ChannelStateTracker,
+    /// 渠道健康档案（C1：30 天成功率/P95/熔断次数，跨重启持久化）
+    health_archive: health_archive::HealthArchive,
     /// 连续空响应计数器（阶段2）
     empty_response_counter: empty_response::EmptyResponseCounter,
     /// RoundRobin 负载均衡器（阶段2）
@@ -241,11 +244,12 @@ impl ChannelStore {
     pub fn new(store: Arc<FileStore>) -> Self {
         let s = Self {
             channels: RwLock::new(Vec::new()),
-            store,
+            store: store.clone(),
             cooldowns: dashmap::DashMap::new(),
             circuit_breaker: circuit_breaker::CircuitBreaker::with_defaults(),
             affinity_cache: affinity::AffinityCache::default(),
             health_tracker: health_manager::ChannelStateTracker::new(),
+            health_archive: health_archive::HealthArchive::new(store.clone()),
             empty_response_counter: empty_response::EmptyResponseCounter::new(),
             balancer: balancer::RoundRobinBalancer::new(),
             aimd: dashmap::DashMap::new(),
@@ -750,6 +754,7 @@ impl ChannelStore {
         self.circuit_breaker.record_success(channel_id);
         self.health_tracker
             .record_success(channel_id, model, latency_ms);
+        self.health_archive.note_success(channel_id, latency_ms);
         self.empty_response_counter.reset(channel_id);
         // AIMD 学习：成功请求上调限额（当前未提供上游限额头，传 None）
         self.aimd_on_success(channel_id, None);
@@ -771,10 +776,17 @@ impl ChannelStore {
         error_message: &str,
         session_id: Option<&str>,
     ) {
+        // C1 熔断迁移：失败前 closed、失败后 open → 记一次 trip。
+        // 必须 BEFORE record_failure（失败后状态已变）。
+        let was_closed = self.circuit_breaker.get_state(channel_id) == "closed";
         self.circuit_breaker
             .record_failure(channel_id, failure_type.clone());
         self.health_tracker
             .record_error(channel_id, model, &failure_type, error_message);
+        self.health_archive.note_failure(channel_id, error_message);
+        if was_closed && self.circuit_breaker.get_state(channel_id) != "closed" {
+            self.health_archive.note_trip(channel_id);
+        }
 
         // 批次3：限速类失败同步喂给 AIMD（降限额/进冷却）
         if let circuit_breaker::FailureType::RateLimited { retry_after, .. } = &failure_type {
@@ -863,6 +875,11 @@ impl ChannelStore {
     /// 健康状态追踪器引用（管理面查询渠道健康汇总用）。
     pub fn health_tracker(&self) -> &health_manager::ChannelStateTracker {
         &self.health_tracker
+    }
+
+    /// 渠道健康档案引用（C1：30 天持久化趋势查询/落盘用）。
+    pub fn health_archive(&self) -> &health_archive::HealthArchive {
+        &self.health_archive
     }
 
     /// 空响应计数器引用（管理面/监控用）。

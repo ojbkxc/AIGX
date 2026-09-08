@@ -443,8 +443,25 @@ async fn main() -> anyhow::Result<()> {
                 }),
             });
         }
+        // C1 渠道健康档案落盘 + 30 天滚动清理：内存累加器每 5 分钟 flush，
+        // 进程重启/崩溃最多丢一个采样周期的数据（运营趋势可接受）。
+        {
+            let channel_store = state.channel_store.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "health-archive-flush",
+                interval: Duration::from_secs(300),
+                first_run_delay: Duration::from_secs(120),
+                run: Box::new(move || {
+                    let cs = channel_store.clone();
+                    Box::pin(async move {
+                        let a = cs.health_archive();
+                        a.flush() + a.prune()
+                    })
+                }),
+            });
+        }
         tracing::info!(
-            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep)",
+            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush)",
             scheduler.task_count()
         );
     }
@@ -800,6 +817,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/channels/:id/reset-circuit",
             post(api::admin::handle_reset_channel_circuit),
+        )
+        .route(
+            "/api/channels/:id/health-archive",
+            get(api::admin::handle_channel_health_archive),
         )
         .route(
             "/api/channels/:id/test",
