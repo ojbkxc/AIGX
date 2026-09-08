@@ -194,7 +194,7 @@ export default function Security(): JSX.Element {
             ))}
           </Select>
           <div className="security-filter-action">
-            <Button size="sm" onClick={handleSearch}>{t('查询')}</Button>
+            <Button size="sm" onClick={handleSearch} disabled={loading}>{loading ? t('查询中...') : t('查询')}</Button>
           </div>
         </div>
       </Card>
@@ -233,8 +233,8 @@ export default function Security(): JSX.Element {
                         </code>
                       </td>
                       <td style={{ fontSize: 12 }}>{ev.ip || ev.client_ip || '—'}</td>
-                      <td style={{ fontSize: 12 }}>{ev.user || ev.user_id || ev.username || '—'}</td>
-                      <td style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: 'var(--text-muted)' }}>
+                      <td style={{ fontSize: 12 }} title={ev.user || ev.user_id || ev.username || ''}>{ev.user || ev.user_id || ev.username || '—'}</td>
+                      <td style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: 'var(--text-muted)' }} title={ev.detail || ev.details || ev.message || ''}>
                         {ev.detail || ev.details || ev.message || '—'}
                       </td>
                       <td>

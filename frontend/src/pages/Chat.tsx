@@ -110,13 +110,12 @@ export default function Chat(): JSX.Element {
       const next = prev.filter((s) => s.id !== id);
       if (!next.length) next.push(newSession(Date.now()));
       saveSessions(next);
+      if (id === activeId) {
+        const fallback = next.find((s) => s.id !== id) ?? next[0];
+        setActiveId(fallback.id);
+      }
       return next;
     });
-    if (id === activeId) {
-      const remaining = sessions.filter((s) => s.id !== id);
-      const nextActive = remaining.length ? remaining[0].id : '';
-      setActiveId(nextActive);
-    }
   };
 
   const handleSelect = (id: string): void => {

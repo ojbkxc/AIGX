@@ -1,6 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { getNetworkStatus, updateNetworkConfig, restartNetwork } from '../api/network';
-import type { NetworkStatusRaw } from '../types/network';
+import type { NetworkStatusRaw, NetworkConfigRequest } from '../types/network';
+import { useToast } from '../components/Toast';
 import './NetworkLayer.css';
 
 interface NetworkLayerConfig {
@@ -76,6 +79,8 @@ function formatTimestamp(ts: number | undefined): string {
 }
 
 export default function NetworkLayer(): JSX.Element {
+  const { t } = useTranslation();
+  const addToast = useToast();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [networkStatus, setNetworkStatus] = useState<NetworkStatusRaw | null>(null);
@@ -90,26 +95,26 @@ export default function NetworkLayer(): JSX.Element {
   const [showRestartConfirm, setShowRestartConfirm] = useState(false);
   const [restartPending, setRestartPending] = useState(false);
 
-  useEffect(() => {
-    fetchStatus();
-  }, []);
-
-  const fetchStatus = async (): Promise<void> => {
+  const fetchStatus = useCallback(async (keepOld = false): Promise<void> => {
     try {
-      setLoading(true);
+      if (!keepOld) setLoading(true);
       const res = await getNetworkStatus();
       setNetworkStatus(res.data ?? null);
     } catch (error) {
-      console.error('Failed to fetch network status:', error);
+      addToast(t('获取网络状态失败'), 'error');
     } finally {
       setLoading(false);
     }
-  };
+  }, [addToast, t]);
+
+  useEffect(() => {
+    void fetchStatus();
+  }, [fetchStatus]);
 
   const handleRefresh = async (): Promise<void> => {
     try {
       setRefreshing(true);
-      await fetchStatus();
+      await fetchStatus(true);
     } finally {
       setRefreshing(false);
     }
@@ -118,10 +123,19 @@ export default function NetworkLayer(): JSX.Element {
   const handleUpdateConfig = async (): Promise<void> => {
     try {
       setShowSettings(false);
-      await updateNetworkConfig('default', { enabled: config.enabled, strategy: config.strategy });
-      await fetchStatus();
+      const payload: NetworkConfigRequest & Record<string, string | number | boolean> = {
+        enabled: config.enabled,
+        strategy: config.strategy,
+        account_pool_min: config.minAccounts,
+        account_pool_max: config.minAccounts + 10,
+        connection_pool_max: config.maxConnections,
+        session_pool_max: config.maxSessions,
+      };
+      await updateNetworkConfig('default', payload);
+      addToast(t('配置已保存'));
+      await fetchStatus(true);
     } catch (error) {
-      console.error('Failed to update config:', error);
+      addToast(t('配置保存失败'), 'error');
       setShowSettings(true);
     }
   };
@@ -129,11 +143,12 @@ export default function NetworkLayer(): JSX.Element {
   const handleRestart = async (): Promise<void> => {
     try {
       setRestartPending(true);
-      await restartNetwork();
-      await fetchStatus();
       setShowRestartConfirm(false);
+      await restartNetwork();
+      addToast(t('网络层已重启'));
+      await fetchStatus(true);
     } catch (error) {
-      console.error('Failed to restart network:', error);
+      addToast(t('网络层重启失败'), 'error');
       setShowRestartConfirm(false);
     } finally {
       setRestartPending(false);
@@ -408,146 +423,34 @@ export default function NetworkLayer(): JSX.Element {
               </div>
             </div>
 
-            {/* Connection Performance Overview */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* Protocol Distribution */}
-              <div className="glass-card">
-                <h3 className="text-lg font-semibold text-white mb-4">协议使用分布</h3>
-                <div className="space-y-4">
-                  {[
-                    { name: 'TCP', icon: '🔗', count: networkStatus.connection_pool.active_connections, total: networkStatus.connection_pool.total_connections },
-                    { name: 'WebSocket', icon: '📡', count: Math.floor(networkStatus.connection_pool.active_connections * 0.4), total: networkStatus.connection_pool.total_connections },
-                    { name: 'KCP', icon: '🚀', count: Math.floor(networkStatus.connection_pool.active_connections * 0.3), total: networkStatus.connection_pool.total_connections },
-                  ].map((protocol, index) => (
-                    <div key={index} className="flex items-center gap-3">
-                      <span className="text-2xl">{protocol.icon}</span>
-                      <div className="flex-1">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-gray-300 font-medium">{protocol.name}</span>
-                          <span className="text-gray-400 text-sm">{protocol.count}/{protocol.total}</span>
-                        </div>
-                        <div className="w-full h-2 bg-gray-800 rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all"
-                            style={{ width: `${protocol.total > 0 ? (protocol.count / protocol.total) * 100 : 0}%` }}
-                          ></div>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Connection Quality */}
-              <div className="glass-card">
-                <h3 className="text-lg font-semibold text-white mb-4">连接质量分析</h3>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-gray-800/30 rounded-xl p-4">
-                    <p className="text-gray-400 text-sm mb-2">吞吐量</p>
-                    <p className="text-2xl font-bold text-white">245.3</p>
-                    <p className="text-xs text-green-500">请求/秒</p>
-                  </div>
-                  <div className="bg-gray-800/30 rounded-xl p-4">
-                    <p className="text-gray-400 text-sm mb-2">平均延迟</p>
-                    <p className="text-2xl font-bold text-white">{fmtLatency(networkStatus.connection_pool.avg_latency_ms)}</p>
-                    <p className="text-xs text-yellow-500">{'目标: <100ms'}</p>
-                  </div>
-                  <div className="bg-gray-800/30 rounded-xl p-4">
-                    <p className="text-gray-400 text-sm mb-2">成功率</p>
-                    <p className="text-2xl font-bold text-white">{fmtPercent(networkStatus.connection_pool.successful_requests + networkStatus.connection_pool.failed_requests > 0 ? networkStatus.connection_pool.successful_requests / (networkStatus.connection_pool.successful_requests + networkStatus.connection_pool.failed_requests) : 1)}</p>
-                    <p className="text-xs text-green-500">99.9%+</p>
-                  </div>
-                  <div className="bg-gray-800/30 rounded-xl p-4">
-                    <p className="text-gray-400 text-sm mb-2">资源利用率</p>
-                    <p className="text-2xl font-bold text-white">67%</p>
-                    <p className="text-xs text-yellow-500">正常范围: 50-80%</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Recent Alerts and Health Status */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Health Status */}
-              <div className="glass-card lg:col-span-2">
-                <h3 className="text-lg font-semibold text-white mb-4">系统健康状态</h3>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-green-500/10 border border-green-500/50 rounded-xl p-4 flex items-center gap-4">
-                    <div className="w-12 h-12 bg-green-500/20 rounded-lg flex items-center justify-center">
-                      <svg className="w-6 h-6 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                    </div>
-                    <div>
-                      <p className="text-white font-medium">整体健康</p>
-                      <p className="text-green-500 text-sm">优秀</p>
-                    </div>
-                  </div>
-                  <div className="bg-blue-500/10 border border-blue-500/50 rounded-xl p-4 flex items-center gap-4">
-                    <div className="w-12 h-12 bg-blue-500/20 rounded-lg flex items-center justify-center">
-                      <svg className="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                    </div>
-                    <div>
-                      <p className="text-white font-medium">连接状态</p>
-                      <p className="text-blue-500 text-sm">正常</p>
-                    </div>
-                  </div>
-                  <div className="bg-purple-500/10 border border-purple-500/50 rounded-xl p-4 flex items-center gap-4">
-                    <div className="w-12 h-12 bg-purple-500/20 rounded-lg flex items-center justify-center">
-                      <svg className="w-6 h-6 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                      </svg>
-                    </div>
-                    <div>
-                      <p className="text-white font-medium">处理能力</p>
-                      <p className="text-purple-500 text-sm">高效</p>
-                    </div>
-                  </div>
-                  <div className="bg-cyan-500/10 border border-cyan-500/50 rounded-xl p-4 flex items-center gap-4">
-                    <div className="w-12 h-12 bg-cyan-500/20 rounded-lg flex items-center justify-center">
-                      <svg className="w-6 h-6 text-cyan-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                      </svg>
-                    </div>
-                    <div>
-                      <p className="text-white font-medium">负载均衡</p>
-                      <p className="text-cyan-500 text-sm">智能</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Quick Actions */}
-              <div className="glass-card">
-                <h3 className="text-lg font-semibold text-white mb-4">快捷操作</h3>
-                <div className="space-y-3">
-                  <button className="w-full p-3 bg-gray-800/50 border border-gray-700 rounded-lg hover:bg-gray-700/50 transition text-left flex items-center justify-between group">
-                    <span className="text-gray-300 group-hover:text-white">查看详细指标</span>
-                    <svg width="18" height="18" className="text-gray-400 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
-                  </button>
-                  <button className="w-full p-3 bg-gray-800/50 border border-gray-700 rounded-lg hover:bg-gray-700/50 transition text-left flex items-center justify-between group">
-                    <span className="text-gray-300 group-hover:text-white">查看日志</span>
-                    <svg width="18" height="18" className="text-gray-400 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
-                  </button>
-                  <button className="w-full p-3 bg-gray-800/50 border border-gray-700 rounded-lg hover:bg-gray-700/50 transition text-left flex items-center justify-between group">
-                    <span className="text-gray-300 group-hover:text-white">查看告警</span>
-                    <svg width="18" height="18" className="text-gray-400 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
-                  </button>
-                  <button className="w-full p-3 bg-gray-800/50 border border-gray-700 rounded-lg hover:bg-gray-700/50 transition text-left flex items-center justify-between group">
-                    <span className="text-gray-300 group-hover:text-white">配置查看</span>
-                    <svg width="18" height="18" className="text-gray-400 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
-                  </button>
-                </div>
+            {/* Quick Actions */}
+            <div className="glass-card">
+              <h3 className="text-lg font-semibold text-white mb-4">{t('快捷操作')}</h3>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <Link to="/" className="p-3 bg-gray-800/50 border border-gray-700 rounded-lg hover:bg-gray-700/50 transition text-left flex items-center justify-between group">
+                  <span className="text-gray-300 group-hover:text-white">{t('查看详细指标')}</span>
+                  <svg width="18" height="18" className="text-gray-400 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </Link>
+                <Link to="/logs" className="p-3 bg-gray-800/50 border border-gray-700 rounded-lg hover:bg-gray-700/50 transition text-left flex items-center justify-between group">
+                  <span className="text-gray-300 group-hover:text-white">{t('查看日志')}</span>
+                  <svg width="18" height="18" className="text-gray-400 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </Link>
+                <Link to="/notify" className="p-3 bg-gray-800/50 border border-gray-700 rounded-lg hover:bg-gray-700/50 transition text-left flex items-center justify-between group">
+                  <span className="text-gray-300 group-hover:text-white">{t('查看告警')}</span>
+                  <svg width="18" height="18" className="text-gray-400 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </Link>
+                <Link to="/settings" className="p-3 bg-gray-800/50 border border-gray-700 rounded-lg hover:bg-gray-700/50 transition text-left flex items-center justify-between group">
+                  <span className="text-gray-300 group-hover:text-white">{t('配置查看')}</span>
+                  <svg width="18" height="18" className="text-gray-400 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </Link>
               </div>
             </div>
           </>

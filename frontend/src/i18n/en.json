@@ -743,4 +743,12 @@
 "复制失败，请手动选择复制": "Copy failed, please select and copy manually",
 "已配置": "Configured",
 "+ 添加档位": "+ Add tier"
+,
+"添加中...": "Adding...",
+"查询中...": "Querying...",
+"获取网络状态失败": "Failed to fetch network status",
+"配置已保存": "Configuration saved",
+"配置保存失败": "Failed to save configuration",
+"网络层已重启": "Network layer restarted",
+"网络层重启失败": "Failed to restart network layer"
 }

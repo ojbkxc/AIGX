@@ -91,7 +91,7 @@ export default function IpManagement() {
   };
 
   // 添加规则
-  const handleAdd = async () => {
+  const handleAdd = async (): Promise<void> => {
     const p = pattern.trim();
     if (!p) {
       setError(t('请输入 IP 或 CIDR'));
@@ -113,7 +113,7 @@ export default function IpManagement() {
       }
       setPattern('');
       setNote('');
-      loadFilter();
+      await loadFilter();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -203,7 +203,10 @@ export default function IpManagement() {
           </div>
 
           {/* 添加规则表单 */}
-          <div className="ipm-add-form">
+          <form
+            className="ipm-add-form"
+            onSubmit={(e) => { e.preventDefault(); void handleAdd(); }}
+          >
             <div className="form-group">
               <label>{t('IP / CIDR')} *</label>
               <input
@@ -211,7 +214,7 @@ export default function IpManagement() {
                 placeholder={t('例如：192.168.0.0/24 或 10.0.0.1')}
                 value={pattern}
                 onChange={(e) => setPattern(e.target.value)}
-                disabled={loading}
+                disabled={loading || adding}
               />
             </div>
             <div className="form-group">
@@ -221,19 +224,19 @@ export default function IpManagement() {
                 placeholder={t('可选备注，如：办公网段')}
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
-                disabled={loading}
+                disabled={loading || adding}
               />
             </div>
             <div className="ipm-add-action">
               <button
+                type="submit"
                 className="btn btn-primary"
-                onClick={handleAdd}
                 disabled={adding || loading || !pattern.trim()}
               >
-                {adding ? t('保存中...') : t('添加规则')}
+                {adding ? t('添加中...') : t('添加规则')}
               </button>
             </div>
-          </div>
+          </form>
 
           {/* 规则列表 */}
           {loading ? (
