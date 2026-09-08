@@ -736,6 +736,9 @@ pub(crate) struct StreamBillingState {
     pub(crate) client_ip: Option<String>,
     pub(crate) request_id: String,
     pub(crate) channel_id: Option<String>,
+    /// P1-7：调度决策回放（流式路径补全）
+    pub(crate) candidate_channels: Vec<String>,
+    pub(crate) filtered_channels: Vec<crate::log::FilteredChannel>,
     /// P1：预留记录（两段式计费）
     pub(crate) reservation: Option<Reservation>,
 }
@@ -800,6 +803,9 @@ impl StreamBillingState {
         log.status_code = 200;
         log.ip = self.client_ip.clone();
         log.request_id = Some(self.request_id.clone());
+        log.candidate_channels = self.candidate_channels.clone();
+        log.filtered_channels = self.filtered_channels.clone();
+        log.selected_channel = self.channel_id.clone();
         self.state.log_store.record_request(log);
 
         (prompt_tokens, completion_tokens)
@@ -1342,6 +1348,9 @@ pub async fn handle_chat_completions(
                 log.error_msg = Some(e.to_string());
                 log.ip = client_ip.clone();
                 log.request_id = Some(request_id.clone());
+                log.candidate_channels = candidate_channel_ids.clone();
+                log.filtered_channels = filtered_channels.clone();
+                log.selected_channel = used_channel_id.clone();
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 crate::metrics::global().record_request(
@@ -1486,6 +1495,8 @@ pub async fn handle_chat_completions(
                 client_ip: client_ip.clone(),
                 request_id: request_id.clone(),
                 channel_id: used_channel_id.clone(),
+                candidate_channels: candidate_channel_ids.clone(),
+                filtered_channels: filtered_channels.clone(),
                 reservation: Some(reservation),
             });
             let billing_fin = billing.clone();

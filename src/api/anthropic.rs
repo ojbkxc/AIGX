@@ -753,6 +753,8 @@ pub async fn handle_messages(
                 client_ip: client_ip.clone(),
                 request_id: request_id.clone(),
                 channel_id: used_channel_id.clone(),
+                candidate_channels: Vec::new(),
+                filtered_channels: Vec::new(),
                 // anthropic 分支尚未接入两段式计费（P1 后续），
                 // 走 finalize 内 charge_usage_with_tools 旧路径
                 reservation: None,
