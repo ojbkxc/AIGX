@@ -424,8 +424,27 @@ async fn main() -> anyhow::Result<()> {
                 })
             }),
         });
+        // G2 预留 TTL 解冻：进程崩溃/请求挂死留下的冻结额度定期归还。
+        // TTL 30 分钟，远超单请求上限（max_tokens 请求通常在数分钟内完成）。
+        {
+            let user_store = state.user_store.clone();
+            let api_key_store = state.api_key_store.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "reservation-sweep",
+                interval: Duration::from_secs(600),
+                first_run_delay: Duration::from_secs(300),
+                run: Box::new(move || {
+                    let us = user_store.clone();
+                    let ks = api_key_store.clone();
+                    Box::pin(async move {
+                        let ttl = 30 * 60;
+                        us.release_stale_reservations(ttl) + ks.release_stale_reservations(ttl)
+                    })
+                }),
+            });
+        }
         tracing::info!(
-            "cron scheduler started: {} task(s) (session-registry-sweep)",
+            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep)",
             scheduler.task_count()
         );
     }

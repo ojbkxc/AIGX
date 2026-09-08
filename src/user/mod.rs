@@ -52,6 +52,9 @@ pub struct User {
     /// 已预留但未结算的配额（P1：配额预留/结算两段式）
     #[serde(default)]
     pub reserved_quota: i64,
+    /// 最近一次预留的时间戳（G2：超时解冻依据，None=无未结算预留）
+    #[serde(default)]
+    pub reserved_at: Option<i64>,
     /// 状态: active / disabled
     #[serde(default = "default_status")]
     pub status: String,
@@ -169,6 +172,7 @@ impl UserStore {
             quota,
             used_quota: 0,
             reserved_quota: 0,
+            reserved_at: None,
             status: "active".into(),
             group: "default".into(),
             totp_secret: String::new(),
@@ -210,6 +214,7 @@ impl UserStore {
             quota,
             used_quota: 0,
             reserved_quota: 0,
+            reserved_at: None,
             status: "active".into(),
             group: "default".into(),
             totp_secret: String::new(),
@@ -381,6 +386,9 @@ impl UserStore {
         if user.remaining() < amount {
             return false;
         }
+        if user.reserved_quota == 0 {
+            user.reserved_at = Some(chrono::Utc::now().timestamp());
+        }
         user.reserved_quota += amount;
         let snapshot = user.clone();
         drop(by_id);
@@ -408,6 +416,9 @@ impl UserStore {
         };
         // 释放预留（不超过已预留量）
         let release = reserved.min(user.reserved_quota);
+        if release >= user.reserved_quota {
+            user.reserved_at = None;
+        }
         user.reserved_quota -= release;
         // 实际消费转入 used_quota
         user.used_quota += actual;
@@ -440,12 +451,43 @@ impl UserStore {
         };
         // 最多归还当前预留量：预留可能已被其他路径结算（防御性上限）
         let release = amount.min(user.reserved_quota);
+        if release >= user.reserved_quota {
+            user.reserved_at = None;
+        }
         user.reserved_quota -= release;
         let snapshot = user.clone();
         drop(by_id);
         if let Err(e) = self.persist(&snapshot) {
             tracing::error!("Failed to persist user {} release_quota: {}", id, e);
         }
+    }
+
+    /// 回收超时未结算的预留（G2：预留 TTL 解冻）。
+    ///
+    /// 进程崩溃 / 流式请求挂死会让预留永久冻结；周期任务按 `reserved_at`
+    /// 判断超时（默认 30 分钟，远超单请求上限），把整笔预留归还余额。
+    /// 返回解冻的账号数。
+    pub fn release_stale_reservations(&self, ttl_secs: i64) -> u64 {
+        let cutoff = chrono::Utc::now().timestamp() - ttl_secs;
+        let mut count = 0u64;
+        let mut by_id = self.by_id.write();
+        for user in by_id.values_mut() {
+            let stale = user.reserved_at.map(|t| t < cutoff).unwrap_or(false);
+            if stale && user.reserved_quota > 0 {
+                user.reserved_quota = 0;
+                user.reserved_at = None;
+                let snapshot = user.clone();
+                if let Err(e) = self.persist(&snapshot) {
+                    tracing::error!(
+                        "Failed to persist stale reservation release {}: {}",
+                        user.id,
+                        e
+                    );
+                }
+                count += 1;
+            }
+        }
+        count
     }
     /// 生成随机默认密码 (8 位)
     pub fn random_password() -> String {
@@ -608,6 +650,39 @@ mod tests {
         assert_eq!(after.reserved_quota, 0);
         assert_eq!(after.used_quota, 0);
     }
+
+    /// G2：预留带时间戳，超时未结算的预留被周期任务解冻。
+    #[test]
+    fn stale_reservation_released_after_ttl() {
+        let s = store();
+        let u = s.create("stale@test.com", "pw", Role::User, 1000).unwrap();
+        assert!(s.reserve_quota(&u.id, 300));
+        assert!(s.get_by_id(&u.id).unwrap().reserved_at.is_some());
+        // 手动把预留时间拨到 1 小时前（模拟挂死请求）
+        {
+            let mut by_id = s.by_id.write();
+            by_id.get_mut(&u.id).unwrap().reserved_at = Some(chrono::Utc::now().timestamp() - 3600);
+        }
+        // TTL 30 分钟：1 小时前的预留应被回收
+        assert_eq!(s.release_stale_reservations(30 * 60), 1);
+        let after = s.get_by_id(&u.id).unwrap();
+        assert_eq!(after.reserved_quota, 0);
+        assert!(after.reserved_at.is_none());
+        assert_eq!(after.remaining(), 1000);
+    }
+
+    /// G2：未超时的预留不受影响。
+    #[test]
+    fn fresh_reservation_not_released() {
+        let s = store();
+        let u = s.create("fresh@test.com", "pw", Role::User, 1000).unwrap();
+        assert!(s.reserve_quota(&u.id, 300));
+        assert_eq!(s.release_stale_reservations(30 * 60), 0);
+        let after = s.get_by_id(&u.id).unwrap();
+        assert_eq!(after.reserved_quota, 300);
+        assert!(after.reserved_at.is_some());
+    }
+
     #[test]
     fn get_by_email() {
         let s = store();

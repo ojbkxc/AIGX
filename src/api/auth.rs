@@ -53,6 +53,9 @@ pub struct ApiKey {
     #[serde(default)]
     pub reserved_quota: i64,
     /// IP 白名单（None=不限）
+    /// 最近一次预留的时间戳（G2：超时解冻依据，None=无未结算预留）
+    #[serde(default)]
+    pub reserved_at: Option<i64>,
     #[serde(default)]
     pub ip_limit: Option<Vec<String>>,
     /// 状态：active / disabled（与 is_active 并存，向后兼容）
@@ -242,6 +245,7 @@ impl ApiKeyStore {
             used_quota: 0,
             ip_limit: opts.ip_limit,
             reserved_quota: 0,
+            reserved_at: None,
             status: "active".to_string(),
             updated_at: now,
         };
@@ -381,6 +385,9 @@ impl ApiKeyStore {
                 return false;
             }
         }
+        if api_key.reserved_quota == 0 {
+            api_key.reserved_at = Some(chrono::Utc::now().timestamp());
+        }
         api_key.reserved_quota += amount;
         let snapshot = api_key.clone();
         drop(keys);
@@ -404,6 +411,9 @@ impl ApiKeyStore {
             None => return,
         };
         let release = reserved.min(api_key.reserved_quota);
+        if release >= api_key.reserved_quota {
+            api_key.reserved_at = None;
+        }
         api_key.reserved_quota -= release;
         api_key.used_quota += actual;
         api_key.last_used_at = Some(chrono::Utc::now().timestamp());
@@ -430,12 +440,39 @@ impl ApiKeyStore {
         };
         // 防御性上限：最多归还当前预留量
         let release = amount.min(api_key.reserved_quota);
+        if release >= api_key.reserved_quota {
+            api_key.reserved_at = None;
+        }
         api_key.reserved_quota -= release;
         let snapshot = api_key.clone();
         drop(keys);
         if let Err(e) = self.store.put(&format!("apikey_{id}"), &snapshot) {
             tracing::error!("Failed to persist apikey {} release_quota: {}", id, e);
         }
+    }
+
+    /// 回收超时未结算的预留（G2：预留 TTL 解冻，与 UserStore 对称）。
+    pub fn release_stale_reservations(&self, ttl_secs: i64) -> u64 {
+        let cutoff = chrono::Utc::now().timestamp() - ttl_secs;
+        let mut count = 0u64;
+        let mut keys = self.keys.write();
+        for key in keys.values_mut() {
+            let stale = key.reserved_at.map(|t| t < cutoff).unwrap_or(false);
+            if stale && key.reserved_quota > 0 {
+                key.reserved_quota = 0;
+                key.reserved_at = None;
+                let snapshot = key.clone();
+                if let Err(e) = self.store.put(&format!("apikey_{}", key.id), &snapshot) {
+                    tracing::error!(
+                        "Failed to persist stale apikey reservation {}: {}",
+                        key.id,
+                        e
+                    );
+                }
+                count += 1;
+            }
+        }
+        count
     }
     /// 重置已用额度
     pub fn reset_used_quota(&self, id: &str) -> bool {
@@ -794,6 +831,24 @@ mod session_registry_tests {
         assert_eq!(after.reserved_quota, 0);
         assert_eq!(after.used_quota, 0);
     }
+
+    /// G2：API key 预留带时间戳，超时未结算的预留被回收。
+    #[test]
+    fn apikey_stale_reservation_released() {
+        let s = key_store();
+        let k = s.generate("stale").unwrap();
+        assert!(s.reserve_quota(&k.id, 100));
+        assert!(s.validate(&k.key).unwrap().reserved_at.is_some());
+        {
+            let mut keys = s.keys.write();
+            keys.get_mut(&k.id).unwrap().reserved_at = Some(chrono::Utc::now().timestamp() - 3600);
+        }
+        assert_eq!(s.release_stale_reservations(30 * 60), 1);
+        let after = s.validate(&k.key).unwrap();
+        assert_eq!(after.reserved_quota, 0);
+        assert!(after.reserved_at.is_none());
+    }
+
     #[test]
     fn revoke_all_sessions() {
         let reg = SessionRegistry::new();

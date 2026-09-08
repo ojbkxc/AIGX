@@ -74,6 +74,9 @@ pub struct RequestLog {
     /// 调度决策回放（P1-7）：最终选中渠道
     #[serde(default)]
     pub selected_channel: Option<String>,
+    /// 是否缓存命中（G4：区分 cache 请求与普通请求的记账维度）
+    #[serde(default)]
+    pub cache_hit: bool,
 }
 
 /// 被过滤的渠道信息（P1-7 调度决策回放）
@@ -109,6 +112,7 @@ impl RequestLog {
             candidate_channels: Vec::new(),
             filtered_channels: Vec::new(),
             selected_channel: None,
+            cache_hit: false,
         }
     }
 }

@@ -1618,7 +1618,7 @@ pub async fn handle_chat_completions(
             }
             state
                 .usage_tracker
-                .accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
+                .accumulate(0, 0, 0, prompt_tokens, 0, 0.0);
             let mut log = crate::log::RequestLog::new();
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
@@ -1632,6 +1632,7 @@ pub async fn handle_chat_completions(
             log.ip = client_ip.clone();
             log.request_id = Some(request_id.clone());
             log.error_msg = Some("cache_hit".to_string());
+            log.cache_hit = true;
             state.log_store.record_request(log);
             crate::metrics::global().record_request(
                 &model,

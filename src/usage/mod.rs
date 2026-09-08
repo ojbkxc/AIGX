@@ -259,3 +259,37 @@ pub fn fmt_limit(n: u64) -> String {
         n.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn tracker() -> UsageTracker {
+        let store = Arc::new(FileStore::new(TempDir::new().unwrap().path().to_path_buf()));
+        let pool = AccountPool::new(store.clone());
+        UsageTracker::new(store, Arc::new(pool))
+    }
+
+    /// G4：缓存命中走 cache_read 维度，不再计入 input/output。
+    #[test]
+    fn cache_hit_counts_cache_read_dimension() {
+        let t = tracker();
+        t.accumulate(0, 0, 0, 120, 0, 0.0);
+        let today = t.today_stats();
+        assert_eq!(today.input, 0);
+        assert_eq!(today.output, 0);
+        assert_eq!(today.cache_read, 120);
+    }
+
+    /// 普通请求不受 cache 维度影响。
+    #[test]
+    fn normal_request_counts_input_output() {
+        let t = tracker();
+        t.accumulate(30, 8, 0, 0, 0, 0.0);
+        let today = t.today_stats();
+        assert_eq!(today.input, 30);
+        assert_eq!(today.output, 8);
+        assert_eq!(today.cache_read, 0);
+    }
+}
