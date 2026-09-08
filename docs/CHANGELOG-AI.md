@@ -1,3 +1,29 @@
+
+## 2026-09-09 · Settings 五分区 + 前端全量 TS 化收尾
+
+### 做了什么
+- `frontend/src/pages/Settings.tsx` 重构为五分区 Tabs（通用/界面/通知/账户/用量），
+  对齐 open-webui Settings 信息架构：
+  - 通用：使用限额 + API 配置（超时/重试）。
+  - 界面：主题三态选择器（system/light/dark），与全局 theme store（`lib/theme.ts`）
+    及登录页/侧边栏切换共享同一份 localStorage 持久化，即时生效。
+  - 通知：独立页面 `/notify` 的入口 + 说明（避免重复承载）。
+  - 账户：改密表单（Enter 提交，原 onClick 改为 form submit）。
+  - 用量：限流配置 + 缓存管理 + 价格同步 + 汇率配置。
+- 并行同事改动的收尾（下班后接管统一交付）：
+  - Sidebar hook 依赖修复、Groups/Wallet 表单内联错误、Orders 状态筛选+刷新。
+  - Epay 折扣档位数组化（添加/删除档位）+ 商户密钥掩码「已配置」徽章。
+  - Login/Register/Profile 密码可见切换 + Profile TOTP 密钥复制。
+  - i18n zh/en 补齐 23 条词条；`NetworkConfigRequest` 补 snake_case 可选字段。
+- 重建 `static/` 产物（vite build，含全部并行改动）。
+
+### 为什么
+- ROADMAP P1 前端体验跃升第 12 项「分区式 Settings V2」；此前 Settings 是
+  672 行单页卡片堆，信息密度高、导航成本大，分区后一屏一焦点，符合
+  ChatGPT/DeepSeek 简约范式。
+
+### 验证结论
+- 前端 `typecheck` / `lint` / `test`（35）/ `build` 全绿；CI 由 GitHub Actions 验证。
 ## 2026-09-08 · Playground V2：三模式 + 参数透传 + Images 端点
 
 ### 做了什么
