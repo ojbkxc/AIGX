@@ -2834,6 +2834,37 @@ pub async fn handle_rerank(
         top_n,
     };
     let ctx = BridgeContext::new(request_id.clone(), model_owned.clone());
+    // G1：rerank 计费对齐两段式——请求发起前按 query+documents 精确估算预留，
+    // 完成后按上游实际 prompt token 结算；失败路径统一 release。
+    let estimated_text = {
+        let mut s = String::with_capacity(
+            rerank_req
+                .documents
+                .iter()
+                .map(|d| d.content.len() + 1)
+                .sum::<usize>()
+                + rerank_req.query.len(),
+        );
+        s.push_str(&rerank_req.query);
+        for doc in &rerank_req.documents {
+            s.push(char::from(10));
+            s.push_str(&doc.content);
+        }
+        s
+    };
+    let estimated_prompt_tokens =
+        crate::token_estimate::count_text(&model_owned, &estimated_text) as u64;
+    let reservation = match reserve_usage(
+        &state,
+        &api_key,
+        &model_owned,
+        &billing_group,
+        estimated_prompt_tokens,
+        0,
+    ) {
+        Ok(r) => r,
+        Err(e) => return Err(e),
+    };
 
     // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
     let mut response_opt = None;
@@ -2900,6 +2931,7 @@ pub async fn handle_rerank(
                         error: e.to_string(),
                     });
             }
+            release_reservation(&state, &api_key, &reservation);
             return Err(bridge_error_response(e));
         }
     };
@@ -2916,14 +2948,16 @@ pub async fn handle_rerank(
             .usage_tracker
             .accumulate(prompt_tokens, 0, 0, 0, 0, 0.0);
 
-        // 计费扣减（rerank 按 prompt token 计费，输出侧无 token）
-        let cost = charge_usage(
+        // 计费扣减：G1 对齐两段式——用 settle_usage 结算之前预留的配额。
+        let cost = settle_usage(
             &state,
             &api_key,
             &model_owned,
             &billing_group,
+            &reservation,
             prompt_tokens,
             0,
+            None,
         );
 
         // 事后限流记账（TPM）
