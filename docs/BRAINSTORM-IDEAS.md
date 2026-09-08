@@ -106,7 +106,7 @@
 - **建议动作**：P1 第二波清单加一项「rerank 计费对齐」。
 - **附加发现（🔴 疑似 bug）**：`reserve_usage()` 的 key 预留失败回滚分支把 `settle_quota(uid, reserved_user, 0)` 当「释放」用——语义上是 release 而非 settle，且 `settle_quota` 内部有 `reserved.min(user.reserved_quota)` 的钳制；当同一用户并发请求都持有预留时，这个钳制可能**归还别人的预留**。建议加 `release_quota()` 专用方法并把回滚改为 release 语义，附带并发测试（两个 key 同时预留同一用户）。
 
-### G2. 预留冻结没有「解冻超时」（⚠️ 真问题）
+### G2. 预留冻结没有「解冻超时」（✅ 已落地 2026-09-08）
 - **发现**：`User.reserved_quota`/`ApiKey.reserved_quota` 是裸字段，无过期时间。若进程在 `reserve` 后、`settle` 前崩溃（或流式请求挂死），预留额度**永久冻结**，用户余额被无声吃走。
 - **更好方案**：预留记录携带 `reserved_at` 时间戳（不破坏 JSON 兼容，加 `#[serde(default)]`）；cron 已有 `src/cron.rs` 调度器，加一个「预留回收」周期任务（TTL 建议 30 分钟，远超 max_tokens 请求上限），只解冻超时未结算的预留。
 - **建议动作**：P1 第二波与 rerank 对齐合并为「计费闭环完整性」。
@@ -116,7 +116,7 @@
 - **更好方案**：生成 10 个一次性恢复码（SHA-256 哈希存储，展示一次即删），登录页 TOTP 输入框支持恢复码。这是 open-webui/new-api 都缺的原创细节，成本约 150 行纯函数。
 - **建议动作**：P2 或作为 TOTP 收尾的顺带项。
 
-### G4. 缓存命中计费的记账维度残缺（⚠️ 真问题）
+### G4. 缓存命中计费的记账维度残缺（✅ 已落地 2026-09-08）
 - **发现**：缓存命中按 `cache_price` 计费后，`usage_tracker.accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0)` 仍把命中当「正常输入」，没有走 `cache_read` 维度；请求日志 `error_msg = "cache_hit"` 也无法与普通请求区分开统计。
 - **更好方案**：`accumulate` 的 cache_read 参数已存在但没被使用——命中时应 `accumulate(0, 0, 0, prompt_tokens, 0, 0.0)`，日志加 `cache_hit: bool` 字段（向后兼容）。
 - **建议动作**：P1 第二波「缓存节省看板（B1）」的前置修正，否则省钱看板拿不到准确数据。
