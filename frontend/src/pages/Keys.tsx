@@ -31,6 +31,7 @@ interface KeyFormState {
   name: string;
   group: string;
   allowed_models: string;
+  /** 过期时间：表单内为 datetime-local 字符串（空串=永不过期），提交时转 Unix 秒 */
   expires_at: string;
   quota_limit: string;
   ip_limit: string;
@@ -58,6 +59,23 @@ const EMPTY_FORM: KeyFormState = {
   status: 'active',
 };
 
+/** Unix 秒 → datetime-local 字符串（本地时区，取分钟精度） */
+function tsToLocalInput(ts: number | null | undefined): string {
+  if (ts == null || ts <= 0) return '';
+  const d = new Date(ts > 1e12 ? ts : ts * 1000);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** datetime-local 字符串 → Unix 秒（空串/非法返回 null） */
+function localInputToTs(v: string): number | null {
+  if (!v.trim()) return null;
+  const ms = new Date(v).getTime();
+  if (Number.isNaN(ms)) return null;
+  return Math.floor(ms / 1000);
+}
+
 export default function Keys(): JSX.Element {
   const [tokens, setTokens] = useState<TokenItem[]>([]);
   const [groups, setGroups] = useState<GroupItem[]>([]);
@@ -73,6 +91,8 @@ export default function Keys(): JSX.Element {
   const [revealedKeys, setRevealedKeys] = useState<Record<string | number, boolean>>({});
   // 按需取回的明文缓存（管理员列表脱敏，点击查看/复制时经 GET /api/tokens/:id/key 取回）
   const [plainKeys, setPlainKeys] = useState<Record<string | number, string>>({});
+  // 正在取明文的令牌 ID（查看按钮 loading 态）
+  const [fetchingKeyId, setFetchingKeyId] = useState<string | number | null>(null);
   const [editing, setEditing] = useState<TokenItem | null>(null);
   const [form, setForm] = useState<KeyFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
@@ -117,7 +137,7 @@ export default function Keys(): JSX.Element {
       allowed_models: Array.isArray(tk.allowed_models)
         ? tk.allowed_models.join(', ')
         : (tk.allowed_models || ''),
-      expires_at: tk.expires_at != null ? String(tk.expires_at) : '',
+      expires_at: tsToLocalInput(tk.expires_at),
       quota_limit: tk.quota_limit != null ? String(tk.quota_limit) : '',
       ip_limit: '',
       status: tk.status || (tk.is_active === false ? 'disabled' : 'active'),
@@ -156,8 +176,10 @@ export default function Keys(): JSX.Element {
         ip_limit: ipLimit,
         status: form.status,
       };
-      if (form.expires_at.trim()) payload.expires_at = Number(form.expires_at);
-      if (form.quota_limit.trim()) payload.quota_limit = Number(form.quota_limit);
+      const expiresTs = localInputToTs(form.expires_at);
+      if (expiresTs != null) payload.expires_at = expiresTs;
+      const quotaNum = Number(form.quota_limit);
+      if (form.quota_limit.trim() && Number.isFinite(quotaNum)) payload.quota_limit = quotaNum;
 
       if (editing) {
         await api.updateToken(editing.id, payload);
@@ -200,16 +222,39 @@ export default function Keys(): JSX.Element {
     });
   };
 
-  const handleToggleStatus = async (tk: TokenItem) => {
-    const newStatus = tk.status === 'disabled' ? 'active' : 'disabled';
-    setError('');
-    try {
-      await api.updateToken(tk.id, { status: newStatus });
-      addToast(newStatus === 'active' ? t('已启用') : t('已禁用'));
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+  const handleToggleStatus = (tk: TokenItem) => {
+    const disabling = tk.status !== 'disabled';
+    const newStatus = disabling ? 'disabled' : 'active';
+    // 禁用令牌立即影响生产调用，需要确认；启用方向可直接执行
+    if (disabling) {
+      setConfirmState({
+        title: t('禁用令牌'),
+        message: t('确定禁用此令牌？使用该令牌的调用将立即失败。'),
+        confirmText: t('禁用'),
+        danger: true,
+        onConfirm: async () => {
+          setError('');
+          try {
+            await api.updateToken(tk.id, { status: newStatus });
+            addToast(t('已禁用'));
+            await load();
+          } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+          }
+        },
+      });
+      return;
     }
+    void (async () => {
+      setError('');
+      try {
+        await api.updateToken(tk.id, { status: newStatus });
+        addToast(t('已启用'));
+        await load();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    })();
   };
 
   const handleResetUsed = (id: string | number) => {
@@ -371,21 +416,25 @@ export default function Keys(): JSX.Element {
                             display: 'inline-block',
                             verticalAlign: 'middle',
                           }}>
-                            {revealedKeys[tk.id] ? (plainKeys[tk.id] || tk.plain_key) : tk.key || '••••••••••••'}
+                            {revealedKeys[tk.id]
+                              ? (plainKeys[tk.id] || tk.plain_key || t('（获取失败）'))
+                              : (tk.key || '••••••••••••')}
                           </code>
                           <button
                             type="button"
                             className="btn btn-outline btn-sm"
                             title={revealedKeys[tk.id] ? t('隐藏密钥') : t('查看密钥')}
+                            disabled={fetchingKeyId === tk.id}
                             onClick={() => {
                               if (!revealedKeys[tk.id] && !plainKeys[tk.id] && !tk.plain_key) {
-                                void fetchPlainKey(tk);
+                                setFetchingKeyId(tk.id);
+                                void fetchPlainKey(tk).finally(() => setFetchingKeyId(null));
                               }
                               setRevealedKeys((prev) => ({ ...prev, [tk.id]: !prev[tk.id] }));
                             }}
                             style={{ padding: '2px 6px', flexShrink: 0 }}
                           >
-                            {revealedKeys[tk.id] ? t('隐藏') : t('查看')}
+                            {fetchingKeyId === tk.id ? t('获取中…') : revealedKeys[tk.id] ? t('隐藏') : t('查看')}
                           </button>
                           <button
                             type="button"
@@ -480,8 +529,8 @@ export default function Keys(): JSX.Element {
       )}
 
       {showModal && (
-        <div className="modal-overlay" onClick={closeModal}>
-          <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={handleSave}>
+        <div className="modal-overlay">
+          <form className="modal" onSubmit={handleSave}>
             <div className="modal-header">
               <h3>{editing ? t('编辑令牌') : t('创建 API 令牌')}</h3>
               <button type="button" className="modal-close" onClick={closeModal}>&times;</button>
@@ -527,9 +576,9 @@ export default function Keys(): JSX.Element {
                     onChange={(e) => setForm({ ...form, allowed_models: e.target.value })}
                   />
                   <Input
-                    label={`${t('过期时间')} ${t('(Unix 时间戳，留空则永不过期)')}`}
-                    type="number"
-                    placeholder={editing ? t('留空表示不修改') : t('keysPlaceholderExpiresAt')}
+                    label={`${t('过期时间')} ${t('(留空则永不过期)')}`}
+                    type="datetime-local"
+                    placeholder={editing ? t('留空表示不修改') : ''}
                     value={form.expires_at}
                     onChange={(e) => setForm({ ...form, expires_at: e.target.value })}
                   />
@@ -562,7 +611,7 @@ export default function Keys(): JSX.Element {
                 <Button onClick={closeModal}>{t('完成')}</Button>
               ) : (
                 <>
-                  <Button variant="outline" onClick={closeModal}>{t('取消')}</Button>
+                  <Button variant="outline" onClick={closeModal} disabled={saving}>{t('取消')}</Button>
                   <Button type="submit" disabled={saving}>
                     {saving ? t('保存中...') : (editing ? t('保存') : t('创建'))}
                   </Button>

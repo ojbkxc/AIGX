@@ -20,6 +20,9 @@ interface GroupForm {
   description: string;
 }
 
+/** 弹窗内的表单错误（区别于页面级 error，直接渲染在表单顶部，不被遮罩挡住） */
+type ModalError = string;
+
 export default function Groups(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
@@ -33,6 +36,8 @@ export default function Groups(): JSX.Element {
   const [editing, setEditing] = useState<GroupItem | null>(null);
   const [form, setForm] = useState<GroupForm>({ name: '', ratio: '1', allowed_models: '', description: '' });
   const [saving, setSaving] = useState(false);
+  // 弹窗内错误：渲染在表单顶部，避免页面顶部错误被遮罩挡住看不见
+  const [modalError, setModalError] = useState<ModalError>('');
 
   useEffect(() => {
     void loadGroups();
@@ -54,11 +59,13 @@ export default function Groups(): JSX.Element {
   const openAdd = () => {
     setEditing(null);
     setForm({ name: '', ratio: '1', allowed_models: '', description: '' });
+    setModalError('');
     setShowModal(true);
   };
 
   const openEdit = (g: GroupItem) => {
     setEditing(g);
+    setModalError('');
     setForm({
       name: g.name || '',
       ratio: String(g.ratio != null ? g.ratio : 1),
@@ -78,11 +85,11 @@ export default function Groups(): JSX.Element {
   // payload 与后端 GroupRequest 对齐
   const handleSave = async () => {
     if (!form.name.trim()) {
-      setError(t('分组名称为必填项'));
+      setModalError(t('分组名称为必填项'));
       return;
     }
     setSaving(true);
-    setError('');
+    setModalError('');
     try {
       const allowedModels = form.allowed_models
         .split(',')
@@ -99,7 +106,7 @@ export default function Groups(): JSX.Element {
       closeModal();
       void loadGroups();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setModalError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
@@ -212,13 +219,14 @@ export default function Groups(): JSX.Element {
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
       {showModal && (
-        <div className="modal-overlay" onClick={closeModal}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay">
+          <div className="modal">
             <div className="modal-header">
               <h3>{editing ? t('编辑分组') : t('新建分组')}</h3>
               <button className="modal-close" onClick={closeModal}>&times;</button>
             </div>
             <div className="modal-body">
+              {modalError && <div className="error-message">{modalError}</div>}
               <div className="form-group">
                 <label>{t('分组名称')} *</label>
                 <input
@@ -262,7 +270,7 @@ export default function Groups(): JSX.Element {
               </div>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={closeModal}>{t('取消')}</button>
+              <button className="btn btn-outline" onClick={closeModal} disabled={saving}>{t('取消')}</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
                 {saving ? t('保存中...') : t('保存')}
               </button>

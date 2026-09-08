@@ -48,6 +48,7 @@ export default function Logs(): JSX.Element {
   const size = 20;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [exporting, setExporting] = useState<'json' | 'csv' | null>(null);
   const addToast = useToast();
   const { t } = useTranslation();
 
@@ -85,8 +86,14 @@ export default function Logs(): JSX.Element {
 
   const handleExport = async (format: 'json' | 'csv') => {
     try {
+      setExporting(format);
+      // 拼接当前生效的筛选参数，保证导出与页面筛选结果一致
+      const qs = new URLSearchParams({ format });
+      if (filters.user) qs.set('user', filters.user);
+      if (filters.model) qs.set('model', filters.model);
+      if (filters.channel) qs.set('channel', filters.channel);
       const token = localStorage.getItem('token');
-      const res = await fetch(`/api/logs/requests/export?format=${format}`, {
+      const res = await fetch(`/api/logs/requests/export?${qs.toString()}`, {
         headers: { 'Authorization': `Bearer ${token}` },
       });
       if (!res.ok) {
@@ -104,6 +111,8 @@ export default function Logs(): JSX.Element {
       addToast(t('导出成功'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExporting(null);
     }
   };
 
@@ -209,8 +218,12 @@ export default function Logs(): JSX.Element {
           </Button>
           {tab === 'requests' && (
             <>
-              <Button variant="outline" size="sm" onClick={() => void handleExport('json')}>{t('导出 JSON')}</Button>
-              <Button variant="outline" size="sm" onClick={() => void handleExport('csv')}>{t('导出 CSV')}</Button>
+              <Button variant="outline" size="sm" onClick={() => void handleExport('json')} disabled={exporting !== null}>
+                {exporting === 'json' ? t('导出中…') : t('导出 JSON')}
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => void handleExport('csv')} disabled={exporting !== null}>
+                {exporting === 'csv' ? t('导出中…') : t('导出 CSV')}
+              </Button>
             </>
           )}
           {tab === 'requests' && (
@@ -295,7 +308,7 @@ export default function Logs(): JSX.Element {
                       <td>
                         <span className={(l.status_code ?? 0) < 400 ? 'badge badge-success' : 'badge badge-danger'}>{l.status_code}</span>
                       </td>
-                      <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.error_msg || '—'}>
                         {l.error_msg || '—'}
                       </td>
                     </tr>
@@ -304,8 +317,8 @@ export default function Logs(): JSX.Element {
                       <td>{fmtTime(l.created_at)}</td>
                       <td>{l.admin_id}</td>
                       <td><code style={{ background: 'var(--card-bg)', padding: '2px 6px', borderRadius: 4 }}>{l.action}</code></td>
-                      <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.target}</td>
-                      <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, color: 'var(--text-muted)' }}>
+                      <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.target || ''}>{l.target}</td>
+                      <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, color: 'var(--text-muted)' }} title={l.after || '—'}>
                         {l.after || '—'}
                       </td>
                     </tr>

@@ -350,6 +350,8 @@ export default function Dashboard(): JSX.Element {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [trend, setTrend] = useState<TrendData[] | null>(null);
+  // 手动刷新按钮的 pending 态（不与整页 loading 混用，避免数据闪断）
+  const [refreshing, setRefreshing] = useState(false);
   const { t } = useTranslation();
 
   // 增强看板数据
@@ -387,6 +389,7 @@ export default function Dashboard(): JSX.Element {
   };
 
   const loadData = async (): Promise<void> => {
+    setRefreshing(true);
     setLoading(true);
     setError('');
     try {
@@ -449,6 +452,7 @@ export default function Dashboard(): JSX.Element {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -494,13 +498,14 @@ export default function Dashboard(): JSX.Element {
           <h1>{t('仪表盘')}</h1>
           <p>{t('AI 网关使用概览')}</p>
         </div>
-        <button className="btn btn-outline btn-sm" onClick={loadData} style={{ gap: '6px' }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <button className="btn btn-outline btn-sm" onClick={loadData} disabled={refreshing} style={{ gap: '6px' }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+            style={refreshing ? { animation: 'spin 0.9s linear infinite' } : undefined}>
             <polyline points="23 4 23 10 17 10" />
             <polyline points="1 20 1 14 7 14" />
             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
           </svg>
-          {t('刷新')}
+          {refreshing ? t('刷新中…') : t('刷新')}
         </button>
       </div>
 
@@ -766,7 +771,7 @@ export default function Dashboard(): JSX.Element {
         </div>
         {isAdmin() ? (
           <div className="card-body quick-actions">
-            <Link to="/channels" className="btn btn-primary">{t('管理账号')}</Link>
+            <Link to="/channels" className="btn btn-primary">{t('管理渠道')}</Link>
             <Link to="/keys" className="btn btn-outline">{t('管理 API 密钥')}</Link>
             <Link to="/mappings" className="btn btn-outline">{t('配置模型映射')}</Link>
             <Link to="/logs" className="btn btn-outline">{t('查看日志')}</Link>

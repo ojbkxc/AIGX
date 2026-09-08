@@ -7,3 +7,87 @@
   padding-top: 20px;
   border-top: 1px solid var(--border-color);
 }
+
+/* 五分区 Tabs：让标签页视觉上跟随 open-webui 的顶部分区风格 */
+.settings-tabs {
+  margin-bottom: 20px;
+}
+
+/* 分区副标题（card-header 内） */
+.card-subtitle {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+/* 主题三态选择器（open-webui theme store 风格：平铺三卡 + 选中态强调） */
+.theme-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+  max-width: 640px;
+}
+
+.theme-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 20px;
+  text-align: left;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  cursor: pointer;
+  color: var(--text-main);
+  transition: border-color 140ms ease-out, background 140ms ease-out, box-shadow 140ms ease-out;
+}
+
+.theme-option:hover:not(:disabled) {
+  border-color: var(--primary-hover);
+  background: var(--btn-secondary-hover);
+}
+
+.theme-option:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 2px;
+}
+
+.theme-option.active {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 1px var(--accent-color);
+  background: var(--btn-secondary-bg);
+}
+
+.theme-option-icon {
+  color: var(--accent-color);
+}
+
+.theme-option-label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.theme-option-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/* 通知跳转面板：留白 + 居中 CTA，代替原来的整页卡片堆 */
+.settings-link-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 8px 0;
+}
+
+.settings-link-panel p {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  max-width: 520px;
+}

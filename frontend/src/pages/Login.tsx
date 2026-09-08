@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { Eye, EyeOff } from 'lucide-react';
 import { api } from '../api';
 import { cycleTheme } from '../lib/theme';
 
@@ -9,6 +10,9 @@ export default function Login(): JSX.Element {
   const [error, setError] = useState<string>('');
   const [success, setSuccess] = useState<string>('');
   const [loading, setLoading] = useState(false);
+  // 密码明文切换（登录/重置两处共用）
+  const [showPassword, setShowPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const registeredHandled = useRef(false);
@@ -434,6 +438,7 @@ export default function Login(): JSX.Element {
                   type="text"
                   className="form-input"
                   placeholder="邮箱或用户名均可登录"
+                  autoComplete="username"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   autoFocus
@@ -442,15 +447,28 @@ export default function Login(): JSX.Element {
               </div>
               <div className="form-group">
                 <label htmlFor="password">密码</label>
-                <input
-                  id="password"
-                  type="password"
-                  className="form-input"
-                  placeholder="请输入密码"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  disabled={loading}
-                />
+                <div className="password-input-wrap">
+                  <input
+                    id="password"
+                    type={showPassword ? 'text' : 'password'}
+                    className="form-input password-input"
+                    placeholder="请输入密码"
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    disabled={loading}
+                  />
+                  <button
+                    type="button"
+                    className="password-input-toggle"
+                    tabIndex={-1}
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={showPassword ? '隐藏密码' : '显示密码'}
+                    title={showPassword ? '隐藏密码' : '显示密码'}
+                  >
+                    {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
               </div>
               <button
                 type="submit"
@@ -488,6 +506,7 @@ export default function Login(): JSX.Element {
                 type="text"
                 className="form-input"
                 placeholder="请输入邮箱"
+                autoComplete="username"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 autoFocus
@@ -587,8 +606,8 @@ export default function Login(): JSX.Element {
       </div>
 
       {showForgot && (
-        <div className="modal-overlay" onClick={() => setShowForgot(false)}>
-          <div className="modal" style={{ maxWidth: 380, width: '90%' }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay">
+          <div className="modal" style={{ maxWidth: 380, width: '90%' }}>
             <div className="modal-header">
               <h3>忘记密码</h3>
               <button className="modal-close" onClick={() => setShowForgot(false)}>&times;</button>
@@ -647,23 +666,37 @@ export default function Login(): JSX.Element {
                     </div>
                     <div className="form-group">
                       <label htmlFor="new-password">新密码</label>
-                      <input
-                        id="new-password"
-                        type="password"
-                        className="form-input"
-                        placeholder="至少 6 位"
-                        value={newPassword}
-                        onChange={(e) => setNewPassword(e.target.value)}
-                        disabled={forgotLoading}
-                      />
+                      <div className="password-input-wrap">
+                        <input
+                          id="new-password"
+                          type={showNewPassword ? 'text' : 'password'}
+                          className="form-input password-input"
+                          placeholder="至少 6 位"
+                          autoComplete="new-password"
+                          value={newPassword}
+                          onChange={(e) => setNewPassword(e.target.value)}
+                          disabled={forgotLoading}
+                        />
+                        <button
+                          type="button"
+                          className="password-input-toggle"
+                          tabIndex={-1}
+                          onClick={() => setShowNewPassword((v) => !v)}
+                          aria-label={showNewPassword ? '隐藏密码' : '显示密码'}
+                          title={showNewPassword ? '隐藏密码' : '显示密码'}
+                        >
+                          {showNewPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                        </button>
+                      </div>
                     </div>
                     <div className="form-group">
                       <label htmlFor="confirm-password">确认新密码</label>
                       <input
                         id="confirm-password"
-                        type="password"
+                        type={showNewPassword ? 'text' : 'password'}
                         className="form-input"
                         placeholder="再次输入新密码"
+                        autoComplete="new-password"
                         value={confirmPassword}
                         onChange={(e) => setConfirmPassword(e.target.value)}
                         disabled={forgotLoading}

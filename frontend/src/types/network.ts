@@ -74,6 +74,10 @@ export const defaultNetworkStatus: NetworkStatus = {
 export interface NetworkConfigRequest {
   enabled: boolean;
   strategy: string;
+  account_pool_min?: number;
+  account_pool_max?: number;
+  connection_pool_max?: number;
+  session_pool_max?: number;
 }
 
 /** 网络层配置响应 */

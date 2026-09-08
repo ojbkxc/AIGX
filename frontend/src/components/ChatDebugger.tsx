@@ -29,6 +29,11 @@ export interface ChatDebuggerProps {
   onMessagesChange?: (messages: DebugMessage[]) => void;
   /** 隐藏调试工具条（协议/系统提示词/附件区），/chat 终端用户形态 */
   hideToolbar?: boolean;
+  /** 顶部悬浮模型 pill（hideToolbar 时）。Open WebUI 首页形态传 false，
+   *  模型选择下沉到空状态大标题上方，避免与居中问候重叠。 */
+  floatingModelBar?: boolean;
+  /** 空状态建议 prompt（Open WebUI 首页 Suggestions 网格），点选直接发送 */
+  suggestionPrompts?: Array<{ title: string; sub: string; content: string }>;
 }
 
 interface ChatChunkResult {
@@ -57,6 +62,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     initialMessages = [],
     onMessagesChange,
     hideToolbar = false,
+    floatingModelBar = true,
+    suggestionPrompts = [],
   } = props;
   const { t } = useTranslation();
 
@@ -213,8 +220,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     return blocks;
   };
 
-  const handleSend = async (): Promise<void> => {
-    const text = input.trim();
+  const handleSend = async (override?: string): Promise<void> => {
+    const text = (override ?? input).trim();
     if ((!text && !attachments.length) || busy) return;
     if (!model) {
       setError(t('请先选择模型'));
@@ -501,7 +508,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       </div>
       )}
 
-      {hideToolbar && (
+      {hideToolbar && floatingModelBar && (
         <div className="chat-debugger-bar chat-debugger-bar-min">
           {modelPicker}
         </div>
@@ -547,10 +554,30 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       <div className="chat-debugger-messages">
         {messages.length === 0 && (
           <div className="chat-debugger-empty">
+            {hideToolbar && !floatingModelBar ? (
+              <div className="chat-debugger-empty-model">{modelPicker}</div>
+            ) : null}
             <div className="chat-debugger-empty-title">{model || t('开始对话')}</div>
             <div className="chat-debugger-empty-sub">
               {t('输入消息开始对话。支持多轮上下文与图片/视频/音频附件（OpenAI 协议）。')}
             </div>
+            {suggestionPrompts.length > 0 && (
+              <div className="chat-debugger-empty-suggestions">
+                {suggestionPrompts.map((s) => (
+                  <button
+                    key={s.title}
+                    type="button"
+                    className="chat-debugger-suggestion"
+                    onClick={() => {
+                      void handleSend(s.content);
+                    }}
+                  >
+                    <span className="chat-debugger-suggestion-title">{s.title}</span>
+                    <span className="chat-debugger-suggestion-sub">{s.sub}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
         {messages.map((m, i) => (

@@ -1,11 +1,12 @@
 /* ── Playground — open-webui 式聊天主界面布局 ──
- * V2：三模式（Chat / Completions / Images）。
- * Chat 全高沙盒；Completions/Images 为参数+响应双栏布局。 */
+ * V3：Chat 模式升级为 Open WebUI 首页形态（全高居中消息流 +
+ * 空状态问候 + 建议 prompt 网格）；Completions/Images 保留参数+响应双栏。 */
 .playground-shell {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
 }
 
 .playground-body {
@@ -28,7 +29,8 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px 0;
+  padding: 10px 16px;
+  flex-shrink: 0;
 }
 
 .playground-mode-bar .ui-tabs {

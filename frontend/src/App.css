@@ -141,6 +141,7 @@
   --code-color: #1a1a1a;
   --code-border: #e5e5e5;
   --sidebar-width: 240px;
+  --sidebar-width-collapsed: 48px;
   --font-size-sm: 12px;
   --font-size-md: 14px;
   --control-pad-y: 8px;
@@ -214,6 +215,44 @@ code, pre, .mono {
   to { transform: rotate(360deg); }
 }
 
+.confirm-dialog-spin {
+  animation: spin 0.9s linear infinite;
+  vertical-align: -2px;
+}
+
+/* ── 密码输入框：右内嵌明文切换按钮 ── */
+.password-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.password-input-wrap .password-input {
+  width: 100%;
+  padding-right: 38px;
+}
+
+.password-input-toggle {
+  position: absolute;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.password-input-toggle:hover {
+  color: var(--text-main);
+  background: var(--btn-secondary-hover);
+}
+
 /* Layout */
 .app-container {
   display: flex;
@@ -227,6 +266,12 @@ code, pre, .mono {
   padding: 28px 32px;
   min-width: 0;
   z-index: 10;
+  transition: margin-left 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 全局侧边栏收缩联动（Sidebar.tsx 设置 data-sidebar-collapsed） */
+:root[data-sidebar-collapsed="true"] .main-content {
+  margin-left: var(--sidebar-width-collapsed);
 }
 
 /* Page Header */
@@ -1050,6 +1095,83 @@ code {
   .sidebar-desktop {
     display: none;
   }
+
+  /* 移动端强制展开全宽侧栏（收缩态文字被隐藏则自动回退为汉堡抽屉） */
+  :root[data-sidebar-collapsed="true"] .main-content {
+    margin-left: 0;
+  }
+}
+
+/* ── 全局侧边栏展开/收缩（Open WebUI 窄图标栏形态）────────────── */
+.sidebar-collapse-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.sidebar-collapse-btn:hover {
+  background: var(--sidebar-menu-hover);
+  color: var(--text-main);
+}
+
+/* 收缩态图标按钮（导航项 / 底部操作） */
+.sidebar-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.sidebar-icon-btn:hover {
+  background: var(--sidebar-menu-hover);
+  color: var(--text-main);
+}
+
+.sidebar-icon-btn.active {
+  background: rgba(47, 111, 237, 0.12);
+  color: var(--text-main);
+}
+
+.sidebar-icon-danger:hover {
+  background: rgba(220, 38, 38, 0.12);
+  color: #dc2626;
+}
+
+/* 收缩态分组图标：置顶展示组类别 */
+.sidebar-group-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 26px;
+  color: var(--text-muted);
+  margin: 2px 0;
+}
+
+.sidebar-group-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: var(--text-muted);
+  opacity: 0.6;
 }
 
 

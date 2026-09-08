@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, type ChangeEvent, type FormEvent } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { Eye, EyeOff } from 'lucide-react';
 import { api } from '../api';
 import { cycleTheme } from '../lib/theme';
 
@@ -24,6 +25,7 @@ export default function Register() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const navigate = useNavigate();
   const { t } = useTranslation();
 
@@ -248,23 +250,37 @@ export default function Register() {
           </div>
           <div className="form-group">
             <label htmlFor="password">{t('密码 *')}</label>
-            <input
-              id="password"
-              type="password"
-              className="form-input"
-              placeholder={t('至少6位密码')}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={loading}
-            />
+            <div className="password-input-wrap">
+              <input
+                id="password"
+                type={showPassword ? 'text' : 'password'}
+                className="form-input password-input"
+                placeholder={t('至少6位密码')}
+                autoComplete="new-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={loading}
+              />
+              <button
+                type="button"
+                className="password-input-toggle"
+                tabIndex={-1}
+                onClick={() => setShowPassword((v) => !v)}
+                aria-label={showPassword ? t('隐藏密码') : t('显示密码')}
+                title={showPassword ? t('隐藏密码') : t('显示密码')}
+              >
+                {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            </div>
           </div>
           <div className="form-group">
             <label htmlFor="confirmPassword">{t('确认密码 *')}</label>
             <input
               id="confirmPassword"
-              type="password"
+              type={showPassword ? 'text' : 'password'}
               className="form-input"
               placeholder={t('再次输入密码')}
+              autoComplete="new-password"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               disabled={loading}

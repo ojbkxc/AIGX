@@ -285,6 +285,36 @@
   padding: 24px 8px;
 }
 
+/* Open WebUI 首页空状态：模型选择下沉到问候语上方 */
+.chat-debugger-empty-model {
+  margin-bottom: 22px;
+}
+
+.chat-debugger-empty-model .chat-debugger-model {
+  flex: none;
+  min-width: 220px;
+  width: 220px;
+  margin: 0 auto;
+}
+
+.chat-debugger-empty-model .chat-debugger-model-btn {
+  justify-content: center;
+  border-radius: 999px;
+  padding: 7px 16px;
+  font-size: 13px;
+  background: var(--card-bg);
+  box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.28);
+  border-color: var(--border-color);
+}
+
+.chat-debugger-empty-model .chat-debugger-model-btn:hover {
+  border-color: var(--text-faint, #b0b0b0);
+}
+
+.chat-debugger-empty-model .chat-debugger-model-name {
+  text-align: left;
+}
+
 .chat-debugger-empty-title {
   font-size: 1.9rem;
   font-weight: 600;
@@ -296,6 +326,60 @@
   color: var(--text-muted);
   font-size: 0.95rem;
   line-height: 1.65;
+}
+
+/* 空状态下方建议 prompt 网格（Open WebUI Suggestions 观感） */
+.chat-debugger-empty-suggestions {
+  margin-top: 28px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  text-align: left;
+}
+
+.chat-debugger-suggestion {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 14px;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-main);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease;
+  animation: chat-suggestion-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.chat-debugger-suggestion:nth-child(2) { animation-delay: 45ms; }
+.chat-debugger-suggestion:nth-child(3) { animation-delay: 90ms; }
+.chat-debugger-suggestion:nth-child(4) { animation-delay: 135ms; }
+
+.chat-debugger-suggestion:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.chat-debugger-suggestion-title {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.chat-debugger-suggestion-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+@keyframes chat-suggestion-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 640px) {
+  .chat-debugger-empty-suggestions {
+    grid-template-columns: 1fr;
+  }
 }
 
 .chat-debugger-msg {

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
-import { Card, Badge, EmptyState, SkeletonTable } from '../components/ui';
+import { Card, Badge, Button, EmptyState, SkeletonTable } from '../components/ui';
 import type { Order, EpayConfig } from './types';
 
 /** 易支付配置（仅取展示需要的字段，其余保持后端形状） */
@@ -13,6 +13,8 @@ export default function Orders(): JSX.Element {
   const [orders, setOrders] = useState<Order[]>([]);
   const [epay, setEpay] = useState<EpayDisplay | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [statusFilter, setStatusFilter] = useState('');
   const [error, setError] = useState('');
   const { t } = useTranslation();
 
@@ -21,6 +23,7 @@ export default function Orders(): JSX.Element {
   }, []);
 
   const load = async () => {
+    setRefreshing(true);
     setLoading(true);
     setError('');
     try {
@@ -38,6 +41,7 @@ export default function Orders(): JSX.Element {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -55,6 +59,10 @@ export default function Orders(): JSX.Element {
   const statusLabel = (status: string | undefined): string =>
     status === 'paid' ? t('已支付') : status === 'expired' ? t('已过期') : t('待支付');
 
+  const visibleOrders = statusFilter
+    ? orders.filter((o) => (o.status || 'pending') === statusFilter)
+    : orders;
+
   if (loading) return <SkeletonTable columns={5} rows={6} />;
 
   return (
@@ -69,11 +77,36 @@ export default function Orders(): JSX.Element {
       <Card
         title={
           <>
-            {t('所有订单')} ({orders.length})
+            {t('所有订单')} ({visibleOrders.length})
           </>
         }
+        actions={
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <select
+              className="form-input"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              style={{ width: 130 }}
+              aria-label={t('状态')}
+            >
+              <option value="">{t('全部')}</option>
+              <option value="pending">{t('待支付')}</option>
+              <option value="paid">{t('已支付')}</option>
+              <option value="expired">{t('已过期')}</option>
+            </select>
+            <Button variant="outline" size="sm" onClick={() => void load()} disabled={refreshing} style={{ gap: 6 }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                style={refreshing ? { animation: 'spin 0.9s linear infinite' } : undefined}>
+                <polyline points="23 4 23 10 17 10" />
+                <polyline points="1 20 1 14 7 14" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+              {refreshing ? t('刷新中…') : t('刷新')}
+            </Button>
+          </div>
+        }
       >
-        {orders.length === 0 ? (
+        {visibleOrders.length === 0 ? (
           <EmptyState message={t('暂无订单')} />
         ) : (
           <div className="table-wrapper">
@@ -91,7 +124,7 @@ export default function Orders(): JSX.Element {
                 </tr>
               </thead>
               <tbody>
-                {orders.map((o) => (
+                {visibleOrders.map((o) => (
                   <tr key={o.trade_no || o.id || ''}>
                     <td>
                       <code className="key-value" style={{ maxWidth: 240 }}>

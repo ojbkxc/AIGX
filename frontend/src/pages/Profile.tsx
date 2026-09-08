@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Copy } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Card, Input } from '../components/ui';
@@ -51,6 +52,16 @@ export default function Profile(): JSX.Element {
       setMe(null);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCopySecret = async (): Promise<void> => {
+    if (!totpSetup?.secret) return;
+    try {
+      await navigator.clipboard.writeText(totpSetup.secret);
+      addToast(t('已复制到剪贴板'));
+    } catch {
+      addToast(t('复制失败，请手动选择复制'), 'error');
     }
   };
 
@@ -162,7 +173,7 @@ export default function Profile(): JSX.Element {
             <div className="form-group">
               <label>{t('配额')}</label>
               <Input
-                value={`${fmtQuota(me.used_quota)} / ${me.quota != null ? fmtQuota(me.quota) : '∞'}`}
+                value={`${t('已用')} ${fmtQuota(me.used_quota)} / ${t('总量')} ${me.quota != null ? fmtQuota(me.quota) : '∞'} / ${t('剩余配额')} ${me.quota != null ? fmtQuota(me.quota - Number(me.used_quota || 0)) : '∞'}`}
                 disabled
               />
             </div>
@@ -180,7 +191,7 @@ export default function Profile(): JSX.Element {
       </Card>
 
       <Card title={t('修改密码')}>
-        <div className="settings-form">
+        <form className="settings-form" onSubmit={(e) => { e.preventDefault(); void handleChangePassword(); }}>
           <div className="form-group">
             <label>{t('当前密码')}</label>
             <input className="form-input" type="password" value={oldPw}
@@ -199,11 +210,11 @@ export default function Profile(): JSX.Element {
           </div>
           {pwError && <div className="error-message">{pwError}</div>}
           <div className="settings-actions">
-            <button className="btn btn-primary" onClick={() => void handleChangePassword()} disabled={pwSaving}>
+            <button type="submit" className="btn btn-primary" disabled={pwSaving}>
               {pwSaving ? t('修改中...') : t('修改密码')}
             </button>
           </div>
-        </div>
+        </form>
       </Card>
 
       <Card title={t('两步验证（TOTP）')}>
@@ -230,7 +241,18 @@ export default function Profile(): JSX.Element {
             <>
               <div className="form-group">
                 <label>{t('密钥（Base32）')}</label>
-                <Input value={totpSetup.secret} disabled />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <Input value={totpSetup.secret} disabled />
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    onClick={() => void handleCopySecret()}
+                    title={t('复制')}
+                    aria-label={t('复制')}
+                  >
+                    <Copy size={14} />
+                  </button>
+                </div>
                 <span className="form-hint">{t('在认证器中选择「手动录入」，粘贴上方密钥')}</span>
               </div>
               {totpSetup.otpauth_uri && (

@@ -92,6 +92,8 @@ export default function Notify() {
   const [alertHistory, setAlertHistory] = useState<AlertEvent[]>([]);
   const [rulesSaving, setRulesSaving] = useState(false);
   const [testingAlertKind, setTestingAlertKind] = useState('memory_high');
+  const [testingAlert, setTestingAlert] = useState(false);
+  const [alertsError, setAlertsError] = useState('');
 
   useEffect(() => { loadConfig(); loadAlerts(); }, []);
 
@@ -223,8 +225,9 @@ export default function Notify() {
       setActiveAlerts(((activeRes as ListResponse<AlertEvent[]>).data || []));
       const historyData = (historyRes as ListResponse<{ items?: AlertEvent[] } | AlertEvent[]>).data;
       setAlertHistory(Array.isArray(historyData) ? historyData : (historyData?.items || []));
-    } catch {
-      // 告警 API 失败不阻塞通知配置页
+      setAlertsError('');
+    } catch (err) {
+      setAlertsError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -248,6 +251,7 @@ export default function Notify() {
 
   const handleTestAlert = async () => {
     setError('');
+    setTestingAlert(true);
     try {
       // 测试值取该规则阈值 +1，保证超过阈值从而真实触发，而不是固定 99 导致
       // 阈值更大的规则（如渠道延迟 30000ms）永远“未触发”
@@ -259,6 +263,8 @@ export default function Notify() {
       loadAlerts();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTestingAlert(false);
     }
   };
 
@@ -527,6 +533,9 @@ export default function Notify() {
             <p className="notify-note">
               {t('后台每 60 秒巡检一次：渠道断路器打开 / 渠道延迟 EMA / 进程内存。达到阈值触发告警并分发到已配置的通知渠道。')}
             </p>
+            {alertsError && (
+              <div className="error-message" style={{ marginBottom: 12 }}>{t('告警数据加载失败')}：{alertsError}</div>
+            )}
             {rules.length === 0 ? (
               <p className="notify-note">{t('暂无规则')}</p>
             ) : (
@@ -585,7 +594,7 @@ export default function Notify() {
                 })}
               </div>
             )}
-            <div className="notify-actions" style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+            <div className="notify-actions" style={{ display: 'flex', gap: 10, marginTop: 12, alignItems: 'center', flexWrap: 'wrap' }}>
               <button className="btn btn-primary" onClick={handleSaveRules} disabled={rulesSaving}>
                 {rulesSaving ? t('保存中...') : t('保存告警规则')}
               </button>
@@ -601,9 +610,10 @@ export default function Notify() {
                   </option>
                 ))}
               </select>
-              <button className="btn btn-outline" onClick={handleTestAlert}>
-                {t('触发测试告警')}
+              <button className="btn btn-outline" onClick={handleTestAlert} disabled={testingAlert}>
+                {testingAlert ? t('测试中...') : t('触发测试告警')}
               </button>
+              <span className="form-hint">{t('需先保存配置')}</span>
             </div>
             {activeAlerts.length > 0 && (
               <div style={{ marginTop: 14 }}>

@@ -48,6 +48,8 @@ export default function Pricing() {
     model_name: '', input_price: '', output_price: '', cache_price: '', price_type: 'token',
   });
   const [savingPrice, setSavingPrice] = useState(false);
+  // 搜索过滤（模型名/分组名本地匹配）
+  const [query, setQuery] = useState('');
 
   // ── 倍率配置状态 ──
   const [, setRatios] = useState<RatiosState>({ model_ratio: {}, group_ratio: {} });
@@ -120,16 +122,30 @@ export default function Pricing() {
     });
   };
 
+  const handleEditPrice = (p: PriceEntry) => {
+    setPriceForm({
+      model_name: p.model_name || '',
+      input_price: p.input_price != null ? String(p.input_price) : '',
+      output_price: p.output_price != null ? String(p.output_price) : '',
+      cache_price: p.cache_price != null ? String(p.cache_price) : '',
+      price_type: p.price_type || 'token',
+    });
+    document.getElementById('price-form')?.scrollIntoView({ behavior: 'smooth' });
+  };
+
   // ── 倍率配置 ──
-  // 输入合法性标记：ratioError 为 null 表示合法，否则存非法原因文案
-  const [ratioError, setRatioError] = useState<string | null>(null);
+  // 输入合法性标记：为 null 表示合法，否则存非法原因文案
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [groupError, setGroupError] = useState<string | null>(null);
 
   const handleRatioBlur = (field: 'model' | 'group', value: string) => {
     try {
       JSON.parse(value || '{}');
-      setRatioError(null);
+      if (field === 'model') setModelError(null);
+      else setGroupError(null);
     } catch {
-      setRatioError(field === 'model' ? t('模型倍率 JSON 格式错误') : t('分组倍率 JSON 格式错误'));
+      if (field === 'model') setModelError(t('模型倍率 JSON 格式错误'));
+      else setGroupError(t('分组倍率 JSON 格式错误'));
     }
   };
 
@@ -157,14 +173,14 @@ export default function Pricing() {
       try {
         modelRatio = JSON.parse(ratioText || '{}');
       } catch {
-        setError(t('模型倍率 JSON 格式错误'));
+        setModelError(t('模型倍率 JSON 格式错误'));
         setSavingRatios(false);
         return;
       }
       try {
         groupRatio = JSON.parse(groupRatioText || '{}');
       } catch {
-        setError(t('分组倍率 JSON 格式错误'));
+        setGroupError(t('分组倍率 JSON 格式错误'));
         setSavingRatios(false);
         return;
       }
@@ -178,6 +194,11 @@ export default function Pricing() {
       setSavingRatios(false);
     }
   };
+
+  const q = query.trim().toLowerCase();
+  const visiblePrices = q
+    ? prices.filter((p) => (p.model_name || '').toLowerCase().includes(q))
+    : prices;
 
   return (
     <div className="pricing-shell">
@@ -205,11 +226,14 @@ export default function Pricing() {
       </div>
 
       <div className="pricing-content">
-        {/* 子标签 1：价格目录 */}
+      {/* 子标签 1：价格目录 */}
         {sub === 'prices' && (
           <div className="card">
             <div className="card-header">
-              <h2>{t('模型定价目录')} ({prices.length})</h2>
+              <h2>{t('模型定价目录')} ({visiblePrices.length}/{prices.length})</h2>
+              <input className="form-input" style={{ width: 200 }}
+                placeholder={t('搜索模型名称…')} value={query}
+                onChange={(e) => setQuery(e.target.value)} />
             </div>
             <div className="card-body">
               {priceLoading ? (
@@ -229,13 +253,13 @@ export default function Pricing() {
                         </tr>
                       </thead>
                       <tbody>
-                        {prices.length === 0 ? (
+                        {visiblePrices.length === 0 ? (
                           <tr>
                             <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
-                              {t('暂无定价配置，未配置的模型将使用倍率计算')}
+                              {q ? t('没有匹配的定价') : t('暂无定价配置，未配置的模型将使用倍率计算')}
                             </td>
                           </tr>
-                        ) : prices.map((p) => (
+                        ) : visiblePrices.map((p) => (
                           <tr key={p.model_name}>
                             <td><strong>{p.model_name}</strong></td>
                             <td className="price-cell">{p.input_price}</td>
@@ -245,6 +269,9 @@ export default function Pricing() {
                               <span className="price-type-badge">{p.price_type || 'token'}</span>
                             </td>
                             <td>
+                              <button className="btn btn-outline btn-sm" style={{ marginRight: 6 }} onClick={() => handleEditPrice(p)}>
+                                {t('编辑')}
+                              </button>
                               <button className="btn btn-danger btn-sm" onClick={() => handleDeletePrice(p.model_name)}>
                                 {t('删除')}
                               </button>
@@ -256,7 +283,7 @@ export default function Pricing() {
                   </div>
 
                   {/* 新增/编辑定价表单 */}
-                  <div className="price-form-row">
+                  <div className="price-form-row" id="price-form">
                     <div className="form-group" style={{ flex: '1 1 160px', margin: 0 }}>
                       <label style={{ fontSize: 12 }}>{t('模型名称')}</label>
                       <input className="form-input" placeholder="glm-5.2" value={priceForm.model_name}
@@ -319,14 +346,17 @@ export default function Pricing() {
                         className="form-input ratio-textarea"
                         rows={10}
                         value={ratioText}
-                        onChange={(e) => setRatioText(e.target.value)}
+                        onChange={(e) => { setRatioText(e.target.value); setModelError(null); }}
                         onBlur={() => handleRatioBlur('model', ratioText)}
-                        style={ratioError ? { borderColor: 'rgb(239,68,68)' } : undefined}
+                        style={modelError ? { borderColor: 'rgb(239,68,68)' } : undefined}
                         placeholder='{"glm-5.2": 1, "deepseek-v3": 0.5}'
                       />
                       <span className="form-hint">
                         {t('模型名 → 倍率。例如')} {"{\"gpt-4\": 2, \"claude-3\": 1.5}"}
                       </span>
+                      {modelError && (
+                        <span className="form-hint" style={{ color: 'rgb(239,68,68)' }}>{modelError}</span>
+                      )}
                     </div>
                     <div className="form-group">
                       <label>{t('分组倍率 (JSON)')}</label>
@@ -334,22 +364,19 @@ export default function Pricing() {
                         className="form-input ratio-textarea"
                         rows={10}
                         value={groupRatioText}
-                        onChange={(e) => setGroupRatioText(e.target.value)}
+                        onChange={(e) => { setGroupRatioText(e.target.value); setGroupError(null); }}
                         onBlur={() => handleRatioBlur('group', groupRatioText)}
-                        style={ratioError ? { borderColor: 'rgb(239,68,68)' } : undefined}
+                        style={groupError ? { borderColor: 'rgb(239,68,68)' } : undefined}
                         placeholder='{"default": 1, "vip": 0.8}'
                       />
                       <span className="form-hint">
                         {t('分组名 → 倍率。例如')} {"{\"default\": 1, \"vip\": 0.8}"}
                       </span>
+                      {groupError && (
+                        <span className="form-hint" style={{ color: 'rgb(239,68,68)' }}>{groupError}</span>
+                      )}
                     </div>
                   </div>
-
-                  {ratioError && (
-                    <div style={{ color: 'rgb(239,68,68)', fontSize: 12, marginTop: 8 }}>
-                      {ratioError}
-                    </div>
-                  )}
 
                   <div style={{ marginTop: 16 }}>
                     <button className="btn btn-primary" onClick={handleSaveRatios} disabled={savingRatios}>

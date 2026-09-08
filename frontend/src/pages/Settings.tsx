@@ -1,8 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { Monitor, Sun, Moon } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
+import { Tabs } from '../components/ui';
+import { getThemeMode, applyTheme, type ThemeMode } from '../lib/theme';
 import './Settings.css';
 
 interface LimitsForm {
@@ -45,6 +49,8 @@ interface DataResponse<T> {
   data?: T;
 }
 
+type SettingsTab = 'general' | 'appearance' | 'notifications' | 'account' | 'usage';
+
 // 格式化字节数为人类可读单位
 function fmtBytes(bytes: number | null | undefined): string {
   const n = Number(bytes || 0);
@@ -53,6 +59,31 @@ function fmtBytes(bytes: number | null | undefined): string {
   if (n >= 1024) return (n / 1024).toFixed(2) + ' KB';
   return n + ' B';
 }
+
+const THEME_OPTIONS: Array<{ mode: ThemeMode; labelKey: string; hintKey: string; icon: typeof Sun }> = [
+  { mode: 'light', labelKey: '浅色模式', hintKey: 'settingsThemeLightHint', icon: Sun },
+  { mode: 'dark', labelKey: '深色模式', hintKey: 'settingsThemeDarkHint', icon: Moon },
+  { mode: 'system', labelKey: '跟随系统', hintKey: 'settingsThemeSystemHint', icon: Monitor },
+];
+
+type RateLimitNumericField = Exclude<keyof RateLimitConfig, 'enabled'>;
+
+const RL_FIELDS: Array<{ field: RateLimitNumericField; labelKey: string; hintKey: string }> = [
+  { field: 'per_key_rpm', labelKey: '每 Key RPM', hintKey: '单个 API Key 每分钟最大请求数' },
+  { field: 'per_key_tpm', labelKey: '每 Key TPM', hintKey: '单个 API Key 每分钟最大 Token 数' },
+  { field: 'per_model_rpm', labelKey: '每模型 RPM', hintKey: '单个模型每分钟最大请求数' },
+  { field: 'per_user_rpm', labelKey: '每用户 RPM', hintKey: '单个用户每分钟最大请求数' },
+  { field: 'per_user_tpm', labelKey: '每用户 TPM', hintKey: '单个用户每分钟最大 Token 数' },
+  { field: 'per_ip_rpm', labelKey: '每 IP RPM', hintKey: '单个 IP 每分钟最大请求数' },
+  { field: 'global_rpm', labelKey: '全局 RPM', hintKey: '全系统每分钟最大请求数' },
+  { field: 'global_tpm', labelKey: '全局 TPM', hintKey: '全系统每分钟最大 Token 数' },
+];
+
+const LIMIT_FIELDS: Array<{ field: 'daily_limit' | 'monthly_limit' | 'threshold'; labelKey: string; hintKey: string; min?: number; max?: number }> = [
+  { field: 'daily_limit', labelKey: '每日 Token 限额', hintKey: '每天允许的最大 Token 数。0 或空 = 无限制。', min: 0 },
+  { field: 'monthly_limit', labelKey: '每月 Token 限额', hintKey: '每月允许的最大 Token 数。0 或空 = 无限制。', min: 0 },
+  { field: 'threshold', labelKey: '告警阈值 (%)', hintKey: '触发告警的限额使用百分比（0-100）。', min: 0, max: 100 },
+];
 
 export default function Settings() {
   const [limits, setLimits] = useState<LimitsForm>({
@@ -67,6 +98,12 @@ export default function Settings() {
   const [error, setError] = useState('');
   const addToast = useToast();
   const { t } = useTranslation();
+
+  // 当前激活的配置分区（open-webui 式 Settings 信息架构）
+  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+
+  // 界面分区：主题三态（system/light/dark），与登录页/侧边栏切换共享同一份持久化
+  const [theme, setTheme] = useState<ThemeMode>(() => getThemeMode());
 
   // 限流配置
   const [rlConfig, setRlConfig] = useState<RateLimitConfig | null>(null);
@@ -99,7 +136,8 @@ export default function Settings() {
   const [pwSaving, setPwSaving] = useState(false);
   const [pwError, setPwError] = useState('');
 
-  const handleChangePassword = async () => {
+  const handleChangePassword = async (e?: FormEvent) => {
+    e?.preventDefault();
     setPwError('');
     if (!oldPw) { setPwError(t('请输入当前密码')); return; }
     if (newPw.length < 6) { setPwError(t('新密码至少 6 位')); return; }
@@ -114,6 +152,11 @@ export default function Settings() {
     } finally {
       setPwSaving(false);
     }
+  };
+
+  const selectTheme = (mode: ThemeMode) => {
+    setTheme(mode);
+    applyTheme(mode);
   };
 
   useEffect(() => {
@@ -280,7 +323,7 @@ export default function Settings() {
     }
   };
 
-  // ── 通知配置已迁移至独立「通知设置」页面（/notify），此处不再承载 ──
+  // ── 通知配置已迁移至独立「通知设置」页面（/notify），此处只提供入口与说明 ──
 
   const handleChange = (field: keyof LimitsForm, value: string) => {
     setLimits({ ...limits, [field]: value });
@@ -325,347 +368,366 @@ export default function Settings() {
     <div>
       <div className="page-header">
         <h1>{t('系统设置')}</h1>
-        <p>{t('配置使用限额、API 超时与重试策略')}</p>
+        <p>{t('settingsPageSubtitle')}</p>
       </div>
 
       {error && <div className="error-message">{error}</div>}
 
-      <div className="card">
-        <div className="card-header">
-          <h2>{t('使用限额')}</h2>
-        </div>
-        <div className="card-body">
-          <div className="settings-form">
-            <div className="form-group">
-              <label>{t('每日 Token 限额')}</label>
-              <input className="form-input" type="number" min="0" placeholder={t('settingsPlaceholderDailyLimit')} value={limits.daily_limit} onChange={(e) => handleChange('daily_limit', e.target.value)} />
-              <span className="form-hint">{t('每天允许的最大 Token 数。0 或空 = 无限制。')}</span>
-            </div>
-            <div className="form-group">
-              <label>{t('每月 Token 限额')}</label>
-              <input className="form-input" type="number" min="0" placeholder={t('settingsPlaceholderMonthlyLimit')} value={limits.monthly_limit} onChange={(e) => handleChange('monthly_limit', e.target.value)} />
-              <span className="form-hint">{t('每月允许的最大 Token 数。0 或空 = 无限制。')}</span>
-            </div>
-            <div className="form-group">
-              <label>{t('告警阈值 (%)')}</label>
-              <input className="form-input" type="number" min="0" max="100" placeholder={t('settingsPlaceholderThreshold')} value={limits.threshold} onChange={(e) => handleChange('threshold', e.target.value)} />
-              <span className="form-hint">{t('触发告警的限额使用百分比（0-100）。')}</span>
-            </div>
-          </div>
-        </div>
-      </div>
+      <Tabs<SettingsTab>
+        items={[
+          { key: 'general', label: t('通用') },
+          { key: 'appearance', label: t('界面') },
+          { key: 'notifications', label: t('通知') },
+          { key: 'account', label: t('账户') },
+          { key: 'usage', label: t('用量') },
+        ]}
+        active={activeTab}
+        onChange={setActiveTab}
+        ariaLabel={t('设置分区')}
+        className="settings-tabs"
+      />
 
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-header">
-          <h2>{t('账户安全')}</h2>
-        </div>
-        <div className="card-body">
-          <div className="settings-form">
-            <div className="form-group">
-              <label>{t('当前密码')}</label>
-              <input className="form-input" type="password" value={oldPw}
-                onChange={(e) => setOldPw(e.target.value)} autoComplete="current-password" />
+      {activeTab === 'general' && (
+        <>
+          {/* 使用限额（含告警阈值）与 API 策略合并为「通用」区，与 open-webui General 分区对齐 */}
+          <div className="card">
+            <div className="card-header">
+              <h2>{t('使用限额')}</h2>
+              <p className="card-subtitle">{t('settingsGeneralHint')}</p>
             </div>
-            <div className="form-group">
-              <label>{t('新密码')}</label>
-              <input className="form-input" type="password" value={newPw}
-                onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
-              <span className="form-hint">{t('至少 6 位，建议混合字母与数字')}</span>
-            </div>
-            <div className="form-group">
-              <label>{t('确认新密码')}</label>
-              <input className="form-input" type="password" value={confirmPw}
-                onChange={(e) => setConfirmPw(e.target.value)} autoComplete="new-password" />
-            </div>
-            {pwError && <div className="error-message">{pwError}</div>}
-            <div className="settings-actions">
-              <button className="btn btn-primary" onClick={handleChangePassword} disabled={pwSaving}>
-                {pwSaving ? t('修改中...') : t('修改密码')}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-header">
-          <h2>{t('API 配置')}</h2>
-        </div>
-        <div className="card-body">
-          <div className="settings-form">
-            <div className="form-group">
-              <label>{t('API 超时时间 (秒)')}</label>
-              <input className="form-input" type="number" min="5" max="300" placeholder={t('settingsPlaceholderApiTimeout')} value={limits.api_timeout_secs} onChange={(e) => handleChange('api_timeout_secs', e.target.value)} />
-              <span className="form-hint">{t('向 Cloudflare API 发送请求的超时时间，默认 120 秒。')}</span>
-            </div>
-            <div className="form-group">
-              <label>{t('最大重试次数')}</label>
-              <input className="form-input" type="number" min="0" max="10" placeholder={t('settingsPlaceholderMaxRetries')} value={limits.max_retries} onChange={(e) => handleChange('max_retries', e.target.value)} />
-              <span className="form-hint">{t('API 请求失败时的最大重试次数，0 表示不重试。')}</span>
-            </div>
-            <div className="settings-actions">
-              <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-                {saving ? t('保存中...') : t('保存更改')}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-header">
-          <h2>{t('限流配置')}</h2>
-        </div>
-        <div className="card-body">
-          {rlLoading ? (
-            <div className="loading">{t('加载限流配置')}</div>
-          ) : rlConfig ? (
-            <div className="settings-form">
-              <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
-                {t('配置多维度 RPM（每分钟请求数）/ TPM（每分钟 Token 数）限流。留空或 0 = 不限制。')}
-              </p>
-              {/* 启用限流总开关：不开启时任何限流维度都不生效 */}
-              <div className="form-group">
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <input
-                    type="checkbox"
-                    checked={rlConfig.enabled ?? false}
-                    onChange={(e) => setRlConfig({ ...rlConfig, enabled: e.target.checked })}
-                  />
-                  {t('启用限流总开关')}
-                </label>
-                <span className="form-hint">{t('开启后限流规则才会生效')}</span>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 16 }}>
-                <div className="form-group">
-                  <label>{t('每 Key RPM')}</label>
-                  <input className="form-input" type="number" min="0" placeholder="0"
-                    value={rlConfig.per_key_rpm ?? ''}
-                    onChange={(e) => handleRlChange('per_key_rpm', e.target.value)} />
-                  <span className="form-hint">{t('单个 API Key 每分钟最大请求数')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('每 Key TPM')}</label>
-                  <input className="form-input" type="number" min="0" placeholder="0"
-                    value={rlConfig.per_key_tpm ?? ''}
-                    onChange={(e) => handleRlChange('per_key_tpm', e.target.value)} />
-                  <span className="form-hint">{t('单个 API Key 每分钟最大 Token 数')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('每模型 RPM')}</label>
-                  <input className="form-input" type="number" min="0" placeholder="0"
-                    value={rlConfig.per_model_rpm ?? ''}
-                    onChange={(e) => handleRlChange('per_model_rpm', e.target.value)} />
-                  <span className="form-hint">{t('单个模型每分钟最大请求数')}</span>
-                </div>
-                <div className="form-group">
-
-                  <label>{t('每用户 RPM')}</label>
-                  <input className="form-input" type="number" min="0" placeholder="0"
-                    value={rlConfig.per_user_rpm ?? ''}
-                    onChange={(e) => handleRlChange('per_user_rpm', e.target.value)} />
-                  <span className="form-hint">{t('单个用户每分钟最大请求数')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('每用户 TPM')}</label>
-                  <input className="form-input" type="number" min="0" placeholder="0"
-                    value={rlConfig.per_user_tpm ?? ''}
-                    onChange={(e) => handleRlChange('per_user_tpm', e.target.value)} />
-                  <span className="form-hint">{t('单个用户每分钟最大 Token 数')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('每 IP RPM')}</label>
-                  <input className="form-input" type="number" min="0" placeholder="0"
-                    value={rlConfig.per_ip_rpm ?? ''}
-                    onChange={(e) => handleRlChange('per_ip_rpm', e.target.value)} />
-                  <span className="form-hint">{t('单个 IP 每分钟最大请求数')}</span>
-                </div>
-                <div className="form-group">
-
-                  <label>{t('全局 RPM')}</label>
-                  <input className="form-input" type="number" min="0" placeholder="0"
-                    value={rlConfig.global_rpm ?? ''}
-                    onChange={(e) => handleRlChange('global_rpm', e.target.value)} />
-                  <span className="form-hint">{t('全系统每分钟最大请求数')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('全局 TPM')}</label>
-                  <input className="form-input" type="number" min="0" placeholder="0"
-                    value={rlConfig.global_tpm ?? ''}
-                    onChange={(e) => handleRlChange('global_tpm', e.target.value)} />
-                  <span className="form-hint">{t('全系统每分钟最大 Token 数')}</span>
-                </div>
-              </div>
-              <div className="settings-actions" style={{ marginTop: 16 }}>
-                <button className="btn btn-primary" onClick={handleRlSave} disabled={rlSaving}>
-                  {rlSaving ? t('保存中...') : t('保存限流配置')}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="empty-state">
-              <p>{t('限流配置未启用或加载失败')}</p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ── 缓存管理面板 ── */}
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-header">
-          <h2>{t('缓存管理')}</h2>
-        </div>
-        <div className="card-body">
-          {cacheLoading ? (
-            <div className="loading">{t('加载缓存统计')}</div>
-          ) : cacheStats ? (
-            <div className="settings-form">
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16, marginBottom: 16 }}>
-                <div className="form-group">
-                  <label>{t('缓存条目数')}</label>
-                  <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-main)' }}>
-                    {Number(cacheStats.entries || cacheStats.count || 0).toLocaleString()}
-                  </div>
-                </div>
-                <div className="form-group">
-                  <label>{t('命中率')}</label>
-                  <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-main)' }}>
-                    {Number(cacheStats.hit_rate || 0).toFixed(1)}%
-                  </div>
-                </div>
-                <div className="form-group">
-                  <label>{t('内存占用')}</label>
-                  <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-main)' }}>
-                    {fmtBytes(cacheStats.memory_bytes || cacheStats.size_bytes || 0)}
-                  </div>
-                </div>
-              </div>
-              <div className="settings-actions">
-                <button
-                  className="btn btn-danger"
-                  onClick={handleClearCache}
-                  disabled={cacheClearing}
-                >
-                  {cacheClearing ? t('清空中...') : t('清空缓存')}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="empty-state">
-              <p>{t('缓存统计未启用或加载失败')}</p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ── 价格同步配置面板 ── */}
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-header">
-          <h2>{t('价格同步')}</h2>
-        </div>
-        <div className="card-body">
-          {priceSyncLoading ? (
-            <div className="loading">{t('加载价格同步配置')}</div>
-          ) : priceSyncConfig ? (
-            <div className="settings-form">
-              <div className="form-group">
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <input
-                    type="checkbox"
-                    checked={priceSyncConfig.enabled ?? false}
-                    onChange={(e) => setPriceSyncConfig({ ...priceSyncConfig, enabled: e.target.checked })}
-                  />
-                  {t('启用自动同步')}
-                </label>
-                <span className="form-hint">{t('开启后按间隔自动从同步 URL 拉取最新价格')}</span>
-              </div>
-              <div className="form-group">
-                <label>{t('同步 URL')}</label>
-                <input
-                  className="form-input"
-                  placeholder="https://example.com/prices.json"
-                  value={priceSyncConfig.sync_url || ''}
-                  onChange={(e) => setPriceSyncConfig({ ...priceSyncConfig, sync_url: e.target.value })}
-                />
-                <span className="form-hint">{t('价格数据源的 JSON URL')}</span>
-              </div>
-              <div className="form-group">
-                <label>{t('同步间隔（秒）')}</label>
-                <input
-                  className="form-input"
-                  type="number"
-                  min="60"
-                  placeholder="3600"
-                  value={priceSyncConfig.interval_secs ?? ''}
-                  onChange={(e) => setPriceSyncConfig({ ...priceSyncConfig, interval_secs: e.target.value === '' ? null : Number(e.target.value) })}
-                />
-                <span className="form-hint">{t('自动同步间隔，建议 >= 300 秒')}</span>
-              </div>
-              <div className="settings-actions" style={{ display: 'flex', gap: 12 }}>
-                <button className="btn btn-primary" onClick={handlePriceSyncSave} disabled={priceSyncSaving}>
-                  {priceSyncSaving ? t('保存中...') : t('保存配置')}
-                </button>
-                <button className="btn btn-outline" onClick={handlePriceSyncTrigger} disabled={priceSyncTriggering}>
-                  {priceSyncTriggering ? t('同步中...') : t('立即同步')}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="empty-state">
-              <p>{t('价格同步未启用或加载失败')}</p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ── 汇率配置面板 ── */}
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-header">
-          <h2>{t('汇率配置')}</h2>
-        </div>
-        <div className="card-body">
-          {exchangeRatesLoading ? (
-            <div className="loading">{t('加载汇率配置')}</div>
-          ) : exchangeRates ? (
-            <div className="settings-form">
-              <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
-                {t('各币种相对于 USD 的汇率。例如 CNY=7.2 表示 1 USD = 7.2 CNY。')}
-              </p>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16 }}>
-                {Object.keys(exchangeRates).map((currency) => (
-                  <div key={currency} className="form-group">
-                    <label>{currency} / USD</label>
+            <div className="card-body">
+              <div className="settings-form">
+                {LIMIT_FIELDS.map((f) => (
+                  <div key={f.field} className="form-group">
+                    <label>{t(f.labelKey)}</label>
                     <input
                       className="form-input"
                       type="number"
-                      step="0.0001"
-                      min="0"
-                      placeholder="1.0"
-                      value={exchangeRates[currency] ?? ''}
-                      disabled={currency.toUpperCase() === 'USD'}
-                      onChange={(e) => handleExchangeRateChange(currency, e.target.value)}
+                      min={f.min}
+                      max={f.max}
+                      placeholder={t('settingsPlaceholderThreshold')}
+                      value={limits[f.field]}
+                      onChange={(e) => handleChange(f.field, e.target.value)}
                     />
-                    {currency.toUpperCase() === 'USD' && (
-                      <span className="form-hint">{t('USD 为基准货币，不可编辑')}</span>
-                    )}
+                    <span className="form-hint">{t(f.hintKey)}</span>
                   </div>
                 ))}
               </div>
-              <div className="settings-actions">
-                <button className="btn btn-primary" onClick={handleExchangeRatesSave} disabled={exchangeRatesSaving}>
-                  {exchangeRatesSaving ? t('保存中...') : t('保存汇率')}
-                </button>
+            </div>
+          </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-header">
+              <h2>{t('API 配置')}</h2>
+            </div>
+            <div className="card-body">
+              <div className="settings-form">
+                <div className="form-group">
+                  <label>{t('API 超时时间 (秒)')}</label>
+                  <input className="form-input" type="number" min="5" max="300" placeholder={t('settingsPlaceholderApiTimeout')} value={limits.api_timeout_secs} onChange={(e) => handleChange('api_timeout_secs', e.target.value)} />
+                  <span className="form-hint">{t('向 Cloudflare API 发送请求的超时时间，默认 120 秒。')}</span>
+                </div>
+                <div className="form-group">
+                  <label>{t('最大重试次数')}</label>
+                  <input className="form-input" type="number" min="0" max="10" placeholder={t('settingsPlaceholderMaxRetries')} value={limits.max_retries} onChange={(e) => handleChange('max_retries', e.target.value)} />
+                  <span className="form-hint">{t('API 请求失败时的最大重试次数，0 表示不重试。')}</span>
+                </div>
+                <div className="settings-actions">
+                  <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+                    {saving ? t('保存中...') : t('保存更改')}
+                  </button>
+                </div>
               </div>
             </div>
-          ) : (
-            <div className="empty-state">
-              <p>{t('汇率配置未启用或加载失败')}</p>
+          </div>
+        </>
+      )}
+
+      {activeTab === 'appearance' && (
+        <div className="card">
+          <div className="card-header">
+            <h2>{t('主题')}</h2>
+            <p className="card-subtitle">{t('settingsThemeSubtitle')}</p>
+          </div>
+          <div className="card-body">
+            <div className="theme-options" role="radiogroup" aria-label={t('主题')}>
+              {THEME_OPTIONS.map((opt) => {
+                const Icon = opt.icon;
+                const active = theme === opt.mode;
+                return (
+                  <button
+                    key={opt.mode}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    className={`theme-option ${active ? 'active' : ''}`}
+                    onClick={() => selectTheme(opt.mode)}
+                  >
+                    <Icon size={18} className="theme-option-icon" />
+                    <span className="theme-option-label">{t(opt.labelKey)}</span>
+                    <span className="theme-option-hint">{t(opt.hintKey)}</span>
+                  </button>
+                );
+              })}
             </div>
-          )}
+          </div>
         </div>
-      </div>
+      )}
+
+      {activeTab === 'notifications' && (
+        <div className="card">
+          <div className="card-header">
+            <h2>{t('通知设置')}</h2>
+          </div>
+          <div className="card-body">
+            <div className="settings-link-panel">
+              <p>{t('settingsNotifyHint')}</p>
+              <Link className="btn btn-outline" to="/notify">{t('打开通知设置')}</Link>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'account' && (
+        <div className="card">
+          <div className="card-header">
+            <h2>{t('账户安全')}</h2>
+          </div>
+          <div className="card-body">
+            <form className="settings-form" onSubmit={(e) => void handleChangePassword(e)}>
+              <div className="form-group">
+                <label>{t('当前密码')}</label>
+                <input className="form-input" type="password" value={oldPw}
+                  onChange={(e) => setOldPw(e.target.value)} autoComplete="current-password" />
+              </div>
+              <div className="form-group">
+                <label>{t('新密码')}</label>
+                <input className="form-input" type="password" value={newPw}
+                  onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
+                <span className="form-hint">{t('至少 6 位，建议混合字母与数字')}</span>
+              </div>
+              <div className="form-group">
+                <label>{t('确认新密码')}</label>
+                <input className="form-input" type="password" value={confirmPw}
+                  onChange={(e) => setConfirmPw(e.target.value)} autoComplete="new-password" />
+              </div>
+              {pwError && <div className="error-message">{pwError}</div>}
+              <div className="settings-actions">
+                <button type="submit" className="btn btn-primary" disabled={pwSaving}>
+                  {pwSaving ? t('修改中...') : t('修改密码')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'usage' && (
+        <>
+          <div className="card">
+            <div className="card-header">
+              <h2>{t('限流配置')}</h2>
+            </div>
+            <div className="card-body">
+              {rlLoading ? (
+                <div className="loading">{t('加载限流配置')}</div>
+              ) : rlConfig ? (
+                <div className="settings-form">
+                  <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
+                    {t('配置多维度 RPM（每分钟请求数）/ TPM（每分钟 Token 数）限流。留空或 0 = 不限制。')}
+                  </p>
+                  {/* 启用限流总开关：不开启时任何限流维度都不生效 */}
+                  <div className="form-group">
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <input
+                        type="checkbox"
+                        checked={rlConfig.enabled ?? false}
+                        onChange={(e) => setRlConfig({ ...rlConfig, enabled: e.target.checked })}
+                      />
+                      {t('启用限流总开关')}
+                    </label>
+                    <span className="form-hint">{t('开启后限流规则才会生效')}</span>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 16 }}>
+                    {RL_FIELDS.map((f) => (
+                      <div key={f.field} className="form-group">
+                        <label>{t(f.labelKey)}</label>
+                        <input className="form-input" type="number" min="0" placeholder="0"
+                          value={rlConfig[f.field] ?? ''}
+                          onChange={(e) => handleRlChange(f.field, e.target.value)} />
+                        <span className="form-hint">{t(f.hintKey)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="settings-actions" style={{ marginTop: 16 }}>
+                    <button className="btn btn-primary" onClick={handleRlSave} disabled={rlSaving}>
+                      {rlSaving ? t('保存中...') : t('保存限流配置')}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <p>{t('限流配置未启用或加载失败')}</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-header">
+              <h2>{t('缓存管理')}</h2>
+            </div>
+            <div className="card-body">
+              {cacheLoading ? (
+                <div className="loading">{t('加载缓存统计')}</div>
+              ) : cacheStats ? (
+                <div className="settings-form">
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16, marginBottom: 16 }}>
+                    <div className="form-group">
+                      <label>{t('缓存条目数')}</label>
+                      <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-main)' }}>
+                        {Number(cacheStats.entries || cacheStats.count || 0).toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="form-group">
+                      <label>{t('命中率')}</label>
+                      <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-main)' }}>
+                        {Number(cacheStats.hit_rate || 0).toFixed(1)}%
+                      </div>
+                    </div>
+                    <div className="form-group">
+                      <label>{t('内存占用')}</label>
+                      <div style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-main)' }}>
+                        {fmtBytes(cacheStats.memory_bytes || cacheStats.size_bytes || 0)}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="settings-actions">
+                    <button
+                      className="btn btn-danger"
+                      onClick={handleClearCache}
+                      disabled={cacheClearing}
+                    >
+                      {cacheClearing ? t('清空中...') : t('清空缓存')}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <p>{t('缓存统计未启用或加载失败')}</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-header">
+              <h2>{t('价格同步')}</h2>
+            </div>
+            <div className="card-body">
+              {priceSyncLoading ? (
+                <div className="loading">{t('加载价格同步配置')}</div>
+              ) : priceSyncConfig ? (
+                <div className="settings-form">
+                  <div className="form-group">
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(priceSyncConfig.enabled)}
+                        onChange={(e) => setPriceSyncConfig({ ...priceSyncConfig, enabled: e.target.checked })}
+                      />
+                      {t('启用自动同步')}
+                    </label>
+                    <span className="form-hint">{t('开启后按间隔自动从同步 URL 拉取最新价格')}</span>
+                  </div>
+                  <div className="form-group">
+                    <label>{t('同步 URL')}</label>
+                    <input
+                      className="form-input"
+                      placeholder="https://example.com/prices.json"
+                      value={priceSyncConfig.sync_url || ''}
+                      onChange={(e) => setPriceSyncConfig({ ...priceSyncConfig, sync_url: e.target.value })}
+                    />
+                    <span className="form-hint">{t('价格数据源的 JSON URL')}</span>
+                  </div>
+                  <div className="form-group">
+                    <label>{t('同步间隔（秒）')}</label>
+                    <input
+                      className="form-input"
+                      type="number"
+                      min="60"
+                      placeholder="3600"
+                      value={priceSyncConfig.interval_secs ?? ''}
+                      onChange={(e) => setPriceSyncConfig({ ...priceSyncConfig, interval_secs: e.target.value === '' ? null : Number(e.target.value) })}
+                    />
+                    <span className="form-hint">{t('自动同步间隔，建议 >= 300 秒')}</span>
+                  </div>
+                  <div className="settings-actions" style={{ display: 'flex', gap: 12 }}>
+                    <button className="btn btn-primary" onClick={handlePriceSyncSave} disabled={priceSyncSaving}>
+                      {priceSyncSaving ? t('保存中...') : t('保存配置')}
+                    </button>
+                    <button className="btn btn-outline" onClick={handlePriceSyncTrigger} disabled={priceSyncTriggering}>
+                      {priceSyncTriggering ? t('同步中...') : t('立即同步')}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <p>{t('价格同步未启用或加载失败')}</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-header">
+              <h2>{t('汇率配置')}</h2>
+            </div>
+            <div className="card-body">
+              {exchangeRatesLoading ? (
+                <div className="loading">{t('加载汇率配置')}</div>
+              ) : exchangeRates ? (
+                <div className="settings-form">
+                  <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
+                    {t('各币种相对于 USD 的汇率。例如 CNY=7.2 表示 1 USD = 7.2 CNY。')}
+                  </p>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16 }}>
+                    {Object.keys(exchangeRates).map((currency) => (
+                      <div key={currency} className="form-group">
+                        <label>{currency} / USD</label>
+                        <input
+                          className="form-input"
+                          type="number"
+                          step="0.0001"
+                          min="0"
+                          placeholder="1.0"
+                          value={exchangeRates[currency] ?? ''}
+                          disabled={currency.toUpperCase() === 'USD'}
+                          onChange={(e) => handleExchangeRateChange(currency, e.target.value)}
+                        />
+                        {currency.toUpperCase() === 'USD' && (
+                          <span className="form-hint">{t('USD 为基准货币，不可编辑')}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="settings-actions">
+                    <button className="btn btn-primary" onClick={handleExchangeRatesSave} disabled={exchangeRatesSaving}>
+                      {exchangeRatesSaving ? t('保存中...') : t('保存汇率')}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <p>{t('汇率配置未启用或加载失败')}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
-
 
     </div>
   );

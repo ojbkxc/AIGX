@@ -2,6 +2,7 @@ import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, Loading, EmptyState } from '../components/ui';
 
 interface WalletUser {
@@ -49,6 +50,11 @@ export default function Wallet(): JSX.Element {
   // 兑换码
   const [redeemCode, setRedeemCode] = useState('');
   const [redeeming, setRedeeming] = useState(false);
+  // 兑换码/充值表单内联错误（页面顶部 error 离表单太远，用户看不到）
+  const [redeemError, setRedeemError] = useState('');
+  const [topupError, setTopupError] = useState('');
+  // 兑换码是不可逆消费，提交前二次确认
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   useEffect(() => {
     void load();
@@ -103,15 +109,16 @@ export default function Wallet(): JSX.Element {
 
     // 空串/NaN 会得到 NaN，NaN <= 0 为 false，会绕过校验直接进 topup → 用 isFinite 兜底
     if (!Number.isFinite(amt) || amt <= 0) {
-      setError(t('请输入有效金额'));
+      setTopupError(t('请输入有效金额'));
       return;
     }
     if (epay && amt < (epay.min_topup || 1)) {
-      setError(`${t('最低充值')} ${epay.min_topup} ${t('元')}`);
+      setTopupError(`${t('最低充值')} ${epay.min_topup} ${t('元')}`);
       return;
     }
     setSubmitting(true);
     setError('');
+    setTopupError('');
     try {
       const res = await api.topup(amt, method);
       const data = (res?.data ?? {}) as Record<string, unknown> & { url?: string };
@@ -121,7 +128,7 @@ export default function Wallet(): JSX.Element {
       }
       const url: string | undefined = data.url;
       if (!url) {
-        setError(t('支付网关未返回跳转地址，请检查易支付配置'));
+        setTopupError(t('支付网关未返回跳转地址，请检查易支付配置'));
         setSubmitting(false);
         return;
       }
@@ -139,7 +146,7 @@ export default function Wallet(): JSX.Element {
       document.body.appendChild(formEl);
       formEl.submit();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setTopupError(err instanceof Error ? err.message : String(err));
     } finally {
       setSubmitting(false);
     }
@@ -148,11 +155,12 @@ export default function Wallet(): JSX.Element {
   // 兑换码兑换（放在 loading 早退之前，保证 hooks 与事件处理函数定义顺序稳定）
   const handleRedeem = async () => {
     if (!redeemCode.trim()) {
-      setError(t('请输入兑换码'));
+      setRedeemError(t('请输入兑换码'));
       return;
     }
     setRedeeming(true);
     setError('');
+    setRedeemError('');
     try {
       const res = await api.redeem(redeemCode.trim());
       const data = res?.data ?? {};
@@ -163,7 +171,7 @@ export default function Wallet(): JSX.Element {
       const meRes = await api.getMe();
       if (meRes) setMe(meRes.data as WalletUser | null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setRedeemError(err instanceof Error ? err.message : String(err));
     } finally {
       setRedeeming(false);
     }
@@ -234,6 +242,7 @@ export default function Wallet(): JSX.Element {
               })}
             </div>
             <form onSubmit={(e: FormEvent) => { e.preventDefault(); void handleTopup(); }} style={{ display: 'grid', gap: 16, maxWidth: 480, marginTop: 14 }}>
+              {topupError && <div className="error-message">{topupError}</div>}
               <Input
                 label={t('充值金额（元）')}
                 type="number"
@@ -276,7 +285,22 @@ export default function Wallet(): JSX.Element {
       )}
 
       <Card title={t('兑换码充值')} bodyClassName="">
-        <form onSubmit={(e: FormEvent) => { e.preventDefault(); void handleRedeem(); }} style={{ display: 'grid', gap: 16, maxWidth: 480 }}>
+        <form onSubmit={(e: FormEvent) => {
+          e.preventDefault();
+          const code = redeemCode.trim();
+          if (!code) {
+            setRedeemError(t('请输入兑换码'));
+            return;
+          }
+          // 兑换码一经提交立即消费（不可逆），先确认再执行
+          setConfirmState({
+            title: t('确认兑换'),
+            message: <>{t('即将兑换以下兑换码，兑换后立即生效且无法撤销：')}<br /><code className="key-value">{code}</code></>,
+            confirmText: t('确认兑换'),
+            onConfirm: () => handleRedeem(),
+          });
+        }} style={{ display: 'grid', gap: 16, maxWidth: 480 }}>
+          {redeemError && <div className="error-message">{redeemError}</div>}
           <Input
             label={t('兑换码')}
             value={redeemCode}
@@ -290,6 +314,8 @@ export default function Wallet(): JSX.Element {
           </Button>
         </form>
       </Card>
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
       <Card title={`${t('我的订单')} (${orders.length})`}>
         {orders.length === 0 ? (

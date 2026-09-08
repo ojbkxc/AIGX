@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Eye, EyeOff } from 'lucide-react';
 import { api } from '../api';
 import type { ChannelItem as ApiChannelItem } from '../types';
 import { useToast } from '../components/Toast';
@@ -71,6 +72,8 @@ export default function Channels(): JSX.Element {
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState<string | number | null>(null);
   const [fetchingModels, setFetchingModels] = useState(false);
+  // API Key 输入明文切换（防输错无法核对）
+  const [showApiKey, setShowApiKey] = useState(false);
 
   // ── 确认弹窗状态 ──
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
@@ -149,7 +152,9 @@ export default function Channels(): JSX.Element {
     setShowModal(true);
   };
 
+  // 关闭渠道弹窗：保存中禁止关闭（防误触丢请求/丢表单）；正常关闭时重置表单
   const closeModal = (): void => {
+    if (saving) return;
     setShowModal(false);
     setEditChannel(null);
     setForm(defaultForm());
@@ -212,16 +217,23 @@ export default function Channels(): JSX.Element {
     }
   };
 
-  // 手动重置渠道断路器（渠道被熔断后恢复）
-  const handleResetCircuit = async (id: string | number): Promise<void> => {
-    setError('');
-    try {
-      await api.resetChannelCircuit(id);
-      addToast(t('断路器已重置'));
-      loadChannels();
-    } catch (err) {
-      addToast(`${t('重置失败')}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+  // 手动重置渠道断路器（渠道被熔断后恢复）— 恢复放行可能仍有故障的渠道流量，需确认
+  const handleResetCircuit = (id: string | number): void => {
+    setConfirmState({
+      title: t('重置断路器'),
+      message: t('重置后将立即恢复向该渠道放行流量。若渠道仍存在故障，可能再次触发熔断。确定继续？'),
+      confirmText: t('重置'),
+      onConfirm: async () => {
+        setError('');
+        try {
+          await api.resetChannelCircuit(id);
+          addToast(t('断路器已重置'));
+          loadChannels();
+        } catch (err) {
+          addToast(`${t('重置失败')}: ${err instanceof Error ? err.message : String(err)}`, 'error');
+        }
+      },
+    });
   };
 
   // 拉取上游模型列表 — 后端代理转发（避免浏览器 CORS）
@@ -266,15 +278,32 @@ export default function Channels(): JSX.Element {
     setChatChannel(null);
   };
 
-  // PATCH 部分更新 — 仅传 status 字段，避免脱敏 api_key 覆盖真实密钥
-  const handleToggle = async (ch: ChannelItem): Promise<void> => {
-    try {
-      const newStatus = ch.status === 'enabled' ? 'disabled' : 'enabled';
-      await api.patchChannel(ch.id, { status: newStatus });
-      loadChannels();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+  // PATCH 部分更新 — 仅传 status 字段，避免脱敏 api_key 覆盖真实密钥。
+  // 停用直接影响生产流量 → 确认弹窗；启用方向直接执行。
+  const handleToggle = (ch: ChannelItem): void => {
+    const disabling = ch.status === 'enabled';
+    const doToggle = async (): Promise<void> => {
+      setError('');
+      try {
+        const newStatus = disabling ? 'disabled' : 'enabled';
+        await api.patchChannel(ch.id, { status: newStatus });
+        addToast(disabling ? t('渠道已停用') : t('渠道已启用'));
+        loadChannels();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    };
+    if (disabling) {
+      setConfirmState({
+        title: t('停用渠道'),
+        message: t('停用后该渠道不再接收新请求。确定继续？'),
+        confirmText: t('停用'),
+        danger: true,
+        onConfirm: doToggle,
+      });
+      return;
     }
+    void doToggle();
   };
 
   const handleDelete = (id: string | number): void => {
@@ -365,7 +394,11 @@ export default function Channels(): JSX.Element {
                             </span>
                           </td>
                           <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                            {(ch.models || []).join(', ') || t('全部')}
+                            {(ch.models || []).length > 6
+                              ? <span title={(ch.models || []).join(', ')}>
+                                  {(ch.models || []).slice(0, 6).join(', ')} +{ch.models!.length - 6}
+                                </span>
+                              : (ch.models || []).join(', ') || t('全部')}
                           </td>
                           <td>
                             {ch.status === 'enabled'
@@ -414,8 +447,8 @@ export default function Channels(): JSX.Element {
       </div>
 
       {showModal && (
-        <div className="modal-overlay" onClick={closeModal}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay">
+          <div className="modal">
             <div className="modal-header">
               <h3>{editChannel ? t('编辑渠道') : t('添加渠道')}</h3>
               <button className="modal-close" onClick={closeModal}>&times;</button>
@@ -468,9 +501,25 @@ export default function Channels(): JSX.Element {
               )}
               <div className="form-group">
                 <label>API Key {editChannel && t('（留空则保持不变）')}</label>
-                <input className="form-input" type="password"
-                  placeholder={editChannel ? t('留空保持当前值') : 'API Key'} value={form.api_key}
-                  onChange={(e) => setForm({ ...form, api_key: e.target.value })} />
+                <div className="password-input-wrap">
+                  <input
+                    className="form-input password-input"
+                    type={showApiKey ? 'text' : 'password'}
+                    placeholder={editChannel ? t('留空保持当前值') : 'API Key'}
+                    value={form.api_key}
+                    onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+                  />
+                  <button
+                    type="button"
+                    className="password-input-toggle"
+                    tabIndex={-1}
+                    onClick={() => setShowApiKey((v) => !v)}
+                    aria-label={showApiKey ? t('隐藏') : t('显示')}
+                    title={showApiKey ? t('隐藏') : t('显示')}
+                  >
+                    {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
               </div>
               <div className="form-group">
                 <label>{t('支持的模型（逗号分隔，留空=全部）')}</label>
@@ -511,7 +560,7 @@ export default function Channels(): JSX.Element {
               </div>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={closeModal}>{t('取消')}</button>
+              <button className="btn btn-outline" onClick={closeModal} disabled={saving}>{t('取消')}</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
                 {saving ? t('保存中...') : (editChannel ? t('更新') : t('添加'))}
               </button>

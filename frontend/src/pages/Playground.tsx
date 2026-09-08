@@ -7,6 +7,13 @@ import { api } from '../api';
 import type { PlaygroundRawResult } from '../types';
 import './Playground.css';
 
+const SUGGESTION_PROMPTS: Array<{ title: string; sub: string; content: string }> = [
+  { title: '写一段 Python 冒泡排序', sub: '代码生成', content: '用 Python 写一段冒泡排序，并解释时间复杂度。' },
+  { title: '翻译成英文', sub: '翻译助手', content: '把下面这段话翻译成地道英文：今天天气很好，适合出门散步。' },
+  { title: '总结要点', sub: '文本摘要', content: '请帮我总结这段文字的核心要点，控制在 100 字以内。' },
+  { title: '构思小说开头', sub: '创意写作', content: '帮我构思一个都市题材小说开头，主角是一名重启人生的程序员。' },
+];
+
 type PlaygroundMode = 'chat' | 'completions' | 'images';
 
 /**
@@ -40,7 +47,7 @@ export default function Playground(): JSX.Element {
       </div>
       {mode === 'chat' && (
         <div className="playground-body">
-          <ChatDebugger />
+          <ChatDebugger hideToolbar floatingModelBar={false} suggestionPrompts={SUGGESTION_PROMPTS} />
         </div>
       )}
       {mode === 'completions' && <CompletionsPanel />}

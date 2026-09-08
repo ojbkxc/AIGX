@@ -56,6 +56,8 @@ export default function Users(): JSX.Element {
   const [editing, setEditing] = useState<UserItem | null>(null);
   const [form, setForm] = useState<UserFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+  // 搜索过滤（邮箱/昵称本地匹配）
+  const [query, setQuery] = useState('');
 
   useEffect(() => {
     void load();
@@ -156,16 +158,25 @@ export default function Users(): JSX.Element {
     }
   };
 
-  const handleDelete = (id: string | number) => {
+  const handleDelete = (u: UserItem) => {
+    // 自我保护：不能删除当前登录账号自己
+    if (me && u.id === me.id) {
+      addToast(t('不能删除当前登录的账号'), 'error');
+      return;
+    }
     setConfirmState({
       title: t('删除用户'),
-      message: t('确定删除该用户？该操作不可撤销。'),
+      message: (
+        <>
+          {t('确定删除用户')} <strong>{u.email}</strong>？{t('该操作不可撤销。')}
+        </>
+      ),
       confirmText: t('删除'),
       danger: true,
       onConfirm: async () => {
         setError('');
         try {
-          await api.deleteUser(id);
+          await api.deleteUser(u.id);
           addToast(t('用户已删除'));
           await load();
         } catch (err) {
@@ -183,6 +194,12 @@ export default function Users(): JSX.Element {
   };
 
   if (loading) return <SkeletonTable columns={6} rows={7} />;
+
+  const q = query.trim().toLowerCase();
+  const visibleUsers = q
+    ? users.filter((u) =>
+        (u.email || '').toLowerCase().includes(q) || (u.username || '').toLowerCase().includes(q))
+    : users;
 
   return (
     <div>
@@ -216,11 +233,21 @@ export default function Users(): JSX.Element {
       )}
 
       <Card
-        title={`${t('所有用户')} (${users.length})`}
-        actions={<Button onClick={openCreate}>{t('+ 新建用户')}</Button>}
+        title={`${t('所有用户')} (${visibleUsers.length}/${users.length})`}
+        actions={
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Input
+              placeholder={t('搜索邮箱 / 昵称…')}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              style={{ width: 200 }}
+            />
+            <Button onClick={openCreate}>{t('+ 新建用户')}</Button>
+          </div>
+        }
       >
-        {users.length === 0 ? (
-          <EmptyState message={t('暂无用户')} icon="👥" />
+        {visibleUsers.length === 0 ? (
+          <EmptyState message={q ? t('没有匹配的用户') : t('暂无用户')} icon="👥" />
         ) : (
           <div className="table-wrapper">
             <table>
@@ -239,7 +266,7 @@ export default function Users(): JSX.Element {
                 </tr>
               </thead>
               <tbody>
-                {users.map((u) => (
+                {visibleUsers.map((u) => (
                   <tr key={u.id}>
                     <td><strong>{u.email}</strong></td>
                     <td>{u.username || '—'}</td>
@@ -257,7 +284,16 @@ export default function Users(): JSX.Element {
                     <td>
                       <div className="actions-cell">
                         <Button variant="outline" size="sm" onClick={() => openEdit(u)}>{t('编辑')}</Button>
-                        <Button variant="danger" size="sm" onClick={() => handleDelete(u.id)}>{t('删除')}</Button>
+                        <span title={me != null && u.id === me.id ? t('不能删除当前登录的账号') : undefined}>
+                          <Button
+                            variant="danger"
+                            size="sm"
+                            onClick={() => handleDelete(u)}
+                            disabled={me != null && u.id === me.id}
+                          >
+                            {t('删除')}
+                          </Button>
+                        </span>
                       </div>
                     </td>
                   </tr>
@@ -271,8 +307,8 @@ export default function Users(): JSX.Element {
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
       {showModal && (
-        <div className="modal-overlay" onClick={closeModal}>
-          <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={handleSave}>
+        <div className="modal-overlay">
+          <form className="modal" onSubmit={handleSave}>
             <div className="modal-header">
               <h3>{editing ? t('编辑用户') : t('新建用户')}</h3>
               <button type="button" className="modal-close" onClick={closeModal}>&times;</button>
@@ -334,7 +370,7 @@ export default function Users(): JSX.Element {
               )}
             </div>
             <div className="modal-footer">
-              <Button variant="outline" onClick={closeModal}>{t('取消')}</Button>
+              <Button variant="outline" onClick={closeModal} disabled={saving}>{t('取消')}</Button>
               <Button type="submit" disabled={saving}>
                 {saving ? t('保存中...') : t('保存')}
               </Button>

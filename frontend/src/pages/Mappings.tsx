@@ -116,8 +116,7 @@ export default function Mappings() {
     try {
       await api.updateSettings(newMappings, true);
       addToast(t('模型映射更新成功'));
-      setMappings({ ...DEFAULT_MODELS.reduce((acc, d) => ({ ...acc, [d.key]: d.value }), {}), ...newMappings });
-      setCustomMappings(newMappings);
+      await loadMappings();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -203,6 +202,13 @@ export default function Mappings() {
                   </button>
                 </div>
               ))}
+            </div>
+          )}
+          {entries.length > 0 && (
+            <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+                {saving ? t('保存中...') : t('保存全部')}
+              </button>
             </div>
           )}
         </div>

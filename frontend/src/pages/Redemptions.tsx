@@ -10,6 +10,7 @@ interface GenForm {
   quota: number;
   name: string;
   expires_at: number;
+  expires_at_local: string;
 }
 
 interface RedemptionItem {
@@ -35,8 +36,13 @@ export default function Redemptions(): JSX.Element {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   const [showGen, setShowGen] = useState(false);
-  const [genForm, setGenForm] = useState<GenForm>({ count: 10, quota: 100, name: '', expires_at: 0 });
+  const [genForm, setGenForm] = useState<GenForm>({ count: 10, quota: 100, name: '', expires_at: 0, expires_at_local: '' });
   const [generating, setGenerating] = useState(false);
+
+  const openGen = () => {
+    setGenForm({ count: 10, quota: 100, name: '', expires_at: 0, expires_at_local: '' });
+    setShowGen(true);
+  };
 
   useEffect(() => {
     void load();
@@ -58,6 +64,14 @@ export default function Redemptions(): JSX.Element {
   };
 
   const handleGenerate = async () => {
+    if (!Number.isInteger(genForm.count) || genForm.count < 1) {
+      addToast(t('数量至少为 1'), 'error');
+      return;
+    }
+    if (!Number.isInteger(genForm.quota) || genForm.quota < 1) {
+      addToast(t('面额至少为 1'), 'error');
+      return;
+    }
     setGenerating(true);
     setError('');
     try {
@@ -96,6 +110,46 @@ export default function Redemptions(): JSX.Element {
     return new Date(ts * 1000).toLocaleString();
   };
 
+  const fmtQuota = (q: number | undefined): string => {
+    const n = Number(q || 0);
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+    if (n >= 1_000) return (n / 1_000).toFixed(2) + 'K';
+    return String(n);
+  };
+
+  const copyToClipboard = (text: string) => {
+    // navigator.clipboard 仅在安全上下文（HTTPS/localhost）可用；AIGX 常以
+    // http://IP:9527 部署，需降级 execCommand 方案，否则复制静默失败。
+    const fallbackCopy = (): boolean => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch {
+        return false;
+      }
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => {
+        addToast(t('已复制到剪贴板'));
+      }).catch(() => {
+        if (!fallbackCopy()) addToast(t('复制失败，请手动选择复制'), 'error');
+        else addToast(t('已复制到剪贴板'));
+      });
+    } else if (fallbackCopy()) {
+      addToast(t('已复制到剪贴板'));
+    } else {
+      addToast(t('复制失败，请手动选择复制'), 'error');
+    }
+  };
+
   const statusBadge = (r: RedemptionItem): JSX.Element => {
     const text =
       r.status === 1
@@ -123,7 +177,7 @@ export default function Redemptions(): JSX.Element {
       {error && <div className="error-message">{error}</div>}
 
       <Card className="" bodyClassName="">
-        <Button onClick={() => setShowGen(!showGen)}>
+        <Button onClick={() => (showGen ? setShowGen(false) : openGen())}>
           {showGen ? t('取消') : t('批量生成兑换码')}
         </Button>
       </Card>
@@ -149,9 +203,10 @@ export default function Redemptions(): JSX.Element {
             <div className="form-group">
               <label>{t('过期时间')}</label>
               <input className="form-input" type="datetime-local"
+                value={genForm.expires_at_local}
                 onChange={(e) => {
                   const ts = e.target.value ? Math.floor(new Date(e.target.value).getTime() / 1000) : 0;
-                  setGenForm({ ...genForm, expires_at: ts });
+                  setGenForm({ ...genForm, expires_at: ts, expires_at_local: e.target.value });
                 }} />
               <span className="form-hint">{t('留空 = 永不过期')}</span>
             </div>
@@ -187,9 +242,16 @@ export default function Redemptions(): JSX.Element {
               <tbody>
                 {items.map((r) => (
                   <tr key={r.id}>
-                    <td><code className="key-value" style={{ maxWidth: 200 }}>{r.code}</code></td>
+                    <td>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <code className="key-value" style={{ maxWidth: 200 }}>{r.code}</code>
+                        {r.code && (
+                          <button className="btn btn-outline btn-sm" onClick={() => copyToClipboard(r.code as string)}>{t('复制')}</button>
+                        )}
+                      </div>
+                    </td>
                     <td>{r.name || '—'}</td>
-                    <td>{r.quota}</td>
+                    <td>{fmtQuota(r.quota)}</td>
                     <td>{statusBadge(r)}</td>
                     <td>{r.used_by || '—'}</td>
                     <td>{r.created_at ? new Date(r.created_at * 1000).toLocaleString() : '—'}</td>
