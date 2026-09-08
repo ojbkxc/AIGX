@@ -173,11 +173,6 @@ mod tests {
             "expected >= 3 runs after panic, got {executed}"
         );
         assert!(executed > 1, "scheduler died after first panic");
-        assert_eq!(
-            scheduler.tick_count("test-panic"),
-            executed - 1
-        );
+        assert_eq!(scheduler.tick_count("test-panic"), executed - 1);
     }
 }
-
-
