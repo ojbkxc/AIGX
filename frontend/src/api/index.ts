@@ -42,6 +42,7 @@ import type {
   TotpDisableResult,
   PlaygroundChatRequest,
   PlaygroundChatResult,
+  ChatStreamCallback,
   UsageSummaryItem,
   TrendItem,
   DashboardItem,
@@ -359,6 +360,14 @@ export const api = {
   // 渠道对话调试：流式（text/event-stream）返回 { stream: [{ content }] }，
   // 非流式返回后端 JSON。与 Playground 页共用 SSE 解析模式。
   testChannelChat: async (data: PlaygroundChatRequest): Promise<PlaygroundChatResult> => {
+    // 非流式走原路径；流式转发给 testChannelChatStream（真·增量渲染）
+    if (data.stream) {
+      let acc = '';
+      await testChannelChatStream(data, (d) => {
+        if (!d.isEnd) acc += d.content;
+      });
+      return acc ? { stream: [{ content: acc }] } : { stream: [] };
+    }
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       ...authHeaders(),
@@ -984,5 +993,162 @@ export const api = {
   },
 
 };
+
+/**
+ * 解析单个 SSE 帧（OpenAI / Anthropic 协议）为增量回调序列。
+ * 纯函数，便于单元测试。返回是否有终止帧（[DONE] / message_stop / error）。
+ */
+export function parseSseFrame(
+  frame: string,
+  onDelta: ChatStreamCallback,
+): boolean {
+  let ended = false;
+  const lines = frame
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('data:') && l.length > 5)
+    .map((l) => l.slice(5).trim())
+    .filter((l) => l.length > 0);
+  for (const data of lines) {
+    if (data === '[DONE]') {
+      if (!ended) onDelta({ content: '', isEnd: true });
+      ended = true;
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(data) as Record<string, unknown>;
+      // Anthropic message_stop
+      if (parsed.type === 'message_stop') {
+        if (!ended) onDelta({ content: '', isEnd: true });
+        ended = true;
+        continue;
+      }
+      if (parsed.type === 'error' || parsed.error) {
+        const raw = parsed.error as Record<string, unknown> | string | undefined;
+        const msg = typeof raw === 'string' ? raw : (raw?.message as string | undefined) ?? '上游流式错误';
+        onDelta({ content: msg, isEnd: true });
+        ended = true;
+        continue;
+      }
+      // Anthropic delta
+      const anthropicDelta = parsed.delta as { text?: string } | undefined;
+      if (anthropicDelta && typeof anthropicDelta.text === 'string' && anthropicDelta.text) {
+        onDelta({ content: anthropicDelta.text, isEnd: false });
+        continue;
+      }
+      // OpenAI delta（content / reasoning_content / text）
+      const choices = parsed.choices as Array<{ delta?: Record<string, unknown> }> | undefined;
+      const firstDelta = choices?.[0]?.delta;
+      if (firstDelta) {
+        const content = ([
+          firstDelta.content,
+          firstDelta.text,
+          firstDelta.reasoning_content,
+          firstDelta.reasoning,
+        ].find((v) => typeof v === 'string') ?? '') as string;
+        if (content) onDelta({ content, isEnd: false });
+      }
+    } catch {
+      // 非 JSON 帧（心跳/注释）忽略
+    }
+  }
+  return ended;
+}
+
+/**
+ * 真·流式对话调试：逐块读取 text/event-stream 并增量解析。
+ *
+ * 与 testChannelChat 的区别：不等整个响应结束，每解析到一个增量
+ * （OpenAI choices[0].delta 或 Anthropic delta.text）立即回调，
+ * ChatDebugger 用它在界面上逐 token 渲染。
+ */
+export async function testChannelChatStream(
+  data: PlaygroundChatRequest,
+  onDelta: ChatStreamCallback,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/channels/chat_test`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(data),
+    signal,
+  });
+
+  if (res.status === 401) {
+    throw new Error('Unauthorized');
+  }
+
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => '');
+    let msg = text;
+    if (text) {
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>;
+        const raw = parsed.error ?? parsed.message;
+        if (typeof raw === 'string') msg = raw;
+      } catch {
+        // 非 JSON 错误体，直接抛原文
+      }
+    }
+    throw new Error(msg || `Request failed with status ${res.status}`);
+  }
+
+  const contentType = res.headers.get('Content-Type') || '';
+  if (!contentType.includes('text/event-stream')) {
+    // 非流式 JSON（例如上游降级或后端报错），解析后一次性回调
+    const text = await res.text();
+    let parsed: unknown = null;
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        // ignore
+      }
+    }
+    const p = (parsed ?? {}) as Record<string, unknown>;
+    const data = (p.data ?? {}) as Record<string, unknown>;
+    const content = typeof data.content === 'string' ? data.content : '';
+    const error = typeof data.error === 'string' ? data.error : typeof p.error === 'string' ? p.error : '';
+    if (error) {
+      onDelta({ content: error, isEnd: true });
+    } else if (content) {
+      onDelta({ content, isEnd: true });
+    }
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let ended = false;
+
+  const handleFrame = (frame: string): void => {
+    ended = parseSseFrame(frame, onDelta) || ended;
+  };
+
+  for (;;) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // 统一行尾：剥离所有 \r（上游透传可能用 CRLF）。
+    // SSE 数据行内不应有孤立 \r，strip 是安全的。
+    buffer = buffer.replace(/\r/g, '');
+    // 空行 = SSE 帧边界，只处理完整帧，避免半个 JSON 被解析失败
+    let idx = buffer.indexOf('\n\n');
+    while (idx !== -1) {
+      const frame = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      handleFrame(frame);
+      idx = buffer.indexOf('\n\n');
+    }
+  }
+  // 尾部残留帧
+  if (buffer.trim()) handleFrame(buffer);
+  if (!ended) onDelta({ content: '', isEnd: true });
+}
 
 export default api;

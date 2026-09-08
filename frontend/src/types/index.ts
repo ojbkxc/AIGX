@@ -472,6 +472,14 @@ export interface PlaygroundChatResult {
   success?: boolean;
 }
 
+/**
+ * 真·流式回调：SSE 每解析到一个增量（OpenAI delta / Anthropic delta.text）
+ * 立即回调一次。isEnd 标记 [DONE] / message_stop 帧。
+ */
+export type ChatStreamDelta = { content: string; isEnd: boolean };
+
+export type ChatStreamCallback = (delta: ChatStreamDelta) => void;
+
 export interface UsageSummaryItem {
   [key: string]: unknown;
 }

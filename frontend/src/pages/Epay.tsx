@@ -215,7 +215,7 @@ export default function Epay() {
               <label>{t('充值档位折扣')} <code style={{ fontSize: 11 }}>amount_discount</code></label>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {[...discountEntries, ['', Number.NaN] as [string, number]].map(([amountKey, discount], i) => (
-                  <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <div key={amountKey || `empty-${i}`} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     <input
                       className="form-input"
                       type="number"

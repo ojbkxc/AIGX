@@ -5,6 +5,8 @@ import { useToast } from '../components/Toast';
 import './Mappings.css';
 
 interface ModelMapping {
+  /** 前端行 ID（crypto.randomUUID），编辑列表用稳定 key 避免重排串行 */
+  id: string;
   key: string;
   value: string;
 }
@@ -17,26 +19,34 @@ interface SettingsResponse {
 }
 
 const DEFAULT_MODELS: ModelMapping[] = [
-  { key: 'glm-5.2', value: '@cf/zai-org/glm-5.2' },
-  { key: 'glm-4.7-flash', value: '@cf/zai-org/glm-4.7-flash' },
-  { key: 'kimi-k2.7-code', value: '@cf/moonshotai/kimi-k2.7-code' },
-  { key: 'kimi-k2.6', value: '@cf/moonshotai/kimi-k2.6' },
-  { key: 'deepseek-v3', value: '@cf/deepseek-ai/deepseek-v3-0324' },
-  { key: 'deepseek-r1-distill', value: '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b' },
-  { key: 'qwen-2.5-72b', value: '@cf/qwen/qwen2.5-72b-instruct' },
-  { key: 'qwen-2.5-coder-32b', value: '@cf/qwen/qwen2.5-coder-32b-instruct' },
-  { key: 'llama-4-scout', value: '@cf/meta/llama-4-scout-17b-16e-instruct' },
-  { key: 'llama-4-maverick', value: '@cf/meta/llama-4-maverick-17b-128e-instruct' },
-  { key: 'llama-3.3-70b', value: '@cf/meta/llama-3.3-70b-instruct-fp8-fast' },
-  { key: 'llama-3.1-8b', value: '@cf/meta/llama-3.1-8b-instruct' },
-  { key: 'gemma-4-27b-it', value: '@cf/google/gemma-4-27b-it' },
-  { key: 'gemma-4-9b-it', value: '@cf/google/gemma-4-9b-it' },
-  { key: 'mixtral-8x7b', value: '@cf/mistral/mixtral-8x7b-instruct' },
-  { key: 'bge-m3', value: '@cf/baai/bge-m3' },
-  { key: 'whisper-1', value: '@cf/openai/whisper' },
-  { key: 'flux-1-schnell', value: '@cf/black-forest-labs/flux-1-schnell' },
-  { key: 'tts', value: '@cf/myshell-ai/tts' },
+  { id: 'default-glm-5.2', key: 'glm-5.2', value: '@cf/zai-org/glm-5.2' },
+  { id: 'default-glm-4.7-flash', key: 'glm-4.7-flash', value: '@cf/zai-org/glm-4.7-flash' },
+  { id: 'default-kimi-k2.7-code', key: 'kimi-k2.7-code', value: '@cf/moonshotai/kimi-k2.7-code' },
+  { id: 'default-kimi-k2.6', key: 'kimi-k2.6', value: '@cf/moonshotai/kimi-k2.6' },
+  { id: 'default-deepseek-v3', key: 'deepseek-v3', value: '@cf/deepseek-ai/deepseek-v3-0324' },
+  { id: 'default-deepseek-r1-distill', key: 'deepseek-r1-distill', value: '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b' },
+  { id: 'default-qwen-2.5-72b', key: 'qwen-2.5-72b', value: '@cf/qwen/qwen2.5-72b-instruct' },
+  { id: 'default-qwen-2.5-coder-32b', key: 'qwen-2.5-coder-32b', value: '@cf/qwen/qwen2.5-coder-32b-instruct' },
+  { id: 'default-llama-4-scout', key: 'llama-4-scout', value: '@cf/meta/llama-4-scout-17b-16e-instruct' },
+  { id: 'default-llama-4-maverick', key: 'llama-4-maverick', value: '@cf/meta/llama-4-maverick-17b-128e-instruct' },
+  { id: 'default-llama-3.3-70b', key: 'llama-3.3-70b', value: '@cf/meta/llama-3.3-70b-instruct-fp8-fast' },
+  { id: 'default-llama-3.1-8b', key: 'llama-3.1-8b', value: '@cf/meta/llama-3.1-8b-instruct' },
+  { id: 'default-gemma-4-27b-it', key: 'gemma-4-27b-it', value: '@cf/google/gemma-4-27b-it' },
+  { id: 'default-gemma-4-9b-it', key: 'gemma-4-9b-it', value: '@cf/google/gemma-4-9b-it' },
+  { id: 'default-mixtral-8x7b', key: 'mixtral-8x7b', value: '@cf/mistral/mixtral-8x7b-instruct' },
+  { id: 'default-bge-m3', key: 'bge-m3', value: '@cf/baai/bge-m3' },
+  { id: 'default-whisper-1', key: 'whisper-1', value: '@cf/openai/whisper' },
+  { id: 'default-flux-1-schnell', key: 'flux-1-schnell', value: '@cf/black-forest-labs/flux-1-schnell' },
+  { id: 'default-tts', key: 'tts', value: '@cf/myshell-ai/tts' },
 ];
+
+/** 前端稳定行 ID（编辑列表 key），不可序列化进后端 */
+function newEntryId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `row-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 export default function Mappings() {
   const [, setMappings] = useState<MappingMap>({});
@@ -69,7 +79,7 @@ export default function Mappings() {
         const isDefault = DEFAULT_MODELS.some(d => d.key === key && d.value === value);
         if (!isDefault) {
           customOnly[key] = value;
-          customEntries.push({ key, value: String(value) });
+          customEntries.push({ id: newEntryId(), key, value: String(value) });
         }
       }
       setCustomMappings(customOnly);
@@ -82,16 +92,16 @@ export default function Mappings() {
   };
 
   const addEntry = () => {
-    setEntries([...entries, { key: '', value: '' }]);
+    setEntries([...entries, { id: newEntryId(), key: '', value: '' }]);
   };
 
-  const removeEntry = (index: number) => {
-    setEntries(entries.filter((_, i) => i !== index));
+  const removeEntry = (id: string) => {
+    setEntries(entries.filter((e) => e.id !== id));
   };
 
-  const updateEntry = (index: number, field: keyof ModelMapping, val: string) => {
-    setEntries(entries.map((entry, i) =>
-      i === index ? { ...entry, [field]: val } : entry
+  const updateEntry = (id: string, field: 'key' | 'value', val: string) => {
+    setEntries(entries.map((entry) =>
+      entry.id === id ? { ...entry, [field]: val } : entry
     ));
   };
 
@@ -177,18 +187,18 @@ export default function Mappings() {
             </div>
           ) : (
             <div className="mappings-list">
-              {entries.map((entry, index) => (
-                <div className="mapping-row" key={index}>
+              {entries.map((entry) => (
+                <div className="mapping-row" key={entry.id}>
                   <div className="mapping-field">
                     <label className="mapping-label">{t('模型键')}</label>
-                    <input className="form-input" placeholder={t('mappingsPlaceholderModelKey')} value={entry.key} onChange={(e) => updateEntry(index, 'key', e.target.value)} />
+                    <input className="form-input" placeholder={t('mappingsPlaceholderModelKey')} value={entry.key} onChange={(e) => updateEntry(entry.id, 'key', e.target.value)} />
                   </div>
                   <div className="mapping-arrow">→</div>
                   <div className="mapping-field">
                     <label className="mapping-label">{t('映射值')}</label>
-                    <input className="form-input" placeholder={t('mappingsPlaceholderModelValue')} value={entry.value} onChange={(e) => updateEntry(index, 'value', e.target.value)} />
+                    <input className="form-input" placeholder={t('mappingsPlaceholderModelValue')} value={entry.value} onChange={(e) => updateEntry(entry.id, 'value', e.target.value)} />
                   </div>
-                  <button className="btn btn-danger btn-sm mapping-remove" onClick={() => removeEntry(index)} title={t('删除')}>
+                  <button className="btn btn-danger btn-sm mapping-remove" onClick={() => removeEntry(entry.id)} title={t('删除')}>
                     ✕
                   </button>
                 </div>

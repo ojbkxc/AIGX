@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Search, Send, Trash2, Image, Video, AudioLines, Loader2, Bot, User, Copy, Check } from 'lucide-react';
-import { api } from '../api';
+import { Search, Send, Square, Trash2, Image, Video, AudioLines, Loader2, Bot, User, Copy, Check } from 'lucide-react';
+import { api, testChannelChatStream } from '../api';
 import './ChatDebugger.css';
 
 interface DebugMessage {
@@ -64,6 +64,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  /** 流式生成中断控制器：用户点「停止」时 abort 上游请求 */
+  const abortRef = useRef<AbortController | null>(null);
 
   const [attachments, setAttachments] = useState<Array<{ kind: 'image' | 'video' | 'audio'; url: string }>>([]);
   const [attachKind, setAttachKind] = useState<'image' | 'video' | 'audio'>('image');
@@ -235,21 +237,43 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     }
 
     try {
-      const res = (await api.testChannelChat(body)) as ChatChunkResult;
-      if (res.stream) {
-        let acc = '';
-        for (const chk of res.stream) {
-          acc += chk.content || '';
-        }
-        if (acc) {
-          setMessages((prev) => [...prev, { role: 'assistant', content: acc }]);
-        }
-        if (!acc) {
-          setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${t('上游未返回内容')}` }]);
-        }
+      if (stream) {
+        const controller = new AbortController();
+        abortRef.current = controller;
+        // 真·流式：占位一条 assistant 消息，逐增量拼接渲染
+        setMessages((prev) => [...prev, { role: 'assistant', content: '…' }]);
+        await testChannelChatStream(body, (delta) => {
+          setMessages((prev) => {
+            const next = prev.slice();
+            const last = next[next.length - 1];
+            if (last && last.role === 'assistant') {
+              // 第一个增量到达时清掉占位「…」
+              const base = last.content === '…' ? '' : last.content;
+              next[next.length - 1] = {
+                ...last,
+                content: delta.isEnd ? base : base + delta.content,
+              };
+            }
+            return next;
+          });
+        }, controller.signal);
+        abortRef.current = null;
+        // 空流兜底提示（避免界面出现永久空白气泡）
+        setMessages((prev) => {
+          const next = prev.slice();
+          const last = next[next.length - 1];
+          if (last && last.role === 'assistant' && (last.content === '…' || !last.content.trim())) {
+            next[next.length - 1] = { ...last, content: `⚠️ ${t('上游未返回内容')}` };
+          }
+          return next;
+        });
       } else {
+        const res = (await api.testChannelChat(body)) as ChatChunkResult;
         const data = res.data || {};
-        if (data.content) {
+        if (res.stream && res.stream.length) {
+          const acc = res.stream.map((c) => c.content || '').join('');
+          setMessages((prev) => [...prev, { role: 'assistant', content: acc }]);
+        } else if (data.content) {
           setMessages((prev) => [...prev, { role: 'assistant', content: data.content ?? '' }]);
         } else if (data.error) {
           setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${data.error}` }]);
@@ -261,11 +285,23 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (msg === 'Aborted' || msg === 'AbortError' || /abort/i.test(msg)) {
+        // 用户主动停止：补一句生成已停止，不弹出错误
+        setMessages((prev) => [...prev, { role: 'assistant', content: `⏹ ${t('已停止生成')}` }]);
+        abortRef.current = null;
+        return;
+      }
       setError(msg);
       setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${msg}` }]);
     } finally {
       setBusy(false);
+      abortRef.current = null;
     }
+  };
+
+  /** 停止当前流式生成（AbortController 中断上游请求） */
+  const stopStreaming = (): void => {
+    abortRef.current?.abort();
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -471,7 +507,10 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       <div className="chat-debugger-messages">
         {messages.length === 0 && (
           <div className="chat-debugger-empty">
-            {t('输入消息开始对话。支持多轮上下文与图片/视频/音频附件（OpenAI 协议）。')}
+            <div className="chat-debugger-empty-title">{model || t('开始对话')}</div>
+            <div className="chat-debugger-empty-sub">
+              {t('输入消息开始对话。支持多轮上下文与图片/视频/音频附件（OpenAI 协议）。')}
+            </div>
           </div>
         )}
         {messages.map((m, i) => (
@@ -499,47 +538,51 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             </div>
           </div>
         ))}
-        {busy && (
-          <div className="chat-debugger-msg chat-debugger-msg-assistant">
-            <span className="chat-debugger-msg-icon"><Bot size={13} /></span>
-            <div className="chat-debugger-msg-body">
-              <Loader2 size={14} className="chat-debugger-spin" /> {t('思考中…')}
+        {busy &&
+          (stream ? null : (
+            <div className="chat-debugger-msg chat-debugger-msg-assistant">
+              <span className="chat-debugger-msg-icon"><Bot size={13} /></span>
+              <div className="chat-debugger-msg-body">
+                <Loader2 size={14} className="chat-debugger-spin" /> {t('思考中…')}
+              </div>
             </div>
-          </div>
-        )}
+          ))}
         <div ref={messagesEndRef} />
       </div>
 
       {error && <div className="error-message">{error}</div>}
 
-      {!compact && messages.length > 0 && (
-        <div className="chat-debugger-context" title={t('上下文 ≈')}>
-          {t('上下文 ≈')} {contextEstimate.toLocaleString()} tokens
-        </div>
-      )}
-
       <div className="chat-debugger-input-row">
-        <textarea
-          className="form-input"
-          rows={2}
-          placeholder={t('输入消息，Enter 发送，Shift+Enter 换行')}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          disabled={busy}
-        />
-        <button type="button" className="btn btn-outline btn-sm" onClick={clearAll} disabled={busy || !messages.length} title={t('清空对话')}>
-          <Trash2 size={14} />
-        </button>
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={() => void handleSend()}
-          disabled={busy || (!input.trim() && !attachments.length) || !model}
-        >
-          {busy ? <Loader2 size={14} className="chat-debugger-spin" /> : <Send size={14} />}
-          {t('发送')}
-        </button>
+        <div className="chat-debugger-input-shell">
+          <textarea
+            rows={2}
+            placeholder={t('输入消息，Enter 发送，Shift+Enter 换行')}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={busy}
+          />
+          <div className="chat-debugger-input-meta">
+            <div className="chat-debugger-context" title={t('上下文 ≈')}>
+              {t('上下文 ≈')} {contextEstimate.toLocaleString()} tokens
+            </div>
+            <div className="chat-debugger-input-actions">
+              <button type="button" className="btn btn-outline btn-sm" onClick={clearAll} disabled={busy || !messages.length} title={t('清空对话')}>
+                <Trash2 size={14} />
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={busy ? stopStreaming : () => void handleSend()}
+                disabled={(!busy && ((!input.trim() && !attachments.length) || !model))}
+                title={busy ? t('停止生成') : t('发送')}
+              >
+                {busy ? <Square size={14} /> : <Send size={14} />}
+                {busy ? t('停止') : t('发送')}
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

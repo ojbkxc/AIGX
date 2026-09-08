@@ -1,28 +1,25 @@
-/* ── Playground 页面样式 ──
- * ChatDebugger 自身样式在 components/ChatDebugger.css。
- * 此文件只保留页面级布局（单列沙盒容器）。 */
+/* ── Playground — open-webui 式聊天主界面布局 ──
+ * 全高聊天沙盒：ChatDebugger 自带居中消息流与三段式输入框，
+ * 本文件只负责把页面撑满并给消息区一个呼吸感。 */
 .playground-shell {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  height: 100%;
+  min-height: 0;
 }
 
 .playground-body {
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .playground-body .chat-debugger {
-  min-height: 560px;
+  flex: 1;
+  min-height: 0;
 }
 
 .playground-body .chat-debugger-messages {
-  min-height: 380px;
-  max-height: calc(100vh - 360px);
-}
-
-@media (max-width: 900px) {
-  .playground-body .chat-debugger-messages {
-    max-height: none;
-  }
+  min-height: 0;
 }
