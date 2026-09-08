@@ -1,0 +1,131 @@
+/* Models workspace — open-webui 式模型目录：干净平面卡片、克制徽章、留白优先 */
+
+.models-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.models-stat {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+}
+
+.models-stat-icon {
+  color: var(--accent-color);
+  flex-shrink: 0;
+}
+
+.models-stat-value {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-main);
+}
+
+.models-stat-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.models-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.models-search {
+  position: relative;
+  flex: 1;
+  max-width: 420px;
+}
+
+.models-search .form-input {
+  padding-left: 32px;
+  width: 100%;
+}
+
+.models-search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.models-count {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.models-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.model-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  transition: border-color 140ms ease-out, box-shadow 140ms ease-out;
+}
+
+.model-card:hover {
+  border-color: var(--primary-hover);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+.model-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.model-card-id {
+  font-size: 14px;
+  font-weight: 600;
+  word-break: break-all;
+  color: var(--text-main);
+  line-height: 1.4;
+}
+
+.model-copy-btn {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  min-height: 28px;
+}
+
+.model-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.model-card-context {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.model-card-caps {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}

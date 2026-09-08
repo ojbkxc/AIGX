@@ -9,7 +9,7 @@ import {
   Users, Tags, Wallet, Receipt, Ticket, ScrollText, CreditCard, Bell,
   Settings, Play, Shield, Globe, Network, Zap, ChevronDown, Menu,
   Code2, BarChart3, UserCircle2, UserRound, MessageSquare, PanelLeftClose,
-  PanelLeftOpen,
+  PanelLeftOpen, Boxes,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -35,6 +35,7 @@ const navItems: NavItem[] = [
   { path: '/', labelKey: '仪表盘', icon: LayoutDashboard, end: true },
   { path: '/playground', labelKey: 'Playground', icon: Play },
   { path: '/chat', labelKey: '聊天', icon: MessageSquare },
+  { path: '/models', labelKey: '模型预设', icon: Boxes },
   { path: '/channels', labelKey: '渠道管理', icon: Satellite, adminOnly: true },
   { path: '/keys', labelKey: 'API 密钥', icon: KeyRound },
   { path: '/mappings', labelKey: '模型映射', icon: ArrowLeftRight, adminOnly: true },
@@ -67,9 +68,10 @@ const navGroups: NavGroup[] = [
       navItems[0],  // 仪表盘
       navItems[1],  // Playground
       navItems[2],  // 聊天
-      navItems[3],  // 渠道管理
-      navItems[4],  // API 密钥
-      navItems[5],  // 模型映射
+      navItems[3],  // 模型预设
+      navItems[4],  // 渠道管理
+      navItems[5],  // API 密钥
+      navItems[6],  // 模型映射
     ],
   },
   {
@@ -78,9 +80,9 @@ const navGroups: NavGroup[] = [
     icon: BarChart3,
     adminOnly: true,
     items: [
-      navItems[6],  // 日志审计
-      navItems[7],  // 安全监控
-      navItems[8],  // IP 管理
+      navItems[7],  // 日志审计
+      navItems[8],  // 安全监控
+      navItems[9],  // IP 管理
     ],
   },
   {
@@ -88,10 +90,10 @@ const navGroups: NavGroup[] = [
     labelKey: '账户',
     icon: UserCircle2,
     items: [
-      navItems[9],  // 钱包充值
-      navItems[10], // 订单记录
-      navItems[11], // 兑换码
-      navItems[19], // 个人中心
+      navItems[10], // 钱包充值
+      navItems[11], // 订单记录
+      navItems[12], // 兑换码
+      navItems[20], // 个人中心
     ],
   },
   {
@@ -100,13 +102,13 @@ const navGroups: NavGroup[] = [
     icon: Settings,
     adminOnly: true,
     items: [
-      navItems[12], // 用户管理
-      navItems[13], // 用户分组
-      navItems[14], // 定价倍率
-      navItems[15], // 易支付
-      navItems[16], // 通知设置
-      navItems[17], // 系统设置
-      navItems[18], // 网络层概览
+      navItems[13], // 用户管理
+      navItems[14], // 用户分组
+      navItems[15], // 定价倍率
+      navItems[16], // 易支付
+      navItems[17], // 通知设置
+      navItems[18], // 系统设置
+      navItems[19], // 网络层概览
     ],
   },
 ];

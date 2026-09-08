@@ -751,4 +751,23 @@
 "配置保存失败": "Failed to save configuration",
 "网络层已重启": "Network layer restarted",
 "网络层重启失败": "Failed to restart network layer"
+,
+"模型预设": "Model Presets",
+"网关聚合的可用模型目录（来自启用渠道的 models 声明）": "Available models aggregated by the gateway (from enabled channel model declarations)",
+"模型总数": "Total Models",
+"厂商": "Vendors",
+"搜索模型名称 / 厂商 / 能力…": "Search model name / vendor / capability…",
+"搜索模型": "Search models",
+"加载模型目录": "Loading model catalog",
+"没有匹配的模型": "No matching models",
+"暂无可用模型，请先启用渠道并声明模型": "No available models. Enable channels and declare their models first.",
+"复制模型 ID": "Copy model ID",
+"上下文": "Context",
+"视觉": "Vision",
+"图像": "Image",
+"音频": "Audio",
+"工具调用": "Tool Call",
+"函数调用": "Function Call",
+"推理": "Reasoning",
+"向量": "Embedding"
 }

@@ -455,6 +455,11 @@ table tr:hover td {
   color: var(--text-muted);
 }
 
+.badge-info {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--cyan);
+}
+
 /* 密钥/订单号等长串文本（全局通用，替代 Keys.css 私有类） */
 .key-value {
   font-family: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;

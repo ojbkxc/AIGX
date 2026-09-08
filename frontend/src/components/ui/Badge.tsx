@@ -3,7 +3,7 @@ import { cn } from '../../lib/utils';
 
 export interface BadgeProps {
   children: React.ReactNode;
-  tone?: 'success' | 'warning' | 'danger' | 'neutral';
+  tone?: 'success' | 'warning' | 'danger' | 'neutral' | 'info';
   className?: string;
 }
 
@@ -12,6 +12,7 @@ const tones = {
   warning: 'badge badge-warning',
   danger: 'badge badge-danger',
   neutral: 'badge badge-neutral',
+  info: 'badge badge-info',
 };
 
 /**

@@ -28,6 +28,7 @@ import Chat from './pages/Chat';
 import Security from './pages/Security';
 import IpManagement from './pages/IpManagement';
 import NetworkLayer from './pages/NetworkLayer';
+import Models from './pages/Models';
 
 function isAuthenticated(): boolean {
   const token = localStorage.getItem('token');
@@ -107,6 +108,7 @@ export default function App(): JSX.Element {
           <Route path="/security" element={<AdminRoute><Security /></AdminRoute>} />
           <Route path="/ip-management" element={<AdminRoute><IpManagement /></AdminRoute>} />
           <Route path="/network-layer" element={<AdminRoute><NetworkLayer /></AdminRoute>} />
+          <Route path="/models" element={<ProtectedLayout><Models /></ProtectedLayout>} />
           <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
           <Route path="/profile" element={<ProtectedLayout><Profile /></ProtectedLayout>} />
           <Route path="*" element={<Navigate to="/" replace />} />
