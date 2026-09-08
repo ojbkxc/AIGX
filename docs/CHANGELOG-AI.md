@@ -1,6 +1,31 @@
 
 
 
+
+## 2026-09-09 · 会话撤销收尾 + 模型元信息同步（P1 第二波收尾）
+
+### 做了什么
+- 会话撤销收尾：`handle_change_password` 补撤销检查——被登出/踢出的旧 token
+  即使签名有效也不得改密（401 Session revoked），与 `verify_user` 同一拦截语义。
+- `/v1/models` 故障渠道隔离：冷却/断路器打开的渠道不参与模型列表聚合，
+  与调度口径一致，避免上游故障把模型从列表吞掉导致客户端误判模型下线。
+- 模型元信息覆盖 UI：Models workspace 新增「元信息覆盖」卡片——列表/新增/
+  编辑/删除 owned_by + 上下文长度 + 能力标签（走 `/api/models/meta`，
+  管理员覆盖优先于内置推断，FileStore 持久化）。
+- `metadata.rs` 新增重启持久化测试（覆盖项跨注册表 reload 保留）。
+- Chat 页消费已启用提示词：`aigx_prompts` 中 enabled 的前 6 条渲染为
+  空状态建议卡片（点选直接发送），Prompts workspace 与 Chat 闭环。
+- E2E 新增断言：登出后旧 token 访问 `/api/users/me` 返回 401（15/15）。
+
+### 为什么
+- ROADMAP P1 第二波最后两项「会话撤销收尾 + 模型元信息同步」；
+  P1 验收标准「会话撤销后旧 token 立即失效」需要真实 E2E 证据而非仅单元测试。
+- 改密不查撤销表是安全漏洞：登出/被踢后的 token 仍能改密。
+
+### 验证结论
+- 前端 `typecheck` / `lint` / `test`（35）/ `build` 全绿。
+- Rust 由 CI 验证（clippy 零警告 + 全矩阵 test + release build）。
+
 ## 2026-09-09 · 提示词库 Prompts workspace + 404 路由兜底修复
 
 ### 做了什么

@@ -334,7 +334,8 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(1);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("aigx-meta-persist-{}-{seq}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aigx-meta-persist-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(FileStore::new(dir));
 
@@ -355,6 +356,9 @@ mod tests {
         let m = reg2.get("gemini-2.5-pro", Some("google"));
         assert_eq!(m.owned_by, "my-gemini");
         assert_eq!(m.context_length, Some(2_000_000));
-        assert_eq!(m.capabilities, vec!["chat".to_string(), "vision".to_string()]);
+        assert_eq!(
+            m.capabilities,
+            vec!["chat".to_string(), "vision".to_string()]
+        );
     }
 }
