@@ -94,6 +94,16 @@ try {
   await page.waitForTimeout(300);
   const hasPwCard = (await page.getByText('当前密码').count()) > 0 || (await page.getByText('旧密码').count()) > 0;
   check('改密表单（账户安全卡片）', hasPwCard);
+
+  // 7. 模型预设（Models workspace）
+  // 7. 模型预设（Models workspace）— SPA 内导航
+  await page.locator('a[href="/model-presets"]').first().click();
+  await page.waitForTimeout(1500);
+  await page.screenshot({ path: 'tests/e2e/screenshots/09-models.png' });
+  await page.screenshot({ path: 'tests/e2e/screenshots/09-models.png' });
+  const modelCards = await page.locator('.model-card').count();
+  const modelSearchVisible = await page.locator('.models-search input').isVisible();
+  check('模型预设页面渲染', modelCards > 0 || modelSearchVisible, `cards=${modelCards}`);
 } catch (e) {
   console.error('E2E 异常:', e.message);
   await page.screenshot({ path: 'tests/e2e/screenshots/99-error.png' }).catch(() => {});
