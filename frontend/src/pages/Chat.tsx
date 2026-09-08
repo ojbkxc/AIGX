@@ -60,6 +60,29 @@ function newSession(now: number): ChatSession {
  * ChatDebugger（hideToolbar 精简形态）。审美参照 open-webui：
  * 窄边栏 + 居中对话流 + 顶部悬浮模型 pill。
  */
+/** 读取「已启用」提示词并映射为 ChatDebugger 的空状态建议卡片 */
+function loadSuggestionPrompts(): Array<{ title: string; sub: string; content: string }> {
+  try {
+    const raw = localStorage.getItem('aigx_prompts');
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((p): p is { id: string; name: string; content: string; tags?: string[]; enabled?: boolean } =>
+        Boolean(p && typeof p === 'object' && (p as { enabled?: boolean }).enabled !== false),
+      )
+      .slice(0, 6)
+      .map((p) => ({
+        title: p.name || 'Prompt',
+        sub: (p.tags ?? []).slice(0, 3).join(' · '),
+        content: p.content,
+      }))
+      .filter((p) => p.content);
+  } catch {
+    return [];
+  }
+}
+
 export default function Chat(): JSX.Element {
   const { t } = useTranslation();
   const [sessions, setSessions] = useState<ChatSession[]>(() => {
@@ -187,6 +210,7 @@ export default function Chat(): JSX.Element {
             initialMessages={active.messages}
             onMessagesChange={handleMessagesChange}
             hideToolbar
+            suggestionPrompts={loadSuggestionPrompts()}
           />
         )}
       </main>

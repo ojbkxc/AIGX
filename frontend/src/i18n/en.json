@@ -801,5 +801,19 @@
 "提示词正文，支持多行": "Prompt body, multi-line supported",
 "标签（逗号分隔）": "Tags (comma separated)",
 "例如：编码, 审查, 常用": "e.g. coding, review, common",
-"按此标签筛选": "Filter by this tag"
+"按此标签筛选": "Filter by this tag",
+"元信息覆盖": "Metadata Overrides",
+"新增覆盖": "New Override",
+"模型 ID 为必填项": "Model ID is required",
+"归属方为必填项": "Owned by is required",
+"上下文长度需为非负整数": "Context length must be a non-negative integer",
+"元信息覆盖已保存": "Metadata override saved",
+"删除元信息覆盖": "Delete Metadata Override",
+"删除后将回落到内置推断": "Deleting falls back to built-in inference",
+"已删除": "Deleted",
+"模型 ID": "Model ID",
+"归属方": "Owned By",
+"上下文长度（可选）": "Context Length (optional)",
+"能力标签（逗号分隔，可选）": "Capabilities (comma separated, optional)",
+"暂无覆盖项。内置推断已覆盖常见模型，需要自定义归属/上下文/能力时在此添加": "No overrides yet. Built-in inference covers common models; add one here to customize ownership/context/capabilities"
 }

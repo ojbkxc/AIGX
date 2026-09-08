@@ -1,10 +1,11 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Boxes, Search, Copy, Layers } from 'lucide-react';
+import { Boxes, Search, Copy, Layers, Plus, Pencil, Trash2 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Card, Loading, EmptyState, Badge } from '../components/ui';
-import type { ModelInfo } from '../types';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
+import type { ModelInfo, ModelMetaOverride } from '../types';
 import './Models.css';
 
 /** 模型能力标记（capabilities 数组里出现的关键词 → 展示徽章） */
@@ -32,6 +33,90 @@ export default function Models(): JSX.Element {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
+
+  // ── 元信息覆盖管理（P1 收尾：管理员可覆盖 owned_by/上下文长度/能力）──
+  const [overrides, setOverrides] = useState<Record<string, ModelMetaOverride>>({});
+  const [showMetaModal, setShowMetaModal] = useState(false);
+  const [metaModel, setMetaModel] = useState('');
+  const [metaOwnedBy, setMetaOwnedBy] = useState('');
+  const [metaContext, setMetaContext] = useState('');
+  const [metaCaps, setMetaCaps] = useState('');
+  const [metaError, setMetaError] = useState('');
+  const [metaSaving, setMetaSaving] = useState(false);
+  const [metaConfirm, setMetaConfirm] = useState<ConfirmState | null>(null);
+
+  const loadOverrides = async () => {
+    try {
+      const res = await api.listModelMeta();
+      setOverrides(res?.data ?? {});
+    } catch {
+      // 覆盖列表加载失败不阻塞模型目录
+    }
+  };
+
+  useEffect(() => {
+    void loadOverrides();
+  }, []);
+
+  const openMetaCreate = () => {
+    setMetaModel(''); setMetaOwnedBy(''); setMetaContext(''); setMetaCaps('');
+    setMetaError(''); setShowMetaModal(true);
+  };
+
+  const openMetaEdit = (model: string) => {
+    const o = overrides[model];
+    if (!o) return;
+    setMetaModel(model);
+    setMetaOwnedBy(o.owned_by ?? '');
+    setMetaContext(o.context_length != null ? String(o.context_length) : '');
+    setMetaCaps((o.capabilities ?? []).join(', '));
+    setMetaError('');
+    setShowMetaModal(true);
+  };
+
+  const handleMetaSave = async () => {
+    setMetaError('');
+    if (!metaModel.trim()) { setMetaError(t('模型 ID 为必填项')); return; }
+    if (!metaOwnedBy.trim()) { setMetaError(t('归属方为必填项')); return; }
+    setMetaSaving(true);
+    try {
+      const ctx = metaContext.trim() ? Number(metaContext.trim()) : null;
+      if (metaContext.trim() && (ctx === null || !Number.isFinite(ctx) || ctx < 0)) {
+        setMetaError(t('上下文长度需为非负整数'));
+        setMetaSaving(false);
+        return;
+      }
+      const meta: ModelMetaOverride = {
+        owned_by: metaOwnedBy.trim(),
+        context_length: ctx,
+        capabilities: metaCaps.split(/[,，]/).map((c) => c.trim()).filter(Boolean),
+      };
+      await api.setModelMeta(metaModel.trim(), meta);
+      addToast(t('元信息覆盖已保存'));
+      setShowMetaModal(false);
+      await loadOverrides();
+      await load();
+    } catch (err) {
+      setMetaError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMetaSaving(false);
+    }
+  };
+
+  const handleMetaDelete = (model: string) => {
+    setMetaConfirm({
+      title: t('删除元信息覆盖'),
+      message: t('删除后将回落到内置推断') + '：' + model,
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        await api.deleteModelMeta(model);
+        addToast(t('已删除'));
+        await loadOverrides();
+        await load();
+      },
+    });
+  };
 
   useEffect(() => {
     void load();
@@ -166,6 +251,123 @@ export default function Models(): JSX.Element {
           </div>
         )}
       </Card>
+
+      {/* ── 元信息覆盖管理（P1 收尾）── */}
+      <Card
+        title={t('元信息覆盖')}
+        actions={
+          <button className="btn btn-outline btn-sm" onClick={openMetaCreate} style={{ gap: 6 }}>
+            <Plus size={13} />
+            {t('新增覆盖')}
+          </button>
+        }
+      >
+        {Object.keys(overrides).length === 0 ? (
+          <EmptyState
+            icon="🏷️"
+            message={t('暂无覆盖项。内置推断已覆盖常见模型，需要自定义归属/上下文/能力时在此添加')}
+          />
+        ) : (
+          <div className="models-grid">
+            {Object.entries(overrides).map(([model, o]) => (
+              <div key={model} className="model-card">
+                <div className="model-card-head">
+                  <strong className="model-card-id">{model}</strong>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      onClick={() => openMetaEdit(model)}
+                      title={t('编辑')}
+                    >
+                      <Pencil size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-danger btn-sm"
+                      onClick={() => handleMetaDelete(model)}
+                      title={t('删除')}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                </div>
+                <div className="model-card-meta">
+                  <Badge tone="info">{o.owned_by}</Badge>
+                  <span className="model-card-context">{t('上下文')} {o.context_length ?? '—'}</span>
+                </div>
+                {(o.capabilities && o.capabilities.length > 0) && (
+                  <div className="model-card-caps">
+                    {o.capabilities.map((c) => <Badge key={c} tone="neutral">{c}</Badge>)}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {showMetaModal && (
+        <div className="modal-overlay" onClick={() => setShowMetaModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('元信息覆盖')}</h3>
+              <button className="modal-close" onClick={() => setShowMetaModal(false)}>&times;</button>
+            </div>
+            <div className="modal-body">
+              {metaError && <div className="error-message">{metaError}</div>}
+              <div className="form-group">
+                <label>{t('模型 ID')} *</label>
+                <input
+                  className="form-input"
+                  value={metaModel}
+                  onChange={(e) => setMetaModel(e.target.value)}
+                  placeholder="gpt-4o"
+                  disabled={metaSaving}
+                />
+              </div>
+              <div className="form-group">
+                <label>{t('归属方')} *</label>
+                <input
+                  className="form-input"
+                  value={metaOwnedBy}
+                  onChange={(e) => setMetaOwnedBy(e.target.value)}
+                  placeholder="openai"
+                  disabled={metaSaving}
+                />
+              </div>
+              <div className="form-group">
+                <label>{t('上下文长度（可选）')}</label>
+                <input
+                  className="form-input"
+                  value={metaContext}
+                  onChange={(e) => setMetaContext(e.target.value)}
+                  placeholder="128000"
+                  disabled={metaSaving}
+                />
+              </div>
+              <div className="form-group">
+                <label>{t('能力标签（逗号分隔，可选）')}</label>
+                <input
+                  className="form-input"
+                  value={metaCaps}
+                  onChange={(e) => setMetaCaps(e.target.value)}
+                  placeholder="chat, vision"
+                  disabled={metaSaving}
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setShowMetaModal(false)} disabled={metaSaving}>{t('取消')}</button>
+              <button className="btn btn-primary" onClick={() => void handleMetaSave()} disabled={metaSaving}>
+                {metaSaving ? t('保存中...') : t('保存')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ConfirmDialog state={metaConfirm} onClose={() => setMetaConfirm(null)} />
     </div>
   );
 }

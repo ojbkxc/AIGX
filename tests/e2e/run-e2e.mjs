@@ -110,6 +110,18 @@ try {
   const promptsHeading = await page.getByRole('heading', { name: /提示词库|Prompts/ }).count();
   const promptsNewBtn = await page.locator('button', { hasText: /新建提示词|New Prompt/ }).first().isVisible().catch(() => false);
   check('提示词库页面渲染', promptsHeading > 0 || promptsNewBtn, 'heading/新按钮可见');
+
+  // 9. 会话撤销：登出后旧 token 立即失效（P1 收尾验收项）
+  const tokenBefore = await page.evaluate(() => localStorage.getItem('token'));
+  await page.evaluate(async () => {
+    await fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('token') } });
+  });
+  const revokedStatus = await page.evaluate(async () => {
+    const token = localStorage.getItem('token');
+    const res = await fetch('/api/users/me', { headers: { Authorization: 'Bearer ' + token } });
+    return res.status;
+  });
+  check('登出后旧 token 立即失效', revokedStatus === 401, 'status=' + revokedStatus + ', token=' + String(tokenBefore && tokenBefore.slice(0, 12)) + '...');
 } catch (e) {
   console.error('E2E 异常:', e.message);
   await page.screenshot({ path: 'tests/e2e/screenshots/99-error.png' }).catch(() => {});

@@ -37,6 +37,7 @@ import type {
   RateLimitConfigItem,
   SettingsItem,
   ModelInfo,
+  ModelMetaOverride,
   TotpSetupResult,
   TotpEnableResult,
   TotpDisableResult,
@@ -291,6 +292,14 @@ export const api = {
   //（数据面需 sk-xxx，会 401 误踢登录），也不用 mappings keys。
   // P1：后端已附带元信息（owned_by/context_length/capabilities），兼容旧
   // 字符串数组与新对象数组两种形状。
+  // 模型元信息覆盖（P1 收尾：owned_by/上下文长度/能力管理员覆盖）
+  listModelMeta: (): Promise<ApiResponse<Record<string, ModelMetaOverride>>> =>
+    request<ApiResponse<Record<string, ModelMetaOverride>>>('GET', `${API_BASE}/models/meta`),
+  setModelMeta: (model: string, meta: ModelMetaOverride): Promise<ApiResponse<ModelMetaOverride>> =>
+    request<ApiResponse<ModelMetaOverride>>('PUT', `${API_BASE}/models/meta/${encodeURIComponent(model)}`, meta),
+  deleteModelMeta: (model: string): Promise<ApiResponse<null>> =>
+    request<ApiResponse<null>>('DELETE', `${API_BASE}/models/meta/${encodeURIComponent(model)}`),
+
   listModels: async (): Promise<ApiResponse<ModelInfo[]>> => {
     const res = await request<ApiResponse<unknown[]>>('GET', `${API_BASE}/models/available`);
     const list: unknown[] = Array.isArray(res?.data) ? res.data : [];

@@ -339,7 +339,8 @@ pub async fn handle_register(
 /// POST /api/auth/change-password — 登录后修改密码
 ///
 /// 需要有效会话；先校验旧密码（防止会话泄露被直接改密），
-/// 新密码至少 6 位，成功后旧会话继续有效（v2board 语义）。
+/// 新密码至少 6 位；已撤销会话直接 401。成功后其他旧会话被 revoke_all
+/// 踢出（与 v2board/new-api 的改密踢出语义一致，含当前会话）。
 pub async fn handle_change_password(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -364,6 +365,11 @@ pub async fn handle_change_password(
     let sess = session_store
         .validate_session(&token)
         .ok_or_else(|| error_response("Invalid session", StatusCode::UNAUTHORIZED))?;
+    // 撤销检查（P1 会话撤销收尾）：被登出/踢出的旧 token 即使签名有效，
+    // 也不得继续执行改密等敏感操作（与 verify_user 同一拦截语义）。
+    if state.session_registry.is_revoked(&sess.session_id) {
+        return Err(error_response("Session revoked", StatusCode::UNAUTHORIZED));
+    }
 
     let user = state
         .user_store

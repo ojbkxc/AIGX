@@ -3653,6 +3653,13 @@ pub async fn handle_list_models(
         if !ch.is_enabled() {
             continue;
         }
+        // 与调度口径一致：冷却/断路器打开的故障渠道不参与模型列表聚合，
+        // 避免上游故障把模型从 /v1/models 吞掉导致客户端误判模型下线
+        if state.channel_store.is_in_cooldown(&ch.id)
+            || !state.channel_store.circuit_breaker().allow_request(&ch.id)
+        {
+            continue;
+        }
         let channel_owned_by =
             crate::model::metadata::owned_by_for_channel_type(ch.channel_type.as_str());
         for m in ch.models.iter().chain(ch.discovered_models.iter()) {

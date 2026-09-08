@@ -436,6 +436,12 @@ export interface ModelInfo {
   [key: string]: unknown;
 }
 
+export interface ModelMetaOverride {
+  owned_by: string;
+  context_length?: number | null;
+  capabilities?: string[];
+}
+
 export interface TotpSetupResult {
   secret: string;
   otpauth_url: string;
