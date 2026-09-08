@@ -95,15 +95,21 @@ try {
   const hasPwCard = (await page.getByText('当前密码').count()) > 0 || (await page.getByText('旧密码').count()) > 0;
   check('改密表单（账户安全卡片）', hasPwCard);
 
-  // 7. 模型预设（Models workspace）
   // 7. 模型预设（Models workspace）— SPA 内导航
   await page.locator('a[href="/model-presets"]').first().click();
   await page.waitForTimeout(1500);
   await page.screenshot({ path: 'tests/e2e/screenshots/09-models.png' });
-  await page.screenshot({ path: 'tests/e2e/screenshots/09-models.png' });
   const modelCards = await page.locator('.model-card').count();
   const modelSearchVisible = await page.locator('.models-search input').isVisible();
-  check('模型预设页面渲染', modelCards > 0 || modelSearchVisible, `cards=${modelCards}`);
+  check('模型预设页面渲染', modelCards > 0 || modelSearchVisible, 'cards=' + modelCards);
+
+  // 8. 提示词库（Prompts workspace）— SPA 内导航
+  await page.locator('a[href="/prompts"]').first().click();
+  await page.waitForTimeout(1200);
+  await page.screenshot({ path: 'tests/e2e/screenshots/10-prompts.png' });
+  const promptsHeading = await page.getByRole('heading', { name: /提示词库|Prompts/ }).count();
+  const promptsNewBtn = await page.locator('button', { hasText: /新建提示词|New Prompt/ }).first().isVisible().catch(() => false);
+  check('提示词库页面渲染', promptsHeading > 0 || promptsNewBtn, 'heading/新按钮可见');
 } catch (e) {
   console.error('E2E 异常:', e.message);
   await page.screenshot({ path: 'tests/e2e/screenshots/99-error.png' }).catch(() => {});

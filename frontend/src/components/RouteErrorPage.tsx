@@ -6,13 +6,18 @@ import { useTranslation } from 'react-i18next';
  * 与 ErrorBoundary 分工：Boundary 捕渲染异常，本页接路由 loader/未匹配错误。
  * 404/403/500 三态 + 一键回首页/重试。
  */
-export default function RouteErrorPage(): JSX.Element {
+interface RouteErrorPageProps {
+  /** catch-all 路由显式传入的状态码（普通 element 模式拿不到 route error） */
+  status?: number;
+}
+
+export default function RouteErrorPage({ status: statusProp }: RouteErrorPageProps): JSX.Element {
   const error = useRouteError();
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
 
-  let status = 500;
+  let status = statusProp ?? 500;
   let message = t('发生未知错误');
   if (isRouteErrorResponse(error)) {
     status = error.status;

@@ -29,6 +29,7 @@ import Security from './pages/Security';
 import IpManagement from './pages/IpManagement';
 import NetworkLayer from './pages/NetworkLayer';
 import Models from './pages/Models';
+import Prompts from './pages/Prompts';
 
 function isAuthenticated(): boolean {
   const token = localStorage.getItem('token');
@@ -109,10 +110,10 @@ export default function App(): JSX.Element {
           <Route path="/ip-management" element={<AdminRoute><IpManagement /></AdminRoute>} />
           <Route path="/network-layer" element={<AdminRoute><NetworkLayer /></AdminRoute>} />
           <Route path="/model-presets" element={<ProtectedLayout><Models /></ProtectedLayout>} />
+          <Route path="/prompts" element={<ProtectedLayout><Prompts /></ProtectedLayout>} />
           <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
           <Route path="/profile" element={<ProtectedLayout><Profile /></ProtectedLayout>} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-          <Route path="*" element={<RouteErrorPage />} />
+          <Route path="*" element={<RouteErrorPage status={404} />} />
         </Routes>
       </ToastProvider>
     </ErrorBoundary>

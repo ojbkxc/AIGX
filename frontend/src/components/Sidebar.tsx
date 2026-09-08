@@ -9,7 +9,7 @@ import {
   Users, Tags, Wallet, Receipt, Ticket, ScrollText, CreditCard, Bell,
   Settings, Play, Shield, Globe, Network, Zap, ChevronDown, Menu,
   Code2, BarChart3, UserCircle2, UserRound, MessageSquare, PanelLeftClose,
-  PanelLeftOpen, Boxes,
+  PanelLeftOpen, Boxes, BookOpen,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -35,6 +35,7 @@ const navItems: NavItem[] = [
   { path: '/', labelKey: '仪表盘', icon: LayoutDashboard, end: true },
   { path: '/playground', labelKey: 'Playground', icon: Play },
   { path: '/chat', labelKey: '聊天', icon: MessageSquare },
+  { path: '/prompts', labelKey: '提示词库', icon: BookOpen },
   { path: '/model-presets', labelKey: '模型预设', icon: Boxes },
   { path: '/channels', labelKey: '渠道管理', icon: Satellite, adminOnly: true },
   { path: '/keys', labelKey: 'API 密钥', icon: KeyRound },
@@ -68,10 +69,11 @@ const navGroups: NavGroup[] = [
       navItems[0],  // 仪表盘
       navItems[1],  // Playground
       navItems[2],  // 聊天
-      navItems[3],  // 模型预设
-      navItems[4],  // 渠道管理
-      navItems[5],  // API 密钥
-      navItems[6],  // 模型映射
+      navItems[3],  // 提示词库
+      navItems[4],  // 模型预设
+      navItems[5],  // 渠道管理
+      navItems[6],  // API 密钥
+      navItems[7],  // 模型映射
     ],
   },
   {
@@ -80,9 +82,9 @@ const navGroups: NavGroup[] = [
     icon: BarChart3,
     adminOnly: true,
     items: [
-      navItems[7],  // 日志审计
-      navItems[8],  // 安全监控
-      navItems[9],  // IP 管理
+      navItems[8],  // 日志审计
+      navItems[9],  // 安全监控
+      navItems[10], // IP 管理
     ],
   },
   {
@@ -90,10 +92,10 @@ const navGroups: NavGroup[] = [
     labelKey: '账户',
     icon: UserCircle2,
     items: [
-      navItems[10], // 钱包充值
-      navItems[11], // 订单记录
-      navItems[12], // 兑换码
-      navItems[20], // 个人中心
+      navItems[11], // 钱包充值
+      navItems[12], // 订单记录
+      navItems[13], // 兑换码
+      navItems[21], // 个人中心
     ],
   },
   {
@@ -102,13 +104,13 @@ const navGroups: NavGroup[] = [
     icon: Settings,
     adminOnly: true,
     items: [
-      navItems[13], // 用户管理
-      navItems[14], // 用户分组
-      navItems[15], // 定价倍率
-      navItems[16], // 易支付
-      navItems[17], // 通知设置
-      navItems[18], // 系统设置
-      navItems[19], // 网络层概览
+      navItems[14], // 用户管理
+      navItems[15], // 用户分组
+      navItems[16], // 定价倍率
+      navItems[17], // 易支付
+      navItems[18], // 通知设置
+      navItems[19], // 系统设置
+      navItems[20], // 网络层概览
     ],
   },
 ];
