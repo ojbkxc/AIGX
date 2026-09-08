@@ -88,11 +88,13 @@ impl ApiKey {
         }
     }
 
-    /// 是否允许使用指定模型
+    /// 是否允许使用指定模型。
+    ///
+    /// None 与 Some(vec![]) 均表示不限（对齐 new-api：空列表 = 全部放行）。
     pub fn allows_model(&self, model: &str) -> bool {
         match &self.allowed_models {
             None => true,
-            Some(list) => list.iter().any(|m| m == model),
+            Some(list) => list.is_empty() || list.iter().any(|m| m == model),
         }
     }
 

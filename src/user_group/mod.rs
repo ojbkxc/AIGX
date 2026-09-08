@@ -51,11 +51,13 @@ impl UserGroup {
         }
     }
 
-    /// 组内是否允许使用指定模型（None=不限，Some 则需包含）
+    /// 组内是否允许使用指定模型。
+    ///
+    /// `None` 与 `Some(vec![])` 均表示不限（对齐 new-api：空列表 = 全部放行）。
     pub fn allows_model(&self, model: &str) -> bool {
         match &self.allowed_models {
             None => true,
-            Some(list) => list.iter().any(|m| m == model),
+            Some(list) => list.is_empty() || list.iter().any(|m| m == model),
         }
     }
 }
@@ -200,5 +202,15 @@ mod tests {
         s.upsert(g).unwrap();
         assert!(s.allows_model("restricted", "gpt-4"));
         assert!(!s.allows_model("restricted", "gpt-3.5"));
+    }
+
+    #[test]
+    fn empty_allowed_models_means_unrestricted() {
+        let s = store();
+        let mut g = UserGroup::new("open", 1.0);
+        g.allowed_models = Some(vec![]);
+        s.upsert(g).unwrap();
+        assert!(s.allows_model("open", "gpt-4"));
+        assert!(s.allows_model("open", "gpt-3.5"));
     }
 }
