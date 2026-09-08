@@ -696,5 +696,11 @@
 "停止生成": "Stop generating",
 "已停止生成": "Generation stopped",
 "开始对话": "Start chatting",
+"聊天": "Chat",
+"新会话": "New chat",
+"暂无会话": "No conversations",
+"删除会话": "Delete conversation",
+"收起会话列表": "Collapse conversation list",
+"展开会话列表": "Expand conversation list",
 "上游未返回内容": "Upstream returned no content"
 }

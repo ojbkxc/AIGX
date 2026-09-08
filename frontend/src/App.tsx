@@ -24,6 +24,7 @@ import Pricing from './pages/Pricing';
 import Groups from './pages/Groups';
 import Notify from './pages/Notify';
 import Playground from './pages/Playground';
+import Chat from './pages/Chat';
 import Security from './pages/Security';
 import IpManagement from './pages/IpManagement';
 import NetworkLayer from './pages/NetworkLayer';
@@ -102,6 +103,7 @@ export default function App(): JSX.Element {
           <Route path="/redemptions" element={<AdminRoute><Redemptions /></AdminRoute>} />
           <Route path="/notify" element={<AdminRoute><Notify /></AdminRoute>} />
           <Route path="/playground" element={<ProtectedLayout><Playground /></ProtectedLayout>} />
+          <Route path="/chat" element={<ProtectedLayout><Chat /></ProtectedLayout>} />
           <Route path="/security" element={<AdminRoute><Security /></AdminRoute>} />
           <Route path="/ip-management" element={<AdminRoute><IpManagement /></AdminRoute>} />
           <Route path="/network-layer" element={<AdminRoute><NetworkLayer /></AdminRoute>} />

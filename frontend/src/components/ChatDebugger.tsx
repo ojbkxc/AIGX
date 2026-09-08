@@ -4,7 +4,7 @@ import { Search, Send, Square, Trash2, Image, Video, AudioLines, Loader2, Bot, U
 import { api, testChannelChatStream } from '../api';
 import './ChatDebugger.css';
 
-interface DebugMessage {
+export interface DebugMessage {
   role: 'user' | 'assistant';
   content: string;
   /** 用户消息可选的多模态附件（URL 或 base64 data URI） */
@@ -20,6 +20,12 @@ export interface ChatDebuggerProps {
   initialProtocol?: 'openai' | 'anthropic';
   /** 紧凑模式（渠道弹窗内嵌） */
   compact?: boolean;
+  /** 初始消息（/chat 会话恢复用）；配合 key 重挂载生效 */
+  initialMessages?: DebugMessage[];
+  /** 消息变化回调（/chat 会话持久化用） */
+  onMessagesChange?: (messages: DebugMessage[]) => void;
+  /** 隐藏调试工具条（协议/系统提示词/附件区），/chat 终端用户形态 */
+  hideToolbar?: boolean;
 }
 
 interface ChatChunkResult {
@@ -40,10 +46,18 @@ interface ChatChunkResult {
  * （image_url / video_url / audio_url 形状）。
  */
 export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
-  const { channelId, channelModels = [], initialProtocol = 'openai', compact = false } = props;
+  const {
+    channelId,
+    channelModels = [],
+    initialProtocol = 'openai',
+    compact = false,
+    initialMessages = [],
+    onMessagesChange,
+    hideToolbar = false,
+  } = props;
   const { t } = useTranslation();
 
-  const [messages, setMessages] = useState<DebugMessage[]>([]);
+  const [messages, setMessages] = useState<DebugMessage[]>(initialMessages);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -71,6 +85,11 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const [attachKind, setAttachKind] = useState<'image' | 'video' | 'audio'>('image');
   const [attachUrl, setAttachUrl] = useState('');
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+
+  // /chat 会话持久化：消息每次变化都同步给宿主页面
+  useEffect(() => {
+    onMessagesChange?.(messages);
+  }, [messages, onMessagesChange]);
 
   // 系统提示词预设（与 i18n 词条保持一致）
   const PROMPT_PRESETS: Record<string, string> = {
@@ -318,10 +337,9 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     setTempPreset('');
   };
 
-  return (
-    <div className={`chat-debugger ${compact ? 'chat-debugger-compact' : ''}`}>
-      <div className="chat-debugger-bar">
-        <div className="chat-debugger-model" ref={pickerRef}>
+  // 模型选择器（完整工具条与 /chat 精简条共用同一份 JSX）
+  const modelPicker = (
+    <div className="chat-debugger-model" ref={pickerRef}>
           <button
             type="button"
             className="form-input chat-debugger-model-btn"
@@ -380,6 +398,13 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             </div>
           )}
         </div>
+  );
+
+  return (
+    <div className={`chat-debugger ${compact ? 'chat-debugger-compact' : ''}`}>
+      {!hideToolbar && (
+      <div className="chat-debugger-bar">
+        {modelPicker}
 
         <select
           className="form-input chat-debugger-protocol"
@@ -468,7 +493,15 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
           />
         )}
       </div>
+      )}
 
+      {hideToolbar && (
+        <div className="chat-debugger-bar chat-debugger-bar-min">
+          {modelPicker}
+        </div>
+      )}
+
+      {!hideToolbar && (
       <div className="chat-debugger-attachments">
         <select
           className="form-input"
@@ -503,6 +536,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
           </div>
         )}
       </div>
+      )}
 
       <div className="chat-debugger-messages">
         {messages.length === 0 && (
