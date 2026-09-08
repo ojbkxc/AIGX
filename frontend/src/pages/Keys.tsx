@@ -83,7 +83,6 @@ export default function Keys(): JSX.Element {
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const load = async () => {
@@ -94,8 +93,8 @@ export default function Keys(): JSX.Element {
         api.listTokens(),
         isAdmin() ? api.listGroups().catch(() => null) : Promise.resolve(null),
       ]);
-      setTokens(Array.isArray(tokenRes?.data) ? tokenRes.data : tokenRes || []);
-      if (groupRes) setGroups(Array.isArray(groupRes?.data) ? groupRes.data : groupRes || []);
+      setTokens(Array.isArray(tokenRes?.data) ? (tokenRes.data as unknown as TokenItem[]) : []);
+      if (groupRes) setGroups(Array.isArray(groupRes?.data) ? groupRes.data : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -165,7 +164,7 @@ export default function Keys(): JSX.Element {
         addToast(t('令牌已更新'));
       } else {
         const res = await api.addToken(payload);
-        const created = (res?.data || res || {}) as GeneratedKeyState;
+        const created = (res?.data ?? {}) as unknown as GeneratedKeyState;
         // 契约：创建响应额外返回 plain_key（一次性明文），优先展示明文而非脱敏密钥
         if (created && (created.plain_key || created.key || created.api_key)) {
           setGeneratedKey({ ...created, key: String(created.plain_key || created.key || created.api_key) });
@@ -243,7 +242,7 @@ export default function Keys(): JSX.Element {
         setError('');
         try {
           const res = await api.rotateToken(tk.id);
-          const data = (res?.data || res || {}) as GeneratedKeyState;
+          const data = (res?.data ?? {}) as unknown as GeneratedKeyState;
           // 后端返回新密钥明文（plain_key / key / api_key）
           const newKey = data.plain_key || data.key || data.api_key;
           if (newKey) {
@@ -297,7 +296,7 @@ export default function Keys(): JSX.Element {
     if (cached) return cached;
     try {
       const res = await api.getTokenKey(tk.id);
-      const key = res?.data?.plain_key || res?.plain_key;
+      const key = res?.data?.plain_key || res?.data?.key;
       if (key) {
         setPlainKeys((prev) => ({ ...prev, [tk.id]: String(key) }));
         return String(key);

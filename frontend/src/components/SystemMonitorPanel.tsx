@@ -112,8 +112,8 @@ export default function SystemMonitorPanel() {
   const fetchMetrics = async () => {
     try {
       setLoading(true);
-      const data = await networkApi.getNetworkMetrics();
-      setMetrics(toMetrics(data));
+      const res = await networkApi.getNetworkMetrics();
+      if (res.data) setMetrics(toMetrics(res.data));
     } catch (error) {
       console.error('Failed to fetch metrics:', error);
     } finally {

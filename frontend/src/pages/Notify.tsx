@@ -236,7 +236,7 @@ export default function Notify() {
     setRulesSaving(true);
     setError('');
     try {
-      await api.updateAlertRules(rules);
+      await api.updateAlertRules(rules as unknown as import('../types').AlertRule[]);
       addToast(t('告警规则已保存'));
       loadAlerts();
     } catch (err) {

@@ -59,7 +59,6 @@ export default function Users(): JSX.Element {
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const load = async () => {
@@ -71,9 +70,9 @@ export default function Users(): JSX.Element {
         api.getMe().catch(() => null),
         api.listGroups().catch(() => null),
       ]);
-      setUsers(Array.isArray(listRes?.data) ? listRes.data : []);
-      if (meRes) setMe(meRes.data || null);
-      if (groupRes) setGroups(Array.isArray(groupRes?.data) ? groupRes.data : groupRes || []);
+      setUsers(Array.isArray(listRes?.data) ? (listRes.data as unknown as UserItem[]) : []);
+      if (meRes) setMe(meRes.data as UserItem | null);
+      if (groupRes) setGroups(Array.isArray(groupRes?.data) ? groupRes.data : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

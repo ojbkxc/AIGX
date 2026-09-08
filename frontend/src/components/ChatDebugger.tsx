@@ -240,22 +240,13 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         let acc = '';
         for (const chk of res.stream) {
           acc += chk.content || '';
-          setMessages((prev) => {
-            const next = prev.slice();
-            if (next.length && next[next.length - 1].role === 'assistant') {
-              next[next.length - 1] = { role: 'assistant', content: acc };
-            } else {
-              next.push({ role: 'assistant', content: acc });
-            }
-            return next;
-          });
         }
-        setMessages((prev) => {
-          if (!prev.length || prev[prev.length - 1].role !== 'assistant') {
-            return [...prev, { role: 'assistant', content: acc }];
-          }
-          return prev;
-        });
+        if (acc) {
+          setMessages((prev) => [...prev, { role: 'assistant', content: acc }]);
+        }
+        if (!acc) {
+          setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${t('上游未返回内容')}` }]);
+        }
       } else {
         const data = res.data || {};
         if (data.content) {

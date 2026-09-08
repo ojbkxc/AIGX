@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
+import type { ChannelItem as ApiChannelItem } from '../types';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ChatDebugger from '../components/ChatDebugger';
@@ -72,7 +73,6 @@ export default function Channels(): JSX.Element {
   const [fetchingModels, setFetchingModels] = useState(false);
 
   // ── 确认弹窗状态 ──
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   // ── 对话调试器状态 ──
@@ -105,7 +105,21 @@ export default function Channels(): JSX.Element {
     setError('');
     try {
       const res = await api.listChannels();
-      setChannels(res.data || []);
+      const items: ChannelItem[] = (res?.data ?? []).map((ch: ApiChannelItem) => ({
+        id: ch.id as string | number,
+        name: ch.name,
+        channel_type: ch.channel_type || ch.type || 'openai_compatible',
+        base_url: ch.base_url,
+        api_key: ch.api_key,
+        priority: ch.priority ?? 0,
+        weight: ch.weight ?? 1,
+        status: ch.status || (ch.enabled ? 'enabled' : 'disabled'),
+        models: ch.models,
+        last_used_at: typeof ch.last_used_at === 'number' ? ch.last_used_at : null,
+        created_at: typeof ch.created_at === 'number' ? ch.created_at : undefined,
+        updated_at: typeof ch.updated_at === 'number' ? ch.updated_at : undefined,
+      }));
+      setChannels(items);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

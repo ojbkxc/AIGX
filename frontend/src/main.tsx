@@ -5,16 +5,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import App from './App';
 import './App.css';
 import './i18n';
+import { initTheme } from './lib/theme';
 
-// 初始化主题
-(function initTheme() {
-  const saved = localStorage.getItem('theme');
-  if (saved === 'light') {
-    document.documentElement.setAttribute('data-theme', 'light');
-  } else {
-    document.documentElement.setAttribute('data-theme', 'dark');
-  }
-})();
+// 初始化主题（system/light/dark 三态，system 跟随系统明暗）
+initTheme();
 
 // TanStack Query 全局客户端：
 // - 30s 轮询保持原有实时性

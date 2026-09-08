@@ -97,8 +97,8 @@ export default function NetworkLayer(): JSX.Element {
   const fetchStatus = async (): Promise<void> => {
     try {
       setLoading(true);
-      const data = await getNetworkStatus();
-      setNetworkStatus(data ?? null);
+      const res = await getNetworkStatus();
+      setNetworkStatus(res.data ?? null);
     } catch (error) {
       console.error('Failed to fetch network status:', error);
     } finally {

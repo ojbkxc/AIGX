@@ -18,7 +18,6 @@ export default function Orders(): JSX.Element {
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const load = async () => {
@@ -30,9 +29,9 @@ export default function Orders(): JSX.Element {
         api.listOrders(),
         api.getEpayConfig().catch(() => null),
       ]);
-      setOrders(Array.isArray(orderRes?.data) ? orderRes.data : []);
+      setOrders(Array.isArray(orderRes?.data) ? (orderRes.data as Order[]) : []);
       if (epayRes) {
-        const cfg: EpayConfig | null = epayRes.data ?? null;
+        const cfg: EpayConfig | null = (epayRes.data ?? null) as unknown as EpayConfig | null;
         setEpay(cfg ? { price: (cfg as { price?: number }).price } : null);
       }
     } catch (err) {

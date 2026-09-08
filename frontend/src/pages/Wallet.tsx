@@ -52,7 +52,6 @@ export default function Wallet(): JSX.Element {
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const load = async () => {
@@ -64,9 +63,9 @@ export default function Wallet(): JSX.Element {
         api.getEpayInfo().catch(() => null),
         api.myOrders().catch(() => null),
       ]);
-      if (meRes) setMe(meRes.data || null);
-      if (epayRes) setEpay(epayRes.data || null);
-      if (orderRes) setOrders(Array.isArray(orderRes.data) ? orderRes.data : []);
+      if (meRes) setMe(meRes.data as WalletUser | null);
+      if (epayRes) setEpay(epayRes.data as EpayConfig | null);
+      if (orderRes) setOrders(Array.isArray(orderRes.data) ? (orderRes.data as unknown as WalletOrder[]) : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -115,8 +114,12 @@ export default function Wallet(): JSX.Element {
     setError('');
     try {
       const res = await api.topup(amt, method);
-      const params: Record<string, string> = res?.data || {};
-      const url: string | undefined = res?.url;
+      const data = (res?.data ?? {}) as Record<string, unknown> & { url?: string };
+      const params: Record<string, string> = {};
+      for (const [k, v] of Object.entries(data)) {
+        if (k !== 'url') params[k] = String(v);
+      }
+      const url: string | undefined = data.url;
       if (!url) {
         setError(t('支付网关未返回跳转地址，请检查易支付配置'));
         setSubmitting(false);
@@ -152,12 +155,13 @@ export default function Wallet(): JSX.Element {
     setError('');
     try {
       const res = await api.redeem(redeemCode.trim());
-      const msg = res?.message || res?.msg || t('兑换成功');
+      const data = res?.data ?? {};
+      const msg = (data as { message?: string }).message || (data as { msg?: string }).msg || t('兑换成功');
       addToast(String(msg));
       setRedeemCode('');
       // 刷新账户信息
       const meRes = await api.getMe();
-      if (meRes) setMe(meRes.data || null);
+      if (meRes) setMe(meRes.data as WalletUser | null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

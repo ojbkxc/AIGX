@@ -2,7 +2,9 @@
 // 仅保留后端已实现的路由（/api/network/*），未实现端点的方法已移除
 import type {
   NetworkConfigRequest,
+  NetworkConfigResponseRaw,
   AccountConfigRequest,
+  ApiEnvelope,
   NetworkStatusRaw,
 } from '../types/network';
 
@@ -54,39 +56,39 @@ async function request<T = unknown>(method: string, path: string, body: unknown 
 }
 
 // 获取网络层健康状态（后端返回 snake_case 原始结构）
-export async function getNetworkStatus(): Promise<NetworkStatusRaw> {
-  return request<NetworkStatusRaw>('GET', '/api/network/status');
+export async function getNetworkStatus(): Promise<ApiEnvelope<NetworkStatusRaw>> {
+  return request<ApiEnvelope<NetworkStatusRaw>>('GET', '/api/network/status');
 }
 
 // 更新网络层配置
-export async function updateNetworkConfig(configId: string | number, config: NetworkConfigRequest): Promise<unknown> {
-  return request('PUT', `/api/network/config/${configId}`, config);
+export async function updateNetworkConfig(configId: string | number, config: NetworkConfigRequest): Promise<NetworkConfigResponseRaw> {
+  return request<NetworkConfigResponseRaw>('PUT', `/api/network/config/${configId}`, config);
 }
 
 // 重启网络层
-export async function restartNetwork(): Promise<unknown> {
-  return request('POST', '/api/network/restart');
+export async function restartNetwork(): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>('POST', '/api/network/restart');
 }
 
 // 添加网络层账号
-export async function addNetworkAccount(accountId: string | number, accountConfig: AccountConfigRequest): Promise<unknown> {
-  return request('POST', `/api/network/accounts/${accountId}`, accountConfig);
+export async function addNetworkAccount(accountId: string | number, accountConfig: AccountConfigRequest): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>('POST', `/api/network/accounts/${accountId}`, accountConfig);
 }
 
 // 删除网络层账号
-export async function removeNetworkAccount(accountId: string | number): Promise<unknown> {
-  return request('DELETE', `/api/network/accounts/${accountId}`);
+export async function removeNetworkAccount(accountId: string | number): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>('DELETE', `/api/network/accounts/${accountId}`);
 }
 
 // 获取网络层原始状态（供监控面板聚合换算为指标）
-export async function getNetworkMetrics(): Promise<NetworkStatusRaw> {
+export async function getNetworkMetrics(): Promise<ApiEnvelope<NetworkStatusRaw>> {
   const res = await fetch(`${BASE_URL}/api/network/status`, {
     headers: authHeaders(),
   });
   if (res.status === 401) {
     throw new Error('Unauthorized');
   }
-  return res.json() as Promise<NetworkStatusRaw>;
+  return res.json() as Promise<ApiEnvelope<NetworkStatusRaw>>;
 }
 
 // 保持与旧 import { api as networkApi } 用法兼容的聚合对象

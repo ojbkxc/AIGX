@@ -378,9 +378,9 @@ export default function Dashboard(): JSX.Element {
         api.getUserRanking().catch(() => null),
         api.getChannelHealth().catch(() => null),
       ]);
-      setRealtime((rtData?.data ?? rtData) as RealtimeStats | null);
-      if (urData) setUserRanking((urData.data ?? urData) as UserRanking[]);
-      if (chData) setChannelHealth((chData.data ?? chData) as ChannelHealth[]);
+      setRealtime((rtData?.data ?? rtData) as unknown as RealtimeStats | null);
+      if (urData) setUserRanking((urData.data ?? urData) as unknown as UserRanking[]);
+      if (chData) setChannelHealth((chData.data ?? chData) as unknown as ChannelHealth[]);
     } catch {
       // 轮询失败静默，不打扰用户
     }

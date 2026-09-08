@@ -43,6 +43,7 @@ logs/
 # Testing
 coverage/
 .nyc_output/
+tests/e2e/screenshots/
 
 # Build artifacts
 *.tar.gz

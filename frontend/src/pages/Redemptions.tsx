@@ -48,7 +48,7 @@ export default function Redemptions(): JSX.Element {
     setError('');
     try {
       const res = await api.listRedemptions({ page: String(page), size: '20' });
-      setItems(Array.isArray(res?.data) ? res.data : []);
+      setItems(Array.isArray(res?.data) ? (res.data as unknown as RedemptionItem[]) : []);
       setTotal(res?.total || 0);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -61,8 +61,9 @@ export default function Redemptions(): JSX.Element {
     setGenerating(true);
     setError('');
     try {
-      const res = await api.batchRedemptions(genForm);
-      addToast(`${t('成功生成')} ${res?.data?.length || 0} ${t('个兑换码')}`);
+      const res = await api.batchRedemptions(genForm as unknown as Record<string, unknown>);
+      const generatedCount = res?.data?.data?.length ?? 0;
+      addToast(`${t('成功生成')} ${generatedCount} ${t('个兑换码')}`);
       setShowGen(false);
       void load();
     } catch (err) {

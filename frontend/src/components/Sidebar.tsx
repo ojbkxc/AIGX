@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { cycleTheme } from '../lib/theme';
 import { api } from '../api';
 import { isAdmin } from '../lib/utils';
 import {
@@ -154,7 +155,7 @@ export default function Sidebar(): JSX.Element {
     setCollapsedGroups((prev) => {
       const next: Record<string, boolean> = { ...prev };
       next[key] = !next[key];
-      try { localStorage.setItem('sidebar_collapsed', JSON.stringify(next)); } catch {}
+      try { localStorage.setItem('sidebar_collapsed', JSON.stringify(next)); } catch { /* 忽略持久化失败 */ }
       return next;
     });
   };
@@ -178,10 +179,7 @@ export default function Sidebar(): JSX.Element {
   };
 
   const toggleTheme = (): void => {
-    const html = document.documentElement;
-    const isLight = html.getAttribute('data-theme') === 'light';
-    html.setAttribute('data-theme', isLight ? 'dark' : 'light');
-    localStorage.setItem('theme', isLight ? 'dark' : 'light');
+    void cycleTheme();
   };
 
   const toggleLanguage = (): void => {

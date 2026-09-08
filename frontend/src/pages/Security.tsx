@@ -74,19 +74,19 @@ export default function Security(): JSX.Element {
   // 概览加载（独立于事件列表，避免分页触发概览重复请求）
   useEffect(() => {
     void loadOverview();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 事件列表：分页/筛选条件变化自动加载
   useEffect(() => {
     void loadEvents();
+    // loadEvents 随分页/筛选参数变化，禁用 exhaustive-deps 以保留显式触发语义
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, timeRange, eventType]);
 
   const loadOverview = async () => {
     try {
       const res = await api.getSecurityOverview();
-      setOverview(res?.data || res || null);
+      setOverview((res?.data ?? null) as unknown as SecurityOverview | null);
     } catch (err) {
       // 概览加载失败不阻塞事件列表
       setError(err instanceof Error ? err.message : String(err));
@@ -101,7 +101,7 @@ export default function Security(): JSX.Element {
       if (timeRange) params.range = timeRange;
       if (eventType) params.type = eventType;
       const res = await api.getSecurityEvents(params);
-      setEvents(Array.isArray(res?.data) ? res.data : []);
+      setEvents(Array.isArray(res?.data) ? (res.data as unknown as SecurityEvent[]) : []);
       setTotal(res?.total || 0);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

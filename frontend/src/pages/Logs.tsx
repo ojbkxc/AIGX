@@ -69,11 +69,11 @@ export default function Logs(): JSX.Element {
         if (filters.model) params.model = filters.model;
         if (filters.channel) params.channel = filters.channel;
         const res = await api.listRequestLogs(params);
-        setLogs(Array.isArray(res?.data) ? res.data : []);
+        setLogs(Array.isArray(res?.data) ? (res.data as unknown as LogItem[]) : []);
         setTotal(res?.total || 0);
       } else {
         const res = await api.listAuditLogs({ page, size });
-        setLogs(Array.isArray(res?.data) ? res.data : []);
+        setLogs(Array.isArray(res?.data) ? (res.data as unknown as LogItem[]) : []);
         setTotal(res?.total || 0);
       }
     } catch (err) {

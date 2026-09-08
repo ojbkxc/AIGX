@@ -28,7 +28,7 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const [channels, setChannels] = useState<Array<{ id?: string; name?: string; base_url?: string }>>([]);
-  const [users, setUsers] = useState<Array<{ id?: string; email?: string; username?: string; role?: string }>>([]);
+  const [users, setUsers] = useState<Array<{ id?: string | number; email?: string; username?: string; role?: string }>>([]);
   const [tokens, setTokens] = useState<Array<{ id?: string; name?: string; key?: string; group?: string }>>([]);
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -41,10 +41,10 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
     setActive(0);
     const id = window.setTimeout(() => inputRef.current?.focus(), 0);
     if (isAdmin()) {
-      api.listChannels().then((res) => setChannels(Array.isArray(res?.data) ? res.data : res || [])).catch(() => {});
-      api.listUsers().then((res) => setUsers(Array.isArray(res?.data) ? res.data : res || [])).catch(() => {});
+      api.listChannels().then((res) => setChannels(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
+      api.listUsers().then((res) => setUsers(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
     }
-    api.listTokens().then((res) => setTokens(Array.isArray(res?.data) ? res.data : res || [])).catch(() => {});
+    api.listTokens().then((res) => setTokens(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
     return () => window.clearTimeout(id);
   }, [open]);
 

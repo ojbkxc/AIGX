@@ -1,6 +1,8 @@
+/* Dashboard 页面样式 - open-webui 风格 */
+
 .quick-actions {
   display: flex;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
 }
 
@@ -15,7 +17,8 @@
 }
 
 .stat-sub {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
   margin-top: auto;
+  font-weight: 400;
 }

@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
 // tailwindcss @tailwindcss/vite 插件将在依赖安装后的 Phase 2 启用：
@@ -7,6 +7,11 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.{ts,tsx}'],
+    globals: true,
+  },
   // 模块解析优先级：TS > JS（页面迁移期间保证 .tsx 优先于同名 .jsx 被加载）
   resolve: {
     extensions: ['.mjs', '.mts', '.ts', '.tsx', '.js', '.jsx', '.json'],

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, type ChangeEvent, type FormEvent } from 'r
 import { useNavigate, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
+import { cycleTheme } from '../lib/theme';
 
 type UsernameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error';
 
@@ -135,11 +136,8 @@ export default function Register() {
     }
   };
 
-  const toggleTheme = () => {
-    const html = document.documentElement;
-    const isLight = html.getAttribute('data-theme') === 'light';
-    html.setAttribute('data-theme', isLight ? 'dark' : 'light');
-    localStorage.setItem('theme', isLight ? 'dark' : 'light');
+  const toggleTheme = (): void => {
+    void cycleTheme();
   };
 
   return (

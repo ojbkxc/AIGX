@@ -38,14 +38,13 @@ export default function Profile(): JSX.Element {
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const load = async () => {
     setLoading(true);
     try {
       const res = await api.getMe();
-      const data = res?.data || res || null;
+      const data = (res?.data ?? null) as Me | null;
       setMe(data);
       setTotpEnabled(Boolean(data?.totp_enabled));
     } catch {
@@ -87,9 +86,9 @@ export default function Profile(): JSX.Element {
     setTotpBusy(true);
     try {
       const res = await api.totpSetup();
-      const data = res?.data || {};
+      const data = (res?.data ?? {}) as { secret?: string; otpauth_uri?: string; otpauth_url?: string };
       if (data.secret) {
-        setTotpSetup({ secret: data.secret, otpauth_uri: data.otpauth_uri || '' });
+        setTotpSetup({ secret: data.secret, otpauth_uri: data.otpauth_uri || data.otpauth_url || '' });
         setTotpCode('');
       } else {
         setTotpError(t('生成密钥失败'));

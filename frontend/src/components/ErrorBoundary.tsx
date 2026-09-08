@@ -27,7 +27,6 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     // 仅在控制台留痕，不外发
-    // eslint-disable-next-line no-console
     console.error('[ErrorBoundary]', error, info);
     this.setState({ info });
   }

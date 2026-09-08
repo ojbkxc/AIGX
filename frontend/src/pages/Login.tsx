@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../api';
+import { cycleTheme } from '../lib/theme';
 
 export default function Login(): JSX.Element {
   const [email, setEmail] = useState<string>('');
@@ -63,8 +64,8 @@ export default function Login(): JSX.Element {
           return c - 1;
         });
       }, 1000);
-    } catch (err: any) {
-      setError(err.message || '验证码发送失败');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '验证码发送失败');
     } finally {
       setCodeSending(false);
     }
@@ -102,8 +103,8 @@ export default function Login(): JSX.Element {
       } else {
         setError('验证失败：响应格式错误');
       }
-    } catch (err: any) {
-      setError(err.message || '两步验证失败');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '两步验证失败');
     } finally {
       setLoading(false);
     }
@@ -121,15 +122,15 @@ export default function Login(): JSX.Element {
     try {
       const res = await api.loginWithCode(email, code.trim());
       if (res.success && res.data?.require_2fa) {
-        setTotpPending(res.data.tmp_token);
+        setTotpPending(res.data.tmp_token ?? null);
         setTotpCode('');
       } else if (res.success && res.data) {
         completeLogin(res.data);
       } else {
         setError('登录失败：响应格式错误');
       }
-    } catch (err: any) {
-      setError(err.message || '登录失败');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '登录失败');
     } finally {
       setLoading(false);
     }
@@ -168,8 +169,8 @@ export default function Login(): JSX.Element {
       } else {
         setForgotStep('token');
       }
-    } catch (err: any) {
-      setForgotError(err.message || '发送重置链接失败');
+    } catch (err) {
+      setForgotError(err instanceof Error ? err.message : '发送重置链接失败');
     } finally {
       setForgotLoading(false);
     }
@@ -198,8 +199,8 @@ export default function Login(): JSX.Element {
       setSuccess('密码已重置，请使用新密码登录');
       setEmail(forgotEmail || email);
       setPassword('');
-    } catch (err: any) {
-      setForgotError(err.message || '重置失败');
+    } catch (err) {
+      setForgotError(err instanceof Error ? err.message : '重置失败');
     } finally {
       setForgotLoading(false);
     }
@@ -246,25 +247,22 @@ export default function Login(): JSX.Element {
       const res = await api.login(email, password);
       if (res.success && res.data?.require_2fa) {
         // 2FA/TOTP：密码已通过，进入二次验证步骤
-        setTotpPending(res.data.tmp_token);
+        setTotpPending(res.data.tmp_token ?? null);
         setTotpCode('');
       } else if (res.success && res.data) {
         completeLogin(res.data);
       } else {
         setError('登录失败：响应格式错误');
       }
-    } catch (err: any) {
-      setError(err.message || '登录失败');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '登录失败');
     } finally {
       setLoading(false);
     }
   };
 
   const toggleTheme = (): void => {
-    const html = document.documentElement;
-    const isLight = html.getAttribute('data-theme') === 'light';
-    html.setAttribute('data-theme', isLight ? 'dark' : 'light');
-    localStorage.setItem('theme', isLight ? 'dark' : 'light');
+    void cycleTheme();
   };
 
   return (

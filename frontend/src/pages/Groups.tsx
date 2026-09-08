@@ -36,7 +36,6 @@ export default function Groups(): JSX.Element {
 
   useEffect(() => {
     void loadGroups();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadGroups = async () => {
@@ -44,7 +43,7 @@ export default function Groups(): JSX.Element {
     setError('');
     try {
       const res = await api.listGroups();
-      setGroups(res?.data || res || []);
+      setGroups(res?.data ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

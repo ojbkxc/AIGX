@@ -59,10 +59,12 @@ try {
       const search = page.locator('.chat-debugger-search input');
       if (await search.isVisible().catch(() => false)) {
         check('模型选择器搜索框', true);
-        await search.fill('glm');
+        // 搜索第一个渠道的模型片段（DeepSeek官网 → deepseek-*），
+        // 断言过滤生效而非固定搜 glm（该渠道不含 glm 模型）
+        await search.fill('deepseek');
         await page.waitForTimeout(400);
         const filtered = await page.locator('.chat-debugger-picker-item').count();
-        check('搜索过滤生效', true, `glm 匹配=${filtered}`);
+        check('搜索过滤生效', filtered > 0, `deepseek 匹配=${filtered}`);
         await page.screenshot({ path: 'tests/e2e/screenshots/05-model-search.png' });
         await page.keyboard.press('Escape');
       } else {

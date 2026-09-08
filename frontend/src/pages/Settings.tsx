@@ -144,7 +144,7 @@ export default function Settings() {
     setRlSaving(true);
     setError('');
     try {
-      await api.updateRateLimitConfig(rlConfig);
+      await api.updateRateLimitConfig(rlConfig as unknown as Record<string, unknown>);
       addToast(t('限流配置更新成功'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -205,7 +205,7 @@ export default function Settings() {
     setPriceSyncSaving(true);
     setError('');
     try {
-      await api.updatePriceSyncConfig(priceSyncConfig);
+      await api.updatePriceSyncConfig(priceSyncConfig as unknown as Record<string, unknown>);
       addToast(t('价格同步配置已更新'));
       // P1：保存后立即刷新 last_sync 等后端派生字段
       await loadPriceSyncConfig();
@@ -251,7 +251,7 @@ export default function Settings() {
     setExchangeRatesSaving(true);
     setError('');
     try {
-      await api.updateExchangeRates(exchangeRates);
+      await api.updateExchangeRates(exchangeRates as unknown as Record<string, unknown>);
       addToast(t('汇率配置已更新'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

@@ -8,7 +8,7 @@ import { twMerge } from 'tailwind-merge';
 
 /**
  * 合并 className：clsx 处理条件类名，twMerge 解决 Tailwind 冲突
- * @param {...any} inputs - 任意 className 组合
+ * @param inputs - 任意 className 组合
  * @returns {string} 合并后的 className
  */
 export function cn(...inputs: (string | boolean | undefined | null)[]): string {

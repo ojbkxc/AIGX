@@ -136,8 +136,8 @@ export default function Pricing() {
   const loadRatios = async () => {
     setRatioLoading(true);
     try {
-      const res = (await api.getRatios()) as { data?: RatiosState } & RatiosState;
-      const r = res.data || res || {};
+      const res = await api.getRatios();
+      const r = (res?.data ?? {}) as unknown as RatiosState;
       setRatios(r);
       setRatioText(JSON.stringify(r.model_ratio || {}, null, 2));
       setGroupRatioText(JSON.stringify(r.group_ratio || {}, null, 2));

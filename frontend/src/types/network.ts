@@ -171,6 +171,14 @@ export interface Metrics {
   uptime: number;
 }
 
+/** AIGX 管理面统一响应信封（success + data） */
+export interface ApiEnvelope<T> {
+  success: boolean;
+  data?: T;
+  error?: string;
+  message?: string;
+}
+
 /** 后端 /api/network/status 的 snake_case 原始结构 */
 export interface NetworkStatusRaw {
   enabled: boolean;
@@ -199,4 +207,15 @@ export interface NetworkStatusRaw {
   };
   load_balance_strategy: string;
   last_check_at: number;
+}
+
+/** 后端 PUT /api/network/config/:id 的 snake_case 响应 */
+export interface NetworkConfigResponseRaw {
+  enabled: boolean;
+  strategy?: string;
+  account_pool_min?: number;
+  account_pool_max?: number;
+  connection_pool_max?: number;
+  session_pool_max?: number;
+  [key: string]: unknown;
 }

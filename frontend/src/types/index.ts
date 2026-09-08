@@ -73,13 +73,19 @@ export enum Permission {
 
 // 数据库实体类型
 export interface User {
-  id: string;
+  id: string | number;
   username: string;
   email: string;
-  role: UserRole;
-  api_keys: string[];
-  created_at: string;
-  updated_at: string;
+  role?: string;
+  api_keys?: string[];
+  group?: string;
+  quota?: number | null;
+  remaining?: number | null;
+  used_quota?: number;
+  status?: string;
+  totp_enabled?: boolean;
+  created_at?: number;
+  updated_at?: number;
 }
 
 export interface Channel {
@@ -87,7 +93,7 @@ export interface Channel {
   name: string;
   type: ChannelType;
   status: ChannelStatus;
-  config: Record<string, any>;
+  config: Record<string, unknown>;
   settings: ChannelSettings;
   health: ChannelHealth;
   created_at: string;
@@ -101,7 +107,7 @@ export interface ChannelSettings {
   rate_limit: number;
   failover_enabled: boolean;
   cooldown_seconds: number;
-  meta: Record<string, any>;
+  meta: Record<string, unknown>;
 }
 
 export interface ChannelHealth {
@@ -158,17 +164,25 @@ export interface BillingRecord {
 // API响应类型
 // ============================================================================
 
-export interface ApiResponse<T = any> {
+export interface ApiResponse<T = unknown> {
   success: boolean;
   data?: T;
   error?: ApiError;
   meta?: ResponseMeta;
 }
 
+export type ApiList<T> = ApiResponse<T[]> & {
+  total?: number;
+  page?: number;
+  size?: number;
+};
+
+export type ApiRecord = ApiResponse<Record<string, unknown>>;
+
 export interface ApiError {
   code: string;
   message: string;
-  details?: Record<string, any>;
+  details?: Record<string, unknown>;
   status: number;
 }
 
@@ -199,6 +213,41 @@ export interface AuthResponse {
   user: User;
   token: string;
   refresh_token: string;
+}
+
+export interface LoginResult {
+  token: string;
+  email: string;
+  username: string;
+  role: string;
+  expires_at: number;
+  require_2fa?: boolean;
+  tmp_token?: string;
+  recovery_codes?: string[];
+}
+
+export interface LoginCodeResult {
+  sent?: boolean;
+  expire_seconds?: number;
+  require_2fa?: boolean;
+  code?: string;
+}
+
+export interface RegisterResult {
+  token: string;
+  email: string;
+  username?: string;
+  role?: string;
+  expires_at?: number;
+  require_2fa?: boolean;
+  tmp_token?: string;
+}
+
+export interface MessageResult {
+  message?: string;
+  success?: boolean;
+  sent?: boolean;
+  token?: string;
 }
 
 export interface RefreshTokenRequest {
@@ -245,6 +294,194 @@ export interface ChannelUsage {
   tokens_today: number;
   current_load: number;
   status: string;
+}
+
+export interface ChannelItem {
+  id: string;
+  name: string;
+  channel_type?: string;
+  type?: string;
+  base_url?: string;
+  models?: string[];
+  status?: string;
+  enabled?: boolean;
+  priority?: number;
+  weight?: number;
+  max_concurrent?: number;
+  api_key?: string;
+  created_at?: string | number;
+  updated_at?: string;
+  last_used_at?: number | null;
+  last_error?: string | null;
+  health?: ChannelHealth;
+}
+
+export interface TokenItem {
+  id: string;
+  name: string;
+  status?: string;
+  used_quota?: number;
+  model_limit?: string;
+  created_at?: string;
+  last_used_at?: string;
+  [key: string]: unknown;
+}
+
+export interface TokenKeyResult {
+  plain_key?: string;
+  key?: string;
+}
+
+export interface PriceEntry {
+  model: string;
+  prompt_price?: number;
+  completion_price?: number;
+  prompt_ratio?: number;
+  completion_ratio?: number;
+  [key: string]: unknown;
+}
+
+export interface GroupItem {
+  name: string;
+  ratio?: number;
+  allowed_models?: string[] | string;
+  description?: string;
+  [key: string]: unknown;
+}
+
+export interface OrderItem {
+  id?: string;
+  trade_no?: string;
+  user_id?: string;
+  amount?: number;
+  money?: number;
+  quota?: number | null;
+  method?: string;
+  payment_method?: string;
+  status?: string;
+  created_at?: string;
+  create_time?: number;
+  paid_time?: number | null;
+  [key: string]: unknown;
+}
+
+export interface RedemptionItem {
+  id: string;
+  code: string;
+  usage_count?: number;
+  status?: string;
+  created_at?: string;
+  expired_at?: string;
+  [key: string]: unknown;
+}
+
+export interface AlertRule {
+  [key: string]: unknown;
+}
+
+export interface AlertEvent {
+  [key: string]: unknown;
+}
+
+export interface NotifyConfigItem {
+  [key: string]: unknown;
+}
+
+export interface IpFilterEntry {
+  [key: string]: unknown;
+}
+
+export interface CacheStatsItem {
+  [key: string]: unknown;
+}
+
+export interface SystemMonitorItem {
+  [key: string]: unknown;
+}
+
+export interface PricingSyncConfigItem {
+  [key: string]: unknown;
+}
+
+export interface ExchangeRatesItem {
+  [key: string]: unknown;
+}
+
+export interface HealthArchiveItem {
+  [key: string]: unknown;
+}
+
+export interface IpFilterConfigItem {
+  [key: string]: unknown;
+}
+
+export interface RateLimitConfigItem {
+  [key: string]: unknown;
+}
+
+export interface SettingsItem {
+  mappings?: unknown;
+  usage?: unknown;
+  limits?: unknown;
+  notification?: unknown;
+  [key: string]: unknown;
+}
+
+export interface ModelInfo {
+  id: string;
+  object?: string;
+  owned_by?: string;
+  context_length?: number | null;
+  capabilities?: string[];
+  [key: string]: unknown;
+}
+
+export interface TotpSetupResult {
+  secret: string;
+  otpauth_url: string;
+  otpauth_uri?: string;
+}
+
+export interface TotpEnableResult {
+  recovery_codes?: string[];
+  [key: string]: unknown;
+}
+
+export interface TotpDisableResult {
+  success?: boolean;
+  [key: string]: unknown;
+}
+
+export interface PlaygroundChatRequest {
+  channel_id?: string;
+  protocol?: string;
+  model?: string;
+  message?: string | unknown;
+  history?: unknown[];
+  stream?: boolean;
+  temperature?: number;
+  max_tokens?: number;
+  system_prompt?: string;
+  [key: string]: unknown;
+}
+
+export interface PlaygroundChatResult {
+  stream?: Array<{ content?: string }>;
+  data?: { content?: string; error?: string; usage?: unknown };
+  error?: string;
+  success?: boolean;
+}
+
+export interface UsageSummaryItem {
+  [key: string]: unknown;
+}
+
+export interface TrendItem {
+  [key: string]: unknown;
+}
+
+export interface DashboardItem {
+  [key: string]: unknown;
 }
 
 // ============================================================================
@@ -340,7 +577,7 @@ export type FormErrors<T> = {
 export interface ChartDataPoint {
   label: string;
   value: number;
-  original?: any;
+  original?: unknown;
 }
 
 export interface ChartConfig {
