@@ -1,5 +1,31 @@
 
 
+
+## 2026-09-09 · 提示词库 Prompts workspace + 404 路由兜底修复
+
+### 做了什么
+- 新页面 `frontend/src/pages/Prompts.tsx` + `.css`（`/prompts`）：
+  open-webui 式提示词库——汇总行（总数/已启用）+ 搜索（名称/内容/标签）
+  + 标签筛选 + 卡片网格 + 新建/编辑/删除/复制/启用切换 + JSON 导入导出，
+  localStorage `aigx_prompts` 持久化（与 /chat 会话同模式）。
+- Sidebar 开发组加入「提示词库」入口（BookOpen，位于模型预设之后）；
+  i18n zh/en 补齐 32 条词条。
+- 修复 404 兜底：App.tsx 原先有两条重复的 `path="*"`，第一条 Navigate 抢走
+  全部未匹配路径，RouteErrorPage 永远不可达；现删除 Navigate 兜底，
+  并给 RouteErrorPage 增加显式 `status={404}` prop（普通 element 模式拿不到
+  route error）。
+- E2E 增加提示词库页断言（SPA 内导航 + 标题/新建按钮），14/14 全绿。
+
+### 为什么
+- ROADMAP P1 前端体验跃升第 16 项「提示词库（Prompts workspace）」——
+  P1 前端跃升至此全部完成。
+- 路由兜底修复属于真实 bug：未匹配深链接此前静默回首页而非显示 404，
+  违反「路由层兜底错误页」设计意图。
+
+### 验证结论
+- 前端 `typecheck` / `lint` / `test`（35）/ `build` 全绿；CI 由 GitHub Actions 验证。
+- `/prompts` 深链接返回 index.html 200（SPA fallback），无数据面冲突。
+
 ## 2026-09-09 · 模型预设 Models workspace + 数据面路由隔离
 
 ### 做了什么

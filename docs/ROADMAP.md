@@ -120,7 +120,8 @@
 2. P1 前端体验跃升：Playground V2 已落地（三模式 + 参数调节 + Images 端点）；
    Settings 分区式已落地（2026-09-09：五分区 Tabs + 主题三态 + 通知入口）；
    模型预设（Models workspace）已落地（2026-09-09：/model-presets 模型目录）；
-   剩余：提示词库（Prompts workspace）。
+   提示词库（Prompts workspace）已落地（2026-09-09：/prompts 卡片网格 + 导入导出）；
+   P1 前端体验跃升全部完成。
 3. 每轮迭代出口：clippy 零警告 + test 全绿 + typecheck/build 通过 + 更新 `CHANGELOG-AI.md` + 推进本文件状态。
 4. 遗留技术债（P2 清债）：Workspace_B780A2 分支计费语义落后主链路（G9）。
 
