@@ -15,6 +15,7 @@ use super::common::{error_response, verify_admin};
 
 // 这里需要引用主 crate 的定价相关类型
 use crate::pricing::ModelPrice;
+use crate::token_estimate;
 
 #[derive(Debug, Deserialize)]
 pub struct PriceRequest {
@@ -119,11 +120,22 @@ pub async fn handle_delete_pricing(
 
 // ── 成本预估器（P1）─────────────────────────────────────────────────
 
+/// 成本预估请求（B2）。
+///
+/// 两种用法，后端兼容并存：
+/// - **消息形态（推荐）**：只传 `model` + `messages`（OpenAI wire 形状），
+///   网关侧用 `token_estimate::count_chat_prompt` 估算 prompt token——
+///   口径与数据面预留计费完全一致，前端无需自带 tokenizer。
+/// - **token 形态（旧客户端）**：传 `input_tokens` / `output_tokens` 直接计价。
 #[derive(Debug, Deserialize)]
 pub struct CostEstimateRequest {
     pub model: String,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
+    #[serde(default)]
+    pub messages: Option<Vec<Value>>,
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
     #[serde(default = "default_group")]
     pub group: String,
 }
@@ -132,9 +144,52 @@ fn default_group() -> String {
     "default".to_string()
 }
 
+/// 从请求体解析预估 token 对（纯逻辑，供 handler 与单测复用）。
+///
+/// 消息形态：`input` 为 `count_chat_prompt` 的精确估算，
+/// `output` 默认 256（与数据面预留计费的保守 completion 估算一致）。
+fn resolve_estimate_tokens(body: &CostEstimateRequest) -> Result<(u64, u64, &'static str), String> {
+    if let Some(raw_messages) = &body.messages {
+        let messages =
+            super::super::openai::parse_messages(Some(&Value::Array(raw_messages.clone())))
+                .unwrap_or_default();
+        if messages.is_empty() {
+            return Err("no valid messages in estimate request".to_string());
+        }
+        let chat = crate::bridge::ChatFormat {
+            model: body.model.clone(),
+            messages,
+            tools: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: false,
+            top_k: None,
+            stop: None,
+            tool_choice: None,
+            reasoning_effort: None,
+            web_search_options: None,
+            extra: None,
+        };
+        let prompt = token_estimate::count_chat_prompt(&body.model, &chat);
+        Ok((
+            u64::from(prompt),
+            body.output_tokens.unwrap_or(256),
+            "messages",
+        ))
+    } else {
+        match (body.input_tokens, body.output_tokens) {
+            (Some(input), Some(output)) => Ok((input, output, "explicit")),
+            (Some(input), None) => Ok((input, 256, "explicit")),
+            _ => Err("provide either messages or input_tokens/output_tokens".to_string()),
+        }
+    }
+}
+
 /// POST /api/pricing/estimate - 成本预估器（P1）
 ///
 /// 根据模型、token 数量和用户分组预估请求成本。
+/// 优先使用原始 `messages` 做网关侧 token 估算；否则回退到显式 token 数。
 /// 用于 Playground/聊天输入实时显示预计消耗。
 pub async fn handle_cost_estimate(
     State(state): State<AppState>,
@@ -142,6 +197,14 @@ pub async fn handle_cost_estimate(
     Json(body): Json<CostEstimateRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _user = super::common::verify_user(&state, &headers).await?;
+
+    // 与数据面一致：优先按原始消息估算 prompt token。
+    let (input_tokens, output_tokens, token_source) = match resolve_estimate_tokens(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(error_response(&e, StatusCode::BAD_REQUEST));
+        }
+    };
 
     let price = match state.pricing_store.get_price(&body.model) {
         Some(p) => p,
@@ -155,8 +218,8 @@ pub async fn handle_cost_estimate(
 
     let cost = match state.pricing_store.calculate_cost(
         &body.model,
-        body.input_tokens,
-        body.output_tokens,
+        input_tokens,
+        output_tokens,
         &body.group,
     ) {
         Ok(c) => c,
@@ -170,8 +233,8 @@ pub async fn handle_cost_estimate(
 
     let cost_quoted = match state.pricing_store.calculate_cost_quoted(
         &body.model,
-        body.input_tokens,
-        body.output_tokens,
+        input_tokens,
+        output_tokens,
         &body.group,
     ) {
         Ok(c) => c,
@@ -187,8 +250,9 @@ pub async fn handle_cost_estimate(
         "success": true,
         "data": {
             "model": body.model,
-            "input_tokens": body.input_tokens,
-            "output_tokens": body.output_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "token_source": token_source,
             "group": body.group,
             "cost_usd": cost,
             "cost_quoted": cost_quoted,
@@ -318,5 +382,90 @@ pub async fn handle_model_meta_delete(
             &format!("Failed to delete model metadata: {e}"),
             StatusCode::INTERNAL_SERVER_ERROR,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req_with_messages(msgs: Value) -> CostEstimateRequest {
+        CostEstimateRequest {
+            model: "gpt-4".to_string(),
+            messages: Some(msgs.as_array().unwrap().clone()),
+            input_tokens: None,
+            output_tokens: None,
+            group: "default".to_string(),
+        }
+    }
+
+    #[test]
+    fn messages_form_estimates_prompt() {
+        let req = req_with_messages(json!([
+            {"role": "user", "content": "Hello"}
+        ]));
+        let (input, output, source) = resolve_estimate_tokens(&req).unwrap();
+        // 3 (per-message) + 1 ("user") + 1 ("Hello") + 3 (reply priming) = 8
+        assert_eq!(input, 8);
+        assert_eq!(output, 256);
+        assert_eq!(source, "messages");
+    }
+
+    #[test]
+    fn messages_form_honors_explicit_output() {
+        let mut req = req_with_messages(json!([
+            {"role": "user", "content": "Hello"}
+        ]));
+        req.output_tokens = Some(64);
+        let (input, output, _) = resolve_estimate_tokens(&req).unwrap();
+        assert_eq!(input, 8);
+        assert_eq!(output, 64);
+    }
+
+    #[test]
+    fn messages_form_rejects_invalid_roles() {
+        let req = req_with_messages(json!([
+            {"role": "nonsense", "content": "x"}
+        ]));
+        assert!(resolve_estimate_tokens(&req).is_err());
+    }
+
+    #[test]
+    fn explicit_tokens_pass_through() {
+        let req = CostEstimateRequest {
+            model: "gpt-4".to_string(),
+            messages: None,
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            group: "default".to_string(),
+        };
+        let (input, output, source) = resolve_estimate_tokens(&req).unwrap();
+        assert_eq!((input, output, source), (100, 50, "explicit"));
+    }
+
+    #[test]
+    fn explicit_input_only_defaults_output() {
+        let req = CostEstimateRequest {
+            model: "gpt-4".to_string(),
+            messages: None,
+            input_tokens: Some(100),
+            output_tokens: None,
+            group: "default".to_string(),
+        };
+        let (input, output, _) = resolve_estimate_tokens(&req).unwrap();
+        assert_eq!(input, 100);
+        assert_eq!(output, 256);
+    }
+
+    #[test]
+    fn empty_request_rejected() {
+        let req = CostEstimateRequest {
+            model: "gpt-4".to_string(),
+            messages: None,
+            input_tokens: None,
+            output_tokens: None,
+            group: "default".to_string(),
+        };
+        assert!(resolve_estimate_tokens(&req).is_err());
     }
 }

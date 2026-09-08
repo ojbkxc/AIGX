@@ -1,4 +1,26 @@
 
+## 2026-09-08 · B2 成本预估器：原始消息直出预估
+
+### 做了什么
+- `src/api/admin/pricing.rs`：`POST /api/pricing/estimate` 新增「消息形态」——
+  只传 `model` + `messages`（OpenAI wire 形状），后端用
+  `token_estimate::count_chat_prompt` 估算 prompt token，completion 默认 256
+  （与数据面预留计费口径一致）；旧「token 形态」完全兼容，两种形态以
+  `token_source` 字段区分。token 解析抽成纯函数 `resolve_estimate_tokens`。
+- `src/api/openai.rs`：`parse_messages` 提升为 `pub(crate)`，预估与数据面共用
+  同一消息解析路径，杜绝口径漂移。
+- 测试：`resolve_estimate_tokens` 6 个单测（消息估算/显式 output 覆盖/非法角色
+  拒绝/显式透传/单 input 默认 output/空请求拒绝）。
+
+### 为什么
+- 旧实现要求前端自带 tokenizer 先算 token 再请求，前端负担重且口径可能漂移。
+  网关侧已有 `count_chat_prompt`，让预估与真实计费共用一条路径是零漂移方案。
+
+### 验证结论
+- `cargo clippy --workspace --all-targets` 零警告。
+- `cargo test --workspace` 全绿（lib 378 + 新增 6）。
+- 未触碰同事并行编辑的前端文件（App.css / network.ts / vite 配置）。
+
 ## 2026-09-08 · P1 第二波（1/N）：计费闭环修复 G1/G5
 
 ### 做了什么

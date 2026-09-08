@@ -41,6 +41,11 @@
 - **为什么**：token 估算能力已存在（`token_estimate.rs`），new-api 无此体验。
 - **形态**：Playground/聊天输入框下方实时显示「预计消耗 ≈ ¥x.xx」，发送前可见；管理端定价页有「成本模拟器」。
 - **分期**：P1。
+- **状态**：🟡 后端已落地（2026-09-08）。`POST /api/pricing/estimate` 支持
+  两种形态：传原始 `messages`（网关侧 `count_chat_prompt` 估算，口径与数据面
+  预留计费一致，响应带 `token_source: "messages"`）或显式 `input_tokens`/
+  `output_tokens`（旧客户端兼容，`token_source: "explicit"`）。前端输入框实时
+  显示等同事审美改造合入后再接入。
 
 ### B3. 跨渠道价格仲裁
 - **为什么**：同一模型多家上游价格不同，当前调度只看可用性不看成本。

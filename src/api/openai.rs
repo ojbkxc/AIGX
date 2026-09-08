@@ -1012,7 +1012,10 @@ impl Drop for ResponsesStreamGuard {
 }
 
 /// 将 JSON Value 的消息数组解析为 ChatMessage 列表
-fn parse_messages(value: Option<&Value>) -> Option<Vec<ChatMessage>> {
+///
+/// `pub(crate)`：B2 成本预估器（`api/admin/pricing.rs`）复用同一解析路径，
+/// 保证预估的 token 口径与数据面请求完全一致。
+pub(crate) fn parse_messages(value: Option<&Value>) -> Option<Vec<ChatMessage>> {
     let arr = value?.as_array()?;
     let mut messages = Vec::new();
     for msg in arr {
