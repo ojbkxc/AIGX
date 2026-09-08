@@ -1,4 +1,28 @@
 
+
+## 2026-09-09 · 模型预设 Models workspace + 数据面路由隔离
+
+### 做了什么
+- 新页面 `frontend/src/pages/Models.tsx` + `.css`（`/model-presets`）：
+  open-webui 式模型目录——汇总行（模型总数/厂商数）+ 搜索（名称/厂商/能力）
+  + 卡片网格（id 复制、owned_by 徽章、上下文长度、能力 chips）。
+  数据源 `/api/models/available`（后端已含 owned_by/context_length/capabilities）。
+- `Badge` 组件增加 info tone（`.badge-info` 蓝色调）。
+- Sidebar 开发组加入「模型预设」入口；i18n zh/en 补齐 18 条词条。
+- 路由隔离修复：页面路由用 `/model-presets` 而非 `/models`，避免与数据面
+  OpenAI 兼容端点 `/models`（main.rs:1008）冲突——否则刷新/深链接会命中
+  数据面 handler 返回 `Missing API key`。
+- E2E 增加模型预设页断言（SPA 内导航 + 卡片计数），13/13 全绿。
+
+### 为什么
+- ROADMAP P1 前端体验跃升第 16 项「模型预设（Models workspace）」。
+- 管理面永远不与数据面路由重叠（架构红线）；深链接可刷新（SPA fallback
+  已验证 `/model-presets` 返回 index.html 200）。
+
+### 验证结论
+- 前端 `typecheck` / `lint` / `test`（35）/ `build` 全绿。
+- 生产验证：登录后 `/api/models/available` 返回 32 模型（owned_by/ctx/caps 完整）；
+  E2E 13/13 PASS；`/model-presets` 深链接 200 + index.html。
 ## 2026-09-09 · Settings 五分区 + 前端全量 TS 化收尾
 
 ### 做了什么
