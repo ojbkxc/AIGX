@@ -87,9 +87,11 @@ try {
     check('对话调试入口可见', false, '渠道行无对话按钮');
   }
 
-  // 6. Settings 改密表单
+  // 6. Settings 改密表单（五分区后位于「账户」Tabs）
   await page.goto(`${BASE}/settings`, { waitUntil: 'networkidle' });
   await page.screenshot({ path: 'tests/e2e/screenshots/08-settings.png' });
+  await page.getByRole('tab', { name: '账户' }).click();
+  await page.waitForTimeout(300);
   const hasPwCard = (await page.getByText('当前密码').count()) > 0 || (await page.getByText('旧密码').count()) > 0;
   check('改密表单（账户安全卡片）', hasPwCard);
 } catch (e) {
