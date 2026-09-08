@@ -32,6 +32,10 @@
 - **为什么**：AIGX 有响应缓存 + cache_price 字段，但命中省下的钱对用户不可见。
 - **形态**：仪表盘新增「缓存节省」卡片（命中次数 × cache_price 差值），与请求日志 `cache_hit` 标记联动。
 - **分期**：P1（与后端「缓存命中差异化计费」同批落地）。
+- **状态**：✅ 已落地（2026-09-08）。后端 `GET /api/dashboard/cache_savings` 聚合
+  `cache_hit` 日志返回 `hit_count` / `cache_tokens` / `billed_cost` / `saved_estimate`；
+  前端仪表盘「缓存节省」卡片展示节省估算与命中统计。`saved_estimate` 按当前定价表
+  `input_price` 估算差价，定位为运营感知而非审计账本。
 
 ### B2. 请求前成本预估器
 - **为什么**：token 估算能力已存在（`token_estimate.rs`），new-api 无此体验。
