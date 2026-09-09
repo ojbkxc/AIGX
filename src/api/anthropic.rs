@@ -414,7 +414,7 @@ pub async fn handle_messages(
         let mut stream_opt = None;
         let mut used_channel_id: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
-        for (bridge, cid) in candidates {
+        for (bridge, cid, _ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
@@ -875,7 +875,7 @@ pub async fn handle_messages(
         let mut response_opt = None;
         let mut used_channel_id: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
-        for (bridge, cid) in candidates {
+        for (bridge, cid, _ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }

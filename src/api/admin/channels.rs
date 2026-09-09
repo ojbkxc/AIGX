@@ -79,6 +79,10 @@ pub struct ChannelRequest {
     pub models: Vec<String>,
     #[serde(default)]
     pub account_id: String,
+    #[serde(default)]
+    pub model_mapping: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub cost_pricing: std::collections::HashMap<String, crate::pricing::ModelPrice>,
 }
 
 fn default_weight() -> u32 {
@@ -103,6 +107,8 @@ impl ChannelRequest {
             status: self.status.clone(),
             models: self.models.clone(),
             account_id: self.account_id.clone(),
+            model_mapping: self.model_mapping.clone(),
+            cost_pricing: self.cost_pricing.clone(),
             last_error: None,
             last_used_at: None,
             discovered_models: Vec::new(),
@@ -135,6 +141,8 @@ pub fn mask_channel(ch: &Channel) -> Value {
         "weight": ch.weight,
         "status": ch.status,
         "models": ch.models,
+        "model_mapping": ch.model_mapping,
+        "cost_pricing": ch.cost_pricing,
         "account_id": ch.account_id,
         "last_error": ch.last_error,
         "last_used_at": ch.last_used_at,
@@ -163,11 +171,22 @@ pub async fn handle_list_channels(
 /// 聚合所有启用渠道声明的模型，供 Playground 模型下拉使用。
 /// 不返回渠道明细/密钥，普通用户与管理员共用同一份可用模型清单。
 /// P1：附带元信息（owned_by/context_length/capabilities）。
+/// 按用户分组 allowed_models 白名单过滤（None/空=不限，对齐 UserGroup::allows_model）。
 pub async fn handle_available_models(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _user = verify_user(&state, &headers).await?;
+    let user = verify_user(&state, &headers).await?;
+    // 组白名单：None 与 Some(空) 均表示不限
+    let group_allow: Option<Vec<String>> = state
+        .user_group_store
+        .get(&user.group)
+        .and_then(|g| g.allowed_models);
+    let unrestricted = match &group_allow {
+        None => true,
+        Some(list) => list.is_empty(),
+    };
+    let allow_set = group_allow.unwrap_or_default();
     let mut seen = std::collections::HashSet::new();
     let models: Vec<Value> = state
         .channel_store
@@ -179,14 +198,22 @@ pub async fn handle_available_models(
                 crate::model::metadata::owned_by_for_channel_type(c.channel_type.as_str());
             c.models.into_iter().map(move |m| (m, owned_by))
         })
-        .filter(|(m, _)| !m.is_empty() && seen.insert(m.clone()))
+        .filter(|(m, _)| {
+            !m.is_empty()
+                && seen.insert(m.clone())
+                && (unrestricted || allow_set.iter().any(|a| a == m))
+        })
         .map(|(m, owned_by)| {
             let meta = state.model_metadata.get(&m, owned_by);
+            let price = state.pricing_store.get_price(&m);
             json!({
                 "id": m,
                 "owned_by": meta.owned_by,
                 "context_length": meta.context_length,
                 "capabilities": meta.capabilities,
+                "price_input": price.as_ref().map(|p| p.input_price).unwrap_or(0.0),
+                "price_output": price.as_ref().map(|p| p.output_price).unwrap_or(0.0),
+                "price_type": price.as_ref().map(|p| p.price_type.as_str()).unwrap_or("token"),
             })
         })
         .collect();

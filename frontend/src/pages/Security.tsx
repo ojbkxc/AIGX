@@ -129,6 +129,25 @@ export default function Security(): JSX.Element {
 
   const totalPages = Math.ceil(total / size);
 
+  // 严重程度 → 中文标签 + 语义色徽章（critical/high 危险、medium 警告、low/warning/info 提示、其余中性原样）
+  const severityLabel = (sv: string): string => {
+    if (sv === 'critical') return t('严重');
+    if (sv === 'high') return t('高危');
+    if (sv === 'medium') return t('中危');
+    if (sv === 'low' || sv === 'warning') return t('低危');
+    if (sv === 'info') return t('信息');
+    return sv;
+  };
+
+  const severityBadgeClass = (sv: string): string => {
+    if (sv === 'critical' || sv === 'high') return 'badge badge-danger';
+    if (sv === 'medium') return 'badge badge-warning';
+    if (sv === 'low') return 'badge badge-info';
+    if (sv === 'warning') return 'badge badge-warning';
+    if (sv === 'info') return 'badge badge-info';
+    return 'badge badge-neutral';
+  };
+
   // 概览卡片数据（容错：后端字段缺失时回退 0）
   const totalEvents = overview?.total_events ?? 0;
   const criticalEvents = overview?.critical_events ?? 0;
@@ -221,7 +240,6 @@ export default function Security(): JSX.Element {
               <tbody>
                 {events.map((ev) => {
                   const severity = ev.severity || ev.level || 'info';
-                  const isCritical = severity === 'critical' || severity === 'high';
                   return (
                     <tr key={ev.id ?? `${ev.created_at}-${ev.ip}`}>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
@@ -238,8 +256,8 @@ export default function Security(): JSX.Element {
                         {ev.detail || ev.details || ev.message || '—'}
                       </td>
                       <td>
-                        <span className={isCritical ? 'badge badge-danger' : 'badge badge-success'}>
-                          {severity}
+                        <span className={severityBadgeClass(severity)}>
+                          {severityLabel(severity)}
                         </span>
                       </td>
                     </tr>

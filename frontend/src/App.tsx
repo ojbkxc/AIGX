@@ -10,22 +10,14 @@ import Login from './pages/Login';
 import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import Keys from './pages/Keys';
-import Mappings from './pages/Mappings';
 import Users from './pages/Users';
 import Wallet from './pages/Wallet';
-import Orders from './pages/Orders';
-import Epay from './pages/Epay';
 import Settings from './pages/Settings';
 import Profile from './pages/Profile';
 import Logs from './pages/Logs';
 import Redemptions from './pages/Redemptions';
 import Channels from './pages/Channels';
-import Pricing from './pages/Pricing';
-import Groups from './pages/Groups';
-import Notify from './pages/Notify';
 import Chat from './pages/Chat';
-import Security from './pages/Security';
-import IpManagement from './pages/IpManagement';
 import NetworkLayer from './pages/NetworkLayer';
 import Models from './pages/Models';
 import Prompts from './pages/Prompts';
@@ -93,20 +85,21 @@ export default function App(): JSX.Element {
           <Route path="/accounts" element={<Navigate to="/channels" replace />} />
           <Route path="/channels" element={<AdminRoute><Channels /></AdminRoute>} />
           <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
-          <Route path="/mappings" element={<AdminRoute><Mappings /></AdminRoute>} />
-          <Route path="/pricing" element={<AdminRoute><Pricing /></AdminRoute>} />
+          {/* 已合并的旧路由 → 重定向到合并后位置 */}
+          <Route path="/mappings" element={<Navigate to="/channels" replace />} />
+          <Route path="/pricing" element={<Navigate to="/settings" replace />} />
+          <Route path="/groups" element={<Navigate to="/settings" replace />} />
+          <Route path="/orders" element={<Navigate to="/wallet" replace />} />
+          <Route path="/epay" element={<Navigate to="/settings" replace />} />
+          <Route path="/notify" element={<Navigate to="/settings" replace />} />
+          <Route path="/security" element={<Navigate to="/settings" replace />} />
+          <Route path="/ip-management" element={<Navigate to="/settings" replace />} />
           <Route path="/users" element={<AdminRoute><Users /></AdminRoute>} />
-          <Route path="/groups" element={<AdminRoute><Groups /></AdminRoute>} />
           <Route path="/wallet" element={<ProtectedLayout><Wallet /></ProtectedLayout>} />
-          <Route path="/orders" element={<AdminRoute><Orders /></AdminRoute>} />
-          <Route path="/epay" element={<AdminRoute><Epay /></AdminRoute>} />
-          <Route path="/logs" element={<AdminRoute><Logs /></AdminRoute>} />
+          <Route path="/logs" element={<ProtectedLayout><Logs /></ProtectedLayout>} />
           <Route path="/redemptions" element={<AdminRoute><Redemptions /></AdminRoute>} />
-          <Route path="/notify" element={<AdminRoute><Notify /></AdminRoute>} />
           <Route path="/playground" element={<Navigate to="/chat" replace />} />
           <Route path="/chat" element={<ProtectedLayout><Chat /></ProtectedLayout>} />
-          <Route path="/security" element={<AdminRoute><Security /></AdminRoute>} />
-          <Route path="/ip-management" element={<AdminRoute><IpManagement /></AdminRoute>} />
           <Route path="/network-layer" element={<AdminRoute><NetworkLayer /></AdminRoute>} />
           <Route path="/model-presets" element={<ProtectedLayout><Models /></ProtectedLayout>} />
           <Route path="/prompts" element={<ProtectedLayout><Prompts /></ProtectedLayout>} />

@@ -36,18 +36,28 @@ pub struct RequestLog {
     /// 渠道 ID（若使用通用渠道）
     #[serde(default)]
     pub channel_id: Option<String>,
-    /// 模型名
+    /// 渠道名（admin 排查用，用户不展示）
+    #[serde(default)]
+    pub channel_name: Option<String>,
+    /// 模型名 — 映射后的上游真实名（= 价格表里的名），用户看这个
     #[serde(default)]
     pub model: String,
+    /// 用户原始请求名（admin 排查用，用户不展示）。无映射时与 model 相同。
+    #[serde(default)]
+    pub origin_model: Option<String>,
     /// 输入 token 数
     #[serde(default)]
     pub input_tokens: u64,
     /// 输出 token 数
     #[serde(default)]
     pub output_tokens: u64,
-    /// 本次请求费用（配额单位）
+    /// 本次请求费用（配额单位，向用户收的销售价）
     #[serde(default)]
     pub cost: i64,
+    /// 渠道成本（配额单位）。未配成本价时 = cost，利润显示 "—"；
+    /// 配了成本价时 = 按 cost_pricing 算出的成本，利润 = cost - channel_cost。
+    #[serde(default)]
+    pub channel_cost: i64,
     /// 延迟（毫秒）
     #[serde(default)]
     pub latency_ms: u64,
@@ -99,10 +109,13 @@ impl RequestLog {
             user_id: None,
             key_id: None,
             channel_id: None,
+            channel_name: None,
             model: String::new(),
+            origin_model: None,
             input_tokens: 0,
             output_tokens: 0,
             cost: 0,
+            channel_cost: 0,
             latency_ms: 0,
             status_code: 200,
             error_msg: None,
@@ -332,25 +345,70 @@ impl RequestLogStore {
         serde_json::to_string_pretty(&all).unwrap_or_else(|_| "[]".to_string())
     }
 
+    /// 导出按 user_id 过滤后的 JSON（普通用户导出自己的记录）
+    pub fn export_json_for_user(&self, user_id: &str) -> String {
+        let all = self.list_all();
+        let filtered: Vec<&RequestLog> = all
+            .iter()
+            .filter(|l| l.user_id.as_deref() == Some(user_id))
+            .collect();
+        serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| "[]".to_string())
+    }
+
     /// 导出为 CSV 字符串
     pub fn export_csv(&self) -> String {
         let all = self.list_all();
         let mut buf = String::from(
-            "id,created_at,user_id,key_id,channel_id,model,input_tokens,output_tokens,cost,latency_ms,status_code,error_msg,ip\n",
+            "id,created_at,user_id,key_id,channel_id,channel_name,model,origin_model,input_tokens,output_tokens,cost,channel_cost,latency_ms,status_code,error_msg,ip\n",
         );
         for l in &all {
-            // 对所有字符串字段应用标准 CSV 转义；数值字段无需转义。
             buf.push_str(&format!(
-                "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 csv_escape(&l.id),
                 csv_escape(&l.created_at.to_string()),
                 csv_escape(l.user_id.as_deref().unwrap_or("")),
                 csv_escape(l.key_id.as_deref().unwrap_or("")),
                 csv_escape(l.channel_id.as_deref().unwrap_or("")),
+                csv_escape(l.channel_name.as_deref().unwrap_or("")),
                 csv_escape(&l.model),
+                csv_escape(l.origin_model.as_deref().unwrap_or("")),
                 l.input_tokens,
                 l.output_tokens,
                 l.cost,
+                l.channel_cost,
+                l.latency_ms,
+                l.status_code,
+                csv_escape(l.error_msg.as_deref().unwrap_or("")),
+                csv_escape(l.ip.as_deref().unwrap_or("")),
+            ));
+        }
+        buf
+    }
+
+    /// 导出按 user_id 过滤后的 CSV（普通用户导出自己的记录）
+    pub fn export_csv_for_user(&self, user_id: &str) -> String {
+        let all = self.list_all();
+        let mut buf = String::from(
+            "id,created_at,user_id,key_id,channel_id,channel_name,model,origin_model,input_tokens,output_tokens,cost,channel_cost,latency_ms,status_code,error_msg,ip\n",
+        );
+        for l in &all {
+            if l.user_id.as_deref() != Some(user_id) {
+                continue;
+            }
+            buf.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                csv_escape(&l.id),
+                csv_escape(&l.created_at.to_string()),
+                csv_escape(l.user_id.as_deref().unwrap_or("")),
+                csv_escape(l.key_id.as_deref().unwrap_or("")),
+                csv_escape(l.channel_id.as_deref().unwrap_or("")),
+                csv_escape(l.channel_name.as_deref().unwrap_or("")),
+                csv_escape(&l.model),
+                csv_escape(l.origin_model.as_deref().unwrap_or("")),
+                l.input_tokens,
+                l.output_tokens,
+                l.cost,
+                l.channel_cost,
                 l.latency_ms,
                 l.status_code,
                 csv_escape(l.error_msg.as_deref().unwrap_or("")),

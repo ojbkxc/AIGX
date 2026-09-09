@@ -131,8 +131,8 @@ export default function Orders(): JSX.Element {
                         {o.trade_no || o.id || '—'}
                       </code>
                     </td>
-                    <td style={{ fontSize: 12 }}>{o.user_id ? o.user_id.slice(0, 8) + '…' : '—'}</td>
-                    <td>¥{Number(o.money ?? o.amount ?? 0).toFixed(2)}</td>
+                    <td style={{ fontSize: 12 }}>{o.user_id ? String(o.user_id).slice(0, 8) + '…' : '—'}</td>
+                    <td>¥{Number(o.money ?? o.amount ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                     <td>{fmtQuota(o.quota != null ? o.quota : (o.amount ?? 0) * (epay?.price || 1))}</td>
                     <td>{o.payment_method || o.method || '—'}</td>
                     <td>

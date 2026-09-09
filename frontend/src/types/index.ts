@@ -309,6 +309,8 @@ export interface ChannelItem {
   weight?: number;
   max_concurrent?: number;
   api_key?: string;
+  model_mapping?: Record<string, string>;
+  cost_pricing?: Record<string, { input_price?: number; output_price?: number; price_type?: string }>;
   created_at?: string | number;
   updated_at?: string;
   last_used_at?: number | null;

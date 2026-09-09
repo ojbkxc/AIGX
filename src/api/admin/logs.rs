@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::super::openai::AppState;
-use super::common::{default_page, default_size, error_response, verify_admin};
+use super::common::{default_page, default_size, error_response, verify_admin, verify_user};
 
 // 这里我们实际上需要引用主 crate 的 log_store
 // 由于子模块内 super 跳到了 api::admin，需要主级引用
@@ -55,17 +55,31 @@ pub struct ExportQuery {
     pub format: Option<String>,
 }
 
-/// 列出请求日志
+/// 列出请求日志（全员可见：管理员看全部，普通用户只看自己的）
+///
+/// 普通用户自动按 `user_id` 过滤，忽略 URL 中的 `user` 参数（安全）。
+/// 管理员保持原行为，可按任意 user/model/channel 筛选。
 pub async fn handle_list_request_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<RequestLogQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
+    // 尝试管理员验证；失败则回退到普通用户
+    let admin = verify_admin(&state, &headers).await.is_ok();
+    // 普通用户可能拥有的 email 所有权，需在函数生命周期内保留
+    let user_email: Option<String>;
+    let (filter_user, filter_channel) = if admin {
+        (q.user.as_deref(), q.channel.as_deref())
+    } else {
+        // 普通用户：必须登录，且只能看自己的
+        let user = verify_user(&state, &headers).await?;
+        user_email = Some(user.email);
+        (user_email.as_deref(), None)
+    };
     let (logs, total) = state.log_store.requests.list_with_filter(
-        q.user.as_deref(),
+        filter_user,
         q.model.as_deref(),
-        q.channel.as_deref(),
+        filter_channel,
         q.start,
         q.end,
         q.page,
@@ -80,7 +94,7 @@ pub async fn handle_list_request_logs(
     })))
 }
 
-/// 列出审计日志
+/// 列出审计日志（仅管理员，审计日志保持 admin only）
 pub async fn handle_list_audit_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -97,20 +111,32 @@ pub async fn handle_list_audit_logs(
     })))
 }
 
-/// 导出请求日志
+/// 导出请求日志（全员可见：管理员导出全部，普通用户导出自己的）
+///
+/// 权限与 `handle_list_request_logs` 对齐：管理员看全部，普通用户按 user_id 过滤。
 pub async fn handle_export_request_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<ExportQuery>,
 ) -> Response {
-    if verify_admin(&state, &headers).await.is_err() {
-        return error_response("Not authenticated", StatusCode::UNAUTHORIZED).into_response();
-    }
+    // 尝试管理员验证；失败则要求普通用户登录并按 user_id 过滤
+    let admin = verify_admin(&state, &headers).await.is_ok();
+    let user_email: Option<String> = if admin {
+        None
+    } else {
+        match verify_user(&state, &headers).await {
+            Ok(u) => Some(u.email),
+            Err(e) => return e.into_response(),
+        }
+    };
     let fmt = q.format.as_deref().unwrap_or("json").to_lowercase();
 
     let result = match fmt.as_str() {
         "csv" => {
-            let csv = state.log_store.requests.export_csv();
+            let csv = match &user_email {
+                Some(email) => state.log_store.requests.export_csv_for_user(email),
+                None => state.log_store.requests.export_csv(),
+            };
             (
                 StatusCode::OK,
                 [
@@ -127,7 +153,10 @@ pub async fn handle_export_request_logs(
             )
         }
         "json" => {
-            let json = state.log_store.requests.export_json();
+            let json = match &user_email {
+                Some(email) => state.log_store.requests.export_json_for_user(email),
+                None => state.log_store.requests.export_json(),
+            };
             (
                 StatusCode::OK,
                 [

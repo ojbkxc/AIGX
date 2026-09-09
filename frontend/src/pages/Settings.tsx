@@ -1,5 +1,4 @@
 import { useState, useEffect, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Monitor, Sun, Moon } from 'lucide-react';
 import { api } from '../api';
@@ -7,6 +6,12 @@ import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Tabs } from '../components/ui';
 import { getThemeMode, applyTheme, type ThemeMode } from '../lib/theme';
+import Pricing from './Pricing';
+import Epay from './Epay';
+import Groups from './Groups';
+import Notify from './Notify';
+import Security from './Security';
+import IpManagement from './IpManagement';
 import './Settings.css';
 
 interface LimitsForm {
@@ -49,7 +54,7 @@ interface DataResponse<T> {
   data?: T;
 }
 
-type SettingsTab = 'general' | 'appearance' | 'notifications' | 'account' | 'usage';
+type SettingsTab = 'site' | 'billing' | 'ops' | 'security' | 'account';
 
 // 格式化字节数为人类可读单位
 function fmtBytes(bytes: number | null | undefined): string {
@@ -99,8 +104,9 @@ export default function Settings() {
   const addToast = useToast();
   const { t } = useTranslation();
 
-  // 当前激活的配置分区（open-webui 式 Settings 信息架构）
-  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+  // 当前激活的配置分区：四 tab 信息架构对齐 new-api System Settings
+  // 站点（原通用+界面）/ 计费（定价+易支付+用户分组）/ 运维（通知+限流+缓存+价格同步）/ 安全（安全监控+IP管理）
+  const [activeTab, setActiveTab] = useState<SettingsTab>('site');
 
   // 界面分区：主题三态（system/light/dark），与登录页/侧边栏切换共享同一份持久化
   const [theme, setTheme] = useState<ThemeMode>(() => getThemeMode());
@@ -330,6 +336,19 @@ export default function Settings() {
   };
 
   const handleSave = async () => {
+    // NaN 兜底：任一数值字段填入非数字内容时直接报错，不提交
+    const numericFields = [
+      limits.daily_limit,
+      limits.monthly_limit,
+      limits.threshold,
+      limits.api_timeout_secs,
+      limits.max_retries,
+    ];
+    if (numericFields.some((v) => v !== '' && Number.isNaN(Number(v)))) {
+      setError(t('请输入有效数字'));
+      return;
+    }
+
     const payload: Record<string, number> = {};
     if (limits.daily_limit !== '') payload.daily_limit = Number(limits.daily_limit);
     if (limits.monthly_limit !== '') payload.monthly_limit = Number(limits.monthly_limit);
@@ -337,7 +356,8 @@ export default function Settings() {
     if (limits.api_timeout_secs !== '') payload.api_timeout_secs = Number(limits.api_timeout_secs);
     if (limits.max_retries !== '') payload.max_retries = Number(limits.max_retries);
 
-    if (payload.daily_limit < 0 || payload.monthly_limit < 0 || (payload.threshold != null && (payload.threshold < 0 || payload.threshold > 1))) {
+    // 阈值按原始输入（0-100 百分比）校验；payload.threshold 已除 100，不再用于范围比较
+    if (payload.daily_limit < 0 || payload.monthly_limit < 0 || (limits.threshold !== '' && (Number(limits.threshold) < 0 || Number(limits.threshold) > 100))) {
       setError(t('请输入有效值。日/月限额必须 >= 0。阈值必须在 0-100 之间。'));
       return;
     }
@@ -375,11 +395,11 @@ export default function Settings() {
 
       <Tabs<SettingsTab>
         items={[
-          { key: 'general', label: t('通用') },
-          { key: 'appearance', label: t('界面') },
-          { key: 'notifications', label: t('通知') },
+          { key: 'site', label: t('站点') },
+          { key: 'billing', label: t('计费') },
+          { key: 'ops', label: t('运维') },
+          { key: 'security', label: t('安全') },
           { key: 'account', label: t('账户') },
-          { key: 'usage', label: t('用量') },
         ]}
         active={activeTab}
         onChange={setActiveTab}
@@ -387,9 +407,9 @@ export default function Settings() {
         className="settings-tabs"
       />
 
-      {activeTab === 'general' && (
+      {activeTab === 'site' && (
         <>
-          {/* 使用限额（含告警阈值）与 API 策略合并为「通用」区，与 open-webui General 分区对齐 */}
+          {/* 站点 = 原通用 + 界面：使用限额 + API 策略 + 主题 */}
           <div className="card">
             <div className="card-header">
               <h2>{t('使用限额')}</h2>
@@ -440,91 +460,52 @@ export default function Settings() {
               </div>
             </div>
           </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-header">
+              <h2>{t('主题')}</h2>
+              <p className="card-subtitle">{t('settingsThemeSubtitle')}</p>
+            </div>
+            <div className="card-body">
+              <div className="theme-options" role="radiogroup" aria-label={t('主题')}>
+                {THEME_OPTIONS.map((opt) => {
+                  const Icon = opt.icon;
+                  const active = theme === opt.mode;
+                  return (
+                    <button
+                      key={opt.mode}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      className={`theme-option ${active ? 'active' : ''}`}
+                      onClick={() => selectTheme(opt.mode)}
+                    >
+                      <Icon size={18} className="theme-option-icon" />
+                      <span className="theme-option-label">{t(opt.labelKey)}</span>
+                      <span className="theme-option-hint">{t(opt.hintKey)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         </>
       )}
 
-      {activeTab === 'appearance' && (
-        <div className="card">
-          <div className="card-header">
-            <h2>{t('主题')}</h2>
-            <p className="card-subtitle">{t('settingsThemeSubtitle')}</p>
-          </div>
-          <div className="card-body">
-            <div className="theme-options" role="radiogroup" aria-label={t('主题')}>
-              {THEME_OPTIONS.map((opt) => {
-                const Icon = opt.icon;
-                const active = theme === opt.mode;
-                return (
-                  <button
-                    key={opt.mode}
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    className={`theme-option ${active ? 'active' : ''}`}
-                    onClick={() => selectTheme(opt.mode)}
-                  >
-                    <Icon size={18} className="theme-option-icon" />
-                    <span className="theme-option-label">{t(opt.labelKey)}</span>
-                    <span className="theme-option-hint">{t(opt.hintKey)}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {activeTab === 'notifications' && (
-        <div className="card">
-          <div className="card-header">
-            <h2>{t('通知设置')}</h2>
-          </div>
-          <div className="card-body">
-            <div className="settings-link-panel">
-              <p>{t('settingsNotifyHint')}</p>
-              <Link className="btn btn-outline" to="/notify">{t('打开通知设置')}</Link>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {activeTab === 'account' && (
-        <div className="card">
-          <div className="card-header">
-            <h2>{t('账户安全')}</h2>
-          </div>
-          <div className="card-body">
-            <form className="settings-form" onSubmit={(e) => void handleChangePassword(e)}>
-              <div className="form-group">
-                <label>{t('当前密码')}</label>
-                <input className="form-input" type="password" value={oldPw}
-                  onChange={(e) => setOldPw(e.target.value)} autoComplete="current-password" />
-              </div>
-              <div className="form-group">
-                <label>{t('新密码')}</label>
-                <input className="form-input" type="password" value={newPw}
-                  onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
-                <span className="form-hint">{t('至少 6 位，建议混合字母与数字')}</span>
-              </div>
-              <div className="form-group">
-                <label>{t('确认新密码')}</label>
-                <input className="form-input" type="password" value={confirmPw}
-                  onChange={(e) => setConfirmPw(e.target.value)} autoComplete="new-password" />
-              </div>
-              {pwError && <div className="error-message">{pwError}</div>}
-              <div className="settings-actions">
-                <button type="submit" className="btn btn-primary" disabled={pwSaving}>
-                  {pwSaving ? t('修改中...') : t('修改密码')}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {activeTab === 'usage' && (
+      {activeTab === 'billing' && (
         <>
-          <div className="card">
+          {/* 计费 = 定价倍率 + 易支付 + 用户分组 */}
+          <Pricing />
+          <div style={{ marginTop: 16 }}><Epay /></div>
+          <div style={{ marginTop: 16 }}><Groups /></div>
+        </>
+      )}
+
+      {activeTab === 'ops' && (
+        <>
+          {/* 运维 = 通知设置 + 限流配置 + 缓存管理 + 价格同步 + 汇率 */}
+          <Notify />
+          <div className="card" style={{ marginTop: 16 }}>
             <div className="card-header">
               <h2>{t('限流配置')}</h2>
             </div>
@@ -725,6 +706,48 @@ export default function Settings() {
             </div>
           </div>
         </>
+      )}
+
+      {activeTab === 'security' && (
+        <>
+          {/* 安全 = 安全监控 + IP 管理 */}
+          <Security />
+          <div style={{ marginTop: 16 }}><IpManagement /></div>
+        </>
+      )}
+
+      {activeTab === 'account' && (
+        <div className="card">
+          <div className="card-header">
+            <h2>{t('账户安全')}</h2>
+          </div>
+          <div className="card-body">
+            <form className="settings-form" onSubmit={(e) => void handleChangePassword(e)}>
+              <div className="form-group">
+                <label>{t('当前密码')}</label>
+                <input className="form-input" type="password" value={oldPw}
+                  onChange={(e) => setOldPw(e.target.value)} autoComplete="current-password" />
+              </div>
+              <div className="form-group">
+                <label>{t('新密码')}</label>
+                <input className="form-input" type="password" value={newPw}
+                  onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
+                <span className="form-hint">{t('至少 6 位，建议混合字母与数字')}</span>
+              </div>
+              <div className="form-group">
+                <label>{t('确认新密码')}</label>
+                <input className="form-input" type="password" value={confirmPw}
+                  onChange={(e) => setConfirmPw(e.target.value)} autoComplete="new-password" />
+              </div>
+              {pwError && <div className="error-message">{pwError}</div>}
+              <div className="settings-actions">
+                <button type="submit" className="btn btn-primary" disabled={pwSaving}>
+                  {pwSaving ? t('修改中...') : t('修改密码')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />

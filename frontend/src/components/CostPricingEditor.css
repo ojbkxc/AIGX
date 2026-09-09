@@ -1,0 +1,59 @@
+/* CostPricingEditor — 渠道成本价编辑器（按映射目标逐行） */
+
+.cpe-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cpe-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  align-items: center;
+}
+
+.cpe-row-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding-bottom: 2px;
+}
+
+.cpe-row input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--card-bg, #fff);
+  color: var(--text-main);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.cpe-row input:focus {
+  border-color: var(--accent-color, #2f6fed);
+}
+
+.cpe-row input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cpe-model-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cpe-empty {
+  padding: 14px;
+  text-align: center;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}

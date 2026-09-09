@@ -104,6 +104,20 @@
   box-sizing: border-box;
 }
 
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 :root {
   /* 设计令牌对齐 open-webui：中性灰度色板 + 现代圆角设计 */
   --bg-color: #ffffff;
@@ -148,6 +162,10 @@
   --control-pad-x: 16px;
   --line-strong: #d4d4d4;
   --shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  --hover-bg: rgba(0, 0, 0, 0.04);
+  --surface-bg: #fafafa;
+  --danger-soft: rgba(239, 68, 68, 0.1);
+  --danger: #ef4444;
 }
 
 :root[data-theme="dark"] {
@@ -177,6 +195,10 @@
   --code-color: #e5e5e5;
   --code-border: #3f3f3f;
   --line-strong: #525252;
+  --hover-bg: rgba(255, 255, 255, 0.08);
+  --surface-bg: #1f1f1f;
+  --danger-soft: rgba(239, 68, 68, 0.18);
+  --danger: #ef4444;
 }
 
 body {
@@ -1107,7 +1129,96 @@ code {
   }
 }
 
-/* ── 全局侧边栏展开/收缩（Open WebUI 窄图标栏形态）────────────── */
+/* ── 全局侧边栏（new-api 信息架构 + Open WebUI 控件审美）──────────────
+ * 单一收缩开关位于头部；分组固定平铺（无折叠按钮）；
+ * 收缩态整栏仅剩图标 + tooltip；样式全部收敛于此，杜绝内联。 */
+.sidebar-aside {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  width: var(--sidebar-width);
+  padding: 14px 10px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border-color);
+  overflow: hidden;
+  transition: width 0.25s cubic-bezier(0.22, 1, 0.36, 1), padding 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 收缩态：窄图标栏，内容居中 */
+.sidebar-aside-collapsed {
+  width: var(--sidebar-width-collapsed);
+  padding: 14px 6px;
+}
+
+/* 移动端抽屉形态：相对定位充满抽屉，恒为展开宽度 */
+.sidebar-aside-drawer {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-right: none;
+}
+
+/* 头部：logo + 品牌 + 唯一收缩开关 */
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 26px;
+  margin-bottom: 14px;
+  padding-left: 6px;
+}
+
+.sidebar-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  border-radius: 7px;
+  background: var(--accent-color);
+  color: #fff;
+}
+
+.sidebar-head-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  transition: opacity 0.15s ease;
+}
+
+.sidebar-title {
+  font-size: 14px;
+  font-weight: 700;
+  font-family: 'Inter', sans-serif;
+  letter-spacing: -0.5px;
+  color: var(--text-main);
+}
+
+.sidebar-subtitle {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+/* 收缩态：品牌文字隐藏，开关移到 logo 下方（窄栏居中列布局） */
+.sidebar-aside-collapsed .sidebar-head {
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 0;
+}
+
+.sidebar-aside-collapsed .sidebar-head-text {
+  display: none;
+}
+
+/* 收缩开关（全侧栏唯一的展开/收起按钮） */
 .sidebar-collapse-btn {
   flex-shrink: 0;
   display: inline-flex;
@@ -1128,55 +1239,238 @@ code {
   color: var(--text-main);
 }
 
-/* 收缩态图标按钮（导航项 / 底部操作） */
-.sidebar-icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  flex-shrink: 0;
-  border: none;
-  border-radius: 10px;
-  background: transparent;
+/* 导航：固定分组平铺 */
+.sidebar-nav {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.sidebar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+}
+
+/* 分组标签：小号 muted 文字，不可点击 */
+.sidebar-group-label {
+  padding: 4px 10px 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--text-muted);
-  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 收缩态：分组标签退化为分隔细线 */
+.sidebar-aside-collapsed .sidebar-group-label {
+  height: 1px;
+  padding: 0;
+  margin: 4px 6px;
+  background: var(--border-color);
+  text-indent: -9999px;
+}
+
+/* 收缩态：分组图标退化为居中小圆点分隔 */
+.sidebar-aside-collapsed .sidebar-group-collapsed {
+  align-items: center;
+}
+
+.sidebar-aside-collapsed .sidebar-group-dot {
+  width: 4px;
+  height: 4px;
+  margin: 4px 0;
+  border-radius: 9999px;
+  background: var(--text-muted);
+  opacity: 0.55;
+}
+
+/* 菜单项（展开/收缩共用一套，收缩态只藏文字） */
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px 6px 12px;
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
   text-decoration: none;
+  white-space: nowrap;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
-.sidebar-icon-btn:hover {
+.nav-item:hover {
   background: var(--sidebar-menu-hover);
   color: var(--text-main);
 }
 
-.sidebar-icon-btn.active {
-  background: rgba(47, 111, 237, 0.12);
+.nav-item.active {
   color: var(--text-main);
+  background: rgba(47, 111, 237, 0.12);
+  box-shadow: inset 2px 0 0 var(--accent-color);
 }
 
-.sidebar-icon-danger:hover {
-  background: rgba(220, 38, 38, 0.12);
-  color: #dc2626;
+.nav-item svg {
+  flex-shrink: 0;
 }
 
-/* 收缩态分组图标：置顶展示组类别 */
-.sidebar-group-icon {
-  display: inline-flex;
+.sidebar-aside-collapsed .nav-item {
+  justify-content: center;
+  padding: 6px 0;
+}
+
+/* 收缩态：隐藏菜单文字（仅剩图标，路径名走 title tooltip） */
+.sidebar-aside-collapsed .nav-item span {
+  display: none;
+}
+
+/* 底部：用户区 + 收进菜单的主题/语言/退出 */
+.sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.sidebar-user {
+  position: relative;
+}
+
+.sidebar-user-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.sidebar-user-btn:hover {
+  background: var(--sidebar-menu-hover);
+}
+
+.sidebar-avatar {
+  display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 26px;
-  color: var(--text-muted);
-  margin: 2px 0;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  border-radius: 50%;
+  background: var(--accent-color);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
 }
 
-.sidebar-group-dot {
-  width: 4px;
-  height: 4px;
-  border-radius: 9999px;
-  background: var(--text-muted);
-  opacity: 0.6;
+.sidebar-user-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+}
+
+.sidebar-user-email {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-user-name {
+  font-size: 10px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-user-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.sidebar-aside-collapsed .sidebar-user-btn {
+  justify-content: center;
+  padding: 6px 0;
+}
+
+/* 收缩态：仅展示头像，邮箱/用户名/箭头全部隐藏（弹层仍可用） */
+.sidebar-aside-collapsed .sidebar-user-info,
+.sidebar-aside-collapsed .sidebar-user-chevron {
+  display: none;
+}
+
+/* 用户菜单弹层（点击头像唤起） */
+.sidebar-user-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 200;
+  min-width: 150px;
+  padding: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-aside-collapsed .sidebar-user-menu {
+  left: calc(100% + 8px);
+  bottom: 0;
+}
+
+.sidebar-user-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.sidebar-user-menu button:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.sidebar-user-menu-danger {
+  color: var(--danger, #dc2626);
+}
+
+.sidebar-user-menu-danger:hover {
+  background: var(--danger-soft, rgba(220, 38, 38, 0.1));
+}
+
+.sidebar-user-menu-hint {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 

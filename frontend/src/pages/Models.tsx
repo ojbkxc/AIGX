@@ -26,6 +26,30 @@ function fmtContextLength(n: number | null | undefined): string {
   return String(n);
 }
 
+function fmtPrice(p: number | null | undefined): string {
+  if (p == null || p === 0) return '—';
+  if (p < 0.01) return p.toFixed(4);
+  if (p < 1) return p.toFixed(3);
+  return p.toFixed(2);
+}
+
+function renderPrice(m: ModelInfo, t: (k: string) => string): JSX.Element {
+  const input = m.price_input as number | undefined;
+  const output = m.price_output as number | undefined;
+  const type = (m.price_type as string | undefined) || 'token';
+  if ((input == null || input === 0) && (output == null || output === 0)) {
+    return <span className="model-price-empty">{t('未定价')}</span>;
+  }
+  if (type === 'count') {
+    return <span className="model-price">{t('¥/次')} {fmtPrice(input)}</span>;
+  }
+  return (
+    <span className="model-price">
+      {t('输入')} {fmtPrice(input)} / {t('输出')} {fmtPrice(output)}
+    </span>
+  );
+}
+
 export default function Models(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
@@ -154,11 +178,34 @@ export default function Models(): JSX.Element {
     return set;
   }, [models]);
 
-  const handleCopy = async (id: string) => {
-    try {
-      await navigator.clipboard.writeText(id);
+  // 复制模型 ID：HTTP 部署下 navigator.clipboard 不可用，参照 Keys.tsx 降级 execCommand
+  const handleCopy = (id: string) => {
+    const fallbackCopy = (): boolean => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = id;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch {
+        return false;
+      }
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(id).then(() => {
+        addToast(t('已复制到剪贴板'));
+      }).catch(() => {
+        if (!fallbackCopy()) addToast(t('复制失败，请手动选择复制'), 'error');
+        else addToast(t('已复制到剪贴板'));
+      });
+    } else if (fallbackCopy()) {
       addToast(t('已复制到剪贴板'));
-    } catch {
+    } else {
       addToast(t('复制失败，请手动选择复制'), 'error');
     }
   };
@@ -167,7 +214,7 @@ export default function Models(): JSX.Element {
     <div>
       <div className="page-header">
         <div>
-          <h1>{t('模型预设')}</h1>
+          <h1>{t('模型与价格')}</h1>
           <p>{t('网关聚合的可用模型目录（来自启用渠道的 models 声明）')}</p>
         </div>
         <button className="btn btn-outline btn-sm" onClick={() => void load()} disabled={loading} style={{ gap: 6 }}>
@@ -226,7 +273,7 @@ export default function Models(): JSX.Element {
                   <button
                     type="button"
                     className="btn btn-outline btn-sm model-copy-btn"
-                    onClick={() => void handleCopy(m.id)}
+                    onClick={() => handleCopy(m.id)}
                     title={t('复制模型 ID')}
                     aria-label={t('复制模型 ID')}
                   >
@@ -236,6 +283,9 @@ export default function Models(): JSX.Element {
                 <div className="model-card-meta">
                   {m.owned_by && <Badge tone="neutral">{m.owned_by}</Badge>}
                   <span className="model-card-context">{t('上下文')} {fmtContextLength(m.context_length)}</span>
+                </div>
+                <div className="model-card-price">
+                  {renderPrice(m, t)}
                 </div>
                 {(m.capabilities && m.capabilities.length > 0) && (
                   <div className="model-card-caps">

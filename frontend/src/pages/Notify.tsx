@@ -623,7 +623,7 @@ export default function Notify() {
                     <span className={`badge ${a.level === 'critical' ? 'badge-danger' : a.level === 'warning' ? 'badge-warning' : 'badge-neutral'}`}>
                       {a.level === 'critical' ? t('严重') : a.level === 'warning' ? t('警告') : t('提示')}
                     </span>
-                    <span>{a.message}</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.message}>{a.message}</span>
                     <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>×{a.trigger_count}</span>
                   </div>
                 ))}

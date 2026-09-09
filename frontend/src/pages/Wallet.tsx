@@ -337,7 +337,7 @@ export default function Wallet(): JSX.Element {
                 {orders.map((o) => (
                   <tr key={o.trade_no}>
                     <td><code className="key-value" style={{ maxWidth: 240 }}>{o.trade_no}</code></td>
-                    <td>¥{Number(o.money || 0).toFixed(2)}</td>
+                    <td>¥{Number(o.money || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                     <td>{fmtQuota(o.quota != null ? o.quota : (o.amount || 0) * (epay?.price || 1))}</td>
                     <td>{o.payment_method}</td>
                     <td>

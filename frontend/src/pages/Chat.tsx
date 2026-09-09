@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { MessageSquare, Plus, Trash2, PanelLeftClose, PanelLeftOpen, Pin, MoreHorizontal, Search, TerminalSquare, Image as ImageIcon, Pencil } from 'lucide-react';
+import {
+  MessageSquare, Plus, Trash2, PanelLeftClose, PanelLeftOpen, Pin,
+  MoreHorizontal, Search, TerminalSquare, Image as ImageIcon, Pencil,
+  SlidersHorizontal,
+} from 'lucide-react';
 import ChatDebugger, { type DebugMessage } from '../components/ChatDebugger';
+import ModelPicker from '../components/ModelPicker';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import Tabs from '../components/ui/Tabs';
 import { api } from '../api';
 import type { PlaygroundRawResult } from '../types';
@@ -93,12 +99,12 @@ function loadSuggestionPrompts(): Array<{ title: string; sub: string; content: s
 type ChatMode = 'chat' | 'completions' | 'images';
 
 /**
- * Chat — 聊天工作区（Playground 合并版，方案 A）。
+ * Chat — 聊天工作区（Playground 合并版）。
  *
- * 左侧会话栏（搜索/新建/置顶/重命名/删除，localStorage 持久化），
- * 右侧主区三模式：聊天（ChatDebugger 真流式 + Lxchat 式输入区）/
- * Completions / Images（纯调试，无会话）。
- * 审美参照 open-webui：窄边栏 + 居中对话流。
+ * 布局参照 new-api 的侧栏+主区结构，控件审美参照 open-webui：
+ * - 左侧会话栏：新会话 + 模式 Tabs（对话/补全/图片）+ 搜索 + 会话列表。
+ * - 顶栏：侧栏开关 + 全局模型 pill（按当前用户分组权限过滤）+ 新会话。
+ * - 三模式共享同一个全局模型选择。
  */
 export default function Chat(): JSX.Element {
   const { t } = useTranslation();
@@ -116,6 +122,15 @@ export default function Chat(): JSX.Element {
   // 重命名：正在重命名的会话 id 与草稿
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  // 删除确认弹窗
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  // 会话菜单弹层：fixed 定位坐标（点击 ⋯ 时按按钮 rect 计算）
+  const [menuPos, setMenuPos] = useState<{ left: number; top: number } | null>(null);
+  // 全局模型（三模式共享；下拉由 ModelPicker 按用户分组白名单过滤）
+  const [model, setModel] = useState('');
+  // Completions 参数预设与 Images 输出数（顶栏面板内联，避免参数区过载）
+  const [compPreset, setCompPreset] = useState<'balanced' | 'precise' | 'creative'>('balanced');
+  const [imgCount, setImgCount] = useState(1);
 
   const active = useMemo(
     () => sessions.find((s) => s.id === activeId) ?? sessions[0],
@@ -166,9 +181,20 @@ export default function Chat(): JSX.Element {
     setMode('chat');
   };
 
-  const handleDelete = (id: string): void => {
+  const openDeleteConfirm = (id: string): void => {
     const target = sessions.find((s) => s.id === id);
-    if (target && target.messages.length && !window.confirm(t('确定删除该会话？'))) return;
+    const title = target?.title || t('新会话');
+    setMenuId(null);
+    setConfirmState({
+      title: t('删除会话'),
+      message: <>{t('确定删除该会话？')}「{title}」</>,
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: () => deleteSession(id),
+    });
+  };
+
+  const deleteSession = (id: string): void => {
     const next = sessions.filter((s) => s.id !== id);
     if (!next.length) next.push(newSession(Date.now()));
     persist(sortSessions(next));
@@ -212,18 +238,24 @@ export default function Chat(): JSX.Element {
     <div className={`chat-shell ${sidebarOpen ? 'chat-shell-sidebar-open' : 'chat-shell-sidebar-closed'}`}>
       <aside className="chat-sidebar">
         <div className="chat-sidebar-head">
-          <button
-            type="button"
-            className="btn btn-outline btn-sm chat-sidebar-close"
-            title={t('收起会话列表')}
-            onClick={() => setSidebarOpen(false)}
-          >
-            <PanelLeftClose size={14} />
-          </button>
           <button type="button" className="btn btn-primary btn-sm chat-new-btn" onClick={handleNew}>
             <Plus size={14} />
             {t('新会话')}
           </button>
+        </div>
+
+        {/* 模式切换（对话/补全/图片）：放左侧会话栏，与全局模型 pill 解耦 */}
+        <div className="chat-sidebar-modes">
+          <Tabs<ChatMode>
+            items={[
+              { key: 'chat', label: <><MessageSquare size={14} /> {t('对话')}</> },
+              { key: 'completions', label: <><TerminalSquare size={14} /> {t('补全')}</> },
+              { key: 'images', label: <><ImageIcon size={14} /> {t('图片')}</> },
+            ]}
+            active={mode}
+            onChange={setMode}
+            ariaLabel={t('聊天模式')}
+          />
         </div>
 
         {/* 会话搜索（Lxchat 抽屉同款） */}
@@ -276,19 +308,30 @@ export default function Chat(): JSX.Element {
                     type="button"
                     className="chat-session-more"
                     title={t('更多操作')}
-                    onClick={() => setMenuId(menuId === s.id ? null : s.id)}
+                    onClick={(e) => {
+                      if (menuId === s.id) { setMenuId(null); return; }
+                      const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+                      const MENU_W = 130;
+                      const MENU_H = 110;
+                      const left = Math.max(8, rect.right - MENU_W);
+                      const top = rect.bottom + 4 + MENU_H > window.innerHeight
+                        ? rect.top - MENU_H - 4
+                        : rect.bottom + 4;
+                      setMenuPos({ left, top });
+                      setMenuId(s.id);
+                    }}
                   >
                     <MoreHorizontal size={13} />
                   </button>
-                  {menuId === s.id && (
-                    <div className="chat-session-menu">
+                  {menuId === s.id && menuPos && (
+                    <div className="chat-session-menu" style={{ position: 'fixed', left: menuPos.left, top: menuPos.top }}>
                       <button type="button" onClick={() => handleTogglePin(s.id)}>
                         <Pin size={13} /> {s.pinned ? t('取消置顶') : t('置顶')}
                       </button>
                       <button type="button" onClick={() => beginRename(s.id)}>
                         <Pencil size={13} /> {t('重命名')}
                       </button>
-                      <button type="button" className="danger" onClick={() => handleDelete(s.id)}>
+                      <button type="button" className="danger" onClick={() => openDeleteConfirm(s.id)}>
                         <Trash2 size={13} /> {t('删除会话')}
                       </button>
                     </div>
@@ -303,56 +346,98 @@ export default function Chat(): JSX.Element {
       <div className="chat-overlay" onClick={() => setSidebarOpen(false)} />
 
       <main className="chat-main">
-        <div className="chat-main-inner">
-          {!sidebarOpen && (
+        {/* 唯一顶栏：侧栏开关 + 全局模型下拉（原模式 Tabs 位置）+ 参数 + 新会话 */}
+        <div className="chat-topbar">
+          <div className="chat-topbar-left">
             <button
               type="button"
-              className="btn btn-outline btn-sm chat-sidebar-open"
-              title={t('展开会话列表')}
-              onClick={() => setSidebarOpen(true)}
+              className="chat-icon-btn chat-sidebar-toggle"
+              onClick={() => setSidebarOpen((v) => !v)}
+              title={sidebarOpen ? t('收起会话列表') : t('展开会话列表')}
+              aria-label={sidebarOpen ? t('收起会话列表') : t('展开会话列表')}
             >
-              <PanelLeftOpen size={14} />
+              {sidebarOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}
             </button>
-          )}
-
-          {/* 三模式切换：聊天 / Completions / Images（原 Playground V2） */}
-          <div className="chat-mode-bar">
-            <Tabs<ChatMode>
-              items={[
-                { key: 'chat', label: <><MessageSquare size={14} /> {t('Chat')}</> },
-                { key: 'completions', label: <><TerminalSquare size={14} /> {t('Completions')}</> },
-                { key: 'images', label: <><ImageIcon size={14} /> {t('Images')}</> },
-              ]}
-              active={mode}
-              onChange={setMode}
-              ariaLabel={t('聊天模式')}
-            />
           </div>
+          <div className="chat-topbar-right">
+            <ModelPicker
+              value={model}
+              onChange={setModel}
+              compact
+            />
+            {mode === 'completions' && (
+              <label className="chat-preset-select" title={t('参数预设')}>
+                <SlidersHorizontal size={13} />
+                <select
+                  value={compPreset}
+                  onChange={(e) => setCompPreset(e.target.value as 'balanced' | 'precise' | 'creative')}
+                >
+                  <option value="balanced">{t('平衡')}</option>
+                  <option value="precise">{t('严谨')}</option>
+                  <option value="creative">{t('创意')}</option>
+                </select>
+              </label>
+            )}
+            {mode === 'images' && (
+              <label className="chat-preset-select" title={t('生成数量')}>
+                <ImageIcon size={13} />
+                <select value={String(imgCount)} onChange={(e) => setImgCount(Number(e.target.value) || 1)}>
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="4">4</option>
+                </select>
+              </label>
+            )}
+            <button
+              type="button"
+              className="chat-icon-btn"
+              title={t('新建会话')}
+              aria-label={t('新建会话')}
+              onClick={handleNew}
+            >
+              <Plus size={15} />
+            </button>
+          </div>
+        </div>
 
+        <div className="chat-main-body">
           {mode === 'chat' && active && (
             <div className="chat-mode-body">
               <ChatDebugger
                 key={active.id}
                 initialMessages={active.messages}
                 onMessagesChange={handleMessagesChange}
+                model={model}
+                onModelChange={setModel}
                 hideToolbar
                 suggestionPrompts={loadSuggestionPrompts()}
               />
             </div>
           )}
-          {mode === 'completions' && <CompletionsPanel />}
-          {mode === 'images' && <ImagesPanel />}
+          {mode === 'completions' && (
+            <CompletionsPanel model={model} preset={compPreset} />
+          )}
+          {mode === 'images' && (
+            <ImagesPanel model={model} count={imgCount} />
+          )}
         </div>
       </main>
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }
 
 /** Completions 面板：参数左栏 + 响应 JSON 右栏（open-webui 双栏） */
-function CompletionsPanel(): JSX.Element {
+function CompletionsPanel({
+  model,
+  preset,
+}: {
+  model: string;
+  preset: 'balanced' | 'precise' | 'creative';
+}): JSX.Element {
   const { t } = useTranslation();
   const [prompt, setPrompt] = useState('');
-  const [model, setModel] = useState('');
   const [temperature, setTemperature] = useState('0.7');
   const [maxTokens, setMaxTokens] = useState('1024');
   const [topP, setTopP] = useState('1');
@@ -392,17 +477,16 @@ function CompletionsPanel(): JSX.Element {
     }
   };
 
+  const applyPreset = (p: 'balanced' | 'precise' | 'creative'): void => {
+    setTemperature(p === 'precise' ? '0.2' : p === 'creative' ? '1.3' : '0.7');
+  };
+
   return (
     <div className="playground-v2">
       <div className="playground-v2-form">
-        <div className="form-group">
-          <label>{t('模型')}</label>
-          <input
-            className="form-input"
-            placeholder={t('留空自动选择渠道首个模型')}
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-          />
+        <div className="playground-v2-model-chip">
+          <span className="playground-v2-model-label">{t('模型')}</span>
+          <span className="playground-v2-model-name">{model || t('顶栏选择模型')}</span>
         </div>
         <div className="form-group">
           <label>{t('提示词')}</label>
@@ -440,14 +524,24 @@ function CompletionsPanel(): JSX.Element {
           <input type="checkbox" checked={jsonMode} onChange={(e) => setJsonMode(e.target.checked)} />
           <span>{t('JSON 模式')}</span>
         </label>
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={() => void handleRun()}
-          disabled={busy || !prompt.trim()}
-        >
-          {busy ? t('运行中…') : t('运行')}
-        </button>
+        <div className="playground-v2-run">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => void handleRun()}
+            disabled={busy || !prompt.trim()}
+          >
+            {busy ? t('运行中…') : t('运行')}
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            title={t('应用预设参数')}
+            onClick={() => applyPreset(preset)}
+          >
+            {t('应用预设')}
+          </button>
+        </div>
         {error && <div className="error-message">{error}</div>}
       </div>
       <div className="playground-v2-result">
@@ -477,11 +571,15 @@ function CompletionsPanel(): JSX.Element {
 }
 
 /** Images 面板：参数 + 图片网格 + JSON（透传 /images/generations） */
-function ImagesPanel(): JSX.Element {
+function ImagesPanel({
+  model,
+  count,
+}: {
+  model: string;
+  count: number;
+}): JSX.Element {
   const { t } = useTranslation();
   const [prompt, setPrompt] = useState('');
-  const [model, setModel] = useState('');
-  const [n, setN] = useState('1');
   const [size, setSize] = useState('1024x1024');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -496,7 +594,7 @@ function ImagesPanel(): JSX.Element {
       const res = (await api.playgroundImages({
         model: model.trim(),
         prompt: prompt.trim(),
-        n: Number(n) || 1,
+        n: count,
         size,
       })) as PlaygroundRawResult;
       setResult(res.data ?? res);
@@ -513,14 +611,9 @@ function ImagesPanel(): JSX.Element {
   return (
     <div className="playground-v2">
       <div className="playground-v2-form">
-        <div className="form-group">
-          <label>{t('模型')}</label>
-          <input
-            className="form-input"
-            placeholder={t('留空自动选择渠道首个模型')}
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-          />
+        <div className="playground-v2-model-chip">
+          <span className="playground-v2-model-label">{t('模型')}</span>
+          <span className="playground-v2-model-name">{model || t('顶栏选择模型')}</span>
         </div>
         <div className="form-group">
           <label>{t('提示词')}</label>
@@ -534,16 +627,16 @@ function ImagesPanel(): JSX.Element {
         </div>
         <div className="playground-v2-params">
           <div className="form-group">
-            <label>n</label>
-            <input className="form-input" type="number" min="1" max="10" value={n} onChange={(e) => setN(e.target.value)} />
-          </div>
-          <div className="form-group">
             <label>size</label>
             <select className="form-input" value={size} onChange={(e) => setSize(e.target.value)}>
               <option value="1024x1024">1024x1024</option>
               <option value="1792x1024">1792x1024</option>
               <option value="1024x1792">1024x1792</option>
             </select>
+          </div>
+          <div className="form-group">
+            <label>{t('生成数量')}</label>
+            <span className="playground-v2-count-chip">{count}</span>
           </div>
         </div>
         <button

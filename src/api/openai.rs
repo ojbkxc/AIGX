@@ -263,13 +263,13 @@ pub fn resolve_bridges_with_affinity(
     state: &AppState,
     model: &str,
     session_id: Option<&str>,
-) -> Vec<(Arc<dyn Bridge>, Option<String>)> {
+) -> Vec<(Arc<dyn Bridge>, Option<String>, Option<crate::channel::Channel>)> {
     let mut result = resolve_bridges(state, model);
     if let Some(sid) = session_id {
         if let Some(affinity_id) = state.channel_store.affinity_cache().lookup(sid, model) {
             if let Some(pos) = result
                 .iter()
-                .position(|(_, cid)| cid.as_deref() == Some(affinity_id.as_str()))
+                .position(|(_, cid, _)| cid.as_deref() == Some(affinity_id.as_str()))
             {
                 if pos > 0 {
                     let item = result.remove(pos);
@@ -285,8 +285,8 @@ pub fn resolve_bridges_with_affinity(
 }
 
 /// 无亲和性版本（既有端点沿用：embeddings/images/audio 等无会话语义的请求）。
-pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<(Arc<dyn Bridge>, Option<String>)> {
-    let mut result: Vec<(Arc<dyn Bridge>, Option<String>)> = Vec::new();
+pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<(Arc<dyn Bridge>, Option<String>, Option<crate::channel::Channel>)> {
+    let mut result: Vec<(Arc<dyn Bridge>, Option<String>, Option<crate::channel::Channel>)> = Vec::new();
 
     // 第一级：通用渠道（按 priority/weight 选取支持该 model 的渠道）
     let candidates = state.channel_store.select_for_model(model);
@@ -298,13 +298,11 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<(Arc<dyn Bridge>, O
                     result.push((
                         crate::bridge::openai::make_bridge(&ch.base_url, &key, &state.http_client),
                         Some(ch.id.clone()),
+                        Some(ch.clone()),
                     ));
                 }
             }
             crate::channel::ChannelType::Anthropic => {
-                // Anthropic 原生上游走 AnthropicBridge（/v1/messages + x-api-key +
-                // anthropic-version），而非复用 OpenAI bridge。对接真正的 Anthropic
-                // 原生 API 必须用本 bridge，否则 401/400（参见 bridge/anthropic.rs）
                 let key = ch.decode_api_key();
                 if !key.is_empty() {
                     result.push((
@@ -314,36 +312,34 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<(Arc<dyn Bridge>, O
                             &state.http_client,
                         ),
                         Some(ch.id.clone()),
+                        Some(ch.clone()),
                     ));
                 }
             }
             crate::channel::ChannelType::Gemini => {
-                // Google Gemini 原生上游走 GeminiBridge（/v1beta/models/{model}:generateContent
-                // + x-goog-api-key 鉴权）。非 OpenAI 兼容形状，必须用本 bridge。
                 let key = ch.decode_api_key();
                 if !key.is_empty() {
                     result.push((
                         crate::bridge::gemini::make_bridge(&ch.base_url, &key, &state.http_client),
                         Some(ch.id.clone()),
+                        Some(ch.clone()),
                     ));
                 }
             }
             crate::channel::ChannelType::Zai => {
-                // 智谱 AI（Z.AI）上游走 ZaiBridge（Anthropic 兼容协议 + Bearer 鉴权）。
-                // 与 AnthropicBridge 的区别：用 Bearer 而非 x-api-key，
-                // 不需要 anthropic-version 头。
                 let key = ch.decode_api_key();
                 if !key.is_empty() {
                     result.push((
                         crate::bridge::zai::make_bridge(&ch.base_url, &key, &state.http_client),
                         Some(ch.id.clone()),
+                        Some(ch.clone()),
                     ));
                 }
             }
             crate::channel::ChannelType::Cloudflare => {
                 // CF 渠道走 Hub 专用桥接
                 if let Some(b) = state.hub.get_specialized("cloudflare") {
-                    result.push((b, Some(ch.id.clone())));
+                    result.push((b, Some(ch.id.clone()), Some(ch.clone())));
                 }
             }
         }
@@ -353,10 +349,27 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<(Arc<dyn Bridge>, O
     // 仅在通用渠道列表未产出任何候选时追加，避免 CF 桥接重复出现。
     if result.is_empty() {
         if let Some(b) = state.hub.get_specialized("cloudflare") {
-            result.push((b, None));
+            result.push((b, None, None));
         }
     }
     result
+}
+
+/// 把原始模型名解析为上游真实模型名（= 价格表里的名）。
+///
+/// 优先级：渠道级映射（链式）> 全局映射 > 原名透传。
+/// 仿 new-api ModelMappedHelper：渠道级支持链式重定向 + 循环检测。
+pub fn resolve_upstream_model(
+    origin: &str,
+    channel: Option<&crate::channel::Channel>,
+    global_mapper: &crate::model::ModelMapper,
+) -> String {
+    if let Some(ch) = channel {
+        if let Some(m) = ch.resolve_channel_mapping(origin) {
+            return m;
+        }
+    }
+    global_mapper.resolve(origin)
 }
 
 /// 判断桥接错误是否值得切换到下一个渠道重试（B06）。
@@ -1268,7 +1281,7 @@ pub async fn handle_chat_completions(
     // P1-7：调度决策回放——记录候选渠道列表
     let candidate_channel_ids: Vec<String> = candidates
         .iter()
-        .filter_map(|(_, cid)| cid.clone())
+        .filter_map(|(_, cid, _)| cid.clone())
         .collect();
 
     if is_stream {
@@ -1277,7 +1290,7 @@ pub async fn handle_chat_completions(
         let mut used_channel_id: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
-        for (bridge, cid) in candidates {
+        for (bridge, cid, ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
@@ -1677,7 +1690,7 @@ pub async fn handle_chat_completions(
         let mut used_channel_id: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
-        for (bridge, cid) in candidates {
+        for (bridge, cid, ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
@@ -1993,7 +2006,7 @@ pub async fn handle_responses(
     let mut result_opt = None;
     let mut used_channel_id: Option<String> = None;
     let mut last_error: Option<crate::bridge::BridgeError> = None;
-    for (bridge, cid) in candidates {
+    for (bridge, cid, ch_ref) in candidates {
         if let Some(c) = &cid {
             state.channel_store.mark_used(c);
         }
@@ -2396,7 +2409,7 @@ pub async fn handle_completions(
     let mut result_opt = None;
     let mut used_channel_id: Option<String> = None;
     let mut last_error: Option<crate::bridge::BridgeError> = None;
-    for (bridge, cid) in candidates {
+    for (bridge, cid, ch_ref) in candidates {
         // 标记渠道已使用（问题 4）
         if let Some(c) = &cid {
             state.channel_store.mark_used(c);
@@ -2611,7 +2624,7 @@ pub async fn handle_embeddings(
     let mut response_opt = None;
     let mut used_channel_id: Option<String> = None;
     let mut last_error: Option<crate::bridge::BridgeError> = None;
-    for (bridge, cid) in candidates {
+    for (bridge, cid, ch_ref) in candidates {
         // 标记渠道已使用（问题 4）
         if let Some(c) = &cid {
             state.channel_store.mark_used(c);
@@ -2897,7 +2910,7 @@ pub async fn handle_rerank(
     let mut response_opt = None;
     let mut used_channel_id: Option<String> = None;
     let mut last_error: Option<crate::bridge::BridgeError> = None;
-    for (bridge, cid) in candidates {
+    for (bridge, cid, ch_ref) in candidates {
         if let Some(c) = &cid {
             state.channel_store.mark_used(c);
         }
@@ -3095,7 +3108,7 @@ pub async fn handle_images_generations(
     let mut result_opt = None;
     let mut used_channel_id: Option<String> = None;
     let mut last_error: Option<crate::bridge::BridgeError> = None;
-    for (bridge, cid) in candidates {
+    for (bridge, cid, ch_ref) in candidates {
         // 标记渠道已使用（问题 4）
         if let Some(c) = &cid {
             state.channel_store.mark_used(c);

@@ -76,7 +76,12 @@ export default function Redemptions(): JSX.Element {
     setError('');
     try {
       const res = await api.batchRedemptions(genForm as unknown as Record<string, unknown>);
-      const generatedCount = res?.data?.data?.length ?? 0;
+      // 兼容两种后端返回形状：{ data: { data: [...] } } 与 { data: [...] }
+      const raw = res?.data;
+      const generated = (raw && typeof raw === 'object' && !Array.isArray(raw)
+        ? (raw as { data?: unknown }).data
+        : raw);
+      const generatedCount = Array.isArray(generated) ? generated.length : 0;
       addToast(`${t('成功生成')} ${generatedCount} ${t('个兑换码')}`);
       setShowGen(false);
       void load();
@@ -151,15 +156,19 @@ export default function Redemptions(): JSX.Element {
   };
 
   const statusBadge = (r: RedemptionItem): JSX.Element => {
+    const expired = r.status === 1
+      && !!r.expires_at && r.expires_at > 0
+      && r.expires_at < Date.now() / 1000;
     const text =
       r.status === 1
-        ? r.expires_at && r.expires_at > 0 && r.expires_at < Date.now() / 1000
+        ? expired
           ? t('已过期')
           : t('未使用')
         : r.status === 2
           ? t('已使用')
           : t('已禁用');
-    const tone = r.status === 1 ? 'success' : r.status === 2 ? 'neutral' : 'danger';
+    // 未使用但已过期 → warning 色；未过期沿用 success
+    const tone = r.status === 1 ? (expired ? 'warning' : 'success') : r.status === 2 ? 'neutral' : 'danger';
     return (
       <span className={`badge badge-${tone}`}>{text}</span>
     );
@@ -254,7 +263,7 @@ export default function Redemptions(): JSX.Element {
                     <td>{fmtQuota(r.quota)}</td>
                     <td>{statusBadge(r)}</td>
                     <td>{r.used_by || '—'}</td>
-                    <td>{r.created_at ? new Date(r.created_at * 1000).toLocaleString() : '—'}</td>
+                    <td>{r.created_at ? new Date(r.created_at > 1e12 ? r.created_at : r.created_at * 1000).toLocaleString() : '—'}</td>
                     <td>{fmtTime(r.expires_at)}</td>
                     <td>
                       {r.status === 1 && (

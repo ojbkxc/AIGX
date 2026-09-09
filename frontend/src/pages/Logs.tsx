@@ -1,6 +1,7 @@
 import { useState, useEffect, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
+import { isAdmin } from '../lib/utils';
 import { useToast } from '../components/Toast';
 import { Button, Card, Loading, EmptyState } from '../components/ui';
 
@@ -11,10 +12,14 @@ interface RequestLogItem {
   id: string | number;
   created_at?: number;
   user_id?: string;
+  channel_id?: string;
+  channel_name?: string;
   model?: string;
+  origin_model?: string;
   input_tokens?: number;
   output_tokens?: number;
   cost?: number;
+  channel_cost?: number;
   latency_ms?: number;
   status_code?: number;
   error_msg?: string;
@@ -40,6 +45,7 @@ interface Filters {
 }
 
 export default function Logs(): JSX.Element {
+  const admin = isAdmin();
   const [tab, setTab] = useState<LogTab>('requests');
   const [view, setView] = useState<LogView>('table');
   const [logs, setLogs] = useState<LogItem[]>([]);
@@ -213,9 +219,11 @@ export default function Logs(): JSX.Element {
           <Button variant={tab === 'requests' ? 'primary' : 'outline'} onClick={() => { setTab('requests'); setPage(1); setView('table'); }}>
             {t('请求日志')}
           </Button>
-          <Button variant={tab === 'audits' ? 'primary' : 'outline'} onClick={() => { setTab('audits'); setPage(1); setView('table'); }}>
-            {t('审计日志')}
-          </Button>
+          {admin && (
+            <Button variant={tab === 'audits' ? 'primary' : 'outline'} onClick={() => { setTab('audits'); setPage(1); setView('table'); }}>
+              {t('审计日志')}
+            </Button>
+          )}
           {tab === 'requests' && (
             <>
               <Button variant="outline" size="sm" onClick={() => void handleExport('json')} disabled={exporting !== null}>
@@ -242,19 +250,28 @@ export default function Logs(): JSX.Element {
       {tab === 'requests' && (
         <Card title={t('筛选')} className="" bodyClassName="">
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
-            <div className="form-group">
-              <label>{t('用户 ID')}</label>
-              <input className="form-input" value={filters.user} onChange={(e) => setFilters({ ...filters, user: e.target.value })} placeholder={t('按用户 ID 过滤')} />
-            </div>
+            {admin && (
+              <div className="form-group">
+                <label>{t('用户 ID')}</label>
+                <input className="form-input" value={filters.user} onChange={(e) => setFilters({ ...filters, user: e.target.value })} placeholder={t('按用户 ID 过滤')} />
+              </div>
+            )}
             <div className="form-group">
               <label>{t('模型')}</label>
               <input className="form-input" value={filters.model} onChange={(e) => setFilters({ ...filters, model: e.target.value })} placeholder={t('按模型过滤')} />
             </div>
-            <div className="form-group">
-              <label>{t('渠道 ID')}</label>
-              <input className="form-input" value={filters.channel} onChange={(e) => setFilters({ ...filters, channel: e.target.value })} placeholder={t('按渠道过滤')} />
-            </div>
+            {admin && (
+              <div className="form-group">
+                <label>{t('渠道 ID')}</label>
+                <input className="form-input" value={filters.channel} onChange={(e) => setFilters({ ...filters, channel: e.target.value })} placeholder={t('按渠道过滤')} />
+              </div>
+            )}
           </div>
+          {!admin && (
+            <div className="form-hint" style={{ marginTop: 4 }}>
+              {t('仅显示你自己的请求记录')}
+            </div>
+          )}
           <div style={{ marginTop: 12 }}>
             <Button size="sm" onClick={handleSearch}>{t('查询')}</Button>
           </div>
@@ -275,11 +292,15 @@ export default function Logs(): JSX.Element {
                 {tab === 'requests' ? (
                   <tr>
                     <th>{t('时间')}</th>
-                    <th>{t('用户')}</th>
+                    {admin && <th>{t('用户')}</th>}
+                    {admin && <th>{t('原始名')}</th>}
                     <th>{t('模型')}</th>
+                    {admin && <th>{t('渠道')}</th>}
                     <th>{t('输入')}</th>
                     <th>{t('输出')}</th>
                     <th>{t('费用')}</th>
+                    {admin && <th>{t('成本')}</th>}
+                    {admin && <th>{t('利润')}</th>}
                     <th>{t('延迟')}</th>
                     <th>{t('状态')}</th>
                     <th>{t('错误')}</th>
@@ -299,11 +320,27 @@ export default function Logs(): JSX.Element {
                   isRequest(l) ? (
                     <tr key={l.id}>
                       <td>{fmtTime(l.created_at)}</td>
-                      <td>{l.user_id || '—'}</td>
-                      <td>{l.model}</td>
+                      {admin && <td>{l.user_id || '—'}</td>}
+                      {admin && (
+                        <td style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.origin_model || ''}>
+                          {l.origin_model || '—'}
+                        </td>
+                      )}
+                      <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.model || ''}>
+                        {l.model || '—'}
+                      </td>
+                      {admin && (
+                        <td style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.channel_name || ''}>
+                          {l.channel_name || '—'}
+                        </td>
+                      )}
                       <td>{l.input_tokens}</td>
                       <td>{l.output_tokens}</td>
-                      <td>{l.cost}</td>
+                      <td>¥{l.cost}</td>
+                      {admin && <td>¥{l.channel_cost ?? l.cost}</td>}
+                      {admin && (
+                        <td>{(l.channel_cost != null && l.channel_cost !== l.cost) ? `¥${(l.cost ?? 0) - l.channel_cost}` : '—'}</td>
+                      )}
                       <td>{l.latency_ms}ms</td>
                       <td>
                         <span className={(l.status_code ?? 0) < 400 ? 'badge badge-success' : 'badge badge-danger'}>{l.status_code}</span>

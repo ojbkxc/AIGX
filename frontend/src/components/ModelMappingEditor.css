@@ -1,0 +1,191 @@
+/* ModelMappingEditor — 渠道级模型映射编辑器（可视化 + JSON 双模式） */
+
+.mme-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mme-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mme-mode-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--hover-bg, rgba(0, 0, 0, 0.03));
+}
+
+.mme-mode-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.mme-mode-tabs button.active {
+  background: var(--card-bg, #fff);
+  color: var(--text-main);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.mme-template-btn {
+  border: none;
+  background: transparent;
+  color: var(--accent-color, #2f6fed);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.mme-template-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mme-error,
+.mme-warn {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.mme-error {
+  color: var(--danger, #dc2626);
+  background: var(--danger-soft, rgba(220, 38, 38, 0.1));
+}
+
+.mme-warn {
+  color: var(--warning, #b45309);
+  background: rgba(180, 83, 9, 0.1);
+}
+
+.mme-visual {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mme-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.mme-row-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding-bottom: 2px;
+}
+
+.mme-row input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--card-bg, #fff);
+  color: var(--text-main);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.mme-row input:focus {
+  border-color: var(--accent-color, #2f6fed);
+}
+
+.mme-row-action {
+  width: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mme-row-action button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.mme-row-action button:hover {
+  background: var(--danger-soft, rgba(220, 38, 38, 0.1));
+  color: var(--danger, #dc2626);
+}
+
+.mme-row-action button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.mme-empty {
+  padding: 20px;
+  text-align: center;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.mme-add-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.mme-add-btn:hover {
+  border-color: var(--accent-color, #2f6fed);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.03));
+}
+
+.mme-add-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mme-json-textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--code-bg, #0f1117);
+  color: var(--code-fg, #e6e6e6);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  resize: vertical;
+  outline: none;
+}
+
+.mme-json-textarea:focus {
+  border-color: var(--accent-color, #2f6fed);
+}

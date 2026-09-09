@@ -37,6 +37,10 @@ export interface ChatDebuggerProps {
   floatingModelBar?: boolean;
   /** 空状态建议 prompt（Open WebUI 首页 Suggestions 网格），点选直接发送 */
   suggestionPrompts?: Array<{ title: string; sub: string; content: string }>;
+  /** 受控模型值：由宿主顶栏提供时，模型选择下沉到外部（/chat） */
+  model?: string;
+  /** 模型变化回调（受控模式下同步宿主状态） */
+  onModelChange?: (model: string) => void;
 }
 
 interface ChatChunkResult {
@@ -67,6 +71,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     hideToolbar = false,
     floatingModelBar = true,
     suggestionPrompts = [],
+    model: controlledModel,
+    onModelChange,
   } = props;
   const { t } = useTranslation();
 
@@ -76,7 +82,13 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const [error, setError] = useState('');
 
   const [models, setModels] = useState<string[]>([]);
-  const [model, setModel] = useState('');
+  const [internalModel, setInternalModel] = useState('');
+  // 受控模型：宿主顶栏提供时以外部值为准，本地 state 仅兜底
+  const model = controlledModel !== undefined ? controlledModel : internalModel;
+  const setModel = (v: string): void => {
+    setInternalModel(v);
+    onModelChange?.(v);
+  };
   const [protocol, setProtocol] = useState<'openai' | 'anthropic'>(initialProtocol);
   const [stream, setStream] = useState(true);
   const [systemPrompt, setSystemPrompt] = useState('');
@@ -103,11 +115,16 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   /** 「+」附件菜单开关 */
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const attachMenuRef = useRef<HTMLDivElement | null>(null);
+  /** 粘贴媒体 URL：小输入行开关与草稿 */
+  const [urlPromptOpen, setUrlPromptOpen] = useState(false);
+  const [urlDraft, setUrlDraft] = useState('');
   /** 语音输入：录音中/转写中 */
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const mediaRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  /** 组件卸载标记：录音 onstop 异步转写回调防 setState */
+  const mountedRef = useRef(true);
   /** TTS 朗读：正在合成/正在播放的消息下标 */
   const [ttsIdx, setTtsIdx] = useState<number | null>(null);
   const [ttsPlaying, setTtsPlaying] = useState(false);
@@ -141,7 +158,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
 
   // 上下文估算：中文按 1 字≈1 token，其他按 4 字符≈1 token，仅作展示
   const contextEstimate = messages.reduce((n, m) => {
-    const text = m.content || '';
+    const text = m.content + (m.reasoning || '');
     const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
     const other = text.length - cjk;
     return n + cjk + Math.ceil(other / 4);
@@ -192,7 +209,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     let mounted = true;
     if (channelModels.length) {
       setModels(channelModels.slice());
-      setModel((prev) => prev || channelModels[0]);
+      if (!model) setModel(channelModels[0]);
       return () => { mounted = false; };
     }
     setModels([]);
@@ -206,7 +223,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             .filter((v): v is string => Boolean(v))
           : [];
         setModels(list);
-        if (list.length) setModel((prev) => prev || list[0]);
+        if (list.length && !model) setModel(list[0]);
       })
       .catch(() => { /* 模型列表失败静默降级 */ });
     return () => { mounted = false; };
@@ -235,7 +252,9 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
 
   // 卸载时停止录音 / 停止 TTS 播放
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (mediaRef.current && mediaRef.current.state === 'recording') {
         mediaRef.current.stop();
       }
@@ -278,6 +297,14 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     setAttachMenuOpen(false);
   };
 
+  /** 「粘贴媒体 URL」小输入行：Enter 确认加为图片附件 */
+  const commitUrlDraft = (): void => {
+    const url = urlDraft.trim();
+    if (url) setAttachments((prev) => [...prev, { kind: 'image', url }]);
+    setUrlDraft('');
+    setUrlPromptOpen(false);
+  };
+
   /** 语音输入：MediaRecorder 录音 → 上传转写 → 填入输入框 */
   const startRecording = async (): Promise<void> => {
     if (recording) {
@@ -297,6 +324,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
       recorder.onstop = async () => {
+        if (!mountedRef.current) return;
         streamObj.getTracks().forEach((tr) => tr.stop());
         setRecording(false);
         const blob = new Blob(chunksRef.current, { type: mime || 'audio/webm' });
@@ -304,13 +332,15 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         setTranscribing(true);
         try {
           const res = await api.playgroundTranscribe(blob, model || 'whisper');
+          if (!mountedRef.current) return;
           const text = (res.text || '').trim();
           if (text) setInput((prev) => (prev ? `${prev} ${text}` : text));
           else setError(t('未识别到语音内容'));
         } catch (err) {
+          if (!mountedRef.current) return;
           setError(err instanceof Error ? err.message : String(err));
         } finally {
-          setTranscribing(false);
+          if (mountedRef.current) setTranscribing(false);
         }
       };
       mediaRef.current = recorder;
@@ -359,8 +389,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     if (lastUserIdx < 0) return;
     const userMsg = messages[lastUserIdx];
     setMessages(messages.slice(0, lastUserIdx));
-    // 等下一帧再触发发送，保证 messages state 已更新
-    setTimeout(() => { void handleSend(userMsg.content, userMsg.attachments?.slice()); }, 0);
+    void handleSend(userMsg.content, userMsg.attachments?.slice(), messages.slice(0, lastUserIdx));
   };
 
   /** 编辑用户消息：进入编辑态 */
@@ -377,7 +406,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     setEditingIdx(null);
     if (!text) return;
     setMessages(messages.slice(0, editingIdx));
-    setTimeout(() => { void handleSend(text, attachmentsOf); }, 0);
+    void handleSend(text, attachmentsOf, messages.slice(0, editingIdx));
   };
 
   const blocksForAttachments = (atts: Array<{ kind: string; url: string }>): Array<Record<string, unknown>> => {
@@ -390,7 +419,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     return blocks;
   };
 
-  const handleSend = async (override?: string, overrideAttachments?: Array<{ kind: 'image' | 'video' | 'audio'; url: string }>): Promise<void> => {
+  const handleSend = async (override?: string, overrideAttachments?: Array<{ kind: 'image' | 'video' | 'audio'; url: string }>, prevMessages?: DebugMessage[]): Promise<void> => {
     const text = (override ?? input).trim();
     const atts = overrideAttachments ?? attachments;
     if ((!text && !atts.length) || busy) return;
@@ -399,10 +428,11 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       return;
     }
     const pendingAttachments = atts.slice();
+    const historySource = prevMessages ?? messages;
 
     // 历史消息：附件展开为 content blocks；纯文本保持字符串形状。
-    // 在当前闭包 messages 基础上追加本条用户消息，保证多轮上下文完整。
-    const history: Array<{ role: string; content: string | Record<string, unknown>[] }> = messages.map((m) => {
+    // 在截断后的消息数组（或当前闭包 messages）基础上追加本条用户消息，保证多轮上下文完整。
+    const history: Array<{ role: string; content: string | Record<string, unknown>[] }> = historySource.map((m) => {
       if (m.role === 'user' && m.attachments?.length) {
         const blocks = blocksForAttachments(m.attachments);
         if (m.content) blocks.push({ type: 'text', text: m.content });
@@ -888,6 +918,22 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
 
       <div className="chat-debugger-input-row">
         <div className="chat-debugger-input-shell">
+          {urlPromptOpen && (
+            <div className="chat-debugger-url-row">
+              <Link2 size={13} />
+              <input
+                autoFocus
+                placeholder={t('粘贴图片 URL，Enter 确认')}
+                value={urlDraft}
+                onChange={(e) => setUrlDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); commitUrlDraft(); }
+                  if (e.key === 'Escape') { e.preventDefault(); setUrlDraft(''); setUrlPromptOpen(false); }
+                }}
+                onBlur={() => { setUrlDraft(''); setUrlPromptOpen(false); }}
+              />
+            </div>
+          )}
           {attachments.length > 0 && (
             <div className="chat-debugger-attach-chips">
               {attachments.map((a, i) => (
@@ -929,38 +975,36 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
           />
           <div className="chat-debugger-input-meta">
             <div className="chat-debugger-input-left">
-              {!hideToolbar && (
-                <div className="chat-debugger-attach-menu" ref={attachMenuRef}>
-                  <button
-                    type="button"
-                    className="chat-debugger-icon-btn"
-                    title={t('添加附件')}
-                    onClick={() => setAttachMenuOpen((v) => !v)}
-                    disabled={busy}
-                  >
-                    <Plus size={15} />
-                  </button>
-                  {attachMenuOpen && (
-                    <div className="chat-debugger-attach-pop">
-                      <button type="button" onClick={() => pickLocalFile('image/*')}>
-                        <Image size={13} /> {t('上传图片')}
-                      </button>
-                      <button type="button" onClick={() => pickLocalFile('video/*')}>
-                        <Video size={13} /> {t('上传视频')}
-                      </button>
-                      <button type="button" onClick={() => pickLocalFile('audio/*')}>
-                        <AudioLines size={13} /> {t('上传音频')}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setAttachKind('image'); setAttachMenuOpen(false); }}
-                      >
-                        <Link2 size={13} /> {t('粘贴媒体 URL')}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
+              <div className="chat-debugger-attach-menu" ref={attachMenuRef}>
+                <button
+                  type="button"
+                  className="chat-debugger-icon-btn"
+                  title={t('添加附件')}
+                  onClick={() => setAttachMenuOpen((v) => !v)}
+                  disabled={busy}
+                >
+                  <Plus size={15} />
+                </button>
+                {attachMenuOpen && (
+                  <div className="chat-debugger-attach-pop">
+                    <button type="button" onClick={() => pickLocalFile('image/*')}>
+                      <Image size={13} /> {t('上传图片')}
+                    </button>
+                    <button type="button" onClick={() => pickLocalFile('video/*')}>
+                      <Video size={13} /> {t('上传视频')}
+                    </button>
+                    <button type="button" onClick={() => pickLocalFile('audio/*')}>
+                      <AudioLines size={13} /> {t('上传音频')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setAttachKind('image'); setAttachMenuOpen(false); setUrlPromptOpen(true); }}
+                    >
+                      <Link2 size={13} /> {t('粘贴媒体 URL')}
+                    </button>
+                  </div>
+                )}
+              </div>
               <div className="chat-debugger-context" title={t('上下文 ≈')}>
                 {t('上下文 ≈')} {contextEstimate.toLocaleString()} tokens
               </div>

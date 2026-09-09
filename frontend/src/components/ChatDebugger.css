@@ -92,7 +92,7 @@
   top: calc(100% + 8px);
   left: 0;
   right: 0;
-  z-index: 60;
+  z-index: 200;
   background: var(--card-bg);
   border: 1px solid var(--border-color);
   border-radius: 16px;
@@ -419,7 +419,7 @@
 
 .chat-debugger-msg-user .chat-debugger-msg-icon {
   order: 2;
-  background: var(--user-avatar-bg, var(--accent-color, #2f6fed));
+  background: var(--cyan, #3b82f6);
   color: #fff;
 }
 
@@ -606,7 +606,7 @@
 
 .chat-debugger-input-shell:focus-within {
   border-color: var(--text-faint, #b0b0b0);
-  box-shadow: 0 16px 40px -14px rgba(0, 0, 0, 0.22), 0 2px 8px -4px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 16px 40px -14px rgba(0, 0, 0, 0.18), 0 2px 8px -4px rgba(0, 0, 0, 0.18);
 }
 
 .chat-debugger-input-shell textarea {
@@ -687,11 +687,38 @@
   position: relative;
 }
 
+/* 「粘贴媒体 URL」小输入行（附件 chips 上方） */
+.chat-debugger-url-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.chat-debugger-url-row input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-color);
+  color: var(--text-main);
+  font-size: 12.5px;
+  padding: 0 10px;
+  outline: none;
+}
+
+.chat-debugger-url-row input:focus {
+  border-color: var(--text-faint, #b0b0b0);
+}
+
 .chat-debugger-attach-pop {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
-  z-index: 40;
+  z-index: 150;
   min-width: 150px;
   padding: 4px;
   border: 1px solid var(--border-color);
@@ -710,7 +737,7 @@
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: var(--text-color);
+  color: var(--text-main);
   font-size: 13px;
   cursor: pointer;
   text-align: left;
@@ -807,5 +834,18 @@
   .chat-debugger-msg-icon {
     width: 26px;
     height: 26px;
+  }
+
+  .chat-debugger-input-left {
+    gap: 4px;
+  }
+
+  .chat-debugger-context {
+    display: none;
+  }
+
+  .chat-debugger-send-fab {
+    width: 32px;
+    height: 32px;
   }
 }

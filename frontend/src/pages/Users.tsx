@@ -123,6 +123,11 @@ export default function Users(): JSX.Element {
       addToast(t('密码为必填项'), 'error');
       return;
     }
+    // 配额必须为有效数字（空串/非数字输入不提交）
+    if (form.quota.trim() !== '' && !Number.isFinite(Number(form.quota))) {
+      addToast(t('配额必须为数字'), 'error');
+      return;
+    }
     setSaving(true);
     setError('');
     try {
@@ -280,7 +285,7 @@ export default function Users(): JSX.Element {
                         {u.status === 'active' ? t('启用') : t('禁用')}
                       </span>
                     </td>
-                    <td>{u.created_at ? new Date(u.created_at * 1000).toLocaleString() : '—'}</td>
+                    <td>{u.created_at ? new Date(u.created_at > 1e12 ? u.created_at : u.created_at * 1000).toLocaleString() : '—'}</td>
                     <td>
                       <div className="actions-cell">
                         <Button variant="outline" size="sm" onClick={() => openEdit(u)}>{t('编辑')}</Button>

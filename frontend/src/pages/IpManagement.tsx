@@ -83,8 +83,17 @@ export default function IpManagement() {
   // 简单校验 IP / CIDR 格式（宽松校验，允许 IPv4、IPv6、CIDR）
   const isValidPattern = (p: string) => {
     if (!p) return false;
-    // IPv4 CIDR
-    if (/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(p)) return true;
+    // IPv4 / IPv4 CIDR：正则 + 每段 0-255 + 掩码 ≤32
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(\/(\d{1,2}))?$/.exec(p);
+    if (m) {
+      const octets = [m[1], m[2], m[3], m[4]].map((s) => parseInt(s, 10));
+      if (octets.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return false;
+      if (m[5] != null) {
+        const mask = parseInt(m[6], 10);
+        if (Number.isNaN(mask) || mask > 32) return false;
+      }
+      return true;
+    }
     // 含冒号视为 IPv6 / IPv6 CIDR，宽松放行
     if (p.includes(':')) return true;
     return false;

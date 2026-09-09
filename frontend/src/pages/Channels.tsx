@@ -6,6 +6,8 @@ import type { ChannelItem as ApiChannelItem } from '../types';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ChatDebugger from '../components/ChatDebugger';
+import ModelMappingEditor from '../components/ModelMappingEditor';
+import CostPricingEditor from '../components/CostPricingEditor';
 import { GuideEmptyState } from '../components/ui';
 import './Channels.css';
 
@@ -20,6 +22,8 @@ interface ChannelItem {
   status: string;
   models?: string[];
   account_id?: string;
+  model_mapping?: Record<string, string>;
+  cost_pricing?: Record<string, { input_price?: number; output_price?: number; price_type?: string }>;
   last_error?: string | null;
   last_used_at?: number | null;
   created_at?: number;
@@ -36,6 +40,8 @@ interface ChannelFormState {
   status: string;
   models: string;
   account_id: string;
+  model_mapping: Record<string, string>;
+  cost_pricing: Record<string, { input_price?: number; output_price?: number; price_type?: string }>;
 }
 
 // 渠道类型选项 — 与后端 ChannelType 枚举对齐（snake_case）
@@ -93,6 +99,8 @@ export default function Channels(): JSX.Element {
       status: 'enabled',
       models: '',
       account_id: '',
+      model_mapping: {},
+      cost_pricing: {},
     };
   }
 
@@ -118,6 +126,8 @@ export default function Channels(): JSX.Element {
         weight: ch.weight ?? 1,
         status: ch.status || (ch.enabled ? 'enabled' : 'disabled'),
         models: ch.models,
+        model_mapping: ch.model_mapping,
+        cost_pricing: ch.cost_pricing || {},
         last_used_at: typeof ch.last_used_at === 'number' ? ch.last_used_at : null,
         created_at: typeof ch.created_at === 'number' ? ch.created_at : undefined,
         updated_at: typeof ch.updated_at === 'number' ? ch.updated_at : undefined,
@@ -148,6 +158,8 @@ export default function Channels(): JSX.Element {
       status: ch.status || 'enabled',
       models: (ch.models || []).join(', '),
       account_id: ch.account_id || '',
+      model_mapping: ch.model_mapping || {},
+      cost_pricing: ch.cost_pricing || {},
     });
     setShowModal(true);
   };
@@ -171,6 +183,8 @@ export default function Channels(): JSX.Element {
     status: form.status,
     models: form.models.split(',').map((s) => s.trim()).filter(Boolean),
     account_id: form.account_id,
+    model_mapping: form.model_mapping,
+    cost_pricing: form.cost_pricing,
   });
 
   const handleSave = async (): Promise<void> => {
@@ -537,6 +551,30 @@ export default function Channels(): JSX.Element {
                     {fetchingModels ? t('拉取中...') : t('拉取模型')}
                   </button>
                 </div>
+              </div>
+              <div className="form-group">
+                <label>{t('模型映射')}</label>
+                <div className="form-hint" style={{ marginBottom: 8 }}>
+                  {t('用户请求的模型名 → 实际转发给上游的模型名。优先级：渠道级映射 > 全局映射 > 原名透传。')}
+                </div>
+                <ModelMappingEditor
+                  value={form.model_mapping}
+                  onChange={(mapping) => setForm((f) => ({ ...f, model_mapping: mapping }))}
+                  sourceModelOptions={form.models.split(',').map((s) => s.trim()).filter(Boolean)}
+                  disabled={saving}
+                />
+              </div>
+              <div className="form-group">
+                <label>{t('成本价（可选）')}</label>
+                <div className="form-hint" style={{ marginBottom: 8 }}>
+                  {t('按映射后的上游模型名填成本价（每 1k token）。可留空——填了管理员可在日志看利润，不填利润显示「—」。')}
+                </div>
+                <CostPricingEditor
+                  value={form.cost_pricing}
+                  mappingTargets={Object.values(form.model_mapping)}
+                  onChange={(cp) => setForm((f) => ({ ...f, cost_pricing: cp }))}
+                  disabled={saving}
+                />
               </div>
               <div style={{ display: 'flex', gap: 12 }}>
                 <div className="form-group" style={{ flex: 1 }}>

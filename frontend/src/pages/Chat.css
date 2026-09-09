@@ -1,6 +1,6 @@
 /* ── Chat — 用户聊天工作区 ──
- * 审美参照 open-webui：左侧窄会话栏 + 右侧居中对话流。
- * 桌面端侧栏常驻；窄屏（≤900px）变抽屉，遮罩点击收起。 */
+ * 布局参照 new-api：顶部唯一顶栏（侧栏开关 + 模式 Tabs + 模型 pill + 新会话）
+ * 控件审美参照 open-webui：居中对话流、大圆角输入框、窄会话侧栏。 */
 
 .chat-shell {
   display: flex;
@@ -34,6 +34,31 @@
   flex: 1;
 }
 
+/* 左侧会话栏：模式切换 Tabs（对话/补全/图片） */
+.chat-sidebar-modes {
+  flex-shrink: 0;
+}
+
+.chat-sidebar-modes .ui-tabs {
+  display: flex;
+  width: 100%;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+}
+
+.chat-sidebar-modes .ui-tab {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 4px;
+  font-size: 12.5px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
 .chat-sidebar-close {
   display: none;
 }
@@ -57,7 +82,7 @@
   min-width: 0;
   border: none;
   background: transparent;
-  color: var(--text-color);
+  color: var(--text-main);
   font-size: 12.5px;
   outline: none;
 }
@@ -98,7 +123,7 @@
   min-height: 32px;
   border-radius: 10px;
   cursor: pointer;
-  color: var(--text-color);
+  color: var(--text-main);
   transition: background 0.15s ease, color 0.15s ease;
 }
 
@@ -124,32 +149,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
-}
-
-.chat-session-delete {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
-}
-
-.chat-session:hover .chat-session-delete,
-.chat-session.active .chat-session-delete {
-  opacity: 1;
-}
-
-.chat-session-delete:hover {
-  background: var(--danger-soft, rgba(220, 38, 38, 0.12));
-  color: var(--danger, #dc2626);
 }
 
 /* 置顶会话：pin 图标高亮 */
@@ -191,12 +190,9 @@
   color: var(--text-main, #000);
 }
 
-/* 会话菜单弹层 */
+/* 会话菜单弹层（position:fixed 与 left/top 由 TSX 内联提供） */
 .chat-session-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 80;
+  z-index: 200;
   min-width: 130px;
   padding: 4px;
   border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
@@ -215,7 +211,7 @@
   border: none;
   border-radius: 7px;
   background: transparent;
-  color: var(--text-color);
+  color: var(--text-main);
   font-size: 12.5px;
   cursor: pointer;
   text-align: left;
@@ -242,7 +238,7 @@
   border: 1px solid var(--accent-color, #2f6fed);
   border-radius: 6px;
   background: var(--card-bg, #fff);
-  color: var(--text-color);
+  color: var(--text-main);
   font-size: 12.5px;
   padding: 0 6px;
   outline: none;
@@ -257,36 +253,97 @@
   min-width: 0;
   min-height: 0;
   display: flex;
+  flex-direction: column;
   position: relative;
   background: var(--bg-color);
 }
 
-/* 主区内层：模式 tabs + 模式内容 */
-.chat-main-inner {
-  flex: 1;
+/* ── 唯一顶栏：侧栏开关 + 全局模型选择 + 模式附加参数 + 新会话 ── */
+.chat-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-color, rgba(0, 0, 0, 0.06));
+  background: var(--surface-bg, var(--bg-color));
+  flex-shrink: 0;
+  z-index: 40;
+}
+
+.chat-topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
+}
+
+.chat-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 顶栏小图标按钮（侧栏开关 / 新会话） */
+.chat-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.chat-icon-btn:hover {
+  color: var(--text-main);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+  border-color: var(--text-faint, #b0b0b0);
+}
+
+.chat-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 顶栏参数预设小 select */
+.chat-preset-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--card-bg);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-preset-select select {
+  border: none;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* 主区：模式内容 */
+.chat-main-body {
+  flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   position: relative;
-}
-
-.chat-mode-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 16px 0;
-  flex-shrink: 0;
-}
-
-.chat-mode-bar .ui-tabs {
-  gap: 4px;
-}
-
-.chat-mode-bar .ui-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .chat-mode-body {
@@ -301,14 +358,6 @@
   min-height: 0;
 }
 
-.chat-sidebar-open {
-  display: none;
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  z-index: 30;
-}
-
 @media (max-width: 900px) {
   .chat-sidebar {
     position: absolute;
@@ -321,14 +370,6 @@
 
   .chat-shell-sidebar-open .chat-sidebar {
     transform: translateX(0);
-  }
-
-  .chat-sidebar-close {
-    display: inline-flex;
-  }
-
-  .chat-sidebar-open {
-    display: inline-flex;
   }
 
   .chat-overlay {
@@ -387,6 +428,12 @@
   user-select: none;
 }
 
+.playground-v2-run {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .playground-v2-result-head {
   display: flex;
   align-items: center;
@@ -441,6 +488,6 @@
 
   .playground-v2-form,
   .playground-v2-result {
-    overflow: visible;
+    overflow: auto;
   }
 }

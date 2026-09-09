@@ -33,19 +33,28 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  // 打开前记住触发焦点元素，关闭时归还
+  const triggerRef = useRef<Element | null>(null);
 
-  // 打开时清空 + 聚焦 + 按角色加载实体数据
+  // 打开时清空 + 聚焦 + 按角色加载实体数据 + 锁 body 滚动
   useEffect(() => {
-    if (!open) return;
+    if (!open) return undefined;
+    triggerRef.current = document.activeElement;
     setQuery('');
     setActive(0);
+    document.body.style.overflow = 'hidden';
     const id = window.setTimeout(() => inputRef.current?.focus(), 0);
     if (isAdmin()) {
       api.listChannels().then((res) => setChannels(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
       api.listUsers().then((res) => setUsers(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
     }
     api.listTokens().then((res) => setTokens(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
-    return () => window.clearTimeout(id);
+    return () => {
+      window.clearTimeout(id);
+      document.body.style.overflow = '';
+      (triggerRef.current as HTMLElement | null)?.focus?.();
+      triggerRef.current = null;
+    };
   }, [open]);
 
   // Ctrl/Cmd+K 打开（由父级 Sidebar 转发 onClose，这里只负责唤起）

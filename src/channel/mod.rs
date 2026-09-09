@@ -15,9 +15,11 @@ use parking_lot::RwLock;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::pricing::ModelPrice;
 use crate::storage::FileStore;
 
 // ── Router 核心增强子模块（阶段2）─────────────────────────────────────
@@ -117,6 +119,15 @@ pub struct Channel {
     /// 支持的模型列表（逗号分隔或数组）
     #[serde(default)]
     pub models: Vec<String>,
+    /// 渠道级模型映射：用户请求的模型名 → 实际转发给上游的模型名。
+    /// 优先级：渠道级映射 > 全局映射 > 原名透传。
+    #[serde(default)]
+    pub model_mapping: HashMap<String, String>,
+    /// 渠道级成本价：key = 映射后的上游模型名（与 model_mapping 的 value 对齐）。
+    /// 可填可不填。填了管理员可在日志看利润 = 销售价(价格表) − 此成本价；
+    /// 不填则日志 channel_cost = cost（利润显示 "—"）。
+    #[serde(default)]
+    pub cost_pricing: HashMap<String, ModelPrice>,
     /// Cloudflare account_id（仅 channel_type=cloudflare 时使用）
     #[serde(default)]
     pub account_id: String,
@@ -186,6 +197,49 @@ impl Channel {
         } else {
             self.api_key.clone()
         }
+    }
+
+    /// 渠道级模型映射的链式解析（仿 new-api ModelMappedHelper）。
+    ///
+    /// `gpt-4 → gpt-4-0613 → gpt-4-turbo`：沿链走到尾，循环检测避免死循环。
+    /// 命中返回 `Some(最终名)`，未命中返回 `None`（调用方 fallback 全局/原名）。
+    pub fn resolve_channel_mapping(&self, model: &str) -> Option<String> {
+        if self.model_mapping.is_empty() {
+            return None;
+        }
+        let mut current = model.to_string();
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(current.clone());
+        let mut mapped = false;
+        loop {
+            match self.model_mapping.get(&current) {
+                Some(next) if !next.is_empty() => {
+                    if visited.contains(next) {
+                        // 检测到循环：next 已访问过
+                        if next == &current {
+                            // 自环 a→a：视为无映射
+                            return if mapped { Some(current) } else { None };
+                        }
+                        // a→b→a 真循环：返回当前已映射结果，不再追
+                        return Some(current);
+                    }
+                    visited.insert(next.clone());
+                    current = next.clone();
+                    mapped = true;
+                }
+                _ => break,
+            }
+        }
+        if mapped {
+            Some(current)
+        } else {
+            None
+        }
+    }
+
+    /// 取该渠道对某上游模型的成本价（可填可不填）。
+    pub fn cost_price_for(&self, upstream_model: &str) -> Option<&ModelPrice> {
+        self.cost_pricing.get(upstream_model)
     }
 }
 
@@ -964,6 +1018,8 @@ mod tests {
             weight: 1,
             status: "enabled".to_string(),
             models: models.into_iter().map(String::from).collect(),
+            model_mapping: HashMap::new(),
+            cost_pricing: HashMap::new(),
             account_id: String::new(),
             last_error: None,
             last_used_at: None,

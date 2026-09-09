@@ -83,7 +83,8 @@ export default function Profile(): JSX.Element {
   };
 
   const fmtQuota = (q: number | undefined | null): string => {
-    const n = Number(q || 0);
+    // isFinite 兜底：后端返回异常值（字符串/null）时按 0 展示
+    const n = Number.isFinite(Number(q)) ? Number(q) : 0;
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
     if (n >= 1_000) return (n / 1_000).toFixed(2) + 'K';
     return String(n);

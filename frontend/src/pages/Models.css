@@ -123,6 +123,21 @@
   color: var(--text-muted);
 }
 
+.model-card-price {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.model-price {
+  color: var(--text-main);
+  font-weight: 500;
+}
+
+.model-price-empty {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
 .model-card-caps {
   display: flex;
   align-items: center;

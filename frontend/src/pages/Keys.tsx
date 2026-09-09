@@ -179,7 +179,14 @@ export default function Keys(): JSX.Element {
       const expiresTs = localInputToTs(form.expires_at);
       if (expiresTs != null) payload.expires_at = expiresTs;
       const quotaNum = Number(form.quota_limit);
-      if (form.quota_limit.trim() && Number.isFinite(quotaNum)) payload.quota_limit = quotaNum;
+      if (form.quota_limit.trim()) {
+        if (!Number.isFinite(quotaNum)) {
+          // 非数字输入：finally 会复位 saving，此处提示后直接中止提交
+          addToast(t('额度上限必须为数字'), 'error');
+          return;
+        }
+        payload.quota_limit = quotaNum;
+      }
 
       if (editing) {
         await api.updateToken(editing.id, payload);

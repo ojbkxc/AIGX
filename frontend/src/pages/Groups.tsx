@@ -186,7 +186,10 @@ export default function Groups(): JSX.Element {
                             ×{g.ratio != null ? g.ratio : 1}
                           </span>
                         </td>
-                        <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                        <td
+                          style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                          title={Array.isArray(g.allowed_models) && g.allowed_models.length > 0 ? g.allowed_models.join(', ') : t('全部')}
+                        >
                           {Array.isArray(g.allowed_models) && g.allowed_models.length > 0
                             ? g.allowed_models.join(', ')
                             : t('全部')}
