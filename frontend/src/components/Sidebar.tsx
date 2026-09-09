@@ -7,7 +7,7 @@ import { isAdmin } from '../lib/utils';
 import {
   LayoutDashboard, Satellite, KeyRound, ArrowLeftRight, CircleDollarSign,
   Users, Tags, Wallet, Receipt, Ticket, ScrollText, CreditCard, Bell,
-  Settings, Play, Shield, Globe, Network, Zap, ChevronDown, Menu,
+  Settings, Shield, Globe, Network, Zap, ChevronDown, Menu,
   Code2, BarChart3, UserCircle2, UserRound, MessageSquare, PanelLeftClose,
   PanelLeftOpen, Boxes, BookOpen,
 } from 'lucide-react';
@@ -33,7 +33,6 @@ interface NavGroup {
 
 const navItems: NavItem[] = [
   { path: '/', labelKey: '仪表盘', icon: LayoutDashboard, end: true },
-  { path: '/playground', labelKey: 'Playground', icon: Play },
   { path: '/chat', labelKey: '聊天', icon: MessageSquare },
   { path: '/prompts', labelKey: '提示词库', icon: BookOpen },
   { path: '/model-presets', labelKey: '模型预设', icon: Boxes },
@@ -58,7 +57,7 @@ const navItems: NavItem[] = [
 
 // 参照 app.ofox.ai 的分组平铺设计：短分组标签 + 组内直接平铺。
 // 角色分层对齐 new-api：
-// - 普通用户（user）：开发组只有 Playground/API 密钥，账户组含钱包 + 个人中心。
+// - 普通用户（user）：开发组只有 聊天/API 密钥，账户组含钱包 + 个人中心。
 // - 管理员（admin）：开发组追加渠道/映射，用量/管理组完整展开。
 const navGroups: NavGroup[] = [
   {
@@ -67,13 +66,12 @@ const navGroups: NavGroup[] = [
     icon: Code2,
     items: [
       navItems[0],  // 仪表盘
-      navItems[1],  // Playground
-      navItems[2],  // 聊天
-      navItems[3],  // 提示词库
-      navItems[4],  // 模型预设
-      navItems[5],  // 渠道管理
-      navItems[6],  // API 密钥
-      navItems[7],  // 模型映射
+      navItems[1],  // 聊天（原 Playground 已并入）
+      navItems[2],  // 提示词库
+      navItems[3],  // 模型预设
+      navItems[4],  // 渠道管理
+      navItems[5],  // API 密钥
+      navItems[6],  // 模型映射
     ],
   },
   {
@@ -92,10 +90,10 @@ const navGroups: NavGroup[] = [
     labelKey: '账户',
     icon: UserCircle2,
     items: [
-      navItems[11], // 钱包充值
-      navItems[12], // 订单记录
-      navItems[13], // 兑换码
-      navItems[21], // 个人中心
+      navItems[10], // 钱包充值
+      navItems[11], // 订单记录
+      navItems[12], // 兑换码
+      navItems[20], // 个人中心
     ],
   },
   {

@@ -38,6 +38,43 @@
   display: none;
 }
 
+/* 会话搜索框（Lxchat 抽屉同款） */
+.chat-sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  height: 32px;
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
+  border-radius: 10px;
+  background: var(--hover-bg, rgba(0, 0, 0, 0.03));
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.chat-sidebar-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-color);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.chat-sidebar-search input::placeholder {
+  color: var(--text-muted);
+}
+
+.chat-sidebar-search button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+}
+
 .chat-sidebar-list {
   display: flex;
   flex-direction: column;
@@ -57,11 +94,12 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 9px 10px;
-  border-radius: 12px;
+  padding: 6px 11px;
+  min-height: 32px;
+  border-radius: 10px;
   cursor: pointer;
   color: var(--text-color);
-  transition: background 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .chat-session:hover {
@@ -69,8 +107,9 @@
 }
 
 .chat-session.active {
-  background: var(--accent-soft, rgba(37, 99, 235, 0.12));
-  color: var(--accent-color, #2563eb);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+  color: var(--text-main, #000000);
+  font-weight: 500;
 }
 
 .chat-session-icon {
@@ -113,6 +152,102 @@
   color: var(--danger, #dc2626);
 }
 
+/* 置顶会话：pin 图标高亮 */
+.chat-session.pinned .chat-session-icon {
+  color: var(--accent-color, #2f6fed);
+  opacity: 1;
+}
+
+/* 会话行操作区：hover 出 ⋯ 菜单按钮 */
+.chat-session-actions {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.chat-session:hover .chat-session-actions,
+.chat-session.active .chat-session-actions,
+.chat-session.pinned .chat-session-actions {
+  opacity: 1;
+}
+
+.chat-session-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.chat-session-more:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.08));
+  color: var(--text-main, #000);
+}
+
+/* 会话菜单弹层 */
+.chat-session-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 80;
+  min-width: 130px;
+  padding: 4px;
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
+  border-radius: 10px;
+  background: var(--card-bg, #fff);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-session-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-color);
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.chat-session-menu button:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.chat-session-menu button.danger {
+  color: var(--danger, #dc2626);
+}
+
+.chat-session-menu button.danger:hover {
+  background: var(--danger-soft, rgba(220, 38, 38, 0.1));
+}
+
+/* 重命名输入框（原地编辑） */
+.chat-session-rename {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  border: 1px solid var(--accent-color, #2f6fed);
+  border-radius: 6px;
+  background: var(--card-bg, #fff);
+  color: var(--text-color);
+  font-size: 12.5px;
+  padding: 0 6px;
+  outline: none;
+}
+
 .chat-overlay {
   display: none;
 }
@@ -124,6 +259,46 @@
   display: flex;
   position: relative;
   background: var(--bg-color);
+}
+
+/* 主区内层：模式 tabs + 模式内容 */
+.chat-main-inner {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.chat-mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px 0;
+  flex-shrink: 0;
+}
+
+.chat-mode-bar .ui-tabs {
+  gap: 4px;
+}
+
+.chat-mode-bar .ui-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-mode-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-mode-body .chat-debugger {
+  flex: 1;
+  min-height: 0;
 }
 
 .chat-sidebar-open {
@@ -170,5 +345,102 @@
   .chat-shell-sidebar-open .chat-overlay {
     opacity: 1;
     pointer-events: auto;
+  }
+}
+
+/* ── Playground V2 双栏（Completions/Images 模式，自 Playground.css 并入） ── */
+.playground-v2 {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) 1fr;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+  padding: 12px 16px 16px;
+  overflow: hidden;
+}
+
+.playground-v2-form,
+.playground-v2-result {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.06));
+  border-radius: 14px;
+  background: var(--surface-bg, var(--bg-color));
+  padding: 14px;
+}
+
+.playground-v2-params {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.playground-v2-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.playground-v2-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.playground-v2-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 120px;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.playground-v2-json {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--code-bg, #0f1117);
+  color: var(--code-fg, #e6e6e6);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.playground-v2-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.playground-v2-images img {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
+}
+
+@media (max-width: 900px) {
+  .playground-v2 {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  .playground-v2-form,
+  .playground-v2-result {
+    overflow: visible;
   }
 }

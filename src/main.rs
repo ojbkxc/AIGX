@@ -804,6 +804,14 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/playground/images",
             post(api::admin::handle_playground_images),
         )
+        .route(
+            "/api/playground/tts",
+            post(api::admin::handle_playground_tts),
+        )
+        .route(
+            "/api/playground/transcriptions",
+            post(api::admin::handle_playground_transcriptions),
+        )
         // 系统监控
         .route(
             "/api/monitor/system",

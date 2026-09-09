@@ -279,15 +279,15 @@
 
 .chat-debugger-empty {
   color: var(--text-main);
-  text-align: center;
+  text-align: left;
   margin: auto;
-  max-width: 34rem;
+  max-width: 38rem;
   padding: 24px 8px;
 }
 
 /* Open WebUI 首页空状态：模型选择下沉到问候语上方 */
 .chat-debugger-empty-model {
-  margin-bottom: 22px;
+  margin-bottom: 18px;
 }
 
 .chat-debugger-empty-model .chat-debugger-model {
@@ -316,10 +316,10 @@
 }
 
 .chat-debugger-empty-title {
-  font-size: 1.9rem;
+  font-size: 1.875rem; /* open-webui text-3xl */
   font-weight: 600;
   letter-spacing: -0.02em;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .chat-debugger-empty-sub {
@@ -328,41 +328,51 @@
   line-height: 1.65;
 }
 
-/* 空状态下方建议 prompt 网格（Open WebUI Suggestions 观感） */
+/* 空状态下方建议 prompt：Open WebUI 式左对齐瀑布流列表，
+ * 透明底 + hover 变色（而非网格卡片）。 */
+.chat-debugger-empty-suggestions-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 24px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 .chat-debugger-empty-suggestions {
-  margin-top: 28px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
   text-align: left;
 }
 
 .chat-debugger-suggestion {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 10px 14px;
+  gap: 1px;
+  width: 100%;
+  padding: 8px 12px;
   border: none;
-  border-radius: 12px;
+  border-radius: 10px;
   background: transparent;
   color: var(--text-main);
   cursor: pointer;
   text-align: left;
-  transition: background 0.15s ease;
-  animation: chat-suggestion-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+  transition: color 0.15s ease, background 0.15s ease;
+  opacity: 0;
+  animation: chat-suggestion-in 0.2s ease forwards;
 }
 
-.chat-debugger-suggestion:nth-child(2) { animation-delay: 45ms; }
-.chat-debugger-suggestion:nth-child(3) { animation-delay: 90ms; }
-.chat-debugger-suggestion:nth-child(4) { animation-delay: 135ms; }
-
 .chat-debugger-suggestion:hover {
-  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+  background: transparent;
+  color: var(--text-main);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.03));
 }
 
 .chat-debugger-suggestion-title {
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 400;
   line-height: 1.4;
 }
 
@@ -377,9 +387,7 @@
 }
 
 @media (max-width: 640px) {
-  .chat-debugger-empty-suggestions {
-    grid-template-columns: 1fr;
-  }
+  .chat-debugger-empty { padding: 20px 4px; }
 }
 
 .chat-debugger-msg {
@@ -458,6 +466,75 @@
   .chat-debugger-copy-btn {
     opacity: 0.55;
   }
+}
+
+/* ── 消息操作行（Lxchat 式：复制/编辑/朗读/重新生成）── */
+.chat-debugger-msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.chat-debugger-msg:hover .chat-debugger-msg-actions,
+.chat-debugger-msg-actions .active {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .chat-debugger-msg-actions {
+    opacity: 0.7;
+  }
+}
+
+.chat-debugger-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.chat-debugger-action-btn:hover:not(:disabled) {
+  color: var(--accent-color, #2f6fed);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.chat-debugger-action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.chat-debugger-action-btn.active {
+  color: var(--accent-color, #2f6fed);
+}
+
+/* 编辑重发框 */
+.chat-debugger-edit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.chat-debugger-edit-box textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.chat-debugger-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .chat-debugger-msg-media {
@@ -570,6 +647,118 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* 输入区左组：+ 附件菜单 + 上下文估算 */
+.chat-debugger-input-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-debugger-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 9999px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.chat-debugger-icon-btn:hover:not(:disabled) {
+  color: var(--accent-color, #2f6fed);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.chat-debugger-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 「+」附件弹出菜单 */
+.chat-debugger-attach-menu {
+  position: relative;
+}
+
+.chat-debugger-attach-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 40;
+  min-width: 150px;
+  padding: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--card-bg);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-debugger-attach-pop button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-color);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-debugger-attach-pop button:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+/* Lxchat 式圆形三态发送按钮：语音 → 发送 → 停止 */
+.chat-debugger-send-fab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 9999px;
+  background: var(--accent-color, #2f6fed);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: 0 2px 8px -2px rgba(47, 111, 237, 0.5);
+}
+
+.chat-debugger-send-fab:hover:not(:disabled) {
+  transform: scale(1.06);
+}
+
+.chat-debugger-send-fab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chat-debugger-send-fab.recording {
+  background: var(--danger, #dc2626);
+  box-shadow: 0 2px 8px -2px rgba(220, 38, 38, 0.5);
+  animation: chat-debugger-pulse 1.2s ease-in-out infinite;
+}
+
+.chat-debugger-send-fab.busy {
+  opacity: 0.6;
+}
+
+@keyframes chat-debugger-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
 }
 
 .chat-debugger-input-row .btn {

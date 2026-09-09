@@ -561,6 +561,28 @@ export const api = {
     request<ApiResponse<PlaygroundChatData>>('POST', `${API_BASE}/playground/chat`, data),
   playgroundImages: (data: PlaygroundImagesRequest): Promise<ApiResponse<PlaygroundRawResult>> =>
     request<ApiResponse<PlaygroundRawResult>>('POST', `${API_BASE}/playground/images`, data),
+  /** Playground TTS：文本转语音，返回 base64 音频 */
+  playgroundTts: (data: { model: string; input: string; voice?: string }): Promise<ApiResponse<{ audio_base64: string; content_type: string }>> =>
+    request<ApiResponse<{ audio_base64: string; content_type: string }>>('POST', `${API_BASE}/playground/tts`, data),
+  /** Playground 语音转文字：multipart 上传音频 blob，返回 { text } */
+  playgroundTranscribe: async (blob: Blob, model: string): Promise<{ text?: string }> => {
+    const form = new FormData();
+    form.append('file', blob, 'audio.webm');
+    form.append('model', model);
+    const res = await fetch(`${API_BASE}/playground/transcriptions`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+    if (res.status === 401) {
+      throw new Error('登录已过期，请重新登录');
+    }
+    const j = (await res.json()) as { success?: boolean; data?: { text?: string }; message?: string; error?: string };
+    if (!res.ok || !j.success) {
+      throw new Error(j.message || j.error || `转写失败 (HTTP ${res.status})`);
+    }
+    return j.data ?? {};
+  },
 
   // 安全监控
   getSecurityOverview: (): Promise<ApiResponse<DashboardItem>> =>
@@ -1091,6 +1113,17 @@ export async function testChannelChatStream(
   });
 
   if (res.status === 401) {
+    // 与 request() 对齐：会话失效时清理本地登录态，避免 SSE 通道被 401 后
+    // 页面停留在「已登录但令牌已死」的状态。
+    try {
+      localStorage.removeItem('token');
+      localStorage.removeItem('email');
+      localStorage.removeItem('username');
+      localStorage.removeItem('role');
+      localStorage.removeItem('expires_at');
+    } catch {
+      // ignore
+    }
     throw new Error('Unauthorized');
   }
 

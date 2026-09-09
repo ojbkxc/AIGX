@@ -3,10 +3,12 @@
 //! 提供在线聊天 Playground 功能，直接测试渠道连接。
 
 use axum::{
+    body::Body,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -323,6 +325,255 @@ pub async fn handle_playground_images(
     };
 
     let mut req = client.post(&url).json(&payload);
+    if !api_key.is_empty() {
+        req = req.bearer_auth(&api_key);
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return error_response(
+                    &format!("Upstream HTTP {status}: {text}"),
+                    StatusCode::BAD_GATEWAY,
+                )
+                .into_response();
+            }
+            match resp.json::<Value>().await {
+                Ok(j) => Json(json!({ "success": true, "data": j })).into_response(),
+                Err(e) => error_response(
+                    &format!("Upstream returned non-JSON: {e}"),
+                    StatusCode::BAD_GATEWAY,
+                )
+                .into_response(),
+            }
+        }
+        Err(e) => {
+            error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY).into_response()
+        }
+    }
+}
+
+/// POST /api/playground/tts - Playground 文本转语音（登录即可）
+///
+/// 请求体透传上游 OpenAI 兼容 /audio/speech（model/input/voice），
+/// 返回 { audio_base64, content_type }，前端 <audio> 直接播放。
+#[derive(Debug, Deserialize)]
+pub struct PlaygroundTtsRequest {
+    pub model: String,
+    pub input: String,
+    #[serde(default)]
+    pub voice: Option<String>,
+}
+
+pub async fn handle_playground_tts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PlaygroundTtsRequest>,
+) -> Response {
+    let _user = match verify_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    if body.input.trim().is_empty() {
+        return error_response("input is required", StatusCode::BAD_REQUEST).into_response();
+    }
+
+    let ch = match state
+        .channel_store
+        .list()
+        .into_iter()
+        .find(|c| c.is_enabled())
+    {
+        Some(c) => c,
+        None => {
+            return error_response(
+                "No enabled channel available for playground",
+                StatusCode::BAD_REQUEST,
+            )
+            .into_response()
+        }
+    };
+
+    let model = if body.model.trim().is_empty() {
+        ch.models.first().cloned().unwrap_or_default()
+    } else {
+        body.model.trim().to_string()
+    };
+    let api_key = ch.decode_api_key();
+    let base = crate::bridge::openai::normalize_base_url(ch.base_url.trim().to_string());
+    let url = format!("{base}/audio/speech");
+
+    let mut payload = json!({ "model": model, "input": body.input });
+    if let Some(v) = body.voice.as_deref() {
+        payload["voice"] = json!(v);
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return error_response(
+                &format!("HTTP client error: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+            .into_response()
+        }
+    };
+
+    let mut req = client.post(&url).json(&payload);
+    if !api_key.is_empty() {
+        req = req.bearer_auth(&api_key);
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return error_response(
+                    &format!("Upstream HTTP {status}: {text}"),
+                    StatusCode::BAD_GATEWAY,
+                )
+                .into_response();
+            }
+            let content_type = resp
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("audio/mpeg")
+                .to_string();
+            match resp.bytes().await {
+                Ok(b) => Json(json!({
+                    "success": true,
+                    "data": {
+                        "audio_base64": BASE64.encode(&b),
+                        "content_type": content_type
+                    }
+                }))
+                .into_response(),
+                Err(e) => error_response(
+                    &format!("Upstream returned no audio: {e}"),
+                    StatusCode::BAD_GATEWAY,
+                )
+                .into_response(),
+            }
+        }
+        Err(e) => {
+            error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY).into_response()
+        }
+    }
+}
+
+/// POST /api/playground/transcriptions - Playground 语音转文字（登录即可）
+///
+/// multipart/form-data（file + model + 可选 language）透传上游
+/// /audio/transcriptions，返回上游 JSON（含 text）。
+pub async fn handle_playground_transcriptions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let _user = match verify_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let boundary = match content_type.split("boundary=").nth(1) {
+        Some(b) => b.to_string(),
+        None => {
+            return error_response("Missing boundary in content-type", StatusCode::BAD_REQUEST)
+                .into_response()
+        }
+    };
+
+    let bytes = match axum::body::to_bytes(body, 25 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(
+                &format!("Failed to read body: {e}"),
+                StatusCode::BAD_REQUEST,
+            )
+            .into_response()
+        }
+    };
+
+    let (audio_data, model, filename) =
+        match super::super::openai::parse_multipart_audio(&bytes, &boundary) {
+            Ok(v) => v,
+            Err((_status, json_err)) => {
+                let msg = json_err
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("invalid multipart")
+                    .to_string();
+                return error_response(&msg, StatusCode::BAD_REQUEST).into_response();
+            }
+        };
+
+    let ch = match state
+        .channel_store
+        .list()
+        .into_iter()
+        .find(|c| c.is_enabled())
+    {
+        Some(c) => c,
+        None => {
+            return error_response(
+                "No enabled channel available for playground",
+                StatusCode::BAD_REQUEST,
+            )
+            .into_response()
+        }
+    };
+
+    let model = if model.trim().is_empty() {
+        ch.models.first().cloned().unwrap_or_default()
+    } else {
+        model
+    };
+    let api_key = ch.decode_api_key();
+    let base = crate::bridge::openai::normalize_base_url(ch.base_url.trim().to_string());
+    let url = format!("{base}/audio/transcriptions");
+
+    let mime_type = mime_guess::from_path(&filename)
+        .first_or_octet_stream()
+        .to_string();
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return error_response(
+                &format!("HTTP client error: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+            .into_response()
+        }
+    };
+
+    let part = reqwest::multipart::Part::bytes(audio_data.to_vec())
+        .file_name(filename)
+        .mime_str(&mime_type)
+        .unwrap_or_else(|_| {
+            reqwest::multipart::Part::bytes(audio_data.to_vec()).file_name("audio.webm")
+        });
+    let form = reqwest::multipart::Form::new()
+        .text("model", model.clone())
+        .part("file", part);
+
+    let mut req = client.post(&url).multipart(form);
     if !api_key.is_empty() {
         req = req.bearer_auth(&api_key);
     }

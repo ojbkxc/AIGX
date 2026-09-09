@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { parseSseFrame } from './index';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseSseFrame, testChannelChatStream } from './index';
 import type { ChatStreamDelta } from '../types';
 
 /** 收集增量到数组 */
@@ -86,5 +86,44 @@ describe('parseSseFrame — 噪声', () => {
     const { deltas, ended } = collect(frame);
     expect(deltas).toEqual([]);
     expect(ended).toBe(false);
+  });
+});
+
+describe('testChannelChatStream — 401 会话清理', () => {
+  const API_BASE = '/api';
+  const chatTestUrl = `${API_BASE}/channels/chat_test`;
+
+  beforeEach(() => {
+    localStorage.setItem('token', 'expired-token');
+    localStorage.setItem('email', 'admin@aigx.local');
+    localStorage.setItem('username', 'admin');
+    localStorage.setItem('role', 'admin');
+    localStorage.setItem('expires_at', String(Date.now() + 60000));
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it('401 时清理本地登录态（与 request() 对齐）', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: 'Session revoked' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    await expect(
+      testChannelChatStream(
+        { channel_id: '', protocol: 'openai', model: 'm', message: 'hi', history: [], stream: true },
+        () => undefined,
+      ),
+    ).rejects.toThrow('Unauthorized');
+    expect(fetchMock).toHaveBeenCalledWith(
+      chatTestUrl,
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(localStorage.getItem('token')).toBeNull();
+    expect(localStorage.getItem('username')).toBeNull();
   });
 });

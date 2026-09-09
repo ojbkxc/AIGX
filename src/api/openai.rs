@@ -3744,7 +3744,7 @@ fn find_sub_slice(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> 
 /// U+FFFD（6 EF BF BD）从而破坏音频内容；且音频流中恰好出现与 boundary
 /// 相同的字节序列时还会截断数据。本实现按 boundary 字节序列分割 part，
 /// 头部（Content-Disposition 等）按 UTF-8 解析，文件 body 保持原始字节。
-fn parse_multipart_audio(
+pub(crate) fn parse_multipart_audio(
     bytes: &bytes::Bytes,
     boundary: &str,
 ) -> Result<(bytes::Bytes, String, String), (StatusCode, Json<Value>)> {

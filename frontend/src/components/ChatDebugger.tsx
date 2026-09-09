@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Search, Send, Square, Trash2, Image, Video, AudioLines, Loader2, Bot, User, Copy, Check } from 'lucide-react';
+import {
+  Search, Send, Square, Trash2, Image, Video, AudioLines, Loader2, Bot, User,
+  Copy, Check, Zap, Mic, Plus, Link2, RefreshCw, Pencil, Volume2,
+} from 'lucide-react';
 import { api, testChannelChatStream } from '../api';
 import MessageViewer from './MessageViewer';
 import './ChatDebugger.css';
@@ -96,10 +99,31 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const [attachUrl, setAttachUrl] = useState('');
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
-  // /chat 会话持久化：消息每次变化都同步给宿主页面
+  // ── Lxchat 式输入区状态 ──
+  /** 「+」附件菜单开关 */
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const attachMenuRef = useRef<HTMLDivElement | null>(null);
+  /** 语音输入：录音中/转写中 */
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const mediaRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  /** TTS 朗读：正在合成/正在播放的消息下标 */
+  const [ttsIdx, setTtsIdx] = useState<number | null>(null);
+  const [ttsPlaying, setTtsPlaying] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // /chat 会话持久化：消息每次变化都同步给宿主页面。
+  // 回调走 ref，避免宿主页面每次渲染传入新函数引用导致
+  // 「保存 → setState → 重渲染 → 新回调 → 再保存」的无限循环。
+  const onMessagesChangeRef = useRef(onMessagesChange);
   useEffect(() => {
-    onMessagesChange?.(messages);
-  }, [messages, onMessagesChange]);
+    onMessagesChangeRef.current = onMessagesChange;
+  }, [onMessagesChange]);
+
+  useEffect(() => {
+    onMessagesChangeRef.current?.(messages);
+  }, [messages]);
 
   // 系统提示词预设（与 i18n 词条保持一致）
   const PROMPT_PRESETS: Record<string, string> = {
@@ -123,7 +147,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     return n + cjk + Math.ceil(other / 4);
   }, 0) + input.length;
 
-  const copyMessage = (text: string, idx: number): void => {
+  const copyMessage = (text: string, idx: number): boolean => {
     const fallbackCopy = (): boolean => {
       try {
         const ta = document.createElement('textarea');
@@ -145,18 +169,25 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         setCopiedIdx(idx);
         setTimeout(() => setCopiedIdx(null), 1500);
       }).catch(() => {
-        if (fallbackCopy()) {
-          setCopiedIdx(idx);
-          setTimeout(() => setCopiedIdx(null), 1500);
-        }
+        const ok = fallbackCopy();
+        if (ok) setCopiedIdx(idx);
+        setTimeout(() => setCopiedIdx(null), 1500);
+        return ok;
       });
+      return true;
     } else if (fallbackCopy()) {
       setCopiedIdx(idx);
       setTimeout(() => setCopiedIdx(null), 1500);
+      return true;
     }
+    return false;
   };
 
   // 合并模型：渠道模型优先，网关映射模型兜底（去重）
+  // 渠道模型列表：依赖 join 后的字符串而非数组引用，避免父组件
+  // 每次渲染传入新数组导致 effect 反复触发。
+  const channelModelsKey = channelModels.join(',');
+
   useEffect(() => {
     let mounted = true;
     if (channelModels.length) {
@@ -180,7 +211,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       .catch(() => { /* 模型列表失败静默降级 */ });
     return () => { mounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channelModels.join(',')]);
+  }, [channelModelsKey]);
 
   useEffect(() => {
     if (messagesEndRef.current) {
@@ -188,15 +219,29 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     }
   }, [messages, busy]);
 
-  // 点击外部关闭模型选择器
+  // 点击外部关闭模型选择器 / 附件菜单
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
         setPickerOpen(false);
       }
+      if (attachMenuRef.current && !attachMenuRef.current.contains(e.target as Node)) {
+        setAttachMenuOpen(false);
+      }
     };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
+  }, []);
+
+  // 卸载时停止录音 / 停止 TTS 播放
+  useEffect(() => {
+    return () => {
+      if (mediaRef.current && mediaRef.current.state === 'recording') {
+        mediaRef.current.stop();
+      }
+      audioRef.current?.pause();
+      audioRef.current = null;
+    };
   }, []);
 
   const visibleModels = models.filter((m) =>
@@ -210,6 +255,131 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     setAttachUrl('');
   };
 
+  /** 「+」菜单：本地文件 → data URI 附件（图片/视频/音频按 MIME 自动分类） */
+  const pickLocalFile = (accept: string): void => {
+    const inputEl = document.createElement('input');
+    inputEl.type = 'file';
+    inputEl.accept = accept;
+    inputEl.multiple = false;
+    inputEl.onchange = () => {
+      const file = inputEl.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const url = String(reader.result || '');
+        const kind: 'image' | 'video' | 'audio' = file.type.startsWith('video')
+          ? 'video'
+          : file.type.startsWith('audio') ? 'audio' : 'image';
+        setAttachments((prev) => [...prev, { kind, url }]);
+      };
+      reader.readAsDataURL(file);
+    };
+    inputEl.click();
+    setAttachMenuOpen(false);
+  };
+
+  /** 语音输入：MediaRecorder 录音 → 上传转写 → 填入输入框 */
+  const startRecording = async (): Promise<void> => {
+    if (recording) {
+      mediaRef.current?.stop();
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError(t('当前浏览器不支持语音输入'));
+      return;
+    }
+    try {
+      const streamObj = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+      const recorder = new MediaRecorder(streamObj, mime ? { mimeType: mime } : undefined);
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        streamObj.getTracks().forEach((tr) => tr.stop());
+        setRecording(false);
+        const blob = new Blob(chunksRef.current, { type: mime || 'audio/webm' });
+        if (blob.size < 1024) return; // 过短的空录音直接丢弃
+        setTranscribing(true);
+        try {
+          const res = await api.playgroundTranscribe(blob, model || 'whisper');
+          const text = (res.text || '').trim();
+          if (text) setInput((prev) => (prev ? `${prev} ${text}` : text));
+          else setError(t('未识别到语音内容'));
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+        } finally {
+          setTranscribing(false);
+        }
+      };
+      mediaRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+      setError('');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(t('无法访问麦克风') + `: ${msg}`);
+    }
+  };
+
+  /** TTS 朗读：再次点击同一消息 = 停止 */
+  const speakMessage = async (idx: number): Promise<void> => {
+    if (ttsPlaying && ttsIdx === idx) {
+      audioRef.current?.pause();
+      setTtsPlaying(false);
+      setTtsIdx(null);
+      return;
+    }
+    audioRef.current?.pause();
+    const m = messages[idx];
+    if (!m?.content?.trim()) return;
+    setTtsIdx(idx);
+    setTtsPlaying(false);
+    try {
+      const res = await api.playgroundTts({ model: model || 'tts', input: m.content });
+      const data = res.data;
+      if (!data?.audio_base64) throw new Error(t('未返回音频'));
+      const audio = new Audio(`data:${data.content_type || 'audio/mpeg'};base64,${data.audio_base64}`);
+      audioRef.current = audio;
+      audio.onended = () => { setTtsPlaying(false); setTtsIdx(null); };
+      audio.onerror = () => { setTtsPlaying(false); setTtsIdx(null); };
+      await audio.play();
+      setTtsPlaying(true);
+    } catch (err) {
+      setTtsIdx(null);
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  /** 重新生成：截断到最后一条用户消息后重发 */
+  const regenerate = async (): Promise<void> => {
+    if (busy) return;
+    const lastUserIdx = messages.map((m) => m.role).lastIndexOf('user');
+    if (lastUserIdx < 0) return;
+    const userMsg = messages[lastUserIdx];
+    setMessages(messages.slice(0, lastUserIdx));
+    // 等下一帧再触发发送，保证 messages state 已更新
+    setTimeout(() => { void handleSend(userMsg.content, userMsg.attachments?.slice()); }, 0);
+  };
+
+  /** 编辑用户消息：进入编辑态 */
+  const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState('');
+  const beginEdit = (idx: number): void => {
+    setEditingIdx(idx);
+    setEditDraft(messages[idx]?.content || '');
+  };
+  const commitEdit = (): void => {
+    if (editingIdx == null) return;
+    const text = editDraft.trim();
+    const attachmentsOf = messages[editingIdx]?.attachments?.slice();
+    setEditingIdx(null);
+    if (!text) return;
+    setMessages(messages.slice(0, editingIdx));
+    setTimeout(() => { void handleSend(text, attachmentsOf); }, 0);
+  };
+
   const blocksForAttachments = (atts: Array<{ kind: string; url: string }>): Array<Record<string, unknown>> => {
     const blocks: Array<Record<string, unknown>> = [];
     for (const a of atts) {
@@ -220,21 +390,19 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     return blocks;
   };
 
-  const handleSend = async (override?: string): Promise<void> => {
+  const handleSend = async (override?: string, overrideAttachments?: Array<{ kind: 'image' | 'video' | 'audio'; url: string }>): Promise<void> => {
     const text = (override ?? input).trim();
-    if ((!text && !attachments.length) || busy) return;
+    const atts = overrideAttachments ?? attachments;
+    if ((!text && !atts.length) || busy) return;
     if (!model) {
       setError(t('请先选择模型'));
       return;
     }
-    setMessages((prev) => [...prev, { role: 'user', content: text, attachments: attachments.slice() }]);
-    setInput('');
-    setAttachments([]);
-    setBusy(true);
-    setError('');
+    const pendingAttachments = atts.slice();
 
-    // 历史消息：附件展开为 content blocks；纯文本保持字符串形状
-    const history = messages.map((m) => {
+    // 历史消息：附件展开为 content blocks；纯文本保持字符串形状。
+    // 在当前闭包 messages 基础上追加本条用户消息，保证多轮上下文完整。
+    const history: Array<{ role: string; content: string | Record<string, unknown>[] }> = messages.map((m) => {
       if (m.role === 'user' && m.attachments?.length) {
         const blocks = blocksForAttachments(m.attachments);
         if (m.content) blocks.push({ type: 'text', text: m.content });
@@ -242,6 +410,24 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       }
       return { role: m.role, content: m.content };
     });
+    const currentBlocks = blocksForAttachments(pendingAttachments);
+    if (text) currentBlocks.push({ type: 'text', text });
+    history.push({
+      role: 'user',
+      content: pendingAttachments.length ? currentBlocks : text,
+    });
+
+    setMessages((prev) => {
+      // 重新生成/编辑重发场景：messages 已被截断到此条之前，直接拼接
+      const hasPendingUser = prev.length > 0 && prev[prev.length - 1].role === 'user'
+        && prev[prev.length - 1].content === text;
+      if (hasPendingUser) return prev;
+      return [...prev, { role: 'user', content: text, attachments: pendingAttachments }];
+    });
+    if (override == null) setInput('');
+    setAttachments([]);
+    setBusy(true);
+    setError('');
 
     const body: Record<string, unknown> = {
       channel_id: channelId || '',
@@ -259,10 +445,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       body.system_prompt = systemPrompt.trim();
     }
     // 多模态附件：OpenAI 协议下把 message 换成 content blocks
-    if (attachments.length || messages.some((m) => m.attachments?.length)) {
-      const finalBlocks = blocksForAttachments(attachments);
-      if (text) finalBlocks.push({ type: 'text', text });
-      body.message = finalBlocks;
+    if (pendingAttachments.length) {
+      body.message = currentBlocks;
     }
 
     try {
@@ -300,7 +484,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
           return next;
         });
       } else {
-        const res = (await api.testChannelChat(body)) as ChatChunkResult;
+        const res = (await api.testChannelChat(body)) as unknown as ChatChunkResult;
         const data = res.data || {};
         if (res.stream && res.stream.length) {
           const acc = res.stream.map((c) => c.content || '').join('');
@@ -319,7 +503,17 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === 'Aborted' || msg === 'AbortError' || /abort/i.test(msg)) {
         // 用户主动停止：补一句生成已停止，不弹出错误
-        setMessages((prev) => [...prev, { role: 'assistant', content: `⏹ ${t('已停止生成')}` }]);
+        setMessages((prev) => {
+          const next = prev.slice();
+          const last = next[next.length - 1];
+          // 停在「…」占位阶段时直接替换占位，避免留下空白气泡
+          if (last && last.role === 'assistant' && (last.content === '…' || !last.content.trim())) {
+            next[next.length - 1] = { ...last, content: `⏹ ${t('已停止生成')}` };
+          } else {
+            next.push({ role: 'assistant', content: `⏹ ${t('已停止生成')}` });
+          }
+          return next;
+        });
         abortRef.current = null;
         return;
       }
@@ -334,6 +528,12 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   /** 停止当前流式生成（AbortController 中断上游请求） */
   const stopStreaming = (): void => {
     abortRef.current?.abort();
+  };
+
+  // 模型键盘导航：过滤后列表比 pickerIdx 短时钳位，避免越界 undefined
+  const clampPickerIdx = (i: number): number => {
+    const max = Math.max(0, visibleModels.length - 1);
+    return Math.min(Math.max(i, 0), max);
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -375,13 +575,13 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
                     // 键盘导航：↑/↓ 选择，Enter 确认，Esc 关闭
                     if (e.key === 'ArrowDown') {
                       e.preventDefault();
-                      setPickerIdx((i) => Math.min(i + 1, visibleModels.length - 1));
+                      setPickerIdx((i) => clampPickerIdx(i + 1));
                     } else if (e.key === 'ArrowUp') {
                       e.preventDefault();
-                      setPickerIdx((i) => Math.max(i - 1, 0));
+                      setPickerIdx((i) => clampPickerIdx(i - 1));
                     } else if (e.key === 'Enter') {
                       e.preventDefault();
-                      const pick = visibleModels[pickerIdx];
+                      const pick = visibleModels[clampPickerIdx(pickerIdx)];
                       if (pick) { setModel(pick); setPickerOpen(false); setMessages([]); setQuery(''); }
                     } else if (e.key === 'Escape') {
                       setPickerOpen(false); setQuery('');
@@ -400,8 +600,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
                   <button
                     type="button"
                     key={m}
-                    className={`chat-debugger-picker-item ${m === model ? 'active' : ''} ${i === pickerIdx ? 'hover' : ''}`}
-                    onMouseEnter={() => setPickerIdx(i)}
+                    className={`chat-debugger-picker-item ${m === model ? 'active' : ''} ${i === clampPickerIdx(pickerIdx) ? 'hover' : ''}`}
+                    onMouseEnter={() => setPickerIdx(clampPickerIdx(i))}
                     onClick={() => { setModel(m); setPickerOpen(false); setMessages([]); setQuery(''); }}
                   >
                     {m}
@@ -562,21 +762,28 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
               {t('输入消息开始对话。支持多轮上下文与图片/视频/音频附件（OpenAI 协议）。')}
             </div>
             {suggestionPrompts.length > 0 && (
-              <div className="chat-debugger-empty-suggestions">
-                {suggestionPrompts.map((s) => (
-                  <button
-                    key={s.title}
-                    type="button"
-                    className="chat-debugger-suggestion"
-                    onClick={() => {
-                      void handleSend(s.content);
-                    }}
-                  >
-                    <span className="chat-debugger-suggestion-title">{s.title}</span>
-                    <span className="chat-debugger-suggestion-sub">{s.sub}</span>
-                  </button>
-                ))}
-              </div>
+              <>
+                <div className="chat-debugger-empty-suggestions-label">
+                  <Zap size={13} />
+                  {t('推荐提示词')}
+                </div>
+                <div className="chat-debugger-empty-suggestions">
+                  {suggestionPrompts.map((s, idx) => (
+                    <button
+                      key={`${s.title}-${idx}`}
+                      type="button"
+                      className="chat-debugger-suggestion"
+                      style={{ animationDelay: `${idx * 45}ms` }}
+                      onClick={() => {
+                        void handleSend(s.content);
+                      }}
+                    >
+                      <span className="chat-debugger-suggestion-title">{s.title}</span>
+                      <span className="chat-debugger-suggestion-sub">{s.sub || t('提示词')}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         )}
@@ -593,17 +800,75 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
                   {a.kind === 'audio' && <audio src={a.url} controls />}
                 </div>
               ))}
-              <div className="chat-debugger-msg-content">
-                <MessageViewer content={m.content} reasoning={m.reasoning} />
-              </div>
-              <button
-                type="button"
-                className="chat-debugger-copy-btn"
-                title={t('复制消息')}
-                onClick={() => copyMessage(m.reasoning ? `${m.reasoning}\n\n${m.content}` : m.content, i)}
-              >
-                {copiedIdx === i ? <Check size={12} /> : <Copy size={12} />}
-              </button>
+              {editingIdx === i ? (
+                <div className="chat-debugger-edit-box">
+                  <textarea
+                    className="form-input"
+                    rows={3}
+                    autoFocus
+                    value={editDraft}
+                    onChange={(e) => setEditDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitEdit(); }
+                      if (e.key === 'Escape') { e.preventDefault(); setEditingIdx(null); }
+                    }}
+                  />
+                  <div className="chat-debugger-edit-actions">
+                    <button type="button" className="btn btn-outline btn-sm" onClick={() => setEditingIdx(null)}>{t('取消')}</button>
+                    <button type="button" className="btn btn-primary btn-sm" onClick={commitEdit} disabled={busy}>{t('保存并重发')}</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="chat-debugger-msg-content">
+                  <MessageViewer content={m.content} reasoning={m.reasoning} />
+                </div>
+              )}
+              {editingIdx !== i && (
+                <div className="chat-debugger-msg-actions">
+                  <button
+                    type="button"
+                    className="chat-debugger-action-btn"
+                    title={t('复制消息')}
+                    onClick={() => copyMessage(m.reasoning ? `${m.reasoning}\n\n${m.content}` : m.content, i)}
+                  >
+                    {copiedIdx === i ? <Check size={13} /> : <Copy size={13} />}
+                  </button>
+                  {m.role === 'user' && (
+                    <button
+                      type="button"
+                      className="chat-debugger-action-btn"
+                      title={t('编辑并重发')}
+                      onClick={() => beginEdit(i)}
+                      disabled={busy}
+                    >
+                      <Pencil size={13} />
+                    </button>
+                  )}
+                  {m.role === 'assistant' && (
+                    <>
+                      <button
+                        type="button"
+                        className={`chat-debugger-action-btn ${ttsIdx === i ? 'active' : ''}`}
+                        title={ttsPlaying && ttsIdx === i ? t('停止朗读') : t('朗读（TTS）')}
+                        onClick={() => void speakMessage(i)}
+                      >
+                        {ttsPlaying && ttsIdx === i ? <Square size={13} /> : <Volume2 size={13} />}
+                      </button>
+                      {i === messages.length - 1 && (
+                        <button
+                          type="button"
+                          className="chat-debugger-action-btn"
+                          title={t('重新生成')}
+                          onClick={() => void regenerate()}
+                          disabled={busy}
+                        >
+                          <RefreshCw size={13} />
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         ))}
@@ -623,31 +888,100 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
 
       <div className="chat-debugger-input-row">
         <div className="chat-debugger-input-shell">
+          {attachments.length > 0 && (
+            <div className="chat-debugger-attach-chips">
+              {attachments.map((a, i) => (
+                <span key={i} className="chat-debugger-chip" title={a.url.length > 48 ? a.url.slice(0, 200) : a.url}>
+                  {a.kind === 'image' && <Image size={12} />}
+                  {a.kind === 'video' && <Video size={12} />}
+                  {a.kind === 'audio' && <AudioLines size={12} />}
+                  {a.kind === 'image' ? t('图片') : a.kind === 'video' ? t('视频') : t('音频')}
+                  <button type="button" onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}>×</button>
+                </span>
+              ))}
+            </div>
+          )}
           <textarea
             rows={2}
-            placeholder={t('输入消息，Enter 发送，Shift+Enter 换行')}
+            placeholder={recording ? t('录音中…再次点击麦克风结束') : transcribing ? t('语音转文字中…') : t('输入消息，Enter 发送，Shift+Enter 换行')}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={busy}
+            onPaste={(e) => {
+              // 粘贴图片（截图）自动变附件
+              const items = e.clipboardData?.items;
+              if (!items) return;
+              for (const item of items) {
+                if (item.type.startsWith('image/')) {
+                  const file = item.getAsFile();
+                  if (!file) continue;
+                  e.preventDefault();
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    const url = String(reader.result || '');
+                    if (url) setAttachments((prev) => [...prev, { kind: 'image', url }]);
+                  };
+                  reader.readAsDataURL(file);
+                }
+              }
+            }}
           />
           <div className="chat-debugger-input-meta">
-            <div className="chat-debugger-context" title={t('上下文 ≈')}>
-              {t('上下文 ≈')} {contextEstimate.toLocaleString()} tokens
+            <div className="chat-debugger-input-left">
+              {!hideToolbar && (
+                <div className="chat-debugger-attach-menu" ref={attachMenuRef}>
+                  <button
+                    type="button"
+                    className="chat-debugger-icon-btn"
+                    title={t('添加附件')}
+                    onClick={() => setAttachMenuOpen((v) => !v)}
+                    disabled={busy}
+                  >
+                    <Plus size={15} />
+                  </button>
+                  {attachMenuOpen && (
+                    <div className="chat-debugger-attach-pop">
+                      <button type="button" onClick={() => pickLocalFile('image/*')}>
+                        <Image size={13} /> {t('上传图片')}
+                      </button>
+                      <button type="button" onClick={() => pickLocalFile('video/*')}>
+                        <Video size={13} /> {t('上传视频')}
+                      </button>
+                      <button type="button" onClick={() => pickLocalFile('audio/*')}>
+                        <AudioLines size={13} /> {t('上传音频')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setAttachKind('image'); setAttachMenuOpen(false); }}
+                      >
+                        <Link2 size={13} /> {t('粘贴媒体 URL')}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className="chat-debugger-context" title={t('上下文 ≈')}>
+                {t('上下文 ≈')} {contextEstimate.toLocaleString()} tokens
+              </div>
             </div>
             <div className="chat-debugger-input-actions">
               <button type="button" className="btn btn-outline btn-sm" onClick={clearAll} disabled={busy || !messages.length} title={t('清空对话')}>
                 <Trash2 size={14} />
               </button>
+              {/* Lxchat 式圆形三态按钮：空输入=语音，有输入=发送，生成中=停止 */}
               <button
                 type="button"
-                className="btn btn-primary"
-                onClick={busy ? stopStreaming : () => void handleSend()}
-                disabled={(!busy && ((!input.trim() && !attachments.length) || !model))}
-                title={busy ? t('停止生成') : t('发送')}
+                className={`chat-debugger-send-fab ${recording ? 'recording' : ''} ${transcribing ? 'busy' : ''}`}
+                onClick={() => {
+                  if (busy) { stopStreaming(); return; }
+                  if (!input.trim() && !attachments.length) { void startRecording(); return; }
+                  void handleSend();
+                }}
+                disabled={transcribing || (!busy && !input.trim() && !attachments.length && !navigator.mediaDevices?.getUserMedia)}
+                title={busy ? t('停止生成') : (!input.trim() && !attachments.length) ? t('语音输入') : t('发送')}
               >
-                {busy ? <Square size={14} /> : <Send size={14} />}
-                {busy ? t('停止') : t('发送')}
+                {busy ? <Square size={14} /> : (!input.trim() && !attachments.length) ? <Mic size={15} /> : <Send size={15} />}
               </button>
             </div>
           </div>
