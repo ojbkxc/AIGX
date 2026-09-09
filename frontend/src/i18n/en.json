@@ -815,5 +815,6 @@
 "归属方": "Owned By",
 "上下文长度（可选）": "Context Length (optional)",
 "能力标签（逗号分隔，可选）": "Capabilities (comma separated, optional)",
-"暂无覆盖项。内置推断已覆盖常见模型，需要自定义归属/上下文/能力时在此添加": "No overrides yet. Built-in inference covers common models; add one here to customize ownership/context/capabilities"
+"暂无覆盖项。内置推断已覆盖常见模型，需要自定义归属/上下文/能力时在此添加": "No overrides yet. Built-in inference covers common models; add one here to customize ownership/context/capabilities",
+"推荐提示词": "Suggested prompts"
 }

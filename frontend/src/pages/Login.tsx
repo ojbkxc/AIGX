@@ -83,11 +83,17 @@ export default function Login(): JSX.Element {
 
   // 登录成功后写入会话并跳转（密码/TOTP 两条路径共用）
   const completeLogin = (data: { token: string; email: string; username?: string; role?: string; expires_at?: number }): void => {
+    // 后端契约是秒级时间戳；防御性兼容：若上游返回毫秒级则不重复乘 1000
+    const rawExp = Number(data.expires_at);
+    const expiresMs = Number.isFinite(rawExp) && rawExp > 0
+      ? (rawExp < 1e12 ? rawExp * 1000 : rawExp)
+      : Date.now() + 24 * 60 * 60 * 1000;
     localStorage.setItem('token', data.token);
     localStorage.setItem('email', data.email);
-    localStorage.setItem('username', data.username || data.email);
+    // 用户名为空时回退 email（侧边栏需要非空展示），不再写入「@」前缀
+    localStorage.setItem('username', data.username || '');
     localStorage.setItem('role', data.role || 'user');
-    localStorage.setItem('expires_at', String(Number(data.expires_at) * 1000));
+    localStorage.setItem('expires_at', String(expiresMs));
     navigate('/');
   };
 
