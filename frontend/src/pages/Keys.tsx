@@ -1,5 +1,9 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, useMemo, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import {
+  Eye, EyeOff, MoreHorizontal, Search, Pencil, Power, PowerOff,
+  Loader2, RotateCcw, Trash2, Copy, Check, RefreshCcw,
+} from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { isAdmin } from '../lib/utils';
@@ -76,6 +80,16 @@ function localInputToTs(v: string): number | null {
   return Math.floor(ms / 1000);
 }
 
+/** 模型名 → 稳定颜色（与渠道页 autoColor 同思路：字符串 hash → HSL 色相） */
+function modelBadgeColor(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i += 1) {
+    hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  }
+  const hue = hash % 360;
+  return `hsl(${hue} 65% 45%)`;
+}
+
 export default function Keys(): JSX.Element {
   const [tokens, setTokens] = useState<TokenItem[]>([]);
   const [groups, setGroups] = useState<GroupItem[]>([]);
@@ -93,6 +107,8 @@ export default function Keys(): JSX.Element {
   const [plainKeys, setPlainKeys] = useState<Record<string | number, string>>({});
   // 正在取明文的令牌 ID（查看按钮 loading 态）
   const [fetchingKeyId, setFetchingKeyId] = useState<string | number | null>(null);
+  // 复制成功打勾回显（new-api ApiKeyCell：Copy → Check 短暂切换）
+  const [copiedKeyId, setCopiedKeyId] = useState<string | number | null>(null);
   const [editing, setEditing] = useState<TokenItem | null>(null);
   const [form, setForm] = useState<KeyFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
@@ -100,6 +116,17 @@ export default function Keys(): JSX.Element {
 
   // 令牌轮换后展示的新密钥（一次性显示，提示用户立即保存）
   const [rotatedKey, setRotatedKey] = useState<RotatedKeyState | null>(null);
+
+  // ── 批量选择 / 搜索 / 行操作菜单（对齐渠道页） ──
+  const [selected, setSelected] = useState<Set<string | number>>(new Set());
+  const [search, setSearch] = useState('');
+  const [rowMenuId, setRowMenuId] = useState<string | number | null>(null);
+  useEffect(() => {
+    if (rowMenuId === null) return;
+    const handler = (): void => setRowMenuId(null);
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [rowMenuId]);
 
   useEffect(() => {
     void load();
@@ -120,6 +147,30 @@ export default function Keys(): JSX.Element {
     } finally {
       setLoading(false);
     }
+  };
+
+  // 前端过滤（后端令牌接口无 search 参数，全量拉回后本地匹配——名称/分组/密钥前缀）
+  const q = search.trim().toLowerCase();
+  const filtered = useMemo(() => {
+    if (!q) return tokens;
+    return tokens.filter((tk) =>
+      (tk.name || '').toLowerCase().includes(q)
+      || (tk.group || '').toLowerCase().includes(q)
+      || (tk.key || '').toLowerCase().includes(q));
+  }, [tokens, q]);
+
+  // 全选/反选（仅当前过滤结果）
+  const allSelected = filtered.length > 0 && filtered.every((tk) => selected.has(tk.id));
+  const toggleAll = (): void => {
+    if (allSelected) setSelected(new Set());
+    else setSelected(new Set(filtered.map((tk) => tk.id)));
+  };
+  const toggleOne = (id: string | number): void => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
   };
 
   const openCreate = () => {
@@ -227,6 +278,52 @@ export default function Keys(): JSX.Element {
         }
       },
     });
+  };
+
+  // 批量删除（对齐渠道页批量操作栏）
+  const handleBulkDelete = (): void => {
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    setConfirmState({
+      title: t('批量删除令牌'),
+      message: t('确定删除选中的 {{count}} 个令牌？使用这些令牌的调用将立即失败。', { count: ids.length }),
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        for (const id of ids) {
+          await api.deleteToken(id).catch(() => {});
+        }
+        addToast(t('已删除 {{count}} 个令牌', { count: ids.length }));
+        setSelected(new Set());
+        await load();
+      },
+    });
+  };
+
+  // 批量启停
+  const handleBulkStatus = (status: 'active' | 'disabled'): void => {
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    const disabling = status === 'disabled';
+    const run = async (): Promise<void> => {
+      for (const id of ids) {
+        await api.updateToken(id, { status }).catch(() => {});
+      }
+      addToast(disabling ? t('已禁用 {{count}} 个令牌', { count: ids.length }) : t('已启用 {{count}} 个令牌', { count: ids.length }));
+      setSelected(new Set());
+      await load();
+    };
+    if (disabling) {
+      setConfirmState({
+        title: t('批量禁用令牌'),
+        message: t('确定禁用选中的 {{count}} 个令牌？使用这些令牌的调用将立即失败。', { count: ids.length }),
+        confirmText: t('禁用'),
+        danger: true,
+        onConfirm: run,
+      });
+      return;
+    }
+    void run();
   };
 
   const handleToggleStatus = (tk: TokenItem) => {
@@ -360,11 +457,21 @@ export default function Keys(): JSX.Element {
     return null;
   };
 
-  const fmtQuota = (q: number | undefined): string => {
-    const n = Number(q || 0);
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
-    if (n >= 1_000) return (n / 1_000).toFixed(2) + 'K';
-    return String(n);
+  // 复制按钮：new-api ApiKeyCell 风格 —— 复制成功后 Copy 图标短暂变绿勾
+  const handleCopyKey = (tk: TokenItem): void => {
+    void fetchPlainKey(tk).then((key) => {
+      if (!key) return;
+      copyToClipboard(key);
+      setCopiedKeyId(tk.id);
+      window.setTimeout(() => setCopiedKeyId(null), 1500);
+    });
+  };
+
+  const fmtQuota = (n: number | undefined): string => {
+    const v = Number(n || 0);
+    if (v >= 1_000_000) return (v / 1_000_000).toFixed(2) + 'M';
+    if (v >= 1_000) return (v / 1_000).toFixed(2) + 'K';
+    return String(v);
   };
 
   const isExpired = (tk: TokenItem): boolean => {
@@ -372,7 +479,30 @@ export default function Keys(): JSX.Element {
     return Number(tk.expires_at) < Math.floor(Date.now() / 1000);
   };
 
-  if (loading) return <SkeletonTable columns={5} rows={6} />;
+  // 相对时间（new-api ApiKeyTimestampCell：相对时间 + hover 绝对时间）
+  const formatRelativeTime = (ts: number): string => {
+    const diff = Date.now() - ts * 1000;
+    const seconds = Math.floor(diff / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    if (seconds < 60) return t('刚刚');
+    if (minutes < 60) return `${minutes}${t('分钟前')}`;
+    if (hours < 24) return `${hours}${t('小时前')}`;
+    if (days < 30) return `${days}${t('天前')}`;
+    return new Date(ts * 1000).toLocaleDateString();
+  };
+
+  // 模型白名单数组（兼容字符串形式）
+  const modelsOf = (tk: TokenItem): string[] => {
+    if (Array.isArray(tk.allowed_models)) return tk.allowed_models;
+    if (typeof tk.allowed_models === 'string' && tk.allowed_models.trim()) {
+      return tk.allowed_models.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    return [];
+  };
+
+  if (loading) return <SkeletonTable columns={7} rows={6} />;
 
   return (
     <div>
@@ -385,123 +515,257 @@ export default function Keys(): JSX.Element {
 
       <Card
         title={`${t('所有令牌')} (${tokens.length})`}
-        actions={<Button onClick={openCreate}>{t('+ 创建令牌')}</Button>}
+        actions={
+          <div className="keys-toolbar">
+            <div className="keys-search">
+              <Search size={14} />
+              <input
+                placeholder={t('搜索令牌')}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+            <Button onClick={openCreate}>{t('+ 创建令牌')}</Button>
+          </div>
+        }
       >
         {tokens.length === 0 ? (
           <EmptyState message={t('暂无 API 令牌')} icon="🔑" action={<Button onClick={openCreate}>{t('创建第一个令牌')}</Button>} />
         ) : (
-          <div className="table-wrapper">
-            <table>
-              <thead>
-                <tr>
-                  <th>{t('名称')}</th>
-                  <th>{t('密钥')}</th>
-                  <th>{t('分组')}</th>
-                  <th>{t('模型白名单')}</th>
-                  <th>{t('额度')}</th>
-                  <th>{t('过期')}</th>
-                  <th>{t('状态')}</th>
-                  <th>{t('创建时间')}</th>
-                  <th>{t('操作')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tokens.map((tk) => {
-                  const expired = isExpired(tk);
-                  const disabled = tk.status === 'disabled' || tk.is_active === false;
-                  return (
-                    <tr key={tk.id}>
-                      <td><strong>{tk.name}</strong></td>
-                      <td style={{ fontSize: 12 }}>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                          <code style={{
-                            fontSize: 11,
-                            maxWidth: 220,
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                            display: 'inline-block',
-                            verticalAlign: 'middle',
-                          }}>
-                            {revealedKeys[tk.id]
-                              ? (plainKeys[tk.id] || tk.plain_key || t('（获取失败）'))
-                              : (tk.key || '••••••••••••')}
-                          </code>
-                          <button
-                            type="button"
-                            className="btn btn-outline btn-sm"
-                            title={revealedKeys[tk.id] ? t('隐藏密钥') : t('查看密钥')}
-                            disabled={fetchingKeyId === tk.id}
-                            onClick={() => {
-                              if (!revealedKeys[tk.id] && !plainKeys[tk.id] && !tk.plain_key) {
-                                setFetchingKeyId(tk.id);
-                                void fetchPlainKey(tk).finally(() => setFetchingKeyId(null));
-                              }
-                              setRevealedKeys((prev) => ({ ...prev, [tk.id]: !prev[tk.id] }));
-                            }}
-                            style={{ padding: '2px 6px', flexShrink: 0 }}
-                          >
-                            {fetchingKeyId === tk.id ? t('获取中…') : revealedKeys[tk.id] ? t('隐藏') : t('查看')}
-                          </button>
-                          <button
-                            type="button"
-                            className="btn btn-outline btn-sm"
-                            title={t('复制密钥')}
-                            onClick={() => void fetchPlainKey(tk).then((key) => key && copyToClipboard(key))}
-                            style={{ padding: '2px 6px', flexShrink: 0 }}
-                          >
-                            {t('复制')}
-                          </button>
-                        </span>
-                      </td>
-                      <td>{tk.group || 'default'}</td>
-                      <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                        {Array.isArray(tk.allowed_models) && tk.allowed_models.length > 0
-                          ? tk.allowed_models.join(', ')
-                          : (tk.allowed_models || t('全部'))}
-                      </td>
-                      <td style={{ fontSize: 12 }}>
-                        {tk.quota_limit
-                          ? `${fmtQuota(tk.used_quota)} / ${fmtQuota(tk.quota_limit)}`
-                          : `${fmtQuota(tk.used_quota)} / ∞`}
-                      </td>
-                      <td style={{ fontSize: 12, color: expired ? 'rgb(239,68,68)' : 'var(--text-muted)' }}>
-                        {tk.expires_at
-                          ? new Date(tk.expires_at * 1000).toLocaleDateString()
-                          : t('永不过期')}
-                        {expired && t('(已过期)')}
-                      </td>
-                      <td>
-                        <span className={disabled ? 'badge badge-danger' : 'badge badge-success'}>
-                          {disabled ? t('禁用') : t('启用')}
-                        </span>
-                      </td>
-                      <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                        {tk.created_at
-                          ? new Date(tk.created_at > 1e12 ? tk.created_at : tk.created_at * 1000).toLocaleDateString()
-                          : '—'}
-                      </td>
-                      <td>
-                        <div className="actions-cell">
-                          <Button variant="outline" size="sm" onClick={() => openEdit(tk)}>{t('编辑')}</Button>
-                          <Button variant="outline" size="sm" onClick={() => void handleToggleStatus(tk)}>
-                            {disabled ? t('启用') : t('禁用')}
-                          </Button>
-                          {tk.quota_limit && (
-                            <Button variant="outline" size="sm" onClick={() => handleResetUsed(tk.id)}>
-                              {t('重置已用')}
-                            </Button>
+          <>
+            {/* 批量操作栏（对齐渠道页） */}
+            {selected.size > 0 && (
+              <div className="keys-bulk">
+                <span>{t('已选')} {selected.size} / {filtered.length}</span>
+                <Button variant="outline" size="sm" onClick={() => handleBulkStatus('active')}>{t('启用')}</Button>
+                <Button variant="outline" size="sm" onClick={() => handleBulkStatus('disabled')}>{t('禁用')}</Button>
+                <Button variant="danger" size="sm" onClick={handleBulkDelete}>{t('删除')}</Button>
+                <Button variant="outline" size="sm" onClick={() => setSelected(new Set())}>{t('取消选择')}</Button>
+              </div>
+            )}
+
+            <div className="table-wrapper keys-table-wrap">
+              <table className="keys-table">
+                <thead>
+                  <tr>
+                    <th className="col-select" style={{ width: 32 }}>
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={toggleAll}
+                        aria-label={t('全选')}
+                      />
+                    </th>
+                    <th className="col-name">{t('名称')}</th>
+                    <th className="col-status">{t('状态')}</th>
+                    <th className="col-key">{t('密钥')}</th>
+                    <th className="col-quota">{t('额度')}</th>
+                    <th className="col-group">{t('分组')}</th>
+                    <th className="col-models">{t('模型')}</th>
+                    <th className="col-expires">{t('过期')}</th>
+                    <th className="col-created">{t('创建时间')}</th>
+                    <th className="col-actions">{t('操作')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((tk) => {
+                    const expired = isExpired(tk);
+                    const disabled = tk.status === 'disabled' || tk.is_active === false;
+                    const models = modelsOf(tk);
+                    const used = Number(tk.used_quota || 0);
+                    const limit = tk.quota_limit;
+                    // 额度进度（new-api Quota Cell：剩余/总量 + 进度条着色）
+                    const pct = limit ? Math.max(0, Math.min(100, ((limit - used) / limit) * 100)) : null;
+                    const maskShown = tk.key || '••••••••••••';
+                    return (
+                      <tr key={tk.id} className={selected.has(tk.id) ? 'selected' : ''}>
+                        <td className="col-select">
+                          <input
+                            type="checkbox"
+                            checked={selected.has(tk.id)}
+                            onChange={() => toggleOne(tk.id)}
+                            aria-label={t('选择')}
+                          />
+                        </td>
+                        <td className="col-name">
+                          <div className="tk-name" title={tk.name}>{tk.name}</div>
+                        </td>
+                        <td className="col-status">
+                          <span className={`tk-status-badge ${expired ? 'warn' : disabled ? 'bad' : 'ok'}`}>
+                            {expired ? t('已过期') : disabled ? t('禁用') : t('启用')}
+                          </span>
+                        </td>
+                        <td className="col-key">
+                          <div className="tk-key-cell">
+                            <code className="tk-key-code" title={revealedKeys[tk.id] ? (plainKeys[tk.id] || '') : maskShown}>
+                              {revealedKeys[tk.id]
+                                ? (plainKeys[tk.id] || tk.plain_key || t('（获取失败）'))
+                                : maskShown}
+                            </code>
+                            <button
+                              type="button"
+                              className="tk-icon-btn"
+                              title={revealedKeys[tk.id] ? t('隐藏密钥') : t('查看密钥')}
+                              disabled={fetchingKeyId === tk.id}
+                              onClick={() => {
+                                if (!revealedKeys[tk.id] && !plainKeys[tk.id] && !tk.plain_key) {
+                                  setFetchingKeyId(tk.id);
+                                  void fetchPlainKey(tk).finally(() => setFetchingKeyId(null));
+                                }
+                                setRevealedKeys((prev) => ({ ...prev, [tk.id]: !prev[tk.id] }));
+                              }}
+                            >
+                              {fetchingKeyId === tk.id
+                                ? <Loader2 size={13} className="animate-spin" />
+                                : (revealedKeys[tk.id] ? <EyeOff size={13} /> : <Eye size={13} />)}
+                            </button>
+                            <button
+                              type="button"
+                              className="tk-icon-btn"
+                              title={copiedKeyId === tk.id ? t('已复制到剪贴板') : t('复制密钥')}
+                              onClick={() => handleCopyKey(tk)}
+                            >
+                              {copiedKeyId === tk.id
+                                ? <Check size={13} style={{ color: 'var(--success-color, #10b981)' }} />
+                                : <Copy size={13} />}
+                            </button>
+                          </div>
+                        </td>
+                        <td className="col-quota">
+                          {limit ? (
+                            <div className="tk-quota" title={`${t('已用')} ${fmtQuota(used)} / ${t('上限')} ${fmtQuota(limit)}`}>
+                              <div className="tk-quota-nums">
+                                <span>{fmtQuota(used)}</span>
+                                <span className="tk-quota-total">/ {fmtQuota(limit)}</span>
+                              </div>
+                              <div className="tk-quota-bar">
+                                <div
+                                  className={`tk-quota-fill ${pct !== null && pct <= 10 ? 'low' : pct !== null && pct <= 30 ? 'mid' : 'high'}`}
+                                  style={{ width: `${pct ?? 0}%` }}
+                                />
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="tk-quota-free" title={`${t('已用')} ${fmtQuota(used)}`}>
+                              {fmtQuota(used)} / ∞
+                            </span>
                           )}
-                          <Button variant="outline" size="sm" onClick={() => handleRotate(tk)}>{t('轮换')}</Button>
-                          <Button variant="danger" size="sm" onClick={() => handleDelete(tk.id)}>{t('删除')}</Button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                        </td>
+                        <td className="col-group">
+                          <span className="tk-group-badge">{tk.group || 'default'}</span>
+                        </td>
+                        <td className="col-models">
+                          {models.length === 0
+                            ? <span className="tk-models-all">{t('全部')}</span>
+                            : (
+                              <div className="tk-models">
+                                {models.slice(0, 3).map((m) => (
+                                  <span key={m} className="tk-model-badge" style={{ color: modelBadgeColor(m), borderColor: modelBadgeColor(m) }}>
+                                    {m}
+                                  </span>
+                                ))}
+                                {models.length > 3 && (
+                                  <span className="tk-model-badge tk-models-more" title={models.slice(3).join(', ')}>
+                                    +{models.length - 3}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                        </td>
+                        <td className="col-expires">
+                          {tk.expires_at
+                            ? (
+                              <span
+                                title={new Date(tk.expires_at * 1000).toLocaleString()}
+                                style={expired ? { color: 'var(--danger-color, #ef4444)' } : undefined}
+                              >
+                                {new Date(tk.expires_at * 1000).toLocaleDateString()}
+                              </span>
+                            )
+                            : <span className="tk-never">{t('永不过期')}</span>}
+                        </td>
+                        <td className="col-created">
+                          {tk.created_at
+                            ? (
+                              <span
+                                title={new Date(tk.created_at > 1e12 ? tk.created_at : tk.created_at * 1000).toLocaleString()}
+                              >
+                                {formatRelativeTime(tk.created_at > 1e12 ? Math.floor(tk.created_at / 1000) : tk.created_at)}
+                              </span>
+                            )
+                            : '—'}
+                        </td>
+                        <td className="col-actions">
+                          <div className="tk-actions">
+                            <button
+                              type="button"
+                              className={`tk-icon-btn ${!disabled ? 'tk-danger-hover' : ''}`}
+                              title={disabled ? t('启用') : t('禁用')}
+                              onClick={() => handleToggleStatus(tk)}
+                            >
+                              {disabled ? <PowerOff size={15} /> : <Power size={15} />}
+                            </button>
+                            <button
+                              type="button"
+                              className="tk-icon-btn"
+                              title={t('编辑令牌')}
+                              onClick={() => openEdit(tk)}
+                            >
+                              <Pencil size={15} />
+                            </button>
+                            <div className="tk-row-menu">
+                              <button
+                                type="button"
+                                className="tk-icon-btn"
+                                title={t('更多操作')}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setRowMenuId((prev) => (prev === tk.id ? null : tk.id));
+                                }}
+                              >
+                                <MoreHorizontal size={15} />
+                              </button>
+                              {rowMenuId === tk.id && (
+                                <div className="tk-row-menu-panel" onClick={(e) => e.stopPropagation()}>
+                                  <button type="button" onClick={() => { setRowMenuId(null); handleCopyKey(tk); }}>
+                                    <Copy size={14} />
+                                    {t('复制密钥')}
+                                  </button>
+                                  {tk.quota_limit && (
+                                    <button type="button" onClick={() => { setRowMenuId(null); handleResetUsed(tk.id); }}>
+                                      <RefreshCcw size={14} />
+                                      {t('重置已用')}
+                                    </button>
+                                  )}
+                                  <button type="button" onClick={() => { setRowMenuId(null); handleRotate(tk); }}>
+                                    <RotateCcw size={14} />
+                                    {t('轮换')}
+                                  </button>
+                                  <div className="tk-row-menu-sep" />
+                                  <button
+                                    type="button"
+                                    className="tk-row-menu-danger"
+                                    onClick={() => { setRowMenuId(null); handleDelete(tk.id); }}
+                                  >
+                                    <Trash2 size={14} />
+                                    {t('删除令牌')}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {filtered.length === 0 && search && (
+              <EmptyState message={t('无匹配结果')} icon="🔍" />
+            )}
+          </>
         )}
       </Card>
 
