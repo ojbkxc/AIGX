@@ -10,6 +10,9 @@ interface WalletUser {
   username?: string;
   quota?: number;
   used_quota?: number;
+  aff_count?: number;
+  aff_quota?: number;
+  aff_history_quota?: number;
 }
 
 interface EpayConfig {
@@ -43,6 +46,10 @@ export default function Wallet(): JSX.Element {
   const addToast = useToast();
   const { t } = useTranslation();
 
+  // 邀请返利
+  const [affCode, setAffCode] = useState('');
+  const [claiming, setClaiming] = useState(false);
+
   const [amount, setAmount] = useState('10');
   const [method, setMethod] = useState('alipay');
   const [submitting, setSubmitting] = useState(false);
@@ -64,14 +71,16 @@ export default function Wallet(): JSX.Element {
     setLoading(true);
     setError('');
     try {
-      const [meRes, epayRes, orderRes] = await Promise.all([
+      const [meRes, epayRes, orderRes, affRes] = await Promise.all([
         api.getMe().catch(() => null),
         api.getEpayInfo().catch(() => null),
         api.myOrders().catch(() => null),
+        api.getAffCode().catch(() => null),
       ]);
       if (meRes) setMe(meRes.data as WalletUser | null);
       if (epayRes) setEpay(epayRes.data as EpayConfig | null);
       if (orderRes) setOrders(Array.isArray(orderRes.data) ? (orderRes.data as unknown as WalletOrder[]) : []);
+      if (affRes) setAffCode(String(affRes.data ?? ''));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -149,6 +158,36 @@ export default function Wallet(): JSX.Element {
       setTopupError(err instanceof Error ? err.message : String(err));
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  /** 复制邀请链接（注册页读 ?aff= 参数自动填入邀请码） */
+  const copyInviteLink = () => {
+    const base = window.location.origin + '/register';
+    const link = affCode ? `${base}?aff=${encodeURIComponent(affCode)}` : base;
+    void navigator.clipboard.writeText(link).then(
+      () => addToast(t('邀请链接已复制')),
+      () => addToast(t('复制失败，请手动复制邀请码')),
+    );
+  };
+
+  /** 领取邀请奖励：aff_quota 全额划转到可用配额 */
+  const claimAff = async () => {
+    setClaiming(true);
+    try {
+      const res = await api.affTransfer();
+      const transferred = Number((res?.data as { transferred?: number } | null)?.transferred ?? 0);
+      if (transferred > 0) {
+        addToast(`${t('已领取')} ${fmtQuota(transferred)} ${t('配额')}`);
+      } else {
+        addToast(t('暂无可领取的邀请奖励'));
+      }
+      const meRes = await api.getMe();
+      if (meRes) setMe(meRes.data as WalletUser | null);
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setClaiming(false);
     }
   };
 
@@ -284,8 +323,39 @@ export default function Wallet(): JSX.Element {
         </>
       )}
 
-      <Card title={t('兑换码充值')} bodyClassName="">
-        <form onSubmit={(e: FormEvent) => {
+      {/* 邀请返利卡片（对齐 new-api AffiliateRewardsCard） */}
+      <Card title={t('邀请返利')} bodyClassName="">
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('我的邀请码')}</div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 }}>
+              <code className="key-value" style={{ fontSize: 16, letterSpacing: 1 }}>{affCode || '—'}</code>
+              <Button variant="outline" size="sm" onClick={copyInviteLink} disabled={!affCode}>
+                {t('复制邀请链接')}
+              </Button>
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('已邀请人数')}</div>
+            <div style={{ fontSize: 18, fontWeight: 600, marginTop: 4 }}>{me?.aff_count ?? 0}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('待领取奖励')}</div>
+            <div style={{ fontSize: 18, fontWeight: 600, marginTop: 4, color: 'var(--accent-color)' }}>
+              {fmtQuota(me?.aff_quota ?? 0)}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('累计邀请获得')}</div>
+            <div style={{ fontSize: 18, fontWeight: 600, marginTop: 4 }}>{fmtQuota(me?.aff_history_quota ?? 0)}</div>
+          </div>
+          <Button size="sm" onClick={() => void claimAff()} disabled={claiming || !me?.aff_quota}>
+            {claiming ? t('领取中...') : t('领取奖励')}
+          </Button>
+        </div>
+      </Card>
+
+      <Card title={t('兑换码充值')} bodyClassName="">        <form onSubmit={(e: FormEvent) => {
           e.preventDefault();
           const code = redeemCode.trim();
           if (!code) {

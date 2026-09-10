@@ -84,6 +84,14 @@ export interface User {
   used_quota?: number;
   status?: string;
   totp_enabled?: boolean;
+  /** 邀请码（对齐 new-api AffCode） */
+  aff_code?: string;
+  /** 已邀请人数 */
+  aff_count?: number;
+  /** 待领取邀请奖励（可划转到可用配额） */
+  aff_quota?: number;
+  /** 累计邀请获得配额（历史总量） */
+  aff_history_quota?: number;
   created_at?: number;
   updated_at?: number;
 }

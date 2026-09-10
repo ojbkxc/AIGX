@@ -24,6 +24,9 @@ pub struct LimitsRequest {
     pub daily_limit: Option<u64>,
     pub monthly_limit: Option<u64>,
     pub register_quota: Option<i64>,
+    pub register_enabled: Option<bool>,
+    pub quota_for_inviter: Option<i64>,
+    pub quota_for_invitee: Option<i64>,
     pub threshold: Option<f64>,
     pub api_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
@@ -97,6 +100,9 @@ pub async fn handle_get_limits(
             "monthly_limit": config.usage.monthly_limit,
             "monthly_used": monthly.total(),
             "register_quota": config.usage.register_quota,
+            "register_enabled": config.usage.register_enabled,
+            "quota_for_inviter": config.usage.quota_for_inviter,
+            "quota_for_invitee": config.usage.quota_for_invitee,
             "threshold": config.usage.threshold,
             "api_timeout_secs": config.usage.api_timeout_secs,
             "max_retries": config.usage.max_retries,
@@ -119,6 +125,15 @@ pub async fn handle_update_limits(
     }
     if let Some(v) = body.register_quota {
         config.usage.register_quota = v;
+    }
+    if let Some(v) = body.register_enabled {
+        config.usage.register_enabled = v;
+    }
+    if let Some(v) = body.quota_for_inviter {
+        config.usage.quota_for_inviter = v;
+    }
+    if let Some(v) = body.quota_for_invitee {
+        config.usage.quota_for_invitee = v;
     }
     if let Some(v) = body.threshold {
         config.usage.threshold = v;

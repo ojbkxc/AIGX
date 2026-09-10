@@ -42,6 +42,11 @@ fn default_register_quota() -> i64 {
     0
 }
 
+/// 注册开关默认开启（向后兼容：升级不停用既有注册入口）。
+fn default_register_enabled() -> bool {
+    true
+}
+
 // ── Config structs ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +130,15 @@ pub struct UsageConfig {
     /// 充值配额赠送——原实现二者混用导致计费口径错乱）。
     #[serde(default = "default_register_quota")]
     pub register_quota: i64,
+    /// 是否开放自助注册（对齐 new-api RegisterEnabled，false 时注册端点 403）
+    #[serde(default = "default_register_enabled")]
+    pub register_enabled: bool,
+    /// 每个邀请人的奖励配额（对齐 new-api QuotaForInviter，0=关闭邀请奖励）
+    #[serde(default)]
+    pub quota_for_inviter: i64,
+    /// 每个受邀新用户的奖励配额（对齐 new-api QuotaForInvitee，0=无奖励）
+    #[serde(default)]
+    pub quota_for_invitee: i64,
     #[serde(default)]
     pub threshold: f64,
     #[serde(default = "default_api_timeout")]
@@ -206,6 +220,9 @@ impl Default for UsageConfig {
             daily_limit: default_daily_limit(),
             monthly_limit: default_monthly_limit(),
             register_quota: default_register_quota(),
+            register_enabled: default_register_enabled(),
+            quota_for_inviter: 0,
+            quota_for_invitee: 0,
             threshold: 0.0,
             api_timeout_secs: default_api_timeout(),
             max_retries: default_max_retries(),

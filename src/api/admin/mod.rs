@@ -101,9 +101,10 @@ pub use legacy::{
 
 // 用户侧端点与未迁移端点（main.rs 恢复路由时需要）
 pub use legacy::{
-    handle_check_username, handle_get_epay_config, handle_get_epay_info, handle_get_ratios,
-    handle_me, handle_my_orders, handle_trigger_price_sync, handle_update_epay_config,
-    handle_update_exchange_rates, handle_update_ratios, handle_upsert_group_by_name,
+    handle_aff_transfer, handle_check_username, handle_get_aff_code, handle_get_epay_config,
+    handle_get_epay_info, handle_get_ratios, handle_me, handle_my_orders,
+    handle_trigger_price_sync, handle_update_epay_config, handle_update_exchange_rates,
+    handle_update_ratios, handle_upsert_group_by_name,
 };
 
 // 网络层管理（main.rs /api/network/* 路由）

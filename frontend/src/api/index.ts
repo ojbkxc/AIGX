@@ -143,12 +143,13 @@ export const api = {
     request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login/code`, { email, code }),
   loginTotp: (tmp_token: string, code: string): Promise<ApiResponse<LoginResult>> =>
     request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login/totp`, { tmp_token, code }),
-  // 兼容历史调用顺序 (email, password, username?)：后端仅使用 email/password/username 字段
-  register: (emailOrUsername: string, password: string, username?: string): Promise<ApiResponse<RegisterResult>> =>
+  // 兼容历史调用顺序 (email, password, username?)：后端仅使用 email/password/username/aff_code 字段
+  register: (emailOrUsername: string, password: string, username?: string, affCode?: string): Promise<ApiResponse<RegisterResult>> =>
     request<ApiResponse<RegisterResult>>('POST', `${API_BASE}/auth/register`, {
       email: emailOrUsername,
       password,
       username: username ?? undefined,
+      aff_code: affCode ?? undefined,
     }),
   forgotPassword: (email: string): Promise<ApiResponse<MessageResult>> =>
     request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/forgot-password`, { email }),
@@ -280,6 +281,12 @@ export const api = {
     request<ApiResponse<MessageResult>>('DELETE', `${API_BASE}/users/${id}`),
   getMe: (): Promise<ApiResponse<User>> =>
     request<ApiResponse<User>>('GET', `${API_BASE}/users/me`),
+  /** 获取当前用户邀请码（对齐 new-api GET /api/user/aff，data 为码字符串） */
+  getAffCode: (): Promise<ApiResponse<string>> =>
+    request<ApiResponse<string>>('GET', `${API_BASE}/aff`),
+  /** 邀请奖励划转到可用配额（对齐 new-api POST /api/user/aff_transfer） */
+  affTransfer: (): Promise<ApiResponse<{ transferred: number }>> =>
+    request<ApiResponse<{ transferred: number }>>('POST', `${API_BASE}/aff_transfer`, {}),
   checkUsername: (username: string): Promise<ApiResponse<{ available?: boolean }>> =>
     request<ApiResponse<{ available?: boolean }>>('GET', `${API_BASE}/users/check?username=${encodeURIComponent(username)}`),
 

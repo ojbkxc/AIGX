@@ -29,6 +29,14 @@ export default function Register() {
   const navigate = useNavigate();
   const { t } = useTranslation();
 
+  // 邀请码：从 ?aff= 或 ?aff_code= 查询参数读入（new-api 前端从 localStorage 读）
+  const [affCode, setAffCode] = useState('');
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const aff = params.get('aff') || params.get('aff_code') || '';
+    if (aff) setAffCode(aff);
+  }, []);
+
   // ── 用户名实时可用性检查（防抖 300ms）──
   // 状态：'idle' 未检查 / 'checking' 检查中 / 'available' 可用 / 'taken' 已占用 / 'error' 检查失败
   const [usernameStatus, setUsernameStatus] = useState<UsernameStatus>('idle');
@@ -124,7 +132,7 @@ export default function Register() {
 
     setLoading(true);
     try {
-      const res = (await api.register(email, password, username || undefined)) as RegisterResponse;
+      const res = (await api.register(email, password, username || undefined, affCode || undefined)) as RegisterResponse;
       if (res.success) {
         // 注册成功后自动跳转登录页
         navigate('/login', { state: { registered: true, email } });
@@ -284,6 +292,19 @@ export default function Register() {
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               disabled={loading}
+            />
+          </div>
+          <div className="form-group">
+            <label htmlFor="affCode">{t('邀请码（可选）')}</label>
+            <input
+              id="affCode"
+              type="text"
+              className="form-input"
+              placeholder={t('填写邀请码，双方均可获得奖励')}
+              value={affCode}
+              onChange={(e) => setAffCode(e.target.value.trim())}
+              disabled={loading}
+              style={{ fontFamily: 'monospace', letterSpacing: 1 }}
             />
           </div>
           <button

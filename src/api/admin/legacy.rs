@@ -673,6 +673,44 @@ pub async fn handle_my_orders(
     Ok(Json(serde_json::json!({ "success": true, "data": orders })))
 }
 
+/// GET /api/aff - 获取当前用户邀请码（对齐 new-api GetAffCode）。
+///
+/// 无码时自动生成 4 位随机码；`data` 直接是码字符串。
+pub async fn handle_get_aff_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let u = verify_user(&state, &headers).await?;
+    let code = state.user_store.ensure_aff_code(&u.id).map_err(|e| {
+        error_response(
+            &format!("生成邀请码失败: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "success": true, "data": code })))
+}
+
+/// POST /api/aff_transfer - 邀请奖励划转到可用配额（对齐 new-api TransferAffQuota）。
+///
+/// new-api 按请求体 quota 部分划转；AIGX 简化为一键全额划转（quota 字段
+/// 兼容接收但忽略，前端也只展示「领取」）。余额为 0 时幂等成功。
+pub async fn handle_aff_transfer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let u = verify_user(&state, &headers).await?;
+    let transferred = state.user_store.transfer_aff_quota(&u.id).map_err(|e| {
+        error_response(&format!("划转失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)
+    })?;
+    if transferred > 0 {
+        tracing::info!("Aff transfer: user {} claimed {transferred} quota", u.id);
+    }
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "transferred": transferred },
+    })))
+}
+
 /// 解析易支付回调参数（支持 GET query 与 POST form）
 fn collect_params(query: Option<&str>, body_bytes: &bytes::Bytes) -> HashMap<String, String> {
     let mut map = HashMap::new();

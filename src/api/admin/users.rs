@@ -68,6 +68,11 @@ pub fn mask_user(u: &User) -> Value {
         "group": u.group,
         // 2FA 状态（不含 secret 本体）：前端 Profile 页据此显示 TOTP 开关
         "totp_enabled": u.totp_enabled,
+        // 邀请返利体系（对齐 new-api Aff* 字段）
+        "aff_code": u.aff_code,
+        "aff_count": u.aff_count,
+        "aff_quota": u.aff_quota,
+        "aff_history_quota": u.aff_history_quota,
         "created_at": u.created_at,
     })
 }

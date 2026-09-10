@@ -78,6 +78,21 @@ pub struct User {
     /// （兼容旧数据与未启用 TOTP 的用户）。
     #[serde(default)]
     pub totp_recovery_codes: Vec<String>,
+    /// 邀请码（4 位随机字符，对齐 new-api AffCode；空=未生成）
+    #[serde(default)]
+    pub aff_code: String,
+    /// 已成功邀请人数
+    #[serde(default)]
+    pub aff_count: i64,
+    /// 邀请奖励余额（可划转到可用配额）
+    #[serde(default)]
+    pub aff_quota: i64,
+    /// 累计邀请获得配额（历史总量，划转不减）
+    #[serde(default)]
+    pub aff_history_quota: i64,
+    /// 邀请人 ID（注册时携带邀请码写入，空=自然注册）
+    #[serde(default)]
+    pub inviter_id: String,
     #[serde(default)]
     pub created_at: i64,
 }
@@ -186,6 +201,11 @@ impl UserStore {
             totp_secret: String::new(),
             totp_enabled: false,
             totp_recovery_codes: Vec::new(),
+            aff_code: String::new(),
+            aff_count: 0,
+            aff_quota: 0,
+            aff_history_quota: 0,
+            inviter_id: String::new(),
             created_at: chrono::Utc::now().timestamp(),
         };
         self.persist(&user)?;
@@ -229,6 +249,11 @@ impl UserStore {
             totp_secret: String::new(),
             totp_enabled: false,
             totp_recovery_codes: Vec::new(),
+            aff_code: String::new(),
+            aff_count: 0,
+            aff_quota: 0,
+            aff_history_quota: 0,
+            inviter_id: String::new(),
             created_at: chrono::Utc::now().timestamp(),
         };
         self.persist(&user)?;
@@ -499,6 +524,88 @@ impl UserStore {
         }
         count
     }
+    /// 通过邀请码查找用户（对齐 new-api GetUserIdByAffCode）
+    pub fn get_by_aff_code(&self, code: &str) -> Option<User> {
+        let code = code.trim();
+        if code.is_empty() {
+            return None;
+        }
+        self.by_id
+            .read()
+            .values()
+            .find(|u| u.aff_code == code)
+            .cloned()
+    }
+
+    /// 确保用户拥有邀请码（无则生成 4 位随机码，对齐 new-api GenAffCode）。
+    /// 冲突时重试（62^4 = 14M 空间，用户量级内碰撞概率极低）。
+    pub fn ensure_aff_code(&self, id: &str) -> Result<String> {
+        {
+            let by_id = self.by_id.read();
+            if let Some(u) = by_id.get(id) {
+                if !u.aff_code.is_empty() {
+                    return Ok(u.aff_code.clone());
+                }
+            }
+        }
+        self.update(id, |u| {
+            if u.aff_code.is_empty() {
+                u.aff_code = gen_aff_code();
+            }
+        })?;
+        Ok(self
+            .by_id
+            .read()
+            .get(id)
+            .map(|u| u.aff_code.clone())
+            .unwrap_or_default())
+    }
+
+    /// 记录一次成功邀请：邀请人 aff_count+1、双方奖励入账。
+    ///
+    /// 在注册事务内调用（注册携带有效邀请码时）；奖励值为 0 时跳过入账
+    /// 但仍计数。返回 (邀请人奖励, 新用户奖励) 实际入账值。
+    pub fn record_aff(
+        &self,
+        inviter_id: &str,
+        invitee_id: &str,
+        quota_for_inviter: i64,
+        quota_for_invitee: i64,
+    ) -> Result<(i64, i64)> {
+        // 邀请人：计数 + 奖励进 aff 余额（需划转才可消费，防刷）
+        self.update(inviter_id, |u| {
+            u.aff_count += 1;
+            if quota_for_inviter > 0 {
+                u.aff_quota += quota_for_inviter;
+                u.aff_history_quota += quota_for_inviter;
+            }
+        })?;
+        // 新用户：奖励直接进可用配额（注册即用）
+        if quota_for_invitee > 0 {
+            self.add_quota(invitee_id, quota_for_invitee)?;
+        }
+        Ok((quota_for_inviter.max(0), quota_for_invitee.max(0)))
+    }
+
+    /// 邀请奖励划转：aff_quota → 可用配额（对齐 new-api TransferAffQuotaToQuota）。
+    /// 返回实际划转额度（余额不足时全部划转）。
+    pub fn transfer_aff_quota(&self, id: &str) -> Result<i64> {
+        let mut by_id = self.by_id.write();
+        let user = by_id
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("user not found"))?;
+        let amount = user.aff_quota;
+        if amount <= 0 {
+            return Ok(0);
+        }
+        user.aff_quota = 0;
+        user.quota += amount;
+        let snapshot = user.clone();
+        drop(by_id);
+        self.persist(&snapshot)?;
+        Ok(amount)
+    }
+
     /// 生成随机默认密码 (8 位)
     pub fn random_password() -> String {
         let mut rng = rand::thread_rng();
@@ -558,6 +665,14 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
     PasswordHash::new(hash)
         .and_then(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed))
         .is_ok()
+}
+
+/// 生成 4 位随机邀请码（对齐 new-api GenAffCode：字母+数字）
+pub fn gen_aff_code() -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    (0..4)
+        .map(|_| CHARSET[rand::thread_rng().gen_range(0..CHARSET.len())] as char)
+        .collect()
 }
 
 /// 生成随机 trade_no

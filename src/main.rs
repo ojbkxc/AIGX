@@ -625,6 +625,9 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/users", post(api::admin::handle_create_user))
         .route("/api/users/check", get(api::admin::handle_check_username))
         .route("/api/users/me", get(api::admin::handle_me))
+        // 邀请返利（对齐 new-api /api/user/aff 与 /api/user/aff_transfer）
+        .route("/api/aff", get(api::admin::handle_get_aff_code))
+        .route("/api/aff_transfer", post(api::admin::handle_aff_transfer))
         .route("/api/users/:id", put(api::admin::handle_update_user))
         .route("/api/users/:id", delete(api::admin::handle_delete_user))
         // 渠道管理

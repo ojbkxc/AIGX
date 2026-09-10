@@ -50,6 +50,9 @@ pub struct RegisterRequest {
     pub email: String,
     pub password: String,
     pub username: Option<String>,
+    /// 邀请人邀请码（对齐 new-api aff_code；可选，无效码静默忽略）
+    #[serde(default)]
+    pub aff_code: String,
 }
 
 /// OAuth 登录回调处理
@@ -292,6 +295,10 @@ pub async fn handle_register(
         return Err(error_response("密码长度至少6位", StatusCode::BAD_REQUEST));
     }
     let config = state.config_manager.get().await;
+    // 注册开关（对齐 new-api RegisterEnabled）：关闭后拒绝自助注册
+    if !config.usage.register_enabled {
+        return Err(error_response("注册已关闭", StatusCode::FORBIDDEN));
+    }
     // 注册赠送配额与月度限额分离（原实现把 monthly_limit 当赠送额度，
     // 与充值配额口径混淆）
     let default_quota = config.usage.register_quota;
@@ -323,6 +330,36 @@ pub async fn handle_register(
             .create(body.email.trim(), &body.password, Role::User, default_quota)
             .map_err(|e| error_response(&format!("注册失败: {e}"), StatusCode::BAD_REQUEST))?
     };
+
+    // 邀请返利（对齐 new-api finishInsert）：注册携带有效邀请码时，
+    // 写入 inviter_id、邀请人 aff_count+1/奖励进 aff_quota、新用户奖励
+    // 直接进可用配额。无效/缺失邀请码静默忽略（不阻断注册）。
+    let inviter = state.user_store.get_by_aff_code(&body.aff_code);
+    if let Some(inv) = inviter {
+        if inv.id != user.id {
+            let _ = state.user_store.update(&user.id, |u| {
+                u.inviter_id = inv.id.clone();
+            });
+            let (for_inviter, for_invitee) = state
+                .user_store
+                .record_aff(
+                    &inv.id,
+                    &user.id,
+                    config.usage.quota_for_inviter,
+                    config.usage.quota_for_invitee,
+                )
+                .unwrap_or((0, 0));
+            if for_inviter > 0 || for_invitee > 0 {
+                tracing::info!(
+                    "Affiliate: user {} invited by {} (inviter +{}, invitee +{})",
+                    user.id,
+                    inv.id,
+                    for_inviter,
+                    for_invitee
+                );
+            }
+        }
+    }
 
     Ok(Json(serde_json::json!({
         "success": true,
