@@ -198,8 +198,8 @@ export const api = {
     request<ApiResponse<SettingsItem>>('PUT', `${API_BASE}/settings`, { mappings: mapping, replace_all: false }),
   deleteModelMapping: (_id: string): Promise<ApiResponse<SettingsItem>> =>
     request<ApiResponse<SettingsItem>>('PUT', `${API_BASE}/settings`, { mappings: {}, replace_all: false }),
-  listOrders: (): Promise<ApiList<OrderItem>> =>
-    request<ApiList<OrderItem>>('GET', `${API_BASE}/orders`),
+  listOrders: (params: Record<string, string | number> = {}): Promise<ApiList<OrderItem>> =>
+    request<ApiList<OrderItem>>('GET', `${API_BASE}/orders${Object.keys(params).length ? `?${buildQuery(params)}` : ''}`),
   chatCompletions: (payload: Record<string, unknown>): Promise<ApiResponse<DashboardItem>> =>
     request<ApiResponse<DashboardItem>>('POST', '/v1/chat/completions', payload),
   listPrices: (): Promise<ApiList<PriceEntry>> =>
@@ -297,6 +297,12 @@ export const api = {
     request<ApiList<OrderItem>>('GET', `${API_BASE}/orders/me`),
   topup: (amount: number, payment_method: string): Promise<ApiResponse<OrderItem>> =>
     request<ApiResponse<OrderItem>>('POST', `${API_BASE}/topup`, { amount, payment_method }),
+  /** 管理端手动补单（对齐 new-api AdminCompleteTopUp）：pending → paid 并入账 */
+  completeOrder: (tradeNo: string): Promise<ApiResponse<OrderItem>> =>
+    request<ApiResponse<OrderItem>>('POST', `${API_BASE}/orders/${encodeURIComponent(tradeNo)}/complete`),
+  /** 充值试算（对齐 new-api RequestAmount）：amount → pay_money/quota */
+  topupAmount: (amount: number): Promise<ApiResponse<{ amount: number; pay_money: number; quota: number }>> =>
+    request<ApiResponse<{ amount: number; pay_money: number; quota: number }>>('POST', `${API_BASE}/topup/amount`, { amount }),
 
   // 通用渠道管理（page/page_size 缺省 = 后端全量返回，兼容旧行为）
   listChannels: (params: Record<string, string | number> = {}): Promise<ApiList<ChannelItem>> =>

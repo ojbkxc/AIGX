@@ -45,7 +45,10 @@ pub use pricing::{
     handle_model_meta_set,
 };
 
-pub use orders::{handle_delete_order, handle_list_orders, handle_topup_request};
+pub use orders::{
+    handle_complete_order, handle_delete_order, handle_get_order, handle_list_orders,
+    handle_topup_amount, handle_topup_request,
+};
 
 pub use plans::{handle_delete_plan, handle_issue_plan_key, handle_list_plans, handle_upsert_plan};
 

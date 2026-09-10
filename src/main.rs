@@ -703,6 +703,13 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/orders/me", get(api::admin::handle_my_orders))
         .route("/api/topup", post(api::admin::handle_topup_request))
         .route("/api/orders/:id", delete(api::admin::handle_delete_order))
+        // 对齐 new-api：订单详情 / 手动补单 / 充值试算
+        .route("/api/orders/:id", get(api::admin::handle_get_order))
+        .route(
+            "/api/orders/:id/complete",
+            post(api::admin::handle_complete_order),
+        )
+        .route("/api/topup/amount", post(api::admin::handle_topup_amount))
         // 日志审计
         .route(
             "/api/logs/requests",

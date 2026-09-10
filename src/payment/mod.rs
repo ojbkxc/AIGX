@@ -47,6 +47,12 @@ pub struct EpayConfig {
     /// 自定义回调地址，留空则使用 ServerAddress
     #[serde(default)]
     pub custom_callback_address: String,
+    /// 预设充值档位（对齐 new-api TopUpGroup.amount_options）
+    #[serde(default)]
+    pub amount_options: Vec<i64>,
+    /// 充值说明/外部充值链接（对齐 new-api topup_link），留空则前端隐藏
+    #[serde(default)]
+    pub topup_link: String,
 }
 
 fn default_price() -> f64 {
@@ -426,6 +432,8 @@ mod tests {
             amount_discount: HashMap::new(),
             min_topup: 1,
             custom_callback_address: String::new(),
+            amount_options: Vec::new(),
+            topup_link: String::new(),
         }
     }
 

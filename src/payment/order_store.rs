@@ -96,6 +96,22 @@ impl OrderStore {
         Some(snapshot)
     }
 
+    /// 手动补单入账失败后回滚：paid → pending（允许重试补单）。
+    pub fn reopen(&self, trade_no: &str) -> anyhow::Result<()> {
+        let mut by_no = self.by_no.write();
+        let order = by_no
+            .get_mut(trade_no)
+            .ok_or_else(|| anyhow::anyhow!("order not found"))?;
+        order.status = "pending".into();
+        order.paid_time = None;
+        let snapshot = order.clone();
+        drop(by_no);
+        self.store
+            .put(&format!("order:{trade_no}"), &snapshot)
+            .map_err(|e| anyhow::anyhow!("persist failed: {e}"))?;
+        Ok(())
+    }
+
     /// 删除订单（管理面用）。
     pub fn delete(&self, trade_no: &str) -> bool {
         let removed = self.by_no.write().remove(trade_no).is_some();
@@ -121,5 +137,69 @@ impl OrderStore {
         let mut list: Vec<TopUpOrder> = self.by_no.read().values().cloned().collect();
         list.sort_by_key(|b| std::cmp::Reverse(b.create_time));
         list
+    }
+
+    /// 分页 + 关键字搜索（管理端全量订单）。
+    ///
+    /// 对齐 new-api PageInfo：返回 (items, total)；keyword 匹配 trade_no/user_id/支付方式。
+    pub fn list_paged(
+        &self,
+        keyword: Option<&str>,
+        page: usize,
+        page_size: usize,
+    ) -> (Vec<TopUpOrder>, usize) {
+        let all = self.list_all();
+        let kw = keyword.unwrap_or("").trim().to_lowercase();
+        let filtered: Vec<TopUpOrder> = if kw.is_empty() {
+            all
+        } else {
+            all.into_iter()
+                .filter(|o| {
+                    o.trade_no.to_lowercase().contains(&kw)
+                        || o.user_id.to_lowercase().contains(&kw)
+                        || o.payment_method.to_lowercase().contains(&kw)
+                })
+                .collect()
+        };
+        let total = filtered.len();
+        let page = page.max(1);
+        let page_size = page_size.max(1);
+        let start = (page - 1) * page_size;
+        let items = if start >= total {
+            Vec::new()
+        } else {
+            let end = (start + page_size).min(total);
+            filtered[start..end].to_vec()
+        };
+        (items, total)
+    }
+
+    /// 用户自己的订单分页 + 关键字搜索。
+    pub fn list_paged_by_user(
+        &self,
+        user_id: &str,
+        keyword: Option<&str>,
+        page: usize,
+        page_size: usize,
+    ) -> (Vec<TopUpOrder>, usize) {
+        let mut all = self.list_by_user(user_id);
+        let kw = keyword.unwrap_or("").trim().to_lowercase();
+        if !kw.is_empty() {
+            all.retain(|o| {
+                o.trade_no.to_lowercase().contains(&kw)
+                    || o.payment_method.to_lowercase().contains(&kw)
+            });
+        }
+        let total = all.len();
+        let page = page.max(1);
+        let page_size = page_size.max(1);
+        let start = (page - 1) * page_size;
+        let items = if start >= total {
+            Vec::new()
+        } else {
+            let end = (start + page_size).min(total);
+            all[start..end].to_vec()
+        };
+        (items, total)
     }
 }

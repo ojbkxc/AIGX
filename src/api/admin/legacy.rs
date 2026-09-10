@@ -509,6 +509,8 @@ pub async fn handle_get_epay_config(
             "amount_discount": config.epay.amount_discount,
             "min_topup": config.epay.min_topup,
             "custom_callback_address": config.epay.custom_callback_address,
+            "amount_options": config.epay.amount_options,
+            "topup_link": config.epay.topup_link,
             "server_address": config.server_address,
         }
     })))
@@ -524,6 +526,12 @@ pub async fn handle_get_epay_info(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _user = verify_user(&state, &headers).await?;
     let config = state.config_manager.get().await;
+    // 预设档位为空时给默认档（对齐 new-api TopUpGroup amount_options）
+    let amount_options = if config.epay.amount_options.is_empty() {
+        vec![10, 20, 50, 100, 200, 500]
+    } else {
+        config.epay.amount_options.clone()
+    };
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
@@ -532,6 +540,8 @@ pub async fn handle_get_epay_info(
             "price": config.epay.price,
             "amount_discount": config.epay.amount_discount,
             "min_topup": config.epay.min_topup,
+            "amount_options": amount_options,
+            "topup_link": config.epay.topup_link,
         }
     })))
 }
@@ -568,6 +578,10 @@ pub struct UpdateEpayConfigRequest {
     pub min_topup: Option<i64>,
     pub custom_callback_address: Option<String>,
     pub server_address: Option<String>,
+    #[serde(default)]
+    pub amount_options: Option<Vec<i64>>,
+    #[serde(default)]
+    pub topup_link: Option<String>,
 }
 
 /// PUT /api/epay/config - 更新易支付配置（仅管理员）
@@ -606,6 +620,12 @@ pub async fn handle_update_epay_config(
     }
     if let Some(v) = body.custom_callback_address {
         config.epay.custom_callback_address = v;
+    }
+    if let Some(v) = body.amount_options {
+        config.epay.amount_options = v;
+    }
+    if let Some(v) = body.topup_link {
+        config.epay.topup_link = v;
     }
     if let Some(v) = body.server_address {
         config.server_address = v;

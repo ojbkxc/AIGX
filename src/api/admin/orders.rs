@@ -3,7 +3,7 @@
 //! 提供充值订单的创建、查询、删除功能。
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
 };
@@ -162,33 +162,60 @@ pub async fn handle_topup_request(
     Json(json!({ "success": true, "data": data })).into_response()
 }
 
-/// GET /api/orders - 列出所有订单
+/// 订单 JSON 形状（列表/详情共用）
+fn order_json(o: &TopUpOrder) -> Value {
+    json!({
+        "trade_no": o.trade_no,
+        "user_id": o.user_id,
+        "amount": o.amount,
+        "money": o.money,
+        "quota": o.quota,
+        "payment_method": o.payment_method,
+        "status": o.status,
+        "create_time": o.create_time,
+        "paid_time": o.paid_time,
+    })
+}
+
+/// 解析 new-api 风格分页参数（p/page/page_size/ps/size 全兼容）
+fn page_params(params: &std::collections::HashMap<String, String>) -> (usize, usize) {
+    let page = ["p", "page"]
+        .iter()
+        .find_map(|k| params.get(*k).and_then(|v| v.parse::<usize>().ok()))
+        .filter(|&p| p >= 1)
+        .unwrap_or(1);
+    let page_size = ["page_size", "ps", "size"]
+        .iter()
+        .find_map(|k| params.get(*k).and_then(|v| v.parse::<usize>().ok()))
+        .filter(|&s| s > 0)
+        .unwrap_or(10)
+        .min(100);
+    (page, page_size)
+}
+
+/// GET /api/orders - 管理端订单列表（分页 + 关键字搜索）。
+///
+/// 对齐 new-api GetAllTopUps：`?p=&page_size=&keyword=`，返回
+/// `{ items, total, page, page_size }`（PageInfo 契约），同时保留
+/// `data` 同值兼容旧前端。
 pub async fn handle_list_orders(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let orders: Vec<Value> = state
-        .order_store
-        .list_all()
-        .iter()
-        .map(|o| {
-            json!({
-                "trade_no": o.trade_no,
-                "user_id": o.user_id,
-                "amount": o.amount,
-                "money": o.money,
-                "quota": o.quota,
-                "payment_method": o.payment_method,
-                "status": o.status,
-                "create_time": o.create_time,
-                "paid_time": o.paid_time,
-            })
-        })
-        .collect();
-    Ok(Json(
-        json!({ "success": true, "data": orders, "total": orders.len() }),
-    ))
+    let (page, page_size) = page_params(&params);
+    let keyword = params.get("keyword").map(|s| s.as_str());
+    let (orders, total) = state.order_store.list_paged(keyword, page, page_size);
+    let items: Vec<Value> = orders.iter().map(order_json).collect();
+    Ok(Json(json!({
+        "success": true,
+        "data": items,
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    })))
 }
 
 /// GET /api/orders/:trade_no - 查询订单详情
@@ -201,17 +228,7 @@ pub async fn handle_get_order(
     if let Some(order) = state.order_store.get(&trade_no) {
         Ok(Json(json!({
             "success": true,
-            "data": json!({
-                "trade_no": order.trade_no,
-                "user_id": order.user_id,
-                "amount": order.amount,
-                "money": order.money,
-                "quota": order.quota,
-                "payment_method": order.payment_method,
-                "status": order.status,
-                "create_time": order.create_time,
-                "paid_time": order.paid_time,
-            })
+            "data": order_json(&order),
         })))
     } else {
         Err(error_response("Order not found", StatusCode::NOT_FOUND))
@@ -230,4 +247,99 @@ pub async fn handle_delete_order(
     } else {
         Err(error_response("Order not found", StatusCode::NOT_FOUND))
     }
+}
+
+/// POST /api/orders/:trade_no/complete - 管理端手动补单。
+///
+/// 对齐 new-api AdminCompleteTopUp：线下收款（如银行转账/微信截图）后
+/// 管理员将 pending 订单标记为 paid 并立即入账。幂等——非 pending 订单
+/// 直接报错，不重复入账。
+pub async fn handle_complete_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(trade_no): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    match state.order_store.complete_if_pending(&trade_no) {
+        Some(order) => {
+            // 入账：用户配额 += 订单锁定配额（F02：下单时锁定的值）
+            if let Err(e) = state.user_store.add_quota(&order.user_id, order.quota) {
+                tracing::error!(
+                    "Manual complete: failed to add quota for order {} user {}: {e}",
+                    trade_no,
+                    order.user_id
+                );
+                // 回滚订单状态，允许重试
+                if let Err(re) = state.order_store.reopen(&trade_no) {
+                    tracing::error!(
+                        "CRITICAL: failed to reopen order {trade_no} after quota add failure: {re}"
+                    );
+                }
+                return Err(error_response(
+                    "Failed to add quota",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ));
+            }
+            let admin_id = super::common::admin_id_from_session(&state, &headers).await;
+            super::common::record_audit(
+                &state,
+                &admin_id,
+                "order.complete",
+                &format!("order:{trade_no}"),
+                None,
+                Some(json!({ "user_id": order.user_id, "quota": order.quota })),
+            );
+            Ok(Json(json!({ "success": true, "data": order_json(&order) })))
+        }
+        None => Err(error_response(
+            "Order not found or not pending",
+            StatusCode::BAD_REQUEST,
+        )),
+    }
+}
+
+/// POST /api/topup/amount - 充值试算（对齐 new-api RequestAmount）。
+///
+/// 前端充值页实时显示「支付金额/到账配额」：amount × discount 折后
+/// pay_money，配额按下单锁定的 topup_quota 公式。Epay 未配置时 400。
+#[derive(Debug, Deserialize)]
+pub struct AmountRequest {
+    pub amount: i64,
+    #[serde(default)]
+    pub payment_method: String,
+}
+
+pub async fn handle_topup_amount(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AmountRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _user = verify_user(&state, &headers).await?;
+    let config = state.config_manager.get().await;
+    let epay = crate::payment::EpayClient::new(config.epay.clone());
+    if !epay.config().ready() {
+        return Err(error_response(
+            "Epay not configured",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if body.amount < epay.config().min_topup {
+        return Err(error_response(
+            "Amount below minimum",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let pay_money = pay_money(epay.config(), body.amount);
+    if pay_money < 0.01 {
+        return Err(error_response("Amount too low", StatusCode::BAD_REQUEST));
+    }
+    let quota = topup_quota(epay.config(), body.amount);
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "amount": body.amount,
+            "pay_money": (pay_money * 100.0).round() / 100.0,
+            "quota": quota,
+        }
+    })))
 }
