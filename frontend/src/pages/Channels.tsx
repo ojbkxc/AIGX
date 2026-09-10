@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Eye, EyeOff, ArrowLeftRight, MoreHorizontal, Search } from 'lucide-react';
+import {
+  Eye, EyeOff, ArrowLeftRight, MoreHorizontal, Search,
+  Pencil, Gauge, Power, PowerOff, Loader2, MessageSquare, RotateCcw, Trash2,
+  DollarSign, Cloud, Sparkles, Gem, BrainCircuit,
+} from 'lucide-react';
 import { api } from '../api';
 import type { ChannelItem as ApiChannelItem } from '../types';
 import { useToast } from '../components/Toast';
@@ -72,6 +76,25 @@ const AUTH_HINT = {
   zai: '鉴权方式：Bearer token（在 API Key 字段填入智谱 API Key）',
 };
 
+// 类型徽章图标（new-api ProviderBadge 同款思路：图标 + 着色标签）
+const TYPE_ICONS: Record<string, typeof Cloud> = {
+  cloudflare: Cloud,
+  openai_compatible: Sparkles,
+  anthropic: BrainCircuit,
+  gemini: Gem,
+  zai: Sparkles,
+};
+
+// 模型名 → 稳定颜色（new-api autoColor 同思路：字符串 hash → HSL 色相）
+function modelBadgeColor(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i += 1) {
+    hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  }
+  const hue = hash % 360;
+  return `hsl(${hue} 65% 45%)`;
+}
+
 export default function Channels(): JSX.Element {
   const [channels, setChannels] = useState<ChannelItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -105,6 +128,15 @@ export default function Channels(): JSX.Element {
   const [editingField, setEditingField] = useState<{ id: string | number; field: 'priority' | 'weight' } | null>(null);
   const [editValue, setEditValue] = useState<string>('');
   const [updatingBalance, setUpdatingBalance] = useState<Set<string | number>>(new Set());
+
+  // ── 行操作下拉菜单（MoreHorizontal）──
+  const [rowMenuId, setRowMenuId] = useState<string | number | null>(null);
+  useEffect(() => {
+    if (rowMenuId === null) return;
+    const handler = (): void => setRowMenuId(null);
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [rowMenuId]);
 
   function defaultForm(): ChannelFormState {
     return {
@@ -535,6 +567,14 @@ export default function Channels(): JSX.Element {
     return new Date(timestamp).toLocaleDateString();
   };
 
+  // 余额双徽章（new-api BalanceCell：Used 红 / Remaining 绿）
+  const getBalanceVariant = (v: number | undefined): string => {
+    if (v === undefined) return 'neutral';
+    if (v < 0) return 'danger';
+    if (v < 5) return 'warning';
+    return 'success';
+  };
+
   if (loading) return <SkeletonTable columns={6} rows={6} />;
 
   return (
@@ -597,11 +637,11 @@ export default function Channels(): JSX.Element {
               </div>
             )}
 
-            <div className="table-wrapper">
-              <table>
+            <div className="table-wrapper channels-table-wrap">
+              <table className="channels-table">
                 <thead>
                   <tr>
-                    <th style={{ width: 32 }}>
+                    <th className="col-select" style={{ width: 36 }}>
                       <input
                         type="checkbox"
                         checked={allSelected}
@@ -609,27 +649,30 @@ export default function Channels(): JSX.Element {
                         aria-label={t('全选')}
                       />
                     </th>
-                    <th>{t('名称')}</th>
-                    <th>{t('类型')}</th>
-                    <th>Base URL</th>
-                    <th>{t('优先级')}</th>
-                    <th>{t('权重')}</th>
-                    <th>{t('余额')}</th>
-                    <th>{t('模型')}</th>
-                    <th>{t('响应时间')}</th>
-                    <th>{t('测试时间')}</th>
-                    <th>{t('状态')}</th>
-                    <th>{t('操作')}</th>
+                    <th className="col-id">ID</th>
+                    <th className="col-name">{t('名称')}</th>
+                    <th className="col-type">{t('类型')}</th>
+                    <th className="col-status">{t('状态')}</th>
+                    <th className="col-models">{t('模型')}</th>
+                    <th className="col-priority">{t('优先级')}</th>
+                    <th className="col-weight">{t('权重')}</th>
+                    <th className="col-balance">{t('余额')}</th>
+                    <th className="col-response">{t('响应')}</th>
+                    <th className="col-testtime">{t('测试时间')}</th>
+                    <th className="col-actions">{t('操作')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filtered.map((ch) => {
                     const isEditingPriority = editingField?.id === ch.id && editingField?.field === 'priority';
                     const isEditingWeight = editingField?.id === ch.id && editingField?.field === 'weight';
+                    const mappingEntries = Object.entries(ch.model_mapping || {});
+                    const TypeIcon = TYPE_ICONS[ch.channel_type] || Sparkles;
+                    const models = ch.models || [];
 
                     return (
                       <tr key={ch.id} className={selected.has(ch.id) ? 'selected' : ''}>
-                        <td>
+                        <td className="col-select">
                           <input
                             type="checkbox"
                             checked={selected.has(ch.id)}
@@ -637,16 +680,60 @@ export default function Channels(): JSX.Element {
                             aria-label={t('选择')}
                           />
                         </td>
-                        <td><strong>{ch.name}</strong></td>
-                        <td>
-                          <span className="channel-type-badge" data-type={ch.channel_type}>
+                        <td className="col-id">{ch.id}</td>
+                        <td className="col-name">
+                          <div className="ch-name" title={ch.name}>{ch.name}</div>
+                          {(ch.base_url || ch.account_id) && (
+                            <div className="ch-sub" title={ch.base_url || ch.account_id}>
+                              {ch.base_url || ch.account_id}
+                            </div>
+                          )}
+                        </td>
+                        <td className="col-type">
+                          <span className="ch-type-badge">
+                            <TypeIcon size={12} />
                             {typeLabel(ch.channel_type)}
                           </span>
                         </td>
-                        <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                          {ch.base_url || ch.account_id || '—'}
+                        <td className="col-status">
+                          <span
+                            className={`ch-status-badge ${ch.status === 'enabled' ? 'ok' : 'bad'}`}
+                            title={ch.last_error || undefined}
+                          >
+                            {ch.status === 'enabled' ? t('启用') : t('禁用')}
+                          </span>
                         </td>
-                        <td>
+                        <td className="col-models">
+                          {models.length === 0
+                            ? <span className="ch-models-all">{t('全部')}</span>
+                            : (
+                              <div className="ch-models">
+                                {models.slice(0, 3).map((m) => (
+                                  <span key={m} className="ch-model-badge" style={{ color: modelBadgeColor(m), borderColor: modelBadgeColor(m) }}>
+                                    {m}
+                                  </span>
+                                ))}
+                                {models.length > 3 && (
+                                  <span
+                                    className="ch-model-badge ch-models-more"
+                                    title={models.slice(3).join(', ')}
+                                  >
+                                    +{models.length - 3}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          {mappingEntries.length > 0 && (
+                            <div
+                              className="ch-mapping"
+                              title={mappingEntries.map(([k, v]) => `${k} → ${v}`).join('\n')}
+                            >
+                              <ArrowLeftRight size={11} />
+                              {t('映射')} {mappingEntries.length}
+                            </div>
+                          )}
+                        </td>
+                        <td className="col-priority">
                           {isEditingPriority ? (
                             <input
                               type="number"
@@ -659,7 +746,7 @@ export default function Channels(): JSX.Element {
                                   setEditingField(null);
                                 }
                               }}
-                              style={{ width: 60, padding: '2px 4px' }}
+                              className="ch-num-input"
                               autoFocus
                             />
                           ) : (
@@ -675,7 +762,7 @@ export default function Channels(): JSX.Element {
                             </span>
                           )}
                         </td>
-                        <td>
+                        <td className="col-weight">
                           {isEditingWeight ? (
                             <input
                               type="number"
@@ -688,7 +775,7 @@ export default function Channels(): JSX.Element {
                                   setEditingField(null);
                                 }
                               }}
-                              style={{ width: 60, padding: '2px 4px' }}
+                              className="ch-num-input"
                               autoFocus
                             />
                           ) : (
@@ -704,7 +791,7 @@ export default function Channels(): JSX.Element {
                             </span>
                           )}
                         </td>
-                        <td>
+                        <td className="col-balance">
                           <button
                             className="balance-cell"
                             onClick={() => handleUpdateBalance(ch.id)}
@@ -712,66 +799,107 @@ export default function Channels(): JSX.Element {
                             title={t('点击更新余额')}
                           >
                             {updatingBalance.has(ch.id) ? (
-                              <span className="animate-spin">⏳</span>
+                              <Loader2 size={13} className="animate-spin" />
                             ) : (
                               <>
-                                {ch.balance !== undefined ? ch.balance.toFixed(2) : '—'}
+                                <span className={`ch-balance-badge v-${getBalanceVariant(ch.balance)}`}>
+                                  {ch.balance !== undefined ? `$${ch.balance.toFixed(2)}` : '—'}
+                                </span>
                                 {ch.credit !== undefined && (
-                                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                                    / ${ch.credit.toFixed(2)}
+                                  <span className={`ch-balance-badge v-neutral ch-balance-credit`}>
+                                    ${ch.credit.toFixed(2)}
                                   </span>
                                 )}
                               </>
                             )}
                           </button>
                         </td>
-                        <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                          {(ch.models || []).length > 6
-                            ? <span title={(ch.models || []).join(', ')}>
-                                {(ch.models || []).slice(0, 6).join(', ')} +{ch.models!.length - 6}
-                              </span>
-                            : (ch.models || []).join(', ') || t('全部')}
-                          {Object.keys(ch.model_mapping || {}).length > 0 && (
-                            <div className="channel-mapping-count" title={Object.entries(ch.model_mapping!).map(([k, v]) => `${k} → ${v}`).join('\n')}>
-                              <ArrowLeftRight size={11} />
-                              {Object.keys(ch.model_mapping!).length} {t('条映射')}
-                            </div>
-                          )}
-                        </td>
-                        <td>
+                        <td className="col-response">
                           {ch.response_time !== undefined ? (
                             <span className={`response-time-badge ${ch.response_time < 500 ? 'fast' : ch.response_time < 2000 ? 'medium' : 'slow'}`}>
                               {ch.response_time}ms
                             </span>
                           ) : '—'}
                         </td>
-                        <td>
+                        <td className="col-testtime">
                           {ch.test_time ? (
                             <span title={new Date(ch.test_time).toLocaleString()}>
                               {formatRelativeTime(ch.test_time)}
                             </span>
                           ) : '—'}
                         </td>
-                        <td>
-                          <span
-                            className={ch.status === 'enabled' ? 'badge badge-success' : 'badge badge-danger'}
-                            title={ch.last_error || ''}
-                          >
-                            {ch.status === 'enabled' ? t('启用') : t('禁用')}
-                          </span>
-                        </td>
-                        <td>
-                          <div className="actions-cell">
-                            <Button variant="outline" size="sm" onClick={() => openChat(ch)}>{t('对话')}</Button>
-                            <Button variant="outline" size="sm" onClick={() => handleTest(ch.id)} disabled={testingId === ch.id}>
-                              {testingId === ch.id ? '...' : t('连通')}
-                            </Button>
-                            <Button variant="outline" size="sm" onClick={() => handleToggle(ch)}>
-                              {ch.status === 'enabled' ? t('停用') : t('启用')}
-                            </Button>
-                            <Button variant="outline" size="sm" onClick={() => handleResetCircuit(ch.id)} title={t('重置断路器')}>{t('重置')}</Button>
-                            <Button variant="outline" size="sm" onClick={() => openEdit(ch)}>{t('编辑')}</Button>
-                            <Button variant="danger" size="sm" onClick={() => handleDelete(ch.id)}>{t('删除')}</Button>
+                        <td className="col-actions">
+                          <div className="ch-actions">
+                            <button
+                              type="button"
+                              className="ch-icon-btn"
+                              title={t('对话调试')}
+                              onClick={() => openChat(ch)}
+                            >
+                              <MessageSquare size={15} />
+                            </button>
+                            <button
+                              type="button"
+                              className="ch-icon-btn"
+                              title={t('测试连通性')}
+                              onClick={() => handleTest(ch.id)}
+                              disabled={testingId === ch.id}
+                            >
+                              {testingId === ch.id
+                                ? <Loader2 size={15} className="animate-spin" />
+                                : <Gauge size={15} />}
+                            </button>
+                            <button
+                              type="button"
+                              className={`ch-icon-btn ${ch.status === 'enabled' ? 'ch-danger-hover' : ''}`}
+                              title={ch.status === 'enabled' ? t('停用') : t('启用')}
+                              onClick={() => handleToggle(ch)}
+                            >
+                              {ch.status === 'enabled' ? <Power size={15} /> : <PowerOff size={15} />}
+                            </button>
+                            <div className="ch-row-menu">
+                              <button
+                                type="button"
+                                className="ch-icon-btn"
+                                title={t('更多操作')}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setRowMenuId((prev) => (prev === ch.id ? null : ch.id));
+                                }}
+                              >
+                                <MoreHorizontal size={15} />
+                              </button>
+                              {rowMenuId === ch.id && (
+                                <div className="ch-row-menu-panel" onClick={(e) => e.stopPropagation()}>
+                                  <button type="button" onClick={() => { setRowMenuId(null); void handleTest(ch.id); }}>
+                                    <Gauge size={14} />
+                                    {t('测试连通性')}
+                                  </button>
+                                  <button type="button" onClick={() => { setRowMenuId(null); void handleUpdateBalance(ch.id); }}>
+                                    <DollarSign size={14} />
+                                    {t('查询余额')}
+                                  </button>
+                                  <button type="button" onClick={() => { setRowMenuId(null); void handleResetCircuit(ch.id); }}>
+                                    <RotateCcw size={14} />
+                                    {t('重置断路器')}
+                                  </button>
+                                  <div className="ch-row-menu-sep" />
+                                  <button type="button" onClick={() => { setRowMenuId(null); openEdit(ch); }}>
+                                    <Pencil size={14} />
+                                    {t('编辑渠道')}
+                                  </button>
+                                  <div className="ch-row-menu-sep" />
+                                  <button
+                                    type="button"
+                                    className="ch-row-menu-danger"
+                                    onClick={() => { setRowMenuId(null); handleDelete(ch.id); }}
+                                  >
+                                    <Trash2 size={14} />
+                                    {t('删除渠道')}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
                           </div>
                         </td>
                       </tr>

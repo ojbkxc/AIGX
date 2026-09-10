@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, type KeyboardEvent, lazy, Suspense } from 
 import { useTranslation } from 'react-i18next';
 import {
   Send, Square, Trash2, Image, Video, AudioLines, Loader2, Bot,
-  Zap, Mic, Plus, Link2,
+  Zap, Mic, Plus, Link2, SlidersHorizontal, MessageSquarePlus, Paperclip,
+  BarChart3, Code2, GraduationCap, ClipboardList,
 } from 'lucide-react';
 import { api, testChannelChatStream } from '../api';
 import type { DebugMessage } from './chat/types';
@@ -14,6 +15,9 @@ const ChatBubble = lazy(() => import('./chat/ChatBubble'));
 
 // 重新导出 DebugMessage 类型（向后兼容）
 export type { DebugMessage };
+
+/** playground 空状态建议 prompt 默认图标序列（new-api 同款四图标） */
+const DEFAULT_PG_ICONS = [BarChart3, ClipboardList, Code2, GraduationCap];
 
 
 export interface ChatDebuggerProps {
@@ -34,12 +38,23 @@ export interface ChatDebuggerProps {
   /** 顶部悬浮模型 pill（hideToolbar 时）。Open WebUI 首页形态传 false，
    *  模型选择下沉到空状态大标题上方，避免与居中问候重叠。 */
   floatingModelBar?: boolean;
-  /** 空状态建议 prompt（Open WebUI 首页 Suggestions 网格），点选直接发送 */
-  suggestionPrompts?: Array<{ title: string; sub: string; content: string }>;
+  /** 空状态建议 prompt（Open WebUI 首页 Suggestions 网格），点选直接发送。
+   *  playground 模式下渲染为 new-api 游乐园式按钮卡片。 */
+  suggestionPrompts?: Array<{ title: string; sub: string; content: string; icon?: unknown }>;
   /** 受控模型值：由宿主顶栏提供时，模型选择下沉到外部（/chat） */
   model?: string;
   /** 模型变化回调（受控模式下同步宿主状态） */
   onModelChange?: (model: string) => void;
+  /** new-api 游乐园形态：无工具条，模型/参数/附件收进输入区底部工具行 */
+  playground?: boolean;
+  /** playground 形态：受控模型值（宿主 /chat 页持有） */
+  playgroundModel?: string;
+  /** playground 形态：模型变化回调 */
+  onPlaygroundModelChange?: (model: string) => void;
+  /** playground 形态：清空对话回调（宿主持久化层同步清空） */
+  onClearMessages?: () => void;
+  /** playground 形态：是否有消息（控制清空按钮禁用态） */
+  hasMessages?: boolean;
 }
 
 interface ChatChunkResult {
@@ -72,6 +87,11 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     suggestionPrompts = [],
     model: controlledModel,
     onModelChange,
+    playground = false,
+    playgroundModel,
+    onPlaygroundModelChange,
+    onClearMessages,
+    hasMessages = false,
   } = props;
   const { t } = useTranslation();
 
@@ -82,12 +102,18 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
 
   const [, setModels] = useState<string[]>([]);
   const [internalModel, setInternalModel] = useState('');
-  // 受控模型：宿主顶栏提供时以外部值为准，本地 state 仅兜底
-  const model = controlledModel !== undefined ? controlledModel : internalModel;
-  const setModel = (v: string): void => {
+  // 受控模型：宿主顶栏提供时以外部值为准，本地 state 仅兜底；
+  // playground 形态下由 playgroundModel 接管（宿主 /chat 页持有）
+  const effectiveControlled = playground
+    ? (playgroundModel !== undefined ? playgroundModel : controlledModel)
+    : controlledModel;
+  const model = effectiveControlled !== undefined ? effectiveControlled : internalModel;
+  const notifyModel = (v: string): void => {
     setInternalModel(v);
-    onModelChange?.(v);
+    if (playground) onPlaygroundModelChange?.(v);
+    else onModelChange?.(v);
   };
+  const setModel = notifyModel;
   const [protocol, setProtocol] = useState<'openai' | 'anthropic'>(initialProtocol);
   const [stream, setStream] = useState(true);
   const [systemPrompt, setSystemPrompt] = useState('');
@@ -107,6 +133,9 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const [freqPenEnabled, setFreqPenEnabled] = useState(false);
   const [presPenEnabled, setPresPenEnabled] = useState(false);
   const [maxTokensEnabled, setMaxTokensEnabled] = useState(false);
+  // playground 形态：参数 Popover 与清空确认
+  const [paramPopOpen, setParamPopOpen] = useState(false);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   /** 流式生成中断控制器：用户点「停止」时 abort 上游请求 */
   const abortRef = useRef<AbortController | null>(null);
@@ -599,21 +628,137 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     setError('');
     setPromptPreset('');
     setTempPreset('');
+    onClearMessages?.();
   };
 
   // A10: 使用统一的 ModelPicker 组件替换内联 picker
   const modelPicker = (
     <ModelPicker
       value={model}
-      onChange={(m) => { setModel(m); setMessages([]); }}
+      onChange={(m) => {
+        setModel(m);
+        if (!playground) setMessages([]);
+      }}
       channelModels={channelModels}
       compact={compact}
     />
   );
 
+  // playground 形态：new-api 游乐园式模型选择（输入区底部工具行，切换不丢消息）
+  const playgroundModelPicker = (
+    <ModelPicker
+      value={model}
+      onChange={setModel}
+      channelModels={channelModels}
+      compact
+    />
+  );
+
+  /** new-api 同款参数控件表（6 参数：滑块/数字输入 + 独立开关） */
+  const PARAM_CONTROLS: Array<{
+    key: string;
+    label: string;
+    desc: string;
+    type: 'slider' | 'number';
+    min: number;
+    max: number;
+    step: number;
+    enabled: boolean;
+    onEnabled: (v: boolean) => void;
+    value: string;
+    onValue: (v: string) => void;
+    streamToggle?: boolean;
+  }> = [
+    { key: 'temperature', label: t('温度'), desc: t('控制随机性与创意'), type: 'slider', min: 0, max: 2, step: 0.1, enabled: tempEnabled, onEnabled: setTempEnabled, value: temperature, onValue: setTemperature },
+    { key: 'top_p', label: 'Top P', desc: t('限制候选 token 的概率质量'), type: 'slider', min: 0, max: 1, step: 0.01, enabled: topPEnabled, onEnabled: setTopPEnabled, value: topP, onValue: setTopP },
+    { key: 'frequency_penalty', label: t('频率惩罚'), desc: t('减少字词重复'), type: 'slider', min: -2, max: 2, step: 0.1, enabled: freqPenEnabled, onEnabled: setFreqPenEnabled, value: frequencyPenalty, onValue: setFrequencyPenalty },
+    { key: 'presence_penalty', label: t('存在惩罚'), desc: t('鼓励引入新话题'), type: 'slider', min: -2, max: 2, step: 0.1, enabled: presPenEnabled, onEnabled: setPresPenEnabled, value: presencePenalty, onValue: setPresencePenalty },
+    { key: 'max_tokens', label: t('最大输出 Token'), desc: t('限制响应长度'), type: 'number', min: 1, max: 200000, step: 1, enabled: maxTokensEnabled, onEnabled: setMaxTokensEnabled, value: maxTokens, onValue: setMaxTokens },
+  ];
+
+  const paramActiveCount = PARAM_CONTROLS.filter((c) => c.enabled).length + (stream ? 1 : 0);
+
+  /** playground 参数 Popover（new-api PlaygroundParameterPanel 观感） */
+  const playgroundParamPanel = (
+    <div className="pg-param-pop">
+      <div className="pg-param-head">
+        <div className="pg-param-title">{t('参数设置')}</div>
+        <div className="pg-param-sub">{t('仅启用的参数会随请求发送')}</div>
+      </div>
+      <div className="pg-param-list">
+        {PARAM_CONTROLS.map((c) => (
+          <div key={c.key} className={`pg-param-item ${(!c.enabled || busy) ? 'disabled' : ''}`}>
+            <div className="pg-param-item-head">
+              <div className="pg-param-item-text">
+                <div className="pg-param-item-label">
+                  <span>{c.label}</span>
+                  <code>{c.value}</code>
+                </div>
+                <div className="pg-param-item-desc">{c.desc}</div>
+              </div>
+              <label className="pg-switch">
+                <input
+                  type="checkbox"
+                  checked={c.enabled}
+                  disabled={busy}
+                  onChange={(e) => c.onEnabled(e.target.checked)}
+                />
+                <span />
+              </label>
+            </div>
+            {c.type === 'slider' ? (
+              <input
+                type="range"
+                className="pg-param-slider"
+                min={c.min}
+                max={c.max}
+                step={c.step}
+                value={c.value}
+                disabled={busy || !c.enabled}
+                onChange={(e) => c.onValue(e.target.value)}
+              />
+            ) : (
+              <input
+                type="number"
+                className="form-input pg-param-number"
+                min={c.min}
+                max={c.max}
+                step={c.step}
+                value={c.value}
+                disabled={busy || !c.enabled}
+                onChange={(e) => c.onValue(e.target.value)}
+              />
+            )}
+          </div>
+        ))}
+        {/* 流式开关：new-api 也作为参数面板里的一项 */}
+        <div className={`pg-param-item ${busy ? 'disabled' : ''}`}>
+          <div className="pg-param-item-head">
+            <div className="pg-param-item-text">
+              <div className="pg-param-item-label">
+                <span>{t('流式')}</span>
+                <code>{stream ? 'true' : 'false'}</code>
+              </div>
+              <div className="pg-param-item-desc">{t('逐字流式渲染响应')}</div>
+            </div>
+            <label className="pg-switch">
+              <input
+                type="checkbox"
+                checked={stream}
+                disabled={busy}
+                onChange={(e) => setStream(e.target.checked)}
+              />
+              <span />
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
-    <div className={`chat-debugger ${compact ? 'chat-debugger-compact' : ''}`}>
-      {!hideToolbar && (
+    <div className={`chat-debugger ${compact ? 'chat-debugger-compact' : ''} ${playground ? 'chat-debugger-playground' : ''}`}>
+      {!hideToolbar && !playground && (
       <div className="chat-debugger-bar">
         {modelPicker}
 
@@ -767,13 +912,13 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
 
       {/* 受控模型（/chat 顶栏 ModelPicker 提供）时不再渲染任何内部模型选择器：
        * 悬浮条与空状态大选择器都会与顶栏入口重复，唯一入口在宿主。 */}
-      {hideToolbar && floatingModelBar && controlledModel === undefined && (
+      {hideToolbar && !playground && floatingModelBar && controlledModel === undefined && (
         <div className="chat-debugger-bar chat-debugger-bar-min">
           {modelPicker}
         </div>
       )}
 
-      {!hideToolbar && (
+      {!hideToolbar && !playground && (
       <div className="chat-debugger-attachments">
         <select
           className="form-input"
@@ -811,7 +956,31 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       )}
 
       <div className="chat-debugger-messages">
-        {messages.length === 0 && (
+        {messages.length === 0 && playground && (
+          /* new-api 游乐园空状态：图标 + 标题 + 提示词按钮网格 */
+          <div className="pg-empty">
+            <div className="pg-empty-icon"><MessageSquarePlus size={20} /></div>
+            <h2 className="pg-empty-title">{t('开始游乐园对话')}</h2>
+            <p className="pg-empty-sub">{t('用示例提示词测试模型，或在下方直接输入你的请求。')}</p>
+            <div className="pg-empty-prompts">
+              {suggestionPrompts.map((s, idx) => {
+                const Icon = (s.icon as typeof Zap | undefined) ?? DEFAULT_PG_ICONS[idx % DEFAULT_PG_ICONS.length];
+                return (
+                  <button
+                    key={`${s.title}-${idx}`}
+                    type="button"
+                    className="pg-empty-prompt"
+                    onClick={() => { void handleSend(s.content); }}
+                  >
+                    <Icon size={15} />
+                    <span>{s.title}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {messages.length === 0 && !playground && (
           <div className="chat-debugger-empty">
             {hideToolbar && !floatingModelBar && controlledModel === undefined ? (
               <div className="chat-debugger-empty-model">{modelPicker}</div>
@@ -953,7 +1122,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
                   onClick={() => setAttachMenuOpen((v) => !v)}
                   disabled={busy}
                 >
-                  <Plus size={15} />
+                  {playground ? <Paperclip size={15} /> : <Plus size={15} />}
                 </button>
                 {attachMenuOpen && (
                   <div className="chat-debugger-attach-pop">
@@ -975,14 +1144,57 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
                   </div>
                 )}
               </div>
-              <div className="chat-debugger-context" title={t('上下文 ≈')}>
-                {t('上下文 ≈')} {contextEstimate.toLocaleString()} tokens
-              </div>
+
+              {playground ? (
+                /* new-api 游乐园工具组：附件 + 参数(Popover) + 清空 */
+                <div className="pg-tools">
+                  <div className="pg-param-menu">
+                    <button
+                      type="button"
+                      className="pg-tool-btn"
+                      title={t('参数设置')}
+                      disabled={busy}
+                      onClick={() => setParamPopOpen((v) => !v)}
+                    >
+                      <SlidersHorizontal size={15} />
+                      {paramActiveCount > 0 && (
+                        <span className="pg-tool-badge">{paramActiveCount}</span>
+                      )}
+                    </button>
+                    {paramPopOpen && (
+                      <div className="pg-param-pop-anchor">
+                        {playgroundParamPanel}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className="pg-tool-btn pg-tool-danger"
+                    title={t('清空对话')}
+                    disabled={busy || !hasMessages}
+                    onClick={() => setClearConfirmOpen(true)}
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              ) : (
+                <div className="chat-debugger-context" title={t('上下文 ≈')}>
+                  {t('上下文 ≈')} {contextEstimate.toLocaleString()} tokens
+                </div>
+              )}
             </div>
             <div className="chat-debugger-input-actions">
-              <button type="button" className="btn btn-outline btn-sm" onClick={clearAll} disabled={busy || !messages.length} title={t('清空对话')}>
-                <Trash2 size={14} />
-              </button>
+              {playground && (
+                /* new-api 游乐园：模型选择器在输入区底部工具行（清空按钮右侧、发送按钮左侧） */
+                <div className="pg-tools-right">
+                  {playgroundModelPicker}
+                </div>
+              )}
+              {!playground && (
+                <button type="button" className="btn btn-outline btn-sm" onClick={clearAll} disabled={busy || !messages.length} title={t('清空对话')}>
+                  <Trash2 size={14} />
+                </button>
+              )}
               {/* Lxchat 式圆形三态按钮：空输入=语音，有输入=发送，生成中=停止 */}
               <button
                 type="button"
@@ -999,6 +1211,28 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
               </button>
             </div>
           </div>
+
+          {/* playground 清空确认弹窗 */}
+          {clearConfirmOpen && (
+            <div className="pg-confirm-overlay" onClick={() => setClearConfirmOpen(false)}>
+              <div className="pg-confirm" onClick={(e) => e.stopPropagation()}>
+                <div className="pg-confirm-title">{t('清空对话记录？')}</div>
+                <div className="pg-confirm-desc">{t('浏览器中保存的本次游乐园对话将被移除，且无法撤销。')}</div>
+                <div className="pg-confirm-actions">
+                  <button type="button" className="btn btn-outline btn-sm" onClick={() => setClearConfirmOpen(false)}>
+                    {t('取消')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-danger btn-sm"
+                    onClick={() => { clearAll(); setClearConfirmOpen(false); }}
+                  >
+                    {t('清空')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
