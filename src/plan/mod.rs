@@ -177,11 +177,7 @@ impl PlanStore {
             },
             allowed_models: p.allowed_models.clone(),
             expires_at: p.compute_expires_at(),
-            quota_limit: if p.quota > 0 {
-                Some(p.quota)
-            } else {
-                None
-            },
+            quota_limit: if p.quota > 0 { Some(p.quota) } else { None },
             ip_limit: None,
         })
     }
@@ -194,11 +190,7 @@ impl PlanStore {
             let snapshot = p.clone();
             drop(by_id);
             if let Err(e) = self.persist(&snapshot) {
-                tracing::error!(
-                    "Failed to persist plan {} issue count: {}",
-                    snapshot.id,
-                    e
-                );
+                tracing::error!("Failed to persist plan {} issue count: {}", snapshot.id, e);
             }
         }
     }
