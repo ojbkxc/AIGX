@@ -186,3 +186,173 @@
   color: var(--accent-color, #2f6fed);
   white-space: nowrap;
 }
+
+/* ── 工具栏（与 Keys 页保持一致的视觉节奏） ── */
+.channels-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.channels-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--bg-color, #f7f8fa);
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 8px;
+  font-size: 13px;
+  min-width: 220px;
+}
+
+.channels-search input {
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 13px;
+  flex: 1;
+}
+
+.channels-search svg {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+/* "更多"下拉 */
+.channels-more {
+  position: relative;
+}
+
+.channels-more-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  background: var(--card-bg, #fff);
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  min-width: 180px;
+  z-index: 20;
+  padding: 4px;
+}
+
+.channels-more-menu button {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.channels-more-menu button:hover {
+  background: var(--bg-color, #f7f8fa);
+}
+
+/* 批量操作栏 */
+.channels-bulk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: rgba(47, 111, 237, 0.08);
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+  font-size: 13px;
+  color: var(--accent-color, #2f6fed);
+}
+
+.channels-bulk span {
+  font-weight: 500;
+  margin-right: auto;
+}
+
+/* 表格行选中高亮 */
+table tr.selected {
+  background: rgba(47, 111, 237, 0.06);
+}
+
+table thead input[type="checkbox"],
+table tbody td input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--accent-color, #2f6fed);
+}
+
+/* 内联编辑样式 */
+.inline-editable {
+  padding: 4px 8px;
+  border-radius: 4px;
+  Workspace_223994: pointer;
+  transition: background-color 0.2s;
+}
+
+.inline-editable:hover {
+  background-color: var(--bg-hover, #f5f5f5);
+}
+
+/* 余额单元格 */
+.balance-cell {
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  Workspace_223994: pointer;
+  transition: all 0.2s;
+  font-size: 13px;
+  color: var(--text-main);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.balance-cell:hover:not(:disabled) {
+  border-color: var(--border-color);
+  background-color: var(--bg-hover, #f5f5f5);
+}
+
+.balance-cell:disabled {
+  Workspace_223994: not-allowed;
+  opacity: 0.6;
+}
+
+/* 响应时间徽章 */
+.response-time-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.response-time-badge.fast {
+  background-color: var(--success-bg, #d1fae5);
+  color: var(--success-color, #065f46);
+}
+
+.response-time-badge.medium {
+  background-color: var(--warning-bg, #fef3c7);
+  color: var(--warning-color, #92400e);
+}
+
+.response-time-badge.slow {
+  background-color: var(--danger-bg, #fee2e2);
+  color: var(--danger-color, #991b1b);
+}
+
+/* 旋转动画 */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+  display: inline-block;
+}

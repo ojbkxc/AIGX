@@ -369,6 +369,8 @@ export const api = {
     request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/channels/${id}/reset-circuit`),
   fetchChannelModels: (data: Record<string, unknown>): Promise<ApiResponse<{ models?: string[] }>> =>
     request<ApiResponse<{ models?: string[] }>>('POST', `${API_BASE}/channels/fetch_models`, data),
+  getChannelBalance: (id: string | number): Promise<ApiResponse<{ balance?: number; credit?: number }>> =>
+    request<ApiResponse<{ balance?: number; credit?: number }>>('GET', `${API_BASE}/channels/${id}/balance`),
   // 渠道对话调试：流式（text/event-stream）返回 { stream: [{ content }] }，
   // 非流式返回后端 JSON。与 Playground 页共用 SSE 解析模式。
   testChannelChat: async (data: PlaygroundChatRequest): Promise<PlaygroundChatResult> => {

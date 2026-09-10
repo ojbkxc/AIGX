@@ -849,3 +849,226 @@
     height: 32px;
   }
 }
+
+/* ── B6: 参数滑块（温度/TopP/频率惩罚/存在惩罚）── */
+.chat-debugger-slider {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: ew-resize;
+}
+
+.chat-debugger-slider span {
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.chat-debugger-slider input[type='range'] {
+  width: 80px;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--hover-bg, rgba(0, 0, 0, 0.08));
+  border-radius: 9999px;
+  outline: none;
+  cursor: ew-resize;
+}
+
+.chat-debugger-slider input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 9999px;
+  background: var(--accent-color, #2f6fed);
+  border: 2px solid var(--card-bg, #fff);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  cursor: ew-resize;
+}
+
+.chat-debugger-slider input[type='range']::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border-radius: 9999px;
+  background: var(--accent-color, #2f6fed);
+  border: 2px solid var(--card-bg, #fff);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  cursor: ew-resize;
+}
+
+.chat-debugger-slider output {
+  min-width: 28px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-main);
+  font-size: 11px;
+}
+
+.chat-debugger-slider input[type="checkbox"] {
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+  accent-color: var(--accent-color);
+  margin: 0;
+}
+
+.chat-debugger-slider input[type="range"]:disabled,
+.chat-debugger-slider input[type="number"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.chat-debugger-slider input[type="number"] {
+  height: 24px;
+  padding: 0 4px;
+  font-size: 11px;
+}
+
+.chat-debugger-slider input[type="checkbox"] {
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+  accent-color: var(--accent-color);
+  margin: 0;
+}
+
+.chat-debugger-slider input[type="range"]:disabled,
+.chat-debugger-slider input[type="number"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.chat-debugger-slider input[type="number"] {
+  height: 24px;
+  padding: 0 4px;
+  font-size: 11px;
+}
+
+/* ── B7: 消息元数据（时间 + 响应时长）── */
+.chat-debugger-msg-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-debugger-msg-user .chat-debugger-msg-meta {
+  align-self: flex-end;
+}
+
+.chat-debugger-msg-time::before {
+  content: '🕐 ';
+  opacity: 0.6;
+}
+
+.chat-debugger-msg-duration::before {
+  content: '⚡ ';
+  opacity: 0.6;
+}
+
+/* 响应时长颜色编码：快/中/慢 */
+.chat-debugger-msg-duration[data-speed='fast'] { color: #16a34a; }
+.chat-debugger-msg-duration[data-speed='mid'] { color: #d97706; }
+.chat-debugger-msg-duration[data-speed='slow'] { color: #dc2626; }
+
+/* ── B8: 源码视图 ── */
+.chat-debugger-msg-source {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-main);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  max-height: 60vh;
+}
+
+/* ── B8: 删除按钮危险态 ── */
+.chat-debugger-action-danger:hover:not(:disabled) {
+  color: var(--danger-color, #ef4444);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+/* ── B8: 移动端更多菜单 ── */
+.chat-debugger-msg-more {
+  position: relative;
+  display: inline-flex;
+}
+
+.chat-debugger-more-btn {
+  /* 桌面端隐藏，移动端显示 */
+  display: none;
+}
+
+.chat-debugger-more-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 100;
+  min-width: 140px;
+  padding: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: chat-debugger-pop 0.14s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.chat-debugger-more-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.chat-debugger-more-menu button:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.chat-debugger-more-menu button.danger {
+  color: var(--danger-color, #ef4444);
+}
+
+.chat-debugger-more-menu button.danger:hover {
+  background: rgba(239, 68, 68, 0.08);
+}
+
+/* 移动端：显示更多菜单按钮，隐藏分散的操作按钮 */
+@media (hover: none), (max-width: 640px) {
+  .chat-debugger-more-btn {
+    display: inline-flex;
+  }
+
+  /* 移动端把除「更多」外的操作按钮收进下拉菜单 */
+  .chat-debugger-msg-actions > .chat-debugger-action-btn:not(.chat-debugger-more-btn) {
+    display: none;
+  }
+
+  .chat-debugger-msg-actions {
+    opacity: 1;
+  }
+}

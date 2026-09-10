@@ -1,21 +1,20 @@
-import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
+import { useState, useEffect, useRef, type KeyboardEvent, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Search, Send, Square, Trash2, Image, Video, AudioLines, Loader2, Bot, User,
-  Copy, Check, Zap, Mic, Plus, Link2, RefreshCw, Pencil, Volume2,
+  Send, Square, Trash2, Image, Video, AudioLines, Loader2, Bot,
+  Zap, Mic, Plus, Link2,
 } from 'lucide-react';
 import { api, testChannelChatStream } from '../api';
-import MessageViewer from './MessageViewer';
+import type { DebugMessage } from './chat/types';
+import ModelPicker from './ModelPicker';
 import './ChatDebugger.css';
 
-export interface DebugMessage {
-  role: 'user' | 'assistant';
-  content: string;
-  /** DeepSeek 式深度思考（SSE 的 reasoning_content，与正文分离） */
-  reasoning?: string;
-  /** 用户消息可选的多模态附件（URL 或 base64 data URI） */
-  attachments?: Array<{ kind: 'image' | 'video' | 'audio'; url: string }>;
-}
+// 懒加载 ChatBubble 组件
+const ChatBubble = lazy(() => import('./chat/ChatBubble'));
+
+// 重新导出 DebugMessage 类型（向后兼容）
+export type { DebugMessage };
+
 
 export interface ChatDebuggerProps {
   /** 指定渠道 ID：调试固定渠道；留空走「自动选择启用渠道」（Playground） */
@@ -81,7 +80,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  const [models, setModels] = useState<string[]>([]);
+  const [, setModels] = useState<string[]>([]);
   const [internalModel, setInternalModel] = useState('');
   // 受控模型：宿主顶栏提供时以外部值为准，本地 state 仅兜底
   const model = controlledModel !== undefined ? controlledModel : internalModel;
@@ -98,10 +97,16 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const [tempPreset, setTempPreset] = useState('');
   const [temperature, setTemperature] = useState('0.7');
   const [maxTokens, setMaxTokens] = useState('1024');
-  const [query, setQuery] = useState('');
-  const [pickerIdx, setPickerIdx] = useState(0);
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const pickerRef = useRef<HTMLDivElement | null>(null);
+  // B6: 扩展参数
+  const [topP, setTopP] = useState('1');
+  const [frequencyPenalty, setFrequencyPenalty] = useState('0');
+  const [presencePenalty, setPresencePenalty] = useState('0');
+  // B6: 每个参数独立开关，关闭时不发送到上游
+  const [tempEnabled, setTempEnabled] = useState(true);
+  const [topPEnabled, setTopPEnabled] = useState(false);
+  const [freqPenEnabled, setFreqPenEnabled] = useState(false);
+  const [presPenEnabled, setPresPenEnabled] = useState(false);
+  const [maxTokensEnabled, setMaxTokensEnabled] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   /** 流式生成中断控制器：用户点「停止」时 abort 上游请求 */
   const abortRef = useRef<AbortController | null>(null);
@@ -236,12 +241,9 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     }
   }, [messages, busy]);
 
-  // 点击外部关闭模型选择器 / 附件菜单
+  // 点击外部关闭附件菜单
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
-      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
-        setPickerOpen(false);
-      }
       if (attachMenuRef.current && !attachMenuRef.current.contains(e.target as Node)) {
         setAttachMenuOpen(false);
       }
@@ -263,9 +265,16 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     };
   }, []);
 
-  const visibleModels = models.filter((m) =>
-    m.toLowerCase().includes(query.trim().toLowerCase()),
-  );
+  // B7: 消息时间戳和响应时长追踪
+  const messageTimestamps = useRef<Map<number, number>>(new Map());
+  const messageDurations = useRef<Map<number, number>>(new Map());
+
+  // B8: 删除消息处理
+  const deleteMessage = (idx: number): void => {
+    setMessages((prev) => prev.filter((_, i) => i !== idx));
+    messageTimestamps.current.delete(idx);
+    messageDurations.current.delete(idx);
+  };
 
   const addAttachment = (): void => {
     const url = attachUrl.trim();
@@ -452,6 +461,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       const hasPendingUser = prev.length > 0 && prev[prev.length - 1].role === 'user'
         && prev[prev.length - 1].content === text;
       if (hasPendingUser) return prev;
+      const userIdx = prev.length;
+      messageTimestamps.current.set(userIdx, Date.now());
       return [...prev, { role: 'user', content: text, attachments: pendingAttachments }];
     });
     if (override == null) setInput('');
@@ -468,8 +479,11 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       stream,
     };
     if (protocol === 'openai') {
-      body.temperature = Number(temperature) || 0.7;
-      body.max_tokens = Number(maxTokens) || 1024;
+      if (tempEnabled) body.temperature = Number(temperature) || 0.7;
+      if (maxTokensEnabled) body.max_tokens = Number(maxTokens) || 1024;
+      if (topPEnabled) body.top_p = Number(topP) || 1;
+      if (freqPenEnabled) body.frequency_penalty = Number(frequencyPenalty) || 0;
+      if (presPenEnabled) body.presence_penalty = Number(presencePenalty) || 0;
     }
     if (systemPrompt.trim()) {
       body.system_prompt = systemPrompt.trim();
@@ -479,12 +493,17 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       body.message = currentBlocks;
     }
 
+    const requestStartTime = Date.now();
     try {
       if (stream) {
         const controller = new AbortController();
         abortRef.current = controller;
         // 真·流式：占位一条 assistant 消息，逐增量拼接渲染
-        setMessages((prev) => [...prev, { role: 'assistant', content: '…' }]);
+        setMessages((prev) => {
+          const assistantIdx = prev.length;
+          messageTimestamps.current.set(assistantIdx, requestStartTime);
+          return [...prev, { role: 'assistant', content: '…' }];
+        });
         await testChannelChatStream(body, (delta) => {
           setMessages((prev) => {
             const next = prev.slice();
@@ -550,6 +569,14 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       setError(msg);
       setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${msg}` }]);
     } finally {
+      const duration = Date.now() - requestStartTime;
+      setMessages((prev) => {
+        const idx = prev.length - 1;
+        if (idx >= 0 && prev[idx].role === 'assistant') {
+          messageDurations.current.set(idx, duration);
+        }
+        return prev;
+      });
       setBusy(false);
       abortRef.current = null;
     }
@@ -558,12 +585,6 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   /** 停止当前流式生成（AbortController 中断上游请求） */
   const stopStreaming = (): void => {
     abortRef.current?.abort();
-  };
-
-  // 模型键盘导航：过滤后列表比 pickerIdx 短时钳位，避免越界 undefined
-  const clampPickerIdx = (i: number): number => {
-    const max = Math.max(0, visibleModels.length - 1);
-    return Math.min(Math.max(i, 0), max);
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -580,67 +601,14 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     setTempPreset('');
   };
 
-  // 模型选择器（完整工具条与 /chat 精简条共用同一份 JSX）
+  // A10: 使用统一的 ModelPicker 组件替换内联 picker
   const modelPicker = (
-    <div className="chat-debugger-model" ref={pickerRef}>
-          <button
-            type="button"
-            className="form-input chat-debugger-model-btn"
-            onClick={() => setPickerOpen((v) => !v)}
-          >
-            <Bot size={14} />
-            <span className="chat-debugger-model-name">{model || t('选择模型')}</span>
-          </button>
-          {pickerOpen && (
-            <div className="chat-debugger-picker">
-              <div className="chat-debugger-search">
-                <Search size={13} />
-                <input
-                  className="form-input"
-                  autoFocus
-                  placeholder={t('搜索模型…')}
-                  value={query}
-                  onChange={(e) => { setQuery(e.target.value); setPickerIdx(0); }}
-                  onKeyDown={(e) => {
-                    // 键盘导航：↑/↓ 选择，Enter 确认，Esc 关闭
-                    if (e.key === 'ArrowDown') {
-                      e.preventDefault();
-                      setPickerIdx((i) => clampPickerIdx(i + 1));
-                    } else if (e.key === 'ArrowUp') {
-                      e.preventDefault();
-                      setPickerIdx((i) => clampPickerIdx(i - 1));
-                    } else if (e.key === 'Enter') {
-                      e.preventDefault();
-                      const pick = visibleModels[clampPickerIdx(pickerIdx)];
-                      if (pick) { setModel(pick); setPickerOpen(false); setMessages([]); setQuery(''); }
-                    } else if (e.key === 'Escape') {
-                      setPickerOpen(false); setQuery('');
-                    }
-                  }}
-                />
-                {visibleModels.length > 0 && (
-                  <span className="chat-debugger-picker-count">{visibleModels.length}</span>
-                )}
-              </div>
-              <div className="chat-debugger-picker-list">
-                {visibleModels.length === 0 && (
-                  <div className="chat-debugger-picker-empty">{t('无匹配模型')}</div>
-                )}
-                {visibleModels.map((m, i) => (
-                  <button
-                    type="button"
-                    key={m}
-                    className={`chat-debugger-picker-item ${m === model ? 'active' : ''} ${i === clampPickerIdx(pickerIdx) ? 'hover' : ''}`}
-                    onMouseEnter={() => setPickerIdx(clampPickerIdx(i))}
-                    onClick={() => { setModel(m); setPickerOpen(false); setMessages([]); setQuery(''); }}
-                  >
-                    {m}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+    <ModelPicker
+      value={model}
+      onChange={(m) => { setModel(m); setMessages([]); }}
+      channelModels={channelModels}
+      compact={compact}
+    />
   );
 
   return (
@@ -706,24 +674,83 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
 
         {!compact && (
           <>
-            <input
-              className="form-input chat-debugger-temp"
-              type="number"
-              step="0.1"
-              min="0"
-              max="2"
-              title={t('温度')}
-              value={temperature}
-              onChange={(e) => setTemperature(e.target.value)}
-            />
-            <input
-              className="form-input chat-debugger-max"
-              type="number"
-              min="1"
-              title={t('最大输出 Token')}
-              value={maxTokens}
-              onChange={(e) => setMaxTokens(e.target.value)}
-            />
+            <label className="chat-debugger-slider" title={t('温度')}>
+              <input
+                type="checkbox"
+                checked={tempEnabled}
+                onChange={(e) => setTempEnabled(e.target.checked)}
+              />
+              <span>Temp</span>
+              <input
+                type="range" step="0.1" min="0" max="2"
+                value={temperature}
+                disabled={!tempEnabled}
+                onChange={(e) => setTemperature(e.target.value)}
+              />
+              <output>{temperature}</output>
+            </label>
+            <label className="chat-debugger-slider" title={t('Top P')}>
+              <input
+                type="checkbox"
+                checked={topPEnabled}
+                onChange={(e) => setTopPEnabled(e.target.checked)}
+              />
+              <span>TopP</span>
+              <input
+                type="range" step="0.01" min="0" max="1"
+                value={topP}
+                disabled={!topPEnabled}
+                onChange={(e) => setTopP(e.target.value)}
+              />
+              <output>{topP}</output>
+            </label>
+            <label className="chat-debugger-slider" title={t('频率惩罚')}>
+              <input
+                type="checkbox"
+                checked={freqPenEnabled}
+                onChange={(e) => setFreqPenEnabled(e.target.checked)}
+              />
+              <span>Freq</span>
+              <input
+                type="range" step="0.1" min="-2" max="2"
+                value={frequencyPenalty}
+                disabled={!freqPenEnabled}
+                onChange={(e) => setFrequencyPenalty(e.target.value)}
+              />
+              <output>{frequencyPenalty}</output>
+            </label>
+            <label className="chat-debugger-slider" title={t('存在惩罚')}>
+              <input
+                type="checkbox"
+                checked={presPenEnabled}
+                onChange={(e) => setPresPenEnabled(e.target.checked)}
+              />
+              <span>Pres</span>
+              <input
+                type="range" step="0.1" min="-2" max="2"
+                value={presencePenalty}
+                disabled={!presPenEnabled}
+                onChange={(e) => setPresencePenalty(e.target.value)}
+              />
+              <output>{presencePenalty}</output>
+            </label>
+            <label className="chat-debugger-slider" title={t('最大输出 Token')}>
+              <input
+                type="checkbox"
+                checked={maxTokensEnabled}
+                onChange={(e) => setMaxTokensEnabled(e.target.checked)}
+              />
+              <span>Max</span>
+              <input
+                className="form-input chat-debugger-max"
+                type="number"
+                min="1"
+                style={{ width: 70 }}
+                value={maxTokens}
+                disabled={!maxTokensEnabled}
+                onChange={(e) => setMaxTokens(e.target.value)}
+              />
+            </label>
           </>
         )}
 
@@ -819,91 +846,32 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             )}
           </div>
         )}
+        <Suspense fallback={<div className="chat-debugger-loading">{t('加载中…')}</div>}>
         {messages.map((m, i) => (
-          <div key={i} className={`chat-debugger-msg chat-debugger-msg-${m.role}`}>
-            <span className="chat-debugger-msg-icon">
-              {m.role === 'user' ? <User size={13} /> : <Bot size={13} />}
-            </span>
-            <div className="chat-debugger-msg-body">
-              {m.attachments?.map((a, j) => (
-                <div key={j} className="chat-debugger-msg-media">
-                  {a.kind === 'image' && <img src={a.url} alt="attachment" loading="lazy" />}
-                  {a.kind === 'video' && <video src={a.url} controls muted />}
-                  {a.kind === 'audio' && <audio src={a.url} controls />}
-                </div>
-              ))}
-              {editingIdx === i ? (
-                <div className="chat-debugger-edit-box">
-                  <textarea
-                    className="form-input"
-                    rows={3}
-                    autoFocus
-                    value={editDraft}
-                    onChange={(e) => setEditDraft(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitEdit(); }
-                      if (e.key === 'Escape') { e.preventDefault(); setEditingIdx(null); }
-                    }}
-                  />
-                  <div className="chat-debugger-edit-actions">
-                    <button type="button" className="btn btn-outline btn-sm" onClick={() => setEditingIdx(null)}>{t('取消')}</button>
-                    <button type="button" className="btn btn-primary btn-sm" onClick={commitEdit} disabled={busy}>{t('保存并重发')}</button>
-                  </div>
-                </div>
-              ) : (
-                <div className="chat-debugger-msg-content">
-                  <MessageViewer content={m.content} reasoning={m.reasoning} />
-                </div>
-              )}
-              {editingIdx !== i && (
-                <div className="chat-debugger-msg-actions">
-                  <button
-                    type="button"
-                    className="chat-debugger-action-btn"
-                    title={t('复制消息')}
-                    onClick={() => copyMessage(m.reasoning ? `${m.reasoning}\n\n${m.content}` : m.content, i)}
-                  >
-                    {copiedIdx === i ? <Check size={13} /> : <Copy size={13} />}
-                  </button>
-                  {m.role === 'user' && (
-                    <button
-                      type="button"
-                      className="chat-debugger-action-btn"
-                      title={t('编辑并重发')}
-                      onClick={() => beginEdit(i)}
-                      disabled={busy}
-                    >
-                      <Pencil size={13} />
-                    </button>
-                  )}
-                  {m.role === 'assistant' && (
-                    <>
-                      <button
-                        type="button"
-                        className={`chat-debugger-action-btn ${ttsIdx === i ? 'active' : ''}`}
-                        title={ttsPlaying && ttsIdx === i ? t('停止朗读') : t('朗读（TTS）')}
-                        onClick={() => void speakMessage(i)}
-                      >
-                        {ttsPlaying && ttsIdx === i ? <Square size={13} /> : <Volume2 size={13} />}
-                      </button>
-                      {i === messages.length - 1 && (
-                        <button
-                          type="button"
-                          className="chat-debugger-action-btn"
-                          title={t('重新生成')}
-                          onClick={() => void regenerate()}
-                          disabled={busy}
-                        >
-                          <RefreshCw size={13} />
-                        </button>
-                      )}
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
+            <ChatBubble
+              key={i}
+              message={m}
+              index={i}
+              isLast={i === messages.length - 1}
+              isBusy={busy}
+              isEditing={editingIdx === i}
+              editDraft={editDraft}
+              isCopied={copiedIdx === i}
+              isTtsPlaying={ttsPlaying}
+              isTtsTarget={ttsIdx === i}
+              timestamp={messageTimestamps.current.get(i)}
+              responseDuration={messageDurations.current.get(i)}
+              onEditDraftChange={setEditDraft}
+              onBeginEdit={() => beginEdit(i)}
+              onCommitEdit={commitEdit}
+              onCancelEdit={() => setEditingIdx(null)}
+              onCopy={() => copyMessage(m.reasoning ? `${m.reasoning}\n\n${m.content}` : m.content, i)}
+              onSpeak={() => void speakMessage(i)}
+              onRegenerate={() => void regenerate()}
+              onDelete={() => deleteMessage(i)}
+            />
         ))}
+        </Suspense>
         {busy &&
           (stream ? null : (
             <div className="chat-debugger-msg chat-debugger-msg-assistant">

@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Eye, EyeOff, ArrowLeftRight } from 'lucide-react';
+import { Eye, EyeOff, ArrowLeftRight, MoreHorizontal, Search } from 'lucide-react';
 import { api } from '../api';
 import type { ChannelItem as ApiChannelItem } from '../types';
 import { useToast } from '../components/Toast';
@@ -8,7 +8,7 @@ import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ChatDebugger from '../components/ChatDebugger';
 import ModelMappingEditor from '../components/ModelMappingEditor';
 import CostPricingEditor from '../components/CostPricingEditor';
-import { GuideEmptyState } from '../components/ui';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
 import './Channels.css';
 
 interface ChannelItem {
@@ -28,6 +28,13 @@ interface ChannelItem {
   last_used_at?: number | null;
   created_at?: number;
   updated_at?: number;
+  // new-api 风格字段
+  balance?: number;
+  credit?: number;
+  response_time?: number;
+  test_time?: number;
+  remark?: string;
+  tags?: string[];
 }
 
 interface ChannelFormState {
@@ -88,6 +95,17 @@ export default function Channels(): JSX.Element {
   const [showChat, setShowChat] = useState(false);
   const [chatChannel, setChatChannel] = useState<ChannelItem | null>(null);
 
+  // ── 批量操作 / 搜索 / "更多"菜单 ──
+  const [selected, setSelected] = useState<Set<string | number>>(new Set());
+  const [search, setSearch] = useState('');
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
+
+  // ── 内联编辑状态 ──
+  const [editingField, setEditingField] = useState<{ id: string | number; field: 'priority' | 'weight' } | null>(null);
+  const [editValue, setEditValue] = useState<string>('');
+  const [updatingBalance, setUpdatingBalance] = useState<Set<string | number>>(new Set());
+
   function defaultForm(): ChannelFormState {
     return {
       name: '',
@@ -110,6 +128,124 @@ export default function Channels(): JSX.Element {
       setError(err instanceof Error ? err.message : String(err));
     });
   }, []);
+
+  // 点击外部关闭"更多"菜单
+  useEffect(() => {
+    if (!moreOpen) return;
+    const handler = (e: MouseEvent): void => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
+        setMoreOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [moreOpen]);
+
+  // 过滤后的渠道列表（名称/类型/base_url 模糊匹配）
+  const filtered = channels.filter((ch) => {
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return (
+      ch.name.toLowerCase().includes(q) ||
+      ch.channel_type.toLowerCase().includes(q) ||
+      (ch.base_url || '').toLowerCase().includes(q) ||
+      (ch.models || []).some((m) => m.toLowerCase().includes(q))
+    );
+  });
+
+  // 全选/反选（仅当前过滤结果）
+  const allSelected = filtered.length > 0 && filtered.every((ch) => selected.has(ch.id));
+  const toggleAll = (): void => {
+    if (allSelected) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(filtered.map((ch) => ch.id)));
+    }
+  };
+  const toggleOne = (id: string | number): void => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  // 批量启用/禁用/删除
+  const handleBulkEnable = async (): Promise<void> => {
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    for (const id of ids) {
+      await api.patchChannel(id, { status: 'enabled' }).catch(() => {});
+    }
+    addToast(`${t('已启用')} ${ids.length} ${t('个渠道')}`);
+    setSelected(new Set());
+    loadChannels();
+  };
+  const handleBulkDisable = (): void => {
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    setConfirmState({
+      title: t('批量停用渠道'),
+      message: t('确定停用选中的 {{count}} 个渠道？', { count: ids.length }),
+      confirmText: t('停用'),
+      danger: true,
+      onConfirm: async () => {
+        for (const id of ids) {
+          await api.patchChannel(id, { status: 'disabled' }).catch(() => {});
+        }
+        addToast(`${t('已停用')} ${ids.length} ${t('个渠道')}`);
+        setSelected(new Set());
+        loadChannels();
+      },
+    });
+  };
+  const handleBulkDelete = (): void => {
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    setConfirmState({
+      title: t('批量删除渠道'),
+      message: t('确定删除选中的 {{count}} 个渠道？此操作不可撤销。', { count: ids.length }),
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        for (const id of ids) {
+          await api.deleteChannel(id).catch(() => {});
+        }
+        addToast(`${t('已删除')} ${ids.length} ${t('个渠道')}`);
+        setSelected(new Set());
+        loadChannels();
+      },
+    });
+  };
+
+  // "更多"菜单项
+  const handleTestAll = async (): Promise<void> => {
+    setMoreOpen(false);
+    for (const ch of channels) {
+      handleTest(ch.id);
+    }
+  };
+  const handleDeleteAllDisabled = (): void => {
+    setMoreOpen(false);
+    const disabled = channels.filter((ch) => ch.status !== 'enabled');
+    if (!disabled.length) {
+      addToast(t('没有已禁用的渠道'));
+      return;
+    }
+    setConfirmState({
+      title: t('删除所有已禁用渠道'),
+      message: t('确定删除全部 {{count}} 个已禁用渠道？', { count: disabled.length }),
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        for (const ch of disabled) {
+          await api.deleteChannel(ch.id).catch(() => {});
+        }
+        addToast(`${t('已删除')} ${disabled.length} ${t('个渠道')}`);
+        loadChannels();
+      },
+    });
+  };
 
   const loadChannels = async (): Promise<void> => {
     setLoading(true);
@@ -345,179 +481,363 @@ export default function Channels(): JSX.Element {
     return found.isRaw ? found.labelKey : t(found.labelKey);
   };
 
+  // ── 内联编辑处理 ──
+  const handleInlineUpdate = async (id: string | number, field: 'priority' | 'weight', value: number): Promise<void> => {
+    if (isNaN(value)) {
+      addToast(t('请输入有效的数字'), 'error');
+      return;
+    }
+    try {
+      await api.updateChannel(id, { [field]: value } as Record<string, unknown>);
+      addToast(t('更新成功'));
+      setEditingField(null);
+      void loadChannels();
+    } catch (err) {
+      addToast(`${t('更新失败')}: ${err instanceof Error ? err.message : String(err)}`, 'error');
+    }
+  };
+
+  // ── 余额更新 ──
+  const handleUpdateBalance = async (id: string | number): Promise<void> => {
+    setUpdatingBalance((prev) => new Set(prev).add(id));
+    try {
+      const res = await api.getChannelBalance(id);
+      if (res.success && res.data) {
+        addToast(t('余额已更新'));
+        void loadChannels();
+      } else {
+        addToast(`${t('获取余额失败')}: ${res.error?.message || ''}`, 'error');
+      }
+    } catch (err) {
+      addToast(`${t('获取余额失败')}: ${err instanceof Error ? err.message : String(err)}`, 'error');
+    } finally {
+      setUpdatingBalance((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
+
+  // ── 相对时间格式化 ──
+  const formatRelativeTime = (timestamp: number): string => {
+    const now = Date.now();
+    const diff = now - timestamp;
+    const seconds = Math.floor(diff / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+
+    if (seconds < 60) return t('刚刚');
+    if (minutes < 60) return `${minutes}${t('分钟前')}`;
+    if (hours < 24) return `${hours}${t('小时前')}`;
+    if (days < 7) return `${days}${t('天前')}`;
+    return new Date(timestamp).toLocaleDateString();
+  };
+
+  if (loading) return <SkeletonTable columns={6} rows={6} />;
+
   return (
-    <div className="channels-shell">
+    <div>
       {/* PageIntro 标题区 */}
       <div className="page-header">
-        <div>
-          <h1>{t('渠道管理')}</h1>
-          <p>{t('管理上游 AI 渠道（支持混用 Cloudflare + 第三方 OpenAI 兼容上游）')}</p>
-        </div>
+        <h1>{t('渠道管理')}</h1>
+        <p>{t('管理上游 AI 渠道（支持混用 Cloudflare + 第三方 OpenAI 兼容上游）')}</p>
       </div>
 
       {error && <div className="error-message">{error}</div>}
 
-      <div className="channels-content">
-        {loading ? (
-          <div className="loading">{t('加载渠道列表')}</div>
-        ) : (
-          <div className="card">
-            <div className="card-header">
-              <h2>{t('所有渠道')} ({channels.length})</h2>
-              <button className="btn btn-primary" onClick={openAdd}>{t('+ 添加渠道')}</button>
+      <Card
+        title={`${t('所有渠道')} (${channels.length})`}
+        actions={
+          <div className="channels-toolbar">
+            {/* 搜索框 */}
+            <div className="channels-search">
+              <Search size={14} />
+              <input
+                placeholder={t('搜索渠道')}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
             </div>
-            <div className="card-body">
-              {channels.length === 0 ? (
-                <GuideEmptyState
-                  icon="🛰️"
-                  title={t('暂无渠道')}
-                  hint={t('渠道是上游 AI 服务的接入点：填入 Base URL 与密钥后即可转发请求。')}
-                  action={<button className="btn btn-primary" onClick={openAdd}>{t('添加第一个渠道')}</button>}
-                />
-              ) : (
-                <div className="table-wrapper">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>{t('名称')}</th>
-                        <th>{t('类型')}</th>
-                        <th>Base URL</th>
-                        <th>{t('优先级/权重')}</th>
-                        <th>{t('模型')}</th>
-                        <th>{t('状态')}</th>
-                        <th>{t('操作')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {channels.map((ch) => (
-                        <tr key={ch.id}>
-                          <td><strong>{ch.name}</strong></td>
-                          <td>
-                            <span className="channel-type-badge" data-type={ch.channel_type}>
-                              {typeLabel(ch.channel_type)}
-                            </span>
-                          </td>
-                          <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                            {ch.base_url || ch.account_id || '—'}
-                          </td>
-                          <td>
-                            <span className="priority-weight">
-                              <span className="pw-priority">{ch.priority}</span>
-                              <span className="pw-sep">/</span>
-                              <span className="pw-weight">{ch.weight}</span>
-                            </span>
-                          </td>
-                          <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                            {(ch.models || []).length > 6
-                              ? <span title={(ch.models || []).join(', ')}>
-                                  {(ch.models || []).slice(0, 6).join(', ')} +{ch.models!.length - 6}
-                                </span>
-                              : (ch.models || []).join(', ') || t('全部')}
-                            {Object.keys(ch.model_mapping || {}).length > 0 && (
-                              <div className="channel-mapping-count" title={Object.entries(ch.model_mapping!).map(([k, v]) => `${k} → ${v}`).join('\n')}>
-                                <ArrowLeftRight size={11} />
-                                {Object.keys(ch.model_mapping!).length} {t('条映射')}
-                              </div>
-                            )}
-                          </td>
-                          <td>
-                            {ch.status === 'enabled'
-                              ? <span className="badge badge-success">{t('启用')}</span>
-                              : <span className="badge badge-danger" title={ch.last_error || ''}>{t('禁用')}</span>}
-                          </td>
-                          <td>
-                            <div className="actions-cell">
-                              <button
-                                className="btn btn-outline btn-sm"
-                                onClick={() => openChat(ch)}
-                                title={t('对话调试')}
-                              >
-                                {t('对话')}
-                              </button>
-                              <button
-                                className="btn btn-outline btn-sm"
-                                onClick={() => handleTest(ch.id)}
-                                disabled={testingId === ch.id}
-                              >
-                                {testingId === ch.id ? '...' : t('连通')}
-                              </button>
-                              <button className="btn btn-outline btn-sm" onClick={() => handleToggle(ch)}>
-                                {ch.status === 'enabled' ? t('停用') : t('启用')}
-                              </button>
-                              <button
-                                className="btn btn-outline btn-sm"
-                                onClick={() => handleResetCircuit(ch.id)}
-                                title={t('重置断路器（渠道被熔断后恢复）')}
-                              >
-                                {t('重置')}
-                              </button>
-                              <button className="btn btn-outline btn-sm" onClick={() => openEdit(ch)}>{t('编辑')}</button>
-                              <button className="btn btn-danger btn-sm" onClick={() => handleDelete(ch.id)}>{t('删除')}</button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+
+            {/* "更多"下拉 */}
+            <div className="channels-more" ref={moreRef}>
+              <Button variant="outline" onClick={() => setMoreOpen((v) => !v)}>
+                <MoreHorizontal size={16} />
+              </Button>
+              {moreOpen && (
+                <div className="channels-more-menu">
+                  <button type="button" onClick={handleTestAll}>{t('测试所有渠道')}</button>
+                  <button type="button" onClick={handleDeleteAllDisabled}>{t('删除所有已禁用渠道')}</button>
                 </div>
               )}
             </div>
+
+            <Button onClick={openAdd}>{t('+ 添加渠道')}</Button>
           </div>
+        }
+      >
+        {channels.length === 0 ? (
+          <EmptyState
+            message={t('暂无渠道')}
+            icon="🛰️"
+            action={<Button onClick={openAdd}>{t('添加第一个渠道')}</Button>}
+          />
+        ) : (
+          <>
+            {/* 批量操作栏 */}
+            {selected.size > 0 && (
+              <div className="channels-bulk">
+                <span>{t('已选')} {selected.size} / {filtered.length}</span>
+                <Button variant="outline" size="sm" onClick={handleBulkEnable}>{t('启用')}</Button>
+                <Button variant="outline" size="sm" onClick={handleBulkDisable}>{t('停用')}</Button>
+                <Button variant="danger" size="sm" onClick={handleBulkDelete}>{t('删除')}</Button>
+                <Button variant="outline" size="sm" onClick={() => setSelected(new Set())}>{t('取消选择')}</Button>
+              </div>
+            )}
+
+            <div className="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th style={{ width: 32 }}>
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={toggleAll}
+                        aria-label={t('全选')}
+                      />
+                    </th>
+                    <th>{t('名称')}</th>
+                    <th>{t('类型')}</th>
+                    <th>Base URL</th>
+                    <th>{t('优先级')}</th>
+                    <th>{t('权重')}</th>
+                    <th>{t('余额')}</th>
+                    <th>{t('模型')}</th>
+                    <th>{t('响应时间')}</th>
+                    <th>{t('测试时间')}</th>
+                    <th>{t('状态')}</th>
+                    <th>{t('操作')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((ch) => {
+                    const isEditingPriority = editingField?.id === ch.id && editingField?.field === 'priority';
+                    const isEditingWeight = editingField?.id === ch.id && editingField?.field === 'weight';
+
+                    return (
+                      <tr key={ch.id} className={selected.has(ch.id) ? 'selected' : ''}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={selected.has(ch.id)}
+                            onChange={() => toggleOne(ch.id)}
+                            aria-label={t('选择')}
+                          />
+                        </td>
+                        <td><strong>{ch.name}</strong></td>
+                        <td>
+                          <span className="channel-type-badge" data-type={ch.channel_type}>
+                            {typeLabel(ch.channel_type)}
+                          </span>
+                        </td>
+                        <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                          {ch.base_url || ch.account_id || '—'}
+                        </td>
+                        <td>
+                          {isEditingPriority ? (
+                            <input
+                              type="number"
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  void handleInlineUpdate(ch.id, 'priority', parseInt(editValue, 10));
+                                } else if (e.key === 'Escape') {
+                                  setEditingField(null);
+                                }
+                              }}
+                              style={{ width: 60, padding: '2px 4px' }}
+                              autoFocus
+                            />
+                          ) : (
+                            <span
+                              className="inline-editable"
+                              onClick={() => {
+                                setEditingField({ id: ch.id, field: 'priority' });
+                                setEditValue(String(ch.priority));
+                              }}
+                              title={t('点击编辑')}
+                            >
+                              {ch.priority}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          {isEditingWeight ? (
+                            <input
+                              type="number"
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  void handleInlineUpdate(ch.id, 'weight', parseInt(editValue, 10));
+                                } else if (e.key === 'Escape') {
+                                  setEditingField(null);
+                                }
+                              }}
+                              style={{ width: 60, padding: '2px 4px' }}
+                              autoFocus
+                            />
+                          ) : (
+                            <span
+                              className="inline-editable"
+                              onClick={() => {
+                                setEditingField({ id: ch.id, field: 'weight' });
+                                setEditValue(String(ch.weight));
+                              }}
+                              title={t('点击编辑')}
+                            >
+                              {ch.weight}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <button
+                            className="balance-cell"
+                            onClick={() => handleUpdateBalance(ch.id)}
+                            disabled={updatingBalance.has(ch.id)}
+                            title={t('点击更新余额')}
+                          >
+                            {updatingBalance.has(ch.id) ? (
+                              <span className="animate-spin">⏳</span>
+                            ) : (
+                              <>
+                                {ch.balance !== undefined ? ch.balance.toFixed(2) : '—'}
+                                {ch.credit !== undefined && (
+                                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                                    / ${ch.credit.toFixed(2)}
+                                  </span>
+                                )}
+                              </>
+                            )}
+                          </button>
+                        </td>
+                        <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                          {(ch.models || []).length > 6
+                            ? <span title={(ch.models || []).join(', ')}>
+                                {(ch.models || []).slice(0, 6).join(', ')} +{ch.models!.length - 6}
+                              </span>
+                            : (ch.models || []).join(', ') || t('全部')}
+                          {Object.keys(ch.model_mapping || {}).length > 0 && (
+                            <div className="channel-mapping-count" title={Object.entries(ch.model_mapping!).map(([k, v]) => `${k} → ${v}`).join('\n')}>
+                              <ArrowLeftRight size={11} />
+                              {Object.keys(ch.model_mapping!).length} {t('条映射')}
+                            </div>
+                          )}
+                        </td>
+                        <td>
+                          {ch.response_time !== undefined ? (
+                            <span className={`response-time-badge ${ch.response_time < 500 ? 'fast' : ch.response_time < 2000 ? 'medium' : 'slow'}`}>
+                              {ch.response_time}ms
+                            </span>
+                          ) : '—'}
+                        </td>
+                        <td>
+                          {ch.test_time ? (
+                            <span title={new Date(ch.test_time).toLocaleString()}>
+                              {formatRelativeTime(ch.test_time)}
+                            </span>
+                          ) : '—'}
+                        </td>
+                        <td>
+                          <span
+                            className={ch.status === 'enabled' ? 'badge badge-success' : 'badge badge-danger'}
+                            title={ch.last_error || ''}
+                          >
+                            {ch.status === 'enabled' ? t('启用') : t('禁用')}
+                          </span>
+                        </td>
+                        <td>
+                          <div className="actions-cell">
+                            <Button variant="outline" size="sm" onClick={() => openChat(ch)}>{t('对话')}</Button>
+                            <Button variant="outline" size="sm" onClick={() => handleTest(ch.id)} disabled={testingId === ch.id}>
+                              {testingId === ch.id ? '...' : t('连通')}
+                            </Button>
+                            <Button variant="outline" size="sm" onClick={() => handleToggle(ch)}>
+                              {ch.status === 'enabled' ? t('停用') : t('启用')}
+                            </Button>
+                            <Button variant="outline" size="sm" onClick={() => handleResetCircuit(ch.id)} title={t('重置断路器')}>{t('重置')}</Button>
+                            <Button variant="outline" size="sm" onClick={() => openEdit(ch)}>{t('编辑')}</Button>
+                            <Button variant="danger" size="sm" onClick={() => handleDelete(ch.id)}>{t('删除')}</Button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
-      </div>
+      </Card>
 
       {showModal && (
         <div className="modal-overlay">
-          <div className="modal">
+          <form className="modal" onSubmit={(e) => { e.preventDefault(); void handleSave(); }}>
             <div className="modal-header">
               <h3>{editChannel ? t('编辑渠道') : t('添加渠道')}</h3>
-              <button className="modal-close" onClick={closeModal}>&times;</button>
+              <button type="button" className="modal-close" onClick={closeModal}>&times;</button>
             </div>
             <div className="modal-body">
-              <div className="form-group">
-                <label>{t('名称')}</label>
-                <input className="form-input" placeholder={t('名称')} value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })} />
-              </div>
-              <div className="form-group">
-                <label>{t('渠道类型')}</label>
-                <select className="form-input" value={form.channel_type}
-                  onChange={(e) => {
-                    const newType = e.target.value;
-                    // 切换类型时：若当前 base_url 为空或是某个类型的默认值，则自动填充新类型的默认 URL
-                    const isUsingDefault = Object.values(DEFAULT_BASE_URL).includes(form.base_url) || !form.base_url;
-                    setForm({
-                      ...form,
-                      channel_type: newType,
-                      base_url: isUsingDefault ? (DEFAULT_BASE_URL[newType as keyof typeof DEFAULT_BASE_URL] || '') : form.base_url,
-                    });
-                  }}>
-                  {CHANNEL_TYPES.map((tp) => (
-                    <option key={tp.value} value={tp.value}>
-                      {tp.isRaw ? tp.labelKey : t(tp.labelKey)}
-                    </option>
-                  ))}
-                </select>
-                {/* Gemini / Zai 鉴权方式提示 */}
-                {AUTH_HINT[form.channel_type as keyof typeof AUTH_HINT] && (
-                  <div className="form-hint" style={{ color: 'var(--accent-color)' }}>
-                    {t(AUTH_HINT[form.channel_type as keyof typeof AUTH_HINT]!)}
-                  </div>
-                )}
-              </div>
-              {form.channel_type === 'cloudflare' ? (
-                <div className="form-group">
-                  <label>{t('Cloudflare 账号 ID')}</label>
-                  <input className="form-input" placeholder={t('Cloudflare 账号 ID')} value={form.account_id}
-                    onChange={(e) => setForm({ ...form, account_id: e.target.value })} />
+              <Input
+                label={`${t('名称')} *`}
+                placeholder={t('例如：OpenAI 官方')}
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                autoFocus
+              />
+              <Select
+                label={t('渠道类型')}
+                value={form.channel_type}
+                onChange={(e) => {
+                  const newType = e.target.value;
+                  const isUsingDefault = Object.values(DEFAULT_BASE_URL).includes(form.base_url) || !form.base_url;
+                  setForm({
+                    ...form,
+                    channel_type: newType,
+                    base_url: isUsingDefault ? (DEFAULT_BASE_URL[newType as keyof typeof DEFAULT_BASE_URL] || '') : form.base_url,
+                  });
+                }}
+              >
+                {CHANNEL_TYPES.map((tp) => (
+                  <option key={tp.value} value={tp.value}>
+                    {tp.isRaw ? tp.labelKey : t(tp.labelKey)}
+                  </option>
+                ))}
+              </Select>
+              {AUTH_HINT[form.channel_type as keyof typeof AUTH_HINT] && (
+                <div className="form-hint" style={{ color: 'var(--accent-color)', marginTop: -8 }}>
+                  {t(AUTH_HINT[form.channel_type as keyof typeof AUTH_HINT]!)}
                 </div>
+              )}
+                            {form.channel_type === 'cloudflare' ? (
+                <Input
+                  label={t('Cloudflare 账号 ID')}
+                  placeholder={t('Cloudflare 账号 ID')}
+                  value={form.account_id}
+                  onChange={(e) => setForm({ ...form, account_id: e.target.value })}
+                />
               ) : (
-                <div className="form-group">
-                  <label>Base URL</label>
-                  <input className="form-input" placeholder="https://cf-ai-gw.pages.dev 或 https://api.deepseek.com/v1" value={form.base_url}
-                    onChange={(e) => setForm({ ...form, base_url: e.target.value })} />
-                  <div className="form-hint">{t('未带 /v1 时会自动补齐；例如 cf-ai-gw 填 https://cf-ai-gw.pages.dev 即可')}</div>
-                </div>
+                <Input
+                  label="Base URL"
+                  placeholder="https://cf-ai-gw.pages.dev 或 https://api.Workspace_2B8939.com/v1"
+                  value={form.base_url}
+                  onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                  hint={t('未带 /v1 时会自动补齐；例如 cf-ai-gw 填 https://cf-ai-gw.pages.dev 即可')}
+                />
               )}
               <div className="form-group">
                 <label>API Key {editChannel && t('（留空则保持不变）')}</label>
@@ -544,18 +864,22 @@ export default function Channels(): JSX.Element {
               <div className="form-group">
                 <label>{t('支持的模型（逗号分隔，留空=全部）')}</label>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <input className="form-input" placeholder="deepseek-chat, deepseek-coder" value={form.models}
-                    onChange={(e) => setForm({ ...form, models: e.target.value })} />
-                  <button
+                  <Input
+                    placeholder="Workspace_2B8939-chat, Workspace_2B8939-coder"
+                    value={form.models}
+                    onChange={(e) => setForm({ ...form, models: e.target.value })}
+                    style={{ flex: 1 }}
+                  />
+                  <Button
                     type="button"
-                    className="btn btn-outline"
-                    style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+                    variant="outline"
                     onClick={handleFetchModels}
                     disabled={fetchingModels}
                     title={t('从上游拉取模型列表')}
+                    style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                   >
                     {fetchingModels ? t('拉取中...') : t('拉取模型')}
-                  </button>
+                  </Button>
                 </div>
               </div>
               <div className="form-group">
@@ -583,33 +907,37 @@ export default function Channels(): JSX.Element {
                 />
               </div>
               <div style={{ display: 'flex', gap: 12 }}>
-                <div className="form-group" style={{ flex: 1 }}>
-                  <label>{t('优先级（越大越优先）')}</label>
-                  <input className="form-input" type="number" value={form.priority}
-                    onChange={(e) => setForm({ ...form, priority: e.target.value })} />
-                </div>
-                <div className="form-group" style={{ flex: 1 }}>
-                  <label>{t('权重')}</label>
-                  <input className="form-input" type="number" value={form.weight}
-                    onChange={(e) => setForm({ ...form, weight: e.target.value })} />
-                </div>
+                <Input
+                  label={t('优先级（越大越优先）')}
+                  type="number"
+                  value={String(form.priority)}
+                  onChange={(e) => setForm({ ...form, priority: e.target.value })}
+                  style={{ flex: 1 }}
+                />
+                <Input
+                  label={t('权重')}
+                  type="number"
+                  value={String(form.weight)}
+                  onChange={(e) => setForm({ ...form, weight: e.target.value })}
+                  style={{ flex: 1 }}
+                />
               </div>
-              <div className="form-group">
-                <label>{t('状态')}</label>
-                <select className="form-input" value={form.status}
-                  onChange={(e) => setForm({ ...form, status: e.target.value })}>
-                  <option value="enabled">{t('启用')}</option>
-                  <option value="disabled">{t('禁用')}</option>
-                </select>
-              </div>
+              <Select
+                label={t('状态')}
+                value={form.status}
+                onChange={(e) => setForm({ ...form, status: e.target.value })}
+              >
+                <option value="enabled">{t('启用')}</option>
+                <option value="disabled">{t('禁用')}</option>
+              </Select>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-outline" onClick={closeModal} disabled={saving}>{t('取消')}</button>
-              <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+              <Button variant="outline" onClick={closeModal} disabled={saving}>{t('取消')}</Button>
+              <Button type="submit" disabled={saving}>
                 {saving ? t('保存中...') : (editChannel ? t('更新') : t('添加'))}
-              </button>
+              </Button>
             </div>
-          </div>
+          </form>
         </div>
       )}
 
