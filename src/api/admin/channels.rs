@@ -187,7 +187,10 @@ pub async fn handle_list_channels(
         .collect();
 
     // 服务端搜索过滤（名称/类型/base_url/模型名，前端一致）
-    let search = params.get("search").map(|s| s.to_lowercase()).unwrap_or_default();
+    let search = params
+        .get("search")
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
     let filtered: Vec<&Channel> = if search.is_empty() {
         all.iter().collect()
     } else {
