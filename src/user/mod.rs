@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 use crate::storage::FileStore;
 
+pub mod checkin;
+
 /// 用户角色
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]

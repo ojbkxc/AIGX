@@ -64,6 +64,8 @@ pub struct AppState {
     pub hub: Arc<Hub>,
     pub user_store: Arc<UserStore>,
     pub order_store: Arc<OrderStore>,
+    /// 签到存储（每日签到送配额，对齐 new-api checkin）
+    pub checkin_store: Arc<crate::user::checkin::CheckinStore>,
     pub epay_client: Arc<crate::payment::EpayClient>,
     /// Stripe 支付客户端
     pub stripe_client: Arc<crate::payment::stripe::StripeClient>,

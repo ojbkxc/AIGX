@@ -136,6 +136,9 @@ async fn main() -> anyhow::Result<()> {
     // 初始化订单存储
     let order_store = Arc::new(OrderStore::new(store.clone()));
 
+    // 初始化签到存储（对齐 new-api 签到送配额）
+    let checkin_store = Arc::new(crate::user::checkin::CheckinStore::new(store.clone()));
+
     // 初始化易支付客户端（运行时按配置即时构造，无需常驻）
     let epay_client = Arc::new(EpayClient::new(config.epay.clone()));
     let stripe_client = Arc::new(StripeClient::new(config.stripe.clone()));
@@ -329,6 +332,7 @@ async fn main() -> anyhow::Result<()> {
         hub,
         user_store,
         order_store,
+        checkin_store,
         epay_client,
         stripe_client,
         health_tracker: health_tracker.clone(),
@@ -631,6 +635,9 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 邀请返利（对齐 new-api /api/user/aff 与 /api/user/aff_transfer）
         .route("/api/aff", get(api::admin::handle_get_aff_code))
         .route("/api/aff_transfer", post(api::admin::handle_aff_transfer))
+        // 签到（对齐 new-api GET/POST /api/user/checkin）
+        .route("/api/checkin", get(api::admin::handle_checkin_status))
+        .route("/api/checkin", post(api::admin::handle_do_checkin))
         .route("/api/users/:id", put(api::admin::handle_update_user))
         .route("/api/users/:id", delete(api::admin::handle_delete_user))
         // 管理员强制禁用用户 2FA（对齐 new-api DELETE /api/user/:id/2fa）

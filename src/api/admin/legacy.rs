@@ -711,6 +711,89 @@ pub async fn handle_aff_transfer(
     })))
 }
 
+/// GET /api/checkin - 签到状态与当月记录（对齐 new-api GetCheckinStatus）。
+///
+/// 未启用时返回 success=false（new-api 同语义）；month 参数可查历史月份。
+pub async fn handle_checkin_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let u = verify_user(&state, &headers).await?;
+    let config = state.config_manager.get().await;
+    let setting = &config.usage.checkin;
+    if !setting.enabled {
+        return Ok(Json(serde_json::json!({
+            "success": false,
+            "message": "签到功能未启用",
+        })));
+    }
+    let checked_today = state
+        .checkin_store
+        .has_checked_today(&u.id)
+        .unwrap_or(false);
+    let stats = state
+        .checkin_store
+        .list_month(&u.id, params.get("month").map(|s| s.as_str()))
+        .unwrap_or_default();
+    let month_total: i64 = stats.iter().map(|c| c.quota_awarded).sum();
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "enabled": setting.enabled,
+            "min_quota": setting.min_quota,
+            "max_quota": setting.max_quota,
+            "checked_today": checked_today,
+            "month_total": month_total,
+            "count": stats.len(),
+            "stats": stats,
+        }
+    })))
+}
+
+/// POST /api/checkin - 执行签到（对齐 new-api DoCheckin）。
+///
+/// 每人每日一次，随机奖励 [min_quota, max_quota] 直进可用配额；
+/// 重复签到返回错误信息（new-api 用 success=false + message）。
+pub async fn handle_do_checkin(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let u = verify_user(&state, &headers).await?;
+    let config = state.config_manager.get().await;
+    let setting = config.usage.checkin.clone();
+    if !setting.enabled {
+        return Ok(Json(serde_json::json!({
+            "success": false,
+            "message": "签到功能未启用",
+        })));
+    }
+    match state.checkin_store.checkin(&u.id, &setting) {
+        Ok(rec) => {
+            if let Err(e) = state.user_store.add_quota(&u.id, rec.quota_awarded) {
+                tracing::error!("Checkin: add quota failed for {}: {e}", u.id);
+                return Err(error_response(
+                    "签到入账失败，请稍后重试",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ));
+            }
+            tracing::info!("Checkin: user {} awarded {} quota", u.id, rec.quota_awarded);
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "message": "签到成功",
+                "data": {
+                    "quota_awarded": rec.quota_awarded,
+                    "checkin_date": rec.checkin_date,
+                }
+            })))
+        }
+        Err(e) => Ok(Json(serde_json::json!({
+            "success": false,
+            "message": e.to_string(),
+        }))),
+    }
+}
+
 /// 解析易支付回调参数（支持 GET query 与 POST form）
 fn collect_params(query: Option<&str>, body_bytes: &bytes::Bytes) -> HashMap<String, String> {
     let mut map = HashMap::new();

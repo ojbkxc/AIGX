@@ -104,11 +104,14 @@ pub use legacy::{
 
 // 用户侧端点与未迁移端点（main.rs 恢复路由时需要）
 pub use legacy::{
-    handle_aff_transfer, handle_check_username, handle_get_aff_code, handle_get_epay_config,
-    handle_get_epay_info, handle_get_ratios, handle_me, handle_my_orders,
+    handle_aff_transfer, handle_check_username, handle_do_checkin, handle_get_aff_code,
+    handle_get_epay_config, handle_get_epay_info, handle_get_ratios, handle_me, handle_my_orders,
     handle_trigger_price_sync, handle_update_epay_config, handle_update_exchange_rates,
     handle_update_ratios, handle_upsert_group_by_name,
 };
+
+// 签到（对齐 new-api GET/POST /api/user/checkin）
+pub use legacy::handle_checkin_status;
 
 // 网络层管理（main.rs /api/network/* 路由）
 pub use network::{

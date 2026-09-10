@@ -15,6 +15,15 @@ interface WalletUser {
   aff_history_quota?: number;
 }
 
+interface CheckinState {
+  enabled?: boolean;
+  min_quota?: number;
+  max_quota?: number;
+  checked_today?: boolean;
+  month_total?: number;
+  count?: number;
+}
+
 interface EpayConfig {
   enabled?: boolean;
   pay_address?: string;
@@ -49,6 +58,9 @@ export default function Wallet(): JSX.Element {
   // 邀请返利
   const [affCode, setAffCode] = useState('');
   const [claiming, setClaiming] = useState(false);
+  // 每日签到
+  const [checkin, setCheckin] = useState<CheckinState | null>(null);
+  const [checkingIn, setCheckingIn] = useState(false);
 
   const [amount, setAmount] = useState('10');
   const [method, setMethod] = useState('alipay');
@@ -71,16 +83,21 @@ export default function Wallet(): JSX.Element {
     setLoading(true);
     setError('');
     try {
-      const [meRes, epayRes, orderRes, affRes] = await Promise.all([
+      const [meRes, epayRes, orderRes, affRes, checkinRes] = await Promise.all([
         api.getMe().catch(() => null),
         api.getEpayInfo().catch(() => null),
         api.myOrders().catch(() => null),
         api.getAffCode().catch(() => null),
+        api.checkinStatus().catch(() => null),
       ]);
       if (meRes) setMe(meRes.data as WalletUser | null);
       if (epayRes) setEpay(epayRes.data as EpayConfig | null);
       if (orderRes) setOrders(Array.isArray(orderRes.data) ? (orderRes.data as unknown as WalletOrder[]) : []);
       if (affRes) setAffCode(String(affRes.data ?? ''));
+      // 签到未启用时后端返回 success=false，data 为空 → 不渲染签到卡片
+      if (checkinRes && (checkinRes as { success?: boolean }).success) {
+        setCheckin((checkinRes.data ?? null) as CheckinState | null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -158,6 +175,31 @@ export default function Wallet(): JSX.Element {
       setTopupError(err instanceof Error ? err.message : String(err));
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  /** 每日签到：随机奖励直进可用配额（一人一天一次） */
+  const handleCheckin = async () => {
+    setCheckingIn(true);
+    try {
+      const res = await api.doCheckin();
+      const awarded = Number((res?.data as { quota_awarded?: number } | null)?.quota_awarded ?? 0);
+      addToast(`${t('签到成功，获得')} ${fmtQuota(awarded)} ${t('配额')}`);
+      // 刷新余额与签到状态
+      const [meRes, statusRes] = await Promise.all([
+        api.getMe().catch(() => null),
+        api.checkinStatus().catch(() => null),
+      ]);
+      if (meRes) setMe(meRes.data as WalletUser | null);
+      if (statusRes && (statusRes as { success?: boolean }).success) {
+        setCheckin((statusRes.data ?? null) as CheckinState | null);
+      } else {
+        setCheckin(null);
+      }
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCheckingIn(false);
     }
   };
 
@@ -321,6 +363,39 @@ export default function Wallet(): JSX.Element {
             </form>
           </Card>
         </>
+      )}
+
+      {/* 每日签到卡片（对齐 new-api CheckinCard；未启用时不渲染） */}
+      {checkin?.enabled && (
+        <Card title={t('每日签到')} bodyClassName="">
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'center' }}>
+            <div>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('今日状态')}</div>
+              <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4 }}>
+                {checkin.checked_today ? t('已签到') : t('未签到')}
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('奖励区间')}</div>
+              <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4 }}>
+                {fmtQuota(checkin.min_quota)} ~ {fmtQuota(checkin.max_quota)}
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('本月签到')}</div>
+              <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4 }}>{checkin.count ?? 0} {t('天')}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{t('本月累计奖励')}</div>
+              <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4, color: 'var(--accent-color)' }}>
+                {fmtQuota(checkin.month_total)}
+              </div>
+            </div>
+            <Button size="sm" onClick={() => void handleCheckin()} disabled={checkingIn || checkin.checked_today}>
+              {checkin.checked_today ? t('今日已签') : checkingIn ? t('签到中...') : t('立即签到')}
+            </Button>
+          </div>
+        </Card>
       )}
 
       {/* 邀请返利卡片（对齐 new-api AffiliateRewardsCard） */}

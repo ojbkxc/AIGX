@@ -139,6 +139,9 @@ pub struct UsageConfig {
     /// 每个受邀新用户的奖励配额（对齐 new-api QuotaForInvitee，0=无奖励）
     #[serde(default)]
     pub quota_for_invitee: i64,
+    /// 签到设置（对齐 new-api CheckinSetting：开关 + 奖励区间）
+    #[serde(default)]
+    pub checkin: crate::user::checkin::CheckinSetting,
     #[serde(default)]
     pub threshold: f64,
     #[serde(default = "default_api_timeout")]
@@ -223,6 +226,7 @@ impl Default for UsageConfig {
             register_enabled: default_register_enabled(),
             quota_for_inviter: 0,
             quota_for_invitee: 0,
+            checkin: Default::default(),
             threshold: 0.0,
             api_timeout_secs: default_api_timeout(),
             max_retries: default_max_retries(),

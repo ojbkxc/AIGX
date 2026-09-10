@@ -296,6 +296,12 @@ export const api = {
   /** 邀请奖励划转到可用配额（对齐 new-api POST /api/user/aff_transfer） */
   affTransfer: (): Promise<ApiResponse<{ transferred: number }>> =>
     request<ApiResponse<{ transferred: number }>>('POST', `${API_BASE}/aff_transfer`, {}),
+  /** 签到状态与当月记录（对齐 new-api GET /api/user/checkin） */
+  checkinStatus: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/checkin`),
+  /** 执行签到（对齐 new-api POST /api/user/checkin） */
+  doCheckin: (): Promise<ApiResponse<{ quota_awarded: number; checkin_date: string }>> =>
+    request<ApiResponse<{ quota_awarded: number; checkin_date: string }>>('POST', `${API_BASE}/checkin`),
   checkUsername: (username: string): Promise<ApiResponse<{ available?: boolean }>> =>
     request<ApiResponse<{ available?: boolean }>>('GET', `${API_BASE}/users/check?username=${encodeURIComponent(username)}`),
 
