@@ -17,6 +17,8 @@ import './Channels.css';
 
 interface ChannelItem {
   id: string | number;
+  /** 展示用短编号（后端按创建顺序注入 1..N；旧数据可能缺失，回退取 id 前 8 位） */
+  seq?: number;
   name: string;
   channel_type: string;
   base_url?: string;
@@ -286,6 +288,7 @@ export default function Channels(): JSX.Element {
       const res = await api.listChannels();
       const items: ChannelItem[] = (res?.data ?? []).map((ch: ApiChannelItem) => ({
         id: ch.id as string | number,
+        seq: ch.seq,
         name: ch.name,
         channel_type: ch.channel_type || ch.type || 'openai_compatible',
         base_url: ch.base_url,
@@ -680,7 +683,9 @@ export default function Channels(): JSX.Element {
                             aria-label={t('选择')}
                           />
                         </td>
-                        <td className="col-id">{ch.id}</td>
+                        <td className="col-id" title={String(ch.id)}>
+                          {ch.seq ?? String(ch.id).slice(0, 8)}
+                        </td>
                         <td className="col-name">
                           <div className="ch-name" title={ch.name}>{ch.name}</div>
                           {(ch.base_url || ch.account_id) && (

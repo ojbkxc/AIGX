@@ -298,6 +298,8 @@ export interface ChannelUsage {
 
 export interface ChannelItem {
   id: string;
+  /** 展示用短编号（列表接口按创建顺序注入 1..N） */
+  seq?: number;
   name: string;
   channel_type?: string;
   type?: string;

@@ -23,29 +23,34 @@
 }
 
 .channels-table {
-  min-width: 1080px;
+  min-width: 980px;
   table-layout: fixed;
   width: 100%;
 }
 
+/* 紧凑行距（new-api data-table 密度） */
 .channels-table th,
 .channels-table td {
+  padding-top: 7px;
+  padding-bottom: 7px;
+  padding-left: 10px;
+  padding-right: 10px;
   white-space: nowrap;
 }
 
-.channels-table .col-select { width: 36px; }
-.channels-table .col-id { width: 72px; }
-.channels-table .col-name { width: 200px; }
-.channels-table .col-type { width: 150px; }
-.channels-table .col-status { width: 84px; }
-.channels-table .col-models { width: 210px; }
-.channels-table .col-priority { width: 84px; }
-.channels-table .col-weight { width: 74px; }
-.channels-table .col-balance { width: 170px; }
-.channels-table .col-response { width: 96px; }
-.channels-table .col-testtime { width: 100px; }
+.channels-table .col-select { width: 32px; padding-left: 8px; padding-right: 4px; }
+.channels-table .col-id { width: 48px; }
+.channels-table .col-name { width: 170px; }
+.channels-table .col-type { width: 140px; }
+.channels-table .col-status { width: 72px; }
+.channels-table .col-models { width: 200px; }
+.channels-table .col-priority { width: 68px; }
+.channels-table .col-weight { width: 62px; }
+.channels-table .col-balance { width: 150px; }
+.channels-table .col-response { width: 84px; }
+.channels-table .col-testtime { width: 88px; }
 .channels-table .col-actions {
-  width: 150px;
+  width: 132px;
   position: sticky;
   right: 0;
   z-index: 2;
@@ -75,6 +80,7 @@
 /* 名称列：主名 + base_url 副行 */
 .channels-table .ch-name {
   font-weight: 500;
+  font-size: 13px;
   color: var(--text-main);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -82,24 +88,27 @@
 
 .channels-table .ch-sub {
   margin-top: 2px;
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--text-faint, var(--text-muted));
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* 类型徽章（new-api ProviderBadge：图标 + 弱底色药丸） */
+/* 类型徽章（ProviderBadge：图标 + 弱底色药丸，超长截断） */
 .ch-type-badge {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 3px 9px;
+  padding: 3px 8px;
   border-radius: 9999px;
   font-size: 12px;
   font-weight: 500;
   background: var(--code-bg);
   color: var(--code-color);
   white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ch-type-badge svg {
@@ -127,7 +136,7 @@
   color: var(--danger-color, #ef4444);
 }
 
-/* 模型徽章流（new-api BadgeListCell autoColor） */
+/* 模型徽章流（autoColor，超长截断省略号） */
 .ch-models {
   display: flex;
   align-items: center;
@@ -137,11 +146,11 @@
 
 .ch-model-badge {
   display: inline-block;
-  max-width: 92px;
-  padding: 1px 7px;
+  max-width: 84px;
+  padding: 1px 6px;
   border: 1px solid;
   border-radius: 9999px;
-  font-size: 11px;
+  font-size: 10.5px;
   font-family: 'JetBrains Mono', 'Consolas', monospace;
   line-height: 1.5;
   overflow: hidden;
@@ -179,14 +188,18 @@
   font-size: 13px;
 }
 
-/* 余额双徽章（new-api BalanceCell：Used/Remaining） */
+/* 余额双徽章（Used/Remaining，超长截断） */
 .ch-balance-badge {
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
+  max-width: 88px;
+  padding: 2px 7px;
   border-radius: 9999px;
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ch-balance-badge.v-success {
@@ -213,7 +226,7 @@
   margin-left: 4px;
 }
 
-/* ── 行操作（new-api：直接图标按钮 + ⋯ 下拉） ── */
+/* ── 行操作（直接图标按钮 + ⋯ 下拉） ── */
 .ch-actions {
   display: flex;
   align-items: center;
@@ -224,8 +237,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   border: none;
   border-radius: 6px;
   background: transparent;

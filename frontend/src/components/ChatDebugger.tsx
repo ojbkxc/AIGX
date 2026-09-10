@@ -957,11 +957,11 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
 
       <div className="chat-debugger-messages">
         {messages.length === 0 && playground && (
-          /* new-api 游乐园空状态：图标 + 标题 + 提示词按钮网格 */
+          /* 空状态：图标 + 标题 + 提示词按钮网格 */
           <div className="pg-empty">
             <div className="pg-empty-icon"><MessageSquarePlus size={20} /></div>
-            <h2 className="pg-empty-title">{t('开始游乐园对话')}</h2>
-            <p className="pg-empty-sub">{t('用示例提示词测试模型，或在下方直接输入你的请求。')}</p>
+            <h2 className="pg-empty-title">{t('有什么可以帮忙的？')}</h2>
+            <p className="pg-empty-sub">{t('选择一个常用任务快速开始，或在下方直接输入你的请求。')}</p>
             <div className="pg-empty-prompts">
               {suggestionPrompts.map((s, idx) => {
                 const Icon = (s.icon as typeof Zap | undefined) ?? DEFAULT_PG_ICONS[idx % DEFAULT_PG_ICONS.length];
@@ -1217,7 +1217,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             <div className="pg-confirm-overlay" onClick={() => setClearConfirmOpen(false)}>
               <div className="pg-confirm" onClick={(e) => e.stopPropagation()}>
                 <div className="pg-confirm-title">{t('清空对话记录？')}</div>
-                <div className="pg-confirm-desc">{t('浏览器中保存的本次游乐园对话将被移除，且无法撤销。')}</div>
+                <div className="pg-confirm-desc">{t('浏览器中保存的当前对话将被移除，且无法撤销。')}</div>
                 <div className="pg-confirm-actions">
                   <button type="button" className="btn btn-outline btn-sm" onClick={() => setClearConfirmOpen(false)}>
                     {t('取消')}

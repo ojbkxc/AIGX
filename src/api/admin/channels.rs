@@ -119,7 +119,8 @@ impl ChannelRequest {
 }
 
 /// 构造渠道 JSON 响应（脱敏 API Key）
-pub fn mask_channel(ch: &Channel) -> Value {
+/// `seq`：展示用短编号（列表接口按创建顺序注入 1..N；单渠道场景传 None 留空）。
+pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
     let masked_key = if ch.api_key.is_empty() {
         String::new()
     } else if ch.api_key.chars().count() > 12 {
@@ -133,6 +134,7 @@ pub fn mask_channel(ch: &Channel) -> Value {
     };
     json!({
         "id": ch.id,
+        "seq": seq.unwrap_or(0),
         "name": ch.name,
         "channel_type": ch.channel_type.as_str(),
         "base_url": ch.base_url,
@@ -157,11 +159,19 @@ pub async fn handle_list_channels(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let channels: Vec<Value> = state
-        .channel_store
-        .list()
+    // 注入展示用短编号：按创建时间升序 1..N（同列表排序键，新增渠道追加新号，
+    // 既有渠道编号稳定不变；删除渠道不回收编号——避免错位显示）
+    let all = state.channel_store.list();
+    let mut sorted: Vec<&Channel> = all.iter().collect();
+    sorted.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+    let id_to_seq: std::collections::HashMap<&str, u64> = sorted
         .iter()
-        .map(mask_channel)
+        .enumerate()
+        .map(|(i, ch)| (ch.id.as_str(), (i + 1) as u64))
+        .collect();
+    let channels: Vec<Value> = all
+        .iter()
+        .map(|ch| mask_channel(ch, id_to_seq.get(ch.id.as_str()).copied()))
         .collect();
     Ok(Json(json!({ "success": true, "data": channels })))
 }
@@ -229,7 +239,7 @@ pub async fn handle_add_channel(
     let _config = verify_admin(&state, &headers).await?;
     let ch = body.to_channel(String::new());
     match state.channel_store.add(ch) {
-        Ok(c) => Ok(Json(json!({ "success": true, "data": mask_channel(&c) }))),
+        Ok(c) => Ok(Json(json!({ "success": true, "data": mask_channel(&c, None) }))),
         Err(e) => Err(error_response(
             &format!("Failed to add channel: {e}"),
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -247,7 +257,7 @@ pub async fn handle_update_channel(
     let _config = verify_admin(&state, &headers).await?;
     let ch = body.to_channel(id);
     match state.channel_store.add(ch) {
-        Ok(c) => Ok(Json(json!({ "success": true, "data": mask_channel(&c) }))),
+        Ok(c) => Ok(Json(json!({ "success": true, "data": mask_channel(&c, None) }))),
         Err(e) => Err(error_response(
             &format!("Failed to update channel: {e}"),
             StatusCode::INTERNAL_SERVER_ERROR,

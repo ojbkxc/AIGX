@@ -838,5 +838,8 @@
 "源模型重复": "Duplicate source model",
 "必须是 JSON 对象": "Must be a JSON object",
 "JSON 格式错误": "Invalid JSON format",
-"未配置映射，点击下方添加": "No mappings configured. Click \"Add Mapping\" below"
+"未配置映射，点击下方添加": "No mappings configured. Click \"Add Mapping\" below",
+"有什么可以帮忙的？": "How can I help you today?",
+"选择一个常用任务快速开始，或在下方直接输入你的请求。": "Pick a common task to get started, or type your request below.",
+"浏览器中保存的当前对话将被移除，且无法撤销。": "The conversation saved in your browser will be removed and cannot be undone."
 }

@@ -969,7 +969,7 @@ pub async fn handle_patch_channel(
 
     match state.channel_store.update(&id, ch) {
         Ok(c) => Ok(Json(
-            serde_json::json!({ "success": true, "data": mask_channel(&c) }),
+            serde_json::json!({ "success": true, "data": mask_channel(&c, None) }),
         )),
         Err(e) => Err(error_response(
             &format!("Failed to patch channel: {e}"),
