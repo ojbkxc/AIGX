@@ -144,7 +144,7 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
     <aside
       className={`sidebar-aside ${collapsed ? 'sidebar-aside-collapsed' : ''} ${isDrawer ? 'sidebar-aside-drawer' : ''}`}
     >
-      {/* Logo + 唯一收缩开关（new-api 顶部单一 trigger 位置） */}
+      {/* Logo（收缩态仅剩居中 logo） */}
       <div className="sidebar-head">
         <div className="sidebar-logo">
           <Zap size={14} strokeWidth={2} />
@@ -153,17 +153,6 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
           <div className="sidebar-title">AIGX</div>
           <div className="sidebar-subtitle">{t('AI 中转网关')}</div>
         </div>
-        {!isDrawer && (
-          <button
-            type="button"
-            className="sidebar-collapse-btn"
-            onClick={onToggleCollapsed}
-            title={collapsed ? t('展开侧边栏') : t('收起侧边栏')}
-            aria-label={collapsed ? t('展开侧边栏') : t('收起侧边栏')}
-          >
-            {collapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
-          </button>
-        )}
       </div>
 
       {/* Nav：展开态分组平铺；收缩态仅图标 + title tooltip */}
@@ -194,7 +183,23 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
         })}
       </nav>
 
-      {/* Footer：用户区 + 收进菜单的主题/语言/退出 */}
+      {/* 唯一收缩开关：nav 与 footer 之间的固定行，展开/收缩同位置恒可见 */}
+      {!isDrawer && (
+        <div className="sidebar-collapse-row">
+          <button
+            type="button"
+            className="sidebar-collapse-btn"
+            onClick={onToggleCollapsed}
+            title={collapsed ? t('展开侧边栏') : t('收起侧边栏')}
+            aria-label={collapsed ? t('展开侧边栏') : t('收起侧边栏')}
+          >
+            {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+          </button>
+          {!collapsed && <span className="sidebar-collapse-hint">{t('收起侧边栏')}</span>}
+        </div>
+      )}
+
+      {/* Footer：用户区（收缩态仅头像）+ 收进菜单的主题/语言/退出 */}
       <div className="sidebar-footer">
         <div className="sidebar-user">
           <button

@@ -1207,15 +1207,36 @@ code {
   color: var(--text-muted);
 }
 
-/* 收缩态：品牌文字隐藏，开关移到 logo 下方（窄栏居中列布局） */
+/* 收缩态：品牌文字隐藏，logo 居中 */
 .sidebar-aside-collapsed .sidebar-head {
-  flex-direction: column;
-  gap: 8px;
+  justify-content: center;
   padding-left: 0;
 }
 
 .sidebar-aside-collapsed .sidebar-head-text {
   display: none;
+}
+
+/* 收缩开关行：nav 与 footer 之间固定一行，展开/收缩同位置恒可见恒可点 */
+.sidebar-collapse-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  flex-shrink: 0;
+}
+
+.sidebar-aside-collapsed .sidebar-collapse-row {
+  justify-content: center;
+  padding: 4px 0;
+}
+
+.sidebar-collapse-hint {
+  font-size: 11px;
+  color: var(--text-faint, var(--text-muted));
+  white-space: nowrap;
+  user-select: none;
 }
 
 /* 收缩开关（全侧栏唯一的展开/收起按钮） */
@@ -1224,8 +1245,8 @@ code {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border: none;
   border-radius: 8px;
   background: transparent;
@@ -1415,7 +1436,8 @@ code {
 
 /* 收缩态：仅展示头像，邮箱/用户名/箭头全部隐藏（弹层仍可用） */
 .sidebar-aside-collapsed .sidebar-user-info,
-.sidebar-aside-collapsed .sidebar-user-chevron {
+.sidebar-aside-collapsed .sidebar-user-chevron,
+.sidebar-aside-collapsed .sidebar-collapse-hint {
   display: none;
 }
 

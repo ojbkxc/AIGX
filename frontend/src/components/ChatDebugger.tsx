@@ -738,7 +738,9 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       </div>
       )}
 
-      {hideToolbar && floatingModelBar && (
+      {/* 受控模型（/chat 顶栏 ModelPicker 提供）时不再渲染任何内部模型选择器：
+       * 悬浮条与空状态大选择器都会与顶栏入口重复，唯一入口在宿主。 */}
+      {hideToolbar && floatingModelBar && controlledModel === undefined && (
         <div className="chat-debugger-bar chat-debugger-bar-min">
           {modelPicker}
         </div>
@@ -784,7 +786,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       <div className="chat-debugger-messages">
         {messages.length === 0 && (
           <div className="chat-debugger-empty">
-            {hideToolbar && !floatingModelBar ? (
+            {hideToolbar && !floatingModelBar && controlledModel === undefined ? (
               <div className="chat-debugger-empty-model">{modelPicker}</div>
             ) : null}
             <div className="chat-debugger-empty-title">{model || t('开始对话')}</div>
