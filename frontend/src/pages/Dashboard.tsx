@@ -433,8 +433,8 @@ export default function Dashboard(): JSX.Element {
       const hasAnyData = usageData || tokenData || limitsData;
       if (!hasAnyData) {
         try {
-          const me = await api.users.getMe();
-          const meData = (me ?? null) as unknown as {
+          const me = await api.getMe();
+          const meData = ((me as { data?: unknown })?.data ?? me) as {
             used_quota?: number;
             quota?: number | null;
           } | null;

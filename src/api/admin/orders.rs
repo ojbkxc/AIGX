@@ -93,6 +93,7 @@ pub async fn handle_topup_request(
     let return_url = format!("{}{}", callback, make_return_path(""));
     let notify_url = format!("{}/api/user/epay/notify", callback.trim_end_matches('/'));
     let trade_no = new_trade_no("USR", &user.id);
+    let money_str = format!("{money:.2}");
     let order = TopUpOrder {
         trade_no: trade_no.clone(),
         user_id: user.id.clone(),
@@ -105,27 +106,60 @@ pub async fn handle_topup_request(
         create_time: chrono::Utc::now().timestamp(),
         paid_time: None,
     };
+
+    // 调 EpayClient::purchase 下单（mapi.php 优先，submit.php 回退），
+    // 返回已签名的提交地址 url + params——前端 Wallet 据此构造 POST 表单跳转。
+    let client_ip =
+        super::common::extract_client_ip(&headers).unwrap_or_else(|| "127.0.0.1".to_string());
+    let purchase = epay
+        .purchase(&crate::payment::PurchaseArgs {
+            pay_type: body.payment_method.clone(),
+            out_trade_no: trade_no.clone(),
+            name: format!("AIGX Topup {}", body.amount),
+            money: money_str,
+            notify_url: notify_url.clone(),
+            return_url: return_url.clone(),
+            clientip: client_ip,
+            device: crate::payment::Device::PC,
+        })
+        .await;
+    if let Err(e) = purchase {
+        tracing::error!("EPay purchase failed for {}: {e}", trade_no);
+        return error_response(
+            &format!("Failed to create payment: {e}"),
+            StatusCode::BAD_GATEWAY,
+        )
+        .into_response();
+    }
+
     if let Err(e) = state.order_store.insert(&order) {
         tracing::error!("Failed to create order: {e}");
         return error_response("Failed to create order", StatusCode::INTERNAL_SERVER_ERROR)
             .into_response();
     }
-    // 注意：这里需要返回完整的订单创建响应，但具体实现依赖于EpayClient
-    // 暂时返回订单创建成功
-    Json(json!({
-        "success": true,
-        "data": {
-            "trade_no": trade_no,
-            "amount": body.amount,
-            "money": money,
-            "quota": order.quota,
-            "payment_method": body.payment_method,
-            "status": "pending",
-            "notify_url": notify_url,
-            "return_url": return_url,
+
+    let purchase = purchase.unwrap();
+    // 前端契约：data.url = 表单提交地址，其余字段为隐藏表单项
+    let mut data = json!({
+        "trade_no": trade_no,
+        "amount": body.amount,
+        "money": money,
+        "quota": order.quota,
+        "payment_method": body.payment_method,
+        "status": "pending",
+        "notify_url": notify_url,
+        "return_url": return_url,
+    });
+    if let Some(obj) = data.as_object_mut() {
+        for (k, v) in &purchase.params {
+            obj.insert(k.clone(), Value::String(v.clone()));
         }
-    }))
-    .into_response()
+    }
+    // serde_json 无对象展开语法：直接把 url 并入 data
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("url".into(), Value::String(purchase.url.clone()));
+    }
+    Json(json!({ "success": true, "data": data })).into_response()
 }
 
 /// GET /api/orders - 列出所有订单

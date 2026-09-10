@@ -212,6 +212,7 @@ pub async fn handle_list_channels(
         .unwrap_or(1);
     let page_size = params
         .get("page_size")
+        .or_else(|| params.get("pageSize")) // 前端 camelCase 兼容
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&s| s > 0)
         .unwrap_or(0);
@@ -219,10 +220,17 @@ pub async fn handle_list_channels(
     let channels: Vec<Value> = if page_size > 0 {
         let start = (page - 1) * page_size;
         let end = start.saturating_add(page_size).min(total);
-        filtered[start..end]
-            .iter()
-            .map(|ch| mask_channel(ch, id_to_seq.get(ch.id.as_str()).copied()))
-            .collect()
+        // 页码越界（start >= total）时返回空页而非 panic：
+        // 前端删除/搜索缩小 total 后旧页码仍可能被保留
+        let page_slice: Vec<Value> = if start < end {
+            filtered[start..end]
+                .iter()
+                .map(|ch| mask_channel(ch, id_to_seq.get(ch.id.as_str()).copied()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        page_slice
     } else {
         // 不分页：全量（兼容旧调用方）
         filtered
