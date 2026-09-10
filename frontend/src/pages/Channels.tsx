@@ -140,6 +140,11 @@ export default function Channels(): JSX.Element {
     return () => document.removeEventListener('mousedown', handler);
   }, [rowMenuId]);
 
+  // ── 分页（服务端分页：page/pageSize/total）──
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const pageSize = 20;
+
   function defaultForm(): ChannelFormState {
     return {
       name: '',
@@ -156,12 +161,13 @@ export default function Channels(): JSX.Element {
     };
   }
 
-  // 挂载时加载一次渠道列表
+  // 挂载时加载一次渠道列表；分页翻页时重新拉取（搜索由服务端过滤）
   useEffect(() => {
     loadChannels().catch((err: unknown) => {
       setError(err instanceof Error ? err.message : String(err));
     });
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
 
   // 点击外部关闭"更多"菜单
   useEffect(() => {
@@ -175,7 +181,7 @@ export default function Channels(): JSX.Element {
     return () => document.removeEventListener('mousedown', handler);
   }, [moreOpen]);
 
-  // 过滤后的渠道列表（名称/类型/base_url 模糊匹配）
+  // 过滤后的渠道列表（服务端搜索已过滤；此处仅兜底前端二次过滤——旧后端兼容）
   const filtered = channels.filter((ch) => {
     if (!search.trim()) return true;
     const q = search.toLowerCase();
@@ -186,6 +192,9 @@ export default function Channels(): JSX.Element {
       (ch.models || []).some((m) => m.toLowerCase().includes(q))
     );
   });
+
+  // 总页数（服务端 total；旧后端无 total 时退化用当前页条数）
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   // 全选/反选（仅当前过滤结果）
   const allSelected = filtered.length > 0 && filtered.every((ch) => selected.has(ch.id));
@@ -285,7 +294,7 @@ export default function Channels(): JSX.Element {
     setLoading(true);
     setError('');
     try {
-      const res = await api.listChannels();
+      const res = await api.listChannels({ search, page, pageSize });
       const items: ChannelItem[] = (res?.data ?? []).map((ch: ApiChannelItem) => ({
         id: ch.id as string | number,
         seq: ch.seq,
@@ -300,10 +309,15 @@ export default function Channels(): JSX.Element {
         model_mapping: ch.model_mapping,
         cost_pricing: ch.cost_pricing || {},
         last_used_at: typeof ch.last_used_at === 'number' ? ch.last_used_at : null,
+        response_time: ch.response_time,
+        test_time: ch.test_time,
+        balance: ch.balance,
+        credit: ch.credit,
         created_at: typeof ch.created_at === 'number' ? ch.created_at : undefined,
         updated_at: typeof ch.updated_at === 'number' ? ch.updated_at : undefined,
       }));
       setChannels(items);
+      setTotal(typeof (res as { total?: number }).total === 'number' ? (res as { total: number }).total : items.length);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -591,16 +605,22 @@ export default function Channels(): JSX.Element {
       {error && <div className="error-message">{error}</div>}
 
       <Card
-        title={`${t('所有渠道')} (${channels.length})`}
+        title={`${t('所有渠道')} (${total})`}
         actions={
           <div className="channels-toolbar">
-            {/* 搜索框 */}
+            {/* 搜索框（回车触发服务端搜索） */}
             <div className="channels-search">
               <Search size={14} />
               <input
                 placeholder={t('搜索渠道')}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    setPage(1);
+                    void loadChannels();
+                  }
+                }}
               />
             </div>
 
@@ -913,6 +933,17 @@ export default function Channels(): JSX.Element {
                 </tbody>
               </table>
             </div>
+
+            {/* 分页（与 Logs 页一致：上一页 / n / total · 下一页） */}
+            {totalPages > 1 && (
+              <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 14, alignItems: 'center' }}>
+                <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>{t('上一页')}</Button>
+                <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                  {page} / {totalPages}
+                </span>
+                <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>{t('下一页')}</Button>
+              </div>
+            )}
           </>
         )}
       </Card>

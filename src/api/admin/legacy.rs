@@ -989,6 +989,8 @@ pub async fn handle_test_channel(
         .get(&id)
         .ok_or_else(|| error_response("Channel not found", StatusCode::NOT_FOUND))?;
     let result = state.channel_store.test(&ch).await;
+    // 持久化测试结果（无论成败都记录延迟与时间，前端表格展示用）
+    state.channel_store.save_test_result(&id, result.latency_ms);
     if result.success {
         state.channel_store.mark_healthy(&id);
     } else {
@@ -997,6 +999,41 @@ pub async fn handle_test_channel(
             .mark_unhealthy(&id, result.message.clone());
     }
     Ok(Json(serde_json::json!({ "success": true, "data": result })))
+}
+
+/// 查询渠道上游真实余额（GET /api/channels/:id/balance）。
+///
+/// 仅 OpenAI 兼容渠道支持（上游需实现 dashboard/billing 系列端点，one-api/new-api
+/// 系网关均有）；其余类型返回明确错误。查询成功后写回渠道记录，前端表格即显示。
+pub async fn handle_get_channel_balance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let ch = state
+        .channel_store
+        .get(&id)
+        .ok_or_else(|| error_response("Channel not found", StatusCode::NOT_FOUND))?;
+    if ch.channel_type != crate::channel::ChannelType::OpenaiCompatible {
+        return Err(error_response(
+            "Balance query is only supported for OpenAI-compatible channels",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    match state.channel_store.query_balance(&ch).await {
+        Some((balance, credit)) => {
+            state.channel_store.save_balance(&id, balance, credit);
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "data": { "balance": balance, "credit": credit }
+            })))
+        }
+        None => Err(error_response(
+            "Upstream does not expose a balance endpoint",
+            StatusCode::BAD_GATEWAY,
+        )),
+    }
 }
 
 pub async fn handle_fetch_channel_models(

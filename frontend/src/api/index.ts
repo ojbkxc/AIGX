@@ -352,9 +352,9 @@ export const api = {
   topup: (amount: number, payment_method: string): Promise<ApiResponse<OrderItem>> =>
     request<ApiResponse<OrderItem>>('POST', `${API_BASE}/topup`, { amount, payment_method }),
 
-  // 通用渠道管理
-  listChannels: (): Promise<ApiList<ChannelItem>> =>
-    request<ApiList<ChannelItem>>('GET', `${API_BASE}/channels`),
+  // 通用渠道管理（page/page_size 缺省 = 后端全量返回，兼容旧行为）
+  listChannels: (params: Record<string, string | number> = {}): Promise<ApiList<ChannelItem>> =>
+    request<ApiList<ChannelItem>>('GET', `${API_BASE}/channels${Object.keys(params).length ? `?${buildQuery(params)}` : ''}`),
   addChannel: (data: Record<string, unknown>): Promise<ApiResponse<ChannelItem>> =>
     request<ApiResponse<ChannelItem>>('POST', `${API_BASE}/channels`, data),
   updateChannel: (id: string | number, data: Record<string, unknown>): Promise<ApiResponse<ChannelItem>> =>

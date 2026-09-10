@@ -838,6 +838,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/channels/:id/test",
             post(api::admin::handle_test_channel),
         )
+        .route(
+            "/api/channels/:id/balance",
+            get(api::admin::handle_get_channel_balance),
+        )
         // IP 过滤
         .route("/api/ip/filter", get(api::admin::handle_get_ip_filter))
         .route("/api/ip/filter", put(api::admin::handle_update_ip_filter))

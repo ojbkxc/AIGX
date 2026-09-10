@@ -7,7 +7,7 @@
 //! - 使用 `crate::` 访问主 crate 的类型和资源
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::Json,
 };
@@ -112,6 +112,10 @@ impl ChannelRequest {
             last_error: None,
             last_used_at: None,
             discovered_models: Vec::new(),
+            response_time: None,
+            test_time: None,
+            balance: None,
+            credit: None,
             created_at: now,
             updated_at: now,
         }
@@ -148,15 +152,27 @@ pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
         "account_id": ch.account_id,
         "last_error": ch.last_error,
         "last_used_at": ch.last_used_at,
+        "response_time": ch.response_time,
+        "test_time": ch.test_time,
+        "balance": ch.balance,
+        "credit": ch.credit,
         "created_at": ch.created_at,
         "updated_at": ch.updated_at,
     })
 }
 
-/// 列出所有渠道
+/// 列出所有渠道（支持分页）。
+///
+/// 查询参数（均可选，向后兼容）：
+/// - `page`：从 1 开始，缺省 1
+/// - `page_size`：缺省 0 = 不分页，返回全量（旧前端/脚本兼容）
+/// - `search`：按名称/类型/base_url 模糊过滤
+///
+/// 分页时返回 `{ data, page, page_size, total }`；不分页时 data 保持原数组形状。
 pub async fn handle_list_channels(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
     // 注入展示用短编号：按创建时间升序 1..N（同列表排序键，新增渠道追加新号，
@@ -169,11 +185,55 @@ pub async fn handle_list_channels(
         .enumerate()
         .map(|(i, ch)| (ch.id.as_str(), (i + 1) as u64))
         .collect();
-    let channels: Vec<Value> = all
-        .iter()
-        .map(|ch| mask_channel(ch, id_to_seq.get(ch.id.as_str()).copied()))
-        .collect();
-    Ok(Json(json!({ "success": true, "data": channels })))
+
+    // 服务端搜索过滤（名称/类型/base_url/模型名，前端一致）
+    let search = params.get("search").map(|s| s.to_lowercase()).unwrap_or_default();
+    let filtered: Vec<&Channel> = if search.is_empty() {
+        all.iter().collect()
+    } else {
+        all.iter()
+            .filter(|ch| {
+                ch.name.to_lowercase().contains(&search)
+                    || ch.channel_type.as_str().to_lowercase().contains(&search)
+                    || ch.base_url.to_lowercase().contains(&search)
+                    || ch.models.iter().any(|m| m.to_lowercase().contains(&search))
+            })
+            .collect()
+    };
+    let total = filtered.len();
+
+    let page = params
+        .get("page")
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&p| p >= 1)
+        .unwrap_or(1);
+    let page_size = params
+        .get("page_size")
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(0);
+
+    let channels: Vec<Value> = if page_size > 0 {
+        let start = (page - 1) * page_size;
+        let end = start.saturating_add(page_size).min(total);
+        filtered[start..end]
+            .iter()
+            .map(|ch| mask_channel(ch, id_to_seq.get(ch.id.as_str()).copied()))
+            .collect()
+    } else {
+        // 不分页：全量（兼容旧调用方）
+        filtered
+            .iter()
+            .map(|ch| mask_channel(ch, id_to_seq.get(ch.id.as_str()).copied()))
+            .collect()
+    };
+    Ok(Json(json!({
+        "success": true,
+        "data": channels,
+        "page": page,
+        "page_size": page_size,
+        "total": total
+    })))
 }
 
 /// 列出可用模型（登录用户即可，对齐 new-api `GET /api/user/models`）
@@ -239,7 +299,9 @@ pub async fn handle_add_channel(
     let _config = verify_admin(&state, &headers).await?;
     let ch = body.to_channel(String::new());
     match state.channel_store.add(ch) {
-        Ok(c) => Ok(Json(json!({ "success": true, "data": mask_channel(&c, None) }))),
+        Ok(c) => Ok(Json(
+            json!({ "success": true, "data": mask_channel(&c, None) }),
+        )),
         Err(e) => Err(error_response(
             &format!("Failed to add channel: {e}"),
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -248,6 +310,9 @@ pub async fn handle_add_channel(
 }
 
 /// 更新渠道信息
+///
+/// PUT 全量更新：保留既有测试结果/余额等运维字段（to_channel 不携带这些，
+/// 旧实现直接 add 会把它们清零），再覆盖表单提交的字段。
 pub async fn handle_update_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -255,9 +320,27 @@ pub async fn handle_update_channel(
     Json(body): Json<ChannelRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let ch = body.to_channel(id);
-    match state.channel_store.add(ch) {
-        Ok(c) => Ok(Json(json!({ "success": true, "data": mask_channel(&c, None) }))),
+    let mut ch = body.to_channel(id.clone());
+    // 保留运维字段（test_time/response_time/balance/credit/discovered_models/
+    // last_used_at/created_at）：编辑表单不提交这些，不应被清空
+    if let Some(prev) = state.channel_store.get(&id) {
+        ch.response_time = prev.response_time;
+        ch.test_time = prev.test_time;
+        ch.balance = prev.balance;
+        ch.credit = prev.credit;
+        ch.discovered_models = prev.discovered_models;
+        ch.last_used_at = prev.last_used_at;
+        ch.last_error = prev.last_error;
+        ch.created_at = prev.created_at;
+        // api_key 留空 → 保留原密钥（前端编辑时留空表示不变）
+        if ch.api_key.is_empty() {
+            ch.api_key = prev.api_key;
+        }
+    }
+    match state.channel_store.update(&id, ch) {
+        Ok(c) => Ok(Json(
+            json!({ "success": true, "data": mask_channel(&c, None) }),
+        )),
         Err(e) => Err(error_response(
             &format!("Failed to update channel: {e}"),
             StatusCode::INTERNAL_SERVER_ERROR,

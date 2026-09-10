@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -9,18 +9,25 @@ import { isAdmin } from './lib/utils';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
-import Keys from './pages/Keys';
-import Users from './pages/Users';
-import Wallet from './pages/Wallet';
-import Settings from './pages/Settings';
-import Profile from './pages/Profile';
-import Logs from './pages/Logs';
-import Redemptions from './pages/Redemptions';
-import Channels from './pages/Channels';
-import Chat from './pages/Chat';
-import NetworkLayer from './pages/NetworkLayer';
-import Models from './pages/Models';
-import Prompts from './pages/Prompts';
+
+// 路由级懒加载：首屏只拉 Dashboard 相关代码，管理页按需加载
+const Keys = lazy(() => import('./pages/Keys'));
+const Users = lazy(() => import('./pages/Users'));
+const Wallet = lazy(() => import('./pages/Wallet'));
+const Settings = lazy(() => import('./pages/Settings'));
+const Profile = lazy(() => import('./pages/Profile'));
+const Logs = lazy(() => import('./pages/Logs'));
+const Redemptions = lazy(() => import('./pages/Redemptions'));
+const Channels = lazy(() => import('./pages/Channels'));
+const Chat = lazy(() => import('./pages/Chat'));
+const NetworkLayer = lazy(() => import('./pages/NetworkLayer'));
+const Models = lazy(() => import('./pages/Models'));
+const Prompts = lazy(() => import('./pages/Prompts'));
+
+/** 懒加载页面兜底骨架（与全局 loading 视觉一致） */
+function PageFallback(): JSX.Element {
+  return <div className="loading">Loading…</div>;
+}
 
 function isAuthenticated(): boolean {
   const token = localStorage.getItem('token');
@@ -78,35 +85,37 @@ export default function App(): JSX.Element {
   return (
     <ErrorBoundary>
       <ToastProvider>
-        <Routes>
-          <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
-          <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
-          <Route path="/" element={<ProtectedLayout><Dashboard /></ProtectedLayout>} />
-          <Route path="/accounts" element={<Navigate to="/channels" replace />} />
-          <Route path="/channels" element={<AdminRoute><Channels /></AdminRoute>} />
-          <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
-          {/* 已合并的旧路由 → 重定向到合并后位置 */}
-          <Route path="/mappings" element={<Navigate to="/channels" replace />} />
-          <Route path="/pricing" element={<Navigate to="/settings" replace />} />
-          <Route path="/groups" element={<Navigate to="/settings" replace />} />
-          <Route path="/orders" element={<Navigate to="/wallet" replace />} />
-          <Route path="/epay" element={<Navigate to="/settings" replace />} />
-          <Route path="/notify" element={<Navigate to="/settings" replace />} />
-          <Route path="/security" element={<Navigate to="/settings" replace />} />
-          <Route path="/ip-management" element={<Navigate to="/settings" replace />} />
-          <Route path="/users" element={<AdminRoute><Users /></AdminRoute>} />
-          <Route path="/wallet" element={<ProtectedLayout><Wallet /></ProtectedLayout>} />
-          <Route path="/logs" element={<ProtectedLayout><Logs /></ProtectedLayout>} />
-          <Route path="/redemptions" element={<AdminRoute><Redemptions /></AdminRoute>} />
-          <Route path="/playground" element={<Navigate to="/chat" replace />} />
-          <Route path="/chat" element={<ProtectedLayout><Chat /></ProtectedLayout>} />
-          <Route path="/network-layer" element={<AdminRoute><NetworkLayer /></AdminRoute>} />
-          <Route path="/model-presets" element={<ProtectedLayout><Models /></ProtectedLayout>} />
-          <Route path="/prompts" element={<ProtectedLayout><Prompts /></ProtectedLayout>} />
-          <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
-          <Route path="/profile" element={<ProtectedLayout><Profile /></ProtectedLayout>} />
-          <Route path="*" element={<RouteErrorPage status={404} />} />
-        </Routes>
+        <Suspense fallback={<PageFallback />}>
+          <Routes>
+            <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
+            <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
+            <Route path="/" element={<ProtectedLayout><Dashboard /></ProtectedLayout>} />
+            <Route path="/accounts" element={<Navigate to="/channels" replace />} />
+            <Route path="/channels" element={<AdminRoute><Channels /></AdminRoute>} />
+            <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
+            {/* 已合并的旧路由 → 重定向到合并后位置 */}
+            <Route path="/mappings" element={<Navigate to="/channels" replace />} />
+            <Route path="/pricing" element={<Navigate to="/settings" replace />} />
+            <Route path="/groups" element={<Navigate to="/settings" replace />} />
+            <Route path="/orders" element={<Navigate to="/wallet" replace />} />
+            <Route path="/epay" element={<Navigate to="/settings" replace />} />
+            <Route path="/notify" element={<Navigate to="/settings" replace />} />
+            <Route path="/security" element={<Navigate to="/settings" replace />} />
+            <Route path="/ip-management" element={<Navigate to="/settings" replace />} />
+            <Route path="/users" element={<AdminRoute><Users /></AdminRoute>} />
+            <Route path="/wallet" element={<ProtectedLayout><Wallet /></ProtectedLayout>} />
+            <Route path="/logs" element={<ProtectedLayout><Logs /></ProtectedLayout>} />
+            <Route path="/redemptions" element={<AdminRoute><Redemptions /></AdminRoute>} />
+            <Route path="/playground" element={<Navigate to="/chat" replace />} />
+            <Route path="/chat" element={<ProtectedLayout><Chat /></ProtectedLayout>} />
+            <Route path="/network-layer" element={<AdminRoute><NetworkLayer /></AdminRoute>} />
+            <Route path="/model-presets" element={<ProtectedLayout><Models /></ProtectedLayout>} />
+            <Route path="/prompts" element={<ProtectedLayout><Prompts /></ProtectedLayout>} />
+            <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
+            <Route path="/profile" element={<ProtectedLayout><Profile /></ProtectedLayout>} />
+            <Route path="*" element={<RouteErrorPage status={404} />} />
+          </Routes>
+        </Suspense>
       </ToastProvider>
     </ErrorBoundary>
   );

@@ -139,10 +139,22 @@ pub struct Channel {
     pub last_used_at: Option<i64>,
     /// 上游最近一次返回的成功模型列表快照（模型自动发现）。
     ///
-    /// 拉取自渠道的 `/models` 端点；调度时若渠道已显式配置 models 则优先用
+    /// 拉自渠道的 `/models` 端点；调度时若渠道已显式配置 models 则优先用
     /// 配置，未配置时尝试用该快照判断模型支持度。仅在"自动发现模型"场景填充。
     #[serde(default)]
     pub discovered_models: Vec<String>,
+    /// 最近一次连通性测试的延迟（毫秒）；未测试过为 None
+    #[serde(default)]
+    pub response_time: Option<u64>,
+    /// 最近一次连通性测试时间戳（秒）；未测试过为 None
+    #[serde(default)]
+    pub test_time: Option<i64>,
+    /// 最近一次查询到的上游余额（美元）；未查询过为 None
+    #[serde(default)]
+    pub balance: Option<f64>,
+    /// 最近一次查询到的上游 credit（OpenAI 系 credit 余额）
+    #[serde(default)]
+    pub credit: Option<f64>,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -570,6 +582,86 @@ impl ChannelStore {
         drop(channels);
         self.persist(&snapshot)?;
         Ok(())
+    }
+
+    /// 保存最近一次连通性测试结果（response_time/test_time），持久化。
+    pub fn save_test_result(&self, id: &str, latency_ms: u64) {
+        let mut channels = self.channels.write();
+        if let Some(ch) = channels.iter_mut().find(|c| c.id == id) {
+            ch.response_time = Some(latency_ms);
+            ch.test_time = Some(chrono::Utc::now().timestamp());
+            ch.updated_at = chrono::Utc::now().timestamp();
+            let snapshot = ch.clone();
+            drop(channels);
+            if let Err(e) = self.persist(&snapshot) {
+                tracing::error!("Failed to persist channel {} test result: {}", id, e);
+            }
+        }
+    }
+
+    /// 保存最近一次查询到的上游余额（balance/credit），持久化。
+    pub fn save_balance(&self, id: &str, balance: Option<f64>, credit: Option<f64>) {
+        let mut channels = self.channels.write();
+        if let Some(ch) = channels.iter_mut().find(|c| c.id == id) {
+            ch.balance = balance;
+            ch.credit = credit;
+            ch.updated_at = chrono::Utc::now().timestamp();
+            let snapshot = ch.clone();
+            drop(channels);
+            if let Err(e) = self.persist(&snapshot) {
+                tracing::error!("Failed to persist channel {} balance: {}", id, e);
+            }
+        }
+    }
+
+    /// 查询上游真实余额（OpenAI 兼容渠道）。
+    ///
+    /// 依次尝试上游常见余额端点（new-api / one-api 风格网关均实现其一）：
+    /// 1. `GET {base}/dashboard/billing/subscription`   → hard_limit_usd（总额度）
+    /// 2. `GET {base}/v1/dashboard/billing/subscription`
+    /// 3. `GET {base}/dashboard/billing/credit_grants`  → total_granted/total_used
+    ///
+    /// 任一端点 200 即解析并返回，全部失败返回 None（调用方给用户提示）。
+    pub async fn query_balance(&self, ch: &Channel) -> Option<(Option<f64>, Option<f64>)> {
+        let base = ch.base_url.trim_end_matches('/').to_string();
+        if base.is_empty() {
+            return None;
+        }
+        let key = ch.decode_api_key();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .ok()?;
+        let endpoints = [
+            format!("{base}/dashboard/billing/subscription"),
+            format!("{base}/v1/dashboard/billing/subscription"),
+            format!("{base}/dashboard/billing/credit_grants"),
+        ];
+        for url in &endpoints {
+            let resp = client.get(url).bearer_auth(&key).send().await;
+            if let Ok(r) = resp {
+                if r.status().as_u16() != 200 {
+                    continue;
+                }
+                if let Ok(v) = r.json::<serde_json::Value>().await {
+                    // subscription 端点：hard_limit_usd 是总额度；
+                    // credit_grants：total_granted - total_used 即剩余
+                    let hard_limit = v.get("hard_limit_usd").and_then(|x| x.as_f64());
+                    let total_granted = v.get("total_granted").and_then(|x| x.as_f64());
+                    let total_used = v.get("total_used").and_then(|x| x.as_f64());
+                    if let Some(limit) = hard_limit {
+                        // total_used 可能在同响应或需另一端点；先仅报总额度
+                        return Some((None, Some(limit)));
+                    }
+                    if total_granted.is_some() || total_used.is_some() {
+                        let used = total_used.unwrap_or(0.0);
+                        let granted = total_granted.unwrap_or(0.0);
+                        return Some((Some((granted - used).max(0.0)), None));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// 测试渠道连通性。
