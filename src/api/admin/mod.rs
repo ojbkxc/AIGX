@@ -9,6 +9,7 @@ pub mod network;
 pub mod notify;
 pub mod orders;
 pub mod playground;
+pub mod plans;
 pub mod pricing;
 pub mod redemptions;
 pub mod security;
@@ -45,6 +46,8 @@ pub use pricing::{
 };
 
 pub use orders::{handle_delete_order, handle_list_orders, handle_topup_request};
+
+pub use plans::{handle_delete_plan, handle_issue_plan_key, handle_list_plans, handle_upsert_plan};
 
 pub use dashboard::{handle_cache_savings, handle_consumption_trend, handle_model_distribution};
 

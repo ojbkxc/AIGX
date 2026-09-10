@@ -84,10 +84,10 @@ pub async fn verify_admin(
                 StatusCode::UNAUTHORIZED,
             ));
         }
-        // 兼容模式：旧 admin 账户
-        if sess.email == "admin" {
-            return Ok(config);
-        }
+        // B10（与 verify_user 同口径）：会话必须对应真实存在的用户。
+        // 旧 admin 账户（email=="admin"）直通回退已移除——用户系统自
+        // ensure_default_admin 起必有真实管理员记录，伪造/残留会话不应
+        // 绕过用户系统的状态与权限校验。
     }
 
     Err(error_response("Invalid session", StatusCode::UNAUTHORIZED))

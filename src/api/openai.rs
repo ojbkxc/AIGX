@@ -39,6 +39,7 @@ use crate::pricing::PricingStore;
 use crate::proxy::CfApiClient;
 use crate::ratelimit::RateLimiter;
 use crate::redemption::RedemptionStore;
+use crate::plan::PlanStore;
 use crate::usage::UsageTracker;
 use crate::user::UserStore;
 use crate::user_group::UserGroupStore;
@@ -78,6 +79,8 @@ pub struct AppState {
     pub log_store: Arc<LogStore>,
     /// 兑换码存储
     pub redemption_store: Arc<RedemptionStore>,
+    /// 套餐模板存储（按量套餐：模板 → 发 key 交付）
+    pub plan_store: Arc<PlanStore>,
     /// 限流器（多维度 RPM/TPM）
     pub rate_limiter: Arc<RateLimiter>,
     /// 通知服务（Telegram + SMTP + Slack + Webhook）
@@ -1349,10 +1352,11 @@ pub async fn handle_chat_completions(
 
     // P1：配额预留/结算两段式——在请求发起前预留预估费用，
     // 请求完成后按实际 token 结算，多预留的部分归还。
-    // 估算：prompt 用 token 计数器精确估算，completion 用保守默认值 256。
+    // 估算：prompt 用 token 计数器精确估算；completion 跟随请求 max_tokens
+    // （未指定时保守默认 256，上限 4096 防止恶意超大 max_tokens 占满配额）。
     let estimated_prompt_tokens =
         crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
-    let estimated_completion_tokens: u64 = 256;
+    let estimated_completion_tokens = chat_req.max_tokens.unwrap_or(256).clamp(256, 4096) as u64;
     let reservation = match reserve_usage(
         &state,
         &api_key,

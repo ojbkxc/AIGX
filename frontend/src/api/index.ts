@@ -24,6 +24,7 @@ import type {
   PriceEntry,
   GroupItem,
   OrderItem,
+  PlanItem,
   RedemptionItem,
   AlertRule,
   AlertEvent,
@@ -269,6 +270,15 @@ export const api = {
     request<ApiList<PriceEntry>>('GET', `${API_BASE}/prices`),
   listRedemptions: (params: Record<string, string | number> = {}): Promise<ApiList<RedemptionItem>> =>
     request<ApiList<RedemptionItem>>('GET', `${API_BASE}/redemptions?${buildQuery(params)}`),
+  // 套餐管理（按量套餐：模板 CRUD + 按套餐发放 API Key）
+  listPlans: (): Promise<ApiList<PlanItem>> =>
+    request<ApiList<PlanItem>>('GET', `${API_BASE}/plans`),
+  upsertPlan: (data: Record<string, unknown>): Promise<ApiResponse<PlanItem>> =>
+    request<ApiResponse<PlanItem>>('POST', `${API_BASE}/plans`, data),
+  deletePlan: (id: string | number): Promise<ApiResponse<MessageResult>> =>
+    request<ApiResponse<MessageResult>>('DELETE', `${API_BASE}/plans/${id}`),
+  issuePlanKey: (id: string | number, data: Record<string, unknown>): Promise<ApiResponse<TokenKeyResult>> =>
+    request<ApiResponse<TokenKeyResult>>('POST', `${API_BASE}/plans/${id}/issue`, data),
   getSecurityIncidents: (): Promise<ApiList<AlertEvent>> =>
     request<ApiList<AlertEvent>>('GET', `${API_BASE}/monitor/security/events`),
   getSecurityAlerts: (): Promise<ApiList<AlertEvent>> =>

@@ -377,6 +377,24 @@ export interface OrderItem {
   [key: string]: unknown;
 }
 
+export interface PlanItem {
+  id: string;
+  name: string;
+  price?: number;
+  /** 额度上限（配额单位；0 = 不限额度） */
+  quota?: number;
+  /** 有效期天数（0 = 永不过期） */
+  duration_days?: number;
+  group?: string;
+  allowed_models?: string[] | null;
+  description?: string;
+  enabled?: boolean;
+  /** 已按此套餐发放的 key 数 */
+  issued_count?: number;
+  created_at?: number;
+  [key: string]: unknown;
+}
+
 export interface RedemptionItem {
   id: string;
   code: string;

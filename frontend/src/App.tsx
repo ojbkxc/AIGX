@@ -18,6 +18,7 @@ const Settings = lazy(() => import('./pages/Settings'));
 const Profile = lazy(() => import('./pages/Profile'));
 const Logs = lazy(() => import('./pages/Logs'));
 const Redemptions = lazy(() => import('./pages/Redemptions'));
+const Plans = lazy(() => import('./pages/Plans'));
 const Channels = lazy(() => import('./pages/Channels'));
 const Chat = lazy(() => import('./pages/Chat'));
 const NetworkLayer = lazy(() => import('./pages/NetworkLayer'));
@@ -106,6 +107,7 @@ export default function App(): JSX.Element {
             <Route path="/wallet" element={<ProtectedLayout><Wallet /></ProtectedLayout>} />
             <Route path="/logs" element={<ProtectedLayout><Logs /></ProtectedLayout>} />
             <Route path="/redemptions" element={<AdminRoute><Redemptions /></AdminRoute>} />
+            <Route path="/plans" element={<AdminRoute><Plans /></AdminRoute>} />
             <Route path="/playground" element={<Navigate to="/chat" replace />} />
             <Route path="/chat" element={<ProtectedLayout><Chat /></ProtectedLayout>} />
             <Route path="/network-layer" element={<AdminRoute><NetworkLayer /></AdminRoute>} />

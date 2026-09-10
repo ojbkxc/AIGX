@@ -23,6 +23,7 @@ mod monitor;
 mod notify;
 mod oauth;
 mod payment;
+mod plan;
 mod pricing;
 mod proxy;
 mod quota_monitor;
@@ -186,6 +187,9 @@ async fn main() -> anyhow::Result<()> {
     // 初始化兑换码存储（功能 2）
     let redemption_store = Arc::new(RedemptionStore::new(store.clone()));
 
+    // 初始化套餐模板存储（按量套餐：模板 → 发 key 交付）
+    let plan_store = Arc::new(plan::PlanStore::new(store.clone()));
+
     // 初始化限流器（功能 3，带持久化配置）
     let rate_limiter = Arc::new(RateLimiter::with_store(store.clone()));
 
@@ -334,6 +338,7 @@ async fn main() -> anyhow::Result<()> {
         user_group_store,
         log_store,
         redemption_store,
+        plan_store,
         rate_limiter,
         notify_service,
         alert_evaluator,
@@ -926,6 +931,14 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             delete(api::admin::handle_delete_redemption),
         )
         .route("/api/redemptions/redeem", post(api::admin::handle_redeem))
+        // 套餐管理（按量套餐：模板 CRUD + 按套餐发放 API Key）
+        .route("/api/plans", get(api::admin::handle_list_plans))
+        .route("/api/plans", post(api::admin::handle_upsert_plan))
+        .route("/api/plans/:id", delete(api::admin::handle_delete_plan))
+        .route(
+            "/api/plans/:id/issue",
+            post(api::admin::handle_issue_plan_key),
+        )
         // 限流配置
         .route(
             "/api/ratelimit/config",

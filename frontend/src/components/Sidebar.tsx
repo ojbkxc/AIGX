@@ -6,7 +6,7 @@ import { api } from '../api';
 import { isAdmin } from '../lib/utils';
 import {
   LayoutDashboard, Satellite, KeyRound,
-  Users, Wallet, Ticket, ScrollText,
+  Users, Wallet, Ticket, ScrollText, Package,
   Settings, Network, Zap, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut,
@@ -40,6 +40,7 @@ const navItems: NavItem[] = [
   { path: '/channels', labelKey: '渠道管理', icon: Satellite, adminOnly: true },
   { path: '/users', labelKey: '用户管理', icon: Users, adminOnly: true },
   { path: '/redemptions', labelKey: '兑换码', icon: Ticket, adminOnly: true },
+  { path: '/plans', labelKey: '套餐管理', icon: Package, adminOnly: true },
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
   { path: '/network-layer', labelKey: '系统信息', icon: Network, adminOnly: true },
   { path: '/wallet', labelKey: '钱包', icon: Wallet },
@@ -47,7 +48,7 @@ const navItems: NavItem[] = [
 ];
 
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
-// 管理员 13 项 / 客户 8 项。原 21 项已合并：
+// 管理员 14 项 / 客户 8 项。原 21 项已合并：
 // - 模型映射 → 渠道管理内每渠道配置 + 全局 fallback（已下沉）
 // - 定价倍率 + 易支付 + 用户分组 + 通知设置 + 安全监控 + IP 管理 → 系统设置四 tab
 // - 订单记录 → 钱包页内 tab
@@ -72,16 +73,17 @@ const navGroups: NavGroup[] = [
       navItems[6],  // 渠道管理
       navItems[7],  // 用户管理
       navItems[8],  // 兑换码
-      navItems[9],  // 系统设置
-      navItems[10], // 系统信息
+      navItems[9],  // 套餐管理
+      navItems[10], // 系统设置
+      navItems[11], // 系统信息
     ],
   },
   {
     key: 'personal',
     labelKey: '个人',
     items: [
-      navItems[11], // 钱包
-      navItems[12], // 个人中心
+      navItems[12], // 钱包
+      navItems[13], // 个人中心
     ],
   },
 ];
