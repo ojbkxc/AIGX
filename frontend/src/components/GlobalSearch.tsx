@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Search, CornerDownLeft, Satellite, Users, KeyRound, FileText, X } from 'lucide-react';
+import { Search, CornerDownLeft, Satellite, Users, KeyRound, FileText, Boxes, X } from 'lucide-react';
 import { api } from '../api';
 import { isAdmin } from '../lib/utils';
 
@@ -30,6 +30,7 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
   const [channels, setChannels] = useState<Array<{ id?: string; name?: string; base_url?: string }>>([]);
   const [users, setUsers] = useState<Array<{ id?: string | number; email?: string; username?: string; role?: string }>>([]);
   const [tokens, setTokens] = useState<Array<{ id?: string; name?: string; key?: string; group?: string }>>([]);
+  const [models, setModels] = useState<Array<{ id?: string; owned_by?: string }>>([]);
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -49,6 +50,7 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
       api.listUsers().then((res) => setUsers(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
     }
     api.listTokens().then((res) => setTokens(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
+    api.listModels().then((res) => setModels(Array.isArray(res?.data) ? res.data : [])).catch(() => {});
     return () => {
       window.clearTimeout(id);
       document.body.style.overflow = '';
@@ -75,17 +77,18 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
     return q ? items.filter((n) => t(n.labelKey).toLowerCase().includes(q)) : items;
   }, [q, navItems, t]);
 
-  // 实体命中（管理员：渠道/用户/令牌；普通用户：仅本人令牌）
+  // 实体命中（管理员：渠道/用户/令牌；普通用户：仅本人令牌；模型任何登录用户可见）
   const hits = useMemo(() => {
-    if (!q) return { channel: [], user: [], token: [] };
+    if (!q) return { channel: [], user: [], token: [], model: [] };
     const match = (fields: Array<string | undefined>): boolean => fields.filter(Boolean).join(' ').toLowerCase().includes(q);
     const channel = isAdmin() ? channels.filter((c) => match([c.name, c.base_url])) : [];
     const user = isAdmin() ? users.filter((u) => match([u.email, u.username, u.role])) : [];
     const token = tokens.filter((k) => match([k.name, k.key, k.group]));
-    return { channel, user, token };
-  }, [q, channels, users, tokens]);
+    const model = models.filter((m) => match([m.id, m.owned_by]));
+    return { channel, user, token, model };
+  }, [q, channels, users, tokens, models]);
 
-  type EntityKind = 'channel' | 'user' | 'token';
+  type EntityKind = 'channel' | 'user' | 'token' | 'model';
   type Row =
     | { kind: 'page'; path: string; title: string; sub: string }
     | { kind: 'entity'; entity: EntityKind; path: string; title: string; sub: string };
@@ -94,6 +97,7 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
     for (const p of pageHits) out.push({ kind: 'page', path: p.path, title: t(p.labelKey), sub: t('页面') });
     for (const c of hits.channel.slice(0, 8)) out.push({ kind: 'entity', entity: 'channel', path: '/channels', title: c.name || '—', sub: c.base_url || '渠道' });
     for (const u of hits.user.slice(0, 8)) out.push({ kind: 'entity', entity: 'user', path: '/users', title: u.email || u.username || '—', sub: u.role || '用户' });
+    for (const m of hits.model.slice(0, 8)) out.push({ kind: 'entity', entity: 'model', path: '/playground', title: m.id || '—', sub: m.owned_by || '模型' });
     for (const k of hits.token.slice(0, 8)) out.push({ kind: 'entity', entity: 'token', path: '/keys', title: k.name || '—', sub: k.group || '令牌' });
     return out;
   }, [pageHits, hits, t]);
@@ -125,9 +129,11 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
     const cStart = pEnd;
     const cEnd = cStart + hits.channel.length;
     const uEnd = cEnd + hits.user.length;
+    const mEnd = uEnd + hits.model.length;
     if (i === cStart && hits.channel.length > 0) return t('渠道');
     if (i === cEnd && hits.user.length > 0) return t('用户');
-    if (i === uEnd && hits.token.length > 0) return t('令牌');
+    if (i === uEnd && hits.model.length > 0) return t('模型');
+    if (i === mEnd && hits.token.length > 0) return t('令牌');
     return null;
   };
 
@@ -141,7 +147,7 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={t('搜索页面、渠道、用户、令牌…')}
+            placeholder={t('搜索页面、渠道、模型、用户、令牌…')}
             aria-label={t('全局搜索')}
           />
           <button type="button" className="global-search-close" onClick={onClose} aria-label={t('关闭')}>
@@ -168,6 +174,8 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
                     <Satellite size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                   ) : row.entity === 'user' ? (
                     <Users size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                  ) : row.entity === 'model' ? (
+                    <Boxes size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                   ) : (
                     <KeyRound size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                   )}
