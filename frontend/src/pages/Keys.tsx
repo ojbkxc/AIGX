@@ -120,13 +120,36 @@ export default function Keys(): JSX.Element {
   // ── 批量选择 / 搜索 / 行操作菜单（对齐渠道页） ──
   const [selected, setSelected] = useState<Set<string | number>>(new Set());
   const [search, setSearch] = useState('');
+  // 菜单用 fixed 定位挂在 body 层级：Card/table-wrap 的 overflow 会裁掉
+  // 行内 absolute 弹层（尤其最后一行向下弹出时），fixed 可逃出所有裁剪容器
   const [rowMenuId, setRowMenuId] = useState<string | number | null>(null);
+  const [rowMenuPos, setRowMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
   useEffect(() => {
     if (rowMenuId === null) return;
     const handler = (): void => setRowMenuId(null);
     document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
+    // 页面/表格滚动时关闭菜单（fixed 坐标不随滚动联动）
+    const scrollHandler = (): void => setRowMenuId(null);
+    window.addEventListener('scroll', scrollHandler, true);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      window.removeEventListener('scroll', scrollHandler, true);
+    };
   }, [rowMenuId]);
+
+  /** 打开行菜单：按触发按钮屏幕坐标计算 fixed 弹出位置（右对齐、下弹出，底部溢出改上弹） */
+  const openRowMenu = (e: React.MouseEvent<HTMLButtonElement>, id: string | number): void => {
+    e.stopPropagation();
+    if (rowMenuId === id) { setRowMenuId(null); return; }
+    const rect = e.currentTarget.getBoundingClientRect();
+    const menuH = 200; // 菜单预估高度（4 项 + 分隔线）
+    const below = window.innerHeight - rect.bottom;
+    const top = below < menuH && rect.top > menuH
+      ? rect.top - menuH + rect.height
+      : rect.bottom + 4;
+    setRowMenuPos({ top, left: rect.right });
+    setRowMenuId(id);
+  };
 
   useEffect(() => {
     void load();
@@ -718,40 +741,10 @@ export default function Keys(): JSX.Element {
                                 type="button"
                                 className="tk-icon-btn"
                                 title={t('更多操作')}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setRowMenuId((prev) => (prev === tk.id ? null : tk.id));
-                                }}
+                                onClick={(e) => openRowMenu(e, tk.id)}
                               >
                                 <MoreHorizontal size={15} />
                               </button>
-                              {rowMenuId === tk.id && (
-                                <div className="tk-row-menu-panel" onClick={(e) => e.stopPropagation()}>
-                                  <button type="button" onClick={() => { setRowMenuId(null); handleCopyKey(tk); }}>
-                                    <Copy size={14} />
-                                    {t('复制密钥')}
-                                  </button>
-                                  {tk.quota_limit && (
-                                    <button type="button" onClick={() => { setRowMenuId(null); handleResetUsed(tk.id); }}>
-                                      <RefreshCcw size={14} />
-                                      {t('重置已用')}
-                                    </button>
-                                  )}
-                                  <button type="button" onClick={() => { setRowMenuId(null); handleRotate(tk); }}>
-                                    <RotateCcw size={14} />
-                                    {t('轮换')}
-                                  </button>
-                                  <div className="tk-row-menu-sep" />
-                                  <button
-                                    type="button"
-                                    className="tk-row-menu-danger"
-                                    onClick={() => { setRowMenuId(null); handleDelete(tk.id); }}
-                                  >
-                                    <Trash2 size={14} />
-                                    {t('删除令牌')}
-                                  </button>
-                                </div>
-                              )}
                             </div>
                           </div>
                         </td>
@@ -768,6 +761,43 @@ export default function Keys(): JSX.Element {
           </>
         )}
       </Card>
+
+      {/* 行操作菜单（fixed 挂在 body 层级，逃出 Card/table 的 overflow 裁剪） */}
+      {rowMenuId !== null && (() => {
+        const tk = filtered.find((c) => c.id === rowMenuId);
+        if (!tk) return null;
+        return (
+          <div
+            className="tk-row-menu-panel tk-row-menu-fixed"
+            style={{ top: rowMenuPos.top, left: rowMenuPos.left }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button type="button" onClick={() => { setRowMenuId(null); handleCopyKey(tk); }}>
+              <Copy size={14} />
+              {t('复制密钥')}
+            </button>
+            {tk.quota_limit && (
+              <button type="button" onClick={() => { setRowMenuId(null); handleResetUsed(tk.id); }}>
+                <RefreshCcw size={14} />
+                {t('重置已用')}
+              </button>
+            )}
+            <button type="button" onClick={() => { setRowMenuId(null); handleRotate(tk); }}>
+              <RotateCcw size={14} />
+              {t('轮换')}
+            </button>
+            <div className="tk-row-menu-sep" />
+            <button
+              type="button"
+              className="tk-row-menu-danger"
+              onClick={() => { setRowMenuId(null); handleDelete(tk.id); }}
+            >
+              <Trash2 size={14} />
+              {t('删除令牌')}
+            </button>
+          </div>
+        );
+      })()}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 

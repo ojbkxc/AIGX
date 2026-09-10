@@ -328,10 +328,6 @@
 }
 
 .tk-row-menu-panel {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 4px);
-  z-index: 60;
   min-width: 160px;
   padding: 4px;
   border: 1px solid var(--border-color);
@@ -339,6 +335,14 @@
   background: var(--card-bg);
   box-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.2), 0 4px 12px -4px rgba(0, 0, 0, 0.1);
   animation: fadeIn 0.12s ease;
+}
+
+/* fixed 模式：由 JS 传 top/left 屏幕坐标，逃出 Card / table-wrap 的 overflow 裁剪 */
+.tk-row-menu-panel.tk-row-menu-fixed {
+  position: fixed;
+  right: auto;
+  z-index: 1200;
+  transform: translateX(-100%);
 }
 
 .tk-row-menu-panel button {

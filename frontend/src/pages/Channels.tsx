@@ -132,13 +132,36 @@ export default function Channels(): JSX.Element {
   const [updatingBalance, setUpdatingBalance] = useState<Set<string | number>>(new Set());
 
   // ── 行操作下拉菜单（MoreHorizontal）──
+  // 菜单用 fixed 定位挂在 body 层级：Card/table-wrap 的 overflow 会裁掉
+  // 行内 absolute 弹层（尤其最后一行向下弹出时），fixed 可逃出所有裁剪容器
   const [rowMenuId, setRowMenuId] = useState<string | number | null>(null);
+  const [rowMenuPos, setRowMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
   useEffect(() => {
     if (rowMenuId === null) return;
     const handler = (): void => setRowMenuId(null);
     document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
+    // 表格横向滚动时关闭菜单（fixed 坐标不随滚动联动）
+    const scrollHandler = (): void => setRowMenuId(null);
+    window.addEventListener('scroll', scrollHandler, true);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      window.removeEventListener('scroll', scrollHandler, true);
+    };
   }, [rowMenuId]);
+
+  /** 打开行菜单：按触发按钮的屏幕坐标计算 fixed 弹出位置（右对齐、下弹出，底部溢出改上弹） */
+  const openRowMenu = (e: React.MouseEvent<HTMLButtonElement>, id: string | number): void => {
+    e.stopPropagation();
+    if (rowMenuId === id) { setRowMenuId(null); return; }
+    const rect = e.currentTarget.getBoundingClientRect();
+    const menuH = 240; // 菜单预估高度（5 项 + 分隔线）
+    const below = window.innerHeight - rect.bottom;
+    const top = below < menuH && rect.top > menuH
+      ? rect.top - menuH + rect.height // 底部放不下 → 向上弹出
+      : rect.bottom + 4;
+    setRowMenuPos({ top, left: rect.right });
+    setRowMenuId(id);
+  };
 
   // ── 分页（服务端分页：page/pageSize/total）──
   const [page, setPage] = useState(1);
@@ -889,43 +912,10 @@ export default function Channels(): JSX.Element {
                                 type="button"
                                 className="ch-icon-btn"
                                 title={t('更多操作')}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setRowMenuId((prev) => (prev === ch.id ? null : ch.id));
-                                }}
+                                onClick={(e) => openRowMenu(e, ch.id)}
                               >
                                 <MoreHorizontal size={15} />
                               </button>
-                              {rowMenuId === ch.id && (
-                                <div className="ch-row-menu-panel" onClick={(e) => e.stopPropagation()}>
-                                  <button type="button" onClick={() => { setRowMenuId(null); void handleTest(ch.id); }}>
-                                    <Gauge size={14} />
-                                    {t('测试连通性')}
-                                  </button>
-                                  <button type="button" onClick={() => { setRowMenuId(null); void handleUpdateBalance(ch.id); }}>
-                                    <DollarSign size={14} />
-                                    {t('查询余额')}
-                                  </button>
-                                  <button type="button" onClick={() => { setRowMenuId(null); void handleResetCircuit(ch.id); }}>
-                                    <RotateCcw size={14} />
-                                    {t('重置断路器')}
-                                  </button>
-                                  <div className="ch-row-menu-sep" />
-                                  <button type="button" onClick={() => { setRowMenuId(null); openEdit(ch); }}>
-                                    <Pencil size={14} />
-                                    {t('编辑渠道')}
-                                  </button>
-                                  <div className="ch-row-menu-sep" />
-                                  <button
-                                    type="button"
-                                    className="ch-row-menu-danger"
-                                    onClick={() => { setRowMenuId(null); handleDelete(ch.id); }}
-                                  >
-                                    <Trash2 size={14} />
-                                    {t('删除渠道')}
-                                  </button>
-                                </div>
-                              )}
                             </div>
                           </div>
                         </td>
@@ -949,6 +939,46 @@ export default function Channels(): JSX.Element {
           </>
         )}
       </Card>
+
+      {/* 行操作菜单（fixed 挂在 body 层级，逃出 Card/table 的 overflow 裁剪） */}
+      {rowMenuId !== null && (() => {
+        const ch = filtered.find((c) => c.id === rowMenuId);
+        if (!ch) return null;
+        return (
+          <div
+            className="ch-row-menu-panel ch-row-menu-fixed"
+            style={{ top: rowMenuPos.top, left: rowMenuPos.left }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button type="button" onClick={() => { setRowMenuId(null); void handleTest(ch.id); }}>
+              <Gauge size={14} />
+              {t('测试连通性')}
+            </button>
+            <button type="button" onClick={() => { setRowMenuId(null); void handleUpdateBalance(ch.id); }}>
+              <DollarSign size={14} />
+              {t('查询余额')}
+            </button>
+            <button type="button" onClick={() => { setRowMenuId(null); void handleResetCircuit(ch.id); }}>
+              <RotateCcw size={14} />
+              {t('重置断路器')}
+            </button>
+            <div className="ch-row-menu-sep" />
+            <button type="button" onClick={() => { setRowMenuId(null); openEdit(ch); }}>
+              <Pencil size={14} />
+              {t('编辑渠道')}
+            </button>
+            <div className="ch-row-menu-sep" />
+            <button
+              type="button"
+              className="ch-row-menu-danger"
+              onClick={() => { setRowMenuId(null); handleDelete(ch.id); }}
+            >
+              <Trash2 size={14} />
+              {t('删除渠道')}
+            </button>
+          </div>
+        );
+      })()}
 
       {showModal && (
         <div className="modal-overlay">
