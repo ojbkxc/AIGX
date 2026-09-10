@@ -83,14 +83,6 @@ jobs:
           path: build/2024-Linux-x86_64/
           retention-days: 30
 
-      # 仅在 tag 触发时推送到 Releases
-      - name: Upload to Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: build/2024-Linux-x86_64/*
-          generate_release_notes: true
-
   # -----------------------------------------------------------------
   # Linux ARM64 构建任务
   # -----------------------------------------------------------------
@@ -148,14 +140,6 @@ jobs:
           path: build/2024-Linux-arm64/
           retention-days: 30
 
-      # 仅在 tag 触发时推送到 Releases
-      - name: Upload to Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: build/2024-Linux-arm64/*
-          generate_release_notes: true
-
   # -----------------------------------------------------------------
   # Windows AMD64 构建任务
   # -----------------------------------------------------------------
@@ -200,14 +184,6 @@ jobs:
           path: build/2024-Windows-x86_64/
           retention-days: 30
 
-      # 仅在 tag 触发时推送到 Releases
-      - name: Upload to Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: build/2024-Windows-x86_64/*
-          generate_release_notes: true
-
   # -----------------------------------------------------------------
   # macOS Intel 构建任务
   # -----------------------------------------------------------------
@@ -250,14 +226,6 @@ jobs:
           name: aigx-macos-x86_64
           path: build/2024-macOS-x86_64/
           retention-days: 30
-
-      # 仅在 tag 触发时推送到 Releases
-      - name: Upload to Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: build/2024-macOS-x86_64/*
-          generate_release_notes: true
 
   # -----------------------------------------------------------------
   # macOS Apple Silicon 构建任务
@@ -302,14 +270,6 @@ jobs:
           path: build/2024-macOS-arm64/
           retention-days: 30
 
-      # 仅在 tag 触发时推送到 Releases
-      - name: Upload to Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: build/2024-macOS-arm64/*
-          generate_release_notes: true
-
   # -----------------------------------------------------------------
   # 建立 Release（收集所有构建）
   # -----------------------------------------------------------------
@@ -322,6 +282,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -333,16 +296,24 @@ jobs:
 
       - name: Create Release Package
         run: |
+          # 资产命名：AIGX-{version}-{platform}（版本取 tag 名去掉 v 前缀；
+          # 非 tag 触发时用 VERSION 文件兜底）
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER=$(cat VERSION)
+          fi
+          echo "AIGX_VERSION=$VER" >> "$GITHUB_ENV"
           mkdir -p release-package
-          # artifacts/<artifact-name>/aigx|aigx.exe —— 按平台重命名，避免互相覆盖
+          # artifacts/<artifact-name>/aigx|aigx.exe —— AIGX-{version}-{platform} 命名
           for dir in artifacts/*/; do
             name=$(basename "$dir")
             case "$name" in
-              aigx-linux-amd64)    out="aigx-linux-amd64" ;;
-              aigx-linux-arm64)    out="aigx-linux-arm64" ;;
-              aigx-windows-amd64) out="aigx-windows-amd64.exe" ;;
-              aigx-macos-x86_64)   out="aigx-macos-x86_64" ;;
-              aigx-macos-arm64)    out="aigx-macos-arm64" ;;
+              aigx-linux-amd64)    out="AIGX-$VER-linux-amd64" ;;
+              aigx-linux-arm64)    out="AIGX-$VER-linux-arm64" ;;
+              aigx-windows-amd64) out="AIGX-$VER-windows-amd64.exe" ;;
+              aigx-macos-x86_64)   out="AIGX-$VER-macos-x86_64" ;;
+              aigx-macos-arm64)    out="AIGX-$VER-macos-arm64" ;;
               *) out="$name" ;;
             esac
             if [ -f "$dir/aigx" ]; then
@@ -356,20 +327,18 @@ jobs:
       - name: Generate Release Notes
         id: release_notes
         run: |
+          VER="${AIGX_VERSION}"
           cat > release-notes.md << ENDOFNOTES
-          # AIGX Release ${GITHUB_REF#refs/tags/}
+          # AIGX Release ${VER}
 
           ## 📦 下载链接
 
           ### 二进制文件
-          - [aigx-linux-amd64](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/aigx)
-
-          二进制文件大小（未压缩）：
-          - Linux AMD64: 15MB
-          - Linux ARM64: 13MB
-          - Windows AMD64: 18MB
-          - macOS Intel: 12MB
-          - macOS ARM64: 10MB
+          - [AIGX-${VER}-linux-amd64](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/AIGX-${VER}-linux-amd64)
+          - [AIGX-${VER}-linux-arm64](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/AIGX-${VER}-linux-arm64)
+          - [AIGX-${VER}-windows-amd64.exe](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/AIGX-${VER}-windows-amd64.exe)
+          - [AIGX-${VER}-macos-x86_64](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/AIGX-${VER}-macos-x86_64)
+          - [AIGX-${VER}-macos-arm64](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/AIGX-${VER}-macos-arm64)
 
           ### 容器镜像
 
@@ -381,14 +350,14 @@ jobs:
 
           ### Linux
           \`\`\`bash
-          wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/aigx
-          chmod +x aigx
-          sudo mv aigx /usr/local/bin/
+          wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/AIGX-${VER}-linux-amd64
+          chmod +x AIGX-${VER}-linux-amd64
+          sudo mv AIGX-${VER}-linux-amd64 /usr/local/bin/aigx
           \`\`\`
 
           ### Windows
           \`\`\`powershell
-          Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/aigx" -OutFile "aigx.exe"
+          Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/AIGX-${VER}-windows-amd64.exe" -OutFile "AIGX.exe"
           \`\`\`
 
           ## 🔧 构建系统
@@ -397,14 +366,6 @@ jobs:
           - Windows Server 2022
           - Debian 11 (Bookworm)
           - macOS latest
-
-          ## ✨ 新特性
-
-          - 多平台支持 (Linux AMD64/ARM64, Windows AMD64/ARM64, macOS Intel/ARM64)
-          - Docker 多平台镜像构建
-          - 完整的监控和告警系统
-          - 智能自动扩缩容
-          - 分布式节点管理
 
           ENDOFNOTES
 
@@ -415,11 +376,12 @@ jobs:
       - name: Package release archives
         run: |
           cd release-package
-          for f in aigx-linux-amd64 aigx-linux-arm64 aigx-macos-x86_64 aigx-macos-arm64; do
+          VER="${AIGX_VERSION}"
+          for f in AIGX-$VER-linux-amd64 AIGX-$VER-linux-arm64 AIGX-$VER-macos-x86_64 AIGX-$VER-macos-arm64; do
             [ -f "$f" ] && tar -czf "$f.tar.gz" "$f"
           done
-          [ -f aigx-windows-amd64.exe ] && zip -q aigx-windows-amd64.zip aigx-windows-amd64.exe
-          rm -f aigx-linux-amd64 aigx-linux-arm64 aigx-macos-x86_64 aigx-macos-arm64 aigx-windows-amd64.exe || true
+          [ -f AIGX-$VER-windows-amd64.exe ] && zip -q AIGX-$VER-windows-amd64.zip AIGX-$VER-windows-amd64.exe
+          # 同时保留裸二进制（直接 wget 即用）
           ls -la
 
       - name: Create GitHub Release

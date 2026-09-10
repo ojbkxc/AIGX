@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Eye, EyeOff } from 'lucide-react';
+import { Eye, EyeOff, ArrowLeftRight } from 'lucide-react';
 import { api } from '../api';
 import type { ChannelItem as ApiChannelItem } from '../types';
 import { useToast } from '../components/Toast';
@@ -413,6 +413,12 @@ export default function Channels(): JSX.Element {
                                   {(ch.models || []).slice(0, 6).join(', ')} +{ch.models!.length - 6}
                                 </span>
                               : (ch.models || []).join(', ') || t('全部')}
+                            {Object.keys(ch.model_mapping || {}).length > 0 && (
+                              <div className="channel-mapping-count" title={Object.entries(ch.model_mapping!).map(([k, v]) => `${k} → ${v}`).join('\n')}>
+                                <ArrowLeftRight size={11} />
+                                {Object.keys(ch.model_mapping!).length} {t('条映射')}
+                              </div>
+                            )}
                           </td>
                           <td>
                             {ch.status === 'enabled'

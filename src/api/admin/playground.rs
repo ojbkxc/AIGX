@@ -101,6 +101,10 @@ pub async fn handle_playground_chat(
     } else {
         body.model.trim().to_string()
     };
+    // 渠道级模型映射（与数据面一致：用户请求名 → 上游真实名）
+    let upstream = ch
+        .resolve_channel_mapping(&model)
+        .unwrap_or_else(|| model.clone());
 
     let api_key = ch.decode_api_key();
     let base = crate::bridge::openai::normalize_base_url(ch.base_url.trim().to_string());
@@ -113,14 +117,14 @@ pub async fn handle_playground_chat(
     };
 
     let mut payload = json!({
-        "model": model,
+        "model": upstream,
         "messages": body.messages,
         "stream": false,
     });
     // P1 Playground V2：Completions 模式 —— 顶层 prompt 替换 messages
     if let Some(prompt) = body.prompt.as_deref() {
         payload = json!({
-            "model": model,
+            "model": upstream,
             "prompt": prompt,
             "stream": false,
         });
@@ -298,11 +302,15 @@ pub async fn handle_playground_images(
     } else {
         body.model.trim().to_string()
     };
+    // 渠道级模型映射（与数据面一致）
+    let upstream = ch
+        .resolve_channel_mapping(&model)
+        .unwrap_or_else(|| model.clone());
     let api_key = ch.decode_api_key();
     let base = crate::bridge::openai::normalize_base_url(ch.base_url.trim().to_string());
     let url = format!("{base}/images/generations");
 
-    let mut payload = json!({ "model": model, "prompt": body.prompt });
+    let mut payload = json!({ "model": upstream, "prompt": body.prompt });
     if let Some(n) = body.n {
         payload["n"] = json!(n);
     }
@@ -401,11 +409,15 @@ pub async fn handle_playground_tts(
     } else {
         body.model.trim().to_string()
     };
+    // 渠道级模型映射（与数据面一致）
+    let upstream = ch
+        .resolve_channel_mapping(&model)
+        .unwrap_or_else(|| model.clone());
     let api_key = ch.decode_api_key();
     let base = crate::bridge::openai::normalize_base_url(ch.base_url.trim().to_string());
     let url = format!("{base}/audio/speech");
 
-    let mut payload = json!({ "model": model, "input": body.input });
+    let mut payload = json!({ "model": upstream, "input": body.input });
     if let Some(v) = body.voice.as_deref() {
         payload["voice"] = json!(v);
     }

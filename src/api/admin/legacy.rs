@@ -2667,6 +2667,11 @@ pub async fn handle_channel_chat_test(
             .unwrap_or_default()
     };
 
+    // 渠道级模型映射（与数据面一致：用户请求名 → 上游真实名）
+    let upstream = ch
+        .resolve_channel_mapping(&model)
+        .unwrap_or_else(|| model.clone());
+
     // 构建消息列表：history + 当前消息（多模态时 content 为块数组）
     let mut messages: Vec<Value> = body.history.clone();
     messages.push(serde_json::json!({ "role": "user", "content": body.message }));
@@ -2707,7 +2712,7 @@ pub async fn handle_channel_chat_test(
     if !is_anthropic {
         let url = format!("{base}/chat/completions");
         let payload = serde_json::json!({
-            "model": model,
+            "model": upstream,
             "messages": messages,
             "stream": stream,
         });
@@ -2774,7 +2779,7 @@ pub async fn handle_channel_chat_test(
     // ── Anthropic 协议 ──
     let url = format!("{base}/v1/messages");
     let mut payload = serde_json::json!({
-        "model": model,
+        "model": upstream,
         "max_tokens": 1024,
         "messages": messages,
     });

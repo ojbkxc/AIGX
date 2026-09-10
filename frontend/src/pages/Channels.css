@@ -175,3 +175,14 @@
   resize: none;
   font-size: 14px;
 }
+
+/* 渠道表格：映射条数小徽标（hover title 显示完整映射） */
+.channel-mapping-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--accent-color, #2f6fed);
+  white-space: nowrap;
+}
