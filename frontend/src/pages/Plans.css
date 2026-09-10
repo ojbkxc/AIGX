@@ -98,3 +98,12 @@
 .plan-card-actions > :first-child {
   margin-right: auto;
 }
+
+/* 订阅套餐卡片（#85）：发 key 位置改为余额购买制提示 */
+.plan-sub-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  border: 1px dashed var(--border-color, #d1d5db);
+  border-radius: 6px;
+  padding: 4px 10px;
+}

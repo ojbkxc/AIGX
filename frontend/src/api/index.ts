@@ -19,6 +19,7 @@ import type {
   OrderItem,
   PlanItem,
   RedemptionItem,
+  UserSubscriptionItem,
   AlertRule,
   AlertEvent,
   NotifyConfigItem,
@@ -216,6 +217,25 @@ export const api = {
     request<ApiResponse<MessageResult>>('DELETE', `${API_BASE}/plans/${id}`),
   issuePlanKey: (id: string | number, data: Record<string, unknown>): Promise<ApiResponse<TokenKeyResult>> =>
     request<ApiResponse<TokenKeyResult>>('POST', `${API_BASE}/plans/${id}/issue`, data),
+  // ==================== 订阅（#85 套餐订阅化，对齐 new-api subscription） ====================
+  /** 上架订阅套餐列表（用户侧购买页） */
+  subscriptionPlans: (): Promise<ApiResponse<PlanItem[]>> =>
+    request<ApiResponse<PlanItem[]>>('GET', `${API_BASE}/subscription/plans`),
+  /** 当前用户全部订阅（含过期/取消） */
+  subscriptionSelf: (): Promise<ApiResponse<UserSubscriptionItem[]>> =>
+    request<ApiResponse<UserSubscriptionItem[]>>('GET', `${API_BASE}/subscription/self`),
+  /** 余额购买订阅 */
+  subscriptionBalancePay: (plan_id: string): Promise<ApiResponse<UserSubscriptionItem>> =>
+    request<ApiResponse<UserSubscriptionItem>>('POST', `${API_BASE}/subscription/balance/pay`, { plan_id }),
+  /** 管理员给用户绑定订阅 */
+  adminBindSubscription: (user_id: string, plan_id: string): Promise<ApiResponse<UserSubscriptionItem>> =>
+    request<ApiResponse<UserSubscriptionItem>>('POST', `${API_BASE}/subscription/admin/bind`, { user_id, plan_id }),
+  /** 管理员查看指定用户订阅 */
+  adminListUserSubscriptions: (user_id: string): Promise<ApiResponse<UserSubscriptionItem[]>> =>
+    request<ApiResponse<UserSubscriptionItem[]>>('GET', `${API_BASE}/subscription/admin/users/${encodeURIComponent(user_id)}/subscriptions`),
+  /** 管理员取消订阅并回退分组 */
+  adminCancelSubscription: (id: string): Promise<ApiResponse<UserSubscriptionItem>> =>
+    request<ApiResponse<UserSubscriptionItem>>('POST', `${API_BASE}/subscription/admin/subscriptions/${encodeURIComponent(id)}/cancel`),
   getSecurityIncidents: (): Promise<ApiList<AlertEvent>> =>
     request<ApiList<AlertEvent>>('GET', `${API_BASE}/monitor/security/events`),
   getSecurityAlerts: (): Promise<ApiList<AlertEvent>> =>

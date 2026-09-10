@@ -14,6 +14,7 @@ pub mod pricing;
 pub mod redemptions;
 pub mod security;
 pub mod settings;
+pub mod subscriptions;
 pub mod tokens;
 pub mod users; // 网络层管理模块
 
@@ -54,6 +55,13 @@ pub use orders::{
 };
 
 pub use plans::{handle_delete_plan, handle_issue_plan_key, handle_list_plans, handle_upsert_plan};
+
+// 订阅（#85 套餐订阅化：时长订阅 + 余额购买 + 独立配额池）
+pub use subscriptions::{
+    handle_subscription_admin_bind, handle_subscription_admin_cancel,
+    handle_subscription_admin_list, handle_subscription_balance_pay, handle_subscription_plans,
+    handle_subscription_self,
+};
 
 pub use dashboard::{handle_cache_savings, handle_consumption_trend, handle_model_distribution};
 

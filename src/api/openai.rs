@@ -83,6 +83,8 @@ pub struct AppState {
     pub redemption_store: Arc<RedemptionStore>,
     /// 套餐模板存储（按量套餐：模板 → 发 key 交付）
     pub plan_store: Arc<PlanStore>,
+    /// 用户订阅存储（时长订阅：余额购买 → 独立配额池 + 分组升降级）
+    pub subscription_store: Arc<crate::plan::subscription::SubscriptionStore>,
     /// 限流器（多维度 RPM/TPM）
     pub rate_limiter: Arc<RateLimiter>,
     /// 通知服务（Telegram + SMTP + Slack + Webhook）
@@ -565,24 +567,57 @@ pub fn charge_usage_with_tools(
     if cost > 0 {
         crate::metrics::global().record_cost("usd", (cost as u64).saturating_mul(1_000_000));
         if let Some(uid) = &api_key.user_id {
-            // 用户余额不足时跳过 key 扣费（问题 6）
-            let charged = state.user_store.try_charge(uid, cost);
+            // P2 订阅化：直接扣路径同样优先扣活跃订阅池（最早到期的先用），
+            // 池不足部分回退钱包。订阅禁 overflow 且池不足时整体拒绝。
+            let now = chrono::Utc::now().timestamp();
+            let mut remaining = cost;
+            for sub in state.subscription_store.find_active(uid, now) {
+                if remaining <= 0 {
+                    break;
+                }
+                let pool = if sub.amount_total > 0 {
+                    sub.amount_total - sub.amount_used
+                } else {
+                    remaining
+                };
+                let take = pool.min(remaining);
+                if take > 0 && state.subscription_store.try_charge(&sub.id, take) {
+                    remaining -= take;
+                }
+            }
+            let charged_wallet = if remaining > 0 {
+                if !state.subscription_store.wallet_overflow_allowed(uid, now) {
+                    // 订阅禁兜底：直接拒绝（key 侧不扣，保持一致性）
+                    if let Some(u) = state.user_store.get_by_id(uid) {
+                        state
+                            .notify_service
+                            .notify_spawn(crate::notify::NotifyEvent::QuotaLow {
+                                user_email: u.email.clone(),
+                                remaining: 0,
+                            });
+                    }
+                    return cost;
+                }
+                state.user_store.try_charge(uid, remaining)
+            } else {
+                true // 订阅池全额承接
+            };
             // 额度不足或剩余过低通知（与非流式分支一致）
             if let Some(u) = state.user_store.get_by_id(uid) {
-                let remaining = u.remaining();
+                let user_remaining = u.remaining();
                 // 阈值：固定 1000 或 quota 的 10%，取较小者；扣费失败必通知
                 let threshold = (u.quota / 10).clamp(1000, 10000);
-                if !charged || remaining < threshold {
+                if !charged_wallet || user_remaining < threshold {
                     state
                         .notify_service
                         .notify_spawn(crate::notify::NotifyEvent::QuotaLow {
                             user_email: u.email.clone(),
-                            remaining,
+                            remaining: user_remaining,
                         });
                 }
             }
             // 问题 6：try_charge 失败时跳过 charge_quota，保持计费一致性
-            if charged {
+            if charged_wallet {
                 let _ = state.api_key_store.charge_quota(&api_key.id, cost);
             }
         } else {
@@ -598,6 +633,11 @@ pub fn charge_usage_with_tools(
 pub struct Reservation {
     pub reserved_user: i64,
     pub reserved_key: i64,
+    /// 订阅池承接的部分（P2 订阅化：优先于用户钱包扣减，结算/释放时
+    /// 按 SubscriptionStore 的预留语义同步归还）
+    pub reserved_sub: i64,
+    /// 承接本次预留的订阅 ID（reserved_sub > 0 时必有）
+    pub sub_id: Option<String>,
 }
 
 /// 预留配额（P1：两段式计费第一步）。
@@ -632,19 +672,69 @@ pub fn reserve_usage(
         return Ok(Reservation {
             reserved_user: 0,
             reserved_key: 0,
+            reserved_sub: 0,
+            sub_id: None,
         });
     }
 
-    // 预留用户配额
-    let reserved_user = if let Some(uid) = &api_key.user_id {
-        if !state.user_store.reserve_quota(uid, estimated_cost) {
+    // P2 订阅化：优先尝试用活跃订阅池承接（最早到期的先用）。
+    // 池不足的部分回退用户钱包（须订阅允许 overflow），零订阅时全走钱包。
+    let mut remaining_cost = estimated_cost;
+    let mut reserved_sub: i64 = 0;
+    let mut sub_id: Option<String> = None;
+    if let Some(uid) = &api_key.user_id {
+        let now = chrono::Utc::now().timestamp();
+        let subs = state.subscription_store.find_active(uid, now);
+        for sub in &subs {
+            let pool = if sub.amount_total > 0 {
+                sub.amount_total - sub.amount_used
+            } else {
+                remaining_cost // 不限池：全部承接
+            };
+            if pool <= 0 {
+                continue;
+            }
+            let take = pool.min(remaining_cost);
+            if state.subscription_store.try_reserve(&sub.id, take) {
+                reserved_sub += take;
+                remaining_cost -= take;
+                sub_id = Some(sub.id.clone());
+                if remaining_cost <= 0 {
+                    break;
+                }
+            }
+        }
+        // 池不够且订阅禁止钱包兜底 → 回滚已预留部分并拒绝
+        if remaining_cost > 0 && !state.subscription_store.wallet_overflow_allowed(uid, now) {
+            if let Some(sid) = &sub_id {
+                state.subscription_store.release(sid, reserved_sub);
+            }
             return Err(error_response(
                 "insufficient_quota",
-                "User quota insufficient",
+                "Subscription quota insufficient",
                 StatusCode::PAYMENT_REQUIRED,
             ));
         }
-        estimated_cost
+    }
+
+    // 预留用户配额（订阅池承接后的剩余部分）
+    let reserved_user = if remaining_cost > 0 {
+        if let Some(uid) = &api_key.user_id {
+            if !state.user_store.reserve_quota(uid, remaining_cost) {
+                // 回滚订阅池预留
+                if let Some(sid) = &sub_id {
+                    state.subscription_store.release(sid, reserved_sub);
+                }
+                return Err(error_response(
+                    "insufficient_quota",
+                    "User quota insufficient",
+                    StatusCode::PAYMENT_REQUIRED,
+                ));
+            }
+            remaining_cost
+        } else {
+            0
+        }
     } else {
         0
     };
@@ -673,6 +763,8 @@ pub fn reserve_usage(
     Ok(Reservation {
         reserved_user,
         reserved_key,
+        reserved_sub,
+        sub_id,
     })
 }
 
@@ -717,12 +809,27 @@ pub fn settle_usage(
         crate::metrics::global().record_cost("usd", (actual_cost as u64).saturating_mul(1_000_000));
     }
 
+    // P2 订阅化：结算订阅池预留。
+    // 订阅池优先承接实际消费：cost 先从订阅池扣，剩余部分转给钱包侧
+    // （reserved_user 的 settle 会把 reserved 释放并把差值入账——这里
+    // 传入 actual - reserved_sub 作为钱包侧实际消费，保证总账不重不漏）。
+    let mut wallet_cost = actual_cost;
+    if reservation.reserved_sub > 0 {
+        if let Some(sid) = &reservation.sub_id {
+            let sub_take = actual_cost.min(reservation.reserved_sub);
+            state
+                .subscription_store
+                .settle(sid, reservation.reserved_sub, sub_take);
+            wallet_cost = actual_cost - sub_take;
+        }
+    }
+
     // 结算用户配额
     if reservation.reserved_user > 0 {
         if let Some(uid) = &api_key.user_id {
             state
                 .user_store
-                .settle_quota(uid, reservation.reserved_user, actual_cost);
+                .settle_quota(uid, reservation.reserved_user, wallet_cost);
             // 余额通知
             if let Some(u) = state.user_store.get_by_id(uid) {
                 let remaining = u.remaining();
@@ -765,6 +872,13 @@ pub fn release_reservation(
             state
                 .user_store
                 .release_quota(uid, reservation.reserved_user);
+        }
+    }
+    if reservation.reserved_sub > 0 {
+        if let Some(sid) = &reservation.sub_id {
+            state
+                .subscription_store
+                .release(sid, reservation.reserved_sub);
         }
     }
     if reservation.reserved_key > 0 {

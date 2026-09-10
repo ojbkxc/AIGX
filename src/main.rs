@@ -193,6 +193,9 @@ async fn main() -> anyhow::Result<()> {
     // 初始化套餐模板存储（按量套餐：模板 → 发 key 交付）
     let plan_store = Arc::new(plan::PlanStore::new(store.clone()));
 
+    // 初始化订阅存储（时长订阅：余额购买 → 独立配额池 + 分组升降级，#85）
+    let subscription_store = Arc::new(plan::subscription::SubscriptionStore::new(store.clone()));
+
     // 初始化限流器（功能 3，带持久化配置）
     let rate_limiter = Arc::new(RateLimiter::with_store(store.clone()));
 
@@ -343,6 +346,7 @@ async fn main() -> anyhow::Result<()> {
         log_store,
         redemption_store,
         plan_store,
+        subscription_store,
         rate_limiter,
         notify_service,
         alert_evaluator,
@@ -469,8 +473,81 @@ async fn main() -> anyhow::Result<()> {
                 }),
             });
         }
+        // #85 订阅周期任务：到期置 expired + 分组回退；周期重置点清零用量。
+        // 读侧（find_active/try_charge）已做动态过期判断，此处落库保证
+        // 用户订阅列表与分组权益最终一致。
+        {
+            let sub_store = state.subscription_store.clone();
+            let user_store = state.user_store.clone();
+            let plan_store = state.plan_store.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "subscription-expire-reset",
+                interval: Duration::from_secs(60),
+                first_run_delay: Duration::from_secs(30),
+                run: Box::new(move || {
+                    let ss = sub_store.clone();
+                    let us = user_store.clone();
+                    let ps = plan_store.clone();
+                    Box::pin(async move {
+                        let now = chrono::Utc::now().timestamp();
+                        // 1) 到期扫描：status 落库 + 分组回退
+                        let expired = ss.expire_due(now);
+                        let mut actions = expired.len() as u64;
+                        for sub in &expired {
+                            if let Err(e) =
+                                crate::plan::subscription::downgrade_user_group(&us, &ss, sub, now)
+                            {
+                                tracing::error!(
+                                    "subscription group downgrade failed for {}: {e}",
+                                    sub.id
+                                );
+                            }
+                        }
+                        // 2) 周期重置：到点的活跃订阅清零已用配额并推进锚点
+                        for sub in ss.list_reset_due(now) {
+                            let Some(plan) = ps.get(&sub.plan_id) else {
+                                continue;
+                            };
+                            // 基准点：上次重置时间或购买时间
+                            let mut base = if sub.last_reset_time > 0 {
+                                sub.last_reset_time
+                            } else {
+                                sub.start_time
+                            };
+                            let mut next = crate::plan::subscription::calc_next_reset(
+                                base,
+                                &plan,
+                                sub.end_time,
+                            );
+                            let mut advanced = false;
+                            while next > 0 && next <= now {
+                                advanced = true;
+                                base = next;
+                                next = crate::plan::subscription::calc_next_reset(
+                                    base,
+                                    &plan,
+                                    sub.end_time,
+                                );
+                            }
+                            if !advanced {
+                                continue;
+                            }
+                            if let Err(e) = ss.apply_reset(&sub.id, base, next) {
+                                tracing::error!(
+                                    "subscription quota reset failed for {}: {e}",
+                                    sub.id
+                                );
+                            } else {
+                                actions += 1;
+                            }
+                        }
+                        actions
+                    })
+                }),
+            });
+        }
         tracing::info!(
-            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush)",
+            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, subscription-expire-reset)",
             scheduler.task_count()
         );
     }
@@ -963,6 +1040,31 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/plans/:id/issue",
             post(api::admin::handle_issue_plan_key),
+        )
+        // 订阅（#85 时长订阅：用户侧购买 + 管理端绑定/取消）
+        .route(
+            "/api/subscription/plans",
+            get(api::admin::handle_subscription_plans),
+        )
+        .route(
+            "/api/subscription/self",
+            get(api::admin::handle_subscription_self),
+        )
+        .route(
+            "/api/subscription/balance/pay",
+            post(api::admin::handle_subscription_balance_pay),
+        )
+        .route(
+            "/api/subscription/admin/bind",
+            post(api::admin::handle_subscription_admin_bind),
+        )
+        .route(
+            "/api/subscription/admin/users/:id/subscriptions",
+            get(api::admin::handle_subscription_admin_list),
+        )
+        .route(
+            "/api/subscription/admin/subscriptions/:id/cancel",
+            post(api::admin::handle_subscription_admin_cancel),
         )
         // 限流配置
         .route(

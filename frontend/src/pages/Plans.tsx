@@ -19,6 +19,20 @@ interface PlanItem {
   enabled?: boolean;
   issued_count?: number;
   created_at?: number;
+  // ── 订阅化扩展（#85）────────────────────────────────────────
+  plan_type?: string;
+  duration_unit?: string;
+  duration_value?: number;
+  custom_seconds?: number;
+  total_amount?: number;
+  quota_reset_period?: string;
+  quota_reset_custom_seconds?: number;
+  allow_balance_pay?: boolean;
+  allow_wallet_overflow?: boolean;
+  max_purchase_per_user?: number;
+  upgrade_group?: string;
+  downgrade_group?: string;
+  sort_order?: number;
   [key: string]: unknown;
 }
 
@@ -31,6 +45,20 @@ interface PlanFormState {
   allowed_models: string;
   description: string;
   enabled: boolean;
+  // ── 订阅化字段（#85）────────────────────────────────────────
+  plan_type: 'once' | 'subscription';
+  duration_unit: string;
+  duration_value: string;
+  custom_seconds: string;
+  total_amount: string;
+  quota_reset_period: string;
+  quota_reset_custom_seconds: string;
+  allow_balance_pay: boolean;
+  allow_wallet_overflow: boolean;
+  max_purchase_per_user: string;
+  upgrade_group: string;
+  downgrade_group: string;
+  sort_order: string;
 }
 
 const EMPTY_FORM: PlanFormState = {
@@ -42,6 +70,19 @@ const EMPTY_FORM: PlanFormState = {
   allowed_models: '',
   description: '',
   enabled: true,
+  plan_type: 'once',
+  duration_unit: 'month',
+  duration_value: '1',
+  custom_seconds: '',
+  total_amount: '',
+  quota_reset_period: 'never',
+  quota_reset_custom_seconds: '',
+  allow_balance_pay: true,
+  allow_wallet_overflow: true,
+  max_purchase_per_user: '',
+  upgrade_group: '',
+  downgrade_group: '',
+  sort_order: '0',
 };
 
 interface IssuedKeyState {
@@ -108,6 +149,19 @@ export default function Plans(): JSX.Element {
       allowed_models: Array.isArray(p.allowed_models) ? p.allowed_models.join(', ') : '',
       description: p.description || '',
       enabled: p.enabled !== false,
+      plan_type: p.plan_type === 'subscription' ? 'subscription' : 'once',
+      duration_unit: p.duration_unit || 'month',
+      duration_value: p.duration_value != null ? String(p.duration_value) : '1',
+      custom_seconds: p.custom_seconds ? String(p.custom_seconds) : '',
+      total_amount: p.total_amount ? String(p.total_amount) : '',
+      quota_reset_period: p.quota_reset_period || 'never',
+      quota_reset_custom_seconds: p.quota_reset_custom_seconds ? String(p.quota_reset_custom_seconds) : '',
+      allow_balance_pay: p.allow_balance_pay !== false,
+      allow_wallet_overflow: p.allow_wallet_overflow !== false,
+      max_purchase_per_user: p.max_purchase_per_user ? String(p.max_purchase_per_user) : '',
+      upgrade_group: p.upgrade_group || '',
+      downgrade_group: p.downgrade_group || '',
+      sort_order: p.sort_order != null ? String(p.sort_order) : '0',
     });
     setShowModal(true);
   };
@@ -126,6 +180,7 @@ export default function Plans(): JSX.Element {
     setSaving(true);
     setError('');
     try {
+      const isSub = form.plan_type === 'subscription';
       const payload: Record<string, unknown> = {
         name: form.name.trim(),
         price: Number(form.price || 0),
@@ -138,7 +193,22 @@ export default function Plans(): JSX.Element {
           .filter(Boolean),
         description: form.description.trim(),
         enabled: form.enabled,
+        plan_type: form.plan_type,
+        sort_order: Number(form.sort_order || 0),
       };
+      if (isSub) {
+        payload.duration_unit = form.duration_unit;
+        payload.duration_value = Number(form.duration_value || 0);
+        payload.custom_seconds = Number(form.custom_seconds || 0);
+        payload.total_amount = Number(form.total_amount || 0);
+        payload.quota_reset_period = form.quota_reset_period;
+        payload.quota_reset_custom_seconds = Number(form.quota_reset_custom_seconds || 0);
+        payload.allow_balance_pay = form.allow_balance_pay;
+        payload.allow_wallet_overflow = form.allow_wallet_overflow;
+        payload.max_purchase_per_user = Number(form.max_purchase_per_user || 0);
+        payload.upgrade_group = form.upgrade_group.trim();
+        payload.downgrade_group = form.downgrade_group.trim();
+      }
       if (editing) payload.id = editing.id;
       await api.upsertPlan(payload);
       addToast(editing ? t('套餐已更新') : t('套餐已创建'));
@@ -255,6 +325,32 @@ export default function Plans(): JSX.Element {
     return `${v}${t('天')}`;
   };
 
+  // 订阅时长展示（#85）
+  const fmtSubDuration = (p: PlanItem): string => {
+    if (p.duration_unit === 'custom') {
+      const s = Number(p.custom_seconds || 0);
+      if (s <= 0) return t('未配置');
+      if (s % 86400 === 0) return `${s / 86400}${t('天')}`;
+      if (s % 3600 === 0) return `${s / 3600}${t('小时')}`;
+      return `${s}${t('秒')}`;
+    }
+    const unitMap: Record<string, string> = { year: t('年'), month: t('月'), day: t('天'), hour: t('小时') };
+    const v = Number(p.duration_value || 0);
+    if (v <= 0) return t('未配置');
+    return `${v} ${unitMap[p.duration_unit || 'month'] || ''}`;
+  };
+
+  const fmtResetPeriod = (period: string | undefined): string => {
+    const map: Record<string, string> = {
+      never: t('不重置'),
+      daily: t('每日'),
+      weekly: t('每周'),
+      monthly: t('每月'),
+      custom: t('自定义'),
+    };
+    return map[period || 'never'] || period || t('不重置');
+  };
+
   if (loading) return <SkeletonTable columns={6} rows={5} />;
 
   return (
@@ -283,6 +379,7 @@ export default function Plans(): JSX.Element {
                 <div className="plan-card-head">
                   <div className="plan-card-title">
                     <span className="plan-name">{p.name}</span>
+                    {p.plan_type === 'subscription' && <span className="badge badge-info">{t('订阅')}</span>}
                     {p.enabled === false && <span className="badge badge-neutral">{t('已停售')}</span>}
                   </div>
                   <div className="plan-price">
@@ -290,28 +387,59 @@ export default function Plans(): JSX.Element {
                   </div>
                 </div>
                 <div className="plan-card-body">
-                  <div className="plan-meta">
-                    <span className="plan-meta-label">{t('额度')}</span>
-                    <span>{p.quota ? fmtQuota(p.quota) : t('不限')}</span>
-                  </div>
-                  <div className="plan-meta">
-                    <span className="plan-meta-label">{t('有效期')}</span>
-                    <span>{fmtDuration(p.duration_days)}</span>
-                  </div>
+                  {p.plan_type === 'subscription' ? (
+                    <>
+                      <div className="plan-meta">
+                        <span className="plan-meta-label">{t('时长')}</span>
+                        <span>{fmtSubDuration(p)}</span>
+                      </div>
+                      <div className="plan-meta">
+                        <span className="plan-meta-label">{t('订阅配额')}</span>
+                        <span>{p.total_amount ? fmtQuota(p.total_amount) : t('不限')}</span>
+                      </div>
+                      <div className="plan-meta">
+                        <span className="plan-meta-label">{t('周期重置')}</span>
+                        <span>{fmtResetPeriod(p.quota_reset_period)}</span>
+                      </div>
+                      {p.upgrade_group && (
+                        <div className="plan-meta">
+                          <span className="plan-meta-label">{t('升级分组')}</span>
+                          <span>{p.upgrade_group}</span>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div className="plan-meta">
+                        <span className="plan-meta-label">{t('额度')}</span>
+                        <span>{p.quota ? fmtQuota(p.quota) : t('不限')}</span>
+                      </div>
+                      <div className="plan-meta">
+                        <span className="plan-meta-label">{t('有效期')}</span>
+                        <span>{fmtDuration(p.duration_days)}</span>
+                      </div>
+                    </>
+                  )}
                   <div className="plan-meta">
                     <span className="plan-meta-label">{t('分组')}</span>
                     <span>{p.group || 'default'}</span>
                   </div>
-                  <div className="plan-meta">
-                    <span className="plan-meta-label">{t('已发放')}</span>
-                    <span>{Number(p.issued_count || 0)}</span>
-                  </div>
+                  {p.plan_type !== 'subscription' && (
+                    <div className="plan-meta">
+                      <span className="plan-meta-label">{t('已发放')}</span>
+                      <span>{Number(p.issued_count || 0)}</span>
+                    </div>
+                  )}
                   {p.description && <p className="plan-desc">{p.description}</p>}
                 </div>
                 <div className="plan-card-actions">
-                  <Button size="sm" onClick={() => handleIssueKey(p)} disabled={p.enabled === false || issuingId === p.id}>
-                    <Gift size={14} /> {issuingId === p.id ? t('生成中...') : t('发放密钥')}
-                  </Button>
+                  {p.plan_type === 'subscription' ? (
+                    <span className="plan-sub-hint" title={t('订阅套餐由用户在钱包页用余额购买')}>{t('余额购买制')}</span>
+                  ) : (
+                    <Button size="sm" onClick={() => handleIssueKey(p)} disabled={p.enabled === false || issuingId === p.id}>
+                      <Gift size={14} /> {issuingId === p.id ? t('生成中...') : t('发放密钥')}
+                    </Button>
+                  )}
                   <Button variant="outline" size="sm" onClick={() => handleToggleEnabled(p)}>
                     {p.enabled !== false ? t('停售') : t('上架')}
                   </Button>
@@ -337,6 +465,14 @@ export default function Plans(): JSX.Element {
               <button type="button" className="modal-close" onClick={closeModal}>&times;</button>
             </div>
             <div className="modal-body">
+              <Select
+                label={t('套餐类型')}
+                value={form.plan_type}
+                onChange={(e) => setForm({ ...form, plan_type: e.target.value as 'once' | 'subscription' })}
+              >
+                <option value="once">{t('按量套餐（发 API 密钥）')}</option>
+                <option value="subscription">{t('时长订阅（余额购买）')}</option>
+              </Select>
               <Input
                 label={`${t('名称')} *`}
                 placeholder={t('例如：入门包 100K tokens')}
@@ -352,20 +488,135 @@ export default function Plans(): JSX.Element {
                 value={form.price}
                 onChange={(e) => setForm({ ...form, price: e.target.value })}
               />
-              <Input
-                label={`${t('额度上限')} ${t('(0 = 不限额度)')}`}
-                type="number"
-                placeholder="100000"
-                value={form.quota}
-                onChange={(e) => setForm({ ...form, quota: e.target.value })}
-              />
-              <Input
-                label={`${t('有效期天数')} ${t('(0 = 永不过期)')}`}
-                type="number"
-                placeholder="30"
-                value={form.duration_days}
-                onChange={(e) => setForm({ ...form, duration_days: e.target.value })}
-              />
+              {form.plan_type === 'once' ? (
+                <>
+                  <Input
+                    label={`${t('额度上限')} ${t('(0 = 不限额度)')}`}
+                    type="number"
+                    placeholder="100000"
+                    value={form.quota}
+                    onChange={(e) => setForm({ ...form, quota: e.target.value })}
+                  />
+                  <Input
+                    label={`${t('有效期天数')} ${t('(0 = 永不过期)')}`}
+                    type="number"
+                    placeholder="30"
+                    value={form.duration_days}
+                    onChange={(e) => setForm({ ...form, duration_days: e.target.value })}
+                  />
+                </>
+              ) : (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
+                    <Select
+                      label={t('订阅时长单位')}
+                      value={form.duration_unit}
+                      onChange={(e) => setForm({ ...form, duration_unit: e.target.value })}
+                    >
+                      <option value="year">{t('年')}</option>
+                      <option value="month">{t('月')}</option>
+                      <option value="day">{t('天')}</option>
+                      <option value="hour">{t('小时')}</option>
+                      <option value="custom">{t('自定义')}</option>
+                    </Select>
+                    {form.duration_unit === 'custom' ? (
+                      <Input
+                        label={`${t('自定义秒数')} *`}
+                        type="number"
+                        placeholder="2592000"
+                        value={form.custom_seconds}
+                        onChange={(e) => setForm({ ...form, custom_seconds: e.target.value })}
+                      />
+                    ) : (
+                      <Input
+                        label={`${t('时长数值')} *`}
+                        type="number"
+                        min="1"
+                        placeholder="1"
+                        value={form.duration_value}
+                        onChange={(e) => setForm({ ...form, duration_value: e.target.value })}
+                      />
+                    )}
+                  </div>
+                  <Input
+                    label={`${t('订阅总配额')} ${t('(0 = 不限)')}`}
+                    type="number"
+                    placeholder="500000"
+                    hint={t('订阅期内可用总额度，耗尽后按下方策略处理')}
+                    value={form.total_amount}
+                    onChange={(e) => setForm({ ...form, total_amount: e.target.value })}
+                  />
+                  <Select
+                    label={t('配额周期重置')}
+                    value={form.quota_reset_period}
+                    onChange={(e) => setForm({ ...form, quota_reset_period: e.target.value })}
+                  >
+                    <option value="never">{t('不重置')}</option>
+                    <option value="daily">{t('每日重置')}</option>
+                    <option value="weekly">{t('每周重置')}</option>
+                    <option value="monthly">{t('每月重置')}</option>
+                    <option value="custom">{t('自定义周期')}</option>
+                  </Select>
+                  {form.quota_reset_period === 'custom' && (
+                    <Input
+                      label={`${t('重置周期秒数')} *`}
+                      type="number"
+                      placeholder="604800"
+                      value={form.quota_reset_custom_seconds}
+                      onChange={(e) => setForm({ ...form, quota_reset_custom_seconds: e.target.value })}
+                    />
+                  )}
+                  <Select
+                    label={t('余额购买')}
+                    value={form.allow_balance_pay ? 'on' : 'off'}
+                    onChange={(e) => setForm({ ...form, allow_balance_pay: e.target.value === 'on' })}
+                  >
+                    <option value="on">{t('允许用户用余额购买')}</option>
+                    <option value="off">{t('禁止余额购买')}</option>
+                  </Select>
+                  <Select
+                    label={t('池耗尽回退钱包')}
+                    value={form.allow_wallet_overflow ? 'on' : 'off'}
+                    onChange={(e) => setForm({ ...form, allow_wallet_overflow: e.target.value === 'on' })}
+                  >
+                    <option value="on">{t('允许：订阅池耗尽后继续扣钱包余额')}</option>
+                    <option value="off">{t('禁止：池耗尽即拒绝请求')}</option>
+                  </Select>
+                  <Input
+                    label={`${t('每用户限购次数')} ${t('(0 = 不限)')}`}
+                    type="number"
+                    placeholder="1"
+                    value={form.max_purchase_per_user}
+                    onChange={(e) => setForm({ ...form, max_purchase_per_user: e.target.value })}
+                  />
+                  <Select
+                    label={t('购买后升级分组')}
+                    value={form.upgrade_group}
+                    onChange={(e) => setForm({ ...form, upgrade_group: e.target.value })}
+                  >
+                    <option value="">{t('不变更')}</option>
+                    {groups.filter((g) => g.name).map((g) => (
+                      <option key={g.name} value={g.name}>{g.name}</option>
+                    ))}
+                  </Select>
+                  <Select
+                    label={t('到期回退分组')}
+                    value={form.downgrade_group}
+                    onChange={(e) => setForm({ ...form, downgrade_group: e.target.value })}
+                  >
+                    <option value="">{t('回退购买前分组')}</option>
+                    {groups.filter((g) => g.name).map((g) => (
+                      <option key={g.name} value={g.name}>{g.name}</option>
+                    ))}
+                  </Select>
+                  <Input
+                    label={t('展示排序（升序）')}
+                    type="number"
+                    value={form.sort_order}
+                    onChange={(e) => setForm({ ...form, sort_order: e.target.value })}
+                  />
+                </>
+              )}
               <Select
                 label={t('分组')}
                 value={form.group}

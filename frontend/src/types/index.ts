@@ -400,6 +400,62 @@ export interface PlanItem {
   /** 已按此套餐发放的 key 数 */
   issued_count?: number;
   created_at?: number;
+  // ── 订阅化扩展（#85，对齐 new-api SubscriptionPlan）──────────────────
+  /** 套餐类型：once（按量发 key，默认）/ subscription（时长订阅） */
+  plan_type?: string;
+  /** 订阅时长单位：year / month / day / hour / custom */
+  duration_unit?: string;
+  /** 订阅时长数值（custom 时忽略） */
+  duration_value?: number;
+  /** custom 时长的秒数 */
+  custom_seconds?: number;
+  /** 订阅总配额（0 = 不限） */
+  total_amount?: number;
+  /** 订阅配额周期重置：never / daily / weekly / monthly / custom */
+  quota_reset_period?: string;
+  /** custom 重置周期的秒数 */
+  quota_reset_custom_seconds?: number;
+  /** 是否允许余额购买订阅 */
+  allow_balance_pay?: boolean;
+  /** 订阅池耗尽后是否允许回退用户钱包 */
+  allow_wallet_overflow?: boolean;
+  /** 每用户最多购买次数（0 = 不限） */
+  max_purchase_per_user?: number;
+  /** 购买后升级到的用户分组（空 = 不变） */
+  upgrade_group?: string;
+  /** 到期后回退到的分组（空 = 回退购买前分组） */
+  downgrade_group?: string;
+  /** 展示排序（升序） */
+  sort_order?: number;
+  [key: string]: unknown;
+}
+
+/** 用户订阅实例（#85，对齐 new-api UserSubscription） */
+export interface UserSubscriptionItem {
+  id: string;
+  user_id: string;
+  plan_id: string;
+  /** 订阅总配额（0 = 不限） */
+  amount_total: number;
+  /** 已用配额 */
+  amount_used: number;
+  start_time: number;
+  end_time: number;
+  /** active / expired / cancelled */
+  status: string;
+  /** balance / admin */
+  source: string;
+  last_reset_time: number;
+  next_reset_time: number;
+  upgrade_group: string;
+  prev_user_group: string;
+  downgrade_group: string;
+  allow_wallet_overflow: boolean;
+  created_at: number;
+  updated_at: number;
+  /** 展示快照（后端 sub_json 附加） */
+  plan_name?: string;
+  plan_price?: number;
   [key: string]: unknown;
 }
 

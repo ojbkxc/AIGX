@@ -33,6 +33,39 @@ interface EpayConfig {
   pay_methods?: string[];
 }
 
+/** 订阅套餐卡片数据（#85，对齐后端 /api/subscription/plans） */
+interface SubPlan {
+  id: string;
+  name: string;
+  price?: number;
+  description?: string;
+  duration_unit?: string;
+  duration_value?: number;
+  custom_seconds?: number;
+  total_amount?: number;
+  quota_reset_period?: string;
+  allow_balance_pay?: boolean;
+  upgrade_group?: string;
+  sort_order?: number;
+  [key: string]: unknown;
+}
+
+/** 我的订阅实例（#85，对齐后端 /api/subscription/self） */
+interface MySubscription {
+  id: string;
+  plan_id: string;
+  amount_total: number;
+  amount_used: number;
+  start_time: number;
+  end_time: number;
+  status: string;
+  next_reset_time: number;
+  upgrade_group?: string;
+  plan_name?: string;
+  plan_price?: number;
+  [key: string]: unknown;
+}
+
 interface WalletOrder {
   trade_no: string;
   money?: number;
@@ -69,6 +102,10 @@ export default function Wallet(): JSX.Element {
   // 兑换码
   const [redeemCode, setRedeemCode] = useState('');
   const [redeeming, setRedeeming] = useState(false);
+  // 订阅（#85 套餐订阅化）
+  const [subPlans, setSubPlans] = useState<SubPlan[]>([]);
+  const [mySubs, setMySubs] = useState<MySubscription[]>([]);
+  const [buyingSubId, setBuyingSubId] = useState<string | null>(null);
   // 兑换码/充值表单内联错误（页面顶部 error 离表单太远，用户看不到）
   const [redeemError, setRedeemError] = useState('');
   const [topupError, setTopupError] = useState('');
@@ -83,17 +120,21 @@ export default function Wallet(): JSX.Element {
     setLoading(true);
     setError('');
     try {
-      const [meRes, epayRes, orderRes, affRes, checkinRes] = await Promise.all([
+      const [meRes, epayRes, orderRes, affRes, checkinRes, subPlansRes, mySubsRes] = await Promise.all([
         api.getMe().catch(() => null),
         api.getEpayInfo().catch(() => null),
         api.myOrders().catch(() => null),
         api.getAffCode().catch(() => null),
         api.checkinStatus().catch(() => null),
+        api.subscriptionPlans().catch(() => null),
+        api.subscriptionSelf().catch(() => null),
       ]);
       if (meRes) setMe(meRes.data as WalletUser | null);
       if (epayRes) setEpay(epayRes.data as EpayConfig | null);
       if (orderRes) setOrders(Array.isArray(orderRes.data) ? (orderRes.data as unknown as WalletOrder[]) : []);
       if (affRes) setAffCode(String(affRes.data ?? ''));
+      if (subPlansRes && Array.isArray(subPlansRes.data)) setSubPlans(subPlansRes.data as unknown as SubPlan[]);
+      if (mySubsRes && Array.isArray(mySubsRes.data)) setMySubs(mySubsRes.data as unknown as MySubscription[]);
       // 签到未启用时后端返回 success=false，data 为空 → 不渲染签到卡片
       if (checkinRes && (checkinRes as { success?: boolean }).success) {
         setCheckin((checkinRes.data ?? null) as CheckinState | null);
@@ -178,6 +219,39 @@ export default function Wallet(): JSX.Element {
     }
   };
 
+  /** 余额购买订阅（#85）：扣余额 → 建订阅实例（独立配额池 + 时长 + 分组升级） */
+  const handleBuySubscription = (p: SubPlan) => {
+    setConfirmState({
+      title: t('确认购买订阅'),
+      message: (
+        <>
+          {t('即将以余额购买订阅「{{name}}」，将从余额扣费，订阅期间消耗优先走订阅配额池。', { name: p.name })}
+          {p.total_amount ? <><br />{t('订阅总配额')}：{fmtQuota(p.total_amount)}</> : null}
+          <br />{t('售价')}：¥{Number(p.price || 0).toFixed(2)}
+        </>
+      ),
+      confirmText: t('确认购买'),
+      onConfirm: async () => {
+        setBuyingSubId(p.id);
+        try {
+          await api.subscriptionBalancePay(p.id);
+          addToast(t('订阅购买成功'));
+          // 刷新余额与订阅列表
+          const [meRes, subsRes] = await Promise.all([
+            api.getMe().catch(() => null),
+            api.subscriptionSelf().catch(() => null),
+          ]);
+          if (meRes) setMe(meRes.data as WalletUser | null);
+          if (subsRes && Array.isArray(subsRes.data)) setMySubs(subsRes.data as unknown as MySubscription[]);
+        } catch (err) {
+          addToast(err instanceof Error ? err.message : String(err), 'error');
+        } finally {
+          setBuyingSubId(null);
+        }
+      },
+    });
+  };
+
   /** 每日签到：随机奖励直进可用配额（一人一天一次） */
   const handleCheckin = async () => {
     setCheckingIn(true);
@@ -234,8 +308,7 @@ export default function Wallet(): JSX.Element {
   };
 
   // 兑换码兑换（放在 loading 早退之前，保证 hooks 与事件处理函数定义顺序稳定）
-  const handleRedeem = async () => {
-    if (!redeemCode.trim()) {
+  const handleRedeem = async () => {    if (!redeemCode.trim()) {
       setRedeemError(t('请输入兑换码'));
       return;
     }
@@ -262,6 +335,39 @@ export default function Wallet(): JSX.Element {
 
   const remaining = me ? (me.quota || 0) - (me.used_quota || 0) : 0;
   const methods = (epay && epay.pay_methods && epay.pay_methods.length > 0) ? epay.pay_methods : ['alipay', 'wxpay'];
+
+  // 订阅展示辅助（#85）
+  const fmtSubDuration = (p: SubPlan): string => {
+    if (p.duration_unit === 'custom') {
+      const s = Number(p.custom_seconds || 0);
+      if (s <= 0) return '—';
+      if (s % 86400 === 0) return `${s / 86400} ${t('天')}`;
+      if (s % 3600 === 0) return `${s / 3600} ${t('小时')}`;
+      return `${s} ${t('秒')}`;
+    }
+    const unitMap: Record<string, string> = { year: t('年'), month: t('个月'), day: t('天'), hour: t('小时') };
+    const v = Number(p.duration_value || 0);
+    if (v <= 0) return '—';
+    return `${v} ${unitMap[p.duration_unit || 'month'] || ''}`;
+  };
+
+  const fmtResetPeriod = (period: string | undefined): string => {
+    const map: Record<string, string> = {
+      never: t('不重置'),
+      daily: t('每日重置'),
+      weekly: t('每周重置'),
+      monthly: t('每月重置'),
+      custom: t('周期重置'),
+    };
+    return map[period || 'never'] || period || '';
+  };
+
+  const subStatusBadge = (s: MySubscription): { cls: string; text: string } => {
+    const now = Math.floor(Date.now() / 1000);
+    if (s.status === 'cancelled') return { cls: 'badge badge-neutral', text: t('已取消') };
+    if (s.status === 'expired' || s.end_time <= now) return { cls: 'badge badge-neutral', text: t('已到期') };
+    return { cls: 'badge badge-success', text: t('生效中') };
+  };
 
   return (
     <div>
@@ -395,6 +501,92 @@ export default function Wallet(): JSX.Element {
               {checkin.checked_today ? t('今日已签') : checkingIn ? t('签到中...') : t('立即签到')}
             </Button>
           </div>
+        </Card>
+      )}
+
+      {/* 订阅套餐购买（#85 套餐订阅化，对齐 new-api SubscriptionCard） */}
+      {subPlans.length > 0 && (
+        <Card title={t('订阅套餐')} bodyClassName="">
+          <div className="plans-grid" style={{ marginBottom: mySubs.length ? 16 : 0 }}>
+            {subPlans.map((p) => (
+              <div key={p.id} className="plan-card" style={{ border: '1px solid var(--border-color, #e5e7eb)', borderRadius: 12, padding: 14, background: 'var(--bg-color, #f7f8fa)' }}>
+                <div className="plan-card-head" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <strong style={{ fontSize: 14 }}>{p.name}</strong>
+                  <span style={{ fontWeight: 700, color: 'var(--accent-color)' }}>¥{Number(p.price || 0).toFixed(2)}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12.5, marginBottom: 10 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>{t('时长')}</span>
+                    <span>{fmtSubDuration(p)}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>{t('订阅配额')}</span>
+                    <span>{p.total_amount ? fmtQuota(p.total_amount) : t('不限')}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>{t('周期重置')}</span>
+                    <span>{fmtResetPeriod(p.quota_reset_period)}</span>
+                  </div>
+                  {p.upgrade_group && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>{t('专属分组')}</span>
+                      <span>{p.upgrade_group}</span>
+                    </div>
+                  )}
+                </div>
+                {p.description && (
+                  <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 10px', lineHeight: 1.5 }}>{p.description}</p>
+                )}
+                <Button
+                  size="sm"
+                  style={{ width: '100%' }}
+                  disabled={buyingSubId === p.id || p.allow_balance_pay === false}
+                  onClick={() => handleBuySubscription(p)}
+                >
+                  {p.allow_balance_pay === false
+                    ? t('不支持余额购买')
+                    : buyingSubId === p.id ? t('购买中...') : t('余额购买')}
+                </Button>
+              </div>
+            ))}
+          </div>
+
+          {/* 我的订阅列表 */}
+          {mySubs.length > 0 && (
+            <div className="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t('套餐')}</th>
+                    <th>{t('状态')}</th>
+                    <th>{t('已用/总配额')}</th>
+                    <th>{t('到期时间')}</th>
+                    <th>{t('下次重置')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {mySubs.map((s) => {
+                    const badge = subStatusBadge(s);
+                    const now = Math.floor(Date.now() / 1000);
+                    const active = s.status === 'active' && s.end_time > now;
+                    return (
+                      <tr key={s.id}>
+                        <td>{s.plan_name || s.plan_id}</td>
+                        <td><span className={badge.cls}>{badge.text}</span></td>
+                        <td>
+                          {s.amount_total > 0
+                            ? `${fmtQuota(s.amount_used)} / ${fmtQuota(s.amount_total)}`
+                            : `${fmtQuota(s.amount_used)} / ${t('不限')}`}
+                        </td>
+                        <td>{s.end_time > 0 ? new Date(s.end_time * 1000).toLocaleString() : '—'}</td>
+                        <td>{active && s.next_reset_time > 0 ? new Date(s.next_reset_time * 1000).toLocaleString() : '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Card>
       )}
 

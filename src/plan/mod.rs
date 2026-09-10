@@ -1,13 +1,20 @@
-//! 套餐系统 — 按量套餐模板 + 按套餐发放 API Key。
+//! 套餐系统 — 按量套餐模板 + 按套餐发放 API Key + 时长订阅（SubscriptionPlan）。
 //!
 //! 业务模式（参照 cf-ai-gw「key 即套餐」+ new-api SubscriptionPlan 模板化）：
 //! 卖家在后台定义套餐模板（名称/售价/额度/有效期天数/分组/模型白名单），
 //! 买家付款后卖家按模板一键创建 API Key 交付——key 自带 quota_limit 与
 //! expires_at，即「次数/额度 + 有效期」的套餐凭证，无需额外交付实体。
 //!
+//! plan_type 二分（#85 套餐订阅化，对齐 new-api SubscriptionPlan）：
+//! - `once`（默认）：按量模板，走发 key 交付路径；
+//! - `subscription`：时长订阅，用户余额购买后生成 UserSubscription
+//!   （见 subscription.rs），自带独立配额池/到期时间/分组升降级。
+//!
 //! 持久化使用 FileStore KV：key 前缀 `plan:{id}`。
 //! Token（ApiKey）已有 quota_limit/used_quota/expires_at 字段完整覆盖
 //! cf-ai-gw 的 maxCalls/usedCalls/expiresAt 模型，无需 schema 变更。
+
+pub mod subscription;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -51,11 +58,78 @@ pub struct Plan {
     /// 已按此套餐发放的 key 数（发 key 时递增，供卖家对账）
     #[serde(default)]
     pub issued_count: i64,
+    // ── 订阅化扩展（#85，对齐 new-api SubscriptionPlan）──────────────────
+    /// 套餐类型：once（按量发 key，默认）/ subscription（时长订阅）
+    #[serde(default)]
+    pub plan_type: String,
+    /// 订阅时长单位：year / month / day / hour / custom
+    #[serde(default = "default_duration_unit")]
+    pub duration_unit: String,
+    /// 订阅时长数值（custom 时忽略；必须 > 0）
+    #[serde(default = "default_duration_value")]
+    pub duration_value: i64,
+    /// custom 时长的秒数
+    #[serde(default)]
+    pub custom_seconds: i64,
+    /// 订阅总配额（0 = 不限）
+    #[serde(default)]
+    pub total_amount: i64,
+    /// 订阅配额周期重置：never / daily / weekly / monthly / custom
+    #[serde(default = "default_reset_period")]
+    pub quota_reset_period: String,
+    /// custom 重置周期的秒数
+    #[serde(default)]
+    pub quota_reset_custom_seconds: i64,
+    /// 是否允许余额购买订阅
+    #[serde(default = "default_allow_balance_pay")]
+    pub allow_balance_pay: bool,
+    /// 订阅池耗尽后是否允许回退用户钱包
+    #[serde(default = "default_allow_wallet_overflow")]
+    pub allow_wallet_overflow: bool,
+    /// 每用户最多购买次数（0 = 不限）
+    #[serde(default)]
+    pub max_purchase_per_user: i64,
+    /// 购买后升级到的用户分组（空 = 不变）
+    #[serde(default)]
+    pub upgrade_group: String,
+    /// 到期后回退到的分组（空 = 回退购买前分组）
+    #[serde(default)]
+    pub downgrade_group: String,
+    /// 展示排序（升序）
+    #[serde(default)]
+    pub sort_order: i64,
     /// 创建时间
     pub created_at: i64,
     /// 更新时间
     #[serde(default)]
     pub updated_at: i64,
+}
+
+fn default_duration_unit() -> String {
+    "month".to_string()
+}
+
+fn default_duration_value() -> i64 {
+    1
+}
+
+fn default_reset_period() -> String {
+    "never".to_string()
+}
+
+fn default_allow_balance_pay() -> bool {
+    true
+}
+
+fn default_allow_wallet_overflow() -> bool {
+    true
+}
+
+impl Plan {
+    /// 是否为时长订阅套餐
+    pub fn is_subscription(&self) -> bool {
+        self.plan_type == "subscription"
+    }
 }
 
 fn default_duration() -> i64 {
@@ -153,6 +227,23 @@ impl PlanStore {
         all
     }
 
+    /// 上架的订阅套餐（用户侧购买页，sort_order 升序 + 创建时间倒序）
+    pub fn list_subscription_enabled(&self) -> Vec<Plan> {
+        let mut all: Vec<Plan> = self
+            .by_id
+            .read()
+            .values()
+            .filter(|p| p.enabled && p.is_subscription())
+            .cloned()
+            .collect();
+        all.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then(b.created_at.cmp(&a.created_at))
+        });
+        all
+    }
+
     /// 按 id 解析出创建 key 的完整选项（发 key 入口的唯一路径）。
     ///
     /// 套餐不存在或已停售返回 None。
@@ -219,6 +310,19 @@ mod tests {
             description: String::new(),
             enabled: true,
             issued_count: 0,
+            plan_type: String::new(),
+            duration_unit: String::new(),
+            duration_value: 0,
+            custom_seconds: 0,
+            total_amount: 0,
+            quota_reset_period: String::new(),
+            quota_reset_custom_seconds: 0,
+            allow_balance_pay: true,
+            allow_wallet_overflow: true,
+            max_purchase_per_user: 0,
+            upgrade_group: String::new(),
+            downgrade_group: String::new(),
+            sort_order: 0,
             created_at: 0,
             updated_at: 0,
         }
@@ -292,5 +396,24 @@ mod tests {
         assert!(s.delete(&p.id).is_ok());
         assert!(s.get(&p.id).is_none());
         assert!(s.delete(&p.id).is_err());
+    }
+
+    #[test]
+    fn subscription_plan_filter_and_defaults() {
+        let s = store();
+        let mut sub = sample_plan("月度会员", 0, 0);
+        sub.plan_type = "subscription".into();
+        sub.sort_order = 1;
+        let mut sub2 = sample_plan("年度会员", 0, 0);
+        sub2.plan_type = "subscription".into();
+        sub2.sort_order = 0;
+        // 默认 once 模式的套餐（plan_type 为空）
+        s.upsert(sample_plan("按量包", 100, 30)).unwrap();
+        s.upsert(sub).unwrap();
+        s.upsert(sub2).unwrap();
+        let subs = s.list_subscription_enabled();
+        assert_eq!(subs.len(), 2, "仅订阅套餐且已上架的入选");
+        assert_eq!(subs[0].name, "年度会员", "sort_order 升序");
+        assert_eq!(subs[1].name, "月度会员");
     }
 }
