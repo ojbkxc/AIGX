@@ -76,7 +76,9 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
 
         // 渠道级模型映射：探测用的上游模型名 = 该渠道映射后的真实模型名
         // （否则 mapping 渠道会被当作不支持该上游探测模型而误判失败）
-        let probe_model = ch.resolve_channel_mapping(&model).unwrap_or_else(|| model.clone());
+        let probe_model = ch
+            .resolve_channel_mapping(&model)
+            .unwrap_or_else(|| model.clone());
         let probe_req = ChatFormat {
             model: probe_model.clone(),
             messages: vec![ChatMessage {

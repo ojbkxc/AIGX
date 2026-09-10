@@ -20,6 +20,12 @@ use crate::bridge::{
 };
 use crate::channel::ChannelStore;
 use crate::config::ConfigManager;
+/// 渠道候选元组：bridge + 渠道 id + 渠道快照（映射/成本价解析用）。
+type BridgeCandidate = (
+    Arc<dyn Bridge>,
+    Option<String>,
+    Option<crate::channel::Channel>,
+);
 use crate::health::{HealthTracker, LivezState};
 use crate::hub::Hub;
 use crate::ip::IpFilterStore;
@@ -263,7 +269,7 @@ pub fn resolve_bridges_with_affinity(
     state: &AppState,
     model: &str,
     session_id: Option<&str>,
-) -> Vec<(Arc<dyn Bridge>, Option<String>, Option<crate::channel::Channel>)> {
+) -> Vec<BridgeCandidate> {
     let mut result = resolve_bridges(state, model);
     if let Some(sid) = session_id {
         if let Some(affinity_id) = state.channel_store.affinity_cache().lookup(sid, model) {
@@ -285,8 +291,8 @@ pub fn resolve_bridges_with_affinity(
 }
 
 /// 无亲和性版本（既有端点沿用：embeddings/images/audio 等无会话语义的请求）。
-pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<(Arc<dyn Bridge>, Option<String>, Option<crate::channel::Channel>)> {
-    let mut result: Vec<(Arc<dyn Bridge>, Option<String>, Option<crate::channel::Channel>)> = Vec::new();
+pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
+    let mut result: Vec<BridgeCandidate> = Vec::new();
 
     // 第一级：通用渠道（按 priority/weight 选取支持该 model 的渠道）
     let candidates = state.channel_store.select_for_model(model);
@@ -505,8 +511,8 @@ pub(crate) fn compute_channel_cost(
         (prompt_tokens as f64 * cp.input_price + completion_tokens as f64 * cp.output_price)
             / 1000.0
     };
-    let channel_cost = (base * ratios.model_ratio(billing_model) * ratios.group_ratio(group)
-        + 0.999999) as i64;
+    let channel_cost =
+        (base * ratios.model_ratio(billing_model) * ratios.group_ratio(group) + 0.999999) as i64;
     // 有成本价但该模型成本算出来为 0（配置异常等）：回退到销售价，避免误显示利润
     if channel_cost == 0 {
         cost
@@ -1380,17 +1386,15 @@ pub async fn handle_chat_completions(
             // 每个渠道都需单独解析——同原始名在不同渠道可能映射到不同上游。
             let upstream = resolve_upstream_model(&model, ch_ref.as_ref(), &state.model_mapper);
             // 防"映射指向未定价模型 → 免费用量"漏洞：仅当映射后名字变化时补查一次
-            if upstream != model {
-                if let Err(_) = ensure_model_priced(&state, &upstream) {
-                    // 该渠道映射的上游无定价，跳过此渠道（failover 下一候选）
-                    tracing::warn!(
-                        "chat_stream mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
-                    );
-                    last_error = Some(crate::bridge::BridgeError::Config(format!(
-                        "mapped upstream '{upstream}' has no price configured"
-                    )));
-                    continue;
-                }
+            if upstream != model && ensure_model_priced(&state, &upstream).is_err() {
+                // 该渠道映射的上游无定价，跳过此渠道（failover 下一候选）
+                tracing::warn!(
+                    "chat_stream mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
+                );
+                last_error = Some(crate::bridge::BridgeError::Config(format!(
+                    "mapped upstream '{upstream}' has no price configured"
+                )));
+                continue;
             }
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
@@ -1466,8 +1470,7 @@ pub async fn handle_chat_completions(
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone());
                 log.model = used_upstream.clone().unwrap_or_else(|| model.clone());
-                log.origin_model = if used_upstream.as_ref().map(String::as_str) == Some(model.as_str())
-                {
+                log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
                     None
                 } else {
                     Some(model.clone())
@@ -1614,11 +1617,7 @@ pub async fn handle_chat_completions(
                 state: state.clone(),
                 api_key: api_key.clone(),
                 model: used_upstream.clone().unwrap_or_else(|| model.clone()),
-                origin_model: if used_upstream
-                    .as_ref()
-                    .map(String::as_str)
-                    == Some(model.as_str())
-                {
+                origin_model: if used_upstream.as_deref() == Some(model.as_str()) {
                     None
                 } else {
                     Some(model.clone())
@@ -1823,16 +1822,14 @@ pub async fn handle_chat_completions(
             }
             // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
             let upstream = resolve_upstream_model(&model, ch_ref.as_ref(), &state.model_mapper);
-            if upstream != model {
-                if let Err(_) = ensure_model_priced(&state, &upstream) {
-                    tracing::warn!(
-                        "chat mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
-                    );
-                    last_error = Some(crate::bridge::BridgeError::Config(format!(
-                        "mapped upstream '{upstream}' has no price configured"
-                    )));
-                    continue;
-                }
+            if upstream != model && ensure_model_priced(&state, &upstream).is_err() {
+                tracing::warn!(
+                    "chat mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
+                );
+                last_error = Some(crate::bridge::BridgeError::Config(format!(
+                    "mapped upstream '{upstream}' has no price configured"
+                )));
+                continue;
             }
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
@@ -1905,12 +1902,11 @@ pub async fn handle_chat_completions(
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone());
                 log.model = used_upstream.clone().unwrap_or_else(|| model.clone());
-                log.origin_model =
-                    if used_upstream.as_ref().map(String::as_str) == Some(model.as_str()) {
-                        None
-                    } else {
-                        Some(model.clone())
-                    };
+                log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
+                    None
+                } else {
+                    Some(model.clone())
+                };
                 log.latency_ms = latency_ms;
                 log.status_code = status_code.as_u16();
                 log.error_msg = Some(e.to_string());
@@ -2191,22 +2187,23 @@ pub async fn handle_responses(
         }
         // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
         let upstream = resolve_upstream_model(&model, ch_ref.as_ref(), &state.model_mapper);
-        if upstream != model {
-            if let Err(_) = ensure_model_priced(&state, &upstream) {
-                tracing::warn!(
-                    "responses mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
-                );
-                last_error = Some(crate::bridge::BridgeError::Config(format!(
-                    "mapped upstream '{upstream}' has no price configured"
-                )));
-                continue;
-            }
+        if upstream != model && ensure_model_priced(&state, &upstream).is_err() {
+            tracing::warn!(
+                "responses mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
+            );
+            last_error = Some(crate::bridge::BridgeError::Config(format!(
+                "mapped upstream '{upstream}' has no price configured"
+            )));
+            continue;
         }
         // 按上游模型名改写请求 body（bridges 从 body["model"] 构造上游请求）
         let mut attempt_body = body.clone();
         attempt_body["model"] = Value::String(upstream.clone());
         let attempt_start = std::time::Instant::now();
-        match bridge.responses_passthrough(&attempt_body, is_stream, &ctx).await {
+        match bridge
+            .responses_passthrough(&attempt_body, is_stream, &ctx)
+            .await
+        {
             Ok(r) => {
                 // 阶段2：成功——记入断路器/健康追踪/亲和性
                 if let Some(c) = &cid {
@@ -2269,8 +2266,7 @@ pub async fn handle_responses(
                 .and_then(|cid| state.channel_store.get(cid))
                 .map(|c| c.name.clone());
             log.model = used_upstream.clone().unwrap_or_else(|| model.clone());
-            log.origin_model = if used_upstream.as_ref().map(String::as_str) == Some(model.as_str())
-            {
+            log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
                 None
             } else {
                 Some(model.clone())
@@ -2396,11 +2392,7 @@ pub async fn handle_responses(
                 state: state.clone(),
                 api_key: api_key.clone(),
                 model: used_upstream.clone().unwrap_or_else(|| model.clone()),
-                origin_model: if used_upstream
-                    .as_ref()
-                    .map(String::as_str)
-                    == Some(model.as_str())
-                {
+                origin_model: if used_upstream.as_deref() == Some(model.as_str()) {
                     None
                 } else {
                     Some(model.clone())
@@ -2655,16 +2647,14 @@ pub async fn handle_completions(
         }
         // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
         let upstream = resolve_upstream_model(&model_owned, ch_ref.as_ref(), &state.model_mapper);
-        if upstream != model_owned {
-            if let Err(_) = ensure_model_priced(&state, &upstream) {
-                tracing::warn!(
-                    "completions mapping: {model_owned} -> {upstream} unpriced, skip channel {cid:?}"
-                );
-                last_error = Some(crate::bridge::BridgeError::Config(format!(
-                    "mapped upstream '{upstream}' has no price configured"
-                )));
-                continue;
-            }
+        if upstream != model_owned && ensure_model_priced(&state, &upstream).is_err() {
+            tracing::warn!(
+                "completions mapping: {model_owned} -> {upstream} unpriced, skip channel {cid:?}"
+            );
+            last_error = Some(crate::bridge::BridgeError::Config(format!(
+                "mapped upstream '{upstream}' has no price configured"
+            )));
+            continue;
         }
         // 按上游模型名改写请求 body（bridges 从 body["model"] 构造上游请求）
         let mut attempt_body = body.clone();
@@ -2713,12 +2703,11 @@ pub async fn handle_completions(
                 .and_then(|cid| state.channel_store.get(cid))
                 .map(|c| c.name.clone());
             log.model = used_upstream.clone().unwrap_or_else(|| model_owned.clone());
-            log.origin_model =
-                if used_upstream.as_ref().map(String::as_str) == Some(model_owned.as_str()) {
-                    None
-                } else {
-                    Some(model_owned.clone())
-                };
+            log.origin_model = if used_upstream.as_deref() == Some(model_owned.as_str()) {
+                None
+            } else {
+                Some(model_owned.clone())
+            };
             log.latency_ms = latency_ms;
             log.status_code = status_code.as_u16();
             log.error_msg = Some(e.to_string());
@@ -2917,16 +2906,14 @@ pub async fn handle_embeddings(
         }
         // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
         let upstream = resolve_upstream_model(&model_owned, ch_ref.as_ref(), &state.model_mapper);
-        if upstream != model_owned {
-            if let Err(_) = ensure_model_priced(&state, &upstream) {
-                tracing::warn!(
-                    "embeddings mapping: {model_owned} -> {upstream} unpriced, skip channel {cid:?}"
-                );
-                last_error = Some(crate::bridge::BridgeError::Config(format!(
-                    "mapped upstream '{upstream}' has no price configured"
-                )));
-                continue;
-            }
+        if upstream != model_owned && ensure_model_priced(&state, &upstream).is_err() {
+            tracing::warn!(
+                "embeddings mapping: {model_owned} -> {upstream} unpriced, skip channel {cid:?}"
+            );
+            last_error = Some(crate::bridge::BridgeError::Config(format!(
+                "mapped upstream '{upstream}' has no price configured"
+            )));
+            continue;
         }
         // 按上游模型名构建本次尝试的请求（bridges 从 req.model 构造上游 body）
         let attempt_req = EmbeddingRequest {
@@ -2977,12 +2964,11 @@ pub async fn handle_embeddings(
                 .and_then(|cid| state.channel_store.get(cid))
                 .map(|c| c.name.clone());
             log.model = used_upstream.clone().unwrap_or_else(|| model_owned.clone());
-            log.origin_model =
-                if used_upstream.as_ref().map(String::as_str) == Some(model_owned.as_str()) {
-                    None
-                } else {
-                    Some(model_owned.clone())
-                };
+            log.origin_model = if used_upstream.as_deref() == Some(model_owned.as_str()) {
+                None
+            } else {
+                Some(model_owned.clone())
+            };
             log.latency_ms = latency_ms;
             log.status_code = status_code.as_u16();
             log.error_msg = Some(e.to_string());
@@ -3251,16 +3237,14 @@ pub async fn handle_rerank(
         }
         // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
         let upstream = resolve_upstream_model(&model_owned, ch_ref.as_ref(), &state.model_mapper);
-        if upstream != model_owned {
-            if let Err(_) = ensure_model_priced(&state, &upstream) {
-                tracing::warn!(
-                    "rerank mapping: {model_owned} -> {upstream} unpriced, skip channel {cid:?}"
-                );
-                last_error = Some(crate::bridge::BridgeError::Config(format!(
-                    "mapped upstream '{upstream}' has no price configured"
-                )));
-                continue;
-            }
+        if upstream != model_owned && ensure_model_priced(&state, &upstream).is_err() {
+            tracing::warn!(
+                "rerank mapping: {model_owned} -> {upstream} unpriced, skip channel {cid:?}"
+            );
+            last_error = Some(crate::bridge::BridgeError::Config(format!(
+                "mapped upstream '{upstream}' has no price configured"
+            )));
+            continue;
         }
         // 按上游模型名构建本次尝试的请求（bridges 从 req.model 构造上游 body）
         let mut attempt_req = rerank_req.clone();
@@ -3306,12 +3290,11 @@ pub async fn handle_rerank(
                 .and_then(|cid| state.channel_store.get(cid))
                 .map(|c| c.name.clone());
             log.model = used_upstream.clone().unwrap_or_else(|| model_owned.clone());
-            log.origin_model =
-                if used_upstream.as_ref().map(String::as_str) == Some(model_owned.as_str()) {
-                    None
-                } else {
-                    Some(model_owned.clone())
-                };
+            log.origin_model = if used_upstream.as_deref() == Some(model_owned.as_str()) {
+                None
+            } else {
+                Some(model_owned.clone())
+            };
             log.latency_ms = latency_ms;
             log.status_code = status_code.as_u16();
             log.error_msg = Some(e.to_string());
@@ -3497,16 +3480,14 @@ pub async fn handle_images_generations(
         }
         // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
         let upstream = resolve_upstream_model(&model_owned, ch_ref.as_ref(), &state.model_mapper);
-        if upstream != model_owned {
-            if let Err(_) = ensure_model_priced(&state, &upstream) {
-                tracing::warn!(
-                    "images mapping: {model_owned} -> {upstream} unpriced, skip channel {cid:?}"
-                );
-                last_error = Some(crate::bridge::BridgeError::Config(format!(
-                    "mapped upstream '{upstream}' has no price configured"
-                )));
-                continue;
-            }
+        if upstream != model_owned && ensure_model_priced(&state, &upstream).is_err() {
+            tracing::warn!(
+                "images mapping: {model_owned} -> {upstream} unpriced, skip channel {cid:?}"
+            );
+            last_error = Some(crate::bridge::BridgeError::Config(format!(
+                "mapped upstream '{upstream}' has no price configured"
+            )));
+            continue;
         }
         // 按上游模型名改写请求 body（bridges 从 body["model"] 构造上游请求）
         let mut attempt_body = body.clone();
@@ -3553,12 +3534,11 @@ pub async fn handle_images_generations(
                 .and_then(|cid| state.channel_store.get(cid))
                 .map(|c| c.name.clone());
             log.model = used_upstream.clone().unwrap_or_else(|| model_owned.clone());
-            log.origin_model =
-                if used_upstream.as_ref().map(String::as_str) == Some(model_owned.as_str()) {
-                    None
-                } else {
-                    Some(model_owned.clone())
-                };
+            log.origin_model = if used_upstream.as_deref() == Some(model_owned.as_str()) {
+                None
+            } else {
+                Some(model_owned.clone())
+            };
             log.latency_ms = latency_ms;
             log.status_code = status_code.as_u16();
             log.error_msg = Some(e.to_string());

@@ -687,6 +687,8 @@ mod scheduler_trait_tests {
                 last_error: None,
                 last_used_at: None,
                 discovered_models: vec![],
+                model_mapping: std::collections::HashMap::new(),
+                cost_pricing: std::collections::HashMap::new(),
                 created_at: 0,
                 updated_at: 0,
             },

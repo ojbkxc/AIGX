@@ -422,16 +422,14 @@ pub async fn handle_messages(
             // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
             let upstream =
                 super::openai::resolve_upstream_model(&model, ch_ref.as_ref(), &state.model_mapper);
-            if upstream != model {
-                if let Err(_) = super::openai::ensure_model_priced(&state, &upstream) {
-                    tracing::warn!(
-                        "messages stream mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
-                    );
-                    last_error = Some(crate::bridge::BridgeError::Config(format!(
-                        "mapped upstream '{upstream}' has no price configured"
-                    )));
-                    continue;
-                }
+            if upstream != model && super::openai::ensure_model_priced(&state, &upstream).is_err() {
+                tracing::warn!(
+                    "messages stream mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
+                );
+                last_error = Some(crate::bridge::BridgeError::Config(format!(
+                    "mapped upstream '{upstream}' has no price configured"
+                )));
+                continue;
             }
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
@@ -498,8 +496,7 @@ pub async fn handle_messages(
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone());
                 log.model = used_upstream.clone().unwrap_or_else(|| model.clone());
-                log.origin_model = if used_upstream.as_ref().map(String::as_str) == Some(model.as_str())
-                {
+                log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
                     None
                 } else {
                     Some(model.clone())
@@ -773,9 +770,7 @@ pub async fn handle_messages(
                 state: state.clone(),
                 api_key: api_key.clone(),
                 model: used_upstream.clone().unwrap_or_else(|| model.clone()),
-                origin_model: if used_upstream.as_ref().map(String::as_str)
-                    == Some(model.as_str())
-                {
+                origin_model: if used_upstream.as_deref() == Some(model.as_str()) {
                     None
                 } else {
                     Some(model.clone())
@@ -924,16 +919,14 @@ pub async fn handle_messages(
             // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
             let upstream =
                 super::openai::resolve_upstream_model(&model, ch_ref.as_ref(), &state.model_mapper);
-            if upstream != model {
-                if let Err(_) = super::openai::ensure_model_priced(&state, &upstream) {
-                    tracing::warn!(
-                        "messages mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
-                    );
-                    last_error = Some(crate::bridge::BridgeError::Config(format!(
-                        "mapped upstream '{upstream}' has no price configured"
-                    )));
-                    continue;
-                }
+            if upstream != model && super::openai::ensure_model_priced(&state, &upstream).is_err() {
+                tracing::warn!(
+                    "messages mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
+                );
+                last_error = Some(crate::bridge::BridgeError::Config(format!(
+                    "mapped upstream '{upstream}' has no price configured"
+                )));
+                continue;
             }
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
@@ -1002,8 +995,7 @@ pub async fn handle_messages(
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone());
                 log.model = used_upstream.clone().unwrap_or_else(|| model.clone());
-                log.origin_model = if used_upstream.as_ref().map(String::as_str) == Some(model.as_str())
-                {
+                log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
                     None
                 } else {
                     Some(model.clone())
