@@ -76,10 +76,7 @@ impl Plan {
         if self.duration_days <= 0 {
             return None;
         }
-        Some(
-            chrono::Utc::now().timestamp()
-                + self.duration_days.saturating_mul(86_400),
-        )
+        Some(chrono::Utc::now().timestamp() + self.duration_days.saturating_mul(86_400))
     }
 }
 
@@ -173,10 +170,18 @@ impl PlanStore {
             // 套餐 key 不挂用户（cf-ai-gw 模式：key 自带额度，独立交付），
             // 不受用户余额约束，只受自身 quota_limit + expires_at 约束
             user_id: None,
-            group: if p.group.is_empty() { "default".to_string() } else { p.group.clone() },
+            group: if p.group.is_empty() {
+                "default".to_string()
+            } else {
+                p.group.clone()
+            },
             allowed_models: p.allowed_models.clone(),
             expires_at: p.compute_expires_at(),
-            quota_limit: if p.quota > 0 { Some(p.quota) } else { None },
+            quota_limit: if p.quota > 0 {
+                Some(p.quota)
+            } else {
+                None
+            },
             ip_limit: None,
         })
     }
@@ -189,7 +194,11 @@ impl PlanStore {
             let snapshot = p.clone();
             drop(by_id);
             if let Err(e) = self.persist(&snapshot) {
-                tracing::error!("Failed to persist plan {} issue count: {}", snapshot.id, e);
+                tracing::error!(
+                    "Failed to persist plan {} issue count: {}",
+                    snapshot.id,
+                    e
+                );
             }
         }
     }

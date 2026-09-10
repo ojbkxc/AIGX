@@ -96,7 +96,11 @@ pub async fn handle_upsert_plan(
         price: body.price,
         quota: body.quota,
         duration_days: body.duration_days,
-        group: if body.group.is_empty() { "default".to_string() } else { body.group.clone() },
+        group: if body.group.is_empty() {
+            "default".to_string()
+        } else {
+            body.group.clone()
+        },
         allowed_models: body.allowed_models,
         description: body.description,
         enabled: body.enabled,
@@ -135,7 +139,14 @@ pub async fn handle_delete_plan(
     match state.plan_store.delete(&id) {
         Ok(_) => {
             let admin_id = admin_id_from_session(&state, &headers).await;
-            record_audit(&state, &admin_id, "delete", &format!("plan:{id}"), None, None);
+            record_audit(
+                &state,
+                &admin_id,
+                "delete",
+                &format!("plan:{id}"),
+                None,
+                None,
+            );
             Ok(Json(json!({ "success": true, "data": null })))
         }
         Err(e) => Err(error_response(
