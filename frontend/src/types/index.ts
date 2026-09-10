@@ -317,14 +317,14 @@ export interface ChannelItem {
   updated_at?: string;
   last_used_at?: number | null;
   last_error?: string | null;
-  /// 最近一次连通性测试延迟（毫秒）
-  response_time?: number;
-  /// 最近一次连通性测试时间戳（秒）
-  test_time?: number;
-  /// 最近一次查询到的上游余额（美元）
-  balance?: number;
-  /// 最近一次查询到的上游 credit
-  credit?: number;
+  /// 最近一次连通性测试延迟（毫秒）；后端 Option 序列化为 null
+  response_time?: number | null;
+  /// 最近一次连通性测试时间戳（秒）；后端 Option 序列化为 null
+  test_time?: number | null;
+  /// 最近一次查询到的上游余额（美元）；后端 Option 序列化为 null
+  balance?: number | null;
+  /// 最近一次查询到的上游 credit；后端 Option 序列化为 null
+  credit?: number | null;
   health?: ChannelHealth;
 }
 

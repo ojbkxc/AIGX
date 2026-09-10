@@ -1,1 +1,0 @@
-import{j as s,b as r}from"./index-DDpPBaHw.js";function j({children:c,title:a,actions:d,className:e,headerClassName:i,bodyClassName:n}){return s.jsxs("div",{className:r("card",e),children:[(a||d)&&s.jsxs("div",{className:r("card-header",i),children:[s.jsx("h2",{children:a}),d]}),s.jsx("div",{className:r("card-body",n),children:c})]})}export{j as C};

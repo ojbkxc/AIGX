@@ -1,0 +1,1 @@
+import{j as s,b as n}from"./index-DnifvRsh.js";function c({message:t,icon:e="📭",action:a,className:i}){return s.jsxs("div",{className:n("empty-state",i),children:[s.jsx("div",{className:"empty-state-icon",children:e}),s.jsx("p",{children:t}),a]})}export{c as E};

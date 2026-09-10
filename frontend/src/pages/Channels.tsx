@@ -309,10 +309,12 @@ export default function Channels(): JSX.Element {
         model_mapping: ch.model_mapping,
         cost_pricing: ch.cost_pricing || {},
         last_used_at: typeof ch.last_used_at === 'number' ? ch.last_used_at : null,
-        response_time: ch.response_time,
-        test_time: ch.test_time,
-        balance: ch.balance,
-        credit: ch.credit,
+        // 后端 Option 序列化为 null（非缺省），?? 归一为 undefined，
+        // 否则 null !== undefined 判断穿透 → null.toFixed() 运行时崩溃
+        response_time: ch.response_time ?? undefined,
+        test_time: ch.test_time ?? undefined,
+        balance: ch.balance ?? undefined,
+        credit: ch.credit ?? undefined,
         created_at: typeof ch.created_at === 'number' ? ch.created_at : undefined,
         updated_at: typeof ch.updated_at === 'number' ? ch.updated_at : undefined,
       }));
@@ -848,8 +850,8 @@ export default function Channels(): JSX.Element {
                         </td>
                         <td className="col-testtime">
                           {ch.test_time ? (
-                            <span title={new Date(ch.test_time).toLocaleString()}>
-                              {formatRelativeTime(ch.test_time)}
+                            <span title={new Date(ch.test_time * 1000).toLocaleString()}>
+                              {formatRelativeTime(ch.test_time * 1000)}
                             </span>
                           ) : '—'}
                         </td>
