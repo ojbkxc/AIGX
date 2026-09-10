@@ -413,25 +413,44 @@ pub async fn handle_messages(
         // B06：failover 循环——依次尝试候选渠道建立流，仅对上游可重试错误切换
         let mut stream_opt = None;
         let mut used_channel_id: Option<String> = None;
+        let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
-        for (bridge, cid, _ch_ref) in candidates {
+        for (bridge, cid, ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
+            // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
+            let upstream =
+                super::openai::resolve_upstream_model(&model, ch_ref.as_ref(), &state.model_mapper);
+            if upstream != model {
+                if let Err(_) = super::openai::ensure_model_priced(&state, &upstream) {
+                    tracing::warn!(
+                        "messages stream mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
+                    );
+                    last_error = Some(crate::bridge::BridgeError::Config(format!(
+                        "mapped upstream '{upstream}' has no price configured"
+                    )));
+                    continue;
+                }
+            }
+            // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
+            let mut attempt_req = chat_req.clone();
+            attempt_req.model = upstream.clone();
             let attempt_start = std::time::Instant::now();
-            match bridge.chat_stream(&chat_req, &ctx).await {
+            match bridge.chat_stream(&attempt_req, &ctx).await {
                 Ok(s) => {
                     // 阶段2：流建立成功——记入断路器/健康追踪/亲和性
                     if let Some(c) = &cid {
                         state.channel_store.record_channel_success(
                             c,
-                            Some(&model),
+                            Some(&upstream),
                             attempt_start.elapsed().as_millis() as u64,
                             session_id.as_deref(),
                         );
                     }
                     stream_opt = Some(s);
                     used_channel_id = cid;
+                    used_upstream = Some(upstream);
                     break;
                 }
                 Err(e) => {
@@ -439,7 +458,7 @@ pub async fn handle_messages(
                     if let Some(c) = &cid {
                         state.channel_store.record_channel_failure(
                             c,
-                            Some(&model),
+                            Some(&upstream),
                             crate::channel::ChannelStore::classify_bridge_error(&e),
                             &e.to_string(),
                             session_id.as_deref(),
@@ -474,7 +493,17 @@ pub async fn handle_messages(
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
                 log.channel_id = used_channel_id.clone();
-                log.model = model.clone();
+                log.channel_name = used_channel_id
+                    .as_ref()
+                    .and_then(|cid| state.channel_store.get(cid))
+                    .map(|c| c.name.clone());
+                log.model = used_upstream.clone().unwrap_or_else(|| model.clone());
+                log.origin_model = if used_upstream.as_ref().map(String::as_str) == Some(model.as_str())
+                {
+                    None
+                } else {
+                    Some(model.clone())
+                };
                 log.latency_ms = latency_ms;
                 log.status_code = status_code.as_u16();
                 log.error_msg = Some(e.to_string());
@@ -517,7 +546,8 @@ pub async fn handle_messages(
             let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
             let input_tokens_est =
                 crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
-            let model_for_prefix = model.clone();
+            // message_start 回显映射后的上游模型名（与计费/日志口径一致）
+            let model_for_prefix = used_upstream.clone().unwrap_or_else(|| model.clone());
             let prefix = futures::stream::once(async move {
                 Ok::<_, Infallible>(
                     Event::default().event("message_start").data(
@@ -742,7 +772,14 @@ pub async fn handle_messages(
             let billing = std::sync::Arc::new(super::openai::StreamBillingState {
                 state: state.clone(),
                 api_key: api_key.clone(),
-                model: model.clone(),
+                model: used_upstream.clone().unwrap_or_else(|| model.clone()),
+                origin_model: if used_upstream.as_ref().map(String::as_str)
+                    == Some(model.as_str())
+                {
+                    None
+                } else {
+                    Some(model.clone())
+                },
                 group: billing_group.clone(),
                 chat_req: chat_req.clone(),
                 tool_calls: tool_calls.clone(),
@@ -753,6 +790,10 @@ pub async fn handle_messages(
                 client_ip: client_ip.clone(),
                 request_id: request_id.clone(),
                 channel_id: used_channel_id.clone(),
+                channel_name: used_channel_id
+                    .as_ref()
+                    .and_then(|cid| state.channel_store.get(cid))
+                    .map(|c| c.name.clone()),
                 candidate_channels: Vec::new(),
                 filtered_channels: Vec::new(),
                 // anthropic 分支尚未接入两段式计费（P1 后续），
@@ -874,25 +915,44 @@ pub async fn handle_messages(
         // B06：failover 循环——依次尝试候选渠道，仅对上游可重试错误切换
         let mut response_opt = None;
         let mut used_channel_id: Option<String> = None;
+        let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
-        for (bridge, cid, _ch_ref) in candidates {
+        for (bridge, cid, ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
             }
+            // 渠道级模型映射：按选定渠道解析上游真实模型名（= 价格表名）
+            let upstream =
+                super::openai::resolve_upstream_model(&model, ch_ref.as_ref(), &state.model_mapper);
+            if upstream != model {
+                if let Err(_) = super::openai::ensure_model_priced(&state, &upstream) {
+                    tracing::warn!(
+                        "messages mapping: {model} -> {upstream} unpriced, skip channel {cid:?}"
+                    );
+                    last_error = Some(crate::bridge::BridgeError::Config(format!(
+                        "mapped upstream '{upstream}' has no price configured"
+                    )));
+                    continue;
+                }
+            }
+            // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
+            let mut attempt_req = chat_req.clone();
+            attempt_req.model = upstream.clone();
             let attempt_start = std::time::Instant::now();
-            match bridge.chat(&chat_req, &ctx).await {
+            match bridge.chat(&attempt_req, &ctx).await {
                 Ok(resp) => {
                     // 阶段2：成功——记入断路器/健康追踪/亲和性
                     if let Some(c) = &cid {
                         state.channel_store.record_channel_success(
                             c,
-                            Some(&model),
+                            Some(&upstream),
                             attempt_start.elapsed().as_millis() as u64,
                             session_id.as_deref(),
                         );
                     }
                     response_opt = Some(resp);
                     used_channel_id = cid;
+                    used_upstream = Some(upstream);
                     break;
                 }
                 Err(e) => {
@@ -900,7 +960,7 @@ pub async fn handle_messages(
                     if let Some(c) = &cid {
                         state.channel_store.record_channel_failure(
                             c,
-                            Some(&model),
+                            Some(&upstream),
                             crate::channel::ChannelStore::classify_bridge_error(&e),
                             &e.to_string(),
                             session_id.as_deref(),
@@ -937,7 +997,17 @@ pub async fn handle_messages(
                 log.user_id = api_key.user_id.clone();
                 log.key_id = Some(api_key.id.clone());
                 log.channel_id = used_channel_id.clone();
-                log.model = model.clone();
+                log.channel_name = used_channel_id
+                    .as_ref()
+                    .and_then(|cid| state.channel_store.get(cid))
+                    .map(|c| c.name.clone());
+                log.model = used_upstream.clone().unwrap_or_else(|| model.clone());
+                log.origin_model = if used_upstream.as_ref().map(String::as_str) == Some(model.as_str())
+                {
+                    None
+                } else {
+                    Some(model.clone())
+                };
                 log.latency_ms = latency_ms;
                 log.status_code = status_code.as_u16();
                 log.error_msg = Some(e.to_string());
@@ -977,10 +1047,11 @@ pub async fn handle_messages(
 
             // 计费扣减：复用 charge_usage 以保证 QuotaLow 通知等行为与流式分支一致
             // （问题 5/6；M10 同类问题。原内联实现缺少 QuotaLow 通知，属行为 bug）
+            let billing_model = used_upstream.as_deref().unwrap_or(&model);
             let cost = super::openai::charge_usage(
                 &state,
                 &api_key,
-                &model,
+                billing_model,
                 &billing_group,
                 response.usage.prompt_tokens,
                 response.usage.completion_tokens,
@@ -995,7 +1066,25 @@ pub async fn handle_messages(
             log.user_id = api_key.user_id.clone();
             log.key_id = Some(api_key.id.clone());
             log.channel_id = used_channel_id.clone();
-            log.model = model.clone();
+            log.channel_name = used_channel_id
+                .as_ref()
+                .and_then(|cid| state.channel_store.get(cid))
+                .map(|c| c.name.clone());
+            log.model = billing_model.to_string();
+            log.origin_model = if used_upstream.as_deref() == Some(model.as_str()) {
+                None
+            } else {
+                Some(model.clone())
+            };
+            log.channel_cost = super::openai::compute_channel_cost(
+                &state,
+                used_channel_id.as_deref(),
+                billing_model,
+                &billing_group,
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+                cost,
+            );
             log.input_tokens = response.usage.prompt_tokens;
             log.output_tokens = response.usage.completion_tokens;
             log.cost = cost;
@@ -1007,14 +1096,18 @@ pub async fn handle_messages(
 
             // Prometheus 指标
             crate::metrics::global().record_request(
-                &model,
+                billing_model,
                 used_channel_id.as_deref().unwrap_or("unknown"),
                 "ok",
                 latency_ms,
             );
-            crate::metrics::global().record_tokens(&model, "prompt", response.usage.prompt_tokens);
             crate::metrics::global().record_tokens(
-                &model,
+                billing_model,
+                "prompt",
+                response.usage.prompt_tokens,
+            );
+            crate::metrics::global().record_tokens(
+                billing_model,
                 "completion",
                 response.usage.completion_tokens,
             );

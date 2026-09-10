@@ -74,8 +74,11 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
             crate::channel::ChannelType::Cloudflare => continue, // CF 走 quota_monitor
         };
 
+        // 渠道级模型映射：探测用的上游模型名 = 该渠道映射后的真实模型名
+        // （否则 mapping 渠道会被当作不支持该上游探测模型而误判失败）
+        let probe_model = ch.resolve_channel_mapping(&model).unwrap_or_else(|| model.clone());
         let probe_req = ChatFormat {
-            model: model.clone(),
+            model: probe_model.clone(),
             messages: vec![ChatMessage {
                 role: Role::User,
                 content: Some("ping".to_string()),
@@ -110,7 +113,7 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
             Ok(_) => {
                 channel_store.record_channel_success(
                     &ch.id,
-                    Some(&model),
+                    Some(&probe_model),
                     start.elapsed().as_millis() as u64,
                     None,
                 );
@@ -121,7 +124,7 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
                 tracing::warn!(channel = %ch.id, "probe failed: {e}");
                 channel_store.record_channel_failure(
                     &ch.id,
-                    Some(&model),
+                    Some(&probe_model),
                     ft,
                     &e.to_string(),
                     None,
