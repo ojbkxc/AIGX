@@ -25,7 +25,10 @@ pub use auth::{
     handle_totp_setup,
 };
 
-pub use users::{handle_create_user, handle_delete_user, handle_list_users, handle_update_user};
+pub use users::{
+    handle_admin_disable_2fa, handle_create_user, handle_delete_user, handle_list_users,
+    handle_manage_user, handle_update_self, handle_update_user,
+};
 
 pub use logs::{handle_export_request_logs, handle_list_audit_logs, handle_list_request_logs};
 

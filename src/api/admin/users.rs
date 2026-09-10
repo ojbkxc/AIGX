@@ -13,10 +13,10 @@ use axum::{
     response::Json,
 };
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, record_audit, verify_admin};
+use super::common::{error_response, record_audit, verify_admin, verify_user};
 
 use crate::user::{Role, User};
 
@@ -268,4 +268,180 @@ pub async fn handle_delete_user(
             StatusCode::BAD_REQUEST,
         )),
     }
+}
+
+/// PUT /api/users/self - 用户自助更新资料（对齐 new-api UpdateSelf）。
+///
+/// 仅允许改 username；带 original_password + password 时先验旧密码再改
+/// （改密成功撤销全部旧会话，语义同 change-password）。
+#[derive(Debug, Deserialize)]
+pub struct UpdateSelfRequest {
+    pub username: Option<String>,
+    pub original_password: Option<String>,
+    pub password: Option<String>,
+}
+
+pub async fn handle_update_self(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateSelfRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let me = verify_user(&state, &headers).await?;
+    // 改密时必须验旧密码（防会话泄露直接改密）
+    if let Some(new_pwd) = &body.password {
+        let new_pwd = new_pwd.trim();
+        if new_pwd.is_empty() {
+            return Err(error_response("新密码不能为空", StatusCode::BAD_REQUEST));
+        }
+        if new_pwd.chars().count() < 6 {
+            return Err(error_response("密码长度至少6位", StatusCode::BAD_REQUEST));
+        }
+        let old = body.original_password.clone().unwrap_or_default();
+        if !crate::user::verify_password(&old, &me.password) {
+            return Err(error_response("原密码不正确", StatusCode::BAD_REQUEST));
+        }
+        let new_hash = crate::user::hash_password(new_pwd);
+        state
+            .user_store
+            .update(&me.id, |u| {
+                u.password = new_hash;
+            })
+            .map_err(|e| error_response(&format!("更新失败: {e}"), StatusCode::BAD_REQUEST))?;
+        // 改密踢出全部旧会话（new-api 语义），当前会话同样失效
+        let revoked = state.session_registry.revoke_all(&me.email);
+        tracing::info!("Password changed via self: {} session(s) revoked", revoked);
+    }
+    // 用户名更新（冲突时报错）
+    if let Some(n) = &body.username {
+        let n = n.trim();
+        if !n.is_empty() && n != me.username {
+            if state.user_store.get_by_username(n).is_some() {
+                return Err(error_response("用户名已存在", StatusCode::CONFLICT));
+            }
+            state
+                .user_store
+                .update(&me.id, |u| {
+                    u.username = n.to_string();
+                })
+                .map_err(|e| error_response(&format!("更新失败: {e}"), StatusCode::BAD_REQUEST))?;
+        }
+    }
+    let updated = state
+        .user_store
+        .get_by_id(&me.id)
+        .ok_or_else(|| error_response("User not found", StatusCode::NOT_FOUND))?;
+    Ok(Json(
+        serde_json::json!({ "success": true, "data": mask_user(&updated) }),
+    ))
+}
+
+/// POST /api/users/manage - 管理端用户管理操作（对齐 new-api ManageUser）。
+///
+/// action: enable / disable；对目标用户置 status 并撤销其全部会话
+/// （禁用即时生效，已签发 token 不再可用）。
+#[derive(Debug, Deserialize)]
+pub struct ManageUserRequest {
+    pub id: String,
+    pub action: String,
+}
+
+pub async fn handle_manage_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ManageUserRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let target = state
+        .user_store
+        .get_by_id(&body.id)
+        .ok_or_else(|| error_response("User not found", StatusCode::NOT_FOUND))?;
+    // 防自我锁死：不允许操作自己（禁用自己会失去管理权）
+    if target.id == {
+        // 当前管理员 id（从会话取）
+        let admin_id = admin_id_from_session_local(&state, &headers).await;
+        state
+            .user_store
+            .get_by_email(&admin_id)
+            .map(|u| u.id)
+            .unwrap_or_default()
+    } {
+        return Err(error_response(
+            "不能对自己执行该操作",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let new_status = match body.action.as_str() {
+        "enable" => "active",
+        "disable" => "disabled",
+        other => {
+            return Err(error_response(
+                &format!("不支持的操作: {other}"),
+                StatusCode::BAD_REQUEST,
+            ))
+        }
+    };
+    state
+        .user_store
+        .update(&target.id, |u| {
+            u.status = new_status.to_string();
+        })
+        .map_err(|e| error_response(&format!("操作失败: {e}"), StatusCode::BAD_REQUEST))?;
+    if new_status == "disabled" {
+        // 禁用即时生效：撤销该用户全部会话
+        state.session_registry.revoke_all(&target.email);
+    }
+    let admin_id = admin_id_from_session_local(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        &format!("user.{}", body.action),
+        &format!("id={}", target.id),
+        Some(mask_user(&target)),
+        None,
+    );
+    let updated = state
+        .user_store
+        .get_by_id(&target.id)
+        .ok_or_else(|| error_response("User not found", StatusCode::NOT_FOUND))?;
+    Ok(Json(
+        serde_json::json!({ "success": true, "data": mask_user(&updated) }),
+    ))
+}
+
+/// DELETE /api/users/:id/2fa - 管理员强制禁用用户 2FA（对齐 new-api AdminDisable2FA）。
+///
+/// 用户丢失 TOTP 设备时由管理员重置；同时撤销该用户全部会话强制重新登录。
+pub async fn handle_admin_disable_2fa(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let target = state
+        .user_store
+        .get_by_id(&id)
+        .ok_or_else(|| error_response("User not found", StatusCode::NOT_FOUND))?;
+    if !target.totp_enabled {
+        return Err(error_response("用户未启用2FA", StatusCode::BAD_REQUEST));
+    }
+    state
+        .user_store
+        .update(&target.id, |u| {
+            u.totp_secret = String::new();
+            u.totp_enabled = false;
+            u.totp_recovery_codes = Vec::new();
+        })
+        .map_err(|e| error_response(&format!("操作失败: {e}"), StatusCode::BAD_REQUEST))?;
+    // 2FA 状态变更：撤销全部会话强制重登（new-api 语义）
+    state.session_registry.revoke_all(&target.email);
+    let admin_id = admin_id_from_session_local(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        "user.disable_2fa",
+        &format!("id={}", target.id),
+        Some(json!({ "email": target.email })),
+        None,
+    );
+    Ok(Json(serde_json::json!({ "success": true, "data": null })))
 }

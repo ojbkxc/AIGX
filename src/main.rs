@@ -625,11 +625,19 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/users", post(api::admin::handle_create_user))
         .route("/api/users/check", get(api::admin::handle_check_username))
         .route("/api/users/me", get(api::admin::handle_me))
+        // 用户自助与管理操作（对齐 new-api PUT /self、POST /manage）
+        .route("/api/users/self", put(api::admin::handle_update_self))
+        .route("/api/users/manage", post(api::admin::handle_manage_user))
         // 邀请返利（对齐 new-api /api/user/aff 与 /api/user/aff_transfer）
         .route("/api/aff", get(api::admin::handle_get_aff_code))
         .route("/api/aff_transfer", post(api::admin::handle_aff_transfer))
         .route("/api/users/:id", put(api::admin::handle_update_user))
         .route("/api/users/:id", delete(api::admin::handle_delete_user))
+        // 管理员强制禁用用户 2FA（对齐 new-api DELETE /api/user/:id/2fa）
+        .route(
+            "/api/users/:id/2fa",
+            delete(api::admin::handle_admin_disable_2fa),
+        )
         // 渠道管理
         .route("/api/channels", get(api::admin::handle_list_channels))
         // 用户侧可用模型聚合（对齐 new-api /api/user/models）

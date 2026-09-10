@@ -29,6 +29,11 @@ export default function Profile(): JSX.Element {
   const [pwSaving, setPwSaving] = useState(false);
   const [pwError, setPwError] = useState('');
 
+  // 用户名自助修改（对齐 new-api UpdateSelf）
+  const [usernameEdit, setUsernameEdit] = useState('');
+  const [usernameSaving, setUsernameSaving] = useState(false);
+  const [usernameError, setUsernameError] = useState('');
+
   // 2FA/TOTP 状态（P1）
   const [totpEnabled, setTotpEnabled] = useState(false);
   const [totpSetup, setTotpSetup] = useState<{ secret: string; otpauth_uri: string } | null>(null);
@@ -47,6 +52,7 @@ export default function Profile(): JSX.Element {
       const res = await api.getMe();
       const data = (res?.data ?? null) as Me | null;
       setMe(data);
+      setUsernameEdit(data?.username ?? '');
       setTotpEnabled(Boolean(data?.totp_enabled));
     } catch {
       setMe(null);
@@ -62,6 +68,26 @@ export default function Profile(): JSX.Element {
       addToast(t('已复制到剪贴板'));
     } catch {
       addToast(t('复制失败，请手动选择复制'), 'error');
+    }
+  };
+
+  /** 自助修改用户名（PUT /api/users/self） */
+  const handleUpdateUsername = async (): Promise<void> => {
+    setUsernameError('');
+    const name = usernameEdit.trim();
+    if (!name) { setUsernameError(t('用户名不能为空')); return; }
+    if (name === (me?.username ?? '')) { setUsernameError(t('用户名未变化')); return; }
+    setUsernameSaving(true);
+    try {
+      await api.updateSelf({ username: name });
+      addToast(t('用户名已更新'));
+      const res = await api.getMe();
+      const data = (res?.data ?? null) as Me | null;
+      setMe(data);
+    } catch (err) {
+      setUsernameError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUsernameSaving(false);
     }
   };
 
@@ -165,7 +191,19 @@ export default function Profile(): JSX.Element {
             </div>
             <div className="form-group">
               <label>{t('用户名')}</label>
-              <Input value={me.username || '—'} disabled />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <Input value={usernameEdit} onChange={(e) => setUsernameEdit(e.target.value)} />
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ whiteSpace: 'nowrap' }}
+                  disabled={usernameSaving}
+                  onClick={() => void handleUpdateUsername()}
+                >
+                  {usernameSaving ? t('保存中...') : t('保存')}
+                </button>
+              </div>
+              {usernameError && <span className="form-hint" style={{ color: 'rgb(239,68,68)' }}>{usernameError}</span>}
             </div>
             <div className="form-group">
               <label>{t('角色')}</label>

@@ -281,6 +281,15 @@ export const api = {
     request<ApiResponse<MessageResult>>('DELETE', `${API_BASE}/users/${id}`),
   getMe: (): Promise<ApiResponse<User>> =>
     request<ApiResponse<User>>('GET', `${API_BASE}/users/me`),
+  /** 用户自助更新资料（对齐 new-api PUT /api/user/self）：username/改密（需原密码） */
+  updateSelf: (data: { username?: string; original_password?: string; password?: string }): Promise<ApiResponse<User>> =>
+    request<ApiResponse<User>>('PUT', `${API_BASE}/users/self`, data),
+  /** 管理端用户操作（对齐 new-api POST /api/user/manage）：enable/disable */
+  manageUser: (id: string, action: 'enable' | 'disable'): Promise<ApiResponse<User>> =>
+    request<ApiResponse<User>>('POST', `${API_BASE}/users/manage`, { id, action }),
+  /** 管理员强制禁用用户 2FA（对齐 new-api DELETE /api/user/:id/2fa） */
+  adminDisable2FA: (id: string): Promise<ApiResponse<null>> =>
+    request<ApiResponse<null>>('DELETE', `${API_BASE}/users/${encodeURIComponent(id)}/2fa`),
   /** 获取当前用户邀请码（对齐 new-api GET /api/user/aff，data 为码字符串） */
   getAffCode: (): Promise<ApiResponse<string>> =>
     request<ApiResponse<string>>('GET', `${API_BASE}/aff`),

@@ -163,6 +163,61 @@ export default function Users(): JSX.Element {
     }
   };
 
+  /** 启用/禁用用户（对齐 new-api ManageUser：禁用即时踢下线） */
+  const handleToggleStatus = async (u: UserItem) => {
+    if (me && u.id === me.id) {
+      addToast(t('不能禁用当前登录的账号'), 'error');
+      return;
+    }
+    const disabling = u.status !== 'disabled';
+    setConfirmState({
+      title: disabling ? t('禁用用户') : t('启用用户'),
+      message: (
+        <>
+          {disabling ? t('确定禁用用户') : t('确定启用用户')} <strong>{u.email}</strong>？
+          {disabling && t('该用户的全部会话将被立即撤销。')}
+        </>
+      ),
+      confirmText: disabling ? t('禁用') : t('启用'),
+      danger: disabling,
+      onConfirm: async () => {
+        setError('');
+        try {
+          await api.manageUser(String(u.id), disabling ? 'disable' : 'enable');
+          addToast(disabling ? t('用户已禁用') : t('用户已启用'));
+          await load();
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      },
+    });
+  };
+
+  /** 强制禁用用户 2FA（用户丢失验证器时管理员重置） */
+  const handleDisable2FA = (u: UserItem) => {
+    setConfirmState({
+      title: t('重置两步验证'),
+      message: (
+        <>
+          {t('确定强制禁用用户')} <strong>{u.email}</strong> {t('的两步验证？')}
+          {t('该用户的全部会话将被撤销，需重新登录。')}
+        </>
+      ),
+      confirmText: t('强制禁用'),
+      danger: true,
+      onConfirm: async () => {
+        setError('');
+        try {
+          await api.adminDisable2FA(String(u.id));
+          addToast(t('两步验证已重置'));
+          await load();
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      },
+    });
+  };
+
   const handleDelete = (u: UserItem) => {
     // 自我保护：不能删除当前登录账号自己
     if (me && u.id === me.id) {
@@ -289,6 +344,15 @@ export default function Users(): JSX.Element {
                     <td>
                       <div className="actions-cell">
                         <Button variant="outline" size="sm" onClick={() => openEdit(u)}>{t('编辑')}</Button>
+                        <Button
+                          variant={u.status === 'disabled' ? 'primary' : 'outline'}
+                          size="sm"
+                          onClick={() => void handleToggleStatus(u)}
+                          disabled={me != null && u.id === me.id}
+                        >
+                          {u.status === 'disabled' ? t('启用') : t('禁用')}
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={() => handleDisable2FA(u)}>{t('重置2FA')}</Button>
                         <span title={me != null && u.id === me.id ? t('不能删除当前登录的账号') : undefined}>
                           <Button
                             variant="danger"
