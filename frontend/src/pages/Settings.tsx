@@ -396,7 +396,7 @@ export default function Settings() {
       <Tabs<SettingsTab>
         items={[
           { key: 'site', label: t('站点') },
-          { key: 'billing', label: t('计费') },
+          { key: 'billing', label: t('计费/易支付') },
           { key: 'ops', label: t('运维') },
           { key: 'security', label: t('安全') },
           { key: 'account', label: t('账户') },

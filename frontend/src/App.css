@@ -1217,14 +1217,25 @@ code {
   display: none;
 }
 
-/* 收缩开关行：nav 与 footer 之间固定一行，展开/收缩同位置恒可见恒可点 */
+/* 收缩开关行：nav 与 footer 之间固定一行，整行按钮化（图标+文字均可点击） */
 .sidebar-collapse-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
   padding: 4px 8px;
   margin-bottom: 4px;
   flex-shrink: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-collapse-row:hover {
+  background: var(--sidebar-menu-hover);
 }
 
 .sidebar-aside-collapsed .sidebar-collapse-row {
@@ -1239,7 +1250,7 @@ code {
   user-select: none;
 }
 
-/* 收缩开关（全侧栏唯一的展开/收起按钮） */
+/* 收缩图标（行内元素，行本身即按钮） */
 .sidebar-collapse-btn {
   flex-shrink: 0;
   display: inline-flex;
@@ -1247,16 +1258,12 @@ code {
   justify-content: center;
   width: 28px;
   height: 28px;
-  border: none;
   border-radius: 8px;
-  background: transparent;
   color: var(--text-muted);
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: color 0.15s ease;
 }
 
-.sidebar-collapse-btn:hover {
-  background: var(--sidebar-menu-hover);
+.sidebar-collapse-row:hover .sidebar-collapse-btn {
   color: var(--text-main);
 }
 

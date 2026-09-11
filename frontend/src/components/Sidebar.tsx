@@ -185,20 +185,20 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
         })}
       </nav>
 
-      {/* 唯一收缩开关：nav 与 footer 之间的固定行，展开/收缩同位置恒可见 */}
+      {/* 唯一收缩开关：nav 与 footer 之间的固定行，整行（含提示文字）可点击 */}
       {!isDrawer && (
-        <div className="sidebar-collapse-row">
-          <button
-            type="button"
-            className="sidebar-collapse-btn"
-            onClick={onToggleCollapsed}
-            title={collapsed ? t('展开侧边栏') : t('收起侧边栏')}
-            aria-label={collapsed ? t('展开侧边栏') : t('收起侧边栏')}
-          >
+        <button
+          type="button"
+          className="sidebar-collapse-row"
+          onClick={onToggleCollapsed}
+          title={collapsed ? t('展开侧边栏') : t('收起侧边栏')}
+          aria-label={collapsed ? t('展开侧边栏') : t('收起侧边栏')}
+        >
+          <span className="sidebar-collapse-btn">
             {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
-          </button>
+          </span>
           {!collapsed && <span className="sidebar-collapse-hint">{t('收起侧边栏')}</span>}
-        </div>
+        </button>
       )}
 
       {/* Footer：用户区（收缩态仅头像）+ 收进菜单的主题/语言/退出 */}
