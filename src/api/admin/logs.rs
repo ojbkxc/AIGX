@@ -246,7 +246,7 @@ pub async fn handle_export_request_logs(
 
 /// 批量删除请求日志（仅管理员）
 ///
-/// Body: `{ "ids": ["id1", "id2", ...] }`；返回 `{ success, removed }`。
+/// Body: `{ "ids": ["id1", "id2", ...] }`；返回 `{ success, data: { removed } }`。
 pub async fn handle_delete_request_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
