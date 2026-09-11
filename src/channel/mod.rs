@@ -298,6 +298,9 @@ pub struct ChannelStore {
     balancer: balancer::RoundRobinBalancer,
     /// per-channel AIMD 自适应限速器（批次3）
     aimd: dashmap::DashMap<String, parking_lot::Mutex<aimd::AimdController>>,
+    /// 懒加载去重：channel_id → 最近一次 fetch_upstream_models 完成时间（unix ts）
+    /// 5 秒内同渠道不重复拉上游 /models，避免并发首启放大请求
+    lazy_discover_inflight: dashmap::DashMap<String, std::sync::atomic::AtomicI64>,
     /// 三色令牌桶预算（批次3）
     rate_budget: rate_budget::InMemoryBudget,
     /// 组合调度器（批次3）
@@ -319,6 +322,7 @@ impl ChannelStore {
             empty_response_counter: empty_response::EmptyResponseCounter::new(),
             balancer: balancer::RoundRobinBalancer::new(),
             aimd: dashmap::DashMap::new(),
+            lazy_discover_inflight: dashmap::DashMap::new(),
             rate_budget: rate_budget::InMemoryBudget::new(),
             scheduler: parking_lot::RwLock::new(scheduler::CombinedScheduler::default()),
             scheduler_config_cache: parking_lot::RwLock::new(
@@ -582,6 +586,25 @@ impl ChannelStore {
         drop(channels);
         self.persist(&snapshot)?;
         Ok(())
+    }
+
+    /// 懒加载去重：5 秒内同渠道是否已触发过上游模型发现。
+    ///
+    /// 返回 true 表示允许本次拉取，false 表示近期已拉过应跳过。
+    /// 用原子时间戳实现非阻塞单飞——不发请求的调用方直接跳过，不阻塞等待。
+    pub fn try_mark_lazy_discover(&self, id: &str) -> bool {
+        const WINDOW_SECS: i64 = 5;
+        let now = chrono::Utc::now().timestamp();
+        let entry = self
+            .lazy_discover_inflight
+            .entry(id.to_string())
+            .or_insert(std::sync::atomic::AtomicI64::new(0));
+        let prev = entry.load(std::sync::atomic::Ordering::Relaxed);
+        if now - prev < WINDOW_SECS {
+            return false;
+        }
+        entry.store(now, std::sync::atomic::Ordering::Relaxed);
+        true
     }
 
     /// 保存最近一次连通性测试结果（response_time/test_time），持久化。

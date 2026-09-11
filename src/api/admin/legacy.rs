@@ -1236,6 +1236,8 @@ pub async fn fetch_upstream_models(
     base_url: &str,
     api_key: &str,
 ) -> Result<(String, Vec<String>), (StatusCode, Json<Value>)> {
+    // 复用 AppState 共享 http_client，避免每次新建 Client（连接池复用 + 减少开销）
+    let client = state.http_client.clone();
     let (url, models) = match channel_type {
         crate::channel::ChannelType::OpenaiCompatible => {
             let base = base_url.trim().trim_end_matches('/');
@@ -1246,16 +1248,7 @@ pub async fn fetch_upstream_models(
                 ));
             }
             let mut url = format!("{base}/models");
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .map_err(|e| {
-                    error_response(
-                        &format!("HTTP client error: {e}"),
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    )
-                })?;
-            let mut req = client.get(&url).bearer_auth(&api_key);
+            let mut req = client.get(&url).bearer_auth(api_key);
             // 部分上游（如 OpenRouter）要求 /v1 前缀，若 /models 404 再试 /v1/models
             let resp = req.send().await;
             let resp = match resp {
@@ -1314,15 +1307,6 @@ pub async fn fetch_upstream_models(
                 ));
             }
             let url = format!("{base}/v1/models");
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .map_err(|e| {
-                    error_response(
-                        &format!("HTTP client error: {e}"),
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    )
-                })?;
             let resp = client
                 .get(&url)
                 .header("x-api-key", api_key)
@@ -1378,18 +1362,9 @@ pub async fn fetch_upstream_models(
                     .to_string()
             };
             let url = format!("{worker_url}/v1/models");
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .map_err(|e| {
-                    error_response(
-                        &format!("HTTP client error: {e}"),
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    )
-                })?;
             let mut req = client.get(&url);
             if !api_key.is_empty() {
-                req = req.bearer_auth(&api_key);
+                req = req.bearer_auth(api_key);
             }
             let resp = req.send().await.map_err(|e| {
                 error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
@@ -1435,15 +1410,6 @@ pub async fn fetch_upstream_models(
                 base
             };
             let url = format!("{base}/models");
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .map_err(|e| {
-                    error_response(
-                        &format!("HTTP client error: {e}"),
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    )
-                })?;
             let resp = client
                 .get(&url)
                 .header("x-goog-api-key", api_key)

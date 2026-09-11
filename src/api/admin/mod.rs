@@ -125,6 +125,9 @@ pub use legacy::{
 // 签到（对齐 new-api GET/POST /api/user/checkin）
 pub use legacy::handle_checkin_status;
 
+// 上游模型发现（供 openai::handle_list_models 懒加载复用）
+pub use legacy::fetch_upstream_models;
+
 // 网络层管理（main.rs /api/network/* 路由）
 pub use network::{
     add_network_account, health_check, remove_network_account, restart_network,

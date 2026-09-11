@@ -273,11 +273,15 @@ pub async fn handle_available_models(
     // 先把已有 models/discovered_models 聚合出来；若结果为空，对"留空=全部"
     // 的启用渠道做一次懒加载：调上游 /models 发现并写回 discovered_models，
     // 下次请求即可命中缓存，本次也立即用上。
-    let collect_models = |channels: &[Channel]| -> Vec<(String, Option<&'static str>)> {
+    // 与 /v1/models 口径一致：冷却/断路器打开的渠道不参与聚合与懒加载。
+    let collect_models = |channels: &[Channel], store: &crate::channel::ChannelStore| -> Vec<(String, Option<&'static str>)> {
         let mut seen = std::collections::HashSet::new();
         let mut out: Vec<(String, Option<&'static str>)> = Vec::new();
         for c in channels {
             if !c.is_enabled() {
+                continue;
+            }
+            if store.is_in_cooldown(&c.id) || !store.circuit_breaker().allow_request(&c.id) {
                 continue;
             }
             let owned_by =
@@ -293,12 +297,18 @@ pub async fn handle_available_models(
     };
 
     let channels = state.channel_store.list();
-    let mut models = collect_models(&channels);
+    let mut models = collect_models(&channels, &state.channel_store);
 
     if models.is_empty() {
         let empty_channels: Vec<Channel> = channels
             .iter()
-            .filter(|c| c.is_enabled() && c.models.is_empty() && c.discovered_models.is_empty())
+            .filter(|c| {
+                c.is_enabled()
+                    && c.models.is_empty()
+                    && c.discovered_models.is_empty()
+                    && !state.channel_store.is_in_cooldown(&c.id)
+                    && state.channel_store.circuit_breaker().allow_request(&c.id)
+            })
             .cloned()
             .collect();
         for ch in &empty_channels {
@@ -309,6 +319,10 @@ pub async fn handle_available_models(
                 && ch.channel_type != crate::channel::ChannelType::Gemini
                 && ch.channel_type != crate::channel::ChannelType::Zai
             {
+                continue;
+            }
+            // 5 秒内同渠道不重复拉上游，避免并发首启放大请求
+            if !state.channel_store.try_mark_lazy_discover(&ch.id) {
                 continue;
             }
             match fetch_upstream_models(&state, ch.channel_type, &ch.base_url, &key).await {

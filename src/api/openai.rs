@@ -450,13 +450,28 @@ pub fn check_group_model_permission(
 /// 在入口处拦截可避免“管理员忘记配置价格 → 用户免费白嫖”的资金损失。
 pub fn ensure_model_priced(state: &AppState, model: &str) -> Result<(), (StatusCode, Json<Value>)> {
     if state.pricing_store.get_price(model).is_none() {
-        return Err(error_response(
-            "model_not_priced",
-            &format!("Model '{model}' has no price configured, contact admin"),
-            StatusCode::SERVICE_UNAVAILABLE,
-        ));
+        // 放行：模型由任一启用渠道声明或发现（models ∪ discovered_models），
+        // 即管理员显式暴露的模型——即便 pricing_store 无条目也允许调用（按 0 计费），
+        // 避免列表显示可用但调用 503 的体验割裂。仅对"无渠道声明又无定价"的
+        // 任意模型名才拒绝（防止用户猜模型名蹭免费）。
+        if !model_declared_by_channel(state, model) {
+            return Err(error_response(
+                "model_not_priced",
+                &format!("Model '{model}' has no price configured, contact admin"),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ));
+        }
     }
     Ok(())
+}
+
+/// 模型是否由任一启用渠道声明或发现（models ∪ discovered_models）。
+pub fn model_declared_by_channel(state: &AppState, model: &str) -> bool {
+    state.channel_store.list().iter().any(|c| {
+        c.is_enabled()
+            && (c.models.iter().any(|m| m == model)
+                || c.discovered_models.iter().any(|m| m == model))
+    })
 }
 
 /// 执行计费扣减（用户 quota + key used_quota）。
@@ -4190,7 +4205,8 @@ pub async fn handle_list_models(
         })
     };
 
-    for ch in state.channel_store.list() {
+    let channels = state.channel_store.list();
+    for ch in &channels {
         if !ch.is_enabled() {
             continue;
         }
@@ -4208,6 +4224,66 @@ pub async fn handle_list_models(
                 continue;
             }
             model_list.push(build_entry(m, channel_owned_by));
+        }
+    }
+
+    // 与 /api/models/available 口径一致：聚合为空时对"留空=全部"的启用且
+    // 非冷却渠道做一次懒加载，调上游 /models 发现并写回 discovered_models。
+    if model_list.is_empty() {
+        let empty_channels: Vec<crate::channel::Channel> = channels
+            .iter()
+            .filter(|c| {
+                c.is_enabled()
+                    && c.models.is_empty()
+                    && c.discovered_models.is_empty()
+                    && !state.channel_store.is_in_cooldown(&c.id)
+                    && state.channel_store.circuit_breaker().allow_request(&c.id)
+            })
+            .cloned()
+            .collect();
+        for ch in &empty_channels {
+            let key = ch.decode_api_key();
+            if ch.base_url.trim().is_empty()
+                && ch.channel_type != crate::channel::ChannelType::Cloudflare
+                && ch.channel_type != crate::channel::ChannelType::Gemini
+                && ch.channel_type != crate::channel::ChannelType::Zai
+            {
+                continue;
+            }
+            // 5 秒内同渠道不重复拉上游，避免并发首启放大请求
+            if !state.channel_store.try_mark_lazy_discover(&ch.id) {
+                continue;
+            }
+            match crate::api::admin::fetch_upstream_models(
+                &state,
+                ch.channel_type,
+                &ch.base_url,
+                &key,
+            )
+            .await
+            {
+                Ok((_url, discovered)) => {
+                    if !discovered.is_empty() {
+                        if let Err(e) = state
+                            .channel_store
+                            .save_discovered_models(&ch.id, discovered.clone())
+                        {
+                            tracing::error!("lazy discover save failed for {}: {e}", ch.id);
+                        }
+                        let channel_owned_by =
+                            crate::model::metadata::owned_by_for_channel_type(
+                                ch.channel_type.as_str(),
+                            );
+                        for m in &discovered {
+                            if m.is_empty() || !seen.insert(m.clone()) {
+                                continue;
+                            }
+                            model_list.push(build_entry(m, channel_owned_by));
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("lazy discover failed for channel {}: {:?}", ch.id, e),
+            }
         }
     }
     // 别名映射的对外名也暴露（供客户端按别名调用；别名无渠道归属，纯名字推断）
