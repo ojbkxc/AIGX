@@ -12,6 +12,8 @@ interface RequestLogItem {
   id: string | number;
   created_at?: number;
   user_id?: string;
+  /** 后端解析的邮箱展示（user_id → email，解析失败缺省回退 user_id） */
+  user_email?: string;
   channel_id?: string;
   channel_name?: string;
   model?: string;
@@ -29,6 +31,8 @@ interface AuditLogItem {
   id: string | number;
   created_at?: number;
   admin_id?: string;
+  /** 后端解析的邮箱展示（admin_id → email） */
+  admin_email?: string;
   action?: string;
   target?: string;
   after?: string;
@@ -252,8 +256,8 @@ export default function Logs(): JSX.Element {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
             {admin && (
               <div className="form-group">
-                <label>{t('用户 ID')}</label>
-                <input className="form-input" value={filters.user} onChange={(e) => setFilters({ ...filters, user: e.target.value })} placeholder={t('按用户 ID 过滤')} />
+                <label>{t('用户')}</label>
+                <input className="form-input" value={filters.user} onChange={(e) => setFilters({ ...filters, user: e.target.value })} placeholder={t('按用户 ID 或邮箱过滤')} />
               </div>
             )}
             <div className="form-group">
@@ -320,7 +324,14 @@ export default function Logs(): JSX.Element {
                   isRequest(l) ? (
                     <tr key={l.id}>
                       <td>{fmtTime(l.created_at)}</td>
-                      {admin && <td>{l.user_id || '—'}</td>}
+                      {admin && (
+                        <td
+                          style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                          title={l.user_id || ''}
+                        >
+                          {l.user_email || l.user_id || '—'}
+                        </td>
+                      )}
                       {admin && (
                         <td style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.origin_model || ''}>
                           {l.origin_model || '—'}
@@ -352,7 +363,12 @@ export default function Logs(): JSX.Element {
                   ) : (
                     <tr key={l.id}>
                       <td>{fmtTime(l.created_at)}</td>
-                      <td>{l.admin_id}</td>
+                      <td
+                        style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                        title={l.admin_id || ''}
+                      >
+                        {l.admin_email || l.admin_id || '—'}
+                      </td>
                       <td><code style={{ background: 'var(--card-bg)', padding: '2px 6px', borderRadius: 4 }}>{l.action}</code></td>
                       <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.target || ''}>{l.target}</td>
                       <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, color: 'var(--text-muted)' }} title={l.after || '—'}>

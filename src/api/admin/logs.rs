@@ -20,9 +20,44 @@ use super::common::{default_page, default_size, error_response, verify_admin, ve
 // 这里我们实际上需要引用主 crate 的 log_store
 // 由于子模块内 super 跳到了 api::admin，需要主级引用
 
+/// 把请求日志条目序列化为 JSON，并附加 user_email（user_id → 邮箱解析）。
+///
+/// 前端用户列展示邮箱而非 UUID；解析失败（用户已删）回退原 user_id。
+fn logs_with_user_email(state: &AppState, logs: Vec<serde_json::Value>) -> Vec<Value> {
+    logs.into_iter()
+        .map(|mut l| {
+            if let Some(obj) = l.as_object_mut() {
+                if let Some(uid) = obj.get("user_id").and_then(|v| v.as_str()) {
+                    if let Some(u) = state.user_store.get_by_id(uid) {
+                        obj.insert("user_email".into(), Value::String(u.email));
+                    }
+                }
+            }
+            l
+        })
+        .collect()
+}
+
+/// 审计日志附加 admin_email（admin_id → 邮箱解析，"admin" 等旧值原样保留）。
+fn audits_with_admin_email(state: &AppState, logs: Vec<serde_json::Value>) -> Vec<Value> {
+    logs.into_iter()
+        .map(|mut l| {
+            if let Some(obj) = l.as_object_mut() {
+                if let Some(aid) = obj.get("admin_id").and_then(|v| v.as_str()) {
+                    if let Some(u) = state.user_store.get_by_id(aid) {
+                        obj.insert("admin_email".into(), Value::String(u.email));
+                    }
+                }
+            }
+            l
+        })
+        .collect()
+}
+
 /// 请求日志查询参数
 #[derive(Debug, Deserialize)]
 pub struct RequestLogQuery {
+    /// 用户过滤：支持 UUID 或邮箱（邮箱自动解析为对应 user_id）
     #[serde(default)]
     pub user: Option<String>,
     #[serde(default)]
@@ -66,14 +101,23 @@ pub async fn handle_list_request_logs(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // 尝试管理员验证；失败则回退到普通用户
     let admin = verify_admin(&state, &headers).await.is_ok();
-    // 普通用户可能拥有的 email 所有权，需在函数生命周期内保留
+    // 管理员按 user 参数过滤（UUID 或邮箱，邮箱解析为 user_id）
+    let resolved_filter: Option<String>;
     let user_email: Option<String>;
     let (filter_user, filter_channel) = if admin {
-        (q.user.as_deref(), q.channel.as_deref())
+        resolved_filter = q.user.as_deref().and_then(|u| {
+            // 含 '@' 视为邮箱 → 解析 user_id；否则原样按 UUID 过滤
+            if u.contains('@') {
+                state.user_store.get_by_email(u).map(|usr| usr.id)
+            } else {
+                Some(u.to_string())
+            }
+        });
+        (resolved_filter.as_deref(), q.channel.as_deref())
     } else {
         // 普通用户：必须登录，且只能看自己的
         let user = verify_user(&state, &headers).await?;
-        user_email = Some(user.email);
+        user_email = Some(user.id);
         (user_email.as_deref(), None)
     };
     let (logs, total) = state.log_store.requests.list_with_filter(
@@ -85,9 +129,17 @@ pub async fn handle_list_request_logs(
         q.page,
         q.size,
     );
+    // user_id → user_email 解析（前端用户列展示邮箱）
+    let data = logs_with_user_email(
+        &state,
+        logs.into_iter()
+            .map(|l| serde_json::to_value(l).unwrap_or(Value::Null))
+            .filter(|v| !v.is_null())
+            .collect(),
+    );
     Ok(Json(serde_json::json!({
         "success": true,
-        "data": logs,
+        "data": data,
         "total": total,
         "page": q.page,
         "size": q.size,
@@ -102,9 +154,17 @@ pub async fn handle_list_audit_logs(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
     let (logs, total) = state.log_store.audits.list_paged(q.page, q.size);
+    // admin_id → admin_email 解析（前端管理员列展示邮箱）
+    let data = audits_with_admin_email(
+        &state,
+        logs.into_iter()
+            .map(|l| serde_json::to_value(l).unwrap_or(Value::Null))
+            .filter(|v| !v.is_null())
+            .collect(),
+    );
     Ok(Json(serde_json::json!({
         "success": true,
-        "data": logs,
+        "data": data,
         "total": total,
         "page": q.page,
         "size": q.size,
