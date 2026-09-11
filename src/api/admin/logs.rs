@@ -206,7 +206,7 @@ pub async fn handle_export_request_logs(
                     ),
                     (
                         axum::http::header::CONTENT_DISPOSITION,
-                        "attachment; filename=\\\"request_logs.csv\\\"".to_string(),
+                        "attachment; filename=\"request_logs.csv\"".to_string(),
                     ),
                 ],
                 csv,
@@ -226,7 +226,7 @@ pub async fn handle_export_request_logs(
                     ),
                     (
                         axum::http::header::CONTENT_DISPOSITION,
-                        "attachment; filename=\\\"request_logs.json\\\"".to_string(),
+                        "attachment; filename=\"request_logs.json\"".to_string(),
                     ),
                 ],
                 json,
