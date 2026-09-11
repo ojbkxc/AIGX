@@ -556,13 +556,14 @@ export default function Channels(): JSX.Element {
   };
 
   // ── 内联编辑处理 ──
+  // PATCH 部分更新：PUT 端点要求全量字段（name 必填），单字段提交会 422
   const handleInlineUpdate = async (id: string | number, field: 'priority' | 'weight', value: number): Promise<void> => {
     if (isNaN(value)) {
       addToast(t('请输入有效的数字'), 'error');
       return;
     }
     try {
-      await api.updateChannel(id, { [field]: value } as Record<string, unknown>);
+      await api.patchChannel(id, { [field]: value } as Record<string, unknown>);
       addToast(t('更新成功'));
       setEditingField(null);
       void loadChannels();
