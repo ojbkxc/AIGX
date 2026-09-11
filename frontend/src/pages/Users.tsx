@@ -447,12 +447,13 @@ export default function Users(): JSX.Element {
         );
       })()}
 
-      {(() => {
-        const totalPages = Math.ceil(total / size);
-        return totalPages > 1 && !q ? (
-          <Pagination page={page} totalPages={totalPages} onChange={setPage} />
-        ) : null;
-      })()}
+      {!q && (
+        <Pagination
+          page={page}
+          totalPages={Math.ceil(total / size)}
+          onChange={setPage}
+        />
+      )}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
