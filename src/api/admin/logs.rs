@@ -254,7 +254,7 @@ pub async fn handle_delete_request_logs(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
     let removed = state.log_store.requests.delete_many(&body.ids);
-    Ok(Json(serde_json::json!({ "success": true, "removed": removed })))
+    Ok(Json(serde_json::json!({ "success": true, "data": { "removed": removed } })))
 }
 
 /// 清空全部请求日志（仅管理员）
@@ -268,7 +268,7 @@ pub async fn handle_clear_request_logs(
         .requests
         .clear_all()
         .map_err(|e| error_response(&format!("Failed to clear: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
-    Ok(Json(serde_json::json!({ "success": true, "removed": removed })))
+    Ok(Json(serde_json::json!({ "success": true, "data": { "removed": removed } })))
 }
 
 /// 批量删除审计日志（仅管理员）
@@ -279,7 +279,7 @@ pub async fn handle_delete_audit_logs(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
     let removed = state.log_store.audits.delete_many(&body.ids);
-    Ok(Json(serde_json::json!({ "success": true, "removed": removed })))
+    Ok(Json(serde_json::json!({ "success": true, "data": { "removed": removed } })))
 }
 
 /// 清空全部审计日志（仅管理员）
@@ -293,7 +293,7 @@ pub async fn handle_clear_audit_logs(
         .audits
         .clear_all()
         .map_err(|e| error_response(&format!("Failed to clear: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
-    Ok(Json(serde_json::json!({ "success": true, "removed": removed })))
+    Ok(Json(serde_json::json!({ "success": true, "data": { "removed": removed } })))
 }
 
 /// 批量删除日志的请求体

@@ -1254,7 +1254,7 @@ pub async fn fetch_upstream_models(
             let resp = match resp {
                 Ok(r) if r.status().as_u16() == 404 => {
                     url = format!("{base}/v1/models");
-                    req = client.get(&url).bearer_auth(&api_key);
+                    req = client.get(&url).bearer_auth(api_key);
                     req.send().await.map_err(|e| {
                         error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
                     })?
