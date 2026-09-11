@@ -23,11 +23,11 @@ export default function Pagination({
   siblingCount = 5,
 }: PaginationProps): JSX.Element | null {
   const { t } = useTranslation();
+  if (totalPages <= 1) return null;
 
   // 计算要显示的页码槽位：首页、末页、当前页 ± sibling，其余用 -1 占位表示省略号
   const slots: number[] = [];
-  // 数据不足一页时也渲染分页条（上一页/下一页禁用），避免用户看不到分页入口
-  const last = Math.max(1, totalPages);
+  const last = totalPages;
   const left = Math.max(2, page - siblingCount);
   const right = Math.min(last - 1, page + siblingCount);
 
