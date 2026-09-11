@@ -1,9 +1,11 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Pencil, Power, PowerOff, MoreHorizontal, KeyRound, Trash2 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
+import './Users.css';
 
 interface UserItem {
   id: string | number;
@@ -58,6 +60,34 @@ export default function Users(): JSX.Element {
   const [saving, setSaving] = useState(false);
   // 搜索过滤（邮箱/昵称本地匹配）
   const [query, setQuery] = useState('');
+
+  // 行操作菜单（fixed 挂在 body 层级，逃出 Card/table 的 overflow 裁剪；同渠道/密钥页）
+  const [rowMenuId, setRowMenuId] = useState<string | number | null>(null);
+  const [rowMenuPos, setRowMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  useEffect(() => {
+    if (rowMenuId === null) return;
+    const handler = (): void => setRowMenuId(null);
+    document.addEventListener('mousedown', handler);
+    const scrollHandler = (): void => setRowMenuId(null);
+    window.addEventListener('scroll', scrollHandler, true);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      window.removeEventListener('scroll', scrollHandler, true);
+    };
+  }, [rowMenuId]);
+
+  const openRowMenu = (e: React.MouseEvent<HTMLButtonElement>, id: string | number): void => {
+    e.stopPropagation();
+    if (rowMenuId === id) { setRowMenuId(null); return; }
+    const rect = e.currentTarget.getBoundingClientRect();
+    const menuH = 160; // 菜单预估高度（2 项 + 分隔线）
+    const below = window.innerHeight - rect.bottom;
+    const top = below < menuH && rect.top > menuH
+      ? rect.top - menuH + rect.height
+      : rect.bottom + 4;
+    setRowMenuPos({ top, left: rect.right });
+    setRowMenuId(id);
+  };
 
   useEffect(() => {
     void load();
@@ -342,27 +372,34 @@ export default function Users(): JSX.Element {
                     </td>
                     <td>{u.created_at ? new Date(u.created_at > 1e12 ? u.created_at : u.created_at * 1000).toLocaleString() : '—'}</td>
                     <td>
-                      <div className="actions-cell">
-                        <Button variant="outline" size="sm" onClick={() => openEdit(u)}>{t('编辑')}</Button>
-                        <Button
-                          variant={u.status === 'disabled' ? 'primary' : 'outline'}
-                          size="sm"
+                      <div className="us-actions">
+                        <button
+                          type="button"
+                          className="us-icon-btn"
+                          title={t('编辑')}
+                          onClick={() => openEdit(u)}
+                        >
+                          <Pencil size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          className={`us-icon-btn ${u.status !== 'disabled' ? 'us-danger-hover' : ''}`}
+                          title={u.status === 'disabled' ? t('启用') : t('禁用')}
                           onClick={() => void handleToggleStatus(u)}
                           disabled={me != null && u.id === me.id}
                         >
-                          {u.status === 'disabled' ? t('启用') : t('禁用')}
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={() => handleDisable2FA(u)}>{t('重置2FA')}</Button>
-                        <span title={me != null && u.id === me.id ? t('不能删除当前登录的账号') : undefined}>
-                          <Button
-                            variant="danger"
-                            size="sm"
-                            onClick={() => handleDelete(u)}
-                            disabled={me != null && u.id === me.id}
+                          {u.status === 'disabled' ? <PowerOff size={15} /> : <Power size={15} />}
+                        </button>
+                        <div className="us-row-menu">
+                          <button
+                            type="button"
+                            className="us-icon-btn"
+                            title={t('更多操作')}
+                            onClick={(e) => openRowMenu(e, u.id)}
                           >
-                            {t('删除')}
-                          </Button>
-                        </span>
+                            <MoreHorizontal size={15} />
+                          </button>
+                        </div>
                       </div>
                     </td>
                   </tr>
@@ -372,6 +409,37 @@ export default function Users(): JSX.Element {
           </div>
         )}
       </Card>
+
+      {/* 行操作菜单（fixed 挂在 body 层级，逃出 Card/table 的 overflow 裁剪） */}
+      {rowMenuId !== null && (() => {
+        const u = visibleUsers.find((row) => row.id === rowMenuId);
+        if (!u) return null;
+        const selfProtect = me != null && u.id === me.id;
+        return (
+          <div
+            className="us-row-menu-panel us-row-menu-fixed"
+            style={{ top: rowMenuPos.top, left: rowMenuPos.left }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button type="button" onClick={() => { setRowMenuId(null); handleDisable2FA(u); }}>
+              <KeyRound size={14} />
+              {t('重置2FA')}
+            </button>
+            <div className="us-row-menu-sep" />
+            <button
+              type="button"
+              className="us-row-menu-danger"
+              onClick={() => { setRowMenuId(null); handleDelete(u); }}
+              disabled={selfProtect}
+              title={selfProtect ? t('不能删除当前登录的账号') : undefined}
+            >
+              <Trash2 size={14} />
+              {t('删除')}
+            </button>
+          </div>
+        );
+      })()}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 

@@ -770,6 +770,7 @@ export default function Keys(): JSX.Element {
           <div
             className="tk-row-menu-panel tk-row-menu-fixed"
             style={{ top: rowMenuPos.top, left: rowMenuPos.left }}
+            onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
           >
             <button type="button" onClick={() => { setRowMenuId(null); handleCopyKey(tk); }}>

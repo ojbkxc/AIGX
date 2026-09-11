@@ -1,0 +1,99 @@
+/* ── 行操作（图标按钮 + ⋯ 下拉，同渠道/密钥页 ch-actions / tk-actions） ── */
+.us-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.us-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.us-icon-btn:hover:not(:disabled) {
+  color: var(--text-main);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.06));
+}
+
+.us-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.us-icon-btn.us-danger-hover:hover {
+  color: var(--danger-color, #ef4444);
+  background: var(--danger-soft, rgba(239, 68, 68, 0.1));
+}
+
+.us-row-menu {
+  position: relative;
+}
+
+.us-row-menu-panel {
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+  box-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.2), 0 4px 12px -4px rgba(0, 0, 0, 0.1);
+  animation: fadeIn 0.12s ease;
+}
+
+/* fixed 模式：由 JS 传 top/left 屏幕坐标，逃出 Card / table-wrapper 的 overflow 裁剪 */
+.us-row-menu-panel.us-row-menu-fixed {
+  position: fixed;
+  right: auto;
+  z-index: 1200;
+  transform: translateX(-100%);
+}
+
+.us-row-menu-panel button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+}
+
+.us-row-menu-panel button:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.us-row-menu-panel button svg {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.us-row-menu-panel .us-row-menu-danger {
+  color: var(--danger-color, #ef4444);
+}
+
+.us-row-menu-panel .us-row-menu-danger:hover {
+  background: var(--danger-soft, rgba(239, 68, 68, 0.1));
+}
+
+.us-row-menu-panel .us-row-menu-danger svg {
+  color: var(--danger-color, #ef4444);
+}
+
+.us-row-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border-color);
+}

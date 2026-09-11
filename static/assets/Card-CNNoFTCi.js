@@ -1,0 +1,1 @@
+import{j as s,e as r}from"./index-DFHBW_vH.js";function j({children:e,title:a,actions:d,className:c,headerClassName:i,bodyClassName:n}){return s.jsxs("div",{className:r("card",c),children:[(a||d)&&s.jsxs("div",{className:r("card-header",i),children:[s.jsx("h2",{children:a}),d]}),s.jsx("div",{className:r("card-body",n),children:e})]})}export{j as C};
