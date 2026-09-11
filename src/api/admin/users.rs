@@ -8,7 +8,7 @@
 //! - `mask_user` 贴合返回格式，仅隐藏敏感字段（不暴露 password/md5）
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::Json,
 };
@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, record_audit, verify_admin, verify_user};
+use super::common::{default_page, default_size, error_response, record_audit, verify_admin, verify_user};
 
 use crate::user::{Role, User};
 
@@ -92,13 +92,39 @@ async fn admin_id_from_session_local(state: &AppState, headers: &HeaderMap) -> S
 }
 
 /// 列出所有用户
+/// 用户列表查询参数（分页）
+#[derive(Debug, Deserialize)]
+pub struct ListUsersQuery {
+    #[serde(default = "default_page")]
+    pub page: usize,
+    #[serde(default = "default_size")]
+    pub size: usize,
+}
+
 pub async fn handle_list_users(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<ListUsersQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let users: Vec<Value> = state.user_store.list().iter().map(mask_user).collect();
-    Ok(Json(serde_json::json!({ "success": true, "data": users })))
+    let all: Vec<Value> = state.user_store.list().iter().map(mask_user).collect();
+    let total = all.len();
+    let page = q.page.max(1);
+    let size = q.size.max(1);
+    let start_idx = (page - 1) * size;
+    let data: Vec<Value> = if start_idx >= total {
+        Vec::new()
+    } else {
+        let end_idx = (start_idx + size).min(total);
+        all[start_idx..end_idx].to_vec()
+    };
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": data,
+        "total": total,
+        "page": page,
+        "size": size,
+    })))
 }
 
 /// 创建新用户

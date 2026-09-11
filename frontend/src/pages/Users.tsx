@@ -4,7 +4,7 @@ import { Pencil, Power, PowerOff, MoreHorizontal, KeyRound, Trash2 } from 'lucid
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
 import './Users.css';
 
 interface UserItem {
@@ -60,6 +60,10 @@ export default function Users(): JSX.Element {
   const [saving, setSaving] = useState(false);
   // 搜索过滤（邮箱/昵称本地匹配）
   const [query, setQuery] = useState('');
+  // 分页（对齐 Logs/Channels）
+  const [page, setPage] = useState(1);
+  const size = 20;
+  const [total, setTotal] = useState(0);
 
   // 行操作菜单（fixed 挂在 body 层级，逃出 Card/table 的 overflow 裁剪；同渠道/密钥页）
   const [rowMenuId, setRowMenuId] = useState<string | number | null>(null);
@@ -91,18 +95,20 @@ export default function Users(): JSX.Element {
 
   useEffect(() => {
     void load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
 
   const load = async () => {
     setLoading(true);
     setError('');
     try {
       const [listRes, meRes, groupRes] = await Promise.all([
-        api.listUsers(),
+        api.listUsers({ page, size }),
         api.getMe().catch(() => null),
         api.listGroups().catch(() => null),
       ]);
       setUsers(Array.isArray(listRes?.data) ? (listRes.data as unknown as UserItem[]) : []);
+      setTotal(typeof listRes?.total === 'number' ? (listRes.total as number) : 0);
       if (meRes) setMe(meRes.data as UserItem | null);
       if (groupRes) setGroups(Array.isArray(groupRes?.data) ? groupRes.data : []);
     } catch (err) {
@@ -323,7 +329,7 @@ export default function Users(): JSX.Element {
       )}
 
       <Card
-        title={`${t('所有用户')} (${visibleUsers.length}/${users.length})`}
+        title={`${t('所有用户')} (${q ? visibleUsers.length : total}${q ? `/${total}` : ''})`}
         actions={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <Input
@@ -439,6 +445,13 @@ export default function Users(): JSX.Element {
             </button>
           </div>
         );
+      })()}
+
+      {(() => {
+        const totalPages = Math.ceil(total / size);
+        return totalPages > 1 && !q ? (
+          <Pagination page={page} totalPages={totalPages} onChange={setPage} />
+        ) : null;
       })()}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />

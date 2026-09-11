@@ -291,8 +291,8 @@ export const api = {
     request<ApiResponse<Record<string, unknown>>>('PUT', `${API_BASE}/limits`, data),
 
   // Users
-  listUsers: (): Promise<ApiList<User>> =>
-    request<ApiList<User>>('GET', `${API_BASE}/users`),
+  listUsers: (params: Record<string, string | number> = {}): Promise<ApiList<User>> =>
+    request<ApiList<User>>('GET', `${API_BASE}/users?${buildQuery(params)}`),
   createUser: (data: Record<string, unknown>): Promise<ApiResponse<User>> =>
     request<ApiResponse<User>>('POST', `${API_BASE}/users`, data),
   updateUser: (id: string | number, data: Record<string, unknown>): Promise<ApiResponse<User>> =>
