@@ -56,9 +56,19 @@ export default function ModelMappingEditor(props: ModelMappingEditorProps): JSX.
     return Object.entries(obj).map(([from, to]) => ({ id: `m-${++nextId.current}`, from, to }));
   };
 
+  const sameMapping = (a: Record<string, string>, b: Record<string, string>): boolean => {
+    const ak = Object.keys(a);
+    const bk = Object.keys(b);
+    if (ak.length !== bk.length) return false;
+    for (const k of ak) if (a[k] !== b[k]) return false;
+    return true;
+  };
+
   // 外部 value 变化时同步
   useEffect(() => {
     const obj = props.value || {};
+    // 避免反馈循环：空行（from 未填）产出 {} → 父组件存 {} → 回灌会擦掉正在编辑的空行
+    if (sameMapping(obj, rowsToObj(rows))) return;
     setRows(objToRows(obj));
     setJsonText(JSON.stringify(obj, null, 2));
     // eslint-disable-next-line react-hooks/exhaustive-deps

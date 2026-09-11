@@ -277,7 +277,15 @@ pub async fn handle_available_models(
         .flat_map(|c| {
             let owned_by =
                 crate::model::metadata::owned_by_for_channel_type(c.channel_type.as_str());
-            c.models.into_iter().map(move |m| (m, owned_by))
+            // 与 /v1/models 口径一致：声明 models ∪ discovered_models。
+            // 空 models 渠道用 discovered_models 兜底，避免聊天页拉不到模型。
+            let merged: Vec<String> = c
+                .models
+                .iter()
+                .chain(c.discovered_models.iter())
+                .cloned()
+                .collect();
+            merged.into_iter().map(move |m| (m, owned_by))
         })
         .filter(|(m, _)| {
             !m.is_empty()
