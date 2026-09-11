@@ -12,7 +12,7 @@ import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ChatDebugger from '../components/ChatDebugger';
 import ModelMappingEditor from '../components/ModelMappingEditor';
 import CostPricingEditor from '../components/CostPricingEditor';
-import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
 import './Channels.css';
 
 interface ChannelItem {
@@ -927,15 +927,9 @@ export default function Channels(): JSX.Element {
               </table>
             </div>
 
-            {/* 分页（与 Logs 页一致：上一页 / n / total · 下一页） */}
+            {/* 分页（公共 Pagination 组件，与 Logs 页统一） */}
             {totalPages > 1 && (
-              <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 14, alignItems: 'center' }}>
-                <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>{t('上一页')}</Button>
-                <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                  {page} / {totalPages}
-                </span>
-                <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>{t('下一页')}</Button>
-              </div>
+              <Pagination page={page} totalPages={totalPages} onChange={(p) => setPage(p)} />
             )}
           </>
         )}

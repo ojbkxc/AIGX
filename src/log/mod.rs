@@ -275,6 +275,39 @@ impl RequestLogStore {
         logs
     }
 
+    /// 按 ID 删除单条请求日志（best-effort，不存在视为成功）
+    pub fn delete_by_id(&self, id: &str) -> anyhow::Result<()> {
+        let keys = self.store.list("reqlog:")?;
+        let target = keys.into_iter().find(|k| k.ends_with(&format!(":{id}")));
+        if let Some(k) = target {
+            self.store.delete(&k)?;
+        }
+        Ok(())
+    }
+
+    /// 批量删除请求日志（按 ID 列表），返回成功删除的条数
+    pub fn delete_many(&self, ids: &[String]) -> usize {
+        let mut removed = 0;
+        for id in ids {
+            if self.delete_by_id(id).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    /// 清空全部请求日志，返回删除条数
+    pub fn clear_all(&self) -> anyhow::Result<usize> {
+        let keys = self.store.list("reqlog:")?;
+        let n = keys.len();
+        for k in &keys {
+            if let Err(e) = self.store.delete(k) {
+                tracing::warn!("clear request log failed for {k}: {e}");
+            }
+        }
+        Ok(n)
+    }
+
     /// 按条件过滤并分页。
     ///
     /// 参数：
@@ -484,6 +517,39 @@ impl AuditLogStore {
             .collect();
         logs.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         logs
+    }
+
+    /// 按 ID 删除单条审计日志
+    pub fn delete_by_id(&self, id: &str) -> anyhow::Result<()> {
+        let keys = self.store.list("auditlog:")?;
+        let target = keys.into_iter().find(|k| k.ends_with(&format!(":{id}")));
+        if let Some(k) = target {
+            self.store.delete(&k)?;
+        }
+        Ok(())
+    }
+
+    /// 批量删除审计日志
+    pub fn delete_many(&self, ids: &[String]) -> usize {
+        let mut removed = 0;
+        for id in ids {
+            if self.delete_by_id(id).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    /// 清空全部审计日志
+    pub fn clear_all(&self) -> anyhow::Result<usize> {
+        let keys = self.store.list("auditlog:")?;
+        let n = keys.len();
+        for k in &keys {
+            if let Err(e) = self.store.delete(k) {
+                tracing::warn!("clear audit log failed for {k}: {e}");
+            }
+        }
+        Ok(n)
     }
 
     /// 分页查询

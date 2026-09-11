@@ -507,6 +507,14 @@ export const api = {
     request<ApiList<Record<string, unknown>>>('GET', `${API_BASE}/logs/requests?${buildQuery(params)}`),
   listAuditLogs: (params: Record<string, string | number> = {}): Promise<ApiList<Record<string, unknown>>> =>
     request<ApiList<Record<string, unknown>>>('GET', `${API_BASE}/logs/audits?${buildQuery(params)}`),
+  deleteRequestLogs: (ids: (string | number)[]): Promise<ApiResponse<{ removed?: number }>> =>
+    request<ApiResponse<{ removed?: number }>>('DELETE', `${API_BASE}/logs/requests`, { ids }),
+  clearRequestLogs: (): Promise<ApiResponse<{ removed?: number }>> =>
+    request<ApiResponse<{ removed?: number }>>('DELETE', `${API_BASE}/logs/requests/clear`),
+  deleteAuditLogs: (ids: (string | number)[]): Promise<ApiResponse<{ removed?: number }>> =>
+    request<ApiResponse<{ removed?: number }>>('DELETE', `${API_BASE}/logs/audits`, { ids }),
+  clearAuditLogs: (): Promise<ApiResponse<{ removed?: number }>> =>
+    request<ApiResponse<{ removed?: number }>>('DELETE', `${API_BASE}/logs/audits/clear`),
 
   // 兑换码
   batchRedemptions: (data: Record<string, unknown>): Promise<ApiResponse<{ count?: number; data?: RedemptionItem[] }>> =>

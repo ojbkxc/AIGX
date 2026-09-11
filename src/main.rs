@@ -815,6 +815,23 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/logs/requests/export",
             get(api::admin::handle_export_request_logs),
         )
+        // 日志删除/清空（仅管理员）
+        .route(
+            "/api/logs/requests",
+            delete(api::admin::handle_delete_request_logs),
+        )
+        .route(
+            "/api/logs/requests/clear",
+            delete(api::admin::handle_clear_request_logs),
+        )
+        .route(
+            "/api/logs/audits",
+            delete(api::admin::handle_delete_audit_logs),
+        )
+        .route(
+            "/api/logs/audits/clear",
+            delete(api::admin::handle_clear_audit_logs),
+        )
         // 数据看板
         .route(
             "/api/dashboard/consumption_trend",

@@ -1887,3 +1887,49 @@ code {
   opacity: 0.5;
   Workspace_223994: not-allowed;
 }
+
+/* ── 分页（Pagination 组件，统一 Logs / Channels 等页面） ── */
+.pagination-bar {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.pagination-page {
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.pagination-page:hover:not(:disabled) {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.06));
+}
+
+.pagination-page.active {
+  background: var(--btn-primary-bg, #2f6fed);
+  border-color: var(--btn-primary-bg, #2f6fed);
+  color: #fff;
+  cursor: default;
+}
+
+.pagination-page:disabled {
+  cursor: not-allowed;
+}
+
+.pagination-ellipsis {
+  min-width: 22px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  user-select: none;
+}

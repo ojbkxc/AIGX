@@ -31,7 +31,11 @@ pub use users::{
     handle_manage_user, handle_update_self, handle_update_user,
 };
 
-pub use logs::{handle_export_request_logs, handle_list_audit_logs, handle_list_request_logs};
+pub use logs::{
+    handle_clear_audit_logs, handle_clear_request_logs, handle_delete_audit_logs,
+    handle_delete_request_logs, handle_export_request_logs, handle_list_audit_logs,
+    handle_list_request_logs,
+};
 
 pub use channels::{
     handle_add_channel, handle_available_models, handle_channel_health_archive,

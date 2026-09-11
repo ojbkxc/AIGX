@@ -1,9 +1,11 @@
 import { useState, useEffect, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Trash2, Eraser } from 'lucide-react';
 import { api } from '../api';
 import { isAdmin } from '../lib/utils';
 import { useToast } from '../components/Toast';
-import { Button, Card, Loading, EmptyState } from '../components/ui';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
+import { Button, Card, Loading, EmptyState, Pagination } from '../components/ui';
 
 type LogTab = 'requests' | 'audits';
 type LogView = 'table' | 'timeline';
@@ -61,6 +63,9 @@ export default function Logs(): JSX.Element {
   const [exporting, setExporting] = useState<'json' | 'csv' | null>(null);
   const addToast = useToast();
   const { t } = useTranslation();
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  const [selected, setSelected] = useState<Set<string | number>>(new Set());
+  const [batchDeleting, setBatchDeleting] = useState(false);
 
   const [filters, setFilters] = useState<Filters>({ user: '', model: '', channel: '', start: '', end: '' });
 
@@ -69,6 +74,11 @@ export default function Logs(): JSX.Element {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, page, size]);
+
+  // 切 tab / 翻页时清空选择，避免跨页选中混淆
+  useEffect(() => {
+    setSelected(new Set());
+  }, [tab, page]);
 
   const load = async () => {
     setLoading(true);
@@ -92,6 +102,85 @@ export default function Logs(): JSX.Element {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleBatchDelete = () => {
+    if (selected.size === 0) return;
+    const ids = Array.from(selected);
+    const targetLabel = tab === 'requests' ? t('请求日志') : t('审计日志');
+    setConfirmState({
+      title: t('删除日志'),
+      message: (
+        <>
+          {t('确定删除选中的')} <strong>{ids.length}</strong> {t('条')}{targetLabel}？{t('该操作不可撤销。')}
+        </>
+      ),
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        setBatchDeleting(true);
+        setError('');
+        try {
+          const res = tab === 'requests'
+            ? await api.deleteRequestLogs(ids)
+            : await api.deleteAuditLogs(ids);
+          addToast(`${t('已删除')} ${res?.data?.removed ?? ids.length} ${t('条')}`);
+          setSelected(new Set());
+          await load();
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+        } finally {
+          setBatchDeleting(false);
+        }
+      },
+    });
+  };
+
+  const handleClearAll = () => {
+    const targetLabel = tab === 'requests' ? t('请求日志') : t('审计日志');
+    setConfirmState({
+      title: t('清空日志'),
+      message: (
+        <>
+          {t('确定清空全部')}{targetLabel}？{t('该操作不可撤销。')}
+        </>
+      ),
+      confirmText: t('清空'),
+      danger: true,
+      onConfirm: async () => {
+        setBatchDeleting(true);
+        setError('');
+        try {
+          const res = tab === 'requests'
+            ? await api.clearRequestLogs()
+            : await api.clearAuditLogs();
+          addToast(`${t('已清空')} ${res?.data?.removed ?? 0} ${t('条')}`);
+          setSelected(new Set());
+          setPage(1);
+          await load();
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+        } finally {
+          setBatchDeleting(false);
+        }
+      },
+    });
+  };
+
+  const toggleSelect = (id: string | number): void => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = (): void => {
+    setSelected((prev) => {
+      if (prev.size === logs.length) return new Set();
+      return new Set(logs.map((l) => l.id));
+    });
   };
 
   const handleExport = async (format: 'json' | 'csv') => {
@@ -276,8 +365,30 @@ export default function Logs(): JSX.Element {
               {t('仅显示你自己的请求记录')}
             </div>
           )}
-          <div style={{ marginTop: 12 }}>
+          <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <Button size="sm" onClick={handleSearch}>{t('查询')}</Button>
+            {admin && (
+              <>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={handleBatchDelete}
+                  disabled={selected.size === 0 || batchDeleting}
+                >
+                  <Trash2 size={14} style={{ marginRight: 4 }} />
+                  {t('删除选中')} {selected.size > 0 ? `(${selected.size})` : ''}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleClearAll}
+                  disabled={batchDeleting || total === 0}
+                >
+                  <Eraser size={14} style={{ marginRight: 4 }} />
+                  {t('清空全部')}
+                </Button>
+              </>
+            )}
           </div>
         </Card>
       )}
@@ -295,6 +406,16 @@ export default function Logs(): JSX.Element {
               <thead>
                 {tab === 'requests' ? (
                   <tr>
+                    {admin && (
+                      <th style={{ width: 36 }}>
+                        <input
+                          type="checkbox"
+                          checked={logs.length > 0 && selected.size === logs.length}
+                          onChange={toggleSelectAll}
+                          aria-label={t('全选')}
+                        />
+                      </th>
+                    )}
                     <th>{t('时间')}</th>
                     {admin && <th>{t('用户')}</th>}
                     {admin && <th>{t('原始名')}</th>}
@@ -311,6 +432,16 @@ export default function Logs(): JSX.Element {
                   </tr>
                 ) : (
                   <tr>
+                    {admin && (
+                      <th style={{ width: 36 }}>
+                        <input
+                          type="checkbox"
+                          checked={logs.length > 0 && selected.size === logs.length}
+                          onChange={toggleSelectAll}
+                          aria-label={t('全选')}
+                        />
+                      </th>
+                    )}
                     <th>{t('时间')}</th>
                     <th>{t('管理员')}</th>
                     <th>{t('操作')}</th>
@@ -323,6 +454,16 @@ export default function Logs(): JSX.Element {
                 {logs.map((l) =>
                   isRequest(l) ? (
                     <tr key={l.id}>
+                      {admin && (
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={selected.has(l.id)}
+                            onChange={() => toggleSelect(l.id)}
+                            aria-label={t('选择该行')}
+                          />
+                        </td>
+                      )}
                       <td>{fmtTime(l.created_at)}</td>
                       {admin && (
                         <td
@@ -362,6 +503,16 @@ export default function Logs(): JSX.Element {
                     </tr>
                   ) : (
                     <tr key={l.id}>
+                      {admin && (
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={selected.has(l.id)}
+                            onChange={() => toggleSelect(l.id)}
+                            aria-label={t('选择该行')}
+                          />
+                        </td>
+                      )}
                       <td>{fmtTime(l.created_at)}</td>
                       <td
                         style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
@@ -383,13 +534,11 @@ export default function Logs(): JSX.Element {
         )}
 
         {totalPages > 1 && (
-          <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 16, alignItems: 'center' }}>
-            <button className="btn btn-outline btn-sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>{t('上一页')}</button>
-            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>{page} / {totalPages}</span>
-            <button className="btn btn-outline btn-sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>{t('下一页')}</button>
-          </div>
+          <Pagination page={page} totalPages={totalPages} onChange={setPage} />
         )}
       </Card>
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }

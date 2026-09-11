@@ -243,3 +243,62 @@ pub async fn handle_export_request_logs(
 
     axum::response::IntoResponse::into_response(result)
 }
+
+/// 批量删除请求日志（仅管理员）
+///
+/// Body: `{ "ids": ["id1", "id2", ...] }`；返回 `{ success, removed }`。
+pub async fn handle_delete_request_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<DeleteLogsBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let removed = state.log_store.requests.delete_many(&body.ids);
+    Ok(Json(serde_json::json!({ "success": true, "removed": removed })))
+}
+
+/// 清空全部请求日志（仅管理员）
+pub async fn handle_clear_request_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let removed = state
+        .log_store
+        .requests
+        .clear_all()
+        .map_err(|e| error_response(&format!("Failed to clear: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(serde_json::json!({ "success": true, "removed": removed })))
+}
+
+/// 批量删除审计日志（仅管理员）
+pub async fn handle_delete_audit_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<DeleteLogsBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let removed = state.log_store.audits.delete_many(&body.ids);
+    Ok(Json(serde_json::json!({ "success": true, "removed": removed })))
+}
+
+/// 清空全部审计日志（仅管理员）
+pub async fn handle_clear_audit_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let removed = state
+        .log_store
+        .audits
+        .clear_all()
+        .map_err(|e| error_response(&format!("Failed to clear: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(serde_json::json!({ "success": true, "removed": removed })))
+}
+
+/// 批量删除日志的请求体
+#[derive(Debug, Deserialize)]
+pub struct DeleteLogsBody {
+    #[serde(default)]
+    pub ids: Vec<String>,
+}
