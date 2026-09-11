@@ -949,6 +949,7 @@ export default function Channels(): JSX.Element {
           <div
             className="ch-row-menu-panel ch-row-menu-fixed"
             style={{ top: rowMenuPos.top, left: rowMenuPos.left }}
+            onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
           >
             <button type="button" onClick={() => { setRowMenuId(null); void handleTest(ch.id); }}>
