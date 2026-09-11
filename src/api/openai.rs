@@ -4270,10 +4270,9 @@ pub async fn handle_list_models(
                         {
                             tracing::error!("lazy discover save failed for {}: {e}", ch.id);
                         }
-                        let channel_owned_by =
-                            crate::model::metadata::owned_by_for_channel_type(
-                                ch.channel_type.as_str(),
-                            );
+                        let channel_owned_by = crate::model::metadata::owned_by_for_channel_type(
+                            ch.channel_type.as_str(),
+                        );
                         for m in &discovered {
                             if m.is_empty() || !seen.insert(m.clone()) {
                                 continue;

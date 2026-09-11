@@ -1199,7 +1199,8 @@ pub async fn handle_fetch_channel_models(
 
     let channel_type = crate::channel::ChannelType::from_str_lossy(&body.channel_type);
     let channel_id_for_save = body.channel_id.clone();
-    let (url, models) = fetch_upstream_models(&state, channel_type, &body.base_url, &api_key).await?;
+    let (url, models) =
+        fetch_upstream_models(&state, channel_type, &body.base_url, &api_key).await?;
 
     if let Some(cid) = channel_id_for_save.split(',').next() {
         if !cid.trim().is_empty() && state.channel_store.get(cid).is_some() {

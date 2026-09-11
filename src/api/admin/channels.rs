@@ -274,7 +274,9 @@ pub async fn handle_available_models(
     // 的启用渠道做一次懒加载：调上游 /models 发现并写回 discovered_models，
     // 下次请求即可命中缓存，本次也立即用上。
     // 与 /v1/models 口径一致：冷却/断路器打开的渠道不参与聚合与懒加载。
-    let collect_models = |channels: &[Channel], store: &crate::channel::ChannelStore| -> Vec<(String, Option<&'static str>)> {
+    let collect_models = |channels: &[Channel],
+                          store: &crate::channel::ChannelStore|
+     -> Vec<(String, Option<&'static str>)> {
         let mut seen = std::collections::HashSet::new();
         let mut out: Vec<(String, Option<&'static str>)> = Vec::new();
         for c in channels {
@@ -334,8 +336,9 @@ pub async fn handle_available_models(
                         {
                             tracing::error!("lazy discover save failed for {}: {e}", ch.id);
                         }
-                        let owned_by =
-                            crate::model::metadata::owned_by_for_channel_type(ch.channel_type.as_str());
+                        let owned_by = crate::model::metadata::owned_by_for_channel_type(
+                            ch.channel_type.as_str(),
+                        );
                         for m in &discovered {
                             if m.is_empty() {
                                 continue;

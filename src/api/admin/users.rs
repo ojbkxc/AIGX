@@ -16,7 +16,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{default_page, default_size, error_response, record_audit, verify_admin, verify_user};
+use super::common::{
+    default_page, default_size, error_response, record_audit, verify_admin, verify_user,
+};
 
 use crate::user::{Role, User};
 
