@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 use super::super::openai::AppState;
 use super::common::{error_response, verify_admin, verify_user};
+use super::legacy::fetch_upstream_models;
 
 // 这里需要引用主 crate 的 Channel 和相关类型
 use crate::channel::{Channel, ChannelType};
@@ -268,25 +269,76 @@ pub async fn handle_available_models(
         Some(list) => list.is_empty(),
     };
     let allow_set = group_allow.unwrap_or_default();
-    let mut seen = std::collections::HashSet::new();
-    let models: Vec<Value> = state
-        .channel_store
-        .list()
-        .into_iter()
-        .filter(|c| c.is_enabled())
-        .flat_map(|c| {
+
+    // 先把已有 models/discovered_models 聚合出来；若结果为空，对"留空=全部"
+    // 的启用渠道做一次懒加载：调上游 /models 发现并写回 discovered_models，
+    // 下次请求即可命中缓存，本次也立即用上。
+    let collect_models = |channels: &[Channel]| -> Vec<(String, Option<&'static str>)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out: Vec<(String, Option<&'static str>)> = Vec::new();
+        for c in channels {
+            if !c.is_enabled() {
+                continue;
+            }
             let owned_by =
                 crate::model::metadata::owned_by_for_channel_type(c.channel_type.as_str());
-            // 与 /v1/models 口径一致：声明 models ∪ discovered_models。
-            // 空 models 渠道用 discovered_models 兜底，避免聊天页拉不到模型。
-            let merged: Vec<String> = c
-                .models
-                .iter()
-                .chain(c.discovered_models.iter())
-                .cloned()
-                .collect();
-            merged.into_iter().map(move |m| (m, owned_by))
-        })
+            for m in c.models.iter().chain(c.discovered_models.iter()) {
+                if m.is_empty() || !seen.insert(m.clone()) {
+                    continue;
+                }
+                out.push((m.clone(), owned_by));
+            }
+        }
+        out
+    };
+
+    let channels = state.channel_store.list();
+    let mut models = collect_models(&channels);
+
+    if models.is_empty() {
+        let empty_channels: Vec<Channel> = channels
+            .iter()
+            .filter(|c| c.is_enabled() && c.models.is_empty() && c.discovered_models.is_empty())
+            .cloned()
+            .collect();
+        for ch in &empty_channels {
+            let key = ch.decode_api_key();
+            // CF/Zai 无需 base_url 也能拉；其余要求非空 base_url
+            if ch.base_url.trim().is_empty()
+                && ch.channel_type != crate::channel::ChannelType::Cloudflare
+                && ch.channel_type != crate::channel::ChannelType::Gemini
+                && ch.channel_type != crate::channel::ChannelType::Zai
+            {
+                continue;
+            }
+            match fetch_upstream_models(&state, ch.channel_type, &ch.base_url, &key).await {
+                Ok((_url, discovered)) => {
+                    if !discovered.is_empty() {
+                        if let Err(e) = state
+                            .channel_store
+                            .save_discovered_models(&ch.id, discovered.clone())
+                        {
+                            tracing::error!("lazy discover save failed for {}: {e}", ch.id);
+                        }
+                        let owned_by =
+                            crate::model::metadata::owned_by_for_channel_type(ch.channel_type.as_str());
+                        for m in &discovered {
+                            if m.is_empty() {
+                                continue;
+                            }
+                            models.push((m.clone(), owned_by));
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("lazy discover failed for channel {}: {:?}", ch.id, e),
+            }
+        }
+    }
+
+    // 去重 + 组白名单过滤
+    let mut seen = std::collections::HashSet::new();
+    let data: Vec<Value> = models
+        .into_iter()
         .filter(|(m, _)| {
             !m.is_empty()
                 && seen.insert(m.clone())
@@ -306,7 +358,7 @@ pub async fn handle_available_models(
             })
         })
         .collect();
-    Ok(Json(json!({ "success": true, "data": models })))
+    Ok(Json(json!({ "success": true, "data": data })))
 }
 
 /// 添加新渠道

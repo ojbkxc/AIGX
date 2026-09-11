@@ -1199,9 +1199,46 @@ pub async fn handle_fetch_channel_models(
 
     let channel_type = crate::channel::ChannelType::from_str_lossy(&body.channel_type);
     let channel_id_for_save = body.channel_id.clone();
+    let (url, models) = fetch_upstream_models(&state, channel_type, &body.base_url, &api_key).await?;
+
+    if let Some(cid) = channel_id_for_save.split(',').next() {
+        if !cid.trim().is_empty() && state.channel_store.get(cid).is_some() {
+            if let Err(e) = state
+                .channel_store
+                .save_discovered_models(cid, models.clone())
+            {
+                tracing::error!("Failed to persist discovered models for channel {cid}: {e}");
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "url": url,
+            "models": models,
+            "count": models.len(),
+        }
+    })))
+}
+
+/// 拉取上游模型列表（按渠道类型走对应协议）。
+///
+/// 抽自 `handle_fetch_channel_models` 供 `handle_available_models` 懒加载复用：
+/// 当渠道 `models` 与 `discovered_models` 均为空时，聊天页 /api/models/available
+/// 会调此函数主动发现上游模型，写回 `discovered_models` 缓存，避免"留空=全部"
+/// 渠道在聊天页一个模型都拉不到。
+///
+/// 返回 `(url, models)` 或 `Err(error_response)`。
+pub async fn fetch_upstream_models(
+    state: &AppState,
+    channel_type: ChannelType,
+    base_url: &str,
+    api_key: &str,
+) -> Result<(String, Vec<String>), (StatusCode, Json<Value>)> {
     let (url, models) = match channel_type {
         crate::channel::ChannelType::OpenaiCompatible => {
-            let base = body.base_url.trim().trim_end_matches('/');
+            let base = base_url.trim().trim_end_matches('/');
             if base.is_empty() {
                 return Err(error_response(
                     "base_url is required",
@@ -1269,7 +1306,7 @@ pub async fn handle_fetch_channel_models(
             (url, models)
         }
         crate::channel::ChannelType::Anthropic => {
-            let base = body.base_url.trim().trim_end_matches('/');
+            let base = base_url.trim().trim_end_matches('/');
             if base.is_empty() {
                 return Err(error_response(
                     "base_url is required",
@@ -1288,7 +1325,7 @@ pub async fn handle_fetch_channel_models(
                 })?;
             let resp = client
                 .get(&url)
-                .header("x-api-key", &api_key)
+                .header("x-api-key", api_key)
                 .header("anthropic-version", "2023-06-01")
                 .send()
                 .await
@@ -1328,8 +1365,8 @@ pub async fn handle_fetch_channel_models(
         }
         crate::channel::ChannelType::Cloudflare => {
             // Cloudflare 渠道：走 cf-ai-gw Worker（Binding 架构）
-            let worker_url = if !body.base_url.trim().is_empty() {
-                body.base_url.trim().trim_end_matches('/').to_string()
+            let worker_url = if !base_url.trim().is_empty() {
+                base_url.trim().trim_end_matches('/').to_string()
             } else {
                 state
                     .config_manager
@@ -1391,7 +1428,7 @@ pub async fn handle_fetch_channel_models(
         crate::channel::ChannelType::Gemini => {
             // Google Gemini 模型发现：GET {base_url}/models，用 x-goog-api-key 鉴权
             // 响应格式：{models: [{name: "models/gemini-pro", ...}]}
-            let base = body.base_url.trim().trim_end_matches('/');
+            let base = base_url.trim().trim_end_matches('/');
             let base = if base.is_empty() {
                 "https://generativelanguage.googleapis.com/v1beta"
             } else {
@@ -1409,7 +1446,7 @@ pub async fn handle_fetch_channel_models(
                 })?;
             let resp = client
                 .get(&url)
-                .header("x-goog-api-key", &api_key)
+                .header("x-goog-api-key", api_key)
                 .send()
                 .await
                 .map_err(|e| {
@@ -1455,7 +1492,7 @@ pub async fn handle_fetch_channel_models(
         crate::channel::ChannelType::Zai => {
             // 智谱 AI（Z.AI）模型发现：智谱 AI 无公开 models 列表端点，
             // 返回常见 GLM 模型作为候选列表（管理员可手动调整）。
-            let base = body.base_url.trim().trim_end_matches('/');
+            let base = base_url.trim().trim_end_matches('/');
             let base = if base.is_empty() {
                 "https://api.z.ai/api/v2"
             } else {
@@ -1474,25 +1511,7 @@ pub async fn handle_fetch_channel_models(
             (url, models)
         }
     };
-    if let Some(cid) = channel_id_for_save.split(',').next() {
-        if !cid.trim().is_empty() && state.channel_store.get(cid).is_some() {
-            if let Err(e) = state
-                .channel_store
-                .save_discovered_models(cid, models.clone())
-            {
-                tracing::error!("Failed to persist discovered models for channel {cid}: {e}");
-            }
-        }
-    }
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "data": {
-            "url": url,
-            "models": models,
-            "count": models.len(),
-        }
-    })))
+    Ok((url, models))
 }
 
 // ── 渠道对话调试（Chat Tester）────────────────────────────────────────
