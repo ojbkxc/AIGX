@@ -8,6 +8,13 @@
 //! 状态聚合成一个「网络层」视图，供管理后台的 /api/network/* 路由使用。
 //! 网络层自身的运行时组件（连接池、会话池）继续由主 crate 的对应模块驱动，
 //! 这里仅做观测与运维控制，避免重复实现状态机。
+//!
+//! 2026-09-12 重构（彻底版）：
+//! - enabled 开关真实化：持久化到 FileStore；关闭时数据面（chat/completions/
+//!   embeddings/messages）统一拒绝转发，管理面不受影响。
+//! - 配置真实化：strategy + 池参数持久化到 FileStore，重启保留。
+//! - 统计真实化：连接池成功率/延迟来自 health_archive 当日窗口，
+//!   会话池来自亲和缓存 + 活跃用户，账号池来自 CF 账号池真实状态。
 
 use axum::{
     extract::{Path, State},
@@ -20,10 +27,102 @@ use serde_json::{json, Value};
 use super::super::openai::AppState;
 use crate::account::CfAccount;
 
+/// 持久化 key：FileStore 中的网络层配置 JSON。
+const NETWORK_CONFIG_STORE_KEY: &str = "network_layer_config";
+
+/// 网络层运行时配置（持久化）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkLayerConfig {
+    /// 是否启用数据面转发（false 时所有推理请求返回 503）
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// 负载均衡策略（展示与调度策略缓存联动）
+    #[serde(default = "default_strategy")]
+    pub strategy: String,
+    /// 账号池下限（低于该值时告警）
+    #[serde(default = "default_account_pool_min")]
+    pub account_pool_min: usize,
+    /// 账号池上限
+    #[serde(default = "default_account_pool_max")]
+    pub account_pool_max: usize,
+    /// 连接池上限（单渠道并发上限参考）
+    #[serde(default = "default_connection_pool_max")]
+    pub connection_pool_max: usize,
+    /// 会话池上限（亲和缓存容量参考）
+    #[serde(default = "default_session_pool_max")]
+    pub session_pool_max: usize,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+fn default_strategy() -> String {
+    "priority+weighted+circuit".to_string()
+}
+fn default_account_pool_min() -> usize {
+    2
+}
+fn default_account_pool_max() -> usize {
+    10
+}
+fn default_connection_pool_max() -> usize {
+    10
+}
+fn default_session_pool_max() -> usize {
+    50
+}
+
+impl Default for NetworkLayerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            strategy: default_strategy(),
+            account_pool_min: default_account_pool_min(),
+            account_pool_max: default_account_pool_max(),
+            connection_pool_max: default_connection_pool_max(),
+            session_pool_max: default_session_pool_max(),
+        }
+    }
+}
+
+/// 加载网络层配置（无记录时用默认值；读失败降级默认并记录）
+pub fn load_network_config(state: &AppState) -> NetworkLayerConfig {
+    match state.alert_store.get::<NetworkLayerConfig>(NETWORK_CONFIG_STORE_KEY) {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => NetworkLayerConfig::default(),
+        Err(e) => {
+            tracing::warn!("加载网络层配置失败，使用默认值: {e}");
+            NetworkLayerConfig::default()
+        }
+    }
+}
+
+/// 数据面闸门：网络层关闭时拒绝转发请求。
+///
+/// 调用方（openai::handle_chat_completions 等）在鉴权后立即检查；
+/// 管理面 /api/* 与监控端点不经过此闸门，保证关停状态下仍可管理。
+pub fn network_layer_gate(state: &AppState) -> Result<(), Response> {
+    let cfg = load_network_config(state);
+    if !cfg.enabled {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "network_layer_disabled",
+                    "type": "api_error",
+                    "message": "网络层已停用：推理转发被管理员关闭。请稍后重试或联系管理员。",
+                }
+            })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
 /// 网络层状态信息
 #[derive(Debug, Serialize)]
 pub struct NetworkStatus {
-    /// 网络层是否启用（始终为 true：数据面即网络层）
+    /// 网络层是否启用（来自持久化配置）
     pub enabled: bool,
     /// 账号池状态
     pub account_pool: AccountPoolStatus,
@@ -35,6 +134,8 @@ pub struct NetworkStatus {
     pub load_balance_strategy: String,
     /// 最后检查时间（unix 秒）
     pub last_check_at: i64,
+    /// 当前生效的持久化配置
+    pub config: NetworkLayerConfig,
 }
 
 /// 账号池状态
@@ -76,11 +177,19 @@ pub struct SessionPoolStats {
 pub struct NetworkConfigRequest {
     /// 是否启用网络层
     pub enabled: bool,
-    /// 负载均衡策略（暂存，后续接入渠道调度权重时使用）
+    /// 负载均衡策略
     pub strategy: Option<String>,
+    /// 账号池下限
+    pub account_pool_min: Option<usize>,
+    /// 账号池上限
+    pub account_pool_max: Option<usize>,
+    /// 连接池上限
+    pub connection_pool_max: Option<usize>,
+    /// 会话池上限
+    pub session_pool_max: Option<usize>,
 }
 
-/// 网络层配置响应
+/// 网络层配置响应（返回持久化后的生效值）
 #[derive(Debug, Serialize)]
 pub struct NetworkConfigResponse {
     pub enabled: bool,
@@ -102,12 +211,18 @@ pub struct AccountConfigRequest {
 
 /// 获取网络层健康状态
 ///
-/// 聚合主 crate 各子系统（账号池 / 渠道 / 健康追踪 / 断路器）的真实状态，
-/// 供管理后台「网络层」面板展示。
+/// 聚合主 crate 各子系统（账号池 / 渠道 / 健康追踪 / 断路器 / 健康归档）
+/// 的真实状态，供管理后台「网络层」面板展示。
 pub async fn health_check(State(state): State<AppState>) -> Json<NetworkStatus> {
+    let cfg = load_network_config(&state);
+
     let accounts = state.account_pool.list();
     let total_accounts = accounts.len();
     let available_accounts = accounts.iter().filter(|a| a.status == "active").count();
+    let busy_accounts = accounts
+        .iter()
+        .filter(|a| a.last_used_at.is_some_and(|t| chrono::Utc::now().timestamp() - t < 300))
+        .count();
     let error_accounts = accounts.iter().filter(|a| a.status == "error").count();
     let invalid_accounts = accounts.iter().filter(|a| a.status == "pending").count();
 
@@ -115,31 +230,60 @@ pub async fn health_check(State(state): State<AppState>) -> Json<NetworkStatus> 
     let total_connections = channels.len();
     let active_connections = channels.iter().filter(|c| c.is_enabled()).count();
     let idle_connections = total_connections - active_connections;
-    // 渠道失败数通过断路器打开数估算；成功数 = 已启用渠道数
-    let failed_requests = channels
-        .iter()
-        .filter(|c| state.channel_store.circuit_breaker().get_state(&c.id) == "open")
-        .count() as u64;
 
-    // 会话：亲和路由会话数 + 活跃用户会话（按分组数与活跃用户数近似）
-    let total_sessions = state.user_group_store.list().len();
-    let active_sessions = state
+    // 连接池请求数/延迟：从 health_archive 当日窗口聚合（真实建流统计）
+    let mut successful_requests: u64 = 0;
+    let mut failed_requests: u64 = 0;
+    let mut latency_sum: u64 = 0;
+    let mut latency_count: u64 = 0;
+    let mut breaker_open: u64 = 0;
+    for ch in &channels {
+        if state.channel_store.circuit_breaker().get_state(&ch.id) == "open" {
+            breaker_open += 1;
+        }
+        if let Some(today) = state
+            .channel_store
+            .health_archive()
+            .query(&ch.id, 1)
+            .pop()
+        {
+            successful_requests += today.success;
+            failed_requests += today.failure;
+            // 平均延迟按各渠道请求数加权（P95 作为窗口代表值）
+            let n = today.success + today.failure;
+            if n > 0 {
+                latency_sum += today.p95_ms() * n;
+                latency_count += n;
+            }
+        }
+    }
+    let avg_latency_ms = if latency_count > 0 {
+        latency_sum as f64 / latency_count as f64
+    } else {
+        0.0
+    };
+    let _ = breaker_open;
+
+    // 会话：亲和缓存会话 + 活跃用户
+    let affinity_sessions = state.channel_store.affinity_cache().len();
+    let active_users = state
         .user_store
         .list()
         .iter()
         .filter(|u| u.status == "active")
         .count();
-    let idle_sessions = total_sessions.saturating_sub(active_sessions);
+    let total_sessions = affinity_sessions.max(active_users);
+    let idle_sessions = total_connections.saturating_sub(active_connections);
 
     Json(NetworkStatus {
-        enabled: true,
+        enabled: cfg.enabled,
         account_pool: AccountPoolStatus {
             total_accounts,
             available_accounts,
-            busy_accounts: 0,
+            busy_accounts,
             error_accounts,
             invalid_accounts,
-            total_requests: state.usage_tracker.monthly_stats().total(),
+            total_requests: state.usage_tracker.today_stats().requests,
             failed_requests,
         },
         connection_pool: ConnectionPoolStatus {
@@ -148,40 +292,71 @@ pub async fn health_check(State(state): State<AppState>) -> Json<NetworkStatus> 
             idle_connections,
             total_connections_created: total_connections as u64,
             total_connections_closed: 0,
-            successful_requests: active_connections as u64,
+            successful_requests,
             failed_requests,
-            avg_latency_ms: 0.0,
+            avg_latency_ms,
         },
         session_pool: SessionPoolStats {
             total_sessions,
-            active_sessions,
+            active_sessions: active_users,
             idle_sessions,
             session_ttl_hours: 72,
         },
-        load_balance_strategy: "priority+weighted+circuit".to_string(),
+        load_balance_strategy: cfg.strategy.clone(),
         last_check_at: chrono::Utc::now().timestamp(),
+        config: cfg,
     })
 }
 
-/// 更新网络层配置
+/// 更新网络层配置（持久化到 FileStore，重启保留）
 pub async fn update_network_config(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(_config_id): Path<String>,
     Json(request): Json<NetworkConfigRequest>,
 ) -> Result<Json<NetworkConfigResponse>, ApiError> {
-    if !request.enabled {
-        return Err(ApiError::NetworkLayerDisabled);
+    // 读-改-写：以当前生效配置为底，覆盖请求中出现的字段
+    let mut cfg = load_network_config(&state);
+    cfg.enabled = request.enabled;
+    if let Some(strategy) = request.strategy.as_deref() {
+        if !strategy.is_empty() {
+            cfg.strategy = strategy.to_string();
+        }
     }
-    // 配置目前由 config.toml 的渠道调度参数驱动；策略仅用于展示与后续扩展。
+    if let Some(v) = request.account_pool_min {
+        cfg.account_pool_min = v;
+    }
+    if let Some(v) = request.account_pool_max {
+        cfg.account_pool_max = v.max(cfg.account_pool_min);
+    }
+    if let Some(v) = request.connection_pool_max {
+        cfg.connection_pool_max = v;
+    }
+    if let Some(v) = request.session_pool_max {
+        cfg.session_pool_max = v;
+    }
+
+    state
+        .alert_store
+        .put(NETWORK_CONFIG_STORE_KEY, &cfg)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    tracing::info!(
+        "网络层配置已更新: enabled={} strategy={} 池参数 {}/{}/{}/{}",
+        cfg.enabled,
+        cfg.strategy,
+        cfg.account_pool_min,
+        cfg.account_pool_max,
+        cfg.connection_pool_max,
+        cfg.session_pool_max
+    );
+
     Ok(Json(NetworkConfigResponse {
-        enabled: request.enabled,
-        strategy: request
-            .strategy
-            .unwrap_or_else(|| "priority+weighted+circuit".to_string()),
-        account_pool_min: 2,
-        account_pool_max: 10,
-        connection_pool_max: 10,
-        session_pool_max: 50,
+        enabled: cfg.enabled,
+        strategy: cfg.strategy,
+        account_pool_min: cfg.account_pool_min,
+        account_pool_max: cfg.account_pool_max,
+        connection_pool_max: cfg.connection_pool_max,
+        session_pool_max: cfg.session_pool_max,
     }))
 }
 
@@ -245,17 +420,39 @@ pub async fn remove_network_account(
     })))
 }
 
+/// 列出网络层账号（CF 账号池真实状态）
+pub async fn list_network_accounts(State(state): State<AppState>) -> Json<Value> {
+    let accounts = state.account_pool.list();
+    let items: Vec<Value> = accounts
+        .iter()
+        .map(|a| {
+            json!({
+                "id": a.id,
+                "name": a.name,
+                "account_id": a.account_id,
+                "status": a.status,
+                "last_error": a.last_error,
+                "last_used_at": a.last_used_at,
+                "created_at": a.created_at,
+            })
+        })
+        .collect();
+    Json(json!({ "success": true, "data": items }))
+}
+
 /// 重启网络层
 ///
 /// 复位所有渠道的断路器与健康追踪状态；渠道探活由后台 prober 周期执行。
 pub async fn restart_network(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mut count = 0usize;
     for ch in state.channel_store.list() {
         state.channel_store.circuit_breaker().reset(&ch.id);
         state.channel_store.health_tracker().reset(&ch.id);
+        count += 1;
     }
     Ok(Json(json!({
         "success": true,
-        "message": "网络层重启完成",
+        "message": format!("网络层重启完成（已重置 {count} 个渠道的断路器与健康状态）"),
         "status": "started"
     })))
 }

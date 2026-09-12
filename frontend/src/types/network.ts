@@ -73,7 +73,7 @@ export const defaultNetworkStatus: NetworkStatus = {
 /** 网络层配置请求 */
 export interface NetworkConfigRequest {
   enabled: boolean;
-  strategy: string;
+  strategy?: string;
   account_pool_min?: number;
   account_pool_max?: number;
   connection_pool_max?: number;
@@ -88,6 +88,27 @@ export interface NetworkConfigResponse {
   accountPoolMax: number;
   connectionPoolMax: number;
   sessionPoolMax: number;
+}
+
+/** 网络层持久化配置（status 接口内嵌返回，snake_case） */
+export interface NetworkLayerConfig {
+  enabled: boolean;
+  strategy: string;
+  account_pool_min: number;
+  account_pool_max: number;
+  connection_pool_max: number;
+  session_pool_max: number;
+}
+
+/** 网络层账号（GET /api/network/accounts 返回） */
+export interface NetworkAccount {
+  id: string;
+  name: string;
+  account_id: string;
+  status: string;
+  last_error: string | null;
+  last_used_at: number | null;
+  created_at: number;
 }
 
 /** 网络层账号配置 */
@@ -211,6 +232,7 @@ export interface NetworkStatusRaw {
   };
   load_balance_strategy: string;
   last_check_at: number;
+  config?: NetworkLayerConfig;
 }
 
 /** 后端 PUT /api/network/config/:id 的 snake_case 响应 */

@@ -250,6 +250,11 @@ pub async fn handle_messages(
         Err(e) => return e.into_response(),
     };
 
+    // 网络层闸门：管理员关闭网络层时拒绝转发（管理面不受影响）
+    if let Err(resp) = crate::api::admin::network::network_layer_gate(&state) {
+        return resp;
+    }
+
     // 限流检查（功能 3）
     let rate_bundle = match state
         .rate_limiter

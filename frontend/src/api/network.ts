@@ -6,6 +6,7 @@ import type {
   AccountConfigRequest,
   ApiEnvelope,
   NetworkStatusRaw,
+  NetworkAccount,
 } from '../types/network';
 
 const BASE_URL = '';
@@ -80,6 +81,11 @@ export async function removeNetworkAccount(accountId: string | number): Promise<
   return request<Record<string, unknown>>('DELETE', `/api/network/accounts/${accountId}`);
 }
 
+// 列出网络层账号
+export async function listNetworkAccounts(): Promise<{ success: boolean; data: NetworkAccount[] }> {
+  return request<{ success: boolean; data: NetworkAccount[] }>('GET', '/api/network/accounts');
+}
+
 // 获取网络层原始状态（供监控面板聚合换算为指标）
 export async function getNetworkMetrics(): Promise<ApiEnvelope<NetworkStatusRaw>> {
   const res = await fetch(`${BASE_URL}/api/network/status`, {
@@ -98,5 +104,6 @@ export const api = {
   restartNetwork,
   addNetworkAccount,
   removeNetworkAccount,
+  listNetworkAccounts,
   getNetworkMetrics,
 };

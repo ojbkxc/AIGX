@@ -1388,6 +1388,11 @@ pub async fn handle_chat_completions(
         Err(e) => return e.into_response(),
     };
 
+    // 网络层闸门：管理员关闭网络层时拒绝转发（管理面不受影响）
+    if let Err(resp) = crate::api::admin::network::network_layer_gate(&state) {
+        return resp;
+    }
+
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
@@ -2250,6 +2255,11 @@ pub async fn handle_responses(
         Err(e) => return e.into_response(),
     };
 
+    // 网络层闸门：管理员关闭网络层时拒绝转发（管理面不受影响）
+    if let Err(resp) = crate::api::admin::network::network_layer_gate(&state) {
+        return resp;
+    }
+
     // 限流检查：鉴权后、推理前（Responses 端点同样纳入限流）
     let rate_bundle = match state
         .rate_limiter
@@ -2739,6 +2749,16 @@ pub async fn handle_completions(
     let api_key = verify_api_key_full(&state, &headers, model)?;
     let model_owned = model.to_string();
 
+    // 网络层闸门：管理员关闭网络层时拒绝转发
+    let _nl_cfg = crate::api::admin::network::load_network_config(&state);
+    if !_nl_cfg.enabled {
+        return Err(error_response(
+            "network_layer_disabled",
+            "网络层已停用：推理转发被管理员关闭。请稍后重试。",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
@@ -2977,6 +2997,16 @@ pub async fn handle_embeddings(
 
     let api_key = verify_api_key_full(&state, &headers, model)?;
     let model_owned = model.to_string();
+
+    // 网络层闸门：管理员关闭网络层时拒绝转发
+    let _nl_cfg = crate::api::admin::network::load_network_config(&state);
+    if !_nl_cfg.enabled {
+        return Err(error_response(
+            "network_layer_disabled",
+            "网络层已停用：推理转发被管理员关闭。请稍后重试。",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
 
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
@@ -3258,6 +3288,16 @@ pub async fn handle_rerank(
     let api_key = verify_api_key_full(&state, &headers, model)?;
     let model_owned = model.to_string();
     let query_owned = query.to_string();
+
+    // 网络层闸门：管理员关闭网络层时拒绝转发
+    let _nl_cfg = crate::api::admin::network::load_network_config(&state);
+    if !_nl_cfg.enabled {
+        return Err(error_response(
+            "network_layer_disabled",
+            "网络层已停用：推理转发被管理员关闭。请稍后重试。",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
 
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
@@ -3572,6 +3612,16 @@ pub async fn handle_images_generations(
     let api_key = verify_api_key_full(&state, &headers, model)?;
     let model_owned = model.to_string();
 
+    // 网络层闸门：管理员关闭网络层时拒绝转发
+    let _nl_cfg = crate::api::admin::network::load_network_config(&state);
+    if !_nl_cfg.enabled {
+        return Err(error_response(
+            "network_layer_disabled",
+            "网络层已停用：推理转发被管理员关闭。请稍后重试。",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
@@ -3809,6 +3859,16 @@ pub async fn handle_audio_transcriptions(
     // 完整鉴权（问题 1）
     let api_key = verify_api_key_full(&state, &headers, &model)?;
 
+    // 网络层闸门：管理员关闭网络层时拒绝转发
+    let _nl_cfg = crate::api::admin::network::load_network_config(&state);
+    if !_nl_cfg.enabled {
+        return Err(error_response(
+            "network_layer_disabled",
+            "网络层已停用：推理转发被管理员关闭。请稍后重试。",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
@@ -3955,6 +4015,16 @@ pub async fn handle_audio_translations(
     // 完整鉴权（问题 1）
     let api_key = verify_api_key_full(&state, &headers, &model)?;
 
+    // 网络层闸门：管理员关闭网络层时拒绝转发
+    let _nl_cfg = crate::api::admin::network::load_network_config(&state);
+    if !_nl_cfg.enabled {
+        return Err(error_response(
+            "network_layer_disabled",
+            "网络层已停用：推理转发被管理员关闭。请稍后重试。",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state
         .rate_limiter
@@ -4073,6 +4143,16 @@ pub async fn handle_audio_speech(
     // 完整鉴权（问题 1）
     let api_key = verify_api_key_full(&state, &headers, model)?;
     let model_owned = model.to_string();
+
+    // 网络层闸门：管理员关闭网络层时拒绝转发
+    let _nl_cfg = crate::api::admin::network::load_network_config(&state);
+    if !_nl_cfg.enabled {
+        return Err(error_response(
+            "network_layer_disabled",
+            "网络层已停用：推理转发被管理员关闭。请稍后重试。",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
 
     // 限流检查（功能 3）：鉴权后、推理前
     let rate_bundle = match state

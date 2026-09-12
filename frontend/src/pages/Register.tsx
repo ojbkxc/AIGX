@@ -215,7 +215,7 @@ export default function Register() {
             margin: '0 auto 14px',
             color: 'white',
           }}>
-            ⚡
+            <img src="/logo.png" alt="AIGX" width={30} height={30} style={{ borderRadius: 6 }} />
           </div>
           <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text-main)', marginBottom: '4px', fontFamily: "'Inter', sans-serif" }}>
             {t('创建账号')}

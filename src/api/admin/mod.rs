@@ -131,6 +131,6 @@ pub use legacy::fetch_upstream_models;
 
 // 网络层管理（main.rs /api/network/* 路由）
 pub use network::{
-    add_network_account, health_check, remove_network_account, restart_network,
-    update_network_config,
+    add_network_account, health_check, list_network_accounts, load_network_config,
+    network_layer_gate, remove_network_account, restart_network, update_network_config,
 };

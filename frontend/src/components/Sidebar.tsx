@@ -7,7 +7,7 @@ import { isAdmin } from '../lib/utils';
 import {
   LayoutDashboard, Satellite, KeyRound,
   Users, Wallet, Ticket, ScrollText, Package,
-  Settings, Zap, ChevronDown, Menu, UserRound,
+  Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Coins,
 } from 'lucide-react';
@@ -151,7 +151,7 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
       {/* Logo（收缩态仅剩居中 logo） */}
       <div className="sidebar-head">
         <div className="sidebar-logo">
-          <Zap size={14} strokeWidth={2} />
+          <img src="/logo.png" alt="AIGX" width={16} height={16} style={{ borderRadius: 4 }} />
         </div>
         <div className="sidebar-head-text">
           <div className="sidebar-title">AIGX</div>

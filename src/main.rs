@@ -1137,6 +1137,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/network/accounts/:account_id",
             delete(api::admin::remove_network_account),
+        )
+        .route(
+            "/api/network/accounts",
+            get(api::admin::list_network_accounts),
         );
 
     // EasyPay 回调（异步通知 + 同步跳转）— 无需鉴权
