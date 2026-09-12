@@ -574,7 +574,7 @@ pub struct UpdateEpayConfigRequest {
     pub epay_key: Option<String>,
     pub pay_methods: Option<Vec<String>>,
     pub price: Option<f64>,
-    pub amount_discount: Option<std::collections::HashMap<i64, f64>>,
+    pub amount_discount: Option<std::collections::HashMap<String, f64>>,
     pub min_topup: Option<i64>,
     pub custom_callback_address: Option<String>,
     pub server_address: Option<String>,

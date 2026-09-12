@@ -28,7 +28,7 @@ pub struct TopupRequest {
 fn pay_money(epay: &EpayConfig, amount: i64) -> f64 {
     let discount = *epay
         .amount_discount
-        .get(&amount)
+        .get(&amount.to_string())
         .filter(|d| **d > 0.0)
         .unwrap_or(&1.0);
     let money = (amount as f64) * discount;
@@ -39,7 +39,7 @@ fn pay_money(epay: &EpayConfig, amount: i64) -> f64 {
 fn topup_quota(epay: &EpayConfig, amount: i64) -> i64 {
     let discount = *epay
         .amount_discount
-        .get(&amount)
+        .get(&amount.to_string())
         .filter(|d| **d > 0.0)
         .unwrap_or(&1.0);
     ((amount as f64) * epay.price * discount + 0.999999) as i64

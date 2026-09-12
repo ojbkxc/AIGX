@@ -38,9 +38,11 @@ pub struct EpayConfig {
     /// 充值倍率：1 元可购买多少配额
     #[serde(default = "default_price")]
     pub price: f64,
-    /// 充值折扣: 原始金额 → 折扣 (0~1)，可选
+    /// 充值折扣: 档位金额 → 折扣 (0~1)，可选。
+    /// key 为金额字符串（如 "10"）：toml/JSON 的 map key 必须是字符串，
+    /// 用整数 key 会导致持久化失败（"map key was not a string"）
     #[serde(default)]
-    pub amount_discount: HashMap<i64, f64>,
+    pub amount_discount: HashMap<String, f64>,
     /// 最低充值金额
     #[serde(default = "default_min_topup")]
     pub min_topup: i64,
