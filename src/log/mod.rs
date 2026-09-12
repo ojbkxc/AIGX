@@ -404,6 +404,8 @@ impl RequestLogStore {
                 Ok(keys) => keys.len(),
                 Err(_) => 0,
             };
+            // 取「前 page*size 条最新键」后在内存中切出第 page 页的 size 条，
+            // 与原全量切片语义一致（页码越界返回空）。
             let limit = page.saturating_mul(size);
             let keys = self
                 .store
@@ -413,9 +415,16 @@ impl RequestLogStore {
                 .into_iter()
                 .filter_map(|k| self.store.get::<RequestLog>(&k).ok().flatten())
                 .collect();
-            // 键倒序（最新优先）；值的 created_at 与键一致，再按值稳定排序一次
+            // 键倒序（最新优先）；值的 created_at 与键一致，按值稳定排序一次
             logs.sort_by_key(|l| std::cmp::Reverse(l.created_at));
-            return (logs, total);
+            let start_idx = (page - 1) * size;
+            let paged: Vec<RequestLog> = if start_idx >= logs.len() {
+                Vec::new()
+            } else {
+                let end_idx = (start_idx + size).min(logs.len());
+                logs[start_idx..end_idx].to_vec()
+            };
+            return (paged, total);
         }
 
         // 带筛选：退回全量扫描（筛选条件在值内，无索引可用），但只在
@@ -667,7 +676,7 @@ impl AuditLogStore {
         Ok(n)
     }
 
-    /// 分页查询（P0 性能：键倒序 LIMIT 只取一页 + COUNT 总数，索引范围扫描）
+    /// 分页查询（P0 性能：键倒序 LIMIT 取前 page*size 条再内存切片，索引范围扫描）
     pub fn list_paged(&self, page: usize, size: usize) -> (Vec<AuditLog>, usize) {
         let page = page.max(1);
         let size = size.max(1);
@@ -682,7 +691,14 @@ impl AuditLogStore {
             .filter_map(|k| self.store.get::<AuditLog>(&k).ok().flatten())
             .collect();
         logs.sort_by_key(|b| std::cmp::Reverse(b.created_at));
-        (logs, total)
+        let start_idx = (page - 1) * size;
+        let paged: Vec<AuditLog> = if start_idx >= logs.len() {
+            Vec::new()
+        } else {
+            let end_idx = (start_idx + size).min(logs.len());
+            logs[start_idx..end_idx].to_vec()
+        };
+        (paged, total)
     }
 }
 
@@ -1014,17 +1030,14 @@ mod tests {
             .list_with_filter(None, None, None, None, None, 1, 10);
         assert_eq!(total, 15);
         assert_eq!(page1.len(), 10);
-        // P0 性能路径：无筛选时 list_latest_keys 倒序 LIMIT 取 page*size 条，
-        // 返回的是「最新 page*size 条」而非切片——第 2 页应返回最新 20 条中的
-        // 后 10 条（即次新的 10 条），长度仍为 10。
+        // P0 快路径：键倒序 LIMIT 取前 page*size 条后内存切片，语义与原全量切片一致
         let (page2, _) = s
             .requests
             .list_with_filter(None, None, None, None, None, 2, 10);
-        assert_eq!(page2.len(), 10);
-        // 第 2 页 = 第 1 页之后的次新 10 条（总共 15 条：第 2 页含最旧 5 条 + 中间 5 条）
+        assert_eq!(page2.len(), 5);
         let (page3, _) = s
             .requests
             .list_with_filter(None, None, None, None, None, 3, 10);
-        assert_eq!(page3.len(), 5);
+        assert_eq!(page3.len(), 0);
     }
 }
