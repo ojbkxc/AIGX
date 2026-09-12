@@ -21,7 +21,7 @@ const Redemptions = lazy(() => import('./pages/Redemptions'));
 const Plans = lazy(() => import('./pages/Plans'));
 const Channels = lazy(() => import('./pages/Channels'));
 const Chat = lazy(() => import('./pages/Chat'));
-const NetworkLayer = lazy(() => import('./pages/NetworkLayer'));
+
 const Models = lazy(() => import('./pages/Models'));
 const Prompts = lazy(() => import('./pages/Prompts'));
 const Pricing = lazy(() => import('./pages/Pricing'));
@@ -111,7 +111,8 @@ export default function App(): JSX.Element {
             <Route path="/plans" element={<AdminRoute><Plans /></AdminRoute>} />
             <Route path="/playground" element={<Navigate to="/chat" replace />} />
             <Route path="/chat" element={<ProtectedLayout><Chat /></ProtectedLayout>} />
-            <Route path="/network-layer" element={<AdminRoute><NetworkLayer /></AdminRoute>} />
+            {/* 网络层管理已并入系统设置运维 tab，旧路由重定向防书签失效 */}
+            <Route path="/network-layer" element={<Navigate to="/settings" replace />} />
             <Route path="/model-presets" element={<ProtectedLayout><Models /></ProtectedLayout>} />
             <Route path="/prompts" element={<ProtectedLayout><Prompts /></ProtectedLayout>} />
             <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />

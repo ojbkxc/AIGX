@@ -7,7 +7,7 @@ import { isAdmin } from '../lib/utils';
 import {
   LayoutDashboard, Satellite, KeyRound,
   Users, Wallet, Ticket, ScrollText, Package,
-  Settings, Network, Zap, ChevronDown, Menu, UserRound,
+  Settings, Zap, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Coins,
 } from 'lucide-react';
@@ -43,17 +43,17 @@ const navItems: NavItem[] = [
   { path: '/redemptions', labelKey: '兑换码', icon: Ticket, adminOnly: true },
   { path: '/plans', labelKey: '套餐管理', icon: Package, adminOnly: true },
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
-  { path: '/network-layer', labelKey: '系统信息', icon: Network, adminOnly: true },
   { path: '/wallet', labelKey: '钱包', icon: Wallet },
   { path: '/profile', labelKey: '个人中心', icon: UserRound },
 ];
 
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
-// 管理员 15 项 / 客户 8 项。合并历史：
+// 管理员 14 项 / 客户 8 项。合并历史：
 // - 模型映射 → 渠道管理内每渠道配置 + 全局 fallback（已下沉）
 // - 易支付 + 用户分组 + 通知设置 + 安全监控 + IP 管理 → 系统设置 tab
 // - 定价倍率曾并入系统设置计费 tab，现拆回独立页（/pricing）
 // - 订单记录 → 钱包页内 tab
+// - 系统信息（AI 网关网络层管理）→ 系统设置运维 tab 网络层子标签（已下沉）
 const navGroups: NavGroup[] = [
   {
     key: 'general',
@@ -78,15 +78,14 @@ const navGroups: NavGroup[] = [
       navItems[9],  // 兑换码
       navItems[10], // 套餐管理
       navItems[11], // 系统设置
-      navItems[12], // 系统信息
     ],
   },
   {
     key: 'personal',
     labelKey: '个人',
     items: [
-      navItems[13], // 钱包
-      navItems[14], // 个人中心
+      navItems[12], // 钱包
+      navItems[13], // 个人中心
     ],
   },
 ];

@@ -847,7 +847,7 @@
   "推荐提示词": "Suggested prompts",
   "模型与价格": "Models & Pricing",
   "用量日志": "Usage Logs",
-  "系统信息": "System Info",
+  "网络层": "Network Layer",
   "钱包": "Wallet",
   "管理": "Admin",
   "个人": "Personal",
@@ -1078,8 +1078,7 @@
   "未配置": "Not configured",
   "本月签到": "Check-ins this month",
   "本月累计奖励": "Monthly total reward",
-  "查看告警": "View alerts",
-  "查看详细指标": "View detailed metrics",
+
   "查看账户信息与安全设置": "View account info & security settings",
   "查询余额": "Check balance",
   "次": "times",
@@ -1188,7 +1187,7 @@
   "邀请码（可选）": "Invite code (optional)",
   "邀请返利": "Invite rewards",
   "邀请链接已复制": "Invite link copied",
-  "配置查看": "View config",
+
   "配额周期重置": "Quota periodic reset",
   "重新生成": "Regenerate",
   "重置后将立即恢复向该渠道放行流量。若渠道仍存在故障，可能再次触发熔断。确定继续？": "After reset, traffic to this channel resumes immediately. If the channel still has faults, the breaker may trip again. Continue?",

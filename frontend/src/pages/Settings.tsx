@@ -11,6 +11,7 @@ import Groups from './Groups';
 import Notify from './Notify';
 import Security from './Security';
 import IpManagement from './IpManagement';
+import NetworkLayer from './NetworkLayer';
 import './Settings.css';
 
 interface LimitsForm {
@@ -56,8 +57,8 @@ interface DataResponse<T> {
 type SettingsTab = 'site' | 'billing' | 'ops' | 'security' | 'account';
 /** billing 分区子标签（易支付 / 用户分组；定价倍率已拆为独立页 /pricing） */
 type BillingSubTab = 'epay' | 'groups';
-/** ops 分区子标签（通知 / 限流 / 缓存 / 价格同步 / 汇率） */
-type OpsSubTab = 'notify' | 'ratelimit' | 'cache' | 'pricesync' | 'exchange';
+/** ops 分区子标签（通知 / 限流 / 缓存 / 价格同步 / 汇率 / 网络层） */
+type OpsSubTab = 'notify' | 'ratelimit' | 'cache' | 'pricesync' | 'exchange' | 'network';
 
 // 格式化字节数为人类可读单位
 function fmtBytes(bytes: number | null | undefined): string {
@@ -519,7 +520,7 @@ export default function Settings() {
 
       {activeTab === 'ops' && (
         <>
-          {/* 运维 = 通知设置 + 限流配置 + 缓存管理 + 价格同步 + 汇率（子标签切换） */}
+          {/* 运维 = 通知设置 + 限流配置 + 缓存管理 + 价格同步 + 汇率 + 网络层（子标签切换） */}
           <Tabs<OpsSubTab>
             items={[
               { key: 'notify', label: t('通知设置') },
@@ -527,6 +528,7 @@ export default function Settings() {
               { key: 'cache', label: t('缓存管理') },
               { key: 'pricesync', label: t('价格同步') },
               { key: 'exchange', label: t('汇率配置') },
+              { key: 'network', label: t('网络层') },
             ]}
             active={opsSub}
             onChange={setOpsSub}
@@ -742,6 +744,10 @@ export default function Settings() {
               )}
             </div>
           </div>
+          </div>
+          <div style={{ marginTop: 16, display: opsSub === 'network' ? 'block' : 'none' }}>
+            {/* 网络层管理（原 /network-layer 独立页并入；display:none 切换保留组件状态） */}
+            <NetworkLayer />
           </div>
         </>
       )}
