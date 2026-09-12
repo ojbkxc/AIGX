@@ -3,7 +3,11 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
+import { Pagination } from '../components/ui';
 import './Pricing.css';
+
+/** 客户端分页每页条数（价格目录 426+ 条，全量渲染过长） */
+const PRICE_PAGE_SIZE = 20;
 
 type SubTabKey = 'prices' | 'ratios';
 
@@ -50,6 +54,8 @@ export default function Pricing() {
   const [savingPrice, setSavingPrice] = useState(false);
   // 搜索过滤（模型名/分组名本地匹配）
   const [query, setQuery] = useState('');
+  // 价格目录客户端分页（过滤变化时回第 1 页）
+  const [pricePage, setPricePage] = useState(1);
 
   // ── 倍率配置状态 ──
   const [, setRatios] = useState<RatiosState>({ model_ratio: {}, group_ratio: {} });
@@ -199,6 +205,13 @@ export default function Pricing() {
   const visiblePrices = q
     ? prices.filter((p) => (p.model_name || '').toLowerCase().includes(q))
     : prices;
+  // 客户端分页：页码越界时钳到最后一页（删除/过滤收缩后不落空页）
+  const totalPages = Math.max(1, Math.ceil(visiblePrices.length / PRICE_PAGE_SIZE));
+  const safePage = Math.min(pricePage, totalPages);
+  const pagePrices = visiblePrices.slice(
+    (safePage - 1) * PRICE_PAGE_SIZE,
+    safePage * PRICE_PAGE_SIZE,
+  );
 
   return (
     <div className="pricing-shell">
@@ -233,7 +246,7 @@ export default function Pricing() {
               <h2>{t('模型定价目录')} ({visiblePrices.length}/{prices.length})</h2>
               <input className="form-input" style={{ width: 200 }}
                 placeholder={t('搜索模型名称…')} value={query}
-                onChange={(e) => setQuery(e.target.value)} />
+                onChange={(e) => { setQuery(e.target.value); setPricePage(1); }} />
             </div>
             <div className="card-body">
               {priceLoading ? (
@@ -259,7 +272,7 @@ export default function Pricing() {
                               {q ? t('没有匹配的定价') : t('暂无定价配置，未配置的模型将使用倍率计算')}
                             </td>
                           </tr>
-                        ) : visiblePrices.map((p) => (
+                        ) : pagePrices.map((p) => (
                           <tr key={p.model_name}>
                             <td><strong>{p.model_name}</strong></td>
                             <td className="price-cell">{p.input_price}</td>
@@ -281,6 +294,16 @@ export default function Pricing() {
                       </tbody>
                     </table>
                   </div>
+
+                  {/* 客户端分页：页码导航 + 总数 */}
+                  {totalPages > 1 && (
+                    <div className="pagination-meta">
+                      <Pagination page={safePage} totalPages={totalPages} onChange={setPricePage} />
+                      <span className="pagination-total">
+                        {t('共 {{count}} 条', { count: visiblePrices.length })}
+                      </span>
+                    </div>
+                  )}
 
                   {/* 新增/编辑定价表单 */}
                   <div className="price-form-row" id="price-form">
