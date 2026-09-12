@@ -87,7 +87,10 @@ impl Default for NetworkLayerConfig {
 
 /// 加载网络层配置（无记录时用默认值；读失败降级默认并记录）
 pub fn load_network_config(state: &AppState) -> NetworkLayerConfig {
-    match state.alert_store.get::<NetworkLayerConfig>(NETWORK_CONFIG_STORE_KEY) {
+    match state
+        .alert_store
+        .get::<NetworkLayerConfig>(NETWORK_CONFIG_STORE_KEY)
+    {
         Ok(Some(cfg)) => cfg,
         Ok(None) => NetworkLayerConfig::default(),
         Err(e) => {
@@ -221,7 +224,10 @@ pub async fn health_check(State(state): State<AppState>) -> Json<NetworkStatus> 
     let available_accounts = accounts.iter().filter(|a| a.status == "active").count();
     let busy_accounts = accounts
         .iter()
-        .filter(|a| a.last_used_at.is_some_and(|t| chrono::Utc::now().timestamp() - t < 300))
+        .filter(|a| {
+            a.last_used_at
+                .is_some_and(|t| chrono::Utc::now().timestamp() - t < 300)
+        })
         .count();
     let error_accounts = accounts.iter().filter(|a| a.status == "error").count();
     let invalid_accounts = accounts.iter().filter(|a| a.status == "pending").count();
@@ -241,12 +247,7 @@ pub async fn health_check(State(state): State<AppState>) -> Json<NetworkStatus> 
         if state.channel_store.circuit_breaker().get_state(&ch.id) == "open" {
             breaker_open += 1;
         }
-        if let Some(today) = state
-            .channel_store
-            .health_archive()
-            .query(&ch.id, 1)
-            .pop()
-        {
+        if let Some(today) = state.channel_store.health_archive().query(&ch.id, 1).pop() {
             successful_requests += today.success;
             failed_requests += today.failure;
             // 平均延迟按各渠道请求数加权（P95 作为窗口代表值）
