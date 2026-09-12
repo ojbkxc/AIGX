@@ -48,6 +48,11 @@ pub struct NotifyConfig {
     /// SMTP STARTTLS（端口 587 常见）；false=明文（25 本地中继）
     #[serde(default)]
     pub smtp_starttls: bool,
+    /// SMTP SSL 直连（端口 465：TCP 建立后立即 TLS 握手）。
+    /// 生产实证部分海外服务器连 smtp.163.com 仅 465 SSL 可达。
+    /// 与 smtp_starttls 同开时 SSL 优先（465 服务器不做明文 EHLO，无法先 STARTTLS）。
+    #[serde(default)]
+    pub smtp_ssl: bool,
     // Slack / Webhook（参照 burncloud AlertConfig）
     #[serde(default)]
     pub slack_webhook_url: String,
@@ -431,16 +436,18 @@ impl SmtpTransport {
     }
 }
 
-/// 原生 TCP SMTP 发送（AUTH LOGIN，可选 STARTTLS）
+/// 原生 TCP SMTP 发送（AUTH LOGIN，可选 STARTTLS / 465 SSL 直连）
 ///
-/// 流程：connect → EHLO → [STARTTLS + TLS handshake + EHLO] → AUTH LOGIN
-///       → MAIL FROM → RCPT TO → DATA → QUIT
+/// 流程：connect → [ssl 直连：立即 TLS] / [明文 EHLO → STARTTLS + TLS handshake + EHLO]
+///       → AUTH LOGIN → MAIL FROM → RCPT TO → DATA → QUIT
 ///
-/// STARTTLS（批次7c）：smtp_starttls=true 时用 tokio-rustls 做真正的
-/// TLS 升级——EHLO 检测到服务器宣告 STARTTLS 能力才发送 STARTTLS，
+/// STARTTLS（批次7c）：smtp_starttls=true 且 smtp_ssl=false 时用 tokio-rustls
+/// 做真正的 TLS 升级——EHLO 检测到服务器宣告 STARTTLS 能力才发送 STARTTLS，
 /// 握手后重新 EHLO 再 AUTH。服务器不支持或握手失败则报错（不静默
 /// 降级明文——明文降级会把凭据暴露给中间人）。
-/// smtp_starttls=false（默认）保持明文行为（25 端口本地中继）。
+/// smtp_ssl=true（465）：TCP 建立后立即 TLS 握手，欢迎信息起全程走 TLS 层；
+/// 与 smtp_starttls 同开时 SSL 优先（传输已是 TLS，无法再 STARTTLS）。
+/// 两者都为 false（默认）保持明文行为（25 端口本地中继）。
 async fn send_smtp_raw(
     cfg: &NotifyConfig,
     to: &str,
@@ -460,7 +467,13 @@ async fn send_smtp_raw(
         .map_err(|e| format!("SMTP connect failed: {}", e))?;
     // 设置读写超时（避免挂死）
     let _ = stream.set_nodelay(true);
-    let mut transport = SmtpTransport::Plain(stream);
+    // 465 SSL 直连：TCP 连接建立后立即 TLS（域名验证用 smtp_host）
+    let mut transport = if cfg.smtp_ssl {
+        let tls = smtp_tls_handshake(stream, &cfg.smtp_host).await?;
+        SmtpTransport::Tls(Box::new(tls))
+    } else {
+        SmtpTransport::Plain(stream)
+    };
 
     // 读取欢迎信息（220）
     let greet = transport.read_line().await?;
@@ -468,12 +481,12 @@ async fn send_smtp_raw(
         return Err(format!("SMTP unexpected greeting: {}", greet));
     }
 
-    // EHLO（明文）
+    // EHLO（明文或 SSL 直连后的首个 EHLO）
     transport.write_line("EHLO aigx.local\r\n").await?;
     let ehlo_caps = transport.read_multiline().await?;
 
-    // STARTTLS 升级（可选）
-    if cfg.smtp_starttls {
+    // STARTTLS 升级（可选；smtp_ssl=true 时传输已是 TLS，跳过）
+    if cfg.smtp_starttls && !cfg.smtp_ssl {
         transport = smtp_starttls_upgrade(transport, &addr, &ehlo_caps).await?;
         // TLS 会话需重新 EHLO（RFC 3207 §4.2：握手后服务器遗忘先前状态）
         transport.write_line("EHLO aigx.local\r\n").await?;
@@ -590,9 +603,19 @@ async fn smtp_starttls_upgrade(
         SmtpTransport::Plain(s) => s,
         SmtpTransport::Tls(_) => return Err("SMTP already TLS".into()),
     };
+    let tls = smtp_tls_handshake(plain, cfg_host(addr)).await?;
+    Ok(SmtpTransport::Tls(Box::new(tls)))
+}
+
+/// TLS 握手（rustls，ring 后端）：STARTTLS 升级与 465 SSL 直连共用。
+///
+/// 系统信任库（Linux 常见路径；不可读时为空信任库——握手将失败，
+/// 错误信息足以定位）。SNI 用主机名（非 IP 字面量——rustls 拒绝 IP SNI）。
+async fn smtp_tls_handshake(
+    stream: TcpStream,
+    host: &str,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, String> {
     let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-    // 系统信任库（Linux 常见路径；不可读时为空信任库——握手将失败，
-    // 错误信息足以定位）
     if let Ok(iter) =
         rustls_pki_types::pem::PemObject::pem_file_iter("/etc/ssl/certs/ca-certificates.crt")
     {
@@ -611,14 +634,12 @@ async fn smtp_starttls_upgrade(
         .with_no_client_auth();
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
 
-    // SNI 用主机名（非 IP 字面量——rustls 拒绝 IP SNI）
-    let server_name = rustls_pki_types::ServerName::try_from(cfg_host(addr).to_string())
+    let server_name = rustls_pki_types::ServerName::try_from(host.to_string())
         .map_err(|e| format!("SMTP SNI invalid: {e}"))?;
-    let tls = connector
-        .connect(server_name, plain)
+    connector
+        .connect(server_name, stream)
         .await
-        .map_err(|e| format!("SMTP TLS handshake failed: {e}"))?;
-    Ok(SmtpTransport::Tls(Box::new(tls)))
+        .map_err(|e| format!("SMTP TLS handshake failed: {e}"))
 }
 
 /// 从 "host:port" 提取 host。
@@ -681,5 +702,7 @@ mod tests {
         assert!(!c.enabled);
         assert!(!c.telegram_ready());
         assert!(!c.smtp_ready());
+        assert!(!c.smtp_starttls);
+        assert!(!c.smtp_ssl);
     }
 }

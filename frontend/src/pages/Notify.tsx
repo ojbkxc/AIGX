@@ -16,6 +16,7 @@ interface NotifyConfig {
   smtp_password?: string;
   smtp_from?: string;
   smtp_starttls?: boolean;
+  smtp_ssl?: boolean;
   slack_ready?: boolean;
   slack_webhook_url?: string;
   webhook_ready?: boolean;
@@ -127,6 +128,7 @@ export default function Notify() {
         smtp_username: notify.smtp_username ?? '',
         smtp_from: notify.smtp_from ?? '',
         smtp_starttls: notify.smtp_starttls ?? false,
+        smtp_ssl: notify.smtp_ssl ?? false,
         webhook_url: notify.webhook_url ?? '',
       };
       // 敏感凭据字段：仅当输入了新的非脱敏值才提交；空串/未修改的脱敏占位不带该字段，
@@ -351,7 +353,7 @@ export default function Notify() {
           </div>
           <div className="card-body">
             <p className="notify-note">
-              {t('原生 TCP SMTP（AUTH LOGIN）。明文适用于本地中继（25 端口）；勾选 STARTTLS 用于 TLS 中继场景（465/587 由中继终结 TLS）。')}
+              {t('原生 TCP SMTP（AUTH LOGIN）。明文适用于本地中继（25 端口）；STARTTLS 用于 587 端口；SSL 直连用于 465 端口（如 smtp.163.com），与 STARTTLS 同开时 SSL 优先。')}
             </p>
             <div className="notify-form-grid-2">
               <div className="form-group" style={{ flex: '2 1 200px' }}>
@@ -382,6 +384,16 @@ export default function Notify() {
                     onChange={(e) => handleChange('smtp_starttls', e.target.checked)}
                   />
                   <span className="toggle-label">STARTTLS</span>
+                </label>
+              </div>
+              <div className="form-group" style={{ flex: '1 1 120px', display: 'flex', alignItems: 'flex-end' }}>
+                <label className="notify-toggle" style={{ marginBottom: '8px' }}>
+                  <input
+                    type="checkbox"
+                    checked={notify.smtp_ssl ?? false}
+                    onChange={(e) => handleChange('smtp_ssl', e.target.checked)}
+                  />
+                  <span className="toggle-label">SSL (465)</span>
                 </label>
               </div>
             </div>

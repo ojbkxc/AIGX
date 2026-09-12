@@ -597,7 +597,7 @@
   "触发测试告警": "触发测试告警",
   "未触发（低于阈值或静默期）": "未触发（低于阈值或静默期）",
   "活跃告警": "活跃告警",
-  "原生 TCP SMTP（AUTH LOGIN）。明文适用于本地中继（25 端口）；勾选 STARTTLS 用于 TLS 中继场景（465/587 由中继终结 TLS）。": "原生 TCP SMTP（AUTH LOGIN）。明文适用于本地中继（25 端口）；勾选 STARTTLS 用于 TLS 中继场景（465/587 由中继终结 TLS）。",
+  "原生 TCP SMTP（AUTH LOGIN）。明文适用于本地中继（25 端口）；STARTTLS 用于 587 端口；SSL 直连用于 465 端口（如 smtp.163.com），与 STARTTLS 同开时 SSL 优先。": "原生 TCP SMTP（AUTH LOGIN）。明文适用于本地中继（25 端口）；STARTTLS 用于 587 端口；SSL 直连用于 465 端口（如 smtp.163.com），与 STARTTLS 同开时 SSL 优先。",
   "系统资源": "系统资源",
   "CPU 使用率": "CPU 使用率",
   "内存使用率": "内存使用率",

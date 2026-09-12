@@ -597,7 +597,7 @@
   "触发测试告警": "Trigger Test Alert",
   "未触发（低于阈值或静默期）": "Not triggered (below threshold or silenced)",
   "活跃告警": "Active Alerts",
-  "原生 TCP SMTP（AUTH LOGIN）。明文适用于本地中继（25 端口）；勾选 STARTTLS 用于 TLS 中继场景（465/587 由中继终结 TLS）。": "Raw TCP SMTP (AUTH LOGIN). Plaintext for local relay (port 25); enable STARTTLS for TLS relay scenarios (465/587 terminated by relay).",
+  "原生 TCP SMTP（AUTH LOGIN）。明文适用于本地中继（25 端口）；STARTTLS 用于 587 端口；SSL 直连用于 465 端口（如 smtp.163.com），与 STARTTLS 同开时 SSL 优先。": "Raw TCP SMTP (AUTH LOGIN). Plaintext for local relay (port 25); STARTTLS for port 587; direct SSL for port 465 (e.g. smtp.163.com) — SSL takes precedence when both are enabled.",
   "系统资源": "System Resources",
   "CPU 使用率": "CPU Usage",
   "内存使用率": "Memory Usage",

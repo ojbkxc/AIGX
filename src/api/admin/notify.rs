@@ -24,6 +24,7 @@ pub struct UpdateNotifyConfigRequest {
     pub smtp_password: Option<String>,
     pub smtp_from: Option<String>,
     pub smtp_starttls: Option<bool>,
+    pub smtp_ssl: Option<bool>,
     pub slack_webhook_url: Option<String>,
     pub webhook_url: Option<String>,
     pub webhook_secret: Option<String>,
@@ -48,6 +49,7 @@ pub async fn handle_get_notify_config(
             "smtp_password": "...", // 脱敏
             "smtp_from": cfg.smtp_from,
             "smtp_starttls": cfg.smtp_starttls,
+            "smtp_ssl": cfg.smtp_ssl,
             "slack_webhook_url": "...", // 脱敏
             "webhook_url": cfg.webhook_url,
             "webhook_secret": "...", // 脱敏
@@ -99,6 +101,9 @@ pub async fn handle_update_notify_config(
     }
     if let Some(v) = body.smtp_starttls {
         cfg.smtp_starttls = v;
+    }
+    if let Some(v) = body.smtp_ssl {
+        cfg.smtp_ssl = v;
     }
     if let Some(v) = body.slack_webhook_url {
         let t = v.trim().to_string();
