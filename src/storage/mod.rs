@@ -133,6 +133,14 @@ impl JsonFileStore {
         Ok(keys)
     }
 
+    /// 倒序取前 `limit` 个键（与 SqliteStore::list_latest_keys 同语义降级实现）
+    pub fn list_latest_keys(&self, prefix: &str, limit: usize) -> anyhow::Result<Vec<String>> {
+        let mut keys = self.list(prefix)?;
+        keys.reverse();
+        keys.truncate(limit);
+        Ok(keys)
+    }
+
     /// 原子更新（读取-修改-写入）。
     /// 返回旧值（如果存在）。
     #[allow(dead_code)]
@@ -193,6 +201,12 @@ impl FileStore {
     /// 列出所有键（支持前缀匹配）
     pub fn list(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
         self.inner.list(prefix)
+    }
+
+    /// P0 性能：按字典序倒序取前 `limit` 个键（前缀过滤，索引范围扫描）。
+    /// 供日志分页用——key 的时间戳前缀使字典序等价时间序，只取最新一页即可。
+    pub fn list_latest_keys(&self, prefix: &str, limit: usize) -> anyhow::Result<Vec<String>> {
+        self.inner.list_latest_keys(prefix, limit)
     }
 
     /// 原子更新（读取-修改-写入）。

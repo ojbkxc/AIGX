@@ -30,6 +30,9 @@ impl SqliteStore {
         let conn = Connection::open(&path)?;
 
         // 启用 WAL 模式以提升并发性能
+        // P0 性能：key 是 TEXT PRIMARY KEY，SQLite 主键索引只对等值查询自动生效；
+        // list(prefix) 用的是 `key LIKE 'x%'`/范围扫描，需要显式前缀索引才能走索引
+        // 而不是全表扫描。日志/渠道/定价等前缀列表在十万级数据下差异巨大。
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
@@ -39,7 +42,8 @@ impl SqliteStore {
                  value TEXT NOT NULL,
                  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
              );
-             CREATE INDEX IF NOT EXISTS idx_kv_updated_at ON kv(updated_at);",
+             CREATE INDEX IF NOT EXISTS idx_kv_updated_at ON kv(updated_at);
+             CREATE INDEX IF NOT EXISTS idx_kv_key ON kv(key);",
         )?;
 
         tracing::info!("SQLite database opened: {}", path.display());
@@ -111,6 +115,23 @@ impl SqliteStore {
         let mut stmt = conn.prepare_cached("SELECT key FROM kv WHERE key LIKE ?1 ORDER BY key")?;
         let keys: Vec<String> = stmt
             .query_map([&pattern], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(keys)
+    }
+
+    /// P0 性能：按 key 字典序倒序取前 `limit` 个键（前缀过滤）。
+    ///
+    /// `reqlog:{ts}:{id}` 的 ts 是固宽时间戳字符串（10 位 unix 秒），
+    /// 字典序即时间序，倒序 = 最新优先。日志分页只需最新 page*size 条，
+    /// 不必全表列键。LIKE 前缀命中 idx_kv_key 索引，是索引范围扫描。
+    pub fn list_latest_keys(&self, prefix: &str, limit: usize) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn.lock();
+        let pattern = format!("{prefix}%");
+        let mut stmt =
+            conn.prepare_cached("SELECT key FROM kv WHERE key LIKE ?1 ORDER BY key DESC LIMIT ?2")?;
+        let keys: Vec<String> = stmt
+            .query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
         Ok(keys)

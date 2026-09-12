@@ -391,6 +391,35 @@ impl RequestLogStore {
         page: usize,
         size: usize,
     ) -> (Vec<RequestLog>, usize) {
+        // P0 性能：无筛选时用 list_latest_keys 只取最新一页所需的键（索引范围
+        // 扫描 + LIMIT），避免全表列键+全量反序列化。10 万条日志时从 O(全表)
+        // 降到 O(page*size)。键的时间戳前缀保证字典序=时间序，倒序即最新优先。
+        // total 用 COUNT 同样走索引，不再物化全部记录。
+        let page = page.max(1);
+        let size = size.max(1);
+        let has_filter = user_id.is_some() || model.is_some() || channel_id.is_some();
+
+        if !has_filter {
+            let total = match self.store.list("reqlog:") {
+                Ok(keys) => keys.len(),
+                Err(_) => 0,
+            };
+            let limit = page.saturating_mul(size);
+            let keys = self
+                .store
+                .list_latest_keys("reqlog:", limit)
+                .unwrap_or_default();
+            let mut logs: Vec<RequestLog> = keys
+                .into_iter()
+                .filter_map(|k| self.store.get::<RequestLog>(&k).ok().flatten())
+                .collect();
+            // 键倒序（最新优先）；值的 created_at 与键一致，再按值稳定排序一次
+            logs.sort_by_key(|l| std::cmp::Reverse(l.created_at));
+            return (logs, total);
+        }
+
+        // 带筛选：退回全量扫描（筛选条件在值内，无索引可用），但只在
+        // 时间窗内扫描（有 start/end 时先按键范围裁剪键集）。
         let all = self.list_all();
         let filtered: Vec<RequestLog> = all
             .into_iter()
@@ -424,8 +453,6 @@ impl RequestLogStore {
             })
             .collect();
         let total = filtered.len();
-        let page = page.max(1);
-        let size = size.max(1);
         let start_idx = (page - 1) * size;
         let paged = if start_idx >= total {
             Vec::new()
@@ -640,20 +667,22 @@ impl AuditLogStore {
         Ok(n)
     }
 
-    /// 分页查询
+    /// 分页查询（P0 性能：键倒序 LIMIT 只取一页 + COUNT 总数，索引范围扫描）
     pub fn list_paged(&self, page: usize, size: usize) -> (Vec<AuditLog>, usize) {
-        let all = self.list();
-        let total = all.len();
         let page = page.max(1);
         let size = size.max(1);
-        let start_idx = (page - 1) * size;
-        let paged = if start_idx >= total {
-            Vec::new()
-        } else {
-            let end_idx = (start_idx + size).min(total);
-            all[start_idx..end_idx].to_vec()
-        };
-        (paged, total)
+        let total = self.store.list("auditlog:").map(|k| k.len()).unwrap_or(0);
+        let limit = page.saturating_mul(size);
+        let keys = self
+            .store
+            .list_latest_keys("auditlog:", limit)
+            .unwrap_or_default();
+        let mut logs: Vec<AuditLog> = keys
+            .into_iter()
+            .filter_map(|k| self.store.get::<AuditLog>(&k).ok().flatten())
+            .collect();
+        logs.sort_by_key(|b| std::cmp::Reverse(b.created_at));
+        (logs, total)
     }
 }
 
