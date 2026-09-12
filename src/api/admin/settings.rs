@@ -184,6 +184,7 @@ pub async fn handle_update_limits(
 pub struct OauthConfigRequest {
     pub github: Option<OauthProviderFields>,
     pub google: Option<OauthProviderFields>,
+    pub linuxdo: Option<OauthProviderFields>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,7 +194,7 @@ pub struct OauthProviderFields {
     pub redirect_uri: Option<String>,
 }
 
-/// 获取 GitHub / Google OAuth 配置与就绪状态
+/// 获取 GitHub / Google / LinuxDO OAuth 配置与就绪状态
 pub async fn handle_get_oauth_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -214,11 +215,17 @@ pub async fn handle_get_oauth_config(
                 "redirect_uri": config.google_oauth.redirect_uri,
                 "ready": config.google_oauth.ready(),
             },
+            "linuxdo": {
+                "client_id": config.linuxdo_oauth.client_id,
+                "client_secret": config.linuxdo_oauth.client_secret,
+                "redirect_uri": config.linuxdo_oauth.redirect_uri,
+                "ready": config.linuxdo_oauth.ready(),
+            },
         }
     })))
 }
 
-/// 更新 GitHub / Google OAuth 配置（未提供的字段保持原值）
+/// 更新 GitHub / Google / LinuxDO OAuth 配置（未提供的字段保持原值）
 pub async fn handle_update_oauth_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -247,6 +254,17 @@ pub async fn handle_update_oauth_config(
             config.google_oauth.redirect_uri = v;
         }
     }
+    if let Some(g) = body.linuxdo {
+        if let Some(v) = g.client_id {
+            config.linuxdo_oauth.client_id = v;
+        }
+        if let Some(v) = g.client_secret {
+            config.linuxdo_oauth.client_secret = v;
+        }
+        if let Some(v) = g.redirect_uri {
+            config.linuxdo_oauth.redirect_uri = v;
+        }
+    }
     match state.config_manager.update(config).await {
         Ok(_) => {
             let updated = state.config_manager.get().await;
@@ -264,6 +282,12 @@ pub async fn handle_update_oauth_config(
                         "client_secret": updated.google_oauth.client_secret,
                         "redirect_uri": updated.google_oauth.redirect_uri,
                         "ready": updated.google_oauth.ready(),
+                    },
+                    "linuxdo": {
+                        "client_id": updated.linuxdo_oauth.client_id,
+                        "client_secret": updated.linuxdo_oauth.client_secret,
+                        "redirect_uri": updated.linuxdo_oauth.redirect_uri,
+                        "ready": updated.linuxdo_oauth.ready(),
                     },
                 }
             })))

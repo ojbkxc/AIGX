@@ -5,6 +5,7 @@ use tokio::sync::RwLock;
 use crate::notify::NotifyConfig;
 use crate::oauth::github::GithubOauthConfig;
 use crate::oauth::google::GoogleOauthConfig;
+use crate::oauth::linuxdo::LinuxDoOauthConfig;
 use crate::payment::stripe::StripeConfig;
 use crate::payment::EpayConfig;
 
@@ -178,6 +179,9 @@ pub struct AppConfig {
     /// Google OAuth configuration
     #[serde(default)]
     pub google_oauth: GoogleOauthConfig,
+    /// LinuxDO OAuth configuration
+    #[serde(default)]
+    pub linuxdo_oauth: LinuxDoOauthConfig,
     /// 站点对外访问地址，用于构造回调 URL
     #[serde(default)]
     pub server_address: String,

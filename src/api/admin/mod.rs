@@ -21,7 +21,8 @@ pub mod users; // 网络层管理模块
 pub use auth::{
     handle_change_password, handle_forgot_password, handle_github_oauth_authorize,
     handle_github_oauth_callback, handle_google_oauth_authorize, handle_google_oauth_callback,
-    handle_login, handle_login_send_code, handle_login_totp, handle_login_with_code, handle_logout,
+    handle_linuxdo_oauth_authorize, handle_linuxdo_oauth_callback, handle_login,
+    handle_login_send_code, handle_login_totp, handle_login_with_code, handle_logout,
     handle_register, handle_reset_password, handle_totp_disable, handle_totp_enable,
     handle_totp_setup,
 };

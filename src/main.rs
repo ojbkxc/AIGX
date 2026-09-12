@@ -702,6 +702,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/auth/google/callback",
             get(api::admin::handle_google_oauth_callback),
         )
+        // LinuxDO OAuth
+        .route(
+            "/api/auth/linuxdo",
+            get(api::admin::handle_linuxdo_oauth_authorize),
+        )
+        .route(
+            "/api/auth/linuxdo/callback",
+            get(api::admin::handle_linuxdo_oauth_callback),
+        )
         // 用户管理
         .route("/api/users", get(api::admin::handle_list_users))
         .route("/api/users", post(api::admin::handle_create_user))
