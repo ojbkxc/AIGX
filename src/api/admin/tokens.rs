@@ -83,6 +83,9 @@ pub fn mask_token(k: &ApiKey) -> Value {
 /// - 普通用户：仅返回属于自己（user_id == 本人）的令牌。
 /// - 明文密钥不下发：两端都通过 `GET /api/tokens/:id/key` 按需取回，
 ///   避免一次性记忆负担，且每次取回都会写入审计日志。
+/// - `user_email`：按 user_id 从 user_store 带出所属用户邮箱（管理员视角
+///   可见令牌归属；普通用户视角恒为本人邮箱）。user_id 为 None 的
+///   管理员级令牌带空串。
 pub async fn handle_list_tokens(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -94,7 +97,16 @@ pub async fn handle_list_tokens(
         .list()
         .iter()
         .filter(|k| is_admin || k.user_id.as_deref() == Some(user.id.as_str()))
-        .map(mask_token)
+        .map(|k| {
+            let mut v = mask_token(k);
+            let email = k
+                .user_id
+                .as_deref()
+                .and_then(|uid| state.user_store.get_by_id(uid))
+                .map(|u| u.email);
+            v["user_email"] = json!(email.unwrap_or_default());
+            v
+        })
         .collect();
     Ok(Json(json!({ "success": true, "data": tokens })))
 }
