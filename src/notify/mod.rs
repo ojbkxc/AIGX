@@ -23,6 +23,9 @@ pub mod alert_patrol;
 
 // ── 配置 ─────────────────────────────────────────────────────────────
 
+/// 持久化 key：FileStore 中的通知配置 JSON（管理界面保存后落盘，重启保留）
+const NOTIFY_CONFIG_STORE_KEY: &str = "notify_config";
+
 /// 通知配置（可序列化到 TOML，#[serde(default)] 兼容旧配置）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NotifyConfig {
@@ -135,6 +138,28 @@ impl NotifyService {
     /// 更新配置
     pub async fn update_config(&self, config: NotifyConfig) {
         *self.config.write().await = config;
+    }
+
+    /// 持久化当前配置到 FileStore（重启保留）。
+    ///
+    /// 原先 update_config 只改内存，服务重启后 SMTP/Telegram 等配置
+    /// 全部丢失回 config.toml 默认值——管理界面保存的配置必须落盘。
+    pub async fn persist_config(&self, store: &crate::storage::FileStore) -> Result<(), String> {
+        let cfg = self.config.read().await.clone();
+        store
+            .put::<NotifyConfig>(NOTIFY_CONFIG_STORE_KEY, &cfg)
+            .map_err(|e| format!("persist notify config: {e}"))
+    }
+
+    /// 从 FileStore 恢复持久化配置（无记录时不覆盖 config.toml 值）。
+    pub async fn restore_config(&self, store: &crate::storage::FileStore) {
+        match store.get::<NotifyConfig>(NOTIFY_CONFIG_STORE_KEY) {
+            Ok(Some(cfg)) => {
+                *self.config.write().await = cfg;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("恢复通知配置失败，沿用 config.toml 值: {e}"),
+        }
     }
 
     // ── Telegram ─────────────────────────────────────────────────────

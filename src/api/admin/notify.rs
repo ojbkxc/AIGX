@@ -121,6 +121,14 @@ pub async fn handle_update_notify_config(
         }
     }
     state.notify_service.update_config(cfg).await;
+    // 持久化：重启保留（原先只改内存，重启即丢）
+    if let Err(e) = state
+        .notify_service
+        .persist_config(&state.alert_store)
+        .await
+    {
+        tracing::warn!("通知配置持久化失败: {e}");
+    }
     Ok(Json(json!({
         "success": true,
         "data": null

@@ -200,7 +200,9 @@ async fn main() -> anyhow::Result<()> {
     let rate_limiter = Arc::new(RateLimiter::with_store(store.clone()));
 
     // 初始化通知服务（Telegram + SMTP + Slack + Webhook）
+    // 启动时先从 FileStore 恢复管理界面保存过的配置（无记录则用 config.toml 值）
     let notify_service = Arc::new(NotifyService::new(config.notify.clone()));
+    notify_service.restore_config(&store).await;
 
     // 初始化告警规则评估器（持久化：FileStore 加载规则集与历史）
     let alert_evaluator = notify::alert_patrol::shared_evaluator_persistent(&store);
