@@ -22,6 +22,11 @@ use super::common::{
 
 use crate::user::{Role, User};
 
+/// 是否为内置管理员（email 写死 admin@gmail.com，用户要求不可更改/删除/禁用）
+fn is_default_admin(u: &User) -> bool {
+    u.email == crate::user::DEFAULT_ADMIN_EMAIL
+}
+
 /// 创建用户请求
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {
@@ -214,6 +219,18 @@ pub async fn handle_update_user(
         Some(u) => Some(mask_user(&u)),
         None => return Err(error_response("User not found", StatusCode::NOT_FOUND)),
     };
+    // 内置管理员：email 锁死（用户明确要求邮箱不可更改；username/role 不锁）
+    if state
+        .user_store
+        .get_by_id(&id)
+        .is_some_and(|raw| is_default_admin(&raw))
+        && body.email.as_deref().is_some_and(|e| !e.is_empty())
+    {
+        return Err(error_response(
+            "内置管理员 admin@gmail.com 的邮箱不可更改",
+            StatusCode::FORBIDDEN,
+        ));
+    }
     match state.user_store.update(&id, |u| {
         if let Some(e) = &body.email {
             if !e.is_empty() {
@@ -274,6 +291,17 @@ pub async fn handle_delete_user(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
+    // 内置管理员不可删除（邮箱不可更改的一部分：账号本身也不许动）
+    if state
+        .user_store
+        .get_by_id(&id)
+        .is_some_and(|u| is_default_admin(&u))
+    {
+        return Err(error_response(
+            "内置管理员 admin@gmail.com 不可删除",
+            StatusCode::FORBIDDEN,
+        ));
+    }
     // 获取管理员 ID 用于审计
     let admin_id = admin_id_from_session_local(&state, &headers).await;
     // 查询用户用于记录审计
@@ -383,6 +411,13 @@ pub async fn handle_manage_user(
         .user_store
         .get_by_id(&body.id)
         .ok_or_else(|| error_response("User not found", StatusCode::NOT_FOUND))?;
+    // 内置管理员不可禁用（邮箱锁死的延伸：账号必须始终可用）
+    if is_default_admin(&target) {
+        return Err(error_response(
+            "内置管理员 admin@gmail.com 不可禁用",
+            StatusCode::FORBIDDEN,
+        ));
+    }
     // 防自我锁死：不允许操作自己（禁用自己会失去管理权）
     if target.id == {
         // 当前管理员 id（从会话取）

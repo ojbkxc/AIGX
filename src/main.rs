@@ -606,11 +606,12 @@ async fn ensure_session_secret(config_manager: &ConfigManager) {
 /// - 密码：`123456`（写死，用户明确要求内置固定密码）
 ///
 /// 已存在 Admin 用户时直接跳过，绝不删除或重建已存在的管理员。
-fn ensure_default_admin(user_store: &UserStore) {
-    const DEFAULT_ADMIN_EMAIL: &str = "admin@gmail.com";
-    const DEFAULT_ADMIN_USERNAME: &str = "admin";
-    const DEFAULT_ADMIN_PASSWORD: &str = "123456";
+///
+/// 邮箱常量在 `crate::user::DEFAULT_ADMIN_EMAIL`（users.rs 锁定逻辑共用）。
+const DEFAULT_ADMIN_USERNAME: &str = "admin";
+const DEFAULT_ADMIN_PASSWORD: &str = "123456";
 
+fn ensure_default_admin(user_store: &UserStore) {
     // 检查是否已存在任意 Admin 角色用户；若已存在则跳过，绝不删除/重建
     let has_admin = user_store.list().iter().any(|u| u.role == Role::Admin);
     if has_admin {
@@ -620,7 +621,7 @@ fn ensure_default_admin(user_store: &UserStore) {
 
     // 创建写死凭据的内置管理员账户
     match user_store.create_with_username(
-        DEFAULT_ADMIN_EMAIL,
+        crate::user::DEFAULT_ADMIN_EMAIL,
         DEFAULT_ADMIN_USERNAME,
         DEFAULT_ADMIN_PASSWORD,
         Role::Admin,
@@ -631,7 +632,7 @@ fn ensure_default_admin(user_store: &UserStore) {
                 "First-time setup: built-in admin account created. \
                  email={} | username={} | password={} \
                  — PLEASE LOGIN AND CHANGE THE PASSWORD IMMEDIATELY.",
-                DEFAULT_ADMIN_EMAIL,
+                crate::user::DEFAULT_ADMIN_EMAIL,
                 DEFAULT_ADMIN_USERNAME,
                 DEFAULT_ADMIN_PASSWORD,
             );

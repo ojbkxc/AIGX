@@ -21,6 +21,10 @@ use crate::storage::FileStore;
 
 pub mod checkin;
 
+/// 内置默认管理员邮箱（首次启动自动创建，用户要求不可更改/删除/禁用）。
+/// main.rs 的 ensure_default_admin 与 admin users.rs 的锁定逻辑共用此常量。
+pub const DEFAULT_ADMIN_EMAIL: &str = "admin@gmail.com";
+
 /// 用户角色
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
