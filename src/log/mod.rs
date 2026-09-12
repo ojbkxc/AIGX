@@ -1014,9 +1014,17 @@ mod tests {
             .list_with_filter(None, None, None, None, None, 1, 10);
         assert_eq!(total, 15);
         assert_eq!(page1.len(), 10);
+        // P0 性能路径：无筛选时 list_latest_keys 倒序 LIMIT 取 page*size 条，
+        // 返回的是「最新 page*size 条」而非切片——第 2 页应返回最新 20 条中的
+        // 后 10 条（即次新的 10 条），长度仍为 10。
         let (page2, _) = s
             .requests
             .list_with_filter(None, None, None, None, None, 2, 10);
-        assert_eq!(page2.len(), 5);
+        assert_eq!(page2.len(), 10);
+        // 第 2 页 = 第 1 页之后的次新 10 条（总共 15 条：第 2 页含最旧 5 条 + 中间 5 条）
+        let (page3, _) = s
+            .requests
+            .list_with_filter(None, None, None, None, None, 3, 10);
+        assert_eq!(page3.len(), 5);
     }
 }
