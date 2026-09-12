@@ -492,7 +492,7 @@ async fn main() -> anyhow::Result<()> {
                         let cutoff = chrono::Utc::now().timestamp() - (days as i64) * 86400;
                         match ls.requests.delete_older_than(cutoff) {
                             Ok(n) => {
-                                if let Ok(m) = ls.audits.delete_audits_older_than(cutoff) {
+                                if let Ok(m) = ls.audits.delete_older_than(cutoff) {
                                     (n + m) as u64
                                 } else {
                                     n as u64

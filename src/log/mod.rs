@@ -315,33 +315,11 @@ impl RequestLogStore {
             .collect();
         let n = doomed.len();
         const BATCH: usize = 5000;
-        for chunk in doomed.drain(..).collect::<Vec<_>>().chunks(BATCH) {
+        for chunk in std::mem::take(&mut doomed).chunks(BATCH) {
             for k in chunk {
                 if let Err(e) = self.store.delete(k) {
                     tracing::warn!("retention delete failed for {k}: {e}");
                 }
-            }
-        }
-        Ok(n)
-    }
-
-    /// 清理早于 `before_ts` 的审计日志（与请求日志同策略）。
-    pub fn delete_audits_older_than(&self, before_ts: i64) -> anyhow::Result<usize> {
-        let keys = self.store.list("auditlog:")?;
-        let doomed: Vec<String> = keys
-            .into_iter()
-            .filter(|k| {
-                k.strip_prefix("auditlog:")
-                    .and_then(|rest| rest.split(':').next())
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .map(|ts| ts < before_ts)
-                    .unwrap_or(false)
-            })
-            .collect();
-        let n = doomed.len();
-        for k in doomed {
-            if let Err(e) = self.store.delete(&k) {
-                tracing::warn!("audit retention delete failed for {k}: {e}");
             }
         }
         Ok(n)
@@ -613,6 +591,30 @@ impl AuditLogStore {
             self.store.delete(&k)?;
         }
         Ok(())
+    }
+
+    /// 清理早于 `before_ts` 的审计日志（与请求日志同保留策略）。
+    ///
+    /// key 格式 `auditlog:{created_at}:{id}` 时间戳前缀，范围扫描即删。
+    pub fn delete_older_than(&self, before_ts: i64) -> anyhow::Result<usize> {
+        let keys = self.store.list("auditlog:")?;
+        let doomed: Vec<String> = keys
+            .into_iter()
+            .filter(|k| {
+                k.strip_prefix("auditlog:")
+                    .and_then(|rest| rest.split(':').next())
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .map(|ts| ts < before_ts)
+                    .unwrap_or(false)
+            })
+            .collect();
+        let n = doomed.len();
+        for k in doomed {
+            if let Err(e) = self.store.delete(&k) {
+                tracing::warn!("audit retention delete failed for {k}: {e}");
+            }
+        }
+        Ok(n)
     }
 
     /// 批量删除审计日志

@@ -397,7 +397,7 @@ pub async fn handle_cleanup_logs(
     let audits = state
         .log_store
         .audits
-        .delete_audits_older_than(cutoff)
+        .delete_older_than(cutoff)
         .unwrap_or(0);
     Ok(Json(serde_json::json!({
         "success": true,
