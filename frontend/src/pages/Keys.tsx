@@ -8,12 +8,17 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { isAdmin } from '../lib/utils';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
 import './Keys.css';
+
+/** 客户端分页每页条数（与 Pricing 页一致） */
+const PAGE_SIZE = 20;
 
 interface TokenItem {
   id: string | number;
   name: string;
+  /** 所属用户邮箱（管理员视角带出归属；管理员级令牌为空串） */
+  user_email?: string;
   group?: string;
   allowed_models?: string[] | string;
   quota_limit?: number | null;
@@ -117,9 +122,11 @@ export default function Keys(): JSX.Element {
   // 令牌轮换后展示的新密钥（一次性显示，提示用户立即保存）
   const [rotatedKey, setRotatedKey] = useState<RotatedKeyState | null>(null);
 
-  // ── 批量选择 / 搜索 / 行操作菜单（对齐渠道页） ──
+  // ── 批量选择 / 搜索 / 分页 / 行操作菜单（对齐渠道页） ──
   const [selected, setSelected] = useState<Set<string | number>>(new Set());
   const [search, setSearch] = useState('');
+  // 客户端分页：搜索过滤变化时回第 1 页
+  const [page, setPage] = useState(1);
   // 菜单用 fixed 定位挂在 body 层级：Card/table-wrap 的 overflow 会裁掉
   // 行内 absolute 弹层（尤其最后一行向下弹出时），fixed 可逃出所有裁剪容器
   const [rowMenuId, setRowMenuId] = useState<string | number | null>(null);
@@ -181,6 +188,11 @@ export default function Keys(): JSX.Element {
       || (tk.group || '').toLowerCase().includes(q)
       || (tk.key || '').toLowerCase().includes(q));
   }, [tokens, q]);
+
+  // 客户端分页：页码越界时钳到最后一页（删除/过滤收缩后不落空页）
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageItems = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   // 全选/反选（仅当前过滤结果）
   const allSelected = filtered.length > 0 && filtered.every((tk) => selected.has(tk.id));
@@ -525,13 +537,13 @@ export default function Keys(): JSX.Element {
     return [];
   };
 
-  if (loading) return <SkeletonTable columns={7} rows={6} />;
+  if (loading) return <SkeletonTable columns={11} rows={6} />;
 
   return (
     <div>
       <div className="page-header">
-        <h1>{t('API 令牌')}</h1>
-        <p>{t('管理 API 令牌：分组、模型白名单、额度、过期与 IP 限制')}</p>
+        <h1>{t('API 密钥')}</h1>
+        <p>{t('创建与管理 API 密钥')}</p>
       </div>
 
       {error && <div className="error-message">{error}</div>}
@@ -545,7 +557,7 @@ export default function Keys(): JSX.Element {
               <input
                 placeholder={t('搜索令牌')}
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
               />
             </div>
             <Button onClick={openCreate}>{t('+ 创建令牌')}</Button>
@@ -580,6 +592,7 @@ export default function Keys(): JSX.Element {
                       />
                     </th>
                     <th className="col-name">{t('名称')}</th>
+                    <th className="col-user">{t('用户')}</th>
                     <th className="col-status">{t('状态')}</th>
                     <th className="col-key">{t('密钥')}</th>
                     <th className="col-quota">{t('额度')}</th>
@@ -591,7 +604,7 @@ export default function Keys(): JSX.Element {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((tk) => {
+                  {pageItems.map((tk) => {
                     const expired = isExpired(tk);
                     const disabled = tk.status === 'disabled' || tk.is_active === false;
                     const models = modelsOf(tk);
@@ -612,6 +625,11 @@ export default function Keys(): JSX.Element {
                         </td>
                         <td className="col-name">
                           <div className="tk-name" title={tk.name}>{tk.name}</div>
+                        </td>
+                        <td className="col-user">
+                          {tk.user_email
+                            ? <span className="tk-user-email" title={tk.user_email}>{tk.user_email}</span>
+                            : <span className="tk-user-none">—</span>}
                         </td>
                         <td className="col-status">
                           <span className={`tk-status-badge ${expired ? 'warn' : disabled ? 'bad' : 'ok'}`}>
@@ -681,15 +699,16 @@ export default function Keys(): JSX.Element {
                           {models.length === 0
                             ? <span className="tk-models-all">{t('全部')}</span>
                             : (
-                              <div className="tk-models">
-                                {models.slice(0, 3).map((m) => (
+                              // 白名单过长只显示前 2 个 + "+N"，悬停 title 看完整列表
+                              <div className="tk-models" title={models.join(', ')}>
+                                {models.slice(0, 2).map((m) => (
                                   <span key={m} className="tk-model-badge" style={{ color: modelBadgeColor(m), borderColor: modelBadgeColor(m) }}>
                                     {m}
                                   </span>
                                 ))}
-                                {models.length > 3 && (
-                                  <span className="tk-model-badge tk-models-more" title={models.slice(3).join(', ')}>
-                                    +{models.length - 3}
+                                {models.length > 2 && (
+                                  <span className="tk-model-badge tk-models-more">
+                                    +{models.length - 2}
                                   </span>
                                 )}
                               </div>
@@ -754,6 +773,16 @@ export default function Keys(): JSX.Element {
                 </tbody>
               </table>
             </div>
+
+            {/* 客户端分页：页码导航 + 总数（全选/批量仍作用于过滤集，与分页前语义一致） */}
+            {totalPages > 1 && (
+              <div className="pagination-meta">
+                <Pagination page={safePage} totalPages={totalPages} onChange={setPage} />
+                <span className="pagination-total">
+                  {t('共 {{count}} 条', { count: filtered.length })}
+                </span>
+              </div>
+            )}
 
             {filtered.length === 0 && search && (
               <EmptyState message={t('无匹配结果')} icon="🔍" />
