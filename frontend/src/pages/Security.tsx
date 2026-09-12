@@ -155,13 +155,6 @@ export default function Security(): JSX.Element {
 
   return (
     <div className="security-shell">
-      <div className="page-header">
-        <div>
-          <h1>{t('安全监控')}</h1>
-          <p>{t('查看安全事件与监控概览，掌握网关安全态势')}</p>
-        </div>
-      </div>
-
       {error && <div className="error-message">{error}</div>}
 
       {/* 系统资源监控（CPU/内存/负载，自动轮询） */}

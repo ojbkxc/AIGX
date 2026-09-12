@@ -165,13 +165,6 @@ export default function IpManagement() {
 
   return (
     <div className="ipm-shell">
-      <div className="page-header">
-        <div>
-          <h1>{t('IP 管理')}</h1>
-          <p>{t('管理 IP 白名单与黑名单，支持单 IP 与 CIDR 网段（如 192.168.0.0/24）')}</p>
-        </div>
-      </div>
-
       {error && <div className="error-message">{error}</div>}
 
       {/* 全局开关 */}

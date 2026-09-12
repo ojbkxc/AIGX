@@ -137,14 +137,7 @@ export default function Groups(): JSX.Element {
 
   return (
     <div className="groups-shell">
-      {/* PageIntro 标题区 */}
-      <div className="page-header">
-        <div>
-          <h1>{t('用户分组')}</h1>
-          <p>{t('管理用户分组与计费倍率，控制不同分组的模型访问权限与费率')}</p>
-        </div>
-      </div>
-
+      {/* 嵌入 Settings billing 子标签使用，无独立路由；标题由外层 Tabs 提供 */}
       {error && <div className="error-message">{error}</div>}
 
       <div className="groups-content">

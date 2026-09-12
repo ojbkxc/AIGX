@@ -1210,5 +1210,9 @@
   "高危": "High",
   "鼓励引入新话题": "Encourage new topics",
   "（获取失败）": "(failed to fetch)",
-  "加载中…": "Loading…"
+  "加载中…": "Loading…",
+  "价格在此为只读展示。": "Prices are shown read-only here.",
+  "编辑定价请前往 系统设置 → 计费/易支付": "To edit pricing, go to Settings → Billing / Epay",
+  "计费设置分区": "Billing settings sections",
+  "运维设置分区": "Ops settings sections"
 }

@@ -272,14 +272,7 @@ export default function Notify() {
 
   return (
     <div className="notify-shell">
-      {/* PageIntro 标题区 */}
-      <div className="page-header">
-        <div>
-          <h1>{t('通知设置')}</h1>
-          <p>{t('配置 Telegram Bot、SMTP 邮件、Slack 与 Webhook 通知。事件触发时推送：充值成功 / 额度不足 / 渠道故障 / 告警规则。')}</p>
-        </div>
-      </div>
-
+      {/* 嵌入 Settings ops 子标签使用，无独立路由；标题由外层 Tabs 提供 */}
       {error && <div className="error-message">{error}</div>}
 
       <div className="notify-content">

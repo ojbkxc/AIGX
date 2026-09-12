@@ -144,11 +144,7 @@ export default function Epay() {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>{t('易支付配置')}</h1>
-        <p>{t('对接易支付（Epay）实现在线充值。字段与 new-api 保持一致：网关地址 / 商户 ID / 商户密钥 / 兑换比例 / 回调地址。')}</p>
-      </div>
-
+      {/* 嵌入 Settings billing 子标签使用，无独立路由；标题由外层 Tabs 提供 */}
       {error && <div className="error-message">{error}</div>}
 
       <div className="card">

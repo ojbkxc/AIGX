@@ -1,9 +1,11 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import { Boxes, Search, Copy, Layers, Plus, Pencil, Trash2 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Card, Loading, EmptyState, Badge } from '../components/ui';
+import { isAdmin } from '../lib/utils';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import type { ModelInfo, ModelMetaOverride } from '../types';
 import './Models.css';
@@ -221,6 +223,14 @@ export default function Models(): JSX.Element {
           {loading ? t('加载中...') : t('刷新')}
         </button>
       </div>
+
+      {/* 管理员提示：价格在此只读展示，编辑入口在 系统设置 → 计费/易支付 */}
+      {isAdmin() && (
+        <div className="notify-note" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
+          {t('价格在此为只读展示。')}{' '}
+          <Link to="/settings">{t('编辑定价请前往 系统设置 → 计费/易支付')}</Link>
+        </div>
+      )}
 
       {error && <div className="error-message">{error}</div>}
 

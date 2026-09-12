@@ -55,6 +55,10 @@ interface DataResponse<T> {
 }
 
 type SettingsTab = 'site' | 'billing' | 'ops' | 'security' | 'account';
+/** billing 分区子标签（定价倍率 / 易支付 / 用户分组） */
+type BillingSubTab = 'pricing' | 'epay' | 'groups';
+/** ops 分区子标签（通知 / 限流 / 缓存 / 价格同步 / 汇率） */
+type OpsSubTab = 'notify' | 'ratelimit' | 'cache' | 'pricesync' | 'exchange';
 
 // 格式化字节数为人类可读单位
 function fmtBytes(bytes: number | null | undefined): string {
@@ -107,6 +111,9 @@ export default function Settings() {
   // 当前激活的配置分区：四 tab 信息架构对齐 new-api System Settings
   // 站点（原通用+界面）/ 计费（定价+易支付+用户分组）/ 运维（通知+限流+缓存+价格同步）/ 安全（安全监控+IP管理）
   const [activeTab, setActiveTab] = useState<SettingsTab>('site');
+  // 分区内子标签：避免 billing/ops 长页面垂直堆叠（易支付曾被压到最底）
+  const [billingSub, setBillingSub] = useState<BillingSubTab>('pricing');
+  const [opsSub, setOpsSub] = useState<OpsSubTab>('notify');
 
   // 界面分区：主题三态（system/light/dark），与登录页/侧边栏切换共享同一份持久化
   const [theme, setTheme] = useState<ThemeMode>(() => getThemeMode());
@@ -494,18 +501,45 @@ export default function Settings() {
 
       {activeTab === 'billing' && (
         <>
-          {/* 计费 = 定价倍率 + 易支付 + 用户分组 */}
-          <Pricing />
-          <div style={{ marginTop: 16 }}><Epay /></div>
-          <div style={{ marginTop: 16 }}><Groups /></div>
+          {/* 计费 = 定价倍率 + 易支付 + 用户分组（子标签切换，不再垂直堆叠） */}
+          <Tabs<BillingSubTab>
+            items={[
+              { key: 'pricing', label: t('定价倍率') },
+              { key: 'epay', label: t('易支付配置') },
+              { key: 'groups', label: t('用户分组') },
+            ]}
+            active={billingSub}
+            onChange={setBillingSub}
+            ariaLabel={t('计费设置分区')}
+          />
+          <div style={{ marginTop: 16 }}>
+            {billingSub === 'pricing' && <Pricing />}
+            {billingSub === 'epay' && <Epay />}
+            {billingSub === 'groups' && <Groups />}
+          </div>
         </>
       )}
 
       {activeTab === 'ops' && (
         <>
-          {/* 运维 = 通知设置 + 限流配置 + 缓存管理 + 价格同步 + 汇率 */}
-          <Notify />
-          <div className="card" style={{ marginTop: 16 }}>
+          {/* 运维 = 通知设置 + 限流配置 + 缓存管理 + 价格同步 + 汇率（子标签切换） */}
+          <Tabs<OpsSubTab>
+            items={[
+              { key: 'notify', label: t('通知设置') },
+              { key: 'ratelimit', label: t('限流配置') },
+              { key: 'cache', label: t('缓存管理') },
+              { key: 'pricesync', label: t('价格同步') },
+              { key: 'exchange', label: t('汇率配置') },
+            ]}
+            active={opsSub}
+            onChange={setOpsSub}
+            ariaLabel={t('运维设置分区')}
+          />
+          <div style={{ marginTop: 16, display: opsSub === 'notify' ? 'block' : 'none' }}>
+            <Notify />
+          </div>
+          <div style={{ marginTop: 16, display: opsSub === 'ratelimit' ? 'block' : 'none' }}>
+            <div className="card">
             <div className="card-header">
               <h2>{t('限流配置')}</h2>
             </div>
@@ -553,8 +587,10 @@ export default function Settings() {
               )}
             </div>
           </div>
+          </div>
 
-          <div className="card" style={{ marginTop: 16 }}>
+          <div style={{ marginTop: 16, display: opsSub === 'cache' ? 'block' : 'none' }}>
+          <div className="card">
             <div className="card-header">
               <h2>{t('缓存管理')}</h2>
             </div>
@@ -600,8 +636,10 @@ export default function Settings() {
               )}
             </div>
           </div>
+          </div>
 
-          <div className="card" style={{ marginTop: 16 }}>
+          <div style={{ marginTop: 16, display: opsSub === 'pricesync' ? 'block' : 'none' }}>
+          <div className="card">
             <div className="card-header">
               <h2>{t('价格同步')}</h2>
             </div>
@@ -659,8 +697,10 @@ export default function Settings() {
               )}
             </div>
           </div>
+          </div>
 
-          <div className="card" style={{ marginTop: 16 }}>
+          <div style={{ marginTop: 16, display: opsSub === 'exchange' ? 'block' : 'none' }}>
+          <div className="card">
             <div className="card-header">
               <h2>{t('汇率配置')}</h2>
             </div>
@@ -704,6 +744,7 @@ export default function Settings() {
                 </div>
               )}
             </div>
+          </div>
           </div>
         </>
       )}
