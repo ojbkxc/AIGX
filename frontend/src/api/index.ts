@@ -515,6 +515,12 @@ export const api = {
     request<ApiResponse<{ removed?: number }>>('DELETE', `${API_BASE}/logs/audits`, { ids }),
   clearAuditLogs: (): Promise<ApiResponse<{ removed?: number }>> =>
     request<ApiResponse<{ removed?: number }>>('DELETE', `${API_BASE}/logs/audits/clear`),
+  getLogRetention: (): Promise<ApiResponse<{ max_age_days?: number; max_capacity?: number }>> =>
+    request<ApiResponse<{ max_age_days?: number; max_capacity?: number }>>('GET', `${API_BASE}/logs/retention`),
+  updateLogRetention: (data: { max_age_days?: number; max_capacity?: number }): Promise<ApiResponse<null>> =>
+    request<ApiResponse<null>>('PUT', `${API_BASE}/logs/retention`, data),
+  cleanupLogs: (): Promise<ApiResponse<{ removed?: number; requests?: number; audits?: number }>> =>
+    request<ApiResponse<{ removed?: number; requests?: number; audits?: number }>>('POST', `${API_BASE}/logs/cleanup`, {}),
 
   // 兑换码
   batchRedemptions: (data: Record<string, unknown>): Promise<ApiResponse<{ count?: number; data?: RedemptionItem[] }>> =>

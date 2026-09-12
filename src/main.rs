@@ -475,6 +475,38 @@ async fn main() -> anyhow::Result<()> {
                 }),
             });
         }
+        // 日志保留清理：按运维设置的「保留天数」每日扫一次 reqlog/auditlog
+        // 前缀，删除早于截止时间的日志（参照 new-api DeleteOldLogBatch）。
+        // 天数未配置时不清理（容量上限 purge_overflow 仍然兜底）。
+        {
+            let log_store = state.log_store.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "log-retention-sweep",
+                interval: Duration::from_secs(86400),
+                first_run_delay: Duration::from_secs(600),
+                run: Box::new(move || {
+                    let ls = log_store.clone();
+                    Box::pin(async move {
+                        let (days, _capacity) = ls.requests.retention();
+                        let Some(days) = days else { return 0 };
+                        let cutoff = chrono::Utc::now().timestamp() - (days as i64) * 86400;
+                        match ls.requests.delete_older_than(cutoff) {
+                            Ok(n) => {
+                                if let Ok(m) = ls.audits.delete_audits_older_than(cutoff) {
+                                    (n + m) as u64
+                                } else {
+                                    n as u64
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("日志保留清理失败: {e}");
+                                0
+                            }
+                        }
+                    })
+                }),
+            });
+        }
         // #85 订阅周期任务：到期置 expired + 分组回退；周期重置点清零用量。
         // 读侧（find_active/try_charge）已做动态过期判断，此处落库保证
         // 用户订阅列表与分组权益最终一致。
@@ -844,6 +876,16 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/logs/audits/clear",
             delete(api::admin::handle_clear_audit_logs),
         )
+        // 日志保留配置（运维设置：保留天数/容量上限/手动清理）
+        .route(
+            "/api/logs/retention",
+            get(api::admin::handle_get_log_retention),
+        )
+        .route(
+            "/api/logs/retention",
+            put(api::admin::handle_update_log_retention),
+        )
+        .route("/api/logs/cleanup", post(api::admin::handle_cleanup_logs))
         // 数据看板
         .route(
             "/api/dashboard/consumption_trend",

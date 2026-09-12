@@ -261,6 +261,92 @@ impl RequestLogStore {
         Ok(())
     }
 
+    /// 日志保留配置（运维设置持久化；None = 不按天数清理，只受容量上限约束）
+    ///
+    /// key 格式 `reqlog:{created_at}:{id}` 时间戳前缀 + `auditlog:{ts}:{id}`，
+    /// 按天清理直接对前缀范围扫描即可，无需遍历解析值。
+    pub fn set_retention(
+        &self,
+        max_age_days: Option<u64>,
+        max_capacity: Option<usize>,
+    ) -> anyhow::Result<()> {
+        #[derive(Serialize, Deserialize, Default)]
+        struct Retention {
+            max_age_days: Option<u64>,
+            max_capacity: Option<usize>,
+        }
+        self.store.put(
+            "log_retention",
+            &Retention {
+                max_age_days,
+                max_capacity,
+            },
+        )
+    }
+
+    /// 读取日志保留配置（无记录返回 None/None = 默认策略：不限天数、容量 10 万）
+    pub fn retention(&self) -> (Option<u64>, Option<usize>) {
+        #[derive(Serialize, Deserialize, Default)]
+        struct Retention {
+            max_age_days: Option<u64>,
+            max_capacity: Option<usize>,
+        }
+        match self.store.get::<Retention>("log_retention") {
+            Ok(Some(r)) => (r.max_age_days, r.max_capacity),
+            _ => (None, None),
+        }
+    }
+
+    /// 手动/定时清理：删除早于 `before_ts` 的请求日志，返回删除条数（分批限流防阻塞）。
+    ///
+    /// 与 new-api DeleteOldLogBatch 对齐的语义，但 AIGX 是 KV 存储无需事务，
+    /// 直接按键前缀收集 + 分批删除（每批 5000 条，逐条 delete 是 O(1) 点删）。
+    pub fn delete_older_than(&self, before_ts: i64) -> anyhow::Result<usize> {
+        let keys = self.store.list("reqlog:")?;
+        let mut doomed: Vec<String> = keys
+            .into_iter()
+            .filter(|k| {
+                k.strip_prefix("reqlog:")
+                    .and_then(|rest| rest.split(':').next())
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .map(|ts| ts < before_ts)
+                    .unwrap_or(false)
+            })
+            .collect();
+        let n = doomed.len();
+        const BATCH: usize = 5000;
+        for chunk in doomed.drain(..).collect::<Vec<_>>().chunks(BATCH) {
+            for k in chunk {
+                if let Err(e) = self.store.delete(k) {
+                    tracing::warn!("retention delete failed for {k}: {e}");
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    /// 清理早于 `before_ts` 的审计日志（与请求日志同策略）。
+    pub fn delete_audits_older_than(&self, before_ts: i64) -> anyhow::Result<usize> {
+        let keys = self.store.list("auditlog:")?;
+        let doomed: Vec<String> = keys
+            .into_iter()
+            .filter(|k| {
+                k.strip_prefix("auditlog:")
+                    .and_then(|rest| rest.split(':').next())
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .map(|ts| ts < before_ts)
+                    .unwrap_or(false)
+            })
+            .collect();
+        let n = doomed.len();
+        for k in doomed {
+            if let Err(e) = self.store.delete(&k) {
+                tracing::warn!("audit retention delete failed for {k}: {e}");
+            }
+        }
+        Ok(n)
+    }
+
     /// 列出全部请求日志（按时间倒序）
     pub fn list_all(&self) -> Vec<RequestLog> {
         let keys = match self.store.list("reqlog:") {

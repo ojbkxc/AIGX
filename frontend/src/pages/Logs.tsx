@@ -1,21 +1,23 @@
 import { useState, useEffect, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Trash2, Eraser } from 'lucide-react';
+import { Trash2, Eraser, EyeOff, Eye } from 'lucide-react';
 import { api } from '../api';
 import { isAdmin } from '../lib/utils';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
+import { RequestLogDetail, AuditLogDetail } from '../components/LogDetailDialogs';
 import { Button, Card, Loading, EmptyState, Pagination } from '../components/ui';
 
-type LogTab = 'requests' | 'audits';
+export type LogTab = 'requests' | 'audits';
 type LogView = 'table' | 'timeline';
 
-interface RequestLogItem {
+export interface RequestLogItem {
   id: string | number;
   created_at?: number;
   user_id?: string;
   /** 后端解析的邮箱展示（user_id → email，解析失败缺省回退 user_id） */
   user_email?: string;
+  key_id?: string;
   channel_id?: string;
   channel_name?: string;
   model?: string;
@@ -27,9 +29,10 @@ interface RequestLogItem {
   latency_ms?: number;
   status_code?: number;
   error_msg?: string;
+  ip?: string;
 }
 
-interface AuditLogItem {
+export interface AuditLogItem {
   id: string | number;
   created_at?: number;
   admin_id?: string;
@@ -37,6 +40,7 @@ interface AuditLogItem {
   admin_email?: string;
   action?: string;
   target?: string;
+  before?: string;
   after?: string;
 }
 
@@ -52,6 +56,7 @@ interface Filters {
 
 export default function Logs(): JSX.Element {
   const admin = isAdmin();
+  const { t } = useTranslation();
   const [tab, setTab] = useState<LogTab>('requests');
   const [view, setView] = useState<LogView>('table');
   const [logs, setLogs] = useState<LogItem[]>([]);
@@ -62,10 +67,13 @@ export default function Logs(): JSX.Element {
   const [error, setError] = useState('');
   const [exporting, setExporting] = useState<'json' | 'csv' | null>(null);
   const addToast = useToast();
-  const { t } = useTranslation();
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [selected, setSelected] = useState<Set<string | number>>(new Set());
   const [batchDeleting, setBatchDeleting] = useState(false);
+  /** 行点击打开的详情条目（null 关闭） */
+  const [detail, setDetail] = useState<LogItem | null>(null);
+  /** 敏感信息脱敏开关（管理员：隐藏用户邮箱/渠道名/IP） */
+  const [masked, setMasked] = useState(false);
 
   const [filters, setFilters] = useState<Filters>({ user: '', model: '', channel: '', start: '', end: '' });
 
@@ -229,6 +237,13 @@ export default function Logs(): JSX.Element {
   const totalPages = Math.ceil(total / size);
   const isRequest = (_l: LogItem): _l is RequestLogItem => tab === 'requests';
 
+  /** 脱敏显示：邮箱/渠道/IP 等敏感值打码 */
+  const mask = (v: string | undefined): string => (v ? '••••' : '—');
+  const userDisplay = (email: string | undefined, id: string | undefined): string => {
+    if (masked) return mask(email ?? id);
+    return email || id || '—';
+  };
+
   // ── 时间线聚合：当前页日志按小时分桶（成功/失败计数 + 总费用） ──
   const timelineBuckets = (() => {
     const map = new Map<number, { ok: number; fail: number; cost: number; models: Set<string> }>();
@@ -337,6 +352,18 @@ export default function Logs(): JSX.Element {
               </button>
             </div>
           )}
+          {admin && (
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={() => setMasked((v) => !v)}
+              title={masked ? t('显示敏感信息') : t('隐藏敏感信息（用户邮箱/渠道名等打码）')}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            >
+              {masked ? <EyeOff size={14} /> : <Eye size={14} />}
+              {masked ? t('已脱敏') : t('脱敏开关')}
+            </button>
+          )}
         </div>
       </Card>
 
@@ -416,19 +443,14 @@ export default function Logs(): JSX.Element {
                         />
                       </th>
                     )}
+                    {admin && <th style={{ width: 190 }}>{t('用户')}</th>}
                     <th>{t('时间')}</th>
-                    {admin && <th>{t('用户')}</th>}
-                    {admin && <th>{t('原始名')}</th>}
                     <th>{t('模型')}</th>
                     {admin && <th>{t('渠道')}</th>}
-                    <th>{t('输入')}</th>
-                    <th>{t('输出')}</th>
+                    <th>{t('Tokens')}</th>
                     <th>{t('费用')}</th>
-                    {admin && <th>{t('成本')}</th>}
-                    {admin && <th>{t('利润')}</th>}
                     <th>{t('延迟')}</th>
                     <th>{t('状态')}</th>
-                    <th>{t('错误')}</th>
                   </tr>
                 ) : (
                   <tr>
@@ -442,8 +464,8 @@ export default function Logs(): JSX.Element {
                         />
                       </th>
                     )}
-                    <th>{t('时间')}</th>
                     <th>{t('管理员')}</th>
+                    <th>{t('时间')}</th>
                     <th>{t('操作')}</th>
                     <th>{t('目标')}</th>
                     <th>{t('变更')}</th>
@@ -453,9 +475,14 @@ export default function Logs(): JSX.Element {
               <tbody>
                 {logs.map((l) =>
                   isRequest(l) ? (
-                    <tr key={l.id}>
+                    <tr
+                      key={l.id}
+                      className="log-row-clickable"
+                      onClick={() => setDetail(l)}
+                      title={t('点击查看详情')}
+                    >
                       {admin && (
-                        <td>
+                        <td onClick={(e) => e.stopPropagation()}>
                           <input
                             type="checkbox"
                             checked={selected.has(l.id)}
@@ -464,47 +491,53 @@ export default function Logs(): JSX.Element {
                           />
                         </td>
                       )}
-                      <td>{fmtTime(l.created_at)}</td>
                       {admin && (
-                        <td
-                          style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                          title={l.user_id || ''}
-                        >
-                          {l.user_email || l.user_id || '—'}
+                        <td style={{ maxWidth: 190 }}>
+                          <span className="log-user-cell">
+                            <span className="log-user-avatar">{(userDisplay(l.user_email, l.user_id) || '?').charAt(0).toUpperCase()}</span>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{userDisplay(l.user_email, l.user_id)}</span>
+                          </span>
                         </td>
                       )}
-                      {admin && (
-                        <td style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.origin_model || ''}>
-                          {l.origin_model || '—'}
-                        </td>
-                      )}
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        {fmtTime(l.created_at)}
+                        <div>
+                          <span className={(l.status_code ?? 0) < 400 ? 'badge badge-success' : 'badge badge-danger'} style={{ fontSize: 10 }}>
+                            {(l.status_code ?? 0) < 400 ? t('成功') : t('失败')}
+                          </span>
+                        </div>
+                      </td>
                       <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.model || ''}>
                         {l.model || '—'}
+                        {l.origin_model && l.origin_model !== l.model && (
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>← {l.origin_model}</div>
+                        )}
                       </td>
                       {admin && (
                         <td style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.channel_name || ''}>
-                          {l.channel_name || '—'}
+                          {masked ? mask(l.channel_name) : (l.channel_name || '—')}
                         </td>
                       )}
-                      <td>{l.input_tokens}</td>
-                      <td>{l.output_tokens}</td>
-                      <td>¥{l.cost}</td>
-                      {admin && <td>¥{l.channel_cost ?? l.cost}</td>}
-                      {admin && (
-                        <td>{(l.channel_cost != null && l.channel_cost !== l.cost) ? `¥${(l.cost ?? 0) - l.channel_cost}` : '—'}</td>
-                      )}
-                      <td>{l.latency_ms}ms</td>
+                      <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
+                        <span>{l.input_tokens ?? 0}</span>
+                        <span style={{ color: 'var(--text-muted)' }}> / </span>
+                        <span>{l.output_tokens ?? 0}</span>
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap' }}>¥{l.cost}</td>
+                      <td style={{ whiteSpace: 'nowrap' }}>{l.latency_ms}ms</td>
                       <td>
                         <span className={(l.status_code ?? 0) < 400 ? 'badge badge-success' : 'badge badge-danger'}>{l.status_code}</span>
                       </td>
-                      <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.error_msg || '—'}>
-                        {l.error_msg || '—'}
-                      </td>
                     </tr>
                   ) : (
-                    <tr key={l.id}>
+                    <tr
+                      key={l.id}
+                      className="log-row-clickable"
+                      onClick={() => setDetail(l)}
+                      title={t('点击查看详情')}
+                    >
                       {admin && (
-                        <td>
+                        <td onClick={(e) => e.stopPropagation()}>
                           <input
                             type="checkbox"
                             checked={selected.has(l.id)}
@@ -513,13 +546,13 @@ export default function Logs(): JSX.Element {
                           />
                         </td>
                       )}
-                      <td>{fmtTime(l.created_at)}</td>
-                      <td
-                        style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                        title={l.admin_id || ''}
-                      >
-                        {l.admin_email || l.admin_id || '—'}
+                      <td style={{ maxWidth: 170 }}>
+                        <span className="log-user-cell">
+                          <span className="log-user-avatar">{(userDisplay(l.admin_email, l.admin_id) || '?').charAt(0).toUpperCase()}</span>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{userDisplay(l.admin_email, l.admin_id)}</span>
+                        </span>
                       </td>
+                      <td style={{ whiteSpace: 'nowrap' }}>{fmtTime(l.created_at)}</td>
                       <td><code style={{ background: 'var(--card-bg)', padding: '2px 6px', borderRadius: 4 }}>{l.action}</code></td>
                       <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.target || ''}>{l.target}</td>
                       <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, color: 'var(--text-muted)' }} title={l.after || '—'}>
@@ -537,6 +570,14 @@ export default function Logs(): JSX.Element {
           <Pagination page={page} totalPages={totalPages} onChange={setPage} />
         )}
       </Card>
+
+      {/* 行点击详情弹窗 */}
+      {detail && isRequest(detail) && (
+        <RequestLogDetail log={detail} admin={admin} onClose={() => setDetail(null)} />
+      )}
+      {detail && !isRequest(detail) && (
+        <AuditLogDetail log={detail} onClose={() => setDetail(null)} />
+      )}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>

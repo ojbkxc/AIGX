@@ -312,3 +312,95 @@ pub struct DeleteLogsBody {
     #[serde(default)]
     pub ids: Vec<String>,
 }
+
+/// ── 日志保留配置（运维设置：保留天数 / 容量上限 / 手动清理）──────────
+
+#[derive(Debug, Deserialize)]
+pub struct LogRetentionBody {
+    /// 保留天数（None = 不按天数清理）
+    #[serde(default)]
+    pub max_age_days: Option<u64>,
+    /// 容量上限（None = 默认 10 万条）
+    #[serde(default)]
+    pub max_capacity: Option<usize>,
+}
+
+/// GET /api/logs/retention — 读取日志保留配置
+pub async fn handle_get_log_retention(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let (days, capacity) = state.log_store.requests.retention();
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "max_age_days": days,
+            "max_capacity": capacity.unwrap_or(100_000),
+        }
+    })))
+}
+
+/// PUT /api/logs/retention — 更新日志保留配置（持久化，后台任务每日执行）
+pub async fn handle_update_log_retention(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LogRetentionBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    state
+        .log_store
+        .requests
+        .set_retention(body.max_age_days, body.max_capacity)
+        .map_err(|e| {
+            error_response(
+                &format!("Failed to save retention: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+    tracing::info!(
+        "日志保留配置已更新: max_age_days={:?} max_capacity={:?}",
+        body.max_age_days,
+        body.max_capacity
+    );
+    Ok(Json(serde_json::json!({ "success": true, "data": null })))
+}
+
+/// POST /api/logs/cleanup — 手动触发一次按保留天数的清理
+///
+/// 不改配置，按当前配置立即执行一次；未配置天数时按 `days` 请求参数执行
+///（给「立即清理 N 天前」按钮用）。
+#[derive(Debug, Deserialize)]
+pub struct LogCleanupBody {
+    #[serde(default)]
+    pub days: Option<u64>,
+}
+
+pub async fn handle_cleanup_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<LogCleanupBody>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let days = body
+        .and_then(|Json(b)| b.days)
+        .or_else(|| state.log_store.requests.retention().0);
+    let Some(days) = days else {
+        return Err(error_response("未配置保留天数", StatusCode::BAD_REQUEST));
+    };
+    let cutoff = chrono::Utc::now().timestamp() - (days as i64) * 86400;
+    let removed = state
+        .log_store
+        .requests
+        .delete_older_than(cutoff)
+        .map_err(|e| error_response(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    let audits = state
+        .log_store
+        .audits
+        .delete_audits_older_than(cutoff)
+        .unwrap_or(0);
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "removed": removed + audits, "requests": removed, "audits": audits, "cutoff": cutoff }
+    })))
+}
