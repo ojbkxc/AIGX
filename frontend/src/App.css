@@ -1184,6 +1184,15 @@ code {
   color: #fff;
 }
 
+/* 图片版 logo：去掉实底色块，让 logo.png 的半透明像素直接透出侧栏背景 */
+.sidebar-logo-img {
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  background: transparent;
+  color: inherit;
+}
+
 .sidebar-head-text {
   display: flex;
   flex-direction: column;

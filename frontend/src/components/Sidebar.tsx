@@ -148,10 +148,10 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
     <aside
       className={`sidebar-aside ${collapsed ? 'sidebar-aside-collapsed' : ''} ${isDrawer ? 'sidebar-aside-drawer' : ''}`}
     >
-      {/* Logo（收缩态仅剩居中 logo） */}
+      {/* Logo（收缩态仅剩居中 logo；容器透明保留 PNG 半透明） */}
       <div className="sidebar-head">
-        <div className="sidebar-logo">
-          <img src="/logo.png" alt="AIGX" width={16} height={16} style={{ borderRadius: 4 }} />
+        <div className="sidebar-logo sidebar-logo-img">
+          <img src="/logo.png" alt="AIGX" width={22} height={22} style={{ borderRadius: 4 }} />
         </div>
         <div className="sidebar-head-text">
           <div className="sidebar-title">AIGX</div>

@@ -328,16 +328,12 @@ export default function Login(): JSX.Element {
           <div style={{
             width: '44px',
             height: '44px',
-            background: 'var(--accent-color)',
-            borderRadius: '10px',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontSize: '20px',
             margin: '0 auto 14px',
-            color: 'white',
           }}>
-            <img src="/logo.png" alt="AIGX" width={30} height={30} style={{ borderRadius: 6 }} />
+            <img src="/logo.png" alt="AIGX" width={44} height={44} />
           </div>
           <h1 style={{ fontSize: '20px', fontWeight: 600, color: 'var(--text-main)', marginBottom: '4px', fontFamily: "'Inter', sans-serif", letterSpacing: '-0.4px' }}>
             AIGX Gateway
