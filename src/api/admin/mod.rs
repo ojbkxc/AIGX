@@ -129,8 +129,8 @@ pub use legacy::handle_checkin_status;
 // 上游模型发现（供 openai::handle_list_models 懒加载复用）
 pub use legacy::fetch_upstream_models;
 
-// 网络层管理（main.rs /api/network/* 路由）
+// 网络层管理（main.rs /api/network/* 路由；gate/load 供数据面闸门内部使用）
 pub use network::{
-    add_network_account, health_check, list_network_accounts, load_network_config,
-    network_layer_gate, remove_network_account, restart_network, update_network_config,
+    add_network_account, health_check, list_network_accounts, remove_network_account,
+    restart_network, update_network_config,
 };

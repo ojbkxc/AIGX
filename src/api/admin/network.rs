@@ -104,20 +104,23 @@ pub fn load_network_config(state: &AppState) -> NetworkLayerConfig {
 ///
 /// 调用方（openai::handle_chat_completions 等）在鉴权后立即检查；
 /// 管理面 /api/* 与监控端点不经过此闸门，保证关停状态下仍可管理。
-pub fn network_layer_gate(state: &AppState) -> Result<(), Response> {
+/// Err 装箱以压小 Result 体积（clippy result_large_err）。
+pub fn network_layer_gate(state: &AppState) -> Result<(), Box<Response>> {
     let cfg = load_network_config(state);
     if !cfg.enabled {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "error": {
-                    "code": "network_layer_disabled",
-                    "type": "api_error",
-                    "message": "网络层已停用：推理转发被管理员关闭。请稍后重试或联系管理员。",
-                }
-            })),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": {
+                        "code": "network_layer_disabled",
+                        "type": "api_error",
+                        "message": "网络层已停用：推理转发被管理员关闭。请稍后重试或联系管理员。",
+                    }
+                })),
+            )
+                .into_response(),
+        ));
     }
     Ok(())
 }

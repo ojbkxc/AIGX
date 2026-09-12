@@ -1390,7 +1390,7 @@ pub async fn handle_chat_completions(
 
     // 网络层闸门：管理员关闭网络层时拒绝转发（管理面不受影响）
     if let Err(resp) = crate::api::admin::network::network_layer_gate(&state) {
-        return resp;
+        return *resp;
     }
 
     // 限流检查（功能 3）：鉴权后、推理前
@@ -2257,7 +2257,7 @@ pub async fn handle_responses(
 
     // 网络层闸门：管理员关闭网络层时拒绝转发（管理面不受影响）
     if let Err(resp) = crate::api::admin::network::network_layer_gate(&state) {
-        return resp;
+        return *resp;
     }
 
     // 限流检查：鉴权后、推理前（Responses 端点同样纳入限流）
