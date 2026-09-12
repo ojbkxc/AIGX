@@ -24,6 +24,7 @@ const Chat = lazy(() => import('./pages/Chat'));
 const NetworkLayer = lazy(() => import('./pages/NetworkLayer'));
 const Models = lazy(() => import('./pages/Models'));
 const Prompts = lazy(() => import('./pages/Prompts'));
+const Pricing = lazy(() => import('./pages/Pricing'));
 
 /** 懒加载页面兜底骨架（与全局 loading 视觉一致） */
 function PageFallback(): JSX.Element {
@@ -96,7 +97,7 @@ export default function App(): JSX.Element {
             <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
             {/* 已合并的旧路由 → 重定向到合并后位置 */}
             <Route path="/mappings" element={<Navigate to="/channels" replace />} />
-            <Route path="/pricing" element={<Navigate to="/settings" replace />} />
+            <Route path="/pricing" element={<AdminRoute><Pricing /></AdminRoute>} />
             <Route path="/groups" element={<Navigate to="/settings" replace />} />
             <Route path="/orders" element={<Navigate to="/wallet" replace />} />
             <Route path="/epay" element={<Navigate to="/settings" replace />} />

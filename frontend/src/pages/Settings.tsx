@@ -6,7 +6,6 @@ import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Tabs } from '../components/ui';
 import { getThemeMode, applyTheme, type ThemeMode } from '../lib/theme';
-import Pricing from './Pricing';
 import Epay from './Epay';
 import Groups from './Groups';
 import Notify from './Notify';
@@ -55,8 +54,8 @@ interface DataResponse<T> {
 }
 
 type SettingsTab = 'site' | 'billing' | 'ops' | 'security' | 'account';
-/** billing 分区子标签（定价倍率 / 易支付 / 用户分组） */
-type BillingSubTab = 'pricing' | 'epay' | 'groups';
+/** billing 分区子标签（易支付 / 用户分组；定价倍率已拆为独立页 /pricing） */
+type BillingSubTab = 'epay' | 'groups';
 /** ops 分区子标签（通知 / 限流 / 缓存 / 价格同步 / 汇率） */
 type OpsSubTab = 'notify' | 'ratelimit' | 'cache' | 'pricesync' | 'exchange';
 
@@ -109,10 +108,10 @@ export default function Settings() {
   const { t } = useTranslation();
 
   // 当前激活的配置分区：四 tab 信息架构对齐 new-api System Settings
-  // 站点（原通用+界面）/ 计费（定价+易支付+用户分组）/ 运维（通知+限流+缓存+价格同步）/ 安全（安全监控+IP管理）
+  // 站点（原通用+界面）/ 计费（易支付+用户分组；定价倍率已拆独立页 /pricing）/ 运维（通知+限流+缓存+价格同步）/ 安全（安全监控+IP管理）
   const [activeTab, setActiveTab] = useState<SettingsTab>('site');
   // 分区内子标签：避免 billing/ops 长页面垂直堆叠（易支付曾被压到最底）
-  const [billingSub, setBillingSub] = useState<BillingSubTab>('pricing');
+  const [billingSub, setBillingSub] = useState<BillingSubTab>('epay');
   const [opsSub, setOpsSub] = useState<OpsSubTab>('notify');
 
   // 界面分区：主题三态（system/light/dark），与登录页/侧边栏切换共享同一份持久化
@@ -501,10 +500,9 @@ export default function Settings() {
 
       {activeTab === 'billing' && (
         <>
-          {/* 计费 = 定价倍率 + 易支付 + 用户分组（子标签切换，不再垂直堆叠） */}
+          {/* 计费 = 易支付 + 用户分组（子标签切换；定价倍率已拆为独立页 /pricing） */}
           <Tabs<BillingSubTab>
             items={[
-              { key: 'pricing', label: t('定价倍率') },
               { key: 'epay', label: t('易支付配置') },
               { key: 'groups', label: t('用户分组') },
             ]}
@@ -513,7 +511,6 @@ export default function Settings() {
             ariaLabel={t('计费设置分区')}
           />
           <div style={{ marginTop: 16 }}>
-            {billingSub === 'pricing' && <Pricing />}
             {billingSub === 'epay' && <Epay />}
             {billingSub === 'groups' && <Groups />}
           </div>

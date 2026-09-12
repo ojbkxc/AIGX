@@ -228,7 +228,7 @@ export default function Models(): JSX.Element {
       {isAdmin() && (
         <div className="notify-note" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
           {t('价格在此为只读展示。')}{' '}
-          <Link to="/settings">{t('编辑定价请前往 系统设置 → 计费/易支付')}</Link>
+          <Link to="/pricing">{t('编辑定价请前往 定价倍率页')}</Link>
         </div>
       )}
 

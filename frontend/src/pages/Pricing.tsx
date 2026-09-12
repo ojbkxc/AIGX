@@ -202,7 +202,14 @@ export default function Pricing() {
 
   return (
     <div className="pricing-shell">
-      {/* 嵌入 Settings billing 子标签使用，无独立路由；标题由外层 Tabs 提供 */}
+      {/* 独立页面（/pricing）：页头标题 + 价格目录/倍率配置子标签 */}
+      <div className="page-header">
+        <div>
+          <h1>{t('定价倍率')}</h1>
+          <p>{t('管理模型定价目录与全局倍率配置，支持按 token 计费与分组倍率')}</p>
+        </div>
+      </div>
+
       {error && <div className="error-message">{error}</div>}
 
       {/* 子标签页 — 参照 deepseek-pp SubTabs 模式 */}
