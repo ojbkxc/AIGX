@@ -596,19 +596,6 @@ export default function Login(): JSX.Element {
           </a>
         </div>
 
-        <div style={{
-          marginTop: '20px',
-          padding: '10px 12px',
-          fontSize: '12px',
-          color: 'var(--text-muted)',
-          background: 'var(--bg-color)',
-          border: '1px solid var(--border-color)',
-          borderRadius: '8px',
-          textAlign: 'center',
-          lineHeight: '1.5',
-        }}>
-          首次启动请查看服务日志获取初始管理员密码
-        </div>
       </div>
 
       {showForgot && (
