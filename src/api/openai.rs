@@ -360,7 +360,16 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
 
     // 第二级：回退到 Hub 专用提供商（cloudflare），无通用渠道 ID。
     // 仅在通用渠道列表未产出任何候选时追加，避免 CF 桥接重复出现。
-    if result.is_empty() {
+    //
+    // 收紧条件：fallback 桥接受任意模型名，若放任"无候选即回退"，
+    // 只在禁用渠道上声明的模型（或任何有定价的名字）仍会被客户路由到
+    // CF Worker——违反"禁用渠道不暴露、不可用"的语义。因此仅当模型
+    // 由任一启用渠道声明/发现，或存在全局映射（管理员显式暴露的别名）
+    // 时才允许 fallback；否则返回空，让调用方按 no_bridge 拒绝。
+    if result.is_empty()
+        && (model_declared_by_channel(state, model)
+            || state.model_mapper.all_mappings().contains_key(model))
+    {
         if let Some(b) = state.hub.get_specialized("cloudflare") {
             result.push((b, None, None));
         }
