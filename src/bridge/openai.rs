@@ -652,6 +652,28 @@ fn parse_finish_reason(s: &str) -> FinishReason {
     }
 }
 
+/// T4：OpenAI 形状上游缓存命中子集的解析兜底链。
+///
+/// 不同上游把"prompt 缓存命中数"放在不同字段（均表示已包含在
+/// prompt_tokens 内的子集）：
+/// 1. `usage.prompt_cache_hit_tokens`（DeepSeek）
+/// 2. `usage.prompt_tokens_details.cached_tokens`（OpenAI 新口径）
+/// 3. `usage.cached_tokens`（Kimi/Moonshot）
+fn extract_cache_hit(u: Option<&Value>) -> u64 {
+    u.and_then(|u| u.get("prompt_cache_hit_tokens"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            u.and_then(|u| u.get("prompt_tokens_details"))
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+        })
+        .or_else(|| {
+            u.and_then(|u| u.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+        })
+        .unwrap_or(0)
+}
+
 fn parse_usage(json: &Value) -> UsageStats {
     let u = json.get("usage");
     let prompt = u
@@ -662,12 +684,11 @@ fn parse_usage(json: &Value) -> UsageStats {
         .and_then(|u| u.get("completion_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    // OpenAI 形状缓存命中子集（prompt_tokens_details.cached_tokens）
-    let cached_prompt_tokens = u
-        .and_then(|u| u.get("prompt_tokens_details"))
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    // T4：缓存命中兜底链 + 恒等式收敛——cache_hit = cache_hit.clamp(0,
+    // prompt_tokens)，cache_miss = prompt_tokens - cache_hit（推导值，
+    // 不落 UsageStats）。上游字段自相矛盾（如 hit > prompt）时收敛到
+    // 合法区间，保证不变量 cache_hit ∈ [0, prompt_tokens] 不破。
+    let cached_prompt_tokens = extract_cache_hit(u).clamp(0, prompt);
     UsageStats {
         prompt_tokens: prompt,
         completion_tokens: completion,
@@ -685,11 +706,8 @@ fn parse_usage_from_value(u: &Value) -> UsageStats {
         .get("completion_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let cached_prompt_tokens = u
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    // T4：与 parse_usage 同口径的兜底链 + 恒等式收敛（见其注释）
+    let cached_prompt_tokens = extract_cache_hit(Some(u)).clamp(0, prompt);
     UsageStats {
         prompt_tokens: prompt,
         completion_tokens: completion,
@@ -970,5 +988,98 @@ mod tests {
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[0].content, "结构化形态");
         assert_eq!(docs[1].content, "纯字符串形态");
+    }
+
+    // ── T4：上游缓存命中兜底链 + 计费恒等式 clamp（纯解析，不发网络）────
+
+    /// DeepSeek 老口径：usage.prompt_cache_hit_tokens 命中，优先级最高。
+    #[test]
+    fn usage_prefers_deepseek_cache_hit_field() {
+        let json = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "prompt_cache_hit_tokens": 40,
+                "prompt_cache_miss_tokens": 60,
+                "prompt_tokens_details": { "cached_tokens": 25 }
+            }
+        });
+        let stats = super::parse_usage(&json);
+        assert_eq!(stats.prompt_tokens, 100);
+        assert_eq!(stats.cached_prompt_tokens, 40, "DeepSeek 字段应优先于新口径");
+    }
+
+    /// OpenAI 新口径：usage.prompt_tokens_details.cached_tokens。
+    #[test]
+    fn usage_reads_openai_cached_tokens_details() {
+        let json = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "prompt_tokens_details": { "cached_tokens": 30 }
+            }
+        });
+        let stats = super::parse_usage(&json);
+        assert_eq!(stats.cached_prompt_tokens, 30);
+    }
+
+    /// Kimi/Moonshot：usage 顶层 cached_tokens。
+    #[test]
+    fn usage_reads_kimi_top_level_cached_tokens() {
+        let json = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "cached_tokens": 60
+            }
+        });
+        let stats = super::parse_usage(&json);
+        assert_eq!(stats.cached_prompt_tokens, 60);
+    }
+
+    /// 三路缓存字段都缺失时默认 0。
+    #[test]
+    fn usage_defaults_cache_hit_to_zero() {
+        let json = serde_json::json!({
+            "usage": { "prompt_tokens": 100, "completion_tokens": 10 }
+        });
+        let stats = super::parse_usage(&json);
+        assert_eq!(stats.cached_prompt_tokens, 0);
+    }
+
+    /// 恒等式收敛：上游自相矛盾（hit > prompt）时 clamp 到 prompt，
+    /// 保证 cache_hit ∈ [0, prompt_tokens]、cache_miss = prompt - hit 不为负。
+    #[test]
+    fn usage_clamps_oversized_cache_hit_to_prompt() {
+        let json = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 50,
+                "completion_tokens": 5,
+                "prompt_cache_hit_tokens": 80
+            }
+        });
+        let stats = super::parse_usage(&json);
+        assert_eq!(stats.cached_prompt_tokens, 50, "hit 超出 prompt 应收敛到 prompt");
+        assert_eq!(stats.prompt_tokens, 50, "prompt_tokens 原样保留");
+    }
+
+    /// 流式终帧（parse_usage_from_value）与非流式同口径。
+    #[test]
+    fn usage_from_value_uses_same_fallback_chain() {
+        let u = serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "cached_tokens": 70
+        });
+        let stats = super::parse_usage_from_value(&u);
+        assert_eq!(stats.cached_prompt_tokens, 70);
+
+        let u = serde_json::json!({
+            "prompt_tokens": 20,
+            "completion_tokens": 5,
+            "prompt_cache_hit_tokens": 99
+        });
+        let stats = super::parse_usage_from_value(&u);
+        assert_eq!(stats.cached_prompt_tokens, 20, "流式路径同样 clamp 收敛");
     }
 }
