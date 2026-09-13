@@ -549,7 +549,7 @@ fn require_channel_id(args: &Value) -> Result<String, (i64, String)> {
 /// - channel_cost：渠道成本（未配成本价时 = cost）
 /// - profit：利润 = cost - channel_cost（仅当 channel_cost ≠ cost 时有意义）
 async fn cost_report(state: &AppState) -> HandlerResult {
-    let logs = state.log_store.list_all();
+    let logs = state.log_store.requests.list_all();
     let mut agg: std::collections::HashMap<String, serde_json::Value> =
         std::collections::HashMap::new();
     for log in logs {
