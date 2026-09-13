@@ -560,9 +560,7 @@ where
     match tokio::time::timeout(SSE_FIRST_EVENT_DEADLINE, stream.into_future()).await {
         // 首事件到达：iter + chain 重组，顺序与原流一致
         // （首元素已解包为 T，iter 的 Item 与 rest 同为 Result<T, BridgeError>）
-        Ok((Some(Ok(first)), rest)) => Ok(Box::pin(
-            futures::stream::iter([Ok(first)]).chain(rest),
-        )),
+        Ok((Some(Ok(first)), rest)) => Ok(Box::pin(futures::stream::iter([Ok(first)]).chain(rest))),
         // 首事件即错误：短路为失败，走熔断 + failover
         Ok((Some(Err(e)), _rest)) => Err(e),
         // 上游 200 后直接正常关闭（空流）：原样返回空流

@@ -254,18 +254,16 @@ pub fn sanitize_error_message(body: &str) -> String {
     let mut pos = 0;
 
     while pos < n {
-        // `Bearer ` 前缀（大小写不敏感）
-        let remaining = &truncated[pos..];
-        if remaining.len() > 7 {
-            let lower = remaining[..7].to_ascii_lowercase();
-            if lower == "bearer " {
-                pos += 7; // 跳过前缀
-                while pos < n && !bytes[pos].is_ascii_whitespace() {
-                    pos += 1; // 吞掉 token 本体
-                }
-                out.push_str("Bearer ***");
-                continue;
+        // `Bearer ` 前缀（大小写不敏感，字节比较——多字节内容上字符串
+        // 切片 remaining[..7] 可能落在 UTF-8 字符内部而 panic）
+        let remaining = &bytes[pos..];
+        if remaining.len() > 7 && remaining[..7].eq_ignore_ascii_case(b"bearer ") {
+            pos += 7; // 跳过前缀
+            while pos < n && !bytes[pos].is_ascii_whitespace() {
+                pos += 1; // 吞掉 token 本体
             }
+            out.push_str("Bearer ***");
+            continue;
         }
 
         // `sk-` 后跟字母数字（≤67 字符）
