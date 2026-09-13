@@ -244,6 +244,8 @@ pub async fn handle_playground_chat(
     }
 
     let client = match reqwest::Client::builder()
+        // 强制 HTTP/1.1：防 h2 PING 帧掩蔽读超时检测（同共享 client，见 main.rs）
+        .http1_only()
         .timeout(std::time::Duration::from_secs(120))
         .build()
     {
@@ -425,6 +427,8 @@ pub async fn handle_playground_images(
     }
 
     let client = match reqwest::Client::builder()
+        // 强制 HTTP/1.1：防 h2 PING 帧掩蔽读超时检测（同共享 client，见 main.rs）
+        .http1_only()
         .timeout(std::time::Duration::from_secs(180))
         .build()
     {
@@ -544,6 +548,8 @@ pub async fn handle_playground_tts(
     }
 
     let client = match reqwest::Client::builder()
+        // 强制 HTTP/1.1：防 h2 PING 帧掩蔽读超时检测（同共享 client，见 main.rs）
+        .http1_only()
         .timeout(std::time::Duration::from_secs(180))
         .build()
     {
@@ -698,6 +704,8 @@ pub async fn handle_playground_transcriptions(
         .to_string();
 
     let client = match reqwest::Client::builder()
+        // 强制 HTTP/1.1：防 h2 PING 帧掩蔽读超时检测（同共享 client，见 main.rs）
+        .http1_only()
         .timeout(std::time::Duration::from_secs(180))
         .build()
     {

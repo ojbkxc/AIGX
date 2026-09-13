@@ -238,8 +238,14 @@ async fn main() -> anyhow::Result<()> {
     // 共享 HTTP 客户端（性能热点 H5/H6）。
     // 全应用复用同一个 reqwest::Client，避免每次请求新建客户端（连接池/TLS 握手开销）。
     // 超时 300s 覆盖大多数上游推理时长；连接池由 reqwest 内部管理。
+    // 强制 HTTP/1.1（参照 rust-tunnel upstream 客户端策略）：reqwest 的
+    // read_timeout 按每个 HTTP 帧重置，HTTP/2 的 PING 帧会持续重置读超时，
+    // 挂连接将永远检测不到空闲超时——后续若把超时策略收紧为 read_timeout
+    // 空闲检测，h2 下挂连接无法检出；且部分上游网关对 h2 连接有激进空闲
+    // 超时，连接被静默关闭后复用会批量失败。HTTP/1.1 无此两类风险。
     let http_client = Arc::new(
         reqwest::Client::builder()
+            .http1_only()
             .timeout(Duration::from_secs(300))
             .build()
             .expect("failed to build shared reqwest::Client"),

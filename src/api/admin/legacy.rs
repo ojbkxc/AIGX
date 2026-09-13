@@ -2864,6 +2864,8 @@ pub async fn handle_channel_chat_test(
     };
 
     let client = match reqwest::Client::builder()
+        // 强制 HTTP/1.1：防 h2 PING 帧掩蔽读超时检测（同共享 client，见 main.rs）
+        .http1_only()
         .timeout(std::time::Duration::from_secs(120))
         .build()
     {

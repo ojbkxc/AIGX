@@ -1354,7 +1354,13 @@ fn finish_reason_str(fr: &FinishReason) -> &'static str {
 /// 将 BridgeError 转换为 HTTP 响应
 fn bridge_error_response(e: crate::bridge::BridgeError) -> (StatusCode, Json<Value>) {
     let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    error_response(e.error_type(), &e.to_string(), status)
+    // T3：发给客户端的错误消息先脱敏（截断 + 凭据模式遮蔽），
+    // 日志/熔断侧保留原始消息（见 error_translate::sanitize_error_message）
+    error_response(
+        e.error_type(),
+        &crate::error_translate::sanitize_error_message(&e.to_string()),
+        status,
+    )
 }
 
 /// POST /v1/chat/completions - 聊天补全
@@ -1549,7 +1555,13 @@ pub async fn handle_chat_completions(
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
             let attempt_start = std::time::Instant::now();
-            match bridge.chat_stream(&attempt_req, &ctx).await {
+            // T2：SSE 首事件守卫——建流成功后等第一个事件（30s 上限），
+            // 上游挂起/建流后立刻断流 → 按失败处理（熔断记账 + failover）
+            let attempt = match bridge.chat_stream(&attempt_req, &ctx).await {
+                Ok(s) => crate::bridge::first_event_or_timeout(s).await,
+                Err(e) => Err(e),
+            };
+            match attempt {
                 Ok(s) => {
                     // 阶段2：流建立成功——记入健康/亲和（断路器成功、延迟 EMA、
                     // 空响应计数清零、粘性路由建立）。流中途失败由计费守卫兜底，
@@ -1747,9 +1759,12 @@ pub async fn handle_chat_completions(
                         // 标准 SSE error 事件格式（与 OpenAI API 错误结构一致）：
                         //   event: error
                         //   data: {"error":{"message":"...","type":"...","code":"..."}}
+                        // T3：发给客户端的错误消息先脱敏（日志侧保留原始消息）
+                        let safe_msg =
+                            crate::error_translate::sanitize_error_message(&e.to_string());
                         let err_data = serde_json::json!({
                             "error": {
-                                "message": e.to_string(),
+                                "message": safe_msg,
                                 "type": e.error_type(),
                                 "code": e.error_type(),
                             }
@@ -2354,10 +2369,21 @@ pub async fn handle_responses(
         let mut attempt_body = body.clone();
         attempt_body["model"] = Value::String(upstream.clone());
         let attempt_start = std::time::Instant::now();
-        match bridge
+        // T2：SSE 首事件守卫——流式分支等第一个事件（30s 上限），上游挂起/
+        // 立刻断流按失败处理（熔断 + failover）；非流式 Json 直接放行
+        let attempt = match bridge
             .responses_passthrough(&attempt_body, is_stream, &ctx)
             .await
         {
+            Ok(ResponsesPassthrough::Stream(s)) => {
+                crate::bridge::first_event_or_timeout(s)
+                    .await
+                    .map(ResponsesPassthrough::Stream)
+            }
+            Ok(r) => Ok(r),
+            Err(e) => Err(e),
+        };
+        match attempt {
             Ok(r) => {
                 // 阶段2：成功——记入断路器/健康追踪/亲和性
                 if let Some(c) = &cid {

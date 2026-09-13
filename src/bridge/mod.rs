@@ -534,6 +534,46 @@ fn truncate_lossy(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
+/// T2：SSE 首事件等待上限（30s）。
+///
+/// 流式请求一旦开始转发，上游挂起就无人能救——上游已返回 200 开始流式
+/// 响应，但首个事件迟迟不到时，客户端只能空等共享 client 的 300s 总超时。
+/// 把"首个事件"的等待上限独立收紧到 30s：超时判 `BridgeError::Timeout`
+/// （可重试错误），调度循环可照常熔断记账并切换下一渠道。仅约束首事件；
+/// 后续事件的间隔由请求级总超时兜底。（参照 rust-tunnel 的
+/// FIRST_EVENT_DEADLINE 设计，数值取 30s。）
+pub const SSE_FIRST_EVENT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// SSE 首事件守卫：等待流的第一个事件，30s 内到达则原样重组返回；
+/// 未到则判 `BridgeError::Timeout`（上游挂起）。
+///
+/// 首 chunk 本身是 Err（上游 200 后立刻断流）时原样返回该错误，让调用方
+/// 按失败处理（熔断记账 + failover）——此时尚未开始转发，仍可换渠道救回。
+/// 上游直接正常关闭（空流）时原样返回空流，交由下游空响应机制处理。
+pub async fn first_event_or_timeout<T>(
+    stream: BoxStream<'static, Result<T, BridgeError>>,
+) -> Result<BoxStream<'static, Result<T, BridgeError>>, BridgeError>
+where
+    T: Send + 'static,
+{
+    use futures::StreamExt;
+    match tokio::time::timeout(SSE_FIRST_EVENT_DEADLINE, stream.into_future()).await {
+        // 首事件到达：once + chain 重组，顺序与原流一致
+        Ok((Some(Ok(first)), rest)) => Ok(Box::pin(
+            futures::stream::once(async move { first }).chain(rest),
+        )),
+        // 首事件即错误：短路为失败，走熔断 + failover
+        Ok((Some(Err(e)), _rest)) => Err(e),
+        // 上游 200 后直接正常关闭（空流）：原样返回空流
+        Ok((None, rest)) => Ok(rest),
+        // 首事件 30s 未到：判上游挂起
+        Err(_) => Err(BridgeError::Timeout {
+            elapsed_ms: SSE_FIRST_EVENT_DEADLINE.as_millis() as u64,
+            cause: "首个 SSE 事件 30s 未到达，上游疑似挂起".into(),
+        }),
+    }
+}
+
 /// 提供商适配器 trait，参考 aisix Bridge trait 设计
 #[async_trait]
 pub trait Bridge: Send + Sync + 'static {
@@ -610,5 +650,60 @@ pub trait Bridge: Send + Sync + 'static {
         Err(BridgeError::Config(
             "this provider does not support the Responses API".into(),
         ))
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    fn boxed<T: Send + 'static>(
+        items: Vec<Result<T, BridgeError>>,
+    ) -> BoxStream<'static, Result<T, BridgeError>> {
+        futures::stream::iter(items).boxed()
+    }
+
+    /// 首事件到达后重组，顺序与原流一致。
+    #[tokio::test]
+    async fn first_event_guard_preserves_order() {
+        let stream = boxed(vec![Ok(1u32), Ok(2), Ok(3)]);
+        let mut stream = first_event_or_timeout(stream).await.expect("首事件应放行");
+        let mut got = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            got.push(chunk.expect("全部应为 Ok"));
+        }
+        assert_eq!(got, vec![1, 2, 3]);
+    }
+
+    /// 首 chunk 即 Err：短路为失败，错误原样透出（走熔断 + failover）。
+    #[tokio::test]
+    async fn first_event_guard_short_circuits_on_error_chunk() {
+        let stream = boxed(vec![Err::<u32, _>(BridgeError::Transport("boom".into()))]);
+        let err = first_event_or_timeout(stream).await.expect_err("首 Err 应短路为失败");
+        match err {
+            BridgeError::Transport(msg) => assert_eq!(msg, "boom"),
+            other => panic!("应为 Transport 变体，实际 {other:?}"),
+        }
+    }
+
+    /// 上游 200 后直接正常关闭（空流）：原样返回空流，不判超时。
+    #[tokio::test]
+    async fn first_event_guard_passes_empty_stream_through() {
+        let stream: BoxStream<'static, Result<u32, BridgeError>> = futures::stream::empty().boxed();
+        let mut stream = first_event_or_timeout(stream).await.expect("空流应原样放行");
+        assert!(stream.next().await.is_none());
+    }
+
+    /// 首事件 30s 未到：判 Timeout（挂起流模拟上游 200 后 body 不再产出）。
+    #[tokio::test(start_paused = true)]
+    async fn first_event_guard_times_out_when_no_first_event() {
+        let hung: BoxStream<'static, Result<u32, BridgeError>> = futures::stream::pending().boxed();
+        let err = first_event_or_timeout(hung).await.expect_err("挂起流应判超时");
+        match err {
+            BridgeError::Timeout { elapsed_ms, .. } => {
+                assert_eq!(elapsed_ms, SSE_FIRST_EVENT_DEADLINE.as_millis() as u64);
+            }
+            other => panic!("应为 Timeout 变体，实际 {other:?}"),
+        }
     }
 }

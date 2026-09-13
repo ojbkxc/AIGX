@@ -45,6 +45,8 @@ pub struct CfApiClient {
 impl CfApiClient {
     pub fn new(account_pool: Arc<AccountPool>, model_mapper: Arc<ModelMapper>) -> Self {
         let http = Client::builder()
+            // 强制 HTTP/1.1：防 h2 PING 帧掩蔽读超时检测（同共享 client，见 main.rs）
+            .http1_only()
             .timeout(Duration::from_secs(120))
             .user_agent(concat!("aigx/", env!("CARGO_PKG_VERSION")))
             .build()

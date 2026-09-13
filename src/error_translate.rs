@@ -213,6 +213,87 @@ fn derive_azure_code(kind: Option<&str>) -> Option<String> {
     }
 }
 
+/// 发往客户端的错误消息截断上限（字节，回退到 UTF-8 字符边界）。
+const SANITIZE_MAX_CHARS: usize = 500;
+
+/// T3：脱敏发往客户端的上游错误消息。
+///
+/// 上游报错体可能回显其收到的认证凭据（如 "Invalid api key sk-xxx"、
+/// "Bearer xxx"），原样透传给付费客户端会泄露渠道侧密钥。本函数只拦
+/// "发给用户"的错误出口；日志/熔断侧保留原始消息以利排查。
+///
+/// 处理（参照 rust-tunnel `sanitize_error_message` 的手动字节匹配实现，
+/// 不引入 regex 依赖）：
+/// 1. 截断到最多 500 字符（UTF-8 字符边界安全，手动回退到合法边界，
+///    不依赖尚未在 MSRV 稳定的 `floor_char_boundary`）
+/// 2. 脱敏两类模式（best-effort，非安全保证）：
+///    - `Bearer <token>`（大小写不敏感前缀）→ `Bearer ***`
+///    - `sk-` 后跟字母数字（≤67 字符）→ `sk-***`
+pub fn sanitize_error_message(body: &str) -> String {
+    // ── 截断：最多 500 字符，仅切在 UTF-8 边界上 ──
+    let end = if body.len() <= SANITIZE_MAX_CHARS {
+        body.len()
+    } else {
+        // 找 ≤500 字节处的最后一个完整字符边界
+        let mut boundary = SANITIZE_MAX_CHARS;
+        while boundary > 0 && !body.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        boundary
+    };
+    let truncated = if end < body.len() {
+        format!("{}...", &body[..end])
+    } else {
+        body.to_string()
+    };
+
+    // ── 脱敏：逐字节扫描手动匹配，避免引入 regex ──
+    let bytes = truncated.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n);
+    let mut pos = 0;
+
+    while pos < n {
+        // `Bearer ` 前缀（大小写不敏感）
+        let remaining = &truncated[pos..];
+        if remaining.len() > 7 {
+            let lower = remaining[..7].to_ascii_lowercase();
+            if lower == "bearer " {
+                pos += 7; // 跳过前缀
+                while pos < n && !bytes[pos].is_ascii_whitespace() {
+                    pos += 1; // 吞掉 token 本体
+                }
+                out.push_str("Bearer ***");
+                continue;
+            }
+        }
+
+        // `sk-` 后跟字母数字（≤67 字符）
+        if pos + 3 <= n
+            && bytes[pos] == b's'
+            && bytes[pos + 1] == b'k'
+            && bytes[pos + 2] == b'-'
+        {
+            let mut key_end = pos + 3;
+            while key_end < n && bytes[key_end].is_ascii_alphanumeric() && key_end - pos <= 67 {
+                key_end += 1;
+            }
+            if key_end > pos + 3 {
+                out.push_str("sk-***");
+                pos = key_end;
+                continue;
+            }
+        }
+
+        // 普通字符原样输出（按 UTF-8 字符步进，多字节安全）
+        let ch = truncated[pos..].chars().next().unwrap_or_default();
+        out.push(ch);
+        pos += ch.len_utf8();
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +305,53 @@ mod tests {
             code: None,
             param: None,
         }
+    }
+
+    /// T3：超限消息截断到 500 字符并追加省略号。
+    #[test]
+    fn sanitize_truncates_over_limit() {
+        let long = "a".repeat(600);
+        let sanitized = sanitize_error_message(&long);
+        assert_eq!(sanitized.len(), 503); // 500 字符 + "..."
+        assert!(sanitized.ends_with("..."));
+    }
+
+    /// 恰好 500 字符的消息原样通过（不截断）。
+    #[test]
+    fn sanitize_keeps_exact_limit_intact() {
+        let exact = "a".repeat(500);
+        assert_eq!(sanitize_error_message(&exact), exact);
+    }
+
+    /// 截断边界落在多字节 UTF-8 字符内部时安全回退到字符边界。
+    #[test]
+    fn sanitize_truncation_respects_utf8_boundary() {
+        // 300 个中文字符 = 900 字节；500 字节处切在字符中间 → 回退到 498
+        let long = "密".repeat(300);
+        let sanitized = sanitize_error_message(&long);
+        assert!(sanitized.len() <= 503);
+        assert!(sanitized.chars().all(|c| c == '密' || c == '.'));
+    }
+
+    /// `Bearer <token>` 前缀大小写不敏感脱敏，token 本体吞到空白符。
+    #[test]
+    fn sanitize_redacts_bearer_case_insensitive() {
+        assert_eq!(
+            sanitize_error_message("unauthorized: bearer tok123 stuff"),
+            "unauthorized: Bearer *** stuff"
+        );
+        assert_eq!(sanitize_error_message("BEARER abc.def-ghi end"), "Bearer *** end");
+    }
+
+    /// `sk-` 后跟字母数字的密钥脱敏；`sk-` 后无字母数字时不误替换。
+    #[test]
+    fn sanitize_redacts_sk_key() {
+        assert_eq!(
+            sanitize_error_message("Invalid api key sk-abc123XYZ"),
+            "Invalid api key sk-***"
+        );
+        // "desk-" 中的 "sk-" 后是空格（非字母数字）→ 原样保留
+        assert_eq!(sanitize_error_message("desk- top corner"), "desk- top corner");
     }
 
     #[test]

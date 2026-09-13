@@ -440,7 +440,13 @@ pub async fn handle_messages(
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
             let attempt_start = std::time::Instant::now();
-            match bridge.chat_stream(&attempt_req, &ctx).await {
+            // T2：SSE 首事件守卫——建流成功后等第一个事件（30s 上限），
+            // 上游挂起/建流后立刻断流 → 按失败处理（熔断记账 + failover）
+            let attempt = match bridge.chat_stream(&attempt_req, &ctx).await {
+                Ok(s) => crate::bridge::first_event_or_timeout(s).await,
+                Err(e) => Err(e),
+            };
+            match attempt {
                 Ok(s) => {
                     // 阶段2：流建立成功——记入断路器/健康追踪/亲和性
                     if let Some(c) = &cid {
@@ -528,8 +534,14 @@ pub async fn handle_messages(
                             error: e.to_string(),
                         });
                 }
-                return anthropic_error(e.error_type(), &e.to_string(), status_code)
-                    .into_response();
+                // T3：发给客户端的错误消息先脱敏（截断 + 凭据模式遮蔽），
+                // 日志/熔断侧保留原始消息（见 error_translate::sanitize_error_message）
+                return anthropic_error(
+                    e.error_type(),
+                    &crate::error_translate::sanitize_error_message(&e.to_string()),
+                    status_code,
+                )
+                .into_response();
             }
         };
         {
@@ -757,9 +769,12 @@ pub async fn handle_messages(
                             }
                         }
                         Err(e) => {
+                            // T3：发给客户端的错误消息先脱敏（日志侧保留原始消息）
+                            let safe_msg =
+                                crate::error_translate::sanitize_error_message(&e.to_string());
                             let err = serde_json::json!({
                                 "type": "error",
-                                "error": {"type": "api_error", "message": e.to_string()}
+                                "error": {"type": "api_error", "message": safe_msg}
                             })
                             .to_string();
                             events.push(Ok(Event::default().event("error").data(err)));
@@ -1027,8 +1042,14 @@ pub async fn handle_messages(
                             error: e.to_string(),
                         });
                 }
-                return anthropic_error(e.error_type(), &e.to_string(), status_code)
-                    .into_response();
+                // T3：发给客户端的错误消息先脱敏（截断 + 凭据模式遮蔽），
+                // 日志/熔断侧保留原始消息（见 error_translate::sanitize_error_message）
+                return anthropic_error(
+                    e.error_type(),
+                    &crate::error_translate::sanitize_error_message(&e.to_string()),
+                    status_code,
+                )
+                .into_response();
             }
         };
         {

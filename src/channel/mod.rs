@@ -652,6 +652,8 @@ impl ChannelStore {
         }
         let key = ch.decode_api_key();
         let client = reqwest::Client::builder()
+            // 强制 HTTP/1.1：防 h2 PING 帧掩蔽读超时检测（同共享 client，见 main.rs）
+            .http1_only()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .ok()?;
@@ -695,6 +697,8 @@ impl ChannelStore {
     pub async fn test(&self, ch: &Channel) -> ChannelTestResult {
         let start = std::time::Instant::now();
         let client = match reqwest::Client::builder()
+            // 强制 HTTP/1.1：防 h2 PING 帧掩蔽读超时检测（同共享 client，见 main.rs）
+            .http1_only()
             .timeout(std::time::Duration::from_secs(15))
             .build()
         {
