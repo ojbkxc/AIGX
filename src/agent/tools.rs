@@ -68,26 +68,116 @@ pub fn tool_specs() -> Vec<ToolSpec> {
     };
     vec![
         // ── 诊断×3 ──
-        ToolSpec { name: "aigx_diagnostics_summary", description: "只读：系统体检摘要（渠道统计/今日用量/24h 错误概况/运行信息）", schema: no_args(), risk: RiskLevel::ReadOnly },
-        ToolSpec { name: "aigx_diagnostics_channels", description: "只读：启用渠道批量测活（并发探测，约需 30 秒）", schema: no_args(), risk: RiskLevel::ReadOnly },
-        ToolSpec { name: "aigx_diagnostics_breakers", description: "只读：熔断器状态快照（三态/失败计数/冷却剩余）", schema: no_args(), risk: RiskLevel::ReadOnly },
+        ToolSpec {
+            name: "aigx_diagnostics_summary",
+            description: "只读：系统体检摘要（渠道统计/今日用量/24h 错误概况/运行信息）",
+            schema: no_args(),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_diagnostics_channels",
+            description: "只读：启用渠道批量测活（并发探测，约需 30 秒）",
+            schema: no_args(),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_diagnostics_breakers",
+            description: "只读：熔断器状态快照（三态/失败计数/冷却剩余）",
+            schema: no_args(),
+            risk: RiskLevel::ReadOnly,
+        },
         // ── 查询×11 ──
-        ToolSpec { name: "aigx_list_channels", description: "只读：列出渠道（search 模糊过滤 + page/page_size 分页）", schema: json!({ "type":"object","properties":{ "search":{"type":"string","description":"按名称/类型/base_url/模型模糊过滤"}, "page":{"type":"integer","minimum":1}, "page_size":{"type":"integer","minimum":1} }, "required":[] }), risk: RiskLevel::ReadOnly },
-        ToolSpec { name: "aigx_list_users", description: "只读：列出用户（分页，敏感字段脱敏）", schema: paged(), risk: RiskLevel::ReadOnly },
-        ToolSpec { name: "aigx_list_keys", description: "只读：列出 API 密钥（脱敏）", schema: no_args(), risk: RiskLevel::ReadOnly },
-        ToolSpec { name: "aigx_list_accounts", description: "只读：列出 CF 账号池（脱敏）", schema: no_args(), risk: RiskLevel::ReadOnly },
-        ToolSpec { name: "aigx_list_orders", description: "只读：列出订单（keyword 过滤 + 分页）", schema: json!({ "type":"object","properties":{ "keyword":{"type":"string"}, "page":{"type":"integer","minimum":1}, "size":{"type":"integer","minimum":1} }, "required":[] }), risk: RiskLevel::ReadOnly },
-        ToolSpec { name: "aigx_list_plans", description: "只读：列出套餐模板", schema: no_args(), risk: RiskLevel::ReadOnly },
-        ToolSpec { name: "aigx_list_redemptions", description: "只读：列出兑换码（分页）", schema: paged(), risk: RiskLevel::ReadOnly },
-        ToolSpec { name: "aigx_list_groups", description: "只读：列出用户分组", schema: no_args(), risk: RiskLevel::ReadOnly },
-        ToolSpec { name: "aigx_query_logs", description: "只读：查询请求日志（user/model/channel/start/end 过滤 + 分页）", schema: json!({ "type":"object","properties":{ "user":{"type":"string"}, "model":{"type":"string"}, "channel":{"type":"string"}, "start":{"type":"integer"}, "end":{"type":"integer"}, "page":{"type":"integer","minimum":1}, "size":{"type":"integer","minimum":1} }, "required":[] }), risk: RiskLevel::ReadOnly },
-        ToolSpec { name: "aigx_get_pricing", description: "只读：列出全部模型定价", schema: no_args(), risk: RiskLevel::ReadOnly },
-        ToolSpec { name: "aigx_cost_report", description: "只读：成本/用量聚合报表（按模型统计调用量与成本）", schema: no_args(), risk: RiskLevel::ReadOnly },
+        ToolSpec {
+            name: "aigx_list_channels",
+            description: "只读：列出渠道（search 模糊过滤 + page/page_size 分页）",
+            schema: json!({ "type":"object","properties":{ "search":{"type":"string","description":"按名称/类型/base_url/模型模糊过滤"}, "page":{"type":"integer","minimum":1}, "page_size":{"type":"integer","minimum":1} }, "required":[] }),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_list_users",
+            description: "只读：列出用户（分页，敏感字段脱敏）",
+            schema: paged(),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_list_keys",
+            description: "只读：列出 API 密钥（脱敏）",
+            schema: no_args(),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_list_accounts",
+            description: "只读：列出 CF 账号池（脱敏）",
+            schema: no_args(),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_list_orders",
+            description: "只读：列出订单（keyword 过滤 + 分页）",
+            schema: json!({ "type":"object","properties":{ "keyword":{"type":"string"}, "page":{"type":"integer","minimum":1}, "size":{"type":"integer","minimum":1} }, "required":[] }),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_list_plans",
+            description: "只读：列出套餐模板",
+            schema: no_args(),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_list_redemptions",
+            description: "只读：列出兑换码（分页）",
+            schema: paged(),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_list_groups",
+            description: "只读：列出用户分组",
+            schema: no_args(),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_query_logs",
+            description: "只读：查询请求日志（user/model/channel/start/end 过滤 + 分页）",
+            schema: json!({ "type":"object","properties":{ "user":{"type":"string"}, "model":{"type":"string"}, "channel":{"type":"string"}, "start":{"type":"integer"}, "end":{"type":"integer"}, "page":{"type":"integer","minimum":1}, "size":{"type":"integer","minimum":1} }, "required":[] }),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_get_pricing",
+            description: "只读：列出全部模型定价",
+            schema: no_args(),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_cost_report",
+            description: "只读：成本/用量聚合报表（按模型统计调用量与成本）",
+            schema: no_args(),
+            risk: RiskLevel::ReadOnly,
+        },
         // ── 低危写×4（复用 mcp 已有的渠道写）──
-        ToolSpec { name: "aigx_channel_enable", description: "写操作（可回滚）：启用渠道", schema: channel_id_args(), risk: RiskLevel::LowRisk },
-        ToolSpec { name: "aigx_channel_disable", description: "写操作（可回滚）：禁用渠道", schema: channel_id_args(), risk: RiskLevel::LowRisk },
-        ToolSpec { name: "aigx_channel_test", description: "写操作（可回滚）：测试渠道连通性并落库结果", schema: channel_id_args(), risk: RiskLevel::LowRisk },
-        ToolSpec { name: "aigx_reset_circuit_breaker", description: "写操作（可回滚）：重置渠道熔断器", schema: channel_id_args(), risk: RiskLevel::LowRisk },
+        ToolSpec {
+            name: "aigx_channel_enable",
+            description: "写操作（可回滚）：启用渠道",
+            schema: channel_id_args(),
+            risk: RiskLevel::LowRisk,
+        },
+        ToolSpec {
+            name: "aigx_channel_disable",
+            description: "写操作（可回滚）：禁用渠道",
+            schema: channel_id_args(),
+            risk: RiskLevel::LowRisk,
+        },
+        ToolSpec {
+            name: "aigx_channel_test",
+            description: "写操作（可回滚）：测试渠道连通性并落库结果",
+            schema: channel_id_args(),
+            risk: RiskLevel::LowRisk,
+        },
+        ToolSpec {
+            name: "aigx_reset_circuit_breaker",
+            description: "写操作（可回滚）：重置渠道熔断器",
+            schema: channel_id_args(),
+            risk: RiskLevel::LowRisk,
+        },
     ]
 }
 
@@ -141,36 +231,32 @@ pub async fn exec_tool(
             handle_list_channels(State(state.clone()), headers.clone(), Query(q)).await
         }
         "aigx_list_users" => {
-            let q = crate::api::admin::mcp::parse_struct_args::<crate::api::admin::users::ListUsersQuery>(name, args)?;
+            let q = crate::api::admin::mcp::parse_struct_args::<
+                crate::api::admin::users::ListUsersQuery,
+            >(name, args)?;
             handle_list_users(State(state.clone()), headers.clone(), Query(q)).await
         }
-        "aigx_list_keys" => {
-            handle_list_keys(State(state.clone()), headers.clone()).await
-        }
-        "aigx_list_accounts" => {
-            handle_list_accounts(State(state.clone()), headers.clone()).await
-        }
+        "aigx_list_keys" => handle_list_keys(State(state.clone()), headers.clone()).await,
+        "aigx_list_accounts" => handle_list_accounts(State(state.clone()), headers.clone()).await,
         "aigx_list_orders" => {
             let q = crate::api::admin::mcp::args_to_string_map(args);
             handle_list_orders(State(state.clone()), headers.clone(), Query(q)).await
         }
-        "aigx_list_plans" => {
-            handle_list_plans(State(state.clone()), headers.clone()).await
-        }
+        "aigx_list_plans" => handle_list_plans(State(state.clone()), headers.clone()).await,
         "aigx_list_redemptions" => {
-            let q = crate::api::admin::mcp::parse_struct_args::<crate::api::admin::logs::AuditLogQuery>(name, args)?;
+            let q = crate::api::admin::mcp::parse_struct_args::<
+                crate::api::admin::redemptions::AuditLogQuery,
+            >(name, args)?;
             handle_list_redemptions(State(state.clone()), headers.clone(), Query(q)).await
         }
-        "aigx_list_groups" => {
-            handle_list_groups(State(state.clone()), headers.clone()).await
-        }
+        "aigx_list_groups" => handle_list_groups(State(state.clone()), headers.clone()).await,
         "aigx_query_logs" => {
-            let q = crate::api::admin::mcp::parse_struct_args::<crate::api::admin::logs::RequestLogQuery>(name, args)?;
+            let q = crate::api::admin::mcp::parse_struct_args::<
+                crate::api::admin::logs::RequestLogQuery,
+            >(name, args)?;
             handle_list_request_logs(State(state.clone()), headers.clone(), Query(q)).await
         }
-        "aigx_get_pricing" => {
-            handle_list_pricing(State(state.clone()), headers.clone()).await
-        }
+        "aigx_get_pricing" => handle_list_pricing(State(state.clone()), headers.clone()).await,
         "aigx_cost_report" => cost_report(state).await,
         "aigx_channel_enable" => {
             let id = require_channel_id(args)?;
@@ -198,7 +284,8 @@ pub async fn exec_tool(
         }
         "aigx_reset_circuit_breaker" => {
             let id = require_channel_id(args)?;
-            admin::handle_reset_channel_circuit(State(state.clone()), headers.clone(), Path(id)).await
+            admin::handle_reset_channel_circuit(State(state.clone()), headers.clone(), Path(id))
+                .await
         }
         _ => {
             return Err((
@@ -213,14 +300,20 @@ pub async fn exec_tool(
 
 fn handler_to_outcome(result: HandlerResult) -> ToolOutcome {
     match result {
-        Ok(Json(v)) => ToolOutcome { text: v.to_string(), ok: true },
+        Ok(Json(v)) => ToolOutcome {
+            text: v.to_string(),
+            ok: true,
+        },
         Err((_, Json(body))) => {
             let msg = body
                 .get("error")
                 .and_then(|e| e.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| body.to_string());
-            ToolOutcome { text: crate::error_translate::sanitize_error_message(&msg), ok: false }
+            ToolOutcome {
+                text: crate::error_translate::sanitize_error_message(&msg),
+                ok: false,
+            }
         }
     }
 }
@@ -230,7 +323,12 @@ fn require_channel_id(args: &Value) -> Result<String, (i64, String)> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.trim().to_string())
-        .ok_or_else(|| (-32602, "Invalid params: missing required argument channel_id".to_string()))
+        .ok_or_else(|| {
+            (
+                -32602,
+                "Invalid params: missing required argument channel_id".to_string(),
+            )
+        })
 }
 
 /// 成本/用量聚合报表（只读，阶段一先做简单聚合）。
@@ -242,7 +340,9 @@ async fn cost_report(state: &AppState) -> HandlerResult {
     // 成本精细聚合留阶段三（需 pricing × usage 联表）。
     let summary = admin::handle_diagnostics_summary(State(state.clone()), HeaderMap::new()).await;
     match summary {
-        Ok(Json(v)) => Ok(Json(json!({ "success": true, "data": v, "note": "成本精细聚合见阶段三" }))),
+        Ok(Json(v)) => Ok(Json(
+            json!({ "success": true, "data": v, "note": "成本精细聚合见阶段三" }),
+        )),
         Err(e) => Err(e),
     }
 }
@@ -266,4 +366,14 @@ pub fn openai_tools() -> Vec<Value> {
 
 /// 供 runner 使用的共享引用（避免每个工具都 clone 一次）。
 #[allow(dead_code)]
-pub type ToolExecutor = Arc<dyn Fn(&AppState, &HeaderMap, &str, &Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolOutcome, (i64, String)>> + Send>> + Send + Sync>;
+pub type ToolExecutor = Arc<
+    dyn Fn(
+            &AppState,
+            &HeaderMap,
+            &str,
+            &Value,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<ToolOutcome, (i64, String)>> + Send>,
+        > + Send
+        + Sync,
+>;

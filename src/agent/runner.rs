@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::agent::llm;
 use crate::agent::tools::{self, RiskLevel};
 use crate::api::openai::AppState;
-use crate::bridge::{ChatMessage, Role};
+use crate::bridge::ChatMessage;
 use crate::config::AgentConfig;
 use axum::http::HeaderMap;
 
@@ -30,7 +30,11 @@ pub enum AgentEvent {
     /// 工具调用开始。
     ToolCall { name: String, arguments: String },
     /// 工具执行结果。
-    ToolResult { name: String, ok: bool, text: String },
+    ToolResult {
+        name: String,
+        ok: bool,
+        text: String,
+    },
     /// 最终答复。
     Final { content: String },
     /// 错误终止。
@@ -68,18 +72,29 @@ pub async fn run(
             events.push(AgentEvent::Error {
                 message: format!("已达最大轮数 {}，强制结束", config.max_turns),
             });
-            return RunOutcome { final_content: None, events, turns };
+            return RunOutcome {
+                final_content: None,
+                events,
+                turns,
+            };
         }
         events.push(AgentEvent::Thinking { turn: turns });
 
         let tools = tools::openai_tools();
-        let (resp, _upstream, _cid) = match llm::chat_once(state, config, convo.clone(), Some(tools)).await {
-            Ok(r) => r,
-            Err(e) => {
-                events.push(AgentEvent::Error { message: e.to_string() });
-                return RunOutcome { final_content: None, events, turns };
-            }
-        };
+        let (resp, _upstream, _cid) =
+            match llm::chat_once(state, config, convo.clone(), Some(tools)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    events.push(AgentEvent::Error {
+                        message: e.to_string(),
+                    });
+                    return RunOutcome {
+                        final_content: None,
+                        events,
+                        turns,
+                    };
+                }
+            };
 
         let msg = llm::response_message(resp);
 
@@ -87,8 +102,14 @@ pub async fn run(
         if let Some(calls) = &msg.tool_calls {
             if calls.is_empty() {
                 let content = msg.content.unwrap_or_default();
-                events.push(AgentEvent::Final { content: content.clone() });
-                return RunOutcome { final_content: Some(content), events, turns };
+                events.push(AgentEvent::Final {
+                    content: content.clone(),
+                });
+                return RunOutcome {
+                    final_content: Some(content),
+                    events,
+                    turns,
+                };
             }
             // 把 assistant 的工具调用消息回填进对话
             convo.push(msg.clone());
@@ -108,13 +129,17 @@ pub async fn run(
                         ok: false,
                     },
                     Some(s) if s.risk == RiskLevel::HighRisk => tools::ToolOutcome {
-                        text: "该工具为高危写操作，需审批矩阵（阶段二接入）；当前已安全拒绝。".to_string(),
+                        text: "该工具为高危写操作，需审批矩阵（阶段二接入）；当前已安全拒绝。"
+                            .to_string(),
                         ok: false,
                     },
                     Some(_) => {
                         match tools::exec_tool(state, headers, &call.function_name, &args).await {
                             Ok(o) => o,
-                            Err((_code, msg)) => tools::ToolOutcome { text: msg, ok: false },
+                            Err((_code, msg)) => tools::ToolOutcome {
+                                text: msg,
+                                ok: false,
+                            },
                         }
                     }
                 };
@@ -137,11 +162,26 @@ pub async fn run(
 
         // 无工具调用 → 最终答复
         let content = msg.content.unwrap_or_default();
-        events.push(AgentEvent::Final { content: content.clone() });
-        return RunOutcome { final_content: Some(content), events, turns };
+        events.push(AgentEvent::Final {
+            content: content.clone(),
+        });
+        return RunOutcome {
+            final_content: Some(content),
+            events,
+            turns,
+        };
     }
 }
 
 /// 供外部（API 层）复用的共享引用类型。
 #[allow(dead_code)]
-pub type RunnerRef = Arc<dyn Fn(&AppState, &HeaderMap, &AgentConfig, Vec<ChatMessage>) -> std::pin::Pin<Box<dyn std::future::Future<Output = RunOutcome> + Send>> + Send + Sync>;
+pub type RunnerRef = Arc<
+    dyn Fn(
+            &AppState,
+            &HeaderMap,
+            &AgentConfig,
+            Vec<ChatMessage>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RunOutcome> + Send>>
+        + Send
+        + Sync,
+>;

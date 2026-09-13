@@ -58,7 +58,11 @@ impl AgentApprovals {
     /// 挂起一个审批请求，返回 (`request_id`, 等待结果的 receiver)。
     ///
     /// 返回 None 表示前端未连接（阶段二由 WS 层传入 sender）；阶段一占位。
-    pub async fn request(&self, _session_id: &str, tool: &str) -> (String, oneshot::Receiver<ApprovalResult>) {
+    pub async fn request(
+        &self,
+        _session_id: &str,
+        tool: &str,
+    ) -> (String, oneshot::Receiver<ApprovalResult>) {
         let request_id = format!("{:032x}", rand::random::<u128>());
         let (tx, rx) = oneshot::channel();
         self.pending

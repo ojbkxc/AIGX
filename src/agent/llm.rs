@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use crate::api::openai::{resolve_bridges_with_affinity, resolve_upstream_model, AppState};
 use crate::bridge::{BridgeContext, ChatFormat, ChatMessage, ChatResponse, Role};
-use crate::config::AgentConfig;
 use crate::channel::ChannelStore;
+use crate::config::AgentConfig;
 
 /// Agent 推理错误。
 #[derive(Debug, thiserror::Error)]
@@ -85,15 +85,21 @@ fn make_bridge_for_channel(
 ) -> Option<Arc<dyn crate::bridge::Bridge>> {
     use crate::channel::ChannelType;
     match ch.channel_type {
-        ChannelType::OpenaiCompatible => {
-            Some(crate::bridge::openai::make_bridge(&ch.base_url, key, client))
-        }
-        ChannelType::Anthropic => {
-            Some(crate::bridge::anthropic::make_bridge(&ch.base_url, key, client))
-        }
-        ChannelType::Gemini => {
-            Some(crate::bridge::gemini::make_bridge(&ch.base_url, key, client))
-        }
+        ChannelType::OpenaiCompatible => Some(crate::bridge::openai::make_bridge(
+            &ch.base_url,
+            key,
+            client,
+        )),
+        ChannelType::Anthropic => Some(crate::bridge::anthropic::make_bridge(
+            &ch.base_url,
+            key,
+            client,
+        )),
+        ChannelType::Gemini => Some(crate::bridge::gemini::make_bridge(
+            &ch.base_url,
+            key,
+            client,
+        )),
         ChannelType::Zai => Some(crate::bridge::zai::make_bridge(&ch.base_url, key, client)),
         // Cloudflare 渠道走 Hub 专用桥，自环暂不支持（阶段三再补）
         ChannelType::Cloudflare => None,
@@ -142,7 +148,7 @@ pub async fn chat_once(
             Ok(resp) => {
                 if let Some(cid) = &cand.channel_id {
                     state.channel_store.record_channel_success(
-                        cand.channel.as_ref().unwrap(),
+                        cid,
                         Some(&upstream),
                         start.elapsed().as_millis() as u64,
                         None,
@@ -154,7 +160,7 @@ pub async fn chat_once(
                 let msg = e.to_string();
                 if let Some(cid) = &cand.channel_id {
                     state.channel_store.record_channel_failure(
-                        cand.channel.as_ref().unwrap(),
+                        cid,
                         Some(&upstream),
                         ChannelStore::classify_bridge_error(&e),
                         &msg,
@@ -168,7 +174,10 @@ pub async fn chat_once(
                 if let Some(cid) = &cand.channel_id {
                     state.channel_store.mark_cooldown(cid, msg.clone(), 60);
                 }
-                tracing::warn!("agent llm failover: channel {cid:?} failed: {e}, trying next");
+                tracing::warn!(
+                    "agent llm failover: channel {:?} failed: {e}, trying next",
+                    cand.channel_id
+                );
                 last_error = Some(msg);
             }
         }
