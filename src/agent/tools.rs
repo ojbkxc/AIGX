@@ -17,6 +17,11 @@ use axum::http::HeaderMap;
 use axum::Json;
 use serde_json::{json, Value};
 
+use crate::api::admin::channels::ChannelRequest;
+use crate::api::admin::legacy::GroupRequest;
+use crate::api::admin::pricing::PriceRequest;
+use crate::api::admin::tokens::KeyRequest;
+use crate::api::admin::users::ManageUserRequest;
 use crate::api::admin::{
     self, handle_list_accounts, handle_list_channels, handle_list_groups, handle_list_keys,
     handle_list_orders, handle_list_plans, handle_list_pricing, handle_list_redemptions,
@@ -418,20 +423,11 @@ pub async fn exec_tool(
         }
         // ── 低危写（新增）──
         "aigx_channel_add" => {
-            let body = json!({
-                "name": str_arg(args, "name").unwrap_or_default(),
-                "base_url": str_arg(args, "base_url").unwrap_or_default(),
-                "api_key": str_arg(args, "api_key").unwrap_or_default(),
-                "channel_type": str_arg(args, "channel_type").unwrap_or_else(|| "openai_compatible".to_string()),
-            });
+            let body: ChannelRequest = parse_tool_args(name, args)?;
             admin::handle_add_channel(State(state.clone()), headers.clone(), Json(body)).await
         }
         "aigx_key_add" => {
-            let body = json!({
-                "name": str_arg(args, "name").unwrap_or_default(),
-                "user_id": str_arg(args, "user_id"),
-                "group": str_arg(args, "group"),
-            });
+            let body: KeyRequest = parse_tool_args(name, args)?;
             admin::handle_add_key(State(state.clone()), headers.clone(), Json(body)).await
         }
         // ── 高危写（runner 层经审批矩阵后调用）──
@@ -440,10 +436,7 @@ pub async fn exec_tool(
             admin::handle_delete_user(State(state.clone()), headers.clone(), Path(id)).await
         }
         "aigx_user_manage" => {
-            let body = json!({
-                "id": require_arg(args, "user_id")?,
-                "action": require_arg(args, "action")?,
-            });
+            let body: ManageUserRequest = parse_tool_args(name, args)?;
             admin::handle_manage_user(State(state.clone()), headers.clone(), Json(body)).await
         }
         "aigx_channel_delete" => {
@@ -455,13 +448,7 @@ pub async fn exec_tool(
             admin::handle_delete_order(State(state.clone()), headers.clone(), Path(trade_no)).await
         }
         "aigx_pricing_upsert" => {
-            let body = json!({
-                "model_name": require_arg(args, "model_name")?,
-                "input_price": args.get("input_price").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                "output_price": args.get("output_price").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                "cache_price": args.get("cache_price").and_then(|v| v.as_f64()),
-                "price_type": require_arg(args, "price_type")?,
-            });
+            let body: PriceRequest = parse_tool_args(name, args)?;
             admin::handle_add_pricing(State(state.clone()), headers.clone(), Json(body)).await
         }
         "aigx_pricing_delete" => {
@@ -483,12 +470,7 @@ pub async fn exec_tool(
             admin::handle_delete_key(State(state.clone()), headers.clone(), Path(id)).await
         }
         "aigx_group_upsert" => {
-            let body = json!({
-                "name": require_arg(args, "name")?,
-                "ratio": args.get("ratio").and_then(|v| v.as_f64()).unwrap_or(1.0),
-                "allowed_models": args.get("allowed_models").cloned(),
-                "description": str_arg(args, "description").unwrap_or_default(),
-            });
+            let body: GroupRequest = parse_tool_args(name, args)?;
             admin::handle_upsert_group(State(state.clone()), headers.clone(), Json(body)).await
         }
         _ => {
@@ -516,12 +498,13 @@ fn require_arg(args: &Value, key: &str) -> Result<String, (i64, String)> {
         })
 }
 
-/// 取可选字符串参数。
-fn str_arg(args: &Value, key: &str) -> Option<String> {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.trim().to_string())
+/// 从工具参数反序列化为 handler 的请求体 struct（字段名同源，类型不符 → -32602）。
+fn parse_tool_args<T: serde::de::DeserializeOwned>(
+    tool: &str,
+    args: &Value,
+) -> Result<T, (i64, String)> {
+    serde_json::from_value(args.clone())
+        .map_err(|e| (-32602, format!("Invalid params for tool {tool}: {e}")))
 }
 
 fn handler_to_outcome(result: HandlerResult) -> ToolOutcome {
