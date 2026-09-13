@@ -95,7 +95,38 @@ async fn main() -> anyhow::Result<()> {
     let data_dir = crate::config::expand_path(&config.server.data_dir);
     tokio::fs::create_dir_all(&data_dir).await?;
     #[cfg(feature = "sqlite-kv")]
-    let store = Arc::new(FileStore::open(data_dir.join("data"))?);
+    let store = {
+        // PostgreSQL 后端：database.url 非空且启用了 postgres feature 时走 PG，
+        // 否则用默认 SQLite 文件后端。二者同为 FileStore 类型，业务层无感知。
+        #[cfg(feature = "postgres")]
+        let s = if config.database.is_enabled() {
+            match FileStore::open_postgres(
+                &config.database.url,
+                config.database.max_connections,
+            ) {
+                Ok(pg) => {
+                    tracing::info!(
+                        "PostgreSQL KV store enabled: {}",
+                        config.database.url
+                    );
+                    pg
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to open PostgreSQL KV store ({}), falling back to SQLite: {}",
+                        config.database.url,
+                        e
+                    );
+                    FileStore::open(data_dir.join("data"))?
+                }
+            }
+        } else {
+            FileStore::open(data_dir.join("data"))?
+        };
+        #[cfg(not(feature = "postgres"))]
+        let s = FileStore::open(data_dir.join("data"))?;
+        Arc::new(s)
+    };
     #[cfg(not(feature = "sqlite-kv"))]
     let store = Arc::new(FileStore::new(data_dir.join("data")));
 
