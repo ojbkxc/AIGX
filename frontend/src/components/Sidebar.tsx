@@ -9,7 +9,7 @@ import {
   Users, Wallet, Ticket, ScrollText, Package,
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
-  Languages, LogOut, Coins,
+  Languages, LogOut, Coins, Bot,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -43,6 +43,7 @@ const navItems: NavItem[] = [
   { path: '/redemptions', labelKey: '兑换码', icon: Ticket, adminOnly: true },
   { path: '/plans', labelKey: '套餐管理', icon: Package, adminOnly: true },
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
+  { path: '/agent', labelKey: 'AI 运维', icon: Bot, adminOnly: true },
   { path: '/wallet', labelKey: '钱包', icon: Wallet },
   { path: '/profile', labelKey: '个人中心', icon: UserRound },
 ];
@@ -78,6 +79,7 @@ const navGroups: NavGroup[] = [
       navItems[9],  // 兑换码
       navItems[10], // 套餐管理
       navItems[11], // 系统设置
+      navItems[14], // AI 运维
     ],
   },
   {

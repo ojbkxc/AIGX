@@ -404,6 +404,14 @@ async fn main() -> anyhow::Result<()> {
         oauth_state_cache,
         #[cfg(feature = "sea-orm")]
         db_conn,
+        agent_state: if config.agent.enabled {
+            Some(std::sync::Arc::new(crate::agent::AgentState::new(
+                store.clone(),
+                config.agent.clone(),
+            )))
+        } else {
+            None
+        },
     };
 
     tracing::info!(
@@ -1301,6 +1309,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .merge(stripe_callback_routes)
         .merge(openai_routes)
         .merge(anthropic_routes)
+        .merge(crate::agent::api::router())
         .route("/livez", get(handle_livez))
         .route("/readyz", get(handle_readyz))
         .route("/health", get(handle_health))

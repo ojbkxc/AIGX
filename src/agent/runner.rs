@@ -23,7 +23,8 @@ const SYSTEM_PROMPT: &str = "你是 AIGX AI 网关的运维助手，通过白名
 回答要简洁、给出关键数据与结论。";
 
 /// 一轮执行的事件。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// 本轮开始（第 N 轮）。
     Thinking { turn: usize },

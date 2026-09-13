@@ -645,6 +645,58 @@ export const api = {
     request<ApiResponse<ExchangeRatesItem>>('GET', `${API_BASE}/pricing/exchange-rates`),
   updateExchangeRates: (data: Record<string, unknown>): Promise<ApiResponse<ExchangeRatesItem>> =>
     request<ApiResponse<ExchangeRatesItem>>('PUT', `${API_BASE}/pricing/exchange-rates`, data),
+
+  // ==================== AI 运维 Agent（管理员专属 /admin/agent） ====================
+  listAgentSessions: (): Promise<ApiResponse<unknown[]>> =>
+    request<ApiResponse<unknown[]>>('GET', `${API_BASE}/agent/sessions`),
+  createAgentSession: (title: string): Promise<ApiResponse<{ id: string; title: string }>> =>
+    request<ApiResponse<{ id: string; title: string }>>('POST', `${API_BASE}/agent/sessions`, { title }),
+  getAgentSession: (id: string): Promise<ApiResponse<unknown>> =>
+    request<ApiResponse<unknown>>('GET', `${API_BASE}/agent/sessions/${encodeURIComponent(id)}`),
+  /** Agent 对话：SSE 流式，逐事件回调（AgentEvent） */
+  agentChatStream: async (
+    id: string,
+    message: string,
+    onEvent: (ev: { type: string; content?: string; name?: string; ok?: boolean; message?: string }) => void,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await fetch(`${API_BASE}/agent/sessions/${encodeURIComponent(id)}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ message }),
+      signal,
+    });
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => '');
+      throw new Error(text || `Agent chat failed (HTTP ${res.status})`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    for (;;) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true }).replace(/\r/g, '');
+      let idx = buffer.indexOf('\n\n');
+      while (idx !== -1) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        for (const line of frame.split('\n')) {
+          const l = line.trim();
+          if (!l.startsWith('data:')) continue;
+          const data = l.slice(5).trim();
+          if (!data || data === '[DONE]') continue;
+          try {
+            onEvent(JSON.parse(data) as { type: string; content?: string; name?: string; ok?: boolean; message?: string });
+          } catch {
+            // 忽略非 JSON 帧
+          }
+        }
+        idx = buffer.indexOf('\n\n');
+      }
+    }
+  },
 };
 
 /**

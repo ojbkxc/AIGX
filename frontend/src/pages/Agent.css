@@ -1,0 +1,236 @@
+/* ── AI 运维工作台（管理员专属，与用户 /chat 隔离）── */
+
+.agent-shell {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  gap: 0;
+}
+
+/* 左栏会话列表 */
+.agent-sessions {
+  width: 240px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border, #e5e7eb);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface, #fafafa);
+}
+
+.agent-sessions-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+}
+
+.agent-new-btn {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--accent, #2f6fed);
+  display: flex;
+  padding: 4px;
+  border-radius: 6px;
+}
+
+.agent-new-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.agent-sessions-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-session-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: 10px 12px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.agent-session-item:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.agent-session-item.active {
+  background: var(--accent, #2f6fed);
+  color: #fff;
+}
+
+.agent-session-title {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-session-model {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.agent-sessions-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--muted, #9ca3af);
+  font-size: 13px;
+}
+
+/* 右栏 */
+.agent-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.agent-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.agent-msg {
+  display: flex;
+}
+
+.agent-msg-user {
+  justify-content: flex-end;
+}
+
+.agent-msg-assistant {
+  justify-content: flex-start;
+}
+
+.agent-msg-bubble {
+  max-width: 70%;
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-msg-user .agent-msg-bubble {
+  background: var(--accent, #2f6fed);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+
+.agent-msg-assistant .agent-msg-bubble {
+  background: var(--surface, #f3f4f6);
+  color: var(--text, #111827);
+  border-bottom-left-radius: 4px;
+}
+
+.agent-tool-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.agent-tool-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: monospace;
+}
+
+.agent-tool-chip.ok {
+  background: rgba(16, 185, 129, 0.15);
+  color: #059669;
+}
+
+.agent-tool-chip.fail {
+  background: rgba(239, 68, 68, 0.15);
+  color: #dc2626;
+}
+
+.agent-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted, #9ca3af);
+}
+
+.agent-error {
+  margin: 0 24px 8px;
+  padding: 8px 12px;
+  background: rgba(239, 68, 68, 0.1);
+  color: #dc2626;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.agent-input-row {
+  display: flex;
+  gap: 8px;
+  padding: 16px 24px 20px;
+  border-top: 1px solid var(--border, #e5e7eb);
+}
+
+.agent-input {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid var(--border, #d1d5db);
+  border-radius: 10px;
+  font-size: 14px;
+  outline: none;
+}
+
+.agent-input:focus {
+  border-color: var(--accent, #2f6fed);
+}
+
+.agent-send-btn,
+.agent-stop-btn {
+  width: 40px;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent, #2f6fed);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.agent-stop-btn {
+  background: #ef4444;
+}
+
+.spin {
+  animation: agent-spin 1s linear infinite;
+}
+
+@keyframes agent-spin {
+  to { transform: rotate(360deg); }
+}

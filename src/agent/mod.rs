@@ -13,6 +13,7 @@
 //! 安全底线：写操作分低危（自动+审计）与高危（审批矩阵人工确认），
 //! 见 [`tools::RiskLevel`]；Agent 默认只读观察员，切角色才解锁写工具。
 
+pub mod api;
 pub mod approval;
 pub mod audit;
 pub mod llm;
@@ -27,19 +28,31 @@ use crate::storage::FileStore;
 
 /// Agent 运行时共享状态（挂在 [`crate::api::openai::AppState`] 上）。
 ///
-/// 阶段一只有 `store`（会话持久化）与 `config`；`approvals` 在阶段二
-/// 审批矩阵接入后填充 pending 表。
+/// - `store`：会话持久化 KV（与业务共用的 FileStore）。
+/// - `config`：`[agent]` 配置快照。
+/// - `approvals`：高危写审批 pending 表（阶段二接入 runner）。
+/// - `session_store`：会话/消息持久化。
 #[derive(Clone)]
 pub struct AgentState {
     /// 会话持久化用的 KV 存储（与业务共用的 FileStore）。
     pub store: Arc<FileStore>,
     /// `[agent]` 配置快照（启动时加载，后续可经配置更新刷新）。
     pub config: AgentConfig,
+    /// 审批运行时（阶段二接入）。
+    pub approvals: approval::AgentApprovals,
+    /// 会话/消息持久化。
+    pub session_store: session::AgentSessionStore,
 }
 
 impl AgentState {
     /// 构造 Agent 运行时状态。
     pub fn new(store: Arc<FileStore>, config: AgentConfig) -> Self {
-        Self { store, config }
+        let session_store = session::AgentSessionStore::new(store.clone());
+        Self {
+            store,
+            config,
+            approvals: approval::AgentApprovals::new(),
+            session_store,
+        }
     }
 }

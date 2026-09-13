@@ -165,6 +165,12 @@ pub struct AppState {
     /// revocation、logout/改密/管理端踢人时撤销。重启后注册表为空
     ///（未撤销 token 仍有效，撤销中的会话恢复——见 SessionRegistry 注释）。
     pub session_registry: Arc<super::auth::SessionRegistry>,
+    /// AI 运维 Agent 运行时（`[agent]` 配置启用后 Some；否则 None）。
+    ///
+    /// 自举式运维工作台：Agent 用 AIGX 自己的渠道推理去运维 AIGX。
+    /// 会话持久化复用同一个 FileStore（PG kv），审批 pending 表挂
+    /// [`crate::agent::approval::AgentApprovals`]。
+    pub agent_state: Option<Arc<crate::agent::AgentState>>,
 }
 
 impl AppState {
