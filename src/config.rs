@@ -121,6 +121,49 @@ impl DatabaseConfig {
     }
 }
 
+/// AI 运维 Agent 配置（`[agent]` 段）——自举式运维工作台。
+///
+/// Agent 的"大脑"走 AIGX 自己的渠道（进程内直调 bridge，复用渠道调度/
+/// 熔断/亲和，但不经 HTTP 端口与计费），模型与渠道均可配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    /// 是否启用 AI 运维 Agent（默认关闭，避免未配置模型时误启）。
+    #[serde(default)]
+    pub enabled: bool,
+    /// Agent 推理模型名（走 AIGX 渠道，缺省用全局映射解析）。
+    #[serde(default)]
+    pub model: String,
+    /// 锁定渠道 ID：非空时只走该渠道（排障用）；空 = 走全局调度。
+    #[serde(default)]
+    pub channel: String,
+    /// 单次任务最大推理轮数（防死循环）。
+    #[serde(default = "default_max_turns")]
+    pub max_turns: usize,
+    /// 高危工具审批超时（秒），超时未响应视为拒绝。
+    #[serde(default = "default_approval_timeout")]
+    pub approval_timeout_secs: u64,
+}
+
+fn default_max_turns() -> usize {
+    12
+}
+
+fn default_approval_timeout() -> u64 {
+    300
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: String::new(),
+            channel: String::new(),
+            max_turns: default_max_turns(),
+            approval_timeout_secs: default_approval_timeout(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageConfig {
     #[serde(default = "default_daily_limit")]
@@ -215,6 +258,9 @@ pub struct AppConfig {
     ///   由代理负责剥离外部传入的 XFF 并追加真实 IP。
     #[serde(default)]
     pub trust_proxy_headers: bool,
+    /// AI 运维 Agent 配置（`[agent]` 段，自举式运维工作台）。
+    #[serde(default)]
+    pub agent: AgentConfig,
 }
 
 // ── Default implementations ──────────────────────────────────────────

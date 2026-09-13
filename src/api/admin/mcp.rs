@@ -467,7 +467,7 @@ fn unknown_tool_result(name: &str) -> Value {
 // ── 参数辅助 ───────────────────────────────────────────────────────
 
 /// 取必填 channel_id 参数（缺失/非字符串/空白 → -32602）。
-fn require_channel_id(arguments: &Value) -> Result<String, (i64, String)> {
+pub(crate) fn require_channel_id(arguments: &Value) -> Result<String, (i64, String)> {
     arguments
         .get("channel_id")
         .and_then(|v| v.as_str())
@@ -485,7 +485,7 @@ fn require_channel_id(arguments: &Value) -> Result<String, (i64, String)> {
 ///
 /// 标量值转字符串（string 原样、number/bool 转 to_string），
 /// 数组/对象忽略（该 handler 只接受标量查询参数）。
-fn args_to_string_map(arguments: &Value) -> HashMap<String, String> {
+pub(crate) fn args_to_string_map(arguments: &Value) -> HashMap<String, String> {
     let mut m = HashMap::new();
     if let Some(obj) = arguments.as_object() {
         for (k, v) in obj {
@@ -505,7 +505,7 @@ fn args_to_string_map(arguments: &Value) -> HashMap<String, String> {
 
 /// 强类型参数解析（与对应 handler 的 Query 结构同源，缺省字段走 serde
 /// default；类型不符 → -32602）。
-fn parse_struct_args<T: DeserializeOwned>(
+pub(crate) fn parse_struct_args<T: DeserializeOwned>(
     tool: &str,
     arguments: &Value,
 ) -> Result<T, (i64, String)> {

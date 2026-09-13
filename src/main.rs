@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 mod account;
+mod agent;
 mod api;
 mod auth;
 mod bridge;
