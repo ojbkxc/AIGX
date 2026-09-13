@@ -42,13 +42,19 @@ fn try_parse(s: &str) -> Option<Value> {
     serde_json::from_str(s).ok()
 }
 
-/// 剥离首尾非 JSON 语法字符（如 ```json``` 围栏或 XML 标签包裹）
+/// 剥离首尾非 JSON 语法字符（如 ```json``` 围栏或 XML 标签包裹）。
+///
+/// start > end 时（如 `"}x{"`：首 `{` 在尾部、尾 `}` 在头部）返回原串，
+/// 由后续 try_parse 判定解析失败——不能直接切片，否则 `s[start..end]` panic。
 fn strip_wrapping(s: &str) -> &str {
     let start = s.find('{').or_else(|| s.find('[')).unwrap_or(0);
     let end = match s.rfind('}').or_else(|| s.rfind(']')) {
         Some(i) => i + 1,
         None => s.len(),
     };
+    if start >= end {
+        return s;
+    }
     &s[start..end]
 }
 

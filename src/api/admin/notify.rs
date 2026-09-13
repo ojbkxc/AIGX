@@ -69,12 +69,16 @@ pub async fn handle_update_notify_config(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
     let mut cfg = state.notify_service.get_config().await;
+    // 敏感字段守卫：GET 返回的脱敏占位符 "..." 不得被当作真实值写回，
+    // 否则前端打开页面点一次保存就把密钥永久覆写成 "..."（P0 数据破坏）。
+    // 统一过滤 *** / 裸 ... / **** 三种脱敏形态。
+    let is_masked = |v: &str| v.contains("***") || v.trim() == "..." || v.trim() == "****";
     if let Some(v) = body.enabled {
         cfg.enabled = v;
     }
     if let Some(v) = body.telegram_bot_token {
         let t = v.trim();
-        if !t.is_empty() && !t.contains("***") {
+        if !t.is_empty() && !is_masked(t) {
             cfg.telegram_bot_token = t.to_string();
         }
     }
@@ -92,7 +96,7 @@ pub async fn handle_update_notify_config(
     }
     if let Some(v) = body.smtp_password {
         let t = v.trim();
-        if !t.is_empty() && !t.contains("***") {
+        if !t.is_empty() && !is_masked(t) {
             cfg.smtp_password = t.to_string();
         }
     }
@@ -107,7 +111,7 @@ pub async fn handle_update_notify_config(
     }
     if let Some(v) = body.slack_webhook_url {
         let t = v.trim().to_string();
-        if !t.is_empty() && !t.contains("***") {
+        if !t.is_empty() && !is_masked(&t) {
             cfg.slack_webhook_url = t;
         }
     }
@@ -116,7 +120,7 @@ pub async fn handle_update_notify_config(
     }
     if let Some(v) = body.webhook_secret {
         let t = v.trim().to_string();
-        if !t.is_empty() && !t.contains("***") {
+        if !t.is_empty() && !is_masked(&t) {
             cfg.webhook_secret = t;
         }
     }

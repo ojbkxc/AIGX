@@ -141,6 +141,29 @@ impl JsonFileStore {
         Ok(keys)
     }
 
+    /// 原子插入（key 已存在返回 false）。JSON 后端用写锁近似 CAS：
+    /// 非默认 feature，仅保证单进程内的互斥（跨进程靠文件系统，尽力而为）。
+    pub fn put_if_absent<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<bool> {
+        if self.get::<serde_json::Value>(key)?.is_some() {
+            return Ok(false);
+        }
+        let mut cache = self.cache.write();
+        if cache.contains_key(key) {
+            return Ok(false);
+        }
+        let path = self.path_of(key);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if path.exists() {
+            return Ok(false);
+        }
+        let content = serde_json::to_string_pretty(value)?;
+        std::fs::write(&path, &content)?;
+        cache.insert(key.to_string(), content);
+        Ok(true)
+    }
+
     /// 原子更新（读取-修改-写入）。
     /// 返回旧值（如果存在）。
     #[allow(dead_code)]
@@ -207,6 +230,11 @@ impl FileStore {
     /// 供日志分页用——key 的时间戳前缀使字典序等价时间序，只取最新一页即可。
     pub fn list_latest_keys(&self, prefix: &str, limit: usize) -> anyhow::Result<Vec<String>> {
         self.inner.list_latest_keys(prefix, limit)
+    }
+
+    /// 原子插入（key 已存在返回 false）——check-then-put 竞态的 CAS 原语。
+    pub fn put_if_absent<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<bool> {
+        self.inner.put_if_absent(key, value)
     }
 
     /// 原子更新（读取-修改-写入）。

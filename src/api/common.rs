@@ -62,7 +62,15 @@ pub fn extract_api_key_xapi_first(headers: &HeaderMap) -> Option<String> {
 /// 从请求头提取客户端 IP（取 `X-Forwarded-For` 首段或 `X-Real-IP`）。
 ///
 /// `openai.rs` 与 `anthropic.rs` 原实现完全一致，合并于此消除重复。
+///
+/// **安全开关**：`trust_proxy_headers = false`（默认）时直接返回 None——
+/// 客户端可随意伪造这两个头，用来冒充白名单 IP 绕过 `ip_limit`/IP
+/// 过滤，或向请求日志注入虚假归属。部署在可信反代（Nginx/CF）之后
+/// 时在 config 里设 `trust_proxy_headers = true` 启用。
 pub fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
+    if !crate::config::trust_proxy_headers() {
+        return None;
+    }
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         if let Some(first) = xff.split(',').next() {
             let ip = first.trim();

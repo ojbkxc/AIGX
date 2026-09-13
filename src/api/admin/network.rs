@@ -18,13 +18,14 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
+use super::common::verify_admin;
 use crate::account::CfAccount;
 
 /// 持久化 key：FileStore 中的网络层配置 JSON。
@@ -206,20 +207,40 @@ pub struct NetworkConfigResponse {
     pub session_pool_max: usize,
 }
 
-/// 网络层账号配置（复用主 crate 账号池的 CF 账号结构）
+/// 网络层账号配置（复用主 crate 账号池的 CF 账号结构）。
+///
+/// 字段双命名兼容：前端曾发 camelCase（accountId/apiToken），后端
+/// snake_case 必填导致 422——两个别名都收，缺主命名时回退别名。
 #[derive(Debug, Deserialize)]
 pub struct AccountConfigRequest {
     pub name: String,
-    pub account_id: String,
-    pub api_token: String,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub api_token: Option<String>,
+    #[serde(default)]
     pub status: Option<String>,
+    /// camelCase 别名（前端 AccountConfigRequest 旧契约）
+    #[serde(default, alias = "accountId")]
+    #[allow(dead_code)]
+    account_id_alias: Option<String>,
+    #[serde(default, alias = "apiToken")]
+    api_token_alias: Option<String>,
 }
 
 /// 获取网络层健康状态
 ///
 /// 聚合主 crate 各子系统（账号池 / 渠道 / 健康追踪 / 断路器 / 健康归档）
 /// 的真实状态，供管理后台「网络层」面板展示。
-pub async fn health_check(State(state): State<AppState>) -> Json<NetworkStatus> {
+///
+/// 响应包统一信封 { success, data }（与前端 ApiEnvelope 契约一致；
+/// 前端原先按裸结构解析导致 `res.data` 恒 undefined，整个面板不渲染）。
+pub async fn health_check(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // 管理面板状态接口：仅管理员可见（泄露账号池规模/健康统计/活跃用户数）
+    verify_admin(&state, &headers).await?;
     let cfg = load_network_config(&state);
 
     let accounts = state.account_pool.list();
@@ -279,7 +300,7 @@ pub async fn health_check(State(state): State<AppState>) -> Json<NetworkStatus> 
     let total_sessions = affinity_sessions.max(active_users);
     let idle_sessions = total_connections.saturating_sub(active_connections);
 
-    Json(NetworkStatus {
+    let status = NetworkStatus {
         enabled: cfg.enabled,
         account_pool: AccountPoolStatus {
             total_accounts,
@@ -309,15 +330,19 @@ pub async fn health_check(State(state): State<AppState>) -> Json<NetworkStatus> 
         load_balance_strategy: cfg.strategy.clone(),
         last_check_at: chrono::Utc::now().timestamp(),
         config: cfg,
-    })
+    };
+    Ok(Json(json!({ "success": true, "data": status })))
 }
 
 /// 更新网络层配置（持久化到 FileStore，重启保留）
 pub async fn update_network_config(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(_config_id): Path<String>,
     Json(request): Json<NetworkConfigRequest>,
-) -> Result<Json<NetworkConfigResponse>, ApiError> {
+) -> Result<Json<NetworkConfigResponse>, (StatusCode, Json<Value>)> {
+    // 管理端配置写入：仅管理员（enabled:false 会停全站数据面）
+    verify_admin(&state, &headers).await?;
     // 读-改-写：以当前生效配置为底，覆盖请求中出现的字段
     let mut cfg = load_network_config(&state);
     cfg.enabled = request.enabled;
@@ -342,7 +367,7 @@ pub async fn update_network_config(
     state
         .alert_store
         .put(NETWORK_CONFIG_STORE_KEY, &cfg)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| error_response(&format!("配置持久化失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
 
     tracing::info!(
         "网络层配置已更新: enabled={} strategy={} 池参数 {}/{}/{}/{}",
@@ -370,11 +395,21 @@ pub async fn update_network_config(
 /// 带 `{name, account_id, api_token, status}` body 时按完整配置添加。
 pub async fn add_network_account(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(account_id): Path<String>,
     body: Option<Json<AccountConfigRequest>>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // 写入 CF 账号凭据（api_token）：仅管理员
+    verify_admin(&state, &headers).await?;
     let now = chrono::Utc::now().timestamp();
     let request = body.map(|Json(r)| r);
+    // camelCase 别名归一：前端旧契约发 accountId/apiToken
+    let body_account_id = request
+        .as_ref()
+        .and_then(|r| r.account_id.clone().or(r.account_id_alias.clone()));
+    let body_api_token = request
+        .as_ref()
+        .and_then(|r| r.api_token.clone().or(r.api_token_alias.clone()));
     let account = CfAccount {
         id: uuid::Uuid::new_v4().to_string(),
         name: request
@@ -382,15 +417,10 @@ pub async fn add_network_account(
             .filter(|r| !r.name.is_empty())
             .map(|r| r.name.clone())
             .unwrap_or_else(|| format!("network-{}", account_id)),
-        account_id: request
-            .as_ref()
-            .filter(|r| !r.account_id.is_empty())
-            .map(|r| r.account_id.clone())
+        account_id: body_account_id
+            .filter(|s| !s.is_empty())
             .unwrap_or_else(|| account_id.clone()),
-        api_token: request
-            .as_ref()
-            .map(|r| r.api_token.clone())
-            .unwrap_or_default(),
+        api_token: body_api_token.unwrap_or_default(),
         status: request
             .as_ref()
             .and_then(|r| r.status.clone())
@@ -402,7 +432,7 @@ pub async fn add_network_account(
     state
         .account_pool
         .add(account)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| error_response(&format!("添加账号失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(json!({
         "success": true,
         "message": "网络层账号已添加"
@@ -412,20 +442,55 @@ pub async fn add_network_account(
 /// 删除网络层账号（按账号 ID）
 pub async fn remove_network_account(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(account_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    state
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // 删除账号池条目：仅管理员
+    verify_admin(&state, &headers).await?;
+    // 后端按内部 UUID（account:{uuid}）存储，前端可能误传 CF account_id；
+    // 两种 ID 都尝试匹配删除，找不到时报 404 而非静默成功。
+    let removed = state
         .account_pool
         .remove(&account_id)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(json!({
-        "success": true,
-        "message": "网络层账号已删除"
-    })))
+        .or_else(|_| {
+            // account_id 不匹配内部 id 时，尝试按 CF account_id 字段找内部 id
+            let internal = state
+                .account_pool
+                .list()
+                .into_iter()
+                .find(|a| a.account_id == account_id)
+                .map(|a| a.id);
+            match internal {
+                Some(id) => state.account_pool.remove(&id),
+                None => Ok(()),
+            }
+        });
+    match removed {
+        Ok(_) => {
+            let still = state
+                .account_pool
+                .list()
+                .into_iter()
+                .any(|a| a.id == account_id || a.account_id == account_id);
+            if still {
+                return Err(error_response("账号未找到", StatusCode::NOT_FOUND));
+            }
+            Ok(Json(json!({
+                "success": true,
+                "message": "网络层账号已删除"
+            })))
+        }
+        Err(e) => Err(error_response(&format!("删除失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+    }
 }
 
 /// 列出网络层账号（CF 账号池真实状态）
-pub async fn list_network_accounts(State(state): State<AppState>) -> Json<Value> {
+pub async fn list_network_accounts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // 账号池列表：仅管理员（含账号状态与错误信息）
+    verify_admin(&state, &headers).await?;
     let accounts = state.account_pool.list();
     let items: Vec<Value> = accounts
         .iter()
@@ -441,13 +506,18 @@ pub async fn list_network_accounts(State(state): State<AppState>) -> Json<Value>
             })
         })
         .collect();
-    Json(json!({ "success": true, "data": items }))
+    Ok(Json(json!({ "success": true, "data": items })))
 }
 
 /// 重启网络层
 ///
 /// 复位所有渠道的断路器与健康追踪状态；渠道探活由后台 prober 周期执行。
-pub async fn restart_network(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+pub async fn restart_network(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // 重置全部断路器/健康状态：仅管理员
+    verify_admin(&state, &headers).await?;
     let mut count = 0usize;
     for ch in state.channel_store.list() {
         state.channel_store.circuit_breaker().reset(&ch.id);
@@ -461,6 +531,14 @@ pub async fn restart_network(State(state): State<AppState>) -> Result<Json<Value
     })))
 }
 
+/// 统一错误响应（与 admin 模块其他 handler 一致的 (StatusCode, Json) 形态）
+fn error_response(
+    msg: &str,
+    status: StatusCode,
+) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({ "success": false, "message": msg })))
+}
+
 /// 错误类型
 #[derive(Debug)]
 pub enum ApiError {
@@ -470,50 +548,4 @@ pub enum ApiError {
     AlreadyExists,
     NotImplemented,
     Internal(String),
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (status, error, detail) = match self {
-            ApiError::NetworkLayerDisabled => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "network_layer_disabled".to_string(),
-                "网络层未启用".to_string(),
-            ),
-            ApiError::NetworkLayerNotStarted => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "network_layer_not_started".to_string(),
-                "网络层未启动".to_string(),
-            ),
-            ApiError::AccountNotFound => (
-                StatusCode::NOT_FOUND,
-                "account_not_found".to_string(),
-                "账号未找到".to_string(),
-            ),
-            ApiError::AlreadyExists => (
-                StatusCode::CONFLICT,
-                "already_exists".to_string(),
-                "账号已存在".to_string(),
-            ),
-            ApiError::NotImplemented => (
-                StatusCode::NOT_IMPLEMENTED,
-                "not_implemented".to_string(),
-                "功能待实现".to_string(),
-            ),
-            ApiError::Internal(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error".to_string(),
-                msg,
-            ),
-        };
-        (
-            status,
-            Json(json!({
-                "success": false,
-                "error": error,
-                "detail": detail,
-            })),
-        )
-            .into_response()
-    }
 }

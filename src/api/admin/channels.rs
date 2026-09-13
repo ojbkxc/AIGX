@@ -126,14 +126,15 @@ impl ChannelRequest {
 /// 构造渠道 JSON 响应（脱敏 API Key）
 /// `seq`：展示用短编号（列表接口按创建顺序注入 1..N；单渠道场景传 None 留空）。
 pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
-    let masked_key = if ch.api_key.is_empty() {
+    // 按字符（而非字节）切片脱敏：非 ASCII key 的字节切片会 panic
+    //（chars().count() 判长 + 字节下标切是不匹配的组合）。
+    let chars: Vec<char> = ch.api_key.chars().collect();
+    let masked_key = if chars.is_empty() {
         String::new()
-    } else if ch.api_key.chars().count() > 12 {
-        format!(
-            "{}...{}",
-            &ch.api_key[..8],
-            &ch.api_key[ch.api_key.len() - 4..]
-        )
+    } else if chars.len() > 12 {
+        let head: String = chars[..8].iter().collect();
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{head}...{tail}")
     } else {
         "****".to_string()
     };

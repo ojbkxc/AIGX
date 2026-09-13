@@ -207,6 +207,14 @@ pub struct AppConfig {
     /// （跨源请求被浏览器拦截，同源不受影响），见 main.rs build_cors_layer。
     #[serde(default)]
     pub cors_origins: Vec<String>,
+    /// 是否信任反向代理的 `X-Forwarded-For` / `X-Real-IP` 头。
+    ///
+    /// - `false`（默认）：忽略这两个头，IP 记为 "unknown"（直连部署无代理，
+    ///   客户端可伪造 XFF 头绕过 IP 白名单/黑名单或伪造日志归属）。
+    /// - `true`：仅在确认部署于可信反代（Nginx/CF 等）之后开启，此时
+    ///   由代理负责剥离外部传入的 XFF 并追加真实 IP。
+    #[serde(default)]
+    pub trust_proxy_headers: bool,
 }
 
 // ── Default implementations ──────────────────────────────────────────
@@ -239,6 +247,24 @@ impl Default for UsageConfig {
 }
 
 // ── ConfigManager ────────────────────────────────────────────────────
+
+/// 是否信任代理头的进程级快照（由 main 启动时写入）。
+///
+/// `extract_client_ip` 是同步函数（18 个调用点都无法 await），而配置
+/// 在运行期可经管理端修改——这里取启动时快照即可：改这个开关需要
+/// 同时调整反代部署方式，重启进程应用是合理语义。
+static TRUST_PROXY_HEADERS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 读取 trust_proxy_headers 快照（供 `extract_client_ip` 同步访问）
+pub fn trust_proxy_headers() -> bool {
+    TRUST_PROXY_HEADERS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 启动时由 main 写入快照（见 main.rs）
+pub fn set_trust_proxy_headers(v: bool) {
+    TRUST_PROXY_HEADERS.store(v, std::sync::atomic::Ordering::Relaxed);
+}
 
 pub struct ConfigManager {
     config: RwLock<AppConfig>,

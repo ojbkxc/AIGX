@@ -194,6 +194,16 @@ pub struct OauthProviderFields {
     pub redirect_uri: Option<String>,
 }
 
+/// client_secret 展示脱敏：已配置返回 "..."（前端无消费方，
+/// 拿到原值也没有用途，避免浏览器网络面板/日志泄露凭据）
+fn mask_secret(s: &str) -> &str {
+    if s.is_empty() {
+        ""
+    } else {
+        "..."
+    }
+}
+
 /// 获取 GitHub / Google / LinuxDO OAuth 配置与就绪状态
 pub async fn handle_get_oauth_config(
     State(state): State<AppState>,
@@ -205,24 +215,30 @@ pub async fn handle_get_oauth_config(
         "data": {
             "github": {
                 "client_id": config.github_oauth.client_id,
-                "client_secret": config.github_oauth.client_secret,
+                "client_secret": mask_secret(&config.github_oauth.client_secret),
                 "redirect_uri": config.github_oauth.redirect_uri,
                 "ready": config.github_oauth.ready(),
             },
             "google": {
                 "client_id": config.google_oauth.client_id,
-                "client_secret": config.google_oauth.client_secret,
+                "client_secret": mask_secret(&config.google_oauth.client_secret),
                 "redirect_uri": config.google_oauth.redirect_uri,
                 "ready": config.google_oauth.ready(),
             },
             "linuxdo": {
                 "client_id": config.linuxdo_oauth.client_id,
-                "client_secret": config.linuxdo_oauth.client_secret,
+                "client_secret": mask_secret(&config.linuxdo_oauth.client_secret),
                 "redirect_uri": config.linuxdo_oauth.redirect_uri,
                 "ready": config.linuxdo_oauth.ready(),
             },
         }
     })))
+}
+
+/// 脱敏占位符守卫：GET 返回 "..."，前端若原样提交会毁掉真实 secret，
+/// 与 notify 的 *** / ... 守卫同语义。
+fn is_masked_secret(v: &str) -> bool {
+    v.trim() == "..." || v.contains("***")
 }
 
 /// 更新 GitHub / Google / LinuxDO OAuth 配置（未提供的字段保持原值）
@@ -237,7 +253,9 @@ pub async fn handle_update_oauth_config(
             config.github_oauth.client_id = v;
         }
         if let Some(v) = g.client_secret {
-            config.github_oauth.client_secret = v;
+            if !is_masked_secret(&v) {
+                config.github_oauth.client_secret = v;
+            }
         }
         if let Some(v) = g.redirect_uri {
             config.github_oauth.redirect_uri = v;
@@ -248,7 +266,9 @@ pub async fn handle_update_oauth_config(
             config.google_oauth.client_id = v;
         }
         if let Some(v) = g.client_secret {
-            config.google_oauth.client_secret = v;
+            if !is_masked_secret(&v) {
+                config.google_oauth.client_secret = v;
+            }
         }
         if let Some(v) = g.redirect_uri {
             config.google_oauth.redirect_uri = v;
@@ -259,7 +279,9 @@ pub async fn handle_update_oauth_config(
             config.linuxdo_oauth.client_id = v;
         }
         if let Some(v) = g.client_secret {
-            config.linuxdo_oauth.client_secret = v;
+            if !is_masked_secret(&v) {
+                config.linuxdo_oauth.client_secret = v;
+            }
         }
         if let Some(v) = g.redirect_uri {
             config.linuxdo_oauth.redirect_uri = v;
@@ -273,19 +295,19 @@ pub async fn handle_update_oauth_config(
                 "data": {
                     "github": {
                         "client_id": updated.github_oauth.client_id,
-                        "client_secret": updated.github_oauth.client_secret,
+                        "client_secret": mask_secret(&updated.github_oauth.client_secret),
                         "redirect_uri": updated.github_oauth.redirect_uri,
                         "ready": updated.github_oauth.ready(),
                     },
                     "google": {
                         "client_id": updated.google_oauth.client_id,
-                        "client_secret": updated.google_oauth.client_secret,
+                        "client_secret": mask_secret(&updated.google_oauth.client_secret),
                         "redirect_uri": updated.google_oauth.redirect_uri,
                         "ready": updated.google_oauth.ready(),
                     },
                     "linuxdo": {
                         "client_id": updated.linuxdo_oauth.client_id,
-                        "client_secret": updated.linuxdo_oauth.client_secret,
+                        "client_secret": mask_secret(&updated.linuxdo_oauth.client_secret),
                         "redirect_uri": updated.linuxdo_oauth.redirect_uri,
                         "ready": updated.linuxdo_oauth.ready(),
                     },

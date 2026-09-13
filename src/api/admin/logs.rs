@@ -83,11 +83,21 @@ pub struct AuditLogQuery {
     pub size: usize,
 }
 
-/// 导出格式参数
+/// 导出格式参数（format 之外的筛选参数与列表页共用，保证导出与所见一致）
 #[derive(Debug, Deserialize)]
 pub struct ExportQuery {
     #[serde(default)]
     pub format: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub end: Option<i64>,
 }
 
 /// 列出请求日志（全员可见：管理员看全部，普通用户只看自己的）
@@ -180,23 +190,35 @@ pub async fn handle_export_request_logs(
     Query(q): Query<ExportQuery>,
 ) -> Response {
     // 尝试管理员验证；失败则要求普通用户登录并按 user_id 过滤
+    // 注意：RequestLog.user_id 存的是用户 UUID（非邮箱），过滤必须用 user.id
     let admin = verify_admin(&state, &headers).await.is_ok();
-    let user_email: Option<String> = if admin {
-        None
+    let filter_user_id: Option<String> = if admin {
+        // 管理员：user 参数支持邮箱（解析为 UUID）或 UUID 原样；与列表页语义一致
+        q.user.as_deref().and_then(|u| {
+            if u.contains('@') {
+                state.user_store.get_by_email(u).map(|usr| usr.id)
+            } else {
+                Some(u.to_string())
+            }
+        })
     } else {
+        // 普通用户：忽略 URL 中的 user 参数，强制只导出自己的（安全）
         match verify_user(&state, &headers).await {
-            Ok(u) => Some(u.email),
+            Ok(u) => Some(u.id),
             Err(e) => return e.into_response(),
         }
     };
     let fmt = q.format.as_deref().unwrap_or("json").to_lowercase();
+    let u = filter_user_id.as_deref();
+    let m = q.model.as_deref();
+    let c = q.channel.as_deref();
 
     let result = match fmt.as_str() {
         "csv" => {
-            let csv = match &user_email {
-                Some(email) => state.log_store.requests.export_csv_for_user(email),
-                None => state.log_store.requests.export_csv(),
-            };
+            let csv = state
+                .log_store
+                .requests
+                .export_csv_filtered(u, m, c, q.start, q.end);
             (
                 StatusCode::OK,
                 [
@@ -213,10 +235,10 @@ pub async fn handle_export_request_logs(
             )
         }
         "json" => {
-            let json = match &user_email {
-                Some(email) => state.log_store.requests.export_json_for_user(email),
-                None => state.log_store.requests.export_json(),
-            };
+            let json = state
+                .log_store
+                .requests
+                .export_json_filtered(u, m, c, q.start, q.end);
             (
                 StatusCode::OK,
                 [

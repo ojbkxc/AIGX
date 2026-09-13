@@ -27,6 +27,11 @@ fn is_default_admin(u: &User) -> bool {
     u.email == crate::user::DEFAULT_ADMIN_EMAIL
 }
 
+/// 取目标用户当前 username（用于更新时判「改没改名」，同名跳过唯一性预检）
+fn user_before_ref(state: &AppState, id: &str) -> Option<String> {
+    state.user_store.get_by_id(id).map(|u| u.username)
+}
+
 /// 创建用户请求
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {
@@ -231,6 +236,16 @@ pub async fn handle_update_user(
             StatusCode::FORBIDDEN,
         ));
     }
+    // 用户名唯一性预检（与创建路径语义一致；UserStore::update 自身不校验重名）
+    if let Some(n) = body.username.as_deref() {
+        let n = n.trim();
+        if !n.is_empty()
+            && Some(n) != user_before_ref(&state, &id).as_deref()
+            && state.user_store.get_by_username(n).is_some()
+        {
+            return Err(error_response("用户名已存在", StatusCode::CONFLICT));
+        }
+    }
     match state.user_store.update(&id, |u| {
         if let Some(e) = &body.email {
             if !e.is_empty() {
@@ -304,10 +319,25 @@ pub async fn handle_delete_user(
     }
     // 获取管理员 ID 用于审计
     let admin_id = admin_id_from_session_local(&state, &headers).await;
-    // 查询用户用于记录审计
-    let user_before = state.user_store.get_by_id(&id).map(|u| mask_user(&u));
+    // 查询用户用于记录审计 + 会话吊销（删除后 email 不再可查）
+    let user_snapshot = state.user_store.get_by_id(&id);
+    let user_before = user_snapshot.as_ref().map(mask_user);
     match state.user_store.delete(&id) {
         Ok(_) => {
+            // 删除用户的孤儿 API key 处理：不吊销的 key 会因 user_id 指向不存在
+            // 的用户而跳过余额预检/扣费（validate_request 找不到用户即放行），
+            // 变成无计费免费通道。随用户删除一并吊销。
+            let orphan_keys = state.api_key_store.list_by_user(&id);
+            for k in &orphan_keys {
+                if let Err(e) = state.api_key_store.delete(&k.id) {
+                    tracing::warn!("Failed to revoke orphan key {} of deleted user: {e}", k.id);
+                }
+            }
+            // 撤销该用户全部会话（已签发 token 立即失效）
+            if let Some(u) = &user_snapshot {
+                let revoked = state.session_registry.revoke_all(&u.email);
+                tracing::info!("User {} deleted, {} session(s) revoked", u.id, revoked);
+            }
             // 记录审计日志
             record_audit(
                 &state,

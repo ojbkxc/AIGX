@@ -131,22 +131,24 @@ export default function Notify() {
         smtp_ssl: notify.smtp_ssl ?? false,
         webhook_url: notify.webhook_url ?? '',
       };
-      // 敏感凭据字段：仅当输入了新的非脱敏值才提交；空串/未修改的脱敏占位不带该字段，
-      // 避免把真实 Bot Token / SMTP 密码覆盖为空（后端契约：缺省字段保持原值）
+      // 敏感凭据字段：仅当输入了新的非脱敏值才提交；空串/未修改的脱敏占位
+      // （后端 GET 返回 "..."）不带该字段，避免把真实密钥覆盖为占位符
+      // （后端契约：缺省字段保持原值；双端都拦 "..." / *** / ****）
+      const isMasked = (v: string): boolean => v.includes('***') || v === '...' || v === '****';
       const botToken = (notify.telegram_bot_token || '').trim();
-      if (botToken && !botToken.includes('***')) {
+      if (botToken && !isMasked(botToken)) {
         payload.telegram_bot_token = botToken;
       }
       const smtpPassword = (notify.smtp_password || '').trim();
-      if (smtpPassword && !smtpPassword.includes('***')) {
+      if (smtpPassword && !isMasked(smtpPassword)) {
         payload.smtp_password = smtpPassword;
       }
       const slackUrl = (notify.slack_webhook_url || '').trim();
-      if (slackUrl && !slackUrl.includes('***')) {
+      if (slackUrl && !isMasked(slackUrl)) {
         payload.slack_webhook_url = slackUrl;
       }
       const webhookSecret = (notify.webhook_secret || '').trim();
-      if (webhookSecret && !webhookSecret.includes('***')) {
+      if (webhookSecret && !isMasked(webhookSecret)) {
         payload.webhook_secret = webhookSecret;
       }
       await api.updateNotifyConfig(payload);

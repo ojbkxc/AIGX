@@ -36,6 +36,7 @@ async function request<T = unknown>(method: string, path: string, body: unknown 
       localStorage.removeItem('email');
       localStorage.removeItem('username');
       localStorage.removeItem('expires_at');
+      localStorage.removeItem('role');
     } catch {
       // 忽略 localStorage 异常
     }
@@ -49,9 +50,16 @@ async function request<T = unknown>(method: string, path: string, body: unknown 
     return null as T;
   }
 
-  const data = await res.json() as Record<string, unknown>;
+  // 非 JSON 响应（HTML 错误页等）不该炸在 JSON 解析掩盖真实状态码
+  const text = await res.text();
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    throw new Error(`HTTP ${res.status}`);
+  }
   if (!res.ok) {
-    throw new Error(String(data.detail || data.error || '请求失败'));
+    throw new Error(String(data.detail || data.error || data.message || '请求失败'));
   }
   return data as T;
 }
@@ -93,6 +101,9 @@ export async function getNetworkMetrics(): Promise<ApiEnvelope<NetworkStatusRaw>
   });
   if (res.status === 401) {
     throw new Error('Unauthorized');
+  }
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
   }
   return res.json() as Promise<ApiEnvelope<NetworkStatusRaw>>;
 }

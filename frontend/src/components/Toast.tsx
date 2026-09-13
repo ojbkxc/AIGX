@@ -35,7 +35,12 @@ export function ToastProvider({ children }: ToastProviderProps): JSX.Element {
 
   const addToast = useCallback<AddToast>((message, type = 'success', duration = 3000) => {
     const id = ++toastId;
-    setToasts((prev) => [...prev, { id, message, type, duration }]);
+    // 同类型提示去重 + 最多保留 5 条：循环里连续 addToast（如批量删除
+    // 每项一条）会堆满屏幕，旧条又不消失
+    setToasts((prev) => {
+      const deduped = prev.filter((t) => t.message !== message || t.type !== type);
+      return [...deduped, { id, message, type, duration }].slice(-5);
+    });
   }, []);
 
   const removeToast = useCallback((id: number) => {

@@ -317,14 +317,19 @@ impl UserStore {
     }
 
     pub fn update(&self, id: &str, mutator: impl FnOnce(&mut User)) -> Result<User> {
-        let mut user = self
+        // 写锁内完成读-改-写：原实现「读锁克隆→改→写锁覆盖回」与并发的
+        // try_charge/add_quota_atomic（同样在写锁内改 quota）会产生丢失
+        // 更新——update 后写覆盖掉并发的扣费/充值。此处持写锁后再执行
+        // mutator，保证与所有配额变更路径串行化。
+        let mut by_id = self
             .by_id
-            .read()
-            .get(id)
-            .cloned()
+            .write();
+        let user = by_id
+            .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("user not found"))?;
         let old_email = user.email.clone();
-        mutator(&mut user);
+        mutator(user);
+        // 邮箱变更校验（写锁内做，读到的 by_email 与写入之间无窗口）
         if user.email != old_email {
             if user.email.is_empty() {
                 anyhow::bail!("email cannot be empty");
@@ -338,16 +343,17 @@ impl UserStore {
                 anyhow::bail!("email already exists");
             }
         }
-        self.persist(&user)?;
-        self.by_id.write().insert(user.id.clone(), user.clone());
+        let snapshot = user.clone();
+        drop(by_id);
+        self.persist(&snapshot)?;
         let mut by_email = self.by_email.write();
         if !old_email.is_empty() {
             by_email.remove(&old_email);
         }
-        if !user.email.is_empty() {
-            by_email.insert(user.email.clone(), user.id.clone());
+        if !snapshot.email.is_empty() {
+            by_email.insert(snapshot.email.clone(), snapshot.id.clone());
         }
-        Ok(user)
+        Ok(snapshot)
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {

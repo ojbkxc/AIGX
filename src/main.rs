@@ -90,6 +90,9 @@ async fn main() -> anyhow::Result<()> {
     // 启动时确保 session_secret 非空并持久化，避免登录后 token 无法鉴权
     ensure_session_secret(&config_manager).await;
     let config = config_manager.get().await;
+    // XFF/X-Real-IP 信任快照：默认不信任（客户端可伪造），
+    // 部署在可信反代后时在 config.toml 设 trust_proxy_headers = true
+    crate::config::set_trust_proxy_headers(config.trust_proxy_headers);
 
     // 初始化存储（默认 SQLite 后端；--no-default-features 构建降级为 JSON 文件）
     let data_dir = crate::config::expand_path(&config.server.data_dir);
@@ -488,6 +491,8 @@ async fn main() -> anyhow::Result<()> {
                     let ls = log_store.clone();
                     Box::pin(async move {
                         let (days, _capacity) = ls.requests.retention();
+                        // 容量上限由写入路径的 purge_overflow 消费（同样读
+                        // retention 配置），此处只负责按天清理。
                         let Some(days) = days else { return 0 };
                         let cutoff = chrono::Utc::now().timestamp() - (days as i64) * 86400;
                         match ls.requests.delete_older_than(cutoff) {
@@ -1310,10 +1315,27 @@ fn build_cors_layer(config: &config::AppConfig) -> CorsLayer {
         .allow_credentials(true)
 }
 
-/// GET /metrics — Prometheus 指标文本输出
-async fn handle_metrics() -> axum::response::Response {
+/// GET /metrics — Prometheus 指标文本输出（管理员鉴权）
+///
+/// 指标含各渠道模型调用量/成本/延迟等业务敏感数据，不设防会向任意
+/// 未认证访客泄露运营概况。校验管理员会话，失败返回 401。
+async fn handle_metrics(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
     use axum::http::{header::CONTENT_TYPE, HeaderValue, StatusCode};
     use axum::response::IntoResponse;
+    if crate::api::admin::common::verify_admin(&state, &headers)
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"))],
+            "unauthorized",
+        )
+            .into_response();
+    }
     let headers = [(
         CONTENT_TYPE,
         HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),

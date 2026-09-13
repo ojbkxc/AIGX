@@ -467,9 +467,9 @@ export const api = {
     return parsed as PlaygroundChatResult;
   },
 
-  // 令牌管理
-  listTokens: (): Promise<ApiList<TokenItem>> =>
-    request<ApiList<TokenItem>>('GET', `${API_BASE}/tokens`),
+  // 令牌管理（all=true 仅管理员生效：默认所有人只看自己的，管理员显式请求查看全系统）
+  listTokens: (all = false): Promise<ApiList<TokenItem>> =>
+    request<ApiList<TokenItem>>('GET', `${API_BASE}/tokens${all ? '?all=1' : ''}`),
   addToken: (data: Record<string, unknown>): Promise<ApiResponse<TokenItem>> =>
     request<ApiResponse<TokenItem>>('POST', `${API_BASE}/tokens`, data),
   updateToken: (id: string | number, data: Record<string, unknown>): Promise<ApiResponse<TokenItem>> =>

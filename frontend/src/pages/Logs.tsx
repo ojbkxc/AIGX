@@ -1,4 +1,4 @@
-import { useState, useEffect, type MouseEvent } from 'react';
+import { useState, useEffect, useRef, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Trash2, Eraser, EyeOff, Eye } from 'lucide-react';
 import { api } from '../api';
@@ -88,27 +88,42 @@ export default function Logs(): JSX.Element {
     setSelected(new Set());
   }, [tab, page]);
 
+  // 请求序号：快速翻页/切筛选时旧响应晚到不覆盖新数据
+  const loadSeq = useRef(0);
   const load = async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError('');
     try {
+      let resTotal = 0;
       if (tab === 'requests') {
         const params: Record<string, string | number> = { page, size };
         if (filters.user) params.user = filters.user;
         if (filters.model) params.model = filters.model;
         if (filters.channel) params.channel = filters.channel;
         const res = await api.listRequestLogs(params);
+        if (seq !== loadSeq.current) return; // 已被更新的请求取代
         setLogs(Array.isArray(res?.data) ? (res.data as unknown as LogItem[]) : []);
-        setTotal(res?.total || 0);
+        resTotal = res?.total || 0;
+        setTotal(resTotal);
       } else {
         const res = await api.listAuditLogs({ page, size });
+        if (seq !== loadSeq.current) return;
         setLogs(Array.isArray(res?.data) ? (res.data as unknown as LogItem[]) : []);
-        setTotal(res?.total || 0);
+        resTotal = res?.total || 0;
+        setTotal(resTotal);
+      }
+      // 删空末页唯一条目后钳回有效页（total 变小页码越界显示空页）
+      const totalPages = Math.max(1, Math.ceil(resTotal / size));
+      if (page > totalPages) {
+        setPage(totalPages);
+        return; // setPage 会触发 useEffect 重新 load
       }
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   };
 
@@ -164,8 +179,11 @@ export default function Logs(): JSX.Element {
             : await api.clearAuditLogs();
           addToast(`${t('已清空')} ${res?.data?.removed ?? 0} ${t('条')}`);
           setSelected(new Set());
-          setPage(1);
-          await load();
+          if (page !== 1) {
+            setPage(1); // useEffect 会重新 load，避免闭包旧 page 双请求
+          } else {
+            await load();
+          }
         } catch (err) {
           setError(err instanceof Error ? err.message : String(err));
         } finally {

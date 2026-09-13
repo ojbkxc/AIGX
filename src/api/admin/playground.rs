@@ -15,6 +15,97 @@ use serde_json::{json, Value};
 use super::super::openai::AppState;
 use super::common::{error_response, verify_user};
 
+/// Playground 计费：按模型实时定价从用户余额扣费 + 记请求日志。
+///
+/// 原先 Playground 四个接口登录即用、零计费——任何注册用户可无限免费
+/// 消耗上游额度。现与数据面同一套扣费路径（订阅池优先 + 钱包兜底）。
+/// 管理员豁免（调试渠道是管理职责，与 new-api playground 语义一致）。
+fn charge_playground_usage(
+    state: &AppState,
+    user_id: &str,
+    model: &str,
+    channel_id: Option<&str>,
+    channel_name: Option<&str>,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+) {
+    let Some(u) = state.user_store.get_by_id(user_id) else {
+        return;
+    };
+    let group = u.group.clone();
+    // 计价（失败按 0，与 charge_usage 的兜底一致）
+    let cost = state
+        .pricing_store
+        .calculate_cost_quoted(model, prompt_tokens, completion_tokens, &group)
+        .unwrap_or(0);
+    if cost > 0 {
+        // 订阅池优先 + 钱包兜底（与数据面 charge_usage 相同顺序）
+        let now = chrono::Utc::now().timestamp();
+        let mut remaining = cost;
+        for sub in state.subscription_store.find_active(user_id, now) {
+            if remaining <= 0 {
+                break;
+            }
+            let pool = if sub.amount_total > 0 {
+                sub.amount_total - sub.amount_used
+            } else {
+                remaining
+            };
+            let take = pool.min(remaining);
+            if take > 0 && state.subscription_store.try_charge(&sub.id, take) {
+                remaining -= take;
+            }
+        }
+        if remaining > 0 && !state.user_store.try_charge(user_id, remaining) {
+            tracing::warn!("playground charge failed for user {user_id} (insufficient quota)");
+        }
+    }
+    // 记请求日志（管理员可在日志页看到 Playground 消耗，来源渠道标注）
+    let log = crate::log::RequestLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        user_id: Some(user_id.to_string()),
+        key_id: Some("playground".to_string()),
+        channel_id: channel_id.map(|s| s.to_string()),
+        channel_name: channel_name.map(|s| s.to_string()),
+        model: model.to_string(),
+        origin_model: Some(model.to_string()),
+        input_tokens: prompt_tokens,
+        output_tokens: completion_tokens,
+        cost,
+        channel_cost: cost,
+        latency_ms: 0,
+        status_code: 200,
+        error_msg: None,
+        ip: None,
+        request_id: None,
+        created_at: chrono::Utc::now().timestamp(),
+        candidate_channels: Vec::new(),
+        cache_hit: false,
+        filtered_channels: Vec::new(),
+        selected_channel: None,
+    };
+    if let Err(e) = state.log_store.requests.add(log) {
+        tracing::warn!("playground request log write failed: {e}");
+    }
+    // 全局 usage 统计同步累加
+    state.usage_tracker.accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
+}
+
+/// 从响应 JSON 中提取 usage 的 prompt/completion tokens（无 usage 时按 0）
+fn extract_usage_tokens(j: &Value) -> (u64, u64) {
+    let p = j
+        .get("usage")
+        .and_then(|u| u.get("prompt_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let c = j
+        .get("usage")
+        .and_then(|u| u.get("completion_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    (p, c)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PlaygroundChatRequest {
     pub channel_id: Option<String>,
@@ -190,6 +281,19 @@ pub async fn handle_playground_chat(
                         .and_then(|c| c.as_str())
                         .unwrap_or("")
                         .to_string();
+                    // 计费：管理员豁免（调试渠道是管理职责）
+                    if !user.is_admin() {
+                        let (p, c) = extract_usage_tokens(&j);
+                        charge_playground_usage(
+                            &state,
+                            &user.id,
+                            &model,
+                            Some(&ch.id),
+                            Some(&ch.name),
+                            p,
+                            c,
+                        );
+                    }
                     Json(json!({
                         "success": true,
                         "data": {
@@ -349,7 +453,22 @@ pub async fn handle_playground_images(
                 .into_response();
             }
             match resp.json::<Value>().await {
-                Ok(j) => Json(json!({ "success": true, "data": j })).into_response(),
+                Ok(j) => {
+                    // 计费：管理员豁免
+                    if !user.is_admin() {
+                        let (p, c) = extract_usage_tokens(&j);
+                        charge_playground_usage(
+                            &state,
+                            &user.id,
+                            &model,
+                            Some(&ch.id),
+                            Some(&ch.name),
+                            p,
+                            c,
+                        );
+                    }
+                    Json(json!({ "success": true, "data": j })).into_response()
+                }
                 Err(e) => error_response(
                     &format!("Upstream returned non-JSON: {e}"),
                     StatusCode::BAD_GATEWAY,
@@ -380,7 +499,7 @@ pub async fn handle_playground_tts(
     headers: HeaderMap,
     Json(body): Json<PlaygroundTtsRequest>,
 ) -> Response {
-    let _user = match verify_user(&state, &headers).await {
+    let user = match verify_user(&state, &headers).await {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -459,14 +578,29 @@ pub async fn handle_playground_tts(
                 .unwrap_or("audio/mpeg")
                 .to_string();
             match resp.bytes().await {
-                Ok(b) => Json(json!({
-                    "success": true,
-                    "data": {
-                        "audio_base64": BASE64.encode(&b),
-                        "content_type": content_type
+                Ok(b) => {
+                    // 计费：管理员豁免；TTS 无 usage 返回，按输入字符数近似估 token
+                    if !user.is_admin() {
+                        let est_tokens = (body.input.chars().count() as u64) / 4;
+                        charge_playground_usage(
+                            &state,
+                            &user.id,
+                            &model,
+                            Some(&ch.id),
+                            Some(&ch.name),
+                            est_tokens,
+                            0,
+                        );
                     }
-                }))
-                .into_response(),
+                    Json(json!({
+                        "success": true,
+                        "data": {
+                            "audio_base64": BASE64.encode(&b),
+                            "content_type": content_type
+                        }
+                    }))
+                    .into_response()
+                }
                 Err(e) => error_response(
                     &format!("Upstream returned no audio: {e}"),
                     StatusCode::BAD_GATEWAY,
@@ -489,7 +623,7 @@ pub async fn handle_playground_transcriptions(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let _user = match verify_user(&state, &headers).await {
+    let user = match verify_user(&state, &headers).await {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -602,7 +736,22 @@ pub async fn handle_playground_transcriptions(
                 .into_response();
             }
             match resp.json::<Value>().await {
-                Ok(j) => Json(json!({ "success": true, "data": j })).into_response(),
+                Ok(j) => {
+                    // 计费：管理员豁免；转写按音频字节数近似估 token
+                    if !user.is_admin() {
+                        let est_tokens = (audio_data.len() as u64) / 1024;
+                        charge_playground_usage(
+                            &state,
+                            &user.id,
+                            &model,
+                            Some(&ch.id),
+                            Some(&ch.name),
+                            est_tokens,
+                            0,
+                        );
+                    }
+                    Json(json!({ "success": true, "data": j })).into_response()
+                }
                 Err(e) => error_response(
                     &format!("Upstream returned non-JSON: {e}"),
                     StatusCode::BAD_GATEWAY,

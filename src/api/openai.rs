@@ -660,8 +660,10 @@ pub struct Reservation {
     /// 订阅池承接的部分（P2 订阅化：优先于用户钱包扣减，结算/释放时
     /// 按 SubscriptionStore 的预留语义同步归还）
     pub reserved_sub: i64,
-    /// 承接本次预留的订阅 ID（reserved_sub > 0 时必有）
-    pub sub_id: Option<String>,
+    /// 各订阅分别承接的 (id, amount)（多订阅时逐个记录，防止
+    /// 跨订阅结算/释放时金额张冠李戴——原先只留最后一个 ID，前面的
+    /// 订阅池预留会被永久吞掉）
+    pub sub_allocs: Vec<(String, i64)>,
 }
 
 /// 预留配额（P1：两段式计费第一步）。
@@ -697,7 +699,7 @@ pub fn reserve_usage(
             reserved_user: 0,
             reserved_key: 0,
             reserved_sub: 0,
-            sub_id: None,
+            sub_allocs: Vec::new(),
         });
     }
 
@@ -705,7 +707,7 @@ pub fn reserve_usage(
     // 池不足的部分回退用户钱包（须订阅允许 overflow），零订阅时全走钱包。
     let mut remaining_cost = estimated_cost;
     let mut reserved_sub: i64 = 0;
-    let mut sub_id: Option<String> = None;
+    let mut sub_allocs: Vec<(String, i64)> = Vec::new();
     if let Some(uid) = &api_key.user_id {
         let now = chrono::Utc::now().timestamp();
         let subs = state.subscription_store.find_active(uid, now);
@@ -722,7 +724,7 @@ pub fn reserve_usage(
             if state.subscription_store.try_reserve(&sub.id, take) {
                 reserved_sub += take;
                 remaining_cost -= take;
-                sub_id = Some(sub.id.clone());
+                sub_allocs.push((sub.id.clone(), take));
                 if remaining_cost <= 0 {
                     break;
                 }
@@ -730,8 +732,8 @@ pub fn reserve_usage(
         }
         // 池不够且订阅禁止钱包兜底 → 回滚已预留部分并拒绝
         if remaining_cost > 0 && !state.subscription_store.wallet_overflow_allowed(uid, now) {
-            if let Some(sid) = &sub_id {
-                state.subscription_store.release(sid, reserved_sub);
+            for (sid, amount) in &sub_allocs {
+                state.subscription_store.release(sid, *amount);
             }
             return Err(error_response(
                 "insufficient_quota",
@@ -746,8 +748,8 @@ pub fn reserve_usage(
         if let Some(uid) = &api_key.user_id {
             if !state.user_store.reserve_quota(uid, remaining_cost) {
                 // 回滚订阅池预留
-                if let Some(sid) = &sub_id {
-                    state.subscription_store.release(sid, reserved_sub);
+                for (sid, amount) in &sub_allocs {
+                    state.subscription_store.release(sid, *amount);
                 }
                 return Err(error_response(
                     "insufficient_quota",
@@ -788,7 +790,7 @@ pub fn reserve_usage(
         reserved_user,
         reserved_key,
         reserved_sub,
-        sub_id,
+        sub_allocs,
     })
 }
 
@@ -833,18 +835,18 @@ pub fn settle_usage(
         crate::metrics::global().record_cost("usd", (actual_cost as u64).saturating_mul(1_000_000));
     }
 
-    // P2 订阅化：结算订阅池预留。
-    // 订阅池优先承接实际消费：cost 先从订阅池扣，剩余部分转给钱包侧
-    // （reserved_user 的 settle 会把 reserved 释放并把差值入账——这里
-    // 传入 actual - reserved_sub 作为钱包侧实际消费，保证总账不重不漏）。
+    // P2 订阅化：结算订阅池预留（多订阅逐个结算）。
+    // 实际消费按各订阅预留占比顺序承接：每个订阅先扣自身预留内的
+    // 部分（sub_take），不足部分溢出到钱包侧。reserved_user 的 settle
+    // 会把 reserved 释放并把差值入账——这里传 wallet_cost 作为钱包侧
+    // 实际消费，保证总账不重不漏。
     let mut wallet_cost = actual_cost;
-    if reservation.reserved_sub > 0 {
-        if let Some(sid) = &reservation.sub_id {
-            let sub_take = actual_cost.min(reservation.reserved_sub);
-            state
-                .subscription_store
-                .settle(sid, reservation.reserved_sub, sub_take);
-            wallet_cost = actual_cost - sub_take;
+    for (sid, reserved) in &reservation.sub_allocs {
+        let sub_take = (*reserved).min(wallet_cost);
+        state.subscription_store.settle(sid, *reserved, sub_take);
+        wallet_cost -= sub_take;
+        if wallet_cost <= 0 {
+            break;
         }
     }
 
@@ -899,10 +901,8 @@ pub fn release_reservation(
         }
     }
     if reservation.reserved_sub > 0 {
-        if let Some(sid) = &reservation.sub_id {
-            state
-                .subscription_store
-                .release(sid, reservation.reserved_sub);
+        for (sid, amount) in &reservation.sub_allocs {
+            state.subscription_store.release(sid, *amount);
         }
     }
     if reservation.reserved_key > 0 {

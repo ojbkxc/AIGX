@@ -8,7 +8,7 @@
 //! 保证「查看 + 复制」随时可用且可审计。
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::Json,
 };
@@ -51,10 +51,13 @@ pub struct UpdateTokenRequest {
     pub status: Option<String>,
 }
 
-/// 构造 API Key JSON 响应（脱敏）
+/// 构造 API Key JSON 响应（脱敏）。按字符切片，非 ASCII key 不会 panic。
 pub fn mask_token(k: &ApiKey) -> Value {
-    let masked_key = if k.key.chars().count() > 8 {
-        format!("{}{}...", &k.key[..4], &k.key[k.key.len() - 4..])
+    let chars: Vec<char> = k.key.chars().collect();
+    let masked_key = if chars.len() > 8 {
+        let head: String = chars[..4].iter().collect();
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{head}{tail}...")
     } else {
         "****".to_string()
     };
@@ -77,10 +80,21 @@ pub fn mask_token(k: &ApiKey) -> Value {
     })
 }
 
+/// 列表查询参数（管理员可用 `all=1` 查看全系统令牌，对齐 new-api 筛选语义）
+#[derive(Debug, Deserialize)]
+pub struct ListTokensQuery {
+    /// 管理员显式请求查看全部令牌（默认所有用户含管理员都只看自己的）
+    #[serde(default)]
+    pub all: Option<String>,
+    /// 按用户邮箱/UUID 筛选（仅管理员生效；普通用户恒为本人）
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
 /// 列出 API Key（双角色，对齐 new-api 权限模型）
 ///
-/// - 管理员：返回所有令牌，列表脱敏（mask）。
-/// - 普通用户：仅返回属于自己（user_id == 本人）的令牌。
+/// - 所有人（含管理员）默认只返回自己的令牌，列表脱敏（mask）。
+/// - 管理员传 `?all=1` 才返回全系统令牌；`?user=xxx` 可按用户筛选。
 /// - 明文密钥不下发：两端都通过 `GET /api/tokens/:id/key` 按需取回，
 ///   避免一次性记忆负担，且每次取回都会写入审计日志。
 /// - `user_email`：按 user_id 从 user_store 带出所属用户邮箱（管理员视角
@@ -89,14 +103,44 @@ pub fn mask_token(k: &ApiKey) -> Value {
 pub async fn handle_list_tokens(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<ListTokensQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let user = verify_user(&state, &headers).await?;
     let is_admin = user.is_admin();
+    // 管理员显式请求查看全部（all=1），否则与普通用户一致只看自己的
+    let view_all = is_admin
+        && q
+            .all
+            .as_deref()
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
+    // 管理员的 user 筛选：邮箱自动解析为 user_id，UUID 原样
+    let admin_user_filter: Option<String> = if is_admin && !view_all {
+        Some(user.id.clone())
+    } else if is_admin {
+        q.user.as_deref().and_then(|u| {
+            if u.contains('@') {
+                state.user_store.get_by_email(u).map(|usr| usr.id)
+            } else {
+                Some(u.to_string())
+            }
+        })
+    } else {
+        None
+    };
     let tokens: Vec<Value> = state
         .api_key_store
         .list()
         .iter()
-        .filter(|k| is_admin || k.user_id.as_deref() == Some(user.id.as_str()))
+        .filter(|k| {
+            if view_all && admin_user_filter.is_none() {
+                return true;
+            }
+            let owner = admin_user_filter
+                .clone()
+                .unwrap_or_else(|| user.id.clone());
+            k.user_id.as_deref() == Some(owner.as_str())
+        })
         .map(|k| {
             let mut v = mask_token(k);
             let email = k
@@ -205,6 +249,16 @@ pub async fn handle_update_token(
             ));
         }
     }
+    // 状态白名单：任意字符串会破坏 validate_request 的 is_enabled 判定语义
+    if let Some(s) = &body.status {
+        let valid = matches!(
+            s.as_str(),
+            "active" | "disabled" | "expired" | "enable" | "enabled" | "disable" | "banned"
+        );
+        if !valid {
+            return Err(error_response("无效的令牌状态", StatusCode::BAD_REQUEST));
+        }
+    }
     match state.api_key_store.update(&id, |k| {
         if let Some(n) = &body.name {
             k.name = n.clone();
@@ -227,7 +281,12 @@ pub async fn handle_update_token(
             k.ip_limit = Some(ip.clone());
         }
         if let Some(s) = &body.status {
-            k.status = s.clone();
+            k.status = match s.as_str() {
+                "active" | "enable" | "enabled" => "active",
+                "disabled" | "disable" | "banned" => "disabled",
+                _ => "expired",
+            }
+            .to_string();
         }
     }) {
         Ok(k) => Ok(Json(json!({ "success": true, "data": mask_token(&k) }))),

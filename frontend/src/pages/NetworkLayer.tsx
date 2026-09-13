@@ -168,11 +168,15 @@ export default function NetworkLayer(): JSX.Element {
     }
   };
 
+  const [addingAccount, setAddingAccount] = useState(false);
+
   const handleAddAccount = async (): Promise<void> => {
     if (!accountForm.name || !accountForm.accountId || !accountForm.apiToken) {
       addToast(t('名称、账号 ID 与 Token 均必填'), 'error');
       return;
     }
+    if (addingAccount) return; // 防双击重复提交
+    setAddingAccount(true);
     try {
       await addNetworkAccount(accountForm.accountId, {
         name: accountForm.name,
@@ -187,6 +191,8 @@ export default function NetworkLayer(): JSX.Element {
       await fetchStatus(true);
     } catch {
       addToast(t('账号添加失败'), 'error');
+    } finally {
+      setAddingAccount(false);
     }
   };
 
@@ -533,9 +539,10 @@ export default function NetworkLayer(): JSX.Element {
                   <div className="md:col-span-3">
                     <button
                       onClick={handleAddAccount}
-                      className="px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition font-medium text-sm"
+                      disabled={addingAccount}
+                      className="px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      {t('确认添加')}
+                      {addingAccount ? t('添加中…') : t('确认添加')}
                     </button>
                   </div>
                 </div>
@@ -567,7 +574,7 @@ export default function NetworkLayer(): JSX.Element {
                           <td className="py-2 pr-4 text-gray-400">{formatTimestamp(a.last_used_at ?? undefined)}</td>
                           <td className="py-2 pr-4">
                             <button
-                              onClick={() => handleRemoveAccount(a.account_id)}
+                              onClick={() => handleRemoveAccount(a.id)}
                               className="text-red-400 hover:text-red-300 text-sm"
                             >
                               {t('删除')}

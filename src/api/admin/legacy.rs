@@ -2054,8 +2054,12 @@ pub async fn handle_stripe_topup(
         return error_response("Stripe is not configured", StatusCode::BAD_REQUEST).into_response();
     }
     let amount = body.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
-    if amount <= 0 {
-        return error_response("amount must be positive", StatusCode::BAD_REQUEST).into_response();
+    // 上限 clamp：amount_cents = amount * 100 有 i64 溢出风险（> 9.2×10^16
+    // 美元即溢出，溢出后金额可能变负引发计费错乱）；正常充值不会到这个量级，
+    // 直接拒绝即可
+    if amount <= 0 || amount > 10_000_000 {
+        return error_response("amount must be positive and reasonable", StatusCode::BAD_REQUEST)
+            .into_response();
     }
     let config = state.config_manager.get().await;
     let callback = callback_address(&state, &config);

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 
 /**
  * 日志保留设置（系统设置 → 运维 tab 子标签）
@@ -20,6 +21,7 @@ export default function LogRetention(): JSX.Element {
   /** 保留天数（空串 = 不限） */
   const [days, setDays] = useState('');
   const [capacity, setCapacity] = useState('');
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -50,24 +52,29 @@ export default function LogRetention(): JSX.Element {
     }
   };
 
-  const cleanupNow = async (): Promise<void> => {
+  const cleanupNow = (): void => {
     if (days.trim() === '') {
       addToast(t('请先设置保留天数'), 'error');
       return;
     }
-    if (!window.confirm(t('将立即删除所有早于保留天数的请求与审计日志，该操作不可撤销。确定继续？'))) {
-      return;
-    }
-    setCleaning(true);
-    try {
-      const res = await api.cleanupLogs();
-      const removed = res?.data?.removed ?? 0;
-      addToast(`${t('已清理')} ${removed} ${t('条日志')}`);
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
-    } finally {
-      setCleaning(false);
-    }
+    setConfirmState({
+      title: t('立即清理'),
+      message: t('将立即删除所有早于保留天数的请求与审计日志，该操作不可撤销。确定继续？'),
+      confirmText: t('清理'),
+      danger: true,
+      onConfirm: async () => {
+        setCleaning(true);
+        try {
+          const res = await api.cleanupLogs();
+          const removed = res?.data?.removed ?? 0;
+          addToast(`${t('已清理')} ${removed} ${t('条日志')}`);
+        } catch (err) {
+          addToast(err instanceof Error ? err.message : String(err), 'error');
+        } finally {
+          setCleaning(false);
+        }
+      },
+    });
   };
 
   if (loading) {
@@ -75,6 +82,7 @@ export default function LogRetention(): JSX.Element {
   }
 
   return (
+    <>
     <div className="card">
       <div className="card-header">
         <h2>{t('日志保留')}</h2>
@@ -114,12 +122,14 @@ export default function LogRetention(): JSX.Element {
             <button type="button" className="btn btn-primary btn-sm" onClick={() => void save()} disabled={saving}>
               {saving ? t('保存中…') : t('保存配置')}
             </button>
-            <button type="button" className="btn btn-outline btn-sm" onClick={() => void cleanupNow()} disabled={cleaning}>
+            <button type="button" className="btn btn-outline btn-sm" onClick={cleanupNow} disabled={cleaning}>
               {cleaning ? t('清理中…') : t('立即清理')}
             </button>
           </div>
         </div>
       </div>
     </div>
+    <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
+    </>
   );
 }

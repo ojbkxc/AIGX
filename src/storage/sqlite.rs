@@ -29,10 +29,11 @@ impl SqliteStore {
 
         let conn = Connection::open(&path)?;
 
-        // 启用 WAL 模式以提升并发性能
-        // P0 性能：key 是 TEXT PRIMARY KEY，SQLite 主键索引只对等值查询自动生效；
-        // list(prefix) 用的是 `key LIKE 'x%'`/范围扫描，需要显式前缀索引才能走索引
-        // 而不是全表扫描。日志/渠道/定价等前缀列表在十万级数据下差异巨大。
+        // 启用 WAL 模式以提升并发性能。
+        // 说明：key 是 TEXT PRIMARY KEY，SQLite 会自动生成主键覆盖索引
+        //（sqlite_autoindex），LIKE 'prefix%' 与 ORDER BY key 本就命中该索引
+        //（EXPLAIN QUERY PLAN 验证为 COVERING INDEX 扫描）。此前额外建的
+        // idx_kv_key 与主键自动索引完全重复，只带来写放大，故删除。
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
@@ -42,8 +43,8 @@ impl SqliteStore {
                  value TEXT NOT NULL,
                  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
              );
-             CREATE INDEX IF NOT EXISTS idx_kv_updated_at ON kv(updated_at);
-             CREATE INDEX IF NOT EXISTS idx_kv_key ON kv(key);",
+             DROP INDEX IF EXISTS idx_kv_key;
+             DROP INDEX IF EXISTS idx_kv_updated_at;",
         )?;
 
         tracing::info!("SQLite database opened: {}", path.display());
@@ -91,6 +92,22 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// 原子插入：key 已存在时不写入，返回 false。
+    ///
+    /// 供"check-then-put"竞态场景（如签到幂等）做真正的 CAS：
+    /// INSERT ... ON CONFLICT DO NOTHING 在 SQLite 内判定存在性，
+    /// 并发双写只有一个成功。
+    pub fn put_if_absent<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<bool> {
+        let content = serde_json::to_string(value)?;
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())
+             ON CONFLICT(key) DO NOTHING",
+            rusqlite::params![key, content],
+        )?;
+        Ok(n > 0)
+    }
+
     /// 判断键是否存在
     pub fn contains(&self, key: &str) -> anyhow::Result<bool> {
         let conn = self.conn.lock();
@@ -124,14 +141,17 @@ impl SqliteStore {
     ///
     /// `reqlog:{ts}:{id}` 的 ts 是固宽时间戳字符串（10 位 unix 秒），
     /// 字典序即时间序，倒序 = 最新优先。日志分页只需最新 page*size 条，
-    /// 不必全表列键。LIKE 前缀命中 idx_kv_key 索引，是索引范围扫描。
+    /// 不必全表列键。LIMIT 已在调用方钳制 ≤ page*100，不会负数化。
     pub fn list_latest_keys(&self, prefix: &str, limit: usize) -> anyhow::Result<Vec<String>> {
         let conn = self.conn.lock();
         let pattern = format!("{prefix}%");
+        // limit 钳到 i64 正区间：usize::MAX as i64 = -1，SQLite 负 LIMIT
+        // 语义为"无限制"，会把快路径优化反转成全表扫描。
+        let limit = (limit as i64).clamp(1, 10_000_000);
         let mut stmt =
             conn.prepare_cached("SELECT key FROM kv WHERE key LIKE ?1 ORDER BY key DESC LIMIT ?2")?;
         let keys: Vec<String> = stmt
-            .query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?
+            .query_map(rusqlite::params![&pattern, limit], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
         Ok(keys)

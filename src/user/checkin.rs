@@ -82,13 +82,13 @@ impl CheckinStore {
     }
 
     /// 执行签到：同日重复签到返回 Err("今日已签到")。
-    /// 成功时写入记录（键含日期 = 天然幂等）并返回奖励配额。
+    ///
+    /// 幂等由 put_if_absent（SQLite ON CONFLICT DO NOTHING）保证：
+    /// 并发双击时只有一个请求写入成功，另一个按"已签到"拒绝——
+    /// 原先 get→判空→put 的 check-then-put 在并发下会双发奖励。
     pub fn checkin(&self, user_id: &str, setting: &CheckinSetting) -> Result<Checkin> {
         let date = today();
         let key = Self::key(user_id, &date);
-        if self.store.get::<Checkin>(&key)?.is_some() {
-            anyhow::bail!("今日已签到");
-        }
         // 随机奖励 [min, max]
         let awarded = if setting.max_quota > setting.min_quota {
             rand::thread_rng().gen_range(setting.min_quota..=setting.max_quota)
@@ -101,9 +101,10 @@ impl CheckinStore {
             quota_awarded: awarded,
             created_at: chrono::Utc::now().timestamp(),
         };
-        // 先写记录再加配额：写失败时不入账；写成功后 add_quota 也有持久化，
-        // 极端场景（写记录成功、入账失败）下次补试也不会重复奖励（键已存在）。
-        self.store.put(&key, &rec)?;
+        // CAS 写入：已存在（含并发先到）时返回 false → 拒绝重复签到
+        if !self.store.put_if_absent(&key, &rec)? {
+            anyhow::bail!("今日已签到");
+        }
         Ok(rec)
     }
 

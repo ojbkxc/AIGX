@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, type FormEvent } from 'react';
+import { useState, useEffect, useMemo, useRef, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Eye, EyeOff, MoreHorizontal, Search, Pencil, Power, PowerOff,
@@ -21,6 +21,7 @@ interface TokenItem {
   user_email?: string;
   group?: string;
   allowed_models?: string[] | string;
+  ip_limit?: string[];
   quota_limit?: number | null;
   used_quota?: number;
   expires_at?: number | null;
@@ -125,6 +126,11 @@ export default function Keys(): JSX.Element {
   // ── 批量选择 / 搜索 / 分页 / 行操作菜单（对齐渠道页） ──
   const [selected, setSelected] = useState<Set<string | number>>(new Set());
   const [search, setSearch] = useState('');
+  // 管理员视角切换：默认所有人（含管理员）只看自己的令牌；
+  // 管理员可显式切换查看全系统（对齐 new-api 筛选语义）
+  const [viewAll, setViewAll] = useState(false);
+  // 防止 load() 依赖 viewAll 造成初始双请求：仅由切换控件显式触发重新拉取
+  const viewAllRef = useRef(false);
   // 客户端分页：搜索过滤变化时回第 1 页
   const [page, setPage] = useState(1);
   // 菜单用 fixed 定位挂在 body 层级：Card/table-wrap 的 overflow 会裁掉
@@ -162,12 +168,12 @@ export default function Keys(): JSX.Element {
     void load();
   }, []);
 
-  const load = async () => {
+  const load = async (all = false) => {
     setLoading(true);
     setError('');
     try {
       const [tokenRes, groupRes] = await Promise.all([
-        api.listTokens(),
+        api.listTokens(all),
         isAdmin() ? api.listGroups().catch(() => null) : Promise.resolve(null),
       ]);
       setTokens(Array.isArray(tokenRes?.data) ? (tokenRes.data as unknown as TokenItem[]) : []);
@@ -177,6 +183,16 @@ export default function Keys(): JSX.Element {
     } finally {
       setLoading(false);
     }
+  };
+
+  // 管理员切换「只看自己的 / 查看全部」：显式触发重新拉取
+  const toggleViewAll = (): void => {
+    const next = !viewAllRef.current;
+    viewAllRef.current = next;
+    setViewAll(next);
+    setSelected(new Set());
+    setPage(1);
+    void load(next);
   };
 
   // 前端过滤（后端令牌接口无 search 参数，全量拉回后本地匹配——名称/分组/密钥前缀）
@@ -225,7 +241,9 @@ export default function Keys(): JSX.Element {
         : (tk.allowed_models || ''),
       expires_at: tsToLocalInput(tk.expires_at),
       quota_limit: tk.quota_limit != null ? String(tk.quota_limit) : '',
-      ip_limit: '',
+      // 编辑时预填现有 IP 白名单（None=不限展示为空），避免保存时把
+      // 未展示的字段清空——后端只要 Some 就覆盖。
+      ip_limit: Array.isArray(tk.ip_limit) ? tk.ip_limit.join(', ') : '',
       status: tk.status || (tk.is_active === false ? 'disabled' : 'active'),
     });
     setGeneratedKey(null);
@@ -247,6 +265,13 @@ export default function Keys(): JSX.Element {
     setSaving(true);
     setError('');
     try {
+      const payload: Record<string, unknown> = {
+        name: form.name.trim(),
+        group: form.group || 'default',
+        status: form.status,
+      };
+      // 模型白名单/IP 白名单：创建必发；编辑仅在用户改动时发——
+      // 后端契约 Some 即覆盖，恒发空数组会把已有白名单清掉。
       const allowedModels = form.allowed_models
         .split(',')
         .map((s) => s.trim())
@@ -255,13 +280,12 @@ export default function Keys(): JSX.Element {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
-      const payload: Record<string, unknown> = {
-        name: form.name.trim(),
-        group: form.group || 'default',
-        allowed_models: allowedModels,
-        ip_limit: ipLimit,
-        status: form.status,
-      };
+      if (!editing || allowedModels.length > 0) {
+        payload.allowed_models = allowedModels;
+      }
+      if (!editing || ipLimit.length > 0) {
+        payload.ip_limit = ipLimit;
+      }
       const expiresTs = localInputToTs(form.expires_at);
       if (expiresTs != null) payload.expires_at = expiresTs;
       const quotaNum = Number(form.quota_limit);
@@ -325,10 +349,20 @@ export default function Keys(): JSX.Element {
       confirmText: t('删除'),
       danger: true,
       onConfirm: async () => {
+        // 逐个删除，失败的计数反馈（原先全吞，部分失败仍报成功）
+        let failed = 0;
         for (const id of ids) {
-          await api.deleteToken(id).catch(() => {});
+          try {
+            await api.deleteToken(id);
+          } catch {
+            failed += 1;
+          }
         }
-        addToast(t('已删除 {{count}} 个令牌', { count: ids.length }));
+        if (failed > 0) {
+          addToast(t('已删除 {{n}} 个，{{m}} 个失败', { n: ids.length - failed, m: failed }), 'error');
+        } else {
+          addToast(t('已删除 {{count}} 个令牌', { count: ids.length }));
+        }
         setSelected(new Set());
         await load();
       },
@@ -549,7 +583,7 @@ export default function Keys(): JSX.Element {
       {error && <div className="error-message">{error}</div>}
 
       <Card
-        title={`${t('所有令牌')} (${tokens.length})`}
+        title={`${viewAll ? t('全部令牌') : t('我的令牌')} (${tokens.length})`}
         actions={
           <div className="keys-toolbar">
             <div className="keys-search">
@@ -560,6 +594,11 @@ export default function Keys(): JSX.Element {
                 onChange={(e) => { setSearch(e.target.value); setPage(1); }}
               />
             </div>
+            {isAdmin() && (
+              <Button variant="outline" size="sm" onClick={toggleViewAll}>
+                {viewAll ? t('只看自己的') : t('查看全部用户')}
+              </Button>
+            )}
             <Button onClick={openCreate}>{t('+ 创建令牌')}</Button>
           </div>
         }

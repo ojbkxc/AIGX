@@ -555,7 +555,8 @@ pub async fn handle_forgot_password(
     tracing::info!("Password reset token generated for {}", user.email);
 
     // 邮件已配置时真正发出重置邮件（new-api/v2board 式自助找回）；
-    // 否则退回 token 直出（便于内网/未配邮件环境使用）。
+    // 未配置时拒绝而非直出 token——原先在响应体里返回重置 token，
+    // 等于对任意已知邮箱开放账号接管（见安全审计 P0-2）。
     let notify_config = state.notify_service.get_config().await;
     if notify_config.smtp_ready() && !notify_config.smtp_from.is_empty() {
         let base = config.server_address.trim_end_matches('/').to_string();
@@ -596,11 +597,16 @@ pub async fn handle_forgot_password(
         }
     }
 
+    // 未配置 SMTP：不返回 token（防任意邮箱账号接管）。提示走管理员线下重置。
+    tracing::warn!(
+        "Forgot password requested for {} but SMTP not configured; no token issued",
+        user.email
+    );
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
             "message": "If the email exists, a reset token has been generated",
-            "token": session.token,
+            "token": null,
             "sent": false,
             "expires_in_secs": PASSWORD_RESET_TTL_HOURS * 3600
         }
@@ -1484,14 +1490,15 @@ pub async fn handle_login_send_code(
         }
     }
 
-    // 未配置 SMTP：直接返回验证码（仅限内网/开发；生产环境必须配置 SMTP）
+    // 未配置 SMTP：拒绝发送而非直出验证码——原先把 6 位验证码放在响应体里，
+    // 等于对任意已注册邮箱开放无密码登录（见安全审计 P0-3）。
     tracing::warn!(
-        "SMTP not configured, returning login code in response for {} (dev only)",
+        "Login code requested for {} but SMTP not configured; no code issued",
         user.email
     );
     Ok(Json(serde_json::json!({
         "success": true,
-        "data": { "sent": false, "code": code, "expires_in_secs": 300 }
+        "data": { "sent": false, "expires_in_secs": 300, "message": "If the email exists, a code has been sent" }
     })))
 }
 

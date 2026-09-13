@@ -196,6 +196,9 @@ impl RequestLogStore {
     const PURGE_BATCH: usize = 10_000;
     /// B13：每隔多少次写入触发一次容量检查
     const PURGE_CHECK_EVERY: u64 = 1000;
+    /// HTTP 层分页单页上限：防止 size=usize::MAX 造成 LIMIT 负数
+    ///（SQLite 负 LIMIT = 无限制 → 全表物化 OOM）或 (page-1)*size 溢出。
+    pub const PAGE_SIZE_MAX: usize = 100;
 
     pub fn new(store: Arc<FileStore>) -> Self {
         Self {
@@ -234,9 +237,14 @@ impl RequestLogStore {
     ///
     /// key 中 created_at 为数字字符串，字典序与数值序不一致
     ///（如 "999" > "1000"），需 parse 后按数值排序再取最旧。
+    ///
+    /// 容量上限优先读运维保留配置（LogRetention 页设置），未配置时
+    /// 回退默认 10 万——原先硬编码 MAX_LOGS，管理员配置的容量被静默忽略。
     fn purge_overflow(&self) -> anyhow::Result<()> {
+        let (_, capacity) = self.retention();
+        let max_logs = capacity.unwrap_or(Self::MAX_LOGS);
         let keys = self.store.list("reqlog:")?;
-        if keys.len() < Self::MAX_LOGS {
+        if keys.len() < max_logs {
             return Ok(());
         }
         let mut timed: Vec<(i64, String)> = keys
@@ -252,7 +260,7 @@ impl RequestLogStore {
             .collect();
         timed.sort_by_key(|(ts, _)| *ts);
         let excess =
-            (timed.len().saturating_sub(Self::MAX_LOGS) + Self::PURGE_BATCH).min(timed.len());
+            (timed.len().saturating_sub(max_logs) + Self::PURGE_BATCH).min(timed.len());
         for (_, k) in timed.into_iter().take(excess) {
             if let Err(e) = self.store.delete(&k) {
                 tracing::warn!("request log purge failed for {k}: {e}");
@@ -395,9 +403,14 @@ impl RequestLogStore {
         // 扫描 + LIMIT），避免全表列键+全量反序列化。10 万条日志时从 O(全表)
         // 降到 O(page*size)。键的时间戳前缀保证字典序=时间序，倒序即最新优先。
         // total 用 COUNT 同样走索引，不再物化全部记录。
-        let page = page.max(1);
-        let size = size.max(1);
-        let has_filter = user_id.is_some() || model.is_some() || channel_id.is_some();
+        let page = page.clamp(1, 10_000);
+        let size = size.clamp(1, Self::PAGE_SIZE_MAX);
+        // start/end 也是筛选：仅传时间范围时不能走快路径（会忽略时间窗）
+        let has_filter = user_id.is_some()
+            || model.is_some()
+            || channel_id.is_some()
+            || start.is_some()
+            || end.is_some();
 
         if !has_filter {
             let total = match self.store.list("reqlog:") {
@@ -432,34 +445,7 @@ impl RequestLogStore {
         let all = self.list_all();
         let filtered: Vec<RequestLog> = all
             .into_iter()
-            .filter(|l| {
-                if let Some(u) = user_id {
-                    if l.user_id.as_deref() != Some(u) {
-                        return false;
-                    }
-                }
-                if let Some(m) = model {
-                    if l.model != m {
-                        return false;
-                    }
-                }
-                if let Some(c) = channel_id {
-                    if l.channel_id.as_deref() != Some(c) {
-                        return false;
-                    }
-                }
-                if let Some(s) = start {
-                    if l.created_at < s {
-                        return false;
-                    }
-                }
-                if let Some(e) = end {
-                    if l.created_at > e {
-                        return false;
-                    }
-                }
-                true
-            })
+            .filter(|l| Self::matches(l, user_id, model, channel_id, start, end))
             .collect();
         let total = filtered.len();
         let start_idx = (page - 1) * size;
@@ -474,60 +460,98 @@ impl RequestLogStore {
 
     /// 导出全部（或按过滤条件）为 JSON 字符串
     pub fn export_json(&self) -> String {
-        let all = self.list_all();
-        serde_json::to_string_pretty(&all).unwrap_or_else(|_| "[]".to_string())
+        self.export_json_filtered(None, None, None, None, None)
     }
 
     /// 导出按 user_id 过滤后的 JSON（普通用户导出自己的记录）
     pub fn export_json_for_user(&self, user_id: &str) -> String {
+        self.export_json_filtered(Some(user_id), None, None, None, None)
+    }
+
+    /// 导出按完整筛选条件过滤后的 JSON（与列表页筛选语义一致）
+    #[allow(clippy::too_many_arguments)]
+    pub fn export_json_filtered(
+        &self,
+        user_id: Option<&str>,
+        model: Option<&str>,
+        channel_id: Option<&str>,
+        start: Option<i64>,
+        end: Option<i64>,
+    ) -> String {
         let all = self.list_all();
         let filtered: Vec<&RequestLog> = all
             .iter()
-            .filter(|l| l.user_id.as_deref() == Some(user_id))
+            .filter(|l| Self::matches(l, user_id, model, channel_id, start, end))
             .collect();
         serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| "[]".to_string())
     }
 
+    /// 单条日志是否匹配筛选条件（列表与导出共用，保证语义一致）
+    #[allow(clippy::too_many_arguments)]
+    fn matches(
+        l: &RequestLog,
+        user_id: Option<&str>,
+        model: Option<&str>,
+        channel_id: Option<&str>,
+        start: Option<i64>,
+        end: Option<i64>,
+    ) -> bool {
+        if let Some(u) = user_id {
+            if l.user_id.as_deref() != Some(u) {
+                return false;
+            }
+        }
+        if let Some(m) = model {
+            if l.model != m {
+                return false;
+            }
+        }
+        if let Some(c) = channel_id {
+            if l.channel_id.as_deref() != Some(c) {
+                return false;
+            }
+        }
+        if let Some(s) = start {
+            if l.created_at < s {
+                return false;
+            }
+        }
+        if let Some(e) = end {
+            if l.created_at > e {
+                return false;
+            }
+        }
+        true
+    }
+
     /// 导出为 CSV 字符串
     pub fn export_csv(&self) -> String {
-        let all = self.list_all();
-        let mut buf = String::from(
-            "id,created_at,user_id,key_id,channel_id,channel_name,model,origin_model,input_tokens,output_tokens,cost,channel_cost,latency_ms,status_code,error_msg,ip\n",
-        );
-        for l in &all {
-            buf.push_str(&format!(
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
-                csv_escape(&l.id),
-                csv_escape(&l.created_at.to_string()),
-                csv_escape(l.user_id.as_deref().unwrap_or("")),
-                csv_escape(l.key_id.as_deref().unwrap_or("")),
-                csv_escape(l.channel_id.as_deref().unwrap_or("")),
-                csv_escape(l.channel_name.as_deref().unwrap_or("")),
-                csv_escape(&l.model),
-                csv_escape(l.origin_model.as_deref().unwrap_or("")),
-                l.input_tokens,
-                l.output_tokens,
-                l.cost,
-                l.channel_cost,
-                l.latency_ms,
-                l.status_code,
-                csv_escape(l.error_msg.as_deref().unwrap_or("")),
-                csv_escape(l.ip.as_deref().unwrap_or("")),
-            ));
-        }
-        buf
+        self.export_csv_filtered(None, None, None, None, None)
     }
 
     /// 导出按 user_id 过滤后的 CSV（普通用户导出自己的记录）
     pub fn export_csv_for_user(&self, user_id: &str) -> String {
+        self.export_csv_filtered(Some(user_id), None, None, None, None)
+    }
+
+    /// 导出按完整筛选条件过滤后的 CSV（与列表页筛选语义一致）
+    #[allow(clippy::too_many_arguments)]
+    pub fn export_csv_filtered(
+        &self,
+        user_id: Option<&str>,
+        model: Option<&str>,
+        channel_id: Option<&str>,
+        start: Option<i64>,
+        end: Option<i64>,
+    ) -> String {
         let all = self.list_all();
         let mut buf = String::from(
             "id,created_at,user_id,key_id,channel_id,channel_name,model,origin_model,input_tokens,output_tokens,cost,channel_cost,latency_ms,status_code,error_msg,ip\n",
         );
-        for l in &all {
-            if l.user_id.as_deref() != Some(user_id) {
-                continue;
-            }
+        for l in all
+            .iter()
+            .filter(|l| Self::matches(l, user_id, model, channel_id, start, end))
+        {
             buf.push_str(&format!(
                 "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 csv_escape(&l.id),
@@ -678,8 +702,8 @@ impl AuditLogStore {
 
     /// 分页查询（P0 性能：键倒序 LIMIT 取前 page*size 条再内存切片，索引范围扫描）
     pub fn list_paged(&self, page: usize, size: usize) -> (Vec<AuditLog>, usize) {
-        let page = page.max(1);
-        let size = size.max(1);
+        let page = page.clamp(1, 10_000);
+        let size = size.clamp(1, RequestLogStore::PAGE_SIZE_MAX);
         let total = self.store.list("auditlog:").map(|k| k.len()).unwrap_or(0);
         let limit = page.saturating_mul(size);
         let keys = self
@@ -890,8 +914,8 @@ impl SecurityEventStore {
             })
             .collect();
         let total = filtered.len();
-        let page = page.max(1);
-        let size = size.max(1);
+        let page = page.clamp(1, 10_000);
+        let size = size.clamp(1, RequestLogStore::PAGE_SIZE_MAX);
         let start_idx = (page - 1) * size;
         let paged = if start_idx >= total {
             Vec::new()

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { Card, Badge, Button, EmptyState, SkeletonTable } from '../components/ui';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import type { Order, EpayConfig } from './types';
 
 /** 易支付配置（仅取展示需要的字段，其余保持后端形状） */
@@ -33,6 +34,7 @@ export default function Orders(): JSX.Element {
   const [statusFilter, setStatusFilter] = useState('');
   const [error, setError] = useState('');
   const [completing, setCompleting] = useState<string | null>(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const { t } = useTranslation();
 
   const load = useCallback(
@@ -82,17 +84,24 @@ export default function Orders(): JSX.Element {
   };
 
   /** 管理端手动补单：线下收款后把 pending 订单标记 paid 并入账（幂等） */
-  const completeOrder = async (tradeNo: string) => {
-    if (!window.confirm(t('确认补单？将立即为该订单用户入账配额。'))) return;
-    setCompleting(tradeNo);
-    try {
-      await api.completeOrder(tradeNo);
-      void load(page, keyword);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setCompleting(null);
-    }
+  const completeOrder = (tradeNo: string) => {
+    setConfirmState({
+      title: t('确认补单'),
+      message: t('将立即为该订单用户入账配额。'),
+      confirmText: t('补单'),
+      danger: true,
+      onConfirm: async () => {
+        setCompleting(tradeNo);
+        try {
+          await api.completeOrder(tradeNo);
+          void load(page, keyword);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+        } finally {
+          setCompleting(null);
+        }
+      },
+    });
   };
 
   // 配额数值格式化（与 Wallet 页保持一致）
@@ -210,7 +219,7 @@ export default function Orders(): JSX.Element {
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => void completeOrder(o.trade_no || o.id || '')}
+                          onClick={() => completeOrder(o.trade_no || o.id || '')}
                           disabled={completing === (o.trade_no || o.id || '')}
                         >
                           {completing === (o.trade_no || o.id || '') ? t('补单中…') : t('补单')}
@@ -237,6 +246,7 @@ export default function Orders(): JSX.Element {
           </div>
         )}
       </Card>
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }
