@@ -14,6 +14,11 @@ use std::path::PathBuf;
 #[cfg(feature = "sqlite-kv")]
 pub mod sqlite;
 
+// PostgreSQL KV 存储模块 — 仅当启用 postgres feature 时编译。
+// 通过 sea-orm 的 sqlx 依赖（sea-orm 已 re-export sqlx）直连 PostgreSQL。
+#[cfg(feature = "postgres")]
+pub mod postgres;
+
 /// 将任意 key 编码为文件名安全的形式：ASCII 字母数字及 `-_.` 保持原样，
 /// 其余字符以 `%XX` 形式转义。可逆，避免 Windows 下 `:`/`/` 等非法字符问题。
 fn encode_key(key: &str) -> String {
@@ -185,9 +190,18 @@ impl JsonFileStore {
 /// - 默认构建（`sqlite-kv`）：基于 SQLite（WAL 模式）的持久化 KV，
 ///   首次打开时自动将旧版 `*.json` 文件数据迁移进 SQLite。
 /// - `--no-default-features`（配合 SeaORM）：降级为 JSON 文件后端。
+/// - 同时启用 `postgres` + `database.url`：FileStore 内部改用 PgStore。
 #[cfg(feature = "sqlite-kv")]
 pub struct FileStore {
-    inner: sqlite::SqliteStore,
+    inner: FileStoreInner,
+}
+
+/// 统一后端枚举：SQLite（默认）或 PostgreSQL（database.url 配置后启用）。
+#[cfg(feature = "sqlite-kv")]
+enum FileStoreInner {
+    Sqlite(sqlite::SqliteStore),
+    #[cfg(feature = "postgres")]
+    Postgres(postgres::PgStore),
 }
 
 #[cfg(feature = "sqlite-kv")]
@@ -198,7 +212,9 @@ impl FileStore {
         let db_path = dir.join("aigx.db");
         let inner = sqlite::SqliteStore::open(db_path)?;
         migrate_legacy_json(&dir, &inner)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: FileStoreInner::Sqlite(inner),
+        })
     }
 
     /// 兼容旧调用：无法失败时 panic。
@@ -206,30 +222,61 @@ impl FileStore {
         Self::open(dir).expect("failed to open SQLite storage")
     }
 
+    /// 以 PostgreSQL 为后端打开 KV 存储（保持同样的同步接口）。
+    ///
+    /// 仅在启用 `postgres` feature 时可用；`database.url` 非空时由 main.rs 调用。
+    #[cfg(feature = "postgres")]
+    pub fn open_postgres(url: &str, max_connections: u32) -> anyhow::Result<Self> {
+        let inner = postgres::PgStore::new(url, max_connections)?;
+        Ok(Self {
+            inner: FileStoreInner::Postgres(inner),
+        })
+    }
+
     /// 读取 JSON 值
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> anyhow::Result<Option<T>> {
-        self.inner.get(key)
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.get(key),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => p.get(key),
+        }
     }
 
     /// 写入 JSON 值
     pub fn put<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<()> {
-        self.inner.put(key, value)
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.put(key, value),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => p.put(key, value),
+        }
     }
 
     /// 删除键
     pub fn delete(&self, key: &str) -> anyhow::Result<()> {
-        self.inner.delete(key)
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.delete(key),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => p.delete(key),
+        }
     }
 
     /// 列出所有键（支持前缀匹配）
     pub fn list(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
-        self.inner.list(prefix)
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.list(prefix),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => p.list(prefix),
+        }
     }
 
     /// P0 性能：按字典序倒序取前 `limit` 个键（前缀过滤，索引范围扫描）。
     /// 供日志分页用——key 的时间戳前缀使字典序等价时间序，只取最新一页即可。
     pub fn list_latest_keys(&self, prefix: &str, limit: usize) -> anyhow::Result<Vec<String>> {
-        self.inner.list_latest_keys(prefix, limit)
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.list_latest_keys(prefix, limit),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => p.list_latest_keys(prefix, limit),
+        }
     }
 
     /// 原子插入（key 已存在返回 false）——check-then-put 竞态的 CAS 原语。
@@ -244,7 +291,11 @@ impl FileStore {
         T: DeserializeOwned + Serialize + Clone + Default,
         F: FnOnce(Option<T>) -> T,
     {
-        self.inner.update(key, f)
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.update(key, f),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => p.update(key, f),
+        }
     }
 }
 
