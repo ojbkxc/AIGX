@@ -171,24 +171,22 @@ pub async fn handle_subscription_balance_pay(
     }
 
     // 扣余额（先扣后建：扣失败无副作用；建订阅失败回滚余额）。
-    // add_quota(-x) 对余额不足返回 Err（update 链路校验 remaining），
-    // 这里直接以剩余额度预检 + add_quota(-x) 双保险。
+    // try_decrease_quota 写锁内校验+扣减原子完成——原「独立读预检 +
+    // add_quota(-x)」两步非原子，并发购买可同时通过预检把余额刷成
+    // 负数（双重消费）。
     if required_quota > 0 {
-        let current = state.user_store.get_by_id(&user.id);
-        let balance = current.map(|u| u.remaining()).unwrap_or(0);
-        if balance < required_quota {
+        if let Err(e) = state.user_store.try_decrease_quota(&user.id, required_quota) {
+            let balance = state
+                .user_store
+                .get_by_id(&user.id)
+                .map(|u| u.remaining())
+                .unwrap_or(0);
+            tracing::warn!("balance pay failed for {}: {e}", user.id);
             return Err(error_response(
                 &format!("余额不足：需要 {required_quota}，当前 {balance}"),
                 StatusCode::BAD_REQUEST,
             ));
         }
-        state
-            .user_store
-            .add_quota(&user.id, -required_quota)
-            .map_err(|e| {
-                tracing::error!("balance pay add_quota failed for {}: {e}", user.id);
-                error_response("余额不足", StatusCode::BAD_REQUEST)
-            })?;
     }
 
     let sub = UserSubscription {

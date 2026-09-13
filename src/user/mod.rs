@@ -392,6 +392,30 @@ impl UserStore {
         Ok(())
     }
 
+    /// 原子扣减余额（余额购买订阅等场景）。
+    ///
+    /// 与 `try_charge` 同构：写锁内校验 remaining 后再改 quota，
+    /// 负余额直接拒绝。取代原先「独立读预检 + add_quota(-x)」的两步
+    /// 非原子做法——预检与扣减之间的窗口内并发请求可双重消费，
+    /// 把余额刷成负数。
+    pub fn try_decrease_quota(&self, id: &str, amount: i64) -> Result<()> {
+        if amount <= 0 {
+            return Ok(());
+        }
+        let mut by_id = self.by_id.write();
+        let user = by_id
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("user not found"))?;
+        if user.remaining() < amount {
+            anyhow::bail!("insufficient quota");
+        }
+        user.quota -= amount;
+        let snapshot = user.clone();
+        drop(by_id);
+        self.persist(&snapshot)?;
+        Ok(())
+    }
+
     /// 扣除已用配额，返回是否成功（余额不足则不扣）
     pub fn try_charge(&self, id: &str, amount: i64) -> bool {
         if amount <= 0 {
