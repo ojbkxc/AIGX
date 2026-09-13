@@ -16,6 +16,7 @@ use serde::Serialize;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 
 use sea_orm::sqlx;
+use sea_orm::sqlx::Row;
 
 /// 存储层命令（后台线程内执行 sqlx 异步查询）
 enum Cmd {
@@ -27,6 +28,11 @@ enum Cmd {
         key: String,
         value: String,
         reply: SyncSender<anyhow::Result<()>>,
+    },
+    PutIfAbsent {
+        key: String,
+        value: String,
+        reply: SyncSender<anyhow::Result<bool>>,
     },
     Delete {
         key: String,
@@ -93,6 +99,19 @@ impl PgStore {
         let content = serde_json::to_string(value)?;
         let (reply, rx) = sync_channel(1);
         self.send(Cmd::Put {
+            key: key.to_string(),
+            value: content,
+            reply,
+        })?;
+        rx.recv()?
+    }
+
+    /// 原子插入：key 已存在时不写入，返回 false（签到幂等等 CAS 场景）。
+    /// INSERT ... ON CONFLICT DO NOTHING 在 PostgreSQL 内判定存在性。
+    pub fn put_if_absent<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<bool> {
+        let content = serde_json::to_string(value)?;
+        let (reply, rx) = sync_channel(1);
+        self.send(Cmd::PutIfAbsent {
             key: key.to_string(),
             value: content,
             reply,
@@ -211,6 +230,20 @@ fn pg_worker(rx: Receiver<Cmd>, url: &str, max_conn: u32) -> anyhow::Result<()> 
                     .await
                     .map(|_| ())
                     .map_err(|e| anyhow::anyhow!("pg put: {e}"));
+                    let _ = reply.send(r);
+                }
+                Cmd::PutIfAbsent { key, value, reply } => {
+                    let r = sqlx::query(
+                        "INSERT INTO kv (key, value, updated_at) VALUES ($1, $2, $3)
+                         ON CONFLICT (key) DO NOTHING",
+                    )
+                    .bind(&key)
+                    .bind(&value)
+                    .bind(now_ts())
+                    .execute(&pool)
+                    .await
+                    .map(|res| res.rows_affected() > 0)
+                    .map_err(|e| anyhow::anyhow!("pg put_if_absent: {e}"));
                     let _ = reply.send(r);
                 }
                 Cmd::Delete { key, reply } => {

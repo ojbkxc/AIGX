@@ -281,7 +281,11 @@ impl FileStore {
 
     /// 原子插入（key 已存在返回 false）——check-then-put 竞态的 CAS 原语。
     pub fn put_if_absent<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<bool> {
-        self.inner.put_if_absent(key, value)
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.put_if_absent(key, value),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => p.put_if_absent(key, value),
+        }
     }
 
     /// 原子更新（读取-修改-写入）。
