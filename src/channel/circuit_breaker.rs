@@ -677,7 +677,12 @@ mod tests {
         assert_eq!(open.state, "open");
         assert_eq!(open.failure_count, 2);
         assert_eq!(open.failure_type, Some("server_error"));
-        assert_eq!(open.cooldown_remaining_secs, 60, "刚失败：剩余冷却≈60s");
+        // 冷却 60s 刚开始，剩余随测试执行耗时有毫秒级流逝（实测 59 或 60）
+        assert!(
+            open.cooldown_remaining_secs > 50 && open.cooldown_remaining_secs <= 60,
+            "刚失败：剩余冷却应≈60s，实测 {}",
+            open.cooldown_remaining_secs
+        );
         assert!(!open.probe_in_flight);
 
         let half = by_id("halfopen-ch");

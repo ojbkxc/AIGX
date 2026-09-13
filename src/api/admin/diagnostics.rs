@@ -258,8 +258,8 @@ fn success_rate_pct(success: u64, total: u64) -> f64 {
 ///
 /// 每组保留最近一条错误消息（截断到 `max_len`）；`error_msg` 为空的
 /// 失败只计数不占消息位（不虚构错误文本）。
-fn top_errors_from<'a>(
-    failures: &[&'a crate::log::RequestLog],
+fn top_errors_from(
+    failures: &[&crate::log::RequestLog],
     limit: usize,
     max_len: usize,
 ) -> Vec<Value> {
