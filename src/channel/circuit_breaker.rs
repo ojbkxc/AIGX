@@ -73,6 +73,13 @@ struct UpstreamState {
     failure_type: Option<FailureType>,
     /// 限流到期时间（被 429 时设置）
     rate_limit_until: Option<Instant>,
+    /// T5：HalfOpen 试探租约到期时间（单飞保护）。
+    ///
+    /// `None` = 无在飞试探；`Some(t)` = 已放行一个试探，t 过期前其余请求
+    /// 拒绝（防并发多请求同时试探冲击上游）。t 过期后允许重新夺取——
+    /// 兜底"租约持有者未被实际调度"场景（候选过滤阶段抢到租约但
+    /// failover 循环未尝试该渠道）。
+    probe_lease_until: Option<Instant>,
 }
 
 impl Default for UpstreamState {
@@ -82,6 +89,7 @@ impl Default for UpstreamState {
             last_failure_time: None,
             failure_type: None,
             rate_limit_until: None,
+            probe_lease_until: None,
         }
     }
 }
@@ -92,6 +100,15 @@ pub(crate) const DEFAULT_RATE_LIMIT_RETRY_SECS: u64 = 60;
 pub(crate) const MAX_RATE_LIMIT_RETRY_SECS: u64 = 3600;
 /// AuthFailed / PaymentRequired 的强制冷却时长（30 分钟）。
 const PERMANENT_FAILURE_COOLDOWN_SECS: u64 = 1800;
+/// T5：HalfOpen 试探租约时长（60s）。
+///
+/// 兜底租约持有者不汇报结果的场景（候选过滤抢到租约但循环未实际尝试该
+/// 渠道、或试探结果丢失）——60s 后自动解锁，渠道不会永久卡死。试探请求
+/// 本身的生命周期：流式有 30s 首事件守卫（`bridge::first_event_or_timeout`），
+/// 渠道测试/prober 有 15s/30s 超时，均远短于 60s，正常试探不会双飞。
+/// （rust-tunnel 的 STALE_PROBE_GRACE 取 300s 对应其无 deadline 的读超时，
+/// AIGX 试探路径均有更短 deadline，取 60s 即可。）
+const PROBE_LEASE_TTL: Duration = Duration::from_secs(60);
 
 /// 渠道断路器 — per-channel 状态机（Closed / Open / HalfOpen）。
 ///
@@ -130,13 +147,56 @@ impl CircuitBreaker {
     /// - 限流未到期 → 拒绝
     /// - 失败计数 < 阈值 → 允许（Closed）
     /// - 失败计数 ≥ 阈值且冷却未过 → 拒绝（Open）
-    /// - 失败计数 ≥ 阈值且冷却已过 → 允许（HalfOpen 试探）
+    /// - 失败计数 ≥ 阈值且冷却已过 → HalfOpen 试探（T5 单飞保护：
+    ///   仅第一个抢到租约的请求放行，其余拒绝；租约 60s 过期后可重新夺取）
     pub fn allow_request(&self, channel_id: &str) -> bool {
         let entry = match self.states.get(channel_id) {
             Some(e) => e,
             None => return true, // 无状态 = 从未失败 = 放行
         };
+        if Self::is_half_open(&entry, self.failure_threshold, self.cooldown_duration) {
+            // HalfOpen：先释放只读锁再抢租约（DashMap 同 key 读写锁嵌套会死锁）
+            drop(entry);
+            return self.acquire_probe_lease(channel_id);
+        }
         Self::state_allows(&entry, self.failure_threshold, self.cooldown_duration)
+    }
+
+    /// 判断渠道是否处于 HalfOpen（失败计数达阈值且冷却已过，待试探）。
+    ///
+    /// 限流窗口内视为 open（非 HalfOpen）；无失败时间（理论不可达，防御）非 HalfOpen。
+    fn is_half_open(
+        entry: &UpstreamState,
+        failure_threshold: u32,
+        cooldown_duration: Duration,
+    ) -> bool {
+        if let Some(rate_limit_until) = entry.rate_limit_until {
+            if rate_limit_until > Instant::now() {
+                return false;
+            }
+        }
+        if entry.failure_count.load(Ordering::Relaxed) < failure_threshold {
+            return false; // Closed
+        }
+        matches!(entry.last_failure_time, Some(last) if last.elapsed() >= cooldown_duration)
+    }
+
+    /// T5：抢 HalfOpen 试探租约（单飞保护）。
+    ///
+    /// 第一个到达的请求抢到租约放行试探，租约期内其余请求拒绝；租约
+    /// 过期（持有者未被实际调度/结果丢失）后允许重新夺取，不永久卡死。
+    fn acquire_probe_lease(&self, channel_id: &str) -> bool {
+        let Some(mut entry) = self.states.get_mut(channel_id) else {
+            return true; // 竞态下条目消失（states 无删除路径，防御放行）
+        };
+        let now = Instant::now();
+        match entry.probe_lease_until {
+            Some(t) if t > now => false, // 已有在飞试探
+            _ => {
+                entry.probe_lease_until = Some(now + PROBE_LEASE_TTL);
+                true // 抢到试探权
+            }
+        }
     }
 
     /// 基于 entry 值判定是否放行（不查 map，避免在 iter 持锁期间嵌套 get 死锁）。
@@ -174,6 +234,7 @@ impl CircuitBreaker {
             entry.last_failure_time = None;
             entry.failure_type = None;
             entry.rate_limit_until = None;
+            entry.probe_lease_until = None; // T5：试探结束，释放单飞租约
         }
     }
 
@@ -186,6 +247,9 @@ impl CircuitBreaker {
         let mut entry = self.states.entry(channel_id.to_string()).or_default();
         entry.failure_type = Some(failure_type.clone());
         entry.last_failure_time = Some(Instant::now());
+        // T5：试探结束（无论成败）清租约——失败回 Open 后旧租约
+        // 不能挡住下一轮 HalfOpen 试探
+        entry.probe_lease_until = None;
 
         match &failure_type {
             FailureType::AuthFailed | FailureType::PaymentRequired => {
@@ -242,6 +306,7 @@ impl CircuitBreaker {
             entry.last_failure_time = Some(Instant::now());
             entry.failure_type = Some(FailureType::ServerError);
             entry.rate_limit_until = None;
+            entry.probe_lease_until = None; // T5：熔断重开，旧租约作废
             tripped.push(entry.key().clone());
         }
         tracing::warn!(
@@ -335,6 +400,7 @@ impl CircuitBreaker {
             entry.last_failure_time = None;
             entry.failure_type = None;
             entry.rate_limit_until = None;
+            entry.probe_lease_until = None; // T5：手动重置，租约一并清除
         }
     }
 
@@ -436,5 +502,48 @@ mod tests {
         assert_eq!(map.get("ch1").map(|s| s.as_str()), Some("open"));
         // 从未失败的渠道不出现在 map
         assert!(!map.contains_key("ch2"));
+    }
+
+    // ── T5：HalfOpen 试探单飞保护 ──────────────────────────────────────
+
+    /// 单飞：第一个请求抢到试探租约，并发其余请求拒绝；试探成功后恢复。
+    #[test]
+    fn half_open_probe_single_flight() {
+        let cb = CircuitBreaker::new(1, 0); // 阈值 1，冷却 0s → 立即 HalfOpen
+        cb.record_failure("ch1", FailureType::ServerError);
+        assert!(cb.allow_request("ch1"), "第一个请求应抢到试探权");
+        assert!(!cb.allow_request("ch1"), "并发试探应被单飞拒绝");
+        // 试探成功 → Closed，租约释放，不再单飞
+        cb.record_success("ch1");
+        assert!(cb.allow_request("ch1"), "成功后渠道恢复");
+        assert!(cb.allow_request("ch1"), "Closed 状态不受租约影响");
+    }
+
+    /// 试探失败：回 Open 并释放租约，冷却后可再次试探。
+    #[test]
+    fn half_open_probe_failure_releases_lease() {
+        let cb = CircuitBreaker::new(1, 0);
+        cb.record_failure("ch1", FailureType::ServerError);
+        assert!(cb.allow_request("ch1"));
+        assert!(!cb.allow_request("ch1"));
+        // 试探失败 → record_failure 清租约（last_failure_time 重置回 Open）
+        cb.record_failure("ch1", FailureType::ServerError);
+        // 冷却 0s → 立即又 HalfOpen，应能再次试探
+        assert!(cb.allow_request("ch1"), "试探失败释放租约后应能再次试探");
+    }
+
+    /// 租约过期回收：持有者未汇报结果（未被实际调度）不会永久卡死渠道。
+    #[test]
+    fn half_open_probe_lease_expires_and_reclaimed() {
+        let cb = CircuitBreaker::new(1, 0);
+        cb.record_failure("ch1", FailureType::ServerError);
+        assert!(cb.allow_request("ch1"), "抢到租约");
+        assert!(!cb.allow_request("ch1"), "租约期内拒绝");
+        // 直接回写租约时间戳为过去，模拟 60s 租约到期（避免测试真实等待）
+        if let Some(mut entry) = cb.states.get_mut("ch1") {
+            entry.probe_lease_until = Some(Instant::now() - Duration::from_secs(1));
+        }
+        assert!(cb.allow_request("ch1"), "租约过期应允许重新夺取试探权");
+        assert!(!cb.allow_request("ch1"), "重新夺取后仍保持单飞");
     }
 }
