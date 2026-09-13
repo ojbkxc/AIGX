@@ -8,7 +8,7 @@ pub mod logs;
 pub mod monitor;
 pub mod network;
 pub mod notify;
-
+pub mod openapi;
 pub mod orders;
 pub mod plans;
 pub mod playground;
@@ -89,6 +89,8 @@ pub use diagnostics::{
     handle_diagnostics_breakers, handle_diagnostics_channels, handle_diagnostics_summary,
 };
 
+// 管理面 OpenAPI 3.1 自描述（零依赖静态构造，覆盖全部管理面真实路由）
+pub use openapi::handle_openapi_v31;
 
 pub use cache::{handle_cache_clear, handle_cache_stats};
 pub use redemptions::{

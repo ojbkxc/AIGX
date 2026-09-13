@@ -1044,7 +1044,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/diagnostics/breakers",
             get(api::admin::handle_diagnostics_breakers),
         )
-
+        // 管理面 API 自描述（OpenAPI 3.1，零依赖静态构造；管理面鉴权）
+        .route("/api/openapi.json", get(api::admin::handle_openapi_v31))
         // 渠道探活
         .route(
             "/api/channels/fetch_models",
