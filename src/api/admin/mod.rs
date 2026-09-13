@@ -3,10 +3,12 @@ pub mod cache;
 pub mod channels;
 pub mod common;
 pub mod dashboard;
+pub mod diagnostics;
 pub mod logs;
 pub mod monitor;
 pub mod network;
 pub mod notify;
+
 pub mod orders;
 pub mod plans;
 pub mod playground;
@@ -81,6 +83,12 @@ pub use notify::{handle_get_notify_config, handle_update_notify_config};
 pub use security::{handle_security_events, handle_security_summary};
 
 pub use monitor::handle_monitor_system;
+
+// 只读诊断端点套件（AI 可运维第①步：summary/channels/breakers 三件套）
+pub use diagnostics::{
+    handle_diagnostics_breakers, handle_diagnostics_channels, handle_diagnostics_summary,
+};
+
 
 pub use cache::{handle_cache_clear, handle_cache_stats};
 pub use redemptions::{

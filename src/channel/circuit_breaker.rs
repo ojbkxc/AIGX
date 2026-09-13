@@ -110,6 +110,43 @@ const PERMANENT_FAILURE_COOLDOWN_SECS: u64 = 1800;
 /// AIGX 试探路径均有更短 deadline，取 60s 即可。）
 const PROBE_LEASE_TTL: Duration = Duration::from_secs(60);
 
+impl FailureType {
+    /// 机器可读的失败类型名（诊断端点快照用，与 `{:?}` Debug 输出解耦）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FailureType::AuthFailed => "auth_failed",
+            FailureType::PaymentRequired => "payment_required",
+            FailureType::RateLimited { .. } => "rate_limited",
+            FailureType::ModelNotFound => "model_not_found",
+            FailureType::ServerError => "server_error",
+            FailureType::Timeout => "timeout",
+            FailureType::ConnectionError => "connection_error",
+            FailureType::EmptyResponse => "empty_response",
+        }
+    }
+}
+
+/// 单个渠道断路器只读快照（`GET /api/diagnostics/breakers` 响应条目）。
+///
+/// 只反映当前状态机事实，不携带也不改变任何控制语义——写操作（reset）
+/// 属管理端点，不在只读诊断范围。
+#[derive(Debug, Clone, Serialize)]
+pub struct BreakerSnapshot {
+    pub channel_id: String,
+    /// `"closed"` / `"open"` / `"halfopen"`
+    pub state: &'static str,
+    /// 连续失败计数（成功时清零）
+    pub failure_count: u32,
+    /// 最近一次失败类型（机器可读名；无失败记录为 None）
+    pub failure_type: Option<&'static str>,
+    /// Open 状态剩余冷却秒数（Closed/HalfOpen 为 0）
+    pub cooldown_remaining_secs: u64,
+    /// 限流窗口剩余秒数（未被限流为 0）
+    pub rate_limit_remaining_secs: u64,
+    /// HalfOpen 试探租约是否在飞（单飞保护期间为 true）
+    pub probe_in_flight: bool,
+}
+
 /// 渠道断路器 — per-channel 状态机（Closed / Open / HalfOpen）。
 ///
 /// 线程安全：内部用 `DashMap` 存储 per-channel 状态，失败计数用 `AtomicU32`。
@@ -333,6 +370,60 @@ impl CircuitBreaker {
         map
     }
 
+    /// 全量只读快照 — 逐渠道返回状态机完整事实（管理面诊断端点用）。
+    ///
+    /// 只遍历 `states` 读取，不写任何字段、不创建条目（从未失败的渠道
+    /// 无状态条目，不出现在结果中——调用方如需"未见=Closed"的完整清单，
+    /// 自行与 ChannelStore 渠道表对齐）。三态计算复用 `state_of`，
+    /// 剩余时长基于 `Instant` 差值推导，与 `get_status_human` 同口径。
+    pub fn snapshot_all(&self) -> Vec<BreakerSnapshot> {
+        let now = Instant::now();
+        let mut out: Vec<BreakerSnapshot> = self
+            .states
+            .iter()
+            .map(|r| {
+                let entry = r.value();
+                let state = Self::state_of(entry, self.failure_threshold, self.cooldown_duration);
+                BreakerSnapshot {
+                    channel_id: r.key().clone(),
+                    state,
+                    failure_count: entry.failure_count.load(Ordering::Relaxed),
+                    failure_type: entry.failure_type.as_ref().map(|f| f.as_str()),
+                    cooldown_remaining_secs: Self::open_cooldown_remaining(
+                        entry,
+                        state,
+                        self.cooldown_duration,
+                    ),
+                    rate_limit_remaining_secs: Self::rate_limit_remaining(entry, now),
+                    probe_in_flight: entry.probe_lease_until.is_some_and(|t| t > now),
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+        out
+    }
+
+    /// Open 状态剩余冷却秒数（其余状态为 0）。
+    fn open_cooldown_remaining(entry: &UpstreamState, state: &str, cooldown: Duration) -> u64 {
+        if state != "open" {
+            return 0;
+        }
+        entry
+            .last_failure_time
+            .and_then(|last| cooldown.checked_sub(last.elapsed()))
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// 限流窗口剩余秒数（无记录或已过期为 0）。
+    fn rate_limit_remaining(entry: &UpstreamState, now: Instant) -> u64 {
+        entry
+            .rate_limit_until
+            .and_then(|until| until.checked_duration_since(now))
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
     /// 查询单个渠道的断路器状态（机器可读枚举值）。
     ///
     /// 返回 `"open"` / `"halfopen"` / `"closed"`。
@@ -545,5 +636,104 @@ mod tests {
         }
         assert!(cb.allow_request("ch1"), "租约过期应允许重新夺取试探权");
         assert!(!cb.allow_request("ch1"), "重新夺取后仍保持单飞");
+    }
+
+    // ── 只读快照 snapshot_all（诊断端点） ─────────────────────────────
+
+    /// 三态 + 租约态映射：closed / open / halfopen / probe_in_flight。
+    #[test]
+    fn snapshot_all_maps_states_and_lease() {
+        let cb = CircuitBreaker::new(2, 60);
+        // closed-ch：1 次失败 < 阈值 2 → closed
+        cb.record_failure("closed-ch", FailureType::Timeout);
+        // open-ch：2 次失败 → open（冷却 60s 内）
+        cb.record_failure("open-ch", FailureType::ServerError);
+        cb.record_failure("open-ch", FailureType::ServerError);
+        // halfopen-ch：2 次失败后把最近失败时间回写为 61s 前 → 冷却已过
+        cb.record_failure("halfopen-ch", FailureType::ServerError);
+        cb.record_failure("halfopen-ch", FailureType::ServerError);
+        if let Some(mut entry) = cb.states.get_mut("halfopen-ch") {
+            entry.last_failure_time = Some(Instant::now() - Duration::from_secs(61));
+        }
+
+        let snaps = cb.snapshot_all();
+        assert_eq!(snaps.len(), 3, "从未失败的渠道无条目，其余三条都在");
+
+        let by_id = |id: &str| {
+            snaps
+                .iter()
+                .find(|s| s.channel_id == id)
+                .unwrap_or_else(|| panic!("missing snapshot for {id}"))
+        };
+
+        let closed = by_id("closed-ch");
+        assert_eq!(closed.state, "closed");
+        assert_eq!(closed.failure_count, 1);
+        assert_eq!(closed.failure_type, Some("timeout"));
+        assert_eq!(closed.cooldown_remaining_secs, 0);
+        assert!(!closed.probe_in_flight);
+
+        let open = by_id("open-ch");
+        assert_eq!(open.state, "open");
+        assert_eq!(open.failure_count, 2);
+        assert_eq!(open.failure_type, Some("server_error"));
+        assert_eq!(open.cooldown_remaining_secs, 60, "刚失败：剩余冷却≈60s");
+        assert!(!open.probe_in_flight);
+
+        let half = by_id("halfopen-ch");
+        assert_eq!(half.state, "halfopen");
+        assert_eq!(half.cooldown_remaining_secs, 0, "冷却已过：无剩余冷却");
+
+        // 租约态：halfopen 渠道抢到试探租约 → probe_in_flight = true
+        assert!(cb.allow_request("halfopen-ch"), "halfopen 抢到试探权");
+        let leased = cb
+            .snapshot_all()
+            .into_iter()
+            .find(|s| s.channel_id == "halfopen-ch")
+            .unwrap();
+        assert!(leased.probe_in_flight, "在飞租约应在快照可见");
+    }
+
+    /// 限流窗口剩余秒数：RateLimited 记录 retry_after 后可见，过期归零。
+    #[test]
+    fn snapshot_all_reports_rate_limit_remaining() {
+        let cb = CircuitBreaker::new(5, 30);
+        cb.record_failure(
+            "rl-ch",
+            FailureType::RateLimited {
+                scope: RateLimitScope::Account,
+                retry_after: Some(120),
+            },
+        );
+        let snap = cb.snapshot_all().into_iter().next().unwrap();
+        assert_eq!(snap.failure_type, Some("rate_limited"));
+        assert!(
+            snap.rate_limit_remaining_secs > 0 && snap.rate_limit_remaining_secs <= 120,
+            "限流剩余应在 (0, 120] 内，实测 {}",
+            snap.rate_limit_remaining_secs
+        );
+        // AuthFailed：30 分钟强制冷却 → 限流窗口=冷却窗口
+        cb.record_failure("auth-ch", FailureType::AuthFailed);
+        let snap = cb
+            .snapshot_all()
+            .into_iter()
+            .find(|s| s.channel_id == "auth-ch")
+            .unwrap();
+        assert_eq!(snap.failure_type, Some("auth_failed"));
+        assert!(snap.rate_limit_remaining_secs > 0, "认证故障强制 30 分钟冷却");
+    }
+
+    /// 快照只读：连续两次调用结果一致，不改变任何状态机行为。
+    #[test]
+    fn snapshot_all_is_read_only() {
+        let cb = CircuitBreaker::new(1, 30);
+        cb.record_failure("ch1", FailureType::ServerError);
+        let before = cb.allow_request("ch1");
+        let s1 = cb.snapshot_all();
+        let s2 = cb.snapshot_all();
+        assert_eq!(s1.len(), s2.len());
+        assert_eq!(s1[0].state, s2[0].state);
+        assert_eq!(s1[0].failure_count, s2[0].failure_count);
+        assert_eq!(before, cb.allow_request("ch1"), "快照不应影响放行判定");
     }
 }

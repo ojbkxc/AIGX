@@ -1031,6 +1031,20 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/monitor/system",
             get(api::admin::handle_monitor_system),
         )
+        // 只读诊断端点套件（AI 可运维第①步：全部只读，管理面鉴权）
+        .route(
+            "/api/diagnostics/summary",
+            get(api::admin::handle_diagnostics_summary),
+        )
+        .route(
+            "/api/diagnostics/channels",
+            get(api::admin::handle_diagnostics_channels),
+        )
+        .route(
+            "/api/diagnostics/breakers",
+            get(api::admin::handle_diagnostics_breakers),
+        )
+
         // 渠道探活
         .route(
             "/api/channels/fetch_models",
