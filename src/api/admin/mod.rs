@@ -5,6 +5,7 @@ pub mod common;
 pub mod dashboard;
 pub mod diagnostics;
 pub mod logs;
+pub mod mcp;
 pub mod monitor;
 pub mod network;
 pub mod notify;
@@ -88,6 +89,9 @@ pub use monitor::handle_monitor_system;
 pub use diagnostics::{
     handle_diagnostics_breakers, handle_diagnostics_channels, handle_diagnostics_summary,
 };
+
+// 内嵌 MCP server（AI 可运维第②步：Streamable HTTP JSON-RPC 端点 + 11 工具白名单）
+pub use mcp::handle_mcp;
 
 // 管理面 OpenAPI 3.1 自描述（零依赖静态构造，覆盖全部管理面真实路由）
 pub use openapi::handle_openapi_v31;

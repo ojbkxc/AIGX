@@ -53,6 +53,7 @@ pub fn build_openapi_document() -> Value {
         paths_accounts_network(),
         paths_docs(),
         paths_diagnostics(),
+        paths_mcp(),
     ] {
         if let Value::Object(m) = part {
             for (k, v) in m {
@@ -655,6 +656,18 @@ fn paths_diagnostics() -> Value {
     })
 }
 
+fn paths_mcp() -> Value {
+    json!({
+        "/api/mcp": {
+            "post": op_body(
+                "MCP",
+                "MCP server（Streamable HTTP，JSON-RPC 2.0：initialize/tools/list/tools/call）",
+                "JSON-RPC 2.0 envelope（jsonrpc/id/method/params）；需 Bearer 管理会话鉴权，响应为 application/json 单响应"
+            )
+        }
+    })
+}
+
 // ── 测试 ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -740,6 +753,7 @@ mod tests {
         add("/api/logs/requests/clear", &["delete"]);
         add("/api/logs/requests/export", &["get"]);
         add("/api/logs/retention", &["get", "put"]);
+        add("/api/mcp", &["post"]);
         add("/api/models/available", &["get"]);
         add("/api/models/meta", &["get"]);
         add("/api/models/meta/{model}", &["delete", "put"]);
@@ -896,15 +910,15 @@ mod tests {
         );
     }
 
-    /// 数量锚点：管理面真实路径共 142 个（141 + openapi.json 自身）。
+    /// 数量锚点：管理面真实路径共 143 个（142 + openapi.json 自身）。
     /// 真实路由增删会先在 covers_all_real_admin_routes 红，此断言辅助定位。
     #[test]
     fn path_count_anchor() {
         let doc = build_openapi_document();
         let n = doc["paths"].as_object().unwrap().len();
         assert_eq!(
-            n, 142,
-            "管理面路径数应为 142（141 真实注册 + openapi.json），实际 {n}"
+            n, 143,
+            "管理面路径数应为 143（142 真实注册 + openapi.json），实际 {n}"
         );
     }
 }

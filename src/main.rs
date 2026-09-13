@@ -1044,6 +1044,9 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/diagnostics/breakers",
             get(api::admin::handle_diagnostics_breakers),
         )
+        // 内嵌 MCP server（AI 可运维第②步：Streamable HTTP，JSON-RPC 2.0 单响应；
+        // initialize/tools/list/tools/call 三方法 + 11 工具白名单，管理面鉴权）
+        .route("/api/mcp", post(api::admin::handle_mcp))
         // 管理面 API 自描述（OpenAPI 3.1，零依赖静态构造；管理面鉴权）
         .route("/api/openapi.json", get(api::admin::handle_openapi_v31))
         // 渠道探活
