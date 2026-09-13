@@ -25,6 +25,20 @@ pub enum AgentRole {
     Operator,
 }
 
+impl AgentRole {
+    /// 该角色是否允许执行写工具。
+    pub fn allows_write(&self) -> bool {
+        matches!(self, AgentRole::Operator)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentRole::Observer => "observer",
+            AgentRole::Operator => "operator",
+        }
+    }
+}
+
 /// 会话元信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSession {

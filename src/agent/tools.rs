@@ -540,20 +540,45 @@ fn require_channel_id(args: &Value) -> Result<String, (i64, String)> {
         })
 }
 
-/// 成本/用量聚合报表（只读，阶段一先做简单聚合）。
+/// 成本/用量聚合报表（只读，阶段三：pricing × 请求日志联表）。
 ///
-/// 从 usage_tracker 的当日聚合取按模型的用量与成本。若 usage_tracker
-/// 未提供聚合接口，则降级返回空报表（不报错）。
+/// 从 `log_store.list_all()` 取全部请求日志，按模型聚合：
+/// - requests：请求数
+/// - input_tokens / output_tokens：token 用量
+/// - cost：向用户收的销售价（配额单位）
+/// - channel_cost：渠道成本（未配成本价时 = cost）
+/// - profit：利润 = cost - channel_cost（仅当 channel_cost ≠ cost 时有意义）
 async fn cost_report(state: &AppState) -> HandlerResult {
-    // 阶段一：复用诊断 summary 的口径（渠道统计 + 今日用量），
-    // 成本精细聚合留阶段三（需 pricing × usage 联表）。
-    let summary = admin::handle_diagnostics_summary(State(state.clone()), HeaderMap::new()).await;
-    match summary {
-        Ok(Json(v)) => Ok(Json(
-            json!({ "success": true, "data": v, "note": "成本精细聚合见阶段三" }),
-        )),
-        Err(e) => Err(e),
+    let logs = state.log_store.list_all();
+    let mut agg: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+    for log in logs {
+        let e = agg.entry(log.model.clone()).or_insert_with(|| {
+            json!({
+                "model": log.model.clone(),
+                "requests": 0u64,
+                "input_tokens": 0u64,
+                "output_tokens": 0u64,
+                "cost": 0i64,
+                "channel_cost": 0i64,
+                "profit": 0i64,
+            })
+        });
+        e["requests"] = json!(e["requests"].as_u64().unwrap_or(0) + 1);
+        e["input_tokens"] = json!(e["input_tokens"].as_u64().unwrap_or(0) + log.input_tokens);
+        e["output_tokens"] = json!(e["output_tokens"].as_u64().unwrap_or(0) + log.output_tokens);
+        e["cost"] = json!(e["cost"].as_i64().unwrap_or(0) + log.cost);
+        e["channel_cost"] = json!(e["channel_cost"].as_i64().unwrap_or(0) + log.channel_cost);
+        e["profit"] = json!(e["profit"].as_i64().unwrap_or(0) + (log.cost - log.channel_cost));
     }
+    let mut rows: Vec<serde_json::Value> = agg.into_values().collect();
+    rows.sort_by(|a, b| {
+        b["cost"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&a["cost"].as_i64().unwrap_or(0))
+    });
+    Ok(Json(json!({ "success": true, "data": rows })))
 }
 
 /// 把工具集序列化为 OpenAI function-calling 的 `tools` 数组。

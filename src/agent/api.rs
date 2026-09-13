@@ -171,6 +171,19 @@ pub async fn handle_chat(
     let _ = verify_admin(&state, &headers).await?;
     let agent = agent_state(&state)?;
 
+    // 会话角色（观察员/运维员），决定写工具是否放行
+    let session_role = agent
+        .session_store
+        .get(&id)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?
+        .map(|s| s.role)
+        .unwrap_or_default();
+
     // 读会话历史消息，组装 LLM 对话上下文
     let history = agent.session_store.messages(&id).map_err(|e| {
         (
@@ -196,6 +209,11 @@ pub async fn handle_chat(
             reasoning: None,
         });
     }
+    // 上下文压缩：超出 max_history 时只保留最近 N 条（防长会话撑爆上下文窗口）
+    let max_history = agent.config.max_history.max(1);
+    if convo.len() > max_history {
+        convo = convo.split_off(convo.len() - max_history);
+    }
     // 追加本轮用户输入
     convo.push(crate::agent::llm::user_message(body.message.clone()));
 
@@ -217,22 +235,59 @@ pub async fn handle_chat(
     let approvals2 = agent.approvals.clone();
     let session_id = id.clone();
 
-    // 后台跑 runner，事件经 mpsc 转发为 SSE 流
+    // 后台跑 runner，事件经 mpsc 转发为 SSE 流；同时累积工具轨迹做决策回放。
     let (tx, rx) = mpsc::channel::<String>(64);
+    let trace: std::sync::Arc<tokio::sync::Mutex<Vec<Value>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let trace2 = trace.clone();
     let sink: runner::EventSink = std::sync::Arc::new(move |ev| {
         let tx = tx.clone();
         let agent = agent2.clone();
         let sid = session_id.clone();
+        let trace = trace2.clone();
         Box::pin(async move {
+            // 累积工具调用/结果/审批事件，Final 时一并落库（决策回放）
+            match &ev {
+                AgentEvent::ToolCall { name, arguments } => {
+                    trace
+                        .lock()
+                        .await
+                        .push(json!({ "type": "tool_call", "name": name, "arguments": arguments }));
+                }
+                AgentEvent::ToolResult { name, ok, text } => {
+                    trace.lock().await.push(
+                        json!({ "type": "tool_result", "name": name, "ok": ok, "text": text }),
+                    );
+                }
+                AgentEvent::ApprovalRequest {
+                    request_id,
+                    name,
+                    arguments,
+                } => {
+                    trace.lock().await.push(json!({ "type": "approval_request", "request_id": request_id, "name": name, "arguments": arguments }));
+                }
+                AgentEvent::ApprovalResolved { name, approved } => {
+                    trace.lock().await.push(
+                        json!({ "type": "approval_resolved", "name": name, "approved": approved }),
+                    );
+                }
+                _ => {}
+            }
             let json = serde_json::to_string(&ev).unwrap_or_else(|_| "{}".to_string());
             let _ = tx.send(format!("data: {json}\n\n")).await;
             if let AgentEvent::Final { content } = &ev {
+                let tool_trace = trace.lock().await;
+                let tool_calls = if tool_trace.is_empty() {
+                    None
+                } else {
+                    Some(Value::Array(tool_trace.clone()))
+                };
                 let _ = agent.session_store.append_message(
                     &sid,
                     &crate::agent::session::AgentMessage {
                         role: "assistant".to_string(),
                         content: content.clone(),
-                        tool_calls: None,
+                        tool_calls,
                         tool_result: None,
                     },
                 );
@@ -241,7 +296,17 @@ pub async fn handle_chat(
     });
     let sink2 = sink.clone();
     tokio::spawn(async move {
-        runner::run(&state2, &headers2, &config, convo, &approvals2, &id, &sink2).await;
+        runner::run(
+            &state2,
+            &headers2,
+            &config,
+            convo,
+            &approvals2,
+            &id,
+            session_role,
+            &sink2,
+        )
+        .await;
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx)

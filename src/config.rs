@@ -142,6 +142,9 @@ pub struct AgentConfig {
     /// 高危工具审批超时（秒），超时未响应视为拒绝。
     #[serde(default = "default_approval_timeout")]
     pub approval_timeout_secs: u64,
+    /// 对话历史最大保留条数（上下文压缩：超出时只保留最近 N 条）。
+    #[serde(default = "default_max_history")]
+    pub max_history: usize,
 }
 
 fn default_max_turns() -> usize {
@@ -152,6 +155,10 @@ fn default_approval_timeout() -> u64 {
     300
 }
 
+fn default_max_history() -> usize {
+    20
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -160,6 +167,7 @@ impl Default for AgentConfig {
             channel: String::new(),
             max_turns: default_max_turns(),
             approval_timeout_secs: default_approval_timeout(),
+            max_history: default_max_history(),
         }
     }
 }

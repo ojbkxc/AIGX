@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::agent::approval::{AgentApprovals, ApprovalResult, APPROVAL_TIMEOUT};
 use crate::agent::llm;
+use crate::agent::session::AgentRole;
 use crate::agent::tools::{self, RiskLevel};
 use crate::api::openai::AppState;
 use crate::bridge::ChatMessage;
@@ -60,6 +61,7 @@ pub type EventSink =
 /// 运行 Agent 多轮循环（回调式，边跑边推事件）。
 ///
 /// `messages`：用户输入作为最后一条消息；函数会在最前插入系统提示词。
+/// `role`：会话角色——观察员只能执行只读工具，写工具一律拒绝。
 pub async fn run(
     state: &AppState,
     headers: &HeaderMap,
@@ -67,6 +69,7 @@ pub async fn run(
     messages: Vec<ChatMessage>,
     approvals: &AgentApprovals,
     session_id: &str,
+    role: AgentRole,
     on_event: &EventSink,
 ) {
     let mut convo: Vec<ChatMessage> = Vec::new();
@@ -125,6 +128,16 @@ pub async fn run(
                         text: format!("Unknown tool: {}", call.function_name),
                         ok: false,
                     },
+                    // 观察员：只读工具放行，写工具（低危/高危）一律拒绝
+                    Some(ref s) if !role.allows_write() && s.risk != RiskLevel::ReadOnly => {
+                        tools::ToolOutcome {
+                            text: format!(
+                                "当前会话角色为观察员，禁止执行写工具 {}（需切运维员角色）",
+                                call.function_name
+                            ),
+                            ok: false,
+                        }
+                    }
                     Some(s) if s.risk == RiskLevel::HighRisk => {
                         // 审批矩阵：挂起等人工确认；RememberAllow 记入本会话免审集
                         let already = approvals.is_remembered(session_id, &call.function_name);
