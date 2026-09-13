@@ -213,9 +213,6 @@ pub async fn exec_tool(
     name: &str,
     args: &Value,
 ) -> Result<ToolOutcome, (i64, String)> {
-    // 参数提取辅助
-    let str_arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
-
     let result: HandlerResult = match name {
         "aigx_diagnostics_summary" => {
             admin::handle_diagnostics_summary(State(state.clone()), headers.clone()).await

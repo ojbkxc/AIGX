@@ -16,18 +16,13 @@ const SESSION_PREFIX: &str = "agent_session:";
 const MSG_PREFIX: &str = "agent_msg:";
 
 /// 会话角色（对齐审批矩阵语义）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AgentRole {
     /// 观察员：只读工具，不能写。
+    #[default]
     Observer,
     /// 运维员：可写（低危自动 + 高危审批）。
     Operator,
-}
-
-impl Default for AgentRole {
-    fn default() -> Self {
-        Self::Observer
-    }
 }
 
 /// 会话元信息。
@@ -106,7 +101,7 @@ impl AgentSessionStore {
                 out.push(s);
             }
         }
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|a| std::cmp::Reverse(a.created_at));
         Ok(out)
     }
 
