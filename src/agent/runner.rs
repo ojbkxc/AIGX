@@ -62,6 +62,7 @@ pub type EventSink =
 ///
 /// `messages`：用户输入作为最后一条消息；函数会在最前插入系统提示词。
 /// `role`：会话角色——观察员只能执行只读工具，写工具一律拒绝。
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     state: &AppState,
     headers: &HeaderMap,
