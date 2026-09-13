@@ -178,6 +178,138 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             schema: channel_id_args(),
             risk: RiskLevel::LowRisk,
         },
+        // ── 低危写×2（新增：加渠道/加密钥，均可删）──
+        ToolSpec {
+            name: "aigx_channel_add",
+            description: "写操作（可回滚）：新增渠道（name/base_url/api_key/type）",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "渠道名" },
+                    "base_url": { "type": "string", "description": "上游 base URL" },
+                    "api_key": { "type": "string", "description": "上游 API key" },
+                    "channel_type": { "type": "string", "description": "openai_compatible/anthropic/gemini/zai/cloudflare" }
+                },
+                "required": ["name", "base_url", "api_key"]
+            }),
+            risk: RiskLevel::LowRisk,
+        },
+        ToolSpec {
+            name: "aigx_key_add",
+            description: "写操作（可回滚）：新增 API 密钥",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "密钥名" },
+                    "user_id": { "type": "string", "description": "归属用户 ID（可空）" },
+                    "group": { "type": "string", "description": "分组（可空）" }
+                },
+                "required": ["name"]
+            }),
+            risk: RiskLevel::LowRisk,
+        },
+        // ── 高危写×9（审批矩阵，人工确认）──
+        ToolSpec {
+            name: "aigx_user_delete",
+            description: "高危写：删除用户（不可逆，需审批）",
+            schema: json!({
+                "type": "object",
+                "properties": { "user_id": { "type": "string", "description": "用户 ID" } },
+                "required": ["user_id"]
+            }),
+            risk: RiskLevel::HighRisk,
+        },
+        ToolSpec {
+            name: "aigx_user_manage",
+            description: "高危写：启用/禁用用户（需审批）",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "user_id": { "type": "string", "description": "用户 ID" },
+                    "action": { "type": "string", "enum": ["enable", "disable"], "description": "enable/disable" }
+                },
+                "required": ["user_id", "action"]
+            }),
+            risk: RiskLevel::HighRisk,
+        },
+        ToolSpec {
+            name: "aigx_channel_delete",
+            description: "高危写：删除渠道（不可逆，需审批）",
+            schema: json!({
+                "type": "object",
+                "properties": { "channel_id": { "type": "string", "description": "渠道 ID" } },
+                "required": ["channel_id"]
+            }),
+            risk: RiskLevel::HighRisk,
+        },
+        ToolSpec {
+            name: "aigx_order_delete",
+            description: "高危写：删除订单（不可逆，需审批）",
+            schema: json!({
+                "type": "object",
+                "properties": { "trade_no": { "type": "string", "description": "订单号" } },
+                "required": ["trade_no"]
+            }),
+            risk: RiskLevel::HighRisk,
+        },
+        ToolSpec {
+            name: "aigx_pricing_upsert",
+            description: "高危写：新增/更新模型定价（需审批）",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "model_name": { "type": "string" },
+                    "input_price": { "type": "number" },
+                    "output_price": { "type": "number" },
+                    "price_type": { "type": "string", "description": "token/image 等" }
+                },
+                "required": ["model_name", "input_price", "output_price", "price_type"]
+            }),
+            risk: RiskLevel::HighRisk,
+        },
+        ToolSpec {
+            name: "aigx_pricing_delete",
+            description: "高危写：删除模型定价（需审批）",
+            schema: json!({
+                "type": "object",
+                "properties": { "model_name": { "type": "string" } },
+                "required": ["model_name"]
+            }),
+            risk: RiskLevel::HighRisk,
+        },
+        ToolSpec {
+            name: "aigx_logs_cleanup",
+            description: "高危写：清理日志（需审批）",
+            schema: json!({
+                "type": "object",
+                "properties": { "days": { "type": "integer", "description": "保留天数" } },
+                "required": []
+            }),
+            risk: RiskLevel::HighRisk,
+        },
+        ToolSpec {
+            name: "aigx_key_delete",
+            description: "高危写：删除 API 密钥（不可逆，需审批）",
+            schema: json!({
+                "type": "object",
+                "properties": { "key_id": { "type": "string", "description": "密钥 ID" } },
+                "required": ["key_id"]
+            }),
+            risk: RiskLevel::HighRisk,
+        },
+        ToolSpec {
+            name: "aigx_group_upsert",
+            description: "高危写：新增/更新用户分组（需审批）",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "ratio": { "type": "number" }
+                },
+                "required": ["name", "ratio"]
+            }),
+            risk: RiskLevel::HighRisk,
+        },
     ]
 }
 
@@ -284,6 +416,81 @@ pub async fn exec_tool(
             admin::handle_reset_channel_circuit(State(state.clone()), headers.clone(), Path(id))
                 .await
         }
+        // ── 低危写（新增）──
+        "aigx_channel_add" => {
+            let body = json!({
+                "name": str_arg(args, "name").unwrap_or_default(),
+                "base_url": str_arg(args, "base_url").unwrap_or_default(),
+                "api_key": str_arg(args, "api_key").unwrap_or_default(),
+                "channel_type": str_arg(args, "channel_type").unwrap_or_else(|| "openai_compatible".to_string()),
+            });
+            admin::handle_add_channel(State(state.clone()), headers.clone(), Json(body)).await
+        }
+        "aigx_key_add" => {
+            let body = json!({
+                "name": str_arg(args, "name").unwrap_or_default(),
+                "user_id": str_arg(args, "user_id"),
+                "group": str_arg(args, "group"),
+            });
+            admin::handle_add_key(State(state.clone()), headers.clone(), Json(body)).await
+        }
+        // ── 高危写（runner 层经审批矩阵后调用）──
+        "aigx_user_delete" => {
+            let id = require_arg(args, "user_id")?;
+            admin::handle_delete_user(State(state.clone()), headers.clone(), Path(id)).await
+        }
+        "aigx_user_manage" => {
+            let body = json!({
+                "id": require_arg(args, "user_id")?,
+                "action": require_arg(args, "action")?,
+            });
+            admin::handle_manage_user(State(state.clone()), headers.clone(), Json(body)).await
+        }
+        "aigx_channel_delete" => {
+            let id = require_arg(args, "channel_id")?;
+            admin::handle_delete_channel(State(state.clone()), headers.clone(), Path(id)).await
+        }
+        "aigx_order_delete" => {
+            let trade_no = require_arg(args, "trade_no")?;
+            admin::handle_delete_order(State(state.clone()), headers.clone(), Path(trade_no)).await
+        }
+        "aigx_pricing_upsert" => {
+            let body = json!({
+                "model_name": require_arg(args, "model_name")?,
+                "input_price": args.get("input_price").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "output_price": args.get("output_price").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "cache_price": args.get("cache_price").and_then(|v| v.as_f64()),
+                "price_type": require_arg(args, "price_type")?,
+            });
+            admin::handle_add_pricing(State(state.clone()), headers.clone(), Json(body)).await
+        }
+        "aigx_pricing_delete" => {
+            let model_name = require_arg(args, "model_name")?;
+            admin::handle_delete_pricing(State(state.clone()), headers.clone(), Path(model_name))
+                .await
+        }
+        "aigx_logs_cleanup" => {
+            let days = args.get("days").and_then(|v| v.as_u64());
+            admin::handle_cleanup_logs(
+                State(state.clone()),
+                headers.clone(),
+                Some(Json(crate::api::admin::logs::LogCleanupBody { days })),
+            )
+            .await
+        }
+        "aigx_key_delete" => {
+            let id = require_arg(args, "key_id")?;
+            admin::handle_delete_key(State(state.clone()), headers.clone(), Path(id)).await
+        }
+        "aigx_group_upsert" => {
+            let body = json!({
+                "name": require_arg(args, "name")?,
+                "ratio": args.get("ratio").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                "allowed_models": args.get("allowed_models").cloned(),
+                "description": str_arg(args, "description").unwrap_or_default(),
+            });
+            admin::handle_upsert_group(State(state.clone()), headers.clone(), Json(body)).await
+        }
         _ => {
             return Err((
                 -32601,
@@ -293,6 +500,28 @@ pub async fn exec_tool(
     };
 
     Ok(handler_to_outcome(result))
+}
+
+/// 取必填字符串参数（缺失/非字符串 → -32602）。
+fn require_arg(args: &Value, key: &str) -> Result<String, (i64, String)> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| {
+            (
+                -32602,
+                format!("Invalid params: missing required argument {key}"),
+            )
+        })
+}
+
+/// 取可选字符串参数。
+fn str_arg(args: &Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
 }
 
 fn handler_to_outcome(result: HandlerResult) -> ToolOutcome {

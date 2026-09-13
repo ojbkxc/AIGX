@@ -1,10 +1,12 @@
-//! 审批矩阵——高危写操作挂起人工确认（阶段二接入 runner 与前端弹层）。
+//! 审批矩阵——高危写操作挂起人工确认（阶段 2）。
 //!
-//! 阶段一先落地数据模型与 pending 表结构；runner 阶段二在高危工具前调用
-//! [`AgentApprovals::request`] 挂起，前端审批卡响应经 [`AgentApprovals::resolve`] 唤醒。
+//! 链路：runner 遇高危工具 → [`AgentApprovals::request`] 生成 request_id 并挂起
+//! → 推 `approval_request` 事件给前端 → 前端弹卡 → `POST /api/agent/.../approve`
+//! → [`AgentApprovals::resolve`] 唤醒 runner → 允许则执行 / 拒绝则跳过。
+//!
 //! 参考 rust-tunnel `approval.rs` 的 allow_once / allow_always / reject 语义。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +14,7 @@ use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
 /// 审批结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalResult {
     /// 允许一次。
     Approved,
@@ -30,7 +32,7 @@ type Pending = HashMap<String, (String, oneshot::Sender<ApprovalResult>)>;
 pub struct AgentApprovals {
     pending: Arc<Mutex<Pending>>,
     /// 本会话已记住允许的工具名集合（进程内存态，重启清零）。
-    remembered: Arc<Mutex<HashMap<String, std::collections::HashSet<String>>>>,
+    remembered: Arc<Mutex<HashMap<String, HashSet<String>>>>,
 }
 
 impl AgentApprovals {
@@ -56,13 +58,7 @@ impl AgentApprovals {
     }
 
     /// 挂起一个审批请求，返回 (`request_id`, 等待结果的 receiver)。
-    ///
-    /// 返回 None 表示前端未连接（阶段二由 WS 层传入 sender）；阶段一占位。
-    pub async fn request(
-        &self,
-        _session_id: &str,
-        tool: &str,
-    ) -> (String, oneshot::Receiver<ApprovalResult>) {
+    pub fn request(&self, tool: &str) -> (String, oneshot::Receiver<ApprovalResult>) {
         let request_id = format!("{:032x}", rand::random::<u128>());
         let (tx, rx) = oneshot::channel();
         self.pending
@@ -72,9 +68,12 @@ impl AgentApprovals {
     }
 
     /// 前端审批响应：唤醒对应 pending。
-    pub fn resolve(&self, request_id: &str, result: ApprovalResult) {
+    pub fn resolve(&self, request_id: &str, result: ApprovalResult) -> bool {
         if let Some((_, tx)) = self.pending.lock().remove(request_id) {
             let _ = tx.send(result);
+            true
+        } else {
+            false
         }
     }
 

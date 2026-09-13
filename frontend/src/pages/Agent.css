@@ -234,3 +234,81 @@
 @keyframes agent-spin {
   to { transform: rotate(360deg); }
 }
+
+/* 审批弹层 */
+.agent-approval-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.agent-approval-card {
+  background: var(--surface, #fff);
+  border-radius: 14px;
+  padding: 24px;
+  width: 420px;
+  max-width: 90vw;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+}
+
+.agent-approval-title {
+  font-weight: 700;
+  font-size: 16px;
+  margin-bottom: 12px;
+  color: #d97706;
+}
+
+.agent-approval-name {
+  font-family: monospace;
+  font-size: 14px;
+  margin-bottom: 8px;
+  color: var(--text, #111827);
+}
+
+.agent-approval-args {
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--muted, #6b7280);
+  background: var(--surface-muted, #f3f4f6);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 16px;
+  word-break: break-all;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.agent-approval-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.agent-approval-deny,
+.agent-approval-once,
+.agent-approval-remember {
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.agent-approval-deny {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.agent-approval-once {
+  background: var(--accent, #2f6fed);
+  color: #fff;
+}
+
+.agent-approval-remember {
+  background: #dbeafe;
+  color: #1d4ed8;
+}

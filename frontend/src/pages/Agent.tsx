@@ -32,6 +32,14 @@ interface AgentEvent {
   text?: string;
   content?: string;
   message?: string;
+  request_id?: string;
+}
+
+/** 待审批请求 */
+interface PendingApproval {
+  requestId: string;
+  name: string;
+  arguments: string;
 }
 
 interface ToolEvent {
@@ -54,8 +62,20 @@ export default function Agent(): JSX.Element {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [pending, setPending] = useState<PendingApproval | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const msgIdRef = useRef(0);
+
+  const respondApproval = useCallback(async (action: 'allow' | 'deny' | 'remember') => {
+    if (!pending) return;
+    const rid = pending.requestId;
+    setPending(null);
+    try {
+      await api.agentApprove(rid, action);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [pending]);
 
   // 加载会话列表
   const loadSessions = useCallback(async () => {
@@ -119,6 +139,10 @@ export default function Agent(): JSX.Element {
     abortRef.current = controller;
     try {
       await api.agentChatStream(activeId, text, (ev: AgentEvent) => {
+        if (ev.type === 'approval_request' && typeof ev.request_id === 'string') {
+          setPending({ requestId: ev.request_id, name: ev.name ?? '', arguments: ev.arguments ?? '' });
+          return;
+        }
         setMessages((prev) =>
           prev.map((m) => {
             if (m.id !== asstId) return m;
@@ -233,6 +257,22 @@ export default function Agent(): JSX.Element {
           )}
         </div>
       </main>
+
+      {/* 审批弹层 */}
+      {pending && (
+        <div className="agent-approval-mask" onClick={() => void respondApproval('deny')}>
+          <div className="agent-approval-card" onClick={(e) => e.stopPropagation()}>
+            <div className="agent-approval-title">{t('高危操作审批')}</div>
+            <div className="agent-approval-name">{pending.name}</div>
+            <div className="agent-approval-args">{pending.arguments}</div>
+            <div className="agent-approval-actions">
+              <button type="button" className="agent-approval-deny" onClick={() => void respondApproval('deny')}>{t('拒绝')}</button>
+              <button type="button" className="agent-approval-once" onClick={() => void respondApproval('allow')}>{t('允许一次')}</button>
+              <button type="button" className="agent-approval-remember" onClick={() => void respondApproval('remember')}>{t('本会话总是允许')}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

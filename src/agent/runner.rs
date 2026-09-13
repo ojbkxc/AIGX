@@ -1,15 +1,18 @@
 //! Agent 多轮循环——LLM 推理 → 解析工具调用 → 执行 → 回填，直到产出最终答复。
 //!
-//! 阶段一：只读 + 低危写工具直接执行；高危写（阶段二）在审批矩阵接入前
-//! 一律拒绝并提示（fail-closed，不静默放行）。
+//! 阶段二：只读/低危写直接执行；高危写经审批矩阵挂起等人工确认
+//! （[`crate::agent::approval::AgentApprovals`]）。
 //!
-//! 每轮产出事件（阶段一先返回事件列表，阶段二接 WebSocket 流式推送）：
-//! `thinking`（本轮开始）/ `tool_call` / `tool_result` / `final`（最终答复）。
+//! 事件实时推送：`run` 通过 `on_event` 回调边跑边发（SSE 流式渲染），
+//! 而非攒到最后一次性返回。
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::agent::approval::{AgentApprovals, ApprovalResult, APPROVAL_TIMEOUT};
 use crate::agent::llm;
 use crate::agent::tools::{self, RiskLevel};
 use crate::api::openai::AppState;
@@ -17,10 +20,10 @@ use crate::bridge::ChatMessage;
 use crate::config::AgentConfig;
 use axum::http::HeaderMap;
 
-/// 系统提示词（观察员视角，阶段一默认只读优先）。
+/// 系统提示词（观察员视角，默认只读优先）。
 const SYSTEM_PROMPT: &str = "你是 AIGX AI 网关的运维助手，通过白名单工具运维网关。\
 优先用只读工具查清现状再下结论；写操作仅在用户明确要求且工具为低危时执行。\
-回答要简洁、给出关键数据与结论。";
+高危写操作会经人工审批。回答要简洁、给出关键数据与结论。";
 
 /// 一轮执行的事件。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -36,23 +39,25 @@ pub enum AgentEvent {
         ok: bool,
         text: String,
     },
+    /// 高危工具审批请求（前端弹卡）。
+    ApprovalRequest {
+        request_id: String,
+        name: String,
+        arguments: String,
+    },
+    /// 审批结果（允许/拒绝/超时）。
+    ApprovalResolved { name: String, approved: bool },
     /// 最终答复。
     Final { content: String },
     /// 错误终止。
     Error { message: String },
 }
 
-/// 运行结果。
-pub struct RunOutcome {
-    /// 最终答复内容（成功时非空）。
-    pub final_content: Option<String>,
-    /// 全程事件。
-    pub events: Vec<AgentEvent>,
-    /// 消耗轮数。
-    pub turns: usize,
-}
+/// 事件回调类型。
+pub type EventSink =
+    Arc<dyn Fn(AgentEvent) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
-/// 运行 Agent 多轮循环（无流式，阶段一先走通非流式）。
+/// 运行 Agent 多轮循环（回调式，边跑边推事件）。
 ///
 /// `messages`：用户输入作为最后一条消息；函数会在最前插入系统提示词。
 pub async fn run(
@@ -60,8 +65,10 @@ pub async fn run(
     headers: &HeaderMap,
     config: &AgentConfig,
     messages: Vec<ChatMessage>,
-) -> RunOutcome {
-    let mut events = Vec::new();
+    approvals: &AgentApprovals,
+    session_id: &str,
+    on_event: &EventSink,
+) {
     let mut convo: Vec<ChatMessage> = Vec::new();
     convo.push(llm::system_message(SYSTEM_PROMPT.to_string()));
     convo.extend(messages);
@@ -70,58 +77,47 @@ pub async fn run(
     loop {
         turns += 1;
         if turns > config.max_turns {
-            events.push(AgentEvent::Error {
+            on_event(AgentEvent::Error {
                 message: format!("已达最大轮数 {}，强制结束", config.max_turns),
-            });
-            return RunOutcome {
-                final_content: None,
-                events,
-                turns,
-            };
+            })
+            .await;
+            return;
         }
-        events.push(AgentEvent::Thinking { turn: turns });
+        on_event(AgentEvent::Thinking { turn: turns }).await;
 
         let tools = tools::openai_tools();
         let (resp, _upstream, _cid) =
             match llm::chat_once(state, config, convo.clone(), Some(tools)).await {
                 Ok(r) => r,
                 Err(e) => {
-                    events.push(AgentEvent::Error {
+                    on_event(AgentEvent::Error {
                         message: e.to_string(),
-                    });
-                    return RunOutcome {
-                        final_content: None,
-                        events,
-                        turns,
-                    };
+                    })
+                    .await;
+                    return;
                 }
             };
 
         let msg = llm::response_message(resp);
 
-        // 有工具调用 → 逐个执行（阶段一只读/低危直跑，高危拒绝）
         if let Some(calls) = &msg.tool_calls {
             if calls.is_empty() {
                 let content = msg.content.unwrap_or_default();
-                events.push(AgentEvent::Final {
+                on_event(AgentEvent::Final {
                     content: content.clone(),
-                });
-                return RunOutcome {
-                    final_content: Some(content),
-                    events,
-                    turns,
-                };
+                })
+                .await;
+                return;
             }
-            // 把 assistant 的工具调用消息回填进对话
             convo.push(msg.clone());
 
-            let mut all_ok = true;
             for call in calls {
                 let args: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
-                events.push(AgentEvent::ToolCall {
+                on_event(AgentEvent::ToolCall {
                     name: call.function_name.clone(),
                     arguments: call.arguments.clone(),
-                });
+                })
+                .await;
 
                 let spec = tools::find_tool(&call.function_name);
                 let outcome = match spec {
@@ -129,11 +125,54 @@ pub async fn run(
                         text: format!("Unknown tool: {}", call.function_name),
                         ok: false,
                     },
-                    Some(s) if s.risk == RiskLevel::HighRisk => tools::ToolOutcome {
-                        text: "该工具为高危写操作，需审批矩阵（阶段二接入）；当前已安全拒绝。"
-                            .to_string(),
-                        ok: false,
-                    },
+                    Some(s) if s.risk == RiskLevel::HighRisk => {
+                        // 审批矩阵：挂起等人工确认；RememberAllow 记入本会话免审集
+                        let already = approvals.is_remembered(session_id, &call.function_name);
+                        let result = if already {
+                            ApprovalResult::Approved
+                        } else {
+                            let (req_id, rx) = approvals.request(&call.function_name);
+                            on_event(AgentEvent::ApprovalRequest {
+                                request_id: req_id.clone(),
+                                name: call.function_name.clone(),
+                                arguments: call.arguments.clone(),
+                            })
+                            .await;
+                            tokio::time::timeout(APPROVAL_TIMEOUT, rx)
+                                .await
+                                .map(|r| r.unwrap_or(ApprovalResult::Denied))
+                                .unwrap_or(ApprovalResult::Denied)
+                        };
+                        let approved = result != ApprovalResult::Denied;
+                        if result == ApprovalResult::RememberAllow {
+                            approvals.remember(session_id, &call.function_name);
+                        }
+                        if !approved {
+                            on_event(AgentEvent::ApprovalResolved {
+                                name: call.function_name.clone(),
+                                approved: false,
+                            })
+                            .await;
+                            tools::ToolOutcome {
+                                text: "高危写操作已被拒绝（未获人工审批）".to_string(),
+                                ok: false,
+                            }
+                        } else {
+                            on_event(AgentEvent::ApprovalResolved {
+                                name: call.function_name.clone(),
+                                approved: true,
+                            })
+                            .await;
+                            match tools::exec_tool(state, headers, &call.function_name, &args).await
+                            {
+                                Ok(o) => o,
+                                Err((_code, msg)) => tools::ToolOutcome {
+                                    text: msg,
+                                    ok: false,
+                                },
+                            }
+                        }
+                    }
                     Some(_) => {
                         match tools::exec_tool(state, headers, &call.function_name, &args).await {
                             Ok(o) => o,
@@ -145,44 +184,28 @@ pub async fn run(
                     }
                 };
 
-                if !outcome.ok {
-                    all_ok = false;
-                }
-                events.push(AgentEvent::ToolResult {
+                on_event(AgentEvent::ToolResult {
                     name: call.function_name.clone(),
                     ok: outcome.ok,
                     text: outcome.text.clone(),
-                });
-                // 工具结果作为 tool 消息回填
+                })
+                .await;
                 convo.push(llm::tool_message(call.id.clone(), outcome.text));
             }
-            // 工具执行完继续下一轮推理（把结果交给模型总结）
-            let _ = all_ok;
             continue;
         }
 
-        // 无工具调用 → 最终答复
         let content = msg.content.unwrap_or_default();
-        events.push(AgentEvent::Final {
+        on_event(AgentEvent::Final {
             content: content.clone(),
-        });
-        return RunOutcome {
-            final_content: Some(content),
-            events,
-            turns,
-        };
+        })
+        .await;
+        return;
     }
 }
 
-/// 供外部（API 层）复用的共享引用类型。
+/// 空 sink（测试用）。
 #[allow(dead_code)]
-pub type RunnerRef = Arc<
-    dyn Fn(
-            &AppState,
-            &HeaderMap,
-            &AgentConfig,
-            Vec<ChatMessage>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RunOutcome> + Send>>
-        + Send
-        + Sync,
->;
+pub fn null_sink() -> EventSink {
+    Arc::new(|_ev| Box::pin(async {}))
+}

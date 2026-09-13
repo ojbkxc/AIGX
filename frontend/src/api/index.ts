@@ -653,6 +653,8 @@ export const api = {
     request<ApiResponse<{ id: string; title: string }>>('POST', `${API_BASE}/agent/sessions`, { title }),
   getAgentSession: (id: string): Promise<ApiResponse<unknown>> =>
     request<ApiResponse<unknown>>('GET', `${API_BASE}/agent/sessions/${encodeURIComponent(id)}`),
+  agentApprove: (requestId: string, action: 'allow' | 'deny' | 'remember'): Promise<ApiResponse<null>> =>
+    request<ApiResponse<null>>('POST', `${API_BASE}/agent/approvals/${encodeURIComponent(requestId)}`, { action }),
   /** Agent 对话：SSE 流式，逐事件回调（AgentEvent） */
   agentChatStream: async (
     id: string,

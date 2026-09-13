@@ -1,9 +1,10 @@
-//! Agent 工作台 API 端点（阶段 1c）。
+//! Agent 工作台 API 端点（阶段 1c + 阶段 2 审批）。
 //!
 //! - `GET /api/agent/sessions`：会话列表
 //! - `POST /api/agent/sessions`：建会话
 //! - `GET /api/agent/sessions/:id`：会话详情（含消息）
 //! - `POST /api/agent/sessions/:id/chat`：对话（SSE 流式，推 AgentEvent）
+//! - `POST /api/agent/approvals/:request_id`：审批响应（allow/deny/remember）
 //!
 //! 全部管理面鉴权（verify_admin），Agent 未启用（`[agent].enabled=false`）
 //! 时返回 503，提示先在 config 开启。
@@ -17,6 +18,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
+use crate::agent::approval::ApprovalResult;
 use crate::agent::runner::{self, AgentEvent};
 use crate::api::admin::common::verify_admin;
 use crate::api::openai::AppState;
@@ -36,6 +38,10 @@ pub fn router() -> axum::Router<AppState> {
             "/api/agent/sessions/:id/chat",
             axum::routing::post(handle_chat),
         )
+        .route(
+            "/api/agent/approvals/:request_id",
+            axum::routing::post(handle_approval),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +55,12 @@ pub struct CreateSessionRequest {
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
     pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApprovalRequest {
+    /// allow / deny / remember（本会话总是允许）
+    pub action: String,
 }
 
 /// 取 Agent 状态；未启用返回 503。
@@ -202,20 +214,21 @@ pub async fn handle_chat(
     let state2 = state.clone();
     let headers2 = headers.clone();
     let agent2 = agent.clone();
+    let approvals2 = agent.approvals.clone();
     let session_id = id.clone();
 
     // 后台跑 runner，事件经 mpsc 转发为 SSE 流
-    let (tx, rx) = mpsc::channel::<String>(32);
-    tokio::spawn(async move {
-        let outcome = runner::run(&state2, &headers2, &config, convo).await;
-        for ev in outcome.events {
+    let (tx, rx) = mpsc::channel::<String>(64);
+    let sink: runner::EventSink = std::sync::Arc::new(move |ev| {
+        let tx = tx.clone();
+        let agent = agent2.clone();
+        let sid = session_id.clone();
+        Box::pin(async move {
             let json = serde_json::to_string(&ev).unwrap_or_else(|_| "{}".to_string());
-            if tx.send(format!("data: {json}\n\n")).await.is_err() {
-                break;
-            }
+            let _ = tx.send(format!("data: {json}\n\n")).await;
             if let AgentEvent::Final { content } = &ev {
-                let _ = agent2.session_store.append_message(
-                    &session_id,
+                let _ = agent.session_store.append_message(
+                    &sid,
                     &crate::agent::session::AgentMessage {
                         role: "assistant".to_string(),
                         content: content.clone(),
@@ -224,8 +237,11 @@ pub async fn handle_chat(
                     },
                 );
             }
-        }
-        let _ = tx.send("data: [DONE]\n\n".to_string()).await;
+        })
+    });
+    let sink2 = sink.clone();
+    tokio::spawn(async move {
+        runner::run(&state2, &headers2, &config, convo, &approvals2, &id, &sink2).await;
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx)
@@ -241,4 +257,28 @@ pub async fn handle_chat(
         axum::http::HeaderValue::from_static("no-cache"),
     );
     Ok(resp)
+}
+
+/// POST /api/agent/approvals/:request_id —— 审批响应。
+pub async fn handle_approval(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    Json(body): Json<ApprovalRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let agent = agent_state(&state)?;
+    let result = match body.action.as_str() {
+        "allow" => ApprovalResult::Approved,
+        "remember" => ApprovalResult::RememberAllow,
+        "deny" => ApprovalResult::Denied,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "action 必须为 allow/deny/remember" })),
+            ))
+        }
+    };
+    let ok = agent.approvals.resolve(&request_id, result);
+    Ok(Json(json!({ "success": ok, "data": null })))
 }
