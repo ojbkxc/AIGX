@@ -109,8 +109,7 @@ pub async fn handle_list_tokens(
     let is_admin = user.is_admin();
     // 管理员显式请求查看全部（all=1），否则与普通用户一致只看自己的
     let view_all = is_admin
-        && q
-            .all
+        && q.all
             .as_deref()
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false);
@@ -136,9 +135,7 @@ pub async fn handle_list_tokens(
             if view_all && admin_user_filter.is_none() {
                 return true;
             }
-            let owner = admin_user_filter
-                .clone()
-                .unwrap_or_else(|| user.id.clone());
+            let owner = admin_user_filter.clone().unwrap_or_else(|| user.id.clone());
             k.user_id.as_deref() == Some(owner.as_str())
         })
         .map(|k| {

@@ -88,7 +88,9 @@ fn charge_playground_usage(
         tracing::warn!("playground request log write failed: {e}");
     }
     // 全局 usage 统计同步累加
-    state.usage_tracker.accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
+    state
+        .usage_tracker
+        .accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
 }
 
 /// 从响应 JSON 中提取 usage 的 prompt/completion tokens（无 usage 时按 0）

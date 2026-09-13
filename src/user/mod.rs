@@ -321,9 +321,7 @@ impl UserStore {
         // try_charge/add_quota_atomic（同样在写锁内改 quota）会产生丢失
         // 更新——update 后写覆盖掉并发的扣费/充值。此处持写锁后再执行
         // mutator，保证与所有配额变更路径串行化。
-        let mut by_id = self
-            .by_id
-            .write();
+        let mut by_id = self.by_id.write();
         let user = by_id
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("user not found"))?;

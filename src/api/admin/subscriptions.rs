@@ -175,7 +175,10 @@ pub async fn handle_subscription_balance_pay(
     // add_quota(-x)」两步非原子，并发购买可同时通过预检把余额刷成
     // 负数（双重消费）。
     if required_quota > 0 {
-        if let Err(e) = state.user_store.try_decrease_quota(&user.id, required_quota) {
+        if let Err(e) = state
+            .user_store
+            .try_decrease_quota(&user.id, required_quota)
+        {
             let balance = state
                 .user_store
                 .get_by_id(&user.id)

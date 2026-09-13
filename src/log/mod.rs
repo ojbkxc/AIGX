@@ -259,8 +259,7 @@ impl RequestLogStore {
             })
             .collect();
         timed.sort_by_key(|(ts, _)| *ts);
-        let excess =
-            (timed.len().saturating_sub(max_logs) + Self::PURGE_BATCH).min(timed.len());
+        let excess = (timed.len().saturating_sub(max_logs) + Self::PURGE_BATCH).min(timed.len());
         for (_, k) in timed.into_iter().take(excess) {
             if let Err(e) = self.store.delete(&k) {
                 tracing::warn!("request log purge failed for {k}: {e}");

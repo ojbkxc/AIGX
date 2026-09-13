@@ -103,15 +103,9 @@ async fn main() -> anyhow::Result<()> {
         // 否则用默认 SQLite 文件后端。二者同为 FileStore 类型，业务层无感知。
         #[cfg(feature = "postgres")]
         let s = if config.database.is_enabled() {
-            match FileStore::open_postgres(
-                &config.database.url,
-                config.database.max_connections,
-            ) {
+            match FileStore::open_postgres(&config.database.url, config.database.max_connections) {
                 Ok(pg) => {
-                    tracing::info!(
-                        "PostgreSQL KV store enabled: {}",
-                        config.database.url
-                    );
+                    tracing::info!("PostgreSQL KV store enabled: {}", config.database.url);
                     pg
                 }
                 Err(e) => {
@@ -1362,7 +1356,10 @@ async fn handle_metrics(
     {
         return (
             StatusCode::UNAUTHORIZED,
-            [(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"))],
+            [(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            )],
             "unauthorized",
         )
             .into_response();

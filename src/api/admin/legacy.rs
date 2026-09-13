@@ -2058,8 +2058,11 @@ pub async fn handle_stripe_topup(
     // 美元即溢出，溢出后金额可能变负引发计费错乱）；正常充值不会到这个量级，
     // 直接拒绝即可
     if amount <= 0 || amount > 10_000_000 {
-        return error_response("amount must be positive and reasonable", StatusCode::BAD_REQUEST)
-            .into_response();
+        return error_response(
+            "amount must be positive and reasonable",
+            StatusCode::BAD_REQUEST,
+        )
+        .into_response();
     }
     let config = state.config_manager.get().await;
     let callback = callback_address(&state, &config);

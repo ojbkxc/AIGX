@@ -367,7 +367,12 @@ pub async fn update_network_config(
     state
         .alert_store
         .put(NETWORK_CONFIG_STORE_KEY, &cfg)
-        .map_err(|e| error_response(&format!("配置持久化失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(|e| {
+            error_response(
+                &format!("配置持久化失败: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
 
     tracing::info!(
         "网络层配置已更新: enabled={} strategy={} 池参数 {}/{}/{}/{}",
@@ -429,10 +434,12 @@ pub async fn add_network_account(
         last_used_at: None,
         created_at: now,
     };
-    state
-        .account_pool
-        .add(account)
-        .map_err(|e| error_response(&format!("添加账号失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
+    state.account_pool.add(account).map_err(|e| {
+        error_response(
+            &format!("添加账号失败: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
     Ok(Json(json!({
         "success": true,
         "message": "网络层账号已添加"
@@ -449,22 +456,19 @@ pub async fn remove_network_account(
     verify_admin(&state, &headers).await?;
     // 后端按内部 UUID（account:{uuid}）存储，前端可能误传 CF account_id；
     // 两种 ID 都尝试匹配删除，找不到时报 404 而非静默成功。
-    let removed = state
-        .account_pool
-        .remove(&account_id)
-        .or_else(|_| {
-            // account_id 不匹配内部 id 时，尝试按 CF account_id 字段找内部 id
-            let internal = state
-                .account_pool
-                .list()
-                .into_iter()
-                .find(|a| a.account_id == account_id)
-                .map(|a| a.id);
-            match internal {
-                Some(id) => state.account_pool.remove(&id),
-                None => Ok(()),
-            }
-        });
+    let removed = state.account_pool.remove(&account_id).or_else(|_| {
+        // account_id 不匹配内部 id 时，尝试按 CF account_id 字段找内部 id
+        let internal = state
+            .account_pool
+            .list()
+            .into_iter()
+            .find(|a| a.account_id == account_id)
+            .map(|a| a.id);
+        match internal {
+            Some(id) => state.account_pool.remove(&id),
+            None => Ok(()),
+        }
+    });
     match removed {
         Ok(_) => {
             let still = state
@@ -480,7 +484,10 @@ pub async fn remove_network_account(
                 "message": "网络层账号已删除"
             })))
         }
-        Err(e) => Err(error_response(&format!("删除失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR)),
+        Err(e) => Err(error_response(
+            &format!("删除失败: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 
@@ -532,10 +539,7 @@ pub async fn restart_network(
 }
 
 /// 统一错误响应（与 admin 模块其他 handler 一致的 (StatusCode, Json) 形态）
-fn error_response(
-    msg: &str,
-    status: StatusCode,
-) -> (StatusCode, Json<Value>) {
+fn error_response(msg: &str, status: StatusCode) -> (StatusCode, Json<Value>) {
     (status, Json(json!({ "success": false, "message": msg })))
 }
 
