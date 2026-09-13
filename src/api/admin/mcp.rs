@@ -145,7 +145,7 @@ struct ToolSpec {
     description: &'static str,
     /// 简化 JSON Schema：type/properties/required
     schema: Value,
-    /// 是否写操作（MCP 层写工具补审计）
+    /// 是否写操作（驱动 tools/list 的 readOnlyHint 标注）
     write: bool,
 }
 
@@ -273,6 +273,10 @@ fn find_tool_spec(name: &str) -> Option<ToolSpec> {
 }
 
 /// tools/list 响应。
+///
+/// `annotations.readOnlyHint` 为 MCP 2025-03-26 规范的 ToolAnnotations
+/// 字段：写工具标注 readOnlyHint=false，客户端（Claude Code 等）可据此
+/// 在调用前向用户提示"该工具会改动系统"。
 fn tools_list_result() -> Value {
     json!({
         "tools": tool_specs()
@@ -281,7 +285,8 @@ fn tools_list_result() -> Value {
                 json!({
                     "name": t.name,
                     "description": t.description,
-                    "inputSchema": t.schema
+                    "inputSchema": t.schema,
+                    "annotations": { "readOnlyHint": !t.write }
                 })
             })
             .collect::<Vec<_>>()
@@ -630,6 +635,11 @@ mod tests {
                 t["inputSchema"]["properties"].is_object(),
                 "{name} 缺 properties"
             );
+            // MCP 规范标注：readOnlyHint 必须为布尔
+            assert!(
+                t["annotations"]["readOnlyHint"].is_boolean(),
+                "{name} 缺 annotations.readOnlyHint"
+            );
         }
         // 每个描述标注读/写语义；写工具 required: ["channel_id"]
         let writes: Vec<&ToolSpec> = specs.iter().filter(|s| s.write).collect();
@@ -645,6 +655,18 @@ mod tests {
                     s.name
                 );
             }
+        }
+        // 写/只读与 annotations.readOnlyHint 一致（写工具必须标注 false）
+        for t in &tools {
+            let spec = specs
+                .iter()
+                .find(|s| t["name"].as_str() == Some(s.name))
+                .unwrap();
+            assert_eq!(
+                t["annotations"]["readOnlyHint"], !spec.write,
+                "{} readOnlyHint 与 write 标志不一致",
+                spec.name
+            );
         }
     }
 
