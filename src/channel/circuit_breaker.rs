@@ -720,7 +720,10 @@ mod tests {
             .find(|s| s.channel_id == "auth-ch")
             .unwrap();
         assert_eq!(snap.failure_type, Some("auth_failed"));
-        assert!(snap.rate_limit_remaining_secs > 0, "认证故障强制 30 分钟冷却");
+        assert!(
+            snap.rate_limit_remaining_secs > 0,
+            "认证故障强制 30 分钟冷却"
+        );
     }
 
     /// 快照只读：连续两次调用结果一致，不改变任何状态机行为。

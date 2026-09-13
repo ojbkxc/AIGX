@@ -787,7 +787,10 @@ mod tests {
         add("/api/settings", &["get", "put"]);
         add("/api/stripe/topup", &["post"]);
         add("/api/subscription/admin/bind", &["post"]);
-        add("/api/subscription/admin/subscriptions/{id}/cancel", &["post"]);
+        add(
+            "/api/subscription/admin/subscriptions/{id}/cancel",
+            &["post"],
+        );
         add("/api/subscription/admin/users/{id}/subscriptions", &["get"]);
         add("/api/subscription/balance/pay", &["post"]);
         add("/api/subscription/plans", &["get"]);
@@ -845,15 +848,20 @@ mod tests {
         assert!(!paths.is_empty(), "paths 不能为空");
         for (p, item) in paths {
             assert!(p.starts_with('/'), "path 须以 / 开头: {p}");
-            assert!(!p.contains(":id"), "path 须用 {id} 语法: {p}");
+            assert!(!p.contains(":id"), "path 须用 {{id}} 语法: {p}");
             for (verb, operation) in item.as_object().unwrap() {
                 assert!(["get", "post", "put", "delete", "patch"].contains(&verb.as_str()));
                 assert!(
-                    operation.get("responses").is_some_and(|r| !r.as_object().unwrap().is_empty()),
+                    operation
+                        .get("responses")
+                        .is_some_and(|r| !r.as_object().unwrap().is_empty()),
                     "{p} {verb} 缺 responses"
                 );
                 assert!(
-                    operation.get("summary").and_then(|s| s.as_str()).is_some_and(|s| !s.is_empty()),
+                    operation
+                        .get("summary")
+                        .and_then(|s| s.as_str())
+                        .is_some_and(|s| !s.is_empty()),
                     "{p} {verb} 缺中文 summary"
                 );
                 if verb == "get" {
@@ -883,12 +891,10 @@ mod tests {
             .collect();
         let actual = document_paths(&build_openapi_document());
         assert_eq!(
-            actual,
-            expected,
+            actual, expected,
             "文档 paths 与 main.rs 真实管理面路由不一致（左侧=文档，右侧=路由表）"
         );
     }
-
 
     /// 数量锚点：管理面真实路径共 142 个（141 + openapi.json 自身）。
     /// 真实路由增删会先在 covers_all_real_admin_routes 红，此断言辅助定位。
@@ -897,8 +903,7 @@ mod tests {
         let doc = build_openapi_document();
         let n = doc["paths"].as_object().unwrap().len();
         assert_eq!(
-            n,
-            142,
+            n, 142,
             "管理面路径数应为 142（141 真实注册 + openapi.json），实际 {n}"
         );
     }
