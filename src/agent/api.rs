@@ -15,6 +15,7 @@ use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 
 use crate::agent::runner::{self, AgentEvent};
 use crate::api::admin::common::verify_admin;
@@ -227,7 +228,8 @@ pub async fn handle_chat(
         let _ = tx.send("data: [DONE]\n\n".to_string()).await;
     });
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx)
+        .map(|s| Ok::<axum::body::Bytes, std::convert::Infallible>(axum::body::Bytes::from(s)));
     let body = Body::from_stream(stream);
     let mut resp = Response::new(body);
     resp.headers_mut().insert(

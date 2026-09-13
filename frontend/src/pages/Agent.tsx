@@ -23,18 +23,27 @@ interface AgentMsg {
 }
 
 /** SSE 推的事件（后端 AgentEvent 序列化形状） */
-type AgentEvent =
-  | { type: 'thinking'; turn: number }
-  | { type: 'tool_call'; name: string; arguments: string }
-  | { type: 'tool_result'; name: string; ok: boolean; text: string }
-  | { type: 'final'; content: string }
-  | { type: 'error'; message: string };
+interface AgentEvent {
+  type: string;
+  turn?: number;
+  name?: string;
+  arguments?: string;
+  ok?: boolean;
+  text?: string;
+  content?: string;
+  message?: string;
+}
+
+interface ToolEvent {
+  name: string;
+  ok: boolean;
+}
 
 interface ChatMsg {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
-  toolEvents?: Array<{ name: string; ok: boolean }>;
+  toolEvents?: ToolEvent[];
 }
 
 export default function Agent(): JSX.Element {
@@ -109,24 +118,25 @@ export default function Agent(): JSX.Element {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      await api.agentChatStream(activeId, text, (ev) => {
+      await api.agentChatStream(activeId, text, (ev: AgentEvent) => {
         setMessages((prev) =>
           prev.map((m) => {
             if (m.id !== asstId) return m;
-            if (ev.type === 'final') {
+            if (ev.type === 'final' && typeof ev.content === 'string') {
               return { ...m, content: m.content + ev.content };
             }
-            if (ev.type === 'error') {
+            if (ev.type === 'error' && typeof ev.message === 'string') {
               return { ...m, content: m.content + `\n⚠️ ${ev.message}` };
             }
-            if (ev.type === 'tool_call') {
+            if (ev.type === 'tool_call' && typeof ev.name === 'string') {
               const te = m.toolEvents ?? [];
               return { ...m, toolEvents: [...te, { name: ev.name, ok: true }] };
             }
-            if (ev.type === 'tool_result') {
-              const te = m.toolEvents ?? [];
-              const last = te[te.length - 1];
-              if (last) last.ok = ev.ok;
+            if (ev.type === 'tool_result' && typeof ev.name === 'string') {
+              const te = m.toolEvents ? [...m.toolEvents] : [];
+              if (te.length > 0) {
+                te[te.length - 1] = { name: te[te.length - 1].name, ok: ev.ok === true };
+              }
               return { ...m, toolEvents: te };
             }
             return m;

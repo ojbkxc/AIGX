@@ -50,6 +50,7 @@ pub struct AgentMessage {
 }
 
 /// Agent 会话存储。
+#[derive(Clone)]
 pub struct AgentSessionStore {
     store: Arc<FileStore>,
 }
