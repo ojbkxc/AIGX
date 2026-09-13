@@ -7,7 +7,7 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-orange)](https://www.rust-lang.org)
 [![React](https://img.shields.io/badge/React-18+-61DAFB)](https://react.dev)
 [![License](https://img.shields.io/badge/License-Free_Personal_Use-blue)](#许可证)
-[![Version](https://img.shields.io/badge/Version-1.0.1-blue)](#快速开始)
+[![Version](https://img.shields.io/badge/Version-1.0.5-blue)](#快速开始)
 
 [English](#english) · [中文](#中文)
 
@@ -45,7 +45,9 @@ AIGX 是一个 **OpenAI / Anthropic 兼容的 AI 中转网关**。它聚合多�
 
 - **多上游类型**：Cloudflare Workers AI（经 cf-ai-gw Worker 的 AI Binding 桥接）、OpenAI 兼容、Anthropic、Gemini、智谱 Z.AI
 - **智能调度**：优先级降序 → 同优先级按权重加权随机 → 断路器 / 健康状态 / 亲和性叠加修正
-- **断路器模式**：渠道连续失败自动熔断，支持半开探测与手动重置
+- **断路器模式**：渠道连续失败自动熔断，失败类型分级（认证/支付类强制长冷却、限流尊重上游 `retry_after`）、半开单飞探测（租约防并发冲击），支持手动重置
+- **流式首事件守卫**：SSE 流式请求上游首事件超时自动判失败并切换下一渠道——流式请求也能故障转移
+- **上游连接加固**：上游调用强制 HTTP/1.1，保证读超时可靠触发，杜绝挂连接
 - **健康巡检**：后台周期探测渠道延迟与可用性，EMA 平滑
 - **AIMD 限流协同**：上游限流反馈自适应调整发送速率
 - **空响应防护**：连续空响应检测与渠道降权
@@ -56,6 +58,7 @@ AIGX 是一个 **OpenAI / Anthropic 兼容的 AI 中转网关**。它聚合多�
 - **用户体系**：邮箱注册、角色权限（管理员 / 普通用户）、GitHub / Google OAuth 登录、密码找回
 - **用户分组**：分组倍率、分组允许模型
 - **定价引擎**：按模型定价（输入 / 输出 / 缓存命中）、模型倍率 × 分组倍率、多币种汇率、价格数据源自动同步
+- **计费口径对齐**：token 用量一律取上游 `usage` 原始数据，支持 OpenAI / DeepSeek / Kimi / Anthropic 多厂商缓存字段解析，脏数据按计费恒等式收敛
 - **支付充值**：易支付（Epay）与 Stripe，支持支付回调验签、订单状态管理
 - **兑换码**：批量生成 / 单码生成 / 兑换充值 / 有效期管理
 - **API 令牌**：创建、编辑、禁用、轮换（一次性展示新密钥）、用量重置
@@ -67,6 +70,8 @@ AIGX 是一个 **OpenAI / Anthropic 兼容的 AI 中转网关**。它聚合多�
 - **关键词护栏**：prompt / 响应关键词过滤
 - **安全事件**：认证失败、限流触发、IP 拦截、滥用检测、入侵尝试，含严重程度分级
 - **日志审计**：请求日志（模型、token、费用、延迟、错误）与管理员操作审计日志，支持 CSV / JSON 导出
+- **上游错误脱敏**：错误响应回传前抹除上游密钥痕迹（`sk-***` / `Bearer ***`），上游凭证不泄漏给下游客户端
+- **AI 原生可运维**：只读诊断端点（系统体检 / 渠道批量测活 / 熔断器快照）、OpenAPI 3.1 自描述文档（`/api/openapi.json`，路由变更测试自动同步）、内嵌 MCP server（见下文）
 - **告警通知**：Telegram、SMTP（含 STARTTLS）、Slack、Webhook，后台巡检触发（断路器打开 / 渠道延迟 / 进程内存）
 - **系统监控**：CPU / 内存 / 磁盘 / 网络 / 负载 / 进程采集（非 Linux 平台自动降级）
 - **Prometheus 指标**：文本格式指标导出，便于接入现有监控体系
@@ -143,6 +148,51 @@ API Key:  sk-xxxxxxxxxxxxxxxx（网关创建的令牌）
 ```
 
 支持 OpenRouter / DeepSeek / Kimi / Claude Code 等主流客户端的 `base_url + api_key` 对接方式。
+
+### 用 AI 运维网关（MCP）
+
+内置 MCP server（Model Context Protocol），codex / Claude Code / CodeArts 等支持 MCP 的客户端可直接挂载，对话式管理网关——AI 自动发现 11 个白名单工具，无需 SSH 或读文档。
+
+**第 1 步：拿管理 token**（MCP 鉴权用的"通行证"，与管理后台登录同一套）
+
+```bash
+curl -s -X POST http://your-gateway.example.com:9527/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@example.com","password":"你的密码"}'
+# 返回的会话 token 存为环境变量备用；token 是会话态，过期后 AI 调用会报 401，重新登录获取即可
+```
+
+**第 2 步：给你的 AI 软件配挂载**
+
+codex CLI（`~/.codex/config.toml`）：
+
+```toml
+[mcp_servers.aigx]
+url = "http://your-gateway.example.com:9527/api/mcp"
+bearer_token_env_var = "AIGX_MCP_TOKEN"   # 从环境变量读 token，勿写进配置文件
+```
+
+> ⚠️ **桌面版 Codex 会在运行时覆写 config.toml**——请在桌面端未运行时编辑，或直接用桌面端自带的 MCP 设置界面添加。
+
+Claude Code：
+
+```bash
+claude mcp add --transport http aigx http://your-gateway.example.com:9527/api/mcp \
+  --header "Authorization: Bearer <你的token>"
+```
+
+**第 3 步：直接对话使用**，没有第三步的仪式感——软件启动后自动发现全部工具：
+
+- "看下系统状态" → AI 调 `aigx_diagnostics_summary`（渠道统计 + 今日用量 + 熔断概况）
+- "那个渠道挂了，禁掉它" → AI 调 `aigx_channel_disable`（完成 + 自动审计留痕）
+- "今天谁在用 API" → AI 调 `aigx_query_logs`
+
+**协议与安全**：
+
+- **协议**：Streamable HTTP（`POST /api/mcp`，JSON-RPC 2.0，MCP 2025-03-26），未知方法 / 工具一律 fail-closed 拒绝
+- **工具集**：诊断×3（系统体检 / 渠道批量测活 / 熔断器快照）+ 查询×4（渠道 / 用户 / 日志 / 定价）+ 写×4（渠道启停 / 测试 / 重置熔断）——写操作全部**可人工回滚**，且每次调用自动写入审计日志；批量禁用 / 删用户 / 动余额等高危操作有意不在第一版白名单内
+
+配合 `/api/openapi.json`（覆盖全部管理端点的 OpenAPI 3.1 自描述文档）与三个只读诊断端点（`/api/diagnostics/{summary,channels,breakers}`），AI 运维闭环：自发现 → 看状态 → 动手改 → 有审计。
 
 ---
 
@@ -235,7 +285,7 @@ API Key:  sk-xxxxxxxxxxxxxxxx（网关创建的令牌）
 
 ## English
 
-**AIGX** is an OpenAI / Anthropic-compatible AI gateway that aggregates upstream AI services (Cloudflare Workers AI, OpenAI-compatible providers, Anthropic, Gemini, Zhipu Z.AI) behind a unified API endpoint, adding authentication, rate limiting, group permissions, pricing, multi-channel scheduling, payments, audit logging and security monitoring.
+**AIGX** is an OpenAI / Anthropic-compatible AI gateway that aggregates upstream AI services (Cloudflare Workers AI, OpenAI-compatible providers, Anthropic, Gemini, Zhipu Z.AI) behind a unified API endpoint, adding authentication, rate limiting, group permissions, pricing, multi-channel scheduling, payments, audit logging and security monitoring. Since v1.0.5 it also ships an AI-native operations layer: read-only diagnostics endpoints, a self-describing OpenAPI 3.1 document, and an embedded MCP server (`POST /api/mcp`) so MCP clients such as codex / Claude Code can manage the gateway conversationally with full audit trails.
 
 The source code is **free for personal, educational, research and non-commercial use**. **Commercial use (including resale, SaaS hosting, or integration into commercial products) requires prior written authorization from the author.** See [License](#许可证) for details.
 
