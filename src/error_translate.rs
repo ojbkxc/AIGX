@@ -269,11 +269,7 @@ pub fn sanitize_error_message(body: &str) -> String {
         }
 
         // `sk-` 后跟字母数字（≤67 字符）
-        if pos + 3 <= n
-            && bytes[pos] == b's'
-            && bytes[pos + 1] == b'k'
-            && bytes[pos + 2] == b'-'
-        {
+        if pos + 3 <= n && bytes[pos] == b's' && bytes[pos + 1] == b'k' && bytes[pos + 2] == b'-' {
             let mut key_end = pos + 3;
             while key_end < n && bytes[key_end].is_ascii_alphanumeric() && key_end - pos <= 67 {
                 key_end += 1;
@@ -340,7 +336,10 @@ mod tests {
             sanitize_error_message("unauthorized: bearer tok123 stuff"),
             "unauthorized: Bearer *** stuff"
         );
-        assert_eq!(sanitize_error_message("BEARER abc.def-ghi end"), "Bearer *** end");
+        assert_eq!(
+            sanitize_error_message("BEARER abc.def-ghi end"),
+            "Bearer *** end"
+        );
     }
 
     /// `sk-` 后跟字母数字的密钥脱敏；`sk-` 后无字母数字时不误替换。
@@ -351,7 +350,10 @@ mod tests {
             "Invalid api key sk-***"
         );
         // "desk-" 中的 "sk-" 后是空格（非字母数字）→ 原样保留
-        assert_eq!(sanitize_error_message("desk- top corner"), "desk- top corner");
+        assert_eq!(
+            sanitize_error_message("desk- top corner"),
+            "desk- top corner"
+        );
     }
 
     #[test]

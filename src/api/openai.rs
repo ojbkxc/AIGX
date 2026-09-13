@@ -2375,11 +2375,9 @@ pub async fn handle_responses(
             .responses_passthrough(&attempt_body, is_stream, &ctx)
             .await
         {
-            Ok(ResponsesPassthrough::Stream(s)) => {
-                crate::bridge::first_event_or_timeout(s)
-                    .await
-                    .map(ResponsesPassthrough::Stream)
-            }
+            Ok(ResponsesPassthrough::Stream(s)) => crate::bridge::first_event_or_timeout(s)
+                .await
+                .map(ResponsesPassthrough::Stream),
             Ok(r) => Ok(r),
             Err(e) => Err(e),
         };

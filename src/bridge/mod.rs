@@ -558,9 +558,10 @@ where
 {
     use futures::StreamExt;
     match tokio::time::timeout(SSE_FIRST_EVENT_DEADLINE, stream.into_future()).await {
-        // 首事件到达：once + chain 重组，顺序与原流一致
+        // 首事件到达：iter + chain 重组，顺序与原流一致
+        // （首元素已解包为 T，iter 的 Item 与 rest 同为 Result<T, BridgeError>）
         Ok((Some(Ok(first)), rest)) => Ok(Box::pin(
-            futures::stream::once(async move { first }).chain(rest),
+            futures::stream::iter([Ok(first)]).chain(rest),
         )),
         // 首事件即错误：短路为失败，走熔断 + failover
         Ok((Some(Err(e)), _rest)) => Err(e),
@@ -679,7 +680,11 @@ mod tests {
     #[tokio::test]
     async fn first_event_guard_short_circuits_on_error_chunk() {
         let stream = boxed(vec![Err::<u32, _>(BridgeError::Transport("boom".into()))]);
-        let err = first_event_or_timeout(stream).await.expect_err("首 Err 应短路为失败");
+        // expect_err 需要 Ok 值实现 Debug（BoxStream 未实现），改用 match 断言
+        let err = match first_event_or_timeout(stream).await {
+            Err(e) => e,
+            Ok(_) => panic!("首 Err 应短路为失败"),
+        };
         match err {
             BridgeError::Transport(msg) => assert_eq!(msg, "boom"),
             other => panic!("应为 Transport 变体，实际 {other:?}"),
@@ -690,7 +695,9 @@ mod tests {
     #[tokio::test]
     async fn first_event_guard_passes_empty_stream_through() {
         let stream: BoxStream<'static, Result<u32, BridgeError>> = futures::stream::empty().boxed();
-        let mut stream = first_event_or_timeout(stream).await.expect("空流应原样放行");
+        let mut stream = first_event_or_timeout(stream)
+            .await
+            .expect("空流应原样放行");
         assert!(stream.next().await.is_none());
     }
 
@@ -698,7 +705,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn first_event_guard_times_out_when_no_first_event() {
         let hung: BoxStream<'static, Result<u32, BridgeError>> = futures::stream::pending().boxed();
-        let err = first_event_or_timeout(hung).await.expect_err("挂起流应判超时");
+        // expect_err 需要 Ok 值实现 Debug（BoxStream 未实现），改用 match 断言
+        let err = match first_event_or_timeout(hung).await {
+            Err(e) => e,
+            Ok(_) => panic!("挂起流应判超时"),
+        };
         match err {
             BridgeError::Timeout { elapsed_ms, .. } => {
                 assert_eq!(elapsed_ms, SSE_FIRST_EVENT_DEADLINE.as_millis() as u64);

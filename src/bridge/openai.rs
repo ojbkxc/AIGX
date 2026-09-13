@@ -1006,7 +1006,10 @@ mod tests {
         });
         let stats = super::parse_usage(&json);
         assert_eq!(stats.prompt_tokens, 100);
-        assert_eq!(stats.cached_prompt_tokens, 40, "DeepSeek 字段应优先于新口径");
+        assert_eq!(
+            stats.cached_prompt_tokens, 40,
+            "DeepSeek 字段应优先于新口径"
+        );
     }
 
     /// OpenAI 新口径：usage.prompt_tokens_details.cached_tokens。
@@ -1059,7 +1062,10 @@ mod tests {
             }
         });
         let stats = super::parse_usage(&json);
-        assert_eq!(stats.cached_prompt_tokens, 50, "hit 超出 prompt 应收敛到 prompt");
+        assert_eq!(
+            stats.cached_prompt_tokens, 50,
+            "hit 超出 prompt 应收敛到 prompt"
+        );
         assert_eq!(stats.prompt_tokens, 50, "prompt_tokens 原样保留");
     }
 
