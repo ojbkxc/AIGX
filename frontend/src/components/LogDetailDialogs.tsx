@@ -52,6 +52,28 @@ export function RequestLogDetail({ log, admin, onClose }: {
           <pre className="log-detail-pre">{log.error_msg}</pre>
         </div>
       )}
+      {admin && log.debug && (
+        <div className="log-detail-debug">
+          {log.debug.upstream_url && (
+            <div className="log-detail-debug-block">
+              <div className="log-detail-label">{t('上游端点')}</div>
+              <pre className="log-detail-pre">{log.debug.upstream_url}</pre>
+            </div>
+          )}
+          {log.debug.request_body && (
+            <div className="log-detail-debug-block">
+              <div className="log-detail-label">{t('请求体')}</div>
+              <pre className="log-detail-pre">{log.debug.request_body}</pre>
+            </div>
+          )}
+          {log.debug.response_body && (
+            <div className="log-detail-debug-block">
+              <div className="log-detail-label">{t('响应体')}</div>
+              <pre className="log-detail-pre">{log.debug.response_body}</pre>
+            </div>
+          )}
+        </div>
+      )}
     </LogDetailShell>
   );
 }

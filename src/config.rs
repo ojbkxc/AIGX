@@ -38,9 +38,9 @@ fn default_monthly_limit() -> u64 {
     100_000
 }
 
-/// 注册赠送配额默认 0（与 Epay price 口径一致：1 元 = price 单位配额）。
+/// 注册赠送配额默认 200（用户要求：注册即送 200 额度）。
 fn default_register_quota() -> i64 {
-    0
+    200
 }
 
 /// 注册开关默认开启（向后兼容：升级不停用既有注册入口）。
@@ -191,6 +191,12 @@ pub struct UsageConfig {
     /// 每个受邀新用户的奖励配额（对齐 new-api QuotaForInvitee，0=无奖励）
     #[serde(default)]
     pub quota_for_invitee: i64,
+    /// 是否启用注册邮箱白名单（对齐 v2board email_whitelist_enable）
+    #[serde(default)]
+    pub email_whitelist_enable: bool,
+    /// 允许注册的邮箱后缀（对齐 v2board email_whitelist_suffix，如 ["gmail.com"]）
+    #[serde(default)]
+    pub email_whitelist_suffix: Vec<String>,
     /// 签到设置（对齐 new-api CheckinSetting：开关 + 奖励区间）
     #[serde(default)]
     pub checkin: crate::user::checkin::CheckinSetting,
@@ -200,6 +206,11 @@ pub struct UsageConfig {
     pub api_timeout_secs: u64,
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// 请求日志快照开关（log_body）：开启后把客户端请求体/上游响应体
+    /// 截断快照进请求日志（每字段 4KB 上限），用于排障回放。
+    /// 默认关闭——关闭时零开销（无序列化、无存储、无字符截断拷贝）。
+    #[serde(default)]
+    pub log_body: bool,
 }
 
 fn default_api_timeout() -> u64 {
@@ -292,10 +303,13 @@ impl Default for UsageConfig {
             register_enabled: default_register_enabled(),
             quota_for_inviter: 0,
             quota_for_invitee: 0,
+            email_whitelist_enable: false,
+            email_whitelist_suffix: Vec::new(),
             checkin: Default::default(),
             threshold: 0.0,
             api_timeout_secs: default_api_timeout(),
             max_retries: default_max_retries(),
+            log_body: false,
         }
     }
 }
@@ -318,6 +332,23 @@ pub fn trust_proxy_headers() -> bool {
 /// 启动时由 main 写入快照（见 main.rs）
 pub fn set_trust_proxy_headers(v: bool) {
     TRUST_PROXY_HEADERS.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 请求日志快照开关的进程级快照（由 main 启动时写入）。
+///
+/// 数据面计费/日志路径是同步代码（StreamBillingState::finalize 无法
+/// await config_manager.get()），走原子快照零开销：关闭时分支预测
+/// 直通，无锁无拷贝。管理端改 log_body 后重启进程生效。
+static LOG_BODY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 读取 log_body 快照（供数据面日志路径同步访问）
+pub fn log_body_enabled() -> bool {
+    LOG_BODY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 与 settings 更新端点写入快照
+pub fn set_log_body(v: bool) {
+    LOG_BODY.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub struct ConfigManager {

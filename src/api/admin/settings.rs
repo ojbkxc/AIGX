@@ -27,11 +27,15 @@ pub struct LimitsRequest {
     pub register_enabled: Option<bool>,
     pub quota_for_inviter: Option<i64>,
     pub quota_for_invitee: Option<i64>,
+    pub email_whitelist_enable: Option<bool>,
+    pub email_whitelist_suffix: Option<Vec<String>>,
     /// 签到设置（对齐 new-api CheckinSetting）
     pub checkin: Option<CheckinSettingBody>,
     pub threshold: Option<f64>,
     pub api_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
+    /// 请求日志快照开关（log_body）
+    pub log_body: Option<bool>,
 }
 
 /// 签到设置请求体（enabled + 奖励区间）
@@ -113,10 +117,13 @@ pub async fn handle_get_limits(
             "register_enabled": config.usage.register_enabled,
             "quota_for_inviter": config.usage.quota_for_inviter,
             "quota_for_invitee": config.usage.quota_for_invitee,
+            "email_whitelist_enable": config.usage.email_whitelist_enable,
+            "email_whitelist_suffix": config.usage.email_whitelist_suffix,
             "checkin": config.usage.checkin,
             "threshold": config.usage.threshold,
             "api_timeout_secs": config.usage.api_timeout_secs,
             "max_retries": config.usage.max_retries,
+            "log_body": config.usage.log_body,
         })
     })))
 }
@@ -146,6 +153,12 @@ pub async fn handle_update_limits(
     if let Some(v) = body.quota_for_invitee {
         config.usage.quota_for_invitee = v;
     }
+    if let Some(v) = body.email_whitelist_enable {
+        config.usage.email_whitelist_enable = v;
+    }
+    if let Some(v) = body.email_whitelist_suffix {
+        config.usage.email_whitelist_suffix = v;
+    }
     if let Some(c) = body.checkin {
         if let Some(v) = c.enabled {
             config.usage.checkin.enabled = v;
@@ -165,6 +178,11 @@ pub async fn handle_update_limits(
     }
     if let Some(v) = body.max_retries {
         config.usage.max_retries = v;
+    }
+    if let Some(v) = body.log_body {
+        config.usage.log_body = v;
+        // 同步进程级快照（数据面同步路径读取，立即生效）
+        crate::config::set_log_body(v);
     }
     match state.config_manager.update(config).await {
         Ok(_) => {

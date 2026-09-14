@@ -20,7 +20,7 @@ use super::common::{error_response, verify_user};
 /// 原先 Playground 四个接口登录即用、零计费——任何注册用户可无限免费
 /// 消耗上游额度。现与数据面同一套扣费路径（订阅池优先 + 钱包兜底）。
 /// 管理员豁免（调试渠道是管理职责，与 new-api playground 语义一致）。
-pub(crate) fn charge_playground_usage(
+fn charge_playground_usage(
     state: &AppState,
     user_id: &str,
     model: &str,
@@ -83,6 +83,7 @@ pub(crate) fn charge_playground_usage(
         cache_hit: false,
         filtered_channels: Vec::new(),
         selected_channel: None,
+        debug: None,
     };
     if let Err(e) = state.log_store.requests.add(log) {
         tracing::warn!("playground request log write failed: {e}");

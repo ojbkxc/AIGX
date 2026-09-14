@@ -25,11 +25,11 @@ pub struct CheckinSetting {
 }
 
 fn default_min_quota() -> i64 {
-    1000
+    20
 }
 
 fn default_max_quota() -> i64 {
-    5000
+    20
 }
 
 impl Default for CheckinSetting {

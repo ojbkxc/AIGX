@@ -2019,6 +2019,21 @@ code {
   margin-top: 12px;
 }
 
+/* 请求/响应快照（log_body 开关；仅 admin 详情展示） */
+.log-detail-debug {
+  margin-top: 12px;
+}
+
+.log-detail-debug-block {
+  margin-top: 10px;
+}
+
+.log-detail-debug .log-detail-pre {
+  color: var(--text-main);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
 .log-detail-change-list {
   display: flex;
   flex-wrap: wrap;

@@ -131,6 +131,39 @@ impl ChatFormat {
     }
 }
 
+/// ChatFormat 的调试序列化（log_body 快照用）。
+///
+/// ChatFormat 不派生 Serialize（Role 等枚举无 serde 实现），此处手工
+/// 拼一个精简 JSON：只保留排障需要的 model/messages/参数，tools/extra
+/// 之类大对象省略（快照有 4KB 截断上限，塞大工具定义无意义）。
+pub fn chat_format_debug_json(req: &ChatFormat) -> String {
+    let messages: Vec<serde_json::Value> = req
+        .messages
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "role": format!("{:?}", m.role).to_lowercase(),
+                "content": m.content_str(),
+            })
+        })
+        .collect();
+    let mut obj = serde_json::json!({
+        "model": req.model,
+        "messages": messages,
+        "stream": req.stream,
+    });
+    if let Some(t) = req.temperature {
+        obj["temperature"] = serde_json::json!(t);
+    }
+    if let Some(t) = req.top_p {
+        obj["top_p"] = serde_json::json!(t);
+    }
+    if let Some(t) = req.max_tokens {
+        obj["max_tokens"] = serde_json::json!(t);
+    }
+    obj.to_string()
+}
+
 /// 聊天完成原因
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinishReason {

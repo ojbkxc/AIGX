@@ -30,6 +30,12 @@ export interface RequestLogItem {
   status_code?: number;
   error_msg?: string;
   ip?: string;
+  /** 请求/响应快照（log_body 开关开启时后端记录；仅 admin 详情展示） */
+  debug?: {
+    request_body?: string;
+    response_body?: string;
+    upstream_url?: string;
+  };
 }
 
 export interface AuditLogItem {

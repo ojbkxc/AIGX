@@ -96,7 +96,7 @@ export default function Wallet(): JSX.Element {
   const [checkingIn, setCheckingIn] = useState(false);
 
   const [amount, setAmount] = useState('10');
-  const [method, setMethod] = useState('alipay');
+  const [method, setMethod] = useState('wxpay');
   const [submitting, setSubmitting] = useState(false);
 
   // 兑换码

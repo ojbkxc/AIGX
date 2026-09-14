@@ -814,6 +814,11 @@ pub async fn handle_messages(
                 // anthropic 分支尚未接入两段式计费（P1 后续），
                 // 走 finalize 内 charge_usage_with_tools 旧路径
                 reservation: None,
+                debug_request_body: if crate::config::log_body_enabled() {
+                    Some(crate::bridge::chat_format_debug_json(&chat_req))
+                } else {
+                    None
+                },
             });
             let billing_fin = billing.clone();
             let has_tool_fin = has_tool.clone();

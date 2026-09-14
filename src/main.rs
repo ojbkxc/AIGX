@@ -96,6 +96,8 @@ async fn main() -> anyhow::Result<()> {
     // XFF/X-Real-IP 信任快照：默认不信任（客户端可伪造），
     // 部署在可信反代后时在 config.toml 设 trust_proxy_headers = true
     crate::config::set_trust_proxy_headers(config.trust_proxy_headers);
+    // 请求日志快照开关快照（数据面同步路径读取，见 config::log_body_enabled）
+    crate::config::set_log_body(config.usage.log_body);
 
     // 初始化存储（默认 SQLite 后端；--no-default-features 构建降级为 JSON 文件）
     let data_dir = crate::config::expand_path(&config.server.data_dir);

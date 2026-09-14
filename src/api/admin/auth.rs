@@ -306,6 +306,27 @@ pub async fn handle_register(
     if !config.usage.register_enabled {
         return Err(error_response("注册已关闭", StatusCode::FORBIDDEN));
     }
+    // 邮箱白名单（对齐 v2board email_whitelist_enable + emailSuffixVerify）：
+    // 开启后仅允许指定后缀的邮箱注册，按 @ 分割取域名后缀精确匹配。
+    if config.usage.email_whitelist_enable {
+        let suffix = body
+            .email
+            .trim()
+            .rsplit_once('@')
+            .map(|(_, domain)| domain.trim().to_string())
+            .unwrap_or_default();
+        let allowed = config
+            .usage
+            .email_whitelist_suffix
+            .iter()
+            .any(|s| s.trim() == suffix);
+        if !allowed {
+            return Err(error_response(
+                "邮箱后缀不在注册白名单内",
+                StatusCode::FORBIDDEN,
+            ));
+        }
+    }
     // 注册赠送配额与月度限额分离（原实现把 monthly_limit 当赠送额度，
     // 与充值配额口径混淆）
     let default_quota = config.usage.register_quota;

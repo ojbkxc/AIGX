@@ -87,6 +87,9 @@ pub struct RequestLog {
     /// 是否缓存命中（G4：区分 cache 请求与普通请求的记账维度）
     #[serde(default)]
     pub cache_hit: bool,
+    /// 请求/响应快照（仅 log_body 开关开启时记录；关闭时 None 且不序列化）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<LogDebugSnapshot>,
 }
 
 /// 被过滤的渠道信息（P1-7 调度决策回放）
@@ -94,6 +97,63 @@ pub struct RequestLog {
 pub struct FilteredChannel {
     pub channel_id: String,
     pub reason: String,
+}
+
+/// 请求/响应快照（排障用，仅 `log_body` 开关开启时记录）。
+///
+/// 对齐 new-api 无落库、仅 stdout DEBUG 的缺陷：AIGX 把快照直接挂在
+/// 请求日志上，点开日志详情即可回放那次对话。开关关闭时字段为 None
+/// 且 `skip_serializing_if` 使其不出现在 JSON 中，零存储/零序列化开销。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogDebugSnapshot {
+    /// 客户端请求体（截断至 `MAX_SNAPSHOT_BYTES`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body: Option<String>,
+    /// 上游响应（非流式 = 响应 JSON；流式 = 拼接后文本；失败 = 上游原始错误体）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body: Option<String>,
+    /// 实际请求的上游端点 URL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_url: Option<String>,
+}
+
+impl LogDebugSnapshot {
+    /// 单字段截断上限（字节）。按字符边界截断，避免切断 UTF-8 多字节序列。
+    pub const MAX_SNAPSHOT_BYTES: usize = 4096;
+
+    /// 截断到上限（字符安全）
+    fn truncate(s: impl Into<String>) -> String {
+        let s: String = s.into();
+        if s.len() <= Self::MAX_SNAPSHOT_BYTES {
+            return s;
+        }
+        let mut end = Self::MAX_SNAPSHOT_BYTES;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut out = s[..end].to_string();
+        out.push_str("…[truncated]");
+        out
+    }
+
+    /// 构造快照（自动截断；空字符串视为 None 不记录）
+    pub fn new(
+        request_body: Option<String>,
+        response_body: Option<String>,
+        upstream_url: Option<String>,
+    ) -> Option<Self> {
+        let req = request_body.filter(|s| !s.is_empty()).map(Self::truncate);
+        let resp = response_body.filter(|s| !s.is_empty()).map(Self::truncate);
+        let url = upstream_url.filter(|s| !s.is_empty());
+        if req.is_none() && resp.is_none() && url.is_none() {
+            return None;
+        }
+        Some(Self {
+            request_body: req,
+            response_body: resp,
+            upstream_url: url,
+        })
+    }
 }
 
 impl Default for RequestLog {
@@ -126,6 +186,7 @@ impl RequestLog {
             filtered_channels: Vec::new(),
             selected_channel: None,
             cache_hit: false,
+            debug: None,
         }
     }
 }

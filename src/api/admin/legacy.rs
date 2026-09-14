@@ -2798,6 +2798,37 @@ fn default_true() -> bool {
     true
 }
 
+/// 聊天页按次计费：每次请求扣固定额度（用户要求 1 次请求 = 2 额度）。
+///
+/// 与 playground 计费同序：订阅池优先 + 钱包兜底；管理员豁免
+/// （调试渠道是管理职责）。仅在收到上游成功响应后调用。
+const CHAT_TEST_QUOTA_PER_REQUEST: i64 = 2;
+
+fn charge_chat_test_request(state: &AppState, user_id: &str) {
+    if state.user_store.get_by_id(user_id).is_none() {
+        return;
+    }
+    let mut remaining = CHAT_TEST_QUOTA_PER_REQUEST;
+    let now = chrono::Utc::now().timestamp();
+    for sub in state.subscription_store.find_active(user_id, now) {
+        if remaining <= 0 {
+            break;
+        }
+        let pool = if sub.amount_total > 0 {
+            sub.amount_total - sub.amount_used
+        } else {
+            remaining
+        };
+        let take = pool.min(remaining);
+        if take > 0 && state.subscription_store.try_charge(&sub.id, take) {
+            remaining -= take;
+        }
+    }
+    if remaining > 0 && !state.user_store.try_charge(user_id, remaining) {
+        tracing::warn!("chat_test charge failed for user {user_id} (insufficient quota)");
+    }
+}
+
 /// 渠道对话调试入口（原 admin.rs 逐字搬运）。
 pub async fn handle_channel_chat_test(
     State(state): State<AppState>,
@@ -3088,10 +3119,9 @@ pub async fn handle_channel_chat_test(
 
 /// chat_test 记账：落请求日志 + usage 统计 + Prometheus 指标。
 ///
-/// 与 Playground 的 charge_playground_usage 同一形态，但 chat_test 的
-/// 关键差异：**谁发起就记谁**——管理员测试自己的渠道是管理职责（不扣费），
-/// 普通用户聊天产生的消耗与数据面一样进日志页与用量统计，可审计可追溯。
-/// token 优先取上游 usage 块；缺失时按累积文本估算。
+/// 管理员测试自己的渠道是管理职责（不扣费），普通用户聊天按次扣费
+/// （见 charge_chat_test_request）。token 优先取上游 usage 块；
+/// 缺失时按累积文本估算。
 #[allow(clippy::too_many_arguments)]
 fn record_chat_test_usage(
     state: &AppState,
@@ -3112,17 +3142,9 @@ fn record_chat_test_usage(
         c
     };
 
-    // 与 Playground 同口径：管理员豁免扣费，普通用户实时扣
+    // 管理员豁免；普通用户按次计费（1 次 = 2 额度，订阅池优先 + 钱包兜底）
     if !user.is_admin() {
-        super::playground::charge_playground_usage(
-            state,
-            &user.id,
-            model,
-            Some(channel_id),
-            Some(channel_name),
-            p,
-            c,
-        );
+        charge_chat_test_request(state, &user.id);
     } else {
         // 管理员：不扣费，但同样落日志（可追溯）
         let group = user.group.clone();
@@ -3152,6 +3174,7 @@ fn record_chat_test_usage(
             cache_hit: false,
             filtered_channels: Vec::new(),
             selected_channel: None,
+            debug: None,
         };
         if let Err(e) = state.log_store.requests.add(log) {
             tracing::warn!("chat_test request log write failed: {e}");

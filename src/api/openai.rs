@@ -949,6 +949,8 @@ pub(crate) struct StreamBillingState {
     pub(crate) filtered_channels: Vec<crate::log::FilteredChannel>,
     /// P1：预留记录（两段式计费）
     pub(crate) reservation: Option<Reservation>,
+    /// 日志快照：客户端请求体（log_body 开关开启时填充，None 时零开销）
+    pub(crate) debug_request_body: Option<String>,
 }
 
 impl StreamBillingState {
@@ -1017,6 +1019,14 @@ impl StreamBillingState {
         log.candidate_channels = self.candidate_channels.clone();
         log.filtered_channels = self.filtered_channels.clone();
         log.selected_channel = self.channel_id.clone();
+        // log_body 开关：快照 = 请求体 + 流式拼接文本（关闭时 None 零开销）
+        if self.debug_request_body.is_some() {
+            log.debug = crate::log::LogDebugSnapshot::new(
+                self.debug_request_body.clone(),
+                Some(self.acc.lock().clone()),
+                None,
+            );
+        }
         self.state.log_store.record_request(log);
 
         (prompt_tokens, completion_tokens)
@@ -1524,6 +1534,13 @@ pub async fn handle_chat_completions(
         .filter_map(|(_, cid, _)| cid.clone())
         .collect();
 
+    // log_body 开关：客户端请求体快照（一次序列化，失败/成功路径共用）
+    let debug_request_body = if crate::config::log_body_enabled() {
+        Some(crate::bridge::chat_format_debug_json(&chat_req))
+    } else {
+        None
+    };
+
     if is_stream {
         // B06：failover 循环——依次尝试候选渠道建立流，仅对上游可重试错误切换
         let mut stream_opt = None;
@@ -1642,6 +1659,14 @@ pub async fn handle_chat_completions(
                 log.candidate_channels = candidate_channel_ids.clone();
                 log.filtered_channels = filtered_channels.clone();
                 log.selected_channel = used_channel_id.clone();
+                // log_body：失败路径快照——上游原始错误信息进 response_body
+                if debug_request_body.is_some() {
+                    log.debug = crate::log::LogDebugSnapshot::new(
+                        debug_request_body.clone(),
+                        Some(e.to_string()),
+                        None,
+                    );
+                }
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 crate::metrics::global().record_request(
@@ -1801,6 +1826,7 @@ pub async fn handle_chat_completions(
                 candidate_channels: candidate_channel_ids.clone(),
                 filtered_channels: filtered_channels.clone(),
                 reservation: Some(reservation),
+                debug_request_body,
             });
             let billing_fin = billing.clone();
             let final_event = async move {
