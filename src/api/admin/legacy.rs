@@ -2972,6 +2972,8 @@ pub async fn handle_channel_chat_test(
                         ch.id.clone(),
                         ch.name.clone(),
                         model.clone(),
+                        payload.clone(),
+                        url.clone(),
                         request_start,
                     ))
                     .into_response();
@@ -3000,6 +3002,8 @@ pub async fn handle_channel_chat_test(
                                 &model,
                                 &json,
                                 None,
+                                &payload,
+                                &url,
                                 request_start.elapsed().as_millis() as u64,
                             );
                             Json(serde_json::json!({
@@ -3059,6 +3063,8 @@ pub async fn handle_channel_chat_test(
                     ch.id.clone(),
                     ch.name.clone(),
                     model.clone(),
+                    payload.clone(),
+                    url.clone(),
                     request_start,
                 ))
                 .into_response();
@@ -3091,6 +3097,8 @@ pub async fn handle_channel_chat_test(
                             &model,
                             &json,
                             None,
+                            &payload,
+                            &url,
                             request_start.elapsed().as_millis() as u64,
                         );
                         Json(serde_json::json!({
@@ -3121,7 +3129,8 @@ pub async fn handle_channel_chat_test(
 ///
 /// 管理员测试自己的渠道是管理职责（不扣费），普通用户聊天按次扣费
 /// （见 charge_chat_test_request）。token 优先取上游 usage 块；
-/// 缺失时按累积文本估算。
+/// 缺失时按累积文本估算。两侧都落 RequestLog——`log_body` 开启时
+/// 快照含请求正文与响应正文，日志详情可回放整次对话。
 #[allow(clippy::too_many_arguments)]
 fn record_chat_test_usage(
     state: &AppState,
@@ -3131,6 +3140,8 @@ fn record_chat_test_usage(
     model: &str,
     usage_json: &Value,
     accumulated_text: Option<&str>,
+    request_body: &Value,
+    upstream_url: &str,
     latency_ms: u64,
 ) {
     let (p, c) = super::playground::extract_usage_tokens(usage_json);
@@ -3142,43 +3153,51 @@ fn record_chat_test_usage(
         c
     };
 
-    // 管理员豁免；普通用户按次计费（1 次 = 2 额度，订阅池优先 + 钱包兜底）
+    // 普通用户按次计费（1 次 = 2 额度，订阅池优先 + 钱包兜底）；管理员豁免
     if !user.is_admin() {
         charge_chat_test_request(state, &user.id);
-    } else {
-        // 管理员：不扣费，但同样落日志（可追溯）
-        let group = user.group.clone();
-        let cost = state
-            .pricing_store
-            .calculate_cost_quoted(model, p, c, &group)
-            .unwrap_or(0);
-        let log = crate::log::RequestLog {
-            id: uuid::Uuid::new_v4().to_string(),
-            user_id: Some(user.id.clone()),
-            key_id: Some("chat_test".to_string()),
-            channel_id: Some(channel_id.to_string()),
-            channel_name: Some(channel_name.to_string()),
-            model: model.to_string(),
-            origin_model: Some(model.to_string()),
-            input_tokens: p,
-            output_tokens: c,
-            cost,
-            channel_cost: cost,
-            latency_ms,
-            status_code: 200,
-            error_msg: None,
-            ip: None,
-            request_id: None,
-            created_at: chrono::Utc::now().timestamp(),
-            candidate_channels: Vec::new(),
-            cache_hit: false,
-            filtered_channels: Vec::new(),
-            selected_channel: None,
-            debug: None,
-        };
-        if let Err(e) = state.log_store.requests.add(log) {
-            tracing::warn!("chat_test request log write failed: {e}");
-        }
+    }
+    // 两侧都落日志（可追溯）；log_body 开启时挂正文快照（流式 = 累积文本）
+    let debug = crate::log::LogDebugSnapshot::new(
+        Some(request_body.to_string()),
+        Some(if usage_json.is_null() {
+            output_text.to_string()
+        } else {
+            usage_json.to_string()
+        }),
+        Some(upstream_url.to_string()),
+    );
+    let group = user.group.clone();
+    let cost = state
+        .pricing_store
+        .calculate_cost_quoted(model, p, c, &group)
+        .unwrap_or(0);
+    let log = crate::log::RequestLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        user_id: Some(user.id.clone()),
+        key_id: Some("chat_test".to_string()),
+        channel_id: Some(channel_id.to_string()),
+        channel_name: Some(channel_name.to_string()),
+        model: model.to_string(),
+        origin_model: Some(model.to_string()),
+        input_tokens: p,
+        output_tokens: c,
+        cost: if user.is_admin() { 0 } else { cost },
+        channel_cost: cost,
+        latency_ms,
+        status_code: 200,
+        error_msg: None,
+        ip: None,
+        request_id: None,
+        created_at: chrono::Utc::now().timestamp(),
+        candidate_channels: Vec::new(),
+        cache_hit: false,
+        filtered_channels: Vec::new(),
+        selected_channel: None,
+        debug,
+    };
+    if let Err(e) = state.log_store.requests.add(log) {
+        tracing::warn!("chat_test request log write failed: {e}");
     }
     // 全局 usage 统计与 Prometheus 指标（管理员也累计——上游消耗真实发生）
     state.usage_tracker.accumulate(p, c, 0, 0, 0, 0.0);
@@ -3193,6 +3212,7 @@ fn record_chat_test_usage(
 /// 复用数据面 [`crate::api::openai::GuardedStream`] + Drop 守卫语义：
 /// 客户端断连时 hyper 中途 drop 响应体流，守卫随流 drop 兜底记账，
 /// 不漏记、不重记（原子标志互斥）。
+#[allow(clippy::too_many_arguments)]
 fn chat_test_logged_stream<S, E>(
     inner: S,
     state: AppState,
@@ -3200,6 +3220,8 @@ fn chat_test_logged_stream<S, E>(
     channel_id: String,
     channel_name: String,
     model: String,
+    request_body: Value,
+    upstream_url: String,
     request_start: std::time::Instant,
 ) -> impl Stream<Item = Result<bytes::Bytes, E>>
 where
@@ -3259,6 +3281,8 @@ where
         channel_id: String,
         channel_name: String,
         model: String,
+        request_body: Value,
+        upstream_url: String,
         request_start: std::time::Instant,
         acc: std::sync::Arc<parking_lot::Mutex<String>>,
         fired: std::sync::atomic::AtomicBool,
@@ -3277,6 +3301,8 @@ where
                 &self.model,
                 &Value::Null,
                 Some(&output),
+                &self.request_body,
+                &self.upstream_url,
                 self.request_start.elapsed().as_millis() as u64,
             );
         }
@@ -3287,6 +3313,8 @@ where
         channel_id,
         channel_name,
         model,
+        request_body,
+        upstream_url,
         request_start,
         acc: acc.clone(),
         fired: std::sync::atomic::AtomicBool::new(false),
