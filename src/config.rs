@@ -211,6 +211,15 @@ pub struct UsageConfig {
     /// 默认关闭——关闭时零开销（无序列化、无存储、无字符截断拷贝）。
     #[serde(default)]
     pub log_body: bool,
+    /// 按次计费每次固定扣减的额度数（全局统一，`billing_mode=count` 的
+    /// 订阅套餐生效）。默认 2，与聊天页「1 次 = 2 额度」口径一致。
+    /// 与 token 计费互斥：订阅计费模式为 count 时按此固定值扣，否则按 token 量。
+    #[serde(default = "default_billing_flat_quota")]
+    pub billing_flat_quota: i64,
+}
+
+fn default_billing_flat_quota() -> i64 {
+    2
 }
 
 fn default_api_timeout() -> u64 {
@@ -310,6 +319,7 @@ impl Default for UsageConfig {
             api_timeout_secs: default_api_timeout(),
             max_retries: default_max_retries(),
             log_body: false,
+            billing_flat_quota: default_billing_flat_quota(),
         }
     }
 }
@@ -349,6 +359,22 @@ pub fn log_body_enabled() -> bool {
 /// 由 main 与 settings 更新端点写入快照
 pub fn set_log_body(v: bool) {
     LOG_BODY.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 按次计费每次固定扣减额度的进程级快照（数据面同步路径读取）。
+///
+/// 数据面计费路径（charge/reserve/settle）是同步函数，无法 await
+/// config_manager.get()；与 log_body 同理，走原子快照零开销。默认 2。
+static BILLING_FLAT_QUOTA: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(2);
+
+/// 读取 billing_flat_quota 快照（供数据面按次计费同步访问）
+pub fn billing_flat_quota() -> i64 {
+    BILLING_FLAT_QUOTA.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 与 settings 更新端点写入快照
+pub fn set_billing_flat_quota(v: i64) {
+    BILLING_FLAT_QUOTA.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub struct ConfigManager {

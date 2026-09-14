@@ -71,6 +71,9 @@ pub struct UserSubscription {
     /// 订阅池耗尽后是否允许回退用户钱包（快照自 plan）
     #[serde(default = "default_true")]
     pub allow_wallet_overflow: bool,
+    /// 计费模式快照（count=每次固定扣额度 / 空或 token=按 token 量）
+    #[serde(default)]
+    pub billing_mode: String,
     pub created_at: i64,
     #[serde(default)]
     pub updated_at: i64,
@@ -80,6 +83,11 @@ impl UserSubscription {
     /// 动态活跃判断（status 与到期时间双重条件，cron 落库前的过渡态安全）
     pub fn is_active_at(&self, now: i64) -> bool {
         self.status == "active" && self.end_time > now
+    }
+
+    /// 订阅是否按次计费
+    pub fn is_count_billing(&self) -> bool {
+        self.billing_mode == "count"
     }
 }
 
@@ -531,6 +539,7 @@ mod tests {
             upgrade_group: String::new(),
             downgrade_group: String::new(),
             sort_order: 0,
+            billing_mode: String::new(),
         }
     }
 
@@ -553,6 +562,7 @@ mod tests {
                 prev_user_group: String::new(),
                 downgrade_group: String::new(),
                 allow_wallet_overflow: true,
+                billing_mode: String::new(),
                 created_at: now,
                 updated_at: now,
             })

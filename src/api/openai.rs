@@ -507,6 +507,58 @@ pub fn charge_usage(
     )
 }
 
+/// 计费额度裁决（销售侧，与渠道成本无关）。
+///
+/// 活跃订阅为 `billing_mode=count` 时，每次请求固定扣全局
+/// `config::billing_flat_quota`（忽略 token 量）；否则按 token 量 ×
+/// 定价 × 倍率，附加工具按次费。
+fn resolve_billing_quota(
+    state: &AppState,
+    api_key: &super::auth::ApiKey,
+    model: &str,
+    group: &str,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    tool_calls: Option<&crate::pricing::ToolCallCounts>,
+) -> i64 {
+    // 订阅按次计费：用户任一活跃订阅为 count 模式即整体按次
+    let count_billing = api_key
+        .user_id
+        .as_deref()
+        .map(|uid| {
+            let now = chrono::Utc::now().timestamp();
+            state
+                .subscription_store
+                .find_active(uid, now)
+                .iter()
+                .any(|s| s.is_count_billing())
+        })
+        .unwrap_or(false);
+    if count_billing {
+        return crate::config::billing_flat_quota();
+    }
+
+    match state
+        .pricing_store
+        .calculate_cost_quoted(model, prompt_tokens, completion_tokens, group)
+    {
+        Ok(mut c) => {
+            if let Some(tools) = tool_calls {
+                c = c.saturating_add(
+                    state
+                        .pricing_store
+                        .calculate_tool_surcharge(tools, model, group),
+                );
+            }
+            c
+        }
+        Err(e) => {
+            tracing::warn!("billing: {e}, billing as 0");
+            0
+        }
+    }
+}
+
 /// 计算渠道成本（配额单位）。
 ///
 /// 该渠道配了该模型成本价 → 按成本价单价 * 全局倍率表算；
@@ -563,27 +615,16 @@ pub fn charge_usage_with_tools(
     completion_tokens: u64,
     tool_calls: Option<&crate::pricing::ToolCallCounts>,
 ) -> i64 {
-    // B09：无定价时记告警并按 0 计费兜底——请求已在入口被 ensure_model_priced
-    // 拦截，此处仅防御“请求进行中价格被删除”的竞态场景
-    let mut cost = match state.pricing_store.calculate_cost_quoted(
+    // 计费额度裁决：按次订阅固定扣额度 / 按 token 量计费
+    let cost = resolve_billing_quota(
+        state,
+        api_key,
         model,
+        group,
         prompt_tokens,
         completion_tokens,
-        group,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("charge_usage: {e}, billing as 0 (price removed mid-request?)");
-            0
-        }
-    };
-    if let Some(tools) = tool_calls {
-        cost = cost.saturating_add(
-            state
-                .pricing_store
-                .calculate_tool_surcharge(tools, model, group),
-        );
-    }
+        tool_calls,
+    );
     // Prometheus 成本指标：pricing 以 USD 计价，cost 即向上取整后的美元配额
     // （单位 1 美元），统一折算为微美元累加，供 /metrics 展示 aigx_cost_usd_total。
     if cost > 0 {
@@ -676,21 +717,15 @@ pub fn reserve_usage(
     estimated_prompt_tokens: u64,
     estimated_completion_tokens: u64,
 ) -> Result<Reservation, (StatusCode, Json<Value>)> {
-    let estimated_cost = state
-        .pricing_store
-        .calculate_cost_quoted(
-            model,
-            estimated_prompt_tokens,
-            estimated_completion_tokens,
-            group,
-        )
-        .map_err(|e| {
-            error_response(
-                "pricing_error",
-                &format!("Failed to estimate cost: {}", e),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-        })?;
+    let estimated_cost = resolve_billing_quota(
+        state,
+        api_key,
+        model,
+        group,
+        estimated_prompt_tokens,
+        estimated_completion_tokens,
+        None,
+    );
 
     if estimated_cost <= 0 {
         return Ok(Reservation {
@@ -808,26 +843,15 @@ pub fn settle_usage(
     actual_completion_tokens: u64,
     tool_calls: Option<&crate::pricing::ToolCallCounts>,
 ) -> i64 {
-    let mut actual_cost = match state.pricing_store.calculate_cost_quoted(
+    let actual_cost = resolve_billing_quota(
+        state,
+        api_key,
         model,
+        group,
         actual_prompt_tokens,
         actual_completion_tokens,
-        group,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("settle_usage: {e}, billing as 0");
-            0
-        }
-    };
-
-    if let Some(tools) = tool_calls {
-        actual_cost = actual_cost.saturating_add(
-            state
-                .pricing_store
-                .calculate_tool_surcharge(tools, model, group),
-        );
-    }
+        tool_calls,
+    );
 
     if actual_cost > 0 {
         crate::metrics::global().record_cost("usd", (actual_cost as u64).saturating_mul(1_000_000));
@@ -1160,6 +1184,8 @@ pub(crate) struct ResponsesBillingState {
     pub(crate) channel_id: Option<String>,
     /// 渠道名（admin 排查用）
     pub(crate) channel_name: Option<String>,
+    /// 日志快照：客户端请求体（log_body 开关开启时填充，None 时零开销）
+    pub(crate) debug_request_body: Option<String>,
 }
 
 impl ResponsesBillingState {
@@ -1218,6 +1244,14 @@ impl ResponsesBillingState {
         log.status_code = 200;
         log.ip = self.client_ip.clone();
         log.request_id = Some(self.request_id.clone());
+        // log_body：快照 = 请求体 + 流式拼接文本（关闭时 None 零开销）
+        if self.debug_request_body.is_some() {
+            log.debug = crate::log::LogDebugSnapshot::new(
+                self.debug_request_body.clone(),
+                Some(self.acc.lock().clone()),
+                None,
+            );
+        }
         self.state.log_store.record_request(log);
 
         (prompt_tokens, completion_tokens)
@@ -1986,6 +2020,14 @@ pub async fn handle_chat_completions(
             log.request_id = Some(request_id.clone());
             log.error_msg = Some("cache_hit".to_string());
             log.cache_hit = true;
+            // log_body：缓存命中快照 = 请求体 + 缓存的响应 JSON
+            if debug_request_body.is_some() {
+                log.debug = crate::log::LogDebugSnapshot::new(
+                    debug_request_body.clone(),
+                    Some(cached.to_string()),
+                    None,
+                );
+            }
             state.log_store.record_request(log);
             crate::metrics::global().record_request(
                 &model,
@@ -2104,6 +2146,14 @@ pub async fn handle_chat_completions(
                 log.candidate_channels = candidate_channel_ids.clone();
                 log.filtered_channels = filtered_channels.clone();
                 log.selected_channel = used_channel_id.clone();
+                // log_body：失败路径快照——上游原始错误信息进 response_body
+                if debug_request_body.is_some() {
+                    log.debug = crate::log::LogDebugSnapshot::new(
+                        debug_request_body.clone(),
+                        Some(e.to_string()),
+                        None,
+                    );
+                }
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 crate::metrics::global().record_request(
@@ -2189,6 +2239,20 @@ pub async fn handle_chat_completions(
             log.status_code = 200;
             log.ip = client_ip.clone();
             log.request_id = Some(request_id.clone());
+            // log_body：快照 = 请求体 + 响应正文（content 优先，tool_calls 计数）
+            if debug_request_body.is_some() {
+                let resp_snapshot = serde_json::json!({
+                    "content": response.message.content_str(),
+                    "reasoning": response.message.reasoning,
+                    "tool_calls_count": response.message.tool_calls.as_ref().map_or(0, |t| t.len()),
+                    "usage": { "prompt_tokens": response.usage.prompt_tokens, "completion_tokens": response.usage.completion_tokens },
+                });
+                log.debug = crate::log::LogDebugSnapshot::new(
+                    debug_request_body.clone(),
+                    Some(resp_snapshot.to_string()),
+                    None,
+                );
+            }
             state.log_store.record_request(log);
 
             // Prometheus 指标
@@ -2292,6 +2356,13 @@ pub async fn handle_responses(
     let api_key = match verify_api_key_full(&state, &headers, &model) {
         Ok(k) => k,
         Err(e) => return e.into_response(),
+    };
+
+    // log_body 开关：客户端请求体快照（一次序列化，失败/成功路径共用）
+    let debug_request_body = if crate::config::log_body_enabled() {
+        Some(body.to_string())
+    } else {
+        None
     };
 
     // 网络层闸门：管理员关闭网络层时拒绝转发（管理面不受影响）
@@ -2478,6 +2549,14 @@ pub async fn handle_responses(
             log.error_msg = Some(e.to_string());
             log.ip = client_ip.clone();
             log.request_id = Some(request_id.clone());
+            // log_body：失败路径快照——上游原始错误信息进 response_body
+            if debug_request_body.is_some() {
+                log.debug = crate::log::LogDebugSnapshot::new(
+                    debug_request_body.clone(),
+                    Some(e.to_string()),
+                    None,
+                );
+            }
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
             crate::metrics::global().record_request(
@@ -2573,6 +2652,14 @@ pub async fn handle_responses(
             log.status_code = 200;
             log.ip = client_ip.clone();
             log.request_id = Some(request_id.clone());
+            // log_body：快照 = 请求体 + 上游响应 JSON
+            if debug_request_body.is_some() {
+                log.debug = crate::log::LogDebugSnapshot::new(
+                    debug_request_body.clone(),
+                    Some(json.to_string()),
+                    None,
+                );
+            }
             state.log_store.record_request(log);
 
             // Prometheus 指标
@@ -2612,6 +2699,7 @@ pub async fn handle_responses(
                     .as_ref()
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone()),
+                debug_request_body,
             });
 
             // 旁路解析：每个 chunk 原样转发（yield 不变），同时喂给
@@ -2797,6 +2885,13 @@ pub async fn handle_completions(
     let api_key = verify_api_key_full(&state, &headers, model)?;
     let model_owned = model.to_string();
 
+    // log_body 开关：客户端请求体快照（一次序列化，失败/成功路径共用）
+    let debug_request_body = if crate::config::log_body_enabled() {
+        Some(body.to_string())
+    } else {
+        None
+    };
+
     // 网络层闸门：管理员关闭网络层时拒绝转发
     let _nl_cfg = crate::api::admin::network::load_network_config(&state);
     if !_nl_cfg.enabled {
@@ -2925,6 +3020,14 @@ pub async fn handle_completions(
             log.error_msg = Some(e.to_string());
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
+            // log_body：失败路径快照——上游原始错误信息进 response_body
+            if debug_request_body.is_some() {
+                log.debug = crate::log::LogDebugSnapshot::new(
+                    debug_request_body.clone(),
+                    Some(e.to_string()),
+                    None,
+                );
+            }
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
             crate::metrics::global().record_request(
@@ -3007,6 +3110,14 @@ pub async fn handle_completions(
         log.status_code = 200;
         log.ip = client_ip.clone();
         log.request_id = Some(request_id);
+        // log_body：快照 = 请求体 + 响应 JSON
+        if let Some(rb) = debug_request_body.as_deref() {
+            log.debug = crate::log::LogDebugSnapshot::new(
+                Some(rb.to_string()),
+                Some(result.to_string()),
+                None,
+            );
+        }
         state.log_store.record_request(log);
 
         // Prometheus 指标
@@ -3045,6 +3156,13 @@ pub async fn handle_embeddings(
 
     let api_key = verify_api_key_full(&state, &headers, model)?;
     let model_owned = model.to_string();
+
+    // log_body 开关：客户端请求体快照（一次序列化，失败/成功路径共用）
+    let debug_request_body = if crate::config::log_body_enabled() {
+        Some(body.to_string())
+    } else {
+        None
+    };
 
     // 网络层闸门：管理员关闭网络层时拒绝转发
     let _nl_cfg = crate::api::admin::network::load_network_config(&state);
@@ -3196,6 +3314,14 @@ pub async fn handle_embeddings(
             log.error_msg = Some(e.to_string());
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
+            // log_body：失败路径快照——上游原始错误信息进 response_body
+            if debug_request_body.is_some() {
+                log.debug = crate::log::LogDebugSnapshot::new(
+                    debug_request_body.clone(),
+                    Some(e.to_string()),
+                    None,
+                );
+            }
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
             crate::metrics::global().record_request(
@@ -3280,6 +3406,18 @@ pub async fn handle_embeddings(
         log.status_code = 200;
         log.ip = client_ip.clone();
         log.request_id = Some(request_id);
+        // log_body：快照 = 请求体 + 响应 JSON
+        if let Some(rb) = debug_request_body.as_deref() {
+            let resp_snapshot = serde_json::json!({
+                "data": data,
+                "usage": { "prompt_tokens": response.usage.prompt_tokens, "total_tokens": response.usage.total_tokens },
+            });
+            log.debug = crate::log::LogDebugSnapshot::new(
+                Some(rb.to_string()),
+                Some(resp_snapshot.to_string()),
+                None,
+            );
+        }
         state.log_store.record_request(log);
 
         // Prometheus 指标
@@ -3336,6 +3474,13 @@ pub async fn handle_rerank(
     let api_key = verify_api_key_full(&state, &headers, model)?;
     let model_owned = model.to_string();
     let query_owned = query.to_string();
+
+    // log_body 开关：客户端请求体快照（一次序列化，失败/成功路径共用）
+    let debug_request_body = if crate::config::log_body_enabled() {
+        Some(body.to_string())
+    } else {
+        None
+    };
 
     // 网络层闸门：管理员关闭网络层时拒绝转发
     let _nl_cfg = crate::api::admin::network::load_network_config(&state);
@@ -3532,6 +3677,14 @@ pub async fn handle_rerank(
             log.error_msg = Some(e.to_string());
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
+            // log_body：失败路径快照——上游原始错误信息进 response_body
+            if debug_request_body.is_some() {
+                log.debug = crate::log::LogDebugSnapshot::new(
+                    debug_request_body.clone(),
+                    Some(e.to_string()),
+                    None,
+                );
+            }
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
             crate::metrics::global().record_request(
@@ -3612,6 +3765,21 @@ pub async fn handle_rerank(
         log.status_code = 200;
         log.ip = client_ip.clone();
         log.request_id = Some(request_id);
+        // log_body：快照 = 请求体 + 响应 JSON
+        if let Some(rb) = debug_request_body.as_deref() {
+            let resp_snapshot = serde_json::json!({
+                "results": response.results.iter().map(|r| serde_json::json!({
+                    "index": r.index,
+                    "relevance_score": r.relevance_score,
+                })).collect::<Vec<_>>(),
+                "usage": { "prompt_tokens": response.usage.prompt_tokens, "total_tokens": response.usage.total_tokens },
+            });
+            log.debug = crate::log::LogDebugSnapshot::new(
+                Some(rb.to_string()),
+                Some(resp_snapshot.to_string()),
+                None,
+            );
+        }
         state.log_store.record_request(log);
 
         // Prometheus 指标
@@ -3659,6 +3827,13 @@ pub async fn handle_images_generations(
 
     let api_key = verify_api_key_full(&state, &headers, model)?;
     let model_owned = model.to_string();
+
+    // log_body 开关：客户端请求体快照（一次序列化，失败/成功路径共用）
+    let debug_request_body = if crate::config::log_body_enabled() {
+        Some(body.to_string())
+    } else {
+        None
+    };
 
     // 网络层闸门：管理员关闭网络层时拒绝转发
     let _nl_cfg = crate::api::admin::network::load_network_config(&state);
@@ -3786,6 +3961,14 @@ pub async fn handle_images_generations(
             log.error_msg = Some(e.to_string());
             log.ip = client_ip.clone();
             log.request_id = Some(request_id);
+            // log_body：失败路径快照——上游原始错误信息进 response_body
+            if debug_request_body.is_some() {
+                log.debug = crate::log::LogDebugSnapshot::new(
+                    debug_request_body.clone(),
+                    Some(e.to_string()),
+                    None,
+                );
+            }
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
             crate::metrics::global().record_request(
@@ -3848,6 +4031,14 @@ pub async fn handle_images_generations(
         log.status_code = 200;
         log.ip = client_ip.clone();
         log.request_id = Some(request_id);
+        // log_body：快照 = 请求体 + 响应 JSON（b64 图片体积大，靠 4KB 截断保护）
+        if let Some(rb) = debug_request_body.as_deref() {
+            log.debug = crate::log::LogDebugSnapshot::new(
+                Some(rb.to_string()),
+                Some(result.to_string()),
+                None,
+            );
+        }
         state.log_store.record_request(log);
 
         // Prometheus 指标（图片按次计价，tokens 记 0）

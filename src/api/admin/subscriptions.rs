@@ -55,6 +55,7 @@ fn plan_json(p: &Plan) -> Value {
         "allow_wallet_overflow": p.allow_wallet_overflow,
         "upgrade_group": p.upgrade_group,
         "sort_order": p.sort_order,
+        "billing_mode": p.billing_mode,
     })
 }
 
@@ -208,6 +209,7 @@ pub async fn handle_subscription_balance_pay(
         prev_user_group: prev_user_group.clone(),
         downgrade_group: plan.downgrade_group.trim().to_string(),
         allow_wallet_overflow: plan.allow_wallet_overflow,
+        billing_mode: plan.billing_mode.clone(),
         created_at: now,
         updated_at: now,
     };
@@ -302,6 +304,7 @@ pub async fn handle_subscription_admin_bind(
         prev_user_group,
         downgrade_group: plan.downgrade_group.trim().to_string(),
         allow_wallet_overflow: plan.allow_wallet_overflow,
+        billing_mode: plan.billing_mode.clone(),
         created_at: now,
         updated_at: now,
     };

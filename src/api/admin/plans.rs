@@ -66,6 +66,9 @@ pub struct PlanRequest {
     pub downgrade_group: String,
     #[serde(default)]
     pub sort_order: i64,
+    /// 订阅计费模式："" / "token"（按 token 量，默认）/ "count"（按次固定扣额度）
+    #[serde(default)]
+    pub billing_mode: String,
 }
 
 fn default_duration_days() -> i64 {
@@ -109,6 +112,9 @@ impl PlanRequest {
         }
         let is_sub = self.plan_type == "subscription";
         if is_sub {
+            if !matches!(self.billing_mode.as_str(), "" | "token" | "count") {
+                return Err(format!("invalid billing_mode: {}", self.billing_mode));
+            }
             match self.duration_unit.as_str() {
                 "year" | "month" | "day" | "hour" => {
                     if self.duration_value <= 0 {
@@ -198,6 +204,7 @@ pub async fn handle_upsert_plan(
         upgrade_group: body.upgrade_group.trim().to_string(),
         downgrade_group: body.downgrade_group.trim().to_string(),
         sort_order: body.sort_order,
+        billing_mode: body.billing_mode.clone(),
         created_at: 0,
         updated_at: 0,
     };

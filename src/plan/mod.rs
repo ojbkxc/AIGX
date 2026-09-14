@@ -98,6 +98,11 @@ pub struct Plan {
     /// 展示排序（升序）
     #[serde(default)]
     pub sort_order: i64,
+    /// 订阅计费模式："" / "token"（按 token 量计费，默认）/ "count"
+    /// （每次固定扣 `usage.billing_flat_quota` 额度，忽略 token 量）。
+    /// 仅 subscription 套餐生效；once 发 key 套餐不受影响。
+    #[serde(default)]
+    pub billing_mode: String,
     /// 创建时间
     pub created_at: i64,
     /// 更新时间
@@ -129,6 +134,11 @@ impl Plan {
     /// 是否为时长订阅套餐
     pub fn is_subscription(&self) -> bool {
         self.plan_type == "subscription"
+    }
+
+    /// 订阅是否按次计费（count = 每次固定扣额度）
+    pub fn is_count_billing(&self) -> bool {
+        self.billing_mode == "count"
     }
 }
 
@@ -326,6 +336,7 @@ mod tests {
             sort_order: 0,
             created_at: 0,
             updated_at: 0,
+            billing_mode: String::new(),
         }
     }
 

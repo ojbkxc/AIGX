@@ -36,6 +36,8 @@ pub struct LimitsRequest {
     pub max_retries: Option<u32>,
     /// 请求日志快照开关（log_body）
     pub log_body: Option<bool>,
+    /// 按次计费每次固定扣减额度（billing_mode=count 的订阅生效）
+    pub billing_flat_quota: Option<i64>,
 }
 
 /// 签到设置请求体（enabled + 奖励区间）
@@ -124,6 +126,7 @@ pub async fn handle_get_limits(
             "api_timeout_secs": config.usage.api_timeout_secs,
             "max_retries": config.usage.max_retries,
             "log_body": config.usage.log_body,
+            "billing_flat_quota": config.usage.billing_flat_quota,
         })
     })))
 }
@@ -183,6 +186,13 @@ pub async fn handle_update_limits(
         config.usage.log_body = v;
         // 同步进程级快照（数据面同步路径读取，立即生效）
         crate::config::set_log_body(v);
+    }
+    if let Some(v) = body.billing_flat_quota {
+        if v > 0 {
+            config.usage.billing_flat_quota = v;
+            // 同步进程级快照（数据面按次计费同步读取，立即生效）
+            crate::config::set_billing_flat_quota(v);
+        }
     }
     match state.config_manager.update(config).await {
         Ok(_) => {

@@ -1115,6 +1115,25 @@ pub async fn handle_messages(
             log.status_code = 200;
             log.ip = client_ip.clone();
             log.request_id = Some(request_id.clone());
+            // log_body：快照 = 请求体 + 响应正文（content 优先，tool_calls 计数）
+            let debug_request_body = if crate::config::log_body_enabled() {
+                Some(crate::bridge::chat_format_debug_json(&chat_req))
+            } else {
+                None
+            };
+            if debug_request_body.is_some() {
+                let resp_snapshot = serde_json::json!({
+                    "content": response.message.content_str(),
+                    "reasoning": response.message.reasoning,
+                    "tool_calls_count": response.message.tool_calls.as_ref().map_or(0, |t| t.len()),
+                    "usage": { "prompt_tokens": response.usage.prompt_tokens, "completion_tokens": response.usage.completion_tokens },
+                });
+                log.debug = crate::log::LogDebugSnapshot::new(
+                    debug_request_body,
+                    Some(resp_snapshot.to_string()),
+                    None,
+                );
+            }
             state.log_store.record_request(log);
 
             // Prometheus 指标
