@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     Json,
 };
+use futures::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -2810,6 +2811,7 @@ pub async fn handle_channel_chat_test(
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
+    let request_start = std::time::Instant::now();
     if !user.is_admin() && !body.channel_id.trim().is_empty() {
         return error_response(
             "Only administrators can target a specific channel",
@@ -2932,7 +2934,16 @@ pub async fn handle_channel_chat_test(
                         ("Content-Type", "text/event-stream; charset=utf-8"),
                         ("Cache-Control", "no-cache"),
                     ];
-                    let mut response = Body::from_stream(resp.bytes_stream()).into_response();
+                    let mut response = Body::from_stream(chat_test_logged_stream(
+                        resp.bytes_stream(),
+                        state.clone(),
+                        user.clone(),
+                        ch.id.clone(),
+                        ch.name.clone(),
+                        model.clone(),
+                        request_start,
+                    ))
+                    .into_response();
                     for (name, value) in upstream_headers {
                         if let Ok(value) = axum::http::HeaderValue::from_str(value) {
                             response.headers_mut().insert(name, value);
@@ -2950,6 +2961,16 @@ pub async fn handle_channel_chat_test(
                                 .and_then(|c| c.as_str())
                                 .unwrap_or("")
                                 .to_string();
+                            record_chat_test_usage(
+                                &state,
+                                &user,
+                                &ch.id,
+                                &ch.name,
+                                &model,
+                                &json,
+                                None,
+                                request_start.elapsed().as_millis() as u64,
+                            );
                             Json(serde_json::json!({
                                 "success": true,
                                 "data": { "content": content, "model": model, "usage": json.get("usage") }
@@ -3000,7 +3021,16 @@ pub async fn handle_channel_chat_test(
                     ("Content-Type", "text/event-stream; charset=utf-8"),
                     ("Cache-Control", "no-cache"),
                 ];
-                let mut response = Body::from_stream(resp.bytes_stream()).into_response();
+                let mut response = Body::from_stream(chat_test_logged_stream(
+                    resp.bytes_stream(),
+                    state.clone(),
+                    user.clone(),
+                    ch.id.clone(),
+                    ch.name.clone(),
+                    model.clone(),
+                    request_start,
+                ))
+                .into_response();
                 for (name, value) in upstream_headers {
                     if let Ok(value) = axum::http::HeaderValue::from_str(value) {
                         response.headers_mut().insert(name, value);
@@ -3022,6 +3052,16 @@ pub async fn handle_channel_chat_test(
                             .and_then(|t| t.as_str())
                             .unwrap_or("")
                             .to_string();
+                        record_chat_test_usage(
+                            &state,
+                            &user,
+                            &ch.id,
+                            &ch.name,
+                            &model,
+                            &json,
+                            None,
+                            request_start.elapsed().as_millis() as u64,
+                        );
                         Json(serde_json::json!({
                             "success": true,
                             "data": {
@@ -3043,6 +3083,195 @@ pub async fn handle_channel_chat_test(
         Err(e) => {
             error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY).into_response()
         }
+    }
+}
+
+/// chat_test 记账：落请求日志 + usage 统计 + Prometheus 指标。
+///
+/// 与 Playground 的 charge_playground_usage 同一形态，但 chat_test 的
+/// 关键差异：**谁发起就记谁**——管理员测试自己的渠道是管理职责（不扣费），
+/// 普通用户聊天产生的消耗与数据面一样进日志页与用量统计，可审计可追溯。
+/// token 优先取上游 usage 块；缺失时按累积文本估算。
+#[allow(clippy::too_many_arguments)]
+fn record_chat_test_usage(
+    state: &AppState,
+    user: &crate::user::User,
+    channel_id: &str,
+    channel_name: &str,
+    model: &str,
+    usage_json: &Value,
+    accumulated_text: Option<&str>,
+    latency_ms: u64,
+) {
+    let (p, c) = super::playground::extract_usage_tokens(usage_json);
+    // usage 缺失（部分流式/小模型）：按估算文本兜底
+    let output_text = accumulated_text.unwrap_or("");
+    let c = if c == 0 && !output_text.is_empty() {
+        crate::token_estimate::count_text(model, output_text) as u64
+    } else {
+        c
+    };
+
+    // 与 Playground 同口径：管理员豁免扣费，普通用户实时扣
+    if !user.is_admin() {
+        super::playground::charge_playground_usage(
+            state,
+            &user.id,
+            model,
+            Some(channel_id),
+            Some(channel_name),
+            p,
+            c,
+        );
+    } else {
+        // 管理员：不扣费，但同样落日志（可追溯）
+        let group = user.group.clone();
+        let cost = state
+            .pricing_store
+            .calculate_cost_quoted(model, p, c, &group)
+            .unwrap_or(0);
+        let log = crate::log::RequestLog {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: Some(user.id.clone()),
+            key_id: Some("chat_test".to_string()),
+            channel_id: Some(channel_id.to_string()),
+            channel_name: Some(channel_name.to_string()),
+            model: model.to_string(),
+            origin_model: Some(model.to_string()),
+            input_tokens: p,
+            output_tokens: c,
+            cost,
+            channel_cost: cost,
+            latency_ms,
+            status_code: 200,
+            error_msg: None,
+            ip: None,
+            request_id: None,
+            created_at: chrono::Utc::now().timestamp(),
+            candidate_channels: Vec::new(),
+            cache_hit: false,
+            filtered_channels: Vec::new(),
+            selected_channel: None,
+        };
+        if let Err(e) = state.log_store.requests.add(log) {
+            tracing::warn!("chat_test request log write failed: {e}");
+        }
+    }
+    // 全局 usage 统计与 Prometheus 指标（管理员也累计——上游消耗真实发生）
+    state.usage_tracker.accumulate(p, c, 0, 0, 0, 0.0);
+    crate::metrics::global().record_request(model, channel_id, "ok", latency_ms);
+    crate::metrics::global().record_tokens(model, "prompt", p);
+    crate::metrics::global().record_tokens(model, "completion", c);
+}
+
+/// chat_test 流式透传包装流：边转发边累积 SSE 增量，流结束（正常或断连
+/// drop）时估算 token 并落日志。
+///
+/// 复用数据面 [`crate::api::openai::GuardedStream`] + Drop 守卫语义：
+/// 客户端断连时 hyper 中途 drop 响应体流，守卫随流 drop 兜底记账，
+/// 不漏记、不重记（原子标志互斥）。
+fn chat_test_logged_stream<S, E>(
+    inner: S,
+    state: AppState,
+    user: crate::user::User,
+    channel_id: String,
+    channel_name: String,
+    model: String,
+    request_start: std::time::Instant,
+) -> impl Stream<Item = Result<bytes::Bytes, E>>
+where
+    S: Stream<Item = Result<bytes::Bytes, E>> + Unpin,
+{
+    // SSE 行缓冲：跨 chunk 拼接完整的 data: {...} 帧
+    let buf = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
+    // 输出文本累积（估算 completion tokens 用）
+    let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
+    let acc_for_map = acc.clone();
+
+    let mapped = inner.map(move |item| {
+        if let Ok(chunk) = &item {
+            // 解析 SSE 帧：逐行提取 data: {...} 中的增量文本
+            let text = String::from_utf8_lossy(chunk);
+            let mut b = buf.lock();
+            b.push_str(&text);
+            let rest = b.clone();
+            b.clear();
+            let mut leftover = String::new();
+            for line in rest.split_inclusive('\n') {
+                if line.ends_with('\n') {
+                    let line = line.trim_end_matches(['\n', '\r']);
+                    if let Some(data) = line.strip_prefix("data:") {
+                        let data = data.trim();
+                        if data == "[DONE]" || data.is_empty() {
+                            continue;
+                        }
+                        if let Ok(v) = serde_json::from_str::<Value>(data) {
+                            // OpenAI 增量：choices[0].delta.content
+                            if let Some(t) = v
+                                .pointer("/choices/0/delta/content")
+                                .and_then(|c| c.as_str())
+                            {
+                                crate::token_estimate::push_capped(&mut acc_for_map.lock(), t);
+                            }
+                            // Anthropic 增量：delta.text
+                            if let Some(t) = v.pointer("/delta/text").and_then(|c| c.as_str()) {
+                                crate::token_estimate::push_capped(&mut acc_for_map.lock(), t);
+                            }
+                        }
+                    }
+                } else {
+                    // 半行（无换行符结尾）留存到下一轮拼接
+                    leftover.push_str(line);
+                }
+            }
+            *b = leftover;
+        }
+        item
+    });
+
+    // Drop 守卫：流被 drop（正常结束消费完 / 客户端断连）时兜底记账
+    struct ChatTestLogGuard {
+        state: AppState,
+        user: crate::user::User,
+        channel_id: String,
+        channel_name: String,
+        model: String,
+        request_start: std::time::Instant,
+        acc: std::sync::Arc<parking_lot::Mutex<String>>,
+        fired: std::sync::atomic::AtomicBool,
+    }
+    impl std::ops::Drop for ChatTestLogGuard {
+        fn drop(&mut self) {
+            if self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let output = self.acc.lock().clone();
+            record_chat_test_usage(
+                &self.state,
+                &self.user,
+                &self.channel_id,
+                &self.channel_name,
+                &self.model,
+                &Value::Null,
+                Some(&output),
+                self.request_start.elapsed().as_millis() as u64,
+            );
+        }
+    }
+    let guard = ChatTestLogGuard {
+        state,
+        user,
+        channel_id,
+        channel_name,
+        model,
+        request_start,
+        acc: acc.clone(),
+        fired: std::sync::atomic::AtomicBool::new(false),
+    };
+
+    crate::api::openai::GuardedStream {
+        inner: Box::pin(mapped),
+        _guard: guard,
     }
 }
 

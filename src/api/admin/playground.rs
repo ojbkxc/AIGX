@@ -20,7 +20,7 @@ use super::common::{error_response, verify_user};
 /// 原先 Playground 四个接口登录即用、零计费——任何注册用户可无限免费
 /// 消耗上游额度。现与数据面同一套扣费路径（订阅池优先 + 钱包兜底）。
 /// 管理员豁免（调试渠道是管理职责，与 new-api playground 语义一致）。
-fn charge_playground_usage(
+pub(crate) fn charge_playground_usage(
     state: &AppState,
     user_id: &str,
     model: &str,
@@ -94,7 +94,7 @@ fn charge_playground_usage(
 }
 
 /// 从响应 JSON 中提取 usage 的 prompt/completion tokens（无 usage 时按 0）
-fn extract_usage_tokens(j: &Value) -> (u64, u64) {
+pub(crate) fn extract_usage_tokens(j: &Value) -> (u64, u64) {
     let p = j
         .get("usage")
         .and_then(|u| u.get("prompt_tokens"))
