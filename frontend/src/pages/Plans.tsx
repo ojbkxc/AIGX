@@ -33,6 +33,7 @@ interface PlanItem {
   upgrade_group?: string;
   downgrade_group?: string;
   sort_order?: number;
+  billing_mode?: string;
   [key: string]: unknown;
 }
 
@@ -59,6 +60,7 @@ interface PlanFormState {
   upgrade_group: string;
   downgrade_group: string;
   sort_order: string;
+  billing_mode: string;
 }
 
 const EMPTY_FORM: PlanFormState = {
@@ -83,6 +85,7 @@ const EMPTY_FORM: PlanFormState = {
   upgrade_group: '',
   downgrade_group: '',
   sort_order: '0',
+  billing_mode: 'token',
 };
 
 interface IssuedKeyState {
@@ -162,6 +165,7 @@ export default function Plans(): JSX.Element {
       upgrade_group: p.upgrade_group || '',
       downgrade_group: p.downgrade_group || '',
       sort_order: p.sort_order != null ? String(p.sort_order) : '0',
+      billing_mode: p.billing_mode || 'token',
     });
     setShowModal(true);
   };
@@ -208,6 +212,7 @@ export default function Plans(): JSX.Element {
         payload.max_purchase_per_user = Number(form.max_purchase_per_user || 0);
         payload.upgrade_group = form.upgrade_group.trim();
         payload.downgrade_group = form.downgrade_group.trim();
+        payload.billing_mode = form.billing_mode;
       }
       if (editing) payload.id = editing.id;
       await api.upsertPlan(payload);
@@ -401,6 +406,10 @@ export default function Plans(): JSX.Element {
                         <span className="plan-meta-label">{t('周期重置')}</span>
                         <span>{fmtResetPeriod(p.quota_reset_period)}</span>
                       </div>
+                      <div className="plan-meta">
+                        <span className="plan-meta-label">{t('计费模式')}</span>
+                        <span>{p.billing_mode === 'count' ? t('按次') : t('按量')}</span>
+                      </div>
                       {p.upgrade_group && (
                         <div className="plan-meta">
                           <span className="plan-meta-label">{t('升级分组')}</span>
@@ -546,6 +555,14 @@ export default function Plans(): JSX.Element {
                     value={form.total_amount}
                     onChange={(e) => setForm({ ...form, total_amount: e.target.value })}
                   />
+                  <Select
+                    label={t('计费模式')}
+                    value={form.billing_mode}
+                    onChange={(e) => setForm({ ...form, billing_mode: e.target.value })}
+                  >
+                    <option value="token">{t('按量计费（按 token × 定价）')}</option>
+                    <option value="count">{t('按次计费（每次固定扣额度）')}</option>
+                  </Select>
                   <Select
                     label={t('配额周期重置')}
                     value={form.quota_reset_period}

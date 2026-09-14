@@ -21,6 +21,7 @@ interface LimitsForm {
   threshold: string;
   api_timeout_secs: string;
   max_retries: string;
+  billing_flat_quota: string;
 }
 
 interface RateLimitConfig {
@@ -102,6 +103,7 @@ export default function Settings() {
     threshold: '',
     api_timeout_secs: '',
     max_retries: '',
+    billing_flat_quota: '',
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -329,6 +331,7 @@ export default function Settings() {
         threshold: data.threshold != null ? String(data.threshold * 100) : '',
         api_timeout_secs: data.api_timeout_secs ?? '',
         max_retries: data.max_retries ?? '',
+        billing_flat_quota: data.billing_flat_quota != null ? String(data.billing_flat_quota) : '',
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -351,6 +354,7 @@ export default function Settings() {
       limits.threshold,
       limits.api_timeout_secs,
       limits.max_retries,
+      limits.billing_flat_quota,
     ];
     if (numericFields.some((v) => v !== '' && Number.isNaN(Number(v)))) {
       setError(t('请输入有效数字'));
@@ -363,6 +367,7 @@ export default function Settings() {
     if (limits.threshold !== '') payload.threshold = Number(limits.threshold) / 100;
     if (limits.api_timeout_secs !== '') payload.api_timeout_secs = Number(limits.api_timeout_secs);
     if (limits.max_retries !== '') payload.max_retries = Number(limits.max_retries);
+    if (limits.billing_flat_quota !== '') payload.billing_flat_quota = Number(limits.billing_flat_quota);
 
     // 阈值按原始输入（0-100 百分比）校验；payload.threshold 已除 100，不再用于范围比较
     if (payload.daily_limit < 0 || payload.monthly_limit < 0 || (limits.threshold !== '' && (Number(limits.threshold) < 0 || Number(limits.threshold) > 100))) {
@@ -375,6 +380,10 @@ export default function Settings() {
     }
     if (payload.max_retries != null && (payload.max_retries < 0 || payload.max_retries > 10)) {
       setError(t('最大重试次数必须在 0-10 之间'));
+      return;
+    }
+    if (payload.billing_flat_quota != null && payload.billing_flat_quota <= 0) {
+      setError(t('按次计费固定额度必须大于 0'));
       return;
     }
 
@@ -459,6 +468,11 @@ export default function Settings() {
                   <label>{t('最大重试次数')}</label>
                   <input className="form-input" type="number" min="0" max="10" placeholder={t('settingsPlaceholderMaxRetries')} value={limits.max_retries} onChange={(e) => handleChange('max_retries', e.target.value)} />
                   <span className="form-hint">{t('API 请求失败时的最大重试次数，0 表示不重试。')}</span>
+                </div>
+                <div className="form-group">
+                  <label>{t('按次计费固定额度')}</label>
+                  <input className="form-input" type="number" min="1" placeholder="2" value={limits.billing_flat_quota} onChange={(e) => handleChange('billing_flat_quota', e.target.value)} />
+                  <span className="form-hint">{t('订阅计费模式为「按次」时，每次请求固定扣减的额度（全局统一，默认 2）。')}</span>
                 </div>
                 <div className="settings-actions">
                   <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
