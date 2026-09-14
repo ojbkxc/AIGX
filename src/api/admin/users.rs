@@ -44,6 +44,9 @@ pub struct CreateUserRequest {
     pub quota: i64,
     #[serde(default = "default_user_group")]
     pub group: String,
+    /// 管理员备注（可空）
+    #[serde(default)]
+    pub remark: String,
 }
 
 fn default_user_role() -> String {
@@ -64,6 +67,8 @@ pub struct UpdateUserRequest {
     pub quota: Option<i64>,
     pub status: Option<String>,
     pub group: Option<String>,
+    /// 管理员备注
+    pub remark: Option<String>,
 }
 
 /// 构造用户 JSON 响应（mask 敏感字段）
@@ -85,6 +90,7 @@ pub fn mask_user(u: &User) -> Value {
         "aff_count": u.aff_count,
         "aff_quota": u.aff_quota,
         "aff_history_quota": u.aff_history_quota,
+        "remark": u.remark,
         "created_at": u.created_at,
     })
 }
@@ -111,6 +117,9 @@ pub struct ListUsersQuery {
     pub page: usize,
     #[serde(default = "default_size")]
     pub size: usize,
+    /// 关键字搜索（邮箱/昵称/备注，对齐 new-api 用户列表搜索）
+    #[serde(default)]
+    pub keyword: String,
 }
 
 pub async fn handle_list_users(
@@ -119,7 +128,19 @@ pub async fn handle_list_users(
     Query(q): Query<ListUsersQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let all: Vec<Value> = state.user_store.list().iter().map(mask_user).collect();
+    let keyword = q.keyword.trim().to_lowercase();
+    let all: Vec<Value> = state
+        .user_store
+        .list()
+        .iter()
+        .filter(|u| {
+            keyword.is_empty()
+                || u.email.to_lowercase().contains(&keyword)
+                || u.username.to_lowercase().contains(&keyword)
+                || u.remark.to_lowercase().contains(&keyword)
+        })
+        .map(mask_user)
+        .collect();
     let total = all.len();
     let page = q.page.max(1);
     let size = q.size.max(1);
@@ -177,12 +198,18 @@ pub async fn handle_create_user(
     };
     match result {
         Ok(u) => {
-            // 应用请求指定的 group（非空且非默认时更新）
-            let final_user = if !body.group.is_empty() && body.group != "default" {
-                match state
-                    .user_store
-                    .update(&u.id, |x| x.group = body.group.clone())
-                {
+            // 应用请求指定的 group / remark（非默认值才更新）
+            let needs_group = !body.group.is_empty() && body.group != "default";
+            let needs_remark = !body.remark.is_empty();
+            let final_user = if needs_group || needs_remark {
+                match state.user_store.update(&u.id, |x| {
+                    if needs_group {
+                        x.group = body.group.clone();
+                    }
+                    if needs_remark {
+                        x.remark = body.remark.clone();
+                    }
+                }) {
                     Ok(updated) => updated,
                     Err(_) => u,
                 }
@@ -277,6 +304,9 @@ pub async fn handle_update_user(
                 u.group = g.clone();
             }
         }
+        if let Some(r) = &body.remark {
+            u.remark = r.clone();
+        }
     }) {
         Ok(u) => {
             // 记录审计日志
@@ -324,6 +354,8 @@ pub async fn handle_delete_user(
     let user_before = user_snapshot.as_ref().map(mask_user);
     match state.user_store.delete(&id) {
         Ok(_) => {
+            // 删除该用户的工单及消息（对齐 v2board delUser）
+            state.ticket_store.delete_by_user(&id);
             // 删除用户的孤儿 API key 处理：不吊销的 key 会因 user_id 指向不存在
             // 的用户而跳过余额预检/扣费（validate_request 找不到用户即放行），
             // 变成无计费免费通道。随用户删除一并吊销。

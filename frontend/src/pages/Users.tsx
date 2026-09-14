@@ -17,6 +17,8 @@ interface UserItem {
   used_quota?: number;
   status?: string;
   created_at?: number;
+  /** 管理员备注 */
+  remark?: string;
 }
 
 interface GroupItem {
@@ -31,6 +33,7 @@ interface UserFormState {
   quota: string;
   status: string;
   group: string;
+  remark: string;
 }
 
 const EMPTY_FORM: UserFormState = {
@@ -41,6 +44,7 @@ const EMPTY_FORM: UserFormState = {
   quota: '0',
   status: 'active',
   group: 'default',
+  remark: '',
 };
 
 export default function Users(): JSX.Element {
@@ -58,8 +62,9 @@ export default function Users(): JSX.Element {
   const [editing, setEditing] = useState<UserItem | null>(null);
   const [form, setForm] = useState<UserFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
-  // 搜索过滤（邮箱/昵称本地匹配）
+  // 搜索关键字（邮箱/昵称/备注，走后端 keyword 过滤以覆盖全量数据）
   const [query, setQuery] = useState('');
+  const [keyword, setKeyword] = useState('');
   // 分页（对齐 Logs/Channels）
   const [page, setPage] = useState(1);
   const size = 20;
@@ -96,14 +101,23 @@ export default function Users(): JSX.Element {
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page]);
+  }, [page, keyword]);
+
+  // 搜索输入防抖：本地 query 立即响应，停顿 300ms 后触发后端 keyword 查询
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setKeyword(query.trim());
+      setPage(1);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [query]);
 
   const load = async () => {
     setLoading(true);
     setError('');
     try {
       const [listRes, meRes, groupRes] = await Promise.all([
-        api.listUsers({ page, size }),
+        api.listUsers({ page, size, keyword }),
         api.getMe().catch(() => null),
         api.listGroups().catch(() => null),
       ]);
@@ -134,6 +148,7 @@ export default function Users(): JSX.Element {
       quota: String(u.quota ?? 0),
       status: u.status || 'active',
       group: u.group || 'default',
+      remark: u.remark || '',
     });
     setShowModal(true);
   };
@@ -173,6 +188,7 @@ export default function Users(): JSX.Element {
           quota: Number(form.quota),
           status: form.status,
           group: form.group,
+          remark: form.remark.trim(),
         };
         if (form.email.trim() !== editing.email) payload.email = form.email.trim();
         if (form.username.trim()) payload.username = form.username.trim();
@@ -187,6 +203,7 @@ export default function Users(): JSX.Element {
           role: form.role,
           quota: Number(form.quota),
           group: form.group,
+          remark: form.remark.trim() || undefined,
         });
         addToast(t('用户已创建'));
       }
@@ -292,10 +309,7 @@ export default function Users(): JSX.Element {
   if (loading) return <SkeletonTable columns={6} rows={7} />;
 
   const q = query.trim().toLowerCase();
-  const visibleUsers = q
-    ? users.filter((u) =>
-        (u.email || '').toLowerCase().includes(q) || (u.username || '').toLowerCase().includes(q))
-    : users;
+  const visibleUsers = users;
 
   return (
     <div>
@@ -329,14 +343,14 @@ export default function Users(): JSX.Element {
       )}
 
       <Card
-        title={`${t('所有用户')} (${q ? visibleUsers.length : total}${q ? `/${total}` : ''})`}
+        title={`${t('所有用户')} (${total})`}
         actions={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <Input
-              placeholder={t('搜索邮箱 / 昵称…')}
+              placeholder={t('搜索邮箱 / 昵称 / 备注…')}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              style={{ width: 200 }}
+              style={{ width: 220 }}
             />
             <Button onClick={openCreate}>{t('+ 新建用户')}</Button>
           </div>
@@ -351,6 +365,7 @@ export default function Users(): JSX.Element {
                 <tr>
                   <th>{t('邮箱')}</th>
                   <th>{t('昵称')}</th>
+                  <th>{t('备注')}</th>
                   <th>{t('角色')}</th>
                   <th>{t('分组')}</th>
                   <th>{t('总配额')}</th>
@@ -366,6 +381,7 @@ export default function Users(): JSX.Element {
                   <tr key={u.id}>
                     <td><strong>{u.email}</strong></td>
                     <td>{u.username || '—'}</td>
+                    <td>{u.remark || '—'}</td>
                     <td>{u.role === 'admin' ? t('管理员') : t('普通用户')}</td>
                     <td>{u.group || 'default'}</td>
                     <td>{fmtQuota(u.quota)}</td>
@@ -449,7 +465,7 @@ export default function Users(): JSX.Element {
 
       {(() => {
         const totalPages = Math.ceil(total / size);
-        return totalPages > 1 && !q ? (
+        return totalPages > 1 ? (
           <Pagination page={page} totalPages={totalPages} onChange={setPage} />
         ) : null;
       })()}
@@ -507,6 +523,13 @@ export default function Users(): JSX.Element {
                 type="number"
                 value={form.quota}
                 onChange={(e) => setForm({ ...form, quota: e.target.value })}
+              />
+              <Input
+                label={t('用户备注')}
+                hint={t('(可选)')}
+                placeholder={t('备注')}
+                value={form.remark}
+                onChange={(e) => setForm({ ...form, remark: e.target.value })}
               />
               {editing && (
                 <Select

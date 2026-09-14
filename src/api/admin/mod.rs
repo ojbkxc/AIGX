@@ -18,6 +18,7 @@ pub mod redemptions;
 pub mod security;
 pub mod settings;
 pub mod subscriptions;
+pub mod tickets;
 pub mod tokens;
 pub mod users; // 网络层管理模块
 
@@ -61,6 +62,12 @@ pub use pricing::{
 pub use orders::{
     handle_complete_order, handle_delete_order, handle_get_order, handle_list_orders,
     handle_topup_amount, handle_topup_request,
+};
+
+pub use tickets::{
+    handle_admin_close_ticket, handle_admin_list_tickets, handle_admin_reply_ticket,
+    handle_user_close_ticket, handle_user_list_tickets, handle_user_reply_ticket,
+    handle_user_save_ticket,
 };
 
 pub use plans::{handle_delete_plan, handle_issue_plan_key, handle_list_plans, handle_upsert_plan};

@@ -29,6 +29,7 @@ pub mod redemption;
 pub mod semantic;
 pub mod sse;
 pub mod storage;
+pub mod ticket;
 pub mod token_estimate;
 pub mod usage;
 pub mod user;

@@ -225,12 +225,19 @@ impl FileStore {
     /// 以 PostgreSQL 为后端打开 KV 存储（保持同样的同步接口）。
     ///
     /// 仅在启用 `postgres` feature 时可用；`database.url` 非空时由 main.rs 调用。
+    /// 打开后执行一次性 SQLite→PG 历史数据迁移（幂等，已存在 key 跳过）。
     #[cfg(feature = "postgres")]
-    pub fn open_postgres(url: &str, max_connections: u32) -> anyhow::Result<Self> {
+    pub fn open_postgres(
+        url: &str,
+        max_connections: u32,
+        sqlite_dirs: &[std::path::PathBuf],
+    ) -> anyhow::Result<Self> {
         let inner = postgres::PgStore::new(url, max_connections)?;
-        Ok(Self {
+        let store = Self {
             inner: FileStoreInner::Postgres(inner),
-        })
+        };
+        migrate_sqlite_to_pg(&store, sqlite_dirs);
+        Ok(store)
     }
 
     /// 读取 JSON 值
@@ -341,6 +348,55 @@ fn migrate_legacy_json(dir: &Path, store: &sqlite::SqliteStore) -> anyhow::Resul
         tracing::info!("Migrated {migrated} legacy JSON entries into SQLite storage");
     }
     Ok(())
+}
+
+/// SQLite→PG 一次性历史数据迁移（幂等）：
+/// - 按顺序探测 `sqlite_dirs` 中的 `aigx.db`（新旧两种布局都覆盖）；
+/// - 对 PG 中尚不存在的 key 用 put_if_absent 原子写入（并发/重复启动安全）；
+/// - 已存在的 key 跳过，避免覆盖 PG 中的新数据。
+///
+/// 背景：`open_postgres` 此前直接返回空 PG 库，历史数据（请求日志/审计/
+/// 会话等）全部留在 SQLite 文件里，切库后页面查不到历史——补上迁移。
+#[cfg(all(feature = "sqlite-kv", feature = "postgres"))]
+fn migrate_sqlite_to_pg(pg: &FileStore, sqlite_dirs: &[std::path::PathBuf]) {
+    for dir in sqlite_dirs {
+        let db_path = dir.join("aigx.db");
+        if !db_path.exists() {
+            continue;
+        }
+        let sqlite = match sqlite::SqliteStore::open(db_path.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("SQLite→PG migration: skip {}: {e}", db_path.display());
+                continue;
+            }
+        };
+        let keys = match sqlite.list("") {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!("SQLite→PG migration: list keys failed: {e}");
+                continue;
+            }
+        };
+        let mut migrated = 0usize;
+        for key in keys {
+            // put_if_absent 保证：PG 已有（更新）的 key 不被旧 SQLite 值覆盖
+            match sqlite.get::<serde_json::Value>(&key) {
+                Ok(Some(v)) => {
+                    if matches!(pg.put_if_absent(&key, &v), Ok(true)) {
+                        migrated += 1;
+                    }
+                }
+                _ => continue,
+            }
+        }
+        if migrated > 0 {
+            tracing::info!(
+                "SQLite→PG migration: {migrated} entries imported from {}",
+                db_path.display()
+            );
+        }
+    }
 }
 
 #[cfg(test)]

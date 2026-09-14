@@ -48,6 +48,8 @@ interface ChannelFormState {
   channel_type: string;
   base_url: string;
   api_key: string;
+  /** 无密钥模式（参照 cf-ai-gw「永久」复选框思路）：勾选后 API Key 输入框置灰，提交 api_key=null */
+  no_key: boolean;
   priority: number | string;
   weight: number | string;
   status: string;
@@ -113,6 +115,14 @@ export default function Channels(): JSX.Element {
   // API Key 输入明文切换（防输错无法核对）
   const [showApiKey, setShowApiKey] = useState(false);
 
+  // 无密钥复选框联动（同 cf-ai-gw onKeyForeverChange）：勾选 → 输入框置灰清空
+  const onNoKeyChange = (): void => {
+    setForm((f) => {
+      const noKey = !f.no_key;
+      return { ...f, no_key: noKey, api_key: noKey ? '' : f.api_key };
+    });
+  };
+
   // ── 确认弹窗状态 ──
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
@@ -174,6 +184,7 @@ export default function Channels(): JSX.Element {
       channel_type: 'openai_compatible',
       base_url: '',
       api_key: '',
+      no_key: false,
       priority: 0,
       weight: 1,
       status: 'enabled',
@@ -363,6 +374,8 @@ export default function Channels(): JSX.Element {
       channel_type: ch.channel_type || 'openai_compatible',
       base_url: ch.base_url || '',
       api_key: '',
+      // 渠道当前为空密钥 → 默认勾选「无密钥」；有密钥 → 不勾（留空=保持不变）
+      no_key: !ch.api_key,
       priority: ch.priority ?? 0,
       weight: ch.weight ?? 1,
       status: ch.status || 'enabled',
@@ -383,19 +396,32 @@ export default function Channels(): JSX.Element {
   };
 
   // 构建请求 payload — 与后端 ChannelRequest 对齐
-  const buildPayload = () => ({
-    name: form.name,
-    channel_type: form.channel_type,
-    base_url: form.base_url,
-    api_key: form.api_key,
-    priority: parseInt(String(form.priority), 10) || 0,
-    weight: parseInt(String(form.weight), 10) || 1,
-    status: form.status,
-    models: form.models.split(',').map((s) => s.trim()).filter(Boolean),
-    account_id: form.account_id,
-    model_mapping: form.model_mapping,
-    cost_pricing: form.cost_pricing,
-  });
+  //
+  // api_key 三态（后端 Option<String> 语义）：
+  // - 勾选「无密钥」→ null = 显式清除密钥
+  // - 不勾且有值 → 新密钥
+  // - 不勾且为空 → 缺省不提交 = 编辑保持不变（新增 = 空密钥渠道）
+  const buildPayload = () => {
+    const payload: Record<string, unknown> = {
+      name: form.name,
+      channel_type: form.channel_type,
+      base_url: form.base_url,
+      priority: parseInt(String(form.priority), 10) || 0,
+      weight: parseInt(String(form.weight), 10) || 1,
+      status: form.status,
+      models: form.models.split(',').map((s) => s.trim()).filter(Boolean),
+      account_id: form.account_id,
+      model_mapping: form.model_mapping,
+      cost_pricing: form.cost_pricing,
+    };
+    if (form.no_key) {
+      payload.api_key = null; // 显式清除
+    } else if (form.api_key) {
+      payload.api_key = form.api_key; // 设置新密钥
+    }
+    // 否则不带 api_key 字段 = 不涉及
+    return payload;
+  };
 
   const handleSave = async (): Promise<void> => {
     if (!form.name) { setError(t('名称为必填项')); return; }
@@ -411,7 +437,6 @@ export default function Channels(): JSX.Element {
         await api.updateChannel(editChannel.id, payload);
         addToast(t('渠道更新成功'));
       } else {
-        if (!form.api_key) { setError(t('新渠道必填 API Key')); setSaving(false); return; }
         await api.addChannel(payload);
         addToast(t('渠道添加成功'));
       }
@@ -1032,12 +1057,21 @@ export default function Channels(): JSX.Element {
                 />
               )}
               <div className="form-group">
-                <label>API Key {editChannel && t('（留空则保持不变）')}</label>
+                <label>API Key {editChannel && !form.no_key && t('（留空则保持不变）')}</label>
+                <label className="no-key-row" title={t('勾选后转发请求不带鉴权头，适用于免鉴权上游或网关侧 IP 白名单')}>
+                  <input
+                    type="checkbox"
+                    checked={form.no_key}
+                    onChange={onNoKeyChange}
+                  />
+                  {t('无密钥（免鉴权上游）')}
+                </label>
                 <div className="password-input-wrap">
                   <input
                     className="form-input password-input"
                     type={showApiKey ? 'text' : 'password'}
-                    placeholder={editChannel ? t('留空保持当前值') : 'API Key'}
+                    disabled={form.no_key}
+                    placeholder={form.no_key ? t('无密钥模式') : (editChannel ? t('留空保持当前值') : 'API Key')}
                     value={form.api_key}
                     onChange={(e) => setForm({ ...form, api_key: e.target.value })}
                   />
@@ -1045,6 +1079,7 @@ export default function Channels(): JSX.Element {
                     type="button"
                     className="password-input-toggle"
                     tabIndex={-1}
+                    disabled={form.no_key}
                     onClick={() => setShowApiKey((v) => !v)}
                     aria-label={showApiKey ? t('隐藏') : t('显示')}
                     title={showApiKey ? t('隐藏') : t('显示')}

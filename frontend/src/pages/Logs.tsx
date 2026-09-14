@@ -101,6 +101,9 @@ export default function Logs(): JSX.Element {
         if (filters.user) params.user = filters.user;
         if (filters.model) params.model = filters.model;
         if (filters.channel) params.channel = filters.channel;
+        // 时间范围筛选：datetime-local 值（本地时区）→ unix 秒
+        if (filters.start) params.start = Math.floor(new Date(filters.start).getTime() / 1000);
+        if (filters.end) params.end = Math.floor(new Date(filters.end).getTime() / 1000);
         const res = await api.listRequestLogs(params);
         if (seq !== loadSeq.current) return; // 已被更新的请求取代
         setLogs(Array.isArray(res?.data) ? (res.data as unknown as LogItem[]) : []);
@@ -213,10 +216,12 @@ export default function Logs(): JSX.Element {
     try {
       setExporting(format);
       // 拼接当前生效的筛选参数，保证导出与页面筛选结果一致
-      const qs = new URLSearchParams({ format });
-      if (filters.user) qs.set('user', filters.user);
-      if (filters.model) qs.set('model', filters.model);
-      if (filters.channel) qs.set('channel', filters.channel);
+    const qs = new URLSearchParams({ format });
+    if (filters.user) qs.set('user', filters.user);
+    if (filters.model) qs.set('model', filters.model);
+    if (filters.channel) qs.set('channel', filters.channel);
+    if (filters.start) qs.set('start', String(Math.floor(new Date(filters.start).getTime() / 1000)));
+    if (filters.end) qs.set('end', String(Math.floor(new Date(filters.end).getTime() / 1000)));
       const token = localStorage.getItem('token');
       const res = await fetch(`/api/logs/requests/export?${qs.toString()}`, {
         headers: { 'Authorization': `Bearer ${token}` },
@@ -404,6 +409,24 @@ export default function Logs(): JSX.Element {
                 <input className="form-input" value={filters.channel} onChange={(e) => setFilters({ ...filters, channel: e.target.value })} placeholder={t('按渠道过滤')} />
               </div>
             )}
+            <div className="form-group">
+              <label>{t('开始时间')}</label>
+              <input
+                type="datetime-local"
+                className="form-input"
+                value={filters.start}
+                onChange={(e) => setFilters({ ...filters, start: e.target.value })}
+              />
+            </div>
+            <div className="form-group">
+              <label>{t('结束时间')}</label>
+              <input
+                type="datetime-local"
+                className="form-input"
+                value={filters.end}
+                onChange={(e) => setFilters({ ...filters, end: e.target.value })}
+              />
+            </div>
           </div>
           {!admin && (
             <div className="form-hint" style={{ marginTop: 4 }}>

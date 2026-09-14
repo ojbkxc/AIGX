@@ -125,9 +125,17 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// 列出所有键（支持前缀匹配）
+    /// 列出所有键（支持前缀匹配；空前缀 = 全部键）
     pub fn list(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
         let conn = self.conn.lock();
+        if prefix.is_empty() {
+            let mut stmt = conn.prepare_cached("SELECT key FROM kv ORDER BY key")?;
+            let keys: Vec<String> = stmt
+                .query_map([], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            return Ok(keys);
+        }
         let pattern = format!("{prefix}%");
         let mut stmt = conn.prepare_cached("SELECT key FROM kv WHERE key LIKE ?1 ORDER BY key")?;
         let keys: Vec<String> = stmt

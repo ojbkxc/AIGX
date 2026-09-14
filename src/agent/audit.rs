@@ -34,6 +34,13 @@ pub async fn record_agent_action(
         &action,
         target,
         before,
-        after.or_else(|| Some(json!({ "success": ok }))),
+        after
+            .map(|mut a| {
+                if let Some(obj) = a.as_object_mut() {
+                    obj.insert("success".to_string(), json!(ok));
+                }
+                a
+            })
+            .or_else(|| Some(json!({ "success": ok }))),
     );
 }

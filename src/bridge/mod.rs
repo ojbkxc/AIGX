@@ -459,6 +459,21 @@ pub fn parse_retry_after(headers: &http::HeaderMap) -> Option<Duration> {
     Some(Duration::from_secs(seconds))
 }
 
+/// 空密钥不发送鉴权头（免鉴权上游 / 网关侧 IP 白名单场景）。
+///
+/// 各 bridge（openai/gemini/zai/anthropic）共用的条件式鉴权辅助：
+/// 避免发出畸形的 `Authorization: Bearer `（部分上游直接 401）。
+pub fn apply_conditional_bearer(
+    req: reqwest::RequestBuilder,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    if api_key.is_empty() {
+        req
+    } else {
+        req.bearer_auth(api_key)
+    }
+}
+
 /// 限制读取响应体，至多 `limit` 字节
 pub async fn read_body_capped(resp: reqwest::Response, limit: usize) -> bytes::Bytes {
     use futures::StreamExt;

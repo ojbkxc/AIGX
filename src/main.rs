@@ -73,6 +73,7 @@ use proxy::CfApiClient;
 use ratelimit::RateLimiter;
 use redemption::RedemptionStore;
 use storage::FileStore;
+use ticket::TicketStore;
 use usage::UsageTracker;
 use user::{Role, UserStore};
 use user_group::UserGroupStore;
@@ -102,9 +103,17 @@ async fn main() -> anyhow::Result<()> {
     let store = {
         // PostgreSQL 后端：database.url 非空且启用了 postgres feature 时走 PG，
         // 否则用默认 SQLite 文件后端。二者同为 FileStore 类型，业务层无感知。
+        // 打开 PG 时顺带做一次 SQLite→PG 历史数据迁移（幂等）：老版本 SQLite
+        // 库在 data_dir 或 data_dir/data 下，两个路径都探测。
         #[cfg(feature = "postgres")]
         let s = if config.database.is_enabled() {
-            match FileStore::open_postgres(&config.database.url, config.database.max_connections) {
+            // 旧布局优先（老版本直接 data_dir/aigx.db），避免被新布局空库干扰
+            let sqlite_dirs = vec![data_dir.clone(), data_dir.join("data")];
+            match FileStore::open_postgres(
+                &config.database.url,
+                config.database.max_connections,
+                &sqlite_dirs,
+            ) {
                 Ok(pg) => {
                     tracing::info!("PostgreSQL KV store enabled: {}", config.database.url);
                     pg
@@ -224,6 +233,9 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化订阅存储（时长订阅：余额购买 → 独立配额池 + 分组升降级，#85）
     let subscription_store = Arc::new(plan::subscription::SubscriptionStore::new(store.clone()));
+
+    // 初始化工单存储（用户提交问题 / 管理员回复）
+    let ticket_store = Arc::new(TicketStore::new(store.clone()));
 
     // 初始化限流器（功能 3，带持久化配置）
     let rate_limiter = Arc::new(RateLimiter::with_store(store.clone()));
@@ -384,6 +396,7 @@ async fn main() -> anyhow::Result<()> {
         redemption_store,
         plan_store,
         subscription_store,
+        ticket_store,
         rate_limiter,
         notify_service,
         alert_evaluator,
@@ -810,6 +823,29 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/users/:id/2fa",
             delete(api::admin::handle_admin_disable_2fa),
+        )
+        // 工单（用户侧 / 管理侧，对齐 v2board Ticket）
+        .route("/api/tickets", get(api::admin::handle_user_list_tickets))
+        .route("/api/tickets", post(api::admin::handle_user_save_ticket))
+        .route(
+            "/api/tickets/reply",
+            post(api::admin::handle_user_reply_ticket),
+        )
+        .route(
+            "/api/tickets/close",
+            post(api::admin::handle_user_close_ticket),
+        )
+        .route(
+            "/api/admin/tickets",
+            get(api::admin::handle_admin_list_tickets),
+        )
+        .route(
+            "/api/admin/tickets/reply",
+            post(api::admin::handle_admin_reply_ticket),
+        )
+        .route(
+            "/api/admin/tickets/close",
+            post(api::admin::handle_admin_close_ticket),
         )
         // 渠道管理
         .route("/api/channels", get(api::admin::handle_list_channels))

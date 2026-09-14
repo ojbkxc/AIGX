@@ -19,6 +19,7 @@ import type {
   OrderItem,
   PlanItem,
   RedemptionItem,
+  TicketItem,
   UserSubscriptionItem,
   AlertRule,
   AlertEvent,
@@ -316,6 +317,22 @@ export const api = {
   /** 邀请奖励划转到可用配额（对齐 new-api POST /api/user/aff_transfer） */
   affTransfer: (): Promise<ApiResponse<{ transferred: number }>> =>
     request<ApiResponse<{ transferred: number }>>('POST', `${API_BASE}/aff_transfer`, {}),
+  // ==================== 工单（对齐 v2board Ticket） ====================
+  listTickets: (id = ''): Promise<ApiResponse<TicketItem[] | TicketItem>> =>
+    request<ApiResponse<TicketItem[] | TicketItem>>('GET', `${API_BASE}/tickets${id ? `?id=${encodeURIComponent(id)}` : ''}`),
+  createTicket: (data: { subject: string; level: number; message: string }): Promise<ApiResponse<TicketItem>> =>
+    request<ApiResponse<TicketItem>>('POST', `${API_BASE}/tickets`, data),
+  replyTicket: (id: string, message: string): Promise<ApiResponse<TicketItem>> =>
+    request<ApiResponse<TicketItem>>('POST', `${API_BASE}/tickets/reply`, { id, message }),
+  closeTicket: (id: string): Promise<ApiResponse<TicketItem>> =>
+    request<ApiResponse<TicketItem>>('POST', `${API_BASE}/tickets/close`, { id }),
+  /** 管理员工单列表/详情 */
+  adminListTickets: (params: Record<string, string | number> = {}): Promise<ApiResponse<TicketItem[] | TicketItem>> =>
+    request<ApiResponse<TicketItem[] | TicketItem>>('GET', `${API_BASE}/admin/tickets${Object.keys(params).length ? `?${buildQuery(params)}` : ''}`),
+  adminReplyTicket: (id: string, message: string): Promise<ApiResponse<TicketItem>> =>
+    request<ApiResponse<TicketItem>>('POST', `${API_BASE}/admin/tickets/reply`, { id, message }),
+  adminCloseTicket: (id: string): Promise<ApiResponse<TicketItem>> =>
+    request<ApiResponse<TicketItem>>('POST', `${API_BASE}/admin/tickets/close`, { id }),
   /** 签到状态与当月记录（对齐 new-api GET /api/user/checkin） */
   checkinStatus: (): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/checkin`),
@@ -649,10 +666,12 @@ export const api = {
   // ==================== AI 运维 Agent（管理员专属 /admin/agent） ====================
   listAgentSessions: (): Promise<ApiResponse<unknown[]>> =>
     request<ApiResponse<unknown[]>>('GET', `${API_BASE}/agent/sessions`),
-  createAgentSession: (title: string): Promise<ApiResponse<{ id: string; title: string }>> =>
-    request<ApiResponse<{ id: string; title: string }>>('POST', `${API_BASE}/agent/sessions`, { title }),
+  createAgentSession: (title: string, role?: 'observer' | 'operator'): Promise<ApiResponse<{ id: string; title: string }>> =>
+    request<ApiResponse<{ id: string; title: string }>>('POST', `${API_BASE}/agent/sessions`, { title, role }),
   getAgentSession: (id: string): Promise<ApiResponse<unknown>> =>
     request<ApiResponse<unknown>>('GET', `${API_BASE}/agent/sessions/${encodeURIComponent(id)}`),
+  deleteAgentSession: (id: string): Promise<ApiResponse<null>> =>
+    request<ApiResponse<null>>('DELETE', `${API_BASE}/agent/sessions/${encodeURIComponent(id)}`),
   agentApprove: (requestId: string, action: 'allow' | 'deny' | 'remember'): Promise<ApiResponse<null>> =>
     request<ApiResponse<null>>('POST', `${API_BASE}/agent/approvals/${encodeURIComponent(requestId)}`, { action }),
   /** Agent 对话：SSE 流式，逐事件回调（AgentEvent） */

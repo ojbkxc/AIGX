@@ -12,9 +12,10 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use super::{
-    Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream, ChatFormat, ChatMessage,
-    ChatResponse, EmbeddingRequest, EmbeddingResponse, FinishReason, RerankRequest, RerankResponse,
-    RerankResult, ResponsesPassthrough, Role, UpstreamWire, UsageStats,
+    apply_conditional_bearer, Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream,
+    ChatFormat, ChatMessage, ChatResponse, EmbeddingRequest, EmbeddingResponse, FinishReason,
+    RerankRequest, RerankResponse, RerankResult, ResponsesPassthrough, Role, UpstreamWire,
+    UsageStats,
 };
 
 /// OpenAI 兼容上游 Bridge。
@@ -66,6 +67,11 @@ impl OpenaiCompatibleBridge {
 
     fn images_url(&self) -> String {
         format!("{}/images/generations", self.base_url.trim_end_matches('/'))
+    }
+
+    /// 空密钥不发送 Authorization 头（见 `apply_conditional_bearer`）
+    fn auth_conditional(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        apply_conditional_bearer(req, &self.api_key)
     }
 
     /// 将 ChatFormat 转为 OpenAI 请求体
@@ -172,9 +178,7 @@ impl Bridge for OpenaiCompatibleBridge {
         body["stream"] = serde_json::json!(false);
 
         let resp = self
-            .client
-            .post(self.chat_url())
-            .bearer_auth(&self.api_key)
+            .auth_conditional(self.client.post(self.chat_url()))
             .json(&body)
             .send()
             .await
@@ -303,7 +307,7 @@ impl Bridge for OpenaiCompatibleBridge {
         let resp = self
             .client
             .post(self.chat_url())
-            .bearer_auth(&self.api_key)
+            .auth_conditional(&self.api_key)
             .json(&body)
             .send()
             .await
@@ -374,7 +378,7 @@ impl Bridge for OpenaiCompatibleBridge {
         let resp = self
             .client
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .auth_conditional(&self.api_key)
             .json(&body)
             .send()
             .await
@@ -455,7 +459,7 @@ impl Bridge for OpenaiCompatibleBridge {
         let resp = self
             .client
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .auth_conditional(&self.api_key)
             .json(&body)
             .send()
             .await
@@ -516,7 +520,7 @@ impl Bridge for OpenaiCompatibleBridge {
         let resp = self
             .client
             .post(self.completions_url())
-            .bearer_auth(&self.api_key)
+            .auth_conditional(&self.api_key)
             .json(body)
             .send()
             .await
@@ -548,7 +552,7 @@ impl Bridge for OpenaiCompatibleBridge {
         let resp = self
             .client
             .post(self.images_url())
-            .bearer_auth(&self.api_key)
+            .auth_conditional(&self.api_key)
             .json(body)
             .send()
             .await
@@ -585,7 +589,7 @@ impl Bridge for OpenaiCompatibleBridge {
         let resp = self
             .client
             .post(self.responses_url())
-            .bearer_auth(&self.api_key)
+            .auth_conditional(&self.api_key)
             .json(body)
             .send()
             .await

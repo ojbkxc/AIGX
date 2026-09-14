@@ -318,6 +318,7 @@ export interface ChannelItem {
   priority?: number;
   weight?: number;
   max_concurrent?: number;
+  /** 脱敏后的密钥；空字符串 = 无密钥渠道（免鉴权上游） */
   api_key?: string;
   model_mapping?: Record<string, string>;
   cost_pricing?: Record<string, { input_price?: number; output_price?: number; price_type?: string }>;
@@ -466,6 +467,34 @@ export interface RedemptionItem {
   status?: string;
   created_at?: string;
   expired_at?: string;
+  [key: string]: unknown;
+}
+
+/** 工单消息（is_me 以工单发起人视角标记） */
+export interface TicketMessageItem {
+  id: string;
+  ticket_id: string;
+  user_id: string;
+  message: string;
+  created_at: number;
+  is_me: boolean;
+  [key: string]: unknown;
+}
+
+/** 工单（对齐 v2board Ticket） */
+export interface TicketItem {
+  id: string;
+  user_id: string;
+  subject: string;
+  level: number;
+  status: number;
+  reply_status: number;
+  created_at: number;
+  updated_at: number;
+  /** 详情接口附带的消息列表 */
+  message?: TicketMessageItem[];
+  /** 管理端列表附带（邮箱由后端补时可选） */
+  email?: string;
   [key: string]: unknown;
 }
 

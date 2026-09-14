@@ -61,6 +61,11 @@ pub async fn handle_channel_health_archive(
 }
 
 /// 渠道创建请求
+///
+/// `api_key` 三态语义（对齐 cf-ai-gw expiresAt 的 undefined/null/值 模式）：
+/// - 缺省 / `None`：不涉及密钥（新增=空密钥渠道，如免鉴权上游；更新=保持原值）
+/// - `Some("")`：显式清除密钥
+/// - `Some("sk-..")`：设置新密钥
 #[derive(Debug, Deserialize)]
 pub struct ChannelRequest {
     pub name: String,
@@ -68,8 +73,8 @@ pub struct ChannelRequest {
     pub channel_type: String,
     #[serde(default)]
     pub base_url: String,
-    #[serde(default)]
-    pub api_key: String,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
+    pub api_key: Option<String>,
     #[serde(default)]
     pub priority: i64,
     #[serde(default = "default_weight")]
@@ -94,6 +99,18 @@ fn default_enabled_status() -> String {
     "enabled".to_string()
 }
 
+/// `Option<String>` 反序列化：字段缺省 → None；显式 `null` / `""` → Some("")。
+///
+/// 不能用 `Option<String>` 的默认行为（null 会变成 None，与"字段缺省"无法区分），
+/// 这里把 null 归一为 Some("")（= 清除语义），缺省才是 None（= 不涉及）。
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(Some(opt.unwrap_or_default()))
+}
+
 impl ChannelRequest {
     fn to_channel(&self, id: String) -> Channel {
         let now = chrono::Utc::now().timestamp();
@@ -102,7 +119,9 @@ impl ChannelRequest {
             name: self.name.clone(),
             channel_type: ChannelType::from_str_lossy(&self.channel_type),
             base_url: self.base_url.clone(),
-            api_key: self.api_key.clone(),
+            // 三态归一：None/Some("") → 空密钥；Some(key) → 密钥
+            // （新增时 None = 空密钥渠道；更新时 handler 先按 prev 保持原值再应用 Some）
+            api_key: self.api_key.clone().unwrap_or_default(),
             priority: self.priority,
             weight: self.weight,
             status: self.status.clone(),
@@ -421,9 +440,10 @@ pub async fn handle_update_channel(
         ch.last_used_at = prev.last_used_at;
         ch.last_error = prev.last_error;
         ch.created_at = prev.created_at;
-        // api_key 留空 → 保留原密钥（前端编辑时留空表示不变）
-        if ch.api_key.is_empty() {
-            ch.api_key = prev.api_key;
+        // api_key 三态：None（前端未动密钥）→ 保持原值；Some("") → 清除；Some(key) → 设置
+        match body.api_key {
+            None => ch.api_key = prev.api_key,
+            Some(ref k) => ch.api_key = k.clone(),
         }
     }
     match state.channel_store.update(&id, ch) {

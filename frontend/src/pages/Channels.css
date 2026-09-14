@@ -621,3 +621,27 @@ table tbody td input[type="checkbox"] {
   animation: spin 1s linear infinite;
   display: inline-block;
 }
+
+/* ── 无密钥复选框行（参照 cf-ai-gw「永久」行内组合：checkbox + 文案）── */
+.no-key-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  font-weight: 400;
+  user-select: none;
+}
+
+.no-key-row input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  margin: 0;
+}
+
+/* 无密钥模式下 API Key 输入框置灰 */
+.password-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

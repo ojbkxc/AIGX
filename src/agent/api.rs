@@ -32,7 +32,7 @@ pub fn router() -> axum::Router<AppState> {
         )
         .route(
             "/api/agent/sessions/:id",
-            axum::routing::get(handle_get_session),
+            axum::routing::get(handle_get_session).delete(handle_delete_session),
         )
         .route(
             "/api/agent/sessions/:id/chat",
@@ -161,6 +161,26 @@ pub async fn handle_get_session(
     ))
 }
 
+/// DELETE /api/agent/sessions/:id —— 删除会话及其消息。
+pub async fn handle_delete_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let agent = agent_state(&state)?;
+    agent
+        .session_store
+        .delete(&id)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+        })?;
+    Ok(Json(json!({ "success": true, "data": null })))
+}
+
 /// POST /api/agent/sessions/:id/chat —— SSE 流式推 AgentEvent。
 pub async fn handle_chat(
     State(state): State<AppState>,
@@ -227,6 +247,9 @@ pub async fn handle_chat(
             tool_result: None,
         },
     );
+
+    // 会话标题仍是缺省"新会话"时，用首条用户消息自动命名（截 30 字符）
+    let _ = agent.session_store.rename_if_default(&id, &body.message);
 
     let config = agent.config.clone();
     let state2 = state.clone();
@@ -345,5 +368,18 @@ pub async fn handle_approval(
         }
     };
     let ok = agent.approvals.resolve(&request_id, result);
+    // 审批动作本身留痕（谁在何时点了允许/拒绝）——工具执行侧的审计
+    // 由 runner 落（含决策来源），此处只记录 resolve 是否命中挂起请求
+    if ok {
+        let action = format!("agent_approval_{}", body.action);
+        crate::api::admin::common::record_audit(
+            &state,
+            &crate::api::admin::common::admin_id_from_session(&state, &headers).await,
+            &action,
+            &format!("request_id={request_id}"),
+            None,
+            Some(json!({ "resolved": true })),
+        );
+    }
     Ok(Json(json!({ "success": ok, "data": null })))
 }

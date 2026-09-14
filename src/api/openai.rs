@@ -85,6 +85,8 @@ pub struct AppState {
     pub plan_store: Arc<PlanStore>,
     /// 用户订阅存储（时长订阅：余额购买 → 独立配额池 + 分组升降级）
     pub subscription_store: Arc<crate::plan::subscription::SubscriptionStore>,
+    /// 工单存储（用户提交问题 / 管理员回复）
+    pub ticket_store: Arc<crate::ticket::TicketStore>,
     /// 限流器（多维度 RPM/TPM）
     pub rate_limiter: Arc<RateLimiter>,
     /// 通知服务（Telegram + SMTP + Slack + Webhook）
@@ -311,49 +313,43 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
     let candidates = state.channel_store.select_for_model(model);
     for ch in &candidates {
         match ch.channel_type {
+            // 空密钥渠道合法（免鉴权上游 / 网关侧 IP 白名单）：
+            // bridge 内部对空 key 不发送鉴权头
             crate::channel::ChannelType::OpenaiCompatible => {
                 let key = ch.decode_api_key();
-                if !key.is_empty() {
-                    result.push((
-                        crate::bridge::openai::make_bridge(&ch.base_url, &key, &state.http_client),
-                        Some(ch.id.clone()),
-                        Some(ch.clone()),
-                    ));
-                }
+                result.push((
+                    crate::bridge::openai::make_bridge(&ch.base_url, &key, &state.http_client),
+                    Some(ch.id.clone()),
+                    Some(ch.clone()),
+                ));
             }
             crate::channel::ChannelType::Anthropic => {
                 let key = ch.decode_api_key();
-                if !key.is_empty() {
-                    result.push((
-                        crate::bridge::anthropic::make_bridge(
-                            &ch.base_url,
-                            &key,
-                            &state.http_client,
-                        ),
-                        Some(ch.id.clone()),
-                        Some(ch.clone()),
-                    ));
-                }
+                result.push((
+                    crate::bridge::anthropic::make_bridge(
+                        &ch.base_url,
+                        &key,
+                        &state.http_client,
+                    ),
+                    Some(ch.id.clone()),
+                    Some(ch.clone()),
+                ));
             }
             crate::channel::ChannelType::Gemini => {
                 let key = ch.decode_api_key();
-                if !key.is_empty() {
-                    result.push((
-                        crate::bridge::gemini::make_bridge(&ch.base_url, &key, &state.http_client),
-                        Some(ch.id.clone()),
-                        Some(ch.clone()),
-                    ));
-                }
+                result.push((
+                    crate::bridge::gemini::make_bridge(&ch.base_url, &key, &state.http_client),
+                    Some(ch.id.clone()),
+                    Some(ch.clone()),
+                ));
             }
             crate::channel::ChannelType::Zai => {
                 let key = ch.decode_api_key();
-                if !key.is_empty() {
-                    result.push((
-                        crate::bridge::zai::make_bridge(&ch.base_url, &key, &state.http_client),
-                        Some(ch.id.clone()),
-                        Some(ch.clone()),
-                    ));
-                }
+                result.push((
+                    crate::bridge::zai::make_bridge(&ch.base_url, &key, &state.http_client),
+                    Some(ch.id.clone()),
+                    Some(ch.clone()),
+                ));
             }
             crate::channel::ChannelType::Cloudflare => {
                 // CF 渠道走 Hub 专用桥接

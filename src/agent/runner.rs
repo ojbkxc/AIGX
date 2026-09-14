@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::agent::approval::{AgentApprovals, ApprovalResult, APPROVAL_TIMEOUT};
+use crate::agent::approval::{self, AgentApprovals, ApprovalResult};
+use crate::agent::audit::record_agent_action;
 use crate::agent::llm;
 use crate::agent::session::AgentRole;
 use crate::agent::tools::{self, RiskLevel};
@@ -77,6 +78,9 @@ pub async fn run(
     convo.push(llm::system_message(SYSTEM_PROMPT.to_string()));
     convo.extend(messages);
 
+    // 审批超时读配置（0/缺失回退缺省 300s），不再硬编码
+    let approval_timeout = approval::approval_timeout_from(config.approval_timeout_secs);
+
     let mut turns = 0;
     loop {
         turns += 1;
@@ -124,6 +128,8 @@ pub async fn run(
                 .await;
 
                 let spec = tools::find_tool(&call.function_name);
+                // 工具审计 target：优先取主目标参数，回退原始参数摘要
+                let target = tool_target(&call.function_name, &args);
                 let outcome = match spec {
                     None => tools::ToolOutcome {
                         text: format!("Unknown tool: {}", call.function_name),
@@ -152,7 +158,7 @@ pub async fn run(
                                 arguments: call.arguments.clone(),
                             })
                             .await;
-                            tokio::time::timeout(APPROVAL_TIMEOUT, rx)
+                            tokio::time::timeout(approval_timeout, rx)
                                 .await
                                 .map(|r| r.unwrap_or(ApprovalResult::Denied))
                                 .unwrap_or(ApprovalResult::Denied)
@@ -161,6 +167,29 @@ pub async fn run(
                         if result == ApprovalResult::RememberAllow {
                             approvals.remember(session_id, &call.function_name);
                         }
+                        // 审批决策落审计：谁在何时允许/拒绝了哪个高危工具（含免审来源）
+                        let (action, decision) = if already {
+                            ("agent_approval_remembered", "remembered(免审)")
+                        } else if result == ApprovalResult::RememberAllow {
+                            ("agent_approval_remember", "remember(本会话总是允许)")
+                        } else if approved {
+                            ("agent_approval_allow", "allow")
+                        } else {
+                            ("agent_approval_deny", "deny")
+                        };
+                        record_agent_action(
+                            state,
+                            headers,
+                            action,
+                            &format!("{} {target}", call.function_name),
+                            approved,
+                            None,
+                            Some(serde_json::json!({
+                                "decision": decision,
+                                "session": session_id,
+                            })),
+                        )
+                        .await;
                         if !approved {
                             on_event(AgentEvent::ApprovalResolved {
                                 name: call.function_name.clone(),
@@ -187,14 +216,35 @@ pub async fn run(
                             }
                         }
                     }
-                    Some(_) => {
-                        match tools::exec_tool(state, headers, &call.function_name, &args).await {
-                            Ok(o) => o,
-                            Err((_code, msg)) => tools::ToolOutcome {
-                                text: msg,
-                                ok: false,
-                            },
+                    Some(s) => {
+                        let out =
+                            match tools::exec_tool(state, headers, &call.function_name, &args).await
+                            {
+                                Ok(o) => o,
+                                Err((_code, msg)) => tools::ToolOutcome {
+                                    text: msg,
+                                    ok: false,
+                                },
+                            };
+                        // 工具调用落审计：写操作必留痕；只读操作成功时不刷审计噪音，
+                        // 失败仍记录（便于排查"为什么查不到"）
+                        if s.risk != RiskLevel::ReadOnly || !out.ok {
+                            record_agent_action(
+                                state,
+                                headers,
+                                &call.function_name,
+                                &target,
+                                out.ok,
+                                None,
+                                Some(serde_json::json!({
+                                    "risk": s.risk.as_str(),
+                                    "role": role.as_str(),
+                                    "session": session_id,
+                                })),
+                            )
+                            .await;
                         }
+                        out
                     }
                 };
 
@@ -222,4 +272,33 @@ pub async fn run(
 #[allow(dead_code)]
 pub fn null_sink() -> EventSink {
     Arc::new(|_ev| Box::pin(async {}))
+}
+
+/// 提取工具调用的人类可读目标（审计 target 列展示用）。
+/// 按工具取主目标参数；查不到时回退参数键值摘要（截断防刷屏）。
+fn tool_target(name: &str, args: &Value) -> String {
+    let key = match name {
+        "aigx_user_delete" | "aigx_user_manage" => "user_id",
+        "aigx_channel_delete" | "aigx_channel_enable" | "aigx_channel_disable"
+        | "aigx_channel_test" | "aigx_reset_circuit_breaker" => "channel_id",
+        "aigx_channel_add" => "name",
+        "aigx_order_delete" => "trade_no",
+        "aigx_pricing_upsert" | "aigx_pricing_delete" => "model_name",
+        "aigx_key_delete" => "key_id",
+        "aigx_key_add" => "name",
+        "aigx_group_upsert" => "name",
+        _ => "",
+    };
+    if !key.is_empty() {
+        if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
+            return format!("{key}={v}");
+        }
+    }
+    let s = args.to_string();
+    if s.chars().count() > 120 {
+        let truncated: String = s.chars().take(120).collect();
+        format!("{truncated}…")
+    } else {
+        s
+    }
 }

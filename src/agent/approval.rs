@@ -90,4 +90,15 @@ impl AgentApprovals {
 }
 
 /// 审批等待超时（与 rust-tunnel 一致 5 分钟）。
-pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+/// 仅作为配置为 0 时的回退缺省值；实际超时读
+/// `config.agent.approval_timeout_secs`（见 runner::run）。
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// 从配置计算审批超时（0/缺失回退缺省 300s）。
+pub fn approval_timeout_from(secs: u64) -> Duration {
+    if secs == 0 {
+        APPROVAL_TIMEOUT
+    } else {
+        Duration::from_secs(secs)
+    }
+}

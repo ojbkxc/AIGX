@@ -9,7 +9,7 @@ import {
   Users, Wallet, Ticket, ScrollText, Package,
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
-  Languages, LogOut, Coins, Bot,
+  Languages, LogOut, Coins, Bot, Headphones,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -45,11 +45,12 @@ const navItems: NavItem[] = [
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
   { path: '/agent', labelKey: 'AI 运维', icon: Bot, adminOnly: true },
   { path: '/wallet', labelKey: '钱包', icon: Wallet },
+  { path: '/tickets', labelKey: '工单', icon: Headphones },
   { path: '/profile', labelKey: '个人中心', icon: UserRound },
 ];
 
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
-// 管理员 14 项 / 客户 8 项。合并历史：
+// 管理员 15 项 / 客户 9 项。合并历史：
 // - 模型映射 → 渠道管理内每渠道配置 + 全局 fallback（已下沉）
 // - 易支付 + 用户分组 + 通知设置 + 安全监控 + IP 管理 → 系统设置 tab
 // - 定价倍率曾并入系统设置计费 tab，现拆回独立页（/pricing）
@@ -79,15 +80,16 @@ const navGroups: NavGroup[] = [
       navItems[9],  // 兑换码
       navItems[10], // 套餐管理
       navItems[11], // 系统设置
-      navItems[14], // AI 运维
+      navItems[12], // AI 运维
     ],
   },
   {
     key: 'personal',
     labelKey: '个人',
     items: [
-      navItems[12], // 钱包
-      navItems[13], // 个人中心
+      navItems[13], // 钱包
+      navItems[14], // 工单
+      navItems[15], // 个人中心
     ],
   },
 ];

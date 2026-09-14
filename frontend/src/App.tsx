@@ -26,6 +26,7 @@ const Models = lazy(() => import('./pages/Models'));
 const Prompts = lazy(() => import('./pages/Prompts'));
 const Pricing = lazy(() => import('./pages/Pricing'));
 const Agent = lazy(() => import('./pages/Agent'));
+const Tickets = lazy(() => import('./pages/Tickets'));
 
 /** 懒加载页面兜底骨架（与全局 loading 视觉一致） */
 function PageFallback(): JSX.Element {
@@ -118,6 +119,7 @@ export default function App(): JSX.Element {
             <Route path="/prompts" element={<ProtectedLayout><Prompts /></ProtectedLayout>} />
             <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
             <Route path="/agent" element={<AdminRoute><Agent /></AdminRoute>} />
+            <Route path="/tickets" element={<ProtectedLayout><Tickets /></ProtectedLayout>} />
             <Route path="/profile" element={<ProtectedLayout><Profile /></ProtectedLayout>} />
             <Route path="*" element={<RouteErrorPage status={404} />} />
           </Routes>

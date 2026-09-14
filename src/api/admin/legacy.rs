@@ -1075,10 +1075,17 @@ pub async fn handle_patch_channel(
     if let Some(base_url) = body.get("base_url").and_then(|v| v.as_str()) {
         ch.base_url = base_url.to_string();
     }
-    // api_key：非空才更新，空字符串保留现有（避免脱敏值覆盖真实密钥）
-    if let Some(api_key) = body.get("api_key").and_then(|v| v.as_str()) {
-        if !api_key.is_empty() {
-            ch.api_key = api_key.to_string();
+    // api_key 三态：缺省/空串 → 保留现有（避免脱敏值覆盖真实密钥）；
+    // 显式 null → 清除密钥（无密钥渠道）；非空串 → 设置新密钥
+    match body.get("api_key") {
+        None => {}
+        Some(Value::Null) => ch.api_key = String::new(),
+        Some(v) => {
+            if let Some(api_key) = v.as_str() {
+                if !api_key.is_empty() {
+                    ch.api_key = api_key.to_string();
+                }
+            }
         }
     }
     if let Some(priority) = body.get("priority").and_then(|v| v.as_i64()) {

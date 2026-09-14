@@ -99,6 +99,9 @@ pub struct User {
     /// 邀请人 ID（注册时携带邀请码写入，空=自然注册）
     #[serde(default)]
     pub inviter_id: String,
+    /// 管理员备注（用户管理后台添加，对齐 v2board 用户备注）
+    #[serde(default)]
+    pub remark: String,
     #[serde(default)]
     pub created_at: i64,
 }
@@ -212,6 +215,7 @@ impl UserStore {
             aff_quota: 0,
             aff_history_quota: 0,
             inviter_id: String::new(),
+            remark: String::new(),
             created_at: chrono::Utc::now().timestamp(),
         };
         self.persist(&user)?;
@@ -260,6 +264,7 @@ impl UserStore {
             aff_quota: 0,
             aff_history_quota: 0,
             inviter_id: String::new(),
+            remark: String::new(),
             created_at: chrono::Utc::now().timestamp(),
         };
         self.persist(&user)?;

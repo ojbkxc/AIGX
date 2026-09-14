@@ -107,6 +107,28 @@ impl AgentSessionStore {
         self.store.get(&Self::session_key(id))
     }
 
+    /// 更新会话标题（首条用户消息后自动命名，避免全是"新会话"）。
+    pub fn rename(&self, id: &str, title: &str) -> anyhow::Result<()> {
+        if let Some(mut s) = self.get(id)? {
+            s.title = title.to_string();
+            self.store.put(&Self::session_key(id), &s)?;
+        }
+        Ok(())
+    }
+
+    /// 标题仍是缺省"新会话"时用 `first_message` 自动命名（截 30 字符）。
+    pub fn rename_if_default(&self, id: &str, first_message: &str) -> anyhow::Result<()> {
+        if let Some(s) = self.get(id)? {
+            if s.title.trim() == "新会话" || s.title.trim().is_empty() {
+                let title: String = first_message.trim().chars().take(30).collect();
+                if !title.is_empty() {
+                    self.rename(id, &title)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 列出全部会话（按创建时间倒序）。
     pub fn list(&self) -> anyhow::Result<Vec<AgentSession>> {
         let keys = self.store.list(SESSION_PREFIX)?;
