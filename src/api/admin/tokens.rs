@@ -37,6 +37,9 @@ pub struct KeyRequest {
     pub quota_limit: Option<i64>,
     #[serde(default)]
     pub ip_limit: Option<Vec<String>>,
+    /// 自定义密钥值（cf-ai-gw 同款语义）：非空则用该值，空则随机生成 sk-xxx
+    #[serde(default)]
+    pub custom_key: Option<String>,
 }
 
 /// API Key 更新请求
@@ -204,6 +207,7 @@ pub async fn handle_add_token(
         expires_at: body.expires_at,
         quota_limit: body.quota_limit,
         ip_limit: body.ip_limit,
+        custom_key: body.custom_key,
     };
     match state.api_key_store.generate_with_options(opts) {
         Ok(k) => {
@@ -214,7 +218,7 @@ pub async fn handle_add_token(
         }
         Err(e) => Err(error_response(
             &format!("Failed to create token: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_REQUEST,
         )),
     }
 }

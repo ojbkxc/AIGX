@@ -18,6 +18,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::account::CfAccount;
+use crate::api::auth::CreateApiKeyOptions;
 use crate::channel::ChannelType;
 use crate::config::AppConfig;
 use crate::graphql;
@@ -374,7 +375,19 @@ pub async fn handle_add_key(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
 
-    match state.api_key_store.generate(&body.name) {
+    // 透传 custom_key（cf-ai-gw 同款语义）：非空用用户值，空则随机生成
+    match state
+        .api_key_store
+        .generate_with_options(CreateApiKeyOptions {
+            name: body.name,
+            user_id: None,
+            group: "default".to_string(),
+            allowed_models: None,
+            expires_at: None,
+            quota_limit: None,
+            ip_limit: None,
+            custom_key: body.custom_key,
+        }) {
         Ok(key) => Ok(Json(serde_json::json!({
             "success": true,
             "data": {

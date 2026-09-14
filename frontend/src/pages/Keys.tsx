@@ -46,6 +46,8 @@ interface KeyFormState {
   quota_limit: string;
   ip_limit: string;
   status: string;
+  /** 自定义密钥值（cf-ai-gw 同款语义）：创建时可选，留空随机生成 sk-xxx */
+  custom_key: string;
 }
 
 interface GeneratedKeyState {
@@ -67,6 +69,7 @@ const EMPTY_FORM: KeyFormState = {
   quota_limit: '',
   ip_limit: '',
   status: 'active',
+  custom_key: '',
 };
 
 /** Unix 秒 → datetime-local 字符串（本地时区，取分钟精度） */
@@ -245,6 +248,8 @@ export default function Keys(): JSX.Element {
       // 未展示的字段清空——后端只要 Some 就覆盖。
       ip_limit: Array.isArray(tk.ip_limit) ? tk.ip_limit.join(', ') : '',
       status: tk.status || (tk.is_active === false ? 'disabled' : 'active'),
+      // 编辑态无自定义密钥值（密钥值只在创建时可选）
+      custom_key: '',
     });
     setGeneratedKey(null);
     setShowModal(true);
@@ -288,6 +293,10 @@ export default function Keys(): JSX.Element {
       }
       const expiresTs = localInputToTs(form.expires_at);
       if (expiresTs != null) payload.expires_at = expiresTs;
+      // 自定义密钥值（仅创建）：非空才发，留空后端随机生成（cf-ai-gw 语义）
+      if (!editing && form.custom_key.trim()) {
+        payload.custom_key = form.custom_key.trim();
+      }
       const quotaNum = Number(form.quota_limit);
       if (form.quota_limit.trim()) {
         if (!Number.isFinite(quotaNum)) {
@@ -929,6 +938,14 @@ export default function Keys(): JSX.Element {
                     onChange={(e) => setForm({ ...form, name: e.target.value })}
                     autoFocus
                   />
+                  {!editing && (
+                    <Input
+                      label={`${t('密钥值')} ${t('(可选，留空则随机生成 sk-...)')}`}
+                      placeholder="sk-..."
+                      value={form.custom_key}
+                      onChange={(e) => setForm({ ...form, custom_key: e.target.value })}
+                    />
+                  )}
                   <Select
                     label={t('分组')}
                     value={form.group}

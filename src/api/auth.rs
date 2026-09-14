@@ -218,6 +218,7 @@ impl ApiKeyStore {
             expires_at: None,
             quota_limit: None,
             ip_limit: None,
+            custom_key: None,
         })
     }
 
@@ -227,7 +228,19 @@ impl ApiKeyStore {
         opts: CreateApiKeyOptions,
     ) -> Result<ApiKey, anyhow::Error> {
         let id = uuid::Uuid::new_v4().to_string();
-        let key = format!("sk-{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+        // 自定义密钥值（cf-ai-gw 同款语义）：非空用用户值（查重防撞），空则随机
+        let key = match opts.custom_key.as_deref() {
+            Some(k) if !k.trim().is_empty() => {
+                let k = k.trim();
+                // 查重：与现有密钥撞值会导致 validate 命中错误对象
+                let hash = hash_api_key(k.strip_prefix("sk-").unwrap_or(k));
+                if self.key_hash_map.read().contains_key(&hash) {
+                    return Err(anyhow::anyhow!("密钥值已存在，请换一个"));
+                }
+                k.to_string()
+            }
+            _ => format!("sk-{}", uuid::Uuid::new_v4().to_string().replace('-', "")),
+        };
         let now = chrono::Utc::now().timestamp();
 
         let api_key = ApiKey {
@@ -529,6 +542,9 @@ pub struct CreateApiKeyOptions {
     pub expires_at: Option<i64>,
     pub quota_limit: Option<i64>,
     pub ip_limit: Option<Vec<String>>,
+    /// 自定义密钥值（cf-ai-gw 同款语义）：非空则用该值，空则随机生成 sk-xxx。
+    /// 带不带 `sk-` 前缀均可（validate 兼容两种形态）。
+    pub custom_key: Option<String>,
 }
 
 /// 空白名单归一化为 `None`：`Some(vec![])` 与 `None` 语义相同（均不限），
@@ -899,6 +915,7 @@ mod session_registry_tests {
             expires_at: None,
             quota_limit: None,
             ip_limit: None,
+            custom_key: None,
         };
         let k = s.generate_with_options(opts).unwrap();
         assert!(k.allowed_models.is_none());
@@ -917,5 +934,61 @@ mod session_registry_tests {
         let after = s.validate(&k.key).unwrap();
         assert!(after.allowed_models.is_none());
         assert!(after.allows_model("any-model"));
+    }
+
+    /// 自定义密钥值：非空用用户值（sk- 前缀可选），validate 双形态可命中。
+    #[test]
+    fn generate_with_custom_key() {
+        let s = key_store();
+        let opts = CreateApiKeyOptions {
+            name: "n3".to_string(),
+            user_id: None,
+            group: "default".to_string(),
+            allowed_models: None,
+            expires_at: None,
+            quota_limit: None,
+            ip_limit: None,
+            custom_key: Some("my-secret-token".to_string()),
+        };
+        let k = s.generate_with_options(opts).unwrap();
+        assert_eq!(k.key, "my-secret-token");
+        assert_eq!(s.validate("my-secret-token").unwrap().id, k.id);
+        assert_eq!(s.validate("sk-my-secret-token").unwrap().id, k.id);
+    }
+
+    /// 自定义密钥值撞已有 key → 报错不落库。
+    #[test]
+    fn generate_with_duplicate_custom_key_fails() {
+        let s = key_store();
+        let k = s.generate("n4").unwrap();
+        let opts = CreateApiKeyOptions {
+            name: "n5".to_string(),
+            user_id: None,
+            group: "default".to_string(),
+            allowed_models: None,
+            expires_at: None,
+            quota_limit: None,
+            ip_limit: None,
+            custom_key: Some(k.key.clone()),
+        };
+        assert!(s.generate_with_options(opts).is_err());
+    }
+
+    /// custom_key 为空串/纯空白 → 回退随机生成（cf-ai-gw `key || random` 语义）。
+    #[test]
+    fn generate_with_blank_custom_key_falls_back() {
+        let s = key_store();
+        let opts = CreateApiKeyOptions {
+            name: "n6".to_string(),
+            user_id: None,
+            group: "default".to_string(),
+            allowed_models: None,
+            expires_at: None,
+            quota_limit: None,
+            ip_limit: None,
+            custom_key: Some("   ".to_string()),
+        };
+        let k = s.generate_with_options(opts).unwrap();
+        assert!(k.key.starts_with("sk-"));
     }
 }
