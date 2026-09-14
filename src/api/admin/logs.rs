@@ -23,10 +23,14 @@ use super::common::{default_page, default_size, error_response, verify_admin, ve
 /// 把请求日志条目序列化为 JSON，并附加 user_email（user_id → 邮箱解析）。
 ///
 /// 前端用户列展示邮箱而非 UUID；解析失败（用户已删）回退原 user_id。
-fn logs_with_user_email(state: &AppState, logs: Vec<serde_json::Value>) -> Vec<Value> {
+/// 普通用户响应剥离 `debug`（请求/响应快照仅 admin 可见，对齐 new-api admin_info 剥离语义）。
+fn logs_with_user_email(state: &AppState, logs: Vec<serde_json::Value>, admin: bool) -> Vec<Value> {
     logs.into_iter()
         .map(|mut l| {
             if let Some(obj) = l.as_object_mut() {
+                if !admin {
+                    obj.remove("debug");
+                }
                 if let Some(uid) = obj.get("user_id").and_then(|v| v.as_str()) {
                     if let Some(u) = state.user_store.get_by_id(uid) {
                         obj.insert("user_email".into(), Value::String(u.email));
@@ -139,13 +143,14 @@ pub async fn handle_list_request_logs(
         q.page,
         q.size,
     );
-    // user_id → user_email 解析（前端用户列展示邮箱）
+    // user_id → user_email 解析（前端用户列展示邮箱）；非 admin 剥离 debug 快照
     let data = logs_with_user_email(
         &state,
         logs.into_iter()
             .map(|l| serde_json::to_value(l).unwrap_or(Value::Null))
             .filter(|v| !v.is_null())
             .collect(),
+        admin,
     );
     Ok(Json(serde_json::json!({
         "success": true,

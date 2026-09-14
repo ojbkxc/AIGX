@@ -78,7 +78,7 @@ export function RequestLogDetail({ log, admin, onClose }: {
   );
 }
 
-/** 审计日志详情弹窗：操作上下文 + before/after JSON diff */
+/** 审计日志详情弹窗：操作上下文 + 逐字段 before/after diff */
 export function AuditLogDetail({ log, onClose }: {
   log: AuditLogItem;
   onClose: () => void;
@@ -98,12 +98,29 @@ export function AuditLogDetail({ log, onClose }: {
   const before = parse(log.before);
   const after = parse(log.after);
 
-  /** 变更字段集合：值不同的 key（diff 高亮） */
-  const changedKeys = new Set<string>();
+  type ChangeKind = 'added' | 'removed' | 'modified';
+  const changes: Array<{ key: string; kind: ChangeKind; before: string; after: string }> = [];
+  const unchanged: Array<{ key: string; value: string }> = [];
+
+  const fmt = (v: unknown): string => {
+    if (v === undefined) return '—';
+    if (typeof v === 'string') return v;
+    return JSON.stringify(v);
+  };
+
   if (before && after) {
-    const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
-    for (const k of keys) {
-      if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) changedKeys.add(k);
+    // 双快照：逐字段归类为 新增 / 删除 / 修改 / 未变
+    for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      const b = before[k], a = after[k];
+      if (JSON.stringify(b) === JSON.stringify(a)) {
+        unchanged.push({ key: k, value: fmt(b) });
+      } else if (b === undefined) {
+        changes.push({ key: k, kind: 'added', before: '', after: fmt(a) });
+      } else if (a === undefined) {
+        changes.push({ key: k, kind: 'removed', before: fmt(b), after: '' });
+      } else {
+        changes.push({ key: k, kind: 'modified', before: fmt(b), after: fmt(a) });
+      }
     }
   }
 
@@ -115,26 +132,60 @@ export function AuditLogDetail({ log, onClose }: {
         <div className="log-detail-row"><span className="log-detail-label">{t('操作')}</span><span className="log-detail-value"><code style={{ background: 'var(--card-bg)', padding: '2px 6px', borderRadius: 4 }}>{log.action}</code></span></div>
         <div className="log-detail-row"><span className="log-detail-label">{t('目标')}</span><span className="log-detail-value log-detail-mono">{log.target || '—'}</span></div>
       </div>
-      {changedKeys.size > 0 && (
+      {changes.length > 0 && (
         <div className="log-detail-changes">
-          <div className="log-detail-label">{t('变更字段')}（{changedKeys.size}）</div>
-          <div className="log-detail-change-list">
-            {Array.from(changedKeys).map((k) => (
-              <span key={k} className="log-detail-change-badge">{k}</span>
+          <div className="log-detail-label">{t('变更内容')}（{changes.length}）</div>
+          <div className="log-detail-change-rows">
+            {changes.map((c) => (
+              <div key={c.key} className={`log-detail-change-row log-detail-change-${c.kind}`}>
+                <div className="log-detail-change-row-head">
+                  <span className="log-detail-change-badge">{c.key}</span>
+                  <span className={`log-detail-change-kind log-detail-kind-${c.kind}`}>
+                    {c.kind === 'added' ? t('新增') : c.kind === 'removed' ? t('删除') : t('修改')}
+                  </span>
+                </div>
+                {c.kind !== 'added' && (
+                  <div className="log-detail-change-line log-detail-line-old">- {c.before || '—'}</div>
+                )}
+                {c.kind !== 'removed' && (
+                  <div className="log-detail-change-line log-detail-line-new">+ {c.after || '—'}</div>
+                )}
+              </div>
             ))}
           </div>
         </div>
       )}
-      <div className="log-detail-diff">
-        <div className="log-detail-diff-col">
-          <div className="log-detail-label">{t('变更前')}</div>
-          <pre className="log-detail-pre">{before ? JSON.stringify(before, null, 2) : (log.before || '—')}</pre>
+      {unchanged.length > 0 && (
+        <div className="log-detail-unchanged">
+          <details>
+            <summary>{t('未变更字段')}（{unchanged.length}）</summary>
+            <div className="log-detail-grid">
+              {unchanged.map((f) => (
+                <div key={f.key} className="log-detail-row">
+                  <span className="log-detail-label">{f.key}</span>
+                  <span className="log-detail-value log-detail-mono">{f.value}</span>
+                </div>
+              ))}
+            </div>
+          </details>
         </div>
-        <div className="log-detail-diff-col">
-          <div className="log-detail-label">{t('变更后')}</div>
-          <pre className="log-detail-pre">{after ? JSON.stringify(after, null, 2) : (log.after || '—')}</pre>
+      )}
+      {(!before || !after) && (log.before || log.after) && (
+        <div className="log-detail-diff">
+          {log.before && (
+            <div className="log-detail-diff-col">
+              <div className="log-detail-label">{t('变更前')}</div>
+              <pre className="log-detail-pre">{log.before}</pre>
+            </div>
+          )}
+          {log.after && (
+            <div className="log-detail-diff-col">
+              <div className="log-detail-label">{t('变更后')}</div>
+              <pre className="log-detail-pre">{log.after}</pre>
+            </div>
+          )}
         </div>
-      </div>
+      )}
     </LogDetailShell>
   );
 }
