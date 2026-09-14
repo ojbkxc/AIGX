@@ -79,6 +79,72 @@
   border: 1px solid var(--border-color);
 }
 
+/* 卡片头筛选区：标题 + 筛选控件行 */
+.pricing-filters {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pricing-filters h2 {
+  margin: 0;
+}
+
+.pricing-filter-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* 编辑态表单高亮（顶部表单进入编辑时） */
+.price-form-editing {
+  border-color: var(--accent-color, #10a37f);
+  box-shadow: 0 0 0 2px rgba(16, 163, 127, 0.15);
+}
+
+/* 正在编辑提示条 */
+.price-editing-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 8px 0;
+  padding: 8px 12px;
+  background: var(--code-bg);
+  border-radius: 8px;
+}
+
+.price-editing-hint code {
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+/* 批量操作条 */
+.price-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 12px;
+  padding: 8px 14px;
+  background: var(--section-item-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+/* 行内编辑行 */
+.price-row-editing {
+  background: var(--section-item-bg);
+}
+
+/* 行内输入框（窄列） */
+.price-inline-input {
+  width: 90px;
+  padding: 4px 8px !important;
+  font-size: 13px;
+}
+
 /* 倍率配置 */
 .ratio-hint {
   font-size: 14px;
