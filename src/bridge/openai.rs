@@ -305,9 +305,7 @@ impl Bridge for OpenaiCompatibleBridge {
         body["stream"] = serde_json::json!(true);
 
         let resp = self
-            .client
-            .post(self.chat_url())
-            .auth_conditional(&self.api_key)
+            .auth_conditional(self.client.post(self.chat_url()))
             .json(&body)
             .send()
             .await
@@ -376,9 +374,7 @@ impl Bridge for OpenaiCompatibleBridge {
             "input": req.input,
         });
         let resp = self
-            .client
-            .post(&url)
-            .auth_conditional(&self.api_key)
+            .auth_conditional(self.client.post(&url))
             .json(&body)
             .send()
             .await
@@ -457,9 +453,7 @@ impl Bridge for OpenaiCompatibleBridge {
             "top_n": req.top_n,
         });
         let resp = self
-            .client
-            .post(&url)
-            .auth_conditional(&self.api_key)
+            .auth_conditional(self.client.post(&url))
             .json(&body)
             .send()
             .await
@@ -518,9 +512,7 @@ impl Bridge for OpenaiCompatibleBridge {
     /// body 原样转发给上游的 /completions 端点，上游 2xx 时返回完整 JSON。
     async fn complete(&self, body: &Value, _ctx: &BridgeContext) -> Result<Value, BridgeError> {
         let resp = self
-            .client
-            .post(self.completions_url())
-            .auth_conditional(&self.api_key)
+            .auth_conditional(self.client.post(self.completions_url()))
             .json(body)
             .send()
             .await
@@ -550,9 +542,7 @@ impl Bridge for OpenaiCompatibleBridge {
         _ctx: &BridgeContext,
     ) -> Result<Value, BridgeError> {
         let resp = self
-            .client
-            .post(self.images_url())
-            .auth_conditional(&self.api_key)
+            .auth_conditional(self.client.post(self.images_url()))
             .json(body)
             .send()
             .await
@@ -587,9 +577,7 @@ impl Bridge for OpenaiCompatibleBridge {
         _ctx: &BridgeContext,
     ) -> Result<ResponsesPassthrough, BridgeError> {
         let resp = self
-            .client
-            .post(self.responses_url())
-            .auth_conditional(&self.api_key)
+            .auth_conditional(self.client.post(self.responses_url()))
             .json(body)
             .send()
             .await
