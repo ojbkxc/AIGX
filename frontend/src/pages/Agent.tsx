@@ -1,29 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Bot, Send, Plus, Square, Trash2, ShieldAlert, Terminal, Eye, Wrench,
-  CheckCircle2, XCircle, Loader2, MessageSquarePlus,
+  Bot, Send, Square, ShieldAlert, Terminal, Eye, Wrench,
+  CheckCircle2, XCircle, Loader2, MessageSquarePlus, Trash2,
 } from 'lucide-react';
+import ModelPicker from '../components/ModelPicker';
 import { api } from '../api';
 import './Agent.css';
-
-/** 会话条目（后端 AgentSession 序列化形状） */
-interface AgentSession {
-  id: string;
-  title: string;
-  model: string;
-  channel: string;
-  role: string;
-  created_at: number;
-}
-
-/** 单条消息（后端 AgentMessage 序列化形状） */
-interface AgentMsg {
-  role: string;
-  content: string;
-  tool_calls?: { type: string; name?: string; arguments?: string; ok?: boolean; text?: string; request_id?: string; approved?: boolean }[] | null;
-  tool_result?: unknown;
-}
 
 /** SSE 推的事件（后端 AgentEvent 序列化形状） */
 interface AgentEvent {
@@ -63,42 +46,54 @@ interface ChatMsg {
   toolSteps?: ToolStep[];
 }
 
-const fmtSessionTime = (ts: number): string => {
-  const d = new Date(ts * 1000);
-  const now = Date.now();
-  const diff = now - d.getTime();
-  if (diff < 60_000) return '刚刚';
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
-  return d.toLocaleDateString();
-};
-
 /** 高危工具的中文描述（审批弹卡展示用，参照 cc-haha 的 PermissionRequestTitle 语义） */
 const TOOL_LABELS: Record<string, string> = {
   aigx_user_delete: '删除用户（不可逆）',
   aigx_user_manage: '启用/禁用用户',
   aigx_channel_delete: '删除渠道（不可逆）',
+  aigx_channel_add: '新增渠道',
+  aigx_channel_enable: '启用渠道',
+  aigx_channel_disable: '禁用渠道',
   aigx_order_delete: '删除订单',
   aigx_pricing_upsert: '新增/更新模型定价',
   aigx_pricing_delete: '删除模型定价',
   aigx_logs_cleanup: '清理日志',
   aigx_key_delete: '删除 API 密钥（不可逆）',
+  aigx_key_add: '新增 API 密钥',
   aigx_group_upsert: '新增/更新用户分组',
 };
 
+/**
+ * Agent — AI 运维工作台（对齐 /chat 聊天页形态）。
+ *
+ * 无侧栏、无会话列表：单一对话流 + 底部输入区（new-api 游乐园布局）。
+ * 会话是后端概念（上下文 + 审计载体），首次发送时懒创建，不暴露给用户。
+ * 输入区底部工具行：[角色徽标 + 清空] ··· [模型选择器 + 发送/停止]。
+ */
 export default function Agent(): JSX.Element {
   const { t } = useTranslation();
-  const [sessions, setSessions] = useState<AgentSession[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [pending, setPending] = useState<PendingApproval | null>(null);
-  const [deleteConfirm, setDeleteConfirm] = useState<AgentSession | null>(null);
+  const [model, setModel] = useState('');
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [role, setRole] = useState<'observer' | 'operator'>('observer');
   const abortRef = useRef<AbortController | null>(null);
   const msgIdRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  // 启动时取 Agent 配置的模型作为模型选择器初值（可换）
+  useEffect(() => {
+    let mounted = true;
+    api.getAgentConfig()
+      .then((res) => {
+        if (mounted) setModel((res as unknown as { data?: { model?: string } }).data?.model ?? '');
+      })
+      .catch(() => { /* 配置读取失败静默降级：选择器空值，发送时走配置模型 */ });
+    return () => { mounted = false; };
+  }, []);
 
   const respondApproval = useCallback(async (action: 'allow' | 'deny' | 'remember') => {
     if (!pending) return;
@@ -111,82 +106,35 @@ export default function Agent(): JSX.Element {
     }
   }, [pending]);
 
-  // 加载会话列表
-  const loadSessions = useCallback(async () => {
-    try {
-      const res = await api.listAgentSessions();
-      const list = (res as unknown as { data?: AgentSession[] }).data ?? [];
-      setSessions(list);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadSessions();
-  }, [loadSessions]);
-
-  // 加载会话详情（含工具轨迹回放）
-  const loadSession = useCallback(async (id: string) => {
-    setActiveId(id);
+  const clearAll = useCallback(() => {
     setMessages([]);
-    try {
-      const res = await api.getAgentSession(id);
-      const data = (res as unknown as { data?: { messages?: AgentMsg[] } }).data;
-      const msgs = (data?.messages ?? []).map((m) => {
-        // tool_calls 数组即决策回放轨迹（tool_call/approval/tool_result 混排）
-        const steps: ToolStep[] = (m.tool_calls ?? []).map((tc) => {
-          if (tc.type === 'tool_call') return { kind: 'call', name: tc.name ?? '', args: tc.arguments, ok: true };
-          if (tc.type === 'approval_request') return { kind: 'approval', name: tc.name ?? '', args: tc.arguments };
-          if (tc.type === 'approval_resolved') return { kind: 'approval', name: tc.name ?? '', approved: tc.approved };
-          return { kind: 'result', name: tc.name ?? '', ok: tc.ok, text: tc.text };
-        });
-        return {
-          id: String(++msgIdRef.current),
-          role: (m.role === 'assistant' ? 'assistant' : 'user') as ChatMsg['role'],
-          content: m.content,
-          toolSteps: steps.length > 0 ? steps : undefined,
-        };
-      });
-      setMessages(msgs);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+    // 会话保留在服务端（审计载体），前端只断开关联：下条消息开新会话
+    setSessionId(null);
   }, []);
 
-  const newSession = useCallback(async () => {
-    try {
-      const res = await api.createAgentSession('');
-      const data = (res as unknown as { data?: { id: string } }).data;
-      if (data) {
-        await loadSessions();
-        await loadSession(data.id);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [loadSessions, loadSession]);
-
-  const removeSession = useCallback(async (s: AgentSession) => {
-    setDeleteConfirm(null);
-    try {
-      await api.deleteAgentSession(s.id);
-      if (activeId === s.id) {
-        setActiveId(null);
-        setMessages([]);
-      }
-      await loadSessions();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [activeId, loadSessions]);
-
-  const send = useCallback(async () => {
-    const text = input.trim();
-    if (!text || !activeId || busy) return;
+  const send = useCallback(async (override?: string) => {
+    const text = (override ?? input).trim();
+    if (!text || busy) return;
     setInput('');
     setBusy(true);
     setError('');
+
+    let sid = sessionId;
+    if (!sid) {
+      // 懒创建会话：首次发送时落一个（角色默认观察员，可切）
+      try {
+        const res = await api.createAgentSession('', role);
+        const data = (res as unknown as { data?: { id: string } }).data;
+        if (!data?.id) throw new Error(t('创建会话失败'));
+        sid = data.id;
+        setSessionId(sid);
+      } catch (e) {
+        setBusy(false);
+        setError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+    }
+
     const userMsg: ChatMsg = { id: String(++msgIdRef.current), role: 'user', content: text };
     setMessages((prev) => [...prev, userMsg]);
     // 占位 assistant 气泡，流式往里填
@@ -196,7 +144,7 @@ export default function Agent(): JSX.Element {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      await api.agentChatStream(activeId, text, (ev: AgentEvent) => {
+      await api.agentChatStream(sid, text, (ev: AgentEvent) => {
         if (ev.type === 'approval_request' && typeof ev.request_id === 'string') {
           setPending({ requestId: ev.request_id, name: ev.name ?? '', arguments: ev.arguments ?? '' });
           return;
@@ -226,7 +174,7 @@ export default function Agent(): JSX.Element {
             return m;
           }),
         );
-      }, controller.signal);
+      }, controller.signal, model || undefined);
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
         setError(e instanceof Error ? e.message : String(e));
@@ -235,7 +183,7 @@ export default function Agent(): JSX.Element {
       setBusy(false);
       abortRef.current = null;
     }
-  }, [input, activeId, busy]);
+  }, [input, busy, sessionId, model, role, t]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -244,9 +192,7 @@ export default function Agent(): JSX.Element {
   // 消息流自动滚底
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  const activeSession = sessions.find((s) => s.id === activeId);
+  }, [messages, pending]);
 
   /** 工具轨迹步骤渲染（决策回放：调用 → 审批 → 结果） */
   const renderStep = (step: ToolStep, i: number): ReactNode => {
@@ -283,122 +229,98 @@ export default function Agent(): JSX.Element {
     );
   };
 
+  const hasMessages = messages.length > 0;
+
   return (
     <div className="agent-shell">
-      {/* 左栏：会话列表（open-webui 侧栏观感） */}
-      <aside className="agent-sessions">
-        <div className="agent-sessions-head">
-          <span className="agent-sessions-title">
-            <Bot size={15} />
-            {t('AI 运维会话')}
-          </span>
-          <button type="button" className="agent-icon-btn" onClick={() => void newSession()} title={t('新建会话')}>
-            <Plus size={15} />
-          </button>
-        </div>
-        <div className="agent-sessions-list">
-          {sessions.map((s) => (
-            <div
-              key={s.id}
-              role="button"
-              tabIndex={0}
-              className={`agent-session-item ${s.id === activeId ? 'active' : ''}`}
-              onClick={() => void loadSession(s.id)}
-              onKeyDown={(e) => { if (e.key === 'Enter') void loadSession(s.id); }}
-            >
-              <span className="agent-session-title">{s.title}</span>
-              <span className="agent-session-meta">
-                <span className="agent-session-time">{fmtSessionTime(s.created_at)}</span>
-                {s.role === 'operator' && (
-                  <span className="agent-session-role operator"><Terminal size={10} />{t('运维员')}</span>
-                )}
-              </span>
+      {/* open-webui 居中 58rem 消息流（对齐聊天页 chat-debugger-messages） */}
+      <div className="agent-messages">
+        {messages.length === 0 && (
+          <div className="agent-empty">
+            <div className="agent-empty-title">{t('AI 运维工作台')}</div>
+            <p className="agent-empty-sub">{t('用 AI 运维你的网关——查渠道、看用户、测健康、排故障')}</p>
+            <div className="agent-empty-prompts">
+              {[
+                { icon: <Terminal size={13} />, text: t('看下系统状态，哪些渠道挂了？') },
+                { icon: <Eye size={13} />, text: t('今天的用量与成本报表') },
+                { icon: <MessageSquarePlus size={13} />, text: t('列出全部用户和密钥') },
+              ].map((p, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  className="agent-empty-prompt"
+                  onClick={() => { void send(p.text); }}
+                >
+                  {p.icon}<span>{p.text}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {messages.map((m) => (
+          <div key={m.id} className={`agent-msg agent-msg-${m.role}`}>
+            <span className="agent-msg-icon">
+              {m.role === 'user' ? <Terminal size={14} /> : <Bot size={14} />}
+            </span>
+            <div className="agent-msg-body">
+              {m.toolSteps && m.toolSteps.length > 0 && (
+                <div className="agent-tool-steps">
+                  {m.toolSteps.map(renderStep)}
+                </div>
+              )}
+              <div className="agent-msg-content">{m.content}</div>
+            </div>
+          </div>
+        ))}
+        {busy && (
+          <div className="agent-msg agent-msg-assistant">
+            <span className="agent-msg-icon"><Bot size={14} /></span>
+            <div className="agent-msg-body">
+              <div className="agent-typing"><Loader2 size={13} className="agent-spin" />{t('思考中…')}</div>
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      {error && <div className="agent-error">{error}<button type="button" onClick={() => setError('')}>×</button></div>}
+
+      {/* open-webui 式三段式圆角大输入框（对齐聊天页 chat-debugger-input-*） */}
+      <div className="agent-input-row">
+        <div className="agent-input-shell">
+          <textarea
+            className="agent-input"
+            value={input}
+            rows={2}
+            placeholder={t('输入运维指令，Enter 发送，Shift+Enter 换行')}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }}
+          />
+          <div className="agent-input-meta">
+            <div className="agent-input-left">
+              {/* 角色切换：观察员只读，运维员解锁写工具（高危仍走审批） */}
               <button
                 type="button"
-                className="agent-session-del"
-                title={t('删除会话')}
-                onClick={(e) => { e.stopPropagation(); setDeleteConfirm(s); }}
+                className={`agent-role-pill ${role === 'operator' ? 'operator' : ''}`}
+                disabled={busy}
+                onClick={() => { setRole((r) => (r === 'observer' ? 'operator' : 'observer')); }}
+                title={role === 'observer' ? t('观察员：只读工具。点击切换为运维员') : t('运维员：可执行写工具（高危仍需审批）。点击切回观察员')}
               >
-                <Trash2 size={12} />
+                <Terminal size={12} />
+                {role === 'observer' ? t('观察员') : t('运维员')}
+              </button>
+              <button
+                type="button"
+                className="agent-icon-btn"
+                title={t('清空对话')}
+                disabled={busy || !hasMessages}
+                onClick={clearAll}
+              >
+                <Trash2 size={15} />
               </button>
             </div>
-          ))}
-          {sessions.length === 0 && <div className="agent-sessions-empty">{t('暂无会话')}</div>}
-        </div>
-      </aside>
-
-      {/* 右栏：消息流 + 输入（open-webui 居中 58rem 消息流） */}
-      <main className="agent-main">
-        <div className="agent-messages">
-          {messages.map((m) => (
-            <div key={m.id} className={`agent-msg agent-msg-${m.role}`}>
-              <span className="agent-msg-icon">
-                {m.role === 'user' ? <Terminal size={14} /> : <Bot size={14} />}
-              </span>
-              <div className="agent-msg-body">
-                {m.toolSteps && m.toolSteps.length > 0 && (
-                  <div className="agent-tool-steps">
-                    {m.toolSteps.map(renderStep)}
-                  </div>
-                )}
-                <div className="agent-msg-content">{m.content || (busy ? '' : '')}</div>
-              </div>
-            </div>
-          ))}
-          {busy && (
-            <div className="agent-msg agent-msg-assistant">
-              <span className="agent-msg-icon"><Bot size={14} /></span>
-              <div className="agent-msg-body">
-                <div className="agent-typing"><Loader2 size={13} className="agent-spin" />{t('思考中…')}</div>
-              </div>
-            </div>
-          )}
-          {messages.length === 0 && !busy && (
-            <div className="agent-empty">
-              <div className="agent-empty-title">{t('AI 运维工作台')}</div>
-              <p className="agent-empty-sub">{t('用 AI 运维你的网关——查渠道、看用户、测健康、排故障')}</p>
-              <div className="agent-empty-prompts">
-                {[
-                  { icon: <Terminal size={13} />, text: t('看下系统状态，哪些渠道挂了？') },
-                  { icon: <Eye size={13} />, text: t('今天的用量与成本报表') },
-                  { icon: <MessageSquarePlus size={13} />, text: t('列出全部用户和密钥') },
-                ].map((p, i) => (
-                  <button
-                    key={i}
-                    type="button"
-                    className="agent-empty-prompt"
-                    onClick={() => { setInput(p.text); }}
-                  >
-                    {p.icon}<span>{p.text}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          <div ref={bottomRef} />
-        </div>
-
-        {error && <div className="agent-error">{error}<button type="button" onClick={() => setError('')}>×</button></div>}
-
-        <div className="agent-input-row">
-          <div className="agent-input-shell">
-            <textarea
-              className="agent-input"
-              value={input}
-              rows={1}
-              placeholder={activeId
-                ? t('输入运维指令，例如：看下系统状态 / 哪些渠道挂了 / 今天用量')
-                : t('先在左侧选择或新建会话')}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }}
-              disabled={!activeId}
-            />
-            <div className="agent-input-meta">
-              <span className="agent-input-context">
-                {activeSession
-                  ? `${activeSession.model || '默认模型'}${activeSession.role === 'operator' ? ` · ${t('运维员')}` : ` · ${t('观察员')}`}`
-                  : '—'}
-              </span>
+            <div className="agent-input-actions">
+              <ModelPicker value={model} onChange={setModel} compact />
               {busy ? (
                 <button type="button" className="agent-send-fab stop" onClick={stop} title={t('停止')}>
                   <Square size={14} />
@@ -408,7 +330,7 @@ export default function Agent(): JSX.Element {
                   type="button"
                   className="agent-send-fab"
                   onClick={() => void send()}
-                  disabled={!activeId || !input.trim()}
+                  disabled={!input.trim()}
                   title={t('发送')}
                 >
                   <Send size={15} />
@@ -417,7 +339,7 @@ export default function Agent(): JSX.Element {
             </div>
           </div>
         </div>
-      </main>
+      </div>
 
       {/* 审批弹卡（cc-haha PermissionDialog 语义：标题/工具/参数/三态选择） */}
       {pending && (
@@ -441,27 +363,6 @@ export default function Agent(): JSX.Element {
               <button type="button" className="agent-approval-deny" onClick={() => void respondApproval('deny')}>{t('拒绝')}</button>
               <button type="button" className="agent-approval-remember" onClick={() => void respondApproval('remember')}>{t('本会话总是允许')}</button>
               <button type="button" className="agent-approval-once" onClick={() => void respondApproval('allow')}>{t('允许一次')}</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 删除会话确认 */}
-      {deleteConfirm && (
-        <div className="agent-approval-mask" onClick={() => setDeleteConfirm(null)}>
-          <div className="agent-approval-card" onClick={(e) => e.stopPropagation()}>
-            <div className="agent-approval-head">
-              <Trash2 size={18} className="agent-approval-icon danger" />
-              <div>
-                <div className="agent-approval-title">{t('删除会话')}</div>
-                <div className="agent-approval-sub">
-                  {t('确定删除')}「{deleteConfirm.title}」？{t('该会话的全部消息将一并删除，不可恢复。')}
-                </div>
-              </div>
-            </div>
-            <div className="agent-approval-actions">
-              <button type="button" className="agent-approval-deny" onClick={() => setDeleteConfirm(null)}>{t('取消')}</button>
-              <button type="button" className="agent-approval-once" onClick={() => void removeSession(deleteConfirm)}>{t('删除')}</button>
             </div>
           </div>
         </div>

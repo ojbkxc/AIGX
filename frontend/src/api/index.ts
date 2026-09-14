@@ -674,17 +674,20 @@ export const api = {
     request<ApiResponse<null>>('DELETE', `${API_BASE}/agent/sessions/${encodeURIComponent(id)}`),
   agentApprove: (requestId: string, action: 'allow' | 'deny' | 'remember'): Promise<ApiResponse<null>> =>
     request<ApiResponse<null>>('POST', `${API_BASE}/agent/approvals/${encodeURIComponent(requestId)}`, { action }),
+  getAgentConfig: (): Promise<ApiResponse<{ model?: string; channel?: string }>> =>
+    request<ApiResponse<{ model?: string; channel?: string }>>('GET', `${API_BASE}/agent/config`),
   /** Agent 对话：SSE 流式，逐事件回调（AgentEvent） */
   agentChatStream: async (
     id: string,
     message: string,
     onEvent: (ev: { type: string; content?: string; name?: string; ok?: boolean; message?: string }) => void,
     signal?: AbortSignal,
+    model?: string,
   ): Promise<void> => {
     const res = await fetch(`${API_BASE}/agent/sessions/${encodeURIComponent(id)}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify(model ? { message, model } : { message }),
       signal,
     });
     if (!res.ok || !res.body) {

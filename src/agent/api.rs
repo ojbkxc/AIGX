@@ -42,6 +42,7 @@ pub fn router() -> axum::Router<AppState> {
             "/api/agent/approvals/:request_id",
             axum::routing::post(handle_approval),
         )
+        .route("/api/agent/config", axum::routing::get(handle_get_config))
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +56,9 @@ pub struct CreateSessionRequest {
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
     pub message: String,
+    /// 覆盖 `[agent].model`（前端模型选择器）。空/缺省用配置值。
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -248,7 +252,14 @@ pub async fn handle_chat(
     // 会话标题仍是缺省"新会话"时，用首条用户消息自动命名（截 30 字符）
     let _ = agent.session_store.rename_if_default(&id, &body.message);
 
-    let config = agent.config.clone();
+    let mut config = agent.config.clone();
+    // 前端模型选择器覆盖：请求带 model 时替换配置快照中的模型
+    //（渠道锁定逻辑不变——若 [agent].channel 非空仍只走该渠道）
+    if let Some(m) = body.model.as_deref() {
+        if !m.trim().is_empty() {
+            config.model = m.trim().to_string();
+        }
+    }
     let state2 = state.clone();
     let headers2 = headers.clone();
     let agent2 = agent.clone();
@@ -379,4 +390,25 @@ pub async fn handle_approval(
         );
     }
     Ok(Json(json!({ "success": ok, "data": null })))
+}
+
+/// GET /api/agent/config —— Agent 配置只读视图（前端模型选择器用）。
+///
+/// 返回当前 `[agent]` 的 model/channel（channel 锁定时模型选择器
+/// 仍可换模型，但渠道不换），与启用状态。
+pub async fn handle_get_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let agent = agent_state(&state)?;
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "model": agent.config.model,
+            "channel": agent.config.channel,
+            "max_turns": agent.config.max_turns,
+            "approval_timeout_secs": agent.config.approval_timeout_secs,
+        }
+    })))
 }
