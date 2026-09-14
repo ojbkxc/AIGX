@@ -1182,6 +1182,8 @@ export default function Channels(): JSX.Element {
                 channelId={String(chatChannel.id)}
                 channelModels={chatChannel.models || []}
                 initialProtocol={chatChannel.channel_type === 'anthropic' ? 'anthropic' : 'openai'}
+                /* 无密钥渠道：浏览器直连上游，请求从本机发出、不经服务器 IP */
+                directUpstream={!chatChannel.api_key ? { base_url: chatChannel.base_url, channel_type: chatChannel.channel_type } : undefined}
                 compact
               />
             </div>

@@ -832,6 +832,21 @@ export async function testChannelChatStream(
     throw new Error(msg || `Request failed with status ${res.status}`);
   }
 
+  await readSseResponse(res, onDelta, signal);
+}
+
+/**
+ * 读取 SSE 响应并逐帧解析为增量回调。
+ *
+ * 由两条路径共用：testChannelChatStream（经后端中转）与 ChatDebugger
+ * 直连模式（无密钥渠道由浏览器直接请求上游）。非流式 JSON（上游降级）
+ * 时解析后一次性回调。
+ */
+export async function readSseResponse(
+  res: Response,
+  onDelta: ChatStreamCallback,
+  signal?: AbortSignal,
+): Promise<void> {
   const contentType = res.headers.get('Content-Type') || '';
   if (!contentType.includes('text/event-stream')) {
     // 非流式 JSON（例如上游降级或后端报错），解析后一次性回调
@@ -846,7 +861,12 @@ export async function testChannelChatStream(
     }
     const p = (parsed ?? {}) as Record<string, unknown>;
     const data = (p.data ?? {}) as Record<string, unknown>;
-    const content = typeof data.content === 'string' ? data.content : '';
+    // 中转路径包一层 data.content；直连上游是 OpenAI 原生 choices 形状
+    let content = typeof data.content === 'string' ? data.content : '';
+    if (!content) {
+      const choices = p.choices as Array<{ message?: { content?: string } }> | undefined;
+      content = choices?.[0]?.message?.content ?? '';
+    }
     const error = typeof data.error === 'string' ? data.error : typeof p.error === 'string' ? p.error : '';
     if (error) {
       onDelta({ content: error, isEnd: true });
@@ -856,7 +876,8 @@ export async function testChannelChatStream(
     return;
   }
 
-  const reader = res.body.getReader();
+  const reader = res.body?.getReader();
+  if (!reader) return;
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
   let ended = false;
@@ -885,6 +906,100 @@ export async function testChannelChatStream(
   // 尾部残留帧
   if (buffer.trim()) handleFrame(buffer);
   if (!ended) onDelta({ content: '', isEnd: true });
+}
+
+/**
+ * 无密钥渠道浏览器直连上游：不经 AIGX 后端中转，请求从用户本机直接发往
+ * 上游 base_url。仅用于渠道「对话调试」弹窗中 api_key 为空的渠道。
+ *
+ * 协议复刻后端 handle_channel_chat_test 的 URL 构造：
+ * - openai：normalize_base_url（无路径时补 /v1）+ /chat/completions
+ * - anthropic：base 原样 + /v1/messages（x-api-key 空则省略）
+ *
+ * 注意：浏览器直连受上游 CORS 策略约束，跨域被拒时抛出带提示的错误。
+ */
+export async function directChannelChatStream(
+  channel: { base_url?: string; channel_type?: string },
+  data: PlaygroundChatRequest,
+  onDelta: ChatStreamCallback,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!channel.base_url || !channel.base_url.trim()) {
+    throw new Error('渠道未配置 Base URL，无法直连');
+  }
+  const isAnthropic = (channel.channel_type || '').toLowerCase() === 'anthropic';
+  const rawBase = channel.base_url.trim().replace(/\/+$/, '');
+  const hasPath = /^https?:\/\/[^/]+\/.+/.test(rawBase);
+  const base = isAnthropic || hasPath ? rawBase : `${rawBase}/v1`;
+
+  const messages: unknown[] = Array.isArray(data.history) ? data.history.slice() : [];
+  messages.push({ role: 'user', content: data.message ?? '' });
+
+  let url: string;
+  let payload: Record<string, unknown>;
+  if (isAnthropic) {
+    url = `${base}/v1/messages`;
+    payload = {
+      model: data.model,
+      max_tokens: data.max_tokens ?? 1024,
+      messages,
+    };
+    if (data.stream) payload.stream = true;
+    if (data.system_prompt) payload.system = data.system_prompt;
+  } else {
+    url = `${base}/chat/completions`;
+    payload = {
+      model: data.model,
+      messages,
+      stream: data.stream ?? false,
+    };
+    if (data.temperature !== undefined) payload.temperature = data.temperature;
+    if (data.max_tokens !== undefined) payload.max_tokens = data.max_tokens;
+    if (data.top_p !== undefined) payload.top_p = data.top_p;
+    if (data.frequency_penalty !== undefined) payload.frequency_penalty = data.frequency_penalty;
+    if (data.presence_penalty !== undefined) payload.presence_penalty = data.presence_penalty;
+    if (data.system_prompt) {
+      payload.messages = [{ role: 'system', content: data.system_prompt }, ...messages];
+    }
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: isAnthropic
+        ? { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' }
+        : { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal,
+    });
+  } catch (err) {
+    // fetch 网络层失败（上游不可达或 CORS 拦截）——TypeError 不带原始原因
+    if (signal?.aborted) throw err;
+    throw new Error(
+      `直连失败（请求未发或被 CORS 拦截）：上游 ${base} 不允许浏览器跨域访问。` +
+      '可改用经服务器中转的普通渠道，或在上游网关配置 CORS 允许本站来源。',
+    );
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    let msg = text;
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const raw = parsed.error ?? parsed.message;
+      if (typeof raw === 'string') msg = raw;
+      else if (raw && typeof raw === 'object') {
+        const m = (raw as Record<string, unknown>).message;
+        if (typeof m === 'string') msg = m;
+      }
+    } catch {
+      // 非 JSON 错误体，直接抛原文
+    }
+    throw new Error(msg || `Upstream HTTP ${res.status}`);
+  }
+
+  await readSseResponse(res, onDelta, signal);
 }
 
 export default api;

@@ -5,7 +5,7 @@ import {
   Zap, Mic, Plus, Link2, SlidersHorizontal, MessageSquarePlus, Paperclip,
   BarChart3, Code2, GraduationCap, ClipboardList,
 } from 'lucide-react';
-import { api, testChannelChatStream } from '../api';
+import { api, testChannelChatStream, directChannelChatStream } from '../api';
 import type { DebugMessage } from './chat/types';
 import ModelPicker from './ModelPicker';
 import './ChatDebugger.css';
@@ -25,6 +25,9 @@ export interface ChatDebuggerProps {
   channelId?: string;
   /** 指定渠道可用模型列表 */
   channelModels?: string[];
+  /** 直连模式：渠道无密钥时由浏览器直接请求上游（不走后端中转）。
+   *  提供后，发送请求改为 directChannelChatStream。 */
+  directUpstream?: { base_url?: string; channel_type?: string };
   /** 初始协议 */
   initialProtocol?: 'openai' | 'anthropic';
   /** 紧凑模式（渠道弹窗内嵌） */
@@ -78,6 +81,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const {
     channelId,
     channelModels = [],
+    directUpstream,
     initialProtocol = 'openai',
     compact = false,
     initialMessages = [],
@@ -533,7 +537,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
           messageTimestamps.current.set(assistantIdx, requestStartTime);
           return [...prev, { role: 'assistant', content: '…' }];
         });
-        await testChannelChatStream(body, (delta) => {
+        const onDelta = (delta: { content: string; isEnd?: boolean; kind?: string }): void => {
           setMessages((prev) => {
             const next = prev.slice();
             const last = next[next.length - 1];
@@ -550,7 +554,13 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             }
             return next;
           });
-        }, controller.signal);
+        };
+        if (directUpstream) {
+          // 无密钥渠道：浏览器直连上游，请求不经服务器中转
+          await directChannelChatStream(directUpstream, body, onDelta, controller.signal);
+        } else {
+          await testChannelChatStream(body, onDelta, controller.signal);
+        }
         abortRef.current = null;
         // 空流兜底提示（避免界面出现永久空白气泡）
         setMessages((prev) => {
