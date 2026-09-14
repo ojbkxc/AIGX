@@ -33,6 +33,7 @@ mod redemption;
 mod semantic;
 mod sse;
 mod storage;
+mod ticket;
 mod token_estimate;
 mod usage;
 mod user;
