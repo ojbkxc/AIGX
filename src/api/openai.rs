@@ -326,11 +326,7 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
             crate::channel::ChannelType::Anthropic => {
                 let key = ch.decode_api_key();
                 result.push((
-                    crate::bridge::anthropic::make_bridge(
-                        &ch.base_url,
-                        &key,
-                        &state.http_client,
-                    ),
+                    crate::bridge::anthropic::make_bridge(&ch.base_url, &key, &state.http_client),
                     Some(ch.id.clone()),
                     Some(ch.clone()),
                 ));

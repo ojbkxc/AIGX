@@ -217,15 +217,15 @@ pub async fn run(
                         }
                     }
                     Some(s) => {
-                        let out =
-                            match tools::exec_tool(state, headers, &call.function_name, &args).await
-                            {
-                                Ok(o) => o,
-                                Err((_code, msg)) => tools::ToolOutcome {
-                                    text: msg,
-                                    ok: false,
-                                },
-                            };
+                        let out = match tools::exec_tool(state, headers, &call.function_name, &args)
+                            .await
+                        {
+                            Ok(o) => o,
+                            Err((_code, msg)) => tools::ToolOutcome {
+                                text: msg,
+                                ok: false,
+                            },
+                        };
                         // 工具调用落审计：写操作必留痕；只读操作成功时不刷审计噪音，
                         // 失败仍记录（便于排查"为什么查不到"）
                         if s.risk != RiskLevel::ReadOnly || !out.ok {
@@ -279,8 +279,11 @@ pub fn null_sink() -> EventSink {
 fn tool_target(name: &str, args: &Value) -> String {
     let key = match name {
         "aigx_user_delete" | "aigx_user_manage" => "user_id",
-        "aigx_channel_delete" | "aigx_channel_enable" | "aigx_channel_disable"
-        | "aigx_channel_test" | "aigx_reset_circuit_breaker" => "channel_id",
+        "aigx_channel_delete"
+        | "aigx_channel_enable"
+        | "aigx_channel_disable"
+        | "aigx_channel_test"
+        | "aigx_reset_circuit_breaker" => "channel_id",
         "aigx_channel_add" => "name",
         "aigx_order_delete" => "trade_no",
         "aigx_pricing_upsert" | "aigx_pricing_delete" => "model_name",

@@ -36,6 +36,7 @@ interface AgentEvent {
   content?: string;
   message?: string;
   request_id?: string;
+  approved?: boolean;
 }
 
 /** 待审批请求 */

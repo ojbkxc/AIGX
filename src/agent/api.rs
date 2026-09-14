@@ -169,15 +169,12 @@ pub async fn handle_delete_session(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
     let agent = agent_state(&state)?;
-    agent
-        .session_store
-        .delete(&id)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })?;
+    agent.session_store.delete(&id).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
     Ok(Json(json!({ "success": true, "data": null })))
 }
 

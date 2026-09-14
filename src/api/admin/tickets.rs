@@ -5,7 +5,7 @@
 //! - 管理员列表（分页 + status/reply_status/email 过滤）、详情、回复（可重开）、关闭。
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::Json,
 };
@@ -108,13 +108,23 @@ pub async fn handle_user_save_ticket(
         return Err(error_response("工单内容不能为空", StatusCode::BAD_REQUEST));
     }
     if !(0..=2).contains(&body.level) {
-        return Err(error_response("工单优先级格式错误", StatusCode::BAD_REQUEST));
+        return Err(error_response(
+            "工单优先级格式错误",
+            StatusCode::BAD_REQUEST,
+        ));
     }
     let ticket = state
         .ticket_store
         .create(&me.id, body.subject.trim(), body.level, body.message.trim())
-        .map_err(|e| error_response(&format!("提交工单失败: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
-    Ok(Json(json!({ "success": true, "data": ticket_json(&ticket) })))
+        .map_err(|e| {
+            error_response(
+                &format!("提交工单失败: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+    Ok(Json(
+        json!({ "success": true, "data": ticket_json(&ticket) }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,7 +272,10 @@ pub async fn handle_admin_reply_ticket(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let admin = verify_user(&state, &headers).await?;
     if !admin.is_admin() {
-        return Err(error_response("Admin access required", StatusCode::FORBIDDEN));
+        return Err(error_response(
+            "Admin access required",
+            StatusCode::FORBIDDEN,
+        ));
     }
     if body.message.trim().is_empty() {
         return Err(error_response("回复内容不能为空", StatusCode::BAD_REQUEST));

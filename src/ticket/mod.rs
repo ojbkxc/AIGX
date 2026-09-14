@@ -169,7 +169,11 @@ impl TicketStore {
     }
 
     pub fn messages(&self, ticket_id: &str) -> Vec<TicketMessage> {
-        self.messages.read().get(ticket_id).cloned().unwrap_or_default()
+        self.messages
+            .read()
+            .get(ticket_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// 最后一条消息
