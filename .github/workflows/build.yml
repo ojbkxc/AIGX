@@ -38,6 +38,11 @@ jobs:
   build-linux-amd64:
     name: Build Linux AMD64
     runs-on: ubuntu-latest
+    env:
+      # 编译期加固：Full RELRO(-z now) + 不可执行栈(noexecstack)；
+      # CFLAGS 让 cc crate 编译 bundled SQLite(C 代码) 时开启栈保护。
+      RUSTFLAGS: "-C link-arg=-Wl,-z,relro,-z,now -C link-arg=-Wl,-z,noexecstack"
+      CFLAGS: "-fstack-protector-strong"
 
     steps:
       - name: Checkout code
@@ -85,6 +90,11 @@ jobs:
   build-linux-arm64:
     name: Build Linux ARM64
     runs-on: ubuntu-latest
+    env:
+      # 编译期加固：Full RELRO(-z now) + 不可执行栈(noexecstack)；
+      # CFLAGS 让 cc crate 编译 bundled SQLite(C 代码) 时开启栈保护。
+      RUSTFLAGS: "-C link-arg=-Wl,-z,relro,-z,now -C link-arg=-Wl,-z,noexecstack"
+      CFLAGS: "-fstack-protector-strong"
 
     steps:
       - name: Checkout code

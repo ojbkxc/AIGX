@@ -745,12 +745,14 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     // 实时读配置快照（config_manager 为 tokio RwLock），不依赖启动时的
     // config 副本，保证后台改完后无需重启即生效。
     let body_limit_state = state.clone();
-    let body_limit_mw = tower::ServiceBuilder::new().map_request(move |mut req: axum::http::Request<axum::body::Body>| {
-        let limit = body_limit_state.config_manager.max_request_body_mb().max(1) * 1024 * 1024;
-        req.extensions_mut()
-            .insert(axum::extract::DefaultBodyLimit::max(limit));
-        req
-    });
+    let body_limit_mw = tower::ServiceBuilder::new().map_request(
+        move |mut req: axum::http::Request<axum::body::Body>| {
+            let limit = body_limit_state.config_manager.max_request_body_mb().max(1) * 1024 * 1024;
+            req.extensions_mut()
+                .insert(axum::extract::DefaultBodyLimit::max(limit));
+            req
+        },
+    );
 
     // 注意：axum 0.7（matchit 0.7）的路由参数语法是 `:id`，不是 `{id}`。
     // `{id}` 是 axum 0.8（matchit 0.8）的语法，在 0.7 下会被当作字面量路径段，

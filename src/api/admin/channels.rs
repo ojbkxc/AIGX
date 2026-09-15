@@ -15,7 +15,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{admin_id_from_session, error_response, record_audit, verify_admin, verify_user};
+use super::common::{
+    admin_id_from_session, error_response, record_audit, verify_admin, verify_user,
+};
 use super::legacy::fetch_upstream_models;
 
 // 这里需要引用主 crate 的 Channel 和相关类型
@@ -493,11 +495,13 @@ pub async fn delete_channel_core(
     id: &str,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let admin_id = admin_id_from_session(state, headers).await;
-    let before = state.channel_store.get(id).map(|ch| json!({
-        "name": ch.name,
-        "status": ch.status,
-        "models_count": ch.models.len(),
-    }));
+    let before = state.channel_store.get(id).map(|ch| {
+        json!({
+            "name": ch.name,
+            "status": ch.status,
+            "models_count": ch.models.len(),
+        })
+    });
     match state.channel_store.remove(id) {
         Ok(_) => {
             record_audit(
@@ -531,19 +535,20 @@ async fn verify_admin_password(
         ));
     };
     let email = admin_id_from_session(state, headers).await;
-    let user = state.user_store.get_by_email(&email).ok_or_else(|| {
-        error_response("Session user not found", StatusCode::UNAUTHORIZED)
-    })?;
+    let user = state
+        .user_store
+        .get_by_email(&email)
+        .ok_or_else(|| error_response("Session user not found", StatusCode::UNAUTHORIZED))?;
     if crate::user::verify_password(&password, &user.password) {
         Ok(())
     } else {
-        state.log_store.record_security(
-            crate::log::SecurityEvent::new(
+        state
+            .log_store
+            .record_security(crate::log::SecurityEvent::new(
                 crate::log::SecurityEventType::AuthFailure,
                 "warning",
                 format!("渠道删除密码认证失败（邮箱: {email}）"),
-            ),
-        );
+            ));
         Err(error_response(
             "密码错误，无法执行删除操作",
             StatusCode::FORBIDDEN,

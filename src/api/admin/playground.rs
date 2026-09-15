@@ -739,16 +739,19 @@ pub async fn handle_playground_transcriptions(
         }
     };
 
-    let bytes = match axum::body::to_bytes(body, super::super::openai::current_body_limit_bytes(&state)).await {
-        Ok(b) => b,
-        Err(e) => {
-            return error_response(
-                &format!("Failed to read body: {e}"),
-                StatusCode::BAD_REQUEST,
-            )
-            .into_response()
-        }
-    };
+    let bytes =
+        match axum::body::to_bytes(body, super::super::openai::current_body_limit_bytes(&state))
+            .await
+        {
+            Ok(b) => b,
+            Err(e) => {
+                return error_response(
+                    &format!("Failed to read body: {e}"),
+                    StatusCode::BAD_REQUEST,
+                )
+                .into_response()
+            }
+        };
 
     let (audio_data, model, filename) =
         match super::super::openai::parse_multipart_audio(&bytes, &boundary) {
