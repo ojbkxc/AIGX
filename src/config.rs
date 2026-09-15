@@ -122,7 +122,7 @@ impl DatabaseConfig {
 }
 
 /// 渠道调度配置（`[channel]` 段）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChannelConfig {
     /// 主动探活巡检周期（秒）。**默认 0 = 关闭**——部署后不对上游渠道
     /// 发任何探测请求，渠道健康完全依赖真实流量的被动熔断。
@@ -131,14 +131,6 @@ pub struct ChannelConfig {
     /// 渠道发一次 1-token 探测，会消耗上游请求）。
     #[serde(default)]
     pub probe_interval_secs: u64,
-}
-
-impl Default for ChannelConfig {
-    fn default() -> Self {
-        Self {
-            probe_interval_secs: 0,
-        }
-    }
 }
 
 /// AI 运维 Agent 配置（`[agent]` 段）——自举式运维工作台。
