@@ -18,11 +18,12 @@ COPY src ./src
 COPY aigx-net ./aigx-net
 # 前端产物在编译期不嵌入（运行时读取 ./static），仅需编译 Rust
 #
-# 编译期加固：RUSTFLAGS 开启 PIE 静态链接（musl 下默认即为 static-pie，
-# 显式声明以稳定覆盖）+ 不可执行栈(noexecstack)；musl 无动态链接器，
-# 无 relro/now 概念，故不传 -z relro,-z now。
+# 编译期加固：不可执行栈(noexecstack)；musl 目标默认即静态链接
+# （rust:1-alpine 的 host triple 是 musl），无需显式 crt-static——
+# 显式设置会连同 proc-macro（async-trait 等）也按 musl 目标编译，
+# 而 proc-macro 必须跑在构建宿主上，直接报 "cannot produce proc-macro"。
 # CFLAGS 让 cc crate 编译 bundled SQLite(C 代码) 时开启栈保护。
-ENV RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,noexecstack" \
+ENV RUSTFLAGS="-C link-arg=-Wl,-z,noexecstack" \
     CFLAGS="-fstack-protector-strong"
 RUN cargo build --release --locked
 
