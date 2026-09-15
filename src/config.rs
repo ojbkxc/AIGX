@@ -149,6 +149,29 @@ impl Default for ChannelConfig {
 /// Agent 的"大脑"走 AIGX 自己的渠道（进程内直调 bridge，复用渠道调度/
 /// 熔断/亲和，但不经 HTTP 端口与计费），模型与渠道均可配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// 渠道调度配置（`[channel]` 段）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelConfig {
+    /// 探活巡检周期（秒），0 = 关闭探活。
+    ///
+    /// 每轮对每个启用渠道发一次 1-token 探测，会消耗上游请求；
+    /// 按需调大（如 3600 = 每小时）或置 0 关闭（仅依赖断路器被动熔断）。
+    #[serde(default = "default_probe_interval_secs")]
+    pub probe_interval_secs: u64,
+}
+
+fn default_probe_interval_secs() -> u64 {
+    300
+}
+
+impl Default for ChannelConfig {
+    fn default() -> Self {
+        Self {
+            probe_interval_secs: default_probe_interval_secs(),
+        }
+    }
+}
+
 pub struct AgentConfig {
     /// 是否启用 AI 运维 Agent（默认关闭，避免未配置模型时误启）。
     #[serde(default)]
