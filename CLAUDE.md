@@ -46,21 +46,27 @@
 
 ```
 AIGX/
-├── src/                    # 前端源码
-│   ├── components/         # UI组件
-│   ├── pages/              # 页面
-│   ├── hooks/              # React Hooks
-│   ├── lib/                # 工具函数
-│   ├── api.js              # API层（待迁移到TypeScript）
-│   └── main.jsx
-├── crates/                 # Rust库模块（待创建）
-├── backend/                # Rust后端（待分离）
-├── frontend/               # 前端项目
-│   ├── src/               # 前端源码
+├── src/                    # Rust 后端源码（axum 0.7 + Tokio）
+│   ├── api/                # 数据面 /v1/* 与管理面 /api/* 路由
+│   ├── channel/            # 渠道调度 / 熔断 / AIMD / 健康巡检
+│   ├── auth/               # JWT / TOTP 认证
+│   ├── bridge/             # 上游协议转换（openai/anthropic/gemini/zai/cf）
+│   ├── pricing/            # 定价引擎 / 倍率 / 汇率
+│   ├── payment/            # Epay / Stripe 支付
+│   ├── db/                 # SeaORM entity / migration
+│   ├── storage/            # FileStore / SQLite KV
+│   ├── agent/              # AI 运维 Agent
+│   └── ...                 # 其余见 lib.rs 模块声明
+├── frontend/               # React 18 + TypeScript + Vite 前端
+│   ├── src/               # 页面 / 组件 / hooks / i18n
 │   └── package.json
+├── aigx-net/               # 独立网络层 crate（workspace 成员）
+├── static/                 # 前端构建产物（由 frontend build 生成，提交入库）
+├── tests/e2e/             # Playwright 端到端测试
+├── tools/                 # 可入库工具脚本（如 newapi_sync.py）
 ├── README.md
-├── Cargo.toml              # Rust依赖配置
-├── AGENTS.md              # 开发规范
+├── Cargo.toml              # Rust workspace 配置
+├── AGENTS.md              # 开发规范（权威）
 ├── PRIVACY.md             # 隐私政策
 └── CLAUDE.md              # 本文件
 ```

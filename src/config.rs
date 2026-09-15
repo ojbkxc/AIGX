@@ -124,22 +124,19 @@ impl DatabaseConfig {
 /// 渠道调度配置（`[channel]` 段）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelConfig {
-    /// 探活巡检周期（秒），0 = 关闭探活。
+    /// 主动探活巡检周期（秒）。**默认 0 = 关闭**——部署后不对上游渠道
+    /// 发任何探测请求，渠道健康完全依赖真实流量的被动熔断。
     ///
-    /// 每轮对每个启用渠道发一次 1-token 探测，会消耗上游请求；
-    /// 按需调大（如 3600 = 每小时）或置 0 关闭（仅依赖断路器被动熔断）。
-    #[serde(default = "default_probe_interval_secs")]
+    /// 需要主动探活时显式配置（如 3600 = 每小时一轮，每轮对每个启用
+    /// 渠道发一次 1-token 探测，会消耗上游请求）。
+    #[serde(default)]
     pub probe_interval_secs: u64,
-}
-
-fn default_probe_interval_secs() -> u64 {
-    300
 }
 
 impl Default for ChannelConfig {
     fn default() -> Self {
         Self {
-            probe_interval_secs: default_probe_interval_secs(),
+            probe_interval_secs: 0,
         }
     }
 }

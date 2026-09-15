@@ -1,7 +1,8 @@
-//! 渠道后台探活巡检——参照 burncloud channel health check 模式。
+//! 渠道后台探活巡检（可选）——参照 burncloud channel health check 模式。
 //!
-//! 周期由 `[channel] probe_interval_secs` 配置（默认 300s，0 = 关闭），
-//! 对每个启用渠道发一次 1-token 轻量探测：
+//! **默认关闭**：`[channel] probe_interval_secs` 缺省 0，不启动探活，
+//! 部署后不会对上游渠道发任何探测请求。需要主动探活时显式配置大于 0
+//! 的周期（秒），对每个启用渠道发一次 1-token 轻量探测：
 //! - 探测请求：`max_tokens=1` 的单轮 "ping"（成本几乎为 0，但能完整走
 //!   通鉴权 → 路由 → 响应链路，比 GET /models 更能反映真实可用性）
 //! - 结果写入 circuit_breaker / health_tracker（复用
@@ -28,7 +29,8 @@ const PROBE_TIMEOUT_SECS: u64 = 30;
 
 /// 启动渠道探活协程。
 ///
-/// `interval_secs` 来自 `[channel] probe_interval_secs` 配置：0 = 不启动探活。
+/// `interval_secs` 来自 `[channel] probe_interval_secs` 配置：
+/// 0（默认）= 不启动探活，部署默认不打扰上游。
 pub fn spawn_channel_prober(
     channel_store: Arc<ChannelStore>,
     http: reqwest::Client,

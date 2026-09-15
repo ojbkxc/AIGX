@@ -28,6 +28,8 @@ else
 fi
 
 # 添加所有文件
+# 注意：`git add .` 会提交全部未忽略文件；scripts/、.env*、.deploy/、node_modules*/
+# 已在 .gitignore 排除，但提交前仍建议 `git status` 复核，避免误提交敏感文件。
 echo "2️⃣ 添加所有文件到暂存区..."
 git add .
 

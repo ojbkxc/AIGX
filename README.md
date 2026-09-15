@@ -7,7 +7,7 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-orange)](https://www.rust-lang.org)
 [![React](https://img.shields.io/badge/React-18+-61DAFB)](https://react.dev)
 [![License](https://img.shields.io/badge/License-Free_Personal_Use-blue)](#许可证)
-[![Version](https://img.shields.io/badge/Version-1.0.5-blue)](#快速开始)
+[![Version](https://img.shields.io/badge/Version-1.0.6-blue)](#快速开始)
 
 [English](#english) · [中文](#中文)
 
