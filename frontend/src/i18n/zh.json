@@ -753,7 +753,7 @@
   "同步中...": "同步中...",
   "连续空响应": "连续空响应",
   "Slack App Incoming Webhook 地址": "Slack App Incoming Webhook 地址",
-  "未带 /v1 时会自动补齐；例如 cf-ai-gw 填 https://cf-ai-gw.pages.dev 即可": "未带 /v1 时会自动补齐；例如 cf-ai-gw 填 https://cf-ai-gw.pages.dev 即可",
+  "未带 /v1 时会自动补齐": "未带 /v1 时会自动补齐",
   "网络层概览": "网络层概览",
   "管理 AIGX Net 网络层（账号池 / 连接池 / 会话池）": "管理 AIGX Net 网络层（账号池 / 连接池 / 会话池）",
   "网络层状态": "网络层状态",

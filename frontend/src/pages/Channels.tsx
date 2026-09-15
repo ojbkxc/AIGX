@@ -1083,7 +1083,7 @@ export default function Channels(): JSX.Element {
                   placeholder="https://cf-ai-gw.pages.dev 或 https://api.Workspace_2B8939.com/v1"
                   value={form.base_url}
                   onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-                  hint={t('未带 /v1 时会自动补齐；例如 cf-ai-gw 填 https://cf-ai-gw.pages.dev 即可')}
+                  hint={t('未带 /v1 时会自动补齐')}
                 />
               )}
               <div className="form-group">

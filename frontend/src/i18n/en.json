@@ -754,7 +754,7 @@
   "同步中...": "Syncing...",
   "连续空响应": "Repeated empty responses",
   "Slack App Incoming Webhook 地址": "Slack App Incoming Webhook URL",
-  "未带 /v1 时会自动补齐；例如 cf-ai-gw 填 https://cf-ai-gw.pages.dev 即可": "Missing /v1 is auto-completed; e.g. for cf-ai-gw enter https://cf-ai-gw.pages.dev",
+  "未带 /v1 时会自动补齐": "Missing /v1 is auto-completed",
   "网络层概览": "Network Layer",
   "管理 AIGX Net 网络层（账号池 / 连接池 / 会话池）": "Manage AIGX Net network layer (account pool / connection pool / session pool)",
   "网络层状态": "Network Layer Status",

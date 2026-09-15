@@ -1262,20 +1262,24 @@ pub async fn fetch_upstream_models(
     let client = state.http_client.clone();
     let (url, models) = match channel_type {
         crate::channel::ChannelType::OpenaiCompatible => {
-            let base = base_url.trim().trim_end_matches('/');
-            if base.is_empty() {
+            let raw_base = base_url.trim().trim_end_matches('/');
+            if raw_base.is_empty() {
                 return Err(error_response(
                     "base_url is required",
                     StatusCode::BAD_REQUEST,
                 ));
             }
+            // 与数据面（bridge::openai）同规则归一化：裸 host 自动补 /v1，
+            // 否则 cf-ai-gw 这类 SPA 站点 /models 命中 fallback 返回 200 HTML，
+            // 永远走不到 404 回退，模型拉取误报"non-JSON response"。
+            let base = crate::bridge::openai::normalize_base_url(raw_base.to_string());
             let mut url = format!("{base}/models");
             let mut req = client.get(&url).bearer_auth(api_key);
-            // 部分上游（如 OpenRouter）要求 /v1 前缀，若 /models 404 再试 /v1/models
+            // 部分上游（如 OpenRouter /api 前缀）要求额外 /v1，若 /models 404 再试
             let resp = req.send().await;
             let resp = match resp {
                 Ok(r) if r.status().as_u16() == 404 => {
-                    url = format!("{base}/v1/models");
+                    url = format!("{raw_base}/v1/models");
                     req = client.get(&url).bearer_auth(api_key);
                     req.send().await.map_err(|e| {
                         error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
