@@ -475,12 +475,7 @@ async fn main() -> anyhow::Result<()> {
     // 启动渠道探活后台任务（批次7c：周期 1-token 探测 → 断路器/健康追踪）
     // 探测周期由 [channel] probe_interval_secs 配置（默认 300s，0 = 关闭）。
     {
-        let probe_interval_secs = state
-            .config_manager
-            .get()
-            .await
-            .channel
-            .probe_interval_secs;
+        let probe_interval_secs = state.config_manager.get().await.channel.probe_interval_secs;
         channel::prober::spawn_channel_prober(
             state.channel_store.clone(),
             state.http_client.as_ref().clone(),

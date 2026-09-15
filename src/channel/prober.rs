@@ -29,7 +29,11 @@ const PROBE_TIMEOUT_SECS: u64 = 30;
 /// 启动渠道探活协程。
 ///
 /// `interval_secs` 来自 `[channel] probe_interval_secs` 配置：0 = 不启动探活。
-pub fn spawn_channel_prober(channel_store: Arc<ChannelStore>, http: reqwest::Client, interval_secs: u64) {
+pub fn spawn_channel_prober(
+    channel_store: Arc<ChannelStore>,
+    http: reqwest::Client,
+    interval_secs: u64,
+) {
     if interval_secs == 0 {
         tracing::info!("channel prober disabled (probe_interval_secs=0)");
         return;
