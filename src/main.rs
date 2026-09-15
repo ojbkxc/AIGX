@@ -473,10 +473,20 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // 启动渠道探活后台任务（批次7c：周期 1-token 探测 → 断路器/健康追踪）
-    channel::prober::spawn_channel_prober(
-        state.channel_store.clone(),
-        state.http_client.as_ref().clone(),
-    );
+    // 探测周期由 [channel] probe_interval_secs 配置（默认 300s，0 = 关闭）。
+    {
+        let probe_interval_secs = state
+            .config_manager
+            .get()
+            .await
+            .channel
+            .probe_interval_secs;
+        channel::prober::spawn_channel_prober(
+            state.channel_store.clone(),
+            state.http_client.as_ref().clone(),
+            probe_interval_secs,
+        );
+    }
 
     // P1-17 定时任务框架：注册会话撤销表清扫（第一个接入的任务）。
     // 撤销记录与会话 TTL 对齐：会话自然过期后撤销记录无意义，

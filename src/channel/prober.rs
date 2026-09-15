@@ -1,6 +1,7 @@
 //! 渠道后台探活巡检——参照 burncloud channel health check 模式。
 //!
-//! 周期（默认 300s，可配）对每个启用渠道发一次 1-token 轻量探测：
+//! 周期由 `[channel] probe_interval_secs` 配置（默认 300s，0 = 关闭），
+//! 对每个启用渠道发一次 1-token 轻量探测：
 //! - 探测请求：`max_tokens=1` 的单轮 "ping"（成本几乎为 0，但能完整走
 //!   通鉴权 → 路由 → 响应链路，比 GET /models 更能反映真实可用性）
 //! - 结果写入 circuit_breaker / health_tracker（复用
@@ -20,15 +21,23 @@ use crate::bridge::{Bridge, BridgeContext, ChatFormat, ChatMessage, Role};
 use crate::bridge::BridgeError;
 use crate::channel::ChannelStore;
 
-/// 探测周期（秒）。
-const PROBE_INTERVAL_SECS: u64 = 300;
+/// 探测周期下限（秒）——配置过小时钳制，防止误配打爆上游。
+const MIN_PROBE_INTERVAL_SECS: u64 = 60;
 /// 单次探测超时（秒）。
 const PROBE_TIMEOUT_SECS: u64 = 30;
 
 /// 启动渠道探活协程。
-pub fn spawn_channel_prober(channel_store: Arc<ChannelStore>, http: reqwest::Client) {
+///
+/// `interval_secs` 来自 `[channel] probe_interval_secs` 配置：0 = 不启动探活。
+pub fn spawn_channel_prober(channel_store: Arc<ChannelStore>, http: reqwest::Client, interval_secs: u64) {
+    if interval_secs == 0 {
+        tracing::info!("channel prober disabled (probe_interval_secs=0)");
+        return;
+    }
+    let interval_secs = interval_secs.max(MIN_PROBE_INTERVAL_SECS);
+    tracing::info!(interval_secs, "channel prober started");
     tokio::spawn(async move {
-        let interval = Duration::from_secs(PROBE_INTERVAL_SECS);
+        let interval = Duration::from_secs(interval_secs);
         loop {
             tokio::time::sleep(interval).await;
             probe_once(&channel_store, &http).await;
