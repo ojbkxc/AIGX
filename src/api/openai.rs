@@ -507,6 +507,22 @@ pub fn charge_usage(
     )
 }
 
+/// 订阅按次计费：用户任一活跃订阅为 `billing_mode=count` 模式即整体按次。
+fn is_count_billing(state: &AppState, api_key: &super::auth::ApiKey) -> bool {
+    api_key
+        .user_id
+        .as_deref()
+        .map(|uid| {
+            let now = chrono::Utc::now().timestamp();
+            state
+                .subscription_store
+                .find_active(uid, now)
+                .iter()
+                .any(|s| s.is_count_billing())
+        })
+        .unwrap_or(false)
+}
+
 /// 计费额度裁决（销售侧，与渠道成本无关）。
 ///
 /// 活跃订阅为 `billing_mode=count` 时，每次请求固定扣全局
@@ -521,20 +537,8 @@ fn resolve_billing_quota(
     completion_tokens: u64,
     tool_calls: Option<&crate::pricing::ToolCallCounts>,
 ) -> i64 {
-    // 订阅按次计费：用户任一活跃订阅为 count 模式即整体按次
-    let count_billing = api_key
-        .user_id
-        .as_deref()
-        .map(|uid| {
-            let now = chrono::Utc::now().timestamp();
-            state
-                .subscription_store
-                .find_active(uid, now)
-                .iter()
-                .any(|s| s.is_count_billing())
-        })
-        .unwrap_or(false);
-    if count_billing {
+    // 按次订阅：固定扣额度，不再叠加缓存读/token 差异化计费
+    if is_count_billing(state, api_key) {
         return crate::config::billing_flat_quota();
     }
 
@@ -1950,10 +1954,6 @@ pub async fn handle_chat_completions(
         .unwrap_or_default();
         if let Some(cached) = state.response_cache.get(&cache_key).await {
             tracing::debug!("response cache hit for model {}", model);
-            // 计费：缓存命中按 cache_price 差异化计费（P1）——
-            // 命中意味着整个 prompt 由网关内部响应缓存直接回放（未消耗上游资源），
-            // prompt_tokens 全部按「缓存读」价格计费；cache_price 未配置的模型
-            // 该部分为 0，维持旧的命中免费行为（升级零破坏）。
             let prompt_tokens = cached
                 .get("usage")
                 .and_then(|u| u.get("prompt_tokens"))
@@ -1964,19 +1964,25 @@ pub async fn handle_chat_completions(
                 .and_then(|u| u.get("completion_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            // 命中计费：input=0, cached=prompt_tokens（与上游无关，
-            // 输出 token 也由缓存回放，不再计费——缓存命中的输出本就是已付费结果的回放）
-            let cache_cost = match state.pricing_store.calculate_cost_quoted_with_cache(
-                &model,
-                0,
-                0,
-                prompt_tokens,
-                &billing_group,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("cache hit billing: {e}, billing as 0");
-                    0
+            // 计费只走一条路：按次订阅固定扣额度；否则按 token 量计费。
+            // 命中意味着整个 prompt 由网关内部响应缓存直接回放（未消耗上游资源），
+            // prompt_tokens 全部按「缓存读」价格计费；cache_price 未配置的模型
+            // 该部分为 0，维持旧的命中免费行为（升级零破坏）。
+            let cache_cost = if is_count_billing(&state, &api_key) {
+                crate::config::billing_flat_quota()
+            } else {
+                match state.pricing_store.calculate_cost_quoted_with_cache(
+                    &model,
+                    0,
+                    0,
+                    prompt_tokens,
+                    &billing_group,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("cache hit billing: {e}, billing as 0");
+                        0
+                    }
                 }
             };
             if cache_cost > 0 {
