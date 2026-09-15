@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
+import { EmptyState, SkeletonTable } from '../components/ui';
 import './IpManagement.css';
 
 type TabKey = 'whitelist' | 'blacklist';
@@ -242,11 +243,12 @@ export default function IpManagement() {
 
           {/* 规则列表 */}
           {loading ? (
-            <div className="loading">{t('加载中')}</div>
+            <SkeletonTable columns={3} rows={4} />
           ) : currentList.length === 0 ? (
-            <div className="empty-state">
-              <p>{activeTab === 'whitelist' ? t('暂无白名单规则') : t('暂无黑名单规则')}</p>
-            </div>
+            <EmptyState
+              message={activeTab === 'whitelist' ? t('暂无白名单规则') : t('暂无黑名单规则')}
+              icon={activeTab === 'whitelist' ? '✅' : '🚫'}
+            />
           ) : (
             <div className="table-wrapper">
               <table>

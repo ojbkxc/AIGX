@@ -167,6 +167,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const [ttsIdx, setTtsIdx] = useState<number | null>(null);
   const [ttsPlaying, setTtsPlaying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  /** 粘贴中标记：大段内容粘贴瞬间禁用 Enter 发送，防止误触发（cc-haha usePasteHandler 模式） */
+  const pastingRef = useRef(false);
 
   // /chat 会话持久化：消息每次变化都同步给宿主页面。
   // 回调走 ref，避免宿主页面每次渲染传入新函数引用导致
@@ -250,6 +252,12 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       if (!model) setModel(channelModels[0]);
       return () => { mounted = false; };
     }
+    // 指定渠道调试：渠道模型列表为空时保持空，不回退网关聚合列表
+    // （渠道禁用/留空=全部时，下拉仍只应显示该渠道自己的模型）。
+    if (channelId) {
+      setModels([]);
+      return () => { mounted = false; };
+    }
     setModels([]);
     api.listModels()
       .then((res) => {
@@ -266,7 +274,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       .catch(() => { /* 模型列表失败静默降级 */ });
     return () => { mounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channelModelsKey]);
+  }, [channelModelsKey, channelId]);
 
   useEffect(() => {
     if (messagesEndRef.current) {
@@ -531,6 +539,9 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
       if (stream) {
         const controller = new AbortController();
         abortRef.current = controller;
+        // 流式阶段标记：收到首个增量前显示「思考中」，之后切「正在生成」
+        streamingStartedRef.current = false;
+        setStreamPhase('thinking');
         // 真·流式：占位一条 assistant 消息，逐增量拼接渲染
         setMessages((prev) => {
           const assistantIdx = prev.length;
@@ -538,6 +549,14 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
           return [...prev, { role: 'assistant', content: '…' }];
         });
         const onDelta = (delta: { content: string; isEnd?: boolean; kind?: string }): void => {
+          lastDeltaAtRef.current = Date.now();
+          if (!streamingStartedRef.current) {
+            streamingStartedRef.current = true;
+            setStreamPhase('generating');
+          } else if (streamPhase === 'stalled') {
+            // 停滞后恢复增量：回到正常生成态
+            setStreamPhase('generating');
+          }
           setMessages((prev) => {
             const next = prev.slice();
             const last = next[next.length - 1];
@@ -626,8 +645,29 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     abortRef.current?.abort();
   };
 
+  /** 流式生成阶段：收到首个增量前=思考中，之后=正在生成（cc-haha 式阶段动词） */
+  const streamingStartedRef = useRef(false);
+  const [streamPhase, setStreamPhase] = useState<'thinking' | 'generating' | 'stalled'>('thinking');
+  // 流式停滞检测：每次 onDelta 记录时间戳，超 3s 无增量切「响应缓慢…」（cc-haha useStalledAnimation）
+  const lastDeltaAtRef = useRef(0);
+  const stallTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    if (!busy || streamPhase === 'thinking') return;
+    stallTimerRef.current = setInterval(() => {
+      if (Date.now() - lastDeltaAtRef.current > 3000) setStreamPhase('stalled');
+    }, 500);
+    return () => { if (stallTimerRef.current) clearInterval(stallTimerRef.current); };
+    // streamPhase 变化本身用于守卫重设 interval，依赖它以在 stalled→generating 间重置
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, streamPhase === 'thinking']);
+
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.key === 'Enter' && !e.shiftKey) {
+      // 粘贴大内容时紧接着的 Enter 是误触发（粘贴动作本身带按键序列），忽略
+      if (pastingRef.current) {
+        e.preventDefault();
+        return;
+      }
       e.preventDefault();
       void handleSend();
     }
@@ -642,6 +682,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   };
 
   // A10: 使用统一的 ModelPicker 组件替换内联 picker
+  // 指定渠道调试（channelId 非空）时锁定下拉：只显示该渠道自己的模型，
+  // 渠道是否启用、模型列表是否为空（留空=全部）都不回退网关聚合列表。
   const modelPicker = (
     <ModelPicker
       value={model}
@@ -650,6 +692,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         if (!playground) setMessages([]);
       }}
       channelModels={channelModels}
+      lockToChannel={Boolean(channelId)}
       compact={compact}
     />
   );
@@ -1051,6 +1094,17 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             />
         ))}
         </Suspense>
+        {busy && stream && (
+          /* 流式阶段指示：思考中 → 正在生成 → 停滞（3s 无增量渐变红色） */
+          <div className={`chat-debugger-phase ${streamPhase === 'stalled' ? 'chat-debugger-phase-stalled' : ''}`}>
+            <span className="chat-debugger-phase-dots">
+              <i /><i /><i />
+            </span>
+            <span className="chat-debugger-phase-text">
+              {streamPhase === 'thinking' ? t('思考中…') : streamPhase === 'stalled' ? t('响应缓慢…') : t('正在生成…')}
+            </span>
+          </div>
+        )}
         {busy &&
           (stream ? null : (
             <div className="chat-debugger-msg chat-debugger-msg-assistant">
@@ -1104,6 +1158,12 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             onKeyDown={handleKeyDown}
             disabled={busy}
             onPaste={(e) => {
+              // 粘贴大内容：短暂禁用 Enter，防止粘贴后的回车残留直接把半成品发出去
+              const text = e.clipboardData?.getData('text') || '';
+              if (text.length > 100) {
+                pastingRef.current = true;
+                window.setTimeout(() => { pastingRef.current = false; }, 150);
+              }
               // 粘贴图片（截图）自动变附件
               const items = e.clipboardData?.items;
               if (!items) return;

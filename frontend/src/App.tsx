@@ -1,6 +1,7 @@
 import React, { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
+import StatusLine from './components/StatusLine';
 import ErrorBoundary from './components/ErrorBoundary';
 import RouteErrorPage from './components/RouteErrorPage';
 import PermissionDenied from './components/PermissionDenied';
@@ -55,6 +56,8 @@ function ProtectedLayout({ children }: ProtectedLayoutProps) {
       <main className="main-content" key={location}>
         <div className="page-fade-enter">{children}</div>
       </main>
+      {/* 底部常驻状态行：仅 admin 可见（内部自行判断），普通用户不渲染 */}
+      <StatusLine />
     </div>
   );
 }

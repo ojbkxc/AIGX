@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next';
 import {
   Bot, Send, Square, ShieldAlert, Terminal, Eye, Wrench,
-  CheckCircle2, XCircle, Loader2, MessageSquarePlus, Trash2,
+  CheckCircle2, XCircle, MessageSquarePlus, Trash2, History, ChevronLeft,
 } from 'lucide-react';
 import ModelPicker from '../components/ModelPicker';
+import MessageViewer from '../components/MessageViewer';
 import { api } from '../api';
 import './Agent.css';
 
@@ -46,6 +47,15 @@ interface ChatMsg {
   toolSteps?: ToolStep[];
 }
 
+/** 会话列表项（后端 AgentSession） */
+interface SessionItem {
+  id: string;
+  title: string;
+  model: string;
+  role: 'observer' | 'operator';
+  created_at: number;
+}
+
 /** 高危工具的中文描述（审批弹卡展示用，参照 cc-haha 的 PermissionRequestTitle 语义） */
 const TOOL_LABELS: Record<string, string> = {
   aigx_user_delete: '删除用户（不可逆）',
@@ -64,11 +74,12 @@ const TOOL_LABELS: Record<string, string> = {
 };
 
 /**
- * Agent — AI 运维工作台（对齐 /chat 聊天页形态）。
+ * Agent — AI 运维工作台（对齐 /chat 聊天页 + cc-haha 交互模式）。
  *
- * 无侧栏、无会话列表：单一对话流 + 底部输入区（new-api 游乐园布局）。
- * 会话是后端概念（上下文 + 审计载体），首次发送时懒创建，不暴露给用户。
- * 输入区底部工具行：[角色徽标 + 清空] ··· [模型选择器 + 发送/停止]。
+ * 单一对话流 + 底部输入区（new-api 游乐园布局）+ 可收起会话抽屉。
+ * 会话是后端概念（上下文 + 审计载体），首次发送时懒创建；
+ * 历史会话可从抽屉恢复（决策回放 + 上下文续聊）。
+ * 输入区底部工具行：[角色徽标 + 历史 + 清空] ··· [模型选择器 + 发送/停止]。
  */
 export default function Agent(): JSX.Element {
   const { t } = useTranslation();
@@ -83,6 +94,14 @@ export default function Agent(): JSX.Element {
   const abortRef = useRef<AbortController | null>(null);
   const msgIdRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  /** 粘贴中标记：大段内容粘贴瞬间禁用 Enter 发送（cc-haha usePasteHandler 模式） */
+  const pastingRef = useRef(false);
+  /** 流式阶段：思考中 → 正在生成（cc-haha ToolUseLoader 阶段动词模式） */
+  const [streamPhase, setStreamPhase] = useState<'thinking' | 'generating'>('thinking');
+  /** 会话抽屉（cc-haha 会话列表 Web 化：桌面侧栏、移动端覆盖层） */
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [sessions, setSessions] = useState<SessionItem[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
 
   // 启动时取 Agent 配置的模型作为模型选择器初值（可换）
   useEffect(() => {
@@ -95,6 +114,24 @@ export default function Agent(): JSX.Element {
     return () => { mounted = false; };
   }, []);
 
+  /** 拉会话列表（后端按 created_at 倒序） */
+  const loadSessions = useCallback(async (): Promise<void> => {
+    setSessionsLoading(true);
+    try {
+      const res = await api.listAgentSessions();
+      const list = (res as unknown as { data?: SessionItem[] }).data ?? [];
+      setSessions(Array.isArray(list) ? list : []);
+    } catch {
+      /* 列表失败静默：抽屉里显示空态 */
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSessions();
+  }, [loadSessions]);
+
   const respondApproval = useCallback(async (action: 'allow' | 'deny' | 'remember') => {
     if (!pending) return;
     const rid = pending.requestId;
@@ -106,11 +143,66 @@ export default function Agent(): JSX.Element {
     }
   }, [pending]);
 
+  /** 清空当前对话（断开会话关联，下条消息开新会话；服务端会话保留作审计载体） */
   const clearAll = useCallback(() => {
     setMessages([]);
-    // 会话保留在服务端（审计载体），前端只断开关联：下条消息开新会话
     setSessionId(null);
   }, []);
+
+  /** 恢复历史会话：拉详情，工具轨迹（tool_calls JSON 数组）还原成步骤条 */
+  const restoreSession = useCallback(async (id: string): Promise<void> => {
+    if (busy) return;
+    try {
+      const res = await api.getAgentSession(id);
+      const data = (res as unknown as {
+        data?: { session?: SessionItem; messages?: Array<{ role: string; content: string; tool_calls?: unknown }> };
+      }).data;
+      if (!data) throw new Error(t('加载会话失败'));
+      setSessionId(data.session?.id ?? id);
+      setRole(data.session?.role === 'operator' ? 'operator' : 'observer');
+      if (data.session?.model) setModel(data.session.model);
+      const restored: ChatMsg[] = [];
+      for (const m of data.messages ?? []) {
+        if (m.role !== 'user' && m.role !== 'assistant') continue;
+        const steps: ToolStep[] = [];
+        const mid = String(++msgIdRef.current);
+        if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+          for (const raw of m.tool_calls as Array<Record<string, unknown>>) {
+            const type = raw.type as string;
+            if (type === 'tool_call') {
+              steps.push({ kind: 'call', name: String(raw.name ?? ''), args: String(raw.arguments ?? ''), ok: true });
+            } else if (type === 'approval_request') {
+              steps.push({ kind: 'approval', name: String(raw.name ?? ''), approved: undefined });
+            } else if (type === 'approval_resolved') {
+              steps.push({ kind: 'approval', name: String(raw.name ?? ''), approved: raw.approved === true });
+            } else if (type === 'tool_result') {
+              steps.push({ kind: 'result', name: String(raw.name ?? ''), ok: raw.ok === true, text: typeof raw.text === 'string' ? raw.text : undefined });
+            }
+          }
+        }
+        restored.push({ id: mid, role: m.role as 'user' | 'assistant', content: m.content, toolSteps: steps.length ? steps : undefined });
+      }
+      setMessages(restored);
+      setError('');
+      setDrawerOpen(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [busy, t]);
+
+  /** 删除历史会话（当前会话被删时同时断开前端关联） */
+  const deleteSession = useCallback(async (id: string): Promise<void> => {
+    try {
+      await api.deleteAgentSession(id);
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+      if (sessionId === id) {
+        setSessionId(null);
+        setMessages([]);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [sessionId]);
 
   const send = useCallback(async (override?: string) => {
     const text = (override ?? input).trim();
@@ -118,6 +210,7 @@ export default function Agent(): JSX.Element {
     setInput('');
     setBusy(true);
     setError('');
+    setStreamPhase('thinking');
 
     let sid = sessionId;
     if (!sid) {
@@ -147,7 +240,19 @@ export default function Agent(): JSX.Element {
       await api.agentChatStream(sid, text, (ev: AgentEvent) => {
         if (ev.type === 'approval_request' && typeof ev.request_id === 'string') {
           setPending({ requestId: ev.request_id, name: ev.name ?? '', arguments: ev.arguments ?? '' });
+          // 用户切走标签页时用桌面通知提醒审批挂起（需一次性授权）
+          if (document.hidden && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            const n = new Notification(t('AI 运维：等待审批'), {
+              body: `${t('工具')}: ${ev.name ?? ''}`,
+              tag: 'aigx-approval',
+            });
+            // 点击通知回到本页处理审批
+            n.onclick = () => { window.focus(); n.close(); };
+          }
           return;
+        }
+        if (ev.type === 'final' || ev.type === 'tool_call' || ev.type === 'tool_result') {
+          setStreamPhase('generating');
         }
         setMessages((prev) =>
           prev.map((m) => {
@@ -175,6 +280,8 @@ export default function Agent(): JSX.Element {
           }),
         );
       }, controller.signal, model || undefined);
+      // 会话可能被自动命名，刷新抽屉列表
+      void loadSessions();
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
         setError(e instanceof Error ? e.message : String(e));
@@ -183,7 +290,7 @@ export default function Agent(): JSX.Element {
       setBusy(false);
       abortRef.current = null;
     }
-  }, [input, busy, sessionId, model, role, t]);
+  }, [input, busy, sessionId, model, role, t, loadSessions]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -233,109 +340,189 @@ export default function Agent(): JSX.Element {
 
   return (
     <div className="agent-shell">
+      {/* 会话抽屉（cc-haha 会话列表 Web 化）：桌面侧栏 / 移动端覆盖层 */}
+      <aside className={`agent-drawer ${drawerOpen ? 'open' : ''}`}>
+        <div className="agent-drawer-head">
+          <span>{t('会话列表')}</span>
+          <button type="button" className="agent-drawer-close" onClick={() => setDrawerOpen(false)}>
+            <ChevronLeft size={14} />
+          </button>
+        </div>
+        <button type="button" className="agent-drawer-new" onClick={() => { clearAll(); setDrawerOpen(false); }}>
+          <MessageSquarePlus size={14} />
+          {t('新会话')}
+        </button>
+        <div className="agent-drawer-list">
+          {sessionsLoading && <div className="agent-drawer-empty">{t('加载中…')}</div>}
+          {!sessionsLoading && sessions.length === 0 && (
+            <div className="agent-drawer-empty">{t('暂无会话')}</div>
+          )}
+          {sessions.map((s) => (
+            <div key={s.id} className={`agent-drawer-item ${s.id === sessionId ? 'active' : ''}`}>
+              <button type="button" className="agent-drawer-item-btn" onClick={() => void restoreSession(s.id)} title={s.title}>
+                <span className="agent-drawer-item-title">{s.title || t('新会话')}</span>
+                <span className="agent-drawer-item-meta">
+                  {s.role === 'operator' ? t('运维员') : t('观察员')} · {new Date(s.created_at * 1000).toLocaleDateString()}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="agent-drawer-item-del"
+                title={t('删除')}
+                onClick={() => void deleteSession(s.id)}
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      </aside>
+      {drawerOpen && <div className="agent-drawer-mask" onClick={() => setDrawerOpen(false)} />}
+
       {/* open-webui 居中 58rem 消息流（对齐聊天页 chat-debugger-messages） */}
-      <div className="agent-messages">
-        {messages.length === 0 && (
-          <div className="agent-empty">
-            <div className="agent-empty-title">{t('AI 运维工作台')}</div>
-            <p className="agent-empty-sub">{t('用 AI 运维你的网关——查渠道、看用户、测健康、排故障')}</p>
-            <div className="agent-empty-prompts">
-              {[
-                { icon: <Terminal size={13} />, text: t('看下系统状态，哪些渠道挂了？') },
-                { icon: <Eye size={13} />, text: t('今天的用量与成本报表') },
-                { icon: <MessageSquarePlus size={13} />, text: t('列出全部用户和密钥') },
-              ].map((p, i) => (
-                <button
-                  key={i}
-                  type="button"
-                  className="agent-empty-prompt"
-                  onClick={() => { void send(p.text); }}
-                >
-                  {p.icon}<span>{p.text}</span>
-                </button>
-              ))}
+      <div className="agent-main">
+        <div className="agent-messages">
+          {messages.length === 0 && (
+            <div className="agent-empty">
+              <div className="agent-empty-title">{t('AI 运维工作台')}</div>
+              <p className="agent-empty-sub">{t('用 AI 运维你的网关——查渠道、看用户、测健康、排故障')}</p>
+              <div className="agent-empty-prompts">
+                {[
+                  { icon: <Terminal size={13} />, text: t('看下系统状态，哪些渠道挂了？') },
+                  { icon: <Eye size={13} />, text: t('今天的用量与成本报表') },
+                  { icon: <MessageSquarePlus size={13} />, text: t('列出全部用户和密钥') },
+                ].map((p, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    className="agent-empty-prompt"
+                    onClick={() => { void send(p.text); }}
+                  >
+                    {p.icon}<span>{p.text}</span>
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
-        {messages.map((m) => (
-          <div key={m.id} className={`agent-msg agent-msg-${m.role}`}>
-            <span className="agent-msg-icon">
-              {m.role === 'user' ? <Terminal size={14} /> : <Bot size={14} />}
-            </span>
-            <div className="agent-msg-body">
-              {m.toolSteps && m.toolSteps.length > 0 && (
-                <div className="agent-tool-steps">
-                  {m.toolSteps.map(renderStep)}
+          )}
+          {messages.map((m) => (
+            <div key={m.id} className={`agent-msg agent-msg-${m.role}`}>
+              <span className="agent-msg-icon">
+                {m.role === 'user' ? <Terminal size={14} /> : <Bot size={14} />}
+              </span>
+              <div className="agent-msg-body">
+                {m.toolSteps && m.toolSteps.length > 0 && (
+                  <div className="agent-tool-steps">
+                    {m.toolSteps.map(renderStep)}
+                  </div>
+                )}
+                {m.role === 'assistant' && m.content
+                  ? <MessageViewer content={m.content} />
+                  : <div className="agent-msg-content">{m.content}</div>}
+              </div>
+            </div>
+          ))}
+          {busy && (
+            <div className="agent-msg agent-msg-assistant">
+              <span className="agent-msg-icon"><Bot size={14} /></span>
+              <div className="agent-msg-body">
+                {/* cc-haha 式呼吸点 + 阶段动词：思考中 → 正在生成 */}
+                <div className="agent-phase">
+                  <span className="agent-phase-dots"><i /><i /><i /></span>
+                  <span className="agent-phase-text">
+                    {streamPhase === 'thinking' ? t('思考中…') : t('正在生成…')}
+                  </span>
                 </div>
-              )}
-              <div className="agent-msg-content">{m.content}</div>
+              </div>
             </div>
-          </div>
-        ))}
-        {busy && (
-          <div className="agent-msg agent-msg-assistant">
-            <span className="agent-msg-icon"><Bot size={14} /></span>
-            <div className="agent-msg-body">
-              <div className="agent-typing"><Loader2 size={13} className="agent-spin" />{t('思考中…')}</div>
-            </div>
-          </div>
-        )}
-        <div ref={bottomRef} />
-      </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
 
-      {error && <div className="agent-error">{error}<button type="button" onClick={() => setError('')}>×</button></div>}
+        {error && <div className="agent-error">{error}<button type="button" onClick={() => setError('')}>×</button></div>}
 
-      {/* open-webui 式三段式圆角大输入框（对齐聊天页 chat-debugger-input-*） */}
-      <div className="agent-input-row">
-        <div className="agent-input-shell">
-          <textarea
-            className="agent-input"
-            value={input}
-            rows={2}
-            placeholder={t('输入运维指令，Enter 发送，Shift+Enter 换行')}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }}
-          />
-          <div className="agent-input-meta">
-            <div className="agent-input-left">
-              {/* 角色切换：观察员只读，运维员解锁写工具（高危仍走审批） */}
-              <button
-                type="button"
-                className={`agent-role-pill ${role === 'operator' ? 'operator' : ''}`}
-                disabled={busy}
-                onClick={() => { setRole((r) => (r === 'observer' ? 'operator' : 'observer')); }}
-                title={role === 'observer' ? t('观察员：只读工具。点击切换为运维员') : t('运维员：可执行写工具（高危仍需审批）。点击切回观察员')}
-              >
-                <Terminal size={12} />
-                {role === 'observer' ? t('观察员') : t('运维员')}
-              </button>
-              <button
-                type="button"
-                className="agent-icon-btn"
-                title={t('清空对话')}
-                disabled={busy || !hasMessages}
-                onClick={clearAll}
-              >
-                <Trash2 size={15} />
-              </button>
-            </div>
-            <div className="agent-input-actions">
-              <ModelPicker value={model} onChange={setModel} compact />
-              {busy ? (
-                <button type="button" className="agent-send-fab stop" onClick={stop} title={t('停止')}>
-                  <Square size={14} />
-                </button>
-              ) : (
+        {/* open-webui 式三段式圆角大输入框（对齐聊天页 chat-debugger-input-*） */}
+        <div className="agent-input-row">
+          <div className="agent-input-shell">
+            <textarea
+              className="agent-input"
+              value={input}
+              rows={2}
+              placeholder={t('输入运维指令，Enter 发送，Shift+Enter 换行')}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  // 粘贴大内容时紧接着的 Enter 是误触发，忽略
+                  if (pastingRef.current) {
+                    e.preventDefault();
+                    return;
+                  }
+                  e.preventDefault();
+                  void send();
+                }
+              }}
+              onPaste={(e) => {
+                const text = e.clipboardData?.getData('text') || '';
+                if (text.length > 100) {
+                  pastingRef.current = true;
+                  window.setTimeout(() => { pastingRef.current = false; }, 150);
+                }
+              }}
+            />
+            <div className="agent-input-meta">
+              <div className="agent-input-left">
+                {/* 角色切换：观察员只读，运维员解锁写工具（高危仍走审批） */}
                 <button
                   type="button"
-                  className="agent-send-fab"
-                  onClick={() => void send()}
-                  disabled={!input.trim()}
-                  title={t('发送')}
+                  className={`agent-role-pill ${role === 'operator' ? 'operator' : ''}`}
+                  disabled={busy}
+                  onClick={() => {
+                    setRole((r) => (r === 'observer' ? 'operator' : 'observer'));
+                    // 切到运维员时顺手请求桌面通知授权：切走标签页时审批挂起才能提醒
+                    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+                      void Notification.requestPermission();
+                    }
+                  }}
+                  title={role === 'observer' ? t('观察员：只读工具。点击切换为运维员') : t('运维员：可执行写工具（高危仍需审批）。点击切回观察员')}
                 >
-                  <Send size={15} />
+                  <Terminal size={12} />
+                  {role === 'observer' ? t('观察员') : t('运维员')}
                 </button>
-              )}
+                <button
+                  type="button"
+                  className="agent-icon-btn"
+                  title={t('会话列表')}
+                  onClick={() => setDrawerOpen((v) => !v)}
+                >
+                  <History size={15} />
+                </button>
+                <button
+                  type="button"
+                  className="agent-icon-btn"
+                  title={t('清空对话')}
+                  disabled={busy || !hasMessages}
+                  onClick={clearAll}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
+              <div className="agent-input-actions">
+                <ModelPicker value={model} onChange={setModel} compact />
+                {busy ? (
+                  <button type="button" className="agent-send-fab stop" onClick={stop} title={t('停止')}>
+                    <Square size={14} />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="agent-send-fab"
+                    onClick={() => void send()}
+                    disabled={!input.trim()}
+                    title={t('发送')}
+                  >
+                    <Send size={15} />
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>

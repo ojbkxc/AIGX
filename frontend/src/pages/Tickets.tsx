@@ -4,7 +4,7 @@ import { MessageSquarePlus, ChevronLeft, Send, X } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { isAdmin } from '../lib/utils';
-import { Button, Card, Input, Select, Textarea, EmptyState, Loading, Pagination, Badge } from '../components/ui';
+import { Button, Card, Input, Select, Textarea, EmptyState, SkeletonTable, Pagination, Badge } from '../components/ui';
 import type { TicketItem, TicketMessageItem } from '../types';
 import './Tickets.css';
 
@@ -354,7 +354,7 @@ export default function Tickets(): JSX.Element {
         }
       >
         {loading ? (
-          <Loading text={t('加载中')} />
+          <SkeletonTable columns={admin ? 8 : 7} rows={6} />
         ) : visibleTickets.length === 0 ? (
           <EmptyState message={t('暂无工单')} icon="🎫" />
         ) : (
@@ -397,7 +397,7 @@ export default function Tickets(): JSX.Element {
         {admin && !loading && !q && (
           <Pagination
             page={page}
-            totalPages={Math.ceil(total / size)}
+            totalPages={Math.max(1, Math.ceil(total / size))}
             onChange={setPage}
           />
         )}

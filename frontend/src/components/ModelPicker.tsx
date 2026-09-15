@@ -11,6 +11,9 @@ export interface ModelPickerProps {
   onChange: (model: string) => void;
   /** 指定渠道模型列表（渠道调试场景）；留空走网关模型列表 */
   channelModels?: string[];
+  /** 锁定模型列表：channelModels 即唯一数据源，为空也不回退网关列表
+   *  （渠道调试"留空=全部"渠道下拉只显示该渠道自己的模型） */
+  lockToChannel?: boolean;
   /** 紧凑 pill 形态（顶栏） */
   compact?: boolean;
   /** 组件重挂载时重置值 */
@@ -26,6 +29,7 @@ export default function ModelPicker({
   value,
   onChange,
   channelModels = [],
+  lockToChannel = false,
   compact = false,
 }: ModelPickerProps): JSX.Element {
   const { t } = useTranslation();
@@ -42,6 +46,11 @@ export default function ModelPicker({
       setModels(channelModels.slice());
       return;
     }
+    // 锁定渠道：空模型列表也只显示空，不回退网关聚合列表
+    if (lockToChannel) {
+      setModels([]);
+      return;
+    }
     let mounted = true;
     api.listModels()
       .then((res) => {
@@ -56,7 +65,7 @@ export default function ModelPicker({
       })
       .catch(() => { /* 模型列表失败静默降级 */ });
     return () => { mounted = false; };
-  }, [channelModelsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [channelModelsKey, lockToChannel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const onDoc = (e: MouseEvent): void => {

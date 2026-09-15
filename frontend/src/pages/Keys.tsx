@@ -7,6 +7,7 @@ import {
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { isAdmin } from '../lib/utils';
+import { useListKeyboard } from '../hooks/useListKeyboard';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
 import './Keys.css';
@@ -212,6 +213,13 @@ export default function Keys(): JSX.Element {
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
   const pageItems = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+
+  // 键盘导航（cc-haha 列表键盘体系）：/ 聚焦搜索、↑↓/j k 行高亮、Enter 打开编辑
+  const { searchRef, rowRefs, activeIndex, setActiveIndex } = useListKeyboard(
+    pageItems.length,
+    (i) => { if (pageItems[i]) openEdit(pageItems[i]); },
+    !loading && !showModal && !confirmState && !rotatedKey && rowMenuId === null,
+  );
 
   // 全选/反选（仅当前过滤结果）
   const allSelected = filtered.length > 0 && filtered.every((tk) => selected.has(tk.id));
@@ -598,6 +606,7 @@ export default function Keys(): JSX.Element {
             <div className="keys-search">
               <Search size={14} />
               <input
+                ref={searchRef}
                 placeholder={t('搜索令牌')}
                 value={search}
                 onChange={(e) => { setSearch(e.target.value); setPage(1); }}
@@ -652,7 +661,7 @@ export default function Keys(): JSX.Element {
                   </tr>
                 </thead>
                 <tbody>
-                  {pageItems.map((tk) => {
+                  {pageItems.map((tk, i) => {
                     const expired = isExpired(tk);
                     const disabled = tk.status === 'disabled' || tk.is_active === false;
                     const models = modelsOf(tk);
@@ -662,7 +671,12 @@ export default function Keys(): JSX.Element {
                     const pct = limit ? Math.max(0, Math.min(100, ((limit - used) / limit) * 100)) : null;
                     const maskShown = tk.key || '••••••••••••';
                     return (
-                      <tr key={tk.id} className={selected.has(tk.id) ? 'selected' : ''}>
+                      <tr
+                        key={tk.id}
+                        ref={(el) => { rowRefs.current[i] = el; }}
+                        className={`${selected.has(tk.id) ? 'selected' : ''} ${activeIndex === i ? 'kbd-active' : ''}`}
+                        onMouseEnter={() => setActiveIndex(i)}
+                      >
                         <td className="col-select">
                           <input
                             type="checkbox"

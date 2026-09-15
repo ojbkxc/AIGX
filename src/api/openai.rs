@@ -207,6 +207,13 @@ fn error_response(code: &str, message: &str, status: StatusCode) -> (StatusCode,
     )
 }
 
+/// 当前请求体大小上限（字节）。数据面 audio multipart 接口用 `to_bytes`
+/// 手动消费原始 Body，需显式钳制；其余 JSON 接口由 main.rs 的
+/// `DefaultBodyLimit` 统一兜底。运行期后台修改后每次请求实时生效。
+pub(crate) fn current_body_limit_bytes(state: &AppState) -> usize {
+    state.config_manager.max_request_body_mb().max(1) * 1024 * 1024
+}
+
 /// 从请求中提取 API Key（H8：实现移至 `api::common`，此处通过 use 别名保持调用不变）
 use super::common::extract_api_key_bearer_first as extract_api_key;
 /// 从请求头提取客户端 IP（H8：实现移至 `api::common`）
@@ -4088,7 +4095,7 @@ pub async fn handle_audio_transcriptions(
             )
         })?;
 
-    let bytes = match axum::body::to_bytes(body, 25 * 1024 * 1024).await {
+    let bytes = match axum::body::to_bytes(body, current_body_limit_bytes(&state)).await {
         Ok(b) => b,
         Err(e) => {
             return Err(error_response(
@@ -4244,7 +4251,7 @@ pub async fn handle_audio_translations(
             )
         })?;
 
-    let bytes = match axum::body::to_bytes(body, 25 * 1024 * 1024).await {
+    let bytes = match axum::body::to_bytes(body, current_body_limit_bytes(&state)).await {
         Ok(b) => b,
         Err(e) => {
             return Err(error_response(

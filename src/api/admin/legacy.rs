@@ -2851,19 +2851,50 @@ pub async fn handle_channel_chat_test(
         .into_response();
     }
 
-    // Playground 不绑定渠道：自动选择优先级最高的启用渠道
+    // Playground 不绑定渠道：按用户指定的 model 路由到声明了该模型的启用渠道
+    //（优先级降序取第一个）；不再「选优先级最高的渠道后透传任意模型」——
+    // 那会把 A 渠道的模型名发给 B 渠道（B 上游可能静默用别的模型兜底，
+    // 日志渠道/模型错位，且无从追溯真实上游模型）。
+    // model 为空时保留旧行为：选优先级最高的启用渠道，再取其 models[0]。
+    let requested_model = body.model.trim().to_string();
     let ch = if body.channel_id.trim().is_empty() {
-        match state
+        let enabled: Vec<crate::channel::Channel> = state
             .channel_store
             .list()
             .into_iter()
             .filter(|c| c.is_enabled())
-            .max_by_key(|c| c.priority)
-        {
+            .collect();
+        let picked = if requested_model.is_empty() {
+            enabled.iter().max_by_key(|c| c.priority).cloned()
+        } else {
+            // 与数据面 /v1/chat/completions 同口径（select_for_model 的过滤子集，
+            // 不含冷却/断路器——调试入口要能看到被冷却的渠道，方便诊断）：
+            // 先找声明了该模型的渠道（models 非空才算声明；models 空 = 全部）
+            enabled
+                .iter()
+                .filter(|c| c.supports_model(&requested_model))
+                .max_by_key(|c| c.priority)
+                .cloned()
+                .or_else(|| {
+                    // 无渠道声明该模型时，退「models 为空（=全部）」的启用渠道
+                    enabled
+                        .iter()
+                        .filter(|c| c.models.is_empty())
+                        .max_by_key(|c| c.priority)
+                        .cloned()
+                })
+        };
+        match picked {
             Some(c) => c,
             None => {
-                return error_response("No enabled channel available", StatusCode::BAD_REQUEST)
-                    .into_response()
+                return error_response(
+                    &format!(
+                        "No enabled channel provides model '{requested_model}' \
+                         (available channels do not declare it)"
+                    ),
+                    StatusCode::BAD_REQUEST,
+                )
+                .into_response()
             }
         }
     } else {
@@ -2874,6 +2905,25 @@ pub async fn handle_channel_chat_test(
             }
         }
     };
+
+    // 指定渠道调试：校验模型属于该渠道（models + discovered_models ∪ 空=全部），
+    // 防止把别的渠道的模型名透传给本渠道上游。
+    if !body.channel_id.trim().is_empty() && !requested_model.is_empty() {
+        let declared = ch.supports_model(&requested_model)
+            || (!ch.models.is_empty()
+                && ch.discovered_models.iter().any(|m| m == &requested_model));
+        if !declared {
+            return error_response(
+                &format!(
+                    "Model '{requested_model}' is not declared by channel '{}' \
+                     (check channel models or clear the selection)",
+                    ch.name
+                ),
+                StatusCode::BAD_REQUEST,
+            )
+            .into_response();
+        }
+    }
 
     // 确定目标模型：渠道未配置模型时使用第一个启用渠道声明的模型，
     // 再无则透传空字符串（不再硬编码 glm-4.7-flash 兜底）。

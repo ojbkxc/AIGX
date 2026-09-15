@@ -126,6 +126,15 @@
   background: rgba(47, 111, 237, 0.08);
 }
 
+/* 键盘导航高亮行（↑↓/j k 移动的 kbd-active） */
+.keys-table tr.kbd-active > td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent-color, #2f6fed);
+}
+
+.keys-table tr.kbd-active .col-actions {
+  background: var(--section-item-bg);
+}
+
 /* 名称列 */
 .keys-table .tk-name {
   font-weight: 500;

@@ -14,6 +14,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
 import GlobalSearch from './GlobalSearch';
+import ConfirmDialog, { type ConfirmState } from './ConfirmDialog';
 
 interface NavItem {
   path: string;
@@ -135,6 +136,9 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
     navigate('/login');
   };
 
+  // 退出登录二次确认：误触不应直接登出丢上下文
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = React.useState<boolean>(false);
+
   const toggleTheme = (): void => {
     void cycleTheme();
   };
@@ -238,7 +242,7 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
                 <span>{t('切换语言')}</span>
                 <span className="sidebar-user-menu-hint">{i18n.language === 'zh' ? 'EN' : '中'}</span>
               </button>
-              <button type="button" className="sidebar-user-menu-danger" onClick={() => { setUserMenuOpen(false); void handleLogout(); }}>
+              <button type="button" className="sidebar-user-menu-danger" onClick={() => { setUserMenuOpen(false); setLogoutConfirmOpen(true); }}>
                 <LogOut size={13} />
                 <span>{t('退出登录')}</span>
               </button>
@@ -246,6 +250,18 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
           )}
         </div>
       </div>
+
+      {/* 退出登录二次确认：误触不应直接登出 */}
+      <ConfirmDialog
+        state={logoutConfirmOpen ? {
+          title: t('退出登录'),
+          message: t('确定要退出当前账号吗？'),
+          confirmText: t('退出'),
+          danger: true,
+          onConfirm: () => handleLogout(),
+        } as ConfirmState : null}
+        onClose={() => setLogoutConfirmOpen(false)}
+      />
     </aside>
   );
 }

@@ -1,0 +1,65 @@
+/* 底部常驻状态行（cc-haha StatusLine 模式）：fixed 悬浮条，越阈值变色 */
+
+.statusline {
+  position: fixed;
+  bottom: 0;
+  left: var(--sidebar-width);
+  right: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 26px;
+  padding: 0 16px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-color);
+  border-top: 1px solid var(--border-color);
+  font-variant-numeric: tabular-nums;
+  transition: left 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.statusline::-webkit-scrollbar {
+  display: none;
+}
+
+/* 收缩态联动侧栏宽度 */
+:root[data-sidebar-collapsed="true"] .statusline {
+  left: var(--sidebar-width-collapsed);
+}
+
+/* 呼吸点：常绿呼吸，异常不在此变色（各分段独立变色） */
+.statusline-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success-color);
+  flex-shrink: 0;
+  animation: statusline-breathe 2s ease-in-out infinite;
+}
+
+@keyframes statusline-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.statusline-seg {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.statusline-seg-bad {
+  color: var(--danger-color);
+  font-weight: 600;
+}
+
+/* 移动端：底部状态行避让内容且缩窄间距；隐藏非核心段避免溢出 */
+@media (max-width: 768px) {
+  .statusline {
+    left: 0;
+    gap: 10px;
+    padding: 0 12px;
+  }
+}

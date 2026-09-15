@@ -34,6 +34,7 @@ pub struct LimitsRequest {
     pub threshold: Option<f64>,
     pub api_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
+    pub max_request_body_mb: Option<usize>,
     /// 请求日志快照开关（log_body）
     pub log_body: Option<bool>,
     /// 按次计费每次固定扣减额度（billing_mode=count 的订阅生效）
@@ -125,6 +126,7 @@ pub async fn handle_get_limits(
             "threshold": config.usage.threshold,
             "api_timeout_secs": config.usage.api_timeout_secs,
             "max_retries": config.usage.max_retries,
+            "max_request_body_mb": config.usage.max_request_body_mb,
             "log_body": config.usage.log_body,
             "billing_flat_quota": config.usage.billing_flat_quota,
         })
@@ -181,6 +183,11 @@ pub async fn handle_update_limits(
     }
     if let Some(v) = body.max_retries {
         config.usage.max_retries = v;
+    }
+    if let Some(v) = body.max_request_body_mb {
+        if v > 0 {
+            config.usage.max_request_body_mb = v;
+        }
     }
     if let Some(v) = body.log_body {
         config.usage.log_body = v;

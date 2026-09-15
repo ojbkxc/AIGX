@@ -2,7 +2,7 @@ import { useState, useEffect, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import SystemMonitorPanel from '../components/SystemMonitorPanel';
-import { Button, Card, Loading, EmptyState, Select } from '../components/ui';
+import { Button, Card, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
 import './Security.css';
 
 interface SecurityOverview {
@@ -214,7 +214,7 @@ export default function Security(): JSX.Element {
       {/* 事件列表 */}
       <Card title={`${t('安全事件')} (${total})`}>
         {loading ? (
-          <Loading text={t('加载中')} />
+          <SkeletonTable columns={6} rows={8} />
         ) : events.length === 0 ? (
           <EmptyState message={t('暂无安全事件')} icon="🛡️" />
         ) : (
@@ -261,17 +261,11 @@ export default function Security(): JSX.Element {
           </div>
         )}
 
-        {totalPages > 1 && (
-          <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 16, alignItems: 'center' }}>
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>
-              {t('上一页')}
-            </Button>
-            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>{page} / {totalPages}</span>
-            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>
-              {t('下一页')}
-            </Button>
-          </div>
-        )}
+        <Pagination
+          page={page}
+          totalPages={Math.max(1, totalPages)}
+          onChange={setPage}
+        />
       </Card>
     </div>
   );

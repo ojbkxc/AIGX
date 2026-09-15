@@ -1,10 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { Eye, EyeOff } from 'lucide-react';
 import { api } from '../api';
 import { cycleTheme } from '../lib/theme';
 
 export default function Login(): JSX.Element {
+  const { t, i18n } = useTranslation();
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [error, setError] = useState<string>('');
@@ -42,7 +44,7 @@ export default function Login(): JSX.Element {
   const handleSendCode = async (): Promise<void> => {
     setError('');
     if (!email) {
-      setError('请先输入邮箱');
+      setError(t('请输入邮箱'));
       return;
     }
     setCodeSending(true);
@@ -52,9 +54,9 @@ export default function Login(): JSX.Element {
       if (data.code) {
         // 未配置 SMTP（开发环境）：直接填入返回的验证码
         setCode(data.code);
-        setSuccess('未配置邮件服务，验证码已自动填入');
+        setSuccess(t('未配置邮件服务，验证码已自动填入'));
       } else {
-        setSuccess('验证码已发送至邮箱，5 分钟内有效');
+        setSuccess(t('验证码已发送至邮箱，5 分钟内有效'));
       }
       // 60 秒重发倒计时
       setCodeCountdown(60);
@@ -69,7 +71,7 @@ export default function Login(): JSX.Element {
         });
       }, 1000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '验证码发送失败');
+      setError(err instanceof Error ? err.message : t('验证码发送失败'));
     } finally {
       setCodeSending(false);
     }
@@ -102,7 +104,7 @@ export default function Login(): JSX.Element {
     e.preventDefault();
     setError('');
     if (!totpCode.trim()) {
-      setError('请输入两步验证码');
+      setError(t('请输入两步验证码'));
       return;
     }
     setLoading(true);
@@ -111,10 +113,10 @@ export default function Login(): JSX.Element {
       if (res.success && res.data) {
         completeLogin(res.data);
       } else {
-        setError('验证失败：响应格式错误');
+        setError(t('登录失败：响应格式错误'));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '两步验证失败');
+      setError(err instanceof Error ? err.message : t('两步验证失败'));
     } finally {
       setLoading(false);
     }
@@ -125,7 +127,7 @@ export default function Login(): JSX.Element {
     e.preventDefault();
     setError('');
     if (!email || !code.trim()) {
-      setError('请输入邮箱和验证码');
+      setError(t('请输入邮箱和验证码'));
       return;
     }
     setLoading(true);
@@ -137,10 +139,10 @@ export default function Login(): JSX.Element {
       } else if (res.success && res.data) {
         completeLogin(res.data);
       } else {
-        setError('登录失败：响应格式错误');
+        setError(t('登录失败：响应格式错误'));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '登录失败');
+      setError(err instanceof Error ? err.message : t('登录失败'));
     } finally {
       setLoading(false);
     }
@@ -162,7 +164,7 @@ export default function Login(): JSX.Element {
     e.preventDefault();
     setForgotError('');
     if (!forgotEmail) {
-      setForgotError('请输入邮箱');
+      setForgotError(t('请输入邮箱'));
       return;
     }
     setForgotLoading(true);
@@ -180,7 +182,7 @@ export default function Login(): JSX.Element {
         setForgotStep('token');
       }
     } catch (err) {
-      setForgotError(err instanceof Error ? err.message : '发送重置链接失败');
+      setForgotError(err instanceof Error ? err.message : t('发送重置链接失败'));
     } finally {
       setForgotLoading(false);
     }
@@ -191,26 +193,26 @@ export default function Login(): JSX.Element {
     e.preventDefault();
     setForgotError('');
     if (!resetToken.trim()) {
-      setForgotError('请输入重置 Token');
+      setForgotError(t('请输入重置 Token'));
       return;
     }
     if (newPassword.length < 6) {
-      setForgotError('新密码至少 6 位');
+      setForgotError(t('新密码至少 6 位'));
       return;
     }
     if (newPassword !== confirmPassword) {
-      setForgotError('两次输入的密码不一致');
+      setForgotError(t('两次输入的密码不一致'));
       return;
     }
     setForgotLoading(true);
     try {
       await api.resetPassword(resetToken.trim(), newPassword);
       setShowForgot(false);
-      setSuccess('密码已重置，请使用新密码登录');
+      setSuccess(t('密码已重置，请使用新密码登录'));
       setEmail(forgotEmail || email);
       setPassword('');
     } catch (err) {
-      setForgotError(err instanceof Error ? err.message : '重置失败');
+      setForgotError(err instanceof Error ? err.message : t('重置失败'));
     } finally {
       setForgotLoading(false);
     }
@@ -225,7 +227,7 @@ export default function Login(): JSX.Element {
     const state = location.state as { registered?: boolean; email?: string } | null;
     if (state?.registered && !registeredHandled.current) {
       registeredHandled.current = true;
-      setSuccess('注册成功，请登录');
+      setSuccess(t('注册成功，请登录'));
       setEmail(state.email || '');
       // 清除 state 防止重复提示
       window.history.replaceState({}, document.title);
@@ -249,7 +251,7 @@ export default function Login(): JSX.Element {
     e.preventDefault();
     setError('');
     if (!email || !password) {
-      setError('请输入邮箱/用户名和密码');
+      setError(t('请输入邮箱/用户名和密码'));
       return;
     }
     setLoading(true);
@@ -262,10 +264,10 @@ export default function Login(): JSX.Element {
       } else if (res.success && res.data) {
         completeLogin(res.data);
       } else {
-        setError('登录失败：响应格式错误');
+        setError(t('登录失败：响应格式错误'));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '登录失败');
+      setError(err instanceof Error ? err.message : t('登录失败'));
     } finally {
       setLoading(false);
     }
@@ -273,6 +275,13 @@ export default function Login(): JSX.Element {
 
   const toggleTheme = (): void => {
     void cycleTheme();
+  };
+
+  // 语言切换：zh ↔ en，持久化后无需登录即可生效（游客/未登录用户也可切换）
+  const toggleLanguage = (): void => {
+    const next = i18n.language === 'zh' ? 'en' : 'zh';
+    localStorage.setItem('i18n_lang', next);
+    void i18n.changeLanguage(next);
   };
 
   return (
@@ -287,32 +296,60 @@ export default function Login(): JSX.Element {
       overflow: 'hidden',
     }}>
 
-      <button
-        onClick={toggleTheme}
-        style={{
-          position: 'fixed',
-          top: '20px',
-          right: '20px',
-          width: '44px',
-          height: '44px',
-          borderRadius: '12px',
-          background: 'var(--card-bg)',
-          border: '1px solid var(--border-color)',
-          color: 'var(--text-main)',
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          boxShadow: 'var(--card-shadow)',
-          zIndex: 1000,
-          transition: 'border-color 0.2s ease',
-        }}
-        title="切换主题"
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" style={{ width: '20px', height: '20px' }}>
-          <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-        </svg>
-      </button>
+      {/* 右上角工具组：语言切换 + 主题切换 */}
+      <div style={{
+        position: 'fixed',
+        top: '20px',
+        right: '20px',
+        display: 'flex',
+        gap: '8px',
+        zIndex: 1000,
+      }}>
+        <button
+          onClick={toggleLanguage}
+          style={{
+            width: '44px',
+            height: '44px',
+            borderRadius: '12px',
+            background: 'var(--card-bg)',
+            border: '1px solid var(--border-color)',
+            color: 'var(--text-main)',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: 'var(--card-shadow)',
+            transition: 'border-color 0.2s ease',
+            fontSize: '13px',
+            fontWeight: 600,
+          }}
+          title={t('切换语言')}
+        >
+          {i18n.language === 'zh' ? 'EN' : '中'}
+        </button>
+        <button
+          onClick={toggleTheme}
+          style={{
+            width: '44px',
+            height: '44px',
+            borderRadius: '12px',
+            background: 'var(--card-bg)',
+            border: '1px solid var(--border-color)',
+            color: 'var(--text-main)',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: 'var(--card-shadow)',
+            transition: 'border-color 0.2s ease',
+          }}
+          title={t('切换主题')}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" style={{ width: '20px', height: '20px' }}>
+            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+          </svg>
+        </button>
+      </div>
 
       <div style={{
         background: 'var(--card-bg)',
@@ -339,7 +376,7 @@ export default function Login(): JSX.Element {
             AIGX Gateway
           </h1>
           <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
-            登录管理面板
+            {t('登录管理面板')}
           </p>
         </div>
 
@@ -355,15 +392,15 @@ export default function Login(): JSX.Element {
         {totpPending ? (
           <form onSubmit={handleTotpSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
             <p style={{ fontSize: '13px', color: 'var(--text-muted)', margin: '0 0 10px' }}>
-              账号已开启两步验证，请输入认证器中的 6 位验证码
+              {t('账号已开启两步验证，请输入认证器中的 6 位验证码')}
             </p>
             <div className="form-group">
-              <label htmlFor="totp-code">两步验证码</label>
+              <label htmlFor="totp-code">{t('两步验证码')}</label>
               <input
                 id="totp-code"
                 type="text"
                 className="form-input"
-                placeholder="6 位验证码"
+                placeholder={t('6 位验证码')}
                 value={totpCode}
                 onChange={(e) => setTotpCode(e.target.value)}
                 autoFocus
@@ -379,7 +416,7 @@ export default function Login(): JSX.Element {
               disabled={loading}
               style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: '8px', fontSize: '13px' }}
             >
-              {loading ? '验证中...' : '验证并登录'}
+              {loading ? t('验证中...') : t('验证并登录')}
             </button>
             <button
               type="button"
@@ -389,7 +426,7 @@ export default function Login(): JSX.Element {
                 fontSize: '12px', color: 'var(--text-muted)', padding: '8px 0 0',
               }}
             >
-              返回重新登录
+              {t('返回重新登录')}
             </button>
           </form>
         ) : (
@@ -404,8 +441,8 @@ export default function Login(): JSX.Element {
           marginBottom: '14px',
         }}>
           {[
-            { key: 'password' as const, label: '密码登录' },
-            { key: 'code' as const, label: '验证码登录' },
+            { key: 'password' as const, label: t('密码登录') },
+            { key: 'code' as const, label: t('验证码登录') },
           ].map((tab) => (
             <button
               key={tab.key}
@@ -434,12 +471,12 @@ export default function Login(): JSX.Element {
           <>
             <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
               <div className="form-group">
-                <label htmlFor="email">邮箱 / 用户名</label>
+                <label htmlFor="email">{t('邮箱 / 用户名')}</label>
                 <input
                   id="email"
                   type="text"
                   className="form-input"
-                  placeholder="邮箱或用户名均可登录"
+                  placeholder={t('邮箱或用户名均可登录')}
                   autoComplete="username"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
@@ -448,13 +485,13 @@ export default function Login(): JSX.Element {
                 />
               </div>
               <div className="form-group">
-                <label htmlFor="password">密码</label>
+                <label htmlFor="password">{t('密码')}</label>
                 <div className="password-input-wrap">
                   <input
                     id="password"
                     type={showPassword ? 'text' : 'password'}
                     className="form-input password-input"
-                    placeholder="请输入密码"
+                    placeholder={t('请输入密码')}
                     autoComplete="current-password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
@@ -465,8 +502,8 @@ export default function Login(): JSX.Element {
                     className="password-input-toggle"
                     tabIndex={-1}
                     onClick={() => setShowPassword((v) => !v)}
-                    aria-label={showPassword ? '隐藏密码' : '显示密码'}
-                    title={showPassword ? '隐藏密码' : '显示密码'}
+                    aria-label={showPassword ? t('隐藏密码') : t('显示密码')}
+                    title={showPassword ? t('隐藏密码') : t('显示密码')}
                   >
                     {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
                   </button>
@@ -478,7 +515,7 @@ export default function Login(): JSX.Element {
                 disabled={loading}
                 style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: '8px', fontSize: '13px' }}
               >
-                {loading ? '登录中...' : '登录'}
+                {loading ? t('登录中...') : t('登录')}
               </button>
             </form>
 
@@ -495,19 +532,19 @@ export default function Login(): JSX.Element {
                   padding: 0,
                 }}
               >
-                忘记密码？
+                {t('忘记密码？')}
               </button>
             </div>
           </>
         ) : (
           <form onSubmit={handleCodeSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
             <div className="form-group">
-              <label htmlFor="code-email">邮箱</label>
+              <label htmlFor="code-email">{t('邮箱')}</label>
               <input
                 id="code-email"
                 type="text"
                 className="form-input"
-                placeholder="请输入邮箱"
+                placeholder={t('请输入邮箱')}
                 autoComplete="username"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -516,13 +553,13 @@ export default function Login(): JSX.Element {
               />
             </div>
             <div className="form-group">
-              <label htmlFor="login-code">验证码</label>
+              <label htmlFor="login-code">{t('两步验证码')}</label>
               <div style={{ display: 'flex', gap: '8px' }}>
                 <input
                   id="login-code"
                   type="text"
                   className="form-input"
-                  placeholder="6 位验证码"
+                  placeholder={t('6 位验证码')}
                   value={code}
                   onChange={(e) => setCode(e.target.value)}
                   disabled={loading}
@@ -536,7 +573,7 @@ export default function Login(): JSX.Element {
                   disabled={codeSending || codeCountdown > 0}
                   style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                 >
-                  {codeSending ? '发送中...' : codeCountdown > 0 ? `${codeCountdown}s` : '发送验证码'}
+                  {codeSending ? t('发送中...') : codeCountdown > 0 ? `${codeCountdown}s` : t('发送验证码')}
                 </button>
               </div>
             </div>
@@ -546,7 +583,7 @@ export default function Login(): JSX.Element {
               disabled={loading}
               style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: '8px', fontSize: '13px' }}
             >
-              {loading ? '验证中...' : '验证码登录'}
+              {loading ? t('验证中...') : t('验证码登录')}
             </button>
           </form>
         )}
@@ -555,7 +592,7 @@ export default function Login(): JSX.Element {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', margin: '16px 0' }}>
           <div style={{ flex: 1, height: '1px', background: 'var(--border-color)' }} />
-          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>或</span>
+          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{t('或')}</span>
           <div style={{ flex: 1, height: '1px', background: 'var(--border-color)' }} />
         </div>
 
@@ -571,7 +608,7 @@ export default function Login(): JSX.Element {
             <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" />
             <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
           </svg>
-          使用 Google 登录
+          {t('使用 Google 登录')}
         </button>
 
         <button
@@ -583,7 +620,7 @@ export default function Login(): JSX.Element {
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" style={{ width: '15px', height: '15px' }}>
             <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
           </svg>
-          使用 GitHub 登录
+          {t('使用 GitHub 登录')}
         </button>
 
         <button
@@ -608,12 +645,12 @@ export default function Login(): JSX.Element {
               fill="#1d1d1f"
             />
           </svg>
-          LinuxDO 登录
+          {t('LinuxDO 登录')}
         </button>
 
         <div style={{ textAlign: 'center', marginTop: '16px' }}>
           <a href="/register" style={{ fontSize: '13px', color: 'var(--accent-color)', textDecoration: 'none' }}>
-            还没有账号？立即注册
+            {t('还没有账号？立即注册')}
           </a>
         </div>
 
@@ -623,24 +660,24 @@ export default function Login(): JSX.Element {
         <div className="modal-overlay">
           <div className="modal" style={{ maxWidth: 380, width: '90%' }}>
             <div className="modal-header">
-              <h3>忘记密码</h3>
+              <h3>{t('忘记密码')}</h3>
               <button className="modal-close" onClick={() => setShowForgot(false)}>&times;</button>
             </div>
             <div className="modal-body">
               {forgotStep === 'email' ? (
                 <>
                   <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>
-                    输入注册邮箱。已配置邮件服务时会发送重置邮件；未配置邮件服务时，界面会进入下一步并给出重置凭据。
+                    {t('输入注册邮箱。已配置邮件服务时会发送重置邮件；未配置邮件服务时，界面会进入下一步并给出重置凭据。')}
                   </p>
                   {forgotError && <div className="error-message">{forgotError}</div>}
                   <form onSubmit={handleForgotSubmit}>
                     <div className="form-group">
-                      <label htmlFor="forgot-email">邮箱</label>
+                      <label htmlFor="forgot-email">{t('邮箱')}</label>
                       <input
                         id="forgot-email"
                         type="email"
                         className="form-input"
-                        placeholder="请输入邮箱"
+                        placeholder={t('请输入邮箱')}
                         value={forgotEmail}
                         onChange={(e) => setForgotEmail(e.target.value)}
                         autoFocus
@@ -653,25 +690,25 @@ export default function Login(): JSX.Element {
                       disabled={forgotLoading}
                       style={{ width: '100%', justifyContent: 'center', padding: '9px', fontSize: '13px' }}
                     >
-                      {forgotLoading ? '发送中...' : '下一步'}
+                      {forgotLoading ? t('发送中...') : t('下一步')}
                     </button>
                   </form>
                 </>
               ) : (
                 <>
                   <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>
-                    输入邮件中的重置 Token 并设置新密码（1 小时内有效）。
+                    {t('输入邮件中的重置 Token 并设置新密码（1 小时内有效）。')}
                   </p>
 
                   {forgotError && <div className="error-message">{forgotError}</div>}
                   <form onSubmit={handleResetSubmit}>
                     <div className="form-group">
-                      <label htmlFor="reset-token">重置 Token</label>
+                      <label htmlFor="reset-token">{t('重置 Token')}</label>
                       <input
                         id="reset-token"
                         type="text"
                         className="form-input"
-                        placeholder="邮件中的重置 Token"
+                        placeholder={t('邮件中的重置 Token')}
                         value={resetToken}
                         onChange={(e) => setResetToken(e.target.value)}
                         autoFocus
@@ -679,13 +716,13 @@ export default function Login(): JSX.Element {
                       />
                     </div>
                     <div className="form-group">
-                      <label htmlFor="new-password">新密码</label>
+                      <label htmlFor="new-password">{t('新密码')}</label>
                       <div className="password-input-wrap">
                         <input
                           id="new-password"
                           type={showNewPassword ? 'text' : 'password'}
                           className="form-input password-input"
-                          placeholder="至少 6 位"
+                          placeholder={t('至少 6 位')}
                           autoComplete="new-password"
                           value={newPassword}
                           onChange={(e) => setNewPassword(e.target.value)}
@@ -696,20 +733,20 @@ export default function Login(): JSX.Element {
                           className="password-input-toggle"
                           tabIndex={-1}
                           onClick={() => setShowNewPassword((v) => !v)}
-                          aria-label={showNewPassword ? '隐藏密码' : '显示密码'}
-                          title={showNewPassword ? '隐藏密码' : '显示密码'}
+                          aria-label={showNewPassword ? t('隐藏密码') : t('显示密码')}
+                          title={showNewPassword ? t('隐藏密码') : t('显示密码')}
                         >
                           {showNewPassword ? <EyeOff size={14} /> : <Eye size={14} />}
                         </button>
                       </div>
                     </div>
                     <div className="form-group">
-                      <label htmlFor="confirm-password">确认新密码</label>
+                      <label htmlFor="confirm-password">{t('确认新密码')}</label>
                       <input
                         id="confirm-password"
                         type={showNewPassword ? 'text' : 'password'}
                         className="form-input"
-                        placeholder="再次输入新密码"
+                        placeholder={t('再次输入新密码')}
                         autoComplete="new-password"
                         value={confirmPassword}
                         onChange={(e) => setConfirmPassword(e.target.value)}
@@ -722,7 +759,7 @@ export default function Login(): JSX.Element {
                       disabled={forgotLoading}
                       style={{ width: '100%', justifyContent: 'center', padding: '9px', fontSize: '13px' }}
                     >
-                      {forgotLoading ? '重置中...' : '重置密码'}
+                      {forgotLoading ? t('重置中...') : t('重置密码')}
                     </button>
                   </form>
                 </>

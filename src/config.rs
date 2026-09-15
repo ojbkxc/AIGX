@@ -206,6 +206,11 @@ pub struct UsageConfig {
     pub api_timeout_secs: u64,
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// 请求体大小上限（MB），作用于数据面接口（OpenAI/Anthropic 兼容
+    /// 端点与音频 multipart 上传）。运行期经管理员后台「使用限额」页
+    /// 修改后立即生效（build_router 每次请求实时读配置）。
+    #[serde(default = "default_max_request_body_mb")]
+    pub max_request_body_mb: usize,
     /// 请求日志快照开关（log_body）：开启后把客户端请求体/上游响应体
     /// 截断快照进请求日志（每字段 4KB 上限），用于排障回放。
     /// 默认关闭——关闭时零开销（无序列化、无存储、无字符截断拷贝）。
@@ -228,6 +233,11 @@ fn default_api_timeout() -> u64 {
 
 fn default_max_retries() -> u32 {
     2
+}
+
+/// 请求体大小上限默认 25MB（对齐 audio multipart 原有阈值）。
+fn default_max_request_body_mb() -> usize {
+    25
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -318,6 +328,7 @@ impl Default for UsageConfig {
             threshold: 0.0,
             api_timeout_secs: default_api_timeout(),
             max_retries: default_max_retries(),
+            max_request_body_mb: default_max_request_body_mb(),
             log_body: false,
             billing_flat_quota: default_billing_flat_quota(),
         }
@@ -436,6 +447,14 @@ impl ConfigManager {
         self.config.read().await.clone()
     }
 
+    /// 同步读取请求体大小上限（MB）。数据面 `map_request` 中间件与
+    /// audio multipart 接口是同步路径，无法 await，故用 try_read 快照。
+    /// 拿不到锁时回退默认 25，避免阻塞数据面。
+    pub fn max_request_body_mb(&self) -> usize {
+        let mb = self.config.try_read().map(|c| c.usage.max_request_body_mb);
+        mb.unwrap_or(25)
+    }
+
     /// 获取配置路径
     #[allow(dead_code)]
     pub fn path(&self) -> &PathBuf {
@@ -484,6 +503,13 @@ fn apply_env_overrides(mut config: AppConfig) -> AppConfig {
     }
     if let Ok(v) = std::env::var("AIGX_SERVER_ADDRESS") {
         config.server_address = v;
+    }
+    if let Ok(v) = std::env::var("AIGX_USAGE__MAX_REQUEST_BODY_MB") {
+        if let Ok(n) = v.parse() {
+            if n > 0 {
+                config.usage.max_request_body_mb = n;
+            }
+        }
     }
     config
 }

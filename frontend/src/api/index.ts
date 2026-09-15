@@ -372,8 +372,8 @@ export const api = {
     request<ApiResponse<ChannelItem>>('PUT', `${API_BASE}/channels/${id}`, data),
   patchChannel: (id: string | number, data: Record<string, unknown>): Promise<ApiResponse<ChannelItem>> =>
     request<ApiResponse<ChannelItem>>('PATCH', `${API_BASE}/channels/${id}`, data),
-  deleteChannel: (id: string | number): Promise<ApiResponse<MessageResult>> =>
-    request<ApiResponse<MessageResult>>('DELETE', `${API_BASE}/channels/${id}`),
+  deleteChannel: (id: string | number, password?: string): Promise<ApiResponse<MessageResult>> =>
+    request<ApiResponse<MessageResult>>('DELETE', `${API_BASE}/channels/${id}`, password ? { password } : null),
   testChannel: (id: string | number): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/channels/${id}/test`),
   resetChannelCircuit: (id: string | number): Promise<ApiResponse<Record<string, unknown>>> =>

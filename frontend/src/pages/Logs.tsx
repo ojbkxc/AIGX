@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Trash2, Eraser, EyeOff, Eye } from 'lucide-react';
 import { api } from '../api';
 import { isAdmin } from '../lib/utils';
+import { useListKeyboard } from '../hooks/useListKeyboard';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { RequestLogDetail, AuditLogDetail } from '../components/LogDetailDialogs';
@@ -82,6 +83,13 @@ export default function Logs(): JSX.Element {
   const [masked, setMasked] = useState(false);
 
   const [filters, setFilters] = useState<Filters>({ user: '', model: '', channel: '', start: '', end: '' });
+
+  // 键盘导航（cc-haha 列表键盘体系）：/ 聚焦用户筛选、↑↓/j k 行高亮、Enter 打开详情
+  const { searchRef, rowRefs, activeIndex, setActiveIndex } = useListKeyboard(
+    logs.length,
+    (i) => { if (logs[i]) setDetail(logs[i]); },
+    !loading && !detail && !confirmState,
+  );
 
   // 仅 tab / 分页变化时自动加载；筛选条件由「查询」按钮显式触发，避免每键一请求
   useEffect(() => {
@@ -402,13 +410,21 @@ export default function Logs(): JSX.Element {
             {admin && (
               <div className="form-group">
                 <label>{t('用户')}</label>
-                <input className="form-input" value={filters.user} onChange={(e) => setFilters({ ...filters, user: e.target.value })} placeholder={t('按用户 ID 或邮箱过滤')} />
+                <input ref={searchRef} className="form-input" value={filters.user} onChange={(e) => setFilters({ ...filters, user: e.target.value })} placeholder={t('按用户 ID 或邮箱过滤')} />
               </div>
             )}
-            <div className="form-group">
-              <label>{t('模型')}</label>
-              <input className="form-input" value={filters.model} onChange={(e) => setFilters({ ...filters, model: e.target.value })} placeholder={t('按模型过滤')} />
-            </div>
+            {!admin && (
+              <div className="form-group">
+                <label>{t('模型')}</label>
+                <input ref={searchRef} className="form-input" value={filters.model} onChange={(e) => setFilters({ ...filters, model: e.target.value })} placeholder={t('按模型过滤')} />
+              </div>
+            )}
+            {admin && (
+              <div className="form-group">
+                <label>{t('模型')}</label>
+                <input className="form-input" value={filters.model} onChange={(e) => setFilters({ ...filters, model: e.target.value })} placeholder={t('按模型过滤')} />
+              </div>
+            )}
             {admin && (
               <div className="form-group">
                 <label>{t('渠道 ID')}</label>
@@ -520,12 +536,14 @@ export default function Logs(): JSX.Element {
                 )}
               </thead>
               <tbody>
-                {logs.map((l) =>
+                {logs.map((l, i) =>
                   isRequest(l) ? (
                     <tr
                       key={l.id}
-                      className="log-row-clickable"
+                      ref={(el) => { rowRefs.current[i] = el; }}
+                      className={`log-row-clickable ${activeIndex === i ? 'kbd-active' : ''}`}
                       onClick={() => setDetail(l)}
+                      onMouseEnter={() => setActiveIndex(i)}
                       title={t('点击查看详情')}
                     >
                       {admin && (
@@ -579,8 +597,10 @@ export default function Logs(): JSX.Element {
                   ) : (
                     <tr
                       key={l.id}
-                      className="log-row-clickable"
+                      ref={(el) => { rowRefs.current[i] = el; }}
+                      className={`log-row-clickable ${activeIndex === i ? 'kbd-active' : ''}`}
                       onClick={() => setDetail(l)}
+                      onMouseEnter={() => setActiveIndex(i)}
                       title={t('点击查看详情')}
                     >
                       {admin && (

@@ -741,6 +741,17 @@ fn ensure_default_admin(user_store: &UserStore) {
 }
 
 fn build_router(state: AppState, config: &config::AppConfig) -> Router {
+    // 请求体大小上限在运行期可经管理后台修改，故此处用中间件每次请求
+    // 实时读配置快照（config_manager 为 tokio RwLock），不依赖启动时的
+    // config 副本，保证后台改完后无需重启即生效。
+    let body_limit_state = state.clone();
+    let body_limit_mw = tower::ServiceBuilder::new().map_request(move |mut req: axum::http::Request<axum::body::Body>| {
+        let limit = body_limit_state.config_manager.max_request_body_mb().max(1) * 1024 * 1024;
+        req.extensions_mut()
+            .insert(axum::extract::DefaultBodyLimit::max(limit));
+        req
+    });
+
     // 注意：axum 0.7（matchit 0.7）的路由参数语法是 `:id`，不是 `{id}`。
     // `{id}` 是 axum 0.8（matchit 0.8）的语法，在 0.7 下会被当作字面量路径段，
     // 导致所有带参数路由匹配失败、请求掉到 fallback_service 返回 405/404。
@@ -748,6 +759,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     let admin_routes = Router::new()
         // Auth handlers (来自 api::admin::auth)
         .route("/api/auth/login", post(api::admin::handle_login))
+        // 公开端点：按客户端 IP 推荐界面语言（登录页默认语言；无代理头时返回 null）
+        .route("/api/public/geo-lang", get(api::admin::handle_geo_lang))
         .route(
             "/api/auth/login/send-code",
             post(api::admin::handle_login_send_code),
@@ -1357,6 +1370,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/metrics", get(handle_metrics))
         .fallback_service(web::serve_static_files())
         .layer(build_cors_layer(config))
+        .layer(body_limit_mw)
         .with_state(state)
 }
 

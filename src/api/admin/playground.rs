@@ -161,7 +161,10 @@ pub async fn handle_playground_chat(
         .into_response();
     }
 
-    // 选渠道：优先 channel_id，否则第一个启用渠道
+    // 选渠道：优先 channel_id，否则按 model 路由到声明该模型的启用渠道
+    //（优先级降序取第一个；无渠道声明时退「models 空 = 全部」渠道），
+    // 不再无差别取第一个启用渠道——那会把 A 渠道的模型发给 B 渠道。
+    let requested_model = body.model.trim().to_string();
     let ch = if let Some(ref cid) = body.channel_id {
         match state.channel_store.get(cid) {
             Some(c) => c,
@@ -170,22 +173,63 @@ pub async fn handle_playground_chat(
             }
         }
     } else {
-        match state
+        let enabled: Vec<crate::channel::Channel> = state
             .channel_store
             .list()
             .into_iter()
-            .find(|c| c.is_enabled())
-        {
+            .filter(|c| c.is_enabled())
+            .collect();
+        let picked = if requested_model.is_empty() {
+            enabled.first().cloned()
+        } else {
+            enabled
+                .iter()
+                .filter(|c| c.supports_model(&requested_model))
+                .max_by_key(|c| c.priority)
+                .cloned()
+                .or_else(|| {
+                    enabled
+                        .iter()
+                        .filter(|c| c.models.is_empty())
+                        .max_by_key(|c| c.priority)
+                        .cloned()
+                })
+        };
+        match picked {
             Some(c) => c,
             None => {
                 return error_response(
-                    "No enabled channel available for playground",
+                    &format!(
+                        "No enabled channel provides model '{requested_model}' \
+                         (available channels do not declare it)"
+                    ),
                     StatusCode::BAD_REQUEST,
                 )
                 .into_response()
             }
         }
     };
+
+    // 指定渠道调试（管理员）：校验模型属于该渠道（models + discovered_models，
+    // models 空 = 全部），防止把别的渠道的模型名透传给本渠道上游。
+    if let Some(ref cid) = body.channel_id {
+        if !cid.trim().is_empty() && !requested_model.is_empty() {
+            let declared = ch.supports_model(&requested_model)
+                || (!ch.models.is_empty()
+                    && ch.discovered_models.iter().any(|m| m == &requested_model));
+            if !declared {
+                return error_response(
+                    &format!(
+                        "Model '{requested_model}' is not declared by channel '{}' \
+                         (check channel models or clear the selection)",
+                        ch.name
+                    ),
+                    StatusCode::BAD_REQUEST,
+                )
+                .into_response();
+            }
+        }
+    }
 
     let model = if body.model.trim().is_empty() {
         ch.models
@@ -381,6 +425,9 @@ pub async fn handle_playground_images(
         .into_response();
     }
 
+    // 选渠道：优先 channel_id，否则按 model 路由到声明该模型的启用渠道
+    //（与 handle_playground_chat 同口径，见其注释）
+    let requested_model = body.model.trim().to_string();
     let ch = if let Some(ref cid) = body.channel_id {
         match state.channel_store.get(cid) {
             Some(c) => c,
@@ -389,16 +436,36 @@ pub async fn handle_playground_images(
             }
         }
     } else {
-        match state
+        let enabled: Vec<crate::channel::Channel> = state
             .channel_store
             .list()
             .into_iter()
-            .find(|c| c.is_enabled())
-        {
+            .filter(|c| c.is_enabled())
+            .collect();
+        let picked = if requested_model.is_empty() {
+            enabled.first().cloned()
+        } else {
+            enabled
+                .iter()
+                .filter(|c| c.supports_model(&requested_model))
+                .max_by_key(|c| c.priority)
+                .cloned()
+                .or_else(|| {
+                    enabled
+                        .iter()
+                        .filter(|c| c.models.is_empty())
+                        .max_by_key(|c| c.priority)
+                        .cloned()
+                })
+        };
+        match picked {
             Some(c) => c,
             None => {
                 return error_response(
-                    "No enabled channel available for playground",
+                    &format!(
+                        "No enabled channel provides model '{requested_model}' \
+                         (available channels do not declare it)"
+                    ),
                     StatusCode::BAD_REQUEST,
                 )
                 .into_response()
@@ -514,16 +581,38 @@ pub async fn handle_playground_tts(
         return error_response("input is required", StatusCode::BAD_REQUEST).into_response();
     }
 
-    let ch = match state
+    // 按 model 路由到声明该模型的启用渠道（与 playground/chat 同口径）
+    let requested_model = body.model.trim().to_string();
+    let enabled: Vec<crate::channel::Channel> = state
         .channel_store
         .list()
         .into_iter()
-        .find(|c| c.is_enabled())
-    {
+        .filter(|c| c.is_enabled())
+        .collect();
+    let picked = if requested_model.is_empty() {
+        enabled.first().cloned()
+    } else {
+        enabled
+            .iter()
+            .filter(|c| c.supports_model(&requested_model))
+            .max_by_key(|c| c.priority)
+            .cloned()
+            .or_else(|| {
+                enabled
+                    .iter()
+                    .filter(|c| c.models.is_empty())
+                    .max_by_key(|c| c.priority)
+                    .cloned()
+            })
+    };
+    let ch = match picked {
         Some(c) => c,
         None => {
             return error_response(
-                "No enabled channel available for playground",
+                &format!(
+                    "No enabled channel provides model '{requested_model}' \
+                     (available channels do not declare it)"
+                ),
                 StatusCode::BAD_REQUEST,
             )
             .into_response()
@@ -650,7 +739,7 @@ pub async fn handle_playground_transcriptions(
         }
     };
 
-    let bytes = match axum::body::to_bytes(body, 25 * 1024 * 1024).await {
+    let bytes = match axum::body::to_bytes(body, super::super::openai::current_body_limit_bytes(&state)).await {
         Ok(b) => b,
         Err(e) => {
             return error_response(
@@ -675,16 +764,38 @@ pub async fn handle_playground_transcriptions(
             }
         };
 
-    let ch = match state
+    // 按上传的 model 路由到声明该模型的启用渠道（与 playground/chat 同口径）
+    let requested_model = model.trim().to_string();
+    let enabled: Vec<crate::channel::Channel> = state
         .channel_store
         .list()
         .into_iter()
-        .find(|c| c.is_enabled())
-    {
+        .filter(|c| c.is_enabled())
+        .collect();
+    let picked = if requested_model.is_empty() {
+        enabled.first().cloned()
+    } else {
+        enabled
+            .iter()
+            .filter(|c| c.supports_model(&requested_model))
+            .max_by_key(|c| c.priority)
+            .cloned()
+            .or_else(|| {
+                enabled
+                    .iter()
+                    .filter(|c| c.models.is_empty())
+                    .max_by_key(|c| c.priority)
+                    .cloned()
+            })
+    };
+    let ch = match picked {
         Some(c) => c,
         None => {
             return error_response(
-                "No enabled channel available for playground",
+                &format!(
+                    "No enabled channel provides model '{requested_model}' \
+                     (available channels do not declare it)"
+                ),
                 StatusCode::BAD_REQUEST,
             )
             .into_response()

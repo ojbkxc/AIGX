@@ -27,7 +27,7 @@ export default function Register() {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const navigate = useNavigate();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
 
   // 邀请码：从 ?aff= 或 ?aff_code= 查询参数读入（new-api 前端从 localStorage 读）
   const [affCode, setAffCode] = useState('');
@@ -150,6 +150,13 @@ export default function Register() {
     void cycleTheme();
   };
 
+  // 语言切换：zh ↔ en（与登录页一致，注册流程同样面向国外用户）
+  const toggleLanguage = (): void => {
+    const next = i18n.language === 'zh' ? 'en' : 'zh';
+    localStorage.setItem('i18n_lang', next);
+    void i18n.changeLanguage(next);
+  };
+
   return (
     <div style={{
       minHeight: '100vh',
@@ -162,33 +169,63 @@ export default function Register() {
       overflow: 'hidden',
     }}>
 
-      <button
-        onClick={toggleTheme}
-        style={{
-          position: 'fixed',
-          top: '20px',
-          right: '20px',
-          width: '44px',
-          height: '44px',
-          borderRadius: '12px',
-          background: 'var(--card-bg)',
-          border: '1px solid var(--border-color)',
-          color: 'var(--text-main)',
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          boxShadow: 'var(--card-shadow)',
-          backdropFilter: 'blur(var(--glass-blur))',
-          zIndex: 1000,
-          transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
-        }}
-        title={t('切换主题')}
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" style={{ width: '20px', height: '20px' }}>
-          <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-        </svg>
-      </button>
+      {/* 右上角工具组：语言切换 + 主题切换 */}
+      <div style={{
+        position: 'fixed',
+        top: '20px',
+        right: '20px',
+        display: 'flex',
+        gap: '8px',
+        zIndex: 1000,
+      }}>
+        <button
+          onClick={toggleLanguage}
+          style={{
+            width: '44px',
+            height: '44px',
+            borderRadius: '12px',
+            background: 'var(--card-bg)',
+            border: '1px solid var(--border-color)',
+            color: 'var(--text-main)',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: 'var(--card-shadow)',
+            backdropFilter: 'blur(var(--glass-blur))',
+            transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+            fontSize: '13px',
+            fontWeight: 600,
+          }}
+          title={t('切换语言')}
+        >
+          {i18n.language === 'zh' ? 'EN' : '中'}
+        </button>
+        <button
+          onClick={toggleTheme}
+          style={{
+            width: '44px',
+            height: '44px',
+            borderRadius: '12px',
+            background: 'var(--card-bg)',
+            border: '1px solid var(--border-color)',
+            color: 'var(--text-main)',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: 'var(--card-shadow)',
+            backdropFilter: 'blur(var(--glass-blur))',
+            zIndex: 1000,
+            transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+          }}
+          title={t('切换主题')}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" style={{ width: '20px', height: '20px' }}>
+            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+          </svg>
+        </button>
+      </div>
 
       <div style={{
         background: 'var(--card-bg)',

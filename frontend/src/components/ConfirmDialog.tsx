@@ -7,7 +7,9 @@ export interface ConfirmState {
   title?: React.ReactNode;
   confirmText?: string;
   danger?: boolean;
-  onConfirm?: () => void | Promise<void>;
+  /** 敏感操作二次认证：渲染密码输入框，值传给 onConfirm(password) */
+  requirePassword?: boolean;
+  onConfirm?: (password?: string) => void | Promise<void>;
 }
 
 export interface ConfirmDialogProps {
@@ -30,11 +32,15 @@ export interface ConfirmDialogProps {
 export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): JSX.Element | null {
   const { t } = useTranslation();
   const [confirming, setConfirming] = useState(false);
+  const [password, setPassword] = useState('');
+  const [passwordError, setPasswordError] = useState('');
 
   // 打开时逐帧触发入场动画；Escape 关闭（键盘可达性，P0 验收）
   useEffect(() => {
     if (state) {
       setConfirming(false);
+      setPassword('');
+      setPasswordError('');
       const raf = requestAnimationFrame(() => {
         // 弹窗显隐由 state 驱动；动画由 App.css 的 modal-* 样式处理
       });
@@ -53,7 +59,7 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
 
   if (!state) return null;
 
-  const { message, title, confirmText, danger, onConfirm } = state;
+  const { message, title, confirmText, danger, requirePassword, onConfirm } = state;
   const confirmLabel = confirmText || t('确定');
   const titleLabel = title || t('确认');
 
@@ -64,10 +70,15 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
 
   const handleConfirm = async (): Promise<void> => {
     if (confirming) return;
-    const result = onConfirm?.();
+    if (requirePassword && !password.trim()) {
+      setPasswordError(t('请输入登录密码'));
+      return;
+    }
+    const result = requirePassword ? onConfirm?.(password) : onConfirm?.();
     // 异步确认：loading 中防重复点击/关闭，完成后再关弹窗
     if (result instanceof Promise) {
       setConfirming(true);
+      setPasswordError('');
       try {
         await result;
       } finally {
@@ -97,9 +108,31 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
         </div>
         <div className="modal-body" style={{ fontSize: 13.5, lineHeight: 1.6, color: 'var(--text-main)' }}>
           {message}
+          {requirePassword && (
+            <div className="form-group" style={{ marginTop: 12, marginBottom: 0 }}>
+              <label>{t('登录密码确认')}</label>
+              <input
+                className="form-input"
+                type="password"
+                autoFocus
+                autoComplete="current-password"
+                value={password}
+                disabled={confirming}
+                placeholder={t('请输入当前登录密码')}
+                onChange={(e) => { setPassword(e.target.value); setPasswordError(''); }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); void handleConfirm(); }
+                }}
+              />
+              {passwordError && (
+                <span className="form-hint" style={{ color: 'var(--danger-color)' }}>{passwordError}</span>
+              )}
+              <span className="form-hint" style={{ marginTop: 6 }}>{t('敏感操作需验证身份，密码不会存储')}</span>
+            </div>
+          )}
         </div>
         <div className="modal-footer">
-          <button className="btn btn-outline" onClick={handleClose} disabled={confirming} autoFocus>
+          <button className="btn btn-outline" onClick={handleClose} disabled={confirming}>
             {t('取消')}
           </button>
           <button

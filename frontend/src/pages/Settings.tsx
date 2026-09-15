@@ -4,7 +4,7 @@ import { Monitor, Sun, Moon } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Tabs } from '../components/ui';
+import { Tabs, SkeletonList } from '../components/ui';
 import { getThemeMode, applyTheme, type ThemeMode } from '../lib/theme';
 import Epay from './Epay';
 import Groups from './Groups';
@@ -22,6 +22,7 @@ interface LimitsForm {
   api_timeout_secs: string;
   max_retries: string;
   billing_flat_quota: string;
+  max_request_body_mb: string;
 }
 
 interface RateLimitConfig {
@@ -104,6 +105,7 @@ export default function Settings() {
     api_timeout_secs: '',
     max_retries: '',
     billing_flat_quota: '',
+    max_request_body_mb: '',
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -332,6 +334,7 @@ export default function Settings() {
         api_timeout_secs: data.api_timeout_secs ?? '',
         max_retries: data.max_retries ?? '',
         billing_flat_quota: data.billing_flat_quota != null ? String(data.billing_flat_quota) : '',
+        max_request_body_mb: data.max_request_body_mb != null ? String(data.max_request_body_mb) : '',
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -355,6 +358,7 @@ export default function Settings() {
       limits.api_timeout_secs,
       limits.max_retries,
       limits.billing_flat_quota,
+      limits.max_request_body_mb,
     ];
     if (numericFields.some((v) => v !== '' && Number.isNaN(Number(v)))) {
       setError(t('请输入有效数字'));
@@ -368,6 +372,7 @@ export default function Settings() {
     if (limits.api_timeout_secs !== '') payload.api_timeout_secs = Number(limits.api_timeout_secs);
     if (limits.max_retries !== '') payload.max_retries = Number(limits.max_retries);
     if (limits.billing_flat_quota !== '') payload.billing_flat_quota = Number(limits.billing_flat_quota);
+    if (limits.max_request_body_mb !== '') payload.max_request_body_mb = Number(limits.max_request_body_mb);
 
     // 阈值按原始输入（0-100 百分比）校验；payload.threshold 已除 100，不再用于范围比较
     if (payload.daily_limit < 0 || payload.monthly_limit < 0 || (limits.threshold !== '' && (Number(limits.threshold) < 0 || Number(limits.threshold) > 100))) {
@@ -386,6 +391,10 @@ export default function Settings() {
       setError(t('按次计费固定额度必须大于 0'));
       return;
     }
+    if (payload.max_request_body_mb != null && payload.max_request_body_mb <= 0) {
+      setError(t('请求体大小上限必须大于 0'));
+      return;
+    }
 
     setSaving(true);
     setError('');
@@ -399,7 +408,7 @@ export default function Settings() {
     }
   };
 
-  if (loading) return <div className="loading">{t('加载设置')}</div>;
+  if (loading) return <SkeletonList rows={6} />;
 
   return (
     <div>
@@ -473,6 +482,11 @@ export default function Settings() {
                   <label>{t('按次计费固定额度')}</label>
                   <input className="form-input" type="number" min="1" placeholder="2" value={limits.billing_flat_quota} onChange={(e) => handleChange('billing_flat_quota', e.target.value)} />
                   <span className="form-hint">{t('订阅计费模式为「按次」时，每次请求固定扣减的额度（全局统一，默认 2）。')}</span>
+                </div>
+                <div className="form-group">
+                  <label>{t('请求体大小上限 (MB)')}</label>
+                  <input className="form-input" type="number" min="1" placeholder="25" value={limits.max_request_body_mb} onChange={(e) => handleChange('max_request_body_mb', e.target.value)} />
+                  <span className="form-hint">{t('数据面接口单次请求体最大大小（含音频上传），超出返回 413，防止超大请求打爆内存。默认 25MB。')}</span>
                 </div>
                 <div className="settings-actions">
                   <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
@@ -560,7 +574,7 @@ export default function Settings() {
             </div>
             <div className="card-body">
               {rlLoading ? (
-                <div className="loading">{t('加载限流配置')}</div>
+                <SkeletonList rows={4} />
               ) : rlConfig ? (
                 <div className="settings-form">
                   <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
@@ -611,7 +625,7 @@ export default function Settings() {
             </div>
             <div className="card-body">
               {cacheLoading ? (
-                <div className="loading">{t('加载缓存统计')}</div>
+                <SkeletonList rows={3} />
               ) : cacheStats ? (
                 <div className="settings-form">
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16, marginBottom: 16 }}>
@@ -660,7 +674,7 @@ export default function Settings() {
             </div>
             <div className="card-body">
               {priceSyncLoading ? (
-                <div className="loading">{t('加载价格同步配置')}</div>
+                <SkeletonList rows={3} />
               ) : priceSyncConfig ? (
                 <div className="settings-form">
                   <div className="form-group">
@@ -721,7 +735,7 @@ export default function Settings() {
             </div>
             <div className="card-body">
               {exchangeRatesLoading ? (
-                <div className="loading">{t('加载汇率配置')}</div>
+                <SkeletonList rows={3} />
               ) : exchangeRates ? (
                 <div className="settings-form">
                   <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>

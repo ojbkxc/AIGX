@@ -441,7 +441,10 @@ pub async fn exec_tool(
         }
         "aigx_channel_delete" => {
             let id = require_arg(args, "channel_id")?;
-            admin::handle_delete_channel(State(state.clone()), headers.clone(), Path(id)).await
+            // Agent 路径免密码：直调 core（删除 + 审计），不走 HTTP handler 的
+            // 密码二次认证——高危工具已经审批矩阵人工确认（runner.rs），
+            // 审批本身即同等强度的身份复核；此处仍有 verify_admin 兜底。
+            admin::channels::delete_channel_core(state, headers, &id).await
         }
         "aigx_order_delete" => {
             let trade_no = require_arg(args, "trade_no")?;

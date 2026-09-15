@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import * as networkApi from '../api/network';
 import type { Metrics, NetworkStatusRaw } from '../types/network';
 import './SystemMonitorPanel.css';
-import { Signal, Activity, Server, Database, Cloud, Zap } from 'lucide-react';
+import { Signal, Activity, Server, Database, Zap } from 'lucide-react';
 
 /** 将后端网络层状态（snake_case）映射为面板指标 */
 function toMetrics(raw: NetworkStatusRaw): Metrics {
@@ -98,6 +99,7 @@ function StatusIndicator({ status }: StatusIndicatorProps) {
 }
 
 export default function SystemMonitorPanel() {
+  const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [metrics, setMetrics] = useState<Metrics | null>(null);
@@ -152,7 +154,7 @@ export default function SystemMonitorPanel() {
       <div className="panel-header">
         <div className="header-left">
           <Activity className="panel-icon" />
-          <h2>系统监控</h2>
+          <h2>{t('系统监控')}</h2>
         </div>
         <div className="header-right">
           <span className="current-time">{currentTime.toLocaleTimeString()}</span>
@@ -171,22 +173,22 @@ export default function SystemMonitorPanel() {
         <div className="metric-row">
           <div className="metric-row-half">
             <MetricCard
-              title="CPU 使用率"
+              title={t('CPU 使用率')}
               value={`${metrics.cpuUsage}%`}
               color={metrics.cpuUsage > 80 ? '#ef4444' : metrics.cpuUsage > 50 ? '#f59e0b' : '#22c55e'}
-              extra={`运行时间: ${formatDuration(metrics.uptime)}`}
+              extra={`${t('运行时间')}: ${formatDuration(metrics.uptime)}`}
             />
           </div>
           <div className="metric-row-middle">
             <MetricCard
-              title="内存使用率"
+              title={t('内存使用率')}
               value={`${metrics.memoryUsage}%`}
               color={metrics.memoryUsage > 80 ? '#ef4444' : metrics.memoryUsage > 50 ? '#f59e0b' : '#22c55e'}
             />
           </div>
           <div className="metric-row-half">
             <MetricCard
-              title="磁盘使用率"
+              title={t('磁盘使用率')}
               value={`${metrics.diskUsage}%`}
               color={metrics.diskUsage > 80 ? '#ef4444' : metrics.diskUsage > 60 ? '#f59e0b' : '#22c55e'}
             />
@@ -200,7 +202,7 @@ export default function SystemMonitorPanel() {
               <div className="metric-with-trend">
                 <Database className="metric-icon-bg" size={24} />
                 <div className="metric-details">
-                  <div className="metric-title">网络吞吐量</div>
+                  <div className="metric-title">{t('网络吞吐量')}</div>
                   <div className="metric-value-large">{formatThroughput(metrics.networkTx + metrics.networkRx)}</div>
                   <div className="metric-trend">
                     <TrendChart value={metrics.networkTx + metrics.networkRx} max={1000} label="Tx" />
@@ -211,10 +213,10 @@ export default function SystemMonitorPanel() {
             </div>
           </div>
           <div className="metric-row-other">
-            <MetricCard title="活动连接" value={metrics.activeConnections} extra="总连接数: -" color="#3b82f6" />
+            <MetricCard title={t('活动连接')} value={metrics.activeConnections} extra={t('连接池活跃连接数')} color="#3b82f6" />
           </div>
           <div className="metric-row-other">
-            <MetricCard title="吞吐量" value={metrics.throughput} extra="请求/秒" color="#2f6fed" />
+            <MetricCard title={t('吞吐量')} value={metrics.throughput} extra={t('累计请求数')} color="#2f6fed" />
           </div>
         </div>
 
@@ -222,14 +224,14 @@ export default function SystemMonitorPanel() {
         <div className="metric-section">
           <div className="section-title">
             <Zap className="section-icon" />
-            <h3>性能指标</h3>
+            <h3>{t('性能指标')}</h3>
           </div>
           <div className="performance-grid">
             {[
-              { title: "平均延迟", value: formatLatency(metrics.avgLatency), unit: "ms", color: "#22c55e" },
-              { title: "请求成功率", value: formatPercent(metrics.successRate), unit: "%", color: "#3b82f6" },
-              { title: "错误率", value: formatPercent(metrics.errorRate), unit: "%", color: "#ef4444" },
-              { title: "吞吐量", value: metrics.throughput, unit: "req/s", color: "#2f6fed" },
+              { title: t('平均延迟'), value: formatLatency(metrics.avgLatency), unit: "ms", color: "#22c55e" },
+              { title: t('请求成功率'), value: formatPercent(metrics.successRate), unit: "%", color: "#3b82f6" },
+              { title: t('错误率'), value: formatPercent(metrics.errorRate), unit: "%", color: "#ef4444" },
+              { title: t('吞吐量'), value: metrics.throughput, unit: t('累计请求数'), color: "#2f6fed" },
             ].map((metric, index) => (
               <div key={index} className="performance-item">
                 <div className="metric-bars">
@@ -246,84 +248,42 @@ export default function SystemMonitorPanel() {
           </div>
         </div>
 
-        {/* Nodes Status */}
+        {/* Nodes Status：单机部署无真实分布式节点，仅展示本机状态 */}
         <div className="metric-section">
           <div className="section-title">
             <Activity className="section-icon" />
-            <h3>分布式节点状态</h3>
+            <h3>{t('节点状态')}</h3>
           </div>
           <div className="nodes-grid">
             <div className="node-card">
               <div className="node-header">
                 <Server className="node-icon" size={20} />
-                <span className="node-name">主节点 (Leader)</span>
+                <span className="node-name">{t('本机节点')}</span>
                 <StatusIndicator status="online" />
               </div>
               <div className="node-metrics">
                 <div className="node-metric">
-                  <span className="metric-label">健康分数</span>
-                  <span className="metric-value">98</span>
+                  <span className="metric-label">{t('连接使用率')}</span>
+                  <span className="metric-value">{metrics.cpuUsage}%</span>
                 </div>
                 <div className="node-metric">
-                  <span className="metric-label">CPU</span>
-                  <span className="metric-value">42%</span>
+                  <span className="metric-label">{t('账号繁忙率')}</span>
+                  <span className="metric-value">{metrics.memoryUsage}%</span>
                 </div>
                 <div className="node-metric">
-                  <span className="metric-label">内存</span>
-                  <span className="metric-value">64%</span>
-                </div>
-              </div>
-            </div>
-            <div className="node-card">
-              <div className="node-header">
-                <Cloud className="node-icon" size={20} />
-                <span className="node-name">计算节点 A</span>
-                <StatusIndicator status="syncing" />
-              </div>
-              <div className="node-metrics">
-                <div className="node-metric">
-                  <span className="metric-label">健康分数</span>
-                  <span className="metric-value">95</span>
-                </div>
-                <div className="node-metric">
-                  <span className="metric-label">CPU</span>
-                  <span className="metric-value">28%</span>
-                </div>
-                <div className="node-metric">
-                  <span className="metric-label">内存</span>
-                  <span className="metric-value">52%</span>
-                </div>
-              </div>
-            </div>
-            <div className="node-card">
-              <div className="node-header">
-                <Cloud className="node-icon" size={20} />
-                <span className="node-name">计算节点 B</span>
-                <StatusIndicator status="online" />
-              </div>
-              <div className="node-metrics">
-                <div className="node-metric">
-                  <span className="metric-label">健康分数</span>
-                  <span className="metric-value">92</span>
-                </div>
-                <div className="node-metric">
-                  <span className="metric-label">CPU</span>
-                  <span className="metric-value">35%</span>
-                </div>
-                <div className="node-metric">
-                  <span className="metric-label">内存</span>
-                  <span className="metric-value">78%</span>
+                  <span className="metric-label">{t('会话活跃率')}</span>
+                  <span className="metric-value">{metrics.diskUsage}%</span>
                 </div>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Scaling Status */}
+        {/* Pool Load：账号池负载（真实数据，替换原"自动扩缩容"伪数据区块） */}
         <div className="metric-section">
           <div className="section-title">
             <Activity className="section-icon" />
-            <h3>自动扩缩容状态</h3>
+            <h3>{t('账号池负载')}</h3>
           </div>
           <div className="scaling-status">
             <div className="scaling-avatar" style={{ background: '#22c55e' }}>
@@ -331,21 +291,21 @@ export default function SystemMonitorPanel() {
             </div>
             <div className="scaling-content">
               <div className="scaling-title">
-                <span className="scaling-mode">智能扩缩容</span>
-                <span className={`scaling-status-badge primary`}>正常运转</span>
+                <span className="scaling-mode">{t('账号池')}</span>
+                <span className={`scaling-status-badge primary`}>{t('正常运转')}</span>
               </div>
               <div className="scaling-details">
                 <div className="scaling-stat">
-                  <span className="stat-label">扩缩容节点数</span>
-                  <span className="stat-value">3/10</span>
-                </div>
-                <div className="scaling-stat">
-                  <span className="stat-label">当前负载</span>
+                  <span className="stat-label">{t('当前负载')}</span>
                   <span className="stat-value primary">{metrics.currentLoad}%</span>
                 </div>
                 <div className="scaling-stat">
-                  <span className="stat-label">理想负载</span>
-                  <span className="stat-value">100%</span>
+                  <span className="stat-label">{t('平均延迟')}</span>
+                  <span className="stat-value">{formatLatency(metrics.avgLatency)}</span>
+                </div>
+                <div className="scaling-stat">
+                  <span className="stat-label">{t('请求成功率')}</span>
+                  <span className="stat-value">{formatPercent(metrics.successRate)}</span>
                 </div>
               </div>
             </div>
@@ -361,18 +321,18 @@ export default function SystemMonitorPanel() {
 
 function formatDuration(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined || isNaN(seconds)) {
-    return '0秒';
+    return '0s';
   }
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
 
   const parts = [];
-  if (days > 0) parts.push(`${days}天`);
-  if (hours > 0) parts.push(`${hours}小时`);
-  if (minutes > 0) parts.push(`${minutes}分`);
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
 
-  return parts.length > 0 ? parts.join(' ') : '0秒';
+  return parts.length > 0 ? parts.join(' ') : '0s';
 }
 
 function formatLatency(ms: number | null | undefined): string {

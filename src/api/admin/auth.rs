@@ -1617,3 +1617,15 @@ pub async fn handle_login_with_code(
         }
     })))
 }
+
+/// GET /api/public/geo-lang — 按客户端 IP 推荐界面语言（登录页默认语言用）。
+///
+/// - 无代理头（`trust_proxy_headers = false` 或直连）→ `lang: null`，前端回退 `navigator.language`
+/// - 中国大陆 IPv4 → `"zh"`；其他 IPv4 → `"en"`；IPv6 → `null`
+///
+/// 公开端点，无需鉴权；不泄露 IP 本身，只返回语言建议。
+pub async fn handle_geo_lang(headers: HeaderMap) -> Json<Value> {
+    let lang = extract_client_ip(&headers)
+        .and_then(|ip| crate::api::common::geo_language_for_ip(&ip).map(|s| s.to_string()));
+    Json(serde_json::json!({ "success": true, "data": { "lang": lang } }))
+}

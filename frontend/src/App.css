@@ -2164,6 +2164,15 @@ code {
   background: var(--hover-bg, rgba(127, 127, 127, 0.06));
 }
 
+/* 键盘导航高亮行（↑↓/j k 移动的 kbd-active，Keys/Channels/Logs 共用） */
+tr.kbd-active > td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent-color, #2f6fed);
+}
+
+tr.kbd-active {
+  background: var(--hover-bg, rgba(127, 127, 127, 0.06));
+}
+
 /* 用户列：头像圆点 + 邮箱 */
 .log-user-cell {
   display: inline-flex;

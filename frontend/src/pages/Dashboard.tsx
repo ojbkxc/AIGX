@@ -372,7 +372,7 @@ export default function Dashboard(): JSX.Element {
     return () => clearInterval(timer);
   }, []);
 
-  // 仅刷新实时指标，避免整页 loading 闪烁
+  // 管理员：仅刷新实时指标，避免整页 loading 闪烁
   const loadRealtimeOnly = async (): Promise<void> => {
     try {
       const [rtData, urData, chData] = await Promise.all([
@@ -392,9 +392,28 @@ export default function Dashboard(): JSX.Element {
     setRefreshing(true);
     setLoading(true);
     setError('');
+    const admin = isAdmin();
     try {
-      // 普通用户兼容：管理员统计端点（verify_admin）403 时回退到 /users/me 个人配额数据，
-      // 保证非管理员登录后仪表盘仍展示个人配额而非全空。
+      if (!admin) {
+        // 普通用户视图：只拉个人配额（/users/me 全员可用），
+        // 不再对 10 个 verify_admin 端点白打 403
+        try {
+          const me = await api.getMe();
+          const meData = ((me as { data?: unknown })?.data ?? me) as {
+            used_quota?: number;
+            quota?: number | null;
+          } | null;
+          if (meData) {
+            setLimits({
+              monthly_used: meData.used_quota ?? 0,
+              monthly_limit: meData.quota ?? null,
+            });
+          }
+        } catch {
+          // 静默：保持空态展示
+        }
+        return;
+      }
       const [
         usageData,
         tokenData,
@@ -428,26 +447,6 @@ export default function Dashboard(): JSX.Element {
       setChannelHealth((chData?.data ?? chData) as ChannelHealth[] | null);
       setRealtime((rtData?.data ?? rtData) as RealtimeStats | null);
       setCacheSavings((csData?.data ?? csData) as CacheSavings | null);
-
-      // 普通用户回退：无任何管理员数据时拉取个人配额展示
-      const hasAnyData = usageData || tokenData || limitsData;
-      if (!hasAnyData) {
-        try {
-          const me = await api.getMe();
-          const meData = ((me as { data?: unknown })?.data ?? me) as {
-            used_quota?: number;
-            quota?: number | null;
-          } | null;
-          if (meData) {
-            setLimits({
-              monthly_used: meData.used_quota ?? 0,
-              monthly_limit: meData.quota ?? null,
-            });
-          }
-        } catch {
-          // 静默：保持空态展示
-        }
-      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -491,6 +490,92 @@ export default function Dashboard(): JSX.Element {
   const rt = realtime || {};
   const cs = cacheSavings || {};
 
+  const admin = isAdmin();
+
+  // ── 普通用户个人视图：只渲染自己的配额/余额与个人工具箱 ──
+  if (!admin) {
+    return (
+      <div>
+        <div className="page-header">
+          <div>
+            <h1>{t('仪表盘')}</h1>
+            <p>{t('我的用量概览')}</p>
+          </div>
+          <button className="btn btn-outline btn-sm" onClick={loadData} disabled={refreshing} style={{ gap: '6px' }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+              style={refreshing ? { animation: 'spin 0.9s linear infinite' } : undefined}>
+              <polyline points="23 4 23 10 17 10" />
+              <polyline points="1 20 1 14 7 14" />
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+            </svg>
+            {refreshing ? t('刷新中…') : t('刷新')}
+          </button>
+        </div>
+
+        {error && <div className="error-message">{error}</div>}
+
+        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}>
+          <div className="stat-card">
+            <div className="stat-card-top">
+              <div className="stat-title">{t('总配额')}</div>
+              <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>💰</div>
+            </div>
+            <div className="stat-value" style={{ fontSize: '26px' }}>{monthlyLimit != null ? fmtLimit(monthlyLimit) : '∞'}</div>
+            <div className="stat-desc" style={{ fontSize: '11px' }}>{t('充值与赠送总额')}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-card-top">
+              <div className="stat-title">{t('已用配额')}</div>
+              <div className="stat-icon-badge" style={{ background: 'rgba(251, 146, 60, 0.15)', color: '#fb923c' }}>📈</div>
+            </div>
+            <div className="stat-value" style={{ fontSize: '26px' }}>{fmtLimit(monthlyUsed)}</div>
+            <div className="stat-desc" style={{ fontSize: '11px' }}>
+              {monthlyPct != null && <span>{monthlyPct.toFixed(1)}% {t('已消耗')}</span>}
+            </div>
+            {monthlyPct != null && (
+              <div style={{ height: 4, background: 'var(--bg-color)', borderRadius: 2, marginTop: 8, overflow: 'hidden' }}>
+                <div style={{
+                  width: `${Math.min(100, monthlyPct)}%`,
+                  height: '100%',
+                  background: monthlyPct > 80 ? 'rgb(239,68,68)' : monthlyPct > 50 ? 'rgb(234,179,8)' : 'var(--accent-color)',
+                  borderRadius: 2,
+                  transition: 'width 0.3s ease',
+                }} />
+              </div>
+            )}
+          </div>
+          <div className="stat-card">
+            <div className="stat-card-top">
+              <div className="stat-title">{t('剩余配额')}</div>
+              <div className="stat-icon-badge" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399' }}>✅</div>
+            </div>
+            <div className="stat-value" style={{ fontSize: '26px' }}>
+              {fmtLimit(Math.max(0, (monthlyLimit ?? 0) - monthlyUsed))}
+            </div>
+            <div className="stat-desc" style={{ fontSize: '11px' }}>
+              {monthlyLimit == null ? t('未设限额') : t('按当前配额计算')}
+            </div>
+          </div>
+        </div>
+
+        {/* 快捷操作（用户工具箱） */}
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-header">
+            <h2>{t('快捷操作')}</h2>
+          </div>
+          <div className="card-body quick-actions">
+            <Link to="/playground" className="btn btn-primary">{t('去 Playground 调试')}</Link>
+            <Link to="/keys" className="btn btn-outline">{t('管理 API 密钥')}</Link>
+            <Link to="/logs" className="btn btn-outline">{t('用量日志')}</Link>
+            <Link to="/wallet" className="btn btn-outline">{t('钱包充值')}</Link>
+            <Link to="/profile" className="btn btn-outline">{t('个人中心')}</Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── 管理员全局视图 ──
   return (
     <div>
       <div className="page-header">
@@ -764,28 +849,19 @@ export default function Dashboard(): JSX.Element {
         </div>
       </div>
 
-      {/* 快捷操作（按角色渲染：普通用户只看到自己的工具箱） */}
+      {/* 快捷操作（管理员工具箱；普通用户视图已提前 return） */}
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-header">
           <h2>{t('快捷操作')}</h2>
         </div>
-        {isAdmin() ? (
-          <div className="card-body quick-actions">
-            <Link to="/channels" className="btn btn-primary">{t('管理渠道')}</Link>
-            <Link to="/keys" className="btn btn-outline">{t('管理 API 密钥')}</Link>
-            <Link to="/mappings" className="btn btn-outline">{t('配置模型映射')}</Link>
-            <Link to="/logs" className="btn btn-outline">{t('查看日志')}</Link>
-            <Link to="/redemptions" className="btn btn-outline">{t('兑换码管理')}</Link>
-            <Link to="/settings" className="btn btn-outline">{t('调整限额')}</Link>
-          </div>
-        ) : (
-          <div className="card-body quick-actions">
-            <Link to="/playground" className="btn btn-primary">{t('去 Playground 调试')}</Link>
-            <Link to="/keys" className="btn btn-outline">{t('管理 API 密钥')}</Link>
-            <Link to="/wallet" className="btn btn-outline">{t('钱包充值')}</Link>
-            <Link to="/profile" className="btn btn-outline">{t('个人中心')}</Link>
-          </div>
-        )}
+        <div className="card-body quick-actions">
+          <Link to="/channels" className="btn btn-primary">{t('管理渠道')}</Link>
+          <Link to="/keys" className="btn btn-outline">{t('管理 API 密钥')}</Link>
+          <Link to="/mappings" className="btn btn-outline">{t('配置模型映射')}</Link>
+          <Link to="/logs" className="btn btn-outline">{t('查看日志')}</Link>
+          <Link to="/redemptions" className="btn btn-outline">{t('兑换码管理')}</Link>
+          <Link to="/settings" className="btn btn-outline">{t('调整限额')}</Link>
+        </div>
       </div>
     </div>
   );

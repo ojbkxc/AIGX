@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, Loading, EmptyState } from '../components/ui';
+import { Button, Card, EmptyState, SkeletonTable, Pagination } from '../components/ui';
 
 interface GenForm {
   count: number;
@@ -230,7 +230,7 @@ export default function Redemptions(): JSX.Element {
 
       <Card title={`${t('兑换码列表')} (${total})`}>
         {loading ? (
-          <Loading text={t('加载中')} />
+          <SkeletonTable columns={8} rows={6} />
         ) : items.length === 0 ? (
           <EmptyState message={t('暂无兑换码')} />
         ) : (
@@ -277,13 +277,11 @@ export default function Redemptions(): JSX.Element {
           </div>
         )}
 
-        {totalPages > 1 && (
-          <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 16, alignItems: 'center' }}>
-            <button className="btn btn-outline btn-sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>{t('上一页')}</button>
-            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>{page} / {totalPages}</span>
-            <button className="btn btn-outline btn-sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>{t('下一页')}</button>
-          </div>
-        )}
+        <Pagination
+          page={page}
+          totalPages={Math.max(1, totalPages)}
+          onChange={setPage}
+        />
 
         <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
       </Card>

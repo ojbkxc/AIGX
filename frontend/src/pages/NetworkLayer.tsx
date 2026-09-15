@@ -11,6 +11,7 @@ import {
 } from '../api/network';
 import type { NetworkStatusRaw, NetworkAccount } from '../types/network';
 import { useToast } from '../components/Toast';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import './NetworkLayer.css';
 
 /** 网络层持久化配置（与后端 NetworkLayerConfig 对齐） */
@@ -590,40 +591,17 @@ export default function NetworkLayer(): JSX.Element {
           </>
         )}
 
-      {/* Restart Confirmation Dialog */}
-      {showRestartConfirm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-gray-900 border border-gray-700 rounded-2xl p-6 max-w-md w-full">
-            <div className="text-center">
-              <div className="w-16 h-16 mx-auto mb-4 bg-red-500/20 rounded-full flex items-center justify-center">
-                <svg className="w-8 h-8 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                </svg>
-              </div>
-              <h3 className="text-xl font-semibold text-white mb-2">{t('确认重启网络层')}</h3>
-              <p className="text-gray-400 mb-6">
-                {t('重启后将重置所有渠道的断路器和健康追踪状态（不影响在途请求）。确定要继续吗？')}
-              </p>
-              <div className="flex gap-3 justify-center">
-                <button
-                  onClick={() => setShowRestartConfirm(false)}
-                  disabled={restartPending}
-                  className="px-6 py-2.5 bg-gray-700 text-white rounded-lg hover:bg-gray-600 transition font-medium text-sm"
-                >
-                  {t('取消')}
-                </button>
-                <button
-                  onClick={handleRestart}
-                  disabled={restartPending}
-                  className="px-6 py-2.5 bg-red-500 text-white rounded-lg hover:bg-red-600 transition font-medium text-sm"
-                >
-                  {restartPending ? t('重启中...') : t('确认重启')}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Restart Confirmation Dialog（统一 ConfirmDialog，替换自造 Tailwind 弹窗） */}
+      <ConfirmDialog
+        state={showRestartConfirm ? {
+          title: t('确认重启网络层'),
+          message: t('重启后将重置所有渠道的断路器和健康追踪状态（不影响在途请求）。确定要继续吗？'),
+          confirmText: t('确认重启'),
+          danger: true,
+          onConfirm: handleRestart,
+        } as ConfirmState : null}
+        onClose={() => setShowRestartConfirm(false)}
+      />
     </div>
   );
 }

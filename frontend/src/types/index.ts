@@ -313,6 +313,8 @@ export interface ChannelItem {
   type?: string;
   base_url?: string;
   models?: string[];
+  /// 上游 /models 自动发现并缓存的模型快照（"留空=全部"渠道调试下拉用）
+  discovered_models?: string[];
   status?: string;
   enabled?: boolean;
   priority?: number;

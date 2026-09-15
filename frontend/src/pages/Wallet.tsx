@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, Input, Loading, EmptyState } from '../components/ui';
+import { Button, Card, Input, EmptyState, SkeletonCards, SkeletonTable } from '../components/ui';
 
 interface WalletUser {
   email?: string;
@@ -331,7 +331,18 @@ export default function Wallet(): JSX.Element {
     }
   };
 
-  if (loading) return <Loading text={t('加载钱包')} />;
+  if (loading) {
+    return (
+      <div>
+        <div className="page-header">
+          <h1>{t('钱包充值')}</h1>
+          <p>{t('通过易支付为账户充值配额')}</p>
+        </div>
+        <SkeletonCards count={3} />
+        <SkeletonTable columns={6} rows={6} />
+      </div>
+    );
+  }
 
   const remaining = me ? (me.quota || 0) - (me.used_quota || 0) : 0;
   const methods = (epay && epay.pay_methods && epay.pay_methods.length > 0) ? epay.pay_methods : ['alipay', 'wxpay'];

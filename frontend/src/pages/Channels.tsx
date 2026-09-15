@@ -6,6 +6,7 @@ import {
   DollarSign, Cloud, Sparkles, Gem, BrainCircuit,
 } from 'lucide-react';
 import { api } from '../api';
+import { useListKeyboard } from '../hooks/useListKeyboard';
 import type { ChannelItem as ApiChannelItem } from '../types';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
@@ -27,6 +28,7 @@ interface ChannelItem {
   weight: number;
   status: string;
   models?: string[];
+  discovered_models?: string[];
   account_id?: string;
   model_mapping?: Record<string, string>;
   cost_pricing?: Record<string, { input_price?: number; output_price?: number; price_type?: string }>;
@@ -111,6 +113,8 @@ export default function Channels(): JSX.Element {
   const [form, setForm] = useState<ChannelFormState>(defaultForm());
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState<string | number | null>(null);
+  // 全部测试进行中标记（批量测试期间禁用菜单入口，结束后单条汇总提示）
+  const [testingAll, setTestingAll] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
   // API Key 输入明文切换（防输错无法核对）
   const [showApiKey, setShowApiKey] = useState(false);
@@ -230,6 +234,13 @@ export default function Channels(): JSX.Element {
   // 总页数（服务端 total；旧后端无 total 时退化用当前页条数）
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
+  // 键盘导航（cc-haha 列表键盘体系）：/ 聚焦搜索、↑↓/j k 行高亮、Enter 打开编辑
+  const { searchRef, rowRefs, activeIndex, setActiveIndex } = useListKeyboard(
+    filtered.length,
+    (i) => { if (filtered[i]) openEdit(filtered[i]); },
+    !loading && !showModal && !confirmState && !showChat && !moreOpen && rowMenuId === null,
+  );
+
   // 全选/反选（仅当前过滤结果）
   const allSelected = filtered.length > 0 && filtered.every((ch) => selected.has(ch.id));
   const toggleAll = (): void => {
@@ -284,9 +295,10 @@ export default function Channels(): JSX.Element {
       message: t('确定删除选中的 {{count}} 个渠道？此操作不可撤销。', { count: ids.length }),
       confirmText: t('删除'),
       danger: true,
-      onConfirm: async () => {
+      requirePassword: true,
+      onConfirm: async (password) => {
         for (const id of ids) {
-          await api.deleteChannel(id).catch(() => {});
+          await api.deleteChannel(id, password).catch(() => {});
         }
         addToast(`${t('已删除')} ${ids.length} ${t('个渠道')}`);
         setSelected(new Set());
@@ -296,11 +308,20 @@ export default function Channels(): JSX.Element {
   };
 
   // "更多"菜单项
+  // 全部测试：并发跑完再单条汇总（避免 N 条 Toast 刷屏，cc-haha PromptInputQueuedCommands 聚合模式）
   const handleTestAll = async (): Promise<void> => {
     setMoreOpen(false);
-    for (const ch of channels) {
-      handleTest(ch.id);
-    }
+    if (!channels.length) return;
+    setTestingAll(true);
+    const results = await Promise.all(channels.map((ch) =>
+      api.testChannel(ch.id)
+        .then((res) => ({ ok: !!(res as { data?: { success?: boolean } }).data?.success, name: ch.name }))
+        .catch(() => ({ ok: false, name: ch.name })),
+    ));
+    const okCount = results.filter((r) => r.ok).length;
+    addToast(t('测试完成：{{ok}}/{{total}} 个渠道连通', { ok: okCount, total: results.length }), okCount === results.length ? 'success' : 'warning');
+    setTestingAll(false);
+    loadChannels();
   };
   const handleDeleteAllDisabled = (): void => {
     setMoreOpen(false);
@@ -314,9 +335,10 @@ export default function Channels(): JSX.Element {
       message: t('确定删除全部 {{count}} 个已禁用渠道？', { count: disabled.length }),
       confirmText: t('删除'),
       danger: true,
-      onConfirm: async () => {
+      requirePassword: true,
+      onConfirm: async (password) => {
         for (const ch of disabled) {
-          await api.deleteChannel(ch.id).catch(() => {});
+          await api.deleteChannel(ch.id, password).catch(() => {});
         }
         addToast(`${t('已删除')} ${disabled.length} ${t('个渠道')}`);
         loadChannels();
@@ -340,6 +362,7 @@ export default function Channels(): JSX.Element {
         weight: ch.weight ?? 1,
         status: ch.status || (ch.enabled ? 'enabled' : 'disabled'),
         models: ch.models,
+        discovered_models: ch.discovered_models,
         model_mapping: ch.model_mapping,
         cost_pricing: ch.cost_pricing || {},
         last_used_at: typeof ch.last_used_at === 'number' ? ch.last_used_at : null,
@@ -561,10 +584,11 @@ export default function Channels(): JSX.Element {
       message: t('确定删除此渠道？'),
       confirmText: t('删除'),
       danger: true,
-      onConfirm: async () => {
+      requirePassword: true,
+      onConfirm: async (password) => {
         setError('');
         try {
-          await api.deleteChannel(id);
+          await api.deleteChannel(id, password);
           addToast(t('渠道已删除'));
           loadChannels();
         } catch (err) {
@@ -663,6 +687,7 @@ export default function Channels(): JSX.Element {
             <div className="channels-search">
               <Search size={14} />
               <input
+                ref={searchRef}
                 placeholder={t('搜索渠道')}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
@@ -682,7 +707,7 @@ export default function Channels(): JSX.Element {
               </Button>
               {moreOpen && (
                 <div className="channels-more-menu">
-                  <button type="button" onClick={handleTestAll}>{t('测试所有渠道')}</button>
+                  <button type="button" onClick={handleTestAll} disabled={testingAll}>{testingAll ? t('测试中…') : t('测试所有渠道')}</button>
                   <button type="button" onClick={handleDeleteAllDisabled}>{t('删除所有已禁用渠道')}</button>
                 </div>
               )}
@@ -737,7 +762,7 @@ export default function Channels(): JSX.Element {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((ch) => {
+                  {filtered.map((ch, i) => {
                     const isEditingPriority = editingField?.id === ch.id && editingField?.field === 'priority';
                     const isEditingWeight = editingField?.id === ch.id && editingField?.field === 'weight';
                     const mappingEntries = Object.entries(ch.model_mapping || {});
@@ -745,7 +770,12 @@ export default function Channels(): JSX.Element {
                     const models = ch.models || [];
 
                     return (
-                      <tr key={ch.id} className={selected.has(ch.id) ? 'selected' : ''}>
+                      <tr
+                        key={ch.id}
+                        ref={(el) => { rowRefs.current[i] = el; }}
+                        className={`${selected.has(ch.id) ? 'selected' : ''} ${activeIndex === i ? 'kbd-active' : ''}`}
+                        onMouseEnter={() => setActiveIndex(i)}
+                      >
                         <td className="col-select">
                           <input
                             type="checkbox"
@@ -1180,7 +1210,10 @@ export default function Channels(): JSX.Element {
             <div className="modal-body chat-modal-body">
               <ChatDebugger
                 channelId={String(chatChannel.id)}
-                channelModels={chatChannel.models || []}
+                channelModels={Array.from(new Set([
+                  ...(chatChannel.models || []),
+                  ...(chatChannel.discovered_models || []),
+                ]))}
                 initialProtocol={chatChannel.channel_type === 'anthropic' ? 'anthropic' : 'openai'}
                 /* 无密钥渠道：浏览器直连上游，请求从本机发出、不经服务器 IP */
                 directUpstream={!chatChannel.api_key ? { base_url: chatChannel.base_url, channel_type: chatChannel.channel_type } : undefined}

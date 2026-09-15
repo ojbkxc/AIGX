@@ -33,6 +33,25 @@ const initOptions: InitOptions = {
 
 void i18n.use(initReactI18next).init(initOptions);
 
+// ── 按 IP 自动选择语言 ──
+// 用户未手动选过语言（localStorage 无记录）时，请求后端 geo-lang 端点：
+// - 中国大陆 IP → zh，其他 IP → en
+// - 端点返回 null（无代理头/IPv6）或请求失败 → 保持 navigator.language 推断结果
+// - 不写 localStorage：只有用户手动切换（setLanguage）才持久化
+if (!localStorage.getItem('i18n_lang')) {
+  fetch('/api/public/geo-lang')
+    .then((res) => (res.ok ? res.json() : null))
+    .then((body) => {
+      const lang = body?.data?.lang ?? body?.lang;
+      if (lang === 'zh' || lang === 'en') {
+        void i18n.changeLanguage(lang);
+      }
+    })
+    .catch(() => {
+      /* 网络失败静默回退，保持现有语言 */
+    });
+}
+
 export default i18n;
 
 /**

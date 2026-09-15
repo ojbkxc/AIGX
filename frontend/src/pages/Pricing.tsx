@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Pagination } from '../components/ui';
+import { Pagination, SkeletonTable, SkeletonList } from '../components/ui';
 import './Pricing.css';
 
 /** 客户端分页每页条数（价格目录 426+ 条，全量渲染过长） */
@@ -405,7 +405,7 @@ export default function Pricing() {
             </div>
             <div className="card-body">
               {priceLoading ? (
-                <div className="loading">{t('加载定价数据')}</div>
+                <SkeletonTable columns={6} rows={8} />
               ) : (
                 <>
                   {/* 新增/编辑定价表单（置顶：编辑时无需滚到页底） */}
@@ -574,7 +574,7 @@ export default function Pricing() {
             </div>
             <div className="card-body">
               {ratioLoading ? (
-                <div className="loading">{t('加载定价数据')}</div>
+                <SkeletonList rows={3} />
               ) : (
                 <>
                   <p className="ratio-hint">

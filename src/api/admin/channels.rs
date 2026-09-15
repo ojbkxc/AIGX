@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::{error_response, verify_admin, verify_user};
+use super::common::{admin_id_from_session, error_response, record_audit, verify_admin, verify_user};
 use super::legacy::fetch_upstream_models;
 
 // 这里需要引用主 crate 的 Channel 和相关类型
@@ -168,6 +168,7 @@ pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
         "weight": ch.weight,
         "status": ch.status,
         "models": ch.models,
+        "discovered_models": ch.discovered_models,
         "model_mapping": ch.model_mapping,
         "cost_pricing": ch.cost_pricing,
         "account_id": ch.account_id,
@@ -457,19 +458,96 @@ pub async fn handle_update_channel(
     }
 }
 
-/// 删除渠道
+/// 删除渠道请求体（敏感操作二次认证）
+///
+/// `password`：当前管理员登录密码。HTTP 前端直调必须携带且校验通过。
+#[derive(Debug, Deserialize)]
+pub struct DeleteChannelRequest {
+    pub password: Option<String>,
+}
+
+/// 删除渠道（HTTP 入口：会话校验 + 密码二次认证）
+///
+/// 管理员敏感操作二次认证：HTTP 请求必须携带当前管理员登录密码，
+/// 校验失败返回 403（防会话劫持/误操作直接删除生产渠道）。
+/// Agent 工具路径不经过本 handler，直调 [`delete_channel_core`]。
 pub async fn handle_delete_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body: Option<Json<DeleteChannelRequest>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
-    match state.channel_store.remove(&id) {
-        Ok(_) => Ok(Json(json!({ "success": true, "data": null }))),
+    verify_admin(&state, &headers).await?;
+    verify_admin_password(&state, &headers, body.and_then(|Json(b)| b.password)).await?;
+    delete_channel_core(&state, &headers, &id).await
+}
+
+/// 删除渠道核心逻辑（HTTP 与 Agent 工具共用）。
+///
+/// Agent 路径免密码：高危工具已经审批矩阵人工确认（runner.rs），
+/// 审批本身即同等强度的身份复核；HTTP 路径在 handler 层已验密。
+/// 调用方需自行完成身份校验（HTTP = verify_admin + 密码；Agent = verify_admin）。
+pub async fn delete_channel_core(
+    state: &AppState,
+    headers: &HeaderMap,
+    id: &str,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let admin_id = admin_id_from_session(state, headers).await;
+    let before = state.channel_store.get(id).map(|ch| json!({
+        "name": ch.name,
+        "status": ch.status,
+        "models_count": ch.models.len(),
+    }));
+    match state.channel_store.remove(id) {
+        Ok(_) => {
+            record_audit(
+                state,
+                &admin_id,
+                "delete_channel",
+                &format!("id={id}"),
+                before,
+                None,
+            );
+            Ok(Json(json!({ "success": true, "data": null })))
+        }
         Err(e) => Err(error_response(
             &format!("Failed to delete channel: {e}"),
             StatusCode::INTERNAL_SERVER_ERROR,
         )),
+    }
+}
+
+/// 管理员密码二次认证：HTTP 路径必须验密，Agent 进程内直调（password=None）
+/// 跳过（审批矩阵已人工确认）。密码错误返回 403 并记安全日志。
+async fn verify_admin_password(
+    state: &AppState,
+    headers: &HeaderMap,
+    password: Option<String>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(password) = password.filter(|p| !p.is_empty()) else {
+        return Err(error_response(
+            "删除渠道需要输入登录密码进行认证",
+            StatusCode::BAD_REQUEST,
+        ));
+    };
+    let email = admin_id_from_session(state, headers).await;
+    let user = state.user_store.get_by_email(&email).ok_or_else(|| {
+        error_response("Session user not found", StatusCode::UNAUTHORIZED)
+    })?;
+    if crate::user::verify_password(&password, &user.password) {
+        Ok(())
+    } else {
+        state.log_store.record_security(
+            crate::log::SecurityEvent::new(
+                crate::log::SecurityEventType::AuthFailure,
+                "warning",
+                format!("渠道删除密码认证失败（邮箱: {email}）"),
+            ),
+        );
+        Err(error_response(
+            "密码错误，无法执行删除操作",
+            StatusCode::FORBIDDEN,
+        ))
     }
 }
 
