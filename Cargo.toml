@@ -135,3 +135,14 @@ regex = "1"
 tempfile = "3"
 # 测试用时间冻结（cron 调度器的时间推进测试）
 tokio = { workspace = true, features = ["full", "test-util"] }
+
+# ── Release 构建加固 ────────────────────────────────────────────────
+# LTO：跨 crate 死代码消除 + 内联，减小体积并抹掉部分符号信息面。
+# 用 thin 而非 fat：体积/安全收益接近，但链接内存与耗时远低于 fat，
+# 在 CI 多平台矩阵 + postgres 原生依赖下更稳。
+# strip=true：让 rustc 在链接后直接剥离符号（等价外部 strip，但跨平台
+# 一致，不依赖 CI runner 上的 binutils 与交叉 strip 工具）。
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1

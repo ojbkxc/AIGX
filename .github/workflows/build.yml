@@ -70,11 +70,6 @@ jobs:
           cargo build --release --features "sqlite-kv,postgres"
           mv target/release/aigx build/2024-Linux-x86_64/aigx
 
-      - name: Strip binary
-        run: |
-          strip build/2024-Linux-x86_64/aigx
-          file build/2024-Linux-x86_64/aigx
-
       - name: Upload AMD64 artifact
         uses: actions/upload-artifact@v4
         with:
@@ -110,9 +105,6 @@ jobs:
       - name: Add ARM64 target
         run: rustup target add aarch64-unknown-linux-gnu
 
-      - name: Install aarch64 strip
-        run: sudo apt-get install -y binutils-aarch64-linux-gnu
-
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
@@ -129,11 +121,6 @@ jobs:
           cargo build --release --features "sqlite-kv,postgres" --target aarch64-unknown-linux-gnu
           mkdir -p build/2024-Linux-arm64
           mv target/aarch64-unknown-linux-gnu/release/aigx build/2024-Linux-arm64/aigx
-
-      - name: Strip binary
-        run: |
-          aarch64-linux-gnu-strip build/2024-Linux-arm64/aigx
-          file build/2024-Linux-arm64/aigx
 
       - name: Upload ARM64 artifact
         uses: actions/upload-artifact@v4
@@ -216,7 +203,6 @@ jobs:
           cargo build --release --target x86_64-apple-darwin
           mkdir -p build/2024-macOS-x86_64
           cp target/x86_64-apple-darwin/release/aigx build/2024-macOS-x86_64/aigx
-          strip build/2024-macOS-x86_64/aigx
 
       - name: Upload macOS Intel artifact
         uses: actions/upload-artifact@v4
@@ -257,7 +243,6 @@ jobs:
           mkdir -p build/2024-macOS-arm64
           cargo build --release --target aarch64-apple-darwin
           cp target/aarch64-apple-darwin/release/aigx build/2024-macOS-arm64/aigx
-          strip build/2024-macOS-arm64/aigx
 
       - name: Upload macOS ARM64 artifact
         uses: actions/upload-artifact@v4
