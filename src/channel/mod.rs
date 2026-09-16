@@ -183,6 +183,19 @@ impl Channel {
         self.models.iter().any(|m| m == model)
     }
 
+    /// 调试/Playground 自动选路口径。
+    ///
+    /// 与 [`Self::supports_model`] 的差别：`models` 留空（= 全部）的渠道，
+    /// 若已有 `discovered_models` 发现快照，则按快照收窄——避免高优先级的
+    /// "全声明" 渠道在调试/Playground 自动选路时抢走它上游实际不提供的模型。
+    /// 快照也为空（尚未拉取过模型列表）时保持全支持兜底。
+    pub fn auto_pick_supports(&self, model: &str) -> bool {
+        if !self.models.is_empty() {
+            return self.models.iter().any(|m| m == model);
+        }
+        self.discovered_models.is_empty() || self.discovered_models.iter().any(|m| m == model)
+    }
+
     /// 对外暴露的有效模型清单（列表聚合 / 声明校验共用口径）。
     ///
     /// - `models` 非空 → 白名单，仅暴露 `models`

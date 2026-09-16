@@ -231,9 +231,11 @@ pub async fn handle_playground_chat(
         let picked = if requested_model.is_empty() {
             enabled.first().cloned()
         } else {
+            // models 留空（=全部）的渠道按发现快照收窄（auto_pick_supports），
+            // 防止高优先级“全声明”渠道抢走上游实际不提供的模型
             enabled
                 .iter()
-                .filter(|c| c.supports_model(&requested_model))
+                .filter(|c| c.auto_pick_supports(&requested_model))
                 .max_by_key(|c| c.priority)
                 .cloned()
                 .or_else(|| {
@@ -508,9 +510,11 @@ pub async fn handle_playground_images(
         let picked = if requested_model.is_empty() {
             enabled.first().cloned()
         } else {
+            // models 留空（=全部）的渠道按发现快照收窄（auto_pick_supports），
+            // 防止高优先级“全声明”渠道抢走上游实际不提供的模型
             enabled
                 .iter()
-                .filter(|c| c.supports_model(&requested_model))
+                .filter(|c| c.auto_pick_supports(&requested_model))
                 .max_by_key(|c| c.priority)
                 .cloned()
                 .or_else(|| {
@@ -659,6 +663,8 @@ pub async fn handle_playground_tts(
 
     // 按 model 路由到声明该模型的启用渠道（与 playground/chat 同口径）
     let requested_model = body.model.trim().to_string();
+    // models 留空（=全部）的渠道按发现快照收窄（auto_pick_supports），
+    // 防止高优先级“全声明”渠道抢走上游实际不提供的模型
     let enabled: Vec<crate::channel::Channel> = state
         .channel_store
         .list()
@@ -670,7 +676,7 @@ pub async fn handle_playground_tts(
     } else {
         enabled
             .iter()
-            .filter(|c| c.supports_model(&requested_model))
+            .filter(|c| c.auto_pick_supports(&requested_model))
             .max_by_key(|c| c.priority)
             .cloned()
             .or_else(|| {
@@ -858,6 +864,8 @@ pub async fn handle_playground_transcriptions(
 
     // 按上传的 model 路由到声明该模型的启用渠道（与 playground/chat 同口径）
     let requested_model = model.trim().to_string();
+    // models 留空（=全部）的渠道按发现快照收窄（auto_pick_supports），
+    // 防止高优先级“全声明”渠道抢走上游实际不提供的模型
     let enabled: Vec<crate::channel::Channel> = state
         .channel_store
         .list()
@@ -869,7 +877,7 @@ pub async fn handle_playground_transcriptions(
     } else {
         enabled
             .iter()
-            .filter(|c| c.supports_model(&requested_model))
+            .filter(|c| c.auto_pick_supports(&requested_model))
             .max_by_key(|c| c.priority)
             .cloned()
             .or_else(|| {

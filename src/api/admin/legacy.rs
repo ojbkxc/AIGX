@@ -2873,10 +2873,12 @@ pub async fn handle_channel_chat_test(
         } else {
             // 与数据面 /v1/chat/completions 同口径（select_for_model 的过滤子集，
             // 不含冷却/断路器——调试入口要能看到被冷却的渠道，方便诊断）：
-            // 先找声明了该模型的渠道（models 非空才算声明；models 空 = 全部）
+            // 先找声明了该模型的渠道；models 留空的渠道若已有发现快照，
+            // 按快照收窄（auto_pick_supports），防止高优先级“全声明”渠道抢走
+            // 上游实际不提供的模型（日志因此记到与请求不符的渠道）。
             enabled
                 .iter()
-                .filter(|c| c.supports_model(&requested_model))
+                .filter(|c| c.auto_pick_supports(&requested_model))
                 .max_by_key(|c| c.priority)
                 .cloned()
                 .or_else(|| {
