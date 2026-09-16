@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { RequestLogItem, AuditLogItem } from '../pages/Logs';
+import { sourceLabel } from '../pages/Logs';
 
 /** 请求日志详情弹窗：全字段结构化展示（参照 new-api DetailsDialog） */
 export function RequestLogDetail({ log, admin, onClose }: {
@@ -16,10 +17,12 @@ export function RequestLogDetail({ log, admin, onClose }: {
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  const src = sourceLabel(log.key_id);
   const rows: Array<{ label: string; value: string; mono?: boolean }> = [
     { label: t('请求 ID'), value: String(log.id), mono: true },
     { label: t('时间'), value: log.created_at ? new Date(log.created_at * 1000).toLocaleString() : '—' },
     ...(admin ? [{ label: t('用户'), value: log.user_email || log.user_id || '—' }] : []),
+    ...(admin && src ? [{ label: t('来源'), value: src }] : []),
     { label: t('模型（映射后）'), value: log.model || '—', mono: true },
     ...(admin ? [{ label: t('原始模型名'), value: log.origin_model || '—', mono: true }] : []),
     ...(admin ? [{ label: t('渠道'), value: log.channel_name ? `${log.channel_name}${log.channel_id ? ` (#${log.channel_id})` : ''}` : (log.channel_id ? `#${log.channel_id}` : '—') }] : []),
@@ -32,7 +35,7 @@ export function RequestLogDetail({ log, admin, onClose }: {
     ] : []),
     { label: t('延迟'), value: `${log.latency_ms ?? 0}ms` },
     { label: t('状态码'), value: String(log.status_code ?? '—') },
-    ...(admin && log.key_id ? [{ label: 'API Key ID', value: log.key_id, mono: true }] : []),
+    ...(admin && log.key_id && !src ? [{ label: 'API Key ID', value: log.key_id, mono: true }] : []),
     ...(admin && log.ip ? [{ label: 'IP', value: log.ip, mono: true }] : []),
   ];
 

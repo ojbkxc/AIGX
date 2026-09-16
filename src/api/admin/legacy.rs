@@ -3004,6 +3004,16 @@ pub async fn handle_channel_chat_test(
                 let status = resp.status();
                 if !status.is_success() {
                     let text = resp.text().await.unwrap_or_default();
+                    record_chat_test_failure(
+                        &state,
+                        &user,
+                        &ch.id,
+                        &ch.name,
+                        &model,
+                        status.as_u16(),
+                        &format!("Upstream HTTP {status}: {text}"),
+                        request_start.elapsed().as_millis() as u64,
+                    );
                     return error_response(
                         &format!("Upstream HTTP {status}: {text}"),
                         StatusCode::BAD_GATEWAY,
@@ -3065,16 +3075,40 @@ pub async fn handle_channel_chat_test(
                             }))
                             .into_response()
                         }
-                        Err(e) => error_response(
-                            &format!("Upstream returned non-JSON: {e}"),
-                            StatusCode::BAD_GATEWAY,
-                        )
-                        .into_response(),
+                        Err(e) => {
+                            record_chat_test_failure(
+                                &state,
+                                &user,
+                                &ch.id,
+                                &ch.name,
+                                &model,
+                                502,
+                                &format!("Upstream returned non-JSON: {e}"),
+                                request_start.elapsed().as_millis() as u64,
+                            );
+                            error_response(
+                                &format!("Upstream returned non-JSON: {e}"),
+                                StatusCode::BAD_GATEWAY,
+                            )
+                            .into_response()
+                        }
                     }
                 }
             }
-            Err(e) => error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
-                .into_response(),
+            Err(e) => {
+                record_chat_test_failure(
+                    &state,
+                    &user,
+                    &ch.id,
+                    &ch.name,
+                    &model,
+                    502,
+                    &format!("Request failed: {e}"),
+                    request_start.elapsed().as_millis() as u64,
+                );
+                error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
+                    .into_response()
+            }
         };
     }
 
@@ -3098,6 +3132,16 @@ pub async fn handle_channel_chat_test(
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
+                record_chat_test_failure(
+                    &state,
+                    &user,
+                    &ch.id,
+                    &ch.name,
+                    &model,
+                    status.as_u16(),
+                    &format!("Upstream HTTP {status}: {text}"),
+                    request_start.elapsed().as_millis() as u64,
+                );
                 return error_response(
                     &format!("Upstream HTTP {status}: {text}"),
                     StatusCode::BAD_GATEWAY,
@@ -3164,15 +3208,37 @@ pub async fn handle_channel_chat_test(
                         }))
                         .into_response()
                     }
-                    Err(e) => error_response(
-                        &format!("Upstream returned non-JSON: {e}"),
-                        StatusCode::BAD_GATEWAY,
-                    )
-                    .into_response(),
+                    Err(e) => {
+                        record_chat_test_failure(
+                            &state,
+                            &user,
+                            &ch.id,
+                            &ch.name,
+                            &model,
+                            502,
+                            &format!("Upstream returned non-JSON: {e}"),
+                            request_start.elapsed().as_millis() as u64,
+                        );
+                        error_response(
+                            &format!("Upstream returned non-JSON: {e}"),
+                            StatusCode::BAD_GATEWAY,
+                        )
+                        .into_response()
+                    }
                 }
             }
         }
         Err(e) => {
+            record_chat_test_failure(
+                &state,
+                &user,
+                &ch.id,
+                &ch.name,
+                &model,
+                502,
+                &format!("Request failed: {e}"),
+                request_start.elapsed().as_millis() as u64,
+            );
             error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY).into_response()
         }
     }
@@ -3257,6 +3323,48 @@ fn record_chat_test_usage(
     crate::metrics::global().record_request(model, channel_id, "ok", latency_ms);
     crate::metrics::global().record_tokens(model, "prompt", p);
     crate::metrics::global().record_tokens(model, "completion", c);
+}
+
+/// chat_test 失败也落日志（不计费、不进 usage 统计）——
+/// 用量日志页需能看到渠道调试的失败请求与上游错误原因。
+#[allow(clippy::too_many_arguments)]
+fn record_chat_test_failure(
+    state: &AppState,
+    user: &crate::user::User,
+    channel_id: &str,
+    channel_name: &str,
+    model: &str,
+    status_code: u16,
+    upstream_error: &str,
+    latency_ms: u64,
+) {
+    let log = crate::log::RequestLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        user_id: Some(user.id.clone()),
+        key_id: Some("chat_test".to_string()),
+        channel_id: Some(channel_id.to_string()),
+        channel_name: Some(channel_name.to_string()),
+        model: model.to_string(),
+        origin_model: Some(model.to_string()),
+        input_tokens: 0,
+        output_tokens: 0,
+        cost: 0,
+        channel_cost: 0,
+        latency_ms,
+        status_code,
+        error_msg: Some(upstream_error.chars().take(500).collect()),
+        ip: None,
+        request_id: None,
+        created_at: chrono::Utc::now().timestamp(),
+        candidate_channels: Vec::new(),
+        cache_hit: false,
+        filtered_channels: Vec::new(),
+        selected_channel: None,
+        debug: None,
+    };
+    if let Err(e) = state.log_store.requests.add(log) {
+        tracing::warn!("chat_test failure log write failed: {e}");
+    }
 }
 
 /// chat_test 流式透传包装流：边转发边累积 SSE 增量，流结束（正常或断连

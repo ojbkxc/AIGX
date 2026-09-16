@@ -108,6 +108,9 @@ fn make_bridge_for_channel(
 
 /// 单次非流式推理（工具调用用）。带 failover。
 ///
+/// 每次推理落一条 RequestLog（key_id="agent"），成功与失败都记——
+/// AI 运维对话在用量日志页可见（与渠道调试/Playground 同口径）。
+///
 /// 返回 (`ChatResponse`, 实际使用的上游模型名, 渠道 id)。
 pub async fn chat_once(
     state: &AppState,
@@ -117,7 +120,7 @@ pub async fn chat_once(
 ) -> Result<(ChatResponse, String, Option<String>), AgentLlmError> {
     let candidates = resolve_candidates(state, config)?;
     let request_id = format!("agent-{}", uuid::Uuid::new_v4());
-    let ctx = BridgeContext::new(request_id, config.model.clone());
+    let ctx = BridgeContext::new(request_id.clone(), config.model.clone());
 
     let mut last_error: Option<String> = None;
     for cand in &candidates {
@@ -154,6 +157,18 @@ pub async fn chat_once(
                         None,
                     );
                 }
+                record_agent_request_log(
+                    state,
+                    &request_id,
+                    &config.model,
+                    &upstream,
+                    cand.channel_id.as_deref(),
+                    cand.channel.as_ref().map(|c| c.name.as_str()),
+                    &req,
+                    Some(&resp),
+                    start.elapsed().as_millis() as u64,
+                    None,
+                );
                 return Ok((resp, upstream, cand.channel_id.clone()));
             }
             Err(e) => {
@@ -167,6 +182,18 @@ pub async fn chat_once(
                         None,
                     );
                 }
+                record_agent_request_log(
+                    state,
+                    &request_id,
+                    &config.model,
+                    &upstream,
+                    cand.channel_id.as_deref(),
+                    cand.channel.as_ref().map(|c| c.name.as_str()),
+                    &req,
+                    None,
+                    start.elapsed().as_millis() as u64,
+                    Some(&msg),
+                );
                 if !crate::api::openai::is_retryable_bridge_error(&e) {
                     // 4xx 客户端错误（上下文超限/参数错/模型不存在）——换渠道大概率同样失败
                     return Err(AgentLlmError::AllChannelsFailed(msg));
@@ -185,6 +212,64 @@ pub async fn chat_once(
     Err(AgentLlmError::AllChannelsFailed(
         last_error.unwrap_or_else(|| "all channels failed".to_string()),
     ))
+}
+
+/// Agent 推理落请求日志（成功/失败都记，不扣费——运维自环不产生销售成本）。
+///
+/// - key_id = "agent"（用量日志页展示为「AI 运维」来源标签）
+/// - user_id = None（系统身份）
+/// - input token 按消息文本估算（自环响应 usage 缺失时输出按 0）
+#[allow(clippy::too_many_arguments)]
+fn record_agent_request_log(
+    state: &AppState,
+    request_id: &str,
+    model: &str,
+    upstream_model: &str,
+    channel_id: Option<&str>,
+    channel_name: Option<&str>,
+    req: &ChatFormat,
+    resp: Option<&crate::bridge::ChatResponse>,
+    latency_ms: u64,
+    error: Option<&str>,
+) {
+    let input_text: String = req
+        .messages
+        .iter()
+        .filter_map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let input_tokens = crate::token_estimate::count_text(model, &input_text) as u64;
+    let output_tokens = resp
+        .map(|r| {
+            let text = r.message.content.clone().unwrap_or_default();
+            crate::token_estimate::count_text(model, &text) as u64
+        })
+        .unwrap_or(0);
+    let log = crate::log::RequestLog {
+        id: request_id.to_string(),
+        user_id: None,
+        key_id: Some("agent".to_string()),
+        channel_id: channel_id.map(|s| s.to_string()),
+        channel_name: channel_name.map(|s| s.to_string()),
+        model: model.to_string(),
+        origin_model: Some(upstream_model.to_string()),
+        input_tokens,
+        output_tokens,
+        cost: 0,
+        channel_cost: 0,
+        latency_ms,
+        status_code: if error.is_some() { 502 } else { 200 },
+        error_msg: error.map(|e| e.chars().take(200).collect()),
+        ip: None,
+        request_id: None,
+        created_at: chrono::Utc::now().timestamp(),
+        candidate_channels: Vec::new(),
+        cache_hit: false,
+        filtered_channels: Vec::new(),
+        selected_channel: None,
+        debug: None,
+    };
+    state.log_store.record_request(log);
 }
 
 /// 从 [`ChatResponse`] 提取助手消息（含 tool_calls）。

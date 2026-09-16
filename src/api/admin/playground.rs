@@ -15,19 +15,23 @@ use serde_json::{json, Value};
 use super::super::openai::AppState;
 use super::common::{error_response, verify_user};
 
-/// Playground 计费：按模型实时定价从用户余额扣费 + 记请求日志。
+/// Playground 统一记账：扣费（普通用户）+ 落请求日志（所有用户都落，
+/// 管理员 cost=0）+ usage 统计。
 ///
-/// 原先 Playground 四个接口登录即用、零计费——任何注册用户可无限免费
-/// 消耗上游额度。现与数据面同一套扣费路径（订阅池优先 + 钱包兜底）。
-/// 管理员豁免（调试渠道是管理职责，与 new-api playground 语义一致）。
-fn charge_playground_usage(
+/// key_id 用 `playground:<kind>` 标注来源（用量日志页展示为来源标签）：
+/// chat / images / tts / transcriptions。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_playground_usage(
     state: &AppState,
     user_id: &str,
+    is_admin: bool,
+    kind: &str,
     model: &str,
     channel_id: Option<&str>,
     channel_name: Option<&str>,
     prompt_tokens: u64,
     completion_tokens: u64,
+    latency_ms: u64,
 ) {
     let Some(u) = state.user_store.get_by_id(user_id) else {
         return;
@@ -38,7 +42,7 @@ fn charge_playground_usage(
         .pricing_store
         .calculate_cost_quoted(model, prompt_tokens, completion_tokens, &group)
         .unwrap_or(0);
-    if cost > 0 {
+    if cost > 0 && !is_admin {
         // 订阅池优先 + 钱包兜底（与数据面 charge_usage 相同顺序）
         let now = chrono::Utc::now().timestamp();
         let mut remaining = cost;
@@ -60,20 +64,21 @@ fn charge_playground_usage(
             tracing::warn!("playground charge failed for user {user_id} (insufficient quota)");
         }
     }
-    // 记请求日志（管理员可在日志页看到 Playground 消耗，来源渠道标注）
+    // 落请求日志（管理员可在日志页看到 Playground 消耗，来源渠道标注；
+    // 管理员豁免计费 → cost=0）
     let log = crate::log::RequestLog {
         id: uuid::Uuid::new_v4().to_string(),
         user_id: Some(user_id.to_string()),
-        key_id: Some("playground".to_string()),
+        key_id: Some(format!("playground:{kind}")),
         channel_id: channel_id.map(|s| s.to_string()),
         channel_name: channel_name.map(|s| s.to_string()),
         model: model.to_string(),
         origin_model: Some(model.to_string()),
         input_tokens: prompt_tokens,
         output_tokens: completion_tokens,
-        cost,
+        cost: if is_admin { 0 } else { cost },
         channel_cost: cost,
-        latency_ms: 0,
+        latency_ms,
         status_code: 200,
         error_msg: None,
         ip: None,
@@ -107,6 +112,50 @@ pub(crate) fn extract_usage_tokens(j: &Value) -> (u64, u64) {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     (p, c)
+}
+
+/// Playground 失败落日志（不计费、不进 usage 统计）。
+///
+/// 状态码 + 上游错误体进 error_msg，用量日志页可见失败原因。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_playground_failure(
+    state: &AppState,
+    user_id: &str,
+    kind: &str,
+    model: &str,
+    channel_id: Option<&str>,
+    channel_name: Option<&str>,
+    status_code: u16,
+    upstream_error: &str,
+    latency_ms: u64,
+) {
+    let log = crate::log::RequestLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        user_id: Some(user_id.to_string()),
+        key_id: Some(format!("playground:{kind}")),
+        channel_id: channel_id.map(|s| s.to_string()),
+        channel_name: channel_name.map(|s| s.to_string()),
+        model: model.to_string(),
+        origin_model: Some(model.to_string()),
+        input_tokens: 0,
+        output_tokens: 0,
+        cost: 0,
+        channel_cost: 0,
+        latency_ms,
+        status_code,
+        error_msg: Some(upstream_error.chars().take(500).collect()),
+        ip: None,
+        request_id: None,
+        created_at: chrono::Utc::now().timestamp(),
+        candidate_channels: Vec::new(),
+        cache_hit: false,
+        filtered_channels: Vec::new(),
+        selected_channel: None,
+        debug: None,
+    };
+    if let Err(e) = state.log_store.requests.add(log) {
+        tracing::warn!("playground failure log write failed: {e}");
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,6 +352,7 @@ pub async fn handle_playground_chat(
         }
     };
 
+    let request_start = std::time::Instant::now();
     let mut req = client.post(&url).json(&payload);
     if !api_key.is_empty() {
         req = req.bearer_auth(&api_key);
@@ -313,6 +363,19 @@ pub async fn handle_playground_chat(
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
+                // 失败也落日志（状态码 + 上游错误体），排障可追溯
+                let latency_ms = request_start.elapsed().as_millis() as u64;
+                record_playground_failure(
+                    &state,
+                    &user.id,
+                    "chat",
+                    &model,
+                    Some(&ch.id),
+                    Some(&ch.name),
+                    status.as_u16(),
+                    &text,
+                    latency_ms,
+                );
                 return error_response(
                     &format!("Upstream HTTP {status}: {text}"),
                     StatusCode::BAD_GATEWAY,
@@ -329,19 +392,20 @@ pub async fn handle_playground_chat(
                         .and_then(|c| c.as_str())
                         .unwrap_or("")
                         .to_string();
-                    // 计费：管理员豁免（调试渠道是管理职责）
-                    if !user.is_admin() {
-                        let (p, c) = extract_usage_tokens(&j);
-                        charge_playground_usage(
-                            &state,
-                            &user.id,
-                            &model,
-                            Some(&ch.id),
-                            Some(&ch.name),
-                            p,
-                            c,
-                        );
-                    }
+                    // 计费（管理员豁免）+ 日志（所有用户都落）
+                    let (p, c) = extract_usage_tokens(&j);
+                    record_playground_usage(
+                        &state,
+                        &user.id,
+                        user.is_admin(),
+                        "chat",
+                        &model,
+                        Some(&ch.id),
+                        Some(&ch.name),
+                        p,
+                        c,
+                        request_start.elapsed().as_millis() as u64,
+                    );
                     Json(json!({
                         "success": true,
                         "data": {
@@ -509,6 +573,7 @@ pub async fn handle_playground_images(
         }
     };
 
+    let request_start = std::time::Instant::now();
     let mut req = client.post(&url).json(&payload);
     if !api_key.is_empty() {
         req = req.bearer_auth(&api_key);
@@ -519,6 +584,17 @@ pub async fn handle_playground_images(
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
+                record_playground_failure(
+                    &state,
+                    &user.id,
+                    "images",
+                    &model,
+                    Some(&ch.id),
+                    Some(&ch.name),
+                    status.as_u16(),
+                    &text,
+                    request_start.elapsed().as_millis() as u64,
+                );
                 return error_response(
                     &format!("Upstream HTTP {status}: {text}"),
                     StatusCode::BAD_GATEWAY,
@@ -527,19 +603,20 @@ pub async fn handle_playground_images(
             }
             match resp.json::<Value>().await {
                 Ok(j) => {
-                    // 计费：管理员豁免
-                    if !user.is_admin() {
-                        let (p, c) = extract_usage_tokens(&j);
-                        charge_playground_usage(
-                            &state,
-                            &user.id,
-                            &model,
-                            Some(&ch.id),
-                            Some(&ch.name),
-                            p,
-                            c,
-                        );
-                    }
+                    // 计费（管理员豁免）+ 日志（所有用户都落）
+                    let (p, c) = extract_usage_tokens(&j);
+                    record_playground_usage(
+                        &state,
+                        &user.id,
+                        user.is_admin(),
+                        "images",
+                        &model,
+                        Some(&ch.id),
+                        Some(&ch.name),
+                        p,
+                        c,
+                        request_start.elapsed().as_millis() as u64,
+                    );
                     Json(json!({ "success": true, "data": j })).into_response()
                 }
                 Err(e) => error_response(
@@ -652,6 +729,7 @@ pub async fn handle_playground_tts(
         }
     };
 
+    let request_start = std::time::Instant::now();
     let mut req = client.post(&url).json(&payload);
     if !api_key.is_empty() {
         req = req.bearer_auth(&api_key);
@@ -662,6 +740,17 @@ pub async fn handle_playground_tts(
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
+                record_playground_failure(
+                    &state,
+                    &user.id,
+                    "tts",
+                    &model,
+                    Some(&ch.id),
+                    Some(&ch.name),
+                    status.as_u16(),
+                    &text,
+                    request_start.elapsed().as_millis() as u64,
+                );
                 return error_response(
                     &format!("Upstream HTTP {status}: {text}"),
                     StatusCode::BAD_GATEWAY,
@@ -676,19 +765,20 @@ pub async fn handle_playground_tts(
                 .to_string();
             match resp.bytes().await {
                 Ok(b) => {
-                    // 计费：管理员豁免；TTS 无 usage 返回，按输入字符数近似估 token
-                    if !user.is_admin() {
-                        let est_tokens = (body.input.chars().count() as u64) / 4;
-                        charge_playground_usage(
-                            &state,
-                            &user.id,
-                            &model,
-                            Some(&ch.id),
-                            Some(&ch.name),
-                            est_tokens,
-                            0,
-                        );
-                    }
+                    // 计费（管理员豁免）+ 日志；TTS 无 usage，按输入字符数近似估 token
+                    let est_tokens = (body.input.chars().count() as u64) / 4;
+                    record_playground_usage(
+                        &state,
+                        &user.id,
+                        user.is_admin(),
+                        "tts",
+                        &model,
+                        Some(&ch.id),
+                        Some(&ch.name),
+                        est_tokens,
+                        0,
+                        request_start.elapsed().as_millis() as u64,
+                    );
                     Json(json!({
                         "success": true,
                         "data": {
@@ -843,6 +933,7 @@ pub async fn handle_playground_transcriptions(
         .text("model", model.clone())
         .part("file", part);
 
+    let request_start = std::time::Instant::now();
     let mut req = client.post(&url).multipart(form);
     if !api_key.is_empty() {
         req = req.bearer_auth(&api_key);
@@ -853,6 +944,17 @@ pub async fn handle_playground_transcriptions(
             let status = resp.status();
             if !status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
+                record_playground_failure(
+                    &state,
+                    &user.id,
+                    "transcriptions",
+                    &model,
+                    Some(&ch.id),
+                    Some(&ch.name),
+                    status.as_u16(),
+                    &text,
+                    request_start.elapsed().as_millis() as u64,
+                );
                 return error_response(
                     &format!("Upstream HTTP {status}: {text}"),
                     StatusCode::BAD_GATEWAY,
@@ -861,19 +963,20 @@ pub async fn handle_playground_transcriptions(
             }
             match resp.json::<Value>().await {
                 Ok(j) => {
-                    // 计费：管理员豁免；转写按音频字节数近似估 token
-                    if !user.is_admin() {
-                        let est_tokens = (audio_data.len() as u64) / 1024;
-                        charge_playground_usage(
-                            &state,
-                            &user.id,
-                            &model,
-                            Some(&ch.id),
-                            Some(&ch.name),
-                            est_tokens,
-                            0,
-                        );
-                    }
+                    // 计费（管理员豁免）+ 日志；转写按音频字节数近似估 token
+                    let est_tokens = (audio_data.len() as u64) / 1024;
+                    record_playground_usage(
+                        &state,
+                        &user.id,
+                        user.is_admin(),
+                        "transcriptions",
+                        &model,
+                        Some(&ch.id),
+                        Some(&ch.name),
+                        est_tokens,
+                        0,
+                        request_start.elapsed().as_millis() as u64,
+                    );
                     Json(json!({ "success": true, "data": j })).into_response()
                 }
                 Err(e) => error_response(

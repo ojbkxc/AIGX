@@ -51,6 +51,19 @@ export interface AuditLogItem {
   after?: string;
 }
 
+/** key_id 特殊来源 → 可读标签（非真实 API Key） */
+const SOURCE_LABELS: Record<string, string> = {
+  chat_test: '渠道调试',
+  agent: 'AI 运维',
+  'playground:chat': 'Playground 对话',
+  'playground:images': 'Playground 图片',
+  'playground:tts': 'Playground TTS',
+  'playground:transcriptions': 'Playground 转写',
+};
+export const sourceLabel = (keyId: string | undefined): string | null =>
+  (keyId && SOURCE_LABELS[keyId]) ||
+  (keyId?.startsWith('playground:') ? keyId.slice('playground:'.length) : null);
+
 type LogItem = RequestLogItem | AuditLogItem;
 
 interface Filters {
@@ -570,6 +583,11 @@ export default function Logs(): JSX.Element {
                           <span className={(l.status_code ?? 0) < 400 ? 'badge badge-success' : 'badge badge-danger'} style={{ fontSize: 10 }}>
                             {(l.status_code ?? 0) < 400 ? t('成功') : t('失败')}
                           </span>
+                          {sourceLabel(l.key_id) && (
+                            <span className="badge badge-info" style={{ fontSize: 10, marginLeft: 4 }} title={l.key_id}>
+                              {sourceLabel(l.key_id)}
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.model || ''}>
