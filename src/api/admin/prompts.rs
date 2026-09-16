@@ -119,7 +119,17 @@ pub async fn handle_prompt_fetch(
 
 type PromptList = Vec<Value>;
 
+/// 单条内容上限：公开源里存在 14 万字符的巨型提示词，前端卡片渲染会卡顿，
+/// 且 localStorage 有约 5MB 配额，必须裁剪以控制单源体积。
+const MAX_CONTENT_CHARS: usize = 20_000;
+
 fn entry(name: &str, content: &str, tags: &[&str], source: &str) -> Value {
+    let content = if content.chars().count() > MAX_CONTENT_CHARS {
+        let truncated: String = content.chars().take(MAX_CONTENT_CHARS).collect();
+        format!("{truncated}\n…（内容过长，已截断）")
+    } else {
+        content.to_string()
+    };
     json!({
         "name": name,
         "content": content,

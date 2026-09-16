@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef, type ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Search, Plus, Copy, Trash2, Pencil, Upload, Download, BookOpen, Globe } from 'lucide-react';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
@@ -66,6 +67,7 @@ function savePrompts(items: PromptItem[]): void {
  */
 export default function Prompts(): JSX.Element {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const addToast = useToast();
   const [prompts, setPrompts] = useState<PromptItem[]>(() => loadPrompts());
   const [query, setQuery] = useState('');
@@ -236,7 +238,7 @@ export default function Prompts(): JSX.Element {
         const fresh = items.filter((it) => !existing.has(it.name));
         return [...fresh, ...prev];
       });
-      addToast(t('拉取完成，新增') + ` ${items.length} ` + t('条提示词'));
+      addToast(t('拉取完成，新增') + ` ${items.length} ` + t('条提示词，可在 Chat 页空状态直接使用'));
       setSourceModal(false);
     } catch (err) {
       addToast(err instanceof Error ? err.message : t('拉取公开源失败'), 'error');
@@ -315,6 +317,10 @@ export default function Prompts(): JSX.Element {
           <Button variant="outline" size="sm" onClick={openSources} style={{ gap: 6 }}>
             <Globe size={13} />
             {t('拉取公开源')}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => navigate('/chat')} style={{ gap: 6 }}>
+            <BookOpen size={13} />
+            {t('去使用')}
           </Button>
           <Button size="sm" onClick={openCreate} style={{ gap: 6 }}>
             <Plus size={13} />
