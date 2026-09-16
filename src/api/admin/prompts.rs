@@ -17,8 +17,8 @@ use axum::Json;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
-use super::common::error_response;
 use super::super::openai::AppState;
+use super::common::error_response;
 
 /// 单个源元信息
 const SOURCES: &[(&str, &str, &str, &str)] = &[
@@ -93,7 +93,10 @@ pub async fn handle_prompt_fetch(
         .and_then(|s| s.as_str())
         .unwrap_or_default();
     if id.is_empty() {
-        return Err(error_response("source is required", StatusCode::BAD_REQUEST));
+        return Err(error_response(
+            "source is required",
+            StatusCode::BAD_REQUEST,
+        ));
     }
     let key = format!("prompt_source:{id}");
     if let Some(v) = hit(&state.prompt_source_cache, &key) {
@@ -108,9 +111,8 @@ pub async fn handle_prompt_fetch(
         _ => return Err(error_response("unknown source", StatusCode::NOT_FOUND)),
     };
 
-    let data = result.map_err(|e| {
-        error_response(&format!("拉取公开源失败：{e}"), StatusCode::BAD_GATEWAY)
-    })?;
+    let data = result
+        .map_err(|e| error_response(&format!("拉取公开源失败：{e}"), StatusCode::BAD_GATEWAY))?;
     store(&state.prompt_source_cache, &key, Value::Array(data.clone()));
     Ok(Json(json!({ "success": true, "data": data })))
 }
@@ -176,9 +178,7 @@ async fn fetch_awesome_prompts(client: &reqwest::Client) -> Result<PromptList, S
         .await
         .map_err(|e| e.to_string())?;
     let list: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-    let items = list
-        .as_array()
-        .ok_or_else(|| "目录结构异常".to_string())?;
+    let items = list.as_array().ok_or_else(|| "目录结构异常".to_string())?;
 
     let mut out = Vec::new();
     for item in items {
@@ -208,7 +208,12 @@ async fn fetch_awesome_prompts(client: &reqwest::Client) -> Result<PromptList, S
             .trim_end_matches(".txt")
             .trim_end_matches(".md")
             .replace('_', " ");
-        out.push(entry(&title, content.trim(), &["awesome-prompts"], "awesome-prompts"));
+        out.push(entry(
+            &title,
+            content.trim(),
+            &["awesome-prompts"],
+            "awesome-prompts",
+        ));
     }
     if out.is_empty() {
         return Err("awesome-prompts 无有效数据".to_string());
@@ -249,9 +254,7 @@ async fn fetch_big_prompt_library(client: &reqwest::Client) -> Result<PromptList
     // 上限：只抓前 200 个（库体量巨大，避免单次请求过重）
     let mut out = Vec::new();
     for path in paths.iter().take(200) {
-        let url = format!(
-            "https://raw.githubusercontent.com/0xeb/TheBigPromptLibrary/main/{path}"
-        );
+        let url = format!("https://raw.githubusercontent.com/0xeb/TheBigPromptLibrary/main/{path}");
         let content = client
             .get(&url)
             .header("User-Agent", "AIGX")
@@ -272,7 +275,12 @@ async fn fetch_big_prompt_library(client: &reqwest::Client) -> Result<PromptList
             .unwrap_or("")
             .trim_end_matches(".md")
             .to_string();
-        out.push(entry(&name, content.trim(), &["gpt-instruction"], "big-prompt-library"));
+        out.push(entry(
+            &name,
+            content.trim(),
+            &["gpt-instruction"],
+            "big-prompt-library",
+        ));
     }
     if out.is_empty() {
         return Err("TheBigPromptLibrary 无有效数据".to_string());
