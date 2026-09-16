@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo, useRef, type ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Search, Plus, Copy, Trash2, Pencil, Upload, Download, BookOpen } from 'lucide-react';
+import { Search, Plus, Copy, Trash2, Pencil, Upload, Download, BookOpen, Globe } from 'lucide-react';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, Textarea, Badge, EmptyState } from '../components/ui';
+import { api } from '../api';
 import './Prompts.css';
 
 interface PromptItem {
@@ -76,6 +77,12 @@ export default function Prompts(): JSX.Element {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [importing, setImporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // 公开提示词源（拉取公开源）
+  const [sourceModal, setSourceModal] = useState(false);
+  const [sources, setSources] = useState<Array<{ id: string; name: string; description: string; repo: string }>>([]);
+  const [sourcesLoading, setSourcesLoading] = useState(false);
+  const [fetchingSource, setFetchingSource] = useState<string | null>(null);
 
   useEffect(() => {
     savePrompts(prompts);
@@ -190,6 +197,54 @@ export default function Prompts(): JSX.Element {
     }
   };
 
+  const openSources = async () => {
+    setSourceModal(true);
+    setSourcesLoading(true);
+    try {
+      const res = await api.listPromptSources();
+      setSources(Array.isArray(res?.data) ? res.data : []);
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : t('拉取公开源列表失败'), 'error');
+    } finally {
+      setSourcesLoading(false);
+    }
+  };
+
+  const handleFetchSource = async (id: string) => {
+    if (fetchingSource) return;
+    setFetchingSource(id);
+    try {
+      const res = await api.fetchPromptSource(id);
+      const list = Array.isArray(res?.data) ? res.data : [];
+      if (list.length === 0) {
+        addToast(t('该源无可用提示词'), 'error');
+        return;
+      }
+      const now = Date.now();
+      const items: PromptItem[] = list.map((x) => ({
+        id: genId(),
+        name: x.name || t('未命名提示词'),
+        content: x.content || '',
+        tags: Array.isArray(x.tags) ? x.tags : [],
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+      }));
+      // 按 name 去重：已存在同名提示词则跳过，仅补充新条目
+      setPrompts((prev) => {
+        const existing = new Set(prev.map((p) => p.name));
+        const fresh = items.filter((it) => !existing.has(it.name));
+        return [...fresh, ...prev];
+      });
+      addToast(t('拉取完成，新增') + ` ${items.length} ` + t('条提示词'));
+      setSourceModal(false);
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : t('拉取公开源失败'), 'error');
+    } finally {
+      setFetchingSource(null);
+    }
+  };
+
   const handleImportFile = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -256,6 +311,10 @@ export default function Prompts(): JSX.Element {
           <Button variant="outline" size="sm" onClick={handleExport} disabled={prompts.length === 0} style={{ gap: 6 }}>
             <Download size={13} />
             {t('导出 JSON')}
+          </Button>
+          <Button variant="outline" size="sm" onClick={openSources} style={{ gap: 6 }}>
+            <Globe size={13} />
+            {t('拉取公开源')}
           </Button>
           <Button size="sm" onClick={openCreate} style={{ gap: 6 }}>
             <Plus size={13} />
@@ -405,6 +464,49 @@ export default function Prompts(): JSX.Element {
       )}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
+
+      {sourceModal && (
+        <div className="modal-overlay" onClick={() => setSourceModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('拉取公开提示词源')}</h3>
+              <button className="modal-close" onClick={() => setSourceModal(false)}>&times;</button>
+            </div>
+            <div className="modal-body">
+              <p className="prompts-source-hint">{t('选择一个公开源，拉取后按名称去重合并到本地提示词库（同名跳过）。')}</p>
+              {sourcesLoading ? (
+                <div className="prompts-source-loading">{t('加载中...')}</div>
+              ) : sources.length === 0 ? (
+                <div className="prompts-source-loading">{t('暂无可用公开源')}</div>
+              ) : (
+                <div className="prompts-source-list">
+                  {sources.map((s) => (
+                    <div key={s.id} className="prompts-source-item">
+                      <div className="prompts-source-info">
+                        <strong>{s.name}</strong>
+                        <span>{s.description}</span>
+                        <small>{s.repo}</small>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={fetchingSource !== null}
+                        onClick={() => void handleFetchSource(s.id)}
+                        style={{ gap: 6 }}
+                      >
+                        {fetchingSource === s.id ? t('拉取中...') : t('拉取')}
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setSourceModal(false)}>{t('关闭')}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

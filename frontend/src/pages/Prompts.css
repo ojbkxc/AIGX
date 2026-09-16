@@ -159,3 +159,60 @@
   min-height: 28px;
   padding: 4px 8px;
 }
+
+/* 拉取公开源弹窗 */
+.prompts-source-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0 0 12px;
+  line-height: 1.6;
+}
+
+.prompts-source-loading {
+  padding: 24px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.prompts-source-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.prompts-source-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.prompts-source-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.prompts-source-info strong {
+  font-size: 14px;
+  color: var(--text-main);
+}
+
+.prompts-source-info span {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.prompts-source-info small {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.7;
+  font-family: monospace;
+}

@@ -131,6 +131,9 @@ tiktoken-rs = "0.12"
 # Regex for keyword guardrail
 regex = "1"
 
+# CSV 解析（公开提示词源 prompts.chat 的 prompts.csv）
+csv = "1"
+
 [dev-dependencies]
 tempfile = "3"
 # 测试用时间冻结（cron 调度器的时间推进测试）

@@ -676,6 +676,11 @@ export const api = {
     request<ApiResponse<null>>('POST', `${API_BASE}/agent/approvals/${encodeURIComponent(requestId)}`, { action }),
   getAgentConfig: (): Promise<ApiResponse<{ model?: string; channel?: string }>> =>
     request<ApiResponse<{ model?: string; channel?: string }>>('GET', `${API_BASE}/agent/config`),
+  // ==================== 公开提示词源（Prompts 页「拉取公开源」） ====================
+  listPromptSources: (): Promise<ApiResponse<Array<{ id: string; name: string; description: string; repo: string }>>> =>
+    request<ApiResponse<Array<{ id: string; name: string; description: string; repo: string }>>>('GET', `${API_BASE}/prompts/sources`),
+  fetchPromptSource: (source: string): Promise<ApiResponse<Array<{ name: string; content: string; tags: string[]; source: string }>>> =>
+    request<ApiResponse<Array<{ name: string; content: string; tags: string[]; source: string }>>>('POST', `${API_BASE}/prompts/fetch`, { source }),
   /** Agent 对话：SSE 流式，逐事件回调（AgentEvent） */
   agentChatStream: async (
     id: string,

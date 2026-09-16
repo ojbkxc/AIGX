@@ -14,6 +14,7 @@ pub mod orders;
 pub mod plans;
 pub mod playground;
 pub mod pricing;
+pub mod prompts;
 pub mod redemptions;
 pub mod security;
 pub mod settings;
@@ -112,6 +113,9 @@ pub use playground::handle_playground_chat;
 pub use playground::handle_playground_images;
 pub use playground::handle_playground_transcriptions;
 pub use playground::handle_playground_tts;
+
+// 公开提示词源拉取（Prompts 页「拉取公开源」）
+pub use prompts::{handle_prompt_fetch, handle_prompt_sources};
 
 // 后续模块的 pub use 将按迁移顺序补充...
 

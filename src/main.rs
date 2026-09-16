@@ -430,6 +430,9 @@ async fn main() -> anyhow::Result<()> {
         } else {
             None
         },
+        prompt_source_cache: std::sync::Arc::new(
+            crate::api::admin::prompts::PromptSourceCache::new(),
+        ),
     };
 
     tracing::info!(
@@ -879,6 +882,12 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/models/available",
             get(api::admin::handle_available_models),
         )
+        // 公开提示词源拉取（Prompts 页一键导入社区提示词）
+        .route(
+            "/api/prompts/sources",
+            get(api::admin::handle_prompt_sources),
+        )
+        .route("/api/prompts/fetch", post(api::admin::handle_prompt_fetch))
         .route("/api/channels", post(api::admin::handle_add_channel))
         .route("/api/channels/:id", put(api::admin::handle_update_channel))
         .route("/api/channels/:id", patch(api::admin::handle_patch_channel))

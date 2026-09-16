@@ -173,6 +173,8 @@ pub struct AppState {
     /// 会话持久化复用同一个 FileStore（PG kv），审批 pending 表挂
     /// [`crate::agent::approval::AgentApprovals`]。
     pub agent_state: Option<Arc<crate::agent::AgentState>>,
+    /// 公开提示词源内存缓存（Prompts 页「拉取公开源」）。
+    pub prompt_source_cache: Arc<crate::api::admin::prompts::PromptSourceCache>,
 }
 
 impl AppState {
