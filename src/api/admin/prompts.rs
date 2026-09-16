@@ -56,8 +56,8 @@ impl PromptSourceCache {
 
 const CACHE_TTL_SECS: i64 = 300;
 
-fn hit(cache: &PromptSourceCache, key: &str) -> Option<Value> {
-    let map = cache.map.blocking_read();
+async fn hit(cache: &PromptSourceCache, key: &str) -> Option<Value> {
+    let map = cache.map.read().await;
     map.get(key).and_then(|(ts, v)| {
         if chrono::Utc::now().timestamp() - *ts < CACHE_TTL_SECS {
             Some(v.clone())
@@ -67,8 +67,8 @@ fn hit(cache: &PromptSourceCache, key: &str) -> Option<Value> {
     })
 }
 
-fn store(cache: &PromptSourceCache, key: &str, v: Value) {
-    let mut map = cache.map.blocking_write();
+async fn store(cache: &PromptSourceCache, key: &str, v: Value) {
+    let mut map = cache.map.write().await;
     map.insert(key.to_string(), (chrono::Utc::now().timestamp(), v));
 }
 
@@ -99,7 +99,7 @@ pub async fn handle_prompt_fetch(
         ));
     }
     let key = format!("prompt_source:{id}");
-    if let Some(v) = hit(&state.prompt_source_cache, &key) {
+    if let Some(v) = hit(&state.prompt_source_cache, &key).await {
         return Ok(Json(json!({ "success": true, "data": v })));
     }
 
@@ -113,7 +113,7 @@ pub async fn handle_prompt_fetch(
 
     let data = result
         .map_err(|e| error_response(&format!("拉取公开源失败：{e}"), StatusCode::BAD_GATEWAY))?;
-    store(&state.prompt_source_cache, &key, Value::Array(data.clone()));
+    store(&state.prompt_source_cache, &key, Value::Array(data.clone())).await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
