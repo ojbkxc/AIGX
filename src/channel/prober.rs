@@ -152,10 +152,10 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
 }
 
 /// 挑探测用的模型：优先显式配置的第一个，其次发现的第一个。
+/// （与 effective_models 同口径：models 非空 = 白名单，空 = 用发现快照）
 fn pick_probe_model(ch: &crate::channel::Channel) -> Option<String> {
-    ch.models
+    ch.effective_models()
         .iter()
-        .chain(ch.discovered_models.iter())
         .find(|m| !m.trim().is_empty())
         .cloned()
 }
@@ -188,6 +188,15 @@ mod tests {
         let mut ch = test_channel();
         ch.discovered_models = vec!["discovered-x".into()];
         assert_eq!(pick_probe_model(&ch).as_deref(), Some("discovered-x"));
+    }
+
+    #[test]
+    fn pick_model_ignores_discovered_when_configured() {
+        // models 非空 = 白名单：发现快照不扩大探测范围
+        let mut ch = test_channel();
+        ch.models = vec!["model-a".into()];
+        ch.discovered_models = vec!["discovered-x".into()];
+        assert_eq!(pick_probe_model(&ch).as_deref(), Some("model-a"));
     }
 
     #[test]

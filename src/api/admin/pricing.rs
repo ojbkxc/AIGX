@@ -288,7 +288,7 @@ pub async fn handle_missing_pricing_models(
             continue;
         }
         let owned_by = crate::model::metadata::owned_by_for_channel_type(ch.channel_type.as_str());
-        for m in ch.models.iter().chain(ch.discovered_models.iter()) {
+        for m in ch.effective_models() {
             if !m.is_empty() && seen.insert(m.clone()) {
                 candidates.push((m.clone(), owned_by));
             }

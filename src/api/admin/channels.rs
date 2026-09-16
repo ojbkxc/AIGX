@@ -311,7 +311,8 @@ pub async fn handle_available_models(
             }
             let owned_by =
                 crate::model::metadata::owned_by_for_channel_type(c.channel_type.as_str());
-            for m in c.models.iter().chain(c.discovered_models.iter()) {
+            // models 非空 = 白名单（只暴露声明部分）；空 = 全部（用发现快照兜底）
+            for m in c.effective_models() {
                 if m.is_empty() || !seen.insert(m.clone()) {
                     continue;
                 }

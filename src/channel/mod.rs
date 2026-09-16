@@ -183,6 +183,19 @@ impl Channel {
         self.models.iter().any(|m| m == model)
     }
 
+    /// 对外暴露的有效模型清单（列表聚合 / 声明校验共用口径）。
+    ///
+    /// - `models` 非空 → 白名单，仅暴露 `models`
+    ///   （`discovered_models` 只是拉取参考快照，不扩大白名单）
+    /// - `models` 空 → "留空=全部"，用 `discovered_models` 提供具体清单
+    pub fn effective_models(&self) -> &[String] {
+        if !self.models.is_empty() {
+            &self.models
+        } else {
+            &self.discovered_models
+        }
+    }
+
     /// 编码 api_key 用于存储。
     ///
     /// ⚠️ B11（已知风险，保留现状）：这是可逆的 Base64“混淆”而非加密——
@@ -436,10 +449,10 @@ impl ChannelStore {
             .iter()
             .filter(|c| {
                 c.is_enabled()
+                    // models 非空 = 白名单（supports_model）；空 = 全部，
+                    // 但若已有发现快照则以快照为准（有效范围收窄）
                     && (c.supports_model(model)
-                        || (!c.models.is_empty()
-                            && !c.discovered_models.is_empty()
-                            && c.discovered_models.iter().any(|m| m == model)))
+                        || (c.models.is_empty() && c.effective_models().iter().any(|m| m == model)))
                     && !self.is_in_cooldown(&c.id)
                     && self.circuit_breaker.allow_request(&c.id)
                     && self.aimd_allows(&c.id)

@@ -210,13 +210,12 @@ pub async fn handle_playground_chat(
         }
     };
 
-    // 指定渠道调试（管理员）：校验模型属于该渠道（models + discovered_models，
-    // models 空 = 全部），防止把别的渠道的模型名透传给本渠道上游。
+    // 指定渠道调试（管理员）：校验模型属于该渠道（models 非空 = 白名单；
+    // 空 = 全部，以发现快照兜底），防止把别的渠道的模型名透传给本渠道上游。
     if let Some(ref cid) = body.channel_id {
         if !cid.trim().is_empty() && !requested_model.is_empty() {
             let declared = ch.supports_model(&requested_model)
-                || (!ch.models.is_empty()
-                    && ch.discovered_models.iter().any(|m| m == &requested_model));
+                || ch.effective_models().iter().any(|m| m == &requested_model);
             if !declared {
                 return error_response(
                     &format!(

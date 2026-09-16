@@ -479,13 +479,13 @@ pub fn ensure_model_priced(state: &AppState, model: &str) -> Result<(), (StatusC
     Ok(())
 }
 
-/// 模型是否由任一启用渠道声明或发现（models ∪ discovered_models）。
+/// 模型是否由任一启用渠道声明或发现（models 非空 = 白名单；空 = 全部，用发现快照）。
 pub fn model_declared_by_channel(state: &AppState, model: &str) -> bool {
-    state.channel_store.list().iter().any(|c| {
-        c.is_enabled()
-            && (c.models.iter().any(|m| m == model)
-                || c.discovered_models.iter().any(|m| m == model))
-    })
+    state
+        .channel_store
+        .list()
+        .iter()
+        .any(|c| c.is_enabled() && c.effective_models().iter().any(|m| m == model))
 }
 
 /// 执行计费扣减（用户 quota + key used_quota）。
@@ -4560,7 +4560,8 @@ pub async fn handle_list_models(
         }
         let channel_owned_by =
             crate::model::metadata::owned_by_for_channel_type(ch.channel_type.as_str());
-        for m in ch.models.iter().chain(ch.discovered_models.iter()) {
+        // models 非空 = 白名单（只暴露声明部分）；空 = 全部（用发现快照兜底）
+        for m in ch.effective_models() {
             if m.is_empty() || !seen.insert(m.clone()) {
                 continue;
             }
@@ -4648,11 +4649,12 @@ pub async fn handle_get_model(
     let _key_id = verify_api_key(&state, &headers)?;
 
     // 通用语义：渠道声明或映射可解析即认为存在
-    let in_channels = state.channel_store.list().iter().any(|ch| {
-        ch.is_enabled()
-            && (ch.models.iter().any(|m| m == &model)
-                || ch.discovered_models.iter().any(|m| m == &model))
-    });
+    // （models 非空 = 白名单；空 = 全部时以发现快照为准）
+    let in_channels = state
+        .channel_store
+        .list()
+        .iter()
+        .any(|ch| ch.is_enabled() && ch.effective_models().iter().any(|m| m == &model));
     let mapped = state.model_mapper.all_mappings().contains_key(&model);
     if in_channels || mapped {
         let now = chrono::Utc::now().timestamp();
