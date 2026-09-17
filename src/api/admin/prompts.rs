@@ -279,6 +279,23 @@ pub async fn handle_prompt_translate(
             StatusCode::BAD_REQUEST,
         ));
     }
+    // 单条内容上限：防止 14 万字符的巨型提示词被原样送入自环翻译，
+    // 既可能烧穿每日字符预算，也会让单次 LLM 调用上下文过大而失败。
+    if let Some(too_long) = items.iter().find(|it| {
+        it.get("content")
+            .and_then(|c| c.as_str())
+            .is_some_and(|s| s.chars().count() > MAX_CONTENT_CHARS)
+    }) {
+        let len = too_long
+            .get("content")
+            .and_then(|c| c.as_str())
+            .map(|s| s.chars().count())
+            .unwrap_or(0);
+        return Err(error_response(
+            &format!("单条内容超长（{len} 字符，上限 {MAX_CONTENT_CHARS}）"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
 
     let system = format!(
         "你是专业翻译。把用户给的每个提示词内容准确翻译成{target}，\
