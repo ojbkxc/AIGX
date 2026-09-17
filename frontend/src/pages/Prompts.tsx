@@ -322,6 +322,7 @@ export default function Prompts(): JSX.Element {
             });
             if (count > 0) addToast(t('已自动翻译') + ` ${count} ` + t('条英文提示词'));
           } catch (err) {
+            // 429（每日预算用尽）后端已给中文提示，直接透传；其余失败保留原文
             addToast(err instanceof Error ? err.message : t('翻译失败，保留原文'), 'error');
           } finally {
             setTranslating(false);
