@@ -1461,14 +1461,20 @@ fn build_cors_layer(config: &config::AppConfig) -> CorsLayer {
 /// SSE 流式响应（text/event-stream）不含 `Content-Length` 时不做压缩，
 /// 保持流式透传。静态文件已由 `ServeDir` 按预压缩/按需处理，此处只
 /// 兜底 API 响应与 SPA index.html。
-fn compression_layer() -> CompressionLayer<tower_http::compression::predicate::SizeAbove> {
-    use tower_http::compression::predicate::SizeAbove;
+fn compression_layer() -> CompressionLayer<
+    tower_http::compression::predicate::And<
+        tower_http::compression::DefaultPredicate,
+        tower_http::compression::predicate::SizeAbove,
+    >,
+> {
+    use tower_http::compression::predicate::{DefaultPredicate, SizeAbove};
+    use tower_http::compression::Predicate;
 
-    // 仅压缩大于 256 字节的响应：小响应（错误 JSON、探针等）压缩收益
-    // 为负（gzip 头开销），且 SSE 事件帧可能短小，跳过避免流式抖动。
-    // DefaultPredicate 已按 Content-Type 排除 text/event-stream 等不可压缩
-    // 类型（避免 SSE 流式响应被 gzip 破坏透传语义）。
-    CompressionLayer::new().compress_when(SizeAbove::new(256))
+    // 必须用 `.and()` 组合 DefaultPredicate 与 SizeAbove：DefaultPredicate
+    // 按 Content-Type 排除 text/event-stream（SSE 流式透传不能被 gzip 破坏），
+    // SizeAbove 跳过小于 256 字节的响应（错误 JSON、探针等，压缩收益为负）。
+    // 若只用 SizeAbove 替换默认谓词，会丢失 event-stream 排除，把 SSE 流也压坏。
+    CompressionLayer::new().compress_when(DefaultPredicate::new().and(SizeAbove::new(256)))
 }
 
 /// GET /metrics — Prometheus 指标文本输出（管理员鉴权）
