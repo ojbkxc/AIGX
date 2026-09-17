@@ -19,9 +19,18 @@ function loadSuggestionPrompts(): Array<{ title: string; sub: string; content: s
       && (p as { enabled?: boolean }).enabled !== false
       && typeof (p as { content?: unknown }).content === 'string'
       && (p as { content: string }).content.trim() !== ''));
-    // 先按更新时间倒序取最近的，再裁剪 6 条，避免空内容条目挤占名额。
+    // 先按更新时间倒序，再按 name 去重（保留最新者），最后裁剪 6 条。
+    // name 去重：导入 JSON 按 id 合并、手动新建都可能产生同名条目，
+    // 空状态卡片不应重复展示同一条提示词。
+    const seen = new Set<string>();
     return valid
       .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0))
+      .filter((p) => {
+        const key = (p.name || '').trim().toLowerCase();
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
       .slice(0, 6)
       .map((p) => ({
         title: p.name || 'Prompt',
