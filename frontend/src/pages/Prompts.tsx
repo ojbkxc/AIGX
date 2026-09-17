@@ -289,9 +289,14 @@ export default function Prompts(): JSX.Element {
         updated_at: now,
       }));
 
-      // 自环翻译：把英文条目的 content 替换为中文（翻译失败则保留原文）
+      // 先按 name 去重（已存在同名则跳过），再对真正的新增条目做自环翻译，
+      // 避免把即将被丢弃的重复条目也送去 LLM 翻译、白白消耗自环调用。
+      const existingNames = new Set(prompts.map((p) => p.name));
+      const fresh = items.filter((it) => !existingNames.has(it.name));
+
+      // 自环翻译：把新增英文条目的 content 替换为中文（翻译失败则保留原文）
       if (translateEnabled && translateTarget !== 'English') {
-        const english = items.filter((it) => looksEnglish(it.content));
+        const english = fresh.filter((it) => looksEnglish(it.content));
         if (english.length > 0) {
           setTranslating(true);
           setTranslateProgress({ done: 0, total: english.length });
@@ -318,9 +323,6 @@ export default function Prompts(): JSX.Element {
         }
       }
 
-      // 按 name 去重：已存在同名提示词则跳过，仅补充新条目
-      const existingNames = new Set(prompts.map((p) => p.name));
-      const fresh = items.filter((it) => !existingNames.has(it.name));
       if (fresh.length > 0) setPrompts((prev) => [...fresh, ...prev]);
       if (fresh.length === 0) {
         addToast(t('该源提示词已全部存在，无需新增'));
