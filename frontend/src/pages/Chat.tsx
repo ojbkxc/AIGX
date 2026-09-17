@@ -13,16 +13,21 @@ function loadSuggestionPrompts(): Array<{ title: string; sub: string; content: s
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((p): p is { id: string; name: string; content: string; tags?: string[]; enabled?: boolean } =>
-        Boolean(p && typeof p === 'object' && (p as { enabled?: boolean }).enabled !== false))
+    const valid = parsed.filter((p): p is {
+      id: string; name: string; content: string; tags?: string[]; enabled?: boolean; updated_at?: number;
+    } => Boolean(p && typeof p === 'object'
+      && (p as { enabled?: boolean }).enabled !== false
+      && typeof (p as { content?: unknown }).content === 'string'
+      && (p as { content: string }).content.trim() !== ''));
+    // 先按更新时间倒序取最近的，再裁剪 6 条，避免空内容条目挤占名额。
+    return valid
+      .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0))
       .slice(0, 6)
       .map((p) => ({
         title: p.name || 'Prompt',
         sub: (p.tags ?? []).slice(0, 3).join(' · '),
         content: p.content,
-      }))
-      .filter((p) => p.content);
+      }));
   } catch {
     return [];
   }
