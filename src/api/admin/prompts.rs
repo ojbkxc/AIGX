@@ -173,11 +173,28 @@ pub async fn handle_prompt_fetch(
     };
 
     let client = state.http_client.clone();
-    let result = match id {
-        "prompts-chat" => fetch_prompts_chat(&client).await,
-        "awesome-prompts" => fetch_awesome_prompts(&client).await,
-        "big-prompt-library" => fetch_big_prompt_library(&client).await,
+    // 先校验 source id，再构造「可被整体超时包裹」的抓取 Future。
+    // 三个 async fn 的返回 Future 是互不相同的 opaque type，需 Box 统一
+    // 到 `Pin<Box<dyn Future<Output=...>>>` 才能放进同一 match 分支。
+    let fetch_fut: std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<PromptList, String>> + Send>,
+    > = match id {
+        "prompts-chat" => Box::pin(fetch_prompts_chat(&client)),
+        "awesome-prompts" => Box::pin(fetch_awesome_prompts(&client)),
+        "big-prompt-library" => Box::pin(fetch_big_prompt_library(&client)),
         _ => return Err(error_response("unknown source", StatusCode::NOT_FOUND)),
+    };
+    // 整源抓取总超时：三个源都可能因上游 GitHub 慢/挂起拖住请求，
+    // 尤其是逐文件并发抓取的 awesome-prompts/big-prompt-library。
+    // 超时即失败，在途闸门随守卫 Drop 释放，不会残留占位。
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(30), fetch_fut).await {
+        Ok(r) => r,
+        Err(_) => {
+            return Err(error_response(
+                "拉取公开源超时，请稍后重试",
+                StatusCode::GATEWAY_TIMEOUT,
+            ))
+        }
     };
 
     let data = result
