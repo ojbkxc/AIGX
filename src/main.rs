@@ -50,6 +50,7 @@ use axum::extract::State;
 use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use std::time::Duration;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use account::AccountPool;
@@ -1394,6 +1395,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/metrics", get(handle_metrics))
         .fallback_service(web::serve_static_files())
         .layer(build_cors_layer(config))
+        .layer(compression_layer())
         .layer(body_limit_mw)
         .with_state(state)
 }
@@ -1451,6 +1453,22 @@ fn build_cors_layer(config: &config::AppConfig) -> CorsLayer {
             axum::http::header::ACCEPT,
         ])
         .allow_credentials(true)
+}
+
+/// gzip 压缩中间件：对可压缩响应（JSON/HTML/CSS/JS/文本）做 gzip。
+///
+/// 公开提示词源单次可达 1.1MB JSON，压缩后约 300KB，显著降低带宽；
+/// SSE 流式响应（text/event-stream）不含 `Content-Length` 时不做压缩，
+/// 保持流式透传。静态文件已由 `ServeDir` 按预压缩/按需处理，此处只
+/// 兜底 API 响应与 SPA index.html。
+fn compression_layer() -> CompressionLayer<tower_http::compression::predicate::SizeAbove> {
+    use tower_http::compression::predicate::SizeAbove;
+
+    // 仅压缩大于 256 字节的响应：小响应（错误 JSON、探针等）压缩收益
+    // 为负（gzip 头开销），且 SSE 事件帧可能短小，跳过避免流式抖动。
+    // DefaultPredicate 已按 Content-Type 排除 text/event-stream 等不可压缩
+    // 类型（避免 SSE 流式响应被 gzip 破坏透传语义）。
+    CompressionLayer::new().compress_when(SizeAbove::new(256))
 }
 
 /// GET /metrics — Prometheus 指标文本输出（管理员鉴权）
