@@ -152,15 +152,12 @@ pub async fn handle_prompt_translate(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _user = verify_user(&state, &headers).await?;
 
-    let agent = state
-        .agent_state
-        .as_deref()
-        .ok_or_else(|| {
-            error_response(
-                "自环翻译未启用：请先在配置中启用 [agent] 并设置 model/channel",
-                StatusCode::SERVICE_UNAVAILABLE,
-            )
-        })?;
+    let agent = state.agent_state.as_deref().ok_or_else(|| {
+        error_response(
+            "自环翻译未启用：请先在配置中启用 [agent] 并设置 model/channel",
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })?;
     let model = agent.config.model.trim().to_string();
     if model.is_empty() {
         return Err(error_response(
@@ -226,7 +223,9 @@ pub async fn handle_prompt_translate(
             }
         }
     }
-    Ok(Json(json!({ "success": true, "data": { "translated": out } })))
+    Ok(Json(
+        json!({ "success": true, "data": { "translated": out } }),
+    ))
 }
 
 /// 单条内容上限：公开源里存在 14 万字符的巨型提示词，前端卡片渲染会卡顿，
