@@ -977,6 +977,8 @@
   "没有需要翻译的英文提示词": "No English prompts to translate",
   "已翻译": "Translated",
   "翻译失败": "Translation failed",
+  "该源提示词已全部存在，无需新增": "All prompts from this source already exist",
+  "请先开启自动翻译并选择非英文目标语言": "Enable auto-translate and choose a non-English target first",
   "元信息覆盖": "Metadata Overrides",
   "新增覆盖": "New Override",
   "模型 ID 为必填项": "Model ID is required",

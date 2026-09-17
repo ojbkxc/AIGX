@@ -306,12 +306,14 @@ export default function Prompts(): JSX.Element {
       }
 
       // 按 name 去重：已存在同名提示词则跳过，仅补充新条目
-      setPrompts((prev) => {
-        const existing = new Set(prev.map((p) => p.name));
-        const fresh = items.filter((it) => !existing.has(it.name));
-        return [...fresh, ...prev];
-      });
-      addToast(t('拉取完成，新增') + ` ${items.length} ` + t('条提示词，可在 Chat 页空状态直接使用'));
+      const existingNames = new Set(prompts.map((p) => p.name));
+      const fresh = items.filter((it) => !existingNames.has(it.name));
+      if (fresh.length > 0) setPrompts((prev) => [...fresh, ...prev]);
+      if (fresh.length === 0) {
+        addToast(t('该源提示词已全部存在，无需新增'));
+      } else {
+        addToast(t('拉取完成，新增') + ` ${fresh.length} ` + t('条提示词，可在 Chat 页空状态直接使用'));
+      }
       setSourceModal(false);
     } catch (err) {
       addToast(err instanceof Error ? err.message : t('拉取公开源失败'), 'error');
