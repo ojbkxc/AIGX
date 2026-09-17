@@ -100,6 +100,8 @@ export default function Prompts(): JSX.Element {
   const [translateEnabled, setTranslateEnabled] = useState(true);
   const [translateBatch, setTranslateBatch] = useState(20);
   const [translating, setTranslating] = useState(false);
+  // 批量翻译进度（已处理英文条数 / 总数），用于按钮上的进度提示。
+  const [translateProgress, setTranslateProgress] = useState<{ done: number; total: number } | null>(null);
 
   useEffect(() => {
     savePrompts(prompts);
@@ -232,9 +234,11 @@ export default function Prompts(): JSX.Element {
    *
    * items：待翻译条目数组（content 可能为英文）。返回按 index 补齐后的
    * 翻译文本 Map；翻译失败抛错（由调用方 toast 提示）。
+   * 每处理完一批回调 onProgress(已完成英文条数, 英文条总数)，用于进度展示。
    */
   const translateItems = async (
     items: Array<{ content: string }>,
+    onProgress?: (done: number, total: number) => void,
   ): Promise<Map<number, string>> => {
     const result = new Map<number, string>();
     if (!translateEnabled || translateTarget === 'English') return result;
@@ -243,6 +247,7 @@ export default function Prompts(): JSX.Element {
       .filter(({ it }) => looksEnglish(it.content));
     if (targets.length === 0) return result;
     const batchSize = Math.min(Math.max(translateBatch, 1), 40);
+    let done = 0;
     for (let i = 0; i < targets.length; i += batchSize) {
       const chunk = targets.slice(i, i + batchSize);
       const res = await translatePrompts(
@@ -250,12 +255,15 @@ export default function Prompts(): JSX.Element {
         translateTarget,
       );
       const translated = res?.data?.translated;
-      if (!Array.isArray(translated)) break;
-      for (const item of translated) {
-        // 后端返回的 index 是本批内部的 0..n，直接用下标取 chunk，再回映射到全局 idx
-        const target = chunk[item.index];
-        if (target && item.content) result.set(target.idx, item.content);
+      if (Array.isArray(translated)) {
+        for (const item of translated) {
+          // 后端返回的 index 是本批内部的 0..n，直接用下标取 chunk，再回映射到全局 idx
+          const target = chunk[item.index];
+          if (target && item.content) result.set(target.idx, item.content);
+        }
       }
+      done += chunk.length;
+      onProgress?.(done, targets.length);
     }
     return result;
   };
@@ -286,8 +294,12 @@ export default function Prompts(): JSX.Element {
         const english = items.filter((it) => looksEnglish(it.content));
         if (english.length > 0) {
           setTranslating(true);
+          setTranslateProgress({ done: 0, total: english.length });
           try {
-            const translated = await translateItems(english.map((it) => ({ content: it.content })));
+            const translated = await translateItems(
+              english.map((it) => ({ content: it.content })),
+              (done, total) => setTranslateProgress({ done, total }),
+            );
             let count = 0;
             english.forEach((it, idx) => {
               const text = translated.get(idx);
@@ -301,6 +313,7 @@ export default function Prompts(): JSX.Element {
             addToast(err instanceof Error ? err.message : t('翻译失败，保留原文'), 'error');
           } finally {
             setTranslating(false);
+            setTranslateProgress(null);
           }
         }
       }
@@ -409,7 +422,11 @@ export default function Prompts(): JSX.Element {
                     addToast(t('没有需要翻译的英文提示词'));
                     return;
                   }
-                  const translated = await translateItems(list.map((it) => ({ content: it.content })));
+                  setTranslateProgress({ done: 0, total: list.length });
+                  const translated = await translateItems(
+                    list.map((it) => ({ content: it.content })),
+                    (done, total) => setTranslateProgress({ done, total }),
+                  );
                   // 先算好 id → 译文映射，再以纯函数更新 state（避免在 updater 里改外部变量）
                   const newContentById = new Map<string, string>();
                   list.forEach((it, idx) => {
@@ -427,6 +444,7 @@ export default function Prompts(): JSX.Element {
                   addToast(err instanceof Error ? err.message : t('翻译失败'), 'error');
                 } finally {
                   setTranslating(false);
+                  setTranslateProgress(null);
                 }
               })();
             }}
@@ -434,7 +452,11 @@ export default function Prompts(): JSX.Element {
             style={{ gap: 6 }}
           >
             <Languages size={13} />
-            {translating ? t('翻译中...') : t('翻译已有')}
+            {translating
+              ? (translateProgress
+                ? t('翻译中...') + ` ${translateProgress.done}/${translateProgress.total}`
+                : t('翻译中...'))
+              : t('翻译已有')}
           </Button>
           <Button variant="outline" size="sm" onClick={() => navigate('/chat')} style={{ gap: 6 }}>
             <BookOpen size={13} />
@@ -659,7 +681,9 @@ export default function Prompts(): JSX.Element {
                         {fetchingSource === s.id
                           ? t('拉取中...')
                           : translating
-                            ? t('翻译中...')
+                            ? (translateProgress
+                              ? t('翻译中...') + ` ${translateProgress.done}/${translateProgress.total}`
+                              : t('翻译中...'))
                             : t('拉取')}
                       </Button>
                     </div>

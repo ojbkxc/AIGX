@@ -14,6 +14,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
+use futures::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
@@ -196,33 +197,61 @@ pub async fn handle_prompt_translate(
          保持原意、语气、格式与代码/变量原样。只输出翻译后的文本，\
          不要解释、不要添加引号或任何额外内容。"
     );
-    let mut out = Vec::with_capacity(items.len());
-    for (i, item) in items.iter().enumerate() {
-        let src = item
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
-        if src.is_empty() || !looks_english(src) {
-            continue;
-        }
-        let convo = vec![
-            crate::agent::llm::system_message(system.clone()),
-            crate::agent::llm::user_message(src.to_string()),
-        ];
-        match crate::agent::llm::chat_once(&state, &agent.config, convo, None).await {
-            Ok((resp, _, _)) => {
-                let text = resp.message.content.unwrap_or_default().trim().to_string();
-                out.push(json!({ "index": i, "content": text }));
+
+    // 只翻译疑似英文的条目，跳过空文本与非英文（中文标题等）。
+    let pending: Vec<(usize, String)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| {
+            let src = item.get("content").and_then(|v| v.as_str())?.trim();
+            if src.is_empty() || !looks_english(src) {
+                return None;
             }
-            Err(e) => {
-                return Err(error_response(
-                    &format!("翻译失败：{e}"),
-                    StatusCode::BAD_GATEWAY,
-                ));
+            Some((i, src.to_string()))
+        })
+        .collect();
+
+    // 逐条并发自环翻译（并发度 4），单条 60s 超时，失败/超时条目静默跳过
+    // （保持部分成功），避免某条卡死拖垮整个批量请求。
+    // AppState/AgentConfig 均为 Arc 包裹字段的轻量 Clone，逐条克隆进 async 块
+    // 以消除对函数局部引用生命周期的依赖。
+    let state_owned = state.clone();
+    let config_owned = agent.config.clone();
+    let results = futures::stream::iter(pending)
+        .map(|(i, src)| {
+            let system = system.clone();
+            let state_owned = state_owned.clone();
+            let config_owned = config_owned.clone();
+            async move {
+                let convo = vec![
+                    crate::agent::llm::system_message(system),
+                    crate::agent::llm::user_message(src),
+                ];
+                let fut = crate::agent::llm::chat_once(&state_owned, &config_owned, convo, None);
+                match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
+                    Ok(Ok((resp, _, _))) => {
+                        let text = resp.message.content.unwrap_or_default().trim().to_string();
+                        // 兜底：译文仍是纯英文时视为翻译失败，丢弃该条保留原文。
+                        if looks_english(&text) {
+                            None
+                        } else {
+                            Some((i, text))
+                        }
+                    }
+                    _ => None,
+                }
             }
-        }
+        })
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut out = Vec::with_capacity(results.len());
+    for (i, text) in results.into_iter().flatten() {
+        out.push(json!({ "index": i, "content": text }));
     }
+    // 按原始 index 升序返回，前端可直接下标定位。
+    out.sort_by_key(|v| v["index"].as_u64().unwrap_or(0));
     Ok(Json(
         json!({ "success": true, "data": { "translated": out } }),
     ))
