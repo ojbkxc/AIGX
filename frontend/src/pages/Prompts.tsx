@@ -252,7 +252,8 @@ export default function Prompts(): JSX.Element {
       const translated = res?.data?.translated;
       if (!Array.isArray(translated)) break;
       for (const item of translated) {
-        const target = chunk.find((c) => c.idx === item.index);
+        // 后端返回的 index 是本批内部的 0..n，直接用下标取 chunk，再回映射到全局 idx
+        const target = chunk[item.index];
         if (target && item.content) result.set(target.idx, item.content);
       }
     }
