@@ -74,21 +74,30 @@ async fn store(cache: &PromptSourceCache, key: &str, v: Value) {
 }
 
 /// GET /api/prompts/sources — 列出可拉取的公开源（登录用户即可）。
-pub async fn handle_prompt_sources() -> Json<Value> {
+pub async fn handle_prompt_sources(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _user = verify_user(&state, &headers).await?;
     let data: Vec<Value> = SOURCES
         .iter()
         .map(|(id, name, desc, repo)| {
             json!({ "id": id, "name": name, "description": desc, "repo": repo })
         })
         .collect();
-    Json(json!({ "success": true, "data": data }))
+    Ok(Json(json!({ "success": true, "data": data })))
 }
 
 /// POST /api/prompts/fetch — 抓取指定源并返回提示词数组。
+///
+/// 鉴权：必须登录。该端点会触发服务端向 GitHub 发起数百个并发抓取请求，
+/// 未鉴权将沦为免费代理与 DoS 放大器（借 AIGX 服务器压 GitHub API 配额）。
 pub async fn handle_prompt_fetch(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _user = verify_user(&state, &headers).await?;
     let id = body
         .get("source")
         .and_then(|s| s.as_str())
