@@ -197,10 +197,45 @@ pub async fn handle_prompt_fetch(
         }
     };
 
-    let data = result
+    let mut data = result
         .map_err(|e| error_response(&format!("拉取公开源失败：{e}"), StatusCode::BAD_GATEWAY))?;
+    // 逐源截断到 MAX_FETCH_ITEMS（并发抓取已在 fetch 函数内 truncate，
+    // 这里再兜底一次，覆盖未来新增源忘截断的情况）。
+    data.truncate(MAX_FETCH_ITEMS);
+    // 逐条再次裁剪内容到 MAX_CONTENT_CHARS（fetch 函数已裁剪，此处为
+    // 二次防线，防止个别源绕过 entry() 直接构造超长条目）。
+    for item in &mut data {
+        if let Some(content) = item.get("content").and_then(|c| c.as_str()) {
+            if content.chars().count() > MAX_CONTENT_CHARS {
+                let truncated: String = content.chars().take(MAX_CONTENT_CHARS).collect();
+                item["content"] = json!(format!("{truncated}\n…（内容过长，已截断）"));
+            }
+        }
+    }
+    // 按 UTF-16 码元估算（localStorage 配额口径）做最终体积闸：非 ASCII
+    // 字符占 1 个码元，但实际编码为 2 字节；用「每字符按 2 码元」的保守
+    // 上限，超阈值即丢弃尾部条目并置 truncated 标记。防止 UTF-8 体积看似
+    // 安全（如 awesome-prompts 2.96MB）实则 UTF-16 触达 5MB 配额而静默丢失。
+    let mut truncated = false;
+    let mut utf16_est: usize = 0;
+    data.retain(|item| {
+        if truncated {
+            return false;
+        }
+        let content = item.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        utf16_est += content.chars().count() * 2;
+        if utf16_est > MAX_SOURCE_UTF16_ESTIMATE {
+            truncated = true;
+            return false;
+        }
+        true
+    });
     store(&state.prompt_source_cache, &key, Value::Array(data.clone())).await;
-    Ok(Json(json!({ "success": true, "data": data })))
+    Ok(Json(json!({
+        "success": true,
+        "truncated": truncated,
+        "data": data,
+    })))
 }
 
 type PromptList = Vec<Value>;
@@ -411,6 +446,13 @@ const MAX_CONTENT_CHARS: usize = 20_000;
 /// 看到「新增 2169 条」但刷新后全部丢失。按条目数截断到 800 条，JSON 体积
 /// 控制在约 2MB，安全落在配额内；800 条对「参考提示词」场景也已足够。
 const MAX_FETCH_ITEMS: usize = 800;
+
+/// 单源最大 UTF-16 字节估算：localStorage 配额按 UTF-16 码元计（Chrome 约
+/// 5M 码元）。awesome-prompts 377 条实测 UTF-8 约 2.96MB、但 UTF-16 估约
+/// 5.6MB——单按 UTF-8 体积判断会误判「安全」，实际导入仍触达配额导致
+/// savePrompts 静默失败。超过该阈值即在响应中丢弃超限条目（返回时带
+/// `truncated` 标记），把单源稳定压在约 3MB UTF-16 以内。
+const MAX_SOURCE_UTF16_ESTIMATE: usize = 3_000_000;
 
 fn entry(name: &str, content: &str, tags: &[&str], source: &str) -> Value {
     let content = if content.chars().count() > MAX_CONTENT_CHARS {
