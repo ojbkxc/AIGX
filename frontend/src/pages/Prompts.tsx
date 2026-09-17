@@ -398,21 +398,28 @@ export default function Prompts(): JSX.Element {
               void (async () => {
                 setTranslating(true);
                 try {
+                  if (!translateEnabled || translateTarget === 'English') {
+                    addToast(t('请先开启自动翻译并选择非英文目标语言'));
+                    return;
+                  }
                   const list = prompts.filter((p) => looksEnglish(p.content));
                   if (list.length === 0) {
                     addToast(t('没有需要翻译的英文提示词'));
                     return;
                   }
                   const translated = await translateItems(list.map((it) => ({ content: it.content })));
-                  let count = 0;
-                  setPrompts((prev) => prev.map((p) => {
-                    const idx = list.findIndex((e) => e.id === p.id);
-                    if (idx < 0) return p;
+                  // 先算好 id → 译文映射，再以纯函数更新 state（避免在 updater 里改外部变量）
+                  const newContentById = new Map<string, string>();
+                  list.forEach((it, idx) => {
                     const text = translated.get(idx);
-                    if (!text) return p;
-                    count += 1;
-                    return { ...p, content: text, updated_at: Date.now() };
-                  }));
+                    if (text) newContentById.set(it.id, text);
+                  });
+                  const count = newContentById.size;
+                  setPrompts((prev) => prev.map((p) => (
+                    newContentById.has(p.id)
+                      ? { ...p, content: newContentById.get(p.id) as string, updated_at: Date.now() }
+                      : p
+                  )));
                   addToast(t('已翻译') + ` ${count} ` + t('条'));
                 } catch (err) {
                   addToast(err instanceof Error ? err.message : t('翻译失败'), 'error');
