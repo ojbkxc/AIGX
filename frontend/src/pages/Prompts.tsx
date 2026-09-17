@@ -99,6 +99,8 @@ export default function Prompts(): JSX.Element {
   const [translateTarget, setTranslateTarget] = useState('简体中文');
   const [translateEnabled, setTranslateEnabled] = useState(true);
   const [translateBatch, setTranslateBatch] = useState(20);
+  // 自环翻译可用性：null=未预检，true=[agent] 已启用且配置了模型，false=不可用（未启用/未配置模型）
+  const [agentReady, setAgentReady] = useState<boolean | null>(null);
   const [translating, setTranslating] = useState(false);
   // 批量翻译进度（已处理英文条数 / 总数），用于按钮上的进度提示。
   const [translateProgress, setTranslateProgress] = useState<{ done: number; total: number } | null>(null);
@@ -219,6 +221,17 @@ export default function Prompts(): JSX.Element {
   const openSources = async () => {
     setSourceModal(true);
     setSourcesLoading(true);
+    // 预检自环翻译可用性：[agent] 未启用或未配置 model 时，翻译必然 503，
+    // 提前拿到结果以禁用「自动翻译英文提示词」开关，而不是等用户点了拉取
+    // 再在翻译环节报错。预检失败不阻断弹窗（拉取本身不依赖 agent）。
+    if (agentReady === null) {
+      try {
+        const cfg = await api.getAgentConfig();
+        setAgentReady(Boolean(cfg?.data?.model?.trim()));
+      } catch {
+        setAgentReady(false);
+      }
+    }
     try {
       const res = await api.listPromptSources();
       setSources(Array.isArray(res?.data) ? res.data : []);
@@ -676,13 +689,19 @@ export default function Prompts(): JSX.Element {
                 <label className="prompts-translate-toggle">
                   <input
                     type="checkbox"
-                    checked={translateEnabled}
+                    checked={agentReady !== false && translateEnabled}
+                    disabled={agentReady === false}
                     onChange={(e) => setTranslateEnabled(e.target.checked)}
                   />
                   <span>{t('自动翻译英文提示词')}</span>
                 </label>
               </div>
               <p className="prompts-source-hint">{t('翻译走 AIGX 自己的渠道（需 [agent] 配置模型），失败时保留原文；每日有翻译字符预算，超限请明日再试。')}</p>
+              {agentReady === false && (
+                <p className="prompts-source-hint" style={{ color: '#c0392b' }}>
+                  {t('自环翻译不可用：请先在配置中启用 [agent] 并设置模型，再勾选自动翻译。')}
+                </p>
+              )}
               {sourcesLoading ? (
                 <div className="prompts-source-loading">{t('加载中...')}</div>
               ) : sources.length === 0 ? (
