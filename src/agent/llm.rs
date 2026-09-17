@@ -129,6 +129,13 @@ pub async fn chat_once(
         }
         let upstream =
             resolve_upstream_model(&config.model, cand.channel.as_ref(), &state.model_mapper);
+        // 无工具时不得声明 tool_choice="auto"：严格的 OpenAI 兼容上游会在
+        // 仅带 tool_choice 而缺 tools 时返回 400。纯文本自环（如提示词翻译）
+        // 复用 chat_once 时 tools=None，必须同步置空，否则翻译会整体失败。
+        let tool_choice = tools
+            .as_ref()
+            .filter(|t| !t.is_empty())
+            .map(|_| serde_json::json!("auto"));
         let mut req = ChatFormat {
             model: upstream.clone(),
             messages: messages.clone(),
@@ -139,7 +146,7 @@ pub async fn chat_once(
             stream: false,
             top_k: None,
             stop: None,
-            tool_choice: Some(serde_json::json!("auto")),
+            tool_choice,
             reasoning_effort: None,
             web_search_options: None,
             extra: None,
