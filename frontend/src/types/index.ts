@@ -177,6 +177,8 @@ export interface ApiResponse<T = unknown> {
   data?: T;
   error?: ApiError;
   meta?: ResponseMeta;
+  /** 后端因体积/条目上限截断结果时为 true（如公开源拉取超 UTF-16 体积闸） */
+  truncated?: boolean;
 }
 
 export type ApiList<T> = ApiResponse<T[]> & {
