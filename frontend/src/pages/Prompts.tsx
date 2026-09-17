@@ -250,17 +250,22 @@ export default function Prompts(): JSX.Element {
     let done = 0;
     for (let i = 0; i < targets.length; i += batchSize) {
       const chunk = targets.slice(i, i + batchSize);
-      const res = await translatePrompts(
-        chunk.map(({ it }) => ({ content: it.content })),
-        translateTarget,
-      );
-      const translated = res?.data?.translated;
-      if (Array.isArray(translated)) {
-        for (const item of translated) {
-          // 后端返回的 index 是本批内部的 0..n，直接用下标取 chunk，再回映射到全局 idx
-          const target = chunk[item.index];
-          if (target && item.content) result.set(target.idx, item.content);
+      try {
+        const res = await translatePrompts(
+          chunk.map(({ it }) => ({ content: it.content })),
+          translateTarget,
+        );
+        const translated = res?.data?.translated;
+        if (Array.isArray(translated)) {
+          for (const item of translated) {
+            // 后端返回的 index 是本批内部的 0..n，直接用下标取 chunk，再回映射到全局 idx
+            const target = chunk[item.index];
+            if (target && item.content) result.set(target.idx, item.content);
+          }
         }
+      } catch {
+        // 单批失败跳过，继续后续批次（后端本身是「单条失败静默跳过」的
+        // 部分成功语义，前端不应因某批失败而丢弃已成功的其余批次）。
       }
       done += chunk.length;
       onProgress?.(done, targets.length);
