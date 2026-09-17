@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use futures::StreamExt;
 use serde_json::{json, Value};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex as TokioMutex, RwLock};
 
 use super::super::openai::AppState;
 use super::common::{error_response, verify_user};
@@ -47,6 +47,8 @@ const SOURCES: &[(&str, &str, &str, &str)] = &[
 #[derive(Default)]
 pub struct PromptSourceCache {
     map: Arc<RwLock<HashMap<String, (i64, Value)>>>,
+    /// 按 key 的在途抓取闸门：防止同一源被并发触发多次 GitHub 抓取。
+    inflight: Arc<TokioMutex<HashMap<String, ()>>>,
 }
 
 impl PromptSourceCache {
@@ -71,6 +73,38 @@ async fn hit(cache: &PromptSourceCache, key: &str) -> Option<Value> {
 async fn store(cache: &PromptSourceCache, key: &str, v: Value) {
     let mut map = cache.map.write().await;
     map.insert(key.to_string(), (chrono::Utc::now().timestamp(), v));
+}
+
+/// 抓取闸门：同一 key 正在抓取时返回 `None`（调用方直接放行，等已发起的
+/// 请求自己落缓存），否则占位返回守卫。守卫 Drop 时释放占位，保证后续
+/// 请求（含失败后重试）不被永久卡死。
+struct FetchGuard {
+    inflight: Arc<TokioMutex<HashMap<String, ()>>>,
+    key: String,
+}
+
+impl Drop for FetchGuard {
+    fn drop(&mut self) {
+        // 同步 Drop 无法 await，用 try_lock 尽力清理。极端竞争下若锁被
+        // 短暂占用，此处可能漏删——但占位仅是"在途"标记，下一次请求会
+        // 走正常抓取路径重新建占位，不会形成永久死锁。
+        if let Ok(mut m) = self.inflight.try_lock() {
+            m.remove(&self.key);
+        }
+    }
+}
+
+async fn begin_fetch(cache: &PromptSourceCache, key: &str) -> Option<FetchGuard> {
+    let mut m = cache.inflight.lock().await;
+    if m.contains_key(key) {
+        None
+    } else {
+        m.insert(key.to_string(), ());
+        Some(FetchGuard {
+            inflight: cache.inflight.clone(),
+            key: key.to_string(),
+        })
+    }
 }
 
 /// GET /api/prompts/sources — 列出可拉取的公开源（登录用户即可）。
@@ -112,6 +146,15 @@ pub async fn handle_prompt_fetch(
     if let Some(v) = hit(&state.prompt_source_cache, &key).await {
         return Ok(Json(json!({ "success": true, "data": v })));
     }
+    // 同一源已在途抓取：直接返回空数组，让前端稍后重试（或等已发起的
+    // 请求落缓存）。既避免并发重复抓取，也防止未鉴权时代码被当作
+    // 放大器（现已要求登录，此闸门是纵深防御的第二道）。
+    // `_guard` 必须绑定存活到本函数末尾，其 Drop 才在 fetch 完成后释放
+    // 占位；若写成 `.is_none()` 临时值，guard 会被立即 Drop、闸门失效。
+    let _guard = match begin_fetch(&state.prompt_source_cache, &key).await {
+        Some(g) => g,
+        None => return Ok(Json(json!({ "success": true, "data": [] }))),
+    };
 
     let client = state.http_client.clone();
     let result = match id {
