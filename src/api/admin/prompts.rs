@@ -72,14 +72,20 @@ impl Default for PromptSourceCache {
 const CACHE_TTL_SECS: i64 = 300;
 
 async fn hit(cache: &PromptSourceCache, key: &str) -> Option<Value> {
-    let map = cache.map.read().await;
-    map.get(key).and_then(|(ts, v)| {
-        if chrono::Utc::now().timestamp() - *ts < CACHE_TTL_SECS {
-            Some(v.clone())
-        } else {
+    // 用写锁：命中返回 clone，过期则主动 remove 释放几 MB 的 Value。
+    // 若只读锁判断过期就返回 None，过期条目会一直驻留内存，直到下次
+    // 同 key store 才被覆盖——某源抓取后 5 分钟内无人再请求，其大
+    // Value 就永久占着内存。key 空间固定 3 个、总量有界，但过期垃圾
+    // 应即时清理，而不是等覆盖。
+    let mut map = cache.map.write().await;
+    match map.get(key) {
+        Some((ts, v)) if chrono::Utc::now().timestamp() - *ts < CACHE_TTL_SECS => Some(v.clone()),
+        Some(_) => {
+            map.remove(key);
             None
         }
-    })
+        None => None,
+    }
 }
 
 async fn store(cache: &PromptSourceCache, key: &str, v: Value) {
