@@ -25,7 +25,9 @@ COPY aigx-net ./aigx-net
 # CFLAGS 让 cc crate 编译 bundled SQLite(C 代码) 时开启栈保护。
 ENV RUSTFLAGS="-C link-arg=-Wl,-z,noexecstack" \
     CFLAGS="-fstack-protector-strong"
-RUN cargo build --release --locked
+# postgres 特性仅是 SeaORM 的编译期 feature 开关，不引入额外运行时成本；
+# 与 build.yml 的 linux-amd64 产物特性集保持一致，避免镜像缺 postgres 后端。
+RUN cargo build --release --locked --features "sqlite-kv,postgres"
 
 # ── 阶段 3：运行镜像 ──────────────────────────────────────────
 FROM alpine:3.20
