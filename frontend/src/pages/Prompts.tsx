@@ -246,19 +246,21 @@ export default function Prompts(): JSX.Element {
    * 自环翻译英文提示词条目（按批次切片调用 /api/prompts/translate）。
    *
    * items：待翻译条目数组（content 可能为英文）。返回按 index 补齐后的
-   * 翻译文本 Map；翻译失败抛错（由调用方 toast 提示）。
+   * 翻译文本 Map，以及是否因「每日预算用尽」（429）而中止——调用方据此
+   * 透传明确原因，而不是只报一个模糊的「部分失败」。
    * 每处理完一批回调 onProgress(已完成英文条数, 英文条总数)，用于进度展示。
    */
   const translateItems = async (
     items: Array<{ content: string }>,
     onProgress?: (done: number, total: number) => void,
-  ): Promise<Map<number, string>> => {
+  ): Promise<{ translated: Map<number, string>; budgetExhausted: boolean }> => {
     const result = new Map<number, string>();
-    if (!translateEnabled || translateTarget === 'English') return result;
+    let budgetExhausted = false;
+    if (!translateEnabled || translateTarget === 'English') return { translated: result, budgetExhausted };
     const targets = items
       .map((it, idx) => ({ it, idx }))
       .filter(({ it }) => looksEnglish(it.content));
-    if (targets.length === 0) return result;
+    if (targets.length === 0) return { translated: result, budgetExhausted };
     const batchSize = Math.min(Math.max(translateBatch, 1), 40);
     let done = 0;
     for (let i = 0; i < targets.length; i += batchSize) {
@@ -280,12 +282,15 @@ export default function Prompts(): JSX.Element {
         // 429 = 每日翻译字符预算用尽：后续批次必然同样被拒，直接中止循环，
         // 已成功批次的译文仍返回，避免空耗往返。其余错误单批跳过，保持
         // 与后端「单条失败静默跳过」一致的部分成功语义。
-        if ((err as { status?: number })?.status === 429) break;
+        if ((err as { status?: number })?.status === 429) {
+          budgetExhausted = true;
+          break;
+        }
       }
       done += chunk.length;
       onProgress?.(done, targets.length);
     }
-    return result;
+    return { translated: result, budgetExhausted };
   };
 
   const handleFetchSource = async (id: string) => {
@@ -331,7 +336,7 @@ export default function Prompts(): JSX.Element {
           setTranslating(true);
           setTranslateProgress({ done: 0, total: english.length });
           try {
-            const translated = await translateItems(
+            const { translated, budgetExhausted } = await translateItems(
               english.map((it) => ({ content: it.content })),
               (done, total) => setTranslateProgress({ done, total }),
             );
@@ -345,9 +350,13 @@ export default function Prompts(): JSX.Element {
             });
             if (count > 0) addToast(t('已自动翻译') + ` ${count} ` + t('条英文提示词'));
             if (count < english.length) {
-              // 部分成功（429 预算用尽或部分条目翻译失败）：明确告知实际
-              // 完成条数，避免用户以为全部翻译成功。
-              addToast(t('翻译预算已用尽或部分失败，本次完成') + ` ${count}/${english.length} ` + t('条'), 'error');
+              // 429（每日预算用尽）与「部分条目翻译失败」原因不同，分别提示，
+              // 让用户知道是预算还是网络/模型问题，而不是一个模糊的「部分失败」。
+              if (budgetExhausted) {
+                addToast(t('今日翻译字符预算已用尽，请明日再试') + `（${count}/${english.length}）`, 'error');
+              } else {
+                addToast(t('部分条目翻译失败，本次完成') + ` ${count}/${english.length} ` + t('条'), 'error');
+              }
             }
           } catch (err) {
             // 429（每日预算用尽）后端已给中文提示，直接透传；其余失败保留原文
@@ -461,7 +470,7 @@ export default function Prompts(): JSX.Element {
                     return;
                   }
                   setTranslateProgress({ done: 0, total: list.length });
-                  const translated = await translateItems(
+                  const { translated, budgetExhausted } = await translateItems(
                     list.map((it) => ({ content: it.content })),
                     (done, total) => setTranslateProgress({ done, total }),
                   );
@@ -477,7 +486,17 @@ export default function Prompts(): JSX.Element {
                       ? { ...p, content: newContentById.get(p.id) as string, updated_at: Date.now() }
                       : p
                   )));
-                  addToast(t('已翻译') + ` ${count} ` + t('条'));
+                  if (count === 0 && budgetExhausted) {
+                    addToast(t('今日翻译字符预算已用尽，请明日再试'), 'error');
+                  } else if (count === 0) {
+                    addToast(t('翻译失败，已保留原文'), 'error');
+                  } else if (budgetExhausted) {
+                    addToast(t('已翻译') + ` ${count} ` + t('条') + `，${t('今日预算已用尽，剩余条目请明日再试')}`, 'error');
+                  } else if (count < list.length) {
+                    addToast(t('已翻译') + ` ${count}/${list.length} ` + t('条，部分失败已保留原文'));
+                  } else {
+                    addToast(t('已翻译') + ` ${count} ` + t('条'));
+                  }
                 } catch (err) {
                   addToast(err instanceof Error ? err.message : t('翻译失败'), 'error');
                 } finally {
