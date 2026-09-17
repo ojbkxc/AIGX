@@ -321,6 +321,11 @@ export default function Prompts(): JSX.Element {
               }
             });
             if (count > 0) addToast(t('已自动翻译') + ` ${count} ` + t('条英文提示词'));
+            if (count < english.length) {
+              // 部分成功（429 预算用尽或部分条目翻译失败）：明确告知实际
+              // 完成条数，避免用户以为全部翻译成功。
+              addToast(t('翻译预算已用尽或部分失败，本次完成') + ` ${count}/${english.length} ` + t('条'), 'error');
+            }
           } catch (err) {
             // 429（每日预算用尽）后端已给中文提示，直接透传；其余失败保留原文
             addToast(err instanceof Error ? err.message : t('翻译失败，保留原文'), 'error');
