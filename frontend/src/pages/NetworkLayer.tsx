@@ -9,7 +9,9 @@ import {
   addNetworkAccount,
   removeNetworkAccount,
 } from '../api/network';
+import { getSchedulerStatus } from '../api';
 import type { NetworkStatusRaw, NetworkAccount } from '../types/network';
+import type { SchedulerStatusItem, SchedulerChannelItem } from '../types';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import './NetworkLayer.css';
@@ -57,6 +59,30 @@ function formatTimestamp(ts: number | undefined): string {
   return new Date(ts * 1000).toLocaleString();
 }
 
+/** 断路器三态 → 展示色（与 Dashboard 渠道卡同口径） */
+function breakerColor(state?: string): string {
+  if (state === 'open') return 'rgb(239,68,68)';
+  if (state === 'halfopen') return 'rgb(234,179,8)';
+  return 'rgb(34,197,94)';
+}
+
+function breakerLabel(state?: string, t?: (k: string) => string): string {
+  if (state === 'open') return t ? t('熔断') : '熔断';
+  if (state === 'halfopen') return t ? t('半开') : '半开';
+  return t ? t('正常') : '正常';
+}
+
+function fmtPct(val: number | null | undefined): string {
+  if (val === undefined || val === null) return '—';
+  return (val * 100).toFixed(1) + '%';
+}
+
+function fmtRate(val: number | null | undefined): string {
+  // 后端 success_rate 已是 0~100 的百分数
+  if (val === undefined || val === null) return '—';
+  return val.toFixed(1) + '%';
+}
+
 export default function NetworkLayer(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
@@ -72,6 +98,7 @@ export default function NetworkLayer(): JSX.Element {
   const [showAccountForm, setShowAccountForm] = useState(false);
   const [accountForm, setAccountForm] = useState({ name: '', accountId: '', apiToken: '' });
   const [toggling, setToggling] = useState(false);
+  const [scheduler, setScheduler] = useState<SchedulerStatusItem | null>(null);
 
   const fetchStatus = useCallback(async (keepOld = false): Promise<void> => {
     try {
@@ -95,6 +122,12 @@ export default function NetworkLayer(): JSX.Element {
         setAccounts(accRes.data ?? []);
       } catch {
         // 账号列表失败不阻塞状态面板
+      }
+      try {
+        const schRes = await getSchedulerStatus();
+        setScheduler((schRes.data ?? null) as SchedulerStatusItem | null);
+      } catch {
+        // 调度状态拉取失败不阻塞网络层面板
       }
     } catch {
       addToast(t('获取网络状态失败'), 'error');
@@ -590,6 +623,118 @@ export default function NetworkLayer(): JSX.Element {
             </div>
           </>
         )}
+
+      {/* 调度实时地图（A2：渠道调度器四路信号） */}
+      <div className="glass-card p-5">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-xl font-semibold text-white">{t('调度实时地图')}</h2>
+            <p className="text-gray-500 text-xs mt-1">
+              {t('断路器 · 健康 EMA · AIMD 限额 · 当日档案')}
+              {scheduler?.scheduler
+                ? ` · ${t('调度权重')} H${scheduler.scheduler.health_weight}/C${scheduler.scheduler.cost_weight}/R${scheduler.scheduler.rpm_weight}`
+                : ''}
+            </p>
+          </div>
+        </div>
+        {!scheduler || scheduler.channels.length === 0 ? (
+          <p className="text-gray-500 text-sm py-4">{t('暂无调度数据')}</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-gray-400 text-left border-b border-gray-700">
+                  <th className="py-2 pr-4">{t('渠道')}</th>
+                  <th className="py-2 pr-4">{t('断路器')}</th>
+                  <th className="py-2 pr-4">{t('健康')}</th>
+                  <th className="py-2 pr-4">{t('AIMD 限额')}</th>
+                  <th className="py-2 pr-4">{t('当日成功率')}</th>
+                  <th className="py-2 pr-4">{t('熔断次数')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scheduler.channels.map((ch: SchedulerChannelItem) => {
+                  const state = ch.breaker?.state;
+                  return (
+                    <tr key={ch.id} className="border-b border-gray-800">
+                      <td className="py-2 pr-4 text-white">
+                        <div className="font-medium">{ch.name || ch.id}</div>
+                        <div className="text-gray-500 text-xs">
+                          {ch.channel_type} · {ch.enabled ? t('启用') : t('停用')} · W{ch.weight}
+                        </div>
+                      </td>
+                      <td className="py-2 pr-4">
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full" style={{ background: breakerColor(state) }} />
+                          <span style={{ color: breakerColor(state) }}>{breakerLabel(state, t)}</span>
+                        </span>
+                        {ch.breaker && ch.breaker.failure_count > 0 && (
+                          <div className="text-gray-500 text-xs mt-0.5">
+                            {ch.breaker.failure_count} 失败
+                            {ch.breaker.failure_type ? ` · ${ch.breaker.failure_type}` : ''}
+                          </div>
+                        )}
+                        {ch.breaker && ch.breaker.cooldown_remaining_secs > 0 && (
+                          <div className="text-gray-500 text-xs">
+                            {t('冷却')} {ch.breaker.cooldown_remaining_secs}s
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4">
+                        {ch.health ? (
+                          <>
+                            <div className={ch.health.auth_ok ? 'text-green-500' : 'text-red-500'}>
+                              {ch.health.auth_ok ? t('认证正常') : t('认证失败')}
+                            </div>
+                            <div className="text-gray-500 text-xs">
+                              {t('错误率')} {fmtPct(ch.health.overall_error_rate)} · {fmtLatency(ch.health.overall_avg_latency_ms)}
+                            </div>
+                            {ch.health.last_error && (
+                              <div className="text-gray-500 text-xs truncate max-w-[240px]" title={ch.health.last_error}>
+                                {ch.health.last_error}
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <span className="text-gray-600">—</span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4">
+                        {ch.aimd ? (
+                          <>
+                            <span className="text-white font-medium">{ch.aimd.current_limit}</span>
+                            <span className="text-gray-500 text-xs ml-1.5">{ch.aimd.state}</span>
+                          </>
+                        ) : (
+                          <span className="text-gray-600">—</span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4">
+                        {ch.archive ? (
+                          <span style={{ color: ch.archive.success_rate >= 95 ? 'rgb(34,197,94)' : ch.archive.success_rate >= 80 ? 'rgb(234,179,8)' : 'rgb(239,68,68)' }}>
+                            {fmtRate(ch.archive.success_rate)}
+                          </span>
+                        ) : (
+                          <span className="text-gray-600">—</span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4">
+                        {ch.archive ? (
+                          <span className={ch.archive.trips > 0 ? 'text-yellow-500 font-medium' : 'text-gray-600'}>
+                            {ch.archive.trips}
+                          </span>
+                        ) : (
+                          <span className="text-gray-600">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       {/* Restart Confirmation Dialog（统一 ConfirmDialog，替换自造 Tailwind 弹窗） */}
       <ConfirmDialog

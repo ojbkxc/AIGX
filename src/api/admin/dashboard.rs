@@ -107,8 +107,107 @@ pub async fn handle_channel_stats(
         "data": channels,
         "stats": json!({
             "total_channels": channels.len(),
-            "active_channels": channels.len(),
+            "active_channels": channels.iter().filter(|c| c["status"] == "enabled").count(),
         })
+    })))
+}
+
+/// 调度实时状态（A2 毫秒级 failover 看板）。
+///
+/// 逐渠道聚合四路实时信号，供 NetworkLayer「调度实时地图」直接渲染：
+/// - `breaker`：断路器三态 + 失败计数 + 剩余冷却/限流（`CircuitBreaker::snapshot_all`）
+/// - `health`：健康追踪器汇总（错误率/延迟 EMA/认证/余额，`ChannelStateTracker::get_health`）
+/// - `aimd`：AIMD 限额与状态机（`ChannelStore::aimd_snapshot`）
+/// - `archive`：当日健康档案（成功率/熔断次数/P95，`HealthArchive::query(1)`）
+///
+/// 只读：不写断路器/健康/AIMD，不落日志，不触发限流。与
+/// `dashboard/channel_health`（日志回放口径）互补——那个看"历史吞吐"，
+/// 这个看"此刻调度器眼中的渠道健康"。
+pub async fn handle_scheduler_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+
+    let channels = state.channel_store.list();
+    let breakers = state.channel_store.circuit_breaker().snapshot_all();
+    let breaker_by_id: std::collections::HashMap<&str, _> = breakers
+        .iter()
+        .map(|s| (s.channel_id.as_str(), s))
+        .collect();
+    let cfg = state.channel_store.scheduler_config();
+
+    let items: Vec<Value> = channels
+        .iter()
+        .map(|ch| {
+            let breaker = breaker_by_id.get(ch.id.as_str()).map(|s| {
+                json!({
+                    "state": s.state,
+                    "failure_count": s.failure_count,
+                    "failure_type": s.failure_type,
+                    "cooldown_remaining_secs": s.cooldown_remaining_secs,
+                    "rate_limit_remaining_secs": s.rate_limit_remaining_secs,
+                    "probe_in_flight": s.probe_in_flight,
+                })
+            });
+            let health = state
+                .channel_store
+                .health_tracker()
+                .get_health(&ch.id)
+                .map(|h| {
+                    json!({
+                        "auth_ok": h.auth_ok,
+                        "balance_status": h.balance_status,
+                        "overall_error_rate": h.overall_error_rate,
+                        "overall_avg_latency_ms": h.overall_avg_latency_ms,
+                        "last_error": h.last_error,
+                    })
+                });
+            let aimd = state.channel_store.aimd_snapshot(&ch.id).map(|a| {
+                json!({
+                    "current_limit": a.current_limit,
+                    "state": a.state,
+                })
+            });
+            let archive = state
+                .channel_store
+                .health_archive()
+                .query(&ch.id, 1)
+                .pop()
+                .map(|s| {
+                    json!({
+                        "success": s.success,
+                        "failure": s.failure,
+                        "trips": s.trips,
+                        "success_rate": (s.success_rate() * 100.0).round() / 100.0,
+                        "p95_ms": s.p95_ms(),
+                        "last_error": s.last_error,
+                    })
+                });
+
+            json!({
+                "id": ch.id,
+                "name": ch.name,
+                "enabled": ch.is_enabled(),
+                "channel_type": ch.channel_type,
+                "priority": ch.priority,
+                "weight": ch.weight,
+                "models": ch.models,
+                "status": ch.status,
+                "breaker": breaker,
+                "health": health,
+                "aimd": aimd,
+                "archive": archive,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "scheduler": cfg,
+            "channels": items,
+        }
     })))
 }
 

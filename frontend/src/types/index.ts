@@ -661,6 +661,63 @@ export interface DashboardItem {
   [key: string]: unknown;
 }
 
+// ── 调度实时状态（/api/dashboard/scheduler_status）──────────────────────
+
+export interface SchedulerBreakerItem {
+  state: 'open' | 'halfopen' | 'closed';
+  failure_count: number;
+  failure_type: string | null;
+  cooldown_remaining_secs: number;
+  rate_limit_remaining_secs: number;
+  probe_in_flight: boolean;
+}
+
+export interface SchedulerHealthItem {
+  auth_ok: boolean;
+  balance_status: string;
+  overall_error_rate: number;
+  overall_avg_latency_ms: number;
+  last_error: string | null;
+}
+
+export interface SchedulerAimdItem {
+  current_limit: number;
+  state: string;
+}
+
+export interface SchedulerArchiveItem {
+  success: number;
+  failure: number;
+  trips: number;
+  success_rate: number;
+  p95_ms: number;
+  last_error: string | null;
+}
+
+export interface SchedulerChannelItem {
+  id: string;
+  name: string;
+  enabled: boolean;
+  channel_type: string;
+  priority: number;
+  weight: number;
+  models: string[];
+  status: string;
+  breaker: SchedulerBreakerItem | null;
+  health: SchedulerHealthItem | null;
+  aimd: SchedulerAimdItem | null;
+  archive: SchedulerArchiveItem | null;
+}
+
+export interface SchedulerStatusItem {
+  scheduler: {
+    health_weight: number;
+    cost_weight: number;
+    rpm_weight: number;
+  };
+  channels: SchedulerChannelItem[];
+}
+
 // ============================================================================
 // 分页类型
 // ============================================================================

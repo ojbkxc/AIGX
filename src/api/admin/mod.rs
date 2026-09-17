@@ -80,7 +80,10 @@ pub use subscriptions::{
     handle_subscription_self,
 };
 
-pub use dashboard::{handle_cache_savings, handle_consumption_trend, handle_model_distribution};
+pub use dashboard::{
+    handle_cache_savings, handle_consumption_trend, handle_model_distribution,
+    handle_scheduler_status,
+};
 
 pub use settings::{
     handle_get_limits, handle_get_oauth_config, handle_get_settings, handle_update_limits,

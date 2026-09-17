@@ -420,6 +420,12 @@ pub async fn handle_messages(
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        // P1-7：调度决策回放——记录候选渠道与被过滤渠道（与 openai 流式路径对齐）
+        let candidate_channel_ids: Vec<String> = candidates
+            .iter()
+            .filter_map(|(_, cid, _)| cid.clone())
+            .collect();
+        let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
         for (bridge, cid, ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
@@ -465,6 +471,11 @@ pub async fn handle_messages(
                 Err(e) => {
                     // 阶段2：失败分类记入断路器/健康追踪/亲和清除
                     if let Some(c) = &cid {
+                        // P1-7：记录被过滤的渠道及原因
+                        filtered_channels.push(crate::log::FilteredChannel {
+                            channel_id: c.clone(),
+                            reason: e.to_string(),
+                        });
                         state.channel_store.record_channel_failure(
                             c,
                             Some(&upstream),
@@ -517,6 +528,10 @@ pub async fn handle_messages(
                 log.error_msg = Some(e.to_string());
                 log.ip = client_ip.clone();
                 log.request_id = Some(request_id.clone());
+                // P1-7：调度决策回放字段（与 openai 失败路径对齐）
+                log.candidate_channels = candidate_channel_ids.clone();
+                log.filtered_channels = filtered_channels.clone();
+                log.selected_channel = used_channel_id.clone();
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 crate::metrics::global().record_request(
@@ -809,8 +824,8 @@ pub async fn handle_messages(
                     .as_ref()
                     .and_then(|cid| state.channel_store.get(cid))
                     .map(|c| c.name.clone()),
-                candidate_channels: Vec::new(),
-                filtered_channels: Vec::new(),
+                candidate_channels: candidate_channel_ids.clone(),
+                filtered_channels: filtered_channels.clone(),
                 // anthropic 分支尚未接入两段式计费（P1 后续），
                 // 走 finalize 内 charge_usage_with_tools 旧路径
                 reservation: None,
@@ -937,6 +952,12 @@ pub async fn handle_messages(
         let mut used_channel_id: Option<String> = None;
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
+        // P1-7：调度决策回放——记录候选渠道与被过滤渠道（与 openai 非流式路径对齐）
+        let candidate_channel_ids: Vec<String> = candidates
+            .iter()
+            .filter_map(|(_, cid, _)| cid.clone())
+            .collect();
+        let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
         for (bridge, cid, ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
@@ -976,6 +997,11 @@ pub async fn handle_messages(
                 Err(e) => {
                     // 阶段2：失败分类记入断路器/健康追踪/亲和清除
                     if let Some(c) = &cid {
+                        // P1-7：记录被过滤的渠道及原因
+                        filtered_channels.push(crate::log::FilteredChannel {
+                            channel_id: c.clone(),
+                            reason: e.to_string(),
+                        });
                         state.channel_store.record_channel_failure(
                             c,
                             Some(&upstream),
@@ -1030,6 +1056,10 @@ pub async fn handle_messages(
                 log.error_msg = Some(e.to_string());
                 log.ip = client_ip.clone();
                 log.request_id = Some(request_id.clone());
+                // P1-7：调度决策回放字段（与 openai 失败路径对齐）
+                log.candidate_channels = candidate_channel_ids.clone();
+                log.filtered_channels = filtered_channels.clone();
+                log.selected_channel = used_channel_id.clone();
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 crate::metrics::global().record_request(
@@ -1115,6 +1145,10 @@ pub async fn handle_messages(
             log.status_code = 200;
             log.ip = client_ip.clone();
             log.request_id = Some(request_id.clone());
+            // P1-7：调度决策回放字段（与 openai 非流式成功路径对齐）
+            log.candidate_channels = candidate_channel_ids.clone();
+            log.filtered_channels = filtered_channels.clone();
+            log.selected_channel = used_channel_id.clone();
             // log_body：快照 = 请求体 + 响应正文（content 优先，tool_calls 计数）
             let debug_request_body = if crate::config::log_body_enabled() {
                 Some(crate::bridge::chat_format_debug_json(&chat_req))

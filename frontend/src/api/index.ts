@@ -46,6 +46,7 @@ import type {
   UsageSummaryItem,
   TrendItem,
   DashboardItem,
+  SchedulerStatusItem,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -1011,3 +1012,8 @@ export async function directChannelChatStream(
 }
 
 export default api;
+
+/** 调度实时状态（/api/dashboard/scheduler_status，NetworkLayer 调度地图用） */
+export async function getSchedulerStatus(): Promise<ApiResponse<SchedulerStatusItem>> {
+  return request<ApiResponse<SchedulerStatusItem>>('GET', `${API_BASE}/dashboard/scheduler_status`);
+}

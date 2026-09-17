@@ -1023,6 +1023,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/dashboard/cache_savings",
             get(api::admin::handle_cache_savings),
         )
+        .route(
+            "/api/dashboard/scheduler_status",
+            get(api::admin::handle_scheduler_status),
+        )
         // 设置管理
         .route("/api/settings", get(api::admin::handle_get_settings))
         .route("/api/settings", put(api::admin::handle_update_settings))
