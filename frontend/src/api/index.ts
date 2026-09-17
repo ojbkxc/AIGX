@@ -132,7 +132,11 @@ async function request<T = unknown>(method: string, path: string, body: unknown 
       (data && typeof data === 'object' && (((data as Record<string, unknown>).error as string) || ((data as Record<string, unknown>).message as string))) ||
       (typeof text === 'string' && text) ||
       `Request failed with status ${res.status}`;
-    throw new Error(typeof msg === 'string' ? msg : String(msg));
+    // 保留 HTTP 状态码：调用方（如翻译的 429 预算限流）可据此区分
+    // 「可重试/限流」与「参数错/服务错」等不同失败语义。
+    const err = new Error(typeof msg === 'string' ? msg : String(msg)) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
   return data as T;
 }

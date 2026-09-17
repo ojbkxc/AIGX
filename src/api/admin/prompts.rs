@@ -44,16 +44,28 @@ const SOURCES: &[(&str, &str, &str, &str)] = &[
 ];
 
 /// 内存缓存：key → (抓取时间戳, 源数据)
-#[derive(Default)]
 pub struct PromptSourceCache {
     map: Arc<RwLock<HashMap<String, (i64, Value)>>>,
     /// 按 key 的在途抓取闸门：防止同一源被并发触发多次 GitHub 抓取。
     inflight: Arc<TokioMutex<HashMap<String, ()>>>,
+    /// 自环翻译每日字符预算：`(当日 YYYYMMDD, 已用字符数)`。
+    /// 跨天自动清零；单次锁内完成检查+累加，保证原子不超卖。
+    daily_budget: Arc<TokioMutex<(String, u64)>>,
 }
 
 impl PromptSourceCache {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+impl Default for PromptSourceCache {
+    fn default() -> Self {
+        Self {
+            map: Arc::new(RwLock::new(HashMap::new())),
+            inflight: Arc::new(TokioMutex::new(HashMap::new())),
+            daily_budget: Arc::new(TokioMutex::new((String::new(), 0))),
+        }
     }
 }
 
@@ -177,6 +189,30 @@ type PromptList = Vec<Value>;
 /// 前端按批次切片（默认 20），单批超过上限时后端直接拒绝。
 const MAX_TRANSLATE_BATCH: usize = 40;
 
+/// 自环翻译每日字符预算（按翻译源文本字符数计，跨天重置）。
+///
+/// 拉取 awesome-prompts（377 条）或 big-prompt-library（200 条）时，
+/// 若开启自动翻译会触发数百次自环 LLM 调用，消耗 `[agent]` 配置渠道的
+/// 真实配额。这里是成本保护的硬闸：单日累计超过预算即拒绝新翻译，
+/// 防止一次误点把自环渠道配额烧穿。1.2M 字符约对应 300 条 × 4KB 提示词。
+const DAILY_TRANSLATE_CHAR_BUDGET: u64 = 1_200_000;
+
+/// 从当日预算中申请 `chars` 个字符。返回 `true` 表示批准（并已原子累加），
+/// `false` 表示超出预算（跨天时自动清零重新计）。
+async fn reserve_translate_budget(cache: &PromptSourceCache, chars: u64) -> bool {
+    let mut g = cache.daily_budget.lock().await;
+    let today = chrono::Utc::now().format("%Y%m%d").to_string();
+    if g.0 != today {
+        g.0 = today;
+        g.1 = 0;
+    }
+    if g.1.saturating_add(chars) > DAILY_TRANSLATE_CHAR_BUDGET {
+        return false;
+    }
+    g.1 += chars;
+    true
+}
+
 /// 翻译目标语言（前端下拉选项，值即 system prompt 中的语言名）。
 const TRANSLATE_TARGETS: &[&str] = &["简体中文", "English", "日本語", "한국어"];
 
@@ -262,6 +298,16 @@ pub async fn handle_prompt_translate(
             Some((i, src.to_string()))
         })
         .collect();
+
+    // 每日字符预算：整批一次性申请，不足则整体拒绝（不做半批）。这样调用方
+    // 会得到一个明确的可重试失败，而不是悄悄翻译一部分、另一部分丢失。
+    let total_chars: u64 = pending.iter().map(|(_, s)| s.chars().count() as u64).sum();
+    if !reserve_translate_budget(&state.prompt_source_cache, total_chars).await {
+        return Err(error_response(
+            "今日自环翻译预算已用尽，请明日再试（避免一次拉取烧穿自环渠道配额）",
+            StatusCode::TOO_MANY_REQUESTS,
+        ));
+    }
 
     // 逐条并发自环翻译（并发度 4），单条 60s 超时，失败/超时条目静默跳过
     // （保持部分成功），避免某条卡死拖垮整个批量请求。

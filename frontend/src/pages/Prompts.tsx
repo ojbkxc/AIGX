@@ -263,9 +263,11 @@ export default function Prompts(): JSX.Element {
             if (target && item.content) result.set(target.idx, item.content);
           }
         }
-      } catch {
-        // 单批失败跳过，继续后续批次（后端本身是「单条失败静默跳过」的
-        // 部分成功语义，前端不应因某批失败而丢弃已成功的其余批次）。
+      } catch (err) {
+        // 429 = 每日翻译字符预算用尽：后续批次必然同样被拒，直接中止循环，
+        // 已成功批次的译文仍返回，避免空耗往返。其余错误单批跳过，保持
+        // 与后端「单条失败静默跳过」一致的部分成功语义。
+        if ((err as { status?: number })?.status === 429) break;
       }
       done += chunk.length;
       onProgress?.(done, targets.length);
@@ -664,7 +666,7 @@ export default function Prompts(): JSX.Element {
                   <span>{t('自动翻译英文提示词')}</span>
                 </label>
               </div>
-              <p className="prompts-source-hint">{t('翻译走 AIGX 自己的渠道（需 [agent] 配置模型），失败时保留原文。')}</p>
+              <p className="prompts-source-hint">{t('翻译走 AIGX 自己的渠道（需 [agent] 配置模型），失败时保留原文；每日有翻译字符预算，超限请明日再试。')}</p>
               {sourcesLoading ? (
                 <div className="prompts-source-loading">{t('加载中...')}</div>
               ) : sources.length === 0 ? (
