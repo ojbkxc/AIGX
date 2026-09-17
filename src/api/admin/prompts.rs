@@ -328,41 +328,55 @@ async fn fetch_awesome_prompts(client: &reqwest::Client) -> Result<PromptList, S
     let list: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     let items = list.as_array().ok_or_else(|| "目录结构异常".to_string())?;
 
-    let mut out = Vec::new();
-    for item in items {
-        let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
-        if !(name.ends_with(".txt") || name.ends_with(".md")) {
-            continue;
-        }
-        let dl = item
-            .get("download_url")
-            .and_then(|u| u.as_str())
-            .ok_or_else(|| "缺少 download_url".to_string())?;
-        let content = client
-            .get(dl)
-            .header("User-Agent", "AIGX")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| e.to_string())?
-            .text()
-            .await
-            .map_err(|e| e.to_string())?;
-        if content.trim().is_empty() {
-            continue;
-        }
-        let title = name
-            .trim_end_matches(".txt")
-            .trim_end_matches(".md")
-            .replace('_', " ");
-        out.push(entry(
-            &title,
-            content.trim(),
-            &["awesome-prompts"],
-            "awesome-prompts",
-        ));
-    }
+    // 先收集待下载的 (标题, download_url) 对，再并发抓取正文。
+    // 单文件失败静默跳过（保持部分成功），避免一条 404/超时拖垮整个源。
+    let pending: Vec<(String, String)> = items
+        .iter()
+        .filter_map(|item| {
+            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if !(name.ends_with(".txt") || name.ends_with(".md")) {
+                return None;
+            }
+            let dl = item
+                .get("download_url")
+                .and_then(|u| u.as_str())?
+                .to_string();
+            let title = name
+                .trim_end_matches(".txt")
+                .trim_end_matches(".md")
+                .replace('_', " ");
+            Some((title, dl))
+        })
+        .collect();
+
+    let client = client.clone();
+    let results = futures::stream::iter(pending)
+        .map(|(title, dl)| {
+            let client = client.clone();
+            async move {
+                let resp = client
+                    .get(&dl)
+                    .header("User-Agent", "AIGX")
+                    .send()
+                    .await
+                    .ok()?;
+                let content = resp.error_for_status().ok()?.text().await.ok()?;
+                if content.trim().is_empty() {
+                    return None;
+                }
+                Some(entry(
+                    &title,
+                    content.trim(),
+                    &["awesome-prompts"],
+                    "awesome-prompts",
+                ))
+            }
+        })
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+
+    let out: Vec<Value> = results.into_iter().flatten().collect();
     if out.is_empty() {
         return Err("awesome-prompts 无有效数据".to_string());
     }
@@ -399,37 +413,45 @@ async fn fetch_big_prompt_library(client: &reqwest::Client) -> Result<PromptList
     if paths.is_empty() {
         return Err("TheBigPromptLibrary 无有效数据".to_string());
     }
-    // 上限：只抓前 200 个（库体量巨大，避免单次请求过重）
-    let mut out = Vec::new();
-    for path in paths.iter().take(200) {
-        let url = format!("https://raw.githubusercontent.com/0xeb/TheBigPromptLibrary/main/{path}");
-        let content = client
-            .get(&url)
-            .header("User-Agent", "AIGX")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| e.to_string())?
-            .text()
-            .await
-            .map_err(|e| e.to_string())?;
-        if content.trim().is_empty() {
-            continue;
-        }
-        let name = path
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .trim_end_matches(".md")
-            .to_string();
-        out.push(entry(
-            &name,
-            content.trim(),
-            &["gpt-instruction"],
-            "big-prompt-library",
-        ));
-    }
+    // 上限：只抓前 200 个（库体量巨大，避免单次请求过重）。
+    // 并发抓取，单文件失败静默跳过，避免单条超时拖垮整个源。
+    let client = client.clone();
+    let results = futures::stream::iter(paths.iter().take(200).cloned())
+        .map(|path| {
+            let client = client.clone();
+            async move {
+                let url = format!(
+                    "https://raw.githubusercontent.com/0xeb/TheBigPromptLibrary/main/{path}"
+                );
+                let resp = client
+                    .get(&url)
+                    .header("User-Agent", "AIGX")
+                    .send()
+                    .await
+                    .ok()?;
+                let content = resp.error_for_status().ok()?.text().await.ok()?;
+                if content.trim().is_empty() {
+                    return None;
+                }
+                let name = path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(".md")
+                    .to_string();
+                Some(entry(
+                    &name,
+                    content.trim(),
+                    &["gpt-instruction"],
+                    "big-prompt-library",
+                ))
+            }
+        })
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+
+    let out: Vec<Value> = results.into_iter().flatten().collect();
     if out.is_empty() {
         return Err("TheBigPromptLibrary 无有效数据".to_string());
     }
