@@ -316,7 +316,7 @@ export default function Prompts(): JSX.Element {
       // 后端因体积/条目上限截断时明确告知（否则用户看到「209 条」会误以为
       // 源本身就只有这么多，且不知道还有大量条目未导入）。
       if (res.truncated) {
-        addToast(t('该源内容过多，已截断导入前') + ` ${list.length} ` + t('条，可多次拉取不同片段'), 'error');
+        addToast(t('该源内容过多，已截断导入前') + ` ${list.length} ` + t('条，其余未导入'), 'error');
       }
       const now = Date.now();
       const items: PromptItem[] = list.map((x) => ({
@@ -511,6 +511,7 @@ export default function Prompts(): JSX.Element {
               })();
             }}
             disabled={translating || prompts.length === 0}
+            title={agentReady === false ? t('自环翻译不可用：请先在配置中启用 [agent]') : undefined}
             style={{ gap: 6 }}
           >
             <Languages size={13} />
