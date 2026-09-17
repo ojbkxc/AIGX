@@ -719,6 +719,36 @@ export interface SchedulerStatusItem {
 }
 
 // ============================================================================
+// 提示词翻译
+// ============================================================================
+
+/** 提示词翻译请求项（index 对应原始数组下标） */
+export interface PromptTranslateItem {
+  index: number;
+  content: string;
+}
+
+/** 提示词翻译结果（translated 仅含实际翻译的条目） */
+export interface PromptTranslateResult {
+  translated: PromptTranslateItem[];
+}
+
+// ============================================================================
+// 提示词翻译
+// ============================================================================
+
+/** 提示词翻译请求项（index 对应原始数组下标） */
+export interface PromptTranslateItem {
+  index: number;
+  content: string;
+}
+
+/** 提示词翻译结果（translated 仅含实际翻译的条目） */
+export interface PromptTranslateResult {
+  translated: PromptTranslateItem[];
+}
+
+// ============================================================================
 // 分页类型
 // ============================================================================
 

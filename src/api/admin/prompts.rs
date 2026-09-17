@@ -12,13 +12,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
 use super::super::openai::AppState;
-use super::common::error_response;
+use super::common::{error_response, verify_user};
 
 /// 单个源元信息
 const SOURCES: &[(&str, &str, &str, &str)] = &[
@@ -118,6 +118,116 @@ pub async fn handle_prompt_fetch(
 }
 
 type PromptList = Vec<Value>;
+
+/// 单次翻译请求的提示词数量上限：批量翻译自环调用成本高，
+/// 且公开源拉取一次可产生数百条，翻译全部会触发海量 LLM 调用。
+/// 前端按批次切片（默认 20），单批超过上限时后端直接拒绝。
+const MAX_TRANSLATE_BATCH: usize = 40;
+
+/// 翻译目标语言（前端下拉选项，值即 system prompt 中的语言名）。
+const TRANSLATE_TARGETS: &[&str] = &["简体中文", "English", "日本語", "한국어"];
+
+/// 判断文本是否需要翻译（保守：仅当出现非 ASCII 且含英文字母时视为英文）。
+///
+/// 中文标题（如本地自建提示词）应直接跳过，避免无谓的 LLM 调用。
+fn looks_english(text: &str) -> bool {
+    let has_letter = text.chars().any(|c| c.is_ascii_alphabetic());
+    let has_cjk = text.chars().any(|c| {
+        ('\u{4e00}'..='\u{9fff}').contains(&c)
+            || ('\u{3040}'..='\u{30ff}').contains(&c)
+            || ('\u{ac00}'..='\u{d7af}').contains(&c)
+    });
+    has_letter && !has_cjk
+}
+
+/// POST /api/prompts/translate — 自环翻译提示词（登录即可）。
+///
+/// 复用 AI 运维 Agent 的进程内推理（`llm::chat_once`）走 AIGX 自己的渠道，
+/// 把英文提示词翻译成目标语言。与客户请求的本质区别：不经 HTTP 端口、
+/// 不计费。翻译失败（如 `[agent]` 未配置模型/渠道）返回 503 并提示原因。
+pub async fn handle_prompt_translate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _user = verify_user(&state, &headers).await?;
+
+    let agent = state
+        .agent_state
+        .as_deref()
+        .ok_or_else(|| {
+            error_response(
+                "自环翻译未启用：请先在配置中启用 [agent] 并设置 model/channel",
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+        })?;
+    let model = agent.config.model.trim().to_string();
+    if model.is_empty() {
+        return Err(error_response(
+            "自环翻译未启用：请先在配置中启用 [agent] 并设置 model/channel",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+
+    let target = body
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("简体中文")
+        .trim()
+        .to_string();
+    if !TRANSLATE_TARGETS.contains(&target.as_str()) {
+        return Err(error_response(
+            &format!("不支持的目标语言：{target}"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+
+    let items = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if items.len() > MAX_TRANSLATE_BATCH {
+        return Err(error_response(
+            &format!("单次翻译最多 {MAX_TRANSLATE_BATCH} 条"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+
+    let system = format!(
+        "你是专业翻译。把用户给的每个提示词内容准确翻译成{target}，\
+         保持原意、语气、格式与代码/变量原样。只输出翻译后的文本，\
+         不要解释、不要添加引号或任何额外内容。"
+    );
+    let mut out = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let src = item
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if src.is_empty() || !looks_english(src) {
+            continue;
+        }
+        let convo = vec![
+            crate::agent::llm::system_message(system.clone()),
+            crate::agent::llm::user_message(src.to_string()),
+        ];
+        match crate::agent::llm::chat_once(&state, &agent.config, convo, None).await {
+            Ok((resp, _, _)) => {
+                let text = resp.message.content.unwrap_or_default().trim().to_string();
+                out.push(json!({ "index": i, "content": text }));
+            }
+            Err(e) => {
+                return Err(error_response(
+                    &format!("翻译失败：{e}"),
+                    StatusCode::BAD_GATEWAY,
+                ));
+            }
+        }
+    }
+    Ok(Json(json!({ "success": true, "data": { "translated": out } })))
+}
 
 /// 单条内容上限：公开源里存在 14 万字符的巨型提示词，前端卡片渲染会卡顿，
 /// 且 localStorage 有约 5MB 配额，必须裁剪以控制单源体积。

@@ -888,6 +888,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             get(api::admin::handle_prompt_sources),
         )
         .route("/api/prompts/fetch", post(api::admin::handle_prompt_fetch))
+        .route(
+            "/api/prompts/translate",
+            post(api::admin::handle_prompt_translate),
+        )
         .route("/api/channels", post(api::admin::handle_add_channel))
         .route("/api/channels/:id", put(api::admin::handle_update_channel))
         .route("/api/channels/:id", patch(api::admin::handle_patch_channel))

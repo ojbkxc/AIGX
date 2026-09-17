@@ -118,7 +118,7 @@ pub use playground::handle_playground_transcriptions;
 pub use playground::handle_playground_tts;
 
 // 公开提示词源拉取（Prompts 页「拉取公开源」）
-pub use prompts::{handle_prompt_fetch, handle_prompt_sources};
+pub use prompts::{handle_prompt_fetch, handle_prompt_sources, handle_prompt_translate};
 
 // 后续模块的 pub use 将按迁移顺序补充...
 

@@ -47,6 +47,7 @@ import type {
   TrendItem,
   DashboardItem,
   SchedulerStatusItem,
+  PromptTranslateResult,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -1016,4 +1017,15 @@ export default api;
 /** 调度实时状态（/api/dashboard/scheduler_status，NetworkLayer 调度地图用） */
 export async function getSchedulerStatus(): Promise<ApiResponse<SchedulerStatusItem>> {
   return request<ApiResponse<SchedulerStatusItem>>('GET', `${API_BASE}/dashboard/scheduler_status`);
+}
+
+/** 自环翻译提示词（/api/prompts/translate，走 AIGX 自己的渠道） */
+export async function translatePrompts(
+  items: Array<{ content: string }>,
+  target = '简体中文',
+): Promise<ApiResponse<PromptTranslateResult>> {
+  return request<ApiResponse<PromptTranslateResult>>('POST', `${API_BASE}/prompts/translate`, {
+    target,
+    items,
+  });
 }

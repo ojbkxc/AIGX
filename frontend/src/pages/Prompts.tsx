@@ -1,11 +1,11 @@
 import { useState, useEffect, useMemo, useRef, type ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { Search, Plus, Copy, Trash2, Pencil, Upload, Download, BookOpen, Globe } from 'lucide-react';
+import { Search, Plus, Copy, Trash2, Pencil, Upload, Download, BookOpen, Globe, Languages } from 'lucide-react';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, Textarea, Badge, EmptyState } from '../components/ui';
-import { api } from '../api';
+import { api, translatePrompts } from '../api';
 import './Prompts.css';
 
 interface PromptItem {
@@ -26,6 +26,16 @@ interface PromptForm {
 
 const STORAGE_KEY = 'aigx_prompts';
 const EMPTY_FORM: PromptForm = { name: '', content: '', tags: '' };
+
+/** 翻译目标语言选项（值需与后端 TRANSLATE_TARGETS 对齐） */
+const TRANSLATE_TARGETS = ['简体中文', 'English', '日本語', '한국어'];
+
+/** 判断文本是否疑似英文（保守：含英文字母且不含中日韩字符） */
+function looksEnglish(text: string): boolean {
+  const hasLetter = /[a-zA-Z]/.test(text);
+  const hasCjk = /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(text);
+  return hasLetter && !hasCjk;
+}
 
 /** 行 ID：secure context 用 crypto.randomUUID，http 环境回退时间戳随机串 */
 function genId(): string {
@@ -85,6 +95,11 @@ export default function Prompts(): JSX.Element {
   const [sources, setSources] = useState<Array<{ id: string; name: string; description: string; repo: string }>>([]);
   const [sourcesLoading, setSourcesLoading] = useState(false);
   const [fetchingSource, setFetchingSource] = useState<string | null>(null);
+  // 自环翻译：目标语言 + 每批大小 + 是否翻译英文条目
+  const [translateTarget, setTranslateTarget] = useState('简体中文');
+  const [translateEnabled, setTranslateEnabled] = useState(true);
+  const [translateBatch, setTranslateBatch] = useState(20);
+  const [translating, setTranslating] = useState(false);
 
   useEffect(() => {
     savePrompts(prompts);
@@ -212,6 +227,38 @@ export default function Prompts(): JSX.Element {
     }
   };
 
+  /**
+   * 自环翻译英文提示词条目（按批次切片调用 /api/prompts/translate）。
+   *
+   * items：待翻译条目数组（content 可能为英文）。返回按 index 补齐后的
+   * 翻译文本 Map；翻译失败抛错（由调用方 toast 提示）。
+   */
+  const translateItems = async (
+    items: Array<{ content: string }>,
+  ): Promise<Map<number, string>> => {
+    const result = new Map<number, string>();
+    if (!translateEnabled || translateTarget === 'English') return result;
+    const targets = items
+      .map((it, idx) => ({ it, idx }))
+      .filter(({ it }) => looksEnglish(it.content));
+    if (targets.length === 0) return result;
+    const batchSize = Math.min(Math.max(translateBatch, 1), 40);
+    for (let i = 0; i < targets.length; i += batchSize) {
+      const chunk = targets.slice(i, i + batchSize);
+      const res = await translatePrompts(
+        chunk.map(({ it }) => ({ content: it.content })),
+        translateTarget,
+      );
+      const translated = res?.data?.translated;
+      if (!Array.isArray(translated)) break;
+      for (const item of translated) {
+        const target = chunk.find((c) => c.idx === item.index);
+        if (target && item.content) result.set(target.idx, item.content);
+      }
+    }
+    return result;
+  };
+
   const handleFetchSource = async (id: string) => {
     if (fetchingSource) return;
     setFetchingSource(id);
@@ -232,6 +279,31 @@ export default function Prompts(): JSX.Element {
         created_at: now,
         updated_at: now,
       }));
+
+      // 自环翻译：把英文条目的 content 替换为中文（翻译失败则保留原文）
+      if (translateEnabled && translateTarget !== 'English') {
+        const english = items.filter((it) => looksEnglish(it.content));
+        if (english.length > 0) {
+          setTranslating(true);
+          try {
+            const translated = await translateItems(english.map((it) => ({ content: it.content })));
+            let count = 0;
+            english.forEach((it, idx) => {
+              const text = translated.get(idx);
+              if (text) {
+                it.content = text;
+                count += 1;
+              }
+            });
+            if (count > 0) addToast(t('已自动翻译') + ` ${count} ` + t('条英文提示词'));
+          } catch (err) {
+            addToast(err instanceof Error ? err.message : t('翻译失败，保留原文'), 'error');
+          } finally {
+            setTranslating(false);
+          }
+        }
+      }
+
       // 按 name 去重：已存在同名提示词则跳过，仅补充新条目
       setPrompts((prev) => {
         const existing = new Set(prev.map((p) => p.name));
@@ -317,6 +389,42 @@ export default function Prompts(): JSX.Element {
           <Button variant="outline" size="sm" onClick={openSources} style={{ gap: 6 }}>
             <Globe size={13} />
             {t('拉取公开源')}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void (async () => {
+                setTranslating(true);
+                try {
+                  const list = prompts.filter((p) => looksEnglish(p.content));
+                  if (list.length === 0) {
+                    addToast(t('没有需要翻译的英文提示词'));
+                    return;
+                  }
+                  const translated = await translateItems(list.map((it) => ({ content: it.content })));
+                  let count = 0;
+                  setPrompts((prev) => prev.map((p) => {
+                    const idx = list.findIndex((e) => e.id === p.id);
+                    if (idx < 0) return p;
+                    const text = translated.get(idx);
+                    if (!text) return p;
+                    count += 1;
+                    return { ...p, content: text, updated_at: Date.now() };
+                  }));
+                  addToast(t('已翻译') + ` ${count} ` + t('条'));
+                } catch (err) {
+                  addToast(err instanceof Error ? err.message : t('翻译失败'), 'error');
+                } finally {
+                  setTranslating(false);
+                }
+              })();
+            }}
+            disabled={translating || prompts.length === 0}
+            style={{ gap: 6 }}
+          >
+            <Languages size={13} />
+            {translating ? t('翻译中...') : t('翻译已有')}
           </Button>
           <Button variant="outline" size="sm" onClick={() => navigate('/chat')} style={{ gap: 6 }}>
             <BookOpen size={13} />
@@ -480,6 +588,44 @@ export default function Prompts(): JSX.Element {
             </div>
             <div className="modal-body">
               <p className="prompts-source-hint">{t('选择一个公开源，拉取后按名称去重合并到本地提示词库（同名跳过）。')}</p>
+              <div className="prompts-translate-row">
+                <div className="prompts-translate-item">
+                  <span>{t('目标语言')}</span>
+                  <select
+                    className="form-input"
+                    style={{ width: 120 }}
+                    value={translateTarget}
+                    onChange={(e) => setTranslateTarget(e.target.value)}
+                    aria-label={t('翻译目标语言')}
+                  >
+                    {TRANSLATE_TARGETS.map((lang) => (
+                      <option key={lang} value={lang}>{lang}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="prompts-translate-item">
+                  <span>{t('批量大小')}</span>
+                  <input
+                    type="number"
+                    className="form-input"
+                    style={{ width: 80 }}
+                    min={1}
+                    max={40}
+                    value={translateBatch}
+                    onChange={(e) => setTranslateBatch(Math.min(40, Math.max(1, Number(e.target.value) || 20)))}
+                    aria-label={t('翻译批量大小')}
+                  />
+                </div>
+                <label className="prompts-translate-toggle">
+                  <input
+                    type="checkbox"
+                    checked={translateEnabled}
+                    onChange={(e) => setTranslateEnabled(e.target.checked)}
+                  />
+                  <span>{t('自动翻译英文提示词')}</span>
+                </label>
+              </div>
+              <p className="prompts-source-hint">{t('翻译走 AIGX 自己的渠道（需 [agent] 配置模型），失败时保留原文。')}</p>
               {sourcesLoading ? (
                 <div className="prompts-source-loading">{t('加载中...')}</div>
               ) : sources.length === 0 ? (
@@ -496,11 +642,15 @@ export default function Prompts(): JSX.Element {
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={fetchingSource !== null}
+                        disabled={fetchingSource !== null || translating}
                         onClick={() => void handleFetchSource(s.id)}
                         style={{ gap: 6 }}
                       >
-                        {fetchingSource === s.id ? t('拉取中...') : t('拉取')}
+                        {fetchingSource === s.id
+                          ? t('拉取中...')
+                          : translating
+                            ? t('翻译中...')
+                            : t('拉取')}
                       </Button>
                     </div>
                   ))}
