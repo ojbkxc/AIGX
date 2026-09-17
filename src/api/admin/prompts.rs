@@ -406,6 +406,12 @@ pub async fn handle_prompt_translate(
 /// 且 localStorage 有约 5MB 配额，必须裁剪以控制单源体积。
 const MAX_CONTENT_CHARS: usize = 20_000;
 
+/// 单源最大条目数：prompts.chat 实测 2169 条、JSON 序列化约 5.4MB，逼近
+/// localStorage 约 5MB 配额——一次性导入会触发 savePrompts 静默失败，用户
+/// 看到「新增 2169 条」但刷新后全部丢失。按条目数截断到 800 条，JSON 体积
+/// 控制在约 2MB，安全落在配额内；800 条对「参考提示词」场景也已足够。
+const MAX_FETCH_ITEMS: usize = 800;
+
 fn entry(name: &str, content: &str, tags: &[&str], source: &str) -> Value {
     let content = if content.chars().count() > MAX_CONTENT_CHARS {
         let truncated: String = content.chars().take(MAX_CONTENT_CHARS).collect();
@@ -450,6 +456,11 @@ async fn fetch_prompts_chat(client: &reqwest::Client) -> Result<PromptList, Stri
             continue;
         }
         out.push(entry(&name, &content, &["prompts.chat"], "prompts-chat"));
+        // 达到单源条目上限即停止解析，避免 5.4MB 的完整 CSV 全部进响应与
+        // 前端 localStorage（会触达配额上限导致静默丢失）。
+        if out.len() >= MAX_FETCH_ITEMS {
+            break;
+        }
     }
     if out.is_empty() {
         return Err("prompts.csv 无有效数据".to_string());
@@ -521,10 +532,12 @@ async fn fetch_awesome_prompts(client: &reqwest::Client) -> Result<PromptList, S
         .collect::<Vec<_>>()
         .await;
 
-    let out: Vec<Value> = results.into_iter().flatten().collect();
+    let mut out: Vec<Value> = results.into_iter().flatten().collect();
     if out.is_empty() {
         return Err("awesome-prompts 无有效数据".to_string());
     }
+    // 统一单源条目上限（并发抓取无法中途 break，收齐后截断）。
+    out.truncate(MAX_FETCH_ITEMS);
     Ok(out)
 }
 
@@ -596,9 +609,10 @@ async fn fetch_big_prompt_library(client: &reqwest::Client) -> Result<PromptList
         .collect::<Vec<_>>()
         .await;
 
-    let out: Vec<Value> = results.into_iter().flatten().collect();
+    let mut out: Vec<Value> = results.into_iter().flatten().collect();
     if out.is_empty() {
         return Err("TheBigPromptLibrary 无有效数据".to_string());
     }
+    out.truncate(MAX_FETCH_ITEMS);
     Ok(out)
 }
