@@ -279,8 +279,18 @@ export default function Prompts(): JSX.Element {
     if (fetchingSource) return;
     setFetchingSource(id);
     try {
-      const res = await api.fetchPromptSource(id);
-      const list = Array.isArray(res?.data) ? res.data : [];
+      let res;
+      try {
+        res = await api.fetchPromptSource(id);
+      } catch (err) {
+        // 409 = 该源正在抓取中（在途闸门）：提示稍后重试，不当作「无数据」
+        if ((err as { status?: number })?.status === 409) {
+          addToast(t('该源正在抓取中，请稍后重试'), 'error');
+          return;
+        }
+        throw err;
+      }
+      const list = Array.isArray(res.data) ? res.data : [];
       if (list.length === 0) {
         addToast(t('该源无可用提示词'), 'error');
         return;

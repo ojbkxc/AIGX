@@ -158,14 +158,18 @@ pub async fn handle_prompt_fetch(
     if let Some(v) = hit(&state.prompt_source_cache, &key).await {
         return Ok(Json(json!({ "success": true, "data": v })));
     }
-    // 同一源已在途抓取：直接返回空数组，让前端稍后重试（或等已发起的
-    // 请求落缓存）。既避免并发重复抓取，也防止未鉴权时代码被当作
-    // 放大器（现已要求登录，此闸门是纵深防御的第二道）。
+    // 同一源已在途抓取：返回 409，告知前端「正在抓取，稍后重试」。
+    // 这比返回空数组更明确——空数组会被前端误判为「该源无可用提示词」。
     // `_guard` 必须绑定存活到本函数末尾，其 Drop 才在 fetch 完成后释放
     // 占位；若写成 `.is_none()` 临时值，guard 会被立即 Drop、闸门失效。
     let _guard = match begin_fetch(&state.prompt_source_cache, &key).await {
         Some(g) => g,
-        None => return Ok(Json(json!({ "success": true, "data": [] }))),
+        None => {
+            return Err(error_response(
+                "该源正在抓取中，请稍后重试",
+                StatusCode::CONFLICT,
+            ))
+        }
     };
 
     let client = state.http_client.clone();
@@ -234,12 +238,32 @@ fn looks_english(text: &str) -> bool {
 /// 复用 AI 运维 Agent 的进程内推理（`llm::chat_once`）走 AIGX 自己的渠道，
 /// 把英文提示词翻译成目标语言。与客户请求的本质区别：不经 HTTP 端口、
 /// 不计费。翻译失败（如 `[agent]` 未配置模型/渠道）返回 503 并提示原因。
+///
+/// 鉴权：登录用户即可（翻译走自环，与数据面计费无关）。
 pub async fn handle_prompt_translate(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _user = verify_user(&state, &headers).await?;
+
+    // 空数组直接返回，避免无谓的模型/预算校验与自环调用。
+    let items = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if items.is_empty() {
+        return Ok(Json(
+            json!({ "success": true, "data": { "translated": [] } }),
+        ));
+    }
+    if items.len() > MAX_TRANSLATE_BATCH {
+        return Err(error_response(
+            &format!("单次翻译最多 {MAX_TRANSLATE_BATCH} 条"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
 
     let agent = state.agent_state.as_deref().ok_or_else(|| {
         error_response(
@@ -268,17 +292,6 @@ pub async fn handle_prompt_translate(
         ));
     }
 
-    let items = body
-        .get("items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if items.len() > MAX_TRANSLATE_BATCH {
-        return Err(error_response(
-            &format!("单次翻译最多 {MAX_TRANSLATE_BATCH} 条"),
-            StatusCode::BAD_REQUEST,
-        ));
-    }
     // 单条内容上限：防止 14 万字符的巨型提示词被原样送入自环翻译，
     // 既可能烧穿每日字符预算，也会让单次 LLM 调用上下文过大而失败。
     if let Some(too_long) = items.iter().find(|it| {
