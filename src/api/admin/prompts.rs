@@ -43,13 +43,16 @@ const SOURCES: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
-/// 内存缓存：key → (抓取时间戳, 源数据, 是否被截断)。
+/// 单源缓存条目：`(抓取时间戳, 源数据 Arc, 是否截断)`。
 /// 源数据存 `Arc<Value>`：命中时仅复制引用计数（O(1)），不再深拷贝
 /// 数 MB 的 JSON 树；缓存与响应体共享同一底层 `Value`。
 /// `truncated` 是数据本身的属性（导入时因体积闸丢弃过尾部条目），必须随
 /// 缓存一起返回，否则 5 分钟内的缓存命中会丢失「内容已截断」提示。
+type SourceEntry = (i64, Arc<Value>, bool);
+
+/// 内存缓存：key → 单源缓存条目。
 pub struct PromptSourceCache {
-    map: Arc<RwLock<HashMap<String, (i64, Arc<Value>, bool)>>>,
+    map: Arc<RwLock<HashMap<String, SourceEntry>>>,
     /// 按 key 的在途抓取闸门：防止同一源被并发触发多次 GitHub 抓取。
     inflight: Arc<TokioMutex<HashMap<String, ()>>>,
     /// 自环翻译每日字符预算：`(当日 YYYYMMDD, 已用字符数)`。
