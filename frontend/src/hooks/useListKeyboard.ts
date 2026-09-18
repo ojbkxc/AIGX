@@ -77,7 +77,6 @@ export function useListKeyboard(
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, total, activeIndex]);
 
   // 行数收缩（翻页/过滤/删除）后钳制越界高亮

@@ -232,7 +232,7 @@ export default function Login(): JSX.Element {
       // 清除 state 防止重复提示
       window.history.replaceState({}, document.title);
     }
-  }, [location]);
+  }, [location, t]);
 
   // 邮件重置链接直达：?reset_token=xxx 自动打开第 2 步（填 token + 新密码）
   useEffect(() => {
