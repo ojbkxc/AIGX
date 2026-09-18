@@ -96,9 +96,9 @@ async fn hit(cache: &PromptSourceCache, key: &str) -> Option<Arc<Value>> {
     None
 }
 
-async fn store(cache: &PromptSourceCache, key: &str, v: Value) {
+async fn store(cache: &PromptSourceCache, key: &str, v: Arc<Value>) {
     let mut map = cache.map.write().await;
-    map.insert(key.to_string(), (chrono::Utc::now().timestamp(), Arc::new(v)));
+    map.insert(key.to_string(), (chrono::Utc::now().timestamp(), v));
 }
 
 /// 抓取闸门：同一 key 正在抓取时返回 `None`（调用方直接放行，等已发起的
@@ -245,7 +245,7 @@ pub async fn handle_prompt_fetch(
         }
         true
     });
-    store(&state.prompt_source_cache, &key, Value::Array(data.clone())).await;
+    store(&state.prompt_source_cache, &key, Arc::new(Value::Array(data.clone()))).await;
     Ok(Json(json!({
         "success": true,
         "truncated": truncated,
