@@ -43,11 +43,13 @@ const SOURCES: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
-/// 内存缓存：key → (抓取时间戳, 源数据)。
+/// 内存缓存：key → (抓取时间戳, 源数据, 是否被截断)。
 /// 源数据存 `Arc<Value>`：命中时仅复制引用计数（O(1)），不再深拷贝
 /// 数 MB 的 JSON 树；缓存与响应体共享同一底层 `Value`。
+/// `truncated` 是数据本身的属性（导入时因体积闸丢弃过尾部条目），必须随
+/// 缓存一起返回，否则 5 分钟内的缓存命中会丢失「内容已截断」提示。
 pub struct PromptSourceCache {
-    map: Arc<RwLock<HashMap<String, (i64, Arc<Value>)>>>,
+    map: Arc<RwLock<HashMap<String, (i64, Arc<Value>, bool)>>>,
     /// 按 key 的在途抓取闸门：防止同一源被并发触发多次 GitHub 抓取。
     inflight: Arc<TokioMutex<HashMap<String, ()>>>,
     /// 自环翻译每日字符预算：`(当日 YYYYMMDD, 已用字符数)`。
@@ -73,22 +75,22 @@ impl Default for PromptSourceCache {
 
 const CACHE_TTL_SECS: i64 = 300;
 
-async fn hit(cache: &PromptSourceCache, key: &str) -> Option<Arc<Value>> {
+async fn hit(cache: &PromptSourceCache, key: &str) -> Option<(Arc<Value>, bool)> {
     // 两段式：命中走读锁快速路径（共享锁，多个并发命中互不阻塞，克隆
     // 的是 `Arc` 引用计数——O(1)，不再深拷贝底层 JSON），只有过期/缺失
     // 才升写锁清理过期垃圾。
     {
         let map = cache.map.read().await;
-        if let Some((ts, v)) = map.get(key) {
+        if let Some((ts, v, truncated)) = map.get(key) {
             if chrono::Utc::now().timestamp() - *ts < CACHE_TTL_SECS {
-                return Some(Arc::clone(v));
+                return Some((Arc::clone(v), *truncated));
             }
         }
     }
     // 过期：升写锁 double-check 后 remove。double-check 防并发 store 已
     // 刷新成新值——此时不删，避免误删刚抓取的缓存。
     let mut map = cache.map.write().await;
-    if let Some((ts, _)) = map.get(key) {
+    if let Some((ts, _, _)) = map.get(key) {
         if chrono::Utc::now().timestamp() - *ts >= CACHE_TTL_SECS {
             map.remove(key);
         }
@@ -96,9 +98,9 @@ async fn hit(cache: &PromptSourceCache, key: &str) -> Option<Arc<Value>> {
     None
 }
 
-async fn store(cache: &PromptSourceCache, key: &str, v: Arc<Value>) {
+async fn store(cache: &PromptSourceCache, key: &str, v: Arc<Value>, truncated: bool) {
     let mut map = cache.map.write().await;
-    map.insert(key.to_string(), (chrono::Utc::now().timestamp(), v));
+    map.insert(key.to_string(), (chrono::Utc::now().timestamp(), v, truncated));
 }
 
 /// 抓取闸门：同一 key 正在抓取时返回 `None`（调用方直接放行，等已发起的
@@ -169,9 +171,10 @@ pub async fn handle_prompt_fetch(
         ));
     }
     let key = format!("prompt_source:{id}");
-    if let Some(v) = hit(&state.prompt_source_cache, &key).await {
+    if let Some((v, truncated)) = hit(&state.prompt_source_cache, &key).await {
         // 命中缓存：`v` 是 `Arc<Value>`，`&*v` 借用底层 JSON 序列化，零深拷贝。
-        return Ok(Json(json!({ "success": true, "data": &*v })));
+        // `truncated` 随缓存一起返回，保证缓存命中窗口内提示不丢失。
+        return Ok(Json(json!({ "success": true, "truncated": truncated, "data": &*v })));
     }
     // 同一源已在途抓取：返回 409，告知前端「正在抓取，稍后重试」。
     // 这比返回空数组更明确——空数组会被前端误判为「该源无可用提示词」。
@@ -248,7 +251,7 @@ pub async fn handle_prompt_fetch(
     // 冷路径最后一次深拷贝的消除：data 只搬一次进 Arc（不 clone），
     // 缓存与响应体共享同一底层数组；响应经 `&*v` 借用序列化，零复制。
     let v = Arc::new(Value::Array(data));
-    store(&state.prompt_source_cache, &key, Arc::clone(&v)).await;
+    store(&state.prompt_source_cache, &key, Arc::clone(&v), truncated).await;
     Ok(Json(json!({
         "success": true,
         "truncated": truncated,
