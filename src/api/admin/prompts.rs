@@ -72,20 +72,25 @@ impl Default for PromptSourceCache {
 const CACHE_TTL_SECS: i64 = 300;
 
 async fn hit(cache: &PromptSourceCache, key: &str) -> Option<Value> {
-    // 用写锁：命中返回 clone，过期则主动 remove 释放几 MB 的 Value。
-    // 若只读锁判断过期就返回 None，过期条目会一直驻留内存，直到下次
-    // 同 key store 才被覆盖——某源抓取后 5 分钟内无人再请求，其大
-    // Value 就永久占着内存。key 空间固定 3 个、总量有界，但过期垃圾
-    // 应即时清理，而不是等覆盖。
-    let mut map = cache.map.write().await;
-    match map.get(key) {
-        Some((ts, v)) if chrono::Utc::now().timestamp() - *ts < CACHE_TTL_SECS => Some(v.clone()),
-        Some(_) => {
-            map.remove(key);
-            None
+    // 两段式：命中走读锁快速路径（共享锁，多个并发命中互不阻塞，clone
+    // 在多个读锁下并发进行），只有过期/缺失才升写锁清理过期垃圾。
+    {
+        let map = cache.map.read().await;
+        if let Some((ts, v)) = map.get(key) {
+            if chrono::Utc::now().timestamp() - *ts < CACHE_TTL_SECS {
+                return Some(v.clone());
+            }
         }
-        None => None,
     }
+    // 过期：升写锁 double-check 后 remove。double-check 防并发 store 已
+    // 刷新成新值——此时不删，避免误删刚抓取的缓存。
+    let mut map = cache.map.write().await;
+    if let Some((ts, _)) = map.get(key) {
+        if chrono::Utc::now().timestamp() - *ts >= CACHE_TTL_SECS {
+            map.remove(key);
+        }
+    }
+    None
 }
 
 async fn store(cache: &PromptSourceCache, key: &str, v: Value) {
