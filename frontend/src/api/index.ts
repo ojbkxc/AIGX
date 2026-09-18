@@ -48,6 +48,8 @@ import type {
   DashboardItem,
   SchedulerStatusItem,
   PromptTranslateResult,
+  PromptSource,
+  PromptSourceItem,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -683,10 +685,11 @@ export const api = {
   getAgentConfig: (): Promise<ApiResponse<{ model?: string; channel?: string }>> =>
     request<ApiResponse<{ model?: string; channel?: string }>>('GET', `${API_BASE}/agent/config`),
   // ==================== 公开提示词源（Prompts 页「拉取公开源」） ====================
-  listPromptSources: (): Promise<ApiResponse<Array<{ id: string; name: string; description: string; repo: string }>>> =>
-    request<ApiResponse<Array<{ id: string; name: string; description: string; repo: string }>>>('GET', `${API_BASE}/prompts/sources`),
-  fetchPromptSource: (source: string): Promise<ApiResponse<Array<{ name: string; content: string; tags: string[]; source: string }>>> =>
-    request<ApiResponse<Array<{ name: string; content: string; tags: string[]; source: string }>>>('POST', `${API_BASE}/prompts/fetch`, { source }),
+  listPromptSources: (): Promise<ApiResponse<PromptSource[]>> =>
+    request<ApiResponse<PromptSource[]>>('GET', `${API_BASE}/prompts/sources`),
+  /** 抓取公开源：成功时 data 为条目数组；truncated 表示因体积闸丢弃过尾部条目 */
+  fetchPromptSource: (source: string): Promise<ApiResponse<PromptSourceItem[]>> =>
+    request<ApiResponse<PromptSourceItem[]>>('POST', `${API_BASE}/prompts/fetch`, { source }),
   /** Agent 对话：SSE 流式，逐事件回调（AgentEvent） */
   agentChatStream: async (
     id: string,

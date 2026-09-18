@@ -735,6 +735,22 @@ export interface PromptTranslateResult {
   translated: PromptTranslateItem[];
 }
 
+/** 公开提示词源条目（/api/prompts/fetch 返回的 data 元素） */
+export interface PromptSourceItem {
+  name: string;
+  content: string;
+  tags: string[];
+  source: string;
+}
+
+/** 公开提示词源列表项（/api/prompts/sources） */
+export interface PromptSource {
+  id: string;
+  name: string;
+  description: string;
+  repo: string;
+}
+
 // ============================================================================
 // 分页类型
 // ============================================================================

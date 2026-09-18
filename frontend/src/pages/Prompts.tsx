@@ -6,6 +6,7 @@ import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, Textarea, Badge, EmptyState } from '../components/ui';
 import { api, translatePrompts } from '../api';
+import type { PromptSource } from '../types';
 import './Prompts.css';
 
 interface PromptItem {
@@ -92,7 +93,7 @@ export default function Prompts(): JSX.Element {
 
   // 公开提示词源（拉取公开源）
   const [sourceModal, setSourceModal] = useState(false);
-  const [sources, setSources] = useState<Array<{ id: string; name: string; description: string; repo: string }>>([]);
+  const [sources, setSources] = useState<PromptSource[]>([]);
   const [sourcesLoading, setSourcesLoading] = useState(false);
   const [fetchingSource, setFetchingSource] = useState<string | null>(null);
   // 自环翻译：目标语言 + 每批大小 + 是否翻译英文条目
