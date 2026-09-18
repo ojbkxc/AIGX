@@ -43,9 +43,11 @@ const SOURCES: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
-/// 内存缓存：key → (抓取时间戳, 源数据)
+/// 内存缓存：key → (抓取时间戳, 源数据)。
+/// 源数据存 `Arc<Value>`：命中时仅复制引用计数（O(1)），不再深拷贝
+/// 数 MB 的 JSON 树；缓存与响应体共享同一底层 `Value`。
 pub struct PromptSourceCache {
-    map: Arc<RwLock<HashMap<String, (i64, Value)>>>,
+    map: Arc<RwLock<HashMap<String, (i64, Arc<Value>)>>>,
     /// 按 key 的在途抓取闸门：防止同一源被并发触发多次 GitHub 抓取。
     inflight: Arc<TokioMutex<HashMap<String, ()>>>,
     /// 自环翻译每日字符预算：`(当日 YYYYMMDD, 已用字符数)`。
@@ -71,14 +73,15 @@ impl Default for PromptSourceCache {
 
 const CACHE_TTL_SECS: i64 = 300;
 
-async fn hit(cache: &PromptSourceCache, key: &str) -> Option<Value> {
-    // 两段式：命中走读锁快速路径（共享锁，多个并发命中互不阻塞，clone
-    // 在多个读锁下并发进行），只有过期/缺失才升写锁清理过期垃圾。
+async fn hit(cache: &PromptSourceCache, key: &str) -> Option<Arc<Value>> {
+    // 两段式：命中走读锁快速路径（共享锁，多个并发命中互不阻塞，克隆
+    // 的是 `Arc` 引用计数——O(1)，不再深拷贝底层 JSON），只有过期/缺失
+    // 才升写锁清理过期垃圾。
     {
         let map = cache.map.read().await;
         if let Some((ts, v)) = map.get(key) {
             if chrono::Utc::now().timestamp() - *ts < CACHE_TTL_SECS {
-                return Some(v.clone());
+                return Some(Arc::clone(v));
             }
         }
     }
@@ -95,7 +98,7 @@ async fn hit(cache: &PromptSourceCache, key: &str) -> Option<Value> {
 
 async fn store(cache: &PromptSourceCache, key: &str, v: Value) {
     let mut map = cache.map.write().await;
-    map.insert(key.to_string(), (chrono::Utc::now().timestamp(), v));
+    map.insert(key.to_string(), (chrono::Utc::now().timestamp(), Arc::new(v)));
 }
 
 /// 抓取闸门：同一 key 正在抓取时返回 `None`（调用方直接放行，等已发起的
@@ -167,7 +170,8 @@ pub async fn handle_prompt_fetch(
     }
     let key = format!("prompt_source:{id}");
     if let Some(v) = hit(&state.prompt_source_cache, &key).await {
-        return Ok(Json(json!({ "success": true, "data": v })));
+        // 命中缓存：`v` 是 `Arc<Value>`，`&*v` 借用底层 JSON 序列化，零深拷贝。
+        return Ok(Json(json!({ "success": true, "data": &*v })));
     }
     // 同一源已在途抓取：返回 409，告知前端「正在抓取，稍后重试」。
     // 这比返回空数组更明确——空数组会被前端误判为「该源无可用提示词」。
