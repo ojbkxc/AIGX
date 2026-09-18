@@ -245,11 +245,14 @@ pub async fn handle_prompt_fetch(
         }
         true
     });
-    store(&state.prompt_source_cache, &key, Arc::new(Value::Array(data.clone()))).await;
+    // 冷路径最后一次深拷贝的消除：data 只搬一次进 Arc（不 clone），
+    // 缓存与响应体共享同一底层数组；响应经 `&*v` 借用序列化，零复制。
+    let v = Arc::new(Value::Array(data));
+    store(&state.prompt_source_cache, &key, Arc::clone(&v)).await;
     Ok(Json(json!({
         "success": true,
         "truncated": truncated,
-        "data": data,
+        "data": &*v,
     })))
 }
 
