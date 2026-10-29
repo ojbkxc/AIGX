@@ -15,5 +15,4 @@ pub mod registry;
 pub mod rotate;
 pub mod store;
 
-pub use model::{AccountSession, Credential};
-pub use store::{AccountLease, AccountSessionStore, CasOutcome};
+pub use store::AccountSessionStore;
