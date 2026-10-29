@@ -50,7 +50,7 @@ impl Default for RotationPolicy {
 pub fn cooldown_secs(
     policy: &RotationPolicy,
     failure: &FailureType,
-    consecutive_errors: u32,
+    consecutive_errors: u64,
     retry_after: Option<u64>,
 ) -> u64 {
     let base = policy.base_cooldown_secs.max(1);
@@ -67,7 +67,8 @@ pub fn cooldown_secs(
         | FailureType::Timeout
         | FailureType::ConnectionError
         | FailureType::EmptyResponse => {
-            base.saturating_mul(1u64 << consecutive_errors.min(MAX_BACKOFF_EXPONENT))
+            let exponent = consecutive_errors.min(u64::from(MAX_BACKOFF_EXPONENT));
+            base.saturating_mul(1u64 << exponent)
         }
     };
     raw.clamp(base, cap)
