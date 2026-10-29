@@ -198,8 +198,9 @@ export default function AccountSessions(): JSX.Element {
         base_url: form.base_url.trim(),
         status: form.status,
         priority: Number(form.priority || 0),
-        weight: Number(form.weight || 1),
-        max_concurrency: Number(form.max_concurrency || 0),
+        // u32 字段：前端先夹紧，避免负数触发后端 422
+        weight: Math.max(1, Number(form.weight || 1)),
+        max_concurrency: Math.max(0, Number(form.max_concurrency || 0)),
         models: splitModels(form.models),
         expires_at: form.expires_at.trim() ? Number(form.expires_at) : null,
       };
@@ -253,8 +254,8 @@ export default function AccountSessions(): JSX.Element {
         proxy: bulk.proxy.trim(),
         name_prefix: bulk.name_prefix.trim(),
         priority: Number(bulk.priority || 0),
-        weight: Number(bulk.weight || 1),
-        max_concurrency: Number(bulk.max_concurrency || 0),
+        weight: Math.max(1, Number(bulk.weight || 1)),
+        max_concurrency: Math.max(0, Number(bulk.max_concurrency || 0)),
         models: splitModels(bulk.models),
         credentials: bulk.credentials,
       });
@@ -432,7 +433,6 @@ export default function AccountSessions(): JSX.Element {
                 ? t('先创建账号型渠道，再来添加凭证')
                 : t('暂无账号，点击「添加账号」或「批量导入」开始')
             }
-            icon="🔑"
             action={
               accountChannels.length > 0 ? (
                 <Button onClick={openCreate}>{t('添加账号')}</Button>
