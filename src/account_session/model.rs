@@ -206,11 +206,9 @@ impl AccountSession {
 
     /// 平均成功延迟（毫秒；无成功样本时为 0）。
     pub fn avg_latency_ms(&self) -> u64 {
-        if self.success_count == 0 {
-            0
-        } else {
-            self.total_latency_ms / self.success_count
-        }
+        self.total_latency_ms
+            .checked_div(self.success_count)
+            .unwrap_or(0)
     }
 }
 

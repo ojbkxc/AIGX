@@ -624,6 +624,11 @@ where
 }
 
 /// 提供商适配器 trait，参考 aisix Bridge trait 设计
+///
+/// async_trait 宏会为返回 `Pin<Box<dyn Future>>` 的方法生成 `#[must_use]`，
+/// 与 Future 自带的 must_use 重复（clippy 1.99 的 `double_must_use`）；
+/// 该属性由宏生成无法手改，此处对 trait 显式豁免。
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Bridge: Send + Sync + 'static {
     /// 人类可读的 Bridge 名称，用于日志和指标

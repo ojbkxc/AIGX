@@ -93,9 +93,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_proxy_scheme() {
+    fn rejects_malformed_proxy_url() {
         let cache = EgressCache::new();
-        assert!(cache.client(Some("ftp://127.0.0.1:21")).is_err());
+        assert!(cache.client(Some("://broken")).is_err());
+    }
+
+    #[test]
+    fn accepts_socks5_proxy() {
+        let cache = EgressCache::new();
+        assert!(cache.client(Some("socks5://127.0.0.1:1080")).is_ok());
     }
 
     #[test]
