@@ -63,6 +63,9 @@ pub enum ChannelType {
     Gemini,
     /// 智谱 AI（Z.AI）协议（Anthropic 兼容 + Bearer 鉴权）
     Zai,
+    /// 账号型渠道：渠道只是一组上游账号的容器，凭证与调度由
+    /// `account_session` 池负责（`base_url`/`api_key` 通常留空）。
+    Account,
 }
 
 impl ChannelType {
@@ -73,6 +76,7 @@ impl ChannelType {
             "anthropic" => Self::Anthropic,
             "gemini" | "google" | "google_gemini" => Self::Gemini,
             "zai" | "z_ai" | "zhipu" | "glm" => Self::Zai,
+            "account" | "accounts" | "account_pool" | "account_session" => Self::Account,
             _ => Self::Cloudflare,
         }
     }
@@ -85,6 +89,7 @@ impl ChannelType {
             Self::Anthropic => "anthropic",
             Self::Gemini => "gemini",
             Self::Zai => "zai",
+            Self::Account => "account",
         }
     }
 }
@@ -226,14 +231,22 @@ impl Channel {
 
     /// 解码存储中的 api_key（安全性说明见 `encode_api_key`）
     pub fn decode_api_key(&self) -> String {
-        if let Some(rest) = self.api_key.strip_prefix("enc:") {
+        Self::decode_api_key_value(&self.api_key)
+    }
+
+    /// 解码 `enc:` 前缀的密钥字符串。
+    ///
+    /// 供账号会话凭证（`account_session::Credential`）复用同一编码口径，
+    /// 保证「渠道密钥」与「账号密钥」在同一套存储里可互相迁移。
+    pub fn decode_api_key_value(stored: &str) -> String {
+        if let Some(rest) = stored.strip_prefix("enc:") {
             general_purpose::STANDARD
                 .decode(rest)
                 .ok()
                 .and_then(|b| String::from_utf8(b).ok())
                 .unwrap_or_default()
         } else {
-            self.api_key.clone()
+            stored.to_string()
         }
     }
 
@@ -815,6 +828,15 @@ impl ChannelStore {
                 return ChannelTestResult {
                     success: false,
                     message: "Cloudflare channels are tested via account pool".to_string(),
+                    latency_ms: start.elapsed().as_millis() as u64,
+                }
+            }
+            ChannelType::Account => {
+                // 账号型渠道没有渠道级凭证，连通性由账号池逐号探测：
+                // 管理面 `handle_test_channel` 会改走 account_sessions::probe_channel
+                return ChannelTestResult {
+                    success: false,
+                    message: "Account channels are tested per account session".to_string(),
                     latency_ms: start.elapsed().as_millis() as u64,
                 }
             }

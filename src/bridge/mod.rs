@@ -15,6 +15,8 @@ use futures::stream::BoxStream;
 use serde_json::Value;
 use std::time::Duration;
 
+/// 账号型渠道 Bridge（渠道内账号级调度：选号 / 冷却 / 并发 / 轮换）
+pub mod account;
 /// Anthropic Messages API（`/v1/messages`）原生 bridge
 pub mod anthropic;
 pub mod cf;

@@ -101,6 +101,9 @@ fn make_bridge_for_channel(
             client,
         )),
         ChannelType::Zai => Some(crate::bridge::zai::make_bridge(&ch.base_url, key, client)),
+        // 账号型渠道无渠道级凭证，锁单渠道路径不可用；全局调度经
+        // `resolve_bridges` 仍会得到 `AccountBridge`（账号池内部选号）
+        ChannelType::Account => None,
         // Cloudflare 渠道走 Hub 专用桥，自环暂不支持（阶段三再补）
         ChannelType::Cloudflare => None,
     }

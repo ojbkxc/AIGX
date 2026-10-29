@@ -86,6 +86,8 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
             crate::channel::ChannelType::Zai => {
                 crate::bridge::zai::make_bridge(&ch.base_url, &key, http)
             }
+            // 账号型渠道没有渠道级凭证，探活由账号池逐号探测
+            crate::channel::ChannelType::Account => continue,
             crate::channel::ChannelType::Cloudflare => continue, // CF 走 quota_monitor
         };
 

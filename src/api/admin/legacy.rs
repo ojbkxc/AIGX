@@ -1150,7 +1150,12 @@ pub async fn handle_test_channel(
         .channel_store
         .get(&id)
         .ok_or_else(|| error_response("Channel not found", StatusCode::NOT_FOUND))?;
-    let result = state.channel_store.test(&ch).await;
+    let result = if ch.channel_type == crate::channel::ChannelType::Account {
+        // 账号型渠道：逐号探活（走账号自己的出口 Client / 凭证）
+        crate::api::admin::account_sessions::probe_channel(&state, &ch).await
+    } else {
+        state.channel_store.test(&ch).await
+    };
     // 持久化测试结果（无论成败都记录延迟与时间，前端表格展示用）
     state.channel_store.save_test_result(&id, result.latency_ms);
     if result.success {
@@ -1501,6 +1506,13 @@ pub async fn fetch_upstream_models(
                 "glm-5".to_string(),
             ];
             (url, models)
+        }
+        crate::channel::ChannelType::Account => {
+            // 账号型渠道无渠道级凭证：模型由渠道显式声明，逐号发现走账号测试端点
+            return Err(error_response(
+                "account channel has no channel-level credential; declare models instead",
+                StatusCode::BAD_REQUEST,
+            ))
         }
     };
     Ok((url, models))

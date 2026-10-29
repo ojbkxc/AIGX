@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 mod account;
+mod account_session;
 mod agent;
 mod api;
 mod auth;
@@ -12,6 +13,7 @@ mod cache;
 mod channel;
 mod config;
 mod cron;
+mod egress;
 mod error_translate;
 mod graphql;
 mod health;
@@ -208,6 +210,9 @@ async fn main() -> anyhow::Result<()> {
     // 初始化通用渠道存储（混用 CF + 第三方 OpenAI 兼容上游）
     let channel_store = Arc::new(ChannelStore::new(store.clone()));
 
+    // 初始化账号型渠道账号池（渠道内第二级调度：账号级优先级/冷却/并发/粘性）
+    let account_sessions = crate::account_session::AccountSessionStore::new(store.clone());
+
     // 初始化模型定价目录
     let pricing_store = Arc::new(PricingStore::new(store.clone()));
 
@@ -396,6 +401,7 @@ async fn main() -> anyhow::Result<()> {
         health_tracker: health_tracker.clone(),
         livez_state: livez_state.clone(),
         channel_store,
+        account_sessions,
         pricing_store,
         user_group_store,
         log_store,
@@ -542,6 +548,19 @@ async fn main() -> anyhow::Result<()> {
                         let a = cs.health_archive();
                         a.flush() + a.prune()
                     })
+                }),
+            });
+        }
+        // 账号池周期维护：清理到期冷却记录 + 凭证过期状态同步（每 60s 一轮）
+        {
+            let sessions = state.account_sessions.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "account-session-sweep",
+                interval: Duration::from_secs(60),
+                first_run_delay: Duration::from_secs(30),
+                run: Box::new(move || {
+                    let pool = sessions.clone();
+                    Box::pin(async move { crate::account_session::maintenance::sweep(&pool) })
                 }),
             });
         }
@@ -1301,6 +1320,37 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/accounts/:id",
             delete(api::admin::handle_delete_account),
+        )
+        // 账号型渠道账号池（账号级调度）：列表/新增/批量导入/改/删/测试/重置冷却
+        .route(
+            "/api/account-sessions",
+            get(api::admin::account_sessions::handle_list_account_sessions)
+                .post(api::admin::account_sessions::handle_create_account_session),
+        )
+        .route(
+            "/api/account-sessions/providers",
+            get(api::admin::account_sessions::handle_list_account_providers),
+        )
+        .route(
+            "/api/account-sessions/stats",
+            get(api::admin::account_sessions::handle_account_session_stats),
+        )
+        .route(
+            "/api/account-sessions/bulk",
+            post(api::admin::account_sessions::handle_bulk_import_account_sessions),
+        )
+        .route(
+            "/api/account-sessions/:id",
+            put(api::admin::account_sessions::handle_update_account_session)
+                .delete(api::admin::account_sessions::handle_delete_account_session),
+        )
+        .route(
+            "/api/account-sessions/:id/test",
+            post(api::admin::account_sessions::handle_test_account_session),
+        )
+        .route(
+            "/api/account-sessions/:id/reset-cooldown",
+            post(api::admin::account_sessions::handle_reset_account_session_cooldowns),
         )
         .route("/api/keys", get(api::admin::handle_list_keys))
         .route("/api/keys", post(api::admin::handle_add_key))

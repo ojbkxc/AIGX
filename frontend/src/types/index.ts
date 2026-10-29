@@ -860,3 +860,59 @@ export interface ChartOptions {
   responsive: boolean;
   padding?: number;
 }
+
+// ============================================================================
+// 账号型渠道账号池（/api/account-sessions）
+// ============================================================================
+
+/** 渠道下的单个上游账号（凭证已脱敏） */
+export interface AccountSessionItem {
+  id: string;
+  channel_id: string;
+  channel_name?: string;
+  name: string;
+  provider: string;
+  base_url?: string;
+  /** 脱敏后的凭证 */
+  api_key?: string;
+  /** 账号级出口代理（http/https/socks5），null = 直连 */
+  proxy?: string | null;
+  /** 运行态：enabled / disabled / expired */
+  status?: string;
+  configured_status?: string;
+  priority?: number;
+  weight?: number;
+  max_concurrency?: number;
+  models?: string[];
+  in_flight?: number;
+  success_count?: number;
+  error_count?: number;
+  avg_latency_ms?: number;
+  /** 上游真名 → 剩余冷却秒数 */
+  cooldowns?: Record<string, number>;
+  last_error?: string | null;
+  last_used_at?: number | null;
+  expires_at?: number | null;
+  created_at?: number;
+  updated_at?: number;
+}
+
+/** provider 目录项（粘贴凭证型上游） */
+export interface AccountProviderItem {
+  kind: string;
+  label: string;
+  protocol: string;
+  default_base_url: string;
+}
+
+/** 账号池按渠道聚合统计 */
+export interface AccountSessionStatsItem {
+  channel_id: string;
+  channel_name?: string;
+  total: number;
+  enabled: number;
+  cooling: number;
+  in_flight: number;
+  success: number;
+  error: number;
+}

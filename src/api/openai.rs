@@ -73,6 +73,8 @@ pub struct AppState {
     pub livez_state: Arc<LivezState>,
     /// 通用渠道存储（混用 CF + 第三方 OpenAI 兼容上游）
     pub channel_store: Arc<ChannelStore>,
+    /// 账号型渠道的账号池（渠道内第二级调度：账号级优先级/冷却/并发/粘性）
+    pub account_sessions: crate::account_session::AccountSessionStore,
     /// 模型定价目录
     pub pricing_store: Arc<PricingStore>,
     /// 用户分组存储
@@ -355,6 +357,16 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
                     Some(ch.id.clone()),
                     Some(ch.clone()),
                 ));
+            }
+            crate::channel::ChannelType::Account => {
+                // 账号型渠道：凭证不进 Channel，bridge 在调用时按账号池选号
+                let bridge: Arc<dyn crate::bridge::Bridge> = Arc::new(
+                    crate::bridge::account::AccountBridge::new(
+                        ch.id.clone(),
+                        state.account_sessions.clone(),
+                    ),
+                );
+                result.push((bridge, Some(ch.id.clone()), Some(ch.clone())));
             }
             crate::channel::ChannelType::Cloudflare => {
                 // CF 渠道走 Hub 专用桥接
@@ -4586,6 +4598,10 @@ pub async fn handle_list_models(
             .cloned()
             .collect();
         for ch in &empty_channels {
+            // 账号型渠道无渠道级凭证，模型发现按账号走管理面账号测试
+            if ch.channel_type == crate::channel::ChannelType::Account {
+                continue;
+            }
             let key = ch.decode_api_key();
             if ch.base_url.trim().is_empty()
                 && ch.channel_type != crate::channel::ChannelType::Cloudflare

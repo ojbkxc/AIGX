@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import {
   Eye, EyeOff, ArrowLeftRight, MoreHorizontal, Search,
   Pencil, Gauge, Power, PowerOff, Loader2, MessageSquare, RotateCcw, Trash2,
-  DollarSign, Cloud, Sparkles, Gem, BrainCircuit,
+  DollarSign, Cloud, Sparkles, Gem, BrainCircuit, Layers,
 } from 'lucide-react';
 import { api } from '../api';
 import { useListKeyboard } from '../hooks/useListKeyboard';
@@ -68,6 +68,7 @@ const CHANNEL_TYPES = [
   { value: 'anthropic', labelKey: 'Anthropic 兼容' },
   { value: 'gemini', labelKey: 'Gemini (Google AI)', isRaw: true },
   { value: 'zai', labelKey: 'Zai (智谱AI)', isRaw: true },
+  { value: 'account', labelKey: '账号型渠道（多账号轮换）', isRaw: true },
 ];
 
 // 各渠道类型的默认 Base URL（创建时自动填充，减少用户手动输入）
@@ -80,6 +81,7 @@ const DEFAULT_BASE_URL = {
 const AUTH_HINT = {
   gemini: '鉴权方式：x-goog-api-key（在 API Key 字段填入 Google AI Studio 密钥）',
   zai: '鉴权方式：Bearer token（在 API Key 字段填入智谱 API Key）',
+  account: '账号型渠道不保存渠道级凭证：凭证与轮换请在「账号池」页按账号添加',
 };
 
 // 类型徽章图标（new-api ProviderBadge 同款思路：图标 + 着色标签）
@@ -89,6 +91,7 @@ const TYPE_ICONS: Record<string, typeof Cloud> = {
   anthropic: BrainCircuit,
   gemini: Gem,
   zai: Sparkles,
+  account: Layers,
 };
 
 // 模型名 → 稳定颜色（new-api autoColor 同思路：字符串 hash → HSL 色相）
@@ -448,7 +451,11 @@ export default function Channels(): JSX.Element {
 
   const handleSave = async (): Promise<void> => {
     if (!form.name) { setError(t('名称为必填项')); return; }
-    if (form.channel_type !== 'cloudflare' && !form.base_url) {
+    if (
+      form.channel_type !== 'cloudflare' &&
+      form.channel_type !== 'account' &&
+      !form.base_url
+    ) {
       setError(t('非 Cloudflare 渠道需填写 Base URL'));
       return;
     }
@@ -510,6 +517,10 @@ export default function Channels(): JSX.Element {
 
   // 拉取上游模型列表 — 后端代理转发（避免浏览器 CORS）
   const handleFetchModels = async (): Promise<void> => {
+    if (form.channel_type === 'account') {
+      setError(t('账号型渠道无渠道级凭证：模型请直接在下方填写，或到账号池页逐号测试'));
+      return;
+    }
     if (form.channel_type !== 'cloudflare' && !form.base_url.trim()) {
       setError(t('请先填写 Base URL'));
       return;
