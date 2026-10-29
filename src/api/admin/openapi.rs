@@ -609,6 +609,29 @@ fn paths_accounts_network() -> Value {
             "put": op_params("网络层", "更新账号", &[path_param("id")]),
             "delete": op_params("网络层", "删除账号", &[path_param("id")])
         },
+        "/api/account-sessions": {
+            "get": op("账号池", "列出账号型渠道的账号（凭证/代理脱敏）"),
+            "post": op_body("账号池", "新增账号", "channel + 凭证/代理/优先级/并发/模型")
+        },
+        "/api/account-sessions/providers": {
+            "get": op("账号池", "provider 目录（粘贴凭证型上游与默认地址）")
+        },
+        "/api/account-sessions/stats": {
+            "get": op("账号池", "按渠道聚合的账号池统计（启用/冷却/并发/成败）")
+        },
+        "/api/account-sessions/bulk": {
+            "post": op_body("账号池", "批量导入凭证（每行 Name,Key 或仅 Key）", "channel_id + credentials")
+        },
+        "/api/account-sessions/{id}": {
+            "put": op_params("账号池", "更新账号（渠道不可变、凭证三态）", &[path_param("id")]),
+            "delete": op_params("账号池", "删除账号", &[path_param("id")])
+        },
+        "/api/account-sessions/{id}/test": {
+            "post": op_params("账号池", "单号探活（走真实推理链路）", &[path_param("id")])
+        },
+        "/api/account-sessions/{id}/reset-cooldown": {
+            "post": op_params("账号池", "清除账号冷却与最近错误", &[path_param("id")])
+        },
         "/api/network/status": {
             "get": op("网络层", "网络层健康状态")
         },

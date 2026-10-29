@@ -15,6 +15,8 @@ use std::collections::HashMap;
 
 /// 凭证形态：粘贴型 API Key（鉴权头由 provider 协议决定）。
 pub const CREDENTIAL_KIND_API_KEY: &str = "api_key";
+/// 凭证形态：免鉴权（bridge 不发送鉴权头，用于 IP 白名单型上游）。
+pub const CREDENTIAL_KIND_NONE: &str = "none";
 
 /// 粘贴型凭证。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -104,6 +106,9 @@ pub struct AccountSession {
     pub success_count: u64,
     #[serde(default)]
     pub error_count: u64,
+    /// 连续失败次数（成功即清零；用于指数退避，区别于累计 `error_count`）。
+    #[serde(default)]
+    pub consecutive_errors: u64,
     /// 累计成功请求延迟（毫秒），与 `success_count` 求均值。
     #[serde(default)]
     pub total_latency_ms: u64,
@@ -157,6 +162,7 @@ impl AccountSession {
             last_error: None,
             success_count: 0,
             error_count: 0,
+            consecutive_errors: 0,
             total_latency_ms: 0,
             expires_at: None,
             in_flight: 0,

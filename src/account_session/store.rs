@@ -337,6 +337,7 @@ impl AccountSessionStore {
             };
             session.success_count = session.success_count.saturating_add(1);
             session.total_latency_ms = session.total_latency_ms.saturating_add(latency_ms);
+            session.consecutive_errors = 0;
             session.cooldowns.remove(model);
             session.last_error = None;
             session.updated_at = chrono::Utc::now().timestamp();
@@ -366,10 +367,11 @@ impl AccountSessionStore {
                 return 0;
             };
             session.error_count = session.error_count.saturating_add(1);
+            session.consecutive_errors = session.consecutive_errors.saturating_add(1);
             let secs = rotate::cooldown_secs(
                 &self.inner.policy,
                 failure,
-                session.error_count,
+                session.consecutive_errors,
                 retry_after,
             );
             if secs > 0 {
@@ -395,7 +397,7 @@ impl AccountSessionStore {
                 return false;
             };
             session.cooldowns.clear();
-            session.error_count = 0;
+            session.consecutive_errors = 0;
             session.last_error = None;
             session.updated_at = chrono::Utc::now().timestamp();
             session.clone()
@@ -491,7 +493,7 @@ fn pick_weighted(sessions: &[AccountSession], group: &[usize], now: i64) -> usiz
     if group.len() == 1 {
         return group[0];
     }
-    let weights: Vec<u32> = group
+    let weights: Vec<u64> = group
         .iter()
         .map(|index| {
             let session = &sessions[*index];
@@ -500,10 +502,11 @@ fn pick_weighted(sessions: &[AccountSession], group: &[usize], now: i64) -> usiz
                 .last_used_at
                 .map(|at| (now - at).clamp(0, 3600) / 60)
                 .unwrap_or(60);
-            session.weight.max(1).saturating_add(idle_bonus as u32)
+            let base_weight = u64::from(session.weight.max(1));
+            base_weight.saturating_add(idle_bonus.max(0) as u64)
         })
         .collect();
-    let total: u32 = weights.iter().sum();
+    let total: u64 = weights.iter().sum();
     let mut cursor = rand::thread_rng().gen_range(0..total.max(1));
     for (offset, index) in group.iter().enumerate() {
         let weight = weights[offset].max(1);

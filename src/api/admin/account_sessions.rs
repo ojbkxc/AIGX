@@ -192,6 +192,16 @@ fn cooldowns_json(session: &AccountSession, now: i64) -> Value {
     Value::Object(map)
 }
 
+/// 代理串脱敏：`http://user:pass@host` → `http://***@host`（无 userinfo 原样返回）。
+fn mask_proxy(proxy: &str) -> String {
+    let Some((userinfo, host)) = proxy.rsplit_once('@') else {
+        return proxy.to_string();
+    };
+    let scheme_end = userinfo.find("://").map(|index| index + 3).unwrap_or(0);
+    let scheme = &userinfo[..scheme_end];
+    format!("{scheme}***@{host}")
+}
+
 /// 账号 JSON 视图（凭证脱敏）。
 fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Value {
     let mut channel_name = String::new();
@@ -209,7 +219,7 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "provider": session.provider,
         "base_url": session.base_url,
         "api_key": mask_secret(&session.credential.secret_plain()),
-        "proxy": session.proxy,
+        "proxy": session.proxy.as_deref().map(mask_proxy),
         "status": session.runtime_status(now),
         "configured_status": session.status,
         "priority": session.priority,
@@ -219,6 +229,7 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "in_flight": session.in_flight,
         "success_count": session.success_count,
         "error_count": session.error_count,
+        "consecutive_errors": session.consecutive_errors,
         "avg_latency_ms": session.avg_latency_ms(),
         "cooldowns": cooldowns_json(session, now),
         "last_error": session.last_error,
@@ -491,14 +502,16 @@ pub struct ProbeOutcome {
     pub message: String,
 }
 
-/// 探活使用的模型：账号白名单 → 渠道 models / 发现快照（含渠道映射）。
+/// 探活使用的模型：账号白名单 → 渠道 models / 发现快照，最后统一走渠道映射
+///（与数据面「上游真名」口径一致：映射对它自己产出的名字是恒等变换，安全）。
 fn resolve_probe_model(state: &AppState, session: &AccountSession) -> Option<String> {
-    if let Some(model) = session.models.first() {
-        return Some(model.clone());
-    }
-    let channel = state.channel_store.get(&session.channel_id)?;
-    let model = channel.effective_models().first()?.clone();
-    Some(channel.resolve_channel_mapping(&model).unwrap_or(model))
+    let channel = state.channel_store.get(&session.channel_id);
+    let raw = match session.models.first() {
+        Some(model) => model.clone(),
+        None => channel.as_ref()?.effective_models().first()?.clone(),
+    };
+    let mapped = channel.and_then(|ch| ch.resolve_channel_mapping(&raw));
+    Some(mapped.unwrap_or(raw))
 }
 
 /// 走真实推理链路探活（复用账号的出口 Client 与原生 Bridge）。

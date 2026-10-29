@@ -26,6 +26,7 @@ interface SessionFormState {
   models: string;
   expires_at: string;
   clear_key: boolean;
+  clear_proxy: boolean;
 }
 
 const EMPTY_FORM: SessionFormState = {
@@ -42,6 +43,7 @@ const EMPTY_FORM: SessionFormState = {
   models: '',
   expires_at: '',
   clear_key: false,
+  clear_proxy: false,
 };
 
 interface BulkFormState {
@@ -145,14 +147,17 @@ export default function AccountSessions(): JSX.Element {
       provider: session.provider || 'openai_compatible',
       base_url: session.base_url || '',
       api_key: '',
-      proxy: session.proxy || '',
-      status: session.configured_status || (session.status === 'enabled' ? 'enabled' : 'disabled'),
+      // 接口返回的代理已脱敏（userinfo 打码），回填会被误存；留空 + 占位提示
+      proxy: '',
+      // 表单只提供启用/停用两态；已过期账号按停用处理（保存即显式置为停用）
+      status: (session.configured_status || session.status) === 'enabled' ? 'enabled' : 'disabled',
       priority: String(session.priority ?? 0),
       weight: String(session.weight ?? 1),
       max_concurrency: String(session.max_concurrency ?? 0),
       models: (session.models || []).join(', '),
       expires_at: session.expires_at ? String(session.expires_at) : '',
       clear_key: false,
+      clear_proxy: false,
     });
     setShowModal(true);
   };
@@ -191,7 +196,6 @@ export default function AccountSessions(): JSX.Element {
         name: form.name.trim(),
         provider: form.provider,
         base_url: form.base_url.trim(),
-        proxy: form.proxy.trim(),
         status: form.status,
         priority: Number(form.priority || 0),
         weight: Number(form.weight || 1),
@@ -199,6 +203,14 @@ export default function AccountSessions(): JSX.Element {
         models: splitModels(form.models),
         expires_at: form.expires_at.trim() ? Number(form.expires_at) : null,
       };
+      // 代理三态：新增直传；更新时缺省保持原值、"" 清除、非空覆盖
+      if (!editing) {
+        payload.proxy = form.proxy.trim();
+      } else if (form.clear_proxy) {
+        payload.proxy = '';
+      } else if (form.proxy.trim()) {
+        payload.proxy = form.proxy.trim();
+      }
       if (editing) {
         if (form.clear_key) {
           payload.api_key = '';
@@ -569,10 +581,21 @@ export default function AccountSessions(): JSX.Element {
               )}
               <Input
                 label={t('出口代理（可选）')}
-                placeholder="socks5://127.0.0.1:1080"
+                placeholder={editing?.proxy || 'socks5://127.0.0.1:1080'}
+                hint={editing?.proxy ? t('留空保持当前代理；勾选下方可清除') : undefined}
                 value={form.proxy}
                 onChange={(e) => setForm({ ...form, proxy: e.target.value })}
               />
+              {editing?.proxy && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={form.clear_proxy}
+                    onChange={(e) => setForm({ ...form, clear_proxy: e.target.checked })}
+                  />
+                  <span>{t('清除出口代理')}</span>
+                </label>
+              )}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 <Input
                   label={t('优先级')}

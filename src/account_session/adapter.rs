@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use super::model::AccountSession;
+use super::model::{AccountSession, CREDENTIAL_KIND_NONE};
 use super::registry::{self, Protocol};
 use super::store::AccountSessionStore;
 use crate::bridge::{Bridge, BridgeError};
@@ -41,7 +41,12 @@ pub fn build_bridge(
         BridgeError::Config(format!("unknown account provider '{}'", session.provider))
     })?;
     let base = effective_base_url(session)?;
-    let secret = session.credential.secret_plain();
+    // `kind = none` = 免鉴权上游（IP 白名单等），此时不发送任何鉴权头
+    let secret = if session.credential.kind == CREDENTIAL_KIND_NONE {
+        String::new()
+    } else {
+        session.credential.secret_plain()
+    };
     let client = sessions.client_for(session)?;
     let bridge: Arc<dyn Bridge> = match spec.protocol {
         Protocol::Openai => crate::bridge::openai::make_bridge(&base, &secret, &client),

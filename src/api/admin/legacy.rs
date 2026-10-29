@@ -2924,6 +2924,16 @@ pub async fn handle_channel_chat_test(
         }
     };
 
+    // 账号型渠道没有渠道级凭证：调试对话由「账号池」页逐号探活承担，
+    // 这里直接给出明确指引（避免用空 base_url/空 key 打上游得到误导性报错）。
+    if ch.channel_type == crate::channel::ChannelType::Account {
+        return error_response(
+            "Account channels are tested per account on the Account Pool page",
+            StatusCode::BAD_REQUEST,
+        )
+        .into_response();
+    }
+
     // 指定渠道调试：校验模型属于该渠道（models 非空 = 白名单；空 = 全部，
     // 以发现快照兜底），防止把别的渠道的模型名透传给本渠道上游。
     if !body.channel_id.trim().is_empty() && !requested_model.is_empty() {

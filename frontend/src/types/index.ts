@@ -887,6 +887,8 @@ export interface AccountSessionItem {
   in_flight?: number;
   success_count?: number;
   error_count?: number;
+  /** 连续失败次数（成功清零，用于指数退避） */
+  consecutive_errors?: number;
   avg_latency_ms?: number;
   /** 上游真名 → 剩余冷却秒数 */
   cooldowns?: Record<string, number>;

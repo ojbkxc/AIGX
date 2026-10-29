@@ -1525,5 +1525,7 @@
   "确定停用选中的 {{count}} 个渠道？": "Disable the {{count}} selected channels?",
   "确定删除选中的 {{count}} 个渠道？此操作不可撤销。": "Delete the {{count}} selected channels? This cannot be undone.",
   "确定删除全部 {{count}} 个已禁用渠道？": "Delete all {{count}} disabled channels?",
-  "账号型渠道无渠道级凭证：模型请直接在下方填写，或到账号池页逐号测试": "Account channels hold no channel-level credential: fill in models below, or test each account on the Account Pool page"
+  "账号型渠道无渠道级凭证：模型请直接在下方填写，或到账号池页逐号测试": "Account channels hold no channel-level credential: fill in models below, or test each account on the Account Pool page",
+  "留空保持当前代理；勾选下方可清除": "Leave empty to keep the current proxy; tick below to clear",
+  "清除出口代理": "Clear the egress proxy"
 }
