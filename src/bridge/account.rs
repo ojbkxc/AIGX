@@ -267,11 +267,9 @@ impl Bridge for AccountBridge {
         req: &EmbeddingRequest,
         ctx: &BridgeContext,
     ) -> Result<EmbeddingResponse, BridgeError> {
-        self.dispatch(
-            &req.model,
-            ctx,
-            |bridge| async move { bridge.embed(req, ctx).await },
-        )
+        self.dispatch(&req.model, ctx, |bridge| async move {
+            bridge.embed(req, ctx).await
+        })
         .await
     }
 
@@ -280,11 +278,9 @@ impl Bridge for AccountBridge {
         req: &RerankRequest,
         ctx: &BridgeContext,
     ) -> Result<RerankResponse, BridgeError> {
-        self.dispatch(
-            &req.model,
-            ctx,
-            |bridge| async move { bridge.rerank(req, ctx).await },
-        )
+        self.dispatch(&req.model, ctx, |bridge| async move {
+            bridge.rerank(req, ctx).await
+        })
         .await
     }
 
