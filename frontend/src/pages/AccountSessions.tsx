@@ -352,6 +352,7 @@ export default function AccountSessions(): JSX.Element {
     if (!needle) return true;
     return (
       s.name.toLowerCase().includes(needle) ||
+      (s.channel_name || '').toLowerCase().includes(needle) ||
       (s.provider || '').toLowerCase().includes(needle) ||
       (s.base_url || '').toLowerCase().includes(needle)
     );

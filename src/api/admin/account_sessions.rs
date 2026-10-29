@@ -202,15 +202,19 @@ fn mask_proxy(proxy: &str) -> String {
     format!("{scheme}***@{host}")
 }
 
-/// 账号 JSON 视图（凭证脱敏）。
-fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Value {
-    let mut channel_name = String::new();
+/// 渠道展示名（找不到返回空串）。
+fn channel_name_for(channels: &[Channel], channel_id: &str) -> String {
     for channel in channels {
-        if channel.id == session.channel_id {
-            channel_name = channel.name.clone();
-            break;
+        if channel.id == channel_id {
+            return channel.name.clone();
         }
     }
+    String::new()
+}
+
+/// 账号 JSON 视图（凭证脱敏）。
+fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Value {
+    let channel_name = channel_name_for(channels, &session.channel_id);
     json!({
         "id": session.id,
         "channel_id": session.channel_id,
@@ -267,8 +271,11 @@ pub async fn handle_list_account_sessions(
         if !channel_filter.is_empty() && session.channel_id != channel_filter {
             continue;
         }
-        if !search.is_empty() && !matches_search(session, &search) {
-            continue;
+        if !search.is_empty() {
+            let channel_name = channel_name_for(&channels, &session.channel_id);
+            if !matches_search(session, &search) && !channel_name.to_lowercase().contains(&search) {
+                continue;
+            }
         }
         data.push(session_json(&channels, session, now));
     }

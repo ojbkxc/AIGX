@@ -1160,7 +1160,9 @@ pub async fn handle_test_channel(
     state.channel_store.save_test_result(&id, result.latency_ms);
     if result.success {
         state.channel_store.mark_healthy(&id);
-    } else {
+    } else if ch.channel_type != crate::channel::ChannelType::Account {
+        // 账号型渠道失败往往只是「当前无可用账号」（全部冷却/未添加），
+        // 不应据此停用整条渠道——账号级冷却由账号池自行恢复
         state
             .channel_store
             .mark_unhealthy(&id, result.message.clone());
