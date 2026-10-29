@@ -709,6 +709,13 @@ mod tests {
             m.insert(p, methods.to_vec());
         };
         add("/api-docs/openapi.json", &["get"]);
+        add("/api/account-sessions", &["get", "post"]);
+        add("/api/account-sessions/bulk", &["post"]);
+        add("/api/account-sessions/providers", &["get"]);
+        add("/api/account-sessions/stats", &["get"]);
+        add("/api/account-sessions/{id}", &["delete", "put"]);
+        add("/api/account-sessions/{id}/reset-cooldown", &["post"]);
+        add("/api/account-sessions/{id}/test", &["post"]);
         add("/api/accounts", &["get", "post"]);
         add("/api/accounts/test", &["post"]);
         add("/api/accounts/{id}", &["delete", "put"]);
@@ -933,15 +940,15 @@ mod tests {
         );
     }
 
-    /// 数量锚点：管理面真实路径共 143 个（142 + openapi.json 自身）。
+    /// 数量锚点：管理面真实路径共 150 个（149 + openapi.json 自身）。
     /// 真实路由增删会先在 covers_all_real_admin_routes 红，此断言辅助定位。
     #[test]
     fn path_count_anchor() {
         let doc = build_openapi_document();
         let n = doc["paths"].as_object().unwrap().len();
         assert_eq!(
-            n, 143,
-            "管理面路径数应为 143（142 真实注册 + openapi.json），实际 {n}"
+            n, 150,
+            "管理面路径数应为 150（149 真实注册 + openapi.json），实际 {n}"
         );
     }
 }
