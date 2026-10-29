@@ -197,6 +197,17 @@ impl AccountSession {
         self.models.is_empty() || self.models.iter().any(|m| m == model)
     }
 
+    /// 是否支持指定模型（兼容「用户可见名 / 上游真名」两种配置口径）。
+    ///
+    /// 数据面传入的 `model` 是映射后的上游真名，而管理面白名单通常按渠道
+    /// `models`（用户可见名）填写；两者任一命中即视为支持。
+    pub fn supports_model_any(&self, model: &str, alias: Option<&str>) -> bool {
+        if self.supports_model(model) {
+            return true;
+        }
+        alias.is_some_and(|other| self.models.iter().any(|m| m == other))
+    }
+
     /// 该上游模型的冷却到期时间（unix 秒）。
     pub fn cooling_until(&self, model: &str) -> Option<i64> {
         self.cooldowns

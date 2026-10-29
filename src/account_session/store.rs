@@ -282,8 +282,16 @@ impl AccountSessionStore {
 
     /// 租用一把可用账号（优先级降序 → 组内权重随机 → 空闲最久优先）。
     ///
+    /// `alias` 是同一模型的「用户可见名」，用于兼容账号白名单按渠道 models
+    /// 配置的场景；冷却键始终是 `model`（上游真名）。
+    ///
     /// 返回 `None` 表示该渠道下当前没有可用账号（全部冷却/并发占满/禁用）。
-    pub fn acquire(&self, channel_id: &str, model: &str) -> Option<AccountLease> {
+    pub fn acquire(
+        &self,
+        channel_id: &str,
+        model: &str,
+        alias: Option<&str>,
+    ) -> Option<AccountLease> {
         let now = chrono::Utc::now().timestamp();
         let mut sessions = self.inner.sessions.write();
         let mut candidates: Vec<usize> = Vec::new();
@@ -291,7 +299,7 @@ impl AccountSessionStore {
             if session.channel_id != channel_id || !session.is_enabled() {
                 continue;
             }
-            if session.is_expired(now) || !session.supports_model(model) {
+            if session.is_expired(now) || !session.supports_model_any(model, alias) {
                 continue;
             }
             if session.is_cooling(model, now) {
@@ -554,7 +562,7 @@ mod tests {
         let pool = pool();
         pool.upsert(session("ch", "low", 1)).unwrap();
         pool.upsert(session("ch", "high", 9)).unwrap();
-        let lease = pool.acquire("ch", "m").expect("应有可用账号");
+        let lease = pool.acquire("ch", "m", None).expect("应有可用账号");
         assert_eq!(lease.session().name, "high");
     }
 
@@ -564,10 +572,10 @@ mod tests {
         let mut only = session("ch", "only", 0);
         only.max_concurrency = 1;
         pool.upsert(only).unwrap();
-        let lease = pool.acquire("ch", "m").expect("首个租约");
-        assert!(pool.acquire("ch", "m").is_none());
+        let lease = pool.acquire("ch", "m", None).expect("首个租约");
+        assert!(pool.acquire("ch", "m", None).is_none());
         drop(lease);
-        assert!(pool.acquire("ch", "m").is_some());
+        assert!(pool.acquire("ch", "m", None).is_some());
     }
 
     #[test]
@@ -577,10 +585,10 @@ mod tests {
         let failure = FailureType::ServerError;
         let secs = pool.record_failure(&account.id, "upstream-x", &failure, "boom");
         assert!(secs >= 60);
-        assert!(pool.acquire("ch", "upstream-x").is_none());
-        assert!(pool.acquire("ch", "other-model").is_some());
+        assert!(pool.acquire("ch", "upstream-x", None).is_none());
+        assert!(pool.acquire("ch", "other-model", None).is_some());
         assert!(pool.reset_cooldowns(&account.id));
-        assert!(pool.acquire("ch", "upstream-x").is_some());
+        assert!(pool.acquire("ch", "upstream-x", None).is_some());
     }
 
     #[test]

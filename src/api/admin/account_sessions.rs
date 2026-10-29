@@ -562,18 +562,27 @@ pub async fn probe_session(state: &AppState, session: &AccountSession) -> ProbeO
         extra: None,
     };
     let started = Instant::now();
-    match bridge.chat(&req, &ctx).await {
-        Ok(response) => ProbeOutcome {
+    // 客户端超时 300s 对探活太久：用短预算收敛（渠道级探活最多试 3 个号）
+    let budget = Duration::from_secs(PROBE_TIMEOUT_SECS);
+    let outcome = tokio::time::timeout(budget, bridge.chat(&req, &ctx)).await;
+    match outcome {
+        Ok(Ok(response)) => ProbeOutcome {
             ok: true,
             latency_ms: started.elapsed().as_millis() as u64,
             model,
             message: format!("OK (finish={:?})", response.finish_reason),
         },
-        Err(e) => ProbeOutcome {
+        Ok(Err(e)) => ProbeOutcome {
             ok: false,
             latency_ms: started.elapsed().as_millis() as u64,
             model,
             message: e.to_string(),
+        },
+        Err(_) => ProbeOutcome {
+            ok: false,
+            latency_ms: started.elapsed().as_millis() as u64,
+            model,
+            message: format!("timed out after {PROBE_TIMEOUT_SECS}s"),
         },
     }
 }

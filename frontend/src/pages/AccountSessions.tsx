@@ -340,6 +340,12 @@ export default function AccountSessions(): JSX.Element {
     return `${((ok / total) * 100).toFixed(0)}%`;
   };
 
+  // 最近错误过长会撑破单元格：截断展示，完整内容放 title
+  const shortError = (raw?: string | null): string => {
+    if (!raw) return '';
+    return raw.length > 48 ? `${raw.slice(0, 48)}…` : raw;
+  };
+
   const needle = search.trim().toLowerCase();
   const visible = sessions.filter((s) => {
     if (channelFilter && s.channel_id !== channelFilter) return false;
@@ -455,6 +461,11 @@ export default function AccountSessions(): JSX.Element {
                       <div>{session.name}</div>
                       <div className="form-hint">{session.api_key || '—'}</div>
                       {session.proxy && <div className="form-hint">{session.proxy}</div>}
+                      {session.last_error && (
+                        <div className="form-hint" title={session.last_error}>
+                          {shortError(session.last_error)}
+                        </div>
+                      )}
                     </td>
                     <td>{session.channel_name || session.channel_id}</td>
                     <td>

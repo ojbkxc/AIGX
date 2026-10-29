@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::{Bridge, BridgeContext, BridgeError, ChatChunkStream};
 use super::{ChatFormat, ChatResponse};
@@ -24,6 +25,30 @@ use crate::channel::ChannelStore;
 pub struct AccountBridge {
     channel_id: String,
     sessions: AccountSessionStore,
+}
+
+/// 同渠道账号轮换的总时间预算（与共享 Client 的单请求超时对齐）。
+///
+/// 没有这个预算时，N 个慢账号会把一个客户端请求拖到 N×300s；有预算后
+/// 最坏耗时与普通渠道（单次 300s）一致。
+const ROTATION_BUDGET: Duration = Duration::from_secs(300);
+
+/// 剩余轮换预算（None = 预算已耗尽，停止换号）。
+fn remaining_budget(started_at: Instant) -> Option<Duration> {
+    let remaining = ROTATION_BUDGET.saturating_sub(started_at.elapsed());
+    if remaining.is_zero() {
+        None
+    } else {
+        Some(remaining)
+    }
+}
+
+/// 轮换预算耗尽 / 单次尝试超时的错误。
+fn rotation_timeout(started_at: Instant) -> BridgeError {
+    BridgeError::Timeout {
+        elapsed_ms: started_at.elapsed().as_millis() as u64,
+        cause: "account rotation budget exhausted".to_string(),
+    }
 }
 
 impl AccountBridge {
@@ -77,14 +102,25 @@ impl AccountBridge {
     }
 
     /// 透传类接口（embed/rerank/complete/image/responses）的账号轮换。
-    async fn dispatch<T, F, Fut>(&self, model: &str, op: F) -> Result<T, BridgeError>
+    async fn dispatch<T, F, Fut>(
+        &self,
+        model: &str,
+        ctx: &BridgeContext,
+        op: F,
+    ) -> Result<T, BridgeError>
     where
         F: Fn(Arc<dyn Bridge>) -> Fut,
         Fut: std::future::Future<Output = Result<T, BridgeError>>,
     {
+        let started_at = Instant::now();
+        let alias = Some(ctx.model.as_str());
         let mut last: Option<BridgeError> = None;
         for _ in 0..self.max_attempts() {
-            let Some(lease) = self.sessions.acquire(&self.channel_id, model) else {
+            let Some(remaining) = remaining_budget(started_at) else {
+                last = Some(rotation_timeout(started_at));
+                break;
+            };
+            let Some(lease) = self.sessions.acquire(&self.channel_id, model, alias) else {
                 break;
             };
             let bridge = match adapter::build_bridge(lease.session(), &self.sessions) {
@@ -95,8 +131,13 @@ impl AccountBridge {
                     continue;
                 }
             };
-            let started = std::time::Instant::now();
-            match op(bridge).await {
+            let started = Instant::now();
+            let outcome = tokio::time::timeout(remaining, op(bridge)).await;
+            let result = match outcome {
+                Ok(result) => result,
+                Err(_) => Err(rotation_timeout(started_at)),
+            };
+            match result {
                 Ok(value) => {
                     let elapsed = started.elapsed().as_millis() as u64;
                     self.sessions.record_success(lease.id(), model, elapsed);
@@ -125,9 +166,15 @@ impl Bridge for AccountBridge {
         req: &ChatFormat,
         ctx: &BridgeContext,
     ) -> Result<ChatResponse, BridgeError> {
+        let started_at = Instant::now();
+        let alias = Some(ctx.model.as_str());
         let mut last: Option<BridgeError> = None;
         for _ in 0..self.max_attempts() {
-            let Some(lease) = self.sessions.acquire(&self.channel_id, &req.model) else {
+            let Some(remaining) = remaining_budget(started_at) else {
+                last = Some(rotation_timeout(started_at));
+                break;
+            };
+            let Some(lease) = self.sessions.acquire(&self.channel_id, &req.model, alias) else {
                 break;
             };
             let bridge = match adapter::build_bridge(lease.session(), &self.sessions) {
@@ -138,8 +185,13 @@ impl Bridge for AccountBridge {
                     continue;
                 }
             };
-            let started = std::time::Instant::now();
-            match bridge.chat(req, ctx).await {
+            let started = Instant::now();
+            let outcome = tokio::time::timeout(remaining, bridge.chat(req, ctx)).await;
+            let result = match outcome {
+                Ok(result) => result,
+                Err(_) => Err(rotation_timeout(started_at)),
+            };
+            match result {
                 Ok(response) => {
                     let elapsed = started.elapsed().as_millis() as u64;
                     self.sessions
@@ -162,9 +214,15 @@ impl Bridge for AccountBridge {
         req: &ChatFormat,
         ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
+        let started_at = Instant::now();
+        let alias = Some(ctx.model.as_str());
         let mut last: Option<BridgeError> = None;
         for _ in 0..self.max_attempts() {
-            let Some(lease) = self.sessions.acquire(&self.channel_id, &req.model) else {
+            let Some(remaining) = remaining_budget(started_at) else {
+                last = Some(rotation_timeout(started_at));
+                break;
+            };
+            let Some(lease) = self.sessions.acquire(&self.channel_id, &req.model, alias) else {
                 break;
             };
             let bridge = match adapter::build_bridge(lease.session(), &self.sessions) {
@@ -175,8 +233,13 @@ impl Bridge for AccountBridge {
                     continue;
                 }
             };
-            let started = std::time::Instant::now();
-            match bridge.chat_stream(req, ctx).await {
+            let started = Instant::now();
+            let outcome = tokio::time::timeout(remaining, bridge.chat_stream(req, ctx)).await;
+            let result = match outcome {
+                Ok(result) => result,
+                Err(_) => Err(rotation_timeout(started_at)),
+            };
+            match result {
                 Ok(stream) => {
                     let elapsed = started.elapsed().as_millis() as u64;
                     self.sessions
@@ -206,6 +269,7 @@ impl Bridge for AccountBridge {
     ) -> Result<EmbeddingResponse, BridgeError> {
         self.dispatch(
             &req.model,
+            ctx,
             |bridge| async move { bridge.embed(req, ctx).await },
         )
         .await
@@ -218,13 +282,14 @@ impl Bridge for AccountBridge {
     ) -> Result<RerankResponse, BridgeError> {
         self.dispatch(
             &req.model,
+            ctx,
             |bridge| async move { bridge.rerank(req, ctx).await },
         )
         .await
     }
 
     async fn complete(&self, body: &Value, ctx: &BridgeContext) -> Result<Value, BridgeError> {
-        self.dispatch(&ctx.model, |bridge| async move {
+        self.dispatch(&ctx.model, ctx, |bridge| async move {
             bridge.complete(body, ctx).await
         })
         .await
@@ -235,7 +300,7 @@ impl Bridge for AccountBridge {
         body: &Value,
         ctx: &BridgeContext,
     ) -> Result<Value, BridgeError> {
-        self.dispatch(&ctx.model, |bridge| async move {
+        self.dispatch(&ctx.model, ctx, |bridge| async move {
             bridge.generate_image(body, ctx).await
         })
         .await
@@ -247,7 +312,7 @@ impl Bridge for AccountBridge {
         stream: bool,
         ctx: &BridgeContext,
     ) -> Result<ResponsesPassthrough, BridgeError> {
-        self.dispatch(&ctx.model, |bridge| async move {
+        self.dispatch(&ctx.model, ctx, |bridge| async move {
             bridge.responses_passthrough(body, stream, ctx).await
         })
         .await
