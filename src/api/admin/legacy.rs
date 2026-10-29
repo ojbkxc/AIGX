@@ -1512,7 +1512,7 @@ pub async fn fetch_upstream_models(
             return Err(error_response(
                 "account channel has no channel-level credential; declare models instead",
                 StatusCode::BAD_REQUEST,
-            ))
+            ));
         }
     };
     Ok((url, models))

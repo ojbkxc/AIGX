@@ -193,7 +193,10 @@ impl AccountSession {
 
     /// 该上游模型的冷却到期时间（unix 秒）。
     pub fn cooling_until(&self, model: &str) -> Option<i64> {
-        self.cooldowns.get(model).copied().filter(|until| *until > 0)
+        self.cooldowns
+            .get(model)
+            .copied()
+            .filter(|until| *until > 0)
     }
 
     /// 该上游模型是否处于冷却期。

@@ -142,7 +142,8 @@ impl Bridge for AccountBridge {
             match bridge.chat(req, ctx).await {
                 Ok(response) => {
                     let elapsed = started.elapsed().as_millis() as u64;
-                    self.sessions.record_success(lease.id(), &req.model, elapsed);
+                    self.sessions
+                        .record_success(lease.id(), &req.model, elapsed);
                     return Ok(response);
                 }
                 Err(e) => {
@@ -178,7 +179,8 @@ impl Bridge for AccountBridge {
             match bridge.chat_stream(req, ctx).await {
                 Ok(stream) => {
                     let elapsed = started.elapsed().as_millis() as u64;
-                    self.sessions.record_success(lease.id(), &req.model, elapsed);
+                    self.sessions
+                        .record_success(lease.id(), &req.model, elapsed);
                     // 并发槽位随流生命周期释放：租约移入闭包持有，流结束才归还
                     let guarded = stream.map(move |item| {
                         let _lease = &lease;
@@ -202,9 +204,10 @@ impl Bridge for AccountBridge {
         req: &EmbeddingRequest,
         ctx: &BridgeContext,
     ) -> Result<EmbeddingResponse, BridgeError> {
-        self.dispatch(&req.model, |bridge| async move {
-            bridge.embed(req, ctx).await
-        })
+        self.dispatch(
+            &req.model,
+            |bridge| async move { bridge.embed(req, ctx).await },
+        )
         .await
     }
 
@@ -213,9 +216,10 @@ impl Bridge for AccountBridge {
         req: &RerankRequest,
         ctx: &BridgeContext,
     ) -> Result<RerankResponse, BridgeError> {
-        self.dispatch(&req.model, |bridge| async move {
-            bridge.rerank(req, ctx).await
-        })
+        self.dispatch(
+            &req.model,
+            |bridge| async move { bridge.rerank(req, ctx).await },
+        )
         .await
     }
 

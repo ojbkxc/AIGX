@@ -360,12 +360,11 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
             }
             crate::channel::ChannelType::Account => {
                 // 账号型渠道：凭证不进 Channel，bridge 在调用时按账号池选号
-                let bridge: Arc<dyn crate::bridge::Bridge> = Arc::new(
-                    crate::bridge::account::AccountBridge::new(
+                let bridge: Arc<dyn crate::bridge::Bridge> =
+                    Arc::new(crate::bridge::account::AccountBridge::new(
                         ch.id.clone(),
                         state.account_sessions.clone(),
-                    ),
-                );
+                    ));
                 result.push((bridge, Some(ch.id.clone()), Some(ch.clone())));
             }
             crate::channel::ChannelType::Cloudflare => {

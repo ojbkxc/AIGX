@@ -245,9 +245,8 @@ impl AccountSessionStore {
     pub fn remove_for_channel(&self, channel_id: &str) -> anyhow::Result<usize> {
         let removed: Vec<AccountSession> = {
             let mut sessions = self.inner.sessions.write();
-            let (matched, kept): (Vec<AccountSession>, Vec<AccountSession>) = sessions
-                .drain(..)
-                .partition(|s| s.channel_id == channel_id);
+            let (matched, kept): (Vec<AccountSession>, Vec<AccountSession>) =
+                sessions.drain(..).partition(|s| s.channel_id == channel_id);
             *sessions = kept;
             matched
         };
@@ -541,7 +540,10 @@ mod tests {
         assert!(created.credential.secret.starts_with("enc:"));
         let loaded = pool.get(&created.id).unwrap();
         assert_eq!(loaded.credential.secret_plain(), "sk-acct");
-        assert_eq!(loaded.provider, super::super::registry::DEFAULT_PROVIDER_KIND);
+        assert_eq!(
+            loaded.provider,
+            super::super::registry::DEFAULT_PROVIDER_KIND
+        );
     }
 
     #[test]
@@ -594,7 +596,10 @@ mod tests {
             pool.update_credential_cas(&account.id, "sk-acct", next),
             CasOutcome::Updated
         );
-        assert_eq!(pool.get(&account.id).unwrap().credential.secret_plain(), "sk-new");
+        assert_eq!(
+            pool.get(&account.id).unwrap().credential.secret_plain(),
+            "sk-new"
+        );
     }
 
     #[test]

@@ -61,10 +61,7 @@ pub fn cooldown_secs(
         FailureType::RateLimited {
             retry_after: header_hint,
             ..
-        } => retry_after
-            .or(*header_hint)
-            .unwrap_or(base)
-            .max(base),
+        } => retry_after.or(*header_hint).unwrap_or(base).max(base),
         FailureType::ModelNotFound => base,
         FailureType::ServerError
         | FailureType::Timeout

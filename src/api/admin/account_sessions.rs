@@ -239,10 +239,17 @@ pub async fn handle_list_account_sessions(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     let channel_filter = params.get("channel_id").cloned().unwrap_or_default();
-    let search = params.get("search").map(|s| s.to_lowercase()).unwrap_or_default();
+    let search = params
+        .get("search")
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
     let channels = state.channel_store.list();
     let mut sessions = state.account_sessions.all();
-    sessions.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.created_at.cmp(&b.created_at)));
+    sessions.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then(a.created_at.cmp(&b.created_at))
+    });
     let now = chrono::Utc::now().timestamp();
     let mut data: Vec<Value> = Vec::with_capacity(sessions.len());
     for session in &sessions {
@@ -255,7 +262,9 @@ pub async fn handle_list_account_sessions(
         data.push(session_json(&channels, session, now));
     }
     let total = data.len();
-    Ok(Json(json!({ "success": true, "data": data, "total": total })))
+    Ok(Json(
+        json!({ "success": true, "data": data, "total": total }),
+    ))
 }
 
 // ── 新增 ────────────────────────────────────────────────────────────
@@ -305,7 +314,10 @@ pub async fn handle_update_account_session(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
     let Some(prev) = state.account_sessions.get(&id) else {
-        return Err(error_response("Account session not found", StatusCode::NOT_FOUND));
+        return Err(error_response(
+            "Account session not found",
+            StatusCode::NOT_FOUND,
+        ));
     };
     // 凭证 KV 以 channel_id 为键，不允许变更归属渠道
     let wanted_channel = body.channel_id.trim();
@@ -355,17 +367,17 @@ pub async fn handle_delete_account_session(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let removed = state
-        .account_sessions
-        .remove(&id)
-        .map_err(|e| {
-            error_response(
-                &format!("Failed to delete account session: {e}"),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-        })?;
+    let removed = state.account_sessions.remove(&id).map_err(|e| {
+        error_response(
+            &format!("Failed to delete account session: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
     let Some(removed) = removed else {
-        return Err(error_response("Account session not found", StatusCode::NOT_FOUND));
+        return Err(error_response(
+            "Account session not found",
+            StatusCode::NOT_FOUND,
+        ));
     };
     let admin_id = admin_id_from_session(&state, &headers).await;
     record_audit(
@@ -561,7 +573,10 @@ pub async fn handle_test_account_session(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     let Some(session) = state.account_sessions.get(&id) else {
-        return Err(error_response("Account session not found", StatusCode::NOT_FOUND));
+        return Err(error_response(
+            "Account session not found",
+            StatusCode::NOT_FOUND,
+        ));
     };
     let outcome = probe_session(&state, &session).await;
     Ok(Json(json!({
@@ -614,7 +629,10 @@ pub async fn handle_reset_account_session_cooldowns(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
     if !state.account_sessions.reset_cooldowns(&id) {
-        return Err(error_response("Account session not found", StatusCode::NOT_FOUND));
+        return Err(error_response(
+            "Account session not found",
+            StatusCode::NOT_FOUND,
+        ));
     }
     let admin_id = admin_id_from_session(&state, &headers).await;
     record_audit(

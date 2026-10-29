@@ -838,7 +838,7 @@ impl ChannelStore {
                     success: false,
                     message: "Account channels are tested per account session".to_string(),
                     latency_ms: start.elapsed().as_millis() as u64,
-                }
+                };
             }
             ChannelType::Gemini => {
                 // Gemini 健康检查：GET {base_url}/models，用 x-goog-api-key 鉴权
