@@ -78,7 +78,7 @@ pub struct AccountSessionRequest {
 ///
 /// 与 PUT（整表单替换）区分：PATCH 不触碰 base_url / models / 代理 / 凭证 /
 /// 到期时间，供控制台开关与 AI 工具做「启停 / 调优先级」这类小操作。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct AccountSessionPatch {
     #[serde(default)]
     pub name: Option<String>,
@@ -90,6 +90,16 @@ pub struct AccountSessionPatch {
     pub weight: Option<u32>,
     #[serde(default)]
     pub max_concurrency: Option<u32>,
+}
+
+impl AccountSessionPatch {
+    /// 仅设置运行状态（MCP/Agent 启停工具的快捷路径）。
+    pub fn status_only(status: &str) -> Self {
+        Self {
+            status: Some(status.to_string()),
+            ..Self::default()
+        }
+    }
 }
 
 /// 批量导入请求。
@@ -414,10 +424,20 @@ pub async fn handle_patch_account_session(
         ));
     };
     let mut next = prev.clone();
-    if let Some(name) = body.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(name) = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         next.name = name.to_string();
     }
-    if let Some(status) = body.status.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(status) = body
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         if status != "enabled" && status != "disabled" {
             return Err(error_response(
                 "status must be 'enabled' or 'disabled'",

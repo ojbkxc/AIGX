@@ -346,6 +346,13 @@ export default function AccountSessions(): JSX.Element {
       .join(' · ');
   };
 
+  // 运行态 → 本地化文案（与渠道管理的启用/禁用口径一致）
+  const statusLabel = (status?: string): string => {
+    if (status === 'enabled') return t('启用');
+    if (status === 'expired') return t('凭证已过期');
+    return t('禁用');
+  };
+
   const successRate = (session: AccountSessionItem): string => {
     const ok = Number(session.success_count || 0);
     const failed = Number(session.error_count || 0);
@@ -488,7 +495,7 @@ export default function AccountSessions(): JSX.Element {
                     </td>
                     <td>
                       <span className={`badge ${statusClass(session.status)}`}>
-                        {session.status}
+                        {statusLabel(session.status)}
                       </span>
                       {(session.in_flight ?? 0) > 0 && (
                         <div className="form-hint">
@@ -524,7 +531,14 @@ export default function AccountSessions(): JSX.Element {
                           variant="outline"
                           size="sm"
                           onClick={() => handleToggleStatus(session)}
-                          title={session.status === 'enabled' ? t('停用') : t('启用')}
+                          disabled={session.status === 'expired'}
+                          title={
+                            session.status === 'expired'
+                              ? t('凭证已过期，请先更新凭证或到期时间')
+                              : session.status === 'enabled'
+                                ? t('停用')
+                                : t('启用')
+                          }
                         >
                           <Power size={14} />
                         </Button>

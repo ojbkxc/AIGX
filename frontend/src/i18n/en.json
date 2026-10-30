@@ -1527,5 +1527,7 @@
   "确定删除全部 {{count}} 个已禁用渠道？": "Delete all {{count}} disabled channels?",
   "账号型渠道无渠道级凭证：模型请直接在下方填写，或到账号池页逐号测试": "Account channels hold no channel-level credential: fill in models below, or test each account on the Account Pool page",
   "留空保持当前代理；勾选下方可清除": "Leave empty to keep the current proxy; tick below to clear",
-  "清除出口代理": "Clear the egress proxy"
+  "清除出口代理": "Clear the egress proxy",
+  "凭证已过期": "Credential expired",
+  "凭证已过期，请先更新凭证或到期时间": "Credential expired — update the credential or expiry first"
 }

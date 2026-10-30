@@ -40,6 +40,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
+use super::account_sessions::AccountSessionPatch;
 use super::account_sessions::{
     handle_account_session_stats, handle_list_account_sessions, handle_patch_account_session,
     handle_reset_account_session_cooldowns, handle_test_account_session,
@@ -465,12 +466,8 @@ async fn exec_tool(
         // ── 账号池×6（读×2 + 写×4）──
         "aigx_list_account_sessions" => {
             let q = args_to_string_map(arguments);
-            let r = handle_list_account_sessions(
-                State(state.clone()),
-                headers.clone(),
-                Query(q),
-            )
-            .await;
+            let r =
+                handle_list_account_sessions(State(state.clone()), headers.clone(), Query(q)).await;
             Ok(handler_to_tool_result(r))
         }
         "aigx_account_session_stats" => {
@@ -549,7 +546,7 @@ async fn write_account_status(
         State(state.clone()),
         headers.clone(),
         Path(id.clone()),
-        Json(json!({ "status": status })),
+        Json(AccountSessionPatch::status_only(status)),
     )
     .await;
     audit_write_tool(state, headers, tool_name, &id, before, &r).await;
@@ -760,7 +757,11 @@ mod tests {
     #[test]
     fn tools_list_has_expected_unique_tools() {
         let specs = tool_specs();
-        assert_eq!(specs.len(), 17, "白名单固定 17 个工具（渠道运维 11 + 账号池 6）");
+        assert_eq!(
+            specs.len(),
+            17,
+            "白名单固定 17 个工具（渠道运维 11 + 账号池 6）"
+        );
         let tools = tools_list_result()["tools"].as_array().unwrap().clone();
         assert_eq!(tools.len(), 17);
         let mut seen = std::collections::BTreeSet::new();
