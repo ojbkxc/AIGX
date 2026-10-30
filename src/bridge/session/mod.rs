@@ -42,5 +42,8 @@ pub fn build(
 
 /// 是否为已实现的私有协议供应商。
 pub fn supports(kind: &str) -> bool {
-    matches!(kind, "orcaterm" | "antigravity" | "accio" | "commandcode" | "kuku")
+    matches!(
+        kind,
+        "orcaterm" | "antigravity" | "accio" | "commandcode" | "kuku"
+    )
 }

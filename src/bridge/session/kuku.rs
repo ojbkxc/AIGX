@@ -47,7 +47,11 @@ struct Triple {
 }
 
 impl KukuBridge {
-    pub fn new(base: impl Into<String>, cookie: impl Into<String>, client: reqwest::Client) -> Self {
+    pub fn new(
+        base: impl Into<String>,
+        cookie: impl Into<String>,
+        client: reqwest::Client,
+    ) -> Self {
         Self {
             base: base.into().trim_end_matches('/').to_string(),
             cookie: cookie.into(),
@@ -304,7 +308,10 @@ impl Bridge for KukuBridge {
             .await;
         let _ = self
             .post_json(
-                &format!("{}/api/genflowpro/workspace/sessionswitch?{query}", self.base),
+                &format!(
+                    "{}/api/genflowpro/workspace/sessionswitch?{query}",
+                    self.base
+                ),
                 &json!({ "session_id": session_id, "op": 1, "full_access_enabled": 0 }),
             )
             .await;
@@ -534,7 +541,12 @@ fn store_token(key: &str, triple: &Triple, now: i64) {
 }
 
 fn short_hex(len: usize) -> String {
-    uuid::Uuid::new_v4().simple().to_string().chars().take(len).collect()
+    uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .chars()
+        .take(len)
+        .collect()
 }
 
 fn head(text: &str) -> String {
