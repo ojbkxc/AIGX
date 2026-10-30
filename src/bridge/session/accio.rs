@@ -12,7 +12,6 @@ use std::collections::VecDeque;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use md5::{Digest, Md5};
 use serde_json::{json, Map, Value};
 
 use crate::bridge::{
@@ -43,12 +42,10 @@ impl AccioBridge {
     }
 
     fn generate_url(&self, request_id: &str) -> String {
-        let mut hasher = Md5::new();
-        hasher.update(request_id.as_bytes());
         format!(
             "{}/api/adk/llm/generateContent?sg_k={:x}",
             self.base,
-            hasher.finalize()
+            md5::compute(request_id.as_bytes())
         )
     }
 
@@ -268,10 +265,7 @@ fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
                             .unwrap_or_default();
                         calls.push(ToolCallDelta {
                             index: calls.len(),
-                            id: fc
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
+                            id: fc.get("id").and_then(Value::as_str).map(str::to_string),
                             function_name: fc
                                 .get("name")
                                 .and_then(Value::as_str)
@@ -303,9 +297,8 @@ fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
                     delta.tool_calls = Some(calls);
                 }
             }
-            let has_delta = delta.content.is_some()
-                || delta.reasoning.is_some()
-                || delta.tool_calls.is_some();
+            let has_delta =
+                delta.content.is_some() || delta.reasoning.is_some() || delta.tool_calls.is_some();
             let turn_complete = value
                 .get("turn_complete")
                 .or_else(|| value.get("turnComplete"))
@@ -498,8 +491,7 @@ mod tests {
 
     #[test]
     fn thought_part_becomes_reasoning_delta() {
-        let payload =
-            r#"{"content":{"role":"model","parts":[{"thought":true,"text":"想…"}]}}"#;
+        let payload = r#"{"content":{"role":"model","parts":[{"thought":true,"text":"想…"}]}}"#;
         match decode_event(&SseEvent::Data(payload.to_string()), "x", "m") {
             Decoded::Chunk(chunk) => assert_eq!(chunk.delta.reasoning.as_deref(), Some("想…")),
             _ => panic!("思考 part 应转 reasoning"),

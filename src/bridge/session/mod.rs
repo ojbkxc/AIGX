@@ -29,9 +29,7 @@ pub fn build(
         "antigravity" => Some(Arc::new(antigravity::AntigravityBridge::new(
             base, credential, client,
         ))),
-        "accio" => Some(Arc::new(accio::AccioBridge::new(
-            base, credential, client,
-        ))),
+        "accio" => Some(Arc::new(accio::AccioBridge::new(base, credential, client))),
         _ => None,
     }
 }
