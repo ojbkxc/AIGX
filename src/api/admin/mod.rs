@@ -88,8 +88,10 @@ pub use dashboard::{
 };
 
 pub use settings::{
-    handle_get_limits, handle_get_oauth_config, handle_get_settings, handle_update_limits,
-    handle_update_oauth_config, handle_update_settings,
+    handle_get_agent_settings, handle_get_gateway_settings, handle_get_limits,
+    handle_get_oauth_config, handle_get_settings, handle_update_agent_settings,
+    handle_update_gateway_settings, handle_update_limits, handle_update_oauth_config,
+    handle_update_settings,
 };
 
 pub use notify::{handle_get_notify_config, handle_update_notify_config};

@@ -75,7 +75,12 @@ pub async fn run(
     on_event: &EventSink,
 ) {
     let mut convo: Vec<ChatMessage> = Vec::new();
-    convo.push(llm::system_message(SYSTEM_PROMPT.to_string()));
+    let system = if config.system_prompt.trim().is_empty() {
+        SYSTEM_PROMPT
+    } else {
+        config.system_prompt.as_str()
+    };
+    convo.push(llm::system_message(system.to_string()));
     convo.extend(messages);
 
     // 审批超时读配置（0/缺失回退缺省 300s），不再硬编码
@@ -93,7 +98,18 @@ pub async fn run(
         }
         on_event(AgentEvent::Thinking { turn: turns }).await;
 
-        let tools = tools::openai_tools();
+        let mut tools = tools::openai_tools();
+        // 工具开关：禁用项不下发给模型（模型看不到就不会调用）
+        if !config.disabled_tools.is_empty() {
+            tools.retain(|tool| {
+                let name = tool
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                !config.disabled_tools.iter().any(|d| d == name)
+            });
+        }
         let (resp, _upstream, _cid) =
             match llm::chat_once(state, config, convo.clone(), Some(tools)).await {
                 Ok(r) => r,

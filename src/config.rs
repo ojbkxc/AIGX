@@ -236,6 +236,12 @@ pub struct AgentConfig {
     /// 前端每次请求可覆盖，便于按任务复杂度选择"更快"或"更准"。
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// 自定义系统提示词（空 = 使用内置默认提示词）。
+    #[serde(default)]
+    pub system_prompt: String,
+    /// 禁用的工具名列表（不下发给模型，也不会被执行）。
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
 }
 
 fn default_max_turns() -> usize {
@@ -260,6 +266,8 @@ impl Default for AgentConfig {
             approval_timeout_secs: default_approval_timeout(),
             max_history: default_max_history(),
             reasoning_effort: None,
+            system_prompt: String::new(),
+            disabled_tools: Vec::new(),
         }
     }
 }

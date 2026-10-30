@@ -931,6 +931,36 @@ export interface AccountRotationPolicyItem {
   max_attempts: number;
 }
 
+/** AI 助手工具条目（GET /api/agent/settings） */
+export interface AgentToolItem {
+  name: string;
+  description: string;
+  risk: string;
+}
+
+/** AI 助手设置（模型 / 提示词 / 工具开关 / 轮数） */
+export interface AgentSettingsItem {
+  enabled: boolean;
+  model: string;
+  channel: string;
+  max_turns: number;
+  approval_timeout_secs: number;
+  max_history: number;
+  reasoning_effort?: string | null;
+  systemPrompt: string;
+  disabledTools: string[];
+  tools: AgentToolItem[];
+}
+
+/** 网关设置（监听地址 / CORS / 反代信任） */
+export interface GatewaySettingsItem {
+  host: string;
+  port: number;
+  corsOrigins: string[];
+  trustProxyHeaders: boolean;
+  restartRequired?: boolean;
+}
+
 /** 服务器自动更新状态（GET /api/update/status） */
 export interface UpdateStatusItem {
   currentVersion: string;

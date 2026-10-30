@@ -507,6 +507,14 @@ fn paths_settings_ops() -> Value {
             "get": op("设置", "查询系统限额"),
             "put": op_body("设置", "更新系统限额（写操作）", "限额键值对象")
         },
+        "/api/agent/settings": {
+            "get": op("AI 助手", "查询 AI 助手设置（模型/提示词/工具开关/轮数）"),
+            "put": op_body("AI 助手", "更新 AI 助手设置（写操作）", "model/systemPrompt/disabledTools/maxTurns/approvalTimeout")
+        },
+        "/api/gateway/settings": {
+            "get": op("网关", "查询网关设置（监听地址/CORS/反代信任）"),
+            "put": op_body("网关", "更新网关设置（重启后生效）", "host/port/corsOrigins/trustProxyHeaders")
+        },
         "/api/notify/config": {
             "get": op("通知", "查询通知配置（脱敏）"),
             "put": op_body("通知", "更新通知配置（写操作）", "telegram/email/slack/webhook 配置组")
@@ -807,6 +815,8 @@ mod tests {
         add("/api/keys", &["get", "post"]);
         add("/api/keys/{id}", &["delete"]);
         add("/api/limits", &["get", "put"]);
+        add("/api/agent/settings", &["get", "put"]);
+        add("/api/gateway/settings", &["get", "put"]);
         add("/api/logs/audits", &["delete", "get"]);
         add("/api/logs/audits/clear", &["delete"]);
         add("/api/logs/cleanup", &["post"]);
@@ -971,15 +981,15 @@ mod tests {
         );
     }
 
-    /// 数量锚点：管理面真实路径共 157 个（156 + openapi.json 自身）。
+    /// 数量锚点：管理面真实路径共 159 个（158 + openapi.json 自身）。
     /// 真实路由增删会先在 covers_all_real_admin_routes 红，此断言辅助定位。
     #[test]
     fn path_count_anchor() {
         let doc = build_openapi_document();
         let n = doc["paths"].as_object().unwrap().len();
         assert_eq!(
-            n, 157,
-            "管理面路径数应为 157（156 真实注册 + openapi.json），实际 {n}"
+            n, 159,
+            "管理面路径数应为 159（158 真实注册 + openapi.json），实际 {n}"
         );
     }
 }

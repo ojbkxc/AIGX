@@ -56,6 +56,8 @@ import type {
   UpdateStatusItem,
   UpdateSettingsItem,
   AccountRotationPolicyItem,
+  AgentSettingsItem,
+  GatewaySettingsItem,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -438,6 +440,14 @@ export const api = {
     request<ApiResponse<AccountRotationPolicyItem>>('GET', `${API_BASE}/account-sessions/rotation`),
   saveAccountRotationPolicy: (data: Partial<AccountRotationPolicyItem>): Promise<ApiResponse<AccountRotationPolicyItem>> =>
     request<ApiResponse<AccountRotationPolicyItem>>('PUT', `${API_BASE}/account-sessions/rotation`, data),
+  getAgentSettings: (): Promise<ApiResponse<AgentSettingsItem>> =>
+    request<ApiResponse<AgentSettingsItem>>('GET', `${API_BASE}/agent/settings`),
+  saveAgentSettings: (data: Record<string, unknown>): Promise<ApiResponse<AgentSettingsItem>> =>
+    request<ApiResponse<AgentSettingsItem>>('PUT', `${API_BASE}/agent/settings`, data),
+  getGatewaySettings: (): Promise<ApiResponse<GatewaySettingsItem>> =>
+    request<ApiResponse<GatewaySettingsItem>>('GET', `${API_BASE}/gateway/settings`),
+  saveGatewaySettings: (data: Record<string, unknown>): Promise<ApiResponse<GatewaySettingsItem>> =>
+    request<ApiResponse<GatewaySettingsItem>>('PUT', `${API_BASE}/gateway/settings`, data),
   // 渠道对话调试：流式（text/event-stream）返回 { stream: [{ content }] }，
   // 非流式返回后端 JSON。与 Playground 页共用 SSE 解析模式。
   testChannelChat: async (data: PlaygroundChatRequest): Promise<PlaygroundChatResult> => {

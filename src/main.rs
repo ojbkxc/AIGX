@@ -1113,6 +1113,16 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         .route("/api/limits", get(api::admin::handle_get_limits))
         .route("/api/limits", put(api::admin::handle_update_limits))
+        .route(
+            "/api/agent/settings",
+            get(api::admin::handle_get_agent_settings)
+                .put(api::admin::handle_update_agent_settings),
+        )
+        .route(
+            "/api/gateway/settings",
+            get(api::admin::handle_get_gateway_settings)
+                .put(api::admin::handle_update_gateway_settings),
+        )
         // 通知配置
         .route(
             "/api/notify/config",

@@ -243,6 +243,214 @@ pub async fn handle_update_limits(
         )),
     }
 }
+
+// ── AI 助手（Agent）设置 ────────────────────────────────────────
+
+/// Agent 设置请求体（缺省字段保持原值）。
+#[derive(Debug, Deserialize)]
+pub struct AgentSettingsRequest {
+    pub enabled: Option<bool>,
+    pub model: Option<String>,
+    pub channel: Option<String>,
+    pub max_turns: Option<usize>,
+    pub approval_timeout_secs: Option<u64>,
+    pub max_history: Option<usize>,
+    pub reasoning_effort: Option<String>,
+    pub system_prompt: Option<String>,
+    pub disabled_tools: Option<Vec<String>>,
+}
+
+fn agent_settings_json(config: &crate::config::AgentConfig) -> Value {
+    let tools: Vec<Value> = crate::agent::tools::tool_specs()
+        .iter()
+        .map(|spec| {
+            json!({
+                "name": spec.name,
+                "description": spec.description,
+                "risk": spec.risk.as_str(),
+            })
+        })
+        .collect();
+    json!({
+        "enabled": config.enabled,
+        "model": config.model,
+        "channel": config.channel,
+        "max_turns": config.max_turns,
+        "approval_timeout_secs": config.approval_timeout_secs,
+        "max_history": config.max_history,
+        "reasoning_effort": config.reasoning_effort,
+        "systemPrompt": config.system_prompt,
+        "disabledTools": config.disabled_tools,
+        "tools": tools,
+    })
+}
+
+/// GET /api/agent/settings —— AI 助手设置（含工具清单与风险等级）。
+pub async fn handle_get_agent_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = verify_admin(&state, &headers).await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": agent_settings_json(&config.agent),
+    })))
+}
+
+/// PUT /api/agent/settings —— 保存 AI 助手设置（模型/提示词/工具开关/轮数）。
+pub async fn handle_update_agent_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AgentSettingsRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut config = verify_admin(&state, &headers).await?;
+    if let Some(v) = body.enabled {
+        config.agent.enabled = v;
+    }
+    if let Some(v) = body.model.as_deref() {
+        config.agent.model = v.trim().to_string();
+    }
+    if let Some(v) = body.channel.as_deref() {
+        config.agent.channel = v.trim().to_string();
+    }
+    if let Some(v) = body.max_turns {
+        config.agent.max_turns = v.clamp(1, 50);
+    }
+    if let Some(v) = body.approval_timeout_secs {
+        config.agent.approval_timeout_secs = v.min(3_600);
+    }
+    if let Some(v) = body.max_history {
+        config.agent.max_history = v.clamp(1, 200);
+    }
+    if let Some(v) = body.reasoning_effort.as_deref() {
+        let effort = v.trim().to_ascii_lowercase();
+        config.agent.reasoning_effort = match effort.as_str() {
+            "" | "off" => None,
+            "low" | "medium" | "high" => Some(effort),
+            _ => return Err(error_response("思考强度应为 off/low/medium/high", StatusCode::BAD_REQUEST)),
+        };
+    }
+    if let Some(v) = body.system_prompt.as_deref() {
+        config.agent.system_prompt = v.trim().to_string();
+    }
+    if let Some(v) = body.disabled_tools {
+        if v.len() > 200 {
+            return Err(error_response("禁用的工具过多", StatusCode::BAD_REQUEST));
+        }
+        config.agent.disabled_tools = v
+            .into_iter()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+    }
+    match state.config_manager.update(config).await {
+        Ok(()) => {
+            let updated = state.config_manager.get().await;
+            Ok(Json(json!({
+                "success": true,
+                "data": agent_settings_json(&updated.agent),
+            })))
+        }
+        Err(e) => Err(error_response(
+            &format!("Failed to save agent settings: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
+// ── 网关设置（监听地址 / CORS / 反代信任）──────────────────────────
+
+/// 网关设置请求体（缺省字段保持原值）。
+#[derive(Debug, Deserialize)]
+pub struct GatewaySettingsRequest {
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub cors_origins: Option<Vec<String>>,
+    pub trust_proxy_headers: Option<bool>,
+}
+
+fn gateway_settings_json(config: &crate::config::AppConfig) -> Value {
+    json!({
+        "host": config.server.host,
+        "port": config.server.port,
+        "corsOrigins": config.cors_origins,
+        "trustProxyHeaders": config.trust_proxy_headers,
+        "restartRequired": true,
+    })
+}
+
+/// GET /api/gateway/settings —— 网关设置（监听地址 / CORS / 反代信任）。
+pub async fn handle_get_gateway_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = verify_admin(&state, &headers).await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": gateway_settings_json(&config),
+    })))
+}
+
+/// PUT /api/gateway/settings —— 保存网关设置（重启服务后生效）。
+pub async fn handle_update_gateway_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<GatewaySettingsRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut config = verify_admin(&state, &headers).await?;
+    if let Some(host) = body.host.as_deref() {
+        let host = host.trim();
+        if host.is_empty() || host.chars().any(char::is_whitespace) {
+            return Err(error_response(
+                "监听地址不能为空且不能包含空白字符",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        config.server.host = host.to_string();
+    }
+    if let Some(port) = body.port {
+        if port == 0 {
+            return Err(error_response("端口必须在 1-65535 之间", StatusCode::BAD_REQUEST));
+        }
+        config.server.port = port;
+    }
+    if let Some(origins) = body.cors_origins {
+        let mut cleaned: Vec<String> = Vec::new();
+        for origin in origins {
+            let origin = origin.trim().to_string();
+            if origin.is_empty() {
+                continue;
+            }
+            // "*" 或合法 http(s) 来源；其它视为配置错误
+            if origin == "*" || origin.starts_with("http://") || origin.starts_with("https://") {
+                cleaned.push(origin);
+            } else {
+                return Err(error_response(
+                    "CORS 来源必须是 http(s):// 开头或 *",
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+        }
+        config.cors_origins = cleaned;
+    }
+    if let Some(v) = body.trust_proxy_headers {
+        config.trust_proxy_headers = v;
+    }
+    match state.config_manager.update(config).await {
+        Ok(()) => {
+            let updated = state.config_manager.get().await;
+            Ok(Json(json!({
+                "success": true,
+                "data": gateway_settings_json(&updated),
+            })))
+        }
+        Err(e) => Err(error_response(
+            &format!("Failed to save gateway settings: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct OauthConfigRequest {
     pub github: Option<OauthProviderFields>,
