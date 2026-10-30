@@ -55,6 +55,8 @@ const MAX_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
 const BUNDLE_MAGIC: &[u8; 7] = b"AIGXUP1";
 const CHECK_KEY: &str = "update:last_check";
 const APPLIED_KEY: &str = "update:applied";
+/// 两次检查之间的最短间隔（秒）：手动按钮连点会重复消耗 GitHub 匿名限额。
+const MIN_CHECK_GAP: i64 = 60;
 
 /// Release 里的一个资产。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +137,8 @@ pub struct UpdateManager {
     /// 启动时解析一次当前程序路径：更新替换后 `/proc/self/exe` 会带
     /// `(deleted)` 后缀，不能再用它来 exec 重启。
     exe: PathBuf,
+    /// 程序目录是否可写（启动时探测一次，避免每次状态轮询都写探针文件）。
+    writable: bool,
 }
 
 impl UpdateManager {
@@ -146,6 +150,7 @@ impl UpdateManager {
             .unwrap_or_default();
         let applied = store.get::<AppliedMarker>(APPLIED_KEY).ok().flatten();
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aigx"));
+        let writable = writable_exe_dir(&exe);
         let _ = std::fs::create_dir_all(data_dir.join("updates"));
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -165,6 +170,7 @@ impl UpdateManager {
                 Duration::from_secs(600),
             )),
             exe,
+            writable,
         }
     }
 
@@ -234,7 +240,7 @@ impl UpdateManager {
             "pendingRestart": guard.pending_restart,
             "download": download,
             "supported": supported(),
-            "writable": writable_exe_dir(&self.exe),
+            "writable": self.writable,
             "backupAvailable": backup_path(&self.exe).is_file(),
             "downloadDir": self.data_dir.join("updates").to_string_lossy(),
             "repository": repo_of(config),
@@ -247,7 +253,7 @@ impl UpdateManager {
     /// 检查更新（手动与定时共用）。失败时返回可读原因并落冷却。
     pub async fn check(&self, config: &UpdateConfig) -> Result<Value, String> {
         let now = now_ts();
-        {
+        let recently_checked = {
             let guard = self.lock();
             if guard.checking {
                 return Err("已有一次更新检查正在进行".to_string());
@@ -258,6 +264,11 @@ impl UpdateManager {
                     guard.retry_at - now
                 ));
             }
+            guard.checked_at > 0 && now - guard.checked_at < MIN_CHECK_GAP
+        };
+        // 刚查过：直接复用最近结果（前端连点不应把匿名限额连点掉）
+        if recently_checked {
+            return Ok(self.status(config));
         }
         self.lock().checking = true;
         let outcome = self.fetch_release(config).await;
@@ -308,7 +319,7 @@ impl UpdateManager {
             if guard.pending_restart {
                 return Err("更新已应用，请先重启服务".to_string());
             }
-            if !writable_exe_dir(&self.exe) {
+            if !self.writable {
                 return Err(
                     "程序目录不可写，无法原地更新（容器内请确认 /opt/aigx 可写）".to_string(),
                 );
@@ -612,6 +623,9 @@ impl UpdateManager {
             }
             if let Err(e) = std::fs::rename(&static_bak, &static_dir) {
                 tracing::error!("restore static dir failed: {e}");
+                return Err(format!(
+                    "程序已回滚，但 static 目录恢复失败: {e}，请手动检查"
+                ));
             }
             remove_dir(&failed_static);
         }
@@ -619,6 +633,11 @@ impl UpdateManager {
             let mut guard = self.lock();
             guard.pending_restart = true;
             guard.last_error = None;
+            // 回滚后「已应用版本」不再成立：清掉标记，避免状态页显示误导信息
+            guard.applied = None;
+        }
+        if let Err(e) = self.store.delete(APPLIED_KEY) {
+            tracing::warn!("clear applied marker failed: {e}");
         }
         self.persist();
         tracing::warn!("update rolled back to previous version, restart to take effect");

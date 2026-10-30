@@ -79,23 +79,29 @@ export default function UpdatePanel(): JSX.Element {
   }, [addToast, t]);
 
   const loadSettings = useCallback(async (): Promise<void> => {
-    const res = await api.getUpdateSettings();
-    const data: UpdateSettingsItem | undefined = res.data;
-    if (!data || !mountedRef.current) return;
-    setSettings({
-      enabled: data.enabled,
-      auto_check: data.auto_check,
-      auto_apply: data.auto_apply,
-      interval_hours: String(data.interval_hours),
-      repo: data.repo,
-      api_base: data.api_base,
-      include_prerelease: data.include_prerelease,
-      proxy: data.proxy,
-      restart_after_apply: data.restart_after_apply,
-      token: '',
-      tokenConfigured: data.tokenConfigured,
-    });
-  }, []);
+    try {
+      const res = await api.getUpdateSettings();
+      const data: UpdateSettingsItem | undefined = res.data;
+      if (!data || !mountedRef.current) return;
+      setSettings({
+        enabled: data.enabled,
+        auto_check: data.auto_check,
+        auto_apply: data.auto_apply,
+        interval_hours: String(data.interval_hours),
+        repo: data.repo,
+        api_base: data.api_base,
+        include_prerelease: data.include_prerelease,
+        proxy: data.proxy,
+        restart_after_apply: data.restart_after_apply,
+        token: '',
+        tokenConfigured: data.tokenConfigured,
+      });
+    } catch (e) {
+      if (mountedRef.current) {
+        setError(`${t('读取更新设置失败')}：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }, [t]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -183,10 +189,15 @@ export default function UpdatePanel(): JSX.Element {
       onConfirm: async () => {
         try {
           await api.rollbackUpdate();
-          restartingRef.current = true;
-          setRestarting(true);
-          addToast(t('已回滚，服务正在重启'));
-          window.setTimeout(() => { void loadStatus(false); }, 3000);
+          if (settings?.restart_after_apply !== false) {
+            restartingRef.current = true;
+            setRestarting(true);
+            addToast(t('已回滚，服务正在重启'));
+            window.setTimeout(() => { void loadStatus(false); }, 3000);
+          } else {
+            addToast(t('已回滚，请手动重启服务'));
+            void loadStatus(false);
+          }
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e));
         }
@@ -238,7 +249,8 @@ export default function UpdatePanel(): JSX.Element {
 
   const download = status?.download;
   const canApply = Boolean(
-    status?.hasUpdate && status.bundle && status.supported && status.writable
+    status?.hasUpdate && status.bundle && status.checksumAvailable !== false
+    && status.supported && status.writable
     && !status.checking && !status.applying && !status.pendingRestart,
   );
 
@@ -400,6 +412,14 @@ export default function UpdatePanel(): JSX.Element {
                   type="checkbox"
                   checked={settings.enabled}
                   onChange={(e) => setSettings({ ...settings, enabled: e.target.checked })}
+                />
+                {t('启用更新模块')}
+              </label>
+              <label className="update-check">
+                <input
+                  type="checkbox"
+                  checked={settings.auto_check}
+                  onChange={(e) => setSettings({ ...settings, auto_check: e.target.checked })}
                 />
                 {t('启用自动检查')}
               </label>
