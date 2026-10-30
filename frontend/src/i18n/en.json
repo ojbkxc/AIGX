@@ -1683,5 +1683,7 @@
   "从抓包请求头导入（可选）": "Import captured headers (optional)",
   "解析并填充凭证与请求头": "Parse and fill credential & headers",
   "从浏览器开发者工具「请求头」整段复制：Cookie / Bearer 自动填入凭证，其余进入额外请求头。": "Paste the whole \"Request Headers\" block from devtools: Cookie / Bearer fills the credential, the rest becomes extra headers.",
-  "已填充凭证与额外请求头": "Credential and extra headers filled"
+  "已填充凭证与额外请求头": "Credential and extra headers filled",
+  "对话路径（可选，默认 /chat/completions）": "Chat path (optional, default /chat/completions)",
+  "登录态型供应商的私有接口路径；留空按标准 OpenAI 路径拼接。": "Private endpoint path for session providers; empty = standard OpenAI path."
 }

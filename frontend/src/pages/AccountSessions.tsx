@@ -161,6 +161,8 @@ interface SessionFormState {
   name: string;
   provider: string;
   base_url: string;
+  /** 对话路径覆盖（如 `/api/chat`，留空走默认 /chat/completions） */
+  chat_path: string;
   api_key: string;
   proxy: string;
   status: string;
@@ -180,6 +182,7 @@ const EMPTY_FORM: SessionFormState = {
   name: '',
   provider: 'openai_compatible',
   base_url: '',
+  chat_path: '',
   api_key: '',
   proxy: '',
   status: 'enabled',
@@ -308,6 +311,7 @@ export default function AccountSessions(): JSX.Element {
       name: session.name,
       provider: session.provider || 'openai_compatible',
       base_url: session.base_url || '',
+      chat_path: session.chat_path || '',
       api_key: '',
       // 接口返回的代理已脱敏（userinfo 打码），回填会被误存；留空 + 占位提示
       proxy: '',
@@ -480,6 +484,7 @@ export default function AccountSessions(): JSX.Element {
         name: form.name.trim(),
         provider: form.provider,
         base_url: form.base_url.trim(),
+        chat_path: form.chat_path.trim(),
         status: form.status,
         priority: Number(form.priority || 0),
         // u32 字段：前端先夹紧，避免负数触发后端 422
@@ -1063,6 +1068,13 @@ export default function AccountSessions(): JSX.Element {
                 placeholder="https://api.deepseek.com"
                 value={form.base_url}
                 onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+              />
+              <Input
+                label={t('对话路径（可选，默认 /chat/completions）')}
+                placeholder="/api/chat"
+                hint={t('登录态型供应商的私有接口路径；留空按标准 OpenAI 路径拼接。')}
+                value={form.chat_path}
+                onChange={(e) => setForm({ ...form, chat_path: e.target.value })}
               />
               <div className="form-group">
                 <label>{t('从抓包请求头导入（可选）')}</label>

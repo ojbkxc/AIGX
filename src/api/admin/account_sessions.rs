@@ -55,8 +55,12 @@ pub struct AccountSessionRequest {
     pub name: String,
     #[serde(default)]
     pub provider: String,
+    /// 账号级上游地址（空 = 用 provider 目录默认值）。
     #[serde(default)]
     pub base_url: String,
+    /// 账号级对话路径覆盖（如 `/api/chat`）；空 = 默认 `<base>/chat/completions`。
+    #[serde(default)]
+    pub chat_path: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -159,6 +163,17 @@ fn apply_request(mut session: AccountSession, body: &AccountSessionRequest) -> A
         session.provider = registry::normalize_kind(&body.provider);
     }
     session.base_url = body.base_url.trim().to_string();
+    if let Some(path) = &body.chat_path {
+        // 空 = 清除覆盖；拒绝路径穿越；缺前导斜杠时补上
+        let trimmed = path.trim();
+        session.chat_path = if trimmed.is_empty() || trimmed.contains("..") {
+            None
+        } else if trimmed.starts_with('/') {
+            Some(trimmed.to_string())
+        } else {
+            Some(format!("/{trimmed}"))
+        };
+    }
     match &body.api_key {
         None => {}
         Some(secret) => session.credential.secret = secret.clone(),
@@ -277,6 +292,7 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "name": session.name,
         "provider": session.provider,
         "base_url": session.base_url,
+        "chat_path": session.chat_path,
         "api_key": mask_secret(&session.credential.secret_plain()),
         "proxy": session.proxy.as_deref().map(mask_proxy),
         "status": session.runtime_status(now),

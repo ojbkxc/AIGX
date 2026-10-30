@@ -78,6 +78,11 @@ pub struct AccountSession {
     /// 账号级上游地址；空 = 用 provider 目录里的默认地址。
     #[serde(default)]
     pub base_url: String,
+    /// 账号级对话路径覆盖（如 `/api/chat`）；空 = 默认 `<base>/chat/completions`。
+    ///
+    /// 登录态型供应商的私有接口常常不是标准 OpenAI 路径，用它来定「请求形态」。
+    #[serde(default)]
+    pub chat_path: Option<String>,
     #[serde(default)]
     pub credential: Credential,
     /// 账号级出口代理（`http://` / `https://` / `socks5://`）；空 = 直连。
@@ -158,6 +163,7 @@ impl AccountSession {
             name: name.into(),
             provider: default_provider(),
             base_url: String::new(),
+            chat_path: None,
             credential: Credential::default(),
             proxy: None,
             status: default_status(),

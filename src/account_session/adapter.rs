@@ -82,6 +82,7 @@ pub fn build_bridge(
                         client.as_ref().clone(),
                         auth_mode,
                         session_headers(session, meta),
+                        session.chat_path.clone(),
                     ),
                 )
             } else {

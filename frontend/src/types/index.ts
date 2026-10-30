@@ -873,6 +873,8 @@ export interface AccountSessionItem {
   name: string;
   provider: string;
   base_url?: string;
+  /** 账号级对话路径覆盖（如 /api/chat），null = 默认 /chat/completions */
+  chat_path?: string | null;
   /** 脱敏后的凭证 */
   api_key?: string;
   /** 账号级出口代理（http/https/socks5），null = 直连 */

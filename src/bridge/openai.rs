@@ -47,6 +47,8 @@ pub struct OpenaiCompatibleBridge {
     auth_mode: AuthMode,
     /// 登录态型供应商要求的专用请求头（已做凭证模板替换）
     session_headers: Vec<(String, String)>,
+    /// 对话路径覆盖（登录态型供应商的私有接口路径）；空 = `/chat/completions`
+    chat_path: Option<String>,
 }
 
 impl OpenaiCompatibleBridge {
@@ -65,6 +67,7 @@ impl OpenaiCompatibleBridge {
             client,
             auth_mode: AuthMode::Bearer,
             session_headers: Vec::new(),
+            chat_path: None,
         }
     }
 
@@ -78,6 +81,7 @@ impl OpenaiCompatibleBridge {
         client: reqwest::Client,
         auth_mode: AuthMode,
         headers: Vec<(String, String)>,
+        chat_path: Option<String>,
     ) -> Self {
         let credential = credential.into();
         let params: Vec<(String, String)> = headers
@@ -90,10 +94,21 @@ impl OpenaiCompatibleBridge {
             client,
             auth_mode,
             session_headers: params,
+            chat_path: chat_path
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
         }
     }
 
     fn chat_url(&self) -> String {
+        if let Some(path) = &self.chat_path {
+            // 绝对路径覆盖：`/api/chat` → `<base>/api/chat`
+            return format!(
+                "{}/{}",
+                self.base_url.trim_end_matches('/'),
+                path.trim_start_matches('/')
+            );
+        }
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
@@ -1171,7 +1186,8 @@ mod tests {
             }))
         }
 
-        let app = Router::new().route("/v1/chat/completions", post(echo));
+        // 同时验证「对话路径覆盖」：/api/chat 而不是默认 /chat/completions
+        let app = Router::new().route("/v1/api/chat", post(echo));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
@@ -1186,6 +1202,7 @@ mod tests {
             reqwest::Client::new(),
             super::AuthMode::Cookie,
             vec![("x-token".to_string(), "{credential}".to_string())],
+            Some("/api/chat".to_string()),
         );
         let req = ChatFormat {
             model: "m".to_string(),
