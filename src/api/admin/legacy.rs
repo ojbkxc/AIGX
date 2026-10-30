@@ -2832,7 +2832,12 @@ fn default_true() -> bool {
 
 /// 归一化思考强度：off/空/未知 → None；low/medium/high 原样。
 fn reasoning_effort_level(raw: &Option<String>) -> Option<&'static str> {
-    match raw.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+    match raw
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("low") => Some("low"),
         Some("medium") => Some("medium"),
         Some("high") => Some("high"),
