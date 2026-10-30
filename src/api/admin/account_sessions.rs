@@ -675,7 +675,9 @@ pub async fn probe_session(state: &AppState, session: &AccountSession) -> ProbeO
         Ok(Ok(response)) => {
             let latency_ms = started.elapsed().as_millis() as u64;
             // 探活成功 = 人工确认已恢复：清该模型冷却并记一次成功（不改状态）
-            state.account_sessions.record_success(&session.id, &model, latency_ms);
+            state
+                .account_sessions
+                .record_success(&session.id, &model, latency_ms);
             ProbeOutcome {
                 ok: true,
                 latency_ms,
