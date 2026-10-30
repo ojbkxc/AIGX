@@ -426,12 +426,12 @@ pub async fn handle_cleanup_logs(
     let mut removed = 0u64;
     let mut requests = 0u64;
     if let Some(cutoff) = req_cutoff {
-        requests = state
+        let n = state
             .log_store
             .requests
             .delete_older_than(cutoff)
-            .map_err(|e| error_response(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?
-            as u64;
+            .map_err(|e| error_response(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+        requests = n as u64;
         removed += requests;
     }
     let audit_cutoff = audit_days
