@@ -327,7 +327,12 @@ pub async fn handle_update_agent_settings(
         config.agent.reasoning_effort = match effort.as_str() {
             "" | "off" => None,
             "low" | "medium" | "high" => Some(effort),
-            _ => return Err(error_response("思考强度应为 off/low/medium/high", StatusCode::BAD_REQUEST)),
+            _ => {
+                return Err(error_response(
+                    "思考强度应为 off/low/medium/high",
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
         };
     }
     if let Some(v) = body.system_prompt.as_deref() {
@@ -410,7 +415,10 @@ pub async fn handle_update_gateway_settings(
     }
     if let Some(port) = body.port {
         if port == 0 {
-            return Err(error_response("端口必须在 1-65535 之间", StatusCode::BAD_REQUEST));
+            return Err(error_response(
+                "端口必须在 1-65535 之间",
+                StatusCode::BAD_REQUEST,
+            ));
         }
         config.server.port = port;
     }
