@@ -79,23 +79,29 @@ export default function UpdatePanel(): JSX.Element {
   }, [addToast, t]);
 
   const loadSettings = useCallback(async (): Promise<void> => {
-    const res = await api.getUpdateSettings();
-    const data: UpdateSettingsItem | undefined = res.data;
-    if (!data || !mountedRef.current) return;
-    setSettings({
-      enabled: data.enabled,
-      auto_check: data.auto_check,
-      auto_apply: data.auto_apply,
-      interval_hours: String(data.interval_hours),
-      repo: data.repo,
-      api_base: data.api_base,
-      include_prerelease: data.include_prerelease,
-      proxy: data.proxy,
-      restart_after_apply: data.restart_after_apply,
-      token: '',
-      tokenConfigured: data.tokenConfigured,
-    });
-  }, []);
+    try {
+      const res = await api.getUpdateSettings();
+      const data: UpdateSettingsItem | undefined = res.data;
+      if (!data || !mountedRef.current) return;
+      setSettings({
+        enabled: data.enabled,
+        auto_check: data.auto_check,
+        auto_apply: data.auto_apply,
+        interval_hours: String(data.interval_hours),
+        repo: data.repo,
+        api_base: data.api_base,
+        include_prerelease: data.include_prerelease,
+        proxy: data.proxy,
+        restart_after_apply: data.restart_after_apply,
+        token: '',
+        tokenConfigured: data.tokenConfigured,
+      });
+    } catch (e) {
+      if (mountedRef.current) {
+        setError(`${t('读取更新设置失败')}：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }, [t]);
 
   useEffect(() => {
     mountedRef.current = true;

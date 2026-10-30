@@ -811,7 +811,7 @@ fn parse_tool_args<T: serde::de::DeserializeOwned>(
 fn handler_to_outcome(result: HandlerResult) -> ToolOutcome {
     match result {
         Ok(Json(v)) => ToolOutcome {
-            text: v.to_string(),
+            text: crate::api::admin::common::truncate_tool_text(v.to_string()),
             ok: true,
         },
         Err((_, Json(body))) => {

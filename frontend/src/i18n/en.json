@@ -1589,5 +1589,6 @@
   "订阅计费模式为「按次」时，每次请求固定扣减的额度（全局统一，默认 2）。": "Quota deducted per request when the subscription billing mode is \"per request\" (global, default 2).",
   "确定删除该用户？该操作不可撤销。": "Delete this user? This action cannot be undone.",
   "顶部编辑": "Edit above",
-  "启用更新模块": "Enable update module"
+  "启用更新模块": "Enable update module",
+  "读取更新设置失败": "Failed to load update settings"
 }

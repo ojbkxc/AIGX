@@ -619,6 +619,7 @@ impl UpdateManager {
             }
             if let Err(e) = std::fs::rename(&static_bak, &static_dir) {
                 tracing::error!("restore static dir failed: {e}");
+                return Err(format!("程序已回滚，但 static 目录恢复失败: {e}，请手动检查"));
             }
             remove_dir(&failed_static);
         }

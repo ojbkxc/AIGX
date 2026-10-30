@@ -159,6 +159,19 @@ pub async fn admin_id_from_session(state: &AppState, headers: &HeaderMap) -> Str
     "unknown".to_string()
 }
 
+/// 工具结果文本上限（字符）：防止大列表/长日志把 LLM 上下文撑爆。
+pub const TOOL_RESULT_MAX_CHARS: usize = 16_384;
+
+/// 截断工具结果（按字符、保留 UTF-8 边界），超限时追加说明。
+pub fn truncate_tool_text(text: String) -> String {
+    let total = text.chars().count();
+    if total <= TOOL_RESULT_MAX_CHARS {
+        return text;
+    }
+    let truncated: String = text.chars().take(TOOL_RESULT_MAX_CHARS).collect();
+    format!("{truncated}\n…（结果过长，已截断 {TOOL_RESULT_MAX_CHARS}/{total} 字符）")
+}
+
 /// 记录审计日志（原 `pub(crate) fn record_audit`，保持可见性语义）
 pub fn record_audit(
     state: &AppState,

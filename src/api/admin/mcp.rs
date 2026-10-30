@@ -583,7 +583,9 @@ async fn write_account_status(
 /// token 与 sk- 密钥）后进 content，不透传上游密钥。
 fn handler_to_tool_result(result: Result<Json<Value>, (StatusCode, Json<Value>)>) -> Value {
     match result {
-        Ok(Json(v)) => text_content(v.to_string()),
+        Ok(Json(v)) => text_content(crate::api::admin::common::truncate_tool_text(
+            v.to_string(),
+        )),
         Err((_, Json(body))) => {
             let msg = body
                 .get("error")
