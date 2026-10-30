@@ -560,7 +560,9 @@ pub async fn exec_tool(
                 State(state.clone()),
                 headers.clone(),
                 Path(id),
-                Json(admin::account_sessions::AccountSessionPatch::status_only("enabled")),
+                Json(admin::account_sessions::AccountSessionPatch::status_only(
+                    "enabled",
+                )),
             )
             .await
         }
@@ -570,7 +572,9 @@ pub async fn exec_tool(
                 State(state.clone()),
                 headers.clone(),
                 Path(id),
-                Json(admin::account_sessions::AccountSessionPatch::status_only("disabled")),
+                Json(admin::account_sessions::AccountSessionPatch::status_only(
+                    "disabled",
+                )),
             )
             .await
         }
