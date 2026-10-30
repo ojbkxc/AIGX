@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "aigx"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "arc-swap",
