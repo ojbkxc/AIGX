@@ -248,6 +248,8 @@ export default function AccountSessions(): JSX.Element {
   // 供应商选择：Agent（内置）/ 预置 API / 自定义（仅新增时展示，编辑保留原下拉）
   const [pickSegment, setPickSegment] = useState<ProviderSegment>('agent');
   const [providerSearch, setProviderSearch] = useState('');
+  /** 从浏览器抓包粘贴的原始请求头（解析后填充凭证与额外请求头） */
+  const [rawHeaders, setRawHeaders] = useState('');
 
   // 账号路由（轮换策略）：冷却窗口与单请求最大换号次数
   const [showRotation, setShowRotation] = useState(false);
@@ -295,6 +297,7 @@ export default function AccountSessions(): JSX.Element {
     });
     setPickSegment('agent');
     setProviderSearch('');
+    setRawHeaders('');
     setShowModal(true);
   };
 
@@ -321,6 +324,7 @@ export default function AccountSessions(): JSX.Element {
       clear_key: false,
       clear_proxy: false,
     });
+    setRawHeaders('');
     setShowModal(true);
   };
 
@@ -404,6 +408,46 @@ export default function AccountSessions(): JSX.Element {
       if (name) out[name] = value;
     }
     return out;
+  };
+
+  /**
+   * 解析抓包得到的原始请求头并回填表单：
+   * - `Cookie` → 凭证（登录态型供应商的整段 cookie）
+   * - `Authorization: Bearer xxx` → 凭证（JWT / API Key）
+   * - 其余头 → 额外请求头（保留原始大小写）
+   */
+  const applyRawHeaders = (): void => {
+    const extra: Record<string, string> = { ...parseHeaders(form.extra_headers) };
+    let credential = form.api_key;
+    for (const line of rawHeaders.split('\n')) {
+      const idx = line.indexOf(':');
+      if (idx <= 0) continue;
+      const rawName = line.slice(0, idx).trim();
+      const value = line.slice(idx + 1).trim();
+      if (!rawName || !value) continue;
+      const lower = rawName.toLowerCase();
+      if (lower === 'cookie') {
+        credential = value;
+        continue;
+      }
+      if (lower === 'authorization') {
+        const bearer = /^bearer\s+(.+)$/i.exec(value);
+        if (bearer) {
+          credential = bearer[1].trim();
+          continue;
+        }
+      }
+      extra[rawName] = value;
+    }
+    setForm((prev) => ({
+      ...prev,
+      api_key: credential,
+      extra_headers: Object.entries(extra)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join('\n'),
+    }));
+    setRawHeaders('');
+    addToast(t('已填充凭证与额外请求头'));
   };
 
   const handleSave = async (e: FormEvent): Promise<void> => {
@@ -1020,6 +1064,31 @@ export default function AccountSessions(): JSX.Element {
                 value={form.base_url}
                 onChange={(e) => setForm({ ...form, base_url: e.target.value })}
               />
+              <div className="form-group">
+                <label>{t('从抓包请求头导入（可选）')}</label>
+                <textarea
+                  className="form-input"
+                  rows={3}
+                  placeholder={
+                    'Cookie: sessionid=...\nAuthorization: Bearer eyJ...\nx-token: ...'
+                  }
+                  value={rawHeaders}
+                  onChange={(e) => setRawHeaders(e.target.value)}
+                />
+                <div style={{ marginTop: 6 }}>
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={applyRawHeaders}
+                    disabled={!rawHeaders.trim()}
+                  >
+                    {t('解析并填充凭证与请求头')}
+                  </button>
+                </div>
+                <div className="form-hint">
+                  {t('从浏览器开发者工具「请求头」整段复制：Cookie / Bearer 自动填入凭证，其余进入额外请求头。')}
+                </div>
+              </div>
               <Input
                 label={credentialLabel}
                 type="password"
