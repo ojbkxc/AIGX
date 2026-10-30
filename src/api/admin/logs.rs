@@ -439,7 +439,11 @@ pub async fn handle_cleanup_logs(
         .or(req_cutoff);
     let mut audits = 0u64;
     if let Some(cutoff) = audit_cutoff {
-        audits = state.log_store.audits.delete_older_than(cutoff).unwrap_or(0) as u64;
+        audits = state
+            .log_store
+            .audits
+            .delete_older_than(cutoff)
+            .unwrap_or(0) as u64;
         removed += audits;
     }
     Ok(Json(serde_json::json!({

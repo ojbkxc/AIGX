@@ -629,8 +629,8 @@ async fn main() -> anyhow::Result<()> {
                         // 两类日志各自独立：审计可单独设天数（未设时跟随请求日志），
                         // 因此请求日志未设天数时仍要清理审计。
                         let mut removed: u64 = 0;
-                        let req_cutoff = days
-                            .map(|d| chrono::Utc::now().timestamp() - (d as i64) * 86400);
+                        let req_cutoff =
+                            days.map(|d| chrono::Utc::now().timestamp() - (d as i64) * 86400);
                         if let Some(cutoff) = req_cutoff {
                             match ls.requests.delete_older_than(cutoff) {
                                 Ok(n) => removed += n as u64,
