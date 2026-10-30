@@ -755,6 +755,18 @@ mod tests {
             .filter(|(_, meta)| meta.openai_compatible)
             .count();
         assert_eq!(compatible, 7, "可直接转发（OpenAI 兼容）的应为 7 家");
+        let private: Vec<&str> = SESSION_PROVIDERS
+            .iter()
+            .filter(|(_, meta)| !meta.openai_compatible)
+            .map(|(kind, _)| *kind)
+            .collect();
+        assert_eq!(private.len(), 10, "私有协议供应商应为 10 家");
+        for kind in private {
+            assert!(
+                crate::bridge::session::supports(kind),
+                "{kind} 标记为私有协议，但缺少专用 Bridge"
+            );
+        }
     }
 
     #[test]
