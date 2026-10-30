@@ -838,9 +838,13 @@ pub async fn handle_set_rotation_policy(
     verify_admin(&state, &headers).await?;
     let current = state.account_sessions.policy();
     let next = RotationPolicy {
-        base_cooldown_secs: body.base_cooldown_secs.unwrap_or(current.base_cooldown_secs),
+        base_cooldown_secs: body
+            .base_cooldown_secs
+            .unwrap_or(current.base_cooldown_secs),
         max_cooldown_secs: body.max_cooldown_secs.unwrap_or(current.max_cooldown_secs),
-        auth_cooldown_secs: body.auth_cooldown_secs.unwrap_or(current.auth_cooldown_secs),
+        auth_cooldown_secs: body
+            .auth_cooldown_secs
+            .unwrap_or(current.auth_cooldown_secs),
         max_attempts: body.max_attempts.unwrap_or(current.max_attempts),
     };
     match state.account_sessions.set_policy(next) {

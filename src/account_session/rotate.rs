@@ -39,7 +39,9 @@ impl RotationPolicy {
     /// - 单请求最多尝试账号 1–20 次
     pub fn clamped(mut self) -> Self {
         self.base_cooldown_secs = self.base_cooldown_secs.clamp(5, 3_600);
-        self.max_cooldown_secs = self.max_cooldown_secs.clamp(self.base_cooldown_secs, 86_400);
+        self.max_cooldown_secs = self
+            .max_cooldown_secs
+            .clamp(self.base_cooldown_secs, 86_400);
         self.auth_cooldown_secs = self.auth_cooldown_secs.clamp(60, 86_400);
         self.max_attempts = self.max_attempts.clamp(1, 20);
         self
