@@ -167,11 +167,7 @@ pub async fn handle_put_update_settings(
     }
     if let Some(repo) = body.repo.as_deref() {
         let repo = repo.trim();
-        let valid = repo
-            .split_once('/')
-            .map(|(owner, name)| !owner.is_empty() && !name.is_empty())
-            .unwrap_or(false);
-        if !valid {
+        if !valid_repo(repo) {
             return Err(error_response(
                 "仓库格式应为 owner/repo",
                 StatusCode::BAD_REQUEST,
@@ -238,3 +234,32 @@ fn settings_json(config: &UpdateConfig) -> Value {
         "currentVersion": crate::update::CURRENT_VERSION,
     })
 }
+
+/// 校验 GitHub 仓库名：严格 `owner/repo` 两段，不允许空白、多级路径或首尾斜杠。
+fn valid_repo(repo: &str) -> bool {
+    if repo.chars().any(char::is_whitespace) {
+        return false;
+    }
+    match repo.split_once('/') {
+        Some((owner, name)) => {
+            !owner.is_empty() && !name.is_empty() && !owner.contains('/') && !name.contains('/')
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_repo;
+
+    #[test]
+    fn repo_name_requires_exactly_two_segments() {
+        assert!(valid_repo("ojbkxc/AIGX"));
+        assert!(!valid_repo("ojbkxc"));
+        assert!(!valid_repo("/AIGX"));
+        assert!(!valid_repo("ojbkxc/"));
+        assert!(!valid_repo("a/b/c"));
+        assert!(!valid_repo("ojbkxc /AIGX"));
+    }
+}
+

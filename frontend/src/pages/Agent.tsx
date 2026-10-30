@@ -104,7 +104,9 @@ export default function Agent(): JSX.Element {
   const [model, setModel] = useState('');
   /** 思考强度：默认关（不发送 reasoning_effort），按任务复杂度点选低/中/高 */
   const [effort, setEffort] = useState<Effort>(() => {
-    const saved = localStorage.getItem('aigx_agent_effort');
+    // 隐私模式/禁用存储时 getItem 可能抛 SecurityError，降级为默认「关」
+    let saved: string | null = null;
+    try { saved = localStorage.getItem('aigx_agent_effort'); } catch { /* noop */ }
     return EFFORT_CYCLE.includes(saved as Effort) ? (saved as Effort) : 'off';
   });
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -513,7 +515,7 @@ export default function Agent(): JSX.Element {
                   onClick={() => {
                     const next = EFFORT_CYCLE[(EFFORT_CYCLE.indexOf(effort) + 1) % EFFORT_CYCLE.length];
                     setEffort(next);
-                    localStorage.setItem('aigx_agent_effort', next);
+                    try { localStorage.setItem('aigx_agent_effort', next); } catch { /* noop */ }
                   }}
                   title={t('思考强度：关 = 直接作答；低/中/高 = 先推理再作答，越强越慢越准')}
                 >

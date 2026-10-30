@@ -155,7 +155,7 @@ struct ToolSpec {
     write: bool,
 }
 
-/// 第一版白名单工具集（17 个：渠道运维 11 + 账号池 6）。
+/// 第一版白名单工具集（19 个：诊断 3 + 查询 4 + 写 4 + 账号池 6 + 更新 2）。
 ///
 /// inputSchema 严格按对应 handler 实际接受的参数写：
 /// - `GET /api/channels` 无 enabled 过滤参数（只有 search/page/page_size），
