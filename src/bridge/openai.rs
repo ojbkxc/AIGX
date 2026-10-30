@@ -82,12 +82,7 @@ impl OpenaiCompatibleBridge {
         let credential = credential.into();
         let params: Vec<(String, String)> = headers
             .iter()
-            .map(|(name, value)| {
-                (
-                    name.to_string(),
-                    value.replace("{credential}", &credential),
-                )
-            })
+            .map(|(name, value)| (name.to_string(), value.replace("{credential}", &credential)))
             .collect();
         Self {
             base_url: normalize_base_url(base_url.into()),

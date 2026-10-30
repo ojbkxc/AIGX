@@ -442,9 +442,12 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
     (
         "codearts",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "CodeArts/1.0")],
-            credential_hint: "粘贴华为 CodeArts 的整段 Cookie / 会话票据",
+            auth: SessionAuth::Headers,
+            headers: &[
+                ("user-agent", "CodeArts/1.0"),
+                ("x-auth-token", "{credential}"),
+            ],
+            credential_hint: "粘贴华为 CodeArts 的会话令牌（x-auth-token）",
         },
     ),
     (
@@ -524,10 +527,7 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
 /// 查登录态型供应商元数据（非登录态型返回 None）。
 pub fn session_meta(kind: &str) -> Option<&'static SessionMeta> {
     let lower = kind.trim().to_ascii_lowercase();
-    SESSION_PROVIDERS
-        .iter()
-        .find(|(k, _)| *k == lower)
-        .map(|(_, meta)| meta)
+    SESSION_PROVIDERS.iter().find(|(k, _)| *k == lower).map(|(_, meta)| meta)
 }
 
 /// 是否登录态型供应商。
