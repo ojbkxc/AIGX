@@ -13,6 +13,7 @@ import Security from './Security';
 import IpManagement from './IpManagement';
 import NetworkLayer from './NetworkLayer';
 import LogRetention from './LogRetention';
+import UpdatePanel from '../components/UpdatePanel';
 import './Settings.css';
 
 interface LimitsForm {
@@ -57,7 +58,7 @@ interface DataResponse<T> {
   data?: T;
 }
 
-type SettingsTab = 'site' | 'billing' | 'ops' | 'security' | 'account';
+type SettingsTab = 'site' | 'billing' | 'ops' | 'update' | 'security' | 'account';
 /** billing 分区子标签（易支付 / 用户分组；定价倍率已拆为独立页 /pricing） */
 type BillingSubTab = 'epay' | 'groups';
 /** ops 分区子标签（通知 / 限流 / 缓存 / 价格同步 / 汇率 / 日志保留 / 网络层） */
@@ -424,6 +425,7 @@ export default function Settings() {
           { key: 'site', label: t('站点') },
           { key: 'billing', label: t('计费/易支付') },
           { key: 'ops', label: t('运维') },
+          { key: 'update', label: t('更新') },
           { key: 'security', label: t('安全') },
           { key: 'account', label: t('账户') },
         ]}
@@ -785,6 +787,8 @@ export default function Settings() {
           </div>
         </>
       )}
+
+      {activeTab === 'update' && <UpdatePanel />}
 
       {activeTab === 'security' && (
         <>

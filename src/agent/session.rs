@@ -129,6 +129,15 @@ impl AgentSessionStore {
         Ok(())
     }
 
+    /// 更新会话角色（前端观察员/运维员切换；写后后续请求沿用该角色）。
+    pub fn set_role(&self, id: &str, role: AgentRole) -> anyhow::Result<()> {
+        if let Some(mut s) = self.get(id)? {
+            s.role = role;
+            self.store.put(&Self::session_key(id), &s)?;
+        }
+        Ok(())
+    }
+
     /// 列出全部会话（按创建时间倒序）。
     pub fn list(&self) -> anyhow::Result<Vec<AgentSession>> {
         let keys = self.store.list(SESSION_PREFIX)?;

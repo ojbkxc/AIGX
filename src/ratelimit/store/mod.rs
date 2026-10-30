@@ -47,6 +47,10 @@ pub struct RateLimit {
 ///
 /// `member` 是进程唯一的预留 ID，用于分布式后端追踪并发集合中的
 /// 精确一个槽位；本地后端忽略它（in_flight 是普通计数器）。
+///
+/// `#[allow(clippy::double_must_use)]`：async_trait 宏生成的 `#[must_use]`
+/// 与 Future 自带 must_use 重复（宏生成无法手改）。
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait RateStore: Send + Sync + 'static {
     /// 预提交获取单个桶。原子地（每桶）：

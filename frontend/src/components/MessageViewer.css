@@ -105,7 +105,7 @@
 }
 
 .reasoning-toggle:hover {
-  color: var(--text-color);
+  color: var(--text-main);
 }
 
 .reasoning-toggle:focus-visible {
@@ -124,10 +124,13 @@
   border-top: 1px solid var(--border-color, rgba(0, 0, 0, 0.06));
 }
 
-/* 代码块（open-webui 范式）：语言标签 + 复制按钮 + 深底 pre */
+/* 代码块（open-webui 范式）：语言标签 + 复制按钮 + 主题化底色
+ * 底色/正文一律走 --code-bg / --code-color：亮色主题是浅底深字，
+ * 暗色主题是深底浅字，避免「浅底浅字」导致代码不可见。 */
 .code-block-shell {
   border-radius: 12px;
   background: var(--code-bg, #0f1117);
+  border: 1px solid var(--code-border, rgba(127, 127, 127, 0.2));
   overflow: hidden;
   margin: 6px 0;
 }
@@ -138,14 +141,14 @@
   justify-content: space-between;
   gap: 8px;
   padding: 6px 10px 6px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--code-border, rgba(127, 127, 127, 0.2));
 }
 
 .code-lang {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--text-muted);
   text-transform: lowercase;
 }
 
@@ -158,14 +161,14 @@
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--text-muted);
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
 .code-copy:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.9);
+  background: var(--hover-bg, rgba(127, 127, 127, 0.12));
+  color: var(--text-main);
 }
 
 .code-copy:focus-visible {
@@ -180,7 +183,7 @@
   font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
   font-size: 13px;
   line-height: 1.55;
-  color: var(--code-fg, #e6e6e6);
+  color: var(--code-color, #e6e6e6);
   background: none;
 }
 

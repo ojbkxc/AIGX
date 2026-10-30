@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Bot, Send, Square, ShieldAlert, Terminal, Eye, Wrench,
+  Bot, Send, Square, ShieldAlert, Terminal, Eye, Wrench, Brain,
   CheckCircle2, XCircle, MessageSquarePlus, Trash2, History, ChevronLeft,
 } from 'lucide-react';
 import ModelPicker from '../components/ModelPicker';
@@ -71,7 +71,20 @@ const TOOL_LABELS: Record<string, string> = {
   aigx_key_delete: '删除 API 密钥（不可逆）',
   aigx_key_add: '新增 API 密钥',
   aigx_group_upsert: '新增/更新用户分组',
+  aigx_account_session_delete: '删除账号（不可逆）',
+  aigx_account_session_bulk_import: '批量导入账号',
+  aigx_account_session_add: '新增账号',
+  aigx_account_session_update: '更新账号',
+  aigx_channel_update: '更新渠道',
+  aigx_apply_update: '下载并更新版本',
+  aigx_restart_service: '重启服务',
+  aigx_rollback_update: '回滚版本',
 };
+
+/** 思考强度档位（off = 不发送思考参数，走服务端默认） */
+const EFFORT_CYCLE = ['off', 'low', 'medium', 'high'] as const;
+type Effort = (typeof EFFORT_CYCLE)[number];
+const EFFORT_LABEL: Record<Effort, string> = { off: '关', low: '低', medium: '中', high: '高' };
 
 /**
  * Agent — AI 运维工作台（对齐 /chat 聊天页 + cc-haha 交互模式）。
@@ -89,6 +102,11 @@ export default function Agent(): JSX.Element {
   const [error, setError] = useState('');
   const [pending, setPending] = useState<PendingApproval | null>(null);
   const [model, setModel] = useState('');
+  /** 思考强度：默认关（不发送 reasoning_effort），按任务复杂度点选低/中/高 */
+  const [effort, setEffort] = useState<Effort>(() => {
+    const saved = localStorage.getItem('aigx_agent_effort');
+    return EFFORT_CYCLE.includes(saved as Effort) ? (saved as Effort) : 'off';
+  });
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [role, setRole] = useState<'observer' | 'operator'>('observer');
   const abortRef = useRef<AbortController | null>(null);
@@ -279,7 +297,7 @@ export default function Agent(): JSX.Element {
             return m;
           }),
         );
-      }, controller.signal, model || undefined);
+      }, controller.signal, model || undefined, effort === 'off' ? undefined : effort, role);
       // 会话可能被自动命名，刷新抽屉列表
       void loadSessions();
     } catch (e) {
@@ -290,7 +308,7 @@ export default function Agent(): JSX.Element {
       setBusy(false);
       abortRef.current = null;
     }
-  }, [input, busy, sessionId, model, role, t, loadSessions]);
+  }, [input, busy, sessionId, model, role, effort, t, loadSessions]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -486,6 +504,21 @@ export default function Agent(): JSX.Element {
                 >
                   <Terminal size={12} />
                   {role === 'observer' ? t('观察员') : t('运维员')}
+                </button>
+                {/* 思考强度：点按循环 关 → 低 → 中 → 高（默认关，不发送思考参数） */}
+                <button
+                  type="button"
+                  className={`agent-role-pill ${effort !== 'off' ? 'effort-on' : ''}`}
+                  disabled={busy}
+                  onClick={() => {
+                    const next = EFFORT_CYCLE[(EFFORT_CYCLE.indexOf(effort) + 1) % EFFORT_CYCLE.length];
+                    setEffort(next);
+                    localStorage.setItem('aigx_agent_effort', next);
+                  }}
+                  title={t('思考强度：关 = 直接作答；低/中/高 = 先推理再作答，越强越慢越准')}
+                >
+                  <Brain size={12} />
+                  {t('思考')}·{t(EFFORT_LABEL[effort])}
                 </button>
                 <button
                   type="button"

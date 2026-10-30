@@ -1,3 +1,4 @@
+pub mod account_sessions;
 pub mod auth;
 pub mod cache;
 pub mod channels;
@@ -21,6 +22,7 @@ pub mod settings;
 pub mod subscriptions;
 pub mod tickets;
 pub mod tokens;
+pub mod update;
 pub mod users; // 网络层管理模块
 
 pub use auth::{

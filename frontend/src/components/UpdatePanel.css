@@ -1,0 +1,198 @@
+/* ── 服务器更新面板 ── */
+
+.update-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.update-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 4px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.update-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.update-hero {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+
+.update-version {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 96px;
+}
+
+.update-version span {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.update-version strong {
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--text-main);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.update-hero .btn {
+  margin-left: auto;
+}
+
+.update-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  border: 1px solid var(--border-color);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.03));
+  color: var(--text-main);
+}
+
+.update-banner svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.update-banner.ok {
+  border-color: rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.08);
+  color: var(--success-text, #047857);
+}
+
+.update-banner.warn {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--warning-text, #b45309);
+}
+
+.update-banner.error {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--danger-text, #b91c1c);
+}
+
+.update-notes {
+  display: grid;
+  gap: 6px;
+}
+
+.update-notes-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.update-notes pre {
+  margin: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--code-bg, #f5f5f5);
+  color: var(--code-color, #1a1a1a);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.update-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.update-progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.update-progress-track {
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--hover-bg, rgba(0, 0, 0, 0.08));
+  overflow: hidden;
+}
+
+.update-progress-fill {
+  height: 100%;
+  border-radius: 9999px;
+  background: var(--accent-color, #2f6fed);
+  transition: width 0.2s ease;
+}
+
+.update-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.update-meta a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent-color, #2f6fed);
+  text-decoration: none;
+}
+
+.update-meta a:hover {
+  text-decoration: underline;
+}
+
+.update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.update-danger:hover:not(:disabled) {
+  color: var(--danger-text, #ef4444);
+  border-color: var(--danger-color, #ef4444);
+}
+
+.update-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.update-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.update-check input {
+  cursor: pointer;
+}
+
+.update-spin {
+  animation: update-spin 1s linear infinite;
+}
+
+@keyframes update-spin {
+  to { transform: rotate(360deg); }
+}

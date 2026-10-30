@@ -103,7 +103,10 @@ async fn hit(cache: &PromptSourceCache, key: &str) -> Option<(Arc<Value>, bool)>
 
 async fn store(cache: &PromptSourceCache, key: &str, v: Arc<Value>, truncated: bool) {
     let mut map = cache.map.write().await;
-    map.insert(key.to_string(), (chrono::Utc::now().timestamp(), v, truncated));
+    map.insert(
+        key.to_string(),
+        (chrono::Utc::now().timestamp(), v, truncated),
+    );
 }
 
 /// 抓取闸门：同一 key 正在抓取时返回 `None`（调用方直接放行，等已发起的
@@ -177,7 +180,9 @@ pub async fn handle_prompt_fetch(
     if let Some((v, truncated)) = hit(&state.prompt_source_cache, &key).await {
         // 命中缓存：`v` 是 `Arc<Value>`，`&*v` 借用底层 JSON 序列化，零深拷贝。
         // `truncated` 随缓存一起返回，保证缓存命中窗口内提示不丢失。
-        return Ok(Json(json!({ "success": true, "truncated": truncated, "data": &*v })));
+        return Ok(Json(
+            json!({ "success": true, "truncated": truncated, "data": &*v }),
+        ));
     }
     // 同一源已在途抓取：返回 409，告知前端「正在抓取，稍后重试」。
     // 这比返回空数组更明确——空数组会被前端误判为「该源无可用提示词」。

@@ -39,6 +39,10 @@ impl GuardrailVerdict {
 /// 护栏 trait。每个护栏实现负责：
 /// - `check_input`: 检查请求消息内容
 /// - `check_output`: 检查响应内容
+///
+/// `#[allow(clippy::double_must_use)]`：async_trait 宏生成的 `#[must_use]`
+/// 与 Future 自带 must_use 重复（宏生成无法手改）。
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Guardrail: Send + Sync + 'static {
     /// 护栏名称，用于日志和指标

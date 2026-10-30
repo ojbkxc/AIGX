@@ -264,7 +264,7 @@
 .agent-msg-user .agent-msg-icon {
   order: 2;
   background: var(--accent-color, #2f6fed);
-  color: #fff;
+  color: var(--accent-contrast, #fff);
 }
 
 .agent-msg-body {
@@ -347,7 +347,7 @@
 }
 
 .agent-step-approval svg {
-  color: #d97706;
+  color: var(--warning-text, #d97706);
 }
 
 .agent-step-approval.denied svg {
@@ -355,7 +355,7 @@
 }
 
 .agent-step-result.ok svg {
-  color: #059669;
+  color: var(--success-text, #059669);
 }
 
 .agent-step-result.fail svg {
@@ -638,9 +638,16 @@
 }
 
 .agent-role-pill.operator {
-  color: #d97706;
+  color: var(--warning-text, #d97706);
   border-color: rgba(217, 119, 6, 0.45);
   background: rgba(217, 119, 6, 0.08);
+}
+
+/* 思考强度已开启（低/中/高）：强调色描边，关闭态保持中性 */
+.agent-role-pill.effort-on {
+  color: var(--text-main);
+  border-color: var(--accent-color, #2f6fed);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
 }
 
 .agent-role-pill:disabled {
@@ -691,7 +698,7 @@
   border: none;
   border-radius: 9999px;
   background: var(--accent-color, #2f6fed);
-  color: #fff;
+  color: var(--accent-contrast, #fff);
   cursor: pointer;
   transition: transform 0.15s ease, opacity 0.15s ease, background 0.15s ease;
   box-shadow: 0 2px 8px -2px rgba(47, 111, 237, 0.5);
@@ -748,7 +755,7 @@
 
 .agent-approval-icon {
   flex-shrink: 0;
-  color: #d97706;
+  color: var(--warning-text, #d97706);
   margin-top: 2px;
 }
 
@@ -847,7 +854,7 @@
 
 .agent-approval-once {
   background: var(--accent-color, #2f6fed);
-  color: #fff;
+  color: var(--accent-contrast, #fff);
 }
 
 .agent-approval-once:hover {
@@ -863,6 +870,16 @@
   .agent-msg-icon {
     width: 26px;
     height: 26px;
+  }
+
+  /* 角色/思考/历史/清空 + 模型/发送 在窄屏折行，避免工具行溢出 */
+  .agent-input-meta {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .agent-input-actions {
+    margin-left: auto;
   }
 
   .agent-input-actions .model-picker {

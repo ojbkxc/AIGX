@@ -609,6 +609,49 @@ fn paths_accounts_network() -> Value {
             "put": op_params("网络层", "更新账号", &[path_param("id")]),
             "delete": op_params("网络层", "删除账号", &[path_param("id")])
         },
+        "/api/account-sessions": {
+            "get": op("账号池", "列出账号型渠道的账号（凭证/代理脱敏）"),
+            "post": op_body("账号池", "新增账号", "channel + 凭证/代理/优先级/并发/模型")
+        },
+        "/api/account-sessions/providers": {
+            "get": op("账号池", "provider 目录（粘贴凭证型上游与默认地址）")
+        },
+        "/api/account-sessions/stats": {
+            "get": op("账号池", "按渠道聚合的账号池统计（启用/冷却/并发/成败）")
+        },
+        "/api/account-sessions/bulk": {
+            "post": op_body("账号池", "批量导入凭证（每行 Name,Key 或仅 Key）", "channel_id + credentials")
+        },
+        "/api/account-sessions/{id}": {
+            "put": op_params("账号池", "更新账号（渠道不可变、凭证三态）", &[path_param("id")]),
+            "patch": op_params("账号池", "部分更新（名称/状态/优先级/权重/并发）", &[path_param("id")]),
+            "delete": op_params("账号池", "删除账号", &[path_param("id")])
+        },
+        "/api/account-sessions/{id}/test": {
+            "post": op_params("账号池", "单号探活（走真实推理链路）", &[path_param("id")])
+        },
+        "/api/account-sessions/{id}/reset-cooldown": {
+            "post": op_params("账号池", "清除账号冷却与最近错误", &[path_param("id")])
+        },
+        "/api/update/status": {
+            "get": op("更新", "服务器更新状态（版本/下载进度/待重启/可原地更新）")
+        },
+        "/api/update/check": {
+            "post": op("更新", "立即检查 GitHub Release（只读网络请求，受限流冷却约束）")
+        },
+        "/api/update/apply": {
+            "post": op("更新", "下载并应用最新版本（sha256 校验 → 替换二进制/static → 自动重启）")
+        },
+        "/api/update/restart": {
+            "post": op("更新", "重启 AIGX 服务（exec 自重启，约 2 秒后生效）")
+        },
+        "/api/update/rollback": {
+            "post": op("更新", "回滚到上一版本（使用 aigx.bak / static.bak）")
+        },
+        "/api/update/settings": {
+            "get": op("更新", "查询自动更新配置（令牌脱敏）"),
+            "put": op_body("更新", "保存自动更新配置", "enabled/auto_check/auto_apply/interval_hours/repo/api_base/proxy/token")
+        },
         "/api/network/status": {
             "get": op("网络层", "网络层健康状态")
         },
@@ -686,6 +729,19 @@ mod tests {
             m.insert(p, methods.to_vec());
         };
         add("/api-docs/openapi.json", &["get"]);
+        add("/api/account-sessions", &["get", "post"]);
+        add("/api/account-sessions/bulk", &["post"]);
+        add("/api/account-sessions/providers", &["get"]);
+        add("/api/account-sessions/stats", &["get"]);
+        add("/api/account-sessions/{id}", &["delete", "patch", "put"]);
+        add("/api/account-sessions/{id}/reset-cooldown", &["post"]);
+        add("/api/account-sessions/{id}/test", &["post"]);
+        add("/api/update/apply", &["post"]);
+        add("/api/update/check", &["post"]);
+        add("/api/update/restart", &["post"]);
+        add("/api/update/rollback", &["post"]);
+        add("/api/update/settings", &["get", "put"]);
+        add("/api/update/status", &["get"]);
         add("/api/accounts", &["get", "post"]);
         add("/api/accounts/test", &["post"]);
         add("/api/accounts/{id}", &["delete", "put"]);
@@ -910,15 +966,15 @@ mod tests {
         );
     }
 
-    /// 数量锚点：管理面真实路径共 143 个（142 + openapi.json 自身）。
+    /// 数量锚点：管理面真实路径共 156 个（155 + openapi.json 自身）。
     /// 真实路由增删会先在 covers_all_real_admin_routes 红，此断言辅助定位。
     #[test]
     fn path_count_anchor() {
         let doc = build_openapi_document();
         let n = doc["paths"].as_object().unwrap().len();
         assert_eq!(
-            n, 143,
-            "管理面路径数应为 143（142 真实注册 + openapi.json），实际 {n}"
+            n, 156,
+            "管理面路径数应为 156（155 真实注册 + openapi.json），实际 {n}"
         );
     }
 }

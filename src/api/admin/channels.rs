@@ -144,13 +144,13 @@ impl ChannelRequest {
     }
 }
 
-/// 构造渠道 JSON 响应（脱敏 API Key）
-/// `seq`：展示用短编号（列表接口按创建顺序注入 1..N；单渠道场景传 None 留空）。
-pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
-    // 按字符（而非字节）切片脱敏：非 ASCII key 的字节切片会 panic
-    //（chars().count() 判长 + 字节下标切是不匹配的组合）。
-    let chars: Vec<char> = ch.api_key.chars().collect();
-    let masked_key = if chars.is_empty() {
+/// 密钥脱敏（列表/详情展示用）：>12 字符保留首 8 + 末 4，否则全掩码。
+///
+/// 按字符（而非字节）切片：非 ASCII key 的字节切片会 panic
+/// （`chars().count()` 判长 + 字节下标切是不匹配的组合）。
+pub fn mask_secret(secret: &str) -> String {
+    let chars: Vec<char> = secret.chars().collect();
+    if chars.is_empty() {
         String::new()
     } else if chars.len() > 12 {
         let head: String = chars[..8].iter().collect();
@@ -158,7 +158,13 @@ pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
         format!("{head}...{tail}")
     } else {
         "****".to_string()
-    };
+    }
+}
+
+/// 构造渠道 JSON 响应（脱敏 API Key）
+/// `seq`：展示用短编号（列表接口按创建顺序注入 1..N；单渠道场景传 None 留空）。
+pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
+    let masked_key = mask_secret(&ch.api_key);
     json!({
         "id": ch.id,
         "seq": seq.unwrap_or(0),
@@ -338,6 +344,10 @@ pub async fn handle_available_models(
             .cloned()
             .collect();
         for ch in &empty_channels {
+            // 账号型渠道无渠道级凭证，模型发现按账号走管理面账号测试
+            if ch.channel_type == crate::channel::ChannelType::Account {
+                continue;
+            }
             let key = ch.decode_api_key();
             // CF/Zai 无需 base_url 也能拉；其余要求非空 base_url
             if ch.base_url.trim().is_empty()
@@ -505,6 +515,10 @@ pub async fn delete_channel_core(
     });
     match state.channel_store.remove(id) {
         Ok(_) => {
+            // 级联清理账号池：账号凭证是独立 KV，渠道删除后不应残留悬挂账号
+            if let Err(e) = state.account_sessions.remove_for_channel(id) {
+                tracing::warn!("Failed to cascade remove account sessions for {id}: {e}");
+            }
             record_audit(
                 state,
                 &admin_id,

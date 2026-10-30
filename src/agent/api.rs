@@ -20,6 +20,7 @@ use tokio_stream::StreamExt;
 
 use crate::agent::approval::ApprovalResult;
 use crate::agent::runner::{self, AgentEvent};
+use crate::agent::session::AgentRole;
 use crate::api::admin::common::verify_admin;
 use crate::api::openai::AppState;
 
@@ -59,6 +60,12 @@ pub struct ChatRequest {
     /// 覆盖 `[agent].model`（前端模型选择器）。空/缺省用配置值。
     #[serde(default)]
     pub model: Option<String>,
+    /// 思考强度覆盖（off/low/medium/high）。off/缺省用配置值。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// 会话角色（observer/operator）。随请求同步到会话，观察员→运维员即时生效。
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,7 +200,7 @@ pub async fn handle_chat(
     let agent = agent_state(&state)?;
 
     // 会话角色（观察员/运维员），决定写工具是否放行
-    let session_role = agent
+    let mut session_role = agent
         .session_store
         .get(&id)
         .map_err(|e| {
@@ -204,6 +211,18 @@ pub async fn handle_chat(
         })?
         .map(|s| s.role)
         .unwrap_or_default();
+    // 前端角色切换随请求同步：切到运维员后本次及后续请求立即放行写工具
+    if let Some(raw) = body.role.as_deref() {
+        let wanted = if raw.trim().eq_ignore_ascii_case("operator") {
+            AgentRole::Operator
+        } else {
+            AgentRole::Observer
+        };
+        if wanted != session_role {
+            let _ = agent.session_store.set_role(&id, wanted);
+            session_role = wanted;
+        }
+    }
 
     // 读会话历史消息，组装 LLM 对话上下文
     let history = agent.session_store.messages(&id).map_err(|e| {
@@ -258,6 +277,16 @@ pub async fn handle_chat(
     if let Some(m) = body.model.as_deref() {
         if !m.trim().is_empty() {
             config.model = m.trim().to_string();
+        }
+    }
+    // 思考强度：前端显式选择时覆盖配置；"off" 表示本次关闭思考。
+    if let Some(e) = body.reasoning_effort.as_deref() {
+        match e.trim().to_ascii_lowercase().as_str() {
+            "off" | "" => config.reasoning_effort = None,
+            "low" | "medium" | "high" => {
+                config.reasoning_effort = Some(e.trim().to_ascii_lowercase());
+            }
+            _ => {}
         }
     }
     let state2 = state.clone();

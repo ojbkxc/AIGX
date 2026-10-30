@@ -6,7 +6,7 @@
 //!
 //! ## 协议子集（零依赖手写，不引 rmcp）
 //! - `initialize`：握手 → protocolVersion + serverInfo + tools 能力声明
-//! - `tools/list`：返回 11 个白名单工具（name/中文 description/inputSchema）
+//! - `tools/list`：返回 19 个白名单工具（name/中文 description/inputSchema）
 //! - `tools/call`：白名单校验后执行工具，结果 JSON 序列化为 text content
 //!
 //! ## fail-closed
@@ -40,8 +40,14 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
+use super::account_sessions::AccountSessionPatch;
+use super::account_sessions::{
+    handle_account_session_stats, handle_list_account_sessions, handle_patch_account_session,
+    handle_reset_account_session_cooldowns, handle_test_account_session,
+};
 use super::common::{admin_id_from_session, record_audit, verify_admin};
 use super::logs::RequestLogQuery;
+use super::update::{handle_update_check, handle_update_status};
 use super::users::ListUsersQuery;
 use super::{
     handle_diagnostics_breakers, handle_diagnostics_channels, handle_diagnostics_summary,
@@ -149,13 +155,14 @@ struct ToolSpec {
     write: bool,
 }
 
-/// 第一版白名单工具集（11 个）。
+/// 第一版白名单工具集（17 个：渠道运维 11 + 账号池 6）。
 ///
 /// inputSchema 严格按对应 handler 实际接受的参数写：
 /// - `GET /api/channels` 无 enabled 过滤参数（只有 search/page/page_size），
 ///   故 schema 不虚构 enabled
 /// - 请求日志端点实际为 `/api/logs/requests`（user/model/channel/start/end
 ///   过滤 + page/size 分页）
+/// - 账号池工具：`account_id` 为账号会话 ID（`/api/account-sessions/{id}`）
 fn tool_specs() -> Vec<ToolSpec> {
     let no_args = || json!({ "type": "object", "properties": {}, "required": [] });
     let channel_id_args = || {
@@ -165,6 +172,15 @@ fn tool_specs() -> Vec<ToolSpec> {
                 "channel_id": { "type": "string", "description": "渠道 ID" }
             },
             "required": ["channel_id"]
+        })
+    };
+    let account_id_args = || {
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string", "description": "账号会话 ID（渠道下单个凭证）" }
+            },
+            "required": ["account_id"]
         })
     };
     vec![
@@ -263,6 +279,66 @@ fn tool_specs() -> Vec<ToolSpec> {
             description: "写操作（可回滚）：重置渠道熔断器与健康追踪状态（故障恢复后解除熔断用）",
             schema: channel_id_args(),
             write: true,
+        },
+        // ── 账号池×6（账号型渠道的账号级调度：查/测/启停/清冷却）──
+        ToolSpec {
+            name: "aigx_list_account_sessions",
+            description: "只读：列出账号型渠道的账号（凭证/代理脱敏，可按渠道与关键词过滤）",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "channel_id": { "type": "string", "description": "按渠道 ID 过滤" },
+                    "search": {
+                        "type": "string",
+                        "description": "按名称/provider/地址/渠道名/最近错误模糊过滤"
+                    }
+                },
+                "required": []
+            }),
+            write: false,
+        },
+        ToolSpec {
+            name: "aigx_account_session_stats",
+            description: "只读：按渠道聚合的账号池统计（总数/启用/冷却中/并发/成败）",
+            schema: no_args(),
+            write: false,
+        },
+        ToolSpec {
+            name: "aigx_account_session_test",
+            description: "写操作（可回滚）：单号探活（走真实推理链路，30s 超时；成功后清该模型冷却）",
+            schema: account_id_args(),
+            write: true,
+        },
+        ToolSpec {
+            name: "aigx_account_session_enable",
+            description: "写操作（可回滚）：启用账号（PATCH status=enabled）",
+            schema: account_id_args(),
+            write: true,
+        },
+        ToolSpec {
+            name: "aigx_account_session_disable",
+            description: "写操作（可回滚）：停用账号（PATCH status=disabled）",
+            schema: account_id_args(),
+            write: true,
+        },
+        ToolSpec {
+            name: "aigx_account_session_reset_cooldown",
+            description: "写操作（可回滚）：清除账号全部模型冷却与最近错误（故障恢复后立即恢复调度）",
+            schema: account_id_args(),
+            write: true,
+        },
+        // ── 更新×2（只读：版本状态与检查；应用/重启属高危，不进 MCP 白名单）──
+        ToolSpec {
+            name: "aigx_update_status",
+            description: "只读：服务器更新状态（当前/最新版本、下载进度、是否待重启、能否原地更新）",
+            schema: no_args(),
+            write: false,
+        },
+        ToolSpec {
+            name: "aigx_check_update",
+            description: "只读：立即检查 GitHub Release 是否有新版本（受最短间隔与限流冷却约束）",
+            schema: no_args(),
+            write: false,
         },
     ]
 }
@@ -401,6 +477,54 @@ async fn exec_tool(
             audit_write_tool(state, headers, name, &id, None, &r).await;
             Ok(handler_to_tool_result(r))
         }
+        // ── 账号池×6（读×2 + 写×4）──
+        "aigx_list_account_sessions" => {
+            let q = args_to_string_map(arguments);
+            let r =
+                handle_list_account_sessions(State(state.clone()), headers.clone(), Query(q)).await;
+            Ok(handler_to_tool_result(r))
+        }
+        "aigx_account_session_stats" => {
+            let r = handle_account_session_stats(State(state.clone()), headers.clone()).await;
+            Ok(handler_to_tool_result(r))
+        }
+        "aigx_account_session_test" => {
+            let id = require_account_id(arguments)?;
+            let r = handle_test_account_session(
+                State(state.clone()),
+                headers.clone(),
+                Path(id.clone()),
+            )
+            .await;
+            audit_write_tool(state, headers, name, &id, None, &r).await;
+            Ok(handler_to_tool_result(r))
+        }
+        "aigx_account_session_enable" => {
+            write_account_status(state, headers, arguments, name, true).await
+        }
+        "aigx_account_session_disable" => {
+            write_account_status(state, headers, arguments, name, false).await
+        }
+        "aigx_account_session_reset_cooldown" => {
+            let id = require_account_id(arguments)?;
+            let r = handle_reset_account_session_cooldowns(
+                State(state.clone()),
+                headers.clone(),
+                Path(id.clone()),
+            )
+            .await;
+            audit_write_tool(state, headers, name, &id, None, &r).await;
+            Ok(handler_to_tool_result(r))
+        }
+        // ── 更新×2（只读）──
+        "aigx_update_status" => {
+            let r = handle_update_status(State(state.clone()), headers.clone()).await;
+            Ok(handler_to_tool_result(r))
+        }
+        "aigx_check_update" => {
+            let r = handle_update_check(State(state.clone()), headers.clone()).await;
+            Ok(handler_to_tool_result(r))
+        }
         // find_tool_spec 已挡掉未知工具；此分支仅作 fail-closed 兜底
         _ => Ok(unknown_tool_result(name)),
     }
@@ -424,6 +548,28 @@ async fn write_channel_toggle(
         headers.clone(),
         Path(id.clone()),
         Json(json!({ "enabled": enabled })),
+    )
+    .await;
+    audit_write_tool(state, headers, tool_name, &id, before, &r).await;
+    Ok(handler_to_tool_result(r))
+}
+
+/// 账号启停公共路径：PATCH `{"status": ...}` + 审计（与渠道 enable/disable 同构）。
+async fn write_account_status(
+    state: &AppState,
+    headers: &HeaderMap,
+    arguments: &Value,
+    tool_name: &str,
+    enabled: bool,
+) -> Result<Value, (i64, String)> {
+    let id = require_account_id(arguments)?;
+    let before = state.account_sessions.get(&id).map(|s| s.status.clone());
+    let status = if enabled { "enabled" } else { "disabled" };
+    let r = handle_patch_account_session(
+        State(state.clone()),
+        headers.clone(),
+        Path(id.clone()),
+        Json(AccountSessionPatch::status_only(status)),
     )
     .await;
     audit_write_tool(state, headers, tool_name, &id, before, &r).await;
@@ -477,6 +623,21 @@ pub(crate) fn require_channel_id(arguments: &Value) -> Result<String, (i64, Stri
             (
                 INVALID_PARAMS,
                 "Invalid params: missing required argument channel_id".to_string(),
+            )
+        })
+}
+
+/// 取必填 account_id 参数（缺失/非字符串/空白 → -32602）。
+pub(crate) fn require_account_id(arguments: &Value) -> Result<String, (i64, String)> {
+    arguments
+        .get("account_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| {
+            (
+                INVALID_PARAMS,
+                "Invalid params: missing required argument account_id".to_string(),
             )
         })
 }
@@ -617,11 +778,15 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_has_eleven_unique_tools() {
+    fn tools_list_has_expected_unique_tools() {
         let specs = tool_specs();
-        assert_eq!(specs.len(), 11, "第一版白名单固定 11 个工具");
+        assert_eq!(
+            specs.len(),
+            19,
+            "白名单固定 19 个工具（渠道运维 11 + 账号池 6 + 更新 2）"
+        );
         let tools = tools_list_result()["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 19);
         let mut seen = std::collections::BTreeSet::new();
         for t in &tools {
             let name = t["name"].as_str().unwrap();
@@ -641,17 +806,20 @@ mod tests {
                 "{name} 缺 annotations.readOnlyHint"
             );
         }
-        // 每个描述标注读/写语义；写工具 required: ["channel_id"]
+        // 每个描述标注读/写语义；写工具 required 必含 channel_id 或 account_id
         let writes: Vec<&ToolSpec> = specs.iter().filter(|s| s.write).collect();
-        assert_eq!(writes.len(), 4, "写工具应为 4 个");
+        assert_eq!(writes.len(), 8, "写工具应为 8 个（渠道 4 + 账号池 4）");
         for s in &specs {
             let tag = if s.write { "写操作" } else { "只读" };
             assert!(s.description.contains(tag), "{} 未标注读/写语义", s.name);
             if s.write {
-                assert_eq!(
-                    s.schema["required"],
-                    json!(["channel_id"]),
-                    "{} 应必填 channel_id",
+                let required: Vec<&str> = s.schema["required"]
+                    .as_array()
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                assert!(
+                    required.contains(&"channel_id") || required.contains(&"account_id"),
+                    "{} 必填项应含 channel_id 或 account_id",
                     s.name
                 );
             }

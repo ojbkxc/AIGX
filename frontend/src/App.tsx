@@ -21,6 +21,7 @@ const Logs = lazy(() => import('./pages/Logs'));
 const Redemptions = lazy(() => import('./pages/Redemptions'));
 const Plans = lazy(() => import('./pages/Plans'));
 const Channels = lazy(() => import('./pages/Channels'));
+const AccountSessions = lazy(() => import('./pages/AccountSessions'));
 const Chat = lazy(() => import('./pages/Chat'));
 
 const Models = lazy(() => import('./pages/Models'));
@@ -99,6 +100,7 @@ export default function App(): JSX.Element {
             <Route path="/" element={<ProtectedLayout><Dashboard /></ProtectedLayout>} />
             <Route path="/accounts" element={<Navigate to="/channels" replace />} />
             <Route path="/channels" element={<AdminRoute><Channels /></AdminRoute>} />
+            <Route path="/account-sessions" element={<AdminRoute><AccountSessions /></AdminRoute>} />
             <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
             {/* 已合并的旧路由 → 重定向到合并后位置 */}
             <Route path="/mappings" element={<Navigate to="/channels" replace />} />

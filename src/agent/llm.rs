@@ -101,8 +101,21 @@ fn make_bridge_for_channel(
             client,
         )),
         ChannelType::Zai => Some(crate::bridge::zai::make_bridge(&ch.base_url, key, client)),
+        // 账号型渠道无渠道级凭证，锁单渠道路径不可用；全局调度经
+        // `resolve_bridges` 仍会得到 `AccountBridge`（账号池内部选号）
+        ChannelType::Account => None,
         // Cloudflare 渠道走 Hub 专用桥，自环暂不支持（阶段三再补）
         ChannelType::Cloudflare => None,
+    }
+}
+
+/// 思考强度归一化：只认 low/medium/high（off/空/未知 = 不发送）。
+fn effort_level(raw: Option<&str>) -> Option<String> {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("low") => Some("low".to_string()),
+        Some("medium") => Some("medium".to_string()),
+        Some("high") => Some("high".to_string()),
+        _ => None,
     }
 }
 
@@ -147,7 +160,7 @@ pub async fn chat_once(
             top_k: None,
             stop: None,
             tool_choice,
-            reasoning_effort: None,
+            reasoning_effort: effort_level(config.reasoning_effort.as_deref()),
             web_search_options: None,
             extra: None,
         };
@@ -320,5 +333,19 @@ pub fn system_message(content: String) -> ChatMessage {
         tool_call_id: None,
         tool_calls: None,
         reasoning: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effort_level;
+
+    #[test]
+    fn effort_level_only_accepts_known_levels() {
+        assert_eq!(effort_level(Some(" HIGH ")), Some("high".to_string()));
+        assert_eq!(effort_level(Some("low")), Some("low".to_string()));
+        assert_eq!(effort_level(Some("off")), None);
+        assert_eq!(effort_level(Some("")), None);
+        assert_eq!(effort_level(None), None);
     }
 }

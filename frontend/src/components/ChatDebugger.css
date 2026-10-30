@@ -761,7 +761,7 @@
   border: none;
   border-radius: 9999px;
   background: var(--accent-color, #2f6fed);
-  color: #fff;
+  color: var(--accent-contrast, #fff);
   cursor: pointer;
   transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
   box-shadow: 0 2px 8px -2px rgba(47, 111, 237, 0.5);
@@ -1039,9 +1039,9 @@
 }
 
 /* 响应时长颜色编码：快/中/慢 */
-.chat-debugger-msg-duration[data-speed='fast'] { color: #16a34a; }
-.chat-debugger-msg-duration[data-speed='mid'] { color: #d97706; }
-.chat-debugger-msg-duration[data-speed='slow'] { color: #dc2626; }
+.chat-debugger-msg-duration[data-speed='fast'] { color: var(--success-text, #16a34a); }
+.chat-debugger-msg-duration[data-speed='mid'] { color: var(--warning-text, #d97706); }
+.chat-debugger-msg-duration[data-speed='slow'] { color: var(--danger-text, #dc2626); }
 
 /* ── B8: 源码视图 ── */
 .chat-debugger-msg-source {

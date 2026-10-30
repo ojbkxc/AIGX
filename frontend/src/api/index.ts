@@ -4,6 +4,9 @@
  */
 
 import type {
+  AccountProviderItem,
+  AccountSessionItem,
+  AccountSessionStatsItem,
   ApiResponse,
   User,
   ApiList,
@@ -50,6 +53,8 @@ import type {
   PromptTranslateResult,
   PromptSource,
   PromptSourceItem,
+  UpdateStatusItem,
+  UpdateSettingsItem,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -299,6 +304,22 @@ export const api = {
   updateLimits: (data: Record<string, unknown>): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('PUT', `${API_BASE}/limits`, data),
 
+  // 服务器自动更新（检查 / 应用 / 重启 / 回滚 / 设置）
+  getUpdateStatus: (): Promise<ApiResponse<UpdateStatusItem>> =>
+    request<ApiResponse<UpdateStatusItem>>('GET', `${API_BASE}/update/status`),
+  checkUpdate: (): Promise<ApiResponse<UpdateStatusItem>> =>
+    request<ApiResponse<UpdateStatusItem>>('POST', `${API_BASE}/update/check`),
+  applyUpdate: (): Promise<ApiResponse<UpdateStatusItem>> =>
+    request<ApiResponse<UpdateStatusItem>>('POST', `${API_BASE}/update/apply`),
+  restartService: (): Promise<ApiResponse<{ restarting: boolean; delaySecs: number }>> =>
+    request<ApiResponse<{ restarting: boolean; delaySecs: number }>>('POST', `${API_BASE}/update/restart`),
+  rollbackUpdate: (): Promise<ApiResponse<{ restored: boolean; needRestart: boolean }>> =>
+    request<ApiResponse<{ restored: boolean; needRestart: boolean }>>('POST', `${API_BASE}/update/rollback`),
+  getUpdateSettings: (): Promise<ApiResponse<UpdateSettingsItem>> =>
+    request<ApiResponse<UpdateSettingsItem>>('GET', `${API_BASE}/update/settings`),
+  saveUpdateSettings: (data: Record<string, unknown>): Promise<ApiResponse<UpdateSettingsItem>> =>
+    request<ApiResponse<UpdateSettingsItem>>('PUT', `${API_BASE}/update/settings`, data),
+
   // Users
   listUsers: (params: Record<string, string | number> = {}): Promise<ApiList<User>> =>
     request<ApiList<User>>('GET', `${API_BASE}/users?${buildQuery(params)}`),
@@ -390,6 +411,28 @@ export const api = {
     request<ApiResponse<{ models?: string[] }>>('POST', `${API_BASE}/channels/fetch_models`, data),
   getChannelBalance: (id: string | number): Promise<ApiResponse<{ balance?: number; credit?: number }>> =>
     request<ApiResponse<{ balance?: number; credit?: number }>>('GET', `${API_BASE}/channels/${id}/balance`),
+  // 账号型渠道账号池（渠道内账号级调度：优先级/冷却/并发/粘性）
+  listAccountSessions: (params: Record<string, string | number> = {}): Promise<ApiList<AccountSessionItem>> =>
+    request<ApiList<AccountSessionItem>>('GET', `${API_BASE}/account-sessions${Object.keys(params).length ? `?${buildQuery(params)}` : ''}`),
+  createAccountSession: (data: Record<string, unknown>): Promise<ApiResponse<AccountSessionItem>> =>
+    request<ApiResponse<AccountSessionItem>>('POST', `${API_BASE}/account-sessions`, data),
+  updateAccountSession: (id: string, data: Record<string, unknown>): Promise<ApiResponse<AccountSessionItem>> =>
+    request<ApiResponse<AccountSessionItem>>('PUT', `${API_BASE}/account-sessions/${encodeURIComponent(id)}`, data),
+  // 部分更新（状态/优先级/权重/并发/名称），不会清空地址/模型/代理/凭证
+  patchAccountSession: (id: string, data: Record<string, unknown>): Promise<ApiResponse<AccountSessionItem>> =>
+    request<ApiResponse<AccountSessionItem>>('PATCH', `${API_BASE}/account-sessions/${encodeURIComponent(id)}`, data),
+  deleteAccountSession: (id: string): Promise<ApiResponse<MessageResult>> =>
+    request<ApiResponse<MessageResult>>('DELETE', `${API_BASE}/account-sessions/${encodeURIComponent(id)}`),
+  bulkImportAccountSessions: (data: Record<string, unknown>): Promise<ApiResponse<{ created?: number; skipped?: number }>> =>
+    request<ApiResponse<{ created?: number; skipped?: number }>>('POST', `${API_BASE}/account-sessions/bulk`, data),
+  testAccountSession: (id: string): Promise<ApiResponse<{ success?: boolean; latency_ms?: number; model?: string; message?: string }>> =>
+    request<ApiResponse<{ success?: boolean; latency_ms?: number; model?: string; message?: string }>>('POST', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/test`),
+  resetAccountSessionCooldowns: (id: string): Promise<ApiResponse<null>> =>
+    request<ApiResponse<null>>('POST', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/reset-cooldown`),
+  accountProviders: (): Promise<ApiList<AccountProviderItem>> =>
+    request<ApiList<AccountProviderItem>>('GET', `${API_BASE}/account-sessions/providers`),
+  accountSessionStats: (): Promise<ApiResponse<{ channels?: AccountSessionStatsItem[]; total?: number }>> =>
+    request<ApiResponse<{ channels?: AccountSessionStatsItem[]; total?: number }>>('GET', `${API_BASE}/account-sessions/stats`),
   // 渠道对话调试：流式（text/event-stream）返回 { stream: [{ content }] }，
   // 非流式返回后端 JSON。与 Playground 页共用 SSE 解析模式。
   testChannelChat: async (data: PlaygroundChatRequest): Promise<PlaygroundChatResult> => {
@@ -697,11 +740,17 @@ export const api = {
     onEvent: (ev: { type: string; content?: string; name?: string; ok?: boolean; message?: string }) => void,
     signal?: AbortSignal,
     model?: string,
+    reasoningEffort?: string,
+    role?: 'observer' | 'operator',
   ): Promise<void> => {
+    const body: { message: string; model?: string; reasoning_effort?: string; role?: string } = { message };
+    if (model) body.model = model;
+    if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+    if (role) body.role = role;
     const res = await fetch(`${API_BASE}/agent/sessions/${encodeURIComponent(id)}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(model ? { message, model } : { message }),
+      body: JSON.stringify(body),
       signal,
     });
     if (!res.ok || !res.body) {

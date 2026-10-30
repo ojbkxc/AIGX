@@ -50,8 +50,8 @@ pub fn serve_static_files() -> Router {
     )))
 }
 
-/// 查找静态文件目录
-fn find_static_dir() -> Option<PathBuf> {
+/// 查找静态文件目录（启动时解析一次；自动更新也用它定位要替换的目录）
+pub fn find_static_dir() -> Option<PathBuf> {
     let candidates: Vec<Option<PathBuf>> = vec![
         Some(PathBuf::from(".").join("static")),
         Some(PathBuf::from(".").join("frontend").join("dist")),

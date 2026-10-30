@@ -57,7 +57,9 @@ http = "1"
 http-body-util = "0.1"
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "fs", "compression-gzip"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls"] }
+# socks：账号型渠道的出口代理需要 socks5://（reqwest 0.12 的 socks feature 为空特性，
+# 代理实现已由 hyper-util 的 client-proxy 承担，不新增依赖、不改 Cargo.lock）
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls", "socks"] }
 # SMTP STARTTLS（批次7c）：tokio-rustls 包装 TcpStream 升级 TLS。
 # 版本与 reqwest rustls 栈对齐（reqwest 0.12 用 rustls 0.23 / tokio-rustls 0.26）。
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }

@@ -365,6 +365,66 @@ jobs:
           # 同时保留裸二进制（直接 wget 即用）
           ls -la
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Package server update bundles
+        run: |
+          python3 - <<'PY'
+          import os
+          import struct
+
+          ver = os.environ["AIGX_VERSION"]
+
+          def static_entries():
+              entries = []
+              for dirpath, _dirnames, filenames in os.walk("static"):
+                  for name in sorted(filenames):
+                      full = os.path.join(dirpath, name)
+                      entries.append(os.path.relpath(full, ".").replace(os.sep, "/"))
+              return entries
+
+          def pack(binary, out_path):
+              with open(out_path, "wb") as out:
+                  out.write(b"AIGXUP1")
+                  for rel in ["aigx"] + static_entries():
+                      source = binary if rel == "aigx" else rel
+                      with open(source, "rb") as handle:
+                          data = handle.read()
+                      path_bytes = rel.encode("utf-8")
+                      out.write(struct.pack("<I", len(path_bytes)))
+                      out.write(path_bytes)
+                      out.write(struct.pack("<Q", len(data)))
+                      out.write(data)
+                  print(f"packed {out_path}: {os.path.getsize(out_path)} bytes")
+
+          for arch in ["amd64", "arm64"]:
+              binary = f"artifacts/aigx-linux-{arch}/aigx"
+              if not os.path.exists(binary):
+                  print(f"skip {arch}: {binary} missing")
+                  continue
+              pack(binary, f"release-package/AIGX-{ver}-server-linux-{arch}.upd")
+          PY
+
+      - name: Generate server bundle checksums
+        run: |
+          cd release-package
+          for f in AIGX-*-server-linux-*.upd; do
+            [ -f "$f" ] || continue
+            sha256sum "$f" > "$f.sha256"
+          done
+          ls -la
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:

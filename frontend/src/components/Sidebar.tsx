@@ -9,7 +9,7 @@ import {
   Users, Wallet, Ticket, ScrollText, Package,
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
-  Languages, LogOut, Coins, Bot, Headphones,
+  Languages, LogOut, Coins, Bot, Headphones, Layers,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -48,6 +48,8 @@ const navItems: NavItem[] = [
   { path: '/wallet', labelKey: '钱包', icon: Wallet },
   { path: '/tickets', labelKey: '工单', icon: Headphones },
   { path: '/profile', labelKey: '个人中心', icon: UserRound },
+  // 账号型渠道的账号池（渠道内账号级调度：优先级/冷却/并发）
+  { path: '/account-sessions', labelKey: '账号池', icon: Layers, adminOnly: true },
 ];
 
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
@@ -76,6 +78,7 @@ const navGroups: NavGroup[] = [
     adminOnly: true,
     items: [
       navItems[6],  // 渠道管理
+      navItems[16], // 账号池
       navItems[7],  // 定价倍率
       navItems[8],  // 用户管理
       navItems[9],  // 兑换码

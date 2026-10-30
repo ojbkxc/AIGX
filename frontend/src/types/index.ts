@@ -860,3 +860,115 @@ export interface ChartOptions {
   responsive: boolean;
   padding?: number;
 }
+
+// ============================================================================
+// 账号型渠道账号池（/api/account-sessions）
+// ============================================================================
+
+/** 渠道下的单个上游账号（凭证已脱敏） */
+export interface AccountSessionItem {
+  id: string;
+  channel_id: string;
+  channel_name?: string;
+  name: string;
+  provider: string;
+  base_url?: string;
+  /** 脱敏后的凭证 */
+  api_key?: string;
+  /** 账号级出口代理（http/https/socks5），null = 直连 */
+  proxy?: string | null;
+  /** 运行态：enabled / disabled / expired */
+  status?: string;
+  configured_status?: string;
+  priority?: number;
+  weight?: number;
+  max_concurrency?: number;
+  models?: string[];
+  in_flight?: number;
+  success_count?: number;
+  error_count?: number;
+  /** 连续失败次数（成功清零，用于指数退避） */
+  consecutive_errors?: number;
+  avg_latency_ms?: number;
+  /** 上游真名 → 剩余冷却秒数 */
+  cooldowns?: Record<string, number>;
+  last_error?: string | null;
+  last_used_at?: number | null;
+  expires_at?: number | null;
+  created_at?: number;
+  updated_at?: number;
+}
+
+/** provider 目录项（粘贴凭证型上游） */
+export interface AccountProviderItem {
+  kind: string;
+  label: string;
+  protocol: string;
+  default_base_url: string;
+}
+
+/** 账号池按渠道聚合统计 */
+export interface AccountSessionStatsItem {
+  channel_id: string;
+  channel_name?: string;
+  total: number;
+  enabled: number;
+  cooling: number;
+  in_flight: number;
+  success: number;
+  error: number;
+}
+
+/** 服务器自动更新状态（GET /api/update/status） */
+export interface UpdateStatusItem {
+  currentVersion: string;
+  latestVersion: string | null;
+  hasUpdate: boolean | null;
+  comparison: 'newer' | 'older' | 'same' | null;
+  releaseName?: string | null;
+  notes?: string | null;
+  publishedAt?: string | null;
+  pageUrl?: string | null;
+  prerelease?: boolean;
+  bundle?: { name: string; size: number; url: string } | null;
+  checksumAvailable?: boolean;
+  checkedAt: number;
+  lastError?: string | null;
+  retryAt: number;
+  checking: boolean;
+  applying: boolean;
+  pendingRestart: boolean;
+  download?: {
+    active: boolean;
+    done: boolean;
+    received: number;
+    total: number;
+    percent: number;
+    error?: string;
+  } | null;
+  supported: boolean;
+  writable: boolean;
+  backupAvailable: boolean;
+  downloadDir: string;
+  repository: string;
+  apiBase: string;
+  appliedVersion?: string | null;
+  appliedAt?: number;
+}
+
+/** 自动更新配置（GET/PUT /api/update/settings，token 为脱敏值） */
+export interface UpdateSettingsItem {
+  enabled: boolean;
+  auto_check: boolean;
+  auto_apply: boolean;
+  interval_hours: number;
+  repo: string;
+  api_base: string;
+  include_prerelease: boolean;
+  proxy: string;
+  token: string;
+  tokenConfigured: boolean;
+  restart_after_apply: boolean;
+  supported: boolean;
+  currentVersion: string;
+}
