@@ -917,6 +917,8 @@ export interface AccountProviderItem {
   chat_path?: string | null;
   /** 是否为 OpenAI 兼容形态；false = 上游需要私有协议/签名，简单转发会失败 */
   openai_compatible?: boolean | null;
+  /** 上游非 OpenAI 协议但 AIGX 已内置专用适配（可直接转发） */
+  native_supported?: boolean | null;
   /** 无默认地址 = 必须由账号自己填写上游地址 */
   requires_base_url?: boolean;
 }

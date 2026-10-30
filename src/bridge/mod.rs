@@ -23,6 +23,8 @@ pub mod cf;
 /// Google Gemini 原生 bridge（`/v1beta/models/{model}:generateContent`）
 pub mod gemini;
 pub mod openai;
+/// 登录态供应商的私有协议 Bridge（Qoder / Trae / CodeArts 等）
+pub mod session;
 /// 工具调用健壮解析（借鉴 ds-free-api tool_parser 的归一化/修复思路，独立实现）
 pub mod tool_repair;
 /// 智谱 AI（Z.AI）bridge — Anthropic 兼容协议 + Bearer 鉴权

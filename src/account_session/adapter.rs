@@ -84,6 +84,17 @@ pub fn build_bridge(
         Protocol::Openai => {
             // 登录态型供应商：Cookie / JWT + 专用请求头（不走 Bearer API Key）
             if let Some(meta) = registry::session_meta(spec.kind) {
+                // 私有协议供应商（请求体/响应帧非 OpenAI 方言）走专用 Bridge
+                if !meta.openai_compatible {
+                    if let Some(bridge) = crate::bridge::session::build(
+                        spec.kind,
+                        &base,
+                        &secret,
+                        client.as_ref().clone(),
+                    ) {
+                        return Ok(bridge);
+                    }
+                }
                 let auth_mode = match meta.auth {
                     registry::SessionAuth::Bearer => crate::bridge::openai::AuthMode::Bearer,
                     registry::SessionAuth::Cookie => crate::bridge::openai::AuthMode::Cookie,

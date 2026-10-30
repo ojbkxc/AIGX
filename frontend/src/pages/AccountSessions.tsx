@@ -987,7 +987,9 @@ export default function AccountSessions(): JSX.Element {
                               {p.auth ? (
                                 <span className="provider-card-badge">{t('登录态')}</span>
                               ) : null}
-                              {p.openai_compatible === false ? (
+                              {p.native_supported ? (
+                                <span className="provider-card-badge">{t('专用适配')}</span>
+                              ) : p.openai_compatible === false ? (
                                 <span className="provider-card-badge provider-card-badge-warn">
                                   {t('需私有协议')}
                                 </span>
@@ -1069,7 +1071,8 @@ export default function AccountSessions(): JSX.Element {
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
               />
-              {selectedProvider?.openai_compatible === false ? (
+              {selectedProvider?.openai_compatible === false &&
+              !selectedProvider?.native_supported ? (
                 <div className="form-hint form-hint-warn">
                   {t('该供应商上游需要私有协议/签名（请求体与响应都要转换），标准 OpenAI 转发会失败；请填写自建转换网关地址，或等待专用适配。')}
                 </div>

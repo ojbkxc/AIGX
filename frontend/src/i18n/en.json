@@ -1679,5 +1679,6 @@
   "对话路径（可选，默认 /chat/completions）": "Chat path (optional, default /chat/completions)",
   "登录态型供应商的私有接口路径；留空按 provider 默认或标准 OpenAI 路径拼接。": "Private endpoint path for session providers; empty = standard OpenAI path.",
   "需私有协议": "Needs private protocol",
-  "该供应商上游需要私有协议/签名（请求体与响应都要转换），标准 OpenAI 转发会失败；请填写自建转换网关地址，或等待专用适配。": "This provider requires a private protocol/signature (request and response must be transformed); plain OpenAI forwarding will fail. Enter your own conversion gateway address or wait for the dedicated adapter."
+  "该供应商上游需要私有协议/签名（请求体与响应都要转换），标准 OpenAI 转发会失败；请填写自建转换网关地址，或等待专用适配。": "This provider requires a private protocol/signature (request and response must be transformed); plain OpenAI forwarding will fail. Enter your own conversion gateway address or wait for the dedicated adapter.",
+  "专用适配": "Native adapter"
 }

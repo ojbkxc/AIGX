@@ -858,6 +858,9 @@ pub async fn handle_list_account_providers(
             // 登录态型供应商的默认对话路径与私有协议标记
             "chat_path": session.map(|m| m.chat_path).filter(|p| !p.is_empty()),
             "openai_compatible": session.map(|m| m.openai_compatible),
+            // 上游非 OpenAI 协议、但 AIGX 已内置专用适配（可直接转发）
+            "native_supported": session
+                .map(|m| !m.openai_compatible && crate::bridge::session::supports(spec.kind)),
             // 无默认地址 = 必须由账号自己填写上游地址
             "requires_base_url": spec.default_base_url.is_empty(),
         }));
