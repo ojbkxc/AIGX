@@ -79,7 +79,7 @@ jobs:
         with:
           key: ${{ matrix.name }}
       - name: ${{ matrix.name }}
-        run: cargo check --locked ${{ matrix.args }}
+        run: cargo check ${{ matrix.args }}
 
   test:
     name: cargo test
@@ -90,6 +90,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test
       - name: Verify release build
-        run: cargo build --release --locked
+        run: cargo build --release

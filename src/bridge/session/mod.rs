@@ -17,6 +17,7 @@ pub mod catpaw;
 pub mod codearts;
 pub mod commandcode;
 pub mod kuku;
+pub mod monkeycode;
 pub mod orcaterm;
 pub mod qoder;
 pub mod qoder_cosy;
@@ -52,6 +53,9 @@ pub fn build(
         "catpaw" => Some(Arc::new(catpaw::CatPawBridge::new(
             base, credential, client,
         ))),
+        "monkeycode" => Some(Arc::new(monkeycode::MonkeyCodeBridge::new(
+            base, credential, client,
+        ))),
         "trae" => Some(Arc::new(trae::TraeBridge::new(
             base, credential, headers, client,
         ))),
@@ -72,5 +76,6 @@ pub fn supports(kind: &str) -> bool {
             | "qoder"
             | "codearts"
             | "catpaw"
+            | "monkeycode"
     )
 }
