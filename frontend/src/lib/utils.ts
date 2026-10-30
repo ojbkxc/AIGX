@@ -15,8 +15,17 @@ export function cn(...inputs: (string | boolean | undefined | null)[]): string {
   return twMerge(clsx(inputs));
 }
 
+/** 除以单位后保留有效位数并去掉小数末尾多余的 0（1.50 → 1.5，120 → 120）。 */
+function scaled(n: number, unit: number): string {
+  const value = n / unit;
+  const digits = Math.abs(value) >= 100 ? 0 : 2;
+  const fixed = value.toFixed(digits);
+  if (!fixed.includes('.')) return fixed;
+  return fixed.replace(/0+$/, '').replace(/\.$/, '');
+}
+
 /**
- * 格式化大数字（K/M/B），供统计卡片使用
+ * 格式化大数字，使用中文单位（亿 / 万），供统计卡片与额度展示使用
  * @param {number|null} val - 数值
  * @returns {string} 格式化结果，null 显示 —
  */
@@ -24,10 +33,18 @@ export function fmtCompact(val: number | null | undefined): string {
   if (val == null) return '—';
   const n = Number(val);
   if (!Number.isFinite(n)) return '—';
-  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  const abs = Math.abs(n);
+  if (abs >= 1e8) return scaled(n, 1e8) + '亿';
+  if (abs >= 1e4) return scaled(n, 1e4) + '万';
   return n.toLocaleString('zh-CN');
+}
+
+/**
+ * 额度展示（缺省按 0）：与 fmtCompact 同一套中文单位，undefined/null 显示 0 而不是 —
+ */
+export function fmtQuota(val: number | null | undefined): string {
+  const n = Number(val ?? 0);
+  return Number.isFinite(n) ? fmtCompact(n) : '0';
 }
 
 /**

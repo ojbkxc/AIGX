@@ -4,6 +4,7 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, EmptyState, SkeletonTable, Pagination } from '../components/ui';
+import { fmtQuota } from '../lib/utils';
 
 interface GenForm {
   count: number;
@@ -113,13 +114,6 @@ export default function Redemptions(): JSX.Element {
   const fmtTime = (ts: number | undefined): string => {
     if (!ts || ts === 0) return t('永不过期');
     return new Date(ts * 1000).toLocaleString();
-  };
-
-  const fmtQuota = (q: number | undefined): string => {
-    const n = Number(q || 0);
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
-    if (n >= 1_000) return (n / 1_000).toFixed(2) + 'K';
-    return String(n);
   };
 
   const copyToClipboard = (text: string) => {

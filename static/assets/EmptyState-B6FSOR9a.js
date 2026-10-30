@@ -1,1 +1,0 @@
-import{j as s,n as i}from"./index-DBI_z0bt.js";function c({message:t,icon:e="📭",action:a,className:n}){return s.jsxs("div",{className:i("empty-state",n),children:[s.jsx("div",{className:"empty-state-icon",children:e}),s.jsx("p",{children:t}),a]})}export{c as E};

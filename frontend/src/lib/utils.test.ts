@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { cn, fmtCompact, isAdmin } from './utils';
+import { cn, fmtCompact, fmtQuota, isAdmin } from './utils';
 
 describe('cn', () => {
   it('合并普通类名', () => {
@@ -29,14 +29,27 @@ describe('fmtCompact', () => {
     expect(fmtCompact(NaN)).toBe('—');
   });
 
-  it('千/百万/十亿缩写', () => {
-    expect(fmtCompact(1500)).toBe('1.5K');
-    expect(fmtCompact(2_500_000)).toBe('2.5M');
-    expect(fmtCompact(3_000_000_000)).toBe('3.0B');
+  it('万/亿中文单位', () => {
+    expect(fmtCompact(15_000)).toBe('1.5万');
+    expect(fmtCompact(20_000)).toBe('2万');
+    expect(fmtCompact(2_500_000)).toBe('250万');
+    expect(fmtCompact(300_000_000)).toBe('3亿');
   });
 
-  it('小于千位使用本地化数字', () => {
+  it('小于万位使用本地化数字', () => {
+    expect(fmtCompact(9999)).toBe('9,999');
     expect(fmtCompact(999)).toBe('999');
+  });
+});
+
+describe('fmtQuota', () => {
+  it('空值按 0 展示', () => {
+    expect(fmtQuota(null)).toBe('0');
+    expect(fmtQuota(undefined)).toBe('0');
+  });
+
+  it('沿用中文单位', () => {
+    expect(fmtQuota(1_200_000)).toBe('120万');
   });
 });
 

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
-import { isAdmin } from '../lib/utils';
+import { fmtCompact, isAdmin } from '../lib/utils';
 import { SkeletonCards } from '../components/ui';
 import './Dashboard.css';
 
@@ -96,20 +96,11 @@ interface PieChartProps {
 // ── 工具函数 ──────────────────────────────────────────────
 
 function fmtLimit(val: number | null | undefined): string {
-  if (val == null) return '—';
-  const n = Number(val);
-  if (n >= 100000) return (n / 10000).toFixed(1) + 'w';
-  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-  return n.toLocaleString();
+  return fmtCompact(val);
 }
 
 function fmtTok(val: number | null | undefined): string {
-  if (val == null) return '—';
-  const n = Number(val);
-  if (n >= 1000000000) return (n / 1000000000).toFixed(1) + 'B';
-  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-  return n.toLocaleString();
+  return fmtCompact(val);
 }
 
 function fmtMoney(val: number | null | undefined): string {

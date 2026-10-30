@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Trash2, Eraser, EyeOff, Eye } from 'lucide-react';
 import { api } from '../api';
-import { isAdmin } from '../lib/utils';
+import { isAdmin, fmtCompact } from '../lib/utils';
 import { useListKeyboard } from '../hooks/useListKeyboard';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
@@ -602,9 +602,9 @@ export default function Logs(): JSX.Element {
                         </td>
                       )}
                       <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
-                        <span>{l.input_tokens ?? 0}</span>
+                        <span>{fmtCompact(l.input_tokens ?? 0)}</span>
                         <span style={{ color: 'var(--text-muted)' }}> / </span>
-                        <span>{l.output_tokens ?? 0}</span>
+                        <span>{fmtCompact(l.output_tokens ?? 0)}</span>
                       </td>
                       <td style={{ whiteSpace: 'nowrap' }}>¥{l.cost}</td>
                       <td style={{ whiteSpace: 'nowrap' }}>{l.latency_ms}ms</td>

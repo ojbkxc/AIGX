@@ -5,6 +5,7 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
+import { fmtQuota } from '../lib/utils';
 import './Plans.css';
 
 interface PlanItem {
@@ -313,13 +314,6 @@ export default function Plans(): JSX.Element {
     } else {
       addToast(t('复制失败，请手动选择复制'), 'error');
     }
-  };
-
-  const fmtQuota = (n: number | undefined): string => {
-    const v = Number(n || 0);
-    if (v >= 1_000_000) return (v / 1_000_000).toFixed(2) + 'M';
-    if (v >= 1_000) return (v / 1_000).toFixed(2) + 'K';
-    return String(v);
   };
 
   const fmtDuration = (d: number | undefined): string => {

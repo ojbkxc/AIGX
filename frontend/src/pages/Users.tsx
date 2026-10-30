@@ -5,6 +5,7 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
+import { fmtQuota } from '../lib/utils';
 import './Users.css';
 
 interface UserItem {
@@ -297,13 +298,6 @@ export default function Users(): JSX.Element {
         }
       },
     });
-  };
-
-  const fmtQuota = (q: number | undefined): string => {
-    const n = Number(q || 0);
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
-    if (n >= 1_000) return (n / 1_000).toFixed(2) + 'K';
-    return String(n);
   };
 
   if (loading) return <SkeletonTable columns={6} rows={7} />;

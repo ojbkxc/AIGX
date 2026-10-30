@@ -4,6 +4,7 @@ import { Copy } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Card, Input } from '../components/ui';
+import { fmtQuota } from '../lib/utils';
 import QRCode from 'react-qr-code';
 
 interface Me {
@@ -106,14 +107,6 @@ export default function Profile(): JSX.Element {
     } finally {
       setPwSaving(false);
     }
-  };
-
-  const fmtQuota = (q: number | undefined | null): string => {
-    // isFinite 兜底：后端返回异常值（字符串/null）时按 0 展示
-    const n = Number.isFinite(Number(q)) ? Number(q) : 0;
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
-    if (n >= 1_000) return (n / 1_000).toFixed(2) + 'K';
-    return String(n);
   };
 
   // ── 2FA/TOTP ──────────────────────────────────────────────

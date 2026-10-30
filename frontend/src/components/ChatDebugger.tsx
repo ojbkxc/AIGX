@@ -6,6 +6,7 @@ import {
   BarChart3, Code2, GraduationCap, ClipboardList,
 } from 'lucide-react';
 import { api, testChannelChatStream, directChannelChatStream } from '../api';
+import { fmtCompact } from '../lib/utils';
 import type { DebugMessage } from './chat/types';
 import ModelPicker from './ModelPicker';
 import './ChatDebugger.css';
@@ -1303,7 +1304,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
                 </div>
               ) : (
                 <div className="chat-debugger-context" title={t('上下文 ≈')}>
-                  {t('上下文 ≈')} {contextEstimate.toLocaleString()} tokens
+                  {t('上下文 ≈')} {fmtCompact(contextEstimate)} tokens
                 </div>
               )}
             </div>

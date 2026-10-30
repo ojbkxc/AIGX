@@ -4,6 +4,7 @@ import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, EmptyState, SkeletonCards, SkeletonTable } from '../components/ui';
+import { fmtQuota } from '../lib/utils';
 
 interface WalletUser {
   email?: string;
@@ -144,13 +145,6 @@ export default function Wallet(): JSX.Element {
     } finally {
       setLoading(false);
     }
-  };
-
-  const fmtQuota = (q: number | undefined): string => {
-    const n = Number(q || 0);
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
-    if (n >= 1_000) return (n / 1_000).toFixed(2) + 'K';
-    return String(n);
   };
 
   // 与后端 pay_money/topup_quota 对齐：档位折扣（金额 → 折扣比例）

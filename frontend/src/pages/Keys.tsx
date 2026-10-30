@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import { isAdmin } from '../lib/utils';
+import { fmtQuota, isAdmin } from '../lib/utils';
 import { useListKeyboard } from '../hooks/useListKeyboard';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
@@ -551,13 +551,6 @@ export default function Keys(): JSX.Element {
       setCopiedKeyId(tk.id);
       window.setTimeout(() => setCopiedKeyId(null), 1500);
     });
-  };
-
-  const fmtQuota = (n: number | undefined): string => {
-    const v = Number(n || 0);
-    if (v >= 1_000_000) return (v / 1_000_000).toFixed(2) + 'M';
-    if (v >= 1_000) return (v / 1_000).toFixed(2) + 'K';
-    return String(v);
   };
 
   const isExpired = (tk: TokenItem): boolean => {

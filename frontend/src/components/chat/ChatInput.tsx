@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import {
   Send, Mic, Square, Plus, Image, Video, AudioLines, Link2,
 } from 'lucide-react';
+import { fmtCompact } from '../../lib/utils';
 
 interface Attachment {
   kind: 'image' | 'video' | 'audio';
@@ -196,7 +197,7 @@ export default function ChatInput({
 
             {/* 上下文估算 */}
             <div className="chat-debugger-context" title={t('上下文 ≈')}>
-              {t('上下文 ≈')} {contextEstimate.toLocaleString()} tokens
+              {t('上下文 ≈')} {fmtCompact(contextEstimate)} tokens
             </div>
           </div>
 

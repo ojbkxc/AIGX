@@ -5,7 +5,7 @@ import { Boxes, Search, Copy, Layers, Plus, Pencil, Trash2 } from 'lucide-react'
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Card, Loading, EmptyState, Badge } from '../components/ui';
-import { isAdmin } from '../lib/utils';
+import { fmtCompact, isAdmin } from '../lib/utils';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import type { ModelInfo, ModelMetaOverride } from '../types';
 import './Models.css';
@@ -23,9 +23,7 @@ const CAPABILITY_LABELS: Array<{ match: string; labelKey: string; tone: 'success
 
 function fmtContextLength(n: number | null | undefined): string {
   if (n == null || n <= 0) return '—';
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-  if (n >= 1_000) return (n / 1_000).toFixed(0) + 'K';
-  return String(n);
+  return fmtCompact(n);
 }
 
 function fmtPrice(p: number | null | undefined): string {
