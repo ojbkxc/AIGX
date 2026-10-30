@@ -131,6 +131,115 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         protocol: Protocol::Gemini,
         default_base_url: "https://generativelanguage.googleapis.com/v1beta",
     },
+    // ── Agent2API 内置供应商补充（同为 API Key 直连，OpenAI 兼容协议）──
+    ProviderSpec {
+        kind: "dashscope",
+        label: "阿里云百炼 DashScope",
+        protocol: Protocol::Openai,
+        default_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    },
+    ProviderSpec {
+        kind: "baichuan",
+        label: "百川智能",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.baichuan-ai.com/v1",
+    },
+    ProviderSpec {
+        kind: "yi",
+        label: "零一万物 Yi",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.lingyiwanwu.com/v1",
+    },
+    ProviderSpec {
+        kind: "stepfun",
+        label: "阶跃星辰 StepFun",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.stepfun.com/v1",
+    },
+    ProviderSpec {
+        kind: "hunyuan",
+        label: "腾讯混元",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.hunyuan.cloud.tencent.com/v1",
+    },
+    ProviderSpec {
+        kind: "groq",
+        label: "Groq",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.groq.com/openai/v1",
+    },
+    ProviderSpec {
+        kind: "mistral",
+        label: "Mistral AI",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.mistral.ai/v1",
+    },
+    ProviderSpec {
+        kind: "together",
+        label: "Together AI",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.together.xyz/v1",
+    },
+    ProviderSpec {
+        kind: "fireworks",
+        label: "Fireworks AI",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.fireworks.ai/inference/v1",
+    },
+    ProviderSpec {
+        kind: "deepinfra",
+        label: "DeepInfra",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.deepinfra.com/v1/openai",
+    },
+    ProviderSpec {
+        kind: "hyperbolic",
+        label: "Hyperbolic",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.hyperbolic.xyz/v1",
+    },
+    ProviderSpec {
+        kind: "nebius",
+        label: "Nebius AI Studio",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.studio.nebius.ai/v1",
+    },
+    ProviderSpec {
+        kind: "cerebras",
+        label: "Cerebras",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.cerebras.ai/v1",
+    },
+    ProviderSpec {
+        kind: "sambanova",
+        label: "SambaNova",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.sambanova.ai/v1",
+    },
+    ProviderSpec {
+        kind: "xai",
+        label: "xAI Grok",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.x.ai/v1",
+    },
+    ProviderSpec {
+        kind: "perplexity",
+        label: "Perplexity",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.perplexity.ai",
+    },
+    ProviderSpec {
+        kind: "cohere",
+        label: "Cohere",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.cohere.com/compatibility/v1",
+    },
+    ProviderSpec {
+        kind: "lmstudio",
+        label: "LM Studio（本地）",
+        protocol: Protocol::Openai,
+        default_base_url: "http://127.0.0.1:1234/v1",
+    },
 ];
 
 /// 全部 provider（管理面下拉用）。
@@ -155,9 +264,21 @@ pub fn find(kind: &str) -> Option<&'static ProviderSpec> {
         "hf" | "hugging_face" => "huggingface",
         "nim" => "nvidia",
         "silicon" => "siliconflow",
-        "volces" | "ark" => "volcengine",
+        "volces" | "ark" | "doubao" | "bytedance" => "volcengine",
         "z.ai" | "zhipu" | "glm" => "zai",
         "kimi" => "moonshot",
+        "qwen" | "aliyun" | "bailian" => "dashscope",
+        "lingyiwanwu" | "01.ai" => "yi",
+        "step" => "stepfun",
+        "tencent" | "hunyuan-turbos" => "hunyuan",
+        "groqcloud" => "groq",
+        "together_ai" => "together",
+        "fireworks_ai" => "fireworks",
+        "deep-infra" => "deepinfra",
+        "nebius_ai" => "nebius",
+        "samba" => "sambanova",
+        "grok" => "xai",
+        "pplx" => "perplexity",
         other => other,
     };
     PROVIDERS.iter().find(|p| p.kind == canonical)
@@ -206,5 +327,22 @@ mod tests {
     fn openai_compatible_needs_explicit_base_url() {
         let spec = find(DEFAULT_PROVIDER_KIND).unwrap();
         assert!(spec.default_base_url.is_empty());
+    }
+
+    #[test]
+    fn provider_kinds_are_unique() {
+        let mut kinds: Vec<&str> = all().iter().map(|p| p.kind).collect();
+        let len = kinds.len();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(kinds.len(), len, "duplicated provider kind in PROVIDERS");
+    }
+
+    #[test]
+    fn new_builtin_aliases_resolve() {
+        assert_eq!(find("qwen").map(|p| p.kind), Some("dashscope"));
+        assert_eq!(find("doubao").map(|p| p.kind), Some("volcengine"));
+        assert_eq!(find("grok").map(|p| p.kind), Some("xai"));
+        assert_eq!(find("pplx").map(|p| p.kind), Some("perplexity"));
     }
 }

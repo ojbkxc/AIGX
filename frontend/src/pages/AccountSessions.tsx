@@ -842,27 +842,6 @@ export default function AccountSessions(): JSX.Element {
               </button>
             </div>
             <div className="modal-body">
-              <Select
-                label={t('渠道')}
-                value={form.channel_id}
-                onChange={(e) => setForm({ ...form, channel_id: e.target.value })}
-                disabled={Boolean(editing)}
-              >
-                {accountChannels.length === 0 && (
-                  <option value="">{t('保存时自动创建（按所选供应商）')}</option>
-                )}
-                {accountChannels.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </Select>
-              <Input
-                label={t('账号名（可选）')}
-                placeholder="account-1"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-              />
               {editing ? (
                 <Select
                   label={t('Provider')}
@@ -972,6 +951,30 @@ export default function AccountSessions(): JSX.Element {
                   </div>
                 </div>
               )}
+              {editing || accountChannels.length > 0 ? (
+                <Select
+                  label={t('渠道')}
+                  value={form.channel_id}
+                  onChange={(e) => setForm({ ...form, channel_id: e.target.value })}
+                  disabled={Boolean(editing)}
+                >
+                  {accountChannels.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </Select>
+              ) : (
+                <div className="form-hint" style={{ marginBottom: 8 }}>
+                  {t('还没有账号型渠道：保存时会按所选供应商自动创建一个')}
+                </div>
+              )}
+              <Input
+                label={t('账号名（可选）')}
+                placeholder="account-1"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+              />
               <Input
                 label={t('上游地址（可选，留空用 provider 默认）')}
                 placeholder="https://api.deepseek.com"
