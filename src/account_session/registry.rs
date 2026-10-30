@@ -530,11 +530,6 @@ pub fn session_meta(kind: &str) -> Option<&'static SessionMeta> {
     SESSION_PROVIDERS.iter().find(|(k, _)| *k == lower).map(|(_, meta)| meta)
 }
 
-/// 是否登录态型供应商。
-pub fn is_session_provider(kind: &str) -> bool {
-    session_meta(kind).is_some()
-}
-
 /// 全部 provider（管理面下拉用）。
 pub fn all() -> &'static [ProviderSpec] {
     PROVIDERS
@@ -605,7 +600,7 @@ mod tests {
     fn builtin_providers_have_default_endpoints() {
         for spec in all() {
             // 自填地址型（OpenAI 兼容 / 登录态型）允许没有默认端点
-            if spec.kind == DEFAULT_PROVIDER_KIND || is_session_provider(spec.kind) {
+            if spec.kind == DEFAULT_PROVIDER_KIND || session_meta(spec.kind).is_some() {
                 continue;
             }
             assert!(
