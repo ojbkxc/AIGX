@@ -44,7 +44,11 @@ impl EgressCache {
     }
 
     /// 三段超时（总超时 / 建连 / 流空闲）——由配置页的「请求超时」驱动。
-    pub fn with_timeouts(timeout: Duration, connect_timeout: Duration, read_idle: Duration) -> Self {
+    pub fn with_timeouts(
+        timeout: Duration,
+        connect_timeout: Duration,
+        read_idle: Duration,
+    ) -> Self {
         Self {
             clients: DashMap::new(),
             timeout,

@@ -592,8 +592,7 @@ fn truncate_lossy(s: &str, max: usize) -> String {
 /// （可重试错误），调度循环可照常熔断记账并切换下一渠道。仅约束首事件；
 /// 后续事件的间隔由请求级总超时兜底。（参照 rust-tunnel 的
 /// FIRST_EVENT_DEADLINE 设计，默认 30s。）
-static SSE_FIRST_EVENT_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(30_000);
+static SSE_FIRST_EVENT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(30_000);
 
 /// 当前首事件等待上限。
 pub fn sse_first_event_deadline() -> Duration {
