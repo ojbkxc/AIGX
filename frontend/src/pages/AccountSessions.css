@@ -81,6 +81,14 @@
   flex-wrap: wrap;
 }
 
+.provider-card-logo {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
 .provider-card-badge {
   font-size: 10px;
   font-weight: 500;

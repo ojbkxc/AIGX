@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FlaskConical, Pencil, Plus, Power, RotateCcw, SlidersHorizontal, Trash2, Upload } from 'lucide-react';
 import { api } from '../api';
+import { presetIcon, providerIcon } from '../lib/providerIcons';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, EmptyState, Input, Select, SkeletonTable, Tabs, Textarea } from '../components/ui';
@@ -942,6 +943,13 @@ export default function AccountSessions(): JSX.Element {
                   <div className="provider-picker-head">
                     <span className="provider-picker-label">{t('选择供应商')}</span>
                     <span className="provider-picker-selected" title={effectiveEndpoint}>
+                      {selectedProvider && providerIcon(selectedProvider.kind) ? (
+                        <img
+                          className="provider-card-logo"
+                          src={providerIcon(selectedProvider.kind) as string}
+                          alt=""
+                        />
+                      ) : null}
                       {t('已选')}：{selectedProviderLabel}
                       {effectiveEndpoint ? ` · ${effectiveEndpoint}` : ''}
                     </span>
@@ -983,6 +991,14 @@ export default function AccountSessions(): JSX.Element {
                             onClick={() => pickProvider(p.kind, '')}
                           >
                             <span className="provider-card-title">
+                              {providerIcon(p.kind) ? (
+                                <img
+                                  className="provider-card-logo"
+                                  src={providerIcon(p.kind) as string}
+                                  alt=""
+                                  loading="lazy"
+                                />
+                              ) : null}
                               {p.label}
                               {p.auth ? (
                                 <span className="provider-card-badge">{t('登录态')}</span>
@@ -1017,7 +1033,17 @@ export default function AccountSessions(): JSX.Element {
                             className={`provider-card${active ? ' active' : ''}`}
                             onClick={() => pickProvider(kind, p.base_url)}
                           >
-                            <span className="provider-card-title">{p.name}</span>
+                            <span className="provider-card-title">
+                              {presetIcon(p.key) ? (
+                                <img
+                                  className="provider-card-logo"
+                                  src={presetIcon(p.key) as string}
+                                  alt=""
+                                  loading="lazy"
+                                />
+                              ) : null}
+                              {p.name}
+                            </span>
                             <span className="provider-card-meta">{p.base_url}</span>
                           </button>
                         );

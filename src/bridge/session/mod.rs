@@ -16,6 +16,8 @@ pub mod antigravity;
 pub mod commandcode;
 pub mod kuku;
 pub mod orcaterm;
+pub mod qoder;
+pub mod qoder_cosy;
 pub mod trae;
 
 /// 按 provider kind 构造私有协议 Bridge；不支持的 kind 返回 None。
@@ -41,6 +43,7 @@ pub fn build(
             base, credential, client,
         ))),
         "kuku" => Some(Arc::new(kuku::KukuBridge::new(base, credential, client))),
+        "qoder" => Some(Arc::new(qoder::QoderBridge::new(base, credential, client))),
         "trae" => Some(Arc::new(trae::TraeBridge::new(
             base, credential, headers, client,
         ))),
