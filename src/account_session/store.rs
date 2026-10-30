@@ -73,6 +73,8 @@ struct Inner {
     policy: RwLock<RotationPolicy>,
     /// 换号重试间隔（毫秒，0 = 立即换号）；由「请求重试」设置实时驱动。
     retry_interval_ms: AtomicU64,
+    /// 命中即直接换号（不给指数退避）的上游状态码；由「请求重试」设置实时驱动。
+    retry_on_status: RwLock<Vec<u16>>,
     /// 落盘节流：account id → 上次持久化 unix 秒。
     persisted_at: DashMap<String, i64>,
 }
@@ -98,6 +100,7 @@ impl AccountSessionStore {
                 egress,
                 policy: RwLock::new(RotationPolicy::default()),
                 retry_interval_ms: AtomicU64::new(0),
+                retry_on_status: RwLock::new(vec![402]),
                 persisted_at: DashMap::new(),
             }),
         };
@@ -302,6 +305,25 @@ impl AccountSessionStore {
             .store(ms.min(10_000), Ordering::Relaxed);
     }
 
+    /// 直接换号状态码名单（命中时不给指数退避冷却）。
+    pub fn retry_on_status(&self) -> Vec<u16> {
+        self.inner.retry_on_status.read().clone()
+    }
+
+    /// 更新直接换号状态码名单（去重、只保留 100–599，最多 50 个）。
+    pub fn set_retry_on_status(&self, codes: Vec<u16>) {
+        let mut cleaned: Vec<u16> = Vec::new();
+        for code in codes {
+            if (100..=599).contains(&code) && !cleaned.contains(&code) {
+                cleaned.push(code);
+            }
+            if cleaned.len() >= 50 {
+                break;
+            }
+        }
+        *self.inner.retry_on_status.write() = cleaned;
+    }
+
     /// 出口 Client 池。
     pub fn egress(&self) -> &Arc<EgressCache> {
         &self.inner.egress
@@ -401,6 +423,7 @@ impl AccountSessionStore {
         model: &str,
         failure: &FailureType,
         message: &str,
+        status: Option<u16>,
     ) -> u64 {
         let now = chrono::Utc::now().timestamp();
         let retry_after = match failure {
@@ -408,6 +431,8 @@ impl AccountSessionStore {
             _ => None,
         };
         let policy = self.policy();
+        let direct_switch = status
+            .is_some_and(|code| self.inner.retry_on_status.read().contains(&code));
         let (snapshot, secs) = {
             let mut sessions = self.inner.sessions.write();
             let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
@@ -415,8 +440,12 @@ impl AccountSessionStore {
             };
             session.error_count = session.error_count.saturating_add(1);
             session.consecutive_errors = session.consecutive_errors.saturating_add(1);
-            let secs =
-                rotate::cooldown_secs(&policy, failure, session.consecutive_errors, retry_after);
+            let secs = if direct_switch {
+                // 命中「直接换号」名单：只给基础冷却，不走指数退避
+                policy.base_cooldown_secs.max(1)
+            } else {
+                rotate::cooldown_secs(&policy, failure, session.consecutive_errors, retry_after)
+            };
             if secs > 0 {
                 session
                     .cooldowns
@@ -618,12 +647,32 @@ mod tests {
         let pool = pool();
         let account = pool.upsert(session("ch", "acct", 0)).unwrap();
         let failure = FailureType::ServerError;
-        let secs = pool.record_failure(&account.id, "upstream-x", &failure, "boom");
+        let secs = pool.record_failure(&account.id, "upstream-x", &failure, "boom", None);
         assert!(secs >= 60);
         assert!(pool.acquire("ch", "upstream-x", None).is_none());
         assert!(pool.acquire("ch", "other-model", None).is_some());
         assert!(pool.reset_cooldowns(&account.id));
         assert!(pool.acquire("ch", "upstream-x", None).is_some());
+    }
+
+    #[test]
+    fn retry_on_status_uses_base_cooldown_only() {
+        let pool = pool();
+        let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+        // 把基础冷却调小，便于断言「命中名单后不再指数退避」
+        let mut policy = pool.policy();
+        policy.base_cooldown_secs = 30;
+        policy.max_cooldown_secs = 1_800;
+        pool.set_policy(policy).unwrap();
+
+        let failure = FailureType::PaymentRequired;
+        // 未命中名单：PaymentRequired 走上限冷却
+        let uncapped = pool.record_failure(&account.id, "m1", &failure, "x", None);
+        assert_eq!(uncapped, 1_800);
+        // 命中名单（默认 402）：只给基础冷却
+        pool.set_retry_on_status(vec![402]);
+        let capped = pool.record_failure(&account.id, "m2", &failure, "x", Some(402));
+        assert_eq!(capped, 30);
     }
 
     #[test]

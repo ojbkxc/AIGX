@@ -28,6 +28,7 @@ interface LimitsForm {
   stream_idle_secs: string;
   max_retries: string;
   retry_interval_ms: string;
+  retry_on_status: string;
   billing_flat_quota: string;
   max_request_body_mb: string;
 }
@@ -115,6 +116,7 @@ export default function Settings() {
     stream_idle_secs: '',
     max_retries: '',
     retry_interval_ms: '',
+    retry_on_status: '',
     billing_flat_quota: '',
     max_request_body_mb: '',
   });
@@ -348,6 +350,9 @@ export default function Settings() {
         stream_idle_secs: data.stream_idle_secs ?? '',
         max_retries: data.max_retries ?? '',
         retry_interval_ms: data.retry_interval_ms ?? '',
+        retry_on_status: Array.isArray((data as { retry_on_status?: number[] }).retry_on_status)
+          ? ((data as { retry_on_status?: number[] }).retry_on_status || []).join(', ')
+          : '',
         billing_flat_quota: data.billing_flat_quota != null ? String(data.billing_flat_quota) : '',
         max_request_body_mb: data.max_request_body_mb != null ? String(data.max_request_body_mb) : '',
       });
@@ -435,10 +440,22 @@ export default function Settings() {
       return;
     }
 
+    // 直接换号状态码：逗号/空格分隔，只接受 100–599
+    const retryCodes = limits.retry_on_status
+      .split(/[,\s]+/)
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0)
+      .map((v) => Number(v));
+    if (retryCodes.some((code) => !Number.isInteger(code) || code < 100 || code > 599)) {
+      setError(t('直接换号状态码必须在 100-599 之间'));
+      return;
+    }
+    const body: Record<string, unknown> = { ...payload, retry_on_status: retryCodes };
+
     setSaving(true);
     setError('');
     try {
-      await api.updateLimits(payload);
+      await api.updateLimits(body);
       addToast(t('设置更新成功'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -537,6 +554,11 @@ export default function Settings() {
                   <label>{t('重试间隔 (毫秒)')}</label>
                   <input className="form-input" type="number" min="0" max="10000" placeholder="0" value={limits.retry_interval_ms} onChange={(e) => handleChange('retry_interval_ms', e.target.value)} />
                   <span className="form-hint">{t('账号池换号重试之间的等待时间，0 = 立即换号（保存后立即生效）。')}</span>
+                </div>
+                <div className="form-group">
+                  <label>{t('直接换号状态码（逗号分隔）')}</label>
+                  <input className="form-input" placeholder="402" value={limits.retry_on_status} onChange={(e) => handleChange('retry_on_status', e.target.value)} />
+                  <span className="form-hint">{t('命中这些上游状态码时不做指数退避冷却（只给基础冷却），直接换号；默认 402（余额不足）。')}</span>
                 </div>
                 <div className="form-group">
                   <label>{t('按次计费固定额度')}</label>

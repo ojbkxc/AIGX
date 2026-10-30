@@ -225,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
     );
     // 换号重试间隔（「请求重试」设置；保存设置时也会实时更新）
     account_sessions.set_retry_interval_ms(config.usage.retry_interval_ms);
+    account_sessions.set_retry_on_status(config.usage.retry_on_status.clone());
 
     // 初始化模型定价目录
     let pricing_store = Arc::new(PricingStore::new(store.clone()));

@@ -318,6 +318,10 @@ pub struct UsageConfig {
     /// 账号换号之间的重试间隔（毫秒），默认 0（立即换号）。
     #[serde(default)]
     pub retry_interval_ms: u64,
+    /// 命中这些上游状态码时不给指数退避冷却（只给基础冷却），直接换号。
+    /// 默认 402（积分/余额不足）——账号已被上游判死，换号比冷却更有意义。
+    #[serde(default = "default_retry_on_status")]
+    pub retry_on_status: Vec<u16>,
     /// 请求体大小上限（MB），作用于数据面接口（OpenAI/Anthropic 兼容
     /// 端点与音频 multipart 上传）。运行期经管理员后台「使用限额」页
     /// 修改后立即生效（build_router 每次请求实时读配置）。
@@ -353,6 +357,10 @@ fn default_headers_timeout() -> u64 {
 
 fn default_stream_idle_secs() -> u64 {
     30
+}
+
+fn default_retry_on_status() -> Vec<u16> {
+    vec![402]
 }
 
 fn default_max_retries() -> u32 {
@@ -462,6 +470,7 @@ impl Default for UsageConfig {
             stream_idle_secs: default_stream_idle_secs(),
             max_retries: default_max_retries(),
             retry_interval_ms: 0,
+            retry_on_status: default_retry_on_status(),
             max_request_body_mb: default_max_request_body_mb(),
             log_body: false,
             billing_flat_quota: default_billing_flat_quota(),

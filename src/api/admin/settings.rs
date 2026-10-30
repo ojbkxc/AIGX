@@ -38,6 +38,7 @@ pub struct LimitsRequest {
     pub stream_idle_secs: Option<u64>,
     pub max_retries: Option<u32>,
     pub retry_interval_ms: Option<u64>,
+    pub retry_on_status: Option<Vec<u16>>,
     pub max_request_body_mb: Option<usize>,
     /// 请求日志快照开关（log_body）
     pub log_body: Option<bool>,
@@ -134,6 +135,7 @@ pub async fn handle_get_limits(
             "stream_idle_secs": config.usage.stream_idle_secs,
             "max_retries": config.usage.max_retries,
             "retry_interval_ms": config.usage.retry_interval_ms,
+            "retry_on_status": config.usage.retry_on_status,
             "max_request_body_mb": config.usage.max_request_body_mb,
             "log_body": config.usage.log_body,
             "billing_flat_quota": config.usage.billing_flat_quota,
@@ -205,6 +207,24 @@ pub async fn handle_update_limits(
     if let Some(v) = body.retry_interval_ms {
         config.usage.retry_interval_ms = v.min(10_000);
     }
+    if let Some(v) = body.retry_on_status {
+        let mut codes: Vec<u16> = Vec::new();
+        for code in v {
+            if !(100..=599).contains(&code) {
+                return Err(error_response(
+                    "直接换号状态码必须在 100-599 之间",
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+            if !codes.contains(&code) {
+                codes.push(code);
+            }
+            if codes.len() >= 50 {
+                break;
+            }
+        }
+        config.usage.retry_on_status = codes;
+    }
     if let Some(v) = body.max_retries {
         config.usage.max_retries = v.min(10);
     }
@@ -229,6 +249,9 @@ pub async fn handle_update_limits(
     state
         .account_sessions
         .set_retry_interval_ms(config.usage.retry_interval_ms);
+    state
+        .account_sessions
+        .set_retry_on_status(config.usage.retry_on_status.clone());
     match state.config_manager.update(config).await {
         Ok(_) => {
             let updated = state.config_manager.get().await;

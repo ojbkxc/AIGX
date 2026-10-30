@@ -77,7 +77,7 @@ impl AccountBridge {
         let failure = ChannelStore::classify_bridge_error(error);
         let secs = self
             .sessions
-            .record_failure(lease.id(), model, &failure, &error.to_string());
+            .record_failure(lease.id(), model, &failure, &error.to_string(), None);
         tracing::warn!(
             "account {} build failed on {} (cooldown {}s): {error}",
             lease.id(),
@@ -89,9 +89,13 @@ impl AccountBridge {
     /// 记入一次上游失败；返回是否值得换号重试。
     fn note_failure(&self, lease: &AccountLease, model: &str, error: &BridgeError) -> bool {
         let failure = ChannelStore::classify_bridge_error(error);
+        let status = match error {
+            BridgeError::UpstreamStatus { status, .. } => Some(*status),
+            _ => None,
+        };
         let secs = self
             .sessions
-            .record_failure(lease.id(), model, &failure, &error.to_string());
+            .record_failure(lease.id(), model, &failure, &error.to_string(), status);
         tracing::warn!(
             "account {} failed on {} (cooldown {}s): {error}",
             lease.id(),
