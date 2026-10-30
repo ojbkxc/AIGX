@@ -440,14 +440,14 @@ export default function Settings() {
       return;
     }
 
-    // 直接换号状态码：逗号/空格分隔，只接受 100–599
+    // 直接换号/换渠道状态码：逗号/空格分隔，只接受 100–599
     const retryCodes = limits.retry_on_status
       .split(/[,\s]+/)
       .map((v) => v.trim())
       .filter((v) => v.length > 0)
       .map((v) => Number(v));
     if (retryCodes.some((code) => !Number.isInteger(code) || code < 100 || code > 599)) {
-      setError(t('直接换号状态码必须在 100-599 之间'));
+      setError(t('直接换号/换渠道状态码必须在 100-599 之间'));
       return;
     }
     const body: Record<string, unknown> = { ...payload, retry_on_status: retryCodes };
@@ -556,9 +556,9 @@ export default function Settings() {
                   <span className="form-hint">{t('账号池换号重试之间的等待时间，0 = 立即换号（保存后立即生效）。')}</span>
                 </div>
                 <div className="form-group">
-                  <label>{t('直接换号状态码（逗号分隔）')}</label>
+                  <label>{t('直接换号/换渠道状态码（逗号分隔）')}</label>
                   <input className="form-input" placeholder="402" value={limits.retry_on_status} onChange={(e) => handleChange('retry_on_status', e.target.value)} />
-                  <span className="form-hint">{t('命中这些上游状态码时不做指数退避冷却（只给基础冷却），直接换号；默认 402（余额不足）。')}</span>
+                  <span className="form-hint">{t('命中这些上游状态码时不做指数退避冷却（只给基础冷却）并直接换号，同时在渠道级重试中视为可重试；默认 402（余额不足）。')}</span>
                 </div>
                 <div className="form-group">
                   <label>{t('按次计费固定额度')}</label>

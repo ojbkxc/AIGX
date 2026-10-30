@@ -437,7 +437,12 @@ pub(crate) fn is_retryable_bridge_error(e: &crate::bridge::BridgeError) -> bool 
         | BridgeError::AuthError(_)
         | BridgeError::InvalidUpstreamCredentials(_) => true,
         BridgeError::UpstreamStatus { status, .. } => {
-            *status >= 500 || *status == 401 || *status == 403 || *status == 429
+            // 内置可重试：5xx / 鉴权 / 限流；外加管理员配置的「直接换号/换渠道」名单
+            *status >= 500
+                || *status == 401
+                || *status == 403
+                || *status == 429
+                || crate::config::is_retry_status(*status)
         }
         BridgeError::Config(_)
         | BridgeError::InvalidUpstreamConfig(_)

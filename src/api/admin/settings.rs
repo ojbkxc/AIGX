@@ -254,6 +254,8 @@ pub async fn handle_update_limits(
         .set_retry_on_status(config.usage.retry_on_status.clone());
     // 渠道级重试次数立即生效（选路时读取进程级快照）
     crate::config::set_max_retries(config.usage.max_retries);
+    // 直接换号/换渠道状态码名单立即生效
+    crate::config::set_retry_on_status_codes(config.usage.retry_on_status.clone());
     match state.config_manager.update(config).await {
         Ok(_) => {
             let updated = state.config_manager.get().await;

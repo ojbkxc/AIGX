@@ -228,6 +228,8 @@ async fn main() -> anyhow::Result<()> {
     account_sessions.set_retry_on_status(config.usage.retry_on_status.clone());
     // 渠道级重试次数（「请求重试」设置；保存设置时也会实时更新）
     crate::config::set_max_retries(config.usage.max_retries);
+    // 直接换号/换渠道状态码名单（选路时同步判定，保存设置时实时更新）
+    crate::config::set_retry_on_status_codes(config.usage.retry_on_status.clone());
 
     // 初始化模型定价目录
     let pricing_store = Arc::new(PricingStore::new(store.clone()));

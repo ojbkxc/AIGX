@@ -1665,7 +1665,7 @@
   "留空时：有站点地址则只允许该地址，否则仅放行本机来源；跨源直连 /v1 需要显式配置。": "When empty: only the site address (if set) is allowed, otherwise local origins only; cross-origin /v1 access needs explicit entries.",
   "信任反向代理的 X-Forwarded-For / X-Real-IP": "Trust X-Forwarded-For / X-Real-IP from the reverse proxy",
   "仅在 Nginx / Cloudflare 等可信反代之后开启；直连部署开启会让客户端伪造 IP 绕过 IP 规则。": "Enable only behind a trusted reverse proxy (Nginx / Cloudflare); on direct deployments clients could spoof IPs and bypass IP rules.",
-  "直接换号状态码（逗号分隔）": "Status codes that switch accounts immediately (comma separated)",
-  "命中这些上游状态码时不做指数退避冷却（只给基础冷却），直接换号；默认 402（余额不足）。": "Listed upstream statuses get the base cooldown instead of exponential backoff and switch accounts immediately; default 402 (insufficient balance).",
-  "直接换号状态码必须在 100-599 之间": "Switch status codes must be between 100 and 599"
+  "直接换号/换渠道状态码（逗号分隔）": "Status codes that switch accounts/channels immediately (comma separated)",
+  "命中这些上游状态码时不做指数退避冷却（只给基础冷却）并直接换号，同时在渠道级重试中视为可重试；默认 402（余额不足）。": "Listed upstream statuses get the base cooldown instead of exponential backoff and switch accounts immediately; they are also retried at the channel level. Default 402 (insufficient balance).",
+  "直接换号/换渠道状态码必须在 100-599 之间": "Switch status codes must be between 100 and 599"
 }

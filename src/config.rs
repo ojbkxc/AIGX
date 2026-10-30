@@ -548,6 +548,40 @@ pub fn set_max_retries(v: u32) {
     MAX_RETRIES.store(v.min(10), std::sync::atomic::Ordering::Relaxed);
 }
 
+/// 「直接换号/换渠道状态码」的进程级快照（数据面同步判定）。
+///
+/// 该名单同时影响两处：
+/// - 账号池：命中即不做指数退避冷却（只给基础冷却），立刻换号；
+/// - 渠道级 failover：命中即视为可重试，切到下一个候选渠道。
+static RETRY_ON_STATUS: std::sync::RwLock<Vec<u16>> = std::sync::RwLock::new(Vec::new());
+
+/// 判断状态码是否命中「直接换号/换渠道」名单。
+pub fn is_retry_status(code: u16) -> bool {
+    RETRY_ON_STATUS
+        .read()
+        .map(|list| list.contains(&code))
+        .unwrap_or(false)
+}
+
+/// 由 main 与 settings 更新端点写入快照（去重、100–599、上限 50）。
+pub fn set_retry_on_status_codes(codes: Vec<u16>) {
+    let mut cleaned: Vec<u16> = Vec::new();
+    for code in codes {
+        if !(100..=599).contains(&code) {
+            continue;
+        }
+        if !cleaned.contains(&code) {
+            cleaned.push(code);
+        }
+        if cleaned.len() >= 50 {
+            break;
+        }
+    }
+    if let Ok(mut list) = RETRY_ON_STATUS.write() {
+        *list = cleaned;
+    }
+}
+
 pub struct ConfigManager {
     config: RwLock<AppConfig>,
     path: PathBuf,
@@ -717,5 +751,19 @@ mod tests {
             redact_url_credentials("not a url"),
             "<invalid database url>"
         );
+    }
+
+    #[test]
+    fn retry_status_codes_are_cleaned_and_queryable() {
+        super::set_retry_on_status_codes(vec![402, 402, 99, 700, 404]);
+        assert!(super::is_retry_status(402));
+        assert!(super::is_retry_status(404));
+        // 越界状态码被丢弃
+        assert!(!super::is_retry_status(99));
+        assert!(!super::is_retry_status(700));
+        // 恢复默认，避免影响其它用例
+        super::set_retry_on_status_codes(vec![402]);
+        assert!(super::is_retry_status(402));
+        assert!(!super::is_retry_status(404));
     }
 }
