@@ -390,6 +390,11 @@ export default function AccountSessions(): JSX.Element {
   const handleSave = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
     setError('');
+    // 登录态型 / 自填地址型供应商必须提供上游地址
+    if (!editing && selectedProvider?.requires_base_url && !form.base_url.trim()) {
+      setError(t('该供应商需要填写上游地址'));
+      return;
+    }
     setSaving(true);
     try {
       let channelId = form.channel_id;
@@ -637,6 +642,15 @@ export default function AccountSessions(): JSX.Element {
     form.base_url.trim()
     || providers.find((p) => p.kind === form.provider)?.default_base_url
     || '';
+
+  // 登录态型供应商（Cookie / JWT）：凭证输入标签与提示按鉴权方式变化
+  const selectedProvider = providers.find((p) => p.kind === form.provider);
+  const sessionAuth = selectedProvider?.auth ?? null;
+  const credentialLabel =
+    sessionAuth === 'cookie' ? t('登录 Cookie') : sessionAuth === 'bearer' ? t('访问令牌（JWT）') : t('凭证');
+  const credentialHint = editing
+    ? t('留空保持原凭证；勾选下方可清除')
+    : selectedProvider?.credential_hint || undefined;
 
   if (loading) return <SkeletonTable columns={7} rows={5} />;
 
@@ -899,9 +913,14 @@ export default function AccountSessions(): JSX.Element {
                             className={`provider-card${active ? ' active' : ''}`}
                             onClick={() => pickProvider(p.kind, '')}
                           >
-                            <span className="provider-card-title">{p.label}</span>
+                            <span className="provider-card-title">
+                              {p.label}
+                              {p.auth ? (
+                                <span className="provider-card-badge">{t('登录态')}</span>
+                              ) : null}
+                            </span>
                             <span className="provider-card-meta">
-                              {p.default_base_url || t('自定义地址')}
+                              {p.default_base_url || t('需自填地址')}
                             </span>
                           </button>
                         );
@@ -982,10 +1001,16 @@ export default function AccountSessions(): JSX.Element {
                 onChange={(e) => setForm({ ...form, base_url: e.target.value })}
               />
               <Input
-                label={t('凭证')}
+                label={credentialLabel}
                 type="password"
-                placeholder={editing ? t('留空表示不修改') : 'sk-...'}
-                hint={editing ? t('留空保持原凭证；勾选下方可清除') : undefined}
+                placeholder={
+                  editing
+                    ? t('留空表示不修改')
+                    : sessionAuth === 'cookie'
+                      ? 'sessionid=...; token=...'
+                      : 'sk-...'
+                }
+                hint={credentialHint}
                 value={form.api_key}
                 onChange={(e) => setForm({ ...form, api_key: e.target.value })}
               />

@@ -905,6 +905,12 @@ export interface AccountProviderItem {
   label: string;
   protocol: string;
   default_base_url: string;
+  /** 登录态型供应商的鉴权方式（bearer / cookie / headers）；API Key 型为 null */
+  auth?: string | null;
+  /** 登录态型供应商的凭证粘贴提示 */
+  credential_hint?: string | null;
+  /** 无默认地址 = 必须由账号自己填写上游地址 */
+  requires_base_url?: boolean;
 }
 
 /** 账号池按渠道聚合统计 */

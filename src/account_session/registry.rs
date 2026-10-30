@@ -240,7 +240,300 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         protocol: Protocol::Openai,
         default_base_url: "http://127.0.0.1:1234/v1",
     },
+    // ── 登录态型供应商（Cookie / JWT + 专用请求头，地址可自填）──
+    ProviderSpec {
+        kind: "cline",
+        label: "Cline",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.cline.bot/api/v1",
+    },
+    ProviderSpec {
+        kind: "workbuddy",
+        label: "WorkBuddy",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "xiaohuanxiong",
+        label: "小浣熊",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "catpaw",
+        label: "CatPaw",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "qoder",
+        label: "Qoder",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "accio",
+        label: "Accio",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "zcode",
+        label: "ZCode",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "codearts",
+        label: "华为 CodeArts",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "trae",
+        label: "Trae",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "loomy",
+        label: "Loomy",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "kuku",
+        label: "Kuku",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "monkeycode",
+        label: "MonkeyCode",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "commandcode",
+        label: "Command Code",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "antigravity",
+        label: "Antigravity",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "officeace",
+        label: "OfficeAce",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "orcaterm",
+        label: "OrcaTerm",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
+    ProviderSpec {
+        kind: "autoclaw",
+        label: "AutoClaw",
+        protocol: Protocol::Openai,
+        default_base_url: "",
+    },
 ];
+
+/// 登录态型供应商的鉴权形态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionAuth {
+    /// `Authorization: Bearer {credential}`（JWT）
+    Bearer,
+    /// 凭证原样作为 `Cookie` 头发送
+    Cookie,
+    /// 专用请求头 + `{credential}` 模板注入
+    Headers,
+}
+
+impl SessionAuth {
+    /// 稳定标识（管理面展示 / 前端提示用）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Bearer => "bearer",
+            Self::Cookie => "cookie",
+            Self::Headers => "headers",
+        }
+    }
+}
+
+/// 登录态型供应商元数据。
+#[derive(Debug, Clone, Copy)]
+pub struct SessionMeta {
+    pub auth: SessionAuth,
+    /// 专用请求头模板（`{credential}` 会被替换成凭证明文）
+    pub headers: &'static [(&'static str, &'static str)],
+    /// 凭证粘贴提示（管理面展示）
+    pub credential_hint: &'static str,
+}
+
+/// 登录态型供应商目录：与 `PROVIDERS` 中的同名 kind 对应。
+///
+/// 这些供应商不是 API Key 直连，而是从网页端登录态里取 Cookie / JWT，
+/// 再叠加各自的专用请求头。凭证统一存 `Credential.secret`，
+/// 由 `bridge::openai::AuthMode` 决定怎么发送。
+pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
+    (
+        "cline",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            headers: &[("user-agent", "Cline/1.0")],
+            credential_hint: "粘贴 Cline 账号的 JWT（Authorization: Bearer）",
+        },
+    ),
+    (
+        "workbuddy",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "WorkBuddy/1.0")],
+            credential_hint: "粘贴浏览器里 WorkBuddy 的整段 Cookie",
+        },
+    ),
+    (
+        "xiaohuanxiong",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "XiaoHuanXiong/1.0")],
+            credential_hint: "粘贴小浣熊的整段 Cookie",
+        },
+    ),
+    (
+        "catpaw",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "CatPaw/1.0")],
+            credential_hint: "粘贴 CatPaw 的整段 Cookie",
+        },
+    ),
+    (
+        "qoder",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "Qoder/1.0")],
+            credential_hint: "粘贴 Qoder 的整段 Cookie（含登录票据）",
+        },
+    ),
+    (
+        "accio",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "Accio/1.0")],
+            credential_hint: "粘贴 Accio 的整段 Cookie",
+        },
+    ),
+    (
+        "zcode",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            headers: &[("user-agent", "ZCode/1.0")],
+            credential_hint: "粘贴 ZCode 的访问令牌（Bearer）",
+        },
+    ),
+    (
+        "codearts",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "CodeArts/1.0")],
+            credential_hint: "粘贴华为 CodeArts 的整段 Cookie / 会话票据",
+        },
+    ),
+    (
+        "trae",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "Trae/1.0")],
+            credential_hint: "粘贴 Trae 的整段 Cookie",
+        },
+    ),
+    (
+        "loomy",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "Loomy/1.0")],
+            credential_hint: "粘贴 Loomy 的整段 Cookie",
+        },
+    ),
+    (
+        "kuku",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "Kuku/1.0")],
+            credential_hint: "粘贴 Kuku 的整段 Cookie",
+        },
+    ),
+    (
+        "monkeycode",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "MonkeyCode/1.0")],
+            credential_hint: "粘贴 MonkeyCode 的整段 Cookie",
+        },
+    ),
+    (
+        "commandcode",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            headers: &[("user-agent", "CommandCode/1.0")],
+            credential_hint: "粘贴 Command Code 的访问令牌（Bearer）",
+        },
+    ),
+    (
+        "antigravity",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "Antigravity/1.0")],
+            credential_hint: "粘贴 Antigravity 的整段 Cookie",
+        },
+    ),
+    (
+        "officeace",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "OfficeAce/1.0")],
+            credential_hint: "粘贴 OfficeAce 的整段 Cookie",
+        },
+    ),
+    (
+        "orcaterm",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "OrcaTerm/1.0")],
+            credential_hint: "粘贴 OrcaTerm 的整段 Cookie",
+        },
+    ),
+    (
+        "autoclaw",
+        SessionMeta {
+            auth: SessionAuth::Cookie,
+            headers: &[("user-agent", "AutoClaw/1.0")],
+            credential_hint: "粘贴 AutoClaw 的整段 Cookie",
+        },
+    ),
+];
+
+/// 查登录态型供应商元数据（非登录态型返回 None）。
+pub fn session_meta(kind: &str) -> Option<&'static SessionMeta> {
+    let lower = kind.trim().to_ascii_lowercase();
+    SESSION_PROVIDERS
+        .iter()
+        .find(|(k, _)| *k == lower)
+        .map(|(_, meta)| meta)
+}
+
+/// 是否登录态型供应商。
+pub fn is_session_provider(kind: &str) -> bool {
+    session_meta(kind).is_some()
+}
 
 /// 全部 provider（管理面下拉用）。
 pub fn all() -> &'static [ProviderSpec] {
@@ -311,16 +604,44 @@ mod tests {
     #[test]
     fn builtin_providers_have_default_endpoints() {
         for spec in all() {
-            if spec.kind == DEFAULT_PROVIDER_KIND {
-                assert!(spec.default_base_url.is_empty());
-            } else {
+            // 自填地址型（OpenAI 兼容 / 登录态型）允许没有默认端点
+            if spec.kind == DEFAULT_PROVIDER_KIND || is_session_provider(spec.kind) {
+                continue;
+            }
+            assert!(
+                spec.default_base_url.starts_with("http"),
+                "{} should ship a default endpoint",
+                spec.kind
+            );
+        }
+    }
+
+    #[test]
+    fn session_providers_are_registered_and_documented() {
+        for (kind, meta) in SESSION_PROVIDERS {
+            assert!(
+                all().iter().any(|p| p.kind == *kind),
+                "session provider {kind} missing from PROVIDERS"
+            );
+            assert!(
+                !meta.credential_hint.is_empty(),
+                "session provider {kind} needs a credential hint"
+            );
+            if meta.auth == SessionAuth::Headers {
                 assert!(
-                    spec.default_base_url.starts_with("http"),
-                    "{} should ship a default endpoint",
-                    spec.kind
+                    !meta.headers.is_empty(),
+                    "headers auth for {kind} needs header templates"
                 );
             }
         }
+        assert_eq!(SESSION_PROVIDERS.len(), 17, "Agent2API 登录态供应商应为 17 家");
+    }
+
+    #[test]
+    fn session_meta_lookup_normalizes_kind() {
+        assert!(session_meta("Cline").is_some());
+        assert!(session_meta(" trae ").is_some());
+        assert!(session_meta("openai").is_none());
     }
 
     #[test]

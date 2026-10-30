@@ -1672,5 +1672,10 @@
   "自动选择渠道（默认）": "Auto-select channel (default)",
   "指定后 AI 助手只通过该渠道调用模型（排障用）；留空则按优先级自动选路。": "When set, the AI assistant only calls models through this channel (for troubleshooting); empty = priority-based auto routing.",
   "还没有账号型渠道：保存时会按所选供应商自动创建一个": "No account-type channel yet: one is auto-created from the selected provider on save",
-  "创建账号型渠道失败": "Failed to create the account-type channel"
+  "创建账号型渠道失败": "Failed to create the account-type channel",
+  "登录态": "Session",
+  "登录 Cookie": "Login cookie",
+  "访问令牌（JWT）": "Access token (JWT)",
+  "需自填地址": "Custom base URL required",
+  "该供应商需要填写上游地址": "This provider requires an upstream base URL"
 }

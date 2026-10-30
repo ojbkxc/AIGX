@@ -49,7 +49,25 @@ pub fn build_bridge(
     };
     let client = sessions.client_for(session)?;
     let bridge: Arc<dyn Bridge> = match spec.protocol {
-        Protocol::Openai => crate::bridge::openai::make_bridge(&base, &secret, &client),
+        Protocol::Openai => {
+            // 登录态型供应商：Cookie / JWT + 专用请求头（不走 Bearer API Key）
+            if let Some(meta) = registry::session_meta(&spec.kind) {
+                let auth_mode = match meta.auth {
+                    registry::SessionAuth::Bearer => crate::bridge::openai::AuthMode::Bearer,
+                    registry::SessionAuth::Cookie => crate::bridge::openai::AuthMode::Cookie,
+                    registry::SessionAuth::Headers => crate::bridge::openai::AuthMode::Headers,
+                };
+                Arc::new(crate::bridge::openai::OpenaiCompatibleBridge::with_session_auth(
+                    &base,
+                    &secret,
+                    client.as_ref().clone(),
+                    auth_mode,
+                    meta.headers,
+                ))
+            } else {
+                crate::bridge::openai::make_bridge(&base, &secret, &client)
+            }
+        }
         Protocol::Anthropic => crate::bridge::anthropic::make_bridge(&base, &secret, &client),
         Protocol::Gemini => crate::bridge::gemini::make_bridge(&base, &secret, &client),
     };

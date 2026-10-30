@@ -18,6 +18,20 @@ use super::{
     UsageStats,
 };
 
+/// 上游鉴权方式。
+///
+/// 大部分供应商是 `Bearer`（API Key 或 JWT 同形）；登录态型供应商
+/// （Cline / Qoder / Trae 等）用 Cookie 或「专用请求头 + 凭证模板」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    /// `Authorization: Bearer {credential}`（默认）
+    Bearer,
+    /// 凭证原样作为 `Cookie` 头发送（登录态抓包得到的整段 cookie）
+    Cookie,
+    /// 只用自定义请求头（凭证已由模板注入到具体头里）
+    Headers,
+}
+
 /// OpenAI 兼容上游 Bridge。
 ///
 /// 每个 Channel（openai_compatible 类型）对应一个 OpenaiCompatibleBridge 实例。
@@ -30,6 +44,9 @@ pub struct OpenaiCompatibleBridge {
     base_url: String,
     api_key: String,
     client: reqwest::Client,
+    auth_mode: AuthMode,
+    /// 登录态型供应商要求的专用请求头（已做凭证模板替换）
+    session_headers: Vec<(String, String)>,
 }
 
 impl OpenaiCompatibleBridge {
@@ -46,6 +63,38 @@ impl OpenaiCompatibleBridge {
             base_url: normalize_base_url(base_url.into()),
             api_key: api_key.into(),
             client,
+            auth_mode: AuthMode::Bearer,
+            session_headers: Vec::new(),
+        }
+    }
+
+    /// 构造「登录态型供应商」Bridge：Cookie / 专用请求头鉴权。
+    ///
+    /// `credential` 为用户粘贴的 Cookie 或 JWT；`headers` 中的 `{credential}`
+    /// 占位符会被替换成凭证明文。
+    pub fn with_session_auth(
+        base_url: impl Into<String>,
+        credential: impl Into<String>,
+        client: reqwest::Client,
+        auth_mode: AuthMode,
+        headers: &[(&str, &str)],
+    ) -> Self {
+        let credential = credential.into();
+        let params: Vec<(String, String)> = headers
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.to_string(),
+                    value.replace("{credential}", &credential),
+                )
+            })
+            .collect();
+        Self {
+            base_url: normalize_base_url(base_url.into()),
+            api_key: credential,
+            client,
+            auth_mode,
+            session_headers: params,
         }
     }
 
@@ -69,9 +118,25 @@ impl OpenaiCompatibleBridge {
         format!("{}/images/generations", self.base_url.trim_end_matches('/'))
     }
 
-    /// 空密钥不发送 Authorization 头（见 `apply_conditional_bearer`）
-    fn auth_conditional(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        apply_conditional_bearer(req, &self.api_key)
+    /// 按鉴权方式附加请求头：
+    /// - `Bearer`：空密钥不发送 Authorization（见 `apply_conditional_bearer`）
+    /// - `Cookie`：凭证原样放进 `Cookie` 头
+    /// - `Headers`：只用登录态供应商要求的专用头
+    fn auth_conditional(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (name, value) in &self.session_headers {
+            req = req.header(name, value);
+        }
+        match self.auth_mode {
+            AuthMode::Bearer => apply_conditional_bearer(req, &self.api_key),
+            AuthMode::Cookie => {
+                if self.api_key.is_empty() {
+                    req
+                } else {
+                    req.header("cookie", &self.api_key)
+                }
+            }
+            AuthMode::Headers => req,
+        }
     }
 
     /// 将 ChatFormat 转为 OpenAI 请求体

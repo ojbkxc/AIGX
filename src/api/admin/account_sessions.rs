@@ -792,11 +792,17 @@ pub async fn handle_list_account_providers(
     verify_admin(&state, &headers).await?;
     let mut data: Vec<Value> = Vec::new();
     for spec in registry::all() {
+        let session = registry::session_meta(spec.kind);
         data.push(json!({
             "kind": spec.kind,
             "label": spec.label,
             "protocol": spec.protocol.as_str(),
             "default_base_url": spec.default_base_url,
+            // 登录态型供应商：鉴权方式与凭证粘贴提示（前端据此改变输入提示）
+            "auth": session.map(|m| m.auth.as_str()),
+            "credential_hint": session.map(|m| m.credential_hint),
+            // 无默认地址 = 必须由账号自己填写上游地址
+            "requires_base_url": spec.default_base_url.is_empty(),
         }));
     }
     Ok(Json(json!({ "success": true, "data": data })))
