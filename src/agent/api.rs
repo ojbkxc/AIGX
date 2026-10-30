@@ -85,7 +85,9 @@ fn agent_state(state: &AppState) -> Result<&crate::agent::AgentState, (StatusCod
     if !agent.config().enabled {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "success": false, "error": "AI 运维 Agent 已关闭（可在 设置 → 运维 → AI 助手 开启）" })),
+            Json(
+                json!({ "success": false, "error": "AI 运维 Agent 已关闭（可在 设置 → 运维 → AI 助手 开启）" }),
+            ),
         ));
     }
     Ok(agent)
