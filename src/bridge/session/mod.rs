@@ -13,6 +13,7 @@ use crate::bridge::Bridge;
 
 pub mod accio;
 pub mod antigravity;
+pub mod catpaw;
 pub mod codearts;
 pub mod commandcode;
 pub mod kuku;
@@ -48,6 +49,9 @@ pub fn build(
         "codearts" => Some(Arc::new(codearts::CodeArtsBridge::new(
             base, credential, client,
         ))),
+        "catpaw" => Some(Arc::new(catpaw::CatPawBridge::new(
+            base, credential, client,
+        ))),
         "trae" => Some(Arc::new(trae::TraeBridge::new(
             base, credential, headers, client,
         ))),
@@ -67,5 +71,6 @@ pub fn supports(kind: &str) -> bool {
             | "trae"
             | "qoder"
             | "codearts"
+            | "catpaw"
     )
 }
