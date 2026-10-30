@@ -414,8 +414,7 @@ fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
                     usage,
                 });
             }
-            if delta.content.is_none() && delta.reasoning.is_none() && delta.tool_calls.is_none()
-            {
+            if delta.content.is_none() && delta.reasoning.is_none() && delta.tool_calls.is_none() {
                 return match usage {
                     Some(stats) => Decoded::Chunk(ChatChunk {
                         id: id.to_string(),
@@ -699,7 +698,10 @@ mod tests {
 
     #[test]
     fn canonical_uri_keeps_trailing_slash() {
-        assert_eq!(canonical_uri("/api/v2/chat/completions"), "/api/v2/chat/completions/");
+        assert_eq!(
+            canonical_uri("/api/v2/chat/completions"),
+            "/api/v2/chat/completions/"
+        );
         assert_eq!(canonical_uri(""), "/");
     }
 

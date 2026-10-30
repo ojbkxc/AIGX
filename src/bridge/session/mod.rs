@@ -59,7 +59,13 @@ pub fn build(
 pub fn supports(kind: &str) -> bool {
     matches!(
         kind,
-        "orcaterm" | "antigravity" | "accio" | "commandcode" | "kuku" | "trae" | "qoder"
+        "orcaterm"
+            | "antigravity"
+            | "accio"
+            | "commandcode"
+            | "kuku"
+            | "trae"
+            | "qoder"
             | "codearts"
     )
 }
