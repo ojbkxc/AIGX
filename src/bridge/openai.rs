@@ -1140,4 +1140,77 @@ mod tests {
         let stats = super::parse_usage_from_value(&u);
         assert_eq!(stats.cached_prompt_tokens, 20, "流式路径同样 clamp 收敛");
     }
+
+    /// 登录态型供应商：Cookie 与 `{credential}` 请求头模板真的到达上游。
+    ///
+    /// 起一个本地 OpenAI 兼容假上游，回显收到的 cookie / x-token，
+    /// 断言 Bridge 构造的请求头与账号凭证一致（端到端，非仅序列化）。
+    #[tokio::test]
+    async fn session_auth_sends_cookie_and_templated_headers() {
+        use crate::bridge::{BridgeContext, ChatFormat, ChatMessage, Role};
+        use axum::{extract::HeaderMap, routing::post, Json, Router};
+
+        async fn echo(headers: HeaderMap) -> Json<serde_json::Value> {
+            let cookie = headers
+                .get("cookie")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let token = headers
+                .get("x-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            Json(serde_json::json!({
+                "id": "chatcmpl-test",
+                "model": "m",
+                "choices": [{
+                    "message": { "content": format!("cookie={cookie};token={token}") },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+            }))
+        }
+
+        let app = Router::new().route("/v1/chat/completions", post(echo));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let bridge = super::OpenaiCompatibleBridge::with_session_auth(
+            format!("http://{addr}/v1"),
+            "sessionid=abc",
+            reqwest::Client::new(),
+            super::AuthMode::Cookie,
+            vec![("x-token".to_string(), "{credential}".to_string())],
+        );
+        let req = ChatFormat {
+            model: "m".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: Some("hi".to_string()),
+                content_blocks: None,
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+                reasoning: None,
+            }],
+            tools: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: false,
+            top_k: None,
+            stop: None,
+            tool_choice: None,
+            reasoning_effort: None,
+            web_search_options: None,
+            extra: None,
+        };
+        let ctx = BridgeContext::new("test-req", "m");
+        let resp = bridge.chat(&req, &ctx).await.expect("chat should succeed");
+        assert_eq!(resp.message.content_str(), "cookie=sessionid=abc;token=sessionid=abc");
+    }
 }
