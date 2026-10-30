@@ -193,7 +193,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
                     "name": { "type": "string", "description": "渠道名" },
                     "base_url": { "type": "string", "description": "上游 base URL" },
                     "api_key": { "type": "string", "description": "上游 API key" },
-                    "channel_type": { "type": "string", "description": "openai_compatible/anthropic/gemini/zai/cloudflare" }
+                    "channel_type": { "type": "string", "description": "openai_compatible/anthropic/gemini/zai/cloudflare/account（account = 账号型渠道，凭证在账号池里加）" }
                 },
                 "required": ["name", "base_url", "api_key"]
             }),
@@ -315,6 +315,50 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             }),
             risk: RiskLevel::HighRisk,
         },
+        // ── 账号池×6（账号型渠道的账号级调度：查/统计/测/启停/清冷却）──
+        ToolSpec {
+            name: "aigx_list_account_sessions",
+            description: "只读：列出账号型渠道的账号（凭证/代理脱敏，可按渠道与关键词过滤）",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "channel_id": { "type": "string", "description": "按渠道 ID 过滤" },
+                    "search": { "type": "string", "description": "按名称/provider/地址/渠道名过滤" }
+                },
+                "required": []
+            }),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_account_session_stats",
+            description: "只读：按渠道聚合的账号池统计（总数/启用/冷却中/并发/成败）",
+            schema: no_args(),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_account_session_test",
+            description: "写操作（可回滚）：单号探活（真实推理链路，不落冷却/状态）",
+            schema: account_id_args(),
+            risk: RiskLevel::LowRisk,
+        },
+        ToolSpec {
+            name: "aigx_account_session_enable",
+            description: "写操作（可回滚）：启用账号",
+            schema: account_id_args(),
+            risk: RiskLevel::LowRisk,
+        },
+        ToolSpec {
+            name: "aigx_account_session_disable",
+            description: "写操作（可回滚）：停用账号",
+            schema: account_id_args(),
+            risk: RiskLevel::LowRisk,
+        },
+        ToolSpec {
+            name: "aigx_account_session_reset_cooldown",
+            description: "写操作（可回滚）：清除账号全部模型冷却与最近错误",
+            schema: account_id_args(),
+            risk: RiskLevel::LowRisk,
+        },
     ]
 }
 
@@ -323,6 +367,14 @@ fn channel_id_args() -> Value {
         "type": "object",
         "properties": { "channel_id": { "type": "string", "description": "渠道 ID" } },
         "required": ["channel_id"]
+    })
+}
+
+fn account_id_args() -> Value {
+    json!({
+        "type": "object",
+        "properties": { "account_id": { "type": "string", "description": "账号会话 ID" } },
+        "required": ["account_id"]
     })
 }
 
@@ -475,6 +527,61 @@ pub async fn exec_tool(
         "aigx_group_upsert" => {
             let body: GroupRequest = parse_tool_args(name, args)?;
             admin::handle_upsert_group(State(state.clone()), headers.clone(), Json(body)).await
+        }
+        // ── 账号池×6 ──
+        "aigx_list_account_sessions" => {
+            let q = crate::api::admin::mcp::args_to_string_map(args);
+            admin::account_sessions::handle_list_account_sessions(
+                State(state.clone()),
+                headers.clone(),
+                Query(q),
+            )
+            .await
+        }
+        "aigx_account_session_stats" => {
+            admin::account_sessions::handle_account_session_stats(
+                State(state.clone()),
+                headers.clone(),
+            )
+            .await
+        }
+        "aigx_account_session_test" => {
+            let id = require_arg(args, "account_id")?;
+            admin::account_sessions::handle_test_account_session(
+                State(state.clone()),
+                headers.clone(),
+                Path(id),
+            )
+            .await
+        }
+        "aigx_account_session_enable" => {
+            let id = require_arg(args, "account_id")?;
+            admin::account_sessions::handle_patch_account_session(
+                State(state.clone()),
+                headers.clone(),
+                Path(id),
+                Json(json!({ "status": "enabled" })),
+            )
+            .await
+        }
+        "aigx_account_session_disable" => {
+            let id = require_arg(args, "account_id")?;
+            admin::account_sessions::handle_patch_account_session(
+                State(state.clone()),
+                headers.clone(),
+                Path(id),
+                Json(json!({ "status": "disabled" })),
+            )
+            .await
+        }
+        "aigx_account_session_reset_cooldown" => {
+            let id = require_arg(args, "account_id")?;
+            admin::account_sessions::handle_reset_account_session_cooldowns(
+                State(state.clone()),
+                headers.clone(),
+                Path(id),
+            )
+            .await
         }
         _ => {
             return Err((

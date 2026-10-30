@@ -624,6 +624,7 @@ fn paths_accounts_network() -> Value {
         },
         "/api/account-sessions/{id}": {
             "put": op_params("账号池", "更新账号（渠道不可变、凭证三态）", &[path_param("id")]),
+            "patch": op_params("账号池", "部分更新（名称/状态/优先级/权重/并发）", &[path_param("id")]),
             "delete": op_params("账号池", "删除账号", &[path_param("id")])
         },
         "/api/account-sessions/{id}/test": {
@@ -713,7 +714,7 @@ mod tests {
         add("/api/account-sessions/bulk", &["post"]);
         add("/api/account-sessions/providers", &["get"]);
         add("/api/account-sessions/stats", &["get"]);
-        add("/api/account-sessions/{id}", &["delete", "put"]);
+        add("/api/account-sessions/{id}", &["delete", "patch", "put"]);
         add("/api/account-sessions/{id}/reset-cooldown", &["post"]);
         add("/api/account-sessions/{id}/test", &["post"]);
         add("/api/accounts", &["get", "post"]);

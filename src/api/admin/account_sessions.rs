@@ -74,6 +74,24 @@ pub struct AccountSessionRequest {
     pub expires_at: Option<i64>,
 }
 
+/// 账号部分更新请求（PATCH）：只应用显式给出的字段。
+///
+/// 与 PUT（整表单替换）区分：PATCH 不触碰 base_url / models / 代理 / 凭证 /
+/// 到期时间，供控制台开关与 AI 工具做「启停 / 调优先级」这类小操作。
+#[derive(Debug, Deserialize)]
+pub struct AccountSessionPatch {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub priority: Option<i64>,
+    #[serde(default)]
+    pub weight: Option<u32>,
+    #[serde(default)]
+    pub max_concurrency: Option<u32>,
+}
+
 /// 批量导入请求。
 #[derive(Debug, Deserialize)]
 pub struct BulkImportRequest {
@@ -370,6 +388,67 @@ pub async fn handle_update_account_session(
         &format!("id={id}"),
         Some(json!({ "name": prev.name, "status": prev.status })),
         Some(json!({ "name": saved.name, "status": saved.status })),
+    );
+    let now = chrono::Utc::now().timestamp();
+    let view = session_json(&state.channel_store.list(), &saved, now);
+    Ok(Json(json!({ "success": true, "data": view })))
+}
+
+// ── 部分更新（PATCH）────────────────────────────────────────────────
+
+/// PATCH /api/account-sessions/:id —— 运营型部分更新（名称/状态/优先级/权重/并发）。
+///
+/// 与 PUT（整表单替换）区分：PATCH 只应用显式给出的字段，不会清空 base_url、
+/// models、代理、凭证与到期时间，适合控制台开关与 AI 工具的小操作。
+pub async fn handle_patch_account_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<AccountSessionPatch>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let Some(prev) = state.account_sessions.get(&id) else {
+        return Err(error_response(
+            "Account session not found",
+            StatusCode::NOT_FOUND,
+        ));
+    };
+    let mut next = prev.clone();
+    if let Some(name) = body.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        next.name = name.to_string();
+    }
+    if let Some(status) = body.status.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if status != "enabled" && status != "disabled" {
+            return Err(error_response(
+                "status must be 'enabled' or 'disabled'",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        next.status = status.to_string();
+    }
+    if let Some(priority) = body.priority {
+        next.priority = priority;
+    }
+    if let Some(weight) = body.weight {
+        next.weight = weight.max(1);
+    }
+    if let Some(max_concurrency) = body.max_concurrency {
+        next.max_concurrency = max_concurrency;
+    }
+    let saved = state.account_sessions.upsert(next).map_err(|e| {
+        error_response(
+            &format!("Failed to patch account session: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    let admin_id = admin_id_from_session(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        "patch_account_session",
+        &format!("id={id}"),
+        Some(json!({ "status": prev.status, "priority": prev.priority })),
+        Some(json!({ "status": saved.status, "priority": saved.priority })),
     );
     let now = chrono::Utc::now().timestamp();
     let view = session_json(&state.channel_store.list(), &saved, now);

@@ -1342,6 +1342,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/account-sessions/:id",
             put(api::admin::account_sessions::handle_update_account_session)
+                .patch(api::admin::account_sessions::handle_patch_account_session)
                 .delete(api::admin::account_sessions::handle_delete_account_session),
         )
         .route(

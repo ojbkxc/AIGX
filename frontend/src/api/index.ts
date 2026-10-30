@@ -400,6 +400,9 @@ export const api = {
     request<ApiResponse<AccountSessionItem>>('POST', `${API_BASE}/account-sessions`, data),
   updateAccountSession: (id: string, data: Record<string, unknown>): Promise<ApiResponse<AccountSessionItem>> =>
     request<ApiResponse<AccountSessionItem>>('PUT', `${API_BASE}/account-sessions/${encodeURIComponent(id)}`, data),
+  // 部分更新（状态/优先级/权重/并发/名称），不会清空地址/模型/代理/凭证
+  patchAccountSession: (id: string, data: Record<string, unknown>): Promise<ApiResponse<AccountSessionItem>> =>
+    request<ApiResponse<AccountSessionItem>>('PATCH', `${API_BASE}/account-sessions/${encodeURIComponent(id)}`, data),
   deleteAccountSession: (id: string): Promise<ApiResponse<MessageResult>> =>
     request<ApiResponse<MessageResult>>('DELETE', `${API_BASE}/account-sessions/${encodeURIComponent(id)}`),
   bulkImportAccountSessions: (data: Record<string, unknown>): Promise<ApiResponse<{ created?: number; skipped?: number }>> =>

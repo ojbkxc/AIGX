@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FlaskConical, Pencil, Plus, RotateCcw, Trash2, Upload } from 'lucide-react';
+import { FlaskConical, Pencil, Plus, Power, RotateCcw, Trash2, Upload } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
@@ -303,6 +303,19 @@ export default function AccountSessions(): JSX.Element {
     }
   };
 
+  // 列表内快捷启停（PATCH 只改状态，不触碰地址/模型/代理/凭证）
+  const handleToggleStatus = async (session: AccountSessionItem): Promise<void> => {
+    const next = session.status === 'enabled' ? 'disabled' : 'enabled';
+    setError('');
+    try {
+      await api.patchAccountSession(session.id, { status: next });
+      addToast(next === 'enabled' ? t('已启用') : t('已停用'));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const handleDelete = (session: AccountSessionItem): void => {
     setConfirmState({
       title: t('删除账号'),
@@ -506,6 +519,14 @@ export default function AccountSessions(): JSX.Element {
                         </Button>
                         <Button variant="outline" size="sm" onClick={() => openEdit(session)}>
                           <Pencil size={14} />
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleToggleStatus(session)}
+                          title={session.status === 'enabled' ? t('停用') : t('启用')}
+                        >
+                          <Power size={14} />
                         </Button>
                         <Button
                           variant="outline"
