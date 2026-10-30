@@ -171,7 +171,7 @@ fn machine_os() -> String {
 
 fn random_hex(len: usize) -> String {
     use rand::RngCore;
-    let mut bytes = vec![0u8; (len + 1) / 2];
+    let mut bytes = vec![0u8; len.div_ceil(2)];
     rand::thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes).chars().take(len).collect()
 }
@@ -215,7 +215,7 @@ fn gf_inv(a: u8) -> u8 {
 }
 
 fn rotl(value: u8, bits: u32) -> u8 {
-    (value << bits) | (value >> (8 - bits))
+    value.rotate_left(bits)
 }
 
 /// 按算法生成 AES S-box（不依赖手抄常量表）。
@@ -312,11 +312,11 @@ fn mix_columns(state: &mut [u8; 16]) {
 
 fn aes_encrypt_block(block: &mut [u8; 16], keys: &[[u8; 16]; 11], table: &[u8; 256]) {
     add_round_key(block, &keys[0]);
-    for round in 1..10 {
+    for key in keys.iter().take(10).skip(1) {
         sub_bytes(block, table);
         shift_rows(block);
         mix_columns(block);
-        add_round_key(block, &keys[round]);
+        add_round_key(block, key);
     }
     sub_bytes(block, table);
     shift_rows(block);
@@ -334,7 +334,7 @@ fn aes128_cbc_base64(key16: &str, plaintext: &[u8]) -> Result<String, String> {
 
     let mut data = plaintext.to_vec();
     let pad = 16 - (data.len() % 16);
-    data.extend(std::iter::repeat(pad as u8).take(pad));
+    data.extend(std::iter::repeat_n(pad as u8, pad));
 
     let mut previous = key;
     let mut out = Vec::with_capacity(data.len());
@@ -475,7 +475,7 @@ fn big_modpow(base: &[u32], exponent: u32, modulus: &[u32]) -> Vec<u32> {
 fn rsa_encrypt_base64(plaintext: &str) -> Result<String, String> {
     use rand::RngCore;
     let modulus = big_from_hex(RSA_MODULUS_HEX);
-    let key_len = (big_bits(&modulus) + 7) / 8;
+    let key_len = big_bits(&modulus).div_ceil(8);
     let message = plaintext.as_bytes();
     if message.len() + 11 > key_len {
         return Err("Qoder 签名内容过长".to_string());
@@ -498,7 +498,7 @@ fn rsa_encrypt_base64(plaintext: &str) -> Result<String, String> {
     encoded.extend_from_slice(message);
 
     // 大端字节 → 小端 limb
-    let mut limbs = vec![0u32; (encoded.len() + 3) / 4];
+    let mut limbs = vec![0u32; encoded.len().div_ceil(4)];
     for (index, chunk) in encoded.chunks(4).enumerate() {
         let mut word = 0u32;
         for (offset, byte) in chunk.iter().enumerate() {
@@ -543,8 +543,8 @@ mod tests {
         let keys = expand_key(&key);
         let table = sbox();
         let mut block = [0u8; 16];
-        for index in 0..16 {
-            block[index] = (index * 0x11) as u8;
+        for (index, byte) in block.iter_mut().enumerate() {
+            *byte = (index * 0x11) as u8;
         }
         aes_encrypt_block(&mut block, &keys, &table);
         assert_eq!(
