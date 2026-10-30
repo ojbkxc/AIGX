@@ -43,7 +43,64 @@ pub struct ProviderSpec {
 }
 
 /// 支持的 provider 目录。
+///
+/// 前半段对齐 Agent2API 的内置/预置供应商（官方与托管端点，凭 API Key 即可转发），
+/// 后半段是 AIGX 原有内置项；`openai_compatible` 永远是「自定义地址」的落点。
 pub const PROVIDERS: &[ProviderSpec] = &[
+    ProviderSpec {
+        kind: "openai",
+        label: "OpenAI",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.openai.com/v1",
+    },
+    ProviderSpec {
+        kind: "huggingface",
+        label: "HuggingFace",
+        protocol: Protocol::Openai,
+        default_base_url: "https://router.huggingface.co/v1",
+    },
+    ProviderSpec {
+        kind: "nvidia",
+        label: "NVIDIA NIM",
+        protocol: Protocol::Openai,
+        default_base_url: "https://integrate.api.nvidia.com/v1",
+    },
+    ProviderSpec {
+        kind: "siliconflow",
+        label: "硅基流动 SiliconFlow",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.siliconflow.cn/v1",
+    },
+    ProviderSpec {
+        kind: "volcengine",
+        label: "火山方舟",
+        protocol: Protocol::Openai,
+        default_base_url: "https://ark.cn-beijing.volces.com/api/v3",
+    },
+    ProviderSpec {
+        kind: "zai",
+        label: "Z.ai Coding",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.z.ai/api/coding/paas/v4",
+    },
+    ProviderSpec {
+        kind: "minimax",
+        label: "MiniMax",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.minimax.io/v1",
+    },
+    ProviderSpec {
+        kind: "moonshot",
+        label: "Moonshot Kimi",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.moonshot.cn/v1",
+    },
+    ProviderSpec {
+        kind: "ollama",
+        label: "Ollama（本地）",
+        protocol: Protocol::Openai,
+        default_base_url: "http://127.0.0.1:11434/v1",
+    },
     ProviderSpec {
         kind: DEFAULT_PROVIDER_KIND,
         label: "OpenAI 兼容（自填地址）",
@@ -82,13 +139,25 @@ pub fn all() -> &'static [ProviderSpec] {
 }
 
 /// 按 kind（含常见别名）查找 provider。
+///
+/// 先按 kind 精确命中（这样 `openai` 这类既是内置 kind 又是历史别名的值
+/// 不会被重定向），再走别名表兼容旧配置。
 pub fn find(kind: &str) -> Option<&'static ProviderSpec> {
     let lower = kind.trim().to_ascii_lowercase();
+    if let Some(spec) = PROVIDERS.iter().find(|p| p.kind == lower) {
+        return Some(spec);
+    }
     let canonical: &str = match lower.as_str() {
         "" => DEFAULT_PROVIDER_KIND,
-        "openai" | "openai-compatible" | "oaicompat" => DEFAULT_PROVIDER_KIND,
+        "openai-compatible" | "oaicompat" => DEFAULT_PROVIDER_KIND,
         "claude" => "anthropic",
         "google" | "google_gemini" => "gemini",
+        "hf" | "hugging_face" => "huggingface",
+        "nim" => "nvidia",
+        "silicon" => "siliconflow",
+        "volces" | "ark" => "volcengine",
+        "z.ai" | "zhipu" | "glm" => "zai",
+        "kimi" => "moonshot",
         other => other,
     };
     PROVIDERS.iter().find(|p| p.kind == canonical)
@@ -107,9 +176,27 @@ mod tests {
 
     #[test]
     fn aliases_resolve_to_canonical_kind() {
-        assert_eq!(find("OpenAI").map(|p| p.kind), Some(DEFAULT_PROVIDER_KIND));
+        assert_eq!(find("openai").map(|p| p.kind), Some("openai"));
+        assert_eq!(find("openai-compatible").map(|p| p.kind), Some(DEFAULT_PROVIDER_KIND));
         assert_eq!(find("claude").map(|p| p.kind), Some("anthropic"));
+        assert_eq!(find("zhipu").map(|p| p.kind), Some("zai"));
+        assert_eq!(find("kimi").map(|p| p.kind), Some("moonshot"));
         assert_eq!(find("").map(|p| p.kind), Some(DEFAULT_PROVIDER_KIND));
+    }
+
+    #[test]
+    fn builtin_providers_have_default_endpoints() {
+        for spec in all() {
+            if spec.kind == DEFAULT_PROVIDER_KIND {
+                assert!(spec.default_base_url.is_empty());
+            } else {
+                assert!(
+                    spec.default_base_url.starts_with("http"),
+                    "{} should ship a default endpoint",
+                    spec.kind
+                );
+            }
+        }
     }
 
     #[test]

@@ -1591,5 +1591,19 @@
   "顶部编辑": "Edit above",
   "启用更新模块": "Enable update module",
   "读取更新设置失败": "Failed to load update settings",
-  "已回滚，请手动重启服务": "Rolled back; please restart the service manually"
+  "已回滚，请手动重启服务": "Rolled back; please restart the service manually",
+  "选择供应商": "Select provider",
+  "Agent（内置）": "Agent (built-in)",
+  "预置 API": "Preset API",
+  "供应商类型": "Provider type",
+  "供应商列表": "Provider list",
+  "搜索供应商": "Search providers",
+  "没有匹配的供应商": "No matching providers",
+  "自定义地址": "Custom URL",
+  "OpenAI 兼容（自定义地址）": "OpenAI compatible (custom URL)",
+  "Anthropic 兼容（自定义地址）": "Anthropic compatible (custom URL)",
+  "Gemini 兼容（自定义地址）": "Gemini compatible (custom URL)",
+  "按 {base}/chat/completions 转发": "Forwards to {base}/chat/completions",
+  "按 {base}/v1/messages 转发": "Forwards to {base}/v1/messages",
+  "按 {base}/models 转发": "Forwards to {base}/models"
 }

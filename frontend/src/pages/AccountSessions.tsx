@@ -4,13 +4,157 @@ import { FlaskConical, Pencil, Plus, Power, RotateCcw, Trash2, Upload } from 'lu
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, EmptyState, Input, Select, SkeletonTable, Textarea } from '../components/ui';
+import { Button, Card, EmptyState, Input, Select, SkeletonTable, Tabs, Textarea } from '../components/ui';
 import type {
   AccountProviderItem,
   AccountSessionItem,
   AccountSessionStatsItem,
   ChannelItem,
 } from '../types';
+import './AccountSessions.css';
+
+/**
+ * 供应商选择分段 —— 对齐 Agent2API 的「Agent（内置）/ 预置 API / 自定义」：
+ * - Agent：网关内置 provider 目录（默认上游地址开箱可用）；
+ * - 预置 API：官方/托管端点模板，点卡片把协议与地址预填进表单；
+ * - 自定义：自己填上游地址（OpenAI / Anthropic / Gemini 三种协议）。
+ */
+type ProviderSegment = 'agent' | 'preset' | 'custom';
+
+type ProviderProtocol = 'openai' | 'anthropic' | 'gemini';
+
+interface PresetProviderItem {
+  key: string;
+  name: string;
+  protocol: ProviderProtocol;
+  base_url: string;
+  hint?: string;
+}
+
+/** 预置端点模板（取自 Agent2API preset 目录；与内置目录同地址的会在渲染时去重） */
+const PRESET_PROVIDERS: PresetProviderItem[] = [
+  {
+    key: 'openai',
+    name: 'OpenAI',
+    protocol: 'openai',
+    base_url: 'https://api.openai.com/v1',
+  },
+  {
+    key: 'anthropic',
+    name: 'Anthropic',
+    protocol: 'anthropic',
+    base_url: 'https://api.anthropic.com',
+  },
+  {
+    key: 'openrouter',
+    name: 'OpenRouter',
+    protocol: 'openai',
+    base_url: 'https://openrouter.ai/api/v1',
+  },
+  {
+    key: 'huggingface',
+    name: 'HuggingFace',
+    protocol: 'openai',
+    base_url: 'https://router.huggingface.co/v1',
+  },
+  {
+    key: 'nvidia',
+    name: 'NVIDIA',
+    protocol: 'openai',
+    base_url: 'https://integrate.api.nvidia.com/v1',
+  },
+  {
+    key: 'deepseek-anthropic',
+    name: 'DeepSeek（Anthropic 端点）',
+    protocol: 'anthropic',
+    base_url: 'https://api.deepseek.com/anthropic',
+  },
+  {
+    key: 'glm-cn',
+    name: 'GLM 中国',
+    protocol: 'openai',
+    base_url: 'https://open.bigmodel.cn/api/coding/paas/v4',
+  },
+  {
+    key: 'zai-anthropic',
+    name: 'Z.ai（Anthropic 端点）',
+    protocol: 'anthropic',
+    base_url: 'https://api.z.ai/api/anthropic',
+  },
+  {
+    key: 'siliconflow-intl',
+    name: 'SiliconFlow 国际',
+    protocol: 'openai',
+    base_url: 'https://api.siliconflow.com/v1',
+  },
+  {
+    key: 'volcengine-ark',
+    name: '火山方舟 Coding',
+    protocol: 'openai',
+    base_url: 'https://ark.cn-beijing.volces.com/api/coding/v3',
+  },
+  {
+    key: 'alicode-cn',
+    name: '阿里云百炼 Coding（国内）',
+    protocol: 'openai',
+    base_url: 'https://coding.dashscope.aliyuncs.com/v1',
+  },
+  {
+    key: 'alicode-intl',
+    name: '阿里云百炼 Coding（国际）',
+    protocol: 'openai',
+    base_url: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+  },
+  {
+    key: 'alims-intl',
+    name: '阿里云百炼模型服务（国际）',
+    protocol: 'openai',
+    base_url: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+  },
+  {
+    key: 'alitp-intl',
+    name: '阿里云 Token Plan（国际）',
+    protocol: 'openai',
+    base_url: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+  },
+  {
+    key: 'xiaomi-mimo',
+    name: '小米 MiMo Token Plan',
+    protocol: 'openai',
+    base_url: 'https://token-plan-sgp.xiaomimimo.com/v1',
+  },
+  {
+    key: 'minimax-cn',
+    name: 'MiniMax 中国',
+    protocol: 'openai',
+    base_url: 'https://api.minimaxi.com/v1',
+  },
+  {
+    key: 'sensenova',
+    name: '商汤日日新',
+    protocol: 'openai',
+    base_url: 'https://api.sensenova.cn/compatible-mode/v1',
+  },
+];
+
+/** 自定义分段：三种协议，地址由用户自己填。 */
+const CUSTOM_PROTOCOLS: Array<{ kind: string; labelKey: string; hintKey: string }> = [
+  { kind: 'openai_compatible', labelKey: 'OpenAI 兼容（自定义地址）', hintKey: '按 {base}/chat/completions 转发' },
+  { kind: 'anthropic', labelKey: 'Anthropic 兼容（自定义地址）', hintKey: '按 {base}/v1/messages 转发' },
+  { kind: 'gemini', labelKey: 'Gemini 兼容（自定义地址）', hintKey: '按 {base}/models 转发' },
+];
+
+/** 协议 → 落库 provider kind（预置模板按协议落到对应兼容 kind）。 */
+function presetKind(protocol: ProviderProtocol): string {
+  if (protocol === 'anthropic') return 'anthropic';
+  if (protocol === 'gemini') return 'gemini';
+  return 'openai_compatible';
+}
+
+/** URL 归一（去尾斜杠 / 小写），用于内置与预置同地址去重。 */
+function normalizeUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '').toLowerCase();
+}
 
 interface SessionFormState {
   channel_id: string;
@@ -98,6 +242,10 @@ export default function AccountSessions(): JSX.Element {
   const [form, setForm] = useState<SessionFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
 
+  // 供应商选择：Agent（内置）/ 预置 API / 自定义（仅新增时展示，编辑保留原下拉）
+  const [pickSegment, setPickSegment] = useState<ProviderSegment>('agent');
+  const [providerSearch, setProviderSearch] = useState('');
+
   const [showBulk, setShowBulk] = useState(false);
   const [bulk, setBulk] = useState<BulkFormState>(EMPTY_BULK);
 
@@ -136,6 +284,8 @@ export default function AccountSessions(): JSX.Element {
       ...EMPTY_FORM,
       channel_id: channelFilter || accountChannels[0]?.id || '',
     });
+    setPickSegment('agent');
+    setProviderSearch('');
     setShowModal(true);
   };
 
@@ -379,6 +529,49 @@ export default function AccountSessions(): JSX.Element {
     );
   });
 
+  // ── 供应商选择（仅新增账号时使用）──
+  const providerLabel = (kind: string): string =>
+    providers.find((p) => p.kind === kind)?.label ?? kind;
+
+  const providerSearchNeedle = providerSearch.trim().toLowerCase();
+
+  // 内置目录里已有同地址的，预置段不再重复出现（Agent 段已经覆盖）
+  const builtinUrls = new Set(
+    providers
+      .map((p) => normalizeUrl(p.default_base_url || ''))
+      .filter((url) => url.length > 0),
+  );
+
+  // 「自定义地址」的落点（openai_compatible）不在 Agent 段重复展示
+  const agentCards = providers
+    .filter((p) => p.kind !== 'openai_compatible')
+    .filter(
+      (p) =>
+        !providerSearchNeedle ||
+        p.label.toLowerCase().includes(providerSearchNeedle) ||
+        p.kind.toLowerCase().includes(providerSearchNeedle) ||
+        (p.default_base_url || '').toLowerCase().includes(providerSearchNeedle),
+    );
+
+  const presetCards = PRESET_PROVIDERS.filter(
+    (p) => !builtinUrls.has(normalizeUrl(p.base_url)),
+  ).filter(
+    (p) =>
+      !providerSearchNeedle ||
+      p.name.toLowerCase().includes(providerSearchNeedle) ||
+      p.base_url.toLowerCase().includes(providerSearchNeedle),
+  );
+
+  const pickProvider = (kind: string, baseUrl: string): void => {
+    setForm((prev) => ({ ...prev, provider: kind, base_url: baseUrl }));
+  };
+
+  const selectedProviderLabel = providerLabel(form.provider);
+  const effectiveEndpoint =
+    form.base_url.trim()
+    || providers.find((p) => p.kind === form.provider)?.default_base_url
+    || '';
+
   if (loading) return <SkeletonTable columns={7} rows={5} />;
 
   return (
@@ -602,17 +795,115 @@ export default function AccountSessions(): JSX.Element {
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
               />
-              <Select
-                label={t('Provider')}
-                value={form.provider}
-                onChange={(e) => setForm({ ...form, provider: e.target.value })}
-              >
-                {providers.map((p) => (
-                  <option key={p.kind} value={p.kind}>
-                    {p.label}
-                  </option>
-                ))}
-              </Select>
+              {editing ? (
+                <Select
+                  label={t('Provider')}
+                  value={form.provider}
+                  onChange={(e) => setForm({ ...form, provider: e.target.value })}
+                >
+                  {providers.map((p) => (
+                    <option key={p.kind} value={p.kind}>
+                      {p.label}
+                    </option>
+                  ))}
+                </Select>
+              ) : (
+                <div className="provider-picker">
+                  <div className="provider-picker-head">
+                    <span className="provider-picker-label">{t('选择供应商')}</span>
+                    <span className="provider-picker-selected" title={effectiveEndpoint}>
+                      {t('已选')}：{selectedProviderLabel}
+                      {effectiveEndpoint ? ` · ${effectiveEndpoint}` : ''}
+                    </span>
+                  </div>
+                  <Tabs<ProviderSegment>
+                    items={[
+                      { key: 'agent', label: t('Agent（内置）') },
+                      { key: 'preset', label: t('预置 API') },
+                      { key: 'custom', label: t('自定义') },
+                    ]}
+                    active={pickSegment}
+                    onChange={(key) => {
+                      setPickSegment(key);
+                      setProviderSearch('');
+                    }}
+                    ariaLabel={t('供应商类型')}
+                    className="provider-picker-tabs"
+                  />
+                  {pickSegment !== 'custom' && (
+                    <Input
+                      placeholder={t('搜索供应商')}
+                      value={providerSearch}
+                      onChange={(e) => setProviderSearch(e.target.value)}
+                    />
+                  )}
+                  <div className="provider-grid" role="listbox" aria-label={t('供应商列表')}>
+                    {pickSegment === 'agent' &&
+                      agentCards.map((p) => {
+                        const active =
+                          form.provider === p.kind &&
+                          normalizeUrl(form.base_url) === normalizeUrl(p.default_base_url);
+                        return (
+                          <button
+                            type="button"
+                            key={p.kind}
+                            role="option"
+                            aria-selected={active}
+                            className={`provider-card${active ? ' active' : ''}`}
+                            onClick={() => pickProvider(p.kind, '')}
+                          >
+                            <span className="provider-card-title">{p.label}</span>
+                            <span className="provider-card-meta">
+                              {p.default_base_url || t('自定义地址')}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    {pickSegment === 'preset' &&
+                      presetCards.map((p) => {
+                        const kind = presetKind(p.protocol);
+                        const active =
+                          form.provider === kind &&
+                          normalizeUrl(form.base_url) === normalizeUrl(p.base_url);
+                        return (
+                          <button
+                            type="button"
+                            key={p.key}
+                            role="option"
+                            aria-selected={active}
+                            className={`provider-card${active ? ' active' : ''}`}
+                            onClick={() => pickProvider(kind, p.base_url)}
+                          >
+                            <span className="provider-card-title">{p.name}</span>
+                            <span className="provider-card-meta">{p.base_url}</span>
+                          </button>
+                        );
+                      })}
+                    {pickSegment === 'custom' &&
+                      CUSTOM_PROTOCOLS.map((p) => {
+                        const active = form.provider === p.kind;
+                        return (
+                          <button
+                            type="button"
+                            key={p.kind}
+                            role="option"
+                            aria-selected={active}
+                            className={`provider-card${active ? ' active' : ''}`}
+                            onClick={() => pickProvider(p.kind, '')}
+                          >
+                            <span className="provider-card-title">{t(p.labelKey)}</span>
+                            <span className="provider-card-meta">{t(p.hintKey)}</span>
+                          </button>
+                        );
+                      })}
+                    {pickSegment !== 'custom' &&
+                      ((pickSegment === 'agent' && !agentCards.length) ||
+                        (pickSegment === 'preset' && !presetCards.length)) && (
+                        <div className="provider-grid-empty">{t('没有匹配的供应商')}</div>
+                      )}
+                  </div>
+                </div>
+              )}
               <Input
                 label={t('上游地址（可选，留空用 provider 默认）')}
                 placeholder="https://api.deepseek.com"

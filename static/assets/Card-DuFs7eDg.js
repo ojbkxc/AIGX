@@ -1,0 +1,1 @@
+import{j as s,n as r}from"./index-DBI_z0bt.js";function j({children:c,title:a,actions:d,className:e,headerClassName:n,bodyClassName:i}){return s.jsxs("div",{className:r("card",e),children:[(a||d)&&s.jsxs("div",{className:r("card-header",n),children:[s.jsx("h2",{children:a}),d]}),s.jsx("div",{className:r("card-body",i),children:c})]})}export{j as C};
