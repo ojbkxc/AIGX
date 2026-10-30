@@ -87,7 +87,10 @@ pub fn build_auth_headers(
         ("Cosy-User".to_string(), identity.user_id.to_string()),
         ("Cosy-Date".to_string(), timestamp),
         ("Cosy-Version".to_string(), COSY_VERSION.to_string()),
-        ("Cosy-Machineid".to_string(), identity.machine_id.to_string()),
+        (
+            "Cosy-Machineid".to_string(),
+            identity.machine_id.to_string(),
+        ),
         (
             "Cosy-Machinetoken".to_string(),
             identity.machine_id.to_string(),
@@ -97,10 +100,7 @@ pub fn build_auth_headers(
         ("Cosy-Clienttype".to_string(), CLIENT_TYPE.to_string()),
         ("Cosy-Clientip".to_string(), CLIENT_IP.to_string()),
         ("Cosy-Bodyhash".to_string(), body_hash),
-        (
-            "Cosy-Bodylength".to_string(),
-            body_bytes.len().to_string(),
-        ),
+        ("Cosy-Bodylength".to_string(), body_bytes.len().to_string()),
         ("Cosy-Sigpath".to_string(), sig_path),
         ("Cosy-Data-Policy".to_string(), DATA_POLICY.to_string()),
         ("Cosy-Organization-Id".to_string(), String::new()),
@@ -239,7 +239,12 @@ fn expand_key(key: &[u8; 16]) -> [[u8; 16]; 11] {
     let boxed = sbox();
     let mut words = [[0u8; 4]; 44];
     for index in 0..4 {
-        words[index] = [key[4 * index], key[4 * index + 1], key[4 * index + 2], key[4 * index + 3]];
+        words[index] = [
+            key[4 * index],
+            key[4 * index + 1],
+            key[4 * index + 2],
+            key[4 * index + 3],
+        ];
     }
     for index in 4..44 {
         let mut temp = words[index - 1];
@@ -292,7 +297,12 @@ fn shift_rows(state: &mut [u8; 16]) {
 fn mix_columns(state: &mut [u8; 16]) {
     for column in 0..4 {
         let base = 4 * column;
-        let a = [state[base], state[base + 1], state[base + 2], state[base + 3]];
+        let a = [
+            state[base],
+            state[base + 1],
+            state[base + 2],
+            state[base + 3],
+        ];
         state[base] = xtime(a[0]) ^ (xtime(a[1]) ^ a[1]) ^ a[2] ^ a[3];
         state[base + 1] = a[0] ^ xtime(a[1]) ^ (xtime(a[2]) ^ a[2]) ^ a[3];
         state[base + 2] = a[0] ^ a[1] ^ xtime(a[2]) ^ (xtime(a[3]) ^ a[3]);
@@ -430,7 +440,11 @@ fn big_mod(a: &[u32], m: &[u32]) -> Vec<u32> {
         // 取 a 的第 bit 位
         let word = bit / 32;
         let offset = bit % 32;
-        let value = if word < a.len() { (a[word] >> offset) & 1 } else { 0 };
+        let value = if word < a.len() {
+            (a[word] >> offset) & 1
+        } else {
+            0
+        };
         remainder[0] |= value;
 
         let mut candidate = remainder.clone();
@@ -552,8 +566,7 @@ mod tests {
     #[test]
     fn signature_path_drops_algo_prefix() {
         assert_eq!(
-            signature_path("https://gateway.qoder.com.cn/algo/api/v2/model/list?Encode=1")
-                .unwrap(),
+            signature_path("https://gateway.qoder.com.cn/algo/api/v2/model/list?Encode=1").unwrap(),
             "/api/v2/model/list"
         );
     }
@@ -564,8 +577,7 @@ mod tests {
         let raw = base64::engine::general_purpose::STANDARD
             .decode(encrypted)
             .unwrap();
+        // 密文定长（模数 1024 位 → 128 字节）；首字节随随机 PS 变化，不固定
         assert_eq!(raw.len(), 128);
-        assert_eq!(raw[0], 0x00);
-        assert_eq!(raw[1], 0x02);
     }
 }

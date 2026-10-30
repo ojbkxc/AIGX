@@ -370,12 +370,7 @@ fn map_finish(raw: &str) -> FinishReason {
 }
 
 fn usage_of(usage: &Value) -> UsageStats {
-    let number = |key: &str| -> u64 {
-        usage
-            .get(key)
-            .and_then(Value::as_i64)
-            .unwrap_or(0) as u64
-    };
+    let number = |key: &str| -> u64 { usage.get(key).and_then(Value::as_i64).unwrap_or(0) as u64 };
     let prompt = number("prompt_tokens");
     let completion = number("completion_tokens");
     let total = number("total_tokens");
@@ -641,7 +636,8 @@ mod tests {
 
     #[test]
     fn envelope_body_is_unwrapped_and_parsed() {
-        let payload = r#"{"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"content\":\"你\"}}]}"}"#;
+        let payload =
+            r#"{"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"content\":\"你\"}}]}"}"#;
         match decode_event(&SseEvent::Data(payload.to_string()), "x", "m") {
             Decoded::Chunk(chunk) => assert_eq!(chunk.delta.content.as_deref(), Some("你")),
             _ => panic!("信封内层应是 OpenAI chunk"),
