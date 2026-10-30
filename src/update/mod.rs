@@ -1230,7 +1230,7 @@ fn compare_versions(a: &str, b: &str) -> Option<i32> {
 }
 
 /// 从 Release 列表里挑版本最高的一版（预发布通道用）。
-fn pick_listed_release<'a>(payload: &'a Value, only_prerelease: bool) -> Option<&'a Value> {
+fn pick_listed_release(payload: &Value, only_prerelease: bool) -> Option<&Value> {
     let list = payload.as_array()?;
     let mut best: Option<&Value> = None;
     let mut first: Option<&Value> = None;
