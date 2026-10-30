@@ -28,6 +28,8 @@ export default function AgentSettingsPanel(): JSX.Element {
   const [error, setError] = useState('');
   const [enabled, setEnabled] = useState(false);
   const [model, setModel] = useState('');
+  const [channel, setChannel] = useState('');
+  const [channels, setChannels] = useState<Array<{ id: string; name: string; status?: string }>>([]);
   const [systemPrompt, setSystemPrompt] = useState('');
   const [effort, setEffort] = useState<'off' | 'low' | 'medium' | 'high'>('off');
   const [maxTurns, setMaxTurns] = useState('12');
@@ -39,11 +41,16 @@ export default function AgentSettingsPanel(): JSX.Element {
   useEffect(() => {
     void (async () => {
       try {
-        const res = await api.getAgentSettings();
+        const [res, chRes] = await Promise.all([api.getAgentSettings(), api.listChannels()]);
+        const list = (chRes?.data || [])
+          .filter((c) => (c.status ?? 'enabled') === 'enabled')
+          .map((c) => ({ id: String(c.id), name: c.name, status: c.status }));
+        setChannels(list);
         const d = res?.data;
         if (!d) return;
         setEnabled(Boolean(d.enabled));
         setModel(d.model || '');
+        setChannel(d.channel || '');
         setSystemPrompt(d.systemPrompt || '');
         setEffort((['off', 'low', 'medium', 'high'] as const).includes(d.reasoning_effort as 'off')
           ? (d.reasoning_effort as 'off' | 'low' | 'medium' | 'high')
@@ -77,6 +84,7 @@ export default function AgentSettingsPanel(): JSX.Element {
       const res = await api.saveAgentSettings({
         enabled,
         model: model.trim(),
+        channel: channel.trim(),
         max_turns: Math.max(1, Number(maxTurns) || 12),
         approval_timeout_secs: Math.max(0, Number(approvalTimeout) || 300),
         max_history: Math.max(1, Number(maxHistory) || 20),
@@ -88,6 +96,7 @@ export default function AgentSettingsPanel(): JSX.Element {
       if (d) {
         setEnabled(Boolean(d.enabled));
         setModel(d.model || '');
+        setChannel(d.channel || '');
         setSystemPrompt(d.systemPrompt || '');
         setDisabledTools(new Set(d.disabledTools || []));
       }
@@ -130,6 +139,25 @@ export default function AgentSettingsPanel(): JSX.Element {
             <label>{t('对话模型')}</label>
             <ModelPicker value={model} onChange={setModel} />
             <div className="form-hint">{t('与聊天页共用同一模型列表；留空走全局默认模型。')}</div>
+          </div>
+
+          <div className="form-group">
+            <label>{t('渠道锁定')}</label>
+            <select
+              className="form-input"
+              value={channel}
+              onChange={(e) => setChannel(e.target.value)}
+            >
+              <option value="">{t('自动选择渠道（默认）')}</option>
+              {channels.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            <div className="form-hint">
+              {t('指定后 AI 助手只通过该渠道调用模型（排障用）；留空则按优先级自动选路。')}
+            </div>
           </div>
 
           <div className="form-group">
