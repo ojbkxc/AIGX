@@ -201,14 +201,12 @@ impl UpdateManager {
         } else {
             None
         };
-        let download = if guard.progress.active
-            || guard.progress.done
-            || guard.progress.error.is_some()
-        {
-            json!(guard.progress)
-        } else {
-            Value::Null
-        };
+        let download =
+            if guard.progress.active || guard.progress.done || guard.progress.error.is_some() {
+                json!(guard.progress)
+            } else {
+                Value::Null
+            };
         json!({
             "currentVersion": CURRENT_VERSION,
             "latestVersion": if latest_tag.is_empty() { Value::Null } else { json!(latest_tag) },
@@ -255,7 +253,10 @@ impl UpdateManager {
                 return Err("已有一次更新检查正在进行".to_string());
             }
             if guard.retry_at > now {
-                return Err(format!("更新检查冷却中，请约 {} 秒后再试", guard.retry_at - now));
+                return Err(format!(
+                    "更新检查冷却中，请约 {} 秒后再试",
+                    guard.retry_at - now
+                ));
             }
         }
         self.lock().checking = true;
@@ -449,7 +450,10 @@ impl UpdateManager {
         }
         let declared = response.content_length().unwrap_or(0);
         if declared > MAX_BUNDLE_BYTES {
-            return Err(format!("更新包体积异常（{} MB），已中止", declared / 1024 / 1024));
+            return Err(format!(
+                "更新包体积异常（{} MB），已中止",
+                declared / 1024 / 1024
+            ));
         }
         {
             let mut guard = self.lock();
@@ -488,7 +492,9 @@ impl UpdateManager {
             .map_err(|e| format!("写入更新包失败: {e}"))?;
         drop(file);
         if declared > 0 && received != declared {
-            return Err(format!("更新包不完整（期望 {declared} 字节，实际 {received} 字节）"));
+            return Err(format!(
+                "更新包不完整（期望 {declared} 字节，实际 {received} 字节）"
+            ));
         }
         Ok(hex::encode(hasher.finalize()))
     }
@@ -1046,8 +1052,7 @@ fn release_info(payload: &Value, repo: &str) -> ReleaseInfo {
             published
         }
     };
-    let bundle_name = host_arch()
-        .and_then(|arch| server_bundle_name(&tag, arch));
+    let bundle_name = host_arch().and_then(|arch| server_bundle_name(&tag, arch));
     let bundle = bundle_name
         .as_deref()
         .and_then(|name| pick_asset(payload.get("assets"), name));
@@ -1281,7 +1286,10 @@ mod tests {
     fn checksum_parser_accepts_sha256sum_output() {
         let hash = "a".repeat(64);
         assert_eq!(parse_checksum(&hash), Ok(hash.clone()));
-        assert_eq!(parse_checksum(&format!("{hash}  AIGX-1.2.3-server-linux-amd64.upd")), Ok(hash));
+        assert_eq!(
+            parse_checksum(&format!("{hash}  AIGX-1.2.3-server-linux-amd64.upd")),
+            Ok(hash)
+        );
         assert!(parse_checksum("deadbeef").is_err());
     }
 

@@ -1379,11 +1379,26 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             post(api::admin::account_sessions::handle_reset_account_session_cooldowns),
         )
         // 服务器自动更新（检查/应用/重启/回滚/设置）
-        .route("/api/update/status", get(api::admin::update::handle_update_status))
-        .route("/api/update/check", post(api::admin::update::handle_update_check))
-        .route("/api/update/apply", post(api::admin::update::handle_update_apply))
-        .route("/api/update/restart", post(api::admin::update::handle_update_restart))
-        .route("/api/update/rollback", post(api::admin::update::handle_update_rollback))
+        .route(
+            "/api/update/status",
+            get(api::admin::update::handle_update_status),
+        )
+        .route(
+            "/api/update/check",
+            post(api::admin::update::handle_update_check),
+        )
+        .route(
+            "/api/update/apply",
+            post(api::admin::update::handle_update_apply),
+        )
+        .route(
+            "/api/update/restart",
+            post(api::admin::update::handle_update_restart),
+        )
+        .route(
+            "/api/update/rollback",
+            post(api::admin::update::handle_update_rollback),
+        )
         .route(
             "/api/update/settings",
             get(api::admin::update::handle_get_update_settings)

@@ -172,16 +172,18 @@ pub async fn handle_put_update_settings(
             .map(|(owner, name)| !owner.is_empty() && !name.is_empty())
             .unwrap_or(false);
         if !valid {
-            return Err(error_response("仓库格式应为 owner/repo", StatusCode::BAD_REQUEST));
+            return Err(error_response(
+                "仓库格式应为 owner/repo",
+                StatusCode::BAD_REQUEST,
+            ));
         }
         config.update.repo = repo.to_string();
     }
     if let Some(api_base) = body.api_base.as_deref() {
         let trimmed = api_base.trim().trim_end_matches('/');
         if !trimmed.is_empty() {
-            let parsed = url::Url::parse(trimmed).map_err(|_| {
-                error_response("更新源地址不是合法 URL", StatusCode::BAD_REQUEST)
-            })?;
+            let parsed = url::Url::parse(trimmed)
+                .map_err(|_| error_response("更新源地址不是合法 URL", StatusCode::BAD_REQUEST))?;
             if parsed.scheme() != "http" && parsed.scheme() != "https" {
                 return Err(error_response(
                     "更新源地址只支持 http/https",
