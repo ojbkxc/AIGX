@@ -54,10 +54,7 @@ impl CatPawBridge {
             ("M-APPKEY".to_string(), APP_KEY.to_string()),
             ("gray-set".to_string(), "new-agent-sdk".to_string()),
             ("enableHeartBeat".to_string(), "true".to_string()),
-            (
-                "X-Agent-Version".to_string(),
-                CLIENT_VERSION.to_string(),
-            ),
+            ("X-Agent-Version".to_string(), CLIENT_VERSION.to_string()),
             (
                 "Cookie".to_string(),
                 format!("X-Passport-Token={}", self.token.trim()),
