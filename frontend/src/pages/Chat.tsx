@@ -53,6 +53,8 @@ const DEFAULT_PROMPTS: Array<{ icon: typeof BarChart3; content: string }> = [
 const SESSIONS_KEY = 'aigx_playground_sessions';
 const ACTIVE_KEY = 'aigx_playground_active';
 const LEGACY_KEY = 'aigx_playground_messages';
+/** 本机最多保留的会话数（localStorage 有 5MB 上限，防无限增长）。 */
+const MAX_SESSIONS = 50;
 
 /** 一条游乐园会话（消息 + 模型快照，updated_at 用于列表排序） */
 interface PlaygroundSession {
@@ -275,7 +277,7 @@ export default function Chat(): JSX.Element {
     }
     saveActiveNow();
     const created = emptySession(modelRef.current);
-    persistSessions([created, ...sessionsRef.current]);
+    persistSessions([created, ...sessionsRef.current].slice(0, MAX_SESSIONS));
     activeRef.current = created.id;
     messagesRef.current = [];
     setActiveId(created.id);
