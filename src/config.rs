@@ -133,6 +133,81 @@ pub struct ChannelConfig {
     pub probe_interval_secs: u64,
 }
 
+/// 服务器自动更新配置（`[update]` 段）。
+///
+/// 只支持 Linux 服务器 / 容器（原地替换二进制与 static 目录后 exec 自重启）；
+/// 其它平台仍可手动检查版本，应用更新时返回明确的不支持提示。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateConfig {
+    /// 是否启用更新模块（关闭后定时任务不再检查，手动检查/更新仍可用）。
+    #[serde(default = "default_update_enabled")]
+    pub enabled: bool,
+    /// 是否按 `interval_hours` 周期自动检查新版本。
+    #[serde(default = "default_update_auto_check")]
+    pub auto_check: bool,
+    /// 发现新版本后是否自动应用（下载 → 校验 → 替换 → 重启），默认关闭。
+    #[serde(default)]
+    pub auto_apply: bool,
+    /// 自动检查间隔（小时，最小 1）。
+    #[serde(default = "default_update_interval_hours")]
+    pub interval_hours: u64,
+    /// 更新来源仓库（`owner/repo`）。
+    #[serde(default = "default_update_repo")]
+    pub repo: String,
+    /// 自建更新源根地址（与 GitHub API 同形）；空 = 官方 GitHub API。
+    #[serde(default)]
+    pub api_base: String,
+    /// 是否把预发布版本也纳入更新候选。
+    #[serde(default)]
+    pub include_prerelease: bool,
+    /// 访问更新源的代理（http/https/socks5），空 = 直连（仍读环境变量代理）。
+    #[serde(default)]
+    pub proxy: String,
+    /// GitHub 令牌（可选，提升 API 限额；不填走匿名 60 次/小时）。
+    #[serde(default)]
+    pub token: String,
+    /// 应用更新后是否自动重启服务（exec 自重启），默认开启。
+    #[serde(default = "default_update_restart")]
+    pub restart_after_apply: bool,
+}
+
+fn default_update_enabled() -> bool {
+    true
+}
+
+fn default_update_auto_check() -> bool {
+    true
+}
+
+fn default_update_interval_hours() -> u64 {
+    24
+}
+
+fn default_update_repo() -> String {
+    "ojbkxc/AIGX".to_string()
+}
+
+fn default_update_restart() -> bool {
+    true
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_update_enabled(),
+            auto_check: default_update_auto_check(),
+            auto_apply: false,
+            interval_hours: default_update_interval_hours(),
+            repo: default_update_repo(),
+            api_base: String::new(),
+            include_prerelease: false,
+            proxy: String::new(),
+            token: String::new(),
+            restart_after_apply: default_update_restart(),
+        }
+    }
+}
+
 /// AI 运维 Agent 配置（`[agent]` 段）——自举式运维工作台。
 ///
 /// Agent 的"大脑"走 AIGX 自己的渠道（进程内直调 bridge，复用渠道调度/
@@ -319,6 +394,9 @@ pub struct AppConfig {
     /// 渠道调度配置（`[channel]` 段）。
     #[serde(default)]
     pub channel: ChannelConfig,
+    /// 服务器自动更新配置（`[update]` 段）。
+    #[serde(default)]
+    pub update: UpdateConfig,
 }
 
 // ── Default implementations ──────────────────────────────────────────

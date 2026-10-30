@@ -6,7 +6,7 @@
 //!
 //! ## 协议子集（零依赖手写，不引 rmcp）
 //! - `initialize`：握手 → protocolVersion + serverInfo + tools 能力声明
-//! - `tools/list`：返回 17 个白名单工具（name/中文 description/inputSchema）
+//! - `tools/list`：返回 19 个白名单工具（name/中文 description/inputSchema）
 //! - `tools/call`：白名单校验后执行工具，结果 JSON 序列化为 text content
 //!
 //! ## fail-closed
@@ -47,6 +47,7 @@ use super::account_sessions::{
 };
 use super::common::{admin_id_from_session, record_audit, verify_admin};
 use super::logs::RequestLogQuery;
+use super::update::{handle_update_check, handle_update_status};
 use super::users::ListUsersQuery;
 use super::{
     handle_diagnostics_breakers, handle_diagnostics_channels, handle_diagnostics_summary,
@@ -326,6 +327,19 @@ fn tool_specs() -> Vec<ToolSpec> {
             schema: account_id_args(),
             write: true,
         },
+        // ── 更新×2（只读：版本状态与检查；应用/重启属高危，不进 MCP 白名单）──
+        ToolSpec {
+            name: "aigx_update_status",
+            description: "只读：服务器更新状态（当前/最新版本、下载进度、是否待重启、能否原地更新）",
+            schema: no_args(),
+            write: false,
+        },
+        ToolSpec {
+            name: "aigx_check_update",
+            description: "只读：立即检查 GitHub Release 是否有新版本（受最短间隔与限流冷却约束）",
+            schema: no_args(),
+            write: false,
+        },
     ]
 }
 
@@ -500,6 +514,15 @@ async fn exec_tool(
             )
             .await;
             audit_write_tool(state, headers, name, &id, None, &r).await;
+            Ok(handler_to_tool_result(r))
+        }
+        // ── 更新×2（只读）──
+        "aigx_update_status" => {
+            let r = handle_update_status(State(state.clone()), headers.clone()).await;
+            Ok(handler_to_tool_result(r))
+        }
+        "aigx_check_update" => {
+            let r = handle_update_check(State(state.clone()), headers.clone()).await;
             Ok(handler_to_tool_result(r))
         }
         // find_tool_spec 已挡掉未知工具；此分支仅作 fail-closed 兜底
@@ -759,11 +782,11 @@ mod tests {
         let specs = tool_specs();
         assert_eq!(
             specs.len(),
-            17,
-            "白名单固定 17 个工具（渠道运维 11 + 账号池 6）"
+            19,
+            "白名单固定 19 个工具（渠道运维 11 + 账号池 6 + 更新 2）"
         );
         let tools = tools_list_result()["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 19);
         let mut seen = std::collections::BTreeSet::new();
         for t in &tools {
             let name = t["name"].as_str().unwrap();

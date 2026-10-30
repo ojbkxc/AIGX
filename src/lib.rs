@@ -33,6 +33,7 @@ pub mod sse;
 pub mod storage;
 pub mod ticket;
 pub mod token_estimate;
+pub mod update;
 pub mod usage;
 pub mod user;
 pub mod user_group;

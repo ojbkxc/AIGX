@@ -76,6 +76,9 @@ const TOOL_LABELS: Record<string, string> = {
   aigx_account_session_add: '新增账号',
   aigx_account_session_update: '更新账号',
   aigx_channel_update: '更新渠道',
+  aigx_apply_update: '下载并更新版本',
+  aigx_restart_service: '重启服务',
+  aigx_rollback_update: '回滚版本',
 };
 
 /** 思考强度档位（off = 不发送思考参数，走服务端默认） */

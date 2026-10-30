@@ -37,6 +37,7 @@ mod sse;
 mod storage;
 mod ticket;
 mod token_estimate;
+mod update;
 mod usage;
 mod user;
 mod user_group;
@@ -384,6 +385,9 @@ async fn main() -> anyhow::Result<()> {
             .build(),
     );
 
+    // 服务器自动更新管理器（Release 检测 / 原地替换 / exec 自重启）
+    let update = crate::update::UpdateManager::new(store.clone(), data_dir.clone());
+
     let state = AppState {
         api_client,
         model_mapper,
@@ -440,6 +444,7 @@ async fn main() -> anyhow::Result<()> {
         prompt_source_cache: std::sync::Arc::new(
             crate::api::admin::prompts::PromptSourceCache::new(),
         ),
+        update,
     };
 
     tracing::info!(
@@ -561,6 +566,26 @@ async fn main() -> anyhow::Result<()> {
                 run: Box::new(move || {
                     let pool = sessions.clone();
                     Box::pin(async move { crate::account_session::maintenance::sweep(&pool) })
+                }),
+            });
+        }
+        // 服务器自动更新：每小时判断一次是否到配置的检查间隔；到点则拉
+        // GitHub Release，开启「自动应用」时下载替换并 exec 自重启。
+        {
+            let updater = state.update.clone();
+            let config_manager = state.config_manager.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "auto-update-check",
+                interval: Duration::from_secs(3600),
+                first_run_delay: Duration::from_secs(300),
+                run: Box::new(move || {
+                    let updater = updater.clone();
+                    let cfg = config_manager.clone();
+                    Box::pin(async move {
+                        let current = cfg.get().await;
+                        updater.tick(&current.update).await;
+                        0
+                    })
                 }),
             });
         }
@@ -1352,6 +1377,17 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/account-sessions/:id/reset-cooldown",
             post(api::admin::account_sessions::handle_reset_account_session_cooldowns),
+        )
+        // 服务器自动更新（检查/应用/重启/回滚/设置）
+        .route("/api/update/status", get(api::admin::update::handle_update_status))
+        .route("/api/update/check", post(api::admin::update::handle_update_check))
+        .route("/api/update/apply", post(api::admin::update::handle_update_apply))
+        .route("/api/update/restart", post(api::admin::update::handle_update_restart))
+        .route("/api/update/rollback", post(api::admin::update::handle_update_rollback))
+        .route(
+            "/api/update/settings",
+            get(api::admin::update::handle_get_update_settings)
+                .put(api::admin::update::handle_put_update_settings),
         )
         .route("/api/keys", get(api::admin::handle_list_keys))
         .route("/api/keys", post(api::admin::handle_add_key))

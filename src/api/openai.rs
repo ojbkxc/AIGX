@@ -177,6 +177,8 @@ pub struct AppState {
     pub agent_state: Option<Arc<crate::agent::AgentState>>,
     /// 公开提示词源内存缓存（Prompts 页「拉取公开源」）。
     pub prompt_source_cache: Arc<crate::api::admin::prompts::PromptSourceCache>,
+    /// 服务器自动更新管理器（Release 检测 / 下载 / 原地替换 / 自重启）。
+    pub update: crate::update::UpdateManager,
 }
 
 impl AppState {

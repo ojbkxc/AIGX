@@ -53,6 +53,8 @@ import type {
   PromptTranslateResult,
   PromptSource,
   PromptSourceItem,
+  UpdateStatusItem,
+  UpdateSettingsItem,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -301,6 +303,22 @@ export const api = {
   // Limits
   updateLimits: (data: Record<string, unknown>): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('PUT', `${API_BASE}/limits`, data),
+
+  // 服务器自动更新（检查 / 应用 / 重启 / 回滚 / 设置）
+  getUpdateStatus: (): Promise<ApiResponse<UpdateStatusItem>> =>
+    request<ApiResponse<UpdateStatusItem>>('GET', `${API_BASE}/update/status`),
+  checkUpdate: (): Promise<ApiResponse<UpdateStatusItem>> =>
+    request<ApiResponse<UpdateStatusItem>>('POST', `${API_BASE}/update/check`),
+  applyUpdate: (): Promise<ApiResponse<UpdateStatusItem>> =>
+    request<ApiResponse<UpdateStatusItem>>('POST', `${API_BASE}/update/apply`),
+  restartService: (): Promise<ApiResponse<{ restarting: boolean; delaySecs: number }>> =>
+    request<ApiResponse<{ restarting: boolean; delaySecs: number }>>('POST', `${API_BASE}/update/restart`),
+  rollbackUpdate: (): Promise<ApiResponse<{ restored: boolean; needRestart: boolean }>> =>
+    request<ApiResponse<{ restored: boolean; needRestart: boolean }>>('POST', `${API_BASE}/update/rollback`),
+  getUpdateSettings: (): Promise<ApiResponse<UpdateSettingsItem>> =>
+    request<ApiResponse<UpdateSettingsItem>>('GET', `${API_BASE}/update/settings`),
+  saveUpdateSettings: (data: Record<string, unknown>): Promise<ApiResponse<UpdateSettingsItem>> =>
+    request<ApiResponse<UpdateSettingsItem>>('PUT', `${API_BASE}/update/settings`, data),
 
   // Users
   listUsers: (params: Record<string, string | number> = {}): Promise<ApiList<User>> =>

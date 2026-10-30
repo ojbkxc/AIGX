@@ -918,3 +918,57 @@ export interface AccountSessionStatsItem {
   success: number;
   error: number;
 }
+
+/** 服务器自动更新状态（GET /api/update/status） */
+export interface UpdateStatusItem {
+  currentVersion: string;
+  latestVersion: string | null;
+  hasUpdate: boolean | null;
+  comparison: 'newer' | 'older' | 'same' | null;
+  releaseName?: string | null;
+  notes?: string | null;
+  publishedAt?: string | null;
+  pageUrl?: string | null;
+  prerelease?: boolean;
+  bundle?: { name: string; size: number; url: string } | null;
+  checksumAvailable?: boolean;
+  checkedAt: number;
+  lastError?: string | null;
+  retryAt: number;
+  checking: boolean;
+  applying: boolean;
+  pendingRestart: boolean;
+  download?: {
+    active: boolean;
+    done: boolean;
+    received: number;
+    total: number;
+    percent: number;
+    error?: string;
+  } | null;
+  supported: boolean;
+  writable: boolean;
+  backupAvailable: boolean;
+  downloadDir: string;
+  repository: string;
+  apiBase: string;
+  appliedVersion?: string | null;
+  appliedAt?: number;
+}
+
+/** 自动更新配置（GET/PUT /api/update/settings，token 为脱敏值） */
+export interface UpdateSettingsItem {
+  enabled: boolean;
+  auto_check: boolean;
+  auto_apply: boolean;
+  interval_hours: number;
+  repo: string;
+  api_base: string;
+  include_prerelease: boolean;
+  proxy: string;
+  token: string;
+  tokenConfigured: boolean;
+  restart_after_apply: boolean;
+  supported: boolean;
+  currentVersion: string;
+}

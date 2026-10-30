@@ -443,6 +443,37 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             }),
             risk: RiskLevel::HighRisk,
         },
+        // ── 服务器自动更新（查状态 / 检查 / 应用 / 重启 / 回滚）──
+        ToolSpec {
+            name: "aigx_update_status",
+            description: "只读：服务器更新状态（当前/最新版本、下载进度、是否待重启、能否原地更新）",
+            schema: no_args(),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_check_update",
+            description: "只读：立即检查 GitHub Release 是否有新版本（受最短间隔与限流冷却约束）",
+            schema: no_args(),
+            risk: RiskLevel::ReadOnly,
+        },
+        ToolSpec {
+            name: "aigx_apply_update",
+            description: "高危写：下载并应用最新版本（sha256 校验 → 替换二进制/static → 自动重启，服务会短暂中断）",
+            schema: no_args(),
+            risk: RiskLevel::HighRisk,
+        },
+        ToolSpec {
+            name: "aigx_restart_service",
+            description: "高危写：重启 AIGX 服务（exec 自重启，约 2 秒后断开，期间请求会失败）",
+            schema: no_args(),
+            risk: RiskLevel::HighRisk,
+        },
+        ToolSpec {
+            name: "aigx_rollback_update",
+            description: "高危写：回滚到上一版本（使用 aigx.bak / static.bak，重启后生效）",
+            schema: no_args(),
+            risk: RiskLevel::HighRisk,
+        },
     ]
 }
 
@@ -726,6 +757,22 @@ pub async fn exec_tool(
                 Json(body),
             )
             .await
+        }
+        // ── 服务器自动更新 ──
+        "aigx_update_status" => {
+            admin::update::handle_update_status(State(state.clone()), headers.clone()).await
+        }
+        "aigx_check_update" => {
+            admin::update::handle_update_check(State(state.clone()), headers.clone()).await
+        }
+        "aigx_apply_update" => {
+            admin::update::handle_update_apply(State(state.clone()), headers.clone()).await
+        }
+        "aigx_restart_service" => {
+            admin::update::handle_update_restart(State(state.clone()), headers.clone()).await
+        }
+        "aigx_rollback_update" => {
+            admin::update::handle_update_rollback(State(state.clone()), headers.clone()).await
         }
         _ => {
             return Err((

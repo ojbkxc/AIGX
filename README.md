@@ -152,7 +152,7 @@ API Key:  sk-xxxxxxxxxxxxxxxx（网关创建的令牌）
 
 ### 用 AI 运维网关（MCP）
 
-内置 MCP server（Model Context Protocol），codex / Claude Code / CodeArts 等支持 MCP 的客户端可直接挂载，对话式管理网关——AI 自动发现 17 个白名单工具，无需 SSH 或读文档。
+内置 MCP server（Model Context Protocol），codex / Claude Code / CodeArts 等支持 MCP 的客户端可直接挂载，对话式管理网关——AI 自动发现 19 个白名单工具，无需 SSH 或读文档。
 
 **第 1 步：拿管理 token**（MCP 鉴权用的"通行证"，与管理后台登录同一套）
 
@@ -192,9 +192,36 @@ claude mcp add --transport http aigx http://your-gateway.example.com:9527/api/mc
 **协议与安全**：
 
 - **协议**：Streamable HTTP（`POST /api/mcp`，JSON-RPC 2.0，MCP 2025-03-26），未知方法 / 工具一律 fail-closed 拒绝
-- **工具集**：诊断×3（系统体检 / 渠道批量测活 / 熔断器快照）+ 查询×4（渠道 / 用户 / 日志 / 定价）+ 写×4（渠道启停 / 测试 / 重置熔断）+ 账号池×6（账号列表 / 统计 / 单号探活 / 启停 / 清冷却）——写操作全部**可人工回滚**，且每次调用自动写入审计日志；批量禁用 / 删用户 / 动余额等高危操作有意不在白名单内
+- **工具集**：诊断×3（系统体检 / 渠道批量测活 / 熔断器快照）+ 查询×4（渠道 / 用户 / 日志 / 定价）+ 写×4（渠道启停 / 测试 / 重置熔断）+ 账号池×6（账号列表 / 统计 / 单号探活 / 启停 / 清冷却）+ 更新×2（版本状态 / 检查更新）——写操作全部**可人工回滚**，且每次调用自动写入审计日志；批量禁用 / 删用户 / 动余额 / 应用更新等高危操作有意不在白名单内
 
 配合 `/api/openapi.json`（覆盖全部管理端点的 OpenAPI 3.1 自描述文档）与三个只读诊断端点（`/api/diagnostics/{summary,channels,breakers}`），AI 运维闭环：自发现 → 看状态 → 动手改 → 有审计。
+
+### 服务器自动更新
+
+管理后台「系统设置 → 更新」与 AI 运维均可检查、应用新版本：
+
+- **检查**：读 GitHub Release（默认 `ojbkxc/AIGX`，可换仓库或自建镜像源），按 semver（含预发布段）与当前版本比较，403/429 按上游 `Retry-After` / `X-RateLimit-Reset` 冷却；
+- **应用**：下载 `AIGX-{ver}-server-linux-{arch}.upd` → 校验同名 `.sha256` → 解包（仅允许 `aigx` 与 `static/`，拒绝 `..` / 绝对路径）→ 备份当前程序为 `aigx.bak`、静态目录为 `static.bak` → 写入新文件（0755）→ 延迟 2 秒 `exec` 自重启（同 PID，systemd / Docker 无需额外重启策略）；
+- **回滚**：一键把 `aigx.bak` / `static.bak` 换回，重启后生效；
+- **平台**：仅 Linux 服务器/容器支持原地更新（Windows/macOS 只检查版本）；容器内需程序目录可写（官方镜像 `/opt/aigx` 已 chown 给运行用户）。
+
+`config.toml` 可显式配置：
+
+```toml
+[update]
+enabled = true          # 关闭后定时任务不再检查（手动检查/更新仍可用）
+auto_check = true
+auto_apply = false      # 发现新版本后自动下载替换并重启（默认关闭）
+interval_hours = 24
+repo = "ojbkxc/AIGX"
+# api_base = "https://mirror.example.com"  # 自建更新源（返回体与 GitHub API 同形）
+# proxy = "http://127.0.0.1:7890"          # 访问 GitHub 的代理
+# token = "ghp_xxx"                        # 提高 API 限额（匿名 60 次/小时）
+# include_prerelease = false
+restart_after_apply = true
+```
+
+AI 运维工具：`aigx_update_status` / `aigx_check_update`（只读）、`aigx_apply_update` / `aigx_restart_service` / `aigx_rollback_update`（高危，走审批）。
 
 ---
 
@@ -206,6 +233,7 @@ claude mcp add --transport http aigx http://your-gateway.example.com:9527/api/mc
 │   ├── channel/       #   渠道存储与调度（断路器/健康/亲和/AIMD）
 │   ├── account_session/ #  账号型渠道账号池（选号/冷却/并发/凭证/维护）
 │   ├── egress/        #   按账号代理缓存的出口 Client 池（http/https/socks5）
+│   ├── update/        #   服务器自动更新（Release 检测/自解包/替换/exec 自重启）
 │   ├── bridge/        #   上游协议适配（cf/openai/anthropic/gemini/zai）
 │   ├── pricing/       #   定价目录/汇率/价格同步
 │   ├── payment/       #   易支付 + Stripe
