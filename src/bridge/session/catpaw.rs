@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::bridge::{
     Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream, ChatDelta, ChatFormat,
