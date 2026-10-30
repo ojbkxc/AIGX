@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use crate::bridge::Bridge;
 
+pub mod accio;
 pub mod antigravity;
 pub mod orcaterm;
 
@@ -28,11 +29,14 @@ pub fn build(
         "antigravity" => Some(Arc::new(antigravity::AntigravityBridge::new(
             base, credential, client,
         ))),
+        "accio" => Some(Arc::new(accio::AccioBridge::new(
+            base, credential, client,
+        ))),
         _ => None,
     }
 }
 
 /// 是否为已实现的私有协议供应商。
 pub fn supports(kind: &str) -> bool {
-    matches!(kind, "orcaterm" | "antigravity")
+    matches!(kind, "orcaterm" | "antigravity" | "accio")
 }
