@@ -1619,5 +1619,20 @@
   "一次请求最多尝试几个账号（1–20）": "How many accounts one request may try (1–20)",
   "审计日志保留天数（天）": "Audit log retention (days)",
   "留空 = 跟随请求日志天数": "Empty = follow request-log days",
-  "审计日志（登录/配置变更/高危操作）单独保留窗口，留空则与请求日志一致": "Audit logs (sign-in / config changes / high-risk actions) have their own retention window; empty means same as request logs"
+  "审计日志（登录/配置变更/高危操作）单独保留窗口，留空则与请求日志一致": "Audit logs (sign-in / config changes / high-risk actions) have their own retention window; empty means same as request logs",
+  "请求总超时 (秒)": "Total request timeout (seconds)",
+  "单次上游请求的总时长上限，默认 300 秒（修改后重启生效）。": "Overall time limit per upstream request; default 300s (restart required).",
+  "连接超时 (秒)": "Connect timeout (seconds)",
+  "与上游建立 TCP/TLS 连接的上限，默认 10 秒（修改后重启生效）。": "TCP/TLS connect limit to upstream; default 10s (restart required).",
+  "响应头等待 / 首事件上限 (秒)": "Response headers / first event limit (seconds)",
+  "等待上游响应头与流式首个事件的上限，默认 60 秒（保存后立即生效）。": "Limit for upstream response headers and the first SSE event; default 60s (takes effect immediately).",
+  "流空闲超时 (秒)": "Stream idle timeout (seconds)",
+  "流式响应两次读取之间的最长静默，默认 30 秒（修改后重启生效）。": "Max silence between two stream reads; default 30s (restart required).",
+  "上游请求失败时的最大重试次数，0 表示不重试。": "Max retries when an upstream request fails; 0 = no retry.",
+  "重试间隔 (毫秒)": "Retry interval (ms)",
+  "账号池换号重试之间的等待时间，0 = 立即换号（保存后立即生效）。": "Wait between account switches; 0 = switch immediately (takes effect immediately).",
+  "连接超时必须在 1-300 秒之间": "Connect timeout must be between 1 and 300 seconds",
+  "响应头等待上限必须在 1-600 秒之间": "Headers/first-event limit must be between 1 and 600 seconds",
+  "流空闲超时必须在 1-600 秒之间": "Stream idle timeout must be between 1 and 600 seconds",
+  "重试间隔必须在 0-10000 毫秒之间": "Retry interval must be between 0 and 10000 ms"
 }

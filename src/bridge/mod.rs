@@ -584,18 +584,30 @@ fn truncate_lossy(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-/// T2：SSE 首事件等待上限（30s）。
+/// T2：SSE 首事件等待上限（默认 30s，可在设置页「请求超时」调整）。
 ///
 /// 流式请求一旦开始转发，上游挂起就无人能救——上游已返回 200 开始流式
-/// 响应，但首个事件迟迟不到时，客户端只能空等共享 client 的 300s 总超时。
-/// 把"首个事件"的等待上限独立收紧到 30s：超时判 `BridgeError::Timeout`
+/// 响应，但首个事件迟迟不到时，客户端只能空等共享 client 的总超时。
+/// 把"首个事件"的等待上限独立收紧：超时判 `BridgeError::Timeout`
 /// （可重试错误），调度循环可照常熔断记账并切换下一渠道。仅约束首事件；
 /// 后续事件的间隔由请求级总超时兜底。（参照 rust-tunnel 的
-/// FIRST_EVENT_DEADLINE 设计，数值取 30s。）
-pub const SSE_FIRST_EVENT_DEADLINE: Duration = Duration::from_secs(30);
+/// FIRST_EVENT_DEADLINE 设计，默认 30s。）
+static SSE_FIRST_EVENT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(30_000);
 
-/// SSE 首事件守卫：等待流的第一个事件，30s 内到达则原样重组返回；
-/// 未到则判 `BridgeError::Timeout`（上游挂起）。
+/// 当前首事件等待上限。
+pub fn sse_first_event_deadline() -> Duration {
+    Duration::from_millis(SSE_FIRST_EVENT_MS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// 设置首事件等待上限（启动时与设置保存时调用，实时生效）。
+pub fn set_sse_first_event_deadline(deadline: Duration) {
+    let ms = deadline.as_millis().clamp(1, 600_000) as u64;
+    SSE_FIRST_EVENT_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// SSE 首事件守卫：等待流的第一个事件，`sse_first_event_deadline()` 内到达则
+/// 原样重组返回；未到则判 `BridgeError::Timeout`（上游挂起）。
 ///
 /// 首 chunk 本身是 Err（上游 200 后立刻断流）时原样返回该错误，让调用方
 /// 按失败处理（熔断记账 + failover）——此时尚未开始转发，仍可换渠道救回。
@@ -607,7 +619,8 @@ where
     T: Send + 'static,
 {
     use futures::StreamExt;
-    match tokio::time::timeout(SSE_FIRST_EVENT_DEADLINE, stream.into_future()).await {
+    let deadline = sse_first_event_deadline();
+    match tokio::time::timeout(deadline, stream.into_future()).await {
         // 首事件到达：iter + chain 重组，顺序与原流一致
         // （首元素已解包为 T，iter 的 Item 与 rest 同为 Result<T, BridgeError>）
         Ok((Some(Ok(first)), rest)) => Ok(Box::pin(futures::stream::iter([Ok(first)]).chain(rest))),
@@ -615,10 +628,10 @@ where
         Ok((Some(Err(e)), _rest)) => Err(e),
         // 上游 200 后直接正常关闭（空流）：原样返回空流
         Ok((None, rest)) => Ok(rest),
-        // 首事件 30s 未到：判上游挂起
+        // 首事件未到：判上游挂起
         Err(_) => Err(BridgeError::Timeout {
-            elapsed_ms: SSE_FIRST_EVENT_DEADLINE.as_millis() as u64,
-            cause: "首个 SSE 事件 30s 未到达，上游疑似挂起".into(),
+            elapsed_ms: deadline.as_millis() as u64,
+            cause: "首个 SSE 事件未在等待上限内到达，上游疑似挂起".into(),
         }),
     }
 }
@@ -765,7 +778,7 @@ mod tests {
         };
         match err {
             BridgeError::Timeout { elapsed_ms, .. } => {
-                assert_eq!(elapsed_ms, SSE_FIRST_EVENT_DEADLINE.as_millis() as u64);
+                assert_eq!(elapsed_ms, sse_first_event_deadline().as_millis() as u64);
             }
             other => panic!("应为 Timeout 变体，实际 {other:?}"),
         }

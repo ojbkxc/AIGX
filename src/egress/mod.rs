@@ -15,11 +15,17 @@ use std::time::Duration;
 
 /// 默认请求超时：与全局共享 Client 一致（覆盖大多数上游推理时长）。
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+/// 默认建连超时。
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 默认流空闲超时（两次读取之间的最长静默）。
+const DEFAULT_READ_IDLE: Duration = Duration::from_secs(30);
 
 /// 按代理地址缓存的出口 Client 池。
 pub struct EgressCache {
     clients: DashMap<String, Arc<reqwest::Client>>,
     timeout: Duration,
+    connect_timeout: Duration,
+    read_idle: Duration,
 }
 
 impl Default for EgressCache {
@@ -34,9 +40,16 @@ impl EgressCache {
     }
 
     pub fn with_timeout(timeout: Duration) -> Self {
+        Self::with_timeouts(timeout, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_IDLE)
+    }
+
+    /// 三段超时（总超时 / 建连 / 流空闲）——由配置页的「请求超时」驱动。
+    pub fn with_timeouts(timeout: Duration, connect_timeout: Duration, read_idle: Duration) -> Self {
         Self {
             clients: DashMap::new(),
             timeout,
+            connect_timeout,
+            read_idle,
         }
     }
 
@@ -48,7 +61,12 @@ impl EgressCache {
         if let Some(cached) = self.clients.get(&key) {
             return Ok(cached.clone());
         }
-        let built = Arc::new(build_client(&key, self.timeout)?);
+        let built = Arc::new(build_client(
+            &key,
+            self.timeout,
+            self.connect_timeout,
+            self.read_idle,
+        )?);
         self.clients.insert(key, built.clone());
         Ok(built)
     }
@@ -66,8 +84,17 @@ fn normalize_proxy(proxy: Option<&str>) -> String {
 
 /// 构造出口 Client：强制 HTTP/1.1（与全局共享 Client 同策略，防 h2 PING
 /// 帧掩蔽读超时），按代理串配置 `Proxy::all`。
-fn build_client(proxy: &str, timeout: Duration) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder().http1_only().timeout(timeout);
+fn build_client(
+    proxy: &str,
+    timeout: Duration,
+    connect_timeout: Duration,
+    read_idle: Duration,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .http1_only()
+        .timeout(timeout)
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_idle);
     if !proxy.is_empty() {
         let parsed =
             reqwest::Proxy::all(proxy).map_err(|e| format!("invalid proxy '{proxy}': {e}"))?;

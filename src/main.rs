@@ -215,7 +215,16 @@ async fn main() -> anyhow::Result<()> {
     let channel_store = Arc::new(ChannelStore::new(store.clone()));
 
     // 初始化账号型渠道账号池（渠道内第二级调度：账号级优先级/冷却/并发/粘性）
-    let account_sessions = crate::account_session::AccountSessionStore::new(store.clone());
+    let account_sessions = crate::account_session::AccountSessionStore::with_egress(
+        store.clone(),
+        Arc::new(crate::egress::EgressCache::with_timeouts(
+            Duration::from_secs(config.usage.api_timeout_secs.max(1)),
+            Duration::from_secs(config.usage.connect_timeout_secs.max(1)),
+            Duration::from_secs(config.usage.stream_idle_secs.max(1)),
+        )),
+    );
+    // 换号重试间隔（「请求重试」设置；保存设置时也会实时更新）
+    account_sessions.set_retry_interval_ms(config.usage.retry_interval_ms);
 
     // 初始化模型定价目录
     let pricing_store = Arc::new(PricingStore::new(store.clone()));
@@ -274,10 +283,18 @@ async fn main() -> anyhow::Result<()> {
     let http_client = Arc::new(
         reqwest::Client::builder()
             .http1_only()
-            .timeout(Duration::from_secs(300))
+            .timeout(Duration::from_secs(config.usage.api_timeout_secs.max(1)))
+            .connect_timeout(Duration::from_secs(
+                config.usage.connect_timeout_secs.max(1),
+            ))
+            .read_timeout(Duration::from_secs(config.usage.stream_idle_secs.max(1)))
             .build()
             .expect("failed to build shared reqwest::Client"),
     );
+    // SSE 首事件守卫上限随「响应头等待」配置生效（保存设置时也会实时更新）
+    crate::bridge::set_sse_first_event_deadline(Duration::from_secs(
+        config.usage.headers_timeout_secs.max(1),
+    ));
 
     // 初始化公开注册速率限制器（per-IP，60s 窗口，最多 10000 个 IP 条目）
     // 使用基于 dashmap 的 AsyncCache 替代 moka（离线环境 moka 不可得，行为等效）

@@ -11,6 +11,7 @@
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use rand::Rng;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::model::{AccountSession, Credential};
@@ -70,6 +71,8 @@ struct Inner {
     sessions: RwLock<Vec<AccountSession>>,
     egress: Arc<EgressCache>,
     policy: RwLock<RotationPolicy>,
+    /// 换号重试间隔（毫秒，0 = 立即换号）；由「请求重试」设置实时驱动。
+    retry_interval_ms: AtomicU64,
     /// 落盘节流：account id → 上次持久化 unix 秒。
     persisted_at: DashMap<String, i64>,
 }
@@ -94,6 +97,7 @@ impl AccountSessionStore {
                 sessions: RwLock::new(Vec::new()),
                 egress,
                 policy: RwLock::new(RotationPolicy::default()),
+                retry_interval_ms: AtomicU64::new(0),
                 persisted_at: DashMap::new(),
             }),
         };
@@ -284,6 +288,18 @@ impl AccountSessionStore {
         *self.inner.policy.write() = next;
         self.inner.store.put(POLICY_KEY, &next)?;
         Ok(next)
+    }
+
+    /// 换号重试间隔（毫秒，0 = 立即换号）。
+    pub fn retry_interval_ms(&self) -> u64 {
+        self.inner.retry_interval_ms.load(Ordering::Relaxed)
+    }
+
+    /// 设置换号重试间隔（上限 10s，设置页保存时实时生效）。
+    pub fn set_retry_interval_ms(&self, ms: u64) {
+        self.inner
+            .retry_interval_ms
+            .store(ms.min(10_000), Ordering::Relaxed);
     }
 
     /// 出口 Client 池。

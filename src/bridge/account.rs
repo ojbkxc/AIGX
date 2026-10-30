@@ -64,6 +64,14 @@ impl AccountBridge {
         self.sessions.policy().max_attempts.max(1)
     }
 
+    /// 换号前的重试间隔（毫秒，0 = 立即换号；「请求重试」设置实时驱动）。
+    async fn pause_before_retry(&self) {
+        let interval = self.sessions.retry_interval_ms();
+        if interval > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(interval)).await;
+        }
+    }
+
     /// 构造失败（地址/代理/凭证配置问题）也要冷却该账号，避免反复踩坑。
     fn note_build_failure(&self, lease: &AccountLease, model: &str, error: &BridgeError) {
         let failure = ChannelStore::classify_bridge_error(error);
@@ -115,7 +123,10 @@ impl AccountBridge {
         let started_at = Instant::now();
         let alias = Some(ctx.model.as_str());
         let mut last: Option<BridgeError> = None;
-        for _ in 0..self.max_attempts() {
+        for attempt in 0..self.max_attempts() {
+            if attempt > 0 {
+                self.pause_before_retry().await;
+            }
             let Some(remaining) = remaining_budget(started_at) else {
                 last = Some(rotation_timeout(started_at));
                 break;
@@ -169,7 +180,10 @@ impl Bridge for AccountBridge {
         let started_at = Instant::now();
         let alias = Some(ctx.model.as_str());
         let mut last: Option<BridgeError> = None;
-        for _ in 0..self.max_attempts() {
+        for attempt in 0..self.max_attempts() {
+            if attempt > 0 {
+                self.pause_before_retry().await;
+            }
             let Some(remaining) = remaining_budget(started_at) else {
                 last = Some(rotation_timeout(started_at));
                 break;
@@ -217,7 +231,10 @@ impl Bridge for AccountBridge {
         let started_at = Instant::now();
         let alias = Some(ctx.model.as_str());
         let mut last: Option<BridgeError> = None;
-        for _ in 0..self.max_attempts() {
+        for attempt in 0..self.max_attempts() {
+            if attempt > 0 {
+                self.pause_before_retry().await;
+            }
             let Some(remaining) = remaining_budget(started_at) else {
                 last = Some(rotation_timeout(started_at));
                 break;

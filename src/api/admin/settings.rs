@@ -33,7 +33,11 @@ pub struct LimitsRequest {
     pub checkin: Option<CheckinSettingBody>,
     pub threshold: Option<f64>,
     pub api_timeout_secs: Option<u64>,
+    pub connect_timeout_secs: Option<u64>,
+    pub headers_timeout_secs: Option<u64>,
+    pub stream_idle_secs: Option<u64>,
     pub max_retries: Option<u32>,
+    pub retry_interval_ms: Option<u64>,
     pub max_request_body_mb: Option<usize>,
     /// 请求日志快照开关（log_body）
     pub log_body: Option<bool>,
@@ -125,7 +129,11 @@ pub async fn handle_get_limits(
             "checkin": config.usage.checkin,
             "threshold": config.usage.threshold,
             "api_timeout_secs": config.usage.api_timeout_secs,
+            "connect_timeout_secs": config.usage.connect_timeout_secs,
+            "headers_timeout_secs": config.usage.headers_timeout_secs,
+            "stream_idle_secs": config.usage.stream_idle_secs,
             "max_retries": config.usage.max_retries,
+            "retry_interval_ms": config.usage.retry_interval_ms,
             "max_request_body_mb": config.usage.max_request_body_mb,
             "log_body": config.usage.log_body,
             "billing_flat_quota": config.usage.billing_flat_quota,
@@ -179,10 +187,26 @@ pub async fn handle_update_limits(
         config.usage.threshold = v;
     }
     if let Some(v) = body.api_timeout_secs {
-        config.usage.api_timeout_secs = v;
+        config.usage.api_timeout_secs = v.clamp(1, 3_600);
+    }
+    if let Some(v) = body.connect_timeout_secs {
+        config.usage.connect_timeout_secs = v.clamp(1, 300);
+    }
+    if let Some(v) = body.headers_timeout_secs {
+        config.usage.headers_timeout_secs = v.clamp(1, 600);
+        // 首事件守卫实时生效（其余客户端超时下次启动生效，见页面提示）
+        crate::bridge::set_sse_first_event_deadline(std::time::Duration::from_secs(
+            config.usage.headers_timeout_secs,
+        ));
+    }
+    if let Some(v) = body.stream_idle_secs {
+        config.usage.stream_idle_secs = v.clamp(1, 600);
+    }
+    if let Some(v) = body.retry_interval_ms {
+        config.usage.retry_interval_ms = v.min(10_000);
     }
     if let Some(v) = body.max_retries {
-        config.usage.max_retries = v;
+        config.usage.max_retries = v.min(10);
     }
     if let Some(v) = body.max_request_body_mb {
         if v > 0 {
@@ -201,6 +225,10 @@ pub async fn handle_update_limits(
             crate::config::set_billing_flat_quota(v);
         }
     }
+    // 换号重试间隔立即生效（账号池运行时读取）
+    state
+        .account_sessions
+        .set_retry_interval_ms(config.usage.retry_interval_ms);
     match state.config_manager.update(config).await {
         Ok(_) => {
             let updated = state.config_manager.get().await;

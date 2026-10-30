@@ -21,7 +21,11 @@ interface LimitsForm {
   monthly_limit: string;
   threshold: string;
   api_timeout_secs: string;
+  connect_timeout_secs: string;
+  headers_timeout_secs: string;
+  stream_idle_secs: string;
   max_retries: string;
+  retry_interval_ms: string;
   billing_flat_quota: string;
   max_request_body_mb: string;
 }
@@ -104,7 +108,11 @@ export default function Settings() {
     monthly_limit: '',
     threshold: '',
     api_timeout_secs: '',
+    connect_timeout_secs: '',
+    headers_timeout_secs: '',
+    stream_idle_secs: '',
     max_retries: '',
+    retry_interval_ms: '',
     billing_flat_quota: '',
     max_request_body_mb: '',
   });
@@ -333,7 +341,11 @@ export default function Settings() {
         monthly_limit: data.monthly_limit ?? '',
         threshold: data.threshold != null ? String(data.threshold * 100) : '',
         api_timeout_secs: data.api_timeout_secs ?? '',
+        connect_timeout_secs: data.connect_timeout_secs ?? '',
+        headers_timeout_secs: data.headers_timeout_secs ?? '',
+        stream_idle_secs: data.stream_idle_secs ?? '',
         max_retries: data.max_retries ?? '',
+        retry_interval_ms: data.retry_interval_ms ?? '',
         billing_flat_quota: data.billing_flat_quota != null ? String(data.billing_flat_quota) : '',
         max_request_body_mb: data.max_request_body_mb != null ? String(data.max_request_body_mb) : '',
       });
@@ -357,7 +369,11 @@ export default function Settings() {
       limits.monthly_limit,
       limits.threshold,
       limits.api_timeout_secs,
+      limits.connect_timeout_secs,
+      limits.headers_timeout_secs,
+      limits.stream_idle_secs,
       limits.max_retries,
+      limits.retry_interval_ms,
       limits.billing_flat_quota,
       limits.max_request_body_mb,
     ];
@@ -371,7 +387,11 @@ export default function Settings() {
     if (limits.monthly_limit !== '') payload.monthly_limit = Number(limits.monthly_limit);
     if (limits.threshold !== '') payload.threshold = Number(limits.threshold) / 100;
     if (limits.api_timeout_secs !== '') payload.api_timeout_secs = Number(limits.api_timeout_secs);
+    if (limits.connect_timeout_secs !== '') payload.connect_timeout_secs = Number(limits.connect_timeout_secs);
+    if (limits.headers_timeout_secs !== '') payload.headers_timeout_secs = Number(limits.headers_timeout_secs);
+    if (limits.stream_idle_secs !== '') payload.stream_idle_secs = Number(limits.stream_idle_secs);
     if (limits.max_retries !== '') payload.max_retries = Number(limits.max_retries);
+    if (limits.retry_interval_ms !== '') payload.retry_interval_ms = Number(limits.retry_interval_ms);
     if (limits.billing_flat_quota !== '') payload.billing_flat_quota = Number(limits.billing_flat_quota);
     if (limits.max_request_body_mb !== '') payload.max_request_body_mb = Number(limits.max_request_body_mb);
 
@@ -386,6 +406,22 @@ export default function Settings() {
     }
     if (payload.max_retries != null && (payload.max_retries < 0 || payload.max_retries > 10)) {
       setError(t('最大重试次数必须在 0-10 之间'));
+      return;
+    }
+    if (payload.connect_timeout_secs != null && (payload.connect_timeout_secs < 1 || payload.connect_timeout_secs > 300)) {
+      setError(t('连接超时必须在 1-300 秒之间'));
+      return;
+    }
+    if (payload.headers_timeout_secs != null && (payload.headers_timeout_secs < 1 || payload.headers_timeout_secs > 600)) {
+      setError(t('响应头等待上限必须在 1-600 秒之间'));
+      return;
+    }
+    if (payload.stream_idle_secs != null && (payload.stream_idle_secs < 1 || payload.stream_idle_secs > 600)) {
+      setError(t('流空闲超时必须在 1-600 秒之间'));
+      return;
+    }
+    if (payload.retry_interval_ms != null && (payload.retry_interval_ms < 0 || payload.retry_interval_ms > 10000)) {
+      setError(t('重试间隔必须在 0-10000 毫秒之间'));
       return;
     }
     if (payload.billing_flat_quota != null && payload.billing_flat_quota <= 0) {
@@ -471,14 +507,34 @@ export default function Settings() {
             <div className="card-body">
               <div className="settings-form">
                 <div className="form-group">
-                  <label>{t('API 超时时间 (秒)')}</label>
-                  <input className="form-input" type="number" min="5" max="300" placeholder={t('settingsPlaceholderApiTimeout')} value={limits.api_timeout_secs} onChange={(e) => handleChange('api_timeout_secs', e.target.value)} />
-                  <span className="form-hint">{t('向 Cloudflare API 发送请求的超时时间，默认 120 秒。')}</span>
+                  <label>{t('请求总超时 (秒)')}</label>
+                  <input className="form-input" type="number" min="5" max="3600" placeholder="300" value={limits.api_timeout_secs} onChange={(e) => handleChange('api_timeout_secs', e.target.value)} />
+                  <span className="form-hint">{t('单次上游请求的总时长上限，默认 300 秒（修改后重启生效）。')}</span>
+                </div>
+                <div className="form-group">
+                  <label>{t('连接超时 (秒)')}</label>
+                  <input className="form-input" type="number" min="1" max="300" placeholder="10" value={limits.connect_timeout_secs} onChange={(e) => handleChange('connect_timeout_secs', e.target.value)} />
+                  <span className="form-hint">{t('与上游建立 TCP/TLS 连接的上限，默认 10 秒（修改后重启生效）。')}</span>
+                </div>
+                <div className="form-group">
+                  <label>{t('响应头等待 / 首事件上限 (秒)')}</label>
+                  <input className="form-input" type="number" min="1" max="600" placeholder="60" value={limits.headers_timeout_secs} onChange={(e) => handleChange('headers_timeout_secs', e.target.value)} />
+                  <span className="form-hint">{t('等待上游响应头与流式首个事件的上限，默认 60 秒（保存后立即生效）。')}</span>
+                </div>
+                <div className="form-group">
+                  <label>{t('流空闲超时 (秒)')}</label>
+                  <input className="form-input" type="number" min="1" max="600" placeholder="30" value={limits.stream_idle_secs} onChange={(e) => handleChange('stream_idle_secs', e.target.value)} />
+                  <span className="form-hint">{t('流式响应两次读取之间的最长静默，默认 30 秒（修改后重启生效）。')}</span>
                 </div>
                 <div className="form-group">
                   <label>{t('最大重试次数')}</label>
                   <input className="form-input" type="number" min="0" max="10" placeholder={t('settingsPlaceholderMaxRetries')} value={limits.max_retries} onChange={(e) => handleChange('max_retries', e.target.value)} />
-                  <span className="form-hint">{t('API 请求失败时的最大重试次数，0 表示不重试。')}</span>
+                  <span className="form-hint">{t('上游请求失败时的最大重试次数，0 表示不重试。')}</span>
+                </div>
+                <div className="form-group">
+                  <label>{t('重试间隔 (毫秒)')}</label>
+                  <input className="form-input" type="number" min="0" max="10000" placeholder="0" value={limits.retry_interval_ms} onChange={(e) => handleChange('retry_interval_ms', e.target.value)} />
+                  <span className="form-hint">{t('账号池换号重试之间的等待时间，0 = 立即换号（保存后立即生效）。')}</span>
                 </div>
                 <div className="form-group">
                   <label>{t('按次计费固定额度')}</label>
