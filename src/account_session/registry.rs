@@ -177,7 +177,10 @@ mod tests {
     #[test]
     fn aliases_resolve_to_canonical_kind() {
         assert_eq!(find("openai").map(|p| p.kind), Some("openai"));
-        assert_eq!(find("openai-compatible").map(|p| p.kind), Some(DEFAULT_PROVIDER_KIND));
+        assert_eq!(
+            find("openai-compatible").map(|p| p.kind),
+            Some(DEFAULT_PROVIDER_KIND)
+        );
         assert_eq!(find("claude").map(|p| p.kind), Some("anthropic"));
         assert_eq!(find("zhipu").map(|p| p.kind), Some("zai"));
         assert_eq!(find("kimi").map(|p| p.kind), Some("moonshot"));
