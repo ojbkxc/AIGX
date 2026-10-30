@@ -651,6 +651,9 @@ mod tests {
             "postgres://127.0.0.1:5432/db"
         );
         assert_eq!(redact_url_credentials(""), "");
-        assert_eq!(redact_url_credentials("not a url"), "<invalid database url>");
+        assert_eq!(
+            redact_url_credentials("not a url"),
+            "<invalid database url>"
+        );
     }
 }
