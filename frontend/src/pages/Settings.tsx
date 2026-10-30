@@ -548,7 +548,7 @@ export default function Settings() {
                 <div className="form-group">
                   <label>{t('最大重试次数')}</label>
                   <input className="form-input" type="number" min="0" max="10" placeholder={t('settingsPlaceholderMaxRetries')} value={limits.max_retries} onChange={(e) => handleChange('max_retries', e.target.value)} />
-                  <span className="form-hint">{t('上游请求失败时的最大重试次数，0 表示不重试。')}</span>
+                  <span className="form-hint">{t('渠道级失败切换的最大额外尝试次数（0 = 只尝试首选渠道，最多 10）；保存后立即生效。')}</span>
                 </div>
                 <div className="form-group">
                   <label>{t('重试间隔 (毫秒)')}</label>

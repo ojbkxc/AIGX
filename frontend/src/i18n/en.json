@@ -1628,7 +1628,7 @@
   "等待上游响应头与流式首个事件的上限，默认 60 秒（保存后立即生效）。": "Limit for upstream response headers and the first SSE event; default 60s (takes effect immediately).",
   "流空闲超时 (秒)": "Stream idle timeout (seconds)",
   "流式响应两次读取之间的最长静默，默认 30 秒（修改后重启生效）。": "Max silence between two stream reads; default 30s (restart required).",
-  "上游请求失败时的最大重试次数，0 表示不重试。": "Max retries when an upstream request fails; 0 = no retry.",
+  "渠道级失败切换的最大额外尝试次数（0 = 只尝试首选渠道，最多 10）；保存后立即生效。": "Max extra channel attempts on failure (0 = first channel only, max 10); applies immediately.",
   "重试间隔 (毫秒)": "Retry interval (ms)",
   "账号池换号重试之间的等待时间，0 = 立即换号（保存后立即生效）。": "Wait between account switches; 0 = switch immediately (takes effect immediately).",
   "连接超时必须在 1-300 秒之间": "Connect timeout must be between 1 and 300 seconds",
