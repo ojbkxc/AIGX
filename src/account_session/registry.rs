@@ -527,7 +527,10 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
 /// 查登录态型供应商元数据（非登录态型返回 None）。
 pub fn session_meta(kind: &str) -> Option<&'static SessionMeta> {
     let lower = kind.trim().to_ascii_lowercase();
-    SESSION_PROVIDERS.iter().find(|(k, _)| *k == lower).map(|(_, meta)| meta)
+    SESSION_PROVIDERS
+        .iter()
+        .find(|(k, _)| *k == lower)
+        .map(|(_, meta)| meta)
 }
 
 /// 全部 provider（管理面下拉用）。
@@ -629,7 +632,11 @@ mod tests {
                 );
             }
         }
-        assert_eq!(SESSION_PROVIDERS.len(), 17, "Agent2API 登录态供应商应为 17 家");
+        assert_eq!(
+            SESSION_PROVIDERS.len(),
+            17,
+            "Agent2API 登录态供应商应为 17 家"
+        );
     }
 
     #[test]

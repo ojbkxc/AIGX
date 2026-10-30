@@ -57,13 +57,15 @@ pub fn build_bridge(
                     registry::SessionAuth::Cookie => crate::bridge::openai::AuthMode::Cookie,
                     registry::SessionAuth::Headers => crate::bridge::openai::AuthMode::Headers,
                 };
-                Arc::new(crate::bridge::openai::OpenaiCompatibleBridge::with_session_auth(
-                    &base,
-                    &secret,
-                    client.as_ref().clone(),
-                    auth_mode,
-                    meta.headers,
-                ))
+                Arc::new(
+                    crate::bridge::openai::OpenaiCompatibleBridge::with_session_auth(
+                        &base,
+                        &secret,
+                        client.as_ref().clone(),
+                        auth_mode,
+                        meta.headers,
+                    ),
+                )
             } else {
                 crate::bridge::openai::make_bridge(&base, &secret, &client)
             }
