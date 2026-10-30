@@ -75,9 +75,9 @@ impl AccountBridge {
     /// 构造失败（地址/代理/凭证配置问题）也要冷却该账号，避免反复踩坑。
     fn note_build_failure(&self, lease: &AccountLease, model: &str, error: &BridgeError) {
         let failure = ChannelStore::classify_bridge_error(error);
-        let secs = self
-            .sessions
-            .record_failure(lease.id(), model, &failure, &error.to_string(), None);
+        let secs =
+            self.sessions
+                .record_failure(lease.id(), model, &failure, &error.to_string(), None);
         tracing::warn!(
             "account {} build failed on {} (cooldown {}s): {error}",
             lease.id(),
@@ -93,9 +93,9 @@ impl AccountBridge {
             BridgeError::UpstreamStatus { status, .. } => Some(*status),
             _ => None,
         };
-        let secs = self
-            .sessions
-            .record_failure(lease.id(), model, &failure, &error.to_string(), status);
+        let secs =
+            self.sessions
+                .record_failure(lease.id(), model, &failure, &error.to_string(), status);
         tracing::warn!(
             "account {} failed on {} (cooldown {}s): {error}",
             lease.id(),

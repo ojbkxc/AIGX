@@ -431,8 +431,8 @@ impl AccountSessionStore {
             _ => None,
         };
         let policy = self.policy();
-        let direct_switch = status
-            .is_some_and(|code| self.inner.retry_on_status.read().contains(&code));
+        let direct_switch =
+            status.is_some_and(|code| self.inner.retry_on_status.read().contains(&code));
         let (snapshot, secs) = {
             let mut sessions = self.inner.sessions.write();
             let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
