@@ -32,6 +32,24 @@ pub fn effective_base_url(session: &AccountSession) -> Result<String, BridgeErro
     Ok(spec.default_base_url.to_string())
 }
 
+/// 合并请求头：provider 默认头 + 账号级额外头（同名以账号级为准）。
+fn session_headers(
+    session: &AccountSession,
+    meta: &registry::SessionMeta,
+) -> Vec<(String, String)> {
+    let mut merged: Vec<(String, String)> = meta
+        .headers
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    for (name, value) in &session.extra_headers {
+        let lower = name.to_ascii_lowercase();
+        merged.retain(|(existing, _)| existing.to_ascii_lowercase() != lower);
+        merged.push((name.clone(), value.clone()));
+    }
+    merged
+}
+
 /// 按账号凭证构造上游 Bridge（按账号代理选出口 Client）。
 pub fn build_bridge(
     session: &AccountSession,
@@ -63,7 +81,7 @@ pub fn build_bridge(
                         &secret,
                         client.as_ref().clone(),
                         auth_mode,
-                        meta.headers,
+                        session_headers(session, meta),
                     ),
                 )
             } else {
@@ -105,5 +123,28 @@ mod tests {
     fn openai_compatible_requires_explicit_base_url() {
         let session = AccountSession::new("ch", "acct");
         assert!(effective_base_url(&session).is_err());
+    }
+
+    #[test]
+    fn account_headers_override_provider_defaults_case_insensitively() {
+        let mut session = AccountSession::new("ch", "acct");
+        session.provider = "qoder".to_string();
+        session
+            .extra_headers
+            .insert("User-Agent".to_string(), "custom/1.0".to_string());
+        session
+            .extra_headers
+            .insert("x-token".to_string(), "{credential}".to_string());
+        let meta = registry::session_meta("qoder").unwrap();
+        let merged = session_headers(&session, meta);
+        let ua: Vec<&(String, String)> = merged
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+            .collect();
+        assert_eq!(ua.len(), 1, "同名请求头应只保留账号级一条");
+        assert_eq!(ua[0].1, "custom/1.0");
+        assert!(merged
+            .iter()
+            .any(|(name, value)| name == "x-token" && value == "{credential}"));
     }
 }

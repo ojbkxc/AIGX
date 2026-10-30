@@ -168,6 +168,8 @@ interface SessionFormState {
   weight: string;
   max_concurrency: string;
   models: string;
+  /** 额外请求头（每行 `Key: Value`，登录态型供应商补专用头） */
+  extra_headers: string;
   expires_at: string;
   clear_key: boolean;
   clear_proxy: boolean;
@@ -185,6 +187,7 @@ const EMPTY_FORM: SessionFormState = {
   weight: '1',
   max_concurrency: '3',
   models: '',
+  extra_headers: '',
   expires_at: '',
   clear_key: false,
   clear_proxy: false,
@@ -311,6 +314,9 @@ export default function AccountSessions(): JSX.Element {
       weight: String(session.weight ?? 1),
       max_concurrency: String(session.max_concurrency ?? 0),
       models: (session.models || []).join(', '),
+      extra_headers: Object.entries(session.extra_headers || {})
+        .map(([k, v]) => `${k}: ${v}`)
+        .join('\n'),
       expires_at: session.expires_at ? String(session.expires_at) : '',
       clear_key: false,
       clear_proxy: false,
@@ -387,6 +393,19 @@ export default function AccountSessions(): JSX.Element {
       .map((m) => m.trim())
       .filter((m) => m.length > 0);
 
+  // 「额外请求头」文本 → 对象（每行 `Key: Value`，忽略空行/无冒号行）
+  const parseHeaders = (raw: string): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const line of raw.split('\n')) {
+      const idx = line.indexOf(':');
+      if (idx <= 0) continue;
+      const name = line.slice(0, idx).trim();
+      const value = line.slice(idx + 1).trim();
+      if (name) out[name] = value;
+    }
+    return out;
+  };
+
   const handleSave = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
     setError('');
@@ -423,6 +442,7 @@ export default function AccountSessions(): JSX.Element {
         weight: Math.max(1, Number(form.weight || 1)),
         max_concurrency: Math.max(0, Number(form.max_concurrency || 0)),
         models: splitModels(form.models),
+        extra_headers: parseHeaders(form.extra_headers),
         expires_at: form.expires_at.trim() ? Number(form.expires_at) : null,
       };
       // 代理三态：新增直传；更新时缺省保持原值、"" 清除、非空覆盖
@@ -1024,6 +1044,19 @@ export default function AccountSessions(): JSX.Element {
                   <span>{t('清除现有凭证')}</span>
                 </label>
               )}
+              <div className="form-group">
+                <label>{t('额外请求头（每行 Key: Value）')}</label>
+                <textarea
+                  className="form-input"
+                  rows={3}
+                  placeholder={'origin: https://example.com\nx-token: {credential}'}
+                  value={form.extra_headers}
+                  onChange={(e) => setForm({ ...form, extra_headers: e.target.value })}
+                />
+                <div className="form-hint">
+                  {t('登录态型供应商按抓包补齐专用请求头；值里的 {credential} 会替换为凭证。')}
+                </div>
+              </div>
               <Input
                 label={t('出口代理（可选）')}
                 placeholder={editing?.proxy || 'socks5://127.0.0.1:1080'}

@@ -1677,5 +1677,7 @@
   "登录 Cookie": "Login cookie",
   "访问令牌（JWT）": "Access token (JWT)",
   "需自填地址": "Custom base URL required",
-  "该供应商需要填写上游地址": "This provider requires an upstream base URL"
+  "该供应商需要填写上游地址": "This provider requires an upstream base URL",
+  "额外请求头（每行 Key: Value）": "Extra request headers (one Key: Value per line)",
+  "登录态型供应商按抓包补齐专用请求头；值里的 {credential} 会替换为凭证。": "For session providers, add the headers captured from the client; {credential} in a value is replaced with the credential."
 }

@@ -884,6 +884,8 @@ export interface AccountSessionItem {
   weight?: number;
   max_concurrency?: number;
   models?: string[];
+  /** 账号级额外请求头（登录态型供应商补专用头） */
+  extra_headers?: Record<string, string>;
   in_flight?: number;
   success_count?: number;
   error_count?: number;

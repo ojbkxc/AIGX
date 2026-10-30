@@ -71,18 +71,18 @@ impl OpenaiCompatibleBridge {
     /// 构造「登录态型供应商」Bridge：Cookie / 专用请求头鉴权。
     ///
     /// `credential` 为用户粘贴的 Cookie 或 JWT；`headers` 中的 `{credential}`
-    /// 占位符会被替换成凭证明文。
+    /// 占位符会被替换成凭证明文（账号级额外头已在调用方合并进来）。
     pub fn with_session_auth(
         base_url: impl Into<String>,
         credential: impl Into<String>,
         client: reqwest::Client,
         auth_mode: AuthMode,
-        headers: &[(&str, &str)],
+        headers: Vec<(String, String)>,
     ) -> Self {
         let credential = credential.into();
         let params: Vec<(String, String)> = headers
-            .iter()
-            .map(|(name, value)| (name.to_string(), value.replace("{credential}", &credential)))
+            .into_iter()
+            .map(|(name, value)| (name, value.replace("{credential}", &credential)))
             .collect();
         Self {
             base_url: normalize_base_url(base_url.into()),

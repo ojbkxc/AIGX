@@ -71,6 +71,9 @@ pub struct AccountSessionRequest {
     pub max_concurrency: u32,
     #[serde(default)]
     pub models: Vec<String>,
+    /// 账号级额外请求头（登录态型供应商补专用头；值支持 `{credential}` 模板）。
+    #[serde(default)]
+    pub extra_headers: Option<HashMap<String, String>>,
     #[serde(default)]
     pub expires_at: Option<i64>,
 }
@@ -184,7 +187,30 @@ fn apply_request(mut session: AccountSession, body: &AccountSessionRequest) -> A
             session.models.push(name.to_string());
         }
     }
+    if let Some(headers) = &body.extra_headers {
+        session.extra_headers = sanitize_headers(headers);
+    }
     session
+}
+
+/// 额外请求头清洗：去空名、去控制字符、限制 20 条（同名后写覆盖）。
+fn sanitize_headers(raw: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut cleaned: HashMap<String, String> = HashMap::new();
+    for (name, value) in raw {
+        let name = name.trim();
+        if name.is_empty() || name.chars().any(char::is_control) {
+            continue;
+        }
+        let value = value.trim();
+        if value.chars().any(|c| c == '\r' || c == '\n') {
+            continue;
+        }
+        if cleaned.len() >= 20 {
+            break;
+        }
+        cleaned.insert(name.to_string(), value.to_string());
+    }
+    cleaned
 }
 
 /// provider 展示名（默认账号名用）。
@@ -259,6 +285,7 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "weight": session.weight,
         "max_concurrency": session.max_concurrency,
         "models": session.models,
+        "extra_headers": session.extra_headers,
         "in_flight": session.in_flight,
         "success_count": session.success_count,
         "error_count": session.error_count,

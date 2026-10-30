@@ -97,6 +97,12 @@ pub struct AccountSession {
     /// 账号级模型白名单（空 = 不限，跟随渠道）。
     #[serde(default)]
     pub models: Vec<String>,
+    /// 账号级额外请求头（登录态型供应商用：逐家补齐专用头，如 `x-token` / `origin`）。
+    ///
+    /// 与 provider 目录里的默认头合并，同名时以账号级为准；
+    /// 值里的 `{credential}` 会被替换成凭证明文。
+    #[serde(default)]
+    pub extra_headers: HashMap<String, String>,
     /// 上游真名 → 冷却到期 unix 秒。
     #[serde(default)]
     pub cooldowns: HashMap<String, i64>,
@@ -159,6 +165,7 @@ impl AccountSession {
             weight: default_weight(),
             max_concurrency: default_max_concurrency(),
             models: Vec::new(),
+            extra_headers: HashMap::new(),
             cooldowns: HashMap::new(),
             last_used_at: None,
             last_error: None,
