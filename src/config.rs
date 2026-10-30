@@ -635,3 +635,22 @@ fn apply_env_overrides(mut config: AppConfig) -> AppConfig {
     }
     config
 }
+
+#[cfg(test)]
+mod tests {
+    use super::redact_url_credentials;
+
+    #[test]
+    fn redacts_database_credentials_in_logs() {
+        assert_eq!(
+            redact_url_credentials("postgres://user:secret@127.0.0.1:5432/db"),
+            "postgres://***@127.0.0.1:5432/db"
+        );
+        assert_eq!(
+            redact_url_credentials("postgres://127.0.0.1:5432/db"),
+            "postgres://127.0.0.1:5432/db"
+        );
+        assert_eq!(redact_url_credentials(""), "");
+        assert_eq!(redact_url_credentials("not a url"), "<invalid database url>");
+    }
+}
