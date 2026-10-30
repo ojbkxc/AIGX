@@ -531,6 +531,23 @@ pub fn set_billing_flat_quota(v: i64) {
     BILLING_FLAT_QUOTA.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// 渠道级最大重试次数的进程级快照（数据面选路同步读取，默认 2）。
+///
+/// `resolve_bridges` 是同步函数且在每个数据面端点共用，无法 await 配置；
+/// 用原子快照把「最大重试次数」落到候选渠道截断（重试次数 = 额外尝试数，
+/// 因此最多尝试 `max_retries + 1` 个渠道）。
+static MAX_RETRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2);
+
+/// 读取渠道级最大重试次数（供数据面选路同步访问）。
+pub fn max_retries() -> u32 {
+    MAX_RETRIES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 与 settings 更新端点写入快照（上限 10）。
+pub fn set_max_retries(v: u32) {
+    MAX_RETRIES.store(v.min(10), std::sync::atomic::Ordering::Relaxed);
+}
+
 pub struct ConfigManager {
     config: RwLock<AppConfig>,
     path: PathBuf,

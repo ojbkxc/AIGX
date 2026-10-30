@@ -394,6 +394,11 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
             result.push((b, None, None));
         }
     }
+    // 渠道级重试上限：最多尝试 `max_retries + 1` 个候选渠道（0 = 只试一个）
+    let limit = crate::config::max_retries() as usize + 1;
+    if result.len() > limit {
+        result.truncate(limit);
+    }
     result
 }
 
