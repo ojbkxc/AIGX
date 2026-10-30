@@ -51,7 +51,7 @@ pub fn build_bridge(
     let bridge: Arc<dyn Bridge> = match spec.protocol {
         Protocol::Openai => {
             // 登录态型供应商：Cookie / JWT + 专用请求头（不走 Bearer API Key）
-            if let Some(meta) = registry::session_meta(&spec.kind) {
+            if let Some(meta) = registry::session_meta(spec.kind) {
                 let auth_mode = match meta.auth {
                     registry::SessionAuth::Bearer => crate::bridge::openai::AuthMode::Bearer,
                     registry::SessionAuth::Cookie => crate::bridge::openai::AuthMode::Cookie,
