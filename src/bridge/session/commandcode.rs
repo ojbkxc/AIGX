@@ -31,7 +31,11 @@ pub struct CommandCodeBridge {
 }
 
 impl CommandCodeBridge {
-    pub fn new(base: impl Into<String>, api_key: impl Into<String>, client: reqwest::Client) -> Self {
+    pub fn new(
+        base: impl Into<String>,
+        api_key: impl Into<String>,
+        client: reqwest::Client,
+    ) -> Self {
         Self {
             base: base.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
@@ -161,7 +165,8 @@ impl Bridge for CommandCodeBridge {
                     match bytes.next().await {
                         Some(Ok(chunk)) => {
                             buffer.extend_from_slice(&chunk);
-                            while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+                            while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n')
+                            {
                                 let line: Vec<u8> = buffer.drain(..=newline).collect();
                                 let text = String::from_utf8_lossy(&line).trim().to_string();
                                 if text.is_empty() {
@@ -194,8 +199,7 @@ impl Bridge for CommandCodeBridge {
                         None => {
                             // 尾行（无换行）
                             if !buffer.is_empty() {
-                                let text =
-                                    String::from_utf8_lossy(&buffer).trim().to_string();
+                                let text = String::from_utf8_lossy(&buffer).trim().to_string();
                                 buffer.clear();
                                 if !text.is_empty() {
                                     if let Decoded::Chunk(chunk) =
@@ -403,7 +407,11 @@ fn usage_of(usage: &Value) -> UsageStats {
     UsageStats {
         prompt_tokens: prompt,
         completion_tokens: completion,
-        total_tokens: if total > 0 { total } else { prompt + completion },
+        total_tokens: if total > 0 {
+            total
+        } else {
+            prompt + completion
+        },
         cached_prompt_tokens: 0,
         cache_creation_tokens: 0,
         cache_read_tokens: 0,
@@ -555,7 +563,9 @@ mod tests {
     fn error_event_maps_to_bridge_error() {
         let line = r#"{"type":"error","statusCode":401,"message":"bad key"}"#;
         match decode_line(line, "x", "m") {
-            Decoded::Err(BridgeError::UpstreamStatus { status, message, .. }) => {
+            Decoded::Err(BridgeError::UpstreamStatus {
+                status, message, ..
+            }) => {
                 assert_eq!(status, 401);
                 assert!(message.contains("bad key"));
             }
