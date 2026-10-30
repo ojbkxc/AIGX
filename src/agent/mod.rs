@@ -36,8 +36,8 @@ use crate::storage::FileStore;
 pub struct AgentState {
     /// 会话持久化用的 KV 存储（与业务共用的 FileStore）。
     pub store: Arc<FileStore>,
-    /// `[agent]` 配置快照（启动时加载，后续可经配置更新刷新）。
-    pub config: AgentConfig,
+    /// `[agent]` 配置（运行期可经设置页保存后实时刷新）。
+    config: Arc<parking_lot::RwLock<AgentConfig>>,
     /// 审批运行时（阶段二接入）。
     pub approvals: approval::AgentApprovals,
     /// 会话/消息持久化。
@@ -50,9 +50,19 @@ impl AgentState {
         let session_store = session::AgentSessionStore::new(store.clone());
         Self {
             store,
-            config,
+            config: Arc::new(parking_lot::RwLock::new(config)),
             approvals: approval::AgentApprovals::new(),
             session_store,
         }
+    }
+
+    /// 当前配置快照（每次读最新值，设置页保存后立即生效）。
+    pub fn config(&self) -> AgentConfig {
+        self.config.read().clone()
+    }
+
+    /// 刷新配置（设置页保存时调用）。
+    pub fn set_config(&self, config: AgentConfig) {
+        *self.config.write() = config;
     }
 }

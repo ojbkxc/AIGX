@@ -74,14 +74,21 @@ pub struct ApprovalRequest {
     pub action: String,
 }
 
-/// 取 Agent 状态；未启用返回 503。
+/// 取 Agent 状态；未启用返回 503（enabled 为运行期配置，设置页保存后立即生效）。
 fn agent_state(state: &AppState) -> Result<&crate::agent::AgentState, (StatusCode, Json<Value>)> {
-    state.agent_state.as_deref().ok_or_else(|| {
+    let agent = state.agent_state.as_deref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "success": false, "error": "AI 运维 Agent 未启用（config [agent].enabled）" })),
         )
-    })
+    })?;
+    if !agent.config().enabled {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "success": false, "error": "AI 运维 Agent 已关闭（可在 设置 → 运维 → AI 助手 开启）" })),
+        ));
+    }
+    Ok(agent)
 }
 
 /// GET /api/agent/sessions
@@ -123,8 +130,8 @@ pub async fn handle_create_session(
         .create(
             &id,
             &title,
-            &agent.config.model,
-            &agent.config.channel,
+            &agent.config().model,
+            &agent.config().channel,
             role,
         )
         .map_err(|e| {
@@ -250,7 +257,7 @@ pub async fn handle_chat(
         });
     }
     // 上下文压缩：超出 max_history 时只保留最近 N 条（防长会话撑爆上下文窗口）
-    let max_history = agent.config.max_history.max(1);
+    let max_history = agent.config().max_history.max(1);
     if convo.len() > max_history {
         convo = convo.split_off(convo.len() - max_history);
     }
@@ -271,7 +278,7 @@ pub async fn handle_chat(
     // 会话标题仍是缺省"新会话"时，用首条用户消息自动命名（截 30 字符）
     let _ = agent.session_store.rename_if_default(&id, &body.message);
 
-    let mut config = agent.config.clone();
+    let mut config = agent.config();
     // 前端模型选择器覆盖：请求带 model 时替换配置快照中的模型
     //（渠道锁定逻辑不变——若 [agent].channel 非空仍只走该渠道）
     if let Some(m) = body.model.as_deref() {
@@ -434,10 +441,10 @@ pub async fn handle_get_config(
     Ok(Json(json!({
         "success": true,
         "data": {
-            "model": agent.config.model,
-            "channel": agent.config.channel,
-            "max_turns": agent.config.max_turns,
-            "approval_timeout_secs": agent.config.approval_timeout_secs,
+            "model": agent.config().model,
+            "channel": agent.config().channel,
+            "max_turns": agent.config().max_turns,
+            "approval_timeout_secs": agent.config().approval_timeout_secs,
         }
     })))
 }

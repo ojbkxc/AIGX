@@ -454,14 +454,11 @@ async fn main() -> anyhow::Result<()> {
         oauth_state_cache,
         #[cfg(feature = "sea-orm")]
         db_conn,
-        agent_state: if config.agent.enabled {
-            Some(std::sync::Arc::new(crate::agent::AgentState::new(
-                store.clone(),
-                config.agent.clone(),
-            )))
-        } else {
-            None
-        },
+        // Agent 运行时恒存在；enabled 由运行期配置驱动（设置页保存后立即生效）
+        agent_state: Some(std::sync::Arc::new(crate::agent::AgentState::new(
+            store.clone(),
+            config.agent.clone(),
+        ))),
         prompt_source_cache: std::sync::Arc::new(
             crate::api::admin::prompts::PromptSourceCache::new(),
         ),

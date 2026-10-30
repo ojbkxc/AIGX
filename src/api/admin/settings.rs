@@ -374,6 +374,10 @@ pub async fn handle_update_agent_settings(
     match state.config_manager.update(config).await {
         Ok(()) => {
             let updated = state.config_manager.get().await;
+            // 运行期 Agent 配置同步（切换 enabled / 模型 / 提示词 / 工具开关都立即生效）
+            if let Some(agent) = state.agent_state.as_deref() {
+                agent.set_config(updated.agent.clone());
+            }
             Ok(Json(json!({
                 "success": true,
                 "data": agent_settings_json(&updated.agent),

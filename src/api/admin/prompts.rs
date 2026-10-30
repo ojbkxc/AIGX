@@ -352,8 +352,8 @@ pub async fn handle_prompt_translate(
             StatusCode::SERVICE_UNAVAILABLE,
         )
     })?;
-    let model = agent.config.model.trim().to_string();
-    if model.is_empty() {
+    let model = agent.config().model.trim().to_string();
+    if model.is_empty() || !agent.config().enabled {
         return Err(error_response(
             "自环翻译未启用：请先在配置中启用 [agent] 并设置 model/channel",
             StatusCode::SERVICE_UNAVAILABLE,
@@ -425,7 +425,7 @@ pub async fn handle_prompt_translate(
     // AppState/AgentConfig 均为 Arc 包裹字段的轻量 Clone，逐条克隆进 async 块
     // 以消除对函数局部引用生命周期的依赖。
     let state_owned = state.clone();
-    let config_owned = agent.config.clone();
+    let config_owned = agent.config();
     let results = futures::stream::iter(pending)
         .map(|(i, src)| {
             let system = system.clone();
