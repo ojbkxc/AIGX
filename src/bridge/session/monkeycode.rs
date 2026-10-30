@@ -40,7 +40,11 @@ pub struct MonkeyCodeBridge {
 }
 
 impl MonkeyCodeBridge {
-    pub fn new(base: impl Into<String>, session: impl Into<String>, client: reqwest::Client) -> Self {
+    pub fn new(
+        base: impl Into<String>,
+        session: impl Into<String>,
+        client: reqwest::Client,
+    ) -> Self {
         Self {
             base: base.into().trim_end_matches('/').to_string(),
             session: session.into(),
@@ -57,10 +61,7 @@ impl MonkeyCodeBridge {
                 "Cookie".to_string(),
                 format!("{SESSION_COOKIE}={}", self.session.trim()),
             ),
-            (
-                "Origin".to_string(),
-                self.base.clone(),
-            ),
+            ("Origin".to_string(), self.base.clone()),
         ]
     }
 
@@ -121,10 +122,7 @@ impl MonkeyCodeBridge {
     }
 
     /// 解析建任务需要的三元组（model_id / cli_name / image_id）。
-    async fn resolve_target(
-        &self,
-        model: &str,
-    ) -> Result<(String, String, String), BridgeError> {
+    async fn resolve_target(&self, model: &str) -> Result<(String, String, String), BridgeError> {
         let status = self.get_json(STATUS_PATH).await.ok();
         let image_id = status
             .as_ref()
@@ -290,7 +288,9 @@ impl Bridge for MonkeyCodeBridge {
 
         // 连接建立后必须先发 auto-approve + user-input，上游才开始执行
         write
-            .send(Message::Text(json!({ "type": "auto-approve" }).to_string().into()))
+            .send(Message::Text(
+                json!({ "type": "auto-approve" }).to_string().into(),
+            ))
             .await
             .map_err(|e| BridgeError::Transport(e.to_string()))?;
         let payload = json!({
@@ -352,9 +352,7 @@ impl Bridge for MonkeyCodeBridge {
                         Decoded::Nothing => {}
                         Decoded::Chunk(chunk) => pending.push_back(Ok(chunk)),
                         Decoded::Reply(payload) => {
-                            let _ = write
-                                .send(Message::Text(payload.into()))
-                                .await;
+                            let _ = write.send(Message::Text(payload.into())).await;
                         }
                         Decoded::Done => {
                             pending.push_back(Ok(finish_chunk(&flow.id, &flow.model)));
