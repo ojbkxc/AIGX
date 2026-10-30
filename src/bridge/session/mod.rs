@@ -13,6 +13,7 @@ use crate::bridge::Bridge;
 
 pub mod accio;
 pub mod antigravity;
+pub mod codearts;
 pub mod commandcode;
 pub mod kuku;
 pub mod orcaterm;
@@ -44,6 +45,9 @@ pub fn build(
         ))),
         "kuku" => Some(Arc::new(kuku::KukuBridge::new(base, credential, client))),
         "qoder" => Some(Arc::new(qoder::QoderBridge::new(base, credential, client))),
+        "codearts" => Some(Arc::new(codearts::CodeArtsBridge::new(
+            base, credential, client,
+        ))),
         "trae" => Some(Arc::new(trae::TraeBridge::new(
             base, credential, headers, client,
         ))),
@@ -55,6 +59,7 @@ pub fn build(
 pub fn supports(kind: &str) -> bool {
     matches!(
         kind,
-        "orcaterm" | "antigravity" | "accio" | "commandcode" | "kuku" | "trae"
+        "orcaterm" | "antigravity" | "accio" | "commandcode" | "kuku" | "trae" | "qoder"
+            | "codearts"
     )
 }

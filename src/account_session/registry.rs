@@ -502,7 +502,7 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             base_url: "https://snap-access.cn-north-4.myhuaweicloud.com",
             chat_path: "/api/v2/chat/completions",
             headers: &[("x-auth-token", "{credential}"), ("x-language", "zh-cn")],
-            credential_hint: "粘贴华为 CodeArts 的会话令牌（x-auth-token）",
+            credential_hint: "粘贴华为云凭证 AK:SK[:SecurityToken]（STS 三元组，冒号或换行分隔）",
             openai_compatible: false,
         },
     ),
