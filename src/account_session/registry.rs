@@ -342,7 +342,8 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         kind: "autoclaw",
         label: "AutoClaw",
         protocol: Protocol::Openai,
-        default_base_url: "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
+        default_base_url:
+            "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
     },
 ];
 
@@ -500,10 +501,7 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             auth: SessionAuth::Headers,
             base_url: "https://snap-access.cn-north-4.myhuaweicloud.com",
             chat_path: "/api/v2/chat/completions",
-            headers: &[
-                ("x-auth-token", "{credential}"),
-                ("x-language", "zh-cn"),
-            ],
+            headers: &[("x-auth-token", "{credential}"), ("x-language", "zh-cn")],
             credential_hint: "粘贴华为 CodeArts 的会话令牌（x-auth-token）",
             openai_compatible: false,
         },
