@@ -23,14 +23,10 @@ pub fn build(
 ) -> Option<Arc<dyn Bridge>> {
     match kind {
         "orcaterm" => Some(Arc::new(orcaterm::OrcaTermBridge::new(
-            base,
-            credential,
-            client,
+            base, credential, client,
         ))),
         "antigravity" => Some(Arc::new(antigravity::AntigravityBridge::new(
-            base,
-            credential,
-            client,
+            base, credential, client,
         ))),
         _ => None,
     }

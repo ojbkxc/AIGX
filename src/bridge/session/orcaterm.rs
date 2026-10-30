@@ -105,9 +105,13 @@ impl OrcaTermBridge {
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("未知错误");
+            let code = value
+                .get("code")
+                .map(|code| code.to_string())
+                .unwrap_or_default();
             return Err(BridgeError::upstream_status(
                 502,
-                format!("OrcaTerm 建会话失败（code={}：{message}）", value.get("code")),
+                format!("OrcaTerm 建会话失败（code={code}：{message}）"),
             ));
         }
         Ok(format!("cid-{uuid}-orcaterm"))

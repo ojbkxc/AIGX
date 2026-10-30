@@ -282,7 +282,11 @@ fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
                     let Some(part_text) = part.get("text").and_then(Value::as_str) else {
                         continue;
                     };
-                    if part.get("thought").and_then(Value::as_bool).unwrap_or(false) {
+                    if part
+                        .get("thought")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
                         thought.push_str(part_text);
                     } else {
                         text.push_str(part_text);
@@ -298,9 +302,8 @@ fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
                     delta.tool_calls = Some(calls);
                 }
             }
-            let has_delta = delta.content.is_some()
-                || delta.reasoning.is_some()
-                || delta.tool_calls.is_some();
+            let has_delta =
+                delta.content.is_some() || delta.reasoning.is_some() || delta.tool_calls.is_some();
             if let Some(reason) = finish {
                 return Decoded::Done(reason, usage);
             }
