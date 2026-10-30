@@ -184,10 +184,6 @@ impl Bridge for AntigravityBridge {
                                         }));
                                         flow.ended = true;
                                     }
-                                    Decoded::Err(err) => {
-                                        pending.push_back(Err(err));
-                                        flow.ended = true;
-                                    }
                                 }
                             }
                         }
@@ -233,7 +229,6 @@ enum Decoded {
     Chunk(ChatChunk),
     Usage(UsageStats),
     Done(FinishReason, Option<UsageStats>),
-    Err(BridgeError),
 }
 
 fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
