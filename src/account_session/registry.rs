@@ -469,7 +469,7 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             base_url: "https://gateway.qoder.com.cn",
             chat_path: "/algo/api/v2/service/pro/sse/agent_chat_generation",
             headers: &[],
-            credential_hint: "粘贴 Qoder 的 COSY 令牌（Bearer COSY.x.y；私有签名由上游校验）",
+            credential_hint: "粘贴 Qoder 的访问令牌（access token，COSY 签名由网关自动完成）",
             openai_compatible: false,
         },
     ),
