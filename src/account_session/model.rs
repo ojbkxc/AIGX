@@ -15,6 +15,8 @@ use std::collections::HashMap;
 
 /// 凭证形态：粘贴型 API Key（鉴权头由 provider 协议决定）。
 pub const CREDENTIAL_KIND_API_KEY: &str = "api_key";
+/// 凭证形态：登录态（Cookie / JWT + 专用请求头，如 Cline / Qoder / Trae）。
+pub const CREDENTIAL_KIND_SESSION: &str = "session";
 /// 凭证形态：免鉴权（bridge 不发送鉴权头，用于 IP 白名单型上游）。
 pub const CREDENTIAL_KIND_NONE: &str = "none";
 

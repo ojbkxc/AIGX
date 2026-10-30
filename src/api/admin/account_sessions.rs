@@ -326,6 +326,11 @@ pub async fn handle_create_account_session(
     let channel = ensure_account_channel(&state, body.channel_id.trim())?;
     let mut session = AccountSession::new(channel.id.clone(), String::new());
     session = apply_request(session, &body);
+    // 登录态型供应商：凭证形态标记为 session（Cookie/JWT），与 API Key 区分
+    if registry::session_meta(&session.provider).is_some() {
+        session.credential.kind =
+            crate::account_session::model::CREDENTIAL_KIND_SESSION.to_string();
+    }
     if session.name.is_empty() {
         let count = state.account_sessions.for_channel(&channel.id).len();
         session.name = format!("{}#{}", provider_label(&session.provider), count + 1);
@@ -376,6 +381,12 @@ pub async fn handle_update_account_session(
     }
     ensure_account_channel(&state, &prev.channel_id)?;
     let mut session = apply_request(prev.clone(), &body);
+    // 切换供应商时凭证形态跟随：登录态型标 session，其余回到 api_key
+    session.credential.kind = if registry::session_meta(&session.provider).is_some() {
+        crate::account_session::model::CREDENTIAL_KIND_SESSION.to_string()
+    } else {
+        crate::account_session::model::CREDENTIAL_KIND_API_KEY.to_string()
+    };
     session.id = prev.id.clone();
     session.channel_id = prev.channel_id.clone();
     session.created_at = prev.created_at;
