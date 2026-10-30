@@ -16,12 +16,17 @@ pub mod antigravity;
 pub mod commandcode;
 pub mod kuku;
 pub mod orcaterm;
+pub mod trae;
 
 /// 按 provider kind 构造私有协议 Bridge；不支持的 kind 返回 None。
+///
+/// `headers` 是 provider 默认头 + 账号级额外头的合并结果（`{credential}`
+/// 已替换）；需要私有身份的供应商（如 Trae 的 `X-Uid`）靠它拿值。
 pub fn build(
     kind: &str,
     base: &str,
     credential: &str,
+    headers: Vec<(String, String)>,
     client: reqwest::Client,
 ) -> Option<Arc<dyn Bridge>> {
     match kind {
@@ -36,6 +41,9 @@ pub fn build(
             base, credential, client,
         ))),
         "kuku" => Some(Arc::new(kuku::KukuBridge::new(base, credential, client))),
+        "trae" => Some(Arc::new(trae::TraeBridge::new(
+            base, credential, headers, client,
+        ))),
         _ => None,
     }
 }
@@ -44,6 +52,6 @@ pub fn build(
 pub fn supports(kind: &str) -> bool {
     matches!(
         kind,
-        "orcaterm" | "antigravity" | "accio" | "commandcode" | "kuku"
+        "orcaterm" | "antigravity" | "accio" | "commandcode" | "kuku" | "trae"
     )
 }

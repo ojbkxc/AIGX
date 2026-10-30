@@ -86,10 +86,15 @@ pub fn build_bridge(
             if let Some(meta) = registry::session_meta(spec.kind) {
                 // 私有协议供应商（请求体/响应帧非 OpenAI 方言）走专用 Bridge
                 if !meta.openai_compatible {
+                    let mut headers = session_headers(session, meta);
+                    for (_, value) in headers.iter_mut() {
+                        *value = value.replace("{credential}", &secret);
+                    }
                     if let Some(bridge) = crate::bridge::session::build(
                         spec.kind,
                         &base,
                         &secret,
+                        headers,
                         client.as_ref().clone(),
                     ) {
                         return Ok(bridge);
