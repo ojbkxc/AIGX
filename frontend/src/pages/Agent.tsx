@@ -294,7 +294,7 @@ export default function Agent(): JSX.Element {
             return m;
           }),
         );
-      }, controller.signal, model || undefined, effort === 'off' ? undefined : effort);
+      }, controller.signal, model || undefined, effort === 'off' ? undefined : effort, role);
       // 会话可能被自动命名，刷新抽屉列表
       void loadSessions();
     } catch (e) {

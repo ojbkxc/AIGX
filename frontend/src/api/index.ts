@@ -723,10 +723,12 @@ export const api = {
     signal?: AbortSignal,
     model?: string,
     reasoningEffort?: string,
+    role?: 'observer' | 'operator',
   ): Promise<void> => {
-    const body: { message: string; model?: string; reasoning_effort?: string } = { message };
+    const body: { message: string; model?: string; reasoning_effort?: string; role?: string } = { message };
     if (model) body.model = model;
     if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+    if (role) body.role = role;
     const res = await fetch(`${API_BASE}/agent/sessions/${encodeURIComponent(id)}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },

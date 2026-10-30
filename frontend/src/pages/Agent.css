@@ -872,6 +872,16 @@
     height: 26px;
   }
 
+  /* 角色/思考/历史/清空 + 模型/发送 在窄屏折行，避免工具行溢出 */
+  .agent-input-meta {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .agent-input-actions {
+    margin-left: auto;
+  }
+
   .agent-input-actions .model-picker {
     min-width: 120px;
   }
