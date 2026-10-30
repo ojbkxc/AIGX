@@ -189,10 +189,15 @@ export default function UpdatePanel(): JSX.Element {
       onConfirm: async () => {
         try {
           await api.rollbackUpdate();
-          restartingRef.current = true;
-          setRestarting(true);
-          addToast(t('已回滚，服务正在重启'));
-          window.setTimeout(() => { void loadStatus(false); }, 3000);
+          if (settings?.restart_after_apply !== false) {
+            restartingRef.current = true;
+            setRestarting(true);
+            addToast(t('已回滚，服务正在重启'));
+            window.setTimeout(() => { void loadStatus(false); }, 3000);
+          } else {
+            addToast(t('已回滚，请手动重启服务'));
+            void loadStatus(false);
+          }
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e));
         }

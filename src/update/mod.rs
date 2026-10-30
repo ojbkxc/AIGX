@@ -619,7 +619,9 @@ impl UpdateManager {
             }
             if let Err(e) = std::fs::rename(&static_bak, &static_dir) {
                 tracing::error!("restore static dir failed: {e}");
-                return Err(format!("程序已回滚，但 static 目录恢复失败: {e}，请手动检查"));
+                return Err(format!(
+                    "程序已回滚，但 static 目录恢复失败: {e}，请手动检查"
+                ));
             }
             remove_dir(&failed_static);
         }
@@ -627,6 +629,11 @@ impl UpdateManager {
             let mut guard = self.lock();
             guard.pending_restart = true;
             guard.last_error = None;
+            // 回滚后「已应用版本」不再成立：清掉标记，避免状态页显示误导信息
+            guard.applied = None;
+        }
+        if let Err(e) = self.store.delete(APPLIED_KEY) {
+            tracing::warn!("clear applied marker failed: {e}");
         }
         self.persist();
         tracing::warn!("update rolled back to previous version, restart to take effect");
