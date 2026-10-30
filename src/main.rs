@@ -124,13 +124,16 @@ async fn main() -> anyhow::Result<()> {
                 &sqlite_dirs,
             ) {
                 Ok(pg) => {
-                    tracing::info!("PostgreSQL KV store enabled: {}", config.database.url);
+                    tracing::info!(
+                        "PostgreSQL KV store enabled: {}",
+                        crate::config::redact_url_credentials(&config.database.url)
+                    );
                     pg
                 }
                 Err(e) => {
                     tracing::error!(
                         "Failed to open PostgreSQL KV store ({}), falling back to SQLite: {}",
-                        config.database.url,
+                        crate::config::redact_url_credentials(&config.database.url),
                         e
                     );
                     FileStore::open(data_dir.join("data"))?
@@ -346,7 +349,7 @@ async fn main() -> anyhow::Result<()> {
                 Ok(manager) => {
                     tracing::info!(
                         "SeaORM backend enabled: {} (backend={})",
-                        config.database.url,
+                        crate::config::redact_url_credentials(&config.database.url),
                         manager.backend().as_str()
                     );
                     Some(manager.connection().clone())
@@ -354,7 +357,7 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => {
                     tracing::error!(
                         "Failed to connect SeaORM backend ({}), falling back to FileStore: {}",
-                        config.database.url,
+                        crate::config::redact_url_credentials(&config.database.url),
                         e
                     );
                     None
@@ -697,7 +700,7 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         tracing::info!(
-            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, subscription-expire-reset)",
+            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, auto-update-check, log-retention-sweep, subscription-expire-reset)",
             scheduler.task_count()
         );
     }

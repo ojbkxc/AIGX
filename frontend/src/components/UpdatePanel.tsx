@@ -238,7 +238,8 @@ export default function UpdatePanel(): JSX.Element {
 
   const download = status?.download;
   const canApply = Boolean(
-    status?.hasUpdate && status.bundle && status.supported && status.writable
+    status?.hasUpdate && status.bundle && status.checksumAvailable !== false
+    && status.supported && status.writable
     && !status.checking && !status.applying && !status.pendingRestart,
   );
 
@@ -400,6 +401,14 @@ export default function UpdatePanel(): JSX.Element {
                   type="checkbox"
                   checked={settings.enabled}
                   onChange={(e) => setSettings({ ...settings, enabled: e.target.checked })}
+                />
+                {t('启用更新模块')}
+              </label>
+              <label className="update-check">
+                <input
+                  type="checkbox"
+                  checked={settings.auto_check}
+                  onChange={(e) => setSettings({ ...settings, auto_check: e.target.checked })}
                 />
                 {t('启用自动检查')}
               </label>

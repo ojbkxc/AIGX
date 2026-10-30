@@ -578,6 +578,30 @@ pub fn expand_path(path: &str) -> PathBuf {
     }
 }
 
+/// 隐藏数据库 URL 里的用户名与密码，专供日志输出。
+///
+/// `postgres://user:pass@host:5432/db` → `postgres://***@host:5432/db`；
+/// 非法 URL 一律返回占位串，绝不把原文写进日志（原文可能含生产密码）。
+pub fn redact_url_credentials(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    match url::Url::parse(trimmed) {
+        Ok(mut parsed) => {
+            let has_user = !parsed.username().is_empty();
+            if has_user || parsed.password().is_some() {
+                let _ = parsed.set_password(None);
+                if has_user {
+                    let _ = parsed.set_username("***");
+                }
+            }
+            parsed.to_string()
+        }
+        Err(_) => "<invalid database url>".to_string(),
+    }
+}
+
 /// 环境变量覆盖配置（容器部署用）。
 ///
 /// 格式：`AIGX_<SECTION>__<FIELD>`，双下划线分隔 section 与 field，field 用小写。

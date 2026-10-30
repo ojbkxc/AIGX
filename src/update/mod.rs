@@ -55,6 +55,8 @@ const MAX_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
 const BUNDLE_MAGIC: &[u8; 7] = b"AIGXUP1";
 const CHECK_KEY: &str = "update:last_check";
 const APPLIED_KEY: &str = "update:applied";
+/// 两次检查之间的最短间隔（秒）：手动按钮连点会重复消耗 GitHub 匿名限额。
+const MIN_CHECK_GAP: i64 = 60;
 
 /// Release 里的一个资产。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,7 +249,7 @@ impl UpdateManager {
     /// 检查更新（手动与定时共用）。失败时返回可读原因并落冷却。
     pub async fn check(&self, config: &UpdateConfig) -> Result<Value, String> {
         let now = now_ts();
-        {
+        let recently_checked = {
             let guard = self.lock();
             if guard.checking {
                 return Err("已有一次更新检查正在进行".to_string());
@@ -258,6 +260,11 @@ impl UpdateManager {
                     guard.retry_at - now
                 ));
             }
+            guard.checked_at > 0 && now - guard.checked_at < MIN_CHECK_GAP
+        };
+        // 刚查过：直接复用最近结果（前端连点不应把匿名限额连点掉）
+        if recently_checked {
+            return Ok(self.status(config));
         }
         self.lock().checking = true;
         let outcome = self.fetch_release(config).await;
