@@ -240,7 +240,8 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         protocol: Protocol::Openai,
         default_base_url: "http://127.0.0.1:1234/v1",
     },
-    // ── 登录态型供应商（Cookie / JWT + 专用请求头，地址可自填）──
+    // ── 登录态型供应商（Cookie / JWT + 专用请求头）──
+    // 默认地址抄自 Agent2API 的 adapter 实现（多地区的取国内版站点）。
     ProviderSpec {
         kind: "cline",
         label: "Cline",
@@ -251,79 +252,79 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         kind: "workbuddy",
         label: "WorkBuddy",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://copilot.tencent.com",
     },
     ProviderSpec {
         kind: "xiaohuanxiong",
         label: "小浣熊",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://xiaohuanxiong.com/api/web/llm/v2",
     },
     ProviderSpec {
         kind: "catpaw",
         label: "CatPaw",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://ai.catpaw.meituan.com",
     },
     ProviderSpec {
         kind: "qoder",
         label: "Qoder",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://gateway.qoder.com.cn",
     },
     ProviderSpec {
         kind: "accio",
         label: "Accio",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://phoenix-gw.alibaba.com",
     },
     ProviderSpec {
         kind: "zcode",
         label: "ZCode",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
     },
     ProviderSpec {
         kind: "codearts",
         label: "华为 CodeArts",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://snap-access.cn-north-4.myhuaweicloud.com",
     },
     ProviderSpec {
         kind: "trae",
         label: "Trae",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://trae-api-cn.mchost.guru",
     },
     ProviderSpec {
         kind: "loomy",
         label: "Loomy",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://loomyad.xunfei.cn/api/v1",
     },
     ProviderSpec {
         kind: "kuku",
         label: "Kuku",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://kuku.baidu.com",
     },
     ProviderSpec {
         kind: "monkeycode",
         label: "MonkeyCode",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://monkeycode-ai.com",
     },
     ProviderSpec {
         kind: "commandcode",
         label: "Command Code",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://api.commandcode.ai",
     },
     ProviderSpec {
         kind: "antigravity",
         label: "Antigravity",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://daily-cloudcode-pa.googleapis.com",
     },
     ProviderSpec {
         kind: "officeace",
@@ -335,13 +336,13 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         kind: "orcaterm",
         label: "OrcaTerm",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://lightai.cloud.tencent.com",
     },
     ProviderSpec {
         kind: "autoclaw",
         label: "AutoClaw",
         protocol: Protocol::Openai,
-        default_base_url: "",
+        default_base_url: "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
     },
 ];
 
@@ -368,13 +369,21 @@ impl SessionAuth {
 }
 
 /// 登录态型供应商元数据。
+///
+/// 值抄自 Agent2API 的各家 adapter（默认端点、身份头、鉴权形态）。
 #[derive(Debug, Clone, Copy)]
 pub struct SessionMeta {
     pub auth: SessionAuth,
+    /// 默认上游地址（空 = 由账号自填）
+    pub base_url: &'static str,
+    /// 默认对话路径（空 = Bridge 默认的 `/chat/completions`）
+    pub chat_path: &'static str,
     /// 专用请求头模板（`{credential}` 会被替换成凭证明文）
     pub headers: &'static [(&'static str, &'static str)],
     /// 凭证粘贴提示（管理面展示）
     pub credential_hint: &'static str,
+    /// 上游是否为 OpenAI 兼容形态（`false` = 需要私有协议/签名，简单转发必失败）
+    pub openai_compatible: bool,
 }
 
 /// 登录态型供应商目录：与 `PROVIDERS` 中的同名 kind 对应。
@@ -387,139 +396,230 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
         "cline",
         SessionMeta {
             auth: SessionAuth::Bearer,
-            headers: &[("user-agent", "Cline/1.0")],
-            credential_hint: "粘贴 Cline 账号的 JWT（Authorization: Bearer）",
+            base_url: "https://api.cline.bot/api/v1",
+            chat_path: "",
+            headers: &[
+                ("user-agent", "Cline/3.0.62"),
+                ("http-referer", "https://cline.bot"),
+                ("x-title", "Cline"),
+                ("x-is-multiroot", "false"),
+                ("x-client-type", "cline-sdk"),
+                ("x-client-version", "3.0.62"),
+                ("x-platform", "terminal"),
+                ("x-platform-version", "3.0.62"),
+                ("x-core-version", "0.0.70"),
+            ],
+            credential_hint: "粘贴 Cline 账号令牌（形如 workos:<JWT>，含 workos: 前缀）",
+            openai_compatible: true,
         },
     ),
     (
         "workbuddy",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "WorkBuddy/1.0")],
-            credential_hint: "粘贴浏览器里 WorkBuddy 的整段 Cookie",
+            auth: SessionAuth::Bearer,
+            base_url: "https://copilot.tencent.com",
+            chat_path: "/v2/chat/completions",
+            headers: &[
+                ("user-agent", "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"),
+                ("x-ide-type", "WorkBuddy"),
+                ("x-ide-name", "WorkBuddy"),
+                ("x-ide-version", "5.5.4"),
+                ("x-product", "SaaS"),
+                ("x-agent-intent", "craft"),
+                ("x-agent-purpose", "conversation"),
+                ("x-agent-type", "main"),
+                ("x-private-data", "true"),
+                ("x-requested-with", "XMLHttpRequest"),
+                ("x-codebuddy-request", "1"),
+                ("origin", "https://copilot.tencent.com"),
+                ("referer", "https://copilot.tencent.com/"),
+                ("accept-language", "zh-CN"),
+            ],
+            credential_hint: "粘贴 WorkBuddy 的访问令牌（auth.accessToken）",
+            openai_compatible: true,
         },
     ),
     (
         "xiaohuanxiong",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "XiaoHuanXiong/1.0")],
-            credential_hint: "粘贴小浣熊的整段 Cookie",
+            auth: SessionAuth::Bearer,
+            base_url: "https://xiaohuanxiong.com/api/web/llm/v2",
+            chat_path: "",
+            headers: &[],
+            credential_hint: "粘贴小浣熊的 JWT（Authorization: Bearer）",
+            openai_compatible: true,
         },
     ),
     (
         "catpaw",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "CatPaw/1.0")],
-            credential_hint: "粘贴 CatPaw 的整段 Cookie",
+            auth: SessionAuth::Headers,
+            base_url: "https://ai.catpaw.meituan.com",
+            chat_path: "/conversation",
+            headers: &[("x-passport-token", "{credential}")],
+            credential_hint: "粘贴 CatPaw 的 passport token（x-passport-token）",
+            openai_compatible: false,
         },
     ),
     (
         "qoder",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "Qoder/1.0")],
-            credential_hint: "粘贴 Qoder 的整段 Cookie（含登录票据）",
+            auth: SessionAuth::Bearer,
+            base_url: "https://gateway.qoder.com.cn",
+            chat_path: "/algo/api/v2/service/pro/sse/agent_chat_generation",
+            headers: &[],
+            credential_hint: "粘贴 Qoder 的 COSY 令牌（Bearer COSY.x.y；私有签名由上游校验）",
+            openai_compatible: false,
         },
     ),
     (
         "accio",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "Accio/1.0")],
-            credential_hint: "粘贴 Accio 的整段 Cookie",
+            auth: SessionAuth::Bearer,
+            base_url: "https://phoenix-gw.alibaba.com",
+            chat_path: "/api/adk/llm/generateContent",
+            headers: &[("x-language", "zh-CN")],
+            credential_hint: "粘贴 Accio 的 accessToken（上游要求放在请求体 token 字段）",
+            openai_compatible: false,
         },
     ),
     (
         "zcode",
         SessionMeta {
             auth: SessionAuth::Bearer,
-            headers: &[("user-agent", "ZCode/1.0")],
+            base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
+            chat_path: "",
+            headers: &[],
             credential_hint: "粘贴 ZCode 的访问令牌（Bearer）",
+            openai_compatible: true,
         },
     ),
     (
         "codearts",
         SessionMeta {
             auth: SessionAuth::Headers,
+            base_url: "https://snap-access.cn-north-4.myhuaweicloud.com",
+            chat_path: "/api/v2/chat/completions",
             headers: &[
-                ("user-agent", "CodeArts/1.0"),
                 ("x-auth-token", "{credential}"),
+                ("x-language", "zh-cn"),
             ],
             credential_hint: "粘贴华为 CodeArts 的会话令牌（x-auth-token）",
+            openai_compatible: false,
         },
     ),
     (
         "trae",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "Trae/1.0")],
-            credential_hint: "粘贴 Trae 的整段 Cookie",
+            auth: SessionAuth::Headers,
+            base_url: "https://trae-api-cn.mchost.guru",
+            chat_path: "/api/agent/v3/llm_utils_chat",
+            headers: &[
+                ("authorization", "Cloud-IDE-JWT {credential}"),
+                ("x-cloudide-token", "{credential}"),
+                ("x-ide-token", "{credential}"),
+                ("x-app-id", "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"),
+                ("x-app-version", "default"),
+                ("x-app-version-code", "1"),
+                ("x-ide-version", "1.0.0"),
+                ("x-ide-version-code", "1"),
+                ("x-ide-version-type", "stable"),
+                ("x-device-type", "windows"),
+                ("user-agent", "Trae/1.0 antigravity-cockpit-tools"),
+            ],
+            credential_hint: "粘贴 Trae 的 accessToken（Cloud-IDE-JWT）",
+            openai_compatible: false,
         },
     ),
     (
         "loomy",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "Loomy/1.0")],
-            credential_hint: "粘贴 Loomy 的整段 Cookie",
+            auth: SessionAuth::Headers,
+            base_url: "https://loomyad.xunfei.cn/api/v1",
+            chat_path: "",
+            headers: &[
+                ("token", "{credential}"),
+                ("authorization", "Bearer {credential}"),
+            ],
+            credential_hint: "粘贴 Loomy 的 session 令牌（token 头）",
+            openai_compatible: true,
         },
     ),
     (
         "kuku",
         SessionMeta {
             auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "Kuku/1.0")],
-            credential_hint: "粘贴 Kuku 的整段 Cookie",
+            base_url: "https://kuku.baidu.com",
+            chat_path: "/wenchain/genflowpro/sse/getchatcontent",
+            headers: &[],
+            credential_hint: "粘贴 Kuku 的整段 Cookie（BDUSS / STOKEN）",
+            openai_compatible: false,
         },
     ),
     (
         "monkeycode",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "MonkeyCode/1.0")],
-            credential_hint: "粘贴 MonkeyCode 的整段 Cookie",
+            auth: SessionAuth::Headers,
+            base_url: "https://monkeycode-ai.com",
+            chat_path: "/api/v1/users/tasks",
+            headers: &[("cookie", "monkeycode_ai_session={credential}")],
+            credential_hint: "粘贴 MonkeyCode 的 session 值（monkeycode_ai_session）",
+            openai_compatible: false,
         },
     ),
     (
         "commandcode",
         SessionMeta {
             auth: SessionAuth::Bearer,
-            headers: &[("user-agent", "CommandCode/1.0")],
-            credential_hint: "粘贴 Command Code 的访问令牌（Bearer）",
+            base_url: "https://api.commandcode.ai",
+            chat_path: "/alpha/generate",
+            headers: &[],
+            credential_hint: "粘贴 Command Code 的 API Key（user_ 开头）",
+            openai_compatible: false,
         },
     ),
     (
         "antigravity",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "Antigravity/1.0")],
-            credential_hint: "粘贴 Antigravity 的整段 Cookie",
+            auth: SessionAuth::Bearer,
+            base_url: "https://daily-cloudcode-pa.googleapis.com",
+            chat_path: "/v1internal:streamGenerateContent?alt=sse",
+            headers: &[],
+            credential_hint: "粘贴 Google OAuth access token（Bearer）",
+            openai_compatible: false,
         },
     ),
     (
         "officeace",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "OfficeAce/1.0")],
-            credential_hint: "粘贴 OfficeAce 的整段 Cookie",
+            auth: SessionAuth::Headers,
+            base_url: "",
+            chat_path: "/v2/chat/completions",
+            headers: &[("authorization", "Basic {credential}")],
+            credential_hint: "粘贴 Basic 凭证（model_app_key:model_app_secret 的 base64）",
+            openai_compatible: true,
         },
     ),
     (
         "orcaterm",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "OrcaTerm/1.0")],
-            credential_hint: "粘贴 OrcaTerm 的整段 Cookie",
+            auth: SessionAuth::Bearer,
+            base_url: "https://lightai.cloud.tencent.com",
+            chat_path: "/assistant/chat?name=orcaterm&mode=0&csrfCode=&sseresume=true",
+            headers: &[],
+            credential_hint: "粘贴 OrcaTerm 的 oauth_access_token（Bearer JWT）",
+            openai_compatible: false,
         },
     ),
     (
         "autoclaw",
         SessionMeta {
-            auth: SessionAuth::Cookie,
-            headers: &[("user-agent", "AutoClaw/1.0")],
-            credential_hint: "粘贴 AutoClaw 的整段 Cookie",
+            auth: SessionAuth::Headers,
+            base_url: "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
+            chat_path: "",
+            headers: &[("x-authorization", "Bearer {credential}")],
+            credential_hint: "粘贴 AutoClaw 的 accessToken",
+            openai_compatible: true,
         },
     ),
 ];
@@ -637,6 +737,26 @@ mod tests {
             17,
             "Agent2API 登录态供应商应为 17 家"
         );
+    }
+
+    #[test]
+    fn session_meta_base_url_matches_provider_default() {
+        for (kind, meta) in SESSION_PROVIDERS {
+            let spec = find(kind).expect("session provider must exist in PROVIDERS");
+            assert_eq!(
+                meta.base_url, spec.default_base_url,
+                "{kind} 的默认地址要与 PROVIDERS 一致"
+            );
+        }
+    }
+
+    #[test]
+    fn session_providers_split_openai_compatible_and_private() {
+        let compatible = SESSION_PROVIDERS
+            .iter()
+            .filter(|(_, meta)| meta.openai_compatible)
+            .count();
+        assert_eq!(compatible, 7, "可直接转发（OpenAI 兼容）的应为 7 家");
     }
 
     #[test]

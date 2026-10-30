@@ -92,6 +92,17 @@
   background: color-mix(in srgb, var(--primary-color) 10%, transparent);
 }
 
+.provider-card-badge-warn {
+  color: #c0392b;
+  border-color: #c0392b;
+  background: rgba(192, 57, 43, 0.1);
+}
+
+.form-hint-warn {
+  color: #c0392b;
+  margin-bottom: 8px;
+}
+
 .provider-card-meta {
   font-size: 11px;
   color: var(--text-muted);

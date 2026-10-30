@@ -987,9 +987,15 @@ export default function AccountSessions(): JSX.Element {
                               {p.auth ? (
                                 <span className="provider-card-badge">{t('登录态')}</span>
                               ) : null}
+                              {p.openai_compatible === false ? (
+                                <span className="provider-card-badge provider-card-badge-warn">
+                                  {t('需私有协议')}
+                                </span>
+                              ) : null}
                             </span>
                             <span className="provider-card-meta">
                               {p.default_base_url || t('需自填地址')}
+                              {p.chat_path ? ` · ${p.chat_path}` : ''}
                             </span>
                           </button>
                         );
@@ -1063,16 +1069,21 @@ export default function AccountSessions(): JSX.Element {
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
               />
+              {selectedProvider?.openai_compatible === false ? (
+                <div className="form-hint form-hint-warn">
+                  {t('该供应商上游需要私有协议/签名（请求体与响应都要转换），标准 OpenAI 转发会失败；请填写自建转换网关地址，或等待专用适配。')}
+                </div>
+              ) : null}
               <Input
                 label={t('上游地址（可选，留空用 provider 默认）')}
-                placeholder="https://api.deepseek.com"
+                placeholder={selectedProvider?.default_base_url || 'https://api.deepseek.com'}
                 value={form.base_url}
                 onChange={(e) => setForm({ ...form, base_url: e.target.value })}
               />
               <Input
                 label={t('对话路径（可选，默认 /chat/completions）')}
-                placeholder="/api/chat"
-                hint={t('登录态型供应商的私有接口路径；留空按标准 OpenAI 路径拼接。')}
+                placeholder={selectedProvider?.chat_path || '/api/chat'}
+                hint={t('登录态型供应商的私有接口路径；留空按 provider 默认或标准 OpenAI 路径拼接。')}
                 value={form.chat_path}
                 onChange={(e) => setForm({ ...form, chat_path: e.target.value })}
               />

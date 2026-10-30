@@ -855,6 +855,9 @@ pub async fn handle_list_account_providers(
             // 登录态型供应商：鉴权方式与凭证粘贴提示（前端据此改变输入提示）
             "auth": session.map(|m| m.auth.as_str()),
             "credential_hint": session.map(|m| m.credential_hint),
+            // 登录态型供应商的默认对话路径与私有协议标记
+            "chat_path": session.map(|m| m.chat_path).filter(|p| !p.is_empty()),
+            "openai_compatible": session.map(|m| m.openai_compatible),
             // 无默认地址 = 必须由账号自己填写上游地址
             "requires_base_url": spec.default_base_url.is_empty(),
         }));

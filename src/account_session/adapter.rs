@@ -50,6 +50,20 @@ fn session_headers(
     merged
 }
 
+/// 生效的对话路径：账号级路径优先，空则回落 provider 默认（再空由 Bridge 补 `/chat/completions`）。
+fn session_chat_path(session: &AccountSession, meta: &registry::SessionMeta) -> Option<String> {
+    session
+        .chat_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let path = meta.chat_path.trim();
+            (!path.is_empty()).then(|| path.to_string())
+        })
+}
+
 /// 按账号凭证构造上游 Bridge（按账号代理选出口 Client）。
 pub fn build_bridge(
     session: &AccountSession,
@@ -75,6 +89,8 @@ pub fn build_bridge(
                     registry::SessionAuth::Cookie => crate::bridge::openai::AuthMode::Cookie,
                     registry::SessionAuth::Headers => crate::bridge::openai::AuthMode::Headers,
                 };
+                // 账号级对话路径优先，空则回落到 provider 默认路径
+                let chat_path = session_chat_path(session, meta);
                 Arc::new(
                     crate::bridge::openai::OpenaiCompatibleBridge::with_session_auth(
                         &base,
@@ -82,7 +98,7 @@ pub fn build_bridge(
                         client.as_ref().clone(),
                         auth_mode,
                         session_headers(session, meta),
-                        session.chat_path.clone(),
+                        chat_path,
                     ),
                 )
             } else {
@@ -124,6 +140,28 @@ mod tests {
     fn openai_compatible_requires_explicit_base_url() {
         let session = AccountSession::new("ch", "acct");
         assert!(effective_base_url(&session).is_err());
+    }
+
+    #[test]
+    fn session_chat_path_falls_back_to_provider_default() {
+        let mut session = AccountSession::new("ch", "acct");
+        session.provider = "workbuddy".to_string();
+        let meta = registry::session_meta("workbuddy").unwrap();
+        assert_eq!(
+            session_chat_path(&session, meta).as_deref(),
+            Some("/v2/chat/completions")
+        );
+
+        session.chat_path = Some("/custom/path".to_string());
+        assert_eq!(
+            session_chat_path(&session, meta).as_deref(),
+            Some("/custom/path")
+        );
+
+        let zcode = registry::session_meta("zcode").unwrap();
+        session.provider = "zcode".to_string();
+        session.chat_path = None;
+        assert!(session_chat_path(&session, zcode).is_none());
     }
 
     #[test]
