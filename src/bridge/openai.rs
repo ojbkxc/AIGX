@@ -1147,8 +1147,9 @@ mod tests {
     /// 断言 Bridge 构造的请求头与账号凭证一致（端到端，非仅序列化）。
     #[tokio::test]
     async fn session_auth_sends_cookie_and_templated_headers() {
-        use crate::bridge::{BridgeContext, ChatFormat, ChatMessage, Role};
-        use axum::{extract::HeaderMap, routing::post, Json, Router};
+        use crate::bridge::{Bridge, BridgeContext, ChatFormat, ChatMessage, Role};
+        use axum::http::HeaderMap;
+        use axum::{routing::post, Json, Router};
 
         async fn echo(headers: HeaderMap) -> Json<serde_json::Value> {
             let cookie = headers
@@ -1211,6 +1212,9 @@ mod tests {
         };
         let ctx = BridgeContext::new("test-req", "m");
         let resp = bridge.chat(&req, &ctx).await.expect("chat should succeed");
-        assert_eq!(resp.message.content_str(), "cookie=sessionid=abc;token=sessionid=abc");
+        assert_eq!(
+            resp.message.content_str(),
+            "cookie=sessionid=abc;token=sessionid=abc"
+        );
     }
 }
