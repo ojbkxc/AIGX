@@ -55,6 +55,7 @@ import type {
   PromptSourceItem,
   UpdateStatusItem,
   UpdateSettingsItem,
+  AccountRotationPolicyItem,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -433,6 +434,10 @@ export const api = {
     request<ApiList<AccountProviderItem>>('GET', `${API_BASE}/account-sessions/providers`),
   accountSessionStats: (): Promise<ApiResponse<{ channels?: AccountSessionStatsItem[]; total?: number }>> =>
     request<ApiResponse<{ channels?: AccountSessionStatsItem[]; total?: number }>>('GET', `${API_BASE}/account-sessions/stats`),
+  accountRotationPolicy: (): Promise<ApiResponse<AccountRotationPolicyItem>> =>
+    request<ApiResponse<AccountRotationPolicyItem>>('GET', `${API_BASE}/account-sessions/rotation`),
+  saveAccountRotationPolicy: (data: Partial<AccountRotationPolicyItem>): Promise<ApiResponse<AccountRotationPolicyItem>> =>
+    request<ApiResponse<AccountRotationPolicyItem>>('PUT', `${API_BASE}/account-sessions/rotation`, data),
   // 渠道对话调试：流式（text/event-stream）返回 { stream: [{ content }] }，
   // 非流式返回后端 JSON。与 Playground 页共用 SSE 解析模式。
   testChannelChat: async (data: PlaygroundChatRequest): Promise<PlaygroundChatResult> => {
@@ -583,9 +588,9 @@ export const api = {
     request<ApiResponse<{ removed?: number }>>('DELETE', `${API_BASE}/logs/audits`, { ids }),
   clearAuditLogs: (): Promise<ApiResponse<{ removed?: number }>> =>
     request<ApiResponse<{ removed?: number }>>('DELETE', `${API_BASE}/logs/audits/clear`),
-  getLogRetention: (): Promise<ApiResponse<{ max_age_days?: number; max_capacity?: number }>> =>
-    request<ApiResponse<{ max_age_days?: number; max_capacity?: number }>>('GET', `${API_BASE}/logs/retention`),
-  updateLogRetention: (data: { max_age_days?: number; max_capacity?: number }): Promise<ApiResponse<null>> =>
+  getLogRetention: (): Promise<ApiResponse<{ max_age_days?: number; max_capacity?: number; audit_max_age_days?: number }>> =>
+    request<ApiResponse<{ max_age_days?: number; max_capacity?: number; audit_max_age_days?: number }>>('GET', `${API_BASE}/logs/retention`),
+  updateLogRetention: (data: { max_age_days?: number; max_capacity?: number; audit_max_age_days?: number }): Promise<ApiResponse<null>> =>
     request<ApiResponse<null>>('PUT', `${API_BASE}/logs/retention`, data),
   cleanupLogs: (): Promise<ApiResponse<{ removed?: number; requests?: number; audits?: number }>> =>
     request<ApiResponse<{ removed?: number; requests?: number; audits?: number }>>('POST', `${API_BASE}/logs/cleanup`, {}),

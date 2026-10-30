@@ -1605,5 +1605,19 @@
   "Gemini 兼容（自定义地址）": "Gemini compatible (custom URL)",
   "按 {base}/chat/completions 转发": "Forwards to {base}/chat/completions",
   "按 {base}/v1/messages 转发": "Forwards to {base}/v1/messages",
-  "按 {base}/models 转发": "Forwards to {base}/models"
+  "按 {base}/models 转发": "Forwards to {base}/models",
+  "账号路由": "Account routing",
+  "账号路由设置已保存": "Account routing settings saved",
+  "账号失败后的冷却窗口与单请求最多尝试几个账号；保存后立即生效并持久化。": "Cooldown windows after an account failure and how many accounts one request may try; changes take effect immediately and are persisted.",
+  "基础冷却（秒）": "Base cooldown (seconds)",
+  "连续失败按指数退避，从该值起算（5–3600）": "Consecutive failures back off exponentially starting from this value (5–3600)",
+  "冷却上限（秒）": "Cooldown cap (seconds)",
+  "单账号单模型的最长冷却（不超过 86400）": "Longest cooldown per account/model (up to 86400)",
+  "认证失败冷却（秒）": "Auth failure cooldown (seconds)",
+  "密钥失效/鉴权失败的长冷却（60–86400）": "Long cooldown for invalid keys / auth failures (60–86400)",
+  "单请求最大换号次数": "Max account switches per request",
+  "一次请求最多尝试几个账号（1–20）": "How many accounts one request may try (1–20)",
+  "审计日志保留天数（天）": "Audit log retention (days)",
+  "留空 = 跟随请求日志天数": "Empty = follow request-log days",
+  "审计日志（登录/配置变更/高危操作）单独保留窗口，留空则与请求日志一致": "Audit logs (sign-in / config changes / high-risk actions) have their own retention window; empty means same as request logs"
 }

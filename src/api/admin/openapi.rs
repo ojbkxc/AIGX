@@ -616,6 +616,10 @@ fn paths_accounts_network() -> Value {
         "/api/account-sessions/providers": {
             "get": op("账号池", "provider 目录（粘贴凭证型上游与默认地址）")
         },
+        "/api/account-sessions/rotation": {
+            "get": op("账号池", "当前账号路由参数（冷却区间与单请求最大换号次数）"),
+            "put": op_body("账号池", "保存账号路由参数", "base/max/auth 冷却秒数 + max_attempts")
+        },
         "/api/account-sessions/stats": {
             "get": op("账号池", "按渠道聚合的账号池统计（启用/冷却/并发/成败）")
         },
@@ -732,6 +736,7 @@ mod tests {
         add("/api/account-sessions", &["get", "post"]);
         add("/api/account-sessions/bulk", &["post"]);
         add("/api/account-sessions/providers", &["get"]);
+        add("/api/account-sessions/rotation", &["get", "put"]);
         add("/api/account-sessions/stats", &["get"]);
         add("/api/account-sessions/{id}", &["delete", "patch", "put"]);
         add("/api/account-sessions/{id}/reset-cooldown", &["post"]);
@@ -966,15 +971,15 @@ mod tests {
         );
     }
 
-    /// 数量锚点：管理面真实路径共 156 个（155 + openapi.json 自身）。
+    /// 数量锚点：管理面真实路径共 157 个（156 + openapi.json 自身）。
     /// 真实路由增删会先在 covers_all_real_admin_routes 红，此断言辅助定位。
     #[test]
     fn path_count_anchor() {
         let doc = build_openapi_document();
         let n = doc["paths"].as_object().unwrap().len();
         assert_eq!(
-            n, 156,
-            "管理面路径数应为 156（155 真实注册 + openapi.json），实际 {n}"
+            n, 157,
+            "管理面路径数应为 157（156 真实注册 + openapi.json），实际 {n}"
         );
     }
 }

@@ -604,14 +604,18 @@ async fn main() -> anyhow::Result<()> {
                 run: Box::new(move || {
                     let ls = log_store.clone();
                     Box::pin(async move {
-                        let (days, _capacity) = ls.requests.retention();
+                        let (days, _capacity, audit_days) = ls.requests.retention_full();
                         // 容量上限由写入路径的 purge_overflow 消费（同样读
                         // retention 配置），此处只负责按天清理。
                         let Some(days) = days else { return 0 };
                         let cutoff = chrono::Utc::now().timestamp() - (days as i64) * 86400;
                         match ls.requests.delete_older_than(cutoff) {
                             Ok(n) => {
-                                if let Ok(m) = ls.audits.delete_older_than(cutoff) {
+                                // 审计日志有独立天数时按自己的窗口清理，否则跟随请求日志
+                                let audit_cutoff = audit_days
+                                    .map(|d| chrono::Utc::now().timestamp() - (d as i64) * 86400)
+                                    .unwrap_or(cutoff);
+                                if let Ok(m) = ls.audits.delete_older_than(audit_cutoff) {
                                     (n + m) as u64
                                 } else {
                                     n as u64
@@ -1358,6 +1362,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/account-sessions/providers",
             get(api::admin::account_sessions::handle_list_account_providers),
+        )
+        .route(
+            "/api/account-sessions/rotation",
+            get(api::admin::account_sessions::handle_get_rotation_policy)
+                .put(api::admin::account_sessions::handle_set_rotation_policy),
         )
         .route(
             "/api/account-sessions/stats",

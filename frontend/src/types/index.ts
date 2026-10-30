@@ -919,6 +919,18 @@ export interface AccountSessionStatsItem {
   error: number;
 }
 
+/** 账号路由（轮换策略）参数（GET/PUT /api/account-sessions/rotation） */
+export interface AccountRotationPolicyItem {
+  /** 基础冷却（秒） */
+  base_cooldown_secs: number;
+  /** 冷却上限（秒） */
+  max_cooldown_secs: number;
+  /** 认证失败冷却（秒） */
+  auth_cooldown_secs: number;
+  /** 单次请求最多尝试几个账号 */
+  max_attempts: number;
+}
+
 /** 服务器自动更新状态（GET /api/update/status） */
 export interface UpdateStatusItem {
   currentVersion: string;

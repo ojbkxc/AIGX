@@ -21,6 +21,8 @@ export default function LogRetention(): JSX.Element {
   /** 保留天数（空串 = 不限） */
   const [days, setDays] = useState('');
   const [capacity, setCapacity] = useState('');
+  /** 审计日志独立保留天数（空串 = 跟随请求日志） */
+  const [auditDays, setAuditDays] = useState('');
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   useEffect(() => {
@@ -30,6 +32,7 @@ export default function LogRetention(): JSX.Element {
         const d = res?.data;
         setDays(d?.max_age_days != null ? String(d.max_age_days) : '');
         setCapacity(d?.max_capacity != null ? String(d.max_capacity) : '');
+        setAuditDays(d?.audit_max_age_days != null ? String(d.audit_max_age_days) : '');
       } catch {
         // 读取失败保持默认空值
       } finally {
@@ -43,7 +46,13 @@ export default function LogRetention(): JSX.Element {
     try {
       const daysVal = days.trim() === '' ? undefined : Math.max(1, parseInt(days) || 0);
       const capVal = capacity.trim() === '' ? undefined : Math.max(1000, parseInt(capacity) || 0);
-      await api.updateLogRetention({ max_age_days: daysVal, max_capacity: capVal });
+      const auditVal = auditDays.trim() === '' ? 0 : Math.max(1, parseInt(auditDays) || 0);
+      // 0 = 清除独立天数（回到跟随请求日志）；undefined 会被后端当缺省不修改
+      await api.updateLogRetention({
+        max_age_days: daysVal,
+        max_capacity: capVal,
+        audit_max_age_days: auditVal,
+      });
       addToast(t('日志保留配置已保存（每日自动清理）'));
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
@@ -117,6 +126,19 @@ export default function LogRetention(): JSX.Element {
               placeholder={t('留空 = 默认 100000')}
             />
             <div className="form-hint">{t('请求日志超过上限时自动清理最旧的一批（默认 10 万条）')}</div>
+          </div>
+          <div className="form-group">
+            <label>{t('审计日志保留天数（天）')}</label>
+            <input
+              className="form-input"
+              type="number"
+              min={1}
+              max={3650}
+              value={auditDays}
+              onChange={(e) => setAuditDays(e.target.value)}
+              placeholder={t('留空 = 跟随请求日志天数')}
+            />
+            <div className="form-hint">{t('审计日志（登录/配置变更/高危操作）单独保留窗口，留空则与请求日志一致')}</div>
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
             <button type="button" className="btn btn-primary btn-sm" onClick={() => void save()} disabled={saving}>

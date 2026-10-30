@@ -338,30 +338,52 @@ impl RequestLogStore {
         max_age_days: Option<u64>,
         max_capacity: Option<usize>,
     ) -> anyhow::Result<()> {
+        self.set_retention_full(max_age_days, max_capacity, None)
+    }
+
+    /// 写入完整保留配置（请求日志天数/容量 + 审计日志独立天数）。
+    pub fn set_retention_full(
+        &self,
+        max_age_days: Option<u64>,
+        max_capacity: Option<usize>,
+        audit_max_age_days: Option<u64>,
+    ) -> anyhow::Result<()> {
         #[derive(Serialize, Deserialize, Default)]
         struct Retention {
             max_age_days: Option<u64>,
             max_capacity: Option<usize>,
+            /// 审计日志独立保留天数；None = 跟随请求日志天数
+            #[serde(default)]
+            audit_max_age_days: Option<u64>,
         }
         self.store.put(
             "log_retention",
             &Retention {
                 max_age_days,
                 max_capacity,
+                audit_max_age_days,
             },
         )
     }
 
     /// 读取日志保留配置（无记录返回 None/None = 默认策略：不限天数、容量 10 万）
     pub fn retention(&self) -> (Option<u64>, Option<usize>) {
+        let (days, capacity, _audit) = self.retention_full();
+        (days, capacity)
+    }
+
+    /// 读取完整保留配置（含审计日志独立天数）。
+    pub fn retention_full(&self) -> (Option<u64>, Option<usize>, Option<u64>) {
         #[derive(Serialize, Deserialize, Default)]
         struct Retention {
             max_age_days: Option<u64>,
             max_capacity: Option<usize>,
+            #[serde(default)]
+            audit_max_age_days: Option<u64>,
         }
         match self.store.get::<Retention>("log_retention") {
-            Ok(Some(r)) => (r.max_age_days, r.max_capacity),
-            _ => (None, None),
+            Ok(Some(r)) => (r.max_age_days, r.max_capacity, r.audit_max_age_days),
+            _ => (None, None, None),
         }
     }
 

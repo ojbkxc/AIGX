@@ -4,6 +4,8 @@
 //! 映射为 `circuit_breaker::FailureType`），本模块只负责「分类 → 冷却秒数」。
 //! 这样渠道级熔断与账号级冷却对同一上游错误保持一致的语义。
 
+use serde::{Deserialize, Serialize};
+
 use crate::channel::circuit_breaker::FailureType;
 
 /// 默认基础冷却（秒）。
@@ -17,8 +19,8 @@ const MAX_BACKOFF_EXPONENT: u32 = 5;
 /// 单次请求最多的账号尝试次数。
 const DEFAULT_MAX_ATTEMPTS: usize = 5;
 
-/// 账号级轮换参数。
-#[derive(Debug, Clone, Copy)]
+/// 账号级轮换参数（管理台「账号路由」可调，落盘后重启仍生效）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RotationPolicy {
     /// 基础冷却（秒）。
     pub base_cooldown_secs: u64,
@@ -28,6 +30,20 @@ pub struct RotationPolicy {
     pub auth_cooldown_secs: u64,
     /// 单次请求最多尝试几个账号。
     pub max_attempts: usize,
+}
+
+impl RotationPolicy {
+    /// 归一化到安全区间，避免管理台误填出「永不冷却 / 无限重试」：
+    /// - 基础冷却 5s–1h；上限至少等于基础值、最多 24h
+    /// - 认证冷却 60s–24h（密钥失效需人工介入，不宜太短）
+    /// - 单请求最多尝试账号 1–20 次
+    pub fn clamped(mut self) -> Self {
+        self.base_cooldown_secs = self.base_cooldown_secs.clamp(5, 3_600);
+        self.max_cooldown_secs = self.max_cooldown_secs.clamp(self.base_cooldown_secs, 86_400);
+        self.auth_cooldown_secs = self.auth_cooldown_secs.clamp(60, 86_400);
+        self.max_attempts = self.max_attempts.clamp(1, 20);
+        self
+    }
 }
 
 impl Default for RotationPolicy {
@@ -113,5 +129,32 @@ mod tests {
             cooldown_secs(&p, &FailureType::AuthFailed, 1, None),
             p.auth_cooldown_secs
         );
+    }
+
+    #[test]
+    fn clamped_bounds_admin_input() {
+        let p = RotationPolicy {
+            base_cooldown_secs: 0,
+            max_cooldown_secs: 0,
+            auth_cooldown_secs: 0,
+            max_attempts: 0,
+        }
+        .clamped();
+        assert_eq!(p.base_cooldown_secs, 5);
+        assert_eq!(p.max_cooldown_secs, 5);
+        assert_eq!(p.auth_cooldown_secs, 60);
+        assert_eq!(p.max_attempts, 1);
+
+        let p = RotationPolicy {
+            base_cooldown_secs: 99_999,
+            max_cooldown_secs: 99_999,
+            auth_cooldown_secs: 99_999,
+            max_attempts: 99,
+        }
+        .clamped();
+        assert_eq!(p.base_cooldown_secs, 3_600);
+        assert_eq!(p.max_cooldown_secs, 86_400);
+        assert_eq!(p.auth_cooldown_secs, 86_400);
+        assert_eq!(p.max_attempts, 20);
     }
 }

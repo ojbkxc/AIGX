@@ -22,6 +22,8 @@ use crate::storage::FileStore;
 
 /// KV 键前缀（`acctses:{channel_id}:{account_id}`）。
 const KEY_PREFIX: &str = "acctses:";
+/// 轮换策略的落盘键（管理台「账号路由」保存后重启仍生效）。
+const POLICY_KEY: &str = "account_rotation_policy";
 /// 运行态统计落盘节流窗口（秒）——热路径不每次请求都写存储。
 const PERSIST_INTERVAL_SECS: i64 = 30;
 
@@ -67,7 +69,7 @@ struct Inner {
     store: Arc<FileStore>,
     sessions: RwLock<Vec<AccountSession>>,
     egress: Arc<EgressCache>,
-    policy: RotationPolicy,
+    policy: RwLock<RotationPolicy>,
     /// 落盘节流：account id → 上次持久化 unix 秒。
     persisted_at: DashMap<String, i64>,
 }
@@ -91,14 +93,26 @@ impl AccountSessionStore {
                 store,
                 sessions: RwLock::new(Vec::new()),
                 egress,
-                policy: RotationPolicy::default(),
+                policy: RwLock::new(RotationPolicy::default()),
                 persisted_at: DashMap::new(),
             }),
         };
         if let Err(e) = pool.load() {
             tracing::error!("Failed to load account sessions: {e}");
         }
+        pool.load_policy();
         pool
+    }
+
+    /// 加载落盘的轮换策略（缺失/损坏时保持默认值）。
+    fn load_policy(&self) {
+        match self.inner.store.get::<RotationPolicy>(POLICY_KEY) {
+            Ok(Some(policy)) => {
+                *self.inner.policy.write() = policy.clamped();
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("load account rotation policy: {e}"),
+        }
     }
 
     /// 从存储加载全部账号（按创建时间升序）。
@@ -261,7 +275,15 @@ impl AccountSessionStore {
 
     /// 轮换参数。
     pub fn policy(&self) -> RotationPolicy {
-        self.inner.policy
+        *self.inner.policy.read()
+    }
+
+    /// 更新轮换参数（归一化后立即生效并落盘）。
+    pub fn set_policy(&self, policy: RotationPolicy) -> anyhow::Result<RotationPolicy> {
+        let next = policy.clamped();
+        *self.inner.policy.write() = next;
+        self.inner.store.put(POLICY_KEY, &next)?;
+        Ok(next)
     }
 
     /// 出口 Client 池。
@@ -369,6 +391,7 @@ impl AccountSessionStore {
             FailureType::RateLimited { retry_after, .. } => *retry_after,
             _ => None,
         };
+        let policy = self.policy();
         let (snapshot, secs) = {
             let mut sessions = self.inner.sessions.write();
             let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
@@ -376,12 +399,8 @@ impl AccountSessionStore {
             };
             session.error_count = session.error_count.saturating_add(1);
             session.consecutive_errors = session.consecutive_errors.saturating_add(1);
-            let secs = rotate::cooldown_secs(
-                &self.inner.policy,
-                failure,
-                session.consecutive_errors,
-                retry_after,
-            );
+            let secs =
+                rotate::cooldown_secs(&policy, failure, session.consecutive_errors, retry_after);
             if secs > 0 {
                 session
                     .cooldowns

@@ -350,6 +350,9 @@ pub struct LogRetentionBody {
     /// 容量上限（None = 默认 10 万条）
     #[serde(default)]
     pub max_capacity: Option<usize>,
+    /// 审计日志独立保留天数（None = 跟随请求日志天数）
+    #[serde(default)]
+    pub audit_max_age_days: Option<u64>,
 }
 
 /// GET /api/logs/retention — 读取日志保留配置
@@ -358,12 +361,13 @@ pub async fn handle_get_log_retention(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    let (days, capacity) = state.log_store.requests.retention();
+    let (days, capacity, audit_days) = state.log_store.requests.retention_full();
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
             "max_age_days": days,
             "max_capacity": capacity.unwrap_or(100_000),
+            "audit_max_age_days": audit_days,
         }
     })))
 }
@@ -375,10 +379,12 @@ pub async fn handle_update_log_retention(
     Json(body): Json<LogRetentionBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
+    // 0 = 清除独立天数（回到跟随请求日志），与前端「清空输入」语义一致
+    let audit_days = body.audit_max_age_days.filter(|d| *d > 0);
     state
         .log_store
         .requests
-        .set_retention(body.max_age_days, body.max_capacity)
+        .set_retention_full(body.max_age_days, body.max_capacity, audit_days)
         .map_err(|e| {
             error_response(
                 &format!("Failed to save retention: {e}"),
@@ -386,9 +392,10 @@ pub async fn handle_update_log_retention(
             )
         })?;
     tracing::info!(
-        "日志保留配置已更新: max_age_days={:?} max_capacity={:?}",
+        "日志保留配置已更新: max_age_days={:?} max_capacity={:?} audit_max_age_days={:?}",
         body.max_age_days,
-        body.max_capacity
+        body.max_capacity,
+        body.audit_max_age_days
     );
     Ok(Json(serde_json::json!({ "success": true, "data": null })))
 }

@@ -20,6 +20,7 @@ use super::common::{admin_id_from_session, error_response, record_audit, verify_
 use crate::account_session::adapter;
 use crate::account_session::model::AccountSession;
 use crate::account_session::registry;
+use crate::account_session::rotate::RotationPolicy;
 use crate::bridge::{BridgeContext, ChatFormat, ChatMessage, Role};
 use crate::channel::{Channel, ChannelTestResult, ChannelType};
 
@@ -799,6 +800,85 @@ pub async fn handle_list_account_providers(
         }));
     }
     Ok(Json(json!({ "success": true, "data": data })))
+}
+
+/// 账号路由（轮换策略）请求体：缺省字段保持原值。
+#[derive(Debug, Deserialize)]
+pub struct RotationPolicyRequest {
+    pub base_cooldown_secs: Option<u64>,
+    pub max_cooldown_secs: Option<u64>,
+    pub auth_cooldown_secs: Option<u64>,
+    pub max_attempts: Option<usize>,
+}
+
+/// GET /api/account-sessions/rotation —— 当前账号路由参数。
+pub async fn handle_get_rotation_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let policy = state.account_sessions.policy();
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "base_cooldown_secs": policy.base_cooldown_secs,
+            "max_cooldown_secs": policy.max_cooldown_secs,
+            "auth_cooldown_secs": policy.auth_cooldown_secs,
+            "max_attempts": policy.max_attempts,
+        }
+    })))
+}
+
+/// PUT /api/account-sessions/rotation —— 保存账号路由参数（归一化后立即生效）。
+pub async fn handle_set_rotation_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<RotationPolicyRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let current = state.account_sessions.policy();
+    let next = RotationPolicy {
+        base_cooldown_secs: body.base_cooldown_secs.unwrap_or(current.base_cooldown_secs),
+        max_cooldown_secs: body.max_cooldown_secs.unwrap_or(current.max_cooldown_secs),
+        auth_cooldown_secs: body.auth_cooldown_secs.unwrap_or(current.auth_cooldown_secs),
+        max_attempts: body.max_attempts.unwrap_or(current.max_attempts),
+    };
+    match state.account_sessions.set_policy(next) {
+        Ok(saved) => {
+            let admin_id = admin_id_from_session(&state, &headers).await;
+            record_audit(
+                &state,
+                &admin_id,
+                "update_account_rotation",
+                "account-session",
+                Some(json!({
+                    "base_cooldown_secs": current.base_cooldown_secs,
+                    "max_cooldown_secs": current.max_cooldown_secs,
+                    "auth_cooldown_secs": current.auth_cooldown_secs,
+                    "max_attempts": current.max_attempts,
+                })),
+                Some(json!({
+                    "base_cooldown_secs": saved.base_cooldown_secs,
+                    "max_cooldown_secs": saved.max_cooldown_secs,
+                    "auth_cooldown_secs": saved.auth_cooldown_secs,
+                    "max_attempts": saved.max_attempts,
+                })),
+            );
+            Ok(Json(json!({
+                "success": true,
+                "data": {
+                    "base_cooldown_secs": saved.base_cooldown_secs,
+                    "max_cooldown_secs": saved.max_cooldown_secs,
+                    "auth_cooldown_secs": saved.auth_cooldown_secs,
+                    "max_attempts": saved.max_attempts,
+                }
+            })))
+        }
+        Err(e) => Err(error_response(
+            &format!("Failed to save rotation policy: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
 }
 
 #[derive(Default)]

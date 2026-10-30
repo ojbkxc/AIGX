@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FlaskConical, Pencil, Plus, Power, RotateCcw, Trash2, Upload } from 'lucide-react';
+import { FlaskConical, Pencil, Plus, Power, RotateCcw, SlidersHorizontal, Trash2, Upload } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
@@ -246,6 +246,12 @@ export default function AccountSessions(): JSX.Element {
   const [pickSegment, setPickSegment] = useState<ProviderSegment>('agent');
   const [providerSearch, setProviderSearch] = useState('');
 
+  // 账号路由（轮换策略）：冷却窗口与单请求最大换号次数
+  const [showRotation, setShowRotation] = useState(false);
+  const [rotation, setRotation] = useState({ base: '60', max: '1800', auth: '900', attempts: '5' });
+  const [rotationSaving, setRotationSaving] = useState(false);
+  const [rotationError, setRotationError] = useState('');
+
   const [showBulk, setShowBulk] = useState(false);
   const [bulk, setBulk] = useState<BulkFormState>(EMPTY_BULK);
 
@@ -324,6 +330,55 @@ export default function AccountSessions(): JSX.Element {
       channel_id: channelFilter || accountChannels[0]?.id || '',
     });
     setShowBulk(true);
+  };
+
+  // ── 账号路由（轮换策略）──
+  const openRotation = async (): Promise<void> => {
+    setRotationError('');
+    try {
+      const res = await api.accountRotationPolicy();
+      const d = res?.data;
+      if (d) {
+        setRotation({
+          base: String(d.base_cooldown_secs),
+          max: String(d.max_cooldown_secs),
+          auth: String(d.auth_cooldown_secs),
+          attempts: String(d.max_attempts),
+        });
+      }
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+    setShowRotation(true);
+  };
+
+  const saveRotation = async (e: FormEvent): Promise<void> => {
+    e.preventDefault();
+    setRotationError('');
+    setRotationSaving(true);
+    try {
+      const res = await api.saveAccountRotationPolicy({
+        base_cooldown_secs: Math.max(5, Number(rotation.base) || 60),
+        max_cooldown_secs: Math.max(5, Number(rotation.max) || 1800),
+        auth_cooldown_secs: Math.max(60, Number(rotation.auth) || 900),
+        max_attempts: Math.max(1, Number(rotation.attempts) || 5),
+      });
+      const d = res?.data;
+      if (d) {
+        setRotation({
+          base: String(d.base_cooldown_secs),
+          max: String(d.max_cooldown_secs),
+          auth: String(d.auth_cooldown_secs),
+          attempts: String(d.max_attempts),
+        });
+      }
+      addToast(t('账号路由设置已保存'));
+      setShowRotation(false);
+    } catch (err) {
+      setRotationError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRotationSaving(false);
+    }
   };
 
   const splitModels = (raw: string): string[] =>
@@ -609,6 +664,9 @@ export default function AccountSessions(): JSX.Element {
         title={`${t('账号池')} (${visible.length})`}
         actions={
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Button variant="outline" onClick={() => void openRotation()}>
+              <SlidersHorizontal size={14} /> {t('账号路由')}
+            </Button>
             <Button variant="outline" onClick={openBulk} disabled={accountChannels.length === 0}>
               <Upload size={14} /> {t('批量导入')}
             </Button>
@@ -1095,6 +1153,71 @@ export default function AccountSessions(): JSX.Element {
               </Button>
               <Button type="submit" disabled={saving}>
                 {saving ? t('导入中…') : t('开始导入')}
+              </Button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {showRotation && (
+        <div className="modal-overlay">
+          <form className="modal" onSubmit={(e) => void saveRotation(e)}>
+            <div className="modal-header">
+              <h3>{t('账号路由')}</h3>
+              <button type="button" className="modal-close" onClick={() => setShowRotation(false)}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                {t('账号失败后的冷却窗口与单请求最多尝试几个账号；保存后立即生效并持久化。')}
+              </p>
+              {rotationError && <div className="error-message">{rotationError}</div>}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <Input
+                  label={t('基础冷却（秒）')}
+                  type="number"
+                  min="5"
+                  max="3600"
+                  hint={t('连续失败按指数退避，从该值起算（5–3600）')}
+                  value={rotation.base}
+                  onChange={(e) => setRotation({ ...rotation, base: e.target.value })}
+                />
+                <Input
+                  label={t('冷却上限（秒）')}
+                  type="number"
+                  min="5"
+                  max="86400"
+                  hint={t('单账号单模型的最长冷却（不超过 86400）')}
+                  value={rotation.max}
+                  onChange={(e) => setRotation({ ...rotation, max: e.target.value })}
+                />
+              </div>
+              <Input
+                label={t('认证失败冷却（秒）')}
+                type="number"
+                min="60"
+                max="86400"
+                hint={t('密钥失效/鉴权失败的长冷却（60–86400）')}
+                value={rotation.auth}
+                onChange={(e) => setRotation({ ...rotation, auth: e.target.value })}
+              />
+              <Input
+                label={t('单请求最大换号次数')}
+                type="number"
+                min="1"
+                max="20"
+                hint={t('一次请求最多尝试几个账号（1–20）')}
+                value={rotation.attempts}
+                onChange={(e) => setRotation({ ...rotation, attempts: e.target.value })}
+              />
+            </div>
+            <div className="modal-footer">
+              <Button variant="secondary" onClick={() => setShowRotation(false)}>
+                {t('取消')}
+              </Button>
+              <Button type="submit" disabled={rotationSaving}>
+                {rotationSaving ? t('保存中…') : t('保存修改')}
               </Button>
             </div>
           </form>
