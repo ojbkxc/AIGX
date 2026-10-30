@@ -201,7 +201,11 @@ impl Bridge for TraeBridge {
                         }
                         None => {
                             // 没见到 done 就 EOF：补一条结束帧（上游不保证发 done）
-                            pending.push_back(Ok(finish_chunk(&flow.id, &flow.model, flow.pending_usage.take())));
+                            pending.push_back(Ok(finish_chunk(
+                                &flow.id,
+                                &flow.model,
+                                flow.pending_usage.take(),
+                            )));
                             flow.ended = true;
                         }
                     }
@@ -262,10 +266,7 @@ fn apply_event(
     };
     match event {
         "output" => {
-            let text = value
-                .get("response")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let text = value.get("response").and_then(Value::as_str).unwrap_or("");
             let reasoning = value
                 .get("reasoning_content")
                 .and_then(Value::as_str)
@@ -286,10 +287,7 @@ fn apply_event(
                         let function = call.get("function")?;
                         Some(ToolCallDelta {
                             index,
-                            id: call
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
+                            id: call.get("id").and_then(Value::as_str).map(str::to_string),
                             function_name: function
                                 .get("name")
                                 .and_then(Value::as_str)
