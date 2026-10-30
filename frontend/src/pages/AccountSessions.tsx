@@ -390,14 +390,25 @@ export default function AccountSessions(): JSX.Element {
   const handleSave = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
     setError('');
-    if (!form.channel_id) {
-      setError(t('请选择渠道'));
-      return;
-    }
     setSaving(true);
     try {
+      let channelId = form.channel_id;
+      // 没有账号型渠道时：按所选供应商自动创建渠道，避免「添加账号」点不动
+      if (!editing && !channelId) {
+        const name = `${selectedProviderLabel} ${t('账号池')}`.trim();
+        const created = await api.addChannel({
+          name,
+          channel_type: 'account',
+          base_url: '',
+          models: [],
+        });
+        channelId = created?.data?.id != null ? String(created.data.id) : '';
+        if (!channelId) {
+          throw new Error(t('创建账号型渠道失败'));
+        }
+      }
       const payload: Record<string, unknown> = {
-        channel_id: form.channel_id,
+        channel_id: channelId,
         name: form.name.trim(),
         provider: form.provider,
         base_url: form.base_url.trim(),
@@ -644,7 +655,7 @@ export default function AccountSessions(): JSX.Element {
 
       {accountChannels.length === 0 && (
         <div className="error-message">
-          {t('还没有账号型渠道：请先在渠道管理里创建 channel_type = account 的渠道')}
+          {t('还没有账号型渠道：添加账号并保存时会按所选供应商自动创建账号型渠道')}
         </div>
       )}
 
@@ -670,7 +681,7 @@ export default function AccountSessions(): JSX.Element {
             <Button variant="outline" onClick={openBulk} disabled={accountChannels.length === 0}>
               <Upload size={14} /> {t('批量导入')}
             </Button>
-            <Button onClick={openCreate} disabled={accountChannels.length === 0}>
+            <Button onClick={openCreate}>
               <Plus size={14} /> {t('添加账号')}
             </Button>
           </div>
@@ -701,14 +712,10 @@ export default function AccountSessions(): JSX.Element {
           <EmptyState
             message={
               accountChannels.length === 0
-                ? t('先创建账号型渠道，再来添加凭证')
+                ? t('还没有账号：点击「添加账号」，保存时会按所选供应商自动创建账号型渠道')
                 : t('暂无账号，点击「添加账号」或「批量导入」开始')
             }
-            action={
-              accountChannels.length > 0 ? (
-                <Button onClick={openCreate}>{t('添加账号')}</Button>
-              ) : undefined
-            }
+            action={<Button onClick={openCreate}>{t('添加账号')}</Button>}
           />
         ) : (
           <div className="table-wrapper">
@@ -841,6 +848,9 @@ export default function AccountSessions(): JSX.Element {
                 onChange={(e) => setForm({ ...form, channel_id: e.target.value })}
                 disabled={Boolean(editing)}
               >
+                {accountChannels.length === 0 && (
+                  <option value="">{t('保存时自动创建（按所选供应商）')}</option>
+                )}
                 {accountChannels.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name}

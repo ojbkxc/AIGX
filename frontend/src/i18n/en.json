@@ -1493,14 +1493,14 @@
   "删除账号": "Delete account",
   "确定删除账号「{{name}}」？该账号的凭证与冷却记录会一并删除。": "Delete account \"{{name}}\"? Its credential and cooldown records will also be removed.",
   "账号池管理": "Account Pool",
-  "还没有账号型渠道：请先在渠道管理里创建 channel_type = account 的渠道": "No account-type channel yet: create a channel with channel_type = account in Channel Management first",
+  "还没有账号型渠道：添加账号并保存时会按所选供应商自动创建账号型渠道": "No account-type channel yet: saving a new account auto-creates one from the selected provider",
   "冷却中": "Cooling down",
   "并发": "Concurrency",
   "批量导入": "Bulk import",
   "选择渠道": "Select channel",
   "全部渠道": "All channels",
   "搜索名称 / provider / 地址": "Search name / provider / base URL",
-  "先创建账号型渠道，再来添加凭证": "Create an account-type channel first, then add credentials",
+  "还没有账号：点击「添加账号」，保存时会按所选供应商自动创建账号型渠道": "No accounts yet: click \"Add account\"; saving auto-creates an account-type channel from the selected provider",
   "暂无账号，点击「添加账号」或「批量导入」开始": "No accounts yet — click \"Add Account\" or \"Bulk import\" to start",
   "Provider": "Provider",
   "冷却": "Cooldown",
@@ -1670,5 +1670,7 @@
   "直接换号/换渠道状态码必须在 100-599 之间": "Switch status codes must be between 100 and 599",
   "渠道锁定": "Channel lock",
   "自动选择渠道（默认）": "Auto-select channel (default)",
-  "指定后 AI 助手只通过该渠道调用模型（排障用）；留空则按优先级自动选路。": "When set, the AI assistant only calls models through this channel (for troubleshooting); empty = priority-based auto routing."
+  "指定后 AI 助手只通过该渠道调用模型（排障用）；留空则按优先级自动选路。": "When set, the AI assistant only calls models through this channel (for troubleshooting); empty = priority-based auto routing.",
+  "保存时自动创建（按所选供应商）": "Create automatically on save (from selected provider)",
+  "创建账号型渠道失败": "Failed to create the account-type channel"
 }
