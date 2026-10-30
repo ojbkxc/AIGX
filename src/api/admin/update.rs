@@ -262,4 +262,3 @@ mod tests {
         assert!(!valid_repo("ojbkxc /AIGX"));
     }
 }
-
