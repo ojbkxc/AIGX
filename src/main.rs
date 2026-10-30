@@ -626,25 +626,28 @@ async fn main() -> anyhow::Result<()> {
                         let (days, _capacity, audit_days) = ls.requests.retention_full();
                         // 容量上限由写入路径的 purge_overflow 消费（同样读
                         // retention 配置），此处只负责按天清理。
-                        let Some(days) = days else { return 0 };
-                        let cutoff = chrono::Utc::now().timestamp() - (days as i64) * 86400;
-                        match ls.requests.delete_older_than(cutoff) {
-                            Ok(n) => {
-                                // 审计日志有独立天数时按自己的窗口清理，否则跟随请求日志
-                                let audit_cutoff = audit_days
-                                    .map(|d| chrono::Utc::now().timestamp() - (d as i64) * 86400)
-                                    .unwrap_or(cutoff);
-                                if let Ok(m) = ls.audits.delete_older_than(audit_cutoff) {
-                                    (n + m) as u64
-                                } else {
-                                    n as u64
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("日志保留清理失败: {e}");
-                                0
+                        // 两类日志各自独立：审计可单独设天数（未设时跟随请求日志），
+                        // 因此请求日志未设天数时仍要清理审计。
+                        let mut removed: u64 = 0;
+                        let req_cutoff = days.map(|d| {
+                            chrono::Utc::now().timestamp() - (d as i64) * 86400
+                        });
+                        if let Some(cutoff) = req_cutoff {
+                            match ls.requests.delete_older_than(cutoff) {
+                                Ok(n) => removed += n as u64,
+                                Err(e) => tracing::warn!("请求日志保留清理失败: {e}"),
                             }
                         }
+                        let audit_cutoff = audit_days
+                            .map(|d| chrono::Utc::now().timestamp() - (d as i64) * 86400)
+                            .or(req_cutoff);
+                        if let Some(cutoff) = audit_cutoff {
+                            match ls.audits.delete_older_than(cutoff) {
+                                Ok(m) => removed += m as u64,
+                                Err(e) => tracing::warn!("审计日志保留清理失败: {e}"),
+                            }
+                        }
+                        removed
                     })
                 }),
             });

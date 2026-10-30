@@ -62,13 +62,13 @@ export default function LogRetention(): JSX.Element {
   };
 
   const cleanupNow = (): void => {
-    if (days.trim() === '') {
+    if (days.trim() === '' && auditDays.trim() === '') {
       addToast(t('请先设置保留天数'), 'error');
       return;
     }
     setConfirmState({
       title: t('立即清理'),
-      message: t('将立即删除所有早于保留天数的请求与审计日志，该操作不可撤销。确定继续？'),
+      message: t('将立即删除所有早于各自保留天数的请求与审计日志，该操作不可撤销。确定继续？'),
       confirmText: t('清理'),
       danger: true,
       onConfirm: async () => {

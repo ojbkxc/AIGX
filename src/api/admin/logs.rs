@@ -416,25 +416,34 @@ pub async fn handle_cleanup_logs(
     body: Option<Json<LogCleanupBody>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    let days = body
-        .and_then(|Json(b)| b.days)
-        .or_else(|| state.log_store.requests.retention().0);
-    let Some(days) = days else {
+    let (req_days, _capacity, audit_days) = state.log_store.requests.retention_full();
+    let req_days = body.and_then(|Json(b)| b.days).or(req_days);
+    if req_days.is_none() && audit_days.is_none() {
         return Err(error_response("未配置保留天数", StatusCode::BAD_REQUEST));
-    };
-    let cutoff = chrono::Utc::now().timestamp() - (days as i64) * 86400;
-    let removed = state
-        .log_store
-        .requests
-        .delete_older_than(cutoff)
-        .map_err(|e| error_response(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
-    let audits = state
-        .log_store
-        .audits
-        .delete_older_than(cutoff)
-        .unwrap_or(0);
+    }
+    // 请求日志与审计日志各自按自己的窗口清理；审计未单独设天数时跟随请求日志
+    let req_cutoff = req_days.map(|d| chrono::Utc::now().timestamp() - (d as i64) * 86400);
+    let mut removed = 0u64;
+    let mut requests = 0u64;
+    if let Some(cutoff) = req_cutoff {
+        requests = state
+            .log_store
+            .requests
+            .delete_older_than(cutoff)
+            .map_err(|e| error_response(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?
+            as u64;
+        removed += requests;
+    }
+    let audit_cutoff = audit_days
+        .map(|d| chrono::Utc::now().timestamp() - (d as i64) * 86400)
+        .or(req_cutoff);
+    let mut audits = 0u64;
+    if let Some(cutoff) = audit_cutoff {
+        audits = state.log_store.audits.delete_older_than(cutoff).unwrap_or(0) as u64;
+        removed += audits;
+    }
     Ok(Json(serde_json::json!({
         "success": true,
-        "data": { "removed": removed + audits, "requests": removed, "audits": audits, "cutoff": cutoff }
+        "data": { "removed": removed, "requests": requests, "audits": audits, "cutoff": req_cutoff }
     })))
 }

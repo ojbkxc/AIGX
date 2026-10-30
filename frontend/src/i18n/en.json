@@ -1425,7 +1425,7 @@
   "已清理": "Cleaned",
   "条日志": " log entries",
   "请先设置保留天数": "Set retention days first",
-  "将立即删除所有早于保留天数的请求与审计日志，该操作不可撤销。确定继续？": "This will immediately delete all request and audit logs older than the retention days. This cannot be undone. Continue?",
+  "将立即删除所有早于各自保留天数的请求与审计日志，该操作不可撤销。确定继续？": "This will immediately delete all request and audit logs older than their respective retention windows. This cannot be undone. Continue?",
   "日志保留配置已保存（每日自动清理）": "Log retention saved (daily auto cleanup)",
   "请求日志与审计日志的保留策略。设置保留天数后每日自动清理过期日志；容量上限超限时自动清最旧一批。": "Retention policy for request and audit logs. With retention days set, expired logs are cleaned daily; the oldest batch is deleted when the capacity limit is exceeded.",
   "工单": "Ticket",
