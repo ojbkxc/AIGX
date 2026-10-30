@@ -337,7 +337,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "aigx_account_session_test",
-            description: "写操作（可回滚）：单号探活（真实推理链路，不落冷却/状态）",
+            description: "写操作（可回滚）：单号探活（真实推理链路，成功后清该模型冷却）",
             schema: account_id_args(),
             risk: RiskLevel::LowRisk,
         },

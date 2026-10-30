@@ -524,7 +524,12 @@ export default function AccountSessions(): JSX.Element {
                           <FlaskConical size={14} />
                           {testingId === session.id ? t('测试中…') : t('测试')}
                         </Button>
-                        <Button variant="outline" size="sm" onClick={() => openEdit(session)}>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => openEdit(session)}
+                          title={t('编辑')}
+                        >
                           <Pencil size={14} />
                         </Button>
                         <Button
@@ -547,10 +552,16 @@ export default function AccountSessions(): JSX.Element {
                           size="sm"
                           onClick={() => handleResetCooldowns(session)}
                           disabled={Object.keys(session.cooldowns || {}).length === 0}
+                          title={t('重置冷却')}
                         >
                           <RotateCcw size={14} />
                         </Button>
-                        <Button variant="danger" size="sm" onClick={() => handleDelete(session)}>
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          onClick={() => handleDelete(session)}
+                          title={t('删除')}
+                        >
                           <Trash2 size={14} />
                         </Button>
                       </div>

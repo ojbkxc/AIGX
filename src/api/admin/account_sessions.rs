@@ -672,12 +672,17 @@ pub async fn probe_session(state: &AppState, session: &AccountSession) -> ProbeO
     let budget = Duration::from_secs(PROBE_TIMEOUT_SECS);
     let outcome = tokio::time::timeout(budget, bridge.chat(&req, &ctx)).await;
     match outcome {
-        Ok(Ok(response)) => ProbeOutcome {
-            ok: true,
-            latency_ms: started.elapsed().as_millis() as u64,
-            model,
-            message: format!("OK (finish={:?})", response.finish_reason),
-        },
+        Ok(Ok(response)) => {
+            let latency_ms = started.elapsed().as_millis() as u64;
+            // 探活成功 = 人工确认已恢复：清该模型冷却并记一次成功（不改状态）
+            state.account_sessions.record_success(&session.id, &model, latency_ms);
+            ProbeOutcome {
+                ok: true,
+                latency_ms,
+                model,
+                message: format!("OK (finish={:?})", response.finish_reason),
+            }
+        }
         Ok(Err(e)) => ProbeOutcome {
             ok: false,
             latency_ms: started.elapsed().as_millis() as u64,

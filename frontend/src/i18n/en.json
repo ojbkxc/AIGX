@@ -1529,5 +1529,6 @@
   "留空保持当前代理；勾选下方可清除": "Leave empty to keep the current proxy; tick below to clear",
   "清除出口代理": "Clear the egress proxy",
   "凭证已过期": "Credential expired",
-  "凭证已过期，请先更新凭证或到期时间": "Credential expired — update the credential or expiry first"
+  "凭证已过期，请先更新凭证或到期时间": "Credential expired — update the credential or expiry first",
+  "重置冷却": "Reset cooldown"
 }
