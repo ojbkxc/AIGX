@@ -473,6 +473,9 @@ pub async fn handle_update_gateway_settings(
     if let Some(v) = body.trust_proxy_headers {
         config.trust_proxy_headers = v;
     }
+    // 信任反代头立即生效（客户端 IP 提取走进程级快照）；
+    // 监听地址/端口/CORS 需重启服务后生效。
+    crate::config::set_trust_proxy_headers(config.trust_proxy_headers);
     match state.config_manager.update(config).await {
         Ok(()) => {
             let updated = state.config_manager.get().await;

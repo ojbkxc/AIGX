@@ -10,7 +10,8 @@ import { useToast } from '../components/Toast';
  * - CORS 来源：浏览器跨源调用 `/api`、`/v1` 的允许来源（一行一个；`*` 表示不限）
  * - 信任反代头：仅在 Nginx/CF 之后部署时开启（否则 XFF 可被伪造）
  *
- * 这些属于启动期配置，保存后需重启服务生效（设置 → 更新 → 重启服务）。
+ * 监听地址 / 端口 / CORS 属于启动期配置，保存后需重启服务生效（设置 → 更新 → 重启服务）；
+ * 信任反代头通过进程级快照，保存即生效。
  */
 export default function GatewayPanel(): JSX.Element {
   const { t } = useTranslation();
@@ -67,7 +68,7 @@ export default function GatewayPanel(): JSX.Element {
         setOrigins((d.corsOrigins || []).join('\n'));
         setTrustProxy(Boolean(d.trustProxyHeaders));
       }
-      addToast(t('网关设置已保存，重启服务后生效'));
+      addToast(t('网关设置已保存（信任反代头立即生效，监听地址/端口/CORS 需重启）'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -84,7 +85,7 @@ export default function GatewayPanel(): JSX.Element {
       <div className="card-header">
         <h2>{t('网关')}</h2>
         <p className="card-subtitle">
-          {t('监听地址、跨源访问与反向代理信任；属于启动期配置，保存后需重启服务生效。')}
+          {t('监听地址、跨源访问与反向代理信任；信任反代头立即生效，其余保存后需重启服务生效。')}
         </p>
       </div>
       <div className="card-body">
