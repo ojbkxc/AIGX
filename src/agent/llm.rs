@@ -109,6 +109,16 @@ fn make_bridge_for_channel(
     }
 }
 
+/// 思考强度归一化：只认 low/medium/high（off/空/未知 = 不发送）。
+fn effort_level(raw: Option<&str>) -> Option<String> {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("low") => Some("low".to_string()),
+        Some("medium") => Some("medium".to_string()),
+        Some("high") => Some("high".to_string()),
+        _ => None,
+    }
+}
+
 /// 单次非流式推理（工具调用用）。带 failover。
 ///
 /// 每次推理落一条 RequestLog（key_id="agent"），成功与失败都记——
@@ -150,7 +160,7 @@ pub async fn chat_once(
             top_k: None,
             stop: None,
             tool_choice,
-            reasoning_effort: None,
+            reasoning_effort: effort_level(config.reasoning_effort.as_deref()),
             web_search_options: None,
             extra: None,
         };
@@ -323,5 +333,19 @@ pub fn system_message(content: String) -> ChatMessage {
         tool_call_id: None,
         tool_calls: None,
         reasoning: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effort_level;
+
+    #[test]
+    fn effort_level_only_accepts_known_levels() {
+        assert_eq!(effort_level(Some(" HIGH ")), Some("high".to_string()));
+        assert_eq!(effort_level(Some("low")), Some("low".to_string()));
+        assert_eq!(effort_level(Some("off")), None);
+        assert_eq!(effort_level(Some("")), None);
+        assert_eq!(effort_level(None), None);
     }
 }

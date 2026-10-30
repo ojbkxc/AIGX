@@ -59,6 +59,9 @@ pub struct ChatRequest {
     /// 覆盖 `[agent].model`（前端模型选择器）。空/缺省用配置值。
     #[serde(default)]
     pub model: Option<String>,
+    /// 思考强度覆盖（off/low/medium/high）。off/缺省用配置值。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -258,6 +261,16 @@ pub async fn handle_chat(
     if let Some(m) = body.model.as_deref() {
         if !m.trim().is_empty() {
             config.model = m.trim().to_string();
+        }
+    }
+    // 思考强度：前端显式选择时覆盖配置；"off" 表示本次关闭思考。
+    if let Some(e) = body.reasoning_effort.as_deref() {
+        match e.trim().to_ascii_lowercase().as_str() {
+            "off" | "" => config.reasoning_effort = None,
+            "low" | "medium" | "high" => {
+                config.reasoning_effort = Some(e.trim().to_ascii_lowercase());
+            }
+            _ => {}
         }
     }
     let state2 = state.clone();

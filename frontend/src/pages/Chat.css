@@ -1,13 +1,175 @@
 /* ── Chat — new-api 游乐园（Playground）形态 ──
- * 无侧栏、无会话列表、无模式切换：单一对话流 + 底部输入区。
- * 输入区底部工具行：[附件 + 参数 + 清空] --- [模型选择器 + 发送/停止] */
+ * 单一对话流 + 底部输入区 + 左侧可收起历史会话抽屉（多会话存 localStorage）。
+ * 输入区底部工具行：[历史 + 参数 + 清空] --- [模型选择器 + 发送/停止] */
 
 .pg-shell {
+  position: relative;
   width: 100%;
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* ── 历史会话抽屉（覆盖层，左侧滑入）── */
+.pg-sessions {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 200;
+  width: min(19rem, 86vw);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 10px;
+  border-right: 1px solid var(--border-color);
+  background: var(--card-bg);
+  box-shadow: 16px 0 40px -24px rgba(0, 0, 0, 0.4);
+  transform: translateX(-102%);
+  transition: transform 0.18s ease;
+}
+
+.pg-sessions.open {
+  transform: translateX(0);
+}
+
+.pg-sessions-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 190;
+  background: rgba(0, 0, 0, 0.28);
+  animation: pg-pop 0.14s ease;
+}
+
+.pg-sessions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.pg-sessions-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pg-sessions-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 9999px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.pg-sessions-close:hover {
+  color: var(--text-main);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.pg-sessions-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border-color);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.pg-sessions-new:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.04));
+  border-color: var(--text-faint, #b0b0b0);
+}
+
+.pg-sessions-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pg-sessions-empty {
+  padding: 16px 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.pg-sessions-item {
+  display: flex;
+  align-items: center;
+  border-radius: 10px;
+}
+
+.pg-sessions-item.active {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.pg-sessions-item-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.pg-sessions-item-title {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--text-main);
+}
+
+.pg-sessions-item-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.pg-sessions-item-del {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-right: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.pg-sessions-item-del:hover {
+  color: var(--danger-color, #ef4444);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
 }
 
 .pg-shell .chat-debugger {
@@ -162,7 +324,7 @@
   padding: 0 3px;
   border-radius: 9999px;
   background: var(--accent-color, #2f6fed);
-  color: #fff;
+  color: var(--accent-contrast, #fff);
   font-size: 9px;
   font-weight: 600;
   line-height: 1;

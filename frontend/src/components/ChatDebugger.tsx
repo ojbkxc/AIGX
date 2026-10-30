@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, type KeyboardEvent, lazy, Suspense } from 
 import { useTranslation } from 'react-i18next';
 import {
   Send, Square, Trash2, Image, Video, AudioLines, Loader2, Bot,
-  Zap, Mic, Plus, Link2, SlidersHorizontal, MessageSquarePlus, Paperclip,
+  Zap, Mic, Plus, Link2, SlidersHorizontal, MessageSquarePlus, Paperclip, History,
   BarChart3, Code2, GraduationCap, ClipboardList,
 } from 'lucide-react';
 import { api, testChannelChatStream, directChannelChatStream } from '../api';
@@ -58,6 +58,8 @@ export interface ChatDebuggerProps {
   onClearMessages?: () => void;
   /** playground 形态：是否有消息（控制清空按钮禁用态） */
   hasMessages?: boolean;
+  /** playground 形态：打开历史会话抽屉（宿主 /chat 页提供，渲染历史按钮） */
+  onOpenSessions?: () => void;
 }
 
 interface ChatChunkResult {
@@ -96,6 +98,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     onPlaygroundModelChange,
     onClearMessages,
     hasMessages = false,
+    onOpenSessions,
   } = props;
   const { t } = useTranslation();
 
@@ -137,6 +140,9 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   const [freqPenEnabled, setFreqPenEnabled] = useState(false);
   const [presPenEnabled, setPresPenEnabled] = useState(false);
   const [maxTokensEnabled, setMaxTokensEnabled] = useState(false);
+  // 深度思考（可选）：off = 不发送；low/medium/high → reasoning_effort / Anthropic thinking
+  const [reasoningEnabled, setReasoningEnabled] = useState(false);
+  const [reasoningEffort, setReasoningEffort] = useState<'low' | 'medium' | 'high'>('medium');
   // playground 形态：参数 Popover 与清空确认
   const [paramPopOpen, setParamPopOpen] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
@@ -529,6 +535,10 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     if (systemPrompt.trim()) {
       body.system_prompt = systemPrompt.trim();
     }
+    // 深度思考：OpenAI 走 reasoning_effort，Anthropic 由后端映射为 thinking 预算
+    if (reasoningEnabled) {
+      body.reasoning_effort = reasoningEffort;
+    }
     // 多模态附件：OpenAI 协议下把 message 换成 content blocks
     if (pendingAttachments.length) {
       body.message = currentBlocks;
@@ -729,7 +739,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     { key: 'max_tokens', label: t('最大输出 Token'), desc: t('限制响应长度'), type: 'number', min: 1, max: 200000, step: 1, enabled: maxTokensEnabled, onEnabled: setMaxTokensEnabled, value: maxTokens, onValue: setMaxTokens },
   ];
 
-  const paramActiveCount = PARAM_CONTROLS.filter((c) => c.enabled).length + (stream ? 1 : 0);
+  const paramActiveCount =
+    PARAM_CONTROLS.filter((c) => c.enabled).length + (stream ? 1 : 0) + (reasoningEnabled ? 1 : 0);
 
   /** playground 参数 Popover（new-api PlaygroundParameterPanel 观感） */
   const playgroundParamPanel = (
@@ -784,6 +795,39 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             )}
           </div>
         ))}
+        {/* 深度思考：可选强度（关闭时不发送任何思考参数） */}
+        <div className={`pg-param-item ${(!reasoningEnabled || busy) ? 'disabled' : ''}`}>
+          <div className="pg-param-item-head">
+            <div className="pg-param-item-text">
+              <div className="pg-param-item-label">
+                <span>{t('深度思考')}</span>
+                <code>{reasoningEnabled ? reasoningEffort : 'off'}</code>
+              </div>
+              <div className="pg-param-item-desc">{t('先推理再作答，更强但更慢更贵')}</div>
+            </div>
+            <label className="pg-switch">
+              <input
+                type="checkbox"
+                checked={reasoningEnabled}
+                disabled={busy}
+                onChange={(e) => setReasoningEnabled(e.target.checked)}
+              />
+              <span />
+            </label>
+          </div>
+          <div className="pg-param-controls">
+            <select
+              className="form-input pg-param-number"
+              value={reasoningEffort}
+              disabled={busy || !reasoningEnabled}
+              onChange={(e) => setReasoningEffort(e.target.value as 'low' | 'medium' | 'high')}
+            >
+              <option value="low">{t('低')}</option>
+              <option value="medium">{t('中')}</option>
+              <option value="high">{t('高')}</option>
+            </select>
+          </div>
+        </div>
         {/* 流式开关：new-api 也作为参数面板里的一项 */}
         <div className={`pg-param-item ${busy ? 'disabled' : ''}`}>
           <div className="pg-param-item-head">
@@ -1216,8 +1260,18 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
               </div>
 
               {playground ? (
-                /* new-api 游乐园工具组：附件 + 参数(Popover) + 清空 */
+                /* new-api 游乐园工具组：历史 + 附件 + 参数(Popover) + 清空 */
                 <div className="pg-tools">
+                  {onOpenSessions && (
+                    <button
+                      type="button"
+                      className="pg-tool-btn"
+                      title={t('历史会话')}
+                      onClick={onOpenSessions}
+                    >
+                      <History size={15} />
+                    </button>
+                  )}
                   <div className="pg-param-menu">
                     <button
                       type="button"

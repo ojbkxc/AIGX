@@ -1530,5 +1530,10 @@
   "清除出口代理": "Clear the egress proxy",
   "凭证已过期": "Credential expired",
   "凭证已过期，请先更新凭证或到期时间": "Credential expired — update the credential or expiry first",
-  "重置冷却": "Reset cooldown"
+  "重置冷却": "Reset cooldown",
+  "思考": "Thinking",
+  "关": "Off",
+  "思考强度：关 = 直接作答；低/中/高 = 先推理再作答，越强越慢越准": "Thinking effort: Off = answer directly; Low/Medium/High = reason before answering (higher is slower but more accurate)",
+  "历史会话": "History",
+  "{{count}} 条消息": "{{count}} messages"
 }

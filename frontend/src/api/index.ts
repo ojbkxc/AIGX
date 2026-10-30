@@ -722,11 +722,15 @@ export const api = {
     onEvent: (ev: { type: string; content?: string; name?: string; ok?: boolean; message?: string }) => void,
     signal?: AbortSignal,
     model?: string,
+    reasoningEffort?: string,
   ): Promise<void> => {
+    const body: { message: string; model?: string; reasoning_effort?: string } = { message };
+    if (model) body.model = model;
+    if (reasoningEffort) body.reasoning_effort = reasoningEffort;
     const res = await fetch(`${API_BASE}/agent/sessions/${encodeURIComponent(id)}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(model ? { message, model } : { message }),
+      body: JSON.stringify(body),
       signal,
     });
     if (!res.ok || !res.body) {

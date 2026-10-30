@@ -2,10 +2,10 @@
 //!
 //! 三层风险分级（安全底线）：
 //! - [`RiskLevel::ReadOnly`]：查/搜/统计/诊断，Agent 自由调用，无审批。
-//! - [`RiskLevel::LowRisk`]：低危写（启停/测活/重置熔断/加密钥/加渠道），
-//!   Agent 直接做，自动审计留痕，可用对向工具回滚。
-//! - [`RiskLevel::HighRisk`]：高危写（删用户/动余额/删订单/改价/清日志），
-//!   必须经审批矩阵（[`crate::agent::approval`]）人工确认，阶段二接入。
+//! - [`RiskLevel::LowRisk`]：低危写（启停/测活/重置熔断/加密钥/加渠道/
+//!   改渠道/账号池增改），Agent 直接做，自动审计留痕，可用对向工具回滚。
+//! - [`RiskLevel::HighRisk`]：高危写（删用户/动余额/删订单/改价/清日志/
+//!   删账号/批量导入），必须经审批矩阵（[`crate::agent::approval`]）人工确认。
 //!
 //! 执行方式：进程内直调现有管理面 handler（与 [`crate::api::admin::mcp`]
 //! 同源思路——复用 verify_admin 校验、副作用、错误构造，不经 HTTP 端口）。
@@ -359,6 +359,90 @@ pub fn tool_specs() -> Vec<ToolSpec> {
             schema: account_id_args(),
             risk: RiskLevel::LowRisk,
         },
+        // ── 账号池写（AI 运维权限扩展：增/改/删/批量导入）──
+        ToolSpec {
+            name: "aigx_channel_update",
+            description: "写操作（可回滚）：部分更新渠道（名称/地址/权重/优先级/模型/启停）",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "channel_id": { "type": "string", "description": "渠道 ID" },
+                    "name": { "type": "string" },
+                    "base_url": { "type": "string" },
+                    "priority": { "type": "integer" },
+                    "weight": { "type": "integer", "minimum": 1 },
+                    "models": { "type": "array", "items": { "type": "string" } },
+                    "enabled": { "type": "boolean", "description": "true 启用 / false 停用" }
+                },
+                "required": ["channel_id"]
+            }),
+            risk: RiskLevel::LowRisk,
+        },
+        ToolSpec {
+            name: "aigx_account_session_add",
+            description: "写操作（可回滚）：账号型渠道下新增账号（凭证加密落库，可配代理/权重/并发/模型白名单）",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "channel_id": { "type": "string", "description": "账号型渠道 ID" },
+                    "name": { "type": "string", "description": "账号名（可空，缺省自动命名）" },
+                    "provider": { "type": "string", "description": "上游类型（openai/anthropic/gemini/zai/cloudflare 等）" },
+                    "base_url": { "type": "string", "description": "上游 base URL（可空 = 用渠道地址）" },
+                    "api_key": { "type": "string", "description": "账号凭证" },
+                    "proxy": { "type": "string", "description": "出口代理（可空）" },
+                    "priority": { "type": "integer", "description": "优先级（越大越先用）" },
+                    "weight": { "type": "integer", "minimum": 1 },
+                    "max_concurrency": { "type": "integer", "minimum": 0, "description": "并发上限，0 = 不限" },
+                    "models": { "type": "array", "items": { "type": "string" }, "description": "模型白名单（空 = 全部）" }
+                },
+                "required": ["channel_id", "api_key"]
+            }),
+            risk: RiskLevel::LowRisk,
+        },
+        ToolSpec {
+            name: "aigx_account_session_update",
+            description: "写操作（可回滚）：部分更新账号（名称/状态/优先级/权重/并发），不触碰凭证与地址",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "account_id": { "type": "string", "description": "账号会话 ID" },
+                    "name": { "type": "string" },
+                    "status": { "type": "string", "enum": ["enabled", "disabled"] },
+                    "priority": { "type": "integer" },
+                    "weight": { "type": "integer", "minimum": 1 },
+                    "max_concurrency": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["account_id"]
+            }),
+            risk: RiskLevel::LowRisk,
+        },
+        ToolSpec {
+            name: "aigx_account_session_delete",
+            description: "高危写：删除账号（不可逆，需审批）",
+            schema: account_id_args(),
+            risk: RiskLevel::HighRisk,
+        },
+        ToolSpec {
+            name: "aigx_account_session_bulk_import",
+            description: "高危写：批量导入账号凭证（每行一条，需审批）",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "channel_id": { "type": "string", "description": "账号型渠道 ID" },
+                    "provider": { "type": "string" },
+                    "base_url": { "type": "string" },
+                    "proxy": { "type": "string" },
+                    "name_prefix": { "type": "string", "description": "账号名前缀（可空）" },
+                    "priority": { "type": "integer" },
+                    "weight": { "type": "integer" },
+                    "max_concurrency": { "type": "integer" },
+                    "models": { "type": "array", "items": { "type": "string" } },
+                    "credentials": { "type": "string", "description": "每行一条：名称,Key 或仅 Key；# 开头与空行忽略" }
+                },
+                "required": ["channel_id", "credentials"]
+            }),
+            risk: RiskLevel::HighRisk,
+        },
     ]
 }
 
@@ -584,6 +668,62 @@ pub async fn exec_tool(
                 State(state.clone()),
                 headers.clone(),
                 Path(id),
+            )
+            .await
+        }
+        // ── 账号池写（权限扩展）──
+        "aigx_channel_update" => {
+            let id = require_channel_id(args)?;
+            let mut patch = args.clone();
+            if let Some(obj) = patch.as_object_mut() {
+                // channel_id 走 Path，不进部分更新体
+                obj.remove("channel_id");
+            }
+            admin::handle_patch_channel(
+                State(state.clone()),
+                headers.clone(),
+                Path(id),
+                Json(patch),
+            )
+            .await
+        }
+        "aigx_account_session_add" => {
+            // 账号必须有凭证，空 key 建号没有意义（前端表单同样禁止）
+            require_arg(args, "api_key")?;
+            let body: admin::account_sessions::AccountSessionRequest = parse_tool_args(name, args)?;
+            admin::account_sessions::handle_create_account_session(
+                State(state.clone()),
+                headers.clone(),
+                Json(body),
+            )
+            .await
+        }
+        "aigx_account_session_update" => {
+            let id = require_arg(args, "account_id")?;
+            let body: admin::account_sessions::AccountSessionPatch = parse_tool_args(name, args)?;
+            admin::account_sessions::handle_patch_account_session(
+                State(state.clone()),
+                headers.clone(),
+                Path(id),
+                Json(body),
+            )
+            .await
+        }
+        "aigx_account_session_delete" => {
+            let id = require_arg(args, "account_id")?;
+            admin::account_sessions::handle_delete_account_session(
+                State(state.clone()),
+                headers.clone(),
+                Path(id),
+            )
+            .await
+        }
+        "aigx_account_session_bulk_import" => {
+            let body: admin::account_sessions::BulkImportRequest = parse_tool_args(name, args)?;
+            admin::account_sessions::handle_bulk_import_account_sessions(
+                State(state.clone()),
+                headers.clone(),
+                Json(body),
             )
             .await
         }

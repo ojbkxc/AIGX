@@ -157,6 +157,10 @@ pub struct AgentConfig {
     /// 对话历史最大保留条数（上下文压缩：超出时只保留最近 N 条）。
     #[serde(default = "default_max_history")]
     pub max_history: usize,
+    /// 思考强度（off/low/medium/high，空或 off = 不向模型发送思考参数）。
+    /// 前端每次请求可覆盖，便于按任务复杂度选择"更快"或"更准"。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 fn default_max_turns() -> usize {
@@ -180,6 +184,7 @@ impl Default for AgentConfig {
             max_turns: default_max_turns(),
             approval_timeout_secs: default_approval_timeout(),
             max_history: default_max_history(),
+            reasoning_effort: None,
         }
     }
 }

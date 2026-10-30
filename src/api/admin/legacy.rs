@@ -2806,6 +2806,20 @@ pub struct ChannelChatTestRequest {
     /// 是否流式返回（默认 true；流式时以 SSE 原样透传，前端解析增量）
     #[serde(default = "default_true")]
     pub stream: bool,
+    /// 采样参数（缺省 = 不发送；与「游乐园」参数面板一致）
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub frequency_penalty: Option<f64>,
+    #[serde(default)]
+    pub presence_penalty: Option<f64>,
+    /// 深度思考强度：off/low/medium/high（off/缺省 = 不发送）
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 fn default_chat_protocol() -> String {
@@ -2814,6 +2828,16 @@ fn default_chat_protocol() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+/// 归一化思考强度：off/空/未知 → None；low/medium/high 原样。
+fn reasoning_effort_level(raw: &Option<String>) -> Option<&'static str> {
+    match raw.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("low") => Some("low"),
+        Some("medium") => Some("medium"),
+        Some("high") => Some("high"),
+        _ => None,
+    }
 }
 
 /// 聊天页按次计费：每次请求扣固定额度（用户要求 1 次请求 = 2 额度）。
@@ -3016,11 +3040,31 @@ pub async fn handle_channel_chat_test(
     // ── OpenAI 协议 ──
     if !is_anthropic {
         let url = format!("{base}/chat/completions");
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "model": upstream,
             "messages": messages,
             "stream": stream,
         });
+        // 采样参数（原本前端发了但后端未落地，导致参数面板形同虚设）
+        if let Some(v) = body.temperature {
+            payload["temperature"] = serde_json::json!(v);
+        }
+        if let Some(v) = body.top_p {
+            payload["top_p"] = serde_json::json!(v);
+        }
+        if let Some(v) = body.max_tokens {
+            payload["max_tokens"] = serde_json::json!(v);
+        }
+        if let Some(v) = body.frequency_penalty {
+            payload["frequency_penalty"] = serde_json::json!(v);
+        }
+        if let Some(v) = body.presence_penalty {
+            payload["presence_penalty"] = serde_json::json!(v);
+        }
+        // 深度思考：OpenAI 兼容上游统一用 reasoning_effort
+        if let Some(effort) = reasoning_effort_level(&body.reasoning_effort) {
+            payload["reasoning_effort"] = serde_json::json!(effort);
+        }
         let mut req = client.post(&url).json(&payload);
         if !api_key.is_empty() {
             req = req.bearer_auth(&api_key);
@@ -3142,9 +3186,28 @@ pub async fn handle_channel_chat_test(
     let url = format!("{base}/v1/messages");
     let mut payload = serde_json::json!({
         "model": upstream,
-        "max_tokens": 1024,
+        "max_tokens": body.max_tokens.unwrap_or(1024),
         "messages": messages,
     });
+    if let Some(v) = body.temperature {
+        payload["temperature"] = serde_json::json!(v);
+    }
+    if let Some(v) = body.top_p {
+        payload["top_p"] = serde_json::json!(v);
+    }
+    // 深度思考（Anthropic）：thinking.enabled + budget_tokens，且 max_tokens 必须更大
+    if let Some(effort) = reasoning_effort_level(&body.reasoning_effort) {
+        let budget: u64 = match effort {
+            "high" => 4096,
+            "medium" => 2048,
+            _ => 1024,
+        };
+        payload["thinking"] = serde_json::json!({ "type": "enabled", "budget_tokens": budget });
+        let need = budget + 1;
+        if payload["max_tokens"].as_u64().unwrap_or(0) < need {
+            payload["max_tokens"] = serde_json::json!(need);
+        }
+    }
     if stream {
         payload["stream"] = serde_json::json!(true);
     }
