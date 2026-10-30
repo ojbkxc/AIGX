@@ -13,6 +13,7 @@ use crate::bridge::Bridge;
 
 pub mod accio;
 pub mod antigravity;
+pub mod commandcode;
 pub mod orcaterm;
 
 /// 按 provider kind 构造私有协议 Bridge；不支持的 kind 返回 None。
@@ -30,11 +31,14 @@ pub fn build(
             base, credential, client,
         ))),
         "accio" => Some(Arc::new(accio::AccioBridge::new(base, credential, client))),
+        "commandcode" => Some(Arc::new(commandcode::CommandCodeBridge::new(
+            base, credential, client,
+        ))),
         _ => None,
     }
 }
 
 /// 是否为已实现的私有协议供应商。
 pub fn supports(kind: &str) -> bool {
-    matches!(kind, "orcaterm" | "antigravity" | "accio")
+    matches!(kind, "orcaterm" | "antigravity" | "accio" | "commandcode")
 }
