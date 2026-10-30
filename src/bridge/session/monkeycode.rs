@@ -288,9 +288,7 @@ impl Bridge for MonkeyCodeBridge {
 
         // 连接建立后必须先发 auto-approve + user-input，上游才开始执行
         write
-            .send(Message::Text(
-                json!({ "type": "auto-approve" }).to_string().into(),
-            ))
+            .send(Message::Text(json!({ "type": "auto-approve" }).to_string()))
             .await
             .map_err(|e| BridgeError::Transport(e.to_string()))?;
         let payload = json!({
@@ -302,7 +300,7 @@ impl Bridge for MonkeyCodeBridge {
             .to_string(),
         });
         write
-            .send(Message::Text(payload.to_string().into()))
+            .send(Message::Text(payload.to_string()))
             .await
             .map_err(|e| BridgeError::Transport(e.to_string()))?;
 
@@ -352,7 +350,7 @@ impl Bridge for MonkeyCodeBridge {
                         Decoded::Nothing => {}
                         Decoded::Chunk(chunk) => pending.push_back(Ok(chunk)),
                         Decoded::Reply(payload) => {
-                            let _ = write.send(Message::Text(payload.into())).await;
+                            let _ = write.send(Message::Text(payload)).await;
                         }
                         Decoded::Done => {
                             pending.push_back(Ok(finish_chunk(&flow.id, &flow.model)));
