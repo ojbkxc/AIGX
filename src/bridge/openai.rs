@@ -119,7 +119,7 @@ impl OpenaiCompatibleBridge {
     /// - `Headers`：只用登录态供应商要求的专用头
     fn auth_conditional(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         for (name, value) in &self.session_headers {
-            req = req.header(name, value);
+            req = req.header(name.as_str(), value.as_str());
         }
         match self.auth_mode {
             AuthMode::Bearer => apply_conditional_bearer(req, &self.api_key),
