@@ -9,7 +9,7 @@ import {
   Users, Wallet, Ticket, ScrollText, Package,
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
-  Languages, LogOut, Coins, Bot, Headphones, Layers,
+  Languages, LogOut, Coins, Bot, Headphones, Layers, CalendarCheck,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -37,7 +37,7 @@ const navItems: NavItem[] = [
   { path: '/prompts', labelKey: '提示词库', icon: BookOpen },
   { path: '/keys', labelKey: 'API 密钥', icon: KeyRound },
   { path: '/logs', labelKey: '用量日志', icon: ScrollText },
-  { path: '/model-presets', labelKey: '模型与价格', icon: Boxes },
+  { path: '/model-manage', labelKey: '模型管理', icon: Boxes },
   { path: '/channels', labelKey: '渠道管理', icon: Satellite, adminOnly: true },
   { path: '/pricing', labelKey: '定价倍率', icon: Coins, adminOnly: true },
   { path: '/users', labelKey: '用户管理', icon: Users, adminOnly: true },
@@ -45,6 +45,7 @@ const navItems: NavItem[] = [
   { path: '/plans', labelKey: '套餐管理', icon: Package, adminOnly: true },
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
   { path: '/agent', labelKey: 'AI 运维', icon: Bot, adminOnly: true },
+  { path: '/checkin', labelKey: '签到中心', icon: CalendarCheck, adminOnly: true },
   { path: '/wallet', labelKey: '钱包', icon: Wallet },
   { path: '/tickets', labelKey: '工单', icon: Headphones },
   { path: '/profile', labelKey: '个人中心', icon: UserRound },
@@ -53,8 +54,8 @@ const navItems: NavItem[] = [
 ];
 
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
-// 管理员 15 项 / 客户 9 项。合并历史：
-// - 模型映射 → 渠道管理内每渠道配置 + 全局 fallback（已下沉）
+// 管理员 17 项 / 客户 9 项。合并历史：
+// - 模型映射 → 模型管理页统一维护（渠道表单里已移除，避免三处可改）
 // - 易支付 + 用户分组 + 通知设置 + 安全监控 + IP 管理 → 系统设置 tab
 // - 定价倍率曾并入系统设置计费 tab，现拆回独立页（/pricing）
 // - 订单记录 → 钱包页内 tab
@@ -69,7 +70,7 @@ const navGroups: NavGroup[] = [
       navItems[2],  // 提示词库
       navItems[3],  // API 密钥
       navItems[4],  // 用量日志（全员可见，admin 看全部，普通用户看自己）
-      navItems[5],  // 模型与价格
+      navItems[5],  // 模型管理（admin 可写；普通用户只读自己分组可见的模型与价格）
     ],
   },
   {
@@ -78,11 +79,12 @@ const navGroups: NavGroup[] = [
     adminOnly: true,
     items: [
       navItems[6],  // 渠道管理
-      navItems[16], // 账号池
+      navItems[17], // 账号池
       navItems[7],  // 定价倍率
       navItems[8],  // 用户管理
       navItems[9],  // 兑换码
       navItems[10], // 套餐管理
+      navItems[13], // 签到中心
       navItems[11], // 系统设置
       navItems[12], // AI 运维
     ],
@@ -91,9 +93,9 @@ const navGroups: NavGroup[] = [
     key: 'personal',
     labelKey: '个人',
     items: [
-      navItems[13], // 钱包
-      navItems[14], // 工单
-      navItems[15], // 个人中心
+      navItems[14], // 钱包
+      navItems[15], // 工单
+      navItems[16], // 个人中心
     ],
   },
 ];

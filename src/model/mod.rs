@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::storage::FileStore;
 
+pub mod manage;
 pub mod metadata;
 
 /// 模型映射管理器（new-api 式通用语义）

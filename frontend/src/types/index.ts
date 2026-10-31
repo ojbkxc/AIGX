@@ -571,6 +571,68 @@ export interface ModelMetaOverride {
   capabilities?: string[];
 }
 
+// ==================== 统一模型管理（渠道 + 账号池合流） ====================
+
+/** 模型的一个承载方：渠道直连，或账号池里的某个账号 */
+export interface ManagedModelSource {
+  /** channel（渠道） / account（账号池） */
+  kind: string;
+  /** 渠道 id */
+  channel_id: string;
+  /** 渠道名或账号名 */
+  name: string;
+  /** 账号 id（仅 kind=account） */
+  account_id?: string;
+}
+
+/** 统一模型管理里的定价条目（对应后端 `pricing::ModelPrice`） */
+export interface ManagedModelPrice {
+  model_name: string;
+  input_price: number;
+  output_price: number;
+  cache_price?: number | null;
+  price_type: string;
+}
+
+/** 聚合后的单行模型：粒度是 (provider, model_id) */
+export interface ManagedModel {
+  provider: string;
+  provider_label: string;
+  id: string;
+  /** 管理员启停状态（false = 已禁用） */
+  enabled: boolean;
+  sources: ManagedModelSource[];
+  owned_by: string;
+  context_length?: number | null;
+  capabilities: string[];
+  /** 定价条目（未定价为 null） */
+  price?: ManagedModelPrice | null;
+  /** 模型倍率（缺省 1.0） */
+  model_ratio: number;
+  /** 该模型的对外别名 */
+  aliases: string[];
+}
+
+/** 左栏 provider 分组 */
+export interface ManagedProviderGroup {
+  id: string;
+  label: string;
+  total: number;
+  enabled: number;
+  /** 是否来自账号池 */
+  account: boolean;
+}
+
+/** 统一模型管理完整视图 */
+export interface ManageView {
+  providers: ManagedProviderGroup[];
+  models: ManagedModel[];
+  /** 全局别名映射 alias → target */
+  mappings: Record<string, string>;
+  /** 未定价的模型数 */
+  unpriced: number;
+}
+
 export interface TotpSetupResult {
   secret: string;
   otpauth_url: string;

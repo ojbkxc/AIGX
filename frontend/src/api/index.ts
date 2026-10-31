@@ -37,6 +37,7 @@ import type {
   SettingsItem,
   ModelInfo,
   ModelMetaOverride,
+  ManageView,
   TotpSetupResult,
   TotpEnableResult,
   TotpDisableResult,
@@ -202,6 +203,15 @@ export const api = {
     request<ApiResponse<DashboardItem>>('GET', `${API_BASE}/dashboard/realtime`),
   getCacheSavings: (): Promise<ApiResponse<DashboardItem>> =>
     request<ApiResponse<DashboardItem>>('GET', `${API_BASE}/dashboard/cache_savings`),
+  // 报表扩展（Agent2API report 视角；普通用户后端按 user_id 自动收敛数据集）
+  getReportHeatmap: (days = 365): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/heatmap?days=${days}`),
+  getReportTopSources: (days = 30): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/top_sources?days=${days}`),
+  getReportTokenTrend: (days = 30): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/token_trend?days=${days}`),
+  getReportOverview: (days = 30): Promise<ApiResponse<DashboardItem>> =>
+    request<ApiResponse<DashboardItem>>('GET', `${API_BASE}/dashboard/report/overview?days=${days}`),
   saveEpayConfig: (config: Record<string, unknown>): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('PUT', `${API_BASE}/epay/config`, config),
   listGroups: (): Promise<ApiList<GroupItem>> =>
@@ -290,6 +300,28 @@ export const api = {
     request<ApiResponse<ModelMetaOverride>>('PUT', `${API_BASE}/models/meta/${encodeURIComponent(model)}`, meta),
   deleteModelMeta: (model: string): Promise<ApiResponse<null>> =>
     request<ApiResponse<null>>('DELETE', `${API_BASE}/models/meta/${encodeURIComponent(model)}`),
+
+  // ── 统一模型管理（渠道模型 + 账号池模型合流，参照 Agent2API 模型管理） ──
+  // 写接口统一回读最新完整视图，前端就地重绘、不必再拉一次。
+  listManageModels: (): Promise<ApiResponse<ManageView>> =>
+    request<ApiResponse<ManageView>>('GET', `${API_BASE}/models/manage`),
+  setModelEnabled: (provider: string, id: string, enabled: boolean): Promise<ApiResponse<ManageView>> =>
+    request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/state`, { provider, id, enabled }),
+  upsertModelPrice: (data: {
+    model: string;
+    input_price: number;
+    output_price: number;
+    cache_price?: number | null;
+    price_type?: string;
+    model_ratio?: number;
+  }): Promise<ApiResponse<ManageView>> =>
+    request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/price`, data),
+  removeModelPrice: (model: string): Promise<ApiResponse<ManageView>> =>
+    request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/price/remove`, { model }),
+  setModelAlias: (alias: string, target: string): Promise<ApiResponse<ManageView>> =>
+    request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias`, { alias, target }),
+  removeModelAlias: (alias: string): Promise<ApiResponse<ManageView>> =>
+    request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias/remove`, { alias }),
 
   listModels: async (): Promise<ApiResponse<ModelInfo[]>> => {
     const res = await request<ApiResponse<unknown[]>>('GET', `${API_BASE}/models/available`);

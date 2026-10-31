@@ -85,6 +85,36 @@ interface CacheSavings {
   saved_estimate?: number;
 }
 
+// 报表扩展（Agent2API report 视角）
+interface ReportHeatmapCell {
+  date?: string;
+  cost?: number;
+  count?: number;
+}
+
+interface ReportTopSource {
+  name?: string;
+  count?: number;
+  cost?: number;
+}
+
+interface ReportTokenTrendPoint {
+  date?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+}
+
+interface ReportOverview {
+  total_requests?: number;
+  success_requests?: number;
+  success_rate?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  total_cost?: number;
+  active_days?: number;
+  top_models?: Array<{ model?: string; count?: number }>;
+}
+
 interface TrendChartProps {
   data: TrendData[];
 }
@@ -115,6 +145,119 @@ function trendVal(d: TrendData): number {
 }
 
 // ── 图表组件 ──────────────────────────────────────────────
+
+// 365 天消费热力图（Agent2API report 365d heatmap 的 CSS grid 版，不引库）。
+// 数据是稀疏的（只有有请求的日期才有格），按日期补零格到全年连续。
+function Heatmap({ data }: { data: ReportHeatmapCell[] }): JSX.Element | null {
+  const [hover, setHover] = useState<ReportHeatmapCell | null>(null);
+  if (!data || data.length === 0) return null;
+  const byDate = new Map(data.map((d) => [d.date, d]));
+  const max = Math.max(...data.map((d) => d.cost ?? 0), 1);
+  const costOf = (c: { cost?: number }) => c.cost ?? 0;
+
+  // 生成近 365 天连续日期序列（含今天），周对齐（列=周）
+  const today = new Date();
+  const cells: Array<{ date: string; cost: number; count: number }> = [];
+  for (let i = 364; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    const hit = byDate.get(key);
+    cells.push({ date: key, cost: hit?.cost ?? 0, count: hit?.count ?? 0 });
+  }
+
+  return (
+    <div>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, 14px)',
+          gap: 3,
+          justifyContent: 'start',
+        }}
+      >
+        {cells.map((c) => {
+          // 四档着色（Agent2API 口径）：0 → 空格，其余按 cost/max 分三档
+          const level = c.cost <= 0 ? 0 : c.cost < max * 0.25 ? 1 : c.cost < max * 0.5 ? 2 : c.cost < max * 0.75 ? 3 : 4;
+          const colors = ['var(--bg-color)', 'rgba(47,111,237,0.25)', 'rgba(47,111,237,0.45)', 'rgba(47,111,237,0.7)', 'rgb(47,111,237)'];
+          return (
+            <div
+              key={c.date}
+              title={`${c.date}：${c.count} ${c.count === 1 ? '次' : '次'} · ¥${(c.cost / 100).toFixed(2)}`}
+              onMouseEnter={() => setHover(c)}
+              onMouseLeave={() => setHover(null)}
+              style={{
+                width: 14,
+                height: 14,
+                borderRadius: 3,
+                background: colors[level],
+                cursor: 'pointer',
+                outline: hover === c ? '1px solid var(--accent-color)' : undefined,
+              }}
+            />
+          );
+        })}
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
+        {hover
+          ? `${hover.date}：${hover.count} 次 · ¥${(costOf(hover) / 100).toFixed(2)}`
+          : '近 365 天每日消费（悬停查看明细）'}
+      </div>
+    </div>
+  );
+}
+
+// Token 趋势双线图（prompt/completion 分列，照 TrendChart 的 SVG 折线方式）
+function TokenTrendChart({ data }: { data: ReportTokenTrendPoint[] }): JSX.Element | null {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  if (!data || data.length === 0) return null;
+  const w = 600;
+  const h = 200;
+  const pad = { top: 20, right: 20, bottom: 30, left: 50 };
+  const chartW = w - pad.left - pad.right;
+  const chartH = h - pad.top - pad.bottom;
+  const maxVal = Math.max(...data.map((d) => Math.max(d.input_tokens ?? 0, d.output_tokens ?? 0)), 1);
+  const x = (i: number) => pad.left + (i + 0.5) * (chartW / data.length);
+  const y = (v: number) => pad.top + chartH - (v / maxVal) * chartH;
+
+  const line = (get: (d: ReportTokenTrendPoint) => number) =>
+    data.map((d, i) => `${i === 0 ? 'M' : 'L'} ${x(i)} ${y(get(d))}`).join(' ');
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', height: 'auto' }}>
+      {[0, 0.25, 0.5, 0.75, 1].map((r) => (
+        <line key={r} x1={pad.left} x2={w - pad.right} y1={pad.top + chartH * r} y2={pad.top + chartH * r} stroke="var(--border-color)" strokeWidth="0.5" />
+      ))}
+      <path d={line((d) => d.input_tokens ?? 0)} fill="none" stroke="#7ca4f5" strokeWidth="2" />
+      <path d={line((d) => d.output_tokens ?? 0)} fill="none" stroke="#34d399" strokeWidth="2" />
+      {hoverIdx != null && (
+        <line x1={x(hoverIdx)} x2={x(hoverIdx)} y1={pad.top} y2={pad.top + chartH} stroke="var(--text-muted)" strokeDasharray="3,3" />
+      )}
+      {data.map((_d, i) => (
+        <rect
+          key={i}
+          x={x(i) - chartW / data.length / 2}
+          y={pad.top}
+          width={chartW / data.length}
+          height={chartH}
+          fill="transparent"
+          onMouseEnter={() => setHoverIdx(i)}
+          onMouseLeave={() => setHoverIdx(null)}
+        />
+      ))}
+      {hoverIdx != null && (
+        <text x={pad.left} y={pad.top - 6} fill="var(--text-main)" fontSize="10">
+          {data[hoverIdx].date} · ↑{(data[hoverIdx].input_tokens ?? 0).toLocaleString()} ↓{(data[hoverIdx].output_tokens ?? 0).toLocaleString()}
+        </text>
+      )}
+      {/* 图例 */}
+      <rect x={w - pad.right - 150} y={pad.top - 10} width="10" height="3" fill="#7ca4f5" />
+      <text x={w - pad.right - 136} y={pad.top - 6} fill="var(--text-muted)" fontSize="10">输入</text>
+      <rect x={w - pad.right - 90} y={pad.top - 10} width="10" height="3" fill="#34d399" />
+      <text x={w - pad.right - 76} y={pad.top - 6} fill="var(--text-muted)" fontSize="10">输出</text>
+    </svg>
+  );
+}
 
 function TrendChart({ data }: TrendChartProps): JSX.Element | null {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
@@ -352,6 +495,11 @@ export default function Dashboard(): JSX.Element {
   const [channelHealth, setChannelHealth] = useState<ChannelHealth[] | null>(null);
   const [realtime, setRealtime] = useState<RealtimeStats | null>(null);
   const [cacheSavings, setCacheSavings] = useState<CacheSavings | null>(null);
+  // 报表扩展（Agent2API report 视角）
+  const [reportHeatmap, setReportHeatmap] = useState<ReportHeatmapCell[] | null>(null);
+  const [reportTopSources, setReportTopSources] = useState<ReportTopSource[] | null>(null);
+  const [reportTokenTrend, setReportTokenTrend] = useState<ReportTokenTrendPoint[] | null>(null);
+  const [reportOverview, setReportOverview] = useState<ReportOverview | null>(null);
 
   const loadData = useCallback(async (): Promise<void> => {
     setRefreshing(true);
@@ -393,6 +541,10 @@ export default function Dashboard(): JSX.Element {
         api.getChannelHealth(),
         api.getRealtime(),
         api.getCacheSavings(),
+        api.getReportHeatmap(365),
+        api.getReportTopSources(30),
+        api.getReportTokenTrend(30),
+        api.getReportOverview(30),
       ]);
       const pick = <T,>(i: number): T | null =>
         results[i].status === 'fulfilled'
@@ -413,6 +565,10 @@ export default function Dashboard(): JSX.Element {
       setChannelHealth(pick<ChannelHealth[]>(7));
       setRealtime(pick<RealtimeStats>(8));
       setCacheSavings(pick<CacheSavings>(9));
+      setReportHeatmap(pick<ReportHeatmapCell[]>(10));
+      setReportTopSources(pick<ReportTopSource[]>(11));
+      setReportTokenTrend(pick<ReportTokenTrendPoint[]>(12));
+      setReportOverview(pick<ReportOverview>(13));
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -695,6 +851,101 @@ export default function Dashboard(): JSX.Element {
           )}
         </div>
       </div>
+
+      {/* 报表扩展：Token 趋势（prompt/completion 分列） */}
+      {reportTokenTrend && reportTokenTrend.length > 0 && (
+        <div className="section-card" style={{ marginTop: 16 }}>
+          <div className="section-card-header">
+            <h2>{t('Token 趋势（输入 / 输出，近 30 日）')}</h2>
+            {reportOverview && (
+              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                {t('成功率')} {reportOverview.success_rate ?? 0}% · {t('活跃天数')} {reportOverview.active_days ?? 0}
+              </span>
+            )}
+          </div>
+          <div className="section-card-body">
+            <TokenTrendChart data={reportTokenTrend} />
+          </div>
+        </div>
+      )}
+
+      {/* 报表扩展：Top 来源（渠道）排行 + 模型 Top5 */}
+      {((reportTopSources && reportTopSources.length > 0) || (reportOverview && reportOverview.top_models && reportOverview.top_models.length > 0)) && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(400px, 100%), 1fr))', gap: 16, marginTop: 16 }}>
+          {reportTopSources && reportTopSources.length > 0 && (
+            <div className="section-card">
+              <div className="section-card-header">
+                <h2>{t('Top 渠道（近 30 日）')}</h2>
+              </div>
+              <div className="section-card-body">
+                <div className="table-wrapper">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>{t('渠道')}</th>
+                        <th>{t('请求数')}</th>
+                        <th>{t('消费')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reportTopSources.map((s, i) => (
+                        <tr key={i}>
+                          <td style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
+                          <td>{s.name || '—'}</td>
+                          <td>{fmtLimit(s.count ?? 0)}</td>
+                          <td>{fmtMoney((s.cost ?? 0) / 100)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+          {reportOverview && reportOverview.top_models && reportOverview.top_models.length > 0 && (
+            <div className="section-card">
+              <div className="section-card-header">
+                <h2>{t('Top 模型（近 30 日）')}</h2>
+              </div>
+              <div className="section-card-body">
+                <div className="table-wrapper">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>{t('模型')}</th>
+                        <th>{t('请求数')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reportOverview.top_models.map((m, i) => (
+                        <tr key={i}>
+                          <td style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
+                          <td>{m.model || '—'}</td>
+                          <td>{fmtLimit(m.count ?? 0)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 报表扩展：365 天消费热力图 */}
+      {reportHeatmap && reportHeatmap.length > 0 && (
+        <div className="section-card" style={{ marginTop: 16 }}>
+          <div className="section-card-header">
+            <h2>{t('消费热力图（近 365 天）')}</h2>
+          </div>
+          <div className="section-card-body">
+            <Heatmap data={reportHeatmap} />
+          </div>
+        </div>
+      )}
 
       {/* 模型分布 + 用户排行 */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(400px, 100%), 1fr))', gap: 16, marginTop: 16 }}>

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import {
   Eye, EyeOff, ArrowLeftRight, MoreHorizontal, Search,
   Pencil, Gauge, Power, PowerOff, Loader2, MessageSquare, RotateCcw, Trash2,
@@ -11,8 +12,6 @@ import type { ChannelItem as ApiChannelItem } from '../types';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ChatDebugger from '../components/ChatDebugger';
-import ModelMappingEditor from '../components/ModelMappingEditor';
-import CostPricingEditor from '../components/CostPricingEditor';
 import {
   BALANCE_SCHEME_LABELS,
   PRESET_PROVIDERS,
@@ -168,7 +167,6 @@ export default function Channels(): JSX.Element {
   const [testingId, setTestingId] = useState<string | number | null>(null);
   // 全部测试进行中标记（批量测试期间禁用菜单入口，结束后单条汇总提示）
   const [testingAll, setTestingAll] = useState(false);
-  const [fetchingModels, setFetchingModels] = useState(false);
   // API Key 输入明文切换（防输错无法核对）
   const [showApiKey, setShowApiKey] = useState(false);
   /** 当前选中的预置供应商 key（仅新增时；编辑回填 null） */
@@ -689,39 +687,6 @@ export default function Channels(): JSX.Element {
         }
       },
     });
-  };
-
-  // 拉取上游模型列表 — 后端代理转发（避免浏览器 CORS）
-  const handleFetchModels = async (): Promise<void> => {
-    if (form.channel_type === 'account') {
-      setError(t('账号型渠道无渠道级凭证：模型请直接在下方填写，或到账号池页逐号测试'));
-      return;
-    }
-    if (form.channel_type !== 'cloudflare' && !form.base_url.trim()) {
-      setError(t('请先填写 Base URL'));
-      return;
-    }
-    setFetchingModels(true);
-    setError('');
-    try {
-      const res = await api.fetchChannelModels({
-        channel_type: form.channel_type,
-        base_url: form.base_url,
-        api_key: form.api_key,
-        channel_id: editChannel ? editChannel.id : '',
-      });
-      const models = res.data?.models || [];
-      if (models.length === 0) {
-        addToast(t('未拉取到模型（上游未返回模型列表）'));
-      } else {
-        setForm((f) => ({ ...f, models: models.join(', ') }));
-        addToast(`${t('已拉取')} ${models.length} ${t('个模型')}`);
-      }
-    } catch (err) {
-      addToast(`${t('拉取失败')}: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setFetchingModels(false);
-    }
   };
 
   // ── 对话调试器 ──
@@ -1360,51 +1325,51 @@ export default function Channels(): JSX.Element {
                   </button>
                 </div>
               </div>
-              <div className="form-group">
-                <label>{t('支持的模型（逗号分隔，留空=全部）')}</label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <Input
-                    placeholder="Workspace_2B8939-chat, Workspace_2B8939-coder"
-                    value={form.models}
-                    onChange={(e) => setForm({ ...form, models: e.target.value })}
-                    style={{ flex: 1 }}
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={handleFetchModels}
-                    disabled={fetchingModels}
-                    title={t('从上游拉取模型列表')}
-                    style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
-                  >
-                    {fetchingModels ? t('拉取中...') : t('拉取模型')}
-                  </Button>
+              {/* 模型配置统一收敛到「模型管理」页（/models）：
+                  这里不再提供逗号输入框、拉取按钮、映射与成本价编辑器，
+                  避免同一份数据在三处可改导致口径分叉。编辑态只展示当前
+                  配置摘要与跳转入口；新增态整块隐藏（新渠道还没有模型）。 */}
+              {editChannel && (
+                <div className="form-group">
+                  <label>{t('模型配置')}</label>
+                  <div className="ch-model-summary">
+                    <div className="ch-model-summary-counts">
+                      <span>
+                        {t('已配置')} <strong>{(editChannel.models || []).length}</strong> {t('个模型')}
+                      </span>
+                      <span className="ch-model-summary-sep">·</span>
+                      <span>
+                        {t('上游发现')} <strong>{(editChannel.discovered_models || []).length}</strong>
+                      </span>
+                      <span className="ch-model-summary-sep">·</span>
+                      <span>
+                        {t('映射')} <strong>{Object.keys(editChannel.model_mapping || {}).length}</strong>
+                      </span>
+                    </div>
+                    {(editChannel.models || []).length > 0 && (
+                      <div className="ch-models">
+                        {(editChannel.models || []).slice(0, 6).map((m) => (
+                          <span key={m} className="ch-model-badge">{m}</span>
+                        ))}
+                        {(editChannel.models || []).length > 6 && (
+                          <span
+                            className="ch-model-badge ch-models-more"
+                            title={(editChannel.models || []).slice(6).join(', ')}
+                          >
+                            +{(editChannel.models || []).length - 6}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    <div className="form-hint" style={{ marginTop: 6 }}>
+                      {t('模型清单、映射与定价统一在模型管理页维护，此处只展示。')}
+                    </div>
+                    <Link className="btn btn-outline btn-sm" to={`/model-manage?channel_id=${encodeURIComponent(String(editChannel.id))}`}>
+                      {t('在模型管理中维护')} →
+                    </Link>
+                  </div>
                 </div>
-              </div>
-              <div className="form-group">
-                <label>{t('模型映射')}</label>
-                <div className="form-hint" style={{ marginBottom: 8 }}>
-                  {t('用户请求的模型名 → 实际转发给上游的模型名。优先级：渠道级映射 > 全局映射 > 原名透传。')}
-                </div>
-                <ModelMappingEditor
-                  value={form.model_mapping}
-                  onChange={(mapping) => setForm((f) => ({ ...f, model_mapping: mapping }))}
-                  sourceModelOptions={form.models.split(',').map((s) => s.trim()).filter(Boolean)}
-                  disabled={saving}
-                />
-              </div>
-              <div className="form-group">
-                <label>{t('成本价（可选）')}</label>
-                <div className="form-hint" style={{ marginBottom: 8 }}>
-                  {t('按映射后的上游模型名填成本价（每 1k token）。可留空——填了管理员可在日志看利润，不填利润显示「—」。')}
-                </div>
-                <CostPricingEditor
-                  value={form.cost_pricing}
-                  mappingTargets={Object.values(form.model_mapping)}
-                  onChange={(cp) => setForm((f) => ({ ...f, cost_pricing: cp }))}
-                  disabled={saving}
-                />
-              </div>
+              )}
               <div style={{ display: 'flex', gap: 12 }}>
                 <Input
                   label={t('优先级（越大越优先）')}

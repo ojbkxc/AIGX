@@ -356,11 +356,32 @@ impl AccountSessionStore {
         model: &str,
         alias: Option<&str>,
     ) -> Option<AccountLease> {
+        self.acquire_with(channel_id, model, alias, |_| true)
+    }
+
+    /// 带 provider 过滤的选号。
+    ///
+    /// `allow` 收到账号的 provider，返回 false 的账号直接跳过。数据面用它
+    /// 落实统一模型管理里「按 (provider, model) 关停」的规则 —— 账号型渠道
+    /// 的 provider 在渠道上不存在，只能到这一层判断。
+    pub fn acquire_with<F>(
+        &self,
+        channel_id: &str,
+        model: &str,
+        alias: Option<&str>,
+        allow: F,
+    ) -> Option<AccountLease>
+    where
+        F: Fn(&str) -> bool,
+    {
         let now = chrono::Utc::now().timestamp();
         let mut sessions = self.inner.sessions.write();
         let mut candidates: Vec<usize> = Vec::new();
         for (index, session) in sessions.iter().enumerate() {
             if session.channel_id != channel_id || !session.is_enabled() {
+                continue;
+            }
+            if !allow(&session.provider) {
                 continue;
             }
             if session.is_expired(now) || !session.supports_model_any(model, alias) {

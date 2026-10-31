@@ -165,6 +165,12 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!("Failed to load model metadata registry: {e}");
     }
 
+    // 初始化统一模型管理的启停规则（provider × model）
+    let model_rules = Arc::new(model::manage::ModelRules::new(store.clone()));
+    if let Err(e) = model_rules.load() {
+        tracing::error!("Failed to load model rules: {e}");
+    }
+
     // 初始化用量追踪
     let usage_tracker = Arc::new(UsageTracker::new(store.clone(), account_pool.clone()));
 
@@ -418,6 +424,7 @@ async fn main() -> anyhow::Result<()> {
         api_client,
         model_mapper,
         model_metadata,
+        model_rules,
         usage_tracker,
         account_pool,
         api_key_store,
@@ -1025,6 +1032,19 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/pricing/missing-models",
             get(api::admin::handle_missing_pricing_models),
         )
+        // 统一模型管理（渠道模型 + 账号池模型聚合视图）
+        .route("/api/models/manage", get(api::admin::handle_manage_view))
+        .route("/api/models/state", post(api::admin::handle_set_state))
+        .route("/api/models/price", post(api::admin::handle_upsert_price))
+        .route(
+            "/api/models/price/remove",
+            post(api::admin::handle_remove_price),
+        )
+        .route("/api/models/alias", post(api::admin::handle_set_alias))
+        .route(
+            "/api/models/alias/remove",
+            post(api::admin::handle_remove_alias),
+        )
         // P1 模型元信息覆盖管理
         .route("/api/models/meta", get(api::admin::handle_model_meta_list))
         .route(
@@ -1117,6 +1137,23 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/dashboard/scheduler_status",
             get(api::admin::handle_scheduler_status),
+        )
+        // 报表扩展（Agent2API report 视角：热力图/Top来源/Token趋势/总览卡）
+        .route(
+            "/api/dashboard/report/heatmap",
+            get(api::admin::handle_report_heatmap),
+        )
+        .route(
+            "/api/dashboard/report/top_sources",
+            get(api::admin::handle_report_top_sources),
+        )
+        .route(
+            "/api/dashboard/report/token_trend",
+            get(api::admin::handle_report_token_trend),
+        )
+        .route(
+            "/api/dashboard/report/overview",
+            get(api::admin::handle_report_overview),
         )
         // 设置管理
         .route("/api/settings", get(api::admin::handle_get_settings))

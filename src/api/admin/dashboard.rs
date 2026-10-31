@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::common::verify_admin;
+use super::common::{is_admin_user, verify_admin, verify_user};
 
 // Dashboard 查询参数：时间范围（天数）。
 #[derive(Debug, Deserialize)]
@@ -322,6 +322,215 @@ pub async fn handle_cache_savings(
             "cache_tokens": cache_tokens,
             "billed_cost": billed_cost,
             "saved_estimate": (saved_estimate * 100.0).round() / 100.0,
+        }
+    })))
+}
+
+// ── 报表扩展（移植 Agent2API report 页视角）──────────────────────────
+//
+// Agent2API 的报表（report-page.tsx）有四个 AIGX 仪表盘没有的维度：
+// 365 天热力图、Top 账号、Top 提供商、prompt/completion 分列 Token 趋势。
+// 以下四个端点把它们补齐，数据源仍是 `log_store.requests`（与既有看板同源，
+// 不引入新存储）。权限模型与 Dashboard.tsx 页内分支一致：管理员看全量，
+// 普通用户只看自己的（按 `user_id` 过滤）——所以这四个端点走 `verify_user`
+// 而非 `verify_admin`，在 handler 内按 `is_admin_user` 收敛数据集。
+
+/// 报表查询参数：时间范围 + 可选的当前用户过滤（非管理员强制过滤）。
+#[derive(Debug, Deserialize)]
+pub struct ReportQuery {
+    #[serde(default = "default_dashboard_days")]
+    pub days: u32,
+}
+
+/// 鉴权并返回 (数据集过滤谓词所需的用户 ID Option, 是否管理员)。
+///
+/// 管理员 → `(None, true)`（全量）；普通用户 → `(Some(user_id), false)`。
+/// 未登录请求在 `verify_user` 处即被 401 拦下。
+async fn report_scope(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(Option<String>, bool), (StatusCode, Json<Value>)> {
+    let user = verify_user(state, headers).await?;
+    if is_admin_user(&user) {
+        return Ok((None, true));
+    }
+    Ok((Some(user.id.clone()), false))
+}
+
+/// 365 天日粒度消费热力图（Agent2API report 365d heatmap）。
+///
+/// `days` 上限放宽到 365（复用 DashboardQuery 的 90 上限不够画全年）；
+/// 超过 365 的按 365 算，避免一次扫穿全部日志。
+pub async fn handle_report_heatmap(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ReportQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
+    let days = q.days.clamp(1, 365) as i64;
+    let start = chrono::Utc::now().timestamp() - days * 24 * 3600;
+    let logs = state.log_store.requests.all_sorted_asc();
+
+    let mut daily: std::collections::BTreeMap<String, (i64, u64)> =
+        std::collections::BTreeMap::new();
+    for l in &logs {
+        if l.created_at < start {
+            continue;
+        }
+        if let Some(uid) = &user_filter {
+            if l.user_id.as_deref() != Some(uid.as_str()) {
+                continue;
+            }
+        }
+        let day = chrono::DateTime::<chrono::Utc>::from_timestamp(l.created_at, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
+        let entry = daily.entry(day).or_insert((0, 0));
+        entry.0 += l.cost;
+        entry.1 += 1;
+    }
+    let data: Vec<Value> = daily
+        .into_iter()
+        .map(|(date, (cost, count))| json!({ "date": date, "cost": cost, "count": count }))
+        .collect();
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+/// Top 渠道/来源排行（Agent2API Top accounts/providers 的 AIGX 对应物）。
+///
+/// AIGX 的请求日志没有 provider 与账号维度，只有 `channel_name`——
+/// Top 提供商与 Top 账号在这里统一为「Top 渠道」（渠道名即来源标签），
+/// 按请求数与消费额双指标排序。
+pub async fn handle_report_top_sources(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ReportQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
+    let start = dashboard_start_ts(q.days);
+    let logs = state.log_store.requests.all_sorted_asc();
+
+    let mut sources: std::collections::HashMap<String, (u64, i64)> =
+        std::collections::HashMap::new();
+    for l in &logs {
+        if l.created_at < start {
+            continue;
+        }
+        if let Some(uid) = &user_filter {
+            if l.user_id.as_deref() != Some(uid.as_str()) {
+                continue;
+            }
+        }
+        let name = l.channel_name.clone().unwrap_or_else(|| "unknown".to_string());
+        let entry = sources.entry(name).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += l.cost;
+    }
+    let mut items: Vec<(String, u64, i64)> = sources.into_iter().map(|(k, v)| (k, v.0, v.1)).collect();
+    items.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+    items.truncate(10);
+    let data: Vec<Value> = items
+        .into_iter()
+        .map(|(name, count, cost)| json!({ "name": name, "count": count, "cost": cost }))
+        .collect();
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+/// prompt/completion 分列 Token 趋势（Agent2API daily token trend）。
+pub async fn handle_report_token_trend(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ReportQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
+    let start = dashboard_start_ts(q.days);
+    let logs = state.log_store.requests.all_sorted_asc();
+
+    let mut daily: std::collections::BTreeMap<String, (u64, u64)> =
+        std::collections::BTreeMap::new();
+    for l in &logs {
+        if l.created_at < start {
+            continue;
+        }
+        if let Some(uid) = &user_filter {
+            if l.user_id.as_deref() != Some(uid.as_str()) {
+                continue;
+            }
+        }
+        let day = chrono::DateTime::<chrono::Utc>::from_timestamp(l.created_at, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
+        let entry = daily.entry(day).or_insert((0, 0));
+        entry.0 = entry.0.saturating_add(l.input_tokens);
+        entry.1 = entry.1.saturating_add(l.output_tokens);
+    }
+    let data: Vec<Value> = daily
+        .into_iter()
+        .map(|(date, (input, output))| {
+            json!({ "date": date, "input_tokens": input, "output_tokens": output })
+        })
+        .collect();
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+/// 报表总览卡（Agent2API report overview：请求/成功/Token/活跃天数）。
+///
+/// 成功率按 `status_code < 400` 计（与 Agent2API requests 表口径一致）。
+pub async fn handle_report_overview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ReportQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
+    let start = dashboard_start_ts(q.days);
+    let logs = state.log_store.requests.all_sorted_asc();
+
+    let mut total = 0u64;
+    let mut success = 0u64;
+    let mut input_tokens = 0u64;
+    let mut output_tokens = 0u64;
+    let mut cost = 0i64;
+    let mut days_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut models: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+
+    for l in &logs {
+        if l.created_at < start {
+            continue;
+        }
+        if let Some(uid) = &user_filter {
+            if l.user_id.as_deref() != Some(uid.as_str()) {
+                continue;
+            }
+        }
+        total += 1;
+        if l.status_code < 400 {
+            success += 1;
+        }
+        input_tokens = input_tokens.saturating_add(l.input_tokens);
+        output_tokens = output_tokens.saturating_add(l.output_tokens);
+        cost = cost.saturating_add(l.cost);
+        if let Some(d) = chrono::DateTime::<chrono::Utc>::from_timestamp(l.created_at, 0) {
+            days_seen.insert(d.format("%Y-%m-%d").to_string());
+        }
+        *models.entry(l.model.clone()).or_insert(0) += 1;
+    }
+    let mut top_models: Vec<(String, u64)> = models.into_iter().collect();
+    top_models.sort_by(|a, b| b.1.cmp(&a.1));
+    top_models.truncate(5);
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "total_requests": total,
+            "success_requests": success,
+            "success_rate": if total > 0 { (success as f64 / total as f64 * 10000.0).round() / 100.0 } else { 0.0 },
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_cost": cost,
+            "active_days": days_seen.len(),
+            "top_models": top_models.into_iter()
+                .map(|(model, count)| json!({ "model": model, "count": count }))
+                .collect::<Vec<Value>>(),
         }
     })))
 }

@@ -57,6 +57,8 @@ pub struct AppState {
     pub model_mapper: Arc<ModelMapper>,
     /// 模型元信息注册表（P1：owned_by/上下文长度/能力）
     pub model_metadata: Arc<crate::model::metadata::ModelMetadataRegistry>,
+    /// 统一模型管理的启停规则（粒度 provider × model）
+    pub model_rules: Arc<crate::model::manage::ModelRules>,
     pub usage_tracker: Arc<UsageTracker>,
     pub account_pool: Arc<AccountPool>,
     pub api_key_store: Arc<ApiKeyStore>,
@@ -345,6 +347,16 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
         .channel_store
         .select_for_model_ranked(model, &state.pricing_store);
     for ch in &candidates {
+        // 统一模型管理里按 (provider, model) 关掉的模型不再进候选。
+        // 账号型渠道的 provider 由账号决定，渠道级无从判断 —— 那一层由
+        // `AccountSessionStore::acquire` 按账号白名单过滤，这里跳过即可。
+        if ch.channel_type != crate::channel::ChannelType::Account
+            && state
+                .model_rules
+                .is_disabled(ch.channel_type.as_str(), model)
+        {
+            continue;
+        }
         match ch.channel_type {
             // 空密钥渠道合法（免鉴权上游 / 网关侧 IP 白名单）：
             // bridge 内部对空 key 不发送鉴权头
@@ -397,11 +409,13 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
             }
             crate::channel::ChannelType::Account => {
                 // 账号型渠道：凭证不进 Channel，bridge 在调用时按账号池选号
-                let bridge: Arc<dyn crate::bridge::Bridge> =
-                    Arc::new(crate::bridge::account::AccountBridge::new(
+                let bridge: Arc<dyn crate::bridge::Bridge> = Arc::new(
+                    crate::bridge::account::AccountBridge::new(
                         ch.id.clone(),
                         state.account_sessions.clone(),
-                    ));
+                    )
+                    .with_rules(state.model_rules.clone()),
+                );
                 result.push((bridge, Some(ch.id.clone()), Some(ch.clone())));
             }
             crate::channel::ChannelType::Cloudflare => {
@@ -540,12 +554,27 @@ pub fn ensure_model_priced(state: &AppState, model: &str) -> Result<(), (StatusC
 }
 
 /// 模型是否由任一启用渠道声明或发现（models 非空 = 白名单；空 = 全部，用发现快照）。
+///
+/// 账号型渠道的模型声明在账号上（`AccountSession.models`），渠道级 models 通常
+/// 为空 —— 只查渠道会让「只在账号池里声明的模型」被误判为未声明。
 pub fn model_declared_by_channel(state: &AppState, model: &str) -> bool {
-    state
-        .channel_store
-        .list()
-        .iter()
-        .any(|c| c.is_enabled() && c.effective_models().iter().any(|m| m == model))
+    state.channel_store.list().iter().any(|c| {
+        if !c.is_enabled() {
+            return false;
+        }
+        if c.channel_type == crate::channel::ChannelType::Account {
+            return state.account_sessions.for_channel(&c.id).iter().any(|s| {
+                s.status == "enabled"
+                    && !state.model_rules.is_disabled(&s.provider, model)
+                    && (s.models.iter().any(|m| m == model)
+                        || (s.models.is_empty() && c.effective_models().iter().any(|m| m == model)))
+            });
+        }
+        !state
+            .model_rules
+            .is_disabled(c.channel_type.as_str(), model)
+            && c.effective_models().iter().any(|m| m == model)
+    })
 }
 
 /// 执行计费扣减（用户 quota + key used_quota）。
@@ -4624,11 +4653,42 @@ pub async fn handle_list_models(
         {
             continue;
         }
+        // 账号型渠道：模型来自账号（与统一模型管理页 / /api/models/available 同口径）
+        if ch.channel_type == crate::channel::ChannelType::Account {
+            for session in state.account_sessions.for_channel(&ch.id) {
+                if session.status != "enabled" {
+                    continue;
+                }
+                let models: Vec<String> = if session.models.is_empty() {
+                    ch.effective_models().to_vec()
+                } else {
+                    session.models.clone()
+                };
+                for m in models {
+                    if m.is_empty()
+                        || state.model_rules.is_disabled(&session.provider, &m)
+                        || !seen.insert(m.clone())
+                    {
+                        continue;
+                    }
+                    model_list.push(build_entry(&m, None));
+                }
+            }
+            continue;
+        }
         let channel_owned_by =
             crate::model::metadata::owned_by_for_channel_type(ch.channel_type.as_str());
         // models 非空 = 白名单（只暴露声明部分）；空 = 全部（用发现快照兜底）
         for m in ch.effective_models() {
-            if m.is_empty() || !seen.insert(m.clone()) {
+            if m.is_empty() {
+                continue;
+            }
+            // 统一模型管理里按 (provider, model) 关掉的模型不对外暴露。
+            // 判断放在 seen 之前：另一家渠道若仍开着，仍能正常进列表。
+            if state.model_rules.is_disabled(ch.channel_type.as_str(), m) {
+                continue;
+            }
+            if !seen.insert(m.clone()) {
                 continue;
             }
             model_list.push(build_entry(m, channel_owned_by));

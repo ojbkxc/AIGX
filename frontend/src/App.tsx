@@ -43,7 +43,7 @@ const Channels = lazyPage(() => import('./pages/Channels'));
 const AccountSessions = lazyPage(() => import('./pages/AccountSessions'));
 const Chat = lazyPage(() => import('./pages/Chat'));
 
-const Models = lazyPage(() => import('./pages/Models'));
+const ModelManage = lazyPage(() => import('./pages/ModelManage'));
 const Prompts = lazyPage(() => import('./pages/Prompts'));
 const Pricing = lazyPage(() => import('./pages/Pricing'));
 const Agent = lazyPage(() => import('./pages/Agent'));
@@ -162,7 +162,9 @@ export default function App(): JSX.Element {
           <Route path="/chat" element={<ProtectedLayout><Chat /></ProtectedLayout>} />
           {/* 网络层管理已并入系统设置运维 tab，旧路由重定向防书签失效 */}
           <Route path="/network-layer" element={<Navigate to="/settings" replace />} />
-          <Route path="/model-presets" element={<ProtectedLayout><Models /></ProtectedLayout>} />
+          {/* 模型管理（渠道 + 账号池合流，admin）：旧的 /model-presets 目录页并入此处 */}
+          <Route path="/model-manage" element={<AdminRoute><ModelManage /></AdminRoute>} />
+          <Route path="/model-presets" element={<Navigate to="/model-manage" replace />} />
           <Route path="/prompts" element={<ProtectedLayout><Prompts /></ProtectedLayout>} />
           <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
           <Route path="/agent" element={<AdminRoute><Agent /></AdminRoute>} />

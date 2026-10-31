@@ -354,7 +354,9 @@ pub async fn handle_available_models(
     // 下次请求即可命中缓存，本次也立即用上。
     // 与 /v1/models 口径一致：冷却/断路器打开的渠道不参与聚合与懒加载。
     let collect_models = |channels: &[Channel],
-                          store: &crate::channel::ChannelStore|
+                          store: &crate::channel::ChannelStore,
+                          rules: &crate::model::manage::ModelRules,
+                          sessions: &crate::account_session::AccountSessionStore|
      -> Vec<(String, Option<&'static str>)> {
         let mut seen = std::collections::HashSet::new();
         let mut out: Vec<(String, Option<&'static str>)> = Vec::new();
@@ -365,11 +367,42 @@ pub async fn handle_available_models(
             if store.is_in_cooldown(&c.id) || !store.circuit_breaker().allows_read_only(&c.id) {
                 continue;
             }
+            // 账号型渠道：模型来自账号（账号白名单非空以账号为准，否则用渠道声明）。
+            // 与统一模型管理页同一口径，避免「管理页看得到、客户端拉不到」。
+            if c.channel_type == crate::channel::ChannelType::Account {
+                for session in sessions.for_channel(&c.id) {
+                    if session.status != "enabled" {
+                        continue;
+                    }
+                    let models: Vec<String> = if session.models.is_empty() {
+                        c.effective_models().to_vec()
+                    } else {
+                        session.models.clone()
+                    };
+                    for m in models {
+                        if m.is_empty()
+                            || rules.is_disabled(&session.provider, &m)
+                            || !seen.insert(m.clone())
+                        {
+                            continue;
+                        }
+                        out.push((m, None));
+                    }
+                }
+                continue;
+            }
             let owned_by =
                 crate::model::metadata::owned_by_for_channel_type(c.channel_type.as_str());
             // models 非空 = 白名单（只暴露声明部分）；空 = 全部（用发现快照兜底）
             for m in c.effective_models() {
-                if m.is_empty() || !seen.insert(m.clone()) {
+                if m.is_empty() {
+                    continue;
+                }
+                // 统一模型管理里按 (provider, model) 关停的模型不对外暴露
+                if rules.is_disabled(c.channel_type.as_str(), m) {
+                    continue;
+                }
+                if !seen.insert(m.clone()) {
                     continue;
                 }
                 out.push((m.clone(), owned_by));
@@ -379,7 +412,12 @@ pub async fn handle_available_models(
     };
 
     let channels = state.channel_store.list();
-    let mut models = collect_models(&channels, &state.channel_store);
+    let mut models = collect_models(
+        &channels,
+        &state.channel_store,
+        &state.model_rules,
+        &state.account_sessions,
+    );
 
     if models.is_empty() {
         let empty_channels: Vec<Channel> = channels

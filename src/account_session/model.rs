@@ -135,6 +135,12 @@ pub struct AccountSession {
     /// 凭证过期时间（unix 秒；None / 0 = 不过期）。
     #[serde(default)]
     pub expires_at: Option<i64>,
+    /// 上次成功签到时间（unix 秒；0 / 缺省 = 从未签到）。
+    ///
+    /// 「今天是否已签」按**北京时间**判断，不用 `chrono::Local`：容器里
+    /// 常是 UTC，会让每天 08:00 前重复签到、08:00 后才算昨天的。
+    #[serde(default)]
+    pub last_checkin_at: i64,
     /// 运行态并发占用（不落盘）。
     #[serde(skip)]
     pub in_flight: u32,
@@ -188,6 +194,7 @@ impl AccountSession {
             consecutive_errors: 0,
             total_latency_ms: 0,
             expires_at: None,
+            last_checkin_at: 0,
             in_flight: 0,
             created_at: now,
             updated_at: now,
