@@ -1422,6 +1422,14 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             post(api::admin::account_login::handle_login_callback),
         )
         .route(
+            "/api/account-sessions/login/sms/send",
+            post(api::admin::account_login::handle_login_sms_send),
+        )
+        .route(
+            "/api/account-sessions/login/sms/verify",
+            post(api::admin::account_login::handle_login_sms_verify),
+        )
+        .route(
             "/api/account-sessions/bulk",
             post(api::admin::account_sessions::handle_bulk_import_account_sessions),
         )

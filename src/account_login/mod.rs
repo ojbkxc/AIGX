@@ -16,6 +16,7 @@
 mod accio;
 mod catpaw;
 mod cline;
+pub mod loomy;
 mod qoder;
 mod raccoon;
 mod workbuddy;
@@ -325,6 +326,22 @@ pub async fn submit_callback(
         finish(&handle, Some(account_id.clone()), None);
     }
     Ok(account_id)
+}
+
+/// 短信登录成功后落账号（供管理面 `sms/verify` 调用）。
+pub fn save_credentials(
+    state: &AppState,
+    provider: &str,
+    channel_id: &str,
+    creds: Credentials,
+) -> Result<String, String> {
+    persist_account(
+        &state.account_sessions,
+        &state.channel_store,
+        provider,
+        channel_id,
+        creds,
+    )
 }
 
 /// 登录凭证 → 账号池记录（自动建渠道、补齐默认名称）。

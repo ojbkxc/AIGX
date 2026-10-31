@@ -156,6 +156,12 @@ export default function AddAccountDialog({
   const [loginError, setLoginError] = useState('');
   const [callbackUrl, setCallbackUrl] = useState('');
   const pollRef = useRef<number | null>(null);
+  // 手机验证码登录（Loomy）
+  const [smsPhone, setSmsPhone] = useState('');
+  const [smsCode, setSmsCode] = useState('');
+  const [smsMsgid, setSmsMsgid] = useState('');
+  const [smsBusy, setSmsBusy] = useState(false);
+  const [smsHint, setSmsHint] = useState('');
 
   const selectedProvider = providers.find((p) => p.kind === provider);
   const addConfig = addConfigOf(provider);
@@ -330,6 +336,43 @@ export default function AddAccountDialog({
       onClose();
     } catch (err) {
       setLoginError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const sendSmsCode = async (): Promise<void> => {
+    setSmsHint('');
+    setSmsBusy(true);
+    try {
+      const res = await api.sendAccountLoginSms({ provider, phone: smsPhone.trim() });
+      const msgid = res.data?.msgid || '';
+      if (!msgid) throw new Error(t('验证码发送失败'));
+      setSmsMsgid(msgid);
+      setSmsHint(t('验证码已发送，请填入收到的 6 位数字'));
+    } catch (err) {
+      setSmsHint(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSmsBusy(false);
+    }
+  };
+
+  const verifySmsCode = async (): Promise<void> => {
+    setSmsHint('');
+    setSmsBusy(true);
+    try {
+      await api.verifyAccountLoginSms({
+        provider,
+        phone: smsPhone.trim(),
+        code: smsCode.trim(),
+        msgid: smsMsgid,
+        channel_id: advanced.channel_id,
+      });
+      addToast(t('账号已添加'));
+      await onCreated();
+      onClose();
+    } catch (err) {
+      setSmsHint(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSmsBusy(false);
     }
   };
 
@@ -602,6 +645,38 @@ export default function AddAccountDialog({
                     <div className="add-block">
                       <h4>{t('手机验证码登录')}</h4>
                       <p className="form-hint">{addConfig.sms.note}</p>
+                      <Input
+                        label={t('手机号')}
+                        placeholder={t('11 位大陆手机号')}
+                        value={smsPhone}
+                        onChange={(e) => setSmsPhone(e.target.value)}
+                      />
+                      <div className="add-btn-row">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => void sendSmsCode()}
+                          disabled={smsBusy || smsPhone.trim().length < 11}
+                        >
+                          {t('获取验证码')}
+                        </Button>
+                      </div>
+                      <Input
+                        label={t('验证码')}
+                        placeholder={t('6 位数字')}
+                        value={smsCode}
+                        onChange={(e) => setSmsCode(e.target.value)}
+                      />
+                      <div className="add-btn-row">
+                        <Button
+                          type="button"
+                          onClick={() => void verifySmsCode()}
+                          disabled={smsBusy || !smsMsgid || smsCode.trim().length !== 6}
+                        >
+                          {t('登录并添加')}
+                        </Button>
+                        {smsHint ? <span className="form-hint">{smsHint}</span> : null}
+                      </div>
                     </div>
                   ) : null}
 

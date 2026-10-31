@@ -296,9 +296,12 @@ export const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
     label: 'Loomy',
     manualTitle: '填写凭证',
     manualNote:
-      '粘贴的是登录 session（同时是模型网关的 token）。Loomy 没有续期接口，session 有效期约 14 天，过期后重新登录即可。官方客户端的神码登录（手机验证码）在远程网关上没有短信通道，请登录后粘贴 session。',
+      '粘贴的是登录 session（同时是模型网关的 token）。Loomy 没有续期接口，session 有效期约 14 天，过期后重新登录即可。也可以用上面的「手机验证码登录」直接发码登录。',
     addButton: '添加 Loomy 账号',
-    methods: ['manual'],
+    methods: ['sms', 'manual'],
+    sms: {
+      note: '用 Loomy 账号绑定的手机号登录：点「获取验证码」后填入即可。这是本家最省事的入口。',
+    },
     fields: [
       { key: 'session', label: 'session', rows: 3, target: 'credential', placeholder: '登录 session（一长串）' },
       { key: 'userId', label: 'userId', optional: true, placeholder: '可选，讯飞侧 userid' },

@@ -446,6 +446,12 @@ export const api = {
   /** 远程部署时手工提交浏览器地址栏里的回调地址 */
   submitAccountLoginCallback: (state: string, callbackUrl: string): Promise<ApiResponse<{ accountId?: string }>> =>
     request<ApiResponse<{ accountId?: string }>>('POST', `${API_BASE}/account-sessions/login/callback`, { state, callback_url: callbackUrl }),
+  /** 发送手机验证码（返回 msgid，登录时带回） */
+  sendAccountLoginSms: (data: Record<string, unknown>): Promise<ApiResponse<{ msgid?: string }>> =>
+    request<ApiResponse<{ msgid?: string }>>('POST', `${API_BASE}/account-sessions/login/sms/send`, data),
+  /** 手机验证码登录并落账号 */
+  verifyAccountLoginSms: (data: Record<string, unknown>): Promise<ApiResponse<{ accountId?: string }>> =>
+    request<ApiResponse<{ accountId?: string }>>('POST', `${API_BASE}/account-sessions/login/sms/verify`, data),
   accountSessionStats: (): Promise<ApiResponse<{ channels?: AccountSessionStatsItem[]; total?: number }>> =>
     request<ApiResponse<{ channels?: AccountSessionStatsItem[]; total?: number }>>('GET', `${API_BASE}/account-sessions/stats`),
   accountRotationPolicy: (): Promise<ApiResponse<AccountRotationPolicyItem>> =>

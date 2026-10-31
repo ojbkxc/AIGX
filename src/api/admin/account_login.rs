@@ -29,6 +29,25 @@ pub struct LoginStateRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SmsSendRequest {
+    pub provider: String,
+    pub phone: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SmsVerifyRequest {
+    pub provider: String,
+    pub phone: String,
+    pub code: String,
+    #[serde(default)]
+    pub msgid: String,
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct LoginCallbackRequest {
     #[serde(default)]
     pub state: String,
@@ -99,6 +118,62 @@ pub async fn handle_login_callback(
         account_login::submit_callback(&state, body.state.trim(), body.callback_url.trim())
             .await
             .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
+    Ok(Json(
+        json!({ "success": true, "data": { "accountId": account_id } }),
+    ))
+}
+
+/// POST /api/account-sessions/login/sms/send（发送手机验证码）
+pub async fn handle_login_sms_send(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SmsSendRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let provider = crate::account_session::registry::normalize_kind(&body.provider);
+    let msgid = match provider.as_str() {
+        "loomy" => account_login::loomy::send_code(&reqwest::Client::new(), &body.phone)
+            .await
+            .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?,
+        other => {
+            return Err(error_response(
+                &format!("「{other}」的手机验证码登录尚未接入网关（AutoClaw 发码强制要求阿里云验证码，请在客户端登录后粘贴 token）"),
+                StatusCode::BAD_REQUEST,
+            ))
+        }
+    };
+    Ok(Json(json!({ "success": true, "data": { "msgid": msgid } })))
+}
+
+/// POST /api/account-sessions/login/sms/verify（验证码登录并落账号）
+pub async fn handle_login_sms_verify(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SmsVerifyRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let provider = crate::account_session::registry::normalize_kind(&body.provider);
+    if provider != "loomy" {
+        return Err(error_response(
+            &format!("「{provider}」的手机验证码登录尚未接入网关"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let creds = account_login::loomy::login_with_code(
+        &reqwest::Client::new(),
+        &body.phone,
+        &body.code,
+        &body.msgid,
+        if body.name.trim().is_empty() {
+            None
+        } else {
+            Some(body.name.trim())
+        },
+    )
+    .await
+    .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
+    let account_id = account_login::save_credentials(&state, &provider, &body.channel_id, creds)
+        .map_err(|error| error_response(&error, StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(
         json!({ "success": true, "data": { "accountId": account_id } }),
     ))
