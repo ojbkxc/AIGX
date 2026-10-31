@@ -441,7 +441,7 @@ async fn workbuddy_claims_daily_checkin() {
         (
             "/billing/meter/checkin-activity-status",
             200,
-            json!({"code": 0, "data": {"today_checked_in": false}}),
+            json!({"code": 0, "data": {"today_checked_in": false, "active": true}}),
         ),
         (
             "/v2/billing/meter/daily-checkin",
@@ -451,10 +451,26 @@ async fn workbuddy_claims_daily_checkin() {
     ])
     .await;
 
-    let result = claim_for(&reqwest::Client::new(), &account("workbuddy", &base)).await;
+    // 国际版才走「活动状态 → 领取」两步（国内版直接领）
+    let result = claim_for(&reqwest::Client::new(), &account("workbuddy-intl", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
+    assert_hit(&state, "/billing/meter/checkin-activity-status");
     assert_hit(&state, "/v2/billing/meter/daily-checkin");
+}
+
+#[tokio::test]
+async fn workbuddy_reports_activity_not_open_as_pending() {
+    let (base, _state) = start_mock(vec![(
+        "/billing/meter/checkin-activity-status",
+        200,
+        json!({"code": 0, "data": {"today_checked_in": false, "active": false}}),
+    )])
+    .await;
+
+    let result = claim_for(&reqwest::Client::new(), &account("workbuddy-intl", &base)).await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Pending);
 }
 
 // ── Trae ────────────────────────────────────────────────────────────
@@ -471,6 +487,13 @@ async fn trae_claims_credits() {
             "/trae/api/v2/ug/checkin_credits/claim",
             200,
             json!({"code": 0, "message": "ok", "data": {"credits": 20}}),
+        ),
+        // 状态端点被打两次：首次查（未签）→ 领取 → 同设备号回查（已签）。
+        // Trae 的判据是「回查翻转才算数」，所以必须回放第二个响应。
+        (
+            "/trae/api/v2/ug/checkin_credits/status",
+            200,
+            json!({"code": 0, "enable": true, "checked_in": true}),
         ),
     ])
     .await;
@@ -529,7 +552,7 @@ async fn codearts_claims_ops_welfare() {
         (
             "/v1/ops/claim",
             200,
-            json!({"data": {"items": [{"id": "w-1", "status": "CLAIMED"}]}}),
+            json!({"code": 0, "data": {"items": [{"id": "w-1", "status": "CLAIMED"}]}}),
         ),
         (
             "/v1/ops/confirm",
