@@ -167,9 +167,6 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
     })
 }
 
-pub fn resume(_client: &reqwest::Client) -> Result<Arc<dyn LoginFlow>, String> {
-    Err("Qoder 设备授权不支持回调地址回填：请等浏览器授权完成后自动入池".to_string())
-}
 
 fn encode_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());

@@ -163,9 +163,6 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
     })
 }
 
-pub fn resume(_client: &reqwest::Client) -> Result<Arc<dyn LoginFlow>, String> {
-    Err("CatPaw 网页登录不支持回调地址回填：网关会自动轮询取回 token".to_string())
-}
 
 fn random_hex() -> String {
     uuid::Uuid::new_v4().simple().to_string()

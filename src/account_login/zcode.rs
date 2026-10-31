@@ -176,9 +176,6 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
     })
 }
 
-pub fn resume(_client: &reqwest::Client) -> Result<Arc<dyn LoginFlow>, String> {
-    Err("ZCode 授权不支持回调地址回填：请等浏览器授权完成后自动入池".to_string())
-}
 
 /// 把中转页参数替换进 `authorize_url`（国内版参数名是 `redirect`）。
 fn apply_interstitial(authorize_url: &str) -> String {

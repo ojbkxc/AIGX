@@ -231,9 +231,6 @@ fn auth_url_of_token(state: &str) -> String {
     auth_url(&format!("/auth/token?state={}", encode_component(state)))
 }
 
-pub fn resume(_client: &reqwest::Client) -> Result<Arc<dyn LoginFlow>, String> {
-    Err("WorkBuddy 网页登录不支持回调地址回填：请等浏览器登录完成后自动入池".to_string())
-}
 
 fn encode_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());

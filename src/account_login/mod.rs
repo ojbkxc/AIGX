@@ -13,9 +13,11 @@
 //! `state` 是每次发起的不可预测随机串（uuid v4）。前端拿它查 `/wait`；
 //! 取消/超时/完成后保留 10 分钟，取任务时顺手清过期项。
 
+mod accio;
 mod catpaw;
 mod cline;
 mod qoder;
+mod raccoon;
 mod workbuddy;
 mod zcode;
 
@@ -90,6 +92,8 @@ pub struct LoginTask {
     pub account_id: Option<String>,
     pub canceled: bool,
     finished_at: Option<Instant>,
+    /// 本任务的登录流程（回调型流程要在提交回调地址时复用发起时的上下文）。
+    flow: Option<Arc<dyn LoginFlow>>,
 }
 
 type Handle = Arc<Mutex<LoginTask>>;
@@ -198,6 +202,8 @@ pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result
         "zcode" => zcode::start(&client).await?,
         "cline" => cline::start(&client).await?,
         "catpaw" => catpaw::start(&client).await?,
+        "xiaohuanxiong" => raccoon::start(&client).await?,
+        "accio" => accio::start(&client).await?,
         other => {
             return Err(format!(
                 "「{other}」的网页登录引擎尚未接入网关：请改用「填写凭证」粘贴登录态"
@@ -214,6 +220,7 @@ pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result
         account_id: None,
         canceled: false,
         finished_at: None,
+        flow: Some(started.flow.clone()),
     })));
     let flow = started.flow.clone();
     let sessions = state.account_sessions.clone();
@@ -296,19 +303,10 @@ pub async fn submit_callback(
             .ok_or_else(|| "该登录任务已结束".to_string());
     }
     let provider = task.provider.clone();
-    let client = reqwest::Client::new();
-    let flow: Arc<dyn LoginFlow> = match provider.as_str() {
-        "workbuddy" => workbuddy::resume(&client)?,
-        "qoder" => qoder::resume(&client)?,
-        "zcode" => zcode::resume(&client)?,
-        "cline" => cline::resume(&client)?,
-        "catpaw" => catpaw::resume(&client)?,
-        other => {
-            return Err(format!(
-                "「{other}」的网页登录不支持回调地址回填：请改用「填写凭证」"
-            ))
-        }
-    };
+    let flow = task
+        .flow
+        .clone()
+        .ok_or_else(|| "登录任务的流程上下文已丢失，请重新发起".to_string())?;
     let creds = flow
         .submit_callback(url)
         .await?
