@@ -895,33 +895,43 @@ async fn codearts(client: &Client, session: &AccountSession, secret: &str) -> Cl
     let base = base.trim_end_matches('/');
     let bridge = CodeArtsBridge::new(base, secret, client.clone());
 
-    let send_signed = |method: reqwest::Method, url: String, body: Value| {
-        let bridge_headers = vec![
+    async fn send_signed(
+        client: &Client,
+        bridge: &CodeArtsBridge,
+        method: reqwest::Method,
+        url: &str,
+        body: Value,
+    ) -> Result<(u16, Value), String> {
+        let mut headers = vec![
             ("Content-Type".to_string(), "application/json".to_string()),
             ("Agent-Type".to_string(), "PromptCenter".to_string()),
             ("X-Language".to_string(), "en-us".to_string()),
         ];
-        let mut headers = bridge_headers.clone();
+        let is_get = method == reqwest::Method::GET;
         let body_text = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
-        if let Some(auth) = bridge.sign(&method.to_string(), &url, &headers, body_text.as_bytes()) {
+        if let Some(auth) = bridge.sign(&method.to_string(), url, &headers, body_text.as_bytes()) {
             headers.push(("Authorization".to_string(), auth));
         }
         send_json(
             client,
             method,
-            &url,
+            url,
             &headers,
-            if body_text == "{}" && method == reqwest::Method::GET {
-                None
-            } else {
-                Some(body)
-            },
+            if is_get { None } else { Some(body) },
             None,
         )
-    };
+        .await
+    }
 
     let delivery_url = format!("{base}/v1/ops/delivery?channel=IDE");
-    let (_, first) = match send_signed(reqwest::Method::GET, delivery_url.clone(), json!({})).await
+    let (_, first) = match send_signed(
+        client,
+        &bridge,
+        reqwest::Method::GET,
+        &delivery_url,
+        json!({}),
+    )
+    .await
     {
         Ok(pair) => pair,
         Err(e) => return failed(&e),
@@ -960,10 +970,12 @@ async fn codearts(client: &Client, session: &AccountSession, secret: &str) -> Cl
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     );
     let (_, claim) = match send_signed(
+        client,
+        &bridge,
         reqwest::Method::POST,
-        format!("{base}/v1/ops/claim"),
+        &format!("{base}/v1/ops/claim"),
         json!({
-            "campaignId": campaign,
+            "campaignId": campaign.clone(),
             "idempotentKey": idempotent,
             "channel": "IDE",
         }),
@@ -981,8 +993,10 @@ async fn codearts(client: &Client, session: &AccountSession, secret: &str) -> Cl
         ));
     }
     let (_, confirm) = match send_signed(
+        client,
+        &bridge,
         reqwest::Method::POST,
-        format!("{base}/v1/ops/confirm"),
+        &format!("{base}/v1/ops/confirm"),
         json!({ "campaignId": campaign }),
     )
     .await
@@ -994,7 +1008,15 @@ async fn codearts(client: &Client, session: &AccountSession, secret: &str) -> Cl
         return pending("CodeArts 领取已提交，确认接口报错，请稍后看台账");
     }
     // 回读 delivery 二次确认（上游硬要求：不确认不算到账）
-    let (_, second) = match send_signed(reqwest::Method::GET, delivery_url, json!({})).await {
+    let (_, second) = match send_signed(
+        client,
+        &bridge,
+        reqwest::Method::GET,
+        &delivery_url,
+        json!({}),
+    )
+    .await
+    {
         Ok(pair) => pair,
         Err(e) => return failed(&e),
     };

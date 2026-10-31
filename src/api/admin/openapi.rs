@@ -54,6 +54,7 @@ pub fn build_openapi_document() -> Value {
         paths_monitor_security(),
         paths_playground(),
         paths_accounts_network(),
+        paths_accounts_network_b(),
         paths_docs(),
         paths_diagnostics(),
         paths_mcp(),
