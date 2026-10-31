@@ -177,7 +177,12 @@ fn upstream_message(payload: &Value) -> String {
 }
 
 fn extract_msgid(payload: &Value) -> String {
-    for pointer in ["/data/msgid", "/data/msgId", "/data/data/msgid", "/data/data/msgId"] {
+    for pointer in [
+        "/data/msgid",
+        "/data/msgId",
+        "/data/data/msgid",
+        "/data/data/msgId",
+    ] {
         let text = payload
             .pointer(pointer)
             .and_then(Value::as_str)
