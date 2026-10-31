@@ -55,6 +55,70 @@ pub struct LoginCallbackRequest {
     pub callback_url: String,
 }
 
+/// 粘贴式登录请求：把凭证交给网关归一化 + 校验一次后落账号。
+#[derive(Debug, Deserialize)]
+pub struct PasteLoginRequest {
+    pub provider: String,
+    #[serde(default)]
+    pub channel_id: String,
+    /// 粘贴的凭证（Cookie / token / API Key，形态由 provider 决定）
+    pub secret: String,
+    /// 站点覆盖（MonkeyCode 国内 .com / 国际 .net）
+    #[serde(default)]
+    pub site: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// POST /api/account-sessions/login/paste
+///
+/// 用于「没有可代跑网页登录」的家（MonkeyCode / KukuAI / OrcaTerm /
+/// Command Code）：用户在浏览器里自己登录后把凭证粘进来，网关归一化并
+/// 校验一次（打一个只读端点）后落账号。校验失败直接返回可读错误，
+/// 不必等到转发时才暴露。
+pub async fn handle_login_paste(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PasteLoginRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let provider = crate::account_session::registry::normalize_kind(&body.provider);
+    let client = reqwest::Client::new();
+    let secret = body.secret.trim();
+    if secret.is_empty() {
+        return Err(error_response("请粘贴凭证", StatusCode::BAD_REQUEST));
+    }
+    let mut creds = match provider.as_str() {
+        "monkeycode" | "monkeycode-intl" => {
+            let site = if body.site.trim().is_empty() {
+                if provider == "monkeycode-intl" {
+                    "https://monkeycode-ai.net"
+                } else {
+                    "https://monkeycode-ai.com"
+                }
+            } else {
+                body.site.trim()
+            };
+            account_login::paste::verify_monkeycode(&client, site, secret).await
+        }
+        "kuku" => account_login::paste::verify_kuku(&client, secret).await,
+        "orcaterm" => account_login::paste::verify_orcaterm(secret).await,
+        "commandcode" => account_login::paste::verify_commandcode(&client, secret).await,
+        other => Err(format!(
+            "「{other}」不走粘贴式登录（请用网页登录或「填写凭证」表单）"
+        )),
+    }
+    .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
+    if !body.name.trim().is_empty() {
+        creds.name = body.name.trim().to_string();
+    }
+    let account_id = account_login::save_credentials(&state, &provider, &body.channel_id, creds)
+        .map_err(|error| error_response(&error, StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(
+        json!({ "success": true, "data": { "accountId": account_id } }),
+    ))
+}
+
 /// POST /api/account-sessions/login/start
 pub async fn handle_login_start(
     State(state): State<AppState>,

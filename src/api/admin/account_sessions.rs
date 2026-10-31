@@ -78,6 +78,10 @@ pub struct AccountSessionRequest {
     /// 账号级额外请求头（登录态型供应商补专用头；值支持 `{credential}` 模板）。
     #[serde(default)]
     pub extra_headers: Option<HashMap<String, String>>,
+    /// 续期令牌（refreshToken / Coding Plan JWT / deviceId 等）。三态：缺省 =
+    /// 保持原值；空串 = 清除；非空 = 设置。
+    #[serde(default)]
+    pub refresh_token: Option<String>,
     #[serde(default)]
     pub expires_at: Option<i64>,
 }
@@ -177,6 +181,10 @@ fn apply_request(mut session: AccountSession, body: &AccountSessionRequest) -> A
     match &body.api_key {
         None => {}
         Some(secret) => session.credential.secret = secret.clone(),
+    }
+    // 续期令牌三态：缺省保持、空串清除、非空设置（落盘编码在 store.upsert 里做）
+    if let Some(token) = &body.refresh_token {
+        session.refresh_secret = token.trim().to_string();
     }
     if let Some(proxy) = &body.proxy {
         let trimmed = proxy.trim();
@@ -302,6 +310,13 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "max_concurrency": session.max_concurrency,
         "models": session.models,
         "extra_headers": session.extra_headers,
+        // 续期令牌只暴露「有没有」与脱敏形态，不回明文
+        "has_refresh_token": !session.refresh_secret.is_empty(),
+        "refresh_token": if session.refresh_secret.is_empty() {
+            String::new()
+        } else {
+            mask_secret(&crate::channel::Channel::decode_api_key_value(&session.refresh_secret))
+        },
         "in_flight": session.in_flight,
         "success_count": session.success_count,
         "error_count": session.error_count,

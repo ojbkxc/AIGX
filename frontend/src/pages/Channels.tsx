@@ -54,6 +54,8 @@ interface ChannelItem {
   quirks?: ChannelQuirks | null;
   /** 余额查询方案（空 = OpenAI 计费端点） */
   balance_scheme?: string;
+  /** 余额展示单位（USD / CNY / % / quota …；随余额查询响应回填） */
+  balance_unit?: string;
 }
 
 /**
@@ -141,6 +143,15 @@ function modelBadgeColor(name: string): string {
   }
   const hue = hash % 360;
   return `hsl(${hue} 65% 45%)`;
+}
+
+/** 余额展示：按单位渲染（USD/CNY 加符号，% 加百分号，quota 原样） */
+function formatBalance(value: number, unit?: string): string {
+  const u = (unit || '').toUpperCase();
+  if (u === '%') return `${value.toFixed(1)}%`;
+  if (u === 'USD' || u === '') return `$${value.toFixed(2)}`;
+  if (u === 'CNY') return `¥${value.toFixed(2)}`;
+  return `${value.toFixed(2)} ${unit}`;
 }
 
 export default function Channels(): JSX.Element {
@@ -318,6 +329,18 @@ export default function Channels(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
 
+  // 搜索防抖：输入停顿 400ms 后自动按服务端搜索（回车仍可立即触发）
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setPage(1);
+      loadChannels().catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    }, 400);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
+
   // 点击外部关闭"更多"菜单
   useEffect(() => {
     if (!moreOpen) return;
@@ -370,13 +393,21 @@ export default function Channels(): JSX.Element {
   };
 
   // 批量启用/禁用/删除
+  // 逐条执行并统计失败数：单条失败（权限/密码/网络）不能静默吞掉，
+  // 否则用户看到「已删除 N 个」而实际一个都没删。
   const handleBulkEnable = async (): Promise<void> => {
     const ids = Array.from(selected);
     if (!ids.length) return;
-    for (const id of ids) {
-      await api.patchChannel(id, { status: 'enabled' }).catch(() => {});
-    }
-    addToast(`${t('已启用')} ${ids.length} ${t('个渠道')}`);
+    const results = await Promise.all(
+      ids.map((id) => api.patchChannel(id, { status: 'enabled' }).then(() => true).catch(() => false)),
+    );
+    const ok = results.filter(Boolean).length;
+    addToast(
+      ok === ids.length
+        ? `${t('已启用')} ${ok} ${t('个渠道')}`
+        : `${t('已启用')} ${ok}/${ids.length} ${t('个渠道（其余失败）')}`,
+      ok === ids.length ? 'success' : 'warning',
+    );
     setSelected(new Set());
     loadChannels();
   };
@@ -389,10 +420,16 @@ export default function Channels(): JSX.Element {
       confirmText: t('停用'),
       danger: true,
       onConfirm: async () => {
-        for (const id of ids) {
-          await api.patchChannel(id, { status: 'disabled' }).catch(() => {});
-        }
-        addToast(`${t('已停用')} ${ids.length} ${t('个渠道')}`);
+        const results = await Promise.all(
+          ids.map((id) => api.patchChannel(id, { status: 'disabled' }).then(() => true).catch(() => false)),
+        );
+        const ok = results.filter(Boolean).length;
+        addToast(
+          ok === ids.length
+            ? `${t('已停用')} ${ok} ${t('个渠道')}`
+            : `${t('已停用')} ${ok}/${ids.length} ${t('个渠道（其余失败）')}`,
+          ok === ids.length ? 'success' : 'warning',
+        );
         setSelected(new Set());
         loadChannels();
       },
@@ -408,10 +445,16 @@ export default function Channels(): JSX.Element {
       danger: true,
       requirePassword: true,
       onConfirm: async (password) => {
-        for (const id of ids) {
-          await api.deleteChannel(id, password).catch(() => {});
-        }
-        addToast(`${t('已删除')} ${ids.length} ${t('个渠道')}`);
+        const results = await Promise.all(
+          ids.map((id) => api.deleteChannel(id, password).then(() => true).catch(() => false)),
+        );
+        const ok = results.filter(Boolean).length;
+        addToast(
+          ok === ids.length
+            ? `${t('已删除')} ${ok} ${t('个渠道')}`
+            : `${t('已删除')} ${ok}/${ids.length} ${t('个渠道（其余失败：密码错误或权限不足）')}`,
+          ok === ids.length ? 'success' : 'error',
+        );
         setSelected(new Set());
         loadChannels();
       },
@@ -448,10 +491,16 @@ export default function Channels(): JSX.Element {
       danger: true,
       requirePassword: true,
       onConfirm: async (password) => {
-        for (const ch of disabled) {
-          await api.deleteChannel(ch.id, password).catch(() => {});
-        }
-        addToast(`${t('已删除')} ${disabled.length} ${t('个渠道')}`);
+        const results = await Promise.all(
+          disabled.map((ch) => api.deleteChannel(ch.id, password).then(() => true).catch(() => false)),
+        );
+        const ok = results.filter(Boolean).length;
+        addToast(
+          ok === disabled.length
+            ? `${t('已删除')} ${ok} ${t('个渠道')}`
+            : `${t('已删除')} ${ok}/${disabled.length} ${t('个渠道（其余失败：密码错误或权限不足）')}`,
+          ok === disabled.length ? 'success' : 'error',
+        );
         loadChannels();
       },
     });
@@ -485,6 +534,7 @@ export default function Channels(): JSX.Element {
         credit: ch.credit ?? undefined,
         quirks: (ch as unknown as { quirks?: ChannelQuirks | null }).quirks ?? null,
         balance_scheme: (ch as unknown as { balance_scheme?: string }).balance_scheme || '',
+        balance_unit: (ch as unknown as { balance_unit?: string }).balance_unit || '',
         created_at: typeof ch.created_at === 'number' ? ch.created_at : undefined,
         updated_at: typeof ch.updated_at === 'number' ? ch.updated_at : undefined,
       }));
@@ -761,7 +811,16 @@ export default function Channels(): JSX.Element {
     try {
       const res = await api.getChannelBalance(id);
       if (res.success && res.data) {
-        addToast(t('余额已更新'));
+        const d = res.data;
+        const detail = (d.wallets || [])
+          .filter((w) => w.balance !== undefined)
+          .map((w) => `${w.displayName || w.type}: ${formatBalance(w.balance as number, w.unit)}`)
+          .join(' · ');
+        addToast(
+          detail
+            ? `${t('余额已更新')} — ${detail}`
+            : t('余额已更新'),
+        );
         void loadChannels();
       } else {
         addToast(`${t('获取余额失败')}: ${res.error?.message || ''}`, 'error');
@@ -794,11 +853,12 @@ export default function Channels(): JSX.Element {
   };
 
   // 余额双徽章（new-api BalanceCell：Used 红 / Remaining 绿）
-  const getBalanceVariant = (v: number | undefined): string => {
+  const getBalanceVariant = (v: number | undefined, unit?: string): string => {
     if (v === undefined) return 'neutral';
     if (v < 0) return 'danger';
-    if (v < 5) return 'warning';
-    return 'success';
+    // 百分比余额（OpenCode / 商汤）：<20% 告警；金额：<$5 告警
+    const warn = (unit || '').toUpperCase() === '%' ? 20 : 5;
+    return v < warn ? 'warning' : 'success';
   };
 
   if (loading) return <SkeletonTable columns={6} rows={6} />;
@@ -1042,12 +1102,17 @@ export default function Channels(): JSX.Element {
                               <Loader2 size={13} className="animate-spin" />
                             ) : (
                               <>
-                                <span className={`ch-balance-badge v-${getBalanceVariant(ch.balance)}`}>
-                                  {ch.balance !== undefined ? `$${ch.balance.toFixed(2)}` : '—'}
+                                <span
+                                  className={`ch-balance-badge v-${getBalanceVariant(ch.balance, ch.balance_unit)}`}
+                                  title={ch.balance_scheme ? `${BALANCE_SCHEME_LABELS[ch.balance_scheme] || ch.balance_scheme}${ch.balance_unit ? ` · ${ch.balance_unit}` : ''}` : undefined}
+                                >
+                                  {ch.balance !== undefined
+                                    ? formatBalance(ch.balance, ch.balance_unit)
+                                    : '—'}
                                 </span>
                                 {ch.credit !== undefined && (
                                   <span className={`ch-balance-badge v-neutral ch-balance-credit`}>
-                                    ${ch.credit.toFixed(2)}
+                                    {formatBalance(ch.credit, ch.balance_unit)}
                                   </span>
                                 )}
                               </>

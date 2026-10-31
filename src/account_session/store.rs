@@ -219,6 +219,10 @@ impl AccountSessionStore {
         next.updated_at = now;
         let credential = next.credential.encoded();
         next.credential = credential;
+        // 续期令牌同口径编码（已编码则原样）
+        if !next.refresh_secret.is_empty() && !next.refresh_secret.starts_with("enc:") {
+            next.refresh_secret = crate::channel::Channel::encode_api_key(&next.refresh_secret);
+        }
         if next.status.is_empty() {
             next.status = "enabled".to_string();
         }

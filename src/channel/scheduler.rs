@@ -695,6 +695,7 @@ mod scheduler_trait_tests {
                 credit: None,
                 quirks: Default::default(),
                 balance_scheme: String::new(),
+                balance_unit: String::new(),
                 created_at: 0,
                 updated_at: 0,
             },

@@ -888,6 +888,10 @@ export interface AccountSessionItem {
   models?: string[];
   /** 账号级额外请求头（登录态型供应商补专用头） */
   extra_headers?: Record<string, string>;
+  /** 是否已保存续期令牌（refreshToken / Coding Plan JWT 等） */
+  has_refresh_token?: boolean;
+  /** 续期令牌的脱敏形态（不回明文） */
+  refresh_token?: string;
   in_flight?: number;
   success_count?: number;
   error_count?: number;

@@ -412,8 +412,8 @@ export const api = {
     request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/channels/${id}/reset-circuit`),
   fetchChannelModels: (data: Record<string, unknown>): Promise<ApiResponse<{ models?: string[] }>> =>
     request<ApiResponse<{ models?: string[] }>>('POST', `${API_BASE}/channels/fetch_models`, data),
-  getChannelBalance: (id: string | number): Promise<ApiResponse<{ balance?: number; credit?: number }>> =>
-    request<ApiResponse<{ balance?: number; credit?: number }>>('GET', `${API_BASE}/channels/${id}/balance`),
+  getChannelBalance: (id: string | number): Promise<ApiResponse<{ balance?: number; credit?: number; unit?: string; wallets?: Array<{ type?: string; displayName?: string; balance?: number; unit?: string }>; scheme?: string }>> =>
+    request<ApiResponse<{ balance?: number; credit?: number; unit?: string; wallets?: Array<{ type?: string; displayName?: string; balance?: number; unit?: string }>; scheme?: string }>>('GET', `${API_BASE}/channels/${id}/balance`),
   // 账号型渠道账号池（渠道内账号级调度：优先级/冷却/并发/粘性）
   listAccountSessions: (params: Record<string, string | number> = {}): Promise<ApiList<AccountSessionItem>> =>
     request<ApiList<AccountSessionItem>>('GET', `${API_BASE}/account-sessions${Object.keys(params).length ? `?${buildQuery(params)}` : ''}`),
@@ -446,6 +446,9 @@ export const api = {
   /** 远程部署时手工提交浏览器地址栏里的回调地址 */
   submitAccountLoginCallback: (state: string, callbackUrl: string): Promise<ApiResponse<{ accountId?: string }>> =>
     request<ApiResponse<{ accountId?: string }>>('POST', `${API_BASE}/account-sessions/login/callback`, { state, callback_url: callbackUrl }),
+  /** 粘贴式登录：网关归一化 + 校验一次后落账号（MonkeyCode / KukuAI / OrcaTerm / Command Code） */
+  pasteAccountLogin: (data: Record<string, unknown>): Promise<ApiResponse<{ accountId?: string }>> =>
+    request<ApiResponse<{ accountId?: string }>>('POST', `${API_BASE}/account-sessions/login/paste`, data),
   /** 发送手机验证码（返回 msgid，登录时带回） */
   sendAccountLoginSms: (data: Record<string, unknown>): Promise<ApiResponse<{ msgid?: string }>> =>
     request<ApiResponse<{ msgid?: string }>>('POST', `${API_BASE}/account-sessions/login/sms/send`, data),

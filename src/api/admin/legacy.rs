@@ -1211,10 +1211,13 @@ pub async fn handle_get_channel_balance(
     }
     match state.channel_store.query_balance(&ch, &state.http_client).await {
         Ok(reading) => {
-            // 写回历史字段：available → balance，其余明细随响应返回给前端
-            state
-                .channel_store
-                .save_balance(&id, reading.available, None);
+            // 写回历史字段：available → balance，unit 一并持久化（前端按单位渲染）
+            state.channel_store.save_balance_with_unit(
+                &id,
+                reading.available,
+                None,
+                Some(&reading.unit),
+            );
             Ok(Json(serde_json::json!({
                 "success": true,
                 "data": {

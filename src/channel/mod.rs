@@ -133,6 +133,13 @@ pub const CLIENT_EMULATION_OPENCODE: &str = "opencode";
 /// `anthropic_tool_type` 的合法取值：给工具补 `type: "custom"`
 pub const TOOL_TYPE_CUSTOM: &str = "custom";
 
+/// 余额查询专用凭证头（`x-balance-*`）：只给余额模块读，绝不随转发发出
+pub fn is_balance_credential_header(name: &str) -> bool {
+    name.trim()
+        .to_ascii_lowercase()
+        .starts_with("x-balance-")
+}
+
 impl ChannelQuirks {
     /// 是否为空（无任何特判）—— 转发路径据此跳过整段逻辑
     pub fn is_empty(&self) -> bool {
@@ -157,12 +164,17 @@ impl ChannelQuirks {
         format!("{url}{sep}{suffix}")
     }
 
-    /// 把静态头合并进请求构造器（空键 / 空值跳过，避免发出 `X-Foo:` 空头）
+    /// 把静态头合并进请求构造器（空键 / 空值跳过，避免发出 `X-Foo:` 空头）。
+    ///
+    /// `x-balance-` 前缀的头是**余额查询专用凭证**（见 [`crate::channel::balance`]
+    /// 的 `credential_field`），只给余额模块读，**绝不能发给上游** ——
+    /// 那是控制台令牌 / 账号密码，泄露给推理端点等于把另一套凭证交出去。
     pub fn apply_headers(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         for (k, v) in &self.headers {
-            if !k.trim().is_empty() && !v.is_empty() {
-                req = req.header(k.as_str(), v.as_str());
+            if k.trim().is_empty() || v.is_empty() || is_balance_credential_header(k) {
+                continue;
             }
+            req = req.header(k.as_str(), v.as_str());
         }
         req
     }
@@ -240,6 +252,9 @@ pub struct Channel {
     /// 余额查询方案（见 [`crate::channel::balance`]；空 = 只试 OpenAI 计费端点）
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub balance_scheme: String,
+    /// 最近一次余额查询的展示单位（USD / CNY / % / quota …），随余额一起写回
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub balance_unit: String,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -743,10 +758,24 @@ impl ChannelStore {
 
     /// 保存最近一次查询到的上游余额（balance/credit），持久化。
     pub fn save_balance(&self, id: &str, balance: Option<f64>, credit: Option<f64>) {
+        self.save_balance_with_unit(id, balance, credit, None);
+    }
+
+    /// 带展示单位的余额写回（方案化查询用；`unit` 为空则保留原值）。
+    pub fn save_balance_with_unit(
+        &self,
+        id: &str,
+        balance: Option<f64>,
+        credit: Option<f64>,
+        unit: Option<&str>,
+    ) {
         let mut channels = self.channels.write();
         if let Some(ch) = channels.iter_mut().find(|c| c.id == id) {
             ch.balance = balance;
             ch.credit = credit;
+            if let Some(unit) = unit {
+                ch.balance_unit = unit.to_string();
+            }
             ch.updated_at = chrono::Utc::now().timestamp();
             let snapshot = ch.clone();
             drop(channels);
@@ -1253,6 +1282,7 @@ mod tests {
             credit: None,
             quirks: ChannelQuirks::default(),
             balance_scheme: String::new(),
+            balance_unit: String::new(),
             last_error: None,
             last_used_at: None,
             discovered_models: Vec::new(),

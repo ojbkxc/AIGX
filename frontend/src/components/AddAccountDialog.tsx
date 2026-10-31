@@ -162,6 +162,9 @@ export default function AddAccountDialog({
   const [smsMsgid, setSmsMsgid] = useState('');
   const [smsBusy, setSmsBusy] = useState(false);
   const [smsHint, setSmsHint] = useState('');
+  // 粘贴式登录（网关归一化 + 校验一次后落账号）
+  const [pasteBusy, setPasteBusy] = useState(false);
+  const [pasteHint, setPasteHint] = useState('');
 
   const selectedProvider = providers.find((p) => p.kind === provider);
   const addConfig = addConfigOf(provider);
@@ -376,10 +379,49 @@ export default function AddAccountDialog({
     }
   };
 
+  const submitPaste = async (): Promise<void> => {
+    setPasteHint('');
+    if (!provider) {
+      setPasteHint(t('请选择供应商'));
+      return;
+    }
+    // 凭证字段：取 config 里 target=credential 的那一格
+    const credField = addConfig?.fields.find((f) => f.target === 'credential');
+    const secret = credField ? (values[credField.key] || '').trim() : '';
+    if (!secret) {
+      setPasteHint(t('请粘贴凭证'));
+      return;
+    }
+    setPasteBusy(true);
+    try {
+      await api.pasteAccountLogin({
+        provider,
+        channel_id: advanced.channel_id,
+        secret,
+        name: (addConfig?.fields.find((f) => f.target === 'name')
+          ? values[addConfig.fields.find((f) => f.target === 'name')!.key] || ''
+          : advanced.name
+        ).trim(),
+      });
+      addToast(t('账号已添加'));
+      await onCreated();
+      onClose();
+    } catch (err) {
+      setPasteHint(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPasteBusy(false);
+    }
+  };
+
   const submit = async (): Promise<void> => {
     setError('');
     if (!provider) {
       setError(t('请选择供应商'));
+      return;
+    }
+    if (addConfig && method === 'paste') {
+      // 粘贴式登录有自己的提交入口（「校验并添加」按钮）
+      setError(t('请点击「校验并添加」完成添加'));
       return;
     }
     if (addConfig && method !== 'manual') {
@@ -443,6 +485,15 @@ export default function AddAccountDialog({
       };
       if (method === 'manual' || !addConfig) {
         payload.api_key = credential;
+      }
+      // 续期令牌（refreshToken / Coding Plan JWT 等）：表单里 key 为 refreshToken
+      // 或 jwt 时落到 refresh_token（AIGX 暂不自动续期，先存下来供后续使用）
+      const refreshKey = addConfig?.fields.find(
+        (f) => f.key === 'refreshToken' || f.key === 'jwt',
+      )?.key;
+      if (refreshKey) {
+        const refreshValue = (values[refreshKey] || '').trim();
+        if (refreshValue) payload.refresh_token = refreshValue;
       }
       await api.createAccountSession(payload);
       addToast(t('账号已创建'));
@@ -692,6 +743,39 @@ export default function AddAccountDialog({
                           onChange={(v) => setValue(field.key, v)}
                         />
                       ))}
+                    </div>
+                  ) : null}
+
+                  {method === 'paste' ? (
+                    <div className="add-block">
+                      <h4>{addConfig.manualTitle}</h4>
+                      <p className="form-hint">{addConfig.manualNote}</p>
+                      {addConfig.web ? (
+                        <div className="add-btn-row" style={{ marginBottom: 10 }}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => window.open(addConfig.web!.url, '_blank', 'noopener,noreferrer')}
+                          >
+                            {addConfig.web.button}
+                          </Button>
+                          <span className="form-hint">{addConfig.web.hint}</span>
+                        </div>
+                      ) : null}
+                      {addConfig.fields.map((field) => (
+                        <FieldInput
+                          key={field.key}
+                          field={field}
+                          value={values[field.key] || ''}
+                          onChange={(v) => setValue(field.key, v)}
+                        />
+                      ))}
+                      <div className="add-btn-row" style={{ marginTop: 10 }}>
+                        <Button type="button" onClick={() => void submitPaste()} disabled={pasteBusy}>
+                          {pasteBusy ? t('校验并添加中…') : t('校验并添加')}
+                        </Button>
+                        {pasteHint ? <span className="form-hint">{pasteHint}</span> : null}
+                      </div>
                     </div>
                   ) : null}
 

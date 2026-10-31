@@ -6,7 +6,7 @@
  * 手填字段、登录方式与说明；新增一家供应商时只改这里。
  */
 
-export type AddMethodId = 'web' | 'sms' | 'manual';
+export type AddMethodId = 'web' | 'sms' | 'manual' | 'paste';
 
 export interface AddField {
   /** 表单草稿里的键（也是展示顺序） */
@@ -470,7 +470,7 @@ export const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
   },
   autoclaw: {
     provider: 'autoclaw',
-    label: 'AutoClaw',
+    label: 'AutoClaw 国内版',
     manualTitle: '填写凭证',
     manualNote:
       'token 支持 enc: 前缀（Windows 上自动解密）。未填 refreshToken 无法自动续期。国内版官方唯一登录方式是手机验证码；远程网关没有短信通道，请在客户端登录后粘贴 token。',
@@ -489,13 +489,247 @@ export const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
       { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空则用 userId' },
     ],
   },
+  // AutoClaw 国际版（autoglm-api.autoglm.ai）：与国内版同一套协议与签名指纹，
+  // 只有站点不同；账号体系独立，凭证不通用。
+  'autoclaw-intl': {
+    provider: 'autoclaw-intl',
+    label: 'AutoClaw 国际版',
+    manualTitle: '填写凭证',
+    manualNote:
+      '国际版与国内版账号体系独立，请填国际版的凭证。未填 refreshToken 无法自动续期。',
+    addButton: '添加 AutoClaw 国际版账号',
+    methods: ['manual'],
+    fields: [
+      { key: 'token', label: 'token', rows: 3, target: 'credential', placeholder: '国际版账号的 access token（明文 JWT）' },
+      { key: 'refreshToken', label: 'refreshToken', rows: 2, optional: true, placeholder: '没有则无法自动续期' },
+      { key: 'deviceId', label: 'deviceId', optional: true, placeholder: '可选，续期时带上' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空则用 userId' },
+    ],
+  },
 };
+
+/**
+ * 拆家的两家（Cline 两池 / WorkBuddy 两地）与几个地区伴生家（Qoder / Accio /
+ * ZCode / MonkeyCode）的配置由工厂生成 —— 表单逐字相同，只有 label / 站点提示
+ * 不同。与 Agent2API 的 `clineForm` / `qoderForm` / `zcodeForm` 同一手法。
+ */
+function clineForm(provider: string, label: string, poolNote: string): ProviderAddConfig {
+  return {
+    provider,
+    label,
+    manualTitle: '填写凭证',
+    manualNote: `accessToken 形如 workos:…（不带前缀也会自动补上）；refreshToken 可选，填了可自动续期。两者都能从 Cline 客户端登录态文件（~/.cline/data/settings/providers.json）取到。同一个 Cline 账号两个池都能用，这里归入 ${label}${poolNote}。`,
+    addButton: `添加 ${label} 账号`,
+    methods: ['web', 'manual'],
+    web: {
+      note:
+        '打开 Cline 官方授权页完成设备授权（授权页给出的一次性代码在浏览器里确认即可）。远程网关无法代替浏览器确认，完成后请把 accessToken 复制到「填写凭证」。',
+      button: '打开 Cline 授权页',
+      url: 'https://app.cline.bot/',
+      hint: '授权完成后回到本弹窗，切到「填写凭证」粘贴 accessToken',
+    },
+    fields: [
+      { key: 'accessToken', label: 'accessToken', rows: 3, target: 'credential', placeholder: '粘贴 workos:… 开头的令牌（不带前缀也会自动补上）' },
+      { key: 'refreshToken', label: 'refreshToken', rows: 2, optional: true, placeholder: '可选，没有则无法自动续期' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空使用账号姓名或令牌指纹' },
+    ],
+  };
+}
+
+function qoderForm(provider: string, label: string, site: string): ProviderAddConfig {
+  return {
+    provider,
+    label,
+    manualTitle: '使用个人访问令牌（PAT）',
+    manualNote: `在 ${label} 的 Qoder 账号设置 → Integrations 生成 PAT（别填 Google / GitHub 的令牌）。两个地区的账号与凭证不通用。COSY 签名由网关自动完成。`,
+    addButton: `添加 Qoder ${label}账号`,
+    methods: ['web', 'manual'],
+    web: {
+      note: `打开 Qoder ${label}（${site}）官方授权页完成设备码授权。远程网关无法自动接收授权结果，完成后请把 accessToken 复制到「填写凭证」。`,
+      button: `打开 Qoder ${label}授权页`,
+      url: site,
+      hint: '授权完成后回到本弹窗，切到「填写凭证」粘贴访问令牌',
+    },
+    fields: [
+      { key: 'pat', label: 'Qoder PAT', rows: 3, target: 'credential', placeholder: '粘贴 Qoder 个人访问令牌（pt-…）' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空使用账号昵称或邮箱' },
+    ],
+  };
+}
+
+function zcodeForm(provider: string, label: string, site: string): ProviderAddConfig {
+  return {
+    provider,
+    label,
+    manualTitle: '填写凭证',
+    manualNote: `两个互不替代的凭证，按你要用的功能填，至少填一个：编码套餐 API Key 用于转发推理（打 ${site}）；jwt 用于领取套餐与查询余额。国内版与国际版是两套独立账号与套餐。`,
+    addButton: `添加 ${label}账号`,
+    methods: ['web', 'manual'],
+    web: {
+      note: `打开 ZCode ${label}官方授权页完成授权。远程网关无法自动取回授权结果，完成后请把编码套餐 API Key 复制到「填写凭证」。`,
+      button: `打开 ZCode ${label}授权页`,
+      url: 'https://zcode.z.ai/',
+      hint: '授权完成后回到本弹窗，切到「填写凭证」粘贴 API Key',
+    },
+    fields: [
+      {
+        key: 'accessToken',
+        label: '编码套餐 API Key',
+        rows: 3,
+        target: 'credential',
+        placeholder: '用于转发；形如 apiKey.secret 两段点分（不填则这个账号不能转发）',
+      },
+      { key: 'jwt', label: 'Coding Plan JWT', rows: 3, optional: true, placeholder: '用于领取套餐与查询余额；不填则这个账号不能领取与查余额' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空自动生成' },
+    ],
+  };
+}
+
+function monkeycodeForm(provider: string, label: string, site: string): ProviderAddConfig {
+  return {
+    provider,
+    label,
+    manualTitle: '粘贴 session',
+    manualNote: `粘贴浏览器里 monkeycode_ai_session cookie 的值（${site}；整段 Cookie 直接粘也行，网关会自己剥出值）。上游没有 refresh 接口，session 约 30 天，过期只能重新登录网页再粘贴。`,
+    addButton: `添加 ${label}账号`,
+    methods: ['manual'],
+    fields: [
+      { key: 'session', label: 'monkeycode_ai_session', rows: 3, target: 'credential', placeholder: '粘贴 monkeycode_ai_session 的值或整段 Cookie' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空自动生成' },
+    ],
+  };
+}
+
+// 拆家 / 地区伴生：与 SESSION_ADD_CONFIGS 同一张表（后注册覆盖同名键）
+Object.assign(SESSION_ADD_CONFIGS, {
+  'cline-free': clineForm('cline-free', 'Cline Free', '（免费额度池，模型名带 cline-free/ 前缀）'),
+  'cline-pass': clineForm('cline-pass', 'Cline Pass', '（订阅池，模型名带 cline-pass/ 前缀，需要账号有对应订阅）'),
+  'qoder-intl': qoderForm('qoder-intl', '国际版', 'https://qoder.com/'),
+  'zcode-intl': zcodeForm('zcode-intl', '国际版', 'api.z.ai'),
+  'monkeycode-intl': monkeycodeForm('monkeycode-intl', 'MonkeyCode 国际版', 'monkeycode-ai.net'),
+  // WorkBuddy 国际版：与国内版同一套 accessToken 粘贴流程，站点不同
+  'workbuddy-intl': {
+    provider: 'workbuddy-intl',
+    label: 'WorkBuddy 国际版',
+    manualTitle: '填写凭证',
+    manualNote:
+      'accessToken 是国际版官方客户端（www.workbuddy.ai）的登录令牌。国内版与国际版是两套独立账号，凭证不通用。',
+    addButton: '添加 WorkBuddy 国际版账号',
+    methods: ['web', 'manual'],
+    web: {
+      note:
+        '打开国际版官方站点并完成登录。远程网关收不到浏览器回调，登录成功后请把客户端登录态里的 accessToken 复制到「填写凭证」。',
+      button: '打开 WorkBuddy AI 登录页',
+      url: 'https://www.workbuddy.ai/',
+      hint: '登录完成后回到本弹窗，切到「填写凭证」粘贴 accessToken',
+    },
+    fields: [
+      { key: 'accessToken', label: 'accessToken', rows: 3, target: 'credential', placeholder: '粘贴国际版 WorkBuddy 的 accessToken' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空则用凭证里的账号名' },
+    ],
+  },
+  // 粘贴式（网关归一化 + 校验一次后落账号）：MonkeyCode / KukuAI / OrcaTerm /
+  // Command Code —— 这几家没有可代跑的网页登录，但粘贴后能立刻校验。
+  monkeycode: {
+    provider: 'monkeycode',
+    label: 'MonkeyCode',
+    manualTitle: '粘贴 session cookie',
+    manualNote:
+      '粘贴网页登录态 cookie monkeycode_ai_session 的值（整段 Cookie 直接粘也行，网关会自己剥出值）。添加时网关会打一次 /api/v1/users/status 校验。没有续期接口，session 约 30 天。',
+    addButton: '添加 MonkeyCode 账号',
+    methods: ['paste', 'manual'],
+    web: {
+      note: '先在浏览器登录 MonkeyCode 主站，再回来粘贴 cookie。',
+      button: '打开 MonkeyCode 登录页',
+      url: 'https://monkeycode-ai.com/',
+      hint: '登录后复制 monkeycode_ai_session 粘贴',
+    },
+    fields: [
+      { key: 'session', label: 'session', rows: 3, target: 'credential', placeholder: 'monkeycode_ai_session 的值（也可直接粘贴整段 Cookie）' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空则用上游返回的账号名' },
+    ],
+  },
+  kuku: {
+    provider: 'kuku',
+    label: 'KukuAI',
+    manualTitle: '粘贴 Cookie',
+    manualNote:
+      'BDUSS 必填；请粘贴完整 Cookie（PTOKEN 必须保留）。添加时网关会打一次 /api/user/info 校验。KukuAI 没有刷新机制，过期后重新粘贴即可。',
+    addButton: '添加 KukuAI 账号',
+    methods: ['paste', 'manual'],
+    web: {
+      note: '先在浏览器登录 KukuAI 主站（手机验证码 / 扫码均可），再回来粘贴完整 Cookie。',
+      button: '打开 KukuAI 登录页',
+      url: 'https://kuku.baidu.com/',
+      hint: '登录后复制完整 Cookie 粘贴',
+    },
+    fields: [
+      { key: 'cookie', label: 'Cookie', rows: 3, target: 'credential', placeholder: 'BDUSS=…; STOKEN=…（或 Cookie 编辑器导出的 JSON）' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空则用账号 uk' },
+    ],
+  },
+  orcaterm: {
+    provider: 'orcaterm',
+    label: 'OrcaTerm',
+    manualTitle: '粘贴 accessToken',
+    manualNote:
+      '粘贴 OrcaTerm 的 OAuth accessToken（JWT，三段点分；从桌面客户端 data.bin 或 Web 版 Cookie ot_session 获取）。直接粘贴含 Bearer / ot_session= 的整行也行，网关会自己剥成裸 token。',
+    addButton: '添加 OrcaTerm 账号',
+    methods: ['paste', 'manual'],
+    web: {
+      note: '在官方 Web 控制台里用微信扫码登录，然后从 data.bin 或 ot_session Cookie 取令牌。',
+      button: '打开 OrcaTerm 控制台',
+      url: 'https://orcaterm.cloud.tencent.com/',
+      hint: '扫码完成后把 ot_session / accessToken 粘贴到「粘贴凭证」',
+    },
+    fields: [
+      { key: 'accessToken', label: 'accessToken', rows: 3, target: 'credential', placeholder: 'JWT（三段点分；也可直接粘贴 Bearer 整行或 data.bin 内容）' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空则用账号昵称或 userId' },
+    ],
+  },
+  commandcode: {
+    provider: 'commandcode',
+    label: 'Command Code',
+    manualTitle: '粘贴 API Key',
+    manualNote:
+      '粘贴 Command Code 的 API Key（user_ 开头）。添加时网关会打一次 /alpha/billing/credits 探活（只有 401/403 才判无效）。',
+    addButton: '添加 Command Code 账号',
+    methods: ['paste', 'manual'],
+    fields: [
+      { key: 'apiKey', label: 'API Key', rows: 3, target: 'credential', placeholder: 'user_…' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空自动生成' },
+    ],
+  },
+  // Accio 国内版（www.accio-ai.com）
+  'accio-cn': {
+    provider: 'accio-cn',
+    label: 'Accio 国内版',
+    manualTitle: '填写凭证',
+    manualNote:
+      'accessToken 是 Accio 国内版（www.accio-ai.com）的登录凭证（一长串不透明 token，不是 JWT）。国际版与国内版是两套独立账号，凭证不通用。',
+    addButton: '添加 Accio 国内版账号',
+    methods: ['web', 'manual'],
+    web: {
+      note:
+        '打开 Accio 国内版官方登录页（www.accio-ai.com）完成登录。远程网关收不到浏览器回调，登录成功后请把 accessToken 复制到「填写凭证」。',
+      button: '打开 Accio 国内版登录页',
+      url: 'https://www.accio-ai.com/',
+      hint: '登录完成后回到本弹窗，切到「填写凭证」粘贴 accessToken',
+      callback: true,
+    },
+    fields: [
+      { key: 'accessToken', label: 'accessToken', rows: 3, target: 'credential', placeholder: '粘贴 Accio 国内版的 accessToken' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空使用账号昵称或邮箱' },
+    ],
+  },
+});
 
 /** 添加方式分段的中文标题 */
 export const ADD_METHOD_LABELS: Record<AddMethodId, string> = {
   web: '网页登录',
   sms: '手机验证码登录',
   manual: '填写凭证',
+  paste: '粘贴凭证（校验后添加）',
 };
 
 export function addConfigOf(provider: string): ProviderAddConfig | undefined {

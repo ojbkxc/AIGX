@@ -20,6 +20,7 @@ mod cline;
 mod codearts;
 pub mod loomy;
 mod officeace;
+pub mod paste;
 mod qoder;
 mod raccoon;
 mod trae;
@@ -206,14 +207,15 @@ pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result
         return Err(format!("「{provider}」不是登录态型供应商，不需要网页登录"));
     }
     let client = reqwest::Client::new();
+    // 拆家的地区 / 池变体复用同一套登录引擎（协议完全相同，只是站点或归属不同）
     let started = match provider.as_str() {
-        "workbuddy" => workbuddy::start(&client).await?,
-        "qoder" => qoder::start(&client).await?,
-        "zcode" => zcode::start(&client).await?,
-        "cline" => cline::start(&client).await?,
+        "workbuddy" | "workbuddy-intl" => workbuddy::start(&client).await?,
+        "qoder" | "qoder-intl" => qoder::start(&client).await?,
+        "zcode" | "zcode-intl" => zcode::start(&client).await?,
+        "cline" | "cline-free" | "cline-pass" => cline::start(&client).await?,
         "catpaw" => catpaw::start(&client).await?,
         "xiaohuanxiong" => raccoon::start(&client).await?,
-        "accio" => accio::start(&client).await?,
+        "accio" | "accio-cn" => accio::start(&client).await?,
         "antigravity" => antigravity::start(&client).await?,
         "trae" => trae::start(&client).await?,
         "codearts" => codearts::start(&client).await?,
@@ -433,6 +435,7 @@ fn ensure_channel(
         credit: None,
         quirks: Default::default(),
         balance_scheme: String::new(),
+        balance_unit: String::new(),
         created_at: 0,
         updated_at: 0,
     };

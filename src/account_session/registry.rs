@@ -242,6 +242,10 @@ pub const PROVIDERS: &[ProviderSpec] = &[
     },
     // ── 登录态型供应商（Cookie / JWT + 专用请求头）──
     // 默认地址抄自 Agent2API 的 adapter 实现（多地区的取国内版站点）。
+    // ── 拆家的两家（Cline / WorkBuddy）──────────────────────────
+    // 与 Agent2API 一致：Cline 分 Free / Pass 两个池（上游模型带计费通道前缀，
+    // 池是账号属性），WorkBuddy 分国内 / 国际两个站点。国内版保持裸 id（存量
+    // 账号的落盘契约），另一版取 `<id>-intl` / `<id>-free|pass`。
     ProviderSpec {
         kind: "cline",
         label: "Cline",
@@ -249,10 +253,28 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         default_base_url: "https://api.cline.bot/api/v1",
     },
     ProviderSpec {
+        kind: "cline-free",
+        label: "Cline Free",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.cline.bot/api/v1",
+    },
+    ProviderSpec {
+        kind: "cline-pass",
+        label: "Cline Pass",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.cline.bot/api/v1",
+    },
+    ProviderSpec {
         kind: "workbuddy",
-        label: "WorkBuddy",
+        label: "WorkBuddy 国内版",
         protocol: Protocol::Openai,
         default_base_url: "https://copilot.tencent.com",
+    },
+    ProviderSpec {
+        kind: "workbuddy-intl",
+        label: "WorkBuddy 国际版",
+        protocol: Protocol::Openai,
+        default_base_url: "https://www.workbuddy.ai",
     },
     ProviderSpec {
         kind: "xiaohuanxiong",
@@ -268,9 +290,15 @@ pub const PROVIDERS: &[ProviderSpec] = &[
     },
     ProviderSpec {
         kind: "qoder",
-        label: "Qoder",
+        label: "Qoder 中国版",
         protocol: Protocol::Openai,
         default_base_url: "https://gateway.qoder.com.cn",
+    },
+    ProviderSpec {
+        kind: "qoder-intl",
+        label: "Qoder 国际版",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api3.qoder.sh",
     },
     ProviderSpec {
         kind: "accio",
@@ -279,10 +307,22 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         default_base_url: "https://phoenix-gw.alibaba.com",
     },
     ProviderSpec {
+        kind: "accio-cn",
+        label: "Accio 国内版",
+        protocol: Protocol::Openai,
+        default_base_url: "https://phoenix-gw.alibaba.com",
+    },
+    ProviderSpec {
         kind: "zcode",
-        label: "ZCode",
+        label: "ZCode 国内版",
         protocol: Protocol::Openai,
         default_base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
+    },
+    ProviderSpec {
+        kind: "zcode-intl",
+        label: "ZCode 国际版",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.z.ai/api/coding/paas/v4",
     },
     ProviderSpec {
         kind: "codearts",
@@ -315,6 +355,12 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         default_base_url: "https://monkeycode-ai.com",
     },
     ProviderSpec {
+        kind: "monkeycode-intl",
+        label: "MonkeyCode 国际版",
+        protocol: Protocol::Openai,
+        default_base_url: "https://monkeycode-ai.net",
+    },
+    ProviderSpec {
         kind: "commandcode",
         label: "Command Code",
         protocol: Protocol::Openai,
@@ -340,10 +386,16 @@ pub const PROVIDERS: &[ProviderSpec] = &[
     },
     ProviderSpec {
         kind: "autoclaw",
-        label: "AutoClaw",
+        label: "AutoClaw 国内版",
         protocol: Protocol::Openai,
         default_base_url:
             "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
+    },
+    ProviderSpec {
+        kind: "autoclaw-intl",
+        label: "AutoClaw 国际版",
+        protocol: Protocol::Openai,
+        default_base_url: "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw",
     },
 ];
 
@@ -414,6 +466,50 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             openai_compatible: true,
         },
     ),
+    // Cline 两个池：上游模型带计费通道前缀（cline-free/ / cline-pass/），
+    // 池是账号属性。表单与转发头与裸 `cline` 完全一致，只是归属不同。
+    (
+        "cline-free",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            base_url: "https://api.cline.bot/api/v1",
+            chat_path: "",
+            headers: &[
+                ("user-agent", "Cline/3.0.62"),
+                ("http-referer", "https://cline.bot"),
+                ("x-title", "Cline"),
+                ("x-is-multiroot", "false"),
+                ("x-client-type", "cline-sdk"),
+                ("x-client-version", "3.0.62"),
+                ("x-platform", "terminal"),
+                ("x-platform-version", "3.0.62"),
+                ("x-core-version", "0.0.70"),
+            ],
+            credential_hint: "粘贴 Cline 账号令牌（免费额度池，模型名带 cline-free/ 前缀）",
+            openai_compatible: true,
+        },
+    ),
+    (
+        "cline-pass",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            base_url: "https://api.cline.bot/api/v1",
+            chat_path: "",
+            headers: &[
+                ("user-agent", "Cline/3.0.62"),
+                ("http-referer", "https://cline.bot"),
+                ("x-title", "Cline"),
+                ("x-is-multiroot", "false"),
+                ("x-client-type", "cline-sdk"),
+                ("x-client-version", "3.0.62"),
+                ("x-platform", "terminal"),
+                ("x-platform-version", "3.0.62"),
+                ("x-core-version", "0.0.70"),
+            ],
+            credential_hint: "粘贴 Cline 账号令牌（订阅池，模型名带 cline-pass/ 前缀，需要账号有对应订阅）",
+            openai_compatible: true,
+        },
+    ),
     (
         "workbuddy",
         SessionMeta {
@@ -437,6 +533,34 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
                 ("accept-language", "zh-CN"),
             ],
             credential_hint: "粘贴 WorkBuddy 的访问令牌（auth.accessToken）",
+            openai_compatible: true,
+        },
+    ),
+    // WorkBuddy 国际版（www.workbuddy.ai）：同一套协议，站点与产品标识不同。
+    // 请求头里的 product / platform 与国内版不同（WorkBuddy AI / workbuddy-ai）。
+    (
+        "workbuddy-intl",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            base_url: "https://www.workbuddy.ai",
+            chat_path: "/v2/chat/completions",
+            headers: &[
+                ("user-agent", "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"),
+                ("x-ide-type", "WorkBuddy"),
+                ("x-ide-name", "WorkBuddy"),
+                ("x-ide-version", "5.5.4"),
+                ("x-product", "WorkBuddy AI"),
+                ("x-agent-intent", "craft"),
+                ("x-agent-purpose", "conversation"),
+                ("x-agent-type", "main"),
+                ("x-private-data", "true"),
+                ("x-requested-with", "XMLHttpRequest"),
+                ("x-codebuddy-request", "1"),
+                ("origin", "https://www.workbuddy.ai"),
+                ("referer", "https://www.workbuddy.ai/app"),
+                ("accept-language", "en-US"),
+            ],
+            credential_hint: "粘贴 WorkBuddy 国际版（www.workbuddy.ai）的访问令牌",
             openai_compatible: true,
         },
     ),
@@ -473,6 +597,20 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             openai_compatible: false,
         },
     ),
+    // Qoder 国际版：同一套设备授权协议，只有站点主机不同。
+    // 国际版有两台推理主机（api3 认设备流令牌 dt-、api2 认 PAT 换来的 jt-），
+    // 这里取 PAT 路（与国内版同一入口语义）。
+    (
+        "qoder-intl",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            base_url: "https://api3.qoder.sh",
+            chat_path: "/algo/api/v2/service/pro/sse/agent_chat_generation",
+            headers: &[],
+            credential_hint: "粘贴 Qoder 国际版的访问令牌（PAT，COSY 签名由网关自动完成）",
+            openai_compatible: false,
+        },
+    ),
     (
         "accio",
         SessionMeta {
@@ -484,6 +622,18 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             openai_compatible: false,
         },
     ),
+    // Accio 国内版（www.accio-ai.com）：与 x-package-region 头一起区分区域。
+    (
+        "accio-cn",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            base_url: "https://phoenix-gw.alibaba.com",
+            chat_path: "/api/adk/llm/generateContent",
+            headers: &[("x-language", "zh-CN"), ("x-package-region", "CN")],
+            credential_hint: "粘贴 Accio 国内版（www.accio-ai.com）的 accessToken",
+            openai_compatible: false,
+        },
+    ),
     (
         "zcode",
         SessionMeta {
@@ -492,6 +642,18 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             chat_path: "",
             headers: &[],
             credential_hint: "粘贴 ZCode 的访问令牌（Bearer）",
+            openai_compatible: true,
+        },
+    ),
+    // ZCode 国际版（api.z.ai）：与国内版是两套独立账号与套餐。
+    (
+        "zcode-intl",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            base_url: "https://api.z.ai/api/coding/paas/v4",
+            chat_path: "",
+            headers: &[],
+            credential_hint: "粘贴 ZCode 国际版（api.z.ai）的访问令牌（Bearer）",
             openai_compatible: true,
         },
     ),
@@ -565,6 +727,19 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             openai_compatible: false,
         },
     ),
+    // MonkeyCode 国际版（monkeycode-ai.net）：同一套协议、同一个 session
+    // cookie 名，只有站点不同（见 Agent2API `monkeycode/region.rs` 的说明）。
+    (
+        "monkeycode-intl",
+        SessionMeta {
+            auth: SessionAuth::Headers,
+            base_url: "https://monkeycode-ai.net",
+            chat_path: "/api/v1/users/tasks",
+            headers: &[("cookie", "monkeycode_ai_session={credential}")],
+            credential_hint: "粘贴 MonkeyCode 国际版（monkeycode-ai.net）的 session 值",
+            openai_compatible: false,
+        },
+    ),
     (
         "commandcode",
         SessionMeta {
@@ -620,6 +795,19 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             openai_compatible: true,
         },
     ),
+    // AutoClaw 国际版（autoglm-api.autoglm.ai）：与国内版同一套协议与签名指纹
+    // （appId/appKey 两地逐字相同），只有站点不同。
+    (
+        "autoclaw-intl",
+        SessionMeta {
+            auth: SessionAuth::Headers,
+            base_url: "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw",
+            chat_path: "",
+            headers: &[("x-authorization", "Bearer {credential}")],
+            credential_hint: "粘贴 AutoClaw 国际版的 accessToken",
+            openai_compatible: true,
+        },
+    ),
 ];
 
 /// 查登录态型供应商元数据（非登录态型返回 None）。
@@ -668,6 +856,9 @@ pub fn find(kind: &str) -> Option<&'static ProviderSpec> {
         "samba" => "sambanova",
         "grok" => "xai",
         "pplx" => "perplexity",
+        // Agent2API 把小浣熊叫 `raccoon`，AIGX 落盘 id 是 `xiaohuanxiong`：
+        // 两个方向都认（导入 Agent2API 导出的账号时靠这条归一）
+        "raccoon" => "xiaohuanxiong",
         other => other,
     };
     PROVIDERS.iter().find(|p| p.kind == canonical)

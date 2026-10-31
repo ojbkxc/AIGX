@@ -152,6 +152,7 @@ impl ChannelRequest {
                 .as_deref()
                 .map(validate_balance_scheme)
                 .unwrap_or_default(),
+            balance_unit: String::new(),
             created_at: now,
             updated_at: now,
         }
@@ -214,6 +215,7 @@ pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
         "credit": ch.credit,
         "quirks": ch.quirks,
         "balance_scheme": ch.balance_scheme,
+        "balance_unit": ch.balance_unit,
         "created_at": ch.created_at,
         "updated_at": ch.updated_at,
     })
@@ -480,6 +482,7 @@ pub async fn handle_update_channel(
         ch.test_time = prev.test_time;
         ch.balance = prev.balance;
         ch.credit = prev.credit;
+        ch.balance_unit = prev.balance_unit.clone();
         ch.discovered_models = prev.discovered_models;
         ch.last_used_at = prev.last_used_at;
         ch.last_error = prev.last_error;

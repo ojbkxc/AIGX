@@ -108,6 +108,13 @@ pub struct AccountSession {
     /// 值里的 `{credential}` 会被替换成凭证明文。
     #[serde(default)]
     pub extra_headers: HashMap<String, String>,
+    /// 续期令牌（refreshToken / Coding Plan JWT / deviceId 等）。
+    ///
+    /// 与 `credential.secret` 同口径落盘（`enc:` + base64 混淆）。AIGX 目前
+    /// **不自动续期**（各家续期接口不同、失败形态各异），这个字段先存下来，
+    /// 供后续接入各家 refresh 链路与手工导出使用；空 = 该家没有续期凭证。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub refresh_secret: String,
     /// 上游真名 → 冷却到期 unix 秒。
     #[serde(default)]
     pub cooldowns: HashMap<String, i64>,
@@ -172,6 +179,7 @@ impl AccountSession {
             max_concurrency: default_max_concurrency(),
             models: Vec::new(),
             extra_headers: HashMap::new(),
+            refresh_secret: String::new(),
             cooldowns: HashMap::new(),
             last_used_at: None,
             last_error: None,
