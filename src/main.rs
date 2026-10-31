@@ -1,7 +1,10 @@
 // lib+bin 双 target 共享 src/*.rs：lib 将模块 pub 导出（视为对外 API 不报 dead），
 // bin 以私有 mod 引入同一批文件，内部未直接调用的预留 API 会被 dead_code 误报。
-// 此处统一豁免 bin 视角的结构性 dead_code，lib 视角的警告已单独清理干净。
+// 此处统一豁免 bin 视角的结构性 dead_code 与 unused_imports（模块里的
+// `pub use` 重导出是给 lib 用的对外 API，bin 视角看不到消费者），
+// lib 视角的警告已单独清理干净。
 #![allow(dead_code)]
+#![allow(unused_imports)]
 // 与 lib.rs 一致：openapi.rs 的深层 `json!` 需要更大的宏递归上限。
 #![recursion_limit = "512"]
 
