@@ -42,23 +42,29 @@ test.describe('聊天 · 历史会话抽屉', () => {
     await loginAsAdmin(page, { sessions: makeSessions(3) });
     await page.goto('/chat');
     await expect(page.locator('.pg-shell')).toBeVisible();
-
-    // 遮罩/抽屉是 position:fixed，其高度按**布局视口**（不含横向滚动条）计算；
-    // window.innerHeight 在出现横向滚动条时比它大十几像素，用它会假红。
-    // documentElement.clientHeight 才是 fixed 元素实际能撑满的高度。
-    const before = await page.evaluate(() => document.documentElement.clientHeight);
     await openDrawer(page);
 
-    // 抽屉铺满整个布局视口。修复前它只有内容高度（约 269px），远低于阈值；
-    // 这里留 1% 容差给移动端模拟器的亚像素差异。
+    // 抽屉与遮罩必须是 position:fixed —— 这是"铺满视口"的结构前提。
+    // 曾是 absolute，父级 auto 高度时只能撑到内容高度（实测 269px，贴着输入框）。
+    const positions = await page.evaluate(() => ({
+      drawer: getComputedStyle(document.querySelector('.pg-sessions')!).position,
+      mask: getComputedStyle(document.querySelector('.pg-sessions-mask')!).position,
+    }));
+    expect(positions.drawer).toBe('fixed');
+    expect(positions.mask).toBe('fixed');
+
+    // 几何下界用 85%：CI 的 Linux Chromium 常驻横向滚动条，布局视口比
+    // viewportSize().height 矮十几像素（实测 707/720 ≈ 98%），留余量避免假红；
+    // 回归时高度只有 ~269/720 ≈ 37%，远低于 85%，仍能抓住。
+    const viewportHeight = page.viewportSize()!.height;
     const drawerBox = await page.locator('.pg-sessions').boundingBox();
     expect(drawerBox).not.toBeNull();
-    expect(drawerBox!.height).toBeGreaterThan(before * 0.99);
     expect(drawerBox!.y).toBeLessThanOrEqual(1);
+    expect(drawerBox!.height).toBeGreaterThan(viewportHeight * 0.85);
 
     // 遮罩同样铺满
     const mask = await page.locator('.pg-sessions-mask').boundingBox();
-    expect(mask!.height).toBeGreaterThan(before * 0.99);
+    expect(mask!.height).toBeGreaterThan(viewportHeight * 0.85);
 
     // 标题可点击 = 没有被更高层元素覆盖（正是移动端汉堡按钮那个 bug）
     const title = page.locator('.pg-sessions-head');
