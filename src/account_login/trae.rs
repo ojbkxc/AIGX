@@ -370,7 +370,12 @@ fn extract_login_host(body: &str) -> Option<String> {
     ];
     let pick = |value: &Value| {
         KEYS.iter()
-            .find_map(|key| value.get(*key).and_then(Value::as_str).filter(|text| !text.is_empty()))
+            .find_map(|key| {
+                value
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+            })
             .map(str::to_string)
     };
     if let Some(found) = pick(&parsed) {
