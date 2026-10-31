@@ -221,6 +221,12 @@ export const api = {
     request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/token_trend?days=${days}`),
   getReportOverview: (days = 30): Promise<ApiResponse<DashboardItem>> =>
     request<ApiResponse<DashboardItem>>('GET', `${API_BASE}/dashboard/report/overview?days=${days}`),
+  getReportModels: (days = 30): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/models?days=${days}`),
+  getReportCacheRates: (days = 30): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/cache_rates?days=${days}`),
+  getReportDailyTrend: (days = 30): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/daily_trend?days=${days}`),
   saveEpayConfig: (config: Record<string, unknown>): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('PUT', `${API_BASE}/epay/config`, config),
   listGroups: (): Promise<ApiList<GroupItem>> =>

@@ -1204,6 +1204,18 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/dashboard/report/overview",
             get(api::admin::handle_report_overview),
         )
+        .route(
+            "/api/dashboard/report/models",
+            get(api::admin::handle_report_models),
+        )
+        .route(
+            "/api/dashboard/report/cache_rates",
+            get(api::admin::handle_report_cache_rates),
+        )
+        .route(
+            "/api/dashboard/report/daily_trend",
+            get(api::admin::handle_report_daily_trend),
+        )
         // 设置管理
         .route("/api/settings", get(api::admin::handle_get_settings))
         .route("/api/settings", put(api::admin::handle_update_settings))

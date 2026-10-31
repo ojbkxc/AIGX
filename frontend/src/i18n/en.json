@@ -1732,5 +1732,9 @@
   "拉取": "Fetch",
   "暂无启用的可拉取渠道": "No enabled channels available to fetch",
   "从上游 /models 接口拉取模型清单（写入渠道的「上游发现」快照）。账号型渠道请在账号池里维护模型白名单。": "Fetch model lists from the upstream /models endpoint (saved as the channel's discovered snapshot). For account channels, maintain model whitelists in the account pool.",
-  "模型清单": "Model list"
+  "模型清单": "Model list",
+  "我的用量报表": "My usage report",
+  "Token 用量": "Token usage",
+  "消费额": "Spend",
+  "缓存命中率（请求数口径）": "Cache hit rate (by requests)"
 }

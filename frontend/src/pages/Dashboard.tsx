@@ -115,6 +115,15 @@ interface ReportOverview {
   top_models?: Array<{ model?: string; count?: number }>;
 }
 
+interface ReportCacheRate {
+  window?: string;
+  requests?: number;
+  hit_requests?: number;
+  rate?: number;
+  input_tokens?: number;
+  hit_input_tokens?: number;
+}
+
 interface TrendChartProps {
   data: TrendData[];
 }
@@ -515,6 +524,7 @@ export default function Dashboard(): JSX.Element {
   const [reportTopSources, setReportTopSources] = useState<ReportTopSource[] | null>(null);
   const [reportTokenTrend, setReportTokenTrend] = useState<ReportTokenTrendPoint[] | null>(null);
   const [reportOverview, setReportOverview] = useState<ReportOverview | null>(null);
+  const [reportCacheRates, setReportCacheRates] = useState<ReportCacheRate[] | null>(null);
 
   const loadData = useCallback(async (rangeKey: RangeKey = DEFAULT_RANGE): Promise<void> => {
     setRefreshing(true);
@@ -523,8 +533,8 @@ export default function Dashboard(): JSX.Element {
     const admin = isAdmin();
     try {
       if (!admin) {
-        // 普通用户视图：只拉个人配额（/users/me 全员可用），
-        // 不再对 10 个 verify_admin 端点白打 403
+        // 普通用户视图：只拉个人配额（/users/me 全员可用）与个人用量报表
+        // （report 系列 verify_user，后端按 user_id 收敛数据集），不打 admin 端点
         try {
           const me = await api.getMe();
           const meData = ((me as { data?: unknown })?.data ?? me) as {
@@ -539,6 +549,16 @@ export default function Dashboard(): JSX.Element {
           }
         } catch {
           // 静默：保持空态展示
+        }
+        try {
+          const [ov, tt] = await Promise.all([
+            api.getReportOverview(Number(rangeKey)),
+            api.getReportTokenTrend(Number(rangeKey)),
+          ]);
+          setReportOverview((ov as { data?: ReportOverview })?.data ?? null);
+          setReportTokenTrend((tt as { data?: ReportTokenTrendPoint[] })?.data ?? null);
+        } catch {
+          // 报表加载失败不影响配额卡片
         }
         return;
       }
@@ -561,6 +581,7 @@ export default function Dashboard(): JSX.Element {
         api.getReportTopSources(days),
         api.getReportTokenTrend(days),
         api.getReportOverview(days),
+        api.getReportCacheRates(days),
       ]);
       const pick = <T,>(i: number): T | null =>
         results[i].status === 'fulfilled'
@@ -585,6 +606,7 @@ export default function Dashboard(): JSX.Element {
       setReportTopSources(pick<ReportTopSource[]>(11));
       setReportTokenTrend(pick<ReportTokenTrendPoint[]>(12));
       setReportOverview(pick<ReportOverview>(13));
+      setReportCacheRates(pick<ReportCacheRate[]>(14));
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -721,6 +743,46 @@ export default function Dashboard(): JSX.Element {
             </div>
           </div>
         </div>
+
+        {/* 我的用量报表（report 系列按 user_id 收敛，只看自己） */}
+        {reportOverview && reportOverview.total_requests != null && reportOverview.total_requests > 0 && (
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-header">
+              <h2>{t('我的用量报表')}</h2>
+              {reportOverview.success_rate != null && (
+                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  {t('成功率')} {reportOverview.success_rate}% · {t('活跃天数')} {reportOverview.active_days ?? 0}
+                </span>
+              )}
+            </div>
+            <div className="card-body">
+              <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))' }}>
+                <div className="stat-card">
+                  <div className="stat-title">{t('请求数')}</div>
+                  <div className="stat-value" style={{ fontSize: '22px' }}>{fmtLimit(reportOverview.total_requests)}</div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-title">{t('Token 用量')}</div>
+                  <div className="stat-value" style={{ fontSize: '22px' }}>
+                    {fmtTok((reportOverview.input_tokens ?? 0) + (reportOverview.output_tokens ?? 0))}
+                  </div>
+                  <div className="stat-desc" style={{ fontSize: '11px' }}>
+                    {t('输入')} {fmtTok(reportOverview.input_tokens)} / {t('输出')} {fmtTok(reportOverview.output_tokens)}
+                  </div>
+                </div>
+                <div className="stat-card">
+                  <div className="stat-title">{t('消费额')}</div>
+                  <div className="stat-value" style={{ fontSize: '22px' }}>{fmtMoney(reportOverview.total_cost)}</div>
+                </div>
+              </div>
+              {reportTokenTrend && reportTokenTrend.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <TokenTrendChart data={reportTokenTrend} />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* 快捷操作（用户工具箱） */}
         <div className="card" style={{ marginTop: 16 }}>
@@ -929,6 +991,28 @@ export default function Dashboard(): JSX.Element {
           </div>
           <div className="section-card-body">
             <TokenTrendChart data={reportTokenTrend} />
+          </div>
+        </div>
+      )}
+
+      {/* 报表扩展：缓存命中率（10m/1h/24h/7d） */}
+      {reportCacheRates && reportCacheRates.length > 0 && (
+        <div className="section-card" style={{ marginTop: 16 }}>
+          <div className="section-card-header">
+            <h2>{t('缓存命中率（请求数口径）')}</h2>
+          </div>
+          <div className="section-card-body">
+            <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))' }}>
+              {reportCacheRates.map((w) => (
+                <div key={w.window} className="stat-card">
+                  <div className="stat-title">{w.window}</div>
+                  <div className="stat-value" style={{ fontSize: '22px' }}>{w.rate ?? 0}%</div>
+                  <div className="stat-desc" style={{ fontSize: '11px' }}>
+                    {t('命中')} {fmtLimit(w.hit_requests)} / {fmtLimit(w.requests)} {t('次请求')}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
