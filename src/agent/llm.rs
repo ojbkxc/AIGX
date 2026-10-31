@@ -320,6 +320,7 @@ fn record_agent_request_log(
         created_at: chrono::Utc::now().timestamp(),
         candidate_channels: Vec::new(),
         cache_hit: false,
+        conversation: None,
         filtered_channels: Vec::new(),
         selected_channel: None,
         debug: None,
