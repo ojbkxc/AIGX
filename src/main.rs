@@ -17,6 +17,7 @@ mod auth;
 mod bridge;
 mod cache;
 mod channel;
+mod chat_session;
 mod checkin;
 mod config;
 mod cron;
@@ -998,7 +999,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         .route(
             "/api/chat/sessions/:id/messages",
-            post(crate::chat_session::handle_append_chat_message),
+            post(crate::chat_session::handle_append_chat_message)
+                .put(crate::chat_session::handle_replace_chat_messages),
         )
         // 签到中心（管理员替上游账号签到，与上面的用户签到是两套）
         .route(
