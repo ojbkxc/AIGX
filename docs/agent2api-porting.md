@@ -26,8 +26,8 @@
 | `src/api/admin/checkin_center.rs`（`/api/checkin-center/*`） | `api/checkin_{center,records,schedules}.rs` |
 | `frontend/src/pages/CheckinCenter.tsx`（center/schedule/records 三 tab） | `ui-islands/src/islands/checkin-page.tsx` |
 
-**首批 claim 白名单**（`src/checkin/claim.rs`）：`loomy / kuku / qoder / qoder-intl / xiaohuanxiong`。
-未接入家的原因：需要各家签名算法（COSY/V11/HMAC）、设备指纹或风控头，未实测的照抄只会每天发失败请求。**后续扩展方法**：在 `claim.rs` 加分支 + `CHECKIN_PROVIDERS` 白名单加名，判据翻译成统一 `ClaimResult{success, msg, outcome}`。
+**claim 白名单**（`src/checkin/claim.rs`，12 家全覆盖）：`loomy / kuku / qoder / qoder-intl / xiaohuanxiong / autoclaw / autoclaw-intl / workbuddy / workbuddy-intl / trae / codearts / officeace`。
+未接入家（zcode / catpaw / accio 等）：上游没有每日签到通道。**扩展方法**：在 `claim.rs` 加分支 + `CHECKIN_PROVIDERS` 白名单加名，判据翻译成统一 `ClaimResult{success, msg, outcome}`。注意：officeace 签到需要临时 AK/SK（`refresh_secret` JSON 或 `ak:sk:sts`），web 登录流程暂未留存，缺凭据时报错指引重登。
 
 注意区分：`/api/checkin`（用户签到送配额，`src/user/checkin.rs`）与 `/api/checkin-center`（管理员替上游账号签到）是两套并存系统。
 
@@ -81,11 +81,11 @@ python tools/sync_agent2api_providers.py --upstream /path/to/Agent2API --report
 
 按优先级（均为可选项，按需排期）：
 
-| 优先 | 能力 | 现状 | 移植来源 | 落点 |
+| 优先 | 能力 | 状态 | 移植来源 | 落点 |
 |---|---|---|---|---|
-| 1 | 账号级 token 自动刷新 | `refresh_secret` 只存不刷（`account_session/model.rs`） | 上游各家 `providers/*/refresh.rs` + `credential_maintenance.rs` | 新增 `src/account_session/refresh.rs`（表驱动端点），挂 `maintenance.rs::sweep`，先做 qoder / autoclaw / trae |
-| 2 | 账号级余额/用量查询 | 只有渠道级余额（`src/channel/balance.rs`） | 上游 14 家 `providers/*/balance.rs` | 仿 balance.rs 的方案表模式，凭证来源改 `AccountSession.credential`，账号池列表加「余额」列 |
-| 3 | 账号级模型清单刷新 | 只有渠道级 `fetch_upstream_models` | 上游各家 `providers/*/models.rs` | `POST /api/account-sessions/:id/fetch_models` 写 `AccountSession.models`，接入模型管理页「获取模型」弹窗 |
-| 4 | 签到覆盖面扩展 | 首批 5 家（loomy/kuku/qoder/qoder-intl/xiaohuanxiong） | 上游各家 `providers/*/checkin.rs` | `src/checkin/claim.rs` 加分支 + 白名单加名；签名/风控重的（trae、codearts）需实测后再上 |
+| 1 | 账号级 token 自动刷新 | **已接入**（qoder/autoclaw/trae） | 上游各家 `providers/*/refresh.rs` | `src/account_session/refresh.rs` + `store.update_tokens_cas` + cron `account-session-refresh` |
+| 2 | 账号级余额/用量查询 | **已接入**（qoder/autoclaw/小浣熊/zcode） | 上游各家 `providers/*/balance.rs` | `src/account_session/balance.rs` + `GET /api/account-sessions/:id/balance`；账号池列表「余额」列待 UI |
+| 3 | 账号级模型清单刷新 | **已接入**（catalog 目录发现） | 上游各家 `providers/*/models.rs` | `src/account_session/catalog.rs` + `POST /api/account-sessions/catalog/sync` |
+| 4 | 签到覆盖面扩展 | **12/12 已接入** | 上游各家 `providers/*/checkin.rs` | `src/checkin/claim.rs`；剩余缺口：officeace 登录留存临时 AK/SK、qoder/trae 登录捕获 refresh_token |
 
 新增登录式 provider 的完整清单：`AGENT2API_PROVIDERS` + `PROVIDERS` + `SESSION_PROVIDERS` + `addAccountConfigs.ts` 表单 + `account_login` 登录实现 + （可选）`checkin/claim.rs`。
