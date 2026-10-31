@@ -613,11 +613,19 @@ async fn xiaohuanxiong(client: &Client, session: &AccountSession, secret: &str) 
         let message = upstream_message(&value);
         return failed(&format!("小浣熊签到失败（HTTP {status}）：{message}"));
     }
-    // 发放通知：有 popup/toast 说明今天有入账；没有则是已经领过
-    let has_grant = value
+    // 发放通知：有 popup/toast 说明今天有入账；没有则是已经领过。
+    //
+    // **在 `data` 下面** —— 与 Agent2API `providers/raccoon/balance.rs` 的
+    // `data.get("point_grant_popups")` 同口径。此前这里读的是顶层，
+    // 上游把通知放在 `data` 里 → 永远读不到 → 永远判「已领过」，
+    // 签到看着成功但实际没领到。
+    let payload = value.get("data").unwrap_or(&value);
+    let has_grant = payload
         .get("point_grant_popups")
         .is_some_and(|v| !v.is_null())
-        || value.get("point_grant_toast").is_some_and(|v| !v.is_null());
+        || payload
+            .get("point_grant_toast")
+            .is_some_and(|v| !v.is_null());
     if has_grant {
         ok("每日积分已发放".to_string())
     } else {

@@ -47,11 +47,18 @@ struct RecordedRequest {
     body: Value,
 }
 
-/// 替身的状态：路径 → (状态码, 响应体)。
+/// 替身的状态：路径 → 依次回放的响应序列。
+///
+/// **为什么要序列**：上游的签到流程常是「查 → 领 → 回查确认」，
+/// 同一个路径会被打两次且两次响应不同（首次未领、回读已领）。
+/// 按调用序依次回放才能覆盖这类流程 —— 固定单响应会让「回查翻转」这类
+/// 判据永远走不到。
 #[derive(Clone)]
 struct MockState {
-    routes: Arc<HashMap<String, (u16, Value)>>,
+    routes: Arc<HashMap<String, Vec<(u16, Value)>>>,
     seen: Arc<Mutex<Vec<RecordedRequest>>>,
+    /// 每条路径已回放了几次（决定取序列里的第几个）。
+    counters: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 /// 起一个上游替身，返回 `(base_url, 状态句柄)`。
@@ -60,13 +67,16 @@ struct MockState {
 /// 未登记的路径一律回 404 + `{"message":"not found"}` —— 这本身也是一种断言：
 /// 执行器打错路径时会立刻暴露，而不是悄悄走到别的分支。
 async fn start_mock(routes: Vec<(&str, u16, Value)>) -> (String, MockState) {
-    let mut map = HashMap::new();
+    let mut map: HashMap<String, Vec<(u16, Value)>> = HashMap::new();
     for (path, status, body) in routes {
-        map.insert(path.to_string(), (status, body));
+        map.entry(path.to_string())
+            .or_default()
+            .push((status, body));
     }
     let state = MockState {
         routes: Arc::new(map),
         seen: Arc::new(Mutex::new(Vec::new())),
+        counters: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let router = Router::new()
@@ -106,10 +116,20 @@ async fn handle(
         body: parsed_body,
     });
 
-    match state.routes.get(&path) {
+    let response = {
+        let mut counters = state.counters.lock().unwrap();
+        let index = counters.entry(path.clone()).or_insert(0);
+        let slot = *index;
+        *index += 1;
+        state.routes.get(&path).and_then(|seq| {
+            // 超出序列长度时复用最后一个（覆盖「末次状态反复回查」）
+            seq.get(slot.min(seq.len().saturating_sub(1))).cloned()
+        })
+    };
+    match response {
         Some((status, payload)) => (
-            StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            axum::Json(payload.clone()),
+            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            axum::Json(payload),
         )
             .into_response(),
         None => (
@@ -153,6 +173,35 @@ fn account(provider: &str, base_url: &str) -> AccountSession {
         created_at: 0,
         updated_at: 0,
     }
+}
+
+/// 断言替身收到的请求用了某个 HTTP 方法。
+fn assert_method(state: &MockState, path: &str, expect: &str) {
+    let seen = state.seen.lock().unwrap();
+    let req = seen
+        .iter()
+        .find(|r| r.path == path)
+        .unwrap_or_else(|| panic!("没收到 {path} 的请求"));
+    assert_eq!(
+        req.method, expect,
+        "{path} 的请求方法应是 {expect}，实际 {}",
+        req.method
+    );
+}
+
+/// 断言替身收到的请求体里某个键等于预期值。
+fn assert_body_field(state: &MockState, path: &str, key: &str, expect: &Value) {
+    let seen = state.seen.lock().unwrap();
+    let req = seen
+        .iter()
+        .find(|r| r.path == path)
+        .unwrap_or_else(|| panic!("没收到 {path} 的请求"));
+    assert_eq!(
+        req.body.get(key),
+        Some(expect),
+        "{path} 的请求体 {key} 期望 {expect}，实际 {:?}",
+        req.body.get(key)
+    );
 }
 
 /// 断言替身确实收到了某个路径的请求。
@@ -365,6 +414,23 @@ async fn autoclaw_claims_task() {
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/autoclaw-proxy/proxy/autoclaw-task-complete");
+    // 请求构造也要对：POST + 任务 id + 签名头
+    assert_method(
+        &state,
+        "/autoclaw-proxy/proxy/autoclaw-task-complete",
+        "POST",
+    );
+    assert_body_field(
+        &state,
+        "/autoclaw-proxy/proxy/autoclaw-task-complete",
+        "task_id",
+        &json!("daily_signin"),
+    );
+    assert_header(
+        &state,
+        "/autoclaw-proxy/proxy/autoclaw-task-complete",
+        "x-auth-sign",
+    );
 }
 
 // ── WorkBuddy ───────────────────────────────────────────────────────
@@ -468,7 +534,20 @@ async fn codearts_claims_ops_welfare() {
         (
             "/v1/ops/confirm",
             200,
-            json!({"data": {"items": [{"id": "w-1", "status": "CONFIRMED"}]}}),
+            json!({"code": 0, "data": {"items": [{"id": "w-1", "status": "CONFIRMED"}]}}),
+        ),
+        // 回读 delivery：上游硬要求「不确认不算到账」，回读必须看到
+        // claimable=false + status=CONFIRMED 才算成功。
+        (
+            "/v1/ops/delivery",
+            200,
+            json!({"code": 0, "data": {"items": [{
+                "type": "USER_LOGIN",
+                "benefitUnit": "CREDIT",
+                "campaignId": "camp-9",
+                "status": "CONFIRMED",
+                "claimable": false
+            }]}}),
         ),
     ])
     .await;
