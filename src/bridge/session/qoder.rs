@@ -391,15 +391,19 @@ fn usage_of(usage: &Value) -> UsageStats {
 }
 
 /// 账号身份（uid / name / email / machine_id）。
-struct Identity {
-    user_id: String,
-    name: String,
-    email: String,
-    machine_id: String,
+pub(crate) struct Identity {
+    pub(crate) user_id: String,
+    pub(crate) name: String,
+    pub(crate) email: String,
+    pub(crate) machine_id: String,
 }
 
-/// 从访问令牌解出身份；解不出时用令牌哈希派生稳定值。
-fn identity_of(token: &str) -> Identity {
+/// 从凭证 token 里解出 COSY 签名要用的身份字段；解不出时用令牌哈希派生稳定值。
+///
+/// 账号池的模型目录拉取（`account_session::catalog`）要签同一个 COSY 头，
+/// 所以这里是 `pub(crate)` —— 两处共用一份解析口径，避免签名身份与
+/// 转发链路对不上。
+pub(crate) fn identity_of(token: &str) -> Identity {
     let claims = decode_jwt_claims(token);
     let text = |keys: &[&str]| -> String {
         keys.iter()

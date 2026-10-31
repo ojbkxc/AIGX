@@ -164,6 +164,15 @@ struct CatalogSpec {
     openai_shape: bool,
     /// 静态兜底表。
     fallback: &'static [FallbackModel],
+    /// 目录端点的鉴权/解析方式（None = 用 provider 默认头 + 账号凭证）。
+    sign: Option<CatalogSign>,
+}
+
+/// 目录端点的特殊鉴权与解析方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogSign {
+    /// COSY 签名（Qoder）：请求头要用账号身份加密签名，与转发链路同一套。
+    Cosy,
 }
 
 /// 静态兜底表的一行。
@@ -199,6 +208,7 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             path: "/api/v1/models",
             openai_shape: true,
             fallback: &[
+            sign: None,
                 FallbackModel {
                     id: "spark-x",
                     upstream_key: "",
@@ -221,39 +231,46 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             path: "/api/v1/users/models",
             openai_shape: false,
             fallback: &[],
+            sign: None,
         }),
         "commandcode" => Some(CatalogSpec {
             path: "/provider/v1/models",
             openai_shape: true,
             fallback: &[],
+            sign: None,
         }),
         "catpaw" => Some(CatalogSpec {
             path: "/api/agent/maas/model-types",
             openai_shape: false,
             fallback: &[],
+            sign: None,
         }),
         "codearts" => Some(CatalogSpec {
             path: "/v1/model/builtin",
             openai_shape: false,
             fallback: &[],
+            sign: None,
         }),
         "officeace" => Some(CatalogSpec {
             path: "/v1/models",
             openai_shape: true,
             fallback: &[],
+            sign: None,
         }),
         // Qoder 中国版 / 国际版：两地的目录不是同一份（套餐档位不同），兜底表
         // 按地区分开 —— 移植自 Agent2API `providers/qoder/models.rs` 的
         // `fallback(region)`。`upstream_key` 是上游的 `config_name`。
         "qoder" => Some(CatalogSpec {
-            path: "",
+            path: "/algo/api/v2/model/list?Encode=1",
             openai_shape: false,
             fallback: QODER_CN_FALLBACK,
+            sign: Some(CatalogSign::Cosy),
         }),
         "qoder-intl" => Some(CatalogSpec {
-            path: "",
+            path: "/algo/api/v2/model/list?Encode=1",
             openai_shape: false,
             fallback: QODER_INTL_FALLBACK,
+            sign: Some(CatalogSign::Cosy),
         }),
         // Cline 免费池 / 订阅池：兜底表移植自 Agent2API
         // `providers/cline/models.rs` 的 `FALLBACK_MODELS`。上游 id 带池前缀
@@ -263,6 +280,7 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             path: "/ai/cline/recommended-models",
             openai_shape: false,
             fallback: CLINE_FALLBACK,
+            sign: None,
         }),
         _ => None,
     }
@@ -772,6 +790,32 @@ async fn fetch_remote(
         let value = value.replace("{credential}", &secret);
         headers.push((name.clone(), value));
     }
+
+    // COSY 签名（Qoder）：目录端点与对话端点用同一套签名 —— 复用
+    // `bridge::session::qoder` 的身份解析，两处口径一致，不会出现
+    // 「对话能通、目录 401」的分裂。
+    if spec.sign == Some(CatalogSign::Cosy) {
+        if secret.is_empty() {
+            return Err("账号没有凭证，无法签名目录请求".to_string());
+        }
+        let identity = crate::bridge::session::qoder::identity_of(&secret);
+        let signed = crate::bridge::session::qoder_cosy::build_auth_headers(
+            None,
+            &url,
+            &crate::bridge::session::qoder_cosy::CosyIdentity {
+                user_id: &identity.user_id,
+                auth_token: &secret,
+                name: &identity.name,
+                email: &identity.email,
+                machine_id: &identity.machine_id,
+            },
+        )
+        .map_err(|e| format!("COSY 签名失败：{e}"))?;
+        for (name, value) in signed {
+            req = req.header(name, value);
+        }
+    }
+
     for (name, value) in &headers {
         req = req.header(name, value);
     }
@@ -795,7 +839,130 @@ async fn fetch_remote(
         .map_err(|e| format!("读取响应失败：{e}"))?;
     let value: Value =
         serde_json::from_str(&text).map_err(|e| format!("响应不是合法 JSON：{e}"))?;
+    // Qoder 的目录是 `chat[]` 私有形态（不是 OpenAI 的 `data[]`），
+    // 解析口径见 `parse_qoder_chat`。
+    if spec.sign == Some(CatalogSign::Cosy) {
+        let models = parse_qoder_chat(&value);
+        if models.is_empty() {
+            return Err("上游返回的模型目录为空".to_string());
+        }
+        return Ok(models);
+    }
     Ok(parse_response(&value, spec.openai_shape))
+}
+
+/// 解析 Qoder 的模型目录（`{chat:[{key, display_name, is_vl, ...}]}`）。
+///
+/// 口径移植自 Agent2API `providers/qoder/models.rs` 的 `parse_catalog`：
+/// - `key` 是上游真名（路由时用它），`display_name` 是客户端可见名
+///   （**去掉所有空白** —— 上游的展示名里带空格与换行，去掉后才是能
+///   当模型名用的形态）；
+/// - `is_vl` / `is_reasoning` 是能力位；
+/// - 上下文长度取条目里的分档上限，取不到用 200k 兜底。
+fn parse_qoder_chat(value: &Value) -> Vec<CatalogEntry> {
+    let Some(chat) = value.get("chat").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out: Vec<CatalogEntry> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for item in chat {
+        let key = item.get("key").and_then(Value::as_str).unwrap_or("").trim();
+        let display = item
+            .get("display_name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if key.is_empty() || display.is_empty() {
+            continue;
+        }
+        let id: String = display.chars().filter(|ch| !ch.is_whitespace()).collect();
+        if id.is_empty() {
+            continue;
+        }
+        let lowered = id.to_lowercase();
+        if seen.contains(&lowered) {
+            continue;
+        }
+        seen.push(lowered);
+
+        let mut capabilities: Vec<String> = Vec::new();
+        if js_truthy(item.get("is_vl")) {
+            capabilities.push("vision".to_string());
+        }
+        if js_truthy(item.get("is_reasoning")) || js_truthy(item.get("thinking_config")) {
+            capabilities.push("reasoning".to_string());
+        }
+        // Qoder 上游是 agent 形态，工具调用是固有能力
+        capabilities.push("tool".to_string());
+
+        out.push(CatalogEntry {
+            id,
+            upstream: Some(key.to_string()),
+            context_length: Some(qoder_context_window(item)),
+            capabilities,
+        });
+    }
+    out
+}
+
+/// JS 真值判定（`Boolean(x)`）：null/false/0/"" 为假，其余为真。
+fn js_truthy(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::Number(number)) => number.as_f64().map(|n| n != 0.0).unwrap_or(false),
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(Value::Array(_)) | Some(Value::Object(_)) => true,
+    }
+}
+
+/// Qoder 条目的上下文长度：取分档上限，取不到用 200k 兜底。
+///
+/// 上游把上下文按 tier 分档（`context_window` 之类），本函数扫条目里的
+/// 数值字段取最大值 —— 与 Agent2API 的 `context_window_of` 同口径
+/// （它读 `tiers_from_catalog` 后的 max）。
+fn qoder_context_window(item: &Value) -> u32 {
+    const DEFAULT_CONTEXT_WINDOW: u32 = 200_000;
+    let mut max = 0u32;
+    if let Some(obj) = item.as_object() {
+        for (key, value) in obj {
+            if !key.to_lowercase().contains("context")
+                && !key.to_lowercase().contains("token")
+                && !key.to_lowercase().contains("window")
+            {
+                continue;
+            }
+            // 数字
+            if let Some(n) = value.as_u64() {
+                if n > 0 && n <= u32::MAX as u64 && n as u32 > max {
+                    max = n as u32;
+                }
+            }
+            // 分档数组：{context_window: N} 之类
+            if let Some(arr) = value.as_array() {
+                for entry in arr {
+                    if let Some(n) = entry.as_u64() {
+                        if n > 0 && n <= u32::MAX as u64 && n as u32 > max {
+                            max = n as u32;
+                        }
+                    } else if let Some(inner) = entry.as_object() {
+                        for v in inner.values() {
+                            if let Some(n) = v.as_u64() {
+                                if n > 0 && n <= u32::MAX as u64 && n as u32 > max {
+                                    max = n as u32;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if max > 0 {
+        max
+    } else {
+        DEFAULT_CONTEXT_WINDOW
+    }
 }
 
 /// 同步某个账号的模型目录。
@@ -963,6 +1130,42 @@ mod tests {
             || m.id.starts_with("cline-pass/")
             || m.id.starts_with("z-ai/")
             || m.id.starts_with("poolside/")));
+    }
+
+    #[test]
+    fn qoder_chat_parsed_with_upstream_key() {
+        let payload = serde_json::json!({
+            "chat": [
+                {"key": "qfmodel", "display_name": "Qwen3.8 Flash", "is_vl": true},
+                {"key": "qmodel", "display_name": "Qwen3.8-Max", "is_reasoning": true},
+                {"key": "dup", "display_name": "Qwen3.8 Flash"},
+                {"key": "", "display_name": "无效"},
+            ]
+        });
+        let entries = parse_qoder_chat(&payload);
+        // 第 3 条是第 1 条的同名（去空白后），按 id 小写去重
+        assert_eq!(entries.len(), 2);
+        // 可见名去掉所有空白
+        assert_eq!(entries[0].id, "Qwen3.8Flash");
+        // 上游真名单独记
+        assert_eq!(entries[0].upstream.as_deref(), Some("qfmodel"));
+        assert!(entries[0].capabilities.iter().any(|c| c == "vision"));
+        assert!(entries[1].capabilities.iter().any(|c| c == "reasoning"));
+    }
+
+    #[test]
+    fn qoder_context_window_defaults_to_200k() {
+        let item = serde_json::json!({"key": "x"});
+        assert_eq!(qoder_context_window(&item), 200_000);
+        let item = serde_json::json!({"max_context_tokens": 131072});
+        assert_eq!(qoder_context_window(&item), 131_072);
+    }
+
+    #[test]
+    fn qoder_spec_uses_cosy_signed_endpoint() {
+        let spec = spec_for("qoder").expect("qoder 应有目录描述");
+        assert_eq!(spec.sign, Some(CatalogSign::Cosy));
+        assert!(spec.path.contains("model/list"));
     }
 
     #[test]
