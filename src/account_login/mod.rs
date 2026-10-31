@@ -20,6 +20,7 @@ mod cline;
 pub mod loomy;
 mod qoder;
 mod raccoon;
+mod trae;
 mod workbuddy;
 mod zcode;
 
@@ -207,6 +208,7 @@ pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result
         "xiaohuanxiong" => raccoon::start(&client).await?,
         "accio" => accio::start(&client).await?,
         "antigravity" => antigravity::start(&client).await?,
+        "trae" => trae::start(&client).await?,
         other => {
             return Err(format!(
                 "「{other}」的网页登录引擎尚未接入网关：请改用「填写凭证」粘贴登录态"
