@@ -57,11 +57,12 @@ pub fn normalize_cookie(raw: &str, cookie_name: &str) -> String {
                 }
             }
         }
+        // 指定了 cookie 名但没找到：取第一个分号之前的内容
+        if let Some((head, _)) = text.split_once(';') {
+            text = head.trim();
+        }
     }
-    // 取第一个分号之前的内容（Cookie 串里可能带着别的 cookie）
-    if let Some((head, _)) = text.split_once(';') {
-        text = head.trim();
-    }
+    // cookie_name 为空 = 调用方要整段 Cookie（KukuAI 需要全部 cookie），原样保留
     text.trim_matches(|ch| ch == '"' || ch == '\'')
         .trim()
         .to_string()
@@ -302,7 +303,8 @@ mod tests {
     #[test]
     fn normalize_token_strips_prefixes() {
         assert_eq!(normalize_token("Bearer user_abc"), "user_abc");
-        assert_eq!(normalize_token("Authorization: Bearer x"), "Bearer x");
+        // `Authorization: Bearer x` 会被逐层剥成裸值
+        assert_eq!(normalize_token("Authorization: Bearer x"), "x");
         assert_eq!(normalize_token("ot_session=abc"), "abc");
     }
 

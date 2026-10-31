@@ -41,19 +41,20 @@ pub fn build(
         "antigravity" => Some(Arc::new(antigravity::AntigravityBridge::new(
             base, credential, client,
         ))),
-        "accio" => Some(Arc::new(accio::AccioBridge::new(base, credential, client))),
+        // 拆家的地区变体复用同一套私有协议 Bridge（协议相同，只是站点不同）
+        "accio" | "accio-cn" => Some(Arc::new(accio::AccioBridge::new(base, credential, client))),
         "commandcode" => Some(Arc::new(commandcode::CommandCodeBridge::new(
             base, credential, client,
         ))),
         "kuku" => Some(Arc::new(kuku::KukuBridge::new(base, credential, client))),
-        "qoder" => Some(Arc::new(qoder::QoderBridge::new(base, credential, client))),
+        "qoder" | "qoder-intl" => Some(Arc::new(qoder::QoderBridge::new(base, credential, client))),
         "codearts" => Some(Arc::new(codearts::CodeArtsBridge::new(
             base, credential, client,
         ))),
         "catpaw" => Some(Arc::new(catpaw::CatPawBridge::new(
             base, credential, client,
         ))),
-        "monkeycode" => Some(Arc::new(monkeycode::MonkeyCodeBridge::new(
+        "monkeycode" | "monkeycode-intl" => Some(Arc::new(monkeycode::MonkeyCodeBridge::new(
             base, credential, client,
         ))),
         "trae" => Some(Arc::new(trae::TraeBridge::new(
@@ -93,12 +94,15 @@ pub fn supports(kind: &str) -> bool {
         "orcaterm"
             | "antigravity"
             | "accio"
+            | "accio-cn"
             | "commandcode"
             | "kuku"
             | "trae"
             | "qoder"
+            | "qoder-intl"
             | "codearts"
             | "catpaw"
             | "monkeycode"
+            | "monkeycode-intl"
     )
 }

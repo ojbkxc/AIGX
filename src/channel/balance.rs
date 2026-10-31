@@ -488,7 +488,7 @@ fn parse_sub2api(payload: &Value) -> Option<BalanceReading> {
     let remaining = number_at(data, "remaining")
         .or_else(|| number_at(data, "balance"))
         .or_else(|| quota.and_then(|m| number_at(m, "remaining")))
-        .or_else(|| match (total, used) {
+        .or(match (total, used) {
             (Some(total), Some(used)) => Some(total - used),
             _ => None,
         });
@@ -825,10 +825,10 @@ fn new_api_display(payload: &Value) -> Option<QuotaDisplay> {
     let usd_exchange_rate = number_at(data, "usd_exchange_rate").unwrap_or(1.0);
     let custom_currency_exchange_rate =
         number_at(data, "custom_currency_exchange_rate").unwrap_or(1.0);
-    if display_type == "CNY" && !(usd_exchange_rate > 0.0) {
+    if display_type == "CNY" && usd_exchange_rate <= 0.0 {
         return None;
     }
-    if display_type == "CUSTOM" && !(custom_currency_exchange_rate > 0.0) {
+    if display_type == "CUSTOM" && custom_currency_exchange_rate <= 0.0 {
         return None;
     }
     Some(QuotaDisplay {

@@ -924,8 +924,8 @@ mod tests {
         }
         assert_eq!(
             SESSION_PROVIDERS.len(),
-            17,
-            "Agent2API 登录态供应商应为 17 家"
+            25,
+            "登录态供应商应为 25 家（Agent2API 的 17 家 + 拆家的 8 个变体）"
         );
     }
 
@@ -946,13 +946,13 @@ mod tests {
             .iter()
             .filter(|(_, meta)| meta.openai_compatible)
             .count();
-        assert_eq!(compatible, 7, "可直接转发（OpenAI 兼容）的应为 7 家");
+        assert_eq!(compatible, 12, "可直接转发（OpenAI 兼容）的应为 12 家");
         let private: Vec<&str> = SESSION_PROVIDERS
             .iter()
             .filter(|(_, meta)| !meta.openai_compatible)
             .map(|(kind, _)| *kind)
             .collect();
-        assert_eq!(private.len(), 10, "私有协议供应商应为 10 家");
+        assert_eq!(private.len(), 13, "私有协议供应商应为 13 家");
         for kind in private {
             assert!(
                 crate::bridge::session::supports(kind),
