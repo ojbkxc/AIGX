@@ -260,6 +260,23 @@ fn build_tools() -> Vec<ToolDef> {
             },
         ),
         td(
+            "aigx_list_tokens",
+            "列出访问令牌",
+            "只读：列出 API 访问令牌（管理员可携 all=1 查全部，脱敏）",
+            ReadOnly,
+            "",
+            &["/api/tokens"],
+            paged,
+            |s, h, a| {
+                Box::pin(async move {
+                    let q = crate::api::admin::mcp::parse_struct_args::<
+                        crate::api::admin::tokens::ListTokensQuery,
+                    >("aigx_list_tokens", a)?;
+                    out(admin::handle_list_tokens(State(s.clone()), h.clone(), Query(q)).await)
+                })
+            },
+        ),
+        td(
             "aigx_list_accounts",
             "列出 CF 账号池",
             "只读：列出 CF 账号池（脱敏）",
