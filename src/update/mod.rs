@@ -204,13 +204,12 @@ impl UpdateManager {
         if applied
             .as_ref()
             .is_some_and(|marker| marker.version == CURRENT_VERSION)
+            && (pending_restart || restart_error.is_some())
         {
-            if pending_restart || restart_error.is_some() {
-                pending_restart = false;
-                restart_error = None;
-                let _ = store.put(PENDING_RESTART_KEY, &false);
-                let _ = store.delete(RESTART_ERROR_KEY);
-            }
+            pending_restart = false;
+            restart_error = None;
+            let _ = store.put(PENDING_RESTART_KEY, &false);
+            let _ = store.delete(RESTART_ERROR_KEY);
         }
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aigx"));
         let writable = writable_exe_dir(&exe);
