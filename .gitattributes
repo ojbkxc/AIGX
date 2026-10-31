@@ -4,4 +4,15 @@
 # static/ 是前端构建产物（vite 写出 LF）。这里强制 text + eol=lf：
 # 仓库内与工作区都用 LF，避免「Windows 本地构建出 CRLF / CI 构建出 LF」
 # 造成 `git status` 恒定漂移、产物同步闸门假阳性。
-static/** text eol=lf
+# 2>&1 二进制（图片/字体）必须显式排除，否则 CRLF→LF 会破坏文件。
+static/**/*.js text eol=lf
+static/**/*.css text eol=lf
+static/**/*.html text eol=lf
+static/**/*.json text eol=lf
+static/**/*.svg text eol=lf
+static/**/*.png binary
+static/**/*.jpg binary
+static/**/*.webp binary
+static/**/*.ico binary
+static/**/*.woff binary
+static/**/*.woff2 binary
