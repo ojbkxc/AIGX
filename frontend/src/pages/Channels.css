@@ -833,3 +833,95 @@ table tbody td input[type="checkbox"] {
 .ch-model-summary .btn {
   align-self: flex-start;
 }
+
+/* ── 添加渠道两步向导（参照账号池添加账号弹框） ── */
+.modal.modal-wide {
+  max-width: 1100px;
+  width: calc(100vw - 48px);
+}
+.modal.modal-form {
+  max-width: 620px;
+}
+
+.ch-wizard-step {
+  margin-left: 10px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted, #6b7280);
+}
+
+.ch-wizard-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.18));
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.ch-preset-hint {
+  display: block;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted, #6b7280);
+  white-space: normal;
+  text-align: left;
+  margin-top: 4px;
+}
+
+.ch-preset-badges {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.ch-preset-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.12);
+  color: #1d4ed8;
+}
+
+.ch-preset-skip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.ch-preset-skip-hint {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
+
+/* 高级配置折叠（模型映射/成本价/上游特判/余额查询） */
+.ch-advanced {
+  margin-top: 14px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.18));
+  border-radius: 10px;
+  padding: 0 12px;
+}
+.ch-advanced > summary {
+  cursor: pointer;
+  padding: 10px 0;
+  font-size: 13px;
+  font-weight: 500;
+  list-style: none;
+}
+.ch-advanced > summary::before {
+  content: '▸';
+  margin-right: 6px;
+  color: var(--text-muted, #6b7280);
+}
+.ch-advanced[open] > summary::before {
+  content: '▾';
+}
+.ch-advanced-body {
+  padding-bottom: 12px;
+}

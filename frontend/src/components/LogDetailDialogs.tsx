@@ -55,6 +55,32 @@ export function RequestLogDetail({ log, admin, onClose }: {
           <pre className="log-detail-pre">{log.error_msg}</pre>
         </div>
       )}
+      {/* 对话浏览：管理员点开日志就能看到这轮对话说了什么，
+          无需去系统设置开调试模式。普通用户拿不到该字段（后端已剥离）。 */}
+      {admin && log.conversation && log.conversation.messages.length > 0 && (
+        <div className="log-detail-conv">
+          <div className="log-detail-label">
+            {t('对话内容')}
+            {log.conversation.system_prompt_chars ? (
+              <span className="log-detail-conv-meta">
+                {t('（系统提示 {{n}} 字，未展示）', { n: log.conversation.system_prompt_chars })}
+              </span>
+            ) : null}
+          </div>
+          {log.conversation.truncated_history && (
+            <div className="log-detail-conv-note">{t('较早的消息已省略（仅保留最近 20 条）')}</div>
+          )}
+          <div className="log-detail-conv-list">
+            {log.conversation.messages.map((m, i) => (
+              <div key={i} className={`log-msg log-msg-${m.role}`}>
+                <div className="log-msg-role">{m.role}</div>
+                <div className="log-msg-text">{m.text}</div>
+                {m.truncated && <div className="log-msg-trunc">{t('（已截断）')}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {admin && log.debug && (
         <div className="log-detail-debug">
           {log.debug.upstream_url && (

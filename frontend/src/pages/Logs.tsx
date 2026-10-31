@@ -37,6 +37,12 @@ export interface RequestLogItem {
     response_body?: string;
     upstream_url?: string;
   };
+  /** 对话快照（**默认记录**，不依赖 log_body）：管理员可在详情里直接看对话 */
+  conversation?: {
+    messages: Array<{ role: string; text: string; truncated?: boolean }>;
+    system_prompt_chars?: number;
+    truncated_history?: boolean;
+  };
 }
 
 export interface AuditLogItem {

@@ -1065,6 +1065,14 @@ pub async fn handle_messages(
                 log.candidate_channels = candidate_channel_ids.clone();
                 log.filtered_channels = filtered_channels.clone();
                 log.selected_channel = used_channel_id.clone();
+                // 失败路径也记对话快照：管理员能看到「用户问了什么导致失败」，
+                // 比只有一句 error_msg 有用得多。
+                {
+                    let conv = crate::log::LogConversation::from_chat_messages(&chat_req.messages);
+                    if !conv.is_empty() {
+                        log.conversation = Some(conv);
+                    }
+                }
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 crate::metrics::global().record_request(
@@ -1154,6 +1162,14 @@ pub async fn handle_messages(
             log.candidate_channels = candidate_channel_ids.clone();
             log.filtered_channels = filtered_channels.clone();
             log.selected_channel = used_channel_id.clone();
+            // 对话快照（默认记录，不依赖 log_body 开关）
+            {
+                let mut conv = crate::log::LogConversation::from_chat_messages(&chat_req.messages);
+                conv.push_assistant(&response.message.content_str());
+                if !conv.is_empty() {
+                    log.conversation = Some(conv);
+                }
+            }
             // log_body：快照 = 请求体 + 响应正文（content 优先，tool_calls 计数）
             let debug_request_body = if crate::config::log_body_enabled() {
                 Some(crate::bridge::chat_format_debug_json(&chat_req))

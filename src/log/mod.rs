@@ -90,6 +90,248 @@ pub struct RequestLog {
     /// 请求/响应快照（仅 log_body 开关开启时记录；关闭时 None 且不序列化）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<LogDebugSnapshot>,
+    /// 对话快照（**默认记录**，与 `debug` 解耦）
+    ///
+    /// `debug` 是排障用的原始报文（受 `log_body` 开关控制、截断 4KB）；
+    /// 这里存的是**结构化对话**：用户的 messages 与模型回复，前端可直接
+    /// 渲染成聊天气泡。管理员点开日志就能看到「这轮对话说了什么」，
+    /// 不必先去系统设置打开调试模式。
+    ///
+    /// 隐私取舍：默认只存最后 N 条消息（见 [`LogConversation::MAX_MESSAGES`]），
+    /// 每条截断到 [`LogConversation::MAX_MESSAGE_CHARS`]，把存储放大控制在
+    /// 可接受范围；系统提示词只留长度、不存正文（常含站方内部指令）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<LogConversation>,
+}
+
+/// 一条对话消息（角色 + 文本）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogMessage {
+    /// `system` / `user` / `assistant` / `tool`
+    pub role: String,
+    /// 文本内容（多模态请求只留 text 段，图片记成 `[image]` 占位）
+    pub text: String,
+    /// 该消息是否被截断
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// 请求的对话快照（可被前端渲染成聊天气泡）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogConversation {
+    /// 按时间顺序的消息列表（含模型回复）
+    #[serde(default)]
+    pub messages: Vec<LogMessage>,
+    /// 系统提示词长度（字符数）；正文不存 —— 常含站方内部指令。
+    #[serde(default)]
+    pub system_prompt_chars: usize,
+    /// 是否因为超出上限丢弃了更早的消息
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated_history: bool,
+}
+
+impl LogConversation {
+    /// 最多保留的消息条数（约 10 轮）。日志是排障视图，不是完整存档；
+    /// 保留太多会让 10 万条日志的存储膨胀数倍。
+    pub const MAX_MESSAGES: usize = 20;
+    /// 单条消息的最大字符数。
+    pub const MAX_MESSAGE_CHARS: usize = 2000;
+
+    /// 从 OpenAI 风格的 `messages` 数组构造快照。
+    ///
+    /// 兼容三种 content 形态：
+    /// - 字符串（最常见）
+    /// - 内容块数组（多模态：`[{type:"text",text},{type:"image_url",...}]`）
+    /// - 缺少 content 的工具调用消息
+    pub fn from_messages(messages: &[serde_json::Value]) -> Self {
+        let mut out = Self::default();
+        // 先统计 system 提示长度（正文不入库）
+        for m in messages {
+            if m.get("role").and_then(|r| r.as_str()) == Some("system") {
+                out.system_prompt_chars += text_of(m).chars().count();
+            }
+        }
+        // 只保留最后 MAX_MESSAGES 条（排障关心的是最近上下文）
+        let start = messages.len().saturating_sub(Self::MAX_MESSAGES);
+        out.truncated_history = start > 0;
+        for m in &messages[start..] {
+            let role = m
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("user")
+                .to_string();
+            // 系统提示只记长度，不存正文（见字段注释）
+            if role == "system" {
+                continue;
+            }
+            let raw = text_of(m);
+            let (text, truncated) = truncate_chars(&raw, Self::MAX_MESSAGE_CHARS);
+            out.messages.push(LogMessage {
+                role,
+                text,
+                truncated,
+            });
+        }
+        out
+    }
+
+    /// 追加模型回复（流式时传拼接后的完整文本）。
+    pub fn push_assistant(&mut self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let (text, truncated) = truncate_chars(text, Self::MAX_MESSAGE_CHARS);
+        // 保持上限：超了就丢最早的一条并标记
+        if self.messages.len() >= Self::MAX_MESSAGES {
+            self.messages.remove(0);
+            self.truncated_history = true;
+        }
+        self.messages.push(LogMessage {
+            role: "assistant".to_string(),
+            text,
+            truncated,
+        });
+    }
+
+    /// 空快照不落库（省存储）。
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
+    /// 从归一化的 [`crate::bridge::ChatMessage`] 构造快照。
+    ///
+    /// 与 [`Self::from_messages`] 的区别：这里直接吃内部强类型，不必先序列化
+    /// 成 JSON 再解析 —— 数据面每条请求都会走一次，省掉一次往返。
+    pub fn from_chat_messages(messages: &[crate::bridge::ChatMessage]) -> Self {
+        use crate::bridge::Role;
+        let mut out = Self::default();
+        for m in messages {
+            if m.role == Role::System {
+                let text = chat_message_text(m);
+                out.system_prompt_chars += text.chars().count();
+            }
+        }
+        let start = messages.len().saturating_sub(Self::MAX_MESSAGES);
+        out.truncated_history = start > 0;
+        for m in &messages[start..] {
+            if m.role == Role::System {
+                continue; // 系统提示只记长度
+            }
+            let role = match m.role {
+                Role::System => "system",
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+            }
+            .to_string();
+            let (text, truncated) = truncate_chars(&chat_message_text(m), Self::MAX_MESSAGE_CHARS);
+            out.messages.push(LogMessage {
+                role,
+                text,
+                truncated,
+            });
+        }
+        out
+    }
+}
+
+/// 从强类型消息里抽文本（content 优先，其次 content_blocks 的文本段）。
+fn chat_message_text(m: &crate::bridge::ChatMessage) -> String {
+    if let Some(c) = m.content.as_deref() {
+        if !c.is_empty() {
+            return c.to_string();
+        }
+    }
+    if let Some(blocks) = m.content_blocks.as_deref() {
+        let mut out = String::new();
+        for b in blocks {
+            let ty = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match ty {
+                "text" | "input_text" => {
+                    if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
+                        out.push_str(t);
+                    }
+                }
+                "image_url" | "image" | "input_image" => out.push_str("[image]"),
+                "audio" | "input_audio" => out.push_str("[audio]"),
+                _ => {}
+            }
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    // 纯工具调用消息
+    if let Some(calls) = m.tool_calls.as_deref() {
+        return calls
+            .iter()
+            .map(|c| {
+                format!(
+                    "[tool:{}] {}",
+                    c.function_name,
+                    c.arguments.chars().take(200).collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    String::new()
+}
+
+/// 按**字符**（非字节）截断，避免切断 UTF-8 多字节序列。
+fn truncate_chars(s: &str, max: usize) -> (String, bool) {
+    if s.chars().count() <= max {
+        return (s.to_string(), false);
+    }
+    (s.chars().take(max).collect(), true)
+}
+
+/// 从一条 OpenAI 消息里抽取可读文本。
+fn text_of(m: &serde_json::Value) -> String {
+    match m.get("content") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(parts)) => {
+            let mut out = String::new();
+            for p in parts {
+                let ty = p.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match ty {
+                    "text" | "input_text" => {
+                        if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
+                            out.push_str(t);
+                        }
+                    }
+                    // 多模态图片/音频只留占位，不存 base64（会撑爆存储）
+                    "image_url" | "image" | "input_image" => out.push_str("[image]"),
+                    "audio" | "input_audio" => out.push_str("[audio]"),
+                    _ => {}
+                }
+            }
+            out
+        }
+        // 工具调用消息：列出工具名，参数只留前 200 字符
+        None => match m.get("tool_calls").and_then(|t| t.as_array()) {
+            Some(list) => list
+                .iter()
+                .filter_map(|c| {
+                    let name = c
+                        .pointer("/function/name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("tool");
+                    let args = c
+                        .pointer("/function/arguments")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("");
+                    Some(format!(
+                        "[tool:{name}] {}",
+                        args.chars().take(200).collect::<String>()
+                    ))
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            None => String::new(),
+        },
+        _ => String::new(),
+    }
 }
 
 /// 被过滤的渠道信息（P1-7 调度决策回放）
@@ -187,6 +429,7 @@ impl RequestLog {
             selected_channel: None,
             cache_hit: false,
             debug: None,
+            conversation: None,
         }
     }
 }
@@ -1145,5 +1388,87 @@ mod tests {
             .requests
             .list_with_filter(None, None, None, None, None, 3, 10);
         assert_eq!(page3.len(), 0);
+    }
+
+    // ── 对话快照 ────────────────────────────────────────────────────
+
+    /// system 提示只记长度，正文不入库（常含站方内部指令）。
+    #[test]
+    fn conversation_hides_system_prompt_body() {
+        let msgs = vec![
+            serde_json::json!({"role":"system","content":"内部指令：不要说你是AI"}),
+            serde_json::json!({"role":"user","content":"你好"}),
+        ];
+        let conv = LogConversation::from_messages(&msgs);
+        assert_eq!(
+            conv.system_prompt_chars,
+            "内部指令：不要说你是AI".chars().count()
+        );
+        assert_eq!(conv.messages.len(), 1, "系统提示不应作为消息出现");
+        assert_eq!(conv.messages[0].role, "user");
+        assert_eq!(conv.messages[0].text, "你好");
+    }
+
+    /// 多模态内容块：文本拼接，图片/音频只留占位（不存 base64）。
+    #[test]
+    fn conversation_flattens_multimodal_blocks() {
+        let msgs = vec![serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "描述这张图"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                {"type": "audio", "input_audio": {"data": "BBBB"}}
+            ]
+        })];
+        let conv = LogConversation::from_messages(&msgs);
+        assert_eq!(conv.messages[0].text, "描述这张图[image][audio]");
+        assert!(!conv.messages[0].text.contains("base64"));
+    }
+
+    /// 超出条数上限时丢最早的并标记 truncated_history。
+    #[test]
+    fn conversation_caps_history() {
+        let msgs: Vec<_> = (0..40)
+            .map(|i| serde_json::json!({"role":"user","content":format!("m{i}")}))
+            .collect();
+        let conv = LogConversation::from_messages(&msgs);
+        assert_eq!(conv.messages.len(), LogConversation::MAX_MESSAGES);
+        assert!(conv.truncated_history);
+        // 保留的是最后 N 条
+        assert_eq!(conv.messages.last().unwrap().text, format!("m{}", 39));
+    }
+
+    /// 单条超长消息按字符截断并标记（不切断 UTF-8 多字节字符）。
+    #[test]
+    fn conversation_truncates_long_message() {
+        let long = "中".repeat(LogConversation::MAX_MESSAGE_CHARS + 100);
+        let msgs = vec![serde_json::json!({"role":"user","content": long})];
+        let conv = LogConversation::from_messages(&msgs);
+        assert!(conv.messages[0].truncated);
+        assert_eq!(
+            conv.messages[0].text.chars().count(),
+            LogConversation::MAX_MESSAGE_CHARS
+        );
+    }
+
+    /// 助手回复追加后同样受条数上限约束。
+    #[test]
+    fn push_assistant_respects_cap() {
+        let msgs: Vec<_> = (0..LogConversation::MAX_MESSAGES)
+            .map(|i| serde_json::json!({"role":"user","content":format!("m{i}")}))
+            .collect();
+        let mut conv = LogConversation::from_messages(&msgs);
+        conv.push_assistant("回复");
+        assert_eq!(conv.messages.len(), LogConversation::MAX_MESSAGES);
+        assert!(conv.truncated_history);
+        assert_eq!(conv.messages.last().unwrap().role, "assistant");
+    }
+
+    /// 空回复不追加（避免产生一条空气泡）。
+    #[test]
+    fn push_assistant_skips_blank() {
+        let mut conv = LogConversation::default();
+        conv.push_assistant("   ");
+        assert!(conv.is_empty());
     }
 }

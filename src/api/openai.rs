@@ -1147,6 +1147,15 @@ impl StreamBillingState {
         log.candidate_channels = self.candidate_channels.clone();
         log.filtered_channels = self.filtered_channels.clone();
         log.selected_channel = self.channel_id.clone();
+        // 对话快照（**默认记录**，不依赖 log_body 开关）：管理员点开日志就能看到
+        // 这轮对话说了什么，无需先去系统设置打开调试模式。
+        {
+            let mut conv = crate::log::LogConversation::from_chat_messages(&self.chat_req.messages);
+            conv.push_assistant(&self.acc.lock());
+            if !conv.is_empty() {
+                log.conversation = Some(conv);
+            }
+        }
         // log_body 开关：快照 = 请求体 + 流式拼接文本（关闭时 None 零开销）
         if self.debug_request_body.is_some() {
             log.debug = crate::log::LogDebugSnapshot::new(

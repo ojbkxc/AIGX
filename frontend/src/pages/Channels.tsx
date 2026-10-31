@@ -173,8 +173,10 @@ export default function Channels(): JSX.Element {
   const [showApiKey, setShowApiKey] = useState(false);
   /** 当前选中的预置供应商 key（仅新增时；编辑回填 null） */
   const [activePreset, setActivePreset] = useState<string | null>(null);
-  /** 预置选择面板展开状态 */
-  const [showPresets, setShowPresets] = useState(false);
+  /** 向导步骤：pick = 选供应商（新增时的第 1 步）；form = 填配置 */
+  const [modalStep, setModalStep] = useState<'pick' | 'form'>('form');
+  /** 预置供应商搜索（第 1 步卡片网格过滤） */
+  const [presetQuery, setPresetQuery] = useState('');
 
   // 无密钥复选框联动（同 cf-ai-gw onKeyForeverChange）：勾选 → 输入框置灰清空
   const onNoKeyChange = (): void => {
@@ -319,6 +321,8 @@ export default function Channels(): JSX.Element {
       balance_fields: {},
     }));
     setActivePreset(preset.key);
+    // 选中预置后直接进「填配置」步（两步式向导）
+    setModalStep('form');
   }
 
   // 挂载 / 翻页 / 搜索变化时加载列表。
@@ -554,14 +558,15 @@ export default function Channels(): JSX.Element {
     setEditChannel(null);
     setForm(defaultForm());
     setActivePreset(null);
-    setShowPresets(true);
+    setPresetQuery('');
+    // 新增走两步向导：先选供应商（可跳过直接自定义）
+    setModalStep('pick');
     setShowModal(true);
   };
 
   const openEdit = (ch: ChannelItem): void => {
     setEditChannel(ch);
     setActivePreset(null);
-    setShowPresets(false);
     setForm({
       name: ch.name || '',
       channel_type: ch.channel_type || 'openai_compatible',
@@ -582,6 +587,8 @@ export default function Channels(): JSX.Element {
       // 避免同一份值既在文本框又在专用框、提交时互相覆盖）
       balance_fields: extractBalanceFields(ch.quirks),
     });
+    // 编辑直达第 2 步（供应商已定）
+    setModalStep('form');
     setShowModal(true);
   };
 
@@ -1202,50 +1209,92 @@ export default function Channels(): JSX.Element {
 
       {showModal && (
         <div className="modal-overlay">
-          <form className="modal" onSubmit={(e) => { e.preventDefault(); void handleSave(); }}>
+          <form className={`modal ${!editChannel && modalStep === 'pick' ? 'modal-wide' : 'modal-form'}`} onSubmit={(e) => { e.preventDefault(); void handleSave(); }}>
             <div className="modal-header">
-              <h3>{editChannel ? t('编辑渠道') : t('添加渠道')}</h3>
+              <h3>
+                {editChannel ? t('编辑渠道') : t('添加渠道')}
+                {!editChannel && (
+                  <span className="ch-wizard-step">
+                    {modalStep === 'pick' ? t('第 1 步 / 2 · 选供应商') : t('第 2 步 / 2 · 填配置')}
+                  </span>
+                )}
+              </h3>
               <button type="button" className="modal-close" onClick={closeModal}>&times;</button>
             </div>
             <div className="modal-body">
-              {/* 预置供应商卡片（仅新增时；点一张即预填名称/协议/地址/特判/余额方案） */}
-              {!editChannel && (
+              {/* 错误提示进弹窗 body（页面级 error 会被遮罩盖住） */}
+              {error && <div className="error-message" style={{ marginBottom: 12 }}>{error}</div>}
+
+              {/* ── 第 1 步：选供应商（新增时；对齐账号池添加账号弹框的卡片网格）── */}
+              {!editChannel && modalStep === 'pick' && (
                 <div className="ch-preset-section">
-                  <button
-                    type="button"
-                    className="ch-preset-toggle"
-                    onClick={() => setShowPresets((v) => !v)}
-                  >
-                    {showPresets ? '▾' : '▸'} {t('从预置供应商选择（可选）')}
-                    {activePreset && (
-                      <span className="ch-preset-current">
-                        {PRESET_PROVIDERS.find((p) => p.key === activePreset)?.name}
-                      </span>
-                    )}
-                  </button>
-                  {showPresets && (
-                    <div className="ch-preset-grid" role="listbox" aria-label={t('预置供应商')}>
-                      {PRESET_PROVIDERS.map((preset) => {
-                        const icon = presetIconOf(preset.key);
-                        return (
-                          <button
-                            type="button"
-                            key={preset.key}
-                            className={`ch-preset-card ${activePreset === preset.key ? 'active' : ''}`}
-                            onClick={() => applyPreset(preset)}
-                          >
-                            {icon ? (
-                              <img className="ch-preset-logo" src={icon} alt="" loading="lazy" />
-                            ) : (
-                              <span className="ch-preset-initial">{preset.name.slice(0, 1)}</span>
-                            )}
-                            <span className="ch-preset-name">{preset.name}</span>
-                            <span className="ch-preset-url">{preset.baseUrl || t('自填地址')}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
+                  <div className="models-search" style={{ marginBottom: 10 }}>
+                    <Search size={14} className="models-search-icon" />
+                    <input
+                      className="form-input"
+                      placeholder={t('搜索预置供应商…')}
+                      value={presetQuery}
+                      onChange={(e) => setPresetQuery(e.target.value)}
+                      aria-label={t('搜索预置供应商')}
+                    />
+                  </div>
+                  <div className="ch-preset-grid" role="listbox" aria-label={t('预置供应商')}>
+                    {PRESET_PROVIDERS.filter((preset) => {
+                      const q = presetQuery.trim().toLowerCase();
+                      if (!q) return true;
+                      return (
+                        preset.name.toLowerCase().includes(q)
+                        || (preset.key?.toLowerCase?.() ?? '').includes(q)
+                        || (preset.baseUrl ?? '').toLowerCase().includes(q)
+                      );
+                    }).map((preset) => {
+                      const icon = presetIconOf(preset.key);
+                      return (
+                        <button
+                          type="button"
+                          key={preset.key}
+                          className={`ch-preset-card ${activePreset === preset.key ? 'active' : ''}`}
+                          onClick={() => applyPreset(preset)}
+                        >
+                          {icon ? (
+                            <img className="ch-preset-logo" src={icon} alt="" loading="lazy" />
+                          ) : (
+                            <span className="ch-preset-initial">{preset.name.slice(0, 1)}</span>
+                          )}
+                          <span className="ch-preset-name">{preset.name}</span>
+                          <span className="ch-preset-url">{preset.baseUrl || t('自填地址')}</span>
+                          {preset.hint && <span className="ch-preset-hint">{preset.hint}</span>}
+                          <span className="ch-preset-badges">
+                            {preset.noAuth && <span className="ch-preset-badge">{t('免密钥')}</span>}
+                            {preset.balanceScheme && <span className="ch-preset-badge">{t('余额查询')}</span>}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="ch-preset-skip">
+                    <Button variant="outline" type="button" onClick={() => setModalStep('form')}>
+                      {t('自定义渠道（跳过预置）')}
+                    </Button>
+                    <span className="ch-preset-skip-hint">
+                      {t('账号型渠道（凭证放账号池）也走自定义，类型选 account')}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* ── 第 2 步：填配置 ── */}
+              {(editChannel || modalStep === 'form') && !editChannel && (
+                <div className="ch-wizard-bar">
+                  <span>
+                    {t('供应商')}：
+                    {activePreset
+                      ? PRESET_PROVIDERS.find((p) => p.key === activePreset)?.name
+                      : t('自定义')}
+                  </span>
+                  <Button variant="outline" type="button" onClick={() => setModalStep('pick')}>
+                    {t('更换供应商')}
+                  </Button>
                 </div>
               )}
               <Input
@@ -1364,145 +1413,156 @@ export default function Channels(): JSX.Element {
                   </div>
                 </div>
               )}
+              <details className="ch-advanced">
+                <summary>{t('高级配置：模型映射 / 成本价 / 上游特判 / 余额查询')}</summary>
+                <div className="ch-advanced-body">
               <div className="form-group">
-                <label>{t('模型映射')}</label>
-                <div className="form-hint" style={{ marginBottom: 8 }}>
-                  {t('用户请求的模型名 → 实际转发给上游的模型名。优先级：渠道级映射 > 全局映射 > 原名透传。')}
-                </div>
-                <ModelMappingEditor
-                  value={form.model_mapping}
-                  onChange={(mapping) => setForm((f) => ({ ...f, model_mapping: mapping }))}
-                  sourceModelOptions={form.models.split(',').map((s) => s.trim()).filter(Boolean)}
-                  disabled={saving}
-                />
-              </div>
-              <div className="form-group">
-                <label>{t('成本价（可选）')}</label>
-                <div className="form-hint" style={{ marginBottom: 8 }}>
-                  {t('按映射后的上游模型名填成本价（每 1k token）。可留空——填了管理员可在日志看利润，不填利润显示「—」。')}
-                </div>
-                <CostPricingEditor
-                  value={form.cost_pricing}
-                  mappingTargets={Object.values(form.model_mapping)}
-                  onChange={(cp) => setForm((f) => ({ ...f, cost_pricing: cp }))}
-                  disabled={saving}
-                />
-              </div>
-              <div style={{ display: 'flex', gap: 12 }}>
-                <Input
-                  label={t('优先级（越大越优先）')}
-                  type="number"
-                  value={String(form.priority)}
-                  onChange={(e) => setForm({ ...form, priority: e.target.value })}
-                  style={{ flex: 1 }}
-                />
-                <Input
-                  label={t('权重')}
-                  type="number"
-                  value={String(form.weight)}
-                  onChange={(e) => setForm({ ...form, weight: e.target.value })}
-                  style={{ flex: 1 }}
-                />
-              </div>
-              <Select
-                label={t('状态')}
-                value={form.status}
-                onChange={(e) => setForm({ ...form, status: e.target.value })}
-              >
-                <option value="enabled">{t('启用')}</option>
-                <option value="disabled">{t('禁用')}</option>
-              </Select>
-
-              {/* ── 上游特判（quirks）── */}
-              <details className="ch-quirks-section">
-                <summary>
-                  {t('上游特判（预置供应商会自动填好，一般不用手改）')}
-                  {formToQuirks(form.quirks, form.balance_fields) && (
-                    <span className="ch-quirks-badge">{t('已配置')}</span>
-                  )}
-                </summary>
-                <div className="ch-quirks-body">
-                  <Input
-                    label={t('URL 查询串后缀')}
-                    placeholder="?beta=true"
-                    value={form.quirks.url_suffix}
-                    onChange={(e) => setForm((f) => ({ ...f, quirks: { ...f.quirks, url_suffix: e.target.value } }))}
-                    hint={t('原样追加到出站 URL（GLM / MiniMax 的 Claude 兼容端点要求 ?beta=true）')}
-                  />
-                  <div className="form-group">
-                    <label>{t('额外请求头（每行 Key: Value）')}</label>
-                    <textarea
-                      className="form-input"
-                      rows={4}
-                      placeholder={'X-CLIENT-TYPE: cline-sdk\nAnthropic-Beta: claude-code-20250219'}
-                      value={form.quirks.headers}
-                      onChange={(e) => setForm((f) => ({ ...f, quirks: { ...f.quirks, headers: e.target.value } }))}
-                    />
-                    <div className="form-hint">
-                      {t('合并到默认头上（同名覆盖）。Cline 一类上游按客户端形态校验，缺头会 403。')}
+                    <label>{t('模型映射')}</label>
+                    <div className="form-hint" style={{ marginBottom: 8 }}>
+                      {t('用户请求的模型名 → 实际转发给上游的模型名。优先级：渠道级映射 > 全局映射 > 原名透传。')}
                     </div>
+                    <ModelMappingEditor
+                      value={form.model_mapping}
+                      onChange={(mapping) => setForm((f) => ({ ...f, model_mapping: mapping }))}
+                      sourceModelOptions={form.models.split(',').map((s) => s.trim()).filter(Boolean)}
+                      disabled={saving}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>{t('成本价（可选）')}</label>
+                    <div className="form-hint" style={{ marginBottom: 8 }}>
+                      {t('按映射后的上游模型名填成本价（每 1k token）。可留空——填了管理员可在日志看利润，不填利润显示「—」。')}
+                    </div>
+                    <CostPricingEditor
+                      value={form.cost_pricing}
+                      mappingTargets={Object.values(form.model_mapping)}
+                      onChange={(cp) => setForm((f) => ({ ...f, cost_pricing: cp }))}
+                      disabled={saving}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', gap: 12 }}>
+                    <Input
+                      label={t('优先级（越大越优先）')}
+                      type="number"
+                      value={String(form.priority)}
+                      onChange={(e) => setForm({ ...form, priority: e.target.value })}
+                      style={{ flex: 1 }}
+                    />
+                    <Input
+                      label={t('权重')}
+                      type="number"
+                      value={String(form.weight)}
+                      onChange={(e) => setForm({ ...form, weight: e.target.value })}
+                      style={{ flex: 1 }}
+                    />
                   </div>
                   <Select
-                    label={t('Anthropic 工具类型')}
-                    value={form.quirks.anthropic_tool_type}
-                    onChange={(e) => setForm((f) => ({ ...f, quirks: { ...f.quirks, anthropic_tool_type: e.target.value } }))}
+                    label={t('状态')}
+                    value={form.status}
+                    onChange={(e) => setForm({ ...form, status: e.target.value })}
                   >
-                    <option value="">{t('不补（默认）')}</option>
-                    <option value="custom">{t('补 type: custom（MiniMax）')}</option>
+                    <option value="enabled">{t('启用')}</option>
+                    <option value="disabled">{t('禁用')}</option>
                   </Select>
-                  <Select
-                    label={t('客户端伪装')}
-                    value={form.quirks.client_emulation}
-                    onChange={(e) => setForm((f) => ({ ...f, quirks: { ...f.quirks, client_emulation: e.target.value } }))}
-                  >
-                    <option value="">{t('不伪装（默认）')}</option>
-                    <option value="opencode">{t('OpenCode 官方客户端（免费档必需）')}</option>
-                  </Select>
+
+                  {/* ── 上游特判（quirks）── */}
+                  <details className="ch-quirks-section">
+                    <summary>
+                      {t('上游特判（预置供应商会自动填好，一般不用手改）')}
+                      {formToQuirks(form.quirks, form.balance_fields) && (
+                        <span className="ch-quirks-badge">{t('已配置')}</span>
+                      )}
+                    </summary>
+                    <div className="ch-quirks-body">
+                      <Input
+                        label={t('URL 查询串后缀')}
+                        placeholder="?beta=true"
+                        value={form.quirks.url_suffix}
+                        onChange={(e) => setForm((f) => ({ ...f, quirks: { ...f.quirks, url_suffix: e.target.value } }))}
+                        hint={t('原样追加到出站 URL（GLM / MiniMax 的 Claude 兼容端点要求 ?beta=true）')}
+                      />
+                      <div className="form-group">
+                        <label>{t('额外请求头（每行 Key: Value）')}</label>
+                        <textarea
+                          className="form-input"
+                          rows={4}
+                          placeholder={'X-CLIENT-TYPE: cline-sdk\nAnthropic-Beta: claude-code-20250219'}
+                          value={form.quirks.headers}
+                          onChange={(e) => setForm((f) => ({ ...f, quirks: { ...f.quirks, headers: e.target.value } }))}
+                        />
+                        <div className="form-hint">
+                          {t('合并到默认头上（同名覆盖）。Cline 一类上游按客户端形态校验，缺头会 403。')}
+                        </div>
+                      </div>
+                      <Select
+                        label={t('Anthropic 工具类型')}
+                        value={form.quirks.anthropic_tool_type}
+                        onChange={(e) => setForm((f) => ({ ...f, quirks: { ...f.quirks, anthropic_tool_type: e.target.value } }))}
+                      >
+                        <option value="">{t('不补（默认）')}</option>
+                        <option value="custom">{t('补 type: custom（MiniMax）')}</option>
+                      </Select>
+                      <Select
+                        label={t('客户端伪装')}
+                        value={form.quirks.client_emulation}
+                        onChange={(e) => setForm((f) => ({ ...f, quirks: { ...f.quirks, client_emulation: e.target.value } }))}
+                      >
+                        <option value="">{t('不伪装（默认）')}</option>
+                        <option value="opencode">{t('OpenCode 官方客户端（免费档必需）')}</option>
+                      </Select>
+                    </div>
+                  </details>
+
+                  {/* ── 余额查询方案 ── */}
+                  <div className="ch-balance-section">
+                    <Select
+                      label={t('余额查询方案')}
+                      value={form.balance_scheme}
+                      onChange={(e) => setForm((f) => ({ ...f, balance_scheme: e.target.value }))}
+                    >
+                      <option value="">{t('默认（OpenAI 计费端点）')}</option>
+                      {Object.entries(BALANCE_SCHEME_LABELS).map(([value, label]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))}
+                    </Select>
+                    {(() => {
+                      const preset = PRESET_PROVIDERS.find((p) => p.balanceScheme === form.balance_scheme);
+                      const fields = preset?.balanceFields || [];
+                      if (!fields.length) return null;
+                      return (
+                        <div className="ch-balance-fields">
+                          {fields.map((field) => (
+                            <Input
+                              key={field.header}
+                              label={field.label}
+                              placeholder={field.placeholder}
+                              value={form.balance_fields[field.header] || ''}
+                              onChange={(e) =>
+                                setForm((f) => ({
+                                  ...f,
+                                  balance_fields: { ...f.balance_fields, [field.header]: e.target.value },
+                                }))
+                              }
+                            />
+                          ))}
+                        </div>
+                      );
+                    })()}
+                </div>
                 </div>
               </details>
-
-              {/* ── 余额查询方案 ── */}
-              <div className="ch-balance-section">
-                <Select
-                  label={t('余额查询方案')}
-                  value={form.balance_scheme}
-                  onChange={(e) => setForm((f) => ({ ...f, balance_scheme: e.target.value }))}
-                >
-                  <option value="">{t('默认（OpenAI 计费端点）')}</option>
-                  {Object.entries(BALANCE_SCHEME_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </Select>
-                {(() => {
-                  const preset = PRESET_PROVIDERS.find((p) => p.balanceScheme === form.balance_scheme);
-                  const fields = preset?.balanceFields || [];
-                  if (!fields.length) return null;
-                  return (
-                    <div className="ch-balance-fields">
-                      {fields.map((field) => (
-                        <Input
-                          key={field.header}
-                          label={field.label}
-                          placeholder={field.placeholder}
-                          value={form.balance_fields[field.header] || ''}
-                          onChange={(e) =>
-                            setForm((f) => ({
-                              ...f,
-                              balance_fields: { ...f.balance_fields, [field.header]: e.target.value },
-                            }))
-                          }
-                        />
-                      ))}
-                    </div>
-                  );
-                })()}
-              </div>
             </div>
             <div className="modal-footer">
               <Button variant="outline" onClick={closeModal} disabled={saving}>{t('取消')}</Button>
-              <Button type="submit" disabled={saving}>
-                {saving ? t('保存中...') : (editChannel ? t('更新') : t('添加'))}
-              </Button>
+              {!editChannel && modalStep === 'pick' ? (
+                <Button type="button" onClick={() => setModalStep('form')}>
+                  {t('自定义渠道')}
+                </Button>
+              ) : (
+                <Button type="submit" disabled={saving}>
+                  {saving ? t('保存中...') : (editChannel ? t('更新') : t('添加'))}
+                </Button>
+              )}
             </div>
           </form>
         </div>

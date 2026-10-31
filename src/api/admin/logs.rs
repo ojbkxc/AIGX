@@ -29,7 +29,11 @@ fn logs_with_user_email(state: &AppState, logs: Vec<serde_json::Value>, admin: b
         .map(|mut l| {
             if let Some(obj) = l.as_object_mut() {
                 if !admin {
+                    // 普通用户只拿统计字段：原始报文（debug）与对话正文
+                    // （conversation）都属于「管理员排障/审计」视图，不下发。
+                    // 对话里可能含他人的系统提示词拼接、工具参数等敏感上下文。
                     obj.remove("debug");
+                    obj.remove("conversation");
                 }
                 if let Some(uid) = obj.get("user_id").and_then(|v| v.as_str()) {
                     if let Some(u) = state.user_store.get_by_id(uid) {
