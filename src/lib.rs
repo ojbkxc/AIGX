@@ -1,3 +1,8 @@
+// OpenAPI 文档里有一个多层嵌套的 `json!` 字面量（路径 → 方法 → 响应 schema），
+// 默认宏递归上限（128）不够，编译期直接报 "recursion limit reached"。
+// 提高 crate 级上限即可，不影响运行期。
+#![recursion_limit = "512"]
+
 pub mod account;
 pub mod account_login;
 pub mod account_session;

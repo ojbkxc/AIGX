@@ -45,6 +45,8 @@ pub fn build_openapi_document() -> Value {
         paths_tokens(),
         paths_pricing(),
         paths_model_manage(),
+        paths_checkin_center(),
+        paths_report(),
         paths_payment(),
         paths_logs(),
         paths_dashboard_usage(),
@@ -348,20 +350,24 @@ fn paths_model_manage() -> Value {
         "/api/models/alias/remove": {
             "post": op_body("模型管理", "删除全局模型别名", "alias: string")
         },
-        // 签到中心（管理员替上游账号签到，区别于用户侧 /api/checkin）
+    })
+}
+
+/// 签到中心（管理员替上游账号签到，区别于用户侧 /api/checkin）。
+///
+/// 单独成函数而不是塞进 `paths_accounts_network`：那个函数已经很大，
+/// `json!` 的宏展开深度在合并后触到默认 recursion_limit。
+fn paths_checkin_center() -> Value {
+    json!({
         "/api/checkin-center": {
             "get": op("签到中心", "总览快照：支持清单 + 今日汇总 + 账号签到状态")
-        },
-        "/api/checkin-center/run": {
-            "post": op_body("签到中心", "立即签到（全部 / 指定账号 / 指定 provider）", "account_ids?: string[], providers?: string[]")
         },
         "/api/checkin-center/records": {
             "get": op_params("签到中心", "签到台账（按天分桶）", &[query_param("days", "integer", "回溯天数")]),
             "delete": op_params("签到中心", "清空签到台账", &[query_param("days", "integer", "回溯天数")])
         },
-        "/api/checkin-center/settings": {
-            "get": op("签到中心", "读取签到设置"),
-            "put": op_body("签到中心", "保存签到设置", "enabled: bool, gap_ms: integer")
+        "/api/checkin-center/run": {
+            "post": op_body("签到中心", "立即签到（全部 / 指定账号 / 指定 provider）", "account_ids?: string[], providers?: string[]")
         },
         "/api/checkin-center/schedules": {
             "get": op("签到中心", "列出定时签到计划"),
@@ -372,7 +378,41 @@ fn paths_model_manage() -> Value {
         },
         "/api/checkin-center/schedules/run": {
             "post": op_body("签到中心", "立即执行某计划的范围", "id: string")
-        }
+        },
+        "/api/checkin-center/settings": {
+            "get": op("签到中心", "读取签到设置"),
+            "put": op_body("签到中心", "保存签到设置", "enabled: bool, gap_ms: integer")
+        },
+    })
+}
+
+/// 报表扩展（移植 Agent2API report 页视角）。
+fn paths_report() -> Value {
+    json!({
+        "/api/dashboard/report/cache_rates": {
+            "get": op_params("看板", "缓存命中率多窗口（10m/1h/24h/7d）", &[query_param("days", "integer", "回溯天数")])
+        },
+        "/api/dashboard/report/daily_trend": {
+            "get": op_params("看板", "按天请求/Token 趋势", &[query_param("days", "integer", "回溯天数")])
+        },
+        "/api/dashboard/report/heatmap": {
+            "get": op_params("看板", "365 天日粒度消费热力图", &[query_param("days", "integer", "回溯天数（1-365）")])
+        },
+        "/api/dashboard/report/models": {
+            "get": op_params("看板", "按模型聚合的用量占比", &[query_param("days", "integer", "回溯天数")])
+        },
+        "/api/dashboard/report/overview": {
+            "get": op_params("看板", "报表总览卡（请求/成功率/Token/活跃天数/Top 模型）", &[query_param("days", "integer", "回溯天数")])
+        },
+        "/api/dashboard/report/token_trend": {
+            "get": op_params("看板", "按天 Token 趋势（prompt/completion 分列）", &[query_param("days", "integer", "回溯天数")])
+        },
+        "/api/dashboard/report/top_sources": {
+            "get": op_params("看板", "Top 账号 / Top 提供商", &[query_param("days", "integer", "回溯天数")])
+        },
+        "/api/dashboard/scheduler_status": {
+            "get": op("看板", "渠道调度器状态")
+        },
     })
 }
 
@@ -528,31 +568,6 @@ fn paths_dashboard_usage() -> Value {
         },
         "/api/dashboard/cache_savings": {
             "get": op_params("看板", "缓存命中节省看板", &[query_param("days", "integer", "回溯天数（1-90，默认 30）")])
-        },
-        // 报表扩展（移植 Agent2API report 页视角）
-        "/api/dashboard/report/heatmap": {
-            "get": op_params("看板", "365 天日粒度消费热力图", &[query_param("days", "integer", "回溯天数（1-365）")])
-        },
-        "/api/dashboard/report/top_sources": {
-            "get": op_params("看板", "Top 账号 / Top 提供商", &[query_param("days", "integer", "回溯天数")])
-        },
-        "/api/dashboard/report/token_trend": {
-            "get": op_params("看板", "按天 Token 趋势（prompt/completion 分列）", &[query_param("days", "integer", "回溯天数")])
-        },
-        "/api/dashboard/report/overview": {
-            "get": op_params("看板", "报表总览卡（请求/成功率/Token/活跃天数/Top 模型）", &[query_param("days", "integer", "回溯天数")])
-        },
-        "/api/dashboard/report/models": {
-            "get": op_params("看板", "按模型聚合的用量占比", &[query_param("days", "integer", "回溯天数")])
-        },
-        "/api/dashboard/report/cache_rates": {
-            "get": op_params("看板", "缓存命中率多窗口（10m/1h/24h/7d）", &[query_param("days", "integer", "回溯天数")])
-        },
-        "/api/dashboard/report/daily_trend": {
-            "get": op_params("看板", "按天请求/Token 趋势", &[query_param("days", "integer", "回溯天数")])
-        },
-        "/api/dashboard/scheduler_status": {
-            "get": op("看板", "渠道调度器状态")
         },
         "/api/usage/trend": {
             "get": op_params("看板", "用量趋势（token/请求）", &[query_param("days", "integer", "回溯天数")])
@@ -737,51 +752,6 @@ fn paths_accounts_network() -> Value {
         "/api/admin/tickets/reply": {
             "post": op_body("工单", "管理员回复工单", "")
         },
-        "/api/checkin-center": {
-            "get": op("签到中心", "账号池签到中心聚合快照")
-        },
-        "/api/checkin-center/records": {
-            "get": op("签到中心", "签到台账（可按 provider/日期筛选）")
-        },
-        "/api/checkin-center/run": {
-            "post": op_body("签到中心", "立即执行一次签到", "")
-        },
-        "/api/checkin-center/schedules": {
-            "get": op("签到中心", "定时签到计划列表")
-        },
-        "/api/checkin-center/schedules/remove": {
-            "post": op_body("签到中心", "删除定时签到计划", "")
-        },
-        "/api/checkin-center/schedules/run": {
-            "post": op_body("签到中心", "立即执行某条定时计划", "")
-        },
-        "/api/checkin-center/settings": {
-            "get": op("签到中心", "签到中心设置")
-        },
-        "/api/dashboard/report/cache_rates": {
-            "get": op("报表", "报表缓存命中率")
-        },
-        "/api/dashboard/report/daily_trend": {
-            "get": op("报表", "报表按天趋势")
-        },
-        "/api/dashboard/report/heatmap": {
-            "get": op("报表", "报表热力图（时间 × 来源）")
-        },
-        "/api/dashboard/report/models": {
-            "get": op("报表", "报表模型分布")
-        },
-        "/api/dashboard/report/overview": {
-            "get": op("报表", "报表总览（请求数/Token/成本/成功率）")
-        },
-        "/api/dashboard/report/token_trend": {
-            "get": op("报表", "报表 Token 趋势")
-        },
-        "/api/dashboard/report/top_sources": {
-            "get": op("报表", "报表排行（模型/提供商/账号）")
-        },
-        "/api/dashboard/scheduler_status": {
-            "get": op("仪表盘", "调度器状态")
-        },
         "/api/prompts/fetch": {
             "post": op_body("提示词", "抓取远端提示词", "")
         },
@@ -939,21 +909,6 @@ mod tests {
         add("/api/admin/tickets", &["get"]);
         add("/api/admin/tickets/close", &["post"]);
         add("/api/admin/tickets/reply", &["post"]);
-        add("/api/checkin-center", &["get"]);
-        add("/api/checkin-center/records", &["get"]);
-        add("/api/checkin-center/run", &["post"]);
-        add("/api/checkin-center/schedules", &["get"]);
-        add("/api/checkin-center/schedules/remove", &["post"]);
-        add("/api/checkin-center/schedules/run", &["post"]);
-        add("/api/checkin-center/settings", &["get"]);
-        add("/api/dashboard/report/cache_rates", &["get"]);
-        add("/api/dashboard/report/daily_trend", &["get"]);
-        add("/api/dashboard/report/heatmap", &["get"]);
-        add("/api/dashboard/report/models", &["get"]);
-        add("/api/dashboard/report/overview", &["get"]);
-        add("/api/dashboard/report/token_trend", &["get"]);
-        add("/api/dashboard/report/top_sources", &["get"]);
-        add("/api/dashboard/scheduler_status", &["get"]);
         add("/api/prompts/fetch", &["post"]);
         add("/api/prompts/sources", &["get"]);
         add("/api/prompts/translate", &["post"]);
@@ -1116,11 +1071,6 @@ mod tests {
             "/api/subscription/admin/subscriptions/{id}/cancel",
             &["post"],
         );
-        add(
-            "/api/subscription/admin/subscriptions/{id}/cancel",
-            &["post"],
-        );
-        add("/api/subscription/admin/subscriptions/{id}/cancel", &["post"]);
         add("/api/subscription/admin/users/{id}/subscriptions", &["get"]);
         add("/api/subscription/balance/pay", &["post"]);
         add("/api/subscription/plans", &["get"]);
@@ -1226,15 +1176,15 @@ mod tests {
         );
     }
 
-    /// 数量锚点：管理面真实路径共 200 个（199 真实注册 + openapi.json 自身）。
+    /// 数量锚点：管理面真实路径共 201 个（200 真实注册 + openapi.json 自身）。
     /// 真实路由增删会先在 covers_all_real_admin_routes 红，此断言辅助定位。
     #[test]
     fn path_count_anchor() {
         let doc = build_openapi_document();
         let n = doc["paths"].as_object().unwrap().len();
         assert_eq!(
-            n, 200,
-            "管理面路径数应为 200（199 真实注册 + openapi.json），实际 {n}"
+            n, 201,
+            "管理面路径数应为 201（200 真实注册 + openapi.json），实际 {n}"
         );
     }
 }

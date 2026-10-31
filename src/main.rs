@@ -2,6 +2,8 @@
 // bin 以私有 mod 引入同一批文件，内部未直接调用的预留 API 会被 dead_code 误报。
 // 此处统一豁免 bin 视角的结构性 dead_code，lib 视角的警告已单独清理干净。
 #![allow(dead_code)]
+// 与 lib.rs 一致：openapi.rs 的深层 `json!` 需要更大的宏递归上限。
+#![recursion_limit = "512"]
 
 mod account;
 mod account_login;
