@@ -958,12 +958,9 @@ mod tests {
     #[test]
     fn cline_fallback_keeps_pool_prefix() {
         let spec = spec_for("cline-free").expect("cline 应有目录描述");
-        assert!(spec
-            .fallback
-            .iter()
-            .all(|m| m.id.starts_with("cline-free/")
-                || m.id.starts_with("z-ai/")
-                || m.id.starts_with("poolside/")));
+        assert!(spec.fallback.iter().all(|m| m.id.starts_with("cline-free/")
+            || m.id.starts_with("z-ai/")
+            || m.id.starts_with("poolside/")));
     }
 
     #[test]

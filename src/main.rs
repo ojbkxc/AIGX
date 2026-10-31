@@ -12,6 +12,7 @@ mod auth;
 mod bridge;
 mod cache;
 mod channel;
+mod checkin;
 mod config;
 mod cron;
 mod egress;
