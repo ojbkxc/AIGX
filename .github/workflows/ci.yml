@@ -38,15 +38,37 @@ jobs:
           node-version: "22.x"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Install deps
+        working-directory: frontend
+        run: npm ci
+      # lint / 单测 / 类型检查先于构建：构建能过不代表代码合规，
+      # 也不代表 hook 依赖、i18n key、SSE 解析这些纯逻辑没退化。
+      - name: Lint (eslint, max-warnings 0)
+        working-directory: frontend
+        run: npm run lint
+      - name: Typecheck (tsc --noEmit)
+        working-directory: frontend
+        run: npm run typecheck
+      - name: Unit tests (vitest)
+        working-directory: frontend
+        run: npx vitest run
       - name: Build frontend
         working-directory: frontend
-        run: |
-          npm ci
-          npm run build
+        run: npm run build
       - name: Verify frontend output
         run: |
           test -f static/index.html
           echo "Frontend output verified: static/index.html"
+      # static/ 是入库的构建产物（发布直接用）。若源码改了但没重新构建提交，
+      # 线上静态文件会与源码不一致。这里在构建后比对，发现漂移即失败。
+      - name: Verify static/ matches source
+        run: |
+          if [ -n "$(git status --porcelain static)" ]; then
+            echo "::error::static/ 与前端源码不一致，请在 frontend 目录执行 npm run build 并提交产物"
+            git status --porcelain static | head -40
+            exit 1
+          fi
+          echo "static/ up to date"
       - name: Upload frontend artifact
         uses: actions/upload-artifact@v4
         with:
