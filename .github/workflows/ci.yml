@@ -150,3 +150,45 @@ jobs:
         run: cargo test
       - name: Verify release build
         run: cargo build --release
+
+  # 上游能力漂移巡检：Agent2API 加了新的签到家 / 模型目录家 / 改了目录端点，
+  # AIGX 没跟上时这里会红。
+  #
+  # 这类漂移**不会**让 AIGX 报错 —— provider id 还在、账号也能加，只是
+  # 「点同步模型说不支持」「签到中心里没有这家」。不主动巡检就发现不了，
+  # 等用户报「A2A 有 AIGX 没有」时已经隔了若干个版本。
+  #
+  # 巡检只比对标识符与端点常量（不拷贝上游实现代码）。拉不到上游时**跳过**
+  # 而不是失败 —— 网络抖动不该把 CI 弄红。
+  upstream-drift:
+    name: upstream drift (Agent2API)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Checkout upstream Agent2API
+        continue-on-error: true
+        id: upstream
+        uses: actions/checkout@v4
+        with:
+          repository: aimod-cc/Agent2API
+          path: upstream-agent2api
+          ref: main
+      - name: Provider capability drift check
+        if: steps.upstream.outcome == 'success'
+        run: |
+          set +e
+          python tools/sync_agent2api_providers.py --upstream upstream-agent2api --check
+          rc_data=$?
+          python tools/sync_agent2api_capabilities.py --upstream upstream-agent2api --check
+          rc_cap=$?
+          if [ $rc_data -ne 0 ] || [ $rc_cap -ne 0 ]; then
+            echo "::warning::Agent2API 上游有 AIGX 尚未跟上的 provider 能力（数据层或能力层）。"
+            echo "::warning::数据层=provider id/展示名；能力层=签到名单/模型目录/目录端点。"
+            echo "::warning::按 docs/agent2api-porting.md 的契约逐家移植后重跑本 job。"
+          fi
+          exit 0

@@ -116,6 +116,22 @@ impl KukuBridge {
             .map_err(|e| BridgeError::UpstreamDecode(e.to_string()))
     }
 
+    /// 取模型目录端点要用的查询串（`bdstoken` / `uinfo` / `uk`）。
+    ///
+    /// KukuAI 的业务接口认的是**按产品签发的 STOKEN**（不是网页登录 Cookie
+    /// 里那份通行证级 STOKEN）—— 所以目录请求必须带这三件套，光带 Cookie
+    /// 会「余额正常、模型拉不下」。
+    ///
+    /// 账号池的模型目录拉取（`account_session::catalog`）要用它，所以这里是
+    /// `pub`：两处共用一份取 token 的逻辑，不会出现「对话能通、目录 401」。
+    pub async fn catalog_query(&self) -> Result<String, BridgeError> {
+        let triple = self.tokens().await?;
+        Ok(format!(
+            "&bdstoken={}&uinfo={}&uk={}",
+            triple.bdstoken, triple.uinfo, triple.uk
+        ))
+    }
+
     /// 取（必要时刷新）会话三件套。
     async fn tokens(&self) -> Result<Triple, BridgeError> {
         let now = chrono::Utc::now().timestamp_millis();

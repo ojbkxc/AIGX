@@ -46,6 +46,9 @@ const CACHE_TTL_SECS: i64 = 600;
 /// 目录请求超时（秒）。目录是短响应，20 秒足够。
 const REQUEST_TIMEOUT_SECS: u64 = 20;
 
+/// KukuAI 目录请求的固定 query 前缀（上游要求先带这串再拼 token 三件套）。
+const WEB_QUERY: &str = "webQuery=1";
+
 /// 目录条目里模型 id 的来源字段。
 ///
 /// 不同上游的命名习惯不同：OpenAI 形态是 `id`，Agent2API 统一成 `id`，
@@ -166,6 +169,44 @@ struct CatalogSpec {
     fallback: &'static [FallbackModel],
     /// 目录端点的鉴权/解析方式（None = 用 provider 默认头 + 账号凭证）。
     sign: Option<CatalogSign>,
+    method: None,
+    body: None,
+    parser: None,
+    /// 目录端点的 HTTP 方法（None = GET）。
+    method: Option<CatalogMethod>,
+    /// 请求体（仅 POST 需要）。
+    body: Option<fn() -> Value>,
+    /// 响应解析器（None = 按 `openai_shape` 走通用解析）。
+    parser: Option<CatalogParser>,
+}
+
+/// 目录端点的 HTTP 方法。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogMethod {
+    Post,
+}
+
+/// 目录响应的专用解析器。
+///
+/// 有些上游的目录不是 OpenAI 的 `{data:[{id,…}]}` 形态（Trae 是
+/// `{config_info_list:[…]}`、Antigravity 是 `{models:{id:…}}` 字典），
+/// 通用解析读不出来 —— 这时给一家一个专用解析器。
+///
+/// 解析口径逐条对齐 Agent2API 对应 provider 的 `models.rs`（见该文件的
+/// `parse_catalog`），**不编造字段**：上游没给的上下文长度就不给。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogParser {
+    /// Trae：`{config_info_list:[{config_name, display_config:{display_name}, …}]}`。
+    Trae,
+    /// Antigravity：`{models:{"<id>":{…}}}` —— **字典**不是数组。
+    AntigravityModelsDict,
+    /// Accio：`{data:[{provider, modelList:[{modelCode, modelDisplayName,…}]}]}`。
+    Accio,
+    /// 小浣熊(raccoon)：`{data:{models:[{modelId, modelName,…}]}}`。
+    Raccoon,
+    /// KukuAI：`{data:{model_list:[…]}}` —— 顶层包络 `status.code` 判成败，
+    /// 模型名散落在嵌套结构里（递归收集 `model_name` / `modelname` / `modelid`）。
+    Kuku,
 }
 
 /// 目录端点的特殊鉴权与解析方式。
@@ -173,6 +214,10 @@ struct CatalogSpec {
 enum CatalogSign {
     /// COSY 签名（Qoder）：请求头要用账号身份加密签名，与转发链路同一套。
     Cosy,
+    /// KukuAI：目录端点要带**按产品签发的** STOKEN 三件套（bdstoken /
+    /// uinfo / uk），不是网页登录 Cookie 里那份通行证级 STOKEN ——
+    /// 光带 Cookie 的症状是「余额正常、模型拉不下」。
+    Kuku,
 }
 
 /// 静态兜底表的一行。
@@ -226,36 +271,54 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
                 },
             ],
             sign: None,
+            method: None,
+            body: None,
+            parser: None,
         }),
         "monkeycode" | "monkeycode-intl" => Some(CatalogSpec {
             path: "/api/v1/users/models",
             openai_shape: false,
             fallback: &[],
             sign: None,
+            method: None,
+            body: None,
+            parser: None,
         }),
         "commandcode" => Some(CatalogSpec {
             path: "/provider/v1/models",
             openai_shape: true,
             fallback: &[],
             sign: None,
+            method: None,
+            body: None,
+            parser: None,
         }),
         "catpaw" => Some(CatalogSpec {
             path: "/api/agent/maas/model-types",
             openai_shape: false,
             fallback: &[],
             sign: None,
+            method: None,
+            body: None,
+            parser: None,
         }),
         "codearts" => Some(CatalogSpec {
             path: "/v1/model/builtin",
             openai_shape: false,
             fallback: &[],
             sign: None,
+            method: None,
+            body: None,
+            parser: None,
         }),
         "officeace" => Some(CatalogSpec {
             path: "/v1/models",
             openai_shape: true,
             fallback: &[],
             sign: None,
+            method: None,
+            body: None,
+            parser: None,
         }),
         // Qoder 中国版 / 国际版：两地的目录不是同一份（套餐档位不同），兜底表
         // 按地区分开 —— 移植自 Agent2API `providers/qoder/models.rs` 的
@@ -265,12 +328,109 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             openai_shape: false,
             fallback: QODER_CN_FALLBACK,
             sign: Some(CatalogSign::Cosy),
+            method: None,
+            body: None,
+            parser: None,
         }),
         "qoder-intl" => Some(CatalogSpec {
             path: "/algo/api/v2/model/list?Encode=1",
             openai_shape: false,
             fallback: QODER_INTL_FALLBACK,
             sign: Some(CatalogSign::Cosy),
+            method: None,
+            body: None,
+            parser: None,
+        }),
+        // KukuAI：`GET /wenchain/genflowpro/model/list`，查询串要带按产品
+        // 签发的 STOKEN 三件套（见 `CatalogSign::Kuku` 的说明）。
+        "kuku" => Some(CatalogSpec {
+            path: "/wenchain/genflowpro/model/list",
+            openai_shape: false,
+            fallback: &[],
+            sign: Some(CatalogSign::Kuku),
+            method: None,
+            body: None,
+            parser: Some(CatalogParser::Kuku),
+        }),
+        // AutoClaw：**上游没有可拉取的模型目录接口** —— 源实现是一份静态映射
+        // 表（AutoClaw 设置页目录 + model-provider-config 支持列表）。
+        // 移植自 Agent2API `providers/autoclaw/models.rs` 的 `MODELS`。
+        "autoclaw" | "autoclaw-intl" => Some(CatalogSpec {
+            path: "",
+            openai_shape: false,
+            fallback: AUTOCLAW_FALLBACK,
+            sign: None,
+            method: None,
+            body: None,
+            parser: None,
+        }),
+        // OrcaTerm：静态兜底（上游没有可拉的清单接口）——
+        // 移植自 Agent2API `providers/orcaterm/models.rs` 的 `MODELS`。
+        "orcaterm" => Some(CatalogSpec {
+            path: "",
+            openai_shape: false,
+            fallback: ORCATERM_FALLBACK,
+            sign: None,
+            method: None,
+            body: None,
+            parser: None,
+        }),
+        // ZCode：静态表（上游没有「列模型」的公开接口）——
+        // 移植自 Agent2API `providers/zcode/models.rs` 的 `MODELS`。
+        "zcode" | "zcode-intl" => Some(CatalogSpec {
+            path: "",
+            openai_shape: false,
+            fallback: ZCODE_FALLBACK,
+            sign: None,
+            method: None,
+            body: None,
+            parser: None,
+        }),
+        // Trae SOLO：`POST /api/ide/v1/get_detail_param`。
+        // 目录是「按客户端版本给的一张表」—— `X-Ide-Version-Code` 决定拿到
+        // 哪一张，所以**没有静态兜底**（抄成常量表等于把一个时间点的读数
+        // 当契约，上游加模型我们要改代码发一版）。没刷到就是空清单。
+        "trae" => Some(CatalogSpec {
+            path: "/api/ide/v1/get_detail_param",
+            openai_shape: false,
+            fallback: &[],
+            sign: None,
+            method: Some(CatalogMethod::Post),
+            body: Some(trae_catalog_body),
+            parser: Some(CatalogParser::Trae),
+        }),
+        // Antigravity：`POST {base}/v1internal:fetchAvailableModels`。
+        // 响应是 `{models:{"<id>":{…}}}` —— **字典**不是数组。
+        "antigravity" => Some(CatalogSpec {
+            path: "/v1internal:fetchAvailableModels",
+            openai_shape: false,
+            fallback: &[],
+            sign: None,
+            method: Some(CatalogMethod::Post),
+            body: Some(antigravity_catalog_body),
+            parser: Some(CatalogParser::AntigravityModelsDict),
+        }),
+        // Accio：`POST {gw}/api/llm/config`，body 带 token。
+        // 响应是 `{data:[{provider, modelList:[{modelCode, modelDisplayName,…}]}]}`。
+        "accio" | "accio-cn" => Some(CatalogSpec {
+            path: "/api/llm/config",
+            openai_shape: false,
+            fallback: &[],
+            sign: None,
+            method: Some(CatalogMethod::Post),
+            body: Some(accio_catalog_body),
+            parser: Some(CatalogParser::Accio),
+        }),
+        // 小浣熊（上游叫 raccoon）：`GET {llmBase}/model_catalog`。
+        // 响应与 `/v3/config` 同形态：`{data:{models:[{modelId, modelName,…}]}}`。
+        "xiaohuanxiong" => Some(CatalogSpec {
+            path: "/model_catalog",
+            openai_shape: false,
+            fallback: &[],
+            sign: None,
+            method: None,
+            body: None,
+            parser: Some(CatalogParser::Raccoon),
         }),
         // Cline 免费池 / 订阅池：兜底表移植自 Agent2API
         // `providers/cline/models.rs` 的 `FALLBACK_MODELS`。上游 id 带池前缀
@@ -281,10 +441,211 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             openai_shape: false,
             fallback: CLINE_FALLBACK,
             sign: None,
+            method: None,
+            body: None,
+            parser: None,
         }),
         _ => None,
     }
 }
+
+/// AutoClaw 兜底表（上游无远程目录接口）。
+///
+/// 移植自 Agent2API `providers/autoclaw/models.rs` 的 `MODELS`：
+/// `id` 是路由 id，`route_id` 是上游真名，`reasoning`/`support_image`
+/// 是能力位，`context_window` 是上下文长度。
+const AUTOCLAW_FALLBACK: &[FallbackModel] = &[
+    FallbackModel {
+        id: "glm-5.3",
+        upstream_key: "zaicoding_glm-5.3",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 1_048_576,
+    },
+    FallbackModel {
+        id: "glm-5.3-flash",
+        upstream_key: "zai_glm-5.3-flash",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 1_048_576,
+    },
+];
+
+/// OrcaTerm 兜底表（上游无远程目录接口，客户端内置清单）。
+///
+/// 移植自 Agent2API `providers/orcaterm/models.rs` 的 `MODELS`。
+const ORCATERM_FALLBACK: &[FallbackModel] = &[
+    FallbackModel {
+        id: "hy4-preview",
+        upstream_key: "hy4-preview",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "hy3",
+        upstream_key: "hy3",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "kimi-k3",
+        upstream_key: "kimi-k3",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "glm-5.3-flash",
+        upstream_key: "glm-5.3-flash",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "glm-5.3",
+        upstream_key: "glm-5.3",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "glm-5.2",
+        upstream_key: "glm-5.2",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "deepseek-v4.1-flash",
+        upstream_key: "deepseek-v4.1-flash",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "deepseek-v4-flash",
+        upstream_key: "deepseek-v4-flash",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "deepseek-v4-pro",
+        upstream_key: "deepseek-v4-pro",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+];
+
+/// ZCode 兜底表（上游无「列模型」接口，客户端内置目录）。
+///
+/// 移植自 Agent2API `providers/zcode/models.rs` 的 `MODELS`。
+/// 视觉两档（`glm-4.6v` / `glm-5v-turbo`）上游**明确不支持思考** ——
+/// 声明成 true 会让客户端按「支持思考」发 `thinking`，上游直接 400。
+const ZCODE_FALLBACK: &[FallbackModel] = &[
+    FallbackModel {
+        id: "glm-5.3",
+        upstream_key: "glm-5.3",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 128_000,
+    },
+    FallbackModel {
+        id: "glm-5.3-flash",
+        upstream_key: "glm-5.3-flash",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 128_000,
+    },
+    FallbackModel {
+        id: "glm-5.2",
+        upstream_key: "glm-5.2",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 128_000,
+    },
+    FallbackModel {
+        id: "glm-5.1",
+        upstream_key: "glm-5.1",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 64_000,
+    },
+    FallbackModel {
+        id: "glm-5",
+        upstream_key: "glm-5",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 64_000,
+    },
+    FallbackModel {
+        id: "glm-5-turbo",
+        upstream_key: "glm-5-turbo",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 64_000,
+    },
+    FallbackModel {
+        id: "glm-4.7",
+        upstream_key: "glm-4.7",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 131_072,
+    },
+    FallbackModel {
+        id: "glm-4.6",
+        upstream_key: "glm-4.6",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 131_072,
+    },
+    FallbackModel {
+        id: "glm-4.5-air",
+        upstream_key: "glm-4.5-air",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 98_304,
+    },
+    FallbackModel {
+        id: "glm-4.6v",
+        upstream_key: "glm-4.6v",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 32_768,
+    },
+    FallbackModel {
+        id: "glm-5v-turbo",
+        upstream_key: "glm-5v-turbo",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 131_072,
+    },
+];
 
 /// Qoder 中国版兜底表。
 const QODER_CN_FALLBACK: &[FallbackModel] = &[
@@ -604,18 +965,29 @@ pub fn supports(provider: &str) -> bool {
 /// 已支持目录发现的供应商清单（管理面下拉用）。
 pub fn supported_providers() -> Vec<&'static str> {
     vec![
+        "accio",
+        "accio-cn",
+        "antigravity",
+        "autoclaw",
+        "autoclaw-intl",
         "catpaw",
         "cline",
         "cline-free",
         "cline-pass",
         "codearts",
         "commandcode",
+        "kuku",
         "loomy",
         "monkeycode",
         "monkeycode-intl",
         "officeace",
+        "orcaterm",
         "qoder",
         "qoder-intl",
+        "trae",
+        "xiaohuanxiong",
+        "zcode",
+        "zcode-intl",
     ]
 }
 
@@ -765,7 +1137,27 @@ async fn fetch_remote(
     if base.is_empty() {
         return Err("账号未配置上游地址".to_string());
     }
-    let url = format!("{base}{}", spec.path);
+    // KukuAI 的目录路径要带 STOKEN 三件套 —— 得先取 token 才能拼出完整 URL，
+    // 所以这里不是简单的 `base + path`。
+    let url = if spec.sign == Some(CatalogSign::Kuku) {
+        // `client_for` 给的是 `Arc<Client>`，而 Bridge 要 `Client`（值）——
+        // 克隆一次 reqwest::Client 是廉价的（内部是 Arc 句柄）。
+        let client = sessions
+            .client_for(session)
+            .map_err(|e| format!("出口客户端不可用：{e}"))?;
+        let bridge = crate::bridge::session::kuku::KukuBridge::new(
+            base,
+            session.credential.secret_plain(),
+            client.as_ref().clone(),
+        );
+        let query = bridge
+            .catalog_query()
+            .await
+            .map_err(|e| format!("取 KukuAI 会话令牌失败：{e}"))?;
+        format!("{base}{}?{WEB_QUERY}{query}", spec.path)
+    } else {
+        format!("{base}{}", spec.path)
+    };
 
     let client = sessions
         .client_for(session)
@@ -774,9 +1166,20 @@ async fn fetch_remote(
     // 凭证落盘是 `enc:` 编码的，取明文用 `secret_plain()`。
     let secret = session.credential.secret_plain();
 
-    let mut req = client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS));
+    let mut req = match spec.method {
+        Some(CatalogMethod::Post) => {
+            let mut builder = client
+                .post(&url)
+                .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS));
+            if let Some(body) = spec.body {
+                builder = builder.json(&body());
+            }
+            builder
+        }
+        None => client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS)),
+    };
 
     // provider 默认头 + 账号级额外头
     let mut headers: Vec<(String, String)> = Vec::new();
@@ -839,16 +1242,319 @@ async fn fetch_remote(
         .map_err(|e| format!("读取响应失败：{e}"))?;
     let value: Value =
         serde_json::from_str(&text).map_err(|e| format!("响应不是合法 JSON：{e}"))?;
+    // 各家目录响应形态不同，按家分派解析器。
+    //
     // Qoder 的目录是 `chat[]` 私有形态（不是 OpenAI 的 `data[]`），
     // 解析口径见 `parse_qoder_chat`。
-    if spec.sign == Some(CatalogSign::Cosy) {
-        let models = parse_qoder_chat(&value);
-        if models.is_empty() {
-            return Err("上游返回的模型目录为空".to_string());
-        }
-        return Ok(models);
+    let models = match spec.parser {
+        Some(CatalogParser::Trae) => parse_trae_catalog(&value),
+        Some(CatalogParser::AntigravityModelsDict) => parse_antigravity_catalog(&value),
+        Some(CatalogParser::Accio) => parse_accio_catalog(&value),
+        Some(CatalogParser::Raccoon) => parse_raccoon_catalog(&value),
+        Some(CatalogParser::Kuku) => parse_kuku_catalog(&value),
+        None if spec.sign == Some(CatalogSign::Cosy) => parse_qoder_chat(&value),
+        None => parse_response(&value, spec.openai_shape),
+    };
+    if models.is_empty() {
+        return Err("上游返回的模型目录为空".to_string());
     }
-    Ok(parse_response(&value, spec.openai_shape))
+    Ok(models)
+}
+
+/// Trae 目录请求体。
+///
+/// 口径抄自 Agent2API `providers/trae/models.rs` 的 `catalog_body`：
+/// `function` 恒为 `solo_work_lite`（各家变体都映射到它），其余字段是空值占位。
+fn trae_catalog_body() -> Value {
+    serde_json::json!({
+        "function": "solo_work_lite",
+        "config_names": Value::Null,
+        "need_prompt": false,
+        "current_config_info": Value::Null,
+        "poly_prompt": true,
+        "mode_type": Value::Null,
+        "agent_type": Value::Null,
+    })
+}
+
+/// Antigravity 目录请求体（上游不接受空体）。
+fn antigravity_catalog_body() -> Value {
+    serde_json::json!({})
+}
+
+/// Accio 目录请求体（token 由请求头带，体里只放空对象）。
+fn accio_catalog_body() -> Value {
+    serde_json::json!({})
+}
+
+/// 解析 Trae 的模型目录（`{config_info_list:[…]}`）。
+///
+/// 口径抄自 Agent2API `providers/trae/models.rs` 的 `parse_catalog`：
+/// - `config_name` 是上游真名（也是路由用的 id），空则跳过；
+/// - `display_config.display_name` 是展示名，空则跳过（那是租户自定义
+///   模型的**占位模板**，能出现在表里但不是可选模型）；
+/// - `config_switch == false`（**显式 false** 才过滤，缺省按启用处理 ——
+///   上游删字段时不能把整张表滤空）与 `is_invisible_to_user == true`
+///   （内部 subagent / 实验通道）两类要滤掉。
+fn parse_trae_catalog(payload: &Value) -> Vec<CatalogEntry> {
+    let Some(entries) = payload.get("config_info_list").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out: Vec<CatalogEntry> = Vec::with_capacity(entries.len());
+    let mut seen: Vec<String> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let config_name = entry
+            .get("config_name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if config_name.is_empty() {
+            continue;
+        }
+        let lowered = config_name.to_lowercase();
+        if seen.contains(&lowered) {
+            continue;
+        }
+        seen.push(lowered);
+        if entry.get("config_switch").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        if entry.get("is_invisible_to_user").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let display_name = entry
+            .get("display_config")
+            .and_then(|config| config.get("display_name"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if display_name.is_empty() {
+            continue;
+        }
+        // 上下文长度在 `context_window_tokens.dev`
+        let context = entry
+            .pointer("/context_window_tokens/dev")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok());
+        let mut capabilities: Vec<String> = Vec::new();
+        if entry.get("supports_reasoning").and_then(Value::as_bool) == Some(true)
+            || entry
+                .pointer("/thinking_config/enabled")
+                .and_then(Value::as_bool)
+                == Some(true)
+        {
+            capabilities.push("reasoning".to_string());
+        }
+        capabilities.push("tool".to_string());
+        out.push(CatalogEntry {
+            id: display_name,
+            upstream: Some(config_name),
+            context_length: context,
+            capabilities,
+        });
+    }
+    out
+}
+
+/// 解析 Antigravity 的模型目录（`{models:{"<id>":{…}}}` —— 字典）。
+fn parse_antigravity_catalog(payload: &Value) -> Vec<CatalogEntry> {
+    let Some(models) = payload.get("models").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut out: Vec<CatalogEntry> = Vec::with_capacity(models.len());
+    for (id, meta) in models {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut capabilities: Vec<String> = Vec::new();
+        if meta.get("supportsImages").and_then(Value::as_bool) == Some(true)
+            || meta.get("supports_images").and_then(Value::as_bool) == Some(true)
+        {
+            capabilities.push("vision".to_string());
+        }
+        if meta.get("supportsReasoning").and_then(Value::as_bool) == Some(true) {
+            capabilities.push("reasoning".to_string());
+        }
+        capabilities.push("tool".to_string());
+        let context = meta
+            .get("maxInputTokens")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok());
+        out.push(CatalogEntry {
+            id: trimmed.to_string(),
+            upstream: None,
+            context_length: context,
+            capabilities,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// 解析 Accio 的模型目录（`{data:[{provider, modelList:[…]}]}`）。
+///
+/// 口径抄自 Agent2API `providers/accio/models.rs`：外层是 **provider 数组**
+/// （不是 `{providers:[…]}` 对象 —— 早先按对象解析导致清单恒为空而 HTTP 是
+/// 200，前端只看到「上游目录里没有可见模型」），模型在 `modelList` 里。
+/// `visible == false` 的条目不列。
+fn parse_accio_catalog(payload: &Value) -> Vec<CatalogEntry> {
+    let Some(providers) = payload.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out: Vec<CatalogEntry> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for provider in providers {
+        let Some(list) = provider.get("modelList").and_then(Value::as_array) else {
+            continue;
+        };
+        for model in list {
+            if model.get("visible").and_then(Value::as_bool) == Some(false) {
+                continue;
+            }
+            let code = model
+                .get("modelCode")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if code.is_empty() {
+                continue;
+            }
+            let display = model
+                .get("modelDisplayName")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let id = if display.is_empty() {
+                code.clone()
+            } else {
+                display.to_string()
+            };
+            if seen.contains(&id) {
+                continue;
+            }
+            seen.push(id.clone());
+            let mut capabilities: Vec<String> = Vec::new();
+            if model.get("supportImage").and_then(Value::as_bool) == Some(true) {
+                capabilities.push("vision".to_string());
+            }
+            capabilities.push("tool".to_string());
+            out.push(CatalogEntry {
+                id,
+                upstream: Some(code),
+                context_length: None,
+                capabilities,
+            });
+        }
+    }
+    out
+}
+
+/// 解析 KukuAI 的模型目录。
+///
+/// 口径抄自 Agent2API `providers/kuku/models.rs` 的 `extract_model_names`：
+/// 模型名散落在嵌套结构里，所以**递归**收集 `model_name` / `modelname` /
+/// `modelid` 三种键的字符串值，排序后去重。
+fn parse_kuku_catalog(payload: &Value) -> Vec<CatalogEntry> {
+    // 顶层包络：业务错误也在 200 里，判据在 `status.code`。
+    if let Some(code) = payload.pointer("/status/code").and_then(Value::as_i64) {
+        if code != 0 {
+            return Vec::new();
+        }
+    }
+    let mut names: Vec<String> = Vec::new();
+    collect_model_names(payload, &mut names);
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|id| CatalogEntry {
+            id,
+            upstream: None,
+            context_length: None,
+            capabilities: vec!["tool".to_string()],
+        })
+        .collect()
+}
+
+/// 递归收集 KukuAI 目录里的模型名。
+fn collect_model_names(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let lower = key.to_ascii_lowercase();
+                if matches!(lower.as_str(), "model_name" | "modelname" | "modelid")
+                    && child.is_string()
+                {
+                    if let Some(text) = child.as_str() {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            out.push(trimmed.to_string());
+                            continue;
+                        }
+                    }
+                }
+                collect_model_names(child, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_model_names(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 解析小浣熊的模型目录（`{data:{models:[{modelId, modelName,…}]}}`）。
+fn parse_raccoon_catalog(payload: &Value) -> Vec<CatalogEntry> {
+    let Some(models) = payload
+        .pointer("/data/models")
+        .or_else(|| payload.get("models"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<CatalogEntry> = Vec::with_capacity(models.len());
+    let mut seen: Vec<String> = Vec::with_capacity(models.len());
+    for model in models {
+        let id = model
+            .get("modelId")
+            .or_else(|| model.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        if seen.contains(&id) {
+            continue;
+        }
+        seen.push(id.clone());
+        let mut capabilities: Vec<String> = Vec::new();
+        if model.get("is_reasoning").and_then(Value::as_bool) == Some(true) {
+            capabilities.push("reasoning".to_string());
+        }
+        if model.get("is_vl").and_then(Value::as_bool) == Some(true) {
+            capabilities.push("vision".to_string());
+        }
+        capabilities.push("tool".to_string());
+        let context = model
+            .get("maxInputTokens")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok());
+        out.push(CatalogEntry {
+            id,
+            upstream: None,
+            context_length: context,
+            capabilities,
+        });
+    }
+    out
 }
 
 /// 解析 Qoder 的模型目录（`{chat:[{key, display_name, is_vl, ...}]}`）。
@@ -1166,6 +1872,123 @@ mod tests {
         let spec = spec_for("qoder").expect("qoder 应有目录描述");
         assert_eq!(spec.sign, Some(CatalogSign::Cosy));
         assert!(spec.path.contains("model/list"));
+    }
+
+    #[test]
+    fn trae_catalog_filters_invisible_and_placeholders() {
+        let payload = serde_json::json!({
+            "config_info_list": [
+                {
+                    "config_name": "deepseek-v4-pro",
+                    "display_config": {"display_name": "DeepSeek V4 Pro"},
+                    "context_window_tokens": {"dev": 128000},
+                    "supports_reasoning": true
+                },
+                // 内部 subagent：不可见
+                {
+                    "config_name": "browser_use_subagent",
+                    "display_config": {"display_name": "Browser Use"},
+                    "is_invisible_to_user": true
+                },
+                // 租户自定义占位模板：展示名为空
+                {"config_name": "custom_model_x", "display_config": {"display_name": ""}},
+                // 显式下线
+                {
+                    "config_name": "retired",
+                    "display_config": {"display_name": "Retired"},
+                    "config_switch": false
+                }
+            ]
+        });
+        let entries = parse_trae_catalog(&payload);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "DeepSeek V4 Pro");
+        assert_eq!(entries[0].upstream.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(entries[0].context_length, Some(128000));
+        assert!(entries[0].capabilities.iter().any(|c| c == "reasoning"));
+    }
+
+    #[test]
+    fn antigravity_catalog_reads_models_dict() {
+        let payload = serde_json::json!({
+            "models": {
+                "gemini-3-pro": {"maxInputTokens": 1048576, "supportsImages": true},
+                "gemini-3-flash": {}
+            }
+        });
+        let entries = parse_antigravity_catalog(&payload);
+        assert_eq!(entries.len(), 2);
+        // 按 id 排序，字典顺序不固定
+        assert_eq!(entries[0].id, "gemini-3-flash");
+        assert_eq!(entries[1].id, "gemini-3-pro");
+        assert_eq!(entries[1].context_length, Some(1048576));
+        assert!(entries[1].capabilities.iter().any(|c| c == "vision"));
+    }
+
+    #[test]
+    fn accio_catalog_flattens_provider_model_lists() {
+        let payload = serde_json::json!({
+            "data": [
+                {
+                    "provider": "openai",
+                    "modelList": [
+                        {"modelCode": "code-1", "modelDisplayName": "GPT 6 Astra", "visible": true},
+                        {"modelCode": "hidden", "modelDisplayName": "Hidden", "visible": false}
+                    ]
+                }
+            ]
+        });
+        let entries = parse_accio_catalog(&payload);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "GPT 6 Astra");
+        assert_eq!(entries[0].upstream.as_deref(), Some("code-1"));
+    }
+
+    #[test]
+    fn raccoon_catalog_reads_nested_models() {
+        let payload = serde_json::json!({
+            "data": {"models": [
+                {"modelId": "spark-x", "is_reasoning": true, "is_vl": true, "maxInputTokens": 128000}
+            ]}
+        });
+        let entries = parse_raccoon_catalog(&payload);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "spark-x");
+        assert_eq!(entries[0].context_length, Some(128000));
+        assert!(entries[0].capabilities.iter().any(|c| c == "vision"));
+    }
+
+    #[test]
+    fn kuku_catalog_collects_nested_model_names() {
+        let payload = serde_json::json!({
+            "status": {"code": 0, "msg": "ok"},
+            "data": {"model_list": [
+                {"model_name": "spark-x", "extra": {"modelId": "nested-id"}}
+            ]}
+        });
+        let entries = parse_kuku_catalog(&payload);
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&"spark-x"));
+        assert!(ids.contains(&"nested-id"));
+    }
+
+    #[test]
+    fn kuku_catalog_rejects_business_error_envelope() {
+        let payload = serde_json::json!({
+            "status": {"code": 4001, "msg": "not logged in"},
+            "data": {"model_list": [{"model_name": "should-not-appear"}]}
+        });
+        assert!(parse_kuku_catalog(&payload).is_empty());
+    }
+
+    #[test]
+    fn static_only_providers_have_no_remote_path() {
+        // 上游没有可拉的目录接口的三家：path 为空 → 走静态兜底
+        for kind in ["autoclaw", "orcaterm", "zcode"] {
+            let spec = spec_for(kind).expect("应有目录描述");
+            assert!(spec.path.is_empty(), "{kind} 不该有远程端点");
+            assert!(!spec.fallback.is_empty(), "{kind} 应有静态兜底表");
+        }
     }
 
     #[test]
