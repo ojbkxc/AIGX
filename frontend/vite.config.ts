@@ -1,6 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 // tailwindcss @tailwindcss/vite 插件将在依赖安装后的 Phase 2 启用：
@@ -10,6 +10,7 @@ import { resolve } from 'node:path';
 // build 结束后往产物目录写 version.json：后端 update::static_version()
 // 靠它判「磁盘上的前端与二进制是否同版」（versionMismatch）。没有这个文件，
 // 「手动换过二进制 / 半更新」在生产上永远检测不出来。
+// 输出必须逐字节确定（无时间戳），否则 CI 的 static 同步闸门永远过不了。
 function emitStaticVersion(): import('vite').Plugin {
   return {
     name: 'emit-static-version',
@@ -17,13 +18,17 @@ function emitStaticVersion(): import('vite').Plugin {
     closeBundle() {
       const outDir = resolve(__dirname, '../static');
       mkdirSync(outDir, { recursive: true });
-      const manifest = {
-        // AIGX_VERSION 由 CI 注入；本地构建没有就写 null（后端把 null 当「判不出」）
-        version: process.env.AIGX_VERSION ?? null,
-        builtAt: process.env.SOURCE_DATE_EPOCH
-          ? Number(process.env.SOURCE_DATE_EPOCH) * 1000
-          : Date.now(),
-      };
+      let version: string | null = process.env.AIGX_VERSION ?? null;
+      if (!version) {
+        try {
+          const raw = readFileSync(resolve(__dirname, '../VERSION'), 'utf8').trim();
+          version = raw || null;
+        } catch {
+          version = null;
+        }
+      }
+      // 内容必须确定性：不写时间戳（否则 CI 的 static 同步闸门永远红）
+      const manifest = { version };
       writeFileSync(
         resolve(outDir, 'version.json'),
         JSON.stringify(manifest, null, 2) + '\n',
