@@ -1584,6 +1584,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/account-sessions/:id/reset-cooldown",
             post(api::admin::account_sessions::handle_reset_account_session_cooldowns),
         )
+        // 账号级余额/额度查询（qoder / autoclaw / 小浣熊 / zcode）
+        .route(
+            "/api/account-sessions/:id/balance",
+            get(api::admin::account_sessions::handle_account_balance),
+        )
         // 上游模型目录发现（抄 Agent2API 的 provider 模型目录）
         .route(
             "/api/account-sessions/catalog/sync",

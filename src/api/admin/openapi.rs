@@ -798,6 +798,9 @@ fn paths_accounts_network() -> Value {
         "/api/account-sessions/{id}/reset-cooldown": {
             "post": op_params("账号池", "清除账号冷却与最近错误", &[path_param("id")])
         },
+        "/api/account-sessions/{id}/balance": {
+            "get": op_params("账号池", "账号级余额/额度查询（qoder/autoclaw/小浣熊/zcode）", &[path_param("id")])
+        },
         "/api/update/status": {
             "get": op("更新", "服务器更新状态（版本/下载进度/待重启/可原地更新）")
         },
@@ -922,6 +925,7 @@ mod tests {
         add("/api/account-sessions/stats", &["get"]);
         add("/api/account-sessions/{id}", &["delete", "patch", "put"]);
         add("/api/account-sessions/{id}/reset-cooldown", &["post"]);
+        add("/api/account-sessions/{id}/balance", &["get"]);
         add("/api/account-sessions/{id}/test", &["post"]);
         add("/api/update/apply", &["post"]);
         add("/api/update/check", &["post"]);
@@ -1178,12 +1182,13 @@ mod tests {
 
     /// 数量锚点：文档路径数必须等于路由对照表的条目数。
     ///
-    /// **不写死数字** —— 路由增删时这个数字必然要跟着改,而改的人往往只改了
-    /// 一处(文档或对照表),于是这个断言变成了「每次加路由都要手改的常量」。
-    /// 改成从 [`real_admin_routes`] 派生后:
-    /// - 文档多了一条没进表 → `covers_all_real_admin_routes` 红(逐条比对);
-    /// - 文档少了一条 → 本断言红(数量不等);
-    /// 两边同步改了就都绿,不用记着改常量。
+    /// **不写死数字** —— 路由增删时这个数字必然要跟着改，而改的人往往只改了
+    /// 一处（文档或对照表），于是这个断言变成了「每次加路由都要手改的常量」。
+    /// 改成从 [`real_admin_routes`] 派生后：
+    /// - 文档多了一条没进表 → `covers_all_real_admin_routes` 红（逐条比对）；
+    /// - 文档少了一条 → 本断言红（数量不等）；
+    ///
+    /// 两边同步改了就都绿，不用记着改常量。
     #[test]
     fn path_count_anchor() {
         let doc = build_openapi_document();

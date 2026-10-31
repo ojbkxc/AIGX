@@ -821,6 +821,45 @@ pub async fn handle_test_account_session(
     })))
 }
 
+/// GET /api/account-sessions/:id/balance —— 账号级余额/额度查询。
+///
+/// 按 provider 分派（qoder / autoclaw / 小浣熊 / zcode），归一形状见
+/// `account_session::balance`。查不到总量时 `available` 为 null（≠ 0）。
+pub async fn handle_account_balance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let Some(session) = state.account_sessions.get(&id) else {
+        return Err(error_response(
+            "Account session not found",
+            StatusCode::NOT_FOUND,
+        ));
+    };
+    if !crate::account_session::balance::supports_balance(&session.provider) {
+        return Err(error_response(
+            "该供应商暂不支持余额查询",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    match crate::account_session::balance::query_balance(&state.http_client, &session).await {
+        Ok(balance) => Ok(Json(json!({
+            "success": true,
+            "data": {
+                "available": balance.available,
+                "unit": balance.unit,
+                "wallets": balance.wallets,
+                "subscription": balance.subscription,
+            },
+        }))),
+        Err(message) => Ok(Json(json!({
+            "success": false,
+            "error": message,
+        }))),
+    }
+}
+
 /// 账号型渠道的渠道级探活（供 `handle_test_channel` 复用）。
 pub async fn probe_channel(state: &AppState, channel: &Channel) -> ChannelTestResult {
     let started = Instant::now();

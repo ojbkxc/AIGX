@@ -12,6 +12,7 @@
 //! - [`import`]：从本机其他 AI 客户端（cc-switch）导入账号
 
 pub mod adapter;
+pub mod balance;
 pub mod catalog;
 pub mod import;
 pub mod maintenance;

@@ -257,7 +257,7 @@ async fn refresh_qoder(
             "Qoder 刷新令牌已失效或与地区不符，请重新登录".to_string(),
         ));
     }
-    if status < 200 || status >= 300 {
+    if !(200..300).contains(&status) {
         return Err(RefreshOutcome::Failed(format!(
             "Qoder 刷新被拒（HTTP {status}）"
         )));
@@ -292,7 +292,8 @@ async fn refresh_qoder(
 const AUTOCLAW_APPID: &str = "100003";
 const AUTOCLAW_APPKEY: &str = "38d2391985e2369a5fb8227d8e6cd5e5";
 
-fn autoclaw_headers(access: &str) -> Vec<(String, String)> {
+/// AutoClaw 鉴权签名头（MD5 appId&ts&appKey）——刷新/余额/签到共用一套。
+pub(crate) fn autoclaw_headers(access: &str) -> Vec<(String, String)> {
     let ts = chrono::Utc::now().timestamp().to_string();
     let sign = format!(
         "{:x}",
@@ -378,7 +379,7 @@ async fn refresh_autoclaw(
             "AutoClaw 登录态已失效，请重新登录".to_string(),
         ));
     }
-    if status < 200 || status >= 300 {
+    if !(200..300).contains(&status) {
         return Err(RefreshOutcome::Failed(format!(
             "AutoClaw 刷新被拒（HTTP {status}）"
         )));
@@ -466,7 +467,7 @@ async fn refresh_trae(
             "Trae 刷新令牌已作废，请重新登录".to_string(),
         ));
     }
-    if status < 200 || status >= 300 {
+    if !(200..300).contains(&status) {
         return Err(RefreshOutcome::Failed(format!(
             "Trae 刷新被拒（HTTP {status}）"
         )));
