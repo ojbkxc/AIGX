@@ -626,6 +626,22 @@ pub fn stream_request_timeout() -> Duration {
     Duration::from_secs(24 * 3600)
 }
 
+/// 下游 SSE 保活帧的间隔。
+pub const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// 下游 SSE 保活帧的注释文本。
+///
+/// 用 SSE 注释行（以 `:` 开头）而非 `event: ping`：
+/// - OpenAI / Anthropic 的官方流里都**没有** `ping` 事件，硬塞一个 `event: ping`
+///   会让严格按事件类型解析的 SDK 收到未知事件；
+/// - 注释行按 SSE 规范必须被客户端忽略，但同时会刷新 TCP/CDN/反向代理的
+///   空闲计时器 —— 这正是保活要的效果。
+///
+/// axum 的 `KeepAlive::new()` 默认发的是空注释 `:`，功能等价但日志/抓包时
+/// 看不出意图，这里显式写明 `keepalive`，与 Responses 透传路径
+/// （`sse::KeepaliveStream` 发的 `: keepalive\n\n`）保持一致。
+pub const SSE_KEEPALIVE_TEXT: &str = "keepalive";
+
 /// SSE 首事件守卫：等待流的第一个事件，`sse_first_event_deadline()` 内到达则
 /// 原样重组返回；未到则判 `BridgeError::Timeout`（上游挂起）。
 ///

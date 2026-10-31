@@ -940,9 +940,14 @@ pub async fn handle_messages(
                 _guard: super::openai::StreamUsageGuard::new(billing),
             };
             Sse::new(guarded)
+                // Anthropic 上游自带 `event: ping`，但那是**上游**的心跳，
+                // 不会自动转发（bridge 里 ping 被丢弃，见 parse_stream_event）。
+                // 这里给下游补 SSE 注释行保活，语义与 OpenAI 侧一致：
+                // 注释行被客户端忽略，但能刷新代理/CDN 的空闲计时器。
                 .keep_alive(
                     axum::response::sse::KeepAlive::new()
-                        .interval(std::time::Duration::from_secs(15)),
+                        .interval(crate::bridge::SSE_KEEPALIVE_INTERVAL)
+                        .text(crate::bridge::SSE_KEEPALIVE_TEXT),
                 )
                 .into_response()
         }

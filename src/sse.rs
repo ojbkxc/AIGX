@@ -295,4 +295,24 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0], SseEvent::Data("hello".into()));
     }
+
+    /// 保活帧必须是 SSE **注释行**（以 `:` 开头），不能是 `event: ping`。
+    ///
+    /// OpenAI / Anthropic 的官方流里都没有 `ping` 事件，硬塞会让严格按事件
+    /// 类型解析的 SDK 收到未知事件；注释行按 SSE 规范必须被忽略，但同样能
+    /// 刷新 TCP/CDN 的空闲计时器 —— 这正是保活的目的。
+    #[test]
+    fn keepalive_frame_is_an_sse_comment() {
+        let frame = b": keepalive\n\n";
+        assert_eq!(
+            frame.first(),
+            Some(&b':'),
+            "保活帧必须以冒号开头（SSE 注释行）"
+        );
+        assert!(!frame.starts_with(b"event:"), "不能伪装成事件帧");
+
+        // 注释行不产生任何事件：解码器应当忽略它
+        let mut decoder = SseDecoder::new();
+        assert!(decoder.feed(frame).is_empty(), "注释行不应被解析成数据事件");
+    }
 }

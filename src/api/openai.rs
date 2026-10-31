@@ -2025,7 +2025,14 @@ pub async fn handle_chat_completions(
             };
 
             Sse::new(guarded)
-                .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+                // 保活用 SSE 注释行（` : keepalive`），不是 `event: ping`：
+                // OpenAI 标准流里没有 ping 事件，硬塞会让严格解析的 SDK 收到
+                // 未知事件；注释行按规范被忽略，但能刷新 TCP/CDN 空闲计时器。
+                .keep_alive(
+                    KeepAlive::new()
+                        .interval(crate::bridge::SSE_KEEPALIVE_INTERVAL)
+                        .text(crate::bridge::SSE_KEEPALIVE_TEXT),
+                )
                 .into_response()
         }
     } else {
@@ -2825,7 +2832,7 @@ pub async fn handle_responses(
 
             let keepalive_stream = crate::sse::KeepaliveStream::new(
                 passthrough_stream,
-                std::time::Duration::from_secs(15),
+                crate::bridge::SSE_KEEPALIVE_INTERVAL,
             );
             let guarded = GuardedStream {
                 inner: Box::pin(keepalive_stream),
