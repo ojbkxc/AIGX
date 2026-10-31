@@ -1,7 +1,7 @@
 # 默认：Git 自行判断文本文件并按 core.autocrlf 转换（Windows 本地 CRLF，
 # 仓库内 LF）。Rust/TS 源码适用默认规则。
 
-# static/ 是前端构建产物（vite 直接写出 LF）。若参与 EOL 转换，Windows 上
-# checkout 成 CRLF、CI 重新构建又得到 LF，`git status` 恒显示已修改，
-# 「产物与源码同步」的 CI 闸门会产生假阳性。
-static/** -text
+# static/ 是前端构建产物（vite 写出 LF）。这里强制 text + eol=lf：
+# 仓库内与工作区都用 LF，避免「Windows 本地构建出 CRLF / CI 构建出 LF」
+# 造成 `git status` 恒定漂移、产物同步闸门假阳性。
+static/** text eol=lf
