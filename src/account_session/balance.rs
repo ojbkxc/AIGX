@@ -489,7 +489,9 @@ async fn kuku(
             .pointer("/status/msg")
             .and_then(Value::as_str)
             .unwrap_or("未知错误");
-        return Err(format!("KukuAI 积分查询失败（status.code={code}：{message}）"));
+        return Err(format!(
+            "KukuAI 积分查询失败（status.code={code}：{message}）"
+        ));
     }
     // data.list 各类资产里取 token 那项（找不到回落第一项），totalPoint 是字符串
     let list = value
@@ -574,11 +576,10 @@ async fn loomy(
         .cloned()
         .unwrap_or(Value::Null);
     let pick = |key: &str| -> Option<f64> {
-        data.get(key)
-            .and_then(|v| {
-                v.as_f64()
-                    .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
-            })
+        data.get(key).and_then(|v| {
+            v.as_f64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+        })
     };
     let permanent = pick("balance").unwrap_or(0.0);
     let daily = pick("dailyBalance").unwrap_or(0.0);
@@ -588,7 +589,8 @@ async fn loomy(
         "balance": daily,
     });
     // 赠送额度的「剩余/上限」是独立展示口径，有就带上，没有不编造
-    if let (Some(remaining), Some(limit)) = (pick("dailyRemainingPoints"), pick("dailyLimitPoints")) {
+    if let (Some(remaining), Some(limit)) = (pick("dailyRemainingPoints"), pick("dailyLimitPoints"))
+    {
         if let Some(obj) = daily_wallet.as_object_mut() {
             obj.insert("remaining".to_string(), json!(remaining));
             obj.insert("limit".to_string(), json!(limit));
@@ -628,10 +630,12 @@ async fn officeace(
         );
     };
     // 网关根 = 模型网关基址去掉尾 /v2（订阅族接口挂在网关根上）
-    let base = crate::account_session::adapter::effective_base_url(session)
-        .unwrap_or_default();
+    let base = crate::account_session::adapter::effective_base_url(session).unwrap_or_default();
     let base = base.trim().trim_end_matches('/');
-    let base = base.strip_suffix("/v2").unwrap_or(base).trim_end_matches('/');
+    let base = base
+        .strip_suffix("/v2")
+        .unwrap_or(base)
+        .trim_end_matches('/');
     if base.is_empty() {
         return Err("OfficeAce 账号缺少模型网关基址".to_string());
     }
@@ -697,7 +701,12 @@ async fn officeace(
         if expire > 0 && (plan_expire == 0 || expire < plan_expire) {
             plan_expire = expire;
         }
-        for quota in sku.get("quotas").and_then(Value::as_array).into_iter().flatten() {
+        for quota in sku
+            .get("quotas")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             let expired = parse_ms(quota.get("expired_time"));
             if expired > 0 && expired <= now_ms {
                 continue;
@@ -708,7 +717,11 @@ async fn officeace(
                     plan_used += num_of(quota.get("current_value"));
                     let total = num_of(quota.get("sku_value"));
                     let used = num_of(quota.get("current_value"));
-                    let sku_name = sku.get("sku_name").and_then(Value::as_str).unwrap_or("").trim();
+                    let sku_name = sku
+                        .get("sku_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
                     wallets.push(json!({
                         "type": "plan",
                         "displayName": if sku_name.is_empty() { "套餐积分" } else { sku_name },
@@ -726,8 +739,16 @@ async fn officeace(
         }
     }
     // 奖励积分：bonuses（全量字段名宽口径）
-    let bonus_total = num_of(value.pointer("/data/bonus/total").or_else(|| value.pointer("/bonus/total")));
-    let bonus_used = num_of(value.pointer("/data/bonus/used").or_else(|| value.pointer("/bonus/used")));
+    let bonus_total = num_of(
+        value
+            .pointer("/data/bonus/total")
+            .or_else(|| value.pointer("/bonus/total")),
+    );
+    let bonus_used = num_of(
+        value
+            .pointer("/data/bonus/used")
+            .or_else(|| value.pointer("/bonus/used")),
+    );
     let bonus_expire = parse_ms(
         value
             .pointer("/data/bonus/expires_at")
@@ -741,7 +762,10 @@ async fn officeace(
         0.0
     };
     // 套餐钱包没有逐条配额时至少给一行聚合读数（与上游 summarize 的 wallets 形状对齐）
-    if !wallets.iter().any(|w| w.get("type") == Some(&json!("plan"))) {
+    if !wallets
+        .iter()
+        .any(|w| w.get("type") == Some(&json!("plan")))
+    {
         wallets.insert(
             0,
             json!({
@@ -806,7 +830,8 @@ async fn accio(
         ("Authorization".to_string(), format!("Bearer {secret}")),
         ("Accept".to_string(), "application/json".to_string()),
     ];
-    let (status, quota) = get_json(client, &format!("{base}/api/entitlement/quota"), &headers).await?;
+    let (status, quota) =
+        get_json(client, &format!("{base}/api/entitlement/quota"), &headers).await?;
     if status == 401 || status == 403 {
         return Err("Accio 凭证已失效，请重新登录".to_string());
     }
@@ -848,7 +873,13 @@ async fn accio(
         wallet["detail"] = Value::String(format!("{text} 后重置"));
     }
     // 订阅可选：失败当「没有」
-    let subscription = match get_json(client, &format!("{base}/api/entitlement/currentSubscription"), &headers).await {
+    let subscription = match get_json(
+        client,
+        &format!("{base}/api/entitlement/currentSubscription"),
+        &headers,
+    )
+    .await
+    {
         Ok((s, v)) if (200..300).contains(&s) => {
             let text = |keys: &[&str]| -> Value {
                 keys.iter()
