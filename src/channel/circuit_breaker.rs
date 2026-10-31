@@ -224,12 +224,10 @@ impl CircuitBreaker {
         if Self::is_half_open(&entry, self.failure_threshold, self.cooldown_duration) {
             // HalfOpen：在飞租约存在 → 拒绝读（上游正在被试探）；否则放行
             let now = Instant::now();
-            return match entry.probe_lease_until {
-                Some(t) if t > now => false,
-                _ => true,
-            };
+            !matches!(entry.probe_lease_until, Some(t) if t > now)
+        } else {
+            Self::state_allows(&entry, self.failure_threshold, self.cooldown_duration)
         }
-        Self::state_allows(&entry, self.failure_threshold, self.cooldown_duration)
     }
 
     /// 判断渠道是否处于 HalfOpen（失败计数达阈值且冷却已过，待试探）。
@@ -327,7 +325,6 @@ impl CircuitBreaker {
             FailureType::ClientError => {
                 entry.failure_type = Some(failure_type);
                 entry.last_failure_time = Some(Instant::now());
-                return;
             }
             FailureType::AuthFailed | FailureType::PaymentRequired => {
                 // 永久性故障：放大计数 + 长冷却，避免反复重试坏密钥/空余额渠道
