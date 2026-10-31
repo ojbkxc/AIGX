@@ -612,6 +612,51 @@ export interface CatalogSyncResult {
   error_count: number;
 }
 
+// ==================== 从本机客户端导入账号 ====================
+
+/** cc-switch 扫描到的一条供应商 */
+export interface ImportSourceEntry {
+  id: string;
+  appType: string;
+  name: string;
+  notes: string;
+  baseUrl: string;
+  apiKey: string;
+  protocol: string;
+  models: string[];
+  modelMappings: Array<{ alias: string; target: string }>;
+  importable: boolean;
+  reason: string;
+}
+
+/** GET /api/account-sessions/import/sources 响应 */
+export interface ImportSources {
+  available: boolean;
+  path: string;
+  reason: string;
+  total: number;
+  providers: ImportSourceEntry[];
+}
+
+/** 提交导入的一条条目 */
+export interface ImportEntry {
+  id: string;
+  name: string;
+  base_url: string;
+  api_key: string;
+  protocol: string;
+  models: string[];
+  model_mappings: Array<{ alias: string; target: string }>;
+}
+
+/** POST /api/account-sessions/import 响应 */
+export interface ImportRunResult {
+  created: Array<{ id: string; name: string; base_url: string; models: string[] }>;
+  errors: Array<{ id: string; name: string; error: string }>;
+  created_count: number;
+  error_count: number;
+}
+
 // ==================== 统一模型管理（渠道 + 账号池合流） ====================
 
 /** 模型的一个承载方：渠道直连，或账号池里的某个账号 */

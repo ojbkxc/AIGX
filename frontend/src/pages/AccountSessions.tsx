@@ -7,13 +7,14 @@ import { CUSTOM_PROTOCOLS, PRESET_PROVIDERS, normalizeUrl, presetKind } from '..
 import { useToast } from '../components/Toast';
 import AddAccountDialog from '../components/AddAccountDialog';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, EmptyState, Input, Select, SkeletonTable, Tabs, Textarea } from '../components/ui';
+import { Button, Card, EmptyState, Input, Loading, Select, SkeletonTable, Tabs, Textarea } from '../components/ui';
 import type {
   AccountProviderItem,
   AccountSessionItem,
   AccountSessionStatsItem,
   CatalogSyncAccount,
   ChannelItem,
+  ImportSourceEntry,
 } from '../types';
 import './AccountSessions.css';
 
@@ -433,6 +434,79 @@ export default function AccountSessions(): JSX.Element {
     }
   };
 
+  // ── 从本机客户端导入（cc-switch）──
+  const [showImportScan, setShowImportScan] = useState(false);
+  const [importScan, setImportScan] = useState<{
+    available: boolean;
+    path: string;
+    reason: string;
+    providers: ImportSourceEntry[];
+  } | null>(null);
+  const [importPicked, setImportPicked] = useState<Set<string>>(new Set());
+  const [importing, setImporting] = useState(false);
+
+  const openImportScan = async (): Promise<void> => {
+    setShowImportScan(true);
+    setImportScan(null);
+    setImportPicked(new Set());
+    try {
+      const res = await api.scanImportSources();
+      const data = res.data;
+      if (data) {
+        setImportScan({
+          available: data.available ?? false,
+          path: data.path ?? '',
+          reason: data.reason ?? '',
+          providers: data.providers ?? [],
+        });
+        // 默认勾选全部可导入项
+        setImportPicked(
+          new Set(
+            (data.providers ?? [])
+              .filter((p) => p.importable)
+              .map((p) => p.id),
+          ),
+        );
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleRunImport = async (): Promise<void> => {
+    if (!importScan) return;
+    const picked = importScan.providers.filter((p) => importPicked.has(p.id));
+    if (picked.length === 0) {
+      addToast(t('请至少勾选一项'), 'error');
+      return;
+    }
+    setImporting(true);
+    try {
+      const res = await api.runImport(
+        picked.map((p) => ({
+          id: p.id,
+          name: p.name,
+          base_url: p.baseUrl,
+          api_key: p.apiKey,
+          protocol: p.protocol,
+          models: p.models ?? [],
+          model_mappings: p.modelMappings ?? [],
+        })),
+      );
+      const data = res.data;
+      addToast(
+        `${t('导入完成')}: ${data?.created_count ?? 0} ${t('个渠道')}` +
+          (data?.error_count ? ` · ${data?.error_count} ${t('个失败')}` : ''),
+      );
+      setShowImportScan(false);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImporting(false);
+    }
+  };
+
   // ── 上游模型目录发现（抄 Agent2API 的 provider 模型目录）──
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [catalogModal, setCatalogModal] = useState<CatalogSyncAccount[] | null>(null);
@@ -661,6 +735,9 @@ export default function AccountSessions(): JSX.Element {
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <Button variant="outline" onClick={() => void openRotation()}>
               <SlidersHorizontal size={14} /> {t('账号路由')}
+            </Button>
+            <Button variant="outline" onClick={() => void openImportScan()}>
+              <Download size={14} /> {t('从本机导入')}
             </Button>
             <Button variant="outline" onClick={openBulk} disabled={accountChannels.length === 0}>
               <Upload size={14} /> {t('批量导入')}
@@ -1354,6 +1431,97 @@ export default function AccountSessions(): JSX.Element {
               </Button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* ── 本机客户端导入（cc-switch）── */}
+      {showImportScan && (
+        <div className="modal-overlay" onClick={() => setShowImportScan(false)}>
+          <div className="modal" style={{ maxWidth: 720 }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('从本机客户端导入')}</h3>
+              <button className="modal-close" onClick={() => setShowImportScan(false)}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              {!importScan ? (
+                <Loading text={t('扫描中...')} />
+              ) : !importScan.available ? (
+                <div className="notify-note">{importScan.reason}</div>
+              ) : importScan.providers.length === 0 ? (
+                <EmptyState icon="📥" message={t('cc-switch 里没有可导入的供应商')} />
+              ) : (
+                <>
+                  <div className="form-hint" style={{ marginBottom: 8 }}>
+                    {t('数据来源')}: {importScan.path}
+                  </div>
+                  <div className="table-wrapper">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th style={{ width: 40 }}></th>
+                          <th>{t('名称')}</th>
+                          <th>{t('类型')}</th>
+                          <th>{t('端点')}</th>
+                          <th>{t('状态')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {importScan.providers.map((p) => (
+                          <tr key={p.id}>
+                            <td>
+                              <input
+                                type="checkbox"
+                                checked={importPicked.has(p.id)}
+                                disabled={!p.importable}
+                                onChange={(e) => {
+                                  setImportPicked((prev) => {
+                                    const next = new Set(prev);
+                                    if (e.target.checked) next.add(p.id);
+                                    else next.delete(p.id);
+                                    return next;
+                                  });
+                                }}
+                                aria-label={t('选择')}
+                              />
+                            </td>
+                            <td>{p.name}</td>
+                            <td>{p.appType}</td>
+                            <td>
+                              {p.importable ? (
+                                p.baseUrl
+                              ) : (
+                                <span className="form-hint">{p.reason}</span>
+                              )}
+                            </td>
+                            <td>
+                              {p.importable ? (
+                                <span className="badge ok">{t('可导入')}</span>
+                              ) : (
+                                <span className="badge">{t('不支持')}</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="modal-footer">
+              <Button variant="secondary" onClick={() => setShowImportScan(false)}>
+                {t('取消')}
+              </Button>
+              <Button
+                onClick={() => void handleRunImport()}
+                disabled={importing || !importScan?.available || importPicked.size === 0}
+              >
+                {importing ? t('导入中...') : t('导入所选')}
+              </Button>
+            </div>
+          </div>
         </div>
       )}
 

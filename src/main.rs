@@ -1556,6 +1556,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/account-sessions/catalog/providers",
             get(api::admin::account_sessions::handle_catalog_providers),
         )
+        // 从本机客户端（cc-switch）导入账号
+        .route(
+            "/api/account-sessions/import/sources",
+            get(api::admin::account_sessions::handle_scan_import_sources),
+        )
+        .route(
+            "/api/account-sessions/import",
+            post(api::admin::account_sessions::handle_run_import),
+        )
         // 服务器自动更新（检查/应用/重启/回滚/设置）
         .route(
             "/api/update/status",

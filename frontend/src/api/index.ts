@@ -39,6 +39,9 @@ import type {
   ModelMetaOverride,
   ManageView,
   CatalogSyncResult,
+  ImportEntry,
+  ImportSources,
+  ImportRunResult,
   CheckinCenterData,
   CheckinRecord,
   CheckinSchedule,
@@ -527,6 +530,12 @@ export const api = {
     replace?: boolean;
   }): Promise<ApiResponse<CatalogSyncResult>> =>
     request<ApiResponse<CatalogSyncResult>>('POST', `${API_BASE}/account-sessions/catalog/sync`, data),
+  /** 扫描本机可导入的账号来源（cc-switch） */
+  scanImportSources: (): Promise<ApiResponse<ImportSources>> =>
+    request<ApiResponse<ImportSources>>('GET', `${API_BASE}/account-sessions/import/sources`),
+  /** 执行导入：勾选的条目 → 渠道 */
+  runImport: (entries: ImportEntry[]): Promise<ApiResponse<ImportRunResult>> =>
+    request<ApiResponse<ImportRunResult>>('POST', `${API_BASE}/account-sessions/import`, { entries }),
   /** 支持模型目录发现的供应商清单 */
   catalogProviders: (): Promise<ApiResponse<{ providers?: Array<{ kind: string; label: string }> }>> =>
     request<ApiResponse<{ providers?: Array<{ kind: string; label: string }> }>>('GET', `${API_BASE}/account-sessions/catalog/providers`),

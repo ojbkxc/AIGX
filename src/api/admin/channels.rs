@@ -121,7 +121,7 @@ where
 }
 
 impl ChannelRequest {
-    fn to_channel(&self, id: String) -> Channel {
+    pub fn to_channel(&self, id: String) -> Channel {
         let now = chrono::Utc::now().timestamp();
         Channel {
             id,

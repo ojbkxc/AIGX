@@ -1201,3 +1201,137 @@ pub async fn handle_catalog_providers(
         json!({ "success": true, "data": { "providers": providers } }),
     ))
 }
+
+// ── 从本机客户端导入账号（cc-switch）────────────────────────────────
+
+/// GET /api/account-sessions/import/sources —— 扫描本机可导入的供应商。
+///
+/// 永不失败：错误在响应的 `available` / `reason` 里。
+pub async fn handle_scan_import_sources(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    // 本地已有的渠道名（同名跳过判据）
+    let existing: std::collections::HashSet<String> = state
+        .channel_store
+        .list()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    let scan = crate::account_session::import::scan(&existing);
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "available": scan.available,
+            "path": scan.path,
+            "reason": scan.reason,
+            "total": scan.total,
+            "providers": scan.providers,
+        }
+    })))
+}
+
+/// POST /api/account-sessions/import —— 执行导入（勾选的条目 → 渠道）。
+#[derive(Debug, Deserialize)]
+pub struct ImportRunRequest {
+    /// 待导入的条目。
+    pub entries: Vec<crate::account_session::import::ImportEntry>,
+    /// 导入后的渠道状态（缺省 enabled）。
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// POST /api/account-sessions/import —— 把勾选的条目导入为渠道。
+pub async fn handle_run_import(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ImportRunRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    if body.entries.is_empty() {
+        return Err(error_response("没有选择要导入的条目", StatusCode::BAD_REQUEST));
+    }
+
+    let mut created: Vec<Value> = Vec::new();
+    let mut errors: Vec<Value> = Vec::new();
+
+    for entry in body.entries {
+        let base_url = entry.base_url.trim();
+        let api_key = entry.api_key.trim();
+        if base_url.is_empty() || api_key.is_empty() {
+            errors.push(json!({
+                "id": entry.id,
+                "name": entry.name,
+                "error": "端点或凭证缺失，已跳过",
+            }));
+            continue;
+        }
+        // 协议 → 渠道类型
+        let channel_type = match entry.protocol.as_str() {
+            "anthropic" => "anthropic",
+            "openai_compatible" => "openai_compatible",
+            other => {
+                errors.push(json!({
+                    "id": entry.id,
+                    "name": entry.name,
+                    "error": format!("不支持的协议 {other}"),
+                }));
+                continue;
+            }
+        };
+
+        let model_mapping: std::collections::HashMap<String, String> = entry
+            .model_mappings
+            .iter()
+            .filter_map(|m| {
+                let alias = m.get("alias")?.as_str()?.trim().to_string();
+                let target = m.get("target")?.as_str()?.trim().to_string();
+                if alias.is_empty() || target.is_empty() {
+                    return None;
+                }
+                Some((alias, target))
+            })
+            .collect();
+
+        let request = super::channels::ChannelRequest {
+            name: entry.name.clone(),
+            channel_type: channel_type.to_string(),
+            base_url: base_url.to_string(),
+            api_key: Some(api_key.to_string()),
+            priority: 0,
+            weight: 1,
+            status: body.status.clone().unwrap_or_else(|| "enabled".to_string()),
+            models: entry.models.clone(),
+            account_id: String::new(),
+            model_mapping,
+            cost_pricing: Default::default(),
+            quirks: None,
+            balance_scheme: None,
+        };
+        let channel = request.to_channel(uuid::Uuid::new_v4().to_string());
+        match state.channel_store.add(channel) {
+            Ok(ch) => created.push(json!({
+                "id": ch.id,
+                "name": ch.name,
+                "base_url": ch.base_url,
+                "models": ch.models,
+            })),
+            Err(e) => errors.push(json!({
+                "id": entry.id,
+                "name": entry.name,
+                "error": format!("创建渠道失败：{e}"),
+            })),
+        }
+    }
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "created": created,
+            "errors": errors,
+            "created_count": created.len(),
+            "error_count": errors.len(),
+        }
+    })))
+}
