@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
   BarChart3, Code2, GraduationCap, ClipboardList, History, MessageSquarePlus, Trash2, X,
@@ -290,6 +291,16 @@ export default function Chat(): JSX.Element {
 
   /** 删除会话：删的是活动会话时切到最近一条，空列表则补一条新会话 */
   const deleteSession = (id: string): void => {
+    // 删的不是活动会话时，活动会话在 debounce 窗口内的最新消息还在 ref 里、
+    // 尚未写回 sessionsRef。若直接过滤 sessionsRef 再整表落盘，这批消息会被
+    // 静默丢弃。先取消待写定时器并把活动会话立即落盘。
+    if (id !== activeRef.current) {
+      if (saveTimer.current !== null) {
+        window.clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      saveActiveNow();
+    }
     const rest = sessionsRef.current.filter((s) => s.id !== id);
     if (id === activeRef.current) {
       if (!rest.length) rest.push(emptySession(modelRef.current));
@@ -320,36 +331,44 @@ export default function Chat(): JSX.Element {
         onOpenSessions={() => setDrawerOpen(true)}
       />
 
-      {/* 历史会话抽屉（对齐运维页会话列表观感） */}
-      <aside className={`pg-sessions ${drawerOpen ? 'open' : ''}`}>
-        <div className="pg-sessions-head">
-          <span><History size={14} /> {t('历史会话')}</span>
-          <button type="button" className="pg-sessions-close" title={t('关闭')} onClick={() => setDrawerOpen(false)}>
-            <X size={14} />
-          </button>
-        </div>
-        <button type="button" className="pg-sessions-new" onClick={createSession}>
-          <MessageSquarePlus size={14} />
-          {t('新会话')}
-        </button>
-        <div className="pg-sessions-list">
-          {sessions.length === 0 && <div className="pg-sessions-empty">{t('暂无会话')}</div>}
-          {sessions.map((s) => (
-            <div key={s.id} className={`pg-sessions-item ${s.id === activeId ? 'active' : ''}`}>
-              <button type="button" className="pg-sessions-item-btn" title={s.title || t('新会话')} onClick={() => switchSession(s.id)}>
-                <span className="pg-sessions-item-title">{s.title || t('新会话')}</span>
-                <span className="pg-sessions-item-meta">
-                  {t('{{count}} 条消息', { count: s.messages.length })} · {new Date(s.updated_at).toLocaleDateString()}
-                </span>
-              </button>
-              <button type="button" className="pg-sessions-item-del" title={t('删除')} onClick={() => deleteSession(s.id)}>
-                <Trash2 size={12} />
+      {/* 历史会话抽屉 + 遮罩 portal 到 body：
+          `.main-content` 有 z-index:10 会形成层叠上下文，抽屉（z=200）被困在
+          其中，移动端汉堡按钮是根上下文的 fixed（z=150），会盖住抽屉标题且
+          遮罩挡不住它。挂到 body 后抽屉/遮罩与汉堡处于同一上下文，层级正确。 */}
+      {createPortal(
+        <>
+          <aside className={`pg-sessions ${drawerOpen ? 'open' : ''}`}>
+            <div className="pg-sessions-head">
+              <span><History size={14} /> {t('历史会话')}</span>
+              <button type="button" className="pg-sessions-close" title={t('关闭')} onClick={() => setDrawerOpen(false)}>
+                <X size={14} />
               </button>
             </div>
-          ))}
-        </div>
-      </aside>
-      {drawerOpen && <div className="pg-sessions-mask" onClick={() => setDrawerOpen(false)} />}
+            <button type="button" className="pg-sessions-new" onClick={createSession}>
+              <MessageSquarePlus size={14} />
+              {t('新会话')}
+            </button>
+            <div className="pg-sessions-list">
+              {sessions.length === 0 && <div className="pg-sessions-empty">{t('暂无会话')}</div>}
+              {sessions.map((s) => (
+                <div key={s.id} className={`pg-sessions-item ${s.id === activeId ? 'active' : ''}`}>
+                  <button type="button" className="pg-sessions-item-btn" title={s.title || t('新会话')} onClick={() => switchSession(s.id)}>
+                    <span className="pg-sessions-item-title">{s.title || t('新会话')}</span>
+                    <span className="pg-sessions-item-meta">
+                      {t('{{count}} 条消息', { count: s.messages.length })} · {new Date(s.updated_at).toLocaleDateString()}
+                    </span>
+                  </button>
+                  <button type="button" className="pg-sessions-item-del" title={t('删除')} onClick={() => deleteSession(s.id)}>
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </aside>
+          {drawerOpen && <div className="pg-sessions-mask" onClick={() => setDrawerOpen(false)} />}
+        </>,
+        document.body,
+      )}
     </div>
   );
 }

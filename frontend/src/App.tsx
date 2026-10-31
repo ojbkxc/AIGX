@@ -79,7 +79,19 @@ function ProtectedLayout({ children }: ProtectedLayoutProps) {
   return (
     <div className="app-container">
       <Sidebar />
-      <main className="main-content" key={location}>
+      {/* full-height 页面（当前为 /chat）：去掉内边距并把内容区高度钉死为
+          视口高度，否则 .pg-shell 的 height:100% 在 auto 高度的父级里退化成
+          内容高度，历史抽屉（absolute top/bottom 0）只能撑到输入区上方。
+          `has-statusline` 仅在 admin 时加：底部常驻状态行是 fixed 26px，
+          非 admin 不渲染，不该留空白。 */}
+      <main
+        className={[
+          'main-content',
+          location === '/chat' ? 'main-content-full' : '',
+          location === '/chat' && isAdmin() ? 'has-statusline' : '',
+        ].filter(Boolean).join(' ')}
+        key={location}
+      >
         <div className="page-fade-enter">
           {/* 页面级边界：单个页面渲染异常/懒加载失败只影响内容区，
               Sidebar 保持可用，用户能切到别的页 —— 而不是整页白屏。 */}

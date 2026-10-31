@@ -11,13 +11,15 @@
   flex-direction: column;
 }
 
-/* ── 历史会话抽屉（覆盖层，左侧滑入）── */
+/* ── 历史会话抽屉（portal 到 body 的覆盖层，左侧滑入）──
+ * 用 fixed 而非 absolute：组件挂载在 body 下，absolute 会相对 body
+ * 的文档盒定位（页面滚动/内容超长时高度不可控）。 */
 .pg-sessions {
-  position: absolute;
+  position: fixed;
   top: 0;
   left: 0;
   bottom: 0;
-  z-index: 200;
+  z-index: 300;
   width: min(19rem, 86vw);
   display: flex;
   flex-direction: column;
@@ -35,9 +37,9 @@
 }
 
 .pg-sessions-mask {
-  position: absolute;
+  position: fixed;
   inset: 0;
-  z-index: 190;
+  z-index: 290;
   background: rgba(0, 0, 0, 0.28);
   animation: pg-pop 0.14s ease;
 }

@@ -305,6 +305,29 @@ code, pre, .mono {
   transition: margin-left 0.25s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* 全高页面（/chat）：把内容区固定为视口高度并去掉内边距，
+ * 让页面自己的 height:100% / flex 布局有确定的父高度可用。 */
+.main-content-full {
+  height: 100vh;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 底部常驻状态行（fixed，26px）会盖住内容，admin 下预留其高度。
+ * 非 admin 不渲染状态行，故不加这个类，避免底部 26px 空白。 */
+.main-content-full.has-statusline {
+  padding-bottom: 26px;
+}
+
+.main-content-full .page-fade-enter {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 /* 全局侧边栏收缩联动（Sidebar.tsx 设置 data-sidebar-collapsed） */
 :root[data-sidebar-collapsed="true"] .main-content {
   margin-left: var(--sidebar-width-collapsed);
@@ -890,6 +913,14 @@ code {
   .main-content {
     margin-left: 0;
     padding: 16px;
+  }
+
+  /* 移动端同样保持全高布局：padding 必须归零，否则同特异性下
+   * 上面 .main-content 的 16px 内边距会覆盖 .main-content-full 的 padding:0，
+   * 全高页会四周留白、抽屉与遮罩撑不满视口。 */
+  .main-content-full {
+    margin-left: 0;
+    padding: 0;
   }
 
   .page-header {
