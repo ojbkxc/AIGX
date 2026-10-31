@@ -1,30 +1,28 @@
-import { Link, isRouteErrorResponse, useLocation, useNavigate, useRouteError } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
 /**
  * RouteErrorPage — 路由层兜底错误页（errorElement）。
  * 与 ErrorBoundary 分工：Boundary 捕渲染异常，本页接路由 loader/未匹配错误。
  * 404/403/500 三态 + 一键回首页/重试。
+ *
+ * 注意：本组件**不调用 `useRouteError()`**。那个 hook 只在 `errorElement`
+ * 上下文里安全；catch-all 404 是普通 `<Route element>`，调用它会直接抛错，
+ * 进而被外层 ErrorBoundary 兜成「出错了」—— 用户看不到 404 页。状态码由
+ * 调用方通过 `status` 传入即可。
  */
 interface RouteErrorPageProps {
-  /** catch-all 路由显式传入的状态码（普通 element 模式拿不到 route error） */
+  /** 显式传入的状态码（catch-all 路由给 404） */
   status?: number;
 }
 
 export default function RouteErrorPage({ status: statusProp }: RouteErrorPageProps): JSX.Element {
-  const error = useRouteError();
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
 
-  let status = statusProp ?? 500;
-  let message = t('发生未知错误');
-  if (isRouteErrorResponse(error)) {
-    status = error.status;
-    message = error.statusText || message;
-  } else if (error instanceof Error) {
-    message = error.message;
-  }
+  const status = statusProp ?? 500;
+  const message = t('发生未知错误');
 
   const is404 = status === 404;
   const icon = is404 ? '🧭' : status === 403 ? '🔒' : '⚠️';

@@ -376,7 +376,7 @@ async fn fetch_remote(
         let value = value.replace("{credential}", &secret);
         headers.push((name.clone(), value));
     }
-    for (name, value) in headers {
+    for (name, value) in &headers {
         req = req.header(name, value);
     }
     // 没有默认头的供应商至少带上 Bearer
@@ -496,7 +496,8 @@ pub fn apply_catalog_to_session(
     updated.models = next;
     sessions
         .upsert(updated)
-        .map_err(|e| format!("写入账号失败：{e}"))
+        .map_err(|e| format!("写入账号失败：{e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

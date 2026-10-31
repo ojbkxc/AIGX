@@ -103,7 +103,7 @@ async fn run_due(
             sessions,
             egress,
             &schedule.providers,
-            &settings.gap_ms,
+            settings.gap_ms,
         )
         .await;
         let _ = store.mark_fired(&schedule.id, &date, &summary);

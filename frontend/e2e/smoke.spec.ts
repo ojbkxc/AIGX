@@ -97,7 +97,10 @@ test.describe('全站冒烟', () => {
   test('未知路由显示 404 页而非白屏', async ({ page, pageErrors }) => {
     await loginAsAdmin(page, { sessions: makeSessions(1) });
     await page.goto('/this-route-does-not-exist');
-    await expect(page.locator('.main-content')).toBeVisible();
+    // 404 是 catch-all 路由，不走 ProtectedLayout（因此没有 .main-content /
+    // 侧边栏），由 RouteErrorPage 独立成页 —— 断言它自己的容器即可。
+    await expect(page.locator('.route-error-page')).toBeVisible();
+    await expect(page.locator('.route-error-page')).toContainText('页面不存在');
     const body = await page.locator('body').innerText();
     expect(body.length).toBeGreaterThan(10);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);

@@ -161,7 +161,7 @@ pub use legacy::{
     handle_swagger_ui, handle_test_account, handle_test_channel, handle_test_email,
     handle_test_slack, handle_test_telegram, handle_test_webhook, handle_tokens_today,
     handle_update_account, handle_update_ip_filter, handle_update_price_sync_config,
-    handle_update_ratelimit_config, handle_upsert_group, handle_upsert_price,
+    handle_update_ratelimit_config, handle_upsert_group,
     handle_upsert_price_by_model, handle_usage_models, handle_usage_summary, handle_usage_trend,
     handle_user_ranking,
 };

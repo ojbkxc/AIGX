@@ -1715,5 +1715,22 @@
   "11 位大陆手机号": "11-digit mainland China phone number",
   "6 位数字": "6 digits",
   "获取验证码": "Send code",
-  "登录并添加": "Sign in and add"
+  "登录并添加": "Sign in and add",
+  "全部来源": "All sources",
+  "仅渠道": "Channels only",
+  "仅账号池": "Account pool only",
+  "渠道筛选": "Channel filter",
+  "来源筛选": "Source filter",
+  "获取模型": "Fetch models",
+  "批量启用": "Enable selected",
+  "批量禁用": "Disable selected",
+  "已批量启用": "Enabled selected models",
+  "已批量禁用": "Disabled selected models",
+  "已批量删除定价": "Removed pricing for selected models",
+  "批量操作完成，失败": "Batch done, failed",
+  "已发现": "discovered",
+  "拉取": "Fetch",
+  "暂无启用的可拉取渠道": "No enabled channels available to fetch",
+  "从上游 /models 接口拉取模型清单（写入渠道的「上游发现」快照）。账号型渠道请在账号池里维护模型白名单。": "Fetch model lists from the upstream /models endpoint (saved as the channel's discovered snapshot). For account channels, maintain model whitelists in the account pool.",
+  "模型清单": "Model list"
 }

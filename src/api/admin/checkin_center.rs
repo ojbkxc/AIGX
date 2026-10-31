@@ -44,7 +44,7 @@ pub async fn handle_checkin_center(
         std::collections::BTreeMap::new();
     for session in &targets {
         let last = state
-            .checkin_store
+            .upstream_checkin
             .last_today(&session.id, &session.provider)
             .ok()
             .flatten();
@@ -215,7 +215,7 @@ pub async fn handle_checkin_records(
         _ => None,
     };
     let records = state
-        .checkin_store
+        .upstream_checkin
         .recent_records(
             q.days,
             q.provider.as_deref().filter(|s| !s.is_empty()),
@@ -337,7 +337,7 @@ pub async fn handle_upsert_checkin_schedule(
         body.label.trim().to_string()
     };
     let list = state
-        .checkin_store
+        .upstream_checkin
         .upsert_schedule(CheckinSchedule {
             id: body.id,
             label,
@@ -388,7 +388,7 @@ pub async fn handle_run_checkin_schedule(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     let schedule = state
-        .checkin_store
+        .upstream_checkin
         .schedules()
         .into_iter()
         .find(|s| s.id == body.id)
@@ -403,7 +403,7 @@ pub async fn handle_run_checkin_schedule(
     )
     .await;
     let _ = state
-        .checkin_store
+        .upstream_checkin
         .mark_fired(&schedule.id, &scheduler::today(), &summary);
     Ok(Json(
         json!({ "success": true, "data": { "summary": summary } }),

@@ -217,7 +217,7 @@ const KUKU_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537
 ///
 /// 每日可自助完成的是 `LOGIN` 与 `CHAT`；`taskComplete` 幂等（重复领
 /// `reward_point=0`），所以「已领过」按 `reward_point == 0` 判。
-async fn kuku(client: &Client, session: &AccountSession, secret: &str) -> ClaimResult {
+async fn kuku(client: &Client, _session: &AccountSession, secret: &str) -> ClaimResult {
     let headers = vec![
         ("Cookie".to_string(), secret.to_string()),
         ("User-Agent".to_string(), KUKU_UA.to_string()),

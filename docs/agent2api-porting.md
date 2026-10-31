@@ -57,3 +57,35 @@
    - `server/src/core/providers/mod.rs` 的 `PROVIDERS` — 新增 provider → 同步 `AGENT2API_PROVIDERS` + registry 条目
 3. 登录态型 provider 需同步确认 `src/account_login/` 有登录实现，否则账号加不进来。
 4. 移植后本地 `cd frontend && npm run build` 验证前端，Rust 侧直接 push 走 CI 编译验证（本机不编译）。
+
+## 自动化数据层同步（工具脚本）
+
+手工核对容易漏，数据层（provider id / 登录态条目 / 表单覆盖）的漂移检测已工具化：
+
+```bash
+# 检测漂移（有差异 exit 1，适合发版前 / 定期巡检）
+python tools/sync_agent2api_providers.py --upstream /path/to/Agent2API --check
+
+# 回写 registry.rs 的 AGENT2API_PROVIDERS 基准表（保守合并：保序、只追加缺项、不删多余项）
+python tools/sync_agent2api_providers.py --upstream /path/to/Agent2API --write
+
+# 生成 docs/upstream-providers-diff.md 漂移报告
+python tools/sync_agent2api_providers.py --upstream /path/to/Agent2API --report
+```
+
+脚本比对四个口径：上游 `PROVIDERS` 注册表 ↔ `AGENT2API_PROVIDERS` 基准表、`SESSION_PROVIDERS` 登录态覆盖、`addAccountConfigs.ts` 表单覆盖（含 `Object.assign` 补的拆家项）。id 归一别名在脚本顶部 `ALIASES`（如 raccoon → xiaohuanxiong）。只比对标识符与常量，不拷贝上游实现代码（上游 LICENSE 禁商用/二次分发）。
+
+能力层（协议/签名/风控）仍按上文逐文件手工移植 —— 上游 `providers/` 深度耦合其 `AccountStore`/`GatewayError`，无法整目录拷贝。
+
+## 能力层移植路线图（账号池缺口）
+
+按优先级（均为可选项，按需排期）：
+
+| 优先 | 能力 | 现状 | 移植来源 | 落点 |
+|---|---|---|---|---|
+| 1 | 账号级 token 自动刷新 | `refresh_secret` 只存不刷（`account_session/model.rs`） | 上游各家 `providers/*/refresh.rs` + `credential_maintenance.rs` | 新增 `src/account_session/refresh.rs`（表驱动端点），挂 `maintenance.rs::sweep`，先做 qoder / autoclaw / trae |
+| 2 | 账号级余额/用量查询 | 只有渠道级余额（`src/channel/balance.rs`） | 上游 14 家 `providers/*/balance.rs` | 仿 balance.rs 的方案表模式，凭证来源改 `AccountSession.credential`，账号池列表加「余额」列 |
+| 3 | 账号级模型清单刷新 | 只有渠道级 `fetch_upstream_models` | 上游各家 `providers/*/models.rs` | `POST /api/account-sessions/:id/fetch_models` 写 `AccountSession.models`，接入模型管理页「获取模型」弹窗 |
+| 4 | 签到覆盖面扩展 | 首批 5 家（loomy/kuku/qoder/qoder-intl/xiaohuanxiong） | 上游各家 `providers/*/checkin.rs` | `src/checkin/claim.rs` 加分支 + 白名单加名；签名/风控重的（trae、codearts）需实测后再上 |
+
+新增登录式 provider 的完整清单：`AGENT2API_PROVIDERS` + `PROVIDERS` + `SESSION_PROVIDERS` + `addAccountConfigs.ts` 表单 + `account_login` 登录实现 + （可选）`checkin/claim.rs`。

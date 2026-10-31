@@ -44,6 +44,7 @@ pub fn build_openapi_document() -> Value {
         paths_channels(),
         paths_tokens(),
         paths_pricing(),
+        paths_model_manage(),
         paths_payment(),
         paths_logs(),
         paths_dashboard_usage(),
@@ -301,8 +302,8 @@ fn paths_pricing() -> Value {
             "put": op_body("定价", "更新定价同步配置", "同步源/开关等配置字段")
         },
         "/api/prices": {
-            "get": op("定价", "列出模型价格（legacy 别名）"),
-            "post": op_body("定价", "写入模型价格", "model: string, price 字段组")
+            "get": op("定价", "列出模型价格（legacy 别名，deprecated —— 新接口走 /api/models/manage 与 /api/models/price）"),
+            "post": op_body("定价", "写入模型价格（legacy 别名，deprecated）", "model: string, price 字段组")
         },
         "/api/prices/{model}": {
             "put": op_params("定价", "按模型写入价格", &[path_param("model")]),
@@ -323,6 +324,29 @@ fn paths_pricing() -> Value {
         "/api/ratelimit/config": {
             "get": op("定价", "查询限流配置"),
             "put": op_body("定价", "更新限流配置", "多维度 RPM/TPM 配置字段")
+        }
+    })
+}
+
+fn paths_model_manage() -> Value {
+    json!({
+        "/api/models/manage": {
+            "get": op("模型管理", "统一模型管理视图（渠道模型 + 账号池模型聚合，含启停/来源/定价/别名）")
+        },
+        "/api/models/state": {
+            "post": op_body("模型管理", "按 (provider, model) 启停模型", "provider: string, id: string, enabled: bool")
+        },
+        "/api/models/price": {
+            "post": op_body("模型管理", "写入模型定价与倍率", "model: string, input_price/output_price/cache_price/price_type/model_ratio")
+        },
+        "/api/models/price/remove": {
+            "post": op_body("模型管理", "删除模型定价", "model: string")
+        },
+        "/api/models/alias": {
+            "post": op_body("模型管理", "设置全局模型别名", "alias/target: string")
+        },
+        "/api/models/alias/remove": {
+            "post": op_body("模型管理", "删除全局模型别名", "alias: string")
         }
     })
 }
