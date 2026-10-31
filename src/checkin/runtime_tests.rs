@@ -59,7 +59,7 @@ struct MockState {
 /// `routes` 的键是**路径**（不含 query），值是 `(状态码, 响应体)`。
 /// 未登记的路径一律回 404 + `{"message":"not found"}` —— 这本身也是一种断言：
 /// 执行器打错路径时会立刻暴露，而不是悄悄走到别的分支。
-async fn start_mock(routes: Vec<(&str, u16, Value)>) -> (String, Arc<MockState>) {
+async fn start_mock(routes: Vec<(&str, u16, Value)>) -> (String, MockState) {
     let mut map = HashMap::new();
     for (path, status, body) in routes {
         map.insert(path.to_string(), (status, body));
@@ -107,7 +107,11 @@ async fn handle(
     });
 
     match state.routes.get(&path) {
-        Some((status, payload)) => (*status, axum::Json(payload.clone())).into_response(),
+        Some((status, payload)) => (
+            StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            axum::Json(payload.clone()),
+        )
+            .into_response(),
         None => (
             StatusCode::NOT_FOUND,
             axum::Json(json!({"message": "not found", "path": path})),
@@ -203,12 +207,7 @@ async fn loomy_claims_successfully() {
     )])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("loomy", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("loomy", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert!(result.msg.contains("128"), "文案应含余额：{}", result.msg);
@@ -227,12 +226,7 @@ async fn loomy_reports_expired_session() {
     )])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("loomy", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("loomy", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Failed);
     assert!(result.msg.contains("失效"), "文案：{}", result.msg);
@@ -257,12 +251,7 @@ async fn kuku_claims_and_reports_already_claimed() {
     ])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("kuku", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("kuku", &base)).await;
 
     // 面板没有可领任务 → 已领过（幂等）
     assert!(
@@ -304,12 +293,7 @@ async fn qoder_claims_campaign() {
     ])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("qoder", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("qoder", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert!(result.msg.contains("25"), "文案应含奖励：{}", result.msg);
@@ -330,12 +314,7 @@ async fn qoder_reports_already_claimed() {
     )])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("qoder", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("qoder", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Already);
 }
@@ -349,12 +328,7 @@ async fn qoder_reports_no_campaign_as_pending() {
     )])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("qoder", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("qoder", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Pending);
 }
@@ -370,12 +344,7 @@ async fn raccoon_claims_successfully() {
     )])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("xiaohuanxiong", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("xiaohuanxiong", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/api/web/office/v3/setting_info");
@@ -392,12 +361,7 @@ async fn autoclaw_claims_task() {
     )])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("autoclaw", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("autoclaw", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/autoclaw-proxy/proxy/autoclaw-task-complete");
@@ -421,12 +385,7 @@ async fn workbuddy_claims_daily_checkin() {
     ])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("workbuddy", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("workbuddy", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/v2/billing/meter/daily-checkin");
@@ -450,12 +409,7 @@ async fn trae_claims_credits() {
     ])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("trae", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("trae", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/trae/api/v2/ug/checkin_credits/status");
@@ -471,12 +425,7 @@ async fn trae_reports_not_open_as_pending() {
     )])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("trae", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("trae", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Pending);
 }
@@ -490,12 +439,7 @@ async fn trae_reports_already_checked_in() {
     )])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("trae", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("trae", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Already);
 }
@@ -529,12 +473,7 @@ async fn codearts_claims_ops_welfare() {
     ])
     .await;
 
-    let result = claim_for(
-        &reqwest::Client::new(),
-        &account("codearts", &base),
-        "test-token",
-    )
-    .await;
+    let result = claim_for(&reqwest::Client::new(), &account("codearts", &base)).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/v1/ops/delivery");
@@ -562,7 +501,7 @@ async fn officeace_claims_bonus() {
     let mut session = account("officeace", &base);
     session.credential.secret = "ak-test:sk-test:sts-test:proj-test".to_string();
 
-    let result = claim_for(&reqwest::Client::new(), &session, "ak-test:sk-test").await;
+    let result = claim_for(&reqwest::Client::new(), &session).await;
 
     assert_eq!(result.outcome, CheckinOutcome::Success);
     assert_hit(&state, "/v1/subscription/bonus/claim");
@@ -577,7 +516,7 @@ async fn every_provider_rejects_empty_credential() {
     for provider in super::claim::supported_providers() {
         let mut session = account(provider, "http://127.0.0.1:1");
         session.credential.secret = String::new();
-        let result = claim_for(&reqwest::Client::new(), &session, "").await;
+        let result = claim_for(&reqwest::Client::new(), &session).await;
         assert_eq!(
             result.outcome,
             CheckinOutcome::Failed,

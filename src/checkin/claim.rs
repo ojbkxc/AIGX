@@ -877,7 +877,7 @@ async fn workbuddy(client: &Client, session: &AccountSession, secret: &str) -> C
 // 一轮 status → claim → 回查共用**一个全新 16 位数字设备号**（风控要求，
 // 凭证自带 device_id 只做门禁）；回查翻转才算成功，失败文案不得含「已签到」。
 
-async fn trae(client: &Client, _session: &AccountSession, secret: &str) -> ClaimResult {
+async fn trae(client: &Client, session: &AccountSession, secret: &str) -> ClaimResult {
     use rand::Rng;
     let device: String = (0..16)
         .map(|_| char::from(b'0' + rand::thread_rng().gen_range(0..10u8)))
