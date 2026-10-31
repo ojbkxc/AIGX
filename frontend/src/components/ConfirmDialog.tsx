@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2 } from 'lucide-react';
 
@@ -34,6 +34,11 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
   const [confirming, setConfirming] = useState(false);
   const [password, setPassword] = useState('');
   const [passwordError, setPasswordError] = useState('');
+  // Escape 处理读 ref 而非闭包里的 confirming：keydown 监听器只在 state
+  // 变化时重建，闭包捕获的 confirming 恒为 false，导致「确认进行中按 Esc
+  // 仍会关闭弹窗、请求却继续跑」。
+  const confirmingRef = useRef(false);
+  confirmingRef.current = confirming;
 
   // 打开时逐帧触发入场动画；Escape 关闭（键盘可达性，P0 验收）
   useEffect(() => {
@@ -45,7 +50,7 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
         // 弹窗显隐由 state 驱动；动画由 App.css 的 modal-* 样式处理
       });
       const onKey = (e: KeyboardEvent): void => {
-        if (e.key === 'Escape' && !confirming) onClose?.();
+        if (e.key === 'Escape' && !confirmingRef.current) onClose?.();
       };
       document.addEventListener('keydown', onKey);
       return () => {
@@ -81,9 +86,14 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
       setPasswordError('');
       try {
         await result;
+        onClose?.();
+      } catch (err) {
+        // 确认失败**不能静默关闭**：保留弹窗并把后端错误显示出来，
+        // 用户才能改正（如密码错误）或重试。原来的 finally 无条件关闭
+        // 会让失败看起来像成功。
+        setPasswordError(err instanceof Error ? err.message : String(err));
       } finally {
         setConfirming(false);
-        onClose?.();
       }
       return;
     }

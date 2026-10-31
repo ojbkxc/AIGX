@@ -405,39 +405,40 @@ export default function Dashboard(): JSX.Element {
         }
         return;
       }
-      const [
-        usageData,
-        tokenData,
-        limitsData,
-        trendData,
-        ctData,
-        mdData,
-        urData,
-        chData,
-        rtData,
-        csData,
-      ] = await Promise.all([
-        api.getUsageSummary().catch(() => null),
-        api.getTodayTokens().catch(() => null),
-        api.getLimits().catch(() => null),
-        api.getTrend().catch(() => null),
-        api.getConsumptionTrend().catch(() => null),
-        api.getModelDistribution().catch(() => null),
-        api.getUserRanking().catch(() => null),
-        api.getChannelHealth().catch(() => null),
-        api.getRealtime().catch(() => null),
-        api.getCacheSavings().catch(() => null),
+      // 各面板独立容错：单个接口失败不应让整页空白（管理员视图有 10 个面板）。
+      // 但失败必须**可见** —— 用 allSettled 统计失败数，整页显示一条提示，
+      // 避免用户把「加载失败」误读成「确实没数据」。
+      const results = await Promise.allSettled([
+        api.getUsageSummary(),
+        api.getTodayTokens(),
+        api.getLimits(),
+        api.getTrend(),
+        api.getConsumptionTrend(),
+        api.getModelDistribution(),
+        api.getUserRanking(),
+        api.getChannelHealth(),
+        api.getRealtime(),
+        api.getCacheSavings(),
       ]);
-      setUsage((usageData?.data ?? usageData) as UsageStats | null);
-      setTokenStats((tokenData?.data ?? tokenData) as TodayTokens | null);
-      setLimits((limitsData?.data ?? limitsData) as LimitsInfo | null);
-      setTrend((trendData?.data ?? trendData) as TrendData[] | null);
-      setConsumptionTrend((ctData?.data ?? ctData) as TrendData[] | null);
-      setModelDist((mdData?.data ?? mdData) as ModelDist[] | null);
-      setUserRanking((urData?.data ?? urData) as UserRanking[] | null);
-      setChannelHealth((chData?.data ?? chData) as ChannelHealth[] | null);
-      setRealtime((rtData?.data ?? rtData) as RealtimeStats | null);
-      setCacheSavings((csData?.data ?? csData) as CacheSavings | null);
+      const pick = <T,>(i: number): T | null =>
+        results[i].status === 'fulfilled'
+          ? ((results[i] as PromiseFulfilledResult<{ data?: unknown }>).value?.data
+              ?? (results[i] as PromiseFulfilledResult<unknown>).value) as T
+          : null;
+      const failed = results.filter((r) => r.status === 'rejected').length;
+      if (failed > 0) {
+        setError(t('有 {{n}} 个面板加载失败，数据可能不完整（可点刷新重试）', { n: failed }));
+      }
+      setUsage(pick<UsageStats>(0));
+      setTokenStats(pick<TodayTokens>(1));
+      setLimits(pick<LimitsInfo>(2));
+      setTrend(pick<TrendData[]>(3));
+      setConsumptionTrend(pick<TrendData[]>(4));
+      setModelDist(pick<ModelDist[]>(5));
+      setUserRanking(pick<UserRanking[]>(6));
+      setChannelHealth(pick<ChannelHealth[]>(7));
+      setRealtime(pick<RealtimeStats>(8));
+      setCacheSavings(pick<CacheSavings>(9));
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

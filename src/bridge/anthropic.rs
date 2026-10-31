@@ -814,12 +814,32 @@ fn parse_stream_event(
         if finish.is_none() && usage.is_none() {
             return None;
         }
+        if finish.is_some() {
+            state.sent_finish = true;
+        }
         return Some(Ok(ChatChunk {
             id: state.id.clone(),
             model: state.model.clone(),
             delta: ChatDelta::default(),
             finish_reason: finish,
             usage,
+        }));
+    }
+
+    // message_stop：流的正式收尾帧。上游有时只在 message_delta 给 usage、
+    // 不给 stop_reason（或完全不发 message_delta），此时靠这一帧补一个
+    // Stop，否则下游客户端一直等不到 finish_reason（表现为"卡住不结束"）。
+    if event_type == "message_stop" {
+        if state.sent_finish {
+            return None;
+        }
+        state.sent_finish = true;
+        return Some(Ok(ChatChunk {
+            id: state.id.clone(),
+            model: state.model.clone(),
+            delta: ChatDelta::default(),
+            finish_reason: Some(FinishReason::Stop),
+            usage: None,
         }));
     }
 
@@ -975,6 +995,10 @@ struct StreamState {
     /// `ClaudeToChatStreamState.toolIndexByContentBlock`）
     tool_index_by_block: std::collections::BTreeMap<usize, usize>,
     next_tool_index: usize,
+    /// 是否已发过 finish_reason（message_delta 或 message_stop 其一）。
+    /// 用于 message_stop 兜底：上游有时在 message_delta 里不给 stop_reason，
+    /// 只靠 message_stop 收尾 —— 不补这一帧下游会一直等不到结束标记。
+    sent_finish: bool,
 }
 
 impl StreamState {
@@ -1103,6 +1127,19 @@ impl Bridge for AnthropicBridge {
                             ));
                         }
                         None => {
+                            // 流结束：缓冲区里可能还有最后一帧没有尾随空行
+                            // （部分上游省略最后的 `\n\n`）。补解析一次，
+                            // 否则会丢掉终帧（常含 message_delta.usage）。
+                            if let Some(crate::sse::SseEvent::Data(payload)) = decoder.finish() {
+                                if let Some(chunk) =
+                                    parse_stream_event(&payload, &id, &model, &mut state)
+                                {
+                                    return Some((
+                                        chunk,
+                                        (byte_stream, decoder, state, id, model, pending),
+                                    ));
+                                }
+                            }
                             return None;
                         }
                     }

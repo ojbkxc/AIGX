@@ -570,9 +570,11 @@ impl ChannelStore {
             .filter(|c| {
                 c.is_enabled()
                     // models 非空 = 白名单（supports_model）；空 = 全部，
-                    // 但若已有发现快照则以快照为准（有效范围收窄）
-                    && (c.supports_model(model)
-                        || (c.models.is_empty() && c.effective_models().iter().any(|m| m == model)))
+                    // 但若已有发现快照则以快照为准（有效范围收窄）。
+                    // 注意：`supports_model` 在 models 为空时恒 true，会短路掉
+                    // 快照判断 —— 因此这里必须用 `auto_pick_supports`（它内部
+                    // 处理了「models 空 → 按 discovered_models 收窄」）。
+                    && c.auto_pick_supports(model)
                     && !self.is_in_cooldown(&c.id)
                     && self.circuit_breaker.allow_request(&c.id)
                     && self.aimd_allows(&c.id)
@@ -662,9 +664,8 @@ impl ChannelStore {
             ch.status = "disabled".to_string();
             ch.last_error = Some(error);
             ch.updated_at = chrono::Utc::now().timestamp();
-            let snapshot = ch.clone();
-            drop(channels);
-            if let Err(e) = self.persist(&snapshot) {
+            // 在锁内落盘：释放锁再写会用旧快照覆盖并发写入（丢更新）
+            if let Err(e) = self.persist(ch) {
                 tracing::error!("Failed to persist channel {} mark_unhealthy: {}", id, e);
             }
         }
@@ -677,9 +678,7 @@ impl ChannelStore {
             ch.status = "enabled".to_string();
             ch.last_error = None;
             ch.updated_at = chrono::Utc::now().timestamp();
-            let snapshot = ch.clone();
-            drop(channels);
-            if let Err(e) = self.persist(&snapshot) {
+            if let Err(e) = self.persist(ch) {
                 tracing::error!("Failed to persist channel {} mark_healthy: {}", id, e);
             }
         }
@@ -695,9 +694,7 @@ impl ChannelStore {
                 return;
             }
             ch.last_used_at = Some(now);
-            let snapshot = ch.clone();
-            drop(channels);
-            if let Err(e) = self.persist(&snapshot) {
+            if let Err(e) = self.persist(ch) {
                 tracing::error!("Failed to persist channel {} mark_used: {}", id, e);
             }
         }
@@ -715,9 +712,7 @@ impl ChannelStore {
             .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
         ch.discovered_models = models;
         ch.updated_at = chrono::Utc::now().timestamp();
-        let snapshot = ch.clone();
-        drop(channels);
-        self.persist(&snapshot)?;
+        self.persist(ch)?;
         Ok(())
     }
 
@@ -747,9 +742,7 @@ impl ChannelStore {
             ch.response_time = Some(latency_ms);
             ch.test_time = Some(chrono::Utc::now().timestamp());
             ch.updated_at = chrono::Utc::now().timestamp();
-            let snapshot = ch.clone();
-            drop(channels);
-            if let Err(e) = self.persist(&snapshot) {
+            if let Err(e) = self.persist(ch) {
                 tracing::error!("Failed to persist channel {} test result: {}", id, e);
             }
         }
@@ -776,9 +769,7 @@ impl ChannelStore {
                 ch.balance_unit = unit.to_string();
             }
             ch.updated_at = chrono::Utc::now().timestamp();
-            let snapshot = ch.clone();
-            drop(channels);
-            if let Err(e) = self.persist(&snapshot) {
+            if let Err(e) = self.persist(ch) {
                 tracing::error!("Failed to persist channel {} balance: {}", id, e);
             }
         }
@@ -1085,6 +1076,16 @@ impl ChannelStore {
         error_message: &str,
         session_id: Option<&str>,
     ) {
+        // 客户端请求错误（400/413/422…）：只留排障信息，**不影响渠道健康、
+        // 不记失败归档、不打开断路器、不清亲和性**。渠道本身是健康的。
+        if matches!(failure_type, circuit_breaker::FailureType::ClientError) {
+            self.circuit_breaker
+                .record_failure(channel_id, failure_type.clone());
+            self.health_tracker
+                .record_error(channel_id, model, &failure_type, error_message);
+            return;
+        }
+
         // C1 熔断迁移：失败前 closed、失败后 open → 记一次 trip。
         // 必须 BEFORE record_failure（失败后状态已变）。
         let was_closed = self.circuit_breaker.get_state(channel_id) == "closed";
@@ -1154,6 +1155,10 @@ impl ChannelStore {
                     retry_after: retry_after.as_ref().map(|d| d.as_secs()),
                 },
                 s if s >= 500 => circuit_breaker::FailureType::ServerError,
+                // 其余 4xx（400/413/422…）是**用户请求本身**的问题：换渠道重发
+                // 大概率同样失败，且不代表渠道不健康 —— 归为 ClientError，
+                // 断路器不计数（否则几个坏请求就能把健康渠道熔断）。
+                400..=499 => circuit_breaker::FailureType::ClientError,
                 _ => circuit_breaker::FailureType::ServerError,
             },
             BridgeError::Timeout { .. } => circuit_breaker::FailureType::Timeout,

@@ -67,12 +67,16 @@ pub struct AccountSessionRequest {
     pub proxy: Option<String>,
     #[serde(default)]
     pub status: String,
+    /// 优先级。三态：缺省 = 保持原值（PUT 只提交部分字段时不清零）。
     #[serde(default)]
-    pub priority: i64,
+    pub priority: Option<i64>,
+    /// 权重。三态：缺省 = 保持原值。
     #[serde(default)]
-    pub weight: u32,
+    pub weight: Option<u32>,
+    /// 单账号并发上限。三态：缺省 = 保持原值（0 = 不限制，是合法值，
+    /// 不能与「字段缺省」混为一谈）。
     #[serde(default)]
-    pub max_concurrency: u32,
+    pub max_concurrency: Option<u32>,
     #[serde(default)]
     pub models: Vec<String>,
     /// 账号级额外请求头（登录态型供应商补专用头；值支持 `{credential}` 模板）。
@@ -197,11 +201,19 @@ fn apply_request(mut session: AccountSession, body: &AccountSessionRequest) -> A
     if !body.status.trim().is_empty() {
         session.status = body.status.trim().to_string();
     }
-    session.priority = body.priority;
-    if body.weight > 0 {
-        session.weight = body.weight;
+    // 三态字段：缺省（None）= 保持原值，不覆盖。PUT 只提交部分字段时
+    // 不会把优先级/权重/并发清零（与 MCP/Agent 工具的小操作路径兼容）。
+    if let Some(priority) = body.priority {
+        session.priority = priority;
     }
-    session.max_concurrency = body.max_concurrency;
+    if let Some(weight) = body.weight {
+        if weight > 0 {
+            session.weight = weight;
+        }
+    }
+    if let Some(max_concurrency) = body.max_concurrency {
+        session.max_concurrency = max_concurrency;
+    }
     session.expires_at = body.expires_at.filter(|at| *at > 0);
     session.models = Vec::new();
     for model in &body.models {

@@ -592,7 +592,16 @@ impl Bridge for OpenaiCompatibleBridge {
                             ));
                         }
                         None => {
-                            // 流结束
+                            // 流结束：缓冲区里可能还有**最后一帧没有尾随空行**
+                            // （部分上游省略最后的 `\n\n`）。直接丢弃会丢掉终帧
+                            // 的 usage / finish_reason，因此这里补解析一次。
+                            if !buf.is_empty() {
+                                let tail = String::from_utf8_lossy(&buf).to_string();
+                                buf.clear();
+                                if let Some(chunk) = parse_sse_event(&tail, &id, &model) {
+                                    return Some((Ok(chunk), (byte_stream, buf, id, model)));
+                                }
+                            }
                             return None;
                         }
                     }

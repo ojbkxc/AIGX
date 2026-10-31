@@ -88,6 +88,8 @@ pub fn cooldown_secs(
             let exponent = consecutive_errors.min(u64::from(MAX_BACKOFF_EXPONENT));
             base.saturating_mul(1u64 << exponent)
         }
+        // 客户端请求错误：账号本身没问题，给最短冷却（调用方一般不会走到这里）
+        FailureType::ClientError => base,
     };
     raw.clamp(base, cap)
 }

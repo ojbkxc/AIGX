@@ -133,6 +133,10 @@ pub struct ChannelState {
     pub account_rate_limit_until: Option<Instant>,
     /// per-model 状态
     pub models: HashMap<String, ModelState>,
+    /// 最近一次客户端请求错误（400/413/422 等）：仅排障可见，不影响健康判定
+    pub last_client_error: Option<String>,
+    /// 最近一次客户端请求错误的时间
+    pub last_client_error_time: Option<Instant>,
 }
 
 impl ChannelState {
@@ -143,6 +147,8 @@ impl ChannelState {
             balance_status: BalanceStatus::default(),
             account_rate_limit_until: None,
             models: HashMap::new(),
+            last_client_error: None,
+            last_client_error_time: None,
         }
     }
 
@@ -339,6 +345,12 @@ impl ChannelStateTracker {
                     ms.last_error_time = Some(now);
                     ms.failure_count += 1;
                 }
+            }
+            FailureType::ClientError => {
+                // 用户请求本身有问题：**不计入渠道健康**（不计失败、不降级模型），
+                // 渠道本身是健康的。只在排障字段上留一句，方便管理员排查。
+                channel_state.last_client_error = Some(error_message.to_string());
+                channel_state.last_client_error_time = Some(now);
             }
         }
     }

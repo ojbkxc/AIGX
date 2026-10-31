@@ -80,7 +80,12 @@ function buildQuery(params: Record<string, string | number>): string {
   return new URLSearchParams(entries).toString();
 }
 
-async function request<T = unknown>(method: string, path: string, body: unknown = null): Promise<T> {
+async function request<T = unknown>(
+  method: string,
+  path: string,
+  body: unknown = null,
+  opts: { skipAuthRedirect?: boolean } = {},
+): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...authHeaders(),
@@ -101,7 +106,11 @@ async function request<T = unknown>(method: string, path: string, body: unknown 
   }
   // 仅真实登录态失效才清除会话并跳转登录页；避免「已登录但访问
   // 无权限页面」时被误踢（后端对越权访问返回 403，而非 401）。
-  if (res.status === 401) {
+  //
+  // `skipAuthRedirect`：登录 / 二次验证 / 改密这类**以 401 表达业务错误**
+  // 的接口（如 TOTP 密码错误也返回 401）不参与登出逻辑 —— 否则用户在
+  // 安全设置里输错一次密码就会被强制登出。这类调用方自己处理错误文案。
+  if (res.status === 401 && !opts.skipAuthRedirect) {
     const token = getToken();
     if (token && !window.location.pathname.startsWith('/login')) {
       try {
@@ -154,13 +163,13 @@ async function request<T = unknown>(method: string, path: string, body: unknown 
 export const api = {
   // ==================== 顶层便捷方法（页面直调，沿用后端路由契约） ====================
   login: (email: string, password: string): Promise<ApiResponse<LoginResult>> =>
-    request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login`, { email, password }),
+    request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login`, { email, password }, { skipAuthRedirect: true }),
   loginSendCode: (email: string): Promise<ApiResponse<LoginCodeResult>> =>
-    request<ApiResponse<LoginCodeResult>>('POST', `${API_BASE}/auth/login/send-code`, { email }),
+    request<ApiResponse<LoginCodeResult>>('POST', `${API_BASE}/auth/login/send-code`, { email }, { skipAuthRedirect: true }),
   loginWithCode: (email: string, code: string): Promise<ApiResponse<LoginResult>> =>
-    request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login/code`, { email, code }),
+    request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login/code`, { email, code }, { skipAuthRedirect: true }),
   loginTotp: (tmp_token: string, code: string): Promise<ApiResponse<LoginResult>> =>
-    request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login/totp`, { tmp_token, code }),
+    request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login/totp`, { tmp_token, code }, { skipAuthRedirect: true }),
   // 兼容历史调用顺序 (email, password, username?)：后端仅使用 email/password/username/aff_code 字段
   register: (emailOrUsername: string, password: string, username?: string, affCode?: string): Promise<ApiResponse<RegisterResult>> =>
     request<ApiResponse<RegisterResult>>('POST', `${API_BASE}/auth/register`, {
@@ -172,7 +181,7 @@ export const api = {
   forgotPassword: (email: string): Promise<ApiResponse<MessageResult>> =>
     request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/forgot-password`, { email }),
   changePassword: (old_password: string, new_password: string): Promise<ApiResponse<MessageResult>> =>
-    request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/change-password`, { old_password, new_password }),
+    request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/change-password`, { old_password, new_password }, { skipAuthRedirect: true }),
   getUsageSummary: (): Promise<ApiResponse<UsageSummaryItem>> =>
     request<ApiResponse<UsageSummaryItem>>('GET', `${API_BASE}/usage/summary`),
   getTodayTokens: (): Promise<ApiResponse<Record<string, unknown>>> =>
@@ -732,9 +741,9 @@ export const api = {
   totpSetup: (): Promise<ApiResponse<TotpSetupResult>> =>
     request<ApiResponse<TotpSetupResult>>('POST', `${API_BASE}/auth/totp/setup`),
   totpEnable: (code: string): Promise<ApiResponse<TotpEnableResult>> =>
-    request<ApiResponse<TotpEnableResult>>('POST', `${API_BASE}/auth/totp/enable`, { code }),
+    request<ApiResponse<TotpEnableResult>>('POST', `${API_BASE}/auth/totp/enable`, { code }, { skipAuthRedirect: true }),
   totpDisable: (password: string): Promise<ApiResponse<TotpDisableResult>> =>
-    request<ApiResponse<TotpDisableResult>>('POST', `${API_BASE}/auth/totp/disable`, { password }),
+    request<ApiResponse<TotpDisableResult>>('POST', `${API_BASE}/auth/totp/disable`, { password }, { skipAuthRedirect: true }),
 
   // 价格同步
   getPriceSyncConfig: (): Promise<ApiResponse<PricingSyncConfigItem>> =>

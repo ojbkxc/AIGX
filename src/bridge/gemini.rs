@@ -374,6 +374,12 @@ struct StreamState {
     model: String,
     /// 是否已发送 finish_reason（避免 [DONE] 时重复发）
     sent_finish: bool,
+    /// 已产出的工具调用累计数（跨帧递增）。
+    ///
+    /// Gemini 的 `functionCall` 每帧从 0 开始给 parts，不能直接用帧内下标当
+    /// OpenAI 的 `tool_calls[].index` —— 否则跨帧的多个调用都落到 index 0，
+    /// 客户端按 index 合并参数时会把两个工具调用的 JSON 拼坏。
+    tool_call_count: usize,
 }
 
 /// Gemini finishReason → 内部 FinishReason
@@ -556,8 +562,13 @@ fn parse_stream_event(
             if let Some(fc) = p.get("functionCall") {
                 let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let args = fc.get("args").cloned().unwrap_or(serde_json::json!({}));
+                // 跨帧递增：每帧的 parts 从 0 重排，直接用帧内下标会让不同帧
+                // 的多个工具调用撞到同一个 index，客户端按 index 合并参数时
+                // 会把两份 JSON 拼坏。用累计计数保证全局唯一。
+                let index = state.tool_call_count;
+                state.tool_call_count += 1;
                 tool_calls.push(super::ToolCallDelta {
-                    index: tool_calls.len(),
+                    index,
                     id: Some(format!("call_{}", uuid::Uuid::new_v4().simple())),
                     function_name: Some(name.to_string()),
                     arguments: Some(args.to_string()),

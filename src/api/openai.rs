@@ -4594,7 +4594,10 @@ pub async fn handle_list_models(
         // 与调度口径一致：冷却/断路器打开的故障渠道不参与模型列表聚合，
         // 避免上游故障把模型从 /v1/models 吞掉导致客户端误判模型下线
         if state.channel_store.is_in_cooldown(&ch.id)
-            || !state.channel_store.circuit_breaker().allow_request(&ch.id)
+            || !state
+                .channel_store
+                .circuit_breaker()
+                .allows_read_only(&ch.id)
         {
             continue;
         }
@@ -4619,7 +4622,10 @@ pub async fn handle_list_models(
                     && c.models.is_empty()
                     && c.discovered_models.is_empty()
                     && !state.channel_store.is_in_cooldown(&c.id)
-                    && state.channel_store.circuit_breaker().allow_request(&c.id)
+                    && state
+                        .channel_store
+                        .circuit_breaker()
+                        .allows_read_only(&c.id)
             })
             .cloned()
             .collect();

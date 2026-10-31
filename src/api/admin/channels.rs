@@ -190,8 +190,24 @@ pub fn mask_secret(secret: &str) -> String {
 
 /// 构造渠道 JSON 响应（脱敏 API Key）
 /// `seq`：展示用短编号（列表接口按创建顺序注入 1..N；单渠道场景传 None 留空）。
+/// 构造渠道 JSON 响应（脱敏 API Key 与余额查询凭证）
+///
+/// `seq`：展示用短编号（列表接口按创建顺序注入 1..N；单渠道场景传 None 留空）。
+///
+/// 脱敏范围：
+/// - `api_key` → 首 8 + 末 4
+/// - `quirks.headers` 里的 `x-balance-*`（控制台令牌 / 账号密码）→ 全掩码。
+///   这些是**余额查询专用凭证**，与转发密钥同等敏感；`mask_channel` 会把
+///   整条 quirks 序列化给前端，不剔除等于把控制台密码明文吐出来。
 pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
     let masked_key = mask_secret(&ch.api_key);
+    // quirks.headers 脱敏：余额凭证头整体替换为掩码（前端只需要知道「有没有配」）
+    let mut quirks = ch.quirks.clone();
+    for (name, value) in quirks.headers.iter_mut() {
+        if crate::channel::is_balance_credential_header(name) && !value.is_empty() {
+            *value = "****".to_string();
+        }
+    }
     json!({
         "id": ch.id,
         "seq": seq.unwrap_or(0),
@@ -213,7 +229,7 @@ pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
         "test_time": ch.test_time,
         "balance": ch.balance,
         "credit": ch.credit,
-        "quirks": ch.quirks,
+        "quirks": quirks,
         "balance_scheme": ch.balance_scheme,
         "balance_unit": ch.balance_unit,
         "created_at": ch.created_at,
@@ -342,7 +358,7 @@ pub async fn handle_available_models(
             if !c.is_enabled() {
                 continue;
             }
-            if store.is_in_cooldown(&c.id) || !store.circuit_breaker().allow_request(&c.id) {
+            if store.is_in_cooldown(&c.id) || !store.circuit_breaker().allows_read_only(&c.id) {
                 continue;
             }
             let owned_by =
@@ -369,7 +385,10 @@ pub async fn handle_available_models(
                     && c.models.is_empty()
                     && c.discovered_models.is_empty()
                     && !state.channel_store.is_in_cooldown(&c.id)
-                    && state.channel_store.circuit_breaker().allow_request(&c.id)
+                    && state
+                        .channel_store
+                        .circuit_breaker()
+                        .allows_read_only(&c.id)
             })
             .cloned()
             .collect();

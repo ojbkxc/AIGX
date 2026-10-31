@@ -60,6 +60,12 @@ pub enum FailureType {
     ConnectionError,
     /// 空响应（HTTP 200 但零 token）
     EmptyResponse,
+    /// 客户端请求错误（400/413/422 等）—— **不计入断路器**。
+    ///
+    /// 这类错误由用户请求本身引起（参数非法、上下文超限、图片过大），
+    /// 换渠道重发大概率同样失败，且**不代表渠道不健康**。若计入失败计数，
+    /// 几个用户连续发坏请求就会把一条健康渠道熔断，波及所有用户。
+    ClientError,
 }
 
 /// 单个渠道的断路器状态。
@@ -199,6 +205,32 @@ impl CircuitBreaker {
         Self::state_allows(&entry, self.failure_threshold, self.cooldown_duration)
     }
 
+    /// **只读**路径的放行判断：与 [`Self::allow_request`] 的区别是
+    /// **不抢 HalfOpen 试探租约**。
+    ///
+    /// 用于 `/v1/models`、管理面模型聚合、健康巡检这类**不消耗上游额度、
+    /// 也不代表渠道真实可用性**的读请求。它们若调用 `allow_request`，会把
+    /// 60s 的单飞租约抢走，导致真正需要试探的真实流量被拒 —— 表现为
+    /// 「探活/列模型一多，真实请求反而全挂」。
+    ///
+    /// 判据：HalfOpen 期间，只要没有在飞试探就允许读（读请求不占租约）；
+    /// 已有在飞试探时按常规拒绝（避免探活风暴同时打上游）。
+    pub fn allows_read_only(&self, channel_id: &str) -> bool {
+        let entry = match self.states.get(channel_id) {
+            Some(e) => e,
+            None => return true,
+        };
+        if Self::is_half_open(&entry, self.failure_threshold, self.cooldown_duration) {
+            // HalfOpen：在飞租约存在 → 拒绝读（上游正在被试探）；否则放行
+            let now = Instant::now();
+            return match entry.probe_lease_until {
+                Some(t) if t > now => false,
+                _ => true,
+            };
+        }
+        Self::state_allows(&entry, self.failure_threshold, self.cooldown_duration)
+    }
+
     /// 判断渠道是否处于 HalfOpen（失败计数达阈值且冷却已过，待试探）。
     ///
     /// 限流窗口内视为 open（非 HalfOpen）；无失败时间（理论不可达，防御）非 HalfOpen。
@@ -289,6 +321,13 @@ impl CircuitBreaker {
         entry.probe_lease_until = None;
 
         match &failure_type {
+            // 客户端请求错误：只更新最近失败类型（排障可见），**不动失败计数、
+            // 不开断路器、不设冷却** —— 渠道本身是健康的。
+            FailureType::ClientError => {
+                entry.failure_type = Some(failure_type);
+                entry.last_failure_time = Some(Instant::now());
+                return;
+            }
             FailureType::AuthFailed | FailureType::PaymentRequired => {
                 // 永久性故障：放大计数 + 长冷却，避免反复重试坏密钥/空余额渠道
                 entry

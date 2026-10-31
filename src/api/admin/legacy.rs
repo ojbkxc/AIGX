@@ -1258,18 +1258,23 @@ pub async fn handle_fetch_channel_models(
 
     let channel_type = crate::channel::ChannelType::from_str_lossy(&body.channel_type);
     let channel_id_for_save = body.channel_id.clone();
-    // 已存渠道的 quirks 优先（预置供应商的 urlSuffix / 静态头）；未存时为空
-    let quirks = channel_id_for_save
+    // 支持逗号分隔的多渠道 ID（批量拉取）；逐个 trim 后再查/写，
+    // 否则 `"ch1, ch2"` 里带空格的 ID 会静默查不到。
+    let ids: Vec<&str> = channel_id_for_save
         .split(',')
-        .next()
-        .and_then(|cid| state.channel_store.get(cid.trim()))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .collect();
+    let quirks = ids
+        .first()
+        .and_then(|cid| state.channel_store.get(cid))
         .map(|ch| ch.quirks)
         .unwrap_or_default();
     let (url, models) =
         fetch_upstream_models(&state, channel_type, &body.base_url, &api_key, &quirks).await?;
 
-    if let Some(cid) = channel_id_for_save.split(',').next() {
-        if !cid.trim().is_empty() && state.channel_store.get(cid).is_some() {
+    for cid in &ids {
+        if state.channel_store.get(cid).is_some() {
             if let Err(e) = state
                 .channel_store
                 .save_discovered_models(cid, models.clone())

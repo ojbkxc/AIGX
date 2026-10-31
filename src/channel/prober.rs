@@ -58,7 +58,7 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
             continue;
         }
         // 断路器 Open 期间不探测（HalfOpen 试探由 allow_request 放行）
-        if !channel_store.circuit_breaker().allow_request(&ch.id) {
+        if !channel_store.circuit_breaker().allows_read_only(&ch.id) {
             tracing::debug!(channel = %ch.id, "prober skip: circuit open");
             continue;
         }

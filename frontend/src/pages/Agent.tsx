@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import ModelPicker from '../components/ModelPicker';
 import MessageViewer from '../components/MessageViewer';
+import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { api } from '../api';
 import './Agent.css';
 
@@ -101,6 +102,8 @@ export default function Agent(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [pending, setPending] = useState<PendingApproval | null>(null);
+  /** 删除历史会话的二次确认（服务端不可逆） */
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [model, setModel] = useState('');
   /** 思考强度：默认关（不发送 reasoning_effort），按任务复杂度点选低/中/高 */
   const [effort, setEffort] = useState<Effort>(() => {
@@ -212,17 +215,28 @@ export default function Agent(): JSX.Element {
 
   /** 删除历史会话（当前会话被删时同时断开前端关联） */
   const deleteSession = useCallback(async (id: string): Promise<void> => {
-    try {
-      await api.deleteAgentSession(id);
-      setSessions((prev) => prev.filter((s) => s.id !== id));
-      if (sessionId === id) {
-        setSessionId(null);
-        setMessages([]);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [sessionId]);
+    // 删除历史会话是服务端不可逆操作：先二次确认
+    setConfirmState({
+      title: t('删除历史会话'),
+      message: t('确定删除这条历史会话？删除后无法恢复。'),
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await api.deleteAgentSession(id);
+          setSessions((prev) => prev.filter((s) => s.id !== id));
+          if (sessionId === id) {
+            setSessionId(null);
+            setMessages([]);
+          }
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+          // 抛出让 ConfirmDialog 保留弹窗并显示错误
+          throw e;
+        }
+      },
+    });
+  }, [sessionId, t]);
 
   const send = useCallback(async (override?: string) => {
     const text = (override ?? input).trim();
@@ -589,6 +603,7 @@ export default function Agent(): JSX.Element {
           </div>
         </div>
       )}
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }

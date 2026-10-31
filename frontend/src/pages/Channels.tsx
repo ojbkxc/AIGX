@@ -321,23 +321,27 @@ export default function Channels(): JSX.Element {
     setActivePreset(preset.key);
   }
 
-  // 挂载时加载一次渠道列表；分页翻页时重新拉取（搜索由服务端过滤）
+  // 挂载 / 翻页 / 搜索变化时加载列表。
+  //
+  // 单一 effect 依赖 `[page, search]`：搜索变化时先把页码重置到 1，由
+  // 同一个 effect 触发一次请求 —— 避免「page effect + search effect 各拉
+  // 一次」的重复请求，也避免搜索时用旧页码发请求的竞态。
+  // 搜索输入用 400ms 防抖（翻页不防抖，立即生效）。
   useEffect(() => {
-    loadChannels().catch((err: unknown) => {
-      setError(err instanceof Error ? err.message : String(err));
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page]);
-
-  // 搜索防抖：输入停顿 400ms 后自动按服务端搜索（回车仍可立即触发）
-  useEffect(() => {
+    const delay = search.trim() ? 400 : 0;
     const timer = window.setTimeout(() => {
-      setPage(1);
       loadChannels().catch((err: unknown) => {
         setError(err instanceof Error ? err.message : String(err));
       });
-    }, 400);
+    }, delay);
     return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, search]);
+
+  // 搜索词变化时把页码重置到 1（避免「第 3 页 + 新搜索词」导致空页）。
+  // 单独一个 effect：它只改状态，不直接发请求。
+  useEffect(() => {
+    setPage((prev) => (prev === 1 ? prev : 1));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
