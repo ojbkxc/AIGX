@@ -55,8 +55,41 @@ const MAX_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
 const BUNDLE_MAGIC: &[u8; 7] = b"AIGXUP1";
 const CHECK_KEY: &str = "update:last_check";
 const APPLIED_KEY: &str = "update:applied";
+/// 重启请求计数（每次 +1；前端据此与 startedAt 一起判定「重启真的发生了」）。
+const RESTART_EPOCH_KEY: &str = "update:restart_epoch";
+/// 最近一次 exec 自重启的失败原因（成功重启后进程无记忆，此项重启即清）。
+const RESTART_ERROR_KEY: &str = "update:restart_error";
+/// 「已应用待重启」标记（持久化：exec 失败/被外部重启后状态不丢）。
+const PENDING_RESTART_KEY: &str = "update:pending_restart";
 /// 两次检查之间的最短间隔（秒）：手动按钮连点会重复消耗 GitHub 匿名限额。
 const MIN_CHECK_GAP: i64 = 60;
+
+/// 本进程的启动时间（unix 秒）。exec 自重启**不换 PID**，前端只能靠
+/// startedAt 的变化判定「新进程起来了」——这是无缝更新的关键信号。
+static PROCESS_STARTED_AT: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+
+/// 进程启动时间（`new()` 时初始化一次）。
+pub fn process_started_at() -> i64 {
+    *PROCESS_STARTED_AT.get_or_init(now_ts)
+}
+
+/// 是否跑在容器里（Docker 在 `/` 放 `.dockerenv`）。容器场景 exec 原地重启
+/// 不可靠（发布二进制是 glibc，Alpine 运行时是 musl），UI 需要提示拉新镜像。
+pub fn containerized() -> bool {
+    std::path::Path::new("/.dockerenv").exists()
+}
+
+/// `static/version.json`（CI 构建时写入，随 .upd 打包）里的版本号。
+fn static_version(exe: &Path) -> Option<String> {
+    let path = static_dir_path(exe).join("version.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().trim_start_matches('v').to_string())
+        .filter(|s| !s.is_empty())
+}
 
 /// Release 里的一个资产。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +158,10 @@ struct Inner {
     pending_restart: bool,
     applied: Option<AppliedMarker>,
     progress: DownloadProgress,
+    /// 重启请求计数（持久化，跨进程存活）。
+    restart_epoch: u64,
+    /// 最近一次 exec 自重启的失败原因。
+    restart_error: Option<String>,
 }
 
 /// 更新管理器（内部 Arc + Mutex，Clone 共享同一状态）。
@@ -149,9 +186,36 @@ impl UpdateManager {
             .flatten()
             .unwrap_or_default();
         let applied = store.get::<AppliedMarker>(APPLIED_KEY).ok().flatten();
+        // 重启相关状态跨进程恢复：exec 失败/被 systemd 重启后不丢
+        let mut pending_restart = store
+            .get::<bool>(PENDING_RESTART_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        let restart_epoch = store
+            .get::<u64>(RESTART_EPOCH_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let mut restart_error = store.get::<String>(RESTART_ERROR_KEY).ok().flatten();
+        // 新进程已在跑「应用后的版本」= 更新已生效：清掉待重启与失败残留。
+        // （exec 会带上旧参数与环境，这里靠版本对齐判定，而不是「新进程=成功」——
+        //  systemd 外部重启也会走到这，同样成立。）
+        if applied
+            .as_ref()
+            .is_some_and(|marker| marker.version == CURRENT_VERSION)
+        {
+            if pending_restart || restart_error.is_some() {
+                pending_restart = false;
+                restart_error = None;
+                let _ = store.put(PENDING_RESTART_KEY, &false);
+                let _ = store.delete(RESTART_ERROR_KEY);
+            }
+        }
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aigx"));
         let writable = writable_exe_dir(&exe);
         let _ = std::fs::create_dir_all(data_dir.join("updates"));
+        let _ = PROCESS_STARTED_AT.set(now_ts());
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 latest: persisted.latest,
@@ -160,9 +224,11 @@ impl UpdateManager {
                 retry_at: persisted.retry_at,
                 checking: false,
                 applying: false,
-                pending_restart: false,
+                pending_restart,
                 applied,
                 progress: DownloadProgress::default(),
+                restart_epoch,
+                restart_error,
             })),
             store,
             data_dir,
@@ -213,6 +279,21 @@ impl UpdateManager {
             } else {
                 Value::Null
             };
+        // 冷却期可见：刚查过就直说，别让按钮像坏了（前端据此显示倒计时）
+        let now = now_ts();
+        let since_check = guard.checked_at.max(0);
+        let recently_checked =
+            since_check > 0 && now - since_check < MIN_CHECK_GAP && !guard.checking;
+        let retry_after_secs = if recently_checked {
+            MIN_CHECK_GAP - (now - since_check)
+        } else {
+            0
+        };
+        let static_ver = static_version(&self.exe);
+        let version_mismatch = static_ver
+            .as_deref()
+            .map(|v| v != CURRENT_VERSION)
+            .unwrap_or(false);
         json!({
             "currentVersion": CURRENT_VERSION,
             "latestVersion": if latest_tag.is_empty() { Value::Null } else { json!(latest_tag) },
@@ -247,6 +328,16 @@ impl UpdateManager {
             "apiBase": api_root(config),
             "appliedVersion": guard.applied.as_ref().map(|marker| marker.version.clone()),
             "appliedAt": guard.applied.as_ref().map(|marker| marker.applied_at).unwrap_or(0),
+            // ── 无缝更新判定用 ──
+            // 本进程启动时间：exec 不换 PID，前端只能靠它的变化确认「新进程起来了」
+            "startedAt": process_started_at(),
+            "restartEpoch": guard.restart_epoch,
+            "restartError": guard.restart_error,
+            "staticVersion": static_ver,
+            "versionMismatch": version_mismatch,
+            "containerized": containerized(),
+            "recentlyChecked": recently_checked,
+            "retryAfterSecs": retry_after_secs,
         })
     }
 
@@ -305,7 +396,9 @@ impl UpdateManager {
     /// 启动后台更新（下载 → 校验 → 解包 → 替换；按配置自动重启）。
     ///
     /// 立即返回状态快照，进度与结果通过 [`Self::status`] 轮询。
-    pub fn start_apply(&self, config: &UpdateConfig) -> Result<Value, String> {
+    /// `force`（修复模式）：跳过「已是最新」与「待重启」拦截，用最新 `.upd`
+    /// 重新安装一遍——修「二进制换了 static 没换」这类半更新。
+    pub fn start_apply(&self, config: &UpdateConfig, force: bool) -> Result<Value, String> {
         if !supported() {
             return Err(
                 "当前平台不支持原地更新（仅 Linux 服务器/容器）：请手动替换发布包".to_string(),
@@ -316,7 +409,7 @@ impl UpdateManager {
             if guard.applying {
                 return Err("更新正在执行中，请稍候".to_string());
             }
-            if guard.pending_restart {
+            if guard.pending_restart && !force {
                 return Err("更新已应用，请先重启服务".to_string());
             }
             if !self.writable {
@@ -327,7 +420,7 @@ impl UpdateManager {
             let Some(release) = guard.latest.clone() else {
                 return Err("请先检查更新".to_string());
             };
-            if compare_versions(&release.tag, CURRENT_VERSION).unwrap_or(0) <= 0 {
+            if !force && compare_versions(&release.tag, CURRENT_VERSION).unwrap_or(0) <= 0 {
                 return Err("当前已是最新版本".to_string());
             }
             let Some(bundle) = release.bundle.clone() else {
@@ -337,6 +430,8 @@ impl UpdateManager {
                 return Err("该版本没有提供 .sha256 校验文件，已拒绝更新".to_string());
             }
             guard.applying = true;
+            guard.pending_restart = false;
+            let _ = self.store.put(PENDING_RESTART_KEY, &false);
             guard.last_error = None;
             guard.progress = DownloadProgress {
                 active: true,
@@ -375,6 +470,10 @@ impl UpdateManager {
             }
         }
         if success {
+            // 待重启标记落盘：exec 失败/进程被外部重启后状态不丢
+            if let Err(e) = self.store.put(PENDING_RESTART_KEY, &true) {
+                tracing::warn!("persist pending_restart failed: {e}");
+            }
             let marker = AppliedMarker {
                 version: release.tag.clone(),
                 applied_at: now_ts(),
@@ -555,11 +654,26 @@ impl UpdateManager {
     }
 
     /// 延迟 2 秒后 exec 自重启（先让 HTTP 响应/SSE 收尾）。
+    ///
+    /// 重启判定交给前端：`restartEpoch`（本次请求）+ `startedAt`（新进程
+    /// 启动时间变化）——exec **不换 PID**，PID 判不出。exec 失败会把原因
+    /// 写进 `update:restart_error` 并保留进程，前端能看到、不是假成功。
     pub fn request_restart(&self) -> Result<Value, String> {
         if !supported() {
             return Err("当前平台不支持网页端重启，请在服务器上重启 AIGX".to_string());
         }
         let exe = self.exe.clone();
+        let epoch = {
+            let mut guard = self.lock();
+            guard.restart_epoch += 1;
+            guard.restart_error = None;
+            guard.restart_epoch
+        };
+        if let Err(e) = self.store.put(RESTART_EPOCH_KEY, &epoch) {
+            tracing::warn!("persist restart epoch failed: {e}");
+        }
+        let _ = self.store.delete(RESTART_ERROR_KEY);
+        let store = self.store.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(2)).await;
             tracing::warn!("restarting AIGX via exec: {}", exe.display());
@@ -567,19 +681,26 @@ impl UpdateManager {
             {
                 use std::os::unix::process::CommandExt;
                 let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+                // cwd 显式归位到 exe 目录：static 目录解析/相对路径才稳定
+                if let Some(dir) = exe.parent() {
+                    let _ = std::env::set_current_dir(dir);
+                }
                 let error = std::process::Command::new(&exe)
                     .args(args)
                     .envs(std::env::vars_os())
                     .exec();
-                tracing::error!("self restart failed: {error}");
+                // exec 只在失败时返回：把原因留下，前端不再假报「已重启」
+                let message = format!("exec 自重启失败：{error}");
+                tracing::error!("{message}");
+                let _ = store.put(RESTART_ERROR_KEY, &message);
             }
             #[cfg(not(unix))]
             {
-                let _ = exe;
+                let _ = (exe, store);
                 tracing::error!("self restart is only supported on unix");
             }
         });
-        Ok(json!({ "restarting": true, "delaySecs": 2 }))
+        Ok(json!({ "restarting": true, "delaySecs": 2, "restartEpoch": epoch }))
     }
 
     /// 回滚到上一版本（备份由上一次成功安装留下）。
@@ -659,7 +780,7 @@ impl UpdateManager {
         match self.check(config).await {
             Ok(status) => {
                 if config.auto_apply && status["hasUpdate"].as_bool() == Some(true) {
-                    if let Err(e) = self.start_apply(config) {
+                    if let Err(e) = self.start_apply(config, false) {
                         tracing::warn!("auto update apply failed: {e}");
                     }
                 }
@@ -835,12 +956,18 @@ fn writable_exe_dir(exe: &Path) -> bool {
     }
 }
 
+/// static 目录定位：**exe 同级 `static/` 是权威**（更新替换的就是它）；
+/// 仅当它不存在时才回落 web 层候选链（cwd 下的 ./static 等），避免 cwd
+/// 里恰好有同名目录时替换错位置。
 fn static_dir_path(exe: &Path) -> PathBuf {
-    crate::web::find_static_dir().unwrap_or_else(|| {
-        exe.parent()
-            .map(|parent| parent.join("static"))
-            .unwrap_or_else(|| PathBuf::from("static"))
-    })
+    let adjacent = exe
+        .parent()
+        .map(|parent| parent.join("static"))
+        .unwrap_or_else(|| PathBuf::from("static"));
+    if adjacent.is_dir() {
+        return adjacent;
+    }
+    crate::web::find_static_dir().unwrap_or(adjacent)
 }
 
 fn backup_path(path: &Path) -> PathBuf {

@@ -66,18 +66,29 @@ pub async fn handle_update_check(
 }
 
 /// POST /api/update/apply —— 后台下载并原地替换（按配置自动 exec 重启）。
+///
+/// body 可选 `{"force": true}`：修复模式（跳过「已是最新/待重启」拦截，
+/// 用最新 .upd 重装一遍），供「前端与后端版本不一致」时一键修复前端。
 pub async fn handle_update_apply(
     State(state): State<AppState>,
     headers: HeaderMap,
+    body: Option<Json<Value>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let config = verify_admin(&state, &headers).await?;
-    match state.update.start_apply(&config.update) {
+    let force = body
+        .and_then(|Json(v)| v.get("force").and_then(|f| f.as_bool()))
+        .unwrap_or(false);
+    match state.update.start_apply(&config.update, force) {
         Ok(data) => {
             let admin_id = admin_id_from_session(&state, &headers).await;
             record_audit(
                 &state,
                 &admin_id,
-                "start_update",
+                if force {
+                    "repair_update"
+                } else {
+                    "start_update"
+                },
                 &format!("from={}", crate::update::CURRENT_VERSION),
                 Some(json!({ "version": crate::update::CURRENT_VERSION })),
                 Some(json!({ "latest": data["latestVersion"] })),
