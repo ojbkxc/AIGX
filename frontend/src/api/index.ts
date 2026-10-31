@@ -434,6 +434,18 @@ export const api = {
     request<ApiResponse<null>>('POST', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/reset-cooldown`),
   accountProviders: (): Promise<ApiList<AccountProviderItem>> =>
     request<ApiList<AccountProviderItem>>('GET', `${API_BASE}/account-sessions/providers`),
+  /** 发起登录态供应商的网页登录（返回授权地址与任务 state） */
+  startAccountLogin: (data: Record<string, unknown>): Promise<ApiResponse<{ state: string; authUrl: string; provider: string }>> =>
+    request<ApiResponse<{ state: string; authUrl: string; provider: string }>>('POST', `${API_BASE}/account-sessions/login/start`, data),
+  /** 轮询登录结果：pending / done+error / done+accountId */
+  waitAccountLogin: (state: string): Promise<ApiResponse<{ pending?: boolean; done?: boolean; error?: string; accountId?: string }>> =>
+    request<ApiResponse<{ pending?: boolean; done?: boolean; error?: string; accountId?: string }>>('GET', `${API_BASE}/account-sessions/login/wait?state=${encodeURIComponent(state)}`),
+  /** 取消等待中的网页登录 */
+  cancelAccountLogin: (state: string): Promise<ApiResponse<{ canceled?: boolean }>> =>
+    request<ApiResponse<{ canceled?: boolean }>>('POST', `${API_BASE}/account-sessions/login/cancel`, { state }),
+  /** 远程部署时手工提交浏览器地址栏里的回调地址 */
+  submitAccountLoginCallback: (state: string, callbackUrl: string): Promise<ApiResponse<{ accountId?: string }>> =>
+    request<ApiResponse<{ accountId?: string }>>('POST', `${API_BASE}/account-sessions/login/callback`, { state, callback_url: callbackUrl }),
   accountSessionStats: (): Promise<ApiResponse<{ channels?: AccountSessionStatsItem[]; total?: number }>> =>
     request<ApiResponse<{ channels?: AccountSessionStatsItem[]; total?: number }>>('GET', `${API_BASE}/account-sessions/stats`),
   accountRotationPolicy: (): Promise<ApiResponse<AccountRotationPolicyItem>> =>

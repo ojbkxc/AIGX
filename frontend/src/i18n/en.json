@@ -1697,5 +1697,10 @@
   "账号设置（渠道 / 优先级 / 并发等）": "Account settings (channel / priority / concurrency)",
   "（必填）": " (required)",
   "已登录，去填写凭证": "Signed in — enter credentials",
-  "网页登录完成后，请切到「填写凭证」把登录态粘进来再添加": "After browser sign-in, switch to \"Enter credentials\" and paste the login state before adding"
+  "网页登录完成后，请切到「填写凭证」把登录态粘进来再添加": "After browser sign-in, switch to \"Enter credentials\" and paste the login state before adding",
+  "取消等待": "Cancel waiting",
+  "等待登录完成…": "Waiting for sign-in…",
+  "提交回调地址": "Submit callback URL",
+  "登录发起失败": "Failed to start sign-in",
+  "远程部署：登录完成后把地址栏回调地址粘到这里": "Remote deployment: paste the callback URL from the address bar after signing in"
 }

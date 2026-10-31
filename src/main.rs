@@ -1403,6 +1403,23 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/account-sessions/stats",
             get(api::admin::account_sessions::handle_account_session_stats),
         )
+        // 登录态供应商的网页登录（服务端无头登录 + 任务表）
+        .route(
+            "/api/account-sessions/login/start",
+            post(api::admin::account_login::handle_login_start),
+        )
+        .route(
+            "/api/account-sessions/login/wait",
+            get(api::admin::account_login::handle_login_wait),
+        )
+        .route(
+            "/api/account-sessions/login/cancel",
+            post(api::admin::account_login::handle_login_cancel),
+        )
+        .route(
+            "/api/account-sessions/login/callback",
+            post(api::admin::account_login::handle_login_callback),
+        )
         .route(
             "/api/account-sessions/bulk",
             post(api::admin::account_sessions::handle_bulk_import_account_sessions),

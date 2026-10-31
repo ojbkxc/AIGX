@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { presetIcon, providerIcon } from '../lib/providerIcons';
@@ -150,6 +150,12 @@ export default function AddAccountDialog({
   const [rawHeaders, setRawHeaders] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // 网页登录：任务 state / 等待态 / 回调地址（远程部署兜底）
+  const [loginState, setLoginState] = useState('');
+  const [loginWaiting, setLoginWaiting] = useState(false);
+  const [loginError, setLoginError] = useState('');
+  const [callbackUrl, setCallbackUrl] = useState('');
+  const pollRef = useRef<number | null>(null);
 
   const selectedProvider = providers.find((p) => p.kind === provider);
   const addConfig = addConfigOf(provider);
@@ -246,6 +252,85 @@ export default function AddAccountDialog({
     }));
     setRawHeaders('');
     addToast(t('已填充凭证与额外请求头'));
+  };
+
+  const stopPolling = (): void => {
+    if (pollRef.current !== null) {
+      window.clearTimeout(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+
+  useEffect(() => stopPolling, []);
+
+  const pollLogin = (taskState: string): void => {
+    api.waitAccountLogin(taskState)
+      .then((res) => {
+        const data = res.data;
+        if (!data) return;
+        if (data.pending) {
+          pollRef.current = window.setTimeout(() => pollLogin(taskState), 2000);
+          return;
+        }
+        stopPolling();
+        setLoginWaiting(false);
+        if (data.error) {
+          setLoginError(data.error);
+          return;
+        }
+        addToast(t('账号已添加'));
+        void onCreated();
+        onClose();
+      })
+      .catch((err) => {
+        stopPolling();
+        setLoginWaiting(false);
+        setLoginError(err instanceof Error ? err.message : String(err));
+      });
+  };
+
+  const startLogin = async (): Promise<void> => {
+    setLoginError('');
+    setLoginWaiting(true);
+    try {
+      const res = await api.startAccountLogin({ provider, channel_id: advanced.channel_id });
+      const data = res.data;
+      if (!data?.state || !data.authUrl) throw new Error(t('登录发起失败'));
+      setLoginState(data.state);
+      window.open(data.authUrl, '_blank', 'noopener,noreferrer');
+      pollLogin(data.state);
+    } catch (err) {
+      setLoginWaiting(false);
+      setLoginError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const cancelLogin = async (): Promise<void> => {
+    stopPolling();
+    setLoginWaiting(false);
+    if (loginState) {
+      try {
+        await api.cancelAccountLogin(loginState);
+      } catch {
+        // 取消失败不影响本地等待退出
+      }
+    }
+  };
+
+  const submitCallback = async (): Promise<void> => {
+    if (!loginState || !callbackUrl.trim()) return;
+    setLoginError('');
+    try {
+      await api.submitAccountLoginCallback(loginState, callbackUrl.trim());
+      setCallbackUrl('');
+      setLoginWaiting(false);
+      stopPolling();
+      addToast(t('账号已添加'));
+      await onCreated();
+      onClose();
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const submit = async (): Promise<void> => {
@@ -474,15 +559,42 @@ export default function AddAccountDialog({
                       <div className="add-btn-row">
                         <Button
                           type="button"
-                          onClick={() => window.open(webConfig.url, '_blank', 'noopener,noreferrer')}
+                          onClick={() => void startLogin()}
+                          disabled={loginWaiting}
                         >
-                          {webConfig.button}
+                          {loginWaiting ? t('等待登录完成…') : webConfig.button}
                         </Button>
+                        {loginWaiting ? (
+                          <Button type="button" variant="outline" onClick={() => void cancelLogin()}>
+                            {t('取消等待')}
+                          </Button>
+                        ) : null}
                         {webConfig.hint ? <span className="form-hint">{webConfig.hint}</span> : null}
                         <Button type="button" variant="outline" onClick={() => setMethod('manual')}>
                           {t('已登录，去填写凭证')}
                         </Button>
                       </div>
+                      {loginWaiting ? (
+                        <div className="add-block" style={{ marginTop: 10 }}>
+                          <Input
+                            label={t('远程部署：登录完成后把地址栏回调地址粘到这里')}
+                            placeholder="http://127.0.0.1:…/oauth/callback?code=…&state=…"
+                            value={callbackUrl}
+                            onChange={(e) => setCallbackUrl(e.target.value)}
+                          />
+                          <div className="add-btn-row">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() => void submitCallback()}
+                              disabled={!callbackUrl.trim()}
+                            >
+                              {t('提交回调地址')}
+                            </Button>
+                          </div>
+                        </div>
+                      ) : null}
+                      {loginError ? <div className="error-message">{loginError}</div> : null}
                     </div>
                   ) : null}
 
