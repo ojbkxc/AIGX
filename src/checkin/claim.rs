@@ -752,7 +752,7 @@ async fn workbuddy(client: &Client, session: &AccountSession, secret: &str) -> C
 // 一轮 status → claim → 回查共用**一个全新 16 位数字设备号**（风控要求，
 // 凭证自带 device_id 只做门禁）；回查翻转才算成功，失败文案不得含「已签到」。
 
-async fn trae(client: &Client, session: &AccountSession, secret: &str) -> ClaimResult {
+async fn trae(client: &Client, _session: &AccountSession, secret: &str) -> ClaimResult {
     use rand::Rng;
     let device: String = (0..16)
         .map(|_| char::from(b'0' + rand::thread_rng().gen_range(0..10u8)))
@@ -909,7 +909,7 @@ async fn codearts(client: &Client, session: &AccountSession, secret: &str) -> Cl
         ];
         let is_get = method == reqwest::Method::GET;
         let body_text = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
-        if let Some(auth) = bridge.sign(&method.to_string(), url, &headers, body_text.as_bytes()) {
+        if let Some(auth) = bridge.sign(method.as_str(), url, &headers, body_text.as_bytes()) {
             headers.push(("Authorization".to_string(), auth));
         }
         send_json(
