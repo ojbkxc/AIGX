@@ -17,6 +17,7 @@ mod accio;
 mod antigravity;
 mod catpaw;
 mod cline;
+mod codearts;
 pub mod loomy;
 mod qoder;
 mod raccoon;
@@ -209,6 +210,7 @@ pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result
         "accio" => accio::start(&client).await?,
         "antigravity" => antigravity::start(&client).await?,
         "trae" => trae::start(&client).await?,
+        "codearts" => codearts::start(&client).await?,
         other => {
             return Err(format!(
                 "「{other}」的网页登录引擎尚未接入网关：请改用「填写凭证」粘贴登录态"
