@@ -1050,7 +1050,7 @@ async fn codearts(client: &Client, session: &AccountSession, secret: &str) -> Cl
 // 或 `secret` 的 `ak:sk:sts` 形态（手工粘贴）。上游一天一活动重复领不报错，
 // 恒按成功处理，文案按领取前后积分增量生成。
 
-fn hmac_sha256(key: &[u8], message: &str) -> Vec<u8> {
+pub(crate) fn hmac_sha256(key: &[u8], message: &str) -> Vec<u8> {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC 接受任意长度密钥");
@@ -1058,7 +1058,7 @@ fn hmac_sha256(key: &[u8], message: &str) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -1068,7 +1068,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// V11-HMAC-SHA256 签名（faithful 移植 upstream `officeace/signer.rs`）。
 #[allow(clippy::too_many_arguments)]
-fn sign_v11(
+pub(crate) fn sign_v11(
     method: &str,
     url: &str,
     extra: &[(String, String)],
@@ -1160,15 +1160,15 @@ fn sign_v11(
     items
 }
 
-struct OfficeAceCred {
-    ak: String,
-    sk: String,
-    sts: String,
-    project: String,
+pub(crate) struct OfficeAceCred {
+    pub(crate) ak: String,
+    pub(crate) sk: String,
+    pub(crate) sts: String,
+    pub(crate) project: String,
 }
 
 /// 取 OfficeAce 临时凭据：`refresh_secret` JSON 优先，`secret` 的 `ak:sk:sts` 兜底。
-fn officeace_temp_creds(session: &AccountSession) -> Option<OfficeAceCred> {
+pub(crate) fn officeace_temp_creds(session: &AccountSession) -> Option<OfficeAceCred> {
     // refresh_secret 落盘/内存都是 `enc:` 编码，先解码再解析 JSON
     let raw = crate::channel::Channel::decode_api_key_value(&session.refresh_secret);
     if let Ok(value) = serde_json::from_str::<Value>(&raw) {
