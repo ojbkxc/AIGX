@@ -2981,6 +2981,21 @@ pub async fn handle_channel_chat_test(
     // 日志渠道/模型错位，且无从追溯真实上游模型）。
     // model 为空时保留旧行为：选优先级最高的启用渠道，再取其 models[0]。
     let requested_model = body.model.trim().to_string();
+
+    // 分组模型白名单（与数据面 / Playground 同口径）：普通用户按次扣 2 配额
+    // 打上游，若不校验白名单，受限分组用户能用低价在这里调用高价模型。
+    if !user.is_admin()
+        && !requested_model.is_empty()
+        && !state
+            .user_group_store
+            .allows_model(&user.group, &requested_model)
+    {
+        return error_response(
+            &format!("模型 '{requested_model}' 不在当前分组允许范围内"),
+            StatusCode::FORBIDDEN,
+        )
+        .into_response();
+    }
     let ch = if body.channel_id.trim().is_empty() {
         let enabled: Vec<crate::channel::Channel> = state
             .channel_store

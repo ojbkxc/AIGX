@@ -194,9 +194,14 @@ fn resolve_estimate_tokens(body: &CostEstimateRequest) -> Result<(u64, u64, &'st
 pub async fn handle_cost_estimate(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<CostEstimateRequest>,
+    Json(mut body): Json<CostEstimateRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _user = super::common::verify_user(&state, &headers).await?;
+    let user = super::common::verify_user(&state, &headers).await?;
+    // 分组绑定：普通用户只能按**自己的分组**试算。否则用 group=vip 反复试算
+    // 就能反推出各组倍率（/api/ratios 是 admin-only，这里等于开了后门）。
+    if !user.is_admin() {
+        body.group = user.group.clone();
+    }
 
     // 与数据面一致：优先按原始消息估算 prompt token。
     let (input_tokens, output_tokens, token_source) = match resolve_estimate_tokens(&body) {

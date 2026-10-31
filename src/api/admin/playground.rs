@@ -61,7 +61,18 @@ pub(crate) fn record_playground_usage(
             }
         }
         if remaining > 0 && !state.user_store.try_charge(user_id, remaining) {
+            // 入口预检挡住了「余额为 0」，但余额不足以覆盖**本次**成本时仍会走到
+            // 这里：上游已经产出、响应已经构造，此时改 402 会丢掉用户已经拿到的
+            // 结果。改为记一条安全事件，让管理员能看到「有用户长期欠费跑量」，
+            // 而不是只留一行 warn 埋在日志里。
             tracing::warn!("playground charge failed for user {user_id} (insufficient quota)");
+            state.log_store.record_security(crate::log::SecurityEvent::new(
+                crate::log::SecurityEventType::RateLimit,
+                "warning",
+                format!(
+                    "Playground 欠费：用户 {user_id} 的余额不足以支付本次 {kind} 调用（应扣 {remaining}）"
+                ),
+            ));
         }
     }
     // 落请求日志（管理员可在日志页看到 Playground 消耗，来源渠道标注；
@@ -183,6 +194,34 @@ pub struct PlaygroundChatRequest {
     pub max_tokens: Option<i32>,
 }
 
+/// Playground 入口的公共准入校验（非管理员）：
+/// 1. 余额必须 > 0（计费发生在上游响应之后，0 余额会白嫖站方成本）
+/// 2. 模型必须在用户分组白名单内（与数据面 `check_group_model_permission` 同口径）
+///
+/// 抽成一处是因为 chat / images / tts / transcriptions 四个入口都要做，
+/// 分散实现迟早会漏掉某个（改造前 images/tts/transcriptions 就没有余额预检）。
+fn playground_guard(state: &AppState, user: &crate::user::User, model: &str) -> Option<Response> {
+    if user.is_admin() {
+        return None;
+    }
+    if user.remaining() <= 0 {
+        return Some(
+            error_response("余额不足，请先充值", StatusCode::PAYMENT_REQUIRED).into_response(),
+        );
+    }
+    let model = model.trim();
+    if !model.is_empty() && !state.user_group_store.allows_model(&user.group, model) {
+        return Some(
+            error_response(
+                &format!("模型 '{model}' 不在当前分组允许范围内"),
+                StatusCode::FORBIDDEN,
+            )
+            .into_response(),
+        );
+    }
+    None
+}
+
 /// POST /api/admin/playground/chat - Playground 聊天
 ///
 /// 权限对齐 new-api：Playground 是普通用户与管理员共用的调试沙盒，
@@ -210,10 +249,9 @@ pub async fn handle_playground_chat(
         .into_response();
     }
 
-    // 余额预检：计费在拿到上游响应之后才做（此时已产生上游成本），
-    // 余额为 0 的普通用户仍能反复调用 = 白嫖站方成本。入口先挡。
-    if !user.is_admin() && user.remaining() <= 0 {
-        return error_response("余额不足，请先充值", StatusCode::PAYMENT_REQUIRED).into_response();
+    // 余额预检 + 分组模型白名单（共用 guard，与数据面同口径）
+    if let Some(resp) = playground_guard(&state, &user, &body.model) {
+        return resp;
     }
 
     // 选渠道：优先 channel_id，否则按 model 路由到声明该模型的启用渠道
@@ -438,11 +476,35 @@ pub async fn handle_playground_chat(
 }
 
 /// GET /api/admin/playground/channels - 列出可用渠道（登录即可，列表已脱敏）
+///
+/// 普通用户只拿到**去重的模型名**：渠道 id/名称/启停状态属于运营资产，
+/// 暴露出去等于给出「站里有几家上游、各叫什么、挂了没」的侦察面。
+/// 管理员的 Playground 需要按渠道定向调试，才返回完整列表。
 pub async fn handle_playground_channels(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _user = verify_user(&state, &headers).await?;
+    let user = verify_user(&state, &headers).await?;
+    if !user.is_admin() {
+        // 与 /api/models/available 同源：只给模型名，且按用户分组白名单过滤
+        let mut names: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for c in state.channel_store.list() {
+            if !c.is_enabled() {
+                continue;
+            }
+            for m in c.effective_models() {
+                if !m.is_empty()
+                    && seen.insert(m.clone())
+                    && state.user_group_store.allows_model(&user.group, m)
+                {
+                    names.push(m.clone());
+                }
+            }
+        }
+        names.sort();
+        return Ok(Json(json!({ "success": true, "data": names })));
+    }
     let channels: Vec<Value> = state
         .channel_store
         .list()
@@ -494,6 +556,11 @@ pub async fn handle_playground_images(
             StatusCode::FORBIDDEN,
         )
         .into_response();
+    }
+
+    // 余额预检 + 分组模型白名单（改造前 images 无这两项校验）
+    if let Some(resp) = playground_guard(&state, &user, &body.model) {
+        return resp;
     }
 
     // 选渠道：优先 channel_id，否则按 model 路由到声明该模型的启用渠道
@@ -665,6 +732,11 @@ pub async fn handle_playground_tts(
     };
     if body.input.trim().is_empty() {
         return error_response("input is required", StatusCode::BAD_REQUEST).into_response();
+    }
+
+    // 余额预检 + 分组模型白名单（改造前 tts 无这两项校验）
+    if let Some(resp) = playground_guard(&state, &user, &body.model) {
+        return resp;
     }
 
     // 按 model 路由到声明该模型的启用渠道（与 playground/chat 同口径）
@@ -870,6 +942,12 @@ pub async fn handle_playground_transcriptions(
 
     // 按上传的 model 路由到声明该模型的启用渠道（与 playground/chat 同口径）
     let requested_model = model.trim().to_string();
+
+    // 余额预检 + 分组模型白名单（改造前 transcriptions 无这两项校验）
+    if let Some(resp) = playground_guard(&state, &user, &requested_model) {
+        return resp;
+    }
+
     // models 留空（=全部）的渠道按发现快照收窄（auto_pick_supports），
     // 防止高优先级“全声明”渠道抢走上游实际不提供的模型
     let enabled: Vec<crate::channel::Channel> = state
