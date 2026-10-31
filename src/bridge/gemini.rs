@@ -278,6 +278,8 @@ impl Bridge for GeminiBridge {
         let url = self.stream_url(&req.model);
         let resp = self
             .post(&url, &body)
+            // 流式请求放宽总超时（共享 client 的 300s 是累计上限，会掐断长流）
+            .timeout(crate::bridge::stream_request_timeout())
             .send()
             .await
             .map_err(|e| BridgeError::Transport(e.to_string()))?;

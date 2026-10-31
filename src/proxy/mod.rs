@@ -438,7 +438,13 @@ impl CfApiClient {
             req = req.bearer_auth(api_key);
         }
 
-        let resp = match req.send().await {
+        // 流式请求放宽总超时：共享 client 的累计上限会掐断长流，
+        // 空闲兜底由 read_timeout 负责（详见 `bridge::stream_request_timeout`）。
+        let resp = match req
+            .timeout(crate::bridge::stream_request_timeout())
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => return Err(CfError::NetworkError(format!("Connection error: {e}"))),
         };

@@ -607,6 +607,25 @@ pub fn set_sse_first_event_deadline(deadline: Duration) {
     SSE_FIRST_EVENT_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// 流式请求的总超时（从发起建连到响应体读完）。
+///
+/// **为什么不能沿用共享 client 的 `api_timeout`**：reqwest 的
+/// `ClientBuilder::timeout` 语义是「从建连开始、到响应体读完为止」的
+/// **累计**上限，不是空闲上限。共享 client 设的是 300s，长对话 / 长思考
+/// 模型很容易超过——超时后 reqwest 直接掐断 body 流，表现为转发到一半突然
+/// 断开，客户端只看到 `error decoding response body` 或被截断的流。
+///
+/// 流式请求的正确兜底是**空闲**超时（`read_timeout`，默认 30s，配置项
+/// `stream_idle_secs`）：它只在上游长时间不吐字节时触发，长流不会误伤。
+/// 但 reqwest 没有「清除请求级 timeout」的 API（`RequestBuilder::timeout`
+/// 只能设置、不能清除），所以给流式请求显式设一个远大于任何合理对话的
+/// 上限，把实际掐断交给 `read_timeout` 与首事件守卫。
+///
+/// 24 小时：足以覆盖最长的 agent 任务；超过仍会断开，避免连接泄漏。
+pub fn stream_request_timeout() -> Duration {
+    Duration::from_secs(24 * 3600)
+}
+
 /// SSE 首事件守卫：等待流的第一个事件，`sse_first_event_deadline()` 内到达则
 /// 原样重组返回；未到则判 `BridgeError::Timeout`（上游挂起）。
 ///
@@ -724,6 +743,20 @@ pub trait Bridge: Send + Sync + 'static {
 mod tests {
     use super::*;
     use futures::StreamExt;
+
+    /// 流式请求的总超时必须显著大于共享 client 的 api_timeout 默认值（300s）。
+    ///
+    /// reqwest 的 `ClientBuilder::timeout` 是「建连到响应体读完」的**累计**上限，
+    /// 不是空闲上限；长对话/长思考模型的流会超过 300s。若这里退回成小值，
+    /// 长流会被中途掐断（历史 bug：转发到一半断开）。
+    #[test]
+    fn stream_request_timeout_is_far_above_api_timeout() {
+        let stream_timeout = stream_request_timeout();
+        assert!(
+            stream_timeout >= Duration::from_secs(6 * 3600),
+            "流式总超时应远大于 300s 的 api_timeout，实际 {stream_timeout:?}"
+        );
+    }
 
     fn boxed<T: Send + 'static>(
         items: Vec<Result<T, BridgeError>>,

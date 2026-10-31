@@ -545,7 +545,10 @@ impl Bridge for OpenaiCompatibleBridge {
         body["stream"] = serde_json::json!(true);
 
         let (request, body) = self.apply_emulation(body);
+        // 流式请求改用宽松的总超时（详见 `Bridge::stream_request_timeout`）：
+        // 共享 client 的 300s 是累计上限，会掐断长流；空闲兜底交给 read_timeout。
         let resp = request
+            .timeout(crate::bridge::stream_request_timeout())
             .json(&body)
             .send()
             .await

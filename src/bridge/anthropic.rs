@@ -1059,6 +1059,9 @@ impl Bridge for AnthropicBridge {
         let body = self.build_body(req, true);
         let resp = self
             .post(&self.messages_url(), &body)
+            // 流式请求放宽总超时（共享 client 的 300s 是累计上限，会掐断长流）；
+            // 空闲兜底交给 read_timeout 与首事件守卫。
+            .timeout(crate::bridge::stream_request_timeout())
             .send()
             .await
             .map_err(|e| BridgeError::Transport(e.to_string()))?;
