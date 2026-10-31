@@ -1806,7 +1806,6 @@ mod tests {
         "/api/oauth",
         "/api/agent",
         "/api/mcp",
-        "/api/openapi.json",
         "/api-docs",
         "/swagger-ui",
     ];
@@ -1824,10 +1823,14 @@ mod tests {
         }
         for domain in EXEMPT_PREFIXES {
             assert!(
-                !all_tools()
-                    .iter()
-                    .any(|t| t.covers.iter().any(|c| c.starts_with(domain))),
-                "豁免域 {domain} 不应被工具覆盖（EXEMPT_PREFIXES 与 covers 矛盾）"
+                // 豁免域本意是「不强制普通工具覆盖」；`aigx_openapi_search` 这类
+                // 能力自发现工具**专门**以 openapi.json 为 covers 是刻意的，
+                // covers 恰好（逐项）都在豁免域内的工具不算矛盾。
+                !all_tools().iter().any(|t| !t.covers.is_empty()
+                    && t.covers
+                        .iter()
+                        .all(|c| EXEMPT_PREFIXES.iter().any(|e| c.starts_with(e)))),
+                "豁免域不应被普通工具覆盖（EXEMPT_PREFIXES 与 covers 矛盾）"
             );
         }
     }

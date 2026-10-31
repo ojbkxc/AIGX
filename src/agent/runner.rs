@@ -175,7 +175,7 @@ pub async fn run(
                         ok: false,
                     },
                     // 观察员：只读工具放行，写工具（低危/高危）一律拒绝
-                    Some(ref s) if !role.allows_write() && s.risk != RiskLevel::ReadOnly => {
+                    Some(s) if !role.allows_write() && s.risk != RiskLevel::ReadOnly => {
                         tools::ToolOutcome {
                             text: format!(
                                 "当前会话角色为观察员，禁止执行写工具 {}（需切运维员角色）",
