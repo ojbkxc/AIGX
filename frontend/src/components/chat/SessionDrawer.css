@@ -29,11 +29,14 @@
   height: 100%;
 }
 
-/* overlay：固定覆盖层（移动端/窄屏） */
+/* overlay：固定覆盖层（移动端/窄屏）
+ *
+ * z-index 必须高于全局侧栏（100）与移动端汉堡按钮（150）：否则抽屉会被它们
+ * 盖住 —— 表现为标题点不动、遮罩挡不住侧栏。160 留出余量给未来新增的浮层。 */
 .sd-root.overlay {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  z-index: 160;
   display: block;
 }
 .sd-root.overlay .sd-panel {
@@ -41,10 +44,16 @@
   inset: 0 auto 0 0;
   width: min(320px, 86vw);
   box-shadow: 0 0 40px rgba(0, 0, 0, 0.35);
+  /* panel 与 mask 是兄弟节点，mask 在 DOM 里排在后面（后绘制的在上）。
+     mask 铺满整个 overlay，若不抬 panel 的层级，遮罩会盖住抽屉本体 ——
+     表现为「抽屉看得见但点不动」。 */
+  z-index: 1;
 }
 .sd-mask {
   position: absolute;
   inset: 0;
+  /* 低于 panel（见上）；用显式 0 避免与兄弟节点的默认层叠顺序混淆 */
+  z-index: 0;
   background: rgba(0, 0, 0, 0.45);
 }
 
@@ -165,12 +174,12 @@
   background: rgba(239, 68, 68, 0.12);
 }
 
-/* 窄屏：sidebar 自动降级为覆盖层 */
+/* 窄屏：sidebar 自动降级为覆盖层（同样要高于全局侧栏与汉堡按钮） */
 @media (max-width: 900px) {
   .sd-root.sidebar {
     position: fixed;
     inset: 0;
-    z-index: 60;
+    z-index: 160;
     width: auto;
   }
   .sd-root.sidebar .sd-panel {

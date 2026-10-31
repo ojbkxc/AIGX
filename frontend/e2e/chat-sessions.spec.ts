@@ -167,7 +167,6 @@ test.describe('聊天 · 历史会话抽屉', () => {
     await expect(page.locator('.sd-item')).toHaveCount(1);
     // 删除是异步的（API 往返 + 状态收敛），poll 等待活动会话消息数收敛回原值
     await expect.poll(readActiveCount, { timeout: 5000 }).toBe(beforeLen);
-    expect(pageErrors, pageErrors.join('
-')).toEqual([]);
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });
