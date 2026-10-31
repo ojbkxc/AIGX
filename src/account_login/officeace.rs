@@ -53,8 +53,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3);
 const SUBSCRIPTION_TYPE: (&str, &str) = ("x-subscription-type", "v2");
 const SIGNING_ALGORITHM: &str = "SDK-HMAC-SHA256";
 /// `sha256("")`，无体请求固定签这个。
-const EMPTY_BODY_SHA256: &str =
-    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const EMPTY_BODY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /// 换来的临时控制面凭据（约 2 小时过期，只用于这次登录的最后两步）。
 struct TempCredential {
@@ -499,7 +498,9 @@ fn sign(
         return Err("临时凭据缺少 AK/SK".to_string());
     }
     let parsed = url::Url::parse(url).map_err(|error| format!("地址无效：{error}"))?;
-    let host = parsed.host_str().ok_or_else(|| "地址缺少主机名".to_string())?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "地址缺少主机名".to_string())?;
     let authority = match parsed.port() {
         Some(port) => format!("{host}:{port}"),
         None => host.to_string(),
@@ -824,7 +825,10 @@ mod tests {
             .find(|(name, _)| name == "Authorization")
             .map(|(_, value)| value.clone())
             .unwrap_or_default();
-        assert!(authorization.starts_with("SDK-HMAC-SHA256 Access=AK"), "{authorization}");
+        assert!(
+            authorization.starts_with("SDK-HMAC-SHA256 Access=AK"),
+            "{authorization}"
+        );
         assert!(authorization.contains("SignedHeaders="));
         assert!(authorization.contains("Signature="));
         assert!(headers.iter().any(|(name, _)| name == "X-Security-Token"));
@@ -843,9 +847,8 @@ mod tests {
 
     #[test]
     fn identity_reads_the_nested_user_profile() {
-        let profile = URL_SAFE_NO_PAD.encode(
-            br#"{"account_name":"hid_synthetic-1","principal_id":"prin_1"}"#,
-        );
+        let profile = URL_SAFE_NO_PAD
+            .encode(br#"{"account_name":"hid_synthetic-1","principal_id":"prin_1"}"#);
         let claims = format!(r#"{{"user_profile":"{profile}"}}"#);
         let token = format!("h.{}.s", URL_SAFE_NO_PAD.encode(claims.as_bytes()));
         let (name, principal) = jwt_identity(&token);
