@@ -128,6 +128,7 @@ impl FailureType {
             FailureType::Timeout => "timeout",
             FailureType::ConnectionError => "connection_error",
             FailureType::EmptyResponse => "empty_response",
+            FailureType::ClientError => "client_error",
         }
     }
 }

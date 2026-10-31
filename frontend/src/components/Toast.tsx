@@ -50,7 +50,7 @@ export function ToastProvider({ children }: ToastProviderProps): JSX.Element {
   return (
     <ToastContext.Provider value={addToast}>
       {children}
-      <div className="toast-container">
+      <div className="toast-container" role="region" aria-label="通知" aria-live="polite">
         {toasts.map((toast) => (
           <ToastItem key={toast.id} toast={toast} onRemove={removeToast} />
         ))}

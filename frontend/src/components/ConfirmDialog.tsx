@@ -39,6 +39,9 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
   // 仍会关闭弹窗、请求却继续跑」。
   const confirmingRef = useRef(false);
   confirmingRef.current = confirming;
+  const dialogRef = useRef<HTMLDivElement>(null);
+  /** 打开前的焦点元素：关闭时还原，避免键盘用户"丢失位置" */
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
 
   // 打开时逐帧触发入场动画；Escape 关闭（键盘可达性，P0 验收）
   useEffect(() => {
@@ -46,16 +49,46 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
       setConfirming(false);
       setPassword('');
       setPasswordError('');
+      // 记录当前焦点，关闭后还原
+      restoreFocusRef.current =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null;
       const raf = requestAnimationFrame(() => {
-        // 弹窗显隐由 state 驱动；动画由 App.css 的 modal-* 样式处理
+        // 无密码框时把焦点移到取消按钮（回车不会误触危险操作）；
+        // 有密码框时 input 自己的 autoFocus 负责
+        if (!state.requirePassword) {
+          const cancel = dialogRef.current?.querySelector<HTMLElement>('[data-confirm-cancel]');
+          cancel?.focus();
+        }
       });
       const onKey = (e: KeyboardEvent): void => {
-        if (e.key === 'Escape' && !confirmingRef.current) onClose?.();
+        if (e.key === 'Escape' && !confirmingRef.current) {
+          onClose?.();
+          return;
+        }
+        // 焦点陷阱：Tab 在弹窗内循环，避免焦点跑到背景页
+        if (e.key === 'Tab' && dialogRef.current) {
+          const focusable = dialogRef.current.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+          );
+          if (focusable.length === 0) return;
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
       };
       document.addEventListener('keydown', onKey);
       return () => {
         cancelAnimationFrame(raf);
         document.removeEventListener('keydown', onKey);
+        // 关闭时还原焦点
+        restoreFocusRef.current?.focus?.();
+        restoreFocusRef.current = null;
       };
     }
     return undefined;
@@ -106,15 +139,19 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
       onClick={handleClose}
       role="dialog"
       aria-modal="true"
+      aria-labelledby="confirm-dialog-title"
     >
       <div
+        ref={dialogRef}
         className="modal"
         style={{ maxWidth: 420, width: '90%' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="modal-header">
-          <h3>{titleLabel}</h3>
-          <button className="modal-close" onClick={handleClose}>&times;</button>
+          <h3 id="confirm-dialog-title">{titleLabel}</h3>
+          <button className="modal-close" onClick={handleClose} aria-label={t('关闭')}>
+            &times;
+          </button>
         </div>
         <div className="modal-body" style={{ fontSize: 13.5, lineHeight: 1.6, color: 'var(--text-main)' }}>
           {message}
@@ -142,7 +179,12 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
           )}
         </div>
         <div className="modal-footer">
-          <button className="btn btn-outline" onClick={handleClose} disabled={confirming}>
+          <button
+            className="btn btn-outline"
+            data-confirm-cancel
+            onClick={handleClose}
+            disabled={confirming}
+          >
             {t('取消')}
           </button>
           <button

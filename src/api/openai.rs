@@ -225,22 +225,6 @@ use super::common::extract_api_key_bearer_first as extract_api_key;
 /// 从请求头提取客户端 IP（H8：实现移至 `api::common`）
 use super::common::extract_client_ip;
 
-/// 验证请求中的 API Key（简化版，仅校验存在性与有效性，返回 key id）
-fn verify_api_key(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<String, (StatusCode, Json<Value>)> {
-    let key = extract_api_key(headers)
-        .ok_or_else(|| error_response("auth_error", "Missing API key", StatusCode::UNAUTHORIZED))?;
-
-    let api_key = state
-        .api_key_store
-        .validate(&key)
-        .ok_or_else(|| error_response("auth_error", "Invalid API key", StatusCode::UNAUTHORIZED))?;
-
-    Ok(api_key.id)
-}
-
 /// 验证 API Key 并执行全部鉴权检查（状态/过期/模型白名单/额度/IP）。
 ///
 /// 参照 new-api token.go 的校验逻辑。返回 ApiKey 实例供计费使用。
@@ -272,6 +256,40 @@ fn verify_api_key_full(
                 // 凭证本身无效：401
                 ApiKeyError::Invalid | ApiKeyError::Disabled => StatusCode::UNAUTHORIZED,
                 // 凭证有效但无权限/过期/超额：403
+                ApiKeyError::Expired
+                | ApiKeyError::ModelNotAllowed(_)
+                | ApiKeyError::QuotaExhausted
+                | ApiKeyError::UserQuotaExhausted
+                | ApiKeyError::IpNotAllowed(_) => StatusCode::FORBIDDEN,
+            };
+            error_response("auth_error", &e.to_string(), status)
+        })
+}
+
+/// 列举类端点（`/v1/models`）的鉴权：完整校验但跳过模型白名单。
+fn verify_api_key_listing(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<super::auth::ApiKey, (StatusCode, Json<Value>)> {
+    let key = extract_api_key(headers)
+        .ok_or_else(|| error_response("auth_error", "Missing API key", StatusCode::UNAUTHORIZED))?;
+    let ip = extract_client_ip(headers);
+    if let Some(ip_str) = ip.as_deref() {
+        if let Err(ip_err) = crate::ip::check_ip(&state.ip_filter.get(), ip_str) {
+            return Err(error_response(
+                "ip_blocked",
+                &ip_err.to_string(),
+                StatusCode::FORBIDDEN,
+            ));
+        }
+    }
+    state
+        .api_key_store
+        .validate_listing(&key, ip.as_deref())
+        .map_err(|e| {
+            use super::auth::ApiKeyError;
+            let status = match e {
+                ApiKeyError::Invalid | ApiKeyError::Disabled => StatusCode::UNAUTHORIZED,
                 ApiKeyError::Expired
                 | ApiKeyError::ModelNotAllowed(_)
                 | ApiKeyError::QuotaExhausted
@@ -4564,7 +4582,10 @@ pub async fn handle_list_models(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _key_id = verify_api_key(&state, &headers)?;
+    // 完整校验（状态/过期/额度/IP/用户余额），但跳过模型白名单：
+    // 列举请求没有具体 model。原来用 verify_api_key 只查存在性，
+    // 过期/禁用的 Key 也能读到模型清单。
+    verify_api_key_listing(&state, &headers)?;
 
     // 通用网关语义：模型列表 = 所有启用渠道声明/发现的模型 ∪ 别名映射的 key。
     // 渠道 models 是主数据源（管理员在渠道上配置），映射只是可选别名。
@@ -4697,7 +4718,8 @@ pub async fn handle_get_model(
     headers: HeaderMap,
     Path(model): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _key_id = verify_api_key(&state, &headers)?;
+    // 模型详情有具体 model：走完整校验（含模型白名单），与对话端点口径一致
+    verify_api_key_full(&state, &headers, &model)?;
 
     // 通用语义：渠道声明或映射可解析即认为存在
     // （models 非空 = 白名单；空 = 全部时以发现快照为准）

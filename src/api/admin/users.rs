@@ -144,7 +144,8 @@ pub async fn handle_list_users(
     let total = all.len();
     let page = q.page.max(1);
     let size = q.size.max(1);
-    let start_idx = (page - 1) * size;
+    // saturating_mul：page 无上限时 `(page-1)*size` 会 usize 溢出
+    let start_idx = page.saturating_sub(1).saturating_mul(size);
     let data: Vec<Value> = if start_idx >= total {
         Vec::new()
     } else {

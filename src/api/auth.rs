@@ -356,6 +356,40 @@ impl ApiKeyStore {
         Ok(api_key)
     }
 
+    /// 校验令牌的**只读列举**权限（`/v1/models` 这类不绑定具体模型的请求）。
+    ///
+    /// 与 [`Self::validate_request`] 的唯一差别：**跳过模型白名单** ——
+    /// 列举请求没有具体 model，用空串去比白名单会把「只允许 gpt-4 的 Key」
+    /// 误判为无权限。其余检查（禁用/过期/额度/IP/用户余额）照常执行，
+    /// 避免过期或超额的 Key 仍能读到模型清单。
+    pub fn validate_listing(&self, key: &str, ip: Option<&str>) -> Result<ApiKey, ApiKeyError> {
+        let api_key = self.validate(key).ok_or(ApiKeyError::Invalid)?;
+        if !api_key.is_enabled() {
+            return Err(ApiKeyError::Disabled);
+        }
+        if api_key.is_expired() {
+            return Err(ApiKeyError::Expired);
+        }
+        if api_key.is_quota_exhausted() {
+            return Err(ApiKeyError::QuotaExhausted);
+        }
+        if let Some(ip) = ip {
+            if !api_key.allows_ip(ip) {
+                return Err(ApiKeyError::IpNotAllowed(ip.to_string()));
+            }
+        }
+        if let Some(uid) = &api_key.user_id {
+            if let Some(store) = &self.user_store {
+                if let Some(user) = store.get_by_id(uid) {
+                    if user.remaining() <= 0 {
+                        return Err(ApiKeyError::UserQuotaExhausted);
+                    }
+                }
+            }
+        }
+        Ok(api_key)
+    }
+
     /// 扣减令牌已用额度（配额不足返回 false）
     pub fn charge_quota(&self, id: &str, amount: i64) -> bool {
         if amount <= 0 {

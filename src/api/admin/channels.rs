@@ -294,7 +294,10 @@ pub async fn handle_list_channels(
         .unwrap_or(0);
 
     let channels: Vec<Value> = if page_size > 0 {
-        let start = (page - 1) * page_size;
+        // saturating_mul：page 无上限时 `(page-1)*page_size` 会 usize 溢出
+        // （debug panic / release 回绕到错误下标）。溢出时 start 极大，
+        // 下面的 `start < end` 判据自然返回空页。
+        let start = page.saturating_sub(1).saturating_mul(page_size);
         let end = start.saturating_add(page_size).min(total);
         // 页码越界（start >= total）时返回空页而非 panic：
         // 前端删除/搜索缩小 total 后旧页码仍可能被保留
