@@ -70,6 +70,12 @@ function ProtectedLayout({ children }: ProtectedLayoutProps) {
   if (!isAuthenticated()) {
     return <Navigate to="/login" replace />;
   }
+  // 首登强制改密：内置管理员初始密码是公开弱口令，登录后写 must_change_password
+  // 标记。只在登录时跳一次不够——用户点侧边栏就能绕开，弱口令长期留着。
+  // 这里做路由级拦截：除 /profile 外一律送回改密页（改密成功后标记被清除）。
+  if (localStorage.getItem('must_change_password') && location !== '/profile') {
+    return <Navigate to="/profile?force_password=1" replace />;
+  }
   return (
     <div className="app-container">
       <Sidebar />
