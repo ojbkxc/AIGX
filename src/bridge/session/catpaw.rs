@@ -36,9 +36,14 @@ pub struct CatPawBridge {
 
 impl CatPawBridge {
     pub fn new(base: impl Into<String>, token: impl Into<String>, client: reqwest::Client) -> Self {
+        let token = token.into();
+        let token = super::normalize_credential(
+            &token,
+            &["cookie:", "x-passport-token=", "authorization:", "bearer"],
+        );
         Self {
             base: base.into().trim_end_matches('/').to_string(),
-            token: token.into(),
+            token: token.to_string(),
             client,
         }
     }

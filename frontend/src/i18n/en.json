@@ -1680,5 +1680,22 @@
   "登录态型供应商的私有接口路径；留空按 provider 默认或标准 OpenAI 路径拼接。": "Private endpoint path for session providers; empty = standard OpenAI path.",
   "需私有协议": "Needs private protocol",
   "该供应商上游需要私有协议/签名（请求体与响应都要转换），标准 OpenAI 转发会失败；请填写自建转换网关地址，或等待专用适配。": "This provider requires a private protocol/signature (request and response must be transformed); plain OpenAI forwarding will fail. Enter your own conversion gateway address or wait for the dedicated adapter.",
-  "专用适配": "Native adapter"
+  "专用适配": "Native adapter",
+  "Trae 还要 X-Uid / X-Machine-Id / X-Device-Id：从抓包复制后填在下方「额外请求头」。": "Trae also needs X-Uid / X-Machine-Id / X-Device-Id: copy them from the captured request into Extra headers below.",
+  "内置适配已带该供应商的默认请求头；只有 Trae 这类需要设备身份的上游才要在这里补。": "The built-in adapter already sends this provider's default headers; only device-identity upstreams such as Trae need extra values here.",
+  "API Key": "API Key",
+  "{label} 账号的添加方式": "How to add a {label} account",
+  "填写凭证": "Enter credentials",
+  "手机验证码登录": "Sign in with SMS code",
+  "搜索提供商…": "Search providers…",
+  "添加 {name} 账号": "Add {name} account",
+  "添加方式": "Add method",
+  "登录 / 添加 {name} 账号": "Sign in / add {name} account",
+  "网页登录": "Browser sign-in",
+  "请填写 {label}": "Please fill in {label}",
+  "请选择供应商": "Please choose a provider",
+  "账号设置（渠道 / 优先级 / 并发等）": "Account settings (channel / priority / concurrency)",
+  "（必填）": " (required)",
+  "已登录，去填写凭证": "Signed in — enter credentials",
+  "网页登录完成后，请切到「填写凭证」把登录态粘进来再添加": "After browser sign-in, switch to \"Enter credentials\" and paste the login state before adding"
 }

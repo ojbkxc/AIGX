@@ -45,9 +45,14 @@ impl MonkeyCodeBridge {
         session: impl Into<String>,
         client: reqwest::Client,
     ) -> Self {
+        let session = session.into();
+        let session = super::normalize_credential(
+            &session,
+            &["cookie:", "monkeycode_ai_session=", "session="],
+        );
         Self {
             base: base.into().trim_end_matches('/').to_string(),
-            session: session.into(),
+            session: session.to_string(),
             client,
         }
     }

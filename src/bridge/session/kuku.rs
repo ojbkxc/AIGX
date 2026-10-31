@@ -52,9 +52,11 @@ impl KukuBridge {
         cookie: impl Into<String>,
         client: reqwest::Client,
     ) -> Self {
+        let cookie = cookie.into();
+        let cookie = super::normalize_credential(&cookie, &["cookie:", "cookie="]);
         Self {
             base: base.into().trim_end_matches('/').to_string(),
-            cookie: cookie.into(),
+            cookie: cookie.to_string(),
             client,
         }
     }

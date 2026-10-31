@@ -3,7 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { FlaskConical, Pencil, Plus, Power, RotateCcw, SlidersHorizontal, Trash2, Upload } from 'lucide-react';
 import { api } from '../api';
 import { presetIcon, providerIcon } from '../lib/providerIcons';
+import { CUSTOM_PROTOCOLS, PRESET_PROVIDERS, normalizeUrl, presetKind } from '../lib/addAccountConfigs';
 import { useToast } from '../components/Toast';
+import AddAccountDialog from '../components/AddAccountDialog';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, EmptyState, Input, Select, SkeletonTable, Tabs, Textarea } from '../components/ui';
 import type {
@@ -21,141 +23,6 @@ import './AccountSessions.css';
  * - 自定义：自己填上游地址（OpenAI / Anthropic / Gemini 三种协议）。
  */
 type ProviderSegment = 'agent' | 'preset' | 'custom';
-
-type ProviderProtocol = 'openai' | 'anthropic' | 'gemini';
-
-interface PresetProviderItem {
-  key: string;
-  name: string;
-  protocol: ProviderProtocol;
-  base_url: string;
-  hint?: string;
-}
-
-/** 预置端点模板（取自 Agent2API preset 目录；与内置目录同地址的会在渲染时去重） */
-const PRESET_PROVIDERS: PresetProviderItem[] = [
-  {
-    key: 'openai',
-    name: 'OpenAI',
-    protocol: 'openai',
-    base_url: 'https://api.openai.com/v1',
-  },
-  {
-    key: 'anthropic',
-    name: 'Anthropic',
-    protocol: 'anthropic',
-    base_url: 'https://api.anthropic.com',
-  },
-  {
-    key: 'openrouter',
-    name: 'OpenRouter',
-    protocol: 'openai',
-    base_url: 'https://openrouter.ai/api/v1',
-  },
-  {
-    key: 'huggingface',
-    name: 'HuggingFace',
-    protocol: 'openai',
-    base_url: 'https://router.huggingface.co/v1',
-  },
-  {
-    key: 'nvidia',
-    name: 'NVIDIA',
-    protocol: 'openai',
-    base_url: 'https://integrate.api.nvidia.com/v1',
-  },
-  {
-    key: 'deepseek-anthropic',
-    name: 'DeepSeek（Anthropic 端点）',
-    protocol: 'anthropic',
-    base_url: 'https://api.deepseek.com/anthropic',
-  },
-  {
-    key: 'glm-cn',
-    name: 'GLM 中国',
-    protocol: 'openai',
-    base_url: 'https://open.bigmodel.cn/api/coding/paas/v4',
-  },
-  {
-    key: 'zai-anthropic',
-    name: 'Z.ai（Anthropic 端点）',
-    protocol: 'anthropic',
-    base_url: 'https://api.z.ai/api/anthropic',
-  },
-  {
-    key: 'siliconflow-intl',
-    name: 'SiliconFlow 国际',
-    protocol: 'openai',
-    base_url: 'https://api.siliconflow.com/v1',
-  },
-  {
-    key: 'volcengine-ark',
-    name: '火山方舟 Coding',
-    protocol: 'openai',
-    base_url: 'https://ark.cn-beijing.volces.com/api/coding/v3',
-  },
-  {
-    key: 'alicode-cn',
-    name: '阿里云百炼 Coding（国内）',
-    protocol: 'openai',
-    base_url: 'https://coding.dashscope.aliyuncs.com/v1',
-  },
-  {
-    key: 'alicode-intl',
-    name: '阿里云百炼 Coding（国际）',
-    protocol: 'openai',
-    base_url: 'https://coding-intl.dashscope.aliyuncs.com/v1',
-  },
-  {
-    key: 'alims-intl',
-    name: '阿里云百炼模型服务（国际）',
-    protocol: 'openai',
-    base_url: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-  },
-  {
-    key: 'alitp-intl',
-    name: '阿里云 Token Plan（国际）',
-    protocol: 'openai',
-    base_url: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
-  },
-  {
-    key: 'xiaomi-mimo',
-    name: '小米 MiMo Token Plan',
-    protocol: 'openai',
-    base_url: 'https://token-plan-sgp.xiaomimimo.com/v1',
-  },
-  {
-    key: 'minimax-cn',
-    name: 'MiniMax 中国',
-    protocol: 'openai',
-    base_url: 'https://api.minimaxi.com/v1',
-  },
-  {
-    key: 'sensenova',
-    name: '商汤日日新',
-    protocol: 'openai',
-    base_url: 'https://api.sensenova.cn/compatible-mode/v1',
-  },
-];
-
-/** 自定义分段：三种协议，地址由用户自己填。 */
-const CUSTOM_PROTOCOLS: Array<{ kind: string; labelKey: string; hintKey: string }> = [
-  { kind: 'openai_compatible', labelKey: 'OpenAI 兼容（自定义地址）', hintKey: '按 {base}/chat/completions 转发' },
-  { kind: 'anthropic', labelKey: 'Anthropic 兼容（自定义地址）', hintKey: '按 {base}/v1/messages 转发' },
-  { kind: 'gemini', labelKey: 'Gemini 兼容（自定义地址）', hintKey: '按 {base}/models 转发' },
-];
-
-/** 协议 → 落库 provider kind（预置模板按协议落到对应兼容 kind）。 */
-function presetKind(protocol: ProviderProtocol): string {
-  if (protocol === 'anthropic') return 'anthropic';
-  if (protocol === 'gemini') return 'gemini';
-  return 'openai_compatible';
-}
-
-/** URL 归一（去尾斜杠 / 小写），用于内置与预置同地址去重。 */
-function normalizeUrl(url: string): string {
-  return url.trim().replace(/\/+$/, '').toLowerCase();
-}
 
 interface SessionFormState {
   channel_id: string;
@@ -832,7 +699,16 @@ export default function AccountSessions(): JSX.Element {
                     </td>
                     <td>{session.channel_name || session.channel_id}</td>
                     <td>
-                      <div>{session.provider}</div>
+                      <div className="provider-cell">
+                        {providerIcon(session.provider) && (
+                          <img
+                            className="provider-card-logo"
+                            src={providerIcon(session.provider) as string}
+                            alt=""
+                          />
+                        )}
+                        <span>{session.provider}</span>
+                      </div>
                       {session.base_url && <div className="form-hint">{session.base_url}</div>}
                     </td>
                     <td>
@@ -916,7 +792,17 @@ export default function AccountSessions(): JSX.Element {
         )}
       </Card>
 
-      {showModal && (
+      {showModal && !editing && (
+        <AddAccountDialog
+          providers={providers}
+          channels={accountChannels}
+          defaultChannelId={channelFilter || accountChannels[0]?.id || ''}
+          onClose={closeModal}
+          onCreated={load}
+        />
+      )}
+
+      {showModal && editing && (
         <div className="modal-overlay">
           <form className="modal" onSubmit={handleSave}>
             <div className="modal-header">
@@ -1109,13 +995,20 @@ export default function AccountSessions(): JSX.Element {
                 value={form.base_url}
                 onChange={(e) => setForm({ ...form, base_url: e.target.value })}
               />
-              <Input
-                label={t('对话路径（可选，默认 /chat/completions）')}
-                placeholder={selectedProvider?.chat_path || '/api/chat'}
-                hint={t('登录态型供应商的私有接口路径；留空按 provider 默认或标准 OpenAI 路径拼接。')}
-                value={form.chat_path}
-                onChange={(e) => setForm({ ...form, chat_path: e.target.value })}
-              />
+              {selectedProvider?.kind === 'trae' ? (
+                <div className="form-hint">
+                  {t('Trae 还要 X-Uid / X-Machine-Id / X-Device-Id：从抓包复制后填在下方「额外请求头」。')}
+                </div>
+              ) : null}
+              {selectedProvider?.native_supported ? null : (
+                <Input
+                  label={t('对话路径（可选，默认 /chat/completions）')}
+                  placeholder={selectedProvider?.chat_path || '/api/chat'}
+                  hint={t('登录态型供应商的私有接口路径；留空按 provider 默认或标准 OpenAI 路径拼接。')}
+                  value={form.chat_path}
+                  onChange={(e) => setForm({ ...form, chat_path: e.target.value })}
+                />
+              )}
               <div className="form-group">
                 <label>{t('从抓包请求头导入（可选）')}</label>
                 <textarea
@@ -1175,7 +1068,9 @@ export default function AccountSessions(): JSX.Element {
                   onChange={(e) => setForm({ ...form, extra_headers: e.target.value })}
                 />
                 <div className="form-hint">
-                  {t('登录态型供应商按抓包补齐专用请求头；值里的 {credential} 会替换为凭证。')}
+                  {selectedProvider?.native_supported
+                    ? t('内置适配已带该供应商的默认请求头；只有 Trae 这类需要设备身份的上游才要在这里补。')
+                    : t('登录态型供应商按抓包补齐专用请求头；值里的 {credential} 会替换为凭证。')}
                 </div>
               </div>
               <Input

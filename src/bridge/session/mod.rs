@@ -63,6 +63,29 @@ pub fn build(
     }
 }
 
+/// 去掉用户从抓包整段复制时带的前缀（大小写不敏感），并去掉首尾空白。
+///
+/// 例如 `Authorization: Bearer eyJ…` / `x-passport-token=…` / `Cookie: a=b`。
+pub fn normalize_credential<'a>(raw: &'a str, prefixes: &[&str]) -> &'a str {
+    let mut value = raw.trim();
+    loop {
+        let mut matched = false;
+        for prefix in prefixes {
+            if value.len() < prefix.len() {
+                continue;
+            }
+            if value[..prefix.len()].eq_ignore_ascii_case(prefix) {
+                value = value[prefix.len()..].trim_start();
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            return value;
+        }
+    }
+}
+
 /// 是否为已实现的私有协议供应商。
 pub fn supports(kind: &str) -> bool {
     matches!(

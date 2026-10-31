@@ -86,14 +86,20 @@ pub fn build_bridge(
             if let Some(meta) = registry::session_meta(spec.kind) {
                 // 私有协议供应商（请求体/响应帧非 OpenAI 方言）走专用 Bridge
                 if !meta.openai_compatible {
+                    // 用户常从抓包整段复制，先剥掉 `Authorization:` / `Bearer` 这类前缀，
+                    // 避免和 provider 默认头重复拼接。
+                    let credential = crate::bridge::session::normalize_credential(
+                        &secret,
+                        &["authorization:", "cloud-ide-jwt", "bearer"],
+                    );
                     let mut headers = session_headers(session, meta);
                     for (_, value) in headers.iter_mut() {
-                        *value = value.replace("{credential}", &secret);
+                        *value = value.replace("{credential}", credential);
                     }
                     if let Some(bridge) = crate::bridge::session::build(
                         spec.kind,
                         &base,
-                        &secret,
+                        credential,
                         headers,
                         client.as_ref().clone(),
                     ) {

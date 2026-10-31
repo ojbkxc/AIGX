@@ -36,9 +36,11 @@ impl CommandCodeBridge {
         api_key: impl Into<String>,
         client: reqwest::Client,
     ) -> Self {
+        let api_key = api_key.into();
+        let api_key = super::normalize_credential(&api_key, &["authorization:", "bearer"]);
         Self {
             base: base.into().trim_end_matches('/').to_string(),
-            api_key: api_key.into(),
+            api_key: api_key.to_string(),
             client,
         }
     }
