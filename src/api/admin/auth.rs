@@ -103,7 +103,11 @@ pub async fn handle_login(
     let client_ip = extract_client_ip(&headers)
         .or_else(|| connect.map(|c| c.0.ip().to_string()))
         .unwrap_or_else(|| "unknown".to_string());
-    let attempts = state.login_limiter.get(&client_ip).await.unwrap_or(0);
+    // 限流键带用途前缀：登录、发验证码、忘记密码共用同一个 60s 窗口缓存，
+    // 裸 IP 做键会导致「发 5 次登录码」把「登录 10 次的额度」提前耗尽
+    // （反之亦然），表现为莫名 429。
+    let login_rate_key = format!("login:{client_ip}");
+    let attempts = state.login_limiter.get(&login_rate_key).await.unwrap_or(0);
     if attempts >= LOGIN_RATE_LIMIT_PER_MINUTE {
         state.log_store.record_security(
             crate::log::SecurityEvent::new(
@@ -120,7 +124,7 @@ pub async fn handle_login(
     }
     state
         .login_limiter
-        .insert(client_ip.clone(), attempts + 1)
+        .insert(login_rate_key, attempts + 1)
         .await;
 
     // ── 失败锁定：连续失败 ≥5 次 → 锁定 5 分钟（TTL 由 login_failures 控制）──
@@ -1504,16 +1508,21 @@ pub async fn handle_login_send_code(
     let client_ip = extract_client_ip(&headers)
         .or_else(|| connect.map(|c| c.0.ip().to_string()))
         .unwrap_or_else(|| "unknown".to_string());
-    // 每 IP 每分钟最多 5 次发送（防刷邮件）
+    // 每 IP 每分钟最多 5 次发送（防刷邮件）。键带 send-code 前缀，
+    // 与登录/忘记密码的额度相互独立（否则互吃额度导致误报 429）。
     const SEND_CODE_RATE_LIMIT: u32 = 5;
-    let sent_count = state.login_limiter.get(&client_ip).await.unwrap_or(0);
+    let send_code_key = format!("send-code:{client_ip}");
+    let sent_count = state.login_limiter.get(&send_code_key).await.unwrap_or(0);
     if sent_count >= SEND_CODE_RATE_LIMIT {
         return Err(error_response(
             "验证码发送过于频繁，请稍后再试",
             StatusCode::TOO_MANY_REQUESTS,
         ));
     }
-    state.login_limiter.insert(client_ip, sent_count + 1).await;
+    state
+        .login_limiter
+        .insert(send_code_key, sent_count + 1)
+        .await;
 
     // 防枚举：用户不存在时返回成功但不生成验证码
     let Some(user) = state.user_store.get_by_email(&email) else {
