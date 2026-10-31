@@ -113,7 +113,10 @@ impl LoginFlow for AntigravityFlow {
                 error
             });
         }
-        let expires_in = payload.get("expires_in").and_then(Value::as_i64).unwrap_or(3600);
+        let expires_in = payload
+            .get("expires_in")
+            .and_then(Value::as_i64)
+            .unwrap_or(3600);
         let email = self.fetch_email(&access_token).await;
         let name = if email.is_empty() {
             "Antigravity".to_string()
