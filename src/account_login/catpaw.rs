@@ -146,7 +146,8 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
     let sid = random_hex();
     // 上游只校验 redirect 是否为 loopback（端口不校验），远程可用
     let redirect = "http://127.0.0.1:1/api/session/login/catpaw-callback";
-    let mut auth_url = url::Url::parse(&entry).map_err(|_| "CatPaw 登录入口地址无效".to_string())?;
+    let mut auth_url =
+        url::Url::parse(&entry).map_err(|_| "CatPaw 登录入口地址无效".to_string())?;
     auth_url
         .query_pairs_mut()
         .append_pair("state", &state)

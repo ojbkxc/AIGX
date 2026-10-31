@@ -96,7 +96,11 @@ impl LoginFlow for ClineFlow {
 }
 
 impl ClineFlow {
-    async fn register_session(&self, access: &str, refresh: &str) -> Result<(String, String), String> {
+    async fn register_session(
+        &self,
+        access: &str,
+        refresh: &str,
+    ) -> Result<(String, String), String> {
         let response = self
             .client
             .post(format!("{CLINE_API_BASE}/auth/register"))
@@ -147,7 +151,9 @@ fn ensure_workos_prefix(token: &str) -> String {
 
 pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
     let response = client
-        .post(format!("{WORKOS_BASE_URL}/user_management/authorize/device"))
+        .post(format!(
+            "{WORKOS_BASE_URL}/user_management/authorize/device"
+        ))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
         .body(format!("client_id={WORKOS_CLIENT_ID}"))

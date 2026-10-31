@@ -133,9 +133,15 @@ impl LoginFlow for WorkBuddyFlow {
         if name.is_empty() {
             if let Some(claims) = decode_claims(token) {
                 if uid.is_empty() {
-                    name = text_of(&claims, &["sub", "nickname", "name", "preferred_username", "email"]);
+                    name = text_of(
+                        &claims,
+                        &["sub", "nickname", "name", "preferred_username", "email"],
+                    );
                 } else {
-                    name = text_of(&claims, &["nickname", "name", "preferred_username", "email"]);
+                    name = text_of(
+                        &claims,
+                        &["nickname", "name", "preferred_username", "email"],
+                    );
                 }
             }
         }
@@ -149,7 +155,13 @@ impl LoginFlow for WorkBuddyFlow {
         let expires_at = data
             .get("expiresAt")
             .and_then(Value::as_i64)
-            .map(|value| if value > 1_000_000_000_000 { value / 1000 } else { value })
+            .map(|value| {
+                if value > 1_000_000_000_000 {
+                    value / 1000
+                } else {
+                    value
+                }
+            })
             .or_else(|| {
                 data.get("expiresIn")
                     .and_then(Value::as_i64)
@@ -175,9 +187,10 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
     for (key, value) in anonymous_headers() {
         request = request.header(key, value);
     }
-    let response = request.send().await.map_err(|error| {
-        format!("无法连接 WorkBuddy 登录服务：{error}")
-    })?;
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("无法连接 WorkBuddy 登录服务：{error}"))?;
     let status = response.status().as_u16();
     let text = response.text().await.map_err(|error| error.to_string())?;
     let value = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
@@ -226,7 +239,8 @@ fn encode_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.as_bytes() {
         let ch = *byte as char;
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')')
+        if ch.is_ascii_alphanumeric()
+            || matches!(ch, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')')
         {
             out.push(ch);
         } else {

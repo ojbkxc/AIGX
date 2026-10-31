@@ -182,11 +182,7 @@ pub fn wait_response(task: &LoginTask) -> Value {
 }
 
 /// 发起网页登录：返回 `{state, authUrl, provider}`，后台任务异步等待完成。
-pub async fn start(
-    state: &AppState,
-    provider: &str,
-    channel_id: &str,
-) -> Result<Value, String> {
+pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result<Value, String> {
     let provider = registry::normalize_kind(provider);
     if registry::session_meta(&provider).is_none() {
         return Err(format!("「{provider}」不是登录态型供应商，不需要网页登录"));
@@ -283,7 +279,11 @@ async fn run_loop(
 }
 
 /// 手工提交回调地址：交给对应流程完成换证，成功后落账号。
-pub async fn submit_callback(state: &AppState, task_state: &str, url: &str) -> Result<String, String> {
+pub async fn submit_callback(
+    state: &AppState,
+    task_state: &str,
+    url: &str,
+) -> Result<String, String> {
     let task = snapshot(task_state).ok_or_else(|| "登录任务不存在或已过期".to_string())?;
     if task.done {
         return task
@@ -305,7 +305,10 @@ pub async fn submit_callback(state: &AppState, task_state: &str, url: &str) -> R
             ))
         }
     };
-    let creds = flow.submit_callback(url).await?.ok_or_else(|| "回调未产生凭证".to_string())?;
+    let creds = flow
+        .submit_callback(url)
+        .await?
+        .ok_or_else(|| "回调未产生凭证".to_string())?;
     let account_id = persist_account(
         &state.account_sessions,
         &state.channel_store,

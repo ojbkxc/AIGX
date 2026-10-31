@@ -101,7 +101,13 @@ impl LoginFlow for QoderFlow {
         let expires_at = data
             .get("expires_at")
             .and_then(Value::as_i64)
-            .map(|value| if value > 1_000_000_000_000 { value / 1000 } else { value })
+            .map(|value| {
+                if value > 1_000_000_000_000 {
+                    value / 1000
+                } else {
+                    value
+                }
+            })
             .or_else(|| {
                 data.get("expires_in")
                     .and_then(Value::as_i64)
@@ -170,7 +176,8 @@ fn encode_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.as_bytes() {
         let ch = *byte as char;
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')')
+        if ch.is_ascii_alphanumeric()
+            || matches!(ch, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')')
         {
             out.push(ch);
         } else {

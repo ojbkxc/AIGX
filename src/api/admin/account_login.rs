@@ -77,7 +77,9 @@ pub async fn handle_login_cancel(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     let canceled = account_login::cancel(body.state.trim());
-    Ok(Json(json!({ "success": true, "data": { "canceled": canceled } })))
+    Ok(Json(
+        json!({ "success": true, "data": { "canceled": canceled } }),
+    ))
 }
 
 /// POST /api/account-sessions/login/callback（手工粘贴回调地址）
@@ -93,8 +95,11 @@ pub async fn handle_login_callback(
             StatusCode::BAD_REQUEST,
         ));
     }
-    let account_id = account_login::submit_callback(&state, body.state.trim(), body.callback_url.trim())
-        .await
-        .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
-    Ok(Json(json!({ "success": true, "data": { "accountId": account_id } })))
+    let account_id =
+        account_login::submit_callback(&state, body.state.trim(), body.callback_url.trim())
+            .await
+            .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
+    Ok(Json(
+        json!({ "success": true, "data": { "accountId": account_id } }),
+    ))
 }
