@@ -52,7 +52,7 @@ export async function loginAsAdmin(
       localStorage.setItem('i18n_lang', 'zh');
       if (mustChange) localStorage.setItem('must_change_password', '1');
       else localStorage.removeItem('must_change_password');
-      if (sess) {
+      if (sess && sess.length > 0) {
         localStorage.setItem(sessionsKey, JSON.stringify(sess));
         localStorage.setItem(activeKey, sess[0].id);
       }
