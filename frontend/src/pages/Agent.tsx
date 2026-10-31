@@ -57,31 +57,6 @@ interface SessionItem {
   created_at: number;
 }
 
-/** 高危工具的中文描述（审批弹卡展示用，参照 cc-haha 的 PermissionRequestTitle 语义） */
-const TOOL_LABELS: Record<string, string> = {
-  aigx_user_delete: '删除用户（不可逆）',
-  aigx_user_manage: '启用/禁用用户',
-  aigx_channel_delete: '删除渠道（不可逆）',
-  aigx_channel_add: '新增渠道',
-  aigx_channel_enable: '启用渠道',
-  aigx_channel_disable: '禁用渠道',
-  aigx_order_delete: '删除订单',
-  aigx_pricing_upsert: '新增/更新模型定价',
-  aigx_pricing_delete: '删除模型定价',
-  aigx_logs_cleanup: '清理日志',
-  aigx_key_delete: '删除 API 密钥（不可逆）',
-  aigx_key_add: '新增 API 密钥',
-  aigx_group_upsert: '新增/更新用户分组',
-  aigx_account_session_delete: '删除账号（不可逆）',
-  aigx_account_session_bulk_import: '批量导入账号',
-  aigx_account_session_add: '新增账号',
-  aigx_account_session_update: '更新账号',
-  aigx_channel_update: '更新渠道',
-  aigx_apply_update: '下载并更新版本',
-  aigx_restart_service: '重启服务',
-  aigx_rollback_update: '回滚版本',
-};
-
 /** 思考强度档位（off = 不发送思考参数，走服务端默认） */
 const EFFORT_CYCLE = ['off', 'low', 'medium', 'high'] as const;
 type Effort = (typeof EFFORT_CYCLE)[number];
@@ -126,12 +101,27 @@ export default function Agent(): JSX.Element {
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
 
-  // 启动时取 Agent 配置的模型作为模型选择器初值（可换）
+  /** 工具中文名（审批卡展示）：从 /api/agent/config 的 tools[] 派生，不再手写标签表 */
+  const [toolLabels, setToolLabels] = useState<Map<string, string>>(new Map());
+
+  // 启动时取 Agent 配置：模型选择器初值（显式配置优先，空则用自动发现的生效模型）
+  // + 工具标签表（后端 registry 的 label 单一来源）
   useEffect(() => {
     let mounted = true;
     api.getAgentConfig()
       .then((res) => {
-        if (mounted) setModel((res as unknown as { data?: { model?: string } }).data?.model ?? '');
+        if (!mounted) return;
+        const data = (res as unknown as {
+          data?: {
+            model?: string;
+            effective_model?: string | null;
+            tools?: Array<{ name: string; label: string }>;
+          };
+        }).data;
+        setModel(data?.model || data?.effective_model || '');
+        if (data?.tools?.length) {
+          setToolLabels(new Map(data.tools.map((tt) => [tt.name, tt.label])));
+        }
       })
       .catch(() => { /* 配置读取失败静默降级：选择器空值，发送时走配置模型 */ });
     return () => { mounted = false; };
@@ -590,7 +580,7 @@ export default function Agent(): JSX.Element {
             </div>
             <div className="agent-approval-tool">
               <code className="agent-approval-name">{pending.name}</code>
-              <span className="agent-approval-desc">{TOOL_LABELS[pending.name] ?? t('高危写操作')}</span>
+              <span className="agent-approval-desc">{toolLabels.get(pending.name) ?? t('高危写操作')}</span>
             </div>
             {pending.arguments && pending.arguments !== '{}' && (
               <pre className="agent-approval-args">{pending.arguments}</pre>

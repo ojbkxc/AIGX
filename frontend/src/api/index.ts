@@ -872,7 +872,14 @@ export const api = {
     request<ApiResponse<null>>('DELETE', `${API_BASE}/agent/sessions/${encodeURIComponent(id)}`),
   agentApprove: (requestId: string, action: 'allow' | 'deny' | 'remember'): Promise<ApiResponse<null>> =>
     request<ApiResponse<null>>('POST', `${API_BASE}/agent/approvals/${encodeURIComponent(requestId)}`, { action }),
-  getAgentConfig: (): Promise<ApiResponse<{ model?: string; channel?: string }>> =>
+  getAgentConfig: (): Promise<ApiResponse<{
+    model?: string;
+    channel?: string;
+    /** 空 model 时后端自动发现的实际生效模型 */
+    effective_model?: string | null;
+    /** 工具清单（name/label/risk），审批卡中文名与设置面板共用 */
+    tools?: Array<{ name: string; label: string; risk: string }>;
+  }>> =>
     request<ApiResponse<{ model?: string; channel?: string }>>('GET', `${API_BASE}/agent/config`),
   // ==================== 公开提示词源（Prompts 页「拉取公开源」） ====================
   listPromptSources: (): Promise<ApiResponse<PromptSource[]>> =>
