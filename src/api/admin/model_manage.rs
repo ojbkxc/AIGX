@@ -30,7 +30,7 @@ use crate::model::manage::{build_view, view_json, ManageView};
 use crate::pricing::{ModelPrice, RatioConfig};
 
 /// 构建当前视图（所有读写接口共用）。
-fn current_view(state: &AppState) -> ManageView {
+pub(crate) fn current_view(state: &AppState) -> ManageView {
     build_view(
         &state.channel_store.list(),
         &state.account_sessions,

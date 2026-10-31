@@ -14,8 +14,10 @@ use crate::config::AgentConfig;
 /// Agent 推理错误。
 #[derive(Debug, thiserror::Error)]
 pub enum AgentLlmError {
-    /// 未配置 `[agent].model`。
-    #[error("agent model not configured (set [agent].model)")]
+    /// 未配置 `[agent].model` 且自动发现没有可用模型。
+    #[error(
+        "agent model not configured and no enabled model available (set [agent].model or add pricing)"
+    )]
     ModelNotConfigured,
     /// 该模型没有任何可用渠道（或全部被熔断）。
     #[error("no bridge available for agent model")]
@@ -32,6 +34,19 @@ struct Candidate {
     channel: Option<crate::channel::Channel>,
 }
 
+/// 解析实际生效的推理模型：显式配置优先，空则从模型管理视图自动发现。
+///
+/// 自动发现策略见 `model::manage::pick_default_model`（启用+已定价 →
+/// 非预览 → 字典序）。平台新上模型/渠道无需任何配置即可被 Agent 用上。
+pub fn effective_model(state: &AppState, config: &AgentConfig) -> Result<String, AgentLlmError> {
+    let explicit = config.model.trim();
+    if !explicit.is_empty() {
+        return Ok(explicit.to_string());
+    }
+    crate::model::manage::pick_default_model(&crate::api::admin::model_manage::current_view(state))
+        .ok_or(AgentLlmError::ModelNotConfigured)
+}
+
 /// 解析 Agent 推理候选渠道。
 ///
 /// - `config.channel` 非空 → 只取该渠道（排障锁定）。
@@ -39,20 +54,16 @@ struct Candidate {
 fn resolve_candidates(
     state: &AppState,
     config: &AgentConfig,
+    model: &str,
 ) -> Result<Vec<Candidate>, AgentLlmError> {
-    if config.model.trim().is_empty() {
-        return Err(AgentLlmError::ModelNotConfigured);
-    }
     if !config.channel.trim().is_empty() {
-        // 锁定单渠道：直接从 ChannelStore 构造（与 resolve_bridges 同源逻辑）
+        // 锁定单渠道：直接从 ChannelStore 构造（与 resolve_bridges 同源逻辑，
+        // 含 model_rules 校验与 Account/Cloudflare 桥支持）
         let Some(ch) = state.channel_store.get(config.channel.trim()) else {
             return Err(AgentLlmError::NoBridge);
         };
         let key = ch.decode_api_key();
-        if key.is_empty() {
-            return Err(AgentLlmError::NoBridge);
-        }
-        let bridge = make_bridge_for_channel(&ch, &key, &state.http_client);
+        let bridge = make_bridge_for_channel(&ch, &key, &state.http_client, state, model);
         let bridge = match bridge {
             Some(b) => b,
             None => return Err(AgentLlmError::NoBridge),
@@ -63,7 +74,7 @@ fn resolve_candidates(
             channel: Some(ch),
         }]);
     }
-    let candidates = resolve_bridges_with_affinity(state, &config.model, None);
+    let candidates = resolve_bridges_with_affinity(state, model, None);
     if candidates.is_empty() {
         return Err(AgentLlmError::NoBridge);
     }
@@ -78,12 +89,24 @@ fn resolve_candidates(
 }
 
 /// 按渠道类型构造 bridge（与 `resolve_bridges` 中的分支一致）。
+///
+/// 锁渠道路径同样过 `model_rules` 启停校验、支持 Account（账号池选号）与
+/// Cloudflare（Hub 专用桥）——与全局调度口径一致。
 fn make_bridge_for_channel(
     ch: &crate::channel::Channel,
     key: &str,
     client: &reqwest::Client,
+    state: &AppState,
+    model: &str,
 ) -> Option<Arc<dyn crate::bridge::Bridge>> {
     use crate::channel::ChannelType;
+    if ch.channel_type != ChannelType::Account
+        && state
+            .model_rules
+            .is_disabled(ch.channel_type.as_str(), model)
+    {
+        return None;
+    }
     match ch.channel_type {
         ChannelType::OpenaiCompatible => Some(crate::bridge::openai::make_bridge_with_quirks(
             &ch.base_url,
@@ -108,11 +131,16 @@ fn make_bridge_for_channel(
             client,
             ch.quirks.clone(),
         )),
-        // 账号型渠道无渠道级凭证，锁单渠道路径不可用；全局调度经
-        // `resolve_bridges` 仍会得到 `AccountBridge`（账号池内部选号）
-        ChannelType::Account => None,
-        // Cloudflare 渠道走 Hub 专用桥，自环暂不支持（阶段三再补）
-        ChannelType::Cloudflare => None,
+        // 账号型渠道无渠道级凭证：AccountBridge 在调用时按账号池选号
+        ChannelType::Account => Some(Arc::new(
+            crate::bridge::account::AccountBridge::new(
+                ch.id.clone(),
+                state.account_sessions.clone(),
+            )
+            .with_rules(state.model_rules.clone()),
+        )),
+        // Cloudflare 渠道走 Hub 专用桥
+        ChannelType::Cloudflare => state.hub.get_specialized("cloudflare"),
     }
 }
 
@@ -138,17 +166,17 @@ pub async fn chat_once(
     messages: Vec<ChatMessage>,
     tools: Option<Vec<serde_json::Value>>,
 ) -> Result<(ChatResponse, String, Option<String>), AgentLlmError> {
-    let candidates = resolve_candidates(state, config)?;
+    let model = effective_model(state, config)?;
+    let candidates = resolve_candidates(state, config, &model)?;
     let request_id = format!("agent-{}", uuid::Uuid::new_v4());
-    let ctx = BridgeContext::new(request_id.clone(), config.model.clone());
+    let ctx = BridgeContext::new(request_id.clone(), model.clone());
 
     let mut last_error: Option<String> = None;
     for cand in &candidates {
         if let Some(cid) = &cand.channel_id {
             state.channel_store.mark_used(cid);
         }
-        let upstream =
-            resolve_upstream_model(&config.model, cand.channel.as_ref(), &state.model_mapper);
+        let upstream = resolve_upstream_model(&model, cand.channel.as_ref(), &state.model_mapper);
         // 无工具时不得声明 tool_choice="auto"：严格的 OpenAI 兼容上游会在
         // 仅带 tool_choice 而缺 tools 时返回 400。纯文本自环（如提示词翻译）
         // 复用 chat_once 时 tools=None，必须同步置空，否则翻译会整体失败。
@@ -187,7 +215,7 @@ pub async fn chat_once(
                 record_agent_request_log(
                     state,
                     &request_id,
-                    &config.model,
+                    &model,
                     &upstream,
                     cand.channel_id.as_deref(),
                     cand.channel.as_ref().map(|c| c.name.as_str()),
@@ -212,7 +240,7 @@ pub async fn chat_once(
                 record_agent_request_log(
                     state,
                     &request_id,
-                    &config.model,
+                    &model,
                     &upstream,
                     cand.channel_id.as_deref(),
                     cand.channel.as_ref().map(|c| c.name.as_str()),

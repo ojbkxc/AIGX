@@ -398,6 +398,33 @@ pub fn view_json(view: &ManageView) -> Value {
     })
 }
 
+/// 为 Agent 自动挑选默认推理模型：启用 + 已定价优先，偏好非预览版，字典序稳定。
+///
+/// config.model 为空时的自动发现入口（`agent::llm::effective_model`）。
+/// 全部启用模型都未定价时兜底取启用集（总比 ModelNotConfigured 强）。
+pub fn pick_default_model(view: &ManageView) -> Option<String> {
+    let is_preview = |id: &str| {
+        let l = id.to_ascii_lowercase();
+        ["preview", "beta", "alpha", "exp", "canary", "nightly", "rc"]
+            .iter()
+            .any(|k| l.contains(k))
+    };
+    let mut cands: Vec<&ManageModel> = view
+        .models
+        .iter()
+        .filter(|m| m.enabled && m.price.is_some())
+        .collect();
+    if cands.is_empty() {
+        cands = view.models.iter().filter(|m| m.enabled).collect();
+    }
+    cands.sort_by(|a, b| {
+        is_preview(&a.id)
+            .cmp(&is_preview(&b.id))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    cands.first().map(|m| m.id.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

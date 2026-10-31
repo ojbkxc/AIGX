@@ -440,13 +440,23 @@ pub async fn handle_get_config(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
     let agent = agent_state(&state)?;
+    let cfg = agent.config();
+    // effective_model：显式配置优先，空则自动发现（前端显示「自动：xxx」用）
+    let effective = crate::agent::llm::effective_model(&state, &cfg).ok();
+    // tools 精简清单：前端审批卡/工具开关的中文名从这里派生（不再手写标签表）
+    let tools: Vec<Value> = crate::agent::registry::all_tools()
+        .iter()
+        .map(|t| json!({ "name": t.name, "label": t.label, "risk": t.risk.as_str() }))
+        .collect();
     Ok(Json(json!({
         "success": true,
         "data": {
-            "model": agent.config().model,
-            "channel": agent.config().channel,
-            "max_turns": agent.config().max_turns,
-            "approval_timeout_secs": agent.config().approval_timeout_secs,
+            "model": cfg.model,
+            "effective_model": effective,
+            "channel": cfg.channel,
+            "max_turns": cfg.max_turns,
+            "approval_timeout_secs": cfg.approval_timeout_secs,
+            "tools": tools,
         }
     })))
 }
