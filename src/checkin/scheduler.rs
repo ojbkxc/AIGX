@@ -55,23 +55,24 @@ pub fn spawn(
     egress: Arc<crate::egress::EgressCache>,
 ) {
     tokio::spawn(async move {
-        // 启动时先补签一次：进程在计划时刻前停过的话，当天还能补上
-        run_due(&store, &sessions, &egress, true).await;
+        // 启动时先跑一轮：进程在计划时刻之后才启动时，当天还能补上
+        run_due(&store, &sessions, &egress).await;
         loop {
             tokio::time::sleep(TICK).await;
-            run_due(&store, &sessions, &egress, false).await;
+            run_due(&store, &sessions, &egress).await;
         }
     });
 }
 
 /// 跑一轮到期的计划。
 ///
-/// `catch_up` = true 时忽略「当前时刻未到」的判断（启动补签用）。
+/// 「到期」= 计划时刻已过（按 UTC+8 的 HH:MM 比较）且今天还没触发过。
+/// 启动时也走这一条：进程在时刻之后才起来，当天仍能补上；时刻未到的
+/// 计划不会被提前跑掉。
 async fn run_due(
     store: &CheckinStore,
     sessions: &AccountSessionStore,
     egress: &crate::egress::EgressCache,
-    catch_up: bool,
 ) {
     let settings = store.settings();
     if !settings.enabled {
@@ -79,6 +80,9 @@ async fn run_due(
     }
     let date = today();
     let now = now_hhmm();
+    // 刷新时间超出 90 天的桶先清掉：这个 store 没有别的清理入口，
+    // 不清的话台账会随天数无限增长
+    let _ = store.prune_records();
     for schedule in store.schedules() {
         if !schedule.enabled {
             continue;
@@ -90,12 +94,8 @@ async fn run_due(
         if !is_hhmm(&schedule.time) {
             continue;
         }
-        if !catch_up && schedule.time.as_str() > now.as_str() {
-            continue;
-        }
-        // 补签只补「今天还没跑过」的；catch_up 时同样要求时刻已过，
-        // 否则会把晚上 21:00 的计划在早上启动时提前跑掉
-        if catch_up && schedule.time.as_str() > now.as_str() {
+        // 时刻未到不跑：避免早上启动时把晚上 21:00 的计划提前执行掉
+        if schedule.time.as_str() > now.as_str() {
             continue;
         }
         let summary = run_schedule(

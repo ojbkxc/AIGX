@@ -276,6 +276,29 @@ impl CheckinStore {
         Ok(removed)
     }
 
+    /// 删掉超过保留期（`KEEP_DAYS`）的日桶。
+    ///
+    /// 台账只在 `append_record` 里写入，没有别的地方会删旧桶；不清理的话
+    /// 存储会随天数无限增长。调度每轮顺手调一次（30 秒一次，代价只是列一次
+    /// 键前缀），保证长时间运行也不膨胀。
+    pub fn prune_records(&self) -> Result<usize> {
+        let today =
+            chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+        let cutoff = (today - chrono::Duration::days(KEEP_DAYS))
+            .format("%Y-%m-%d")
+            .to_string();
+        let mut removed = 0usize;
+        for key in self.store.list(RECORD_PREFIX)? {
+            // 键形如 `checkin:rec:YYYY-MM-DD`，日期是最后 10 个字符
+            let date = key.rsplit(':').next().unwrap_or("");
+            if date.len() == 10 && date < cutoff.as_str() {
+                self.store.delete(&key)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     /// 今天某账号某 provider 的最后一条记录（用于「今日是否已签」）。
     pub fn last_today(&self, account_id: &str, provider: &str) -> Result<Option<CheckinRecord>> {
         let records = self.recent_records(1, Some(provider), Some(account_id), None)?;
