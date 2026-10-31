@@ -188,8 +188,11 @@ pub struct FallbackModel {
 /// 已接入目录发现的供应商。
 ///
 /// 路径与兜底表移植自 Agent2API 对应 provider 的 `models.rs`（MIT 许可，
-/// 见 `Agent2API-main/LICENSE`）。**兜底表只收模型 id**，能力位与上下文长度
-/// 不硬编码 —— 上游拉回来时才有这些信息。
+/// 见 `Agent2API-main/LICENSE`）。兜底表带能力位与上下文长度 —— 那是从
+/// Agent2API 的静态表里逐条抄来的实测值；上游拉回真实目录时以上游为准。
+///
+/// `path` 为空表示该家**只有静态兜底**（Qoder 的目录端点需要 COSY 签名，
+/// 本模块不做逐家签名，与其发一个必然被拒的请求，不如用兜底表）。
 fn spec_for(provider: &str) -> Option<CatalogSpec> {
     match provider {
         "loomy" => Some(CatalogSpec {
@@ -930,6 +933,37 @@ mod tests {
         let entries = parse_response(&v, false);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].id, "y");
+    }
+
+    #[test]
+    fn fallback_tables_carry_metadata() {
+        // Qoder 兜底表带上游真名与能力位
+        let spec = spec_for("qoder").expect("qoder 应有目录描述");
+        assert!(!spec.fallback.is_empty());
+        let first = &spec.fallback[0];
+        assert_eq!(first.id, "Qwen3.8-Flash");
+        assert_eq!(first.upstream_key, "qfmodel");
+        assert!(first.reasoning);
+        assert!(first.context_window > 0);
+
+        // 兜底目录条目要带上上游真名与能力位
+        let snapshot = fallback_catalog(&spec);
+        assert_eq!(snapshot.models.len(), spec.fallback.len());
+        assert_eq!(snapshot.source, "fallback");
+        let entry = &snapshot.models[0];
+        assert_eq!(entry.upstream.as_deref(), Some("qfmodel"));
+        assert!(entry.capabilities.iter().any(|c| c == "reasoning"));
+    }
+
+    #[test]
+    fn cline_fallback_keeps_pool_prefix() {
+        let spec = spec_for("cline-free").expect("cline 应有目录描述");
+        assert!(spec
+            .fallback
+            .iter()
+            .all(|m| m.id.starts_with("cline-free/")
+                || m.id.starts_with("z-ai/")
+                || m.id.starts_with("poolside/")));
     }
 
     #[test]
