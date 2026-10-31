@@ -1165,7 +1165,7 @@ pub async fn handle_messages(
             // 对话快照（默认记录，不依赖 log_body 开关）
             {
                 let mut conv = crate::log::LogConversation::from_chat_messages(&chat_req.messages);
-                conv.push_assistant(&response.message.content_str());
+                conv.push_assistant(response.message.content_str());
                 if !conv.is_empty() {
                     log.conversation = Some(conv);
                 }

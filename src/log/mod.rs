@@ -312,7 +312,7 @@ fn text_of(m: &serde_json::Value) -> String {
         None => match m.get("tool_calls").and_then(|t| t.as_array()) {
             Some(list) => list
                 .iter()
-                .filter_map(|c| {
+                .map(|c| {
                     let name = c
                         .pointer("/function/name")
                         .and_then(|n| n.as_str())
@@ -321,10 +321,10 @@ fn text_of(m: &serde_json::Value) -> String {
                         .pointer("/function/arguments")
                         .and_then(|a| a.as_str())
                         .unwrap_or("");
-                    Some(format!(
+                    format!(
                         "[tool:{name}] {}",
                         args.chars().take(200).collect::<String>()
-                    ))
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),

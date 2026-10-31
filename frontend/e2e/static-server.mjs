@@ -154,7 +154,7 @@ const chatSessions = new Map();
 let chatSeq = 0;
 {
   const base = Math.floor(Date.now() / 1000);
-  for (let i = 0; i < 2; i++) {
+  for (let i = 0; i < 30; i++) {
     const id = `cs-seed-${i + 1}`;
     chatSessions.set(id, {
       id,

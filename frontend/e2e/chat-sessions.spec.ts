@@ -1,4 +1,4 @@
-import { test, expect, loginAsAdmin, makeSessions, SESSIONS_KEY, ACTIVE_KEY } from './fixtures';
+import { test, expect, loginAsAdmin } from './fixtures';
 
 /**
  * 聊天页历史会话抽屉 —— 回归测试。
@@ -18,7 +18,7 @@ async function openDrawer(page: import('@playwright/test').Page): Promise<void> 
 
 test.describe('聊天 · 历史会话抽屉', () => {
   test('聊天主区域铺满视口高度（输入区贴底、消息区可滚动）', async ({ page, pageErrors }) => {
-    await loginAsAdmin(page, { sessions: makeSessions(3) });
+    await loginAsAdmin(page);
     await page.goto('/chat');
     await expect(page.locator('.pg-shell')).toBeVisible();
 
@@ -39,7 +39,7 @@ test.describe('聊天 · 历史会话抽屉', () => {
   });
 
   test('打开后铺满视口高度，且标题未被遮挡', async ({ page, pageErrors }) => {
-    await loginAsAdmin(page, { sessions: makeSessions(3) });
+    await loginAsAdmin(page);
     await page.goto('/chat');
     await expect(page.locator('.pg-shell')).toBeVisible();
     await openDrawer(page);
@@ -90,36 +90,40 @@ test.describe('聊天 · 历史会话抽屉', () => {
   });
 
   test('切换会话后抽屉自动收起并载入目标消息', async ({ page, pageErrors }) => {
-    const sessions = makeSessions(3);
-    await loginAsAdmin(page, { sessions });
+    await loginAsAdmin(page);
     await page.goto('/chat');
     await expect(page.locator('.pg-shell')).toBeVisible();
 
     await openDrawer(page);
+    // 从列表里读出第 2 项的标题，再用它反推该会话的消息文本
+    // （seed 的标题是「会话 N」，消息是「第 N 个会话的第 1/2 条消息」）
+    const secondTitle = (await page.locator('.sd-item-title').nth(1).innerText()).trim();
+    const n = secondTitle.replace(/\D+/g, '');
     await page.locator('.sd-item-btn').nth(1).click();
 
     await expect(page.locator('.sd-root.open')).toHaveCount(0);
-    // 首条消息来自第 2 个会话
-    await expect(page.locator('.chat-debugger-messages')).toContainText('第 2 个会话的第 1 条消息');
+    await expect(page.locator('.chat-debugger-messages')).toContainText(`第 ${n} 个会话的第 1 条消息`);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
   test('点遮罩关闭抽屉', async ({ page, pageErrors }) => {
-    await loginAsAdmin(page, { sessions: makeSessions(2) });
+    await loginAsAdmin(page);
     await page.goto('/chat');
     await openDrawer(page);
 
-    // 点遮罩关闭：必须点在抽屉右侧的遮罩区（抽屉宽约 304px 或 86vw，
-    // 因此取视口宽度的 80% 处，确保落在遮罩上而非抽屉内）。
+    // 点遮罩关闭：必须点在抽屉**右侧**的遮罩区。抽屉宽 min(320px, 86vw)，
+    // 窄屏时 86vw 占比很大，用固定百分比（80%）会落进抽屉内。这里按实际
+    // 抽屉宽度 + 一点余量取点，并钳制在视口内。
+    const panel = await page.locator('.sd-panel').boundingBox();
     const vw = page.viewportSize()!.width;
-    await page.locator('.sd-mask').click({ position: { x: Math.round(vw * 0.8), y: 300 } });
+    const x = Math.min(Math.round((panel?.width ?? 0) + 24), vw - 12);
+    await page.locator('.sd-mask').click({ position: { x, y: 300 } });
     await expect(page.locator('.sd-root.open')).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
   test('会话很多时可滚动，且滚到底能切换到最后一个会话', async ({ page, pageErrors }) => {
-    const sessions = makeSessions(30);
-    await loginAsAdmin(page, { sessions });
+    await loginAsAdmin(page);
     await page.goto('/chat');
     await openDrawer(page);
 
@@ -137,7 +141,7 @@ test.describe('聊天 · 历史会话抽屉', () => {
   });
 
   test('删除非活动会话不会丢掉当前会话的消息', async ({ page, pageErrors }) => {
-    await loginAsAdmin(page, { sessions: makeSessions(2) });
+    await loginAsAdmin(page);
     await page.goto('/chat');
     await expect(page.locator('.pg-shell')).toBeVisible();
 
@@ -160,11 +164,14 @@ test.describe('聊天 · 历史会话抽屉', () => {
     expect(beforeLen).toBeGreaterThan(0);
 
     await openDrawer(page);
+    const beforeCount = await page.locator('.sd-item').count();
+    expect(beforeCount).toBeGreaterThan(1);
     // 删除第 2 个（非活动）会话（点击后弹确认框）
     await page.locator('.sd-item-del').nth(1).click();
     await page.getByRole('button', { name: '删除' }).last().click();
 
-    await expect(page.locator('.sd-item')).toHaveCount(1);
+    // 只少一条（seed 有 30 条，不是删到只剩 1 条）
+    await expect(page.locator('.sd-item')).toHaveCount(beforeCount - 1);
     // 删除是异步的（API 往返 + 状态收敛），poll 等待活动会话消息数收敛回原值
     await expect.poll(readActiveCount, { timeout: 5000 }).toBe(beforeLen);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);

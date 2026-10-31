@@ -238,6 +238,9 @@ export default function Chat(): JSX.Element {
       activeRef.current = active;
       messagesRef.current = msgs;
       modelRef.current = model;
+      // 关键：把已加载的会话列表写进 state。`sessionsRef` 只是渲染期读的快照，
+      // 不 setState 的话抽屉永远显示空列表（历史 bug：加载 30 条会话但列表空白）。
+      persistSessions(list);
       setActiveId(active);
       setMessages(msgs);
       setModel(model);
