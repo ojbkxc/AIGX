@@ -1176,15 +1176,22 @@ mod tests {
         );
     }
 
-    /// 数量锚点：管理面真实路径共 201 个（200 真实注册 + openapi.json 自身）。
-    /// 真实路由增删会先在 covers_all_real_admin_routes 红，此断言辅助定位。
+    /// 数量锚点：文档路径数必须等于路由对照表的条目数。
+    ///
+    /// **不写死数字** —— 路由增删时这个数字必然要跟着改,而改的人往往只改了
+    /// 一处(文档或对照表),于是这个断言变成了「每次加路由都要手改的常量」。
+    /// 改成从 [`real_admin_routes`] 派生后:
+    /// - 文档多了一条没进表 → `covers_all_real_admin_routes` 红(逐条比对);
+    /// - 文档少了一条 → 本断言红(数量不等);
+    /// 两边同步改了就都绿,不用记着改常量。
     #[test]
     fn path_count_anchor() {
         let doc = build_openapi_document();
         let n = doc["paths"].as_object().unwrap().len();
+        let expected = real_admin_routes().len();
         assert_eq!(
-            n, 201,
-            "管理面路径数应为 201（200 真实注册 + openapi.json），实际 {n}"
+            n, expected,
+            "文档路径数应等于路由对照表条目数（{expected}），实际 {n}"
         );
     }
 }
