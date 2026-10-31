@@ -22,7 +22,7 @@ use base64::Engine;
 use p256::ecdsa::signature::hazmat::PrehashSigner;
 use p256::ecdsa::{Signature, SigningKey};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{Credentials, LoginFlow, Started};
@@ -30,7 +30,6 @@ use super::{Credentials, LoginFlow, Started};
 const CLIENT_ID: &str = "vscode-codebot";
 const WEB_LOGIN_BASE: &str = "https://codearts.huaweicloud.com";
 const TOKEN_URL: &str = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens";
-const CALLBACK_PATH: &str = "/oauth/callback";
 const PLUGIN_NAME: &str = "snap_vscode";
 const PLUGIN_VERSION: &str = "26.9.101";
 
