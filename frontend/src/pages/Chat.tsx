@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  BarChart3, Code2, GraduationCap, ClipboardList, History, MessageSquarePlus, Trash2, X,
+  BarChart3, Code2, GraduationCap, ClipboardList,
 } from 'lucide-react';
+import { api } from '../api';
 import ChatDebugger, { type DebugMessage } from '../components/ChatDebugger';
+import SessionDrawer from '../components/chat/SessionDrawer';
 import './Chat.css';
 
 /** 读取「已启用」提示词并映射为空状态建议卡片（无则用 new-api 同款默认四项） */
@@ -54,15 +55,20 @@ const DEFAULT_PROMPTS: Array<{ icon: typeof BarChart3; content: string }> = [
 const SESSIONS_KEY = 'aigx_playground_sessions';
 const ACTIVE_KEY = 'aigx_playground_active';
 const LEGACY_KEY = 'aigx_playground_messages';
-/** 本机最多保留的会话数（localStorage 有 5MB 上限，防无限增长）。 */
-const MAX_SESSIONS = 50;
-
-/** 一条游乐园会话（消息 + 模型快照，updated_at 用于列表排序） */
-interface PlaygroundSession {
+/** 旧本机会话（仅迁移期读取；含消息体） */
+interface LegacySession {
   id: string;
   title: string;
   model: string;
   messages: DebugMessage[];
+  updated_at: number;
+}
+
+/** 会话摘要（列表用；消息按需从后端拉） */
+interface PlaygroundSession {
+  id: string;
+  title: string;
+  model: string;
   updated_at: number;
 }
 
@@ -72,25 +78,14 @@ const isDebugMessage = (m: unknown): m is DebugMessage => Boolean(
   m && typeof m === 'object' && ((m as DebugMessage).role === 'user' || (m as DebugMessage).role === 'assistant'),
 );
 
-/** 用首条用户消息生成会话标题（截 30 字符） */
-function autoTitle(messages: DebugMessage[]): string {
-  const first = messages.find((m) => m.role === 'user' && m.content.trim());
-  const text = first?.content.trim() ?? '';
-  return text.length > 30 ? `${text.slice(0, 30)}…` : text;
-}
-
-function emptySession(model = ''): PlaygroundSession {
-  return { id: uid(), title: '', model, messages: [], updated_at: Date.now() };
-}
-
-function readSessions(): PlaygroundSession[] {
+function readSessions(): LegacySession[] {
   try {
     const raw = localStorage.getItem(SESSIONS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
     return parsed
-      .filter((s): s is PlaygroundSession => Boolean(s && typeof s === 'object' && typeof (s as PlaygroundSession).id === 'string'))
+      .filter((s): s is LegacySession => Boolean(s && typeof s === 'object' && typeof (s as LegacySession).id === 'string'))
       .map((s) => ({
         id: s.id,
         title: typeof s.title === 'string' ? s.title : '',
@@ -127,87 +122,132 @@ export default function Chat(): JSX.Element {
   const messagesRef = useRef<DebugMessage[]>([]);
   const modelRef = useRef('');
 
-  /** 会话列表：state + ref + localStorage 三处同步 */
+  /** 会话摘要列表（后端返回；消息按需拉取） */
   const persistSessions = (next: PlaygroundSession[]): void => {
     sessionsRef.current = next;
     setSessions(next);
-    try {
-      localStorage.setItem(SESSIONS_KEY, JSON.stringify(next));
-    } catch { /* 存储写满静默降级 */ }
   };
 
-  /** 把当前消息/模型写回活动会话（标题为空时用首条用户消息自动命名） */
-  // 全量状态读的都是 ref + setState，依赖恒为空，可安全稳定引用，
-  // 供 debounce/卸载两个 effect 直接依赖而不触发重跑。
-  const saveActiveNow = useCallback((): void => {
+  /** 把当前消息整表落盘后端（debounce 调用；编辑/重发会改写历史，所以是替换不是追加） */
+  const saveActiveNow = useCallback(async (): Promise<void> => {
     const id = activeRef.current;
-    if (!id) return;
-    const next = sessionsRef.current.map((s) => (s.id === id
-      ? {
-        ...s,
-        messages: messagesRef.current,
-        model: modelRef.current,
-        title: s.title || autoTitle(messagesRef.current),
-        updated_at: Date.now(),
-      }
-      : s));
-    persistSessions(next);
+    if (!id || !loadedRef.current) return;
+    try {
+      await api.replaceChatMessages(
+        id,
+        messagesRef.current.map((m) => ({ role: m.role, content: m.content })),
+      );
+    } catch {
+      /* 离线/过期时静默；下次保存会覆盖 */
+    }
   }, []);
 
-  // 首启：恢复多会话列表（无则迁移旧单会话），定位活动会话
+  /** 一次性迁移旧 localStorage 会话到后端（成功后清旧键） */
+  const importLegacySessions = useCallback(async (): Promise<PlaygroundSession[]> => {
+    const legacyList = readSessions();
+    if (!legacyList.length) return [];
+    const imported: PlaygroundSession[] = [];
+    for (const s of legacyList.slice(0, 20)) {
+      try {
+        const created = await api.createChatSession({ title: s.title || '新会话', model: s.model });
+        const id = created.data?.id;
+        if (!id) continue;
+        if (s.messages.length) {
+          await api.replaceChatMessages(
+            id,
+            s.messages.map((m) => ({ role: m.role, content: m.content })),
+          );
+        }
+        imported.push({ id, title: s.title || '新会话', model: s.model, updated_at: s.updated_at });
+      } catch {
+        /* 单条失败跳过，不阻塞其余 */
+      }
+    }
+    try {
+      localStorage.removeItem(SESSIONS_KEY);
+      localStorage.removeItem(ACTIVE_KEY);
+      localStorage.removeItem(LEGACY_KEY);
+    } catch { /* noop */ }
+    return imported;
+  }, []);
+
+  // 首启：拉后端会话列表（空则一次性导入旧 localStorage 会话），定位活动会话
   useEffect(() => {
     let cancelled = false;
-    const timer = window.setTimeout(() => {
-      let list = readSessions();
+    void (async () => {
+      let list: PlaygroundSession[] = [];
+      try {
+        const res = await api.listChatSessions();
+        list = (res.data ?? []).map((s) => ({
+          id: s.id,
+          title: s.title,
+          model: s.model,
+          updated_at: s.updated_at,
+        }));
+      } catch {
+        list = [];
+      }
+      if (!list.length) {
+        list = await importLegacySessions();
+      }
+      if (cancelled) return;
       let active = '';
       try { active = localStorage.getItem(ACTIVE_KEY) ?? ''; } catch { /* noop */ }
-      if (!list.length) {
-        let legacy: DebugMessage[] = [];
-        try {
-          const raw = localStorage.getItem(LEGACY_KEY);
-          const parsed = raw ? JSON.parse(raw) as unknown : [];
-          if (Array.isArray(parsed)) legacy = parsed.filter(isDebugMessage);
-        } catch { /* 损坏数据静默丢弃 */ }
-        const migrated: PlaygroundSession = {
-          id: uid(),
-          title: autoTitle(legacy),
-          model: '',
-          messages: legacy,
-          updated_at: Date.now(),
-        };
-        list = [migrated];
-        active = migrated.id;
-        try { localStorage.removeItem(LEGACY_KEY); } catch { /* noop */ }
-      }
-      if (!list.some((s) => s.id === active)) active = list[0].id;
-      const current = list.find((s) => s.id === active) ?? list[0];
-      if (cancelled) return;
+      if (!list.some((s) => s.id === active)) active = list[0]?.id ?? '';
       sessionsRef.current = list;
-      activeRef.current = current.id;
-      messagesRef.current = current.messages;
-      modelRef.current = current.model;
-      setSessions(list);
-      setActiveId(current.id);
-      setMessages(current.messages);
-      setModel(current.model);
+      if (!active) {
+        // 一个会话都没有：建一个新的（首条消息落盘时再自动命名）
+        let freshId = uid();
+        try {
+          const created = await api.createChatSession({ model: '' });
+          freshId = created.data?.id ?? freshId;
+        } catch {
+          // 后端不可用时退化为本地临时会话（不持久化）
+        }
+        if (cancelled) return;
+        const fresh = { id: freshId, title: '新会话', model: '', updated_at: Date.now() };
+        persistSessions([fresh]);
+        activeRef.current = freshId;
+        messagesRef.current = [];
+        setActiveId(freshId);
+        setMessages([]);
+        loadedRef.current = true;
+        setLoading(false);
+        return;
+      }
+      // 载入活动会话的消息
+      let msgs: DebugMessage[] = [];
+      let model = '';
+      try {
+        const detail = await api.getChatSession(active);
+        msgs = (detail.data?.messages ?? [])
+          .filter((m) => isDebugMessage(m))
+          .map((m) => ({ role: m.role, content: m.content }));
+        model = detail.data?.session.model ?? '';
+      } catch {
+        msgs = [];
+      }
+      if (cancelled) return;
+      activeRef.current = active;
+      messagesRef.current = msgs;
+      modelRef.current = model;
+      setActiveId(active);
+      setMessages(msgs);
+      setModel(model);
       loadedRef.current = true;
       setLoading(false);
-      try {
-        localStorage.setItem(SESSIONS_KEY, JSON.stringify(list));
-        localStorage.setItem(ACTIVE_KEY, current.id);
-      } catch { /* noop */ }
-    }, 0);
-    return () => { cancelled = true; window.clearTimeout(timer); };
-  }, []);
+    })();
+    return () => { cancelled = true; };
+  }, [importLegacySessions]);
 
-  // debounce 持久化（活动会话）
+  // debounce 持久化（活动会话整表替换到后端）
   useEffect(() => {
     messagesRef.current = messages;
     if (!loadedRef.current) return;
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
       saveTimer.current = null;
-      saveActiveNow();
+      void saveActiveNow();
     }, 500);
   }, [messages, saveActiveNow]);
 
@@ -216,7 +256,7 @@ export default function Chat(): JSX.Element {
     if (saveTimer.current !== null) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
-      saveActiveNow();
+      void saveActiveNow();
     }
   }, [saveActiveNow]);
 
@@ -240,78 +280,102 @@ export default function Chat(): JSX.Element {
   const handleModelChange = (next: string): void => {
     modelRef.current = next;
     setModel(next);
-    saveActiveNow();
   };
 
   const handleClear = (): void => {
     messagesRef.current = [];
     setMessages([]);
-    saveActiveNow();
+    void saveActiveNow();
   };
 
-  /** 切换会话：先落盘当前会话，再载入目标会话（ChatDebugger 以 key 重挂载） */
-  const switchSession = (id: string): void => {
+  /** 切换会话：先落盘当前会话，再从后端载入目标会话（ChatDebugger 以 key 重挂载） */
+  const switchSession = async (id: string): Promise<void> => {
     if (id === activeRef.current) {
       setDrawerOpen(false);
       return;
     }
-    const target = sessionsRef.current.find((s) => s.id === id);
-    if (!target) return;
     if (saveTimer.current !== null) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    saveActiveNow();
+    await saveActiveNow();
+    let msgs: DebugMessage[] = [];
+    let model = '';
+    try {
+      const detail = await api.getChatSession(id);
+      msgs = (detail.data?.messages ?? [])
+        .filter((m) => isDebugMessage(m))
+        .map((m) => ({ role: m.role, content: m.content }));
+      model = detail.data?.session.model ?? '';
+    } catch {
+      msgs = [];
+    }
     activeRef.current = id;
-    messagesRef.current = target.messages;
-    modelRef.current = target.model;
+    messagesRef.current = msgs;
+    modelRef.current = model;
     setActiveId(id);
-    setMessages(target.messages);
-    setModel(target.model);
-    try { localStorage.setItem(ACTIVE_KEY, id); } catch { /* noop */ }
+    setMessages(msgs);
+    setModel(model);
     setDrawerOpen(false);
   };
 
-  /** 新建会话（沿用当前模型，消息清空） */
-  const createSession = (): void => {
+  /** 新建会话（后端创建，消息清空） */
+  const createSession = async (): Promise<void> => {
     if (saveTimer.current !== null) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    saveActiveNow();
-    const created = emptySession(modelRef.current);
-    persistSessions([created, ...sessionsRef.current].slice(0, MAX_SESSIONS));
-    activeRef.current = created.id;
+    await saveActiveNow();
+    let freshId = uid();
+    try {
+      const created = await api.createChatSession({ model: modelRef.current });
+      freshId = created.data?.id ?? freshId;
+    } catch {
+      // 后端不可用：本地临时会话兜底
+    }
+    persistSessions([{ id: freshId, title: '新会话', model: modelRef.current, updated_at: Date.now() }, ...sessionsRef.current]);
+    activeRef.current = freshId;
     messagesRef.current = [];
-    setActiveId(created.id);
+    setActiveId(freshId);
     setMessages([]);
-    try { localStorage.setItem(ACTIVE_KEY, created.id); } catch { /* noop */ }
     setDrawerOpen(false);
   };
 
-  /** 删除会话：删的是活动会话时切到最近一条，空列表则补一条新会话 */
-  const deleteSession = (id: string): void => {
-    // 删的不是活动会话时，活动会话在 debounce 窗口内的最新消息还在 ref 里、
-    // 尚未写回 sessionsRef。若直接过滤 sessionsRef 再整表落盘，这批消息会被
-    // 静默丢弃。先取消待写定时器并把活动会话立即落盘。
+  /** 删除会话（二次确认由共享 SessionDrawer 内建） */
+  const deleteSession = async (id: string): Promise<void> => {
+    try {
+      await api.deleteChatSession(id);
+    } catch {
+      /* 已不存在等情况忽略 */
+    }
     if (id !== activeRef.current) {
       if (saveTimer.current !== null) {
         window.clearTimeout(saveTimer.current);
         saveTimer.current = null;
       }
-      saveActiveNow();
+      await saveActiveNow();
     }
     const rest = sessionsRef.current.filter((s) => s.id !== id);
     if (id === activeRef.current) {
-      if (!rest.length) rest.push(emptySession(modelRef.current));
+      if (!rest.length) {
+        await createSession();
+        return;
+      }
       const target = rest[0];
       activeRef.current = target.id;
-      messagesRef.current = target.messages;
+      messagesRef.current = [];
       modelRef.current = target.model;
       setActiveId(target.id);
-      setMessages(target.messages);
+      setMessages([]);
       setModel(target.model);
-      try { localStorage.setItem(ACTIVE_KEY, target.id); } catch { /* noop */ }
+      try {
+        const detail = await api.getChatSession(target.id);
+        const msgs = (detail.data?.messages ?? [])
+          .filter((m) => isDebugMessage(m))
+          .map((m) => ({ role: m.role, content: m.content }));
+        messagesRef.current = msgs;
+        setMessages(msgs);
+      } catch { /* 空消息列表兜底 */ }
     }
     persistSessions(rest);
   };
@@ -335,40 +399,22 @@ export default function Chat(): JSX.Element {
           `.main-content` 有 z-index:10 会形成层叠上下文，抽屉（z=200）被困在
           其中，移动端汉堡按钮是根上下文的 fixed（z=150），会盖住抽屉标题且
           遮罩挡不住它。挂到 body 后抽屉/遮罩与汉堡处于同一上下文，层级正确。 */}
-      {createPortal(
-        <>
-          <aside className={`pg-sessions ${drawerOpen ? 'open' : ''}`}>
-            <div className="pg-sessions-head">
-              <span><History size={14} /> {t('历史会话')}</span>
-              <button type="button" className="pg-sessions-close" title={t('关闭')} onClick={() => setDrawerOpen(false)}>
-                <X size={14} />
-              </button>
-            </div>
-            <button type="button" className="pg-sessions-new" onClick={createSession}>
-              <MessageSquarePlus size={14} />
-              {t('新会话')}
-            </button>
-            <div className="pg-sessions-list">
-              {sessions.length === 0 && <div className="pg-sessions-empty">{t('暂无会话')}</div>}
-              {sessions.map((s) => (
-                <div key={s.id} className={`pg-sessions-item ${s.id === activeId ? 'active' : ''}`}>
-                  <button type="button" className="pg-sessions-item-btn" title={s.title || t('新会话')} onClick={() => switchSession(s.id)}>
-                    <span className="pg-sessions-item-title">{s.title || t('新会话')}</span>
-                    <span className="pg-sessions-item-meta">
-                      {t('{{count}} 条消息', { count: s.messages.length })} · {new Date(s.updated_at).toLocaleDateString()}
-                    </span>
-                  </button>
-                  <button type="button" className="pg-sessions-item-del" title={t('删除')} onClick={() => deleteSession(s.id)}>
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </aside>
-          {drawerOpen && <div className="pg-sessions-mask" onClick={() => setDrawerOpen(false)} />}
-        </>,
-        document.body,
-      )}
+      {/* 历史会话抽屉（共享 SessionDrawer：overlay 变体，删除带二次确认） */}
+      <SessionDrawer
+        variant="overlay"
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        title={t('历史会话')}
+        sessions={sessions.map((s) => ({
+          id: s.id,
+          title: s.title || t('新会话'),
+          meta: new Date(s.updated_at).toLocaleDateString(),
+        }))}
+        activeId={activeId}
+        onSelect={(id) => void switchSession(id)}
+        onCreate={() => void createSession()}
+        onDelete={(id) => void deleteSession(id)}
+      />
     </div>
   );
 }

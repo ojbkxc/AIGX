@@ -166,6 +166,32 @@ impl ChatSessionStore {
         Ok(out)
     }
 
+    /// 整表替换消息（前端 debounce 保存：编辑/重发会改写历史，append 不够）。
+    pub fn replace_messages(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        msgs: &[ChatMessage],
+    ) -> anyhow::Result<()> {
+        // 先清旧消息再写新的（简单可靠；会话消息量级小）
+        for k in self
+            .store
+            .list(&format!("{MSG_PREFIX}{user_id}:{session_id}:"))?
+        {
+            self.store.delete(&k)?;
+        }
+        for (seq, msg) in msgs.iter().enumerate() {
+            self.store
+                .put(&Self::msg_key(user_id, session_id, seq as u64), msg)?;
+        }
+        if let Some(mut s) = self.get(user_id, session_id)? {
+            s.updated_at = now_ts();
+            self.store
+                .put(&Self::session_key(user_id, session_id), &s)?;
+        }
+        Ok(())
+    }
+
     fn next_seq(&self, user_id: &str, session_id: &str) -> anyhow::Result<u64> {
         let keys = self
             .store
@@ -331,6 +357,56 @@ pub async fn handle_append_chat_message(
             .rename_if_default(&user.id, &id, &msg.content);
     }
     Ok(Json(json!({ "success": true, "data": { "seq": seq } })))
+}
+
+/// PUT /api/chat/sessions/:id/messages —— 整表替换消息（debounce 保存）。
+#[derive(Debug, Deserialize)]
+pub struct ReplaceChatMessagesBody {
+    pub messages: Vec<AppendChatMessageBody>,
+}
+
+pub async fn handle_replace_chat_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ReplaceChatMessagesBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user = verify_user(&state, &headers).await?;
+    let Some(session) = state
+        .chat_sessions
+        .get(&user.id, &id)
+        .map_err(|e| error_response(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?
+    else {
+        return Err(error_response("会话不存在", StatusCode::NOT_FOUND));
+    };
+    let msgs: Vec<ChatMessage> = body
+        .messages
+        .into_iter()
+        .map(|m| ChatMessage {
+            role: m.role,
+            content: m.content,
+            extra: m.extra,
+            created_at: now_ts(),
+        })
+        .collect();
+    state
+        .chat_sessions
+        .replace_messages(&user.id, &id, &msgs)
+        .map_err(|e| error_response(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    // 标题仍为缺省时用首条用户消息自动命名
+    if session.title.trim() == "新会话" || session.title.trim().is_empty() {
+        if let Some(first) = msgs
+            .iter()
+            .find(|m| m.role == "user" && !m.content.trim().is_empty())
+        {
+            let _ = state
+                .chat_sessions
+                .rename_if_default(&user.id, &id, &first.content);
+        }
+    }
+    Ok(Json(
+        json!({ "success": true, "data": { "count": msgs.len() } }),
+    ))
 }
 
 /// DELETE /api/chat/sessions/:id —— 删会话。

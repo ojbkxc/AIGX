@@ -2,11 +2,14 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next';
 import {
   Bot, Send, Square, ShieldAlert, Terminal, Eye, Wrench, Brain,
-  CheckCircle2, XCircle, MessageSquarePlus, Trash2, History, ChevronLeft,
+  CheckCircle2, XCircle, History, MessageSquarePlus, Trash2,
 } from 'lucide-react';
 import ModelPicker from '../components/ModelPicker';
+import SessionDrawer from '../components/chat/SessionDrawer';
+import EffortPicker, { type Effort } from '../components/chat/EffortPicker';
+import StreamPhaseIndicator from '../components/chat/StreamPhase';
+import { usePasteGuard } from '../hooks/usePasteGuard';
 import MessageViewer from '../components/MessageViewer';
-import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { api } from '../api';
 import './Agent.css';
 
@@ -57,10 +60,6 @@ interface SessionItem {
   created_at: number;
 }
 
-/** 思考强度档位（off = 不发送思考参数，走服务端默认） */
-const EFFORT_CYCLE = ['off', 'low', 'medium', 'high'] as const;
-type Effort = (typeof EFFORT_CYCLE)[number];
-const EFFORT_LABEL: Record<Effort, string> = { off: '关', low: '低', medium: '中', high: '高' };
 
 /**
  * Agent — AI 运维工作台（对齐 /chat 聊天页 + cc-haha 交互模式）。
@@ -77,25 +76,25 @@ export default function Agent(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [pending, setPending] = useState<PendingApproval | null>(null);
-  /** 删除历史会话的二次确认（服务端不可逆） */
-  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [model, setModel] = useState('');
   /** 思考强度：默认关（不发送 reasoning_effort），按任务复杂度点选低/中/高 */
   const [effort, setEffort] = useState<Effort>(() => {
     // 隐私模式/禁用存储时 getItem 可能抛 SecurityError，降级为默认「关」
     let saved: string | null = null;
     try { saved = localStorage.getItem('aigx_agent_effort'); } catch { /* noop */ }
-    return EFFORT_CYCLE.includes(saved as Effort) ? (saved as Effort) : 'off';
+    return saved === 'low' || saved === 'medium' || saved === 'high' ? (saved as Effort) : 'off';
   });
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [role, setRole] = useState<'observer' | 'operator'>('observer');
   const abortRef = useRef<AbortController | null>(null);
   const msgIdRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  /** 粘贴中标记：大段内容粘贴瞬间禁用 Enter 发送（cc-haha usePasteHandler 模式） */
-  const pastingRef = useRef(false);
+  /** 粘贴守卫（共享 hook）：大段内容粘贴瞬间禁用 Enter 发送 */
+  const pasteGuard = usePasteGuard();
   /** 流式阶段：思考中 → 正在生成（cc-haha ToolUseLoader 阶段动词模式） */
   const [streamPhase, setStreamPhase] = useState<'thinking' | 'generating'>('thinking');
+  /** 最近一次流式事件时间（StreamPhase 停滞检测用） */
+  const [lastEventAt, setLastEventAt] = useState(() => Date.now());
   /** 会话抽屉（cc-haha 会话列表 Web 化：桌面侧栏、移动端覆盖层） */
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
@@ -203,30 +202,19 @@ export default function Agent(): JSX.Element {
     }
   }, [busy, t]);
 
-  /** 删除历史会话（当前会话被删时同时断开前端关联） */
+  /** 删除历史会话（二次确认由共享 SessionDrawer 内建；当前会话被删时断开前端关联） */
   const deleteSession = useCallback(async (id: string): Promise<void> => {
-    // 删除历史会话是服务端不可逆操作：先二次确认
-    setConfirmState({
-      title: t('删除历史会话'),
-      message: t('确定删除这条历史会话？删除后无法恢复。'),
-      confirmText: t('删除'),
-      danger: true,
-      onConfirm: async () => {
-        try {
-          await api.deleteAgentSession(id);
-          setSessions((prev) => prev.filter((s) => s.id !== id));
-          if (sessionId === id) {
-            setSessionId(null);
-            setMessages([]);
-          }
-        } catch (e) {
-          setError(e instanceof Error ? e.message : String(e));
-          // 抛出让 ConfirmDialog 保留弹窗并显示错误
-          throw e;
-        }
-      },
-    });
-  }, [sessionId, t]);
+    try {
+      await api.deleteAgentSession(id);
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+      if (sessionId === id) {
+        setSessionId(null);
+        setMessages([]);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [sessionId]);
 
   const send = useCallback(async (override?: string) => {
     const text = (override ?? input).trim();
@@ -262,6 +250,8 @@ export default function Agent(): JSX.Element {
     abortRef.current = controller;
     try {
       await api.agentChatStream(sid, text, (ev: AgentEvent) => {
+        // 每个流式事件都推进停滞计时（StreamPhase 用）
+        setLastEventAt(Date.now());
         if (ev.type === 'approval_request' && typeof ev.request_id === 'string') {
           setPending({ requestId: ev.request_id, name: ev.name ?? '', arguments: ev.arguments ?? '' });
           // 用户切走标签页时用桌面通知提醒审批挂起（需一次性授权）
@@ -364,44 +354,22 @@ export default function Agent(): JSX.Element {
 
   return (
     <div className="agent-shell">
-      {/* 会话抽屉（cc-haha 会话列表 Web 化）：桌面侧栏 / 移动端覆盖层 */}
-      <aside className={`agent-drawer ${drawerOpen ? 'open' : ''}`}>
-        <div className="agent-drawer-head">
-          <span>{t('会话列表')}</span>
-          <button type="button" className="agent-drawer-close" onClick={() => setDrawerOpen(false)}>
-            <ChevronLeft size={14} />
-          </button>
-        </div>
-        <button type="button" className="agent-drawer-new" onClick={() => { clearAll(); setDrawerOpen(false); }}>
-          <MessageSquarePlus size={14} />
-          {t('新会话')}
-        </button>
-        <div className="agent-drawer-list">
-          {sessionsLoading && <div className="agent-drawer-empty">{t('加载中…')}</div>}
-          {!sessionsLoading && sessions.length === 0 && (
-            <div className="agent-drawer-empty">{t('暂无会话')}</div>
-          )}
-          {sessions.map((s) => (
-            <div key={s.id} className={`agent-drawer-item ${s.id === sessionId ? 'active' : ''}`}>
-              <button type="button" className="agent-drawer-item-btn" onClick={() => void restoreSession(s.id)} title={s.title}>
-                <span className="agent-drawer-item-title">{s.title || t('新会话')}</span>
-                <span className="agent-drawer-item-meta">
-                  {s.role === 'operator' ? t('运维员') : t('观察员')} · {new Date(s.created_at * 1000).toLocaleDateString()}
-                </span>
-              </button>
-              <button
-                type="button"
-                className="agent-drawer-item-del"
-                title={t('删除')}
-                onClick={() => void deleteSession(s.id)}
-              >
-                <Trash2 size={12} />
-              </button>
-            </div>
-          ))}
-        </div>
-      </aside>
-      {drawerOpen && <div className="agent-drawer-mask" onClick={() => setDrawerOpen(false)} />}
+      {/* 会话抽屉（共享 SessionDrawer：桌面侧栏 / 移动端覆盖层，删除带二次确认） */}
+      <SessionDrawer
+        variant="sidebar"
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        sessions={sessions.map((s) => ({
+          id: s.id,
+          title: s.title,
+          meta: `${s.role === 'operator' ? t('运维员') : t('观察员')} · ${new Date(s.created_at * 1000).toLocaleDateString()}`,
+        }))}
+        activeId={sessionId}
+        loading={sessionsLoading}
+        onSelect={(id) => void restoreSession(id)}
+        onCreate={clearAll}
+        onDelete={(id) => void deleteSession(id)}
+      />
 
       {/* open-webui 居中 58rem 消息流（对齐聊天页 chat-debugger-messages） */}
       <div className="agent-main">
@@ -449,13 +417,12 @@ export default function Agent(): JSX.Element {
             <div className="agent-msg agent-msg-assistant">
               <span className="agent-msg-icon"><Bot size={14} /></span>
               <div className="agent-msg-body">
-                {/* cc-haha 式呼吸点 + 阶段动词：思考中 → 正在生成 */}
-                <div className="agent-phase">
-                  <span className="agent-phase-dots"><i /><i /><i /></span>
-                  <span className="agent-phase-text">
-                    {streamPhase === 'thinking' ? t('思考中…') : t('正在生成…')}
-                  </span>
-                </div>
+                {/* 共享流式阶段指示（含停滞检测） */}
+                <StreamPhaseIndicator
+                  active={busy}
+                  phase={streamPhase}
+                  lastEventAt={lastEventAt}
+                />
               </div>
             </div>
           )}
@@ -476,7 +443,7 @@ export default function Agent(): JSX.Element {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   // 粘贴大内容时紧接着的 Enter 是误触发，忽略
-                  if (pastingRef.current) {
+                  if (pasteGuard.shouldSuppressEnter()) {
                     e.preventDefault();
                     return;
                   }
@@ -484,13 +451,7 @@ export default function Agent(): JSX.Element {
                   void send();
                 }
               }}
-              onPaste={(e) => {
-                const text = e.clipboardData?.getData('text') || '';
-                if (text.length > 100) {
-                  pastingRef.current = true;
-                  window.setTimeout(() => { pastingRef.current = false; }, 150);
-                }
-              }}
+              onPaste={pasteGuard.onPaste}
             />
             <div className="agent-input-meta">
               <div className="agent-input-left">
@@ -511,21 +472,11 @@ export default function Agent(): JSX.Element {
                   <Terminal size={12} />
                   {role === 'observer' ? t('观察员') : t('运维员')}
                 </button>
-                {/* 思考强度：点按循环 关 → 低 → 中 → 高（默认关，不发送思考参数） */}
-                <button
-                  type="button"
-                  className={`agent-role-pill ${effort !== 'off' ? 'effort-on' : ''}`}
-                  disabled={busy}
-                  onClick={() => {
-                    const next = EFFORT_CYCLE[(EFFORT_CYCLE.indexOf(effort) + 1) % EFFORT_CYCLE.length];
-                    setEffort(next);
-                    try { localStorage.setItem('aigx_agent_effort', next); } catch { /* noop */ }
-                  }}
-                  title={t('思考强度：关 = 直接作答；低/中/高 = 先推理再作答，越强越慢越准')}
-                >
+                {/* 思考强度（共享 EffortPicker）：点按循环 关 → 低 → 中 → 高 */}
+                <span className="agent-role-pill">
                   <Brain size={12} />
-                  {t('思考')}·{t(EFFORT_LABEL[effort])}
-                </button>
+                  <EffortPicker storageKey="aigx_agent_effort" value={effort} onChange={setEffort} disabled={busy} />
+                </span>
                 <button
                   type="button"
                   className="agent-icon-btn"
@@ -593,7 +544,6 @@ export default function Agent(): JSX.Element {
           </div>
         </div>
       )}
-      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }

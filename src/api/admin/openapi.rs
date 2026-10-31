@@ -208,7 +208,8 @@ fn paths_users() -> Value {
             "post": op_body("用户", "重命名会话", "title: string")
         },
         "/api/chat/sessions/{id}/messages": {
-            "post": op_body("用户", "追加一条消息（流式结束后落盘）", "role/content/extra")
+            "post": op_body("用户", "追加一条消息", "role/content/extra"),
+            "put": op_body("用户", "整表替换消息（编辑/重发后 debounce 保存）", "messages: [{role, content, extra}]")
         },
         "/api/checkin": {
             "get": op("用户", "查询今日签到状态"),
@@ -1059,7 +1060,7 @@ mod tests {
         add("/api/channels/{id}/test", &["post"]);
         add("/api/chat/sessions", &["get", "post"]);
         add("/api/chat/sessions/{id}", &["delete", "get"]);
-        add("/api/chat/sessions/{id}/messages", &["post"]);
+        add("/api/chat/sessions/{id}/messages", &["post", "put"]);
         add("/api/chat/sessions/{id}/rename", &["post"]);
         add("/api/checkin", &["get", "post"]);
         add("/api/dashboard/cache_savings", &["get"]);
