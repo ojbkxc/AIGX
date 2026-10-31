@@ -1,6 +1,6 @@
 # Agent2API → AIGX 能力层漂移报告
 
-生成时间：2026-11-01 03:16
+生成时间：2026-11-01 03:50
 
 本报告由 `tools/sync_agent2api_capabilities.py --report` 生成。
 能力层 = 签到名单 / 模型目录实现 / 目录端点。
@@ -15,7 +15,7 @@
 
 ## 模型目录
 
-**AIGX 缺目录实现**：accio, antigravity, autoclaw, cline, kuku, orcaterm, trae, xiaohuanxiong, zcode
+**AIGX 缺目录实现**：（无）
 
 **目录端点不一致**：
 

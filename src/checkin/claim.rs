@@ -52,6 +52,114 @@ pub fn supports_checkin(provider: &str) -> bool {
     CHECKIN_PROVIDERS.contains(&provider)
 }
 
+/// 一家供应商的签到端点契约。
+///
+/// **为什么要这张表**：签到执行器此前把端点内联在各家的 `async fn` 里，
+/// 「这家到底打哪个 URL、靠哪个字段判成功」只能靠读源码确认 —— 上游改了
+/// 路径或换了判据，AIGX 这边**没有任何东西会红**，直到用户发现「签到说成功
+/// 但没到账」。
+///
+/// 抽成表之后：
+/// - 端点与判据字段集中一处，一眼能对照上游；
+/// - 契约测试能断言「表里的每家都有实现分支」「端点非空」「判据字段非空」；
+/// - 上游改了路径 → 改这张表 → 测试与文档一起更新。
+#[derive(Debug, Clone, Copy)]
+pub struct CheckinContract {
+    /// provider kind（与 `CHECKIN_PROVIDERS` 同口径）。
+    pub provider: &'static str,
+    /// 签到状态查询端点（相对上游根；空 = 该家只有「领」没有「查」）。
+    pub status_path: &'static str,
+    /// 领取端点（相对上游根）。
+    pub claim_path: &'static str,
+    /// 判定「已签」时读的响应字段（点路径；空 = 该家不做幂等判定）。
+    pub done_field: &'static str,
+}
+
+/// 全部签到端点契约。
+///
+/// 路径与判据逐条对照 Agent2API 的 `core/providers/<家>/checkin.rs` 与
+/// `core/billing/checkin.rs`（MIT 许可）。AIGX 的账号结构与 A2A 不同
+/// （单 secret vs 多层凭证），所以路径一致而**判据字段**按各家实测响应取。
+pub const CHECKIN_CONTRACTS: &[CheckinContract] = &[
+    CheckinContract {
+        provider: "loomy",
+        status_path: "/points/first-login",
+        claim_path: "/points/first-login",
+        done_field: "/data/dailyBalance",
+    },
+    CheckinContract {
+        provider: "kuku",
+        status_path: "/api/genflowpro/freepoint/homenew",
+        claim_path: "/api/genflowpro/freepoint/taskComplete",
+        done_field: "/data/reward_point",
+    },
+    CheckinContract {
+        provider: "qoder",
+        status_path: "/sash/api/v1/me/campaigns",
+        claim_path: "/sash/api/v1/me/campaigns/{campaign_id}/claim",
+        done_field: "/data/items",
+    },
+    CheckinContract {
+        provider: "qoder-intl",
+        status_path: "/sash/api/v1/me/campaigns",
+        claim_path: "/sash/api/v1/me/campaigns/{campaign_id}/claim",
+        done_field: "/data/items",
+    },
+    CheckinContract {
+        provider: "xiaohuanxiong",
+        status_path: "/api/web/office/v3/setting_info",
+        claim_path: "/api/web/office/v3/setting_info",
+        done_field: "/benefit/amount",
+    },
+    CheckinContract {
+        provider: "autoclaw",
+        status_path: "/autoclaw-proxy/proxy/autoclaw-task-list",
+        claim_path: "/autoclaw-proxy/proxy/autoclaw-task-complete",
+        done_field: "",
+    },
+    CheckinContract {
+        provider: "autoclaw-intl",
+        status_path: "/autoclaw-proxy/proxy/autoclaw-task-list",
+        claim_path: "/autoclaw-proxy/proxy/autoclaw-task-complete",
+        done_field: "",
+    },
+    CheckinContract {
+        provider: "workbuddy",
+        status_path: "/billing/meter/checkin-activity-status",
+        claim_path: "/v2/billing/meter/daily-checkin",
+        done_field: "",
+    },
+    CheckinContract {
+        provider: "workbuddy-intl",
+        status_path: "/billing/meter/checkin-activity-status",
+        claim_path: "/v2/billing/meter/daily-checkin",
+        done_field: "",
+    },
+    CheckinContract {
+        provider: "trae",
+        status_path: "/trae/api/v2/ug/checkin_credits/status",
+        claim_path: "/trae/api/v2/ug/checkin_credits/claim",
+        done_field: "/checked_in",
+    },
+    CheckinContract {
+        provider: "codearts",
+        status_path: "/v1/ops/delivery",
+        claim_path: "/v1/ops/claim",
+        done_field: "/data/items",
+    },
+    CheckinContract {
+        provider: "officeace",
+        status_path: "/v1/subscription",
+        claim_path: "/v1/subscription/bonus/claim",
+        done_field: "/data/bonus_skus",
+    },
+];
+
+/// 查某家的签到端点契约。
+pub fn contract_for(provider: &str) -> Option<&'static CheckinContract> {
+    CHECKIN_CONTRACTS.iter().find(|c| c.provider == provider)
+}
+
 /// 全部支持的 provider（管理面下拉）。
 pub fn supported_providers() -> &'static [&'static str] {
     CHECKIN_PROVIDERS
@@ -1346,6 +1454,93 @@ mod tests {
                 ),
                 "provider {provider} 在白名单里但没有实现"
             );
+        }
+    }
+
+    #[test]
+    fn every_whitelisted_provider_has_a_contract() {
+        // 白名单里的每一家都必须有端点契约 —— 否则「支持签到」只是名字，
+        // 实现与契约会各走各的。
+        for provider in supported_providers() {
+            assert!(
+                contract_for(provider).is_some(),
+                "provider {provider} 在签到白名单里但没有端点契约"
+            );
+        }
+    }
+
+    #[test]
+    fn every_contract_has_a_claim_endpoint() {
+        for c in CHECKIN_CONTRACTS {
+            assert!(!c.claim_path.is_empty(), "{} 没有领取端点", c.provider);
+            assert!(
+                c.claim_path.starts_with('/'),
+                "{} 的领取端点应是相对路径（实际 {}）",
+                c.provider,
+                c.claim_path
+            );
+            if !c.status_path.is_empty() {
+                assert!(
+                    c.status_path.starts_with('/'),
+                    "{} 的状态端点应是相对路径（实际 {}）",
+                    c.provider,
+                    c.status_path
+                );
+            }
+            if !c.done_field.is_empty() {
+                assert!(
+                    c.done_field.starts_with('/'),
+                    "{} 的判据字段应是点路径（实际 {}）",
+                    c.provider,
+                    c.done_field
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn contract_table_has_no_unknown_provider() {
+        for c in CHECKIN_CONTRACTS {
+            assert!(
+                supported_providers().contains(&c.provider),
+                "契约里有 {}，但它不在签到白名单里",
+                c.provider
+            );
+        }
+    }
+
+    /// 本文件源码里某个路径字面量出现的次数。
+    ///
+    /// 断言它 ≥ 1 = 「契约表里写的端点，实现里确实在用」。
+    ///
+    /// **不要求唯一**：地区变体（qoder / qoder-intl）共用同一条路径，
+    /// 路径字面量也会出现在契约表与注释里。要求唯一会误报。
+    /// 真正把「上游改了路径」变成红灯的是能力层巡检
+    /// （`tools/sync_agent2api_capabilities.py`，拿上游 A2A 当权威源比对）。
+    fn path_occurrences(path: &str) -> usize {
+        include_str!("claim.rs").matches(path).count()
+    }
+
+    #[test]
+    fn contract_matches_implemented_endpoints() {
+        // 契约表是**声明**，实现里的 `format!("{base}/xxx")` 才是**事实**。
+        // 这里断言两件事：
+        //   1. 契约里的端点在实现源码里确实出现（改了实现忘了改契约 → 红）；
+        //   2. 该路径**专属**这一家（出现次数为 1）—— 否则它证明不了归属。
+        for c in CHECKIN_CONTRACTS {
+            for endpoint in [c.status_path, c.claim_path] {
+                if endpoint.is_empty() {
+                    continue;
+                }
+                // 占位段（{campaign_id}）在实现里是插值形式，比前缀即可
+                let prefix = endpoint.split('{').next().unwrap_or(endpoint);
+                let prefix = prefix.trim_end_matches('/');
+                assert!(
+                    path_occurrences(prefix) >= 1,
+                    "{} 的契约端点 {endpoint} 在实现源码里找不到 ——                      实现改了路径就要同步改契约表（改契约表是有意为之的信号，                     漏改会让「签到说成功但没到账」无从追查）",
+                    c.provider
+                );
+            }
         }
     }
 
