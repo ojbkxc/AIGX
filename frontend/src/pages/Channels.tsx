@@ -12,6 +12,8 @@ import type { ChannelItem as ApiChannelItem } from '../types';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ChatDebugger from '../components/ChatDebugger';
+import ModelMappingEditor from '../components/ModelMappingEditor';
+import CostPricingEditor from '../components/CostPricingEditor';
 import {
   BALANCE_SCHEME_LABELS,
   PRESET_PROVIDERS,
@@ -1325,13 +1327,12 @@ export default function Channels(): JSX.Element {
                   </button>
                 </div>
               </div>
-              {/* 模型配置统一收敛到「模型管理」页（/models）：
-                  这里不再提供逗号输入框、拉取按钮、映射与成本价编辑器，
-                  避免同一份数据在三处可改导致口径分叉。编辑态只展示当前
-                  配置摘要与跳转入口；新增态整块隐藏（新渠道还没有模型）。 */}
+              {/* 模型清单（白名单）统一收敛到「模型管理」页（/model-manage），
+                  这里不再提供逗号输入框与拉取按钮。渠道级「模型映射」与
+                  「成本价」是渠道自身配置，仍在此维护（与全局别名区分）。 */}
               {editChannel && (
                 <div className="form-group">
-                  <label>{t('模型配置')}</label>
+                  <label>{t('模型清单')}</label>
                   <div className="ch-model-summary">
                     <div className="ch-model-summary-counts">
                       <span>
@@ -1340,10 +1341,6 @@ export default function Channels(): JSX.Element {
                       <span className="ch-model-summary-sep">·</span>
                       <span>
                         {t('上游发现')} <strong>{(editChannel.discovered_models || []).length}</strong>
-                      </span>
-                      <span className="ch-model-summary-sep">·</span>
-                      <span>
-                        {t('映射')} <strong>{Object.keys(editChannel.model_mapping || {}).length}</strong>
                       </span>
                     </div>
                     {(editChannel.models || []).length > 0 && (
@@ -1361,15 +1358,36 @@ export default function Channels(): JSX.Element {
                         )}
                       </div>
                     )}
-                    <div className="form-hint" style={{ marginTop: 6 }}>
-                      {t('模型清单、映射与定价统一在模型管理页维护，此处只展示。')}
-                    </div>
                     <Link className="btn btn-outline btn-sm" to={`/model-manage?channel_id=${encodeURIComponent(String(editChannel.id))}`}>
                       {t('在模型管理中维护')} →
                     </Link>
                   </div>
                 </div>
               )}
+              <div className="form-group">
+                <label>{t('模型映射')}</label>
+                <div className="form-hint" style={{ marginBottom: 8 }}>
+                  {t('用户请求的模型名 → 实际转发给上游的模型名。优先级：渠道级映射 > 全局映射 > 原名透传。')}
+                </div>
+                <ModelMappingEditor
+                  value={form.model_mapping}
+                  onChange={(mapping) => setForm((f) => ({ ...f, model_mapping: mapping }))}
+                  sourceModelOptions={form.models.split(',').map((s) => s.trim()).filter(Boolean)}
+                  disabled={saving}
+                />
+              </div>
+              <div className="form-group">
+                <label>{t('成本价（可选）')}</label>
+                <div className="form-hint" style={{ marginBottom: 8 }}>
+                  {t('按映射后的上游模型名填成本价（每 1k token）。可留空——填了管理员可在日志看利润，不填利润显示「—」。')}
+                </div>
+                <CostPricingEditor
+                  value={form.cost_pricing}
+                  mappingTargets={Object.values(form.model_mapping)}
+                  onChange={(cp) => setForm((f) => ({ ...f, cost_pricing: cp }))}
+                  disabled={saving}
+                />
+              </div>
               <div style={{ display: 'flex', gap: 12 }}>
                 <Input
                   label={t('优先级（越大越优先）')}

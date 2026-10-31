@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FlaskConical, Pencil, Plus, Power, RotateCcw, SlidersHorizontal, Trash2, Upload } from 'lucide-react';
+import { Download, FlaskConical, Loader2, Pencil, Plus, Power, RotateCcw, SlidersHorizontal, Trash2, Upload } from 'lucide-react';
 import { api } from '../api';
 import { presetIcon, providerIcon } from '../lib/providerIcons';
 import { CUSTOM_PROTOCOLS, PRESET_PROVIDERS, normalizeUrl, presetKind } from '../lib/addAccountConfigs';
@@ -12,6 +12,7 @@ import type {
   AccountProviderItem,
   AccountSessionItem,
   AccountSessionStatsItem,
+  CatalogSyncAccount,
   ChannelItem,
 } from '../types';
 import './AccountSessions.css';
@@ -432,6 +433,38 @@ export default function AccountSessions(): JSX.Element {
     }
   };
 
+  // ── 上游模型目录发现（抄 Agent2API 的 provider 模型目录）──
+  const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [catalogModal, setCatalogModal] = useState<CatalogSyncAccount[] | null>(null);
+
+  const handleSyncCatalog = async (session: AccountSessionItem): Promise<void> => {
+    setSyncingId(session.id);
+    setError('');
+    try {
+      const res = await api.syncAccountCatalog({
+        account_id: session.id,
+        force: true,
+        apply: true,
+        replace: false,
+      });
+      const data = res.data;
+      const ok = data?.results ?? [];
+      const failed = data?.errors ?? [];
+      if (ok.length > 0) {
+        setCatalogModal(ok);
+        addToast(t('已同步模型目录') + ` · ${ok[0].count} ${t('个模型')}`);
+        await load();
+      }
+      if (failed.length > 0) {
+        addToast(`${t('同步失败')}: ${failed[0].error}`, 'error');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSyncingId(null);
+    }
+  };
+
   const handleTest = async (session: AccountSessionItem): Promise<void> => {
     setTestingId(session.id);
     setError('');
@@ -741,6 +774,19 @@ export default function AccountSessions(): JSX.Element {
                         >
                           <FlaskConical size={14} />
                           {testingId === session.id ? t('测试中…') : t('测试')}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleSyncCatalog(session)}
+                          disabled={syncingId === session.id}
+                          title={t('从上游拉取模型清单并写入本账号')}
+                        >
+                          {syncingId === session.id ? (
+                            <Loader2 size={14} />
+                          ) : (
+                            <Download size={14} />
+                          )}
                         </Button>
                         <Button
                           variant="outline"
@@ -1308,6 +1354,41 @@ export default function AccountSessions(): JSX.Element {
               </Button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* ── 模型目录同步结果 ── */}
+      {catalogModal && (
+        <div className="modal-overlay" onClick={() => setCatalogModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('上游模型目录')}</h3>
+              <button className="modal-close" onClick={() => setCatalogModal(null)}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              {catalogModal.map((r) => (
+                <div key={r.account_id} style={{ marginBottom: 12 }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                    <strong>{r.name}</strong>
+                    <span className="form-hint">
+                      {r.count} {t('个模型')} · {r.source}
+                      {r.applied ? ` · ${t('已写入账号')}` : ''}
+                    </span>
+                  </div>
+                  <div className="form-hint">
+                    {r.models.map((m) => m.id).join(', ') || t('（空）')}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setCatalogModal(null)}>
+                {t('关闭')}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

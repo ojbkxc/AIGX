@@ -3,11 +3,13 @@ pub mod account_sessions;
 pub mod auth;
 pub mod cache;
 pub mod channels;
+pub mod checkin_center;
 pub mod common;
 pub mod dashboard;
 pub mod diagnostics;
 pub mod logs;
 pub mod mcp;
+pub mod model_manage;
 pub mod monitor;
 pub mod network;
 pub mod notify;
@@ -61,6 +63,20 @@ pub use pricing::{
     handle_add_pricing, handle_cost_estimate, handle_delete_pricing, handle_list_pricing,
     handle_missing_pricing_models, handle_model_meta_delete, handle_model_meta_list,
     handle_model_meta_set,
+};
+
+// 统一模型管理（渠道模型 + 账号池模型聚合视图，参照 Agent2API 模型管理）
+pub use model_manage::{
+    handle_manage_view, handle_remove_alias, handle_remove_price, handle_set_alias,
+    handle_set_state, handle_upsert_price,
+};
+
+// 签到中心（管理员替上游账号签到，区别于用户侧的 /api/checkin）
+pub use checkin_center::{
+    handle_checkin_center, handle_checkin_records, handle_checkin_run,
+    handle_clear_checkin_records, handle_get_checkin_settings, handle_list_checkin_schedules,
+    handle_remove_checkin_schedule, handle_run_checkin_schedule, handle_update_checkin_settings,
+    handle_upsert_checkin_schedule,
 };
 
 pub use orders::{

@@ -571,6 +571,47 @@ export interface ModelMetaOverride {
   capabilities?: string[];
 }
 
+// ==================== 上游模型目录发现 ====================
+
+/** 目录条目 */
+export interface CatalogEntry {
+  id: string;
+  upstream?: string;
+  context_length?: number | null;
+  capabilities?: string[];
+}
+
+/** 单个账号的目录同步结果 */
+export interface CatalogSyncAccount {
+  account_id: string;
+  name: string;
+  provider: string;
+  /** remote（上游拉回）/ cache（命中缓存）/ fallback（静态兜底） */
+  source: string;
+  fetched_at: number;
+  count: number;
+  models: CatalogEntry[];
+  /** 是否已写回账号的模型白名单 */
+  applied: boolean;
+  apply_error?: string | null;
+}
+
+/** 单个账号的目录同步失败 */
+export interface CatalogSyncError {
+  account_id: string;
+  name: string;
+  provider: string;
+  error: string;
+}
+
+/** POST /api/account-sessions/catalog/sync 响应 */
+export interface CatalogSyncResult {
+  results: CatalogSyncAccount[];
+  errors: CatalogSyncError[];
+  ok_count: number;
+  error_count: number;
+}
+
 // ==================== 统一模型管理（渠道 + 账号池合流） ====================
 
 /** 模型的一个承载方：渠道直连，或账号池里的某个账号 */
@@ -631,6 +672,72 @@ export interface ManageView {
   mappings: Record<string, string>;
   /** 未定价的模型数 */
   unpriced: number;
+}
+
+// ==================== 签到中心（管理员替上游账号签到） ====================
+
+export interface CheckinSettings {
+  enabled: boolean;
+  /** 逐个签到之间的间隔（毫秒） */
+  gap_ms: number;
+}
+
+export interface CheckinSchedule {
+  id: string;
+  label: string;
+  enabled: boolean;
+  /** 每天时刻 HH:MM（北京时间） */
+  time: string;
+  providers: string[];
+  last_fired_date: string;
+  last_result: string;
+}
+
+export interface CheckinAccountRow {
+  id: string;
+  name: string;
+  channel_id: string;
+  checked_in_today: boolean;
+  last_outcome?: string;
+  last_message?: string;
+  last_ts?: number;
+}
+
+export interface CheckinProviderGroup {
+  provider: string;
+  label: string;
+  accounts: CheckinAccountRow[];
+  today_done: number;
+  today_total: number;
+}
+
+export interface CheckinCenterData {
+  settings: CheckinSettings;
+  supported_providers: string[];
+  providers: CheckinProviderGroup[];
+  schedules: CheckinSchedule[];
+  today_summary: Array<{ provider: string; done: number; total: number }>;
+}
+
+export interface CheckinRunResult {
+  account_id: string;
+  account_name: string;
+  provider: string;
+  success: boolean;
+  outcome: string;
+  message: string;
+}
+
+export interface CheckinRecord {
+  ts: number;
+  date: string;
+  account_id: string;
+  account_name: string;
+  provider: string;
+  source: string;
+  outcome: string;
+  ok: boolean;
+  message: string;
 }
 
 export interface TotpSetupResult {

@@ -68,6 +68,8 @@ pub struct AppState {
     pub order_store: Arc<OrderStore>,
     /// 签到存储（每日签到送配额，对齐 new-api checkin）
     pub checkin_store: Arc<crate::user::checkin::CheckinStore>,
+    /// 签到中心存储（替**上游账号**每日领额度，与上面的用户签到是两套）
+    pub upstream_checkin: Arc<crate::checkin::CheckinStore>,
     pub epay_client: Arc<crate::payment::EpayClient>,
     /// Stripe 支付客户端
     pub stripe_client: Arc<crate::payment::stripe::StripeClient>,

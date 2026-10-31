@@ -421,12 +421,16 @@ pub async fn handle_report_top_sources(
                 continue;
             }
         }
-        let name = l.channel_name.clone().unwrap_or_else(|| "unknown".to_string());
+        let name = l
+            .channel_name
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
         let entry = sources.entry(name).or_insert((0, 0));
         entry.0 += 1;
         entry.1 += l.cost;
     }
-    let mut items: Vec<(String, u64, i64)> = sources.into_iter().map(|(k, v)| (k, v.0, v.1)).collect();
+    let mut items: Vec<(String, u64, i64)> =
+        sources.into_iter().map(|(k, v)| (k, v.0, v.1)).collect();
     items.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
     items.truncate(10);
     let data: Vec<Value> = items

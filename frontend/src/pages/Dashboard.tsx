@@ -475,6 +475,18 @@ function PieChart({ data }: PieChartProps): JSX.Element | null {
   );
 }
 
+// 报表时间范围选项（Agent2API report RANGES 的 AIGX 子集；不引日期选择器，5 档够用）。
+// 热力图固定 365 天不受此切换影响（全年视图本就该看全年）。
+const RANGE_OPTIONS = [
+  { key: '1', labelKey: '今日' },
+  { key: '7', labelKey: '近 7 日' },
+  { key: '30', labelKey: '近 30 日' },
+  { key: '90', labelKey: '近 90 日' },
+  { key: '365', labelKey: '近 365 日' },
+] as const;
+type RangeKey = (typeof RANGE_OPTIONS)[number]['key'];
+const DEFAULT_RANGE: RangeKey = '30';
+
 // ── 主组件 ──────────────────────────────────────────────
 
 export default function Dashboard(): JSX.Element {
@@ -487,6 +499,9 @@ export default function Dashboard(): JSX.Element {
   // 手动刷新按钮的 pending 态（不与整页 loading 混用，避免数据闪断）
   const [refreshing, setRefreshing] = useState(false);
   const { t } = useTranslation();
+
+  // 报表时间范围（仅驱动 4 个 report API 的 days 参数；热力图固定 365 不受影响）
+  const [range, setRange] = useState<RangeKey>(DEFAULT_RANGE);
 
   // 增强看板数据
   const [consumptionTrend, setConsumptionTrend] = useState<TrendData[] | null>(null);
@@ -501,7 +516,7 @@ export default function Dashboard(): JSX.Element {
   const [reportTokenTrend, setReportTokenTrend] = useState<ReportTokenTrendPoint[] | null>(null);
   const [reportOverview, setReportOverview] = useState<ReportOverview | null>(null);
 
-  const loadData = useCallback(async (): Promise<void> => {
+  const loadData = useCallback(async (rangeKey: RangeKey = DEFAULT_RANGE): Promise<void> => {
     setRefreshing(true);
     setLoading(true);
     setError('');
@@ -530,6 +545,7 @@ export default function Dashboard(): JSX.Element {
       // 各面板独立容错：单个接口失败不应让整页空白（管理员视图有 10 个面板）。
       // 但失败必须**可见** —— 用 allSettled 统计失败数，整页显示一条提示，
       // 避免用户把「加载失败」误读成「确实没数据」。
+      const days = Number(rangeKey);
       const results = await Promise.allSettled([
         api.getUsageSummary(),
         api.getTodayTokens(),
@@ -542,9 +558,9 @@ export default function Dashboard(): JSX.Element {
         api.getRealtime(),
         api.getCacheSavings(),
         api.getReportHeatmap(365),
-        api.getReportTopSources(30),
-        api.getReportTokenTrend(30),
-        api.getReportOverview(30),
+        api.getReportTopSources(days),
+        api.getReportTokenTrend(days),
+        api.getReportOverview(days),
       ]);
       const pick = <T,>(i: number): T | null =>
         results[i].status === 'fulfilled'
@@ -594,14 +610,14 @@ export default function Dashboard(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    void loadData();
+    void loadData(range);
     // 实时指标轮询：30s 刷新一次 RPS / 活跃用户 / 活跃渠道 / 平均延迟
     // 仅管理员轮询管理指标，普通用户静默展示个人配额视图
     const timer = setInterval(() => {
       if (isAdmin()) void loadRealtimeOnly();
     }, 30000);
     return () => clearInterval(timer);
-  }, [loadData, loadRealtimeOnly]);
+  }, [loadData, loadRealtimeOnly, range]);
 
   if (loading) {
     return (
@@ -649,7 +665,7 @@ export default function Dashboard(): JSX.Element {
             <h1>{t('仪表盘')}</h1>
             <p>{t('我的用量概览')}</p>
           </div>
-          <button className="btn btn-outline btn-sm" onClick={loadData} disabled={refreshing} style={{ gap: '6px' }}>
+          <button className="btn btn-outline btn-sm" onClick={() => void loadData()} disabled={refreshing} style={{ gap: '6px' }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
               style={refreshing ? { animation: 'spin 0.9s linear infinite' } : undefined}>
               <polyline points="23 4 23 10 17 10" />
@@ -724,6 +740,7 @@ export default function Dashboard(): JSX.Element {
   }
 
   // ── 管理员全局视图 ──
+  const rangeLabel = RANGE_OPTIONS.find((o) => o.key === range)?.labelKey ?? '近 30 日';
   return (
     <div>
       <div className="page-header">
@@ -731,15 +748,32 @@ export default function Dashboard(): JSX.Element {
           <h1>{t('仪表盘')}</h1>
           <p>{t('AI 网关使用概览')}</p>
         </div>
-        <button className="btn btn-outline btn-sm" onClick={loadData} disabled={refreshing} style={{ gap: '6px' }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-            style={refreshing ? { animation: 'spin 0.9s linear infinite' } : undefined}>
-            <polyline points="23 4 23 10 17 10" />
-            <polyline points="1 20 1 14 7 14" />
-            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-          </svg>
-          {refreshing ? t('刷新中…') : t('刷新')}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          {/* 报表时间范围切换（Agent2API report RANGES 的 AIGX 对应物；原生按钮组，不引组件库） */}
+          <div className="range-switcher" role="tablist" aria-label={t('时间范围')}>
+            {RANGE_OPTIONS.map((o) => (
+              <button
+                key={o.key}
+                role="tab"
+                aria-selected={range === o.key}
+                className={`range-switcher-btn${range === o.key ? ' is-active' : ''}`}
+                onClick={() => setRange(o.key)}
+                disabled={refreshing}
+              >
+                {t(o.labelKey)}
+              </button>
+            ))}
+          </div>
+          <button className="btn btn-outline btn-sm" onClick={() => void loadData(range)} disabled={refreshing} style={{ gap: '6px' }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+              style={refreshing ? { animation: 'spin 0.9s linear infinite' } : undefined}>
+              <polyline points="23 4 23 10 17 10" />
+              <polyline points="1 20 1 14 7 14" />
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+            </svg>
+            {refreshing ? t('刷新中…') : t('刷新')}
+          </button>
+        </div>
       </div>
 
       {error && <div className="error-message">{error}</div>}
@@ -832,6 +866,36 @@ export default function Dashboard(): JSX.Element {
             <span style={{ marginLeft: 12 }}>{t('缓存 Token')} {fmtTok(cs.cache_tokens)}</span>
           </div>
         </div>
+
+        {/* 报表概览：成功率（status_code<400 占比，来自 handle_report_overview） */}
+        <div className="stat-card">
+          <div className="stat-card-top">
+            <div className="stat-title">{t('成功率')}</div>
+            <div className="stat-icon-badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#34d399' }}>✅</div>
+          </div>
+          <div className="stat-value" style={{ fontSize: '26px' }}>
+            {reportOverview && reportOverview.total_requests != null && reportOverview.total_requests > 0
+              ? `${((reportOverview.success_requests ?? 0) / reportOverview.total_requests * 100).toFixed(1)}%`
+              : '—'}
+          </div>
+          <div className="stat-desc" style={{ fontSize: '11px' }}>
+            {reportOverview ? `${fmtLimit(reportOverview.success_requests ?? 0)} / ${fmtLimit(reportOverview.total_requests ?? 0)} ${t('次请求')}` : t('暂无数据')}
+          </div>
+        </div>
+
+        {/* 报表概览：活跃天数（统计区间内有请求的天数） */}
+        <div className="stat-card">
+          <div className="stat-card-top">
+            <div className="stat-title">{t('活跃天数')}</div>
+            <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>📆</div>
+          </div>
+          <div className="stat-value" style={{ fontSize: '26px' }}>
+            {reportOverview?.active_days ?? '—'}
+          </div>
+          <div className="stat-desc" style={{ fontSize: '11px' }}>
+            {t('所选时间范围内有请求的天数')}
+          </div>
+        </div>
       </div>
 
       {/* 消费趋势（增强） */}
@@ -856,7 +920,7 @@ export default function Dashboard(): JSX.Element {
       {reportTokenTrend && reportTokenTrend.length > 0 && (
         <div className="section-card" style={{ marginTop: 16 }}>
           <div className="section-card-header">
-            <h2>{t('Token 趋势（输入 / 输出，近 30 日）')}</h2>
+            <h2>{t('Token 趋势（输入 / 输出，{{range}}）', { range: t(rangeLabel) })}</h2>
             {reportOverview && (
               <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                 {t('成功率')} {reportOverview.success_rate ?? 0}% · {t('活跃天数')} {reportOverview.active_days ?? 0}
@@ -875,7 +939,7 @@ export default function Dashboard(): JSX.Element {
           {reportTopSources && reportTopSources.length > 0 && (
             <div className="section-card">
               <div className="section-card-header">
-                <h2>{t('Top 渠道（近 30 日）')}</h2>
+                <h2>{t('Top 渠道（{{range}}）', { range: t(rangeLabel) })}</h2>
               </div>
               <div className="section-card-body">
                 <div className="table-wrapper">
@@ -906,7 +970,7 @@ export default function Dashboard(): JSX.Element {
           {reportOverview && reportOverview.top_models && reportOverview.top_models.length > 0 && (
             <div className="section-card">
               <div className="section-card-header">
-                <h2>{t('Top 模型（近 30 日）')}</h2>
+                <h2>{t('Top 模型（{{range}}）', { range: t(rangeLabel) })}</h2>
               </div>
               <div className="section-card-body">
                 <div className="table-wrapper">

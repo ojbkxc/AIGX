@@ -173,6 +173,11 @@ impl AccountSessionStore {
         self.inner.sessions.read().clone()
     }
 
+    /// 底层 KV 存储（账号池目录缓存等旁路数据也落在同一库里）。
+    pub fn store(&self) -> &Arc<FileStore> {
+        &self.inner.store
+    }
+
     /// 指定渠道的账号快照。
     pub fn for_channel(&self, channel_id: &str) -> Vec<AccountSession> {
         self.inner

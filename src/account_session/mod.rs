@@ -7,8 +7,10 @@
 //! - [`store`]：KV 持久化 + 内存池 + 租约式并发 + 冷却表
 //! - [`rotate`]：失败分类 → 冷却时长（分类复用渠道断路器）
 //! - [`maintenance`]：周期清理（冷却过期、凭证过期状态同步）
+//! - [`catalog`]：按账号自动发现上游模型目录（抄 Agent2API 的 provider 目录）
 
 pub mod adapter;
+pub mod catalog;
 pub mod maintenance;
 pub mod model;
 pub mod registry;

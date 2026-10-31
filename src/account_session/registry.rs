@@ -10,6 +10,52 @@
 /// 默认 provider（= OpenAI 兼容，需账号自带 base_url）。
 pub const DEFAULT_PROVIDER_KIND: &str = "openai_compatible";
 
+/// 上游基准清单 —— **Agent2API 的 provider 全集**（`core/providers/mod.rs`
+/// 的 `PROVIDERS` 注册表，2026-11-01 核对）。
+///
+/// ## 这张表为什么存在
+///
+/// AIGX 的账号池是照着 Agent2API 的账号体系做的，供应商能力理应同步跟进。
+/// 但两份代码各自演进时，「Agent2API 加了一家、AIGX 忘了加」不会有任何报错，
+/// 只会在用户导入那边导出的账号时表现为「未知 provider」——静默失配。
+///
+/// 因此这里固化一份基准清单，并在测试里断言：**基准里的每一家都必须在
+/// `PROVIDERS` 里存在**（经 `find` 归一，允许 AIGX 用自己的 kind 名，如
+/// `raccoon` → `xiaohuanxiong`）。新增一家时测试会红，提醒同步。
+///
+/// ## 维护方式
+///
+/// Agent2API 新增 provider 时：
+/// 1. 把它加进本表；
+/// 2. 在 `PROVIDERS`（API Key 型）或 `SESSION_PROVIDERS`（登录态型）补条目；
+/// 3. 登录态型还要确认 `account_login` 有对应的登录实现，否则账号加不进来。
+pub const AGENT2API_PROVIDERS: &[&str] = &[
+    "workbuddy",
+    "workbuddy-intl",
+    "raccoon",
+    "catpaw",
+    "autoclaw",
+    "autoclaw-intl",
+    "qoder",
+    "qoder-intl",
+    "cline-free",
+    "cline-pass",
+    "accio",
+    "accio-cn",
+    "zcode",
+    "zcode-intl",
+    "codearts",
+    "trae",
+    "loomy",
+    "kuku",
+    "monkeycode",
+    "monkeycode-intl",
+    "commandcode",
+    "antigravity",
+    "officeace",
+    "orcaterm",
+];
+
 /// 上游协议族，决定复用哪个原生 Bridge。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -989,5 +1035,49 @@ mod tests {
         assert_eq!(find("doubao").map(|p| p.kind), Some("volcengine"));
         assert_eq!(find("grok").map(|p| p.kind), Some("xai"));
         assert_eq!(find("pplx").map(|p| p.kind), Some("perplexity"));
+    }
+
+    /// Agent2API 的每一家 provider 都必须能在 AIGX 里找到。
+    ///
+    /// 这条测试是「供应商同步」的守门人：Agent2API 新增一家而 AIGX 没跟上时，
+    /// 这里会红，而不是等到用户导入账号时报「未知 provider」。
+    #[test]
+    fn every_agent2api_provider_is_known() {
+        let mut missing: Vec<&str> = Vec::new();
+        for id in AGENT2API_PROVIDERS {
+            if find(id).is_none() {
+                missing.push(id);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "以下 Agent2API provider 在 AIGX 的 PROVIDERS 里不存在：{missing:?}。
+             请补 `PROVIDERS` 条目（API Key 型）或 `SESSION_PROVIDERS`（登录态型）。"
+        );
+    }
+
+    /// 登录态型 provider 必须同时具备 `PROVIDERS` 条目与 `SESSION_PROVIDERS` 元数据。
+    ///
+    /// 只补一处会让账号加得进来却无法转发（缺协议族）或无法登录（缺默认端点）。
+    #[test]
+    fn session_providers_have_both_entries() {
+        let mut missing_spec: Vec<&str> = Vec::new();
+        let mut missing_meta: Vec<&str> = Vec::new();
+        for (kind, _) in SESSION_PROVIDERS {
+            if !PROVIDERS.iter().any(|p| p.kind == *kind) {
+                missing_spec.push(kind);
+            }
+            if session_meta(kind).is_none() {
+                missing_meta.push(kind);
+            }
+        }
+        assert!(
+            missing_spec.is_empty(),
+            "SESSION_PROVIDERS 里这些 kind 缺 PROVIDERS 条目：{missing_spec:?}"
+        );
+        assert!(
+            missing_meta.is_empty(),
+            "这些 kind 缺 SessionMeta：{missing_meta:?}"
+        );
     }
 }

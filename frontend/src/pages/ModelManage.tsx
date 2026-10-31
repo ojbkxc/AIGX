@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Boxes, Search, Trash2, Plus, RefreshCw, Tag, Pencil } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
+import { Boxes, Search, Trash2, Plus, RefreshCw, Tag, Pencil, Download, Loader2 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { Card, Loading, EmptyState, Badge, Switch, Pagination, Tabs } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { fmtCompact } from '../lib/utils';
-import type { ManageView, ManagedModel, ModelMetaOverride } from '../types';
+import type { ManageView, ManagedModel, ModelMetaOverride, ChannelItem } from '../types';
 import './ModelManage.css';
 
 /** 每页行数（模型目录动辄数百条，全量渲染卡顿） */
@@ -19,6 +20,8 @@ type MainTab = 'catalog' | 'meta';
 type StateFilter = 'all' | 'on' | 'off';
 /** 定价筛选 */
 type PriceFilter = 'all' | 'priced' | 'unpriced';
+/** 来源筛选：全部 / 渠道 / 账号池 */
+type SourceFilter = 'all' | 'channel' | 'account';
 
 const CAP_LABELS: Array<{ match: string; label: string }> = [
   { match: 'vision', label: '视觉' },
@@ -72,8 +75,23 @@ export default function ModelManage(): JSX.Element {
   const [provider, setProvider] = useState('all');
   const [stateFilter, setStateFilter] = useState<StateFilter>('all');
   const [priceFilter, setPriceFilter] = useState<PriceFilter>('all');
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+  const [channelFilter, setChannelFilter] = useState('all');
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(1);
+
+  // 批量选择（key = provider|id）
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batchRunning, setBatchRunning] = useState(false);
+
+  // 获取模型弹窗
+  const [fetchModal, setFetchModal] = useState(false);
+  const [fetchChannels, setFetchChannels] = useState<ChannelItem[]>([]);
+  const [fetchingId, setFetchingId] = useState<string | null>(null);
+  const [fetchDone, setFetchDone] = useState<Record<string, boolean>>({});
+
+  // 渠道页跳转过来时带 ?channel_id= 预选来源渠道
+  const [searchParams] = useSearchParams();
 
   // 弹窗
   const [priceTarget, setPriceTarget] = useState<ManagedModel | null>(null);
@@ -334,6 +352,91 @@ export default function ModelManage(): JSX.Element {
     });
   };
 
+  // ── 批量操作（串行调写接口，最后整视图刷新）──
+  const toggleSelect = (key: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleSelectAllPage = () => {
+    const pageKeys = pageRows.map((r) => `${r.provider}|${r.id}`);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const allSelected = pageKeys.every((k) => next.has(k));
+      for (const k of pageKeys) {
+        if (allSelected) next.delete(k);
+        else next.add(k);
+      }
+      return next;
+    });
+  };
+
+  const runBatch = async (action: 'enable' | 'disable' | 'remove-price') => {
+    if (selected.size === 0 || batchRunning) return;
+    setBatchRunning(true);
+    const rows = (view?.models ?? []).filter((m) => selected.has(`${m.provider}|${m.id}`));
+    let fail = 0;
+    try {
+      for (const row of rows) {
+        try {
+          if (action === 'remove-price') {
+            if (row.price) await api.removeModelPrice(row.id);
+          } else {
+            await api.setModelEnabled(row.provider, row.id, action === 'enable');
+          }
+        } catch {
+          fail += 1;
+        }
+      }
+      await load();
+      setSelected(new Set());
+      addToast(
+        fail > 0
+          ? t('批量操作完成，失败') + ` ${fail}`
+          : action === 'remove-price'
+            ? t('已批量删除定价')
+            : action === 'enable'
+              ? t('已批量启用')
+              : t('已批量禁用')
+      );
+    } finally {
+      setBatchRunning(false);
+    }
+  };
+
+  // ── 获取模型（逐渠道拉取上游模型清单）──
+  const openFetchModal = async () => {
+    setFetchModal(true);
+    setFetchDone({});
+    try {
+      const res = await api.listChannels({ page: 1, page_size: 200 });
+      const list = (res?.data ?? []) as ChannelItem[];
+      setFetchChannels(list.filter((c) => c.status === 'enabled'));
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  const fetchOne = async (ch: ChannelItem) => {
+    const cid = String(ch.id);
+    if (fetchingId) return;
+    setFetchingId(cid);
+    try {
+      await api.fetchChannelModels({ channel_id: cid });
+      setFetchDone((d) => ({ ...d, [cid]: true }));
+      addToast(t('已拉取') + `：${ch.name}`);
+      await load();
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setFetchingId(null);
+    }
+  };
+
   // ── 过滤 + 分页 ──
   const filtered = useMemo(() => {
     const list = view?.models ?? [];
@@ -344,6 +447,9 @@ export default function ModelManage(): JSX.Element {
       if (stateFilter === 'off' && m.enabled) return false;
       if (priceFilter === 'priced' && !m.price) return false;
       if (priceFilter === 'unpriced' && m.price) return false;
+      if (sourceFilter === 'channel' && !m.sources.some((s) => s.kind === 'channel')) return false;
+      if (sourceFilter === 'account' && !m.sources.some((s) => s.kind === 'account')) return false;
+      if (channelFilter !== 'all' && !m.sources.some((s) => s.channel_id === channelFilter)) return false;
       if (!q) return true;
       const hay = [
         m.id,
@@ -356,11 +462,32 @@ export default function ModelManage(): JSX.Element {
         .toLowerCase();
       return hay.includes(q);
     });
-  }, [view, provider, stateFilter, priceFilter, query]);
+  }, [view, provider, stateFilter, priceFilter, sourceFilter, channelFilter, query]);
+
+  /** 来源渠道下拉选项（从模型来源汇总，覆盖所有承载渠道） */
+  const channelOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const m of view?.models ?? []) {
+      for (const s of m.sources) {
+        if (!map.has(s.channel_id)) map.set(s.channel_id, s.name);
+      }
+    }
+    return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+  }, [view]);
 
   useEffect(() => {
     setPage(1);
-  }, [provider, stateFilter, priceFilter, query]);
+    setSelected(new Set());
+  }, [provider, stateFilter, priceFilter, sourceFilter, channelFilter, query]);
+
+  // 渠道页「在模型管理中维护」跳转：预选该渠道
+  useEffect(() => {
+    const cid = searchParams.get('channel_id');
+    if (cid) {
+      setChannelFilter(cid);
+      setSourceFilter('all');
+    }
+  }, [searchParams]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
@@ -523,6 +650,31 @@ export default function ModelManage(): JSX.Element {
               </div>
               <select
                 className="form-input"
+                value={sourceFilter}
+                onChange={(e) => setSourceFilter(e.target.value as SourceFilter)}
+                aria-label={t('来源筛选')}
+                style={{ maxWidth: 120 }}
+              >
+                <option value="all">{t('全部来源')}</option>
+                <option value="channel">{t('仅渠道')}</option>
+                <option value="account">{t('仅账号池')}</option>
+              </select>
+              <select
+                className="form-input"
+                value={channelFilter}
+                onChange={(e) => setChannelFilter(e.target.value)}
+                aria-label={t('渠道筛选')}
+                style={{ maxWidth: 160 }}
+              >
+                <option value="all">{t('全部渠道')}</option>
+                {channelOptions.map(([cid, name]) => (
+                  <option key={cid} value={cid}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="form-input"
                 value={stateFilter}
                 onChange={(e) => setStateFilter(e.target.value as StateFilter)}
                 aria-label={t('启停筛选')}
@@ -543,11 +695,59 @@ export default function ModelManage(): JSX.Element {
                 <option value="priced">{t('已定价')}</option>
                 <option value="unpriced">{t('未定价')}</option>
               </select>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                onClick={() => void openFetchModal()}
+                style={{ gap: 6, whiteSpace: 'nowrap' }}
+                title={t('从上游拉取模型列表')}
+              >
+                <Download size={13} />
+                {t('获取模型')}
+              </button>
               <span className="mm-summary">
                 {t('显示')} {filtered.length} / {providerStats.total} ·{' '}
                 {t('未定价')} {providerStats.unpriced}
               </span>
             </div>
+
+            {selected.size > 0 && (
+              <div className="mm-batch-bar">
+                <span>{t('已选')} {selected.size}</span>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  disabled={batchRunning}
+                  onClick={() => void runBatch('enable')}
+                >
+                  {t('批量启用')}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  disabled={batchRunning}
+                  onClick={() => void runBatch('disable')}
+                >
+                  {t('批量禁用')}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger btn-sm"
+                  disabled={batchRunning}
+                  onClick={() => void runBatch('remove-price')}
+                >
+                  {t('批量删除定价')}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  disabled={batchRunning}
+                  onClick={() => setSelected(new Set())}
+                >
+                  {t('取消')}
+                </button>
+              </div>
+            )}
 
             {loading ? (
               <Loading text={t('加载模型目录')} />
@@ -565,6 +765,14 @@ export default function ModelManage(): JSX.Element {
                 <table className="mm-table">
                   <thead>
                     <tr>
+                      <th style={{ width: 36 }}>
+                        <input
+                          type="checkbox"
+                          aria-label={t('全选')}
+                          checked={pageRows.length > 0 && pageRows.every((r) => selected.has(`${r.provider}|${r.id}`))}
+                          onChange={toggleSelectAllPage}
+                        />
+                      </th>
                       <th style={{ width: 52 }}>{t('启用')}</th>
                       <th>{t('模型')}</th>
                       <th>{t('来源')}</th>
@@ -579,6 +787,14 @@ export default function ModelManage(): JSX.Element {
                       const key = `${row.provider}|${row.id}`;
                       return (
                         <tr key={key}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              aria-label={t('选择') + ' ' + row.id}
+                              checked={selected.has(key)}
+                              onChange={() => toggleSelect(key)}
+                            />
+                          </td>
                           <td>
                             <Switch
                               checked={row.enabled}
@@ -937,6 +1153,65 @@ export default function ModelManage(): JSX.Element {
                 disabled={savingAlias}
               >
                 {savingAlias ? t('保存中...') : t('保存')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 获取模型弹窗 ── */}
+      {fetchModal && (
+        <div className="modal-overlay" onClick={() => setFetchModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('获取模型')}</h3>
+              <button className="modal-close" onClick={() => setFetchModal(false)}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+                {t('从上游 /models 接口拉取模型清单（写入渠道的「上游发现」快照）。账号型渠道请在账号池里维护模型白名单。')}
+              </p>
+              {fetchChannels.length === 0 ? (
+                <EmptyState icon="📡" message={t('暂无启用的可拉取渠道')} />
+              ) : (
+                <div className="mm-fetch-list">
+                  {fetchChannels.map((ch) => {
+                    const cid = String(ch.id);
+                    return (
+                      <div key={cid} className="mm-fetch-row">
+                        <div className="mm-fetch-info">
+                          <strong>{ch.name}</strong>
+                          <span className="mm-model-sub">
+                            {ch.channel_type} · {t('已发现')} {(ch.discovered_models ?? []).length}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-sm"
+                          disabled={fetchingId !== null}
+                          onClick={() => void fetchOne(ch)}
+                        >
+                          {fetchingId === cid ? (
+                            <>
+                              <Loader2 size={12} className="spin" /> {t('拉取中...')}
+                            </>
+                          ) : fetchDone[cid] ? (
+                            t('已拉取')
+                          ) : (
+                            t('拉取')
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setFetchModal(false)}>
+                {t('关闭')}
               </button>
             </div>
           </div>

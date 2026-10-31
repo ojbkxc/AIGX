@@ -1050,3 +1050,154 @@ pub async fn handle_account_session_stats(
         "data": { "channels": data, "total": sessions.len() },
     })))
 }
+
+// ── 模型目录发现 ────────────────────────────────────────────────────
+
+/// POST /api/account-sessions/catalog/sync 请求体。
+#[derive(Debug, Deserialize)]
+pub struct CatalogSyncRequest {
+    /// 指定账号 id（省略 = 按 provider 同步该家全部账号）。
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// 按供应商同步时的供应商 kind。
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// 跳过缓存强制回源。
+    #[serde(default)]
+    pub force: bool,
+    /// 是否把结果写回账号的模型白名单。
+    #[serde(default)]
+    pub apply: bool,
+    /// 写回时是否覆盖（false = 只追加目录新增的模型）。
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// POST /api/account-sessions/catalog/sync —— 同步上游模型目录。
+///
+/// 单个账号失败不影响其他账号：逐账号返回结果，前端展示成表格。
+pub async fn handle_sync_account_catalog(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CatalogSyncRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+
+    let sessions = state.account_sessions.clone();
+    let mut results: Vec<Value> = Vec::new();
+    let mut errors: Vec<Value> = Vec::new();
+
+    // 目标账号集合：指定账号 id，或按 provider 展开
+    let targets: Vec<crate::account_session::model::AccountSession> = match &body.account_id {
+        Some(id) if !id.is_empty() => match sessions.get(id) {
+            Some(s) => vec![s],
+            None => {
+                return Err(error_response(
+                    &format!("账号 {id} 不存在"),
+                    StatusCode::NOT_FOUND,
+                ))
+            }
+        },
+        _ => {
+            let provider = body.provider.clone().unwrap_or_default();
+            if provider.is_empty() {
+                return Err(error_response(
+                    "需要指定 account_id 或 provider",
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+            if !crate::account_session::catalog::supports(&provider) {
+                return Err(error_response(
+                    &format!("供应商 {provider} 暂不支持模型目录发现"),
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+            sessions
+                .all()
+                .into_iter()
+                .filter(|s| s.provider == provider)
+                .collect()
+        }
+    };
+
+    if targets.is_empty() {
+        return Err(error_response("没有匹配的账号", StatusCode::NOT_FOUND));
+    }
+
+    for session in targets {
+        let name = if session.name.is_empty() {
+            session.id.clone()
+        } else {
+            session.name.clone()
+        };
+        match crate::account_session::catalog::sync_account_catalog(&sessions, &session, body.force)
+            .await
+        {
+            Ok(snapshot) => {
+                let mut applied = false;
+                let mut apply_error: Option<String> = None;
+                if body.apply {
+                    let ids: Vec<String> = snapshot.models.iter().map(|m| m.id.clone()).collect();
+                    match crate::account_session::catalog::apply_catalog_to_session(
+                        &sessions,
+                        &session.id,
+                        &ids,
+                        body.replace,
+                    ) {
+                        Ok(()) => applied = true,
+                        Err(e) => apply_error = Some(e),
+                    }
+                }
+                results.push(json!({
+                    "account_id": session.id,
+                    "name": name,
+                    "provider": session.provider,
+                    "source": snapshot.source,
+                    "fetched_at": snapshot.fetched_at,
+                    "count": snapshot.models.len(),
+                    "models": snapshot.models,
+                    "applied": applied,
+                    "apply_error": apply_error,
+                }));
+            }
+            Err(e) => {
+                errors.push(json!({
+                    "account_id": session.id,
+                    "name": name,
+                    "provider": session.provider,
+                    "error": e,
+                }));
+            }
+        }
+    }
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "results": results,
+            "errors": errors,
+            "ok_count": results.len(),
+            "error_count": errors.len(),
+        }
+    })))
+}
+
+/// GET /api/account-sessions/catalog/providers —— 支持目录发现的供应商清单。
+pub async fn handle_catalog_providers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let providers: Vec<Value> = crate::account_session::catalog::supported_providers()
+        .into_iter()
+        .map(|kind| {
+            let label = registry::find(kind)
+                .map(|s| s.label.to_string())
+                .unwrap_or_else(|| kind.to_string());
+            json!({ "kind": kind, "label": label })
+        })
+        .collect();
+    Ok(Json(
+        json!({ "success": true, "data": { "providers": providers } }),
+    ))
+}

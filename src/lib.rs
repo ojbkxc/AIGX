@@ -7,6 +7,7 @@ pub mod auth;
 pub mod bridge;
 pub mod cache;
 pub mod channel;
+pub mod checkin;
 pub mod config;
 pub mod cron;
 pub mod egress;

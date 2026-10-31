@@ -69,9 +69,8 @@ pub async fn handle_manage_view(
         };
         let allow_set = allow.unwrap_or_default();
         let mut view = current_view(&state);
-        view.models.retain(|m| {
-            m.enabled && (unrestricted || allow_set.iter().any(|a| a == &m.id))
-        });
+        view.models
+            .retain(|m| m.enabled && (unrestricted || allow_set.iter().any(|a| a == &m.id)));
         for model in view.models.iter_mut() {
             model.sources.clear();
         }
@@ -79,15 +78,15 @@ pub async fn handle_manage_view(
         let mut groups: std::collections::BTreeMap<String, crate::model::manage::ProviderGroup> =
             std::collections::BTreeMap::new();
         for m in &view.models {
-            let g = groups
-                .entry(m.provider.clone())
-                .or_insert_with(|| crate::model::manage::ProviderGroup {
+            let g = groups.entry(m.provider.clone()).or_insert_with(|| {
+                crate::model::manage::ProviderGroup {
                     id: m.provider.clone(),
                     label: m.provider_label.clone(),
                     total: 0,
                     enabled: 0,
                     account: false,
-                });
+                }
+            });
             g.total += 1;
             g.enabled += 1;
         }

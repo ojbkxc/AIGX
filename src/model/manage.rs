@@ -234,8 +234,10 @@ pub fn build_view(
     let mut account_providers: HashSet<String> = HashSet::new();
 
     // 预取账号池：按渠道分组，避免每渠道重复扫描全量账号。
-    let mut sessions_by_channel: HashMap<String, Vec<crate::account_session::AccountSession>> =
-        HashMap::new();
+    let mut sessions_by_channel: HashMap<
+        String,
+        Vec<crate::account_session::model::AccountSession>,
+    > = HashMap::new();
     for session in sessions.all() {
         sessions_by_channel
             .entry(session.channel_id.clone())

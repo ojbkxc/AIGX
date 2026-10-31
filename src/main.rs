@@ -196,6 +196,12 @@ async fn main() -> anyhow::Result<()> {
     // 初始化签到存储（对齐 new-api 签到送配额）
     let checkin_store = Arc::new(crate::user::checkin::CheckinStore::new(store.clone()));
 
+    // 初始化签到中心存储（替上游账号每日领额度，与上面的用户签到是两套）
+    let upstream_checkin = Arc::new(crate::checkin::CheckinStore::new(store.clone()));
+    if let Err(e) = upstream_checkin.load() {
+        tracing::error!("Failed to load upstream checkin store: {e}");
+    }
+
     // 初始化易支付客户端（运行时按配置即时构造，无需常驻）
     let epay_client = Arc::new(EpayClient::new(config.epay.clone()));
     let stripe_client = Arc::new(StripeClient::new(config.stripe.clone()));
@@ -433,6 +439,7 @@ async fn main() -> anyhow::Result<()> {
         user_store,
         order_store,
         checkin_store,
+        upstream_checkin,
         epay_client,
         stripe_client,
         health_tracker: health_tracker.clone(),
@@ -585,6 +592,13 @@ async fn main() -> anyhow::Result<()> {
                     })
                 }),
             });
+        }
+        // 签到中心调度：30 秒轮询，按计划的 HH:MM（UTC+8）触发，当天去重
+        {
+            let store = state.upstream_checkin.clone();
+            let sessions = state.account_sessions.clone();
+            let egress = state.account_sessions.egress().clone();
+            crate::checkin::scheduler::spawn(store, sessions, egress);
         }
         // 账号池周期维护：清理到期冷却记录 + 凭证过期状态同步（每 60s 一轮）
         {
@@ -936,9 +950,41 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 邀请返利（对齐 new-api /api/user/aff 与 /api/user/aff_transfer）
         .route("/api/aff", get(api::admin::handle_get_aff_code))
         .route("/api/aff_transfer", post(api::admin::handle_aff_transfer))
-        // 签到（对齐 new-api GET/POST /api/user/checkin）
+        // 签到（对齐 new-api GET/POST /api/user/checkin）—— 用户侧，发本站配额
         .route("/api/checkin", get(api::admin::handle_checkin_status))
         .route("/api/checkin", post(api::admin::handle_do_checkin))
+        // 签到中心（管理员替上游账号签到，与上面的用户签到是两套）
+        .route(
+            "/api/checkin-center",
+            get(api::admin::handle_checkin_center),
+        )
+        .route(
+            "/api/checkin-center/run",
+            post(api::admin::handle_checkin_run),
+        )
+        .route(
+            "/api/checkin-center/records",
+            get(api::admin::handle_checkin_records)
+                .delete(api::admin::handle_clear_checkin_records),
+        )
+        .route(
+            "/api/checkin-center/settings",
+            get(api::admin::handle_get_checkin_settings)
+                .put(api::admin::handle_update_checkin_settings),
+        )
+        .route(
+            "/api/checkin-center/schedules",
+            get(api::admin::handle_list_checkin_schedules)
+                .post(api::admin::handle_upsert_checkin_schedule),
+        )
+        .route(
+            "/api/checkin-center/schedules/remove",
+            post(api::admin::handle_remove_checkin_schedule),
+        )
+        .route(
+            "/api/checkin-center/schedules/run",
+            post(api::admin::handle_run_checkin_schedule),
+        )
         .route("/api/users/:id", put(api::admin::handle_update_user))
         .route("/api/users/:id", delete(api::admin::handle_delete_user))
         // 管理员强制禁用用户 2FA（对齐 new-api DELETE /api/user/:id/2fa）
@@ -1500,6 +1546,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/account-sessions/:id/reset-cooldown",
             post(api::admin::account_sessions::handle_reset_account_session_cooldowns),
+        )
+        // 上游模型目录发现（抄 Agent2API 的 provider 模型目录）
+        .route(
+            "/api/account-sessions/catalog/sync",
+            post(api::admin::account_sessions::handle_sync_account_catalog),
+        )
+        .route(
+            "/api/account-sessions/catalog/providers",
+            get(api::admin::account_sessions::handle_catalog_providers),
         )
         // 服务器自动更新（检查/应用/重启/回滚/设置）
         .route(

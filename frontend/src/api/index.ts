@@ -38,6 +38,12 @@ import type {
   ModelInfo,
   ModelMetaOverride,
   ManageView,
+  CatalogSyncResult,
+  CheckinCenterData,
+  CheckinRecord,
+  CheckinSchedule,
+  CheckinSettings,
+  CheckinRunResult,
   TotpSetupResult,
   TotpEnableResult,
   TotpDisableResult,
@@ -323,6 +329,45 @@ export const api = {
   removeModelAlias: (alias: string): Promise<ApiResponse<ManageView>> =>
     request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias/remove`, { alias }),
 
+  // ── 签到中心（管理员替上游账号签到，区别于用户侧 /api/checkin） ──
+  getCheckinCenter: (): Promise<ApiResponse<CheckinCenterData>> =>
+    request<ApiResponse<CheckinCenterData>>('GET', `${API_BASE}/checkin-center`),
+  runCheckin: (data: {
+    account_ids?: string[];
+    providers?: string[];
+  }): Promise<ApiResponse<{ results: CheckinRunResult[]; done: number; total: number }>> =>
+    request('POST', `${API_BASE}/checkin-center/run`, data),
+  getCheckinRecords: (params: {
+    days?: number;
+    provider?: string;
+    account_id?: string;
+    outcome?: string;
+  }): Promise<ApiResponse<{ records: CheckinRecord[]; total: number }>> => {
+    const query = new URLSearchParams();
+    if (params.days != null) query.set('days', String(params.days));
+    if (params.provider) query.set('provider', params.provider);
+    if (params.account_id) query.set('account_id', params.account_id);
+    if (params.outcome) query.set('outcome', params.outcome);
+    const suffix = query.toString();
+    return request('GET', `${API_BASE}/checkin-center/records${suffix ? `?${suffix}` : ''}`);
+  },
+  clearCheckinRecords: (days: number): Promise<ApiResponse<{ removed: number }>> =>
+    request('DELETE', `${API_BASE}/checkin-center/records?days=${days}`),
+  updateCheckinSettings: (settings: CheckinSettings): Promise<ApiResponse<CheckinSettings>> =>
+    request('PUT', `${API_BASE}/checkin-center/settings`, settings),
+  upsertCheckinSchedule: (schedule: {
+    id: string;
+    label: string;
+    enabled: boolean;
+    time: string;
+    providers: string[];
+  }): Promise<ApiResponse<CheckinSchedule[]>> =>
+    request('POST', `${API_BASE}/checkin-center/schedules`, schedule),
+  removeCheckinSchedule: (id: string): Promise<ApiResponse<CheckinSchedule[]>> =>
+    request('POST', `${API_BASE}/checkin-center/schedules/remove`, { id }),
+  runCheckinSchedule: (id: string): Promise<ApiResponse<{ summary: string }>> =>
+    request('POST', `${API_BASE}/checkin-center/schedules/run`, { id }),
+
   listModels: async (): Promise<ApiResponse<ModelInfo[]>> => {
     const res = await request<ApiResponse<unknown[]>>('GET', `${API_BASE}/models/available`);
     const list: unknown[] = Array.isArray(res?.data) ? res.data : [];
@@ -473,6 +518,18 @@ export const api = {
     request<ApiResponse<null>>('POST', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/reset-cooldown`),
   accountProviders: (): Promise<ApiList<AccountProviderItem>> =>
     request<ApiList<AccountProviderItem>>('GET', `${API_BASE}/account-sessions/providers`),
+  /** 上游模型目录发现：同步某账号（或某 provider 下全部账号）的模型清单 */
+  syncAccountCatalog: (data: {
+    account_id?: string;
+    provider?: string;
+    force?: boolean;
+    apply?: boolean;
+    replace?: boolean;
+  }): Promise<ApiResponse<CatalogSyncResult>> =>
+    request<ApiResponse<CatalogSyncResult>>('POST', `${API_BASE}/account-sessions/catalog/sync`, data),
+  /** 支持模型目录发现的供应商清单 */
+  catalogProviders: (): Promise<ApiResponse<{ providers?: Array<{ kind: string; label: string }> }>> =>
+    request<ApiResponse<{ providers?: Array<{ kind: string; label: string }> }>>('GET', `${API_BASE}/account-sessions/catalog/providers`),
   /** 发起登录态供应商的网页登录（返回授权地址与任务 state） */
   startAccountLogin: (data: Record<string, unknown>): Promise<ApiResponse<{ state: string; authUrl: string; provider: string }>> =>
     request<ApiResponse<{ state: string; authUrl: string; provider: string }>>('POST', `${API_BASE}/account-sessions/login/start`, data),

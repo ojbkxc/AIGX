@@ -35,7 +35,6 @@ export default function Pricing() {
   useEffect(() => {
     void loadRatios();
     // 只在挂载时拉一次；保存后由 handleSaveRatios 自行回读
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadRatios = async () => {
