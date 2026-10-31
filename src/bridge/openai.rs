@@ -129,13 +129,17 @@ impl OpenaiCompatibleBridge {
     /// `/responses`，避免对已含 `/v1` 的 base_url 重复拼出
     /// `/v1/v1/responses`（SDK 双前缀问题，参考 aisix build_v1_url）。
     fn responses_url(&self) -> String {
-        self.quirks
-            .append_suffix(&format!("{}/responses", self.base_url.trim_end_matches('/')))
+        self.quirks.append_suffix(&format!(
+            "{}/responses",
+            self.base_url.trim_end_matches('/')
+        ))
     }
 
     fn completions_url(&self) -> String {
-        self.quirks
-            .append_suffix(&format!("{}/completions", self.base_url.trim_end_matches('/')))
+        self.quirks.append_suffix(&format!(
+            "{}/completions",
+            self.base_url.trim_end_matches('/')
+        ))
     }
 
     fn images_url(&self) -> String {
@@ -177,7 +181,10 @@ impl OpenaiCompatibleBridge {
     /// 返回补齐后的请求体（非伪装路径原样返回）。
     fn apply_emulation(&self, mut body: Value) -> (reqwest::RequestBuilder, Value) {
         if !self.quirks.emulates_opencode() {
-            return (self.auth_conditional(self.client.post(self.chat_url())), body);
+            return (
+                self.auth_conditional(self.client.post(self.chat_url())),
+                body,
+            );
         }
         let go_face = crate::channel::emulation::is_opencode_go_endpoint(&self.base_url);
         let session = crate::channel::emulation::session_id(
@@ -207,7 +214,9 @@ impl OpenaiCompatibleBridge {
         &self,
         req: &ChatFormat,
     ) -> Result<ChatResponse, BridgeError> {
-        let mut stream = self.chat_stream(req, &BridgeContext::new("aggregate", &req.model)).await?;
+        let mut stream = self
+            .chat_stream(req, &BridgeContext::new("aggregate", &req.model))
+            .await?;
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut calls: std::collections::BTreeMap<usize, super::ToolCall> =
@@ -260,12 +269,24 @@ impl OpenaiCompatibleBridge {
             .collect();
         let mut message = ChatMessage {
             role: Role::Assistant,
-            content: if content.is_empty() { None } else { Some(content) },
+            content: if content.is_empty() {
+                None
+            } else {
+                Some(content)
+            },
             content_blocks: None,
             name: None,
             tool_call_id: None,
-            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
-            reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
+            reasoning: if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            },
         };
         // 空 content 兜底：下游 OpenAI 客户端对 `content: null` 且无工具的
         // 响应会报错，与 SSE 聚合器的处置保持一致
@@ -1044,8 +1065,7 @@ pub fn make_bridge_with_quirks(
     quirks: crate::channel::ChannelQuirks,
 ) -> Arc<dyn Bridge> {
     Arc::new(
-        OpenaiCompatibleBridge::with_client(base_url, api_key, client.clone())
-            .with_quirks(quirks),
+        OpenaiCompatibleBridge::with_client(base_url, api_key, client.clone()).with_quirks(quirks),
     )
 }
 

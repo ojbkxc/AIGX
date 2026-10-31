@@ -49,7 +49,8 @@ pub const SCHEMES: &[&str] = &[
 /// 智谱控制台域（余额记在控制台账户上，与推理端点无关）
 const ZHIPU_CONSOLE_BASE: &str = "https://bigmodel.cn";
 /// 智谱国际站（z.ai）的账户报告接口
-const ZHIPU_ZAI_BALANCE_URL: &str = "https://api.z.ai/api/biz/account/query-customer-account-report";
+const ZHIPU_ZAI_BALANCE_URL: &str =
+    "https://api.z.ai/api/biz/account/query-customer-account-report";
 /// 商汤控制面
 const SENSENOVA_PLATFORM_BASE: &str = "https://platform.sensenova.cn";
 const SENSENOVA_PLATFORM_LITE_BASE: &str = "https://platform-lite.sensenova.cn";
@@ -89,7 +90,9 @@ fn credential_hint(scheme: &str) -> &'static str {
     match scheme {
         SCHEME_NEW_API => "渠道的余额访问令牌（请求头 x-balance-access-token）",
         SCHEME_ZHIPU => "渠道的智谱控制台令牌（请求头 x-balance-token）",
-        SCHEME_SENSENOVA => "渠道的商汤账号与密码（请求头 x-balance-username / x-balance-password）",
+        SCHEME_SENSENOVA => {
+            "渠道的商汤账号与密码（请求头 x-balance-username / x-balance-password）"
+        }
         _ => "渠道的 API Key",
     }
 }
@@ -352,17 +355,11 @@ async fn get_json(
     for (name, value) in headers {
         req = req.header(name.as_str(), value.as_str());
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("请求失败：{e}"))?;
+    let resp = req.send().await.map_err(|e| format!("请求失败：{e}"))?;
     let status = resp.status().as_u16();
     let text = resp.text().await.unwrap_or_default();
     if !(200..300).contains(&status) {
-        return Err(format!(
-            "上游返回 HTTP {status}：{}",
-            shorten(&text, 160)
-        ));
+        return Err(format!("上游返回 HTTP {status}：{}", shorten(&text, 160)));
     }
     serde_json::from_str(&text).map_err(|_| "上游返回的不是 JSON".to_string())
 }
@@ -413,7 +410,10 @@ async fn sensenova_login(
     let status = resp.status().as_u16();
     let text = resp.text().await.unwrap_or_default();
     if !(200..300).contains(&status) {
-        return Err(format!("商汤登录失败（HTTP {status}）：{}", shorten(&text, 120)));
+        return Err(format!(
+            "商汤登录失败（HTTP {status}）：{}",
+            shorten(&text, 120)
+        ));
     }
     let payload: Value =
         serde_json::from_str(&text).map_err(|_| "商汤登录响应不是 JSON".to_string())?;
@@ -465,7 +465,12 @@ fn wallet(kind: &str, display_name: &str, balance: Option<f64>, unit: &str) -> O
     }))
 }
 
-fn document(available: Option<f64>, unit: &str, wallets: Vec<Value>, raw: &Value) -> BalanceReading {
+fn document(
+    available: Option<f64>,
+    unit: &str,
+    wallets: Vec<Value>,
+    raw: &Value,
+) -> BalanceReading {
     BalanceReading {
         available,
         unit: unit.to_string(),
@@ -515,7 +520,9 @@ fn parse_deepseek(payload: &Value) -> Option<BalanceReading> {
     let mut wallets = Vec::new();
     let mut primary: Option<(f64, String)> = None;
     for item in infos {
-        let Some(info) = item.as_object() else { continue };
+        let Some(info) = item.as_object() else {
+            continue;
+        };
         let Some(amount) = number_at(info, "total_balance") else {
             continue;
         };
@@ -596,7 +603,11 @@ fn parse_opencode(payload: &Value) -> Option<BalanceReading> {
         }
     };
     let mut reads: Vec<(&str, &str, Window)> = Vec::new();
-    for (key, label) in [("rolling", "5 小时"), ("weekly", "每周"), ("monthly", "每月")] {
+    for (key, label) in [
+        ("rolling", "5 小时"),
+        ("weekly", "每周"),
+        ("monthly", "每月"),
+    ] {
         let Some(window) = usage.get(key).and_then(Value::as_object) else {
             continue;
         };
@@ -640,14 +651,17 @@ fn parse_zhipu(
             .map(|t| shorten(t, 120))
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| "未知错误".to_string());
-        return Err(if matches!(code, Some(401.0) | Some(1000.0) | Some(1001.0)) {
-            format!("{invalid_credential}：{message}")
-        } else {
-            format!(
-                "智谱余额接口返回错误（code={}）：{message}",
-                code.map(|v| v.to_string()).unwrap_or_else(|| "?".to_string())
-            )
-        });
+        return Err(
+            if matches!(code, Some(401.0) | Some(1000.0) | Some(1001.0)) {
+                format!("{invalid_credential}：{message}")
+            } else {
+                format!(
+                    "智谱余额接口返回错误（code={}）：{message}",
+                    code.map(|v| v.to_string())
+                        .unwrap_or_else(|| "?".to_string())
+                )
+            },
+        );
     }
     let data = body.get("data").and_then(Value::as_object);
     let balance = data
@@ -657,9 +671,19 @@ fn parse_zhipu(
     let wallets = data
         .map(|m| {
             vec![
-                wallet("rechargeAmount", "充值余额", number_at(m, "rechargeAmount"), unit),
+                wallet(
+                    "rechargeAmount",
+                    "充值余额",
+                    number_at(m, "rechargeAmount"),
+                    unit,
+                ),
                 wallet("giveAmount", "赠送余额", number_at(m, "giveAmount"), unit),
-                wallet("frozenBalance", "冻结金额", number_at(m, "frozenBalance"), unit),
+                wallet(
+                    "frozenBalance",
+                    "冻结金额",
+                    number_at(m, "frozenBalance"),
+                    unit,
+                ),
             ]
             .into_iter()
             .flatten()
@@ -681,7 +705,9 @@ fn parse_sensenova(payload: &Value) -> Option<BalanceReading> {
     }
     let mut pools: Vec<Pool> = Vec::new();
     for item in pools_raw {
-        let Some(map) = item.as_object() else { continue };
+        let Some(map) = item.as_object() else {
+            continue;
+        };
         let window_5h = read_sensenova_window(map.get("window_5h"));
         let window_7d = read_sensenova_window(map.get("window_7d"));
         if window_5h.is_none() && window_7d.is_none() {

@@ -1130,8 +1130,7 @@ pub async fn handle_patch_channel(
     }
     // 上游特判：提交了才覆盖（`{}` = 清空）；反序列化失败按「不涉及」跳过
     if let Some(quirks) = body.get("quirks") {
-        if let Ok(parsed) =
-            serde_json::from_value::<crate::channel::ChannelQuirks>(quirks.clone())
+        if let Ok(parsed) = serde_json::from_value::<crate::channel::ChannelQuirks>(quirks.clone())
         {
             ch.quirks = parsed;
         }
@@ -1209,7 +1208,11 @@ pub async fn handle_get_channel_balance(
             StatusCode::BAD_REQUEST,
         ));
     }
-    match state.channel_store.query_balance(&ch, &state.http_client).await {
+    match state
+        .channel_store
+        .query_balance(&ch, &state.http_client)
+        .await
+    {
         Ok(reading) => {
             // 写回历史字段：available → balance，unit 一并持久化（前端按单位渲染）
             state.channel_store.save_balance_with_unit(
@@ -1262,14 +1265,8 @@ pub async fn handle_fetch_channel_models(
         .and_then(|cid| state.channel_store.get(cid.trim()))
         .map(|ch| ch.quirks)
         .unwrap_or_default();
-    let (url, models) = fetch_upstream_models(
-        &state,
-        channel_type,
-        &body.base_url,
-        &api_key,
-        &quirks,
-    )
-    .await?;
+    let (url, models) =
+        fetch_upstream_models(&state, channel_type, &body.base_url, &api_key, &quirks).await?;
 
     if let Some(cid) = channel_id_for_save.split(',').next() {
         if !cid.trim().is_empty() && state.channel_store.get(cid).is_some() {

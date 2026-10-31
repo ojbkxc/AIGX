@@ -82,7 +82,9 @@ pub fn normalize_token(raw: &str) -> String {
             text = rest.trim();
         }
     }
-    text.trim_matches(|ch| ch == '"' || ch == '\'').trim().to_string()
+    text.trim_matches(|ch| ch == '"' || ch == '\'')
+        .trim()
+        .to_string()
 }
 
 fn check_length(secret: &str, label: &str) -> Result<(), String> {
@@ -278,7 +280,10 @@ mod tests {
     #[test]
     fn normalize_cookie_extracts_named_value() {
         assert_eq!(
-            normalize_cookie("Cookie: a=1; monkeycode_ai_session=abc123; b=2", MONKEYCODE_COOKIE),
+            normalize_cookie(
+                "Cookie: a=1; monkeycode_ai_session=abc123; b=2",
+                MONKEYCODE_COOKIE
+            ),
             "abc123"
         );
         assert_eq!(

@@ -128,7 +128,10 @@ pub fn is_acceptable_session_id(text: &str) -> bool {
     let Some(hex) = text.get(4..16) else {
         return false;
     };
-    let Some(low) = hex.get(9..12).and_then(|tail| u16::from_str_radix(tail, 16).ok()) else {
+    let Some(low) = hex
+        .get(9..12)
+        .and_then(|tail| u16::from_str_radix(tail, 16).ok())
+    else {
         return false;
     };
     low >= LOW12_FLOOR
@@ -263,10 +266,7 @@ pub fn ensure_agent_shape(body: &mut Value) -> bool {
     }
     object.insert("tools".to_string(), Value::Array(tools));
     if !had_tools {
-        object.insert(
-            "tool_choice".to_string(),
-            Value::String("none".to_string()),
-        );
+        object.insert("tool_choice".to_string(), Value::String("none".to_string()));
     }
     changed
 }
@@ -286,7 +286,11 @@ fn tool_names(tools: &[Value]) -> Vec<String> {
 
 /// 一个桩工具（参数与描述不参与上游校验）
 fn stub_tool(name: &str) -> Value {
-    let property = if name == "bash" { "command" } else { "filePath" };
+    let property = if name == "bash" {
+        "command"
+    } else {
+        "filePath"
+    };
     json!({
         "type": "function",
         "function": {
@@ -315,7 +319,10 @@ mod tests {
         let id = session_id("hello world");
         assert!(id.starts_with("ses_"));
         assert_eq!(id.len(), 4 + 12 + 14);
-        assert!(is_acceptable_session_id(&id), "派生值必须满足上游判据: {id}");
+        assert!(
+            is_acceptable_session_id(&id),
+            "派生值必须满足上游判据: {id}"
+        );
     }
 
     #[test]

@@ -4645,6 +4645,7 @@ pub async fn handle_list_models(
                 ch.channel_type,
                 &ch.base_url,
                 &key,
+                &ch.quirks,
             )
             .await
             {

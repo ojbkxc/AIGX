@@ -28,13 +28,13 @@ use crate::storage::FileStore;
 // 形式实现。各模块自包含、可独立测试，由 `ChannelStore` 持有并集成到渠道选择。
 pub mod affinity;
 pub mod aimd;
-pub mod balancer;
 /// 渠道级余额查询（七种方案，见 [`balance::SCHEMES`]）
 pub mod balance;
+pub mod balancer;
 pub mod circuit_breaker;
+pub mod empty_response;
 /// OpenCode 官方客户端形态伪装（`quirks.client_emulation = "opencode"`）
 pub mod emulation;
-pub mod empty_response;
 pub mod health_archive;
 pub mod health_manager;
 pub mod prober;
@@ -135,9 +135,7 @@ pub const TOOL_TYPE_CUSTOM: &str = "custom";
 
 /// 余额查询专用凭证头（`x-balance-*`）：只给余额模块读，绝不随转发发出
 pub fn is_balance_credential_header(name: &str) -> bool {
-    name.trim()
-        .to_ascii_lowercase()
-        .starts_with("x-balance-")
+    name.trim().to_ascii_lowercase().starts_with("x-balance-")
 }
 
 impl ChannelQuirks {
@@ -151,7 +149,8 @@ impl ChannelQuirks {
 
     /// 是否启用 OpenCode 客户端伪装
     pub fn emulates_opencode(&self) -> bool {
-        self.client_emulation.eq_ignore_ascii_case(CLIENT_EMULATION_OPENCODE)
+        self.client_emulation
+            .eq_ignore_ascii_case(CLIENT_EMULATION_OPENCODE)
     }
 
     /// 追加查询串：已带查询串的 URL 用 `&` 连接
@@ -868,9 +867,10 @@ impl ChannelStore {
                 }
             }
             ChannelType::Anthropic => {
-                let url = ch
-                    .quirks
-                    .append_suffix(&format!("{}/v1/messages", ch.base_url.trim_end_matches('/')));
+                let url = ch.quirks.append_suffix(&format!(
+                    "{}/v1/messages",
+                    ch.base_url.trim_end_matches('/')
+                ));
                 let body = serde_json::json!({
                     "model": "claude-3-5-sonnet-20241022",
                     "max_tokens": 1,

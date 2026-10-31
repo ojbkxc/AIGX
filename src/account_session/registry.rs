@@ -506,7 +506,8 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
                 ("x-platform-version", "3.0.62"),
                 ("x-core-version", "0.0.70"),
             ],
-            credential_hint: "粘贴 Cline 账号令牌（订阅池，模型名带 cline-pass/ 前缀，需要账号有对应订阅）",
+            credential_hint:
+                "粘贴 Cline 账号令牌（订阅池，模型名带 cline-pass/ 前缀，需要账号有对应订阅）",
             openai_compatible: true,
         },
     ),
