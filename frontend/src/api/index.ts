@@ -884,7 +884,7 @@ export const api = {
   // ==================== 聊天会话（按用户隔离的对话记录） ====================
   listChatSessions: (): Promise<ApiResponse<Array<{ id: string; title: string; model: string; created_at: number; updated_at: number }>>> =>
     request<ApiResponse<Array<{ id: string; title: string; model: string; created_at: number; updated_at: number }>>>('GET', `${API_BASE}/chat/sessions`),
-  createChatSession: (data: { title?: string; model?: string } = {}): Promise<ApiResponse<{ id: string; title: string; model: string }>> =>
+  createChatSession: (data: { title?: string; model?: string; updated_at?: number } = {}): Promise<ApiResponse<{ id: string; title: string; model: string }>> =>
     request<ApiResponse<{ id: string; title: string; model: string }>>('POST', `${API_BASE}/chat/sessions`, data),
   getChatSession: (id: string): Promise<ApiResponse<{ session: { id: string; title: string; model: string }; messages: Array<{ role: string; content: string; extra?: unknown }> }>> =>
     request<ApiResponse<{ session: { id: string; title: string; model: string }; messages: Array<{ role: string; content: string; extra?: unknown }> }>>('GET', `${API_BASE}/chat/sessions/${encodeURIComponent(id)}`),
@@ -893,8 +893,8 @@ export const api = {
   renameChatSession: (id: string, title: string): Promise<ApiResponse<null>> =>
     request<ApiResponse<null>>('POST', `${API_BASE}/chat/sessions/${encodeURIComponent(id)}/rename`, { title }),
   /** 整表替换消息（编辑/重发后 debounce 保存） */
-  replaceChatMessages: (id: string, messages: Array<{ role: string; content: string; extra?: unknown }>): Promise<ApiResponse<{ count: number }>> =>
-    request<ApiResponse<{ count: number }>>('PUT', `${API_BASE}/chat/sessions/${encodeURIComponent(id)}/messages`, { messages }),
+  replaceChatMessages: (id: string, messages: Array<{ role: string; content: string; extra?: unknown }>, touch = true): Promise<ApiResponse<{ count: number }>> =>
+    request<ApiResponse<{ count: number }>>('PUT', `${API_BASE}/chat/sessions/${encodeURIComponent(id)}/messages`, { messages, touch }),
   /** 追加一条消息（导入旧 localStorage 会话用） */
   appendChatMessage: (id: string, message: { role: string; content: string; extra?: unknown }): Promise<ApiResponse<{ seq: number }>> =>
     request<ApiResponse<{ seq: number }>>('POST', `${API_BASE}/chat/sessions/${encodeURIComponent(id)}/messages`, message),

@@ -5,6 +5,7 @@
  * 列表项由调用方给出 meta 文案；删除二次确认内建（chat 页此前裸删）。
  */
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { ChevronLeft, MessageSquarePlus, Trash2 } from 'lucide-react';
 import ConfirmDialog, { type ConfirmState } from '../ConfirmDialog';
@@ -113,7 +114,7 @@ export default function SessionDrawer({
     </>
   );
 
-  return (
+  const root = (
     <div className={`sd-root ${variant}${open ? ' open' : ''}`}>
       <aside className="sd-panel">{body}</aside>
       {variant === 'overlay' && (
@@ -121,4 +122,7 @@ export default function SessionDrawer({
       )}
     </div>
   );
+  // overlay 必须 portal 到 body：内联会被父级的 transform/z-index 层叠上下文
+  // 困住（移动端汉堡按钮盖住抽屉标题的回归 bug 就是这么来的）
+  return variant === 'overlay' ? createPortal(root, document.body) : root;
 }

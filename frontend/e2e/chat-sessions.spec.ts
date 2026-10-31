@@ -13,7 +13,7 @@ import { test, expect, loginAsAdmin, makeSessions, SESSIONS_KEY, ACTIVE_KEY } fr
 
 async function openDrawer(page: import('@playwright/test').Page): Promise<void> {
   await page.getByRole('button', { name: '历史会话' }).first().click();
-  await expect(page.locator('.pg-sessions.open')).toBeVisible();
+  await expect(page.locator('.sd-root.open')).toBeVisible();
 }
 
 test.describe('聊天 · 历史会话抽屉', () => {
@@ -46,28 +46,30 @@ test.describe('聊天 · 历史会话抽屉', () => {
 
     // 抽屉与遮罩必须是 position:fixed —— 这是"铺满视口"的结构前提。
     // 曾是 absolute，父级 auto 高度时只能撑到内容高度（实测 269px，贴着输入框）。
+    // 覆盖层定位在 `.sd-root.overlay` 上（fixed），panel / mask 相对它 absolute
+    // 铺满 —— fixed 的是 root，所以拿 root 判「是否脱离文档流铺满视口」。
     const positions = await page.evaluate(() => ({
-      drawer: getComputedStyle(document.querySelector('.pg-sessions')!).position,
-      mask: getComputedStyle(document.querySelector('.pg-sessions-mask')!).position,
+      root: getComputedStyle(document.querySelector('.sd-root.overlay')!).position,
+      mask: getComputedStyle(document.querySelector('.sd-mask')!).position,
     }));
-    expect(positions.drawer).toBe('fixed');
-    expect(positions.mask).toBe('fixed');
+    expect(positions.root).toBe('fixed');
+    expect(positions.mask).toBe('absolute');
 
     // 几何下界用 85%：CI 的 Linux Chromium 常驻横向滚动条，布局视口比
     // viewportSize().height 矮十几像素（实测 707/720 ≈ 98%），留余量避免假红；
     // 回归时高度只有 ~269/720 ≈ 37%，远低于 85%，仍能抓住。
     const viewportHeight = page.viewportSize()!.height;
-    const drawerBox = await page.locator('.pg-sessions').boundingBox();
+    const drawerBox = await page.locator('.sd-panel').boundingBox();
     expect(drawerBox).not.toBeNull();
     expect(drawerBox!.y).toBeLessThanOrEqual(1);
     expect(drawerBox!.height).toBeGreaterThan(viewportHeight * 0.85);
 
     // 遮罩同样铺满
-    const mask = await page.locator('.pg-sessions-mask').boundingBox();
+    const mask = await page.locator('.sd-mask').boundingBox();
     expect(mask!.height).toBeGreaterThan(viewportHeight * 0.85);
 
     // 标题可点击 = 没有被更高层元素覆盖（正是移动端汉堡按钮那个 bug）
-    const title = page.locator('.pg-sessions-head');
+    const title = page.locator('.sd-head');
     await expect(title).toBeVisible();
     await title.click({ trial: true });
 
@@ -75,14 +77,14 @@ test.describe('聊天 · 历史会话抽屉', () => {
     // 左上角）盖住抽屉标题，抽屉会被判为「受遮挡」，此项即失败。
     const topLeftOwner = await page.evaluate(() => {
       const el = document.elementFromPoint(24, 24);
-      return el?.closest('.pg-sessions, .mobile-menu-btn')?.className ?? String(el?.className ?? '');
+      return el?.closest('.sd-root, .mobile-menu-btn')?.className ?? String(el?.className ?? '');
     });
-    expect(topLeftOwner).toContain('pg-sessions');
+    expect(topLeftOwner).toContain('sd-root');
     expect(topLeftOwner).not.toContain('mobile-menu-btn');
 
     // 抽屉内关闭按钮可用
-    await page.locator('.pg-sessions-close').click();
-    await expect(page.locator('.pg-sessions.open')).toHaveCount(0);
+    await page.locator('.sd-close').click();
+    await expect(page.locator('.sd-root.open')).toHaveCount(0);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
@@ -94,9 +96,9 @@ test.describe('聊天 · 历史会话抽屉', () => {
     await expect(page.locator('.pg-shell')).toBeVisible();
 
     await openDrawer(page);
-    await page.locator('.pg-sessions-item-btn').nth(1).click();
+    await page.locator('.sd-item-btn').nth(1).click();
 
-    await expect(page.locator('.pg-sessions.open')).toHaveCount(0);
+    await expect(page.locator('.sd-root.open')).toHaveCount(0);
     // 首条消息来自第 2 个会话
     await expect(page.locator('.chat-debugger-messages')).toContainText('第 2 个会话的第 1 条消息');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
@@ -110,8 +112,8 @@ test.describe('聊天 · 历史会话抽屉', () => {
     // 点遮罩关闭：必须点在抽屉右侧的遮罩区（抽屉宽约 304px 或 86vw，
     // 因此取视口宽度的 80% 处，确保落在遮罩上而非抽屉内）。
     const vw = page.viewportSize()!.width;
-    await page.locator('.pg-sessions-mask').click({ position: { x: Math.round(vw * 0.8), y: 300 } });
-    await expect(page.locator('.pg-sessions.open')).toHaveCount(0);
+    await page.locator('.sd-mask').click({ position: { x: Math.round(vw * 0.8), y: 300 } });
+    await expect(page.locator('.sd-root.open')).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
@@ -121,61 +123,51 @@ test.describe('聊天 · 历史会话抽屉', () => {
     await page.goto('/chat');
     await openDrawer(page);
 
-    const list = page.locator('.pg-sessions-list');
+    const list = page.locator('.sd-list');
     const scrollable = await list.evaluate((el) => el.scrollHeight > el.clientHeight);
     expect(scrollable).toBe(true);
 
-    const last = page.locator('.pg-sessions-item-btn').last();
+    const last = page.locator('.sd-item-btn').last();
     await last.scrollIntoViewIfNeeded();
     await last.click();
 
-    await expect(page.locator('.pg-sessions.open')).toHaveCount(0);
+    await expect(page.locator('.sd-root.open')).toHaveCount(0);
     await expect(page.locator('.chat-debugger-messages')).toContainText('第 30 个会话的第 1 条消息');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('删除非活动会话不会丢掉当前会话未落盘的消息', async ({ page, pageErrors }) => {
-    const sessions = makeSessions(2);
-    await loginAsAdmin(page, { sessions });
+  test('删除非活动会话不会丢掉当前会话的消息', async ({ page, pageErrors }) => {
+    await loginAsAdmin(page, { sessions: makeSessions(2) });
     await page.goto('/chat');
     await expect(page.locator('.pg-shell')).toBeVisible();
 
-    // 给活动会话制造一条"只存在于 React state、尚未 debounce 落盘"的消息：
-    // 直接在输入框输入并提交会走网络，这里改为断言删除后 localStorage 里
-    // 活动会话的消息数未被回退。
-    const beforeLen = await page.evaluate(
-      ({ key, activeKey }) => {
-        const raw = localStorage.getItem(key);
-        const list = raw ? (JSON.parse(raw) as Array<{ id: string; messages: unknown[] }>) : [];
-        const active = localStorage.getItem(activeKey);
-        return list.find((s) => s.id === active)?.messages.length ?? -1;
-      },
-      { key: SESSIONS_KEY, activeKey: ACTIVE_KEY },
-    );
+    // 会话已迁到后端持久化（mock 维护 /api/chat/sessions 状态）：
+    // 删除**非活动**会话时，活动会话的消息（含 debounce 窗口内未 PUT 的）
+    // 必须完好。这里从活动会话视角取删除前后的消息条数对比。
+    const readActiveCount = async (): Promise<number> =>
+      page.evaluate(async () => {
+        const list = (await (await fetch('/api/chat/sessions')).json()) as {
+          data?: Array<{ id: string }>;
+        };
+        const first = list.data?.[0]?.id;
+        if (!first) return -1;
+        const detail = (await (await fetch(`/api/chat/sessions/${first}`)).json()) as {
+          data?: { messages?: unknown[] };
+        };
+        return detail.data?.messages?.length ?? -1;
+      });
+    const beforeLen = await readActiveCount();
     expect(beforeLen).toBeGreaterThan(0);
 
     await openDrawer(page);
-    // 删除第 2 个（非活动）会话
-    await page.locator('.pg-sessions-item-del').nth(1).click();
+    // 删除第 2 个（非活动）会话（点击后弹确认框）
+    await page.locator('.sd-item-del').nth(1).click();
+    await page.getByRole('button', { name: '删除' }).last().click();
 
-    await expect(page.locator('.pg-sessions-item')).toHaveCount(1);
-    // 删除会触发 setState → effect → localStorage 写入，是异步的；
-    // 直接读会在移动端慢一帧时读到旧值。用 expect.poll 等待收敛。
-    await expect
-      .poll(
-        () =>
-          page.evaluate(
-            ({ key, activeKey }) => {
-              const raw = localStorage.getItem(key);
-              const list = raw ? (JSON.parse(raw) as Array<{ id: string; messages: unknown[] }>) : [];
-              const active = localStorage.getItem(activeKey);
-              return list.find((s) => s.id === active)?.messages.length ?? -1;
-            },
-            { key: SESSIONS_KEY, activeKey: ACTIVE_KEY },
-          ),
-        { timeout: 5000 },
-      )
-      .toBe(beforeLen);
-    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+    await expect(page.locator('.sd-item')).toHaveCount(1);
+    // 删除是异步的（API 往返 + 状态收敛），poll 等待活动会话消息数收敛回原值
+    await expect.poll(readActiveCount, { timeout: 5000 }).toBe(beforeLen);
+    expect(pageErrors, pageErrors.join('
+')).toEqual([]);
   });
 });

@@ -74,15 +74,17 @@ impl ChatSessionStore {
         id: &str,
         title: &str,
         model: &str,
+        updated_at: Option<i64>,
     ) -> anyhow::Result<ChatSession> {
         let now = now_ts();
+        let ts = updated_at.filter(|t| *t > 0).unwrap_or(now);
         let s = ChatSession {
             id: id.to_string(),
             user_id: user_id.to_string(),
             title: title.to_string(),
             model: model.to_string(),
-            created_at: now,
-            updated_at: now,
+            created_at: ts,
+            updated_at: ts,
         };
         self.store.put(&Self::session_key(user_id, id), &s)?;
         Ok(s)
@@ -172,6 +174,7 @@ impl ChatSessionStore {
         user_id: &str,
         session_id: &str,
         msgs: &[ChatMessage],
+        touch: bool,
     ) -> anyhow::Result<()> {
         // 先清旧消息再写新的（简单可靠；会话消息量级小）
         for k in self
@@ -184,10 +187,12 @@ impl ChatSessionStore {
             self.store
                 .put(&Self::msg_key(user_id, session_id, seq as u64), msg)?;
         }
-        if let Some(mut s) = self.get(user_id, session_id)? {
-            s.updated_at = now_ts();
-            self.store
-                .put(&Self::session_key(user_id, session_id), &s)?;
+        if touch {
+            if let Some(mut s) = self.get(user_id, session_id)? {
+                s.updated_at = now_ts();
+                self.store
+                    .put(&Self::session_key(user_id, session_id), &s)?;
+            }
         }
         Ok(())
     }
@@ -241,6 +246,9 @@ pub struct CreateChatSessionBody {
     pub title: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// 迁移旧会话时保留原时间（unix 秒；缺省用当前时间）。
+    #[serde(default)]
+    pub updated_at: Option<i64>,
 }
 
 pub async fn handle_create_chat_session(
@@ -260,6 +268,7 @@ pub async fn handle_create_chat_session(
             &new_id(),
             &title,
             body.model.as_deref().unwrap_or(""),
+            body.updated_at,
         )
         .map_err(|e| error_response(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(json!({ "success": true, "data": session })))
@@ -363,6 +372,13 @@ pub async fn handle_append_chat_message(
 #[derive(Debug, Deserialize)]
 pub struct ReplaceChatMessagesBody {
     pub messages: Vec<AppendChatMessageBody>,
+    /// false = 不刷新 updated_at（迁移旧会话时保留原排序时间；默认 true）。
+    #[serde(default = "default_touch")]
+    pub touch: bool,
+}
+
+fn default_touch() -> bool {
+    true
 }
 
 pub async fn handle_replace_chat_messages(
@@ -391,7 +407,7 @@ pub async fn handle_replace_chat_messages(
         .collect();
     state
         .chat_sessions
-        .replace_messages(&user.id, &id, &msgs)
+        .replace_messages(&user.id, &id, &msgs, body.touch)
         .map_err(|e| error_response(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
     // 标题仍为缺省时用首条用户消息自动命名
     if session.title.trim() == "新会话" || session.title.trim().is_empty() {

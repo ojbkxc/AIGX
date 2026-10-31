@@ -149,13 +149,20 @@ export default function Chat(): JSX.Element {
     const imported: PlaygroundSession[] = [];
     for (const s of legacyList.slice(0, 20)) {
       try {
-        const created = await api.createChatSession({ title: s.title || '新会话', model: s.model });
+        // 保留原时间（seed 是 ms，后端存秒）→ 排序与旧版一致
+        const updatedSec = Math.floor(s.updated_at / 1000);
+        const created = await api.createChatSession({
+          title: s.title || '新会话',
+          model: s.model,
+          updated_at: updatedSec > 0 ? updatedSec : undefined,
+        });
         const id = created.data?.id;
         if (!id) continue;
         if (s.messages.length) {
           await api.replaceChatMessages(
             id,
             s.messages.map((m) => ({ role: m.role, content: m.content })),
+            false,
           );
         }
         imported.push({ id, title: s.title || '新会话', model: s.model, updated_at: s.updated_at });
@@ -408,7 +415,7 @@ export default function Chat(): JSX.Element {
         sessions={sessions.map((s) => ({
           id: s.id,
           title: s.title || t('新会话'),
-          meta: new Date(s.updated_at).toLocaleDateString(),
+          meta: new Date(s.updated_at * 1000).toLocaleDateString(),
         }))}
         activeId={activeId}
         onSelect={(id) => void switchSession(id)}

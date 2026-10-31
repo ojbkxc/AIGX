@@ -147,9 +147,43 @@ function sendJson(res, body, status = 200) {
   res.end(typeof body === 'string' ? body : JSON.stringify(body));
 }
 
+
+/** 聊天会话的内存态（E2E 每次启动清零）。
+ *  预置两条带消息的会话：抽屉相关用例需要「多会话 + 可切换」的初始状态。 */
+const chatSessions = new Map();
+let chatSeq = 0;
+{
+  const base = Math.floor(Date.now() / 1000);
+  for (let i = 0; i < 2; i++) {
+    const id = `cs-seed-${i + 1}`;
+    chatSessions.set(id, {
+      id,
+      title: `会话 ${i + 1}`,
+      model: 'glm-4',
+      created_at: base - i * 60,
+      updated_at: base - i * 60,
+      messages: [
+        { role: 'user', content: `第 ${i + 1} 个会话的第 1 条消息` },
+        { role: 'assistant', content: `第 ${i + 1} 个会话的第 2 条消息` },
+      ],
+    });
+  }
+  chatSeq = 0;
+}
+
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
   const p = url.pathname;
+
+  // 先把 body 收齐再分发：会话相关端点需要读 JSON（PUT messages / POST rename）。
+  // E2E 的请求体都很小，一次性缓冲即可。
+  let bodyText = '';
+  req.on('data', (c) => { bodyText += c; });
+  req.on('end', () => { handle(req, res, p, bodyText); });
+});
+
+function handle(req, res, p, bodyText) {
 
   if (p.startsWith('/api/') || p.startsWith('/v1/')) {
     // 少数需要具体形状的端点
@@ -176,6 +210,58 @@ const server = http.createServer((req, res) => {
         success: true,
         data: { total: 1, success: 1, already: 0, failed: 0, results: [{ account_id: 'acc-2', account_name: 'workbuddy-2', provider: 'workbuddy', success: true, outcome: 'success', message: '签到成功' }] },
       });
+    }
+
+    // ── 聊天会话（Chat 页已从 localStorage 迁到后端持久化）──
+    // 用进程内 Map 维护状态，让「切换会话 / 重命名 / 删除」这类交互可被
+    // E2E 真实驱动，而不是每次返回空数组。
+    if (p === '/api/chat/sessions' && req.method === 'GET') {
+      return sendJson(res, {
+        success: true,
+        data: [...chatSessions.values()].map(({ messages: _m, ...s }) => s),
+      });
+    }
+    if (p === '/api/chat/sessions' && req.method === 'POST') {
+      const id = `cs-${++chatSeq}`;
+      const now = Math.floor(Date.now() / 1000);
+      const session = { id, title: '新会话', model: '', created_at: now, updated_at: now, messages: [] };
+      chatSessions.set(id, session);
+      return sendJson(res, { success: true, data: { id, title: session.title, model: session.model } });
+    }
+    {
+      const m = p.match(/^\/api\/chat\/sessions\/([^/]+)(\/rename|\/messages)?$/);
+      if (m) {
+        const sid = decodeURIComponent(m[1]);
+        const sub = m[2];
+        const s = chatSessions.get(sid);
+        if (sub === '/messages' && req.method === 'PUT') {
+          const body = JSON.parse(bodyText || '{}');
+          if (s) {
+            s.messages = body.messages ?? [];
+            s.updated_at = Math.floor(Date.now() / 1000);
+          }
+          return sendJson(res, { success: true, data: { count: s?.messages.length ?? 0 } });
+        }
+        if (sub === '/rename' && req.method === 'POST') {
+          const body = JSON.parse(bodyText || '{}');
+          if (s) s.title = body.title ?? s.title;
+          return sendJson(res, { success: true, data: null });
+        }
+        if (req.method === 'DELETE') {
+          chatSessions.delete(sid);
+          return sendJson(res, { success: true, data: null });
+        }
+        if (req.method === 'GET') {
+          if (!s) return sendJson(res, { success: false, error: 'not found' }, 404);
+          return sendJson(res, {
+            success: true,
+            data: {
+              session: { id: s.id, title: s.title, model: s.model },
+              messages: s.messages,
+            },
+          });
+        }
+      }
     }
 
     // 报表
@@ -215,7 +301,7 @@ const server = http.createServer((req, res) => {
     'Cache-Control': path.basename(file) === 'index.html' ? 'no-store' : 'public, max-age=3600',
   });
   fs.createReadStream(file).pipe(res);
-});
+}
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[e2e] static server on http://127.0.0.1:${PORT} (root: ${ROOT})`);
