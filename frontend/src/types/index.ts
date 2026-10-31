@@ -1232,6 +1232,22 @@ export interface UpdateStatusItem {
   apiBase: string;
   appliedVersion?: string | null;
   appliedAt?: number;
+  /** 本进程启动时间（unix 秒）：exec 自重启不换 PID，前端靠它的变化判定新进程已起 */
+  startedAt: number;
+  /** 重启请求计数（每次点重启 +1，跨进程持久化） */
+  restartEpoch: number;
+  /** 最近一次 exec 自重启的失败原因（成功重启后被新进程清空） */
+  restartError?: string | null;
+  /** static/version.json 里的前端版本（旧构建可能没有） */
+  staticVersion?: string | null;
+  /** static 版本与后端二进制版本不一致（半更新） */
+  versionMismatch?: boolean;
+  /** 跑在容器里（原地更新/重启不可靠，应拉新镜像） */
+  containerized?: boolean;
+  /** 刚检查过（处于最短检查间隔冷却内） */
+  recentlyChecked?: boolean;
+  /** 冷却剩余秒数 */
+  retryAfterSecs?: number;
 }
 
 /** 自动更新配置（GET/PUT /api/update/settings，token 为脱敏值） */

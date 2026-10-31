@@ -441,8 +441,16 @@ export default function ModelManage(): JSX.Element {
   const filtered = useMemo(() => {
     const list = view?.models ?? [];
     const q = query.trim().toLowerCase();
+    // 左栏三段式：`ch:<渠道id>` 按渠道筛选，`pv:<provider>` 按来源 provider 筛选，
+    // `all` 不过滤。两段互斥（点到哪段就只看那段），与筛选行的下拉是「与」关系。
+    const navIsChannel = navKey.startsWith('ch:');
+    const navChannelId = navIsChannel ? navKey.slice(3) : '';
+    const navIsProvider = navKey.startsWith('pv:');
+    const navProvider = navIsProvider ? navKey.slice(3) : '';
     return list.filter((m) => {
       if (provider !== 'all' && m.provider !== provider) return false;
+      if (navIsChannel && !m.sources.some((s) => s.channel_id === navChannelId)) return false;
+      if (navIsProvider && m.provider !== navProvider) return false;
       if (stateFilter === 'on' && !m.enabled) return false;
       if (stateFilter === 'off' && m.enabled) return false;
       if (priceFilter === 'priced' && !m.price) return false;
@@ -462,7 +470,35 @@ export default function ModelManage(): JSX.Element {
         .toLowerCase();
       return hay.includes(q);
     });
-  }, [view, provider, stateFilter, priceFilter, sourceFilter, channelFilter, query]);
+  }, [view, provider, navKey, stateFilter, priceFilter, sourceFilter, channelFilter, query]);
+
+  /** 左栏「渠道供应商」：按渠道聚合模型数（只统计有模型进视图的渠道 = 启用中的）。 */
+  const channelRails = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; count: number }>();
+    for (const m of view?.models ?? []) {
+      for (const s of m.sources) {
+        if (s.kind !== 'channel' || !s.channel_id) continue;
+        const hit = map.get(s.channel_id);
+        if (hit) hit.count += 1;
+        else map.set(s.channel_id, { id: s.channel_id, name: s.name || s.channel_id, count: 1 });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [view]);
+
+  /** 左栏「内置提供商」：账号池来源的 provider 分组。 */
+  const builtinRails = useMemo(
+    () => (view?.providers ?? []).filter((g) => g.account),
+    [view],
+  );
+
+  const selectNav = (key: string): void => {
+    setNavKey(key);
+    // 渠道段与筛选行的「来源渠道」下拉联动，避免两处冲突
+    if (key.startsWith('ch:')) setChannelFilter(key.slice(3));
+    else if (channelFilter !== 'all') setChannelFilter('all');
+  };
+
 
   /** 来源渠道下拉选项（从模型来源汇总，覆盖所有承载渠道） */
   const channelOptions = useMemo(() => {
@@ -605,33 +641,71 @@ export default function ModelManage(): JSX.Element {
         </Card>
       ) : (
       <div className="mm-layout">
-        {/* 左栏：provider 分组 */}
+        {/* 左栏：三段式导航（对齐 Agent2API 模型管理）
+            1. 渠道供应商 —— 每个**启用中**的渠道单独一行，按渠道 id 精确筛选
+            2. 内置提供商 —— 账号池里的 provider（workbuddy / qoder / …）
+            3. 自定义提供商 —— 用户自建的 provider（暂无独立存储时自然为空）
+
+            「全部」放在最上面，跨三段聚合。 */}
         <nav className="mm-rail" aria-label={t('提供商分组')}>
-          <div className="mm-rail-title">{t('提供商')}</div>
           <button
             type="button"
-            className={`mm-rail-item${provider === 'all' ? ' active' : ''}`}
-            onClick={() => setProvider('all')}
+            className={`mm-rail-item${navKey === 'all' ? ' active' : ''}`}
+            onClick={() => selectNav('all')}
           >
             <Boxes size={14} />
             <span className="mm-rail-name">{t('全部')}</span>
             <span className="mm-rail-count">{providerStats.total}</span>
           </button>
-          {(view?.providers ?? []).map((g) => (
-            <button
-              key={g.id}
-              type="button"
-              className={`mm-rail-item${provider === g.id ? ' active' : ''}`}
-              onClick={() => setProvider(g.id)}
-              title={`${g.label} (${g.enabled}/${g.total})`}
-            >
-              <span className={`mm-rail-dot${g.account ? ' account' : ''}`} />
-              <span className="mm-rail-name">{g.label}</span>
-              <span className="mm-rail-count">
-                {g.enabled}/{g.total}
-              </span>
-            </button>
-          ))}
+
+          {/* ① 渠道供应商：启用的渠道逐个列出（用户明确要求「每个不同的渠道名称都列出来，
+              只要状态是启动的」）。渠道被停用后其模型本就不进视图，这里也不会出现。 */}
+          <div className="mm-rail-title">{t('渠道供应商')}</div>
+          {channelRails.length === 0 ? (
+            <div className="mm-rail-empty">{t('暂无启用的渠道')}</div>
+          ) : (
+            channelRails.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className={`mm-rail-item${navKey === `ch:${c.id}` ? ' active' : ''}`}
+                onClick={() => selectNav(`ch:${c.id}`)}
+                title={`${c.name} · ${c.count} ${t('个模型')}`}
+              >
+                <span className="mm-rail-dot" />
+                <span className="mm-rail-name">{c.name}</span>
+                <span className="mm-rail-count">{c.count}</span>
+              </button>
+            ))
+          )}
+
+          {/* ② 内置提供商：账号池的 provider 分组（原有的 provider 维度） */}
+          <div className="mm-rail-title">{t('内置提供商')}</div>
+          {builtinRails.length === 0 ? (
+            <div className="mm-rail-empty">{t('暂无账号池供应商')}</div>
+          ) : (
+            builtinRails.map((g) => (
+              <button
+                key={g.id}
+                type="button"
+                className={`mm-rail-item${navKey === `pv:${g.id}` ? ' active' : ''}`}
+                onClick={() => selectNav(`pv:${g.id}`)}
+                title={`${g.label} (${g.enabled}/${g.total})`}
+              >
+                <span className="mm-rail-dot account" />
+                <span className="mm-rail-name">{g.label}</span>
+                <span className="mm-rail-count">
+                  {g.enabled}/{g.total}
+                </span>
+              </button>
+            ))
+          )}
+
+          {/* ③ 自定义提供商：目前 AIGX 没有独立的“自定义 provider”存储，
+              账号池新增的 provider 会落到上面「内置」段。这里保留分段与空态提示，
+              等后端支持后再填内容，避免和 Agent2API 的信息架构脱节。 */}
+          <div className="mm-rail-title">{t('自定义提供商')}</div>
+          <div className="mm-rail-empty">{t('暂无自定义提供商')}</div>
         </nav>
 
         {/* 右侧：表格 */}

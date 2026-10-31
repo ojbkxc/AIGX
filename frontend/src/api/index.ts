@@ -405,10 +405,10 @@ export const api = {
     request<ApiResponse<UpdateStatusItem>>('GET', `${API_BASE}/update/status`),
   checkUpdate: (): Promise<ApiResponse<UpdateStatusItem>> =>
     request<ApiResponse<UpdateStatusItem>>('POST', `${API_BASE}/update/check`),
-  applyUpdate: (): Promise<ApiResponse<UpdateStatusItem>> =>
-    request<ApiResponse<UpdateStatusItem>>('POST', `${API_BASE}/update/apply`),
-  restartService: (): Promise<ApiResponse<{ restarting: boolean; delaySecs: number }>> =>
-    request<ApiResponse<{ restarting: boolean; delaySecs: number }>>('POST', `${API_BASE}/update/restart`),
+  applyUpdate: (force = false): Promise<ApiResponse<UpdateStatusItem>> =>
+    request<ApiResponse<UpdateStatusItem>>('POST', `${API_BASE}/update/apply`, { force }),
+  restartService: (): Promise<ApiResponse<{ restarting: boolean; delaySecs: number; restartEpoch: number }>> =>
+    request<ApiResponse<{ restarting: boolean; delaySecs: number; restartEpoch: number }>>('POST', `${API_BASE}/update/restart`),
   rollbackUpdate: (): Promise<ApiResponse<{ restored: boolean; needRestart: boolean }>> =>
     request<ApiResponse<{ restored: boolean; needRestart: boolean }>>('POST', `${API_BASE}/update/rollback`),
   getUpdateSettings: (): Promise<ApiResponse<UpdateSettingsItem>> =>

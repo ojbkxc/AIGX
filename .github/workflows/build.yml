@@ -376,7 +376,9 @@ jobs:
         run: |
           cd frontend
           npm ci
-          npm run build
+          # 注入版本号：vite 插件据此在产物里生成 static/version.json，
+          # 后端 update::static_version() 靠它检测「前端与二进制是否同版」
+          AIGX_VERSION="${AIGX_VERSION:-$(cat VERSION 2>/dev/null || echo '')}" npm run build
 
       - name: Package server update bundles
         run: |

@@ -196,3 +196,17 @@
 @keyframes update-spin {
   to { transform: rotate(360deg); }
 }
+
+/* 信息态（重启进行中等中性提示） */
+.update-banner.info {
+  background: rgba(59, 130, 246, 0.1);
+  border-color: rgba(59, 130, 246, 0.3);
+  color: #1d4ed8;
+}
+
+/* 检查更新冷却倒计时提示 */
+.update-cooldown {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  align-self: center;
+}

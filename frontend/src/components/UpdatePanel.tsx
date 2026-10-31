@@ -55,6 +55,10 @@ export default function UpdatePanel(): JSX.Element {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const mountedRef = useRef(true);
   const restartingRef = useRef(false);
+  /** 重启请求时刻的 startedAt：新进程的 startedAt 变了才算重启完成（exec 不换 PID） */
+  const restartBaselineRef = useRef<number | null>(null);
+  /** 重启请求发起时间（超时判定用） */
+  const restartStartRef = useRef(0);
 
   const loadStatus = useCallback(async (showError: boolean): Promise<void> => {
     try {
@@ -63,9 +67,32 @@ export default function UpdatePanel(): JSX.Element {
       if (res.data) {
         setStatus(res.data);
         if (restartingRef.current) {
-          restartingRef.current = false;
-          setRestarting(false);
-          addToast(t('服务已重启'));
+          const baseline = restartBaselineRef.current;
+          const startedAt = res.data.startedAt ?? 0;
+          const restarted = baseline != null && startedAt !== baseline;
+          if (restarted) {
+            // 新进程起来了：换前端再回来（无缝更新的关键一步）
+            restartingRef.current = false;
+            setRestarting(false);
+            addToast(t('服务已重启，正在刷新界面'));
+            window.location.reload();
+            return;
+          }
+          if (res.data.restartError) {
+            restartingRef.current = false;
+            setRestarting(false);
+            setError(res.data.restartError);
+            return;
+          }
+          if (Date.now() - restartStartRef.current > 40000) {
+            // 40s 还是同一个进程：不假报成功
+            restartingRef.current = false;
+            setRestarting(false);
+            setError(
+              res.data.restartError
+                || t('重启超时未检测到新进程（可能 exec 失败），请在服务器上查看日志'),
+            );
+          }
         }
       }
       if (showError) setError('');
@@ -169,10 +196,31 @@ export default function UpdatePanel(): JSX.Element {
       onConfirm: async () => {
         try {
           await api.restartService();
+          restartBaselineRef.current = status?.startedAt ?? null;
+          restartStartRef.current = Date.now();
           restartingRef.current = true;
           setRestarting(true);
-          addToast(t('服务正在重启（约 2 秒）'));
+          addToast(t('服务正在重启（约 2 秒），完成后界面自动刷新'));
           window.setTimeout(() => { void loadStatus(false); }, 3000);
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      },
+    });
+  };
+
+  /** 修复前端（修复模式重应用：跳过「已是最新」拦截，重装最新 .upd） */
+  const confirmRepair = (): void => {
+    setConfirmState({
+      title: t('修复前端（重新应用更新）'),
+      message: t('将重新下载并安装最新更新包（含 static/ 前端产物），修复前后端版本不一致。安装后需重启服务。'),
+      confirmText: t('重新应用'),
+      danger: false,
+      onConfirm: async () => {
+        try {
+          await api.applyUpdate(true);
+          addToast(t('已开始重新应用，完成后请重启服务'));
+          void loadStatus(false);
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e));
         }
@@ -190,6 +238,8 @@ export default function UpdatePanel(): JSX.Element {
         try {
           await api.rollbackUpdate();
           if (settings?.restart_after_apply !== false) {
+            restartBaselineRef.current = status?.startedAt ?? null;
+            restartStartRef.current = Date.now();
             restartingRef.current = true;
             setRestarting(true);
             addToast(t('已回滚，服务正在重启'));
@@ -286,6 +336,11 @@ export default function UpdatePanel(): JSX.Element {
                 : <RefreshCw size={14} />}
               {checking || status?.checking ? t('检查中…') : t('检查更新')}
             </button>
+            {status?.recentlyChecked && (status.retryAfterSecs ?? 0) > 0 && (
+              <span className="update-cooldown">
+                {t('刚检查过，{{n}} 秒后可再查', { n: status.retryAfterSecs })}
+              </span>
+            )}
           </div>
 
           {!status?.supported && (
@@ -301,6 +356,42 @@ export default function UpdatePanel(): JSX.Element {
             </div>
           )}
 
+          {status?.containerized && (
+            <div className="update-banner warn">
+              <AlertTriangle size={15} />
+              <span>
+                {t('检测到容器部署：原地更新/重启在容器内不可靠（发布二进制为 glibc，Alpine 镜像为 musl），建议拉取新镜像重建容器。')}
+              </span>
+            </div>
+          )}
+          {status?.versionMismatch && (
+            <div className="update-banner warn">
+              <AlertTriangle size={15} />
+              <span>
+                {t('前端与后端版本不一致')}
+                {status.staticVersion ? `（前端 v${status.staticVersion} / 后端 v${status.currentVersion}）` : ''}
+                {t('，界面可能异常，可一键修复前端。')}
+              </span>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                onClick={confirmRepair}
+                disabled={Boolean(status?.applying)}
+                style={{ marginLeft: 8 }}
+              >
+                {t('修复前端')}
+              </button>
+            </div>
+          )}
+          {(status?.restartError || restarting) && (
+            <div className={`update-banner ${status?.restartError ? 'error' : 'info'}`}>
+              {status?.restartError ? <AlertTriangle size={15} /> : <Loader2 size={15} className="update-spin" />}
+              <span>
+                {status?.restartError
+                  ?? t('正在等待新进程启动（检测到启动时间变化后自动刷新界面）…')}
+              </span>
+            </div>
+          )}
           {status?.lastError && !status.applying && (
             <div className="update-banner error">
               <AlertTriangle size={15} />
