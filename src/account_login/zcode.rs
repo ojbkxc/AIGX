@@ -176,7 +176,6 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
     })
 }
 
-
 /// 把中转页参数替换进 `authorize_url`（国内版参数名是 `redirect`）。
 fn apply_interstitial(authorize_url: &str) -> String {
     let target = encode_component(&format!(

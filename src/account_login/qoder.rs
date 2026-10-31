@@ -167,7 +167,6 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
     })
 }
 
-
 fn encode_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.as_bytes() {

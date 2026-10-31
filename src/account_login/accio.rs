@@ -128,7 +128,6 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
     })
 }
 
-
 fn random_token() -> String {
     format!(
         "{}{}",

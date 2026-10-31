@@ -42,8 +42,10 @@ impl LoginFlow for RaccoonFlow {
             .map(str::to_ascii_lowercase)
             .is_some_and(|host| host == "auth");
         if parsed.scheme() != "office-raccoon" || !host_matches || parsed.path() != "/callback" {
-            return Err("登录回调地址无效（应为 office-raccoon://auth/callback?code=…&state=…）"
-                .to_string());
+            return Err(
+                "登录回调地址无效（应为 office-raccoon://auth/callback?code=…&state=…）"
+                    .to_string(),
+            );
         }
         let param = |name: &str| -> String {
             parsed
@@ -87,7 +89,10 @@ impl LoginFlow for RaccoonFlow {
             };
             return Err(message);
         }
-        let name = text_of(&data, &["office_org_name", "office_identity", "office_org_role"]);
+        let name = text_of(
+            &data,
+            &["office_org_name", "office_identity", "office_org_role"],
+        );
         Ok(Some(Credentials {
             name: if name.is_empty() {
                 "小浣熊".to_string()
@@ -121,7 +126,6 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
         }),
     })
 }
-
 
 fn text_of(object: &Value, keys: &[&str]) -> String {
     for key in keys {

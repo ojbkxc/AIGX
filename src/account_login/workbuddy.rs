@@ -231,7 +231,6 @@ fn auth_url_of_token(state: &str) -> String {
     auth_url(&format!("/auth/token?state={}", encode_component(state)))
 }
 
-
 fn encode_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.as_bytes() {

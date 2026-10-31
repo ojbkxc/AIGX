@@ -163,7 +163,6 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
     })
 }
 
-
 fn random_hex() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
