@@ -81,7 +81,7 @@ pub struct RequestLogQuery {
     pub page_size: Option<usize>,
 }
 
-impl LogQuery {
+impl RequestLogQuery {
     /// 生效的每页条数（`size` 优先，其次 `page_size`，最后默认值）
     pub fn effective_size(&self) -> usize {
         self.page_size.unwrap_or(self.size).clamp(1, 500)
