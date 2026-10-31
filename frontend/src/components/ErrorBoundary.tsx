@@ -9,6 +9,11 @@ interface ErrorBoundaryState {
 
 type ErrorBoundaryProps = WithTranslation & {
   children?: React.ReactNode;
+  /**
+   * `full`（默认）= 全屏错误页（顶层边界用）；
+   * `inline` = 只占内容区（页面级边界用，Sidebar 保持可见、可切换其他页）。
+   */
+  variant?: 'full' | 'inline';
 };
 
 /**
@@ -42,6 +47,7 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
 
   render() {
     if (!this.state.hasError) return this.props.children;
+    const inline = this.props.variant === 'inline';
     const { t } = this.props;
     const errText =
       (this.state.error && (this.state.error.message || String(this.state.error))) ||
@@ -50,7 +56,8 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
     return (
       <div
         style={{
-          minHeight: '100vh',
+          minHeight: inline ? '320px' : '100vh',
+          height: inline ? '100%' : undefined,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',

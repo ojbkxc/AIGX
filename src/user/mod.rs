@@ -76,6 +76,13 @@ pub struct User {
     /// 是否已启用 TOTP 二次验证（secret 已绑定且经过一次有效验证）
     #[serde(default)]
     pub totp_enabled: bool,
+    /// 是否必须在下次登录后修改密码（首次启动的内置管理员置 true）。
+    ///
+    /// 内置管理员用固定的弱口令 `123456` 初始化；该标记让前端在登录成功后
+    /// 强制跳转改密页（不阻断登录本身 —— 否则用户拿不到初始密码就无法进入）。
+    /// 用户改过一次密码后置 false。旧数据缺该字段时为 false（不影响存量用户）。
+    #[serde(default)]
+    pub must_change_password: bool,
     /// TOTP 一次性恢复码的 SHA-256 哈希（G3：备换设备时使用）。
     ///
     /// 只存哈希不存明文：恢复码明文仅在生成时展示一次，落盘即
@@ -209,6 +216,7 @@ impl UserStore {
             group: "default".into(),
             totp_secret: String::new(),
             totp_enabled: false,
+            must_change_password: false,
             totp_recovery_codes: Vec::new(),
             aff_code: String::new(),
             aff_count: 0,
@@ -258,6 +266,7 @@ impl UserStore {
             group: "default".into(),
             totp_secret: String::new(),
             totp_enabled: false,
+            must_change_password: false,
             totp_recovery_codes: Vec::new(),
             aff_code: String::new(),
             aff_count: 0,

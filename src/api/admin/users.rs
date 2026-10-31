@@ -117,6 +117,9 @@ pub struct ListUsersQuery {
     pub page: usize,
     #[serde(default = "default_size")]
     pub size: usize,
+    /// `page_size` 别名（前端两种写法都认；`size` 优先）
+    #[serde(default)]
+    pub page_size: Option<usize>,
     /// 关键字搜索（邮箱/昵称/备注，对齐 new-api 用户列表搜索）
     #[serde(default)]
     pub keyword: String,
@@ -143,7 +146,7 @@ pub async fn handle_list_users(
         .collect();
     let total = all.len();
     let page = q.page.max(1);
-    let size = q.size.max(1);
+    let size = q.page_size.unwrap_or(q.size).clamp(1, 500);
     // saturating_mul：page 无上限时 `(page-1)*size` 会 usize 溢出
     let start_idx = page.saturating_sub(1).saturating_mul(size);
     let data: Vec<Value> = if start_idx >= total {

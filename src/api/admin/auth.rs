@@ -203,7 +203,9 @@ pub async fn handle_login(
                 "email": u.email,
                 "username": u.username,
                 "role": match u.role { Role::Admin => "admin", Role::User => "user" },
-                "expires_at": session.expires_at
+                "expires_at": session.expires_at,
+                // 首次启动的内置管理员用弱口令初始化：前端据此强制跳改密页
+                "must_change_password": u.must_change_password
             }
         })));
     }
@@ -232,7 +234,8 @@ pub async fn handle_login(
                     "email": u.email,
                     "username": u.username,
                     "role": match u.role { Role::Admin => "admin", Role::User => "user" },
-                    "expires_at": session.expires_at
+                    "expires_at": session.expires_at,
+                    "must_change_password": u.must_change_password
                 }
             })));
         }
@@ -262,10 +265,7 @@ pub async fn handle_login(
         tracing::warn!("Login failed {next_fail} times from {client_ip}; locked for 5 minutes");
     }
 
-    Err(error_response(
-        "Invalid credentials",
-        StatusCode::UNAUTHORIZED,
-    ))
+    Err(error_response("账号或密码错误", StatusCode::UNAUTHORIZED))
 }
 
 /// POST /api/auth/register - 公开邮箱注册
@@ -464,6 +464,8 @@ pub async fn handle_change_password(
     let new_hash = hash_password(&body.new_password);
     match state.user_store.update(&user.id, |u| {
         u.password = new_hash;
+        // 改过密码 = 弱口令风险已解除
+        u.must_change_password = false;
     }) {
         Ok(_) => {
             // 改密成功 → 撤销该用户全部会话（旧密码签发的 token 全部失效，
@@ -552,11 +554,38 @@ const PASSWORD_RESET_TTL_HOURS: i64 = 1;
 /// 但不返回有效 token。
 pub async fn handle_forgot_password(
     State(state): State<AppState>,
+    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Json(body): Json<ForgotPasswordRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     if body.email.trim().is_empty() {
         return Err(error_response("邮箱不能为空", StatusCode::BAD_REQUEST));
     }
+
+    // 限流：同一 (IP, 邮箱) 组合 60 秒内最多 3 次。忘记密码会触发邮件发送，
+    // 无限制时可被用来对已知邮箱反复轰炸。键里带邮箱：同一 IP 重置不同邮箱
+    // 不算滥用，但同一邮箱被同一来源反复请求就是轰炸。
+    const FORGOT_RATE_LIMIT: u32 = 3;
+    let client_ip = extract_client_ip(&headers)
+        .or_else(|| connect.map(|c| c.0.ip().to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+    let rate_key = format!("forgot:{}:{}", client_ip, body.email.trim().to_lowercase());
+    let attempts = state.login_limiter.get(&rate_key).await.unwrap_or(0);
+    if attempts >= FORGOT_RATE_LIMIT {
+        state.log_store.record_security(
+            crate::log::SecurityEvent::new(
+                crate::log::SecurityEventType::RateLimit,
+                "warning",
+                format!("忘记密码限流触发：IP {client_ip} 对同一邮箱请求过于频繁"),
+            )
+            .with_ip(Some(client_ip)),
+        );
+        return Err(error_response(
+            "请求过于频繁，请稍后再试",
+            StatusCode::TOO_MANY_REQUESTS,
+        ));
+    }
+    state.login_limiter.insert(rate_key, attempts + 1).await;
 
     let config = state.config_manager.get().await;
     // 重置令牌用**独立的派生密钥**（session_secret + 用途后缀），与登录会话
@@ -687,6 +716,8 @@ pub async fn handle_reset_password(
     let new_hash = hash_password(&body.new_password);
     match state.user_store.update(&user.id, |u| {
         u.password = new_hash;
+        // 改过密码 = 弱口令风险已解除
+        u.must_change_password = false;
     }) {
         Ok(_) => {
             // 重置密码成功 → 撤销该用户全部会话（改密的踢出语义）

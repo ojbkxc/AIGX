@@ -76,6 +76,16 @@ pub struct RequestLogQuery {
     pub page: usize,
     #[serde(default = "default_size")]
     pub size: usize,
+    /// `page_size` 别名（前端两种写法都认；`size` 优先）
+    #[serde(default)]
+    pub page_size: Option<usize>,
+}
+
+impl LogQuery {
+    /// 生效的每页条数（`size` 优先，其次 `page_size`，最后默认值）
+    pub fn effective_size(&self) -> usize {
+        self.page_size.unwrap_or(self.size).clamp(1, 500)
+    }
 }
 
 /// 审计日志查询参数
@@ -85,6 +95,15 @@ pub struct AuditLogQuery {
     pub page: usize,
     #[serde(default = "default_size")]
     pub size: usize,
+    /// `page_size` 别名（前端两种写法都认；`size` 优先）
+    #[serde(default)]
+    pub page_size: Option<usize>,
+}
+
+impl AuditLogQuery {
+    pub fn effective_size(&self) -> usize {
+        self.page_size.unwrap_or(self.size).clamp(1, 500)
+    }
 }
 
 /// 导出格式参数（format 之外的筛选参数与列表页共用，保证导出与所见一致）
@@ -141,7 +160,7 @@ pub async fn handle_list_request_logs(
         q.start,
         q.end,
         q.page,
-        q.size,
+        q.effective_size(),
     );
     // user_id → user_email 解析（前端用户列展示邮箱）；非 admin 剥离 debug 快照
     let data = logs_with_user_email(
@@ -157,7 +176,7 @@ pub async fn handle_list_request_logs(
         "data": data,
         "total": total,
         "page": q.page,
-        "size": q.size,
+        "size": q.effective_size(),
     })))
 }
 
@@ -168,7 +187,10 @@ pub async fn handle_list_audit_logs(
     Query(q): Query<AuditLogQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let (logs, total) = state.log_store.audits.list_paged(q.page, q.size);
+    let (logs, total) = state
+        .log_store
+        .audits
+        .list_paged(q.page, q.effective_size());
     // admin_id → admin_email 解析（前端管理员列展示邮箱）
     let data = audits_with_admin_email(
         &state,
@@ -182,7 +204,7 @@ pub async fn handle_list_audit_logs(
         "data": data,
         "total": total,
         "page": q.page,
-        "size": q.size,
+        "size": q.effective_size(),
     })))
 }
 

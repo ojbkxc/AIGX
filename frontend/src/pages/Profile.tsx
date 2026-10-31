@@ -102,6 +102,11 @@ export default function Profile(): JSX.Element {
       await api.changePassword(oldPw, newPw);
       addToast(t('密码已修改，下次登录请使用新密码'));
       setOldPw(''); setNewPw(''); setConfirmPw('');
+      // 强制改密流程完成：清除标记（后端改密后也会撤销所有会话，
+      // 用户需用新密码重新登录）
+      if (localStorage.getItem('must_change_password')) {
+        localStorage.removeItem('must_change_password');
+      }
     } catch (err) {
       setPwError(err instanceof Error ? err.message : String(err));
     } finally {

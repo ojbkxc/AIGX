@@ -179,7 +179,7 @@ export const api = {
       aff_code: affCode ?? undefined,
     }),
   forgotPassword: (email: string): Promise<ApiResponse<MessageResult>> =>
-    request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/forgot-password`, { email }),
+    request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/forgot-password`, { email }, { skipAuthRedirect: true }),
   changePassword: (old_password: string, new_password: string): Promise<ApiResponse<MessageResult>> =>
     request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/change-password`, { old_password, new_password }, { skipAuthRedirect: true }),
   getUsageSummary: (): Promise<ApiResponse<UsageSummaryItem>> =>
@@ -266,8 +266,6 @@ export const api = {
     request<ApiList<AlertEvent>>('GET', `${API_BASE}/monitor/security/events`),
   getSecurityAlerts: (): Promise<ApiList<AlertEvent>> =>
     request<ApiList<AlertEvent>>('GET', `${API_BASE}/alerts/active`),
-  saveSettings: (usage: unknown, limits: unknown, notification: unknown): Promise<ApiResponse<SettingsItem>> =>
-    request<ApiResponse<SettingsItem>>('PUT', `${API_BASE}/settings`, { usage, limits, notification }),
   getBalance: (): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/users/me`),
   getTransactions: (): Promise<ApiList<OrderItem>> =>
@@ -735,7 +733,7 @@ export const api = {
 
   // 忘记密码/重置密码
   resetPassword: (token: string, password: string): Promise<ApiResponse<MessageResult>> =>
-    request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/reset-password`, { token, password }),
+    request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/reset-password`, { token, password }, { skipAuthRedirect: true }),
 
   // 2FA/TOTP（P1）：用户侧自助管理
   totpSetup: (): Promise<ApiResponse<TotpSetupResult>> =>

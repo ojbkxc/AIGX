@@ -12,23 +12,42 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 
 // 路由级懒加载：首屏只拉 Dashboard 相关代码，管理页按需加载
-const Keys = lazy(() => import('./pages/Keys'));
-const Users = lazy(() => import('./pages/Users'));
-const Wallet = lazy(() => import('./pages/Wallet'));
-const Settings = lazy(() => import('./pages/Settings'));
-const Profile = lazy(() => import('./pages/Profile'));
-const Logs = lazy(() => import('./pages/Logs'));
-const Redemptions = lazy(() => import('./pages/Redemptions'));
-const Plans = lazy(() => import('./pages/Plans'));
-const Channels = lazy(() => import('./pages/Channels'));
-const AccountSessions = lazy(() => import('./pages/AccountSessions'));
-const Chat = lazy(() => import('./pages/Chat'));
+//
+// `lazyPage`：chunk 加载失败时自动重试一次。常见触发场景是发布新版本后
+// 旧 chunk 被替换（哈希文件名变了），用户停在旧页面点菜单 → 请求旧 chunk
+// 404 → React.lazy 抛出 → 整页白屏。重试一次通常能命中新 chunk；仍失败
+// 则交给页面级 ErrorBoundary 显示可读提示（Sidebar 还在，能切到别的页）。
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyComponent = React.ComponentType<any>;
 
-const Models = lazy(() => import('./pages/Models'));
-const Prompts = lazy(() => import('./pages/Prompts'));
-const Pricing = lazy(() => import('./pages/Pricing'));
-const Agent = lazy(() => import('./pages/Agent'));
-const Tickets = lazy(() => import('./pages/Tickets'));
+function lazyPage(loader: () => Promise<{ default: AnyComponent }>) {
+  return lazy(() =>
+    loader().catch(
+      () =>
+        new Promise<{ default: AnyComponent }>((resolve) =>
+          setTimeout(() => resolve(loader()), 300),
+        ),
+    ),
+  );
+}
+
+const Keys = lazyPage(() => import('./pages/Keys'));
+const Users = lazyPage(() => import('./pages/Users'));
+const Wallet = lazyPage(() => import('./pages/Wallet'));
+const Settings = lazyPage(() => import('./pages/Settings'));
+const Profile = lazyPage(() => import('./pages/Profile'));
+const Logs = lazyPage(() => import('./pages/Logs'));
+const Redemptions = lazyPage(() => import('./pages/Redemptions'));
+const Plans = lazyPage(() => import('./pages/Plans'));
+const Channels = lazyPage(() => import('./pages/Channels'));
+const AccountSessions = lazyPage(() => import('./pages/AccountSessions'));
+const Chat = lazyPage(() => import('./pages/Chat'));
+
+const Models = lazyPage(() => import('./pages/Models'));
+const Prompts = lazyPage(() => import('./pages/Prompts'));
+const Pricing = lazyPage(() => import('./pages/Pricing'));
+const Agent = lazyPage(() => import('./pages/Agent'));
+const Tickets = lazyPage(() => import('./pages/Tickets'));
 
 /** 懒加载页面兜底骨架（与全局 loading 视觉一致） */
 function PageFallback(): JSX.Element {
@@ -55,7 +74,13 @@ function ProtectedLayout({ children }: ProtectedLayoutProps) {
     <div className="app-container">
       <Sidebar />
       <main className="main-content" key={location}>
-        <div className="page-fade-enter">{children}</div>
+        <div className="page-fade-enter">
+          {/* 页面级边界：单个页面渲染异常/懒加载失败只影响内容区，
+              Sidebar 保持可用，用户能切到别的页 —— 而不是整页白屏。 */}
+          <ErrorBoundary variant="inline">
+            <Suspense fallback={<PageFallback />}>{children}</Suspense>
+          </ErrorBoundary>
+        </div>
       </main>
       {/* 底部常驻状态行：仅 admin 可见（内部自行判断），普通用户不渲染 */}
       <StatusLine />
@@ -93,42 +118,40 @@ export default function App(): JSX.Element {
   return (
     <ErrorBoundary>
       <ToastProvider>
-        <Suspense fallback={<PageFallback />}>
-          <Routes>
-            <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
-            <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
-            <Route path="/" element={<ProtectedLayout><Dashboard /></ProtectedLayout>} />
-            <Route path="/accounts" element={<Navigate to="/channels" replace />} />
-            <Route path="/channels" element={<AdminRoute><Channels /></AdminRoute>} />
-            <Route path="/account-sessions" element={<AdminRoute><AccountSessions /></AdminRoute>} />
-            <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
-            {/* 已合并的旧路由 → 重定向到合并后位置 */}
-            <Route path="/mappings" element={<Navigate to="/channels" replace />} />
-            <Route path="/pricing" element={<AdminRoute><Pricing /></AdminRoute>} />
-            <Route path="/groups" element={<Navigate to="/settings" replace />} />
-            <Route path="/orders" element={<Navigate to="/wallet" replace />} />
-            <Route path="/epay" element={<Navigate to="/settings" replace />} />
-            <Route path="/notify" element={<Navigate to="/settings" replace />} />
-            <Route path="/security" element={<Navigate to="/settings" replace />} />
-            <Route path="/ip-management" element={<Navigate to="/settings" replace />} />
-            <Route path="/users" element={<AdminRoute><Users /></AdminRoute>} />
-            <Route path="/wallet" element={<ProtectedLayout><Wallet /></ProtectedLayout>} />
-            <Route path="/logs" element={<ProtectedLayout><Logs /></ProtectedLayout>} />
-            <Route path="/redemptions" element={<AdminRoute><Redemptions /></AdminRoute>} />
-            <Route path="/plans" element={<AdminRoute><Plans /></AdminRoute>} />
-            <Route path="/playground" element={<Navigate to="/chat" replace />} />
-            <Route path="/chat" element={<ProtectedLayout><Chat /></ProtectedLayout>} />
-            {/* 网络层管理已并入系统设置运维 tab，旧路由重定向防书签失效 */}
-            <Route path="/network-layer" element={<Navigate to="/settings" replace />} />
-            <Route path="/model-presets" element={<ProtectedLayout><Models /></ProtectedLayout>} />
-            <Route path="/prompts" element={<ProtectedLayout><Prompts /></ProtectedLayout>} />
-            <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
-            <Route path="/agent" element={<AdminRoute><Agent /></AdminRoute>} />
-            <Route path="/tickets" element={<ProtectedLayout><Tickets /></ProtectedLayout>} />
-            <Route path="/profile" element={<ProtectedLayout><Profile /></ProtectedLayout>} />
-            <Route path="*" element={<RouteErrorPage status={404} />} />
-          </Routes>
-        </Suspense>
+        <Routes>
+          <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
+          <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
+          <Route path="/" element={<ProtectedLayout><Dashboard /></ProtectedLayout>} />
+          <Route path="/accounts" element={<Navigate to="/channels" replace />} />
+          <Route path="/channels" element={<AdminRoute><Channels /></AdminRoute>} />
+          <Route path="/account-sessions" element={<AdminRoute><AccountSessions /></AdminRoute>} />
+          <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
+          {/* 已合并的旧路由 → 重定向到合并后位置 */}
+          <Route path="/mappings" element={<Navigate to="/channels" replace />} />
+          <Route path="/pricing" element={<AdminRoute><Pricing /></AdminRoute>} />
+          <Route path="/groups" element={<Navigate to="/settings" replace />} />
+          <Route path="/orders" element={<Navigate to="/wallet" replace />} />
+          <Route path="/epay" element={<Navigate to="/settings" replace />} />
+          <Route path="/notify" element={<Navigate to="/settings" replace />} />
+          <Route path="/security" element={<Navigate to="/settings" replace />} />
+          <Route path="/ip-management" element={<Navigate to="/settings" replace />} />
+          <Route path="/users" element={<AdminRoute><Users /></AdminRoute>} />
+          <Route path="/wallet" element={<ProtectedLayout><Wallet /></ProtectedLayout>} />
+          <Route path="/logs" element={<ProtectedLayout><Logs /></ProtectedLayout>} />
+          <Route path="/redemptions" element={<AdminRoute><Redemptions /></AdminRoute>} />
+          <Route path="/plans" element={<AdminRoute><Plans /></AdminRoute>} />
+          <Route path="/playground" element={<Navigate to="/chat" replace />} />
+          <Route path="/chat" element={<ProtectedLayout><Chat /></ProtectedLayout>} />
+          {/* 网络层管理已并入系统设置运维 tab，旧路由重定向防书签失效 */}
+          <Route path="/network-layer" element={<Navigate to="/settings" replace />} />
+          <Route path="/model-presets" element={<ProtectedLayout><Models /></ProtectedLayout>} />
+          <Route path="/prompts" element={<ProtectedLayout><Prompts /></ProtectedLayout>} />
+          <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
+          <Route path="/agent" element={<AdminRoute><Agent /></AdminRoute>} />
+          <Route path="/tickets" element={<ProtectedLayout><Tickets /></ProtectedLayout>} />
+          <Route path="/profile" element={<ProtectedLayout><Profile /></ProtectedLayout>} />
+          <Route path="*" element={<RouteErrorPage status={404} />} />
+        </Routes>
       </ToastProvider>
     </ErrorBoundary>
   );

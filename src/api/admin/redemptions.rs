@@ -34,6 +34,9 @@ pub struct AuditLogQuery {
     pub page: usize,
     #[serde(default = "default_size")]
     pub size: usize,
+    /// `page_size` 别名（前端两种写法都认；`size` 优先）
+    #[serde(default)]
+    pub page_size: Option<usize>,
 }
 
 /// 兑换请求
@@ -79,13 +82,14 @@ pub async fn handle_list_redemptions(
     Query(q): Query<AuditLogQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let (items, total) = state.redemption_store.list_paged(q.page, q.size);
+    let size = q.page_size.unwrap_or(q.size).clamp(1, 500);
+    let (items, total) = state.redemption_store.list_paged(q.page, size);
     Ok(Json(serde_json::json!({
         "success": true,
         "data": items,
         "total": total,
         "page": q.page,
-        "size": q.size,
+        "size": size,
     })))
 }
 

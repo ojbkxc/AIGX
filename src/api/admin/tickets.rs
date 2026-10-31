@@ -193,6 +193,9 @@ pub struct AdminTicketQuery {
     pub page: Option<usize>,
     #[serde(default)]
     pub page_size: Option<usize>,
+    /// `size` 别名（前端两种写法都认；`page_size` 优先）
+    #[serde(default)]
+    pub size: Option<usize>,
     #[serde(default)]
     pub status: Option<i32>,
     #[serde(default)]
@@ -244,7 +247,7 @@ pub async fn handle_admin_list_tickets(
     }
     let total = all.len();
     let page = q.page.unwrap_or(1).max(1);
-    let page_size = q.page_size.unwrap_or(10).clamp(1, 100);
+    let page_size = q.page_size.or(q.size).unwrap_or(10).clamp(1, 100);
     let start = (page - 1) * page_size;
     let data: Vec<Value> = if start >= total {
         Vec::new()

@@ -15,7 +15,12 @@ use super::common::{error_response, verify_admin};
 
 #[derive(Debug, Deserialize)]
 pub struct SettingsRequest {
+    /// 模型映射表。缺省为空表（不涉及映射时前端可不传）。
+    #[serde(default)]
     pub mappings: std::collections::HashMap<String, String>,
+    /// 是否整表替换（true）还是增量合并（false）。缺省 false = 增量，
+    /// 避免「只传部分映射」时把既有映射清空。
+    #[serde(default)]
     pub replace_all: bool,
 }
 

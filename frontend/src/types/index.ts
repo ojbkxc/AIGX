@@ -234,6 +234,8 @@ export interface LoginResult {
   require_2fa?: boolean;
   tmp_token?: string;
   recovery_codes?: string[];
+  /** 首次启动的内置管理员用弱口令初始化：前端应强制跳转改密页 */
+  must_change_password?: boolean;
 }
 
 export interface LoginCodeResult {

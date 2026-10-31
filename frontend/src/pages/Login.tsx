@@ -5,6 +5,31 @@ import { Eye, EyeOff } from 'lucide-react';
 import { api } from '../api';
 import { cycleTheme } from '../lib/theme';
 
+/**
+ * 把登录接口的错误统一成用户能读懂的中文。
+ *
+ * 后端不同失败形态给出的消息不一致（401 可能带 "账号或密码错误"，
+ * 也可能是拦截器抛的 "Unauthorized"、网络层的 "网络连接失败"、
+ * 限流的 429 等），直接透传会让用户看到英文或技术术语。
+ */
+function friendlyLoginError(err: unknown, t: (k: string) => string): string {
+  const raw = err instanceof Error ? err.message : String(err ?? '');
+  const status = (err as { status?: number } | null)?.status;
+  if (status === 401 || raw === 'Unauthorized' || /invalid credentials/i.test(raw)) {
+    return t('账号或密码错误，请检查后重试');
+  }
+  if (status === 403) {
+    return t('该账号已被禁用或没有登录权限');
+  }
+  if (status === 429 || /频繁|too many/i.test(raw)) {
+    return t('尝试过于频繁，请稍后再试');
+  }
+  if (/网络连接失败|Failed to fetch|NetworkError/i.test(raw)) {
+    return t('网络连接失败，请检查网络后重试');
+  }
+  return raw || t('登录失败，请稍后重试');
+}
+
 export default function Login(): JSX.Element {
   const { t, i18n } = useTranslation();
   const [email, setEmail] = useState<string>('');
@@ -84,7 +109,7 @@ export default function Login(): JSX.Element {
   }, []);
 
   // 登录成功后写入会话并跳转（密码/TOTP 两条路径共用）
-  const completeLogin = (data: { token: string; email: string; username?: string; role?: string; expires_at?: number }): void => {
+  const completeLogin = (data: { token: string; email: string; username?: string; role?: string; expires_at?: number; must_change_password?: boolean }): void => {
     // 后端契约是秒级时间戳；防御性兼容：若上游返回毫秒级则不重复乘 1000
     const rawExp = Number(data.expires_at);
     const expiresMs = Number.isFinite(rawExp) && rawExp > 0
@@ -96,6 +121,14 @@ export default function Login(): JSX.Element {
     localStorage.setItem('username', data.username || '');
     localStorage.setItem('role', data.role || 'user');
     localStorage.setItem('expires_at', String(expiresMs));
+    // 首次启动的内置管理员用公开弱口令（123456）初始化：强制去改密页，
+    // 不阻断登录（否则拿不到初始密码就无法进入）。
+    if (data.must_change_password) {
+      localStorage.setItem('must_change_password', '1');
+      navigate('/profile?force_password=1');
+      return;
+    }
+    localStorage.removeItem('must_change_password');
     navigate('/');
   };
 
@@ -116,7 +149,7 @@ export default function Login(): JSX.Element {
         setError(t('登录失败：响应格式错误'));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('两步验证失败'));
+      setError(friendlyLoginError(err, t));
     } finally {
       setLoading(false);
     }
@@ -142,7 +175,7 @@ export default function Login(): JSX.Element {
         setError(t('登录失败：响应格式错误'));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('登录失败'));
+      setError(friendlyLoginError(err, t));
     } finally {
       setLoading(false);
     }
@@ -267,7 +300,7 @@ export default function Login(): JSX.Element {
         setError(t('登录失败：响应格式错误'));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('登录失败'));
+      setError(friendlyLoginError(err, t));
     } finally {
       setLoading(false);
     }

@@ -812,7 +812,14 @@ fn ensure_default_admin(user_store: &UserStore) {
         Role::Admin,
         0,
     ) {
-        Ok(_) => {
+        Ok(user) => {
+            // 标记「首次登录必须改密」：内置密码是公开的弱口令，
+            // 前端登录后据此强制跳转改密页。
+            if let Err(e) = user_store.update(&user.id, |u| {
+                u.must_change_password = true;
+            }) {
+                tracing::warn!("Failed to set must_change_password for default admin: {e}");
+            }
             tracing::warn!(
                 "First-time setup: built-in admin account created. \
                  email={} | username={} | password={} \
