@@ -169,9 +169,6 @@ struct CatalogSpec {
     fallback: &'static [FallbackModel],
     /// 目录端点的鉴权/解析方式（None = 用 provider 默认头 + 账号凭证）。
     sign: Option<CatalogSign>,
-    method: None,
-    body: None,
-    parser: None,
     /// 目录端点的 HTTP 方法（None = GET）。
     method: Option<CatalogMethod>,
     /// 请求体（仅 POST 需要）。
