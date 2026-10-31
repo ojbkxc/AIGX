@@ -11,7 +11,7 @@ const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'} — ${name}${detail ? ` | ${detail}` : ''}`);
 };
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || undefined });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 
 try {
