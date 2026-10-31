@@ -340,8 +340,10 @@ pub fn resolve_bridges_with_affinity(
 pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
     let mut result: Vec<BridgeCandidate> = Vec::new();
 
-    // 第一级：通用渠道（按 priority/weight 选取支持该 model 的渠道）
-    let candidates = state.channel_store.select_for_model(model);
+    // 第一级：通用渠道（多因子调度排序：health / cost / rpm）
+    let candidates = state
+        .channel_store
+        .select_for_model_ranked(model, &state.pricing_store);
     for ch in &candidates {
         match ch.channel_type {
             // 空密钥渠道合法（免鉴权上游 / 网关侧 IP 白名单）：

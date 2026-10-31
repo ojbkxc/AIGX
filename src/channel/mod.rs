@@ -1004,6 +1004,71 @@ impl ChannelStore {
     // balancer 集成到 ChannelStore。既有方法（mark_cooldown/mark_unhealthy/
     // mark_healthy/mark_used/select_for_model）签名与逻辑保留不变，仅新增。
 
+    /// 多因子调度的渠道选取 — 在 `select_for_model` 的候选集上按
+    /// 组合调度器（health / cost / rpm）重新排序。
+    ///
+    /// 与 `select_for_model` 的关系：后者是「过滤 + 优先级分组 + 加权随机」
+    /// 的基础选取；本方法在此基础上叠加 `scheduler::rank_candidates` 的
+    /// 多因子评分排序。调度器评分失败（panic / 返回 Err）时自动回退
+    /// passthrough（按 weight 排序），不阻断请求。
+    ///
+    /// `pricing_store` 用于成本因子（渠道级 cost_pricing 优先，缺失回落全局价）；
+    /// rpm 因子取自各渠道的 AIMD 快照。
+    pub fn select_for_model_ranked(
+        &self,
+        model: &str,
+        pricing_store: &crate::pricing::PricingStore,
+    ) -> Vec<Channel> {
+        let candidates = self.select_for_model(model);
+        if candidates.len() <= 1 {
+            return candidates;
+        }
+        // 只在**同一 priority 组内**按多因子评分重排：priority 是管理员显式
+        // 设定的硬约束（「这组渠道优先用」），不能被自动评分推翻 —— 否则
+        // 把低优先级渠道的分数抬上去会让管理员的配置失效。同组内才比较
+        // health / cost / rpm。
+        let mut result: Vec<Channel> = Vec::with_capacity(candidates.len());
+        let mut group_start = 0;
+        while group_start < candidates.len() {
+            let priority = candidates[group_start].priority;
+            let mut group_end = group_start;
+            while group_end < candidates.len() && candidates[group_end].priority == priority {
+                group_end += 1;
+            }
+            let group: Vec<Channel> = candidates[group_start..group_end].to_vec();
+            if group.len() <= 1 {
+                result.extend(group);
+            } else {
+                let pairs: Vec<(Channel, u32)> =
+                    group.iter().map(|c| (c.clone(), c.weight.max(1))).collect();
+                let mut rpm_overrides: HashMap<String, f64> = HashMap::new();
+                for (ch, _) in &pairs {
+                    if let Some(snapshot) = self.aimd_snapshot(&ch.id) {
+                        rpm_overrides.insert(
+                            ch.id.clone(),
+                            scheduler::aimd_state_to_rpm_factor(
+                                &snapshot.state,
+                                snapshot.current_limit,
+                            ),
+                        );
+                    }
+                }
+                let ctx = scheduler::build_context(
+                    model,
+                    &pairs,
+                    &self.health_tracker,
+                    pricing_store,
+                    Some(&rpm_overrides),
+                );
+                let scheduler = self.scheduler.read();
+                let ranked = scheduler::rank_candidates(pairs, &ctx, &*scheduler);
+                result.extend(ranked.into_iter().map(|(ch, _)| ch));
+            }
+            group_start = group_end;
+        }
+        result
+    }
+
     /// 带亲和性的渠道选取 — 先查 `(session_id, model)` 亲和缓存，命中且可用则置顶。
     ///
     /// 返回的列表与 `select_for_model` 同样按 priority/weight 排序，仅当亲和命中时

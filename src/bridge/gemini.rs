@@ -356,6 +356,18 @@ impl Bridge for GeminiBridge {
                             ));
                         }
                         None => {
+                            // 流结束：补解析缓冲区里没有尾随空行的最后一帧
+                            // （部分上游省略最后的 `\n\n`，直接丢弃会丢 usage）。
+                            if let Some(crate::sse::SseEvent::Data(payload)) = decoder.finish() {
+                                if let Some(chunk) =
+                                    parse_stream_event(&payload, &id, &model, &mut state)
+                                {
+                                    return Some((
+                                        chunk,
+                                        (byte_stream, decoder, state, id, model, pending),
+                                    ));
+                                }
+                            }
                             return None;
                         }
                     }
@@ -763,6 +775,7 @@ mod tests {
             id: "test".to_string(),
             model: "gemini-pro".to_string(),
             sent_finish: false,
+            ..Default::default()
         };
         let chunk = parse_stream_event(payload, "test", "gemini-pro", &mut state)
             .expect("should parse")
@@ -778,6 +791,7 @@ mod tests {
             id: "test".to_string(),
             model: "gemini-pro".to_string(),
             sent_finish: false,
+            ..Default::default()
         };
         let chunk = parse_stream_event(payload, "test", "gemini-pro", &mut state)
             .expect("should parse")
