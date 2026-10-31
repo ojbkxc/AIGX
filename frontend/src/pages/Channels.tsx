@@ -342,7 +342,6 @@ export default function Channels(): JSX.Element {
   // 单独一个 effect：它只改状态，不直接发请求。
   useEffect(() => {
     setPage((prev) => (prev === 1 ? prev : 1));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
   // 点击外部关闭"更多"菜单

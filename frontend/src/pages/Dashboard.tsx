@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
@@ -353,33 +353,7 @@ export default function Dashboard(): JSX.Element {
   const [realtime, setRealtime] = useState<RealtimeStats | null>(null);
   const [cacheSavings, setCacheSavings] = useState<CacheSavings | null>(null);
 
-  useEffect(() => {
-    loadData();
-    // 实时指标轮询：30s 刷新一次 RPS / 活跃用户 / 活跃渠道 / 平均延迟
-    // 仅管理员轮询管理指标，普通用户静默展示个人配额视图
-    const timer = setInterval(() => {
-      if (isAdmin()) loadRealtimeOnly();
-    }, 30000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // 管理员：仅刷新实时指标，避免整页 loading 闪烁
-  const loadRealtimeOnly = async (): Promise<void> => {
-    try {
-      const [rtData, urData, chData] = await Promise.all([
-        api.getRealtime().catch(() => null),
-        api.getUserRanking().catch(() => null),
-        api.getChannelHealth().catch(() => null),
-      ]);
-      setRealtime((rtData?.data ?? rtData) as unknown as RealtimeStats | null);
-      if (urData) setUserRanking((urData.data ?? urData) as unknown as UserRanking[]);
-      if (chData) setChannelHealth((chData.data ?? chData) as unknown as ChannelHealth[]);
-    } catch {
-      // 轮询失败静默，不打扰用户
-    }
-  };
-
-  const loadData = async (): Promise<void> => {
+  const loadData = useCallback(async (): Promise<void> => {
     setRefreshing(true);
     setLoading(true);
     setError('');
@@ -445,7 +419,33 @@ export default function Dashboard(): JSX.Element {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [t]);
+
+  // 管理员：仅刷新实时指标，避免整页 loading 闪烁
+  const loadRealtimeOnly = useCallback(async (): Promise<void> => {
+    try {
+      const [rtData, urData, chData] = await Promise.all([
+        api.getRealtime().catch(() => null),
+        api.getUserRanking().catch(() => null),
+        api.getChannelHealth().catch(() => null),
+      ]);
+      setRealtime((rtData?.data ?? rtData) as unknown as RealtimeStats | null);
+      if (urData) setUserRanking((urData.data ?? urData) as unknown as UserRanking[]);
+      if (chData) setChannelHealth((chData.data ?? chData) as unknown as ChannelHealth[]);
+    } catch {
+      // 轮询失败静默，不打扰用户
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadData();
+    // 实时指标轮询：30s 刷新一次 RPS / 活跃用户 / 活跃渠道 / 平均延迟
+    // 仅管理员轮询管理指标，普通用户静默展示个人配额视图
+    const timer = setInterval(() => {
+      if (isAdmin()) void loadRealtimeOnly();
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [loadData, loadRealtimeOnly]);
 
   if (loading) {
     return (

@@ -11,6 +11,9 @@ export default defineConfig({
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}'],
     globals: true,
+    // 固定 NODE_ENV=test：宿主 shell 若已导出 NODE_ENV=production，
+    // React 会加载生产构建，@testing-library 的 act() 直接抛错。
+    env: { NODE_ENV: 'test' },
   },
   // 模块解析优先级：TS > JS（页面迁移期间保证 .tsx 优先于同名 .jsx 被加载）
   resolve: {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   BarChart3, Code2, GraduationCap, ClipboardList, History, MessageSquarePlus, Trash2, X,
@@ -136,7 +136,9 @@ export default function Chat(): JSX.Element {
   };
 
   /** 把当前消息/模型写回活动会话（标题为空时用首条用户消息自动命名） */
-  const saveActiveNow = (): void => {
+  // 全量状态读的都是 ref + setState，依赖恒为空，可安全稳定引用，
+  // 供 debounce/卸载两个 effect 直接依赖而不触发重跑。
+  const saveActiveNow = useCallback((): void => {
     const id = activeRef.current;
     if (!id) return;
     const next = sessionsRef.current.map((s) => (s.id === id
@@ -149,7 +151,7 @@ export default function Chat(): JSX.Element {
       }
       : s));
     persistSessions(next);
-  };
+  }, []);
 
   // 首启：恢复多会话列表（无则迁移旧单会话），定位活动会话
   useEffect(() => {
@@ -206,7 +208,7 @@ export default function Chat(): JSX.Element {
       saveTimer.current = null;
       saveActiveNow();
     }, 500);
-  }, [messages]);
+  }, [messages, saveActiveNow]);
 
   // 卸载时立即落盘
   useEffect(() => () => {
@@ -215,7 +217,7 @@ export default function Chat(): JSX.Element {
       saveTimer.current = null;
       saveActiveNow();
     }
-  }, []);
+  }, [saveActiveNow]);
 
   const suggestions = useMemo(() => {
     const custom = loadSuggestionPrompts();
