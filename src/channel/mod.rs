@@ -1044,13 +1044,15 @@ impl ChannelStore {
                 let mut rpm_overrides: HashMap<String, f64> = HashMap::new();
                 for (ch, _) in &pairs {
                     if let Some(snapshot) = self.aimd_snapshot(&ch.id) {
-                        rpm_overrides.insert(
-                            ch.id.clone(),
-                            scheduler::aimd_state_to_rpm_factor(
-                                &snapshot.state,
-                                snapshot.current_limit,
-                            ),
-                        );
+                        // channel::aimd 的 RateLimitState 与 ratelimit::aimd_limiter
+                        // 的是两个类型，这里就地映射（Stable 用当前限额、
+                        // Learning 中性、Cooldown 大幅降权）。
+                        let factor = match snapshot.state {
+                            aimd::RateLimitState::Stable => snapshot.current_limit as f64,
+                            aimd::RateLimitState::Learning => scheduler::RPM_FACTOR_LEARNING,
+                            aimd::RateLimitState::Cooldown => scheduler::RPM_FACTOR_COOLDOWN,
+                        };
+                        rpm_overrides.insert(ch.id.clone(), factor);
                     }
                 }
                 let ctx = scheduler::build_context(
