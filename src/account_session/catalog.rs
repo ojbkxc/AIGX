@@ -162,8 +162,27 @@ struct CatalogSpec {
     path: &'static str,
     /// 响应是否是 OpenAI 形态 `{data:[...]}`（false = 需按家解析）。
     openai_shape: bool,
-    /// 静态兜底表（模型 id 列表）。
-    fallback: &'static [&'static str],
+    /// 静态兜底表。
+    fallback: &'static [FallbackModel],
+}
+
+/// 静态兜底表的一行。
+///
+/// 字段与 Agent2API 各家 `models.rs` 的兜底表**逐条对应**（见该文件的
+/// 模块头）：`id` 是客户端可见名，`upstream_key` 是上游真名（路由时用），
+/// `reasoning` / `vision` / `tool` 是能力位，`context_window` 是上下文长度。
+///
+/// 上游拉回真实目录时这些值以上游为准；兜底表只在断网 / 未登录时兜底。
+#[derive(Debug, Clone, Copy)]
+pub struct FallbackModel {
+    pub id: &'static str,
+    /// 上游真名（空 = 与 id 相同）。
+    pub upstream_key: &'static str,
+    pub reasoning: bool,
+    pub vision: bool,
+    /// 该家是 agent 形态、工具调用为固有能力时置 true。
+    pub tool: bool,
+    pub context_window: u32,
 }
 
 /// 已接入目录发现的供应商。
@@ -176,7 +195,24 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
         "loomy" => Some(CatalogSpec {
             path: "/api/v1/models",
             openai_shape: true,
-            fallback: &["spark-x", "spark-x2.5"],
+            fallback: &[
+                FallbackModel {
+                    id: "spark-x",
+                    upstream_key: "",
+                    reasoning: true,
+                    vision: false,
+                    tool: true,
+                    context_window: 128_000,
+                },
+                FallbackModel {
+                    id: "spark-x2.5",
+                    upstream_key: "",
+                    reasoning: false,
+                    vision: false,
+                    tool: true,
+                    context_window: 128_000,
+                },
+            ],
         }),
         "monkeycode" | "monkeycode-intl" => Some(CatalogSpec {
             path: "/api/v1/users/models",
@@ -203,9 +239,341 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             openai_shape: true,
             fallback: &[],
         }),
+        // Qoder 中国版 / 国际版：两地的目录不是同一份（套餐档位不同），兜底表
+        // 按地区分开 —— 移植自 Agent2API `providers/qoder/models.rs` 的
+        // `fallback(region)`。`upstream_key` 是上游的 `config_name`。
+        "qoder" => Some(CatalogSpec {
+            path: "",
+            openai_shape: false,
+            fallback: QODER_CN_FALLBACK,
+        }),
+        "qoder-intl" => Some(CatalogSpec {
+            path: "",
+            openai_shape: false,
+            fallback: QODER_INTL_FALLBACK,
+        }),
+        // Cline 免费池 / 订阅池：兜底表移植自 Agent2API
+        // `providers/cline/models.rs` 的 `FALLBACK_MODELS`。上游 id 带池前缀
+        // （`cline-free/` / `cline-pass/`），客户端可见名就是同一个 id ——
+        // AIGX 侧不做改名，前缀本身就是池归属。
+        "cline" | "cline-free" | "cline-pass" => Some(CatalogSpec {
+            path: "/ai/cline/recommended-models",
+            openai_shape: false,
+            fallback: CLINE_FALLBACK,
+        }),
         _ => None,
     }
 }
+
+/// Qoder 中国版兜底表。
+const QODER_CN_FALLBACK: &[FallbackModel] = &[
+    FallbackModel {
+        id: "Qwen3.8-Flash",
+        upstream_key: "qfmodel",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Qwen3.8-Max",
+        upstream_key: "qmodel_38max",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Auto",
+        upstream_key: "auto",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Qwen3.7-Max",
+        upstream_key: "qmodel_latest",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Qwen3.7-Plus",
+        upstream_key: "qmodel",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "DeepSeek-V4-Pro",
+        upstream_key: "dmodel",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "DeepSeek-Flash",
+        upstream_key: "dfmodel",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "GLM-5.3",
+        upstream_key: "gmodel",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Kimi-K2.8-Preview",
+        upstream_key: "kmodel",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "MiniMax-M3",
+        upstream_key: "mmodel",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 200_000,
+    },
+];
+
+/// Qoder 国际版兜底表（比中国版多几个模型）。
+const QODER_INTL_FALLBACK: &[FallbackModel] = &[
+    FallbackModel {
+        id: "Qwen3.8-Flash",
+        upstream_key: "qfmodel",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Qwen3.8-Max",
+        upstream_key: "qmodel_38max",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Auto",
+        upstream_key: "auto",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Ultimate",
+        upstream_key: "ultimate",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Performance",
+        upstream_key: "performance",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Efficient",
+        upstream_key: "efficient",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Sonus",
+        upstream_key: "smodel",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Cantus",
+        upstream_key: "cmodel",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Qwen3.7-Max",
+        upstream_key: "qmodel_latest",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Qwen3.7-Plus",
+        upstream_key: "qmodel",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Kimi-K3",
+        upstream_key: "kmodel_latest",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "Kimi-K2.8-Preview",
+        upstream_key: "kmodel",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "GLM-5.3",
+        upstream_key: "gmodel",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "GLM-5.3-Flash",
+        upstream_key: "gfmodel",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "DeepSeek-V4-Pro",
+        upstream_key: "dmodel",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "DeepSeek-Flash",
+        upstream_key: "dfmodel",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "MiniMax-M3",
+        upstream_key: "mmodel",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 200_000,
+    },
+];
+
+/// Cline 兜底表（免费池 + 订阅池）。
+///
+/// 上下文窗口取自 Cline 官方目录（`@cline/llms` 的 `cline` 块实测值）。
+const CLINE_FALLBACK: &[FallbackModel] = &[
+    FallbackModel {
+        id: "cline-pass/glm-5.3",
+        upstream_key: "cline-pass/glm-5.3",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "cline-pass/kimi-k3",
+        upstream_key: "cline-pass/kimi-k3",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 256_000,
+    },
+    FallbackModel {
+        id: "cline-pass/deepseek-v4.1-flash",
+        upstream_key: "cline-pass/deepseek-v4.1-flash",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 1_000_000,
+    },
+    FallbackModel {
+        id: "cline-pass/deepseek-v4-pro",
+        upstream_key: "cline-pass/deepseek-v4-pro",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 128_000,
+    },
+    FallbackModel {
+        id: "cline-pass/qwen3.8-max",
+        upstream_key: "cline-pass/qwen3.8-max",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 256_000,
+    },
+    FallbackModel {
+        id: "cline-free/deepseek-v4.1-flash",
+        upstream_key: "cline-free/deepseek-v4.1-flash",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 1_000_000,
+    },
+    FallbackModel {
+        id: "cline-free/muse-spark-1.3-contributor",
+        upstream_key: "cline-free/muse-spark-1.3-contributor",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 200_000,
+    },
+    FallbackModel {
+        id: "cline-free/solar-pro4",
+        upstream_key: "cline-free/solar-pro4",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 128_000,
+    },
+    FallbackModel {
+        id: "z-ai/glm-5.3-flash",
+        upstream_key: "z-ai/glm-5.3-flash",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 1_310_720,
+    },
+    FallbackModel {
+        id: "poolside/laguna-s-2.1:free",
+        upstream_key: "poolside/laguna-s-2.1:free",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 262_144,
+    },
+];
 
 /// 该供应商是否支持目录发现（管理面据此决定是否显示「同步模型」）。
 pub fn supports(provider: &str) -> bool {
@@ -216,12 +584,17 @@ pub fn supports(provider: &str) -> bool {
 pub fn supported_providers() -> Vec<&'static str> {
     vec![
         "catpaw",
+        "cline",
+        "cline-free",
+        "cline-pass",
         "codearts",
         "commandcode",
         "loomy",
         "monkeycode",
         "monkeycode-intl",
         "officeace",
+        "qoder",
+        "qoder-intl",
     ]
 }
 
@@ -267,11 +640,31 @@ fn fallback_catalog(spec: &CatalogSpec) -> CatalogSnapshot {
         models: spec
             .fallback
             .iter()
-            .map(|id| CatalogEntry {
-                id: (*id).to_string(),
-                upstream: None,
-                context_length: None,
-                capabilities: Vec::new(),
+            .map(|m| {
+                let mut capabilities: Vec<String> = Vec::new();
+                if m.reasoning {
+                    capabilities.push("reasoning".to_string());
+                }
+                if m.vision {
+                    capabilities.push("vision".to_string());
+                }
+                if m.tool {
+                    capabilities.push("tool".to_string());
+                }
+                CatalogEntry {
+                    id: m.id.to_string(),
+                    upstream: if m.upstream_key.is_empty() {
+                        None
+                    } else {
+                        Some(m.upstream_key.to_string())
+                    },
+                    context_length: if m.context_window > 0 {
+                        Some(m.context_window)
+                    } else {
+                        None
+                    },
+                    capabilities,
+                }
             })
             .collect(),
         fetched_at: 0,

@@ -538,3 +538,201 @@ pub async fn handle_report_overview(
         }
     })))
 }
+
+// ── 报表内存缓存 ────────────────────────────────────────────────────────────
+//
+// report 系列每次全量扫 `log_store.requests`（all_sorted_asc），日志量大时
+// 管理端会卡。这里加一层进程内 TTL 缓存：同一 (端点, 天数, 用户范围) 在 TTL
+// 窗口内直接回放上次结果。日志写入不主动失效（报表容忍 ≤TTL 的滞后），故
+// TTL 取短：明细类 60s、聚合类 120s。按天落盘聚合（仿 Agent2API request_daily）
+// 是后续的正解，见 docs/agent2api-porting.md 能力路线图。
+
+type ReportCacheKey = (String, u32, String); // (端点, 天数, 用户范围: ""=全量 / user_id)
+
+fn report_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<ReportCacheKey, (std::time::Instant, Value)>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<ReportCacheKey, (std::time::Instant, Value)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 命中缓存直接回放；未命中执行 `compute` 并落缓存。锁只护 map 本身，
+/// `compute` 在锁外执行（宁可同键并发算两次，也不把全量扫日志塞进临界区）。
+fn cached_report(
+    endpoint: &str,
+    days: u32,
+    user_filter: &Option<String>,
+    ttl_secs: u64,
+    compute: impl FnOnce() -> Value,
+) -> Value {
+    let key: ReportCacheKey = (
+        endpoint.to_string(),
+        days,
+        user_filter.clone().unwrap_or_default(),
+    );
+    if let Ok(map) = report_cache().lock() {
+        if let Some((at, v)) = map.get(&key) {
+            if at.elapsed() < std::time::Duration::from_secs(ttl_secs) {
+                return v.clone();
+            }
+        }
+    }
+    let fresh = compute();
+    if let Ok(mut map) = report_cache().lock() {
+        // 防止日志很长时缓存无限膨胀：超过 256 条整表清空（简单够用）
+        if map.len() > 256 {
+            map.clear();
+        }
+        map.insert(key, (std::time::Instant::now(), fresh.clone()));
+    }
+    fresh
+}
+
+/// 模型分布（Agent2API report models 维度）：按请求数/Token/消费额排布。
+pub async fn handle_report_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ReportQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
+    let days = q.days.clamp(1, 365);
+    let data = cached_report("models", days, &user_filter, 120, || {
+        let start = dashboard_start_ts(days);
+        let logs = state.log_store.requests.all_sorted_asc();
+        let mut agg: std::collections::HashMap<String, (u64, u64, u64, i64)> =
+            std::collections::HashMap::new();
+        for l in &logs {
+            if l.created_at < start {
+                continue;
+            }
+            if let Some(uid) = &user_filter {
+                if l.user_id.as_deref() != Some(uid.as_str()) {
+                    continue;
+                }
+            }
+            let e = agg.entry(l.model.clone()).or_insert((0, 0, 0, 0));
+            e.0 += 1;
+            e.1 = e.1.saturating_add(l.input_tokens);
+            e.2 = e.2.saturating_add(l.output_tokens);
+            e.3 = e.3.saturating_add(l.cost);
+        }
+        let mut items: Vec<(String, (u64, u64, u64, i64))> = agg.into_iter().collect();
+        items.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        json!(items
+            .into_iter()
+            .map(|(model, (count, it, ot, cost))| json!({
+                "model": model,
+                "count": count,
+                "input_tokens": it,
+                "output_tokens": ot,
+                "cost": cost,
+            }))
+            .collect::<Vec<Value>>())
+    });
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+/// 缓存命中率四档窗口（Agent2API cacheRates：10m/1h/24h/7d）。
+///
+/// AIGX 日志的 `cache_hit` 是请求级布尔（无命中 token 数），口径取
+/// 「命中请求数 / 总请求数」，并附命中请求承担的输入 Token 作参考。
+pub async fn handle_report_cache_rates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ReportQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
+    let days = q.days.clamp(1, 365);
+    let data = cached_report("cache_rates", days, &user_filter, 60, || {
+        let start = dashboard_start_ts(days);
+        let now = chrono::Utc::now().timestamp();
+        let windows: [(&str, i64); 4] = [
+            ("10m", 600),
+            ("1h", 3600),
+            ("24h", 24 * 3600),
+            ("7d", 7 * 24 * 3600),
+        ];
+        let logs = state.log_store.requests.all_sorted_asc();
+        let mut out = Vec::new();
+        for (label, span) in windows {
+            let from = now - span;
+            let mut total = 0u64;
+            let mut hit = 0u64;
+            let mut input_tokens = 0u64;
+            let mut hit_input_tokens = 0u64;
+            for l in &logs {
+                if l.created_at < from || l.created_at < start {
+                    continue;
+                }
+                if let Some(uid) = &user_filter {
+                    if l.user_id.as_deref() != Some(uid.as_str()) {
+                        continue;
+                    }
+                }
+                total += 1;
+                input_tokens = input_tokens.saturating_add(l.input_tokens);
+                if l.cache_hit {
+                    hit += 1;
+                    hit_input_tokens = hit_input_tokens.saturating_add(l.input_tokens);
+                }
+            }
+            out.push(json!({
+                "window": label,
+                "requests": total,
+                "hit_requests": hit,
+                "rate": if total > 0 { (hit as f64 / total as f64 * 10000.0).round() / 100.0 } else { 0.0 },
+                "input_tokens": input_tokens,
+                "hit_input_tokens": hit_input_tokens,
+            }));
+        }
+        json!(out)
+    });
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+/// 按天消费/请求趋势（Agent2API dailyTrend）：供仪表盘折线复用。
+pub async fn handle_report_daily_trend(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ReportQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
+    let days = q.days.clamp(1, 365);
+    let data = cached_report("daily_trend", days, &user_filter, 120, || {
+        let start = dashboard_start_ts(days);
+        let logs = state.log_store.requests.all_sorted_asc();
+        let mut daily: std::collections::BTreeMap<String, (u64, u64, u64, i64)> =
+            std::collections::BTreeMap::new();
+        for l in &logs {
+            if l.created_at < start {
+                continue;
+            }
+            if let Some(uid) = &user_filter {
+                if l.user_id.as_deref() != Some(uid.as_str()) {
+                    continue;
+                }
+            }
+            let day = chrono::DateTime::<chrono::Utc>::from_timestamp(l.created_at, 0)
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+            let e = daily.entry(day).or_insert((0, 0, 0, 0));
+            e.0 += 1;
+            e.1 = e.1.saturating_add(l.input_tokens);
+            e.2 = e.2.saturating_add(l.output_tokens);
+            e.3 = e.3.saturating_add(l.cost);
+        }
+        json!(daily
+            .into_iter()
+            .map(|(date, (count, it, ot, cost))| json!({
+                "date": date,
+                "count": count,
+                "input_tokens": it,
+                "output_tokens": ot,
+                "cost": cost,
+            }))
+            .collect::<Vec<Value>>())
+    });
+    Ok(Json(json!({ "success": true, "data": data })))
+}

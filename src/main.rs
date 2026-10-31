@@ -1081,7 +1081,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 统一模型管理（渠道模型 + 账号池模型聚合视图）
         .route("/api/models/manage", get(api::admin::handle_manage_view))
         .route("/api/models/state", post(api::admin::handle_set_state))
-        .route("/api/models/price", post(api::admin::handle_upsert_price))
+        .route(
+            "/api/models/price",
+            post(api::admin::handle_upsert_model_price),
+        )
         .route(
             "/api/models/price/remove",
             post(api::admin::handle_remove_price),
@@ -1394,7 +1397,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/swagger-ui", get(api::admin::handle_swagger_ui))
         // 模型定价
         .route("/api/prices", get(api::admin::handle_list_prices))
-        .route("/api/prices", post(api::admin::handle_upsert_price))
+        .route("/api/prices", post(api::admin::legacy::handle_upsert_price))
         .route(
             "/api/prices/:model",
             put(api::admin::handle_upsert_price_by_model),

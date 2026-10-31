@@ -1250,7 +1250,10 @@ pub async fn handle_run_import(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     if body.entries.is_empty() {
-        return Err(error_response("没有选择要导入的条目", StatusCode::BAD_REQUEST));
+        return Err(error_response(
+            "没有选择要导入的条目",
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     let mut created: Vec<Value> = Vec::new();

@@ -149,7 +149,7 @@ fn default_price_type() -> String {
 }
 
 /// POST /api/models/price —— 新增/更新定价（可选同时改模型倍率）。
-pub async fn handle_upsert_price(
+pub async fn handle_upsert_model_price(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<PriceBody>,

@@ -19,7 +19,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{FixedOffset, TimeZone, Utc};
+use chrono::{FixedOffset, Utc};
 
 use super::claim::{self, supports_checkin};
 use super::store::{CheckinOutcome, CheckinRecord, CheckinStore};

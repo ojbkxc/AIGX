@@ -68,7 +68,7 @@ pub use pricing::{
 // 统一模型管理（渠道模型 + 账号池模型聚合视图，参照 Agent2API 模型管理）
 pub use model_manage::{
     handle_manage_view, handle_remove_alias, handle_remove_price, handle_set_alias,
-    handle_set_state, handle_upsert_price,
+    handle_set_state, handle_upsert_model_price,
 };
 
 // 签到中心（管理员替上游账号签到，区别于用户侧的 /api/checkin）
@@ -101,7 +101,8 @@ pub use subscriptions::{
 
 pub use dashboard::{
     handle_cache_savings, handle_consumption_trend, handle_model_distribution,
-    handle_report_heatmap, handle_report_overview, handle_report_token_trend,
+    handle_report_cache_rates, handle_report_daily_trend, handle_report_heatmap,
+    handle_report_models, handle_report_overview, handle_report_token_trend,
     handle_report_top_sources, handle_scheduler_status,
 };
 
@@ -161,9 +162,8 @@ pub use legacy::{
     handle_swagger_ui, handle_test_account, handle_test_channel, handle_test_email,
     handle_test_slack, handle_test_telegram, handle_test_webhook, handle_tokens_today,
     handle_update_account, handle_update_ip_filter, handle_update_price_sync_config,
-    handle_update_ratelimit_config, handle_upsert_group,
-    handle_upsert_price_by_model, handle_usage_models, handle_usage_summary, handle_usage_trend,
-    handle_user_ranking,
+    handle_update_ratelimit_config, handle_upsert_group, handle_upsert_price_by_model,
+    handle_usage_models, handle_usage_summary, handle_usage_trend, handle_user_ranking,
 };
 
 // 用户侧端点与未迁移端点（main.rs 恢复路由时需要）
