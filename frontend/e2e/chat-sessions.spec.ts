@@ -43,12 +43,14 @@ test.describe('聊天 · 历史会话抽屉', () => {
     await page.goto('/chat');
     await expect(page.locator('.pg-shell')).toBeVisible();
 
-    const before = await page.evaluate(() => window.innerHeight);
+    // 遮罩/抽屉是 position:fixed，其高度按**布局视口**（不含横向滚动条）计算；
+    // window.innerHeight 在出现横向滚动条时比它大十几像素，用它会假红。
+    // documentElement.clientHeight 才是 fixed 元素实际能撑满的高度。
+    const before = await page.evaluate(() => document.documentElement.clientHeight);
     await openDrawer(page);
 
-    // 抽屉铺满整个视口高度。移动端模拟器的 visual viewport 与
-    // window.innerHeight 存在几像素差异，故用 99% 作为下界而非精确比较。
-    // 修复前抽屉高度只有内容高度（约 269px），远低于此阈值。
+    // 抽屉铺满整个布局视口。修复前它只有内容高度（约 269px），远低于阈值；
+    // 这里留 1% 容差给移动端模拟器的亚像素差异。
     const drawerBox = await page.locator('.pg-sessions').boundingBox();
     expect(drawerBox).not.toBeNull();
     expect(drawerBox!.height).toBeGreaterThan(before * 0.99);
