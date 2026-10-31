@@ -453,7 +453,11 @@ mod tests {
     #[test]
     fn provider_label_falls_back_to_kind() {
         assert_eq!(provider_label("unknown-vendor"), "unknown-vendor");
-        assert_eq!(provider_label("openai_compatible"), "OpenAI 兼容");
+        // registry 里有这一家的正式条目，用它自己的展示名（含「自填地址」后缀）
+        assert_eq!(
+            provider_label("openai_compatible"),
+            "OpenAI 兼容（自填地址）"
+        );
         // registry 里的 provider 用中文展示名
         assert!(!provider_label("deepseek").is_empty());
     }

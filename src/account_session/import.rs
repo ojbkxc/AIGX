@@ -198,7 +198,7 @@ fn collect_claude_models(env: Option<&Value>) -> (Vec<String>, Vec<Value>) {
     const MAX_MODELS: usize = 6;
     let mut models: Vec<String> = Vec::new();
     let mut mappings: Vec<Value> = Vec::new();
-    let mut push = |raw: &str, models: &mut Vec<String>, mappings: &mut Vec<Value>| {
+    let push = |raw: &str, models: &mut Vec<String>, mappings: &mut Vec<Value>| {
         let (clean, alias) = split_one_m_marker(raw);
         if clean.is_empty() {
             return;
@@ -455,7 +455,7 @@ pub fn scan(existing_names: &HashSet<String>) -> ImportScan {
                 string_field(Some(entry), "name").to_lowercase(),
             )
         };
-        entries.sort_by(|a, b| rank(a).cmp(&rank(b)));
+        entries.sort_by_key(rank);
 
         ImportScan {
             available: true,

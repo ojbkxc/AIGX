@@ -958,7 +958,9 @@ mod tests {
     #[test]
     fn cline_fallback_keeps_pool_prefix() {
         let spec = spec_for("cline-free").expect("cline 应有目录描述");
+        // 表里既有 cline-free/ 也有 cline-pass/ 的条目（两个池共用一张表）
         assert!(spec.fallback.iter().all(|m| m.id.starts_with("cline-free/")
+            || m.id.starts_with("cline-pass/")
             || m.id.starts_with("z-ai/")
             || m.id.starts_with("poolside/")));
     }

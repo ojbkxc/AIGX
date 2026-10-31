@@ -519,7 +519,7 @@ pub async fn handle_report_overview(
         *models.entry(l.model.clone()).or_insert(0) += 1;
     }
     let mut top_models: Vec<(String, u64)> = models.into_iter().collect();
-    top_models.sort_by(|a, b| b.1.cmp(&a.1));
+    top_models.sort_by_key(|a| std::cmp::Reverse(a.1));
     top_models.truncate(5);
 
     Ok(Json(json!({
@@ -619,7 +619,7 @@ pub async fn handle_report_models(
             e.3 = e.3.saturating_add(l.cost);
         }
         let mut items: Vec<(String, (u64, u64, u64, i64))> = agg.into_iter().collect();
-        items.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        items.sort_by_key(|a| std::cmp::Reverse(a.1 .0));
         json!(items
             .into_iter()
             .map(|(model, (count, it, ot, cost))| json!({
