@@ -406,7 +406,16 @@ pub async fn handle_create_account_session(
     headers: HeaderMap,
     Json(body): Json<AccountSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
+    let config = verify_admin(&state, &headers).await?;
+    // SSRF 防护：账号级 base_url 同样会被网关主动请求（探活/签到/转发）
+    if !body.base_url.trim().is_empty() {
+        if let Err(rej) = crate::net_guard::validate_outbound_url(
+            &body.base_url,
+            config.usage.allow_internal_upstream,
+        ) {
+            return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
+        }
+    }
     let channel = ensure_account_channel(&state, body.channel_id.trim())?;
     let mut session = AccountSession::new(channel.id.clone(), String::new());
     session = apply_request(session, &body);
@@ -448,7 +457,16 @@ pub async fn handle_update_account_session(
     Path(id): Path<String>,
     Json(body): Json<AccountSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
+    let config = verify_admin(&state, &headers).await?;
+    // SSRF 防护（与新增同口径）
+    if !body.base_url.trim().is_empty() {
+        if let Err(rej) = crate::net_guard::validate_outbound_url(
+            &body.base_url,
+            config.usage.allow_internal_upstream,
+        ) {
+            return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
+        }
+    }
     let Some(prev) = state.account_sessions.get(&id) else {
         return Err(error_response(
             "Account session not found",

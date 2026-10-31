@@ -337,6 +337,13 @@ pub struct UsageConfig {
     /// 与 token 计费互斥：订阅计费模式为 count 时按此固定值扣，否则按 token 量。
     #[serde(default = "default_billing_flat_quota")]
     pub billing_flat_quota: i64,
+    /// 是否允许上游地址指向内网/环回地址（SSRF 防护的逃生阀）。
+    ///
+    /// 默认 `false`：保存渠道/账号时拒绝 `127.0.0.1`、`10.x`、`169.254.169.254`
+    /// 这类地址，避免网关被当成内网探测跳板。自托管 Ollama / 内网 vLLM 等
+    /// 确实需要指向内网的场景，由管理员显式开启。
+    #[serde(default)]
+    pub allow_internal_upstream: bool,
 }
 
 fn default_billing_flat_quota() -> i64 {
@@ -473,6 +480,7 @@ impl Default for UsageConfig {
             retry_on_status: default_retry_on_status(),
             max_request_body_mb: default_max_request_body_mb(),
             log_body: false,
+            allow_internal_upstream: false,
             billing_flat_quota: default_billing_flat_quota(),
         }
     }

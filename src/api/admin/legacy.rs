@@ -1085,7 +1085,7 @@ pub async fn handle_patch_channel(
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
+    let config = verify_admin(&state, &headers).await?;
     let mut ch = state
         .channel_store
         .get(&id)
@@ -1099,6 +1099,15 @@ pub async fn handle_patch_channel(
         ch.channel_type = ChannelType::from_str_lossy(channel_type);
     }
     if let Some(base_url) = body.get("base_url").and_then(|v| v.as_str()) {
+        // SSRF 防护：PATCH 只改 URL 的路径同样要校验（与 PUT/新增同口径）
+        if !base_url.trim().is_empty() {
+            if let Err(rej) = crate::net_guard::validate_outbound_url(
+                base_url,
+                config.usage.allow_internal_upstream,
+            ) {
+                return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
+            }
+        }
         ch.base_url = base_url.to_string();
     }
     // api_key 三态：缺省/空串 → 保留现有（避免脱敏值覆盖真实密钥）；

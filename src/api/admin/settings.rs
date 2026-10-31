@@ -49,6 +49,8 @@ pub struct LimitsRequest {
     pub log_body: Option<bool>,
     /// 按次计费每次固定扣减额度（billing_mode=count 的订阅生效）
     pub billing_flat_quota: Option<i64>,
+    /// 是否允许上游地址指向内网（SSRF 防护逃生阀，默认 false）
+    pub allow_internal_upstream: Option<bool>,
 }
 
 /// 签到设置请求体（enabled + 奖励区间）
@@ -144,6 +146,7 @@ pub async fn handle_get_limits(
             "max_request_body_mb": config.usage.max_request_body_mb,
             "log_body": config.usage.log_body,
             "billing_flat_quota": config.usage.billing_flat_quota,
+            "allow_internal_upstream": config.usage.allow_internal_upstream,
         })
     })))
 }
@@ -249,6 +252,11 @@ pub async fn handle_update_limits(
             // 同步进程级快照（数据面按次计费同步读取，立即生效）
             crate::config::set_billing_flat_quota(v);
         }
+    }
+    if let Some(v) = body.allow_internal_upstream {
+        // SSRF 防护逃生阀：开启后允许上游地址指向内网（自托管 Ollama 等）。
+        // 保存后立即生效（渠道/账号保存时实时读配置快照）。
+        config.usage.allow_internal_upstream = v;
     }
     // 换号重试间隔立即生效（账号池运行时读取）
     state

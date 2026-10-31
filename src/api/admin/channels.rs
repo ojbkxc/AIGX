@@ -511,7 +511,17 @@ pub async fn handle_add_channel(
     headers: HeaderMap,
     Json(body): Json<ChannelRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
+    let config = verify_admin(&state, &headers).await?;
+    // SSRF 防护：拒绝把上游指向内网/环回/云元数据地址。
+    // 空 base_url 合法（Cloudflare / 账号型渠道无渠道级地址）。
+    if !body.base_url.trim().is_empty() {
+        if let Err(rej) = crate::net_guard::validate_outbound_url(
+            &body.base_url,
+            config.usage.allow_internal_upstream,
+        ) {
+            return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
+        }
+    }
     let ch = body.to_channel(String::new());
     match state.channel_store.add(ch) {
         Ok(c) => {
@@ -549,7 +559,16 @@ pub async fn handle_update_channel(
     Path(id): Path<String>,
     Json(body): Json<ChannelRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
+    let config = verify_admin(&state, &headers).await?;
+    // SSRF 防护（与新增同口径）：拒绝内网/环回/元数据地址。
+    if !body.base_url.trim().is_empty() {
+        if let Err(rej) = crate::net_guard::validate_outbound_url(
+            &body.base_url,
+            config.usage.allow_internal_upstream,
+        ) {
+            return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
+        }
+    }
     let mut ch = body.to_channel(id.clone());
     // 保留运维字段（test_time/response_time/balance/credit/discovered_models/
     // last_used_at/created_at）：编辑表单不提交这些，不应被清空

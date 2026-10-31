@@ -30,6 +30,7 @@ mod log;
 mod metrics;
 mod model;
 mod monitor;
+mod net_guard;
 mod notify;
 mod oauth;
 mod payment;

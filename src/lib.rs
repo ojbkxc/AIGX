@@ -26,6 +26,7 @@ pub mod log;
 pub mod metrics;
 pub mod model;
 pub mod monitor;
+pub mod net_guard;
 pub mod notify;
 pub mod oauth;
 pub mod payment;
