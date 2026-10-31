@@ -208,7 +208,6 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             path: "/api/v1/models",
             openai_shape: true,
             fallback: &[
-            sign: None,
                 FallbackModel {
                     id: "spark-x",
                     upstream_key: "",
@@ -226,6 +225,7 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
                     context_window: 128_000,
                 },
             ],
+            sign: None,
         }),
         "monkeycode" | "monkeycode-intl" => Some(CatalogSpec {
             path: "/api/v1/users/models",
