@@ -14,6 +14,7 @@
 //! 取消/超时/完成后保留 10 分钟，取任务时顺手清过期项。
 
 mod accio;
+mod antigravity;
 mod catpaw;
 mod cline;
 pub mod loomy;
@@ -205,6 +206,7 @@ pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result
         "catpaw" => catpaw::start(&client).await?,
         "xiaohuanxiong" => raccoon::start(&client).await?,
         "accio" => accio::start(&client).await?,
+        "antigravity" => antigravity::start(&client).await?,
         other => {
             return Err(format!(
                 "「{other}」的网页登录引擎尚未接入网关：请改用「填写凭证」粘贴登录态"
