@@ -52,6 +52,10 @@ pub struct Credentials {
 }
 
 /// 一个进行中的登录流程。
+///
+/// `double_must_use`：`async_trait` 宏给每个方法的返回值包一层 pinned future
+/// （本身已是 must_use），再叠加一层 `#[must_use]` 会被 clippy 判为重复。
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait LoginFlow: Send + Sync {
     /// 轮询一次：`Ok(None)` = 还没完成，继续等；`Ok(Some(_))` = 拿到凭证。
@@ -159,7 +163,7 @@ pub fn cancel(state: &str) -> bool {
         task.finished_at = Some(Instant::now());
     }
     let mut tasks = lock(table());
-    tasks.retain(|_, item| Arc::ptr_eq(item, &handle) == false);
+    tasks.retain(|_, item| !Arc::ptr_eq(item, &handle));
     true
 }
 
