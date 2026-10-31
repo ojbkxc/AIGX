@@ -190,17 +190,22 @@ pub async fn run(
                         let result = if already {
                             ApprovalResult::Approved
                         } else {
-                            let (req_id, rx) = approvals.request(&call.function_name);
+                            let (req_id, rx) =
+                                approvals.request(session_id, &call.function_name, &call.arguments);
                             on_event(AgentEvent::ApprovalRequest {
                                 request_id: req_id.clone(),
                                 name: call.function_name.clone(),
                                 arguments: call.arguments.clone(),
                             })
                             .await;
-                            tokio::time::timeout(approval_timeout, rx)
-                                .await
-                                .map(|r| r.unwrap_or(ApprovalResult::Denied))
-                                .unwrap_or(ApprovalResult::Denied)
+                            match tokio::time::timeout(approval_timeout, rx).await {
+                                Ok(r) => r.unwrap_or(ApprovalResult::Denied),
+                                Err(_) => {
+                                    // 超时：清 pending（防泄漏）+ 落 timeout 留痕
+                                    approvals.remove(&req_id);
+                                    ApprovalResult::Denied
+                                }
+                            }
                         };
                         let approved = result != ApprovalResult::Denied;
                         if result == ApprovalResult::RememberAllow {

@@ -195,6 +195,8 @@ pub async fn handle_delete_session(
             Json(json!({ "error": e.to_string() })),
         )
     })?;
+    // 会话删除顺带清它的免审集（KV + 内存）
+    agent.approvals.forget_session(&id);
     Ok(Json(json!({ "success": true, "data": null })))
 }
 

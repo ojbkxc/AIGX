@@ -49,10 +49,11 @@ impl AgentState {
     /// 构造 Agent 运行时状态。
     pub fn new(store: Arc<FileStore>, config: AgentConfig) -> Self {
         let session_store = session::AgentSessionStore::new(store.clone());
+        let approvals = approval::AgentApprovals::with_store(store.clone());
         Self {
             store,
             config: Arc::new(parking_lot::RwLock::new(config)),
-            approvals: approval::AgentApprovals::new(),
+            approvals,
             session_store,
         }
     }
