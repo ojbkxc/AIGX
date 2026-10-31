@@ -28,7 +28,7 @@ pub mod claim;
 pub mod scheduler;
 pub mod store;
 
-pub use store::{CheckinOutcome, CheckinRecord, CheckinSchedule, CheckinSettings, CheckinStore};
+pub use store::{CheckinOutcome, CheckinStore};
 
 /// 一次签到的结果（各家 claim 的统一返回）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
