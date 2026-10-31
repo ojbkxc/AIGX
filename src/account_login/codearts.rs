@@ -33,7 +33,8 @@ const TOKEN_URL: &str = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/toke
 const PLUGIN_NAME: &str = "snap_vscode";
 const PLUGIN_VERSION: &str = "26.9.101";
 
-struct DpopKey {
+/// 一次性 DPoP 密钥对（OfficeAce 的令牌交换复用这一份）。
+pub(crate) struct DpopKey {
     signing: SigningKey,
     jwk: Jwk,
 }
@@ -62,7 +63,7 @@ struct DpopPayload<'a> {
 }
 
 impl DpopKey {
-    fn generate() -> Result<Self, String> {
+    pub(crate) fn generate() -> Result<Self, String> {
         for _ in 0..8 {
             let seed = uuid::Uuid::new_v4().simple().to_string();
             let bytes = hex::decode(&seed).map_err(|_| "随机数不可用".to_string())?;
@@ -91,7 +92,7 @@ impl DpopKey {
         Err("无法生成本机 P-256 密钥".to_string())
     }
 
-    fn proof(&self, method: &str, endpoint: &str) -> Result<String, String> {
+    pub(crate) fn proof(&self, method: &str, endpoint: &str) -> Result<String, String> {
         let header = DpopHeader {
             alg: "ES256",
             typ: "dpop+jwt",

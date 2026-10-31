@@ -18,6 +18,7 @@ mod antigravity;
 mod catpaw;
 mod cline;
 mod codearts;
+mod officeace;
 pub mod loomy;
 mod qoder;
 mod raccoon;
@@ -74,6 +75,11 @@ pub trait LoginFlow: Send + Sync {
 
     fn poll_interval(&self) -> Duration {
         DEFAULT_POLL_INTERVAL
+    }
+
+    /// 轮询错误是否应立即终止任务（默认按瞬时错误继续重试）。
+    fn fatal(&self, _error: &str) -> bool {
+        false
     }
 }
 
@@ -211,6 +217,7 @@ pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result
         "antigravity" => antigravity::start(&client).await?,
         "trae" => trae::start(&client).await?,
         "codearts" => codearts::start(&client).await?,
+        "officeace" => officeace::start(&client).await?,
         other => {
             return Err(format!(
                 "「{other}」的网页登录引擎尚未接入网关：请改用「填写凭证」粘贴登录态"
@@ -291,7 +298,13 @@ async fn run_loop(
                 return;
             }
             Ok(None) => continue,
-            Err(error) => last_error = error,
+            Err(error) => {
+                if flow.fatal(&error) {
+                    finish(&handle, None, Some(error));
+                    return;
+                }
+                last_error = error;
+            }
         }
     }
 }

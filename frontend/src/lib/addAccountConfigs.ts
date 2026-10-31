@@ -48,6 +48,8 @@ export interface ProviderAddConfig {
     /** 官方登录页（远程网关收不到本机回调，登录完成后回填凭证） */
     url: string;
     hint?: string;
+    /** 该家支持把浏览器地址栏里的回调地址粘回网关换取凭证 */
+    callback?: boolean;
   };
   sms?: {
     note: string;
@@ -102,6 +104,7 @@ export const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
       button: '打开小浣熊登录页',
       url: 'https://xiaohuanxiong.com/',
       hint: '登录完成后回到本弹窗，切到「填写凭证」粘贴 token',
+      callback: true,
     },
     fields: [
       {
@@ -200,6 +203,7 @@ export const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
       button: '打开 Accio 登录页',
       url: 'https://www.accio.com/',
       hint: '登录完成后回到本弹窗，切到「填写凭证」粘贴 accessToken',
+      callback: true,
     },
     fields: [
       { key: 'accessToken', label: 'accessToken', rows: 3, target: 'credential', placeholder: '粘贴 Accio 的 accessToken' },
@@ -247,6 +251,7 @@ export const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
       button: '打开 CodeArts 授权页',
       url: 'https://devcloud.huaweicloud.com/',
       hint: '远程部署时把地址栏回调地址复制回来，按提示处理',
+      callback: true,
     },
     fields: [
       {
@@ -275,6 +280,7 @@ export const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
       button: '打开 Trae 授权页',
       url: 'https://www.trae.cn/',
       hint: '远程部署时把地址栏回调地址复制回来，或粘贴 accessToken',
+      callback: true,
     },
     fields: [
       { key: 'accessToken', label: 'accessToken', rows: 3, target: 'credential', placeholder: 'Cloud-IDE-JWT（三段点分）' },
@@ -399,6 +405,7 @@ export const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
       button: '打开 Antigravity 网页登录',
       url: 'https://antigravity.google/',
       hint: '授权完成后回到本弹窗，切到「填写凭证」粘贴 refresh token',
+      callback: true,
     },
     fields: [
       {
@@ -426,7 +433,7 @@ export const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
         '打开华为云授权页登录。登录完成后网关会自动轮询云端取回授权码（不需要装 OfficeAce 桌面端，也无需手工回填回调地址）。远程网关无法自动登录时，请把网关凭据粘贴到「填写凭证」。',
       button: '打开授权页',
       url: 'https://www.huaweicloud.com/',
-      hint: '登录完成后回到本弹窗，按提示粘贴网关凭据',
+      hint: '登录完成后回到本弹窗等待自动完成（无需粘贴回调地址）',
     },
     fields: [
       { key: 'baseUrl', label: '模型网关基址', target: 'base_url', placeholder: 'https://modelgw-…huaweicloud-agentarts.com/v2' },

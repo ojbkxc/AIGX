@@ -617,7 +617,7 @@ export default function AddAccountDialog({
                           {t('已登录，去填写凭证')}
                         </Button>
                       </div>
-                      {loginWaiting ? (
+                      {loginWaiting && webConfig.callback ? (
                         <div className="add-block" style={{ marginTop: 10 }}>
                           <Input
                             label={t('远程部署：登录完成后把地址栏回调地址粘到这里')}
