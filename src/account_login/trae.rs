@@ -27,7 +27,6 @@ use super::{Credentials, LoginFlow, Started};
 
 const PLUGIN_VERSION: &str = "1.0.0";
 const IDE_VERSION: &str = "0.1.61";
-const IDE_VERSION_CODE: &str = "20260820";
 const DEVICE_NAME: &str = "DESKTOP-CPASOLO";
 const DEVICE_TYPE: &str = "windows";
 const DEVICE_BRAND: &str = "83DG";
