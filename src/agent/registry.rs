@@ -1822,15 +1822,19 @@ mod tests {
             );
         }
         for domain in EXEMPT_PREFIXES {
+            // 豁免域本意是「不提供这个域的功能」。
+            //
+            // 但「以该域为**数据源**」的工具不算提供功能 ——
+            // `aigx_openapi_search` 的 covers 就是 `/api/openapi.json`：
+            // 它读 OpenAPI 文档去**发现**别的端点，而不是提供「读 OpenAPI
+            // 文档」这个能力。所以判据是「cover 落在该豁免域**之下**」
+            // （比该域更长，即真的是它的子路径），而不是「等于该域」。
             assert!(
-                // 豁免域本意是「不强制普通工具覆盖」；`aigx_openapi_search` 这类
-                // 能力自发现工具**专门**以 openapi.json 为 covers 是刻意的，
-                // covers 恰好（逐项）都在豁免域内的工具不算矛盾。
-                !all_tools().iter().any(|t| !t.covers.is_empty()
-                    && t.covers
-                        .iter()
-                        .all(|c| EXEMPT_PREFIXES.iter().any(|e| c.starts_with(e)))),
-                "豁免域不应被普通工具覆盖（EXEMPT_PREFIXES 与 covers 矛盾）"
+                !all_tools().iter().any(|t| t
+                    .covers
+                    .iter()
+                    .any(|c| { c.starts_with(domain) && c.len() > domain.len() })),
+                "豁免域 {domain} 被工具覆盖了（EXEMPT_PREFIXES 与 covers 矛盾）"
             );
         }
     }
