@@ -253,21 +253,6 @@ fn unknown_tool_result(name: &str) -> Value {
 
 // ── 参数辅助 ───────────────────────────────────────────────────────
 
-/// 取必填 channel_id 参数（缺失/非字符串/空白 → -32602）。
-pub(crate) fn require_channel_id(arguments: &Value) -> Result<String, (i64, String)> {
-    arguments
-        .get("channel_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.trim().to_string())
-        .ok_or_else(|| {
-            (
-                INVALID_PARAMS,
-                "Invalid params: missing required argument channel_id".to_string(),
-            )
-        })
-}
-
 /// JSON object → `HashMap<String, String>`（list_channels 的 Query 形状）。
 ///
 /// 标量值转字符串（string 原样、number/bool 转 to_string），
@@ -337,6 +322,7 @@ async fn audit_write_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::admin::logs::RequestLogQuery;
 
     #[test]
     fn parse_request_passthrough_string_and_number_id() {
@@ -468,14 +454,15 @@ mod tests {
         // parse 失败 → -32700
         assert_eq!(PARSE_ERROR, -32700);
         // 写工具缺 channel_id → -32602
-        let (code, msg) = require_channel_id(&json!({})).unwrap_err();
+        let (code, msg) = crate::agent::tools::require_channel_id(&json!({})).unwrap_err();
         assert_eq!(code, INVALID_PARAMS);
         assert_eq!(code, -32602);
         assert!(msg.contains("channel_id"));
         // 空白字符串同样拒绝
-        assert!(require_channel_id(&json!({ "channel_id": "  " })).is_err());
+        assert!(crate::agent::tools::require_channel_id(&json!({ "channel_id": "  " })).is_err());
         // 正常取值 trim
-        let id = require_channel_id(&json!({ "channel_id": " ch-1 " })).unwrap();
+        let id =
+            crate::agent::tools::require_channel_id(&json!({ "channel_id": " ch-1 " })).unwrap();
         assert_eq!(id, "ch-1");
         // 超时 → -32603
         assert_eq!(INTERNAL_ERROR, -32603);
