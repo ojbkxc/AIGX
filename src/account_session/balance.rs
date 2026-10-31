@@ -860,7 +860,7 @@ async fn accio(
             let number = |keys: &[&str]| -> Value {
                 keys.iter()
                     .find_map(|k| v.get(*k).and_then(Value::as_f64))
-                    .map(json!)
+                    .map(|value| json!(value))
                     .unwrap_or(Value::Null)
             };
             json!({
