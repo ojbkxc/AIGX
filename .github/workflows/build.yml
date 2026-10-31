@@ -258,13 +258,30 @@ jobs:
     name: Create Release from Artifacts
     needs: [build-linux-amd64, build-linux-arm64, build-windows-amd64, build-macos-intel, build-macos-arm64]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    # 兼容 tag 推送与网页手动创建 Release 两种触发；单平台构建失败不阻塞
+    # 发版（下面只打包存在的产物，服务器 .upd 不被 macOS 偶发失败拖死）
+    if: >-
+      !cancelled() &&
+      (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release')
     permissions:
       contents: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Verify version consistency
+        # VERSION / Cargo.toml / frontend/package.json 三者必须一致——
+        # 否则线上「当前版本」显示与前端对不上，更新判定也会错位
+        run: |
+          VER=$(cat VERSION)
+          CARGO_VER=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"//')
+          PKG_VER=$(python3 -c "import json; print(json.load(open('frontend/package.json'))['version'])")
+          echo "VERSION=$VER Cargo=$CARGO_VER package.json=$PKG_VER"
+          [ "$VER" = "$CARGO_VER" ] && [ "$VER" = "$PKG_VER" ] || {
+            echo "::error::三处版本号不一致，请统一为同一版本（VERSION/Cargo.toml/frontend/package.json）"
+            exit 1
+          }
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -323,13 +340,31 @@ jobs:
 
           ### 容器镜像
 
+          \`\`\`bash
+          docker pull docker.io/ojbkxc/ds2api:${VER}
           \`\`\`
-          docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-          \`\`\`
+
+          > 容器部署请以拉新镜像的方式更新（镜像内原地更新/重启不可靠）。
 
           ## 🚀 安装说明
 
-          ### Linux
+          ### Linux（推荐：内置更新）
+          已部署的实例直接在 **设置 → 服务器更新** 里「下载并更新」——
+          会同时替换二进制与 static/ 前端产物，点「重启服务」后界面自动刷新。
+
+          ### Linux（手动更新）
+          手动替换务必**二进制与 static/ 一起换**（只换二进制会导致界面仍是旧版）：
+          \`\`\`bash
+          wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/AIGX-${VER}-linux-amd64
+          wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/AIGX-${VER}-server-linux-static.tar.gz
+          sudo systemctl stop aigx   # 或你的服务管理方式
+          chmod +x AIGX-${VER}-linux-amd64
+          sudo mv AIGX-${VER}-linux-amd64 /opt/aigx/aigx      # 换成你的程序目录
+          sudo tar -xzf AIGX-${VER}-server-linux-static.tar.gz -C /opt/aigx   # 解出 static/
+          sudo systemctl start aigx
+          \`\`\`
+          （\`.upd\` 是内置更新专用包，只有程序内的更新器能解，手动替换请用上面的 static.tar.gz）
+          仅需单独二进制时：
           \`\`\`bash
           wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/AIGX-${VER}-linux-amd64
           chmod +x AIGX-${VER}-linux-amd64
@@ -379,6 +414,13 @@ jobs:
           # 注入版本号：vite 插件据此在产物里生成 static/version.json，
           # 后端 update::static_version() 靠它检测「前端与二进制是否同版」
           AIGX_VERSION="${AIGX_VERSION:-$(cat VERSION 2>/dev/null || echo '')}" npm run build
+
+      - name: Package static tarball (manual updates)
+        run: |
+          # 手动更新用：把 static/ 打成 tar.gz，与二进制配合可完整手动升级
+          VER="${AIGX_VERSION}"
+          tar -czf "release-package/AIGX-$VER-server-linux-static.tar.gz" static
+          ls -la release-package/*.tar.gz
 
       - name: Package server update bundles
         run: |

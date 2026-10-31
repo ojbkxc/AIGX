@@ -1736,5 +1736,11 @@
   "我的用量报表": "My usage report",
   "Token 用量": "Token usage",
   "消费额": "Spend",
-  "缓存命中率（请求数口径）": "Cache hit rate (by requests)"
+  "缓存命中率（请求数口径）": "Cache hit rate (by requests)",
+  "渠道供应商": "Channel providers",
+  "内置提供商": "Built-in providers",
+  "自定义提供商": "Custom providers",
+  "暂无启用的渠道": "No enabled channels",
+  "暂无账号池供应商": "No account-pool providers",
+  "暂无自定义提供商": "No custom providers"
 }

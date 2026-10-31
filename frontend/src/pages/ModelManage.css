@@ -286,3 +286,11 @@
     transform: rotate(360deg);
   }
 }
+
+/* 左栏分段空态（渠道供应商 / 内置提供商 / 自定义提供商） */
+.mm-rail-empty {
+  padding: 6px 10px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  opacity: 0.8;
+}

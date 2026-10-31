@@ -72,7 +72,9 @@ export default function ModelManage(): JSX.Element {
   const [error, setError] = useState('');
 
   // 筛选
-  const [provider, setProvider] = useState('all');
+  /** 左栏三段式导航的选中项：`all` / `ch:<渠道id>` / `pv:<provider>`。
+   *  用单一 key 统一表达，避免 provider 与 channelFilter 两个状态互相打架。 */
+  const [navKey, setNavKey] = useState<string>('all');
   const [stateFilter, setStateFilter] = useState<StateFilter>('all');
   const [priceFilter, setPriceFilter] = useState<PriceFilter>('all');
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
@@ -448,7 +450,6 @@ export default function ModelManage(): JSX.Element {
     const navIsProvider = navKey.startsWith('pv:');
     const navProvider = navIsProvider ? navKey.slice(3) : '';
     return list.filter((m) => {
-      if (provider !== 'all' && m.provider !== provider) return false;
       if (navIsChannel && !m.sources.some((s) => s.channel_id === navChannelId)) return false;
       if (navIsProvider && m.provider !== navProvider) return false;
       if (stateFilter === 'on' && !m.enabled) return false;
@@ -470,7 +471,7 @@ export default function ModelManage(): JSX.Element {
         .toLowerCase();
       return hay.includes(q);
     });
-  }, [view, provider, navKey, stateFilter, priceFilter, sourceFilter, channelFilter, query]);
+  }, [view, navKey, stateFilter, priceFilter, sourceFilter, channelFilter, query]);
 
   /** 左栏「渠道供应商」：按渠道聚合模型数（只统计有模型进视图的渠道 = 启用中的）。 */
   const channelRails = useMemo(() => {
@@ -514,7 +515,7 @@ export default function ModelManage(): JSX.Element {
   useEffect(() => {
     setPage(1);
     setSelected(new Set());
-  }, [provider, stateFilter, priceFilter, sourceFilter, channelFilter, query]);
+  }, [navKey, stateFilter, priceFilter, sourceFilter, channelFilter, query]);
 
   // 渠道页「在模型管理中维护」跳转：预选该渠道
   useEffect(() => {
@@ -829,7 +830,7 @@ export default function ModelManage(): JSX.Element {
               <EmptyState
                 icon="📦"
                 message={
-                  query || stateFilter !== 'all' || priceFilter !== 'all' || provider !== 'all'
+                  query || stateFilter !== 'all' || priceFilter !== 'all' || navKey !== 'all'
                     ? t('没有匹配的模型')
                     : t('暂无模型。请先在渠道管理或账号池里配置上游。')
                 }

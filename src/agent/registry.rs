@@ -1058,7 +1058,10 @@ fn build_tools() -> Vec<ToolDef> {
             no_args,
             |s, h, _a| {
                 Box::pin(async move {
-                    out(admin::update::handle_update_apply(State(s.clone()), h.clone()).await)
+                    // handler 新增了可选 body（force 标记）—— Agent 走默认路径
+                    out(
+                        admin::update::handle_update_apply(State(s.clone()), h.clone(), None).await,
+                    )
                 })
             },
         ),
