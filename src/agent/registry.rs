@@ -1291,7 +1291,12 @@ fn build_tools() -> Vec<ToolDef> {
                 Box::pin(async move {
                     let body: admin::checkin_center::RunRequest =
                         parse_tool_args("aigx_checkin_run", a)?;
-                    out(admin::checkin_center::handle_checkin_run(State(s.clone()), h.clone(), Json(body)).await)
+                    out(admin::checkin_center::handle_checkin_run(
+                        State(s.clone()),
+                        h.clone(),
+                        Some(Json(body)),
+                    )
+                    .await)
                 })
             },
         ),
@@ -1327,9 +1332,13 @@ fn build_tools() -> Vec<ToolDef> {
             no_args,
             |s, h, _a| {
                 Box::pin(async move {
+                    let q = crate::api::admin::mcp::parse_struct_args::<
+                        admin::checkin_center::RecordsQuery,
+                    >("aigx_checkin_records_clear", &json!({}))?;
                     out(admin::checkin_center::handle_clear_checkin_records(
                         State(s.clone()),
                         h.clone(),
+                        Query(q),
                     )
                     .await)
                 })
@@ -1580,7 +1589,7 @@ fn build_tools() -> Vec<ToolDef> {
                         State(s.clone()),
                         h.clone(),
                         Path(id),
-                        Json(json!({ "force": force })),
+                        Json(admin::account_sessions::RefreshBody { force }),
                     )
                     .await)
                 })
