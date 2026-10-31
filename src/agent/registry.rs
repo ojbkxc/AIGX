@@ -1799,6 +1799,8 @@ mod tests {
 
     /// 明确不给工具的域（人工维护的边界：认证/支付/工单/Agent 自身…）。
     const EXEMPT_PREFIXES: &[&str] = &[
+        // 个人聊天会话（用户私域，不给运维 Agent 暴露）
+        "/api/chat",
         "/api/auth",
         "/api/payment",
         "/api/epay",

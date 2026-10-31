@@ -196,6 +196,20 @@ fn paths_users() -> Value {
         "/api/aff_transfer": {
             "post": op_body("用户", "划转返利余额到主配额", "amount: integer")
         },
+        "/api/chat/sessions": {
+            "get": op("用户", "列出我的聊天会话（按用户隔离的对话记录）"),
+            "post": op_body("用户", "新建聊天会话", "title/model 可选")
+        },
+        "/api/chat/sessions/{id}": {
+            "get": op_params("用户", "会话详情 + 全部消息", &[path_param("id")]),
+            "delete": op_params("用户", "删除会话及其消息", &[path_param("id")])
+        },
+        "/api/chat/sessions/{id}/rename": {
+            "post": op_body("用户", "重命名会话", "title: string")
+        },
+        "/api/chat/sessions/{id}/messages": {
+            "post": op_body("用户", "追加一条消息（流式结束后落盘）", "role/content/extra")
+        },
         "/api/checkin": {
             "get": op("用户", "查询今日签到状态"),
             "post": op("用户", "执行每日签到（送配额）")
@@ -1043,6 +1057,10 @@ mod tests {
         add("/api/channels/{id}/patch", &["patch"]);
         add("/api/channels/{id}/reset-circuit", &["post"]);
         add("/api/channels/{id}/test", &["post"]);
+        add("/api/chat/sessions", &["get", "post"]);
+        add("/api/chat/sessions/{id}", &["delete", "get"]);
+        add("/api/chat/sessions/{id}/messages", &["post"]);
+        add("/api/chat/sessions/{id}/rename", &["post"]);
         add("/api/checkin", &["get", "post"]);
         add("/api/dashboard/cache_savings", &["get"]);
         add("/api/dashboard/channel_health", &["get"]);

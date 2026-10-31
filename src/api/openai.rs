@@ -93,6 +93,8 @@ pub struct AppState {
     pub subscription_store: Arc<crate::plan::subscription::SubscriptionStore>,
     /// 工单存储（用户提交问题 / 管理员回复）
     pub ticket_store: Arc<crate::ticket::TicketStore>,
+    /// 聊天会话存储（按用户隔离的对话记录；Agent 会话另在 agent_state 里）
+    pub chat_sessions: crate::chat_session::ChatSessionStore,
     /// 限流器（多维度 RPM/TPM）
     pub rate_limiter: Arc<RateLimiter>,
     /// 通知服务（Telegram + SMTP + Slack + Webhook）

@@ -12,6 +12,7 @@ pub mod auth;
 pub mod bridge;
 pub mod cache;
 pub mod channel;
+pub mod chat_session;
 pub mod checkin;
 pub mod config;
 pub mod cron;

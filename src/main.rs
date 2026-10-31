@@ -285,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化工单存储（用户提交问题 / 管理员回复）
     let ticket_store = Arc::new(TicketStore::new(store.clone()));
+    let chat_sessions = crate::chat_session::ChatSessionStore::new(store.clone());
 
     // 初始化限流器（功能 3，带持久化配置）
     let rate_limiter = Arc::new(RateLimiter::with_store(store.clone()));
@@ -460,6 +461,7 @@ async fn main() -> anyhow::Result<()> {
         plan_store,
         subscription_store,
         ticket_store,
+        chat_sessions,
         rate_limiter,
         notify_service,
         alert_evaluator,
@@ -979,6 +981,25 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 签到（对齐 new-api GET/POST /api/user/checkin）—— 用户侧，发本站配额
         .route("/api/checkin", get(api::admin::handle_checkin_status))
         .route("/api/checkin", post(api::admin::handle_do_checkin))
+        // 聊天会话（按用户隔离的对话记录；与 Agent 会话同套机制）
+        .route(
+            "/api/chat/sessions",
+            get(crate::chat_session::handle_list_chat_sessions)
+                .post(crate::chat_session::handle_create_chat_session),
+        )
+        .route(
+            "/api/chat/sessions/:id",
+            get(crate::chat_session::handle_get_chat_session)
+                .delete(crate::chat_session::handle_delete_chat_session),
+        )
+        .route(
+            "/api/chat/sessions/:id/rename",
+            post(crate::chat_session::handle_rename_chat_session),
+        )
+        .route(
+            "/api/chat/sessions/:id/messages",
+            post(crate::chat_session::handle_append_chat_message),
+        )
         // 签到中心（管理员替上游账号签到，与上面的用户签到是两套）
         .route(
             "/api/checkin-center",
