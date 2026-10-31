@@ -85,22 +85,29 @@ fn make_bridge_for_channel(
 ) -> Option<Arc<dyn crate::bridge::Bridge>> {
     use crate::channel::ChannelType;
     match ch.channel_type {
-        ChannelType::OpenaiCompatible => Some(crate::bridge::openai::make_bridge(
+        ChannelType::OpenaiCompatible => Some(crate::bridge::openai::make_bridge_with_quirks(
             &ch.base_url,
             key,
             client,
+            ch.quirks.clone(),
         )),
-        ChannelType::Anthropic => Some(crate::bridge::anthropic::make_bridge(
+        ChannelType::Anthropic => Some(crate::bridge::anthropic::make_bridge_with_quirks(
             &ch.base_url,
             key,
             client,
+            ch.quirks.clone(),
         )),
         ChannelType::Gemini => Some(crate::bridge::gemini::make_bridge(
             &ch.base_url,
             key,
             client,
         )),
-        ChannelType::Zai => Some(crate::bridge::zai::make_bridge(&ch.base_url, key, client)),
+        ChannelType::Zai => Some(crate::bridge::zai::make_bridge_with_quirks(
+            &ch.base_url,
+            key,
+            client,
+            ch.quirks.clone(),
+        )),
         // 账号型渠道无渠道级凭证，锁单渠道路径不可用；全局调度经
         // `resolve_bridges` 仍会得到 `AccountBridge`（账号池内部选号）
         ChannelType::Account => None,

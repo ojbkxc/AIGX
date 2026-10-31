@@ -34,6 +34,8 @@ pub struct AnthropicBridge {
     base_url: String,
     api_key: String,
     client: reqwest::Client,
+    /// 渠道级上游特判（urlSuffix / 静态头 / anthropicToolType）
+    quirks: crate::channel::ChannelQuirks,
 }
 
 impl AnthropicBridge {
@@ -49,11 +51,20 @@ impl AnthropicBridge {
             base_url: super::openai::normalize_base_url(base_url.into()),
             api_key: api_key.into(),
             client,
+            quirks: crate::channel::ChannelQuirks::default(),
         }
     }
 
+    /// 挂上渠道级特判（GLM / MiniMax 的 `?beta=true`、Cline 客户端伪装头、
+    /// MiniMax 的工具补 type）。
+    pub fn with_quirks(mut self, quirks: crate::channel::ChannelQuirks) -> Self {
+        self.quirks = quirks;
+        self
+    }
+
     fn messages_url(&self) -> String {
-        format!("{}/messages", self.base_url.trim_end_matches('/'))
+        self.quirks
+            .append_suffix(&format!("{}/messages", self.base_url.trim_end_matches('/')))
     }
 
     /// OpenAI `tool_choice` → Anthropic `tool_choice`。
@@ -288,7 +299,10 @@ impl AnthropicBridge {
             body["stop_sequences"] = serde_json::json!(stop);
         }
         if let Some(tools) = &req.tools {
-            let translated = translate_tools(tools);
+            // MiniMax 的 Claude 兼容端点拒绝无 `type` 的工具定义（quirks
+            // 逐家特判）：DeepSeek 恰好相反、拒绝 type:"custom"，所以只按
+            // 渠道记录走，不做全局默认。
+            let translated = translate_tools(tools, &self.quirks);
             if !translated.is_empty() {
                 body["tools"] = Value::Array(translated);
             }
@@ -351,14 +365,15 @@ impl AnthropicBridge {
         body
     }
 
-    /// 构建带鉴权头的 POST 请求（`x-api-key` + `anthropic-version`）。
+    /// 构建带鉴权头的 POST 请求（`x-api-key` + `anthropic-version`），
+    /// 并合并渠道级静态头（quirks.headers，同名覆盖）。
     fn post(&self, url: &str, body: &Value) -> reqwest::RequestBuilder {
         let mut req = self.client.post(url).json(body);
         if !self.api_key.is_empty() {
             req = req.header("x-api-key", &self.api_key);
         }
         req = req.header("anthropic-version", ANTHROPIC_VERSION);
-        req
+        self.quirks.apply_headers(req)
     }
 }
 
@@ -476,8 +491,9 @@ fn assistant_message(m: &ChatMessage) -> Value {
 
 /// OpenAI 形状 tools → Anthropic 形状 tools：
 /// `{type:"function",function:{name,description,parameters}}`
-/// → `{name,description,input_schema}`
-fn translate_tools(tools: &[Value]) -> Vec<Value> {
+/// → `{name,description,input_schema}`（quirks 要求时再补 `type: "custom"`）
+fn translate_tools(tools: &[Value], quirks: &crate::channel::ChannelQuirks) -> Vec<Value> {
+    let add_type = quirks.anthropic_tool_type == crate::channel::TOOL_TYPE_CUSTOM;
     tools
         .iter()
         .filter_map(|t| {
@@ -487,6 +503,11 @@ fn translate_tools(tools: &[Value]) -> Vec<Value> {
             let function = t.get("function")?.as_object()?;
             let name = function.get("name")?.as_str()?;
             let mut tool = serde_json::Map::new();
+            // MiniMax 要求每个工具带 type，取值 `custom`（Anthropic 官方
+            // 内置工具才是 web_search 这类；自定义函数统一 custom）
+            if add_type {
+                tool.insert("type".into(), Value::String("custom".into()));
+            }
             tool.insert("name".into(), name.into());
             if let Some(desc) = function.get("description") {
                 tool.insert("description".into(), desc.clone());
@@ -1100,4 +1121,14 @@ pub fn make_bridge(base_url: &str, api_key: &str, client: &reqwest::Client) -> A
         api_key,
         client.clone(),
     ))
+}
+
+/// 带渠道级特判的构造（GLM / MiniMax / Cline 等预置供应商渠道用）。
+pub fn make_bridge_with_quirks(
+    base_url: &str,
+    api_key: &str,
+    client: &reqwest::Client,
+    quirks: crate::channel::ChannelQuirks,
+) -> Arc<dyn Bridge> {
+    Arc::new(AnthropicBridge::with_client(base_url, api_key, client.clone()).with_quirks(quirks))
 }

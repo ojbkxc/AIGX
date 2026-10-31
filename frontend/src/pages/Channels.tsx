@@ -13,6 +13,13 @@ import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ChatDebugger from '../components/ChatDebugger';
 import ModelMappingEditor from '../components/ModelMappingEditor';
 import CostPricingEditor from '../components/CostPricingEditor';
+import {
+  BALANCE_SCHEME_LABELS,
+  PRESET_PROVIDERS,
+  presetIconOf,
+  type ChannelQuirks,
+  type PresetProvider,
+} from '../lib/channelPresets';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
 import './Channels.css';
 
@@ -43,7 +50,24 @@ interface ChannelItem {
   test_time?: number;
   remark?: string;
   tags?: string[];
+  /** 上游特判（预置供应商写入） */
+  quirks?: ChannelQuirks | null;
+  /** 余额查询方案（空 = OpenAI 计费端点） */
+  balance_scheme?: string;
 }
+
+/**
+ * 余额查询专用凭证在 `quirks.headers` 里的约定头名（与后端
+ * `channel::balance::credential_field` 一致）。它们不随转发发出，只给余额
+ * 查询用；表单里用专用输入框承载，避免用户误以为要填到「额外请求头」。
+ */
+const BALANCE_CREDENTIAL_HEADERS = [
+  'x-balance-access-token',
+  'x-balance-user-id',
+  'x-balance-token',
+  'x-balance-username',
+  'x-balance-password',
+];
 
 interface ChannelFormState {
   name: string;
@@ -59,6 +83,21 @@ interface ChannelFormState {
   account_id: string;
   model_mapping: Record<string, string>;
   cost_pricing: Record<string, { input_price?: number; output_price?: number; price_type?: string }>;
+  /** 上游特判（预置供应商卡片写入；编辑时回填） */
+  quirks: ChannelQuirksForm;
+  /** 余额查询方案（空 = OpenAI 计费端点） */
+  balance_scheme: string;
+  /** 余额查询额外凭证（按 header 名存，提交时并入 quirks.headers） */
+  balance_fields: Record<string, string>;
+}
+
+/** quirks 的表单形态（与后端 snake_case 字段对齐） */
+interface ChannelQuirksForm {
+  url_suffix: string;
+  /** 每行 `Key: Value` */
+  headers: string;
+  anthropic_tool_type: string;
+  client_emulation: string;
 }
 
 // 渠道类型选项 — 与后端 ChannelType 枚举对齐（snake_case）
@@ -121,6 +160,10 @@ export default function Channels(): JSX.Element {
   const [fetchingModels, setFetchingModels] = useState(false);
   // API Key 输入明文切换（防输错无法核对）
   const [showApiKey, setShowApiKey] = useState(false);
+  /** 当前选中的预置供应商 key（仅新增时；编辑回填 null） */
+  const [activePreset, setActivePreset] = useState<string | null>(null);
+  /** 预置选择面板展开状态 */
+  const [showPresets, setShowPresets] = useState(false);
 
   // 无密钥复选框联动（同 cf-ai-gw onKeyForeverChange）：勾选 → 输入框置灰清空
   const onNoKeyChange = (): void => {
@@ -199,7 +242,72 @@ export default function Channels(): JSX.Element {
       account_id: '',
       model_mapping: {},
       cost_pricing: {},
+      quirks: { url_suffix: '', headers: '', anthropic_tool_type: '', client_emulation: '' },
+      balance_scheme: '',
+      balance_fields: {},
     };
+  }
+
+  /** quirks 对象 → 表单形态（headers 每行 `Key: Value`） */
+  function quirksToForm(quirks?: ChannelQuirks | null): ChannelQuirksForm {
+    const headers = { ...(quirks?.headers || {}) };
+    // 余额凭证走专用输入框，从文本里剔除（提交时再合并回去）
+    for (const header of BALANCE_CREDENTIAL_HEADERS) delete headers[header];
+    return {
+      url_suffix: quirks?.url_suffix || '',
+      headers: Object.entries(headers)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join('\n'),
+      anthropic_tool_type: quirks?.anthropic_tool_type || '',
+      client_emulation: quirks?.client_emulation || '',
+    };
+  }
+
+  /** 从渠道 quirks.headers 里抽出余额查询专用凭证（按约定 header 名） */
+  function extractBalanceFields(quirks?: ChannelQuirks | null): Record<string, string> {
+    const out: Record<string, string> = {};
+    const headers = quirks?.headers || {};
+    for (const header of BALANCE_CREDENTIAL_HEADERS) {
+      if (headers[header]) out[header] = headers[header];
+    }
+    return out;
+  }
+
+  /** 表单形态 → quirks 对象（空则返回 undefined，表示无特判） */
+  function formToQuirks(form: ChannelQuirksForm, balanceFields: Record<string, string>): ChannelQuirks | undefined {
+    const headers: Record<string, string> = {};
+    for (const line of form.headers.split('\n')) {
+      const idx = line.indexOf(':');
+      if (idx <= 0) continue;
+      const name = line.slice(0, idx).trim();
+      const value = line.slice(idx + 1).trim();
+      if (name && value) headers[name] = value;
+    }
+    for (const [header, value] of Object.entries(balanceFields)) {
+      const trimmed = value.trim();
+      if (header && trimmed) headers[header] = trimmed;
+    }
+    const quirks: ChannelQuirks = {};
+    if (form.url_suffix.trim()) quirks.url_suffix = form.url_suffix.trim();
+    if (Object.keys(headers).length > 0) quirks.headers = headers;
+    if (form.anthropic_tool_type.trim()) quirks.anthropic_tool_type = form.anthropic_tool_type.trim();
+    if (form.client_emulation.trim()) quirks.client_emulation = form.client_emulation.trim();
+    return Object.keys(quirks).length > 0 ? quirks : undefined;
+  }
+
+  /** 选中预置供应商：把名称 / 协议 / 地址 / quirks / 余额方案填进表单 */
+  function applyPreset(preset: PresetProvider): void {
+    setForm((prev) => ({
+      ...prev,
+      name: prev.name || preset.name,
+      channel_type: preset.protocol,
+      base_url: preset.baseUrl,
+      no_key: preset.noAuth ?? false,
+      quirks: quirksToForm(preset.quirks),
+      balance_scheme: preset.balanceScheme || '',
+      balance_fields: {},
+    }));
+    setActivePreset(preset.key);
   }
 
   // 挂载时加载一次渠道列表；分页翻页时重新拉取（搜索由服务端过滤）
@@ -375,6 +483,8 @@ export default function Channels(): JSX.Element {
         test_time: ch.test_time ?? undefined,
         balance: ch.balance ?? undefined,
         credit: ch.credit ?? undefined,
+        quirks: (ch as unknown as { quirks?: ChannelQuirks | null }).quirks ?? null,
+        balance_scheme: (ch as unknown as { balance_scheme?: string }).balance_scheme || '',
         created_at: typeof ch.created_at === 'number' ? ch.created_at : undefined,
         updated_at: typeof ch.updated_at === 'number' ? ch.updated_at : undefined,
       }));
@@ -390,11 +500,15 @@ export default function Channels(): JSX.Element {
   const openAdd = (): void => {
     setEditChannel(null);
     setForm(defaultForm());
+    setActivePreset(null);
+    setShowPresets(true);
     setShowModal(true);
   };
 
   const openEdit = (ch: ChannelItem): void => {
     setEditChannel(ch);
+    setActivePreset(null);
+    setShowPresets(false);
     setForm({
       name: ch.name || '',
       channel_type: ch.channel_type || 'openai_compatible',
@@ -409,6 +523,11 @@ export default function Channels(): JSX.Element {
       account_id: ch.account_id || '',
       model_mapping: ch.model_mapping || {},
       cost_pricing: ch.cost_pricing || {},
+      quirks: quirksToForm(ch.quirks),
+      balance_scheme: ch.balance_scheme || '',
+      // 余额凭证存在 quirks.headers 里，编辑时回填到专用输入框（并从 headers 文本里剔除，
+      // 避免同一份值既在文本框又在专用框、提交时互相覆盖）
+      balance_fields: extractBalanceFields(ch.quirks),
     });
     setShowModal(true);
   };
@@ -439,6 +558,10 @@ export default function Channels(): JSX.Element {
       account_id: form.account_id,
       model_mapping: form.model_mapping,
       cost_pricing: form.cost_pricing,
+      // 上游特判：新增时总是提交（无特判 = undefined，后端归一为默认）；
+      // 编辑时也总是提交，用户清空表单即等于「清掉特判」
+      quirks: formToQuirks(form.quirks, form.balance_fields) ?? {},
+      balance_scheme: form.balance_scheme,
     };
     if (form.no_key) {
       payload.api_key = null; // 显式清除
@@ -1050,6 +1173,46 @@ export default function Channels(): JSX.Element {
               <button type="button" className="modal-close" onClick={closeModal}>&times;</button>
             </div>
             <div className="modal-body">
+              {/* 预置供应商卡片（仅新增时；点一张即预填名称/协议/地址/特判/余额方案） */}
+              {!editChannel && (
+                <div className="ch-preset-section">
+                  <button
+                    type="button"
+                    className="ch-preset-toggle"
+                    onClick={() => setShowPresets((v) => !v)}
+                  >
+                    {showPresets ? '▾' : '▸'} {t('从预置供应商选择（可选）')}
+                    {activePreset && (
+                      <span className="ch-preset-current">
+                        {PRESET_PROVIDERS.find((p) => p.key === activePreset)?.name}
+                      </span>
+                    )}
+                  </button>
+                  {showPresets && (
+                    <div className="ch-preset-grid" role="listbox" aria-label={t('预置供应商')}>
+                      {PRESET_PROVIDERS.map((preset) => {
+                        const icon = presetIconOf(preset.key);
+                        return (
+                          <button
+                            type="button"
+                            key={preset.key}
+                            className={`ch-preset-card ${activePreset === preset.key ? 'active' : ''}`}
+                            onClick={() => applyPreset(preset)}
+                          >
+                            {icon ? (
+                              <img className="ch-preset-logo" src={icon} alt="" loading="lazy" />
+                            ) : (
+                              <span className="ch-preset-initial">{preset.name.slice(0, 1)}</span>
+                            )}
+                            <span className="ch-preset-name">{preset.name}</span>
+                            <span className="ch-preset-url">{preset.baseUrl || t('自填地址')}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
               <Input
                 label={`${t('名称')} *`}
                 placeholder={t('例如：OpenAI 官方')}
@@ -1198,6 +1361,91 @@ export default function Channels(): JSX.Element {
                 <option value="enabled">{t('启用')}</option>
                 <option value="disabled">{t('禁用')}</option>
               </Select>
+
+              {/* ── 上游特判（quirks）── */}
+              <details className="ch-quirks-section">
+                <summary>
+                  {t('上游特判（预置供应商会自动填好，一般不用手改）')}
+                  {formToQuirks(form.quirks, form.balance_fields) && (
+                    <span className="ch-quirks-badge">{t('已配置')}</span>
+                  )}
+                </summary>
+                <div className="ch-quirks-body">
+                  <Input
+                    label={t('URL 查询串后缀')}
+                    placeholder="?beta=true"
+                    value={form.quirks.url_suffix}
+                    onChange={(e) => setForm((f) => ({ ...f, quirks: { ...f.quirks, url_suffix: e.target.value } }))}
+                    hint={t('原样追加到出站 URL（GLM / MiniMax 的 Claude 兼容端点要求 ?beta=true）')}
+                  />
+                  <div className="form-group">
+                    <label>{t('额外请求头（每行 Key: Value）')}</label>
+                    <textarea
+                      className="form-input"
+                      rows={4}
+                      placeholder={'X-CLIENT-TYPE: cline-sdk\nAnthropic-Beta: claude-code-20250219'}
+                      value={form.quirks.headers}
+                      onChange={(e) => setForm((f) => ({ ...f, quirks: { ...f.quirks, headers: e.target.value } }))}
+                    />
+                    <div className="form-hint">
+                      {t('合并到默认头上（同名覆盖）。Cline 一类上游按客户端形态校验，缺头会 403。')}
+                    </div>
+                  </div>
+                  <Select
+                    label={t('Anthropic 工具类型')}
+                    value={form.quirks.anthropic_tool_type}
+                    onChange={(e) => setForm((f) => ({ ...f, quirks: { ...f.quirks, anthropic_tool_type: e.target.value } }))}
+                  >
+                    <option value="">{t('不补（默认）')}</option>
+                    <option value="custom">{t('补 type: custom（MiniMax）')}</option>
+                  </Select>
+                  <Select
+                    label={t('客户端伪装')}
+                    value={form.quirks.client_emulation}
+                    onChange={(e) => setForm((f) => ({ ...f, quirks: { ...f.quirks, client_emulation: e.target.value } }))}
+                  >
+                    <option value="">{t('不伪装（默认）')}</option>
+                    <option value="opencode">{t('OpenCode 官方客户端（免费档必需）')}</option>
+                  </Select>
+                </div>
+              </details>
+
+              {/* ── 余额查询方案 ── */}
+              <div className="ch-balance-section">
+                <Select
+                  label={t('余额查询方案')}
+                  value={form.balance_scheme}
+                  onChange={(e) => setForm((f) => ({ ...f, balance_scheme: e.target.value }))}
+                >
+                  <option value="">{t('默认（OpenAI 计费端点）')}</option>
+                  {Object.entries(BALANCE_SCHEME_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </Select>
+                {(() => {
+                  const preset = PRESET_PROVIDERS.find((p) => p.balanceScheme === form.balance_scheme);
+                  const fields = preset?.balanceFields || [];
+                  if (!fields.length) return null;
+                  return (
+                    <div className="ch-balance-fields">
+                      {fields.map((field) => (
+                        <Input
+                          key={field.header}
+                          label={field.label}
+                          placeholder={field.placeholder}
+                          value={form.balance_fields[field.header] || ''}
+                          onChange={(e) =>
+                            setForm((f) => ({
+                              ...f,
+                              balance_fields: { ...f.balance_fields, [field.header]: e.target.value },
+                            }))
+                          }
+                        />
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
             </div>
             <div className="modal-footer">
               <Button variant="outline" onClick={closeModal} disabled={saving}>{t('取消')}</Button>

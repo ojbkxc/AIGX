@@ -331,7 +331,12 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
             crate::channel::ChannelType::OpenaiCompatible => {
                 let key = ch.decode_api_key();
                 result.push((
-                    crate::bridge::openai::make_bridge(&ch.base_url, &key, &state.http_client),
+                    crate::bridge::openai::make_bridge_with_quirks(
+                        &ch.base_url,
+                        &key,
+                        &state.http_client,
+                        ch.quirks.clone(),
+                    ),
                     Some(ch.id.clone()),
                     Some(ch.clone()),
                 ));
@@ -339,7 +344,12 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
             crate::channel::ChannelType::Anthropic => {
                 let key = ch.decode_api_key();
                 result.push((
-                    crate::bridge::anthropic::make_bridge(&ch.base_url, &key, &state.http_client),
+                    crate::bridge::anthropic::make_bridge_with_quirks(
+                        &ch.base_url,
+                        &key,
+                        &state.http_client,
+                        ch.quirks.clone(),
+                    ),
                     Some(ch.id.clone()),
                     Some(ch.clone()),
                 ));
@@ -355,7 +365,12 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
             crate::channel::ChannelType::Zai => {
                 let key = ch.decode_api_key();
                 result.push((
-                    crate::bridge::zai::make_bridge(&ch.base_url, &key, &state.http_client),
+                    crate::bridge::zai::make_bridge_with_quirks(
+                        &ch.base_url,
+                        &key,
+                        &state.http_client,
+                        ch.quirks.clone(),
+                    ),
                     Some(ch.id.clone()),
                     Some(ch.clone()),
                 ));

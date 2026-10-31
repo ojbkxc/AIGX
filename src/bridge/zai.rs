@@ -35,6 +35,8 @@ pub struct ZaiBridge {
     base_url: String,
     api_key: String,
     client: reqwest::Client,
+    /// 渠道级上游特判（urlSuffix / 静态头 / anthropicToolType）
+    quirks: crate::channel::ChannelQuirks,
 }
 
 impl ZaiBridge {
@@ -54,12 +56,20 @@ impl ZaiBridge {
             base_url,
             api_key: api_key.into(),
             client,
+            quirks: crate::channel::ChannelQuirks::default(),
         }
+    }
+
+    /// 挂上渠道级特判。
+    pub fn with_quirks(mut self, quirks: crate::channel::ChannelQuirks) -> Self {
+        self.quirks = quirks;
+        self
     }
 
     /// 消息端点：`{base_url}/messages`
     fn messages_url(&self) -> String {
-        format!("{}/messages", self.base_url.trim_end_matches('/'))
+        self.quirks
+            .append_suffix(&format!("{}/messages", self.base_url.trim_end_matches('/')))
     }
 
     /// 构建带鉴权头的 POST 请求（`Authorization: Bearer`）。
@@ -71,7 +81,7 @@ impl ZaiBridge {
         if !self.api_key.is_empty() {
             req = req.header("authorization", format!("Bearer {}", self.api_key));
         }
-        req
+        self.quirks.apply_headers(req)
     }
 
     /// 将归一化 `ChatFormat` 转为智谱 AI `/messages` 请求体。
@@ -664,6 +674,16 @@ fn parse_stream_event(
 /// 构造一个智谱 AI Bridge 的 `Arc` 实例（供 ChannelStore/Hub 调度使用）。
 pub fn make_bridge(base_url: &str, api_key: &str, client: &reqwest::Client) -> Arc<dyn Bridge> {
     Arc::new(ZaiBridge::with_client(base_url, api_key, client.clone()))
+}
+
+/// 带渠道级特判的构造（Z.ai Coding 预置卡用）。
+pub fn make_bridge_with_quirks(
+    base_url: &str,
+    api_key: &str,
+    client: &reqwest::Client,
+    quirks: crate::channel::ChannelQuirks,
+) -> Arc<dyn Bridge> {
+    Arc::new(ZaiBridge::with_client(base_url, api_key, client.clone()).with_quirks(quirks))
 }
 
 #[cfg(test)]

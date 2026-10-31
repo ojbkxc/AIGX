@@ -29,7 +29,11 @@ use crate::storage::FileStore;
 pub mod affinity;
 pub mod aimd;
 pub mod balancer;
+/// 渠道级余额查询（七种方案，见 [`balance::SCHEMES`]）
+pub mod balance;
 pub mod circuit_breaker;
+/// OpenCode 官方客户端形态伪装（`quirks.client_emulation = "opencode"`）
+pub mod emulation;
 pub mod empty_response;
 pub mod health_archive;
 pub mod health_manager;
@@ -91,6 +95,76 @@ impl ChannelType {
             Self::Zai => "zai",
             Self::Account => "account",
         }
+    }
+}
+
+// ── 上游特判（quirks）────────────────────────────────────────────────
+
+/// 渠道级上游特判：预置供应商卡片在创建时写入，转发时由 bridge 应用。
+///
+/// 参照 Agent2API `custom_providers` 的 quirks（`preset-providers.js` 的
+/// `quirks` 字段）：GLM / MiniMax 的 Claude 兼容端点要求 `?beta=true`，
+/// Cline 上游按客户端形态校验（缺 `X-CLIENT-TYPE` 一律 403），MiniMax
+/// 拒绝无 `type` 的工具定义 —— 这些都不是协议本身的语义，而是「这一家
+/// 是谁」的派生事实，因此随渠道记录落库。
+///
+/// 全部字段缺省 = 无特判（手工新建的渠道即如此），行为与引入本结构前一致。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelQuirks {
+    /// 原样追加到出站 URL 的查询串（如 `?beta=true`，含前导 `?`）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url_suffix: String,
+    /// 合并到默认头上的静态额外头（同名覆盖默认头）。
+    /// BTreeMap 保证顺序稳定（持久化 / 日志比对时不抖）。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// `"custom"` = 发 anthropic 上游时给每个工具补 `type`（MiniMax 要求；
+    /// DeepSeek 恰好相反，因此是逐家特判而不是默认行为）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub anthropic_tool_type: String,
+    /// `"opencode"` = 按 OpenCode 官方 CLI 形状补齐出站请求
+    /// （见 [`crate::channel::emulation`]：匿名凭证 + 四个会话头 + 请求体桩工具）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_emulation: String,
+}
+
+/// `client_emulation` 的合法取值：OpenCode 官方客户端形态
+pub const CLIENT_EMULATION_OPENCODE: &str = "opencode";
+/// `anthropic_tool_type` 的合法取值：给工具补 `type: "custom"`
+pub const TOOL_TYPE_CUSTOM: &str = "custom";
+
+impl ChannelQuirks {
+    /// 是否为空（无任何特判）—— 转发路径据此跳过整段逻辑
+    pub fn is_empty(&self) -> bool {
+        self.url_suffix.is_empty()
+            && self.headers.is_empty()
+            && self.anthropic_tool_type.is_empty()
+            && self.client_emulation.is_empty()
+    }
+
+    /// 是否启用 OpenCode 客户端伪装
+    pub fn emulates_opencode(&self) -> bool {
+        self.client_emulation.eq_ignore_ascii_case(CLIENT_EMULATION_OPENCODE)
+    }
+
+    /// 追加查询串：已带查询串的 URL 用 `&` 连接
+    pub fn append_suffix(&self, url: &str) -> String {
+        if self.url_suffix.is_empty() {
+            return url.to_string();
+        }
+        let sep = if url.contains('?') { '&' } else { '?' };
+        let suffix = self.url_suffix.trim_start_matches('?');
+        format!("{url}{sep}{suffix}")
+    }
+
+    /// 把静态头合并进请求构造器（空键 / 空值跳过，避免发出 `X-Foo:` 空头）
+    pub fn apply_headers(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (k, v) in &self.headers {
+            if !k.trim().is_empty() && !v.is_empty() {
+                req = req.header(k.as_str(), v.as_str());
+            }
+        }
+        req
     }
 }
 
@@ -160,6 +234,12 @@ pub struct Channel {
     /// 最近一次查询到的上游 credit（OpenAI 系 credit 余额）
     #[serde(default)]
     pub credit: Option<f64>,
+    /// 上游特判（预置供应商卡片写入；手工新建 = 空）
+    #[serde(default, skip_serializing_if = "ChannelQuirks::is_empty")]
+    pub quirks: ChannelQuirks,
+    /// 余额查询方案（见 [`crate::channel::balance`]；空 = 只试 OpenAI 计费端点）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub balance_scheme: String,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -676,56 +756,18 @@ impl ChannelStore {
         }
     }
 
-    /// 查询上游真实余额（OpenAI 兼容渠道）。
+    /// 查询上游真实余额（按渠道记录的 `balance_scheme` 分派）。
     ///
-    /// 依次尝试上游常见余额端点（new-api / one-api 风格网关均实现其一）：
-    /// 1. `GET {base}/dashboard/billing/subscription`   → hard_limit_usd（总额度）
-    /// 2. `GET {base}/v1/dashboard/billing/subscription`
-    /// 3. `GET {base}/dashboard/billing/credit_grants`  → total_granted/total_used
-    ///
-    /// 任一端点 200 即解析并返回，全部失败返回 None（调用方给用户提示）。
-    pub async fn query_balance(&self, ch: &Channel) -> Option<(Option<f64>, Option<f64>)> {
-        let base = ch.base_url.trim_end_matches('/').to_string();
-        if base.is_empty() {
-            return None;
-        }
-        let key = ch.decode_api_key();
-        let client = reqwest::Client::builder()
-            // 强制 HTTP/1.1：防 h2 PING 帧掩蔽读超时检测（同共享 client，见 main.rs）
-            .http1_only()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .ok()?;
-        let endpoints = [
-            format!("{base}/dashboard/billing/subscription"),
-            format!("{base}/v1/dashboard/billing/subscription"),
-            format!("{base}/dashboard/billing/credit_grants"),
-        ];
-        for url in &endpoints {
-            let resp = client.get(url).bearer_auth(&key).send().await;
-            if let Ok(r) = resp {
-                if r.status().as_u16() != 200 {
-                    continue;
-                }
-                if let Ok(v) = r.json::<serde_json::Value>().await {
-                    // subscription 端点：hard_limit_usd 是总额度；
-                    // credit_grants：total_granted - total_used 即剩余
-                    let hard_limit = v.get("hard_limit_usd").and_then(|x| x.as_f64());
-                    let total_granted = v.get("total_granted").and_then(|x| x.as_f64());
-                    let total_used = v.get("total_used").and_then(|x| x.as_f64());
-                    if let Some(limit) = hard_limit {
-                        // total_used 可能在同响应或需另一端点；先仅报总额度
-                        return Some((None, Some(limit)));
-                    }
-                    if total_granted.is_some() || total_used.is_some() {
-                        let used = total_used.unwrap_or(0.0);
-                        let granted = total_granted.unwrap_or(0.0);
-                        return Some((Some((granted - used).max(0.0)), None));
-                    }
-                }
-            }
-        }
-        None
+    /// 方案为空时回落 OpenAI 计费端点（历史行为）；方案见
+    /// [`crate::channel::balance::SCHEMES`]。返回 `(available, credit)`：
+    /// - `available`：主读数（金额或百分比）
+    /// - `credit`：历史字段（OpenAI 计费端点的总额度），方案化后不再使用
+    pub async fn query_balance(
+        &self,
+        ch: &Channel,
+        client: &reqwest::Client,
+    ) -> Result<crate::channel::balance::BalanceReading, String> {
+        crate::channel::balance::query(ch, client).await
     }
 
     /// 测试渠道连通性。
@@ -760,12 +802,19 @@ impl ChannelStore {
                 // 标准 OpenAI 路径是 /v1/models，但部分网关只有 /models，
                 // 因此先试 /v1/models，404 时回退 /models。
                 let base = ch.base_url.trim_end_matches('/');
-                let url = format!("{base}/v1/models");
-                let resp = client.get(&url).bearer_auth(&key).send().await;
+                let url = ch.quirks.append_suffix(&format!("{base}/v1/models"));
+                let resp = ch
+                    .quirks
+                    .apply_headers(client.get(&url).bearer_auth(&key))
+                    .send()
+                    .await;
                 let resp = match resp {
                     Ok(r) if r.status().as_u16() == 404 => {
-                        let fallback = format!("{base}/models");
-                        client.get(&fallback).bearer_auth(&key).send().await
+                        let fallback = ch.quirks.append_suffix(&format!("{base}/models"));
+                        ch.quirks
+                            .apply_headers(client.get(&fallback).bearer_auth(&key))
+                            .send()
+                            .await
                     }
                     other => other,
                 };
@@ -790,16 +839,22 @@ impl ChannelStore {
                 }
             }
             ChannelType::Anthropic => {
-                let url = format!("{}/v1/messages", ch.base_url.trim_end_matches('/'));
+                let url = ch
+                    .quirks
+                    .append_suffix(&format!("{}/v1/messages", ch.base_url.trim_end_matches('/')));
                 let body = serde_json::json!({
                     "model": "claude-3-5-sonnet-20241022",
                     "max_tokens": 1,
                     "messages": [{"role": "user", "content": "ping"}]
                 });
-                let resp = client
-                    .post(&url)
-                    .header("x-api-key", &key)
-                    .header("anthropic-version", "2023-06-01")
+                let resp = ch
+                    .quirks
+                    .apply_headers(
+                        client
+                            .post(&url)
+                            .header("x-api-key", &key)
+                            .header("anthropic-version", "2023-06-01"),
+                    )
                     .json(&body)
                     .send()
                     .await;
@@ -878,15 +933,19 @@ impl ChannelStore {
                 } else {
                     base
                 };
-                let url = format!("{base}/messages");
+                let url = ch.quirks.append_suffix(&format!("{base}/messages"));
                 let body = serde_json::json!({
                     "model": "glm-4-flash",
                     "max_tokens": 1,
                     "messages": [{"role": "user", "content": "ping"}]
                 });
-                let resp = client
-                    .post(&url)
-                    .header("authorization", format!("Bearer {key}"))
+                let resp = ch
+                    .quirks
+                    .apply_headers(
+                        client
+                            .post(&url)
+                            .header("authorization", format!("Bearer {key}")),
+                    )
                     .json(&body)
                     .send()
                     .await;
@@ -1192,6 +1251,8 @@ mod tests {
             test_time: None,
             balance: None,
             credit: None,
+            quirks: ChannelQuirks::default(),
+            balance_scheme: String::new(),
             last_error: None,
             last_used_at: None,
             discovered_models: Vec::new(),

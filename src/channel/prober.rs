@@ -75,17 +75,30 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
 
         let bridge: Arc<dyn Bridge> = match ch.channel_type {
             crate::channel::ChannelType::OpenaiCompatible => {
-                crate::bridge::openai::make_bridge(&ch.base_url, &key, http)
+                crate::bridge::openai::make_bridge_with_quirks(
+                    &ch.base_url,
+                    &key,
+                    http,
+                    ch.quirks.clone(),
+                )
             }
             crate::channel::ChannelType::Anthropic => {
-                crate::bridge::anthropic::make_bridge(&ch.base_url, &key, http)
+                crate::bridge::anthropic::make_bridge_with_quirks(
+                    &ch.base_url,
+                    &key,
+                    http,
+                    ch.quirks.clone(),
+                )
             }
             crate::channel::ChannelType::Gemini => {
                 crate::bridge::gemini::make_bridge(&ch.base_url, &key, http)
             }
-            crate::channel::ChannelType::Zai => {
-                crate::bridge::zai::make_bridge(&ch.base_url, &key, http)
-            }
+            crate::channel::ChannelType::Zai => crate::bridge::zai::make_bridge_with_quirks(
+                &ch.base_url,
+                &key,
+                http,
+                ch.quirks.clone(),
+            ),
             // 账号型渠道没有渠道级凭证，探活由账号池逐号探测
             crate::channel::ChannelType::Account => continue,
             crate::channel::ChannelType::Cloudflare => continue, // CF 走 quota_monitor

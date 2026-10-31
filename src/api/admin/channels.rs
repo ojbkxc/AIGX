@@ -91,6 +91,13 @@ pub struct ChannelRequest {
     pub model_mapping: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub cost_pricing: std::collections::HashMap<String, crate::pricing::ModelPrice>,
+    /// 上游特判（预置供应商卡片写入：urlSuffix / 静态头 / anthropicToolType /
+    /// clientEmulation）。三态：缺省 = 更新时保持原值；`{}` = 清空；有值 = 覆盖。
+    #[serde(default)]
+    pub quirks: Option<crate::channel::ChannelQuirks>,
+    /// 余额查询方案（见 `channel::balance::SCHEMES`）；空 = OpenAI 计费端点
+    #[serde(default)]
+    pub balance_scheme: Option<String>,
 }
 
 fn default_weight() -> u32 {
@@ -138,9 +145,28 @@ impl ChannelRequest {
             test_time: None,
             balance: None,
             credit: None,
+            // 新增时缺省 = 无特判；更新时 handler 会按 prev 保持原值
+            quirks: self.quirks.clone().unwrap_or_default(),
+            balance_scheme: self
+                .balance_scheme
+                .as_deref()
+                .map(validate_balance_scheme)
+                .unwrap_or_default(),
             created_at: now,
             updated_at: now,
         }
+    }
+}
+
+/// 校验余额方案：只认 `channel::balance::SCHEMES` 里的值，未知值归一为空
+/// （= 回落 OpenAI 计费端点）。与 `client_emulation` 的读侧容错同一取向：
+/// 手改坏的值不该让整条渠道记录写不进去。
+fn validate_balance_scheme(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if crate::channel::balance::SCHEMES.contains(&trimmed) {
+        trimmed.to_string()
+    } else {
+        String::new()
     }
 }
 
@@ -186,6 +212,8 @@ pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
         "test_time": ch.test_time,
         "balance": ch.balance,
         "credit": ch.credit,
+        "quirks": ch.quirks,
+        "balance_scheme": ch.balance_scheme,
         "created_at": ch.created_at,
         "updated_at": ch.updated_at,
     })
@@ -361,7 +389,9 @@ pub async fn handle_available_models(
             if !state.channel_store.try_mark_lazy_discover(&ch.id) {
                 continue;
             }
-            match fetch_upstream_models(&state, ch.channel_type, &ch.base_url, &key).await {
+            match fetch_upstream_models(&state, ch.channel_type, &ch.base_url, &key, &ch.quirks)
+                .await
+            {
                 Ok((_url, discovered)) => {
                     if !discovered.is_empty() {
                         if let Err(e) = state
@@ -454,6 +484,13 @@ pub async fn handle_update_channel(
         ch.last_used_at = prev.last_used_at;
         ch.last_error = prev.last_error;
         ch.created_at = prev.created_at;
+        // quirks / 余额方案：缺省（前端未提交）→ 保持原值；提交了 → 覆盖
+        if body.quirks.is_none() {
+            ch.quirks = prev.quirks.clone();
+        }
+        if body.balance_scheme.is_none() {
+            ch.balance_scheme = prev.balance_scheme.clone();
+        }
         // api_key 三态：None（前端未动密钥）→ 保持原值；Some("") → 清除；Some(key) → 设置
         match body.api_key {
             None => ch.api_key = prev.api_key,

@@ -49,6 +49,8 @@ pub struct OpenaiCompatibleBridge {
     session_headers: Vec<(String, String)>,
     /// 对话路径覆盖（登录态型供应商的私有接口路径）；空 = `/chat/completions`
     chat_path: Option<String>,
+    /// 渠道级上游特判（预置供应商写入；缺省 = 无特判）
+    quirks: crate::channel::ChannelQuirks,
 }
 
 impl OpenaiCompatibleBridge {
@@ -68,7 +70,14 @@ impl OpenaiCompatibleBridge {
             auth_mode: AuthMode::Bearer,
             session_headers: Vec::new(),
             chat_path: None,
+            quirks: crate::channel::ChannelQuirks::default(),
         }
+    }
+
+    /// 挂上渠道级特判（urlSuffix / 静态头 / OpenCode 客户端伪装）。
+    pub fn with_quirks(mut self, quirks: crate::channel::ChannelQuirks) -> Self {
+        self.quirks = quirks;
+        self
     }
 
     /// 构造「登录态型供应商」Bridge：Cookie / 专用请求头鉴权。
@@ -97,19 +106,22 @@ impl OpenaiCompatibleBridge {
             chat_path: chat_path
                 .map(|p| p.trim().to_string())
                 .filter(|p| !p.is_empty()),
+            quirks: crate::channel::ChannelQuirks::default(),
         }
     }
 
     fn chat_url(&self) -> String {
-        if let Some(path) = &self.chat_path {
+        let url = if let Some(path) = &self.chat_path {
             // 绝对路径覆盖：`/api/chat` → `<base>/api/chat`
-            return format!(
+            format!(
                 "{}/{}",
                 self.base_url.trim_end_matches('/'),
                 path.trim_start_matches('/')
-            );
-        }
-        format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+            )
+        } else {
+            format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+        };
+        self.quirks.append_suffix(&url)
     }
 
     /// Responses API 端点。与 chat_url 同规则：渠道 base_url 习惯上已含
@@ -117,26 +129,34 @@ impl OpenaiCompatibleBridge {
     /// `/responses`，避免对已含 `/v1` 的 base_url 重复拼出
     /// `/v1/v1/responses`（SDK 双前缀问题，参考 aisix build_v1_url）。
     fn responses_url(&self) -> String {
-        format!("{}/responses", self.base_url.trim_end_matches('/'))
+        self.quirks
+            .append_suffix(&format!("{}/responses", self.base_url.trim_end_matches('/')))
     }
 
     fn completions_url(&self) -> String {
-        format!("{}/completions", self.base_url.trim_end_matches('/'))
+        self.quirks
+            .append_suffix(&format!("{}/completions", self.base_url.trim_end_matches('/')))
     }
 
     fn images_url(&self) -> String {
-        format!("{}/images/generations", self.base_url.trim_end_matches('/'))
+        self.quirks.append_suffix(&format!(
+            "{}/images/generations",
+            self.base_url.trim_end_matches('/')
+        ))
     }
 
     /// 按鉴权方式附加请求头：
     /// - `Bearer`：空密钥不发送 Authorization（见 `apply_conditional_bearer`）
     /// - `Cookie`：凭证原样放进 `Cookie` 头
     /// - `Headers`：只用登录态供应商要求的专用头
+    ///
+    /// 之后再叠加渠道级静态头（`quirks.headers`，同名覆盖），OpenCode 伪装
+    /// 在 `apply_emulation` 里单独处理（它需要请求体参与）。
     fn auth_conditional(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         for (name, value) in &self.session_headers {
             req = req.header(name.as_str(), value.as_str());
         }
-        match self.auth_mode {
+        let req = match self.auth_mode {
             AuthMode::Bearer => apply_conditional_bearer(req, &self.api_key),
             AuthMode::Cookie => {
                 if self.api_key.is_empty() {
@@ -146,7 +166,123 @@ impl OpenaiCompatibleBridge {
                 }
             }
             AuthMode::Headers => req,
+        };
+        self.quirks.apply_headers(req)
+    }
+
+    /// OpenCode 客户端伪装：按官方 CLI 形状补齐出站头与请求体。
+    ///
+    /// 只在 `quirks.client_emulation = "opencode"` 且**非 Go 面**时生效
+    /// （Go 面按端点判，只补会话头 —— 见 `channel::emulation`）。
+    /// 返回补齐后的请求体（非伪装路径原样返回）。
+    fn apply_emulation(&self, mut body: Value) -> (reqwest::RequestBuilder, Value) {
+        if !self.quirks.emulates_opencode() {
+            return (self.auth_conditional(self.client.post(self.chat_url())), body);
         }
+        let go_face = crate::channel::emulation::is_opencode_go_endpoint(&self.base_url);
+        let session = crate::channel::emulation::session_id(
+            &crate::channel::emulation::conversation_seed(&body),
+        );
+        let mut headers: Vec<(String, String)> = Vec::new();
+        if go_face {
+            crate::channel::emulation::apply_go_headers(&mut headers, &session);
+        } else {
+            crate::channel::emulation::apply_headers(&mut headers, &self.api_key, &session);
+            crate::channel::emulation::ensure_agent_shape(&mut body);
+        }
+        let mut req = self.client.post(self.chat_url());
+        for (name, value) in &headers {
+            req = req.header(name.as_str(), value.as_str());
+        }
+        req = self.quirks.apply_headers(req);
+        (req, body)
+    }
+
+    /// 发流式请求并在本地聚合成一个非流式响应。
+    ///
+    /// 只为 OpenCode 免费档：上游拒绝非流式请求（`stream: true` 是过检条件
+    /// 之一），而下游调用的是 `chat()`。聚合口径与下游 SSE 聚合器一致：
+    /// 文本 / 推理 / 工具调用按 index 拼接，usage 取终帧。
+    async fn chat_via_stream_aggregation(
+        &self,
+        req: &ChatFormat,
+    ) -> Result<ChatResponse, BridgeError> {
+        let mut stream = self.chat_stream(req, &BridgeContext::new("aggregate", &req.model)).await?;
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut calls: std::collections::BTreeMap<usize, super::ToolCall> =
+            std::collections::BTreeMap::new();
+        let mut usage = super::UsageStats::default();
+        let mut finish = super::FinishReason::Stop;
+        let mut id = String::new();
+        let mut model = req.model.clone();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if !chunk.id.is_empty() {
+                id = chunk.id.clone();
+            }
+            if !chunk.model.is_empty() {
+                model = chunk.model.clone();
+            }
+            if let Some(text) = chunk.delta.content {
+                content.push_str(&text);
+            }
+            if let Some(text) = chunk.delta.reasoning {
+                reasoning.push_str(&text);
+            }
+            if let Some(deltas) = chunk.delta.tool_calls {
+                for delta in deltas {
+                    let entry = calls.entry(delta.index).or_default();
+                    if let Some(call_id) = delta.id {
+                        entry.id = call_id;
+                    }
+                    if let Some(name) = delta.function_name {
+                        entry.function_name = name;
+                    }
+                    if let Some(args) = delta.arguments {
+                        entry.arguments.push_str(&args);
+                    }
+                }
+            }
+            if let Some(reason) = chunk.finish_reason {
+                finish = reason;
+            }
+            if let Some(stats) = chunk.usage {
+                usage = stats;
+            }
+        }
+        let tool_calls: Vec<super::ToolCall> = calls
+            .into_values()
+            .map(|mut call| {
+                call.arguments = super::tool_repair::repair_tool_arguments(&call.arguments);
+                call
+            })
+            .collect();
+        let mut message = ChatMessage {
+            role: Role::Assistant,
+            content: if content.is_empty() { None } else { Some(content) },
+            content_blocks: None,
+            name: None,
+            tool_call_id: None,
+            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
+        };
+        // 空 content 兜底：下游 OpenAI 客户端对 `content: null` 且无工具的
+        // 响应会报错，与 SSE 聚合器的处置保持一致
+        if message.content.is_none() && message.tool_calls.is_none() {
+            message.content = Some(String::new());
+        }
+        Ok(ChatResponse {
+            id: if id.is_empty() {
+                format!("chatcmpl-{}", uuid::Uuid::new_v4())
+            } else {
+                id
+            },
+            model,
+            message,
+            finish_reason: finish,
+            usage,
+        })
     }
 
     /// 将 ChatFormat 转为 OpenAI 请求体
@@ -252,8 +388,16 @@ impl Bridge for OpenaiCompatibleBridge {
         let mut body = self.build_body(req);
         body["stream"] = serde_json::json!(false);
 
-        let resp = self
-            .auth_conditional(self.client.post(self.chat_url()))
+        // OpenCode 免费档只接受流式请求（见 channel::emulation）：此时改发
+        // 流式再在本地聚合成一个响应，对下游仍是「非流式」语义。
+        if self.quirks.emulates_opencode()
+            && !crate::channel::emulation::is_opencode_go_endpoint(&self.base_url)
+        {
+            return self.chat_via_stream_aggregation(req).await;
+        }
+
+        let (request, body) = self.apply_emulation(body);
+        let resp = request
             .json(&body)
             .send()
             .await
@@ -379,8 +523,8 @@ impl Bridge for OpenaiCompatibleBridge {
         let mut body = self.build_body(req);
         body["stream"] = serde_json::json!(true);
 
-        let resp = self
-            .auth_conditional(self.client.post(self.chat_url()))
+        let (request, body) = self.apply_emulation(body);
+        let resp = request
             .json(&body)
             .send()
             .await
@@ -890,6 +1034,19 @@ pub fn make_bridge(base_url: &str, api_key: &str, client: &reqwest::Client) -> A
         api_key,
         client.clone(),
     ))
+}
+
+/// 带渠道级特判的构造（预置供应商渠道用）。
+pub fn make_bridge_with_quirks(
+    base_url: &str,
+    api_key: &str,
+    client: &reqwest::Client,
+    quirks: crate::channel::ChannelQuirks,
+) -> Arc<dyn Bridge> {
+    Arc::new(
+        OpenaiCompatibleBridge::with_client(base_url, api_key, client.clone())
+            .with_quirks(quirks),
+    )
 }
 
 #[cfg(test)]

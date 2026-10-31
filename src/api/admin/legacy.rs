@@ -1128,6 +1128,23 @@ pub async fn handle_patch_channel(
             "disabled".to_string()
         };
     }
+    // 上游特判：提交了才覆盖（`{}` = 清空）；反序列化失败按「不涉及」跳过
+    if let Some(quirks) = body.get("quirks") {
+        if let Ok(parsed) =
+            serde_json::from_value::<crate::channel::ChannelQuirks>(quirks.clone())
+        {
+            ch.quirks = parsed;
+        }
+    }
+    // 余额方案：只认合法值，未知值按空（= 回落 OpenAI 计费端点）
+    if let Some(scheme) = body.get("balance_scheme").and_then(|v| v.as_str()) {
+        let trimmed = scheme.trim();
+        ch.balance_scheme = if crate::channel::balance::SCHEMES.contains(&trimmed) {
+            trimmed.to_string()
+        } else {
+            String::new()
+        };
+    }
 
     match state.channel_store.update(&id, ch) {
         Ok(c) => Ok(Json(
@@ -1172,8 +1189,9 @@ pub async fn handle_test_channel(
 
 /// 查询渠道上游真实余额（GET /api/channels/:id/balance）。
 ///
-/// 仅 OpenAI 兼容渠道支持（上游需实现 dashboard/billing 系列端点，one-api/new-api
-/// 系网关均有）；其余类型返回明确错误。查询成功后写回渠道记录，前端表格即显示。
+/// 按渠道记录的 `balance_scheme` 分派（见 `channel::balance`）：空方案回落
+/// OpenAI 计费端点（历史行为）；预置供应商卡片写入方案后可查 DeepSeek /
+/// NewAPI / 智谱 / 商汤 / OpenCode 等。查询成功后写回渠道记录，前端表格即显示。
 pub async fn handle_get_channel_balance(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1184,24 +1202,31 @@ pub async fn handle_get_channel_balance(
         .channel_store
         .get(&id)
         .ok_or_else(|| error_response("Channel not found", StatusCode::NOT_FOUND))?;
-    if ch.channel_type != crate::channel::ChannelType::OpenaiCompatible {
+    // 账号型渠道没有渠道级凭证，余额由账号池逐号查询
+    if ch.channel_type == crate::channel::ChannelType::Account {
         return Err(error_response(
-            "Balance query is only supported for OpenAI-compatible channels",
+            "账号型渠道的余额请到「账号池」逐号查询",
             StatusCode::BAD_REQUEST,
         ));
     }
-    match state.channel_store.query_balance(&ch).await {
-        Some((balance, credit)) => {
-            state.channel_store.save_balance(&id, balance, credit);
+    match state.channel_store.query_balance(&ch, &state.http_client).await {
+        Ok(reading) => {
+            // 写回历史字段：available → balance，其余明细随响应返回给前端
+            state
+                .channel_store
+                .save_balance(&id, reading.available, None);
             Ok(Json(serde_json::json!({
                 "success": true,
-                "data": { "balance": balance, "credit": credit }
+                "data": {
+                    "balance": reading.available,
+                    "credit": null,
+                    "unit": reading.unit,
+                    "wallets": reading.wallets,
+                    "scheme": ch.balance_scheme,
+                }
             })))
         }
-        None => Err(error_response(
-            "Upstream does not expose a balance endpoint",
-            StatusCode::BAD_GATEWAY,
-        )),
+        Err(message) => Err(error_response(&message, StatusCode::BAD_GATEWAY)),
     }
 }
 
@@ -1227,8 +1252,21 @@ pub async fn handle_fetch_channel_models(
 
     let channel_type = crate::channel::ChannelType::from_str_lossy(&body.channel_type);
     let channel_id_for_save = body.channel_id.clone();
-    let (url, models) =
-        fetch_upstream_models(&state, channel_type, &body.base_url, &api_key).await?;
+    // 已存渠道的 quirks 优先（预置供应商的 urlSuffix / 静态头）；未存时为空
+    let quirks = channel_id_for_save
+        .split(',')
+        .next()
+        .and_then(|cid| state.channel_store.get(cid.trim()))
+        .map(|ch| ch.quirks)
+        .unwrap_or_default();
+    let (url, models) = fetch_upstream_models(
+        &state,
+        channel_type,
+        &body.base_url,
+        &api_key,
+        &quirks,
+    )
+    .await?;
 
     if let Some(cid) = channel_id_for_save.split(',').next() {
         if !cid.trim().is_empty() && state.channel_store.get(cid).is_some() {
@@ -1264,6 +1302,7 @@ pub async fn fetch_upstream_models(
     channel_type: ChannelType,
     base_url: &str,
     api_key: &str,
+    quirks: &crate::channel::ChannelQuirks,
 ) -> Result<(String, Vec<String>), (StatusCode, Json<Value>)> {
     // 复用 AppState 共享 http_client，避免每次新建 Client（连接池复用 + 减少开销）
     let client = state.http_client.clone();
@@ -1280,14 +1319,14 @@ pub async fn fetch_upstream_models(
             // 否则 cf-ai-gw 这类 SPA 站点 /models 命中 fallback 返回 200 HTML，
             // 永远走不到 404 回退，模型拉取误报"non-JSON response"。
             let base = crate::bridge::openai::normalize_base_url(raw_base.to_string());
-            let mut url = format!("{base}/models");
-            let mut req = client.get(&url).bearer_auth(api_key);
+            let mut url = quirks.append_suffix(&format!("{base}/models"));
+            let mut req = quirks.apply_headers(client.get(&url).bearer_auth(api_key));
             // 部分上游（如 OpenRouter /api 前缀）要求额外 /v1，若 /models 404 再试
             let resp = req.send().await;
             let resp = match resp {
                 Ok(r) if r.status().as_u16() == 404 => {
-                    url = format!("{raw_base}/v1/models");
-                    req = client.get(&url).bearer_auth(api_key);
+                    url = quirks.append_suffix(&format!("{raw_base}/v1/models"));
+                    req = quirks.apply_headers(client.get(&url).bearer_auth(api_key));
                     req.send().await.map_err(|e| {
                         error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY)
                     })?
@@ -1339,11 +1378,14 @@ pub async fn fetch_upstream_models(
                     StatusCode::BAD_REQUEST,
                 ));
             }
-            let url = format!("{base}/v1/models");
-            let resp = client
-                .get(&url)
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01")
+            let url = quirks.append_suffix(&format!("{base}/v1/models"));
+            let resp = quirks
+                .apply_headers(
+                    client
+                        .get(&url)
+                        .header("x-api-key", api_key)
+                        .header("anthropic-version", "2023-06-01"),
+                )
                 .send()
                 .await
                 .map_err(|e| {
@@ -3044,7 +3086,7 @@ pub async fn handle_channel_chat_test(
 
     // ── OpenAI 协议 ──
     if !is_anthropic {
-        let url = format!("{base}/chat/completions");
+        let url = ch.quirks.append_suffix(&format!("{base}/chat/completions"));
         let mut payload = serde_json::json!({
             "model": upstream,
             "messages": messages,
@@ -3074,6 +3116,8 @@ pub async fn handle_channel_chat_test(
         if !api_key.is_empty() {
             req = req.bearer_auth(&api_key);
         }
+        // 渠道级静态头（预置供应商的客户端伪装头等）
+        req = ch.quirks.apply_headers(req);
         return match req.send().await {
             Ok(resp) => {
                 let status = resp.status();
@@ -3188,7 +3232,7 @@ pub async fn handle_channel_chat_test(
     }
 
     // ── Anthropic 协议 ──
-    let url = format!("{base}/v1/messages");
+    let url = ch.quirks.append_suffix(&format!("{base}/v1/messages"));
     let mut payload = serde_json::json!({
         "model": upstream,
         "max_tokens": body.max_tokens.unwrap_or(1024),
@@ -3221,6 +3265,7 @@ pub async fn handle_channel_chat_test(
         req = req.header("x-api-key", &api_key);
     }
     req = req.header("anthropic-version", "2023-06-01");
+    req = ch.quirks.apply_headers(req);
     match req.send().await {
         Ok(resp) => {
             let status = resp.status();

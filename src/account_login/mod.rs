@@ -431,6 +431,8 @@ fn ensure_channel(
         test_time: None,
         balance: None,
         credit: None,
+        quirks: Default::default(),
+        balance_scheme: String::new(),
         created_at: 0,
         updated_at: 0,
     };
