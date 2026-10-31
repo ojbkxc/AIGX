@@ -348,19 +348,25 @@ async fn refresh_autoclaw(
         }
     }
 
-    let try_path = |path: &str| {
+    async fn try_path(
+        client: &Client,
+        root: &str,
+        path: &str,
+        access: &str,
+        body: &Value,
+    ) -> Result<(u16, Value), RefreshOutcome> {
         let url = format!("{root}/userapi/v1/{path}");
-        let headers = autoclaw_headers(&access);
-        post_json(client, &url, &headers, body.clone())
-    };
+        let headers = autoclaw_headers(access);
+        post_json(client, &url, &headers, body.clone()).await
+    }
 
-    let (status, value) = match try_path("refresh").await {
+    let (status, value) = match try_path(client, root, "refresh", &access, &body).await {
         Ok(pair) => pair,
         Err(e) => return Err(e),
     };
     // 400002 = 签名校验失败 → 降级 agent-refresh 再试一次
     let (status, value) = if value.get("code").and_then(Value::as_i64) == Some(400002) {
-        match try_path("agent-refresh").await {
+        match try_path(client, root, "agent-refresh", &access, &body).await {
             Ok(pair) => pair,
             Err(e) => return Err(e),
         }
