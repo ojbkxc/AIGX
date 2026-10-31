@@ -51,12 +51,17 @@ pub fn supports_refresh(provider: &str) -> bool {
     )
 }
 
+/// refresh_secret 的明文（内存/落盘都是 `enc:` 编码，读前必须解码）。
+fn refresh_plain(session: &AccountSession) -> String {
+    crate::channel::Channel::decode_api_key_value(&session.refresh_secret)
+}
+
 /// 是否临期需要刷新（无 refresh_secret 或未知过期时间则不动）。
 fn needs_refresh(session: &AccountSession, now: i64) -> bool {
     if !supports_refresh(&session.provider) {
         return false;
     }
-    if session.refresh_secret.trim().is_empty() {
+    if refresh_plain(session).trim().is_empty() {
         return false;
     }
     let Some(exp) = session.expires_at.filter(|e| *e > 0) else {
@@ -216,9 +221,12 @@ fn jwt_exp(token: &str) -> Option<i64> {
 // refresh_token 前缀决定端点（`jrt-` → jobToken，其余 → deviceToken），
 // 响应里 refresh_token 每次轮换；过期只认绝对时间字段（不猜 expires_in）。
 
-async fn refresh_qoder(client: &Client, session: &AccountSession) -> Result<TokenSet, RefreshOutcome> {
+async fn refresh_qoder(
+    client: &Client,
+    session: &AccountSession,
+) -> Result<TokenSet, RefreshOutcome> {
     // 落库可能是 "{rt}|{uid}|{mid}" 复合串，请求只带第一段
-    let stored = session.refresh_secret.trim();
+    let stored = refresh_plain(session);
     let rt = stored.split('|').next().unwrap_or("").trim();
     if rt.is_empty() {
         return Err(RefreshOutcome::Failed("缺少 refresh token".to_string()));
@@ -254,14 +262,20 @@ async fn refresh_qoder(client: &Client, session: &AccountSession) -> Result<Toke
             "Qoder 刷新被拒（HTTP {status}）"
         )));
     }
-    let access = first_str(&value, &["device_token", "deviceToken", "token", "access_token"])
-        .ok_or_else(|| RefreshOutcome::Failed("Qoder 刷新响应缺 access token".to_string()))?;
-    let refresh = first_str(&value, &["refresh_token", "refreshToken"])
-        .unwrap_or_else(|| rt.to_string());
+    let access = first_str(
+        &value,
+        &["device_token", "deviceToken", "token", "access_token"],
+    )
+    .ok_or_else(|| RefreshOutcome::Failed("Qoder 刷新响应缺 access token".to_string()))?;
+    let refresh =
+        first_str(&value, &["refresh_token", "refreshToken"]).unwrap_or_else(|| rt.to_string());
     // 只认绝对时间；缺字段兜底 30 天
-    let expires_at = first_num(&value, &["expires_at", "expiresAt", "expire_time", "expireTime"])
-        .map(normalize_expire_ts)
-        .or_else(|| Some(chrono::Utc::now().timestamp() + 30 * 24 * 3600));
+    let expires_at = first_num(
+        &value,
+        &["expires_at", "expiresAt", "expire_time", "expireTime"],
+    )
+    .map(normalize_expire_ts)
+    .or_else(|| Some(chrono::Utc::now().timestamp() + 30 * 24 * 3600));
     Ok(TokenSet {
         access,
         refresh,
@@ -309,7 +323,8 @@ async fn refresh_autoclaw(
     client: &Client,
     session: &AccountSession,
 ) -> Result<TokenSet, RefreshOutcome> {
-    let rt = session.refresh_secret.trim();
+    let rt_owned = refresh_plain(session);
+    let rt = rt_owned.trim();
     if rt.is_empty() {
         return Err(RefreshOutcome::Failed("缺少 refresh token".to_string()));
     }
@@ -395,8 +410,12 @@ async fn refresh_autoclaw(
 const TRAE_CLIENT_MAIN: &str = "ono9krqynydwx5";
 const TRAE_CLIENT_ALT: &str = "en1oxy7wnw8j9n";
 
-async fn refresh_trae(client: &Client, session: &AccountSession) -> Result<TokenSet, RefreshOutcome> {
-    let rt = session.refresh_secret.trim();
+async fn refresh_trae(
+    client: &Client,
+    session: &AccountSession,
+) -> Result<TokenSet, RefreshOutcome> {
+    let rt_owned = refresh_plain(session);
+    let rt = rt_owned.trim();
     if rt.is_empty() {
         return Err(RefreshOutcome::Failed("缺少 refresh token".to_string()));
     }

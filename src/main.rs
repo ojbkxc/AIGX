@@ -616,6 +616,25 @@ async fn main() -> anyhow::Result<()> {
                 }),
             });
         }
+        // 账号 token 自动刷新：临期（qoder/autoclaw 5 分钟、trae 24 小时）即刷，
+        // 串行执行，失败不改写凭据（下一轮再试）。见 account_session::refresh。
+        {
+            let sessions = state.account_sessions.clone();
+            let http = state.http_client.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "account-session-refresh",
+                interval: Duration::from_secs(600),
+                first_run_delay: Duration::from_secs(90),
+                run: Box::new(move || {
+                    let pool = sessions.clone();
+                    let http = http.clone();
+                    Box::pin(async move {
+                        crate::account_session::refresh::refresh_expiring(&pool, &http).await;
+                        0
+                    })
+                }),
+            });
+        }
         // 服务器自动更新：每小时判断一次是否到配置的检查间隔；到点则拉
         // GitHub Release，开启「自动应用」时下载替换并 exec 自重启。
         {

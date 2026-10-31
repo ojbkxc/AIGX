@@ -554,6 +554,47 @@ impl AccountSessionStore {
         CasOutcome::Updated
     }
 
+    /// token 三件套比较-再写：access / refresh / 过期时间一次落盘。
+    ///
+    /// 刷新会轮换 refresh_token —— 与 access 分两次写，中间崩掉会把账号
+    /// 弄丢（旧 rt 已作废、新 rt 没存上），所以必须同一把 CAS 一起写。
+    /// `next_refresh` 传明文（内部按 upsert 同口径做 `enc:` 编码）。
+    pub fn update_tokens_cas(
+        &self,
+        id: &str,
+        expected_plain: &str,
+        next: Credential,
+        next_refresh: &str,
+        next_expires_at: Option<i64>,
+    ) -> CasOutcome {
+        let snapshot = {
+            let mut sessions = self.inner.sessions.write();
+            let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
+                return CasOutcome::Missing;
+            };
+            if session.credential.secret_plain() != expected_plain {
+                return CasOutcome::Stale;
+            }
+            session.credential = next.encoded();
+            session.refresh_secret = if next_refresh.trim().is_empty() {
+                String::new()
+            } else if next_refresh.starts_with("enc:") {
+                next_refresh.to_string()
+            } else {
+                crate::channel::Channel::encode_api_key(next_refresh)
+            };
+            session.expires_at = next_expires_at;
+            session.error_count = 0;
+            session.last_error = None;
+            session.updated_at = chrono::Utc::now().timestamp();
+            session.clone()
+        };
+        if let Err(e) = self.persist(&snapshot) {
+            tracing::warn!("persist account session {} tokens: {e}", snapshot.id);
+        }
+        CasOutcome::Updated
+    }
+
     /// 周期维护：清理过期冷却、同步凭证过期状态。返回本轮变更条数。
     pub fn sweep(&self, now: i64) -> u64 {
         let mut touched: Vec<AccountSession> = Vec::new();
