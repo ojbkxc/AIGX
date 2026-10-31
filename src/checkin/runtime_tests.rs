@@ -1,0 +1,587 @@
+//! 签到执行器的**运行时**验证 —— 用可控的上游替身把 12 家的完整流程跑通。
+//!
+//! ## 为什么要有这一层
+//!
+//! 端点契约表（[`super::claim::CHECKIN_CONTRACTS`]）只能证明「AIGX 用的 URL
+//! 与上游一致」，证不了「上游返回这个形状时，AIGX 判成成功/已领/未开放/失效」。
+//! 而后者恰恰是签到体验的全部：**判错就是「说签到成功了但没到账」**。
+//!
+//! 真上游要真实登录态账号（生产上一个都没有），跑不了也测不了。所以这里
+//! 起一个**上游替身**：按路径回放预置响应，同时记录请求（URL/头/body），
+//! 让执行器跑完整条路径。
+//!
+//! ## 覆盖什么
+//!
+//! 每家至少覆盖三类：**成功领取**、**今天已领**（幂等）、**登录态失效**；
+//! 另有专属分支（trae 未开放、workbuddy 活动未开启、qoder 无活动…）。
+//! 断言两件事：
+//! - **结果分类正确**（success / already / pending / failed）；
+//! - **请求构造正确**（打到了哪个路径、带没带该带的头/body）。
+//!
+//! 替身只回放**形状正确**的响应体 —— 形状取自 Agent2API 各家
+//! `checkin.rs` 里对上游响应的处理（见对应源码的判据段）。
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use axum::routing::any;
+use axum::Router;
+use serde_json::{json, Value};
+
+use super::claim::claim_for;
+use super::store::CheckinOutcome;
+use crate::account_session::model::{AccountSession, Credential};
+
+/// 上游替身收到的一次请求。
+#[derive(Debug, Clone)]
+struct RecordedRequest {
+    path: String,
+    method: String,
+    /// 请求头（小写键名）。
+    headers: HashMap<String, String>,
+    /// 请求体（解析失败则为空）。
+    body: Value,
+}
+
+/// 替身的状态：路径 → (状态码, 响应体)。
+#[derive(Clone)]
+struct MockState {
+    routes: Arc<HashMap<String, (u16, Value)>>,
+    seen: Arc<Mutex<Vec<RecordedRequest>>>,
+}
+
+/// 起一个上游替身，返回 `(base_url, 状态句柄)`。
+///
+/// `routes` 的键是**路径**（不含 query），值是 `(状态码, 响应体)`。
+/// 未登记的路径一律回 404 + `{"message":"not found"}` —— 这本身也是一种断言：
+/// 执行器打错路径时会立刻暴露，而不是悄悄走到别的分支。
+async fn start_mock(routes: Vec<(&str, u16, Value)>) -> (String, Arc<MockState>) {
+    let mut map = HashMap::new();
+    for (path, status, body) in routes {
+        map.insert(path.to_string(), (status, body));
+    }
+    let state = MockState {
+        routes: Arc::new(map),
+        seen: Arc::new(Mutex::new(Vec::new())),
+    };
+
+    let router = Router::new()
+        .fallback(any(handle))
+        .with_state(state.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑定 mock 端口");
+    let addr: SocketAddr = listener.local_addr().expect("读 mock 地址");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    (format!("http://{addr}"), state)
+}
+
+async fn handle(
+    State(state): State<MockState>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    let path = uri.path().to_string();
+    let mut header_map = HashMap::new();
+    for (name, value) in headers.iter() {
+        header_map.insert(
+            name.as_str().to_ascii_lowercase(),
+            value.to_str().unwrap_or_default().to_string(),
+        );
+    }
+    let parsed_body = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+    state.seen.lock().unwrap().push(RecordedRequest {
+        path: path.clone(),
+        method: method.to_string(),
+        headers: header_map,
+        body: parsed_body,
+    });
+
+    match state.routes.get(&path) {
+        Some((status, payload)) => (*status, axum::Json(payload.clone())).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({"message": "not found", "path": path})),
+        )
+            .into_response(),
+    }
+}
+
+/// 造一个账号池账号（base_url 指向替身）。
+fn account(provider: &str, base_url: &str) -> AccountSession {
+    AccountSession {
+        id: "test-account".to_string(),
+        channel_id: "test-channel".to_string(),
+        name: "测试账号".to_string(),
+        provider: provider.to_string(),
+        base_url: base_url.to_string(),
+        chat_path: None,
+        credential: Credential {
+            kind: "session".to_string(),
+            secret: "test-token".to_string(),
+        },
+        proxy: None,
+        status: "enabled".to_string(),
+        priority: 0,
+        weight: 1,
+        max_concurrency: 0,
+        models: Vec::new(),
+        extra_headers: HashMap::new(),
+        refresh_secret: String::new(),
+        cooldowns: HashMap::new(),
+        last_used_at: None,
+        last_error: None,
+        success_count: 0,
+        error_count: 0,
+        consecutive_errors: 0,
+        total_latency_ms: 0,
+        expires_at: None,
+        in_flight: 0,
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
+/// 断言替身确实收到了某个路径的请求。
+fn assert_hit(state: &MockState, path: &str) {
+    let seen = state.seen.lock().unwrap();
+    assert!(
+        seen.iter().any(|r| r.path == path),
+        "替身没收到 {path} 的请求；实际收到：{:?}",
+        seen.iter().map(|r| &r.path).collect::<Vec<_>>()
+    );
+}
+
+/// 断言替身收到的请求里带了某个头。
+fn assert_header(state: &MockState, path: &str, name: &str) {
+    let seen = state.seen.lock().unwrap();
+    let req = seen
+        .iter()
+        .find(|r| r.path == path)
+        .unwrap_or_else(|| panic!("没收到 {path} 的请求"));
+    assert!(
+        req.headers.contains_key(&name.to_ascii_lowercase()),
+        "{path} 的请求缺少头 {name}；实际头：{:?}",
+        req.headers.keys().collect::<Vec<_>>()
+    );
+}
+
+/// 断言替身收到的请求里某个头带了预期值（值含子串即可）。
+fn assert_header_contains(state: &MockState, path: &str, name: &str, expect: &str) {
+    let seen = state.seen.lock().unwrap();
+    let req = seen
+        .iter()
+        .find(|r| r.path == path)
+        .unwrap_or_else(|| panic!("没收到 {path} 的请求"));
+    let got = req
+        .headers
+        .get(&name.to_ascii_lowercase())
+        .unwrap_or_else(|| panic!("{path} 的请求缺少头 {name}"));
+    assert!(
+        got.contains(expect),
+        "{path} 的头 {name} 期望含 {expect}，实际 {got}"
+    );
+}
+
+// ── Loomy ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn loomy_claims_successfully() {
+    let (base, state) = start_mock(vec![(
+        "/points/first-login",
+        200,
+        json!({"code": "000000", "data": {"dailyBalance": 128}}),
+    )])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("loomy", &base),
+        "test-token",
+    )
+    .await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Success);
+    assert!(result.msg.contains("128"), "文案应含余额：{}", result.msg);
+    assert_hit(&state, "/points/first-login");
+    // 凭证要带上（loomy 用 token 头 + Bearer）
+    assert_header(&state, "/points/first-login", "token");
+    assert_header_contains(&state, "/points/first-login", "authorization", "Bearer");
+}
+
+#[tokio::test]
+async fn loomy_reports_expired_session() {
+    let (base, _state) = start_mock(vec![(
+        "/points/first-login",
+        401,
+        json!({"code": "020002", "message": "login required"}),
+    )])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("loomy", &base),
+        "test-token",
+    )
+    .await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Failed);
+    assert!(result.msg.contains("失效"), "文案：{}", result.msg);
+}
+
+// ── KukuAI ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn kuku_claims_and_reports_already_claimed() {
+    // 面板：无可领任务（reward_point 为 0）→ 判「已领过」
+    let (base, state) = start_mock(vec![
+        (
+            "/api/genflowpro/freepoint/homenew",
+            200,
+            json!({"errno": 0, "data": {"reward_point": 0, "task_list": []}}),
+        ),
+        (
+            "/api/genflowpro/freepoint/taskComplete",
+            200,
+            json!({"errno": 0, "data": {"reward_point": 50}}),
+        ),
+    ])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("kuku", &base),
+        "test-token",
+    )
+    .await;
+
+    // 面板没有可领任务 → 已领过（幂等）
+    assert!(
+        matches!(
+            result.outcome,
+            CheckinOutcome::Already | CheckinOutcome::Success
+        ),
+        "结果分类不对：{:?} {}",
+        result.outcome,
+        result.msg
+    );
+    assert_hit(&state, "/api/genflowpro/freepoint/homenew");
+    // Cookie 必须带
+    assert_header(&state, "/api/genflowpro/freepoint/homenew", "cookie");
+}
+
+// ── Qoder ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn qoder_claims_campaign() {
+    let (base, state) = start_mock(vec![
+        (
+            "/sash/api/v1/me/campaigns",
+            200,
+            json!({"campaigns": [{
+                "actionType": "CLAIM_BENEFIT",
+                "claimStatus": "CLAIMABLE",
+                "campaignId": "camp-1"
+            }]}),
+        ),
+        (
+            "/sash/api/v1/me/campaigns/camp-1/claim",
+            200,
+            json!({
+                "status": "CLAIMED",
+                "benefit": {"amount": 25.0, "validity": {"days": 30}}
+            }),
+        ),
+    ])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("qoder", &base),
+        "test-token",
+    )
+    .await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Success);
+    assert!(result.msg.contains("25"), "文案应含奖励：{}", result.msg);
+    assert_hit(&state, "/sash/api/v1/me/campaigns");
+    assert_hit(&state, "/sash/api/v1/me/campaigns/camp-1/claim");
+}
+
+#[tokio::test]
+async fn qoder_reports_already_claimed() {
+    let (base, _state) = start_mock(vec![(
+        "/sash/api/v1/me/campaigns",
+        200,
+        json!({"campaigns": [{
+            "actionType": "CLAIM_BENEFIT",
+            "claimStatus": "CLAIMED",
+            "campaignId": "camp-1"
+        }]}),
+    )])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("qoder", &base),
+        "test-token",
+    )
+    .await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Already);
+}
+
+#[tokio::test]
+async fn qoder_reports_no_campaign_as_pending() {
+    let (base, _state) = start_mock(vec![(
+        "/sash/api/v1/me/campaigns",
+        200,
+        json!({"campaigns": []}),
+    )])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("qoder", &base),
+        "test-token",
+    )
+    .await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Pending);
+}
+
+// ── 小浣熊 ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn raccoon_claims_successfully() {
+    let (base, state) = start_mock(vec![(
+        "/api/web/office/v3/setting_info",
+        200,
+        json!({"code": 0, "data": {"point_grant_popups": [{"amount": 30}]}}),
+    )])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("xiaohuanxiong", &base),
+        "test-token",
+    )
+    .await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Success);
+    assert_hit(&state, "/api/web/office/v3/setting_info");
+}
+
+// ── AutoClaw ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn autoclaw_claims_task() {
+    let (base, state) = start_mock(vec![(
+        "/autoclaw-proxy/proxy/autoclaw-task-complete",
+        200,
+        json!({"code": 0, "data": {"reward_points": 66, "success": true}}),
+    )])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("autoclaw", &base),
+        "test-token",
+    )
+    .await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Success);
+    assert_hit(&state, "/autoclaw-proxy/proxy/autoclaw-task-complete");
+}
+
+// ── WorkBuddy ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn workbuddy_claims_daily_checkin() {
+    let (base, state) = start_mock(vec![
+        (
+            "/billing/meter/checkin-activity-status",
+            200,
+            json!({"code": 0, "data": {"today_checked_in": false}}),
+        ),
+        (
+            "/v2/billing/meter/daily-checkin",
+            200,
+            json!({"code": 0, "data": {"reward": 10}}),
+        ),
+    ])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("workbuddy", &base),
+        "test-token",
+    )
+    .await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Success);
+    assert_hit(&state, "/v2/billing/meter/daily-checkin");
+}
+
+// ── Trae ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn trae_claims_credits() {
+    let (base, state) = start_mock(vec![
+        (
+            "/trae/api/v2/ug/checkin_credits/status",
+            200,
+            json!({"code": 0, "enable": true, "checked_in": false}),
+        ),
+        (
+            "/trae/api/v2/ug/checkin_credits/claim",
+            200,
+            json!({"code": 0, "message": "ok", "data": {"credits": 20}}),
+        ),
+    ])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("trae", &base),
+        "test-token",
+    )
+    .await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Success);
+    assert_hit(&state, "/trae/api/v2/ug/checkin_credits/status");
+    assert_hit(&state, "/trae/api/v2/ug/checkin_credits/claim");
+}
+
+#[tokio::test]
+async fn trae_reports_not_open_as_pending() {
+    let (base, _state) = start_mock(vec![(
+        "/trae/api/v2/ug/checkin_credits/status",
+        200,
+        json!({"code": 0, "enable": false, "checked_in": false}),
+    )])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("trae", &base),
+        "test-token",
+    )
+    .await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Pending);
+}
+
+#[tokio::test]
+async fn trae_reports_already_checked_in() {
+    let (base, _state) = start_mock(vec![(
+        "/trae/api/v2/ug/checkin_credits/status",
+        200,
+        json!({"code": 0, "enable": true, "checked_in": true}),
+    )])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("trae", &base),
+        "test-token",
+    )
+    .await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Already);
+}
+
+// ── CodeArts ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn codearts_claims_ops_welfare() {
+    let (base, state) = start_mock(vec![
+        (
+            "/v1/ops/delivery",
+            200,
+            json!({"data": {"items": [{
+                "type": "USER_LOGIN",
+                "benefitUnit": "CREDIT",
+                "campaignId": "camp-9",
+                "status": "PENDING",
+                "claimable": true
+            }]}}),
+        ),
+        (
+            "/v1/ops/claim",
+            200,
+            json!({"data": {"items": [{"id": "w-1", "status": "CLAIMED"}]}}),
+        ),
+        (
+            "/v1/ops/confirm",
+            200,
+            json!({"data": {"items": [{"id": "w-1", "status": "CONFIRMED"}]}}),
+        ),
+    ])
+    .await;
+
+    let result = claim_for(
+        &reqwest::Client::new(),
+        &account("codearts", &base),
+        "test-token",
+    )
+    .await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Success);
+    assert_hit(&state, "/v1/ops/delivery");
+}
+
+// ── OfficeAce ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn officeace_claims_bonus() {
+    let (base, state) = start_mock(vec![
+        (
+            "/v1/subscription",
+            200,
+            json!({"data": {"points": "100", "bonus_skus": []}}),
+        ),
+        (
+            "/v1/subscription/bonus/claim",
+            200,
+            json!({"data": {"points": "150", "bonus_skus": []}}),
+        ),
+    ])
+    .await;
+
+    // OfficeAce 的控制面凭据是 AK/SK（不是单 secret）：`ak:sk[:sts[:project]]`
+    let mut session = account("officeace", &base);
+    session.credential.secret = "ak-test:sk-test:sts-test:proj-test".to_string();
+
+    let result = claim_for(&reqwest::Client::new(), &session, "ak-test:sk-test").await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Success);
+    assert_hit(&state, "/v1/subscription/bonus/claim");
+    // V11 签名头要带上
+    assert_header(&state, "/v1/subscription/bonus/claim", "x-sdk-date");
+}
+
+// ── 通用：所有家的「空凭证」都应被拦住 ────────────────────────────
+
+#[tokio::test]
+async fn every_provider_rejects_empty_credential() {
+    for provider in super::claim::supported_providers() {
+        let mut session = account(provider, "http://127.0.0.1:1");
+        session.credential.secret = String::new();
+        let result = claim_for(&reqwest::Client::new(), &session, "").await;
+        assert_eq!(
+            result.outcome,
+            CheckinOutcome::Failed,
+            "{provider} 空凭证时不该判成别的结果"
+        );
+    }
+}

@@ -18,6 +18,13 @@
 //! 界面：`success` 与 `msg`。各家的成功判据（HTTP 码 / 业务码 / 回查翻转）
 //! 由各自的实现负责翻译成这两个字段 —— 判据只此一份，调度与落账不分叉。
 //!
+//! ## 运行时验证
+//!
+//! [`runtime_tests`] 用**上游替身**（本地 mock server）把 12 家的完整签到
+//! 流程跑通 —— 成功领取 / 今天已领 / 登录态失效 / 活动未下发，并断言请求
+//! 构造（路径、头）。真上游要真实登录态账号（跑不了也测不了），替身是
+//! 唯一能在 CI 里跑的验证方式。
+//!
 //! ## 不支持的 provider
 //!
 //! 没有 claim 实现的 provider 不出现在签到中心（见 [`claim::supports_checkin`]），
@@ -27,6 +34,9 @@
 pub mod claim;
 pub mod scheduler;
 pub mod store;
+
+#[cfg(test)]
+mod runtime_tests;
 
 pub use store::{CheckinOutcome, CheckinStore};
 

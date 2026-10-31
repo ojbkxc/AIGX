@@ -340,15 +340,20 @@ const KUKU_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537
 ///
 /// 每日可自助完成的是 `LOGIN` 与 `CHAT`；`taskComplete` 幂等（重复领
 /// `reward_point=0`），所以「已领过」按 `reward_point == 0` 判。
-async fn kuku(client: &Client, _session: &AccountSession, secret: &str) -> ClaimResult {
+async fn kuku(client: &Client, session: &AccountSession, secret: &str) -> ClaimResult {
+    // 站点根优先用账号 base_url（自建中转时不该打到官方站；缺省回落
+    // provider 默认 = KUKU_BASE）。
+    let base = crate::account_session::adapter::effective_base_url(session)
+        .unwrap_or_else(|_| KUKU_BASE.to_string());
+    let base = base.trim_end_matches('/');
     let headers = vec![
         ("Cookie".to_string(), secret.to_string()),
         ("User-Agent".to_string(), KUKU_UA.to_string()),
-        ("Referer".to_string(), format!("{KUKU_BASE}/genflowpro")),
-        ("Origin".to_string(), KUKU_BASE.to_string()),
+        ("Referer".to_string(), format!("{base}/genflowpro")),
+        ("Origin".to_string(), base.to_string()),
         ("Accept-Language".to_string(), "zh-CN,zh;q=0.9".to_string()),
     ];
-    let panel_url = format!("{KUKU_BASE}/api/genflowpro/freepoint/homenew?{KUKU_WEB_QUERY}");
+    let panel_url = format!("{base}/api/genflowpro/freepoint/homenew?{KUKU_WEB_QUERY}");
     let (status, panel) = match send_json(
         client,
         reqwest::Method::GET,
@@ -383,7 +388,7 @@ async fn kuku(client: &Client, _session: &AccountSession, secret: &str) -> Claim
     let mut any_ok = false;
     let mut last_error = String::new();
     for (task_type, label) in tasks {
-        let url = format!("{KUKU_BASE}/api/genflowpro/freepoint/taskComplete?{KUKU_WEB_QUERY}");
+        let url = format!("{base}/api/genflowpro/freepoint/taskComplete?{KUKU_WEB_QUERY}");
         let result = send_json(
             client,
             reqwest::Method::POST,
@@ -435,13 +440,25 @@ const QODER_CAMPAIGNS_QUERY: &str = "?forceRefresh=true";
 /// `claimable` 标志（领完后它仍可能是 true）。`replayed=true` 与 409 都算
 /// 「今天已领」。
 async fn qoder(client: &Client, session: &AccountSession, secret: &str) -> ClaimResult {
-    let (open_api, origin) = if session.provider == "qoder-intl" {
+    // 站点根优先用账号 base_url（自建中转时不该打到官方 openapi）；
+    // 缺省按地区回落 —— 国际版 `openapi.qoder.sh`，中国版 `openapi.qoder.com.cn`。
+    let (default_api, default_origin) = if session.provider == "qoder-intl" {
         ("https://openapi.qoder.sh", "https://openapi.qoder.sh")
     } else {
         (
             "https://openapi.qoder.com.cn",
             "https://openapi.qoder.com.cn",
         )
+    };
+    let configured = crate::account_session::adapter::effective_base_url(session)
+        .ok()
+        .filter(|url| !url.trim().is_empty());
+    let (open_api, origin) = match configured {
+        Some(url) => {
+            let trimmed = url.trim_end_matches('/');
+            (trimmed.to_string(), trimmed.to_string())
+        }
+        None => (default_api.to_string(), default_origin.to_string()),
     };
     let headers = vec![
         ("authorization".to_string(), format!("Bearer {secret}")),
@@ -892,7 +909,14 @@ async fn trae(client: &Client, _session: &AccountSession, secret: &str) -> Claim
             format!("Cloud-IDE-JWT {secret}"),
         ),
     ];
-    let host = "https://api.trae.cn";
+    // 站点根走账号 base_url（缺省回落 provider 默认 = A2A 的 AGENT_BASE_URL
+    // `trae-api-cn.mchost.guru`）。
+    //
+    // 此前这里硬编码成 `https://api.trae.cn` —— **与上游不是同一个站**，
+    // 签到请求必然打错地方。自建中转时也不该打到官方站。
+    let host = crate::account_session::adapter::effective_base_url(session)
+        .unwrap_or_else(|_| "https://trae-api-cn.mchost.guru".to_string());
+    let host = host.trim_end_matches('/');
     let status_url = format!("{host}/trae/api/v2/ug/checkin_credits/status");
     let claim_url = format!("{host}/trae/api/v2/ug/checkin_credits/claim");
 
