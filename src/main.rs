@@ -741,17 +741,23 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Server listening on {}", addr);
 
     // 优雅关闭：收到 SIGTERM/SIGINT 后标记 draining，等待现有请求完成
+    // `into_make_service_with_connect_info` 让 handler 能拿到真实对端 IP
+    // （ConnectInfo<SocketAddr>）：反向代理未开 trust_proxy_headers 时，
+    // 登录/注册限流按真实来源 IP 计数，而不是全站共用一个 "unknown" 键。
     let livez = livez_state.clone();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            tokio::signal::ctrl_c().await.ok();
-            tracing::info!("Shutdown signal received, marking draining...");
-            livez.mark_shutting_down();
-            // 给现有请求一些时间完成
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            tracing::info!("Graceful shutdown complete");
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        tokio::signal::ctrl_c().await.ok();
+        tracing::info!("Shutdown signal received, marking draining...");
+        livez.mark_shutting_down();
+        // 给现有请求一些时间完成
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tracing::info!("Graceful shutdown complete");
+    })
+    .await?;
 
     Ok(())
 }

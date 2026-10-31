@@ -211,6 +211,14 @@ pub async fn handle_add_token(
     };
     match state.api_key_store.generate_with_options(opts) {
         Ok(k) => {
+            super::common::record_audit(
+                &state,
+                &user.email,
+                "token.create",
+                &k.name,
+                None,
+                Some(json!({ "id": k.id, "user_id": k.user_id })),
+            );
             // F01（契约1）：创建响应一次性返回完整明文密钥
             let mut data = mask_token(&k);
             data["plain_key"] = json!(k.key.clone());
@@ -316,7 +324,10 @@ pub async fn handle_delete_token(
         }
     }
     match state.api_key_store.delete(&id) {
-        Ok(_) => Ok(Json(json!({ "success": true, "data": null }))),
+        Ok(_) => {
+            super::common::record_audit(&state, &user.email, "token.delete", &id, None, None);
+            Ok(Json(json!({ "success": true, "data": null })))
+        }
         Err(e) => Err(error_response(
             &format!("Failed to delete token: {e}"),
             StatusCode::INTERNAL_SERVER_ERROR,

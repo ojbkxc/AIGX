@@ -892,6 +892,12 @@ pub async fn handle_epay_notify(
     }
     let config = state.config_manager.get().await;
     let epay = crate::payment::EpayClient::new(config.epay.clone());
+    // 未配置支付（epay_key 为空）时，verify 会用空密钥算签名 —— 任何人都能
+    // 伪造 TRADE_SUCCESS 刷额度。入口先拒绝。
+    if !config.epay.ready() {
+        tracing::warn!("Epay notify: epay not configured (missing pay_address/epay_id/epay_key)");
+        return "fail".into_response();
+    }
     let verify = match epay.verify(&params) {
         Ok(v) => v,
         Err(_) => return "fail".into_response(),
@@ -998,6 +1004,12 @@ pub async fn handle_epay_return(
     }
     let config = state.config_manager.get().await;
     let epay = crate::payment::EpayClient::new(config.epay.clone());
+    // 未配置支付（epay_key 为空）时，verify 会用空密钥算签名 —— 任何人都能
+    // 伪造 TRADE_SUCCESS 刷额度。入口先拒绝。
+    if !config.epay.ready() {
+        tracing::warn!("Epay notify: epay not configured (missing pay_address/epay_id/epay_key)");
+        return "fail".into_response();
+    }
     let verify = match epay.verify(&params) {
         Ok(v) => v,
         Err(_) => return Redirect::to(&make_return_path("fail")).into_response(),
@@ -1130,8 +1142,17 @@ pub async fn handle_patch_channel(
     }
     // 上游特判：提交了才覆盖（`{}` = 清空）；反序列化失败按「不涉及」跳过
     if let Some(quirks) = body.get("quirks") {
-        if let Ok(parsed) = serde_json::from_value::<crate::channel::ChannelQuirks>(quirks.clone())
+        if let Ok(mut parsed) =
+            serde_json::from_value::<crate::channel::ChannelQuirks>(quirks.clone())
         {
+            // 敏感头被脱敏成 `****` 后原样提交回来：保留原值
+            for (name, value) in parsed.headers.iter_mut() {
+                if value == "****" {
+                    if let Some(original) = ch.quirks.headers.get(name) {
+                        *value = original.clone();
+                    }
+                }
+            }
             ch.quirks = parsed;
         }
     }

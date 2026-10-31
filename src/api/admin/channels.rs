@@ -201,10 +201,11 @@ pub fn mask_secret(secret: &str) -> String {
 ///   整条 quirks 序列化给前端，不剔除等于把控制台密码明文吐出来。
 pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
     let masked_key = mask_secret(&ch.api_key);
-    // quirks.headers 脱敏：余额凭证头整体替换为掩码（前端只需要知道「有没有配」）
+    // quirks.headers 脱敏：敏感头（余额凭证 / 客户端令牌 / 账号密码）整体
+    // 替换为掩码（前端只需要知道「有没有配」）
     let mut quirks = ch.quirks.clone();
     for (name, value) in quirks.headers.iter_mut() {
-        if crate::channel::is_balance_credential_header(name) && !value.is_empty() {
+        if crate::channel::is_sensitive_header(name) && !value.is_empty() {
             *value = "****".to_string();
         }
     }
@@ -475,9 +476,24 @@ pub async fn handle_add_channel(
     let _config = verify_admin(&state, &headers).await?;
     let ch = body.to_channel(String::new());
     match state.channel_store.add(ch) {
-        Ok(c) => Ok(Json(
-            json!({ "success": true, "data": mask_channel(&c, None) }),
-        )),
+        Ok(c) => {
+            let admin_id = admin_id_from_session(&state, &headers).await;
+            record_audit(
+                &state,
+                &admin_id,
+                "create_channel",
+                &format!("id={} name={}", c.id, c.name),
+                None,
+                Some(json!({
+                    "name": c.name,
+                    "channel_type": c.channel_type.as_str(),
+                    "base_url": c.base_url,
+                })),
+            );
+            Ok(Json(
+                json!({ "success": true, "data": mask_channel(&c, None) }),
+            ))
+        }
         Err(e) => Err(error_response(
             &format!("Failed to add channel: {e}"),
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -512,6 +528,16 @@ pub async fn handle_update_channel(
         // quirks / 余额方案：缺省（前端未提交）→ 保持原值；提交了 → 覆盖
         if body.quirks.is_none() {
             ch.quirks = prev.quirks.clone();
+        } else {
+            // 敏感头被脱敏成 `****` 后前端原样提交回来：此时保留原值
+            // （否则一次「只改名称」的保存会把所有凭证覆盖成字面量 ****）。
+            for (name, value) in ch.quirks.headers.iter_mut() {
+                if value == "****" {
+                    if let Some(original) = prev.quirks.headers.get(name) {
+                        *value = original.clone();
+                    }
+                }
+            }
         }
         if body.balance_scheme.is_none() {
             ch.balance_scheme = prev.balance_scheme.clone();
@@ -523,9 +549,24 @@ pub async fn handle_update_channel(
         }
     }
     match state.channel_store.update(&id, ch) {
-        Ok(c) => Ok(Json(
-            json!({ "success": true, "data": mask_channel(&c, None) }),
-        )),
+        Ok(c) => {
+            let admin_id = admin_id_from_session(&state, &headers).await;
+            record_audit(
+                &state,
+                &admin_id,
+                "update_channel",
+                &format!("id={} name={}", c.id, c.name),
+                None,
+                Some(json!({
+                    "name": c.name,
+                    "channel_type": c.channel_type.as_str(),
+                    "status": c.status,
+                })),
+            );
+            Ok(Json(
+                json!({ "success": true, "data": mask_channel(&c, None) }),
+            ))
+        }
         Err(e) => Err(error_response(
             &format!("Failed to update channel: {e}"),
             StatusCode::INTERNAL_SERVER_ERROR,

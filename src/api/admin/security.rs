@@ -18,6 +18,8 @@ pub struct SecurityEventsQuery {
     pub range: Option<String>,
     pub page: Option<usize>,
     pub page_size: Option<usize>,
+    /// 前端历史传参名（`size`）：与 `page_size` 等价，二者都认
+    pub size: Option<usize>,
 }
 
 /// GET /api/monitor/security - 安全汇总
@@ -48,7 +50,7 @@ pub async fn handle_security_events(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
     let page = params.page.unwrap_or(1).max(1);
-    let page_size = params.page_size.unwrap_or(20).clamp(1, 100);
+    let page_size = params.page_size.or(params.size).unwrap_or(20).clamp(1, 100);
     let start = params.range.as_deref().and_then(|r| {
         let secs = match r {
             "1h" => 3600,

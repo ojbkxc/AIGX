@@ -89,13 +89,20 @@ pub struct LinuxDoCallbackParams {
 /// POST /api/auth/login - 管理员登录
 pub async fn handle_login(
     State(state): State<AppState>,
+    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // ── 登录限流：同 IP 每分钟最多 10 次 ──
     const LOGIN_RATE_LIMIT_PER_MINUTE: u32 = 10;
     const LOGIN_FAIL_LOCK_THRESHOLD: u32 = 5; // 连续失败 ≥5 次锁定
-    let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+
+    // 真实来源 IP：优先信任的代理头（trust_proxy_headers 开启时），
+    // 否则用 TCP 对端地址。原来两者都拿不到时全站共用 "unknown" 键 ——
+    // 任意人 5 次失败就能把**所有用户**锁 5 分钟（登录 DoS）。
+    let client_ip = extract_client_ip(&headers)
+        .or_else(|| connect.map(|c| c.0.ip().to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
     let attempts = state.login_limiter.get(&client_ip).await.unwrap_or(0);
     if attempts >= LOGIN_RATE_LIMIT_PER_MINUTE {
         state.log_store.record_security(
@@ -203,7 +210,9 @@ pub async fn handle_login(
 
     // 用户名也是合法登录标识（与 user_store.authenticate 的 email 校验互补）
     if let Some(u) = state.user_store.get_by_username(&body.email) {
-        if user::verify_password(&body.password, &u.password) {
+        // 与 email 分支同一口径：禁用/封禁账号不得登录。
+        // 原来这里只校验密码，被禁用的用户仍能签发会话。
+        if u.status == "active" && user::verify_password(&body.password, &u.password) {
             // 登录成功：清除失败计数
             state.login_failures.remove(&client_ip).await;
             let session_secret = if config.admin.session_secret.is_empty() {
@@ -265,12 +274,15 @@ pub async fn handle_login(
 /// 限流基于 moka TTL 缓存（key=IP, value=计数），窗口 60s。
 pub async fn handle_register(
     State(state): State<AppState>,
+    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // ── 速率限制：同 IP 每分钟最多 5 次 ──
     const REGISTER_RATE_LIMIT_PER_MINUTE: u32 = 5;
-    let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+    let client_ip = extract_client_ip(&headers)
+        .or_else(|| connect.map(|c| c.0.ip().to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
     let current_count = state.register_limiter.get(&client_ip).await.unwrap_or(0);
     if current_count >= REGISTER_RATE_LIMIT_PER_MINUTE {
         state.log_store.record_security(
@@ -547,10 +559,13 @@ pub async fn handle_forgot_password(
     }
 
     let config = state.config_manager.get().await;
+    // 重置令牌用**独立的派生密钥**（session_secret + 用途后缀），与登录会话
+    // 隔离：原来两者共用同一个 secret，一个有效的登录 token 就能当重置令牌用
+    // （反之亦然），违反「令牌用途最小权限」。
     let session_secret = if config.admin.session_secret.is_empty() {
         Uuid::new_v4().to_string()
     } else {
-        config.admin.session_secret.clone()
+        format!("{}:password-reset", config.admin.session_secret)
     };
 
     // 用户不存在时返回成功但不返回 token（防止邮箱枚举）
@@ -653,7 +668,8 @@ pub async fn handle_reset_password(
             StatusCode::INTERNAL_SERVER_ERROR,
         ));
     } else {
-        config.admin.session_secret.clone()
+        // 与 handle_forgot_password 同一派生口径：重置令牌与登录会话隔离
+        format!("{}:password-reset", config.admin.session_secret)
     };
 
     let session_store = SessionStore::new(&session_secret, PASSWORD_RESET_TTL_HOURS);
@@ -1314,10 +1330,13 @@ pub async fn handle_totp_disable(
 /// - 验证失败计入 login_failures（复用 5 次锁定机制，防暴力破解 6 位码）
 pub async fn handle_login_totp(
     State(state): State<AppState>,
+    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     Json(body): Json<LoginTotpRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+    let client_ip = extract_client_ip(&headers)
+        .or_else(|| connect.map(|c| c.0.ip().to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
 
     // 5 次锁定检查（与密码登录共用计数器）
     let fail_count = state.login_failures.get(&client_ip).await.unwrap_or(0);
@@ -1442,6 +1461,7 @@ pub async fn handle_login_totp(
 ///   用户不存在时仍返回成功（防邮箱枚举），但不生成验证码。
 pub async fn handle_login_send_code(
     State(state): State<AppState>,
+    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     Json(body): Json<LoginCodeRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -1450,7 +1470,9 @@ pub async fn handle_login_send_code(
         return Err(error_response("邮箱不能为空", StatusCode::BAD_REQUEST));
     }
 
-    let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+    let client_ip = extract_client_ip(&headers)
+        .or_else(|| connect.map(|c| c.0.ip().to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
     // 每 IP 每分钟最多 5 次发送（防刷邮件）
     const SEND_CODE_RATE_LIMIT: u32 = 5;
     let sent_count = state.login_limiter.get(&client_ip).await.unwrap_or(0);

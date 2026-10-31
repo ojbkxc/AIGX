@@ -223,7 +223,21 @@ fn apply_request(mut session: AccountSession, body: &AccountSessionRequest) -> A
         }
     }
     if let Some(headers) = &body.extra_headers {
-        session.extra_headers = sanitize_headers(headers);
+        let mut cleaned = sanitize_headers(headers);
+        // 敏感头被脱敏成 `****` 后原样提交回来：保留原值
+        for (name, value) in cleaned.iter_mut() {
+            if value == "****" {
+                if let Some(original) = session
+                    .extra_headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| v.clone())
+                {
+                    *value = original;
+                }
+            }
+        }
+        session.extra_headers = cleaned;
     }
     session
 }
@@ -321,7 +335,7 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "weight": session.weight,
         "max_concurrency": session.max_concurrency,
         "models": session.models,
-        "extra_headers": session.extra_headers,
+        "extra_headers": crate::channel::mask_sensitive_headers(&session.extra_headers),
         // 续期令牌只暴露「有没有」与脱敏形态，不回明文
         "has_refresh_token": !session.refresh_secret.is_empty(),
         "refresh_token": if session.refresh_secret.is_empty() {

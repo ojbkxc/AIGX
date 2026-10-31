@@ -17,6 +17,7 @@
 
 use dashmap::DashMap;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 // ── AsyncCacheBuilder ───────────────────────────────────────────────
@@ -63,6 +64,8 @@ impl AsyncCacheBuilder {
             inner: DashMap::new(),
             ttl: self.ttl,
             max_capacity: self.max_capacity,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         }
     }
 }
@@ -82,6 +85,10 @@ where
     inner: DashMap<K, (V, Instant)>,
     ttl: Duration,
     max_capacity: u64,
+    /// 命中次数（用于缓存统计面板的命中率）
+    hits: AtomicU64,
+    /// 未命中次数（含过期/不存在）
+    misses: AtomicU64,
 }
 
 impl<K, V> AsyncCache<K, V>
@@ -106,10 +113,13 @@ where
             if Self::is_expired(*inserted_at, self.ttl) {
                 drop(entry);
                 self.inner.remove(key);
+                self.misses.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
+            self.hits.fetch_add(1, Ordering::Relaxed);
             Some(value.clone())
         } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
             None
         }
     }
@@ -185,6 +195,39 @@ where
     pub fn entry_count(&self) -> u64 {
         self.inner.len() as u64
     }
+
+    /// 命中 / 未命中计数（缓存统计面板用）。
+    pub fn hit_miss(&self) -> (u64, u64) {
+        (
+            self.hits.load(Ordering::Relaxed),
+            self.misses.load(Ordering::Relaxed),
+        )
+    }
+
+    /// 命中率（0.0~1.0；无任何访问时为 0）。
+    pub fn hit_rate(&self) -> f64 {
+        let (hits, misses) = self.hit_miss();
+        let total = hits + misses;
+        if total == 0 {
+            0.0
+        } else {
+            hits as f64 / total as f64
+        }
+    }
+
+    /// 最大容量（0 = 无限制）。
+    pub fn max_capacity(&self) -> u64 {
+        self.max_capacity
+    }
+
+    /// TTL 秒数（Duration::MAX 时为 0，表示永不过期）。
+    pub fn ttl_secs(&self) -> u64 {
+        if self.ttl == Duration::MAX {
+            0
+        } else {
+            self.ttl.as_secs()
+        }
+    }
 }
 
 impl<K, V> std::fmt::Debug for AsyncCache<K, V>
@@ -259,6 +302,11 @@ where
     /// 返回缓存条目数（近似值）
     pub fn entry_count(&self) -> u64 {
         self.inner.entry_count()
+    }
+
+    /// 命中率（0.0~1.0）
+    pub fn hit_rate(&self) -> f64 {
+        self.inner.hit_rate()
     }
 }
 

@@ -101,8 +101,13 @@ export default function Security(): JSX.Element {
       if (timeRange) params.range = timeRange;
       if (eventType) params.type = eventType;
       const res = await api.getSecurityEvents(params);
-      setEvents(Array.isArray(res?.data) ? (res.data as unknown as SecurityEvent[]) : []);
-      setTotal(res?.total || 0);
+      // 后端返回 { data: { events, total, page, page_size } }（对象嵌套），
+      // 不是数组。原来按数组读会导致列表恒空、分页恒 0。
+      const payload = res?.data as unknown as
+        | { events?: SecurityEvent[]; total?: number }
+        | undefined;
+      setEvents(Array.isArray(payload?.events) ? payload.events : []);
+      setTotal(payload?.total ?? 0);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

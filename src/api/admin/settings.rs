@@ -460,12 +460,20 @@ pub async fn handle_update_gateway_settings(
             if origin.is_empty() {
                 continue;
             }
-            // "*" 或合法 http(s) 来源；其它视为配置错误
-            if origin == "*" || origin.starts_with("http://") || origin.starts_with("https://") {
+            // 拒绝 `*`：CORS 层用 `AllowOrigin::list`（精确匹配），`*` 在这里
+            // 不会变成通配、只会静默不匹配任何来源，与「允许所有来源」的直觉
+            // 相反 —— 让用户以为配通了却全部被浏览器拦截。要放开就显式列出。
+            if origin == "*" {
+                return Err(error_response(
+                    "CORS 来源不支持 *（请显式列出允许的来源，如 https://example.com）",
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+            if origin.starts_with("http://") || origin.starts_with("https://") {
                 cleaned.push(origin);
             } else {
                 return Err(error_response(
-                    "CORS 来源必须是 http(s):// 开头或 *",
+                    "CORS 来源必须是 http(s):// 开头",
                     StatusCode::BAD_REQUEST,
                 ));
             }

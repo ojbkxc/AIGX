@@ -210,6 +210,12 @@ pub async fn handle_playground_chat(
         .into_response();
     }
 
+    // 余额预检：计费在拿到上游响应之后才做（此时已产生上游成本），
+    // 余额为 0 的普通用户仍能反复调用 = 白嫖站方成本。入口先挡。
+    if !user.is_admin() && user.remaining() <= 0 {
+        return error_response("余额不足，请先充值", StatusCode::PAYMENT_REQUIRED).into_response();
+    }
+
     // 选渠道：优先 channel_id，否则按 model 路由到声明该模型的启用渠道
     //（优先级降序取第一个；无渠道声明时退「models 空 = 全部」渠道），
     // 不再无差别取第一个启用渠道——那会把 A 渠道的模型发给 B 渠道。

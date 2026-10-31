@@ -138,6 +138,56 @@ pub fn is_balance_credential_header(name: &str) -> bool {
     name.trim().to_ascii_lowercase().starts_with("x-balance-")
 }
 
+/// 是否是**携带凭证**的请求头（输出到前端时应脱敏）。
+///
+/// 覆盖：`authorization` / `x-api-key` / `api-key` / `cookie` / `x-auth-token`
+/// / `x-passport-token` / `x-ide-token` / `token` / `x-token`，以及所有
+/// `x-balance-*` 余额查询凭证。用于 `mask_channel` 与账号会话的
+/// `extra_headers` 脱敏 —— 这些头里是登录态令牌 / 控制台密码，与 api_key
+/// 同等敏感，不能原样返回给前端。
+pub fn is_sensitive_header(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    if lower.starts_with("x-balance-") {
+        return true;
+    }
+    matches!(
+        lower.as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "x-api-key"
+            | "api-key"
+            | "cookie"
+            | "set-cookie"
+            | "x-auth-token"
+            | "x-passport-token"
+            | "x-ide-token"
+            | "x-cloudide-token"
+            | "token"
+            | "x-token"
+            | "x-authorization"
+            | "x-access-token"
+            | "x-refresh-token"
+    ) || lower.ends_with("-token")
+        || lower.ends_with("-secret")
+        || lower.ends_with("-key")
+}
+
+/// 脱敏一组请求头：敏感头保留键名、值替换为掩码。
+pub fn mask_sensitive_headers(
+    headers: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    headers
+        .iter()
+        .map(|(k, v)| {
+            if is_sensitive_header(k) && !v.is_empty() {
+                (k.clone(), "****".to_string())
+            } else {
+                (k.clone(), v.clone())
+            }
+        })
+        .collect()
+}
+
 impl ChannelQuirks {
     /// 是否为空（无任何特判）—— 转发路径据此跳过整段逻辑
     pub fn is_empty(&self) -> bool {

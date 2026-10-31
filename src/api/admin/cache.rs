@@ -18,12 +18,20 @@ pub async fn handle_cache_stats(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
     let entry_count = state.response_cache.entry_count();
+    let hit_rate = state.response_cache.hit_rate();
     Ok(Json(json!({
         "success": true,
         "data": {
+            // 前端读 entries / hit_rate / memory_bytes：三个都返回，
+            // 同时保留 entry_count 等旧字段兼容。
+            "entries": entry_count,
             "entry_count": entry_count,
-            "max_capacity": 1000,
-            "ttl_secs": 300,
+            "hit_rate": (hit_rate * 100.0 * 10.0).round() / 10.0,
+            // 内存占用无法精确统计（dashmap 无此 API）：返回 0 由前端显示「—」，
+            // 不编一个假数字。
+            "memory_bytes": 0,
+            "max_capacity": state.response_cache.max_capacity(),
+            "ttl_secs": state.response_cache.ttl_secs(),
             "description": "response_cache (exact-match prompt cache)"
         }
     })))
