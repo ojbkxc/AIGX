@@ -801,6 +801,9 @@ fn paths_accounts_network() -> Value {
         "/api/account-sessions/{id}/balance": {
             "get": op_params("账号池", "账号级余额/额度查询（qoder/autoclaw/小浣熊/zcode）", &[path_param("id")])
         },
+        "/api/account-sessions/{id}/refresh": {
+            "post": op_params("账号池", "刷新账号 token（force 可选；失败不改写凭据）", &[path_param("id")])
+        },
         "/api/update/status": {
             "get": op("更新", "服务器更新状态（版本/下载进度/待重启/可原地更新）")
         },
@@ -879,6 +882,74 @@ fn paths_mcp() -> Value {
     })
 }
 
+// ── 能力自发现（供 Agent 工具 aigx_openapi_search 检索）────────────
+
+static OPENAPI_DOC: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+
+/// 文档缓存（纯函数产物，进程内不变；路由对照测试不受影响）。
+pub fn openapi_document_cached() -> &'static Value {
+    OPENAPI_DOC.get_or_init(build_openapi_document)
+}
+
+/// 按关键词搜索管理面 API（路径/摘要/标签子串匹配，path 命中优先）。
+///
+/// 只返回 API 形状（method/path/summary/tags），不含任何数据；
+/// 新端点落进本文档即可被 Agent 发现（不依赖工具表同步）。
+pub fn search_openapi(query: &str, tag: Option<&str>, limit: usize) -> Vec<Value> {
+    let doc = openapi_document_cached();
+    let q = query.trim().to_lowercase();
+    let mut hits: Vec<(u8, String, Value)> = Vec::new();
+    if let Some(paths) = doc.get("paths").and_then(|p| p.as_object()) {
+        for (path, methods) in paths {
+            let Some(ops) = methods.as_object() else {
+                continue;
+            };
+            for (method, op) in ops {
+                if !matches!(method.as_str(), "get" | "post" | "put" | "patch" | "delete") {
+                    continue;
+                }
+                let summary = op.get("summary").and_then(|s| s.as_str()).unwrap_or("");
+                let tags: Vec<&str> = op
+                    .get("tags")
+                    .and_then(|t| t.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                if let Some(want) = tag {
+                    if !tags.iter().any(|x| x.eq_ignore_ascii_case(want)) {
+                        continue;
+                    }
+                }
+                let rank = if q.is_empty() {
+                    3u8
+                } else if path.to_lowercase().contains(&q) {
+                    0
+                } else if summary.to_lowercase().contains(&q) {
+                    1
+                } else if tags.iter().any(|x| x.to_lowercase().contains(&q)) {
+                    2
+                } else {
+                    continue;
+                };
+                hits.push((
+                    rank,
+                    path.clone(),
+                    json!({
+                        "method": method.to_uppercase(),
+                        "path": path,
+                        "summary": summary,
+                        "tags": tags,
+                    }),
+                ));
+            }
+        }
+    }
+    hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    hits.into_iter()
+        .take(limit.clamp(1, 50))
+        .map(|(_, _, v)| v)
+        .collect()
+}
+
 // ── 测试 ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -926,6 +997,7 @@ mod tests {
         add("/api/account-sessions/{id}", &["delete", "patch", "put"]);
         add("/api/account-sessions/{id}/reset-cooldown", &["post"]);
         add("/api/account-sessions/{id}/balance", &["get"]);
+        add("/api/account-sessions/{id}/refresh", &["post"]);
         add("/api/account-sessions/{id}/test", &["post"]);
         add("/api/update/apply", &["post"]);
         add("/api/update/check", &["post"]);

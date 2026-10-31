@@ -33,27 +33,12 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::Json;
+use axum::http::HeaderMap;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use super::super::openai::AppState;
-use super::account_sessions::AccountSessionPatch;
-use super::account_sessions::{
-    handle_account_session_stats, handle_list_account_sessions, handle_patch_account_session,
-    handle_reset_account_session_cooldowns, handle_test_account_session,
-};
 use super::common::{admin_id_from_session, record_audit, verify_admin};
-use super::logs::RequestLogQuery;
-use super::update::{handle_update_check, handle_update_status};
-use super::users::ListUsersQuery;
-use super::{
-    handle_diagnostics_breakers, handle_diagnostics_channels, handle_diagnostics_summary,
-    handle_list_channels, handle_list_pricing, handle_list_request_logs, handle_list_users,
-    handle_patch_channel, handle_reset_channel_circuit, handle_test_channel,
-};
 
 /// MCP 协议版本（2025-03-26 Streamable HTTP）。
 const PROTOCOL_VERSION: &str = "2025-03-26";
@@ -142,227 +127,28 @@ fn initialize_result() -> Value {
     })
 }
 
-// ── 工具注册表（显式白名单，绝不动态发现） ──────────────────────────
+// ── 工具面：派生自 agent::registry 的统一注册表 ────────────────────
+//
+// 历史上这里养过第二份 19 项静态白名单，与 agent::tools 各自漂移。现在
+// spec 与执行体只在 `agent::registry`（一条工具 = 一条声明），MCP 是
+// 「非高危子集」的消费方（高危写留给 Agent 审批矩阵，外部客户端不给碰）。
 
-/// 白名单工具条目。
-struct ToolSpec {
-    name: &'static str,
-    /// 中文一句话描述，写明只读/写操作
-    description: &'static str,
-    /// 简化 JSON Schema：type/properties/required
-    schema: Value,
-    /// 是否写操作（驱动 tools/list 的 readOnlyHint 标注）
-    write: bool,
+/// 白名单查找（fail-closed：高危与白名单外一视同仁地拒绝）。
+fn find_tool_spec(name: &str) -> Option<&'static crate::agent::registry::ToolDef> {
+    crate::agent::registry::find_tool(name)
+        .filter(|t| t.risk != crate::agent::tools::RiskLevel::HighRisk)
 }
 
-/// 第一版白名单工具集（19 个：诊断 3 + 查询 4 + 写 4 + 账号池 6 + 更新 2）。
-///
-/// inputSchema 严格按对应 handler 实际接受的参数写：
-/// - `GET /api/channels` 无 enabled 过滤参数（只有 search/page/page_size），
-///   故 schema 不虚构 enabled
-/// - 请求日志端点实际为 `/api/logs/requests`（user/model/channel/start/end
-///   过滤 + page/size 分页）
-/// - 账号池工具：`account_id` 为账号会话 ID（`/api/account-sessions/{id}`）
-fn tool_specs() -> Vec<ToolSpec> {
-    let no_args = || json!({ "type": "object", "properties": {}, "required": [] });
-    let channel_id_args = || {
-        json!({
-            "type": "object",
-            "properties": {
-                "channel_id": { "type": "string", "description": "渠道 ID" }
-            },
-            "required": ["channel_id"]
-        })
-    };
-    let account_id_args = || {
-        json!({
-            "type": "object",
-            "properties": {
-                "account_id": { "type": "string", "description": "账号会话 ID（渠道下单个凭证）" }
-            },
-            "required": ["account_id"]
-        })
-    };
-    vec![
-        // ── 诊断×3（只读转发第①步端点）──
-        ToolSpec {
-            name: "aigx_diagnostics_summary",
-            description: "只读：系统体检摘要（渠道统计/今日用量/24h 错误概况/运行信息）",
-            schema: no_args(),
-            write: false,
-        },
-        ToolSpec {
-            name: "aigx_diagnostics_channels",
-            description: "只读：启用渠道批量测活（并发探测，只探测不落状态，约需 30 秒）",
-            schema: no_args(),
-            write: false,
-        },
-        ToolSpec {
-            name: "aigx_diagnostics_breakers",
-            description: "只读：熔断器状态快照（三态/失败计数/失败类型/冷却剩余）",
-            schema: no_args(),
-            write: false,
-        },
-        // ── 查询×4 ──
-        ToolSpec {
-            name: "aigx_list_channels",
-            description: "只读：列出渠道（支持 search 模糊过滤与 page/page_size 分页）",
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "search": { "type": "string", "description": "按名称/类型/base_url/模型模糊过滤" },
-                    "page": { "type": "integer", "minimum": 1, "description": "页码，默认 1" },
-                    "page_size": { "type": "integer", "minimum": 1, "description": "每页条数，缺省 0=不分页" }
-                },
-                "required": []
-            }),
-            write: false,
-        },
-        ToolSpec {
-            name: "aigx_list_users",
-            description: "只读：列出用户（page/size 分页，密钥与敏感字段按管理员口径脱敏）",
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "page": { "type": "integer", "minimum": 1, "description": "页码，默认 1" },
-                    "size": { "type": "integer", "minimum": 1, "description": "每页条数，默认 20" }
-                },
-                "required": []
-            }),
-            write: false,
-        },
-        ToolSpec {
-            name: "aigx_query_logs",
-            description: "只读：查询请求日志（user/model/channel/start/end 过滤 + page/size 分页）",
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "user": { "type": "string", "description": "用户 UUID 或邮箱" },
-                    "model": { "type": "string", "description": "按模型名过滤" },
-                    "channel": { "type": "string", "description": "按渠道 ID 过滤" },
-                    "start": { "type": "integer", "description": "起始 unix 时间戳（秒）" },
-                    "end": { "type": "integer", "description": "结束 unix 时间戳（秒）" },
-                    "page": { "type": "integer", "minimum": 1, "description": "页码，默认 1" },
-                    "size": { "type": "integer", "minimum": 1, "description": "每页条数，默认 20" }
-                },
-                "required": []
-            }),
-            write: false,
-        },
-        ToolSpec {
-            name: "aigx_get_pricing",
-            description: "只读：列出全部模型定价（单价/缓存价/计价类型）",
-            schema: no_args(),
-            write: false,
-        },
-        // ── 写×4（可恢复原则：均可用对向工具或管理台人工回滚）──
-        ToolSpec {
-            name: "aigx_channel_enable",
-            description: "写操作（可回滚）：启用渠道（PATCH enabled=true，持久化渠道状态）",
-            schema: channel_id_args(),
-            write: true,
-        },
-        ToolSpec {
-            name: "aigx_channel_disable",
-            description: "写操作（可回滚）：禁用渠道（PATCH enabled=false，持久化渠道状态）",
-            schema: channel_id_args(),
-            write: true,
-        },
-        ToolSpec {
-            name: "aigx_channel_test",
-            description: "写操作（可回滚）：测试渠道连通性并落库测试结果（test_time/response_time），联动 mark_healthy/mark_unhealthy 状态",
-            schema: channel_id_args(),
-            write: true,
-        },
-        ToolSpec {
-            name: "aigx_reset_circuit_breaker",
-            description: "写操作（可回滚）：重置渠道熔断器与健康追踪状态（故障恢复后解除熔断用）",
-            schema: channel_id_args(),
-            write: true,
-        },
-        // ── 账号池×6（账号型渠道的账号级调度：查/测/启停/清冷却）──
-        ToolSpec {
-            name: "aigx_list_account_sessions",
-            description: "只读：列出账号型渠道的账号（凭证/代理脱敏，可按渠道与关键词过滤）",
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "channel_id": { "type": "string", "description": "按渠道 ID 过滤" },
-                    "search": {
-                        "type": "string",
-                        "description": "按名称/provider/地址/渠道名/最近错误模糊过滤"
-                    }
-                },
-                "required": []
-            }),
-            write: false,
-        },
-        ToolSpec {
-            name: "aigx_account_session_stats",
-            description: "只读：按渠道聚合的账号池统计（总数/启用/冷却中/并发/成败）",
-            schema: no_args(),
-            write: false,
-        },
-        ToolSpec {
-            name: "aigx_account_session_test",
-            description: "写操作（可回滚）：单号探活（走真实推理链路，30s 超时；成功后清该模型冷却）",
-            schema: account_id_args(),
-            write: true,
-        },
-        ToolSpec {
-            name: "aigx_account_session_enable",
-            description: "写操作（可回滚）：启用账号（PATCH status=enabled）",
-            schema: account_id_args(),
-            write: true,
-        },
-        ToolSpec {
-            name: "aigx_account_session_disable",
-            description: "写操作（可回滚）：停用账号（PATCH status=disabled）",
-            schema: account_id_args(),
-            write: true,
-        },
-        ToolSpec {
-            name: "aigx_account_session_reset_cooldown",
-            description: "写操作（可回滚）：清除账号全部模型冷却与最近错误（故障恢复后立即恢复调度）",
-            schema: account_id_args(),
-            write: true,
-        },
-        // ── 更新×2（只读：版本状态与检查；应用/重启属高危，不进 MCP 白名单）──
-        ToolSpec {
-            name: "aigx_update_status",
-            description: "只读：服务器更新状态（当前/最新版本、下载进度、是否待重启、能否原地更新）",
-            schema: no_args(),
-            write: false,
-        },
-        ToolSpec {
-            name: "aigx_check_update",
-            description: "只读：立即检查 GitHub Release 是否有新版本（受最短间隔与限流冷却约束）",
-            schema: no_args(),
-            write: false,
-        },
-    ]
-}
-
-/// 白名单查找（未知工具在分发前被此函数挡下，fail-closed）。
-fn find_tool_spec(name: &str) -> Option<ToolSpec> {
-    tool_specs().into_iter().find(|t| t.name == name)
-}
-
-/// tools/list 响应。
-///
-/// `annotations.readOnlyHint` 为 MCP 2025-03-26 规范的 ToolAnnotations
-/// 字段：写工具标注 readOnlyHint=false，客户端（Claude Code 等）可据此
-/// 在调用前向用户提示"该工具会改动系统"。
-fn tools_list_result() -> Value {
+/// tools/list 响应（与 registry 同源；readOnlyHint 驱动客户端写前提示）。
+pub(crate) fn tools_list_result() -> Value {
     json!({
-        "tools": tool_specs()
-            .iter()
+        "tools": crate::agent::registry::mcp_tools()
             .map(|t| {
                 json!({
                     "name": t.name,
                     "description": t.description,
-                    "inputSchema": t.schema,
-                    "annotations": { "readOnlyHint": !t.write }
+                    "inputSchema": (t.schema)(),
+                    "annotations": { "readOnlyHint": t.risk == crate::agent::tools::RiskLevel::ReadOnly }
                 })
             })
             .collect::<Vec<_>>()
@@ -398,7 +184,7 @@ async fn handle_tools_call(
         ));
     }
 
-    // fail-closed：白名单外工具名直接拒绝，不触碰任何内部逻辑
+    // fail-closed：白名单外（含高危）工具名直接拒绝，不触碰任何内部逻辑
     if find_tool_spec(name).is_none() {
         return Ok(unknown_tool_result(name));
     }
@@ -413,186 +199,39 @@ async fn handle_tools_call(
     }
 }
 
-/// 白名单分发执行（进程内直调现有 handler）。
+/// 分发执行：registry 统一执行体 + MCP 侧写审计 + tools/call 形态包装。
 async fn exec_tool(
     state: &AppState,
     headers: &HeaderMap,
     name: &str,
     arguments: &Value,
 ) -> Result<Value, (i64, String)> {
-    match name {
-        // ── 诊断×3（只读）──
-        "aigx_diagnostics_summary" => {
-            let r = handle_diagnostics_summary(State(state.clone()), headers.clone()).await;
-            Ok(handler_to_tool_result(r))
-        }
-        "aigx_diagnostics_channels" => {
-            let r = handle_diagnostics_channels(State(state.clone()), headers.clone()).await;
-            Ok(handler_to_tool_result(r))
-        }
-        "aigx_diagnostics_breakers" => {
-            let r = handle_diagnostics_breakers(State(state.clone()), headers.clone()).await;
-            Ok(handler_to_tool_result(r))
-        }
-        // ── 查询×4（只读）──
-        "aigx_list_channels" => {
-            let q = args_to_string_map(arguments);
-            let r = handle_list_channels(State(state.clone()), headers.clone(), Query(q)).await;
-            Ok(handler_to_tool_result(r))
-        }
-        "aigx_list_users" => {
-            let q = parse_struct_args::<ListUsersQuery>(name, arguments)?;
-            let r = handle_list_users(State(state.clone()), headers.clone(), Query(q)).await;
-            Ok(handler_to_tool_result(r))
-        }
-        "aigx_query_logs" => {
-            let q = parse_struct_args::<RequestLogQuery>(name, arguments)?;
-            let r = handle_list_request_logs(State(state.clone()), headers.clone(), Query(q)).await;
-            Ok(handler_to_tool_result(r))
-        }
-        "aigx_get_pricing" => {
-            let r = handle_list_pricing(State(state.clone()), headers.clone()).await;
-            Ok(handler_to_tool_result(r))
-        }
-        // ── 写×4（MCP 层补审计）──
-        "aigx_channel_enable" => write_channel_toggle(state, headers, arguments, name, true).await,
-        "aigx_channel_disable" => {
-            write_channel_toggle(state, headers, arguments, name, false).await
-        }
-        "aigx_channel_test" => {
-            let id = require_channel_id(arguments)?;
-            let r =
-                handle_test_channel(State(state.clone()), headers.clone(), Path(id.clone())).await;
-            audit_write_tool(state, headers, name, &id, None, &r).await;
-            Ok(handler_to_tool_result(r))
-        }
-        "aigx_reset_circuit_breaker" => {
-            let id = require_channel_id(arguments)?;
-            let r = handle_reset_channel_circuit(
-                State(state.clone()),
-                headers.clone(),
-                Path(id.clone()),
-            )
-            .await;
-            audit_write_tool(state, headers, name, &id, None, &r).await;
-            Ok(handler_to_tool_result(r))
-        }
-        // ── 账号池×6（读×2 + 写×4）──
-        "aigx_list_account_sessions" => {
-            let q = args_to_string_map(arguments);
-            let r =
-                handle_list_account_sessions(State(state.clone()), headers.clone(), Query(q)).await;
-            Ok(handler_to_tool_result(r))
-        }
-        "aigx_account_session_stats" => {
-            let r = handle_account_session_stats(State(state.clone()), headers.clone()).await;
-            Ok(handler_to_tool_result(r))
-        }
-        "aigx_account_session_test" => {
-            let id = require_account_id(arguments)?;
-            let r = handle_test_account_session(
-                State(state.clone()),
-                headers.clone(),
-                Path(id.clone()),
-            )
-            .await;
-            audit_write_tool(state, headers, name, &id, None, &r).await;
-            Ok(handler_to_tool_result(r))
-        }
-        "aigx_account_session_enable" => {
-            write_account_status(state, headers, arguments, name, true).await
-        }
-        "aigx_account_session_disable" => {
-            write_account_status(state, headers, arguments, name, false).await
-        }
-        "aigx_account_session_reset_cooldown" => {
-            let id = require_account_id(arguments)?;
-            let r = handle_reset_account_session_cooldowns(
-                State(state.clone()),
-                headers.clone(),
-                Path(id.clone()),
-            )
-            .await;
-            audit_write_tool(state, headers, name, &id, None, &r).await;
-            Ok(handler_to_tool_result(r))
-        }
-        // ── 更新×2（只读）──
-        "aigx_update_status" => {
-            let r = handle_update_status(State(state.clone()), headers.clone()).await;
-            Ok(handler_to_tool_result(r))
-        }
-        "aigx_check_update" => {
-            let r = handle_update_check(State(state.clone()), headers.clone()).await;
-            Ok(handler_to_tool_result(r))
-        }
-        // find_tool_spec 已挡掉未知工具；此分支仅作 fail-closed 兜底
-        _ => Ok(unknown_tool_result(name)),
+    use crate::agent::tools::RiskLevel;
+    let tool = find_tool_spec(name).ok_or_else(|| {
+        (
+            -32601,
+            format!("Unknown tool: {name} (not in MCP whitelist)"),
+        )
+    })?;
+    let outcome = crate::agent::registry::exec_tool(state, headers, name, arguments).await?;
+    // 写工具补 mcp_ 前缀审计（registry/runner 侧审计不带 MCP 语境）
+    if tool.risk != RiskLevel::ReadOnly {
+        let target = if tool.target_key.is_empty() {
+            String::new()
+        } else {
+            arguments
+                .get(tool.target_key)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        audit_write_tool(state, headers, name, &target, outcome.ok).await;
     }
-}
-
-/// enable/disable 公共路径：PATCH `{"enabled": <bool>}` + 审计。
-///
-/// before 记录操作前渠道 status（渠道不存在时 None——此时 handler 返回
-/// 404，审计照样留痕谁在何时试图经 MCP 动哪个渠道）。
-async fn write_channel_toggle(
-    state: &AppState,
-    headers: &HeaderMap,
-    arguments: &Value,
-    tool_name: &str,
-    enabled: bool,
-) -> Result<Value, (i64, String)> {
-    let id = require_channel_id(arguments)?;
-    let before = state.channel_store.get(&id).map(|c| c.status.clone());
-    let r = handle_patch_channel(
-        State(state.clone()),
-        headers.clone(),
-        Path(id.clone()),
-        Json(json!({ "enabled": enabled })),
-    )
-    .await;
-    audit_write_tool(state, headers, tool_name, &id, before, &r).await;
-    Ok(handler_to_tool_result(r))
-}
-
-/// 账号启停公共路径：PATCH `{"status": ...}` + 审计（与渠道 enable/disable 同构）。
-async fn write_account_status(
-    state: &AppState,
-    headers: &HeaderMap,
-    arguments: &Value,
-    tool_name: &str,
-    enabled: bool,
-) -> Result<Value, (i64, String)> {
-    let id = require_account_id(arguments)?;
-    let before = state.account_sessions.get(&id).map(|s| s.status.clone());
-    let status = if enabled { "enabled" } else { "disabled" };
-    let r = handle_patch_account_session(
-        State(state.clone()),
-        headers.clone(),
-        Path(id.clone()),
-        Json(AccountSessionPatch::status_only(status)),
-    )
-    .await;
-    audit_write_tool(state, headers, tool_name, &id, before, &r).await;
-    Ok(handler_to_tool_result(r))
-}
-
-/// handler 结果 → tools/call result。
-///
-/// 成功：数据 JSON 序列化为 text content；失败：`isError: true` + 错误
-/// 消息经 `sanitize_error_message` 脱敏（截断 500 字符、抹掉 Bearer
-/// token 与 sk- 密钥）后进 content，不透传上游密钥。
-fn handler_to_tool_result(result: Result<Json<Value>, (StatusCode, Json<Value>)>) -> Value {
-    match result {
-        Ok(Json(v)) => text_content(crate::api::admin::common::truncate_tool_text(v.to_string())),
-        Err((_, Json(body))) => {
-            let msg = body
-                .get("error")
-                .and_then(|e| e.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| body.to_string());
-            tool_error(crate::error_translate::sanitize_error_message(&msg))
-        }
-    }
+    Ok(if outcome.ok {
+        text_content(outcome.text)
+    } else {
+        tool_error(outcome.text)
+    })
 }
 
 /// tools/call 成功形态：`{ content: [{ type, text }] }`。
@@ -623,21 +262,6 @@ pub(crate) fn require_channel_id(arguments: &Value) -> Result<String, (i64, Stri
             (
                 INVALID_PARAMS,
                 "Invalid params: missing required argument channel_id".to_string(),
-            )
-        })
-}
-
-/// 取必填 account_id 参数（缺失/非字符串/空白 → -32602）。
-pub(crate) fn require_account_id(arguments: &Value) -> Result<String, (i64, String)> {
-    arguments
-        .get("account_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.trim().to_string())
-        .ok_or_else(|| {
-            (
-                INVALID_PARAMS,
-                "Invalid params: missing required argument account_id".to_string(),
             )
         })
 }
@@ -690,25 +314,19 @@ async fn audit_write_tool(
     state: &AppState,
     headers: &HeaderMap,
     tool_name: &str,
-    channel_id: &str,
-    before_status: Option<String>,
-    result: &Result<Json<Value>, (StatusCode, Json<Value>)>,
+    target: &str,
+    success: bool,
 ) {
     let admin_id = admin_id_from_session(state, headers).await;
-    let (status, success) = match result {
-        Ok(_) => (200, true),
-        Err((code, _)) => (code.as_u16(), false),
-    };
     // aigx_channel_enable → mcp_channel_enable（动作名带 mcp 前缀标记来源）
     let action = format!("mcp_{}", tool_name.trim_start_matches("aigx_"));
-    let before = before_status.map(|s| json!({ "status": s }));
     record_audit(
         state,
         &admin_id,
         &action,
-        &format!("id={channel_id}"),
-        before,
-        Some(json!({ "status": status, "success": success })),
+        &format!("id={target}"),
+        None,
+        Some(json!({ "success": success })),
     );
 }
 
@@ -779,60 +397,47 @@ mod tests {
 
     #[test]
     fn tools_list_has_expected_unique_tools() {
-        let specs = tool_specs();
-        assert_eq!(
-            specs.len(),
-            19,
-            "白名单固定 19 个工具（渠道运维 11 + 账号池 6 + 更新 2）"
-        );
+        let specs: Vec<&crate::agent::registry::ToolDef> =
+            crate::agent::registry::mcp_tools().collect();
+        assert!(!specs.is_empty(), "MCP 工具面不能为空");
         let tools = tools_list_result()["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 19);
+        assert_eq!(tools.len(), specs.len(), "tools/list 与 registry 计数一致");
         let mut seen = std::collections::BTreeSet::new();
         for t in &tools {
             let name = t["name"].as_str().unwrap();
             assert!(seen.insert(name.to_string()), "工具名重复: {name}");
             assert!(
                 t["description"].as_str().is_some_and(|d| !d.is_empty()),
-                "{name} 缺中文 description"
+                "{name} 缺 description"
             );
             assert_eq!(t["inputSchema"]["type"], "object", "{name} schema.type");
             assert!(
                 t["inputSchema"]["properties"].is_object(),
                 "{name} 缺 properties"
             );
-            // MCP 规范标注：readOnlyHint 必须为布尔
             assert!(
                 t["annotations"]["readOnlyHint"].is_boolean(),
                 "{name} 缺 annotations.readOnlyHint"
             );
         }
-        // 每个描述标注读/写语义；写工具 required 必含 channel_id 或 account_id
-        let writes: Vec<&ToolSpec> = specs.iter().filter(|s| s.write).collect();
-        assert_eq!(writes.len(), 8, "写工具应为 8 个（渠道 4 + 账号池 4）");
+        // MCP 面 = 非高危子集；readOnlyHint 与风险一致
         for s in &specs {
-            let tag = if s.write { "写操作" } else { "只读" };
-            assert!(s.description.contains(tag), "{} 未标注读/写语义", s.name);
-            if s.write {
-                let required: Vec<&str> = s.schema["required"]
-                    .as_array()
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-                    .unwrap_or_default();
-                assert!(
-                    required.contains(&"channel_id") || required.contains(&"account_id"),
-                    "{} 必填项应含 channel_id 或 account_id",
-                    s.name
-                );
-            }
+            assert_ne!(
+                s.risk,
+                crate::agent::tools::RiskLevel::HighRisk,
+                "{} 高危不得进 MCP",
+                s.name
+            );
         }
-        // 写/只读与 annotations.readOnlyHint 一致（写工具必须标注 false）
         for t in &tools {
             let spec = specs
                 .iter()
-                .find(|s| t["name"].as_str() == Some(s.name))
+                .find(|s| Some(s.name) == t["name"].as_str())
                 .unwrap();
             assert_eq!(
-                t["annotations"]["readOnlyHint"], !spec.write,
-                "{} readOnlyHint 与 write 标志不一致",
+                t["annotations"]["readOnlyHint"],
+                spec.risk == crate::agent::tools::RiskLevel::ReadOnly,
+                "{} readOnlyHint 与风险不一致",
                 spec.name
             );
         }

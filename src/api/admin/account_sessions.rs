@@ -860,6 +860,72 @@ pub async fn handle_account_balance(
     }
 }
 
+/// POST /api/account-sessions/:id/refresh 的请求体。
+#[derive(Debug, serde::Deserialize)]
+pub struct RefreshBody {
+    /// true = 无条件刷新；false（默认）= 仅临期才刷，否则 skip。
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// POST /api/account-sessions/:id/refresh —— 手动刷新账号 token。
+///
+/// 进程内直调 `account_session::refresh::refresh_one`（qoder/autoclaw/trae），
+/// 失败不改写凭据；`force=false` 时未临期直接返回 skip。
+pub async fn handle_account_refresh(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<RefreshBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let Some(session) = state.account_sessions.get(&id) else {
+        return Err(error_response(
+            "Account session not found",
+            StatusCode::NOT_FOUND,
+        ));
+    };
+    if !crate::account_session::refresh::supports_refresh(&session.provider) {
+        return Err(error_response(
+            "该供应商暂不支持 token 刷新",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if !body.force {
+        let now = chrono::Utc::now().timestamp();
+        if !crate::account_session::refresh::needs_refresh(&session, now) {
+            return Ok(Json(json!({
+                "success": true,
+                "data": { "outcome": "skip", "message": "token 未临期（force=true 可强制刷新）" },
+            })));
+        }
+    }
+    match crate::account_session::refresh::refresh_one(
+        &state.account_sessions,
+        &state.http_client,
+        &session,
+    )
+    .await
+    {
+        crate::account_session::refresh::RefreshOutcome::Refreshed(message) => Ok(Json(json!({
+            "success": true,
+            "data": { "outcome": "refreshed", "message": message },
+        }))),
+        crate::account_session::refresh::RefreshOutcome::Stale => Ok(Json(json!({
+            "success": true,
+            "data": { "outcome": "stale", "message": "凭据已被其他路径更新，未覆盖" },
+        }))),
+        crate::account_session::refresh::RefreshOutcome::Invalid(message) => Ok(Json(json!({
+            "success": false,
+            "error": format!("refresh token 失效：{message}"),
+        }))),
+        crate::account_session::refresh::RefreshOutcome::Failed(message) => Ok(Json(json!({
+            "success": false,
+            "error": message,
+        }))),
+    }
+}
+
 /// 账号型渠道的渠道级探活（供 `handle_test_channel` 复用）。
 pub async fn probe_channel(state: &AppState, channel: &Channel) -> ChannelTestResult {
     let started = Instant::now();

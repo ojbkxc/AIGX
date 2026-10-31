@@ -1592,6 +1592,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/account-sessions/:id/balance",
             get(api::admin::account_sessions::handle_account_balance),
         )
+        .route(
+            "/api/account-sessions/:id/refresh",
+            post(api::admin::account_sessions::handle_account_refresh),
+        )
         // 上游模型目录发现（抄 Agent2API 的 provider 模型目录）
         .route(
             "/api/account-sessions/catalog/sync",

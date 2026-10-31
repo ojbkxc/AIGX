@@ -57,7 +57,7 @@ fn refresh_plain(session: &AccountSession) -> String {
 }
 
 /// 是否临期需要刷新（无 refresh_secret 或未知过期时间则不动）。
-fn needs_refresh(session: &AccountSession, now: i64) -> bool {
+pub fn needs_refresh(session: &AccountSession, now: i64) -> bool {
     if !supports_refresh(&session.provider) {
         return false;
     }

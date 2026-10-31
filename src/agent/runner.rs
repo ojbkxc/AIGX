@@ -146,6 +146,29 @@ pub async fn run(
                 let spec = tools::find_tool(&call.function_name);
                 // 工具审计 target：优先取主目标参数，回退原始参数摘要
                 let target = tool_target(&call.function_name, &args);
+                // 执行侧兜底：disabled_tools 不只是从下发清单剔除——模型幻觉/
+                // 上下文残留仍可能叫出被禁工具，这里再挡一道
+                if config
+                    .disabled_tools
+                    .iter()
+                    .any(|d| d == &call.function_name)
+                {
+                    let outcome = tools::ToolOutcome {
+                        text: format!(
+                            "工具 {} 已被管理员禁用（disabled_tools），未执行",
+                            call.function_name
+                        ),
+                        ok: false,
+                    };
+                    on_event(AgentEvent::ToolResult {
+                        name: call.function_name.clone(),
+                        ok: false,
+                        text: outcome.text.clone(),
+                    })
+                    .await;
+                    convo.push(llm::tool_message(call.id.clone(), outcome.text));
+                    continue;
+                }
                 let outcome = match spec {
                     None => tools::ToolOutcome {
                         text: format!("Unknown tool: {}", call.function_name),
@@ -291,26 +314,13 @@ pub fn null_sink() -> EventSink {
 }
 
 /// 提取工具调用的人类可读目标（审计 target 列展示用）。
-/// 按工具取主目标参数；查不到时回退参数键值摘要（截断防刷屏）。
+/// 主目标参数名从注册表 `ToolDef.target_key` 派生；查不到时回退参数摘要。
 fn tool_target(name: &str, args: &Value) -> String {
-    let key = match name {
-        "aigx_user_delete" | "aigx_user_manage" => "user_id",
-        "aigx_channel_delete"
-        | "aigx_channel_enable"
-        | "aigx_channel_disable"
-        | "aigx_channel_test"
-        | "aigx_reset_circuit_breaker" => "channel_id",
-        "aigx_channel_add" => "name",
-        "aigx_order_delete" => "trade_no",
-        "aigx_pricing_upsert" | "aigx_pricing_delete" => "model_name",
-        "aigx_key_delete" => "key_id",
-        "aigx_key_add" => "name",
-        "aigx_group_upsert" => "name",
-        _ => "",
-    };
-    if !key.is_empty() {
-        if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
-            return format!("{key}={v}");
+    if let Some(spec) = tools::find_tool(name) {
+        if !spec.target_key.is_empty() {
+            if let Some(v) = args.get(spec.target_key).and_then(|v| v.as_str()) {
+                return format!("{}={}", spec.target_key, v);
+            }
         }
     }
     let s = args.to_string();

@@ -298,6 +298,7 @@ fn agent_settings_json(config: &crate::config::AgentConfig) -> Value {
         .map(|spec| {
             json!({
                 "name": spec.name,
+                "label": spec.label,
                 "description": spec.description,
                 "risk": spec.risk.as_str(),
             })

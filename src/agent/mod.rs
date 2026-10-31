@@ -17,6 +17,7 @@ pub mod api;
 pub mod approval;
 pub mod audit;
 pub mod llm;
+pub mod registry;
 pub mod runner;
 pub mod session;
 pub mod tools;
