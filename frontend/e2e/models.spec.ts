@@ -18,19 +18,34 @@ test.describe('模型管理', () => {
     await expect(page.locator('h1')).toContainText('模型管理');
   });
 
-  test('左栏按 provider 分组并显示计数', async ({ page, pageErrors }) => {
+  test('左栏分三段：渠道供应商 / 内置提供商 / 自定义提供商', async ({ page, pageErrors }) => {
     const rail = page.locator('.mm-rail');
     await expect(rail).toBeVisible();
 
-    // 「全部」+ 两个 provider 分组
-    await expect(rail.locator('.mm-rail-item')).toHaveCount(3);
-    await expect(rail).toContainText('全部');
-    await expect(rail).toContainText('OpenAI 兼容');
+    // 三个分段标题都在（对齐 Agent2API 的信息架构）
+    await expect(rail).toContainText('渠道供应商');
+    await expect(rail).toContainText('内置提供商');
+    await expect(rail).toContainText('自定义提供商');
+
+    // 「全部」+ 两个渠道供应商（mock 里 ch-1 lxchat-glm / ch-2 backup-channel）
+    // + 内置提供商 1 个（workbuddy，account 来源）
+    await expect(rail).toContainText('lxchat-glm');
+    await expect(rail).toContainText('backup-channel');
     await expect(rail).toContainText('WorkBuddy 国内版');
 
     // 账号池来源的分组带 account 标记点
     await expect(rail.locator('.mm-rail-dot.account')).toHaveCount(1);
+    // 自定义提供商暂为空 → 有提示文案
+    await expect(rail.locator('.mm-rail-empty')).toHaveCount(1);
 
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('点渠道供应商只显示该渠道的模型', async ({ page, pageErrors }) => {
+    // lxchat-glm 只承载 glm-4.7-flash
+    await page.locator('.mm-rail-item', { hasText: 'lxchat-glm' }).click();
+    await expect(page.locator('.mm-table tbody tr')).toHaveCount(1);
+    await expect(page.locator('.mm-table')).toContainText('glm-4.7-flash');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
