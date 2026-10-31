@@ -95,7 +95,15 @@ impl TraeFlow {
         let uid = text_of(source, &["UserID", "userId", "uid", "UID", "user_id"]);
         let name = text_of(
             source,
-            &["ScreenName", "screenName", "Nickname", "nickname", "Name", "name", "displayName"],
+            &[
+                "ScreenName",
+                "screenName",
+                "Nickname",
+                "nickname",
+                "Name",
+                "name",
+                "displayName",
+            ],
         );
         (uid, name)
     }
@@ -108,7 +116,8 @@ impl LoginFlow for TraeFlow {
     }
 
     async fn submit_callback(&self, url: &str) -> Result<Option<Credentials>, String> {
-        let parsed = url::Url::parse(url.trim()).map_err(|_| "Trae 登录回调地址无效".to_string())?;
+        let parsed =
+            url::Url::parse(url.trim()).map_err(|_| "Trae 登录回调地址无效".to_string())?;
         if parsed.path() != CALLBACK_PATH {
             return Err("Trae 登录回调地址无效（应为 /authorize）".to_string());
         }
@@ -284,7 +293,14 @@ fn verification_uri(login_host: &str, context: &LoginContext) -> String {
     let host = ensure_https_scheme(login_host);
     let mut query: Vec<String> = Vec::new();
     let push = |query: &mut Vec<String>, key: &str, value: &str, encode: bool| {
-        query.push(format!("{key}={}", if encode { url_encode(value) } else { value.to_string() }));
+        query.push(format!(
+            "{key}={}",
+            if encode {
+                url_encode(value)
+            } else {
+                value.to_string()
+            }
+        ));
     };
     push(&mut query, "login_version", "1", false);
     push(&mut query, "auth_from", "solo", false);
@@ -345,7 +361,13 @@ async fn request_guidance(client: &reqwest::Client) -> String {
 
 fn extract_login_host(body: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(body).ok()?;
-    const KEYS: [&str; 5] = ["LoginHost", "loginHost", "LoginURL", "loginUrl", "login_url"];
+    const KEYS: [&str; 5] = [
+        "LoginHost",
+        "loginHost",
+        "LoginURL",
+        "loginUrl",
+        "login_url",
+    ];
     let pick = |value: &Value| {
         KEYS.iter()
             .find_map(|key| value.get(*key).and_then(Value::as_str).filter(|text| !text.is_empty()))
@@ -374,7 +396,10 @@ fn extract_login_host(body: &str) -> Option<String> {
 
 fn exchange_urls(login_host: &str) -> Vec<String> {
     let onto = |origin: &str| format!("{}{EXCHANGE_PATH}", origin.trim_end_matches('/'));
-    let mut urls: Vec<String> = ACCOUNT_API_ORIGINS.iter().map(|origin| onto(origin)).collect();
+    let mut urls: Vec<String> = ACCOUNT_API_ORIGINS
+        .iter()
+        .map(|origin| onto(origin))
+        .collect();
     let derived = ensure_https_scheme(login_host);
     let host = host_only(&derived);
     if !host.is_empty() {
@@ -405,7 +430,10 @@ fn ensure_https_scheme(raw: &str) -> String {
 
 fn host_only(url: &str) -> String {
     let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    rest.split(['/', '?', '#']).next().unwrap_or_default().to_string()
+    rest.split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn scheme_of(url: &str) -> &str {
@@ -500,7 +528,9 @@ fn normalize_expires_at(value: i64) -> Option<i64> {
 
 fn timestamp_of(value: &Value) -> Option<i64> {
     match value {
-        Value::Number(number) => number.as_i64().or_else(|| number.as_f64().map(|raw| raw as i64)),
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|raw| raw as i64)),
         Value::String(text) => text.trim().parse::<f64>().ok().map(|raw| raw as i64),
         _ => None,
     }
