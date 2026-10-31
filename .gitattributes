@@ -1,18 +1,24 @@
-# 默认：Git 自行判断文本文件并按 core.autocrlf 转换（Windows 本地 CRLF，
-# 仓库内 LF）。Rust/TS 源码适用默认规则。
+# 全仓库统一 LF（仓库内 + 工作区）。
+#
+# 背景：Windows 上 Git 默认 core.autocrlf=true，checkout 时把文件转成 CRLF。
+# 这会让「本地构建产物」与「CI（Linux）构建产物」产生纯换行差异，前端产物
+# 同步闸门因此反复假阳性；也让 vite 从 CRLF 的 index.html 模板复制出 CRLF。
+# 显式 eol=lf 后，检出即 LF，与 CI 完全一致。
+* text=auto eol=lf
 
-# static/ 是前端构建产物（vite 写出 LF）。这里强制 text + eol=lf：
-# 仓库内与工作区都用 LF，避免「Windows 本地构建出 CRLF / CI 构建出 LF」
-# 造成 `git status` 恒定漂移、产物同步闸门假阳性。
-# 2>&1 二进制（图片/字体）必须显式排除，否则 CRLF→LF 会破坏文件。
-static/**/*.js text eol=lf
-static/**/*.css text eol=lf
-static/**/*.html text eol=lf
-static/**/*.json text eol=lf
-static/**/*.svg text eol=lf
-static/**/*.png binary
-static/**/*.jpg binary
-static/**/*.webp binary
-static/**/*.ico binary
-static/**/*.woff binary
-static/**/*.woff2 binary
+# 二进制文件不得参与换行转换（否则会损坏字节流，PNG/字体尤其明显）。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.zip binary
+*.gz binary
+*.pdf binary
+*.so binary
+*.dll binary
+*.exe binary
