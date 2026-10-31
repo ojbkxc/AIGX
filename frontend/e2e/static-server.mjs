@@ -124,6 +124,52 @@ const CHECKIN_RECORDS = [
   { ts: 1761890000, date: '2025-10-31', account_id: 'acc-2', account_name: 'workbuddy-2', provider: 'workbuddy', source: 'schedule', outcome: 'already', ok: true, message: '今日已签到' },
 ];
 
+// ── 请求日志（含对话快照，验证「不开调试模式也能看对话」）──
+const REQUEST_LOGS = [
+  {
+    id: 'log-1',
+    created_at: 1761900000,
+    user_id: 'u-admin',
+    user_email: 'admin@aigx.local',
+    key_id: 'playground:chat',
+    model: 'glm-4.7-flash',
+    origin_model: 'glm-4.7-flash',
+    channel_id: 'ch-1',
+    channel_name: 'lxchat-glm',
+    input_tokens: 120,
+    output_tokens: 80,
+    cost: 5,
+    channel_cost: 3,
+    latency_ms: 850,
+    status_code: 200,
+    ip: '203.0.113.10',
+    // 关键：只有 conversation、没有 debug —— 证明对话不依赖 log_body 开关
+    conversation: {
+      messages: [
+        { role: 'user', text: '帮我总结这段文本' },
+        { role: 'assistant', text: '好的，要点如下……' },
+      ],
+      system_prompt_chars: 240,
+    },
+  },
+  {
+    id: 'log-2',
+    created_at: 1761899400,
+    user_id: 'u-admin',
+    model: 'glm-4.7-flash',
+    input_tokens: 3000,
+    output_tokens: 900,
+    cost: 12,
+    latency_ms: 2300,
+    status_code: 200,
+    conversation: {
+      messages: [{ role: 'user', text: '最近一条' }],
+      system_prompt_chars: 0,
+      truncated_history: true,
+    },
+  },
+];
+
 // ── 报表端点（形状对齐 src/api/admin/dashboard.rs 的 report/*）──
 const REPORT_HEATMAP = Array.from({ length: 30 }, (_, i) => ({
   date: `2025-10-${String(i + 1).padStart(2, '0')}`,
@@ -262,6 +308,20 @@ function handle(req, res, p, bodyText) {
           });
         }
       }
+    }
+
+    // 请求日志（列表；详情弹窗在前端由同一份数据渲染）
+    if (p === '/api/logs/requests' && req.method === 'GET') {
+      return sendJson(res, {
+        success: true,
+        data: REQUEST_LOGS,
+        total: REQUEST_LOGS.length,
+        page: 1,
+        size: 20,
+      });
+    }
+    if (p === '/api/logs/audits') {
+      return sendJson(res, { success: true, data: [], total: 0, page: 1, size: 20 });
     }
 
     // 报表
