@@ -57,8 +57,17 @@ test.describe('全站冒烟', () => {
       await loginAsAdmin(page, { sessions: makeSessions(1) });
       await page.goto(path);
       await expectRendered(page);
-      // 导航栏保持可用（页面级 ErrorBoundary 未兜底触发）
-      await expect(page.locator('.sidebar-aside').first()).toBeVisible();
+      // 导航保持可用：桌面端侧栏常驻；移动端侧栏收进抽屉（由汉堡按钮唤出）。
+      // 注意页面上有**两个** `.sidebar-aside`（桌面常驻 + 抽屉内各一），
+      // 窄屏下前者被 CSS 隐藏，不能只取 first() 判可见性。
+      const sidebars = page.locator('.sidebar-aside');
+      await expect(sidebars.first()).toHaveCount(1);
+      const isMobile = (page.viewportSize()?.width ?? 1440) <= 768;
+      if (isMobile) {
+        await page.locator('.mobile-menu-btn').click();
+      }
+      // 任一实例可见即说明导航结构在且可用
+      await expect(sidebars.filter({ visible: true }).first()).toBeVisible({ timeout: 5000 });
       expect(pageErrors.join('\n')).not.toMatch(/ErrorBoundary|page-fade/);
       expect(pageErrors, `${path} 控制台报错：\n${pageErrors.join('\n')}`).toEqual([]);
       void marker;
@@ -111,7 +120,16 @@ test.describe('全站冒烟', () => {
     await page.goto('/');
     await expect(page.locator('.main-content')).toBeVisible();
 
-    await page.locator('.sidebar-aside').first().getByText('渠道管理', { exact: false }).click();
+    // 移动端侧栏在抽屉里，先唤出再点
+    if ((page.viewportSize()?.width ?? 1440) <= 768) {
+      await page.locator('.mobile-menu-btn').click();
+    }
+    await page
+      .locator('.sidebar-aside')
+      .filter({ visible: true })
+      .first()
+      .getByText('渠道管理', { exact: false })
+      .click();
     await expect(page).toHaveURL(/\/channels$/);
     await expectRendered(page);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);

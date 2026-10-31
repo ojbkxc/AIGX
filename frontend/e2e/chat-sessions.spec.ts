@@ -151,16 +151,23 @@ test.describe('聊天 · 历史会话抽屉', () => {
     await page.locator('.pg-sessions-item-del').nth(1).click();
 
     await expect(page.locator('.pg-sessions-item')).toHaveCount(1);
-    const afterLen = await page.evaluate(
-      ({ key, activeKey }) => {
-        const raw = localStorage.getItem(key);
-        const list = raw ? (JSON.parse(raw) as Array<{ id: string; messages: unknown[] }>) : [];
-        const active = localStorage.getItem(activeKey);
-        return list.find((s) => s.id === active)?.messages.length ?? -1;
-      },
-      { key: SESSIONS_KEY, activeKey: ACTIVE_KEY },
-    );
-    expect(afterLen).toBe(beforeLen);
+    // 删除会触发 setState → effect → localStorage 写入，是异步的；
+    // 直接读会在移动端慢一帧时读到旧值。用 expect.poll 等待收敛。
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            ({ key, activeKey }) => {
+              const raw = localStorage.getItem(key);
+              const list = raw ? (JSON.parse(raw) as Array<{ id: string; messages: unknown[] }>) : [];
+              const active = localStorage.getItem(activeKey);
+              return list.find((s) => s.id === active)?.messages.length ?? -1;
+            },
+            { key: SESSIONS_KEY, activeKey: ACTIVE_KEY },
+          ),
+        { timeout: 5000 },
+      )
+      .toBe(beforeLen);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });
