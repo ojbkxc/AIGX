@@ -111,7 +111,7 @@ async fn qoder(
     if status == 401 || status == 403 {
         return Err("Qoder 登录态已失效，请重新登录该账号".to_string());
     }
-    if status < 200 || status >= 300 {
+    if !(200..300).contains(&status) {
         return Err(format!("Qoder 额度查询失败（HTTP {status}）"));
     }
     let data = value.get("data").cloned().unwrap_or(Value::Null);
@@ -211,7 +211,7 @@ async fn autoclaw(
     if code == 410000 || code == 400000 {
         return Err("AutoClaw 登录态已失效，请重新登录该账号".to_string());
     }
-    if status < 200 || status >= 300 || code != 0 {
+    if !(200..300).contains(&status) || code != 0 {
         // v1 兜底（部分老账号只有 v1 钱包）
         let (status, value) = get_json(
             client,
@@ -224,7 +224,7 @@ async fn autoclaw(
         if status == 401 || status == 403 {
             return Err("AutoClaw 登录态已失效，请重新登录该账号".to_string());
         }
-        if status < 200 || status >= 300 {
+        if !(200..300).contains(&status) {
             return Err(format!("AutoClaw 余额查询失败（HTTP {status}）"));
         }
         let data = value.get("data").cloned().unwrap_or(Value::Null);
@@ -307,7 +307,7 @@ async fn xiaohuanxiong(
     if status == 401 || status == 403 {
         return Err("小浣熊登录态已失效，请重新登录该账号".to_string());
     }
-    if status < 200 || status >= 300 {
+    if !(200..300).contains(&status) {
         return Err(format!("小浣熊余额查询失败（HTTP {status}）"));
     }
     let code = value.get("code").and_then(Value::as_i64).unwrap_or(0);
@@ -392,7 +392,7 @@ async fn zcode(
     if status == 429 {
         return Err("ZCode 额度查询被限流，请稍后再试".to_string());
     }
-    if status < 200 || status >= 300 {
+    if !(200..300).contains(&status) {
         return Err(format!("ZCode 额度查询失败（HTTP {status}）"));
     }
     let code = value.get("code").and_then(Value::as_i64).unwrap_or(0);
