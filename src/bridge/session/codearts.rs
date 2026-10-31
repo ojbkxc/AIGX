@@ -93,7 +93,10 @@ impl CodeArtsBridge {
     }
 
     /// SDK-HMAC-SHA256：返回 `Authorization` 头值。
-    fn sign(
+    ///
+    /// `pub` 给签到/福利领取复用（`checkin::claim::codearts`），签名口径与
+    /// 登录/对话完全一致，避免两处算法分叉。
+    pub fn sign(
         &self,
         method: &str,
         url: &str,

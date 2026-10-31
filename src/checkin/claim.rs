@@ -1169,7 +1169,7 @@ struct OfficeAceCred {
 
 /// 取 OfficeAce 临时凭据：`refresh_secret` JSON 优先，`secret` 的 `ak:sk:sts` 兜底。
 fn officeace_temp_creds(session: &AccountSession) -> Option<OfficeAceCred> {
-    let raw = session.refresh_secret.clone().unwrap_or_default();
+    let raw = session.refresh_secret.clone();
     if let Ok(value) = serde_json::from_str::<Value>(&raw) {
         let read = |key: &str| {
             value
@@ -1238,21 +1238,26 @@ async fn officeace(client: &Client, session: &AccountSession) -> ClaimResult {
     let claim_url = format!("{gateway}/v1/subscription/bonus/claim");
     let extra = vec![("x-subscription-type".to_string(), "v2".to_string())];
 
-    let read_subscription = |cred: &OfficeAceCred| {
+    async fn read_sub(
+        client: &Client,
+        url: &str,
+        extra: &[(String, String)],
+        cred: &OfficeAceCred,
+    ) -> Result<(u16, Value), String> {
         let headers = sign_v11(
             "GET",
-            &sub_url,
-            &extra,
+            url,
+            extra,
             b"",
             &cred.ak,
             &cred.sk,
             &cred.sts,
             &cred.project,
         );
-        send_json(client, reqwest::Method::GET, &sub_url, &headers, None, None)
-    };
+        send_json(client, reqwest::Method::GET, url, &headers, None, None).await
+    }
 
-    let before = match read_subscription(&cred).await {
+    let before = match read_sub(client, &sub_url, &extra, &cred).await {
         Ok((status, value)) if (200..300).contains(&status) => officeace_points(&value),
         Ok((status, _)) if status == 401 || status == 403 => {
             return failed("OfficeAce 控制面临时 AK/SK 已失效，请重新登录该账号");
@@ -1299,7 +1304,7 @@ async fn officeace(client: &Client, session: &AccountSession) -> ClaimResult {
         ));
     }
     // 上游重复领不报错：按前后增量出文案，恒算成功
-    let after = match read_subscription(&cred).await {
+    let after = match read_sub(client, &sub_url, &extra, &cred).await {
         Ok((status, value)) if (200..300).contains(&status) => officeace_points(&value),
         _ => -1,
     };
@@ -1325,7 +1330,18 @@ mod tests {
             assert!(
                 matches!(
                     *provider,
-                    "loomy" | "kuku" | "qoder" | "qoder-intl" | "xiaohuanxiong"
+                    "loomy"
+                        | "kuku"
+                        | "qoder"
+                        | "qoder-intl"
+                        | "xiaohuanxiong"
+                        | "autoclaw"
+                        | "autoclaw-intl"
+                        | "workbuddy"
+                        | "workbuddy-intl"
+                        | "trae"
+                        | "codearts"
+                        | "officeace"
                 ),
                 "provider {provider} 在白名单里但没有实现"
             );
@@ -1335,7 +1351,9 @@ mod tests {
     #[test]
     fn unknown_provider_not_supported() {
         assert!(!supports_checkin("openai"));
-        assert!(!supports_checkin("trae"));
+        assert!(!supports_checkin("zcode"));
+        assert!(!supports_checkin("catpaw"));
         assert!(supports_checkin("loomy"));
+        assert!(supports_checkin("trae"));
     }
 }
