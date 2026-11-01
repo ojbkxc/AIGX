@@ -449,7 +449,13 @@ impl AccountSessionStore {
             session.success_count = session.success_count.saturating_add(1);
             session.total_latency_ms = session.total_latency_ms.saturating_add(latency_ms);
             session.consecutive_errors = 0;
+            // 清该模型冷却；整号冷却也一并清掉 —— 账号既然成功响应，
+            // 之前的账号级限流/认证失败窗口已经过去，继续挂着只会白白
+            // 让账号退出调度。
             session.cooldowns.remove(model);
+            session
+                .cooldowns
+                .remove(crate::account_session::model::ACCOUNT_WIDE_COOLDOWN);
             session.last_error = None;
             session.updated_at = chrono::Utc::now().timestamp();
             session.clone()
@@ -457,9 +463,15 @@ impl AccountSessionStore {
         self.persist_throttled(&snapshot);
     }
 
-    /// 记入一次失败（按失败类型冷却该账号的该上游模型），返回冷却秒数。
+    /// 记入一次失败（按失败类型冷却），返回冷却秒数。
     ///
     /// 失败分类复用渠道断路器的 `classify_bridge_error` 结果。
+    ///
+    /// **冷却粒度**由失败类型决定（此前一律按模型冷却，账号级限流因此
+    /// 只冷掉撞上的那一个模型，其余模型继续撞墙 —— 上游惩罚窗口越撞越长）：
+    /// - `RateLimited { scope }` → `Account`/`Unknown` 冷整号，`Model` 冷该模型
+    /// - `AuthFailed` / `PaymentRequired` → 冷整号（凭证/余额问题是账号级的）
+    /// - 其余（5xx / 超时 / 连接失败 / 模型不存在）→ 只冷该模型
     pub fn record_failure(
         &self,
         id: &str,
@@ -472,6 +484,12 @@ impl AccountSessionStore {
         let retry_after = match failure {
             FailureType::RateLimited { retry_after, .. } => *retry_after,
             _ => None,
+        };
+        // 这次失败该冷「整号」还是「这一个模型」
+        let account_wide = match failure {
+            FailureType::RateLimited { scope, .. } => scope.cools_whole_account(),
+            FailureType::AuthFailed | FailureType::PaymentRequired => true,
+            _ => false,
         };
         let policy = self.policy();
         let direct_switch =
@@ -490,9 +508,12 @@ impl AccountSessionStore {
                 rotate::cooldown_secs(&policy, failure, session.consecutive_errors, retry_after)
             };
             if secs > 0 {
-                session
-                    .cooldowns
-                    .insert(model.to_string(), now + secs as i64);
+                let key = if account_wide {
+                    crate::account_session::model::ACCOUNT_WIDE_COOLDOWN
+                } else {
+                    model
+                };
+                session.cooldowns.insert(key.to_string(), now + secs as i64);
             }
             session.last_error = Some(message.to_string());
             session.updated_at = now;
@@ -765,6 +786,130 @@ mod tests {
             assert!(pool.acquire("ch", "other-model", None).is_some());
             assert!(pool.reset_cooldowns(&account.id));
             assert!(pool.acquire("ch", "upstream-x", None).is_some());
+        });
+    }
+
+    #[test]
+    fn account_scope_rate_limit_cools_whole_account() {
+        with_secret_dir("cooldown-account", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            let failure = FailureType::RateLimited {
+                scope: crate::channel::circuit_breaker::RateLimitScope::Account,
+                retry_after: Some(90),
+            };
+            let secs = pool.record_failure(
+                &account.id,
+                "upstream-x",
+                &failure,
+                "rate limited",
+                Some(429),
+            );
+            assert_eq!(secs, 90);
+            // 账号级限流：**任何**模型都不可用，不只是撞上的那个
+            assert!(pool.acquire("ch", "upstream-x", None).is_none());
+            assert!(
+                pool.acquire("ch", "other-model", None).is_none(),
+                "账号级限流必须冷却整号，不能只冷一个模型"
+            );
+            // 展示口径：整号冷却写在哨兵键上，前端渲染成「全部模型」
+            let loaded = pool.get(&account.id).unwrap();
+            let until = loaded
+                .cooldowns
+                .get(crate::account_session::model::ACCOUNT_WIDE_COOLDOWN)
+                .copied()
+                .expect("整号冷却应写进哨兵键");
+            let now = chrono::Utc::now().timestamp();
+            assert!(
+                until > now && until <= now + 91,
+                "哨兵键到期时间应落在 90 秒窗口内（实际差 {} 秒）",
+                until - now
+            );
+        });
+    }
+
+    #[test]
+    fn model_scope_rate_limit_cools_only_that_model() {
+        with_secret_dir("cooldown-model", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            let failure = FailureType::RateLimited {
+                scope: crate::channel::circuit_breaker::RateLimitScope::Model,
+                retry_after: None,
+            };
+            pool.record_failure(
+                &account.id,
+                "upstream-x",
+                &failure,
+                "rate limited",
+                Some(429),
+            );
+            assert!(pool.acquire("ch", "upstream-x", None).is_none());
+            assert!(
+                pool.acquire("ch", "other-model", None).is_some(),
+                "模型级限流只冷该模型，其余模型应照常可用"
+            );
+        });
+    }
+
+    #[test]
+    fn unknown_scope_is_treated_as_account_wide() {
+        with_secret_dir("cooldown-unknown", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            // 判不出作用域时按账号级保守处理（见 RateLimitScope::cools_whole_account）
+            let failure = FailureType::RateLimited {
+                scope: crate::channel::circuit_breaker::RateLimitScope::Unknown,
+                retry_after: None,
+            };
+            pool.record_failure(
+                &account.id,
+                "upstream-x",
+                &failure,
+                "rate limited",
+                Some(429),
+            );
+            assert!(pool.acquire("ch", "other-model", None).is_none());
+        });
+    }
+
+    #[test]
+    fn auth_failure_cools_whole_account() {
+        with_secret_dir("cooldown-auth", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            pool.record_failure(
+                &account.id,
+                "upstream-x",
+                &FailureType::AuthFailed,
+                "401",
+                Some(401),
+            );
+            // 凭证坏了，换模型也救不回来
+            assert!(pool.acquire("ch", "other-model", None).is_none());
+        });
+    }
+
+    #[test]
+    fn success_clears_account_wide_cooldown() {
+        with_secret_dir("cooldown-recover", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            let failure = FailureType::RateLimited {
+                scope: crate::channel::circuit_breaker::RateLimitScope::Account,
+                retry_after: Some(30),
+            };
+            pool.record_failure(
+                &account.id,
+                "upstream-x",
+                &failure,
+                "rate limited",
+                Some(429),
+            );
+            assert!(pool.acquire("ch", "other-model", None).is_none());
+            // 账号成功响应一次 = 限流窗口已过，整号冷却该清掉
+            pool.record_success(&account.id, "upstream-x", 100);
+            assert!(pool.acquire("ch", "other-model", None).is_some());
         });
     }
 

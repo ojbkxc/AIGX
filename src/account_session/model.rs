@@ -20,6 +20,14 @@ pub const CREDENTIAL_KIND_SESSION: &str = "session";
 /// 凭证形态：免鉴权（bridge 不发送鉴权头，用于 IP 白名单型上游）。
 pub const CREDENTIAL_KIND_NONE: &str = "none";
 
+/// `cooldowns` 里的整号冷却哨兵键。
+///
+/// 账号级限流（429 + account/organization 措辞）、认证失败、余额耗尽
+/// 影响的是**整个账号**而不是某个模型。用 `"*"` 占位避免逐模型写一遍
+/// （漏掉未请求过的模型会让它们仍被调度）。`"*"` 不是合法的上游模型名
+/// （模型名只允许字母数字与 `- _ . / :`），不会与真实模型冲突。
+pub const ACCOUNT_WIDE_COOLDOWN: &str = "*";
+
 /// 粘贴型凭证。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Credential {
@@ -187,6 +195,11 @@ pub struct AccountSession {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub refresh_secret: String,
     /// 上游真名 → 冷却到期 unix 秒。
+    ///
+    /// 特殊键 [`ACCOUNT_WIDE_COOLDOWN`]（`"*"`）表示**整号冷却**：账号级
+    /// 限流 / 认证失败 / 余额耗尽会让该账号所有模型都不可用，此时逐模型
+    /// 写一遍既浪费存储又漏掉未请求过的模型。前端展示时 `*` 渲染成
+    /// 「全部模型」。
     #[serde(default)]
     pub cooldowns: HashMap<String, i64>,
     #[serde(default)]
@@ -303,9 +316,12 @@ impl AccountSession {
     }
 
     /// 该上游模型的冷却到期时间（unix 秒）。
+    ///
+    /// 整号冷却优先返回：账号级限流期间问任何模型都该得到那个到期时间。
     pub fn cooling_until(&self, model: &str) -> Option<i64> {
         self.cooldowns
-            .get(model)
+            .get(ACCOUNT_WIDE_COOLDOWN)
+            .or_else(|| self.cooldowns.get(model))
             .copied()
             .filter(|until| *until > 0)
     }
