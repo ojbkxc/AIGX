@@ -90,17 +90,13 @@ fn anthropic_error(
     )
 }
 
-/// 将 Anthropic role 转为内部 Role
-fn anthropic_role_to_internal(role: &str) -> Option<Role> {
-    anthropic_role_to_internal_with_dev(role, false)
-}
-
-/// [`anthropic_role_to_internal`] 的带 developer 兼容开关版本。
+/// 将 Anthropic role 转为内部 Role。
 ///
+/// `developer_to_system` = developer 角色兼容开关（A2A developerRoleCompat）：
 /// Anthropic 协议本身无 developer 角色，但客户端代理层（如把 OpenAI SDK
 /// 请求转成 Anthropic 形状的中间件）可能透传——开关开时归一为 system，
-/// 与 OpenAI 入口同口径（A2A developerRoleCompat）。
-fn anthropic_role_to_internal_with_dev(role: &str, developer_to_system: bool) -> Option<Role> {
+/// 与 OpenAI 入口同口径。
+fn anthropic_role_to_internal(role: &str, developer_to_system: bool) -> Option<Role> {
     match role {
         "user" => Some(Role::User),
         "assistant" => Some(Role::Assistant),
@@ -126,20 +122,14 @@ fn to_anthropic_stop_reason(fr: &FinishReason) -> &'static str {
     }
 }
 
-/// 解析 Anthropic 消息列表为内部 ChatMessage 列表
-fn parse_anthropic_messages(messages: &[Value]) -> Vec<ChatMessage> {
-    parse_anthropic_messages_with_dev(messages, false)
-}
-
-/// [`parse_anthropic_messages`] 的带 developer 兼容开关版本。
-fn parse_anthropic_messages_with_dev(
-    messages: &[Value],
-    developer_to_system: bool,
-) -> Vec<ChatMessage> {
+/// 解析 Anthropic 消息列表为内部 ChatMessage 列表。
+///
+/// `developer_to_system` = developer 角色兼容开关（网关提示词设置）。
+fn parse_anthropic_messages(messages: &[Value], developer_to_system: bool) -> Vec<ChatMessage> {
     let mut result = Vec::new();
     for msg in messages {
         let role_str = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-        let role = match anthropic_role_to_internal_with_dev(role_str, developer_to_system) {
+        let role = match anthropic_role_to_internal(role_str, developer_to_system) {
             Some(r) => r,
             None => continue,
         };
@@ -339,10 +329,7 @@ pub async fn handle_messages(
         .get("messages")
         .and_then(|m| m.as_array())
         .map(|arr| {
-            parse_anthropic_messages_with_dev(
-                arr,
-                state.gateway_prompt.snapshot().developer_role_compat,
-            )
+            parse_anthropic_messages(arr, state.gateway_prompt.snapshot().developer_role_compat)
         })
         .unwrap_or_default();
 
