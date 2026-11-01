@@ -1709,7 +1709,10 @@ pub async fn handle_import_account_sessions_json(
                 .channel_store
                 .list()
                 .iter()
-                .find(|c| c.channel_type == "account" && c.name == entry_channel_name)
+                .find(|c| {
+                    matches!(c.channel_type, crate::channel::ChannelType::Account)
+                        && c.name == entry_channel_name
+                })
                 .map(|c| c.id.clone())
                 .unwrap_or_default()
         } else {
