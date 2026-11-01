@@ -884,6 +884,72 @@
   white-space: nowrap;
 }
 
+/* 全部拉取工具条 + 单渠道失败提示 */
+.mm-fetch-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.mm-fetch-summary {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.mm-fetch-err {
+  font-size: 11px;
+  color: var(--danger, #e5484d);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* ── 能力声明编辑（继承/显式声明两态 + 四圆点 chip）── */
+.mm-caps-mode {
+  display: inline-flex;
+  gap: 2px;
+  margin-top: 6px;
+  padding: 2px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--surface-bg);
+}
+
+.mm-caps-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.mm-cap-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary, var(--text-muted));
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.mm-cap-toggle:hover:not(:disabled) {
+  border-color: var(--primary, var(--text-color));
+  color: var(--text-color);
+}
+
+.mm-cap-toggle.on {
+  background: hsla(var(--accent-hue, 160), 70%, 50%, 0.14);
+  border-color: hsla(var(--accent-hue, 160), 70%, 50%, 0.55);
+  color: var(--text-color);
+}
+
 /* ── 批量操作弹窗 ── */
 .mm-batch-models {
   display: flex;

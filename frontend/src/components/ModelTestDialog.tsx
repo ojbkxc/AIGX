@@ -87,6 +87,8 @@ export default function ModelTestDialog({ target, onClose }: Props): JSX.Element
   /** 读秒（有在途时 400ms 一跳） */
   const [elapsed, setElapsed] = useState(0);
   const runSeq = useRef(0);
+  /** 本轮在途请求的取消令牌（对照 Agent2API terminateStatsRequest 的中止语义） */
+  const abortRef = useRef<AbortController | null>(null);
 
   function sourceKey(s: { kind: string; channel_id: string; account_id?: string }): string {
     return s.kind === 'account' ? `a:${s.account_id}` : `c:${s.channel_id}`;
@@ -115,6 +117,8 @@ export default function ModelTestDialog({ target, onClose }: Props): JSX.Element
     const chosen = usable.filter((s) => picked.has(sourceKey(s)));
     if (chosen.length === 0) return;
     const seq = ++runSeq.current;
+    const ac = new AbortController();
+    abortRef.current = ac;
     setElapsed(0);
     setSlots(
       chosen.map((s) => ({
@@ -136,23 +140,42 @@ export default function ModelTestDialog({ target, onClose }: Props): JSX.Element
           );
         };
         try {
-          const res = await api.testModel({
-            provider: target.provider,
-            model: model.id,
-            account_id: s.kind === 'account' ? s.account_id : undefined,
-            channel_id: s.kind === 'channel' ? s.channel_id : undefined,
-            prompt: prompt.trim() || undefined,
-            system_prompt: systemPrompt.trim() || undefined,
-            reasoning_effort: reasoning || undefined,
-            stream,
-          });
+          const res = await api.testModel(
+            {
+              provider: target.provider,
+              model: model.id,
+              account_id: s.kind === 'account' ? s.account_id : undefined,
+              channel_id: s.kind === 'channel' ? s.channel_id : undefined,
+              prompt: prompt.trim() || undefined,
+              system_prompt: systemPrompt.trim() || undefined,
+              reasoning_effort: reasoning || undefined,
+              stream,
+            },
+            ac.signal,
+          );
           patch({ running: false, result: res?.data });
         } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') {
+            patch({ running: false, transport: t('已中止') });
+            return;
+          }
           patch({ running: false, transport: err instanceof Error ? err.message : String(err) });
         }
       }),
     );
-    if (runSeq.current === seq) setRunning(false);
+    if (runSeq.current === seq) {
+      setRunning(false);
+      abortRef.current = null;
+    }
+  };
+
+  /** 中止本轮在途请求：回参数层，已回来的结论作废清空（对齐 Agent2API 测试中止） */
+  const stopTests = () => {
+    runSeq.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setRunning(false);
+    setSlots(null);
   };
 
   const closeResults = () => {
@@ -394,6 +417,11 @@ export default function ModelTestDialog({ target, onClose }: Props): JSX.Element
                       : t('全部成功')}
                 </span>
                 <div style={{ display: 'flex', gap: 8 }}>
+                  {running && (
+                    <button className="btn btn-danger btn-sm" onClick={stopTests} title={t('取消尚未返回的请求，已回来的结论一并作废')}>
+                      {t('中止测试')}
+                    </button>
+                  )}
                   <button className="btn btn-outline btn-sm" onClick={closeResults}>
                     {running ? t('关闭（请求会在后台跑完并记日志）') : t('关闭')}
                   </button>

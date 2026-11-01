@@ -106,13 +106,13 @@ async function request<T = unknown>(
   method: string,
   path: string,
   body: unknown = null,
-  opts: { skipAuthRedirect?: boolean } = {},
+  opts: { skipAuthRedirect?: boolean; signal?: AbortSignal } = {},
 ): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...authHeaders(),
   };
-  const options: RequestInit = { method, headers };
+  const options: RequestInit = { method, headers, signal: opts.signal };
   if (body !== null) {
     options.body = JSON.stringify(body);
   }
@@ -204,6 +204,15 @@ export const api = {
     request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/forgot-password`, { email }, { skipAuthRedirect: true }),
   changePassword: (old_password: string, new_password: string): Promise<ApiResponse<MessageResult>> =>
     request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/change-password`, { old_password, new_password }, { skipAuthRedirect: true }),
+  // OAuth 登录回跳：callback 只把一次性 ticket 放进 URL fragment，这里换回会话数据。
+  // skipAuthRedirect：ticket 无效返回 401 属业务错误（登录页自己提示），不参与登出逻辑。
+  oauthConsume: (ticket: string): Promise<ApiResponse<LoginResult>> =>
+    request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/oauth/consume`, { ticket }, { skipAuthRedirect: true }),
+  // 个人中心发起第三方账号绑定（登录态）：返回上游授权 URL，前端整页跳转过去。
+  oauthBindStart: (provider: string): Promise<ApiResponse<{ url: string }>> =>
+    request<ApiResponse<{ url: string }>>('POST', `${API_BASE}/auth/${provider}/bind/start`, {}),
+  oauthUnbind: (provider: string): Promise<ApiResponse<{ provider: string }>> =>
+    request<ApiResponse<{ provider: string }>>('POST', `${API_BASE}/auth/oauth/unbind`, { provider }),
   getUsageSummary: (): Promise<ApiResponse<UsageSummaryItem>> =>
     request<ApiResponse<UsageSummaryItem>>('GET', `${API_BASE}/usage/summary`),
   getTodayTokens: (): Promise<ApiResponse<Record<string, unknown>>> =>
@@ -363,8 +372,8 @@ export const api = {
   removeModelAlias: (alias: string): Promise<ApiResponse<ManageView>> =>
     request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias/remove`, { alias }),
   // 模型测试（管理员）：钉 provider+model 走真实链路，恒 200，结论在 data.ok
-  testModel: (data: ModelTestPayload): Promise<ApiResponse<ModelTestResult>> =>
-    request<ApiResponse<ModelTestResult>>('POST', `${API_BASE}/models/test`, data),
+  testModel: (data: ModelTestPayload, signal?: AbortSignal): Promise<ApiResponse<ModelTestResult>> =>
+    request<ApiResponse<ModelTestResult>>('POST', `${API_BASE}/models/test`, data, { signal }),
 
   // ── 签到中心（管理员替上游账号签到，区别于用户侧 /api/checkin） ──
   getCheckinCenter: (): Promise<ApiResponse<CheckinCenterData>> =>

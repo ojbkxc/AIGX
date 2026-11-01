@@ -151,6 +151,52 @@ interface AliasForm {
   target: string;
 }
 
+/** 元信息覆盖表单：能力四圆点结构化（对齐 Agent2API CapabilityDialog 的声明式编辑） */
+interface MetaForm {
+  model: string;
+  owned_by: string;
+  context_length: string;
+  /** inherit = 能力标签留空（继承内置推断）；custom = 显式声明下方勾选项 */
+  capsMode: 'inherit' | 'custom';
+  capTool: boolean;
+  capImage: boolean;
+  capAudio: boolean;
+  capReasoning: boolean;
+  /** 四圆点之外的标签（embedding / rerank / …），逗号分隔 */
+  extraTags: string;
+}
+
+const EMPTY_META_FORM: MetaForm = {
+  model: '',
+  owned_by: '',
+  context_length: '',
+  capsMode: 'inherit',
+  capTool: false,
+  capImage: false,
+  capAudio: false,
+  capReasoning: false,
+  extraTags: '',
+};
+
+/** 能力标签 → 表单勾选态（与 CAP_DOTS 同一套正则口径） */
+function capsToForm(caps: string[]): Pick<MetaForm, 'capsMode' | 'capTool' | 'capImage' | 'capAudio' | 'capReasoning' | 'extraTags'> {
+  if (!caps.length) {
+    return { capsMode: 'inherit', capTool: false, capImage: false, capAudio: false, capReasoning: false, extraTags: '' };
+  }
+  const has = (re: RegExp): boolean => caps.some((c) => re.test(c));
+  const extra = caps
+    .filter((c) => !/tool|function|vision|image|audio|speech|tts|reason|think|chat/i.test(c))
+    .join(', ');
+  return {
+    capsMode: 'custom',
+    capTool: has(/tool|function/i),
+    capImage: has(/vision|image/i),
+    capAudio: has(/audio|speech|tts/i),
+    capReasoning: has(/reason|think/i),
+    extraTags: extra,
+  };
+}
+
 type BatchAction = 'enable' | 'disable' | 'remove-price';
 
 // ── 主组件 ───────────────────────────────────────────────────────────
@@ -223,6 +269,9 @@ export default function ModelManage(): JSX.Element {
   const [fetchChannels, setFetchChannels] = useState<ChannelItem[]>([]);
   const [fetchingId, setFetchingId] = useState<string | null>(null);
   const [fetchDone, setFetchDone] = useState<Record<string, boolean>>({});
+  /** 单渠道失败标记（重试即清除），对照 Agent2API 获取弹窗的状态徽标 */
+  const [fetchFailed, setFetchFailed] = useState<Record<string, string>>({});
+  const [fetchAllRunning, setFetchAllRunning] = useState(false);
 
   const [searchParams] = useSearchParams();
 
@@ -248,7 +297,7 @@ export default function ModelManage(): JSX.Element {
   // 元信息覆盖
   const [overrides, setOverrides] = useState<Record<string, ModelMetaOverride>>({});
   const [metaModal, setMetaModal] = useState(false);
-  const [metaForm, setMetaForm] = useState({ model: '', owned_by: '', context_length: '', capabilities: '' });
+  const [metaForm, setMetaForm] = useState<MetaForm>(EMPTY_META_FORM);
   const [metaError, setMetaError] = useState('');
   const [savingMeta, setSavingMeta] = useState(false);
 
@@ -439,7 +488,7 @@ export default function ModelManage(): JSX.Element {
 
   // ── 元信息覆盖 ──
   const openMetaCreate = () => {
-    setMetaForm({ model: '', owned_by: '', context_length: '', capabilities: '' });
+    setMetaForm({ ...EMPTY_META_FORM });
     setMetaError('');
     setMetaModal(true);
   };
@@ -451,7 +500,7 @@ export default function ModelManage(): JSX.Element {
       model,
       owned_by: o.owned_by ?? '',
       context_length: o.context_length != null ? String(o.context_length) : '',
-      capabilities: (o.capabilities ?? []).join(', '),
+      ...capsToForm(o.capabilities ?? []),
     });
     setMetaError('');
     setMetaModal(true);
@@ -470,10 +519,24 @@ export default function ModelManage(): JSX.Element {
           : row.context_length != null
             ? String(row.context_length)
             : '',
-      capabilities: (o?.capabilities ?? row.capabilities ?? []).join(', '),
+      ...capsToForm(o?.capabilities ?? row.capabilities ?? []),
     });
     setMetaError('');
     setMetaModal(true);
+  };
+
+  /** 四圆点勾选 → 提交给后端的标签数组（chat 恒携带，与内置推断口径一致） */
+  const metaFormToCaps = (): string[] => {
+    if (metaForm.capsMode === 'inherit') return [];
+    const caps: string[] = ['chat'];
+    if (metaForm.capTool) caps.push('tool');
+    if (metaForm.capImage) caps.push('vision');
+    if (metaForm.capAudio) caps.push('audio');
+    if (metaForm.capReasoning) caps.push('reasoning');
+    for (const tag of metaForm.extraTags.split(/[,，]/).map((c) => c.trim()).filter(Boolean)) {
+      if (!caps.includes(tag)) caps.push(tag);
+    }
+    return caps;
   };
 
   const saveMeta = async () => {
@@ -495,7 +558,7 @@ export default function ModelManage(): JSX.Element {
       await api.setModelMeta(model, {
         owned_by: ownedBy,
         context_length: ctx,
-        capabilities: metaForm.capabilities.split(/[,，]/).map((c) => c.trim()).filter(Boolean),
+        capabilities: metaFormToCaps(),
       });
       addToast(t('元信息覆盖已保存'));
       setMetaModal(false);
@@ -588,6 +651,7 @@ export default function ModelManage(): JSX.Element {
   const openFetchModal = async () => {
     setFetchModal(true);
     setFetchDone({});
+    setFetchFailed({});
     try {
       const res = await api.listChannels({ page: 1, page_size: 200 });
       const list = (res?.data ?? []) as ChannelItem[];
@@ -597,19 +661,57 @@ export default function ModelManage(): JSX.Element {
     }
   };
 
-  const fetchOne = async (ch: ChannelItem) => {
+  const fetchOne = async (ch: ChannelItem): Promise<boolean> => {
     const cid = String(ch.id);
-    if (fetchingId) return;
+    if (fetchingId) return false;
     setFetchingId(cid);
     try {
       await api.fetchChannelModels({ channel_id: cid });
       setFetchDone((d) => ({ ...d, [cid]: true }));
-      addToast(t('已拉取') + `：${ch.name}`);
-      await load();
+      setFetchFailed((f) => {
+        const next = { ...f };
+        delete next[cid];
+        return next;
+      });
+      return true;
     } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
+      setFetchFailed((f) => ({ ...f, [cid]: err instanceof Error ? err.message : String(err) }));
+      return false;
     } finally {
       setFetchingId(null);
+    }
+  };
+
+  /** 逐个点击（拉完刷新目录）；「全部拉取」里传 silent 由批处理统一刷新 */
+  const fetchOneClick = async (ch: ChannelItem) => {
+    const ok = await fetchOne(ch);
+    if (ok) {
+      addToast(t('已拉取') + `：${ch.name}`);
+      await load();
+    } else {
+      addToast(t('拉取失败'), 'error');
+    }
+  };
+
+  /** 全部拉取：串行逐渠道（避免同时打爆上游），完成后统一刷新并汇报成败数 */
+  const fetchAll = async () => {
+    if (fetchAllRunning || fetchChannels.length === 0) return;
+    setFetchAllRunning(true);
+    let ok = 0;
+    let fail = 0;
+    try {
+      for (const ch of fetchChannels) {
+        const done = await fetchOne(ch);
+        if (done) ok += 1;
+        else fail += 1;
+      }
+      if (ok > 0) await load();
+      addToast(
+        `${t('全部拉取完成')}：${ok} ${t('成功')}` + (fail > 0 ? ` · ${fail} ${t('失败')}` : ''),
+        fail > 0 ? 'error' : undefined,
+      );
+    } finally {
+      setFetchAllRunning(false);
     }
   };
 
@@ -1583,7 +1685,7 @@ export default function ModelManage(): JSX.Element {
             <div className="modal-body">
               {metaError && <div className="error-message">{metaError}</div>}
               <p className="mm-dialog-note">
-                {t('这些声明展示给下游客户端（/v1/models 的 owned_by / context_length / capabilities），不影响网关转发与路由。字段留空即继承内置推断。')}
+                {t('这些声明展示给下游客户端（/v1/models 的 owned_by / context_length / capabilities），不影响网关转发与路由。')}
               </p>
               <div className="form-group">
                 <label>{t('模型 ID')} *</label>
@@ -1606,24 +1708,75 @@ export default function ModelManage(): JSX.Element {
                 />
               </div>
               <div className="form-group">
-                <label>{t('上下文长度（留空继承）')}</label>
+                <label>{t('上下文窗口')}</label>
                 <input
                   className="form-input"
                   value={metaForm.context_length}
                   onChange={(e) => setMetaForm({ ...metaForm, context_length: e.target.value })}
-                  placeholder="128000"
+                  placeholder={t('留空继承内置推断')}
                   disabled={savingMeta}
                 />
               </div>
               <div className="form-group">
-                <label>{t('能力标签（逗号分隔，留空继承）')}</label>
-                <input
-                  className="form-input"
-                  value={metaForm.capabilities}
-                  onChange={(e) => setMetaForm({ ...metaForm, capabilities: e.target.value })}
-                  placeholder="chat, vision, tool, reasoning"
-                  disabled={savingMeta}
-                />
+                <label>{t('能力声明')}</label>
+                <div className="mm-caps-mode" role="tablist" aria-label={t('能力声明模式')}>
+                  <button
+                    type="button"
+                    className={`mm-seg-btn${metaForm.capsMode === 'inherit' ? ' active' : ''}`}
+                    onClick={() => setMetaForm({ ...metaForm, capsMode: 'inherit' })}
+                    disabled={savingMeta}
+                  >
+                    {t('继承内置推断')}
+                  </button>
+                  <button
+                    type="button"
+                    className={`mm-seg-btn${metaForm.capsMode === 'custom' ? ' active' : ''}`}
+                    onClick={() => setMetaForm({ ...metaForm, capsMode: 'custom' })}
+                    disabled={savingMeta}
+                  >
+                    {t('显式声明')}
+                  </button>
+                </div>
+                {metaForm.capsMode === 'custom' ? (
+                  <>
+                    <div className="mm-caps-toggles">
+                      {(
+                        [
+                          ['capTool', '工具调用', Wrench],
+                          ['capImage', '图像识别', ImageIcon],
+                          ['capAudio', '音频', AudioLines],
+                          ['capReasoning', '思考', Lightbulb],
+                        ] as Array<[keyof MetaForm, string, typeof Wrench]>
+                      ).map(([key, label, Icon]) => {
+                        const on = Boolean(metaForm[key]);
+                        return (
+                          <button
+                            key={String(key)}
+                            type="button"
+                            className={`mm-cap-toggle${on ? ' on' : ''}`}
+                            aria-pressed={on}
+                            disabled={savingMeta}
+                            onClick={() => setMetaForm({ ...metaForm, [key]: !on })}
+                          >
+                            <Icon size={12} /> {t(label)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <input
+                      className="form-input"
+                      value={metaForm.extraTags}
+                      onChange={(e) => setMetaForm({ ...metaForm, extraTags: e.target.value })}
+                      placeholder={t('其他标签（逗号分隔）：embedding, rerank…')}
+                      disabled={savingMeta}
+                      style={{ marginTop: 8 }}
+                    />
+                  </>
+                ) : (
+                  <p className="mm-dialog-note" style={{ marginTop: 8 }}>
+                    {t('能力标签按模型名内置推断（chat / embedding / image / audio…），下游按推断值展示。')}
+                  </p>
+                )}
               </div>
             </div>
             <div className="modal-footer">
@@ -1807,39 +1960,72 @@ export default function ModelManage(): JSX.Element {
               {fetchChannels.length === 0 ? (
                 <EmptyState icon="📡" message={t('暂无启用的可拉取渠道')} />
               ) : (
-                <div className="mm-fetch-list">
-                  {fetchChannels.map((ch) => {
-                    const cid = String(ch.id);
-                    return (
-                      <div key={cid} className="mm-fetch-row">
-                        <div className="mm-fetch-info">
-                          <strong>{ch.name}</strong>
-                          <span className="mm-model-sub">
-                            {ch.channel_type} · {t('已发现')} {(ch.discovered_models ?? []).length}
-                          </span>
-                        </div>
-                        {fetchDone[cid] ? (
-                          <span className="mm-badge-ok">{t('已拉取')}</span>
-                        ) : (
-                          <button
-                            type="button"
-                            className="btn btn-outline btn-sm"
-                            disabled={fetchingId !== null}
-                            onClick={() => void fetchOne(ch)}
-                          >
-                            {fetchingId === cid ? (
-                              <>
-                                <Loader2 size={12} className="spin" /> {t('拉取中...')}
-                              </>
-                            ) : (
-                              t('拉取')
+                <>
+                  <div className="mm-fetch-toolbar">
+                    <span className="mm-fetch-summary">
+                      {t('共')} {fetchChannels.length} {t('个渠道')}
+                      {Object.keys(fetchDone).length > 0 &&
+                        ` · ${t('成功')} ${Object.keys(fetchDone).length}`}
+                      {Object.keys(fetchFailed).length > 0 &&
+                        ` · ${t('失败')} ${Object.keys(fetchFailed).length}`}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      disabled={fetchingId !== null || fetchAllRunning}
+                      onClick={() => void fetchAll()}
+                    >
+                      {fetchAllRunning || fetchingId !== null ? (
+                        <>
+                          <Loader2 size={12} className="spin" /> {t('拉取中...')}
+                        </>
+                      ) : (
+                        Object.keys(fetchDone).length > 0 ? t('重新获取全部') : t('全部拉取')
+                      )}
+                    </button>
+                  </div>
+                  <div className="mm-fetch-list">
+                    {fetchChannels.map((ch) => {
+                      const cid = String(ch.id);
+                      const busy = fetchingId === cid || (fetchAllRunning && fetchingId === null && !fetchDone[cid] && !fetchFailed[cid]);
+                      return (
+                        <div key={cid} className="mm-fetch-row">
+                          <div className="mm-fetch-info">
+                            <strong>{ch.name}</strong>
+                            <span className="mm-model-sub">
+                              {ch.channel_type} · {t('已发现')} {(ch.discovered_models ?? []).length}
+                            </span>
+                            {fetchFailed[cid] && (
+                              <span className="mm-fetch-err" title={fetchFailed[cid]}>
+                                {fetchFailed[cid].length > 60 ? `${fetchFailed[cid].slice(0, 60)}…` : fetchFailed[cid]}
+                              </span>
                             )}
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                          </div>
+                          {fetchDone[cid] ? (
+                            <span className="mm-badge-ok">{t('已拉取')}</span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn btn-outline btn-sm"
+                              disabled={fetchingId !== null || fetchAllRunning}
+                              onClick={() => void fetchOneClick(ch)}
+                            >
+                              {busy ? (
+                                <>
+                                  <Loader2 size={12} className="spin" /> {t('拉取中...')}
+                                </>
+                              ) : fetchFailed[cid] ? (
+                                t('重试')
+                              ) : (
+                                t('拉取')
+                              )}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
               )}
             </div>
             <div className="modal-footer">

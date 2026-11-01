@@ -1244,40 +1244,36 @@ export default function AccountSessions(): JSX.Element {
                     <td>{successRate(session)}</td>
                     <td>{cooldownSummary(session)}</td>
                     <td>
-                      <div className="actions-cell">
-                        <Button
-                          variant="outline"
-                          size="sm"
+                      <div className="actions-cell as-actions">
+                        <button
+                          type="button"
+                          className="as-act"
                           onClick={() => handleTest(session)}
                           disabled={testingId === session.id}
+                          title={testingId === session.id ? t('测试中…') : t('沿真实链路发一条最小对话验证可用性')}
                         >
-                          <FlaskConical size={14} />
-                          {testingId === session.id ? t('测试中…') : t('测试')}
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
+                          <FlaskConical size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          className="as-act"
                           onClick={() => void handleSyncCatalog(session)}
                           disabled={syncingId === session.id}
                           title={t('从上游拉取模型清单并写入本账号')}
                         >
-                          {syncingId === session.id ? (
-                            <Loader2 size={14} />
-                          ) : (
-                            <Download size={14} />
-                          )}
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
+                          {syncingId === session.id ? <Loader2 size={13} className="spin" /> : <Download size={13} />}
+                        </button>
+                        <button
+                          type="button"
+                          className="as-act"
                           onClick={() => openEdit(session)}
                           title={t('编辑')}
                         >
-                          <Pencil size={14} />
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
+                          <Pencil size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          className="as-act"
                           onClick={() => handleToggleStatus(session)}
                           disabled={session.status === 'expired'}
                           title={
@@ -1288,21 +1284,21 @@ export default function AccountSessions(): JSX.Element {
                                 : t('启用')
                           }
                         >
-                          <Power size={14} />
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
+                          <Power size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          className="as-act"
                           onClick={() => handleResetCooldowns(session)}
                           disabled={Object.keys(session.cooldowns || {}).length === 0}
                           title={t('重置冷却')}
                         >
-                          <RotateCcw size={14} />
-                        </Button>
+                          <RotateCcw size={13} />
+                        </button>
                         {/* 手动刷新凭证：仅持有续期令牌的账号可用（qoder/autoclaw/trae 等） */}
-                        <Button
-                          variant="outline"
-                          size="sm"
+                        <button
+                          type="button"
+                          className="as-act"
                           onClick={() => void handleRefreshCredential(session)}
                           disabled={!session.has_refresh_token || refreshingId === session.id}
                           title={
@@ -1311,20 +1307,16 @@ export default function AccountSessions(): JSX.Element {
                               : t('该账号没有续期令牌，无法在线刷新')
                           }
                         >
-                          {refreshingId === session.id ? (
-                            <Loader2 size={14} />
-                          ) : (
-                            <RefreshCw size={14} />
-                          )}
-                        </Button>
-                        <Button
-                          variant="danger"
-                          size="sm"
+                          {refreshingId === session.id ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}
+                        </button>
+                        <button
+                          type="button"
+                          className="as-act danger"
                           onClick={() => handleDelete(session)}
                           title={t('删除')}
                         >
-                          <Trash2 size={14} />
-                        </Button>
+                          <Trash2 size={13} />
+                        </button>
                       </div>
                     </td>
                   </tr>
