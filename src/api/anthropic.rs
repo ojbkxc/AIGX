@@ -487,7 +487,7 @@ pub async fn handle_messages(
                 Ok(s) => {
                     // 阶段2：流建立成功——记入断路器/健康追踪/亲和性
                     if let Some(c) = &cid {
-                        state.channel_store.record_channel_success(
+                        state.channel_store.record_channel_success_with_sticky(
                             c,
                             Some(&upstream),
                             attempt_start.elapsed().as_millis() as u64,
@@ -1024,7 +1024,7 @@ pub async fn handle_messages(
                 Ok(resp) => {
                     // 阶段2：成功——记入断路器/健康追踪/亲和性
                     if let Some(c) = &cid {
-                        state.channel_store.record_channel_success(
+                        state.channel_store.record_channel_success_with_sticky(
                             c,
                             Some(&upstream),
                             attempt_start.elapsed().as_millis() as u64,

@@ -1847,7 +1847,7 @@ pub async fn handle_chat_completions(
                     // 空响应计数清零、粘性路由建立）。流中途失败由计费守卫兜底，
                     // 此处只记"建流成功"。
                     if let Some(c) = &cid {
-                        state.channel_store.record_channel_success(
+                        state.channel_store.record_channel_success_with_sticky(
                             c,
                             Some(&upstream),
                             attempt_start.elapsed().as_millis() as u64,
@@ -2317,7 +2317,7 @@ pub async fn handle_chat_completions(
                 Ok(resp) => {
                     // 阶段2：成功——记入断路器/健康追踪/亲和性/空响应计数
                     if let Some(c) = &cid {
-                        state.channel_store.record_channel_success(
+                        state.channel_store.record_channel_success_with_sticky(
                             c,
                             Some(&upstream),
                             attempt_start.elapsed().as_millis() as u64,
@@ -2733,7 +2733,7 @@ pub async fn handle_responses(
             Ok(r) => {
                 // 阶段2：成功——记入断路器/健康追踪/亲和性
                 if let Some(c) = &cid {
-                    state.channel_store.record_channel_success(
+                    state.channel_store.record_channel_success_with_sticky(
                         c,
                         Some(&upstream),
                         attempt_start.elapsed().as_millis() as u64,
