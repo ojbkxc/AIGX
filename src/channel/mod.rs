@@ -39,6 +39,8 @@ pub mod health_archive;
 pub mod health_manager;
 pub mod prober;
 pub mod rate_budget;
+/// 路由策略配置（对照 Agent2API「设置 → 路由」：策略/粘性/断路器/调度权重可配）
+pub mod routing_policy;
 // ── 阶段3：响应质量分级（喂给断路器/调度器）──────────────────────────
 //
 // 参照 burncloud `crates/router/src/response_quality.rs`，评估上游响应质量
@@ -1280,13 +1282,23 @@ impl ChannelStore {
             BridgeError::UpstreamStatus {
                 status,
                 retry_after,
+                message,
+                parsed,
                 ..
             } => match *status {
                 401 | 403 => circuit_breaker::FailureType::AuthFailed,
                 402 => circuit_breaker::FailureType::PaymentRequired,
                 404 => circuit_breaker::FailureType::ModelNotFound,
                 429 => circuit_breaker::FailureType::RateLimited {
-                    scope: circuit_breaker::RateLimitScope::Unknown,
+                    // 作用域从上游响应文本判定（见 `detect_rate_limit_scope_from_text`）：
+                    // 账号级限流冷却整号，模型级只冷那一个模型。判不出来时给
+                    // `Unknown`，由记录端按「保守 = 账号级」处理。
+                    scope: circuit_breaker::RateLimitScope::from_upstream_text(
+                        parsed
+                            .as_ref()
+                            .and_then(|v| v.message.as_deref())
+                            .unwrap_or(message),
+                    ),
                     retry_after: retry_after.as_ref().map(|d| d.as_secs()),
                 },
                 s if s >= 500 => circuit_breaker::FailureType::ServerError,
@@ -1388,6 +1400,57 @@ impl ChannelStore {
     /// 调度器当前权重配置。
     pub fn scheduler_config(&self) -> scheduler::SchedulerPolicyConfig {
         self.scheduler_config_cache.read().clone()
+    }
+
+    /// 按路由策略选取候选渠道（对照 Agent2API RoutingPane 的 strategy 分派）。
+    ///
+    /// - `weighted`：`select_for_model`（现状：priority 分组 + 组内加权随机）
+    /// - `round_robin`：`select_for_model` 候选集取首条——分组顺序由 priority
+    ///   决定，RR 游标由 `balancer` 按 `(模型, priority)` 组推进（组内轮换，
+    ///   跨组仍按优先级，与 A2A「家间按优先级、家内轮询」语义一致）
+    /// - `ranked`：`select_for_model_ranked`（多因子 health×cost×rpm）
+    ///
+    /// 返回完整候选列表供 failover 循环逐个尝试。
+    pub fn select_for_model_by_strategy(
+        &self,
+        model: &str,
+        strategy: routing_policy::RouteStrategy,
+        pricing_store: &crate::pricing::PricingStore,
+    ) -> Vec<Channel> {
+        match strategy {
+            routing_policy::RouteStrategy::Ranked => {
+                self.select_for_model_ranked(model, pricing_store)
+            }
+            routing_policy::RouteStrategy::RoundRobin => {
+                // 候选集排序同 weighted（priority 降序 + 组内加权随机），
+                // 但把 RR 游标命中的组内渠道顶到最前——游标按组推进实现
+                // 「组间按优先级、组内轮询」。
+                let candidates = self.select_for_model(model);
+                if candidates.is_empty() {
+                    return candidates;
+                }
+                let top_prio = candidates[0].priority;
+                let group: Vec<&Channel> = candidates
+                    .iter()
+                    .filter(|c| c.priority == top_prio)
+                    .collect();
+                if group.len() <= 1 {
+                    return candidates;
+                }
+                let group_id = format!("model:{model}:p{top_prio}");
+                let pick = self.balancer.next(&group_id, &group).map(|c| c.id.clone());
+                if let Some(id) = pick {
+                    if let Some(pos) = candidates.iter().position(|c| c.id == id) {
+                        if pos > 0 {
+                            let ch = candidates.remove(pos);
+                            candidates.insert(0, ch);
+                        }
+                    }
+                }
+                candidates
+            }
+            routing_policy::RouteStrategy::Weighted => self.select_for_model(model),
+        }
     }
 }
 

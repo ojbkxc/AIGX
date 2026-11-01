@@ -31,6 +31,54 @@ pub enum RateLimitScope {
     Unknown,
 }
 
+impl RateLimitScope {
+    /// 从上游错误文本判定限流作用域。
+    ///
+    /// 判定依据是各家 429 响应里的措辞差异（与 `response_quality` 模块
+    /// 当年那套规则同口径，但那边从未被调用）：
+    /// - 提到 account / organization / workspace / key / billing / plan
+    ///   → 账号级（这些词描述的是凭证或组织，不是某个模型）
+    /// - 提到 model / 模型 → 模型级
+    /// - 两者都提到或都没提到 → Unknown（记录端按账号级保守处理）
+    ///
+    /// 判定顺序刻意先账号级：OpenAI 的 `Rate limit reached for <model> on
+    /// tokens per min (TPM)` 是模型级，而 `You exceeded your current quota,
+    /// please check your plan and billing details` 是账号级 —— 后者若被
+    /// "model" 之类的词误判成模型级，会把整号可用性拖成半残。
+    pub fn from_upstream_text(text: &str) -> Self {
+        let lower = text.to_lowercase();
+        let account_hint = [
+            "account",
+            "organization",
+            "organisation",
+            "workspace",
+            "billing",
+            "plan",
+            "api key",
+            "apikey",
+            "credential",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+        if account_hint {
+            return Self::Account;
+        }
+        if lower.contains("model") || text.contains("模型") {
+            return Self::Model;
+        }
+        Self::Unknown
+    }
+
+    /// 是否应按「整号冷却」处理（Account 与 Unknown 都是）。
+    ///
+    /// Unknown 走账号级是刻意的保守选择：判不出作用域时宁可多冷一个账号
+    /// （换号重试仍有其他账号可用），也不要让一个被整号限流的账号继续被
+    /// 调度去撞墙 —— 那会把上游的惩罚窗口越撞越长。
+    pub fn cools_whole_account(&self) -> bool {
+        matches!(self, Self::Account | Self::Unknown)
+    }
+}
+
 /// 渠道失败类型，参照 burncloud `FailureType`。
 ///
 /// 不同失败类型在断路器中触发不同行为：
@@ -158,13 +206,16 @@ pub struct BreakerSnapshot {
 ///
 /// 线程安全：内部用 `DashMap` 存储 per-channel 状态，失败计数用 `AtomicU32`。
 /// 热路径 `allow_request` 只读，不创建条目，健康渠道零开销。
+///
+/// 参数可热更新（`update_params`，对照 Agent2API 路由设置 routingBreaker*）：
+/// 阈值/冷却秒数存 `AtomicU32`，改完下一请求即生效，无需重启。
 pub struct CircuitBreaker {
     /// channel_id → 状态
     states: DashMap<String, UpstreamState>,
     /// 打开断路器的失败次数阈值
-    failure_threshold: u32,
-    /// 打开后的冷却时长
-    cooldown_duration: Duration,
+    failure_threshold: AtomicU32,
+    /// 打开后的冷却时长（秒；AtomicU32 存秒，比较时换算 Duration）
+    cooldown_secs: AtomicU32,
 }
 
 impl CircuitBreaker {
@@ -175,14 +226,42 @@ impl CircuitBreaker {
     pub fn new(failure_threshold: u32, cooldown_seconds: u64) -> Self {
         Self {
             states: DashMap::new(),
-            failure_threshold,
-            cooldown_duration: Duration::from_secs(cooldown_seconds),
+            failure_threshold: AtomicU32::new(failure_threshold),
+            cooldown_secs: AtomicU32::new(cooldown_seconds.min(u32::MAX as u64) as u32),
         }
     }
 
     /// 默认配置：阈值 5，冷却 30s（与 burncloud 对齐）。
     pub fn with_defaults() -> Self {
         Self::new(5, 30)
+    }
+
+    /// 当前失败阈值（路由设置面板展示用）。
+    pub fn failure_threshold(&self) -> u32 {
+        self.failure_threshold.load(Ordering::Relaxed)
+    }
+
+    /// 当前冷却秒数（路由设置面板展示用）。
+    pub fn cooldown_secs(&self) -> u64 {
+        self.cooldown_secs.load(Ordering::Relaxed) as u64
+    }
+
+    /// 热更新断路器参数（下一请求生效，已累计的失败计数保留）。
+    pub fn update_params(&self, failure_threshold: u32, cooldown_seconds: u64) {
+        self.failure_threshold
+            .store(failure_threshold.max(1), Ordering::Relaxed);
+        self.cooldown_secs.store(
+            cooldown_seconds.min(u32::MAX as u64) as u32,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn threshold(&self) -> u32 {
+        self.failure_threshold.load(Ordering::Relaxed).max(1)
+    }
+
+    fn cooldown(&self) -> Duration {
+        Duration::from_secs(self.cooldown_secs.load(Ordering::Relaxed) as u64)
     }
 
     /// 判断指定渠道当前是否允许请求。
@@ -198,12 +277,13 @@ impl CircuitBreaker {
             Some(e) => e,
             None => return true, // 无状态 = 从未失败 = 放行
         };
-        if Self::is_half_open(&entry, self.failure_threshold, self.cooldown_duration) {
+        let (threshold, cooldown) = (self.threshold(), self.cooldown());
+        if Self::is_half_open(&entry, threshold, cooldown) {
             // HalfOpen：先释放只读锁再抢租约（DashMap 同 key 读写锁嵌套会死锁）
             drop(entry);
             return self.acquire_probe_lease(channel_id);
         }
-        Self::state_allows(&entry, self.failure_threshold, self.cooldown_duration)
+        Self::state_allows(&entry, threshold, cooldown)
     }
 
     /// **只读**路径的放行判断：与 [`Self::allow_request`] 的区别是
@@ -221,12 +301,13 @@ impl CircuitBreaker {
             Some(e) => e,
             None => return true,
         };
-        if Self::is_half_open(&entry, self.failure_threshold, self.cooldown_duration) {
+        let (threshold, cooldown) = (self.threshold(), self.cooldown());
+        if Self::is_half_open(&entry, threshold, cooldown) {
             // HalfOpen：在飞租约存在 → 拒绝读（上游正在被试探）；否则放行
             let now = Instant::now();
             !matches!(entry.probe_lease_until, Some(t) if t > now)
         } else {
-            Self::state_allows(&entry, self.failure_threshold, self.cooldown_duration)
+            Self::state_allows(&entry, threshold, cooldown)
         }
     }
 
@@ -330,7 +411,7 @@ impl CircuitBreaker {
                 // 永久性故障：放大计数 + 长冷却，避免反复重试坏密钥/空余额渠道
                 entry
                     .failure_count
-                    .store(self.failure_threshold.saturating_mul(10), Ordering::Relaxed);
+                    .store(self.threshold().saturating_mul(10), Ordering::Relaxed);
                 entry.last_failure_time = Some(Instant::now());
                 entry.rate_limit_until =
                     Some(Instant::now() + Duration::from_secs(PERMANENT_FAILURE_COOLDOWN_SECS));
@@ -347,7 +428,7 @@ impl CircuitBreaker {
                     .unwrap_or_else(|| Duration::from_secs(DEFAULT_RATE_LIMIT_RETRY_SECS));
                 entry.rate_limit_until = Some(Instant::now() + duration);
                 let new_count = entry.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
-                if new_count >= self.failure_threshold {
+                if new_count >= self.threshold() {
                     tracing::warn!(
                         "CircuitBreaker: 渠道 {} 因限流打开断路器 (失败计数 {})",
                         channel_id,
@@ -357,7 +438,7 @@ impl CircuitBreaker {
             }
             _ => {
                 let new_count = entry.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
-                if new_count >= self.failure_threshold {
+                if new_count >= self.threshold() {
                     tracing::warn!(
                         "CircuitBreaker: 渠道 {} 打开断路器 (失败计数 {})",
                         channel_id,
@@ -376,7 +457,7 @@ impl CircuitBreaker {
         for mut entry in self.states.iter_mut() {
             entry
                 .failure_count
-                .store(self.failure_threshold, Ordering::Relaxed);
+                .store(self.threshold(), Ordering::Relaxed);
             entry.last_failure_time = Some(Instant::now());
             entry.failure_type = Some(FailureType::ServerError);
             entry.rate_limit_until = None;
@@ -400,8 +481,7 @@ impl CircuitBreaker {
             // 直接基于 entry 值计算，不嵌套 get（避免 DashMap 迭代中同 key 二次加锁死锁）
             map.insert(
                 r.key().clone(),
-                Self::state_of(r.value(), self.failure_threshold, self.cooldown_duration)
-                    .to_string(),
+                Self::state_of(r.value(), self.threshold(), self.cooldown()).to_string(),
             );
         }
         map
@@ -420,7 +500,7 @@ impl CircuitBreaker {
             .iter()
             .map(|r| {
                 let entry = r.value();
-                let state = Self::state_of(entry, self.failure_threshold, self.cooldown_duration);
+                let state = Self::state_of(entry, self.threshold(), self.cooldown());
                 BreakerSnapshot {
                     channel_id: r.key().clone(),
                     state,
@@ -429,7 +509,7 @@ impl CircuitBreaker {
                     cooldown_remaining_secs: Self::open_cooldown_remaining(
                         entry,
                         state,
-                        self.cooldown_duration,
+                        self.cooldown(),
                     ),
                     rate_limit_remaining_secs: Self::rate_limit_remaining(entry, now),
                     probe_in_flight: entry.probe_lease_until.is_some_and(|t| t > now),
@@ -470,7 +550,7 @@ impl CircuitBreaker {
             Some(e) => e,
             None => return "closed",
         };
-        Self::state_of(&entry, self.failure_threshold, self.cooldown_duration)
+        Self::state_of(&entry, self.threshold(), self.cooldown())
     }
 
     /// 基于 entry 值计算状态（不查 map）。
@@ -508,7 +588,7 @@ impl CircuitBreaker {
                 let remaining = entry
                     .and_then(|e| e.last_failure_time)
                     .map(|last| {
-                        self.cooldown_duration
+                        self.cooldown()
                             .checked_sub(last.elapsed())
                             .map(|d| d.as_secs())
                             .unwrap_or(0)
@@ -536,9 +616,7 @@ impl CircuitBreaker {
     pub fn open_count(&self) -> usize {
         self.states
             .iter()
-            .filter(|r| {
-                !Self::state_allows(r.value(), self.failure_threshold, self.cooldown_duration)
-            })
+            .filter(|r| !Self::state_allows(r.value(), self.threshold(), self.cooldown()))
             .count()
     }
 }
@@ -552,6 +630,54 @@ impl Default for CircuitBreaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_limit_scope_from_upstream_text() {
+        // 账号级：OpenAI 的配额耗尽措辞
+        assert_eq!(
+            RateLimitScope::from_upstream_text(
+                "You exceeded your current quota, please check your plan and billing details"
+            ),
+            RateLimitScope::Account
+        );
+        // 账号级：组织级限流
+        assert_eq!(
+            RateLimitScope::from_upstream_text("Rate limit reached for organization org-abc"),
+            RateLimitScope::Account
+        );
+        // 模型级：OpenAI 的 TPM 限流
+        assert_eq!(
+            RateLimitScope::from_upstream_text(
+                "Rate limit reached for gpt-4o in organization org-abc on tokens per min (TPM)"
+            ),
+            RateLimitScope::Account,
+            "同时提到 organization 时应按账号级（更保守）"
+        );
+        assert_eq!(
+            RateLimitScope::from_upstream_text("Rate limit reached for model gpt-4o"),
+            RateLimitScope::Model
+        );
+        // 中文
+        assert_eq!(
+            RateLimitScope::from_upstream_text("模型 glm-5.3 已触发限流"),
+            RateLimitScope::Model
+        );
+        // 判不出
+        assert_eq!(
+            RateLimitScope::from_upstream_text("too many requests"),
+            RateLimitScope::Unknown
+        );
+    }
+
+    #[test]
+    fn unknown_scope_cools_whole_account() {
+        assert!(RateLimitScope::Account.cools_whole_account());
+        assert!(
+            RateLimitScope::Unknown.cools_whole_account(),
+            "判不出作用域时按账号级保守处理"
+        );
+        assert!(!RateLimitScope::Model.cools_whole_account());
+    }
 
     #[test]
     fn unknown_channel_is_allowed() {
