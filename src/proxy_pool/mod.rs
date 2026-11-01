@@ -402,7 +402,7 @@ fn rotate_candidates(spec: &str) -> Vec<String> {
     let wanted: Vec<&str> = spec.split(',').map(str::trim).collect();
     read_entries()
         .into_iter()
-        .filter(|e| wanted.iter().any(|id| *id == e.id.as_str()))
+        .filter(|e| wanted.contains(&e.id.as_str()))
         .map(|e| e.id)
         .collect()
 }
@@ -644,7 +644,7 @@ mod tests {
         let _ = STORE.set(install_temp().clone());
         let created = create(&sample("节点A", 8080)).expect("create");
         let id = created["id"].as_str().unwrap().to_string();
-        assert_eq!(list_public().len() >= 1, true);
+        assert!(!list_public().is_empty());
         assert!(remove(&id).is_ok());
         assert!(remove(&id).is_err());
     }

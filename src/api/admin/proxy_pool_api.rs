@@ -36,12 +36,12 @@ const MAX_REFERENCE_NAMES: usize = 10;
 // ── 请求体 ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct IdBody {
+pub struct IdBody {
     id: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct EnableBody {
+pub struct EnableBody {
     id: String,
     enabled: bool,
 }
@@ -49,7 +49,7 @@ struct EnableBody {
 /// 账号代理测试请求：`{ accountId }`（测该账号生效的代理配置）或
 /// `{ proxy }`（测临时串，`null` = 测直连）。
 #[derive(Debug, Default, Deserialize)]
-struct TestAccountBody {
+pub struct TestAccountBody {
     #[serde(default)]
     account_id: String,
     /// 临时代理串（`pool:` / `rotate` 编码或 URL）；与 accountId 二选一。
