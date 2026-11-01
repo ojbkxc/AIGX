@@ -3675,6 +3675,9 @@ where
     crate::api::openai::GuardedStream {
         inner: Box::pin(mapped),
         _guard: guard,
+        // 渠道调试/Playground 流未登记在途请求
+        cancel: None,
+        _inflight: None,
     }
 }
 

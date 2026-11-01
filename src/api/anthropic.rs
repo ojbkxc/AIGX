@@ -938,6 +938,9 @@ pub async fn handle_messages(
             let guarded = super::openai::GuardedStream {
                 inner: Box::pin(combined),
                 _guard: super::openai::StreamUsageGuard::new(billing),
+                // Anthropic 数据面暂未登记在途请求，不参与「终止」
+                cancel: None,
+                _inflight: None,
             };
             Sse::new(guarded)
                 // Anthropic 上游自带 `event: ping`，但那是**上游**的心跳，
