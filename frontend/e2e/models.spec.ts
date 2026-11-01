@@ -142,17 +142,17 @@ test.describe('模型管理', () => {
 
     // 点「+ 映射」打开弹窗，且带实时预览区
     await cell.locator('.mm-alias-add').click();
-    const modal = page.locator('.modal');
+    // .modal-overlay 是本弹窗容器（页面上可能还有其他 modal 类元素）
+    const modal = page.locator('.modal-overlay .modal').first();
     await expect(modal).toBeVisible();
-    await expect(modal.locator('.mm-alias-preview')).toBeVisible();
-    // 弹窗默认把本行模型填进「转发到上游模型」：Combobox 的 input value 应为
-    // unpriced-model。Combobox 根 .cb-wrap，输入框 .cb-input。
-    const targetInput = modal.locator('.cb-input').first();
-    await expect(targetInput).toHaveValue('unpriced-model');
-    // 填上对外名后，预览立刻显示完整链路（alias → target）
+    const preview = modal.locator('.mm-alias-preview');
+    await expect(preview).toBeVisible();
+    // 弹窗默认把本行模型填进「转发到上游模型」（Combobox 的输入框）
+    await expect(modal.locator('.cb-input').first()).toHaveValue('unpriced-model');
+    // 填上对外名后，预览立刻显示完整链路
     await modal.locator('input.form-input').first().fill('alias-new');
-    await expect(modal.locator('.mm-alias-preview')).toContainText('unpriced-model');
-    await expect(modal.locator('.mm-alias-preview')).toContainText('alias-new');
+    await expect(preview).toContainText('alias-new');
+    await expect(preview).toContainText('unpriced-model');
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
