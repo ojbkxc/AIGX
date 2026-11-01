@@ -1782,5 +1782,6 @@
   "终止": "Terminate",
   "终止在途请求": "Terminate in-flight request",
   "将中断这条请求的上游流并记为失败。确定继续？": "This will abort the upstream stream and record it as failed. Continue?",
-  "已终止": "Terminated"
+  "已终止": "Terminated",
+  "将删除 {{n}} 条": "{{n}} entries will be deleted"
 }

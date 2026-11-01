@@ -320,6 +320,12 @@ function handle(req, res, p, bodyText) {
         size: 20,
       });
     }
+    if (p === '/api/logs/requests/clear-preview' && req.method === 'GET') {
+      return sendJson(res, {
+        success: true,
+        data: { days: 0, total_all: REQUEST_LOGS.length, would_remove: REQUEST_LOGS.length, oldest: 1761899400, newest: 1761900000 },
+      });
+    }
     if (p === '/api/logs/audits') {
       return sendJson(res, { success: true, data: [], total: 0, page: 1, size: 20 });
     }

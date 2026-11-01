@@ -262,4 +262,45 @@ mod tests {
         assert_eq!(list[0].model, "first");
         assert_eq!(list[1].model, "second");
     }
+
+    /// 取消后 `cancelled()` 立刻返回（供数据面 select! 使用）。
+    #[tokio::test]
+    async fn cancel_signal_wakes_waiter() {
+        let sig = CancelSignal::new();
+        let s2 = sig.clone();
+        let waiter = tokio::spawn(async move {
+            s2.cancelled().await;
+            true
+        });
+        // 让 waiter 先挂到 Notify 上
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        sig.cancel();
+        let woke = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("取消后 waiter 必须在 1s 内被唤醒")
+            .expect("waiter 不应 panic");
+        assert!(woke);
+    }
+
+    /// 已经取消过的信号，再调 `cancelled()` 不挂起（幂等）。
+    #[tokio::test]
+    async fn cancelled_returns_immediately_when_already_cancelled() {
+        let sig = CancelSignal::new();
+        sig.cancel();
+        tokio::time::timeout(std::time::Duration::from_millis(100), sig.cancelled())
+            .await
+            .expect("已取消的信号不应挂起");
+    }
+
+    /// terminate 之后，从登记表里仍能找到该条目（等请求自己收尾注销），
+    /// 但信号已置位 —— 这是「终止」与「注销」的分工。
+    #[test]
+    fn terminate_does_not_remove_entry_immediately() {
+        let reg = Arc::new(InflightRegistry::new());
+        let (id, guard) = reg.begin("m", true, None, None);
+        assert!(reg.terminate(&id));
+        // 条目仍在（由请求自己的 guard drop 注销，避免与 terminate 竞争）
+        assert_eq!(reg.len(), 1);
+        assert!(guard.cancel_signal().is_cancelled());
+    }
 }

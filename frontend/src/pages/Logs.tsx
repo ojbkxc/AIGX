@@ -199,13 +199,34 @@ export default function Logs(): JSX.Element {
     });
   };
 
-  const handleClearAll = () => {
+  const handleClearAll = async () => {
     const targetLabel = tab === 'requests' ? t('请求日志') : t('审计日志');
+    // 先取预览：告诉管理员「会删多少条、覆盖哪段时间」，
+    // 避免一键清空后才发现删错了区间。预览失败不阻断（退回通用文案）。
+    let preview: { would_remove: number; oldest?: number | null; newest?: number | null } | null = null;
+    if (tab === 'requests') {
+      try {
+        const res = await api.clearPreview(0);
+        preview = res?.data ?? null;
+      } catch {
+        preview = null;
+      }
+    }
+    const rangeText = preview?.oldest && preview?.newest
+      ? `${fmtTime(preview.oldest)} ~ ${fmtTime(preview.newest)}`
+      : null;
     setConfirmState({
       title: t('清空日志'),
       message: (
         <>
-          {t('确定清空全部')}{targetLabel}？{t('该操作不可撤销。')}
+          {t('确定清空全部')}{targetLabel}？
+          {preview ? (
+            <div style={{ marginTop: 8, fontSize: 12.5, color: 'var(--text-muted)' }}>
+              {t('将删除 {{n}} 条', { n: preview.would_remove })}
+              {rangeText ? `（${rangeText}）` : ''}
+            </div>
+          ) : null}
+          {t('该操作不可撤销。')}
         </>
       ),
       confirmText: t('清空'),
@@ -583,7 +604,7 @@ export default function Logs(): JSX.Element {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={handleClearAll}
+                  onClick={() => void handleClearAll()}
                   disabled={batchDeleting || total === 0}
                 >
                   <Eraser size={14} style={{ marginRight: 4 }} />

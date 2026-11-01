@@ -1,0 +1,1 @@
+import{j as s,r as i}from"./index-Bmdtu9Eg.js";function c({message:t,icon:e="📭",action:a,className:r}){return s.jsxs("div",{className:i("empty-state",r),children:[s.jsx("div",{className:"empty-state-icon",children:e}),s.jsx("p",{children:t}),a]})}export{c as E};

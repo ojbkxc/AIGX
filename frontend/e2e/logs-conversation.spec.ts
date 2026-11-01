@@ -116,3 +116,26 @@ test.describe('在途请求', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });
+
+/**
+ * 清空预览 —— 一键清空前先告诉管理员「会删多少条、覆盖哪段时间」。
+ */
+test.describe('清空预览', () => {
+  test('点清空全部时先请求预览并展示条数', async ({ page, pageErrors }) => {
+    await loginAsAdmin(page);
+    await page.goto('/logs');
+
+    const previewCalls: string[] = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/clear-preview')) previewCalls.push(r.url());
+    });
+
+    await page.getByRole('button', { name: '清空全部' }).click();
+
+    await expect.poll(() => previewCalls.length, { timeout: 5000 }).toBeGreaterThan(0);
+
+    const dlg = page.locator('[role="dialog"], .modal, .confirm-dialog').filter({ hasText: '清空日志' }).first();
+    await expect(dlg).toContainText('将删除');
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+});

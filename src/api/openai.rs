@@ -1251,6 +1251,20 @@ impl Drop for StreamUsageGuard {
 pub(crate) struct GuardedStream<S, G> {
     pub(crate) inner: std::pin::Pin<Box<S>>,
     pub(crate) _guard: G,
+    /// 管理员「终止在途请求」的取消信号（None = 不参与取消）。
+    ///
+    /// 一旦取消，poll_next 直接返回 `Ready(None)` 结束下游 SSE 流 ——
+    /// 上游连接随 `inner` 被 drop 而关闭（reqwest 的 body 流 drop 即断开），
+    /// 客户端会看到 SSE 流提前结束，而不是一直挂着。
+    ///
+    /// 这里选「结束流」而不是「返回 error 帧」：对已开始输出的流，追加
+    /// error 事件容易让客户端把它当业务错误重试；直接收尾更接近用户点
+    /// 「停止生成」的语义。
+    pub(crate) cancel: Option<crate::log::inflight::CancelSignal>,
+    /// 在途请求守卫：随流存活，流结束时 Drop 自动从在途列表注销。
+    /// 放在流里（而不是函数局部变量）是因为：函数返回响应时请求仍在跑，
+    /// guard 若随函数 drop，管理员列表里就会立刻看不到这条请求。
+    pub(crate) _inflight: Option<crate::log::inflight::InflightGuard>,
 }
 
 // G 仅需 Unpin：poll_next 通过 get_mut 访问 inner，要求整个结构体
@@ -1264,7 +1278,11 @@ impl<S: futures::Stream, G: std::marker::Unpin> futures::Stream for GuardedStrea
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         // GuardedStream 所有字段均为 Unpin（Pin<Box<S>> 与普通结构体），可安全 get_mut
-        self.get_mut().inner.as_mut().poll_next(cx)
+        let this = self.get_mut();
+        if this.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+            return std::task::Poll::Ready(None);
+        }
+        this.inner.as_mut().poll_next(cx)
     }
 }
 
@@ -1660,12 +1678,18 @@ pub async fn handle_chat_completions(
 
     // 在途请求登记：管理员可在日志页看到这条请求并终止它。
     // guard 在函数返回时 drop → 自动注销（成功 / 失败 / 客户端断连三条路径都覆盖）。
-    let (_inflight_id, _inflight_guard) = state.inflight.begin(
+    //
+    // `cancel_signal` 会被挂到响应流上：管理员点「终止」时置位，
+    // GuardedStream::poll_next 立刻返回 None 收尾，上游连接随流 drop 断开。
+    let (_inflight_id, inflight_guard) = state.inflight.begin(
         model.clone(),
         is_stream,
         api_key.user_id.clone(),
         Some(api_key.id.clone()),
     );
+    let cancel_signal = inflight_guard.cancel_signal();
+    // 非流式请求没有可中断的流：终止只在流式路径生效（登记仍然保留，
+    // 管理员至少能看到「这条非流式请求还在跑」）。
 
     // P1：配额预留/结算两段式——在请求发起前预留预估费用，
     // 请求完成后按实际 token 结算，多预留的部分归还。
@@ -2044,6 +2068,11 @@ pub async fn handle_chat_completions(
             let guarded = GuardedStream {
                 inner: Box::pin(combined),
                 _guard: StreamUsageGuard::new(billing),
+                // 管理员「终止在途请求」时立刻收尾下游流
+                cancel: Some(cancel_signal),
+                // guard 移进流：流存活期间才算是「在途」。函数返回响应后
+                // guard 不能立刻 drop，否则列表里会立刻消失。
+                _inflight: Some(inflight_guard),
             };
 
             Sse::new(guarded)
@@ -2859,6 +2888,9 @@ pub async fn handle_responses(
             let guarded = GuardedStream {
                 inner: Box::pin(keepalive_stream),
                 _guard: ResponsesStreamGuard { billing },
+                // Responses 透传路径未登记在途请求，不参与取消
+                cancel: None,
+                _inflight: None,
             };
 
             let mut response = Response::new(axum::body::Body::from_stream(guarded));
