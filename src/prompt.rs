@@ -202,6 +202,7 @@ mod tests {
         let cfg = GatewayPrompt {
             mode: PromptMode::Append,
             text: "   ".to_string(),
+            ..GatewayPrompt::default()
         };
         assert!(apply_prompt(&msgs, &cfg).is_none());
     }
@@ -212,6 +213,7 @@ mod tests {
         let cfg = GatewayPrompt {
             mode: PromptMode::Custom,
             text: "GATEWAY".to_string(),
+            ..GatewayPrompt::default()
         };
         let out = apply_prompt(&msgs, &cfg).unwrap();
         assert_eq!(out.len(), 3, "两条 system 都被删，插入一条网关的");
@@ -227,6 +229,7 @@ mod tests {
         let cfg = GatewayPrompt {
             mode: PromptMode::Append,
             text: "GATEWAY".to_string(),
+            ..GatewayPrompt::default()
         };
         let out = apply_prompt(&msgs, &cfg).unwrap();
         assert_eq!(out.len(), 5);
@@ -244,6 +247,7 @@ mod tests {
         let cfg = GatewayPrompt {
             mode: PromptMode::Append,
             text: "G".to_string(),
+            ..GatewayPrompt::default()
         };
         let out = apply_prompt(&msgs, &cfg).unwrap();
         assert_eq!(out[0].content.as_deref(), Some("G"));
