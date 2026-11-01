@@ -68,6 +68,16 @@ test.describe('聊天 · 历史会话抽屉', () => {
     const mask = await page.locator('.sd-mask').boundingBox();
     expect(mask!.height).toBeGreaterThan(viewportHeight * 0.85);
 
+    // 面板背景必须不透明：曾用 var(--bg-elevated, rgba(255,255,255,.04))，
+    // 该变量在主题体系中不存在，fallback 近乎全透明，亮色主题下侧栏文字
+    // 透过面板混排（标题与品牌名叠印）。断言 alpha ≥ 0.95 防回归。
+    const panelBg = await page.evaluate(
+      () => getComputedStyle(document.querySelector('.sd-panel')!).backgroundColor,
+    );
+    const parts = panelBg.match(/rgba?\(([^)]+)\)/)![1].split(',').map((s) => parseFloat(s));
+    const alpha = parts.length === 4 ? parts[3] : 1;
+    expect(alpha, `面板背景 ${panelBg} 近乎透明，侧栏会透过来`).toBeGreaterThan(0.95);
+
     // 标题可点击 = 没有被更高层元素覆盖（正是移动端汉堡按钮那个 bug）
     const title = page.locator('.sd-head');
     await expect(title).toBeVisible();

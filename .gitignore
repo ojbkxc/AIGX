@@ -60,3 +60,4 @@ aigx-net/target/
 # Playwright 产物
 frontend/test-results/
 frontend/playwright-report/
+.e2e-shots/
