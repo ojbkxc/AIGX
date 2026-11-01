@@ -101,13 +101,59 @@ test.describe('模型管理', () => {
     });
 
     const row = page.locator('.mm-table tbody tr', { hasText: 'unpriced-model' });
-    // 注意：行内第一个复选框是「批量选择」，启停是 role=switch 的独立控件
-    const toggle = row.getByRole('switch');
+    // 注意：行内第一个复选框是「批量选择」，启停是 role=switch 的独立控件。
+    // 别名列里也有 role=switch（映射开关），所以按列定位——第 2 个 td 是启停列。
+    const toggle = row.locator('td').nth(1).getByRole('switch');
     await expect(toggle).toBeVisible();
     await toggle.click();
 
     await expect.poll(() => stateCalls.length, { timeout: 5000 }).toBeGreaterThan(0);
     expect(stateCalls[0]).toBe('POST');
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('别名列：Agent2API 式映射 chips —— 开关可切、关闭态划线、行内 + 映射入口', async ({ page, pageErrors }) => {
+    const aliasCalls: string[] = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/api/models/alias')) aliasCalls.push(r.url());
+    });
+
+    const row = page.locator('.mm-table tbody tr', { hasText: 'unpriced-model' });
+    const cell = row.locator('.mm-alias-cell');
+    await expect(cell).toBeVisible();
+
+    // 两条映射：一条启用（alias-free）、一条关闭（alias-off）
+    const chips = cell.locator('.mm-alias-chip');
+    await expect(chips).toHaveCount(2);
+    await expect(cell.locator('.mm-alias-chip.is-off')).toHaveCount(1);
+    await expect(cell.locator('.mm-alias-chip.is-off')).toContainText('alias-off');
+
+    // 每条 chip 都有开关
+    await expect(cell.locator('.mm-alias-chip').first().getByRole('switch')).toBeVisible();
+
+    // 行内「+ 映射」入口存在
+    await expect(cell.locator('.mm-alias-add')).toBeVisible();
+
+    // 切开关：请求打到 /api/models/alias/state
+    await cell.locator('.mm-alias-chip').first().getByRole('switch').click();
+    await expect
+      .poll(() => aliasCalls.filter((u) => u.includes('/alias/state')).length, { timeout: 5000 })
+      .toBeGreaterThan(0);
+
+    // 点「+ 映射」打开弹窗，且带实时预览区
+    await cell.locator('.mm-alias-add').click();
+    const modal = page.locator('.modal');
+    await expect(modal).toBeVisible();
+    await expect(modal.locator('.mm-alias-preview')).toBeVisible();
+    // 弹窗默认把本行模型填进「转发到上游模型」：Combobox 的 input value 应为
+    // unpriced-model。Combobox 根 .cb-wrap，输入框 .cb-input。
+    const targetInput = modal.locator('.cb-input').first();
+    await expect(targetInput).toHaveValue('unpriced-model');
+    // 填上对外名后，预览立刻显示完整链路（alias → target）
+    await modal.locator('input.form-input').first().fill('alias-new');
+    await expect(modal.locator('.mm-alias-preview')).toContainText('unpriced-model');
+    await expect(modal.locator('.mm-alias-preview')).toContainText('alias-new');
+
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
