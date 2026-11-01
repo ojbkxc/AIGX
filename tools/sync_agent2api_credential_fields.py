@@ -498,7 +498,9 @@ def write_report(path: Path, drift: dict, upstream: dict[str, ProviderFields]) -
         "不属于本工具重写范围。",
         "",
     ]
-    path.write_text("\n".join(lines), encoding="utf-8")
+    # eol=lf（.gitattributes）：Windows 上 write_text 默认把 \n 转 \r\n，
+    # 显式 newline="\n" 避免报告文件 eol 抖动。
+    path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
 def main() -> int:
