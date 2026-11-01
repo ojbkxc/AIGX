@@ -26,9 +26,25 @@ pub struct Credential {
     /// 凭证形态（`api_key` / `none`）。
     #[serde(default = "default_credential_kind")]
     pub kind: String,
-    /// 密钥；落盘前以 `enc:` + base64 混淆（与 `Channel::api_key` 同口径）。
+    /// 主密钥；落盘前加密（见 [`crate::account_session::secret`]）。
+    ///
+    /// 大多数家只��这一个字段（单 token / cookie / key）。
     #[serde(default)]
     pub secret: String,
+    /// 额外凭证字段（多层凭证）。
+    ///
+    /// 有些家要的不止一个值 —— Agent2API 的账号记录就是**扁平 JSON**：
+    /// Trae 要 `accessToken` + `refreshToken` + `deviceId` + `machineId` + `uid`，
+    /// CodeArts 要 `access_key_id` + `secret_access_key` + `security_token`，
+    /// OfficeAce 要**两层**（网关凭据 `model_app_key`/`model_app_secret` +
+    /// 控制面临时 AK/SK/STS）。单 secret 字段承载不了这些。
+    ///
+    /// 这里放**除主密钥外**的具名字段；主密钥仍走 `secret`（多数家与
+    /// Agent2API 的 `accessToken`/`token`/`cookie` 对应）。
+    ///
+    /// 值同样加密落盘（与 `secret` 同信封）。
+    #[serde(default)]
+    pub fields: std::collections::HashMap<String, String>,
 }
 
 impl Default for Credential {
@@ -36,6 +52,7 @@ impl Default for Credential {
         Self {
             kind: default_credential_kind(),
             secret: String::new(),
+            fields: std::collections::HashMap::new(),
         }
     }
 }
@@ -45,21 +62,74 @@ fn default_credential_kind() -> String {
 }
 
 impl Credential {
-    /// 明文密钥（兼容带 `enc:` 前缀的存储值）。
+    /// 明文密钥。
+    ///
+    /// 认三种存储形态（见 [`crate::account_session::secret::open_secret`]）：
+    /// `enc1:`（AES-256-GCM 真加密）、`enc:`（旧的可逆 base64 混淆，存量）、
+    /// 明文（尚未加密的存量）。
     pub fn secret_plain(&self) -> String {
-        crate::channel::Channel::decode_api_key_value(&self.secret)
+        crate::account_session::secret::open_secret(
+            &self.secret,
+            &crate::account_session::secret::data_dir(),
+        )
     }
 
-    /// 落盘前的编码副本（已编码则原样返回）。
+    /// 落盘前的加密副本。
+    ///
+    /// 新写入一律用 `enc1:`（AES-256-GCM，密钥在库外的 `account.key`）；
+    /// 已是信封的原样返回（幂等）。加密失败时**不退化成明文** —— 那样等于
+    /// 让「加密」变成摆设。
     pub fn encoded(&self) -> Self {
         let mut next = self.clone();
-        if !next.secret.is_empty() && !next.secret.starts_with("enc:") {
-            next.secret = crate::channel::Channel::encode_api_key(&next.secret);
+        let dir = crate::account_session::secret::data_dir();
+        next.secret = crate::account_session::secret::seal_or_keep(&next.secret, &dir);
+        for (name, value) in next.fields.iter_mut() {
+            if !value.is_empty() && !value.starts_with("enc1:") {
+                *value = crate::account_session::secret::seal_or_keep(value, &dir);
+            }
         }
         if next.kind.is_empty() {
             next.kind = default_credential_kind();
         }
         next
+    }
+
+    /// 取一个具名凭证字段的明文。
+    ///
+    /// `name` 为空时返回主密钥（`secret`）—— 调用方可以只问「这个家的
+    /// 凭证」而不用关心它落在 `secret` 还是 `fields`。
+    pub fn field_plain(&self, name: &str) -> String {
+        if name.is_empty() {
+            return self.secret_plain();
+        }
+        self.fields
+            .get(name)
+            .map(|v| {
+                crate::account_session::secret::open_secret(
+                    v,
+                    &crate::account_session::secret::data_dir(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    /// 设一个具名凭证字段（明文入，明文存 —— 落盘前由 `encoded` 处理）。
+    pub fn set_field(&mut self, name: &str, value: &str) {
+        if name.is_empty() {
+            self.secret = value.to_string();
+        } else {
+            self.fields.insert(name.to_string(), value.to_string());
+        }
+    }
+
+    /// 这个家需要哪些具名字段（不含主密钥）。
+    ///
+    /// 移植 Agent2API 的账号结构时按它填 —— 少填的字段在调用处会拿到空串，
+    /// 上游会明确报「缺什么」，而不是静默用空值发请求。
+    pub fn field_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.fields.keys().map(|k| k.as_str()).collect();
+        names.sort_unstable();
+        names
     }
 }
 
@@ -256,15 +326,70 @@ impl AccountSession {
 mod tests {
     use super::*;
 
+    /// 凭证加解密用**全局**的 data_dir（密钥文件所在目录）—— 并行测试会
+    /// 互相换钥匙，所以这里用一把全局锁把「设目录 + 跑断言」串起来。
+    fn with_secret_dir<R>(tag: &str, f: impl FnOnce() -> R) -> R {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("aigx-cred-{tag}-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::account_session::secret::set_data_dir(&dir);
+        f()
+    }
+
     #[test]
     fn credential_roundtrip_keeps_plaintext_recoverable() {
-        let cred = Credential {
-            kind: CREDENTIAL_KIND_API_KEY.to_string(),
-            secret: "sk-test-1234567890".to_string(),
-        };
-        let encoded = cred.encoded();
-        assert!(encoded.secret.starts_with("enc:"));
-        assert_eq!(encoded.secret_plain(), "sk-test-1234567890");
+        with_secret_dir("roundtrip", || {
+            let cred = Credential {
+                kind: CREDENTIAL_KIND_API_KEY.to_string(),
+                secret: "sk-test-1234567890".to_string(),
+                fields: std::collections::HashMap::new(),
+            };
+            let encoded = cred.encoded();
+            // 新写入用 AES-256-GCM 真加密（不是可逆的 base64 混淆）
+            assert!(encoded.secret.starts_with("enc1:"));
+            assert!(!encoded.secret.contains("sk-test"));
+            assert_eq!(encoded.secret_plain(), "sk-test-1234567890");
+        });
+    }
+
+    #[test]
+    fn credential_multi_fields_roundtrip() {
+        with_secret_dir("multi", || {
+            let mut cred = Credential {
+                kind: CREDENTIAL_KIND_SESSION.to_string(),
+                secret: "access-token-value".to_string(),
+                fields: std::collections::HashMap::new(),
+            };
+            cred.set_field("refreshToken", "refresh-value");
+            cred.set_field("deviceId", "device-value");
+            let encoded = cred.encoded();
+            // 每个字段各自加密
+            assert!(encoded.fields["refreshToken"].starts_with("enc1:"));
+            assert!(!encoded.fields["deviceId"].contains("device-value"));
+            assert_eq!(encoded.secret_plain(), "access-token-value");
+            assert_eq!(encoded.field_plain("refreshToken"), "refresh-value");
+            assert_eq!(encoded.field_plain("deviceId"), "device-value");
+            assert_eq!(encoded.field_names(), vec!["deviceId", "refreshToken"]);
+        });
+    }
+
+    #[test]
+    fn legacy_enc_credential_still_readable() {
+        with_secret_dir("legacy", || {
+            // 存量数据是 base64 混淆的 enc: 前缀 —— 必须还能读
+            let legacy = crate::channel::Channel::encode_api_key("sk-legacy-value");
+            let cred = Credential {
+                kind: CREDENTIAL_KIND_API_KEY.to_string(),
+                secret: legacy,
+                fields: std::collections::HashMap::new(),
+            };
+            assert_eq!(cred.secret_plain(), "sk-legacy-value");
+        });
     }
 
     #[test]

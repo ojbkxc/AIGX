@@ -43,6 +43,12 @@ export interface RequestLogItem {
     system_prompt_chars?: number;
     truncated_history?: boolean;
   };
+  /** 调度决策回放：候选渠道列表（仅 admin 下发，普通用户已被后端剥离） */
+  candidate_channels?: string[];
+  /** 被过滤的渠道及原因（仅 admin） */
+  filtered_channels?: Array<{ channel_id: string; reason: string }>;
+  /** 最终选中渠道（仅 admin） */
+  selected_channel?: string;
 }
 
 export interface AuditLogItem {

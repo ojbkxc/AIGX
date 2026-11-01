@@ -14,6 +14,7 @@
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 
 use crate::storage::FileStore;
@@ -785,17 +786,22 @@ impl RequestLogStore {
         (paged, total)
     }
 
-    /// 导出全部（或按过滤条件）为 JSON 字符串
+    /// 导出全部（或按过滤条件）为 JSON 字符串（管理员视角，含全部字段）
     pub fn export_json(&self) -> String {
-        self.export_json_filtered(None, None, None, None, None)
+        self.export_json_filtered(None, None, None, None, None, true)
     }
 
-    /// 导出按 user_id 过滤后的 JSON（普通用户导出自己的记录）
+    /// 导出按 user_id 过滤后的 JSON（普通用户导出自己的记录，剥离敏感字段）
     pub fn export_json_for_user(&self, user_id: &str) -> String {
-        self.export_json_filtered(Some(user_id), None, None, None, None)
+        self.export_json_filtered(Some(user_id), None, None, None, None, false)
     }
 
-    /// 导出按完整筛选条件过滤后的 JSON（与列表页筛选语义一致）
+    /// 导出按完整筛选条件过滤后的 JSON（与列表页筛选语义一致）。
+    ///
+    /// `admin` = false 时按非管理员视角剥离 `debug` / `conversation` /
+    /// `candidate_channels` / `filtered_channels` / `selected_channel`，
+    /// 与 `logs.rs::logs_with_user_email` 的剥离口径一致 —— 导出与列表页
+    /// 不应给出不同权限边界。
     #[allow(clippy::too_many_arguments)]
     pub fn export_json_filtered(
         &self,
@@ -804,11 +810,25 @@ impl RequestLogStore {
         channel_id: Option<&str>,
         start: Option<i64>,
         end: Option<i64>,
+        admin: bool,
     ) -> String {
         let all = self.list_all();
-        let filtered: Vec<&RequestLog> = all
+        let filtered: Vec<Value> = all
             .iter()
             .filter(|l| Self::matches(l, user_id, model, channel_id, start, end))
+            .map(|l| {
+                let mut v = serde_json::to_value(l).unwrap_or(Value::Null);
+                if !admin {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.remove("debug");
+                        obj.remove("conversation");
+                        obj.remove("candidate_channels");
+                        obj.remove("filtered_channels");
+                        obj.remove("selected_channel");
+                    }
+                }
+                v
+            })
             .collect();
         serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| "[]".to_string())
     }
@@ -1472,5 +1492,65 @@ mod tests {
         let mut conv = LogConversation::default();
         conv.push_assistant("   ");
         assert!(conv.is_empty());
+    }
+
+    // ── 导出权限剥离 ────────────────────────────────────────────────
+
+    /// 非 admin 导出 JSON 必须剥离 conversation/debug/路由回放字段，
+    /// 与列表页 `logs_with_user_email` 的剥离口径一致 —— 导出与列表页
+    /// 不应给出不同权限边界（曾存在漏洞：导出走 store 全量序列化，
+    /// 普通用户调 `?format=json` 即可拿到对话正文与站方内部拓扑）。
+    #[test]
+    fn export_json_strips_sensitive_for_non_admin() {
+        let s = store();
+        let mut log = RequestLog::new();
+        log.user_id = Some("u1".to_string());
+        log.model = "gpt-4".to_string();
+        log.candidate_channels = vec!["ch-a".to_string(), "ch-b".to_string()];
+        log.filtered_channels = vec![FilteredChannel {
+            channel_id: "ch-b".to_string(),
+            reason: "circuit_open".to_string(),
+        }];
+        log.selected_channel = Some("ch-a".to_string());
+        log.conversation = Some(LogConversation {
+            messages: vec![LogMessage {
+                role: "user".to_string(),
+                text: "秘密对话".to_string(),
+                truncated: false,
+            }],
+            system_prompt_chars: 0,
+            truncated_history: false,
+        });
+        s.requests.add(log).unwrap();
+
+        let non_admin = s
+            .requests
+            .export_json_filtered(Some("u1"), None, None, None, None, false);
+        // 非管理员导出不含任何敏感字段
+        assert!(
+            !non_admin.contains("conversation"),
+            "对话正文不应泄露给非管理员"
+        );
+        assert!(
+            !non_admin.contains("candidate_channels"),
+            "候选渠道拓扑不应泄露给非管理员"
+        );
+        assert!(
+            !non_admin.contains("filtered_channels"),
+            "过滤原因不应泄露给非管理员"
+        );
+        assert!(
+            !non_admin.contains("selected_channel"),
+            "选中渠道不应泄露给非管理员"
+        );
+        assert!(!non_admin.contains("秘密对话"));
+
+        let admin = s
+            .requests
+            .export_json_filtered(Some("u1"), None, None, None, None, true);
+        // 管理员导出保留全部字段
+        assert!(admin.contains("conversation"));
+        assert!(admin.contains("candidate_channels"));
+        assert!(admin.contains("秘密对话"));
     }
 }

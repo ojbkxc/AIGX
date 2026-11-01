@@ -52,6 +52,32 @@ test.describe('请求日志对话浏览', () => {
     await expect(page.locator('.log-detail-conv-note')).toContainText('较早的消息已省略');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
+
+  test('管理员点开日志能看到路由回放（候选/选中/被过滤）', async ({ page, pageErrors }) => {
+    await loginAsAdmin(page);
+    await page.goto('/logs');
+    // 第一条 mock 日志带完整路由回放字段
+    await page.locator('tbody tr').first().click();
+
+    const route = page.locator('.log-detail-route');
+    await expect(route).toBeVisible();
+    await expect(route).toContainText('路由回放');
+
+    // 候选渠道 chips：ch-1 / ch-2 / ch-3
+    await expect(route).toContainText('ch-1');
+    await expect(route).toContainText('ch-2');
+    await expect(route).toContainText('ch-3');
+
+    // 选中渠道高亮（ch-1 是 selected_channel）。候选行与选中行都会给 ch-1
+    // 加 .log-detail-chip-on，断言「至少一个高亮 chip 文本是 ch-1」即可。
+    const onChips = route.locator('.log-detail-chip-on');
+    await expect(onChips.first()).toContainText('ch-1');
+
+    // 被过滤渠道及原因
+    await expect(route).toContainText('circuit_open');
+    await expect(route).toContainText('health_check_failed');
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
 });
 
 /**

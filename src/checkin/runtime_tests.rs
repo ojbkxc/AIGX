@@ -152,6 +152,7 @@ fn account(provider: &str, base_url: &str) -> AccountSession {
         credential: Credential {
             kind: "session".to_string(),
             secret: "test-token".to_string(),
+            fields: std::collections::HashMap::new(),
         },
         proxy: None,
         status: "enabled".to_string(),

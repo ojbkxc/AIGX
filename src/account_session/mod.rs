@@ -9,6 +9,7 @@
 //! - [`maintenance`]：周期清理（冷却过期、凭证过期状态同步）
 //! - [`refresh`]：账号级 token 自动刷新（qoder / autoclaw / trae，表驱动）
 //! - [`catalog`]：按账号自动发现上游模型目录（抄 Agent2API 的 provider 目录）
+//! - [`secret`]：凭证的 AES-256-GCM 真加密（抄 Agent2API 的 crypto.rs）
 //! - [`import`]：从本机其他 AI 客户端（cc-switch）导入账号
 
 pub mod adapter;
@@ -20,6 +21,7 @@ pub mod model;
 pub mod refresh;
 pub mod registry;
 pub mod rotate;
+pub mod secret;
 pub mod store;
 
 pub use store::AccountSessionStore;

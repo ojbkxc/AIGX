@@ -74,6 +74,10 @@ serde_json = "1"
 
 # Crypto
 sha2 = "0.10"
+# 凭证加密：AES-256-GCM（与 Agent2API 的 crypto.rs 同算法同信封格式）
+aes-gcm = "0.10"
+# 系统熵源（密钥与 nonce 的随机来源）
+getrandom = "0.2"
 sha1 = "0.10"
 hmac = "0.12"
 # TRAE 登录要求每次现生成一台设备的 EC P-256 公钥（SPKI PEM）

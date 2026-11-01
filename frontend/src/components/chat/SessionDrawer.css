@@ -8,8 +8,10 @@
 .sd-panel {
   display: flex;
   flex-direction: column;
-  background: var(--bg-elevated, rgba(255, 255, 255, 0.04));
-  border-right: 1px solid var(--border, rgba(128, 128, 128, 0.15));
+  /* 背景必须不透明：--bg-elevated 在本主题体系中不存在，旧 fallback
+     rgba(255,255,255,.04) 近乎全透明，亮色主题下侧栏文字会透过面板混排。 */
+  background: var(--card-bg, #ffffff);
+  border-right: 1px solid var(--border-color, rgba(128, 128, 128, 0.15));
   min-width: 0;
   overflow: hidden;
 }
@@ -89,7 +91,7 @@
   margin: 0 12px 10px;
   padding: 8px 12px;
   border-radius: 10px;
-  border: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+  border: 1px solid var(--border-color, rgba(128, 128, 128, 0.2));
   background: transparent;
   color: inherit;
   font-size: 13px;

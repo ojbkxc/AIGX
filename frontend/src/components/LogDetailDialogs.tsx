@@ -81,6 +81,44 @@ export function RequestLogDetail({ log, admin, onClose }: {
           </div>
         </div>
       )}
+      {/* 路由回放：管理员可看到这次请求的调度决策 —— 候选渠道、谁被过滤及
+          原因、最终选中谁。普通用户拿不到这些字段（后端已剥离）。 */}
+      {admin && (log.candidate_channels?.length || log.filtered_channels?.length || log.selected_channel) && (
+        <div className="log-detail-route">
+          <div className="log-detail-label">{t('路由回放')}</div>
+          {log.candidate_channels && log.candidate_channels.length > 0 && (
+            <div className="log-detail-route-row">
+              <span className="log-detail-route-key">{t('候选（{{n}}）', { n: log.candidate_channels.length })}</span>
+              <span className="log-detail-route-chips">
+                {log.candidate_channels.map((c) => (
+                  <span key={c} className={`log-detail-chip ${c === log.selected_channel ? 'log-detail-chip-on' : ''}`}>{c}</span>
+                ))}
+              </span>
+            </div>
+          )}
+          {log.selected_channel && (
+            <div className="log-detail-route-row">
+              <span className="log-detail-route-key">{t('选中')}</span>
+              <span className="log-detail-route-chips">
+                <span className="log-detail-chip log-detail-chip-on">{log.selected_channel}</span>
+              </span>
+            </div>
+          )}
+          {log.filtered_channels && log.filtered_channels.length > 0 && (
+            <div className="log-detail-route-row">
+              <span className="log-detail-route-key">{t('被过滤（{{n}}）', { n: log.filtered_channels.length })}</span>
+              <div className="log-detail-route-filtered">
+                {log.filtered_channels.map((f) => (
+                  <div key={f.channel_id} className="log-detail-route-filtered-item">
+                    <code>{f.channel_id}</code>
+                    <span className="log-detail-route-reason">{f.reason}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       {admin && log.debug && (
         <div className="log-detail-debug">
           {log.debug.upstream_url && (

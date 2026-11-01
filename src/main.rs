@@ -117,6 +117,9 @@ async fn main() -> anyhow::Result<()> {
     // 初始化存储（默认 SQLite 后端；--no-default-features 构建降级为 JSON 文件）
     let data_dir = crate::config::expand_path(&config.server.data_dir);
     tokio::fs::create_dir_all(&data_dir).await?;
+    // 凭证加密的密钥文件落在数据目录下（account.key，与库同目录、0600 权限）。
+    // 必须在任何账号读写之前设定 —— 密钥路径错了会导致解不开存量凭证。
+    crate::account_session::secret::set_data_dir(&data_dir);
     #[cfg(feature = "sqlite-kv")]
     let store = {
         // PostgreSQL 后端：database.url 非空且启用了 postgres feature 时走 PG，

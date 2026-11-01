@@ -34,6 +34,12 @@ fn logs_with_user_email(state: &AppState, logs: Vec<serde_json::Value>, admin: b
                     // 对话里可能含他人的系统提示词拼接、工具参数等敏感上下文。
                     obj.remove("debug");
                     obj.remove("conversation");
+                    // 路由回放字段同理：候选/被过滤渠道与过滤原因暴露的是
+                    // 站方内部拓扑（有几家渠道、谁被熔断、健康度），
+                    // 普通用户只需知道自己这次请求的结果。
+                    obj.remove("candidate_channels");
+                    obj.remove("filtered_channels");
+                    obj.remove("selected_channel");
                 }
                 if let Some(uid) = obj.get("user_id").and_then(|v| v.as_str()) {
                     if let Some(u) = state.user_store.get_by_id(uid) {
@@ -269,7 +275,7 @@ pub async fn handle_export_request_logs(
             let json = state
                 .log_store
                 .requests
-                .export_json_filtered(u, m, c, q.start, q.end);
+                .export_json_filtered(u, m, c, q.start, q.end, admin);
             (
                 StatusCode::OK,
                 [

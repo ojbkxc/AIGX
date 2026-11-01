@@ -380,6 +380,7 @@ fn persist_account(
     session.credential = Credential {
         kind: CREDENTIAL_KIND_SESSION.to_string(),
         secret: creds.secret,
+        fields: std::collections::HashMap::new(),
     };
     session.extra_headers = creds.extra_headers;
     session.expires_at = creds.expires_at;

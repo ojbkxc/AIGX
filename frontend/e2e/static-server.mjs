@@ -151,6 +151,13 @@ const REQUEST_LOGS = [
       ],
       system_prompt_chars: 240,
     },
+    // 路由回放：管理员可见的调度决策（候选/选中/被过滤及原因）
+    candidate_channels: ['ch-1', 'ch-2', 'ch-3'],
+    selected_channel: 'ch-1',
+    filtered_channels: [
+      { channel_id: 'ch-2', reason: 'circuit_open' },
+      { channel_id: 'ch-3', reason: 'health_check_failed' },
+    ],
   },
   {
     id: 'log-2',

@@ -753,6 +753,7 @@ mod tests {
         let next = Credential {
             kind: "api_key".to_string(),
             secret: "sk-new".to_string(),
+            fields: std::collections::HashMap::new(),
         };
         assert_eq!(
             pool.update_credential_cas(&account.id, "sk-wrong", next.clone()),
