@@ -534,6 +534,8 @@ async fn main() -> anyhow::Result<()> {
         response_cache,
         semantic_router,
         oauth_state_cache,
+        oauth_bind_state,
+        oauth_ticket,
         #[cfg(feature = "sea-orm")]
         db_conn,
         // Agent 运行时恒存在；enabled 由运行期配置驱动（设置页保存后立即生效）
@@ -1020,6 +1022,29 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/auth/linuxdo/callback",
             get(api::admin::handle_linuxdo_oauth_callback),
+        )
+        // OAuth 个人中心绑定：start 需登录态（verify_user），返回授权 URL 供前端整页跳；
+        // 三家 callback 复用上面同一路由，由 state 命中 oauth_bind_state 判定走绑定流。
+        .route(
+            "/api/auth/github/bind/start",
+            post(api::admin::handle_github_bind_start),
+        )
+        .route(
+            "/api/auth/google/bind/start",
+            post(api::admin::handle_google_bind_start),
+        )
+        .route(
+            "/api/auth/linuxdo/bind/start",
+            post(api::admin::handle_linuxdo_bind_start),
+        )
+        .route(
+            "/api/auth/oauth/unbind",
+            post(api::admin::handle_oauth_unbind),
+        )
+        // OAuth 登录回跳：callback 只发一次性 ticket，SPA 用它换回会话数据（token 不进 URL）。
+        .route(
+            "/api/auth/oauth/consume",
+            post(api::admin::handle_oauth_consume),
         )
         // 用户管理
         .route("/api/users", get(api::admin::handle_list_users))

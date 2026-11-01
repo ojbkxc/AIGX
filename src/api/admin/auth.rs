@@ -786,7 +786,10 @@ fn set_oauth_identity(u: &mut user::User, provider: &str, identity: &str) {
 }
 
 /// 读取用户某 provider 已绑定的身份（空=未绑定）。
-fn get_oauth_identity(u: &user::User, provider: &str) -> &str {
+///
+/// 返回值全部借用自 `u`（`provider` 只参与匹配、不出现在返回值里），
+/// 生命周期只需绑 `u`。
+fn get_oauth_identity<'a>(u: &'a user::User, provider: &str) -> &'a str {
     match provider {
         "github" => &u.oauth_github,
         "google" => &u.oauth_google,
@@ -1365,106 +1368,18 @@ pub async fn handle_linuxdo_oauth_authorize(State(state): State<AppState>) -> Re
     Redirect::to(&url).into_response()
 }
 
-/// GET /api/auth/linuxdo/callback — LinuxDO OAuth 回调处理
+/// GET /api/auth/linuxdo/callback — LinuxDO OAuth 回调处理（统一走 oauth_handle_callback）
 pub async fn handle_linuxdo_oauth_callback(
     State(state): State<AppState>,
     Query(params): Query<LinuxDoCallbackParams>,
 ) -> Response {
-    let config = state.config_manager.get().await;
-    let oauth = config.linuxdo_oauth.clone();
-    if !oauth.ready() {
-        return error_response("LinuxDO OAuth not configured", StatusCode::BAD_REQUEST)
-            .into_response();
-    }
-    let code = match params.code {
-        Some(c) => c,
-        None => {
-            return error_response("Missing authorization code", StatusCode::BAD_REQUEST)
-                .into_response()
-        }
-    };
-    // CSRF 防护：校验 state（一次性消费，防重放/伪造回调）
-    let state_param = match params.state {
-        Some(ref s) if !s.is_empty() => s.clone(),
-        _ => return error_response("Missing OAuth state", StatusCode::BAD_REQUEST).into_response(),
-    };
-    if state.oauth_state_cache.get(&state_param).await.is_none() {
-        tracing::warn!("LinuxDO OAuth callback: invalid or expired state (CSRF check failed)");
-        return error_response("Invalid OAuth state", StatusCode::BAD_REQUEST).into_response();
-    }
-    state.oauth_state_cache.remove(&state_param).await;
-    // Exchange code for access token
-    let access_token =
-        match crate::oauth::linuxdo::exchange_code(&oauth, &code, &state.http_client).await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!("LinuxDO OAuth token exchange failed: {e}");
-                return error_response("OAuth token exchange failed", StatusCode::BAD_GATEWAY)
-                    .into_response();
-            }
-        };
-    // Fetch user info
-    let user_info = crate::oauth::linuxdo::get_user_info(&access_token, &state.http_client).await;
-    let ld_user = match user_info {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::error!("LinuxDO OAuth user info failed: {e}");
-            return error_response("Failed to fetch LinuxDO user info", StatusCode::BAD_GATEWAY)
-                .into_response();
-        }
-    };
-    // LinuxDO user info 无 email 字段（对齐 new-api），统一用伪邮箱
-    let email = format!("{}@linuxdo.local", ld_user.username);
-    // Find or create user
-    let user = match state.user_store.get_by_email(&email) {
-        Some(u) => u,
-        None => {
-            // Auto-create user for LinuxDO OAuth
-            match state.user_store.create_with_username(
-                &email,
-                &ld_user.username,
-                &Uuid::new_v4().to_string(), // random password (OAuth users don't use password login)
-                crate::user::Role::User,
-                config.usage.register_quota,
-            ) {
-                Ok(u) => u,
-                Err(e) => {
-                    tracing::error!("Failed to create OAuth user: {e}");
-                    return error_response(
-                        "Failed to create user",
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    )
-                    .into_response();
-                }
-            }
-        }
-    };
-    // Create session
-    let session_ttl = config.admin.session_ttl_hours.max(1);
-    let session_secret = if config.admin.session_secret.is_empty() {
-        Uuid::new_v4().to_string()
-    } else {
-        config.admin.session_secret.clone()
-    };
-    let session_store = SessionStore::new(&session_secret, session_ttl);
-    let session = session_store.create_session(&user.email);
-    state
-        .session_registry
-        .register(&user.email, &session.session_id);
-    Json(serde_json::json!({
-        "success": true,
-        "data": {
-            "token": session.token,
-            "email": user.email,
-            "username": user.username,
-            "role": match user.role {
-                crate::user::Role::Admin => "admin",
-                crate::user::Role::User => "user",
-            },
-            "expires_at": session.expires_at,
-        }
-    }))
-    .into_response()
+    oauth_handle_callback(
+        state,
+        "linuxdo",
+        params.code.unwrap_or_default(),
+        params.state,
+    )
+    .await
 }
 
 /// 邮箱验证码登录 — 发送验证码请求
