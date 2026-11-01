@@ -1146,6 +1146,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         .route("/api/models/alias", post(api::admin::handle_set_alias))
         .route(
+            "/api/models/alias/state",
+            post(api::admin::handle_set_alias_state),
+        )
+        .route(
             "/api/models/alias/remove",
             post(api::admin::handle_remove_alias),
         )

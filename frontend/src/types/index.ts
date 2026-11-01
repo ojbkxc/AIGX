@@ -695,6 +695,14 @@ export interface ManagedModelPrice {
   price_type: string;
 }
 
+/** 一条别名映射（带开关状态） */
+export interface AliasEntry {
+  alias: string;
+  target: string;
+  /** 关掉的别名仍出现在清单里，但不参与改名 */
+  enabled: boolean;
+}
+
 /** 聚合后的单行模型：粒度是 (provider, model_id) */
 export interface ManagedModel {
   provider: string;
@@ -712,6 +720,8 @@ export interface ManagedModel {
   model_ratio: number;
   /** 该模型的对外别名 */
   aliases: string[];
+  /** 别名明细（含开关）。老后端不返回时前端回退到 aliases 合成 */
+  alias_entries?: AliasEntry[];
 }
 
 /** 左栏 provider 分组 */

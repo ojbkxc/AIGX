@@ -225,6 +225,143 @@
   gap: 3px;
 }
 
+/* ── 别名列：Agent2API 式映射 chips ──────────────────────────────
+   每条 chip = [开关] 对外名 [×]，外加行内虚线「+ 映射」入口。
+   与「来源」列的 .mm-source-chip 刻意不同：别名是**可操作**的
+   （开关/改名/删除），来源是只读徽标，两者视觉上必须能一眼区分。 */
+.mm-alias-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  max-width: 300px;
+}
+
+.mm-alias-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 3px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1;
+  background: var(--chip-bg, rgba(128, 128, 128, 0.12));
+  color: var(--text-color);
+  max-width: 100%;
+  border: 1px solid transparent;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+
+.mm-alias-chip:hover {
+  border-color: var(--border-color);
+}
+
+/* 关掉的映射：整条压淡 + 名字划线 —— 「仍存在但不生效」一眼可辨 */
+.mm-alias-chip.is-off {
+  opacity: 0.55;
+}
+
+.mm-alias-chip.is-off .mm-alias-name {
+  text-decoration: line-through;
+}
+
+/* 药丸内的小号开关：标准 36×20 会把行高撑起来，缩到 22×12 */
+.mm-alias-chip .mm-alias-switch.glass-switch {
+  width: 22px;
+  height: 12px;
+  border-radius: 12px;
+}
+
+.mm-alias-chip .mm-alias-switch .glass-switch-thumb {
+  width: 8px;
+  height: 8px;
+  top: 1px;
+  left: 1px;
+}
+
+.mm-alias-chip .mm-alias-switch.glass-switch-on .glass-switch-thumb {
+  transform: translateX(10px);
+}
+
+.mm-alias-name {
+  cursor: pointer;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.mm-alias-name:hover {
+  color: var(--accent-color);
+  text-decoration: underline;
+}
+
+.mm-alias-x {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+
+.mm-alias-x:hover {
+  color: var(--danger-color, #dc2626);
+  background: rgba(220, 38, 38, 0.1);
+}
+
+/* 行内「+ 映射」入口：虚线边 = 「这里还能再加一个」，与实心 chip 一眼分开 */
+.mm-alias-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px dashed var(--border-color);
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.mm-alias-add:hover {
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+}
+
+/* 弹窗里的实时预览行 */
+.mm-alias-preview {
+  margin: 4px 0 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--btn-secondary-bg, rgba(128, 128, 128, 0.08));
+  font-size: 12px;
+  color: var(--text-muted);
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mm-alias-preview code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--chip-bg, rgba(128, 128, 128, 0.16));
+  color: var(--text-color);
+  font-size: 11px;
+}
+
+.mm-alias-preview-empty {
+  opacity: 0.7;
+}
+
 .mm-actions {
   display: flex;
   gap: 6px;

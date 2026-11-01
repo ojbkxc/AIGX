@@ -336,8 +336,21 @@ export const api = {
     request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/price`, data),
   removeModelPrice: (model: string): Promise<ApiResponse<ManageView>> =>
     request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/price/remove`, { model }),
-  setModelAlias: (alias: string, target: string): Promise<ApiResponse<ManageView>> =>
-    request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias`, { alias, target }),
+  setModelAlias: (
+    alias: string,
+    target: string,
+    enabled?: boolean
+  ): Promise<ApiResponse<ManageView>> =>
+    request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias`, {
+      alias,
+      target,
+      ...(enabled === undefined ? {} : { enabled })
+    }),
+  setModelAliasState: (alias: string, enabled: boolean): Promise<ApiResponse<ManageView>> =>
+    request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias/state`, {
+      alias,
+      enabled
+    }),
   removeModelAlias: (alias: string): Promise<ApiResponse<ManageView>> =>
     request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias/remove`, { alias }),
 

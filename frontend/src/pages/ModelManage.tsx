@@ -127,6 +127,8 @@ export default function ModelManage(): JSX.Element {
   const [aliasForm, setAliasForm] = useState<AliasForm>({ alias: '', target: '' });
   const [aliasError, setAliasError] = useState('');
   const [savingAlias, setSavingAlias] = useState(false);
+  /** 正在切换开关的别名（防重复点击） */
+  const [pendingAlias, setPendingAlias] = useState<string | null>(null);
 
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   /** 正在切换启停的行（provider|id），防重复点击 */
@@ -266,24 +268,44 @@ export default function ModelManage(): JSX.Element {
   };
 
   // ── 别名弹窗 ──
-  const openAlias = (row: ManagedModel) => {
+  const openAlias = (row: ManagedModel, presetAlias?: string) => {
     setAliasTarget(row);
     setAliasError('');
-    setAliasForm({ alias: '', target: row.id });
+    // 点已有 chip 的「编辑」时把名字带进来，等于「改这条映射」
+    setAliasForm({ alias: presetAlias ?? '', target: row.id });
+  };
+
+  /** 行内切换某条别名的开关（不改映射关系，独立接口） */
+  const toggleAlias = async (alias: string, enabled: boolean) => {
+    setPendingAlias(alias);
+    try {
+      const res = await api.setModelAliasState(alias, enabled);
+      acceptView(res?.data);
+      addToast(enabled ? t('映射已启用') : t('映射已关闭'));
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setPendingAlias(null);
+    }
   };
 
   const saveAlias = async () => {
     setAliasError('');
     const alias = aliasForm.alias.trim();
+    const target = aliasForm.target.trim();
     if (!alias) {
       setAliasError(t('别名不能为空'));
       return;
     }
+    if (!target) {
+      setAliasError(t('目标模型不能为空'));
+      return;
+    }
     setSavingAlias(true);
     try {
-      const res = await api.setModelAlias(alias, aliasForm.target.trim());
+      const res = await api.setModelAlias(alias, target);
       acceptView(res?.data);
-      addToast(t('别名已保存'));
+      addToast(t('映射已保存') + `：${alias} → ${target}`);
       setAliasTarget(null);
     } catch (err) {
       setAliasError(err instanceof Error ? err.message : String(err));
@@ -294,14 +316,14 @@ export default function ModelManage(): JSX.Element {
 
   const removeAlias = (alias: string) => {
     setConfirmState({
-      title: t('删除别名'),
+      title: t('删除映射'),
       message: t('删除后客户端将无法再通过该别名调用') + `：${alias}`,
       confirmText: t('删除'),
       danger: true,
       onConfirm: async () => {
         const res = await api.removeModelAlias(alias);
         acceptView(res?.data);
-        addToast(t('已删除别名'));
+        addToast(t('已删除映射'));
       },
     });
   };
@@ -966,29 +988,66 @@ export default function ModelManage(): JSX.Element {
                             </div>
                           </td>
                           <td>
-                            <div className="mm-sources">
-                              {row.aliases.map((a) => (
-                                <span key={a} className="mm-source-chip">
-                                  {a}
-                                  <button
-                                    type="button"
-                                    className="btn btn-outline btn-sm"
-                                    style={{ padding: '0 4px', height: 18 }}
-                                    title={t('删除别名')}
-                                    onClick={() => removeAlias(a)}
+                            <div className="mm-alias-cell">
+                              {(() => {
+                                // 新后端给 alias_entries（带开关）；老后端只给 aliases 名字，
+                                // 回退成「全部启用」的等价结构，避免两套渲染分支。
+                                const entries = row.alias_entries?.length
+                                  ? row.alias_entries
+                                  : row.aliases.map((a) => ({
+                                      alias: a,
+                                      target: row.id,
+                                      enabled: true
+                                    }));
+                                return entries.map((entry) => (
+                                  <span
+                                    key={entry.alias}
+                                    className={`mm-alias-chip${entry.enabled ? '' : ' is-off'}`}
+                                    title={
+                                      entry.enabled
+                                        ? `${entry.alias} → ${entry.target}`
+                                        : `${entry.alias} → ${entry.target}（已关闭，请求会原样透传）`
+                                    }
                                   >
-                                    ×
-                                  </button>
-                                </span>
-                              ))}
+                                    <Switch
+                                      checked={entry.enabled}
+                                      onChange={(next) => void toggleAlias(entry.alias, next)}
+                                      disabled={pendingAlias === entry.alias}
+                                      ariaLabel={`${entry.enabled ? t('关闭') : t('启用')}映射 ${entry.alias}`}
+                                      className="mm-alias-switch"
+                                    />
+                                    <span
+                                      className="mm-alias-name"
+                                      onClick={() => openAlias(row, entry.alias)}
+                                      role="button"
+                                      tabIndex={0}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter' || e.key === ' ') {
+                                          e.preventDefault();
+                                          openAlias(row, entry.alias);
+                                        }
+                                      }}
+                                    >
+                                      {entry.alias}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      className="mm-alias-x"
+                                      title={t('删除映射')}
+                                      onClick={() => removeAlias(entry.alias)}
+                                    >
+                                      ×
+                                    </button>
+                                  </span>
+                                ));
+                              })()}
                               <button
                                 type="button"
-                                className="btn btn-outline btn-sm"
-                                style={{ padding: '0 6px', height: 22 }}
+                                className="mm-alias-add"
                                 onClick={() => openAlias(row)}
-                                title={t('新增别名')}
+                                title={t('添加映射：对外名 → 本模型')}
                               >
-                                <Plus size={11} />
+                                <Plus size={11} /> {t('映射')}
                               </button>
                             </div>
                           </td>
@@ -1218,7 +1277,7 @@ export default function ModelManage(): JSX.Element {
         <div className="modal-overlay" onClick={() => setAliasTarget(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h3>{t('新增别名')}</h3>
+              <h3>{aliasTarget && aliasForm.alias.trim() && aliasTarget.aliases.includes(aliasForm.alias.trim()) ? t('编辑映射') : t('添加映射')}</h3>
               <button className="modal-close" onClick={() => setAliasTarget(null)}>
                 &times;
               </button>
@@ -1226,17 +1285,18 @@ export default function ModelManage(): JSX.Element {
             <div className="modal-body">
               {aliasError && <div className="error-message">{aliasError}</div>}
               <div className="form-group">
-                <label>{t('别名（客户端调用的名字）')} *</label>
+                <label>{t('对外映射名（客户端调用的名字）')} *</label>
                 <input
                   className="form-input"
                   value={aliasForm.alias}
                   onChange={(e) => setAliasForm({ ...aliasForm, alias: e.target.value })}
                   placeholder="gpt-4o"
                   disabled={savingAlias}
+                  autoFocus
                 />
               </div>
               <div className="form-group">
-                <label>{t('目标模型')} *</label>
+                <label>{t('转发到上游模型')} *</label>
                 <Combobox
                   value={aliasForm.target}
                   options={modelIdOptions}
@@ -1245,8 +1305,21 @@ export default function ModelManage(): JSX.Element {
                   disabled={savingAlias}
                 />
               </div>
+              {/* 实时预览：一眼看清这次保存会得到什么（Agent2API 同款） */}
+              <div className="mm-alias-preview">
+                {aliasForm.alias.trim() && aliasForm.target.trim() ? (
+                  <>
+                    {t('下游请求')} <code>{aliasForm.alias.trim()}</code> → {t('转发')}{' '}
+                    <code>{aliasForm.target.trim()}</code>
+                  </>
+                ) : (
+                  <span className="mm-alias-preview-empty">
+                    {t('填上对外名与目标模型后，这里会显示实际转发链路')}
+                  </span>
+                )}
+              </div>
               <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                {t('别名是全局映射：客户端请求别名时，网关按映射改名为目标模型再转发。')}
+                {t('映射是全局的：客户端请求对外名时，网关按映射改名为目标模型再转发。同一对外名可被多条映射使用（主备切换）。')}
               </p>
             </div>
             <div className="modal-footer">

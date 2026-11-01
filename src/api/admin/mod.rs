@@ -68,7 +68,7 @@ pub use pricing::{
 // 统一模型管理（渠道模型 + 账号池模型聚合视图，参照 Agent2API 模型管理）
 pub use model_manage::{
     handle_manage_view, handle_remove_alias, handle_remove_price, handle_set_alias,
-    handle_set_state, handle_upsert_model_price,
+    handle_set_alias_state, handle_set_state, handle_upsert_model_price,
 };
 
 // 签到中心（管理员替上游账号签到，区别于用户侧的 /api/checkin）

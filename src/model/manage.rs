@@ -166,6 +166,23 @@ pub struct ManageModel {
     pub model_ratio: f64,
     /// 该模型的对外别名（`model_custom_map` 里 target == 本模型的行）
     pub aliases: Vec<String>,
+    /// 别名明细（含开关状态）。与 `aliases` 同源，前者是纯名字清单
+    /// （老前端 / 老调用点用），后者带启用位（新前端渲染 chip 用）。
+    ///
+    /// 两个字段并存是刻意的：`aliases: Vec<String>` 已被 `/v1/models`
+    /// 一类出口与既有前端消费，改成对象会让它们全部失效；新增字段
+    /// 只增不改。
+    #[serde(default)]
+    pub alias_entries: Vec<AliasEntry>,
+}
+
+/// 一条别名映射的渲染视图。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AliasEntry {
+    pub alias: String,
+    pub target: String,
+    /// 是否启用（关掉的别名仍出现在清单里，但不参与改名）
+    pub enabled: bool,
 }
 
 /// 左栏分组。
@@ -367,12 +384,21 @@ fn new_row(
     let meta = metadata.get(model, channel_owned_by);
     let price = pricing.get_price(model);
     let model_ratio = pricing.get_ratios().model_ratio(model);
-    let aliases = mapper
-        .all_mappings()
-        .into_iter()
-        .filter(|(_, target)| target == model)
-        .map(|(alias, _)| alias)
+    let all_mappings = mapper.all_mappings();
+    let disabled = mapper.disabled_aliases();
+    let alias_entries: Vec<AliasEntry> = all_mappings
+        .iter()
+        .filter(|(_, target)| *target == model)
+        .map(|(alias, target)| AliasEntry {
+            alias: alias.clone(),
+            target: target.clone(),
+            enabled: !disabled.contains(alias),
+        })
         .collect();
+    let mut aliases: Vec<String> = alias_entries.iter().map(|e| e.alias.clone()).collect();
+    aliases.sort_unstable();
+    let mut alias_entries = alias_entries;
+    alias_entries.sort_by(|a, b| a.alias.cmp(&b.alias));
     ManageModel {
         provider: provider.to_string(),
         provider_label: provider_label(provider),
@@ -385,6 +411,7 @@ fn new_row(
         price,
         model_ratio,
         aliases,
+        alias_entries,
     }
 }
 

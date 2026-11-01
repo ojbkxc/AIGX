@@ -19,13 +19,24 @@ pub mod metadata;
 ///   那是 cf-ai-gw 专属模型表，对通用网关是噪音）。
 pub struct ModelMapper {
     custom_map: RwLock<HashMap<String, String>>,
+    /// 被关掉的别名（仍保留映射，但 `resolve` 时跳过 → 原样透传）。
+    ///
+    /// 与 `custom_map` 分开存：存量数据只有 alias→target 的字符串表，
+    /// 把它整体升级成结构体会让所有老数据需要迁移，且 `all_mappings()`
+    /// 这类只读消费者的返回类型被迫改变。用一张并行的禁用集，
+    /// 老存储原样可读、老调用点零改动。
+    disabled: RwLock<std::collections::HashSet<String>>,
     store: Arc<FileStore>,
 }
+
+/// 禁用集在存储里的键（与 `model_custom_map` 并列）。
+const DISABLED_KEY: &str = "model_custom_map_disabled";
 
 impl ModelMapper {
     pub fn new(store: Arc<FileStore>) -> Self {
         Self {
             custom_map: RwLock::new(HashMap::new()),
+            disabled: RwLock::new(std::collections::HashSet::new()),
             store,
         }
     }
@@ -40,23 +51,42 @@ impl ModelMapper {
             custom.clear();
             custom.extend(map);
         }
+        // 禁用集是后加的：老存储里没有这个键，读不到就当空集（全部启用）
+        if let Some(off) = self
+            .store
+            .get::<std::collections::HashSet<String>>(DISABLED_KEY)?
+        {
+            let mut disabled = self.disabled.write();
+            disabled.clear();
+            disabled.extend(off);
+        }
         Ok(())
     }
 
     /// 保存自定义映射到存储
     pub fn save(&self) -> Result<()> {
         let custom = self.custom_map.read().clone();
-        self.store.put("model_custom_map", &custom)
+        self.store.put("model_custom_map", &custom)?;
+        let disabled = self.disabled.read().clone();
+        self.store.put(DISABLED_KEY, &disabled)
     }
 
     /// 解析模型名：查自定义映射，命中则改名，否则**原样透传**。
     /// 空模型名返回空（由调用方决定错误处理），不再强制兜底到某个模型。
+    ///
+    /// 被关掉的别名不参与改名 —— 它仍留在清单里（前端能看到、能再打开），
+    /// 但行为上等同于没配过这条映射。
     pub fn resolve(&self, model: &str) -> String {
         if model.is_empty() {
             return String::new();
         }
         let custom = self.custom_map.read();
         if let Some(mapped) = custom.get(model) {
+            // 读锁顺序：先 custom 后 disabled。写入路径（set_enabled / set_custom）
+            // 也是这个顺序，不会死锁。
+            if self.disabled.read().contains(model) {
+                return model.to_string();
+            }
             return mapped.clone();
         }
         // 无映射：透传原始模型名（通用网关语义）
@@ -73,21 +103,57 @@ impl ModelMapper {
         self.custom_map.read().clone()
     }
 
+    /// 某条别名当前是否启用（未配过映射也返回 true —— 「没有」不是「关掉」）。
+    pub fn is_enabled(&self, source: &str) -> bool {
+        !self.disabled.read().contains(source)
+    }
+
+    /// 被关掉的别名清单（前端渲染开关状态用）。
+    pub fn disabled_aliases(&self) -> std::collections::HashSet<String> {
+        self.disabled.read().clone()
+    }
+
     /// 设置自定义映射
     pub fn set_custom(&self, source: String, target: String) -> Result<()> {
         self.custom_map.write().insert(source, target);
         self.save()
     }
 
+    /// 切换某条别名的启停。
+    ///
+    /// 别名不存在时返回 `false`（调用方据此报 404，而不是静默造一条
+    /// 只存在于禁用集里的孤儿）。
+    pub fn set_enabled(&self, source: &str, enabled: bool) -> Result<bool> {
+        {
+            let custom = self.custom_map.read();
+            if !custom.contains_key(source) {
+                return Ok(false);
+            }
+        }
+        {
+            let mut disabled = self.disabled.write();
+            if enabled {
+                disabled.remove(source);
+            } else {
+                disabled.insert(source.to_string());
+            }
+        }
+        self.save()?;
+        Ok(true)
+    }
+
     /// 删除自定义映射
     pub fn remove_custom(&self, source: &str) -> Result<()> {
         self.custom_map.write().remove(source);
+        // 连带清掉禁用标记，否则同名别名将来重新建出来会继承旧状态
+        self.disabled.write().remove(source);
         self.save()
     }
 
     /// 清空所有自定义映射
     pub fn reset(&self) -> Result<()> {
         self.custom_map.write().clear();
+        self.disabled.write().clear();
         self.save()
     }
 }
@@ -129,5 +195,91 @@ mod tests {
     fn test_empty_model() {
         let m = mapper();
         assert_eq!(m.resolve(""), "");
+    }
+
+    #[test]
+    fn disabled_alias_passes_through_but_stays_listed() {
+        let m = mapper();
+        m.set_custom("gpt-4o".into(), "gpt-4o-2024-08-06".into())
+            .unwrap();
+        assert_eq!(m.resolve("gpt-4o"), "gpt-4o-2024-08-06");
+
+        // 关掉：行为回到透传，但映射本身还在（前端能看到、能再打开）
+        assert!(m.set_enabled("gpt-4o", false).unwrap());
+        assert_eq!(m.resolve("gpt-4o"), "gpt-4o");
+        assert!(m.all_mappings().contains_key("gpt-4o"));
+        assert!(!m.is_enabled("gpt-4o"));
+        assert!(m.disabled_aliases().contains("gpt-4o"));
+
+        // 再打开：恢复改名
+        assert!(m.set_enabled("gpt-4o", true).unwrap());
+        assert_eq!(m.resolve("gpt-4o"), "gpt-4o-2024-08-06");
+        assert!(m.is_enabled("gpt-4o"));
+    }
+
+    #[test]
+    fn set_enabled_rejects_unknown_alias() {
+        let m = mapper();
+        // 不存在的别名不该被「关掉」——否则禁用集里多出一条没有映射的孤儿
+        assert!(!m.set_enabled("never-configured", false).unwrap());
+        assert!(m.disabled_aliases().is_empty());
+    }
+
+    #[test]
+    fn disabled_state_survives_reload() {
+        let dir = {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir =
+                std::env::temp_dir().join(format!("aigx-map-reload-{}-{seq}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        };
+        let store = Arc::new(FileStore::new(dir.clone()));
+        {
+            let m = ModelMapper::new(store.clone());
+            m.set_custom("a".into(), "b".into()).unwrap();
+            m.set_enabled("a", false).unwrap();
+        }
+        let reloaded = ModelMapper::new(store);
+        reloaded.load().unwrap();
+        assert_eq!(reloaded.resolve("a"), "a", "禁用状态必须落盘");
+        assert!(!reloaded.is_enabled("a"));
+    }
+
+    #[test]
+    fn remove_clears_disabled_mark() {
+        let m = mapper();
+        m.set_custom("a".into(), "b".into()).unwrap();
+        m.set_enabled("a", false).unwrap();
+        m.remove_custom("a").unwrap();
+        assert!(!m.disabled_aliases().contains("a"));
+        // 重新建同名别名应当是「启用」的新条目，不继承旧状态
+        m.set_custom("a".into(), "c".into()).unwrap();
+        assert_eq!(m.resolve("a"), "c");
+    }
+
+    #[test]
+    fn legacy_store_without_disabled_key_loads() {
+        // 老存储只有 model_custom_map 一个键：load 不该报错，且全部启用
+        let dir = {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir =
+                std::env::temp_dir().join(format!("aigx-map-legacy-{}-{seq}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        };
+        let store = Arc::new(FileStore::new(dir));
+        let mut legacy = HashMap::new();
+        legacy.insert("old".to_string(), "new".to_string());
+        store.put("model_custom_map", &legacy).unwrap();
+
+        let m = ModelMapper::new(store);
+        m.load().unwrap();
+        assert_eq!(m.resolve("old"), "new");
+        assert!(m.is_enabled("old"));
     }
 }

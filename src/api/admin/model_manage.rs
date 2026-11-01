@@ -238,6 +238,13 @@ pub async fn handle_remove_price(
 pub struct AliasBody {
     pub alias: String,
     pub target: String,
+    /// 映射开关（三态，与 Agent2API 同口径）：
+    /// - 键缺失 → 不动已有状态（新建时默认启用）
+    /// - `true` / `false` → 显式开 / 关
+    ///
+    /// 老前端不传这个键，行为与改造前完全一致。
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 /// 别名合法性：字母数字与 `- _ . / :`，≤128（与 Agent2API `alias_valid` 同口径）。
@@ -276,7 +283,50 @@ pub async fn handle_set_alias(
             StatusCode::INTERNAL_SERVER_ERROR,
         ));
     }
+    // 三态：只在调用方显式给了才改开关状态。新建的映射默认启用。
+    if let Some(enabled) = body.enabled {
+        if let Err(e) = state.model_mapper.set_enabled(alias, enabled) {
+            return Err(error_response(
+                &format!("保存别名开关失败：{e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
+        }
+    }
     Ok(ok_view(&current_view(&state)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AliasStateBody {
+    pub alias: String,
+    pub enabled: bool,
+}
+
+/// POST /api/models/alias/state —— 只切开关，不改映射关系。
+///
+/// 单独一条接口的理由：切换开关是高频行内操作，带上 `target` 会让前端
+/// 必须持有完整映射（渲染 chip 时有），但把「只改开关」和「改映射」分开
+/// 之后，任何一次开关操作都不可能意外改掉映射目标。
+pub async fn handle_set_alias_state(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AliasStateBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let alias = body.alias.trim();
+    if alias.is_empty() {
+        return Err(error_response("别名不能为空", StatusCode::BAD_REQUEST));
+    }
+    match state.model_mapper.set_enabled(alias, body.enabled) {
+        Ok(true) => Ok(ok_view(&current_view(&state))),
+        Ok(false) => Err(error_response(
+            &format!("别名不存在：{alias}"),
+            StatusCode::NOT_FOUND,
+        )),
+        Err(e) => Err(error_response(
+            &format!("保存别名开关失败：{e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
