@@ -86,6 +86,11 @@ pub struct AccountSessionRequest {
     /// 保持原值；空串 = 清除；非空 = 设置。
     #[serde(default)]
     pub refresh_token: Option<String>,
+    /// 凭证形态（api_key / session / none）。缺省 = 自动判定（登录态型供应商
+    /// 落 session，其余 api_key）；显式传 "none" = 该上游无需鉴权（Ollama /
+    /// OpenCode Zen 免费档，转发时一个鉴权头都不发）。
+    #[serde(default)]
+    pub credential_kind: Option<String>,
     #[serde(default)]
     pub expires_at: Option<i64>,
 }
@@ -185,6 +190,19 @@ fn apply_request(mut session: AccountSession, body: &AccountSessionRequest) -> A
     match &body.api_key {
         None => {}
         Some(secret) => session.credential.secret = secret.clone(),
+    }
+    // 显式凭证形态（none = 免鉴权，转发时一个鉴权头都不发；Ollama /
+    // OpenCode Zen 免费档）。白名单外的值忽略（防止乱填 kind 导致鉴权错乱）。
+    if let Some(kind) = &body.credential_kind {
+        let k = kind.trim();
+        if matches!(
+            k,
+            crate::account_session::model::CREDENTIAL_KIND_API_KEY
+                | crate::account_session::model::CREDENTIAL_KIND_SESSION
+                | crate::account_session::model::CREDENTIAL_KIND_NONE
+        ) {
+            session.credential.kind = k.to_string();
+        }
     }
     // 续期令牌三态：缺省保持、空串清除、非空设置（落盘编码在 store.upsert 里做）
     if let Some(token) = &body.refresh_token {
@@ -422,8 +440,9 @@ pub async fn handle_create_account_session(
     let channel = ensure_account_channel(&state, body.channel_id.trim())?;
     let mut session = AccountSession::new(channel.id.clone(), String::new());
     session = apply_request(session, &body);
-    // 登录态型供应商：凭证形态标记为 session（Cookie/JWT），与 API Key 区分
-    if registry::session_meta(&session.provider).is_some() {
+    // 登录态型供应商：凭证形态标记为 session（Cookie/JWT），与 API Key 区分。
+    // 显式 credential_kind 入参优先（apply_request 已应用），不覆盖。
+    if body.credential_kind.is_none() && registry::session_meta(&session.provider).is_some() {
         session.credential.kind =
             crate::account_session::model::CREDENTIAL_KIND_SESSION.to_string();
     }
@@ -1777,6 +1796,10 @@ pub async fn handle_import_account_sessions_json(
                 .get("refresh_token")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            credential_kind: entry
+                .get("credential_kind")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             proxy: entry
                 .get("proxy")
                 .and_then(|v| v.as_str())
@@ -1815,11 +1838,6 @@ pub async fn handle_import_account_sessions_json(
         };
         let mut session = AccountSession::new(channel.id.clone(), String::new());
         session = apply_request(session, &req);
-        if let Some(kind) = entry.get("credential_kind").and_then(|v| v.as_str()) {
-            if !kind.trim().is_empty() {
-                session.credential.kind = kind.trim().to_string();
-            }
-        }
         // 具名凭证逐名落库（set_field 内部按口径编码）
         if let Some(fields) = entry.get("credential_fields").and_then(|v| v.as_object()) {
             for (fname, fval) in fields {

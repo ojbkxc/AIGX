@@ -905,16 +905,20 @@ export default function AccountSessions(): JSX.Element {
 
   const providerSearchNeedle = providerSearch.trim().toLowerCase();
 
-  // 内置目录里已有同地址的，预置段不再重复出现（Agent 段已经覆盖）
+  // 判重口径：只统计登录态家地址（API Key 型不在 Agent 段展示，预置段
+  // 的 OpenAI/HuggingFace 等卡不该被后端目录判重滤掉——对齐 Agent2API）
   const builtinUrls = new Set(
     providers
+      .filter((p) => p.auth != null)
       .map((p) => normalizeUrl(p.default_base_url || ''))
       .filter((url) => url.length > 0),
   );
 
-  // 「自定义地址」的落点（openai_compatible）不在 Agent 段重复展示
+  // Agent 段只放登录态家（对齐 Agent2API：内置 = 有 OAuth/设备登录流的家；
+  // API Key 型全家走「预置 API」段）。openai_compatible 是「自定义地址」的
+  // 落点，天然不在此段。
   const agentCards = providers
-    .filter((p) => p.kind !== 'openai_compatible')
+    .filter((p) => p.auth != null && p.kind !== 'openai_compatible')
     .filter(
       (p) =>
         !providerSearchNeedle ||

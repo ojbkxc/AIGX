@@ -746,16 +746,33 @@ export interface PresetProviderItem {
   protocol: ProviderProtocol;
   base_url: string;
   hint?: string;
+  /** Base URL 输入框占位提示（自建面板没有固定地址时给，对齐 Agent2API placeholder） */
+  placeholder?: string;
+  /** 预填的账号级额外请求头（对齐 Agent2API quirks.headers；
+      如 Cline Pass 的客户端形态头是硬门槛，缺了一律 403） */
+  headers?: Record<string, string>;
+  /** 预勾「该上游无需鉴权」（Ollama/OpenCode Zen 免费档，对齐 Agent2API account.noAuth） */
+  no_auth?: boolean;
 }
 
 /** 预置端点模板（逐条对齐 Agent2API `preset-providers.js` 的 PRESET_PROVIDERS：
  *  顺序、命名、协议与说明文案全抄；与内置目录同地址的会在渲染时去重） */
+/** Anthropic coding 端点的 beta 特性头（对齐 Agent2API ANTHROPIC_BETA_HEADERS） */
+const ANTHROPIC_BETA_HEADERS: Record<string, string> = {
+  'Anthropic-Beta': 'claude-code-20250219,interleaved-thinking-2025-05-14',
+};
+
 export const PRESET_PROVIDERS: PresetProviderItem[] = [
   { key: 'openai', name: 'OpenAI', protocol: 'openai', base_url: 'https://api.openai.com/v1' },
-  { key: 'anthropic', name: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com' },
+  {
+    key: 'anthropic', name: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com',
+    headers: { ...ANTHROPIC_BETA_HEADERS },
+  },
   {
     key: 'openrouter', name: 'OpenRouter', protocol: 'openai', base_url: 'https://openrouter.ai/api/v1',
     hint: '一个 Key 用遍多家模型，模型名用「厂商/模型」全称（如 deepseek/deepseek-chat）',
+    // OpenRouter 的推荐标识头（缺了不影响转发，对齐 Agent2API 同款行为）
+    headers: { 'HTTP-Referer': 'https://aigx.local', 'X-Title': 'AIGX' },
   },
   {
     key: 'huggingface', name: 'HuggingFace', protocol: 'openai', base_url: 'https://router.huggingface.co/v1',
@@ -772,6 +789,7 @@ export const PRESET_PROVIDERS: PresetProviderItem[] = [
   {
     key: 'glm', name: 'GLM Coding', protocol: 'anthropic', base_url: 'https://api.z.ai/api/anthropic',
     hint: '国际版 z.ai 的 Coding 套餐；OpenAI 兼容地址为 https://api.z.ai/api/coding/paas/v4',
+    headers: { ...ANTHROPIC_BETA_HEADERS },
   },
   {
     key: 'glm-cn', name: 'GLM 中国', protocol: 'openai', base_url: 'https://open.bigmodel.cn/api/coding/paas/v4',
@@ -780,10 +798,12 @@ export const PRESET_PROVIDERS: PresetProviderItem[] = [
   {
     key: 'minimax', name: 'Minimax Coding', protocol: 'anthropic', base_url: 'https://api.minimax.io/anthropic',
     hint: '国际站 Coding 套餐；OpenAI 兼容地址为 https://api.minimax.io/v1',
+    headers: { ...ANTHROPIC_BETA_HEADERS },
   },
   {
     key: 'minimax-cn', name: 'Minimax 中国', protocol: 'anthropic', base_url: 'https://api.minimaxi.com/anthropic',
     hint: '国内站（minimaxi.com）；OpenAI 兼容地址为 https://api.minimaxi.com/v1',
+    headers: { ...ANTHROPIC_BETA_HEADERS },
   },
   {
     key: 'siliconflow', name: 'SiliconFlow', protocol: 'openai', base_url: 'https://api.siliconflow.com/v1',
@@ -815,27 +835,44 @@ export const PRESET_PROVIDERS: PresetProviderItem[] = [
   },
   {
     key: 'opencode-go', name: 'OpenCode Go', protocol: 'openai', base_url: 'https://opencode.ai/zen/go/v1',
-    hint: '同地址换 anthropic 协议即走它的 Claude 兼容端点。转发必须填 OpenCode Go 的 API Key（订阅制）',
+    hint: '同地址换 anthropic 协议即走它的 Claude 兼容端点。转发必须填 OpenCode Go 的 API Key（订阅制；获取模型清单不需要 Key，但发请求上游会回 401「Missing API key」）',
   },
   {
     key: 'opencode-zen', name: 'OpenCode Zen', protocol: 'openai', base_url: 'https://opencode.ai/inference/v1',
-    hint: '免费模型不用填 Key；付费模型则填 Zen 的 API Key',
+    hint: '免费模型不用填 Key（默认勾上「该上游无需鉴权」）；付费模型则填 Zen 的 API Key',
+    no_auth: true,
   },
   {
     key: 'clinepass', name: 'Cline Pass', protocol: 'openai', base_url: 'https://api.cline.bot/api/v1',
-    hint: 'Cline Pass 的 API Key 在 app.cline.bot 获取（订阅制）；端点为 OpenAI 兼容',
+    hint: 'Cline Pass 的 API Key 在 app.cline.bot 获取（订阅制）；端点为 OpenAI 兼容，模型清单以 Cline 控制台为准，模型名在模型管理里按裸名添加；上游按客户端形态校验，所需的客户端请求头已随卡预置',
+    // 客户端形态头（上游硬门槛：X-CLIENT-TYPE: cline-sdk 缺了一律 403）——
+    // 对齐 Agent2API 抄自 Cline 官方适配器的 DEFAULT_HEADERS
+    headers: {
+      'User-Agent': 'Cline/3.0.62',
+      'HTTP-Referer': 'https://cline.bot',
+      'X-Title': 'Cline',
+      'X-IS-MULTIROOT': 'false',
+      'X-CLIENT-TYPE': 'cline-sdk',
+      'X-CLIENT-VERSION': '3.0.62',
+      'X-PLATFORM': 'terminal',
+      'X-PLATFORM-VERSION': '3.0.62',
+      'X-CORE-VERSION': '0.0.70',
+    },
   },
   {
     key: 'ollama-local', name: 'Ollama（本地）', protocol: 'openai', base_url: 'http://localhost:11434/v1',
-    hint: '本机 Ollama 的 OpenAI 兼容端点，无需 API Key',
+    hint: '本机 Ollama 的 OpenAI 兼容端点，无需 API Key（默认已勾上「该上游无需鉴权」，鉴权头一个都不发）',
+    no_auth: true,
   },
   // ── 自建聚合面板与商汤日日新：随余额查询一起接入，「后到居后」追加 ──
   {
     key: 'sub2api', name: 'Sub2API', protocol: 'openai', base_url: '',
-    hint: '自建聚合面板：填你自己的站点地址（OpenAI 兼容填到 /v1）',
+    placeholder: 'https://你的 Sub2API 站点地址（OpenAI 兼容填到 /v1）',
+    hint: '自建聚合面板：填你自己的站点地址',
   },
   {
     key: 'newapi', name: 'NewAPI', protocol: 'openai', base_url: '',
+    placeholder: 'https://你的 NewAPI 站点地址（OpenAI 兼容填到 /v1）',
     hint: '自建聚合面板：填你自己的站点地址',
   },
   {

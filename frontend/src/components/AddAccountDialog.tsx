@@ -11,6 +11,7 @@ import {
   presetKind,
   type AddField,
   type AddMethodId,
+  type PresetProviderItem,
   type ProviderAddConfig,
 } from '../lib/addAccountConfigs';
 import { useToast } from './Toast';
@@ -141,6 +142,10 @@ export default function AddAccountDialog({
   const [search, setSearch] = useState('');
   const [provider, setProvider] = useState('');
   const [baseUrlHint, setBaseUrlHint] = useState('');
+  /** 预置卡的地址栏占位提示（Sub2API/NewAPI 等自建面板没有固定地址） */
+  const [baseUrlPlaceholder, setBaseUrlPlaceholder] = useState('');
+  /** 「该上游无需鉴权」（预置卡 no_auth 预勾：Ollama / OpenCode Zen 免费档） */
+  const [noAuth, setNoAuth] = useState(false);
   const [method, setMethod] = useState<AddMethodId>('manual');
   const [values, setValues] = useState<Record<string, string>>({});
   const [advanced, setAdvanced] = useState<AdvancedState>({
@@ -177,17 +182,26 @@ export default function AddAccountDialog({
 
   const providerLabel = (p: AccountProviderItem): string => p.label || p.kind;
 
+  // 判重口径：只统计登录态家的地址（对齐 Agent2API：API Key 型不在 Agent 段
+  // 展示，预置段的 OpenAI/HuggingFace 等卡不该被后端目录判重滤掉）
   const builtinUrls = useMemo(
-    () => new Set(providers.map((p) => normalizeUrl(p.default_base_url || ''))),
+    () => new Set(
+      providers
+        .filter((p) => p.auth != null)
+        .map((p) => normalizeUrl(p.default_base_url || '')),
+    ),
     [providers],
   );
   const needle = search.trim().toLowerCase();
+  // Agent 段只放登录态家（对齐 Agent2API：内置 = 有 OAuth/设备登录流的家；
+  // API Key 型全家走「预置 API」段，不在这里混排）
   const agentCards = providers.filter(
     (p) =>
-      !needle
-      || providerLabel(p).toLowerCase().includes(needle)
-      || p.kind.toLowerCase().includes(needle)
-      || (p.default_base_url || '').toLowerCase().includes(needle),
+      p.auth != null
+      && (!needle
+        || providerLabel(p).toLowerCase().includes(needle)
+        || p.kind.toLowerCase().includes(needle)
+        || (p.default_base_url || '').toLowerCase().includes(needle)),
   );
   const presetCards = PRESET_PROVIDERS.filter((p) => !builtinUrls.has(normalizeUrl(p.base_url))).filter(
     (p) =>
@@ -203,16 +217,24 @@ export default function AddAccountDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const pick = (kind: string, baseUrl: string, config?: ProviderAddConfig): void => {
+  const pick = (kind: string, baseUrl: string, config?: ProviderAddConfig, preset?: PresetProviderItem): void => {
     setProvider(kind);
     setBaseUrlHint(baseUrl);
+    setBaseUrlPlaceholder(preset?.placeholder ?? '');
+    setNoAuth(preset?.no_auth ?? false);
     setValues({});
     setRawHeaders('');
     setError('');
+    // 预置卡随带的客户端头预填进「额外请求头」（如 Cline Pass 的客户端形态
+    // 头是上游硬门槛，缺了一律 403——对齐 Agent2API quirks.headers）
+    const headersText = preset?.headers
+      ? Object.entries(preset.headers).map(([k, v]) => `${k}: ${v}`).join('\n')
+      : '';
     setAdvanced((prev) => ({
       ...EMPTY_ADVANCED,
       channel_id: prev.channel_id,
       base_url: baseUrl,
+      extra_headers: headersText,
     }));
     const methods = config?.methods?.length ? config.methods : (['manual'] as AddMethodId[]);
     setMethod(methods[0]);
@@ -488,7 +510,12 @@ export default function AddAccountDialog({
         proxy: advanced.proxy.trim(),
       };
       if (method === 'manual' || !addConfig) {
-        payload.api_key = credential;
+        payload.api_key = noAuth ? '' : credential;
+      }
+      // 免鉴权：凭证形态落 none（转发时一个鉴权头都不发——Ollama /
+      // OpenCode Zen 免费档等；对齐 Agent2API account.noAuth）
+      if (noAuth) {
+        payload.credential_kind = 'none';
       }
       // 续期令牌（refreshToken / Coding Plan JWT 等）：表单里 key 为 refreshToken
       // 或 jwt 时落到 refresh_token（AIGX 暂不自动续期，先存下来供后续使用）
@@ -580,7 +607,7 @@ export default function AddAccountDialog({
                       type="button"
                       key={p.key}
                       className="add-card"
-                      onClick={() => pick(presetKind(p.protocol), p.base_url)}
+                      onClick={() => pick(presetKind(p.protocol), p.base_url, undefined, p)}
                     >
                       {presetIcon(p.key) ? (
                         <img
@@ -823,12 +850,22 @@ export default function AddAccountDialog({
                             ? t('访问令牌（JWT）')
                             : t('API Key'),
                       rows: 3,
-                      placeholder: 'sk-...',
+                      placeholder: noAuth ? t('无需填写（该上游免鉴权）') : 'sk-...',
                       target: 'credential',
                     }}
-                    value={values.credential || ''}
+                    value={noAuth ? '' : (values.credential || '')}
                     onChange={(v) => setValue('credential', v)}
                   />
+                  {/* 免鉴权（对齐 Agent2API account.noAuth）：Ollama / OpenCode Zen
+                      免费档等上游一个鉴权头都不发 */}
+                  <label className="form-hint" style={{ display: 'inline-flex', gap: 6, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={noAuth}
+                      onChange={(e) => setNoAuth(e.target.checked)}
+                    />
+                    {t('该上游无需鉴权（本地/免费端点）')}
+                  </label>
                   <div className="add-block">
                     <h4>{t('从抓包请求头导入（可选）')}</h4>
                     <Textarea
@@ -880,7 +917,7 @@ export default function AddAccountDialog({
                   ) : null}
                   <Input
                     label={t('上游地址（可选，留空用 provider 默认）')}
-                    placeholder={selectedProvider?.default_base_url || baseUrlHint || 'https://api.deepseek.com'}
+                    placeholder={baseUrlPlaceholder || selectedProvider?.default_base_url || baseUrlHint || 'https://api.deepseek.com'}
                     value={advanced.base_url}
                     onChange={(e) => setAdvanced({ ...advanced, base_url: e.target.value })}
                   />
