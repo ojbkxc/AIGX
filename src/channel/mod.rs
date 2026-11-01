@@ -1425,7 +1425,7 @@ impl ChannelStore {
                 // 候选集排序同 weighted（priority 降序 + 组内加权随机），
                 // 但把 RR 游标命中的组内渠道顶到最前——游标按组推进实现
                 // 「组间按优先级、组内轮询」。
-                let candidates = self.select_for_model(model);
+                let mut candidates = self.select_for_model(model);
                 if candidates.is_empty() {
                     return candidates;
                 }

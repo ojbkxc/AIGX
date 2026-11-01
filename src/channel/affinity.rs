@@ -35,10 +35,12 @@ struct CacheEntry {
 /// 亲和性缓存 — DashMap 实现，双 TTL。
 ///
 /// 线程安全：所有方法通过 DashMap 的内部分片锁保护。
+/// TTL 热更新：字段存 `RwLock`（管理面保存时写一次，数据面每读锁取），
+/// 「会话粘性」档位切换即生效（对照 Agent2API routingSticky）。
 pub struct AffinityCache {
     entries: DashMap<CacheKey, CacheEntry>,
-    sticky_ttl: Duration,
-    hard_ttl: Duration,
+    sticky_ttl: parking_lot::RwLock<Duration>,
+    hard_ttl: parking_lot::RwLock<Duration>,
 }
 
 impl Default for AffinityCache {
@@ -58,8 +60,8 @@ impl AffinityCache {
         );
         Self {
             entries: DashMap::new(),
-            sticky_ttl,
-            hard_ttl,
+            sticky_ttl: parking_lot::RwLock::new(sticky_ttl),
+            hard_ttl: parking_lot::RwLock::new(hard_ttl),
         }
     }
 
@@ -72,12 +74,12 @@ impl AffinityCache {
         let compound = (session_id.to_string(), model.to_string());
         let entry = self.entries.get(&compound)?;
         let age = entry.created_at.elapsed();
-        if age > self.hard_ttl {
+        if age > *self.hard_ttl.read() {
             drop(entry);
             self.entries.remove(&compound);
             return None;
         }
-        if age > self.sticky_ttl {
+        if age > *self.sticky_ttl.read() {
             return None;
         }
         Some(entry.channel_id.clone())
@@ -107,8 +109,9 @@ impl AffinityCache {
     /// 清扫全部过硬 TTL 的条目。
     fn purge_expired(&self) {
         let now = Instant::now();
+        let hard = *self.hard_ttl.read();
         self.entries
-            .retain(|_, entry| now.duration_since(entry.created_at) <= self.hard_ttl);
+            .retain(|_, entry| now.duration_since(entry.created_at) <= hard);
     }
 
     /// 清除 `(session_id, model)` 的亲和条目。
@@ -117,6 +120,21 @@ impl AffinityCache {
     pub fn evict(&self, session_id: &str, model: &str) {
         let compound = (session_id.to_string(), model.to_string());
         self.entries.remove(&compound);
+    }
+
+    /// 热更新 TTL（路由设置「会话粘性」档位切换时调用）。
+    ///
+    /// 已有条目按**新 TTL** 判定（收紧立即生效；放宽只是多粘一会儿，
+    /// 均可接受）。
+    pub fn update_ttls(&self, sticky_ttl: Duration, hard_ttl: Duration) {
+        assert!(
+            sticky_ttl <= hard_ttl,
+            "sticky_ttl 必须 <= hard_ttl，得到 sticky={:?} hard={:?}",
+            sticky_ttl,
+            hard_ttl
+        );
+        *self.sticky_ttl.write() = sticky_ttl;
+        *self.hard_ttl.write() = hard_ttl;
     }
 
     /// 近似条目数（DashMap len 在并发下是近似值）。

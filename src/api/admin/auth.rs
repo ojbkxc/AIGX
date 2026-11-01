@@ -10,6 +10,7 @@ use serde_json::Value;
 use super::common::error_response;
 use super::common::extract_client_ip;
 use super::common::extract_session_token;
+use super::common::verify_user;
 
 use super::super::auth::SessionStore;
 use super::super::openai::AppState;
@@ -151,6 +152,14 @@ pub async fn handle_login(
     if let Some(u) = state.user_store.authenticate(&body.email, &body.password) {
         // 登录成功：清除失败计数
         state.login_failures.remove(&client_ip).await;
+        // password_set 自愈：旧数据缺该字段按 false，一旦用密码成功登录过就
+        // 翻成 true —— 关闭「他人凭相同邮箱注册密码账号、再用 OAuth 登进该
+        // 账号」的接管面（OAuth 邮箱兜底只接纳尚未设置密码的存量 OAuth 账号）。
+        if !u.password_set {
+            let _ = state
+                .user_store
+                .update(&u.id, |user| user.password_set = true);
+        }
         // 2FA/TOTP（P1）：用户已开启 TOTP 时不下发 session，
         // 返回 require_2fa + 一次性 tmp_token，客户端二次提交验证码。
         // totp_enabled=false 的用户走原路径，行为不变（向后兼容）。
@@ -221,6 +230,12 @@ pub async fn handle_login(
         if u.status == "active" && user::verify_password(&body.password, &u.password) {
             // 登录成功：清除失败计数
             state.login_failures.remove(&client_ip).await;
+            // password_set 自愈（同 email 分支）
+            if !u.password_set {
+                let _ = state
+                    .user_store
+                    .update(&u.id, |user| user.password_set = true);
+            }
             let session_secret = if config.admin.session_secret.is_empty() {
                 Uuid::new_v4().to_string()
             } else {
@@ -743,6 +758,505 @@ pub async fn handle_reset_password(
     }
 }
 
+// ── OAuth 统一回调 / 绑定 / 票据基础设施 ──────────────────────────────
+//
+// 三个 provider（google / github / linuxdo）共用一套流程，差异只在
+// profile 字段提取。旧实现有三处问题，一并修正：
+// 1. callback 给浏览器返回**原始 JSON**（token 在里面），但发起方是
+//    `window.location.href` 整页跳转 → 用户只会看到一片 JSON，token 永远
+//    进不了 localStorage，OAuth 登录实际上登不进来。改为 302 回 SPA。
+// 2. 归属纯靠 email 隐式匹配 → 任何人用相同邮箱注册密码账号，再用对应
+//    OAuth 登录就能登进别人账号（接管）。改为「显式身份优先」，email 兜底
+//    只接纳尚未设密码的存量 OAuth 账号（见 resolve_oauth_login）。
+// 3. 没有「在已登录状态下把第三方账号绑到当前用户」的能力 → 新增 bind/start
+//    （POST，带 Bearer，SPA 拿 url 再整页跳）+ 复用 callback 的绑定分支。
+//
+// token 不进 URL：登录成功签发一次性 ticket（TTL 2 分钟，oauth_ticket），
+// 只把 ticket 放 fragment；SPA 调 /api/auth/oauth/consume 用 ticket 换回
+// 完整会话数据。绑定结果回 /profile#oauth_bind=…（成功/失败码，不回任何 token）。
+
+/// 把 provider 身份写入用户的对应字段。
+fn set_oauth_identity(u: &mut user::User, provider: &str, identity: &str) {
+    match provider {
+        "github" => u.oauth_github = identity.to_string(),
+        "google" => u.oauth_google = identity.to_string(),
+        "linuxdo" => u.oauth_linuxdo = identity.to_string(),
+        _ => {}
+    }
+}
+
+/// 读取用户某 provider 已绑定的身份（空=未绑定）。
+fn get_oauth_identity(u: &user::User, provider: &str) -> &str {
+    match provider {
+        "github" => &u.oauth_github,
+        "google" => &u.oauth_google,
+        "linuxdo" => &u.oauth_linuxdo,
+        _ => "",
+    }
+}
+
+/// 302 回 SPA 登录页并把一次性 ticket 放进 URL fragment（不进 query / 不进日志）。
+fn redirect_login_ticket(ticket: &str) -> Response {
+    Redirect::to(&format!("/login#oauth_ticket={ticket}")).into_response()
+}
+
+/// 302 回 SPA 登录页并带一个稳定的错误码（前端按码给本地化文案）。
+fn redirect_login_error(code: &str) -> Response {
+    Redirect::to(&format!("/login#oauth_error={code}")).into_response()
+}
+
+/// 302 回个人中心并报告绑定结果（provider + 状态 + 可选错误码，均不含敏感数据）。
+fn redirect_bind_result(provider: &str, status: &str, reason: Option<&str>) -> Response {
+    let tail = match reason {
+        Some(r) => format!("&reason={r}"),
+        None => String::new(),
+    };
+    Redirect::to(&format!(
+        "/profile#oauth_bind={provider}&status={status}{tail}"
+    ))
+    .into_response()
+}
+
+/// 建会话（与密码登录同一签发口径），返回 (token, expires_at)。
+async fn issue_oauth_session(state: &AppState, email: &str) -> (String, i64) {
+    let config = state.config_manager.get().await;
+    let session_ttl = config.admin.session_ttl_hours.max(1);
+    let session_secret = if config.admin.session_secret.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        config.admin.session_secret.clone()
+    };
+    let session_store = SessionStore::new(&session_secret, session_ttl);
+    let session = session_store.create_session(email);
+    state.session_registry.register(email, &session.session_id);
+    (session.token, session.expires_at)
+}
+
+/// 登录流归属解析：显式身份优先 → email 兜底（仅存量未设密码的 OAuth 账号，
+/// 命中即补写身份升级为显式绑定）→ 建号。返回 Err(错误码) 交由上层重定向提示。
+async fn resolve_oauth_login(
+    state: &AppState,
+    provider: &str,
+    identity: &str,
+    email: Option<&str>,
+    username: &str,
+    register_quota: i64,
+) -> Result<user::User, &'static str> {
+    // 1. 已显式绑定该身份
+    if let Some(u) = state.user_store.find_by_oauth(provider, identity) {
+        if u.status != "active" {
+            return Err("disabled");
+        }
+        return Ok(u);
+    }
+    // 2. email 兜底
+    if let Some(em) = email.map(str::trim).filter(|e| !e.is_empty()) {
+        if let Some(u) = state.user_store.get_by_email(em) {
+            if u.status != "active" {
+                return Err("disabled");
+            }
+            // 该邮箱是「已设密码」的账号：绝不在登录流里自动绑定 —— 这正是接管
+            // 攻击面。要关联请先到个人中心登录后手动绑定。
+            if u.password_set {
+                return Err("need_bind");
+            }
+            // 存量 OAuth 账号（随机密码 / 从未设过密码）：升级为显式绑定。
+            let uid = u.id.clone();
+            let pid = provider.to_string();
+            let idt = identity.to_string();
+            if let Ok(updated) = state
+                .user_store
+                .update(&uid, |x| set_oauth_identity(x, &pid, &idt))
+            {
+                return Ok(updated);
+            }
+            return Ok(u);
+        }
+    }
+    // 3. 无匹配：建号。缺 email 用伪邮箱（与旧行为一致）。
+    let final_email = email
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| format!("{username}@{provider}.local"));
+    let uname = if username.is_empty() {
+        format!("{provider}用户")
+    } else {
+        username.to_string()
+    };
+    state
+        .user_store
+        .create_oauth_user(&final_email, &uname, provider, identity, register_quota)
+        .map_err(|e| {
+            tracing::warn!("OAuth create user failed ({provider}): {e}");
+            "create_failed"
+        })
+}
+
+/// 绑定流归属校验：把 provider 身份绑到 `target_email`（个人中心发起）。
+/// 冲突（该身份已属他人 / 目标已有别的同 provider 身份）时拒绝并记安全事件。
+async fn resolve_oauth_bind(
+    state: &AppState,
+    provider: &str,
+    identity: &str,
+    target_email: &str,
+) -> Result<(), &'static str> {
+    let target = state
+        .user_store
+        .get_by_email(target_email)
+        .ok_or("unknown_user")?;
+    // 该第三方身份是否已被「别的用户」占用
+    if let Some(occ) = state.user_store.find_by_oauth(provider, identity) {
+        if occ.email != target.email {
+            state.log_store.record_security(
+                crate::log::SecurityEvent::new(
+                    crate::log::SecurityEventType::Intrusion,
+                    "critical",
+                    format!(
+                        "OAuth 绑定冲突：{provider} 身份 {identity} 已属用户 {}，用户 {} 试图占用",
+                        occ.email, target.email
+                    ),
+                )
+                .with_user(Some(target.id.clone())),
+            );
+            return Err("taken");
+        }
+        // 已在目标身上 → 幂等成功
+        return Ok(());
+    }
+    // 目标用户在同 provider 上已绑了另一个身份
+    let cur = get_oauth_identity(&target, provider);
+    if !cur.is_empty() && cur != identity {
+        return Err("conflict");
+    }
+    let uid = target.id.clone();
+    let pid = provider.to_string();
+    let idt = identity.to_string();
+    state
+        .user_store
+        .update(&uid, |x| set_oauth_identity(x, &pid, &idt))
+        .map_err(|e| {
+            tracing::warn!("OAuth bind persist failed: {e}");
+            "persist_failed"
+        })?;
+    state.log_store.record_security(
+        crate::log::SecurityEvent::new(
+            crate::log::SecurityEventType::AuthFailure,
+            "info",
+            format!("用户 {} 绑定了 {provider} 账号", target.email),
+        )
+        .with_user(Some(target.id.clone())),
+    );
+    Ok(())
+}
+
+/// 统一 OAuth 回调：按 state 命中哪个缓存区分登录 / 绑定两条流。
+async fn oauth_handle_callback(
+    state: AppState,
+    provider: &'static str,
+    code: String,
+    state_param: Option<String>,
+) -> Response {
+    if code.trim().is_empty() {
+        return redirect_login_error("no_code");
+    }
+    let sp = match state_param {
+        Some(ref s) if !s.is_empty() => s.clone(),
+        _ => return redirect_login_error("missing_state"),
+    };
+    // 判定流程 + 一次性消费对应缓存
+    let bind_email: Option<String> = match state.oauth_bind_state.get(&sp).await {
+        Some(email) => {
+            state.oauth_bind_state.remove(&sp).await;
+            Some(email)
+        }
+        None => {
+            if state.oauth_state_cache.get(&sp).await.is_some() {
+                state.oauth_state_cache.remove(&sp).await;
+                None // 登录流
+            } else {
+                return redirect_login_error("invalid_state");
+            }
+        }
+    };
+
+    // 换 access token + 拉 profile（三家实现不同）
+    let config = state.config_manager.get().await;
+    let register_quota = config.usage.register_quota;
+    let (identity, email, username) =
+        match fetch_oauth_profile(&state, &config, provider, code.trim()).await {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!("OAuth callback {provider} failed: {err}");
+                return redirect_login_error("upstream_failed");
+            }
+        };
+
+    if let Some(target_email) = bind_email {
+        // ── 绑定流 ──
+        match resolve_oauth_bind(&state, provider, &identity, &target_email).await {
+            Ok(()) => redirect_bind_result(provider, "ok", None),
+            Err(reason) => redirect_bind_result(provider, "error", Some(reason)),
+        }
+    } else {
+        // ── 登录流 ──
+        let user = match resolve_oauth_login(
+            &state,
+            provider,
+            &identity,
+            email.as_deref(),
+            &username,
+            register_quota,
+        )
+        .await
+        {
+            Ok(u) => u,
+            Err(code) => {
+                tracing::info!("OAuth login {provider} rejected: {code}");
+                return redirect_login_error(code);
+            }
+        };
+        let (token, expires_at) = issue_oauth_session(&state, &user.email).await;
+        let payload = serde_json::json!({
+            "token": token,
+            "email": user.email,
+            "username": user.username,
+            "role": match user.role { Role::Admin => "admin", Role::User => "user" },
+            "expires_at": expires_at,
+            "must_change_password": user.must_change_password,
+        });
+        let ticket = Uuid::new_v4().to_string();
+        state
+            .oauth_ticket
+            .insert(ticket.clone(), payload.to_string())
+            .await;
+        redirect_login_ticket(&ticket)
+    }
+}
+
+/// 拉取并归一化上游 profile：返回 (稳定身份 id, 邮箱?, 用户名)。
+async fn fetch_oauth_profile(
+    state: &AppState,
+    config: &crate::config::AppConfig,
+    provider: &str,
+    code: &str,
+) -> anyhow::Result<(String, Option<String>, String)> {
+    match provider {
+        "github" => {
+            let oauth = &config.github_oauth;
+            if !oauth.ready() {
+                anyhow::bail!("GitHub OAuth not configured");
+            }
+            let token =
+                crate::oauth::github::exchange_code(oauth, code, &state.http_client).await?;
+            let g = crate::oauth::github::get_user_info(&token, &state.http_client).await?;
+            Ok((g.id.to_string(), g.email.clone(), g.login.clone()))
+        }
+        "google" => {
+            let oauth = &config.google_oauth;
+            if !oauth.ready() {
+                anyhow::bail!("Google OAuth not configured");
+            }
+            let token =
+                crate::oauth::google::exchange_code(oauth, code, &state.http_client).await?;
+            let g = crate::oauth::google::get_user_info(&token, &state.http_client).await?;
+            Ok((
+                g.sub.clone(),
+                g.email.clone(),
+                g.name.clone().unwrap_or_else(|| g.sub.clone()),
+            ))
+        }
+        "linuxdo" => {
+            let oauth = &config.linuxdo_oauth;
+            if !oauth.ready() {
+                anyhow::bail!("LinuxDO OAuth not configured");
+            }
+            let token =
+                crate::oauth::linuxdo::exchange_code(oauth, code, &state.http_client).await?;
+            let g = crate::oauth::linuxdo::get_user_info(&token, &state.http_client).await?;
+            // LinuxDO 无 email 字段，统一用伪邮箱（与旧行为一致）
+            Ok((g.id.to_string(), None, g.username.clone()))
+        }
+        other => anyhow::bail!("unknown oauth provider {other}"),
+    }
+}
+
+/// 生成 provider 登录授权 URL（三家端点不同）。未配置返回 None。
+fn build_provider_authorize_url(
+    config: &crate::config::AppConfig,
+    provider: &str,
+    state: &str,
+) -> Option<String> {
+    match provider {
+        "github" => {
+            let o = &config.github_oauth;
+            if !o.ready() {
+                return None;
+            }
+            Some(format!(
+                "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=user:email&state={}",
+                o.client_id, o.redirect_uri, state
+            ))
+        }
+        "google" => {
+            let o = &config.google_oauth;
+            if !o.ready() {
+                return None;
+            }
+            Some(crate::oauth::google::build_authorize_url(o, state))
+        }
+        "linuxdo" => {
+            let o = &config.linuxdo_oauth;
+            if !o.ready() {
+                return None;
+            }
+            Some(format!(
+                "https://connect.linux.do/oauth2/authorize?response_type=code&client_id={}&redirect_uri={}&state={}",
+                o.client_id, o.redirect_uri, state
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// POST /api/auth/{provider}/bind/start —— 已登录用户发起第三方账号绑定。
+///
+/// 整页跳转（callback）不带 Authorization 头，所以绑定身份不能靠请求头传递：
+/// 这里用 Bearer 校验当前用户，生成一次性 state 把其 email 存进 oauth_bind_state，
+/// 返回授权 URL；前端再 `window.location.href = url` 整页跳过去。callback 命中
+/// 该 state 即走绑定流（见 oauth_handle_callback）。
+async fn oauth_bind_start(state: AppState, provider: &'static str, headers: HeaderMap) -> Response {
+    let user = match verify_user(&state, &headers).await {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    if user.status != "active" {
+        return error_response("账号已禁用", StatusCode::UNAUTHORIZED).into_response();
+    }
+    let config = state.config_manager.get().await;
+    let state_param = Uuid::new_v4().to_string();
+    let url = match build_provider_authorize_url(&config, provider, &state_param) {
+        Some(u) => u,
+        None => {
+            return error_response(&format!("{provider} OAuth 未配置"), StatusCode::BAD_REQUEST)
+                .into_response()
+        }
+    };
+    state
+        .oauth_bind_state
+        .insert(state_param, user.email.clone())
+        .await;
+    Json(serde_json::json!({ "success": true, "data": { "url": url } })).into_response()
+}
+
+pub async fn handle_github_bind_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    oauth_bind_start(state, "github", headers).await
+}
+pub async fn handle_google_bind_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    oauth_bind_start(state, "google", headers).await
+}
+pub async fn handle_linuxdo_bind_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    oauth_bind_start(state, "linuxdo", headers).await
+}
+
+/// POST /api/auth/oauth/unbind —— 解绑当前用户的某 provider 第三方账号。
+///
+/// 防锁死：解绑前确认还剩至少一种可用登录方式（密码 / 另一个 provider / TOTP），
+/// 否则解绑后用户将永远无法登录。
+#[derive(Debug, Deserialize)]
+pub struct OAuthUnbindRequest {
+    pub provider: String,
+}
+
+pub async fn handle_oauth_unbind(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<OAuthUnbindRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user = verify_user(&state, &headers).await?;
+    let provider = body.provider.trim().to_lowercase();
+    if !matches!(provider.as_str(), "github" | "google" | "linuxdo") {
+        return Err(error_response(
+            "未知的第三方账号类型",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let bound = !get_oauth_identity(&user, &provider).is_empty();
+    if !bound {
+        return Err(error_response(
+            "该第三方账号未绑定",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    // 防锁死：解绑该 provider 后，是否还剩其它登录方式
+    let remaining_oauth = ["github", "google", "linuxdo"]
+        .iter()
+        .filter(|p| **p != provider.as_str())
+        .any(|p| !get_oauth_identity(&user, p).is_empty());
+    let has_password = user.password_set && !user.password.is_empty();
+    let has_totp = user.totp_enabled;
+    if !remaining_oauth && !has_password && !has_totp {
+        return Err(error_response(
+            "这是唯一的登录方式，解绑后将无法登录。请先设置密码或绑定其它账号。",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let uid = user.id.clone();
+    let pv = provider.clone();
+    state
+        .user_store
+        .update(&uid, |u| set_oauth_identity(u, &pv, ""))
+        .map_err(|e| {
+            error_response(&format!("解绑失败：{e}"), StatusCode::INTERNAL_SERVER_ERROR)
+        })?;
+    state.log_store.record_security(
+        crate::log::SecurityEvent::new(
+            crate::log::SecurityEventType::AuthFailure,
+            "info",
+            format!("用户 {} 解绑了 {provider} 账号", user.email),
+        )
+        .with_user(Some(user.id.clone())),
+    );
+    Ok(Json(
+        serde_json::json!({ "success": true, "data": { "provider": provider } }),
+    ))
+}
+
+/// POST /api/auth/oauth/consume —— 一次性 ticket 换回会话数据。
+#[derive(Debug, Deserialize)]
+pub struct OAuthConsumeRequest {
+    pub ticket: String,
+}
+
+pub async fn handle_oauth_consume(
+    State(state): State<AppState>,
+    Json(body): Json<OAuthConsumeRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let ticket = body.ticket.trim();
+    if ticket.is_empty() {
+        return Err(error_response("缺少 ticket", StatusCode::BAD_REQUEST));
+    }
+    let payload = state
+        .oauth_ticket
+        .get(&ticket.to_string())
+        .await
+        .ok_or_else(|| error_response("登录票据无效或已过期", StatusCode::UNAUTHORIZED))?;
+    // 一次性消费：换过即作废，防重放
+    state.oauth_ticket.remove(&ticket.to_string()).await;
+    let value: Value = serde_json::from_str(&payload)
+        .map_err(|_| error_response("票据数据损坏", StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(serde_json::json!({ "success": true, "data": value })))
+}
+
 // ── 功能 2：Google OAuth ─────────────────────────────────────────────
 //
 // 参照 burncloud `api/auth.rs::oauth_google` 及 AIGX 既有 `handle_github_oauth_*` 模式。
@@ -771,100 +1285,13 @@ pub async fn handle_google_oauth_callback(
     State(state): State<AppState>,
     Query(params): Query<GoogleCallbackParams>,
 ) -> Response {
-    let config = state.config_manager.get().await;
-    let oauth = config.google_oauth.clone();
-    if !oauth.ready() {
-        return error_response("Google OAuth not configured", StatusCode::BAD_REQUEST)
-            .into_response();
-    }
-    let code = match params.code {
-        Some(c) => c,
-        None => {
-            return error_response("Missing authorization code", StatusCode::BAD_REQUEST)
-                .into_response()
-        }
-    };
-    // CSRF 防护：校验 state（一次性消费，防重放/伪造回调）
-    let state_param = match params.state {
-        Some(ref s) if !s.is_empty() => s.clone(),
-        _ => return error_response("Missing OAuth state", StatusCode::BAD_REQUEST).into_response(),
-    };
-    if state.oauth_state_cache.get(&state_param).await.is_none() {
-        tracing::warn!("Google OAuth callback: invalid or expired state (CSRF check failed)");
-        return error_response("Invalid OAuth state", StatusCode::BAD_REQUEST).into_response();
-    }
-    state.oauth_state_cache.remove(&state_param).await;
-    // 用授权码换取 access token
-    let access_token =
-        match crate::oauth::google::exchange_code(&oauth, &code, &state.http_client).await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!("Google OAuth token exchange failed: {e}");
-                return error_response("OAuth token exchange failed", StatusCode::BAD_GATEWAY)
-                    .into_response();
-            }
-        };
-    // 拉取用户信息
-    let g_user = match crate::oauth::google::get_user_info(&access_token, &state.http_client).await
-    {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::error!("Google OAuth user info failed: {e}");
-            return error_response("Failed to fetch Google user info", StatusCode::BAD_GATEWAY)
-                .into_response();
-        }
-    };
-    // 确定邮箱：优先 email，否则用 sub 造伪邮箱
-    let email = g_user
-        .email
-        .clone()
-        .unwrap_or_else(|| format!("{}@google.local", g_user.sub));
-    // 用户名：优先 name，否则用 sub
-    let username = g_user.name.clone().unwrap_or_else(|| g_user.sub.clone());
-    // 查找或创建用户
-    let user = match state.user_store.get_by_email(&email) {
-        Some(u) => u,
-        None => match state.user_store.create_with_username(
-            &email,
-            &username,
-            &Uuid::new_v4().to_string(), // 随机密码（OAuth 用户不走密码登录）
-            crate::user::Role::User,
-            config.usage.register_quota,
-        ) {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::error!("Failed to create Google OAuth user: {e}");
-                return error_response("Failed to create user", StatusCode::INTERNAL_SERVER_ERROR)
-                    .into_response();
-            }
-        },
-    };
-    // 创建会话
-    let session_ttl = config.admin.session_ttl_hours.max(1);
-    let session_secret = if config.admin.session_secret.is_empty() {
-        Uuid::new_v4().to_string()
-    } else {
-        config.admin.session_secret.clone()
-    };
-    let session_store = SessionStore::new(&session_secret, session_ttl);
-    let session = session_store.create_session(&user.email);
-    state
-        .session_registry
-        .register(&user.email, &session.session_id);
-    Json(serde_json::json!({
-        "success": true,
-        "data": {
-            "token": session.token,
-            "email": user.email,
-            "username": user.username,
-            "role": match user.role {
-                crate::user::Role::Admin => "admin",
-                crate::user::Role::User => "user",
-            },
-            "expires_at": session.expires_at,
-        }
-    }))
-    .into_response()
+    oauth_handle_callback(
+        state,
+        "google",
+        params.code.unwrap_or_default(),
+        params.state,
+    )
+    .await
 }
 
 // ── 功能 3：GitHub OAuth ─────────────────────────────────────────────
@@ -895,109 +1322,18 @@ pub async fn handle_github_oauth_authorize(State(state): State<AppState>) -> Res
     Redirect::to(&url).into_response()
 }
 
-/// GET /api/auth/github/callback — GitHub OAuth 回调处理
+/// GET /api/auth/github/callback — GitHub OAuth 回调处理（登录 / 绑定统一走 oauth_handle_callback）
 pub async fn handle_github_oauth_callback(
     State(state): State<AppState>,
     Query(params): Query<GithubCallbackParams>,
 ) -> Response {
-    let config = state.config_manager.get().await;
-    let oauth = config.github_oauth.clone();
-    if !oauth.ready() {
-        return error_response("GitHub OAuth not configured", StatusCode::BAD_REQUEST)
-            .into_response();
-    }
-    let code = match params.code {
-        Some(c) => c,
-        None => {
-            return error_response("Missing authorization code", StatusCode::BAD_REQUEST)
-                .into_response()
-        }
-    };
-    // CSRF 防护：校验 state（一次性消费，防重放/伪造回调）
-    let state_param = match params.state {
-        Some(ref s) if !s.is_empty() => s.clone(),
-        _ => return error_response("Missing OAuth state", StatusCode::BAD_REQUEST).into_response(),
-    };
-    if state.oauth_state_cache.get(&state_param).await.is_none() {
-        tracing::warn!("GitHub OAuth callback: invalid or expired state (CSRF check failed)");
-        return error_response("Invalid OAuth state", StatusCode::BAD_REQUEST).into_response();
-    }
-    state.oauth_state_cache.remove(&state_param).await;
-    // Exchange code for access token
-    let access_token =
-        match crate::oauth::github::exchange_code(&oauth, &code, &state.http_client).await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!("GitHub OAuth token exchange failed: {e}");
-                return error_response("OAuth token exchange failed", StatusCode::BAD_GATEWAY)
-                    .into_response();
-            }
-        };
-    // Fetch user info
-    let gh_user = match crate::oauth::github::get_user_info(&access_token, &state.http_client).await
-    {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::error!("GitHub OAuth user info failed: {e}");
-            return error_response("Failed to fetch GitHub user info", StatusCode::BAD_GATEWAY)
-                .into_response();
-        }
-    };
-    // Determine email: prefer primary email, fallback to github id pseudo-email
-    let email = gh_user
-        .email
-        .clone()
-        .unwrap_or_else(|| format!("{}@github.local", gh_user.login));
-    // Find or create user
-    let user = match state.user_store.get_by_email(&email) {
-        Some(u) => u,
-        None => {
-            // Auto-create user for GitHub OAuth
-            match state.user_store.create_with_username(
-                &email,
-                &gh_user.login,
-                &Uuid::new_v4().to_string(), // random password (OAuth users don't use password login)
-                crate::user::Role::User,
-                config.usage.register_quota,
-            ) {
-                Ok(u) => u,
-                Err(e) => {
-                    tracing::error!("Failed to create OAuth user: {e}");
-                    return error_response(
-                        "Failed to create user",
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    )
-                    .into_response();
-                }
-            }
-        }
-    };
-    // Create session
-    let session_ttl = config.admin.session_ttl_hours.max(1);
-    let session_secret = if config.admin.session_secret.is_empty() {
-        Uuid::new_v4().to_string()
-    } else {
-        config.admin.session_secret.clone()
-    };
-    let session_store = SessionStore::new(&session_secret, session_ttl);
-    let session = session_store.create_session(&user.email);
-    state
-        .session_registry
-        .register(&user.email, &session.session_id);
-    Json(serde_json::json!({
-        "success": true,
-        "data": {
-            "token": session.token,
-            "email": user.email,
-            "username": user.username,
-            "role": match user.role {
-                crate::user::Role::Admin => "admin",
-                crate::user::Role::User => "user",
-            },
-            "expires_at": session.expires_at,
-        }
-    }))
-    .into_response()
+    oauth_handle_callback(
+        state,
+        "github",
+        params.code.unwrap_or_default(),
+        params.state,
+    )
+    .await
 }
 
 // ── 功能 4：LinuxDO OAuth ────────────────────────────────────────────

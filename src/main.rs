@@ -252,6 +252,12 @@ async fn main() -> anyhow::Result<()> {
                 .circuit_breaker()
                 .update_params(p.breaker.threshold, p.breaker.cooldown_secs);
         }
+        if let Some((sticky_secs, hard_secs)) = p.sticky.ttls() {
+            channel_store.affinity_cache().update_ttls(
+                Duration::from_secs(sticky_secs),
+                Duration::from_secs(hard_secs),
+            );
+        }
         channel_store.set_scheduler_config(p.scheduler_weights.clone());
     }
 

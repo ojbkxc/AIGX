@@ -236,16 +236,6 @@ impl CircuitBreaker {
         Self::new(5, 30)
     }
 
-    /// 当前失败阈值（路由设置面板展示用）。
-    pub fn failure_threshold(&self) -> u32 {
-        self.failure_threshold.load(Ordering::Relaxed)
-    }
-
-    /// 当前冷却秒数（路由设置面板展示用）。
-    pub fn cooldown_secs(&self) -> u64 {
-        self.cooldown_secs.load(Ordering::Relaxed) as u64
-    }
-
     /// 热更新断路器参数（下一请求生效，已累计的失败计数保留）。
     pub fn update_params(&self, failure_threshold: u32, cooldown_seconds: u64) {
         self.failure_threshold

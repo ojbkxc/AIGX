@@ -162,6 +162,13 @@ pub async fn handle_update_routing(
             .circuit_breaker()
             .update_params(policy.breaker.threshold, policy.breaker.cooldown_secs);
     }
+    // 粘性档位热更：切换亲和缓存双 TTL（auto=5min/30min，session=6h/6h）
+    if let Some((sticky_secs, hard_secs)) = policy.sticky.ttls() {
+        state.channel_store.affinity_cache().update_ttls(
+            std::time::Duration::from_secs(sticky_secs),
+            std::time::Duration::from_secs(hard_secs),
+        );
+    }
     // 调度权重热更（ranked 策略生效）
     state
         .channel_store

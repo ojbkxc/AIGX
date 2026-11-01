@@ -237,7 +237,7 @@ fn apply_interstitial(region: &Region, authorize_url: &str) -> String {
     let mut replaced = false;
     let mut segments: Vec<String> = Vec::new();
     for segment in query.split('&').filter(|value| !value.is_empty()) {
-        if segment.starts_with(prefix) {
+        if segment.starts_with(prefix.as_str()) {
             if !replaced {
                 segments.push(replacement.clone());
                 replaced = true;

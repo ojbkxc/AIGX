@@ -33,7 +33,7 @@ pub const RPM_FACTOR_LEARNING: f64 = 1.0;
 pub const RPM_FACTOR_COOLDOWN: f64 = 0.1;
 
 /// 组合调度权重配置。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SchedulerPolicyConfig {
     #[serde(default = "default_health_weight")]
     pub health_weight: f64,

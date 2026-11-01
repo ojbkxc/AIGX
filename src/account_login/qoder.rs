@@ -169,14 +169,14 @@ pub async fn start(client: &reqwest::Client, intl: bool) -> Result<Started, Stri
     let machine = machine_id();
     let state = random_secret();
     let auth_url = format!(
-        "{WEB}{DEVICE_LOGIN_PATH}?challenge={}&challenge_method=S256&machine_id={}&nonce={}",
+        "{}{DEVICE_LOGIN_PATH}?challenge={}&challenge_method=S256&machine_id={}&nonce={}",
         site.web_origin,
         encode_component(&challenge),
         encode_component(&machine),
         encode_component(&nonce)
     );
     let poll_url = format!(
-        "{OPEN}{DEVICE_POLL_PATH}?nonce={}&verifier={}&challenge_method=S256",
+        "{}{DEVICE_POLL_PATH}?nonce={}&verifier={}&challenge_method=S256",
         site.open_api,
         encode_component(&nonce),
         encode_component(&verifier)
