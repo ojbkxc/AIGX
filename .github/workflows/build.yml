@@ -275,7 +275,7 @@ jobs:
         # 否则线上「当前版本」显示与前端对不上，更新判定也会错位
         run: |
           VER=$(cat VERSION)
-          CARGO_VER=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"//')
+          CARGO_VER=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
           PKG_VER=$(python3 -c "import json; print(json.load(open('frontend/package.json'))['version'])")
           echo "VERSION=$VER Cargo=$CARGO_VER package.json=$PKG_VER"
           [ "$VER" = "$CARGO_VER" ] && [ "$VER" = "$PKG_VER" ] || {
