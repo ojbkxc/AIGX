@@ -159,6 +159,8 @@ export default function AccountSessions(): JSX.Element {
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [orderSaving, setOrderSaving] = useState(false);
+  /** 冷却明细展开行（对齐 Agent2API row-panel：点冷却格展开完整明细） */
+  const [cooldownOpenId, setCooldownOpenId] = useState<string | null>(null);
   /** 自动余额查询只做一次（load 内触发，见 load） */
   const autoBalanceDone = useRef(false);
 
@@ -1242,7 +1244,20 @@ export default function AccountSessions(): JSX.Element {
                         : t('不限')}
                     </td>
                     <td>{successRate(session)}</td>
-                    <td>{cooldownSummary(session)}</td>
+                    <td>
+                      {Object.keys(session.cooldowns || {}).length === 0 ? (
+                        '—'
+                      ) : (
+                        <button
+                          type="button"
+                          className="as-cooldown-toggle"
+                          title={t('点击展开完整冷却明细')}
+                          onClick={() => setCooldownOpenId(cooldownOpenId === session.id ? null : session.id)}
+                        >
+                          {cooldownSummary(session)}
+                        </button>
+                      )}
+                    </td>
                     <td>
                       <div className="actions-cell as-actions">
                         <button
@@ -1323,6 +1338,37 @@ export default function AccountSessions(): JSX.Element {
                   );
                 })}
               </tbody>
+              {cooldownOpenId && (() => {
+                const open = sessions.find((s) => s.id === cooldownOpenId);
+                if (!open) return null;
+                const entries = Object.entries(open.cooldowns || {});
+                return (
+                  <tbody className="as-panel-tbody">
+                    <tr className="as-panel-row">
+                      <td colSpan={10}>
+                        <div className="as-panel-head">
+                          <strong>{open.name}</strong>
+                          <span className="form-hint">{t('冷却明细（上游模型 → 剩余秒数）')}</span>
+                          <button type="button" className="as-panel-close" onClick={() => setCooldownOpenId(null)} title={t('收起')}>
+                            ✕
+                          </button>
+                        </div>
+                        {entries.length === 0 ? (
+                          <div className="as-panel-body">{t('当前没有冷却中的模型。')}</div>
+                        ) : (
+                          <div className="as-panel-body">
+                            {entries.map(([model, secs]) => (
+                              <span key={model} className={`mm-src-tag${secs > 0 ? '' : ' is-off'}`}>
+                                {model === '*' ? t('全部模型') : model} · {secs}s
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  </tbody>
+                );
+              })()}
             </table>
           </div>
         )}

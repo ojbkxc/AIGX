@@ -451,3 +451,66 @@ tr:hover .as-act:not(:disabled) {
   color: var(--danger-text, #e5484d);
   background: rgba(229, 72, 77, 0.1);
 }
+
+/* ── 冷却明细展开行（对齐 Agent2API row-panel：通栏面板 + 标签流）── */
+.as-cooldown-toggle {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.as-cooldown-toggle:hover {
+  text-decoration: underline;
+}
+
+.as-panel-tbody td {
+  padding: 0 !important;
+}
+
+.as-panel-row > td > div {
+  padding: 10px 14px;
+  border-top: 1px dashed var(--border-color);
+  background: var(--surface-bg);
+}
+
+.as-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.as-panel-head strong {
+  font-size: 12.5px;
+}
+
+.as-panel-close {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.as-panel-close:hover {
+  color: var(--text-main, var(--text-color));
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.as-panel-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.as-panel-body .is-off {
+  opacity: 0.5;
+}
