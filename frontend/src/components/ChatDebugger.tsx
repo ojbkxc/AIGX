@@ -20,6 +20,18 @@ export type { DebugMessage };
 /** playground 空状态建议 prompt 默认图标序列（new-api 同款四图标） */
 const DEFAULT_PG_ICONS = [BarChart3, ClipboardList, Code2, GraduationCap];
 
+/**
+ * 判断一段 assistant 文本是否为「一次性占位/错误气泡」。
+ *
+ * 流式占位「…」、错误「⚠️ …」、停止「⏹ …」都带这些标记，它们只在界面上提示
+ * 本次结果，不是真正的模型回复。回传历史时要排除，否则会把一串报错当上下文
+ * 发给上游（详见 handleSend 的 history 过滤）。
+ */
+function isTransientAssistantText(content: string | undefined): boolean {
+  const s = (content ?? '').trim();
+  return s === '' || s === '…' || s.startsWith('⚠️') || s.startsWith('⏹');
+}
+
 
 export interface ChatDebuggerProps {
   /** 指定渠道 ID：调试固定渠道；留空走「自动选择启用渠道」（Playground） */
@@ -504,7 +516,14 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
 
     // 历史消息：附件展开为 content blocks；纯文本保持字符串形状。
     // 在截断后的消息数组（或当前闭包 messages）基础上追加本条用户消息，保证多轮上下文完整。
-    const history: Array<{ role: string; content: string | Record<string, unknown>[] }> = historySource.map((m) => {
+    //
+    // 过滤掉此前失败留下的「…」「⚠️ …」「⏹ …」占位/错误气泡：它们只是界面上的
+    // 一次性提示，不是真实的 assistant 回复。若原样回传给上游，等于把一串报错
+    // 塞进对话上下文，上游要么 400（内容角色校验）要么答非所问，用户感知为
+    // 「越聊越多报错」。重新生成/编辑重发的截断也一并受益。
+    const history: Array<{ role: string; content: string | Record<string, unknown>[] }> = historySource
+      .filter((m) => !(m.role === 'assistant' && isTransientAssistantText(m.content)))
+      .map((m) => {
       if (m.role === 'user' && m.attachments?.length) {
         const blocks = blocksForAttachments(m.attachments);
         if (m.content) blocks.push({ type: 'text', text: m.content });
@@ -651,7 +670,20 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         return;
       }
       setError(msg);
-      setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${msg}` }]);
+      // 一次失败只留一条可见错误：若末尾还是流式占位「…」（或上次未清理的
+      // 占位/停止气泡），就地替换成错误文案，而不是再追加一条 —— 否则用户
+      // 会同时看到「…」空泡 + 「⚠️ …」气泡 + 顶部红字，重试再各叠一份，
+      // 界面被「一堆报错」刷屏。
+      setMessages((prev) => {
+        const next = prev.slice();
+        const last = next[next.length - 1];
+        if (last && last.role === 'assistant' && isTransientAssistantText(last.content)) {
+          next[next.length - 1] = { ...last, content: `⚠️ ${msg}` };
+        } else {
+          next.push({ role: 'assistant', content: `⚠️ ${msg}` });
+        }
+        return next;
+      });
     } finally {
       const duration = Date.now() - requestStartTime;
       setMessages((prev) => {

@@ -15,6 +15,7 @@ import {
   type ProviderAddConfig,
 } from '../lib/addAccountConfigs';
 import { useToast } from './Toast';
+import ProxySelector from './ProxySelector';
 import { Button, Input, Select, Tabs, Textarea } from './ui';
 import type { AccountProviderItem, ChannelItem } from '../types';
 
@@ -963,11 +964,10 @@ export default function AddAccountDialog({
                     value={advanced.extra_headers}
                     onChange={(e) => setAdvanced({ ...advanced, extra_headers: e.target.value })}
                   />
-                  <Input
-                    label={t('出口代理（可选）')}
-                    placeholder="socks5://127.0.0.1:1080"
+                  <ProxySelector
                     value={advanced.proxy}
-                    onChange={(e) => setAdvanced({ ...advanced, proxy: e.target.value })}
+                    onChange={(next) => setAdvanced({ ...advanced, proxy: next })}
+                    placeholder="socks5://127.0.0.1:1080"
                   />
                   <Input
                     label={t('凭证到期时间（可选）')}

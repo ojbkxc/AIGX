@@ -452,7 +452,7 @@ export default function Chat(): JSX.Element {
         suggestionPrompts={suggestions}
         onClearMessages={handleClear}
         hasMessages={messages.length > 0}
-        onOpenSessions={() => setDrawerOpen(true)}
+        onOpenSessions={() => setDrawerOpen((v) => !v)}
         onBusyChange={(b) => { busyRef.current = b; }}
       />
     </div>

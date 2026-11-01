@@ -37,6 +37,7 @@ mod oauth;
 mod payment;
 mod plan;
 mod pricing;
+mod prompt;
 mod proxy;
 mod proxy_pool;
 mod quota_monitor;
@@ -238,6 +239,25 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化通用渠道存储（混用 CF + 第三方 OpenAI 兼容上游）
     let channel_store = Arc::new(ChannelStore::new(store.clone()));
+
+    // 路由策略（对照 Agent2API「设置 → 路由」）：策略/粘性/断路器/调度权重
+    // 可配可热更；数据面 resolve_bridges 每请求读快照分派
+    let routing_policy =
+        Arc::new(crate::channel::routing_policy::RoutingPolicyStore::with_store(store.clone()));
+    // 启动时把持久化的断路器参数热应用到 CircuitBreaker（免重启生效）
+    {
+        let p = routing_policy.snapshot();
+        if p.breaker.enabled {
+            channel_store
+                .circuit_breaker()
+                .update_params(p.breaker.threshold, p.breaker.cooldown_secs);
+        }
+        channel_store.set_scheduler_config(p.scheduler_weights.clone());
+    }
+
+    // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
+    // passthrough/custom/append 三模式，保存即生效
+    let gateway_prompt = Arc::new(crate::prompt::GatewayPromptStore::with_store(store.clone()));
 
     // 初始化账号型渠道账号池（渠道内第二级调度：账号级优先级/冷却/并发/粘性）
     let account_sessions = crate::account_session::AccountSessionStore::with_egress(
@@ -463,6 +483,8 @@ async fn main() -> anyhow::Result<()> {
         health_tracker: health_tracker.clone(),
         livez_state: livez_state.clone(),
         channel_store,
+        routing_policy,
+        gateway_prompt,
         account_sessions,
         pricing_store,
         user_group_store,
@@ -1140,6 +1162,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 统一模型管理（渠道模型 + 账号池模型聚合视图）
         .route("/api/models/manage", get(api::admin::handle_manage_view))
         .route("/api/models/state", post(api::admin::handle_set_state))
+        // 模型测试（模型管理页「测试」按钮：钉 provider+model 走真实链路）
+        .route("/api/models/test", post(api::admin::handle_model_test))
         .route(
             "/api/models/price",
             post(api::admin::handle_upsert_model_price),
@@ -1314,6 +1338,25 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             get(api::admin::handle_get_gateway_settings)
                 .put(api::admin::handle_update_gateway_settings),
         )
+        // 路由策略（对照 Agent2API「设置 → 路由」：策略/粘性/断路器/调度权重）
+        .route(
+            "/api/routing",
+            get(api::admin::handle_get_routing).put(api::admin::handle_update_routing),
+        )
+        .route(
+            "/api/routing/defaults",
+            get(api::admin::handle_routing_defaults),
+        )
+        // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）
+        .route(
+            "/api/gateway/prompt",
+            get(api::admin::handle_get_gateway_prompt)
+                .put(api::admin::handle_update_gateway_prompt),
+        )
+        // 数据管理（存储概览 + 全量备份/恢复；对照 Agent2API「设置 → 数据」）
+        .route("/api/storage", get(api::admin::handle_storage_overview))
+        .route("/api/backup/export", get(api::admin::handle_backup_export))
+        .route("/api/backup/import", post(api::admin::handle_backup_import))
         // 通知配置
         .route(
             "/api/notify/config",

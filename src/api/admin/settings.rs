@@ -655,3 +655,72 @@ pub async fn handle_update_oauth_config(
         )),
     }
 }
+
+/// GET /api/gateway/prompt —— 网关系统提示词（对照 Agent2API「设置 → 网关 → 系统提示词」）。
+pub async fn handle_get_gateway_prompt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let cfg = state.gateway_prompt.snapshot();
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "mode": cfg.mode,
+            "text": cfg.text,
+        }
+    })))
+}
+
+/// PUT /api/gateway/prompt —— 保存系统提示词（热生效：下一请求即按新策略注入）。
+pub async fn handle_update_gateway_prompt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+
+    // 读-改-写：未出现的字段保留现值
+    let mut cfg = state.gateway_prompt.snapshot().as_ref().clone();
+    if let Some(mode) = body.get("mode").and_then(|m| m.as_str()) {
+        match crate::prompt::PromptMode::parse(mode) {
+            Some(v) => cfg.mode = v,
+            None => {
+                return Err(error_response(
+                    &format!("无效的提示词模式：{mode}（可选 passthrough / custom / append）"),
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
+        }
+    }
+    if let Some(text) = body.get("text").and_then(|t| t.as_str()) {
+        if text.chars().count() > 64_000 {
+            return Err(error_response(
+                "提示词过长（上限 64000 字符）",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        cfg.text = text.to_string();
+    }
+
+    state.gateway_prompt.update(cfg.clone()).map_err(|e| {
+        error_response(
+            &format!("提示词持久化失败: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+
+    tracing::info!(
+        "网关系统提示词已更新: mode={} 长度 {}",
+        cfg.mode.as_str(),
+        cfg.text.chars().count()
+    );
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "mode": cfg.mode,
+            "text": cfg.text,
+        }
+    })))
+}

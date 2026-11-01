@@ -6,6 +6,7 @@ import { presetIcon, providerIcon } from '../lib/providerIcons';
 import { CUSTOM_PROTOCOLS, PRESET_PROVIDERS, normalizeUrl, presetKind } from '../lib/addAccountConfigs';
 import { useToast } from '../components/Toast';
 import AddAccountDialog from '../components/AddAccountDialog';
+import ProxySelector from '../components/ProxySelector';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, EmptyState, Input, Loading, Select, SkeletonTable, Tabs, Textarea } from '../components/ui';
 import type {
@@ -630,9 +631,11 @@ export default function AccountSessions(): JSX.Element {
   const cooldownSummary = (session: AccountSessionItem): string => {
     const entries = Object.entries(session.cooldowns || {});
     if (entries.length === 0) return '—';
+    // `*` 是整号冷却哨兵（账号级限流/认证失败/余额耗尽），渲染成「全部模型」
+    // 比露出一颗星号有用得多
     return entries
       .slice(0, 3)
-      .map(([model, secs]) => `${model} ${secs}s`)
+      .map(([model, secs]) => `${model === '*' ? t('全部模型') : model} ${secs}s`)
       .join(' · ');
   };
 
@@ -1614,23 +1617,11 @@ export default function AccountSessions(): JSX.Element {
                     : t('登录态型供应商按抓包补齐专用请求头；值里的 {credential} 会替换为凭证。')}
                 </div>
               </div>
-              <Input
-                label={t('出口代理（可选）')}
+              <ProxySelector
+                value={form.proxy || editing?.proxy || ''}
+                onChange={(next) => setForm({ ...form, proxy: next, clear_proxy: false })}
                 placeholder={editing?.proxy || 'socks5://127.0.0.1:1080'}
-                hint={editing?.proxy ? t('留空保持当前代理；勾选下方可清除') : undefined}
-                value={form.proxy}
-                onChange={(e) => setForm({ ...form, proxy: e.target.value })}
               />
-              {editing?.proxy && (
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <input
-                    type="checkbox"
-                    checked={form.clear_proxy}
-                    onChange={(e) => setForm({ ...form, clear_proxy: e.target.checked })}
-                  />
-                  <span>{t('清除出口代理')}</span>
-                </label>
-              )}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 <Input
                   label={t('优先级')}

@@ -1,6 +1,7 @@
 pub mod account_login;
 pub mod account_sessions;
 pub mod auth;
+pub mod backup;
 pub mod cache;
 pub mod channels;
 pub mod checkin_center;
@@ -10,6 +11,7 @@ pub mod diagnostics;
 pub mod logs;
 pub mod mcp;
 pub mod model_manage;
+pub mod model_test;
 pub mod monitor;
 pub mod network;
 pub mod notify;
@@ -21,6 +23,7 @@ pub mod pricing;
 pub mod prompts;
 pub mod proxy_pool_api;
 pub mod redemptions;
+pub mod routing;
 pub mod security;
 pub mod settings;
 pub mod subscriptions;
@@ -71,6 +74,8 @@ pub use model_manage::{
     handle_manage_view, handle_remove_alias, handle_remove_price, handle_set_alias,
     handle_set_alias_state, handle_set_state, handle_upsert_model_price,
 };
+// 模型测试（钉 provider/账号/渠道的真实链路最小对话，对照 Agent2API model_test）
+pub use model_test::handle_model_test;
 
 // 签到中心（管理员替上游账号签到，区别于用户侧的 /api/checkin）
 pub use checkin_center::{
@@ -108,11 +113,14 @@ pub use dashboard::{
 };
 
 pub use settings::{
-    handle_get_agent_settings, handle_get_gateway_settings, handle_get_limits,
-    handle_get_oauth_config, handle_get_settings, handle_update_agent_settings,
-    handle_update_gateway_settings, handle_update_limits, handle_update_oauth_config,
-    handle_update_settings,
+    handle_get_agent_settings, handle_get_gateway_prompt, handle_get_gateway_settings,
+    handle_get_limits, handle_get_oauth_config, handle_get_settings, handle_update_agent_settings,
+    handle_update_gateway_prompt, handle_update_gateway_settings, handle_update_limits,
+    handle_update_oauth_config, handle_update_settings,
 };
+
+// 数据管理（存储概览 + 全量备份/恢复；对照 Agent2API「设置 → 数据」）
+pub use backup::{handle_backup_export, handle_backup_import, handle_storage_overview};
 
 pub use notify::{handle_get_notify_config, handle_update_notify_config};
 
@@ -186,3 +194,6 @@ pub use network::{
     add_network_account, health_check, list_network_accounts, remove_network_account,
     restart_network, update_network_config,
 };
+
+// 路由策略（对照 Agent2API「设置 → 路由」；数据面 resolve_bridges 每请求读快照）
+pub use routing::{handle_get_routing, handle_routing_defaults, handle_update_routing};

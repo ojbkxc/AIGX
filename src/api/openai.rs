@@ -77,6 +77,10 @@ pub struct AppState {
     pub livez_state: Arc<LivezState>,
     /// 通用渠道存储（混用 CF + 第三方 OpenAI 兼容上游）
     pub channel_store: Arc<ChannelStore>,
+    /// 路由策略（对照 Agent2API「设置 → 路由」：策略/粘性/断路器/调度权重）
+    pub routing_policy: Arc<crate::channel::routing_policy::RoutingPolicyStore>,
+    /// 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）
+    pub gateway_prompt: Arc<crate::prompt::GatewayPromptStore>,
     /// 账号型渠道的账号池（渠道内第二级调度：账号级优先级/冷却/并发/粘性）
     pub account_sessions: crate::account_session::AccountSessionStore,
     /// 模型定价目录
@@ -319,24 +323,28 @@ fn verify_api_key_listing(
 ///
 /// 阶段2：`resolve_bridges_with_affinity` 在此之上叠加 session 粘性路由——
 /// 亲和缓存命中的渠道被移到候选列表首位（若仍在候选池且未被断路器拦截）。
+/// 粘性档位由路由策略控制：`off` 时跳过亲和（每请求独立选路）。
 pub fn resolve_bridges_with_affinity(
     state: &AppState,
     model: &str,
     session_id: Option<&str>,
 ) -> Vec<BridgeCandidate> {
     let mut result = resolve_bridges(state, model);
+    let policy = state.routing_policy.snapshot();
     if let Some(sid) = session_id {
-        if let Some(affinity_id) = state.channel_store.affinity_cache().lookup(sid, model) {
-            if let Some(pos) = result
-                .iter()
-                .position(|(_, cid, _)| cid.as_deref() == Some(affinity_id.as_str()))
-            {
-                if pos > 0 {
-                    let item = result.remove(pos);
-                    result.insert(0, item);
-                    tracing::debug!(
-                        "affinity hit: session {sid} model {model} -> channel {affinity_id}"
-                    );
+        if policy.sticky != crate::channel::routing_policy::StickyMode::Off {
+            if let Some(affinity_id) = state.channel_store.affinity_cache().lookup(sid, model) {
+                if let Some(pos) = result
+                    .iter()
+                    .position(|(_, cid, _)| cid.as_deref() == Some(affinity_id.as_str()))
+                {
+                    if pos > 0 {
+                        let item = result.remove(pos);
+                        result.insert(0, item);
+                        tracing::debug!(
+                            "affinity hit: session {sid} model {model} -> channel {affinity_id}"
+                        );
+                    }
                 }
             }
         }
@@ -348,10 +356,15 @@ pub fn resolve_bridges_with_affinity(
 pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
     let mut result: Vec<BridgeCandidate> = Vec::new();
 
-    // 第一级：通用渠道（多因子调度排序：health / cost / rpm）
-    let candidates = state
-        .channel_store
-        .select_for_model_ranked(model, &state.pricing_store);
+    // 第一级：通用渠道——按路由策略选取（对照 Agent2API「设置 → 路由」）：
+    // weighted=priority 分组+组内加权随机（默认）；round_robin=组内确定性
+    // 轮询；ranked=多因子 health×cost×rpm（策略来自 /api/routing，可热更）
+    let policy = state.routing_policy.snapshot();
+    let candidates = state.channel_store.select_for_model_by_strategy(
+        model,
+        policy.strategy,
+        &state.pricing_store,
+    );
     for ch in &candidates {
         // 统一模型管理里按 (provider, model) 关掉的模型不再进候选。
         // 账号型渠道的 provider 由账号决定，渠道级无从判断 —— 那一层由
@@ -1678,6 +1691,13 @@ pub async fn handle_chat_completions(
     }
 
     // 构建 ChatFormat
+    // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
+    // passthrough 不动（零开销）；custom 替换 / append 追加网关提示词
+    let messages = match crate::prompt::apply_prompt(&messages, &state.gateway_prompt.snapshot()) {
+        Some(injected) => injected,
+        None => messages,
+    };
+
     let chat_req = ChatFormat {
         model: model.clone(),
         messages,

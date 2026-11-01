@@ -209,6 +209,12 @@ function sendJson(res, body, status = 200) {
 /** 聊天会话的内存态（E2E 每次启动清零）。
  *  预置两条带消息的会话：抽屉相关用例需要「多会话 + 可切换」的初始状态。 */
 const chatSessions = new Map();
+
+/** 网络代理池内存态（E2E 可驱动 CRUD）。预置两条：一条启用 + 一条禁用。 */
+const proxyPool = [
+  { id: 'px_e2e_1', name: '香港节点', enabled: true, protocol: 'socks5', host: '127.0.0.1', port: 1080, username: '', has_password: false, usedBy: [] },
+  { id: 'px_e2e_2', name: '日本节点', enabled: false, protocol: 'http', host: '127.0.0.1', port: 8080, username: 'user1', has_password: true, usedBy: [{ id: 'acc-1', name: 'workbuddy-1', enabled: true }] },
+];
 let chatSeq = 0;
 {
   const base = Math.floor(Date.now() / 1000);
@@ -260,6 +266,101 @@ function handle(req, res, p, bodyText) {
     if (p === '/api/models/alias' || p === '/api/models/alias/state' || p === '/api/models/alias/remove') {
       // 写别名/切开关/删别名：同样回读视图（不真改），只锁「请求打到正确端点」
       return sendJson(res, { success: true, data: MANAGE_VIEW });
+    }
+    if (p === '/api/models/test') {
+      // 模型测试：回显钉住的来源 + 固定结论，锁住「请求体形状 + 结果渲染」
+      const body = JSON.parse(bodyText || '{}');
+      return sendJson(res, {
+        success: true,
+        data: {
+          ok: true,
+          reply: '你好！我是测试回复。',
+          reasoning: '',
+          upstream_model: body.model || '',
+          duration_ms: 812,
+          ttfb_ms: 230,
+          prompt_tokens: 2,
+          completion_tokens: 9,
+          total_tokens: 11,
+          stream: body.stream !== false,
+          source: {
+            kind: body.account_id ? 'account' : 'channel',
+            channel_id: body.channel_id || 'ch-3',
+            name: body.account_id ? 'workbuddy-1' : 'lxchat-glm',
+            account_id: body.account_id || null,
+          },
+        },
+      });
+    }
+
+    // 网络代理池（进程内数组，E2E 可驱动 CRUD）
+    if (p === '/api/proxy-pool' && req.method === 'GET') {
+      return sendJson(res, { success: true, items: proxyPool, total: proxyPool.length });
+    }
+    if (p === '/api/proxy-pool' && req.method === 'POST') {
+      const body = JSON.parse(bodyText || '{}');
+      const entry = {
+        id: `px_e2e_${proxyPool.length + 1}`,
+        name: body.name || '',
+        enabled: body.enabled ?? true,
+        protocol: body.protocol || 'http',
+        host: body.host || '',
+        port: body.port || 0,
+        username: body.username || '',
+        has_password: !!(body.password || ''),
+      };
+      proxyPool.unshift(entry);
+      return sendJson(res, { success: true, items: proxyPool, total: proxyPool.length, entry });
+    }
+    if (p === '/api/proxy-pool/update') {
+      const body = JSON.parse(bodyText || '{}');
+      const idx = proxyPool.findIndex((e) => e.id === body.id);
+      if (idx >= 0) {
+        proxyPool[idx] = { ...proxyPool[idx], ...body, has_password: !!(body.password || proxyPool[idx].has_password) };
+      }
+      return sendJson(res, { success: true, items: proxyPool, total: proxyPool.length, entry: idx >= 0 ? proxyPool[idx] : null });
+    }
+    if (p === '/api/proxy-pool/enable') {
+      const body = JSON.parse(bodyText || '{}');
+      const entry = proxyPool.find((e) => e.id === body.id);
+      if (entry) entry.enabled = body.enabled;
+      return sendJson(res, { success: true, items: proxyPool, total: proxyPool.length, entry });
+    }
+    if (p === '/api/proxy-pool/remove') {
+      const body = JSON.parse(bodyText || '{}');
+      const idx = proxyPool.findIndex((e) => e.id === body.id);
+      if (idx >= 0) proxyPool.splice(idx, 1);
+      return sendJson(res, { success: true, items: proxyPool, total: proxyPool.length });
+    }
+    if (p === '/api/proxy-pool/test') {
+      const body = JSON.parse(bodyText || '{}');
+      const entry = proxyPool.find((e) => e.id === body.id);
+      return sendJson(res, {
+        success: true,
+        status: 200,
+        ip: '203.0.113.42',
+        duration_ms: 120,
+        error: null,
+        name: entry?.name || '',
+        items: proxyPool,
+      });
+    }
+    if (p === '/api/proxy-pool/test-account') {
+      return sendJson(res, { success: true, status: 200, ip: '203.0.113.42', duration_ms: 100, error: null, proxy: '' });
+    }
+
+    // 账号池（预置一条，供账号弹窗代理选择器用例用）
+    if (p === '/api/account-sessions' && req.method === 'GET') {
+      return sendJson(res, {
+        success: true,
+        data: [{
+          id: 'acc-e2e-1', channel_id: 'ch-1', channel_name: 'lxchat-glm',
+          name: 'e2e-账号', provider: 'openai_compatible', base_url: 'https://upstream.example.com',
+          api_key: 'sk-***', proxy: 'pool:px_e2e_1', status: 'enabled', configured_status: 'enabled',
+          priority: 0, weight: 1, max_concurrency: 3, models: [], extra_headers: {},
+        }],
+        total: 1,
+      });
     }
 
     // 签到中心

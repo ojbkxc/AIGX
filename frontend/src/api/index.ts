@@ -44,6 +44,8 @@ import type {
   InflightRequestItem,
   ModelMetaOverride,
   ManageView,
+  ModelTestPayload,
+  ModelTestResult,
   CatalogSyncResult,
   ImportEntry,
   ImportSources,
@@ -74,6 +76,10 @@ import type {
   AccountRotationPolicyItem,
   AgentSettingsItem,
   GatewaySettingsItem,
+  RoutingPolicyItem,
+  GatewayPromptItem,
+  StorageOverviewItem,
+  BackupImportResult,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -356,6 +362,9 @@ export const api = {
     }),
   removeModelAlias: (alias: string): Promise<ApiResponse<ManageView>> =>
     request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias/remove`, { alias }),
+  // 模型测试（管理员）：钉 provider+model 走真实链路，恒 200，结论在 data.ok
+  testModel: (data: ModelTestPayload): Promise<ApiResponse<ModelTestResult>> =>
+    request<ApiResponse<ModelTestResult>>('POST', `${API_BASE}/models/test`, data),
 
   // ── 签到中心（管理员替上游账号签到，区别于用户侧 /api/checkin） ──
   getCheckinCenter: (): Promise<ApiResponse<CheckinCenterData>> =>
@@ -626,6 +635,25 @@ export const api = {
     request<ApiResponse<GatewaySettingsItem>>('GET', `${API_BASE}/gateway/settings`),
   saveGatewaySettings: (data: Record<string, unknown>): Promise<ApiResponse<GatewaySettingsItem>> =>
     request<ApiResponse<GatewaySettingsItem>>('PUT', `${API_BASE}/gateway/settings`, data),
+  // 路由策略（对照 Agent2API「设置 → 路由」；保存即热生效，无需重启）
+  getRoutingPolicy: (): Promise<ApiResponse<RoutingPolicyItem>> =>
+    request<ApiResponse<RoutingPolicyItem>>('GET', `${API_BASE}/routing`),
+  saveRoutingPolicy: (data: Record<string, unknown>): Promise<ApiResponse<RoutingPolicyItem>> =>
+    request<ApiResponse<RoutingPolicyItem>>('PUT', `${API_BASE}/routing`, data),
+  getRoutingDefaults: (): Promise<ApiResponse<RoutingPolicyItem>> =>
+    request<ApiResponse<RoutingPolicyItem>>('GET', `${API_BASE}/routing/defaults`),
+  // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」；热生效）
+  getGatewayPrompt: (): Promise<ApiResponse<GatewayPromptItem>> =>
+    request<ApiResponse<GatewayPromptItem>>('GET', `${API_BASE}/gateway/prompt`),
+  saveGatewayPrompt: (data: Record<string, unknown>): Promise<ApiResponse<GatewayPromptItem>> =>
+    request<ApiResponse<GatewayPromptItem>>('PUT', `${API_BASE}/gateway/prompt`, data),
+  // 数据管理（对照 Agent2API「设置 → 数据」：存储概览 + 全量备份/恢复）
+  getStorageOverview: (): Promise<ApiResponse<StorageOverviewItem>> =>
+    request<ApiResponse<StorageOverviewItem>>('GET', `${API_BASE}/storage`),
+  exportBackup: (includeLogs: boolean): Promise<unknown> =>
+    request<unknown>('GET', `${API_BASE}/backup/export?include_logs=${includeLogs}`),
+  importBackup: (doc: Record<string, unknown>): Promise<ApiResponse<BackupImportResult>> =>
+    request<ApiResponse<BackupImportResult>>('POST', `${API_BASE}/backup/import`, doc),
   // 渠道对话调试：流式（text/event-stream）返回 { stream: [{ content }] }，
   // 非流式返回后端 JSON。与 Playground 页共用 SSE 解析模式。
   testChannelChat: async (data: PlaygroundChatRequest): Promise<PlaygroundChatResult> => {

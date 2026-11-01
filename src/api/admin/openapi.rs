@@ -353,6 +353,9 @@ fn paths_model_manage() -> Value {
         "/api/models/state": {
             "post": op_body("模型管理", "按 (provider, model) 启停模型", "provider: string, id: string, enabled: bool")
         },
+        "/api/models/test": {
+            "post": op_body("模型管理", "模型测试：钉 provider+model（可选 account_id/channel_id）走真实链路发最小对话，返回用时/首字/用量/回复/错误", "provider/model: string, account_id?/channel_id?/prompt?/system_prompt?/reasoning_effort?/stream?")
+        },
         "/api/models/price": {
             "post": op_body("模型管理", "写入模型定价与倍率", "model: string, input_price/output_price/cache_price/price_type/model_ratio")
         },
@@ -618,6 +621,26 @@ fn paths_settings_ops() -> Value {
         "/api/gateway/settings": {
             "get": op("网关", "查询网关设置（监听地址/CORS/反代信任）"),
             "put": op_body("网关", "更新网关设置（重启后生效）", "host/port/corsOrigins/trustProxyHeaders")
+        },
+        "/api/routing": {
+            "get": op("路由", "查询路由策略（策略/粘性/断路器/调度权重）与运行时状态"),
+            "put": op_body("路由", "更新路由策略（热生效）", "strategy/sticky/breaker/scheduler_weights")
+        },
+        "/api/routing/defaults": {
+            "get": op("路由", "查询路由策略默认值（恢复默认用）")
+        },
+        "/api/gateway/prompt": {
+            "get": op("网关", "查询系统提示词注入配置（模式/文本）"),
+            "put": op_body("网关", "更新系统提示词注入（热生效）", "mode(passthrough/custom/append)/text")
+        },
+        "/api/storage": {
+            "get": op("数据", "存储概览（KV 总键数/分组统计/库文件大小）")
+        },
+        "/api/backup/export": {
+            "get": op("数据", "全量导出 KV 备份 JSON（include_logs=false 跳过日志键）")
+        },
+        "/api/backup/import": {
+            "post": op_body("数据", "导入备份恢复（先自动快照当前全量到 backups/ 再写回）", "BackupDocument{version,exported_at,include_logs,kv}")
         },
         "/api/notify/config": {
             "get": op("通知", "查询通知配置（脱敏）"),
@@ -1123,6 +1146,12 @@ mod tests {
         add("/api/limits", &["get", "put"]);
         add("/api/agent/settings", &["get", "put"]);
         add("/api/gateway/settings", &["get", "put"]);
+        add("/api/routing", &["get", "put"]);
+        add("/api/routing/defaults", &["get"]);
+        add("/api/gateway/prompt", &["get", "put"]);
+        add("/api/storage", &["get"]);
+        add("/api/backup/export", &["get"]);
+        add("/api/backup/import", &["post"]);
         add("/api/logs/audits", &["delete", "get"]);
         add("/api/logs/audits/clear", &["delete"]);
         add("/api/logs/cleanup", &["post"]);
@@ -1140,6 +1169,7 @@ mod tests {
         add("/api/models/price", &["post"]);
         add("/api/models/price/remove", &["post"]);
         add("/api/models/state", &["post"]);
+        add("/api/models/test", &["post"]);
         add("/api/checkin-center", &["get"]);
         add("/api/checkin-center/records", &["delete", "get"]);
         add("/api/checkin-center/run", &["post"]);

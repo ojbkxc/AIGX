@@ -8,6 +8,11 @@
 //! ④ POST {gw}/api/oauth/token  {code, codeVerifier, clientId, redirectUri}
 //! ```
 //!
+//! 国际版与国内版同一套协议（对齐 Agent2API `accio/endpoints.rs`），只有
+//! 登录站点与 `x-package-region` 头不同：
+//!   · 国际版  login = www.accio.com        region = GLOBAL
+//!   · 国内版  login = www.accio-ai.com     region = CN
+//!
 //! 远程部署到不了网关 loopback 时，前端把地址栏里的回调地址粘回来即可。
 
 use std::collections::HashMap;
@@ -21,7 +26,6 @@ use sha2::{Digest, Sha256};
 
 use super::{Credentials, LoginFlow, Started};
 
-const LOGIN_BASE: &str = "https://www.accio.com";
 const GATEWAY_BASE: &str = "https://phoenix-gw.alibaba.com";
 const OAUTH_TOKEN_PATH: &str = "/api/oauth/token";
 const CLIENT_ID: &str = "accio-work";
@@ -30,8 +34,27 @@ const APP_VERSION: &str = "0.32.6";
 /// 用户把地址栏里的回调地址粘回来即可。
 const REDIRECT_URI: &str = "http://127.0.0.1:1/auth/callback-accio";
 
+/// 一次登录的地区上下文（国际版 / 国内版）。
+struct Site {
+    login_base: &'static str,
+    package_region: &'static str,
+}
+
+/// 国际版站点
+const SITE_INTL: Site = Site {
+    login_base: "https://www.accio.com",
+    package_region: "GLOBAL",
+};
+
+/// 国内版站点
+const SITE_CN: Site = Site {
+    login_base: "https://www.accio-ai.com",
+    package_region: "CN",
+};
+
 pub struct AccioFlow {
     client: reqwest::Client,
+    site: &'static Site,
     state: String,
     verifier: String,
 }
@@ -75,7 +98,7 @@ impl LoginFlow for AccioFlow {
             .header("x-platform", "desktop")
             .header("x-os", std::env::consts::OS)
             .header("x-app-version", APP_VERSION)
-            .header("x-package-region", "GLOBAL")
+            .header("x-package-region", self.site.package_region)
             .json(&body)
             .send()
             .await
@@ -104,11 +127,12 @@ impl LoginFlow for AccioFlow {
     }
 }
 
-pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
+pub async fn start(client: &reqwest::Client, cn: bool) -> Result<Started, String> {
+    let site = if cn { &SITE_CN } else { &SITE_INTL };
     let verifier = random_token();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let state = uuid::Uuid::new_v4().simple().to_string();
-    let mut auth_url = url::Url::parse(&format!("{LOGIN_BASE}/login"))
+    let mut auth_url = url::Url::parse(&format!("{}/login", site.login_base))
         .map_err(|_| "Accio 登录地址无效".to_string())?;
     auth_url
         .query_pairs_mut()
@@ -122,6 +146,7 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
         auth_url: auth_url.to_string(),
         flow: Arc::new(AccioFlow {
             client: client.clone(),
+            site,
             state,
             verifier,
         }),

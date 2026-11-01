@@ -1,42 +1,94 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
-import { Boxes, Search, Trash2, Plus, RefreshCw, Tag, Pencil, Download, Loader2 } from 'lucide-react';
+import {
+  AudioLines,
+  Boxes,
+  ChevronDown,
+  ChevronUp,
+  Download,
+  FlaskConical,
+  Image as ImageIcon,
+  Lightbulb,
+  Loader2,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  Settings2,
+  Tag,
+  Trash2,
+  Wrench,
+} from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import { Card, Loading, EmptyState, Badge, Switch, Pagination, Tabs, Combobox } from '../components/ui';
+import { Loading, EmptyState, Switch, Pagination, Tabs, Combobox } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
+import ModelTestDialog from '../components/ModelTestDialog';
 import { fmtCompact } from '../lib/utils';
 import type { ManageView, ManagedModel, ModelMetaOverride, ChannelItem } from '../types';
 import './ModelManage.css';
 
-/** 每页行数（模型目录动辄数百条，全量渲染卡顿） */
-const PAGE_SIZE = 25;
+// ── 常量 ─────────────────────────────────────────────────────────────
 
-/** 主 Tab */
+/** 分页档位（对齐 Agent2API table-shell 的 CLIENT_PAGE_SIZES，去掉 all 防卡顿） */
+const PAGE_SIZES = [20, 25, 50, 100];
+const DEFAULT_PAGE_SIZE = 25;
+/** 聚合视图每组默认展示行数，其余折叠（Agent2API GROUP_LIMIT） */
+const GROUP_LIMIT = 8;
+
+/** localStorage 键 */
+const LS_FILTERS = 'aigx-mm-filters';
+const LS_COLS = 'aigx-mm-cols';
+const LS_COLW = 'aigx-mm-colw';
+const LS_PAGE_SIZE = 'aigx-mm-pagesize';
+
 type MainTab = 'catalog' | 'meta';
-
-/** 启停筛选 */
-type StateFilter = 'all' | 'on' | 'off';
-/** 定价筛选 */
+/** 启停筛选（多一档「有映射」，对齐 Agent2API MODEL_STATE_OPTIONS） */
+type StateFilter = 'all' | 'on' | 'off' | 'mapped';
 type PriceFilter = 'all' | 'priced' | 'unpriced';
-/** 来源筛选：全部 / 渠道 / 账号池 */
 type SourceFilter = 'all' | 'channel' | 'account';
+/** 排序档位（对齐 Agent2API MODEL_SORT_OPTIONS） */
+type SortMode = 'default' | 'ratio-asc' | 'ratio-desc';
 
-const CAP_LABELS: Array<{ match: string; label: string }> = [
-  { match: 'vision', label: '视觉' },
-  { match: 'image', label: '图像' },
-  { match: 'audio', label: '音频' },
-  { match: 'tool', label: '工具' },
-  { match: 'function', label: '函数' },
-  { match: 'reasoning', label: '推理' },
-  { match: 'embedding', label: '向量' },
+/** 可显隐的列（check / model / act 锁定不可关） */
+type ColKey = 'enable' | 'price' | 'source' | 'caps' | 'alias';
+const COL_DEFS: Array<{ key: ColKey; label: string }> = [
+  { key: 'enable', label: '启用' },
+  { key: 'price', label: '定价' },
+  { key: 'source', label: '来源' },
+  { key: 'caps', label: '能力' },
+  { key: 'alias', label: '映射' },
 ];
+/** 全部表格列（含锁定列）——渲染顺序与默认宽度 */
+type AnyCol = 'check' | ColKey | 'model' | 'act';
+const COL_ORDER: AnyCol[] = ['check', 'enable', 'model', 'price', 'source', 'caps', 'alias', 'act'];
+const COL_DEFAULT_W: Record<AnyCol, string> = {
+  check: '34px',
+  enable: '46px',
+  model: '21%',
+  price: '13%',
+  source: '16%',
+  caps: '10%',
+  alias: '36%',
+  act: '132px',
+};
+
+/** 能力圆点定义（对齐 Agent2API caps 列四枚圆点：工具/图像/音频/思考） */
+const CAP_DOTS: Array<{ key: string; match: RegExp; label: string; icon: typeof Wrench }> = [
+  { key: 'tool', match: /tool|function/i, label: '工具调用', icon: Wrench },
+  { key: 'image', match: /vision|image/i, label: '图像识别', icon: ImageIcon },
+  { key: 'audio', match: /audio|speech|tts/i, label: '音频', icon: AudioLines },
+  { key: 'reasoning', match: /reason|think/i, label: '思考', icon: Lightbulb },
+];
+
+// ── 小工具 ───────────────────────────────────────────────────────────
 
 function fmtPrice(n: number | null | undefined): string {
   if (n == null) return '—';
-  if (n < 0.01) return n.toFixed(4);
-  if (n < 1) return n.toFixed(3);
+  // 去尾零：0.0010 → 0.001，列宽紧张时不被截断
+  if (n < 0.01) return String(parseFloat(n.toFixed(4)));
+  if (n < 1) return String(parseFloat(n.toFixed(3)));
   return n.toFixed(2);
 }
 
@@ -46,7 +98,38 @@ function isFreePrice(p: { input_price: number; output_price: number; cache_price
   return p.input_price === 0 && p.output_price === 0 && (p.cache_price == null || p.cache_price === 0);
 }
 
-/** 价格表单（字符串态，提交时解析） */
+/** provider 单调色（Agent2API monogram：哈希取色相，首尾字母做字形） */
+function providerHue(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i += 1) h = (h * 31 + id.charCodeAt(i)) % 360;
+  return h;
+}
+
+function monogramChar(label: string): string {
+  const latin = label.match(/[A-Za-z]/);
+  if (latin) return latin[0].toUpperCase();
+  return label.trim().slice(-1) || '·';
+}
+
+function readLS<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? { ...fallback, ...JSON.parse(raw) } : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeLS(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* 隐私模式下静默 */
+  }
+}
+
+// ── 表单类型 ─────────────────────────────────────────────────────────
+
 interface PriceForm {
   input_price: string;
   output_price: string;
@@ -63,11 +146,14 @@ const EMPTY_PRICE_FORM: PriceForm = {
   model_ratio: '',
 };
 
-/** 别名表单 */
 interface AliasForm {
   alias: string;
   target: string;
 }
+
+type BatchAction = 'enable' | 'disable' | 'remove-price';
+
+// ── 主组件 ───────────────────────────────────────────────────────────
 
 export default function ModelManage(): JSX.Element {
   const { t } = useTranslation();
@@ -93,20 +179,44 @@ export default function ModelManage(): JSX.Element {
     return [...seen.values()].sort((a, b) => a.localeCompare(b));
   }, [view]);
 
-  // 筛选
-  /** 左栏三段式导航的选中项：`all` / `ch:<渠道id>` / `pv:<provider>`。
-   *  用单一 key 统一表达，避免 provider 与 channelFilter 两个状态互相打架。 */
+  // ── 筛选（落盘记忆，对齐 Agent2API models-filters） ──
   const [navKey, setNavKey] = useState<string>('all');
-  const [stateFilter, setStateFilter] = useState<StateFilter>('all');
-  const [priceFilter, setPriceFilter] = useState<PriceFilter>('all');
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+  const [stateFilter, setStateFilter] = useState<StateFilter>(() => readLS(LS_FILTERS, { state: 'all' }).state as StateFilter);
+  const [priceFilter, setPriceFilter] = useState<PriceFilter>(() => readLS(LS_FILTERS, { price: 'all' }).price as PriceFilter);
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>(() => readLS(LS_FILTERS, { source: 'all' }).source as SourceFilter);
+  const [sortMode, setSortMode] = useState<SortMode>(() => readLS(LS_FILTERS, { sort: 'default' }).sort as SortMode);
   const [channelFilter, setChannelFilter] = useState('all');
   const [query, setQuery] = useState('');
+
+  useEffect(() => {
+    writeLS(LS_FILTERS, { state: stateFilter, price: priceFilter, source: sourceFilter, sort: sortMode });
+  }, [stateFilter, priceFilter, sourceFilter, sortMode]);
+
+  // 分页
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(() => {
+    const n = Number(localStorage.getItem(LS_PAGE_SIZE));
+    return PAGE_SIZES.includes(n) ? n : DEFAULT_PAGE_SIZE;
+  });
+  const [jumpDraft, setJumpDraft] = useState('');
 
   // 批量选择（key = provider|id）
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchAction, setBatchAction] = useState<BatchAction>('enable');
   const [batchRunning, setBatchRunning] = useState(false);
+  const [batchReport, setBatchReport] = useState('');
+
+  // 列显隐 / 列宽（localStorage 记忆，对齐 Agent2API 列设置 + 列宽拖动）
+  const [colConfig, setColConfig] = useState<Record<ColKey, boolean>>(() =>
+    readLS(LS_COLS, { enable: true, price: true, source: true, caps: true, alias: true }),
+  );
+  const [colWidths, setColWidths] = useState<Record<string, number>>(() => readLS(LS_COLW, {}));
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
+
+  // 聚合视图的组折叠（展开的组集合；默认折叠）
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
   // 获取模型弹窗
   const [fetchModal, setFetchModal] = useState(false);
@@ -114,7 +224,6 @@ export default function ModelManage(): JSX.Element {
   const [fetchingId, setFetchingId] = useState<string | null>(null);
   const [fetchDone, setFetchDone] = useState<Record<string, boolean>>({});
 
-  // 渠道页跳转过来时带 ?channel_id= 预选来源渠道
   const [searchParams] = useSearchParams();
 
   // 弹窗
@@ -127,25 +236,19 @@ export default function ModelManage(): JSX.Element {
   const [aliasForm, setAliasForm] = useState<AliasForm>({ alias: '', target: '' });
   const [aliasError, setAliasError] = useState('');
   const [savingAlias, setSavingAlias] = useState(false);
-  /** 正在切换开关的别名（防重复点击） */
   const [pendingAlias, setPendingAlias] = useState<string | null>(null);
 
+  const [testTarget, setTestTarget] = useState<ManagedModel | null>(null);
+
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
-  /** 正在切换启停的行（provider|id），防重复点击 */
   const [pendingRow, setPendingRow] = useState<string | null>(null);
 
-  // ── 主 Tab ──
   const [tab, setTab] = useState<MainTab>('catalog');
 
-  // ── 元信息覆盖（owned_by / 上下文长度 / 能力）──
+  // 元信息覆盖
   const [overrides, setOverrides] = useState<Record<string, ModelMetaOverride>>({});
   const [metaModal, setMetaModal] = useState(false);
-  const [metaForm, setMetaForm] = useState({
-    model: '',
-    owned_by: '',
-    context_length: '',
-    capabilities: '',
-  });
+  const [metaForm, setMetaForm] = useState({ model: '', owned_by: '', context_length: '', capabilities: '' });
   const [metaError, setMetaError] = useState('');
   const [savingMeta, setSavingMeta] = useState(false);
 
@@ -197,6 +300,14 @@ export default function ModelManage(): JSX.Element {
     } finally {
       setPendingRow(null);
     }
+  };
+
+  /** 点击复制（模型 id / 映射名，Agent2API data-copy 同款交互） */
+  const copyText = (text: string) => {
+    void navigator.clipboard?.writeText(text).then(
+      () => addToast(t('已复制') + `：${text}`),
+      () => addToast(t('复制失败'), 'error'),
+    );
   };
 
   // ── 定价弹窗 ──
@@ -271,11 +382,9 @@ export default function ModelManage(): JSX.Element {
   const openAlias = (row: ManagedModel, presetAlias?: string) => {
     setAliasTarget(row);
     setAliasError('');
-    // 点已有 chip 的「编辑」时把名字带进来，等于「改这条映射」
     setAliasForm({ alias: presetAlias ?? '', target: row.id });
   };
 
-  /** 行内切换某条别名的开关（不改映射关系，独立接口） */
   const toggleAlias = async (alias: string, enabled: boolean) => {
     setPendingAlias(alias);
     try {
@@ -348,6 +457,25 @@ export default function ModelManage(): JSX.Element {
     setMetaModal(true);
   };
 
+  /** 目录行点「能力 / 上下文」单元格 → 打开覆盖弹窗并预填当前推断值
+   *  （对齐 Agent2API 能力弹窗的「继承 / 覆盖」语义：留空 = 继承内置推断）。 */
+  const openMetaForRow = (row: ManagedModel) => {
+    const o = overrides[row.id];
+    setMetaForm({
+      model: row.id,
+      owned_by: o?.owned_by ?? row.owned_by ?? '',
+      context_length:
+        o?.context_length != null
+          ? String(o.context_length)
+          : row.context_length != null
+            ? String(row.context_length)
+            : '',
+      capabilities: (o?.capabilities ?? row.capabilities ?? []).join(', '),
+    });
+    setMetaError('');
+    setMetaModal(true);
+  };
+
   const saveMeta = async () => {
     setMetaError('');
     const model = metaForm.model.trim();
@@ -367,10 +495,7 @@ export default function ModelManage(): JSX.Element {
       await api.setModelMeta(model, {
         owned_by: ownedBy,
         context_length: ctx,
-        capabilities: metaForm.capabilities
-          .split(/[,，]/)
-          .map((c) => c.trim())
-          .filter(Boolean),
+        capabilities: metaForm.capabilities.split(/[,，]/).map((c) => c.trim()).filter(Boolean),
       });
       addToast(t('元信息覆盖已保存'));
       setMetaModal(false);
@@ -398,7 +523,9 @@ export default function ModelManage(): JSX.Element {
     });
   };
 
-  // ── 批量操作（串行调写接口，最后整视图刷新）──
+  // ── 批量操作 ──
+  const rowKey = (m: ManagedModel) => `${m.provider}|${m.id}`;
+
   const toggleSelect = (key: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -408,47 +535,50 @@ export default function ModelManage(): JSX.Element {
     });
   };
 
-  const toggleSelectAllPage = () => {
-    const pageKeys = pageRows.map((r) => `${r.provider}|${r.id}`);
-    setSelected((prev) => {
-      const next = new Set(prev);
-      const allSelected = pageKeys.every((k) => next.has(k));
-      for (const k of pageKeys) {
-        if (allSelected) next.delete(k);
-        else next.add(k);
-      }
-      return next;
-    });
-  };
+  const selectedRows = useMemo(
+    () => (view?.models ?? []).filter((m) => selected.has(rowKey(m))),
+    [view, selected],
+  );
 
-  const runBatch = async (action: 'enable' | 'disable' | 'remove-price') => {
-    if (selected.size === 0 || batchRunning) return;
+  const runBatch = async () => {
+    if (selectedRows.length === 0 || batchRunning) return;
     setBatchRunning(true);
-    const rows = (view?.models ?? []).filter((m) => selected.has(`${m.provider}|${m.id}`));
+    setBatchReport('');
     let fail = 0;
+    let skip = 0;
+    let firstError = '';
     try {
-      for (const row of rows) {
+      for (const row of selectedRows) {
         try {
-          if (action === 'remove-price') {
+          if (batchAction === 'remove-price') {
             if (row.price) await api.removeModelPrice(row.id);
+            else skip += 1;
           } else {
-            await api.setModelEnabled(row.provider, row.id, action === 'enable');
+            await api.setModelEnabled(row.provider, row.id, batchAction === 'enable');
           }
-        } catch {
+        } catch (err) {
           fail += 1;
+          if (!firstError) firstError = err instanceof Error ? err.message : String(err);
         }
       }
       await load();
-      setSelected(new Set());
-      addToast(
-        fail > 0
-          ? t('批量操作完成，失败') + ` ${fail}`
-          : action === 'remove-price'
-            ? t('已批量删除定价')
-            : action === 'enable'
+      if (fail === 0) {
+        addToast(
+          batchAction === 'remove-price'
+            ? t('已批量删除定价') + (skip > 0 ? `（${skip} ${t('个未定价跳过')}）` : '')
+            : batchAction === 'enable'
               ? t('已批量启用')
-              : t('已批量禁用')
-      );
+              : t('已批量禁用'),
+        );
+        setBatchOpen(false);
+        setSelected(new Set());
+      } else {
+        setBatchReport(
+          `${t('成功')} ${selectedRows.length - fail - skip} · ${t('失败')} ${fail}` +
+            (skip > 0 ? ` · ${t('跳过')} ${skip}` : '') +
+            (firstError ? ` — ${firstError}` : ''),
+        );
+      }
     } finally {
       setBatchRunning(false);
     }
@@ -483,41 +613,123 @@ export default function ModelManage(): JSX.Element {
     }
   };
 
-  // ── 过滤 + 分页 ──
+  // ── 列设置 / 列宽拖动 ──
+  const visibleCols = useMemo(
+    () => COL_ORDER.filter((c) => c === 'check' || c === 'model' || c === 'act' || colConfig[c as ColKey]),
+    [colConfig],
+  );
+
+  useEffect(() => {
+    if (!colPanelOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (colPanelRef.current && !colPanelRef.current.contains(e.target as Node)) {
+        setColPanelOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', onDown);
+    return () => window.removeEventListener('mousedown', onDown);
+  }, [colPanelOpen]);
+
+  const toggleCol = (key: ColKey) => {
+    setColConfig((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      writeLS(LS_COLS, next);
+      return next;
+    });
+  };
+
+  /** 列宽拖动：拖表头右缘把手改宽（写回 colgroup），双击把手还原 */
+  const startColDrag = (key: AnyCol, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const th = (e.target as HTMLElement).closest('th');
+    const startW = th?.getBoundingClientRect().width ?? 100;
+    const startX = e.clientX;
+    let latest = startW;
+    const move = (ev: MouseEvent) => {
+      latest = Math.max(56, Math.round(startW + ev.clientX - startX));
+      setColWidths((prev) => ({ ...prev, [key]: latest }));
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      setColWidths((prev) => {
+        writeLS(LS_COLW, prev);
+        return prev;
+      });
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+
+  const resetColWidth = (key: AnyCol) => {
+    setColWidths((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      writeLS(LS_COLW, next);
+      return next;
+    });
+  };
+
+  // ── 过滤 + 排序 + 分组 + 分页 ──
   const filtered = useMemo(() => {
     const list = view?.models ?? [];
     const q = query.trim().toLowerCase();
-    // 左栏三段式：`ch:<渠道id>` 按渠道筛选，`pv:<provider>` 按来源 provider 筛选，
-    // `all` 不过滤。两段互斥（点到哪段就只看那段），与筛选行的下拉是「与」关系。
     const navIsChannel = navKey.startsWith('ch:');
     const navChannelId = navIsChannel ? navKey.slice(3) : '';
     const navIsProvider = navKey.startsWith('pv:');
     const navProvider = navIsProvider ? navKey.slice(3) : '';
-    return list.filter((m) => {
+    const out = list.filter((m) => {
       if (navIsChannel && !m.sources.some((s) => s.channel_id === navChannelId)) return false;
       if (navIsProvider && m.provider !== navProvider) return false;
       if (stateFilter === 'on' && !m.enabled) return false;
       if (stateFilter === 'off' && m.enabled) return false;
+      if (stateFilter === 'mapped' && (m.alias_entries?.length ?? m.aliases.length) === 0) return false;
       if (priceFilter === 'priced' && !m.price) return false;
       if (priceFilter === 'unpriced' && m.price) return false;
       if (sourceFilter === 'channel' && !m.sources.some((s) => s.kind === 'channel')) return false;
       if (sourceFilter === 'account' && !m.sources.some((s) => s.kind === 'account')) return false;
       if (channelFilter !== 'all' && !m.sources.some((s) => s.channel_id === channelFilter)) return false;
       if (!q) return true;
-      const hay = [
-        m.id,
-        m.owned_by,
-        m.provider_label,
-        ...m.aliases,
-        ...m.sources.map((s) => s.name),
-      ]
+      const hay = [m.id, m.owned_by, m.provider_label, ...m.aliases, ...m.sources.map((s) => s.name)]
         .join(' ')
         .toLowerCase();
       return hay.includes(q);
     });
-  }, [view, navKey, stateFilter, priceFilter, sourceFilter, channelFilter, query]);
+    // 排序：默认保持后端序（provider_label → id）；倍率档在同启用态内排
+    if (sortMode !== 'default') {
+      const dir = sortMode === 'ratio-asc' ? 1 : -1;
+      out.sort((a, b) => {
+        if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+        return (a.model_ratio - b.model_ratio) * dir || a.id.localeCompare(b.id);
+      });
+    }
+    return out;
+  }, [view, navKey, stateFilter, priceFilter, sourceFilter, channelFilter, query, sortMode]);
 
-  /** 左栏「渠道供应商」：按渠道聚合模型数（只统计有模型进视图的渠道 = 启用中的）。 */
+  /** 聚合模式：左栏「全部」且无搜索词 → 按提供商分组 + 组内折叠（Agent2API 同款）。
+   *  任何筛选/排序/搜索生效时回落到平铺分页表。 */
+  const groupedMode = navKey === 'all' && !query.trim();
+
+  const groups = useMemo(() => {
+    if (!groupedMode) return [];
+    const map = new Map<string, { label: string; rows: ManagedModel[] }>();
+    for (const m of filtered) {
+      const hit = map.get(m.provider);
+      if (hit) hit.rows.push(m);
+      else map.set(m.provider, { label: m.provider_label, rows: [m] });
+    }
+    return Array.from(map.entries()).map(([id, g]) => ({ id, ...g }));
+  }, [filtered, groupedMode]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const pageRows = useMemo(
+    () => filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [filtered, currentPage, pageSize],
+  );
+
+  // 左栏数据
   const channelRails = useMemo(() => {
     const map = new Map<string, { id: string; name: string; count: number }>();
     for (const m of view?.models ?? []) {
@@ -531,21 +743,47 @@ export default function ModelManage(): JSX.Element {
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
   }, [view]);
 
-  /** 左栏「内置提供商」：账号池来源的 provider 分组。 */
-  const builtinRails = useMemo(
-    () => (view?.providers ?? []).filter((g) => g.account),
-    [view],
-  );
+  const builtinRails = useMemo(() => (view?.providers ?? []).filter((g) => g.account), [view]);
+
+  const providerStats = useMemo(() => {
+    const groupsList = view?.providers ?? [];
+    return {
+      total: groupsList.reduce((n, g) => n + g.total, 0),
+      providers: groupsList.length,
+      unpriced: view?.unpriced ?? 0,
+    };
+  }, [view]);
+
+  /** 面板头统计：总数 / 已启用 / 有映射（对齐 Agent2API mm-meta） */
+  const headStats = useMemo(() => {
+    const list = filtered;
+    return {
+      total: list.length,
+      enabled: list.filter((m) => m.enabled).length,
+      mapped: list.filter((m) => (m.alias_entries?.length ?? m.aliases.length) > 0).length,
+    };
+  }, [filtered]);
+
+  /** 面板头标题：当前视图名 */
+  const viewTitle = useMemo(() => {
+    if (navKey === 'all') return t('全部');
+    if (navKey.startsWith('ch:')) {
+      const cid = navKey.slice(3);
+      return channelRails.find((c) => c.id === cid)?.name ?? cid;
+    }
+    if (navKey.startsWith('pv:')) {
+      const pid = navKey.slice(3);
+      return (view?.providers ?? []).find((g) => g.id === pid)?.label ?? pid;
+    }
+    return t('全部');
+  }, [navKey, channelRails, view, t]);
 
   const selectNav = (key: string): void => {
     setNavKey(key);
-    // 渠道段与筛选行的「来源渠道」下拉联动，避免两处冲突
     if (key.startsWith('ch:')) setChannelFilter(key.slice(3));
     else if (channelFilter !== 'all') setChannelFilter('all');
   };
 
-
-  /** 来源渠道下拉选项（从模型来源汇总，覆盖所有承载渠道） */
   const channelOptions = useMemo(() => {
     const map = new Map<string, string>();
     for (const m of view?.models ?? []) {
@@ -559,7 +797,7 @@ export default function ModelManage(): JSX.Element {
   useEffect(() => {
     setPage(1);
     setSelected(new Set());
-  }, [navKey, stateFilter, priceFilter, sourceFilter, channelFilter, query]);
+  }, [navKey, stateFilter, priceFilter, sourceFilter, channelFilter, query, sortMode]);
 
   // 渠道页「在模型管理中维护」跳转：预选该渠道
   useEffect(() => {
@@ -570,36 +808,318 @@ export default function ModelManage(): JSX.Element {
     }
   }, [searchParams]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const currentPage = Math.min(page, totalPages);
-  const pageRows = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const toggleSelectAllPage = () => {
+    const keys = (groupedMode ? filtered : pageRows).map(rowKey);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const allSelected = keys.length > 0 && keys.every((k) => next.has(k));
+      for (const k of keys) {
+        if (allSelected) next.delete(k);
+        else next.add(k);
+      }
+      return next;
+    });
+  };
 
-  const providerStats = useMemo(() => {
-    const groups = view?.providers ?? [];
-    return {
-      total: groups.reduce((n, g) => n + g.total, 0),
-      providers: groups.length,
-      unpriced: view?.unpriced ?? 0,
-    };
-  }, [view]);
+  const toggleGroup = (gid: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(gid)) next.delete(gid);
+      else next.add(gid);
+      return next;
+    });
+  };
 
+  const submitJump = () => {
+    const n = Number(jumpDraft);
+    if (Number.isInteger(n) && n >= 1 && n <= totalPages) setPage(n);
+    setJumpDraft('');
+  };
+
+  // ── 单元格渲染 ──
+  const renderCell = (col: AnyCol, row: ManagedModel): JSX.Element | null => {
+    const key = rowKey(row);
+    switch (col) {
+      case 'check':
+        return (
+          <td key={col} className="mm-c-check">
+            <input
+              type="checkbox"
+              aria-label={t('选择') + ' ' + row.id}
+              checked={selected.has(key)}
+              onChange={() => toggleSelect(key)}
+            />
+          </td>
+        );
+      case 'enable':
+        return (
+          <td key={col} className="mm-c-enable">
+            <Switch
+              checked={row.enabled}
+              onChange={(next) => void handleToggle(row, next)}
+              disabled={pendingRow === key}
+              ariaLabel={`${row.id} ${t('启停')}`}
+              className="mm-row-switch"
+            />
+          </td>
+        );
+      case 'model':
+        return (
+          <td key={col} className="mm-c-model">
+            <span
+              className="mm-mid"
+              title={t('点击复制模型 ID')}
+              onClick={() => copyText(row.id)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') copyText(row.id);
+              }}
+            >
+              {row.id}
+            </span>
+            <span className="mm-model-sub">
+              {row.provider_label}
+              {row.context_length ? ` · ${fmtCompact(row.context_length)}` : ''}
+            </span>
+          </td>
+        );
+      case 'price':
+        return (
+          <td key={col} className="mm-c-price">
+            {row.price ? (
+              isFreePrice(row.price) ? (
+                <span className="mm-price-free" title={t('价格已配置为 0，调用不计费')}>
+                  {t('免费')}
+                </span>
+              ) : (
+                <span
+                  className="mm-price"
+                  title={t('单位：美元。按量价为每 1k tokens 输入/输出价；按次价为每次调用价。')}
+                >
+                  {row.price.price_type === 'count'
+                    ? `$${fmtPrice(row.price.input_price)}/${t('次')}`
+                    : `$${fmtPrice(row.price.input_price)}/$${fmtPrice(row.price.output_price)}`}
+                  {row.model_ratio !== 1 && <span className="mm-price-ratio">{row.model_ratio}x</span>}
+                </span>
+              )
+            ) : (
+              <span className="mm-price-empty">{t('未定价')}</span>
+            )}
+          </td>
+        );
+      case 'source':
+        return (
+          <td key={col} className="mm-c-source">
+            <div className="mm-sources">
+              {row.sources.slice(0, 3).map((s, i) => (
+                <span
+                  key={`${s.kind}-${s.channel_id}-${s.account_id ?? ''}-${i}`}
+                  className={`mm-src-tag${s.kind === 'account' ? '' : ' provider'}`}
+                  title={`${s.kind === 'account' ? t('账号') : t('渠道')}：${s.name}`}
+                >
+                  {s.name}
+                </span>
+              ))}
+              {row.sources.length > 3 && (
+                <span
+                  className="mm-src-more"
+                  title={row.sources.map((s) => s.name).join('\n')}
+                >
+                  +{row.sources.length - 3}
+                </span>
+              )}
+              {row.sources.length === 0 && <span className="mm-src-none">—</span>}
+            </div>
+          </td>
+        );
+      case 'caps':
+        return (
+          <td key={col} className="mm-c-caps">
+            <button
+              type="button"
+              className="mm-caps-btn"
+              title={t('查看 / 覆盖能力声明（继承内置推断，覆盖后以下游声明为准）')}
+              onClick={() => openMetaForRow(row)}
+            >
+              {CAP_DOTS.map((c) => {
+                const on = (row.capabilities ?? []).some((cap) => c.match.test(cap));
+                const Icon = c.icon;
+                return (
+                  <span
+                    key={c.key}
+                    className={`mm-cap-dot${on ? ' on' : ''}`}
+                    title={`${t(c.label)}：${on ? t('支持') : t('未声明')}`}
+                  >
+                    <Icon size={10} />
+                  </span>
+                );
+              })}
+              <span className="mm-cap-ctx">
+                {row.context_length ? fmtCompact(row.context_length) : '—'}
+              </span>
+            </button>
+          </td>
+        );
+      case 'alias':
+        return (
+          <td key={col} className="mm-c-alias">
+            <div className="mm-alias-cell">
+              {(row.alias_entries?.length
+                ? row.alias_entries
+                : row.aliases.map((a) => ({ alias: a, target: row.id, enabled: true }))
+              ).map((entry) => (
+                <span
+                  key={entry.alias}
+                  className={`mm-alias${entry.enabled ? '' : ' is-off'}`}
+                  title={
+                    entry.enabled
+                      ? `${entry.alias} → ${entry.target}`
+                      : `${entry.alias} → ${entry.target}（${t('已关闭，请求原样透传')}）`
+                  }
+                >
+                  <Switch
+                    checked={entry.enabled}
+                    onChange={(next) => void toggleAlias(entry.alias, next)}
+                    disabled={pendingAlias === entry.alias}
+                    ariaLabel={`${entry.enabled ? t('关闭') : t('启用')}映射 ${entry.alias}`}
+                    className="mm-alias-switch"
+                  />
+                  <span
+                    className="mm-alias-name"
+                    title={t('点击复制对外名；双击编辑映射')}
+                    onClick={() => copyText(entry.alias)}
+                    onDoubleClick={() => openAlias(row, entry.alias)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') openAlias(row, entry.alias);
+                    }}
+                  >
+                    {entry.alias}
+                  </span>
+                  <button
+                    type="button"
+                    className="mm-alias-x"
+                    title={t('删除映射')}
+                    onClick={() => removeAlias(entry.alias)}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              <button
+                type="button"
+                className="mm-alias-add"
+                onClick={() => openAlias(row)}
+                title={t('添加映射：对外名 → 本模型')}
+              >
+                <Plus size={10} /> {t('映射')}
+              </button>
+            </div>
+          </td>
+        );
+      case 'act':
+        return (
+          <td key={col} className="mm-c-act">
+            <div className="mm-actions">
+              <button
+                type="button"
+                className="mm-act-btn"
+                disabled={row.sources.length === 0}
+                title={
+                  row.sources.length === 0
+                    ? t('该模型没有可用来源（启用账号或渠道），无法测试')
+                    : t('沿真实链路发一条最小对话，验证可用性与延迟')
+                }
+                onClick={() => setTestTarget(row)}
+              >
+                <FlaskConical size={11} /> {t('测试')}
+              </button>
+              <button
+                type="button"
+                className="mm-act-btn"
+                onClick={() => openPrice(row)}
+                title={t('编辑定价')}
+              >
+                <Tag size={11} /> {t('定价')}
+              </button>
+              {row.price && (
+                <button
+                  type="button"
+                  className="mm-act-btn danger icon-only"
+                  onClick={() => removePrice(row)}
+                  title={t('删除定价')}
+                >
+                  <Trash2 size={11} />
+                </button>
+              )}
+            </div>
+          </td>
+        );
+      default:
+        return null;
+    }
+  };
+
+  const COL_HEAD: Record<AnyCol, { label: string; tip?: string }> = {
+    check: { label: '' },
+    enable: { label: t('启用') },
+    model: { label: t('模型') },
+    price: { label: t('定价'), tip: t('单位：美元（USD），按量价为每 1k tokens') },
+    source: { label: t('来源') },
+    caps: { label: t('能力'), tip: t('工具 / 图像 / 音频 / 思考 + 上下文长度；点击覆盖') },
+    alias: { label: t('映射'), tip: t('对外名 → 本模型；开关关掉后请求原样透传') },
+    act: { label: t('操作') },
+  };
+
+  const renderHeadCell = (col: AnyCol): JSX.Element => {
+    const def = COL_HEAD[col];
+    return (
+      <th key={col} className={`mm-h-${col}`} title={def.tip}>
+        {col === 'check' ? (
+          <input
+            type="checkbox"
+            aria-label={t('全选')}
+            checked={
+              (groupedMode ? filtered : pageRows).length > 0 &&
+              (groupedMode ? filtered : pageRows).every((r) => selected.has(rowKey(r)))
+            }
+            onChange={toggleSelectAllPage}
+          />
+        ) : (
+          def.label
+        )}
+        {col !== 'act' && (
+          <span
+            className="mm-col-grip"
+            title={t('拖动调整列宽 · 双击还原')}
+            onMouseDown={(e) => startColDrag(col, e)}
+            onDoubleClick={() => resetColWidth(col)}
+          />
+        )}
+      </th>
+    );
+  };
+
+  const renderRow = (row: ManagedModel): JSX.Element => {
+    const key = rowKey(row);
+    return (
+      <tr key={key} className={`${row.enabled ? '' : 'mm-off'}${selected.has(key) ? ' mm-sel' : ''}`}>
+        {visibleCols.map((col) => renderCell(col, row))}
+      </tr>
+    );
+  };
+
+  // ── 渲染 ──
   return (
     <div>
       <div className="page-header">
         <div>
           <h1>{t('模型管理')}</h1>
-          <p>
-            {t(
-              '渠道与账号池的模型统一在此管理：启停、定价、别名。渠道表单里不再重复配置模型。'
-            )}
-          </p>
+          <p>{t('渠道与账号池的模型统一在此管理：测试、启停、定价、映射。')}</p>
         </div>
-        <button
-          className="btn btn-outline btn-sm"
-          onClick={() => void load()}
-          disabled={loading}
-          style={{ gap: 6 }}
-        >
+        <button className="btn btn-outline btn-sm" onClick={() => void load()} disabled={loading} style={{ gap: 6 }}>
           <RefreshCw size={13} />
           {loading ? t('加载中...') : t('刷新')}
         </button>
@@ -613,67 +1133,63 @@ export default function ModelManage(): JSX.Element {
           { key: 'meta', label: t('元信息覆盖') },
         ]}
         active={tab}
-        onChange={setTab}
+        onChange={(k) => setTab(k as MainTab)}
         ariaLabel={t('模型管理')}
       />
 
       {tab === 'meta' ? (
-        <Card
-          title={t('元信息覆盖')}
-          actions={
-            <button className="btn btn-outline btn-sm" onClick={openMetaCreate} style={{ gap: 6 }}>
-              <Plus size={13} />
-              {t('新增覆盖')}
-            </button>
-          }
-        >
+        <div className="mm-panel">
+          <div className="mm-titlebar">
+            <div className="mm-title">
+              <span className="mm-title-name">{t('元信息覆盖')}</span>
+              <span className="mm-meta">{t('覆盖内置推断的归属方 / 上下文长度 / 能力声明')}</span>
+            </div>
+            <div className="mm-head-actions">
+              <button className="btn btn-outline btn-sm" onClick={openMetaCreate} style={{ gap: 6 }}>
+                <Plus size={13} />
+                {t('新增覆盖')}
+              </button>
+            </div>
+          </div>
           {Object.keys(overrides).length === 0 ? (
             <EmptyState
               icon="🏷️"
               message={t('暂无覆盖项。内置推断已覆盖常见模型，需要自定义归属/上下文/能力时在此添加')}
             />
           ) : (
-            <div className="table-wrapper">
-              <table>
+            <div className="mm-table-wrap">
+              <table className="mm-table">
                 <thead>
                   <tr>
                     <th>{t('模型')}</th>
                     <th>{t('归属方')}</th>
                     <th>{t('上下文长度')}</th>
                     <th>{t('能力')}</th>
-                    <th style={{ width: 110 }}>{t('操作')}</th>
+                    <th style={{ width: 96 }}>{t('操作')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {Object.entries(overrides).map(([model, o]) => (
                     <tr key={model}>
-                      <td><strong>{model}</strong></td>
+                      <td>
+                        <span className="mm-mid">{model}</span>
+                      </td>
                       <td>{o.owned_by}</td>
                       <td>{o.context_length ?? '—'}</td>
                       <td>
-                        <div className="mm-caps">
+                        <div className="mm-sources">
                           {(o.capabilities ?? []).map((c) => (
-                            <Badge key={c} tone="neutral">{c}</Badge>
+                            <span key={c} className="mm-src-tag provider">{c}</span>
                           ))}
                         </div>
                       </td>
                       <td>
                         <div className="mm-actions">
-                          <button
-                            type="button"
-                            className="btn btn-outline btn-sm"
-                            onClick={() => openMetaEdit(model)}
-                            title={t('编辑')}
-                          >
-                            <Pencil size={12} />
+                          <button type="button" className="mm-act-btn" onClick={() => openMetaEdit(model)} title={t('编辑')}>
+                            <Pencil size={11} />
                           </button>
-                          <button
-                            type="button"
-                            className="btn btn-danger btn-sm"
-                            onClick={() => removeMeta(model)}
-                            title={t('删除')}
-                          >
-                            <Trash2 size={12} />
+                          <button type="button" className="mm-act-btn danger icon-only" onClick={() => removeMeta(model)} title={t('删除')}>
+                            <Trash2 size={11} />
                           </button>
                         </div>
                       </td>
@@ -683,107 +1199,212 @@ export default function ModelManage(): JSX.Element {
               </table>
             </div>
           )}
-        </Card>
+        </div>
       ) : (
-      <div className="mm-layout">
-        {/* 左栏：三段式导航（对齐 Agent2API 模型管理）
-            1. 渠道供应商 —— 每个**启用中**的渠道单独一行，按渠道 id 精确筛选
-            2. 内置提供商 —— 账号池里的 provider（workbuddy / qoder / …）
-            3. 自定义提供商 —— 用户自建的 provider（暂无独立存储时自然为空）
+        <div className="mm-layout">
+          {/* 左栏：分组导航（对齐 Agent2API prov-rail） */}
+          <nav className="mm-rail" aria-label={t('提供商分组')}>
+            <button
+              type="button"
+              className={`mm-rail-item${navKey === 'all' ? ' active' : ''}`}
+              onClick={() => selectNav('all')}
+            >
+              <span className="mm-mono mute">
+                <Boxes size={13} />
+              </span>
+              <span className="mm-rail-name">{t('全部')}</span>
+              <span className="mm-rail-count">{providerStats.total}</span>
+            </button>
 
-            「全部」放在最上面，跨三段聚合。 */}
-        <nav className="mm-rail" aria-label={t('提供商分组')}>
-          <button
-            type="button"
-            className={`mm-rail-item${navKey === 'all' ? ' active' : ''}`}
-            onClick={() => selectNav('all')}
-          >
-            <Boxes size={14} />
-            <span className="mm-rail-name">{t('全部')}</span>
-            <span className="mm-rail-count">{providerStats.total}</span>
-          </button>
+            <div className="mm-rail-title">{t('渠道供应商')}</div>
+            {channelRails.length === 0 ? (
+              <div className="mm-rail-empty">{t('暂无启用的渠道')}</div>
+            ) : (
+              channelRails.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  className={`mm-rail-item${navKey === `ch:${c.id}` ? ' active' : ''}`}
+                  onClick={() => selectNav(`ch:${c.id}`)}
+                  title={`${c.name} · ${c.count} ${t('个模型')}`}
+                >
+                  <span
+                    className="mm-mono"
+                    style={{
+                      background: `hsla(${providerHue(c.id)}, 65%, 55%, 0.16)`,
+                      color: `hsl(${providerHue(c.id)}, 55%, 42%)`,
+                    }}
+                  >
+                    {monogramChar(c.name)}
+                  </span>
+                  <span className="mm-rail-name">{c.name}</span>
+                  <span className="mm-rail-count">{c.count}</span>
+                </button>
+              ))
+            )}
 
-          {/* ① 渠道供应商：启用的渠道逐个列出（用户明确要求「每个不同的渠道名称都列出来，
-              只要状态是启动的」）。渠道被停用后其模型本就不进视图，这里也不会出现。 */}
-          <div className="mm-rail-title">{t('渠道供应商')}</div>
-          {channelRails.length === 0 ? (
-            <div className="mm-rail-empty">{t('暂无启用的渠道')}</div>
-          ) : (
-            channelRails.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                className={`mm-rail-item${navKey === `ch:${c.id}` ? ' active' : ''}`}
-                onClick={() => selectNav(`ch:${c.id}`)}
-                title={`${c.name} · ${c.count} ${t('个模型')}`}
-              >
-                <span className="mm-rail-dot" />
-                <span className="mm-rail-name">{c.name}</span>
-                <span className="mm-rail-count">{c.count}</span>
-              </button>
-            ))
-          )}
+            <div className="mm-rail-title">{t('账号池提供商')}</div>
+            {builtinRails.length === 0 ? (
+              <div className="mm-rail-empty">{t('暂无账号池供应商')}</div>
+            ) : (
+              builtinRails.map((g) => (
+                <button
+                  key={g.id}
+                  type="button"
+                  className={`mm-rail-item${navKey === `pv:${g.id}` ? ' active' : ''}`}
+                  onClick={() => selectNav(`pv:${g.id}`)}
+                  title={`${g.label} (${g.enabled}/${g.total})`}
+                >
+                  <span
+                    className="mm-mono"
+                    style={{
+                      background: `hsla(${providerHue(g.id)}, 65%, 55%, 0.16)`,
+                      color: `hsl(${providerHue(g.id)}, 55%, 42%)`,
+                    }}
+                  >
+                    {monogramChar(g.label)}
+                  </span>
+                  <span className="mm-rail-name">{g.label}</span>
+                  <span className="mm-rail-count">
+                    {g.enabled}/{g.total}
+                  </span>
+                </button>
+              ))
+            )}
 
-          {/* ② 内置提供商：账号池的 provider 分组（原有的 provider 维度） */}
-          <div className="mm-rail-title">{t('内置提供商')}</div>
-          {builtinRails.length === 0 ? (
-            <div className="mm-rail-empty">{t('暂无账号池供应商')}</div>
-          ) : (
-            builtinRails.map((g) => (
-              <button
-                key={g.id}
-                type="button"
-                className={`mm-rail-item${navKey === `pv:${g.id}` ? ' active' : ''}`}
-                onClick={() => selectNav(`pv:${g.id}`)}
-                title={`${g.label} (${g.enabled}/${g.total})`}
-              >
-                <span className="mm-rail-dot account" />
-                <span className="mm-rail-name">{g.label}</span>
-                <span className="mm-rail-count">
-                  {g.enabled}/{g.total}
+            <div className="mm-rail-title">{t('自定义提供商')}</div>
+            <div className="mm-rail-empty">{t('暂无自定义提供商')}</div>
+          </nav>
+
+          {/* 右侧面板 */}
+          <div className="mm-panel">
+            {/* 第一行：标题 + 统计 + 动作 */}
+            <div className="mm-titlebar">
+              <div className="mm-title">
+                <span className="mm-title-name">{viewTitle}</span>
+                <span className="mm-meta">
+                  {headStats.total} {t('个模型')} · {t('已启用')} {headStats.enabled} · {t('有映射')}{' '}
+                  {headStats.mapped}
+                  {providerStats.unpriced > 0 && ` · ${t('未定价')} ${providerStats.unpriced}`}
                 </span>
-              </button>
-            ))
-          )}
+              </div>
+              <div className="mm-head-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={() => void openFetchModal()}
+                  style={{ gap: 6 }}
+                  title={t('从上游拉取模型列表')}
+                >
+                  <Download size={13} />
+                  {t('获取模型')}
+                </button>
+                <div className="mm-colset" ref={colPanelRef}>
+                  <button
+                    type="button"
+                    className={`btn btn-outline btn-sm${colPanelOpen ? ' mm-colset-open' : ''}`}
+                    onClick={() => setColPanelOpen((v) => !v)}
+                    style={{ gap: 6 }}
+                    title={t('列显示设置')}
+                  >
+                    <Settings2 size={13} />
+                    {t('列设置')}
+                  </button>
+                  {colPanelOpen && (
+                    <div className="mm-colset-panel">
+                      {COL_DEFS.map((c) => (
+                        <label key={c.key} className="mm-colset-row">
+                          <span>{t(c.label)}</span>
+                          <Switch
+                            checked={colConfig[c.key]}
+                            onChange={() => toggleCol(c.key)}
+                            ariaLabel={`${t('显示列')} ${t(c.label)}`}
+                          />
+                        </label>
+                      ))}
+                      <button
+                        type="button"
+                        className="mm-colset-reset"
+                        onClick={() => {
+                          const def = { enable: true, price: true, source: true, caps: true, alias: true };
+                          setColConfig(def);
+                          writeLS(LS_COLS, def);
+                          setColWidths({});
+                          writeLS(LS_COLW, {});
+                        }}
+                      >
+                        {t('恢复默认（含列宽）')}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
 
-          {/* ③ 自定义提供商：目前 AIGX 没有独立的“自定义 provider”存储，
-              账号池新增的 provider 会落到上面「内置」段。这里保留分段与空态提示，
-              等后端支持后再填内容，避免和 Agent2API 的信息架构脱节。 */}
-          <div className="mm-rail-title">{t('自定义提供商')}</div>
-          <div className="mm-rail-empty">{t('暂无自定义提供商')}</div>
-        </nav>
-
-        {/* 右侧：表格 */}
-        <div className="mm-main">
-          <Card bodyClassName="">
-            <div className="mm-toolbar">
-              <div className="models-search" style={{ flex: 1, minWidth: 180 }}>
-                <Search size={14} className="models-search-icon" />
+            {/* 第二行：筛选 */}
+            <div className="mm-filters">
+              <div className="mm-seg" role="tablist" aria-label={t('状态筛选')}>
+                {(
+                  [
+                    ['all', '全部'],
+                    ['on', '已启用'],
+                    ['off', '已禁用'],
+                    ['mapped', '有映射'],
+                  ] as Array<[StateFilter, string]>
+                ).map(([v, label]) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className={`mm-seg-btn${stateFilter === v ? ' active' : ''}`}
+                    onClick={() => setStateFilter(v)}
+                  >
+                    {t(label)}
+                  </button>
+                ))}
+              </div>
+              <div className="mm-seg" role="tablist" aria-label={t('排序')}>
+                {(
+                  [
+                    ['default', '默认'],
+                    ['ratio-asc', '倍率升序'],
+                    ['ratio-desc', '倍率降序'],
+                  ] as Array<[SortMode, string]>
+                ).map(([v, label]) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className={`mm-seg-btn${sortMode === v ? ' active' : ''}`}
+                    onClick={() => setSortMode(v)}
+                  >
+                    {t(label)}
+                  </button>
+                ))}
+              </div>
+              <div className="models-search mm-search">
+                <Search size={13} className="models-search-icon" />
                 <input
                   className="form-input"
-                  placeholder={t('搜索模型 / 别名 / 渠道 / 账号…')}
+                  placeholder={t('搜索模型 ID / 别名 / 来源…')}
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   aria-label={t('搜索模型')}
                 />
               </div>
               <select
-                className="form-input"
+                className="form-input mm-mini-select"
                 value={sourceFilter}
                 onChange={(e) => setSourceFilter(e.target.value as SourceFilter)}
                 aria-label={t('来源筛选')}
-                style={{ maxWidth: 120 }}
               >
                 <option value="all">{t('全部来源')}</option>
                 <option value="channel">{t('仅渠道')}</option>
                 <option value="account">{t('仅账号池')}</option>
               </select>
               <select
-                className="form-input"
+                className="form-input mm-mini-select"
                 value={channelFilter}
                 onChange={(e) => setChannelFilter(e.target.value)}
                 aria-label={t('渠道筛选')}
-                style={{ maxWidth: 160 }}
               >
                 <option value="all">{t('全部渠道')}</option>
                 {channelOptions.map(([cid, name]) => (
@@ -793,77 +1414,28 @@ export default function ModelManage(): JSX.Element {
                 ))}
               </select>
               <select
-                className="form-input"
-                value={stateFilter}
-                onChange={(e) => setStateFilter(e.target.value as StateFilter)}
-                aria-label={t('启停筛选')}
-                style={{ maxWidth: 120 }}
-              >
-                <option value="all">{t('全部状态')}</option>
-                <option value="on">{t('已启用')}</option>
-                <option value="off">{t('已禁用')}</option>
-              </select>
-              <select
-                className="form-input"
+                className="form-input mm-mini-select"
                 value={priceFilter}
                 onChange={(e) => setPriceFilter(e.target.value as PriceFilter)}
                 aria-label={t('定价筛选')}
-                style={{ maxWidth: 120 }}
               >
                 <option value="all">{t('全部定价')}</option>
                 <option value="priced">{t('已定价')}</option>
                 <option value="unpriced">{t('未定价')}</option>
               </select>
-              <button
-                type="button"
-                className="btn btn-outline btn-sm"
-                onClick={() => void openFetchModal()}
-                style={{ gap: 6, whiteSpace: 'nowrap' }}
-                title={t('从上游拉取模型列表')}
-              >
-                <Download size={13} />
-                {t('获取模型')}
-              </button>
-              <span className="mm-summary">
-                {t('显示')} {filtered.length} / {providerStats.total} ·{' '}
-                {t('未定价')} {providerStats.unpriced}
-              </span>
             </div>
 
+            {/* 批量条（勾选后出现，对齐 Agent2API batch-chip） */}
             {selected.size > 0 && (
-              <div className="mm-batch-bar">
-                <span>{t('已选')} {selected.size}</span>
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
-                  disabled={batchRunning}
-                  onClick={() => void runBatch('enable')}
-                >
-                  {t('批量启用')}
+              <div className="mm-batch-chip">
+                <span>
+                  {t('已选')} <strong>{selected.size}</strong> {t('个')}
+                </span>
+                <button type="button" className="btn btn-outline btn-sm" onClick={() => { setBatchReport(''); setBatchOpen(true); }}>
+                  {t('批量操作')}
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
-                  disabled={batchRunning}
-                  onClick={() => void runBatch('disable')}
-                >
-                  {t('批量禁用')}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-danger btn-sm"
-                  disabled={batchRunning}
-                  onClick={() => void runBatch('remove-price')}
-                >
-                  {t('批量删除定价')}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
-                  disabled={batchRunning}
-                  onClick={() => setSelected(new Set())}
-                >
-                  {t('取消')}
+                <button type="button" className="mm-batch-clear" title={t('清除选择')} onClick={() => setSelected(new Set())}>
+                  ×
                 </button>
               </div>
             )}
@@ -874,222 +1446,128 @@ export default function ModelManage(): JSX.Element {
               <EmptyState
                 icon="📦"
                 message={
-                  query || stateFilter !== 'all' || priceFilter !== 'all' || navKey !== 'all'
-                    ? t('没有匹配的模型')
-                    : t('暂无模型。请先在渠道管理或账号池里配置上游。')
+                  query
+                    ? t('没有匹配「') + query + t('」的模型')
+                    : stateFilter !== 'all' || priceFilter !== 'all' || navKey !== 'all'
+                      ? t('没有匹配的模型')
+                      : t('暂无模型。请先在渠道管理或账号池里配置上游。')
                 }
               />
             ) : (
               <>
-                <table className="mm-table">
-                  <thead>
-                    <tr>
-                      <th style={{ width: 36 }}>
-                        <input
-                          type="checkbox"
-                          aria-label={t('全选')}
-                          checked={pageRows.length > 0 && pageRows.every((r) => selected.has(`${r.provider}|${r.id}`))}
-                          onChange={toggleSelectAllPage}
-                        />
-                      </th>
-                      <th style={{ width: 52 }}>{t('启用')}</th>
-                      <th>{t('模型')}</th>
-                      <th>{t('来源')}</th>
-                      <th style={{ width: 150 }} title={t('单位：美元（USD）')}>
-                        {t('价格')}
-                        <span className="mm-th-sub">$/1k</span>
-                      </th>
-                      <th style={{ width: 130 }}>{t('能力')}</th>
-                      <th style={{ width: 170 }}>{t('别名')}</th>
-                      <th style={{ width: 150 }}>{t('操作')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pageRows.map((row) => {
-                      const key = `${row.provider}|${row.id}`;
-                      return (
-                        <tr key={key}>
-                          <td>
-                            <input
-                              type="checkbox"
-                              aria-label={t('选择') + ' ' + row.id}
-                              checked={selected.has(key)}
-                              onChange={() => toggleSelect(key)}
-                            />
-                          </td>
-                          <td>
-                            <Switch
-                              checked={row.enabled}
-                              onChange={(next) => void handleToggle(row, next)}
-                              disabled={pendingRow === key}
-                              ariaLabel={`${row.id} ${t('启停')}`}
-                            />
-                          </td>
-                          <td>
-                            <div className="mm-model-id">{row.id}</div>
-                            <div className="mm-model-sub">
-                              {row.provider_label}
-                              {row.context_length
-                                ? ` · ${t('上下文')} ${fmtCompact(row.context_length)}`
-                                : ''}
-                            </div>
-                          </td>
-                          <td>
-                            <div className="mm-sources">
-                              {row.sources.map((s, i) => (
-                                <span
-                                  key={`${s.kind}-${s.channel_id}-${s.account_id ?? ''}-${i}`}
-                                  className={`mm-source-chip${s.kind === 'account' ? ' account' : ''}`}
-                                  title={`${s.kind === 'account' ? t('账号') : t('渠道')}：${s.name}`}
-                                >
-                                  {s.kind === 'account' ? '👤' : '🔗'} {s.name}
-                                </span>
-                              ))}
-                            </div>
-                          </td>
-                          <td>
-                            {row.price ? (
-                              isFreePrice(row.price) ? (
-                                <span className="mm-price-free" title={t('价格已配置为 0，调用不计费')}>
-                                  {t('免费')}
-                                </span>
-                              ) : (
-                                <span
-                                  className="mm-price"
-                                  title={t('单位：美元。按量价为每 1k tokens 输入/输出价；按次价为每次调用价。')}
-                                >
-                                  {row.price.price_type === 'count'
-                                    ? `$${fmtPrice(row.price.input_price)} ${t('/次')}`
-                                    : `$${fmtPrice(row.price.input_price)} / $${fmtPrice(
-                                        row.price.output_price
-                                      )}`}
-                                  {row.model_ratio !== 1 && (
-                                    <span className="mm-price-ratio">
-                                      {t('倍率')} {row.model_ratio}
-                                    </span>
-                                  )}
-                                </span>
-                              )
-                            ) : (
-                              <span className="mm-price-empty">{t('未定价')}</span>
-                            )}
-                          </td>
-                          <td>
-                            <div className="mm-caps">
-                              {CAP_LABELS.filter((c) =>
-                                (row.capabilities ?? []).some((cap) =>
-                                  cap.toLowerCase().includes(c.match)
-                                )
-                              ).map((c) => (
-                                <Badge key={c.match} tone="neutral">
-                                  {c.label}
-                                </Badge>
-                              ))}
-                            </div>
-                          </td>
-                          <td>
-                            <div className="mm-alias-cell">
-                              {(() => {
-                                // 新后端给 alias_entries（带开关）；老后端只给 aliases 名字，
-                                // 回退成「全部启用」的等价结构，避免两套渲染分支。
-                                const entries = row.alias_entries?.length
-                                  ? row.alias_entries
-                                  : row.aliases.map((a) => ({
-                                      alias: a,
-                                      target: row.id,
-                                      enabled: true
-                                    }));
-                                return entries.map((entry) => (
-                                  <span
-                                    key={entry.alias}
-                                    className={`mm-alias-chip${entry.enabled ? '' : ' is-off'}`}
-                                    title={
-                                      entry.enabled
-                                        ? `${entry.alias} → ${entry.target}`
-                                        : `${entry.alias} → ${entry.target}（已关闭，请求会原样透传）`
-                                    }
-                                  >
-                                    <Switch
-                                      checked={entry.enabled}
-                                      onChange={(next) => void toggleAlias(entry.alias, next)}
-                                      disabled={pendingAlias === entry.alias}
-                                      ariaLabel={`${entry.enabled ? t('关闭') : t('启用')}映射 ${entry.alias}`}
-                                      className="mm-alias-switch"
-                                    />
+                <div className="mm-table-wrap">
+                  <table className="mm-table">
+                    <colgroup>
+                      {visibleCols.map((col) => (
+                        <col key={col} style={{ width: colWidths[col] ? `${colWidths[col]}px` : COL_DEFAULT_W[col] }} />
+                      ))}
+                    </colgroup>
+                    <thead>
+                      <tr>{visibleCols.map(renderHeadCell)}</tr>
+                    </thead>
+                    <tbody>
+                      {groupedMode
+                        ? groups.map((g) => {
+                            const expanded = expandedGroups.has(g.id);
+                            const shown = expanded ? g.rows : g.rows.slice(0, GROUP_LIMIT);
+                            const hidden = g.rows.length - shown.length;
+                            return (
+                              <FragmentGroup key={g.id}>
+                                <tr className="mm-tr-group">
+                                  <td colSpan={visibleCols.length}>
                                     <span
-                                      className="mm-alias-name"
-                                      onClick={() => openAlias(row, entry.alias)}
-                                      role="button"
-                                      tabIndex={0}
-                                      onKeyDown={(e) => {
-                                        if (e.key === 'Enter' || e.key === ' ') {
-                                          e.preventDefault();
-                                          openAlias(row, entry.alias);
-                                        }
+                                      className="mm-mono"
+                                      style={{
+                                        background: `hsla(${providerHue(g.id)}, 65%, 55%, 0.16)`,
+                                        color: `hsl(${providerHue(g.id)}, 55%, 42%)`,
                                       }}
                                     >
-                                      {entry.alias}
+                                      {monogramChar(g.label)}
                                     </span>
-                                    <button
-                                      type="button"
-                                      className="mm-alias-x"
-                                      title={t('删除映射')}
-                                      onClick={() => removeAlias(entry.alias)}
-                                    >
-                                      ×
-                                    </button>
-                                  </span>
-                                ));
-                              })()}
-                              <button
-                                type="button"
-                                className="mm-alias-add"
-                                onClick={() => openAlias(row)}
-                                title={t('添加映射：对外名 → 本模型')}
-                              >
-                                <Plus size={11} /> {t('映射')}
-                              </button>
-                            </div>
-                          </td>
-                          <td>
-                            <div className="mm-actions">
-                              <button
-                                type="button"
-                                className="btn btn-outline btn-sm"
-                                onClick={() => openPrice(row)}
-                                title={t('编辑定价')}
-                              >
-                                <Tag size={12} /> {t('定价')}
-                              </button>
-                              {row.price && (
-                                <button
-                                  type="button"
-                                  className="btn btn-danger btn-sm"
-                                  onClick={() => removePrice(row)}
-                                  title={t('删除定价')}
-                                >
-                                  <Trash2 size={12} />
-                                </button>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-                <div className="mm-pagination">
-                  <Pagination
-                    page={currentPage}
-                    totalPages={totalPages}
-                    onChange={setPage}
-                  />
+                                    <span className="mm-group-label">{g.label}</span>
+                                    <span className="mm-group-count">{g.rows.length}</span>
+                                  </td>
+                                </tr>
+                                {shown.map(renderRow)}
+                                {hidden > 0 && (
+                                  <tr className="mm-tr-more">
+                                    <td colSpan={visibleCols.length}>
+                                      <button type="button" className="mm-more-btn" onClick={() => toggleGroup(g.id)}>
+                                        <ChevronDown size={12} /> {t('展开其余')} {hidden} {t('个模型')}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                )}
+                                {expanded && g.rows.length > GROUP_LIMIT && (
+                                  <tr className="mm-tr-more">
+                                    <td colSpan={visibleCols.length}>
+                                      <button type="button" className="mm-more-btn" onClick={() => toggleGroup(g.id)}>
+                                        <ChevronUp size={12} /> {t('收起')}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                )}
+                              </FragmentGroup>
+                            );
+                          })
+                        : pageRows.map(renderRow)}
+                    </tbody>
+                  </table>
                 </div>
+
+                {/* 分页页脚（对齐 Agent2API TableFooter：总数 / 每页档位 / 跳页） */}
+                {!groupedMode && (
+                  <div className="mm-table-foot">
+                    <span className="mm-foot-info">
+                      {t('共')} {filtered.length} {t('条')}
+                      {filtered.length > 0 &&
+                        ` · ${t('当前第')} ${(currentPage - 1) * pageSize + 1}–${Math.min(
+                          currentPage * pageSize,
+                          filtered.length,
+                        )} ${t('条')}`}
+                    </span>
+                    <div className="mm-foot-right">
+                      <select
+                        className="form-input mm-pagesize"
+                        value={pageSize}
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          setPageSize(n);
+                          localStorage.setItem(LS_PAGE_SIZE, String(n));
+                          setPage(1);
+                        }}
+                        aria-label={t('每页条数')}
+                      >
+                        {PAGE_SIZES.map((n) => (
+                          <option key={n} value={n}>
+                            {n} / {t('页')}
+                          </option>
+                        ))}
+                      </select>
+                      <Pagination page={currentPage} totalPages={totalPages} onChange={setPage} />
+                      <span className="mm-jump">
+                        {t('跳至')}
+                        <input
+                          className="form-input"
+                          value={jumpDraft}
+                          onChange={(e) => setJumpDraft(e.target.value.replace(/\D/g, ''))}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') submitJump();
+                            if (e.key === 'Escape') setJumpDraft('');
+                          }}
+                          onBlur={submitJump}
+                          placeholder={String(currentPage)}
+                          aria-label={t('跳至页码')}
+                        />
+                        {t('页')}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </>
             )}
-          </Card>
+          </div>
         </div>
-      </div>
       )}
 
       {/* ── 元信息覆盖弹窗 ── */}
@@ -1104,6 +1582,9 @@ export default function ModelManage(): JSX.Element {
             </div>
             <div className="modal-body">
               {metaError && <div className="error-message">{metaError}</div>}
+              <p className="mm-dialog-note">
+                {t('这些声明展示给下游客户端（/v1/models 的 owned_by / context_length / capabilities），不影响网关转发与路由。字段留空即继承内置推断。')}
+              </p>
               <div className="form-group">
                 <label>{t('模型 ID')} *</label>
                 <input
@@ -1125,7 +1606,7 @@ export default function ModelManage(): JSX.Element {
                 />
               </div>
               <div className="form-group">
-                <label>{t('上下文长度（可选）')}</label>
+                <label>{t('上下文长度（留空继承）')}</label>
                 <input
                   className="form-input"
                   value={metaForm.context_length}
@@ -1135,29 +1616,21 @@ export default function ModelManage(): JSX.Element {
                 />
               </div>
               <div className="form-group">
-                <label>{t('能力标签（逗号分隔，可选）')}</label>
+                <label>{t('能力标签（逗号分隔，留空继承）')}</label>
                 <input
                   className="form-input"
                   value={metaForm.capabilities}
                   onChange={(e) => setMetaForm({ ...metaForm, capabilities: e.target.value })}
-                  placeholder="chat, vision"
+                  placeholder="chat, vision, tool, reasoning"
                   disabled={savingMeta}
                 />
               </div>
             </div>
             <div className="modal-footer">
-              <button
-                className="btn btn-outline"
-                onClick={() => setMetaModal(false)}
-                disabled={savingMeta}
-              >
+              <button className="btn btn-outline" onClick={() => setMetaModal(false)} disabled={savingMeta}>
                 {t('取消')}
               </button>
-              <button
-                className="btn btn-primary"
-                onClick={() => void saveMeta()}
-                disabled={savingMeta}
-              >
+              <button className="btn btn-primary" onClick={() => void saveMeta()} disabled={savingMeta}>
                 {savingMeta ? t('保存中...') : t('保存')}
               </button>
             </div>
@@ -1186,9 +1659,7 @@ export default function ModelManage(): JSX.Element {
                 <select
                   className="form-input"
                   value={priceForm.price_type}
-                  onChange={(e) =>
-                    setPriceForm({ ...priceForm, price_type: e.target.value })
-                  }
+                  onChange={(e) => setPriceForm({ ...priceForm, price_type: e.target.value })}
                   disabled={savingPrice}
                 >
                   <option value="token">{t('按 token 计价')}</option>
@@ -1197,16 +1668,12 @@ export default function ModelManage(): JSX.Element {
               </div>
               <div className="form-group">
                 <label>
-                  {priceForm.price_type === 'count'
-                    ? t('每次价格')
-                    : t('输入价格（每 1k token）')}
+                  {priceForm.price_type === 'count' ? t('每次价格') : t('输入价格（每 1k token）')}
                 </label>
                 <input
                   className="form-input"
                   value={priceForm.input_price}
-                  onChange={(e) =>
-                    setPriceForm({ ...priceForm, input_price: e.target.value })
-                  }
+                  onChange={(e) => setPriceForm({ ...priceForm, input_price: e.target.value })}
                   placeholder="0.0005"
                   disabled={savingPrice}
                 />
@@ -1218,9 +1685,7 @@ export default function ModelManage(): JSX.Element {
                     <input
                       className="form-input"
                       value={priceForm.output_price}
-                      onChange={(e) =>
-                        setPriceForm({ ...priceForm, output_price: e.target.value })
-                      }
+                      onChange={(e) => setPriceForm({ ...priceForm, output_price: e.target.value })}
                       placeholder="0.0015"
                       disabled={savingPrice}
                     />
@@ -1230,9 +1695,7 @@ export default function ModelManage(): JSX.Element {
                     <input
                       className="form-input"
                       value={priceForm.cache_price}
-                      onChange={(e) =>
-                        setPriceForm({ ...priceForm, cache_price: e.target.value })
-                      }
+                      onChange={(e) => setPriceForm({ ...priceForm, cache_price: e.target.value })}
                       placeholder="0.0001"
                       disabled={savingPrice}
                     />
@@ -1244,27 +1707,17 @@ export default function ModelManage(): JSX.Element {
                 <input
                   className="form-input"
                   value={priceForm.model_ratio}
-                  onChange={(e) =>
-                    setPriceForm({ ...priceForm, model_ratio: e.target.value })
-                  }
+                  onChange={(e) => setPriceForm({ ...priceForm, model_ratio: e.target.value })}
                   placeholder="1.0"
                   disabled={savingPrice}
                 />
               </div>
             </div>
             <div className="modal-footer">
-              <button
-                className="btn btn-outline"
-                onClick={() => setPriceTarget(null)}
-                disabled={savingPrice}
-              >
+              <button className="btn btn-outline" onClick={() => setPriceTarget(null)} disabled={savingPrice}>
                 {t('取消')}
               </button>
-              <button
-                className="btn btn-primary"
-                onClick={() => void savePrice()}
-                disabled={savingPrice}
-              >
+              <button className="btn btn-primary" onClick={() => void savePrice()} disabled={savingPrice}>
                 {savingPrice ? t('保存中...') : t('保存')}
               </button>
             </div>
@@ -1277,7 +1730,11 @@ export default function ModelManage(): JSX.Element {
         <div className="modal-overlay" onClick={() => setAliasTarget(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h3>{aliasTarget && aliasForm.alias.trim() && aliasTarget.aliases.includes(aliasForm.alias.trim()) ? t('编辑映射') : t('添加映射')}</h3>
+              <h3>
+                {aliasForm.alias.trim() && aliasTarget.aliases.includes(aliasForm.alias.trim())
+                  ? t('编辑映射')
+                  : t('添加映射')}
+              </h3>
               <button className="modal-close" onClick={() => setAliasTarget(null)}>
                 &times;
               </button>
@@ -1305,7 +1762,6 @@ export default function ModelManage(): JSX.Element {
                   disabled={savingAlias}
                 />
               </div>
-              {/* 实时预览：一眼看清这次保存会得到什么（Agent2API 同款） */}
               <div className="mm-alias-preview">
                 {aliasForm.alias.trim() && aliasForm.target.trim() ? (
                   <>
@@ -1318,23 +1774,15 @@ export default function ModelManage(): JSX.Element {
                   </span>
                 )}
               </div>
-              <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              <p className="mm-dialog-note">
                 {t('映射是全局的：客户端请求对外名时，网关按映射改名为目标模型再转发。同一对外名可被多条映射使用（主备切换）。')}
               </p>
             </div>
             <div className="modal-footer">
-              <button
-                className="btn btn-outline"
-                onClick={() => setAliasTarget(null)}
-                disabled={savingAlias}
-              >
+              <button className="btn btn-outline" onClick={() => setAliasTarget(null)} disabled={savingAlias}>
                 {t('取消')}
               </button>
-              <button
-                className="btn btn-primary"
-                onClick={() => void saveAlias()}
-                disabled={savingAlias}
-              >
+              <button className="btn btn-primary" onClick={() => void saveAlias()} disabled={savingAlias}>
                 {savingAlias ? t('保存中...') : t('保存')}
               </button>
             </div>
@@ -1353,7 +1801,7 @@ export default function ModelManage(): JSX.Element {
               </button>
             </div>
             <div className="modal-body">
-              <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+              <p className="mm-dialog-note">
                 {t('从上游 /models 接口拉取模型清单（写入渠道的「上游发现」快照）。账号型渠道请在账号池里维护模型白名单。')}
               </p>
               {fetchChannels.length === 0 ? (
@@ -1370,22 +1818,24 @@ export default function ModelManage(): JSX.Element {
                             {ch.channel_type} · {t('已发现')} {(ch.discovered_models ?? []).length}
                           </span>
                         </div>
-                        <button
-                          type="button"
-                          className="btn btn-outline btn-sm"
-                          disabled={fetchingId !== null}
-                          onClick={() => void fetchOne(ch)}
-                        >
-                          {fetchingId === cid ? (
-                            <>
-                              <Loader2 size={12} className="spin" /> {t('拉取中...')}
-                            </>
-                          ) : fetchDone[cid] ? (
-                            t('已拉取')
-                          ) : (
-                            t('拉取')
-                          )}
-                        </button>
+                        {fetchDone[cid] ? (
+                          <span className="mm-badge-ok">{t('已拉取')}</span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-outline btn-sm"
+                            disabled={fetchingId !== null}
+                            onClick={() => void fetchOne(ch)}
+                          >
+                            {fetchingId === cid ? (
+                              <>
+                                <Loader2 size={12} className="spin" /> {t('拉取中...')}
+                              </>
+                            ) : (
+                              t('拉取')
+                            )}
+                          </button>
+                        )}
                       </div>
                     );
                   })}
@@ -1401,7 +1851,79 @@ export default function ModelManage(): JSX.Element {
         </div>
       )}
 
+      {/* ── 批量操作弹窗（对齐 Agent2API models-batch-dialog） ── */}
+      {batchOpen && (
+        <div className="modal-overlay" onClick={() => !batchRunning && setBatchOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>
+                {t('批量操作')} · {t('已选')} {selectedRows.length} {t('个模型')}
+              </h3>
+              <button className="modal-close" onClick={() => setBatchOpen(false)} disabled={batchRunning}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              <div className="mm-batch-models">
+                {selectedRows.map((m) => (
+                  <code key={rowKey(m)}>{m.id}</code>
+                ))}
+              </div>
+              <div className="mm-batch-actions">
+                {(
+                  [
+                    ['enable', '启用'],
+                    ['disable', '禁用'],
+                    ['remove-price', '删除定价'],
+                  ] as Array<[BatchAction, string]>
+                ).map(([v, label]) => (
+                  <label key={v} className={`mm-batch-action${batchAction === v ? ' active' : ''}`}>
+                    <input
+                      type="radio"
+                      name="mm-batch-action"
+                      checked={batchAction === v}
+                      onChange={() => setBatchAction(v)}
+                      disabled={batchRunning}
+                    />
+                    {t(label)}
+                  </label>
+                ))}
+              </div>
+              {batchAction === 'remove-price' && (
+                <p className="mm-dialog-note">{t('未定价的模型会被跳过；删除后按 0 计费。')}</p>
+              )}
+              {batchReport && <div className="error-message">{batchReport}</div>}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setBatchOpen(false)} disabled={batchRunning}>
+                {t('取消')}
+              </button>
+              <button
+                className={`btn ${batchAction === 'remove-price' ? 'btn-danger' : 'btn-primary'}`}
+                onClick={() => void runBatch()}
+                disabled={batchRunning || selectedRows.length === 0}
+              >
+                {batchRunning ? t('执行中…') : `${t('执行')}${t(batchAction === 'enable' ? '启用' : batchAction === 'disable' ? '禁用' : '删除定价')}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 模型测试弹窗 ── */}
+      {testTarget && (
+        <ModelTestDialog
+          target={{ provider: testTarget.provider, providerLabel: testTarget.provider_label, model: testTarget }}
+          onClose={() => setTestTarget(null)}
+        />
+      )}
+
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
+}
+
+/** 分组片段（key 需要挂在显式组件上，React 19 前 <> 不支持 key） */
+function FragmentGroup({ children }: { children: React.ReactNode }): JSX.Element {
+  return <>{children}</>;
 }

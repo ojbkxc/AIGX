@@ -33,6 +33,7 @@ pub mod oauth;
 pub mod payment;
 pub mod plan;
 pub mod pricing;
+pub mod prompt;
 pub mod proxy;
 pub mod proxy_pool;
 pub mod quota_monitor;

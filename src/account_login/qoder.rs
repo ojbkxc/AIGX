@@ -1,4 +1,4 @@
-//! Qoder 的 PKCE 设备授权（中国版站点：qoder.com.cn / openapi.qoder.com.cn）。
+//! Qoder 的 PKCE 设备授权（中国版 / 国际版同构，只有站点主机不同）。
 //!
 //! ```text
 //! ① 本地生成 verifier，challenge = base64url(sha256(verifier))
@@ -7,6 +7,10 @@
 //!    202 / 404 = 等待中；data.token 即访问令牌（dt- 前缀）
 //! ④ GET {openapi}/api/v1/userinfo（Bearer）补齐昵称（失败不影响落账号）
 //! ```
+//!
+//! 两站站点常量对齐 Agent2API `qoder/endpoints.rs` 的 Region：
+//!   · 中国版  web = qoder.com.cn        openapi = openapi.qoder.com.cn
+//!   · 国际版  web = qoder.com           openapi = openapi.qoder.sh
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -19,11 +23,27 @@ use sha2::{Digest, Sha256};
 
 use super::{Credentials, LoginFlow, Started};
 
-const WEB_ORIGIN: &str = "https://qoder.com.cn";
-const OPEN_API: &str = "https://openapi.qoder.com.cn";
 const DEVICE_LOGIN_PATH: &str = "/device/selectAccounts";
 const DEVICE_POLL_PATH: &str = "/api/v1/deviceToken/poll";
 const USER_INFO_PATH: &str = "/api/v1/userinfo";
+
+/// 一次登录的站点上下文（中国版 / 国际版）。
+struct Site {
+    web_origin: &'static str,
+    open_api: &'static str,
+}
+
+/// 中国版站点
+const SITE_CN: Site = Site {
+    web_origin: "https://qoder.com.cn",
+    open_api: "https://openapi.qoder.com.cn",
+};
+
+/// 国际版站点
+const SITE_INTL: Site = Site {
+    web_origin: "https://qoder.com",
+    open_api: "https://openapi.qoder.sh",
+};
 
 fn machine_id() -> String {
     static MACHINE: OnceLock<String> = OnceLock::new();
@@ -55,6 +75,7 @@ fn open_api_headers(token: Option<&str>) -> Vec<(String, String)> {
 
 pub struct QoderFlow {
     client: reqwest::Client,
+    site: &'static Site,
     poll_url: String,
 }
 
@@ -124,7 +145,7 @@ impl LoginFlow for QoderFlow {
 
 impl QoderFlow {
     async fn profile_name(&self, token: &str) -> String {
-        let url = format!("{OPEN_API}{USER_INFO_PATH}");
+        let url = format!("{}{USER_INFO_PATH}", self.site.open_api);
         let mut request = self.client.get(&url).header("Accept", "application/json");
         for (key, value) in open_api_headers(Some(token)) {
             request = request.header(key, value);
@@ -140,20 +161,23 @@ impl QoderFlow {
     }
 }
 
-pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
+pub async fn start(client: &reqwest::Client, intl: bool) -> Result<Started, String> {
+    let site = if intl { &SITE_INTL } else { &SITE_CN };
     let verifier = random_secret();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let machine = machine_id();
     let state = random_secret();
     let auth_url = format!(
-        "{WEB_ORIGIN}{DEVICE_LOGIN_PATH}?challenge={}&challenge_method=S256&machine_id={}&nonce={}",
+        "{WEB}{DEVICE_LOGIN_PATH}?challenge={}&challenge_method=S256&machine_id={}&nonce={}",
+        site.web_origin,
         encode_component(&challenge),
         encode_component(&machine),
         encode_component(&nonce)
     );
     let poll_url = format!(
-        "{OPEN_API}{DEVICE_POLL_PATH}?nonce={}&verifier={}&challenge_method=S256",
+        "{OPEN}{DEVICE_POLL_PATH}?nonce={}&verifier={}&challenge_method=S256",
+        site.open_api,
         encode_component(&nonce),
         encode_component(&verifier)
     );
@@ -162,6 +186,7 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
         auth_url,
         flow: Arc::new(QoderFlow {
             client: client.clone(),
+            site,
             poll_url,
         }),
     })

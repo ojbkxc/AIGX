@@ -744,6 +744,46 @@ export interface ManageView {
   unpriced: number;
 }
 
+// ==================== 模型测试（POST /api/models/test） ====================
+
+/** 模型测试请求（钉 provider+model，可选钉账号/渠道） */
+export interface ModelTestPayload {
+  provider: string;
+  model: string;
+  account_id?: string;
+  channel_id?: string;
+  prompt?: string;
+  system_prompt?: string;
+  reasoning_effort?: string;
+  stream?: boolean;
+}
+
+/** 实际承载本次测试的来源 */
+export interface ModelTestSource {
+  kind: string;
+  channel_id: string;
+  name: string;
+  account_id?: string | null;
+}
+
+/** 模型测试结构化结论（HTTP 恒 200，成败看 ok） */
+export interface ModelTestResult {
+  ok: boolean;
+  error?: string;
+  /** 上游 HTTP 状态（失败时给出，用于下一步建议） */
+  status?: number;
+  reply?: string;
+  reasoning?: string;
+  upstream_model?: string;
+  duration_ms?: number;
+  ttfb_ms?: number | null;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  stream?: boolean;
+  source?: ModelTestSource;
+}
+
 // ==================== 签到中心（管理员替上游账号签到） ====================
 
 export interface CheckinSettings {
@@ -1284,6 +1324,56 @@ export interface GatewaySettingsItem {
   corsOrigins: string[];
   trustProxyHeaders: boolean;
   restartRequired?: boolean;
+}
+
+/** 路由策略（GET/PUT /api/routing；对照 Agent2API「设置 → 路由」） */
+export type RouteStrategy = 'weighted' | 'round_robin' | 'ranked';
+export type StickyMode = 'auto' | 'session' | 'off';
+
+export interface BreakerPolicyItem {
+  enabled: boolean;
+  threshold: number;
+  cooldown_secs: number;
+}
+
+export interface SchedulerWeightsItem {
+  health_weight: number;
+  cost_weight: number;
+  rpm_weight: number;
+}
+
+export interface RoutingPolicyItem {
+  strategy: RouteStrategy;
+  sticky: StickyMode;
+  breaker: BreakerPolicyItem;
+  scheduler_weights: SchedulerWeightsItem;
+  runtime?: {
+    affinity_entries?: number;
+    breaker_open?: number;
+    breaker_halfopen?: number;
+  };
+}
+
+/** 系统提示词注入（GET/PUT /api/gateway/prompt；对照 Agent2API 网关设置） */
+export type PromptMode = 'passthrough' | 'custom' | 'append';
+
+export interface GatewayPromptItem {
+  mode: PromptMode;
+  text: string;
+}
+
+/** 存储概览（GET /api/storage） */
+export interface StorageOverviewItem {
+  total_keys: number;
+  groups: Record<string, number>;
+  db_size_bytes: number | null;
+}
+
+/** 备份导入结果（POST /api/backup/import） */
+export interface BackupImportResult {
+  written: number;
+  skipped: number;
+  pre_import_backup: string;
 }
 
 /** 服务器自动更新状态（GET /api/update/status） */

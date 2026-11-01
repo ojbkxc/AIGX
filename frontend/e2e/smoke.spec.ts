@@ -17,6 +17,7 @@ const ADMIN_PAGES: Array<[path: string, marker: string]> = [
   ['/plans', '套餐'],
   ['/redemptions', '兑换'],
   ['/account-sessions', '账号'],
+  ['/proxy-pool', '代理'],
 ];
 
 /** 普通登录即可访问的页面 */

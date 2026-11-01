@@ -109,8 +109,34 @@ pub struct User {
     /// 管理员备注（用户管理后台添加，对齐 v2board 用户备注）
     #[serde(default)]
     pub remark: String,
+    /// GitHub 账号身份（上游返回的用户 id 字符串；空 = 未绑定）。
+    ///
+    /// OAuth 登录/绑定按「显式身份优先」匹配：只要某 GitHub 账号绑到某用户，
+    /// 该账号再走 OAuth 只会登进这个用户，即使其邮箱与他人相同 —— 杜绝
+    /// 「换个相同邮箱就能登进别人账号」的接管面。邮箱匹配仅在身份未绑定时
+    /// 作为兜底（命中后自动把身份写入，升级为显式绑定）。
+    #[serde(default)]
+    pub oauth_github: String,
+    /// Google 账号身份（`sub` claim，稳定唯一；空 = 未绑定）
+    #[serde(default)]
+    pub oauth_google: String,
+    /// LinuxDO 账号身份（上游用户 id 字符串；空 = 未绑定）
+    #[serde(default)]
+    pub oauth_linuxdo: String,
+    /// 是否已设置真实登录密码。
+    ///
+    /// OAuth 首次自动建号时随机密码不可用，置 false；用户密码注册 / 改密 /
+    /// 成功密码登录后置 true。旧数据缺该字段按 true 处理（视为已有密码），
+    /// 避免误判把存量密码用户的解绑保护错误触发。用于「解绑 OAuth 前确认
+    /// 还有其它登录方式」的防锁死校验。
+    #[serde(default = "default_true")]
+    pub password_set: bool,
     #[serde(default)]
     pub created_at: i64,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_status() -> String {
@@ -224,6 +250,10 @@ impl UserStore {
             aff_history_quota: 0,
             inviter_id: String::new(),
             remark: String::new(),
+            oauth_github: String::new(),
+            oauth_google: String::new(),
+            oauth_linuxdo: String::new(),
+            password_set: true,
             created_at: chrono::Utc::now().timestamp(),
         };
         self.persist(&user)?;
@@ -274,6 +304,10 @@ impl UserStore {
             aff_history_quota: 0,
             inviter_id: String::new(),
             remark: String::new(),
+            oauth_github: String::new(),
+            oauth_google: String::new(),
+            oauth_linuxdo: String::new(),
+            password_set: true,
             created_at: chrono::Utc::now().timestamp(),
         };
         self.persist(&user)?;
@@ -282,6 +316,99 @@ impl UserStore {
             .write()
             .insert(user.email.clone(), user.id.clone());
         Ok(user)
+    }
+
+    /// 为 OAuth 首次登录创建用户：随机密码不可用（password_set=false），
+    /// 并写入对应 provider 的稳定身份 id。OAuth 用户不走密码登录。
+    pub fn create_oauth_user(
+        &self,
+        email: &str,
+        username: &str,
+        provider: &str,
+        identity: &str,
+        quota: i64,
+    ) -> Result<User> {
+        if email.is_empty() {
+            anyhow::bail!("email cannot be empty");
+        }
+        if !is_valid_email(email) {
+            anyhow::bail!("invalid email format");
+        }
+        if self.by_email.read().contains_key(email) {
+            anyhow::bail!("email already exists");
+        }
+        let mut user = User {
+            id: uuid::Uuid::new_v4().to_string(),
+            email: email.to_string(),
+            username: username.to_string(),
+            // 随机密码：OAuth 用户不用密码登录；password_set=false 让解绑保护生效
+            password: hash_password(&uuid::Uuid::new_v4().to_string()),
+            role: Role::User,
+            quota,
+            used_quota: 0,
+            reserved_quota: 0,
+            reserved_at: None,
+            status: "active".into(),
+            group: "default".into(),
+            totp_secret: String::new(),
+            totp_enabled: false,
+            must_change_password: false,
+            totp_recovery_codes: Vec::new(),
+            aff_code: String::new(),
+            aff_count: 0,
+            aff_quota: 0,
+            aff_history_quota: 0,
+            inviter_id: String::new(),
+            remark: String::new(),
+            oauth_github: String::new(),
+            oauth_google: String::new(),
+            oauth_linuxdo: String::new(),
+            password_set: false,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+        match provider {
+            "github" => user.oauth_github = identity.to_string(),
+            "google" => user.oauth_google = identity.to_string(),
+            "linuxdo" => user.oauth_linuxdo = identity.to_string(),
+            _ => anyhow::bail!("unknown oauth provider {provider}"),
+        }
+        self.persist(&user)?;
+        self.by_id.write().insert(user.id.clone(), user.clone());
+        self.by_email
+            .write()
+            .insert(user.email.clone(), user.id.clone());
+        Ok(user)
+    }
+
+    /// 按 provider 稳定身份查找用户（显式绑定优先）。返回 None 表示该身份未绑定任何人。
+    pub fn find_by_oauth(&self, provider: &str, identity: &str) -> Option<User> {
+        if identity.is_empty() {
+            return None;
+        }
+        self.list().into_iter().find(|u| match provider {
+            "github" => u.oauth_github == identity,
+            "google" => u.oauth_google == identity,
+            "linuxdo" => u.oauth_linuxdo == identity,
+            _ => false,
+        })
+    }
+
+    /// 某 provider 身份是否已被「别的用户」占用（绑定冲突检测）。
+    /// `self_email` 允许为空（新绑定场景），只要有任何用户的该身份槽位
+    /// 等于 identity 且 email 不同即视为冲突。
+    pub fn oauth_taken_by_other(&self, provider: &str, identity: &str, self_email: &str) -> bool {
+        if identity.is_empty() {
+            return false;
+        }
+        self.list().iter().any(|u| {
+            let same_identity = match provider {
+                "github" => u.oauth_github == identity,
+                "google" => u.oauth_google == identity,
+                "linuxdo" => u.oauth_linuxdo == identity,
+                _ => false,
+            };
+            same_identity && u.email != self_email
+        })
     }
 
     pub fn list(&self) -> Vec<User> {

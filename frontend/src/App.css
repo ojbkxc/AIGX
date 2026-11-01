@@ -2386,3 +2386,35 @@ tr.kbd-active {
   color: var(--text-muted);
   opacity: 0.8;
 }
+
+/* ── ProxySelector（账号弹窗里的出口代理选择器）── */
+.proxy-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.proxy-selector-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 6px;
+  background: var(--bg-elevated, #f9f9f9);
+}
+.proxy-selector-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.proxy-selector-check input[type='checkbox'] {
+  margin: 0;
+}
+.proxy-selector-check .form-hint {
+  margin: 0;
+  font-size: 11px;
+}

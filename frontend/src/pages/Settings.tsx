@@ -16,6 +16,9 @@ import LogRetention from './LogRetention';
 import UpdatePanel from '../components/UpdatePanel';
 import AgentSettingsPanel from '../components/AgentSettingsPanel';
 import GatewayPanel from '../components/GatewayPanel';
+import PromptPanel from '../components/PromptPanel';
+import RoutingPanel from '../components/RoutingPanel';
+import DataManagement from '../components/DataManagement';
 import './Settings.css';
 
 interface LimitsForm {
@@ -68,8 +71,8 @@ interface DataResponse<T> {
 type SettingsTab = 'site' | 'billing' | 'ops' | 'update' | 'security' | 'account';
 /** billing 分区子标签（易支付 / 用户分组；定价倍率已拆为独立页 /pricing） */
 type BillingSubTab = 'epay' | 'groups';
-/** ops 分区子标签（通知 / 限流 / 缓存 / 价格同步 / 汇率 / 日志保留 / 网络层 / AI 助手 / 网关） */
-type OpsSubTab = 'notify' | 'ratelimit' | 'cache' | 'pricesync' | 'exchange' | 'logs' | 'network' | 'assistant' | 'gateway';
+/** ops 分区子标签（通知 / 限流 / 缓存 / 价格同步 / 汇率 / 日志保留 / 网络层 / AI 助手 / 网关 / 路由） */
+type OpsSubTab = 'notify' | 'ratelimit' | 'cache' | 'pricesync' | 'exchange' | 'logs' | 'network' | 'assistant' | 'gateway' | 'routing' | 'data';
 
 // 格式化字节数为人类可读单位
 function fmtBytes(bytes: number | null | undefined): string {
@@ -643,6 +646,8 @@ export default function Settings() {
               { key: 'network', label: t('网络层') },
               { key: 'assistant', label: t('AI 助手') },
               { key: 'gateway', label: t('网关') },
+              { key: 'routing', label: t('路由') },
+              { key: 'data', label: t('数据') },
             ]}
             active={opsSub}
             onChange={setOpsSub}
@@ -872,6 +877,15 @@ export default function Settings() {
           </div>
           <div style={{ marginTop: 16, display: opsSub === 'gateway' ? 'block' : 'none' }}>
             <GatewayPanel />
+            <div style={{ marginTop: 16 }}>
+              <PromptPanel />
+            </div>
+          </div>
+          <div style={{ marginTop: 16, display: opsSub === 'routing' ? 'block' : 'none' }}>
+            <RoutingPanel />
+          </div>
+          <div style={{ marginTop: 16, display: opsSub === 'data' ? 'block' : 'none' }}>
+            <DataManagement />
           </div>
         </>
       )}

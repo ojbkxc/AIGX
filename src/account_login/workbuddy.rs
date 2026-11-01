@@ -1,7 +1,7 @@
 //! WorkBuddy 的网页登录（上游 `auth/state` + 轮询 `auth/token`）。
 //!
 //! 协议逐条移植自 Agent2API `core/login.rs` 的 `login_interactive`：
-//!   ① POST {endpoint}/v2/plugin/auth/state?platform=workbuddy（匿名）
+//!   ① POST {endpoint}/v2/plugin/auth/state?platform={platform}（匿名）
 //!        → data.authUrl + data.state
 //!   ② 用户在浏览器打开 authUrl 完成登录
 //!   ③ 每 2 秒 GET {endpoint}/v2/plugin/auth/token?state=<state>
@@ -9,6 +9,12 @@
 //!   ④ GET {endpoint}/v2/plugin/login/account?state=  （Bearer）
 //!   ⑤ 回退 GET {endpoint}/v2/plugin/accounts            （Bearer）
 //!   ⑥ 再回退 access token 的 JWT 声明（sub 即账号 uid）
+//!
+//! 国内版与国际版协议完全一致，只有三处取值不同（对齐 Agent2API
+//! `endpoints.rs` 的 EDITION_CN / EDITION_INTL）：
+//!   · 端点：copilot.tencent.com vs www.workbuddy.ai
+//!   · platform：workbuddy vs workbuddy-ai
+//!   · Accept-Language：zh-CN vs en-US
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,14 +27,33 @@ use serde_json::Value;
 
 use super::{Credentials, LoginFlow, Started};
 
-const ENDPOINT: &str = "https://copilot.tencent.com";
 const PREFIX: &str = "/v2/plugin";
-const PLATFORM: &str = "workbuddy";
 /// 上游「token 未就绪」的业务码
 const RETRY_FETCH_TOKEN: i64 = 11217;
 
-fn auth_url(path: &str) -> String {
-    format!("{ENDPOINT}{PREFIX}{path}")
+/// 一次登录的地区上下文（国内版 / 国际版）。
+pub(crate) struct Edition {
+    endpoint: &'static str,
+    platform: &'static str,
+    accept_language: &'static str,
+}
+
+/// 国内版（copilot.tencent.com / platform=workbuddy）
+const EDITION_CN: Edition = Edition {
+    endpoint: "https://copilot.tencent.com",
+    platform: "workbuddy",
+    accept_language: "zh-CN",
+};
+
+/// 国际版（www.workbuddy.ai / platform=workbuddy-ai）
+const EDITION_INTL: Edition = Edition {
+    endpoint: "https://www.workbuddy.ai",
+    platform: "workbuddy-ai",
+    accept_language: "en-US",
+};
+
+fn auth_url(edition: &Edition, path: &str) -> String {
+    format!("{}{PREFIX}{path}", edition.endpoint)
 }
 
 fn anonymous_headers() -> Vec<(&'static str, &'static str)> {
@@ -42,6 +67,7 @@ fn anonymous_headers() -> Vec<(&'static str, &'static str)> {
 
 pub struct WorkBuddyFlow {
     client: reqwest::Client,
+    edition: &'static Edition,
     state: String,
     poll_url: String,
     account_url: String,
@@ -49,7 +75,11 @@ pub struct WorkBuddyFlow {
 
 impl WorkBuddyFlow {
     async fn fetch_text(&self, url: &str, bearer: Option<&str>) -> Result<(u16, Value), String> {
-        let mut request = self.client.get(url).header("Accept", "application/json");
+        let mut request = self
+            .client
+            .get(url)
+            .header("Accept", "application/json")
+            .header("Accept-Language", self.edition.accept_language);
         for (key, value) in anonymous_headers() {
             request = request.header(key, value);
         }
@@ -81,7 +111,7 @@ impl WorkBuddyFlow {
             }
             _ => {}
         }
-        let accounts_url = auth_url("/accounts");
+        let accounts_url = auth_url(self.edition, "/accounts");
         if let Ok((status, value)) = self.fetch_text(&accounts_url, Some(token)).await {
             if status < 400 {
                 if let Some(list) = value
@@ -177,11 +207,16 @@ impl LoginFlow for WorkBuddyFlow {
     }
 }
 
-pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
-    let url = auth_url(&format!("/auth/state?platform={PLATFORM}"));
+pub async fn start(client: &reqwest::Client, intl: bool) -> Result<Started, String> {
+    let edition = if intl { &EDITION_INTL } else { &EDITION_CN };
+    let url = auth_url(
+        edition,
+        &format!("/auth/state?platform={}", edition.platform),
+    );
     let mut request = client
         .post(&url)
         .header("Accept", "application/json")
+        .header("Accept-Language", edition.accept_language)
         .header("Content-Type", "application/json")
         .body("{}");
     for (key, value) in anonymous_headers() {
@@ -214,21 +249,25 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
     if state.is_empty() || login_url.is_empty() {
         return Err("WorkBuddy auth/state 未返回 state/authUrl".to_string());
     }
-    let poll_url = auth_url_of_token(&state);
+    let poll_url = auth_url_of_token(edition, &state);
     Ok(Started {
         state: state.clone(),
         auth_url: login_url,
         flow: Arc::new(WorkBuddyFlow {
             client: client.clone(),
+            edition,
             state,
             poll_url,
-            account_url: auth_url("/login/account"),
+            account_url: auth_url(edition, "/login/account"),
         }),
     })
 }
 
-fn auth_url_of_token(state: &str) -> String {
-    auth_url(&format!("/auth/token?state={}", encode_component(state)))
+fn auth_url_of_token(edition: &Edition, state: &str) -> String {
+    auth_url(
+        edition,
+        &format!("/auth/token?state={}", encode_component(state)),
+    )
 }
 
 fn encode_component(value: &str) -> String {

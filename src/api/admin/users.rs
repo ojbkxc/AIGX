@@ -91,6 +91,14 @@ pub fn mask_user(u: &User) -> Value {
         "aff_quota": u.aff_quota,
         "aff_history_quota": u.aff_history_quota,
         "remark": u.remark,
+        // OAuth 绑定状态（仅布尔位，不回传上游身份 id —— 那是可跨站关联的
+        // 稳定标识，普通查询接口不应泄露）：前端个人中心据此显示已绑/未绑。
+        "oauth_github": !u.oauth_github.is_empty(),
+        "oauth_google": !u.oauth_google.is_empty(),
+        "oauth_linuxdo": !u.oauth_linuxdo.is_empty(),
+        // 是否已设置真实密码：OAuth 建号（随机密码）为 false。前端解绑保护、
+        // 「设置密码」引导都依赖它。
+        "password_set": u.password_set,
         "created_at": u.created_at,
     })
 }

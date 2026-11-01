@@ -27,6 +27,8 @@ use sha2::{Digest, Sha256};
 
 use super::{Credentials, LoginFlow, Started};
 
+// DPoP 密钥种子用系统熵源（getrandom 已在 Cargo.toml，AES-GCM 凭证加密同源）
+
 const CLIENT_ID: &str = "vscode-codebot";
 const WEB_LOGIN_BASE: &str = "https://codearts.huaweicloud.com";
 const TOKEN_URL: &str = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens";
@@ -63,11 +65,15 @@ struct DpopPayload<'a> {
 }
 
 impl DpopKey {
+    /// 生成一把 P-256 密钥：种子必须是**32 字节**随机数（P-256 标量的宽度）。
+    ///
+    /// 与 Agent2API 的 dpop.rs 同源：`getrandom` 取 32 字节 → `from_slice`。
+    /// 落到 `[1, n-1]` 之外的概率约 2⁻¹²⁸，重试只是兜底。
     pub(crate) fn generate() -> Result<Self, String> {
         for _ in 0..8 {
-            let seed = uuid::Uuid::new_v4().simple().to_string();
-            let bytes = hex::decode(&seed).map_err(|_| "随机数不可用".to_string())?;
-            let Ok(signing) = SigningKey::from_slice(&bytes) else {
+            let mut seed = [0u8; 32];
+            getrandom::getrandom(&mut seed).map_err(|error| format!("随机数不可用：{error}"))?;
+            let Ok(signing) = SigningKey::from_slice(&seed) else {
                 continue;
             };
             let point = signing.verifying_key().to_encoded_point(false);

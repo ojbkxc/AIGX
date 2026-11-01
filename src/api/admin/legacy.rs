@@ -20,6 +20,7 @@ use std::collections::HashMap;
 
 use crate::account::CfAccount;
 use crate::api::auth::CreateApiKeyOptions;
+use crate::bridge::Bridge;
 use crate::channel::ChannelType;
 use crate::config::AppConfig;
 use crate::graphql;
@@ -3061,16 +3062,6 @@ pub async fn handle_channel_chat_test(
         }
     };
 
-    // 账号型渠道没有渠道级凭证：调试对话由「账号池」页逐号探活承担，
-    // 这里直接给出明确指引（避免用空 base_url/空 key 打上游得到误导性报错）。
-    if ch.channel_type == crate::channel::ChannelType::Account {
-        return error_response(
-            "Account channels are tested per account on the Account Pool page",
-            StatusCode::BAD_REQUEST,
-        )
-        .into_response();
-    }
-
     // 指定渠道调试：校验模型属于该渠道（models 非空 = 白名单；空 = 全部，
     // 以发现快照兜底），防止把别的渠道的模型名透传给本渠道上游。
     if !body.channel_id.trim().is_empty() && !requested_model.is_empty() {
@@ -3147,6 +3138,135 @@ pub async fn handle_channel_chat_test(
     };
 
     let stream = body.stream;
+
+    // 账号型渠道：凭证不进 Channel，改走 AccountBridge（账号池选号 + 复用各家
+    // 原生 bridge 协议），与数据面 /v1/chat/completions 同源。
+    //
+    // 此前这里直接 400「请到账号池页逐号测试」，但普通用户的 /api/models/available
+    // 已把账号池模型并入下拉（587dc5c「统一模型管理」），于是「选了账号池模型 →
+    // 自动选路命中 Account 渠道 → 必 400」，普通用户一发就报错。改为真正服务账号
+    // 渠道；账号池无可用账号时给出明确中文提示（区别于逐号探活的运维指引）。
+    if ch.channel_type == ChannelType::Account {
+        let account_msgs: Vec<Value> = messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": m.get("role").and_then(|r| r.as_str()).unwrap_or("user"),
+                    "content": m.get("content").cloned().unwrap_or(Value::String(String::new())),
+                })
+            })
+            .collect();
+        let parsed = crate::api::openai::parse_messages(Some(&Value::Array(account_msgs)))
+            .unwrap_or_default();
+        let chat_req = crate::bridge::ChatFormat {
+            model: upstream.clone(),
+            messages: parsed,
+            tools: None,
+            max_tokens: body.max_tokens,
+            temperature: body.temperature,
+            top_p: body.top_p,
+            stream,
+            top_k: None,
+            stop: None,
+            tool_choice: None,
+            reasoning_effort: reasoning_effort_level(&body.reasoning_effort).map(String::from),
+            web_search_options: None,
+            extra: None,
+        };
+        let ctx =
+            crate::bridge::BridgeContext::new(uuid::Uuid::new_v4().to_string(), model.clone());
+        let bridge = crate::bridge::account::AccountBridge::new(
+            ch.id.clone(),
+            state.account_sessions.clone(),
+        )
+        .with_rules(state.model_rules.clone());
+        // 记账用请求体快照（与既有透传路径口径一致：含 model + messages）
+        let payload_for_log = serde_json::json!({ "model": upstream, "messages": messages });
+        let account_url = format!("account://{}", ch.id);
+        if stream {
+            let s = match bridge.chat_stream(&chat_req, &ctx).await {
+                Ok(s) => s,
+                Err(e) => {
+                    record_chat_test_failure(
+                        &state,
+                        &user,
+                        &ch.id,
+                        &ch.name,
+                        &model,
+                        502,
+                        &e.to_string(),
+                        request_start.elapsed().as_millis() as u64,
+                    );
+                    return error_response(&format!("账号池不可用：{e}"), StatusCode::BAD_GATEWAY)
+                        .into_response();
+                }
+            };
+            let body_stream = account_chat_test_stream(
+                s,
+                state.clone(),
+                user.clone(),
+                ch.id.clone(),
+                ch.name.clone(),
+                model.clone(),
+                payload_for_log.clone(),
+                account_url.clone(),
+                request_start,
+            );
+            let mut response = Body::from_stream(body_stream).into_response();
+            for (name, value) in [
+                ("Content-Type", "text/event-stream; charset=utf-8"),
+                ("Cache-Control", "no-cache"),
+            ] {
+                if let Ok(v) = axum::http::HeaderValue::from_str(value) {
+                    response.headers_mut().insert(name, v);
+                }
+            }
+            return response;
+        }
+        return match bridge.chat(&chat_req, &ctx).await {
+            Ok(resp) => {
+                let content = resp.message.content_str().to_string();
+                let usage_json = serde_json::json!({
+                    "usage": {
+                        "prompt_tokens": resp.usage.prompt_tokens,
+                        "completion_tokens": resp.usage.completion_tokens,
+                        "total_tokens": resp.usage.total_tokens,
+                    }
+                });
+                record_chat_test_usage(
+                    &state,
+                    &user,
+                    &ch.id,
+                    &ch.name,
+                    &model,
+                    &usage_json,
+                    Some(&content),
+                    &payload_for_log,
+                    &account_url,
+                    request_start.elapsed().as_millis() as u64,
+                );
+                Json(serde_json::json!({
+                    "success": true,
+                    "data": { "content": content, "model": model, "usage": usage_json.get("usage") }
+                }))
+                .into_response()
+            }
+            Err(e) => {
+                record_chat_test_failure(
+                    &state,
+                    &user,
+                    &ch.id,
+                    &ch.name,
+                    &model,
+                    502,
+                    &e.to_string(),
+                    request_start.elapsed().as_millis() as u64,
+                );
+                error_response(&format!("账号池不可用：{e}"), StatusCode::BAD_GATEWAY)
+                    .into_response()
+            }
+        };
+    }
 
     // ── OpenAI 协议 ──
     if !is_anthropic {
@@ -3444,6 +3564,153 @@ pub async fn handle_channel_chat_test(
             );
             error_response(&format!("Request failed: {e}"), StatusCode::BAD_GATEWAY).into_response()
         }
+    }
+}
+
+/// 账号池 chat_test 流式包装：把 AccountBridge 的归一化 `ChatChunk` 序列化为
+/// OpenAI SSE 帧（与数据面 /v1/chat/completions 的 wire 形状一致，前端
+/// `parseSseFrame` 按 choices[0].delta 解析），并在流结束/drop 时记账。
+///
+/// 与 `chat_test_logged_stream` 的区别：那边透传上游原始字节流，这边是
+/// bridge 归一化块（账号池的各家私有协议已在 bridge 内转成 OpenAI 方言）。
+#[allow(clippy::too_many_arguments)]
+fn account_chat_test_stream(
+    inner: crate::bridge::ChatChunkStream,
+    state: AppState,
+    user: crate::user::User,
+    channel_id: String,
+    channel_name: String,
+    model: String,
+    request_body: Value,
+    upstream_url: String,
+    request_start: std::time::Instant,
+) -> impl Stream<Item = Result<bytes::Bytes, std::convert::Infallible>> {
+    // 输出文本累积（估算 completion tokens；含 reasoning）
+    let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
+    let acc_for_map = acc.clone();
+
+    let mapped = inner.map(
+        move |chunk_result| -> Result<bytes::Bytes, std::convert::Infallible> {
+            match chunk_result {
+                Ok(chunk) => {
+                    let mut delta = serde_json::json!({
+                        "content": chunk.delta.content.clone().unwrap_or_default(),
+                    });
+                    if let Some(reasoning) = &chunk.delta.reasoning {
+                        crate::token_estimate::push_capped(&mut acc_for_map.lock(), reasoning);
+                        delta["reasoning_content"] = Value::String(reasoning.clone());
+                    }
+                    if let Some(text) = &chunk.delta.content {
+                        crate::token_estimate::push_capped(&mut acc_for_map.lock(), text);
+                    }
+                    // 工具调用增量：原样透传（与数据面口径一致），前端会忽略
+                    // tool_calls 帧（只渲染 content/reasoning），但保留可调试性。
+                    if let Some(tool_calls) = &chunk.delta.tool_calls {
+                        delta["tool_calls"] = Value::Array(
+                            tool_calls
+                                .iter()
+                                .map(|tc| {
+                                    serde_json::json!({
+                                        "index": tc.index,
+                                        "id": tc.id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": tc.function_name,
+                                            "arguments": tc.arguments,
+                                        },
+                                    })
+                                })
+                                .collect(),
+                        );
+                    }
+                    let finish = chunk.finish_reason.map(|fr| match fr {
+                        crate::bridge::FinishReason::Stop => "stop",
+                        crate::bridge::FinishReason::Length => "length",
+                        crate::bridge::FinishReason::ContentFilter => "content_filter",
+                        crate::bridge::FinishReason::ToolCalls => "tool_calls",
+                    });
+                    let sse_data = serde_json::json!({
+                        "id": chunk.id,
+                        "object": "chat.completion.chunk",
+                        "created": chrono::Utc::now().timestamp(),
+                        "model": chunk.model,
+                        "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
+                    })
+                    .to_string();
+                    Ok(bytes::Bytes::from(format!("data: {sse_data}\n\n")))
+                }
+                Err(e) => {
+                    // 与数据面同款标准 SSE 错误帧：前端解析后以错误气泡收尾
+                    tracing::warn!("account chat_test stream error: {e}");
+                    let safe_msg = crate::error_translate::sanitize_error_message(&e.to_string());
+                    let err_data = serde_json::json!({
+                    "error": { "message": safe_msg, "type": e.error_type(), "code": e.error_type() }
+                })
+                .to_string();
+                    Ok(bytes::Bytes::from(format!(
+                        "event: error\ndata: {err_data}\n\ndata: [DONE]\n\n"
+                    )))
+                }
+            }
+        },
+    );
+
+    // Drop 守卫：流消费完/客户端断连时兜底记账（与 ChatTestLogGuard 同款语义）
+    struct AccountStreamGuard {
+        state: AppState,
+        user: crate::user::User,
+        channel_id: String,
+        channel_name: String,
+        model: String,
+        request_body: Value,
+        upstream_url: String,
+        request_start: std::time::Instant,
+        acc: std::sync::Arc<parking_lot::Mutex<String>>,
+        fired: std::sync::atomic::AtomicBool,
+    }
+    impl std::ops::Drop for AccountStreamGuard {
+        fn drop(&mut self) {
+            if self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let output = self.acc.lock().clone();
+            record_chat_test_usage(
+                &self.state,
+                &self.user,
+                &self.channel_id,
+                &self.channel_name,
+                &self.model,
+                &Value::Null,
+                Some(&output),
+                &self.request_body,
+                &self.upstream_url,
+                self.request_start.elapsed().as_millis() as u64,
+            );
+        }
+    }
+    let guard = AccountStreamGuard {
+        state,
+        user,
+        channel_id,
+        channel_name,
+        model,
+        request_body,
+        upstream_url,
+        request_start,
+        acc: acc.clone(),
+        fired: std::sync::atomic::AtomicBool::new(false),
+    };
+
+    let done = futures::stream::once(async {
+        Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(b"data: [DONE]\n\n"))
+    });
+    // 先记成功：chat_test 记账以 drop 守卫为准，这里只做包装
+    crate::api::openai::GuardedStream {
+        inner: Box::pin(mapped.chain(done)),
+        _guard: guard,
+        // 渠道调试流不登记在途请求
+        cancel: None,
+        _inflight: None,
     }
 }
 

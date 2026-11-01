@@ -37,7 +37,7 @@ const navItems: NavItem[] = [
   { path: '/prompts', labelKey: '提示词库', icon: BookOpen },
   { path: '/keys', labelKey: 'API 密钥', icon: KeyRound },
   { path: '/logs', labelKey: '用量日志', icon: ScrollText },
-  { path: '/model-manage', labelKey: '模型管理', icon: Boxes },
+  { path: '/model-manage', labelKey: '模型管理', icon: Boxes, adminOnly: true },
   { path: '/channels', labelKey: '渠道管理', icon: Satellite, adminOnly: true },
   { path: '/pricing', labelKey: '定价倍率', icon: Coins, adminOnly: true },
   { path: '/users', labelKey: '用户管理', icon: Users, adminOnly: true },

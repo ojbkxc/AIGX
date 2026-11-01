@@ -207,15 +207,21 @@ pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result
         return Err(format!("「{provider}」不是登录态型供应商，不需要网页登录"));
     }
     let client = reqwest::Client::new();
-    // 拆家的地区 / 池变体复用同一套登录引擎（协议完全相同，只是站点或归属不同）
+    // 拆家的地区 / 池变体复用同一套登录引擎（协议完全相同，只是站点或归属不同）。
+    // 站点/地区由 provider id 决定（对齐 Agent2API：provider id 是权威，
+    // 不读请求里的 edition 之类的回显字段——账号落错家会稳定打错域名）。
     let started = match provider.as_str() {
-        "workbuddy" | "workbuddy-intl" => workbuddy::start(&client).await?,
-        "qoder" | "qoder-intl" => qoder::start(&client).await?,
-        "zcode" | "zcode-intl" => zcode::start(&client).await?,
+        "workbuddy" => workbuddy::start(&client, false).await?,
+        "workbuddy-intl" => workbuddy::start(&client, true).await?,
+        "qoder" => qoder::start(&client, false).await?,
+        "qoder-intl" => qoder::start(&client, true).await?,
+        "zcode" => zcode::start(&client, false).await?,
+        "zcode-intl" => zcode::start(&client, true).await?,
         "cline" | "cline-free" | "cline-pass" => cline::start(&client).await?,
         "catpaw" => catpaw::start(&client).await?,
         "xiaohuanxiong" => raccoon::start(&client).await?,
-        "accio" | "accio-cn" => accio::start(&client).await?,
+        "accio" => accio::start(&client, false).await?,
+        "accio-cn" => accio::start(&client, true).await?,
         "antigravity" => antigravity::start(&client).await?,
         "trae" => trae::start(&client).await?,
         "codearts" => codearts::start(&client).await?,

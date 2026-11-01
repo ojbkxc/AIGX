@@ -3,13 +3,19 @@ import { test, expect, loginAsAdmin } from './fixtures';
 /**
  * 模型管理页 —— 功能级回归。
  *
- * 覆盖「渠道 + 账号池模型合流」这个核心改造：
- * - 左栏按 provider 分组与计数（含账号池来源标记）
- * - 来源 chips 区分渠道 / 账号
+ * 覆盖「渠道 + 账号池模型合流」这个核心改造（Agent2API 同款信息架构）：
+ * - 左栏按 provider 分组与计数（monogram 图标）
+ * - 聚合视图分组带 + 组内折叠
+ * - 来源徽标区分渠道 / 账号
  * - 启停开关可点且请求打到 /api/models/state
- * - 未定价模型高亮 + 顶部统计
+ * - 未定价模型高亮 + 头部统计
  * - 搜索与状态筛选真的过滤行
+ * - 操作列「测试」打开模型测试弹窗，结果按来源分块渲染
  */
+
+/** 数据行（排除分组带 / 展开折叠行） */
+const dataRows = (page: import('@playwright/test').Page) =>
+  page.locator('.mm-table tbody tr:not(.mm-tr-group):not(.mm-tr-more)');
 
 test.describe('模型管理', () => {
   test.beforeEach(async ({ page }) => {
@@ -18,23 +24,23 @@ test.describe('模型管理', () => {
     await expect(page.locator('h1')).toContainText('模型管理');
   });
 
-  test('左栏分三段：渠道供应商 / 内置提供商 / 自定义提供商', async ({ page, pageErrors }) => {
+  test('左栏分三段：渠道供应商 / 账号池提供商 / 自定义提供商', async ({ page, pageErrors }) => {
     const rail = page.locator('.mm-rail');
     await expect(rail).toBeVisible();
 
-    // 三个分段标题都在（对齐 Agent2API 的信息架构）
+    // 三个分段标题都在
     await expect(rail).toContainText('渠道供应商');
-    await expect(rail).toContainText('内置提供商');
+    await expect(rail).toContainText('账号池提供商');
     await expect(rail).toContainText('自定义提供商');
 
     // 「全部」+ 两个渠道供应商（mock 里 ch-1 lxchat-glm / ch-2 backup-channel）
-    // + 内置提供商 1 个（workbuddy，account 来源）
+    // + 账号池提供商 1 个（workbuddy，account 来源）
     await expect(rail).toContainText('lxchat-glm');
     await expect(rail).toContainText('backup-channel');
     await expect(rail).toContainText('WorkBuddy 国内版');
 
-    // 账号池来源的分组带 account 标记点
-    await expect(rail.locator('.mm-rail-dot.account')).toHaveCount(1);
+    // 「全部」+ 3 家各一枚 monogram 图标
+    await expect(rail.locator('.mm-mono')).toHaveCount(4);
     // 自定义提供商暂为空 → 有提示文案
     await expect(rail.locator('.mm-rail-empty')).toHaveCount(1);
 
@@ -44,53 +50,65 @@ test.describe('模型管理', () => {
   test('点渠道供应商只显示该渠道的模型', async ({ page, pageErrors }) => {
     // lxchat-glm 只承载 glm-4.7-flash
     await page.locator('.mm-rail-item', { hasText: 'lxchat-glm' }).click();
-    await expect(page.locator('.mm-table tbody tr')).toHaveCount(1);
+    await expect(dataRows(page)).toHaveCount(1);
     await expect(page.locator('.mm-table')).toContainText('glm-4.7-flash');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('表格展示模型行、来源 chips 与未定价标记', async ({ page, pageErrors }) => {
-    const rows = page.locator('.mm-table tbody tr');
-    await expect(rows).toHaveCount(3);
+  test('聚合视图按提供商分组，数据行与来源徽标正确', async ({ page, pageErrors }) => {
+    // 「全部」视图 = 分组模式：2 个分组带（openai_compatible / workbuddy）
+    await expect(page.locator('.mm-tr-group')).toHaveCount(2);
+    await expect(dataRows(page)).toHaveCount(3);
 
-    // 渠道来源与账号来源的 chip 文本不同
-    await expect(page.locator('.mm-source-chip', { hasText: 'lxchat-glm' })).toBeVisible();
-    await expect(page.locator('.mm-source-chip.account', { hasText: 'workbuddy-1' })).toBeVisible();
+    // 渠道来源与账号来源的徽标
+    await expect(page.locator('.mm-src-tag.provider', { hasText: 'lxchat-glm' })).toBeVisible();
+    await expect(page.locator('.mm-src-tag:not(.provider)', { hasText: 'workbuddy-1' })).toBeVisible();
 
     // 未定价模型显示占位
     await expect(page.locator('.mm-price-empty')).toHaveCount(1);
-    await expect(rows.filter({ hasText: 'unpriced-model' })).toContainText('未定价');
+    await expect(dataRows(page).filter({ hasText: 'unpriced-model' })).toContainText('未定价');
 
     // 已定价模型显示输入/输出价
-    await expect(rows.filter({ hasText: 'glm-4.7-flash' })).toContainText('0.001');
+    await expect(dataRows(page).filter({ hasText: 'glm-4.7-flash' })).toContainText('0.001');
+
+    // 头部统计行（对齐 Agent2API mm-meta：总数 / 已启用 / 有映射 / 未定价）
+    await expect(page.locator('.mm-titlebar .mm-meta')).toContainText('3');
+    await expect(page.locator('.mm-titlebar .mm-meta')).toContainText('已启用');
+    await expect(page.locator('.mm-titlebar .mm-meta')).toContainText('有映射');
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
   test('点击左栏分组只显示该组模型', async ({ page, pageErrors }) => {
     await page.locator('.mm-rail-item', { hasText: 'WorkBuddy 国内版' }).click();
-    await expect(page.locator('.mm-table tbody tr')).toHaveCount(1);
+    await expect(dataRows(page)).toHaveCount(1);
     await expect(page.locator('.mm-table')).toContainText('wb-coder');
 
     await page.locator('.mm-rail-item', { hasText: '全部' }).click();
-    await expect(page.locator('.mm-table tbody tr')).toHaveCount(3);
+    await expect(dataRows(page)).toHaveCount(3);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
   test('搜索过滤模型行', async ({ page, pageErrors }) => {
-    const search = page.locator('.mm-toolbar input.form-input').first();
+    const search = page.locator('.mm-search input.form-input').first();
     await search.fill('glm');
-    await expect(page.locator('.mm-table tbody tr')).toHaveCount(1);
+    await expect(dataRows(page)).toHaveCount(1);
     await expect(page.locator('.mm-table')).toContainText('glm-4.7-flash');
 
     await search.fill('不存在的模型');
-    // 无匹配：表格空或显示空态
-    const rowCount = await page.locator('.mm-table tbody tr').count();
-    expect(rowCount).toBe(0);
+    // 无匹配：显示空态，无数据行
+    await expect(dataRows(page)).toHaveCount(0);
 
     await search.fill('');
-    await expect(page.locator('.mm-table tbody tr')).toHaveCount(3);
+    await expect(dataRows(page)).toHaveCount(3);
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('状态筛选「有映射」只显示带别名的行', async ({ page, pageErrors }) => {
+    await page.locator('.mm-seg-btn', { hasText: '有映射' }).click();
+    await expect(dataRows(page)).toHaveCount(1);
+    await expect(page.locator('.mm-table')).toContainText('unpriced-model');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
@@ -100,9 +118,9 @@ test.describe('模型管理', () => {
       if (r.url().includes('/api/models/state')) stateCalls.push(r.method());
     });
 
-    const row = page.locator('.mm-table tbody tr', { hasText: 'unpriced-model' });
-    // 注意：行内第一个复选框是「批量选择」，启停是 role=switch 的独立控件。
-    // 别名列里也有 role=switch（映射开关），所以按列定位——第 2 个 td 是启停列。
+    const row = dataRows(page).filter({ hasText: 'unpriced-model' });
+    // 行内第一个复选框是「批量选择」，启停是 role=switch 的独立控件。
+    // 映射列里也有 role=switch（映射开关），所以按列定位——第 2 个 td 是启停列。
     const toggle = row.locator('td').nth(1).getByRole('switch');
     await expect(toggle).toBeVisible();
     await toggle.click();
@@ -112,37 +130,36 @@ test.describe('模型管理', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('别名列：Agent2API 式映射 chips —— 开关可切、关闭态划线、行内 + 映射入口', async ({ page, pageErrors }) => {
+  test('映射列：映射 chips —— 开关可切、关闭态划线、行内 + 映射入口', async ({ page, pageErrors }) => {
     const aliasCalls: string[] = [];
     page.on('request', (r) => {
       if (r.url().includes('/api/models/alias')) aliasCalls.push(r.url());
     });
 
-    const row = page.locator('.mm-table tbody tr', { hasText: 'unpriced-model' });
+    const row = dataRows(page).filter({ hasText: 'unpriced-model' });
     const cell = row.locator('.mm-alias-cell');
     await expect(cell).toBeVisible();
 
     // 两条映射：一条启用（alias-free）、一条关闭（alias-off）
-    const chips = cell.locator('.mm-alias-chip');
+    const chips = cell.locator('.mm-alias');
     await expect(chips).toHaveCount(2);
-    await expect(cell.locator('.mm-alias-chip.is-off')).toHaveCount(1);
-    await expect(cell.locator('.mm-alias-chip.is-off')).toContainText('alias-off');
+    await expect(cell.locator('.mm-alias.is-off')).toHaveCount(1);
+    await expect(cell.locator('.mm-alias.is-off')).toContainText('alias-off');
 
     // 每条 chip 都有开关
-    await expect(cell.locator('.mm-alias-chip').first().getByRole('switch')).toBeVisible();
+    await expect(cell.locator('.mm-alias').first().getByRole('switch')).toBeVisible();
 
     // 行内「+ 映射」入口存在
     await expect(cell.locator('.mm-alias-add')).toBeVisible();
 
     // 切开关：请求打到 /api/models/alias/state
-    await cell.locator('.mm-alias-chip').first().getByRole('switch').click();
+    await cell.locator('.mm-alias').first().getByRole('switch').click();
     await expect
       .poll(() => aliasCalls.filter((u) => u.includes('/alias/state')).length, { timeout: 5000 })
       .toBeGreaterThan(0);
 
     // 点「+ 映射」打开弹窗，且带实时预览区
     await cell.locator('.mm-alias-add').click();
-    // .modal-overlay 是本弹窗容器（页面上可能还有其他 modal 类元素）
     const modal = page.locator('.modal-overlay .modal').first();
     await expect(modal).toBeVisible();
     const preview = modal.locator('.mm-alias-preview');
@@ -157,15 +174,72 @@ test.describe('模型管理', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
+  test('操作列「测试」打开模型测试弹窗，按来源并发并渲染结论', async ({ page, pageErrors }) => {
+    const testCalls: string[] = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/api/models/test')) testCalls.push(r.method());
+    });
+
+    // wb-coder 行有一个账号来源（workbuddy-1）
+    const row = dataRows(page).filter({ hasText: 'wb-coder' });
+    await row.locator('.mm-act-btn', { hasText: '测试' }).click();
+
+    const modal = page.locator('.mt-modal');
+    await expect(modal).toBeVisible();
+    // 目标行预览 + 默认勾选了唯一来源
+    await expect(modal.locator('.mt-target')).toContainText('wb-coder');
+    await expect(modal.locator('.mt-source.on')).toHaveCount(1);
+
+    await modal.locator('.btn-primary', { hasText: '开始测试' }).click();
+
+    // 结果层：成功徽标（用时/首字）+ 回复正文 + tokens 行
+    const results = modal.locator('.mt-results');
+    await expect(results).toBeVisible();
+    await expect(results.locator('.mm-badge-ok')).toContainText('200');
+    await expect(results.locator('.mt-reply')).toContainText('你好！我是测试回复。');
+    await expect(results.locator('.mt-slot-meta')).toContainText('tokens: 2 + 9 = 11');
+
+    expect(testCalls.length).toBeGreaterThan(0);
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('勾选后出现批量条，批量操作弹窗列出动作', async ({ page, pageErrors }) => {
+    await dataRows(page).first().locator('td').nth(0).locator('input[type=checkbox]').click();
+    await expect(page.locator('.mm-batch-chip')).toContainText('已选');
+
+    await page.locator('.mm-batch-chip .btn', { hasText: '批量操作' }).click();
+    const modal = page.locator('.modal-overlay .modal').last();
+    await expect(modal).toBeVisible();
+    await expect(modal).toContainText('批量操作');
+    await expect(modal.locator('.mm-batch-models code')).toHaveCount(1);
+    await expect(modal.locator('.mm-batch-action')).toHaveCount(3);
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('列设置可以关掉「定价」列', async ({ page, pageErrors }) => {
+    await expect(page.locator('.mm-h-price')).toHaveCount(1);
+    await page.locator('.mm-colset .btn').click();
+    const panel = page.locator('.mm-colset-panel');
+    await expect(panel).toBeVisible();
+    await panel.locator('.mm-colset-row', { hasText: '定价' }).getByRole('switch').click();
+    await expect(page.locator('.mm-h-price')).toHaveCount(0);
+    // 恢复默认，避免 localStorage 影响后续用例
+    await panel.locator('.mm-colset-reset').click();
+    await expect(page.locator('.mm-h-price')).toHaveCount(1);
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
   test('元信息覆盖 Tab 可切换并渲染', async ({ page, pageErrors }) => {
     await page.getByRole('tab', { name: '元信息覆盖' }).click();
     const text = await page.locator('.main-content').innerText();
     expect(text.length).toBeGreaterThan(10);
-    // 目录 Tab 的表格不应再显示
-    await expect(page.locator('.mm-table')).toHaveCount(0);
+    // 目录 Tab 的布局不应再显示
+    await expect(page.locator('.mm-layout')).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
 
     await page.getByRole('tab', { name: '模型目录' }).click();
-    await expect(page.locator('.mm-table')).toBeVisible();
+    await expect(page.locator('.mm-layout')).toBeVisible();
   });
 });
