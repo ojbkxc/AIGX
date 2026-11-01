@@ -466,8 +466,7 @@ pub fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
     // 由任一启用渠道声明/发现，或存在全局映射（管理员显式暴露的别名）
     // 时才允许 fallback；否则返回空，让调用方按 no_bridge 拒绝。
     if result.is_empty()
-        && (model_declared_by_channel(state, model)
-            || state.model_mapper.all_mappings().contains_key(model))
+        && (model_declared_by_channel(state, model) || state.model_mapper.is_active(model))
     {
         if let Some(b) = state.hub.get_specialized("cloudflare") {
             result.push((b, None, None));
@@ -4947,8 +4946,9 @@ pub async fn handle_list_models(
             }
         }
     }
-    // 别名映射的对外名也暴露（供客户端按别名调用；别名无渠道归属，纯名字推断）
-    for name in state.model_mapper.all_mappings().keys() {
+    // 别名映射的对外名也暴露（供客户端按别名调用；别名无渠道归属，纯名字推断）。
+    // 用 active_mappings：关掉的别名不参与改名，列出来会让客户端「看得到调不通」。
+    for name in state.model_mapper.active_mappings().keys() {
         if seen.insert(name.clone()) {
             model_list.push(build_entry(name, None));
         }
@@ -4976,7 +4976,9 @@ pub async fn handle_get_model(
         .list()
         .iter()
         .any(|ch| ch.is_enabled() && ch.effective_models().iter().any(|m| m == &model));
-    let mapped = state.model_mapper.all_mappings().contains_key(&model);
+    // 关掉的别名不算「存在」：与 resolve/list 口径一致，否则详情说存在、
+    // 调用时却按未配别名透传。
+    let mapped = state.model_mapper.is_active(&model);
     if in_channels || mapped {
         let now = chrono::Utc::now().timestamp();
         let meta = state.model_metadata.get(&model, None);

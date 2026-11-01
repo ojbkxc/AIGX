@@ -98,6 +98,30 @@ impl ModelMapper {
         self.custom_map.read().clone()
     }
 
+    /// 获取**当前生效**的映射（排除已关闭的别名）。
+    ///
+    /// 对外出口（`/v1/models` 列出别名、CF fallback 判「管理员显式暴露」、
+    /// `/v1/models/{id}` 判存在）必须用这份：关掉的别名不参与改名
+    /// （见 [`resolve`](Self::resolve)），若仍把它列给客户端，就会出现
+    /// 「列表里有、调用时当没配」的欺骗性状态。
+    ///
+    /// 管理面（模型管理页渲染开关状态）用 [`all_mappings`](Self::all_mappings)
+    /// + [`disabled_aliases`](Self::disabled_aliases)，需要看到全部条目。
+    pub fn active_mappings(&self) -> HashMap<String, String> {
+        let disabled = self.disabled.read();
+        self.custom_map
+            .read()
+            .iter()
+            .filter(|(alias, _)| !disabled.contains(*alias))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// 某条已配置的别名当前是否生效（配了且没关）。
+    pub fn is_active(&self, alias: &str) -> bool {
+        self.custom_map.read().contains_key(alias) && self.is_enabled(alias)
+    }
+
     /// 获取自定义映射
     pub fn custom_mappings(&self) -> HashMap<String, String> {
         self.custom_map.read().clone()
@@ -223,6 +247,28 @@ mod tests {
         // 不存在的别名不该被「关掉」——否则禁用集里多出一条没有映射的孤儿
         assert!(!m.set_enabled("never-configured", false).unwrap());
         assert!(m.disabled_aliases().is_empty());
+    }
+
+    #[test]
+    fn active_mappings_exclude_disabled() {
+        let m = mapper();
+        m.set_custom("a".into(), "t1".into()).unwrap();
+        m.set_custom("b".into(), "t2".into()).unwrap();
+        assert_eq!(m.active_mappings().len(), 2);
+
+        m.set_enabled("a", false).unwrap();
+        // 对外出口只看生效的那条：关掉的别名不该出现在 /v1/models 里
+        let active = m.active_mappings();
+        assert_eq!(active.len(), 1);
+        assert!(active.contains_key("b"));
+        assert!(!active.contains_key("a"));
+        // 管理面仍能看到全部（渲染开关状态用）
+        assert_eq!(m.all_mappings().len(), 2);
+
+        // is_active：配了且没关才算生效；没配过的名字一律不算
+        assert!(!m.is_active("a"));
+        assert!(m.is_active("b"));
+        assert!(!m.is_active("never-configured"));
     }
 
     #[test]

@@ -299,7 +299,8 @@ pub async fn handle_missing_pricing_models(
             }
         }
     }
-    for name in state.model_mapper.all_mappings().keys() {
+    // 只列生效别名：关掉的别名调不通、不需要定价（与上面跳过禁用渠道同一口径）
+    for name in state.model_mapper.active_mappings().keys() {
         if seen.insert(name.clone()) {
             candidates.push((name.clone(), None));
         }
