@@ -13,6 +13,10 @@ import { test, expect, loginAsAdmin } from './fixtures';
 
 test.describe('网络代理', () => {
   test.beforeEach(async ({ page }) => {
+    // mock server 的代理池是进程内数组：desktop/mobile 串行共用，
+    // CRUD 用例的残留会跨 project 污染后续断言（toHaveCount(2) 实得 5）。
+    // 每用例先经 page.request（挂 baseURL）复位回预置两条。
+    await page.request.post('/api/__e2e/reset-proxy-pool');
     await loginAsAdmin(page, { sessions: [] });
     await page.goto('/proxy-pool');
     await expect(page.locator('h1')).toContainText('网络代理');

@@ -38,7 +38,14 @@ const ME_ADMIN = {
   quota: null,
   used_quota: 0,
   aff_code: 'demo',
+  // OAuth 绑定态（个人中心「第三方账号」卡片）：GitHub 已绑，Google/LinuxDO 未绑。
+  // unbind 用例会改写这些布尔位；reset-oauth 钩子复位（beforeEach 调用）。
+  oauth_github: true,
+  oauth_google: false,
+  oauth_linuxdo: false,
+  password_set: true,
 };
+const ME_OAUTH_SEED = { oauth_github: true, oauth_google: false, oauth_linuxdo: false, password_set: true };
 
 /** 列表类接口统一返回空数组，避免各页面因结构不符而报错 */
 const EMPTY_LIST = JSON.stringify({ success: true, data: [], total: 0, page: 1, size: 20 });
@@ -210,11 +217,14 @@ function sendJson(res, body, status = 200) {
  *  预置两条带消息的会话：抽屉相关用例需要「多会话 + 可切换」的初始状态。 */
 const chatSessions = new Map();
 
-/** 网络代理池内存态（E2E 可驱动 CRUD）。预置两条：一条启用 + 一条禁用。 */
-const proxyPool = [
+/** 网络代理池内存态（E2E 可驱动 CRUD）。预置两条：一条启用 + 一条禁用。
+ *  desktop/mobile 两个 project 串行共用本进程，CRUD 会跨 project 残留 ——
+ *  `__e2e/reset-proxy-pool` 供用例 beforeEach 恢复预置态。 */
+const PROXY_POOL_SEED = () => [
   { id: 'px_e2e_1', name: '香港节点', enabled: true, protocol: 'socks5', host: '127.0.0.1', port: 1080, username: '', has_password: false, usedBy: [] },
   { id: 'px_e2e_2', name: '日本节点', enabled: false, protocol: 'http', host: '127.0.0.1', port: 8080, username: 'user1', has_password: true, usedBy: [{ id: 'acc-1', name: 'workbuddy-1', enabled: true }] },
 ];
+const proxyPool = PROXY_POOL_SEED();
 let chatSeq = 0;
 {
   const base = Math.floor(Date.now() / 1000);
@@ -253,6 +263,30 @@ function handle(req, res, p, bodyText) {
     // 少数需要具体形状的端点
     if (p === '/api/users/me') return sendJson(res, { success: true, data: ME_ADMIN });
     if (p === '/api/auth/logout') return sendJson(res, { success: true, data: null });
+    // ── OAuth 登录回跳 / 绑定 / 解绑（个人中心「第三方账号」+ 登录 ticket）──
+    if (p === '/api/auth/oauth/consume' && req.method === 'POST') {
+      // 任意 ticket 换一份合法登录数据（真实后端是一次性票据；E2E 不校验唯一性）
+      return sendJson(res, {
+        success: true,
+        data: {
+          token: 'e2e-oauth-token', email: ME_ADMIN.email, username: ME_ADMIN.username,
+          role: 'admin', expires_at: Math.floor(Date.now() / 1000) + 86400, must_change_password: false,
+        },
+      });
+    }
+    if (/^\/api\/auth\/(github|google|linuxdo)\/bind\/start$/.test(p) && req.method === 'POST') {
+      return sendJson(res, { success: true, data: { url: `https://example.com/oauth/authorize?state=e2e` } });
+    }
+    if (p === '/api/auth/oauth/unbind' && req.method === 'POST') {
+      const body = JSON.parse(bodyText || '{}');
+      const key = `oauth_${body.provider}`;
+      if (key in ME_ADMIN) ME_ADMIN[key] = false;
+      return sendJson(res, { success: true, data: { provider: body.provider } });
+    }
+    if (p === '/api/__e2e/reset-oauth' && req.method === 'POST') {
+      Object.assign(ME_ADMIN, ME_OAUTH_SEED);
+      return sendJson(res, { success: true, data: null });
+    }
     if (p === '/api/models/available') return sendJson(res, { success: true, data: ['glm-4'] });
     if (p === '/api/network/status') return sendJson(res, { success: true, data: { enabled: true } });
     if (p === '/api/dashboard/realtime') return sendJson(res, { success: true, data: { window_secs: 300, total_requests: 0, qps: 0, avg_latency_ms: 0, error_rate: 0, errors: 0 } });
@@ -291,6 +325,14 @@ function handle(req, res, p, bodyText) {
           },
         },
       });
+    }
+
+    // E2E 状态复位：恢复代理池预置态（跨 project 残留隔离）
+    if (p === '/api/__e2e/reset-proxy-pool' && req.method === 'POST') {
+      const fresh = PROXY_POOL_SEED();
+      proxyPool.length = 0;
+      proxyPool.push(...fresh);
+      return sendJson(res, { success: true, items: proxyPool });
     }
 
     // 网络代理池（进程内数组，E2E 可驱动 CRUD）
