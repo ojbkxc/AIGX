@@ -38,6 +38,7 @@ mod payment;
 mod plan;
 mod pricing;
 mod proxy;
+mod proxy_pool;
 mod quota_monitor;
 mod ratelimit;
 mod redemption;
