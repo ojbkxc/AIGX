@@ -172,7 +172,7 @@ fn short_fingerprint(bytes: &[u8]) -> String {
 /// nonce 每次现生成 —— GCM 的 nonce 重用是灾难性的（同一密钥下两条明文用
 /// 同一 nonce 会互相泄底）。不用计数器：进程重启后计数没有持久化。
 pub fn seal_secret(plaintext: &str, data_dir: &Path) -> Result<String, String> {
-    use aes_gcm::aead::{consts::U12, Aead as _};
+    use aes_gcm::aead::Aead as _;
     use aes_gcm::{Aes256Gcm, KeyInit as _, Nonce};
 
     let key = secret_key(data_dir)?;
@@ -180,10 +180,9 @@ pub fn seal_secret(plaintext: &str, data_dir: &Path) -> Result<String, String> {
         Aes256Gcm::new_from_slice(&key).map_err(|_| "密钥长度不受 AES-256 支持".to_string())?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
     getrandom::getrandom(&mut nonce_bytes).map_err(|e| format!("系统随机源不可用：{e}"))?;
-    let nonce = Nonce::<U12>::try_from(nonce_bytes.as_slice())
-        .map_err(|_| "生成 nonce 失败".to_string())?;
+    let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
-        .encrypt(&nonce, plaintext.as_bytes())
+        .encrypt(nonce, plaintext.as_bytes())
         .map_err(|_| "AES-GCM 加密失败".to_string())?;
     let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
     blob.extend_from_slice(&nonce_bytes);
@@ -193,7 +192,7 @@ pub fn seal_secret(plaintext: &str, data_dir: &Path) -> Result<String, String> {
 
 /// 解开一段 `enc1:` 信封 → 明文（纯读路径，不生成密钥文件）。
 fn open_envelope(value: &str, data_dir: &Path) -> Result<String, String> {
-    use aes_gcm::aead::{consts::U12, Aead as _};
+    use aes_gcm::aead::Aead as _;
     use aes_gcm::{Aes256Gcm, KeyInit as _, Nonce};
 
     let body = value
@@ -208,10 +207,9 @@ fn open_envelope(value: &str, data_dir: &Path) -> Result<String, String> {
     let key = secret_key_readonly(data_dir)?;
     let cipher =
         Aes256Gcm::new_from_slice(&key).map_err(|_| "密钥长度不受 AES-256 支持".to_string())?;
-    let nonce =
-        Nonce::<U12>::try_from(&blob[..NONCE_LEN]).map_err(|_| "nonce 长度异常".to_string())?;
+    let nonce = Nonce::from_slice(&blob[..NONCE_LEN]);
     let plaintext = cipher
-        .decrypt(&nonce, &blob[NONCE_LEN..])
+        .decrypt(nonce, &blob[NONCE_LEN..])
         .map_err(|_| "解密失败（密钥不对或数据被改过）".to_string())?;
     String::from_utf8(plaintext).map_err(|_| "解密结果不是合法 UTF-8".to_string())
 }
