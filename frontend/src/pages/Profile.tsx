@@ -15,6 +15,12 @@ interface Me {
   used_quota?: number;
   created_at?: number;
   totp_enabled?: boolean;
+  // OAuth 绑定状态（后端 mask_user 只暴露布尔位，不回传身份 id）
+  oauth_github?: boolean;
+  oauth_google?: boolean;
+  oauth_linuxdo?: boolean;
+  // 是否已设置真实密码（决定第三方解绑的防锁死提示文案）
+  password_set?: boolean;
 }
 
 export default function Profile(): JSX.Element {
@@ -46,6 +52,68 @@ export default function Profile(): JSX.Element {
   useEffect(() => {
     void load();
   }, []);
+
+  // ── 第三方账号（OAuth）绑定 ──────────────────────────────
+  const [oauthBusy, setOauthBusy] = useState<string | null>(null);
+
+  // 绑定回跳结果：oauth_handle_callback 绑完 302 回本页 #oauth_bind=xx&status=ok|error&reason=
+  useEffect(() => {
+    const hash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : '';
+    if (!hash.includes('oauth_bind=')) return;
+    const params = new URLSearchParams(hash);
+    const provider = params.get('oauth_bind') || '';
+    const status = params.get('status') || '';
+    const reason = params.get('reason') || '';
+    // 清理 fragment，避免刷新重复提示
+    window.history.replaceState({}, document.title, window.location.pathname + window.location.search);
+    const REASONS: Record<string, string> = {
+      taken: '该第三方账号已绑定到其他用户',
+      conflict: '本账号已绑定另一个同类型第三方账号，请先解绑',
+      unknown_user: '账号不存在，请重新登录后再试',
+      persist_failed: '绑定保存失败，请稍后重试',
+    };
+    const label = provider === 'github' ? 'GitHub' : provider === 'google' ? 'Google' : provider === 'linuxdo' ? 'LinuxDO' : provider;
+    if (status === 'ok') {
+      addToast(`${label} ${t('绑定成功')}`);
+      void load();
+    } else {
+      addToast(REASONS[reason] || t('绑定失败，请重试'), 'error');
+      void load();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 发起绑定：POST 拿授权 URL（带 Bearer 校验当前用户），再整页跳到上游授权 */
+  const handleOAuthBind = async (provider: 'github' | 'google' | 'linuxdo'): Promise<void> => {
+    setOauthBusy(provider);
+    try {
+      const res = await api.oauthBindStart(provider);
+      const url = res?.data?.url;
+      if (url) {
+        window.location.href = url;
+        return; // 整页跳走，不再复位 busy
+      }
+      addToast(t('该第三方登录未配置，无法绑定'), 'error');
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : t('发起绑定失败'), 'error');
+    } finally {
+      setOauthBusy(null);
+    }
+  };
+
+  /** 解绑：后端做防锁死校验（无其它登录方式时拒绝） */
+  const handleOAuthUnbind = async (provider: 'github' | 'google' | 'linuxdo'): Promise<void> => {
+    setOauthBusy(provider);
+    try {
+      await api.oauthUnbind(provider);
+      addToast(t('已解绑'));
+      await load();
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : t('解绑失败'), 'error');
+    } finally {
+      setOauthBusy(null);
+    }
+  };
 
   const load = async () => {
     setLoading(true);
@@ -252,6 +320,50 @@ export default function Profile(): JSX.Element {
             </button>
           </div>
         </form>
+      </Card>
+
+      <Card title={t('第三方账号')}>
+        <div className="settings-form">
+          <p className="form-hint" style={{ margin: '0 0 4px' }}>
+            {t('绑定后可用对应账号快捷登录。登录时优先按已绑定的第三方身份归属，避免邮箱相同导致串号。')}
+          </p>
+          {([
+            { key: 'github', label: 'GitHub' },
+            { key: 'google', label: 'Google' },
+            { key: 'linuxdo', label: 'LinuxDO' },
+          ] as const).map((p) => {
+            const bound = me?.[`oauth_${p.key}` as keyof Me] === true;
+            return (
+              <div key={p.key} className="form-group" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                <div>
+                  <label style={{ display: 'block' }}>{p.label}</label>
+                  <span className="form-hint">{bound ? t('已绑定') : t('未绑定')}</span>
+                </div>
+                {bound ? (
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    style={{ whiteSpace: 'nowrap' }}
+                    disabled={oauthBusy !== null}
+                    onClick={() => void handleOAuthUnbind(p.key)}
+                  >
+                    {oauthBusy === p.key ? t('处理中...') : t('解绑')}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    style={{ whiteSpace: 'nowrap' }}
+                    disabled={oauthBusy !== null}
+                    onClick={() => void handleOAuthBind(p.key)}
+                  >
+                    {oauthBusy === p.key ? t('跳转中...') : t('绑定')}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </Card>
 
       <Card title={t('两步验证（TOTP）')}>

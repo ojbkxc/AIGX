@@ -165,7 +165,22 @@ fn paths_auth() -> Value {
         "/api/auth/google": { "get": op_pub("认证", "Google OAuth 授权跳转") },
         "/api/auth/google/callback": { "get": op_pub("认证", "Google OAuth 回调") },
         "/api/auth/linuxdo": { "get": op_pub("认证", "LinuxDO OAuth 授权跳转") },
-        "/api/auth/linuxdo/callback": { "get": op_pub("认证", "LinuxDO OAuth 回调") }
+        "/api/auth/linuxdo/callback": { "get": op_pub("认证", "LinuxDO OAuth 回调") },
+        "/api/auth/github/bind/start": {
+            "post": op_body("认证", "发起绑定 GitHub（登录态）", "无请求体，返回授权 URL")
+        },
+        "/api/auth/google/bind/start": {
+            "post": op_body("认证", "发起绑定 Google（登录态）", "无请求体，返回授权 URL")
+        },
+        "/api/auth/linuxdo/bind/start": {
+            "post": op_body("认证", "发起绑定 LinuxDO（登录态）", "无请求体，返回授权 URL")
+        },
+        "/api/auth/oauth/unbind": {
+            "post": op_body("认证", "解绑第三方账号（登录态）", "provider: 'github' | 'google' | 'linuxdo'")
+        },
+        "/api/auth/oauth/consume": {
+            "post": op_pub("认证", "OAuth 一次性 ticket 换会话数据")
+        }
     })
 }
 
@@ -1085,10 +1100,15 @@ mod tests {
         add("/api/auth/forgot-password", &["post"]);
         add("/api/auth/github", &["get"]);
         add("/api/auth/github/callback", &["get"]);
+        add("/api/auth/github/bind/start", &["post"]);
         add("/api/auth/google", &["get"]);
         add("/api/auth/google/callback", &["get"]);
+        add("/api/auth/google/bind/start", &["post"]);
         add("/api/auth/linuxdo", &["get"]);
         add("/api/auth/linuxdo/callback", &["get"]);
+        add("/api/auth/linuxdo/bind/start", &["post"]);
+        add("/api/auth/oauth/unbind", &["post"]);
+        add("/api/auth/oauth/consume", &["post"]);
         add("/api/auth/login", &["post"]);
         add("/api/auth/login/code", &["post"]);
         add("/api/auth/login/send-code", &["post"]);

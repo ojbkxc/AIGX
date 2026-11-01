@@ -1787,5 +1787,19 @@
   "终止在途请求": "Terminate in-flight request",
   "将中断这条请求的上游流并记为失败。确定继续？": "This will abort the upstream stream and record it as failed. Continue?",
   "已终止": "Terminated",
-  "将删除 {{n}} 条": "{{n}} entries will be deleted"
+  "将删除 {{n}} 条": "{{n}} entries will be deleted",
+  "第三方账号": "Third-party accounts",
+  "绑定后可用对应账号快捷登录。登录时优先按已绑定的第三方身份归属，避免邮箱相同导致串号。": "Once linked, sign in with that account. Login resolves by the linked third-party identity first, so a matching email can't cross into another account.",
+  "已绑定": "Linked",
+  "未绑定": "Not linked",
+  "解绑": "Unlink",
+  "绑定": "Link",
+  "跳转中...": "Redirecting...",
+  "绑定成功": "Linked successfully",
+  "绑定失败，请重试": "Link failed, please try again",
+  "该第三方登录未配置，无法绑定": "This sign-in provider isn't configured, can't link",
+  "发起绑定失败": "Failed to start linking",
+  "已解绑": "Unlinked",
+  "解绑失败": "Unlink failed",
+  "第三方登录失败，请重试": "Third-party login failed, please try again"
 }

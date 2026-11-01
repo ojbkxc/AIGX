@@ -267,6 +267,50 @@ export default function Login(): JSX.Element {
     }
   }, [location, t]);
 
+  // OAuth 登录回跳：callback 已 302 回本页并把一次性 ticket 放进 URL fragment
+  // （#oauth_ticket=xxx），或错误码（#oauth_error=xxx）。token 不进 URL。
+  useEffect(() => {
+    const hash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : '';
+    if (!hash) return;
+    const params = new URLSearchParams(hash);
+    const ticket = params.get('oauth_ticket');
+    const oauthErr = params.get('oauth_error');
+    // 消费后清掉 fragment，避免刷新重复请求 / 停留在敏感参数上
+    const cleanUrl = window.location.pathname + window.location.search;
+    const OAUTH_ERRORS: Record<string, string> = {
+      no_code: 'OAuth 授权未完成（缺少 code），请重试',
+      missing_state: 'OAuth 授权已失效（缺少 state），请重试',
+      invalid_state: 'OAuth 授权已过期或被截获，请重新发起登录',
+      upstream_failed: '第三方授权服务暂不可用，请稍后重试',
+      disabled: '该账号已被禁用，请联系管理员',
+      need_bind: '该邮箱已有密码账号。请先用密码登录，再到「个人中心」绑定此第三方账号',
+      create_failed: '创建账号失败，请稍后重试',
+    };
+    if (oauthErr) {
+      window.history.replaceState({}, document.title, cleanUrl);
+      setError(OAUTH_ERRORS[oauthErr] || t('第三方登录失败，请重试'));
+      return;
+    }
+    if (!ticket) return;
+    window.history.replaceState({}, document.title, cleanUrl);
+    setLoading(true);
+    void (async () => {
+      try {
+        const res = await api.oauthConsume(ticket);
+        if (res.success && res.data) {
+          completeLogin(res.data);
+        } else {
+          setError(t('第三方登录失败，请重试'));
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : t('第三方登录失败，请重试'));
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 邮件重置链接直达：?reset_token=xxx 自动打开第 2 步（填 token + 新密码）
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
