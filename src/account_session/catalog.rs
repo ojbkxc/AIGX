@@ -105,8 +105,14 @@ fn pick_capabilities(value: &Value) -> Vec<String> {
     }
 
     // 布尔位
+    //
+    // 字段名对齐 Agent2API 归一后的目录字段（`core/models/shape.rs`）：
+    // `supports_images` / `supports_reasoning` / `supports_tool_call` —— 注意
+    // images 是**复数**（A2A 的口径），单数 `supports_image` 是各家的原始
+    // 字段名，两者都认。
     let flags: &[(&str, &str)] = &[
         ("supportsImages", "vision"),
+        ("supports_images", "vision"),
         ("supports_image", "vision"),
         ("supportsVision", "vision"),
         ("supportsToolCall", "tool"),
@@ -116,6 +122,7 @@ fn pick_capabilities(value: &Value) -> Vec<String> {
         ("supports_reasoning", "reasoning"),
         ("thinking", "reasoning"),
         ("supportsVideo", "video"),
+        ("supports_video", "video"),
         ("supportsAudio", "audio"),
     ];
     for (key, label) in flags {
@@ -123,6 +130,24 @@ fn pick_capabilities(value: &Value) -> Vec<String> {
             && !caps.iter().any(|c| c.eq_ignore_ascii_case(label))
         {
             caps.push((*label).to_string());
+        }
+    }
+    // `input_modalities: ["text","image","video"]` —— Agent2API 归一后的目录
+    // 用它表达输入模态。视觉/视频位也在这里（有的上游只给模态、不给布尔位）。
+    if let Some(modalities) = value.get("input_modalities").and_then(Value::as_array) {
+        for modality in modalities {
+            let Some(text) = modality.as_str() else {
+                continue;
+            };
+            let label = match text.trim().to_ascii_lowercase().as_str() {
+                "image" | "images" | "vision" => "vision",
+                "video" | "videos" => "video",
+                "audio" => "audio",
+                _ => continue,
+            };
+            if !caps.iter().any(|c| c.eq_ignore_ascii_case(label)) {
+                caps.push(label.to_string());
+            }
         }
     }
 
@@ -1976,6 +2001,53 @@ mod tests {
             "data": {"model_list": [{"model_name": "should-not-appear"}]}
         });
         assert!(parse_kuku_catalog(&payload).is_empty());
+    }
+
+    #[test]
+    fn capabilities_read_agent2api_normalized_fields() {
+        // 样本取自 Agent2API 归一后的真实上游目录（`/v1/models` 实测响应）。
+        //
+        // 关键点：视觉位在 **`supports_images`（复数）** 与
+        // `input_modalities` 里 —— 早先只认单数 `supports_image`，导致
+        // 真实支持图像的模型被判成不支持视觉。
+        let sample = serde_json::json!({
+            "id": "hy3-x",
+            "name": "Hy3",
+            "owned_by": "workbuddy",
+            "supports_images": true,
+            "supports_reasoning": true,
+            "supports_tool_call": true,
+            "supports_video": false,
+            "input_modalities": ["text", "image"],
+            "max_input_tokens": 192000,
+            "max_output_tokens": 64000
+        });
+        let caps = pick_capabilities(&sample);
+        assert!(caps.iter().any(|c| c == "vision"), "应认出视觉位：{caps:?}");
+        assert!(
+            caps.iter().any(|c| c == "reasoning"),
+            "应认出推理位：{caps:?}"
+        );
+        assert!(caps.iter().any(|c| c == "tool"), "应认出工具位：{caps:?}");
+        assert!(!caps.iter().any(|c| c == "video"), "不支持视频：{caps:?}");
+
+        // 只有 input_modalities 带 image（上游不给布尔位）也要认出视觉
+        let modalities_only = serde_json::json!({
+            "id": "mimo-v2.6-pro",
+            "input_modalities": ["text", "image", "video"]
+        });
+        let caps = pick_capabilities(&modalities_only);
+        assert!(caps.iter().any(|c| c == "vision"), "{caps:?}");
+        assert!(caps.iter().any(|c| c == "video"), "{caps:?}");
+
+        // 纯文本模型不该被误判成支持视觉
+        let text_only = serde_json::json!({
+            "id": "glm-5.3",
+            "supports_images": false,
+            "input_modalities": ["text"]
+        });
+        let caps = pick_capabilities(&text_only);
+        assert!(!caps.iter().any(|c| c == "vision"), "{caps:?}");
     }
 
     #[test]
