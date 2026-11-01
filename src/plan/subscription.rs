@@ -306,7 +306,6 @@ impl SubscriptionStore {
         sub.amount_used += amount;
         sub.updated_at = now;
         let snapshot = sub.clone();
-        drop(by_id);
         if let Err(e) = self.persist(&snapshot) {
             tracing::error!(
                 "Failed to persist subscription {} charge: {}",
@@ -314,6 +313,7 @@ impl SubscriptionStore {
                 e
             );
         }
+        drop(by_id);
         true
     }
 
@@ -342,7 +342,6 @@ impl SubscriptionStore {
         }
         sub.updated_at = now;
         let snapshot = sub.clone();
-        drop(by_id);
         if let Err(e) = self.persist(&snapshot) {
             tracing::error!(
                 "Failed to persist subscription {} settle: {}",
@@ -350,6 +349,7 @@ impl SubscriptionStore {
                 e
             );
         }
+        drop(by_id);
     }
 
     /// 释放订阅池预留（请求取消/失败路径），归还到池可用额度。
@@ -366,7 +366,6 @@ impl SubscriptionStore {
         sub.amount_used -= amount.min(sub.amount_used);
         sub.updated_at = now;
         let snapshot = sub.clone();
-        drop(by_id);
         if let Err(e) = self.persist(&snapshot) {
             tracing::error!(
                 "Failed to persist subscription {} release: {}",
@@ -374,6 +373,7 @@ impl SubscriptionStore {
                 e
             );
         }
+        drop(by_id);
     }
 
     /// 扫描到期订阅：active 且 end_time <= now → expired 落库。

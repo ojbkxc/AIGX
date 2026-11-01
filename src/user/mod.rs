@@ -393,8 +393,11 @@ impl UserStore {
             .ok_or_else(|| anyhow::anyhow!("user not found"))?;
         user.quota += delta;
         let snapshot = user.clone();
-        drop(by_id);
+        // 持久化必须在写锁内完成：若先放锁再写盘，两个并发修改各自拿到快照
+        // 后，后写盘的可能反而是**更旧**的那份（T1 拿 S1 放锁 → T2 拿 S2 写盘
+        // → T1 写盘覆盖 S2），重启后数据回退（配额凭空变多/变少）。
         self.persist(&snapshot)?;
+        drop(by_id);
         Ok(snapshot)
     }
 
@@ -423,8 +426,9 @@ impl UserStore {
         }
         user.quota -= amount;
         let snapshot = user.clone();
-        drop(by_id);
+        // 同 add_quota_atomic：锁内落盘，避免旧快照覆盖新快照
         self.persist(&snapshot)?;
+        drop(by_id);
         Ok(())
     }
 
@@ -443,10 +447,12 @@ impl UserStore {
         }
         user.used_quota += amount;
         let snapshot = user.clone();
-        drop(by_id);
+        // 锁内落盘（并发安全）；失败只记日志不清零内存态——
+        // 计费已经在内存里扣了，回滚会让用户白嫖，宁可下次写盘纠正。
         if let Err(e) = self.persist(&snapshot) {
             tracing::error!("Failed to persist user {} try_charge: {}", id, e);
         }
+        drop(by_id);
         true
     }
 
@@ -474,10 +480,11 @@ impl UserStore {
         }
         user.reserved_quota += amount;
         let snapshot = user.clone();
-        drop(by_id);
+        // 锁内落盘（并发安全）
         if let Err(e) = self.persist(&snapshot) {
             tracing::error!("Failed to persist user {} reserve_quota: {}", id, e);
         }
+        drop(by_id);
         true
     }
 
@@ -506,10 +513,11 @@ impl UserStore {
         // 实际消费转入 used_quota
         user.used_quota += actual;
         let snapshot = user.clone();
-        drop(by_id);
+        // 锁内落盘（并发安全）
         if let Err(e) = self.persist(&snapshot) {
             tracing::error!("Failed to persist user {} settle_quota: {}", id, e);
         }
+        drop(by_id);
     }
 
     /// 释放预留配额（P1：两段式计费的取消/回滚路径）。
@@ -539,10 +547,11 @@ impl UserStore {
         }
         user.reserved_quota -= release;
         let snapshot = user.clone();
-        drop(by_id);
+        // 锁内落盘（并发安全）
         if let Err(e) = self.persist(&snapshot) {
             tracing::error!("Failed to persist user {} release_quota: {}", id, e);
         }
+        drop(by_id);
     }
 
     /// 回收超时未结算的预留（G2：预留 TTL 解冻）。
