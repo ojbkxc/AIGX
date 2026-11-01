@@ -4,6 +4,7 @@
  */
 
 import type {
+  AccountBalance,
   AccountProviderItem,
   AccountSessionItem,
   AccountSessionStatsItem,
@@ -526,6 +527,12 @@ export const api = {
     request<ApiResponse<{ success?: boolean; latency_ms?: number; model?: string; message?: string }>>('POST', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/test`),
   resetAccountSessionCooldowns: (id: string): Promise<ApiResponse<null>> =>
     request<ApiResponse<null>>('POST', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/reset-cooldown`),
+  /** 账号余额/额度（支持 12 家；不支持返回 400 错误信息） */
+  getAccountSessionBalance: (id: string): Promise<ApiResponse<AccountBalance>> =>
+    request<ApiResponse<AccountBalance>>('GET', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/balance`),
+  /** 手动刷新账号凭证（qoder/autoclaw/trae；force=true 无条件刷新） */
+  refreshAccountSession: (id: string, force = false): Promise<ApiResponse<{ refreshed?: boolean; skipped?: boolean; message?: string }>> =>
+    request<ApiResponse<{ refreshed?: boolean; skipped?: boolean; message?: string }>>('POST', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/refresh`, { force }),
   accountProviders: (): Promise<ApiList<AccountProviderItem>> =>
     request<ApiList<AccountProviderItem>>('GET', `${API_BASE}/account-sessions/providers`),
   /** 上游模型目录发现：同步某账号（或某 provider 下全部账号）的模型清单 */

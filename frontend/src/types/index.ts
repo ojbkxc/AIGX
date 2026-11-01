@@ -1138,6 +1138,17 @@ export interface AccountSessionItem {
   updated_at?: number;
 }
 
+/** 账号余额/额度归一化读数（GET /api/account-sessions/:id/balance） */
+export interface AccountBalance {
+  /** 可用总量（null = 上游没给，勿当 0） */
+  available: number | null;
+  /** 展示单位（积分 / token / 额度…） */
+  unit: string;
+  /** 明细桶：{type, displayName, balance, total?, used?} */
+  wallets?: Array<Record<string, unknown>>;
+  subscription?: Record<string, unknown> | null;
+}
+
 /** provider 目录项（粘贴凭证型上游） */
 export interface AccountProviderItem {
   kind: string;

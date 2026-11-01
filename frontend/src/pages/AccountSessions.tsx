@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Download, FlaskConical, Loader2, Pencil, Plus, Power, RotateCcw, SlidersHorizontal, Trash2, Upload } from 'lucide-react';
+import { Download, FlaskConical, Loader2, Pencil, Plus, Power, RefreshCw, RotateCcw, SlidersHorizontal, Trash2, Upload, Wallet } from 'lucide-react';
 import { api } from '../api';
 import { presetIcon, providerIcon } from '../lib/providerIcons';
 import { CUSTOM_PROTOCOLS, PRESET_PROVIDERS, normalizeUrl, presetKind } from '../lib/addAccountConfigs';
@@ -135,6 +135,19 @@ export default function AccountSessions(): JSX.Element {
 
   const [testingId, setTestingId] = useState<string | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+
+  // 状态分段过滤（对齐 Agent2API 账号页：全部/启用/禁用/冷却中）
+  const [statusSeg, setStatusSeg] = useState<'all' | 'enabled' | 'disabled' | 'cooling'>('all');
+  // 勾选与批量操作（批量启停/删除，循环既有 PATCH/DELETE 端点）
+  const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
+  const [batchRunning, setBatchRunning] = useState(false);
+  // 余额查询（后端 :id/balance 支持 12 家）与手动刷新凭证（:id/refresh）
+  type BalanceView =
+    | { state: 'loading' }
+    | { state: 'ok'; text: string }
+    | { state: 'err'; text: string };
+  const [balances, setBalances] = useState<Record<string, BalanceView>>({});
+  const [refreshingId, setRefreshingId] = useState<string | null>(null);
 
   const load = async (): Promise<void> => {
     setLoading(true);
@@ -633,7 +646,11 @@ export default function AccountSessions(): JSX.Element {
   };
 
   const needle = search.trim().toLowerCase();
-  const visible = sessions.filter((s) => {
+  /** 账号是否处于冷却中（任一上游真名还有剩余冷却秒数） */
+  const isCooling = (s: AccountSessionItem): boolean =>
+    Object.values(s.cooldowns || {}).some((v) => Number(v) > 0);
+  // 分段计数基于「渠道+搜索」过滤后、状态分段前的集合（计数口径=用户看到的池子）
+  const segBase = sessions.filter((s) => {
     if (channelFilter && s.channel_id !== channelFilter) return false;
     if (!needle) return true;
     return (
@@ -643,6 +660,101 @@ export default function AccountSessions(): JSX.Element {
       (s.base_url || '').toLowerCase().includes(needle)
     );
   });
+  const segCounts = {
+    all: segBase.length,
+    enabled: segBase.filter((s) => s.status === 'enabled' && !isCooling(s)).length,
+    disabled: segBase.filter((s) => s.status !== 'enabled').length,
+    cooling: segBase.filter((s) => s.status === 'enabled' && isCooling(s)).length,
+  };
+  const visible = segBase.filter((s) => {
+    if (statusSeg === 'enabled') return s.status === 'enabled' && !isCooling(s);
+    if (statusSeg === 'disabled') return s.status !== 'enabled';
+    if (statusSeg === 'cooling') return s.status === 'enabled' && isCooling(s);
+    return true;
+  });
+
+  /** 勾选（列表重载后清掉已不存在的 id，避免幽灵选择） */
+  const togglePick = (id: string): void => {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const togglePickAll = (): void => {
+    setPicked((prev) =>
+      prev.size === visible.length && visible.length > 0
+        ? new Set()
+        : new Set(visible.map((s) => s.id)),
+    );
+  };
+
+  /** 批量启停/删除：循环既有 PATCH/DELETE 端点（账号量通常几十，无需专用批量端点） */
+  const runBatch = async (action: 'enable' | 'disable' | 'delete'): Promise<void> => {
+    const ids = [...picked];
+    if (!ids.length) return;
+    setBatchRunning(true);
+    setError('');
+    try {
+      const results = await Promise.allSettled(
+        ids.map((id) =>
+          action === 'delete'
+            ? api.deleteAccountSession(id)
+            : api.patchAccountSession(id, { status: action === 'enable' ? 'enabled' : 'disabled' }),
+        ),
+      );
+      const ok = results.filter((r) => r.status === 'fulfilled').length;
+      addToast(t('批量{{action}}完成：{{ok}}/{{total}}', { action: action === 'delete' ? t('删除') : action === 'enable' ? t('启用') : t('停用'), ok, total: ids.length }));
+      setPicked(new Set());
+      await load();
+    } finally {
+      setBatchRunning(false);
+    }
+  };
+
+  const askBatchDelete = (): void => {
+    setConfirmState({
+      title: t('批量删除账号'),
+      message: t('确定删除选中的 {{count}} 个账号？凭证与冷却记录会一并删除。', { count: picked.size }),
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => { await runBatch('delete'); },
+    });
+  };
+
+  /** 查询余额（后端支持 12 家；不支持的 provider 内联显示原因） */
+  const handleBalance = async (session: AccountSessionItem): Promise<void> => {
+    setBalances((prev) => ({ ...prev, [session.id]: { state: 'loading' } }));
+    try {
+      const res = await api.getAccountSessionBalance(session.id);
+      const d = res.data;
+      const text = d && d.available != null
+        ? `${d.available} ${d.unit || ''}`.trim()
+        : t('读数不可用');
+      setBalances((prev) => ({ ...prev, [session.id]: { state: 'ok', text } }));
+    } catch (err) {
+      setBalances((prev) => ({
+        ...prev,
+        [session.id]: { state: 'err', text: err instanceof Error ? err.message : String(err) },
+      }));
+    }
+  };
+
+  /** 手动刷新凭证（仅持有续期令牌的账号可用；force=true 无条件刷新） */
+  const handleRefreshCredential = async (session: AccountSessionItem): Promise<void> => {
+    setRefreshingId(session.id);
+    setError('');
+    try {
+      const res = await api.refreshAccountSession(session.id, true);
+      addToast(res.data?.message || t('凭证已刷新'));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRefreshingId(null);
+    }
+  };
 
   // ── 供应商选择（仅新增账号时使用）──
   const providerLabel = (kind: string): string =>
@@ -767,7 +879,60 @@ export default function AccountSessions(): JSX.Element {
             onChange={(e) => setSearch(e.target.value)}
             aria-label={t('搜索')}
           />
+          {/* 状态分段（对齐 Agent2API 账号页）：启用口径=enabled 且不在冷却中 */}
+          <div className="seg-filter" role="group" aria-label={t('按状态过滤')}>
+            {(
+              [
+                ['all', t('全部')],
+                ['enabled', t('启用')],
+                ['disabled', t('禁用')],
+                ['cooling', t('冷却中')],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                className={`seg-filter-btn${statusSeg === key ? ' active' : ''}`}
+                onClick={() => setStatusSeg(key)}
+              >
+                {label} {segCounts[key]}
+              </button>
+            ))}
+          </div>
         </div>
+
+        {picked.size > 0 && (
+          <div className="batch-bar">
+            <span>{t('已选 {{count}} 个账号', { count: picked.size })}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={batchRunning}
+              onClick={() => void runBatch('enable')}
+            >
+              <Power size={14} /> {t('批量启用')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={batchRunning}
+              onClick={() => void runBatch('disable')}
+            >
+              <Power size={14} /> {t('批量停用')}
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              disabled={batchRunning}
+              onClick={askBatchDelete}
+            >
+              <Trash2 size={14} /> {t('批量删除')}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setPicked(new Set())}>
+              {t('清除选择')}
+            </Button>
+          </div>
+        )}
 
         {visible.length === 0 ? (
           <EmptyState
@@ -783,6 +948,14 @@ export default function AccountSessions(): JSX.Element {
             <table>
               <thead>
                 <tr>
+                  <th className="pick-col">
+                    <input
+                      type="checkbox"
+                      aria-label={t('全选')}
+                      checked={visible.length > 0 && picked.size === visible.length}
+                      onChange={togglePickAll}
+                    />
+                  </th>
                   <th>{t('名称')}</th>
                   <th>{t('渠道')}</th>
                   <th>{t('Provider')}</th>
@@ -795,8 +968,18 @@ export default function AccountSessions(): JSX.Element {
                 </tr>
               </thead>
               <tbody>
-                {visible.map((session) => (
+                {visible.map((session) => {
+                  const bal = balances[session.id];
+                  return (
                   <tr key={session.id}>
+                    <td className="pick-col">
+                      <input
+                        type="checkbox"
+                        aria-label={t('选择账号')}
+                        checked={picked.has(session.id)}
+                        onChange={() => togglePick(session.id)}
+                      />
+                    </td>
                     <td>
                       <div>{session.name}</div>
                       <div className="form-hint">{session.api_key || '—'}</div>
@@ -806,6 +989,23 @@ export default function AccountSessions(): JSX.Element {
                           {shortError(session.last_error)}
                         </div>
                       )}
+                      {/* 余额查询：点击才打上游，避免列表加载时全量请求；结果内联 */}
+                      <div className="form-hint">
+                        {!bal && (
+                          <button
+                            type="button"
+                            className="balance-link"
+                            onClick={() => void handleBalance(session)}
+                          >
+                            <Wallet size={12} /> {t('查询余额')}
+                          </button>
+                        )}
+                        {bal?.state === 'loading' && <span>{t('查询中…')}</span>}
+                        {bal?.state === 'ok' && <span>{t('余额')} {bal.text}</span>}
+                        {bal?.state === 'err' && (
+                          <span title={bal.text}>{t('余额不可用')}</span>
+                        )}
+                      </div>
                     </td>
                     <td>{session.channel_name || session.channel_id}</td>
                     <td>
@@ -897,6 +1097,24 @@ export default function AccountSessions(): JSX.Element {
                         >
                           <RotateCcw size={14} />
                         </Button>
+                        {/* 手动刷新凭证：仅持有续期令牌的账号可用（qoder/autoclaw/trae 等） */}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleRefreshCredential(session)}
+                          disabled={!session.has_refresh_token || refreshingId === session.id}
+                          title={
+                            session.has_refresh_token
+                              ? t('刷新凭证（用续期令牌换新 access token）')
+                              : t('该账号没有续期令牌，无法在线刷新')
+                          }
+                        >
+                          {refreshingId === session.id ? (
+                            <Loader2 size={14} />
+                          ) : (
+                            <RefreshCw size={14} />
+                          )}
+                        </Button>
                         <Button
                           variant="danger"
                           size="sm"
@@ -908,7 +1126,8 @@ export default function AccountSessions(): JSX.Element {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

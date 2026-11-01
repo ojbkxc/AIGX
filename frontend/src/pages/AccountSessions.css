@@ -321,3 +321,73 @@
   flex-direction: column;
   gap: 4px;
 }
+
+/* ── 状态分段过滤（对齐 Agent2API 账号页） ── */
+.seg-filter {
+  display: inline-flex;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.seg-filter-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 7px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.seg-filter-btn + .seg-filter-btn {
+  border-left: 1px solid var(--border-color);
+}
+
+.seg-filter-btn:hover {
+  background: var(--hover-bg);
+}
+
+.seg-filter-btn.active {
+  background: var(--btn-secondary-bg);
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+/* ── 批量操作条 ── */
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--surface-bg);
+  font-size: 13px;
+}
+
+/* 勾选列 */
+.pick-col {
+  width: 32px;
+  text-align: center !important;
+}
+
+/* 余额查询小链接（名称列副信息行内） */
+.balance-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.balance-link:hover {
+  color: var(--text-main);
+  text-decoration: underline;
+}
