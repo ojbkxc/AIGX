@@ -301,7 +301,13 @@ code, pre, .mono {
   margin-left: var(--sidebar-width);
   padding: 28px 32px;
   min-width: 0;
-  z-index: 10;
+  /* 这里绝不能有 z-index（哪怕是 10）：.main-content 是 .app-container 的
+   * flex item，规范规定 flex item 只要 z-index 不是 auto 就创建层叠上下文
+   * ——即使 position:static。当年加 z-index:10 后，页内所有弹窗
+   * （.modal-overlay z:1000）被困在这层「10」里，整体被 .sidebar-aside
+   * （fixed z:100）盖住左缘：宽弹窗四列网格的第一列看不见也点不着，
+   * 表现为「添加账号弹窗里找不到几家提供商」。不靠定位，侧栏（fixed）
+   * 天然盖得住 static 内容，此值没有任何用处。 */
   transition: margin-left 0.25s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
