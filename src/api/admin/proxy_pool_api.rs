@@ -351,7 +351,7 @@ mod tests {
         let body: TestAccountBody =
             serde_json::from_str(r#"{"proxy":"socks5://1.2.3.4:1080"}"#).expect("parse");
         assert_eq!(body.proxy.as_deref(), Some("socks5://1.2.3.4:1080"));
-        let body: TestAccountBody = serde_json::from_str(r#"{"accountId":"abc"}"#).expect("parse");
+        let body: TestAccountBody = serde_json::from_str(r#"{"account_id":"abc"}"#).expect("parse");
         assert_eq!(body.account_id, "abc");
     }
 }
