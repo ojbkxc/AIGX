@@ -114,8 +114,14 @@ impl StickyMode {
     }
 }
 
-/// 断路器参数（对照 A2A routingBreaker*；A2A 默认关 / 5 次 / 60s / 半开成功 2 次）。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// 断路器参数（对照 A2A routingBreaker*；A2A 默认关 / 5 次 / 30s / 半开成功 2 次）。
+///
+/// **不可 derive(Default)**：`#[serde(default = "...")]` 只作用于**反序列化**；
+/// derive 出来的 `Default::default()` 给的是各字段的类型零值
+/// （threshold=0 / cooldown_secs=0 / success_threshold=0），而非这里的业务默认
+/// （5 / 30 / 2）。阈值 0 意味着断路器在**首次失败**就打开 —— 那等于把整条
+/// 渠道链路停掉。手写 impl 见下。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BreakerPolicy {
     /// 断路器开关（false = 不熔断，只保留冷却/AIMD）
     #[serde(default = "default_breaker_enabled")]
@@ -143,6 +149,18 @@ fn default_breaker_cooldown() -> u64 {
 }
 fn default_breaker_success_threshold() -> u32 {
     2
+}
+
+/// 手写（非 derive）：默认值走上面那组 `default_breaker_*`，与反序列化口径一致。
+impl Default for BreakerPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: default_breaker_enabled(),
+            threshold: default_breaker_threshold(),
+            cooldown_secs: default_breaker_cooldown(),
+            success_threshold: default_breaker_success_threshold(),
+        }
+    }
 }
 
 /// 路由策略整份配置。
