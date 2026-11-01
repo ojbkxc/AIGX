@@ -27,21 +27,16 @@ use crate::storage::FileStore;
 pub const ROUTING_POLICY_KEY: &str = "routing_policy";
 
 /// 选路策略。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RouteStrategy {
     /// 加权随机 + 同优先级分组（`select_for_model` 现状，默认）
+    #[default]
     Weighted,
     /// 确定性轮询（`select_for_model_round_robin`，均匀分布）
     RoundRobin,
     /// 多因子调度（health × cost × rpm 几何加权，`select_for_model_ranked`）
     Ranked,
-}
-
-impl Default for RouteStrategy {
-    fn default() -> Self {
-        Self::Weighted
-    }
 }
 
 impl RouteStrategy {
@@ -64,21 +59,16 @@ impl RouteStrategy {
 }
 
 /// 会话粘性档位（决定亲和缓存 TTL；对照 A2A routingSticky）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StickyMode {
     /// 5 分钟粘性 / 30 分钟硬过期（A2A auto，多数场景默认）
+    #[default]
     Auto,
     /// 6 小时粘性（长会话吃满上游上下文缓存；A2A session）
     Session,
     /// 关闭亲和，每请求独立选路（A2A off）
     Off,
-}
-
-impl Default for StickyMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl StickyMode {
@@ -144,7 +134,7 @@ impl Default for BreakerPolicy {
 }
 
 /// 路由策略整份配置。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RoutingPolicy {
     /// 选路策略
     #[serde(default)]
@@ -158,17 +148,6 @@ pub struct RoutingPolicy {
     /// 多因子调度权重（strategy=ranked 时生效；健康/成本/RPM）
     #[serde(default)]
     pub scheduler_weights: SchedulerPolicyConfig,
-}
-
-impl Default for RoutingPolicy {
-    fn default() -> Self {
-        Self {
-            strategy: RouteStrategy::default(),
-            sticky: StickyMode::default(),
-            breaker: BreakerPolicy::default(),
-            scheduler_weights: SchedulerPolicyConfig::default(),
-        }
-    }
 }
 
 /// 路由策略运行时持有者：进程级快照，保存即生效。
@@ -272,8 +251,10 @@ mod tests {
         let store = RoutingPolicyStore::in_memory(RoutingPolicy::default());
         let mut p = store.snapshot();
         assert_eq!(p.strategy, RouteStrategy::Weighted);
-        let mut next = RoutingPolicy::default();
-        next.strategy = RouteStrategy::RoundRobin;
+        let next = RoutingPolicy {
+            strategy: RouteStrategy::RoundRobin,
+            ..RoutingPolicy::default()
+        };
         store.update(next).unwrap();
         p = store.snapshot();
         assert_eq!(p.strategy, RouteStrategy::RoundRobin);
