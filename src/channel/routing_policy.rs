@@ -58,7 +58,7 @@ impl RouteStrategy {
     }
 }
 
-/// 会话粘性档位（决定亲和缓存 TTL；对照 A2A routingSticky）。
+/// 会话粘性档位（决定亲和缓存 TTL；对照 A2A routingSticky 四档）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StickyMode {
@@ -67,24 +67,38 @@ pub enum StickyMode {
     Auto,
     /// 6 小时粘性（长会话吃满上游上下文缓存；A2A session）
     Session,
+    /// 每轮重选：与 Off 同为不粘（A2A turn；AIGX 无独立会话记录面，
+    /// 语义上与 Off 等效，保留该档以对齐 API 契约）
+    Turn,
     /// 关闭亲和，每请求独立选路（A2A off）
     Off,
 }
 
 impl StickyMode {
-    /// 返回 `(sticky_ttl_secs, hard_ttl_secs)`；Off 返回 None。
+    /// 返回 `(sticky_ttl_secs, hard_ttl_secs)`；Turn/Off 返回 None（不粘）。
     pub fn ttls(&self) -> Option<(u64, u64)> {
         match self {
             Self::Auto => Some((5 * 60, 30 * 60)),
             Self::Session => Some((6 * 3600, 6 * 3600)),
-            Self::Off => None,
+            Self::Turn | Self::Off => None,
         }
+    }
+
+    /// 是否参与亲和（读取与写入两侧统一判据）。
+    pub fn sticky_enabled(&self) -> bool {
+        self.ttls().is_some()
+    }
+
+    /// 数据面便捷判据：从策略快照取「本请求是否写/读亲和」。
+    pub fn sticky_enabled_from(policy: &RoutingPolicy) -> bool {
+        policy.sticky.sticky_enabled()
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Auto => "auto",
             Self::Session => "session",
+            Self::Turn => "turn",
             Self::Off => "off",
         }
     }
@@ -93,14 +107,15 @@ impl StickyMode {
         match s {
             "auto" => Some(Self::Auto),
             "session" => Some(Self::Session),
+            "turn" => Some(Self::Turn),
             "off" => Some(Self::Off),
             _ => None,
         }
     }
 }
 
-/// 断路器参数（对照 A2A routingBreaker*；A2A 默认 5 次 / 60s）。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// 断路器参数（对照 A2A routingBreaker*；A2A 默认关 / 5 次 / 60s / 半开成功 2 次）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BreakerPolicy {
     /// 断路器开关（false = 不熔断，只保留冷却/AIMD）
     #[serde(default = "default_breaker_enabled")]
@@ -111,6 +126,10 @@ pub struct BreakerPolicy {
     /// 打开后冷却秒数（HalfOpen 试探前）
     #[serde(default = "default_breaker_cooldown")]
     pub cooldown_secs: u64,
+    /// HalfOpen 连续成功多少次才真正关闭（A2A routingBreakerSuccessThreshold；
+    /// 1 = 单次试探成功即恢复现状行为）
+    #[serde(default = "default_breaker_success_threshold")]
+    pub success_threshold: u32,
 }
 
 fn default_breaker_enabled() -> bool {
@@ -122,15 +141,8 @@ fn default_breaker_threshold() -> u32 {
 fn default_breaker_cooldown() -> u64 {
     30
 }
-
-impl Default for BreakerPolicy {
-    fn default() -> Self {
-        Self {
-            enabled: default_breaker_enabled(),
-            threshold: default_breaker_threshold(),
-            cooldown_secs: default_breaker_cooldown(),
-        }
-    }
+fn default_breaker_success_threshold() -> u32 {
+    2
 }
 
 /// 路由策略整份配置。
@@ -258,5 +270,45 @@ mod tests {
         store.update(next).unwrap();
         p = store.snapshot();
         assert_eq!(p.strategy, RouteStrategy::RoundRobin);
+    }
+
+    #[test]
+    fn turn_mode_is_non_sticky() {
+        // turn：不粘（TTL None）、sticky_enabled false；序列化为 "turn"
+        assert_eq!(StickyMode::Turn.ttls(), None);
+        assert!(!StickyMode::Turn.sticky_enabled());
+        assert_eq!(StickyMode::from_str_opt("turn"), Some(StickyMode::Turn));
+        let json = serde_json::to_value(StickyMode::Turn).unwrap();
+        assert_eq!(json, serde_json::json!("turn"));
+        // 旧档位不受影响
+        assert!(StickyMode::Auto.sticky_enabled());
+        assert!(StickyMode::Session.sticky_enabled());
+        assert!(!StickyMode::Off.sticky_enabled());
+    }
+
+    #[test]
+    fn breaker_policy_success_threshold_default() {
+        // A2A 对齐：默认关 / 阈值 5 / 冷却 30s / 半开成功 2 次
+        let d = BreakerPolicy::default();
+        assert!(!d.enabled);
+        assert_eq!(d.threshold, 5);
+        assert_eq!(d.cooldown_secs, 30);
+        assert_eq!(d.success_threshold, 2);
+        // 旧数据（无 success_threshold 字段）回落默认 2
+        let v: BreakerPolicy = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert!(v.enabled);
+        assert_eq!(v.success_threshold, 2);
+    }
+
+    #[test]
+    fn sticky_enabled_from_policy() {
+        let mut p = RoutingPolicy::default();
+        assert!(StickyMode::sticky_enabled_from(&p));
+        p.sticky = StickyMode::Turn;
+        assert!(!StickyMode::sticky_enabled_from(&p));
+        p.sticky = StickyMode::Off;
+        assert!(!StickyMode::sticky_enabled_from(&p));
+        p.sticky = StickyMode::Session;
+        assert!(StickyMode::sticky_enabled_from(&p));
     }
 }

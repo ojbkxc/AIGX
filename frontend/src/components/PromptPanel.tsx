@@ -43,6 +43,7 @@ export default function PromptPanel(): JSX.Element {
   const [error, setError] = useState('');
   const [mode, setMode] = useState<PromptMode>('passthrough');
   const [text, setText] = useState('');
+  const [devCompat, setDevCompat] = useState(true);
 
   useEffect(() => {
     void (async () => {
@@ -52,6 +53,7 @@ export default function PromptPanel(): JSX.Element {
         if (d) {
           setMode(d.mode ?? 'passthrough');
           setText(d.text ?? '');
+          setDevCompat(d.developer_role_compat !== false);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -65,11 +67,12 @@ export default function PromptPanel(): JSX.Element {
     setSaving(true);
     setError('');
     try {
-      const res = await api.saveGatewayPrompt({ mode, text });
+      const res = await api.saveGatewayPrompt({ mode, text, developer_role_compat: devCompat });
       const d = res?.data;
       if (d) {
         setMode(d.mode ?? mode);
         setText(d.text ?? text);
+        setDevCompat(d.developer_role_compat !== false);
       }
       addToast(t('系统提示词已保存（下一请求即生效）'));
     } catch (err) {
@@ -128,6 +131,20 @@ export default function PromptPanel(): JSX.Element {
               </div>
             </div>
           )}
+
+          <div className="form-group">
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={devCompat}
+                onChange={(e) => setDevCompat(e.target.checked)}
+              />
+              <span>{t('developer 角色兼容（role:"developer" 归一为 system）')}</span>
+            </label>
+            <div className="form-hint">
+              {t('OpenAI 新 SDK（o 系模型）用 developer 角色替代 system；开启时网关自动归一，关闭时按未知角色丢弃（老行为）。')}
+            </div>
+          </div>
 
           <div className="settings-actions">
             <button className="btn btn-primary" onClick={() => void save()} disabled={saving}>

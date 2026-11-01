@@ -1328,12 +1328,13 @@ export interface GatewaySettingsItem {
 
 /** 路由策略（GET/PUT /api/routing；对照 Agent2API「设置 → 路由」） */
 export type RouteStrategy = 'weighted' | 'round_robin' | 'ranked';
-export type StickyMode = 'auto' | 'session' | 'off';
+export type StickyMode = 'auto' | 'session' | 'turn' | 'off';
 
 export interface BreakerPolicyItem {
   enabled: boolean;
   threshold: number;
   cooldown_secs: number;
+  success_threshold: number;
 }
 
 export interface SchedulerWeightsItem {
@@ -1360,6 +1361,7 @@ export type PromptMode = 'passthrough' | 'custom' | 'append';
 export interface GatewayPromptItem {
   mode: PromptMode;
   text: string;
+  developer_role_compat?: boolean;
 }
 
 /** 存储概览（GET /api/storage） */
@@ -1367,6 +1369,7 @@ export interface StorageOverviewItem {
   total_keys: number;
   groups: Record<string, number>;
   db_size_bytes: number | null;
+  data_dir: string;
 }
 
 /** 备份导入结果（POST /api/backup/import） */

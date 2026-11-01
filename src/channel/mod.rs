@@ -1188,6 +1188,22 @@ impl ChannelStore {
         latency_ms: u64,
         session_id: Option<&str>,
     ) {
+        self.record_channel_success_with_sticky(channel_id, model, latency_ms, session_id, true);
+    }
+
+    /// [`Self::record_channel_success`] 的显式粘性开关版本。
+    ///
+    /// `sticky` = 路由策略的 `StickyMode::sticky_enabled()`：off/turn 档
+    /// 不写亲和缓存（只停读取会留半成品——缓存条目会随 30min 硬过期
+    /// 隐性影响后续切回 auto 档的行为）。
+    pub fn record_channel_success_with_sticky(
+        &self,
+        channel_id: &str,
+        model: Option<&str>,
+        latency_ms: u64,
+        session_id: Option<&str>,
+        sticky: bool,
+    ) {
         self.circuit_breaker.record_success(channel_id);
         self.health_tracker
             .record_success(channel_id, model, latency_ms);
@@ -1196,7 +1212,9 @@ impl ChannelStore {
         // AIMD 学习：成功请求上调限额（当前未提供上游限额头，传 None）
         self.aimd_on_success(channel_id, None);
         if let (Some(sid), Some(m)) = (session_id, model) {
-            self.affinity_cache.insert(sid, m, channel_id);
+            if sticky {
+                self.affinity_cache.insert(sid, m, channel_id);
+            }
         }
     }
 
@@ -1405,9 +1423,11 @@ impl ChannelStore {
     /// 按路由策略选取候选渠道（对照 Agent2API RoutingPane 的 strategy 分派）。
     ///
     /// - `weighted`：`select_for_model`（现状：priority 分组 + 组内加权随机）
-    /// - `round_robin`：`select_for_model` 候选集取首条——分组顺序由 priority
-    ///   决定，RR 游标由 `balancer` 按 `(模型, priority)` 组推进（组内轮换，
-    ///   跨组仍按优先级，与 A2A「家间按优先级、家内轮询」语义一致）
+    /// - `round_robin`：priority 降序分组，**首组按渠道 id 稳定排序**后由
+    ///   `balancer` 游标轮换——组间仍按优先级、组内确定性轮询（A2A「家间
+    ///   按优先级、家内轮询」）。不能用 `select_for_model` 的组内顺序：
+    ///   那是**加权随机**摇出来的，在其上做计数器轮换等于二次随机，
+    ///   每次的"下一个"都随摇序漂移，均匀性失效。
     /// - `ranked`：`select_for_model_ranked`（多因子 health×cost×rpm）
     ///
     /// 返回完整候选列表供 failover 循环逐个尝试。
@@ -1422,21 +1442,21 @@ impl ChannelStore {
                 self.select_for_model_ranked(model, pricing_store)
             }
             routing_policy::RouteStrategy::RoundRobin => {
-                // 候选集排序同 weighted（priority 降序 + 组内加权随机），
-                // 但把 RR 游标命中的组内渠道顶到最前——游标按组推进实现
-                // 「组间按优先级、组内轮询」。
                 let mut candidates = self.select_for_model(model);
-                if candidates.is_empty() {
+                if candidates.len() <= 1 {
                     return candidates;
                 }
                 let top_prio = candidates[0].priority;
-                let group: Vec<&Channel> = candidates
+                let mut group: Vec<Channel> = candidates
                     .iter()
                     .filter(|c| c.priority == top_prio)
+                    .cloned()
                     .collect();
                 if group.len() <= 1 {
                     return candidates;
                 }
+                // 稳定序（id 字典序）：候选集增删时轮换表只有平移没有漂移
+                group.sort_by(|a, b| a.id.cmp(&b.id));
                 let group_id = format!("model:{model}:p{top_prio}");
                 let pick = self.balancer.next(&group_id, &group).map(|c| c.id.clone());
                 if let Some(id) = pick {

@@ -244,13 +244,19 @@ async fn main() -> anyhow::Result<()> {
     // 可配可热更；数据面 resolve_bridges 每请求读快照分派
     let routing_policy =
         Arc::new(crate::channel::routing_policy::RoutingPolicyStore::with_store(store.clone()));
-    // 启动时把持久化的断路器参数热应用到 CircuitBreaker（免重启生效）
+    // 启动时把持久化的路由策略热应用到各组件（免重启生效）：
+    // 断路器（开关+三参）、亲和 TTL、调度权重
     {
         let p = routing_policy.snapshot();
+        channel_store
+            .circuit_breaker()
+            .set_enabled(p.breaker.enabled);
         if p.breaker.enabled {
-            channel_store
-                .circuit_breaker()
-                .update_params(p.breaker.threshold, p.breaker.cooldown_secs);
+            channel_store.circuit_breaker().update_params(
+                p.breaker.threshold,
+                p.breaker.cooldown_secs,
+                p.breaker.success_threshold,
+            );
         }
         if let Some((sticky_secs, hard_secs)) = p.sticky.ttls() {
             channel_store.affinity_cache().update_ttls(

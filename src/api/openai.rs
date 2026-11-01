@@ -343,7 +343,7 @@ pub fn resolve_bridges_with_affinity(
     let mut result = resolve_bridges(state, model);
     let policy = state.routing_policy.snapshot();
     if let Some(sid) = session_id {
-        if policy.sticky != crate::channel::routing_policy::StickyMode::Off {
+        if policy.sticky.sticky_enabled() {
             if let Some(affinity_id) = state.channel_store.affinity_cache().lookup(sid, model) {
                 if let Some(pos) = result
                     .iter()
@@ -1491,11 +1491,25 @@ impl Drop for ResponsesStreamGuard {
 /// `pub(crate)`：B2 成本预估器（`api/admin/pricing.rs`）复用同一解析路径，
 /// 保证预估的 token 口径与数据面请求完全一致。
 pub(crate) fn parse_messages(value: Option<&Value>) -> Option<Vec<ChatMessage>> {
+    parse_messages_with_dev(value, true)
+}
+
+/// [`parse_messages`] 的带 developer 兼容开关版本。
+///
+/// OpenAI 新 SDK 用 `role:"developer"` 取代 system（o1/o3 系）。
+/// `developer_to_system = true`（A2A developerRoleCompat 开）时归一为
+/// system；false 时按未知角色丢弃（引入该兼容前的行为）。
+/// 兼容开关来自 `GatewayPrompt.developer_role_compat`（/api/gateway/prompt）。
+pub(crate) fn parse_messages_with_dev(
+    value: Option<&Value>,
+    developer_to_system: bool,
+) -> Option<Vec<ChatMessage>> {
     let arr = value?.as_array()?;
     let mut messages = Vec::new();
     for msg in arr {
         let role = match msg.get("role").and_then(|r| r.as_str()) {
             Some("system") => Role::System,
+            Some("developer") if developer_to_system => Role::System,
             Some("user") => Role::User,
             Some("assistant") => Role::Assistant,
             Some("tool") => Role::Tool,
@@ -1691,7 +1705,11 @@ pub async fn handle_chat_completions(
         .unwrap_or(false);
 
     // 解析消息列表
-    let messages = parse_messages(body.get("messages")).unwrap_or_default();
+    let messages = parse_messages_with_dev(
+        body.get("messages"),
+        state.gateway_prompt.snapshot().developer_role_compat,
+    )
+    .unwrap_or_default();
     if messages.is_empty() {
         return error_response(
             "invalid_messages",
@@ -1834,6 +1852,9 @@ pub async fn handle_chat_completions(
                             Some(&upstream),
                             attempt_start.elapsed().as_millis() as u64,
                             session_id.as_deref(),
+                            crate::channel::routing_policy::StickyMode::sticky_enabled_from(
+                                &state.routing_policy.snapshot(),
+                            ),
                         );
                     }
                     stream_opt = Some(s);
@@ -2301,6 +2322,9 @@ pub async fn handle_chat_completions(
                             Some(&upstream),
                             attempt_start.elapsed().as_millis() as u64,
                             session_id.as_deref(),
+                            crate::channel::routing_policy::StickyMode::sticky_enabled_from(
+                                &state.routing_policy.snapshot(),
+                            ),
                         );
                     }
                     response_opt = Some(resp);
@@ -2714,6 +2738,9 @@ pub async fn handle_responses(
                         Some(&upstream),
                         attempt_start.elapsed().as_millis() as u64,
                         session_id.as_deref(),
+                        crate::channel::routing_policy::StickyMode::sticky_enabled_from(
+                            &state.routing_policy.snapshot(),
+                        ),
                     );
                 }
                 result_opt = Some(r);

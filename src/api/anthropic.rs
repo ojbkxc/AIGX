@@ -92,10 +92,20 @@ fn anthropic_error(
 
 /// 将 Anthropic role 转为内部 Role
 fn anthropic_role_to_internal(role: &str) -> Option<Role> {
+    anthropic_role_to_internal_with_dev(role, false)
+}
+
+/// [`anthropic_role_to_internal`] 的带 developer 兼容开关版本。
+///
+/// Anthropic 协议本身无 developer 角色，但客户端代理层（如把 OpenAI SDK
+/// 请求转成 Anthropic 形状的中间件）可能透传——开关开时归一为 system，
+/// 与 OpenAI 入口同口径（A2A developerRoleCompat）。
+fn anthropic_role_to_internal_with_dev(role: &str, developer_to_system: bool) -> Option<Role> {
     match role {
         "user" => Some(Role::User),
         "assistant" => Some(Role::Assistant),
         "system" => Some(Role::System),
+        "developer" if developer_to_system => Some(Role::System),
         _ => None,
     }
 }
@@ -118,10 +128,18 @@ fn to_anthropic_stop_reason(fr: &FinishReason) -> &'static str {
 
 /// 解析 Anthropic 消息列表为内部 ChatMessage 列表
 fn parse_anthropic_messages(messages: &[Value]) -> Vec<ChatMessage> {
+    parse_anthropic_messages_with_dev(messages, false)
+}
+
+/// [`parse_anthropic_messages`] 的带 developer 兼容开关版本。
+fn parse_anthropic_messages_with_dev(
+    messages: &[Value],
+    developer_to_system: bool,
+) -> Vec<ChatMessage> {
     let mut result = Vec::new();
     for msg in messages {
         let role_str = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-        let role = match anthropic_role_to_internal(role_str) {
+        let role = match anthropic_role_to_internal_with_dev(role_str, developer_to_system) {
             Some(r) => r,
             None => continue,
         };
@@ -320,7 +338,12 @@ pub async fn handle_messages(
     let messages = body
         .get("messages")
         .and_then(|m| m.as_array())
-        .map(|arr| parse_anthropic_messages(arr))
+        .map(|arr| {
+            parse_anthropic_messages_with_dev(
+                arr,
+                state.gateway_prompt.snapshot().developer_role_compat,
+            )
+        })
         .unwrap_or_default();
 
     if messages.is_empty() {
@@ -469,6 +492,9 @@ pub async fn handle_messages(
                             Some(&upstream),
                             attempt_start.elapsed().as_millis() as u64,
                             session_id.as_deref(),
+                            crate::channel::routing_policy::StickyMode::sticky_enabled_from(
+                                &state.routing_policy.snapshot(),
+                            ),
                         );
                     }
                     stream_opt = Some(s);
@@ -1003,6 +1029,9 @@ pub async fn handle_messages(
                             Some(&upstream),
                             attempt_start.elapsed().as_millis() as u64,
                             session_id.as_deref(),
+                            crate::channel::routing_policy::StickyMode::sticky_enabled_from(
+                                &state.routing_policy.snapshot(),
+                            ),
                         );
                     }
                     response_opt = Some(resp);

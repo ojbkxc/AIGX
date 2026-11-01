@@ -153,6 +153,11 @@ export default function DataManagement(): JSX.Element {
               size: fmtBytes(overview?.db_size_bytes),
             })}
           </div>
+          {overview?.data_dir && (
+            <div className="form-hint" style={{ wordBreak: 'break-all' }}>
+              {t('数据目录：{{dir}}（备份快照存于其下 backups/）', { dir: overview.data_dir })}
+            </div>
+          )}
           {groups.length > 0 && (
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
               {groups.map(([label, count]) => (

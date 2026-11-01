@@ -86,8 +86,10 @@ pub async fn handle_storage_overview(
         }
     }
 
-    // SQLite 库文件大小（data_dir/data/aigx.db；PG 后端时为 None）
+    // 数据目录（面板展示「数据存在哪」；与备份/恢复路径同源）+ SQLite 库大小
+    // （data_dir/data/aigx.db；PG 后端时 db_size 为 None）
     let data_dir = crate::config::expand_path(&state.config_manager.get().await.server.data_dir);
+    let data_dir_display = data_dir.display().to_string();
     let db_size = std::fs::metadata(data_dir.join("data").join("aigx.db"))
         .ok()
         .map(|m| m.len());
@@ -108,6 +110,7 @@ pub async fn handle_storage_overview(
             "total_keys": all_keys.len(),
             "groups": groups,
             "db_size_bytes": db_size,
+            "data_dir": data_dir_display,
         }
     })))
 }

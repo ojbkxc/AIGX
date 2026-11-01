@@ -134,6 +134,9 @@ struct UpstreamState {
     /// 兜底"租约持有者未被实际调度"场景（候选过滤阶段抢到租约但
     /// failover 循环未尝试该渠道）。
     probe_lease_until: Option<Instant>,
+    /// HalfOpen 期连续成功计数（A2A routingBreakerSuccessThreshold）：
+    /// 达到 `success_threshold` 才真正关闭断路器；0 = 一次成功即关（现状）。
+    half_open_successes: AtomicU32,
 }
 
 impl Default for UpstreamState {
@@ -144,6 +147,7 @@ impl Default for UpstreamState {
             failure_type: None,
             rate_limit_until: None,
             probe_lease_until: None,
+            half_open_successes: AtomicU32::new(0),
         }
     }
 }
@@ -200,6 +204,8 @@ pub struct BreakerSnapshot {
     pub rate_limit_remaining_secs: u64,
     /// HalfOpen 试探租约是否在飞（单飞保护期间为 true）
     pub probe_in_flight: bool,
+    /// HalfOpen 期已连续成功次数（对照 A2A halfOpenSuccesses）
+    pub half_open_successes: u32,
 }
 
 /// 渠道断路器 — per-channel 状态机（Closed / Open / HalfOpen）。
@@ -212,10 +218,15 @@ pub struct BreakerSnapshot {
 pub struct CircuitBreaker {
     /// channel_id → 状态
     states: DashMap<String, UpstreamState>,
+    /// 总开关（路由设置 breaker.enabled；false = 记账但不拦截，
+    /// 冷却/AIMD 等其余保护继续生效）
+    enabled: AtomicU32,
     /// 打开断路器的失败次数阈值
     failure_threshold: AtomicU32,
     /// 打开后的冷却时长（秒；AtomicU32 存秒，比较时换算 Duration）
     cooldown_secs: AtomicU32,
+    /// HalfOpen 连续成功多少次才真正关闭（A2A routingBreakerSuccessThreshold）
+    success_threshold: AtomicU32,
 }
 
 impl CircuitBreaker {
@@ -226,8 +237,11 @@ impl CircuitBreaker {
     pub fn new(failure_threshold: u32, cooldown_seconds: u64) -> Self {
         Self {
             states: DashMap::new(),
+            // 默认开启：构造即生效的既有行为（5 次/30s）不变
+            enabled: AtomicU32::new(1),
             failure_threshold: AtomicU32::new(failure_threshold),
             cooldown_secs: AtomicU32::new(cooldown_seconds.min(u32::MAX as u64) as u32),
+            success_threshold: AtomicU32::new(1),
         }
     }
 
@@ -237,13 +251,38 @@ impl CircuitBreaker {
     }
 
     /// 热更新断路器参数（下一请求生效，已累计的失败计数保留）。
-    pub fn update_params(&self, failure_threshold: u32, cooldown_seconds: u64) {
+    pub fn update_params(
+        &self,
+        failure_threshold: u32,
+        cooldown_seconds: u64,
+        success_threshold: u32,
+    ) {
         self.failure_threshold
             .store(failure_threshold.max(1), Ordering::Relaxed);
         self.cooldown_secs.store(
             cooldown_seconds.min(u32::MAX as u64) as u32,
             Ordering::Relaxed,
         );
+        self.success_threshold
+            .store(success_threshold.max(1), Ordering::Relaxed);
+    }
+
+    /// 总开关热更（路由设置 breaker.enabled）。
+    ///
+    /// 关闭 = `allow_request` 恒放行（记账继续：失败仍累计、快照仍可见，
+    /// 只是不再拦截调度）；冷却/AIMD 等其余保护不受此开关影响。
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(u32::from(enabled), Ordering::Relaxed);
+    }
+
+    /// 总开关当前值（路由设置面板回显用）。
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed) == 1
+    }
+
+    /// 成功阈值当前值（路由设置面板回显用）。
+    pub fn success_threshold(&self) -> u32 {
+        self.success_threshold.load(Ordering::Relaxed)
     }
 
     fn threshold(&self) -> u32 {
@@ -263,6 +302,10 @@ impl CircuitBreaker {
     /// - 失败计数 ≥ 阈值且冷却已过 → HalfOpen 试探（T5 单飞保护：
     ///   仅第一个抢到租约的请求放行，其余拒绝；租约 60s 过期后可重新夺取）
     pub fn allow_request(&self, channel_id: &str) -> bool {
+        // 总开关关闭：恒放行（记账继续，只是不再拦截调度）
+        if !self.is_enabled() {
+            return true;
+        }
         let entry = match self.states.get(channel_id) {
             Some(e) => e,
             None => return true, // 无状态 = 从未失败 = 放行
@@ -287,6 +330,9 @@ impl CircuitBreaker {
     /// 判据：HalfOpen 期间，只要没有在飞试探就允许读（读请求不占租约）；
     /// 已有在飞试探时按常规拒绝（避免探活风暴同时打上游）。
     pub fn allows_read_only(&self, channel_id: &str) -> bool {
+        if !self.is_enabled() {
+            return true;
+        }
         let entry = match self.states.get(channel_id) {
             Some(e) => e,
             None => return true,
@@ -366,15 +412,38 @@ impl CircuitBreaker {
         false // Open
     }
 
-    /// 记入一次成功 — 清零失败计数与限流状态。
+    /// 记入一次成功。
+    ///
+    /// 健康渠道（失败计数未达阈值）：清零全部状态（现状行为）。
+    /// HalfOpen 试探成功：不立即关闭 —— 连续成功达到 `success_threshold`
+    /// 才真正闭合（A2A routingBreakerSuccessThreshold，默认 2）；未达标时
+    /// 保留失败计数与失败时间，让下一请求继续按 HalfOpen 单飞试探，
+    /// 避免上游刚缓过来一口气就被打回 Open。
     pub fn record_success(&self, channel_id: &str) {
-        if let Some(mut entry) = self.states.get_mut(channel_id) {
-            entry.failure_count.store(0, Ordering::Relaxed);
-            entry.last_failure_time = None;
-            entry.failure_type = None;
-            entry.rate_limit_until = None;
-            entry.probe_lease_until = None; // T5：试探结束，释放单飞租约
+        let Some(mut entry) = self.states.get_mut(channel_id) else {
+            return;
+        };
+        entry.rate_limit_until = None;
+        entry.probe_lease_until = None; // T5：试探结束，释放单飞租约
+        let threshold = self.threshold();
+        let in_half_open = entry.failure_count.load(Ordering::Relaxed) >= threshold
+            && matches!(entry.last_failure_time, Some(last) if last.elapsed() >= self.cooldown());
+        if in_half_open {
+            let need = self.success_threshold();
+            let got = entry.half_open_successes.fetch_add(1, Ordering::Relaxed) + 1;
+            if got >= need {
+                entry.failure_count.store(0, Ordering::Relaxed);
+                entry.last_failure_time = None;
+                entry.failure_type = None;
+                entry.half_open_successes.store(0, Ordering::Relaxed);
+            }
+            return; // 未达阈值：保持 HalfOpen，继续单飞试探
         }
+        // 健康渠道：全清（现状行为）
+        entry.failure_count.store(0, Ordering::Relaxed);
+        entry.last_failure_time = None;
+        entry.failure_type = None;
+        entry.half_open_successes.store(0, Ordering::Relaxed);
     }
 
     /// 计入一次失败（按类型分级处理）。
@@ -386,6 +455,8 @@ impl CircuitBreaker {
         let mut entry = self.states.entry(channel_id.to_string()).or_default();
         entry.failure_type = Some(failure_type.clone());
         entry.last_failure_time = Some(Instant::now());
+        // 失败即清零半开成功计数（A2A：半开期再失败 → 重新打开）
+        entry.half_open_successes.store(0, Ordering::Relaxed);
         // T5：试探结束（无论成败）清租约——失败回 Open 后旧租约
         // 不能挡住下一轮 HalfOpen 试探
         entry.probe_lease_until = None;
@@ -452,6 +523,7 @@ impl CircuitBreaker {
             entry.failure_type = Some(FailureType::ServerError);
             entry.rate_limit_until = None;
             entry.probe_lease_until = None; // T5：熔断重开，旧租约作废
+            entry.half_open_successes.store(0, Ordering::Relaxed);
             tripped.push(entry.key().clone());
         }
         tracing::warn!(
@@ -503,6 +575,7 @@ impl CircuitBreaker {
                     ),
                     rate_limit_remaining_secs: Self::rate_limit_remaining(entry, now),
                     probe_in_flight: entry.probe_lease_until.is_some_and(|t| t > now),
+                    half_open_successes: entry.half_open_successes.load(Ordering::Relaxed),
                 }
             })
             .collect();
@@ -599,6 +672,7 @@ impl CircuitBreaker {
             entry.failure_type = None;
             entry.rate_limit_until = None;
             entry.probe_lease_until = None; // T5：手动重置，租约一并清除
+            entry.half_open_successes.store(0, Ordering::Relaxed);
         }
     }
 
@@ -691,6 +765,80 @@ mod tests {
         cb.record_failure("ch1", FailureType::ServerError);
         cb.record_success("ch1");
         assert!(cb.allow_request("ch1"));
+    }
+
+    // ── 半开成功阈值（A2A routingBreakerSuccessThreshold）──────────────
+
+    #[test]
+    fn half_open_needs_success_threshold_to_close() {
+        // 阈值 2 次成功才关：第一次试探成功仍 HalfOpen，第二次才闭合
+        let cb = CircuitBreaker::new(1, 0); // 阈值 1、冷却 0s → 立即 HalfOpen
+        cb.update_params(1, 0, 2);
+        cb.record_failure("ch1", FailureType::ServerError);
+        // 第一次成功：半开计数 1 < 2 → 仍处于 HalfOpen（单飞继续）
+        cb.record_success("ch1");
+        assert_eq!(cb.get_state("ch1"), "halfopen");
+        // 第二次成功：达到阈值 → 真正关闭
+        cb.record_success("ch1");
+        assert_eq!(cb.get_state("ch1"), "closed");
+        assert!(cb.allow_request("ch1"));
+    }
+
+    #[test]
+    fn half_open_success_threshold_one_keeps_legacy_behavior() {
+        // 阈值 1 = 现状行为：单次试探成功即关闭
+        let cb = CircuitBreaker::new(1, 0);
+        cb.update_params(1, 0, 1);
+        cb.record_failure("ch1", FailureType::ServerError);
+        cb.record_success("ch1");
+        assert_eq!(cb.get_state("ch1"), "closed");
+    }
+
+    #[test]
+    fn half_open_failure_resets_success_count() {
+        // 半开期再失败：成功计数清零、断路器重新打开
+        let cb = CircuitBreaker::new(1, 30);
+        cb.update_params(1, 30, 2);
+        cb.record_failure("ch1", FailureType::ServerError);
+        // 推进冷却（回写最近失败时间为过去）
+        if let Some(mut e) = cb.states.get_mut("ch1") {
+            e.last_failure_time = Some(Instant::now() - Duration::from_secs(31));
+        }
+        cb.record_success("ch1"); // 半开成功 1
+        cb.record_failure("ch1", FailureType::ServerError); // 失败 → 重开
+        let snap = cb.snapshot_all().into_iter().next().unwrap();
+        assert_eq!(snap.state, "open");
+        assert_eq!(snap.half_open_successes, 0, "失败应清零半开成功计数");
+    }
+
+    // ── 总开关（breaker.enabled）──────────────────────────────────────
+
+    #[test]
+    fn disabled_breaker_always_allows_but_keeps_accounting() {
+        let cb = CircuitBreaker::new(1, 30);
+        cb.set_enabled(false);
+        cb.record_failure("ch1", FailureType::ServerError);
+        cb.record_failure("ch1", FailureType::ServerError);
+        // 关闭态：拦截不生效
+        assert!(cb.allow_request("ch1"));
+        assert!(cb.allows_read_only("ch1"));
+        // 记账保留：失败计数与状态可见（诊断面板仍能看到"若开启会熔断"）
+        let snap = cb.snapshot_all().into_iter().next().unwrap();
+        assert_eq!(snap.failure_count, 2);
+        assert_eq!(snap.state, "open");
+        assert!(!cb.is_enabled());
+        // 重新开启：拦截恢复（无需重启，下一请求即生效）
+        cb.set_enabled(true);
+        assert!(!cb.allow_request("ch1"));
+        assert!(cb.is_enabled());
+    }
+
+    #[test]
+    fn success_threshold_accessor_roundtrip() {
+        let cb = CircuitBreaker::with_defaults();
+        assert_eq!(cb.success_threshold(), 1, "构造默认 = 现状行为");
+        cb.update_params(3, 60, 2);
+        assert_eq!(cb.success_threshold(), 2);
     }
 
     #[test]

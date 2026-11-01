@@ -49,9 +49,14 @@ const STICKY_OPTIONS: Array<{ value: StickyMode; label: string; tip: string }> =
     tip: '同一会话 6 小时内跟住同一渠道。适合一坐几个小时的长会话，上游的上下文缓存能吃到更多。',
   },
   {
+    value: 'turn',
+    label: '每轮',
+    tip: '每条请求都重新按策略选路（不粘），仅保留会话识别记录。与「关闭」行为一致。',
+  },
+  {
     value: 'off',
     label: '关闭',
-    tip: '不做会话粘性，每个请求独立选路。渠道池均匀性优先于上游缓存命中时选它。',
+    tip: '完全不做会话粘性，每个请求独立选路。渠道池均匀性优先于上游缓存命中时选它。',
   },
 ];
 
@@ -61,6 +66,7 @@ interface FormState {
   breakerEnabled: boolean;
   breakerThreshold: string;
   breakerCooldown: string;
+  breakerSuccessThreshold: string;
   healthWeight: string;
   costWeight: string;
   rpmWeight: string;
@@ -79,6 +85,7 @@ export default function RoutingPanel(): JSX.Element {
     breakerEnabled: false,
     breakerThreshold: '5',
     breakerCooldown: '30',
+    breakerSuccessThreshold: '2',
     healthWeight: '0.4',
     costWeight: '0.4',
     rpmWeight: '0.2',
@@ -91,6 +98,7 @@ export default function RoutingPanel(): JSX.Element {
       breakerEnabled: Boolean(d.breaker?.enabled),
       breakerThreshold: String(d.breaker?.threshold ?? 5),
       breakerCooldown: String(d.breaker?.cooldown_secs ?? 30),
+      breakerSuccessThreshold: String(d.breaker?.success_threshold ?? 2),
       healthWeight: String(d.scheduler_weights?.health_weight ?? 0.4),
       costWeight: String(d.scheduler_weights?.cost_weight ?? 0.4),
       rpmWeight: String(d.scheduler_weights?.rpm_weight ?? 0.2),
@@ -117,6 +125,7 @@ export default function RoutingPanel(): JSX.Element {
     try {
       const threshold = Number(form.breakerThreshold);
       const cooldown = Number(form.breakerCooldown);
+      const successThreshold = Number(form.breakerSuccessThreshold);
       const hw = Number(form.healthWeight);
       const cw = Number(form.costWeight);
       const rw = Number(form.rpmWeight);
@@ -126,6 +135,10 @@ export default function RoutingPanel(): JSX.Element {
       }
       if (!Number.isFinite(cooldown) || cooldown < 10 || cooldown > 600) {
         setError(t('断路器冷却须在 10-600 秒之间'));
+        return;
+      }
+      if (!Number.isFinite(successThreshold) || successThreshold < 1 || successThreshold > 10) {
+        setError(t('半开成功阈值须在 1-10 之间'));
         return;
       }
       if (![hw, cw, rw].every((w) => Number.isFinite(w) && w >= 0)) {
@@ -143,6 +156,7 @@ export default function RoutingPanel(): JSX.Element {
           enabled: form.breakerEnabled,
           threshold,
           cooldown_secs: cooldown,
+          success_threshold: successThreshold,
         },
         scheduler_weights: {
           health_weight: hw,
@@ -237,10 +251,10 @@ export default function RoutingPanel(): JSX.Element {
                 checked={form.breakerEnabled}
                 onChange={(e) => setForm({ ...form, breakerEnabled: e.target.checked })}
               />
-              <span>{t('启用断路器（连续失败自动熔断渠道）')}</span>
+              <span>{t('启用断路器（连续失败自动熔断渠道；关闭后仍记录失败但不拦截）')}</span>
             </label>
             {form.breakerEnabled && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 8 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginTop: 8 }}>
                 <div className="form-group">
                   <label>{t('熔断阈值（次）')}</label>
                   <input
@@ -265,6 +279,20 @@ export default function RoutingPanel(): JSX.Element {
                   />
                   <div className="form-hint">
                     {t('熔断后冷却多少秒再放试探请求（10-600）')}
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label>{t('半开成功阈值')}</label>
+                  <input
+                    className="form-input"
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={form.breakerSuccessThreshold}
+                    onChange={(e) => setForm({ ...form, breakerSuccessThreshold: e.target.value })}
+                  />
+                  <div className="form-hint">
+                    {t('试探成功几次才真正恢复（1-10）；1=单次成功即恢复')}
                   </div>
                 </div>
               </div>

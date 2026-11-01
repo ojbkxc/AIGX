@@ -63,6 +63,16 @@ pub struct GatewayPrompt {
     /// 提示词文本（custom/append 模式生效；空文本等价 passthrough）
     #[serde(default)]
     pub text: String,
+    /// developer 角色兼容（对照 A2A developerRoleCompat，默认开）：
+    /// OpenAI 新 SDK 用 `role:"developer"` 取代 system，多数上游只认
+    /// system——开启时入口解析把 developer 归一为 system；关闭时按原
+    /// 样丢弃未知角色（引入该开关前的行为）。
+    #[serde(default = "default_developer_role_compat")]
+    pub developer_role_compat: bool,
+}
+
+fn default_developer_role_compat() -> bool {
+    true
 }
 
 impl Default for GatewayPrompt {
@@ -70,6 +80,7 @@ impl Default for GatewayPrompt {
         Self {
             mode: PromptMode::Passthrough,
             text: String::new(),
+            developer_role_compat: default_developer_role_compat(),
         }
     }
 }
@@ -252,5 +263,49 @@ mod tests {
         let v: GatewayPrompt = serde_json::from_str(r#"{"text":"hi"}"#).unwrap();
         assert_eq!(v.mode, PromptMode::Passthrough);
         assert_eq!(v.text, "hi");
+        // 旧数据（无 developer_role_compat 字段）回落默认开
+        assert!(v.developer_role_compat);
+    }
+
+    #[test]
+    fn developer_compat_can_be_disabled() {
+        let v: GatewayPrompt = serde_json::from_str(r#"{"developer_role_compat":false}"#).unwrap();
+        assert!(!v.developer_role_compat);
+    }
+
+    /// developer 角色归一（数据面入口解析层；A2A developerRoleCompat）。
+    /// 兼容开关开：developer → system；关：按未知角色丢弃（老行为）。
+    #[test]
+    fn parse_messages_developer_role_compat() {
+        use serde_json::json;
+        let body = json!([
+            { "role": "developer", "content": "You are a helpful assistant." },
+            { "role": "user", "content": "hi" },
+        ]);
+        let raw = serde_json::to_value(&body).unwrap();
+
+        // 开：归一为 system，内容逐字保留
+        let msgs = crate::api::openai::parse_messages_with_dev(Some(&raw), true).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, Role::System);
+        assert_eq!(
+            msgs[0].content.as_deref(),
+            Some("You are a helpful assistant.")
+        );
+        assert_eq!(msgs[1].role, Role::User);
+
+        // 关：developer 按未知角色丢弃（引入兼容前的行为）
+        let msgs = crate::api::openai::parse_messages_with_dev(Some(&raw), false).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::User);
+
+        // system/tool 不受开关影响
+        let body2 = json!([
+            { "role": "system", "content": "s" },
+            { "role": "tool", "content": "t" },
+        ]);
+        let raw2 = serde_json::to_value(&body2).unwrap();
+        let msgs = crate::api::openai::parse_messages_with_dev(Some(&raw2), false).unwrap();
+        assert_eq!(msgs.len(), 2);
     }
 }

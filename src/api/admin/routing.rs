@@ -66,6 +66,8 @@ pub struct BreakerUpdate {
     pub enabled: Option<bool>,
     pub threshold: Option<u32>,
     pub cooldown_secs: Option<u64>,
+    /// HalfOpen 连续成功多少次才真正关闭（1-10；A2A routingBreakerSuccessThreshold）
+    pub success_threshold: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,7 +102,7 @@ pub async fn handle_update_routing(
             Some(v) => policy.sticky = v,
             None => {
                 return Err(super::common::error_response(
-                    &format!("无效的粘性档位：{s}（可选 auto / session / off）"),
+                    &format!("无效的粘性档位：{s}（可选 auto / session / turn / off）"),
                     axum::http::StatusCode::BAD_REQUEST,
                 ))
             }
@@ -127,6 +129,15 @@ pub async fn handle_update_routing(
                 ));
             }
             policy.breaker.cooldown_secs = v;
+        }
+        if let Some(v) = b.success_threshold {
+            if !(1..=10).contains(&v) {
+                return Err(super::common::error_response(
+                    "半开成功阈值须在 1-10 之间",
+                    axum::http::StatusCode::BAD_REQUEST,
+                ));
+            }
+            policy.breaker.success_threshold = v;
         }
     }
     if let Some(w) = req.scheduler_weights {
@@ -155,12 +166,19 @@ pub async fn handle_update_routing(
         )
     })?;
 
-    // 断路器参数热更（下一请求生效）
+    // 断路器热更（下一请求生效）：开关 + 三参一起下发。
+    // enabled=false 时 set_enabled(false) 让 allow_request 恒放行
+    // （记账保留），此前"关闭仍按默认 5/30s 熔断"是假开关。
+    state
+        .channel_store
+        .circuit_breaker()
+        .set_enabled(policy.breaker.enabled);
     if policy.breaker.enabled {
-        state
-            .channel_store
-            .circuit_breaker()
-            .update_params(policy.breaker.threshold, policy.breaker.cooldown_secs);
+        state.channel_store.circuit_breaker().update_params(
+            policy.breaker.threshold,
+            policy.breaker.cooldown_secs,
+            policy.breaker.success_threshold,
+        );
     }
     // 粘性档位热更：切换亲和缓存双 TTL（auto=5min/30min，session=6h/6h）
     if let Some((sticky_secs, hard_secs)) = policy.sticky.ttls() {

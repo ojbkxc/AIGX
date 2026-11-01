@@ -668,6 +668,7 @@ pub async fn handle_get_gateway_prompt(
         "data": {
             "mode": cfg.mode,
             "text": cfg.text,
+            "developer_role_compat": cfg.developer_role_compat,
         }
     })))
 }
@@ -702,6 +703,9 @@ pub async fn handle_update_gateway_prompt(
         }
         cfg.text = text.to_string();
     }
+    if let Some(v) = body.get("developer_role_compat").and_then(|v| v.as_bool()) {
+        cfg.developer_role_compat = v;
+    }
 
     state.gateway_prompt.update(cfg.clone()).map_err(|e| {
         error_response(
@@ -721,6 +725,7 @@ pub async fn handle_update_gateway_prompt(
         "data": {
             "mode": cfg.mode,
             "text": cfg.text,
+            "developer_role_compat": cfg.developer_role_compat,
         }
     })))
 }
