@@ -391,3 +391,23 @@
   color: var(--text-main);
   text-decoration: underline;
 }
+
+/* 拖拽排序：悬停目标行指示 */
+.drag-over {
+  outline: 2px dashed var(--text-faint);
+  outline-offset: -2px;
+}
+
+tr[draggable="true"] {
+  cursor: grab;
+}
+
+tr[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+/* 余额不足警示 */
+.balance-low {
+  color: var(--danger-text, #b91c1c);
+  font-weight: 600;
+}

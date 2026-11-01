@@ -1615,6 +1615,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/account-sessions/bulk",
             post(api::admin::account_sessions::handle_bulk_import_account_sessions),
         )
+        // 导出/导入 JSON 迁移闭环（导出具明文凭证，仅管理员）
+        .route(
+            "/api/account-sessions/export",
+            get(api::admin::account_sessions::handle_export_account_sessions),
+        )
+        .route(
+            "/api/account-sessions/import/json",
+            post(api::admin::account_sessions::handle_import_account_sessions_json),
+        )
         .route(
             "/api/account-sessions/:id",
             put(api::admin::account_sessions::handle_update_account_session)

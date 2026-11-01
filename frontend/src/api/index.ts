@@ -5,6 +5,7 @@
 
 import type {
   AccountBalance,
+  AccountExportFile,
   AccountProviderItem,
   AccountSessionItem,
   AccountSessionStatsItem,
@@ -533,6 +534,12 @@ export const api = {
   /** 手动刷新账号凭证（qoder/autoclaw/trae；force=true 无条件刷新） */
   refreshAccountSession: (id: string, force = false): Promise<ApiResponse<{ refreshed?: boolean; skipped?: boolean; message?: string }>> =>
     request<ApiResponse<{ refreshed?: boolean; skipped?: boolean; message?: string }>>('POST', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/refresh`, { force }),
+  /** 导出全部账号（含明文凭证，迁移/备份用，仅管理员） */
+  exportAccountSessions: (): Promise<ApiResponse<AccountExportFile>> =>
+    request<ApiResponse<AccountExportFile>>('GET', `${API_BASE}/account-sessions/export`),
+  /** 导入导出文件中的账号（同渠道同名幂等跳过） */
+  importAccountSessionsJson: (data: { channel_id?: string; entries: Array<Record<string, unknown>> }): Promise<ApiResponse<{ created?: number; skipped?: number; errors?: string[] }>> =>
+    request<ApiResponse<{ created?: number; skipped?: number; errors?: string[] }>>('POST', `${API_BASE}/account-sessions/import/json`, data),
   accountProviders: (): Promise<ApiList<AccountProviderItem>> =>
     request<ApiList<AccountProviderItem>>('GET', `${API_BASE}/account-sessions/providers`),
   /** 上游模型目录发现：同步某账号（或某 provider 下全部账号）的模型清单 */

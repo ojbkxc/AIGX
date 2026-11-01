@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Download, FlaskConical, Loader2, Pencil, Plus, Power, RefreshCw, RotateCcw, SlidersHorizontal, Trash2, Upload, Wallet } from 'lucide-react';
 import { api } from '../api';
@@ -99,6 +99,12 @@ function statusClass(status?: string): string {
   return 'badge-neutral';
 }
 
+/** 支持余额查询的 provider（与后端 account_session/balance.rs 名单一致） */
+const BALANCE_PROVIDERS: ReadonlySet<string> = new Set([
+  'qoder', 'qoder-intl', 'autoclaw', 'autoclaw-intl', 'xiaohuanxiong',
+  'zcode', 'zcode-intl', 'kuku', 'loomy', 'officeace', 'accio', 'accio-cn',
+]);
+
 export default function AccountSessions(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
@@ -144,12 +150,18 @@ export default function AccountSessions(): JSX.Element {
   // 余额查询（后端 :id/balance 支持 12 家）与手动刷新凭证（:id/refresh）
   type BalanceView =
     | { state: 'loading' }
-    | { state: 'ok'; text: string }
+    | { state: 'ok'; text: string; low?: boolean }
     | { state: 'err'; text: string };
   const [balances, setBalances] = useState<Record<string, BalanceView>>({});
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  // 拖拽排序（HTML5 DnD，落盘后重赋 priority 落盘）
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [orderSaving, setOrderSaving] = useState(false);
+  /** 自动余额查询只做一次（load 内触发，见 load） */
+  const autoBalanceDone = useRef(false);
 
-  const load = async (): Promise<void> => {
+  const load = useCallback(async (): Promise<void> => {
     setLoading(true);
     setError('');
     try {
@@ -169,11 +181,11 @@ export default function AccountSessions(): JSX.Element {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
 
   const openCreate = (): void => {
     setEditing(null);
@@ -724,7 +736,7 @@ export default function AccountSessions(): JSX.Element {
   };
 
   /** 查询余额（后端支持 12 家；不支持的 provider 内联显示原因） */
-  const handleBalance = async (session: AccountSessionItem): Promise<void> => {
+  const handleBalance = useCallback(async (session: AccountSessionItem): Promise<void> => {
     setBalances((prev) => ({ ...prev, [session.id]: { state: 'loading' } }));
     try {
       const res = await api.getAccountSessionBalance(session.id);
@@ -732,14 +744,38 @@ export default function AccountSessions(): JSX.Element {
       const text = d && d.available != null
         ? `${d.available} ${d.unit || ''}`.trim()
         : t('读数不可用');
-      setBalances((prev) => ({ ...prev, [session.id]: { state: 'ok', text } }));
+      const low = d?.available != null && d.available <= 0;
+      setBalances((prev) => ({ ...prev, [session.id]: { state: 'ok', text, low } }));
     } catch (err) {
       setBalances((prev) => ({
         ...prev,
         [session.id]: { state: 'err', text: err instanceof Error ? err.message : String(err) },
       }));
     }
-  };
+  }, [t]);
+
+  /** 查询全部（仅支持余额的 provider；并发受限，避免同时打爆上游） */
+  const queryAllBalances = useCallback(async (list: AccountSessionItem[]): Promise<void> => {
+    const targets = list.filter((s) => BALANCE_PROVIDERS.has(s.provider));
+    if (!targets.length) {
+      addToast(t('当前列表没有支持余额查询的账号'));
+      return;
+    }
+    const CONCURRENCY = 3;
+    for (let i = 0; i < targets.length; i += CONCURRENCY) {
+      // 并发窗口：每批最多 3 个，避免瞬间 N 个请求打向上游
+      await Promise.all(targets.slice(i, i + CONCURRENCY).map((s) => handleBalance(s)));
+    }
+  }, [addToast, handleBalance, t]);
+
+  // 首次加载后自动查询一次支持余额的账号（对齐 Agent2API 列表常驻余额读数；
+  // 只查一次不做周期轮询，避免页面常驻打上游）。
+  // 注意定义位置必须在 queryAllBalances 之后（hooks 求值顺序 = TDZ 安全）。
+  useEffect(() => {
+    if (autoBalanceDone.current || loading || !sessions.length) return;
+    autoBalanceDone.current = true;
+    void queryAllBalances(sessions);
+  }, [loading, sessions, queryAllBalances]);
 
   /** 手动刷新凭证（仅持有续期令牌的账号可用；force=true 无条件刷新） */
   const handleRefreshCredential = async (session: AccountSessionItem): Promise<void> => {
@@ -753,6 +789,113 @@ export default function AccountSessions(): JSX.Element {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRefreshingId(null);
+    }
+  };
+
+  /** 导出全部账号为 JSON（含明文凭证；浏览器触发下载） */
+  const handleExport = async (): Promise<void> => {
+    setError('');
+    try {
+      const res = await api.exportAccountSessions();
+      const file = res.data;
+      if (!file || !Array.isArray(file.accounts)) {
+        throw new Error(t('导出数据为空'));
+      }
+      const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `aigx-accounts-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      addToast(t('已导出 {{count}} 个账号（文件含明文凭证，请妥善保管）', { count: file.accounts.length }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  /** 导入 JSON：选文件 → 解析 → 选渠道 → 上传 */
+  const importFileRef = useRef<HTMLInputElement | null>(null);
+  const [importJsonChannel, setImportJsonChannel] = useState('');
+  const [importJsonEntries, setImportJsonEntries] = useState<Array<Record<string, unknown>> | null>(null);
+  const [importJsonRunning, setImportJsonRunning] = useState(false);
+
+  const handleImportFile = async (file: File): Promise<void> => {
+    setError('');
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as { accounts?: Array<Record<string, unknown>> };
+      if (!parsed || !Array.isArray(parsed.accounts) || parsed.accounts.length === 0) {
+        throw new Error(t('文件里没有 accounts 数组'));
+      }
+      if (parsed.accounts.length > 500) {
+        throw new Error(t('单次最多导入 500 个账号'));
+      }
+      setImportJsonEntries(parsed.accounts);
+      setImportJsonChannel(channelFilter || accountChannels[0]?.id || '');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const runImportJson = async (): Promise<void> => {
+    if (!importJsonEntries) return;
+    setImportJsonRunning(true);
+    setError('');
+    try {
+      const res = await api.importAccountSessionsJson({
+        channel_id: importJsonChannel || undefined,
+        entries: importJsonEntries,
+      });
+      const d = res.data ?? {};
+      addToast(
+        t('导入完成：新建 {{created}}、跳过 {{skipped}}', {
+          created: d.created ?? 0,
+          skipped: d.skipped ?? 0,
+        }) + (d.errors?.length ? `（${d.errors.length} 条失败）` : ''),
+      );
+      setImportJsonEntries(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImportJsonRunning(false);
+    }
+  };
+
+  /** 拖拽排序：落点后把可见列表按新顺序重赋递减 priority（循环 PATCH 落盘）。
+      语义对齐 Agent2API 队列：列表顺序 = 调度优先顺序（AIGX priority 越大越优先）。 */
+  const handleDropRow = async (targetId: string): Promise<void> => {
+    const srcId = dragId;
+    setDragId(null);
+    setDragOverId(null);
+    if (!srcId || srcId === targetId || orderSaving) return;
+    const ids = visible.map((s) => s.id);
+    const from = ids.indexOf(srcId);
+    const to = ids.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    const reordered = [...visible];
+    const [moved] = reordered.splice(from, 1);
+    reordered.splice(to, 0, moved);
+    // 重赋 priority：队首最大，递减 10（留间隙便于以后插队）
+    const base = reordered.length * 10;
+    setOrderSaving(true);
+    setError('');
+    try {
+      const results = await Promise.allSettled(
+        reordered.map((s, i) =>
+          api.patchAccountSession(s.id, { priority: base - i * 10 }),
+        ),
+      );
+      const ok = results.filter((r) => r.status === 'fulfilled').length;
+      if (ok < reordered.length) {
+        addToast(t('排序保存：{{ok}}/{{total}} 成功', { ok, total: reordered.length }), 'error');
+      } else {
+        addToast(t('顺序已保存'));
+      }
+      await load();
+    } finally {
+      setOrderSaving(false);
     }
   };
 
@@ -845,6 +988,31 @@ export default function AccountSessions(): JSX.Element {
         title={`${t('账号池')} (${visible.length})`}
         actions={
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Button variant="outline" onClick={() => void queryAllBalances(visible)}>
+              <Wallet size={14} /> {t('查询全部余额')}
+            </Button>
+            <Button variant="outline" onClick={() => void handleExport()} disabled={sessions.length === 0}>
+              <Download size={14} /> {t('导出')}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => importFileRef.current?.click()}
+              disabled={accountChannels.length === 0}
+            >
+              <Upload size={14} /> {t('导入 JSON')}
+            </Button>
+            {/* 隐藏的文件选择器：解析后弹渠道选择确认 */}
+            <input
+              ref={importFileRef}
+              type="file"
+              accept="application/json,.json"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void handleImportFile(f);
+                e.target.value = '';
+              }}
+            />
             <Button variant="outline" onClick={() => void openRotation()}>
               <SlidersHorizontal size={14} /> {t('账号路由')}
             </Button>
@@ -971,7 +1139,29 @@ export default function AccountSessions(): JSX.Element {
                 {visible.map((session) => {
                   const bal = balances[session.id];
                   return (
-                  <tr key={session.id}>
+                  <tr
+                    key={session.id}
+                    className={dragOverId === session.id && dragId !== session.id ? 'drag-over' : ''}
+                    draggable
+                    onDragStart={(e) => {
+                      setDragId(session.id);
+                      e.dataTransfer.effectAllowed = 'move';
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = 'move';
+                      if (dragOverId !== session.id) setDragOverId(session.id);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      void handleDropRow(session.id);
+                    }}
+                    onDragEnd={() => {
+                      setDragId(null);
+                      setDragOverId(null);
+                    }}
+                    title={t('拖拽行可调整调度顺序')}
+                  >
                     <td className="pick-col">
                       <input
                         type="checkbox"
@@ -1001,7 +1191,12 @@ export default function AccountSessions(): JSX.Element {
                           </button>
                         )}
                         {bal?.state === 'loading' && <span>{t('查询中…')}</span>}
-                        {bal?.state === 'ok' && <span>{t('余额')} {bal.text}</span>}
+                        {bal?.state === 'ok' && (
+                          <span className={bal.low ? 'balance-low' : ''}>
+                            {t('余额')} {bal.text}
+                            {bal.low ? `（${t('不足，请充值或停用')}）` : ''}
+                          </span>
+                        )}
                         {bal?.state === 'err' && (
                           <span title={bal.text}>{t('余额不可用')}</span>
                         )}
@@ -1774,6 +1969,43 @@ export default function AccountSessions(): JSX.Element {
               <button className="btn btn-outline" onClick={() => setCatalogModal(null)}>
                 {t('关闭')}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 导入 JSON 确认：选目标渠道（留空则按文件内 channel_id/channel_name 匹配） */}
+      {importJsonEntries && (
+        <div className="modal-overlay" onClick={() => !importJsonRunning && setImportJsonEntries(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <h3>{t('导入账号')}</h3>
+            <p className="form-hint">
+              {t('解析到 {{count}} 个账号。选择统一落点渠道，或留空按文件内记录的渠道匹配。同渠道同名账号会跳过（不覆盖在线凭证）。', { count: importJsonEntries.length })}
+            </p>
+            <Select
+              value={importJsonChannel}
+              onChange={(e) => setImportJsonChannel(e.target.value)}
+              aria-label={t('目标渠道')}
+            >
+              <option value="">{t('按文件内渠道匹配')}</option>
+              {accountChannels.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </Select>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
+              <Button
+                variant="outline"
+                onClick={() => setImportJsonEntries(null)}
+                disabled={importJsonRunning}
+              >
+                {t('取消')}
+              </Button>
+              <Button onClick={() => void runImportJson()} disabled={importJsonRunning}>
+                {importJsonRunning ? <Loader2 size={14} /> : null}
+                {t('开始导入')}
+              </Button>
             </div>
           </div>
         </div>

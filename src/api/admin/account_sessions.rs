@@ -1561,3 +1561,294 @@ pub async fn handle_import_agent2api(
         "data": report,
     })))
 }
+
+// ── 导出 / 导入（JSON 迁移闭环）────────────────────────────────────
+
+/// GET /api/account-sessions/export —— 导出全部账号（**含明文凭证**）。
+///
+/// 用途：迁移/备份。仅管理员可调（管理面统一 verify_admin）。
+/// 凭证在存储层是 enc1: 加密形态，导出时解密为明文——导出文件必须当
+/// 密码本保管，这与 Agent2API 的导出语义一致。
+pub async fn handle_export_account_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let channels = state.channel_store.list();
+    let data_dir = crate::account_session::secret::data_dir();
+    let accounts: Vec<Value> = state
+        .account_sessions
+        .all()
+        .iter()
+        .map(|s| {
+            let channel_name = channels
+                .iter()
+                .find(|c| c.id == s.channel_id)
+                .map(|c| c.name.clone())
+                .unwrap_or_default();
+            // 具名凭证逐名解密回明文（多层凭证家庭：Cookie+JWT 等）
+            let fields: serde_json::Map<String, Value> = s
+                .credential
+                .field_names()
+                .iter()
+                .map(|name| ((*name).to_string(), json!(s.credential.field_plain(name))))
+                .collect();
+            let refresh_token = if s.refresh_secret.is_empty() {
+                String::new()
+            } else {
+                crate::account_session::secret::open_secret(&s.refresh_secret, &data_dir)
+            };
+            json!({
+                "name": s.name,
+                "provider": s.provider,
+                "channel_id": s.channel_id,
+                "channel_name": channel_name,
+                "base_url": s.base_url,
+                "chat_path": s.chat_path,
+                "proxy": s.proxy,
+                "status": s.status,
+                "priority": s.priority,
+                "weight": s.weight,
+                "max_concurrency": s.max_concurrency,
+                "models": s.models,
+                "extra_headers": s.extra_headers,
+                "expires_at": s.expires_at,
+                "credential_kind": s.credential.kind,
+                "api_key": s.credential.secret_plain(),
+                "credential_fields": fields,
+                "refresh_token": refresh_token,
+            })
+        })
+        .collect();
+    let now = chrono::Utc::now().timestamp();
+    let admin_id = admin_id_from_session(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        "export_account_sessions",
+        &format!("count={}", accounts.len()),
+        None,
+        None,
+    );
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "version": 1,
+            "exported_at": now,
+            "accounts": accounts,
+        }
+    })))
+}
+
+/// POST /api/account-sessions/import/json —— 导入导出文件中的账号。
+///
+/// 落点解析（逐条）：body.channel_id（统一落点）> entry.channel_id（本实例
+/// 存在且为账号型渠道）> entry.channel_name（匹配账号型渠道名）。
+/// 同渠道同名已存在 → skip（幂等，不覆盖在线凭证）。
+pub async fn handle_import_account_sessions_json(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = verify_admin(&state, &headers).await?;
+    let fallback_channel = body
+        .get("channel_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let entries = body
+        .get("entries")
+        .or_else(|| body.get("accounts"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if entries.is_empty() {
+        return Err(error_response(
+            "entries 为空：请提供 accounts 数组",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if entries.len() > 500 {
+        return Err(error_response(
+            "单次最多导入 500 个账号",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+
+    let mut created = 0usize;
+    let mut skipped = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    for entry in &entries {
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        // 目标渠道解析：统一落点 > entry 内 channel_id > channel_name 匹配
+        let entry_channel_id = entry
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let entry_channel_name = entry
+            .get("channel_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let channel_id = if !fallback_channel.is_empty() {
+            fallback_channel.clone()
+        } else if !entry_channel_id.is_empty() {
+            entry_channel_id
+        } else if !entry_channel_name.is_empty() {
+            state
+                .channel_store
+                .list()
+                .iter()
+                .find(|c| c.channel_type == "account" && c.name == entry_channel_name)
+                .map(|c| c.id.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if channel_id.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        let channel = match ensure_account_channel(&state, &channel_id) {
+            Ok(c) => c,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        // 幂等：同渠道同名跳过
+        let dup = state
+            .account_sessions
+            .for_channel(&channel.id)
+            .iter()
+            .any(|s| !name.is_empty() && s.name == name);
+        if dup {
+            skipped += 1;
+            continue;
+        }
+        // SSRF 防护与 create 一致
+        let base_url = entry
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !base_url.is_empty() {
+            if let Err(rej) = crate::net_guard::validate_outbound_url(
+                &base_url,
+                config.usage.allow_internal_upstream,
+            ) {
+                errors.push(format!("{name}: {}", rej.message()));
+                continue;
+            }
+        }
+        // 复用 create 的字段归一化：构造 AccountSessionRequest 走 apply_request
+        let req = AccountSessionRequest {
+            channel_id: channel.id.clone(),
+            name: name.clone(),
+            provider: entry
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            base_url,
+            chat_path: entry
+                .get("chat_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            api_key: entry
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            refresh_token: entry
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            proxy: entry
+                .get("proxy")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            status: entry
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("enabled")
+                .to_string(),
+            priority: entry.get("priority").and_then(|v| v.as_i64()),
+            weight: entry
+                .get("weight")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32),
+            max_concurrency: entry
+                .get("max_concurrency")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32),
+            models: entry
+                .get("models")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            extra_headers: entry.get("extra_headers").and_then(|v| {
+                v.as_object().map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+            }),
+            expires_at: entry.get("expires_at").and_then(|v| v.as_i64()),
+        };
+        let mut session = AccountSession::new(channel.id.clone(), String::new());
+        session = apply_request(session, &req);
+        if let Some(kind) = entry.get("credential_kind").and_then(|v| v.as_str()) {
+            if !kind.trim().is_empty() {
+                session.credential.kind = kind.trim().to_string();
+            }
+        }
+        // 具名凭证逐名落库（set_field 内部按口径编码）
+        if let Some(fields) = entry.get("credential_fields").and_then(|v| v.as_object()) {
+            for (fname, fval) in fields {
+                if let Some(text) = fval.as_str() {
+                    session.credential.set_field(fname, text);
+                }
+            }
+        }
+        if session.name.is_empty() {
+            let count = state.account_sessions.for_channel(&channel.id).len();
+            session.name = format!("{}#{}", provider_label(&session.provider), count + 1);
+        }
+        match state.account_sessions.upsert(session) {
+            Ok(_) => created += 1,
+            Err(e) => errors.push(format!("{name}: 落盘失败：{e}")),
+        }
+    }
+
+    let admin_id = admin_id_from_session(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        "import_account_sessions_json",
+        &format!(
+            "created={created} skipped={skipped} errors={}",
+            errors.len()
+        ),
+        None,
+        None,
+    );
+    Ok(Json(json!({
+        "success": true,
+        "data": { "created": created, "skipped": skipped, "errors": errors },
+    })))
+}

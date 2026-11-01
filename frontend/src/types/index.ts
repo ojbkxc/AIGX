@@ -1149,6 +1149,13 @@ export interface AccountBalance {
   subscription?: Record<string, unknown> | null;
 }
 
+/** 账号导出文件（GET /api/account-sessions/export；含明文凭证，须当密码本保管） */
+export interface AccountExportFile {
+  version: number;
+  exported_at: number;
+  accounts: Array<Record<string, unknown>>;
+}
+
 /** provider 目录项（粘贴凭证型上游） */
 export interface AccountProviderItem {
   kind: string;
