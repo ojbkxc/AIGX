@@ -41,6 +41,7 @@ const Redemptions = lazyPage(() => import('./pages/Redemptions'));
 const Plans = lazyPage(() => import('./pages/Plans'));
 const Channels = lazyPage(() => import('./pages/Channels'));
 const AccountSessions = lazyPage(() => import('./pages/AccountSessions'));
+const ProxyPool = lazyPage(() => import('./pages/ProxyPool'));
 const Chat = lazyPage(() => import('./pages/Chat'));
 
 const ModelManage = lazyPage(() => import('./pages/ModelManage'));
@@ -144,6 +145,7 @@ export default function App(): JSX.Element {
           <Route path="/accounts" element={<Navigate to="/channels" replace />} />
           <Route path="/channels" element={<AdminRoute><Channels /></AdminRoute>} />
           <Route path="/account-sessions" element={<AdminRoute><AccountSessions /></AdminRoute>} />
+          <Route path="/proxy-pool" element={<AdminRoute><ProxyPool /></AdminRoute>} />
           <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
           {/* 已合并的旧路由 → 重定向到合并后位置 */}
           <Route path="/mappings" element={<Navigate to="/channels" replace />} />

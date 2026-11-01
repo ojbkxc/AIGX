@@ -9,7 +9,7 @@ import {
   Users, Wallet, Ticket, ScrollText, Package,
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
-  Languages, LogOut, Coins, Bot, Headphones, Layers, CalendarCheck,
+  Languages, LogOut, Coins, Bot, Headphones, Layers, CalendarCheck, Globe,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -51,6 +51,8 @@ const navItems: NavItem[] = [
   { path: '/profile', labelKey: '个人中心', icon: UserRound },
   // 账号型渠道的账号池（渠道内账号级调度：优先级/冷却/并发）
   { path: '/account-sessions', labelKey: '账号池', icon: Layers, adminOnly: true },
+  // 网络代理池（集中管理出口：账号 proxy 字段 pool:/rotate 编码引用）
+  { path: '/proxy-pool', labelKey: '网络代理', icon: Globe, adminOnly: true },
 ];
 
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。

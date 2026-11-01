@@ -345,13 +345,20 @@ impl AccountSessionStore {
     }
 
     /// 取该账号的出口 Client（按账号代理缓存，非法代理返回配置错误）。
+    ///
+    /// 账号 `proxy` 字段的 `pool:` / `rotate` 编码在这里解析成实际代理 URL
+    ///（见 `crate::proxy_pool::resolve_proxy`）：池条目被删/被禁用时返回
+    /// 配置错误，**不静默直连**——否则账号流量会从错误的出口 IP 发出。
+    /// 轮询游标按账号 id 前进（逐请求换出口）。
     pub fn client_for(
         &self,
         session: &AccountSession,
     ) -> Result<Arc<reqwest::Client>, BridgeError> {
+        let resolved = crate::proxy_pool::resolve_proxy(session.proxy.as_deref(), &session.id)
+            .map_err(BridgeError::Config)?;
         self.inner
             .egress
-            .client(session.proxy.as_deref())
+            .client(resolved.as_deref())
             .map_err(BridgeError::Config)
     }
 

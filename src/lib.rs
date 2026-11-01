@@ -34,6 +34,7 @@ pub mod payment;
 pub mod plan;
 pub mod pricing;
 pub mod proxy;
+pub mod proxy_pool;
 pub mod quota_monitor;
 pub mod ratelimit;
 pub mod redemption;

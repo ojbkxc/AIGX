@@ -19,6 +19,7 @@ pub mod plans;
 pub mod playground;
 pub mod pricing;
 pub mod prompts;
+pub mod proxy_pool_api;
 pub mod redemptions;
 pub mod security;
 pub mod settings;

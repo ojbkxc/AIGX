@@ -8,6 +8,9 @@ import type {
   AccountExportFile,
   AccountProviderItem,
   AccountSessionItem,
+  ProxyPoolItem,
+  ProxyPoolResult,
+  ProxyTestResult,
   AccountSessionStatsItem,
   ApiResponse,
   User,
@@ -555,6 +558,21 @@ export const api = {
     request<ApiResponse<{ created?: number; skipped?: number; errors?: string[] }>>('POST', `${API_BASE}/account-sessions/import/json`, data),
   accountProviders: (): Promise<ApiList<AccountProviderItem>> =>
     request<ApiList<AccountProviderItem>>('GET', `${API_BASE}/account-sessions/providers`),
+  // 网络代理池（「网络代理」页：集中管理命名代理，账号 proxy 字段用 pool:/rotate 编码引用）
+  listProxyPool: (): Promise<ApiResponse<ProxyPoolResult>> =>
+    request<ApiResponse<ProxyPoolResult>>('GET', `${API_BASE}/proxy-pool`),
+  createProxyEntry: (data: Record<string, unknown>): Promise<ApiResponse<ProxyPoolResult>> =>
+    request<ApiResponse<ProxyPoolResult>>('POST', `${API_BASE}/proxy-pool`, data),
+  updateProxyEntry: (data: Record<string, unknown>): Promise<ApiResponse<ProxyPoolResult>> =>
+    request<ApiResponse<ProxyPoolResult>>('POST', `${API_BASE}/proxy-pool/update`, data),
+  enableProxyEntry: (id: string, enabled: boolean): Promise<ApiResponse<ProxyPoolResult>> =>
+    request<ApiResponse<ProxyPoolResult>>('POST', `${API_BASE}/proxy-pool/enable`, { id, enabled }),
+  removeProxyEntry: (id: string): Promise<ApiResponse<ProxyPoolResult>> =>
+    request<ApiResponse<ProxyPoolResult>>('POST', `${API_BASE}/proxy-pool/remove`, { id }),
+  testProxyEntry: (id: string): Promise<ApiResponse<ProxyTestResult & { items?: ProxyPoolItem[] }>> =>
+    request<ApiResponse<ProxyTestResult & { items?: ProxyPoolItem[] }>>('POST', `${API_BASE}/proxy-pool/test`, { id }),
+  testAccountProxy: (data: { account_id?: string; proxy?: string | null }): Promise<ApiResponse<ProxyTestResult>> =>
+    request<ApiResponse<ProxyTestResult>>('POST', `${API_BASE}/proxy-pool/test-account`, data),
   /** 上游模型目录发现：同步某账号（或某 provider 下全部账号）的模型清单 */
   syncAccountCatalog: (data: {
     account_id?: string;

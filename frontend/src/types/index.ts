@@ -1210,6 +1210,52 @@ export interface AccountRotationPolicyItem {
   max_attempts: number;
 }
 
+/** 网络代理池条目（GET/POST /api/proxy-pool） */
+export interface ProxyPoolItem {
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** http / https / socks5 */
+  protocol: string;
+  host: string;
+  port: number;
+  username: string;
+  /** 密码不回传，只回是否设置（编辑时留空 = 保留旧值） */
+  has_password: boolean;
+  createdAt?: number;
+  updatedAt?: number;
+  /** 上次测试结果（历史事实，不参与选路） */
+  lastTest?: {
+    success: boolean;
+    ip: string;
+    duration_ms: number;
+    error?: string | null;
+    tested_at: number;
+  } | null;
+  /** 引用它的账号（删除确认提示用） */
+  usedBy?: Array<{ id: string; name: string; enabled: boolean }>;
+}
+
+/** 代理池列表响应（写操作也回整份，前端就地替换） */
+export interface ProxyPoolResult {
+  items?: ProxyPoolItem[];
+  total?: number;
+  entry?: ProxyPoolItem;
+  [key: string]: unknown;
+}
+
+/** 代理连通性测试结果 */
+export interface ProxyTestResult {
+  success: boolean;
+  status?: number | null;
+  ip?: string;
+  duration_ms?: number;
+  error?: string | null;
+  /** 测的是哪个出口（描述串，不含认证信息） */
+  proxy?: string | null;
+  saveError?: string | null;
+}
+
 /** AI 助手工具条目（GET /api/agent/settings） */
 export interface AgentToolItem {
   name: string;

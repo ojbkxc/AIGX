@@ -1,0 +1,115 @@
+/* ProxyPool.css — 网络代理页：卡片网格 + 行内表单 */
+
+.proxy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+.proxy-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+
+.proxy-card-disabled {
+  opacity: 0.6;
+}
+
+.proxy-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.proxy-card-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.proxy-card-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-card-addr {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-test-result {
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-secondary, rgba(127, 127, 127, 0.08));
+  color: var(--text-main);
+  word-break: break-all;
+}
+
+.proxy-test-result.ok {
+  color: var(--success-color, #2e9e5b);
+}
+
+.proxy-test-result.bad {
+  color: var(--danger-color, #d94452);
+}
+
+.proxy-usedby {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.proxy-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: auto;
+}
+
+.proxy-form-card {
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.proxy-form-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 12px;
+  color: var(--text-main);
+}
+
+.proxy-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.proxy-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.proxy-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .proxy-form-row {
+    grid-template-columns: 1fr;
+  }
+}

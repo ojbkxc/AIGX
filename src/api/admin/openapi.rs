@@ -779,6 +779,25 @@ fn paths_accounts_network() -> Value {
         "/api/prompts/translate": {
             "post": op_body("提示词", "翻译提示词", "")
         },
+        "/api/proxy-pool": {
+            "get": op("网络代理", "代理池列表（含账号引用统计）"),
+            "post": op_body("网络代理", "新建代理池条目（http/https/socks5）", "")
+        },
+        "/api/proxy-pool/enable": {
+            "post": op_body("网络代理", "启用/禁用代理池条目", "{ id, enabled }")
+        },
+        "/api/proxy-pool/remove": {
+            "post": op_body("网络代理", "删除代理池条目（有账号引用时拒绝）", "{ id }")
+        },
+        "/api/proxy-pool/test": {
+            "post": op_body("网络代理", "测试代理池条目连通性（结果记入 lastTest）", "{ id }")
+        },
+        "/api/proxy-pool/test-account": {
+            "post": op_body("网络代理", "按账号代理配置测试出口（或测临时串/直连）", "{ accountId } | { proxy }")
+        },
+        "/api/proxy-pool/update": {
+            "post": op_body("网络代理", "编辑代理池条目（密码留空=保留旧值）", "")
+        },
         "/api/public/geo-lang": {
             "get": op("公开", "按 IP 推断语言")
         },
@@ -1005,6 +1024,12 @@ mod tests {
         add("/api/prompts/fetch", &["post"]);
         add("/api/prompts/sources", &["get"]);
         add("/api/prompts/translate", &["post"]);
+        add("/api/proxy-pool", &["get", "post"]);
+        add("/api/proxy-pool/enable", &["post"]);
+        add("/api/proxy-pool/remove", &["post"]);
+        add("/api/proxy-pool/test", &["post"]);
+        add("/api/proxy-pool/test-account", &["post"]);
+        add("/api/proxy-pool/update", &["post"]);
         add("/api/public/geo-lang", &["get"]);
         add("/api/tickets", &["get", "post"]);
         add("/api/tickets/close", &["post"]);

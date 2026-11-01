@@ -440,6 +440,9 @@ async fn main() -> anyhow::Result<()> {
     // 服务器自动更新管理器（Release 检测 / 原地替换 / exec 自重启）
     let update = crate::update::UpdateManager::new(store.clone(), data_dir.clone());
 
+    // 网络代理池（网络代理页）：账号 proxy 字段的 pool:/rotate 编码解析依赖它
+    crate::proxy_pool::install(store.clone());
+
     let state = AppState {
         api_client,
         model_mapper,
@@ -1673,6 +1676,32 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/account-sessions/import/agent2api",
             post(api::admin::account_sessions::handle_import_agent2api),
+        )
+        // 网络代理池（网络代理页）：CRUD / 启停 / 删除（引用检查）/ 连通性测试
+        .route(
+            "/api/proxy-pool",
+            get(api::admin::proxy_pool_api::handle_pool_list)
+                .post(api::admin::proxy_pool_api::handle_pool_create),
+        )
+        .route(
+            "/api/proxy-pool/update",
+            post(api::admin::proxy_pool_api::handle_pool_update),
+        )
+        .route(
+            "/api/proxy-pool/enable",
+            post(api::admin::proxy_pool_api::handle_pool_enable),
+        )
+        .route(
+            "/api/proxy-pool/remove",
+            post(api::admin::proxy_pool_api::handle_pool_remove),
+        )
+        .route(
+            "/api/proxy-pool/test",
+            post(api::admin::proxy_pool_api::handle_pool_test),
+        )
+        .route(
+            "/api/proxy-pool/test-account",
+            post(api::admin::proxy_pool_api::handle_pool_test_account),
         )
         // 服务器自动更新（检查/应用/重启/回滚/设置）
         .route(
