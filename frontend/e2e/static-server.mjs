@@ -76,7 +76,12 @@ const MANAGE_VIEW = {
       capabilities: [],
       price: null,
       model_ratio: 1,
-      aliases: ['alias-free'],
+      aliases: ['alias-free', 'alias-off'],
+      // 一条启用 + 一条关闭：锁住「关掉的映射仍显示但划线」的渲染
+      alias_entries: [
+        { alias: 'alias-free', target: 'unpriced-model', enabled: true },
+        { alias: 'alias-off', target: 'unpriced-model', enabled: false },
+      ],
     },
     {
       provider: 'workbuddy',
@@ -92,7 +97,7 @@ const MANAGE_VIEW = {
       aliases: [],
     },
   ],
-  mappings: { 'alias-free': 'unpriced-model' },
+  mappings: { 'alias-free': 'unpriced-model', 'alias-off': 'unpriced-model' },
   unpriced: 1,
 };
 
@@ -250,6 +255,10 @@ function handle(req, res, p, bodyText) {
     if (p === '/api/models/manage') return sendJson(res, { success: true, data: MANAGE_VIEW });
     if (p === '/api/models/state') {
       // 启停后回读视图：不真的改状态，只验证请求能打通并返回同形数据
+      return sendJson(res, { success: true, data: MANAGE_VIEW });
+    }
+    if (p === '/api/models/alias' || p === '/api/models/alias/state' || p === '/api/models/alias/remove') {
+      // 写别名/切开关/删别名：同样回读视图（不真改），只锁「请求打到正确端点」
       return sendJson(res, { success: true, data: MANAGE_VIEW });
     }
 
