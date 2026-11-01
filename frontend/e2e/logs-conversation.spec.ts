@@ -83,3 +83,36 @@ test.describe('安全边界（前端侧）', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });
+
+/**
+ * 在途请求 —— 对齐 Agent2API「能看到正在跑的请求并终止它」。
+ *
+ * AIGX 的 RequestLog 只在请求结束后落库，过程中原本完全不可见；
+ * 本轮新增进程内登记表 + `/api/logs/inflight` 与 terminate 端点。
+ */
+test.describe('在途请求', () => {
+  test('管理员可查看在途请求并终止', async ({ page, pageErrors }) => {
+    await loginAsAdmin(page);
+    await page.goto('/logs');
+    await expect(page.locator('.main-content')).toContainText('日志与审计');
+
+    await page.getByRole('button', { name: '在途请求' }).click();
+
+    // 面板出现后表格里应有 mock 的那条在途请求
+    await expect(page.locator('.main-content')).toContainText('inflight-1');
+    await expect(page.locator('.main-content')).toContainText('glm-4.7-flash');
+    await expect(page.locator('.main-content')).toContainText('lxchat-glm');
+
+    // 点「终止」→ 二次确认 → 发 POST
+    const calls: string[] = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/terminate')) calls.push(r.method());
+    });
+    await page.getByRole('button', { name: '终止', exact: true }).first().click();
+    await page.getByRole('button', { name: '终止', exact: true }).last().click();
+
+    await expect.poll(() => calls.length, { timeout: 5000 }).toBeGreaterThan(0);
+    expect(calls[0]).toBe('POST');
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+});

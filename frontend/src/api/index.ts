@@ -36,6 +36,7 @@ import type {
   RateLimitConfigItem,
   SettingsItem,
   ModelInfo,
+  InflightRequestItem,
   ModelMetaOverride,
   ManageView,
   CatalogSyncResult,
@@ -720,6 +721,21 @@ export const api = {
   // 日志与审计
   listRequestLogs: (params: Record<string, string | number> = {}): Promise<ApiList<Record<string, unknown>>> =>
     request<ApiList<Record<string, unknown>>>('GET', `${API_BASE}/logs/requests?${buildQuery(params)}`),
+  /** 在途请求（管理员）：正在跑、尚未落日志的请求 */
+  listInflightRequests: (): Promise<ApiList<InflightRequestItem>> =>
+    request<ApiList<InflightRequestItem>>('GET', `${API_BASE}/logs/inflight`),
+  /** 终止一条在途请求 */
+  terminateInflightRequest: (id: string): Promise<ApiResponse<null>> =>
+    request<ApiResponse<null>>('POST', `${API_BASE}/logs/inflight/${encodeURIComponent(id)}/terminate`),
+  /** 清空前的预览：会删多少条、时间范围 */
+  clearPreview: (days = 0): Promise<ApiResponse<{
+    days: number;
+    total_all: number;
+    would_remove: number;
+    oldest?: number | null;
+    newest?: number | null;
+  }>> =>
+    request('GET', `${API_BASE}/logs/requests/clear-preview?days=${days}`),
   listAuditLogs: (params: Record<string, string | number> = {}): Promise<ApiList<Record<string, unknown>>> =>
     request<ApiList<Record<string, unknown>>>('GET', `${API_BASE}/logs/audits?${buildQuery(params)}`),
   deleteRequestLogs: (ids: (string | number)[]): Promise<ApiResponse<{ removed?: number }>> =>

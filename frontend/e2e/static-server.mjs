@@ -324,6 +324,22 @@ function handle(req, res, p, bodyText) {
       return sendJson(res, { success: true, data: [], total: 0, page: 1, size: 20 });
     }
 
+    // 在途请求
+    if (p === '/api/logs/inflight' && req.method === 'GET') {
+      return sendJson(res, {
+        success: true,
+        total: 1,
+        data: [{
+          id: 'inflight-1', user_id: 'u-admin', key_id: 'playground:chat',
+          model: 'glm-4.7-flash', channel_id: 'ch-1', channel_name: 'lxchat-glm',
+          started_at: Math.floor(Date.now() / 1000) - 12, elapsed_ms: 12000, stream: true,
+        }],
+      });
+    }
+    if (p.startsWith('/api/logs/inflight/') && p.endsWith('/terminate')) {
+      return sendJson(res, { success: true, data: null });
+    }
+
     // 报表
     if (p === '/api/dashboard/report/heatmap') return sendJson(res, { success: true, data: REPORT_HEATMAP });
     if (p === '/api/dashboard/report/overview') return sendJson(res, { success: true, data: REPORT_OVERVIEW });

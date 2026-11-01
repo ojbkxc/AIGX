@@ -1773,5 +1773,14 @@
   "检测到容器部署：原地更新/重启在容器内不可靠（发布二进制为 glibc，Alpine 镜像为 musl），建议拉取新镜像重建容器。": "Container deployment detected: in-place update/restart is unreliable in containers (release binary is glibc, Alpine images are musl). Pull the new image and recreate the container instead.",
   "刚检查过，{{n}} 秒后可再查": "Just checked — retry in {{n}}s",
   "响应似乎停滞了（仍在等待上游）…": "Response seems stalled (still waiting for upstream)…",
-  "思考强度（点击切换）": "Reasoning effort (click to cycle)"
+  "思考强度（点击切换）": "Reasoning effort (click to cycle)",
+  "在途请求": "In-flight requests",
+  "在途请求（{{n}}）": "In-flight requests ({{n}})",
+  "当前没有在途请求": "No in-flight requests",
+  "已运行": "Elapsed",
+  "非流式": "Non-streaming",
+  "终止": "Terminate",
+  "终止在途请求": "Terminate in-flight request",
+  "将中断这条请求的上游流并记为失败。确定继续？": "This will abort the upstream stream and record it as failed. Continue?",
+  "已终止": "Terminated"
 }

@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 use crate::storage::FileStore;
 
+pub mod inflight;
+
 // ── RequestLog ─────────────────────────────────────────────────────
 
 /// 请求日志 — 每次推理调用记录一条。

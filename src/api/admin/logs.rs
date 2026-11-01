@@ -381,6 +381,86 @@ pub struct LogRetentionBody {
     pub audit_max_age_days: Option<u64>,
 }
 
+/// GET /api/logs/inflight — 当前在途请求快照（仅管理员）
+///
+/// RequestLog 只在请求结束后落库，过程中完全不可见。这里返回进程内登记的
+/// 正在进行的请求，供管理员查看「谁在跑、跑了多久」并按需终止。
+pub async fn handle_list_inflight(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let items = state.inflight.list();
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": items,
+        "total": items.len(),
+    })))
+}
+
+/// GET /api/logs/requests/clear-preview?days=N — 清空前的预览（仅管理员）
+///
+/// 先告诉管理员「会删多少条、最早/最新是哪天」，再让他确认 —— 避免
+/// 一键清空后发现删错了区间。`days=0` 表示全部。
+pub async fn handle_clear_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ClearPreviewQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let days = q.days.unwrap_or(0);
+    let cutoff = if days > 0 {
+        chrono::Utc::now().timestamp() - (days as i64) * 86_400
+    } else {
+        i64::MIN
+    };
+    let all = state.log_store.requests.all_sorted_asc();
+    let matched: Vec<_> = all.iter().filter(|l| l.created_at >= cutoff).collect();
+    let oldest = matched.first().map(|l| l.created_at);
+    let newest = matched.last().map(|l| l.created_at);
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "days": days,
+            "total_all": all.len(),
+            "would_remove": matched.len(),
+            "oldest": oldest,
+            "newest": newest,
+        }
+    })))
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct ClearPreviewQuery {
+    /// 只统计最近 N 天；缺省/0 = 全部
+    #[serde(default)]
+    pub days: Option<u64>,
+}
+
+/// POST /api/logs/inflight/:id/terminate — 终止一条在途请求（仅管理员）
+///
+/// 触发取消信号，数据面的流式循环收到即中断上游流并落一条失败日志。
+pub async fn handle_terminate_inflight(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    if state.inflight.terminate(&id) {
+        super::common::record_audit(
+            &state,
+            &super::common::admin_id_from_session(&state, &headers).await,
+            "request.terminate",
+            &id,
+            None,
+            None,
+        );
+        Ok(Json(serde_json::json!({ "success": true, "data": null })))
+    } else {
+        Err(error_response("请求不存在或已结束", StatusCode::NOT_FOUND))
+    }
+}
+
 /// GET /api/logs/retention — 读取日志保留配置
 pub async fn handle_get_log_retention(
     State(state): State<AppState>,

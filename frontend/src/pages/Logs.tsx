@@ -98,6 +98,10 @@ export default function Logs(): JSX.Element {
   const [batchDeleting, setBatchDeleting] = useState(false);
   /** 行点击打开的详情条目（null 关闭） */
   const [detail, setDetail] = useState<LogItem | null>(null);
+  /** 在途请求面板（管理员：正在跑、尚未落日志的请求） */
+  const [showInflight, setShowInflight] = useState(false);
+  const [inflight, setInflight] = useState<import('../types').InflightRequestItem[]>([]);
+  const [inflightLoading, setInflightLoading] = useState(false);
   /** 敏感信息脱敏开关（管理员：隐藏用户邮箱/渠道名/IP） */
   const [masked, setMasked] = useState(false);
 
@@ -291,6 +295,36 @@ export default function Logs(): JSX.Element {
 
   const fmtTime = (ts: number | undefined): string => (ts ? new Date(ts * 1000).toLocaleString() : '—');
   const totalPages = Math.ceil(total / size);
+  const loadInflight = async (): Promise<void> => {
+    setInflightLoading(true);
+    try {
+      const res = await api.listInflightRequests();
+      setInflight((res?.data ?? []) as import('../types').InflightRequestItem[]);
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setInflightLoading(false);
+    }
+  };
+
+  const handleTerminateInflight = (id: string): void => {
+    setConfirmState({
+      title: t('终止在途请求'),
+      message: t('将中断这条请求的上游流并记为失败。确定继续？'),
+      confirmText: t('终止'),
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await api.terminateInflightRequest(id);
+          addToast(t('已终止'));
+          await loadInflight();
+        } catch (err) {
+          addToast(err instanceof Error ? err.message : String(err), 'error');
+        }
+      },
+    });
+  };
+
   const isRequest = (_l: LogItem): _l is RequestLogItem => tab === 'requests';
 
   /** 脱敏显示：邮箱/渠道/IP 等敏感值打码 */
@@ -388,6 +422,18 @@ export default function Logs(): JSX.Element {
               {t('审计日志')}
             </Button>
           )}
+          {admin && (
+            <Button
+              variant={showInflight ? 'primary' : 'outline'}
+              onClick={() => {
+                const next = !showInflight;
+                setShowInflight(next);
+                if (next) void loadInflight();
+              }}
+            >
+              {t('在途请求')}
+            </Button>
+          )}
           {tab === 'requests' && (
             <>
               <Button variant="outline" size="sm" onClick={() => void handleExport('json')} disabled={exporting !== null}>
@@ -422,6 +468,53 @@ export default function Logs(): JSX.Element {
           )}
         </div>
       </Card>
+
+      {/* 在途请求面板：正在跑、尚未落库的请求，可逐条终止 */}
+      {admin && showInflight && (
+        <Card
+          title={t('在途请求（{{n}}）', { n: inflight.length })}
+          actions={
+            <Button variant="outline" size="sm" onClick={() => void loadInflight()} disabled={inflightLoading}>
+              {inflightLoading ? t('刷新中…') : t('刷新')}
+            </Button>
+          }
+        >
+          {inflight.length === 0 ? (
+            <EmptyState icon="🕊️" message={t('当前没有在途请求')} />
+          ) : (
+            <div className="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t('请求 ID')}</th>
+                    <th>{t('模型')}</th>
+                    <th>{t('渠道')}</th>
+                    <th>{t('已运行')}</th>
+                    <th>{t('类型')}</th>
+                    <th>{t('操作')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {inflight.map((r) => (
+                    <tr key={r.id}>
+                      <td className="log-detail-mono">{r.id}</td>
+                      <td>{r.model}</td>
+                      <td>{r.channel_name || r.channel_id || '—'}</td>
+                      <td>{(r.elapsed_ms / 1000).toFixed(1)}s</td>
+                      <td>{r.stream ? t('流式') : t('非流式')}</td>
+                      <td>
+                        <Button variant="outline" size="sm" onClick={() => handleTerminateInflight(r.id)}>
+                          {t('终止')}
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      )}
 
       {tab === 'requests' && (
         <Card title={t('筛选')} className="" bodyClassName="">

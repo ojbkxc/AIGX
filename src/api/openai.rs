@@ -85,6 +85,8 @@ pub struct AppState {
     pub user_group_store: Arc<UserGroupStore>,
     /// 日志与审计存储
     pub log_store: Arc<LogStore>,
+    /// 在途请求登记表（进程内）：管理员可查看并终止正在进行的请求
+    pub inflight: Arc<crate::log::inflight::InflightRegistry>,
     /// 兑换码存储
     pub redemption_store: Arc<RedemptionStore>,
     /// 套餐模板存储（按量套餐：模板 → 发 key 交付）
@@ -1655,6 +1657,15 @@ pub async fn handle_chat_completions(
     };
 
     let ctx = BridgeContext::new(request_id.clone(), model.clone());
+
+    // 在途请求登记：管理员可在日志页看到这条请求并终止它。
+    // guard 在函数返回时 drop → 自动注销（成功 / 失败 / 客户端断连三条路径都覆盖）。
+    let (_inflight_id, _inflight_guard) = state.inflight.begin(
+        model.clone(),
+        is_stream,
+        api_key.user_id.clone(),
+        Some(api_key.id.clone()),
+    );
 
     // P1：配额预留/结算两段式——在请求发起前预留预估费用，
     // 请求完成后按实际 token 结算，多预留的部分归还。

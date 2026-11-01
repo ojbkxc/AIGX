@@ -556,6 +556,21 @@ export interface SettingsItem {
   [key: string]: unknown;
 }
 
+/** 一条在途请求（管理员日志页可见并可终止） */
+export interface InflightRequestItem {
+  id: string;
+  user_id?: string | null;
+  key_id?: string | null;
+  model: string;
+  channel_id?: string | null;
+  channel_name?: string | null;
+  /** 开始时刻（unix 秒） */
+  started_at: number;
+  /** 已运行毫秒 */
+  elapsed_ms: number;
+  stream: boolean;
+}
+
 export interface ModelInfo {
   id: string;
   object?: string;

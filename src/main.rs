@@ -274,6 +274,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化日志与审计存储（功能 1）
     let log_store = Arc::new(LogStore::new(store.clone()));
+    // 在途请求登记表（进程内）：配合日志页「查看并终止正在进行的请求」
+    let inflight = Arc::new(crate::log::inflight::InflightRegistry::new());
 
     // 初始化兑换码存储（功能 2）
     let redemption_store = Arc::new(RedemptionStore::new(store.clone()));
@@ -458,6 +460,7 @@ async fn main() -> anyhow::Result<()> {
         pricing_store,
         user_group_store,
         log_store,
+        inflight,
         redemption_store,
         plan_store,
         subscription_store,
@@ -1199,6 +1202,18 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/logs/audits/clear",
             delete(api::admin::handle_clear_audit_logs),
+        )
+        // 清空预览：先告诉管理员会删多少条，再让他确认
+        .route(
+            "/api/logs/requests/clear-preview",
+            get(api::admin::handle_clear_preview),
+        )
+        // 在途请求（查看 + 终止）：RequestLog 只在结束后落库，
+        // 这里让管理员能看到「谁在跑、跑了多久」并中断卡住的请求。
+        .route("/api/logs/inflight", get(api::admin::handle_list_inflight))
+        .route(
+            "/api/logs/inflight/:id/terminate",
+            post(api::admin::handle_terminate_inflight),
         )
         // 日志保留配置（运维设置：保留天数/容量上限/手动清理）
         .route(
