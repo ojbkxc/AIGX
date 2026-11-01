@@ -579,7 +579,10 @@ fn a2a_expires_at(record: &Map<String, Value>) -> Option<i64> {
 /// 把一条 Agent2API 账号记录（`accounts.data` 的扁平 JSON）映射成
 /// AIGX `AccountSession` 草稿。`id` / `provider` / 任何凭证都没有的记录
 /// 返回 None（调用方计入 skipped）。
-pub fn map_agent2api_record(channel_id: &str, record: &Value) -> Option<AccountSession> {
+pub fn map_agent2api_record(
+    channel_id: &str,
+    record: &Value,
+) -> Option<super::model::AccountSession> {
     use super::model::{AccountSession, Credential};
 
     let obj = record.as_object()?;
