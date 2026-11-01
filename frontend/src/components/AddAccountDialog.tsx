@@ -190,7 +190,11 @@ export default function AddAccountDialog({
       || (p.default_base_url || '').toLowerCase().includes(needle),
   );
   const presetCards = PRESET_PROVIDERS.filter((p) => !builtinUrls.has(normalizeUrl(p.base_url))).filter(
-    (p) => !needle || p.name.toLowerCase().includes(needle) || p.base_url.toLowerCase().includes(needle),
+    (p) =>
+      !needle
+      || p.name.toLowerCase().includes(needle)
+      || p.base_url.toLowerCase().includes(needle)
+      || (p.hint || '').toLowerCase().includes(needle),
   );
 
   useEffect(() => {
@@ -590,7 +594,7 @@ export default function AddAccountDialog({
                       )}
                       <span className="add-card-info">
                         <span className="add-card-name">{p.name}</span>
-                        <span className="add-card-meta">{p.base_url}</span>
+                        <span className="add-card-meta">{p.hint || p.base_url || t('地址自填')}</span>
                       </span>
                       <span className="add-card-go">›</span>
                     </button>

@@ -125,7 +125,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
     },
     ProviderSpec {
         kind: "zai",
-        label: "Z.ai Coding",
+        label: "智谱 Z.ai Coding",
         protocol: Protocol::Openai,
         default_base_url: "https://api.z.ai/api/coding/paas/v4",
     },
@@ -288,28 +288,12 @@ pub const PROVIDERS: &[ProviderSpec] = &[
     },
     // ── 登录态型供应商（Cookie / JWT + 专用请求头）──
     // 默认地址抄自 Agent2API 的 adapter 实现（多地区的取国内版站点）。
-    // ── 拆家的两家（Cline / WorkBuddy）──────────────────────────
+    // 展示顺序对齐 Agent2API `providers::PROVIDERS`：同一条产品线的两个地区
+    // 相邻排列（国内版在前），找「国际版」不用整段扫描。
+    // ── 拆家的两家（Cline 两池 / WorkBuddy 两地）──────────────────────────
     // 与 Agent2API 一致：Cline 分 Free / Pass 两个池（上游模型带计费通道前缀，
     // 池是账号属性），WorkBuddy 分国内 / 国际两个站点。国内版保持裸 id（存量
     // 账号的落盘契约），另一版取 `<id>-intl` / `<id>-free|pass`。
-    ProviderSpec {
-        kind: "cline",
-        label: "Cline",
-        protocol: Protocol::Openai,
-        default_base_url: "https://api.cline.bot/api/v1",
-    },
-    ProviderSpec {
-        kind: "cline-free",
-        label: "Cline Free",
-        protocol: Protocol::Openai,
-        default_base_url: "https://api.cline.bot/api/v1",
-    },
-    ProviderSpec {
-        kind: "cline-pass",
-        label: "Cline Pass",
-        protocol: Protocol::Openai,
-        default_base_url: "https://api.cline.bot/api/v1",
-    },
     ProviderSpec {
         kind: "workbuddy",
         label: "WorkBuddy 国内版",
@@ -335,6 +319,19 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         default_base_url: "https://ai.catpaw.meituan.com",
     },
     ProviderSpec {
+        kind: "autoclaw",
+        label: "AutoClaw 国内版",
+        protocol: Protocol::Openai,
+        default_base_url:
+            "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
+    },
+    ProviderSpec {
+        kind: "autoclaw-intl",
+        label: "AutoClaw 国际版",
+        protocol: Protocol::Openai,
+        default_base_url: "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw",
+    },
+    ProviderSpec {
         kind: "qoder",
         label: "Qoder 中国版",
         protocol: Protocol::Openai,
@@ -345,6 +342,24 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         label: "Qoder 国际版",
         protocol: Protocol::Openai,
         default_base_url: "https://api3.qoder.sh",
+    },
+    ProviderSpec {
+        kind: "cline",
+        label: "Cline",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.cline.bot/api/v1",
+    },
+    ProviderSpec {
+        kind: "cline-free",
+        label: "Cline Free",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.cline.bot/api/v1",
+    },
+    ProviderSpec {
+        kind: "cline-pass",
+        label: "Cline Pass",
+        protocol: Protocol::Openai,
+        default_base_url: "https://api.cline.bot/api/v1",
     },
     ProviderSpec {
         kind: "accio",
@@ -390,7 +405,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
     },
     ProviderSpec {
         kind: "kuku",
-        label: "Kuku",
+        label: "KukuAI",
         protocol: Protocol::Openai,
         default_base_url: "https://kuku.baidu.com",
     },
@@ -420,7 +435,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
     },
     ProviderSpec {
         kind: "officeace",
-        label: "OfficeAce",
+        label: "OfficeAce 果办",
         protocol: Protocol::Openai,
         default_base_url: "",
     },
@@ -429,19 +444,6 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         label: "OrcaTerm",
         protocol: Protocol::Openai,
         default_base_url: "https://lightai.cloud.tencent.com",
-    },
-    ProviderSpec {
-        kind: "autoclaw",
-        label: "AutoClaw 国内版",
-        protocol: Protocol::Openai,
-        default_base_url:
-            "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
-    },
-    ProviderSpec {
-        kind: "autoclaw-intl",
-        label: "AutoClaw 国际版",
-        protocol: Protocol::Openai,
-        default_base_url: "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw",
     },
 ];
 

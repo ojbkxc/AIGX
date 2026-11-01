@@ -61,6 +61,8 @@ export interface ChatDebuggerProps {
   hasMessages?: boolean;
   /** playground 形态：打开历史会话抽屉（宿主 /chat 页提供，渲染历史按钮） */
   onOpenSessions?: () => void;
+  /** 流式生成状态上报（宿主据此在生成中禁止切换/删除/新建会话，防止半截回复落盘） */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 interface ChatChunkResult {
@@ -100,6 +102,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     onClearMessages,
     hasMessages = false,
     onOpenSessions,
+    onBusyChange,
   } = props;
   const { t } = useTranslation();
 
@@ -188,6 +191,15 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
   useEffect(() => {
     onMessagesChangeRef.current?.(messages);
   }, [messages]);
+
+  // 流式状态上报（与 onMessagesChange 同款 ref 防抖模式）
+  const onBusyChangeRef = useRef(onBusyChange);
+  useEffect(() => {
+    onBusyChangeRef.current = onBusyChange;
+  }, [onBusyChange]);
+  useEffect(() => {
+    onBusyChangeRef.current?.(busy);
+  }, [busy]);
 
   // 系统提示词预设（与 i18n 词条保持一致）
   const PROMPT_PRESETS: Record<string, string> = {
@@ -300,11 +312,14 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     return () => document.removeEventListener('mousedown', onDoc);
   }, []);
 
-  // 卸载时停止录音 / 停止 TTS 播放
+  // 卸载时中断流式请求 / 停止录音 / 停止 TTS 播放
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      // 兜底：流式生成中被卸载（如宿主切换会话 key 重挂载）必须中断上游请求，
+      // 否则孤儿流继续消耗上游额度且回调写入已卸载组件
+      abortRef.current?.abort();
       if (mediaRef.current && mediaRef.current.state === 'recording') {
         mediaRef.current.stop();
       }

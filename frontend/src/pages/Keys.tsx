@@ -293,14 +293,34 @@ export default function Keys(): JSX.Element {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
-      if (!editing || allowedModels.length > 0) {
+      // 可清除字段按「与原值比较」决定是否提交：原来用「非空才发」，
+      // 用户把白名单/额度/过期时间清空后保存，后端因字段缺省视为「不修改」，
+      // 限制依然生效且界面无任何提示。
+      const origModels = Array.isArray(editing?.allowed_models)
+        ? editing!.allowed_models
+        : [];
+      if (
+        !editing
+        || allowedModels.length > 0
+        || JSON.stringify(origModels.slice().sort()) !== JSON.stringify(allowedModels.slice().sort())
+      ) {
         payload.allowed_models = allowedModels;
       }
-      if (!editing || ipLimit.length > 0) {
+      const origIps = Array.isArray(editing?.ip_limit) ? editing!.ip_limit : [];
+      if (
+        !editing
+        || ipLimit.length > 0
+        || JSON.stringify(origIps.slice().sort()) !== JSON.stringify(ipLimit.slice().sort())
+      ) {
         payload.ip_limit = ipLimit;
       }
       const expiresTs = localInputToTs(form.expires_at);
-      if (expiresTs != null) payload.expires_at = expiresTs;
+      if (expiresTs != null) {
+        payload.expires_at = expiresTs;
+      } else if (editing && editing.expires_at != null && !form.expires_at.trim()) {
+        // 显式清空过期时间：后端 null = 永不过期
+        payload.expires_at = null;
+      }
       // 自定义密钥值（仅创建）：非空才发，留空后端随机生成（cf-ai-gw 语义）
       if (!editing && form.custom_key.trim()) {
         payload.custom_key = form.custom_key.trim();
@@ -313,6 +333,9 @@ export default function Keys(): JSX.Element {
           return;
         }
         payload.quota_limit = quotaNum;
+      } else if (editing && editing.quota_limit != null) {
+        // 清空额度上限 = 改为不限（后端 0 表示不限）
+        payload.quota_limit = 0;
       }
 
       if (editing) {
@@ -392,10 +415,27 @@ export default function Keys(): JSX.Element {
     if (!ids.length) return;
     const disabling = status === 'disabled';
     const run = async (): Promise<void> => {
+      // 逐条统计成败：原来把失败全部 `.catch(() => {})` 吞掉后无条件提示
+      // 「已启用/禁用 N 个」，实际可能全失败 —— 用户会以为改成功了。
+      let ok = 0;
       for (const id of ids) {
-        await api.updateToken(id, { status }).catch(() => {});
+        try {
+          await api.updateToken(id, { status });
+          ok += 1;
+        } catch {
+          /* 计数后统一提示 */
+        }
       }
-      addToast(disabling ? t('已禁用 {{count}} 个令牌', { count: ids.length }) : t('已启用 {{count}} 个令牌', { count: ids.length }));
+      if (ok === ids.length) {
+        addToast(disabling
+          ? t('已禁用 {{count}} 个令牌', { count: ok })
+          : t('已启用 {{count}} 个令牌', { count: ok }));
+      } else {
+        addToast(
+          t('{{ok}} 个成功，{{fail}} 个失败', { ok, fail: ids.length - ok }),
+          'error',
+        );
+      }
       setSelected(new Set());
       await load();
     };

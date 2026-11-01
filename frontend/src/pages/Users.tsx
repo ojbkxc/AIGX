@@ -1,4 +1,4 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, useRef, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Pencil, Power, PowerOff, MoreHorizontal, KeyRound, Trash2 } from 'lucide-react';
 import { api } from '../api';
@@ -53,6 +53,9 @@ export default function Users(): JSX.Element {
   const [groups, setGroups] = useState<GroupItem[]>([]);
   const [me, setMe] = useState<UserItem | null>(null);
   const [loading, setLoading] = useState(true);
+  // 仅首次加载显示整页骨架。搜索/翻页时若也整页早退，工具栏（含搜索框）
+  // 会被卸载，用户输入到一半焦点就丢了 —— 改为首屏后只做局部 loading。
+  const firstLoadRef = useRef(true);
   const [error, setError] = useState('');
   const addToast = useToast();
   const { t } = useTranslation();
@@ -130,6 +133,7 @@ export default function Users(): JSX.Element {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      firstLoadRef.current = false;
     }
   };
 
@@ -300,7 +304,9 @@ export default function Users(): JSX.Element {
     });
   };
 
-  if (loading) return <SkeletonTable columns={6} rows={7} />;
+  if (loading && firstLoadRef.current) {
+    return <SkeletonTable columns={6} rows={7} />;
+  }
 
   const q = query.trim().toLowerCase();
   const visibleUsers = users;
@@ -350,7 +356,10 @@ export default function Users(): JSX.Element {
           </div>
         }
       >
-        {visibleUsers.length === 0 ? (
+        {loading ? (
+          /* 局部 loading：只替换表格内容，工具栏/搜索框保持挂载与焦点 */
+          <SkeletonTable columns={6} rows={5} />
+        ) : visibleUsers.length === 0 ? (
           <EmptyState message={q ? t('没有匹配的用户') : t('暂无用户')} icon="👥" />
         ) : (
           <div className="table-wrapper">

@@ -593,6 +593,7 @@ pub fn model_declared_by_channel(state: &AppState, model: &str) -> bool {
 pub fn charge_usage(
     state: &AppState,
     api_key: &super::auth::ApiKey,
+    requested_model: &str,
     model: &str,
     group: &str,
     prompt_tokens: u64,
@@ -601,6 +602,7 @@ pub fn charge_usage(
     charge_usage_with_tools(
         state,
         api_key,
+        requested_model,
         model,
         group,
         prompt_tokens,
@@ -633,6 +635,7 @@ fn is_count_billing(state: &AppState, api_key: &super::auth::ApiKey) -> bool {
 fn resolve_billing_quota(
     state: &AppState,
     api_key: &super::auth::ApiKey,
+    requested_model: &str,
     model: &str,
     group: &str,
     prompt_tokens: u64,
@@ -644,10 +647,18 @@ fn resolve_billing_quota(
         return crate::config::billing_flat_quota();
     }
 
+    // 计价键双名感知：定价目录按对外名配置，model 为映射后上游名——
+    // 对外名优先、上游名兜底，修复映射场景定价失效导致的按 0 免费放行
     match state
         .pricing_store
-        .calculate_cost_quoted(model, prompt_tokens, completion_tokens, group)
-    {
+        .calculate_cost_quoted_with_cache_aliased(
+            requested_model,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            0,
+            group,
+        ) {
         Ok(mut c) => {
             if let Some(tools) = tool_calls {
                 c = c.saturating_add(
@@ -674,6 +685,7 @@ fn resolve_billing_quota(
 pub(crate) fn compute_channel_cost(
     state: &AppState,
     channel_id: Option<&str>,
+    requested_model: &str,
     billing_model: &str,
     group: &str,
     prompt_tokens: u64,
@@ -690,7 +702,8 @@ pub(crate) fn compute_channel_cost(
     let Some(cp) = ch.cost_price_for(billing_model) else {
         return cost;
     };
-    // 成本价与销售价共用同一倍率表（model_ratio/group_ratio），只换单价来源
+    // 成本价与销售价共用同一倍率表（model_ratio/group_ratio），只换单价来源；
+    // 模型倍率双名查找（对外名优先、上游名兜底），与销售侧计费口径一致
     let ratios = state.pricing_store.get_ratios();
     let base = if cp.price_type == "count" {
         cp.input_price
@@ -698,8 +711,10 @@ pub(crate) fn compute_channel_cost(
         (prompt_tokens as f64 * cp.input_price + completion_tokens as f64 * cp.output_price)
             / 1000.0
     };
-    let channel_cost =
-        (base * ratios.model_ratio(billing_model) * ratios.group_ratio(group) + 0.999999) as i64;
+    let channel_cost = (base
+        * ratios.model_ratio_aliased(requested_model, billing_model)
+        * ratios.group_ratio(group)
+        + 0.999999) as i64;
     // 有成本价但该模型成本算出来为 0（配置异常等）：回退到销售价，避免误显示利润
     if channel_cost == 0 {
         cost
@@ -715,6 +730,7 @@ pub(crate) fn compute_channel_cost(
 pub fn charge_usage_with_tools(
     state: &AppState,
     api_key: &super::auth::ApiKey,
+    requested_model: &str,
     model: &str,
     group: &str,
     prompt_tokens: u64,
@@ -725,6 +741,7 @@ pub fn charge_usage_with_tools(
     let cost = resolve_billing_quota(
         state,
         api_key,
+        requested_model,
         model,
         group,
         prompt_tokens,
@@ -818,6 +835,7 @@ pub struct Reservation {
 pub fn reserve_usage(
     state: &AppState,
     api_key: &super::auth::ApiKey,
+    requested_model: &str,
     model: &str,
     group: &str,
     estimated_prompt_tokens: u64,
@@ -826,6 +844,7 @@ pub fn reserve_usage(
     let estimated_cost = resolve_billing_quota(
         state,
         api_key,
+        requested_model,
         model,
         group,
         estimated_prompt_tokens,
@@ -942,6 +961,7 @@ pub fn reserve_usage(
 pub fn settle_usage(
     state: &AppState,
     api_key: &super::auth::ApiKey,
+    requested_model: &str,
     model: &str,
     group: &str,
     reservation: &Reservation,
@@ -952,6 +972,7 @@ pub fn settle_usage(
     let actual_cost = resolve_billing_quota(
         state,
         api_key,
+        requested_model,
         model,
         group,
         actual_prompt_tokens,
@@ -1107,10 +1128,13 @@ impl StreamBillingState {
         } else {
             Some(&tool_calls)
         };
+        // 计价键：对外请求名（origin_model）优先，上游名兜底
+        let requested_model = self.origin_model.as_deref().unwrap_or(&self.model);
         let cost = if let Some(reservation) = &self.reservation {
             settle_usage(
                 &self.state,
                 &self.api_key,
+                requested_model,
                 &self.model,
                 &self.group,
                 reservation,
@@ -1122,6 +1146,7 @@ impl StreamBillingState {
             charge_usage_with_tools(
                 &self.state,
                 &self.api_key,
+                requested_model,
                 &self.model,
                 &self.group,
                 prompt_tokens,
@@ -1177,6 +1202,7 @@ impl StreamBillingState {
         compute_channel_cost(
             &self.state,
             self.channel_id.as_deref(),
+            self.origin_model.as_deref().unwrap_or(&self.model),
             &self.model,
             &self.group,
             prompt_tokens,
@@ -1347,6 +1373,7 @@ impl ResponsesBillingState {
         let cost = charge_usage(
             &self.state,
             &self.api_key,
+            self.origin_model.as_deref().unwrap_or(&self.model),
             &self.model,
             &self.group,
             prompt_tokens,
@@ -1364,6 +1391,7 @@ impl ResponsesBillingState {
         log.channel_cost = compute_channel_cost(
             &self.state,
             self.channel_id.as_deref(),
+            self.origin_model.as_deref().unwrap_or(&self.model),
             &self.model,
             &self.group,
             prompt_tokens,
@@ -1701,6 +1729,7 @@ pub async fn handle_chat_completions(
     let reservation = match reserve_usage(
         &state,
         &api_key,
+        &model,
         &model,
         &billing_group,
         estimated_prompt_tokens,
@@ -2358,6 +2387,7 @@ pub async fn handle_chat_completions(
             let cost = settle_usage(
                 &state,
                 &api_key,
+                &model,
                 billing_model,
                 &billing_group,
                 &reservation,
@@ -2388,6 +2418,7 @@ pub async fn handle_chat_completions(
             log.channel_cost = compute_channel_cost(
                 &state,
                 used_channel_id.as_deref(),
+                &model,
                 billing_model,
                 &billing_group,
                 response.usage.prompt_tokens,
@@ -2773,6 +2804,7 @@ pub async fn handle_responses(
             let cost = charge_usage(
                 &state,
                 &api_key,
+                &model,
                 billing_model,
                 &billing_group,
                 prompt_tokens,
@@ -2801,6 +2833,7 @@ pub async fn handle_responses(
             log.channel_cost = compute_channel_cost(
                 &state,
                 used_channel_id.as_deref(),
+                &model,
                 billing_model,
                 &billing_group,
                 prompt_tokens,
@@ -3229,11 +3262,13 @@ pub async fn handle_completions(
             .usage_tracker
             .accumulate(prompt_tokens, completion_tokens, 0, 0, 0, 0.0);
 
-        // 计费扣减（问题 2/5/6）——计费与日志统一用映射后的上游模型名
+        // 计费扣减（问题 2/5/6）——日志用映射后的上游模型名；
+        // 计价键双名感知：对外请求名优先、上游名兜底
         let billing_model = used_upstream.as_deref().unwrap_or(&model_owned);
         let cost = charge_usage(
             &state,
             &api_key,
+            &model_owned,
             billing_model,
             &billing_group,
             prompt_tokens,
@@ -3262,6 +3297,7 @@ pub async fn handle_completions(
         log.channel_cost = compute_channel_cost(
             &state,
             used_channel_id.as_deref(),
+            &model_owned,
             billing_model,
             &billing_group,
             prompt_tokens,
@@ -3526,11 +3562,13 @@ pub async fn handle_embeddings(
             .usage_tracker
             .accumulate(prompt_tokens, 0, 0, 0, 0, 0.0);
 
-        // 计费扣减（问题 2/5/6）——计费与日志统一用映射后的上游模型名
+        // 计费扣减（问题 2/5/6）——日志用映射后的上游模型名；
+        // 计价键双名感知：对外请求名优先、上游名兜底
         let billing_model = used_upstream.as_deref().unwrap_or(&model_owned);
         let cost = charge_usage(
             &state,
             &api_key,
+            &model_owned,
             billing_model,
             &billing_group,
             prompt_tokens,
@@ -3558,6 +3596,7 @@ pub async fn handle_embeddings(
         log.channel_cost = compute_channel_cost(
             &state,
             used_channel_id.as_deref(),
+            &model_owned,
             billing_model,
             &billing_group,
             prompt_tokens,
@@ -3760,6 +3799,7 @@ pub async fn handle_rerank(
         &state,
         &api_key,
         &model_owned,
+        &model_owned,
         &billing_group,
         estimated_prompt_tokens,
         0,
@@ -3888,6 +3928,7 @@ pub async fn handle_rerank(
         let cost = settle_usage(
             &state,
             &api_key,
+            &model_owned,
             billing_model,
             &billing_group,
             &reservation,
@@ -3917,6 +3958,7 @@ pub async fn handle_rerank(
         log.channel_cost = compute_channel_cost(
             &state,
             used_channel_id.as_deref(),
+            &model_owned,
             billing_model,
             &billing_group,
             prompt_tokens,
@@ -4158,9 +4200,18 @@ pub async fn handle_images_generations(
         let latency_ms = request_start.elapsed().as_millis() as u64;
         state.usage_tracker.accumulate(0, 0, 0, 0, 0, 0.0);
 
-        // 计费扣减（按次计价，问题 2/5/6）——计费与日志统一用映射后的上游模型名
+        // 计费扣减（按次计价，问题 2/5/6）——日志用映射后的上游模型名；
+        // 计价键双名感知：对外请求名优先、上游名兜底
         let billing_model = used_upstream.as_deref().unwrap_or(&model_owned);
-        let cost = charge_usage(&state, &api_key, billing_model, &billing_group, 0, 0);
+        let cost = charge_usage(
+            &state,
+            &api_key,
+            &model_owned,
+            billing_model,
+            &billing_group,
+            0,
+            0,
+        );
 
         // 事后限流记账（按次计价，记 1 个请求 token 占位以维持 RPM 一致性）
         rate_bundle.commit_tokens(0).await;
@@ -4183,6 +4234,7 @@ pub async fn handle_images_generations(
         log.channel_cost = compute_channel_cost(
             &state,
             used_channel_id.as_deref(),
+            &model_owned,
             billing_model,
             &billing_group,
             0,
@@ -4322,7 +4374,7 @@ pub async fn handle_audio_transcriptions(
             state.usage_tracker.accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
-            let cost = charge_usage(&state, &api_key, &model, &billing_group, 0, 0);
+            let cost = charge_usage(&state, &api_key, &model, &model, &billing_group, 0, 0);
 
             // 事后限流记账（按次计价，记 0 token）
             rate_bundle.commit_tokens(0).await;
@@ -4478,7 +4530,7 @@ pub async fn handle_audio_translations(
             state.usage_tracker.accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
-            let cost = charge_usage(&state, &api_key, &model, &billing_group, 0, 0);
+            let cost = charge_usage(&state, &api_key, &model, &model, &billing_group, 0, 0);
 
             // 事后限流记账（按次计价，记 0 token）
             rate_bundle.commit_tokens(0).await;
@@ -4616,7 +4668,15 @@ pub async fn handle_audio_speech(
             state.usage_tracker.accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
-            let cost = charge_usage(&state, &api_key, &model_owned, &billing_group, 0, 0);
+            let cost = charge_usage(
+                &state,
+                &api_key,
+                &model_owned,
+                &model_owned,
+                &billing_group,
+                0,
+                0,
+            );
 
             // 事后限流记账（按次计价，记 0 token）
             rate_bundle.commit_tokens(0).await;

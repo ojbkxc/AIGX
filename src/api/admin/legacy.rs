@@ -1967,6 +1967,18 @@ pub async fn handle_realtime(
     } else {
         0.0
     };
+    // 近 5 分钟窗口内的去重活跃用户 / 渠道计数（仪表盘「活跃用户/活跃渠道」卡
+    // 的真实口径——此前前端拿用户 Top 榜长度冒充，榜长度与活跃数是两回事）
+    let active_users = recent
+        .iter()
+        .filter_map(|l| l.user_id.as_deref())
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u64;
+    let active_channels = recent
+        .iter()
+        .filter_map(|l| l.channel_id.as_deref())
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u64;
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
@@ -1976,6 +1988,8 @@ pub async fn handle_realtime(
             "avg_latency_ms": avg_latency,
             "error_rate": error_rate,
             "errors": errors,
+            "active_users": active_users,
+            "active_channels": active_channels,
         }
     })))
 }

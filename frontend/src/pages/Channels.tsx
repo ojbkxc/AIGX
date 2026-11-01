@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import {
@@ -158,6 +158,7 @@ function formatBalance(value: number, unit?: string): string {
 export default function Channels(): JSX.Element {
   const [channels, setChannels] = useState<ChannelItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const firstLoadRef = useRef(true);
   const [error, setError] = useState('');
   const addToast = useToast();
   const { t } = useTranslation();
@@ -177,6 +178,43 @@ export default function Channels(): JSX.Element {
   const [modalStep, setModalStep] = useState<'pick' | 'form'>('form');
   /** 预置供应商搜索（第 1 步卡片网格过滤） */
   const [presetQuery, setPresetQuery] = useState('');
+
+  // ── 全局模型目录候选（映射编辑器源/目标的可搜索下拉）──
+  const [globalModels, setGlobalModels] = useState<string[]>([]);
+  useEffect(() => {
+    api.listManageModels()
+      .then((res) => {
+        const models = res?.data?.models ?? [];
+        const seen = new Map<string, string>();
+        const push = (n?: string) => {
+          const v = n?.trim();
+          if (!v) return;
+          const k = v.toLowerCase();
+          if (!seen.has(k)) seen.set(k, v);
+        };
+        models.forEach((m) => {
+          push(m.id);
+          (m.aliases ?? []).forEach(push);
+        });
+        setGlobalModels([...seen.values()].sort((a, b) => a.localeCompare(b)));
+      })
+      .catch(() => { /* 候选加载失败静默降级为仅渠道清单 */ });
+  }, []);
+
+  /** 映射编辑器候选：渠道已配置模型 ∪ 上游发现模型 ∪ 全局目录（大小写不敏感去重） */
+  const mappingModelOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    const push = (n?: string) => {
+      const v = n?.trim();
+      if (!v) return;
+      const k = v.toLowerCase();
+      if (!seen.has(k)) seen.set(k, v);
+    };
+    form.models.split(',').forEach(push);
+    (editChannel?.discovered_models ?? []).forEach(push);
+    globalModels.forEach(push);
+    return [...seen.values()].sort((a, b) => a.localeCompare(b));
+  }, [form.models, editChannel, globalModels]);
 
   // 无密钥复选框联动（同 cf-ai-gw onKeyForeverChange）：勾选 → 输入框置灰清空
   const onNoKeyChange = (): void => {
@@ -551,6 +589,7 @@ export default function Channels(): JSX.Element {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      firstLoadRef.current = false;
     }
   };
 
@@ -838,7 +877,11 @@ export default function Channels(): JSX.Element {
     return v < warn ? 'warning' : 'success';
   };
 
-  if (loading) return <SkeletonTable columns={6} rows={6} />;
+  // 仅首次加载显示整页骨架：搜索/翻页时若也早退，搜索框与工具栏会被卸载，
+  // 用户输入到一半焦点就丢了。首屏之后改为表格区局部 loading。
+  if (loading && firstLoadRef.current) {
+    return <SkeletonTable columns={6} rows={6} />;
+  }
 
   return (
     <div>
@@ -888,7 +931,10 @@ export default function Channels(): JSX.Element {
           </div>
         }
       >
-        {channels.length === 0 ? (
+        {loading ? (
+          /* 局部 loading：搜索/翻页时只替换表格，工具栏与搜索框保持挂载 */
+          <SkeletonTable columns={6} rows={5} />
+        ) : channels.length === 0 ? (
           <EmptyState
             message={t('暂无渠道')}
             icon="🛰️"
@@ -1424,7 +1470,8 @@ export default function Channels(): JSX.Element {
                     <ModelMappingEditor
                       value={form.model_mapping}
                       onChange={(mapping) => setForm((f) => ({ ...f, model_mapping: mapping }))}
-                      sourceModelOptions={form.models.split(',').map((s) => s.trim()).filter(Boolean)}
+                      sourceModelOptions={mappingModelOptions}
+                      targetModelOptions={mappingModelOptions}
                       disabled={saving}
                     />
                   </div>

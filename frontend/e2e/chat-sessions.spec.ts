@@ -140,6 +140,41 @@ test.describe('聊天 · 历史会话抽屉', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
+  test('流式生成中切换会话被拦截且当前会话不被污染', async ({ page, pageErrors }) => {
+    await loginAsAdmin(page);
+    await page.goto('/chat');
+    await expect(page.locator('.pg-shell')).toBeVisible();
+
+    // 拦截对话请求并挂起（模拟慢流式响应）：busy 状态一直保持，
+    // 请求根本不出浏览器，不依赖 mock server 的 chat_test 桩
+    await page.route('**/api/channels/chat_test', () => { /* 永不 fulfill */ });
+
+    // 发送一条消息进入流式生成中
+    const input = page.locator('.pg-shell textarea').first();
+    await input.fill('触发流式');
+    await input.press('Enter');
+    // 等 onBusyChange(true) 上报（发送即 setBusy，无需等网络）
+    await page.waitForTimeout(400);
+
+    // 生成中点历史会话：必须被守卫拦截——toast 提示、消息区不切换。
+    // （抽屉在 overlay 变体下点项即收拢，与切换是否成功无关，不以抽屉状态断言）
+    await openDrawer(page);
+    await page.locator('.sd-item-btn').nth(1).click();
+    await expect(page.getByText('正在生成回复，请先停止再操作会话').first()).toBeVisible();
+    // 切换被拦截：消息区仍是当前会话（刚发的「触发流式」还在，
+    // 且没有载入目标会话的 seed 消息）
+    await expect(page.locator('.chat-debugger-messages')).toContainText('触发流式');
+    await expect(page.locator('.chat-debugger-messages')).not.toContainText('第 2 个会话');
+
+    // 新建会话同样被拦截
+    await openDrawer(page);
+    await page.getByRole('button', { name: '新会话' }).first().click();
+    await expect(page.getByText('正在生成回复，请先停止再操作会话').first()).toBeVisible();
+    await expect(page.locator('.chat-debugger-messages')).toContainText('触发流式');
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
   test('删除非活动会话不会丢掉当前会话的消息', async ({ page, pageErrors }) => {
     await loginAsAdmin(page);
     await page.goto('/chat');

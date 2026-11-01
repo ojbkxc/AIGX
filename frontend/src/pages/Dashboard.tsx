@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
@@ -58,6 +58,10 @@ interface RealtimeStats {
   qps?: number;
   rps?: number;
   avg_latency_ms?: number;
+  /** 近 5 分钟窗口去重活跃用户数（后端 2026-11 补；旧后端无此字段时回落榜单长度） */
+  active_users?: number;
+  /** 近 5 分钟窗口去重活跃渠道数 */
+  active_channels?: number;
 }
 
 interface UsageStats {
@@ -503,6 +507,7 @@ export default function Dashboard(): JSX.Element {
   const [tokenStats, setTokenStats] = useState<TodayTokens | null>(null);
   const [limits, setLimits] = useState<LimitsInfo | null>(null);
   const [loading, setLoading] = useState(true);
+  const firstLoadRef = useRef(true);
   const [error, setError] = useState('');
   const [trend, setTrend] = useState<TrendData[] | null>(null);
   // 手动刷新按钮的 pending 态（不与整页 loading 混用，避免数据闪断）
@@ -612,20 +617,17 @@ export default function Dashboard(): JSX.Element {
     } finally {
       setLoading(false);
       setRefreshing(false);
+      firstLoadRef.current = false;
     }
   }, [t]);
 
-  // 管理员：仅刷新实时指标，避免整页 loading 闪烁
+  // 管理员：仅刷新实时指标（RPS / 延迟），避免整页 loading 闪烁。
+  // 用户排行 / 渠道健康是 Top 榜视图，30s 轮询全量榜单纯属浪费带宽——
+  // 它们只随 loadData（首屏 / 切时间范围 / 手动刷新）更新。
   const loadRealtimeOnly = useCallback(async (): Promise<void> => {
     try {
-      const [rtData, urData, chData] = await Promise.all([
-        api.getRealtime().catch(() => null),
-        api.getUserRanking().catch(() => null),
-        api.getChannelHealth().catch(() => null),
-      ]);
+      const rtData = await api.getRealtime().catch(() => null);
       setRealtime((rtData?.data ?? rtData) as unknown as RealtimeStats | null);
-      if (urData) setUserRanking((urData.data ?? urData) as unknown as UserRanking[]);
-      if (chData) setChannelHealth((chData.data ?? chData) as unknown as ChannelHealth[]);
     } catch {
       // 轮询失败静默，不打扰用户
     }
@@ -636,12 +638,17 @@ export default function Dashboard(): JSX.Element {
     // 实时指标轮询：30s 刷新一次 RPS / 活跃用户 / 活跃渠道 / 平均延迟
     // 仅管理员轮询管理指标，普通用户静默展示个人配额视图
     const timer = setInterval(() => {
+      // 页面在后台时不轮询：标签页不可见时用户看不到数据，
+      // 无谓请求既浪费带宽也占用服务端与移动端电量。
+      if (document.hidden) return;
       if (isAdmin()) void loadRealtimeOnly();
     }, 30000);
     return () => clearInterval(timer);
   }, [loadData, loadRealtimeOnly, range]);
 
-  if (loading) {
+  // 仅首次加载显示骨架。点刷新或切换时间范围时也整页骨架会连刷新按钮和
+  // 档位切换器一起卸载，界面闪断且用户失去操作位置。
+  if (loading && firstLoadRef.current) {
     return (
       <div>
         <div className="page-header">
@@ -855,7 +862,7 @@ export default function Dashboard(): JSX.Element {
             <div className="stat-title">{t('活跃用户')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>👥</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(ur.length)}</div>
+          <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(rt.active_users ?? ur.length)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟')}</div>
         </div>
         <div className="stat-card">
@@ -863,8 +870,8 @@ export default function Dashboard(): JSX.Element {
             <div className="stat-title">{t('活跃渠道')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>🔗</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(ch.length)}</div>
-          <div className="stat-desc" style={{ fontSize: '11px' }}>{t('在线渠道数')}</div>
+          <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(rt.active_channels ?? ch.length)}</div>
+          <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟')}</div>
         </div>
         <div className="stat-card">
           <div className="stat-card-top">
@@ -911,8 +918,8 @@ export default function Dashboard(): JSX.Element {
             <div className="stat-icon-badge" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399' }}>📅</div>
           </div>
           <div className="stat-value" style={{ fontSize: '26px' }}>{monthlyLimit != null ? fmtLimit(monthlyLimit) : '∞'}</div>
-          <div className="stat-desc" style={{ fontSize: '11px' }}>
-            <span>{t('已用')} {fmtTok(monthlyUsed)}</span>
+          <div className="stat-desc" style={{ fontSize: '11px' }} title={t('统计口径：token（本月累计），与「配额/余额」的货币口径不同')}>
+            <span>{t('已用')} {fmtTok(monthlyUsed)} tokens</span>
             {monthlyPct != null && <span style={{ marginLeft: 12 }}>{monthlyPct.toFixed(1)}%</span>}
           </div>
         </div>
@@ -978,16 +985,12 @@ export default function Dashboard(): JSX.Element {
         </div>
       </div>
 
-      {/* 报表扩展：Token 趋势（prompt/completion 分列） */}
+      {/* 报表扩展：Token 趋势（prompt/completion 分列）
+          注：成功率/活跃天数在顶部统计卡已展示，这里不再重复。 */}
       {reportTokenTrend && reportTokenTrend.length > 0 && (
         <div className="section-card" style={{ marginTop: 16 }}>
           <div className="section-card-header">
             <h2>{t('Token 趋势（输入 / 输出，{{range}}）', { range: t(rangeLabel) })}</h2>
-            {reportOverview && (
-              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                {t('成功率')} {reportOverview.success_rate ?? 0}% · {t('活跃天数')} {reportOverview.active_days ?? 0}
-              </span>
-            )}
           </div>
           <div className="section-card-body">
             <TokenTrendChart data={reportTokenTrend} />
@@ -995,11 +998,16 @@ export default function Dashboard(): JSX.Element {
         </div>
       )}
 
-      {/* 报表扩展：缓存命中率（10m/1h/24h/7d） */}
+      {/* 缓存效率：命中率窗口卡（节省估算见顶部「缓存节省」卡，同源数据合并展示） */}
       {reportCacheRates && reportCacheRates.length > 0 && (
         <div className="section-card" style={{ marginTop: 16 }}>
           <div className="section-card-header">
             <h2>{t('缓存命中率（请求数口径）')}</h2>
+            {cs.saved_estimate != null && (
+              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                {t('累计节省约')} {fmtTok(cs.saved_estimate)} tokens · {t('命中')} {fmtLimit(cs.hit_count)} {t('次')}
+              </span>
+            )}
           </div>
           <div className="section-card-body">
             <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))' }}>

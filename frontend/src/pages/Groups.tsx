@@ -23,10 +23,14 @@ interface GroupForm {
 /** 弹窗内的表单错误（区别于页面级 error，直接渲染在表单顶部，不被遮罩挡住） */
 type ModalError = string;
 
+/** 计费实际读取的分组倍率表（RatioConfig.group_ratio） */
+type GroupRatioMap = Record<string, number>;
+
 export default function Groups(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
   const [groups, setGroups] = useState<GroupItem[]>([]);
+  const [groupRatios, setGroupRatios] = useState<GroupRatioMap>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -47,8 +51,13 @@ export default function Groups(): JSX.Element {
     setLoading(true);
     setError('');
     try {
-      const res = await api.listGroups();
-      setGroups(res?.data ?? []);
+      const [groupRes, ratioRes] = await Promise.all([
+        api.listGroups(),
+        api.getRatios().catch(() => null),
+      ]);
+      setGroups(groupRes?.data ?? []);
+      const ratios = (ratioRes?.data ?? {}) as { group_ratio?: GroupRatioMap };
+      setGroupRatios(ratios.group_ratio ?? {});
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -68,7 +77,8 @@ export default function Groups(): JSX.Element {
     setModalError('');
     setForm({
       name: g.name || '',
-      ratio: String(g.ratio != null ? g.ratio : 1),
+      // 展示计费口径的倍率（RatioConfig），不回退到分组条目上那份不生效的旧值
+      ratio: String(groupRatios[g.name] != null ? groupRatios[g.name] : 1),
       allowed_models: Array.isArray(g.allowed_models)
         ? g.allowed_models.join(', ')
         : (g.allowed_models || ''),
@@ -80,6 +90,22 @@ export default function Groups(): JSX.Element {
   const closeModal = () => {
     setShowModal(false);
     setEditing(null);
+  };
+
+  /** 把分组倍率写进计费实际读取的 RatioConfig（分组条目上的 ratio 字段仅为兼容保留） */
+  const syncGroupRatio = async (name: string, ratio: number | null) => {
+    const res = await api.getRatios();
+    const current = (res?.data ?? {}) as {
+      model_ratio?: Record<string, number>;
+      group_ratio?: GroupRatioMap;
+    };
+    const nextGroup = { ...(current.group_ratio ?? {}) };
+    if (ratio == null || ratio === 1) delete nextGroup[name];
+    else nextGroup[name] = ratio;
+    await api.updateRatios({
+      model_ratio: current.model_ratio ?? {},
+      group_ratio: nextGroup,
+    });
   };
 
   // payload 与后端 GroupRequest 对齐
@@ -102,6 +128,7 @@ export default function Groups(): JSX.Element {
         description: form.description || '',
       };
       await api.upsertGroup(payload);
+      await syncGroupRatio(form.name.trim(), Number(form.ratio) || 1);
       addToast(t('用户分组已保存'));
       closeModal();
       void loadGroups();
@@ -126,6 +153,8 @@ export default function Groups(): JSX.Element {
         setError('');
         try {
           await api.deleteGroup(name);
+          // 连带清掉计费倍率，避免留下孤儿倍率作用到同名新分组
+          await syncGroupRatio(name, null).catch(() => { /* 清理失败不阻塞删除 */ });
           addToast(t('用户分组已删除'));
           void loadGroups();
         } catch (err) {
@@ -175,8 +204,12 @@ export default function Groups(): JSX.Element {
                           )}
                         </td>
                         <td>
-                          <span className="ratio-badge" data-high={(g.ratio || 1) > 1}>
-                            ×{g.ratio != null ? g.ratio : 1}
+                          <span
+                            className="ratio-badge"
+                            data-high={(groupRatios[g.name] ?? 1) > 1}
+                            title={t('计费实际生效的分组倍率（与「定价倍率」页同一份配置）')}
+                          >
+                            ×{groupRatios[g.name] != null ? groupRatios[g.name] : 1}
                           </span>
                         </td>
                         <td

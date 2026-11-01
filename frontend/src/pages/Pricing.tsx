@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { Plus, Trash2 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import { SkeletonList } from '../components/ui';
+import { SkeletonList, Combobox } from '../components/ui';
+import type { ManageView, GroupItem } from '../types';
 import './Pricing.css';
 
 /**
@@ -67,10 +68,36 @@ export default function Pricing() {
   const [ratioText, setRatioText] = useState('{}');
   const [groupRatioText, setGroupRatioText] = useState('{}');
 
+  // 候选数据：模型目录视图（含别名映射）、价格目录、用户分组
+  const [manageView, setManageView] = useState<ManageView | null>(null);
+  const [priceKeys, setPriceKeys] = useState<string[]>([]);
+  const [groups, setGroups] = useState<GroupItem[]>([]);
+
   useEffect(() => {
     void loadRatios();
+    void loadOptions();
     // 只在挂载时拉一次；保存后由 handleSaveRatios 自行回读
   }, []);
+
+  /** 拉取下拉候选：失败静默（候选为空时仍可自由输入） */
+  const loadOptions = async () => {
+    try {
+      const res = await api.listManageModels();
+      if (res?.data) setManageView(res.data);
+    } catch { /* 候选加载失败静默 */ }
+    try {
+      const res = await api.listPrices();
+      const raw = Array.isArray(res) ? res : (res as { data?: Array<{ model?: string }> })?.data;
+      if (Array.isArray(raw)) {
+        setPriceKeys(raw.map((p) => p?.model).filter((v): v is string => Boolean(v)));
+      }
+    } catch { /* 候选加载失败静默 */ }
+    try {
+      const res = await api.listGroups();
+      const raw = Array.isArray(res) ? res : (res as { data?: GroupItem[] })?.data;
+      if (Array.isArray(raw)) setGroups(raw);
+    } catch { /* 候选加载失败静默 */ }
+  };
 
   const loadRatios = async () => {
     setRatioLoading(true);
@@ -115,9 +142,42 @@ export default function Pricing() {
     );
   };
 
-  /** 校验一行：key 非空且不重复、value 是正数 */
+  /** 模型倍率候选：模型目录 ∪ 全局别名 ∪ 价格目录 ∪ 已配置倍率键（大小写不敏感去重） */
+  const modelOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    const push = (name?: string) => {
+      const n = name?.trim();
+      if (!n) return;
+      const k = n.toLowerCase();
+      if (!seen.has(k)) seen.set(k, n);
+    };
+    manageView?.models.forEach((m) => {
+      push(m.id);
+      m.aliases.forEach(push);
+    });
+    Object.keys(manageView?.mappings ?? {}).forEach(push);
+    priceKeys.forEach(push);
+    modelRows.forEach((r) => push(r.key));
+    return [...seen.values()].sort((a, b) => a.localeCompare(b));
+  }, [manageView, priceKeys, modelRows]);
+
+  /** 分组倍率候选：用户分组列表 ∪ 已配置分组键 */
+  const groupOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    const push = (name?: string) => {
+      const n = name?.trim();
+      if (!n) return;
+      const k = n.toLowerCase();
+      if (!seen.has(k)) seen.set(k, n);
+    };
+    groups.forEach((g) => push(g.name));
+    groupRows.forEach((r) => push(r.key));
+    return [...seen.values()].sort((a, b) => a.localeCompare(b));
+  }, [groups, groupRows]);
+
+  /** 校验一行：key 非空且不重复（大小写不敏感）、value 是正数 */
   const validate = (which: 'model' | 'group', rows: RatioRow[]): boolean => {
-    const keys = rows.map((r) => r.key.trim()).filter(Boolean);
+    const keys = rows.map((r) => r.key.trim().toLowerCase()).filter(Boolean);
     const dup = keys.some((k, i) => keys.indexOf(k) !== i);
     const bad = rows.some((r) => {
       if (!r.key.trim()) return r.value.trim() !== ''; // 空 key + 空 value = 待删占位行，不算错
@@ -203,6 +263,7 @@ export default function Pricing() {
     err: string | null,
     nameHint: string,
     placeholder: string,
+    options: string[],
   ) => (
     <div className="form-group">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -234,11 +295,15 @@ export default function Pricing() {
               {rows.map((row, i) => (
                 <tr key={i}>
                   <td>
-                    <input
-                      className="form-input"
+                    <Combobox
                       value={row.key}
                       placeholder={placeholder}
-                      onChange={(e) => updateRow(which, i, { key: e.target.value })}
+                      options={options}
+                      disabledOptions={rows
+                        .filter((_, j) => j !== i)
+                        .map((r) => r.key.trim())
+                        .filter(Boolean)}
+                      onChange={(v) => updateRow(which, i, { key: v })}
                     />
                   </td>
                   <td>
@@ -358,8 +423,9 @@ export default function Pricing() {
                       'model',
                       modelRows,
                       modelError,
-                      t('模型名 → 倍率。例如 gpt-4: 2 表示该模型费用 ×2。'),
+                      t('模型名/别名 → 倍率。候选来自模型目录、别名与价格目录；单个模型的倍率也可在模型管理的定价弹窗里改。'),
                       'gpt-4o',
+                      modelOptions,
                     )}
                     {ratioTable(
                       'group',
@@ -367,6 +433,7 @@ export default function Pricing() {
                       groupError,
                       t('分组名 → 倍率。例如 vip: 0.8 表示 VIP 组用户打 8 折。'),
                       'vip',
+                      groupOptions,
                     )}
                   </div>
                 )}

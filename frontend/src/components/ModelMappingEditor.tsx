@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Plus, Trash2, Table2, Code2 } from 'lucide-react';
+import Combobox from './ui/Combobox';
 import './ModelMappingEditor.css';
 
 interface MappingRow {
@@ -173,19 +174,23 @@ export default function ModelMappingEditor(props: ModelMappingEditorProps): JSX.
               </div>
               {rows.map((row) => (
                 <div key={row.id} className="mme-row">
-                  <input
+                  <Combobox
                     value={row.from}
-                    onChange={(e) => handleRowChange(row.id, 'from', e.target.value)}
+                    options={props.sourceModelOptions ?? []}
+                    disabledOptions={rows
+                      .filter((r) => r.id !== row.id)
+                      .map((r) => r.from.trim())
+                      .filter(Boolean)}
+                    onChange={(v) => handleRowChange(row.id, 'from', v)}
                     placeholder="gpt-4"
                     disabled={props.disabled}
-                    list="mme-source-list"
                   />
-                  <input
+                  <Combobox
                     value={row.to}
-                    onChange={(e) => handleRowChange(row.id, 'to', e.target.value)}
+                    options={props.targetModelOptions ?? props.sourceModelOptions ?? []}
+                    onChange={(v) => handleRowChange(row.id, 'to', v)}
                     placeholder="gpt-4-0613"
                     disabled={props.disabled}
-                    list="mme-target-list"
                   />
                   <div className="mme-row-action">
                     <button
@@ -226,16 +231,6 @@ export default function ModelMappingEditor(props: ModelMappingEditorProps): JSX.
         />
       )}
 
-      {props.sourceModelOptions && props.sourceModelOptions.length > 0 && (
-        <datalist id="mme-source-list">
-          {props.sourceModelOptions.map((m) => <option key={m} value={m} />)}
-        </datalist>
-      )}
-      {props.targetModelOptions && props.targetModelOptions.length > 0 && (
-        <datalist id="mme-target-list">
-          {props.targetModelOptions.map((m) => <option key={m} value={m} />)}
-        </datalist>
-      )}
     </div>
   );
 }

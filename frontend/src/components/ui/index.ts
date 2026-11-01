@@ -19,3 +19,4 @@ export { default as Tooltip } from './Tooltip';
 export { default as Skeleton, SkeletonList, SkeletonTable, SkeletonCards } from './Skeleton';
 export { default as GuideEmptyState } from './GuideEmptyState';
 export { default as Pagination } from './Pagination';
+export { default as Combobox } from './Combobox';

@@ -1120,6 +1120,7 @@ pub async fn handle_messages(
             let cost = super::openai::charge_usage(
                 &state,
                 &api_key,
+                &model,
                 billing_model,
                 &billing_group,
                 response.usage.prompt_tokens,
@@ -1148,6 +1149,7 @@ pub async fn handle_messages(
             log.channel_cost = super::openai::compute_channel_cost(
                 &state,
                 used_channel_id.as_deref(),
+                &model,
                 billing_model,
                 &billing_group,
                 response.usage.prompt_tokens,

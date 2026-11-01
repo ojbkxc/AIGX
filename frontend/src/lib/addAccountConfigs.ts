@@ -748,65 +748,100 @@ export interface PresetProviderItem {
   hint?: string;
 }
 
-/** 预置端点模板（取自 Agent2API preset 目录；与内置目录同地址的会在渲染时去重） */
+/** 预置端点模板（逐条对齐 Agent2API `preset-providers.js` 的 PRESET_PROVIDERS：
+ *  顺序、命名、协议与说明文案全抄；与内置目录同地址的会在渲染时去重） */
 export const PRESET_PROVIDERS: PresetProviderItem[] = [
   { key: 'openai', name: 'OpenAI', protocol: 'openai', base_url: 'https://api.openai.com/v1' },
   { key: 'anthropic', name: 'Anthropic', protocol: 'anthropic', base_url: 'https://api.anthropic.com' },
-  { key: 'openrouter', name: 'OpenRouter', protocol: 'openai', base_url: 'https://openrouter.ai/api/v1' },
-  { key: 'huggingface', name: 'HuggingFace', protocol: 'openai', base_url: 'https://router.huggingface.co/v1' },
-  { key: 'nvidia', name: 'NVIDIA', protocol: 'openai', base_url: 'https://integrate.api.nvidia.com/v1' },
   {
-    key: 'deepseek-anthropic',
-    name: 'DeepSeek（Anthropic 端点）',
-    protocol: 'anthropic',
-    base_url: 'https://api.deepseek.com/anthropic',
-  },
-  { key: 'glm-cn', name: 'GLM 中国', protocol: 'openai', base_url: 'https://open.bigmodel.cn/api/coding/paas/v4' },
-  { key: 'zai-anthropic', name: 'Z.ai（Anthropic 端点）', protocol: 'anthropic', base_url: 'https://api.z.ai/api/anthropic' },
-  {
-    key: 'siliconflow-intl',
-    name: 'SiliconFlow 国际',
-    protocol: 'openai',
-    base_url: 'https://api.siliconflow.com/v1',
+    key: 'openrouter', name: 'OpenRouter', protocol: 'openai', base_url: 'https://openrouter.ai/api/v1',
+    hint: '一个 Key 用遍多家模型，模型名用「厂商/模型」全称（如 deepseek/deepseek-chat）',
   },
   {
-    key: 'volcengine-ark',
-    name: '火山方舟 Coding',
-    protocol: 'openai',
-    base_url: 'https://ark.cn-beijing.volces.com/api/coding/v3',
+    key: 'huggingface', name: 'HuggingFace', protocol: 'openai', base_url: 'https://router.huggingface.co/v1',
+    hint: '走 Inference Providers 路由，Key 在 hf.co/settings/tokens 创建',
   },
   {
-    key: 'alicode-cn',
-    name: '阿里云百炼 Coding（国内）',
-    protocol: 'openai',
-    base_url: 'https://coding.dashscope.aliyuncs.com/v1',
+    key: 'nvidia', name: 'NVIDIA', protocol: 'openai', base_url: 'https://integrate.api.nvidia.com/v1',
+    hint: 'NVIDIA NIM 托管端点，Key 在 integrate.api.nvidia.com 申请',
   },
   {
-    key: 'alicode-intl',
-    name: '阿里云百炼 Coding（国际）',
-    protocol: 'openai',
-    base_url: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+    key: 'deepseek', name: 'DeepSeek', protocol: 'openai', base_url: 'https://api.deepseek.com',
+    hint: 'Anthropic 兼容端点在 https://api.deepseek.com/anthropic（协议换 anthropic 时填它）',
   },
   {
-    key: 'alims-intl',
-    name: '阿里云百炼模型服务（国际）',
-    protocol: 'openai',
-    base_url: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    key: 'glm', name: 'GLM Coding', protocol: 'anthropic', base_url: 'https://api.z.ai/api/anthropic',
+    hint: '国际版 z.ai 的 Coding 套餐；OpenAI 兼容地址为 https://api.z.ai/api/coding/paas/v4',
   },
   {
-    key: 'alitp-intl',
-    name: '阿里云 Token Plan（国际）',
-    protocol: 'openai',
-    base_url: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    key: 'glm-cn', name: 'GLM 中国', protocol: 'openai', base_url: 'https://open.bigmodel.cn/api/coding/paas/v4',
+    hint: '智谱 bigmodel.cn 的 Coding 套餐，Key 在 open.bigmodel.cn/usercenter/apikeys',
   },
   {
-    key: 'xiaomi-mimo',
-    name: '小米 MiMo Token Plan',
-    protocol: 'openai',
-    base_url: 'https://token-plan-sgp.xiaomimimo.com/v1',
+    key: 'minimax', name: 'Minimax Coding', protocol: 'anthropic', base_url: 'https://api.minimax.io/anthropic',
+    hint: '国际站 Coding 套餐；OpenAI 兼容地址为 https://api.minimax.io/v1',
   },
-  { key: 'minimax-cn', name: 'MiniMax 中国', protocol: 'openai', base_url: 'https://api.minimaxi.com/v1' },
-  { key: 'sensenova', name: '商汤日日新', protocol: 'openai', base_url: 'https://api.sensenova.cn/compatible-mode/v1' },
+  {
+    key: 'minimax-cn', name: 'Minimax 中国', protocol: 'anthropic', base_url: 'https://api.minimaxi.com/anthropic',
+    hint: '国内站（minimaxi.com）；OpenAI 兼容地址为 https://api.minimaxi.com/v1',
+  },
+  {
+    key: 'siliconflow', name: 'SiliconFlow', protocol: 'openai', base_url: 'https://api.siliconflow.com/v1',
+    hint: '国内站为 https://api.siliconflow.cn/v1',
+  },
+  {
+    key: 'volcengine-ark', name: '火山方舟', protocol: 'openai', base_url: 'https://ark.cn-beijing.volces.com/api/coding/v3',
+    hint: '火山引擎 Coding 套餐；通用推理接入点为 https://ark.cn-beijing.volces.com/api/v3',
+  },
+  {
+    key: 'alicode', name: 'Alibaba', protocol: 'openai', base_url: 'https://coding.dashscope.aliyuncs.com/v1',
+    hint: '阿里云百炼 Coding 套餐（国内站）',
+  },
+  {
+    key: 'alicode-intl', name: 'Alibaba Coding', protocol: 'openai', base_url: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+    hint: '阿里云百炼 Coding 套餐（国际站）',
+  },
+  {
+    key: 'alims-intl', name: 'Alibaba Studio', protocol: 'openai', base_url: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    hint: '阿里云百炼模型服务（国际站，OpenAI 兼容模式）',
+  },
+  {
+    key: 'alitp-intl', name: 'Alibaba Token Plan', protocol: 'openai', base_url: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    hint: '阿里云 Token Plan 套餐（国际站）',
+  },
+  {
+    key: 'xiaomi-tokenplan', name: '小米 MiMo (Token Plan)', protocol: 'openai', base_url: 'https://token-plan-sgp.xiaomimimo.com/v1',
+    hint: '小米 MiMo Token Plan 套餐（新加坡站）',
+  },
+  {
+    key: 'opencode-go', name: 'OpenCode Go', protocol: 'openai', base_url: 'https://opencode.ai/zen/go/v1',
+    hint: '同地址换 anthropic 协议即走它的 Claude 兼容端点。转发必须填 OpenCode Go 的 API Key（订阅制）',
+  },
+  {
+    key: 'opencode-zen', name: 'OpenCode Zen', protocol: 'openai', base_url: 'https://opencode.ai/inference/v1',
+    hint: '免费模型不用填 Key；付费模型则填 Zen 的 API Key',
+  },
+  {
+    key: 'clinepass', name: 'Cline Pass', protocol: 'openai', base_url: 'https://api.cline.bot/api/v1',
+    hint: 'Cline Pass 的 API Key 在 app.cline.bot 获取（订阅制）；端点为 OpenAI 兼容',
+  },
+  {
+    key: 'ollama-local', name: 'Ollama（本地）', protocol: 'openai', base_url: 'http://localhost:11434/v1',
+    hint: '本机 Ollama 的 OpenAI 兼容端点，无需 API Key',
+  },
+  // ── 自建聚合面板与商汤日日新：随余额查询一起接入，「后到居后」追加 ──
+  {
+    key: 'sub2api', name: 'Sub2API', protocol: 'openai', base_url: '',
+    hint: '自建聚合面板：填你自己的站点地址（OpenAI 兼容填到 /v1）',
+  },
+  {
+    key: 'newapi', name: 'NewAPI', protocol: 'openai', base_url: '',
+    hint: '自建聚合面板：填你自己的站点地址',
+  },
+  {
+    key: 'sensenova', name: '商汤日日新', protocol: 'openai', base_url: 'https://api.sensenova.cn/compatible-mode/v1',
+    hint: '商汤日日新的 OpenAI 兼容端点',
+  },
 ];
 
 /** 自定义分段：三种协议，地址由用户自己填。 */

@@ -6,6 +6,7 @@ import {
 import { api } from '../api';
 import ChatDebugger, { type DebugMessage } from '../components/ChatDebugger';
 import SessionDrawer from '../components/chat/SessionDrawer';
+import { useToast } from '../components/Toast';
 import './Chat.css';
 
 /** 读取「已启用」提示词并映射为空状态建议卡片（无则用 new-api 同款默认四项） */
@@ -121,6 +122,16 @@ export default function Chat(): JSX.Element {
   const activeRef = useRef('');
   const messagesRef = useRef<DebugMessage[]>([]);
   const modelRef = useRef('');
+  /** 流式生成中标记（ChatDebugger 上报）：生成中禁止切换/新建/删除会话，
+   *  否则切换前的落盘会把流式中间态的半截回复写进当前会话 */
+  const busyRef = useRef(false);
+  const addToast = useToast();
+  /** 会话操作守卫（对齐 Agent 页 `if (busy) return`）：生成中拦截并提示 */
+  const guardBusy = useCallback((): boolean => {
+    if (!busyRef.current) return false;
+    addToast(t('正在生成回复，请先停止再操作会话'), 'error');
+    return true;
+  }, [addToast, t]);
 
   /** 会话摘要列表（后端返回；消息按需拉取） */
   const persistSessions = (next: PlaygroundSession[]): void => {
@@ -165,7 +176,9 @@ export default function Chat(): JSX.Element {
             false,
           );
         }
-        imported.push({ id, title: s.title || '新会话', model: s.model, updated_at: s.updated_at });
+        // 单位统一：后端会话摘要的 updated_at 是「秒」（渲染时 ×1000），
+        // 旧 localStorage 数据是 ms —— 入库与本地 state 都按秒存
+        imported.push({ id, title: s.title || '新会话', model: s.model, updated_at: updatedSec > 0 ? updatedSec : Math.floor(Date.now() / 1000) });
       } catch {
         /* 单条失败跳过，不阻塞其余 */
       }
@@ -212,7 +225,7 @@ export default function Chat(): JSX.Element {
           // 后端不可用时退化为本地临时会话（不持久化）
         }
         if (cancelled) return;
-        const fresh = { id: freshId, title: '新会话', model: '', updated_at: Date.now() };
+        const fresh = { id: freshId, title: '新会话', model: '', updated_at: Math.floor(Date.now() / 1000) };
         persistSessions([fresh]);
         activeRef.current = freshId;
         messagesRef.current = [];
@@ -304,6 +317,8 @@ export default function Chat(): JSX.Element {
       setDrawerOpen(false);
       return;
     }
+    // 生成中切换会把半截回复落盘到当前会话（流式中间态），直接拦截
+    if (guardBusy()) return;
     if (saveTimer.current !== null) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -331,6 +346,7 @@ export default function Chat(): JSX.Element {
 
   /** 新建会话（后端创建，消息清空） */
   const createSession = async (): Promise<void> => {
+    if (guardBusy()) return;
     if (saveTimer.current !== null) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -343,7 +359,7 @@ export default function Chat(): JSX.Element {
     } catch {
       // 后端不可用：本地临时会话兜底
     }
-    persistSessions([{ id: freshId, title: '新会话', model: modelRef.current, updated_at: Date.now() }, ...sessionsRef.current]);
+    persistSessions([{ id: freshId, title: '新会话', model: modelRef.current, updated_at: Math.floor(Date.now() / 1000) }, ...sessionsRef.current]);
     activeRef.current = freshId;
     messagesRef.current = [];
     setActiveId(freshId);
@@ -353,6 +369,7 @@ export default function Chat(): JSX.Element {
 
   /** 删除会话（二次确认由共享 SessionDrawer 内建） */
   const deleteSession = async (id: string): Promise<void> => {
+    if (guardBusy()) return;
     try {
       await api.deleteChatSession(id);
     } catch {
@@ -368,6 +385,11 @@ export default function Chat(): JSX.Element {
     const rest = sessionsRef.current.filter((s) => s.id !== id);
     if (id === activeRef.current) {
       if (!rest.length) {
+        // 删的是最后一个会话：先把 ref 清空再新建，否则 createSession 会
+        // 拿含刚删会话的 sessionsRef 重建列表，被删的会话「复活」。
+        persistSessions([]);
+        activeRef.current = '';
+        messagesRef.current = [];
         await createSession();
         return;
       }
@@ -403,6 +425,7 @@ export default function Chat(): JSX.Element {
         onClearMessages={handleClear}
         hasMessages={messages.length > 0}
         onOpenSessions={() => setDrawerOpen(true)}
+        onBusyChange={(b) => { busyRef.current = b; }}
       />
 
       {/* 历史会话抽屉 + 遮罩 portal 到 body：

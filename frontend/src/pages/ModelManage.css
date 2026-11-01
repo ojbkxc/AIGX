@@ -169,6 +169,23 @@
   font-size: 12px;
 }
 
+.mm-price-free {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--success-soft, rgba(22, 163, 74, 0.12));
+  color: var(--success-color, #16a34a);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mm-th-sub {
+  margin-left: 4px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
 .mm-price-ratio {
   display: block;
   font-size: 11px;

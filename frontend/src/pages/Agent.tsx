@@ -86,6 +86,9 @@ export default function Agent(): JSX.Element {
   });
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [role, setRole] = useState<'observer' | 'operator'>('observer');
+  /** sessionId 的 ref 镜像：配置加载竞态保护用（恢复历史后禁止被配置初值覆盖模型） */
+  const sessionIdRef = useRef<string | null>(null);
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
   const abortRef = useRef<AbortController | null>(null);
   const msgIdRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -117,7 +120,10 @@ export default function Agent(): JSX.Element {
             tools?: Array<{ name: string; label: string }>;
           };
         }).data;
-        setModel(data?.model || data?.effective_model || '');
+        // 竞态保护：用户已恢复历史会话时，配置初值不得覆盖会话自己的模型
+        if (!sessionIdRef.current) {
+          setModel(data?.model || data?.effective_model || '');
+        }
         if (data?.tools?.length) {
           setToolLabels(new Map(data.tools.map((tt) => [tt.name, tt.label])));
         }
@@ -159,11 +165,15 @@ export default function Agent(): JSX.Element {
   const clearAll = useCallback(() => {
     setMessages([]);
     setSessionId(null);
+    // 残留审批卡指向旧会话的 request_id，必须一并清掉（点了会误审批旧请求）
+    setPending(null);
   }, []);
 
   /** 恢复历史会话：拉详情，工具轨迹（tool_calls JSON 数组）还原成步骤条 */
   const restoreSession = useCallback(async (id: string): Promise<void> => {
     if (busy) return;
+    // 切换前清掉残留审批卡：它指向旧会话的 request_id，留着会误审批旧请求
+    setPending(null);
     try {
       const res = await api.getAgentSession(id);
       const data = (res as unknown as {
@@ -210,6 +220,8 @@ export default function Agent(): JSX.Element {
       if (sessionId === id) {
         setSessionId(null);
         setMessages([]);
+        // 同 restoreSession：当前会话被删时审批卡也必须清掉
+        setPending(null);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

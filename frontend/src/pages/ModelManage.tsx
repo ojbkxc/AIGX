@@ -4,7 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Boxes, Search, Trash2, Plus, RefreshCw, Tag, Pencil, Download, Loader2 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import { Card, Loading, EmptyState, Badge, Switch, Pagination, Tabs } from '../components/ui';
+import { Card, Loading, EmptyState, Badge, Switch, Pagination, Tabs, Combobox } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { fmtCompact } from '../lib/utils';
 import type { ManageView, ManagedModel, ModelMetaOverride, ChannelItem } from '../types';
@@ -34,10 +34,16 @@ const CAP_LABELS: Array<{ match: string; label: string }> = [
 ];
 
 function fmtPrice(n: number | null | undefined): string {
-  if (n == null || n === 0) return '—';
+  if (n == null) return '—';
   if (n < 0.01) return n.toFixed(4);
   if (n < 1) return n.toFixed(3);
   return n.toFixed(2);
+}
+
+/** 定价条目是否全 0（免费模型）——与「未定价」（price 为 null）区分开展示 */
+function isFreePrice(p: { input_price: number; output_price: number; cache_price?: number | null; price_type: string }): boolean {
+  if (p.price_type === 'count') return p.input_price === 0;
+  return p.input_price === 0 && p.output_price === 0 && (p.cache_price == null || p.cache_price === 0);
 }
 
 /** 价格表单（字符串态，提交时解析） */
@@ -70,6 +76,22 @@ export default function ModelManage(): JSX.Element {
   const [view, setView] = useState<ManageView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  /** 全量模型 ID 候选（别名弹窗目标模型下拉）：目录 id ∪ 别名，大小写不敏感去重 */
+  const modelIdOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    const push = (name?: string) => {
+      const n = name?.trim();
+      if (!n) return;
+      const k = n.toLowerCase();
+      if (!seen.has(k)) seen.set(k, n);
+    };
+    view?.models.forEach((m) => {
+      push(m.id);
+      m.aliases.forEach(push);
+    });
+    return [...seen.values()].sort((a, b) => a.localeCompare(b));
+  }, [view]);
 
   // 筛选
   /** 左栏三段式导航的选中项：`all` / `ch:<渠道id>` / `pv:<provider>`。
@@ -851,7 +873,10 @@ export default function ModelManage(): JSX.Element {
                       <th style={{ width: 52 }}>{t('启用')}</th>
                       <th>{t('模型')}</th>
                       <th>{t('来源')}</th>
-                      <th style={{ width: 150 }}>{t('价格')}</th>
+                      <th style={{ width: 150 }} title={t('单位：美元（USD）')}>
+                        {t('价格')}
+                        <span className="mm-th-sub">$/1k</span>
+                      </th>
                       <th style={{ width: 130 }}>{t('能力')}</th>
                       <th style={{ width: 170 }}>{t('别名')}</th>
                       <th style={{ width: 150 }}>{t('操作')}</th>
@@ -902,18 +927,27 @@ export default function ModelManage(): JSX.Element {
                           </td>
                           <td>
                             {row.price ? (
-                              <span className="mm-price">
-                                {row.price.price_type === 'count'
-                                  ? `${t('¥/次')} ${fmtPrice(row.price.input_price)}`
-                                  : `${fmtPrice(row.price.input_price)} / ${fmtPrice(
-                                      row.price.output_price
-                                    )}`}
-                                {row.model_ratio !== 1 && (
-                                  <span className="mm-price-ratio">
-                                    {t('倍率')} {row.model_ratio}
-                                  </span>
-                                )}
-                              </span>
+                              isFreePrice(row.price) ? (
+                                <span className="mm-price-free" title={t('价格已配置为 0，调用不计费')}>
+                                  {t('免费')}
+                                </span>
+                              ) : (
+                                <span
+                                  className="mm-price"
+                                  title={t('单位：美元。按量价为每 1k tokens 输入/输出价；按次价为每次调用价。')}
+                                >
+                                  {row.price.price_type === 'count'
+                                    ? `$${fmtPrice(row.price.input_price)} ${t('/次')}`
+                                    : `$${fmtPrice(row.price.input_price)} / $${fmtPrice(
+                                        row.price.output_price
+                                      )}`}
+                                  {row.model_ratio !== 1 && (
+                                    <span className="mm-price-ratio">
+                                      {t('倍率')} {row.model_ratio}
+                                    </span>
+                                  )}
+                                </span>
+                              )
                             ) : (
                               <span className="mm-price-empty">{t('未定价')}</span>
                             )}
@@ -1203,10 +1237,11 @@ export default function ModelManage(): JSX.Element {
               </div>
               <div className="form-group">
                 <label>{t('目标模型')} *</label>
-                <input
-                  className="form-input"
+                <Combobox
                   value={aliasForm.target}
-                  onChange={(e) => setAliasForm({ ...aliasForm, target: e.target.value })}
+                  options={modelIdOptions}
+                  placeholder={t('搜索或输入目标模型名')}
+                  onChange={(v) => setAliasForm({ ...aliasForm, target: v })}
                   disabled={savingAlias}
                 />
               </div>

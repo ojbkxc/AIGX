@@ -1,0 +1,84 @@
+/* Combobox — 表单内联可搜索下拉（input 形态） */
+
+.cb-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.cb-input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--card-bg, #fff);
+  color: var(--text-main);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.cb-input:focus {
+  border-color: var(--accent-color, #2f6fed);
+}
+
+.cb-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.cb-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--card-bg, #fff);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  padding: 4px;
+}
+
+.cb-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cb-item.hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.cb-item.active {
+  color: var(--accent-color, #2f6fed);
+  font-weight: 600;
+}
+
+.cb-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.cb-item-tag {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.cb-empty {
+  padding: 10px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}

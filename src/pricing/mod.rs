@@ -108,6 +108,19 @@ impl RatioConfig {
         self.model_ratio.get(model).copied().unwrap_or(1.0)
     }
 
+    /// 模型倍率（双名感知）：先按对外请求名查，未配置再按映射后上游名查，缺省 1.0。
+    ///
+    /// 倍率的配置入口（模型管理定价弹窗 / 倍率页）以对外模型名为键；计费发生时
+    /// 名字可能已被渠道级映射改写为上游名。双名 fallback 让「一次配置」对两种
+    /// 计费路径都生效，避免映射场景倍率静默失效。
+    pub fn model_ratio_aliased(&self, requested: &str, upstream: &str) -> f64 {
+        self.model_ratio
+            .get(requested)
+            .or_else(|| self.model_ratio.get(upstream))
+            .copied()
+            .unwrap_or(1.0)
+    }
+
     pub fn group_ratio(&self, group: &str) -> f64 {
         self.group_ratio.get(group).copied().unwrap_or(1.0)
     }
@@ -321,6 +334,23 @@ impl PricingStore {
         self.prices.read().get(model).cloned()
     }
 
+    /// 解析计价键：对外请求名优先，映射后上游名兜底。
+    ///
+    /// 定价目录按「对外模型名」全局唯一配置（模型管理页），但计费时模型名可能
+    /// 已被渠道级映射改写。若按上游名找不到定价，回退对外名——否则映射场景
+    /// 定价整体失效、请求被调用方按 0 计费（免费放行）。返回 `None` 表示两个
+    /// 名字都未定价。
+    pub fn resolve_priced_name(&self, requested: &str, upstream: &str) -> Option<String> {
+        let prices = self.prices.read();
+        if prices.contains_key(requested) {
+            Some(requested.to_string())
+        } else if prices.contains_key(upstream) {
+            Some(upstream.to_string())
+        } else {
+            None
+        }
+    }
+
     /// 新增/更新定价（upsert，以 model_name 为键）
     pub fn upsert_price(&self, mut price: ModelPrice) -> anyhow::Result<ModelPrice> {
         let now = chrono::Utc::now().timestamp();
@@ -401,11 +431,43 @@ impl PricingStore {
         cached_tokens: u64,
         group: &str,
     ) -> Result<f64, PricingError> {
+        self.cost_with_name(model, input_tokens, output_tokens, cached_tokens, group)
+    }
+
+    /// 计算单次请求费用（双名感知版）。
+    ///
+    /// 计价键经 `resolve_priced_name` 解析（对外名优先、上游名兜底），价格与
+    /// 模型倍率使用同一个命中名，保证口径自洽。两个名字都未定价时返回
+    /// `Err(PricingError(requested))`，与单名版一致由调用方处理。
+    pub fn calculate_cost_with_cache_aliased(
+        &self,
+        requested: &str,
+        upstream: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_tokens: u64,
+        group: &str,
+    ) -> Result<f64, PricingError> {
+        let name = self
+            .resolve_priced_name(requested, upstream)
+            .ok_or_else(|| PricingError(requested.to_string()))?;
+        self.cost_with_name(&name, input_tokens, output_tokens, cached_tokens, group)
+    }
+
+    /// 按已解析的计价键计算费用（内部共用主体）。
+    fn cost_with_name(
+        &self,
+        name: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_tokens: u64,
+        group: &str,
+    ) -> Result<f64, PricingError> {
         let price = self
-            .get_price(model)
-            .ok_or_else(|| PricingError(model.to_string()))?;
+            .get_price(name)
+            .ok_or_else(|| PricingError(name.to_string()))?;
         let ratios = self.ratios.read();
-        let model_ratio = ratios.model_ratio(model);
+        let model_ratio = ratios.model_ratio(name);
         let group_ratio = ratios.group_ratio(group);
 
         let base = if price.price_type == "count" {
@@ -460,6 +522,30 @@ impl PricingStore {
             return Ok(0);
         }
         // 向上取整，最低 1 配额单位
+        Ok((cost + 0.999999) as i64)
+    }
+
+    /// 双名感知版配额计费（向上取整，最低 1 配额单位）。
+    pub fn calculate_cost_quoted_with_cache_aliased(
+        &self,
+        requested: &str,
+        upstream: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_tokens: u64,
+        group: &str,
+    ) -> Result<i64, PricingError> {
+        let cost = self.calculate_cost_with_cache_aliased(
+            requested,
+            upstream,
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            group,
+        )?;
+        if cost <= 0.0 {
+            return Ok(0);
+        }
         Ok((cost + 0.999999) as i64)
     }
 
@@ -672,5 +758,68 @@ mod tests {
         // B09：无定价不再静默按 0 计费（免费放行），而是显式返回错误
         let s = store();
         assert!(s.calculate_cost("unknown", 1000, 1000, "default").is_err());
+    }
+
+    #[test]
+    fn aliased_pricing_prefers_requested_name() {
+        // 对外名与上游名都定价时，按对外名计（「一个模型设一次价」语义）
+        let s = store();
+        s.upsert_price(ModelPrice::new("gpt-4o", 0.01, 0.02))
+            .unwrap();
+        s.upsert_price(ModelPrice::new("gpt-4o-2024-08-06", 0.03, 0.06))
+            .unwrap();
+        let cost = s
+            .calculate_cost_with_cache_aliased("gpt-4o", "gpt-4o-2024-08-06", 1000, 0, 0, "default")
+            .unwrap();
+        assert!((cost - 0.01).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aliased_pricing_falls_back_to_upstream() {
+        // 只按上游名定价（存量配置）时仍然生效
+        let s = store();
+        s.upsert_price(ModelPrice::new("gpt-4o-2024-08-06", 0.03, 0.06))
+            .unwrap();
+        let cost = s
+            .calculate_cost_with_cache_aliased("gpt-4o", "gpt-4o-2024-08-06", 1000, 0, 0, "default")
+            .unwrap();
+        assert!((cost - 0.03).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aliased_pricing_falls_back_to_requested() {
+        // 映射场景的核心修复：只有对外名定价时，按上游名计费也能命中
+        let s = store();
+        s.upsert_price(ModelPrice::new("gpt-4o", 0.01, 0.02))
+            .unwrap();
+        let cost = s
+            .calculate_cost_with_cache_aliased(
+                "gpt-4o",
+                "gpt-4o-2024-08-06",
+                1000,
+                500,
+                0,
+                "default",
+            )
+            .unwrap();
+        // 1000*0.01/1k + 500*0.02/1k = 0.01 + 0.01 = 0.02
+        assert!((cost - 0.02).abs() < 1e-9);
+        // 两个名字都未定价 → Err（不静默免费）
+        assert!(s
+            .calculate_cost_with_cache_aliased("foo", "bar", 1000, 0, 0, "default")
+            .is_err());
+    }
+
+    #[test]
+    fn aliased_model_ratio_double_lookup() {
+        let mut ratios = RatioConfig::default();
+        ratios.model_ratio.insert("gpt-4o".to_string(), 2.0);
+        ratios.model_ratio.insert("upstream-x".to_string(), 3.0);
+        // 对外名优先
+        assert_eq!(ratios.model_ratio_aliased("gpt-4o", "upstream-x"), 2.0);
+        // 只有上游名 → 兜底
+        assert_eq!(ratios.model_ratio_aliased("unknown", "upstream-x"), 3.0);
+        // 都没有 → 1.0
+        assert_eq!(ratios.model_ratio_aliased("a", "b"), 1.0);
     }
 }

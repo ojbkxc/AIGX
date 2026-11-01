@@ -155,6 +155,13 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
         </div>
         <div className="modal-body" style={{ fontSize: 13.5, lineHeight: 1.6, color: 'var(--text-main)' }}>
           {message}
+          {/* 错误提示放在 body 顶层：不只在「需要密码」时才显示。
+              非密码确认（删除定价 / 清空记录等）的失败也必须可见，
+              否则按钮从「处理中…」恢复、弹窗不关、却没有任何文案，
+              用户会以为操作成功或卡死。 */}
+          {passwordError && (
+            <div className="error-message" style={{ marginTop: 10 }}>{passwordError}</div>
+          )}
           {requirePassword && (
             <div className="form-group" style={{ marginTop: 12, marginBottom: 0 }}>
               <label>{t('登录密码确认')}</label>
@@ -171,9 +178,6 @@ export default function ConfirmDialog({ state, onClose }: ConfirmDialogProps): J
                   if (e.key === 'Enter') { e.preventDefault(); void handleConfirm(); }
                 }}
               />
-              {passwordError && (
-                <span className="form-hint" style={{ color: 'var(--danger-color)' }}>{passwordError}</span>
-              )}
               <span className="form-hint" style={{ marginTop: 6 }}>{t('敏感操作需验证身份，密码不会存储')}</span>
             </div>
           )}
