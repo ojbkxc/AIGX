@@ -317,8 +317,13 @@ export default function Chat(): JSX.Element {
       setDrawerOpen(false);
       return;
     }
-    // 生成中切换会把半截回复落盘到当前会话（流式中间态），直接拦截
-    if (guardBusy()) return;
+    // 生成中切换会把半截回复落盘到当前会话（流式中间态），直接拦截。
+    // 拦截也收起抽屉：sidebar 变体点项不再自动关，窄屏覆盖层形态下抽屉
+    // 不收起会盖住 toast 与「历史会话」按钮，后续操作全被挡。
+    if (guardBusy()) {
+      setDrawerOpen(false);
+      return;
+    }
     if (saveTimer.current !== null) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -346,7 +351,11 @@ export default function Chat(): JSX.Element {
 
   /** 新建会话（后端创建，消息清空） */
   const createSession = async (): Promise<void> => {
-    if (guardBusy()) return;
+    // 拦截同样收起抽屉（理由见 switchSession）
+    if (guardBusy()) {
+      setDrawerOpen(false);
+      return;
+    }
     if (saveTimer.current !== null) {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -414,27 +423,12 @@ export default function Chat(): JSX.Element {
 
   return (
     <div className="pg-shell">
-      <ChatDebugger
-        key={loading ? 'loading' : activeId}
-        playground
-        playgroundModel={model}
-        onPlaygroundModelChange={handleModelChange}
-        initialMessages={loading ? [] : messages}
-        onMessagesChange={handleMessagesChange}
-        suggestionPrompts={suggestions}
-        onClearMessages={handleClear}
-        hasMessages={messages.length > 0}
-        onOpenSessions={() => setDrawerOpen(true)}
-        onBusyChange={(b) => { busyRef.current = b; }}
-      />
-
-      {/* 历史会话抽屉 + 遮罩 portal 到 body：
-          `.main-content` 有 z-index:10 会形成层叠上下文，抽屉（z=200）被困在
-          其中，移动端汉堡按钮是根上下文的 fixed（z=150），会盖住抽屉标题且
-          遮罩挡不住它。挂到 body 后抽屉/遮罩与汉堡处于同一上下文，层级正确。 */}
-      {/* 历史会话抽屉（共享 SessionDrawer：overlay 变体，删除带二次确认） */}
+      {/* 历史会话抽屉（共享 SessionDrawer：sidebar 变体，对齐 AI 运维页）——
+          内嵌在 .pg-shell 左端把消息区往右推，不遮挡全局侧边栏；
+          窄屏（<900px）由组件 CSS 自动降级为 fixed 覆盖层。切换/新建会话后
+          由 switchSession/createSession 里的 setDrawerOpen(false) 收起。 */}
       <SessionDrawer
-        variant="overlay"
+        variant="sidebar"
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         title={t('历史会话')}
@@ -447,6 +441,19 @@ export default function Chat(): JSX.Element {
         onSelect={(id) => void switchSession(id)}
         onCreate={() => void createSession()}
         onDelete={(id) => void deleteSession(id)}
+      />
+      <ChatDebugger
+        key={loading ? 'loading' : activeId}
+        playground
+        playgroundModel={model}
+        onPlaygroundModelChange={handleModelChange}
+        initialMessages={loading ? [] : messages}
+        onMessagesChange={handleMessagesChange}
+        suggestionPrompts={suggestions}
+        onClearMessages={handleClear}
+        hasMessages={messages.length > 0}
+        onOpenSessions={() => setDrawerOpen(true)}
+        onBusyChange={(b) => { busyRef.current = b; }}
       />
     </div>
   );

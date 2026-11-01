@@ -3,12 +3,14 @@ import { test, expect, loginAsAdmin } from './fixtures';
 /**
  * 聊天页历史会话抽屉 —— 回归测试。
  *
- * 覆盖三个真实修复过的缺陷：
+ * 覆盖真实修复过的缺陷：
  * 1. 抽屉高度：`.pg-shell` 的 height:100% 曾因父级无高度而退化，抽屉只能
  *    撑到输入区上方（高度 ≈ 269px）。断言抽屉实际高度接近视口高度。
- * 2. 层级：抽屉曾被困在 `.main-content`（z-index:10）的层叠上下文中，移动端
- *    汉堡按钮会盖住抽屉标题。断言抽屉覆盖视口且标题可点击（未被遮挡）。
- * 3. 删除非活动会话不应丢失活动会话在 debounce 窗口内的消息。
+ * 2. 透明面板：抽屉背景曾引用主题里不存在的 --bg-elevated，fallback 近乎
+ *    全透明，侧栏文字透过面板混排。断言面板背景 alpha ≥ 0.95。
+ * 3. 遮挡主导航：抽屉曾是 overlay 变体，从视口最左滑出把全局侧边栏整个盖住。
+ *    现对齐 AI 运维页用 sidebar 变体（桌面内嵌/窄屏降级覆盖层）。
+ * 4. 删除非活动会话不应丢失活动会话在 debounce 窗口内的消息。
  */
 
 async function openDrawer(page: import('@playwright/test').Page): Promise<void> {
@@ -38,22 +40,20 @@ test.describe('聊天 · 历史会话抽屉', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('打开后铺满视口高度，且标题未被遮挡', async ({ page, pageErrors }) => {
+  test('抽屉形态：桌面内嵌不挡侧栏 / 移动覆盖全屏，且标题未被遮挡', async ({ page, pageErrors }) => {
     await loginAsAdmin(page);
     await page.goto('/chat');
     await expect(page.locator('.pg-shell')).toBeVisible();
     await openDrawer(page);
 
-    // 抽屉与遮罩必须是 position:fixed —— 这是"铺满视口"的结构前提。
-    // 曾是 absolute，父级 auto 高度时只能撑到内容高度（实测 269px，贴着输入框）。
-    // 覆盖层定位在 `.sd-root.overlay` 上（fixed），panel / mask 相对它 absolute
-    // 铺满 —— fixed 的是 root，所以拿 root 判「是否脱离文档流铺满视口」。
-    const positions = await page.evaluate(() => ({
-      root: getComputedStyle(document.querySelector('.sd-root.overlay')!).position,
-      mask: getComputedStyle(document.querySelector('.sd-mask')!).position,
-    }));
-    expect(positions.root).toBe('fixed');
-    expect(positions.mask).toBe('absolute');
+    // sidebar 变体（对齐 AI 运维页）：桌面端内嵌在 .pg-shell 左端，把消息区
+    // 往右推，不脱离文档流（static）；窄屏（<900px）由组件 CSS 降级为
+    // fixed 覆盖层。曾为 overlay 变体：从视口最左滑出把全局侧栏整个盖住。
+    const isNarrow = (page.viewportSize()?.width ?? 1280) < 900;
+    const rootPos = await page.evaluate(
+      () => getComputedStyle(document.querySelector('.sd-root.sidebar')!).position,
+    );
+    expect(rootPos).toBe(isNarrow ? 'fixed' : 'static');
 
     // 几何下界用 85%：CI 的 Linux Chromium 常驻横向滚动条，布局视口比
     // viewportSize().height 矮十几像素（实测 707/720 ≈ 98%），留余量避免假红；
@@ -63,10 +63,6 @@ test.describe('聊天 · 历史会话抽屉', () => {
     expect(drawerBox).not.toBeNull();
     expect(drawerBox!.y).toBeLessThanOrEqual(1);
     expect(drawerBox!.height).toBeGreaterThan(viewportHeight * 0.85);
-
-    // 遮罩同样铺满
-    const mask = await page.locator('.sd-mask').boundingBox();
-    expect(mask!.height).toBeGreaterThan(viewportHeight * 0.85);
 
     // 面板背景必须不透明：曾用 var(--bg-elevated, rgba(255,255,255,.04))，
     // 该变量在主题体系中不存在，fallback 近乎全透明，亮色主题下侧栏文字
@@ -83,14 +79,17 @@ test.describe('聊天 · 历史会话抽屉', () => {
     await expect(title).toBeVisible();
     await title.click({ trial: true });
 
-    // 用视口右上角做命中测试：该点应在遮罩内、抽屉外。若汉堡按钮（fixed,
-    // 左上角）盖住抽屉标题，抽屉会被判为「受遮挡」，此项即失败。
-    const topLeftOwner = await page.evaluate(() => {
-      const el = document.elementFromPoint(24, 24);
-      return el?.closest('.sd-root, .mobile-menu-btn')?.className ?? String(el?.className ?? '');
-    });
-    expect(topLeftOwner).toContain('sd-root');
-    expect(topLeftOwner).not.toContain('mobile-menu-btn');
+    // 窄屏覆盖层形态：视口左上角命中测试必须在抽屉内（若汉堡按钮 fixed
+    // 盖住抽屉标题，此项即失败）。桌面内嵌形态该点属于全局侧栏，在
+    // 「不遮挡主导航」用例里单独断言。
+    if (isNarrow) {
+      const topLeftOwner = await page.evaluate(() => {
+        const el = document.elementFromPoint(24, 24);
+        return el?.closest('.sd-root, .mobile-menu-btn')?.className ?? String(el?.className ?? '');
+      });
+      expect(topLeftOwner).toContain('sd-root');
+      expect(topLeftOwner).not.toContain('mobile-menu-btn');
+    }
 
     // 抽屉内关闭按钮可用
     await page.locator('.sd-close').click();
@@ -116,18 +115,35 @@ test.describe('聊天 · 历史会话抽屉', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('点遮罩关闭抽屉', async ({ page, pageErrors }) => {
+  test('抽屉打开时全局侧边栏仍可交互（不遮挡主导航）', async ({ page, pageErrors }) => {
+    // 用户回归反馈：overlay 抽屉从视口最左滑出，把全局主导航（仪表盘/渠道
+    // 管理等）整个盖住。sidebar 变体后抽屉起点必须在全局侧栏右缘之右，
+    // 且侧栏命中测试不被抽屉抢走。
+    const isNarrow = (page.viewportSize()?.width ?? 1280) < 900;
+    test.skip(isNarrow, '移动端全局侧栏为汉堡抽屉，与覆盖层抽屉天然不冲突');
+
     await loginAsAdmin(page);
     await page.goto('/chat');
     await openDrawer(page);
 
-    // 点遮罩关闭：必须点在抽屉**右侧**的遮罩区。抽屉宽 min(320px, 86vw)，
-    // 窄屏时 86vw 占比很大，用固定百分比（80%）会落进抽屉内。这里按实际
-    // 抽屉宽度 + 一点余量取点，并钳制在视口内。
+    const probe = await page.evaluate(() => {
+      const aside = document.querySelector('.sidebar-aside')!;
+      const r = aside.getBoundingClientRect();
+      // 侧栏中部命中测试：该点必须仍属于全局侧栏，而不是被抽屉盖住
+      const el = document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(300, r.height - 8));
+      return {
+        asideRight: r.right,
+        owner: el?.closest('.sidebar-aside, .sd-root')?.className ?? String(el?.className ?? ''),
+      };
+    });
+    expect(probe.owner).toContain('sidebar-aside');
+
+    // 抽屉面板从全局侧栏右缘开始（允许 1px 抖动）
     const panel = await page.locator('.sd-panel').boundingBox();
-    const vw = page.viewportSize()!.width;
-    const x = Math.min(Math.round((panel?.width ?? 0) + 24), vw - 12);
-    await page.locator('.sd-mask').click({ position: { x, y: 300 } });
+    expect(panel).not.toBeNull();
+    expect(panel!.x).toBeGreaterThanOrEqual(probe.asideRight - 1);
+
+    await page.locator('.sd-close').click();
     await expect(page.locator('.sd-root.open')).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
@@ -167,7 +183,8 @@ test.describe('聊天 · 历史会话抽屉', () => {
     await page.waitForTimeout(400);
 
     // 生成中点历史会话：必须被守卫拦截——toast 提示、消息区不切换。
-    // （抽屉在 overlay 变体下点项即收拢，与切换是否成功无关，不以抽屉状态断言）
+    // （sidebar 变体点项不自动收拢，守卫拦截时会主动收起抽屉——否则窄屏
+    // 覆盖层形态下抽屉盖着 toast 与「历史会话」按钮；不以抽屉状态断言切换成败）
     await openDrawer(page);
     await page.locator('.sd-item-btn').nth(1).click();
     await expect(page.getByText('正在生成回复，请先停止再操作会话').first()).toBeVisible();
@@ -211,9 +228,11 @@ test.describe('聊天 · 历史会话抽屉', () => {
     await openDrawer(page);
     const beforeCount = await page.locator('.sd-item').count();
     expect(beforeCount).toBeGreaterThan(1);
-    // 删除第 2 个（非活动）会话（点击后弹确认框）
+    // 删除第 2 个（非活动）会话（点击后弹确认框）。
+    // 确认按钮必须点名 dialog 内的：sidebar 变体下 ConfirmDialog 内联渲染在
+    // .sd-root 里，裸 .last() 会命中消息区更靠后的「删除消息」按钮。
     await page.locator('.sd-item-del').nth(1).click();
-    await page.getByRole('button', { name: '删除' }).last().click();
+    await page.getByRole('dialog').getByRole('button', { name: '删除' }).click();
 
     // 只少一条（seed 有 30 条，不是删到只剩 1 条）
     await expect(page.locator('.sd-item')).toHaveCount(beforeCount - 1);
