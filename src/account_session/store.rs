@@ -683,7 +683,9 @@ mod tests {
     fn upsert_persists_and_encodes_secret() {
         let pool = pool();
         let created = pool.upsert(session("ch", "acct", 0)).unwrap();
-        assert!(created.credential.secret.starts_with("enc:"));
+        // 新写入用 enc1:（AES-256-GCM，见 crate::account_session::secret）。
+        // 旧的 enc: base64 混淆前缀只在存量数据上还能看到。
+        assert!(created.credential.secret.starts_with("enc1:"));
         let loaded = pool.get(&created.id).unwrap();
         assert_eq!(loaded.credential.secret_plain(), "sk-acct");
         assert_eq!(

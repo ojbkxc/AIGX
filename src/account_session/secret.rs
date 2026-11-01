@@ -248,10 +248,7 @@ pub fn set_data_dir(dir: &Path) {
 /// - 其他    → 原样返回（明文，尚未加密的存量）
 pub fn open_secret(value: &str, data_dir: &Path) -> String {
     if value.starts_with(ENVELOPE_PREFIX) {
-        return match open_envelope(value, data_dir) {
-            Ok(plain) => plain,
-            Err(_) => String::new(),
-        };
+        return open_envelope(value, data_dir).unwrap_or_default();
     }
     if value.starts_with(LEGACY_PREFIX) {
         return crate::channel::Channel::decode_api_key_value(value);

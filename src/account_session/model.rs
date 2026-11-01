@@ -83,7 +83,7 @@ impl Credential {
         let mut next = self.clone();
         let dir = crate::account_session::secret::data_dir();
         next.secret = crate::account_session::secret::seal_or_keep(&next.secret, &dir);
-        for (_name, value) in next.fields.iter_mut() {
+        for value in next.fields.values_mut() {
             if !value.is_empty() && !value.starts_with("enc1:") {
                 *value = crate::account_session::secret::seal_or_keep(value, &dir);
             }
