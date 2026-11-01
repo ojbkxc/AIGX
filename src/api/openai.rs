@@ -632,6 +632,10 @@ fn is_count_billing(state: &AppState, api_key: &super::auth::ApiKey) -> bool {
 /// 活跃订阅为 `billing_mode=count` 时，每次请求固定扣全局
 /// `config::billing_flat_quota`（忽略 token 量）；否则按 token 量 ×
 /// 定价 × 倍率，附加工具按次费。
+// 参数是计费语义的完整集合（调用上下文 + 请求/上游模型名 + 分组 + token 量
+// + 工具附加费），与同族的 charge_usage_with_tools / settle_usage 一致，
+// 不为规避参数计数拆散语义。
+#[allow(clippy::too_many_arguments)]
 fn resolve_billing_quota(
     state: &AppState,
     api_key: &super::auth::ApiKey,
@@ -727,6 +731,7 @@ pub(crate) fn compute_channel_cost(
 ///
 /// 与 `charge_usage` 相同，额外将 `tool_calls`（工具名 → 调用次数）按
 /// `PricingStore::calculate_tool_surcharge` 折算为附加费并入总 cost。
+#[allow(clippy::too_many_arguments)]
 pub fn charge_usage_with_tools(
     state: &AppState,
     api_key: &super::auth::ApiKey,
