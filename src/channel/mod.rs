@@ -1290,7 +1290,7 @@ impl ChannelStore {
                 402 => circuit_breaker::FailureType::PaymentRequired,
                 404 => circuit_breaker::FailureType::ModelNotFound,
                 429 => circuit_breaker::FailureType::RateLimited {
-                    // 作用域从上游响应文本判定（见 `detect_rate_limit_scope_from_text`）：
+                    // 作用域从上游响应文本判定（见 `RateLimitScope::from_upstream_text`）：
                     // 账号级限流冷却整号，模型级只冷那一个模型。判不出来时给
                     // `Unknown`，由记录端按「保守 = 账号级」处理。
                     scope: circuit_breaker::RateLimitScope::from_upstream_text(
