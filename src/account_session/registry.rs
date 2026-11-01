@@ -920,6 +920,291 @@ pub fn normalize_kind(kind: &str) -> String {
         .unwrap_or_else(|| kind.trim().to_string())
 }
 
+// ── 凭证字段模板（Agent2API 账号结构同步）─────────────────────────────
+//
+// Agent2API 的账号记录是**扁平 JSON**：除通用键（accessToken/refreshToken/
+// expiresAt/userId —— AIGX 由 `Credential.secret` / `refresh_secret` /
+// `expires_at` 承担）外，各家还有自己的具名字段（trae 的 deviceId/
+// machineId/uid、codearts 的 secret_access_key/security_token、officeace
+// 的双层凭据……）。这些落在 AIGX `Credential.fields`。
+//
+// 这张表声明「每家该有哪些具名字段」，用于：
+// - 导入 Agent2API 账号记录时按表搬运（漏搬 = 转发时才发现缺字段）；
+// - 管理面展示「这家要填哪些字段」；
+// - `tools/sync_agent2api_credential_fields.py` 与上游
+//   `providers/*/credentials.rs` 对拍，发现漂移（CI upstream-drift）。
+
+/// 一个具名凭证字段（键名与 Agent2API 落库记录一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialField {
+    /// 落库键名（与 Agent2API 记录一致，如 `deviceId` / `secret_access_key`）。
+    pub name: &'static str,
+    /// 转发/续期链路缺了它会直接失败（上游 `valid()` 的判定；管理面据此标必填）。
+    pub required: bool,
+    /// 用途一句话（管理面展示；同步工具从上游字段注释提取）。
+    pub hint: &'static str,
+}
+
+/// 各供应商的凭证字段模板（按归一后的 kind 索引）。
+///
+/// **BEGIN/END 标记之间是生成区**：由
+/// `tools/sync_agent2api_credential_fields.py --write` 与上游对拍重写，
+/// 手工改动会被下次同步冲掉（要改就改工具或上游）。
+// BEGIN AGENT2API-CREDENTIAL-FIELDS
+pub const CREDENTIAL_FIELDS: &[(&str, &[CredentialField])] = &[
+    (
+        "accio",
+        &[
+            CredentialField {
+                name: "deviceId",
+                required: false,
+                hint: "推理请求的设备指纹（本网关按账号生成）",
+            },
+            CredentialField {
+                name: "email",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "mode",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "nickname",
+                required: false,
+                hint: "",
+            },
+        ],
+    ),
+    (
+        "antigravity",
+        &[
+            CredentialField {
+                name: "email",
+                required: false,
+                hint: "账号邮箱（可能为空 —— 展示名与身份来源）",
+            },
+            CredentialField {
+                name: "name",
+                required: false,
+                hint: "展示名（记录的备注名）",
+            },
+            CredentialField {
+                name: "projectId",
+                required: false,
+                hint: "`cloudaicompanionProject`（可能为空 —— 由 `project.rs` 发现）",
+            },
+        ],
+    ),
+    (
+        "codearts",
+        &[
+            CredentialField {
+                name: "domain_id",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "login_type",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "secret_access_key",
+                required: true,
+                hint: "",
+            },
+            CredentialField {
+                name: "security_token",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "user_name",
+                required: false,
+                hint: "",
+            },
+        ],
+    ),
+    (
+        "commandcode",
+        &[
+            CredentialField {
+                name: "apiKey",
+                required: false,
+                hint: "上游 API Key（`user_` 开头的明文）",
+            },
+            CredentialField {
+                name: "name",
+                required: false,
+                hint: "展示名（记录的备注名）",
+            },
+        ],
+    ),
+    (
+        "loomy",
+        &[
+            CredentialField {
+                name: "name",
+                required: false,
+                hint: "展示名（记录的备注名）",
+            },
+            CredentialField {
+                name: "phone",
+                required: false,
+                hint: "手机号（可选，展示用）",
+            },
+        ],
+    ),
+    (
+        "monkeycode",
+        &[
+            CredentialField {
+                name: "imageId",
+                required: false,
+                hint: "VM 镜像 UUID（创建任务必需；可能为空 —— 见模块头）",
+            },
+            CredentialField {
+                name: "name",
+                required: false,
+                hint: "展示名（记录的备注名）",
+            },
+        ],
+    ),
+    (
+        "officeace",
+        &[
+            CredentialField {
+                name: "accessKeyId",
+                required: false,
+                hint: "控制面临时凭据（手工只导入网关凭据时全空）",
+            },
+            CredentialField {
+                name: "modelAppKey",
+                required: false,
+                hint: "网关凭据：转发用的那一对",
+            },
+            CredentialField {
+                name: "modelAppSecret",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "projectId",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "secretAccessKey",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "securityToken",
+                required: false,
+                hint: "",
+            },
+        ],
+    ),
+    (
+        "qoder",
+        &[
+            CredentialField {
+                name: "email",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "machineId",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "mode",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "nickname",
+                required: false,
+                hint: "",
+            },
+        ],
+    ),
+    (
+        "trae",
+        &[
+            CredentialField {
+                name: "apiHost",
+                required: false,
+                hint: "OAuth/积分那条链的 host（`ExchangeToken` 的第一候选）。",
+            },
+            CredentialField {
+                name: "authClientId",
+                required: false,
+                hint: "这张 refreshToken **当初是在哪个 OAuth 应用里 mint 的**（上游在",
+            },
+            CredentialField {
+                name: "deviceId",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "devicePrivateKey",
+                required: false,
+                hint: "登录时那套设备密钥的私钥（PKCS#8 PEM）。",
+            },
+            CredentialField {
+                name: "devicePublicKey",
+                required: false,
+                hint: "登录时那套设备密钥的**公钥**（SPKI PEM，随 ExchangeToken 上传过的那份）。",
+            },
+            CredentialField {
+                name: "domain",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "enterpriseId",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "machineId",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "nickname",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "uid",
+                required: false,
+                hint: "",
+            },
+            CredentialField {
+                name: "variant",
+                required: false,
+                hint: "",
+            },
+        ],
+    ),
+];
+// END AGENT2API-CREDENTIAL-FIELDS
+
+/// 查某 provider 的凭证字段模板（kind 先归一；空表 = 单 secret 直连型）。
+pub fn credential_fields_for(kind: &str) -> &'static [CredentialField] {
+    let canonical = normalize_kind(kind);
+    CREDENTIAL_FIELDS
+        .iter()
+        .find(|(k, _)| *k == canonical)
+        .map(|(_, fields)| *fields)
+        .unwrap_or(&[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1014,6 +1299,36 @@ mod tests {
         assert!(session_meta("Cline").is_some());
         assert!(session_meta(" trae ").is_some());
         assert!(session_meta("openai").is_none());
+    }
+
+    #[test]
+    fn credential_fields_cover_session_providers() {
+        // 多层凭证家的关键字段必须在模板里（同步工具与上游对拍的底线断言，
+        // 详细字段清单由 CI 的 upstream-drift 巡检把关）。
+        let expectations: &[(&str, &[&str])] = &[
+            ("trae", &["uid", "deviceId", "machineId"]),
+            ("codearts", &["secret_access_key", "security_token"]),
+            ("officeace", &["modelAppKey", "modelAppSecret"]),
+            ("qoder", &["machineId"]),
+        ];
+        for (kind, required_names) in expectations {
+            let fields = credential_fields_for(kind);
+            assert!(
+                !fields.is_empty(),
+                "credential fields for {kind} must not be empty"
+            );
+            for name in *required_names {
+                assert!(
+                    fields.iter().any(|f| f.name == *name),
+                    "credential fields for {kind} missing {name}"
+                );
+            }
+        }
+        // Agent2API 叫 `raccoon`、AIGX 叫 `xiaohuanxiong` —— 模板查询要
+        // 走同一套别名归一，导入那边导出的账号才不会查空。
+        let raccoon = credential_fields_for("raccoon");
+        let xiaohuanxiong = credential_fields_for("xiaohuanxiong");
+        assert_eq!(raccoon, xiaohuanxiong);
     }
 
     #[test]

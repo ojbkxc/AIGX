@@ -498,6 +498,220 @@ pub struct ImportEntry {
     pub model_mappings: Vec<Value>,
 }
 
+// ── Agent2API 账号库导入 ────────────────────────────────────────────────
+//
+// A2A 的账号库是 SQLite（`accounts(id, provider, priority, enabled,
+// added_at, data)`，`data` 是整条扁平 JSON）。AIGX 账号池与其同源，
+// 按本节的映射规则把记录搬成 `AccountSession`：
+//
+// - **幂等键**：A2A 记录 `id` 直接做 `AccountSession.id` —— 重复导入
+//   命中同一条记录并更新（「跟着 A2A 账号更新」），不堆副本。
+// - **通用键**：`accessToken` → `credential.secret`；`refreshToken` →
+//   `refresh_secret`；`expiresAt`（秒/毫秒归一）→ `expires_at`。
+// - **具名字段**：`registry::CREDENTIAL_FIELDS` 模板里的键 →
+//   `credential.fields`；模板没列但记录里有的**字符串**字段也搬（宽容：
+//   上游加了新字段而模板未跟上时不丢数据），通用键/非凭证键除外。
+// - **officeace 兼容**：AK/SK/STS/project_id 同时拼 JSON 写进
+//   `refresh_secret` —— 现有签到链路（`checkin::claim::
+//   officeace_temp_creds`）从那里读；新代码应读 `fields`。
+
+/// 通用键（AIGX 一等字段承担，不进 `fields`）。
+const A2A_GENERIC_KEYS: [&str; 8] = [
+    "accessToken",
+    "access_token",
+    "refreshToken",
+    "refresh_token",
+    "expiresAt",
+    "expires_at",
+    "userId",
+    "user_id",
+];
+
+/// 非凭证键（记录的归属/元信息，AIGX `AccountSession` 一等字段承担）。
+const A2A_NON_CREDENTIAL_KEYS: [&str; 7] = [
+    "id", "provider", "priority", "enabled", "added_at", "addedAt", "baseUrl",
+];
+
+/// `credential.secret` 的候选键（按优先级）。
+const A2A_SECRET_KEYS: [&str; 6] = [
+    "accessToken",
+    "access_token",
+    "access_key_id",
+    "modelAppKey",
+    "apiKey",
+    "token",
+];
+
+/// 从记录里取第一个非空字符串键。
+fn a2a_first(record: &Map<String, Value>, keys: &[&str]) -> String {
+    for key in keys {
+        if let Some(text) = record.get(*key).and_then(Value::as_str) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return text.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// `expiresAt` 归一（秒/毫秒都认，归一到秒；非法值 → None）。
+fn a2a_expires_at(record: &Map<String, Value>) -> Option<i64> {
+    for key in ["expiresAt", "expires_at", "expires"] {
+        let raw = record
+            .get(key)
+            .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+        if let Some(ts) = raw {
+            if ts <= 0 {
+                continue;
+            }
+            // 毫秒时间戳（> 约 2001-09-09 的秒值 1e12）归一到秒
+            return Some(if ts > 1_000_000_000_000 {
+                ts / 1000
+            } else {
+                ts
+            });
+        }
+    }
+    None
+}
+
+/// 把一条 Agent2API 账号记录（`accounts.data` 的扁平 JSON）映射成
+/// AIGX `AccountSession` 草稿。`id` / `provider` / 任何凭证都没有的记录
+/// 返回 None（调用方计入 skipped）。
+pub fn map_agent2api_record(channel_id: &str, record: &Value) -> Option<AccountSession> {
+    use super::model::{AccountSession, Credential};
+
+    let obj = record.as_object()?;
+    let id = a2a_first(obj, &["id"]);
+    let provider_raw = a2a_first(obj, &["provider"]);
+    if id.is_empty() || provider_raw.is_empty() {
+        return None;
+    }
+    let provider = super::registry::normalize_kind(&provider_raw);
+
+    let secret = a2a_first(obj, &A2A_SECRET_KEYS);
+    let refresh = a2a_first(obj, &["refreshToken", "refresh_token"]);
+    // officeace 双键形态：网关凭据 modelAppKey 做 secret（签名主键），
+    // modelAppSecret 进 fields。
+    let has_any_credential = !secret.is_empty() || !refresh.is_empty();
+    if !has_any_credential {
+        return None;
+    }
+
+    let mut credential = Credential {
+        kind: super::model::CREDENTIAL_KIND_SESSION.to_string(),
+        secret,
+        fields: std::collections::HashMap::new(),
+    };
+
+    // 具名字段：模板声明的键 + 记录里其余字符串键（宽容搬运，见模块注释）。
+    let template = super::registry::credential_fields_for(&provider);
+    for field in template {
+        let value = a2a_first(obj, &[field.name]);
+        if !value.is_empty() {
+            credential.set_field(field.name, &value);
+        }
+    }
+    for (key, value) in obj {
+        let Some(text) = value.as_str() else { continue };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if A2A_GENERIC_KEYS.contains(&key.as_str())
+            || A2A_NON_CREDENTIAL_KEYS.contains(&key.as_str())
+            || A2A_SECRET_KEYS.contains(&key.as_str())
+            || key == "refreshToken"
+            || key == "refresh_token"
+            || key == "name"
+            || key == "nickname"
+            || credential.fields.contains_key(key)
+        {
+            continue;
+        }
+        credential.set_field(key, text);
+    }
+
+    let mut session = AccountSession::new(channel_id, "");
+    session.id = id.clone();
+    session.provider = provider;
+    session.name = {
+        let name = a2a_first(obj, &["name", "nickname", "email"]);
+        if name.is_empty() {
+            let short: String = id.chars().take(8).collect();
+            format!("{provider_raw}-{short}")
+        } else {
+            name
+        }
+    };
+    session.base_url = a2a_first(obj, &["baseUrl", "base_url", "apiHost", "api_host"]);
+    session.refresh_secret = refresh;
+    session.expires_at = a2a_expires_at(obj);
+    session.credential = credential;
+
+    // officeace 兼容：AK/SK/STS/project_id 拼 JSON 进 refresh_secret
+    // （现有签到链路从 refresh_secret JSON 读，见 claim::officeace_temp_creds）。
+    if session.provider == "officeace" {
+        let ak = session.credential.field_plain("accessKeyId");
+        let sk = session.credential.field_plain("secretAccessKey");
+        let sts = session.credential.field_plain("securityToken");
+        let project = session.credential.field_plain("projectId");
+        if !ak.is_empty() && !sk.is_empty() {
+            session.refresh_secret = json!({
+                "access_key_id": ak,
+                "secret_access_key": sk,
+                "security_token": sts,
+                "project_id": project,
+            })
+            .to_string();
+        }
+    }
+    Some(session)
+}
+
+/// Agent2API 导入结果统计。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Agent2ApiImportReport {
+    /// 新导入条数。
+    pub imported: usize,
+    /// 命中既有记录（同 id）被更新的条数。
+    pub updated: usize,
+    /// 跳过条数（缺 id/provider/凭证）。
+    pub skipped: usize,
+    /// 逐条错误（provider 未知等）。
+    pub errors: Vec<String>,
+    /// 读取来源（库路径或 "records"）。
+    pub source: String,
+}
+
+/// 从 Agent2API 的 SQLite 账号库读出全部启用账号记录。
+/// 只读打开（A2A 可能在运行，对它的库零写入）。
+#[cfg(feature = "sqlite-kv")]
+pub fn read_agent2api_db(path: &std::path::Path) -> Result<Vec<Value>, String> {
+    use rusqlite::OpenFlags;
+
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("无法打开 Agent2API 数据库 {}: {e}", path.display()))?;
+    let mut stmt = conn
+        .prepare("SELECT data FROM accounts WHERE enabled = 1")
+        .map_err(|e| format!("Agent2API 数据库结构与预期不符（accounts 表）: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("读取 Agent2API 账号失败: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows.flatten() {
+        match serde_json::from_str::<Value>(&row) {
+            Ok(value) if value.is_object() => out.push(value),
+            _ => continue,
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +760,81 @@ base_url = "https://stale.example/v1"
         assert!(models.contains(&"claude-sonnet-4".to_string()));
         assert!(models.contains(&"claude-haiku-4".to_string()));
         assert_eq!(mappings.len(), 1);
+    }
+
+    #[test]
+    fn agent2api_record_maps_trae_fields() {
+        let record = json!({
+            "id": "trae-solo-u1",
+            "provider": "trae",
+            "accessToken": "at-xxx",
+            "refreshToken": "rt-yyy",
+            "expiresAt": 1_900_000_000_000i64,
+            "uid": "u1",
+            "deviceId": "d-1",
+            "machineId": "m-1",
+            "variant": "solo",
+            "nickname": "小明"
+        });
+        let session = map_agent2api_record("ch-1", &record).expect("trae 记录应可映射");
+        assert_eq!(session.id, "trae-solo-u1");
+        assert_eq!(session.provider, "trae");
+        assert_eq!(session.name, "小明");
+        assert_eq!(session.credential.secret, "at-xxx");
+        assert_eq!(session.refresh_secret, "rt-yyy");
+        // 毫秒时间戳归一到秒
+        assert_eq!(session.expires_at, Some(1_900_000_000));
+        assert_eq!(session.credential.field_plain("uid"), "u1");
+        assert_eq!(session.credential.field_plain("deviceId"), "d-1");
+        assert_eq!(session.credential.field_plain("machineId"), "m-1");
+        assert_eq!(session.credential.field_plain("variant"), "solo");
+    }
+
+    #[test]
+    fn agent2api_record_maps_raccoon_alias_and_unknown_string_fields() {
+        let record = json!({
+            "id": "racc-1",
+            "provider": "raccoon",
+            "accessToken": "at-zzz",
+            "someFutureField": "ff-1"
+        });
+        let session = map_agent2api_record("ch-1", &record).expect("别名应归一");
+        // raccoon → xiaohuanxiong（registry 别名归一）
+        assert_eq!(session.provider, "xiaohuanxiong");
+        // 模板没列的字符串字段宽容搬运（上游加新字段不丢数据）
+        assert_eq!(session.credential.field_plain("someFutureField"), "ff-1");
+    }
+
+    #[test]
+    fn agent2api_record_maps_officeace_dual_credentials() {
+        let record = json!({
+            "id": "oa-1",
+            "provider": "officeace",
+            "modelAppKey": "app-key",
+            "modelAppSecret": "app-secret",
+            "accessKeyId": "AK",
+            "secretAccessKey": "SK",
+            "securityToken": "STS",
+            "projectId": "proj-1"
+        });
+        let session = map_agent2api_record("ch-1", &record).expect("officeace 记录应可映射");
+        assert_eq!(session.credential.secret, "app-key");
+        assert_eq!(
+            session.credential.field_plain("modelAppSecret"),
+            "app-secret"
+        );
+        assert_eq!(session.credential.field_plain("accessKeyId"), "AK");
+        // 现有签到链路读 refresh_secret JSON —— 导入时同步拼好
+        let refresh: Value = serde_json::from_str(&session.refresh_secret).unwrap();
+        assert_eq!(refresh["access_key_id"], "AK");
+        assert_eq!(refresh["secret_access_key"], "SK");
+        assert_eq!(refresh["project_id"], "proj-1");
+    }
+
+    #[test]
+    fn agent2api_record_skips_incomplete() {
+        assert!(map_agent2api_record("ch-1", &json!({"provider": "trae"})).is_none());
+        assert!(map_agent2api_record("ch-1", &json!({"id": "x", "provider": "trae"})).is_none());
+        assert!(map_agent2api_record("ch-1", &json!("not-an-object")).is_none());
     }
 }

@@ -1464,3 +1464,100 @@ pub async fn handle_run_import(
         }
     })))
 }
+
+/// POST /api/account-sessions/import/agent2api —— 从 Agent2API 账号库导入到账号池。
+///
+/// 输入二选一：
+/// - `path`：A2A 的 SQLite 库路径（服务器本地文件，只读打开；A2A 可同时在跑）
+/// - `records`：A2A `accounts.data` 的 JSON 数组（手工导出的扁平记录）
+///
+/// 幂等键是 A2A 记录 id：重复导入命中同一条账号并更新凭证字段，
+/// 不会产生副本（「AIGX 账号池跟着 A2A 账号更新」的落地路径）。
+#[derive(Debug, Deserialize)]
+pub struct ImportAgent2ApiRequest {
+    /// 目标账号型渠道 id。
+    #[serde(rename = "channelId")]
+    pub channel_id: String,
+    /// A2A SQLite 库路径（与 records 二选一）。
+    #[serde(default)]
+    pub path: Option<String>,
+    /// A2A 账号记录 JSON 数组（与 path 二选一）。
+    #[serde(default)]
+    pub records: Option<Vec<Value>>,
+}
+
+pub async fn handle_import_agent2api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ImportAgent2ApiRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+
+    // 目标渠道必须是账号型渠道
+    let channel = state
+        .channel_store
+        .get(&body.channel_id)
+        .ok_or_else(|| error_response("目标渠道不存在", StatusCode::NOT_FOUND))?;
+    if !matches!(channel.channel_type, crate::channel::ChannelType::Account) {
+        return Err(error_response(
+            "目标渠道不是账号型渠道（channel_type 须为 account）",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+
+    // 两种输入之一
+    let (records, source) = match (&body.path, &body.records) {
+        (Some(path), None) => {
+            #[cfg(feature = "sqlite-kv")]
+            {
+                let path = std::path::PathBuf::from(path.trim());
+                let records = crate::account_session::import::read_agent2api_db(&path)
+                    .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+                (records, path.to_string_lossy().to_string())
+            }
+            #[cfg(not(feature = "sqlite-kv"))]
+            {
+                let _ = path;
+                return Err(error_response(
+                    "当前构建未启用 SQLite 后端，无法用 path 读取；请改用 records 传入 JSON",
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+        }
+        (None, Some(records)) => (records.clone(), "records".to_string()),
+        _ => {
+            return Err(error_response(
+                "path 与 records 必须二选一（且只给一个）",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+    };
+
+    let mut report = crate::account_session::import::Agent2ApiImportReport {
+        source,
+        ..Default::default()
+    };
+    for record in &records {
+        let Some(draft) =
+            crate::account_session::import::map_agent2api_record(&body.channel_id, record)
+        else {
+            report.skipped += 1;
+            continue;
+        };
+        let exists = state.account_sessions.get(&draft.id).is_some();
+        if let Err(e) = state.account_sessions.upsert(draft) {
+            report.errors.push(format!("落盘失败：{e}"));
+            continue;
+        }
+        if exists {
+            report.updated += 1;
+        } else {
+            report.imported += 1;
+        }
+    }
+
+    Ok(Json(json!({
+        "success": true,
+        "data": report,
+    })))
+}

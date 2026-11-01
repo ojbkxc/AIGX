@@ -186,9 +186,11 @@ jobs:
           rc_data=$?
           python tools/sync_agent2api_capabilities.py --upstream upstream-agent2api --check
           rc_cap=$?
-          if [ $rc_data -ne 0 ] || [ $rc_cap -ne 0 ]; then
-            echo "::warning::Agent2API 上游有 AIGX 尚未跟上的 provider 能力（数据层或能力层）。"
-            echo "::warning::数据层=provider id/展示名；能力层=签到名单/模型目录/目录端点。"
-            echo "::warning::按 docs/agent2api-porting.md 的契约逐家移植后重跑本 job。"
+          python tools/sync_agent2api_credential_fields.py --upstream upstream-agent2api --check
+          rc_fields=$?
+          if [ $rc_data -ne 0 ] || [ $rc_cap -ne 0 ] || [ $rc_fields -ne 0 ]; then
+            echo "::warning::Agent2API 上游有 AIGX 尚未跟上的 provider 能力（数据层、能力层或凭证字段模板）。"
+            echo "::warning::数据层=provider id/展示名；能力层=签到名单/模型目录/目录端点；字段模板=账号记录的具名凭证字段。"
+            echo "::warning::字段模板可用 tools/sync_agent2api_credential_fields.py --write 半自动对齐；其余按 docs/agent2api-porting.md 的契约逐家移植后重跑本 job。"
           fi
           exit 0

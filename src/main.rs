@@ -1656,6 +1656,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/account-sessions/import",
             post(api::admin::account_sessions::handle_run_import),
         )
+        // 从 Agent2API 账号库导入（SQLite 路径或记录 JSON；幂等更新）
+        .route(
+            "/api/account-sessions/import/agent2api",
+            post(api::admin::account_sessions::handle_import_agent2api),
+        )
         // 服务器自动更新（检查/应用/重启/回滚/设置）
         .route(
             "/api/update/status",

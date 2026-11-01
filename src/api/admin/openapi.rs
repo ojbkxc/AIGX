@@ -734,6 +734,9 @@ fn paths_accounts_network() -> Value {
         "/api/account-sessions/import": {
             "post": op_body("账号池", "导入本机客户端（cc-switch）的供应商为渠道", "")
         },
+        "/api/account-sessions/import/agent2api": {
+            "post": op_body("账号池", "从 Agent2API 账号库导入（SQLite 路径或记录 JSON，幂等更新）", "")
+        },
         "/api/account-sessions/import/sources": {
             "get": op("账号池", "扫描本机可导入的供应商（cc-switch）")
         },
@@ -987,6 +990,7 @@ mod tests {
         add("/api/account-sessions/catalog/providers", &["get"]);
         add("/api/account-sessions/catalog/sync", &["post"]);
         add("/api/account-sessions/import", &["post"]);
+        add("/api/account-sessions/import/agent2api", &["post"]);
         add("/api/account-sessions/import/sources", &["get"]);
         add("/api/account-sessions/login/callback", &["post"]);
         add("/api/account-sessions/login/cancel", &["post"]);
