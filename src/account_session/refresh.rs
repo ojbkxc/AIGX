@@ -51,9 +51,12 @@ pub fn supports_refresh(provider: &str) -> bool {
     )
 }
 
-/// refresh_secret 的明文（内存/落盘都是 `enc:` 编码，读前必须解码）。
+/// refresh_secret 的明文（落盘是 `enc1:`/`enc:` 编码，读前必须解码）。
 fn refresh_plain(session: &AccountSession) -> String {
-    crate::channel::Channel::decode_api_key_value(&session.refresh_secret)
+    crate::account_session::secret::open_secret(
+        &session.refresh_secret,
+        &crate::account_session::secret::data_dir(),
+    )
 }
 
 /// 是否临期需要刷新（无 refresh_secret 或未知过期时间则不动）。

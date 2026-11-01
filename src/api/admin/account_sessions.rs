@@ -341,7 +341,10 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "refresh_token": if session.refresh_secret.is_empty() {
             String::new()
         } else {
-            mask_secret(&crate::channel::Channel::decode_api_key_value(&session.refresh_secret))
+            mask_secret(&crate::account_session::secret::open_secret(
+                &session.refresh_secret,
+                &crate::account_session::secret::data_dir(),
+            ))
         },
         "in_flight": session.in_flight,
         "success_count": session.success_count,

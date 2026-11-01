@@ -1309,8 +1309,11 @@ pub(crate) struct OfficeAceCred {
 
 /// 取 OfficeAce 临时凭据：`refresh_secret` JSON 优先，`secret` 的 `ak:sk:sts` 兜底。
 pub(crate) fn officeace_temp_creds(session: &AccountSession) -> Option<OfficeAceCred> {
-    // refresh_secret 落盘/内存都是 `enc:` 编码，先解码再解析 JSON
-    let raw = crate::channel::Channel::decode_api_key_value(&session.refresh_secret);
+    // refresh_secret 落盘是 `enc1:`/`enc:` 编码，先解码再解析 JSON
+    let raw = crate::account_session::secret::open_secret(
+        &session.refresh_secret,
+        &crate::account_session::secret::data_dir(),
+    );
     if let Ok(value) = serde_json::from_str::<Value>(&raw) {
         let read = |key: &str| {
             value

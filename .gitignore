@@ -21,6 +21,10 @@ package-lock.json
 # 服务器部署助手（含服务器凭据，禁止提交）
 scripts/
 
+# 凭证加密密钥文件（account_session/secret.rs；与库同目录但绝不能进版本库）
+account.key
+**/account.key
+
 # Docker
 .docker/
 

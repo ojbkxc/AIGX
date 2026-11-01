@@ -180,7 +180,8 @@ pub struct AccountSession {
     pub extra_headers: HashMap<String, String>,
     /// 续期令牌（refreshToken / Coding Plan JWT / deviceId 等）。
     ///
-    /// 与 `credential.secret` 同口径落盘（`enc:` + base64 混淆）。AIGX 目前
+    /// 与 `credential.secret` 同口径落盘（`enc1:` AES-256-GCM，见
+    /// [`crate::account_session::secret`]；存量 `enc:` 读兼容）。AIGX 目前
     /// **不自动续期**（各家续期接口不同、失败形态各异），这个字段先存下来，
     /// 供后续接入各家 refresh 链路与手工导出使用；空 = 该家没有续期凭证。
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -327,12 +328,15 @@ mod tests {
     use super::*;
 
     /// 凭证加解密用**全局**的 data_dir（密钥文件所在目录）—— 并行测试会
-    /// 互相换钥匙，所以这里用一把全局锁把「设目录 + 跑断言」串起来。
+    /// 互相换钥匙，所以这里用跨模块共享锁（`secret::test_lock`）把
+    /// 「设目录 + 跑断言」串起来（自有锁只管得住本模块，管不住 `channel`
+    /// 等其他模块同样操作全局目录的测试）。
     fn with_secret_dir<R>(tag: &str, f: impl FnOnce() -> R) -> R {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::account_session::secret::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let dir =
             std::env::temp_dir().join(format!("aigx-cred-{tag}-{}-{seq}", std::process::id()));

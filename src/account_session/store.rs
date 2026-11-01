@@ -224,9 +224,15 @@ impl AccountSessionStore {
         next.updated_at = now;
         let credential = next.credential.encoded();
         next.credential = credential;
-        // 续期令牌同口径编码（已编码则原样）
-        if !next.refresh_secret.is_empty() && !next.refresh_secret.starts_with("enc:") {
-            next.refresh_secret = crate::channel::Channel::encode_api_key(&next.refresh_secret);
+        // 续期令牌同口径编码（已编码的 enc:/enc1: 值原样保留，明文升级 enc1:）
+        if !next.refresh_secret.is_empty()
+            && !next.refresh_secret.starts_with("enc:")
+            && !next.refresh_secret.starts_with("enc1:")
+        {
+            next.refresh_secret = crate::account_session::secret::seal_or_keep(
+                &next.refresh_secret,
+                &crate::account_session::secret::data_dir(),
+            );
         }
         if next.status.is_empty() {
             next.status = "enabled".to_string();
@@ -558,7 +564,7 @@ impl AccountSessionStore {
     ///
     /// 刷新会轮换 refresh_token —— 与 access 分两次写，中间崩掉会把账号
     /// 弄丢（旧 rt 已作废、新 rt 没存上），所以必须同一把 CAS 一起写。
-    /// `next_refresh` 传明文（内部按 upsert 同口径做 `enc:` 编码）。
+    /// `next_refresh` 传明文（内部按 upsert 同口径做 `enc1:` 加密）。
     pub fn update_tokens_cas(
         &self,
         id: &str,
@@ -578,10 +584,13 @@ impl AccountSessionStore {
             session.credential = next.encoded();
             session.refresh_secret = if next_refresh.trim().is_empty() {
                 String::new()
-            } else if next_refresh.starts_with("enc:") {
+            } else if next_refresh.starts_with("enc:") || next_refresh.starts_with("enc1:") {
                 next_refresh.to_string()
             } else {
-                crate::channel::Channel::encode_api_key(next_refresh)
+                crate::account_session::secret::seal_or_keep(
+                    next_refresh,
+                    &crate::account_session::secret::data_dir(),
+                )
             };
             session.expires_at = next_expires_at;
             session.error_count = 0;
@@ -666,6 +675,22 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// 编码路径走全局 data_dir（密钥文件所在目录）—— 拿跨模块共享锁设
+    /// 独立临时目录，防并行测试互相换密钥（见 `secret::test_lock`）。
+    fn with_secret_dir<R>(tag: &str, f: impl FnOnce() -> R) -> R {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let _guard = crate::account_session::secret::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("aigx-store-{tag}-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::account_session::secret::set_data_dir(&dir);
+        f()
+    }
+
     fn pool() -> AccountSessionStore {
         AccountSessionStore::new(Arc::new(FileStore::new(
             TempDir::new().unwrap().path().to_path_buf(),
@@ -681,115 +706,131 @@ mod tests {
 
     #[test]
     fn upsert_persists_and_encodes_secret() {
-        let pool = pool();
-        let created = pool.upsert(session("ch", "acct", 0)).unwrap();
-        // 新写入用 enc1:（AES-256-GCM，见 crate::account_session::secret）。
-        // 旧的 enc: base64 混淆前缀只在存量数据上还能看到。
-        assert!(created.credential.secret.starts_with("enc1:"));
-        let loaded = pool.get(&created.id).unwrap();
-        assert_eq!(loaded.credential.secret_plain(), "sk-acct");
-        assert_eq!(
-            loaded.provider,
-            super::super::registry::DEFAULT_PROVIDER_KIND
-        );
+        with_secret_dir("upsert", || {
+            let pool = pool();
+            let created = pool.upsert(session("ch", "acct", 0)).unwrap();
+            // 新写入用 enc1:（AES-256-GCM，见 crate::account_session::secret）。
+            // 旧的 enc: base64 混淆前缀只在存量数据上还能看到。
+            assert!(created.credential.secret.starts_with("enc1:"));
+            let loaded = pool.get(&created.id).unwrap();
+            assert_eq!(loaded.credential.secret_plain(), "sk-acct");
+            assert_eq!(
+                loaded.provider,
+                super::super::registry::DEFAULT_PROVIDER_KIND
+            );
+        });
     }
 
     #[test]
     fn acquire_prefers_higher_priority() {
-        let pool = pool();
-        pool.upsert(session("ch", "low", 1)).unwrap();
-        pool.upsert(session("ch", "high", 9)).unwrap();
-        let lease = pool.acquire("ch", "m", None).expect("应有可用账号");
-        assert_eq!(lease.session().name, "high");
+        with_secret_dir("acquire-prio", || {
+            let pool = pool();
+            pool.upsert(session("ch", "low", 1)).unwrap();
+            pool.upsert(session("ch", "high", 9)).unwrap();
+            let lease = pool.acquire("ch", "m", None).expect("应有可用账号");
+            assert_eq!(lease.session().name, "high");
+        });
     }
 
     #[test]
     fn acquire_stops_at_concurrency_limit_and_releases_on_drop() {
-        let pool = pool();
-        let mut only = session("ch", "only", 0);
-        only.max_concurrency = 1;
-        pool.upsert(only).unwrap();
-        let lease = pool.acquire("ch", "m", None).expect("首个租约");
-        assert!(pool.acquire("ch", "m", None).is_none());
-        drop(lease);
-        assert!(pool.acquire("ch", "m", None).is_some());
+        with_secret_dir("acquire-lease", || {
+            let pool = pool();
+            let mut only = session("ch", "only", 0);
+            only.max_concurrency = 1;
+            pool.upsert(only).unwrap();
+            let lease = pool.acquire("ch", "m", None).expect("首个租约");
+            assert!(pool.acquire("ch", "m", None).is_none());
+            drop(lease);
+            assert!(pool.acquire("ch", "m", None).is_some());
+        });
     }
 
     #[test]
     fn failure_cools_down_only_the_upstream_model() {
-        let pool = pool();
-        let account = pool.upsert(session("ch", "acct", 0)).unwrap();
-        let failure = FailureType::ServerError;
-        let secs = pool.record_failure(&account.id, "upstream-x", &failure, "boom", None);
-        assert!(secs >= 60);
-        assert!(pool.acquire("ch", "upstream-x", None).is_none());
-        assert!(pool.acquire("ch", "other-model", None).is_some());
-        assert!(pool.reset_cooldowns(&account.id));
-        assert!(pool.acquire("ch", "upstream-x", None).is_some());
+        with_secret_dir("cooldown", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            let failure = FailureType::ServerError;
+            let secs = pool.record_failure(&account.id, "upstream-x", &failure, "boom", None);
+            assert!(secs >= 60);
+            assert!(pool.acquire("ch", "upstream-x", None).is_none());
+            assert!(pool.acquire("ch", "other-model", None).is_some());
+            assert!(pool.reset_cooldowns(&account.id));
+            assert!(pool.acquire("ch", "upstream-x", None).is_some());
+        });
     }
 
     #[test]
     fn retry_on_status_uses_base_cooldown_only() {
-        let pool = pool();
-        let account = pool.upsert(session("ch", "acct", 0)).unwrap();
-        // 把基础冷却调小，便于断言「命中名单后不再指数退避」
-        let mut policy = pool.policy();
-        policy.base_cooldown_secs = 30;
-        policy.max_cooldown_secs = 1_800;
-        pool.set_policy(policy).unwrap();
+        with_secret_dir("retry-status", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            // 把基础冷却调小，便于断言「命中名单后不再指数退避」
+            let mut policy = pool.policy();
+            policy.base_cooldown_secs = 30;
+            policy.max_cooldown_secs = 1_800;
+            pool.set_policy(policy).unwrap();
 
-        let failure = FailureType::PaymentRequired;
-        // 未命中名单：PaymentRequired 走上限冷却
-        let uncapped = pool.record_failure(&account.id, "m1", &failure, "x", None);
-        assert_eq!(uncapped, 1_800);
-        // 命中名单（默认 402）：只给基础冷却
-        pool.set_retry_on_status(vec![402]);
-        let capped = pool.record_failure(&account.id, "m2", &failure, "x", Some(402));
-        assert_eq!(capped, 30);
+            let failure = FailureType::PaymentRequired;
+            // 未命中名单：PaymentRequired 走上限冷却
+            let uncapped = pool.record_failure(&account.id, "m1", &failure, "x", None);
+            assert_eq!(uncapped, 1_800);
+            // 命中名单（默认 402）：只给基础冷却
+            pool.set_retry_on_status(vec![402]);
+            let capped = pool.record_failure(&account.id, "m2", &failure, "x", Some(402));
+            assert_eq!(capped, 30);
+        });
     }
 
     #[test]
     fn credential_cas_rejects_stale_snapshot() {
-        let pool = pool();
-        let account = pool.upsert(session("ch", "acct", 0)).unwrap();
-        let next = Credential {
-            kind: "api_key".to_string(),
-            secret: "sk-new".to_string(),
-            fields: std::collections::HashMap::new(),
-        };
-        assert_eq!(
-            pool.update_credential_cas(&account.id, "sk-wrong", next.clone()),
-            CasOutcome::Stale
-        );
-        assert_eq!(
-            pool.update_credential_cas(&account.id, "sk-acct", next),
-            CasOutcome::Updated
-        );
-        assert_eq!(
-            pool.get(&account.id).unwrap().credential.secret_plain(),
-            "sk-new"
-        );
+        with_secret_dir("cas", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            let next = Credential {
+                kind: "api_key".to_string(),
+                secret: "sk-new".to_string(),
+                fields: std::collections::HashMap::new(),
+            };
+            assert_eq!(
+                pool.update_credential_cas(&account.id, "sk-wrong", next.clone()),
+                CasOutcome::Stale
+            );
+            assert_eq!(
+                pool.update_credential_cas(&account.id, "sk-acct", next),
+                CasOutcome::Updated
+            );
+            assert_eq!(
+                pool.get(&account.id).unwrap().credential.secret_plain(),
+                "sk-new"
+            );
+        });
     }
 
     #[test]
     fn sweep_prunes_cooldowns_and_flips_expired_status() {
-        let pool = pool();
-        let mut account = session("ch", "acct", 0);
-        account.cooldowns.insert("m".to_string(), 10);
-        account.expires_at = Some(10);
-        pool.upsert(account).unwrap();
-        assert_eq!(pool.sweep(100), 1);
-        let loaded = pool.all();
-        assert_eq!(loaded[0].status, "expired");
-        assert!(loaded[0].cooldowns.is_empty());
+        with_secret_dir("sweep", || {
+            let pool = pool();
+            let mut account = session("ch", "acct", 0);
+            account.cooldowns.insert("m".to_string(), 10);
+            account.expires_at = Some(10);
+            pool.upsert(account).unwrap();
+            assert_eq!(pool.sweep(100), 1);
+            let loaded = pool.all();
+            assert_eq!(loaded[0].status, "expired");
+            assert!(loaded[0].cooldowns.is_empty());
+        });
     }
 
     #[test]
     fn remove_for_channel_cascades() {
-        let pool = pool();
-        pool.upsert(session("ch-a", "a", 0)).unwrap();
-        pool.upsert(session("ch-b", "b", 0)).unwrap();
-        assert_eq!(pool.remove_for_channel("ch-a").unwrap(), 1);
-        assert_eq!(pool.len(), 1);
+        with_secret_dir("remove", || {
+            let pool = pool();
+            pool.upsert(session("ch-a", "a", 0)).unwrap();
+            pool.upsert(session("ch-b", "b", 0)).unwrap();
+            assert_eq!(pool.remove_for_channel("ch-a").unwrap(), 1);
+            assert_eq!(pool.len(), 1);
+        });
     }
 }

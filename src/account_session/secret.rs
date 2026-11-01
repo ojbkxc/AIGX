@@ -240,6 +240,18 @@ pub fn set_data_dir(dir: &Path) {
     }
 }
 
+/// 测试专用的跨模块互斥锁。
+///
+/// `data_dir` 是进程级全局态，cargo test 默认并行 —— `model` / `channel`
+/// 等模块的测试若各自持私有锁再 `set_data_dir`，锁与锁之间不互斥，
+/// 全局目录仍会被别的测试线程中途换掉（enc1: 用错密钥 → flaky）。
+/// 所有需要「设目录 + 跑断言」的测试统一拿这一把锁。
+#[cfg(test)]
+pub(crate) fn test_lock() -> &'static Mutex<()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    &LOCK
+}
+
 /// 解密一段存储值 → 明文。
 ///
 /// 认三种形态：

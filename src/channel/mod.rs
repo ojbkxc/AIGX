@@ -358,14 +358,13 @@ impl Channel {
         }
     }
 
-    /// 编码 api_key 用于存储。
+    /// 编码 api_key 用于存储（`enc:` + base64，**旧格式**）。
     ///
-    /// ⚠️ B11（已知风险，保留现状）：这是可逆的 Base64“混淆”而非加密——
-    /// 密钥与密文同存于同一存储，无法防御能读取存储文件的攻击者，仅避免
-    /// 明文密钥在浏览配置/备份/日志时被直接看到。
-    /// 升级路径（后续版本）：引入 master key（环境变量或独立 KMS）做
-    /// AES-GCM 对称加密，并为存量 `enc:` 数据提供迁移解码；因涉及存储
-    /// 格式兼容与部署流程变更，超出本次修复范围，此处仅文档化。
+    /// ⚠️ 这是可逆的 Base64“混淆”而非加密，仅为**存量兼容**保留：
+    /// 老数据以 `enc:` 落盘，读路径（[`Self::decode_api_key`] /
+    /// `account_session::secret::open_secret`）仍认它。
+    /// **新写入一律走 `account_session::secret::seal_or_keep`（`enc1:`
+    /// AES-256-GCM）**，本函数只应出现在旧格式解码与测试里。
     pub fn encode_api_key(plain: &str) -> String {
         if plain.is_empty() {
             return String::new();
@@ -373,15 +372,22 @@ impl Channel {
         format!("enc:{}", general_purpose::STANDARD.encode(plain.as_bytes()))
     }
 
-    /// 解码存储中的 api_key（安全性说明见 `encode_api_key`）
+    /// 解码存储中的 api_key。
+    ///
+    /// 认三种形态（见 [`crate::account_session::secret::open_secret`]）：
+    /// `enc1:`（AES-256-GCM 真加密）、`enc:`（旧混淆，存量）、明文（存量）。
     pub fn decode_api_key(&self) -> String {
-        Self::decode_api_key_value(&self.api_key)
+        crate::account_session::secret::open_secret(
+            &self.api_key,
+            &crate::account_session::secret::data_dir(),
+        )
     }
 
-    /// 解码 `enc:` 前缀的密钥字符串。
+    /// 解码 `enc:` 前缀的密钥字符串（**只认旧格式**）。
     ///
-    /// 供账号会话凭证（`account_session::Credential`）复用同一编码口径，
-    /// 保证「渠道密钥」与「账号密钥」在同一套存储里可互相迁移。
+    /// 供 `account_session::secret::open_secret` 的存量兼容分支复用同一
+    /// 解码口径；新代码要解「可能已是 `enc1:`」的值时，请用
+    /// `account_session::secret::open_secret` 而不是本函数。
     pub fn decode_api_key_value(stored: &str) -> String {
         if let Some(rest) = stored.strip_prefix("enc:") {
             general_purpose::STANDARD
@@ -559,9 +565,15 @@ impl ChannelStore {
             ch.created_at = now;
         }
         ch.updated_at = now;
-        // 编码明文 api_key（若未编码）
-        if !ch.api_key.is_empty() && !ch.api_key.starts_with("enc:") {
-            ch.api_key = Channel::encode_api_key(&ch.api_key);
+        // 编码明文 api_key（enc:/enc1: 已编码值原样保留，明文升级 enc1:）
+        if !ch.api_key.is_empty()
+            && !ch.api_key.starts_with("enc:")
+            && !ch.api_key.starts_with("enc1:")
+        {
+            ch.api_key = crate::account_session::secret::seal_or_keep(
+                &ch.api_key,
+                &crate::account_session::secret::data_dir(),
+            );
         }
         self.persist(&ch)?;
         self.channels.write().push(ch.clone());
@@ -578,8 +590,14 @@ impl ChannelStore {
     pub fn update(&self, id: &str, mut ch: Channel) -> anyhow::Result<Channel> {
         ch.id = id.to_string();
         ch.updated_at = chrono::Utc::now().timestamp();
-        if !ch.api_key.is_empty() && !ch.api_key.starts_with("enc:") {
-            ch.api_key = Channel::encode_api_key(&ch.api_key);
+        if !ch.api_key.is_empty()
+            && !ch.api_key.starts_with("enc:")
+            && !ch.api_key.starts_with("enc1:")
+        {
+            ch.api_key = crate::account_session::secret::seal_or_keep(
+                &ch.api_key,
+                &crate::account_session::secret::data_dir(),
+            );
         }
         self.persist(&ch)?;
         let mut channels = self.channels.write();
@@ -1384,6 +1402,22 @@ mod tests {
         )))
     }
 
+    /// 编码路径走全局 data_dir（密钥文件所在目录）—— 拿跨模块共享锁设
+    /// 独立临时目录，防并行测试互相换密钥（见 `secret::test_lock`）。
+    fn with_secret_dir<R>(tag: &str, f: impl FnOnce() -> R) -> R {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let _guard = crate::account_session::secret::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("aigx-channel-{tag}-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::account_session::secret::set_data_dir(&dir);
+        f()
+    }
+
     fn sample(id: &str, prio: i64, models: Vec<&str>) -> Channel {
         Channel {
             id: id.to_string(),
@@ -1415,34 +1449,51 @@ mod tests {
 
     #[test]
     fn add_and_select() {
-        let s = store();
-        s.add(sample("a", 10, vec!["deepseek-chat"])).unwrap();
-        s.add(sample("b", 20, vec!["deepseek-chat"])).unwrap();
-        let picked = s.select_for_model("deepseek-chat");
-        assert_eq!(picked.len(), 2);
-        // priority 20 排前
-        assert_eq!(picked[0].id, "b");
+        with_secret_dir("select", || {
+            let s = store();
+            s.add(sample("a", 10, vec!["deepseek-chat"])).unwrap();
+            s.add(sample("b", 20, vec!["deepseek-chat"])).unwrap();
+            let picked = s.select_for_model("deepseek-chat");
+            assert_eq!(picked.len(), 2);
+            // priority 20 排前
+            assert_eq!(picked[0].id, "b");
+        });
     }
 
     #[test]
     fn api_key_encoding() {
-        let ch = sample("a", 1, vec![]);
+        // 旧格式静态函数本身不变（存量兼容）
         let enc = Channel::encode_api_key("sk-secret");
         assert!(enc.starts_with("enc:"));
-        let mut ch2 = ch.clone();
+        let mut ch2 = sample("a", 1, vec![]);
         ch2.api_key = enc;
+        // enc: 走 legacy 兼容分支，不依赖密钥文件
         assert_eq!(ch2.decode_api_key(), "sk-secret");
     }
 
     #[test]
+    fn api_key_new_writes_use_enc1_and_roundtrip() {
+        with_secret_dir("enc1", || {
+            let s = store();
+            let created = s.add(sample("a", 1, vec![])).unwrap();
+            // 新写入用 enc1:（AES-256-GCM，见 account_session::secret）
+            assert!(created.api_key.starts_with("enc1:"));
+            assert!(!created.api_key.contains("sk-test"));
+            assert_eq!(created.decode_api_key(), "sk-test");
+        });
+    }
+
+    #[test]
     fn mark_unhealthy_disables() {
-        let s = store();
-        s.add(sample("a", 1, vec!["m"])).unwrap();
-        s.mark_unhealthy("a", "boom".to_string());
-        let ch = s.get("a").unwrap();
-        assert_eq!(ch.status, "disabled");
-        assert_eq!(ch.last_error.as_deref(), Some("boom"));
-        // disabled 不被选中
-        assert!(s.select_for_model("m").is_empty());
+        with_secret_dir("unhealthy", || {
+            let s = store();
+            s.add(sample("a", 1, vec!["m"])).unwrap();
+            s.mark_unhealthy("a", "boom".to_string());
+            let ch = s.get("a").unwrap();
+            assert_eq!(ch.status, "disabled");
+            assert_eq!(ch.last_error.as_deref(), Some("boom"));
+            // disabled 不被选中
+            assert!(s.select_for_model("m").is_empty());
+        });
     }
 }
