@@ -136,27 +136,33 @@ impl InflightRegistry {
     }
 
     /// 当前在途请求快照（按开始时间升序 = 最早的在前）。
+    ///
+    /// 排序键用 `Instant`（纳秒精度）而不是公开字段 `started_at`（unix 秒）：
+    /// 同一秒内创建的多条请求，用秒做键顺序不确定，列表会随机抖动。
     pub fn list(&self) -> Vec<InflightEntry> {
-        let mut out: Vec<InflightEntry> = self
+        let mut pairs: Vec<(std::time::Instant, InflightEntry)> = self
             .entries
             .iter()
             .map(|kv| {
                 let e = kv.value();
-                InflightEntry {
-                    id: kv.key().clone(),
-                    user_id: e.user_id.clone(),
-                    key_id: e.key_id.clone(),
-                    model: e.model.clone(),
-                    channel_id: e.channel_id.clone(),
-                    channel_name: e.channel_name.clone(),
-                    started_at: e.started_unix,
-                    elapsed_ms: e.started_at.elapsed().as_millis() as u64,
-                    stream: e.stream,
-                }
+                (
+                    e.started_at,
+                    InflightEntry {
+                        id: kv.key().clone(),
+                        user_id: e.user_id.clone(),
+                        key_id: e.key_id.clone(),
+                        model: e.model.clone(),
+                        channel_id: e.channel_id.clone(),
+                        channel_name: e.channel_name.clone(),
+                        started_at: e.started_unix,
+                        elapsed_ms: e.started_at.elapsed().as_millis() as u64,
+                        stream: e.stream,
+                    },
+                )
             })
             .collect();
-        out.sort_by_key(|e| e.started_at);
-        out
+        pairs.sort_by_key(|(at, _)| *at);
+        pairs.into_iter().map(|(_, e)| e).collect()
     }
 
     /// 终止一条在途请求。返回是否找到。
@@ -255,7 +261,7 @@ mod tests {
     fn list_sorted_by_start_time() {
         let reg = Arc::new(InflightRegistry::new());
         let (_a, _ga) = reg.begin("first", false, None, None);
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::thread::sleep(std::time::Duration::from_millis(10));
         let (_b, _gb) = reg.begin("second", false, None, None);
         let list = reg.list();
         assert_eq!(list.len(), 2);
