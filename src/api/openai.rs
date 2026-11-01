@@ -175,6 +175,17 @@ pub struct AppState {
     /// authorize 时生成随机 state 存入，callback 时校验并一次性消费。
     /// key=state 值，value=生成时间戳（TTL 10 分钟由 AsyncCache 清扫）。
     pub oauth_state_cache: Arc<crate::cache::AsyncCache<String, i64>>,
+    /// OAuth **绑定** state → 目标用户 email（个人中心发起绑定时写入）。
+    ///
+    /// 与登录态的 `oauth_state_cache` 分开：绑定由已登录用户发起，callback 需
+    /// 知道把第三方身份绑到「谁」。state 是不透明 UUID，一次性消费（TTL 10 分钟）。
+    pub oauth_bind_state: Arc<crate::cache::AsyncCache<String, String>>,
+    /// OAuth 登录成功后的**一次性票据** ticket → 会话 token。
+    ///
+    /// callback 是浏览器整页跳转，会话 token 若直接放 URL（哪怕 fragment）会留在
+    /// 浏览器历史里。改为：callback 生成短命 ticket（TTL 2 分钟）放 fragment，SPA
+    /// 再用 ticket 调 `/api/auth/oauth/consume` 换回真正的 token，token 不进 URL。
+    pub oauth_ticket: Arc<crate::cache::AsyncCache<String, String>>,
     /// 会话注册表（P1：会话撤销）。
     ///
     /// 无状态 HMAC token 的服务端撤销层：登录注册 jti、验证查

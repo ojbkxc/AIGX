@@ -21,8 +21,8 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::common::{error_response, record_audit, verify_admin};
 use super::super::openai::AppState;
+use super::common::{error_response, record_audit, verify_admin};
 
 /// 备份文档格式版本（未来结构变更时的兼容判据）。
 const BACKUP_FORMAT_VERSION: u32 = 1;
@@ -80,25 +80,27 @@ pub async fn handle_storage_overview(
     })?;
     let mut groups: BTreeMap<String, Value> = BTreeMap::new();
     for (prefix, label) in STORAGE_GROUPS {
-        let count = all_keys
-            .iter()
-            .filter(|k| k.starts_with(prefix))
-            .count();
+        let count = all_keys.iter().filter(|k| k.starts_with(prefix)).count();
         if count > 0 {
             groups.insert((*label).to_string(), json!(count));
         }
     }
 
     // SQLite 库文件大小（data_dir/data/aigx.db；PG 后端时为 None）
-    let data_dir = crate::config::expand_path(
-        &state.config_manager.get().await.server.data_dir,
-    );
+    let data_dir = crate::config::expand_path(&state.config_manager.get().await.server.data_dir);
     let db_size = std::fs::metadata(data_dir.join("data").join("aigx.db"))
         .ok()
         .map(|m| m.len());
 
     let admin_id = crate::api::admin::common::admin_id_from_session(&state, &headers).await;
-    record_audit(&state, &admin_id, "storage.overview", "查询存储概览", None, None);
+    record_audit(
+        &state,
+        &admin_id,
+        "storage.overview",
+        "查询存储概览",
+        None,
+        None,
+    );
 
     Ok(Json(json!({
         "success": true,
@@ -219,9 +221,7 @@ pub async fn handle_backup_import(
         include_logs: true,
         kv: snapshot,
     };
-    let data_dir = crate::config::expand_path(
-        &state.config_manager.get().await.server.data_dir,
-    );
+    let data_dir = crate::config::expand_path(&state.config_manager.get().await.server.data_dir);
     let backups_dir = data_dir.join("backups");
     std::fs::create_dir_all(&backups_dir).map_err(|e| {
         error_response(

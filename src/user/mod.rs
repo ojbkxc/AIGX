@@ -125,18 +125,16 @@ pub struct User {
     pub oauth_linuxdo: String,
     /// 是否已设置真实登录密码。
     ///
-    /// OAuth 首次自动建号时随机密码不可用，置 false；用户密码注册 / 改密 /
-    /// 成功密码登录后置 true。旧数据缺该字段按 true 处理（视为已有密码），
-    /// 避免误判把存量密码用户的解绑保护错误触发。用于「解绑 OAuth 前确认
-    /// 还有其它登录方式」的防锁死校验。
-    #[serde(default = "default_true")]
+    /// OAuth 首次自动建号时随机密码不可用，置 false；密码注册 / 改密 / 重置 /
+    /// 成功密码登录后置 true（自愈）。**旧数据缺该字段按 false 处理**——让存量
+    /// OAuth 账号在身份字段还是空时仍走邮箱兜底登录（首次登录即补写身份，
+    /// 升级为显式绑定）；而任何用密码成功登录过的账号都会被翻成 true，从而
+    /// 关闭「他人用相同邮箱注册密码账号后、凭 OAuth 登进该账号」的接管面。
+    /// 另用于解绑前的防锁死校验（确认还有其它登录方式）。
+    #[serde(default)]
     pub password_set: bool,
     #[serde(default)]
     pub created_at: i64,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_status() -> String {

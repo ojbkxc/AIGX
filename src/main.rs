@@ -458,6 +458,21 @@ async fn main() -> anyhow::Result<()> {
             .build(),
     );
 
+    // OAuth 绑定 state → 目标 email（个人中心发起绑定；TTL 10 分钟）
+    let oauth_bind_state = std::sync::Arc::new(
+        crate::cache::AsyncCache::<String, String>::builder()
+            .max_capacity(10_000)
+            .time_to_live(std::time::Duration::from_secs(600))
+            .build(),
+    );
+    // OAuth 登录一次性票据 ticket → 会话 token（token 不进 URL，SPA 用 ticket 换回；TTL 2 分钟）
+    let oauth_ticket = std::sync::Arc::new(
+        crate::cache::AsyncCache::<String, String>::builder()
+            .max_capacity(10_000)
+            .time_to_live(std::time::Duration::from_secs(120))
+            .build(),
+    );
+
     // 服务器自动更新管理器（Release 检测 / 原地替换 / exec 自重启）
     let update = crate::update::UpdateManager::new(store.clone(), data_dir.clone());
 

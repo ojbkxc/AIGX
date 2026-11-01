@@ -67,10 +67,10 @@ const COL_DEFAULT_W: Record<AnyCol, string> = {
   check: '34px',
   enable: '46px',
   model: '21%',
-  price: '13%',
+  price: '15%',
   source: '16%',
   caps: '10%',
-  alias: '36%',
+  alias: '33%',
   act: '132px',
 };
 
