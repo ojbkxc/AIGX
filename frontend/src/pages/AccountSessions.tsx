@@ -3,7 +3,15 @@ import { useTranslation } from 'react-i18next';
 import { Download, FlaskConical, Loader2, Pencil, Plus, Power, RefreshCw, RotateCcw, SlidersHorizontal, Trash2, Upload, Wallet } from 'lucide-react';
 import { api } from '../api';
 import { presetIcon, providerIcon } from '../lib/providerIcons';
-import { CUSTOM_PROTOCOLS, PRESET_PROVIDERS, normalizeUrl, presetKind } from '../lib/addAccountConfigs';
+import {
+  addConfigOf,
+  cardKindOf,
+  CUSTOM_PROTOCOLS,
+  isCardHidden,
+  PRESET_PROVIDERS,
+  normalizeUrl,
+  presetKind,
+} from '../lib/addAccountConfigs';
 import { useToast } from '../components/Toast';
 import AddAccountDialog from '../components/AddAccountDialog';
 import ProxySelector from '../components/ProxySelector';
@@ -923,7 +931,7 @@ export default function AccountSessions(): JSX.Element {
   // API Key 型全家走「预置 API」段）。openai_compatible 是「自定义地址」的
   // 落点，天然不在此段。
   const agentCards = providers
-    .filter((p) => p.auth != null && p.kind !== 'openai_compatible')
+    .filter((p) => p.auth != null && p.kind !== 'openai_compatible' && !isCardHidden(p.kind))
     .filter(
       (p) =>
         !providerSearchNeedle ||
@@ -944,6 +952,14 @@ export default function AccountSessions(): JSX.Element {
   const pickProvider = (kind: string, baseUrl: string): void => {
     setForm((prev) => ({ ...prev, provider: kind, base_url: baseUrl }));
   };
+
+  // 卡内「账号版本」（如 WorkBuddy 国内版/国际版）：form.provider 始终存真实
+  // provider id，这里由它反推母卡与选中档位（对齐 Agent2API WorkBuddyBlock）
+  const editionHost = cardKindOf(form.provider);
+  const hostEditions = addConfigOf(editionHost)?.editions ?? [];
+  const selectedEditionId = hostEditions.some((item) => item.id === form.provider)
+    ? form.provider
+    : (hostEditions[0]?.id || '');
 
   const selectedProviderLabel = providerLabel(form.provider);
   const effectiveEndpoint =
@@ -1400,7 +1416,7 @@ export default function AccountSessions(): JSX.Element {
                   value={form.provider}
                   onChange={(e) => setForm({ ...form, provider: e.target.value })}
                 >
-                  {providers.map((p) => (
+                  {providers.filter((p) => !isCardHidden(p.kind)).map((p) => (
                     <option key={p.kind} value={p.kind}>
                       {p.label}
                     </option>
@@ -1447,7 +1463,7 @@ export default function AccountSessions(): JSX.Element {
                     {pickSegment === 'agent' &&
                       agentCards.map((p) => {
                         const active =
-                          form.provider === p.kind &&
+                          cardKindOf(form.provider) === p.kind &&
                           normalizeUrl(form.base_url) === normalizeUrl(p.default_base_url);
                         return (
                           <button
@@ -1541,6 +1557,20 @@ export default function AccountSessions(): JSX.Element {
                   </div>
                 </div>
               )}
+              {hostEditions.length ? (
+                <div className="form-group">
+                  <label>{t('账号版本')}</label>
+                  <Tabs<string>
+                    items={hostEditions.map((item) => ({ key: item.id, label: item.label }))}
+                    active={selectedEditionId}
+                    onChange={(id) => setForm({ ...form, provider: id })}
+                    ariaLabel={t('账号版本')}
+                  />
+                  <div className="form-hint">
+                    {t('国内版与国际版是两套独立账号，凭证不通用。')}
+                  </div>
+                </div>
+              ) : null}
               {editing || accountChannels.length > 0 ? (
                 <Select
                   label={t('渠道')}

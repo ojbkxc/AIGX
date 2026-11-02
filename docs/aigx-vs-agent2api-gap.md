@@ -1,0 +1,158 @@
+# AIGX ↔ Agent2API 差距清单（手工分析，2026-11-02）
+
+> 基准：AIGX `D:\GitHub\AIGX` @ `dcb14bd`（VERSION 1.0.28）↔ 上游 Agent2API @ `68d0a4e`（v3.0.8，`D:\GitHub\Agent2API`）。
+> 用途：逐项对照上游功能，标出 AIGX 落点或缺口，供多人/多 AI 并行改动时对照，避免撞车。
+> 生成方式：人工核对源码（非 `tools/sync_agent2api_*.py` 生成的自动报告，那三份看 `upstream-*-diff.md`）。
+> 图例：✅ 已对齐 / 🟡 部分或语义需确认 / ❌ 缺
+
+---
+
+## 0. 前置结论
+
+- 上游**供应商数据层已完全对齐**：24 家 provider、25 条登录态、25 个表单覆盖全绿
+  （`python tools/sync_agent2api_providers.py --upstream /d/GitHub/Agent2API --check`）。
+- 本清单只列**功能/交互层**的差距。
+
+---
+
+## 1. 设置页 · 网关（上游 tab `gateway`，15 项）
+
+| 上游项（i18n key） | 默认 | 上游端点 | AIGX 现状 | AIGX 落点 / 缺口 |
+|---|---|---|---|---|
+| 监听地址 / 端口 | 0.0.0.0 / 3065 | 独立页 | ✅ | `frontend/src/components/GatewayPanel.tsx:22-23`（端口默认 9527） |
+| CORS 允许来源 | 关 | `/api/cors` | ✅ | `GatewayPanel.tsx:24,54`（origin 列表，语义等价） |
+| 信任反代头 | — | — | ✅ | `GatewayPanel.tsx:25,62` |
+| 开发者角色兼容（developer→system） | 开 | `/api/developer-role-compat` | ✅ | 并入 `/api/gateway/prompt`：`src/api/admin/settings.rs:671,706`、消费点 `src/api/openai.rs:1503`、`src/api/anthropic.rs:332` |
+| 系统提示词模式/文件/正文/按家覆盖/三段 | passthrough | `/api/prompt` | 🟡 | AIGX 有 `/api/gateway/prompt`（`main.rs:1404`）；**「按提供商覆盖」与「三段(ZCode)」需逐项确认** |
+| 排队等待次数 | 2 (0–10) | `/api/queue` | ❌ | 无排队概念 |
+| 排队等待秒数 | 0 (0–120) | `/api/queue` | ❌ | 同上 |
+| ZCode 库存目标 / 轮询间隔 / 单轮铸造上限 | 3 / 2500ms / 1 | `/api/zcode/captcha-pool` | ❌ | AIGX 无 zcode 验证码池概念 |
+| models.dev 模型元数据开关 | 开 | `/api/models/metadata` | ❌ | AIGX 走自建模型聚合，无该开关 |
+| 指纹脱敏（剥离审核黑名单指纹） | 开 | `/api/sanitize`（上游 `core/sanitize.rs` 337 行） | ❌ | AIGX 只有**渠道级**伪装 `src/channel/emulation.rs`（仅 opencode 一种），无全局可配指纹剥离 |
+| Cline 伪装头（可编辑覆盖表） | 内置一套 | `/api/cline/headers` | ❌ | 无 |
+| 内容拦截降级期 | — | `/api/prompt` | ❌ | 未见 degrade 实现 |
+| 调试模式（保存上游原始报文 + 流量查看） | 关 | `/api/debug`、`/api/debug/traffic` | 🟡 | AIGX 有 `log_body` 开关（`src/api/admin/settings.rs:49`）但无「原始报文留存 + 查看 API」 |
+| 保活换行丢弃 | 关 | `/api/keepalive-strip` | ❌ | 无 |
+| 长度截断自动续写 | 关 | `/api/auto-continue` | ❌ | 无 |
+
+## 2. 设置页 · 路由（上游 tab `routing`，5 项）
+
+| 上游项 | 上游可选值/默认 | AIGX 现状 | AIGX 落点 |
+|---|---|---|---|
+| 路由策略 | 顺序优先(默认)/负载均衡/家内轮询 | ✅ 语义等价 | `frontend/src/components/RoutingPanel.tsx:30-47`（`weighted`/`round_robin`/`ranked`）→ `src/channel/routing_policy.rs` |
+| 会话粘性 | 自动(默认,5min)/会话内(6h)/每轮/关闭 | ✅ | `RoutingPanel.tsx:49-70`（auto/session/turn/off）→ `src/channel/affinity.rs` |
+| 失败退避 | 开（15min 起翻倍，封顶 1h） | 🟡 | AIGX 有断路器冷却，但**「指数翻倍退避」语义需确认** |
+| 限流垫底 | 开（429 沉底 30min 回） | 🟡 | `src/channel/aimd.rs`、`rate_budget.rs` 有 429 处理，**「沉底 + 30min 回」需确认** |
+| 熔断 | 关（阈值 5 / 超时 60s / 成功阈值 2） | ✅ | `RoutingPanel.tsx:108-119`（enabled/threshold/cooldown/success_threshold）→ `src/channel/circuit_breaker.rs` |
+| 调度权重 health/cost/rpm | 上游无 | ✅ **AIGX 独有增强** | `RoutingPanel.tsx:71-77` → `src/channel/scheduler.rs` |
+
+> AIGX 后端调度深度（affinity/aimd/balancer/circuit_breaker/scheduler/rate_budget/response_quality）**强于上游**，属优势项，不必回退。
+
+## 3. 设置页 · 重试（上游 tab `retry`，4 项）
+
+| 上游项 | 默认 | AIGX 现状 | AIGX 落点 / 缺口 |
+|---|---|---|---|
+| 同一账号重试次数 | 3 (0–10) | ✅ | `/api/limits` 的 `max_retries`：`src/api/admin/settings.rs:44` |
+| 切换账号重试次数 | 5 (0–10) | ❌ | **缺**（AIGX 无账号级 switch-count 字段） |
+| 重试间隔 | 5s (0–300) | ✅ | `retry_interval_ms`：`settings.rs:45` |
+| 指定错误码直接换号 | [402] | ✅ | `retry_on_status`：`settings.rs:46` |
+
+## 4. 设置页 · 超时（上游 tab `timeout`，4 项）
+
+| 上游项 | 默认 | AIGX 现状 | AIGX 落点 |
+|---|---|---|---|
+| 连接中超时 | 30s | ✅ | `connect_timeout_secs`：`settings.rs:41` |
+| 等待响应头超时 | 300s | ✅ | `headers_timeout_secs`：`settings.rs:42` |
+| 流式空闲超时 | 300s | ✅ | `stream_idle_secs`：`settings.rs:43` |
+| 非流式响应超时 | 300s | ✅ | `api_timeout_secs`：`settings.rs:40` |
+
+## 5. 设置页 · 安全（上游 tab `security`）
+
+| 上游项 | 默认 | AIGX 现状 | AIGX 落点 / 缺口 |
+|---|---|---|---|
+| 网关跨域（CORS 开关） | 关 | ✅ | 见网关表 |
+| 机器人校验（ALTCHA） | 开 | ❌ | **缺**（AIGX 有登录限流+连续失败锁定 5min、IP 管理，但无人机校验） |
+| 面板登出 | 动作 | ✅ | 有认证体系 |
+| **策略化安全配置面**（登录失败锁定阈值/自动封禁规则） | — | ❌ | AIGX 只有**监控 + IP 管理**（`frontend/src/pages/Security.tsx`、`IpManagement.tsx`），无可配策略面 |
+
+## 6. 设置页 · 数据（上游 tab `data`，4 项 + 4 动作）
+
+| 上游项 | 默认 | AIGX 现状 | AIGX 落点 |
+|---|---|---|---|
+| 事件日志保留天数 | 30 | ✅ | `frontend/src/pages/LogRetention.tsx` → `/api/logs/retention`（`main.rs:1307`） |
+| 请求日志保留天数 | 99999 | ✅ | 同上 |
+| 按天聚合保留天数 | 99999 | 🟡 | 需确认是否有「聚合」档 |
+| 整库备份/恢复（含日志开关） | 开 | ✅ | `frontend/src/components/DataManagement.tsx` → `/api/backup/export|import` |
+| 账号导入/导出 | — | ✅ | `AccountSessions.tsx` `handleExport` |
+| 数据存储信息（只读） | — | ✅ | `/api/storage` |
+
+---
+
+## 7. 模型管理页
+
+AIGX `frontend/src/pages/ModelManage.tsx`（2115 行）+ `src/model/manage.rs` + `src/api/admin/model_manage.rs` + `src/api/admin/model_test.rs`。
+
+| 上游能力 | AIGX 现状 | 证据 |
+|---|---|---|
+| 模型列表 / 统计（N 个模型 · 已启用 X · 有映射 Y） | ✅ | `ModelManage.tsx` |
+| 状态筛选（全部/已启用/已禁用/有映射） | ✅ | `:231-239` |
+| 排序（默认/倍率升/降） | ✅ | `:231-239` |
+| 搜索（id/name/别名） | ✅ | `:276` |
+| 启停（单行 + 批量） | ✅ | `:339-346`、`:606-646` |
+| 定价 upsert/删除（倍率） | ✅ | `:362-428` |
+| 别名映射 增/删/开关（对外名→上游模型） | ✅ | `:430-482`、`:55-65` |
+| 能力（上下文/输出/工具/图片/视频/思考）继承↔覆盖 | ✅ | `能力` 15 处、`继承` 11 处 |
+| 思考等级（映射随转发注入） | ✅ | `reasoning` 5 处 |
+| **选中模型 → 测试**（真实转发 + TTFB + 流式） | ✅ | `components/ModelTestDialog.tsx`、`src/api/admin/model_test.rs:78`；来源选择 账号>渠道>自动 |
+| 批量弹窗（启用/禁用/删） | ✅ | `:2040` |
+| 拉取/同步上游模型目录 | ✅ | `:685-696` |
+| 分组带 + 组内折叠 | ✅ | `分组` 5 处 |
+| 客户端分页 | ✅ | `分页`/`page` |
+| 列可见性持久化 | ✅ | `:258` |
+| **列设置面板「拖拽排序 + 对齐三档 + 恢复默认」** | ❌ | AIGX 无 `drag` 实现（上游 `table-col-settings.tsx`） |
+| **列宽拖动 + 双击还原 + 持久化** | 🟡 | AIGX 有 `columnWidth` 2 处，需确认是否可拖动 |
+| **移动端卡片化（≤767px 行拆卡片）** | 🟡 | 需确认（上游 `ui/mobile-columns.js`） |
+
+> 结论：模型管理**主体已对齐（含"选中后测试"）**，剩余是列设置拖拽、移动端卡片化等手感细节。
+
+---
+
+## 8. 账号添加 · WorkBuddy 国内/国际卡
+
+| 项 | 上游 | AIGX 现状 | 落点 |
+|---|---|---|---|
+| WorkBuddy 国内/国际 | **合并为一张卡** + 卡内「账号版本」分段，提交时 `workbuddyProviderId(edition)` 解析成 `workbuddy`/`workbuddy-intl`；凭证文件按 `domain` 自动判地区 | ❌ **两张独立卡** | `frontend/src/lib/addAccountConfigs.ts:61`（workbuddy）、`:611`（workbuddy-intl）；渲染 `components/AddAccountDialog.tsx:582`、`pages/AccountSessions.tsx:1447-1487` |
+| 其余 intl 变体（autoclaw/qoder/accio/zcode/monkeycode） | 分开两卡 | ✅ 一致 | 无需改 |
+
+> **只有 WorkBuddy 需要改**（上游唯一合并的一家）。
+
+## 9. CodeArts / OfficeAce · DPoP 续期
+
+| 项 | 上游 | AIGX 现状 | 落点 |
+|---|---|---|---|
+| DPoP 私钥随凭据落盘 | ✅ `dpop_key_pair` 落库 | ✅ **已补**（登录落 `dpop_d`/`code_verifier` 到 `Credential.fields`，refresh_token 落 `refresh_secret`） | `src/account_login/mod.rs`（`LoginFlow::extra_fields/refresh_token` + `persist_account`）、`src/account_login/codearts.rs` |
+| refresh_token 落盘 + 自动续期（提前 15min） | ✅ `providers/codearts/refresh.rs` | ✅ **已补（CodeArts）** | `src/account_session/refresh.rs`（`refresh_codearts` + `supports_refresh`/`needs_refresh` 分派） |
+| OfficeAce 同样的 DPoP 续期 | ✅（协议不同） | ❌ 未做（OfficeAce 续期走 model_app_key/secret + 临时 AK/SK 另一套协议，待补） | 同上，`refresh_officeace` 待写 |
+| 「无法生成本机 P-256 密钥」报错 | —— | ✅ **已修**（旧 `3e0c6421` 用 uuid 16 字节当 32 字节标量必失败；`f552cc06` 改 getrandom 32 字节，已含在 1.0.28） | `src/account_login/codearts.rs:72-99` |
+
+## 10. 其他（设置页其余分区）
+
+| 分区 | 上游可配项 | AIGX 现状 |
+|---|---|---|
+| 通用 | 关窗最小化托盘/轻量模式/开机自启/局域网访问/开放网页面板/中文单位 | 🟡 部分（AIGX 是 server，托盘/自启不适用） |
+| 显示 | 显示模式/界面缩放/语言 | ✅ AIGX 有主题；**缩放档需确认** |
+| 更新 | 自动检查/间隔/beta 通道/GitHub Token | ✅ `UpdatePanel` |
+| AI 助手 | 对话模型/注入提示词/9 工具勾选 | ✅ `assistant` 子标签 |
+| 网络代理池 | 代理池/订阅/Clash/轮询 | ✅ AIGX 有代理池（`proxies`） |
+| 端口独立页 | 端口冲突处理 | 🟡 见网关表 |
+
+---
+
+## 建议优先级（未开始）
+
+1. **P0** WorkBuddy 合并卡（§8）—— 用户点名，前端独立，零后端风险。
+2. **P0** CodeArts/OfficeAce DPoP 落盘 + 续期（§9）—— 功能正确性，账号不再 1h 掉线。
+3. **P1** 设置-重试补「切换账号重试次数」（§3）；安全补 ALTCHA + 策略面（§5）。
+4. **P1** 网关补齐高价值项：指纹脱敏(sanitize)、调试模式原始报文、Cline 伪装头（§1）。
+5. **P2** 模型管理列设置拖拽 + 移动端卡片化（§7）。
+6. **P2** 排队等待、ZCode 验证码池、models.dev 元数据、keepalive/auto-continue（§1，多为上游桌面端特有，AIGX 是 server 可评估不采纳）。

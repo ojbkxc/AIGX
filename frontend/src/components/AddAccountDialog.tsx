@@ -6,6 +6,9 @@ import {
   ADD_METHOD_LABELS,
   addConfigOf,
   CUSTOM_PROTOCOLS,
+  editionOf,
+  effectiveProvider,
+  isCardHidden,
   normalizeUrl,
   PRESET_PROVIDERS,
   presetKind,
@@ -142,6 +145,8 @@ export default function AddAccountDialog({
   const [segment, setSegment] = useState<Segment>('agent');
   const [search, setSearch] = useState('');
   const [provider, setProvider] = useState('');
+  /** 卡内「账号版本」档位（如 WorkBuddy 的 国内版/国际版），空 = 用 defaults */
+  const [edition, setEdition] = useState('');
   const [baseUrlHint, setBaseUrlHint] = useState('');
   /** 预置卡的地址栏占位提示（Sub2API/NewAPI 等自建面板没有固定地址） */
   const [baseUrlPlaceholder, setBaseUrlPlaceholder] = useState('');
@@ -174,7 +179,20 @@ export default function AddAccountDialog({
 
   const selectedProvider = providers.find((p) => p.kind === provider);
   const addConfig = addConfigOf(provider);
-  const webConfig = addConfig?.web ?? null;
+  /** 卡内版本档位（无 editions 时 undefined） */
+  const selectedEdition = addConfig?.editions?.length ? editionOf(provider, edition) : undefined;
+  /** 真正落账号 / 起登录的 provider id：版本卡把档位解析成 workbuddy / workbuddy-intl */
+  const activeProvider = effectiveProvider(provider, edition);
+  const baseWeb = addConfig?.web ?? null;
+  const webConfig = baseWeb && selectedEdition
+    ? {
+        ...baseWeb,
+        url: selectedEdition.url || baseWeb.url,
+        note: selectedEdition.note || baseWeb.note,
+        hint: selectedEdition.hint ?? baseWeb.hint,
+        button: selectedEdition.button || baseWeb.button,
+      }
+    : baseWeb;
   const label =
     addConfig?.label
     || selectedProvider?.label
@@ -199,6 +217,7 @@ export default function AddAccountDialog({
   const agentCards = providers.filter(
     (p) =>
       p.auth != null
+      && !isCardHidden(p.kind)
       && (!needle
         || providerLabel(p).toLowerCase().includes(needle)
         || p.kind.toLowerCase().includes(needle)
@@ -220,6 +239,7 @@ export default function AddAccountDialog({
 
   const pick = (kind: string, baseUrl: string, config?: ProviderAddConfig, preset?: PresetProviderItem): void => {
     setProvider(kind);
+    setEdition(config?.editions?.[0]?.id || '');
     setBaseUrlHint(baseUrl);
     setBaseUrlPlaceholder(preset?.placeholder ?? '');
     setNoAuth(preset?.no_auth ?? false);
@@ -329,7 +349,7 @@ export default function AddAccountDialog({
     setLoginError('');
     setLoginWaiting(true);
     try {
-      const res = await api.startAccountLogin({ provider, channel_id: advanced.channel_id });
+      const res = await api.startAccountLogin({ provider: activeProvider, channel_id: advanced.channel_id });
       const data = res.data;
       if (!data?.state || !data.authUrl) throw new Error(t('登录发起失败'));
       setLoginState(data.state);
@@ -373,7 +393,7 @@ export default function AddAccountDialog({
     setSmsHint('');
     setSmsBusy(true);
     try {
-      const res = await api.sendAccountLoginSms({ provider, phone: smsPhone.trim() });
+      const res = await api.sendAccountLoginSms({ provider: activeProvider, phone: smsPhone.trim() });
       const msgid = res.data?.msgid || '';
       if (!msgid) throw new Error(t('验证码发送失败'));
       setSmsMsgid(msgid);
@@ -390,7 +410,7 @@ export default function AddAccountDialog({
     setSmsBusy(true);
     try {
       await api.verifyAccountLoginSms({
-        provider,
+        provider: activeProvider,
         phone: smsPhone.trim(),
         code: smsCode.trim(),
         msgid: smsMsgid,
@@ -422,7 +442,7 @@ export default function AddAccountDialog({
     setPasteBusy(true);
     try {
       await api.pasteAccountLogin({
-        provider,
+        provider: activeProvider,
         channel_id: advanced.channel_id,
         secret,
         name: (addConfig?.fields.find((f) => f.target === 'name')
@@ -498,7 +518,7 @@ export default function AddAccountDialog({
       const payload: Record<string, unknown> = {
         channel_id: channelId,
         name: (nameField ? values[nameField.key] || '' : advanced.name).trim(),
-        provider,
+        provider: activeProvider,
         base_url: (advanced.base_url || baseUrlHint).trim(),
         chat_path: advanced.chat_path.trim(),
         status: advanced.status,
@@ -668,6 +688,18 @@ export default function AddAccountDialog({
             <div className="modal-body">
               {addConfig ? (
                 <>
+                  {addConfig.editions?.length ? (
+                    <div className="add-method-row">
+                      <span className="add-method-label">{t('账号版本')}</span>
+                      <Tabs<string>
+                        items={addConfig.editions.map((item) => ({ key: item.id, label: item.label }))}
+                        active={activeProvider}
+                        onChange={setEdition}
+                        ariaLabel={t('账号版本')}
+                      />
+                    </div>
+                  ) : null}
+
                   <div className="add-method-row">
                     <span className="add-method-label">{t('添加方式')}</span>
                     <Tabs<AddMethodId>

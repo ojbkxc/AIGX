@@ -4,6 +4,11 @@
  *
  * 只放数据、不放 JSX：弹窗组件（components/AddAccountDialog.tsx）按这张表渲染
  * 手填字段、登录方式与说明；新增一家供应商时只改这里。
+ *
+ * 国内/国际「合并在一个框里」的一家（WorkBuddy）用 `editions` 表达：卡只出现
+ * 一次，档位在提交时解析成真实 provider id；`hideCard` 标记的子项不进卡片列表
+ * （对齐 Agent2API 的 WorkBuddyBlock / workbuddyProviderId）。其余地区的
+ * intl 变体（autoclaw/qoder/accio/zcode/monkeycode）上游也是分开两张卡。
  */
 
 export type AddMethodId = 'web' | 'sms' | 'manual' | 'paste';
@@ -30,9 +35,31 @@ export interface AddField {
   json?: boolean;
 }
 
+/**
+ * 同一张卡内的「账号版本」档位（对齐 Agent2API WorkBuddyBlock 的版本分段）：
+ * 卡只出现一次，提交时才把选中档位解析成真实 provider id。
+ */
+export interface ProviderEdition {
+  /** 该档位对应的真实 provider id（落账号时用） */
+  id: string;
+  label: string;
+  /** 该档位的官方登录页（覆盖 `web.url`） */
+  url?: string;
+  note?: string;
+  hint?: string;
+  button?: string;
+}
+
 export interface ProviderAddConfig {
   provider: string;
   label: string;
+  /**
+   * 卡内版本分段（如 WorkBuddy 的 国内版/国际版）。有值时该卡在供应商列表里
+   * **只出现一次**，具体 provider 由选中档位决定（见 `effectiveProvider`）。
+   */
+  editions?: ProviderEdition[];
+  /** 仅作为某个 editions 的子项存在，不在供应商列表里单独出现 */
+  hideCard?: boolean;
   /** 手填段标题 */
   manualTitle: string;
   /** 手填段说明（纯文本，避免 dangerouslySetInnerHTML） */
@@ -63,8 +90,14 @@ export const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
     label: 'WorkBuddy',
     manualTitle: '填写凭证',
     manualNote:
-      'accessToken 是官方客户端的登录令牌（形如一长串 JWT）。两版账号（国内版 WorkBuddy / 国际版 WorkBuddy AI）可同时保存，各自一份模型清单。',
+      'accessToken 是官方客户端的登录令牌（形如一长串 JWT）。国内版（WorkBuddy）与国际版（WorkBuddy AI）是两套独立账号，凭证不通用，用上面的「账号版本」切换后分别添加。',
     addButton: '添加 WorkBuddy 账号',
+    // 国内 / 国际合并在同一张卡：入口只此一处，选中档位在提交时解析成
+    // `workbuddy` / `workbuddy-intl`（对齐 Agent2API WorkBuddyBlock 的「账号版本」）
+    editions: [
+      { id: 'workbuddy', label: '国内版', url: 'https://www.workbuddy.cn/' },
+      { id: 'workbuddy-intl', label: '国际版', url: 'https://www.workbuddy.ai/' },
+    ],
     methods: ['web', 'manual'],
     web: {
       note:
@@ -607,10 +640,12 @@ Object.assign(SESSION_ADD_CONFIGS, {
   'qoder-intl': qoderForm('qoder-intl', '国际版', 'https://qoder.com/'),
   'zcode-intl': zcodeForm('zcode-intl', '国际版', 'api.z.ai'),
   'monkeycode-intl': monkeycodeForm('monkeycode-intl', 'MonkeyCode 国际版', 'monkeycode-ai.net'),
-  // WorkBuddy 国际版：与国内版同一套 accessToken 粘贴流程，站点不同
+  // WorkBuddy 国际版：与国内版同一套 accessToken 粘贴流程，站点不同。
+  // 作为 workbuddy 卡的 editions 子项存在，不在供应商列表单独成卡（hideCard）。
   'workbuddy-intl': {
     provider: 'workbuddy-intl',
     label: 'WorkBuddy 国际版',
+    hideCard: true,
     manualTitle: '填写凭证',
     manualNote:
       'accessToken 是国际版官方客户端（www.workbuddy.ai）的登录令牌。国内版与国际版是两套独立账号，凭证不通用。',
@@ -734,6 +769,32 @@ export const ADD_METHOD_LABELS: Record<AddMethodId, string> = {
 
 export function addConfigOf(provider: string): ProviderAddConfig | undefined {
   return SESSION_ADD_CONFIGS[provider];
+}
+
+/** 该 provider 是否只在母卡的版本分段里出现（不在供应商列表单独成卡） */
+export function isCardHidden(kind: string): boolean {
+  return SESSION_ADD_CONFIGS[kind]?.hideCard === true;
+}
+
+/** 该 provider 归属的卡片 kind：版本子项返回其母卡，其余返回自身 */
+export function cardKindOf(kind: string): string {
+  if (!isCardHidden(kind)) return kind;
+  for (const [base, config] of Object.entries(SESSION_ADD_CONFIGS)) {
+    if (config.editions?.some((edition) => edition.id === kind)) return base;
+  }
+  return kind;
+}
+
+/** 当前选中的版本档位（无 editions 时返回 undefined） */
+export function editionOf(kind: string, edition: string): ProviderEdition | undefined {
+  const config = SESSION_ADD_CONFIGS[cardKindOf(kind)];
+  if (!config?.editions?.length) return undefined;
+  return config.editions.find((item) => item.id === edition) || config.editions[0];
+}
+
+/** 选中的版本档位对应的真实 provider id（无 editions 时即自身） */
+export function effectiveProvider(kind: string, edition: string): string {
+  return editionOf(kind, edition)?.id || kind;
 }
 
 /* ─── 预置 API / 自定义协议（与账号池页共用同一份目录）────────────── */
