@@ -269,6 +269,7 @@ const EMPTY_PRICE_FORM: PriceForm = {
 interface AliasForm {
   alias: string;
   target: string;
+  reasoning_effort: string;
 }
 
 /** 元信息覆盖表单：能力四圆点结构化（对齐 Agent2API CapabilityDialog 的声明式编辑） */
@@ -323,7 +324,7 @@ function capsToForm(caps: string[]): Pick<MetaForm, 'capsMode' | 'capTool' | 'ca
   };
 }
 
-type BatchAction = 'enable' | 'disable' | 'remove-price';
+type BatchAction = 'enable' | 'disable' | 'remove-price' | 'set-reasoning';
 
 // ── 主组件 ───────────────────────────────────────────────────────────
 
@@ -378,6 +379,7 @@ export default function ModelManage(): JSX.Element {
   const [batchAction, setBatchAction] = useState<BatchAction>('enable');
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchReport, setBatchReport] = useState('');
+  const [batchReasoning, setBatchReasoning] = useState('');
 
   // 列配置：顺序（拖拽）/ 显隐 / 对齐三档 + 列宽（localStorage 记忆，
   // 对齐 Agent2API table-col-settings + 列宽拖动）
@@ -401,6 +403,13 @@ export default function ModelManage(): JSX.Element {
   const [fetchFailed, setFetchFailed] = useState<Record<string, string>>({});
   const [fetchAllRunning, setFetchAllRunning] = useState(false);
 
+  // 添加自定义模型弹窗
+  const [addModelOpen, setAddModelOpen] = useState(false);
+  const [addModelProvider, setAddModelProvider] = useState('');
+  const [addModelId, setAddModelId] = useState('');
+  const [addModelError, setAddModelError] = useState('');
+  const [addingModel, setAddingModel] = useState(false);
+
   const [searchParams] = useSearchParams();
 
   // 弹窗
@@ -410,7 +419,7 @@ export default function ModelManage(): JSX.Element {
   const [savingPrice, setSavingPrice] = useState(false);
 
   const [aliasTarget, setAliasTarget] = useState<ManagedModel | null>(null);
-  const [aliasForm, setAliasForm] = useState<AliasForm>({ alias: '', target: '' });
+  const [aliasForm, setAliasForm] = useState<AliasForm>({ alias: '', target: '', reasoning_effort: '' });
   const [aliasError, setAliasError] = useState('');
   const [savingAlias, setSavingAlias] = useState(false);
   const [pendingAlias, setPendingAlias] = useState<string | null>(null);
@@ -572,7 +581,15 @@ export default function ModelManage(): JSX.Element {
   const openAlias = (row: ManagedModel, presetAlias?: string) => {
     setAliasTarget(row);
     setAliasError('');
-    setAliasForm({ alias: presetAlias ?? '', target: row.id });
+    // 预填已有思考等级（编辑已有别名时）
+    const existing = presetAlias
+      ? row.alias_entries?.find((e) => e.alias === presetAlias)
+      : undefined;
+    setAliasForm({
+      alias: presetAlias ?? '',
+      target: row.id,
+      reasoning_effort: existing?.reasoning_effort ?? '',
+    });
   };
 
   const toggleAlias = async (alias: string, enabled: boolean) => {
@@ -602,7 +619,14 @@ export default function ModelManage(): JSX.Element {
     }
     setSavingAlias(true);
     try {
-      const res = await api.setModelAlias(alias, target);
+      // 三态：非空=设置，空串=清除，undefined=不动
+      const effort = aliasForm.reasoning_effort.trim();
+      const res = await api.setModelAlias(
+        alias,
+        target,
+        undefined,
+        effort || undefined
+      );
       acceptView(res?.data);
       addToast(t('映射已保存') + `：${alias} → ${target}`);
       setAliasTarget(null);
@@ -857,6 +881,17 @@ export default function ModelManage(): JSX.Element {
           if (batchAction === 'remove-price') {
             if (row.price) await api.removeModelPrice(row.id);
             else skip += 1;
+          } else if (batchAction === 'set-reasoning') {
+            // 收集该模型所有别名，调用批量设等级端点
+            const aliases = (row.alias_entries?.map((e) => e.alias) ?? row.aliases).filter(Boolean);
+            if (aliases.length === 0) {
+              skip += 1;
+              continue;
+            }
+            const res = await api.setAliasReasoning(aliases, batchReasoning);
+            const written = res?.data?.written ?? 0;
+            if (written === 0) skip += 1;
+            if (res?.data?.view) acceptView(res.data.view);
           } else {
             await api.setModelEnabled(row.provider, row.id, batchAction === 'enable');
           }
@@ -870,9 +905,11 @@ export default function ModelManage(): JSX.Element {
         addToast(
           batchAction === 'remove-price'
             ? t('已批量删除定价') + (skip > 0 ? `（${skip} ${t('个未定价跳过')}）` : '')
-            : batchAction === 'enable'
-              ? t('已批量启用')
-              : t('已批量禁用'),
+            : batchAction === 'set-reasoning'
+              ? t('已批量设置思考等级') + (skip > 0 ? `（${skip} ${t('个无别名跳过')}）` : '')
+              : batchAction === 'enable'
+                ? t('已批量启用')
+                : t('已批量禁用'),
         );
         setBatchOpen(false);
         setSelected(new Set());
@@ -899,6 +936,33 @@ export default function ModelManage(): JSX.Element {
       setFetchChannels(list.filter((c) => c.status === 'enabled'));
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  const saveAddModel = async () => {
+    setAddModelError('');
+    const provider = addModelProvider.trim();
+    const id = addModelId.trim();
+    if (!provider) {
+      setAddModelError(t('请选择 provider'));
+      return;
+    }
+    if (!id) {
+      setAddModelError(t('模型 ID 不能为空'));
+      return;
+    }
+    setAddingModel(true);
+    try {
+      const res = await api.addCustomModel(provider, id);
+      acceptView(res?.data);
+      addToast(t('已添加自定义模型') + `：${provider}/${id}`);
+      setAddModelOpen(false);
+      setAddModelProvider('');
+      setAddModelId('');
+    } catch (err) {
+      setAddModelError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAddingModel(false);
     }
   };
 
@@ -1431,7 +1495,7 @@ export default function ModelManage(): JSX.Element {
                   className={`mm-alias${entry.enabled ? '' : ' is-off'}`}
                   title={
                     entry.enabled
-                      ? `${entry.alias} → ${entry.target}`
+                      ? `${entry.alias} → ${entry.target}${entry.reasoning_effort ? ` · 思考: ${entry.reasoning_effort}` : ''}`
                       : `${entry.alias} → ${entry.target}（${t('已关闭，请求原样透传')}）`
                   }
                 >
@@ -1453,7 +1517,12 @@ export default function ModelManage(): JSX.Element {
                       if (e.key === 'Enter') openAlias(row, entry.alias);
                     }}
                   >
-                    {entry.alias}
+                    <span className="mm-alias-text">{entry.alias}</span>
+                    {entry.reasoning_effort && (
+                      <span className="mm-alias-reason" title={`映射思考等级: ${entry.reasoning_effort}`}>
+                        · {entry.reasoning_effort}
+                      </span>
+                    )}
                   </span>
                   <button
                     type="button"
@@ -1798,6 +1867,16 @@ export default function ModelManage(): JSX.Element {
                 >
                   <Download size={13} />
                   {t('获取模型')}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  onClick={() => setAddModelOpen(true)}
+                  style={{ gap: 6 }}
+                  title={t('手动登记自定义模型')}
+                >
+                  <Plus size={13} />
+                  {t('添加模型')}
                 </button>
                 <div className="mm-colset" ref={colPanelRef}>
                   <button
@@ -2365,6 +2444,19 @@ export default function ModelManage(): JSX.Element {
                   disabled={savingAlias}
                 />
               </div>
+              <div className="form-group">
+                <label>{t('映射级思考等级（留空 = 不设置）')}</label>
+                <input
+                  className="form-input"
+                  value={aliasForm.reasoning_effort}
+                  onChange={(e) => setAliasForm({ ...aliasForm, reasoning_effort: e.target.value })}
+                  placeholder="off / minimal / low / medium / high / xhigh"
+                  disabled={savingAlias}
+                />
+                <span className="form-hint">
+                  {t('仅当客户端未在请求里显式指定 reasoning_effort 时叠加；留空清除已有等级')}
+                </span>
+              </div>
               <div className="mm-alias-preview">
                 {aliasForm.alias.trim() && aliasForm.target.trim() ? (
                   <>
@@ -2619,6 +2711,69 @@ export default function ModelManage(): JSX.Element {
         </div>
       )}
 
+      {/* ── 添加自定义模型弹窗 ── */}
+      {addModelOpen && (
+        <div className="modal-overlay" onClick={() => setAddModelOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('添加自定义模型')}</h3>
+              <button className="modal-close" onClick={() => setAddModelOpen(false)}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              <p className="mm-dialog-note">
+                {t('手动登记上游未发现（或暂未接入渠道）的模型，使其出现在模型清单里，可定价 / 测试 / 启停。不编造能力位元数据。')}
+              </p>
+              {addModelError && <div className="error-message">{addModelError}</div>}
+              <div className="form-group">
+                <label>{t('Provider')} *</label>
+                <select
+                  className="form-input"
+                  value={addModelProvider}
+                  onChange={(e) => setAddModelProvider(e.target.value)}
+                  disabled={addingModel}
+                >
+                  <option value="">{t('请选择 provider')}</option>
+                  {(view?.providers ?? []).map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                  {/* 常见 provider 补充（不在渠道清单里的也能登记） */}
+                  {['openai', 'anthropic', 'deepseek', 'zhipu', 'gemini', 'moonshot', 'qwen'].filter(
+                    (p) => !(view?.providers ?? []).some((vp) => vp.id === p)
+                  ).map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-group">
+                <label>{t('模型 ID')} *</label>
+                <input
+                  className="form-input"
+                  value={addModelId}
+                  onChange={(e) => setAddModelId(e.target.value)}
+                  placeholder="gpt-4o / claude-3-5-sonnet / deepseek-chat"
+                  disabled={addingModel}
+                  autoFocus
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setAddModelOpen(false)} disabled={addingModel}>
+                {t('取消')}
+              </button>
+              <button className="btn btn-primary" onClick={() => void saveAddModel()} disabled={addingModel}>
+                {addingModel ? t('添加中...') : t('添加')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── 批量操作弹窗（对齐 Agent2API models-batch-dialog） ── */}
       {batchOpen && (
         <div className="modal-overlay" onClick={() => !batchRunning && setBatchOpen(false)}>
@@ -2642,6 +2797,7 @@ export default function ModelManage(): JSX.Element {
                   [
                     ['enable', '启用'],
                     ['disable', '禁用'],
+                    ['set-reasoning', '设思考等级'],
                     ['remove-price', '删除定价'],
                   ] as Array<[BatchAction, string]>
                 ).map(([v, label]) => (
@@ -2660,6 +2816,22 @@ export default function ModelManage(): JSX.Element {
               {batchAction === 'remove-price' && (
                 <p className="mm-dialog-note">{t('未定价的模型会被跳过；删除后按 0 计费。')}</p>
               )}
+              {batchAction === 'set-reasoning' && (
+                <div className="form-group">
+                  <label>{t('思考等级（留空 = 清除已有等级）')}</label>
+                  <input
+                    className="form-input"
+                    value={batchReasoning}
+                    onChange={(e) => setBatchReasoning(e.target.value)}
+                    placeholder="off / minimal / low / medium / high / xhigh"
+                    disabled={batchRunning}
+                    autoFocus
+                  />
+                  <span className="form-hint">
+                    {t('仅对选中模型的别名设置思考等级；无别名的模型会被跳过')}
+                  </span>
+                </div>
+              )}
               {batchReport && <div className="error-message">{batchReport}</div>}
             </div>
             <div className="modal-footer">
@@ -2671,7 +2843,7 @@ export default function ModelManage(): JSX.Element {
                 onClick={() => void runBatch()}
                 disabled={batchRunning || selectedRows.length === 0}
               >
-                {batchRunning ? t('执行中…') : `${t('执行')}${t(batchAction === 'enable' ? '启用' : batchAction === 'disable' ? '禁用' : '删除定价')}`}
+                {batchRunning ? t('执行中…') : `${t('执行')}${t(batchAction === 'enable' ? '启用' : batchAction === 'disable' ? '禁用' : batchAction === 'set-reasoning' ? '设思考等级' : '删除定价')}`}
               </button>
             </div>
           </div>

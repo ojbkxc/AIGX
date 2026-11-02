@@ -681,6 +681,13 @@
 .mm-alias-name {
   cursor: pointer;
   max-width: 150px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.mm-alias-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -691,8 +698,24 @@
 
 .mm-alias-name:hover {
   color: var(--accent-color);
+}
+
+.mm-alias-name:hover .mm-alias-text {
   text-decoration: underline;
   text-decoration-style: dashed;
+}
+
+.mm-alias-reason {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 4px;
+  border-radius: 6px;
+  background: rgba(99, 102, 241, 0.12);
+  color: #6366f1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .mm-alias-x {

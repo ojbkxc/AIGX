@@ -448,7 +448,10 @@ pub async fn handle_remove_custom_model(
     let provider = body.provider.trim();
     let id = body.id.trim();
     if provider.is_empty() || id.is_empty() {
-        return Err(error_response("provider 与模型 ID 不能为空", StatusCode::BAD_REQUEST));
+        return Err(error_response(
+            "provider 与模型 ID 不能为空",
+            StatusCode::BAD_REQUEST,
+        ));
     }
     if let Err(e) = state.model_mapper.remove_custom_model(provider, id) {
         return Err(error_response(
