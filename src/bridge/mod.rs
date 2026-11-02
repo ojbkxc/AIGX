@@ -215,6 +215,33 @@ impl UsageStats {
             cache_read_tokens: 0,
         }
     }
+
+    /// 计费口径的 `(prompt_tokens, 缓存折扣 token 数)`。
+    ///
+    /// 两种线路形状对「缓存」的表达完全不同，计费前必须归一：
+    ///
+    /// | 线路 | prompt_tokens 含义 | 缓存字段含义 |
+    /// |---|---|---|
+    /// | OpenAI | **已含**缓存命中量 | `cached_prompt_tokens` 是 prompt 的**子集** |
+    /// | Anthropic | **不含**缓存量（只是 `input_tokens`） | `cache_read`/`cache_creation` 是 prompt **之外的追加量** |
+    ///
+    /// 所以：
+    /// - 计费用的 prompt 总量 = `prompt_tokens` + Anthropic 的两项追加量；
+    /// - 其中按缓存价计的部分 = 缓存**读**量（`cache_read` 或 OpenAI 的子集值）。
+    ///
+    /// `cache_creation`（写入缓存）**不计入折扣**：它通常比普通输入更贵，
+    /// 当作折扣会少收。它被并入 prompt 总量、按正价计 —— 宁可略高估，
+    /// 也不要把写入当读取来打折。
+    pub fn billing_tokens(&self) -> (u64, u64) {
+        let anthropic_extra = self.cache_creation_tokens.saturating_add(self.cache_read_tokens);
+        if anthropic_extra > 0 {
+            // Anthropic 形状：缓存量在 prompt 之外
+            let prompt = self.prompt_tokens.saturating_add(anthropic_extra);
+            return (prompt, self.cache_read_tokens);
+        }
+        // OpenAI 形状（或没有缓存）：cached 已是 prompt 的子集
+        (self.prompt_tokens, self.cached_prompt_tokens)
+    }
 }
 
 /// 流式聊天块

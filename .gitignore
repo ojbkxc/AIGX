@@ -62,6 +62,7 @@ aigx-net/target/
 .deploy/
 
 # Playwright 产物
+test-results/
 frontend/test-results/
 frontend/playwright-report/
 .e2e-shots/

@@ -463,6 +463,42 @@ impl PricingStore {
         cached_tokens: u64,
         group: &str,
     ) -> Result<f64, PricingError> {
+        self.cost_with_name_inner(
+            name,
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            group,
+            false,
+        )
+    }
+
+    /// 同 [`cost_with_name`]，但**上游提示缓存**口径：`cache_price` 未配置时
+    /// 缓存 token 回退按 `input_price` 计费，而不是 0。
+    ///
+    /// ## 为什么需要第二个口径
+    ///
+    /// 缓存命中在这套系统里有两种截然不同的来源：
+    ///
+    /// 1. **网关内部响应缓存**（`state.response_cache`）—— 命中的请求根本
+    ///    没消耗上游资源，整段 prompt 按「缓存读」计价；`cache_price` 未配置
+    ///    时按 0 收，是**有意的免费**（升级兼容，见 openai.rs 的缓存命中分支）。
+    /// 2. **上游提示缓存**（OpenAI `prompt_tokens_details.cached_tokens` /
+    ///    Anthropic `cache_read_input_tokens`）—— 上游**确实处理了**这些 token，
+    ///    只是单价更低。我方仍要付钱给上游，所以 `cache_price` 未配置时必须
+    ///    回退按正价收，否则就是净亏损。
+    ///
+    /// 两条路径共用 `cached_tokens` 这个参数名，语义却相反；用一个 `bool`
+    /// 显式区分，避免将来又有人「顺手合并」把免费语义泄漏到上游路径。
+    fn cost_with_name_inner(
+        &self,
+        name: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_tokens: u64,
+        group: &str,
+        upstream_cache: bool,
+    ) -> Result<f64, PricingError> {
         let price = self
             .get_price(name)
             .ok_or_else(|| PricingError(name.to_string()))?;
@@ -482,13 +518,50 @@ impl PricingStore {
                 cached_tokens.min(input_tokens)
             };
             let fresh = input_tokens.saturating_sub(cached);
-            let cache_price = price.cache_price.unwrap_or(0.0);
+            let cache_price = match price.cache_price {
+                Some(p) => p,
+                // 上游缓存：没配缓存价 → 按正价收（不白送）
+                None if upstream_cache => price.input_price,
+                // 网关内部缓存命中：维持旧语义（未配置 = 免费）
+                None => 0.0,
+            };
             (fresh as f64 * price.input_price
                 + cached as f64 * cache_price
                 + output_tokens as f64 * price.output_price)
                 / 1000.0
         };
         Ok(base * model_ratio * group_ratio)
+    }
+
+    /// 上游提示缓存的配额计费（双名感知，向上取整）。
+    ///
+    /// `cached_tokens` 是上游报告的**已缓存 prompt token 数**（属于
+    /// `prompt_tokens` 的子集，不需要调用方另外相加）；`cache_price`
+    /// 未配置时按正价计（见 [`cost_with_name_inner`] 的口径说明）。
+    pub fn calculate_cost_quoted_upstream_cache(
+        &self,
+        requested: &str,
+        upstream: &str,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        cached_tokens: u64,
+        group: &str,
+    ) -> Result<i64, PricingError> {
+        let name = self
+            .resolve_priced_name(requested, upstream)
+            .ok_or_else(|| PricingError(requested.to_string()))?;
+        let cost = self.cost_with_name_inner(
+            &name,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            group,
+            true,
+        )?;
+        if cost <= 0.0 {
+            return Ok(0);
+        }
+        Ok((cost + 0.999999) as i64)
     }
 
     /// 计算费用并向上取整为 i64 配额单位（避免浮点扣费）。

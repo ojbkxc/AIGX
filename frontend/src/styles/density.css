@@ -1,0 +1,79 @@
+/**
+ * 密度 token 层（全站精致小巧化 · 阶段1）
+ *
+ * 纯 utility / 基元样式，只消费 App.css :root 里的 token，不针对任何具体页面，
+ * 因此引入零冲突。后续各管理页按需套 .dense-table / .icon-btn / .surface-* / .ta-*。
+ *
+ * 注意：.empty-state 与 .skeleton* 家族已在 App.css 全局定义并被页面依赖，
+ *       本文件不重定义它们——"统一空态/骨架尺寸"的目标由既有全局类即可满足。
+ */
+
+/* 紧凑表格：行高 / 字号 / 单元格内边距全部由 token 驱动 */
+.dense-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+.dense-table th,
+.dense-table td {
+  padding: var(--pad-1) var(--pad-2);
+  height: var(--row-h);
+  vertical-align: middle;
+}
+.dense-table th {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-align: left;
+  white-space: nowrap;
+}
+.dense-table tbody tr {
+  transition: background-color var(--transition-fast);
+}
+.dense-table tbody tr:hover {
+  background: var(--hover-bg);
+}
+
+/* 三档对齐工具类（列设置面板 / 表头复用；晚于 .dense-table th 声明，同特异度可覆盖其 text-align） */
+.ta-left { text-align: left; }
+.ta-center { text-align: center; }
+.ta-right { text-align: right; }
+
+/* 图标按钮：表格操作列统一尺寸，hover 淡底、禁用压淡 */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+.icon-btn:hover:not(:disabled) {
+  background: var(--hover-bg);
+  color: var(--text-main);
+}
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 表面标题栏：页头两行统计（标题 + meta 说明行） */
+.surface-titlebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pad-1);
+}
+.surface-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--pad-2);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}

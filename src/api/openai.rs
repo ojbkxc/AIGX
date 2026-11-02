@@ -667,6 +667,7 @@ fn resolve_billing_quota(
     group: &str,
     prompt_tokens: u64,
     completion_tokens: u64,
+    cached_tokens: u64,
     tool_calls: Option<&crate::pricing::ToolCallCounts>,
 ) -> i64 {
     // 按次订阅：固定扣额度，不再叠加缓存读/token 差异化计费
@@ -675,17 +676,20 @@ fn resolve_billing_quota(
     }
 
     // 计价键双名感知：定价目录按对外名配置，model 为映射后上游名——
-    // 对外名优先、上游名兜底，修复映射场景定价失效导致的按 0 免费放行
-    match state
-        .pricing_store
-        .calculate_cost_quoted_with_cache_aliased(
-            requested_model,
-            model,
-            prompt_tokens,
-            completion_tokens,
-            0,
-            group,
-        ) {
+    // 对外名优先、上游名兜底，修复映射场景定价失效导致的按 0 免费放行。
+    //
+    // 走**上游缓存**口径（`calculate_cost_quoted_upstream_cache`）：
+    // 这里的缓存量来自上游 usage（prompt caching），上游确实处理了这些
+    // token、我方要照付，所以 cache_price 未配置时必须回退正价而不是免费。
+    // 网关内部响应缓存命中是另一条路径（另一个函数），那里的免费语义不变。
+    match state.pricing_store.calculate_cost_quoted_upstream_cache(
+        requested_model,
+        model,
+        prompt_tokens,
+        completion_tokens,
+        cached_tokens,
+        group,
+    ) {
         Ok(mut c) => {
             if let Some(tools) = tool_calls {
                 c = c.saturating_add(
