@@ -752,7 +752,22 @@ export default function AddAccountDialog({
                           </div>
                         </div>
                       ) : null}
-                      {loginError ? <div className="error-message">{loginError}</div> : null}
+                      {loginError ? (
+                        <div className="error-message">
+                          {loginError}
+                          {loginError.includes('P-256') ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              style={{ marginLeft: 8 }}
+                              onClick={() => void startLogin()}
+                            >
+                              {t('重试')}
+                            </Button>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
 

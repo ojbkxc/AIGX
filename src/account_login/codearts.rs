@@ -27,7 +27,8 @@ use sha2::{Digest, Sha256};
 
 use super::{Credentials, LoginFlow, Started};
 
-// DPoP 密钥种子用系统熵源（getrandom 已在 Cargo.toml，AES-GCM 凭证加密同源）
+// DPoP 密钥生成走 `SecretKey::random`（rand 的 OsRng，与 trae.rs 同路径）；
+// AES-GCM 凭证加密仍用 getrandom（同 Cargo.toml 系统熵源）
 
 const CLIENT_ID: &str = "vscode-codebot";
 const WEB_LOGIN_BASE: &str = "https://codearts.huaweicloud.com";
@@ -49,6 +50,10 @@ struct Jwk {
     crv: &'static str,
     x: String,
     y: String,
+    /// 私钥标量（base64url）——只随凭据落盘；proof 头部嵌的是剥掉 `d` 的公钥，
+    /// 私钥绝不能进 proof（序列化时空串自动跳过）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    d: String,
 }
 
 #[derive(Serialize)]
@@ -67,38 +72,42 @@ struct DpopPayload<'a> {
 }
 
 impl DpopKey {
-    /// 生成一把 P-256 密钥：种子必须是**32 字节**随机数（P-256 标量的宽度）。
+    /// 生成一把 P-256 密钥。
     ///
-    /// 与 Agent2API 的 dpop.rs 同源：`getrandom` 取 32 字节 → `from_slice`。
-    /// 落到 `[1, n-1]` 之外的概率约 2⁻¹²⁸，重试只是兜底。
+    /// 与 trae.rs 的设备密钥同一路径：`SecretKey::random` 内部做标量归约，直接
+    /// 生成落在 `[1, n-1]` 内的合法标量 —— 不再走 `getrandom` + `from_slice` 的
+    /// 范围检查（随机源退化时旧写法会 8 次全失败，报"无法生成本机 P-256 密钥"）。
+    /// 私钥标量同时存进 `jwk.d` 与 `scalar`：旧落盘数据没有 `d`，续期路径仍走
+    /// `scalar`，向后兼容。
     pub(crate) fn generate() -> Result<Self, String> {
-        for _ in 0..8 {
-            let mut seed = [0u8; 32];
-            getrandom::getrandom(&mut seed).map_err(|error| format!("随机数不可用：{error}"))?;
-            let Ok(signing) = SigningKey::from_slice(&seed) else {
-                continue;
-            };
-            let point = signing.verifying_key().to_encoded_point(false);
-            let x = point
-                .x()
-                .map(|value| URL_SAFE_NO_PAD.encode(value))
-                .unwrap_or_default();
-            let y = point
-                .y()
-                .map(|value| URL_SAFE_NO_PAD.encode(value))
-                .unwrap_or_default();
-            return Ok(Self {
-                signing,
-                jwk: Jwk {
-                    kty: "EC",
-                    crv: "P-256",
-                    x,
-                    y,
-                },
-                scalar: URL_SAFE_NO_PAD.encode(seed),
-            });
+        let secret = p256::SecretKey::random(&mut rand::rngs::OsRng);
+        let scalar = URL_SAFE_NO_PAD.encode(secret.to_bytes());
+        let signing = SigningKey::from(secret);
+        let point = signing.verifying_key().to_encoded_point(false);
+        let x = point
+            .x()
+            .map(|value| URL_SAFE_NO_PAD.encode(value))
+            .unwrap_or_default();
+        let y = point
+            .y()
+            .map(|value| URL_SAFE_NO_PAD.encode(value))
+            .unwrap_or_default();
+        if x.is_empty() || y.is_empty() {
+            // `SecretKey::random` 理论上不会失败；这里是 Result 签名下的兜底文案，
+            // 保留给 `start()` 的 `?` 与前端的重试入口。
+            return Err("无法生成本机 P-256 密钥，请重试".to_string());
         }
-        Err("无法生成本机 P-256 密钥".to_string())
+        Ok(Self {
+            signing,
+            jwk: Jwk {
+                kty: "EC",
+                crv: "P-256",
+                x,
+                y,
+                d: scalar.clone(),
+            },
+            scalar,
+        })
     }
 
     /// 私钥标量（base64url）——供登录落盘、续期时用同一把密钥现签。
@@ -107,10 +116,19 @@ impl DpopKey {
     }
 
     pub(crate) fn proof(&self, method: &str, endpoint: &str) -> Result<String, String> {
+        // proof 头部只嵌公钥三件套：`jwk.d`（私钥标量）绝不能带进 proof，
+        // 这里剥掉（对齐 Agent2API —— 头里的公钥 `d` 恒空）。
+        let public_jwk = Jwk {
+            kty: self.jwk.kty,
+            crv: self.jwk.crv,
+            x: self.jwk.x.clone(),
+            y: self.jwk.y.clone(),
+            d: String::new(),
+        };
         let header = DpopHeader {
             alg: "ES256",
             typ: "dpop+jwt",
-            jwk: &self.jwk,
+            jwk: &public_jwk,
         };
         let header_json =
             serde_json::to_vec(&header).map_err(|error| format!("DPoP 头部序列化失败：{error}"))?;
@@ -148,25 +166,49 @@ pub(crate) fn dpop_proof_from_scalar(
     method: &str,
     endpoint: &str,
 ) -> Result<String, String> {
+    // 落盘目前只存私钥标量（`dpop_d`），没有公钥可比 —— 一致性校验在
+    // `dpop_proof_from_jwk` 里，落盘公钥的入口接上后自动生效。
+    dpop_proof_from_jwk(scalar_b64, None, method, endpoint)
+}
+
+/// 同 `dpop_proof_from_scalar`，另收落盘的公钥 x/y（可选）：公钥若在且非空，
+/// 与私钥重算出的公钥比对，不一致说明凭据被改坏 —— 宁可报错，也不要签出
+/// 「头里的公钥和签名的私钥对不上」的 proof 去打上游（对齐 Agent2API
+/// `dpop.rs::from_key_pair`）。
+pub(crate) fn dpop_proof_from_jwk(
+    scalar_b64: &str,
+    public_xy: Option<(&str, &str)>,
+    method: &str,
+    endpoint: &str,
+) -> Result<String, String> {
     let bytes = URL_SAFE_NO_PAD
         .decode(scalar_b64.trim())
         .map_err(|_| "CodeArts DPoP 私钥不是合法 base64url".to_string())?;
     let signing = SigningKey::from_slice(&bytes)
         .map_err(|_| "CodeArts DPoP 私钥不是合法 P-256 标量".to_string())?;
     let point = signing.verifying_key().to_encoded_point(false);
+    let x = point
+        .x()
+        .map(|value| URL_SAFE_NO_PAD.encode(value))
+        .unwrap_or_default();
+    let y = point
+        .y()
+        .map(|value| URL_SAFE_NO_PAD.encode(value))
+        .unwrap_or_default();
+    if let Some((stored_x, stored_y)) = public_xy {
+        let (stored_x, stored_y) = (stored_x.trim(), stored_y.trim());
+        if (!stored_x.is_empty() && stored_x != x) || (!stored_y.is_empty() && stored_y != y) {
+            return Err("CodeArts DPoP 公私钥不一致，请重新登录".to_string());
+        }
+    }
     let key = DpopKey {
         signing,
         jwk: Jwk {
             kty: "EC",
             crv: "P-256",
-            x: point
-                .x()
-                .map(|value| URL_SAFE_NO_PAD.encode(value))
-                .unwrap_or_default(),
-            y: point
-                .y()
-                .map(|value| URL_SAFE_NO_PAD.encode(value))
-                .unwrap_or_default(),
+            x,
+            y,
+            d: scalar_b64.trim().to_string(),
         },
         scalar: scalar_b64.trim().to_string(),
     };
