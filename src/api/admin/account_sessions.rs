@@ -910,7 +910,8 @@ pub struct RefreshBody {
 
 /// POST /api/account-sessions/:id/refresh —— 手动刷新账号 token。
 ///
-/// 进程内直调 `account_session::refresh::refresh_one`（qoder/autoclaw/trae），
+/// 进程内直调 `account_session::refresh::refresh_one`
+///（qoder/autoclaw/trae/codearts/officeace），
 /// 失败不改写凭据；`force=false` 时未临期直接返回 skip。
 pub async fn handle_account_refresh(
     State(state): State<AppState>,

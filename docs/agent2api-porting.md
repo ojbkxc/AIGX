@@ -83,9 +83,9 @@ python tools/sync_agent2api_providers.py --upstream /path/to/Agent2API --report
 
 | 优先 | 能力 | 状态 | 移植来源 | 落点 |
 |---|---|---|---|---|
-| 1 | 账号级 token 自动刷新 | **已接入**（qoder/autoclaw/trae/codearts） | 上游各家 `providers/*/refresh.rs` | `src/account_session/refresh.rs` + `store.update_tokens_cas` + cron `account-session-refresh`；登录期 OAuth 上下文落盘见 `LoginFlow::extra_fields`/`refresh_token` |
+| 1 | 账号级 token 自动刷新 | **已接入**（qoder/autoclaw/trae/codearts/officeace） | 上游各家 `providers/*/refresh.rs` | `src/account_session/refresh.rs` + `store.update_tokens_cas` + cron `account-session-refresh`；登录期 OAuth 上下文落盘见 `LoginFlow::extra_fields`/`refresh_token` |
 | 2 | 账号级余额/用量查询 | **已接入**（qoder/autoclaw/小浣熊/zcode） | 上游各家 `providers/*/balance.rs` | `src/account_session/balance.rs` + `GET /api/account-sessions/:id/balance`；账号池列表「余额」列待 UI |
 | 3 | 账号级模型清单刷新 | **已接入**（catalog 目录发现） | 上游各家 `providers/*/models.rs` | `src/account_session/catalog.rs` + `POST /api/account-sessions/catalog/sync` |
-| 4 | 签到覆盖面扩展 | **12/12 已接入** | 上游各家 `providers/*/checkin.rs` | `src/checkin/claim.rs`；剩余缺口：officeace 登录留存临时 AK/SK、officeace 续期（协议与 codearts 不同，待补 `refresh_officeace`） |
+| 4 | 签到覆盖面扩展 | **12/12 已接入** | 上游各家 `providers/*/checkin.rs` | `src/checkin/claim.rs`；凭据侧：officeace 签到依赖的临时 AK/SK 由登录期落盘 + `refresh_officeace` 自动续期维持，不再 2 小时后失效 |
 
 新增登录式 provider 的完整清单：`AGENT2API_PROVIDERS` + `PROVIDERS` + `SESSION_PROVIDERS` + `addAccountConfigs.ts` 表单 + `account_login` 登录实现 + （可选）`checkin/claim.rs`。

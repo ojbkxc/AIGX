@@ -1326,7 +1326,8 @@ export default function AccountSessions(): JSX.Element {
                         >
                           <RotateCcw size={13} />
                         </button>
-                        {/* 手动刷新凭证：仅持有续期令牌的账号可用（qoder/autoclaw/trae 等） */}
+                        {/* 手动刷新凭证：仅持有续期令牌的账号可用
+                            （qoder/autoclaw/trae/codearts/officeace 等） */}
                         <button
                           type="button"
                           className="as-act"

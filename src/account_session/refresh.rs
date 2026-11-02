@@ -1,19 +1,21 @@
 //! 账号级 token 自动刷新 —— 表驱动，按 provider 分派。
 //!
-//! 协议逐家移植自 Agent2API（`providers/{qoder,autoclaw,trae}/refresh.rs` 与
-//! `core/credential_maintenance.rs`，MIT + 使用声明，禁止商用）。设计取向：
+//! 协议逐家移植自 Agent2API（`providers/{qoder,autoclaw,trae,codearts,officeace}/
+//! refresh.rs` 与 `core/credential_maintenance.rs`，MIT + 使用声明，禁止商用）。设计取向：
 //!
 //! - **失败绝不改写凭据**（含 refresh_token）：旧快照仍可重试，不会把账号刷废；
 //! - 成功时 access/refresh/过期时间**一次 CAS 落盘**（refresh_token 会轮换，
 //!   与 access 分开写会把账号弄丢）；
-//! - 过期窗口按家不同：qoder/autoclaw 提前 5 分钟，trae 提前 24 小时，codearts 提前 15 分钟；
+//! - 过期窗口按家不同：qoder/autoclaw 提前 5 分钟，trae 提前 24 小时，
+//!   codearts 提前 15 分钟，officeace 提前 30 分钟；
 //! - 不做单飞与指数退避：调度是 10 分钟一轮的串行巡检，重复刷新幂等
 //!   （refresh_token 轮换后旧的失效，但 CAS 保证只有一次写入生效）。
 //!
 //! 刷新令牌来源：`AccountSession.refresh_secret`（管理面可粘贴；登录流程也会
 //! 捕获 —— 见 `LoginFlow::refresh_token`）。CodeArts 续期除 refresh_token 还要
-//! 登录期那把 DPoP 私钥与 PKCE verifier（走 `Credential.fields`，见
-//! `LoginFlow::extra_fields`）。
+//! 登录期那把 DPoP 私钥与 PKCE verifier；OfficeAce 同样要那把 DPoP 私钥，且
+//! `refresh_secret` 装的是一个 JSON（控制面凭据 + refresh token），见
+//! `refresh_officeace`。（两者均走 `Credential.fields`，见 `LoginFlow::extra_fields`）
 
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -30,10 +32,16 @@ const AUTOCLAW_MARGIN: i64 = 300;
 const TRAE_MARGIN: i64 = 86400;
 /// CodeArts 临时凭据寿命短（约 1 小时），对齐 Agent2API 提前 15 分钟续。
 const CODEARTS_MARGIN: i64 = 900;
+/// OfficeAce 控制面临时凭据寿命 2 小时，对齐上游提前 30 分钟续。
+const OFFICEACE_MARGIN: i64 = 1800;
 
 /// CodeArts 换证端点与客户端标识（与登录换证同一套，见 `account_login::codearts`）。
 const CODEARTS_TOKEN_URL: &str = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens";
 const CODEARTS_CLIENT_ID: &str = "vscode-codebot";
+
+/// OfficeAce 换证端点与客户端标识（同一个 STS 主机，见 `account_login::officeace`）。
+const OFFICEACE_TOKEN_URL: &str = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens";
+const OFFICEACE_CLIENT_ID: &str = "pdp5_for_agentarts";
 
 /// 一次刷新的结果。`Invalid` = refresh_token 也死了，只能重新登录。
 #[derive(Debug)]
@@ -55,7 +63,13 @@ struct TokenSet {
 pub fn supports_refresh(provider: &str) -> bool {
     matches!(
         provider,
-        "qoder" | "qoder-intl" | "autoclaw" | "autoclaw-intl" | "trae" | "codearts"
+        "qoder"
+            | "qoder-intl"
+            | "autoclaw"
+            | "autoclaw-intl"
+            | "trae"
+            | "codearts"
+            | "officeace"
     )
 }
 
@@ -82,6 +96,7 @@ pub fn needs_refresh(session: &AccountSession, now: i64) -> bool {
         "trae" => TRAE_MARGIN,
         "autoclaw" | "autoclaw-intl" => AUTOCLAW_MARGIN,
         "codearts" => CODEARTS_MARGIN,
+        "officeace" => OFFICEACE_MARGIN,
         _ => QODER_MARGIN,
     };
     exp - now <= margin
@@ -130,6 +145,7 @@ pub async fn refresh_one(
         "autoclaw" | "autoclaw-intl" => refresh_autoclaw(client, session).await,
         "trae" => refresh_trae(client, session).await,
         "codearts" => refresh_codearts(client, session).await,
+        "officeace" => refresh_officeace(client, session).await,
         other => {
             return RefreshOutcome::Failed(format!("{other} 暂不支持自动刷新"));
         }
@@ -607,6 +623,134 @@ async fn refresh_codearts(
     })
 }
 
+/// OfficeAce 续期：用落盘的 refresh_token + 登录期那把 DPoP 私钥再换一份临时
+/// AK/SK/STS（对齐 Agent2API `providers/officeace/oauth.rs::refresh`）。
+///
+/// ── 与 CodeArts 的异同 ──────────────────────────────────────
+/// 同一个 STS 端点、同样的 `DPoP:` proof 头，**表单少一个 `code_verifier`**
+/// （OfficeAce 的 refresh grant 不校验 PKCE）。
+///
+/// 续的是**控制面**凭据 —— 转发的网关凭据（`credential.secret` =
+/// base64(model_app_key:model_app_secret)）不过期，本函数一个字都不动它，
+/// 因此 `TokenSet.access` 原样带回旧值仅供 CAS 比对。新的临时凭据与轮换后的
+/// refresh_token 一起按 JSON 写回 `refresh_secret`（`checkin::claim::
+/// officeace_temp_creds` 的读取形态），签到/余额因此不再在登录 2 小时后失效。
+async fn refresh_officeace(
+    client: &Client,
+    session: &AccountSession,
+) -> Result<TokenSet, RefreshOutcome> {
+    let raw = refresh_plain(session);
+    let stored: Value = serde_json::from_str(&raw).map_err(|_| {
+        RefreshOutcome::Failed("OfficeAce 账号续期载荷不是 JSON，请重新登录".to_string())
+    })?;
+    let read_stored = |key: &str| {
+        stored
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    };
+    let refresh = read_stored("refresh_token");
+    if refresh.is_empty() {
+        return Err(RefreshOutcome::Failed(
+            "OfficeAce 账号缺少 refresh token，请重新登录".to_string(),
+        ));
+    }
+    let dpop_scalar = session.credential.field_plain("dpop_d");
+    if dpop_scalar.trim().is_empty() {
+        return Err(RefreshOutcome::Failed(
+            "OfficeAce 账号缺少续期上下文（DPoP 私钥），请重新登录".to_string(),
+        ));
+    }
+    let proof = crate::account_login::codearts::dpop_proof_from_scalar(
+        &dpop_scalar,
+        "POST",
+        OFFICEACE_TOKEN_URL,
+    )
+    .map_err(RefreshOutcome::Failed)?;
+    let form = [
+        ("client_id", OFFICEACE_CLIENT_ID),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh.as_str()),
+    ];
+    let response = client
+        .post(OFFICEACE_TOKEN_URL)
+        .timeout(std::time::Duration::from_millis(TIMEOUT_MS))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .header("DPoP", proof)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| RefreshOutcome::Failed(format!("OfficeAce 续期请求失败：{e}")))?;
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap_or_default();
+    let payload = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+    if status == 400 || status == 401 {
+        return Err(RefreshOutcome::Invalid(
+            "OfficeAce 刷新令牌已失效，请重新登录".to_string(),
+        ));
+    }
+    if !(200..300).contains(&status) {
+        return Err(RefreshOutcome::Failed(format!(
+            "OfficeAce 续期被拒（HTTP {status}）"
+        )));
+    }
+    let credentials = payload.get("credentials").cloned().unwrap_or(Value::Null);
+    let read = |name: &str| {
+        credentials
+            .get(name)
+            .or_else(|| payload.get(name))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    };
+    let ak = read("access_key_id");
+    let sk = read("secret_access_key");
+    if ak.is_empty() || sk.is_empty() {
+        return Err(RefreshOutcome::Failed(
+            "OfficeAce 续期响应缺少临时 AK/SK".to_string(),
+        ));
+    }
+    // refresh_token 一次性轮换：响应没给就沿用旧的（对齐 Agent2API 的兜底）
+    let rotated = read("refresh_token");
+    let next_refresh = if rotated.is_empty() {
+        refresh.clone()
+    } else {
+        rotated
+    };
+    // security_token / project_id 可能不回传：沿用上一次的值，别把已有信息抹掉
+    let keep = |fresh: String, key: &str| {
+        let previous = read_stored(key);
+        if fresh.is_empty() {
+            previous
+        } else {
+            fresh
+        }
+    };
+    let renewal = json!({
+        "access_key_id": ak,
+        "secret_access_key": sk,
+        "security_token": keep(read("security_token"), "security_token"),
+        "project_id": keep(read("project_id"), "project_id"),
+        "refresh_token": next_refresh,
+    })
+    .to_string();
+    // 过期时间：响应给的是 RFC3339 字符串；缺失时按控制面凭据 2 小时兜底
+    let expires_at = first_str(&payload, &["expiration", "expires_at", "expiresAt"])
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text.trim()).ok())
+        .map(|dt| dt.timestamp())
+        .or_else(|| Some(chrono::Utc::now().timestamp() + 2 * 3600));
+    Ok(TokenSet {
+        // 转发凭据（网关 Basic）不过期，原样带回归 CAS 比对
+        access: session.credential.secret_plain(),
+        refresh: renewal,
+        expires_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,6 +767,8 @@ mod tests {
         assert!(supports_refresh("qoder"));
         assert!(supports_refresh("autoclaw-intl"));
         assert!(supports_refresh("trae"));
+        assert!(supports_refresh("codearts"));
+        assert!(supports_refresh("officeace"));
         assert!(!supports_refresh("loomy"));
         assert!(!supports_refresh("openai"));
     }
@@ -638,6 +784,10 @@ mod tests {
         // trae 窗口 24h
         session.provider = "trae".to_string();
         assert!(needs_refresh(&session, 1_000_000 - 3_600));
+        // officeace 窗口 30min：剩 20 分钟算临期、剩 2 小时不算
+        session.provider = "officeace".to_string();
+        assert!(needs_refresh(&session, 1_000_000 - 1_200));
+        assert!(!needs_refresh(&session, 1_000_000 - 7_200));
         // 无 refresh_secret 不动
         session.refresh_secret = String::new();
         assert!(!needs_refresh(&session, 1_000_000));

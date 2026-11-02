@@ -19,14 +19,14 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use hmac::{Hmac, Mac};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::codearts::DpopKey;
@@ -68,6 +68,9 @@ pub struct OfficeaceFlow {
     state: String,
     code_verifier: String,
     dpop: DpopKey,
+    /// 换证拿到的续期载荷（临时控制面凭据 + 一次性 refresh_token，JSON 串）。
+    /// 登录成功时写入，随账号落进 `refresh_secret` 供自动续期与签到/余额读取。
+    renewal: Mutex<Option<String>>,
 }
 
 #[async_trait]
@@ -79,6 +82,30 @@ impl LoginFlow for OfficeaceFlow {
     /// state 作废要立刻结束，别拖到任务超时。
     fn fatal(&self, error: &str) -> bool {
         error.contains("授权码已失效")
+    }
+
+    /// 续期上下文：登录期那把 DPoP 私钥。
+    ///
+    /// 华为云用 proof 头里的公钥验签，换一把密钥就续不了（对齐 Agent2API
+    /// `officeace/oauth.rs::refresh` 要求 `dpop_key_pair` 必须是当初登录那把）。
+    fn extra_fields(&self) -> HashMap<String, String> {
+        let mut fields = HashMap::new();
+        fields.insert("dpop_d".to_string(), self.dpop.scalar());
+        fields
+    }
+
+    /// 续期载荷（JSON 串）：临时控制面凭据 + 一次性 refresh token。
+    ///
+    /// 方法名沿用 trait 的 `refresh_token`，但 OfficeAce 的控制面凭据（签到/余额
+    /// 要用）必须与 refresh token 一起落盘，故整包成一个 JSON 存进
+    /// `AccountSession.refresh_secret` —— `checkin::claim::officeace_temp_creds`
+    /// 正是按这个形态解析的。
+    fn refresh_token(&self) -> String {
+        self.renewal
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .unwrap_or_default()
     }
 
     async fn poll(&self) -> Result<Option<Credentials>, String> {
@@ -156,12 +183,35 @@ impl OfficeaceFlow {
             account_id,
             "OfficeAce".to_string(),
         ]);
+        // 控制面临时凭据 + 一次性 refresh token 一起落盘：前者是签到/余额的凭据
+        // 来源（`checkin::claim::officeace_temp_creds` 正是按这个 JSON 形态读
+        // `refresh_secret`），后者供 10 分钟一轮的自动续期接着换新。
+        // 转发的网关凭据（`secret` = base64(model_app_key:model_app_secret)）不过期，
+        // 与这套控制面凭据互不影响（对齐 Agent2API：控制面过期只影响签到/额度）。
+        let refresh_token = payload
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
+        let renewal = json!({
+            "access_key_id": temporary.access_key_id,
+            "secret_access_key": temporary.secret_access_key,
+            "security_token": temporary.security_token,
+            "project_id": temporary.project_id,
+            "refresh_token": refresh_token,
+        })
+        .to_string();
+        if let Ok(mut slot) = self.renewal.lock() {
+            *slot = Some(renewal);
+        }
+        let expires_at = control_plane_expiry(&payload);
         Ok(Credentials {
             name,
             secret,
             base_url: Some(base_url),
             extra_headers: HashMap::new(),
-            expires_at: None,
+            expires_at: Some(expires_at),
         })
     }
 
@@ -308,6 +358,7 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
             state,
             code_verifier,
             dpop,
+            renewal: Mutex::new(None),
         }),
     })
 }
@@ -573,6 +624,26 @@ fn first_non_empty(values: &[String]) -> String {
         .find(|value| !value.is_empty())
         .unwrap_or("")
         .to_string()
+}
+
+/// 控制面临时凭据的到期时刻（unix 秒）。
+///
+/// 上游给的是 RFC3339 字符串（`credentials.expiration`，见 Agent2API
+/// `officeace/oauth.rs::refresh` 的同名解析）；缺失时按实测寿命 2 小时兜底。
+/// AIGX 的 `AccountSession.expires_at` 是秒，故与 CodeArts 同口径。
+fn control_plane_expiry(payload: &Value) -> i64 {
+    let credentials = payload.get("credentials").unwrap_or(&Value::Null);
+    ["expiration", "expires_at", "expiresAt"]
+        .iter()
+        .find_map(|key| {
+            credentials
+                .get(*key)
+                .or_else(|| payload.get(*key))
+                .and_then(Value::as_str)
+                .and_then(|text| chrono::DateTime::parse_from_rfc3339(text.trim()).ok())
+                .map(|dt| dt.timestamp())
+        })
+        .unwrap_or_else(|| chrono::Utc::now().timestamp() + 2 * 3600)
 }
 
 fn random_bytes() -> Result<Vec<u8>, String> {
