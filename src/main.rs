@@ -46,6 +46,8 @@ mod proxy_pool;
 mod quota_monitor;
 mod ratelimit;
 mod redemption;
+mod sanitize;
+mod scheduled_tasks;
 mod semantic;
 mod sse;
 mod storage;
