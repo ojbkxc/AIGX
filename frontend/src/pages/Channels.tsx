@@ -160,6 +160,7 @@ function formatBalance(value: number, unit?: string): string {
 /** localStorage 键 */
 const LS_FILTERS = 'aigx-ch-filters';
 const LS_COLS = 'aigx-ch-cols';
+const LS_COLW = 'aigx-ch-colw';
 const LS_PAGE_SIZE = 'aigx-ch-pagesize';
 
 const PAGE_SIZES = [20, 50, 100];
@@ -186,6 +187,8 @@ type ChStateFilter = 'all' | 'on' | 'off';
 type ChTypeFilter = 'all' | 'cloudflare' | 'openai_compatible' | 'anthropic' | 'gemini' | 'zai' | 'account';
 /** 排序档位（方向即档位语义，同 ModelManage 倍率升/降分开的做法取常用向） */
 type ChSortMode = 'default' | 'priority' | 'response' | 'balance' | 'name';
+/** 批量操作动作（对齐 ModelManage BatchAction） */
+type BatchAction = 'enable' | 'disable' | 'delete';
 
 const CH_STATE_OPTIONS: Array<[ChStateFilter, string]> = [
   ['all', '全部'],
@@ -211,6 +214,23 @@ const CH_SORT_OPTIONS: Array<[ChSortMode, string]> = [
 
 /** 可显隐列（check 勾选列与 actions 操作列锁定） */
 type ChColKey = 'id' | 'name' | 'type' | 'status' | 'models' | 'priority' | 'weight' | 'balance' | 'response' | 'testtime';
+/** 列声明顺序（colgroup 与表头同源；select/actions 为锁定列不参与显隐） */
+const CH_COL_ORDER: ChColKey[] = ['id', 'name', 'type', 'status', 'models', 'priority', 'weight', 'balance', 'response', 'testtime'];
+/** 列默认宽（colgroup 接管宽度后 CSS 不再声明；与原有 CSS 宽度一致） */
+const CH_COL_DEFAULT_W: Record<string, number> = {
+  select: 32,
+  id: 48,
+  name: 170,
+  type: 140,
+  status: 72,
+  models: 200,
+  priority: 68,
+  weight: 62,
+  balance: 150,
+  response: 84,
+  testtime: 88,
+  actions: 132,
+};
 const CH_COL_DEFS: Array<{ key: ChColKey; label: string }> = [
   { key: 'id', label: 'ID' },
   { key: 'name', label: '名称' },
@@ -314,6 +334,13 @@ export default function Channels(): JSX.Element {
 
   // ── 批量操作 / 搜索 / "更多"菜单 ──
   const [selected, setSelected] = useState<Set<string | number>>(new Set());
+  // 批量弹窗（对齐 ModelManage：动作单选 + 选中清单 + 失败保留现场）
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchAction, setBatchAction] = useState<BatchAction>('enable');
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchReport, setBatchReport] = useState('');
+  // 批量删除需要删除密码（与单条删除同口径，ConfirmDialog requirePassword 的弹窗内形态）
+  const [batchPassword, setBatchPassword] = useState('');
   const [search, setSearch] = useState('');
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
@@ -369,6 +396,8 @@ export default function Channels(): JSX.Element {
   const [typeFilter, setTypeFilter] = useState<ChTypeFilter>(storedFilters.type || 'all');
   const [sortMode, setSortMode] = useState<ChSortMode>(storedFilters.sort || 'default');
   const [colVis, setColVis] = useState<Record<ChColKey, boolean>>(() => readLs(LS_COLS, DEFAULT_COL_VIS));
+  // 列宽（拖表头右缘把手调整；localStorage 记忆，对齐 ModelManage 列宽拖动）
+  const [colWidths, setColWidths] = useState<Record<string, number>>(() => readLs(LS_COLW, {}));
   const [colPanelOpen, setColPanelOpen] = useState(false);
   const colPanelRef = useRef<HTMLDivElement | null>(null);
 
@@ -562,10 +591,52 @@ export default function Channels(): JSX.Element {
     });
   };
 
+  /** 恢复默认：显隐与列宽一起回到列声明（列宽一并还原） */
   const resetColVis = (): void => {
     setColVis({ ...DEFAULT_COL_VIS });
     writeLs(LS_COLS, DEFAULT_COL_VIS);
+    setColWidths({});
+    writeLs(LS_COLW, {});
   };
+
+  /** 列宽拖动：拖表头右缘把手改宽（写回 colgroup），双击把手还原 */
+  const startColDrag = (key: string, e: React.MouseEvent): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    const th = (e.target as HTMLElement).closest('th');
+    const startW = th?.getBoundingClientRect().width ?? 100;
+    const startX = e.clientX;
+    let latest = startW;
+    const move = (ev: MouseEvent): void => {
+      latest = Math.max(56, Math.round(startW + ev.clientX - startX));
+      setColWidths((prev) => ({ ...prev, [key]: latest }));
+    };
+    const up = (): void => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      setColWidths((prev) => {
+        writeLs(LS_COLW, prev);
+        return prev;
+      });
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+
+  const resetColWidth = (key: string): void => {
+    setColWidths((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      writeLs(LS_COLW, next);
+      return next;
+    });
+  };
+
+  /** 可见列全集（勾选列 + 显隐过滤后的数据列 + 操作列；colgroup 与表头同源） */
+  const visibleColKeys = useMemo(
+    () => ['select', ...CH_COL_ORDER.filter((k) => colVis[k]), 'actions'],
+    [colVis],
+  );
 
   /** 点击复制（对齐 ModelManage 的 data-copy 交互） */
   const copyText = (text: string): void => {
@@ -600,73 +671,56 @@ export default function Channels(): JSX.Element {
     });
   };
 
-  // 批量启用/禁用/删除
+  // 批量操作（对齐 ModelManage 批量弹窗）：动作单选 + 选中清单 + 失败保留现场。
   // 逐条执行并统计失败数：单条失败（权限/密码/网络）不能静默吞掉，
-  // 否则用户看到「已删除 N 个」而实际一个都没删。
-  const handleBulkEnable = async (): Promise<void> => {
-    const ids = Array.from(selected);
-    if (!ids.length) return;
-    const results = await Promise.all(
-      ids.map((id) => api.patchChannel(id, { status: 'enabled' }).then(() => true).catch(() => false)),
-    );
-    const ok = results.filter(Boolean).length;
-    addToast(
-      ok === ids.length
-        ? `${t('已启用')} ${ok} ${t('个渠道')}`
-        : `${t('已启用')} ${ok}/${ids.length} ${t('个渠道（其余失败）')}`,
-      ok === ids.length ? 'success' : 'warning',
-    );
-    setSelected(new Set());
-    loadChannels();
-  };
-  const handleBulkDisable = (): void => {
-    const ids = Array.from(selected);
-    if (!ids.length) return;
-    setConfirmState({
-      title: t('批量停用渠道'),
-      message: t('确定停用选中的 {{count}} 个渠道？', { count: ids.length }),
-      confirmText: t('停用'),
-      danger: true,
-      onConfirm: async () => {
-        const results = await Promise.all(
-          ids.map((id) => api.patchChannel(id, { status: 'disabled' }).then(() => true).catch(() => false)),
-        );
-        const ok = results.filter(Boolean).length;
-        addToast(
-          ok === ids.length
-            ? `${t('已停用')} ${ok} ${t('个渠道')}`
-            : `${t('已停用')} ${ok}/${ids.length} ${t('个渠道（其余失败）')}`,
-          ok === ids.length ? 'success' : 'warning',
-        );
-        setSelected(new Set());
-        loadChannels();
-      },
-    });
-  };
-  const handleBulkDelete = (): void => {
-    const ids = Array.from(selected);
-    if (!ids.length) return;
-    setConfirmState({
-      title: t('批量删除渠道'),
-      message: t('确定删除选中的 {{count}} 个渠道？此操作不可撤销。', { count: ids.length }),
-      confirmText: t('删除'),
-      danger: true,
-      requirePassword: true,
-      onConfirm: async (password) => {
-        const results = await Promise.all(
-          ids.map((id) => api.deleteChannel(id, password).then(() => true).catch(() => false)),
-        );
-        const ok = results.filter(Boolean).length;
-        addToast(
-          ok === ids.length
-            ? `${t('已删除')} ${ok} ${t('个渠道')}`
-            : `${t('已删除')} ${ok}/${ids.length} ${t('个渠道（其余失败：密码错误或权限不足）')}`,
-          ok === ids.length ? 'success' : 'error',
-        );
-        setSelected(new Set());
-        loadChannels();
-      },
-    });
+  // 否则用户看到「已删除 N 个」而实际一个都没删。失败时弹窗保留并显示汇总。
+  const selectedRows = useMemo(
+    () => channels.filter((ch) => selected.has(ch.id)),
+    [channels, selected],
+  );
+
+  const runBatch = async (): Promise<void> => {
+    if (selectedRows.length === 0 || batchRunning) return;
+    if (batchAction === 'delete' && !batchPassword) {
+      setBatchReport(t('请输入删除密码'));
+      return;
+    }
+    setBatchRunning(true);
+    setBatchReport('');
+    let fail = 0;
+    let firstError = '';
+    for (const ch of selectedRows) {
+      try {
+        if (batchAction === 'delete') {
+          await api.deleteChannel(ch.id, batchPassword);
+        } else {
+          await api.patchChannel(ch.id, { status: batchAction === 'enable' ? 'enabled' : 'disabled' });
+        }
+      } catch (err) {
+        fail += 1;
+        if (!firstError) firstError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    await loadChannels();
+    setBatchRunning(false);
+    if (fail === 0) {
+      const n = selectedRows.length;
+      addToast(
+        batchAction === 'enable'
+          ? `${t('已启用')} ${n} ${t('个渠道')}`
+          : batchAction === 'disable'
+            ? `${t('已停用')} ${n} ${t('个渠道')}`
+            : `${t('已删除')} ${n} ${t('个渠道')}`,
+        'success',
+      );
+      setBatchOpen(false);
+      setSelected(new Set());
+      setBatchPassword('');
+    } else {
+      setBatchReport(
+        `${t('操作失败')} ${fail}/${selectedRows.length} ${t('个渠道')}${firstError ? `：${firstError}` : ''}`,
+      );
+    }
   };
 
   // "更多"菜单项
@@ -1180,22 +1234,43 @@ export default function Channels(): JSX.Element {
               </span>
             </div>
 
-            {/* 批量操作栏 */}
+            {/* 批量条（勾选后出现，对齐 ModelManage mm-batch-chip：批量操作进弹窗） */}
             {selected.size > 0 && (
-              <div className="channels-bulk">
-                <span>{t('已选')} {selected.size} / {filtered.length}</span>
-                <Button variant="outline" size="sm" onClick={handleBulkEnable}>{t('启用')}</Button>
-                <Button variant="outline" size="sm" onClick={handleBulkDisable}>{t('停用')}</Button>
-                <Button variant="danger" size="sm" onClick={handleBulkDelete}>{t('删除')}</Button>
-                <Button variant="outline" size="sm" onClick={() => setSelected(new Set())}>{t('取消选择')}</Button>
+              <div className="ch-batch-chip">
+                <span>
+                  {t('已选')} <strong>{selected.size}</strong> {t('个渠道')}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  onClick={() => { setBatchReport(''); setBatchOpen(true); }}
+                >
+                  {t('批量操作')}
+                </button>
+                <button
+                  type="button"
+                  className="ch-batch-clear"
+                  title={t('清除选择')}
+                  onClick={() => setSelected(new Set())}
+                >
+                  ×
+                </button>
               </div>
             )}
 
             <div className="table-wrapper channels-table-wrap">
               <table className="channels-table">
+                <colgroup>
+                  {visibleColKeys.map((k) => (
+                    <col
+                      key={k}
+                      style={{ width: colWidths[k] ? `${colWidths[k]}px` : `${CH_COL_DEFAULT_W[k]}px` }}
+                    />
+                  ))}
+                </colgroup>
                 <thead>
                   <tr>
-                    <th className="col-select" style={{ width: 36 }}>
+                    <th className="col-select">
                       <input
                         type="checkbox"
                         checked={allSelected}
@@ -1203,16 +1278,20 @@ export default function Channels(): JSX.Element {
                         aria-label={t('全选')}
                       />
                     </th>
-                    <th className={`col-id${colCls('id')}`}>ID</th>
-                    <th className={`col-name${colCls('name')}`}>{t('名称')}</th>
-                    <th className={`col-type${colCls('type')}`}>{t('类型')}</th>
-                    <th className={`col-status${colCls('status')}`}>{t('状态')}</th>
-                    <th className={`col-models${colCls('models')}`}>{t('模型')}</th>
-                    <th className={`col-priority${colCls('priority')}`}>{t('优先级')}</th>
-                    <th className={`col-weight${colCls('weight')}`}>{t('权重')}</th>
-                    <th className={`col-balance${colCls('balance')}`}>{t('余额')}</th>
-                    <th className={`col-response${colCls('response')}`}>{t('响应')}</th>
-                    <th className={`col-testtime${colCls('testtime')}`}>{t('测试时间')}</th>
+                    {CH_COL_DEFS.filter((c) => colVis[c.key]).map((c) => (
+                      <th
+                        key={c.key}
+                        className={`col-${c.key}${colCls(c.key)}`}
+                      >
+                        {c.label === 'ID' ? 'ID' : t(c.label)}
+                        <span
+                          className="ch-col-grip"
+                          title={t('拖动调整列宽 · 双击还原')}
+                          onMouseDown={(e) => startColDrag(c.key, e)}
+                          onDoubleClick={() => resetColWidth(c.key)}
+                        />
+                      </th>
+                    ))}
                     <th className="col-actions">{t('操作')}</th>
                   </tr>
                 </thead>
@@ -1901,6 +1980,72 @@ export default function Channels(): JSX.Element {
               )}
             </div>
           </form>
+        </div>
+      )}
+
+      {/* ── 批量操作弹窗（对齐 ModelManage 批量弹窗：动作单选 + 选中清单 + 失败保留现场） ── */}
+      {batchOpen && (
+        <div className="modal-overlay" onClick={() => !batchRunning && setBatchOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>
+                {t('批量操作')} · {t('已选')} {selectedRows.length} {t('个渠道')}
+              </h3>
+              <button className="modal-close" onClick={() => setBatchOpen(false)} disabled={batchRunning}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              <div className="ch-batch-models">
+                {selectedRows.map((ch) => (
+                  <code key={ch.id} title={ch.base_url || ''}>{ch.name}</code>
+                ))}
+              </div>
+              <div className="ch-batch-actions">
+                {(['enable', 'disable', 'delete'] as BatchAction[]).map((v) => (
+                  <label key={v} className={`ch-batch-action${batchAction === v ? ' active' : ''}`}>
+                    <input
+                      type="radio"
+                      name="ch-batch-action"
+                      checked={batchAction === v}
+                      onChange={() => setBatchAction(v)}
+                      disabled={batchRunning}
+                    />
+                    {v === 'enable' ? t('启用') : v === 'disable' ? t('停用') : t('删除')}
+                  </label>
+                ))}
+              </div>
+              {batchAction === 'delete' && (
+                <>
+                  <p className="ch-dialog-note">{t('删除后渠道不可恢复，此操作需要删除密码确认。')}</p>
+                  <input
+                    className="form-input"
+                    type="password"
+                    value={batchPassword}
+                    onChange={(e) => setBatchPassword(e.target.value)}
+                    placeholder={t('删除密码')}
+                    autoFocus
+                    disabled={batchRunning}
+                  />
+                </>
+              )}
+              {batchReport && <div className="error-message">{batchReport}</div>}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setBatchOpen(false)} disabled={batchRunning}>
+                {t('取消')}
+              </button>
+              <button
+                className={`btn ${batchAction === 'delete' ? 'btn-danger' : 'btn-primary'}`}
+                onClick={() => void runBatch()}
+                disabled={batchRunning || selectedRows.length === 0}
+              >
+                {batchRunning
+                  ? t('执行中…')
+                  : `${t('执行')}${batchAction === 'enable' ? t('启用') : batchAction === 'disable' ? t('停用') : t('删除')}`}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
