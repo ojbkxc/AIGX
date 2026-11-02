@@ -350,7 +350,7 @@ where
 fn prune_accum<T, M>(list: &mut Vec<T>, cap: usize, metric: M)
 where
     M: Fn(&T) -> u64,
-    T: Named,
+    T: Named + Default,
 {
     if list.len() <= cap + cap / 2 {
         return;
@@ -483,7 +483,9 @@ impl DailyAggStore {
     pub fn load_range(&self, from_date: &str, to_date: &str) -> Vec<DailyAgg> {
         self.prefix_rows::<DailyAgg>(MASTER_PREFIX)
             .into_iter()
-            .filter(|a| !a.date.is_empty() && a.date >= from_date && a.date <= to_date)
+            .filter(|a| {
+                !a.date.is_empty() && a.date.as_str() >= from_date && a.date.as_str() <= to_date
+            })
             .collect()
     }
 
@@ -491,7 +493,7 @@ impl DailyAggStore {
     pub fn load_user_range(&self, uid: &str, from_date: &str, to_date: &str) -> Vec<UserDailyRow> {
         let prefix = format!("{USER_PREFIX}{uid}:");
         let mut rows = self.prefix_rows::<UserDailyRow>(&prefix);
-        rows.retain(|r| r.date >= from_date && r.date <= to_date);
+        rows.retain(|r| r.date.as_str() >= from_date && r.date.as_str() <= to_date);
         rows.sort_by(|a, b| a.date.cmp(&b.date));
         rows
     }
