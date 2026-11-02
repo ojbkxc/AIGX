@@ -193,16 +193,14 @@ impl AccountBridge {
         if matches!(
             failure,
             crate::channel::circuit_breaker::FailureType::AuthFailed
-        ) {
-            if self
-                .sessions
-                .mark_credential_rejected(lease.id(), &lease.session().provider)
-            {
-                tracing::info!(
-                    "account {} credential rejected upstream; queued for refresh",
-                    lease.id()
-                );
-            }
+        ) && self
+            .sessions
+            .mark_credential_rejected(lease.id(), &lease.session().provider)
+        {
+            tracing::info!(
+                "account {} credential rejected upstream; queued for refresh",
+                lease.id()
+            );
         }
         crate::api::openai::is_retryable_bridge_error(error)
     }

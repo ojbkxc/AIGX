@@ -385,7 +385,7 @@ pub struct UsageConfig {
     /// 排队单次等待秒数（对齐 Agent2API `queueWaitSeconds`，0~120，默认 0）。
     ///
     /// 0 = 跟随上游建议（`retryAfterSeconds`，钳在 5~30 秒，上游没给时 15 秒）；
-    /// >0 = 写死这个间隔。排队等待吃的是「响应头等待超时」那份预算，
+    /// `>0` = 写死这个间隔。排队等待吃的是「响应头等待超时」那份预算，
     /// 本设置不会突破该预算。
     #[serde(default)]
     pub queue_wait_seconds: u8,
