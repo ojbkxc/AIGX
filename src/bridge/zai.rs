@@ -19,9 +19,9 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use super::{
-    capture_upstream_error_http, Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream,
-    ChatDelta, ChatFormat, ChatMessage, ChatResponse, FinishReason, Role, UpstreamErrorView,
-    UpstreamWire, UsageStats,
+    capture_upstream_error_http, is_length_finish, Bridge, BridgeContext, BridgeError, ChatChunk,
+    ChatChunkStream, ChatDelta, ChatFormat, ChatMessage, ChatResponse, FinishReason, Role,
+    UpstreamErrorView, UpstreamWire, UsageStats,
 };
 
 /// 智谱 AI 默认 base_url（Anthropic 兼容端点）。
@@ -328,9 +328,11 @@ struct StreamState {
 /// 与 Anthropic 兼容：`end_turn`/`stop_sequence` → stop，
 /// `max_tokens` → length，`tool_use` → tool_calls。
 fn parse_stop_reason(s: &str) -> FinishReason {
+    if is_length_finish(s) {
+        return FinishReason::Length;
+    }
     match s {
         "end_turn" | "stop_sequence" => FinishReason::Stop,
-        "max_tokens" => FinishReason::Length,
         "tool_use" => FinishReason::ToolCalls,
         _ => FinishReason::Stop,
     }

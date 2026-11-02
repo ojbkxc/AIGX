@@ -21,9 +21,9 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use super::{
-    capture_upstream_error_http, Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream,
-    ChatDelta, ChatFormat, ChatMessage, ChatResponse, FinishReason, Role, UpstreamErrorView,
-    UpstreamWire, UsageStats,
+    capture_upstream_error_http, is_length_finish, Bridge, BridgeContext, BridgeError, ChatChunk,
+    ChatChunkStream, ChatDelta, ChatFormat, ChatMessage, ChatResponse, FinishReason, Role,
+    UpstreamErrorView, UpstreamWire, UsageStats,
 };
 
 /// Gemini 默认 base_url（含 `/v1beta` 版本前缀）。
@@ -402,9 +402,11 @@ struct StreamState {
 /// - `SAFETY` → content_filter
 /// - 其他 → stop
 fn parse_finish_reason(s: &str) -> FinishReason {
+    if is_length_finish(s) {
+        return FinishReason::Length;
+    }
     match s {
         "STOP" => FinishReason::Stop,
-        "MAX_TOKENS" => FinishReason::Length,
         "SAFETY" => FinishReason::ContentFilter,
         _ => FinishReason::Stop,
     }

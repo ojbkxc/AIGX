@@ -1816,6 +1816,9 @@ pub async fn handle_chat_completions(
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
+        // auto-continue：留住成功轮的桥与（映射后）请求，续写轮复用同一渠道
+        let mut cont_bridge: Option<Arc<dyn Bridge>> = None;
+        let mut cont_req: Option<ChatFormat> = None;
         for (bridge, cid, ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
@@ -1864,6 +1867,8 @@ pub async fn handle_chat_completions(
                     used_channel_id = cid;
                     // 记录映射结果：流计费守卫用上游名计价/记账
                     used_upstream = Some(upstream);
+                    cont_bridge = Some(bridge);
+                    cont_req = Some(attempt_req);
                     break;
                 }
                 Err(e) => {
@@ -1960,6 +1965,15 @@ pub async fn handle_chat_completions(
                 release_reservation(&state, &api_key, &reservation);
                 return bridge_error_response(e).into_response();
             }
+        };
+        // auto-continue（流式）：开关打开才包装，在 ChatChunk 层透传全部轮次；
+        // 关着时下发字节与接线前逐字一致（零开销）。计费/文本累积在包装的
+        // 下游（map 层），天然看到跨轮拼接的整体。
+        let stream = match (crate::continuation::plan(), cont_bridge, cont_req) {
+            (Some(max_rounds), Some(bridge), Some(req)) => {
+                crate::continuation::wrap_stream(stream, bridge, req, ctx.clone(), max_rounds)
+            }
+            _ => stream,
         };
         {
             // 累积输出文本用于流结束时估算 token（问题 3）
@@ -2297,6 +2311,9 @@ pub async fn handle_chat_completions(
         let mut used_upstream: Option<String> = None;
         let mut last_error: Option<crate::bridge::BridgeError> = None;
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
+        // auto-continue：留住成功轮的桥与（映射后）请求，续写轮复用同一渠道
+        let mut cont_bridge: Option<Arc<dyn Bridge>> = None;
+        let mut cont_req: Option<ChatFormat> = None;
         for (bridge, cid, ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
@@ -2333,6 +2350,8 @@ pub async fn handle_chat_completions(
                     response_opt = Some(resp);
                     used_channel_id = cid;
                     used_upstream = Some(upstream);
+                    cont_bridge = Some(bridge);
+                    cont_req = Some(attempt_req);
                     break;
                 }
                 Err(e) => {
@@ -2430,6 +2449,15 @@ pub async fn handle_chat_completions(
                 release_reservation(&state, &api_key, &reservation);
                 return bridge_error_response(e).into_response();
             }
+        };
+        // auto-continue（非流式）：逐轮续写拼接正文、usage 求和；没续轮或
+        // 开关关着时响应原样返回。续写轮失败保留已得内容（见 continue_non_streaming）。
+        let response = match (crate::continuation::plan(), cont_bridge, cont_req) {
+            (Some(max_rounds), Some(bridge), Some(req)) => {
+                crate::continuation::continue_non_streaming(bridge, req, &ctx, response, max_rounds)
+                    .await
+            }
+            _ => response,
         };
         {
             let latency_ms = request_start.elapsed().as_millis() as u64;

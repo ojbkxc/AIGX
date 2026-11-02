@@ -380,6 +380,24 @@ pub struct UsageConfig {
     /// 本设置不会突破该预算。
     #[serde(default)]
     pub queue_wait_seconds: u8,
+    /// 截断自动续写总开关（对齐 Agent2API `autoContinue`，默认**关**）。
+    ///
+    /// 开启时：网关判定上游答复被截断（`length` 停止原因、围栏/括号没闭合、
+    /// 句子吊尾等六条判据，见 `crate::continuation`）后，自动把半截原文当
+    /// 上下文再发一轮「请继续」，直到自然停止或触到轮数上限。关闭时数据面
+    /// 连包装都不做，零开销。
+    #[serde(default)]
+    pub auto_continue: bool,
+    /// 续写最多额外轮数（对齐 Agent2API `autoContinueMaxRounds`，1~8，默认 3）。
+    ///
+    /// 只统计续写轮，不含首轮；复读检测（两轮文本几乎一模一样）会提前收手。
+    #[serde(default = "default_auto_continue_max_rounds")]
+    pub auto_continue_max_rounds: u8,
+}
+
+/// 续写最多额外轮数的默认值（对齐上游 autoContinueMaxRounds）。
+fn default_auto_continue_max_rounds() -> u8 {
+    3
 }
 
 /// 排队退避次数上限的默认值（对齐上游 queueMaxWaits）。
@@ -612,6 +630,8 @@ impl Default for UsageConfig {
             allow_internal_upstream: false,
             queue_max_waits: default_queue_max_waits(),
             queue_wait_seconds: 0,
+            auto_continue: false,
+            auto_continue_max_rounds: default_auto_continue_max_rounds(),
             billing_flat_quota: default_billing_flat_quota(),
         }
     }
@@ -717,6 +737,28 @@ pub fn queue_settings() -> (u64, u64) {
 pub fn set_queue_settings(max_waits: u64, wait_seconds: u64) {
     QUEUE_MAX_WAITS.store(max_waits.min(10), std::sync::atomic::Ordering::Relaxed);
     QUEUE_WAIT_SECONDS.store(wait_seconds.min(120), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 截断自动续写开关的进程级快照（数据面每个请求同步读取，管理端保存即生效）。
+static AUTO_CONTINUE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 续写最多额外轮数的进程级快照（1~8）。
+static AUTO_CONTINUE_MAX_ROUNDS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(3);
+
+/// 续写开关是否开启（关闭时数据面不做任何包装，零开销）。
+pub fn auto_continue_enabled() -> bool {
+    AUTO_CONTINUE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 续写最多额外轮数（已钳 1~8）。
+pub fn auto_continue_max_rounds() -> u64 {
+    AUTO_CONTINUE_MAX_ROUNDS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 启动与限额更新端点写入快照（越界值钳制后再存，快照即合法域）。
+pub fn set_auto_continue_settings(enabled: bool, max_rounds: u64) {
+    AUTO_CONTINUE.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    AUTO_CONTINUE_MAX_ROUNDS.store(max_rounds.clamp(1, 8), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 按次计费每次固定扣减额度的进程级快照（数据面同步路径读取）。

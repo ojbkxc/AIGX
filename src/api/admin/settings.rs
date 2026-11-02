@@ -59,6 +59,10 @@ pub struct LimitsRequest {
     pub queue_max_waits: Option<u8>,
     /// 排队单次等待秒数（0~120，默认 0 = 跟随上游建议）
     pub queue_wait_seconds: Option<u8>,
+    /// 截断自动续写总开关（默认 false；关闭时数据面不做任何包装）
+    pub auto_continue: Option<bool>,
+    /// 续写最多额外轮数（1~8，默认 3）
+    pub auto_continue_max_rounds: Option<u8>,
 }
 
 /// 签到设置请求体（enabled + 奖励区间）
@@ -159,6 +163,8 @@ pub async fn handle_get_limits(
             "allow_internal_upstream": config.usage.allow_internal_upstream,
             "queue_max_waits": config.usage.queue_max_waits,
             "queue_wait_seconds": config.usage.queue_wait_seconds,
+            "auto_continue": config.usage.auto_continue,
+            "auto_continue_max_rounds": config.usage.auto_continue_max_rounds,
         })
     })))
 }
@@ -297,6 +303,19 @@ pub async fn handle_update_limits(
         crate::config::set_queue_settings(
             config.usage.queue_max_waits as u64,
             config.usage.queue_wait_seconds as u64,
+        );
+    }
+    if body.auto_continue.is_some() || body.auto_continue_max_rounds.is_some() {
+        if let Some(v) = body.auto_continue {
+            config.usage.auto_continue = v;
+        }
+        if let Some(v) = body.auto_continue_max_rounds {
+            config.usage.auto_continue_max_rounds = v.clamp(1, 8);
+        }
+        // 同步进程级快照（数据面每个请求同步读取，立即生效）
+        crate::config::set_auto_continue_settings(
+            config.usage.auto_continue,
+            config.usage.auto_continue_max_rounds as u64,
         );
     }
     // 换号重试间隔立即生效（账号池运行时读取）

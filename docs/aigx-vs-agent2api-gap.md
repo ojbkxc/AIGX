@@ -33,7 +33,7 @@
 | 内容拦截降级期 | — | `/api/prompt` | ❌ | 未见 degrade 实现 |
 | 调试模式（保存上游原始报文 + 流量查看） | 关 | `/api/debug`、`/api/debug/traffic` | 🟡 请求侧已补 | AIGX：开关 `usage.debug_traffic`（`/api/limits` GET/PUT，前端 `DebugTrafficPanel.tsx` 挂设置→运维→网关）；抓取落点 `src/debug_traffic.rs`（进程内环形缓冲 200 条 / 单条请求体 64KB，凭据头硬脱敏）+ `GET|DELETE /api/debug/traffic`（`src/api/admin/debug.rs`）；桥接层在 openai/anthropic/gemini/zai 共 13 个发送点用 `debug_traffic::traced(...)` 抓 **即将发出的 URL/脱敏头/请求体**。**仍缺**：上游**响应**侧原始报文（状态码/响应头/流式原始 SSE 文本）——AIGX 现有 `log_body` 的非流式响应体与错误体可覆盖一部分，原始 SSE 帧未留存 |
 | 保活换行丢弃 | 关 | `/api/keepalive-strip` | ✅ **已补** | 开关 `usage.strip_newline_keepalive`（`/api/limits` GET/PUT，前端 `StreamCompatPanel.tsx` 挂设置→运维→网关）；判据 `src/sse.rs::is_newline_keepalive`（终止/用量/错误帧豁免；同帧带 reasoning/tool_calls/function_call 不丢）→ 下发前丢弃点 `src/bridge/openai.rs::chat_stream`；开关关闭时桥接层零解析 |
-| 长度截断自动续写 | 关 | `/api/auto-continue` | ❌ | 无 |
+| 长度截断自动续写 | 关 | `/api/auto-continue` | ✅ **已补** | 判据模块 `src/continuation.rs`（六判据：工具轮永不续 / length 族 / 空正文+有思考 / ``` 奇数 / 末 100 字符括号失衡 / 悬挂尾部与长思考短句；两道停机：轮数上限 + 逐字符位置相似度 >0.5 复读闸；判据读跨轮拼接整体）。length 族 8 别名归一在各桥入口 `crate::bridge::is_length_finish`（openai/anthropic/gemini/zai/cf 与 session 桥 qoder/trae/codearts/commandcode/accio/antigravity；anthropic 保留 `pause_turn` 特有语义）。数据面挂 `/v1/chat/completions`：流式 `wrap_stream`（压住终止帧、续写轮复用同桥重发、超 1MiB 暂存放行放弃续），非流式 `continue_non_streaming`（逐轮 forward、正文拼接、usage 求和，续写轮失败以已得内容返回）。设置并入 `/api/limits`（`auto_continue` 默认关 + `auto_continue_max_rounds` 1–8 默认 3；关着不包装零开销）；前端 `AutoContinuePanel.tsx` 挂设置→运维→网关。差异：上游独立 `/api/auto-continue` 端点，AIGX 并入 limits；Responses 透传等旁路端点未接 |
 
 ## 2. 设置页 · 路由（上游 tab `routing`，5 项）
 
@@ -154,6 +154,6 @@ AIGX `frontend/src/pages/ModelManage.tsx`（2115 行）+ `src/model/manage.rs` +
 2. **P1** 设置-重试补「切换账号重试次数」（§3）。
 3. **P1** 调试模式补**响应侧**原始报文（§1：上游状态码 / 脱敏响应头 / 流式原始 SSE 文本）。请求侧已落地，响应侧需在桥接层 `.send()` 之后接入，涉及 13 个发送点的二次改动。
 4. **P2** 模型管理列设置拖拽 + 移动端卡片化（§7）。
-5. **P1 剩余** 设置-网关继续移植：auto-continue（截断续写，默认关）。keepalive 换行帧丢弃、models.dev 元数据、排队等待已补（§1）。
+5. **已完成** 设置-网关移植：auto-continue（截断续写，默认关）已补（§1）。keepalive 换行帧丢弃、models.dev 元数据、排队等待已补（§1）。
 6. **不移植** ZCode 验证码池（§1）：每条推理请求需要浏览器里铸造的上游反自动化令牌，server 侧只能靠无头浏览器/外部打码，本 AI 不代写这类铸造链。
 7. **不做** 指纹脱敏(sanitize)、Cline 伪装头（§1）—— 上游源码注释自述目标是「一字改动即可绕过内容审核」「伪装成官方客户端」，属规避类，本 AI 不代写。

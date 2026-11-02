@@ -16,6 +16,7 @@ pub mod channel;
 pub mod chat_session;
 pub mod checkin;
 pub mod config;
+pub mod continuation;
 pub mod cron;
 pub mod debug_traffic;
 pub mod egress;

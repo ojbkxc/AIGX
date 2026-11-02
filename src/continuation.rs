@@ -14,7 +14,7 @@
 //!   1. **工具轮永不续**（最高优先级）：tool_calls 的执行权在客户端，续写
 //!      等于伪造一次工具调用；
 //!   2. `finish_reason` 属于 length 族（8 个上游写法，别名归一在各桥
-//!      [`crate::bridge::finish_length`] 完成，判据只看 [`FinishReason::Length`]）；
+//!      [`crate::bridge::is_length_finish`] 完成，判据只看 [`FinishReason::Length`]）；
 //!   3. 正文为空但有思考：整轮烧在思考通道里，该再问一次（两者都空 → 交给
 //!      既有空答复兜底链，不归本模块）；
 //!   4. 代码围栏 ``` 数量为**奇数**（数整篇，未闭合是硬证据）；
@@ -44,14 +44,16 @@
 //! 字节与接入前逐字一致。
 
 use futures::StreamExt;
+use std::sync::Arc;
 
-use crate::bridge::{BridgeError, ChatChunk, ChatMessage, ChatResponse, FinishReason, Role, UsageStats};
+use crate::bridge::{
+    Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream, ChatFormat, ChatMessage,
+    ChatResponse, FinishReason, Role, UsageStats,
+};
 
 /// 悬挂尾部的**单字符**集合（rstrip 之后看末字符；上游的 8 条正则等价化成
 /// 集合判定，`//` 是「以 `/` 结尾」的子集，合并）。
-const DANGLING_ENDING_CHARS: &[char] = &[
-    ',', '|', '｜', '\\', '/', '#', '-', '–', '—', ':', '：',
-];
+const DANGLING_ENDING_CHARS: &[char] = &[',', '|', '｜', '\\', '/', '#', '-', '–', '—', ':', '：'];
 
 /// 句末符号集合（上游 `_SENTENCE_END_RE` 字符类逐字对应；含中文右引号/右
 /// 括号闭合形态，漏了会把「说完了」判成半截）。
@@ -336,10 +338,7 @@ pub fn wants_another_round(
 }
 
 /// 非流式续写的同类判断（判据输入与流式完全同源，见 [`verdict_of`]）。
-pub fn wants_another_round_response(
-    parts: &TurnParts,
-    previous_round_text: Option<&str>,
-) -> bool {
+pub fn wants_another_round_response(parts: &TurnParts, previous_round_text: Option<&str>) -> bool {
     if parts.has_tool_calls {
         return false;
     }
@@ -368,8 +367,14 @@ fn last_chars(text: &str, n: usize) -> String {
 /// 中间出现的落单闭合符按噪声跳过（抄上游/参考实现会把它也点亮，完整答案
 /// 被误判半截的代价比漏判重）。
 fn unbalanced_brackets(tail: &str) -> bool {
-    let opens = tail.chars().filter(|c| matches!(c, '[' | '{' | '(')).count();
-    let closes = tail.chars().filter(|c| matches!(c, ']' | '}' | ')')).count();
+    let opens = tail
+        .chars()
+        .filter(|c| matches!(c, '[' | '{' | '('))
+        .count();
+    let closes = tail
+        .chars()
+        .filter(|c| matches!(c, ']' | '}' | ')'))
+        .count();
     if opens > closes + 2 {
         return true;
     }
@@ -453,6 +458,197 @@ pub fn plan() -> Option<usize> {
     Some(total_rounds_of(crate::config::auto_continue_max_rounds()))
 }
 
+/// 终止帧及其后帧的暂存上限（1 MiB）。超过即放行全部并放弃续写 ——
+/// 宁可不续，也不无界占内存。
+const MAX_HELD_BYTES: usize = 1024 * 1024;
+
+/// 粗估一个 chunk 的正文体积（判据与续写都不读工具参数，只为闸住暂存内存）。
+fn estimate_chunk_bytes(chunk: &ChatChunk) -> usize {
+    let mut n = 0usize;
+    if let Some(text) = &chunk.delta.content {
+        n += text.len();
+    }
+    if let Some(text) = &chunk.delta.reasoning {
+        n += text.len();
+    }
+    n
+}
+
+/// **流式**续写包装：透传上游流，判出截断时压住终止帧（及其后的补发帧），
+/// 半截原文回放进上下文再开一轮，新内容接在同一条流后面。
+///
+/// 只在 [`plan`] 给出 Some 时被调用（关着零开销）。语义与上游
+/// `continuation.stream()` 对齐：
+///   - 终止帧压住不发 —— 客户端先看到「半截」再看到续写内容，finish 只出
+///     最终一次；
+///   - 续写轮**复用同一桥与渠道**（内容连贯优先于换路再试）；建流失败则
+///     把压住的终止帧与错误帧原样放行，客户端拿到的是「带错误的完整前半」；
+///   - 客户端断连（send 失败）即刻终止后台任务，上游流随之 drop。
+pub fn wrap_stream(
+    first: ChatChunkStream,
+    bridge: Arc<dyn Bridge>,
+    mut req: ChatFormat,
+    ctx: BridgeContext,
+    max_rounds: usize,
+) -> ChatChunkStream {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<ChatChunk, BridgeError>>(64);
+    tokio::spawn(async move {
+        let mut stream = first;
+        let mut rounds_done = 1usize;
+        // 跨轮整体（判据读整体，见模块头）；本轮文本单独记一份给复读闸对比。
+        let mut joined_text = String::new();
+        let mut joined_reasoning = String::new();
+        let mut any_tool_calls = false;
+        let mut last_round_text: Option<String> = None;
+        loop {
+            let mut acc = TurnAccumulator::default();
+            let mut held: Vec<Result<ChatChunk, BridgeError>> = Vec::new();
+            let mut held_bytes = 0usize;
+            let mut holding = false;
+            // 暂存超上限 / 客户端断连时置真：此后帧一律直通，不再续。
+            let mut no_more = false;
+            while let Some(item) = stream.next().await {
+                // 判据照常吃满（即便不再续，也不影响正确性，省一个分支）。
+                let terminal = acc.push_chunk(&item);
+                if no_more {
+                    if tx.send(item).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                if terminal || holding {
+                    holding = true;
+                    held_bytes += item.as_ref().map(estimate_chunk_bytes).unwrap_or(64);
+                    held.push(item);
+                    if held_bytes > MAX_HELD_BYTES {
+                        no_more = true;
+                        for h in held.drain(..) {
+                            if tx.send(h).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                } else if tx.send(item).await.is_err() {
+                    return;
+                }
+            }
+            let parts = acc.parts().clone();
+            let mut cur_joined = joined_text.clone();
+            cur_joined.push_str(&parts.text);
+            let mut cur_reasoning = joined_reasoning.clone();
+            cur_reasoning.push_str(&parts.reasoning);
+            let want = !no_more
+                && !acc.saw_error()
+                && wants_another_round(
+                    &cur_joined,
+                    &cur_reasoning,
+                    any_tool_calls,
+                    last_round_text.as_deref(),
+                    &parts,
+                    acc.produced_anything(),
+                    rounds_done,
+                    max_rounds,
+                );
+            if !want {
+                // 自然停止 / 判不住 / 到上限：放行压住的终止帧，收尾。
+                for h in held.drain(..) {
+                    if tx.send(h).await.is_err() {
+                        return;
+                    }
+                }
+                return;
+            }
+            // 续一轮：丢终止帧（最终轮的 finish 才是客户端该看到的），
+            // 半截原文当 assistant 回合回放 + 追「请继续」。
+            drop(held);
+            append_continuation(&mut req.messages, &parts.text, looks_reasoning_only(&parts));
+            rounds_done += 1;
+            last_round_text = Some(parts.text.clone());
+            joined_text = cur_joined;
+            joined_reasoning = cur_reasoning;
+            any_tool_calls = any_tool_calls || parts.has_tool_calls;
+            match bridge.chat_stream(&req, &ctx).await {
+                Ok(s) => stream = s,
+                Err(e) => {
+                    tracing::warn!("auto-continue(流式) 续写轮建流失败: {e}");
+                    // 前半已流出的内容照常收完：补一个错误帧（SSE error 事件）。
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            }
+        }
+    });
+    tokio_stream::wrappers::ReceiverStream::new(rx).boxed()
+}
+
+/// **非流式**续写循环：逐轮 forward，正文拼接，usage 求和。
+///
+/// 与流式共用同一套判据输入（[`wants_another_round`]）；续写轮失败时
+/// **保留已拿到的内容**返回（半截也好过报错，与上游同语义）。
+/// 没续过（`rounds_done == 1`）时响应原样返回，一个字节都不动。
+pub async fn continue_non_streaming(
+    bridge: Arc<dyn Bridge>,
+    mut req: ChatFormat,
+    ctx: &BridgeContext,
+    mut response: ChatResponse,
+    max_rounds: usize,
+) -> ChatResponse {
+    let mut current = parts_of_response(&response);
+    let mut joined_text = current.text.clone();
+    let mut joined_reasoning = current.reasoning.clone();
+    let mut any_tool_calls = current.has_tool_calls;
+    let mut last_round_text: Option<String> = None;
+    let mut rounds_done = 1usize;
+    let mut usages = vec![response.usage.clone()];
+    loop {
+        let produced = !current.text.trim().is_empty() || !current.reasoning.trim().is_empty();
+        if !wants_another_round(
+            &joined_text,
+            &joined_reasoning,
+            any_tool_calls,
+            last_round_text.as_deref(),
+            &current,
+            produced,
+            rounds_done,
+            max_rounds,
+        ) {
+            break;
+        }
+        append_continuation(
+            &mut req.messages,
+            &current.text,
+            looks_reasoning_only(&current),
+        );
+        let prev_round_text = std::mem::take(&mut current.text);
+        match bridge.chat(&req, ctx).await {
+            Ok(resp) => {
+                usages.push(resp.usage.clone());
+                current = parts_of_response(&resp);
+                last_round_text = Some(prev_round_text);
+                joined_text.push_str(&current.text);
+                joined_reasoning.push_str(&current.reasoning);
+                any_tool_calls = any_tool_calls || current.has_tool_calls;
+                rounds_done += 1;
+            }
+            Err(e) => {
+                tracing::warn!("auto-continue(非流式) 续写轮失败: {e}，以已得内容返回");
+                break;
+            }
+        }
+    }
+    if rounds_done > 1 {
+        response.message.content = Some(joined_text);
+        if !joined_reasoning.is_empty() {
+            response.message.reasoning = Some(joined_reasoning);
+        }
+        response.usage = sum_usage(&usages);
+        if let Some(finish) = current.finish {
+            response.finish_reason = finish;
+        }
+    }
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,28 +685,52 @@ mod tests {
         let mut with_calls = parts("我把文件读完之后", "", Some(FinishReason::Length));
         with_calls.has_tool_calls = true;
         assert!(!looks_truncated(&with_calls));
-        assert!(looks_truncated(&parts("我把文件读完之后", "", Some(FinishReason::Length))));
+        assert!(looks_truncated(&parts(
+            "我把文件读完之后",
+            "",
+            Some(FinishReason::Length)
+        )));
     }
 
     /// 判据 2：length 枚举点亮；Stop/ContentFilter 不点亮。
     #[test]
     fn length_finish_counts_as_truncation() {
-        assert!(looks_truncated(&parts("就这样", "", Some(FinishReason::Length))));
-        assert!(!looks_truncated(&parts("就这样", "", Some(FinishReason::ToolCalls))));
+        assert!(looks_truncated(&parts(
+            "就这样",
+            "",
+            Some(FinishReason::Length)
+        )));
+        assert!(!looks_truncated(&parts(
+            "就这样",
+            "",
+            Some(FinishReason::ToolCalls)
+        )));
     }
 
     /// 判据 3：正文空 + 有思考要续；两者都空**不续**。
     #[test]
     fn empty_visible_text_depends_on_reasoning_channel() {
-        assert!(looks_truncated(&parts("", "先分析题目，再考虑边界情况。", None)));
+        assert!(looks_truncated(&parts(
+            "",
+            "先分析题目，再考虑边界情况。",
+            None
+        )));
         assert!(!looks_truncated(&parts("   ", "", None)));
     }
 
     /// 判据 4：围栏奇数点亮，闭合的不点亮。
     #[test]
     fn unclosed_code_fence_is_hard_evidence() {
-        assert!(looks_truncated(&parts("看这段：\n```python\ndef f():\n    return 1", "", None)));
-        assert!(!looks_truncated(&parts("看这段：\n```python\ndef f():\n    return 1\n```", "", None)));
+        assert!(looks_truncated(&parts(
+            "看这段：\n```python\ndef f():\n    return 1",
+            "",
+            None
+        )));
+        assert!(!looks_truncated(&parts(
+            "看这段：\n```python\ndef f():\n    return 1\n```",
+            "",
+            None
+        )));
     }
 
     /// 判据 5：只认「走完仍未闭合」，落单闭合符按噪声跳过。
@@ -529,8 +749,20 @@ mod tests {
     /// 判据 6a：悬挂尾部集合；单个句点不算。
     #[test]
     fn dangling_tails_flagged_but_period_is_not() {
-        for text in ["总价包括：", "第一行 |", "等等...", "路径是 src\\", "注释 #", "下一项 -", "结果是 :", "表格单元 ｜"] {
-            assert!(looks_truncated(&parts(text, "", None)), "悬挂尾部没抓到: {text:?}");
+        for text in [
+            "总价包括：",
+            "第一行 |",
+            "等等...",
+            "路径是 src\\",
+            "注释 #",
+            "下一项 -",
+            "结果是 :",
+            "表格单元 ｜",
+        ] {
+            assert!(
+                looks_truncated(&parts(text, "", None)),
+                "悬挂尾部没抓到: {text:?}"
+            );
         }
         assert!(!looks_truncated(&parts("结果是 42.", "", None)));
     }
@@ -540,7 +772,11 @@ mod tests {
     fn long_think_with_stopped_fragment_needs_more() {
         let thinking = "分".repeat(FRAGMENT_REASONING_MIN_CHARS);
         assert!(looks_truncated(&parts("好的", &thinking, None)));
-        assert!(!looks_truncated(&parts(&"好的，".repeat(20), &thinking, None)));
+        assert!(!looks_truncated(&parts(
+            &"好的，".repeat(20),
+            &thinking,
+            None
+        )));
         assert!(!looks_truncated(&parts("好的", "短思考", None)));
         assert!(!looks_truncated(&parts("收到。", &thinking, None)));
     }
@@ -548,11 +784,18 @@ mod tests {
     /// 判据读「拼接后的整体」：第一轮点亮，第二轮补完后的整体必须熄灭。
     #[test]
     fn verdict_reads_stitched_answer_not_last_round() {
-        let first = parts("示例代码：\n```python\ndef solve():\n    return 42\n", "", Some(FinishReason::Stop));
+        let first = parts(
+            "示例代码：\n```python\ndef solve():\n    return 42\n",
+            "",
+            Some(FinishReason::Stop),
+        );
         assert!(looks_truncated(&first));
         let second = parts("```\n上面的函数返回 42。", "", Some(FinishReason::Stop));
         let stitched = verdict_of(&(first.text.clone() + &second.text), "", false, &second);
-        assert!(!looks_truncated(&stitched), "拼接后围栏已闭合，不许再打一轮");
+        assert!(
+            !looks_truncated(&stitched),
+            "拼接后围栏已闭合，不许再打一轮"
+        );
         let opening = verdict_of(&first.text.clone(), "", false, &first);
         assert!(looks_truncated(&opening), "首轮判据必须带上本轮自己");
     }

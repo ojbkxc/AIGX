@@ -26,10 +26,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream, ChatDelta, ChatFormat,
-    ChatMessage, ChatResponse, EmbeddingObject, EmbeddingRequest, EmbeddingResponse,
+    is_length_finish, Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream, ChatDelta,
+    ChatFormat, ChatMessage, ChatResponse, EmbeddingObject, EmbeddingRequest, EmbeddingResponse,
     EmbeddingUsage, FinishReason, ResponsesPassthrough, Role, UpstreamWire, UsageStats,
 };
+
+/// Cloudflare finish_reason → 内部 FinishReason。
+///
+/// length 族走共享别名表（续写判据依赖它，见 `crate::bridge::is_length_finish`），
+/// 其余按 OpenAI 语义映射。
+fn map_finish(s: &str) -> FinishReason {
+    if is_length_finish(s) {
+        return FinishReason::Length;
+    }
+    match s {
+        "content_filter" => FinishReason::ContentFilter,
+        "tool_calls" => FinishReason::ToolCalls,
+        _ => FinishReason::Stop,
+    }
+}
 
 use crate::model::ModelMapper;
 use crate::proxy::CfApiClient;
@@ -170,13 +185,7 @@ fn parse_openai_chunk(
         .and_then(|arr| arr.first())
         .and_then(|first| first.get("finish_reason"))
         .and_then(|f| f.as_str())
-        .map(|s| match s {
-            "stop" => FinishReason::Stop,
-            "length" => FinishReason::Length,
-            "content_filter" => FinishReason::ContentFilter,
-            "tool_calls" => FinishReason::ToolCalls,
-            _ => FinishReason::Stop,
-        });
+        .map(map_finish);
 
     if delta_content.is_none()
         && delta_reasoning.is_none()
@@ -356,13 +365,7 @@ impl Bridge for CloudflareBridge {
             .and_then(|arr| arr.first())
             .and_then(|first| first.get("finish_reason"))
             .and_then(|f| f.as_str())
-            .map(|s| match s {
-                "stop" => FinishReason::Stop,
-                "length" => FinishReason::Length,
-                "content_filter" => FinishReason::ContentFilter,
-                "tool_calls" => FinishReason::ToolCalls,
-                _ => FinishReason::Stop,
-            })
+            .map(map_finish)
             .unwrap_or(FinishReason::Stop);
 
         Ok(ChatResponse {

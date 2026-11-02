@@ -18,9 +18,9 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use super::{
-    capture_upstream_error_http, Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream,
-    ChatDelta, ChatFormat, ChatMessage, ChatResponse, FinishReason, Role, UpstreamErrorView,
-    UpstreamWire, UsageStats,
+    capture_upstream_error_http, is_length_finish, Bridge, BridgeContext, BridgeError, ChatChunk,
+    ChatChunkStream, ChatDelta, ChatFormat, ChatMessage, ChatResponse, FinishReason, Role,
+    UpstreamErrorView, UpstreamWire, UsageStats,
 };
 
 /// Anthropic API 版本头（与官方 SDK 一致）
@@ -667,9 +667,13 @@ fn parse_response(json: &Value, fallback_model: &str) -> ChatResponse {
 /// - `pause_turn` → length（服务端可续轮的未完成响应，视作截断而非成功停止）
 /// - `refusal` → content_filter
 fn parse_stop_reason(s: &str) -> FinishReason {
+    // pause_turn 是 Anthropic 特有语义（服务端可续轮的未完成响应），不在共享 length
+    // 别名表里，单独保留；max_tokens 走共享表。
+    if s == "pause_turn" || is_length_finish(s) {
+        return FinishReason::Length;
+    }
     match s {
         "end_turn" | "stop_sequence" => FinishReason::Stop,
-        "max_tokens" | "pause_turn" => FinishReason::Length,
         "tool_use" => FinishReason::ToolCalls,
         "refusal" => FinishReason::ContentFilter,
         _ => FinishReason::Stop,

@@ -165,6 +165,37 @@ AIGX 把两项并入既有 `/api/limits`（与 `strip_newline_keepalive` 同一�
 上游 `max_waits=0` 时记录 note_attempt_retry 的阶段化请求日志，AIGX 侧以
 `tracing::info!` 呈现退避过程（AIGX 请求日志无尝试明细结构）。
 
+### 11. 截断自动续写（Agent2API 设置 → 网关 → 自动续写）
+
+| AIGX | Agent2API 蓝本 |
+|---|---|
+| `src/continuation.rs`（六判据 + 两道停机 + `TurnAccumulator`） | `core/upstream/continuation.rs`（判据逐条对应；唯一偏差：括号走查只认「走完仍未闭合」，落单闭合符按噪声跳过） |
+| `wrap_stream`（流式：mpsc+spawn，压住终止帧及其后帧，续轮同桥重发） | `continuation::stream()`（held 帧 + want_more 六条件） |
+| `continue_non_streaming`（非流式：逐轮 forward、正文 concat、usage 求和） | `continuation::complete()` |
+| `append_continuation`（半截原文不 trim 当 assistant 回合 + 「请继续」指令；纯思考轮用英文指令） | `append_continuation`（同文本） |
+| `crate::bridge::is_length_finish`（8 别名归一，各桥 map_finish/parse_* 入口） | `config::finish_length` 字符串层判定 |
+| 数据面挂点：`/v1/chat/completions` 流式/非流式两路（failover 建立后、map/计费前包装） | 上游编排层 upstream forward 处包装 |
+| 设置 `usage.auto_continue`（默认关）/ `auto_continue_max_rounds`（1~8，默认 3，原子快照） | `config::auto_continue` / `auto_continue_max_rounds` |
+| `/api/limits` GET/PUT 透传两键（AIGX 无独立 `/api/auto-continue`） | `GET/PUT /api/auto-continue` |
+| `frontend/src/components/AutoContinuePanel.tsx`（设置 → 运维 → 网关） | 设置页「网关 → 自动续写」 |
+
+关键语义（与上游一致）：
+
+- **判据读拼接整体**：结构性判据（未闭合 ```、括号失衡）问的是「答案」写完了
+  没有，而续写场景里答案是跨轮拼接的；按本轮判会把「已补完」读成「又断」。
+  `finish`/`has_tool_calls` 例外——那是本轮的事实。
+- **工具轮永不续**：tool_calls 的执行权在客户端，续写等于伪造工具调用。
+- **终止帧压住不发**：finish 只在最终一次出现；被丢弃的中间轮终止帧不进
+  客户端，计费/文本累积在包装下游看到全部轮次。
+- **复读闸**：新轮正文与上一轮逐字符位置相似度 >0.5 即停——防「每次在相同
+  位置吐相同段落」的死循环烧配额。
+- **默认关，关着不包装**：连 channel 往返都省，下发字节与未接线逐字一致。
+
+差异（有意为之）：续写轮**复用同一桥与渠道**（内容连贯优先于换路；上游蓝本
+同语义），全渠道 failover 仍只发生在首轮建流；AIGX 只挂 `/v1/chat/completions`
+主链路，Responses 透传等旁路端点未接；流式路径 AIGX 计费走文本估算，不做
+跨轮 usage 合并（非流式按各轮真实 usage 求和）。
+
 ## 后续手工同步上游的方法
 
 1. 拉上游最新代码：`git -C C:\GitHub\Agent2API-main pull`（或重新下载 zip）。

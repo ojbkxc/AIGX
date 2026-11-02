@@ -126,6 +126,11 @@ async fn main() -> anyhow::Result<()> {
         config.usage.queue_max_waits as u64,
         config.usage.queue_wait_seconds as u64,
     );
+    // 截断自动续写设置快照（数据面每个请求同步读取，见 config::auto_continue_enabled）
+    crate::config::set_auto_continue_settings(
+        config.usage.auto_continue,
+        config.usage.auto_continue_max_rounds as u64,
+    );
     // 按次计费固定额度快照（数据面同步路径读取，见 config::billing_flat_quota）
     crate::config::set_billing_flat_quota(config.usage.billing_flat_quota);
 

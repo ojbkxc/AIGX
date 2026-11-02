@@ -12,10 +12,10 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use super::{
-    apply_conditional_bearer, Bridge, BridgeContext, BridgeError, ChatChunk, ChatChunkStream,
-    ChatFormat, ChatMessage, ChatResponse, EmbeddingRequest, EmbeddingResponse, FinishReason,
-    RerankRequest, RerankResponse, RerankResult, ResponsesPassthrough, Role, UpstreamWire,
-    UsageStats,
+    apply_conditional_bearer, is_length_finish, Bridge, BridgeContext, BridgeError, ChatChunk,
+    ChatChunkStream, ChatFormat, ChatMessage, ChatResponse, EmbeddingRequest, EmbeddingResponse,
+    FinishReason, RerankRequest, RerankResponse, RerankResult, ResponsesPassthrough, Role,
+    UpstreamWire, UsageStats,
 };
 
 /// 上游鉴权方式。
