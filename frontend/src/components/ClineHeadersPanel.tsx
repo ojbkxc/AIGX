@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from './Toast';
@@ -38,12 +38,12 @@ export default function ClineHeadersPanel(): JSX.Element {
   const [rows, setRows] = useState<RowState[]>([]);
   const [newKey, setNewKey] = useState('');
 
-  const applyData = (defs: Record<string, string>, overrides: Record<string, string>): void => {
+  const applyData = useCallback((defs: Record<string, string>, overrides: Record<string, string>): void => {
     setDefaults(defs);
     setRows(buildRows(defs, overrides));
-  };
+  }, []);
 
-  const load = async (): Promise<void> => {
+  const load = useCallback(async (): Promise<void> => {
     setLoading(true);
     setError('');
     try {
@@ -54,11 +54,11 @@ export default function ClineHeadersPanel(): JSX.Element {
     } finally {
       setLoading(false);
     }
-  };
+  }, [applyData]);
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
 
   const updateRow = (idx: number, value: string): void => {
     setRows(rows.map((r, i) => (i === idx ? { ...r, value } : r)));

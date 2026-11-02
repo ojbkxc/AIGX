@@ -28,7 +28,12 @@
   width: 100%;
 }
 
-/* 紧凑行距（new-api data-table 密度） */
+/* 紧凑行距 + 密度（对齐模型管理页：12.5px 表体 / 10.5px 表头 / 纵向 sticky 表头） */
+.channels-table {
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
 .channels-table th,
 .channels-table td {
   padding-top: 7px;
@@ -36,6 +41,42 @@
   padding-left: 10px;
   padding-right: 10px;
   white-space: nowrap;
+}
+
+.channels-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  text-align: left;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  background: var(--table-header-bg, var(--surface-bg));
+  border-bottom: 1px solid var(--border-color);
+  user-select: none;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.channels-table td {
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* 行 hover / 勾选淡底：与模型管理同 token（全局旧值在渠道表内覆盖） */
+.channels-table tbody tr:hover td {
+  background: var(--hover-bg, rgba(128, 128, 128, 0.05));
+}
+
+.channels-table tr.selected td {
+  background: var(--accent-soft, rgba(99, 102, 241, 0.07));
+}
+
+/* 表体有界滚动：让 th 的纵向 sticky 真正生效（mm-table-wrap 同式） */
+.channels-table-wrap {
+  max-height: calc(100vh - 300px);
+  overflow-y: auto;
+  overflow-anchor: none;
 }
 
 .channels-table .col-select { width: 32px; padding-left: 8px; padding-right: 4px; }
@@ -53,21 +94,24 @@
   width: 132px;
   position: sticky;
   right: 0;
-  z-index: 2;
+  top: 0;
+  z-index: 3;
   background: var(--card-bg);
   box-shadow: -6px 0 8px -6px rgba(0, 0, 0, 0.15);
 }
 
+/* 表头的操作列同时 sticky 两个方向：盖过其他 th 的滚动内容 */
 .channels-table thead .col-actions {
+  z-index: 4;
   background: var(--table-header-bg);
 }
 
 .channels-table tr:hover .col-actions {
-  background: var(--section-item-bg);
+  background: color-mix(in srgb, var(--hover-bg, rgba(128, 128, 128, 0.05)) 55%, var(--card-bg));
 }
 
 .channels-table tr.selected .col-actions {
-  background: rgba(47, 111, 237, 0.08);
+  background: color-mix(in srgb, var(--accent-color, #6366f1) 7%, var(--card-bg));
 }
 
 /* 键盘导航高亮行（↑↓/j k 移动的 kbd-active） */
@@ -75,8 +119,9 @@
   box-shadow: inset 2px 0 0 var(--accent-color, #2f6fed);
 }
 
+.channels-table tr.selected .col-actions,
 .channels-table tr.kbd-active .col-actions {
-  background: var(--section-item-bg);
+  background: color-mix(in srgb, var(--accent-color, #6366f1) 7%, var(--card-bg));
 }
 
 /* ID 列等宽数字 */
@@ -89,7 +134,7 @@
 /* 名称列：主名 + base_url 副行 */
 .channels-table .ch-name {
   font-weight: 500;
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--text-main);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -110,7 +155,7 @@
   gap: 5px;
   padding: 3px 8px;
   border-radius: 9999px;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 500;
   background: var(--code-bg);
   color: var(--code-color);
@@ -131,7 +176,7 @@
   align-items: center;
   padding: 3px 10px;
   border-radius: 9999px;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 500;
 }
 
@@ -175,7 +220,7 @@
 }
 
 .ch-models-all {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-muted);
 }
 
@@ -194,7 +239,7 @@
 .ch-num-input {
   width: 60px;
   padding: 2px 4px;
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
 /* 余额双徽章（Used/Remaining，超长截断） */
@@ -476,7 +521,7 @@
   background: var(--bg-color, #f7f8fa);
   border: 1px solid var(--border-color, #e5e7eb);
   border-radius: 8px;
-  font-size: 13px;
+  font-size: 12.5px;
   min-width: 220px;
 }
 
@@ -485,7 +530,7 @@
   outline: none;
   background: transparent;
   color: var(--text-main);
-  font-size: 13px;
+  font-size: 12.5px;
   flex: 1;
 }
 
@@ -516,7 +561,7 @@
   display: block;
   width: 100%;
   padding: 6px 10px;
-  font-size: 13px;
+  font-size: 12.5px;
   text-align: left;
   background: transparent;
   border: none;
@@ -535,9 +580,9 @@
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
-  background: rgba(47, 111, 237, 0.08);
+  background: var(--accent-soft, rgba(99, 102, 241, 0.08));
   border-bottom: 1px solid var(--border-color, #e5e7eb);
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--accent-color, #2f6fed);
 }
 
@@ -563,7 +608,7 @@ table tbody td input[type="checkbox"] {
 .inline-editable {
   padding: 4px 8px;
   border-radius: 4px;
-  Workspace_223994: pointer;
+  cursor: pointer;
   transition: background-color 0.2s;
 }
 
@@ -577,9 +622,9 @@ table tbody td input[type="checkbox"] {
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
-  Workspace_223994: pointer;
+  cursor: pointer;
   transition: all 0.2s;
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--text-main);
   display: inline-flex;
   align-items: center;
@@ -592,7 +637,7 @@ table tbody td input[type="checkbox"] {
 }
 
 .balance-cell:disabled {
-  Workspace_223994: not-allowed;
+  cursor: not-allowed;
   opacity: 0.6;
 }
 
@@ -601,7 +646,7 @@ table tbody td input[type="checkbox"] {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 12px;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 500;
 }
 
@@ -984,11 +1029,11 @@ table tbody td input[type="checkbox"] {
 
 /* 禁用行压淡（对齐 mm-off） */
 .channels-table tr.ch-off td {
-  opacity: 0.55;
+  opacity: 0.5;
 }
 
 .channels-table tr.ch-off:hover td {
-  opacity: 0.8;
+  opacity: 0.75;
 }
 
 /* 点击复制目标 */

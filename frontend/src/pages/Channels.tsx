@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import {
   Eye, EyeOff, ArrowLeftRight, MoreHorizontal, Search,
   Pencil, Gauge, Power, PowerOff, Loader2, MessageSquare, RotateCcw, Trash2,
-  DollarSign, Cloud, Sparkles, Gem, BrainCircuit, Layers, Settings2,
+  DollarSign, Cloud, Sparkles, Gem, BrainCircuit, Layers, Settings2, Plus,
 } from 'lucide-react';
 import { api } from '../api';
 import { useListKeyboard } from '../hooks/useListKeyboard';
@@ -1077,10 +1077,13 @@ export default function Channels(): JSX.Element {
             <div className="ch-colset" ref={colPanelRef}>
               <Button
                 variant="outline"
+                size="sm"
                 onClick={() => setColPanelOpen((v) => !v)}
                 title={t('列显示设置')}
+                style={{ gap: 6 }}
               >
-                <Settings2 size={16} />
+                <Settings2 size={13} />
+                {t('列设置')}
               </Button>
               {colPanelOpen && (
                 <div className="ch-colset-panel" role="group" aria-label={t('列设置')}>
@@ -1103,8 +1106,8 @@ export default function Channels(): JSX.Element {
 
             {/* "更多"下拉 */}
             <div className="channels-more" ref={moreRef}>
-              <Button variant="outline" onClick={() => setMoreOpen((v) => !v)}>
-                <MoreHorizontal size={16} />
+              <Button variant="outline" size="sm" onClick={() => setMoreOpen((v) => !v)}>
+                <MoreHorizontal size={13} />
               </Button>
               {moreOpen && (
                 <div className="channels-more-menu">
@@ -1114,7 +1117,10 @@ export default function Channels(): JSX.Element {
               )}
             </div>
 
-            <Button onClick={openAdd}>{t('+ 添加渠道')}</Button>
+            <Button size="sm" onClick={openAdd} style={{ gap: 6 }}>
+              <Plus size={13} />
+              {t('添加渠道')}
+            </Button>
           </div>
         }
       >
