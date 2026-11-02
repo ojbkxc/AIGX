@@ -621,6 +621,7 @@ pub fn charge_usage(
     group: &str,
     prompt_tokens: u64,
     completion_tokens: u64,
+    cached_tokens: u64,
 ) -> i64 {
     charge_usage_with_tools(
         state,
@@ -630,6 +631,7 @@ pub fn charge_usage(
         group,
         prompt_tokens,
         completion_tokens,
+        cached_tokens,
         None,
     )
 }
@@ -767,6 +769,7 @@ pub fn charge_usage_with_tools(
     group: &str,
     prompt_tokens: u64,
     completion_tokens: u64,
+    cached_tokens: u64,
     tool_calls: Option<&crate::pricing::ToolCallCounts>,
 ) -> i64 {
     // 计费额度裁决：按次订阅固定扣额度 / 按 token 量计费
@@ -778,6 +781,7 @@ pub fn charge_usage_with_tools(
         group,
         prompt_tokens,
         completion_tokens,
+        cached_tokens,
         tool_calls,
     );
     // Prometheus 成本指标：pricing 以 USD 计价，cost 即向上取整后的美元配额
@@ -881,6 +885,8 @@ pub fn reserve_usage(
         group,
         estimated_prompt_tokens,
         estimated_completion_tokens,
+        // 预估阶段拿不到上游缓存量；结算侧（settle_usage）会用真实值重裁
+        0,
         None,
     );
 
@@ -999,6 +1005,7 @@ pub fn settle_usage(
     reservation: &Reservation,
     actual_prompt_tokens: u64,
     actual_completion_tokens: u64,
+    cached_tokens: u64,
     tool_calls: Option<&crate::pricing::ToolCallCounts>,
 ) -> i64 {
     let actual_cost = resolve_billing_quota(
@@ -1009,6 +1016,7 @@ pub fn settle_usage(
         group,
         actual_prompt_tokens,
         actual_completion_tokens,
+        cached_tokens,
         tool_calls,
     );
 
@@ -1172,6 +1180,8 @@ impl StreamBillingState {
                 reservation,
                 prompt_tokens,
                 completion_tokens,
+                // 本地估算路径没有上游 usage，无缓存量可言
+                0,
                 tool_calls_opt,
             )
         } else {
@@ -1183,6 +1193,7 @@ impl StreamBillingState {
                 &self.group,
                 prompt_tokens,
                 completion_tokens,
+                0,
                 tool_calls_opt,
             )
         };
@@ -1410,6 +1421,8 @@ impl ResponsesBillingState {
             &self.group,
             prompt_tokens,
             completion_tokens,
+            // usage 元组只带 (prompt, completion)，无缓存量
+            0,
         );
 
         // 记录请求日志（真实耗时）
@@ -2475,6 +2488,9 @@ pub async fn handle_chat_completions(
             // 若无预留记录（旧路径），回退到 charge_usage。
             // 计费与日志统一用映射后的上游模型名
             let billing_model = used_upstream.as_deref().unwrap_or(&model);
+            // 上游缓存量透传：prompt 按真实口径（含 Anthropic 缓存分量），
+            // 缓存命中部分走缓存价而不是免费
+            let (billing_prompt, billing_cached) = response.usage.billing_tokens();
             let cost = settle_usage(
                 &state,
                 &api_key,
@@ -2482,8 +2498,9 @@ pub async fn handle_chat_completions(
                 billing_model,
                 &billing_group,
                 &reservation,
-                response.usage.prompt_tokens,
+                billing_prompt,
                 response.usage.completion_tokens,
+                billing_cached,
                 None,
             );
 
@@ -2895,6 +2912,14 @@ pub async fn handle_responses(
 
             // 计费扣减（用户 quota + key used_quota）
             let billing_model = used_upstream.as_deref().unwrap_or(&model);
+            // Responses 形状缓存命中量（input_tokens_details.cached_tokens）
+            let cached_tokens = usage
+                .and_then(|u| {
+                    u.pointer("/input_tokens_details/cached_tokens")
+                        .or_else(|| u.pointer("/prompt_tokens_details/cached_tokens"))
+                        .and_then(|v| v.as_u64())
+                })
+                .unwrap_or(0);
             let cost = charge_usage(
                 &state,
                 &api_key,
@@ -2903,6 +2928,7 @@ pub async fn handle_responses(
                 &billing_group,
                 prompt_tokens,
                 completion_tokens,
+                cached_tokens,
             );
 
             // 事后限流记账（TPM）
@@ -3359,6 +3385,11 @@ pub async fn handle_completions(
         // 计费扣减（问题 2/5/6）——日志用映射后的上游模型名；
         // 计价键双名感知：对外请求名优先、上游名兜底
         let billing_model = used_upstream.as_deref().unwrap_or(&model_owned);
+        // OpenAI 形状缓存命中量（prompt_tokens_details.cached_tokens）
+        let cached_tokens = result
+            .pointer("/usage/prompt_tokens_details/cached_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let cost = charge_usage(
             &state,
             &api_key,
@@ -3367,6 +3398,7 @@ pub async fn handle_completions(
             &billing_group,
             prompt_tokens,
             completion_tokens,
+            cached_tokens,
         );
 
         // 事后限流记账（TPM）
@@ -3666,6 +3698,8 @@ pub async fn handle_embeddings(
             billing_model,
             &billing_group,
             prompt_tokens,
+            0,
+            // embedding 无缓存语义
             0,
         );
 
@@ -4028,6 +4062,8 @@ pub async fn handle_rerank(
             &reservation,
             prompt_tokens,
             0,
+            // embedding 无缓存语义
+            0,
             None,
         );
 
@@ -4305,6 +4341,7 @@ pub async fn handle_images_generations(
             &billing_group,
             0,
             0,
+            0,
         );
 
         // 事后限流记账（按次计价，记 1 个请求 token 占位以维持 RPM 一致性）
@@ -4468,7 +4505,7 @@ pub async fn handle_audio_transcriptions(
             state.usage_tracker.accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
-            let cost = charge_usage(&state, &api_key, &model, &model, &billing_group, 0, 0);
+            let cost = charge_usage(&state, &api_key, &model, &model, &billing_group, 0, 0, 0);
 
             // 事后限流记账（按次计价，记 0 token）
             rate_bundle.commit_tokens(0).await;
@@ -4624,7 +4661,7 @@ pub async fn handle_audio_translations(
             state.usage_tracker.accumulate(0, 0, 0, 0, 0, 0.0);
 
             // 计费扣减（按次计价，问题 2/5/6）
-            let cost = charge_usage(&state, &api_key, &model, &model, &billing_group, 0, 0);
+            let cost = charge_usage(&state, &api_key, &model, &model, &billing_group, 0, 0, 0);
 
             // 事后限流记账（按次计价，记 0 token）
             rate_bundle.commit_tokens(0).await;
@@ -4768,6 +4805,7 @@ pub async fn handle_audio_speech(
                 &model_owned,
                 &model_owned,
                 &billing_group,
+                0,
                 0,
                 0,
             );

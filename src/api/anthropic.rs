@@ -1140,15 +1140,19 @@ pub async fn handle_messages(
 
             // 计费扣减：复用 charge_usage 以保证 QuotaLow 通知等行为与流式分支一致
             // （问题 5/6；M10 同类问题。原内联实现缺少 QuotaLow 通知，属行为 bug）
+            // 缓存透传：Anthropic 的 input_tokens 不含 cache 分量，按计费口径
+            // 归一（prompt 补上 creation+read，read 单独走缓存价）
             let billing_model = used_upstream.as_deref().unwrap_or(&model);
+            let (billing_prompt, billing_cached) = response.usage.billing_tokens();
             let cost = super::openai::charge_usage(
                 &state,
                 &api_key,
                 &model,
                 billing_model,
                 &billing_group,
-                response.usage.prompt_tokens,
+                billing_prompt,
                 response.usage.completion_tokens,
+                billing_cached,
             );
 
             // 事后限流记账
