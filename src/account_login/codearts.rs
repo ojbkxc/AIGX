@@ -14,7 +14,7 @@
 //! 临时凭据约一小时到期，过期后重新登录。
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -39,6 +39,8 @@ const PLUGIN_VERSION: &str = "26.9.101";
 pub(crate) struct DpopKey {
     signing: SigningKey,
     jwk: Jwk,
+    /// 私钥标量（base64url）——续期要用同一把密钥现签 proof，故随凭据落盘。
+    scalar: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -93,9 +95,15 @@ impl DpopKey {
                     x,
                     y,
                 },
+                scalar: URL_SAFE_NO_PAD.encode(seed),
             });
         }
         Err("无法生成本机 P-256 密钥".to_string())
+    }
+
+    /// 私钥标量（base64url）——供登录落盘、续期时用同一把密钥现签。
+    pub(crate) fn scalar(&self) -> String {
+        self.scalar.clone()
     }
 
     pub(crate) fn proof(&self, method: &str, endpoint: &str) -> Result<String, String> {
@@ -131,12 +139,48 @@ impl DpopKey {
     }
 }
 
+/// 用落盘的私钥标量（base64url）现签一份 DPoP proof —— 续期路径复用登录期那把密钥。
+///
+/// CodeArts 续期必须出示「当初那次授权」的 DPoP 密钥（对齐 Agent2API
+/// `providers/codearts/dpop.rs::from_private_jwk`），换一把就续不了。
+pub(crate) fn dpop_proof_from_scalar(
+    scalar_b64: &str,
+    method: &str,
+    endpoint: &str,
+) -> Result<String, String> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(scalar_b64.trim())
+        .map_err(|_| "CodeArts DPoP 私钥不是合法 base64url".to_string())?;
+    let signing = SigningKey::from_slice(&bytes)
+        .map_err(|_| "CodeArts DPoP 私钥不是合法 P-256 标量".to_string())?;
+    let point = signing.verifying_key().to_encoded_point(false);
+    let key = DpopKey {
+        signing,
+        jwk: Jwk {
+            kty: "EC",
+            crv: "P-256",
+            x: point
+                .x()
+                .map(|value| URL_SAFE_NO_PAD.encode(value))
+                .unwrap_or_default(),
+            y: point
+                .y()
+                .map(|value| URL_SAFE_NO_PAD.encode(value))
+                .unwrap_or_default(),
+        },
+        scalar: scalar_b64.trim().to_string(),
+    };
+    key.proof(method, endpoint)
+}
+
 pub struct CodeartsFlow {
     client: reqwest::Client,
     state: String,
     callback_url: String,
     code_verifier: String,
     dpop: DpopKey,
+    /// 换证拿到的 refresh_token（落账号时带走，供后续自动续期）。
+    refresh_token: Mutex<Option<String>>,
 }
 
 #[async_trait]
@@ -228,6 +272,14 @@ impl LoginFlow for CodeartsFlow {
         } else {
             format!("{ak}:{sk}:{sts}")
         };
+        // refresh_token 随账号落盘（见 LoginFlow::refresh_token）：续期靠它 + 那把 DPoP
+        // 密钥 + PKCE verifier 再换一份临时 AK/SK/STS（对齐 Agent2API credentials.rs）。
+        let refresh = read("refresh_token");
+        if !refresh.is_empty() {
+            if let Ok(mut slot) = self.refresh_token.lock() {
+                *slot = Some(refresh);
+            }
+        }
         Ok(Some(Credentials {
             name: "CodeArts".to_string(),
             secret,
@@ -235,6 +287,21 @@ impl LoginFlow for CodeartsFlow {
             extra_headers: HashMap::new(),
             expires_at: Some(chrono::Utc::now().timestamp() + 3600),
         }))
+    }
+
+    fn extra_fields(&self) -> HashMap<String, String> {
+        let mut fields = HashMap::new();
+        fields.insert("dpop_d".to_string(), self.dpop.scalar());
+        fields.insert("code_verifier".to_string(), self.code_verifier.clone());
+        fields
+    }
+
+    fn refresh_token(&self) -> String {
+        self.refresh_token
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -277,6 +344,7 @@ pub async fn start(client: &reqwest::Client) -> Result<Started, String> {
             callback_url,
             code_verifier,
             dpop,
+            refresh_token: Mutex::new(None),
         }),
     })
 }

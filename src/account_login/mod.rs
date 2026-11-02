@@ -17,7 +17,7 @@ mod accio;
 mod antigravity;
 mod catpaw;
 mod cline;
-mod codearts;
+pub(crate) mod codearts;
 pub mod loomy;
 mod officeace;
 pub mod paste;
@@ -81,6 +81,17 @@ pub trait LoginFlow: Send + Sync {
     /// 轮询错误是否应立即终止任务（默认按瞬时错误继续重试）。
     fn fatal(&self, _error: &str) -> bool {
         false
+    }
+
+    /// 登录成功后要一并落进账号的额外具名字段（如 CodeArts 的 DPoP 私钥 / PKCE verifier）。
+    /// 默认空 —— 只有需要后续自动续期的家才覆盖（对齐 Agent2API 把 OAuth 上下文随凭据落盘）。
+    fn extra_fields(&self) -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    /// 登录成功后要落进账号的续期令牌（如 CodeArts 的 refresh_token）。默认空。
+    fn refresh_token(&self) -> String {
+        String::new()
     }
 }
 
@@ -299,7 +310,15 @@ async fn run_loop(
                 let provider = task.provider.clone();
                 let channel_id = task.channel_id.clone();
                 drop(task);
-                match persist_account(&sessions, &channels, &provider, &channel_id, creds) {
+                match persist_account(
+                    &sessions,
+                    &channels,
+                    &provider,
+                    &channel_id,
+                    creds,
+                    flow.extra_fields(),
+                    flow.refresh_token(),
+                ) {
                     Ok(account_id) => finish(&handle, Some(account_id), None),
                     Err(error) => finish(&handle, None, Some(error)),
                 }
@@ -345,6 +364,8 @@ pub async fn submit_callback(
         &provider,
         &task.channel_id,
         creds,
+        flow.extra_fields(),
+        flow.refresh_token(),
     )?;
     if let Some(handle) = {
         let tasks = lock(table());
@@ -356,6 +377,9 @@ pub async fn submit_callback(
 }
 
 /// 短信登录成功后落账号（供管理面 `sms/verify` 调用）。
+///
+/// 短信流程没有「流程上下文」，故不带续期用的额外字段（sms 支持的几家里
+/// 目前也没有需要随凭据落盘 OAuth 上下文的）。
 pub fn save_credentials(
     state: &AppState,
     provider: &str,
@@ -368,16 +392,24 @@ pub fn save_credentials(
         provider,
         channel_id,
         creds,
+        HashMap::new(),
+        String::new(),
     )
 }
 
 /// 登录凭证 → 账号池记录（自动建渠道、补齐默认名称）。
+///
+/// `extra_fields` / `refresh_token` 由流程提供（见 `LoginFlow::extra_fields` /
+/// `refresh_token`）：续期要用的 OAuth 上下文（CodeArts 的 DPoP 私钥 + PKCE
+/// verifier）与 refresh token 必须随凭据一起落盘，否则过期后无法自动续期。
 fn persist_account(
     sessions: &AccountSessionStore,
     channels: &ChannelStore,
     provider: &str,
     channel_id: &str,
     creds: Credentials,
+    extra_fields: HashMap<String, String>,
+    refresh_token: String,
 ) -> Result<String, String> {
     let channel = ensure_channel(channels, channel_id, provider)?;
     let mut session = AccountSession::new(channel.id.clone(), creds.name.clone());
@@ -386,10 +418,11 @@ fn persist_account(
     session.credential = Credential {
         kind: CREDENTIAL_KIND_SESSION.to_string(),
         secret: creds.secret,
-        fields: std::collections::HashMap::new(),
+        fields: extra_fields,
     };
     session.extra_headers = creds.extra_headers;
     session.expires_at = creds.expires_at;
+    session.refresh_secret = refresh_token;
     if session.name.trim().is_empty() {
         let count = sessions.for_channel(&channel.id).len();
         session.name = format!("{}#{}", label_of(provider), count + 1);
