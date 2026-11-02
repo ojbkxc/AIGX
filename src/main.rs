@@ -614,6 +614,7 @@ async fn main() -> anyhow::Result<()> {
             crate::api::admin::prompts::PromptSourceCache::new(),
         ),
         update,
+        scheduled_task_store: store.clone(),
     };
 
     tracing::info!(
@@ -746,24 +747,8 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         // 账号 token 自动刷新：临期（qoder/autoclaw 5 分钟、trae 24 小时）即刷，
-        // 串行执行，失败不改写凭据（下一轮再试）。见 account_session::refresh。
-        {
-            let sessions = state.account_sessions.clone();
-            let http = state.http_client.clone();
-            scheduler.spawn(cron::TaskSpec {
-                name: "account-session-refresh",
-                interval: Duration::from_secs(600),
-                first_run_delay: Duration::from_secs(90),
-                run: Box::new(move || {
-                    let pool = sessions.clone();
-                    let http = http.clone();
-                    Box::pin(async move {
-                        crate::account_session::refresh::refresh_expiring(&pool, &http).await;
-                        0
-                    })
-                }),
-            });
-        }
+        // 凭证自动维护：已迁入 scheduled_tasks 间隔型定时任务循环（`scheduled_tasks::spawn`），
+        // 开关与间隔在「定时任务」页可配，排期跨重启保留（见 scheduled_tasks 模块）。
         // 余额自动查询：按账号独立间隔（usage_query_interval_secs）到期即查，
         // 写回快照供界面上次读数展示。未配间隔的账号一律跳过。
         {
@@ -783,53 +768,10 @@ async fn main() -> anyhow::Result<()> {
                 }),
             });
         }
-        // models.dev 元数据目录联网刷新（每 24h 一轮）：开关关闭直接跳过；
-        // 失败保留上一版目录（不退回内嵌快照，避免网络抖动把好数据换掉）。
-        {
-            let http = state.http_client.clone();
-            let store = state.alert_store.clone();
-            scheduler.spawn(cron::TaskSpec {
-                name: "modelsdev-refresh",
-                interval: Duration::from_secs(86_400),
-                first_run_delay: Duration::from_secs(300),
-                run: Box::new(move || {
-                    let http = http.clone();
-                    let store = store.clone();
-                    Box::pin(async move {
-                        if !crate::config::models_dev_enabled() {
-                            return 0;
-                        }
-                        match crate::model::models_dev::refresh(&http, &store).await {
-                            Ok(count) => count as u64,
-                            Err(error) => {
-                                tracing::warn!("models.dev refresh failed: {error}");
-                                0
-                            }
-                        }
-                    })
-                }),
-            });
-        }
-        // 服务器自动更新：每小时判断一次是否到配置的检查间隔；到点则拉
-        // GitHub Release，开启「自动应用」时下载替换并 exec 自重启。
-        {
-            let updater = state.update.clone();
-            let config_manager = state.config_manager.clone();
-            scheduler.spawn(cron::TaskSpec {
-                name: "auto-update-check",
-                interval: Duration::from_secs(3600),
-                first_run_delay: Duration::from_secs(300),
-                run: Box::new(move || {
-                    let updater = updater.clone();
-                    let cfg = config_manager.clone();
-                    Box::pin(async move {
-                        let current = cfg.get().await;
-                        updater.tick(&current.update).await;
-                        0
-                    })
-                }),
-            });
-        }
+        // models.dev 元数据目录刷新 / 服务器自动更新检查：已迁入 scheduled_tasks
+        // 间隔型定时任务循环（见 `scheduled_tasks::spawn`），开关与间隔在「定时任务」页可配。
+        // 服务器自动更新检查：已迁入 scheduled_tasks 间隔型定时任务循环
+        // （`scheduled_tasks::spawn` 内的「软件版本检查」任务）。
         // 日志保留清理：按运维设置的「保留天数」每日扫一次 reqlog/auditlog
         // 前缀，删除早于截止时间的日志（参照 new-api DeleteOldLogBatch）。
         // 天数未配置时不清理（容量上限 purge_overflow 仍然兜底）。
@@ -990,10 +932,17 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         tracing::info!(
-            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-refresh, account-session-usage-query, auto-update-check, log-retention-sweep, subscription-expire-reset, modelsdev-refresh)",
+            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-usage-query, log-retention-sweep, subscription-expire-reset)",
             scheduler.task_count()
         );
     }
+
+    // 间隔型定时任务调度循环：凭证维护 / 模型刷新 / 版本检查三条后端任务按各自
+    // 配置的开关与间隔执行，排期跨重启保留。前端三条自动刷新任务只存配置，由界面读。
+    crate::scheduled_tasks::spawn(state.clone());
+    tracing::info!(
+        "scheduled task loop started (credential maintenance / model refresh / update check)"
+    );
 
     let app = build_router(state, &config);
 
@@ -1584,6 +1533,20 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/security/policy",
             get(api::admin::handle_get_security_policy)
                 .put(api::admin::handle_update_security_policy),
+        )
+        // 定时任务（对照 Agent2API「定时任务」页：间隔型任务的开关/间隔/立即执行）
+        .route(
+            "/api/scheduled-tasks",
+            get(api::admin::scheduled_tasks::list_handler),
+        )
+        .route(
+            "/api/scheduled-tasks/:id",
+            patch(api::admin::scheduled_tasks::configure_handler)
+                .post(api::admin::scheduled_tasks::configure_handler),
+        )
+        .route(
+            "/api/scheduled-tasks/:id/run",
+            post(api::admin::scheduled_tasks::run_handler),
         )
         // 调试模式：上游原始报文（对照 Agent2API「设置 → 网关 → 调试模式」）
         .route(

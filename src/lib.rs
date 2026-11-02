@@ -43,6 +43,7 @@ pub mod quota_monitor;
 pub mod ratelimit;
 pub mod redemption;
 pub mod sanitize;
+pub mod scheduled_tasks;
 pub mod semantic;
 pub mod sse;
 pub mod storage;

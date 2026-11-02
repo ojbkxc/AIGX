@@ -548,6 +548,9 @@ pub struct AppConfig {
     /// 服务器自动更新配置（`[update]` 段）。
     #[serde(default)]
     pub update: UpdateConfig,
+    /// 间隔型定时任务配置（凭证维护 / 模型刷新 / 版本检查 + 三页自动刷新）
+    #[serde(default)]
+    pub scheduled_tasks: crate::scheduled_tasks::types::ScheduledSettings,
     /// 安全策略配置（`[security]` 段）：登录失败锁定与登录限流的可配参数。
     #[serde(default)]
     pub security: SecurityPolicyConfig,
