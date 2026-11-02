@@ -92,6 +92,22 @@
 - **防伪造**：台账只认本服务器签发过的 challenge，`signature = HMAC-SHA256(secret, challenge)`，secret 首次生成后落 KV（`auth.altcha_secret`），从不外发。
 - **成本可控**：`maxnumber` 随机 5–10 万，浏览器百毫秒级完成；脚本每试一次都要重解一道题。
 
+### 8. 流式输出兼容 · 丢弃换行保活帧（Agent2API 设置 → 网关 → 保活换行丢弃）
+
+| AIGX | Agent2API 蓝本 |
+|---|---|
+| `src/sse.rs::is_newline_keepalive`（严格判据） | `core/upstream/sse.rs::is_newline_keepalive` + `carries_terminal_signal` |
+| `src/bridge/openai.rs::chat_stream` 下发前过滤（开关关闭时零解析） | `ReasoningCoalescer::push` 内的丢弃点 |
+| 开关 `usage.strip_newline_keepalive`：`/api/limits` GET/PUT + main 启动快照 | config `stripNewlineKeepalive` |
+| `frontend/src/components/StreamCompatPanel.tsx` | 设置 → 网关「保活换行丢弃」 |
+
+判据（与上游一致）：`choices[0].delta.content` 非空且只由 `\n` / `\r` 组成；同帧的
+`reasoning_content` / `tool_calls` / `function_call` 必须都是假值；顶层 `error` /
+`usage` 或 `choices[0].finish_reason` 为真值时**豁免**（客户端只能从这一类帧拿到
+收尾与用量）。与上游的差异：上游按 provider 能力位（WorkBuddy / AutoClaw）收窄，
+AIGX 在 OpenAI 协议桥接层统一过滤——判据本身足够严格，误丢风险只在「整帧只有换行」
+的正文帧上。
+
 ## 后续手工同步上游的方法
 
 1. 拉上游最新代码：`git -C C:\GitHub\Agent2API-main pull`（或重新下载 zip）。

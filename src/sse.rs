@@ -14,6 +14,8 @@
 
 use std::borrow::Cow;
 
+use serde_json::Value;
+
 /// SSE 事件
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SseEvent {
@@ -218,6 +220,79 @@ impl<S: futures::Stream<Item = Result<bytes::Bytes, E>>, E: std::fmt::Debug> fut
     }
 }
 
+// ────────────────────────────────────────────────────────────────
+// 「换行保活帧」识别（对齐 Agent2API `core/upstream/sse.rs`）。
+//
+// 部分上游会在正文分片之间插「content 只由换行组成」的帧给自己保活；客户端按
+// markdown 渲染就成了「一行一个词」。开关开启时在下发前丢掉这类帧；关掉时
+// 完全不调用本模块，桥接层零开销。
+
+/// JS 真值语义（仅用于终止信号判定）。
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64() != Some(0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+    }
+}
+
+/// 这一帧是否携带客户端只能从它拿到的终止 / 统计 / 错误信号。
+///
+/// 三项任一为真都**不能**当保活帧丢掉：`finish_reason`（收尾）、`usage`
+/// （用量）、`error`（错误）。
+fn carries_terminal_signal(chunk: &Value) -> bool {
+    if chunk.get("error").is_some_and(truthy) {
+        return true;
+    }
+    if chunk.get("usage").is_some_and(truthy) {
+        return true;
+    }
+    chunk
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("finish_reason"))
+        .is_some_and(truthy)
+}
+
+/// 是否是「换行保活帧」。全部满足才算：
+/// - 没有终止信号（见 [`carries_terminal_signal`]）；
+/// - `choices[0].delta.content` 非空且只由 `\n` / `\r` 组成；
+/// - 同一 delta 里没有别的载荷：`reasoning_content` / `tool_calls` /
+///   `function_call` 都是假值。
+///
+/// `delta.role` 不参与判定：有的上游每帧都带 `role:"assistant"`，算进去就
+/// 一帧都丢不掉。
+pub fn is_newline_keepalive(chunk: &Value) -> bool {
+    if carries_terminal_signal(chunk) {
+        return false;
+    }
+    let Some(delta) = chunk
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("delta"))
+    else {
+        return false;
+    };
+    let Some(content) = delta.get("content").and_then(Value::as_str) else {
+        return false;
+    };
+    if content.is_empty() || !content.chars().all(|c| c == '\n' || c == '\r') {
+        return false;
+    }
+    if delta.get("reasoning_content").is_some_and(truthy)
+        || delta.get("tool_calls").is_some_and(truthy)
+        || delta.get("function_call").is_some_and(truthy)
+    {
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +389,44 @@ mod tests {
         // 注释行不产生任何事件：解码器应当忽略它
         let mut decoder = SseDecoder::new();
         assert!(decoder.feed(frame).is_empty(), "注释行不应被解析成数据事件");
+    }
+
+    #[test]
+    fn newline_only_chunk_is_keepalive() {
+        let chunk = serde_json::json!({
+            "choices": [{"delta": {"role": "assistant", "content": "\n\n"}}]
+        });
+        assert!(is_newline_keepalive(&chunk));
+    }
+
+    #[test]
+    fn chunk_with_payload_is_not_keepalive() {
+        // 有正文
+        assert!(!is_newline_keepalive(&serde_json::json!({
+            "choices": [{"delta": {"content": "hello\n"}}]
+        })));
+        // 换行 + 思维链
+        assert!(!is_newline_keepalive(&serde_json::json!({
+            "choices": [{"delta": {"content": "\n", "reasoning_content": "思考"}}]
+        })));
+        // 换行 + 工具调用
+        assert!(!is_newline_keepalive(&serde_json::json!({
+            "choices": [{"delta": {"content": "\n", "tool_calls": [{"id": "c1"}]}}]
+        })));
+    }
+
+    #[test]
+    fn terminal_frames_are_not_keepalive() {
+        assert!(!is_newline_keepalive(&serde_json::json!({
+            "choices": [{"delta": {"content": "\n"}, "finish_reason": "stop"}]
+        })));
+        assert!(!is_newline_keepalive(&serde_json::json!({
+            "choices": [{"delta": {"content": "\n"}}], "usage": {"total_tokens": 1}
+        })));
+        assert!(!is_newline_keepalive(&serde_json::json!({
+            "choices": [{"delta": {"content": "\n"}}], "error": {"message": "boom"}
+        })));
+        // 没有 choices / delta
+        assert!(!is_newline_keepalive(&serde_json::json!({"usage": null})));
     }
 }

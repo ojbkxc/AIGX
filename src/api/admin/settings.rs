@@ -49,6 +49,8 @@ pub struct LimitsRequest {
     pub log_body: Option<bool>,
     /// 调试模式（上游原始报文）开关
     pub debug_traffic: Option<bool>,
+    /// 丢弃上游换行保活帧开关
+    pub strip_newline_keepalive: Option<bool>,
     /// 按次计费每次固定扣减额度（billing_mode=count 的订阅生效）
     pub billing_flat_quota: Option<i64>,
     /// 是否允许上游地址指向内网（SSRF 防护逃生阀，默认 false）
@@ -148,6 +150,7 @@ pub async fn handle_get_limits(
             "max_request_body_mb": config.usage.max_request_body_mb,
             "log_body": config.usage.log_body,
             "debug_traffic": config.usage.debug_traffic,
+            "strip_newline_keepalive": config.usage.strip_newline_keepalive,
             "billing_flat_quota": config.usage.billing_flat_quota,
             "allow_internal_upstream": config.usage.allow_internal_upstream,
         })
@@ -258,6 +261,11 @@ pub async fn handle_update_limits(
         if !v {
             crate::debug_traffic::clear();
         }
+    }
+    if let Some(v) = body.strip_newline_keepalive {
+        config.usage.strip_newline_keepalive = v;
+        // 同步进程级快照（桥接层每条 SSE 帧读取，保存即生效、无需重启）
+        crate::config::set_strip_newline_keepalive(v);
     }
     if let Some(v) = body.billing_flat_quota {
         if v > 0 {

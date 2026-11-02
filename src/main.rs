@@ -117,6 +117,8 @@ async fn main() -> anyhow::Result<()> {
     crate::config::set_log_body(config.usage.log_body);
     // 调试模式（上游原始报文）开关快照（桥接层同步读取，见 config::debug_traffic_enabled）
     crate::config::set_debug_traffic(config.usage.debug_traffic);
+    // 换行保活帧过滤开关快照（桥接层同步读取，见 config::strip_newline_keepalive）
+    crate::config::set_strip_newline_keepalive(config.usage.strip_newline_keepalive);
     // 按次计费固定额度快照（数据面同步路径读取，见 config::billing_flat_quota）
     crate::config::set_billing_flat_quota(config.usage.billing_flat_quota);
 

@@ -338,6 +338,13 @@ pub struct UsageConfig {
     /// 默认关闭——关闭时桥接层零开销（`try_clone`/`build` 都不执行）。
     #[serde(default)]
     pub debug_traffic: bool,
+    /// 丢弃上游「换行保活帧」（对齐 Agent2API `stripNewlineKeepalive`）。
+    ///
+    /// 部分上游会在正文分片之间插 content 只含换行的帧给自己保活；客户端按
+    /// markdown 渲染就成了一行一个词。开启后在下发前丢掉这类帧（只改下发字节，
+    /// 不动上游请求）。默认关闭。
+    #[serde(default)]
+    pub strip_newline_keepalive: bool,
     /// 按次计费每次固定扣减的额度数（全局统一，`billing_mode=count` 的
     /// 订阅套餐生效）。默认 2，与聊天页「1 次 = 2 额度」口径一致。
     /// 与 token 计费互斥：订阅计费模式为 count 时按此固定值扣，否则按 token 量。
@@ -568,6 +575,7 @@ impl Default for UsageConfig {
             max_request_body_mb: default_max_request_body_mb(),
             log_body: false,
             debug_traffic: false,
+            strip_newline_keepalive: false,
             allow_internal_upstream: false,
             billing_flat_quota: default_billing_flat_quota(),
         }
@@ -626,6 +634,20 @@ pub fn debug_traffic_enabled() -> bool {
 /// 由 main 与 settings 更新端点写入快照
 pub fn set_debug_traffic(v: bool) {
     DEBUG_TRAFFIC.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 换行保活帧过滤开关（桥接层每条 SSE 帧读取；关闭时零开销）。
+static STRIP_NEWLINE_KEEPALIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 读取「丢弃换行保活帧」开关（桥接层同步访问）。
+pub fn strip_newline_keepalive() -> bool {
+    STRIP_NEWLINE_KEEPALIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 与 settings 更新端点写入快照。
+pub fn set_strip_newline_keepalive(v: bool) {
+    STRIP_NEWLINE_KEEPALIVE.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 按次计费每次固定扣减额度的进程级快照（数据面同步路径读取）。

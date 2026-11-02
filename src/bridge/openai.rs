@@ -580,6 +580,12 @@ impl Bridge for OpenaiCompatibleBridge {
                     if let Some(end) = crate::sse::find_event_end_bytes(&buf) {
                         let event = String::from_utf8_lossy(&buf[..end]).to_string();
                         buf.drain(..end);
+                        // 换行保活帧：开关开启时直接丢（关掉时不做任何解析）
+                        if crate::config::strip_newline_keepalive()
+                            && is_newline_keepalive_event(&event)
+                        {
+                            continue;
+                        }
                         if let Some(chunk) = parse_sse_event(&event, &id, &model) {
                             return Some((Ok(chunk), (byte_stream, buf, id, model)));
                         }
@@ -603,6 +609,11 @@ impl Bridge for OpenaiCompatibleBridge {
                             if !buf.is_empty() {
                                 let tail = String::from_utf8_lossy(&buf).to_string();
                                 buf.clear();
+                                if crate::config::strip_newline_keepalive()
+                                    && is_newline_keepalive_event(&tail)
+                                {
+                                    return None;
+                                }
                                 if let Some(chunk) = parse_sse_event(&tail, &id, &model) {
                                     return Some((Ok(chunk), (byte_stream, buf, id, model)));
                                 }
@@ -984,6 +995,24 @@ fn parse_openai_error(body: &[u8]) -> Option<super::UpstreamErrorView> {
         code: err.get("code").and_then(|c| c.as_str()).map(String::from),
         param: err.get("param").and_then(|p| p.as_str()).map(String::from),
     })
+}
+
+/// SSE 事件是否「换行保活帧」（开关开启时在下发前丢弃）。
+///
+/// 与 [`parse_sse_event`] 同款 `data:` 前缀解析（兼容 `data:` 后无空格）；
+/// `[DONE]` 与非 JSON 负载一律不算——它们不是保活节拍，丢掉会伤到收尾。
+fn is_newline_keepalive_event(event: &str) -> bool {
+    for line in event.lines() {
+        if let Some(data) = line.strip_prefix("data:").map(str::trim_start) {
+            if data.trim() == "[DONE]" {
+                return false;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(data) {
+                return crate::sse::is_newline_keepalive(&value);
+            }
+        }
+    }
+    false
 }
 
 /// 解析单个 SSE 事件为 ChatChunk

@@ -19,6 +19,7 @@ import GatewayPanel from '../components/GatewayPanel';
 import SecurityPolicyPanel from '../components/SecurityPolicyPanel';
 import PromptPanel from '../components/PromptPanel';
 import DebugTrafficPanel from '../components/DebugTrafficPanel';
+import StreamCompatPanel from '../components/StreamCompatPanel';
 import RoutingPanel from '../components/RoutingPanel';
 import DataManagement from '../components/DataManagement';
 import './Settings.css';
@@ -884,6 +885,9 @@ export default function Settings() {
             </div>
             <div style={{ marginTop: 16 }}>
               <DebugTrafficPanel />
+            </div>
+            <div style={{ marginTop: 16 }}>
+              <StreamCompatPanel />
             </div>
           </div>
           <div style={{ marginTop: 16, display: opsSub === 'routing' ? 'block' : 'none' }}>
