@@ -72,8 +72,8 @@ fn sha256_hex(value: &str) -> String {
 }
 
 fn hmac_hex(secret: &str, message: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("HMAC 接受任意长度的密钥");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC 接受任意长度的密钥");
     mac.update(message.as_bytes());
     format!("{:x}", mac.finalize().into_bytes())
 }

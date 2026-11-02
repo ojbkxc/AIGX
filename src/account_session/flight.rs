@@ -266,7 +266,11 @@ mod tests {
     #[test]
     fn key_separates_provider_account_and_credential() {
         let base = key("codearts", "acct-1", "tok");
-        assert_ne!(base, key("officeace", "acct-1", "tok"), "换 provider 要换格");
+        assert_ne!(
+            base,
+            key("officeace", "acct-1", "tok"),
+            "换 provider 要换格"
+        );
         assert_ne!(base, key("codearts", "acct-2", "tok"), "换账号要换格");
         assert_ne!(base, key("codearts", "acct-1", "tok2"), "换凭据要换格");
         assert_eq!(base, key("codearts", "acct-1", "tok"), "同输入要稳定命中");

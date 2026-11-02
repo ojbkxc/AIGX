@@ -939,7 +939,10 @@ mod tests {
             account.expires_at = Some(chrono::Utc::now().timestamp() + 3_600);
             let account = pool.upsert(account).unwrap();
             assert!(
-                !crate::account_session::refresh::needs_refresh(&account, chrono::Utc::now().timestamp()),
+                !crate::account_session::refresh::needs_refresh(
+                    &account,
+                    chrono::Utc::now().timestamp()
+                ),
                 "离到期还有一小时，本来不该刷"
             );
 

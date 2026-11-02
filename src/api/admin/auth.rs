@@ -320,7 +320,9 @@ pub async fn handle_login(
         .with_ip(Some(client_ip.clone())),
     );
     if lockout_enabled && next_fail >= fail_threshold {
-        tracing::warn!("Login failed {next_fail} times from {client_ip}; lockout threshold reached");
+        tracing::warn!(
+            "Login failed {next_fail} times from {client_ip}; lockout threshold reached"
+        );
     }
 
     Err(error_response("账号或密码错误", StatusCode::UNAUTHORIZED))

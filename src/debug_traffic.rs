@@ -212,7 +212,10 @@ pub fn traced(req: reqwest::RequestBuilder, ctx: &BridgeContext) -> reqwest::Req
 /// 读取当前缓冲（最新在后）与概览计数。
 pub fn snapshot() -> Value {
     let (entries, dropped) = match BUFFER.lock() {
-        Ok(b) => (b.iter().cloned().collect::<Vec<_>>(), DROPPED.load(Ordering::Relaxed)),
+        Ok(b) => (
+            b.iter().cloned().collect::<Vec<_>>(),
+            DROPPED.load(Ordering::Relaxed),
+        ),
         Err(_) => (Vec::new(), 0),
     };
     serde_json::json!({

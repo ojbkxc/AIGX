@@ -137,7 +137,10 @@ impl AccountBridge {
         // 刷新」）。凭据是一次性的 refresh_token 换来的，真失效时 waits 到
         // 「临期」还早，光靠 `expires_at` 判不出来 —— 不打这个标，续期永远不会
         // 触发（`needs_refresh` 恒假），账号就死在那了。
-        if matches!(failure, crate::channel::circuit_breaker::FailureType::AuthFailed) {
+        if matches!(
+            failure,
+            crate::channel::circuit_breaker::FailureType::AuthFailed
+        ) {
             if self
                 .sessions
                 .mark_credential_rejected(lease.id(), &lease.session().provider)

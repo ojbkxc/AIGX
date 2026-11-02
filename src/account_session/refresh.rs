@@ -72,13 +72,7 @@ struct TokenSet {
 pub fn supports_refresh(provider: &str) -> bool {
     matches!(
         provider,
-        "qoder"
-            | "qoder-intl"
-            | "autoclaw"
-            | "autoclaw-intl"
-            | "trae"
-            | "codearts"
-            | "officeace"
+        "qoder" | "qoder-intl" | "autoclaw" | "autoclaw-intl" | "trae" | "codearts" | "officeace"
     )
 }
 
@@ -195,23 +189,25 @@ async fn refresh_one_inner(
     };
     let mut next = session.credential.clone();
     next.secret = tokens.access.clone();
-    Ok(match pool.update_tokens_cas(
-        &session.id,
-        &expected,
-        next,
-        &tokens.refresh,
-        tokens.expires_at,
-    ) {
-        CasOutcome::Updated => RefreshOutcome::Refreshed(format!(
-            "token 已续期{}",
-            tokens
-                .expires_at
-                .map(|e| format!("（新过期时间 {e}）"))
-                .unwrap_or_default()
-        )),
-        CasOutcome::Stale => RefreshOutcome::Stale,
-        CasOutcome::Missing => RefreshOutcome::Failed("账号已被删除".to_string()),
-    })
+    Ok(
+        match pool.update_tokens_cas(
+            &session.id,
+            &expected,
+            next,
+            &tokens.refresh,
+            tokens.expires_at,
+        ) {
+            CasOutcome::Updated => RefreshOutcome::Refreshed(format!(
+                "token 已续期{}",
+                tokens
+                    .expires_at
+                    .map(|e| format!("（新过期时间 {e}）"))
+                    .unwrap_or_default()
+            )),
+            CasOutcome::Stale => RefreshOutcome::Stale,
+            CasOutcome::Missing => RefreshOutcome::Failed("账号已被删除".to_string()),
+        },
+    )
 }
 
 /// 发 JSON 请求，返回 (status, body)。

@@ -233,7 +233,9 @@ impl UsageStats {
     /// 当作折扣会少收。它被并入 prompt 总量、按正价计 —— 宁可略高估，
     /// 也不要把写入当读取来打折。
     pub fn billing_tokens(&self) -> (u64, u64) {
-        let anthropic_extra = self.cache_creation_tokens.saturating_add(self.cache_read_tokens);
+        let anthropic_extra = self
+            .cache_creation_tokens
+            .saturating_add(self.cache_read_tokens);
         if anthropic_extra > 0 {
             // Anthropic 形状：缓存量在 prompt 之外
             let prompt = self.prompt_tokens.saturating_add(anthropic_extra);
