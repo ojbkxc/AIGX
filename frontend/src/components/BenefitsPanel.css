@@ -1,0 +1,61 @@
+/* 福利通道面板（签到中心第 4 个 tab）：一次性/限时领取行 */
+
+.bp-note {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.bp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bp-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.bp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.bp-logo {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  flex: none;
+}
+
+.bp-name {
+  font-weight: 600;
+}
+
+.bp-provider {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.bp-keepalive-note {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.bp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bp-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

@@ -83,6 +83,9 @@ import type {
   RoutingPolicyItem,
   GatewayPromptItem,
   SanitizeHeadersItem,
+  CheckinBenefitsData,
+  BenefitResult,
+  KeepaliveConfig,
   StorageOverviewItem,
   BackupImportResult,
 } from '@/types';
@@ -419,6 +422,24 @@ export const api = {
     request('POST', `${API_BASE}/checkin-center/schedules/remove`, { id }),
   runCheckinSchedule: (id: string): Promise<ApiResponse<{ summary: string }>> =>
     request('POST', `${API_BASE}/checkin-center/schedules/run`, { id }),
+
+  // 一次性 / 限时福利通道（新手礼 / 保活 / 成长任务 / 限时套餐 / UMID）
+  getCheckinBenefits: (): Promise<ApiResponse<CheckinBenefitsData>> =>
+    request('GET', `${API_BASE}/checkin-center/benefits`),
+  runCheckinBenefit: (
+    account_id: string,
+    action: string,
+    params?: Record<string, unknown>,
+  ): Promise<ApiResponse<BenefitResult>> =>
+    request('POST', `${API_BASE}/checkin-center/benefits/run`, {
+      account_id,
+      action,
+      params: params ?? {},
+    }),
+  getKeepaliveConfig: (): Promise<ApiResponse<KeepaliveConfig>> =>
+    request('GET', `${API_BASE}/checkin-center/benefits/keepalive`),
+  saveKeepaliveConfig: (models: string[]): Promise<ApiResponse<KeepaliveConfig>> =>
+    request('PUT', `${API_BASE}/checkin-center/benefits/keepalive`, { models }),
 
   listModels: async (): Promise<ApiResponse<ModelInfo[]>> => {
     const res = await request<ApiResponse<unknown[]>>('GET', `${API_BASE}/models/available`);

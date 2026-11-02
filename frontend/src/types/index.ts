@@ -838,6 +838,35 @@ export interface CheckinRunResult {
   message: string;
 }
 
+/** 一次性/限时福利通道的一次执行结果（POST /api/checkin-center/benefits/run） */
+export interface BenefitResult {
+  ok: boolean;
+  outcome: 'done' | 'already' | 'pending' | 'failed' | 'skipped';
+  message: string;
+  data?: unknown;
+}
+
+/** 保活免费模型链配置（GET/PUT /api/checkin-center/benefits/keepalive） */
+export interface KeepaliveConfig {
+  models: string[];
+  default_models: string[];
+}
+
+/** 福利通道清单（GET /api/checkin-center/benefits） */
+export interface CheckinBenefitsData {
+  accounts: Array<{
+    id: string;
+    name: string;
+    provider: string;
+    channel_id: string;
+    status: string;
+    /** 该账号可用的动作 id（newbie / onboarding / keepalive / growth / plan / umid） */
+    actions: string[];
+    keepalive?: { date?: string; model?: string; keepalive_ok?: number } | null;
+  }>;
+  keepalive: KeepaliveConfig;
+}
+
 export interface CheckinRecord {
   ts: number;
   date: string;

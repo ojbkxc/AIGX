@@ -409,3 +409,130 @@ pub async fn handle_run_checkin_schedule(
         json!({ "success": true, "data": { "summary": summary } }),
     ))
 }
+
+// ── 一次性 / 限时福利通道（对照 Agent2API 的 onboarding/keepalive/growth/claim）──
+//
+// 与每日签到分开：这些动作一次性或限时（领完即结清），不进调度器，
+// 只能手动触发。见 `checkin::benefits` 的模块头说明。
+
+/// 福利动作请求体。
+#[derive(Debug, Deserialize)]
+pub struct BenefitRunRequest {
+    pub account_id: String,
+    /// 动作 id（newbie / onboarding / onboarding_claim / keepalive / growth / plan / umid）
+    pub action: String,
+    /// 动作参数（growth 的 `code`、zcode 的 `mode`/`plan_id`/`captcha_verify_param`）
+    #[serde(default)]
+    pub params: Value,
+}
+
+/// GET /api/checkin-center/benefits —— 可用福利通道清单（零上游请求）。
+pub async fn handle_benefits_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let now = chrono::Utc::now().timestamp();
+    let accounts: Vec<Value> = state
+        .account_sessions
+        .all()
+        .into_iter()
+        .filter_map(|session| {
+            let actions = crate::checkin::benefits::actions_for(&session.provider);
+            if actions.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "id": session.id,
+                "name": session.name,
+                "provider": session.provider,
+                "channel_id": session.channel_id,
+                "status": session.runtime_status(now),
+                "actions": actions,
+                // 上次保活执行留下的痕迹（仅国际版有）
+                "keepalive": crate::checkin::benefits::keepalive::memory_view(
+                    &state.alert_store,
+                    &session.id,
+                ),
+            }))
+        })
+        .collect();
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "accounts": accounts,
+            "keepalive": crate::checkin::benefits::keepalive::config_view(&state.alert_store),
+        }
+    })))
+}
+
+/// POST /api/checkin-center/benefits/run —— 执行一次福利动作。
+///
+/// 不设「一次性动作每日去重」：结清状态由各通道自己的记忆表达（见
+/// `benefits::*`），重复调用对已结清的通道是零上游请求的 `already`。
+pub async fn handle_benefit_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BenefitRunRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let Some(session) = state.account_sessions.get(&body.account_id) else {
+        return Err(error_response("账号不存在", StatusCode::NOT_FOUND));
+    };
+    // 出口走账号自己的代理（与转发/签到同一条链路）
+    let client = state
+        .account_sessions
+        .egress()
+        .client(session.proxy.as_deref())
+        .map_err(|e| error_response(&format!("出口配置错误：{e}"), StatusCode::BAD_REQUEST))?;
+    let result = crate::checkin::benefits::run(
+        &state.account_sessions,
+        &state.alert_store,
+        &client,
+        &session,
+        &body.action,
+        &body.params,
+    )
+    .await;
+    Ok(Json(json!({ "success": true, "data": result })))
+}
+
+/// GET /api/checkin-center/benefits/keepalive —— 保活免费模型链配置。
+pub async fn handle_get_keepalive(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": crate::checkin::benefits::keepalive::config_view(&state.alert_store),
+    })))
+}
+
+/// PUT /api/checkin-center/benefits/keepalive —— 保存保活免费模型链（空 = 恢复默认）。
+pub async fn handle_put_keepalive(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let models: Vec<String> = body
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let view = crate::checkin::benefits::keepalive::save_config(&state.alert_store, models)
+        .map_err(|e| {
+            error_response(
+                &format!("保存保活配置失败：{e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+    Ok(Json(json!({ "success": true, "data": view })))
+}

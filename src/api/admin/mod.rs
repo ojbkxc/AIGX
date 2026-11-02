@@ -82,8 +82,9 @@ pub use model_test::handle_model_test;
 
 // 签到中心（管理员替上游账号签到，区别于用户侧的 /api/checkin）
 pub use checkin_center::{
-    handle_checkin_center, handle_checkin_records, handle_checkin_run,
-    handle_clear_checkin_records, handle_get_checkin_settings, handle_list_checkin_schedules,
+    handle_benefit_run, handle_benefits_list, handle_checkin_center, handle_checkin_records,
+    handle_checkin_run, handle_clear_checkin_records, handle_get_checkin_settings,
+    handle_get_keepalive, handle_list_checkin_schedules, handle_put_keepalive,
     handle_remove_checkin_schedule, handle_run_checkin_schedule, handle_update_checkin_settings,
     handle_upsert_checkin_schedule,
 };

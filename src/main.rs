@@ -1214,6 +1214,19 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/checkin-center/schedules/run",
             post(api::admin::handle_run_checkin_schedule),
         )
+        // 一次性 / 限时福利通道（新手礼 / 保活 / 成长任务 / 限时套餐 / UMID）
+        .route(
+            "/api/checkin-center/benefits",
+            get(api::admin::handle_benefits_list),
+        )
+        .route(
+            "/api/checkin-center/benefits/run",
+            post(api::admin::handle_benefit_run),
+        )
+        .route(
+            "/api/checkin-center/benefits/keepalive",
+            get(api::admin::handle_get_keepalive).put(api::admin::handle_put_keepalive),
+        )
         .route("/api/users/:id", put(api::admin::handle_update_user))
         .route("/api/users/:id", delete(api::admin::handle_delete_user))
         // 管理员强制禁用用户 2FA（对齐 new-api DELETE /api/user/:id/2fa）

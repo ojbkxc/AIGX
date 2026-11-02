@@ -6,10 +6,11 @@ import { providerIcon } from '../lib/providerIcons';
 import { useToast } from '../components/Toast';
 import { Badge, Card, EmptyState, Loading, Switch } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
+import BenefitsPanel from '../components/BenefitsPanel';
 import type { CheckinCenterData, CheckinRecord, CheckinSchedule } from '../types';
 import './CheckinCenter.css';
 
-type TabKey = 'center' | 'schedule' | 'records';
+type TabKey = 'center' | 'schedule' | 'records' | 'benefits';
 
 const TAB_STORAGE_KEY = 'aigx-checkin-tab';
 
@@ -88,7 +89,7 @@ export default function CheckinCenter(): JSX.Element {
 
   const [tab, setTab] = useState<TabKey>(() => {
     const saved = localStorage.getItem(TAB_STORAGE_KEY);
-    return saved === 'schedule' || saved === 'records' ? saved : 'center';
+    return saved === 'schedule' || saved === 'records' || saved === 'benefits' ? saved : 'center';
   });
   const [data, setData] = useState<CheckinCenterData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -353,6 +354,7 @@ export default function CheckinCenter(): JSX.Element {
     { key: 'center' as TabKey, label: t('签到中心') },
     { key: 'schedule' as TabKey, label: t('定时签到') },
     { key: 'records' as TabKey, label: t('签到记录') },
+    { key: 'benefits' as TabKey, label: t('福利通道') },
   ];
 
   /** 提供商行徽章（对齐 Agent2API GroupBadge） */
@@ -785,6 +787,8 @@ export default function CheckinCenter(): JSX.Element {
             )}
           </Card>
         </>
+      ) : tab === 'benefits' ? (
+        <BenefitsPanel />
       ) : (
         <Card
           title={t('签到记录')}

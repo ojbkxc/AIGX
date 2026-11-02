@@ -31,6 +31,7 @@
 //! 而不是列出来每次都报「不支持」。这与 Agent2API 的 `CHECKIN_PROVIDERS`
 //! 白名单同一取向 —— 用白名单而非黑名单，避免新增 provider 时静默漏签。
 
+pub mod benefits;
 pub mod claim;
 pub mod scheduler;
 pub mod store;
