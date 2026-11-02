@@ -5050,7 +5050,7 @@ pub async fn handle_list_models(
             continue;
         }
         let owned_by = crate::model::metadata::owned_by_for_channel_type(&entry.provider);
-        model_list.push(build_entry(&entry.id, Some(owned_by)));
+        model_list.push(build_entry(&entry.id, owned_by));
     }
 
     Ok(Json(serde_json::json!({

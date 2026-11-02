@@ -7,7 +7,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Json,
 };
-use chrono::TimeZone;
+use chrono::{TimeZone, Timelike};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -1125,25 +1125,31 @@ pub async fn handle_report_cache_trend_24h(
     // 缓存键只到小时粒度：同一小时内反复打开页面命中 60s TTL 不误重算，
     // 跨小时自动重算（补全上一个完整小时的数据）。
     let slot = local_hour_key(now);
-    let data = cached_report("cache_trend_24h", &slot, &user_filter, 60, move || {
-        // 多取 1 小时余量：首桶可能只覆盖 [now−24h, 桶起点] 的部分区间，
-        // 起点按整点桶表精确过滤即可。
-        let from = now - 25 * 3600;
-        let (logs, sampled) = state
-            .log_store
-            .requests
-            .list_window(from, now, 20_000)
-            .unwrap_or_default();
-        let filtered: Vec<crate::log::RequestLog> = logs
-            .into_iter()
-            .filter(|l| match (&user_filter, l.user_id.as_deref()) {
-                (None, _) => true,
-                (Some(uid), Some(lu)) => lu == uid.as_str(),
-                (Some(_), None) => false,
-            })
-            .collect();
-        json!(bucket_hours(&filtered, now, sampled))
-    });
+    let data = cached_report(
+        "cache_trend_24h",
+        &slot,
+        &user_filter.clone(),
+        60,
+        move || {
+            // 多取 1 小时余量：首桶可能只覆盖 [now−24h, 桶起点] 的部分区间，
+            // 起点按整点桶表精确过滤即可。
+            let from = now - 25 * 3600;
+            let (logs, sampled) = state
+                .log_store
+                .requests
+                .list_window(from, now, 20_000)
+                .unwrap_or_default();
+            let filtered: Vec<crate::log::RequestLog> = logs
+                .into_iter()
+                .filter(|l| match (&user_filter, l.user_id.as_deref()) {
+                    (None, _) => true,
+                    (Some(uid), Some(lu)) => lu == uid.as_str(),
+                    (Some(_), None) => false,
+                })
+                .collect();
+            json!(bucket_hours(&filtered, now, sampled))
+        },
+    );
     Ok(Json(json!({ "success": true, "data": data })))
 }
 

@@ -361,6 +361,24 @@ pub async fn handle_upsert_checkin_schedule(
     } else {
         body.label.trim().to_string()
     };
+    // 保存计划只改配置：运行状态（上次触发/结果/成功·保活·失败计数）必须从现有
+    // 计划继承，否则编辑一次就把界面「上次执行」清空，且空 last_fired_date 会让
+    // 调度器当天重复触发签到（浪费上游日配额）。
+    let (last_fired_date, last_result, last_ok, last_keepalive, last_failed) = state
+        .upstream_checkin
+        .schedules()
+        .into_iter()
+        .find(|s| s.id == body.id)
+        .map(|s| {
+            (
+                s.last_fired_date,
+                s.last_result,
+                s.last_ok,
+                s.last_keepalive,
+                s.last_failed,
+            )
+        })
+        .unwrap_or_default();
     let list = state
         .upstream_checkin
         .upsert_schedule(CheckinSchedule {
@@ -369,8 +387,11 @@ pub async fn handle_upsert_checkin_schedule(
             enabled: body.enabled,
             time: body.time,
             providers: body.providers,
-            last_fired_date: String::new(),
-            last_result: String::new(),
+            last_fired_date,
+            last_result,
+            last_ok,
+            last_keepalive,
+            last_failed,
         })
         .map_err(|e| {
             error_response(

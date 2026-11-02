@@ -31,8 +31,8 @@ use crate::api::openai::AppState;
 pub mod task_state;
 pub mod types;
 
-use super::task_state::{self, TaskState};
-use super::types::{
+use self::task_state::{self, TaskState};
+use self::types::{
     IntervalTask, IntervalTaskPatch, ScheduledSettings, DEFAULT_CREDENTIAL_MAINTENANCE_MINUTES,
     DEFAULT_LOGS_AUTO_REFRESH_SECONDS, DEFAULT_MODEL_REFRESH_MINUTES,
     DEFAULT_REPORT_AUTO_REFRESH_SECONDS, DEFAULT_REQUESTS_AUTO_REFRESH_SECONDS,
@@ -386,7 +386,7 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
         }
         TASK_MODEL_REFRESH => {
             if !crate::config::models_dev_enabled() {
-                ("models.dev 元数据开关已关闭，跳过", true)
+                ("models.dev 元数据开关已关闭，跳过".to_string(), true)
             } else {
                 match crate::model::models_dev::refresh(
                     &state.http_client,
