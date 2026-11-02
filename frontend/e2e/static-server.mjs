@@ -189,6 +189,67 @@ const REQUEST_LOGS = [
   },
 ];
 
+// ── 渠道列表（形状对齐 src/api/admin/channel.rs 的 ChannelItem）──
+// 此前 /api/channels 落到 EMPTY_LIST，渠道页在 E2E 里恒为「暂无渠道」空态，
+// 表格与列设置面板一行都没被覆盖。这里给三条，覆盖启用/禁用、有密钥/无密钥、
+// 有余额/无余额、有映射/全模型四种形态。
+const CHANNELS = [
+  {
+    id: 'ch-1',
+    seq: 1,
+    name: 'lxchat-glm',
+    channel_type: 'openai_compatible',
+    base_url: 'https://upstream.example.com/v1',
+    api_key: 'sk-e2e-1',
+    priority: 10,
+    weight: 3,
+    status: 'enabled',
+    models: ['glm-4.7-flash', 'glm-4-plus'],
+    model_mapping: { 'glm-4.7-flash': 'glm-4.7-flash-upstream' },
+    balance: 12.5,
+    credit: 3.2,
+    balance_unit: 'USD',
+    balance_scheme: 'openai_billing',
+    response_time: 320,
+    test_time: 1761900000,
+    quirks: null,
+    last_error: null,
+  },
+  {
+    id: 'ch-2',
+    seq: 2,
+    name: 'cf-free-gateway',
+    channel_type: 'cloudflare',
+    base_url: 'https://cf-ai-gw.pages.dev',
+    api_key: null,
+    priority: 5,
+    weight: 1,
+    status: 'enabled',
+    models: [],
+    response_time: 880,
+    test_time: 1761896400,
+    quirks: { headers: { 'X-E2E': '1' } },
+    last_error: null,
+  },
+  {
+    id: 'ch-3',
+    seq: 3,
+    name: 'anthropic-relay',
+    channel_type: 'anthropic',
+    base_url: 'https://relay.example.com',
+    api_key: 'sk-ant-e2e',
+    priority: 1,
+    weight: 1,
+    status: 'disabled',
+    models: ['claude-sonnet-4-20250514'],
+    balance: -1.5,
+    balance_unit: 'USD',
+    response_time: 2400,
+    test_time: 0,
+    last_error: 'upstream 429',
+  },
+];
+
 // ── 报表端点（形状对齐 src/api/admin/dashboard.rs 的 report/*）──
 const REPORT_HEATMAP = Array.from({ length: 30 }, (_, i) => ({
   date: `2025-10-${String(i + 1).padStart(2, '0')}`,
@@ -290,6 +351,11 @@ function handle(req, res, p, bodyText) {
     if (p === '/api/models/available') return sendJson(res, { success: true, data: ['glm-4'] });
     if (p === '/api/network/status') return sendJson(res, { success: true, data: { enabled: true } });
     if (p === '/api/dashboard/realtime') return sendJson(res, { success: true, data: { window_secs: 300, total_requests: 0, qps: 0, avg_latency_ms: 0, error_rate: 0, errors: 0 } });
+
+    // 渠道列表（渠道管理页）：返回三条样本，覆盖启用/禁用、有/无密钥、有/无余额、有/无模型映射
+    if (p === '/api/channels' && req.method === 'GET') {
+      return sendJson(res, { success: true, data: CHANNELS, total: CHANNELS.length, page: 1, size: CHANNELS.length });
+    }
 
     // 统一模型管理
     if (p === '/api/models/manage') return sendJson(res, { success: true, data: MANAGE_VIEW });
