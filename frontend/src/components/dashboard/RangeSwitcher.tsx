@@ -105,7 +105,7 @@ export default function RangeSwitcher({
 
 /** 初始档位：localStorage 合法值优先，否则默认（近 30 日） */
 export function initialRange(): RangeKey {
-  const saved = readRange(DEFAULT_RANGE, RANGE_OPTIONS, DEFAULT_RANGE) as RangeKey;
+  const saved = readRange(DEFAULT_RANGE, RANGE_OPTIONS) as RangeKey;
   return saved;
 }
 

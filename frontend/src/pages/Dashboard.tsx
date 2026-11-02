@@ -25,7 +25,7 @@ import CacheTrend24h from '../components/dashboard/CacheTrend24h';
 import {
   useCacheRates, useCacheSavings, useCacheTrend24h, useChannelHealth as useChannelHealthQ,
   useDailyTrend, useHeatmap, useLimits, useOverview, usePersonalMe, useRealtime,
-  useReportModels, useTokenTrend, useTopSources, useUsageSummary, useUserRanking,
+  useReportModels, useTodayTokens, useTokenTrend, useTopSources, useUsageSummary, useUserRanking,
 } from '../hooks/useDashboard';
 import './Dashboard.css';
 
@@ -171,7 +171,7 @@ export default function Dashboard(): JSX.Element {
         <SkeletonCards count={6} />
       ) : (
         <StatCards
-          overview={ov}
+          overview={ov ?? null}
           savedEstimate={savings?.saved_estimate}
           savedApprox={savings?.approx}
           channels={channels}

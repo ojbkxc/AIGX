@@ -49,7 +49,6 @@ export default function TrendBars({
   rows,
   formatValue,
   formatAxis,
-  colors,
   lang,
   height = 240,
 }: Props): JSX.Element | null {
@@ -191,7 +190,7 @@ export default function TrendBars({
             x={p.x}
             y={p.y}
             textAnchor={p.anchor}
-            dominantBaseline={p.rotate ? 'text-after-ideograph' : undefined}
+            dominantBaseline={p.rotate ? 'text-after-edge' : undefined}
             fill="var(--text-muted)"
             fontSize="9"
             transform={p.rotate ? `rotate(-90 ${p.x} ${p.y})` : undefined}
@@ -218,7 +217,7 @@ export default function TrendBars({
         })}
         {/* hover 热区：整列铺满，扫过任意一列都能读到 */}
         {!useNativeTip &&
-          rows.map((r, i) => (
+          rows.map((_, i) => (
             <rect
               key={`h${i}`}
               x={pad.left + step * i}

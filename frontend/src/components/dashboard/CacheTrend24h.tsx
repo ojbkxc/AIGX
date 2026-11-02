@@ -46,9 +46,9 @@ export default function CacheTrend24h({ data, lang }: { data: CacheTrendHour[]; 
 
   // 点标读数 + 避让（先标长串 token，再标短命中率）
   const boxes: Array<{ l: number; r: number; t: number; b: number }> = [];
-  const place = (x: number, y: number, text: string): { x: number; y: number; text: string; anchor: string } | null => {
+  const place = (x: number, y: number, text: string): { x: number; y: number; text: string; anchor: 'start' | 'middle' | 'end' } | null => {
     const w = textWidth(text);
-    let anchor = 'middle';
+    let anchor: 'start' | 'middle' | 'end' = 'middle';
     if (x - w / 2 < pad.left - 6) anchor = 'start';
     else if (x + w / 2 > pad.left + plotW + 6) anchor = 'end';
     const l = anchor === 'middle' ? x - w / 2 : anchor === 'end' ? x - w : x;
@@ -57,9 +57,9 @@ export default function CacheTrend24h({ data, lang }: { data: CacheTrendHour[]; 
     boxes.push(box);
     return { x, y, text, anchor };
   };
-  const tokenLabels: Array<{ x: number; y: number; text: string; anchor: string }> = [];
+  const tokenLabels: Array<{ x: number; y: number; text: string; anchor: 'start' | 'middle' | 'end' }> = [];
   if (hasTokens) {
-    list.forEach((h, i) => {
+    list.forEach((_, i) => {
       if (!(tokens[i] > 0)) return;
       const y = yTokens(tokens[i]);
       const above = y - 12 >= pad.top - 10;
@@ -67,7 +67,7 @@ export default function CacheTrend24h({ data, lang }: { data: CacheTrendHour[]; 
       if (p) tokenLabels.push(p);
     });
   }
-  const rateLabels: Array<{ x: number; y: number; text: string; anchor: string }> = [];
+  const rateLabels: Array<{ x: number; y: number; text: string; anchor: 'start' | 'middle' | 'end' }> = [];
   list.forEach((h, i) => {
     const used = (h.input_tokens ?? 0) + (h.hit_input_tokens ?? 0) > 0 || (h.requests ?? 0) > 0;
     if (!used) return; // 补零的 0% 不标，否则连成一排毫无信息量

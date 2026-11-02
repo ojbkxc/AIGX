@@ -234,7 +234,7 @@ export const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const RANGE_KEY = 'aigx-dashboard-range';
 const CUSTOM_RANGE_KEY = 'aigx-dashboard-custom-range';
 
-export function readRange(saved: string, allowed: readonly string[], fallback: string): string {
+export function readRange(saved: string, allowed: readonly string[]): string {
   try {
     const v = localStorage.getItem(RANGE_KEY);
     return v !== null && allowed.includes(v) ? v : saved;
