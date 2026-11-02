@@ -407,6 +407,17 @@ export const api = {
     }),
   removeModelAlias: (alias: string): Promise<ApiResponse<ManageView>> =>
     request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias/remove`, { alias }),
+  // 批量映射前缀（对齐 Agent2API 批量加映射：前缀 + 同名合并到多家；后端端点待实现，调用失败时页面报错兜底）
+  batchAddAliasPrefix: (
+    prefix: string,
+    opts: { sep?: string; merge?: boolean; targets?: string[] }
+  ): Promise<ManageView | null | undefined> =>
+    request<{ data?: ManageView }>('POST', `${API_BASE}/models/alias/prefix`, {
+      prefix,
+      sep: opts.sep ?? '-',
+      merge: opts.merge ?? true,
+      targets: opts.targets ?? []
+    }).then((res) => res?.data),
   // 批量设置映射级思考等级
   setAliasReasoning: (
     aliases: string[],
@@ -644,6 +655,31 @@ export const api = {
   // 账号型渠道账号池（渠道内账号级调度：优先级/冷却/并发/粘性）
   listAccountSessions: (params: Record<string, string | number> = {}): Promise<ApiList<AccountSessionItem>> =>
     request<ApiList<AccountSessionItem>>('GET', `${API_BASE}/account-sessions${Object.keys(params).length ? `?${buildQuery(params)}` : ''}`),
+  /**
+   * 连接数快照（GET /api/account-sessions/connections，页面 2 秒轮询）。
+   * 该端点未上线 / 网络异常 / 401 时**静默返回 null**，页面降级用列表自带的
+   * in_flight 字段展示，绝不崩溃；skipAuthRedirect 防止轮询把已登录用户误踢。
+   */
+  getAccountSessionConnections: async (): Promise<Record<string, number> | null> => {
+    try {
+      const json = await request<{ data?: { counts?: Record<string, unknown> } } | null>(
+        'GET',
+        `${API_BASE}/account-sessions/connections`,
+        null,
+        { skipAuthRedirect: true },
+      );
+      const counts = json?.data?.counts;
+      if (!counts || typeof counts !== 'object') return null;
+      const out: Record<string, number> = {};
+      for (const [id, n] of Object.entries(counts)) {
+        const num = Number(n);
+        if (Number.isFinite(num) && num >= 0) out[id] = Math.floor(num);
+      }
+      return out;
+    } catch {
+      return null;
+    }
+  },
   createAccountSession: (data: Record<string, unknown>): Promise<ApiResponse<AccountSessionItem>> =>
     request<ApiResponse<AccountSessionItem>>('POST', `${API_BASE}/account-sessions`, data),
   updateAccountSession: (id: string, data: Record<string, unknown>): Promise<ApiResponse<AccountSessionItem>> =>

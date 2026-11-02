@@ -23,11 +23,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import { api } from '../api';
-import {
-  addCustomModel,
-  removeCustomModel,
-  batchAddAliasPrefix,
-} from './modelApiHelpers';
+
 import { useToast } from '../components/Toast';
 import { Loading, EmptyState, Switch, Pagination, Tabs, Combobox } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
@@ -764,7 +760,7 @@ export default function ModelManage(): JSX.Element {
     });
   };
 
-  // ── 自定义模型（Task 9 后端端点未就绪，helper 失败只弹 toast，不崩页面） ──
+  // ── 自定义模型（保存/删除失败只弹 toast，不崩页面） ──
 
   /** 判定一行是否为自定义模型：来源里带 manual 标记，或该 provider 是自定义家 */
   const isCustomRow = (row: ManagedModel): boolean => {
@@ -788,12 +784,13 @@ export default function ModelManage(): JSX.Element {
     }
     setSavingCustom(true);
     try {
-      await addCustomModel({ id, provider, owned_by: customForm.owned_by.trim() || provider });
+      // 远程 addCustomModel 为 (provider, id) 两参形状；弹窗中的 owned_by 字段远程后端暂不支持，暂不传
+      await api.addCustomModel(provider, id);
       addToast(t('自定义模型已添加') + `：${id}`);
       setCustomModal(false);
       await load();
     } catch (err) {
-      // 后端端点尚未就绪（Task 9），失败只报错不崩页面
+      // 失败只报错不崩页面
       setCustomError(err instanceof Error ? err.message : String(err));
     } finally {
       setSavingCustom(false);
@@ -807,7 +804,7 @@ export default function ModelManage(): JSX.Element {
       confirmText: t('删除'),
       danger: true,
       onConfirm: async () => {
-        await removeCustomModel(row.provider, row.id);
+        await api.removeCustomModel(row.provider, row.id);
         addToast(t('已删除自定义模型'));
 
         await load();
@@ -834,7 +831,7 @@ export default function ModelManage(): JSX.Element {
     setSavingPrefix(true);
     try {
       const targets = selectedRows.map((m) => m.id);
-      const res = await batchAddAliasPrefix(prefix, {
+      const res = await api.batchAddAliasPrefix(prefix, {
         sep: prefixForm.sep,
         merge: prefixForm.merge,
         targets,
@@ -844,7 +841,7 @@ export default function ModelManage(): JSX.Element {
       setPrefixModal(false);
       setSelected(new Set());
     } catch (err) {
-      // 端点未就绪时不中断批量会话，报错留在弹窗里供重试
+      // 报错留在弹窗里供重试
       setPrefixError(err instanceof Error ? err.message : String(err));
     } finally {
       setSavingPrefix(false);
@@ -2485,7 +2482,7 @@ export default function ModelManage(): JSX.Element {
         </div>
       )}
 
-      {/* ── 自定义模型弹窗（对齐 Agent2API addCustomModel；端点由 Task 9 补齐） ── */}
+      {/* ── 自定义模型弹窗（对齐 Agent2API addCustomModel） ── */}
       {customModal && (
         <div className="modal-overlay" onClick={() => setCustomModal(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>

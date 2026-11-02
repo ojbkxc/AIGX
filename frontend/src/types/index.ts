@@ -1237,8 +1237,26 @@ export interface AccountSessionItem {
   last_balance?: AccountBalance | null;
   /** 上次余额查询失败原因（成功后清空） */
   last_balance_error?: string | null;
+  /** 账号级限制器规则（PATCH limiters 键整块替换） */
+  limiters?: AccountLimiterRule[];
   created_at?: number;
   updated_at?: number;
+}
+
+/** 账号级限制器规则（对齐 Agent2API LimiterRule；枚举与后端校验白名单一致） */
+export interface AccountLimiterRule {
+  /** 规则类型：balance（余额阈值）/ token（周期用量阈值） */
+  type: 'balance' | 'token';
+  /** 触发动作：skip（本轮跳过该账号）/ disable（停用账号） */
+  action: 'skip' | 'disable';
+  /** 阈值：balance 为余额下限，token 为周期用量上限 */
+  threshold: number;
+  /** 重置方式：daily（每日零点重置）/ fixed（固定窗口，配合 period） */
+  reset?: string;
+  /** 固定窗口时长（秒，token+fixed 时有效，1800-86400） */
+  period?: number;
+  /** 是否启用（缺省 true） */
+  enabled?: boolean;
 }
 
 /** 账号余额/额度归一化读数（GET /api/account-sessions/:id/balance） */

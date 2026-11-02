@@ -28,6 +28,100 @@ pub const CREDENTIAL_KIND_NONE: &str = "none";
 /// （模型名只允许字母数字与 `- _ . / :`），不会与真实模型冲突。
 pub const ACCOUNT_WIDE_COOLDOWN: &str = "*";
 
+/// 一条账号限制规则（余额 / Token 两类，对齐前端 `LimiterRule` 与 Agent2API
+/// 的 `accounts-dialog-limiter`；JSON 字段名与 Agent2API `LimiterRule::to_json`
+/// 同名：`type` / `action` / `threshold` / `reset` / `period` / `enabled`）。
+///
+/// 语义（本任务先落地存储与回显，调度器消费在后续任务接入）：
+/// - `balance`：账号余额低于 `threshold` 时触发（跟随余额读数，无窗口概念）；
+/// - `token`：`reset = daily` 自然日（每天 0 点重置）或 `reset = fixed` 固定
+///   `period` 秒窗口内，累计消耗达到 `threshold` 时触发；
+/// - 动作 `skip` = 选号阶段跳过该账号（余额回升 / 周期重置后自动恢复）；
+///   `disable` = 停用该账号（需手动重新启用）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccountLimiterRule {
+    /// 规则类型：`balance` / `token`（`type` 是 Rust 关键字，serde rename）。
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    /// 触发动作：`skip` / `disable`。
+    #[serde(default)]
+    pub action: String,
+    /// 阈值：余额数值（balance）或 Token 个数（token），恒 > 0。
+    #[serde(default)]
+    pub threshold: f64,
+    /// Token 规则的重置方式：`fixed` / `daily`；balance 规则不携带。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset: Option<String>,
+    /// Token 固定周期的秒数（30 分钟 ~ 24 小时，与前端口径一致）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<u64>,
+    /// 规则开关（缺省启用；`enabled: false` 的规则保留但不生效）。
+    #[serde(default = "default_limiter_enabled")]
+    pub enabled: bool,
+}
+
+fn default_limiter_enabled() -> bool {
+    true
+}
+
+/// Token 固定周期的合法区间（秒），与前端 `TOKEN_PERIOD_MIN/MAX_SECS` 同口径。
+const TOKEN_PERIOD_MIN_SECS: u64 = 30 * 60;
+const TOKEN_PERIOD_MAX_SECS: u64 = 24 * 3600;
+
+/// 单账号限制规则条数上限（防一次性灌入海量规则拖慢选号）。
+const MAX_LIMITER_RULES: usize = 50;
+
+impl AccountLimiterRule {
+    /// 写入前的基本合法性校验；错误返回中文文案（前端 toast 直接展示）。
+    ///
+    /// 周期区间与前端同一套硬约束 —— 前端表单已卡 30 分钟 ~ 24 小时，
+    /// 后端再卡一道是防绕过前端直调 API 填进病态值。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.kind != "balance" && self.kind != "token" {
+            return Err(format!("限制器类型必须是 balance 或 token：{}", self.kind));
+        }
+        if self.action != "skip" && self.action != "disable" {
+            return Err(format!("限制器动作必须是 skip 或 disable：{}", self.action));
+        }
+        if !self.threshold.is_finite() || self.threshold <= 0.0 {
+            return Err("限制阈值必须是大于 0 的数字".to_string());
+        }
+        if self.kind == "token" {
+            match self.reset.as_deref() {
+                Some("fixed") => {
+                    let period = self.period.unwrap_or(0);
+                    if !(TOKEN_PERIOD_MIN_SECS..=TOKEN_PERIOD_MAX_SECS).contains(&period) {
+                        return Err("重置周期必须是 30 分钟 ~ 24 小时".to_string());
+                    }
+                }
+                // daily 没有周期长度，只有「每天 0 点」这一个锚点
+                Some("daily") => {}
+                other => {
+                    return Err(format!(
+                        "Token 规则的重置方式必须是 fixed 或 daily：{:?}",
+                        other
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 校验一批限制规则（条数上限 + 逐条合法性）；任何一条非法即整体失败。
+///
+/// 任何一条非法就整单拒绝：半保存的限制器（部分生效部分忽略）比不保存
+/// 更难排查。
+pub fn validate_limiter_rules(rules: &[AccountLimiterRule]) -> Result<(), String> {
+    if rules.len() > MAX_LIMITER_RULES {
+        return Err(format!("限制规则最多 {MAX_LIMITER_RULES} 条"));
+    }
+    for rule in rules {
+        rule.validate()?;
+    }
+    Ok(())
+}
+
 /// 粘贴型凭证。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Credential {
@@ -186,6 +280,12 @@ pub struct AccountSession {
     /// 值里的 `{credential}` 会被替换成凭证明文。
     #[serde(default)]
     pub extra_headers: HashMap<String, String>,
+    /// 账号限制规则（余额 / Token 两类，见 [`AccountLimiterRule`]）。
+    ///
+    /// 空数组 = 未配置限制（与字段缺省同义）。随账号 KV 一起落盘；
+    /// 调度器在选号阶段消费（后续任务接入）。
+    #[serde(default)]
+    pub limiters: Vec<AccountLimiterRule>,
     /// 续期令牌（refreshToken / Coding Plan JWT / deviceId 等）。
     ///
     /// 与 `credential.secret` 同口径落盘（`enc1:` AES-256-GCM，见
@@ -281,6 +381,7 @@ impl AccountSession {
             max_concurrency: default_max_concurrency(),
             models: Vec::new(),
             extra_headers: HashMap::new(),
+            limiters: Vec::new(),
             refresh_secret: String::new(),
             cooldowns: HashMap::new(),
             last_used_at: None,
@@ -450,5 +551,52 @@ mod tests {
         assert_eq!(session.runtime_status(100), "expired");
         session.expires_at = None;
         assert_eq!(session.runtime_status(100), "enabled");
+    }
+
+    /// 限制规则白名单：合法形态放行，类型/动作/阈值/周期越界各自挡下。
+    #[test]
+    fn limiter_rule_validation() {
+        let rule = |kind: &str, action: &str, reset: Option<&str>, period: Option<u64>| {
+            AccountLimiterRule {
+                kind: kind.to_string(),
+                action: action.to_string(),
+                threshold: 10.0,
+                reset: reset.map(str::to_string),
+                period,
+                enabled: true,
+            }
+        };
+        // 合法：余额 / Token-fixed / Token-daily
+        assert!(rule("balance", "skip", None, None).validate().is_ok());
+        assert!(rule("token", "disable", Some("fixed"), Some(3600))
+            .validate()
+            .is_ok());
+        assert!(rule("token", "skip", Some("daily"), None).validate().is_ok());
+        // 类型 / 动作白名单
+        assert!(rule("quota", "skip", None, None).validate().is_err());
+        assert!(rule("balance", "pause", None, None).validate().is_err());
+        // 阈值必须 > 0 且有限
+        let zero = AccountLimiterRule {
+            threshold: 0.0,
+            ..rule("balance", "skip", None, None)
+        };
+        assert!(zero.validate().is_err());
+        let nan = AccountLimiterRule {
+            threshold: f64::NAN,
+            ..rule("balance", "skip", None, None)
+        };
+        assert!(nan.validate().is_err());
+        // Token-fixed 周期必须落在 30 分钟 ~ 24 小时
+        assert!(rule("token", "skip", Some("fixed"), Some(60))
+            .validate()
+            .is_err());
+        assert!(rule("token", "skip", Some("fixed"), Some(25 * 3600))
+            .validate()
+            .is_err());
+        // Token 规则缺 reset / reset 乱填都拒绝
+        assert!(rule("token", "skip", None, None).validate().is_err());
+        assert!(rule("token", "skip", Some("weekly"), None)
+            .validate()
+            .is_err());
     }
 }

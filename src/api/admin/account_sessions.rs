@@ -96,6 +96,12 @@ pub struct AccountSessionRequest {
     /// 余额自动查询间隔（秒）。三态：缺省 = 保持原值；0 = 关闭；>0 = 定频查询。
     #[serde(default)]
     pub usage_query_interval_secs: Option<u64>,
+    /// 账号限制规则（余额 / Token 两类，见 `AccountLimiterRule`）。
+    ///
+    /// 三态：缺省 = 保持原值（PUT 只提交部分字段时不清规则）；
+    /// 空数组 = 清空全部规则。校验失败整单拒绝（400）。
+    #[serde(default)]
+    pub limiters: Option<Vec<crate::account_session::model::AccountLimiterRule>>,
 }
 
 /// 账号部分更新请求（PATCH）：只应用显式给出的字段。
@@ -114,6 +120,10 @@ pub struct AccountSessionPatch {
     pub weight: Option<u32>,
     #[serde(default)]
     pub max_concurrency: Option<u32>,
+    /// 账号限制规则（余额 / Token 两类）。三态：缺省 = 保持原值；
+    /// 空数组 = 清空。整块替换（对齐前端「规则列表一次全量提交」）。
+    #[serde(default)]
+    pub limiters: Option<Vec<crate::account_session::model::AccountLimiterRule>>,
 }
 
 impl AccountSessionPatch {
@@ -151,6 +161,17 @@ pub struct BulkImportRequest {
 }
 
 // ── 辅助 ────────────────────────────────────────────────────────────
+
+/// 校验请求里的限制规则（条数上限 + 逐条白名单 / 阈值 / 周期范围）。
+///
+/// 任何一条非法就整单拒绝：半保存的限制器（部分生效部分忽略）比不保存
+/// 更难排查。校验逻辑在 `account_session::model::validate_limiter_rules`。
+fn validate_limiters(
+    rules: &[crate::account_session::model::AccountLimiterRule],
+) -> Result<(), (StatusCode, Json<Value>)> {
+    crate::account_session::model::validate_limiter_rules(rules)
+        .map_err(|msg| error_response(&msg, StatusCode::BAD_REQUEST))
+}
 
 /// 校验渠道存在且是账号型渠道。
 fn ensure_account_channel(
@@ -243,6 +264,11 @@ fn apply_request(mut session: AccountSession, body: &AccountSessionRequest) -> A
             0 => None,
             v => Some(v.min(30 * 86_400)),
         };
+    }
+    // 限制规则整块替换（缺省 = 保持原值，空数组 = 清空）；合法性由调用方
+    // 在进本函数前用 validate_limiters 挡下（本函数不返回 Result）。
+    if let Some(rules) = &body.limiters {
+        session.limiters = rules.clone();
     }
     session.models = Vec::new();
     for model in &body.models {
@@ -365,6 +391,8 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "max_concurrency": session.max_concurrency,
         "models": session.models,
         "extra_headers": crate::channel::mask_sensitive_headers(&session.extra_headers),
+        // 账号限制规则（余额 / Token 两类）；编辑弹窗读它回填规则列表
+        "limiters": session.limiters,
         // 续期令牌只暴露「有没有」与脱敏形态，不回明文
         "has_refresh_token": !session.refresh_secret.is_empty(),
         "refresh_token": if session.refresh_secret.is_empty() {
@@ -454,6 +482,8 @@ pub async fn handle_create_account_session(
         }
     }
     let channel = ensure_account_channel(&state, body.channel_id.trim())?;
+    // 限制规则先校验再应用：非法就整单拒绝，不产生「存了一半」的账号
+    validate_limiters(body.limiters.as_deref().unwrap_or_default())?;
     let mut session = AccountSession::new(channel.id.clone(), String::new());
     session = apply_request(session, &body);
     // 登录态型供应商：凭证形态标记为 session（Cookie/JWT），与 API Key 区分。
@@ -520,6 +550,8 @@ pub async fn handle_update_account_session(
         ));
     }
     ensure_account_channel(&state, &prev.channel_id)?;
+    // 限制规则先校验再应用（与新增同口径）
+    validate_limiters(body.limiters.as_deref().unwrap_or_default())?;
     let mut session = apply_request(prev.clone(), &body);
     // 切换供应商时凭证形态跟随：登录态型标 session，其余回到 api_key
     session.credential.kind = if registry::session_meta(&session.provider).is_some() {
@@ -606,6 +638,11 @@ pub async fn handle_patch_account_session(
     }
     if let Some(max_concurrency) = body.max_concurrency {
         next.max_concurrency = max_concurrency;
+    }
+    // 限制规则：缺省 = 保持原值；给了就校验后整块替换（空数组 = 清空）
+    if let Some(rules) = &body.limiters {
+        validate_limiters(rules)?;
+        next.limiters = rules.clone();
     }
     let saved = state.account_sessions.upsert(next).map_err(|e| {
         error_response(
@@ -1055,6 +1092,26 @@ pub async fn handle_reset_account_session_cooldowns(
 }
 
 // ── provider 目录 / 统计 ────────────────────────────────────────────
+
+/// GET /api/account-sessions/connections —— 各账号实时并发占用快照。
+///
+/// 前端连接数列 2 秒轮询这里（对齐 Agent2API `getAccountConnections`）：
+/// 汇总内存池里的运行态计数 `in_flight`（不落盘，天然是实时值），
+/// 形状 `{data: {counts: {<sessionId>: n}}}`；不在表里的账号等价于 0 并发，
+/// 前端按 Record 读取。
+pub async fn handle_account_session_connections(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let mut counts = Map::new();
+    for session in state.account_sessions.all() {
+        counts.insert(session.id, json!(session.in_flight));
+    }
+    Ok(Json(
+        json!({ "success": true, "data": { "counts": counts } }),
+    ))
+}
 
 /// GET /api/account-sessions/providers
 pub async fn handle_list_account_providers(

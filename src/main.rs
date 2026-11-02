@@ -1875,6 +1875,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/account-sessions/stats",
             get(api::admin::account_sessions::handle_account_session_stats),
         )
+        // 各账号实时并发占用快照（连接数列 2s 轮询；静态段与 :id 同级，matchit 静态优先）
+        .route(
+            "/api/account-sessions/connections",
+            get(api::admin::account_sessions::handle_account_session_connections),
+        )
         // 登录态供应商的网页登录（服务端无头登录 + 任务表）
         .route(
             "/api/account-sessions/login/start",

@@ -14,6 +14,7 @@ import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, EmptyState, Input, Loading, Select, SkeletonTable, Switch, Tabs, Textarea } from '../components/ui';
 import type {
   AccountBalance,
+  AccountLimiterRule,
   AccountProviderItem,
   AccountSessionItem,
   AccountSessionStatsItem,
@@ -180,28 +181,14 @@ function usagePoolOf(bal: AccountBalance | null | undefined): UsagePoolView | nu
 }
 
 /* ══ 账号限制器（对齐 Agent2API accounts-dialog-limiter：余额 / Token 两类规则） ══ */
-
-/** 一条限制规则（保存走 PATCH 的 limiters 键，整块替换；后端 Task 9 落地前有兜底提示） */
-interface LimiterRule {
-  /** balance = 余额低于阈值；token = 周期内累计消耗达到阈值 */
-  type: 'balance' | 'token';
-  /** skip = 跳过该账号（自动恢复）；disable = 禁用该账号（需手动启用） */
-  action: 'skip' | 'disable';
-  /** 阈值：余额数值 / Token 个数 */
-  threshold: number;
-  /** Token 规则的重置方式：fixed = 固定周期；daily = 自然日（每天 0 点） */
-  reset?: 'fixed' | 'daily';
-  /** Token 固定周期的秒数（30 分钟 ~ 24 小时） */
-  period?: number;
-  enabled?: boolean;
-}
+/* 规则类型 AccountLimiterRule 定义在 ../types（后端 PATCH limiters 键整块替换） */
 
 /** Token 固定周期的上下限（对齐 Agent2API TOKEN_PERIOD_*） */
 const TOKEN_PERIOD_MIN_SECS = 30 * 60;
 const TOKEN_PERIOD_MAX_SECS = 24 * 3600;
 
 /** 一条规则的「触发条件 → 触发动作」一句话（规则列表用） */
-function describeLimiterRule(rule: LimiterRule): string {
+function describeLimiterRule(rule: AccountLimiterRule): string {
   const action = rule.action === 'disable'
     ? '禁用该账号（需手动重新启用）'
     : '跳过该账号（自动恢复）';
@@ -231,7 +218,7 @@ interface LimiterDraft {
   periodUnit: 'minutes' | 'hours';
 }
 
-function limiterDraftOf(rule: LimiterRule | null): LimiterDraft {
+function limiterDraftOf(rule: AccountLimiterRule | null): LimiterDraft {
   if (!rule) {
     return { type: 'balance', action: 'skip', thresholdInput: '', tokenUnit: 'wan', reset: 'fixed', periodInput: '1', periodUnit: 'hours' };
   }
@@ -254,7 +241,7 @@ function limiterDraftOf(rule: LimiterRule | null): LimiterDraft {
 }
 
 /** 草稿 → 规则（校验不过返回错误文案；与参考实现同一套规则） */
-function limiterRuleOfDraft(draft: LimiterDraft): { error: string } | { rule: LimiterRule } {
+function limiterRuleOfDraft(draft: LimiterDraft): { error: string } | { rule: AccountLimiterRule } {
   const thresholdRaw = Number(draft.thresholdInput);
   if (!Number.isFinite(thresholdRaw) || thresholdRaw <= 0) {
     return { error: '限制阈值必须是大于 0 的数字' };
@@ -307,30 +294,10 @@ const LS_NAMEMASK = 'aigx-as-namemask';
 const LS_AUTOBAL = 'aigx-as-autobal'; // 自动余额轮询间隔（分钟）
 
 /**
- * 页面内 API helper：连接数快照（GET /api/account-sessions/connections）。
- * 该端点由后端任务补齐，未上线 / 网络异常时**静默返回 null**，页面降级用列表
- * 自带的 in_flight 字段展示，绝不崩溃。
+ * 连接数快照走 api.getAccountSessionConnections（已收敛进 api/index.ts）：
+ * 端点未上线 / 网络异常时静默返回 null，页面降级用列表自带的 in_flight
+ * 字段展示，绝不崩溃。
  */
-async function fetchConnectionCounts(): Promise<Record<string, number> | null> {
-  try {
-    const token = localStorage.getItem('token');
-    const res = await fetch('/api/account-sessions/connections', {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    if (!res.ok) return null;
-    const json = (await res.json()) as { data?: { counts?: Record<string, unknown> } } | null;
-    const counts = json?.data?.counts;
-    if (!counts || typeof counts !== 'object') return null;
-    const out: Record<string, number> = {};
-    for (const [id, n] of Object.entries(counts)) {
-      const num = Number(n);
-      if (Number.isFinite(num) && num >= 0) out[id] = Math.floor(num);
-    }
-    return out;
-  } catch {
-    return null;
-  }
-}
 
 /** 账号设置弹窗的五个分组（对齐 Agent2API acct-dlg 左栏导航） */
 const DLG_SEGS = [
@@ -426,7 +393,7 @@ export default function AccountSessions(): JSX.Element {
   // ── 账号设置弹窗五分组导航（基本信息/凭证/代理/限制器/高级）──
   const [dlgSeg, setDlgSeg] = useState<DlgSeg>('basic');
   /** 限制器规则草稿（保存随表单主体之后单独 PATCH，失败不拖累主保存） */
-  const [limiters, setLimiters] = useState<LimiterRule[]>([]);
+  const [limiters, setLimiters] = useState<AccountLimiterRule[]>([]);
   const limitersBaseline = useRef<string>('[]');
   const [limiterEditor, setLimiterEditor] = useState<{ index: number; draft: LimiterDraft } | null>(null);
   const [limiterError, setLimiterError] = useState('');
@@ -478,7 +445,7 @@ export default function AccountSessions(): JSX.Element {
     let alive = true;
     let timer = 0;
     const tick = async (): Promise<void> => {
-      const counts = await fetchConnectionCounts();
+      const counts = await api.getAccountSessionConnections();
       if (!alive) return;
       if (counts) {
         setConnCounts(counts);
@@ -505,8 +472,6 @@ export default function AccountSessions(): JSX.Element {
     setShowModal(true);
   };
 
-  /** 编辑弹窗里的账号可能带限制器规则（后端 Task 9 落地前字段缺省 = 空规则） */
-  type SessionWithLimiters = AccountSessionItem & { limiters?: LimiterRule[] };
 
   const openEdit = (session: AccountSessionItem): void => {
     setEditing(session);
@@ -534,7 +499,7 @@ export default function AccountSessions(): JSX.Element {
       clear_proxy: false,
     });
     // 限制器草稿：读账号自带规则（没有 = 空），基线序列化用于保存时判断是否变更
-    const rules = (session as SessionWithLimiters).limiters ?? [];
+    const rules = session.limiters ?? [];
     setLimiters(rules.map((rule) => ({ ...rule })));
     limitersBaseline.current = JSON.stringify(rules);
     setDlgSeg('basic');
@@ -723,7 +688,7 @@ export default function AccountSessions(): JSX.Element {
           payload.api_key = form.api_key.trim();
         }
         await api.updateAccountSession(editing.id, payload);
-        // 限制器随主保存之后单独 PATCH：端点未上线（Task 9 前后端未对齐）时
+        // 限制器随主保存之后单独 PATCH（校验失败/网络异常）时
         // 只提示本段失败，不拖累账号主体的保存
         if (JSON.stringify(limiters) !== limitersBaseline.current) {
           try {
@@ -731,7 +696,7 @@ export default function AccountSessions(): JSX.Element {
             limitersBaseline.current = JSON.stringify(limiters);
           } catch (limiterErr) {
             addToast(
-              `${t('账号限制器保存失败（后端端点可能未上线）')}：${limiterErr instanceof Error ? limiterErr.message : String(limiterErr)}`,
+              `${t('账号限制器保存失败')}：${limiterErr instanceof Error ? limiterErr.message : String(limiterErr)}`,
               'error',
             );
           }
