@@ -462,7 +462,6 @@ export default function Channels(): JSX.Element {
     void loadChannels().catch((err: unknown) => {
       setError(err instanceof Error ? err.message : String(err));
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 筛选条件变化时把页码重置到 1（避免「第 3 页 + 新筛选」导致空页）
