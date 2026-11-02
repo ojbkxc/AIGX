@@ -705,6 +705,8 @@ export interface AliasEntry {
   target: string;
   /** 关掉的别名仍出现在清单里，但不参与改名 */
   enabled: boolean;
+  /** 映射级思考等级（None = 未设置） */
+  reasoning_effort?: string | null;
 }
 
 /** 聚合后的单行模型：粒度是 (provider, model_id) */
@@ -805,6 +807,10 @@ export interface CheckinSchedule {
   providers: string[];
   last_fired_date: string;
   last_result: string;
+  /** 上次执行计数（成功/保活/失败） */
+  last_ok: number;
+  last_keepalive: number;
+  last_failed: number;
 }
 
 export interface CheckinAccountRow {
@@ -830,6 +836,8 @@ export interface CheckinCenterData {
   supported_providers: string[];
   providers: CheckinProviderGroup[];
   schedules: CheckinSchedule[];
+  /** 台账总条数（统计卡「累计记录数」） */
+  records_total: number;
   today_summary: Array<{ provider: string; done: number; total: number }>;
 }
 
@@ -864,8 +872,10 @@ export interface CheckinBenefitsData {
     provider: string;
     channel_id: string;
     status: string;
-    /** 该账号可用的动作 id（newbie / onboarding / keepalive / growth / plan / umid） */
+    /** 该账号可用的动作 id（newbie / onboarding / onboarding_claim / keepalive / claim / keepalive_claim / growth / plan / umid） */
     actions: string[];
+    /** 待领新手福利项数（None = 还没盘点过） */
+    pending_onboarding?: number | null;
     keepalive?: { date?: string; model?: string; keepalive_ok?: number } | null;
   }>;
   keepalive: KeepaliveConfig;
@@ -880,6 +890,8 @@ export interface CheckinRecord {
   source: string;
   outcome: string;
   ok: boolean;
+  /** 本次执行链是否附带保活动作 */
+  kept_active: boolean;
   message: string;
 }
 
@@ -1599,4 +1611,63 @@ export interface UpdateSettingsItem {
   restart_after_apply: boolean;
   supported: boolean;
   currentVersion: string;
+}
+
+/**
+ * 间隔型定时任务的一条任务项（GET /api/scheduled-tasks）。
+ * 对应后端 `scheduled_tasks::task_json`。
+ *
+ * ─── 两类任务（区别是「谁来执行」）───
+ *   - `runner: "backend"`：凭证维护 / 模型刷新 / 版本检查，后端调度循环执行，
+ *     有 lastRunAt / nextRunAt 等运行状态，界面可「立即执行」。
+ *   - `runner: "frontend"`：日志页 / 请求日志页 / 报表页自动刷新，定时器长在
+ *     页面上，后端只存开关与间隔，界面自己读；`canRun` 为 false。
+ */
+export interface ScheduledTaskItem {
+  id: string;
+  label: string;
+  description: string;
+  /** 间隔单位：`minutes`（后端任务）或 `seconds`（前端刷新任务） */
+  unit: 'minutes' | 'seconds';
+  runner: 'backend' | 'frontend';
+  enabled: boolean;
+  interval: number;
+  min: number;
+  max: number;
+  defaultInterval: number;
+  /** 仅 backend 任务有运行状态语义；frontend 恒为 false */
+  running: boolean;
+  /** 最近一次执行完成时间（unix 毫秒，null 表示从未成功执行） */
+  lastRunAt: number | null;
+  /** 最近一次尝试开始时间（unix 毫秒） */
+  lastAttemptAt: number | null;
+  /** 最近一次成功执行时间（unix 毫秒） */
+  lastSuccessAt: number | null;
+  /** 最近一次执行的结论文案（人类可读） */
+  lastResult: string | null;
+  /** 最近一次失败原因 */
+  lastError: string | null;
+  /** 失败冷却的到期时间（unix 毫秒，null/过期表示无冷却） */
+  retryAt: number | null;
+  /** 下次计划执行时间（unix 毫秒；frontend 任务恒为 null） */
+  nextRunAt: number | null;
+  /** 是否可在后端立即执行（仅 backend 任务为 true） */
+  canRun: boolean;
+}
+
+/** 间隔型任务清单（GET /api/scheduled-tasks 响应） */
+export interface ScheduledTaskList {
+  tasks: ScheduledTaskItem[];
+}
+
+/** 改一条任务的请求体（PATCH/POST /api/scheduled-tasks/{id}，只传要改的字段） */
+export interface ScheduledTaskPatch {
+  enabled?: boolean;
+  interval?: number;
+}
+
+/** 立即执行结果（POST /api/scheduled-tasks/{id}/run 响应） */
+export interface ScheduledTaskRunResult {
+  summary: string;
+  task: ScheduledTaskItem;
 }

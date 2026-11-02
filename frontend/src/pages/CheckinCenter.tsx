@@ -7,7 +7,7 @@ import { useToast } from '../components/Toast';
 import { Badge, Card, EmptyState, Loading, Switch } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import BenefitsPanel from '../components/BenefitsPanel';
-import type { CheckinCenterData, CheckinRecord, CheckinSchedule } from '../types';
+import type { CheckinCenterData, CheckinRecord, CheckinRunResult, CheckinSchedule } from '../types';
 import './CheckinCenter.css';
 
 type TabKey = 'center' | 'schedule' | 'records' | 'benefits';
@@ -32,6 +32,38 @@ const SOURCE_LABEL: Record<string, string> = {
   schedule: '定时',
   manual: '手动',
   startup: '补签',
+};
+
+/**
+ * 各家上游的签到链路说明（对齐 Agent2API 提供商行的一句话说明）。
+ * 只做静态展示，不参与任何逻辑。
+ */
+const PROVIDER_DESC: Record<string, string> = {
+  loomy: '讯飞 Loomy：每日领取会员权益，签到即领',
+  kuku: 'Kuku：每日签到领积分，签到即领',
+  qoder: 'Qoder：每日签到领额度，签到即领',
+  'qoder-intl': 'Qoder 国际版：签到领额度；风控组件 UMID 见福利通道',
+  xiaohuanxiong: '小浣熊：桌面端 / 移动端各领一次登录积分',
+  autoclaw: 'AutoClaw：每日签到领额度，签到即领',
+  'autoclaw-intl': 'AutoClaw 国际版：每日签到领额度，签到即领',
+  workbuddy: 'WorkBuddy：每日签到领额度，签到即领',
+  'workbuddy-intl': 'WorkBuddy 国际版：签到领日活奖励；保活链见福利通道',
+  trae: 'Trae：每日签到领额度，签到即领',
+  codearts: 'CodeArts：每日签到领额度；新人礼见福利通道',
+  officeace: 'OfficeAce：每日签到与新人礼同链，签到即领',
+};
+
+/**
+ * 签到后的自动链（对齐 Agent2API「签到后自动领福利」）。
+ * 各家签到之外还有一次性/限时福利可领：codearts 新人礼、loomy 新手任务、
+ * 小浣熊登录积分、workbuddy-intl 保活+领取 —— 签到成功即串行跑一遍，
+ * 不用管理员再切到「福利」页逐个点。
+ */
+const AUTO_CHAIN: Record<string, string[]> = {
+  codearts: ['newbie'],
+  loomy: ['onboarding', 'onboarding_claim'],
+  xiaohuanxiong: ['onboarding'],
+  'workbuddy-intl': ['keepalive_claim'],
 };
 
 interface ScheduleForm {
@@ -97,6 +129,8 @@ export default function CheckinCenter(): JSX.Element {
   // 单飞：一次只允许一个签到动作在途（上游有全局 running 防重），
   // 但按钮级 busy 只落在对应行上，不让一颗在跑拖灰整页
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  // 签到后的自动链在途：按钮禁用并显示进度，避免与手动点福利打架
+  const [autoChaining, setAutoChaining] = useState(false);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -107,12 +141,16 @@ export default function CheckinCenter(): JSX.Element {
 
   // 记录
   const [records, setRecords] = useState<CheckinRecord[]>([]);
+  const [recordsTotal, setRecordsTotal] = useState(0);
   const [recordsLoading, setRecordsLoading] = useState(false);
   const [recordDays, setRecordDays] = useState(7);
   const [recordOutcome, setRecordOutcome] = useState('');
   const [recordProvider, setRecordProvider] = useState('');
   const [keyword, setKeyword] = useState('');
+  // 关键词走后端过滤（与分页同口径）；kwApplied 是「已提交」的关键词
   const [kwApplied, setKwApplied] = useState('');
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(50);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -142,18 +180,61 @@ export default function CheckinCenter(): JSX.Element {
         days: recordDays,
         provider: recordProvider || undefined,
         outcome: recordOutcome || undefined,
+        keyword: kwApplied || undefined,
+        offset: page * pageSize,
+        limit: pageSize,
       });
       setRecords(res?.data?.records ?? []);
+      setRecordsTotal(res?.data?.total ?? 0);
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
       setRecordsLoading(false);
     }
-  }, [recordDays, recordProvider, recordOutcome, addToast]);
+  }, [recordDays, recordProvider, recordOutcome, kwApplied, page, pageSize, addToast]);
+
+  // 筛选条件变化时回到第一页
+  useEffect(() => {
+    setPage(0);
+  }, [recordDays, recordProvider, recordOutcome, kwApplied]);
 
   useEffect(() => {
     if (tab === 'records') void loadRecords();
   }, [tab, loadRecords]);
+
+  /**
+   * 签到后的自动链：把签到结果里各家的一次性/限时福利串行跑一遍。
+   * 间隔 300ms 让上游看清「逐个执行」的画像；单个动作失败即停（不拖垮后续）。
+   * keepalive_claim 成功后回写台账（保活标记），让「保活」在记录里可见。
+   */
+  const autoChain = async (results: CheckinRunResult[]): Promise<void> => {
+    const chain = results
+      .filter((r) => r.success && AUTO_CHAIN[r.provider])
+      .flatMap((r) => (AUTO_CHAIN[r.provider] ?? []).map((action) => ({ r, action })));
+    if (chain.length === 0) return;
+    setAutoChaining(true);
+    try {
+      for (const { r, action } of chain) {
+        const res = await api.runCheckinBenefit(r.account_id, action);
+        const result = res?.data;
+        if (result && !result.ok) break; // 失败即停，不拖垮后续动作
+        // workbuddy-intl 保活+领取成功后回写台账（保活标记）
+        if (action === 'keepalive_claim' && result?.ok) {
+          try {
+            await api.markKeptActive(r.account_id, r.provider);
+          } catch {
+            // 回写失败不影响主流程（记录仍可手动标记）
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+      addToast(t('自动链完成'), 'success');
+    } catch {
+      // 自动链失败不拖垮签到结果展示
+    } finally {
+      setAutoChaining(false);
+    }
+  };
 
   const runAll = async (providers: string[] = [], key = 'all') => {
     setBusyKey(key);
@@ -162,6 +243,7 @@ export default function CheckinCenter(): JSX.Element {
       const d = res?.data;
       if (d) {
         addToast(`${t('签到完成')}：${d.done}/${d.total}`);
+        void autoChain(d.results);
       }
       await load();
       if (tab === 'records') await loadRecords();
@@ -179,6 +261,7 @@ export default function CheckinCenter(): JSX.Element {
       const r = res?.data?.results?.[0];
       if (r) {
         addToast(`${r.account_name}：${r.message}`, r.success ? 'success' : 'error');
+        if (res.data) void autoChain(res.data.results);
       }
       await load();
     } catch (err) {
@@ -270,7 +353,11 @@ export default function CheckinCenter(): JSX.Element {
     setBusyKey(`sched:${schedule.id}`);
     try {
       const res = await api.runCheckinSchedule(schedule.id);
-      addToast(`${schedule.label}：${res?.data?.summary ?? ''}`);
+      const d = res?.data;
+      addToast(
+        `${schedule.label}：${d?.summary ?? ''}` +
+          (d ? `（成功 ${d.ok}·保活 ${d.keepalive}·失败 ${d.failed}）` : ''),
+      );
       await load();
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
@@ -307,18 +394,6 @@ export default function CheckinCenter(): JSX.Element {
     }
     return { done, total, accounts: providers.reduce((n, p) => n + p.accounts.length, 0) };
   }, [providers]);
-
-  const filteredRecords = useMemo(() => {
-    if (!kwApplied) return records;
-    const needle = kwApplied.toLowerCase();
-    return records.filter(
-      (r) =>
-        (r.account_name || '').toLowerCase().includes(needle) ||
-        r.account_id.toLowerCase().includes(needle) ||
-        (r.message || '').toLowerCase().includes(needle) ||
-        r.provider.toLowerCase().includes(needle),
-    );
-  }, [records, kwApplied]);
 
   const hasRecordFilter = !!kwApplied || !!recordOutcome || !!recordProvider;
 
@@ -519,6 +594,16 @@ export default function CheckinCenter(): JSX.Element {
                 <div className="ck-stat-label">{t('支持的上游')}</div>
               </div>
             </div>
+            <button
+              type="button"
+              className="ck-stat ck-stat-link"
+              onClick={() => setTab('records')}
+            >
+              <div className="ck-stat-body">
+                <div className="ck-stat-value">{data?.records_total ?? 0}</div>
+                <div className="ck-stat-label">{t('累计记录数')}</div>
+              </div>
+            </button>
             <button type="button" className="ck-stat ck-stat-link" onClick={() => setTab('schedule')}>
               <div className="ck-stat-body">
                 <div className="ck-stat-value">
@@ -536,10 +621,11 @@ export default function CheckinCenter(): JSX.Element {
               <button
                 className="btn btn-primary btn-sm"
                 onClick={() => void runAll()}
-                disabled={busyKey !== null || totals.accounts === 0}
+                disabled={busyKey !== null || autoChaining || totals.accounts === 0}
                 style={{ gap: 6 }}
               >
-                <Play size={12} /> {busyKey === 'all' ? t('签到中...') : t('立即全部签到')}
+                <Play size={12} />
+                {busyKey === 'all' ? t('签到中...') : autoChaining ? t('自动链执行中...') : t('立即全部签到')}
               </button>
             }
           >
@@ -582,6 +668,9 @@ export default function CheckinCenter(): JSX.Element {
                           <span className="ck-prov-sub">
                             {t('{{n}} 个账号', { n: group.accounts.length })} · {t('已签')} {group.today_done}
                           </span>
+                          {PROVIDER_DESC[group.provider] && (
+                            <span className="ck-prov-desc">{PROVIDER_DESC[group.provider]}</span>
+                          )}
                         </div>
                         {groupBadge(group.today_done, group.today_total)}
                         <ChevronRight size={14} className={`ck-prov-caret${open ? ' is-open' : ''}`} />
@@ -746,9 +835,12 @@ export default function CheckinCenter(): JSX.Element {
                         </div>
                         <div className="ck-sched-desc ck-sched-last">
                           {schedule.last_fired_date
-                            ? t('上次执行：{{d}} · {{r}}', {
+                            ? t('上次执行：{{d}} · {{r}} · 成功 {{ok}}·保活 {{ka}}·失败 {{f}}', {
                                 d: schedule.last_fired_date,
                                 r: schedule.last_result || '—',
+                                ok: schedule.last_ok,
+                                ka: schedule.last_keepalive,
+                                f: schedule.last_failed,
                               })
                             : t('从未执行')}
                         </div>
@@ -862,47 +954,92 @@ export default function CheckinCenter(): JSX.Element {
         >
           {recordsLoading ? (
             <Loading text={t('加载记录')} />
-          ) : filteredRecords.length === 0 ? (
+          ) : records.length === 0 ? (
             <EmptyState
               icon="📝"
               message={hasRecordFilter ? t('没有匹配的签到记录') : t('暂无签到记录')}
             />
           ) : (
-            <table className="ck-table">
-              <thead>
-                <tr>
-                  <th style={{ width: 150 }}>{t('时间')}</th>
-                  <th>{t('账号')}</th>
-                  <th style={{ width: 110 }}>{t('上游')}</th>
-                  <th style={{ width: 90 }}>{t('来源')}</th>
-                  <th style={{ width: 100 }}>{t('结果')}</th>
-                  <th>{t('说明')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredRecords.map((record, index) => (
-                  <tr key={`${record.ts}-${record.account_id}-${index}`}>
-                    <td>
-                      {new Date(record.ts * 1000).toLocaleString()}
-                      {record.date && <div className="ck-time-subtle">{record.date}</div>}
-                    </td>
-                    <td>{record.account_name || record.account_id}</td>
-                    <td>{record.provider}</td>
-                    <td className="ck-record-source">
-                      {t(SOURCE_LABEL[record.source] ?? record.source)}
-                    </td>
-                    <td>
-                      <Badge tone={OUTCOME_TONE[record.outcome] ?? 'neutral'}>
-                        {t(OUTCOME_LABEL[record.outcome] ?? record.outcome)}
-                      </Badge>
-                    </td>
-                    <td className={record.outcome === 'failed' ? 'ck-message ck-record-detail-fail' : 'ck-message'}>
-                      {record.message || '—'}
-                    </td>
+            <>
+              <table className="ck-table">
+                <thead>
+                  <tr>
+                    <th style={{ width: 150 }}>{t('时间')}</th>
+                    <th>{t('账号')}</th>
+                    <th style={{ width: 110 }}>{t('上游')}</th>
+                    <th style={{ width: 90 }}>{t('来源')}</th>
+                    <th style={{ width: 100 }}>{t('结果')}</th>
+                    <th>{t('说明')}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {records.map((record, index) => (
+                    <tr key={`${record.ts}-${record.account_id}-${index}`}>
+                      <td>
+                        {new Date(record.ts * 1000).toLocaleString()}
+                        {record.date && <div className="ck-time-subtle">{record.date}</div>}
+                      </td>
+                      <td>
+                        {record.account_name || record.account_id}
+                        {record.kept_active && <Badge tone="info">{t('保活')}</Badge>}
+                      </td>
+                      <td>{record.provider}</td>
+                      <td className="ck-record-source">
+                        {t(SOURCE_LABEL[record.source] ?? record.source)}
+                      </td>
+                      <td>
+                        <Badge tone={OUTCOME_TONE[record.outcome] ?? 'neutral'}>
+                          {t(OUTCOME_LABEL[record.outcome] ?? record.outcome)}
+                        </Badge>
+                      </td>
+                      <td className={record.outcome === 'failed' ? 'ck-message ck-record-detail-fail' : 'ck-message'}>
+                        {record.message || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="ck-pager">
+                <span className="ck-pager-info">
+                  {t('共 {{n}} 条 · 第 {{page}}/{{pages}} 页', {
+                    n: recordsTotal,
+                    page: page + 1,
+                    pages: Math.max(1, Math.ceil(recordsTotal / pageSize)),
+                  })}
+                </span>
+                <div className="ck-pager-tools">
+                  <select
+                    className="form-input"
+                    style={{ maxWidth: 90 }}
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setPage(0);
+                    }}
+                  >
+                    {[20, 50, 100, 200].map((size) => (
+                      <option key={size} value={size}>
+                        {size} / 页
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="btn btn-outline btn-sm"
+                    disabled={page === 0}
+                    onClick={() => setPage((p) => Math.max(0, p - 1))}
+                  >
+                    {t('上一页')}
+                  </button>
+                  <button
+                    className="btn btn-outline btn-sm"
+                    disabled={(page + 1) * pageSize >= recordsTotal}
+                    onClick={() => setPage((p) => p + 1)}
+                  >
+                    {t('下一页')}
+                  </button>
+                </div>
+              </div>
+            </>
           )}
         </Card>
       )}

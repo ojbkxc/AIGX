@@ -90,6 +90,9 @@ import type {
   KeepaliveConfig,
   StorageOverviewItem,
   BackupImportResult,
+  ScheduledTaskList,
+  ScheduledTaskPatch,
+  ScheduledTaskRunResult,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -387,12 +390,14 @@ export const api = {
   setModelAlias: (
     alias: string,
     target: string,
-    enabled?: boolean
+    enabled?: boolean,
+    reasoning_effort?: string
   ): Promise<ApiResponse<ManageView>> =>
     request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias`, {
       alias,
       target,
-      ...(enabled === undefined ? {} : { enabled })
+      ...(enabled === undefined ? {} : { enabled }),
+      ...(reasoning_effort === undefined ? {} : { reasoning_effort })
     }),
   setModelAliasState: (alias: string, enabled: boolean): Promise<ApiResponse<ManageView>> =>
     request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias/state`, {
@@ -401,6 +406,27 @@ export const api = {
     }),
   removeModelAlias: (alias: string): Promise<ApiResponse<ManageView>> =>
     request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/alias/remove`, { alias }),
+  // 批量设置映射级思考等级
+  setAliasReasoning: (
+    aliases: string[],
+    effort: string
+  ): Promise<ApiResponse<{ written: number; view: ManageView }>> =>
+    request<ApiResponse<{ written: number; view: ManageView }>>('POST', `${API_BASE}/models/alias/reasoning`, {
+      aliases,
+      effort
+    }),
+  // 添加自定义模型登记
+  addCustomModel: (
+    provider: string,
+    id: string
+  ): Promise<ApiResponse<ManageView>> =>
+    request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/custom`, { provider, id }),
+  // 删除自定义模型登记
+  removeCustomModel: (
+    provider: string,
+    id: string
+  ): Promise<ApiResponse<ManageView>> =>
+    request<ApiResponse<ManageView>>('POST', `${API_BASE}/models/custom/remove`, { provider, id }),
   // 模型测试（管理员）：钉 provider+model 走真实链路，恒 200，结论在 data.ok
   testModel: (data: ModelTestPayload, signal?: AbortSignal): Promise<ApiResponse<ModelTestResult>> =>
     request<ApiResponse<ModelTestResult>>('POST', `${API_BASE}/models/test`, data, { signal }),
@@ -418,15 +444,26 @@ export const api = {
     provider?: string;
     account_id?: string;
     outcome?: string;
+    keyword?: string;
+    offset?: number;
+    limit?: number;
   }): Promise<ApiResponse<{ records: CheckinRecord[]; total: number }>> => {
     const query = new URLSearchParams();
     if (params.days != null) query.set('days', String(params.days));
     if (params.provider) query.set('provider', params.provider);
     if (params.account_id) query.set('account_id', params.account_id);
     if (params.outcome) query.set('outcome', params.outcome);
+    if (params.keyword) query.set('keyword', params.keyword);
+    if (params.offset != null) query.set('offset', String(params.offset));
+    if (params.limit != null) query.set('limit', String(params.limit));
     const suffix = query.toString();
     return request('GET', `${API_BASE}/checkin-center/records${suffix ? `?${suffix}` : ''}`);
   },
+  markKeptActive: (account_id: string, provider: string): Promise<ApiResponse<{ kept_active: boolean }>> =>
+    request('POST', `${API_BASE}/checkin-center/records/mark-kept-active`, {
+      account_id,
+      provider,
+    }),
   clearCheckinRecords: (days: number): Promise<ApiResponse<{ removed: number }>> =>
     request('DELETE', `${API_BASE}/checkin-center/records?days=${days}`),
   updateCheckinSettings: (settings: CheckinSettings): Promise<ApiResponse<CheckinSettings>> =>
@@ -441,7 +478,7 @@ export const api = {
     request('POST', `${API_BASE}/checkin-center/schedules`, schedule),
   removeCheckinSchedule: (id: string): Promise<ApiResponse<CheckinSchedule[]>> =>
     request('POST', `${API_BASE}/checkin-center/schedules/remove`, { id }),
-  runCheckinSchedule: (id: string): Promise<ApiResponse<{ summary: string }>> =>
+  runCheckinSchedule: (id: string): Promise<ApiResponse<{ summary: string; ok: number; keepalive: number; failed: number }>> =>
     request('POST', `${API_BASE}/checkin-center/schedules/run`, { id }),
 
   // 一次性 / 限时福利通道（新手礼 / 保活 / 成长任务 / 限时套餐 / UMID）
@@ -461,6 +498,17 @@ export const api = {
     request('GET', `${API_BASE}/checkin-center/benefits/keepalive`),
   saveKeepaliveConfig: (models: string[]): Promise<ApiResponse<KeepaliveConfig>> =>
     request('PUT', `${API_BASE}/checkin-center/benefits/keepalive`, { models }),
+
+  // 间隔型定时任务（对齐 Agent2API「定时任务」页）
+  getScheduledTasks: (): Promise<ApiResponse<ScheduledTaskList>> =>
+    request('GET', `${API_BASE}/scheduled-tasks`),
+  patchScheduledTask: (
+    id: string,
+    patch: ScheduledTaskPatch,
+  ): Promise<ApiResponse<ScheduledTaskList>> =>
+    request('PATCH', `${API_BASE}/scheduled-tasks/${id}`, patch),
+  runScheduledTask: (id: string): Promise<ApiResponse<ScheduledTaskRunResult>> =>
+    request('POST', `${API_BASE}/scheduled-tasks/${id}/run`, {}),
 
   listModels: async (): Promise<ApiResponse<ModelInfo[]>> => {
     const res = await request<ApiResponse<unknown[]>>('GET', `${API_BASE}/models/available`);
