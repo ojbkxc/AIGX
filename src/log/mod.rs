@@ -585,15 +585,16 @@ impl RequestLogStore {
         max_age_days: Option<u64>,
         max_capacity: Option<usize>,
     ) -> anyhow::Result<()> {
-        self.set_retention_full(max_age_days, max_capacity, None)
+        self.set_retention_full(max_age_days, max_capacity, None, None)
     }
 
-    /// 写入完整保留配置（请求日志天数/容量 + 审计日志独立天数）。
+    /// 写入完整保留配置（请求日志天数/容量 + 审计日志独立天数 + 日聚合天数）。
     pub fn set_retention_full(
         &self,
         max_age_days: Option<u64>,
         max_capacity: Option<usize>,
         audit_max_age_days: Option<u64>,
+        daily_max_age_days: Option<u64>,
     ) -> anyhow::Result<()> {
         #[derive(Serialize, Deserialize, Default)]
         struct Retention {
@@ -602,6 +603,11 @@ impl RequestLogStore {
             /// 审计日志独立保留天数；None = 跟随请求日志天数
             #[serde(default)]
             audit_max_age_days: Option<u64>,
+            /// 日聚合保留天数（含今天 N 个自然日）；None = 永久——聚合行
+            /// 一天几十 KB，量级每年顶天几十 MB，默认不清。聚合寿命独立于
+            /// 明细：明细被裁掉后聚合仍是报表的完整历史。
+            #[serde(default)]
+            daily_max_age_days: Option<u64>,
         }
         self.store.put(
             "log_retention",
@@ -609,28 +615,36 @@ impl RequestLogStore {
                 max_age_days,
                 max_capacity,
                 audit_max_age_days,
+                daily_max_age_days,
             },
         )
     }
 
     /// 读取日志保留配置（无记录返回 None/None = 默认策略：不限天数、容量 10 万）
     pub fn retention(&self) -> (Option<u64>, Option<usize>) {
-        let (days, capacity, _audit) = self.retention_full();
+        let (days, capacity, _audit, _daily) = self.retention_full();
         (days, capacity)
     }
 
-    /// 读取完整保留配置（含审计日志独立天数）。
-    pub fn retention_full(&self) -> (Option<u64>, Option<usize>, Option<u64>) {
+    /// 读取完整保留配置（请求天数/容量 + 审计独立天数 + 日聚合天数）。
+    pub fn retention_full(&self) -> (Option<u64>, Option<usize>, Option<u64>, Option<u64>) {
         #[derive(Serialize, Deserialize, Default)]
         struct Retention {
             max_age_days: Option<u64>,
             max_capacity: Option<usize>,
             #[serde(default)]
             audit_max_age_days: Option<u64>,
+            #[serde(default)]
+            daily_max_age_days: Option<u64>,
         }
         match self.store.get::<Retention>("log_retention") {
-            Ok(Some(r)) => (r.max_age_days, r.max_capacity, r.audit_max_age_days),
-            _ => (None, None, None),
+            Ok(Some(r)) => (
+                r.max_age_days,
+                r.max_capacity,
+                r.audit_max_age_days,
+                r.daily_max_age_days,
+            ),
+            _ => (None, None, None, None),
         }
     }
 
@@ -702,6 +716,22 @@ impl RequestLogStore {
             }
         }
         Ok((logs, total > max_rows))
+    }
+
+    /// 全部 reqlog 键按键升序（时间戳定宽 10 位 → 键序=时间序）。
+    /// 回填/重建的流式读入口：只拿键不反序列化，配合 `logs_by_keys`
+    /// 分批读，避免历史百万级明细一次性驻留内存。
+    pub fn all_keys_asc(&self) -> Vec<String> {
+        let mut keys = self.store.list("reqlog:").unwrap_or_default();
+        keys.sort();
+        keys
+    }
+
+    /// 按 key 批量反序列化请求日志（缺失/损坏静默跳过）。
+    pub fn logs_by_keys(&self, keys: &[String]) -> Vec<RequestLog> {
+        keys.iter()
+            .filter_map(|k| self.store.get::<RequestLog>(k).ok().flatten())
+            .collect()
     }
 
     /// 按 ID 删除单条请求日志（best-effort，不存在视为成功）
@@ -1360,6 +1390,108 @@ impl LogStore {
             tracing::warn!("Failed to record security event: {e}");
         }
     }
+
+    /// 回填历史日聚合：流式分批读全部明细，按 UTC 日折出主档 + 用户行。
+    ///
+    /// 覆盖**仅 date < 今天**的日子（今天归运行期 RMW 独占，回填与在途
+    /// 记账互不踩踏）。shrink 守卫（蓝本 backfill「拿不准不动」语义）：
+    /// 逐行覆盖前与既有行比对，既有行计数更大说明明细已被 retention
+    /// 裁过——聚合寿命独立于明细，重算值不可信，保留既有行不覆盖。
+    /// 全部写完后落回填 marker（as_of=昨天），报表读路径据此切聚合。
+    pub fn backfill_history(&self, batch: usize) -> anyhow::Result<BackfillReport> {
+        let today = daily_agg::today_key();
+        let keys = self.requests.all_keys_asc();
+        let mut aggs: std::collections::BTreeMap<String, daily_agg::DailyAgg> = Default::default();
+        let mut users: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, daily_agg::UserDailyRow>,
+        > = Default::default();
+        let mut report = BackfillReport::default();
+        for chunk in keys.chunks(batch.max(1)) {
+            for l in self.requests.logs_by_keys(chunk) {
+                let day = daily_agg::date_key(l.created_at);
+                if day.is_empty() || day >= today {
+                    continue;
+                }
+                report.scanned += 1;
+                let agg = aggs
+                    .entry(day.clone())
+                    .or_insert_with(|| daily_agg::DailyAgg {
+                        date: day.clone(),
+                        ..Default::default()
+                    });
+                daily_agg::fold_request(agg, &l);
+                if let Some(uid) = l.user_id.as_deref() {
+                    let row = users
+                        .entry(uid.to_string())
+                        .or_default()
+                        .entry(day.clone())
+                        .or_insert_with(|| daily_agg::UserDailyRow {
+                            date: day.clone(),
+                            ..Default::default()
+                        });
+                    daily_agg::fold_user_row(row, &l);
+                }
+            }
+        }
+        for (day, agg) in &aggs {
+            if let Some(existing) = self.daily.load_day(day) {
+                if existing.requests > agg.requests {
+                    report.skipped_shrink += 1;
+                    tracing::warn!(
+                        "回填 shrink 守卫：既有行 {day} requests={} 大于重算={}，保留不动",
+                        existing.requests,
+                        agg.requests
+                    );
+                    continue;
+                }
+            }
+            self.daily.overwrite_day(agg)?;
+            report.days_written += 1;
+        }
+        for (uid, days) in &users {
+            for (day, row) in days {
+                if let Some(ex) = self.daily.load_user_range(uid, day, day).into_iter().next() {
+                    if ex.count > row.count {
+                        report.skipped_shrink += 1;
+                        tracing::warn!(
+                            "回填 shrink 守卫：用户 {uid} {day} 既有 count={} 大于重算={}，保留不动",
+                            ex.count,
+                            row.count
+                        );
+                        continue;
+                    }
+                }
+                self.daily.overwrite_user_row(uid, row)?;
+                report.user_rows_written += 1;
+            }
+        }
+        // as_of=昨天：marker 语义为「as_of 及之前的日子已由回填覆盖」，
+        // 今天的数据由运行期 record 保证。空历史也要落 marker（新装首日
+        // 即闭合聚合链条，无历史可回填 = 回填完成）。
+        let yesterday = chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d")
+            .map(|d| {
+                (d - chrono::Duration::days(1))
+                    .format("%Y-%m-%d")
+                    .to_string()
+            })
+            .unwrap_or_else(|_| today.clone());
+        self.daily.set_backfill_marker(&yesterday)?;
+        Ok(report)
+    }
+}
+
+/// 回填/重建的统计返回（cron 与 `POST /api/logs/agg/rebuild` 共用形状）。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct BackfillReport {
+    /// 读入并参与折叠的明细条数（今天行不计）
+    pub scanned: usize,
+    /// 写入的历史日主档数
+    pub days_written: usize,
+    /// 写入的用户日行数
+    pub user_rows_written: usize,
+    /// shrink 守卫拒绝覆盖的行数（既有行计数更大，保留不动）
+    pub skipped_shrink: usize,
 }
 
 // 用 RwLock 包装以便纳入 AppState（Clone）
@@ -1391,6 +1523,151 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].model, "gpt-4");
         assert_eq!(all[0].input_tokens, 100);
+    }
+
+    #[test]
+    fn retention_roundtrip_including_daily_tier() {
+        let s = store();
+        s.requests
+            .set_retention_full(Some(30), Some(1000), Some(7), Some(365))
+            .unwrap();
+        assert_eq!(
+            s.requests.retention_full(),
+            (Some(30), Some(1000), Some(7), Some(365))
+        );
+        // 两元组便捷读不受新档影响
+        assert_eq!(s.requests.retention(), (Some(30), Some(1000)));
+        // 第三档 None = 永久（缺省读回 None，旧配置无字段也兼容）
+        s.requests.set_retention(Some(10), None).unwrap();
+        assert_eq!(s.requests.retention_full(), (Some(10), None, None, None));
+    }
+
+    /// 造一个「昨天」时间戳（now−86400：同钟点前一天，必落在昨日日历）。
+    fn yesterday_ts() -> i64 {
+        chrono::Utc::now().timestamp() - 86_400
+    }
+
+    #[test]
+    fn daily_prune_boundary_keeps_today_and_cutoff_day() {
+        let s = store();
+        let day = |back: i64| {
+            (chrono::Utc::now().naive_utc().date() - chrono::Duration::days(back))
+                .format("%Y-%m-%d")
+                .to_string()
+        };
+        let today = daily_agg::today_key();
+        assert_eq!(day(0), today);
+        // 造三天行：今天、截止日（今天−2）、截止日前一天（今天−3）
+        for back in [0i64, 2, 3] {
+            let date = day(back);
+            s.daily
+                .overwrite_day(&daily_agg::DailyAgg {
+                    date: date.clone(),
+                    requests: 1,
+                    ..Default::default()
+                })
+                .unwrap();
+            s.daily
+                .overwrite_user_row(
+                    "u1",
+                    &daily_agg::UserDailyRow {
+                        date: date.clone(),
+                        count: 1,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        // N=3 →「含今天 3 个自然日」→ cutoff=今天−2，删严格早于 cutoff 的
+        let cutoff = daily_agg::cutoff_date_key(3);
+        assert_eq!(cutoff, day(2));
+        let removed = s.daily.prune_before(&cutoff).unwrap();
+        assert_eq!(removed, 2, "主档+用户行各删一条（今天−3 的）");
+        assert!(s.daily.load_day(&today).is_some(), "今天不删");
+        assert!(s.daily.load_day(&day(2)).is_some(), "截止日当天保留");
+        assert!(s.daily.load_day(&day(3)).is_none(), "早于截止日删除");
+    }
+
+    #[test]
+    fn backfill_skips_today_and_sets_marker() {
+        let s = store();
+        // 昨天两条（其一 u1）+ 今天一条（经记账路径进今天聚合）
+        for uid in [Some("u1"), None] {
+            let mut l = RequestLog::new();
+            l.created_at = yesterday_ts();
+            l.user_id = uid.map(|u| u.to_string());
+            l.model = "gpt-4".to_string();
+            s.requests.add(l).unwrap();
+        }
+        let mut today_log = RequestLog::new();
+        today_log.model = "gpt-4".to_string();
+        s.record_request(today_log);
+
+        let report = s.backfill_history(5000).unwrap();
+        assert_eq!(report.scanned, 2, "今天行不参与回填");
+        assert_eq!(report.days_written, 1);
+        assert_eq!(report.user_rows_written, 1);
+        assert!(s.daily.agg_available(), "回填后 marker 落位");
+
+        let yday = daily_agg::date_key(yesterday_ts());
+        let agg = s.daily.load_day(&yday).expect("昨日主档");
+        assert_eq!(agg.requests, 2);
+        // 今天的行 = 运行期记账（requests=1）；回填若误覆盖今天会变 0
+        let today = s.daily.load_day(&daily_agg::today_key()).expect("今天主档");
+        assert_eq!(today.requests, 1, "回填不得触碰今天的行");
+        let urows = s.daily.load_user_range("u1", &yday, &yday);
+        assert_eq!(urows.len(), 1);
+        assert_eq!(urows[0].count, 1);
+    }
+
+    #[test]
+    fn backfill_shrink_guard_and_idempotent() {
+        let s = store();
+        let yday = daily_agg::date_key(yesterday_ts());
+        // 先塞一条「虚大」的既有行（模拟明细被裁后重算偏小的场景）
+        s.daily
+            .overwrite_day(&daily_agg::DailyAgg {
+                date: yday.clone(),
+                requests: 999,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut l = RequestLog::new();
+        l.created_at = yesterday_ts();
+        l.model = "gpt-4".to_string();
+        s.requests.add(l).unwrap();
+
+        let report = s.backfill_history(5000).unwrap();
+        assert_eq!(report.skipped_shrink, 1, "既有行更大 → 拒覆盖");
+        assert_eq!(report.days_written, 0);
+        assert_eq!(s.daily.load_day(&yday).unwrap().requests, 999, "旧行保留");
+
+        // 幂等：正常回填（无虚大行）两次，结果逐字节一致、无 shrink 拒绝
+        let s2 = store();
+        for _ in 0..2 {
+            let mut l = RequestLog::new();
+            l.created_at = yesterday_ts();
+            l.user_id = Some("u1".to_string());
+            l.model = "gpt-4".to_string();
+            s2.requests.add(l).unwrap();
+        }
+        let r1 = s2.backfill_history(5000).unwrap();
+        assert_eq!(r1.skipped_shrink, 0);
+        let day_after_1 = serde_json::to_value(s2.daily.load_day(&yday).unwrap()).unwrap();
+        let user_after_1 =
+            serde_json::to_value(s2.daily.load_user_range("u1", &yday, &yday)[0]).unwrap();
+        // marker 已存在时 cron 会跳过；手动重建路径 clear 后再跑等价
+        s2.daily.clear_backfill_marker().unwrap();
+        let r2 = s2.backfill_history(5000).unwrap();
+        assert_eq!(r2.skipped_shrink, 0, "相等不触发守卫（仅严格大于拒）");
+        assert_eq!(
+            serde_json::to_value(s2.daily.load_day(&yday).unwrap()).unwrap(),
+            day_after_1
+        );
+        assert_eq!(
+            serde_json::to_value(s2.daily.load_user_range("u1", &yday, &yday)[0]).unwrap(),
+            user_after_1
+        );
     }
 
     #[test]

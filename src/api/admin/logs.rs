@@ -385,6 +385,10 @@ pub struct LogRetentionBody {
     /// 审计日志独立保留天数（None = 跟随请求日志天数）
     #[serde(default)]
     pub audit_max_age_days: Option<u64>,
+    /// 日聚合保留天数（含今天 N 个自然日；None/0 = 永久——聚合行量级
+    /// 极小，默认不清。清理的是报表历史，不影响计费/明细）
+    #[serde(default)]
+    pub daily_max_age_days: Option<u64>,
 }
 
 /// GET /api/logs/inflight — 当前在途请求快照（仅管理员）
@@ -473,13 +477,14 @@ pub async fn handle_get_log_retention(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    let (days, capacity, audit_days) = state.log_store.requests.retention_full();
+    let (days, capacity, audit_days, daily_days) = state.log_store.requests.retention_full();
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
             "max_age_days": days,
             "max_capacity": capacity.unwrap_or(100_000),
             "audit_max_age_days": audit_days,
+            "daily_max_age_days": daily_days,
         }
     })))
 }
@@ -493,23 +498,42 @@ pub async fn handle_update_log_retention(
     let _ = verify_admin(&state, &headers).await?;
     // 0 = 清除独立天数（回到跟随请求日志），与前端「清空输入」语义一致
     let audit_days = body.audit_max_age_days.filter(|d| *d > 0);
+    // 日聚合档：0 同样视作「留空 = 永久不清」
+    let daily_days = body.daily_max_age_days.filter(|d| *d > 0);
     state
         .log_store
         .requests
-        .set_retention_full(body.max_age_days, body.max_capacity, audit_days)
+        .set_retention_full(body.max_age_days, body.max_capacity, audit_days, daily_days)
         .map_err(|e| {
             error_response(
                 &format!("Failed to save retention: {e}"),
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
         })?;
+    // 设置日聚合保留后同请求立即 prune 一次（蓝本 stats_api 同款语义），
+    // 失败只 warn：配置已存，明日的 sweep 会补做。
+    let mut daily_pruned: u64 = 0;
+    if let Some(n) = daily_days {
+        match state
+            .log_store
+            .daily
+            .prune_before(&crate::log::daily_agg::cutoff_date_key(n))
+        {
+            Ok(m) => daily_pruned = m as u64,
+            Err(e) => tracing::warn!("日聚合保留清理失败: {e}"),
+        }
+    }
     tracing::info!(
-        "日志保留配置已更新: max_age_days={:?} max_capacity={:?} audit_max_age_days={:?}",
+        "日志保留配置已更新: max_age_days={:?} max_capacity={:?} audit_max_age_days={:?} daily_max_age_days={:?}",
         body.max_age_days,
         body.max_capacity,
-        body.audit_max_age_days
+        body.audit_max_age_days,
+        body.daily_max_age_days
     );
-    Ok(Json(serde_json::json!({ "success": true, "data": null })))
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "daily_pruned": daily_pruned }
+    })))
 }
 
 /// POST /api/logs/cleanup — 手动触发一次按保留天数的清理
@@ -528,9 +552,9 @@ pub async fn handle_cleanup_logs(
     body: Option<Json<LogCleanupBody>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _ = verify_admin(&state, &headers).await?;
-    let (req_days, _capacity, audit_days) = state.log_store.requests.retention_full();
+    let (req_days, _capacity, audit_days, daily_days) = state.log_store.requests.retention_full();
     let req_days = body.and_then(|Json(b)| b.days).or(req_days);
-    if req_days.is_none() && audit_days.is_none() {
+    if req_days.is_none() && audit_days.is_none() && daily_days.is_none() {
         return Err(error_response("未配置保留天数", StatusCode::BAD_REQUEST));
     }
     // 请求日志与审计日志各自按自己的窗口清理；审计未单独设天数时跟随请求日志
@@ -546,6 +570,17 @@ pub async fn handle_cleanup_logs(
         requests = n as u64;
         removed += requests;
     }
+    // 日聚合档独立于明细：按配置的 daily_max_age_days 现算截止日键。
+    // 明细删除不影响聚合数字（报表仍含已删请求），文案由前端确认框承担。
+    let mut daily_rows = 0u64;
+    if let Some(n) = daily_days {
+        daily_rows = state
+            .log_store
+            .daily
+            .prune_before(&crate::log::daily_agg::cutoff_date_key(n))
+            .unwrap_or(0) as u64;
+        removed += daily_rows;
+    }
     let audit_cutoff = audit_days
         .map(|d| chrono::Utc::now().timestamp() - (d as i64) * 86400)
         .or(req_cutoff);
@@ -560,6 +595,44 @@ pub async fn handle_cleanup_logs(
     }
     Ok(Json(serde_json::json!({
         "success": true,
-        "data": { "removed": removed, "requests": requests, "audits": audits, "cutoff": req_cutoff }
+        "data": { "removed": removed, "requests": requests, "audits": audits, "daily_rows": daily_rows, "cutoff": req_cutoff }
+    })))
+}
+
+/// POST /api/logs/agg/rebuild — 手动重建日聚合（仅管理员，逃生门）。
+///
+/// 流程：清回填标记（报表读路径立刻退回明细现算，不出现半重建假数）→
+/// 全量流式重读明细回填（只动 date<今天 的日子，今天归运行期记账）→
+/// 重设标记。shrink 守卫在回填内做：既有行计数更大（明细已被 retention
+/// 裁过）的行保留不动，宁可旧数不准也不虚构小值。
+pub async fn handle_agg_rebuild(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    if let Err(e) = state.log_store.daily.clear_backfill_marker() {
+        return Err(error_response(
+            &format!("Failed to clear backfill marker: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+    }
+    let report = state.log_store.backfill_history(5000).map_err(|e| {
+        error_response(
+            &format!("Agg rebuild failed: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    super::common::record_audit(
+        &state,
+        &super::common::admin_id_from_session(&state, &headers).await,
+        "logs.agg_rebuild",
+        "daily_agg",
+        None,
+        Some(serde_json::to_value(&report).unwrap_or_default()),
+    );
+    tracing::info!("日聚合手动重建完成: {report:?}");
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": report
     })))
 }

@@ -842,7 +842,8 @@ async fn main() -> anyhow::Result<()> {
                 run: Box::new(move || {
                     let ls = log_store.clone();
                     Box::pin(async move {
-                        let (days, _capacity, audit_days) = ls.requests.retention_full();
+                        let (days, _capacity, audit_days, daily_days) =
+                            ls.requests.retention_full();
                         // 容量上限由写入路径的 purge_overflow 消费（同样读
                         // retention 配置），此处只负责按天清理。
                         // 两类日志各自独立：审计可单独设天数（未设时跟随请求日志），
@@ -865,7 +866,52 @@ async fn main() -> anyhow::Result<()> {
                                 Err(e) => tracing::warn!("审计日志保留清理失败: {e}"),
                             }
                         }
+                        // 第三档：日聚合保留（None = 永久）。键区间尾段是
+                        // YYYY-MM-DD，含今天 N 个自然日 → cutoff=今天−(N−1)。
+                        if let Some(n) = daily_days {
+                            let cutoff = crate::log::daily_agg::cutoff_date_key(n);
+                            match ls.daily.prune_before(&cutoff) {
+                                Ok(k) => removed += k as u64,
+                                Err(e) => tracing::warn!("日聚合保留清理失败: {e}"),
+                            }
+                        }
                         removed
+                    })
+                }),
+            });
+        }
+        // 日聚合历史回填：聚合表上线前已有明细，启动后一次性折进按天主档
+        // （只动 date<今天 的日子，今天归运行期记账）。回填标记存在即跳过
+        // ——marker 同时是报表读路径的聚合闸门（阶段 2 的 agg_available）。
+        // 24h 周期只为兜住「首次启动失败/期间明细增长」的补跑。
+        {
+            let log_store = state.log_store.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "daily-agg-backfill",
+                interval: Duration::from_secs(86400),
+                first_run_delay: Duration::from_secs(60),
+                run: Box::new(move || {
+                    let ls = log_store.clone();
+                    Box::pin(async move {
+                        if ls.daily.agg_available() {
+                            return 0;
+                        }
+                        match ls.backfill_history(5000) {
+                            Ok(r) => {
+                                tracing::info!(
+                                    "日聚合回填完成: 扫描 {} 条明细, 主档 {} 天, 用户行 {}, shrink 守卫跳过 {}",
+                                    r.scanned,
+                                    r.days_written,
+                                    r.user_rows_written,
+                                    r.skipped_shrink
+                                );
+                                r.days_written as u64
+                            }
+                            Err(e) => {
+                                tracing::warn!("日聚合回填失败（下一周期重试）: {e}");
+                                0
+                            }
+                        }
                     })
                 }),
             });
@@ -1434,6 +1480,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             put(api::admin::handle_update_log_retention),
         )
         .route("/api/logs/cleanup", post(api::admin::handle_cleanup_logs))
+        // 日聚合手动重建（逃生门：聚合数字可疑时管理员一键重算历史）
+        .route(
+            "/api/logs/agg/rebuild",
+            post(api::admin::handle_agg_rebuild),
+        )
         // 数据看板
         .route(
             "/api/dashboard/consumption_trend",
