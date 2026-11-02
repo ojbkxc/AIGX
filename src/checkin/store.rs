@@ -67,6 +67,9 @@ pub struct CheckinRecord {
     pub source: String,
     pub outcome: CheckinOutcome,
     pub ok: bool,
+    /// 本次执行链是否附带保活动作（签到后自动链对国际版账号顺带保活时置真）
+    #[serde(default)]
+    pub kept_active: bool,
     pub message: String,
 }
 
@@ -87,6 +90,21 @@ pub struct CheckinSchedule {
     /// 上次结果摘要
     #[serde(default)]
     pub last_result: String,
+    /// 上次执行计数（对齐 Agent2API 的「成功 n·保活 n·失败 n」）
+    #[serde(default)]
+    pub last_ok: usize,
+    #[serde(default)]
+    pub last_keepalive: usize,
+    #[serde(default)]
+    pub last_failed: usize,
+}
+
+/// 一次计划执行的计数汇总（界面「成功 n·保活 n·失败 n」）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScheduleCounts {
+    pub ok: usize,
+    pub keepalive: usize,
+    pub failed: usize,
 }
 
 /// 签到总设置。
@@ -199,13 +217,22 @@ impl CheckinStore {
         Ok(self.schedules())
     }
 
-    /// 记下某计划今天已触发（当天去重）。
-    pub fn mark_fired(&self, id: &str, date: &str, result: &str) -> Result<()> {
+    /// 记下某计划今天已触发（当天去重）。`counts` 落「成功 n·保活 n·失败 n」供界面展示。
+    pub fn mark_fired(
+        &self,
+        id: &str,
+        date: &str,
+        result: &str,
+        counts: &ScheduleCounts,
+    ) -> Result<()> {
         {
             let mut guard = self.schedules.write();
             if let Some(schedule) = guard.schedules.iter_mut().find(|s| s.id == id) {
                 schedule.last_fired_date = date.to_string();
                 schedule.last_result = result.to_string();
+                schedule.last_ok = counts.ok;
+                schedule.last_keepalive = counts.keepalive;
+                schedule.last_failed = counts.failed;
             }
         }
         self.persist_schedules()
@@ -227,17 +254,22 @@ impl CheckinStore {
 
     /// 读最近 `days` 天的记录，按时间倒序。
     ///
-    /// `provider` / `account_id` / `outcome` 为空表示不过滤。
+    /// `provider` / `account_id` / `outcome` / `keyword` 为空表示不过滤
+    /// （`keyword` 对账号名、账号 id、上游、说明做大小写不敏感包含匹配）。
     pub fn recent_records(
         &self,
         days: u32,
         provider: Option<&str>,
         account_id: Option<&str>,
         outcome: Option<CheckinOutcome>,
+        keyword: Option<&str>,
     ) -> Result<Vec<CheckinRecord>> {
         let days = days.clamp(1, KEEP_DAYS as u32) as i64;
         let today =
             chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+        let keyword = keyword
+            .map(|k| k.trim().to_lowercase())
+            .filter(|k| !k.is_empty());
         let mut out: Vec<CheckinRecord> = Vec::new();
         for offset in 0..days {
             let date = (today - chrono::Duration::days(offset))
@@ -251,10 +283,46 @@ impl CheckinStore {
                 provider.map(|p| r.provider == p).unwrap_or(true)
                     && account_id.map(|a| r.account_id == a).unwrap_or(true)
                     && outcome.map(|o| r.outcome == o).unwrap_or(true)
+                    && keyword.as_ref().map_or(true, |k| {
+                        r.account_name.to_lowercase().contains(k)
+                            || r.account_id.to_lowercase().contains(k)
+                            || r.provider.to_lowercase().contains(k)
+                            || r.message.to_lowercase().contains(k)
+                    })
             }));
         }
         out.sort_by_key(|r| std::cmp::Reverse(r.ts));
         Ok(out)
+    }
+
+    /// 台账总条数（统计卡「累计记录数」）。
+    pub fn total_records(&self) -> Result<usize> {
+        let mut total = 0usize;
+        for key in self.store.list(RECORD_PREFIX)? {
+            if let Some(bucket) = self.store.get::<Vec<CheckinRecord>>(&key)? {
+                total += bucket.len();
+            }
+        }
+        Ok(total)
+    }
+
+    /// 把某账号某 provider 当日最后一条记录标记「附带保活」。
+    ///
+    /// 台账的设计是「只追加、不改写」，但「本次执行链附带了保活」是元数据
+    /// 修正（由签到后的自动链在保活成功后回写），不改变记录的语义，因此
+    /// 只改这一个布尔字段。找不到记录时静默成功（保活回写不该让主流程失败）。
+    pub fn mark_kept_active(&self, account_id: &str, provider: &str, date: &str) -> Result<()> {
+        let key = Self::record_key(date);
+        let mut bucket: Vec<CheckinRecord> = self.store.get(&key)?.unwrap_or_default();
+        if let Some(last) = bucket
+            .iter_mut()
+            .rev()
+            .find(|r| r.account_id == account_id && r.provider == provider)
+        {
+            last.kept_active = true;
+            self.store.put(&key, &bucket)?;
+        }
+        Ok(())
     }
 
     /// 清空台账（`days` 天前的桶一并删除，保留窗口外的不动）。
@@ -301,13 +369,13 @@ impl CheckinStore {
 
     /// 今天某账号某 provider 的最后一条记录（用于「今日是否已签」）。
     pub fn last_today(&self, account_id: &str, provider: &str) -> Result<Option<CheckinRecord>> {
-        let records = self.recent_records(1, Some(provider), Some(account_id), None)?;
+        let records = self.recent_records(1, Some(provider), Some(account_id), None, None)?;
         Ok(records.into_iter().next())
     }
 
     /// 台账按 provider 汇总（今日）：`provider → (完成数, 总数)`。
     pub fn today_summary(&self) -> Result<HashMap<String, (usize, usize)>> {
-        let records = self.recent_records(1, None, None, None)?;
+        let records = self.recent_records(1, None, None, None, None)?;
         let mut map: HashMap<String, (usize, usize)> = HashMap::new();
         for r in records {
             let entry = map.entry(r.provider.clone()).or_insert((0, 0));
@@ -355,6 +423,9 @@ mod tests {
                 providers: vec!["loomy".into()],
                 last_fired_date: String::new(),
                 last_result: String::new(),
+                last_ok: 0,
+                last_keepalive: 0,
+                last_failed: 0,
             })
             .unwrap();
         assert_eq!(list.len(), 1);
@@ -391,28 +462,50 @@ mod tests {
                         CheckinOutcome::Failed
                     },
                     ok,
+                    kept_active: false,
                     message: String::new(),
                 })
                 .unwrap();
         }
-        assert_eq!(store.recent_records(1, None, None, None).unwrap().len(), 3);
         assert_eq!(
             store
-                .recent_records(1, Some("loomy"), None, None)
+                .recent_records(1, None, None, None, None)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            store
+                .recent_records(1, Some("loomy"), None, None, None)
                 .unwrap()
                 .len(),
             2
         );
         assert_eq!(
             store
-                .recent_records(1, None, None, Some(CheckinOutcome::Failed))
+                .recent_records(1, None, None, Some(CheckinOutcome::Failed), None)
                 .unwrap()
                 .len(),
             1
         );
+        // keyword 大小写不敏感、命中账号名 / 说明
+        assert_eq!(
+            store
+                .recent_records(1, None, None, None, Some("账号 1"))
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            store
+                .recent_records(1, None, None, None, Some("x-nomatch"))
+                .unwrap()
+                .is_empty(),
+            true
+        );
         assert_eq!(store.clear_records(1).unwrap(), 3);
         assert!(store
-            .recent_records(1, None, None, None)
+            .recent_records(1, None, None, None, None)
             .unwrap()
             .is_empty());
     }

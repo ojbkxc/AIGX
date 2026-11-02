@@ -396,8 +396,18 @@ fn paths_checkin_center() -> Value {
             "get": op("签到中心", "总览快照：支持清单 + 今日汇总 + 账号签到状态")
         },
         "/api/checkin-center/records": {
-            "get": op_params("签到中心", "签到台账（按天分桶）", &[query_param("days", "integer", "回溯天数")]),
+            "get": op_params("签到中心", "签到台账（按天分桶、分页）", &[
+                query_param("days", "integer", "回溯天数"),
+                query_param("provider", "string", "按上游过滤"),
+                query_param("outcome", "string", "按结果过滤（success/already/pending/failed）"),
+                query_param("keyword", "string", "关键词（账号名/账号 id/上游/说明）"),
+                query_param("offset", "integer", "分页偏移"),
+                query_param("limit", "integer", "分页大小（默认 50，≤0 = 全部）"),
+            ]),
             "delete": op_params("签到中心", "清空签到台账", &[query_param("days", "integer", "回溯天数")])
+        },
+        "/api/checkin-center/records/mark-kept-active": {
+            "post": op_body("签到中心", "把某账号当日最后一条记录标记「附带保活」", "account_id: string, provider: string")
         },
         "/api/checkin-center/run": {
             "post": op_body("签到中心", "立即签到（全部 / 指定账号 / 指定 provider）", "account_ids?: string[], providers?: string[]")
