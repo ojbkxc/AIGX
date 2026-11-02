@@ -41,6 +41,29 @@ pub async fn run(
     }
 }
 
+/// 待领新手福利项数（只读记忆，零上游请求）。
+///
+/// - Loomy：盘点时存过 `unclaimed`，直接读；
+/// - 小浣熊：没有只读口，靠本地记忆数「还没领的通道」；
+/// - OfficeAce：新人礼与签到同链，恒 0；
+/// - 从未盘点过（无记忆）：返回 None，界面显示「待盘点」。
+pub fn pending_count(store: &Arc<FileStore>, account_id: &str, provider: &str) -> Option<usize> {
+    let memory = load_memory(store, &memory_key(account_id, "onboarding"))?;
+    match provider {
+        "loomy" => memory
+            .get("unclaimed")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize),
+        "xiaohuanxiong" => Some(
+            ["desktop", "mobile"]
+                .iter()
+                .filter(|c| memory.get(*c).and_then(Value::as_bool) != Some(true))
+                .count(),
+        ),
+        _ => Some(0),
+    }
+}
+
 /// Loomy：读任务列表，`claim` 时逐个完成未完成项。
 async fn loomy(
     store: &Arc<FileStore>,

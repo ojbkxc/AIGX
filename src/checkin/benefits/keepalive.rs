@@ -53,11 +53,22 @@ pub fn free_models(store: &FileStore) -> Vec<String> {
 }
 
 /// 执行一条保活链。
+///
+/// `mode` 三档手动粒度（对齐 Agent2API `WorkbuddyActivity::parse`）：
+/// - `"claim"`：只探测 + 领取日活奖励（不打最小对话）；
+/// - `"keepalive"`：只打免费模型最小对话（不探测不领取）；
+/// - `"full"`：探测 + 领取 + 最小对话（定时与批量走这一档）。
 pub async fn run(
     store: &Arc<FileStore>,
     client: &reqwest::Client,
     session: &AccountSession,
+    mode: &str,
 ) -> BenefitResult {
+    let (with_claim, with_keepalive) = match mode {
+        "claim" => (true, false),
+        "keepalive" => (false, true),
+        _ => (true, true),
+    };
     let base = crate::account_session::adapter::effective_base_url(session)
         .unwrap_or_else(|_| "https://www.workbuddy.ai".to_string());
     let base = base.trim_end_matches('/');
@@ -75,66 +86,68 @@ pub async fn run(
         headers.push(("X-User-Id".to_string(), uid.clone()));
     }
 
-    // ① 探测今日活跃奖励状态
+    // ① 探测活动是否开启、今天是否已领；未领则领取
     let mut steps: Vec<Value> = Vec::new();
-    let probe = send_json(
-        client,
-        reqwest::Method::POST,
-        &format!("{base}/billing/meter/checkin-activity-status"),
-        &headers,
-        Some(&json!({})),
-    )
-    .await;
     let mut claimed_now = false;
-    match &probe {
-        Ok((status, body)) if (200..300).contains(status) => {
-            let checked = body
-                .pointer("/data/today_checked_in")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let active = body
-                .pointer("/data/active")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            steps.push(json!({
-                "step": "probe",
-                "checked_in_today": checked,
-                "active": active,
-            }));
-            // ② 未领取则领取（今日已领就跳过，别重复打上游）
-            if !checked && active {
-                match send_json(
-                    client,
-                    reqwest::Method::POST,
-                    &format!("{base}/v2/billing/meter/daily-checkin"),
-                    &headers,
-                    Some(&json!({})),
-                )
-                .await
-                {
-                    Ok((code, body)) => {
-                        claimed_now = (200..300).contains(&code);
-                        steps.push(json!({
-                            "step": "claim",
-                            "http": code,
-                            "ok": claimed_now,
-                            "body": body.get("msg").or_else(|| body.get("message")).cloned()
-                                .unwrap_or(Value::Null),
-                        }));
+    if with_claim {
+        let probe = send_json(
+            client,
+            reqwest::Method::POST,
+            &format!("{base}/billing/meter/checkin-activity-status"),
+            &headers,
+            Some(&json!({})),
+        )
+        .await;
+        match &probe {
+            Ok((status, body)) if (200..300).contains(status) => {
+                let checked = body
+                    .pointer("/data/today_checked_in")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let active = body
+                    .pointer("/data/active")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                steps.push(json!({
+                    "step": "probe",
+                    "checked_in_today": checked,
+                    "active": active,
+                }));
+                // ② 未领取则领取（今日已领就跳过，别重复打上游）
+                if !checked && active {
+                    match send_json(
+                        client,
+                        reqwest::Method::POST,
+                        &format!("{base}/v2/billing/meter/daily-checkin"),
+                        &headers,
+                        Some(&json!({})),
+                    )
+                    .await
+                    {
+                        Ok((code, body)) => {
+                            claimed_now = (200..300).contains(&code);
+                            steps.push(json!({
+                                "step": "claim",
+                                "http": code,
+                                "ok": claimed_now,
+                                "body": body.get("msg").or_else(|| body.get("message")).cloned()
+                                    .unwrap_or(Value::Null),
+                            }));
+                        }
+                        Err(e) => steps.push(json!({ "step": "claim", "ok": false, "error": e })),
                     }
-                    Err(e) => steps.push(json!({ "step": "claim", "ok": false, "error": e })),
                 }
             }
+            Ok((status, _)) => steps.push(json!({ "step": "probe", "http": status })),
+            Err(e) => steps.push(json!({ "step": "probe", "error": e })),
         }
-        Ok((status, _)) => steps.push(json!({ "step": "probe", "http": status })),
-        Err(e) => steps.push(json!({ "step": "probe", "error": e })),
     }
 
     // ③ 免费模型最小对话保活（桌面 + 网页各一发）
     let models = free_models(store);
     let model = models.first().cloned().unwrap_or_default();
     let mut keepalive_ok = 0usize;
-    if !model.is_empty() {
+    if with_keepalive && !model.is_empty() {
         // 桌面通道：标准 chat/completions，max_tokens 极小
         let desktop = send_json(
             client,
@@ -203,7 +216,7 @@ pub async fn run(
     } else {
         format!("日活奖励今日已领或未开启，保活 {keepalive_ok}/2 成功")
     };
-    if keepalive_ok == 0 {
+    if keepalive_ok == 0 && with_keepalive {
         BenefitResult::pending(format!("{summary}（保活请求都没成功，稍后重试）")).with_data(memory)
     } else if claimed_now {
         BenefitResult::done(summary).with_data(memory)

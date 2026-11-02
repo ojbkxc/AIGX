@@ -22,7 +22,7 @@ use std::time::Duration;
 use chrono::{FixedOffset, Utc};
 
 use super::claim::{self, supports_checkin};
-use super::store::{CheckinOutcome, CheckinRecord, CheckinStore};
+use super::store::{CheckinOutcome, CheckinRecord, CheckinStore, ScheduleCounts};
 use crate::account_session::AccountSessionStore;
 
 const TICK: Duration = Duration::from_secs(30);
@@ -98,7 +98,7 @@ async fn run_due(
         if schedule.time.as_str() > now.as_str() {
             continue;
         }
-        let summary = run_schedule(
+        let outcome = run_schedule(
             store,
             sessions,
             egress,
@@ -106,7 +106,12 @@ async fn run_due(
             settings.gap_ms,
         )
         .await;
-        let _ = store.mark_fired(&schedule.id, &date, &summary);
+        let counts = ScheduleCounts {
+            ok: outcome.ok,
+            keepalive: outcome.keepalive,
+            failed: outcome.failed,
+        };
+        let _ = store.mark_fired(&schedule.id, &date, &outcome.summary, &counts);
     }
 }
 
@@ -122,19 +127,36 @@ pub fn is_hhmm(value: &str) -> bool {
     h < 24 && m < 60
 }
 
-/// 跑一次指定 provider 范围的签到，返回一句话摘要。
+/// 一次计划执行的结果汇总（`summary` 进台账，计数供界面展示）。
+#[derive(Debug, Clone, Default)]
+pub struct ScheduleOutcome {
+    /// 一句话摘要
+    pub summary: String,
+    /// 成功数（含「今日已领」）
+    pub ok: usize,
+    /// 附带保活数（签到后自动链对国际版账号顺带保活）
+    pub keepalive: usize,
+    /// 失败数
+    pub failed: usize,
+}
+
+/// 跑一次指定 provider 范围的签到，返回计数汇总。
 pub async fn run_schedule(
     store: &CheckinStore,
     sessions: &AccountSessionStore,
     egress: &crate::egress::EgressCache,
     providers: &[String],
     gap_ms: u64,
-) -> String {
+) -> ScheduleOutcome {
     let targets = collect_targets(sessions, providers);
     if targets.is_empty() {
-        return "没有可签到的账号".to_string();
+        return ScheduleOutcome {
+            summary: "没有可签到的账号".to_string(),
+            ..Default::default()
+        };
     }
     let mut ok = 0usize;
+    let mut failed = 0usize;
     let mut total = 0usize;
     for session in targets {
         total += 1;
@@ -147,20 +169,36 @@ pub async fn run_schedule(
                     "schedule",
                     CheckinOutcome::Failed,
                     &format!("出口配置错误：{e}"),
+                    false,
                 );
+                failed += 1;
                 continue;
             }
         };
         let result = claim::claim_for(&client, &session).await;
         if result.outcome.is_ok() {
             ok += 1;
+        } else if result.outcome == CheckinOutcome::Failed {
+            failed += 1;
         }
-        record(store, &session, "schedule", result.outcome, &result.msg);
+        record(
+            store,
+            &session,
+            "schedule",
+            result.outcome,
+            &result.msg,
+            false,
+        );
         if gap_ms > 0 {
             tokio::time::sleep(Duration::from_millis(gap_ms)).await;
         }
     }
-    format!("成功 {ok}/{total}")
+    ScheduleOutcome {
+        summary: format!("成功 {ok}/{total}"),
+        ok,
+        failed,
+        keepalive: 0,
+    }
 }
 
 /// 收集参与签到的账号（启用 + 凭证未过期 + provider 在白名单内）。
@@ -178,13 +216,14 @@ pub fn collect_targets(
         .collect()
 }
 
-/// 写一条台账。
+/// 写一条台账。`kept_active` 标记本次执行链是否附带保活动作。
 pub fn record(
     store: &CheckinStore,
     session: &crate::account_session::model::AccountSession,
     source: &str,
     outcome: CheckinOutcome,
     message: &str,
+    kept_active: bool,
 ) {
     let _ = store.append_record(CheckinRecord {
         ts: Utc::now().timestamp(),
@@ -195,6 +234,7 @@ pub fn record(
         source: source.to_string(),
         outcome,
         ok: outcome.is_ok(),
+        kept_active,
         message: message.to_string(),
     });
 }
