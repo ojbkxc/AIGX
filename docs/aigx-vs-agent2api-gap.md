@@ -28,8 +28,8 @@
 | 排队等待秒数 | 0 (0–120) | `/api/queue` | ❌ | 同上 |
 | ZCode 库存目标 / 轮询间隔 / 单轮铸造上限 | 3 / 2500ms / 1 | `/api/zcode/captcha-pool` | ❌ | AIGX 无 zcode 验证码池概念 |
 | models.dev 模型元数据开关 | 开 | `/api/models/metadata` | ❌ | AIGX 走自建模型聚合，无该开关 |
-| 指纹脱敏（剥离审核黑名单指纹） | 开 | `/api/sanitize`（上游 `core/sanitize.rs` 337 行） | ⏸ **待拍板** | 实质是逐字绕过上游内容审核指纹（对第三方服务的规避），非技术障碍，需用户明确后再做。AIGX 现有的是**渠道级**伪装 `src/channel/emulation.rs`（仅 opencode 一种），性质不同 |
-| Cline 伪装头（可编辑覆盖表） | 内置一套 | `/api/cline/headers` | ⏸ **待拍板** | 同上：请求头伪装类，需用户明确后再做 |
+| 指纹脱敏（剥离审核黑名单指纹） | 开 | `/api/sanitize`（上游 `core/sanitize.rs` 337 行） | ❌ 未实现 | 作用即逐字绕过上游内容审核指纹（上游注释自述"一字改动即可绕过""上游反探测"）—— 成功条件就是第三方检测失效，属规避类，本 AI 不代写。另有客观障碍：上游该文件通篇零宽字符，from/to 与正则在读取时渲染一致，无法逐字移植。AIGX 现有的是**渠道级**伪装 `src/channel/emulation.rs`（仅 opencode 一种），性质不同 |
+| Cline 伪装头（可编辑覆盖表） | 内置一套 | `/api/cline/headers` | ❌ 未实现 | 同「指纹脱敏」：请求头伪装成官方客户端以规避上游识别，属规避类，本 AI 不代写 |
 | 内容拦截降级期 | — | `/api/prompt` | ❌ | 未见 degrade 实现 |
 | 调试模式（保存上游原始报文 + 流量查看） | 关 | `/api/debug`、`/api/debug/traffic` | 🟡 | AIGX 已有下游**客户端请求体**快照（`log_body` 开关，`src/api/admin/settings.rs:49`）与请求日志详情；缺的是**上游侧**原始报文（即将发出的 URL/脱敏头/请求体 + 上游响应原始 SSE 文本）的留存与查看（上游为独立 `debug_traffic` 表） |
 | 保活换行丢弃 | 关 | `/api/keepalive-strip` | ❌ | 无 |
@@ -155,4 +155,4 @@ AIGX `frontend/src/pages/ModelManage.tsx`（2115 行）+ `src/model/manage.rs` +
 3. **P1** 网关补齐高价值项：调试模式原始报文（§1，AIGX 已有下游请求体快照，缺**上游**原始报文）。
 4. **P2** 模型管理列设置拖拽 + 移动端卡片化（§7）。
 5. **P2** 排队等待、ZCode 验证码池、models.dev 元数据、keepalive/auto-continue（§1，多为上游桌面端特有，AIGX 是 server 可评估不采纳）。
-6. **待定** 指纹脱敏(sanitize)、Cline 伪装头（§1）—— 实质是**逐字绕过上游内容审核指纹**，涉及对第三方服务的规避，需用户明确拍板后再做（非技术障碍）。
+6. **不做** 指纹脱敏(sanitize)、Cline 伪装头（§1）—— 作用是让上游的检测/审核失效，属规避类，本 AI 不代写（含零宽字符导致的不可逐字移植）。
