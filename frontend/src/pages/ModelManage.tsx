@@ -8,6 +8,7 @@ import {
   ChevronUp,
   Download,
   FlaskConical,
+  GripVertical,
   Image as ImageIcon,
   Lightbulb,
   Loader2,
@@ -40,6 +41,7 @@ const GROUP_LIMIT = 8;
 /** localStorage 键 */
 const LS_FILTERS = 'aigx-mm-filters';
 const LS_COLS = 'aigx-mm-cols';
+const LS_COLCFG = 'aigx-mm-colcfg';
 const LS_COLW = 'aigx-mm-colw';
 const LS_PAGE_SIZE = 'aigx-mm-pagesize';
 
@@ -51,16 +53,9 @@ type SourceFilter = 'all' | 'channel' | 'account';
 /** 排序档位（对齐 Agent2API MODEL_SORT_OPTIONS） */
 type SortMode = 'default' | 'ratio-asc' | 'ratio-desc';
 
-/** 可显隐的列（check / model / act 锁定不可关） */
+/** 可显隐的列（check / model / act 锁定不可关，但可拖动排序） */
 type ColKey = 'enable' | 'price' | 'source' | 'caps' | 'alias';
-const COL_DEFS: Array<{ key: ColKey; label: string }> = [
-  { key: 'enable', label: '启用' },
-  { key: 'price', label: '定价' },
-  { key: 'source', label: '来源' },
-  { key: 'caps', label: '能力' },
-  { key: 'alias', label: '映射' },
-];
-/** 全部表格列（含锁定列）——渲染顺序与默认宽度 */
+/** 全部表格列（含锁定列）——默认渲染顺序与默认宽度 */
 type AnyCol = 'check' | ColKey | 'model' | 'act';
 const COL_ORDER: AnyCol[] = ['check', 'enable', 'model', 'price', 'source', 'caps', 'alias', 'act'];
 const COL_DEFAULT_W: Record<AnyCol, string> = {
@@ -73,6 +68,96 @@ const COL_DEFAULT_W: Record<AnyCol, string> = {
   alias: '33%',
   act: '132px',
 };
+/** 锁定列：恒显示（表不能没有勾选框 / 模型名 / 操作），但可参与拖序 */
+const LOCKED_COLS: AnyCol[] = ['check', 'model', 'act'];
+/** 列设置面板显示的列名（锁定列也要有名字） */
+const COL_PANEL_LABEL: Record<AnyCol, string> = {
+  check: '选择',
+  enable: '启用',
+  model: '模型',
+  price: '定价',
+  source: '来源',
+  caps: '能力',
+  alias: '映射',
+  act: '操作',
+};
+
+/** 列对齐三档（对齐 Agent2API table-col-settings 的 ALIGNS） */
+type Align = 'left' | 'center' | 'right';
+const ALIGN_OPTIONS: Array<{ value: Align; label: string }> = [
+  { value: 'left', label: '左' },
+  { value: 'center', label: '居中' },
+  { value: 'right', label: '右' },
+];
+const isAlign = (v: unknown): v is Align => ALIGN_OPTIONS.some((a) => a.value === v);
+/** 各列的默认对齐 = 现有 CSS 的观感（勾/启用居中，其余左对齐），视觉不突变 */
+const COL_DEFAULT_ALIGN: Record<AnyCol, Align> = {
+  check: 'center',
+  enable: 'center',
+  model: 'left',
+  price: 'left',
+  source: 'left',
+  caps: 'left',
+  alias: 'left',
+  act: 'left',
+};
+/** 一列的配置项：**数组顺序就是用户拖出来的列顺序**（对齐上游 ColConfigItem） */
+interface ColItem {
+  key: AnyCol;
+  visible: boolean;
+  align: Align;
+}
+
+function defaultColItems(): ColItem[] {
+  return COL_ORDER.map((key) => ({ key, visible: true, align: COL_DEFAULT_ALIGN[key] }));
+}
+
+/**
+ * 读列配置：v2（LS_COLCFG，数组含对齐）→ 旧 LS_COLS 显隐表迁移 → 默认。
+ * 脏值逐条忽略（对齐上游 normalize）：新出现的键按默认相对位置插入，
+ * 存坏了退回默认 —— 列设置读不出来不该让整张表渲染不了。
+ */
+function readColItems(): ColItem[] {
+  const base = defaultColItems();
+  const raw = readLS<unknown>(LS_COLCFG, null);
+  if (Array.isArray(raw)) {
+    const items: ColItem[] = [];
+    for (const entry of raw) {
+      if (!entry || typeof entry !== 'object') continue;
+      const e = entry as { key?: unknown; visible?: unknown; align?: unknown };
+      const found = base.find((b) => b.key === e.key);
+      if (!found || items.some((i) => i.key === found.key)) continue;
+      const locked = LOCKED_COLS.includes(found.key);
+      items.push({
+        key: found.key,
+        visible: locked || e.visible !== false,
+        align: isAlign(e.align) ? e.align : found.align,
+      });
+    }
+    // 缺失的键按 COL_ORDER 的相对位置补回（将来加列时老存盘不至于错位）
+    for (const b of base) {
+      if (items.some((i) => i.key === b.key)) continue;
+      const specIdx = COL_ORDER.indexOf(b.key);
+      let insertAt = items.length;
+      for (let k = 0; k < items.length; k += 1) {
+        if (COL_ORDER.indexOf(items[k].key) > specIdx) {
+          insertAt = k;
+          break;
+        }
+      }
+      items.splice(insertAt, 0, b);
+    }
+    return items.length === base.length ? items : base;
+  }
+  // 旧格式迁移：{col: boolean} 只有显隐，顺序与对齐取默认
+  const legacy = readLS<Partial<Record<ColKey, boolean>> | null>(LS_COLS, null);
+  if (legacy && typeof legacy === 'object' && !Array.isArray(legacy)) {
+    return base.map((b) =>
+      !LOCKED_COLS.includes(b.key) && legacy[b.key as ColKey] === false ? { ...b, visible: false } : b,
+    );
+  }
+  return base;
+}
 
 /** 能力圆点定义（对齐 Agent2API caps 列四枚圆点：工具/图像/音频/思考） */
 const CAP_DOTS: Array<{ key: string; match: RegExp; label: string; icon: typeof Wrench }> = [
@@ -253,13 +338,15 @@ export default function ModelManage(): JSX.Element {
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchReport, setBatchReport] = useState('');
 
-  // 列显隐 / 列宽（localStorage 记忆，对齐 Agent2API 列设置 + 列宽拖动）
-  const [colConfig, setColConfig] = useState<Record<ColKey, boolean>>(() =>
-    readLS(LS_COLS, { enable: true, price: true, source: true, caps: true, alias: true }),
-  );
+  // 列配置：顺序（拖拽）/ 显隐 / 对齐三档 + 列宽（localStorage 记忆，
+  // 对齐 Agent2API table-col-settings + 列宽拖动）
+  const [colItems, setColItems] = useState<ColItem[]>(() => readColItems());
   const [colWidths, setColWidths] = useState<Record<string, number>>(() => readLS(LS_COLW, {}));
   const [colPanelOpen, setColPanelOpen] = useState(false);
   const colPanelRef = useRef<HTMLDivElement | null>(null);
+  const colRowsRef = useRef<HTMLDivElement | null>(null);
+  const [draggingCol, setDraggingCol] = useState<AnyCol | null>(null);
+  const colDragCleanup = useRef<(() => void) | null>(null);
 
   // 聚合视图的组折叠（展开的组集合；默认折叠）
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -715,11 +802,23 @@ export default function ModelManage(): JSX.Element {
     }
   };
 
-  // ── 列设置 / 列宽拖动 ──
-  const visibleCols = useMemo(
-    () => COL_ORDER.filter((c) => c === 'check' || c === 'model' || c === 'act' || colConfig[c as ColKey]),
-    [colConfig],
+  // ── 列设置（顺序 / 显隐 / 对齐）/ 列宽拖动 ──
+  const visibleCols = useMemo<AnyCol[]>(
+    () => colItems.filter((c) => c.visible).map((c) => c.key),
+    [colItems],
   );
+  /** 列 key → 当前对齐（th/td 的 ta-* 类由此来） */
+  const colAlign = useMemo(() => {
+    const map = {} as Record<AnyCol, Align>;
+    for (const item of colItems) map[item.key] = item.align;
+    return map;
+  }, [colItems]);
+
+  /** 提交列配置：改内存即重画，写盘只在明确动作时（开关/对齐/松手/重置） */
+  const commitColItems = useCallback((next: ColItem[], persist: boolean) => {
+    setColItems(next);
+    if (persist) writeLS(LS_COLCFG, next);
+  }, []);
 
   useEffect(() => {
     if (!colPanelOpen) return;
@@ -732,12 +831,90 @@ export default function ModelManage(): JSX.Element {
     return () => window.removeEventListener('mousedown', onDown);
   }, [colPanelOpen]);
 
-  const toggleCol = (key: ColKey) => {
-    setColConfig((prev) => {
-      const next = { ...prev, [key]: !prev[key] };
-      writeLS(LS_COLS, next);
-      return next;
+  // 面板收起 / 组件卸载时把拖动会话收干净（对齐上游：卸载补写盘，防内存与 localStorage 漂移）
+  const finishColDrag = useCallback(() => {
+    if (!colDragCleanup.current) return;
+    colDragCleanup.current();
+    setColItems((prev) => {
+      writeLS(LS_COLCFG, prev);
+      return prev;
     });
+  }, []);
+  useEffect(() => finishColDrag, [finishColDrag]);
+  useEffect(() => {
+    if (colPanelOpen) return;
+    finishColDrag();
+  }, [colPanelOpen, finishColDrag]);
+
+  /** 显隐开关：锁定列不可关（表不能没有勾选框/模型名/操作列） */
+  const toggleCol = (key: AnyCol) => {
+    if (LOCKED_COLS.includes(key)) return;
+    commitColItems(
+      colItems.map((c) => (c.key === key ? { ...c, visible: !c.visible } : c)),
+      true,
+    );
+  };
+
+  /** 对齐三档 */
+  const setColAlignValue = (key: AnyCol, next: Align) => {
+    const item = colItems.find((c) => c.key === key);
+    if (!item || item.align === next) return;
+    commitColItems(
+      colItems.map((c) => (c.key === key ? { ...c, align: next } : c)),
+      true,
+    );
+  };
+
+  /**
+   * 拖动排序：指针事件（对齐上游，不用 HTML5 拖放）。每跨过一行就重排一次并
+   * 重画，但**不写盘**（每跨一行都落一次盘很吵）；松手（或浮层收起）才提交。
+   */
+  const startColOrderDrag = (key: AnyCol, e: React.PointerEvent<HTMLElement>) => {
+    e.preventDefault();
+    colDragCleanup.current?.();
+    setDraggingCol(key);
+    document.body.classList.add('mm-colset-dragging');
+    const rows = colRowsRef.current;
+
+    const teardown = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.classList.remove('mm-colset-dragging');
+      colDragCleanup.current = null;
+      setDraggingCol(null);
+    };
+    const onMove = (ev: PointerEvent) => {
+      const over = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('[data-col-key]');
+      if (!over || !rows || !rows.contains(over)) return;
+      const overKey = over.getAttribute('data-col-key') as AnyCol | null;
+      if (!overKey || overKey === key) return;
+      setColItems((prev) => {
+        const from = prev.findIndex((c) => c.key === key);
+        const to = prev.findIndex((c) => c.key === overKey);
+        if (from < 0 || to < 0) return prev;
+        const next = [...prev];
+        const [item] = next.splice(from, 1);
+        next.splice(to, 0, item);
+        return next;
+      });
+    };
+    const onUp = () => {
+      teardown();
+      setColItems((prev) => {
+        writeLS(LS_COLCFG, prev);
+        return prev;
+      });
+    };
+    colDragCleanup.current = teardown;
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  /** 恢复默认：顺序、显隐、对齐一起回到列声明（列宽一并还原） */
+  const resetColConfig = () => {
+    commitColItems(defaultColItems(), true);
+    setColWidths({});
+    writeLS(LS_COLW, {});
   };
 
   /** 列宽拖动：拖表头右缘把手改宽（写回 colgroup），双击把手还原 */
@@ -944,7 +1121,7 @@ export default function ModelManage(): JSX.Element {
     switch (col) {
       case 'check':
         return (
-          <td key={col} className="mm-c-check">
+          <td key={col} className={`mm-c-check ta-${colAlign.check}`}>
             <input
               type="checkbox"
               aria-label={t('选择') + ' ' + row.id}
@@ -955,7 +1132,7 @@ export default function ModelManage(): JSX.Element {
         );
       case 'enable':
         return (
-          <td key={col} className="mm-c-enable">
+          <td key={col} className={`mm-c-enable ta-${colAlign.enable}`}>
             <Switch
               checked={row.enabled}
               onChange={(next) => void handleToggle(row, next)}
@@ -967,7 +1144,7 @@ export default function ModelManage(): JSX.Element {
         );
       case 'model':
         return (
-          <td key={col} className="mm-c-model">
+          <td key={col} className={`mm-c-model ta-${colAlign.model}`}>
             <span
               className="mm-mid"
               title={t('点击复制模型 ID')}
@@ -988,7 +1165,7 @@ export default function ModelManage(): JSX.Element {
         );
       case 'price':
         return (
-          <td key={col} className="mm-c-price">
+          <td key={col} className={`mm-c-price ta-${colAlign.price}`}>
             {row.price ? (
               isFreePrice(row.price) ? (
                 <span className="mm-price-free" title={t('价格已配置为 0，调用不计费')}>
@@ -1012,7 +1189,7 @@ export default function ModelManage(): JSX.Element {
         );
       case 'source':
         return (
-          <td key={col} className="mm-c-source">
+          <td key={col} className={`mm-c-source ta-${colAlign.source}`}>
             <div className="mm-sources">
               {row.sources.slice(0, 3).map((s, i) => (
                 <span
@@ -1037,7 +1214,7 @@ export default function ModelManage(): JSX.Element {
         );
       case 'caps':
         return (
-          <td key={col} className="mm-c-caps">
+          <td key={col} className={`mm-c-caps ta-${colAlign.caps}`}>
             <button
               type="button"
               className="mm-caps-btn"
@@ -1065,7 +1242,7 @@ export default function ModelManage(): JSX.Element {
         );
       case 'alias':
         return (
-          <td key={col} className="mm-c-alias">
+          <td key={col} className={`mm-c-alias ta-${colAlign.alias}`}>
             <div className="mm-alias-cell">
               {(row.alias_entries?.length
                 ? row.alias_entries
@@ -1123,7 +1300,7 @@ export default function ModelManage(): JSX.Element {
         );
       case 'act':
         return (
-          <td key={col} className="mm-c-act">
+          <td key={col} className={`mm-c-act ta-${colAlign.act}`}>
             <div className="mm-actions">
               <button
                 type="button"
@@ -1178,7 +1355,11 @@ export default function ModelManage(): JSX.Element {
   const renderHeadCell = (col: AnyCol): JSX.Element => {
     const def = COL_HEAD[col];
     return (
-      <th key={col} className={`mm-h-${col}`} title={def.tip}>
+      <th
+        key={col}
+        className={`mm-h-${col} ta-${colAlign[col] ?? COL_DEFAULT_ALIGN[col]}`}
+        title={def.tip}
+      >
         {col === 'check' ? (
           <input
             type="checkbox"
@@ -1413,30 +1594,68 @@ export default function ModelManage(): JSX.Element {
                     {t('列设置')}
                   </button>
                   {colPanelOpen && (
-                    <div className="mm-colset-panel">
-                      {COL_DEFS.map((c) => (
-                        <label key={c.key} className="mm-colset-row">
-                          <span>{t(c.label)}</span>
-                          <Switch
-                            checked={colConfig[c.key]}
-                            onChange={() => toggleCol(c.key)}
-                            ariaLabel={`${t('显示列')} ${t(c.label)}`}
-                          />
-                        </label>
-                      ))}
-                      <button
-                        type="button"
-                        className="mm-colset-reset"
-                        onClick={() => {
-                          const def = { enable: true, price: true, source: true, caps: true, alias: true };
-                          setColConfig(def);
-                          writeLS(LS_COLS, def);
-                          setColWidths({});
-                          writeLS(LS_COLW, {});
-                        }}
-                      >
-                        {t('恢复默认（含列宽）')}
-                      </button>
+                    <div className="mm-colset-panel" role="group" aria-label={t('列设置')}>
+                      {/* 表头与数据行同一套网格：手柄 / 列名 / 显示 / 对齐（对齐上游面板骨架） */}
+                      <div className="mm-colset-grid mm-colset-head">
+                        <span />
+                        <span>{t('列')}</span>
+                        <span>{t('显示')}</span>
+                        <span>{t('对齐')}</span>
+                      </div>
+                      <div className="mm-colset-rows" ref={colRowsRef}>
+                        {colItems.map((item) => {
+                          const locked = LOCKED_COLS.includes(item.key);
+                          const name = t(COL_PANEL_LABEL[item.key]);
+                          return (
+                            <div
+                              key={item.key}
+                              data-col-key={item.key}
+                              className={`mm-colset-grid mm-colset-row${draggingCol === item.key ? ' dragging' : ''}`}
+                            >
+                              <span
+                                className="mm-colset-grip"
+                                title={t('按住拖动调整列顺序')}
+                                onPointerDown={(e) => startColOrderDrag(item.key, e)}
+                              >
+                                <GripVertical size={13} />
+                              </span>
+                              <span className="mm-colset-name" title={name}>
+                                {name}
+                              </span>
+                              <Switch
+                                className="mm-colset-switch"
+                                checked={item.visible}
+                                disabled={locked}
+                                onChange={() => toggleCol(item.key)}
+                                ariaLabel={`${t('显示列')} ${name}`}
+                                title={item.visible ? t('这一列正在显示') : t('这一列已隐藏')}
+                              />
+                              <div
+                                className="mm-seg mm-seg-mini"
+                                role="group"
+                                aria-label={t('「{name}」列的对齐', { name })}
+                              >
+                                {ALIGN_OPTIONS.map((a) => (
+                                  <button
+                                    key={a.value}
+                                    type="button"
+                                    className={`mm-seg-btn${item.align === a.value ? ' active' : ''}`}
+                                    onClick={() => setColAlignValue(item.key, a.value)}
+                                  >
+                                    {t(a.label)}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="mm-colset-foot">
+                        <span className="mm-colset-tip">{t('拖动手柄调整顺序')}</span>
+                        <button type="button" className="mm-colset-reset" onClick={resetColConfig}>
+                          {t('恢复默认（含列宽）')}
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>

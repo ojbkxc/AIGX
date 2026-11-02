@@ -231,6 +231,33 @@ test.describe('模型管理', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
+  test('列设置：对齐三档作用于表头与单元格，锁定列不可关', async ({ page, pageErrors }) => {
+    await page.locator('.mm-colset .btn').click();
+    const panel = page.locator('.mm-colset-panel');
+    await expect(panel).toBeVisible();
+
+    // 定价列 → 居中（默认左）
+    const priceRow = panel.locator('.mm-colset-row', { hasText: '定价' });
+    await priceRow.getByRole('button', { name: '居中' }).click();
+    await expect(page.locator('.mm-h-price')).toHaveClass(/ta-center/);
+
+    // 勾列（锁定）→ 改左对齐；默认是居中
+    const checkRow = panel.locator('.mm-colset-row', { hasText: '选择' });
+    await checkRow.getByRole('button', { name: '左', exact: true }).click();
+    await expect(page.locator('.mm-h-check')).toHaveClass(/ta-left/);
+
+    // 锁定列（选择/模型/操作）开关禁用，点不动
+    await expect(checkRow.getByRole('switch')).toBeDisabled();
+    await expect(panel.locator('.mm-colset-row', { hasText: '模型' }).getByRole('switch')).toBeDisabled();
+
+    // 恢复默认：对齐回到各列声明值
+    await panel.locator('.mm-colset-reset').click();
+    await expect(page.locator('.mm-h-price')).toHaveClass(/ta-left/);
+    await expect(page.locator('.mm-h-check')).toHaveClass(/ta-center/);
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
   test('元信息覆盖 Tab 可切换并渲染', async ({ page, pageErrors }) => {
     await page.getByRole('tab', { name: '元信息覆盖' }).click();
     const text = await page.locator('.main-content').innerText();

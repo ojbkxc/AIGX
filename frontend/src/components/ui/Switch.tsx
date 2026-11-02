@@ -6,6 +6,8 @@ export interface SwitchProps {
   disabled?: boolean;
   /** 可访问性标签 */
   ariaLabel?: string;
+  /** 悬停提示（列设置面板等场景） */
+  title?: string;
   className?: string;
   id?: string;
 }
@@ -19,6 +21,7 @@ export default function Switch({
   onChange,
   disabled = false,
   ariaLabel,
+  title,
   className,
   id
 }: SwitchProps) {
@@ -30,6 +33,7 @@ export default function Switch({
       aria-checked={checked}
       aria-label={ariaLabel}
       aria-disabled={disabled || undefined}
+      title={title}
       disabled={disabled}
       className={cn('glass-switch', checked && 'glass-switch-on', className)}
       onClick={() => onChange(!checked)}

@@ -796,7 +796,7 @@
   text-align: center;
 }
 
-/* ── 列设置浮层 ── */
+/* ── 列设置浮层（对齐 Agent2API table-col-settings：手柄/列名/显示/对齐 四列网格，可拖序）── */
 .mm-colset {
   position: relative;
 }
@@ -810,45 +810,128 @@
   right: 0;
   top: calc(100% + 6px);
   z-index: 30;
-  width: 220px;
-  padding: 8px;
+  width: 330px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--card-bg);
   border: 1px solid var(--border-color);
   border-radius: 10px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
 }
 
-.mm-colset-row {
-  display: flex;
+/* 面板表头与数据行共用同一套网格：手柄 / 列名 / 显示 / 对齐 */
+.mm-colset-grid {
+  display: grid;
+  grid-template-columns: 18px minmax(70px, 1fr) 34px 96px;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  font-size: 12px;
-  color: var(--text-main);
-  cursor: pointer;
+  gap: 8px;
+}
+
+.mm-colset-head {
+  padding: 9px 12px 7px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.mm-colset-head span:nth-child(2),
+.mm-colset-head span:nth-child(3),
+.mm-colset-head span:nth-child(4) {
+  text-align: center;
+}
+
+/* 行区滚动：列多时面板不跟着长 */
+.mm-colset-rows {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px 12px 6px;
+}
+
+.mm-colset-row {
+  padding: 5px 0;
+  border-radius: 4px;
 }
 
 .mm-colset-row:hover {
   background: var(--hover-bg, rgba(128, 128, 128, 0.07));
 }
 
-.mm-colset-reset {
-  width: 100%;
-  margin-top: 6px;
-  border: 0;
+/* 被拖动的那一行压淡：让落点更醒目 */
+.mm-colset-row.dragging {
+  opacity: 0.5;
+}
+
+.mm-colset-grip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  opacity: 0.5;
+  cursor: grab;
+}
+
+.mm-colset-grip:hover {
+  opacity: 1;
+}
+
+.mm-colset-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-main);
+}
+
+.mm-colset-switch {
+  justify-self: center;
+  transform: scale(0.8);
+}
+
+/* 面板内的迷你对齐分段（三档：左/中/右） */
+.mm-seg-mini .mm-seg-btn {
+  flex: 1;
+  font-size: 10.5px;
+  padding: 3px 0;
+  text-align: center;
+}
+
+.mm-colset-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   border-top: 1px solid var(--border-color);
+  padding: 6px 12px 8px;
+}
+
+.mm-colset-tip {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.mm-colset-reset {
+  border: 1px solid var(--border-color);
   background: transparent;
   color: var(--text-muted);
   font-size: 11.5px;
-  padding: 8px;
+  padding: 4px 10px;
   cursor: pointer;
-  border-radius: 0 0 6px 6px;
+  border-radius: 7px;
 }
 
 .mm-colset-reset:hover {
   color: var(--accent-color);
+  border-color: var(--accent-color);
+}
+
+/* 拖动期间：全局 grabbing 光标 + 禁选中（对齐上游 colset-dragging） */
+body.mm-colset-dragging {
+  cursor: grabbing;
+  user-select: none;
 }
 
 /* ── 获取模型弹窗列表 ── */
@@ -1273,4 +1356,21 @@
   to {
     transform: rotate(360deg);
   }
+}
+
+/* ── 列对齐三档（列设置面板可调，对齐 Agent2API ta-left/ta-center/ta-right）──
+   放在文件末尾并带上表名限定：特异性压过各列的默认对齐（.mm-h-* / .mm-c-*）。 */
+.mm-table th.ta-left,
+.mm-table td.ta-left {
+  text-align: left;
+}
+
+.mm-table th.ta-center,
+.mm-table td.ta-center {
+  text-align: center;
+}
+
+.mm-table th.ta-right,
+.mm-table td.ta-right {
+  text-align: right;
 }
