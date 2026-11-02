@@ -33,7 +33,7 @@ import { Loading, EmptyState, Switch, Pagination, Tabs, Combobox } from '../comp
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ModelTestDialog from '../components/ModelTestDialog';
 import { fmtCompact } from '../lib/utils';
-import type { ManageView, ManagedModel, ModelMetaOverride, ChannelItem } from '../types';
+import type { AliasEntry, ManageView, ManagedModel, ModelMetaOverride, ChannelItem } from '../types';
 import './ModelManage.css';
 
 // ── 常量 ─────────────────────────────────────────────────────────────
@@ -1488,7 +1488,7 @@ export default function ModelManage(): JSX.Element {
             <div className="mm-alias-cell">
               {(row.alias_entries?.length
                 ? row.alias_entries
-                : row.aliases.map((a) => ({ alias: a, target: row.id, enabled: true }))
+                : row.aliases.map((a): AliasEntry => ({ alias: a, target: row.id, enabled: true, reasoning_effort: undefined }))
               ).map((entry) => (
                 <span
                   key={entry.alias}
