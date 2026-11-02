@@ -232,7 +232,7 @@ pub async fn handle_checkin_records(
         Some("failed") => Some(CheckinOutcome::Failed),
         _ => None,
     };
-    let mut records = state
+    let records = state
         .upstream_checkin
         .recent_records(
             q.days,
