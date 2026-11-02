@@ -515,6 +515,85 @@ pub async fn handle_update_gateway_settings(
     }
 }
 
+// ── 安全策略（登录失败锁定 / 登录限流）────────────────────────────
+
+/// 安全策略请求体（缺省字段保持原值）。
+#[derive(Debug, Deserialize)]
+pub struct SecurityPolicyRequest {
+    pub lockout_enabled: Option<bool>,
+    pub fail_threshold: Option<u32>,
+    pub lock_minutes: Option<u64>,
+    pub rate_limit_per_minute: Option<u32>,
+}
+
+fn security_policy_json(config: &crate::config::SecurityPolicyConfig) -> Value {
+    json!({
+        "lockoutEnabled": config.lockout_enabled,
+        "failThreshold": config.fail_threshold,
+        "lockMinutes": config.lock_minutes,
+        "rateLimitPerMinute": config.rate_limit_per_minute,
+        // `lockMinutes` 是失败计数缓存的 TTL，建缓存时固定 → 改后需重启服务生效；
+        // 其余三项走原子快照，保存即生效。
+        "restartRequiredFields": ["lockMinutes"],
+    })
+}
+
+/// GET /api/security/policy —— 安全策略（登录失败锁定 / 限流阈值）。
+pub async fn handle_get_security_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = verify_admin(&state, &headers).await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": security_policy_json(&config.security),
+    })))
+}
+
+/// PUT /api/security/policy —— 保存安全策略。
+///
+/// 越界输入按 `SecurityPolicyConfig::normalized` 夹到合法区间（阈值 1-100、
+/// 锁定时长 1-1440 分钟、每分钟上限 1-1000）后落盘。
+pub async fn handle_update_security_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SecurityPolicyRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut config = verify_admin(&state, &headers).await?;
+    if let Some(v) = body.lockout_enabled {
+        config.security.lockout_enabled = v;
+    }
+    if let Some(v) = body.fail_threshold {
+        config.security.fail_threshold = v;
+    }
+    if let Some(v) = body.lock_minutes {
+        config.security.lock_minutes = v;
+    }
+    if let Some(v) = body.rate_limit_per_minute {
+        config.security.rate_limit_per_minute = v;
+    }
+    config.security = config.security.normalized();
+    // 阈值 / 限流 / 开关立即生效（登录 handler 读进程级快照）
+    crate::config::set_security_policy(
+        config.security.lockout_enabled,
+        config.security.fail_threshold,
+        config.security.rate_limit_per_minute,
+    );
+    match state.config_manager.update(config).await {
+        Ok(()) => {
+            let updated = state.config_manager.get().await;
+            Ok(Json(json!({
+                "success": true,
+                "data": security_policy_json(&updated.security),
+            })))
+        }
+        Err(e) => Err(error_response(
+            &format!("Failed to save security policy: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct OauthConfigRequest {
     pub github: Option<OauthProviderFields>,

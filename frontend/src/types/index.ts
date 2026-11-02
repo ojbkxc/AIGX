@@ -1326,6 +1326,20 @@ export interface GatewaySettingsItem {
   restartRequired?: boolean;
 }
 
+/** 安全策略（GET/PUT /api/security/policy；对照 Agent2API「设置 → 安全」） */
+export interface SecurityPolicyItem {
+  /** 是否启用「连续失败锁定」 */
+  lockoutEnabled: boolean;
+  /** 连续失败达该次数即锁定来源 IP */
+  failThreshold: number;
+  /** 锁定时长（分钟）；改后需重启服务生效 */
+  lockMinutes: number;
+  /** 同一 IP 每分钟允许的登录尝试次数 */
+  rateLimitPerMinute: number;
+  /** 保存后需重启才生效的字段名（当前为 lockMinutes） */
+  restartRequiredFields?: string[];
+}
+
 /** 路由策略（GET/PUT /api/routing；对照 Agent2API「设置 → 路由」） */
 export type RouteStrategy = 'weighted' | 'round_robin' | 'ranked';
 export type StickyMode = 'auto' | 'session' | 'turn' | 'off';

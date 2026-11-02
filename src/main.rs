@@ -378,12 +378,24 @@ async fn main() -> anyhow::Result<()> {
             .build(),
     );
 
-    // 登录失败锁定状态：<ip> → 连续失败次数（TTL=5 分钟，连续失败 ≥5 次锁 5 分钟）
+    // 登录失败锁定状态：<ip> → 连续失败次数。
+    //
+    // TTL = 锁定时长（配置 `security.lock_minutes`，默认 5 分钟）；三个门槛里
+    // 只有它建缓存时固定，改后需重启服务生效 —— 与网关监听地址/端口同口径，
+    // 页面会给出同样的提示。其余两项（阈值 / 每分钟上限）走原子快照，保存即生效。
+    let security = config_manager.get().await.security.normalized();
     let login_failures = Arc::new(
         crate::cache::AsyncCache::<String, u32>::builder()
             .max_capacity(10_000)
-            .time_to_live(Duration::from_secs(300))
+            .time_to_live(Duration::from_secs(security.lock_minutes * 60))
             .build(),
+    );
+
+    // 安全策略的进程级快照（登录 handler 同步读取，保存即生效）
+    crate::config::set_security_policy(
+        security.lockout_enabled,
+        security.fail_threshold,
+        security.rate_limit_per_minute,
     );
 
     // 邮箱验证码登录：<email> → 6 位验证码（TTL=5 分钟）
@@ -1389,6 +1401,12 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/gateway/settings",
             get(api::admin::handle_get_gateway_settings)
                 .put(api::admin::handle_update_gateway_settings),
+        )
+        // 安全策略（登录失败锁定 / 登录限流阈值，对照 Agent2API「设置 → 安全」）
+        .route(
+            "/api/security/policy",
+            get(api::admin::handle_get_security_policy)
+                .put(api::admin::handle_update_security_policy),
         )
         // 路由策略（对照 Agent2API「设置 → 路由」：策略/粘性/断路器/调度权重）
         .route(

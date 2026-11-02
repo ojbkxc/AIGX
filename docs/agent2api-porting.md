@@ -44,6 +44,16 @@
 
 `frontend/src/pages/Pricing.tsx`：主视图表格（模型名/倍率/增删行）+ JSON 高级模式折叠项。后端零改动（`pricing::RatioConfig` 的 HashMap 结构天然适配），费用公式 `基础费用 × model_ratio × group_ratio`（`src/pricing/mod.rs` `calculate_cost`）不变。
 
+### 5. 安全策略面（Agent2API 设置 → 安全）
+
+| AIGX | Agent2API 蓝本 |
+|---|---|
+| `src/config.rs`（`SecurityPolicyConfig` + `[security]` 段 + 进程级原子快照） | 上游 `config/types.rs` 的安全项 |
+| `src/api/admin/settings.rs`（`GET/PUT /api/security/policy`） | 上游 `api/security*.rs` |
+| `frontend/src/components/SecurityPolicyPanel.tsx`（设置 → 安全顶部） | `ui-islands/.../settings-page.tsx` 的安全 tab |
+
+把原先硬编码在 `src/api/admin/auth.rs`（阈值 5 / 限流 10）与 `main.rs`（锁定 TTL 300s）的三个门槛抽成可配项：连续失败锁定开关 / 失败阈值 / 锁定时长 / 每分钟登录上限。默认值与原硬编码一致，行为不变。阈值/开关走原子快照保存即生效；锁定时长是失败计数缓存 TTL，改后需重启（与网关监听地址同口径）。差异：上游的 ALTCHA 机器人校验未移植。
+
 ## 供应商对齐状态
 
 `src/account_session/registry.rs` 的 `AGENT2API_PROVIDERS` 已对齐上游 24 家全名单（workbuddy/-intl、raccoon、catpaw、autoclaw/-intl、qoder/-intl、cline-free/pass、accio/-cn、zcode/-intl、codearts、trae、loomy、kuku、monkeycode/-intl、commandcode、antigravity、officeace、orcaterm）。

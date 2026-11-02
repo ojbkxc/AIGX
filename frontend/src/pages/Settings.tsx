@@ -16,6 +16,7 @@ import LogRetention from './LogRetention';
 import UpdatePanel from '../components/UpdatePanel';
 import AgentSettingsPanel from '../components/AgentSettingsPanel';
 import GatewayPanel from '../components/GatewayPanel';
+import SecurityPolicyPanel from '../components/SecurityPolicyPanel';
 import PromptPanel from '../components/PromptPanel';
 import RoutingPanel from '../components/RoutingPanel';
 import DataManagement from '../components/DataManagement';
@@ -894,8 +895,9 @@ export default function Settings() {
 
       {activeTab === 'security' && (
         <>
-          {/* 安全 = 安全监控 + IP 管理 */}
-          <Security />
+          {/* 安全 = 安全策略（可配门槛）+ 安全监控 + IP 管理 */}
+          <SecurityPolicyPanel />
+          <div style={{ marginTop: 16 }}><Security /></div>
           <div style={{ marginTop: 16 }}><IpManagement /></div>
         </>
       )}

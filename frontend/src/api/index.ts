@@ -76,6 +76,7 @@ import type {
   AccountRotationPolicyItem,
   AgentSettingsItem,
   GatewaySettingsItem,
+  SecurityPolicyItem,
   RoutingPolicyItem,
   GatewayPromptItem,
   StorageOverviewItem,
@@ -644,6 +645,12 @@ export const api = {
     request<ApiResponse<GatewaySettingsItem>>('GET', `${API_BASE}/gateway/settings`),
   saveGatewaySettings: (data: Record<string, unknown>): Promise<ApiResponse<GatewaySettingsItem>> =>
     request<ApiResponse<GatewaySettingsItem>>('PUT', `${API_BASE}/gateway/settings`, data),
+  // 安全策略（登录失败锁定 / 限流阈值；对照 Agent2API「设置 → 安全」）
+  // 阈值与开关保存即生效，锁定时长改后需重启服务。
+  getSecurityPolicy: (): Promise<ApiResponse<SecurityPolicyItem>> =>
+    request<ApiResponse<SecurityPolicyItem>>('GET', `${API_BASE}/security/policy`),
+  saveSecurityPolicy: (data: Record<string, unknown>): Promise<ApiResponse<SecurityPolicyItem>> =>
+    request<ApiResponse<SecurityPolicyItem>>('PUT', `${API_BASE}/security/policy`, data),
   // 路由策略（对照 Agent2API「设置 → 路由」；保存即热生效，无需重启）
   getRoutingPolicy: (): Promise<ApiResponse<RoutingPolicyItem>> =>
     request<ApiResponse<RoutingPolicyItem>>('GET', `${API_BASE}/routing`),

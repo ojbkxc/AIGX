@@ -115,9 +115,10 @@ pub use dashboard::{
 
 pub use settings::{
     handle_get_agent_settings, handle_get_gateway_prompt, handle_get_gateway_settings,
-    handle_get_limits, handle_get_oauth_config, handle_get_settings, handle_update_agent_settings,
-    handle_update_gateway_prompt, handle_update_gateway_settings, handle_update_limits,
-    handle_update_oauth_config, handle_update_settings,
+    handle_get_limits, handle_get_oauth_config, handle_get_security_policy, handle_get_settings,
+    handle_update_agent_settings, handle_update_gateway_prompt, handle_update_gateway_settings,
+    handle_update_limits, handle_update_oauth_config, handle_update_security_policy,
+    handle_update_settings,
 };
 
 // 数据管理（存储概览 + 全量备份/恢复；对照 Agent2API「设置 → 数据」）

@@ -444,6 +444,73 @@ pub struct AppConfig {
     /// 服务器自动更新配置（`[update]` 段）。
     #[serde(default)]
     pub update: UpdateConfig,
+    /// 安全策略配置（`[security]` 段）：登录失败锁定与登录限流的可配参数。
+    #[serde(default)]
+    pub security: SecurityPolicyConfig,
+}
+
+/// 安全策略（`[security]` 段）。
+///
+/// 现状的这三个门槛此前硬编码在 `api::admin::auth`（阈值 5 / 限流 10）与
+/// `main.rs`（锁定 TTL 300s）。抽成配置后默认值与原硬编码一致，行为不变。
+///
+/// ── 生效时机 ────────────────────────────────────────────────
+/// `fail_threshold` / `rate_limit_per_minute` / `lockout_enabled` 走进程级
+/// 原子快照，**保存即生效**；`lock_minutes` 是失败计数缓存的 TTL（建缓存时
+/// 固定），**改后需重启服务生效** —— 与网关监听地址/端口同口径。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityPolicyConfig {
+    /// 是否启用「连续失败锁定」（默认开）。关闭后仅保留每分钟限流。
+    #[serde(default = "default_lockout_enabled")]
+    pub lockout_enabled: bool,
+    /// 连续登录失败达到该次数即锁定来源 IP（默认 5，范围 1-100）。
+    #[serde(default = "default_fail_threshold")]
+    pub fail_threshold: u32,
+    /// 锁定时长（分钟，默认 5，范围 1-1440）。缓存 TTL 在启动时确定，改后需重启。
+    #[serde(default = "default_lock_minutes")]
+    pub lock_minutes: u64,
+    /// 同一来源 IP 每分钟允许的登录尝试次数（默认 10，范围 1-1000）。
+    #[serde(default = "default_rate_limit_per_minute")]
+    pub rate_limit_per_minute: u32,
+}
+
+fn default_lockout_enabled() -> bool {
+    true
+}
+
+fn default_fail_threshold() -> u32 {
+    5
+}
+
+fn default_lock_minutes() -> u64 {
+    5
+}
+
+fn default_rate_limit_per_minute() -> u32 {
+    10
+}
+
+impl Default for SecurityPolicyConfig {
+    fn default() -> Self {
+        Self {
+            lockout_enabled: default_lockout_enabled(),
+            fail_threshold: default_fail_threshold(),
+            lock_minutes: default_lock_minutes(),
+            rate_limit_per_minute: default_rate_limit_per_minute(),
+        }
+    }
+}
+
+impl SecurityPolicyConfig {
+    /// 落盘与运行期都用归一化后的值（越界输入夹到合法区间）。
+    pub fn normalized(&self) -> Self {
+        Self {
+            lockout_enabled: self.lockout_enabled,
+            fail_threshold: self.fail_threshold.clamp(1, 100),
+            lock_minutes: self.lock_minutes.clamp(1, 1440),
+            rate_limit_per_minute: self.rate_limit_per_minute.clamp(1, 1000),
+        }
+    }
 }
 
 // ── Default implementations ──────────────────────────────────────────
@@ -537,6 +604,50 @@ pub fn billing_flat_quota() -> i64 {
 /// 由 main 与 settings 更新端点写入快照
 pub fn set_billing_flat_quota(v: i64) {
     BILLING_FLAT_QUOTA.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+// ── 安全策略的进程级快照 ──────────────────────────────────────
+//
+// 登录 handler 里读这三项是同步比较（限流上限 / 锁定阈值 / 锁定开关），
+// 与 log_body 同理走原子快照：管理端保存后（`handle_update_security_policy`）
+// 与启动时（main）各写一次，数据面无锁零开销。
+// 锁定时长（`lock_minutes`）不在此列 —— 它是失败计数缓存的 TTL，建缓存时固定。
+
+/// 是否启用连续失败锁定（默认开）。
+static SECURITY_LOCKOUT_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+/// 连续失败锁定阈值（默认 5）。
+static SECURITY_FAIL_THRESHOLD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(5);
+/// 每分钟登录尝试上限（默认 10）。
+static SECURITY_RATE_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(10);
+
+/// 读取「是否启用失败锁定」快照。
+pub fn security_lockout_enabled() -> bool {
+    SECURITY_LOCKOUT_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 读取「连续失败锁定阈值」快照（至少 1，避免 0 导致首次失败即锁）。
+pub fn security_fail_threshold() -> u32 {
+    SECURITY_FAIL_THRESHOLD
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .max(1)
+}
+
+/// 读取「每分钟登录尝试上限」快照（至少 1）。
+pub fn security_rate_limit_per_minute() -> u32 {
+    SECURITY_RATE_LIMIT
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .max(1)
+}
+
+/// 由 main 启动与 settings 更新端点写入三个快照。
+pub fn set_security_policy(lockout_enabled: bool, fail_threshold: u32, rate_limit_per_minute: u32) {
+    SECURITY_LOCKOUT_ENABLED.store(lockout_enabled, std::sync::atomic::Ordering::Relaxed);
+    SECURITY_FAIL_THRESHOLD.store(fail_threshold.max(1), std::sync::atomic::Ordering::Relaxed);
+    SECURITY_RATE_LIMIT.store(
+        rate_limit_per_minute.max(1),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// 渠道级最大重试次数的进程级快照（数据面选路同步读取，默认 2）。

@@ -94,9 +94,10 @@ pub async fn handle_login(
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // ── 登录限流：同 IP 每分钟最多 10 次 ──
-    const LOGIN_RATE_LIMIT_PER_MINUTE: u32 = 10;
-    const LOGIN_FAIL_LOCK_THRESHOLD: u32 = 5; // 连续失败 ≥5 次锁定
+    // ── 安全策略门槛（设置 → 安全，保存即生效；默认 10 次/分 + 连续 5 次锁 5 分钟）──
+    let rate_limit = crate::config::security_rate_limit_per_minute();
+    let fail_threshold = crate::config::security_fail_threshold();
+    let lockout_enabled = crate::config::security_lockout_enabled();
 
     // 真实来源 IP：优先信任的代理头（trust_proxy_headers 开启时），
     // 否则用 TCP 对端地址。原来两者都拿不到时全站共用 "unknown" 键 ——
@@ -109,12 +110,12 @@ pub async fn handle_login(
     // （反之亦然），表现为莫名 429。
     let login_rate_key = format!("login:{client_ip}");
     let attempts = state.login_limiter.get(&login_rate_key).await.unwrap_or(0);
-    if attempts >= LOGIN_RATE_LIMIT_PER_MINUTE {
+    if attempts >= rate_limit {
         state.log_store.record_security(
             crate::log::SecurityEvent::new(
                 crate::log::SecurityEventType::RateLimit,
                 "warning",
-                format!("登录限流触发：IP {client_ip} 每分钟超过 {LOGIN_RATE_LIMIT_PER_MINUTE} 次"),
+                format!("登录限流触发：IP {client_ip} 每分钟超过 {rate_limit} 次"),
             )
             .with_ip(Some(client_ip.clone())),
         );
@@ -128,14 +129,14 @@ pub async fn handle_login(
         .insert(login_rate_key, attempts + 1)
         .await;
 
-    // ── 失败锁定：连续失败 ≥5 次 → 锁定 5 分钟（TTL 由 login_failures 控制）──
+    // ── 失败锁定：连续失败达阈值 → 锁定（TTL = 配置的 lock_minutes，默认 5 分钟）──
     let fail_count = state.login_failures.get(&client_ip).await.unwrap_or(0);
-    if fail_count >= LOGIN_FAIL_LOCK_THRESHOLD {
+    if lockout_enabled && fail_count >= fail_threshold {
         state.log_store.record_security(
             crate::log::SecurityEvent::new(
                 crate::log::SecurityEventType::IpBlocked,
                 "critical",
-                format!("IP {client_ip} 连续失败 {fail_count} 次，已锁定 5 分钟"),
+                format!("IP {client_ip} 连续失败 {fail_count} 次，已锁定"),
             )
             .with_ip(Some(client_ip.clone())),
         );
@@ -266,8 +267,8 @@ pub async fn handle_login(
         .login_failures
         .insert(client_ip.clone(), next_fail)
         .await;
-    // 安全事件：认证失败（每次失败都记录，锁定阈值时升级 critical）
-    let severity = if next_fail >= LOGIN_FAIL_LOCK_THRESHOLD {
+    // 安全事件：认证失败（每次失败都记录，达锁定阈值时升级 critical）
+    let severity = if next_fail >= fail_threshold {
         "critical"
     } else {
         "warning"
@@ -280,8 +281,8 @@ pub async fn handle_login(
         )
         .with_ip(Some(client_ip.clone())),
     );
-    if next_fail >= LOGIN_FAIL_LOCK_THRESHOLD {
-        tracing::warn!("Login failed {next_fail} times from {client_ip}; locked for 5 minutes");
+    if lockout_enabled && next_fail >= fail_threshold {
+        tracing::warn!("Login failed {next_fail} times from {client_ip}; lockout threshold reached");
     }
 
     Err(error_response("账号或密码错误", StatusCode::UNAUTHORIZED))
@@ -1624,9 +1625,11 @@ pub async fn handle_login_totp(
         .or_else(|| connect.map(|c| c.0.ip().to_string()))
         .unwrap_or_else(|| "unknown".to_string());
 
-    // 5 次锁定检查（与密码登录共用计数器）
+    // 锁定检查（与密码登录共用计数器；阈值走安全策略快照）
     let fail_count = state.login_failures.get(&client_ip).await.unwrap_or(0);
-    if fail_count >= 5 {
+    if crate::config::security_lockout_enabled()
+        && fail_count >= crate::config::security_fail_threshold()
+    {
         return Err(error_response(
             "登录失败次数过多，请稍后再试",
             StatusCode::TOO_MANY_REQUESTS,
@@ -1853,7 +1856,9 @@ pub async fn handle_login_with_code(
 
     let client_ip = extract_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
     let fail_count = state.login_failures.get(&client_ip).await.unwrap_or(0);
-    if fail_count >= 5 {
+    if crate::config::security_lockout_enabled()
+        && fail_count >= crate::config::security_fail_threshold()
+    {
         return Err(error_response(
             "登录失败次数过多，请稍后再试",
             StatusCode::TOO_MANY_REQUESTS,
