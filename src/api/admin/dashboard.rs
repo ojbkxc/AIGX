@@ -367,7 +367,7 @@ pub async fn handle_cache_savings(
             && l.created_at >= from_ts
             && user_filter
                 .as_deref()
-                .map_or(true, |uid| l.user_id.as_deref() == Some(uid))
+                .is_none_or(|uid| l.user_id.as_deref() == Some(uid))
     }) {
         hit_count += 1;
         cache_tokens = cache_tokens.saturating_add(log.input_tokens);
@@ -678,11 +678,7 @@ pub async fn handle_report_top_sources(
                             } else {
                                 0.0
                             }),
-                            json!(if c.count > 0 {
-                                (c.latency_sum / c.count) as u64
-                            } else {
-                                0
-                            }),
+                            json!(c.latency_sum.checked_div(c.count).unwrap_or(0)),
                         )
                     };
                     json!({
@@ -1162,6 +1158,16 @@ fn local_hour_key(ts: i64) -> String {
         .unwrap_or_default()
 }
 
+/// 24h 分桶累加器：(总请求, 命中请求, 输入 Token, 命中输入 Token, 总 Token, 模型→Token)。
+type HourBucketAcc = (
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    std::collections::BTreeMap<String, u64>,
+);
+
 /// 把明细按本地整点分进「含当前小时的近 24 桶」（升序，缺数据的桶补零行）。
 ///
 /// 纯函数便于单测；logs 需调用方先按 user 过滤。口径与 cache_rates 同一条：
@@ -1188,15 +1194,8 @@ fn bucket_hours(logs: &[crate::log::RequestLog], now: i64, sampled: bool) -> Vec
             dt.timestamp() + 3600,
         ));
     }
-    // 每桶 (total, hit, input, hit_input, total_tokens, model→tokens)
-    let mut acc: Vec<(
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        std::collections::BTreeMap<String, u64>,
-    )> = (0..keys.len()).map(|_| Default::default()).collect();
+    // 每桶累加器见 HourBucketAcc（total, hit, input, hit_input, total_tokens, model→tokens）
+    let mut acc: Vec<HourBucketAcc> = (0..keys.len()).map(|_| Default::default()).collect();
     for l in logs {
         let Some(idx) = keys
             .iter()

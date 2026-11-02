@@ -283,7 +283,7 @@ impl CheckinStore {
                 provider.map(|p| r.provider == p).unwrap_or(true)
                     && account_id.map(|a| r.account_id == a).unwrap_or(true)
                     && outcome.map(|o| r.outcome == o).unwrap_or(true)
-                    && keyword.as_ref().map_or(true, |k| {
+                    && keyword.as_ref().is_none_or(|k| {
                         r.account_name.to_lowercase().contains(k)
                             || r.account_id.to_lowercase().contains(k)
                             || r.provider.to_lowercase().contains(k)
@@ -496,13 +496,10 @@ mod tests {
                 .len(),
             3
         );
-        assert_eq!(
-            store
-                .recent_records(1, None, None, None, Some("x-nomatch"))
-                .unwrap()
-                .is_empty(),
-            true
-        );
+        assert!(store
+            .recent_records(1, None, None, None, Some("x-nomatch"))
+            .unwrap()
+            .is_empty());
         assert_eq!(store.clear_records(1).unwrap(), 3);
         assert!(store
             .recent_records(1, None, None, None, None)

@@ -55,22 +55,13 @@ pub const INTERVAL_MIN_SECONDS: i64 = 1;
 pub const INTERVAL_MAX_SECONDS: i64 = 600;
 
 /// 一条间隔型任务的开关与间隔。
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct IntervalTask {
     /// 是否启用。
     pub enabled: bool,
     /// 间隔（单位见 `TaskDef.unit`）。
     pub interval: i64,
-}
-
-impl Default for IntervalTask {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            interval: 0,
-        }
-    }
 }
 
 /// 六条间隔型任务的配置整份（随 `AppConfig` 持久化）。
