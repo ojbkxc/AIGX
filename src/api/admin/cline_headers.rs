@@ -103,7 +103,7 @@ pub async fn handle_update_cline_headers(
     };
 
     // 持久化（config.toml）+ 进程级快照热更（下一请求生效）
-    config.cline_headers.overrides = overrides.clone();
+    config.usage.cline_headers.overrides = overrides.clone();
     state.config_manager.update(config).await.map_err(|e| {
         super::common::error_response(
             &format!("Cline 伪装头持久化失败: {e}"),
