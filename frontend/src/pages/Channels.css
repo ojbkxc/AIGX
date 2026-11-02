@@ -1125,7 +1125,7 @@ table tbody td input[type="checkbox"] {
   text-underline-offset: 2px;
 }
 
-/* 列设置浮层（工具栏齿轮） */
+/* ── 列设置浮层（对齐 ModelManage mm-colset：手柄/列名/显示/对齐 四列网格，可拖序）── */
 .ch-colset {
   position: relative;
   display: inline-flex;
@@ -1136,45 +1136,133 @@ table tbody td input[type="checkbox"] {
   right: 0;
   top: calc(100% + 6px);
   z-index: 40;
-  width: 210px;
-  padding: 8px;
+  width: 330px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--card-bg);
   border: 1px solid var(--border-color);
   border-radius: 10px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
 }
 
-.ch-colset-row {
-  display: flex;
+/* 面板表头与数据行共用同一套网格：手柄 / 列名 / 显示 / 对齐 */
+.ch-colset-grid {
+  display: grid;
+  grid-template-columns: 18px minmax(64px, 1fr) 34px 92px;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 5px 8px;
-  border-radius: 6px;
-  font-size: 12px;
-  color: var(--text-main);
-  cursor: pointer;
+  gap: 8px;
+}
+
+.ch-colset-head {
+  padding: 9px 12px 7px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.ch-colset-head span:nth-child(2),
+.ch-colset-head span:nth-child(3),
+.ch-colset-head span:nth-child(4) {
+  text-align: center;
+}
+
+/* 行区滚动：列多时面板不跟着长 */
+.ch-colset-rows {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px 12px 6px;
+}
+
+.ch-colset-row {
+  padding: 5px 0;
+  border-radius: 4px;
 }
 
 .ch-colset-row:hover {
   background: var(--hover-bg, rgba(128, 128, 128, 0.07));
 }
 
-.ch-colset-reset {
+/* 被拖动的那一行压淡：让落点更醒目 */
+.ch-colset-row.dragging {
+  opacity: 0.5;
+}
+
+.ch-colset-grip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  opacity: 0.5;
+  cursor: grab;
+}
+
+.ch-colset-grip:hover {
+  opacity: 1;
+}
+
+.ch-colset-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-main);
+}
+
+.ch-colset-switch {
+  justify-self: center;
+  transform: scale(0.8);
+}
+
+/* 面板内的迷你对齐分段（三档：左/中/右） */
+.ch-seg-mini {
+  display: flex;
   width: 100%;
-  margin-top: 6px;
-  border: 0;
+}
+
+.ch-seg-mini .ch-seg-btn {
+  flex: 1;
+  font-size: 10.5px;
+  padding: 3px 0;
+  text-align: center;
+}
+
+.ch-colset-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   border-top: 1px solid var(--border-color);
+  padding: 6px 12px 8px;
+}
+
+.ch-colset-tip {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ch-colset-reset {
+  border: 1px solid var(--border-color);
   background: transparent;
   color: var(--text-muted);
   font-size: 11.5px;
-  padding: 8px;
+  padding: 4px 10px;
   cursor: pointer;
-  border-radius: 0 0 6px 6px;
+  border-radius: 7px;
 }
 
 .ch-colset-reset:hover {
   color: var(--accent-color);
+  border-color: var(--accent-color);
+}
+
+/* 拖动期间：全局 grabbing 光标 + 禁选中（对齐 ModelManage colset-dragging） */
+body.ch-colset-dragging {
+  cursor: grabbing;
+  user-select: none;
 }
 
 /* 分页页脚 */
@@ -1231,4 +1319,21 @@ table tbody td input[type="checkbox"] {
   .ch-table-foot {
     justify-content: center;
   }
+}
+
+/* ── 列对齐三档（列设置面板可调，对齐 ModelManage ta-left/ta-center/ta-right）──
+   放在文件末尾并带上表名限定：特异性压过 th/td 的默认对齐。 */
+.channels-table th.ta-left,
+.channels-table td.ta-left {
+  text-align: left;
+}
+
+.channels-table th.ta-center,
+.channels-table td.ta-center {
+  text-align: center;
+}
+
+.channels-table th.ta-right,
+.channels-table td.ta-right {
+  text-align: right;
 }

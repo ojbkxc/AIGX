@@ -1,10 +1,10 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import {
   Eye, EyeOff, ArrowLeftRight, MoreHorizontal, Search,
   Pencil, Gauge, Power, PowerOff, Loader2, MessageSquare, RotateCcw, Trash2,
-  DollarSign, Cloud, Sparkles, Gem, BrainCircuit, Layers, Settings2, Plus,
+  DollarSign, Cloud, Sparkles, Gem, BrainCircuit, Layers, Settings2, Plus, GripVertical,
 } from 'lucide-react';
 import { api } from '../api';
 import { useListKeyboard } from '../hooks/useListKeyboard';
@@ -160,6 +160,7 @@ function formatBalance(value: number, unit?: string): string {
 /** localStorage 键 */
 const LS_FILTERS = 'aigx-ch-filters';
 const LS_COLS = 'aigx-ch-cols';
+const LS_COLCFG = 'aigx-ch-colcfg';
 const LS_COLW = 'aigx-ch-colw';
 const LS_PAGE_SIZE = 'aigx-ch-pagesize';
 
@@ -212,10 +213,23 @@ const CH_SORT_OPTIONS: Array<[ChSortMode, string]> = [
   ['name', '名称'],
 ];
 
-/** 可显隐列（check 勾选列与 actions 操作列锁定） */
+/** 可显隐列（select 勾选列与 actions 操作列锁定，不进面板、不参与拖序） */
 type ChColKey = 'id' | 'name' | 'type' | 'status' | 'models' | 'priority' | 'weight' | 'balance' | 'response' | 'testtime';
-/** 列声明顺序（colgroup 与表头同源；select/actions 为锁定列不参与显隐） */
+/** 列声明顺序（面板顺序、colgroup 与表头同源） */
 const CH_COL_ORDER: ChColKey[] = ['id', 'name', 'type', 'status', 'models', 'priority', 'weight', 'balance', 'response', 'testtime'];
+/** 列设置面板显示的列名（ID 固定英文不译） */
+const CH_COL_PANEL_LABEL: Record<ChColKey, string> = {
+  id: 'ID',
+  name: '名称',
+  type: '类型',
+  status: '状态',
+  models: '模型',
+  priority: '优先级',
+  weight: '权重',
+  balance: '余额',
+  response: '响应',
+  testtime: '测试时间',
+};
 /** 列默认宽（colgroup 接管宽度后 CSS 不再声明；与原有 CSS 宽度一致） */
 const CH_COL_DEFAULT_W: Record<string, number> = {
   select: 32,
@@ -231,30 +245,93 @@ const CH_COL_DEFAULT_W: Record<string, number> = {
   testtime: 88,
   actions: 132,
 };
-const CH_COL_DEFS: Array<{ key: ChColKey; label: string }> = [
-  { key: 'id', label: 'ID' },
-  { key: 'name', label: '名称' },
-  { key: 'type', label: '类型' },
-  { key: 'status', label: '状态' },
-  { key: 'models', label: '模型' },
-  { key: 'priority', label: '优先级' },
-  { key: 'weight', label: '权重' },
-  { key: 'balance', label: '余额' },
-  { key: 'response', label: '响应' },
-  { key: 'testtime', label: '测试时间' },
+
+/** 列对齐三档（对齐 ModelManage ALIGN_OPTIONS） */
+type ChAlign = 'left' | 'center' | 'right';
+const ALIGN_OPTIONS: Array<{ value: ChAlign; label: string }> = [
+  { value: 'left', label: '左' },
+  { value: 'center', label: '居中' },
+  { value: 'right', label: '右' },
 ];
-const DEFAULT_COL_VIS: Record<ChColKey, boolean> = {
-  id: true,
-  name: true,
-  type: true,
-  status: true,
-  models: true,
-  priority: true,
-  weight: true,
-  balance: true,
-  response: true,
-  testtime: true,
+const isChAlign = (v: unknown): v is ChAlign => ALIGN_OPTIONS.some((a) => a.value === v);
+/** 各列默认对齐 = 现有 CSS 的观感（渠道表当前全左对齐），视觉不突变 */
+const CH_COL_DEFAULT_ALIGN: Record<ChColKey, ChAlign> = {
+  id: 'left',
+  name: 'left',
+  type: 'left',
+  status: 'left',
+  models: 'left',
+  priority: 'left',
+  weight: 'left',
+  balance: 'left',
+  response: 'left',
+  testtime: 'left',
 };
+/** 一列的配置项：**数组顺序就是用户拖出来的列顺序**（对齐 ModelManage ColItem） */
+interface ChColItem {
+  key: ChColKey;
+  visible: boolean;
+  align: ChAlign;
+}
+
+function defaultColItems(): ChColItem[] {
+  return CH_COL_ORDER.map((key) => ({ key, visible: true, align: CH_COL_DEFAULT_ALIGN[key] }));
+}
+
+/** 读原始 JSON（数组形态不能用 readLs：它会把数组摊成对象） */
+function readLsRaw<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 读列配置：v2（LS_COLCFG，数组含顺序与对齐）→ 旧 LS_COLS 显隐表迁移 → 默认。
+ * 脏值逐条忽略（对齐 ModelManage normalize）：缺失的键按 CH_COL_ORDER 的相对位置
+ * 补回，存坏了退回默认 —— 列设置读不出来不该让整张表渲染不了。
+ */
+function readColItems(): ChColItem[] {
+  const base = defaultColItems();
+  const raw = readLsRaw<unknown>(LS_COLCFG);
+  if (Array.isArray(raw)) {
+    const items: ChColItem[] = [];
+    for (const entry of raw) {
+      if (!entry || typeof entry !== 'object') continue;
+      const e = entry as { key?: unknown; visible?: unknown; align?: unknown };
+      const found = base.find((b) => b.key === e.key);
+      if (!found || items.some((i) => i.key === found.key)) continue;
+      items.push({
+        key: found.key,
+        visible: e.visible !== false,
+        align: isChAlign(e.align) ? e.align : found.align,
+      });
+    }
+    // 缺失的键按 CH_COL_ORDER 的相对位置补回（将来加列时老存盘不至于错位）
+    for (const b of base) {
+      if (items.some((i) => i.key === b.key)) continue;
+      const specIdx = CH_COL_ORDER.indexOf(b.key);
+      let insertAt = items.length;
+      for (let k = 0; k < items.length; k += 1) {
+        if (CH_COL_ORDER.indexOf(items[k].key) > specIdx) {
+          insertAt = k;
+          break;
+        }
+      }
+      items.splice(insertAt, 0, b);
+    }
+    return items.length === base.length ? items : base;
+  }
+  // 旧格式迁移：{col: boolean} 只有显隐，顺序与对齐取默认
+  const legacy = readLsRaw<Partial<Record<ChColKey, boolean>>>(LS_COLS);
+  if (legacy && typeof legacy === 'object') {
+    return base.map((b) => (legacy[b.key] === false ? { ...b, visible: false } : b));
+  }
+  return base;
+}
 
 export default function Channels(): JSX.Element {
   const [channels, setChannels] = useState<ChannelItem[]>([]);
@@ -395,11 +472,16 @@ export default function Channels(): JSX.Element {
   const [stateFilter, setStateFilter] = useState<ChStateFilter>(storedFilters.state || 'all');
   const [typeFilter, setTypeFilter] = useState<ChTypeFilter>(storedFilters.type || 'all');
   const [sortMode, setSortMode] = useState<ChSortMode>(storedFilters.sort || 'default');
-  const [colVis, setColVis] = useState<Record<ChColKey, boolean>>(() => readLs(LS_COLS, DEFAULT_COL_VIS));
+  // 列配置（顺序 / 显隐 / 对齐，对齐 ModelManage colItems）
+  const [colItems, setColItems] = useState<ChColItem[]>(() => readColItems());
   // 列宽（拖表头右缘把手调整；localStorage 记忆，对齐 ModelManage 列宽拖动）
   const [colWidths, setColWidths] = useState<Record<string, number>>(() => readLs(LS_COLW, {}));
   const [colPanelOpen, setColPanelOpen] = useState(false);
   const colPanelRef = useRef<HTMLDivElement | null>(null);
+  // 拖序会话（指针事件；面板收起 / 组件卸载时收尾补写盘）
+  const colRowsRef = useRef<HTMLDivElement | null>(null);
+  const [draggingCol, setDraggingCol] = useState<ChColKey | null>(null);
+  const colDragCleanup = useRef<(() => void) | null>(null);
 
   function defaultForm(): ChannelFormState {
     return {
@@ -569,7 +651,21 @@ export default function Channels(): JSX.Element {
     }
   }, [pageSize]);
 
-  const colCls = (key: ChColKey): string => (colVis[key] ? '' : ' ch-hidden');
+  /** 列 key → 是否可见（tbody 的 ch-hidden 由此来；隐藏列 td 保留但不计入布局） */
+  const colVisible = useMemo(() => {
+    const map = {} as Record<ChColKey, boolean>;
+    for (const item of colItems) map[item.key] = item.visible;
+    return map;
+  }, [colItems]);
+
+  /** 列 key → 当前对齐（th/td 的 ta-* 类由此来） */
+  const colAlign = useMemo(() => {
+    const map = {} as Record<ChColKey, ChAlign>;
+    for (const item of colItems) map[item.key] = item.align;
+    return map;
+  }, [colItems]);
+
+  const colCls = (key: ChColKey): string => (colVisible[key] ? '' : ' ch-hidden');
 
   // 列设置浮层：点外部收起
   useEffect(() => {
@@ -583,18 +679,93 @@ export default function Channels(): JSX.Element {
     return () => document.removeEventListener('mousedown', handler);
   }, [colPanelOpen]);
 
-  const toggleColVis = (key: ChColKey): void => {
-    setColVis((prev) => {
-      const next = { ...prev, [key]: !prev[key] };
-      writeLs(LS_COLS, next);
-      return next;
+  /** 提交列配置：改内存即重画，写盘只在明确动作时（开关/对齐/松手/重置） */
+  const commitColItems = useCallback((next: ChColItem[], persist: boolean): void => {
+    setColItems(next);
+    if (persist) writeLs(LS_COLCFG, next);
+  }, []);
+
+  // 面板收起 / 组件卸载时把拖动会话收干净（对齐 ModelManage：卸载补写盘，防内存与 localStorage 漂移）
+  const finishColDrag = useCallback((): void => {
+    if (!colDragCleanup.current) return;
+    colDragCleanup.current();
+    setColItems((prev) => {
+      writeLs(LS_COLCFG, prev);
+      return prev;
     });
+  }, []);
+  useEffect(() => finishColDrag, [finishColDrag]);
+  useEffect(() => {
+    if (colPanelOpen) return;
+    finishColDrag();
+  }, [colPanelOpen, finishColDrag]);
+
+  /** 显隐开关 */
+  const toggleCol = (key: ChColKey): void => {
+    commitColItems(
+      colItems.map((c) => (c.key === key ? { ...c, visible: !c.visible } : c)),
+      true,
+    );
   };
 
-  /** 恢复默认：显隐与列宽一起回到列声明（列宽一并还原） */
-  const resetColVis = (): void => {
-    setColVis({ ...DEFAULT_COL_VIS });
-    writeLs(LS_COLS, DEFAULT_COL_VIS);
+  /** 对齐三档 */
+  const setColAlignValue = (key: ChColKey, next: ChAlign): void => {
+    const item = colItems.find((c) => c.key === key);
+    if (!item || item.align === next) return;
+    commitColItems(
+      colItems.map((c) => (c.key === key ? { ...c, align: next } : c)),
+      true,
+    );
+  };
+
+  /**
+   * 拖动排序：指针事件（对齐 ModelManage，不用 HTML5 拖放）。每跨过一行就重排一次并
+   * 重画，但**不写盘**（每跨一行都落一次盘很吵）；松手（或浮层收起）才提交。
+   */
+  const startColOrderDrag = (key: ChColKey, e: React.PointerEvent<HTMLElement>): void => {
+    e.preventDefault();
+    colDragCleanup.current?.();
+    setDraggingCol(key);
+    document.body.classList.add('ch-colset-dragging');
+    const rows = colRowsRef.current;
+
+    const teardown = (): void => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.classList.remove('ch-colset-dragging');
+      colDragCleanup.current = null;
+      setDraggingCol(null);
+    };
+    const onMove = (ev: PointerEvent): void => {
+      const over = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('[data-col-key]');
+      if (!over || !rows || !rows.contains(over)) return;
+      const overKey = over.getAttribute('data-col-key') as ChColKey | null;
+      if (!overKey || overKey === key) return;
+      setColItems((prev) => {
+        const from = prev.findIndex((c) => c.key === key);
+        const to = prev.findIndex((c) => c.key === overKey);
+        if (from < 0 || to < 0) return prev;
+        const next = [...prev];
+        const [item] = next.splice(from, 1);
+        next.splice(to, 0, item);
+        return next;
+      });
+    };
+    const onUp = (): void => {
+      teardown();
+      setColItems((prev) => {
+        writeLs(LS_COLCFG, prev);
+        return prev;
+      });
+    };
+    colDragCleanup.current = teardown;
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  /** 恢复默认：顺序、显隐、对齐一起回到列声明（列宽一并还原） */
+  const resetColConfig = (): void => {
+    commitColItems(defaultColItems(), true);
     setColWidths({});
     writeLs(LS_COLW, {});
   };
@@ -634,9 +805,13 @@ export default function Channels(): JSX.Element {
 
   /** 可见列全集（勾选列 + 显隐过滤后的数据列 + 操作列；colgroup 与表头同源） */
   const visibleColKeys = useMemo(
-    () => ['select', ...CH_COL_ORDER.filter((k) => colVis[k]), 'actions'],
-    [colVis],
+    () => ['select', ...colItems.filter((c) => c.visible).map((c) => c.key), 'actions'],
+    [colItems],
   );
+
+  /** 列名（ID 固定英文不译） */
+  const colLabel = (key: ChColKey): string =>
+    CH_COL_PANEL_LABEL[key] === 'ID' ? 'ID' : t(CH_COL_PANEL_LABEL[key]);
 
   /** 点击复制（对齐 ModelManage 的 data-copy 交互） */
   const copyText = (text: string): void => {
@@ -1127,7 +1302,7 @@ export default function Channels(): JSX.Element {
               />
             </div>
 
-            {/* 列设置（显隐浮层，localStorage 记忆，对齐模型管理页） */}
+            {/* 列设置（顺序 / 显隐 / 对齐浮层，localStorage 记忆，对齐模型管理页） */}
             <div className="ch-colset" ref={colPanelRef}>
               <Button
                 variant="outline"
@@ -1141,19 +1316,65 @@ export default function Channels(): JSX.Element {
               </Button>
               {colPanelOpen && (
                 <div className="ch-colset-panel" role="group" aria-label={t('列设置')}>
-                  {CH_COL_DEFS.map((c) => (
-                    <label key={c.key} className="ch-colset-row">
-                      <span>{c.label === 'ID' ? 'ID' : t(c.label)}</span>
-                      <Switch
-                        checked={colVis[c.key]}
-                        onChange={() => toggleColVis(c.key)}
-                        ariaLabel={`${t('显示列')} ${c.label}`}
-                      />
-                    </label>
-                  ))}
-                  <button type="button" className="ch-colset-reset" onClick={resetColVis}>
-                    {t('恢复默认')}
-                  </button>
+                  {/* 表头与数据行同一套网格：手柄 / 列名 / 显示 / 对齐（对齐 ModelManage 面板骨架） */}
+                  <div className="ch-colset-grid ch-colset-head">
+                    <span />
+                    <span>{t('列')}</span>
+                    <span>{t('显示')}</span>
+                    <span>{t('对齐')}</span>
+                  </div>
+                  <div className="ch-colset-rows" ref={colRowsRef}>
+                    {colItems.map((item) => {
+                      const name = colLabel(item.key);
+                      return (
+                        <div
+                          key={item.key}
+                          data-col-key={item.key}
+                          className={`ch-colset-grid ch-colset-row${draggingCol === item.key ? ' dragging' : ''}`}
+                        >
+                          <span
+                            className="ch-colset-grip"
+                            title={t('按住拖动调整列顺序')}
+                            onPointerDown={(e) => startColOrderDrag(item.key, e)}
+                          >
+                            <GripVertical size={13} />
+                          </span>
+                          <span className="ch-colset-name" title={name}>
+                            {name}
+                          </span>
+                          <Switch
+                            className="ch-colset-switch"
+                            checked={item.visible}
+                            onChange={() => toggleCol(item.key)}
+                            ariaLabel={`${t('显示列')} ${name}`}
+                            title={item.visible ? t('这一列正在显示') : t('这一列已隐藏')}
+                          />
+                          <div
+                            className="ch-seg ch-seg-mini"
+                            role="group"
+                            aria-label={t('「{name}」列的对齐', { name })}
+                          >
+                            {ALIGN_OPTIONS.map((a) => (
+                              <button
+                                key={a.value}
+                                type="button"
+                                className={`ch-seg-btn${item.align === a.value ? ' active' : ''}`}
+                                onClick={() => setColAlignValue(item.key, a.value)}
+                              >
+                                {t(a.label)}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="ch-colset-foot">
+                    <span className="ch-colset-tip">{t('拖动手柄调整顺序')}</span>
+                    <button type="button" className="ch-colset-reset" onClick={resetColConfig}>
+                      {t('恢复默认（含列宽）')}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -1278,12 +1499,12 @@ export default function Channels(): JSX.Element {
                         aria-label={t('全选')}
                       />
                     </th>
-                    {CH_COL_DEFS.filter((c) => colVis[c.key]).map((c) => (
+                    {colItems.filter((c) => c.visible).map((c) => (
                       <th
                         key={c.key}
-                        className={`col-${c.key}${colCls(c.key)}`}
+                        className={`col-${c.key} ta-${colAlign[c.key]}`}
                       >
-                        {c.label === 'ID' ? 'ID' : t(c.label)}
+                        {colLabel(c.key)}
                         <span
                           className="ch-col-grip"
                           title={t('拖动调整列宽 · 双击还原')}
@@ -1318,10 +1539,10 @@ export default function Channels(): JSX.Element {
                             aria-label={t('选择')}
                           />
                         </td>
-                        <td className={`col-id${colCls('id')}`} title={String(ch.id)}>
+                        <td className={`col-id${colCls('id')} ta-${colAlign.id}`} title={String(ch.id)}>
                           {ch.seq ?? String(ch.id).slice(0, 8)}
                         </td>
-                        <td className={`col-name${colCls('name')}`}>
+                        <td className={`col-name${colCls('name')} ta-${colAlign.name}`}>
                           <div className="ch-name ch-copy" title={t('点击复制名称')} onClick={() => copyText(ch.name)}>{ch.name}</div>
                           {(ch.base_url || ch.account_id) && (
                             <div
@@ -1333,13 +1554,13 @@ export default function Channels(): JSX.Element {
                             </div>
                           )}
                         </td>
-                        <td className={`col-type${colCls('type')}`}>
+                        <td className={`col-type${colCls('type')} ta-${colAlign.type}`}>
                           <span className="ch-type-badge">
                             <TypeIcon size={12} />
                             {typeLabel(ch.channel_type)}
                           </span>
                         </td>
-                        <td className={`col-status${colCls('status')}`}>
+                        <td className={`col-status${colCls('status')} ta-${colAlign.status}`}>
                           <span
                             className={`ch-status-badge ${ch.status === 'enabled' ? 'ok' : 'bad'}`}
                             title={ch.last_error || undefined}
@@ -1347,7 +1568,7 @@ export default function Channels(): JSX.Element {
                             {ch.status === 'enabled' ? t('启用') : t('禁用')}
                           </span>
                         </td>
-                        <td className={`col-models${colCls('models')}`}>
+                        <td className={`col-models${colCls('models')} ta-${colAlign.models}`}>
                           {models.length === 0
                             ? <span className="ch-models-all">{t('全部')}</span>
                             : (
@@ -1383,7 +1604,7 @@ export default function Channels(): JSX.Element {
                             </div>
                           )}
                         </td>
-                        <td className={`col-priority${colCls('priority')}`}>
+                        <td className={`col-priority${colCls('priority')} ta-${colAlign.priority}`}>
                           {isEditingPriority ? (
                             <input
                               type="number"
@@ -1412,7 +1633,7 @@ export default function Channels(): JSX.Element {
                             </span>
                           )}
                         </td>
-                        <td className={`col-weight${colCls('weight')}`}>
+                        <td className={`col-weight${colCls('weight')} ta-${colAlign.weight}`}>
                           {isEditingWeight ? (
                             <input
                               type="number"
@@ -1441,7 +1662,7 @@ export default function Channels(): JSX.Element {
                             </span>
                           )}
                         </td>
-                        <td className={`col-balance${colCls('balance')}`}>
+                        <td className={`col-balance${colCls('balance')} ta-${colAlign.balance}`}>
                           <button
                             className="balance-cell"
                             onClick={() => handleUpdateBalance(ch.id)}
@@ -1469,14 +1690,14 @@ export default function Channels(): JSX.Element {
                             )}
                           </button>
                         </td>
-                        <td className={`col-response${colCls('response')}`}>
+                        <td className={`col-response${colCls('response')} ta-${colAlign.response}`}>
                           {ch.response_time !== undefined ? (
                             <span className={`response-time-badge ${ch.response_time < 500 ? 'fast' : ch.response_time < 2000 ? 'medium' : 'slow'}`}>
                               {ch.response_time}ms
                             </span>
                           ) : '—'}
                         </td>
-                        <td className={`col-testtime${colCls('testtime')}`}>
+                        <td className={`col-testtime${colCls('testtime')} ta-${colAlign.testtime}`}>
                           {ch.test_time ? (
                             <span title={new Date(ch.test_time * 1000).toLocaleString()}>
                               {formatRelativeTime(ch.test_time * 1000)}
