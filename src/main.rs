@@ -751,6 +751,25 @@ async fn main() -> anyhow::Result<()> {
                 }),
             });
         }
+        // 余额自动查询：按账号独立间隔（usage_query_interval_secs）到期即查，
+        // 写回快照供界面上次读数展示。未配间隔的账号一律跳过。
+        {
+            let sessions = state.account_sessions.clone();
+            let http = state.http_client.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "account-session-usage-query",
+                interval: Duration::from_secs(60),
+                first_run_delay: Duration::from_secs(120),
+                run: Box::new(move || {
+                    let pool = sessions.clone();
+                    let http = http.clone();
+                    Box::pin(async move {
+                        crate::account_session::usage_query::sweep(&pool, &http).await;
+                        0
+                    })
+                }),
+            });
+        }
         // models.dev 元数据目录联网刷新（每 24h 一轮）：开关关闭直接跳过；
         // 失败保留上一版目录（不退回内嵌快照，避免网络抖动把好数据换掉）。
         {
@@ -912,7 +931,7 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         tracing::info!(
-            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-refresh, auto-update-check, log-retention-sweep, subscription-expire-reset, modelsdev-refresh)",
+            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-refresh, account-session-usage-query, auto-update-check, log-retention-sweep, subscription-expire-reset, modelsdev-refresh)",
             scheduler.task_count()
         );
     }

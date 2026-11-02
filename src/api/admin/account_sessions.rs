@@ -93,6 +93,9 @@ pub struct AccountSessionRequest {
     pub credential_kind: Option<String>,
     #[serde(default)]
     pub expires_at: Option<i64>,
+    /// 余额自动查询间隔（秒）。三态：缺省 = 保持原值；0 = 关闭；>0 = 定频查询。
+    #[serde(default)]
+    pub usage_query_interval_secs: Option<u64>,
 }
 
 /// 账号部分更新请求（PATCH）：只应用显式给出的字段。
@@ -233,6 +236,14 @@ fn apply_request(mut session: AccountSession, body: &AccountSessionRequest) -> A
         session.max_concurrency = max_concurrency;
     }
     session.expires_at = body.expires_at.filter(|at| *at > 0);
+    // 余额自动查询间隔：三态（缺省保持 / 0 关闭 / >0 定频）。上限 30 天，
+    // 防止误填一个巨大值把「下次查询」推到永远。
+    if let Some(interval) = body.usage_query_interval_secs {
+        session.usage_query_interval_secs = match interval {
+            0 => None,
+            v => Some(v.min(30 * 86_400)),
+        };
+    }
     session.models = Vec::new();
     for model in &body.models {
         let name = model.trim();
@@ -373,6 +384,11 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "last_error": session.last_error,
         "last_used_at": session.last_used_at,
         "expires_at": session.expires_at,
+        // 余额自动查询（间隔 + 上次读数快照；查询失败时保留上一次成功值）
+        "usage_query_interval_secs": session.usage_query_interval_secs,
+        "last_balance_at": session.last_balance_at,
+        "last_balance": session.last_balance,
+        "last_balance_error": session.last_balance_error,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
     })

@@ -10,6 +10,7 @@
 //! - [`refresh`]：账号级 token 自动刷新（qoder / autoclaw / trae / codearts / officeace，表驱动）
 //! - [`flight`]：刷新单飞原语（一次性 refresh_token 必须并发收口）
 //! - [`catalog`]：按账号自动发现上游模型目录（抄 Agent2API 的 provider 目录）
+//! - [`usage_query`]：余额自动查询巡检（按账号独立间隔，抄 A2A 的 usageQuery）
 //! - [`secret`]：凭证的 AES-256-GCM 真加密（抄 Agent2API 的 crypto.rs）
 //! - [`import`]：从本机其他 AI 客户端（cc-switch）导入账号
 
@@ -25,5 +26,6 @@ pub mod registry;
 pub mod rotate;
 pub mod secret;
 pub mod store;
+pub mod usage_query;
 
 pub use store::AccountSessionStore;

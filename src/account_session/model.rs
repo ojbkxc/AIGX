@@ -222,6 +222,24 @@ pub struct AccountSession {
     /// 运行态并发占用（不落盘）。
     #[serde(skip)]
     pub in_flight: u32,
+    /// 余额自动查询间隔（秒）。`None` / 0 = 关闭（默认）。
+    ///
+    /// 对照 Agent2API 的 per-account `usageQuery`：每个账号独立定频，
+    /// 由 `account_session::usage_query` 的巡检按到期判定触发。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_query_interval_secs: Option<u64>,
+    /// 上次余额查询时间（unix 秒；`None` = 从未查过）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_balance_at: Option<i64>,
+    /// 上次余额查询结果快照（归一后的 `AccountBalance` 形状）。
+    ///
+    /// 存快照而不是只存数字：前端要展示明细桶与订阅信息，且查询可能失败
+    /// （失败时保留上一次成功的快照，只更新 `last_balance_error`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_balance: Option<serde_json::Value>,
+    /// 上次余额查询失败原因（成功后清空）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_balance_error: Option<String>,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -273,6 +291,10 @@ impl AccountSession {
             total_latency_ms: 0,
             expires_at: None,
             in_flight: 0,
+            usage_query_interval_secs: None,
+            last_balance_at: None,
+            last_balance: None,
+            last_balance_error: None,
             created_at: now,
             updated_at: now,
         }

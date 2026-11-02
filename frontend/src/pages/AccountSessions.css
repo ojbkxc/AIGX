@@ -631,3 +631,8 @@ tr:hover .as-act:not(:disabled) {
   transform-origin: left center;
   flex: none;
 }
+
+/* ── 余额快照（后台自动查询留存的读数，避免只显示「查询余额」按钮） ── */
+.balance-snapshot {
+  color: var(--text-muted);
+}

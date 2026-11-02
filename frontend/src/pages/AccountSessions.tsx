@@ -51,13 +51,23 @@ interface SessionFormState {
   models: string;
   /** 额外请求头（每行 `Key: Value`，登录态型供应商补专用头） */
   extra_headers: string;
+  /** 余额自动查询间隔（秒；'0' = 关闭） */
+  usage_query_interval_secs: string;
   expires_at: string;
   clear_key: boolean;
   clear_proxy: boolean;
 }
 
-const EMPTY_FORM: SessionFormState = {
-  channel_id: '',
+/** 相对时间（「3 分钟前」），用于展示余额快照的采集时刻。 */
+function formatAgo(unixSeconds: number): string {
+  const delta = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds);
+  if (delta < 60) return '刚刚';
+  if (delta < 3600) return `${Math.floor(delta / 60)} 分钟前`;
+  if (delta < 86400) return `${Math.floor(delta / 3600)} 小时前`;
+  return `${Math.floor(delta / 86400)} 天前`;
+}
+
+const EMPTY_FORM: SessionFormState = {  channel_id: '',
   name: '',
   provider: 'openai_compatible',
   base_url: '',
@@ -70,6 +80,7 @@ const EMPTY_FORM: SessionFormState = {
   max_concurrency: '3',
   models: '',
   extra_headers: '',
+  usage_query_interval_secs: '0',
   expires_at: '',
   clear_key: false,
   clear_proxy: false,
@@ -247,6 +258,7 @@ export default function AccountSessions(): JSX.Element {
       extra_headers: Object.entries(session.extra_headers || {})
         .map(([k, v]) => `${k}: ${v}`)
         .join('\n'),
+      usage_query_interval_secs: String(session.usage_query_interval_secs ?? 0),
       expires_at: session.expires_at ? String(session.expires_at) : '',
       clear_key: false,
       clear_proxy: false,
@@ -415,6 +427,7 @@ export default function AccountSessions(): JSX.Element {
         max_concurrency: Math.max(0, Number(form.max_concurrency || 0)),
         models: splitModels(form.models),
         extra_headers: parseHeaders(form.extra_headers),
+        usage_query_interval_secs: Math.max(0, Number(form.usage_query_interval_secs || 0)),
         expires_at: form.expires_at.trim() ? Number(form.expires_at) : null,
       };
       // 代理三态：新增直传；更新时缺省保持原值、"" 清除、非空覆盖
@@ -1249,8 +1262,23 @@ export default function AccountSessions(): JSX.Element {
                           {shortError(session.last_error)}
                         </div>
                       )}
-                      {/* 余额查询：点击才打上游，避免列表加载时全量请求；结果内联 */}
+                      {/* 余额查询：点击才打上游，避免列表加载时全量请求；结果内联。
+                          未点击时若后台自动查询留了快照，直接展示它（省一次上游请求）。 */}
                       <div className="form-hint">
+                        {!bal && session.last_balance && (
+                          <div className="balance-snapshot">
+                            {t('余额')}{' '}
+                            {session.last_balance.available != null
+                              ? `${session.last_balance.available} ${session.last_balance.unit || ''}`.trim()
+                              : t('读数不可用')}
+                            {session.last_balance_at
+                              ? `（${formatAgo(session.last_balance_at)}）`
+                              : ''}
+                          </div>
+                        )}
+                        {!bal && session.last_balance_error && (
+                          <div title={session.last_balance_error}>{t('自动查询失败')}</div>
+                        )}
                         {!bal && (
                           <button
                             type="button"
@@ -1805,6 +1833,18 @@ export default function AccountSessions(): JSX.Element {
                 value={form.models}
                 onChange={(e) => setForm({ ...form, models: e.target.value })}
               />
+              <Select
+                label={t('余额自动查询')}
+                hint={t('按间隔自动拉取上游余额并展示上次读数；仅支持余额查询的供应商生效')}
+                value={form.usage_query_interval_secs}
+                onChange={(e) => setForm({ ...form, usage_query_interval_secs: e.target.value })}
+              >
+                <option value="0">{t('关闭')}</option>
+                <option value="3600">{t('每小时')}</option>
+                <option value="21600">{t('每 6 小时')}</option>
+                <option value="43200">{t('每 12 小时')}</option>
+                <option value="86400">{t('每天')}</option>
+              </Select>
               <Input
                 label={t('凭证到期时间（可选）')}
                 type="number"

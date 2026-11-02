@@ -1184,6 +1184,14 @@ export interface AccountSessionItem {
   last_error?: string | null;
   last_used_at?: number | null;
   expires_at?: number | null;
+  /** 余额自动查询间隔（秒；null/缺省 = 关闭） */
+  usage_query_interval_secs?: number | null;
+  /** 上次余额查询时间（unix 秒） */
+  last_balance_at?: number | null;
+  /** 上次余额查询快照（与 /balance 的 data 同构） */
+  last_balance?: AccountBalance | null;
+  /** 上次余额查询失败原因（成功后清空） */
+  last_balance_error?: string | null;
   created_at?: number;
   updated_at?: number;
 }
