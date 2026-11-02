@@ -89,6 +89,29 @@
   opacity: 0.8;
 }
 
+/* 左栏沉底「+新建」动作（对齐 Agent2API prov-rail 的 +新建自定义提供商） */
+.mm-rail-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin: 6px 2px 2px;
+  padding: 6px 8px;
+  border: 1px dashed var(--line-strong, rgba(128, 128, 128, 0.35));
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+
+.mm-rail-add:hover {
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+  background: var(--accent-soft, rgba(99, 102, 241, 0.08));
+}
+
 /* provider 色相 monogram（Agent2API 同款：无官方图标时的稳定彩色字块） */
 .mm-mono {
   display: inline-flex;
@@ -486,6 +509,34 @@
   color: var(--text-muted);
 }
 
+/* 来源 tag 需要容纳色点：改为行内弹性布局 */
+.mm-src-tag {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* 来源色点：远程品牌蓝 / 内置灰 / 手动琥珀（对齐 Agent2API .src i 三态） */
+.mm-src-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 4px;
+  flex: none;
+}
+
+.mm-src-dot.remote {
+  background: var(--info-color, #3b82f6);
+}
+
+.mm-src-dot.builtin {
+  background: var(--text-faint, rgba(128, 128, 128, 0.55));
+}
+
+.mm-src-dot.manual {
+  background: var(--warning-color, #f59e0b);
+}
+
 .mm-src-more {
   font-size: 10.5px;
   color: var(--text-muted);
@@ -525,10 +576,45 @@
   border: 1px dashed var(--line-strong, rgba(128, 128, 128, 0.35));
 }
 
+/* 三态之二：可用 = 品牌淡底（对齐 Agent2API .cap-dot.on） */
 .mm-cap-dot.on {
   color: var(--accent-color);
   background: var(--accent-soft, rgba(99, 102, 241, 0.14));
   border: 1px solid transparent;
+}
+
+/* 三态之三：不可用 = 灰实底（有声明但不支持，与「未测」虚线圈区分） */
+.mm-cap-dot.off {
+  color: var(--text-muted);
+  background: var(--chip-bg, rgba(128, 128, 128, 0.15));
+  border: 1px solid transparent;
+  opacity: 0.75;
+}
+
+/* models.dev 补齐标记：覆盖小点挂在能力格右下（对齐 Agent2API .cap-mark） */
+.mm-cap-mark {
+  position: relative;
+  width: 0;
+  height: 18px;
+  display: inline-block;
+}
+
+.mm-cap-mark::after {
+  content: '';
+  position: absolute;
+  right: -2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-color, #6366f1);
+  box-shadow: 0 0 0 2px var(--bg-main, #fff);
+}
+
+/* 上下文数值补齐态：models.dev 补的值加虚线底（对齐 Agent2API .cap-num.filled） */
+.mm-cap-ctx.filled {
+  border-bottom: 1px dashed var(--line-strong, rgba(128, 128, 128, 0.35));
 }
 
 .mm-cap-ctx {

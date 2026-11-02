@@ -76,8 +76,6 @@ pub async fn handle_checkin_center(
         })
         .collect();
 
-    let records_total = state.upstream_checkin.total_records().unwrap_or(0);
-
     Ok(Json(json!({
         "success": true,
         "data": {
@@ -85,7 +83,6 @@ pub async fn handle_checkin_center(
             "supported_providers": claim::supported_providers(),
             "providers": providers,
             "schedules": state.upstream_checkin.schedules(),
-            "records_total": records_total,
             "today_summary": summary.iter().map(|(k, (done, total))| json!({
                 "provider": k, "done": done, "total": total
             })).collect::<Vec<_>>(),
@@ -141,7 +138,6 @@ pub async fn handle_checkin_run(
                     "manual",
                     CheckinOutcome::Failed,
                     &message,
-                    false,
                 );
                 results.push(json!({
                     "account_id": session.id,
@@ -164,7 +160,6 @@ pub async fn handle_checkin_run(
             "manual",
             result.outcome,
             &result.msg,
-            false,
         );
         results.push(json!({
             "account_id": session.id,
@@ -199,26 +194,13 @@ pub struct RecordsQuery {
     pub account_id: Option<String>,
     #[serde(default)]
     pub outcome: Option<String>,
-    /// 关键词（账号名 / 账号 id / 上游 / 说明，大小写不敏感包含）
-    #[serde(default)]
-    pub keyword: Option<String>,
-    /// 分页偏移（从 0 起）
-    #[serde(default)]
-    pub offset: usize,
-    /// 分页大小（≤0 = 不分页，返回全部）
-    #[serde(default = "default_page_size")]
-    pub limit: usize,
 }
 
 fn default_days() -> u32 {
     7
 }
 
-fn default_page_size() -> usize {
-    50
-}
-
-/// GET /api/checkin-center/records —— 台账（分页 + 关键词）。
+/// GET /api/checkin-center/records —— 台账。
 pub async fn handle_checkin_records(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -232,14 +214,13 @@ pub async fn handle_checkin_records(
         Some("failed") => Some(CheckinOutcome::Failed),
         _ => None,
     };
-    let mut records = state
+    let records = state
         .upstream_checkin
         .recent_records(
             q.days,
             q.provider.as_deref().filter(|s| !s.is_empty()),
             q.account_id.as_deref().filter(|s| !s.is_empty()),
             outcome,
-            q.keyword.as_deref(),
         )
         .map_err(|e| {
             error_response(
@@ -247,16 +228,10 @@ pub async fn handle_checkin_records(
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
         })?;
-    // 过滤后总数（供分页控件），再截取当前页
     let total = records.len();
-    let page = if q.limit > 0 {
-        records.into_iter().skip(q.offset).take(q.limit).collect()
-    } else {
-        records
-    };
     Ok(Json(json!({
         "success": true,
-        "data": { "records": page, "total": total }
+        "data": { "records": records, "total": total }
     })))
 }
 
@@ -419,7 +394,7 @@ pub async fn handle_run_checkin_schedule(
         .find(|s| s.id == body.id)
         .ok_or_else(|| error_response("签到计划不存在", StatusCode::NOT_FOUND))?;
     let settings = state.upstream_checkin.settings();
-    let outcome = scheduler::run_schedule(
+    let summary = scheduler::run_schedule(
         &state.upstream_checkin,
         &state.account_sessions,
         state.account_sessions.egress(),
@@ -427,26 +402,12 @@ pub async fn handle_run_checkin_schedule(
         settings.gap_ms,
     )
     .await;
-    let counts = crate::checkin::store::ScheduleCounts {
-        ok: outcome.ok,
-        keepalive: outcome.keepalive,
-        failed: outcome.failed,
-    };
-    let _ = state.upstream_checkin.mark_fired(
-        &schedule.id,
-        &scheduler::today(),
-        &outcome.summary,
-        &counts,
-    );
-    Ok(Json(json!({
-        "success": true,
-        "data": {
-            "summary": outcome.summary,
-            "ok": outcome.ok,
-            "keepalive": outcome.keepalive,
-            "failed": outcome.failed,
-        }
-    })))
+    let _ = state
+        .upstream_checkin
+        .mark_fired(&schedule.id, &scheduler::today(), &summary);
+    Ok(Json(
+        json!({ "success": true, "data": { "summary": summary } }),
+    ))
 }
 
 // ── 一次性 / 限时福利通道（对照 Agent2API 的 onboarding/keepalive/growth/claim）──
@@ -488,12 +449,6 @@ pub async fn handle_benefits_list(
                 "channel_id": session.channel_id,
                 "status": session.runtime_status(now),
                 "actions": actions,
-                // 待领新手福利项数（只读记忆，零上游请求；None = 还没盘点过）
-                "pending_onboarding": crate::checkin::benefits::onboarding::pending_count(
-                    &state.alert_store,
-                    &session.id,
-                    &session.provider,
-                ),
                 // 上次保活执行留下的痕迹（仅国际版有）
                 "keepalive": crate::checkin::benefits::keepalive::memory_view(
                     &state.alert_store,
@@ -540,32 +495,6 @@ pub async fn handle_benefit_run(
     )
     .await;
     Ok(Json(json!({ "success": true, "data": result })))
-}
-
-/// POST /api/checkin-center/records/mark-kept-active —— 签到后自动链回写。
-///
-/// 对签到成功的国际版账号顺带执行保活成功后，把该账号当日最后一条签到
-/// 记录标记「附带保活」（见 `CheckinStore::mark_kept_active` 的说明）。
-#[derive(Debug, Deserialize)]
-pub struct KeptActiveBody {
-    pub account_id: String,
-    pub provider: String,
-}
-
-pub async fn handle_mark_kept_active(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<KeptActiveBody>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    verify_admin(&state, &headers).await?;
-    let _ = state.upstream_checkin.mark_kept_active(
-        &body.account_id,
-        &body.provider,
-        &scheduler::today(),
-    );
-    Ok(Json(
-        json!({ "success": true, "data": { "kept_active": true } }),
-    ))
 }
 
 /// GET /api/checkin-center/benefits/keepalive —— 保活免费模型链配置。

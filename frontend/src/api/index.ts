@@ -112,6 +112,17 @@ function buildQuery(params: Record<string, string | number>): string {
   return new URLSearchParams(entries).toString();
 }
 
+/** 报表窗口参数（与后端 resolve_window 契约一致）：days 缺省 30；
+ *  start/end 合法时后端优先生效（自定义区间档传这两个，不传 days） */
+export type ReportWindow = { days?: number; start?: string; end?: string };
+
+function reportWindowQs(q: ReportWindow): string {
+  if (q.start && q.end) {
+    return new URLSearchParams({ start: q.start, end: q.end }).toString();
+  }
+  return `days=${q.days ?? 30}`;
+}
+
 async function request<T = unknown>(
   method: string,
   path: string,
@@ -232,33 +243,41 @@ export const api = {
     request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/limits`),
   getTrend: (): Promise<ApiResponse<TrendItem[]>> =>
     request<ApiResponse<TrendItem[]>>('GET', `${API_BASE}/usage/trend`),
-  getConsumptionTrend: (): Promise<ApiResponse<TrendItem[]>> =>
-    request<ApiResponse<TrendItem[]>>('GET', `${API_BASE}/dashboard/consumption_trend`),
-  getModelDistribution: (): Promise<ApiResponse<DashboardItem[]>> =>
-    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/model_distribution`),
-  getUserRanking: (): Promise<ApiResponse<DashboardItem[]>> =>
-    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/user_ranking`),
-  getChannelHealth: (): Promise<ApiResponse<DashboardItem[]>> =>
-    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/channel_health`),
+  getConsumptionTrend: (q: ReportWindow = {}): Promise<ApiResponse<TrendItem[]>> =>
+    request<ApiResponse<TrendItem[]>>('GET', `${API_BASE}/dashboard/consumption_trend?${reportWindowQs(q)}`),
+  getModelDistribution: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/model_distribution?${reportWindowQs(q)}`),
+  getUserRanking: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/user_ranking?${reportWindowQs(q)}`),
+  getChannelHealth: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/channel_health?${reportWindowQs(q)}`),
   getRealtime: (): Promise<ApiResponse<DashboardItem>> =>
     request<ApiResponse<DashboardItem>>('GET', `${API_BASE}/dashboard/realtime`),
-  getCacheSavings: (): Promise<ApiResponse<DashboardItem>> =>
-    request<ApiResponse<DashboardItem>>('GET', `${API_BASE}/dashboard/cache_savings`),
-  // 报表扩展（Agent2API report 视角；普通用户后端按 user_id 自动收敛数据集）
-  getReportHeatmap: (days = 365): Promise<ApiResponse<DashboardItem[]>> =>
-    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/heatmap?days=${days}`),
-  getReportTopSources: (days = 30): Promise<ApiResponse<DashboardItem[]>> =>
-    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/top_sources?days=${days}`),
-  getReportTokenTrend: (days = 30): Promise<ApiResponse<DashboardItem[]>> =>
-    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/token_trend?days=${days}`),
-  getReportOverview: (days = 30): Promise<ApiResponse<DashboardItem>> =>
-    request<ApiResponse<DashboardItem>>('GET', `${API_BASE}/dashboard/report/overview?days=${days}`),
-  getReportModels: (days = 30): Promise<ApiResponse<DashboardItem[]>> =>
-    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/models?days=${days}`),
-  getReportCacheRates: (days = 30): Promise<ApiResponse<DashboardItem[]>> =>
-    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/cache_rates?days=${days}`),
-  getReportDailyTrend: (days = 30): Promise<ApiResponse<DashboardItem[]>> =>
-    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/daily_trend?days=${days}`),
+  getCacheSavings: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem>> =>
+    request<ApiResponse<DashboardItem>>('GET', `${API_BASE}/dashboard/cache_savings?${reportWindowQs(q)}`),
+  // 报表扩展（Agent2API report 视角；普通用户后端按 user_id 自动收敛数据集）。
+  // 窗口参数：days = 含今天的 N 个自然日；start/end（YYYY-MM-DD，含端点）
+  // 合法时优先生效——与后端 resolve_window 同一契约（阶段 2 铺路）。
+  getReportHeatmap: (q: { days?: number; start?: string; end?: string } = {}): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/heatmap?${reportWindowQs({ days: 365, ...q })}`),
+  getReportTopSources: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/top_sources?${reportWindowQs(q)}`),
+  getReportTokenTrend: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/token_trend?${reportWindowQs(q)}`),
+  getReportOverview: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem>> =>
+    request<ApiResponse<DashboardItem>>('GET', `${API_BASE}/dashboard/report/overview?${reportWindowQs(q)}`),
+  getReportModels: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/models?${reportWindowQs(q)}`),
+  getReportCacheRates: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/cache_rates?${reportWindowQs(q)}`),
+  getReportDailyTrend: (q: ReportWindow = {}): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/daily_trend?${reportWindowQs(q)}`),
+  // 近 24 个本地整点缓存命中双轴序列（A2A cacheTrend24h；窗口固定不受 days 影响）
+  getReportCacheTrend24h: (): Promise<ApiResponse<DashboardItem[]>> =>
+    request<ApiResponse<DashboardItem[]>>('GET', `${API_BASE}/dashboard/report/cache_trend_24h`),
+  // 日聚合手动重建（逃生门：聚合数字可疑时管理员一键重算历史）
+  rebuildDailyAgg: (): Promise<ApiResponse<{ scanned: number; days_written: number; user_rows_written: number; skipped_shrink: number }>> =>
+    request<ApiResponse<{ scanned: number; days_written: number; user_rows_written: number; skipped_shrink: number }>>('POST', `${API_BASE}/logs/agg/rebuild`, {}),
   saveEpayConfig: (config: Record<string, unknown>): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('PUT', `${API_BASE}/epay/config`, config),
   listGroups: (): Promise<ApiList<GroupItem>> =>
@@ -900,10 +919,10 @@ export const api = {
     request<ApiResponse<{ removed?: number }>>('DELETE', `${API_BASE}/logs/audits`, { ids }),
   clearAuditLogs: (): Promise<ApiResponse<{ removed?: number }>> =>
     request<ApiResponse<{ removed?: number }>>('DELETE', `${API_BASE}/logs/audits/clear`),
-  getLogRetention: (): Promise<ApiResponse<{ max_age_days?: number; max_capacity?: number; audit_max_age_days?: number }>> =>
-    request<ApiResponse<{ max_age_days?: number; max_capacity?: number; audit_max_age_days?: number }>>('GET', `${API_BASE}/logs/retention`),
-  updateLogRetention: (data: { max_age_days?: number; max_capacity?: number; audit_max_age_days?: number }): Promise<ApiResponse<null>> =>
-    request<ApiResponse<null>>('PUT', `${API_BASE}/logs/retention`, data),
+  getLogRetention: (): Promise<ApiResponse<{ max_age_days?: number; max_capacity?: number; audit_max_age_days?: number; daily_max_age_days?: number }>> =>
+    request<ApiResponse<{ max_age_days?: number; max_capacity?: number; audit_max_age_days?: number; daily_max_age_days?: number }>>('GET', `${API_BASE}/logs/retention`),
+  updateLogRetention: (data: { max_age_days?: number; max_capacity?: number; audit_max_age_days?: number; daily_max_age_days?: number }): Promise<ApiResponse<{ daily_pruned?: number } | null>> =>
+    request<ApiResponse<{ daily_pruned?: number } | null>>('PUT', `${API_BASE}/logs/retention`, data),
   cleanupLogs: (): Promise<ApiResponse<{ removed?: number; requests?: number; audits?: number }>> =>
     request<ApiResponse<{ removed?: number; requests?: number; audits?: number }>>('POST', `${API_BASE}/logs/cleanup`, {}),
 

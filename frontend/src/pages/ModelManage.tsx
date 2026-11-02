@@ -19,9 +19,15 @@ import {
   Settings2,
   Tag,
   Trash2,
+  Video,
   Wrench,
 } from 'lucide-react';
 import { api } from '../api';
+import {
+  addCustomModel,
+  removeCustomModel,
+  batchAddAliasPrefix,
+} from './modelApiHelpers';
 import { useToast } from '../components/Toast';
 import { Loading, EmptyState, Switch, Pagination, Tabs, Combobox } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
@@ -159,13 +165,42 @@ function readColItems(): ColItem[] {
   return base;
 }
 
-/** 能力圆点定义（对齐 Agent2API caps 列四枚圆点：工具/图像/音频/思考） */
+/**
+ * 能力圆点定义（对齐 Agent2API caps 列圆点：工具/图像/音频/视频/思考）。
+ * match 命中 = 「可用」；capabilities 存在但该圆点未命中 = 「不可用」（灰实底）；
+ * capabilities 完全缺失 = 「未测」（虚线圈）—— 三态判定见 renderCapDots。
+ */
 const CAP_DOTS: Array<{ key: string; match: RegExp; label: string; icon: typeof Wrench }> = [
   { key: 'tool', match: /tool|function/i, label: '工具调用', icon: Wrench },
   { key: 'image', match: /vision|image/i, label: '图像识别', icon: ImageIcon },
+  { key: 'video', match: /video/i, label: '视频识别', icon: Video },
   { key: 'audio', match: /audio|speech|tts/i, label: '音频', icon: AudioLines },
   { key: 'reasoning', match: /reason|think/i, label: '思考', icon: Lightbulb },
 ];
+
+/** 来源色点三态：远程品牌蓝 / 内置灰 / 手动琥珀（对齐 Agent2API .src i） */
+const SOURCE_DOTS: Record<string, { label: string; className: string }> = {
+  remote: { label: '远程拉取', className: 'mm-src-dot remote' },
+  builtin: { label: '内置', className: 'mm-src-dot builtin' },
+  manual: { label: '手动', className: 'mm-src-dot manual' },
+};
+
+/** 来源列色点：有 kind 细分时按三态取色，否则按承载方（account=琥珀）兜底 */
+function srcDotClass(s: { kind: string; source?: string }): string {
+  const hit = SOURCE_DOTS[s.source ?? ''];
+  if (hit) return hit.className;
+  return s.kind === 'account' ? 'mm-src-dot manual' : 'mm-src-dot builtin';
+}
+
+/**
+ * 能力圆点三态判定：
+ *   caps 缺失/空数组 → 未声明（unset，虚线圈）；
+ *   有声明且命中 → 可用（on，品牌淡底）；有声明但未命中 → 不可用（off，灰实底）。
+ */
+function capDotState(caps: string[] | undefined, match: RegExp): '' | 'on' | 'off' {
+  if (!caps || caps.length === 0) return '';
+  return caps.some((c) => match.test(c)) ? 'on' : 'off';
+}
 
 // ── 小工具 ───────────────────────────────────────────────────────────
 
@@ -245,10 +280,13 @@ interface MetaForm {
   capsMode: 'inherit' | 'custom';
   capTool: boolean;
   capImage: boolean;
+  capVideo: boolean;
   capAudio: boolean;
   capReasoning: boolean;
   /** 四圆点之外的标签（embedding / rerank / …），逗号分隔 */
   extraTags: string;
+  /** 思考等级候选（逗号分隔，对齐 Agent2API 能力弹窗的 reasoningLevels 编辑） */
+  reasoningLevels: string;
 }
 
 const EMPTY_META_FORM: MetaForm = {
@@ -258,24 +296,27 @@ const EMPTY_META_FORM: MetaForm = {
   capsMode: 'inherit',
   capTool: false,
   capImage: false,
+  capVideo: false,
   capAudio: false,
   capReasoning: false,
   extraTags: '',
+  reasoningLevels: '',
 };
 
 /** 能力标签 → 表单勾选态（与 CAP_DOTS 同一套正则口径） */
-function capsToForm(caps: string[]): Pick<MetaForm, 'capsMode' | 'capTool' | 'capImage' | 'capAudio' | 'capReasoning' | 'extraTags'> {
+function capsToForm(caps: string[]): Pick<MetaForm, 'capsMode' | 'capTool' | 'capImage' | 'capVideo' | 'capAudio' | 'capReasoning' | 'extraTags'> {
   if (!caps.length) {
-    return { capsMode: 'inherit', capTool: false, capImage: false, capAudio: false, capReasoning: false, extraTags: '' };
+    return { capsMode: 'inherit', capTool: false, capImage: false, capVideo: false, capAudio: false, capReasoning: false, extraTags: '' };
   }
   const has = (re: RegExp): boolean => caps.some((c) => re.test(c));
   const extra = caps
-    .filter((c) => !/tool|function|vision|image|audio|speech|tts|reason|think|chat/i.test(c))
+    .filter((c) => !/tool|function|vision|image|video|audio|speech|tts|reason|think|chat/i.test(c))
     .join(', ');
   return {
     capsMode: 'custom',
     capTool: has(/tool|function/i),
     capImage: has(/vision|image/i),
+    capVideo: has(/video/i),
     capAudio: has(/audio|speech|tts/i),
     capReasoning: has(/reason|think/i),
     extraTags: extra,
@@ -380,6 +421,19 @@ export default function ModelManage(): JSX.Element {
   const [pendingRow, setPendingRow] = useState<string | null>(null);
 
   const [tab, setTab] = useState<MainTab>('catalog');
+
+  // ── 自定义模型（对齐 Agent2API addCustomModel / removeCustomModel） ──
+  const [customModal, setCustomModal] = useState(false);
+  const [customForm, setCustomForm] = useState({ id: '', provider: '', owned_by: '' });
+  const [customError, setCustomError] = useState('');
+  const [savingCustom, setSavingCustom] = useState(false);
+
+
+  // ── 批量映射前缀（对齐 Agent2API 批量加映射的「前缀 + 同名合并」选项） ──
+  const [prefixModal, setPrefixModal] = useState(false);
+  const [prefixForm, setPrefixForm] = useState({ prefix: '', sep: '-', merge: true });
+  const [prefixError, setPrefixError] = useState('');
+  const [savingPrefix, setSavingPrefix] = useState(false);
 
   // 元信息覆盖
   const [overrides, setOverrides] = useState<Record<string, ModelMetaOverride>>({});
@@ -587,6 +641,7 @@ export default function ModelManage(): JSX.Element {
       model,
       owned_by: o.owned_by ?? '',
       context_length: o.context_length != null ? String(o.context_length) : '',
+      reasoningLevels: (o.reasoning_levels ?? []).join(', '),
       ...capsToForm(o.capabilities ?? []),
     });
     setMetaError('');
@@ -606,24 +661,35 @@ export default function ModelManage(): JSX.Element {
           : row.context_length != null
             ? String(row.context_length)
             : '',
+      reasoningLevels: (o?.reasoning_levels ?? []).join(', '),
       ...capsToForm(o?.capabilities ?? row.capabilities ?? []),
     });
     setMetaError('');
     setMetaModal(true);
   };
 
-  /** 四圆点勾选 → 提交给后端的标签数组（chat 恒携带，与内置推断口径一致） */
+  /** 五圆点勾选 → 提交给后端的标签数组（chat 恒携带，与内置推断口径一致） */
   const metaFormToCaps = (): string[] => {
     if (metaForm.capsMode === 'inherit') return [];
     const caps: string[] = ['chat'];
     if (metaForm.capTool) caps.push('tool');
     if (metaForm.capImage) caps.push('vision');
+    if (metaForm.capVideo) caps.push('video');
     if (metaForm.capAudio) caps.push('audio');
     if (metaForm.capReasoning) caps.push('reasoning');
     for (const tag of metaForm.extraTags.split(/[,，]/).map((c) => c.trim()).filter(Boolean)) {
       if (!caps.includes(tag)) caps.push(tag);
     }
     return caps;
+  };
+
+  /** 思考等级候选输入 → 数组（中文逗号也兼容；空 = 不覆盖，交由后端继承） */
+  const metaFormToLevels = (): string[] | undefined => {
+    const levels = metaForm.reasoningLevels
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return levels.length ? levels : undefined;
   };
 
   const saveMeta = async () => {
@@ -646,6 +712,7 @@ export default function ModelManage(): JSX.Element {
         owned_by: ownedBy,
         context_length: ctx,
         capabilities: metaFormToCaps(),
+        reasoning_levels: metaFormToLevels(),
       });
       addToast(t('元信息覆盖已保存'));
       setMetaModal(false);
@@ -671,6 +738,93 @@ export default function ModelManage(): JSX.Element {
         await load();
       },
     });
+  };
+
+  // ── 自定义模型（Task 9 后端端点未就绪，helper 失败只弹 toast，不崩页面） ──
+
+  /** 判定一行是否为自定义模型：来源里带 manual 标记，或该 provider 是自定义家 */
+  const isCustomRow = (row: ManagedModel): boolean => {
+    if (row.sources.some((s) => s.source === 'manual')) return true;
+    return customProviders.some((p) => p.id === row.provider);
+  };
+
+  const openCustomCreate = () => {
+    setCustomForm({ id: '', provider: '', owned_by: '' });
+    setCustomError('');
+    setCustomModal(true);
+  };
+
+  const saveCustom = async () => {
+    setCustomError('');
+    const id = customForm.id.trim();
+    const provider = customForm.provider.trim() || 'custom';
+    if (!id) {
+      setCustomError(t('模型 ID 为必填项'));
+      return;
+    }
+    setSavingCustom(true);
+    try {
+      await addCustomModel({ id, provider, owned_by: customForm.owned_by.trim() || provider });
+      addToast(t('自定义模型已添加') + `：${id}`);
+      setCustomModal(false);
+      await load();
+    } catch (err) {
+      // 后端端点尚未就绪（Task 9），失败只报错不崩页面
+      setCustomError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingCustom(false);
+    }
+  };
+
+  const deleteCustom = (row: ManagedModel) => {
+    setConfirmState({
+      title: t('删除自定义模型'),
+      message: t('删除后客户端将无法再调用该模型') + `：${row.id}`,
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        await removeCustomModel(row.provider, row.id);
+        addToast(t('已删除自定义模型'));
+
+        await load();
+      },
+    });
+  };
+
+  // ── 批量映射前缀（对齐 Agent2API 批量加映射：前缀 + 同名合并到多家） ──
+
+  const openPrefixBatch = () => {
+    if (selectedRows.length === 0) return;
+    setPrefixForm({ prefix: '', sep: '-', merge: true });
+    setPrefixError('');
+    setPrefixModal(true);
+  };
+
+  const savePrefixBatch = async () => {
+    setPrefixError('');
+    const prefix = prefixForm.prefix.trim();
+    if (!prefix) {
+      setPrefixError(t('前缀不能为空'));
+      return;
+    }
+    setSavingPrefix(true);
+    try {
+      const targets = selectedRows.map((m) => m.id);
+      const res = await batchAddAliasPrefix(prefix, {
+        sep: prefixForm.sep,
+        merge: prefixForm.merge,
+        targets,
+      });
+      acceptView(res ?? undefined);
+      addToast(t('已批量添加映射') + `：${prefix}<sep><模型ID>`);
+      setPrefixModal(false);
+      setSelected(new Set());
+    } catch (err) {
+      // 端点未就绪时不中断批量会话，报错留在弹窗里供重试
+      setPrefixError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingPrefix(false);
+    }
   };
 
   // ── 批量操作 ──
@@ -1024,6 +1178,15 @@ export default function ModelManage(): JSX.Element {
 
   const builtinRails = useMemo(() => (view?.providers ?? []).filter((g) => g.account), [view]);
 
+  /** 自定义提供商分组：providers 里 account=false 但 id 带 custom 前缀的分组（后端就绪后自动出现） */
+  const customProviders = useMemo(
+    () =>
+      (view?.providers ?? []).filter(
+        (g) => !g.account && (g.id.startsWith('custom:') || g.id === 'custom'),
+      ),
+    [view],
+  );
+
   const providerStats = useMemo(() => {
     const groupsList = view?.providers ?? [];
     return {
@@ -1197,6 +1360,8 @@ export default function ModelManage(): JSX.Element {
                   className={`mm-src-tag${s.kind === 'account' ? '' : ' provider'}`}
                   title={`${s.kind === 'account' ? t('账号') : t('渠道')}：${s.name}`}
                 >
+                  {/* 来源色点：远程蓝 / 内置灰 / 手动琥珀（Agent2API .src i 三态） */}
+                  <i className={srcDotClass(s)} />
                   {s.name}
                 </span>
               ))}
@@ -1222,19 +1387,32 @@ export default function ModelManage(): JSX.Element {
               onClick={() => openMetaForRow(row)}
             >
               {CAP_DOTS.map((c) => {
-                const on = (row.capabilities ?? []).some((cap) => c.match.test(cap));
+                const state = capDotState(row.capabilities, c.match);
                 const Icon = c.icon;
                 return (
                   <span
                     key={c.key}
-                    className={`mm-cap-dot${on ? ' on' : ''}`}
-                    title={`${t(c.label)}：${on ? t('支持') : t('未声明')}`}
+                    className={`mm-cap-dot${state ? ` ${state}` : ''}`}
+                    title={`${t(c.label)}：${
+                      state === 'on'
+                        ? t('可用')
+                        : state === 'off'
+                          ? t('不可用')
+                          : t('未测')
+                    }`}
                   >
                     <Icon size={10} />
                   </span>
                 );
               })}
-              <span className="mm-cap-ctx">
+              {/* models.dev 补齐标记：能力来自社区目录补齐时加内侧描边小点 */}
+              {row.sources.some((s) => s.source === 'modelsdev') && (
+                <span className="mm-cap-mark" title={t('能力由 models.dev 社区目录补齐')} />
+              )}
+              <span
+                className={`mm-cap-ctx${row.context_length == null ? '' : ' filled'}`}
+                title={row.context_length == null ? t('上下文长度未声明') : `${row.context_length}`}
+              >
                 {row.context_length ? fmtCompact(row.context_length) : '—'}
               </span>
             </button>
@@ -1329,6 +1507,17 @@ export default function ModelManage(): JSX.Element {
                   className="mm-act-btn danger icon-only"
                   onClick={() => removePrice(row)}
                   title={t('删除定价')}
+                >
+                  <Trash2 size={11} />
+                </button>
+              )}
+              {/* 自定义模型：行内删除（对齐 Agent2API removeCustomModel） */}
+              {isCustomRow(row) && (
+                <button
+                  type="button"
+                  className="mm-act-btn danger icon-only"
+                  onClick={() => deleteCustom(row)}
+                  title={t('删除自定义模型')}
                 >
                   <Trash2 size={11} />
                 </button>
@@ -1556,7 +1745,35 @@ export default function ModelManage(): JSX.Element {
             )}
 
             <div className="mm-rail-title">{t('自定义提供商')}</div>
-            <div className="mm-rail-empty">{t('暂无自定义提供商')}</div>
+            {customProviders.length === 0 ? (
+              <div className="mm-rail-empty">{t('暂无自定义提供商')}</div>
+            ) : (
+              customProviders.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={`mm-rail-item${navKey === `pv:${p.id}` ? ' active' : ''}`}
+                  onClick={() => selectNav(`pv:${p.id}`)}
+                  title={`${p.label} · ${p.total} ${t('个模型')}`}
+                >
+                  <span
+                    className="mm-mono"
+                    style={{
+                      background: `hsla(${providerHue(p.id)}, 65%, 55%, 0.16)`,
+                      color: `hsl(${providerHue(p.id)}, 55%, 42%)`,
+                    }}
+                  >
+                    {monogramChar(p.label)}
+                  </span>
+                  <span className="mm-rail-name">{p.label}</span>
+                  <span className="mm-rail-count">{p.total}</span>
+                </button>
+              ))
+            )}
+            {/* 新建自定义提供商/模型（对齐 Agent2API「+新建」沉底动作） */}
+            <button type="button" className="mm-rail-add" onClick={openCustomCreate}>
+              <Plus size={12} /> {t('新建自定义模型')}
+            </button>
           </nav>
 
           {/* 右侧面板 */}
@@ -1754,6 +1971,10 @@ export default function ModelManage(): JSX.Element {
                 </span>
                 <button type="button" className="btn btn-outline btn-sm" onClick={() => { setBatchReport(''); setBatchOpen(true); }}>
                   {t('批量操作')}
+                </button>
+                {/* 批量映射前缀：给选中模型统一加「前缀+sep+原ID」的对外名 */}
+                <button type="button" className="btn btn-outline btn-sm" onClick={openPrefixBatch}>
+                  {t('批量映射前缀')}
                 </button>
                 <button type="button" className="mm-batch-clear" title={t('清除选择')} onClick={() => setSelected(new Set())}>
                   ×
@@ -1963,6 +2184,7 @@ export default function ModelManage(): JSX.Element {
                         [
                           ['capTool', '工具调用', Wrench],
                           ['capImage', '图像识别', ImageIcon],
+                          ['capVideo', '视频识别', Video],
                           ['capAudio', '音频', AudioLines],
                           ['capReasoning', '思考', Lightbulb],
                         ] as Array<[keyof MetaForm, string, typeof Wrench]>
@@ -1987,6 +2209,15 @@ export default function ModelManage(): JSX.Element {
                       value={metaForm.extraTags}
                       onChange={(e) => setMetaForm({ ...metaForm, extraTags: e.target.value })}
                       placeholder={t('其他标签（逗号分隔）：embedding, rerank…')}
+                      disabled={savingMeta}
+                      style={{ marginTop: 8 }}
+                    />
+                    {/* 思考等级候选（对齐 Agent2API 能力弹窗的 reasoningLevels 编辑） */}
+                    <input
+                      className="form-input"
+                      value={metaForm.reasoningLevels}
+                      onChange={(e) => setMetaForm({ ...metaForm, reasoningLevels: e.target.value })}
+                      placeholder={t('思考等级候选（逗号分隔）：off, low, medium, high…')}
                       disabled={savingMeta}
                       style={{ marginTop: 8 }}
                     />
@@ -2156,6 +2387,138 @@ export default function ModelManage(): JSX.Element {
               </button>
               <button className="btn btn-primary" onClick={() => void saveAlias()} disabled={savingAlias}>
                 {savingAlias ? t('保存中...') : t('保存')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 自定义模型弹窗（对齐 Agent2API addCustomModel；端点由 Task 9 补齐） ── */}
+      {customModal && (
+        <div className="modal-overlay" onClick={() => setCustomModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('新建自定义模型')}</h3>
+              <button className="modal-close" onClick={() => setCustomModal(false)}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              {customError && <div className="error-message">{customError}</div>}
+              <div className="form-group">
+                <label>{t('模型 ID')} *</label>
+                <input
+                  className="form-input"
+                  value={customForm.id}
+                  onChange={(e) => setCustomForm({ ...customForm, id: e.target.value })}
+                  placeholder="my-model"
+                  disabled={savingCustom}
+                  autoFocus
+                />
+              </div>
+              <div className="form-group">
+                <label>{t('提供商（可选，默认 custom）')}</label>
+                <input
+                  className="form-input"
+                  value={customForm.provider}
+                  onChange={(e) => setCustomForm({ ...customForm, provider: e.target.value })}
+                  placeholder="custom"
+                  disabled={savingCustom}
+                />
+              </div>
+              <div className="form-group">
+                <label>{t('归属方（可选）')}</label>
+                <input
+                  className="form-input"
+                  value={customForm.owned_by}
+                  onChange={(e) => setCustomForm({ ...customForm, owned_by: e.target.value })}
+                  placeholder="custom"
+                  disabled={savingCustom}
+                />
+              </div>
+              <p className="mm-dialog-note">
+                {t('自定义模型登记后可在目录中启停、定价与映射；来源色点为手动（琥珀）。')}
+              </p>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setCustomModal(false)} disabled={savingCustom}>
+                {t('取消')}
+              </button>
+              <button className="btn btn-primary" onClick={() => void saveCustom()} disabled={savingCustom}>
+                {savingCustom ? t('保存中...') : t('保存')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 批量映射前缀弹窗（对齐 Agent2API 批量加映射的前缀选项） ── */}
+      {prefixModal && (
+        <div className="modal-overlay" onClick={() => !savingPrefix && setPrefixModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>
+                {t('批量映射前缀')} · {t('已选')} {selectedRows.length} {t('个模型')}
+              </h3>
+              <button className="modal-close" onClick={() => setPrefixModal(false)} disabled={savingPrefix}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              {prefixError && <div className="error-message">{prefixError}</div>}
+              <div className="mm-batch-models">
+                {selectedRows.map((m) => (
+                  <code key={rowKey(m)}>{m.id}</code>
+                ))}
+              </div>
+              <div className="form-group">
+                <label>{t('对外名前缀')} *</label>
+                <input
+                  className="form-input"
+                  value={prefixForm.prefix}
+                  onChange={(e) => setPrefixForm({ ...prefixForm, prefix: e.target.value })}
+                  placeholder="gw"
+                  disabled={savingPrefix}
+                  autoFocus
+                />
+              </div>
+              <div className="form-group">
+                <label>{t('分隔符')}</label>
+                <select
+                  className="form-input"
+                  value={prefixForm.sep}
+                  onChange={(e) => setPrefixForm({ ...prefixForm, sep: e.target.value })}
+                  disabled={savingPrefix}
+                >
+                  <option value="-">-</option>
+                  <option value="/">/</option>
+                  <option value=".">.</option>
+                  <option value="__">__</option>
+                </select>
+              </div>
+              <label className="mm-batch-action">
+                <input
+                  type="checkbox"
+                  checked={prefixForm.merge}
+                  onChange={(e) => setPrefixForm({ ...prefixForm, merge: e.target.checked })}
+                  disabled={savingPrefix}
+                />
+                {t('同名合并：同前缀+同后缀可指向多个目标（主备）')}
+              </label>
+              <div className="mm-alias-preview">
+                <span>
+                  {t('预览')}：{prefixForm.prefix.trim() || '<前缀>'}
+                  {prefixForm.sep}
+                  {'<模型ID>'}
+                </span>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setPrefixModal(false)} disabled={savingPrefix}>
+                {t('取消')}
+              </button>
+              <button className="btn btn-primary" onClick={() => void savePrefixBatch()} disabled={savingPrefix}>
+                {savingPrefix ? t('执行中…') : t('执行')}
               </button>
             </div>
           </div>

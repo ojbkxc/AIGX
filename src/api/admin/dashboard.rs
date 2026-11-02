@@ -288,36 +288,60 @@ pub async fn handle_scheduler_status(
 /// 节省估算用「当前定价表 input_price × tokens / 1000」减去实际已收费用。
 /// 日志不存 group ratio（历史记录不可追溯），此处按当前 default 分组倍率近似；
 /// 看板定位是运营感知「缓存值多少钱」，不是审计级精确账本。
+///
+/// 权限（阶段 4 矩阵）：report_scope——管理员全站主档；普通用户仅自己
+/// （用户日行 models 分项，长尾并入 OTHER 时响应带 `approx:true`）。
 pub async fn handle_cache_savings(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<DashboardQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
+    let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
     let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
     if state.log_store.daily.agg_available() {
-        let rows = state.log_store.daily.load_range(&from, &to);
+        // 管理员：主档 Σcache_billed + Σby_model 查价；普通用户：用户日行
+        // models 分项（cache_billed 由模型级求和，行平铺无此字段）。
         let mut hit_count: u64 = 0;
         let mut cache_tokens: u64 = 0;
         let mut billed_cost: i64 = 0;
         let mut saved_estimate: f64 = 0.0;
         let mut approx = false;
-        for r in &rows {
-            hit_count = hit_count.saturating_add(r.cache_hits);
-            cache_tokens = cache_tokens.saturating_add(r.cache_input);
-            billed_cost = billed_cost.saturating_add(r.cache_billed);
-        }
-        // 节省估算按当前定价表逐模型算（top-128 次查询，比逐请求便宜）；
-        // 模型级口径与逐请求 max(0) 求和近似一致。
-        for m in daily_agg::merge_models(&rows) {
-            if m.name == daily_agg::OTHER {
-                // 长尾并组无单一模型价可查：节省记 0，响应标注近似。
-                approx = true;
-                continue;
+        if let Some(uid) = &user_filter {
+            let rows = state.log_store.daily.load_user_range(uid, &from, &to);
+            for r in &rows {
+                hit_count = hit_count.saturating_add(r.cache_hits);
+                cache_tokens = cache_tokens.saturating_add(r.cache_input);
             }
-            if let Some(price) = state.pricing_store.get_price(&m.name) {
-                let full = price.input_price * m.cache_input as f64 / 1000.0;
-                saved_estimate += (full - m.cache_billed as f64).max(0.0);
+            for m in daily_agg::merge_user_models(&rows) {
+                if m.name == daily_agg::OTHER {
+                    approx = true;
+                    continue;
+                }
+                billed_cost = billed_cost.saturating_add(m.cache_billed);
+                if let Some(price) = state.pricing_store.get_price(&m.name) {
+                    let full = price.input_price * m.cache_input as f64 / 1000.0;
+                    saved_estimate += (full - m.cache_billed as f64).max(0.0);
+                }
+            }
+        } else {
+            let rows = state.log_store.daily.load_range(&from, &to);
+            for r in &rows {
+                hit_count = hit_count.saturating_add(r.cache_hits);
+                cache_tokens = cache_tokens.saturating_add(r.cache_input);
+                billed_cost = billed_cost.saturating_add(r.cache_billed);
+            }
+            // 节省估算按当前定价表逐模型算（top-128 次查询，比逐请求便宜）；
+            // 模型级口径与逐请求 max(0) 求和近似一致。
+            for m in daily_agg::merge_models(&rows) {
+                if m.name == daily_agg::OTHER {
+                    // 长尾并组无单一模型价可查：节省记 0，响应标注近似。
+                    approx = true;
+                    continue;
+                }
+                if let Some(price) = state.pricing_store.get_price(&m.name) {
+                    let full = price.input_price * m.cache_input as f64 / 1000.0;
+                    saved_estimate += (full - m.cache_billed as f64).max(0.0);
+                }
             }
         }
         let mut data = json!({
@@ -338,10 +362,13 @@ pub async fn handle_cache_savings(
     let mut billed_cost: i64 = 0;
     let mut saved_estimate: f64 = 0.0;
 
-    for log in logs
-        .iter()
-        .filter(|l| l.cache_hit && l.created_at >= from_ts)
-    {
+    for log in logs.iter().filter(|l| {
+        l.cache_hit
+            && l.created_at >= from_ts
+            && user_filter
+                .as_deref()
+                .map_or(true, |uid| l.user_id.as_deref() == Some(uid))
+    }) {
         hit_count += 1;
         cache_tokens = cache_tokens.saturating_add(log.input_tokens);
         billed_cost = billed_cost.saturating_add(log.cost);

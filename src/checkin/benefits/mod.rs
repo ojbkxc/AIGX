@@ -163,19 +163,7 @@ pub const BENEFIT_CONTRACTS: &[BenefitContract] = &[
     BenefitContract {
         provider: "workbuddy-intl",
         action: "keepalive",
-        label: "WorkBuddy 国际版保活（只打最小对话）",
-        endpoint: "POST {base}/v1/chat/completions",
-    },
-    BenefitContract {
-        provider: "workbuddy-intl",
-        action: "claim",
-        label: "WorkBuddy 国际版日活领取",
-        endpoint: "POST {base}/v2/billing/meter/daily-checkin",
-    },
-    BenefitContract {
-        provider: "workbuddy-intl",
-        action: "keepalive_claim",
-        label: "WorkBuddy 国际版保活+领取",
+        label: "WorkBuddy 国际版日活保活",
         endpoint: "POST {base}/console/as/conversations/",
     },
     BenefitContract {
@@ -235,13 +223,7 @@ pub async fn run(
         ("loomy" | "xiaohuanxiong" | "officeace", "onboarding" | "onboarding_claim") => {
             onboarding::run(store, client, session, action).await
         }
-        ("workbuddy-intl", "keepalive") => {
-            keepalive::run(store, client, session, "keepalive").await
-        }
-        ("workbuddy-intl", "claim") => keepalive::run(store, client, session, "claim").await,
-        ("workbuddy-intl", "keepalive_claim") => {
-            keepalive::run(store, client, session, "full").await
-        }
+        ("workbuddy-intl", "keepalive") => keepalive::run(store, client, session).await,
         ("workbuddy", "growth") => growth::run(client, session, params).await,
         ("zcode" | "zcode-intl", "plan") => zcode_claim::run(store, client, session, params).await,
         ("qoder-intl", "umid") => umid::status(),
@@ -325,8 +307,6 @@ mod tests {
         assert!(actions_for("codearts").contains(&"newbie"));
         assert!(actions_for("loomy").contains(&"onboarding"));
         assert!(actions_for("workbuddy-intl").contains(&"keepalive"));
-        assert!(actions_for("workbuddy-intl").contains(&"claim"));
-        assert!(actions_for("workbuddy-intl").contains(&"keepalive_claim"));
         assert!(actions_for("zcode").contains(&"plan"));
         assert!(actions_for("zcode-intl").contains(&"plan"));
         assert!(actions_for("openai").is_empty());

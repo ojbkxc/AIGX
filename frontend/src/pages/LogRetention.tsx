@@ -23,6 +23,8 @@ export default function LogRetention(): JSX.Element {
   const [capacity, setCapacity] = useState('');
   /** 审计日志独立保留天数（空串 = 跟随请求日志） */
   const [auditDays, setAuditDays] = useState('');
+  /** 日聚合保留天数（空串 = 永久）。聚合是报表数据源，寿命独立于明细。 */
+  const [dailyDays, setDailyDays] = useState('');
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   useEffect(() => {
@@ -33,6 +35,7 @@ export default function LogRetention(): JSX.Element {
         setDays(d?.max_age_days != null ? String(d.max_age_days) : '');
         setCapacity(d?.max_capacity != null ? String(d.max_capacity) : '');
         setAuditDays(d?.audit_max_age_days != null ? String(d.audit_max_age_days) : '');
+        setDailyDays(d?.daily_max_age_days != null ? String(d.daily_max_age_days) : '');
       } catch {
         // 读取失败保持默认空值
       } finally {
@@ -47,13 +50,20 @@ export default function LogRetention(): JSX.Element {
       const daysVal = days.trim() === '' ? undefined : Math.max(1, parseInt(days) || 0);
       const capVal = capacity.trim() === '' ? undefined : Math.max(1000, parseInt(capacity) || 0);
       const auditVal = auditDays.trim() === '' ? 0 : Math.max(1, parseInt(auditDays) || 0);
+      const dailyVal = dailyDays.trim() === '' ? undefined : Math.max(1, parseInt(dailyDays) || 0);
       // 0 = 清除独立天数（回到跟随请求日志）；undefined 会被后端当缺省不修改
-      await api.updateLogRetention({
+      const res = await api.updateLogRetention({
         max_age_days: daysVal,
         max_capacity: capVal,
         audit_max_age_days: auditVal,
+        daily_max_age_days: dailyVal,
       });
-      addToast(t('日志保留配置已保存（每日自动清理）'));
+      const pruned = res?.data?.daily_pruned;
+      addToast(
+        pruned
+          ? `${t('日志保留配置已保存（每日自动清理）')} · ${t('已裁掉')} ${pruned} ${t('个更早的聚合日')}`
+          : t('日志保留配置已保存（每日自动清理）'),
+      );
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
@@ -62,13 +72,13 @@ export default function LogRetention(): JSX.Element {
   };
 
   const cleanupNow = (): void => {
-    if (days.trim() === '' && auditDays.trim() === '') {
+    if (days.trim() === '' && auditDays.trim() === '' && dailyDays.trim() === '') {
       addToast(t('请先设置保留天数'), 'error');
       return;
     }
     setConfirmState({
       title: t('立即清理'),
-      message: t('将立即删除所有早于各自保留天数的请求与审计日志，该操作不可撤销。确定继续？'),
+      message: t('将立即删除所有早于各自保留天数的请求与审计日志，该操作不可撤销。清理明细后报表数字仍含已删请求（按天聚合独立保留，除非其保留天数也已到期）。确定继续？'),
       confirmText: t('清理'),
       danger: true,
       onConfirm: async () => {
@@ -139,6 +149,21 @@ export default function LogRetention(): JSX.Element {
               placeholder={t('留空 = 跟随请求日志天数')}
             />
             <div className="form-hint">{t('审计日志（登录/配置变更/高危操作）单独保留窗口，留空则与请求日志一致')}</div>
+          </div>
+          <div className="form-group">
+            <label>{t('日聚合保留天数（天）')}</label>
+            <input
+              className="form-input"
+              type="number"
+              min={1}
+              max={36500}
+              value={dailyDays}
+              onChange={(e) => setDailyDays(e.target.value)}
+              placeholder={t('留空 = 永久保留')}
+            />
+            <div className="form-hint">
+              {t('按天聚合行是报表数据源（一天一行，量极小），寿命独立于明细日志；N = 含今天在内的 N 个自然日。')}
+            </div>
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
             <button type="button" className="btn btn-primary btn-sm" onClick={() => void save()} disabled={saving}>

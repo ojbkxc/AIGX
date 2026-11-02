@@ -1,797 +1,248 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+// 仪表盘（阶段 4 重构）：每面板独立 TanStack Query 取数 + PanelWrap 外壳，
+// 单面板失败只坏该面板（旧版 allSettled+pick(i) 位置化会让残缺数字无差别
+// 铺满全页）。权限矩阵：管理员 = A2A 全量报表 ∪ AIGX 渠道/租户维（一张不落）；
+// 普通用户 = 个人账单口径（report_scope 收敛），admin 专属端点 enabled=false
+// 根本不发请求。时间档六档含自定义区间（start/end 参数，热力图固定 365 天）。
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { api } from '../api';
-import { fmtCompact, isAdmin } from '../lib/utils';
+import { useIsFetching, useQueryClient } from '@tanstack/react-query';
+import { isAdmin } from '../lib/utils';
 import { SkeletonCards } from '../components/ui';
+import { fmtCost, fmtInt, fmtPct, fmtTokens, nameColorMap, toCsv, downloadText } from '../lib/format';
+import PanelWrap from '../components/dashboard/PanelWrap';
+import RangeSwitcher, { initialRange, rangeLabel as rangeLabelOf, windowOf, readCustomRange, type RangeKey } from '../components/dashboard/RangeSwitcher';
+import StatCards from '../components/dashboard/StatCards';
+import QuotaCards from '../components/dashboard/QuotaCards';
+import TrendBars from '../components/dashboard/TrendBars';
+import TokenTrendChart from '../components/dashboard/TokenTrendChart';
+import DonutChart from '../components/dashboard/DonutChart';
+import Heatmap from '../components/dashboard/Heatmap';
+import TopSources from '../components/dashboard/TopSources';
+import UserRanking from '../components/dashboard/UserRanking';
+import ChannelHealth from '../components/dashboard/ChannelHealth';
+import CacheTrend24h from '../components/dashboard/CacheTrend24h';
+import {
+  useCacheRates, useCacheSavings, useCacheTrend24h, useChannelHealth as useChannelHealthQ,
+  useDailyTrend, useHeatmap, useLimits, useOverview, usePersonalMe, useRealtime,
+  useReportModels, useTokenTrend, useTopSources, useUsageSummary, useUserRanking,
+} from '../hooks/useDashboard';
 import './Dashboard.css';
 
-// ── 类型定义 ──────────────────────────────────────────────
-
-interface TrendData {
-  value?: number;
-  cost?: number;
-  tokens?: number;
-  label?: string;
-  date?: string;
-}
-
-interface ModelDist {
-  label?: string;
-  model?: string;
-  name?: string;
-  value?: number;
-  count?: number;
-}
-
-interface UserRanking {
-  user_id: string | number;
-  email?: string;
-  username?: string;
-  request_count?: number;
-  requests?: number;
-  count?: number;
-  total_tokens?: number;
-  tokens?: number;
-  total_cost?: number;
-  cost?: number;
-}
-
-interface ChannelHealth {
-  id?: string | number;
-  name?: string;
-  success_rate?: number | null;
-  success_count?: number;
-  total_requests?: number;
-  requests?: number;
-  error_rate?: number | null;
-  circuit_breaker?: string;
-  avg_latency_ms?: number;
-  consecutive_empty?: number | null;
-  health?: {
-    error_rate?: number | null;
-    last_error?: string;
-  } | null;
-}
-
-interface RealtimeStats {
-  qps?: number;
-  rps?: number;
-  avg_latency_ms?: number;
-  /** 近 5 分钟窗口去重活跃用户数（后端 2026-11 补；旧后端无此字段时回落榜单长度） */
-  active_users?: number;
-  /** 近 5 分钟窗口去重活跃渠道数 */
-  active_channels?: number;
-}
-
-interface UsageStats {
-  total_tokens?: number;
-  total_input_tokens?: number;
-  total_output_tokens?: number;
-}
-
-interface TodayTokens {
-  total_tokens?: number;
-  input_tokens?: number;
-  output_tokens?: number;
-  request_count?: number;
-}
-
-interface LimitsInfo {
-  monthly_used?: number;
-  monthly_limit?: number | null;
-}
-
-interface CacheSavings {
-  hit_count?: number;
-  cache_tokens?: number;
-  billed_cost?: number;
-  saved_estimate?: number;
-}
-
-// 报表扩展（Agent2API report 视角）
-interface ReportHeatmapCell {
-  date?: string;
-  cost?: number;
-  count?: number;
-}
-
-interface ReportTopSource {
-  name?: string;
-  count?: number;
-  cost?: number;
-}
-
-interface ReportTokenTrendPoint {
-  date?: string;
-  input_tokens?: number;
-  output_tokens?: number;
-}
-
-interface ReportOverview {
-  total_requests?: number;
-  success_requests?: number;
-  success_rate?: number;
-  input_tokens?: number;
-  output_tokens?: number;
-  total_cost?: number;
-  active_days?: number;
-  top_models?: Array<{ model?: string; count?: number }>;
-}
-
-interface ReportCacheRate {
-  window?: string;
-  requests?: number;
-  hit_requests?: number;
-  rate?: number;
-  input_tokens?: number;
-  hit_input_tokens?: number;
-}
-
-interface TrendChartProps {
-  data: TrendData[];
-}
-
-interface PieChartProps {
-  data: ModelDist[];
-}
-
-// ── 工具函数 ──────────────────────────────────────────────
-
-function fmtLimit(val: number | null | undefined): string {
-  return fmtCompact(val);
-}
-
-function fmtTok(val: number | null | undefined): string {
-  return fmtCompact(val);
-}
-
-function fmtMoney(val: number | null | undefined): string {
-  if (val == null) return '—';
-  return '¥' + Number(val).toFixed(2);
-}
-
-// 趋势数据点取值：后端消费趋势返回 cost 字段，兼容 value/tokens；
-// 使用 ?? 而非 ||，避免成本为 0 的合法数据点被短路误判为无值
-function trendVal(d: TrendData): number {
-  return d.value ?? d.cost ?? d.tokens ?? 0;
-}
-
-// ── 图表组件 ──────────────────────────────────────────────
-
-// 365 天消费热力图（Agent2API report 365d heatmap 的 CSS grid 版，不引库）。
-// 数据是稀疏的（只有有请求的日期才有格），按日期补零格到全年连续。
-function Heatmap({ data }: { data: ReportHeatmapCell[] }): JSX.Element | null {
-  const [hover, setHover] = useState<ReportHeatmapCell | null>(null);
-  if (!data || data.length === 0) return null;
-  const byDate = new Map(data.map((d) => [d.date, d]));
-  const max = Math.max(...data.map((d) => d.cost ?? 0), 1);
-  const costOf = (c: { cost?: number }) => c.cost ?? 0;
-
-  // 生成近 365 天连续日期序列（含今天），周对齐（列=周）
-  const today = new Date();
-  const cells: Array<{ date: string; cost: number; count: number }> = [];
-  for (let i = 364; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(d.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    const hit = byDate.get(key);
-    cells.push({ date: key, cost: hit?.cost ?? 0, count: hit?.count ?? 0 });
-  }
-
+function RefreshIcon({ spinning }: { spinning: boolean }): JSX.Element {
   return (
-    <div>
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, 14px)',
-          gap: 3,
-          justifyContent: 'start',
-        }}
-      >
-        {cells.map((c) => {
-          // 四档着色（Agent2API 口径）：0 → 空格，其余按 cost/max 分三档
-          const level = c.cost <= 0 ? 0 : c.cost < max * 0.25 ? 1 : c.cost < max * 0.5 ? 2 : c.cost < max * 0.75 ? 3 : 4;
-          const colors = ['var(--bg-color)', 'rgba(47,111,237,0.25)', 'rgba(47,111,237,0.45)', 'rgba(47,111,237,0.7)', 'rgb(47,111,237)'];
-          return (
-            <div
-              key={c.date}
-              title={`${c.date}：${c.count} ${c.count === 1 ? '次' : '次'} · ¥${(c.cost / 100).toFixed(2)}`}
-              onMouseEnter={() => setHover(c)}
-              onMouseLeave={() => setHover(null)}
-              style={{
-                width: 14,
-                height: 14,
-                borderRadius: 3,
-                background: colors[level],
-                cursor: 'pointer',
-                outline: hover === c ? '1px solid var(--accent-color)' : undefined,
-              }}
-            />
-          );
-        })}
-      </div>
-      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
-        {hover
-          ? `${hover.date}：${hover.count} 次 · ¥${(costOf(hover) / 100).toFixed(2)}`
-          : '近 365 天每日消费（悬停查看明细）'}
-      </div>
-    </div>
-  );
-}
-
-// Token 趋势双线图（prompt/completion 分列，照 TrendChart 的 SVG 折线方式）
-function TokenTrendChart({ data }: { data: ReportTokenTrendPoint[] }): JSX.Element | null {
-  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  if (!data || data.length === 0) return null;
-  const w = 600;
-  const h = 200;
-  const pad = { top: 20, right: 20, bottom: 30, left: 50 };
-  const chartW = w - pad.left - pad.right;
-  const chartH = h - pad.top - pad.bottom;
-  const maxVal = Math.max(...data.map((d) => Math.max(d.input_tokens ?? 0, d.output_tokens ?? 0)), 1);
-  const x = (i: number) => pad.left + (i + 0.5) * (chartW / data.length);
-  const y = (v: number) => pad.top + chartH - (v / maxVal) * chartH;
-
-  const line = (get: (d: ReportTokenTrendPoint) => number) =>
-    data.map((d, i) => `${i === 0 ? 'M' : 'L'} ${x(i)} ${y(get(d))}`).join(' ');
-
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', height: 'auto' }}>
-      {[0, 0.25, 0.5, 0.75, 1].map((r) => (
-        <line key={r} x1={pad.left} x2={w - pad.right} y1={pad.top + chartH * r} y2={pad.top + chartH * r} stroke="var(--border-color)" strokeWidth="0.5" />
-      ))}
-      <path d={line((d) => d.input_tokens ?? 0)} fill="none" stroke="#7ca4f5" strokeWidth="2" />
-      <path d={line((d) => d.output_tokens ?? 0)} fill="none" stroke="#34d399" strokeWidth="2" />
-      {hoverIdx != null && (
-        <line x1={x(hoverIdx)} x2={x(hoverIdx)} y1={pad.top} y2={pad.top + chartH} stroke="var(--text-muted)" strokeDasharray="3,3" />
-      )}
-      {data.map((_d, i) => (
-        <rect
-          key={i}
-          x={x(i) - chartW / data.length / 2}
-          y={pad.top}
-          width={chartW / data.length}
-          height={chartH}
-          fill="transparent"
-          onMouseEnter={() => setHoverIdx(i)}
-          onMouseLeave={() => setHoverIdx(null)}
-        />
-      ))}
-      {hoverIdx != null && (
-        <text x={pad.left} y={pad.top - 6} fill="var(--text-main)" fontSize="10">
-          {data[hoverIdx].date} · ↑{(data[hoverIdx].input_tokens ?? 0).toLocaleString()} ↓{(data[hoverIdx].output_tokens ?? 0).toLocaleString()}
-        </text>
-      )}
-      {/* 图例 */}
-      <rect x={w - pad.right - 150} y={pad.top - 10} width="10" height="3" fill="#7ca4f5" />
-      <text x={w - pad.right - 136} y={pad.top - 6} fill="var(--text-muted)" fontSize="10">输入</text>
-      <rect x={w - pad.right - 90} y={pad.top - 10} width="10" height="3" fill="#34d399" />
-      <text x={w - pad.right - 76} y={pad.top - 6} fill="var(--text-muted)" fontSize="10">输出</text>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      style={spinning ? { animation: 'spin 0.9s linear infinite' } : undefined}>
+      <polyline points="23 4 23 10 17 10" />
+      <polyline points="1 20 1 14 7 14" />
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
     </svg>
   );
 }
-
-function TrendChart({ data }: TrendChartProps): JSX.Element | null {
-  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  if (!data || data.length === 0) return null;
-  const maxVal = Math.max(...data.map(trendVal), 1);
-  const w = 600;
-  const h = 200;
-  const pad = { top: 20, right: 20, bottom: 30, left: 50 };
-  const chartW = w - pad.left - pad.right;
-  const chartH = h - pad.top - pad.bottom;
-
-  const points = data.map((d, i) => {
-    const x = pad.left + (i + 0.5) * (chartW / data.length);
-    const y = pad.top + chartH - (trendVal(d) / maxVal) * chartH;
-    return `${x},${y}`;
-  });
-
-  const hover = hoverIdx != null ? data[hoverIdx] : null;
-  const hoverX = hoverIdx != null ? pad.left + (hoverIdx + 0.5) * (chartW / data.length) : 0;
-  const hoverY = hoverIdx != null ? pad.top + chartH - (trendVal(data[hoverIdx]) / maxVal) * chartH : 0;
-  const hoverVal = hover ? (hover.value ?? hover.cost ?? hover.tokens ?? 0) : 0;
-  // tooltip 框位置：靠近右缘时左移，避免溢出
-  const tipW = 110;
-  const tipX = hoverX > w - pad.right - tipW - 8 ? hoverX - tipW - 12 : hoverX + 12;
-  const tipY = Math.max(pad.top, hoverY - 44);
-
-  const onMove = (e: React.MouseEvent<SVGSVGElement>): void => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    // viewBox 600 宽映射到实际渲染宽度
-    const ratio = w / rect.width;
-    const x = (e.clientX - rect.left) * ratio;
-    if (x < pad.left || x > w - pad.right) {
-      setHoverIdx(null);
-      return;
-    }
-    const idx = Math.floor(((x - pad.left) / chartW) * data.length);
-    setHoverIdx(Math.max(0, Math.min(data.length - 1, idx)));
-  };
-
-  return (
-    <svg
-      viewBox={`0 0 ${w} ${h}`}
-      style={{ width: '100%', height: 'auto', display: 'block' }}
-      onMouseMove={onMove}
-      onMouseLeave={() => setHoverIdx(null)}
-    >
-      {[0, 0.25, 0.5, 0.75, 1].map((r) => {
-        const y = pad.top + chartH * (1 - r);
-        return (
-          <g key={r}>
-            <line x1={pad.left} y1={y} x2={w - pad.right} y2={y} stroke="var(--border-color)" strokeWidth="1" />
-            <text x={pad.left - 8} y={y + 4} textAnchor="end" fill="var(--text-muted)" fontSize="10">
-              {fmtLimit(maxVal * r)}
-            </text>
-          </g>
-        );
-      })}
-
-      <defs>
-        <linearGradient id="trendGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="rgba(47, 111, 237, 0.4)" />
-          <stop offset="100%" stopColor="rgba(168, 85, 247, 0)" />
-        </linearGradient>
-      </defs>
-      <polygon
-        points={`${pad.left},${pad.top + chartH} ${points.join(' ')} ${w - pad.right},${pad.top + chartH}`}
-        fill="url(#trendGrad)"
-      />
-
-      <polyline
-        points={points.join(' ')}
-        fill="none"
-        stroke="var(--accent-color)"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-
-      {data.map((d, i) => {
-        const x = pad.left + (i + 0.5) * (chartW / data.length);
-        const y = pad.top + chartH - (trendVal(d) / maxVal) * chartH;
-        return (
-          <g key={i}>
-            <circle
-              cx={x}
-              cy={y}
-              r={hoverIdx === i ? 5 : 3}
-              fill="var(--accent-color)"
-              stroke="var(--card-bg)"
-              strokeWidth="2"
-              style={{ transition: 'r 0.15s ease' }}
-            />
-            <text x={x} y={pad.top + chartH + 16} textAnchor="middle" fill="var(--text-muted)" fontSize="9">
-              {d.label || d.date || ''}
-            </text>
-          </g>
-        );
-      })}
-
-      {/* 悬停参考线 + 数值提示 */}
-      {hoverIdx != null && (
-        <g pointerEvents="none">
-          <line
-            x1={hoverX}
-            y1={pad.top}
-            x2={hoverX}
-            y2={pad.top + chartH}
-            stroke="var(--accent-color)"
-            strokeWidth="1"
-            strokeDasharray="4 3"
-            opacity={0.6}
-          />
-          <rect x={tipX} y={tipY} width={tipW} height={40} rx="7" fill="var(--card-bg)" stroke="var(--border-color)" />
-          <text x={tipX + 10} y={tipY + 17} fill="var(--text-main)" fontSize="11" fontWeight="600">
-            {hover?.label || hover?.date || ''}
-          </text>
-          <text x={tipX + 10} y={tipY + 32} fill="var(--text-muted)" fontSize="10">
-            {fmtMoney(hoverVal)}
-          </text>
-        </g>
-      )}
-    </svg>
-  );
-}
-
-function PieChart({ data }: PieChartProps): JSX.Element | null {
-  const [hoverSlice, setHoverSlice] = useState<number | null>(null);
-  const { t } = useTranslation();
-  if (!data || data.length === 0) return null;
-  const raw = data.map((d) => ({
-    label: d.label || d.model || d.name || '—',
-    val: Number(d.value || d.count || 0),
-  })).filter((d) => d.val > 0);
-  if (raw.length === 0) return null;
-
-  // 超过 9 个模型时，第 10 名及之后聚合为「其他」扇区，避免扇区过多难读
-  const MAX_SLICES = 10;
-  const top = raw.slice(0, MAX_SLICES - 1);
-  const rest = raw.slice(MAX_SLICES - 1);
-  const slicesRaw = rest.length
-    ? [...top, { label: `其他 (${rest.length})`, val: rest.reduce((s, d) => s + d.val, 0) }]
-    : top;
-  const total = slicesRaw.reduce((s, d) => s + d.val, 0);
-
-  const colors = ['#7ca4f5', '#7ca4f5', '#f472b6', '#fb923c', '#fbbf24', '#34d399', '#22d3ee', '#60a5fa', '#a78bfa', '#94a3b8'];
-  const cx = 120;
-  const cy = 120;
-  const r = 90;
-  let cumAngle = -Math.PI / 2;
-
-  const slices = slicesRaw.map((d, i) => {
-    const angle = (d.val / total) * 2 * Math.PI;
-    const x1 = cx + r * Math.cos(cumAngle);
-    const y1 = cy + r * Math.sin(cumAngle);
-    const x2 = cx + r * Math.cos(cumAngle + angle);
-    const y2 = cy + r * Math.sin(cumAngle + angle);
-    const largeArc = angle > Math.PI ? 1 : 0;
-    const midAngle = cumAngle + angle / 2;
-    const labelX = cx + (r * 0.6) * Math.cos(midAngle);
-    const labelY = cy + (r * 0.6) * Math.sin(midAngle);
-    const slice = {
-      path: `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`,
-      color: colors[i % colors.length],
-      pct: (d.val / total) * 100,
-      label: d.label,
-      labelX,
-      labelY,
-    };
-    cumAngle += angle;
-    return slice;
-  });
-
-  return (
-    <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
-      <svg viewBox="0 0 240 240" style={{ width: 240, height: 240, flexShrink: 0 }}>
-        {slices.map((s, i) => (
-          <path
-            key={i}
-            d={s.path}
-            fill={s.color}
-            stroke="var(--card-bg)"
-            strokeWidth="2"
-            opacity={hoverSlice === null || hoverSlice === i ? 1 : 0.35}
-            style={{ transition: 'opacity 0.2s ease', cursor: 'pointer' }}
-            onMouseEnter={() => setHoverSlice(i)}
-            onMouseLeave={() => setHoverSlice(null)}
-          />
-        ))}
-        {/* 中心统计：悬停显示该扇区数值，默认显示总量 */}
-        {hoverSlice != null ? (
-          <text x={cx} y={cy - 2} textAnchor="middle" fill="var(--text-main)" fontSize="13" fontWeight="700">
-            {slices[hoverSlice].pct.toFixed(1)}%
-          </text>
-        ) : (
-          <text x={cx} y={cy - 2} textAnchor="middle" fill="var(--text-main)" fontSize="16" fontWeight="700">
-            {fmtLimit(total)}
-          </text>
-        )}
-        <text x={cx} y={cy + 16} textAnchor="middle" fill="var(--text-muted)" fontSize="10">
-          {hoverSlice != null ? slices[hoverSlice].label.length > 12
-            ? slices[hoverSlice].label.slice(0, 12) + '…'
-            : slices[hoverSlice].label : t('总量')}
-        </text>
-      </svg>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1, minWidth: 200 }}>
-        {slices.map((s, i) => (
-          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
-            <span style={{ width: 12, height: 12, borderRadius: 3, background: s.color, flexShrink: 0 }} />
-            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.label}</span>
-            <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>{s.pct.toFixed(1)}%</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// 报表时间范围选项（Agent2API report RANGES 的 AIGX 子集；不引日期选择器，5 档够用）。
-// 热力图固定 365 天不受此切换影响（全年视图本就该看全年）。
-const RANGE_OPTIONS = [
-  { key: '1', labelKey: '今日' },
-  { key: '7', labelKey: '近 7 日' },
-  { key: '30', labelKey: '近 30 日' },
-  { key: '90', labelKey: '近 90 日' },
-  { key: '365', labelKey: '近 365 日' },
-] as const;
-type RangeKey = (typeof RANGE_OPTIONS)[number]['key'];
-const DEFAULT_RANGE: RangeKey = '30';
-
-// ── 主组件 ──────────────────────────────────────────────
 
 export default function Dashboard(): JSX.Element {
-  const [usage, setUsage] = useState<UsageStats | null>(null);
-  const [tokenStats, setTokenStats] = useState<TodayTokens | null>(null);
-  const [limits, setLimits] = useState<LimitsInfo | null>(null);
-  const [loading, setLoading] = useState(true);
-  const firstLoadRef = useRef(true);
-  const [error, setError] = useState('');
-  const [trend, setTrend] = useState<TrendData[] | null>(null);
-  // 手动刷新按钮的 pending 态（不与整页 loading 混用，避免数据闪断）
-  const [refreshing, setRefreshing] = useState(false);
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
+  const admin = isAdmin();
+  const queryClient = useQueryClient();
+  const fetching = useIsFetching({ queryKey: ['dashboard'] });
 
-  // 报表时间范围（仅驱动 4 个 report API 的 days 参数；热力图固定 365 不受影响）
-  const [range, setRange] = useState<RangeKey>(DEFAULT_RANGE);
+  const [range, setRange] = useState<RangeKey>(() => initialRange());
+  const [custom, setCustom] = useState(() => readCustomRange());
+  const win = useMemo(() => windowOf(range, custom), [range, custom]);
+  const rLabel = rangeLabelOf(range, custom);
 
-  // 增强看板数据
-  const [consumptionTrend, setConsumptionTrend] = useState<TrendData[] | null>(null);
-  const [modelDist, setModelDist] = useState<ModelDist[] | null>(null);
-  const [userRanking, setUserRanking] = useState<UserRanking[] | null>(null);
-  const [channelHealth, setChannelHealth] = useState<ChannelHealth[] | null>(null);
-  const [realtime, setRealtime] = useState<RealtimeStats | null>(null);
-  const [cacheSavings, setCacheSavings] = useState<CacheSavings | null>(null);
-  // 报表扩展（Agent2API report 视角）
-  const [reportHeatmap, setReportHeatmap] = useState<ReportHeatmapCell[] | null>(null);
-  const [reportTopSources, setReportTopSources] = useState<ReportTopSource[] | null>(null);
-  const [reportTokenTrend, setReportTokenTrend] = useState<ReportTokenTrendPoint[] | null>(null);
-  const [reportOverview, setReportOverview] = useState<ReportOverview | null>(null);
-  const [reportCacheRates, setReportCacheRates] = useState<ReportCacheRate[] | null>(null);
+  // 全部 hooks 无条件调用（enabled 控制是否发请求，避免 admin 端点在个人视图 403）。
+  const overviewQ = useOverview(win);
+  const savingsQ = useCacheSavings(win);
+  const dailyQ = useDailyTrend(win);
+  const tokenTrendQ = useTokenTrend(win);
+  const modelsQ = useReportModels(win);
+  const ratesQ = useCacheRates(win);
+  const trend24Q = useCacheTrend24h();
+  const heatmapQ = useHeatmap({ days: 365 });
+  const sourcesQ = useTopSources(win, { enabled: admin });
+  const userRankQ = useUserRanking(win, { enabled: admin });
+  const healthQ = useChannelHealthQ(win, { enabled: admin });
+  const realtimeQ = useRealtime({ enabled: admin });
+  const todayQ = useTodayTokens({ enabled: admin });
+  const usageQ = useUsageSummary({ enabled: admin });
+  const limitsQ = useLimits({ enabled: admin });
+  const meQ = usePersonalMe({ enabled: !admin });
 
-  const loadData = useCallback(async (rangeKey: RangeKey = DEFAULT_RANGE): Promise<void> => {
-    setRefreshing(true);
-    setLoading(true);
-    setError('');
-    const admin = isAdmin();
-    try {
-      if (!admin) {
-        // 普通用户视图：只拉个人配额（/users/me 全员可用）与个人用量报表
-        // （report 系列 verify_user，后端按 user_id 收敛数据集），不打 admin 端点
-        try {
-          const me = await api.getMe();
-          const meData = ((me as { data?: unknown })?.data ?? me) as {
-            used_quota?: number;
-            quota?: number | null;
-          } | null;
-          if (meData) {
-            setLimits({
-              monthly_used: meData.used_quota ?? 0,
-              monthly_limit: meData.quota ?? null,
-            });
-          }
-        } catch {
-          // 静默：保持空态展示
-        }
-        try {
-          const [ov, tt] = await Promise.all([
-            api.getReportOverview(Number(rangeKey)),
-            api.getReportTokenTrend(Number(rangeKey)),
-          ]);
-          setReportOverview((ov as { data?: ReportOverview })?.data ?? null);
-          setReportTokenTrend((tt as { data?: ReportTokenTrendPoint[] })?.data ?? null);
-        } catch {
-          // 报表加载失败不影响配额卡片
-        }
-        return;
+  const ov = overviewQ.data;
+  const savings = savingsQ.data;
+  const daily = dailyQ.data ?? [];
+  const models = modelsQ.data ?? [];
+  const health = healthQ.data ?? [];
+  const rt = realtimeQ.data;
+  const ts = todayQ.data;
+  const us = usageQ.data;
+  const lm = limitsQ.data;
+  const me = meQ.data;
+
+  const channels = admin && health.length > 0
+    ? {
+        total: health.length,
+        circuitOpen: health.filter((c) => String(c.circuit_breaker || 'closed').toLowerCase() === 'open').length,
+        enabled: health.length,
       }
-      // 各面板独立容错：单个接口失败不应让整页空白（管理员视图有 10 个面板）。
-      // 但失败必须**可见** —— 用 allSettled 统计失败数，整页显示一条提示，
-      // 避免用户把「加载失败」误读成「确实没数据」。
-      const days = Number(rangeKey);
-      const results = await Promise.allSettled([
-        api.getUsageSummary(),
-        api.getTodayTokens(),
-        api.getLimits(),
-        api.getTrend(),
-        api.getConsumptionTrend(),
-        api.getModelDistribution(),
-        api.getUserRanking(),
-        api.getChannelHealth(),
-        api.getRealtime(),
-        api.getCacheSavings(),
-        api.getReportHeatmap(365),
-        api.getReportTopSources(days),
-        api.getReportTokenTrend(days),
-        api.getReportOverview(days),
-        api.getReportCacheRates(days),
-      ]);
-      const pick = <T,>(i: number): T | null =>
-        results[i].status === 'fulfilled'
-          ? ((results[i] as PromiseFulfilledResult<{ data?: unknown }>).value?.data
-              ?? (results[i] as PromiseFulfilledResult<unknown>).value) as T
-          : null;
-      const failed = results.filter((r) => r.status === 'rejected').length;
-      if (failed > 0) {
-        setError(t('有 {{n}} 个面板加载失败，数据可能不完整（可点刷新重试）', { n: failed }));
-      }
-      setUsage(pick<UsageStats>(0));
-      setTokenStats(pick<TodayTokens>(1));
-      setLimits(pick<LimitsInfo>(2));
-      setTrend(pick<TrendData[]>(3));
-      setConsumptionTrend(pick<TrendData[]>(4));
-      setModelDist(pick<ModelDist[]>(5));
-      setUserRanking(pick<UserRanking[]>(6));
-      setChannelHealth(pick<ChannelHealth[]>(7));
-      setRealtime(pick<RealtimeStats>(8));
-      setCacheSavings(pick<CacheSavings>(9));
-      setReportHeatmap(pick<ReportHeatmapCell[]>(10));
-      setReportTopSources(pick<ReportTopSource[]>(11));
-      setReportTokenTrend(pick<ReportTokenTrendPoint[]>(12));
-      setReportOverview(pick<ReportOverview>(13));
-      setReportCacheRates(pick<ReportCacheRate[]>(14));
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-      firstLoadRef.current = false;
-    }
-  }, [t]);
+    : null;
 
-  // 管理员：仅刷新实时指标（RPS / 延迟），避免整页 loading 闪烁。
-  // 用户排行 / 渠道健康是 Top 榜视图，30s 轮询全量榜单纯属浪费带宽——
-  // 它们只随 loadData（首屏 / 切时间范围 / 手动刷新）更新。
-  const loadRealtimeOnly = useCallback(async (): Promise<void> => {
-    try {
-      const rtData = await api.getRealtime().catch(() => null);
-      setRealtime((rtData?.data ?? rtData) as unknown as RealtimeStats | null);
-    } catch {
-      // 轮询失败静默，不打扰用户
-    }
-  }, []);
+  const trendRows = useMemo(() => daily.map((d) => ({
+    date: d.date ?? '',
+    value: d.cost ?? 0,
+    sub: t('{{n}} 次请求', { n: fmtInt(d.count, lang) }),
+    models: (d.models ?? []).map((m) => ({ model: m.model ?? '?', tokens: m.tokens ?? 0 })),
+  })), [daily, t, lang]);
 
-  useEffect(() => {
-    void loadData(range);
-    // 实时指标轮询：30s 刷新一次 RPS / 活跃用户 / 活跃渠道 / 平均延迟
-    // 仅管理员轮询管理指标，普通用户静默展示个人配额视图
-    const timer = setInterval(() => {
-      // 页面在后台时不轮询：标签页不可见时用户看不到数据，
-      // 无谓请求既浪费带宽也占用服务端与移动端电量。
-      if (document.hidden) return;
-      if (isAdmin()) void loadRealtimeOnly();
-    }, 30000);
-    return () => clearInterval(timer);
-  }, [loadData, loadRealtimeOnly, range]);
+  const donutData = models.map((m) => ({
+    name: m.model ?? '—',
+    value: m.count ?? 0,
+    labelValue: fmtTokens((m.input_tokens ?? 0) + (m.output_tokens ?? 0), lang),
+  }));
+  const donutColors = useMemo(() => nameColorMap(models, (m) => m.model ?? '', (m) => m.count ?? 0), [models]);
+  const modelTotalCount = models.reduce((s, m) => s + (m.count ?? 0), 0);
 
-  // 仅首次加载显示骨架。点刷新或切换时间范围时也整页骨架会连刷新按钮和
-  // 档位切换器一起卸载，界面闪断且用户失去操作位置。
-  if (loading && firstLoadRef.current) {
+  const monthlyUsed = me?.used_quota ?? lm?.monthly_used ?? 0;
+  const monthlyLimit = me && !admin ? me.quota ?? null : lm?.monthly_limit ?? null;
+
+  const refresh = (): void => {
+    void queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+  };
+  const exportCsv = (): void => {
+    downloadText(
+      `aigx-report-${range === 'custom' ? `${custom.start}_${custom.end}` : `${range}d`}.csv`,
+      toCsv(daily.map((d) => ({
+        date: d.date ?? '',
+        requests: d.count ?? 0,
+        input_tokens: d.input_tokens ?? 0,
+        output_tokens: d.output_tokens ?? 0,
+        cost: d.cost ?? 0,
+      }))),
+    );
+  };
+
+  const header = (
+    <div className="page-header">
+      <div>
+        <h1>{t('仪表盘')}</h1>
+        <p>{admin ? t('AI 网关使用概览') : t('我的用量概览')}</p>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <RangeSwitcher range={range} custom={custom} onChange={setRange} onCustomChange={setCustom} />
+        <button className="btn btn-outline btn-sm" onClick={exportCsv} disabled={daily.length === 0} style={{ gap: 6 }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          {t('导出 CSV')}
+        </button>
+        <button className="btn btn-outline btn-sm" onClick={refresh} style={{ gap: 6 }}>
+          <RefreshIcon spinning={fetching > 0} />
+          {t('刷新')}
+        </button>
+      </div>
+    </div>
+  );
+
+  // 首屏（无任何缓存数据时）整体骨架；有数据后切档/刷新由面板各自 placeholder 承接。
+  const firstLoad = admin
+    ? (overviewQ.isPending && realtimeQ.isPending && todayQ.isPending)
+    : (overviewQ.isPending && meQ.isPending);
+  if (firstLoad) {
     return (
       <div>
-        <div className="page-header">
-          <div>
-            <h1>{t('仪表盘')}</h1>
-            <p>{t('AI 网关使用概览')}</p>
-          </div>
-        </div>
+        {header}
         <SkeletonCards count={6} />
       </div>
     );
   }
 
-  const u = usage || {};
-  const ts = tokenStats || {};
-  const l = limits || {};
-  const trendData: TrendData[] = trend || [];
+  const statCardsBlock = (
+    <div style={{ marginBottom: 16 }}>
+      {overviewQ.isError ? (
+        <div className="error-message">
+          {t('概览加载失败')}
+          <button className="btn btn-outline btn-sm" style={{ marginLeft: 8 }} onClick={() => void overviewQ.refetch()}>{t('重试')}</button>
+        </div>
+      ) : overviewQ.isPending ? (
+        <SkeletonCards count={6} />
+      ) : (
+        <StatCards
+          overview={ov}
+          savedEstimate={savings?.saved_estimate}
+          savedApprox={savings?.approx}
+          channels={channels}
+          lang={lang}
+          rangeLabel={rLabel}
+        />
+      )}
+    </div>
+  );
 
-  const todayTokens = ts.total_tokens || 0;
-  const todayInput = ts.input_tokens || 0;
-  const todayOutput = ts.output_tokens || 0;
-  const todayRequests = ts.request_count || 0;
-  const monthlyUsed = l.monthly_used || 0;
-  const monthlyLimit = l.monthly_limit;
-  const monthlyPct = monthlyLimit && monthlyLimit > 0 ? Math.min(100, (monthlyUsed / monthlyLimit) * 100) : null;
-
-  // 增强数据
-  const ct = consumptionTrend || [];
-  const md = modelDist || [];
-  const ur = userRanking || [];
-  const ch = channelHealth || [];
-  const rt = realtime || {};
-  const cs = cacheSavings || {};
-
-  const admin = isAdmin();
-
-  // ── 普通用户个人视图：只渲染自己的配额/余额与个人工具箱 ──
+  // ── 普通用户个人视图 ──
   if (!admin) {
     return (
       <div>
-        <div className="page-header">
-          <div>
-            <h1>{t('仪表盘')}</h1>
-            <p>{t('我的用量概览')}</p>
-          </div>
-          <button className="btn btn-outline btn-sm" onClick={() => void loadData()} disabled={refreshing} style={{ gap: '6px' }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-              style={refreshing ? { animation: 'spin 0.9s linear infinite' } : undefined}>
-              <polyline points="23 4 23 10 17 10" />
-              <polyline points="1 20 1 14 7 14" />
-              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-            </svg>
-            {refreshing ? t('刷新中…') : t('刷新')}
-          </button>
-        </div>
+        {header}
+        <QuotaCards monthlyUsed={monthlyUsed} monthlyLimit={monthlyLimit} lang={lang} />
+        <div style={{ marginTop: 16 }} />
+        {statCardsBlock}
 
-        {error && <div className="error-message">{error}</div>}
+        <PanelWrap title={t('消费趋势（{{range}}）', { range: t(rLabel) })} query={dailyQ}
+          emptyText={t('所选范围内还没有消费记录')}>
+          {() => (
+            <TrendBars rows={trendRows} formatValue={(v) => fmtCost(v, lang)} formatAxis={(v) => fmtCost(v, lang)} lang={lang} />
+          )}
+        </PanelWrap>
 
-        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}>
-          <div className="stat-card">
-            <div className="stat-card-top">
-              <div className="stat-title">{t('总配额')}</div>
-              <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>💰</div>
-            </div>
-            <div className="stat-value" style={{ fontSize: '26px' }}>{monthlyLimit != null ? fmtLimit(monthlyLimit) : '∞'}</div>
-            <div className="stat-desc" style={{ fontSize: '11px' }}>{t('充值与赠送总额')}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-card-top">
-              <div className="stat-title">{t('已用配额')}</div>
-              <div className="stat-icon-badge" style={{ background: 'rgba(251, 146, 60, 0.15)', color: '#fb923c' }}>📈</div>
-            </div>
-            <div className="stat-value" style={{ fontSize: '26px' }}>{fmtLimit(monthlyUsed)}</div>
-            <div className="stat-desc" style={{ fontSize: '11px' }}>
-              {monthlyPct != null && <span>{monthlyPct.toFixed(1)}% {t('已消耗')}</span>}
-            </div>
-            {monthlyPct != null && (
-              <div style={{ height: 4, background: 'var(--bg-color)', borderRadius: 2, marginTop: 8, overflow: 'hidden' }}>
-                <div style={{
-                  width: `${Math.min(100, monthlyPct)}%`,
-                  height: '100%',
-                  background: monthlyPct > 80 ? 'rgb(239,68,68)' : monthlyPct > 50 ? 'rgb(234,179,8)' : 'var(--accent-color)',
-                  borderRadius: 2,
-                  transition: 'width 0.3s ease',
-                }} />
-              </div>
+        <PanelWrap title={t('Token 趋势（输入 / 输出，{{range}}）', { range: t(rLabel) })} query={tokenTrendQ} style={{ marginTop: 16 }}
+          emptyText={t('暂无趋势数据')}>
+          {(data) => <TokenTrendChart data={data} lang={lang} />}
+        </PanelWrap>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(400px, 100%), 1fr))', gap: 16, marginTop: 16 }}>
+          <PanelWrap title={t('模型分布（{{range}}）', { range: t(rLabel) })} query={modelsQ} emptyText={t('暂无模型分布数据')}>
+            {() => (
+              <DonutChart data={donutData} colors={donutColors}
+                totalText={fmtInt(modelTotalCount, lang)} totalSub={t('次调用')} otherName={t('其他')} />
             )}
-          </div>
-          <div className="stat-card">
-            <div className="stat-card-top">
-              <div className="stat-title">{t('剩余配额')}</div>
-              <div className="stat-icon-badge" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399' }}>✅</div>
-            </div>
-            <div className="stat-value" style={{ fontSize: '26px' }}>
-              {fmtLimit(Math.max(0, (monthlyLimit ?? 0) - monthlyUsed))}
-            </div>
-            <div className="stat-desc" style={{ fontSize: '11px' }}>
-              {monthlyLimit == null ? t('未设限额') : t('按当前配额计算')}
-            </div>
-          </div>
+          </PanelWrap>
+          <PanelWrap title={t('我的 Top 模型（{{range}}）', { range: t(rLabel) })} query={modelsQ} emptyText={t('暂无模型数据')}>
+            {(data: typeof models) => <TopModelsTable rows={data} lang={lang} />}
+          </PanelWrap>
         </div>
 
-        {/* 我的用量报表（report 系列按 user_id 收敛，只看自己） */}
-        {reportOverview && reportOverview.total_requests != null && reportOverview.total_requests > 0 && (
-          <div className="card" style={{ marginTop: 16 }}>
-            <div className="card-header">
-              <h2>{t('我的用量报表')}</h2>
-              {reportOverview.success_rate != null && (
-                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                  {t('成功率')} {reportOverview.success_rate}% · {t('活跃天数')} {reportOverview.active_days ?? 0}
-                </span>
-              )}
-            </div>
-            <div className="card-body">
-              <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))' }}>
-                <div className="stat-card">
-                  <div className="stat-title">{t('请求数')}</div>
-                  <div className="stat-value" style={{ fontSize: '22px' }}>{fmtLimit(reportOverview.total_requests)}</div>
-                </div>
-                <div className="stat-card">
-                  <div className="stat-title">{t('Token 用量')}</div>
-                  <div className="stat-value" style={{ fontSize: '22px' }}>
-                    {fmtTok((reportOverview.input_tokens ?? 0) + (reportOverview.output_tokens ?? 0))}
-                  </div>
+        <PanelWrap title={t('缓存命中率（请求数口径）')} query={ratesQ} style={{ marginTop: 16 }}
+          emptyText={t('所选范围内没有缓存请求')}>
+          {(data) => (
+            <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))' }}>
+              {data.map((w: { window?: string; rate?: number; hit_requests?: number; requests?: number }) => (
+                <div key={w.window} className="stat-card">
+                  <div className="stat-title">{w.window}</div>
+                  <div className="stat-value" style={{ fontSize: '22px' }}>{fmtPct(w.rate)}</div>
                   <div className="stat-desc" style={{ fontSize: '11px' }}>
-                    {t('输入')} {fmtTok(reportOverview.input_tokens)} / {t('输出')} {fmtTok(reportOverview.output_tokens)}
+                    {t('命中')} {fmtInt(w.hit_requests, lang)} / {fmtInt(w.requests, lang)} {t('次请求')}
                   </div>
                 </div>
-                <div className="stat-card">
-                  <div className="stat-title">{t('消费额')}</div>
-                  <div className="stat-value" style={{ fontSize: '22px' }}>{fmtMoney(reportOverview.total_cost)}</div>
-                </div>
-              </div>
-              {reportTokenTrend && reportTokenTrend.length > 0 && (
-                <div style={{ marginTop: 12 }}>
-                  <TokenTrendChart data={reportTokenTrend} />
-                </div>
-              )}
+              ))}
             </div>
-          </div>
-        )}
+          )}
+        </PanelWrap>
 
-        {/* 快捷操作（用户工具箱） */}
+        <PanelWrap title={t('近 24 小时缓存命中')} query={trend24Q} style={{ marginTop: 16 }}
+          emptyText={t('近 24 小时没有请求')}>
+          {(data) => <CacheTrend24h data={data} lang={lang} />}
+        </PanelWrap>
+
+        <PanelWrap title={t('消费热力图（近 365 天）')} query={heatmapQ} style={{ marginTop: 16 }}
+          emptyText={t('近一年还没有使用记录')}>
+          {(data) => <Heatmap data={data} lang={lang} />}
+        </PanelWrap>
+
+        {/* 快捷操作（个人工具箱） */}
         <div className="card" style={{ marginTop: 16 }}>
           <div className="card-header">
             <h2>{t('快捷操作')}</h2>
@@ -809,446 +260,166 @@ export default function Dashboard(): JSX.Element {
   }
 
   // ── 管理员全局视图 ──
-  const rangeLabel = RANGE_OPTIONS.find((o) => o.key === range)?.labelKey ?? '近 30 日';
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1>{t('仪表盘')}</h1>
-          <p>{t('AI 网关使用概览')}</p>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          {/* 报表时间范围切换（Agent2API report RANGES 的 AIGX 对应物；原生按钮组，不引组件库） */}
-          <div className="range-switcher" role="tablist" aria-label={t('时间范围')}>
-            {RANGE_OPTIONS.map((o) => (
-              <button
-                key={o.key}
-                role="tab"
-                aria-selected={range === o.key}
-                className={`range-switcher-btn${range === o.key ? ' is-active' : ''}`}
-                onClick={() => setRange(o.key)}
-                disabled={refreshing}
-              >
-                {t(o.labelKey)}
-              </button>
-            ))}
-          </div>
-          <button className="btn btn-outline btn-sm" onClick={() => void loadData(range)} disabled={refreshing} style={{ gap: '6px' }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-              style={refreshing ? { animation: 'spin 0.9s linear infinite' } : undefined}>
-              <polyline points="23 4 23 10 17 10" />
-              <polyline points="1 20 1 14 7 14" />
-              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-            </svg>
-            {refreshing ? t('刷新中…') : t('刷新')}
-          </button>
-        </div>
-      </div>
+      {header}
 
-      {error && <div className="error-message">{error}</div>}
+      {/* 实时 4 卡（30s 轮询，页面隐藏自动暂停） */}
+      {!realtimeQ.isPending && (
+        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', marginBottom: 16 }}>
+          <div className="stat-card">
+            <div className="stat-card-top">
+              <div className="stat-title">{t('实时 RPS')}</div>
+              <div className="stat-icon-badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#34d399' }}>⚡</div>
+            </div>
+            <div className="stat-value" style={{ fontSize: '24px' }}>{fmtInt(rt?.qps ?? rt?.rps ?? 0, lang)}</div>
+            <div className="stat-desc" style={{ fontSize: '11px' }}>{t('每秒请求数')}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-card-top">
+              <div className="stat-title">{t('活跃用户')}</div>
+              <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>👥</div>
+            </div>
+            <div className="stat-value" style={{ fontSize: '24px' }}>{fmtInt(rt?.active_users ?? userRankQ.data?.length, lang)}</div>
+            <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟')}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-card-top">
+              <div className="stat-title">{t('活跃渠道')}</div>
+              <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>🔗</div>
+            </div>
+            <div className="stat-value" style={{ fontSize: '24px' }}>{fmtInt(rt?.active_channels ?? health.length, lang)}</div>
+            <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟')}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-card-top">
+              <div className="stat-title">{t('平均延迟')}</div>
+              <div className="stat-icon-badge" style={{ background: 'rgba(251, 146, 60, 0.15)', color: '#fb923c' }}>⏱️</div>
+            </div>
+            <div className="stat-value" style={{ fontSize: '24px' }}>{fmtInt(rt?.avg_latency_ms ?? 0, lang)}ms</div>
+            <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟平均')}</div>
+          </div>
+        </div>
+      )}
 
-      {/* 实时监控数字 */}
-      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', marginBottom: 16 }}>
-        <div className="stat-card">
-          <div className="stat-card-top">
-            <div className="stat-title">{t('实时 RPS')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#34d399' }}>⚡</div>
-          </div>
-          <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(rt.qps ?? rt.rps ?? 0)}</div>
-          <div className="stat-desc" style={{ fontSize: '11px' }}>{t('每秒请求数')}</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-card-top">
-            <div className="stat-title">{t('活跃用户')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>👥</div>
-          </div>
-          <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(rt.active_users ?? ur.length)}</div>
-          <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟')}</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-card-top">
-            <div className="stat-title">{t('活跃渠道')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>🔗</div>
-          </div>
-          <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(rt.active_channels ?? ch.length)}</div>
-          <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟')}</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-card-top">
-            <div className="stat-title">{t('平均延迟')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(251, 146, 60, 0.15)', color: '#fb923c' }}>⏱️</div>
-          </div>
-          <div className="stat-value" style={{ fontSize: '24px' }}>{fmtLimit(rt.avg_latency_ms || 0)}ms</div>
-          <div className="stat-desc" style={{ fontSize: '11px' }}>{t('近 5 分钟平均')}</div>
-        </div>
-      </div>
-
-      {/* 基础统计 */}
-      <div className="stats-grid">
+      {/* 全站累计三卡（今日 / 总量 / 限额） */}
+      <div className="stats-grid" style={{ marginBottom: 16 }}>
         <div className="stat-card">
           <div className="stat-card-top">
             <div className="stat-title">{t('今日用量')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>📊</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '26px' }}>{fmtTok(todayTokens)}</div>
+          <div className="stat-value" style={{ fontSize: '26px' }}>{fmtTokens(ts?.total_tokens, lang)}</div>
           <div className="stat-desc" style={{ display: 'flex', gap: '16px', fontSize: '11px' }}>
-            <span>↑ {t('输入')} {fmtTok(todayInput)}</span>
-            <span>↓ {t('输出')} {fmtTok(todayOutput)}</span>
+            <span>↑ {t('输入')} {fmtTokens(ts?.input_tokens, lang)}</span>
+            <span>↓ {t('输出')} {fmtTokens(ts?.output_tokens, lang)}</span>
           </div>
           <div className="stat-sub">
-            <span>{todayRequests.toLocaleString()} {t('次请求')}</span>
+            <span>{fmtInt(ts?.request_count, lang)} {t('次请求')}</span>
           </div>
         </div>
-
         <div className="stat-card">
           <div className="stat-card-top">
             <div className="stat-title">{t('Token 统计')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>🔤</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '26px' }}>{fmtTok(u.total_tokens)}</div>
+          <div className="stat-value" style={{ fontSize: '26px' }}>{fmtTokens(us?.total_tokens, lang)}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }}>
-            <div>{t('输入')}: {fmtTok(u.total_input_tokens || u.total_tokens || 0)}</div>
-            <div>{t('输出')}: {fmtTok(u.total_output_tokens || 0)}</div>
+            <div>{t('输入')}: {fmtTokens(us?.total_input_tokens ?? us?.total_tokens, lang)}</div>
+            <div>{t('输出')}: {fmtTokens(us?.total_output_tokens, lang)}</div>
           </div>
         </div>
-
         <div className="stat-card">
           <div className="stat-card-top">
             <div className="stat-title">{t('本月用量限额')}</div>
             <div className="stat-icon-badge" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399' }}>📅</div>
           </div>
-          <div className="stat-value" style={{ fontSize: '26px' }}>{monthlyLimit != null ? fmtLimit(monthlyLimit) : '∞'}</div>
+          <div className="stat-value" style={{ fontSize: '26px' }}>{monthlyLimit != null ? fmtInt(monthlyLimit, lang) : '∞'}</div>
           <div className="stat-desc" style={{ fontSize: '11px' }} title={t('统计口径：token（本月累计），与「配额/余额」的货币口径不同')}>
-            <span>{t('已用')} {fmtTok(monthlyUsed)} tokens</span>
-            {monthlyPct != null && <span style={{ marginLeft: 12 }}>{monthlyPct.toFixed(1)}%</span>}
-          </div>
-        </div>
-
-        <div className="stat-card">
-          <div className="stat-card-top">
-            <div className="stat-title">{t('缓存节省')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#34d399' }}>💾</div>
-          </div>
-          <div className="stat-value" style={{ fontSize: '26px' }}>{fmtTok(cs.saved_estimate)}</div>
-          <div className="stat-desc" style={{ fontSize: '11px' }}>
-            <span>{t('命中')} {fmtLimit(cs.hit_count)} {t('次')}</span>
-            <span style={{ marginLeft: 12 }}>{t('缓存 Token')} {fmtTok(cs.cache_tokens)}</span>
-          </div>
-        </div>
-
-        {/* 报表概览：成功率（status_code<400 占比，来自 handle_report_overview） */}
-        <div className="stat-card">
-          <div className="stat-card-top">
-            <div className="stat-title">{t('成功率')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#34d399' }}>✅</div>
-          </div>
-          <div className="stat-value" style={{ fontSize: '26px' }}>
-            {reportOverview && reportOverview.total_requests != null && reportOverview.total_requests > 0
-              ? `${((reportOverview.success_requests ?? 0) / reportOverview.total_requests * 100).toFixed(1)}%`
-              : '—'}
-          </div>
-          <div className="stat-desc" style={{ fontSize: '11px' }}>
-            {reportOverview ? `${fmtLimit(reportOverview.success_requests ?? 0)} / ${fmtLimit(reportOverview.total_requests ?? 0)} ${t('次请求')}` : t('暂无数据')}
-          </div>
-        </div>
-
-        {/* 报表概览：活跃天数（统计区间内有请求的天数） */}
-        <div className="stat-card">
-          <div className="stat-card-top">
-            <div className="stat-title">{t('活跃天数')}</div>
-            <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>📆</div>
-          </div>
-          <div className="stat-value" style={{ fontSize: '26px' }}>
-            {reportOverview?.active_days ?? '—'}
-          </div>
-          <div className="stat-desc" style={{ fontSize: '11px' }}>
-            {t('所选时间范围内有请求的天数')}
-          </div>
-        </div>
-      </div>
-
-      {/* 消费趋势（增强） */}
-      <div className="section-card">
-        <div className="section-card-header">
-          <h2>{t('消费趋势（近 30 日）')}</h2>
-        </div>
-        <div className="section-card-body">
-          {ct.length > 0 ? (
-            <TrendChart data={ct} />
-          ) : trendData.length > 0 ? (
-            <TrendChart data={trendData} />
-          ) : (
-            <div className="empty-state" style={{ padding: '22px' }}>
-              <p>{t('暂无趋势数据')}</p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* 报表扩展：Token 趋势（prompt/completion 分列）
-          注：成功率/活跃天数在顶部统计卡已展示，这里不再重复。 */}
-      {reportTokenTrend && reportTokenTrend.length > 0 && (
-        <div className="section-card" style={{ marginTop: 16 }}>
-          <div className="section-card-header">
-            <h2>{t('Token 趋势（输入 / 输出，{{range}}）', { range: t(rangeLabel) })}</h2>
-          </div>
-          <div className="section-card-body">
-            <TokenTrendChart data={reportTokenTrend} />
-          </div>
-        </div>
-      )}
-
-      {/* 缓存效率：命中率窗口卡（节省估算见顶部「缓存节省」卡，同源数据合并展示） */}
-      {reportCacheRates && reportCacheRates.length > 0 && (
-        <div className="section-card" style={{ marginTop: 16 }}>
-          <div className="section-card-header">
-            <h2>{t('缓存命中率（请求数口径）')}</h2>
-            {cs.saved_estimate != null && (
-              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                {t('累计节省约')} {fmtTok(cs.saved_estimate)} tokens · {t('命中')} {fmtLimit(cs.hit_count)} {t('次')}
-              </span>
+            <span>{t('已用')} {fmtInt(monthlyUsed, lang)} tokens</span>
+            {monthlyLimit != null && monthlyLimit > 0 && (
+              <span style={{ marginLeft: 12 }}>{((monthlyUsed / monthlyLimit) * 100).toFixed(1)}%</span>
             )}
           </div>
-          <div className="section-card-body">
-            <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))' }}>
-              {reportCacheRates.map((w) => (
-                <div key={w.window} className="stat-card">
-                  <div className="stat-title">{w.window}</div>
-                  <div className="stat-value" style={{ fontSize: '22px' }}>{w.rate ?? 0}%</div>
-                  <div className="stat-desc" style={{ fontSize: '11px' }}>
-                    {t('命中')} {fmtLimit(w.hit_requests)} / {fmtLimit(w.requests)} {t('次请求')}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
-      )}
+      </div>
 
-      {/* 报表扩展：Top 来源（渠道）排行 + 模型 Top5 */}
-      {((reportTopSources && reportTopSources.length > 0) || (reportOverview && reportOverview.top_models && reportOverview.top_models.length > 0)) && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(400px, 100%), 1fr))', gap: 16, marginTop: 16 }}>
-          {reportTopSources && reportTopSources.length > 0 && (
-            <div className="section-card">
-              <div className="section-card-header">
-                <h2>{t('Top 渠道（{{range}}）', { range: t(rangeLabel) })}</h2>
-              </div>
-              <div className="section-card-body">
-                <div className="table-wrapper">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>#</th>
-                        <th>{t('渠道')}</th>
-                        <th>{t('请求数')}</th>
-                        <th>{t('消费')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {reportTopSources.map((s, i) => (
-                        <tr key={i}>
-                          <td style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
-                          <td>{s.name || '—'}</td>
-                          <td>{fmtLimit(s.count ?? 0)}</td>
-                          <td>{fmtMoney((s.cost ?? 0) / 100)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+      {statCardsBlock}
+
+      <PanelWrap title={t('消费趋势（{{range}}）', { range: t(rLabel) })} query={dailyQ}
+        emptyText={t('所选范围内还没有消费记录')}>
+        {() => (
+          <TrendBars rows={trendRows} formatValue={(v) => fmtCost(v, lang)} formatAxis={(v) => fmtCost(v, lang)} lang={lang} />
+        )}
+      </PanelWrap>
+
+      <PanelWrap title={t('Token 趋势（输入 / 输出，{{range}}）', { range: t(rLabel) })} query={tokenTrendQ} style={{ marginTop: 16 }}
+        emptyText={t('暂无趋势数据')}>
+        {(data) => <TokenTrendChart data={data} lang={lang} />}
+      </PanelWrap>
+
+      {/* 缓存效率：四窗口卡 + 近 24h 双轴折线 */}
+      <PanelWrap title={t('缓存命中率（请求数口径）')} query={ratesQ} style={{ marginTop: 16 }}
+        extra={savings?.saved_estimate != null ? (
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            {t('估算节省')} {fmtCost(savings.saved_estimate, lang)}{savings.approx ? ` (${t('近似')})` : ''}
+          </span>
+        ) : null}
+        emptyText={t('所选范围内没有缓存请求')}>
+        {(data) => (
+          <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))' }}>
+            {data.map((w: { window?: string; rate?: number; hit_requests?: number; requests?: number }) => (
+              <div key={w.window} className="stat-card">
+                <div className="stat-title">{w.window}</div>
+                <div className="stat-value" style={{ fontSize: '22px' }}>{fmtPct(w.rate)}</div>
+                <div className="stat-desc" style={{ fontSize: '11px' }}>
+                  {t('命中')} {fmtInt(w.hit_requests, lang)} / {fmtInt(w.requests, lang)} {t('次请求')}
                 </div>
               </div>
-            </div>
-          )}
-          {reportOverview && reportOverview.top_models && reportOverview.top_models.length > 0 && (
-            <div className="section-card">
-              <div className="section-card-header">
-                <h2>{t('Top 模型（{{range}}）', { range: t(rangeLabel) })}</h2>
-              </div>
-              <div className="section-card-body">
-                <div className="table-wrapper">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>#</th>
-                        <th>{t('模型')}</th>
-                        <th>{t('请求数')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {reportOverview.top_models.map((m, i) => (
-                        <tr key={i}>
-                          <td style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
-                          <td>{m.model || '—'}</td>
-                          <td>{fmtLimit(m.count ?? 0)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* 报表扩展：365 天消费热力图 */}
-      {reportHeatmap && reportHeatmap.length > 0 && (
-        <div className="section-card" style={{ marginTop: 16 }}>
-          <div className="section-card-header">
-            <h2>{t('消费热力图（近 365 天）')}</h2>
+            ))}
           </div>
-          <div className="section-card-body">
-            <Heatmap data={reportHeatmap} />
-          </div>
-        </div>
-      )}
+        )}
+      </PanelWrap>
 
-      {/* 模型分布 + 用户排行 */}
+      <PanelWrap title={t('近 24 小时缓存命中')} query={trend24Q} style={{ marginTop: 16 }}
+        emptyText={t('近 24 小时没有请求')}>
+        {(data) => <CacheTrend24h data={data} lang={lang} />}
+      </PanelWrap>
+
+      {/* 模型分布环形图 + Top 模型榜 */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(400px, 100%), 1fr))', gap: 16, marginTop: 16 }}>
-        <div className="section-card">
-          <div className="section-card-header">
-            <h2>{t('模型调用分布')}</h2>
-          </div>
-          <div className="section-card-body">
-            {md.length > 0 ? (
-              <PieChart data={md} />
-            ) : (
-              <div className="empty-state" style={{ padding: '22px' }}>
-                <p>{t('暂无模型分布数据')}</p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="section-card">
-          <div className="section-card-header">
-            <h2>{t('用户消费排行（Top 10）')}</h2>
-          </div>
-          <div className="section-card-body">
-            {ur.length > 0 ? (
-              <div className="table-wrapper">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>#</th>
-                      <th>{t('用户')}</th>
-                      <th>{t('请求数')}</th>
-                      <th>{t('Token')}</th>
-                      <th>{t('消费')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {ur.slice(0, 10).map((r, i) => (
-                      <tr key={i}>
-                        <td style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
-                        <td>{r.email || r.username || `User#${r.user_id}`}</td>
-                        <td>{fmtLimit(r.request_count || r.requests || r.count || 0)}</td>
-                        <td>{fmtTok(r.total_tokens || r.tokens || 0)}</td>
-                        <td>{fmtMoney(r.total_cost || r.cost || 0)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="empty-state" style={{ padding: '22px' }}>
-                <p>{t('暂无用户排行数据')}</p>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* 渠道健康 */}
-      <div className="section-card" style={{ marginTop: 16 }}>
-        <div className="section-card-header">
-          <h2>{t('渠道健康状态')}</h2>
-        </div>
-        <div className="section-card-body">
-          {ch.length > 0 ? (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
-              {ch.map((c, i) => {
-                const totalReq = c.total_requests ?? 0;
-                const successRate = c.success_rate != null ? c.success_rate : (totalReq > 0 ? ((c.success_count ?? 0) / totalReq) * 100 : 0);
-                const errorRate = c.error_rate != null ? c.error_rate : (totalReq > 0 ? ((totalReq - (c.success_count ?? 0)) / totalReq) * 100 : 0);
-                const isHealthy = successRate >= 95;
-                const isWarning = successRate >= 80 && successRate < 95;
-                // 断路器状态：后端 circuit_breaker 已为机器可读小写枚举
-                // ("open"/"halfopen"/"closed"，见 channel/circuit_breaker.rs get_state)
-                const breakerState = String(c.circuit_breaker || 'closed').toLowerCase();
-                const breakerColor = breakerState === 'open' ? 'rgb(239,68,68)' : breakerState === 'halfopen' ? 'rgb(234,179,8)' : 'rgb(34,197,94)';
-                const breakerLabel = breakerState === 'open' ? t('熔断') : breakerState === 'halfopen' ? t('半开') : t('正常');
-                return (
-                  <div key={i} className="stat-card" style={{ padding: 16 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                      <span style={{ fontWeight: 600, fontSize: 14 }}>{c.name || `Channel#${c.id || i}`}</span>
-                      <span style={{
-                        padding: '2px 8px', borderRadius: 999, fontSize: 11,
-                        background: isHealthy ? 'rgba(34,197,94,0.15)' : isWarning ? 'rgba(234,179,8,0.15)' : 'rgba(239,68,68,0.15)',
-                        color: isHealthy ? 'rgb(34,197,94)' : isWarning ? 'rgb(234,179,8)' : 'rgb(239,68,68)',
-                      }}>
-                        {isHealthy ? t('健康') : isWarning ? t('警告') : t('异常')}
-                      </span>
-                    </div>
-                    {/* 断路器状态：用圆点 + 文字标识 */}
-                    <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: breakerColor, display: 'inline-block' }} />
-                      {t('断路器')}: <span style={{ color: breakerColor, fontWeight: 600 }}>{breakerLabel}</span>
-                    </div>
-                    <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>
-                      {t('成功率')}: <span style={{ color: 'var(--text-main)', fontWeight: 600 }}>{successRate.toFixed(1)}%</span>
-                    </div>
-                    {/* 错误率：百分比 + 进度条 */}
-                    <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>
-                      {t('错误率')}: <span style={{ color: errorRate > 20 ? 'rgb(239,68,68)' : 'var(--text-main)', fontWeight: 600 }}>{errorRate.toFixed(1)}%</span>
-                    </div>
-                    <div style={{ height: 4, background: 'var(--bg-color)', borderRadius: 2, marginBottom: 4, overflow: 'hidden' }}>
-                      <div style={{
-                        width: `${Math.min(100, errorRate)}%`,
-                        height: '100%',
-                        background: errorRate > 20 ? 'rgb(239,68,68)' : errorRate > 5 ? 'rgb(234,179,8)' : 'rgb(34,197,94)',
-                        borderRadius: 2,
-                        transition: 'width 0.3s ease',
-                      }} />
-                    </div>
-                    <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4 }}>
-                      {t('平均延迟')}: <span style={{ color: 'var(--text-main)' }}>{fmtLimit(c.avg_latency_ms || 0)}ms</span>
-                    </div>
-                    {/* 连续空响应计数：超过阈值提示风险 */}
-                    {c.consecutive_empty != null && c.consecutive_empty > 0 && (
-                      <div style={{ fontSize: 13, color: c.consecutive_empty >= 3 ? 'rgb(239,68,68)' : 'var(--text-muted)' }}>
-                        {t('连续空响应')}: <span style={{ fontWeight: 600 }}>{c.consecutive_empty}</span>
-                      </div>
-                    )}
-                    {/* 批次6：health_tracker 实时快照（错误率 EMA 视角） */}
-                    {c.health && c.health.error_rate != null && c.health.error_rate > 0 && (
-                      <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                        {t('实时错误率')}: <span style={{ color: c.health.error_rate > 0.5 ? 'rgb(234,179,8)' : 'var(--text-main)', fontWeight: 600 }}>
-                          {(c.health.error_rate * 100).toFixed(1)}%
-                        </span>
-                      </div>
-                    )}
-                    {c.health && c.health.last_error && (
-                      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.health.last_error}>
-                        {t('最近错误')}: {c.health.last_error}
-                      </div>
-                    )}
-                    <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 4 }}>
-                      {t('请求数')}: <span style={{ color: 'var(--text-main)' }}>{fmtLimit(c.total_requests || c.requests || 0)}</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="empty-state" style={{ padding: '22px' }}>
-              <p>{t('暂无渠道健康数据')}</p>
-            </div>
+        <PanelWrap title={t('模型分布（{{range}}）', { range: t(rLabel) })} query={modelsQ} emptyText={t('暂无模型分布数据')}>
+          {() => (
+            <DonutChart data={donutData} colors={donutColors}
+              totalText={fmtInt(modelTotalCount, lang)} totalSub={t('次调用')} otherName={t('其他')} />
           )}
-        </div>
+        </PanelWrap>
+        <PanelWrap title={t('Top 模型（{{range}}）', { range: t(rLabel) })} query={modelsQ} emptyText={t('暂无模型数据')}>
+          {(data: typeof models) => <TopModelsTable rows={data} lang={lang} />}
+        </PanelWrap>
       </div>
 
-      {/* 快捷操作（管理员工具箱；普通用户视图已提前 return） */}
+      {/* Top 渠道榜 + 用户消费榜 */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(400px, 100%), 1fr))', gap: 16, marginTop: 16 }}>
+        <PanelWrap title={t('Top 渠道（{{range}}）', { range: t(rLabel) })} query={sourcesQ} emptyText={t('暂无渠道数据')}>
+          {(data) => <TopSources data={data} lang={lang} />}
+        </PanelWrap>
+        <PanelWrap title={t('用户消费排行（Top 20）')} query={userRankQ} emptyText={t('暂无用户排行数据')}>
+          {(data) => <UserRanking data={data} lang={lang} />}
+        </PanelWrap>
+      </div>
+
+      <PanelWrap title={t('消费热力图（近 365 天）')} query={heatmapQ} style={{ marginTop: 16 }}
+        emptyText={t('近一年还没有使用记录')}>
+        {(data) => <Heatmap data={data} lang={lang} />}
+      </PanelWrap>
+
+      <PanelWrap title={t('渠道健康状态')} query={healthQ} style={{ marginTop: 16 }}
+        emptyText={t('暂无渠道健康数据')}>
+        {(data) => <ChannelHealth data={data} lang={lang} />}
+      </PanelWrap>
+
+      {/* 快捷操作（管理员工具箱） */}
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-header">
           <h2>{t('快捷操作')}</h2>
@@ -1263,5 +434,45 @@ export default function Dashboard(): JSX.Element {
         </div>
       </div>
     </div>
+  );
+}
+
+// Top 模型表：请求数 + 占比条 + 消费/Token（右对齐 num 列，与 Top 渠道榜同法）。
+function TopModelsTable({ rows, lang }: { rows: Array<{ model?: string; count?: number; input_tokens?: number; output_tokens?: number; cost?: number }>; lang?: string }): JSX.Element {
+  const { t } = useTranslation();
+  const total = rows.reduce((s, r) => s + (r.count ?? 0), 0);
+  const maxCount = Math.max(...rows.map((r) => r.count ?? 0), 1);
+  return (
+    <table className="top-rank-table" style={{ width: '100%' }}>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>{t('模型')}</th>
+          <th style={{ width: '22%' }}>{t('请求占比')}</th>
+          <th className="num">{t('请求数')}</th>
+          <th className="num">{t('消费')}</th>
+          <th className="num">{t('Token')}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.slice(0, 10).map((r, i) => {
+          const pct = total > 0 ? ((r.count ?? 0) / total) * 100 : 0;
+          return (
+            <tr key={`${i}-${r.model}`}>
+              <td style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
+              <td style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160 }} title={r.model}>{r.model || '—'}</td>
+              <td>
+                <div className="share-bar">
+                  <div className="share-bar-fill" style={{ width: `${Math.max(2, ((r.count ?? 0) / maxCount) * 100)}%` }} />
+                </div>
+              </td>
+              <td className="num">{fmtInt(r.count, lang)}<span className="pct-hint"> {pct.toFixed(1)}%</span></td>
+              <td className="num">{fmtCost(r.cost, lang)}</td>
+              <td className="num">{fmtTokens((r.input_tokens ?? 0) + (r.output_tokens ?? 0), lang)}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
   );
 }

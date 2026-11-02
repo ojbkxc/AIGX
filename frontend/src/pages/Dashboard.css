@@ -62,3 +62,64 @@
   cursor: not-allowed;
   opacity: 0.6;
 }
+
+/* 自定义区间档：起止两个原生日期输入 */
+.range-custom-inputs input[type='date'] {
+  appearance: none;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-main);
+  font-size: 12px;
+  padding: 5px 8px;
+  color-scheme: light dark;
+}
+
+/* Top 榜行内占比条（CSS 宽度百分比，不画 SVG） */
+.share-bar {
+  height: 6px;
+  background: var(--bg-color);
+  border-radius: 3px;
+  overflow: hidden;
+  min-width: 60px;
+}
+
+.share-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, rgba(47, 111, 237, 0.55), var(--accent-color));
+  border-radius: 3px;
+  transition: width 0.25s ease;
+}
+
+/* 榜表：数字列右对齐 + 占比小字提示 */
+.top-rank-table td.num,
+.top-rank-table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.pct-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 400;
+  margin-left: 2px;
+}
+
+/* 移动端：栅格单列、热力图横滚、榜表横滚 */
+@media (max-width: 768px) {
+  .stats-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+
+  .range-switcher {
+    flex-wrap: wrap;
+  }
+
+  .section-card-body {
+    overflow-x: auto;
+  }
+
+  .top-rank-table {
+    min-width: 520px;
+  }
+}

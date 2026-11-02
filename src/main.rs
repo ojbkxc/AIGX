@@ -1256,10 +1256,6 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
                 .delete(api::admin::handle_clear_checkin_records),
         )
         .route(
-            "/api/checkin-center/records/mark-kept-active",
-            post(api::admin::handle_mark_kept_active),
-        )
-        .route(
             "/api/checkin-center/settings",
             get(api::admin::handle_get_checkin_settings)
                 .put(api::admin::handle_update_checkin_settings),

@@ -1,23 +1,19 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type FormEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Download, FlaskConical, Loader2, Pencil, Plus, Power, RefreshCw, RotateCcw, SlidersHorizontal, Trash2, Upload, Wallet } from 'lucide-react';
-import { api } from '../api';
-import { presetIcon, providerIcon } from '../lib/providerIcons';
 import {
-  addConfigOf,
-  cardKindOf,
-  CUSTOM_PROTOCOLS,
-  isCardHidden,
-  PRESET_PROVIDERS,
-  normalizeUrl,
-  presetKind,
-} from '../lib/addAccountConfigs';
+  Columns3, Download, Eye, EyeOff, FlaskConical, Globe, KeyRound, Loader2, Pencil, Plus, Power,
+  RefreshCw, RotateCcw, SlidersHorizontal, Trash2, Upload, User, Wallet, Wrench,
+} from 'lucide-react';
+import { api } from '../api';
+import { providerIcon } from '../lib/providerIcons';
+import { addConfigOf, cardKindOf, isCardHidden } from '../lib/addAccountConfigs';
 import { useToast } from '../components/Toast';
 import AddAccountDialog from '../components/AddAccountDialog';
 import ProxySelector from '../components/ProxySelector';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, EmptyState, Input, Loading, Select, SkeletonTable, Switch, Tabs, Textarea } from '../components/ui';
 import type {
+  AccountBalance,
   AccountProviderItem,
   AccountSessionItem,
   AccountSessionStatsItem,
@@ -26,14 +22,6 @@ import type {
   ImportSourceEntry,
 } from '../types';
 import './AccountSessions.css';
-
-/**
- * 供应商选择分段 —— 对齐 Agent2API 的「Agent（内置）/ 预置 API / 自定义」：
- * - Agent：网关内置 provider 目录（默认上游地址开箱可用）；
- * - 预置 API：官方/托管端点模板，点卡片把协议与地址预填进表单；
- * - 自定义：自己填上游地址（OpenAI / Anthropic / Gemini 三种协议）。
- */
-type ProviderSegment = 'agent' | 'preset' | 'custom';
 
 interface SessionFormState {
   channel_id: string;
@@ -127,6 +115,243 @@ const BALANCE_PROVIDERS: ReadonlySet<string> = new Set([
   'workbuddy', 'workbuddy-intl', 'trae', 'codearts',
 ]);
 
+/* ══ localStorage 工具（页面级偏好记忆：列宽/列显隐/分组/脱敏/自动余额） ══ */
+
+function readLS<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeLS(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // 隐私模式等存不了就算了：本次会话内仍然生效
+  }
+}
+
+/* ══ 姓名脱敏（对齐 Agent2API 表头眼睛：整列打码） ══ */
+
+/** 保留首尾字符、中间打码；过短的全打。旁人扫屏时看不出是谁。 */
+function maskName(name: string): string {
+  const s = (name || '').trim();
+  if (!s) return '';
+  if (s.length <= 2) return '*'.repeat(s.length);
+  return `${s[0]}***${s[s.length - 1]}`;
+}
+
+/* ══ 余额主额度桶（对齐 Agent2API .usage-pool 两行形态：套餐名 + 进度条 + 读数） ══ */
+
+/** 余额单元格的两行形态视图 */
+interface UsagePoolView {
+  /** 套餐 / 额度桶名（第一行；可为空） */
+  plan: string;
+  /** 读数（第二行，已拼好「数值 单位」） */
+  text: string;
+  /** 剩余比例（0~1；上游没给总额时为 null，不画进度条） */
+  ratio: number | null;
+  /** 读数是否已耗尽（红色警示） */
+  low: boolean;
+}
+
+/** 从余额读数提取主额度桶：优先取第一个给出总额的桶，否则第一个桶 / 顶层 available */
+function usagePoolOf(bal: AccountBalance | null | undefined): UsagePoolView | null {
+  if (!bal) return null;
+  const wallets = Array.isArray(bal.wallets) ? bal.wallets : [];
+  const main = wallets.find((w) => Number(w?.total) > 0) || wallets[0] || null;
+  const available = main != null && main.balance != null ? Number(main.balance) : bal.available;
+  if (available == null || !Number.isFinite(available)) return null;
+  const total = main ? Number(main.total) || 0 : 0;
+  const subPlan = bal.subscription
+    && typeof (bal.subscription as Record<string, unknown>).plan === 'string'
+    ? String((bal.subscription as Record<string, unknown>).plan)
+    : '';
+  const plan = (main && typeof main.displayName === 'string' && main.displayName) || subPlan;
+  return {
+    plan,
+    text: `${available}${bal.unit ? ` ${bal.unit}` : ''}`,
+    ratio: total > 0 ? Math.max(0, Math.min(1, available / total)) : null,
+    low: available <= 0,
+  };
+}
+
+/* ══ 账号限制器（对齐 Agent2API accounts-dialog-limiter：余额 / Token 两类规则） ══ */
+
+/** 一条限制规则（保存走 PATCH 的 limiters 键，整块替换；后端 Task 9 落地前有兜底提示） */
+interface LimiterRule {
+  /** balance = 余额低于阈值；token = 周期内累计消耗达到阈值 */
+  type: 'balance' | 'token';
+  /** skip = 跳过该账号（自动恢复）；disable = 禁用该账号（需手动启用） */
+  action: 'skip' | 'disable';
+  /** 阈值：余额数值 / Token 个数 */
+  threshold: number;
+  /** Token 规则的重置方式：fixed = 固定周期；daily = 自然日（每天 0 点） */
+  reset?: 'fixed' | 'daily';
+  /** Token 固定周期的秒数（30 分钟 ~ 24 小时） */
+  period?: number;
+  enabled?: boolean;
+}
+
+/** Token 固定周期的上下限（对齐 Agent2API TOKEN_PERIOD_*） */
+const TOKEN_PERIOD_MIN_SECS = 30 * 60;
+const TOKEN_PERIOD_MAX_SECS = 24 * 3600;
+
+/** 一条规则的「触发条件 → 触发动作」一句话（规则列表用） */
+function describeLimiterRule(rule: LimiterRule): string {
+  const action = rule.action === 'disable'
+    ? '禁用该账号（需手动重新启用）'
+    : '跳过该账号（自动恢复）';
+  if (rule.type === 'balance') {
+    return `余额 < ${rule.threshold} 时 → ${action}`;
+  }
+  const quota = rule.threshold >= 10000 && rule.threshold % 10000 === 0
+    ? `${rule.threshold / 10000} 万`
+    : `${rule.threshold}`;
+  if (rule.reset === 'daily') {
+    return `每日消耗 ≥ ${quota} Token（每天 0 点重置）时 → ${action}`;
+  }
+  const period = rule.period ?? 0;
+  const periodText = period < 60 ? `${period}s` : period < 3600 ? `${Math.round(period / 60)} 分钟` : `${Math.round(period / 3600) * 3600 === period ? period / 3600 : (period / 3600).toFixed(1)} 小时`;
+  return `每 ${periodText}消耗 ≥ ${quota} Token 时 → ${action}`;
+}
+
+/** 编辑器草稿（数字输入框以字符串中转，输入中途允许为空） */
+interface LimiterDraft {
+  type: 'balance' | 'token';
+  action: 'skip' | 'disable';
+  thresholdInput: string;
+  /** Token 阈值的输入单位（万 / 个），落库统一换算成个数 */
+  tokenUnit: 'wan' | 'unit';
+  reset: 'fixed' | 'daily';
+  periodInput: string;
+  periodUnit: 'minutes' | 'hours';
+}
+
+function limiterDraftOf(rule: LimiterRule | null): LimiterDraft {
+  if (!rule) {
+    return { type: 'balance', action: 'skip', thresholdInput: '', tokenUnit: 'wan', reset: 'fixed', periodInput: '1', periodUnit: 'hours' };
+  }
+  const unit: LimiterDraft['tokenUnit'] = rule.type === 'token' && rule.threshold % 10000 === 0 && rule.threshold > 0 ? 'wan' : 'unit';
+  const thresholdInput = rule.type === 'token' && unit === 'wan'
+    ? String(rule.threshold / 10000)
+    : String(rule.threshold);
+  let periodInput = '1';
+  let periodUnit: LimiterDraft['periodUnit'] = 'hours';
+  if (rule.type === 'token' && rule.reset !== 'daily' && rule.period) {
+    if (rule.period % 3600 === 0) {
+      periodInput = String(rule.period / 3600);
+      periodUnit = 'hours';
+    } else {
+      periodInput = String(Math.round(rule.period / 60));
+      periodUnit = 'minutes';
+    }
+  }
+  return { type: rule.type, action: rule.action, thresholdInput, tokenUnit: unit, reset: rule.reset === 'daily' ? 'daily' : 'fixed', periodInput, periodUnit };
+}
+
+/** 草稿 → 规则（校验不过返回错误文案；与参考实现同一套规则） */
+function limiterRuleOfDraft(draft: LimiterDraft): { error: string } | { rule: LimiterRule } {
+  const thresholdRaw = Number(draft.thresholdInput);
+  if (!Number.isFinite(thresholdRaw) || thresholdRaw <= 0) {
+    return { error: '限制阈值必须是大于 0 的数字' };
+  }
+  if (draft.type === 'balance') {
+    return { rule: { type: 'balance', action: draft.action, threshold: thresholdRaw, enabled: true } };
+  }
+  const threshold = Math.round(draft.tokenUnit === 'wan' ? thresholdRaw * 10000 : thresholdRaw);
+  if (draft.reset === 'daily') {
+    return { rule: { type: 'token', action: draft.action, threshold, reset: 'daily', enabled: true } };
+  }
+  const period = Math.round(Number(draft.periodInput) * (draft.periodUnit === 'hours' ? 3600 : 60));
+  if (!Number.isFinite(period) || period <= 0) {
+    return { error: '请填写重置周期' };
+  }
+  if (period < TOKEN_PERIOD_MIN_SECS || period > TOKEN_PERIOD_MAX_SECS) {
+    return { error: '重置周期必须是 30 分钟 ~ 24 小时' };
+  }
+  return { rule: { type: 'token', action: draft.action, threshold, period, reset: 'fixed', enabled: true } };
+}
+
+/* ══ 列定义（对齐 Agent2API accounts-columns：列宽拖动 + 列显隐 + 横滚底线） ══ */
+
+type AsCol = 'pick' | 'name' | 'channel' | 'provider' | 'status' | 'priority' | 'conn' | 'usage' | 'rate' | 'cooldown' | 'act';
+
+/** 全部列：默认宽（px）；flex 列没有用户覆盖时不写宽度，吃表格剩余宽度 */
+const AS_COLS: Array<{ key: AsCol; label: string; w: number; lock?: boolean; flex?: boolean }> = [
+  { key: 'pick', label: '选择', w: 44, lock: true },
+  { key: 'name', label: '账号', w: 210, lock: true, flex: true },
+  { key: 'channel', label: '渠道', w: 104 },
+  { key: 'provider', label: 'Provider', w: 126 },
+  { key: 'status', label: '状态', w: 92, lock: true },
+  { key: 'priority', label: '优先级', w: 88 },
+  { key: 'conn', label: '连接数', w: 60 },
+  { key: 'usage', label: '余额', w: 132 },
+  { key: 'rate', label: '成功率', w: 64 },
+  { key: 'cooldown', label: '冷却', w: 128 },
+  { key: 'act', label: '操作', w: 150, lock: true },
+];
+
+/** 弹性列的下限：容器窄于「定宽列合计 + 它」时交给横向滚动，而不是继续压列 */
+const AS_FLEX_MIN = 220;
+/** 拖动的下限：再窄里面的控件就点不准了 */
+const AS_MIN_COLW = 48;
+
+const LS_COLCFG = 'aigx-as-colcfg'; // 隐藏列
+const LS_COLW = 'aigx-as-colw'; // 列宽覆盖
+const LS_GROUPED = 'aigx-as-grouped';
+const LS_NAMEMASK = 'aigx-as-namemask';
+const LS_AUTOBAL = 'aigx-as-autobal'; // 自动余额轮询间隔（分钟）
+
+/**
+ * 页面内 API helper：连接数快照（GET /api/account-sessions/connections）。
+ * 该端点由后端任务补齐，未上线 / 网络异常时**静默返回 null**，页面降级用列表
+ * 自带的 in_flight 字段展示，绝不崩溃。
+ */
+async function fetchConnectionCounts(): Promise<Record<string, number> | null> {
+  try {
+    const token = localStorage.getItem('token');
+    const res = await fetch('/api/account-sessions/connections', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { data?: { counts?: Record<string, unknown> } } | null;
+    const counts = json?.data?.counts;
+    if (!counts || typeof counts !== 'object') return null;
+    const out: Record<string, number> = {};
+    for (const [id, n] of Object.entries(counts)) {
+      const num = Number(n);
+      if (Number.isFinite(num) && num >= 0) out[id] = Math.floor(num);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** 账号设置弹窗的五个分组（对齐 Agent2API acct-dlg 左栏导航） */
+const DLG_SEGS = [
+  { key: 'basic', label: '基本信息', icon: 'user' },
+  { key: 'credential', label: '凭证', icon: 'key' },
+  { key: 'proxy', label: '代理', icon: 'globe' },
+  { key: 'limiter', label: '限制器', icon: 'sliders' },
+  { key: 'advanced', label: '高级', icon: 'wrench' },
+] as const;
+
+type DlgSeg = (typeof DLG_SEGS)[number]['key'];
+
+/** 五分组导航图标（key 与 DLG_SEGS 的 icon 字段一一对应） */
+const DLG_ICONS: Record<(typeof DLG_SEGS)[number]['icon'], ReactNode> = {
+  user: <User size={15} />,
+  key: <KeyRound size={15} />,
+  globe: <Globe size={15} />,
+  sliders: <SlidersHorizontal size={15} />,
+  wrench: <Wrench size={15} />,
+};
+
 export default function AccountSessions(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
@@ -146,10 +371,7 @@ export default function AccountSessions(): JSX.Element {
   const [form, setForm] = useState<SessionFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
 
-  // 供应商选择：Agent（内置）/ 预置 API / 自定义（仅新增时展示，编辑保留原下拉）
-  const [pickSegment, setPickSegment] = useState<ProviderSegment>('agent');
-  const [providerSearch, setProviderSearch] = useState('');
-  /** 从浏览器抓包粘贴的原始请求头（解析后填充凭证与额外请求头） */
+  // 从浏览器抓包粘贴的原始请求头（解析后填充凭证与额外请求头）
   const [rawHeaders, setRawHeaders] = useState('');
 
   // 账号路由（轮换策略）：冷却窗口与单请求最大换号次数
@@ -170,9 +392,10 @@ export default function AccountSessions(): JSX.Element {
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const [batchRunning, setBatchRunning] = useState(false);
   // 余额查询（后端 :id/balance 支持 12 家）与手动刷新凭证（:id/refresh）
+  // ok 分支同时带主额度桶视图（.as-usage-pool 两行形态的数据）
   type BalanceView =
     | { state: 'loading' }
-    | { state: 'ok'; text: string; low?: boolean }
+    | { state: 'ok'; pool: UsagePoolView | null; text: string }
     | { state: 'err'; text: string };
   const [balances, setBalances] = useState<Record<string, BalanceView>>({});
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
@@ -188,6 +411,29 @@ export default function AccountSessions(): JSX.Element {
   const [, setCooldownTick] = useState(0);
   /** 自动余额查询只做一次（load 内触发，见 load） */
   const autoBalanceDone = useRef(false);
+
+  // ── 列显隐 / 列宽 / 分组 / 姓名脱敏 / 自动余额周期轮询（对齐 Agent2API 账号表）──
+  const [hiddenCols, setHiddenCols] = useState<ReadonlySet<AsCol>>(() => new Set(readLS<AsCol[]>(LS_COLCFG, [])));
+  const [colWidths, setColWidths] = useState<Record<string, number>>(() => readLS(LS_COLW, {}));
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
+  const [grouped, setGrouped] = useState<boolean>(() => readLS(LS_GROUPED, false));
+  const [nameMasked, setNameMasked] = useState<boolean>(() => readLS(LS_NAMEMASK, false));
+  const [autoBalanceMins, setAutoBalanceMins] = useState<number>(() => readLS(LS_AUTOBAL, 0));
+  /** 连接数轮询读数（端点未上线时为空表，展示层用 in_flight 兜底） */
+  const [connCounts, setConnCounts] = useState<Record<string, number>>({});
+
+  // ── 账号设置弹窗五分组导航（基本信息/凭证/代理/限制器/高级）──
+  const [dlgSeg, setDlgSeg] = useState<DlgSeg>('basic');
+  /** 限制器规则草稿（保存随表单主体之后单独 PATCH，失败不拖累主保存） */
+  const [limiters, setLimiters] = useState<LimiterRule[]>([]);
+  const limitersBaseline = useRef<string>('[]');
+  const [limiterEditor, setLimiterEditor] = useState<{ index: number; draft: LimiterDraft } | null>(null);
+  const [limiterError, setLimiterError] = useState('');
+
+  // ── 按模型清限流（操作列重置按钮：多模型冷却时先弹菜单选模型）──
+  const [clearMenuFor, setClearMenuFor] = useState<string | null>(null);
+  const clearMenuRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -226,17 +472,41 @@ export default function AccountSessions(): JSX.Element {
     return () => window.clearInterval(timer);
   }, [hasActiveCooldown]);
 
+  // ── 连接数轮询（对齐 Agent2API getAccountConnections 2 秒轮询）──
+  // 端点未上线（404）或网络异常时静默降级：拉长到 15 秒再试，展示层用 in_flight 兜底。
+  useEffect(() => {
+    let alive = true;
+    let timer = 0;
+    const tick = async (): Promise<void> => {
+      const counts = await fetchConnectionCounts();
+      if (!alive) return;
+      if (counts) {
+        setConnCounts(counts);
+        timer = window.setTimeout(() => void tick(), 2000);
+      } else {
+        timer = window.setTimeout(() => void tick(), 15000);
+      }
+    };
+    void tick();
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, []);
+
   const openCreate = (): void => {
     setEditing(null);
     setForm({
       ...EMPTY_FORM,
       channel_id: channelFilter || accountChannels[0]?.id || '',
     });
-    setPickSegment('agent');
-    setProviderSearch('');
+
     setRawHeaders('');
     setShowModal(true);
   };
+
+  /** 编辑弹窗里的账号可能带限制器规则（后端 Task 9 落地前字段缺省 = 空规则） */
+  type SessionWithLimiters = AccountSessionItem & { limiters?: LimiterRule[] };
 
   const openEdit = (session: AccountSessionItem): void => {
     setEditing(session);
@@ -263,6 +533,13 @@ export default function AccountSessions(): JSX.Element {
       clear_key: false,
       clear_proxy: false,
     });
+    // 限制器草稿：读账号自带规则（没有 = 空），基线序列化用于保存时判断是否变更
+    const rules = (session as SessionWithLimiters).limiters ?? [];
+    setLimiters(rules.map((rule) => ({ ...rule })));
+    limitersBaseline.current = JSON.stringify(rules);
+    setDlgSeg('basic');
+    setLimiterEditor(null);
+    setLimiterError('');
     setRawHeaders('');
     setShowModal(true);
   };
@@ -271,6 +548,7 @@ export default function AccountSessions(): JSX.Element {
     setShowModal(false);
     setEditing(null);
     setSaving(false);
+    setLimiterEditor(null);
   };
 
   const openBulk = (): void => {
@@ -445,6 +723,19 @@ export default function AccountSessions(): JSX.Element {
           payload.api_key = form.api_key.trim();
         }
         await api.updateAccountSession(editing.id, payload);
+        // 限制器随主保存之后单独 PATCH：端点未上线（Task 9 前后端未对齐）时
+        // 只提示本段失败，不拖累账号主体的保存
+        if (JSON.stringify(limiters) !== limitersBaseline.current) {
+          try {
+            await api.patchAccountSession(editing.id, { limiters });
+            limitersBaseline.current = JSON.stringify(limiters);
+          } catch (limiterErr) {
+            addToast(
+              `${t('账号限制器保存失败（后端端点可能未上线）')}：${limiterErr instanceof Error ? limiterErr.message : String(limiterErr)}`,
+              'error',
+            );
+          }
+        }
         addToast(t('账号已保存'));
       } else {
         payload.api_key = form.api_key.trim();
@@ -707,6 +998,54 @@ export default function AccountSessions(): JSX.Element {
     }
   };
 
+  /** 操作列「重置冷却」：只有单模型冷却时直接清；多模型时先弹菜单按模型挑
+   *  （对齐 Agent2API 行内 clearRateLimits 可按模型的形态） */
+  const onResetCooldownClick = (session: AccountSessionItem): void => {
+    const active = activeCooldowns(session);
+    if (active.length > 1) {
+      setClearMenuFor(clearMenuFor === session.id ? null : session.id);
+    } else {
+      setClearMenuFor(null);
+      void handleResetCooldowns(session);
+    }
+  };
+
+  // ── 账号限制器编辑器（对齐 Agent2API accounts-dialog-limiter：列表 + 二级弹层）──
+
+  /** 二级弹层的草稿更新（字段改动只落在草稿里，「保存规则」才上抛） */
+  const updateLimiterDraft = (next: Partial<LimiterDraft>): void => {
+    setLimiterError('');
+    setLimiterEditor((prev) => (prev ? { ...prev, draft: { ...prev.draft, ...next } } : prev));
+  };
+
+  const openLimiterEditor = (index: number): void => {
+    setLimiterError('');
+    setLimiterEditor({ index, draft: limiterDraftOf(index >= 0 ? limiters[index] : null) });
+  };
+
+  const saveLimiterEditor = (): void => {
+    if (!limiterEditor) return;
+    const result = limiterRuleOfDraft(limiterEditor.draft);
+    if ('error' in result) {
+      setLimiterError(result.error);
+      return;
+    }
+    const next = [...limiters];
+    if (limiterEditor.index >= 0) next[limiterEditor.index] = result.rule;
+    else next.push(result.rule);
+    setLimiters(next);
+    setLimiterEditor(null);
+    setLimiterError('');
+  };
+
+  const removeLimiter = (index: number): void => {
+    setLimiters(limiters.filter((_, i) => i !== index));
+  };
+
+  const toggleLimiter = (index: number, enabled: boolean): void => {
+    setLimiters(limiters.map((rule, i) => (i === index ? { ...rule, enabled } : rule)));
+  };
+
   // 运行态 → 本地化文案（与渠道管理的启用/禁用口径一致）
   const statusLabel = (status?: string): string => {
     if (status === 'enabled') return t('启用');
@@ -755,6 +1094,108 @@ export default function AccountSessions(): JSX.Element {
     if (statusSeg === 'cooling') return s.status === 'enabled' && isCooling(s);
     return true;
   });
+
+  // ── 列显隐 / 列宽拖动（对齐 Agent2API accounts-columns + 模型管理同款交互）──
+
+  /** 当前可见列（隐藏的已从 DOM 摘掉，colSpan / colgroup / minWidth 都按它算） */
+  const visibleCols = useMemo<AsCol[]>(() => AS_COLS.filter((c) => !hiddenCols.has(c.key)).map((c) => c.key), [hiddenCols]);
+
+  /** 列宽（colgroup 用）：弹性列没有用户覆盖时不写宽度，吃表格剩余宽度 */
+  const widthOf = (key: AsCol): number | undefined => {
+    const override = colWidths[key];
+    if (override) return override;
+    const def = AS_COLS.find((c) => c.key === key);
+    return def?.flex ? undefined : def?.w;
+  };
+
+  /** 表格横滚底线：∑可见列宽（弹性列按下限），窄容器宁可横滚不压列 */
+  const tableMinWidth = useMemo(
+    () => visibleCols.reduce((sum, key) => {
+      const override = colWidths[key];
+      if (override) return sum + override;
+      const def = AS_COLS.find((c) => c.key === key);
+      return sum + (def?.flex ? AS_FLEX_MIN : def?.w ?? AS_MIN_COLW);
+    }, 0),
+    [visibleCols, colWidths],
+  );
+
+  /** 显隐开关：锁定列不可关（表不能没有勾选框/账号名/状态/操作列） */
+  const toggleCol = (key: AsCol): void => {
+    if (AS_COLS.find((c) => c.key === key)?.lock) return;
+    setHiddenCols((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      writeLS(LS_COLCFG, [...next]);
+      return next;
+    });
+  };
+
+  /** 恢复默认：显隐与列宽一并还原 */
+  const resetColConfig = (): void => {
+    setHiddenCols(new Set());
+    setColWidths({});
+    writeLS(LS_COLCFG, []);
+    writeLS(LS_COLW, {});
+  };
+
+  /** 列宽拖动：拖表头右缘把手改宽，双击把手还原默认 */
+  const startColDrag = (key: AsCol, e: React.MouseEvent): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    const th = (e.target as HTMLElement).closest('th');
+    const startW = th?.getBoundingClientRect().width ?? 100;
+    const startX = e.clientX;
+    document.body.classList.add('as-col-resizing');
+    const move = (ev: MouseEvent): void => {
+      const w = Math.max(AS_MIN_COLW, Math.round(startW + ev.clientX - startX));
+      setColWidths((prev) => ({ ...prev, [key]: w }));
+    };
+    const up = (): void => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      document.body.classList.remove('as-col-resizing');
+      setColWidths((prev) => {
+        writeLS(LS_COLW, prev);
+        return prev;
+      });
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+
+  const resetColWidth = (key: AsCol): void => {
+    setColWidths((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      writeLS(LS_COLW, next);
+      return next;
+    });
+  };
+
+  // 列设置浮层点外关闭
+  useEffect(() => {
+    if (!colPanelOpen) return undefined;
+    const onDown = (e: MouseEvent): void => {
+      if (colPanelRef.current && !colPanelRef.current.contains(e.target as Node)) {
+        setColPanelOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', onDown);
+    return () => window.removeEventListener('mousedown', onDown);
+  }, [colPanelOpen]);
+
+  // 按模型清限流菜单点外关闭
+  useEffect(() => {
+    if (!clearMenuFor) return undefined;
+    const onDown = (e: MouseEvent): void => {
+      if (clearMenuRef.current && !clearMenuRef.current.contains(e.target as Node)) {
+        setClearMenuFor(null);
+      }
+    };
+    window.addEventListener('mousedown', onDown);
+    return () => window.removeEventListener('mousedown', onDown);
+  }, [clearMenuFor]);
 
   /** 勾选（列表重载后清掉已不存在的 id，避免幽灵选择） */
   const togglePick = (id: string): void => {
@@ -812,11 +1253,9 @@ export default function AccountSessions(): JSX.Element {
     try {
       const res = await api.getAccountSessionBalance(session.id);
       const d = res.data;
-      const text = d && d.available != null
-        ? `${d.available} ${d.unit || ''}`.trim()
-        : t('读数不可用');
-      const low = d?.available != null && d.available <= 0;
-      setBalances((prev) => ({ ...prev, [session.id]: { state: 'ok', text, low } }));
+      const pool = usagePoolOf(d);
+      const text = pool?.text ?? t('读数不可用');
+      setBalances((prev) => ({ ...prev, [session.id]: { state: 'ok', pool, text } }));
     } catch (err) {
       setBalances((prev) => ({
         ...prev,
@@ -847,6 +1286,20 @@ export default function AccountSessions(): JSX.Element {
     autoBalanceDone.current = true;
     void queryAllBalances(sessions);
   }, [loading, sessions, queryAllBalances]);
+
+  // 自动余额周期轮询（对齐 Agent2API 的可配置间隔；用户在工具条选间隔，
+  // 关闭时只保留首次那一次，避免无人值守时持续打上游）。
+  const sessionsRef = useRef<AccountSessionItem[]>(sessions);
+  sessionsRef.current = sessions;
+  useEffect(() => {
+    if (!autoBalanceMins) return undefined;
+    const intervalMs = Math.max(30, autoBalanceMins * 60) * 1000;
+    const timer = window.setInterval(() => {
+      const list = sessionsRef.current;
+      if (list.length) void queryAllBalances(list);
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [autoBalanceMins, queryAllBalances]);
 
   /** 手动刷新凭证（仅持有续期令牌的账号可用；force=true 无条件刷新） */
   const handleRefreshCredential = async (session: AccountSessionItem): Promise<void> => {
@@ -974,42 +1427,6 @@ export default function AccountSessions(): JSX.Element {
   const providerLabel = (kind: string): string =>
     providers.find((p) => p.kind === kind)?.label ?? kind;
 
-  const providerSearchNeedle = providerSearch.trim().toLowerCase();
-
-  // 判重口径：只统计登录态家地址（API Key 型不在 Agent 段展示，预置段
-  // 的 OpenAI/HuggingFace 等卡不该被后端目录判重滤掉——对齐 Agent2API）
-  const builtinUrls = new Set(
-    providers
-      .filter((p) => p.auth != null)
-      .map((p) => normalizeUrl(p.default_base_url || ''))
-      .filter((url) => url.length > 0),
-  );
-
-  // Agent 段只放登录态家（对齐 Agent2API：内置 = 有 OAuth/设备登录流的家；
-  // API Key 型全家走「预置 API」段）。openai_compatible 是「自定义地址」的
-  // 落点，天然不在此段。
-  const agentCards = providers
-    .filter((p) => p.auth != null && p.kind !== 'openai_compatible' && !isCardHidden(p.kind))
-    .filter(
-      (p) =>
-        !providerSearchNeedle ||
-        p.label.toLowerCase().includes(providerSearchNeedle) ||
-        p.kind.toLowerCase().includes(providerSearchNeedle) ||
-        (p.default_base_url || '').toLowerCase().includes(providerSearchNeedle),
-    );
-
-  const presetCards = PRESET_PROVIDERS.filter(
-    (p) => !builtinUrls.has(normalizeUrl(p.base_url)),
-  ).filter(
-    (p) =>
-      !providerSearchNeedle ||
-      p.name.toLowerCase().includes(providerSearchNeedle) ||
-      p.base_url.toLowerCase().includes(providerSearchNeedle),
-  );
-
-  const pickProvider = (kind: string, baseUrl: string): void => {
-    setForm((prev) => ({ ...prev, provider: kind, base_url: baseUrl }));
-  };
 
   // 卡内「账号版本」（如 WorkBuddy 国内版/国际版）：form.provider 始终存真实
   // provider id，这里由它反推母卡与选中档位（对齐 Agent2API WorkBuddyBlock）
@@ -1020,10 +1437,7 @@ export default function AccountSessions(): JSX.Element {
     : (hostEditions[0]?.id || '');
 
   const selectedProviderLabel = providerLabel(form.provider);
-  const effectiveEndpoint =
-    form.base_url.trim()
-    || providers.find((p) => p.kind === form.provider)?.default_base_url
-    || '';
+
 
   // 登录态型供应商（Cookie / JWT）：凭证输入标签与提示按鉴权方式变化
   const selectedProvider = providers.find((p) => p.kind === form.provider);
@@ -1033,6 +1447,346 @@ export default function AccountSessions(): JSX.Element {
   const credentialHint = editing
     ? t('留空保持原凭证；勾选下方可清除')
     : selectedProvider?.credential_hint || undefined;
+
+  // ── 分组模式（对齐 Agent2API accountGroups）：按 provider 聚组 ──
+  // 组序 = 首次出现先后（列表本身已按调度优先序排列，组内保持同序）。
+  const groupedList = useMemo<Array<{ provider: string; rows: AccountSessionItem[] }>>(() => {
+    if (!grouped) return [];
+    const groups: Array<{ provider: string; rows: AccountSessionItem[] }> = [];
+    const indexOf = new Map<string, number>();
+    for (const s of visible) {
+      const key = s.provider || 'unknown';
+      let gi = indexOf.get(key);
+      if (gi == null) {
+        gi = groups.length;
+        indexOf.set(key, gi);
+        groups.push({ provider: key, rows: [] });
+      }
+      groups[gi].rows.push(s);
+    }
+    return groups;
+  }, [grouped, visible]);
+
+  // ── 表格单元格渲染（列配置驱动：列显隐 / 列宽 / 分组模式共用一套）──
+  const renderCell = (col: AsCol, s: AccountSessionItem, orderIdx: number): ReactNode => {
+    switch (col) {
+      case 'pick':
+        return (
+          <td key={col} className="pick-col">
+            <input
+              type="checkbox"
+              aria-label={t('选择账号')}
+              checked={picked.has(s.id)}
+              onChange={() => togglePick(s.id)}
+            />
+          </td>
+        );
+      case 'name':
+        return (
+          <td key={col} className="as-c-name">
+            <div className="as-name">{nameMasked ? maskName(s.name) : s.name}</div>
+            <div className="form-hint">{s.api_key || '—'}</div>
+            {s.proxy && <div className="form-hint">{s.proxy}</div>}
+            {s.last_error && (
+              <div className="form-hint" title={s.last_error}>
+                {shortError(s.last_error)}
+              </div>
+            )}
+          </td>
+        );
+      case 'channel':
+        return <td key={col} className="as-c-channel">{s.channel_name || s.channel_id}</td>;
+      case 'provider':
+        return (
+          <td key={col} className="as-c-provider">
+            <div className="provider-cell">
+              {providerIcon(s.provider) && (
+                <img
+                  className="provider-card-logo"
+                  src={providerIcon(s.provider) as string}
+                  alt=""
+                />
+              )}
+              <span>{s.provider}</span>
+            </div>
+            {s.base_url && <div className="form-hint">{s.base_url}</div>}
+          </td>
+        );
+      case 'status':
+        return (
+          <td key={col} className="as-c-status">
+            {/* 行内启停 Switch（对齐 Agent2API StatusCell：直接 PATCH 状态，无需进操作列） */}
+            <div className="as-status-line">
+              <Switch
+                className="as-status-switch"
+                checked={s.status === 'enabled'}
+                disabled={s.status === 'expired'}
+                ariaLabel={t('启用/停用')}
+                title={
+                  s.status === 'expired'
+                    ? t('凭证已过期，请先更新凭证或到期时间')
+                    : s.status === 'enabled'
+                      ? t('停用')
+                      : t('启用')
+                }
+                onChange={() => void handleToggleStatus(s)}
+              />
+              <span className={`badge ${statusClass(s.status)}`}>
+                {statusLabel(s.status)}
+              </span>
+            </div>
+          </td>
+        );
+      case 'priority':
+        return (
+          <td key={col} className="as-c-priority">
+            {orderIdx >= 0 ? (
+              // 分组模式：格内改显组内序号（对齐 Agent2API OrderCell 的 #N）
+              <span
+                className="as-order"
+                title={t('组内顺序 · 优先级 {{p}} / 权重 {{w}}', { p: s.priority ?? 0, w: s.weight ?? 1 })}
+              >
+                #{orderIdx + 1}
+              </span>
+            ) : (
+              <span>{s.priority ?? 0} / w{s.weight ?? 1}</span>
+            )}
+          </td>
+        );
+      case 'conn':
+        return (
+          <td
+            key={col}
+            className="as-c-conn"
+            title={t('此刻正在使用该账号的请求数（2 秒轮询）')}
+          >
+            {(() => {
+              const cur = connCounts[s.id] ?? s.in_flight ?? 0;
+              if (!cur && !s.max_concurrency) return <span className="form-hint">—</span>;
+              return (
+                <span className="as-conn-cell">
+                  <span className={`as-conn${cur > 0 ? '' : ' as-conn-zero'}`}>{cur}</span>
+                  {s.max_concurrency ? <span className="form-hint">/{s.max_concurrency}</span> : null}
+                </span>
+              );
+            })()}
+          </td>
+        );
+      case 'usage': {
+        // 余额列（主额度桶两行形态：套餐名 + 进度条 + 读数，对齐 Agent2API .usage-pool）
+        const bal = balances[s.id];
+        if (bal?.state === 'loading') {
+          return <td key={col} className="as-c-usage"><span className="form-hint">{t('查询中…')}</span></td>;
+        }
+        if (bal?.state === 'err') {
+          return <td key={col} className="as-c-usage"><span className="form-hint" title={bal.text}>{t('余额不可用')}</span></td>;
+        }
+        const pool = bal?.state === 'ok' ? bal.pool : usagePoolOf(s.last_balance);
+        const ago = !bal && s.last_balance_at ? formatAgo(s.last_balance_at) : '';
+        return (
+          <td key={col} className="as-c-usage">
+            {pool ? (
+              <div className="as-usage-pool">
+                {pool.plan && (
+                  <span className="as-usage-pool-name" title={pool.plan}>{pool.plan}</span>
+                )}
+                <div className="as-usage-pool-line">
+                  {pool.ratio != null && (
+                    <span className="as-usage-pool-bar" aria-hidden="true">
+                      <span style={{ width: `${Math.round(pool.ratio * 100)}%` }} />
+                    </span>
+                  )}
+                  <span className={`as-usage-pool-view${pool.low ? ' warn' : ' ok'}`}>
+                    {pool.text}
+                    {ago ? `（${ago}）` : ''}
+                  </span>
+                </div>
+                {pool.low && <div className="balance-low">{t('不足，请充值或停用')}</div>}
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="balance-link"
+                onClick={() => void handleBalance(s)}
+              >
+                <Wallet size={12} /> {t('查询余额')}
+              </button>
+            )}
+            {!bal && s.last_balance_error && (
+              <div className="form-hint" title={s.last_balance_error}>{t('自动查询失败')}</div>
+            )}
+          </td>
+        );
+      }
+      case 'rate':
+        return <td key={col} className="as-c-rate">{successRate(s)}</td>;
+      case 'cooldown':
+        return (
+          <td key={col} className="as-c-cooldown">
+            {(() => {
+              const active = activeCooldowns(s);
+              if (active.length === 0) {
+                return (
+                  <span className="as-ok">
+                    <span className="as-ok-dot" aria-hidden="true" />
+                    {t('正常')}
+                  </span>
+                );
+              }
+              const whole = active.some(([model]) => model === '*');
+              const open = cooldownOpenId === s.id;
+              return (
+                <button
+                  type="button"
+                  className={`as-limits-badge${open ? ' is-open' : ''}`}
+                  title={t('点击展开完整冷却明细')}
+                  onClick={() => setCooldownOpenId(open ? null : s.id)}
+                >
+                  <span className="as-limits-main">
+                    {whole
+                      ? t('整号冷却')
+                      : t('{{n}} 个模型', { n: active.length })}
+                    <span className="as-limits-caret">{open ? '▴' : '▾'}</span>
+                  </span>
+                  <span className="as-limits-sub">
+                    {t('最早 {{time}} 恢复', { time: fmtDuration(active[0][1]) })}
+                  </span>
+                </button>
+              );
+            })()}
+          </td>
+        );
+      case 'act':
+        return (
+          <td key={col} className="as-c-act">
+            <div className="actions-cell as-actions">
+              <button
+                type="button"
+                className="as-act"
+                onClick={() => handleTest(s)}
+                disabled={testingId === s.id}
+                title={testingId === s.id ? t('测试中…') : t('沿真实链路发一条最小对话验证可用性')}
+              >
+                <FlaskConical size={13} />
+              </button>
+              <button
+                type="button"
+                className="as-act"
+                onClick={() => void handleSyncCatalog(s)}
+                disabled={syncingId === s.id}
+                title={t('从上游拉取模型清单并写入本账号')}
+              >
+                {syncingId === s.id ? <Loader2 size={13} className="spin" /> : <Download size={13} />}
+              </button>
+              <button
+                type="button"
+                className="as-act"
+                onClick={() => openEdit(s)}
+                title={t('编辑')}
+              >
+                <Pencil size={13} />
+              </button>
+              {/* 重置冷却：单模型直接清；多模型先弹菜单按模型挑（对齐 Agent2API 可按模型清除） */}
+              <div
+                className="as-act-wrap"
+                ref={clearMenuFor === s.id ? clearMenuRef : undefined}
+              >
+                <button
+                  type="button"
+                  className="as-act"
+                  onClick={() => onResetCooldownClick(s)}
+                  disabled={Object.keys(s.cooldowns || {}).length === 0}
+                  title={t('重置冷却（多模型冷却时可按模型清除）')}
+                >
+                  <RotateCcw size={13} />
+                </button>
+                {clearMenuFor === s.id && (
+                  <div className="as-clear-menu">
+                    <button
+                      type="button"
+                      className="as-clear-menu-item"
+                      onClick={() => {
+                        setClearMenuFor(null);
+                        void handleResetCooldowns(s);
+                      }}
+                    >
+                      {t('全部清除')}
+                    </button>
+                    {activeCooldowns(s).map(([model, rem]) => (
+                      <button
+                        key={model}
+                        type="button"
+                        className="as-clear-menu-item"
+                        onClick={() => {
+                          setClearMenuFor(null);
+                          void handleClearOneCooldown(s, model);
+                        }}
+                      >
+                        <code>{model === '*' ? t('全部模型') : model}</code>
+                        <span className="form-hint">{fmtDuration(rem)}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {/* 手动刷新凭证：仅持有续期令牌的账号可用（qoder/autoclaw/trae/codearts 等） */}
+              <button
+                type="button"
+                className="as-act"
+                onClick={() => void handleRefreshCredential(s)}
+                disabled={!s.has_refresh_token || refreshingId === s.id}
+                title={
+                  s.has_refresh_token
+                    ? t('刷新凭证（用续期令牌换新 access token）')
+                    : t('该账号没有续期令牌，无法在线刷新')
+                }
+              >
+                {refreshingId === s.id ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}
+              </button>
+              <button
+                type="button"
+                className="as-act danger"
+                onClick={() => handleDelete(s)}
+                title={t('删除')}
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          </td>
+        );
+      default:
+        return null;
+    }
+  };
+
+  /** 行渲染：分组模式下禁用整行拖拽（组间顺序由分组带表达，组内拖拽语义另做） */
+  const renderRow = (s: AccountSessionItem, orderIdx: number): JSX.Element => (
+    <tr
+      key={s.id}
+      className={dragOverId === s.id && dragId !== s.id ? 'drag-over' : ''}
+      draggable={!grouped}
+      onDragStart={(e) => {
+        setDragId(s.id);
+        e.dataTransfer.effectAllowed = 'move';
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        if (dragOverId !== s.id) setDragOverId(s.id);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        void handleDropRow(s.id);
+      }}
+      onDragEnd={() => {
+        setDragId(null);
+        setDragOverId(null);
+      }}
+      title={grouped ? undefined : t('拖拽行可调整调度顺序')}
+    >
+      {visibleCols.map((col) => renderCell(col, s, orderIdx))}
+    </tr>
+  );
 
   if (loading) return <SkeletonTable columns={7} rows={5} />;
 
@@ -1071,6 +1825,48 @@ export default function AccountSessions(): JSX.Element {
         title={`${t('账号池')} (${visible.length})`}
         actions={
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <div className="as-colset" ref={colPanelRef}>
+              <button
+                type="button"
+                className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                onClick={() => setColPanelOpen((v) => !v)}
+                title={t('列设置（显隐 / 列宽拖动）')}
+                aria-label={t('列设置')}
+              >
+                <Columns3 size={14} />
+              </button>
+              {colPanelOpen && (
+                <div className="as-colset-panel">
+                  <div className="as-colset-head">
+                    <span>{t('列')}</span>
+                    <span>{t('显示')}</span>
+                  </div>
+                  <div className="as-colset-rows">
+                    {AS_COLS.map((col) => (
+                      <label key={col.key} className="as-colset-row">
+                        <span className="as-colset-name">{t(col.label)}</span>
+                        {col.lock ? (
+                          <span className="as-colset-fixed">{t('固定')}</span>
+                        ) : (
+                          <input
+                            type="checkbox"
+                            checked={!hiddenCols.has(col.key)}
+                            onChange={() => toggleCol(col.key)}
+                            aria-label={t(col.label)}
+                          />
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                  <div className="as-colset-foot">
+                    <span className="as-colset-tip">{t('拖动表头右缘调列宽，双击把手还原')}</span>
+                    <button type="button" className="as-colset-reset" onClick={resetColConfig}>
+                      {t('恢复默认')}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
             <Button variant="outline" onClick={() => void queryAllBalances(visible)}>
               <Wallet size={14} /> {t('查询全部余额')}
             </Button>
@@ -1130,6 +1926,36 @@ export default function AccountSessions(): JSX.Element {
             onChange={(e) => setSearch(e.target.value)}
             aria-label={t('搜索')}
           />
+          {/* 分组模式（对齐 Agent2API accountGroups：按家分组带 + 组内序号替代优先级数字） */}
+          <label className="as-toggle" title={t('按提供商分组显示；组内序号即调度顺序')}>
+            <input
+              type="checkbox"
+              checked={grouped}
+              onChange={(e) => {
+                setGrouped(e.target.checked);
+                writeLS(LS_GROUPED, e.target.checked);
+              }}
+            />
+            <span>{t('分组')}</span>
+          </label>
+          {/* 自动余额周期轮询（间隔可配置；关闭时仅保留首次加载那一次查询） */}
+          <Select
+            aria-label={t('自动余额查询间隔')}
+            value={String(autoBalanceMins)}
+            className="as-autobal-select"
+            onChange={(e) => {
+              const v = Number(e.target.value) || 0;
+              setAutoBalanceMins(v);
+              writeLS(LS_AUTOBAL, v);
+            }}
+          >
+            <option value="0">{t('余额自动：关')}</option>
+            <option value="30">{t('每 30 分钟')}</option>
+            <option value="60">{t('每小时')}</option>
+            <option value="360">{t('每 6 小时')}</option>
+            <option value="720">{t('每 12 小时')}</option>
+            <option value="1440">{t('每天')}</option>
+          </Select>
           {/* 状态分段（对齐 Agent2API 账号页）：启用口径=enabled 且不在冷却中 */}
           <div className="seg-filter" role="group" aria-label={t('按状态过滤')}>
             {(
@@ -1195,261 +2021,78 @@ export default function AccountSessions(): JSX.Element {
             action={<Button onClick={openCreate}>{t('添加账号')}</Button>}
           />
         ) : (
-          <div className="table-wrapper">
-            <table>
+          <div className="table-wrapper as-scroll">
+            <table className="as-table" style={{ tableLayout: 'fixed', minWidth: tableMinWidth }}>
+              {/* 列宽由 colgroup 驱动（拖动表头右缘把手改这里）；弹性列不写宽度吃剩余 */}
+              <colgroup>
+                {visibleCols.map((col) => (
+                  <col key={col} style={widthOf(col) != null ? { width: widthOf(col) } : undefined} />
+                ))}
+              </colgroup>
               <thead>
                 <tr>
-                  <th className="pick-col">
-                    <input
-                      type="checkbox"
-                      aria-label={t('全选')}
-                      checked={visible.length > 0 && picked.size === visible.length}
-                      onChange={togglePickAll}
-                    />
-                  </th>
-                  <th>{t('名称')}</th>
-                  <th>{t('渠道')}</th>
-                  <th>{t('Provider')}</th>
-                  <th>{t('状态')}</th>
-                  <th>{t('优先级')}</th>
-                  <th>{t('并发')}</th>
-                  <th>{t('成功率')}</th>
-                  <th>{t('冷却')}</th>
-                  <th>{t('操作')}</th>
+                  {visibleCols.map((col) => (
+                    <th key={col} className={`as-h-${col}`}>
+                      {col === 'pick' ? (
+                        <input
+                          type="checkbox"
+                          aria-label={t('全选')}
+                          checked={visible.length > 0 && picked.size === visible.length}
+                          onChange={togglePickAll}
+                        />
+                      ) : col === 'name' ? (
+                        <>
+                          <span>{t('账号')}</span>
+                          {/* 姓名脱敏（对齐 Agent2API .name-eye：开启后整列打码） */}
+                          <button
+                            type="button"
+                            className={`as-name-eye${nameMasked ? ' on' : ''}`}
+                            title={t('隐藏账号名（脱敏显示）')}
+                            aria-label={t('姓名脱敏')}
+                            onClick={() => {
+                              const next = !nameMasked;
+                              setNameMasked(next);
+                              writeLS(LS_NAMEMASK, next);
+                            }}
+                          >
+                            {nameMasked ? <EyeOff size={12} /> : <Eye size={12} />}
+                          </button>
+                        </>
+                      ) : (
+                        t(AS_COLS.find((c) => c.key === col)?.label || col)
+                      )}
+                      {col !== 'act' && (
+                        <span
+                          className="as-col-grip"
+                          title={t('拖动调整列宽 · 双击还原')}
+                          onMouseDown={(e) => startColDrag(col, e)}
+                          onDoubleClick={() => resetColWidth(col)}
+                        />
+                      )}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
-                {visible.map((session) => {
-                  const bal = balances[session.id];
-                  return (
-                  <tr
-                    key={session.id}
-                    className={dragOverId === session.id && dragId !== session.id ? 'drag-over' : ''}
-                    draggable
-                    onDragStart={(e) => {
-                      setDragId(session.id);
-                      e.dataTransfer.effectAllowed = 'move';
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      e.dataTransfer.dropEffect = 'move';
-                      if (dragOverId !== session.id) setDragOverId(session.id);
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      void handleDropRow(session.id);
-                    }}
-                    onDragEnd={() => {
-                      setDragId(null);
-                      setDragOverId(null);
-                    }}
-                    title={t('拖拽行可调整调度顺序')}
-                  >
-                    <td className="pick-col">
-                      <input
-                        type="checkbox"
-                        aria-label={t('选择账号')}
-                        checked={picked.has(session.id)}
-                        onChange={() => togglePick(session.id)}
-                      />
-                    </td>
-                    <td>
-                      <div>{session.name}</div>
-                      <div className="form-hint">{session.api_key || '—'}</div>
-                      {session.proxy && <div className="form-hint">{session.proxy}</div>}
-                      {session.last_error && (
-                        <div className="form-hint" title={session.last_error}>
-                          {shortError(session.last_error)}
-                        </div>
-                      )}
-                      {/* 余额查询：点击才打上游，避免列表加载时全量请求；结果内联。
-                          未点击时若后台自动查询留了快照，直接展示它（省一次上游请求）。 */}
-                      <div className="form-hint">
-                        {!bal && session.last_balance && (
-                          <div className="balance-snapshot">
-                            {t('余额')}{' '}
-                            {session.last_balance.available != null
-                              ? `${session.last_balance.available} ${session.last_balance.unit || ''}`.trim()
-                              : t('读数不可用')}
-                            {session.last_balance_at
-                              ? `（${formatAgo(session.last_balance_at)}）`
-                              : ''}
-                          </div>
-                        )}
-                        {!bal && session.last_balance_error && (
-                          <div title={session.last_balance_error}>{t('自动查询失败')}</div>
-                        )}
-                        {!bal && (
-                          <button
-                            type="button"
-                            className="balance-link"
-                            onClick={() => void handleBalance(session)}
-                          >
-                            <Wallet size={12} /> {t('查询余额')}
-                          </button>
-                        )}
-                        {bal?.state === 'loading' && <span>{t('查询中…')}</span>}
-                        {bal?.state === 'ok' && (
-                          <span className={bal.low ? 'balance-low' : ''}>
-                            {t('余额')} {bal.text}
-                            {bal.low ? `（${t('不足，请充值或停用')}）` : ''}
-                          </span>
-                        )}
-                        {bal?.state === 'err' && (
-                          <span title={bal.text}>{t('余额不可用')}</span>
-                        )}
-                      </div>
-                    </td>
-                    <td>{session.channel_name || session.channel_id}</td>
-                    <td>
-                      <div className="provider-cell">
-                        {providerIcon(session.provider) && (
-                          <img
-                            className="provider-card-logo"
-                            src={providerIcon(session.provider) as string}
-                            alt=""
-                          />
-                        )}
-                        <span>{session.provider}</span>
-                      </div>
-                      {session.base_url && <div className="form-hint">{session.base_url}</div>}
-                    </td>
-                    <td>
-                      {/* 行内启停 Switch（对齐 Agent2API StatusCell：直接 PATCH 状态，无需进操作列） */}
-                      <div className="as-status-line">
-                        <Switch
-                          className="as-status-switch"
-                          checked={session.status === 'enabled'}
-                          disabled={session.status === 'expired'}
-                          ariaLabel={t('启用/停用')}
-                          title={
-                            session.status === 'expired'
-                              ? t('凭证已过期，请先更新凭证或到期时间')
-                              : session.status === 'enabled'
-                                ? t('停用')
-                                : t('启用')
-                          }
-                          onChange={() => void handleToggleStatus(session)}
-                        />
-                        <span className={`badge ${statusClass(session.status)}`}>
-                          {statusLabel(session.status)}
-                        </span>
-                      </div>
-                      {(session.in_flight ?? 0) > 0 && (
-                        <div className="form-hint">
-                          {t('进行中')} {session.in_flight}
-                        </div>
-                      )}
-                    </td>
-                    <td>
-                      {session.priority ?? 0} / w{session.weight ?? 1}
-                    </td>
-                    <td>
-                      {session.max_concurrency
-                        ? `${session.in_flight ?? 0}/${session.max_concurrency}`
-                        : t('不限')}
-                    </td>
-                    <td>{successRate(session)}</td>
-                    <td>
-                      {(() => {
-                        const active = activeCooldowns(session);
-                        if (active.length === 0) {
-                          return (
-                            <span className="as-ok">
-                              <span className="as-ok-dot" aria-hidden="true" />
-                              {t('正常')}
-                            </span>
-                          );
-                        }
-                        const whole = active.some(([model]) => model === '*');
-                        const open = cooldownOpenId === session.id;
-                        return (
-                          <button
-                            type="button"
-                            className={`as-limits-badge${open ? ' is-open' : ''}`}
-                            title={t('点击展开完整冷却明细')}
-                            onClick={() => setCooldownOpenId(open ? null : session.id)}
-                          >
-                            <span className="as-limits-main">
-                              {whole
-                                ? t('整号冷却')
-                                : t('{{n}} 个模型', { n: active.length })}
-                              <span className="as-limits-caret">{open ? '▴' : '▾'}</span>
-                            </span>
-                            <span className="as-limits-sub">
-                              {t('最早 {{time}} 恢复', { time: fmtDuration(active[0][1]) })}
-                            </span>
-                          </button>
-                        );
-                      })()}
-                    </td>
-                    <td>
-                      <div className="actions-cell as-actions">
-                        <button
-                          type="button"
-                          className="as-act"
-                          onClick={() => handleTest(session)}
-                          disabled={testingId === session.id}
-                          title={testingId === session.id ? t('测试中…') : t('沿真实链路发一条最小对话验证可用性')}
-                        >
-                          <FlaskConical size={13} />
-                        </button>
-                        <button
-                          type="button"
-                          className="as-act"
-                          onClick={() => void handleSyncCatalog(session)}
-                          disabled={syncingId === session.id}
-                          title={t('从上游拉取模型清单并写入本账号')}
-                        >
-                          {syncingId === session.id ? <Loader2 size={13} className="spin" /> : <Download size={13} />}
-                        </button>
-                        <button
-                          type="button"
-                          className="as-act"
-                          onClick={() => openEdit(session)}
-                          title={t('编辑')}
-                        >
-                          <Pencil size={13} />
-                        </button>
-                        {/* 启停已上移至状态列 Switch（对齐 Agent2API StatusCell），操作列不再重复 */}
-                        <button
-                          type="button"
-                          className="as-act"
-                          onClick={() => handleResetCooldowns(session)}
-                          disabled={Object.keys(session.cooldowns || {}).length === 0}
-                          title={t('重置冷却')}
-                        >
-                          <RotateCcw size={13} />
-                        </button>
-                        {/* 手动刷新凭证：仅持有续期令牌的账号可用
-                            （qoder/autoclaw/trae/codearts/officeace 等） */}
-                        <button
-                          type="button"
-                          className="as-act"
-                          onClick={() => void handleRefreshCredential(session)}
-                          disabled={!session.has_refresh_token || refreshingId === session.id}
-                          title={
-                            session.has_refresh_token
-                              ? t('刷新凭证（用续期令牌换新 access token）')
-                              : t('该账号没有续期令牌，无法在线刷新')
-                          }
-                        >
-                          {refreshingId === session.id ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}
-                        </button>
-                        <button
-                          type="button"
-                          className="as-act danger"
-                          onClick={() => handleDelete(session)}
-                          title={t('删除')}
-                        >
-                          <Trash2 size={13} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                  );
-                })}
+                {groupedList
+                  ? groupedList.map((g) => (
+                      <Fragment key={g.provider}>
+                        {/* 分组带（对齐 Agent2API grp-band：家图标 + 家名 + 计数） */}
+                        <tr className="as-tr-group">
+                          <td colSpan={visibleCols.length}>
+                            {providerIcon(g.provider) ? (
+                              <img className="provider-card-logo" src={providerIcon(g.provider) as string} alt="" />
+                            ) : null}
+                            <span className="as-group-label">{providerLabel(g.provider)}</span>
+                            <span className="as-group-count">{g.rows.length}</span>
+                          </td>
+                        </tr>
+                        {g.rows.map((row, idx) => renderRow(row, idx))}
+                      </Fragment>
+                    ))
+                  : visible.map((row) => renderRow(row, -1))}
               </tbody>
+              {/* 冷却明细展开行（对齐 Agent2API row-panel：通栏面板 + 标签流） */}
               {cooldownOpenId && (() => {
                 const open = sessions.find((s) => s.id === cooldownOpenId);
                 if (!open) return null;
@@ -1457,9 +2100,9 @@ export default function AccountSessions(): JSX.Element {
                 return (
                   <tbody className="as-panel-tbody">
                     <tr className="as-panel-row">
-                      <td colSpan={10}>
+                      <td colSpan={visibleCols.length}>
                         <div className="as-panel-head">
-                          <strong>{open.name}</strong>
+                          <strong>{nameMasked ? maskName(open.name) : open.name}</strong>
                           <span className="form-hint">
                             {t('冷却来自上游 429/限额失败，到期自动解除；手动清除后若仍限流会再次标记')}
                           </span>
@@ -1516,352 +2159,307 @@ export default function AccountSessions(): JSX.Element {
 
       {showModal && editing && (
         <div className="modal-overlay">
-          <form className="modal" onSubmit={handleSave}>
+          <form className="modal as-dlg" onSubmit={handleSave}>
             <div className="modal-header">
-              <h3>{editing ? t('编辑账号') : t('添加账号')}</h3>
+              <h3>
+                {t('账号设置')}
+                {editing.name ? <span className="as-dlg-sub">{editing.name}</span> : null}
+              </h3>
               <button type="button" className="modal-close" onClick={closeModal}>
                 &times;
               </button>
             </div>
-            <div className="modal-body">
-              {editing ? (
-                <Select
-                  label={t('Provider')}
-                  value={form.provider}
-                  onChange={(e) => setForm({ ...form, provider: e.target.value })}
-                >
-                  {providers.filter((p) => !isCardHidden(p.kind)).map((p) => (
-                    <option key={p.kind} value={p.kind}>
-                      {p.label}
-                    </option>
-                  ))}
-                </Select>
-              ) : (
-                <div className="provider-picker">
-                  <div className="provider-picker-head">
-                    <span className="provider-picker-label">{t('选择供应商')}</span>
-                    <span className="provider-picker-selected" title={effectiveEndpoint}>
-                      {selectedProvider && providerIcon(selectedProvider.kind) ? (
-                        <img
-                          className="provider-card-logo"
-                          src={providerIcon(selectedProvider.kind) as string}
-                          alt=""
-                        />
-                      ) : null}
-                      {t('已选')}：{selectedProviderLabel}
-                      {effectiveEndpoint ? ` · ${effectiveEndpoint}` : ''}
-                    </span>
-                  </div>
-                  <Tabs<ProviderSegment>
-                    items={[
-                      { key: 'agent', label: t('Agent（内置）') },
-                      { key: 'preset', label: t('预置 API') },
-                      { key: 'custom', label: t('自定义') },
-                    ]}
-                    active={pickSegment}
-                    onChange={(key) => {
-                      setPickSegment(key);
-                      setProviderSearch('');
-                    }}
-                    ariaLabel={t('供应商类型')}
-                    className="provider-picker-tabs"
-                  />
-                  {pickSegment !== 'custom' && (
-                    <Input
-                      placeholder={t('搜索供应商')}
-                      value={providerSearch}
-                      onChange={(e) => setProviderSearch(e.target.value)}
-                    />
-                  )}
-                  <div className="provider-grid" role="listbox" aria-label={t('供应商列表')}>
-                    {pickSegment === 'agent' &&
-                      agentCards.map((p) => {
-                        const active =
-                          cardKindOf(form.provider) === p.kind &&
-                          normalizeUrl(form.base_url) === normalizeUrl(p.default_base_url);
-                        return (
-                          <button
-                            type="button"
-                            key={p.kind}
-                            role="option"
-                            aria-selected={active}
-                            className={`provider-card${active ? ' active' : ''}`}
-                            onClick={() => pickProvider(p.kind, '')}
-                          >
-                            <span className="provider-card-title">
-                              {providerIcon(p.kind) ? (
-                                <img
-                                  className="provider-card-logo"
-                                  src={providerIcon(p.kind) as string}
-                                  alt=""
-                                  loading="lazy"
-                                />
-                              ) : null}
-                              {p.label}
-                              {p.auth ? (
-                                <span className="provider-card-badge">{t('登录态')}</span>
-                              ) : null}
-                              {p.native_supported ? (
-                                <span className="provider-card-badge">{t('专用适配')}</span>
-                              ) : p.openai_compatible === false ? (
-                                <span className="provider-card-badge provider-card-badge-warn">
-                                  {t('需私有协议')}
-                                </span>
-                              ) : null}
-                            </span>
-                            <span className="provider-card-meta">
-                              {p.default_base_url || t('需自填地址')}
-                              {p.chat_path ? ` · ${p.chat_path}` : ''}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    {pickSegment === 'preset' &&
-                      presetCards.map((p) => {
-                        const kind = presetKind(p.protocol);
-                        const active =
-                          form.provider === kind &&
-                          normalizeUrl(form.base_url) === normalizeUrl(p.base_url);
-                        return (
-                          <button
-                            type="button"
-                            key={p.key}
-                            role="option"
-                            aria-selected={active}
-                            className={`provider-card${active ? ' active' : ''}`}
-                            onClick={() => pickProvider(kind, p.base_url)}
-                          >
-                            <span className="provider-card-title">
-                              {presetIcon(p.key) ? (
-                                <img
-                                  className="provider-card-logo"
-                                  src={presetIcon(p.key) as string}
-                                  alt=""
-                                  loading="lazy"
-                                />
-                              ) : null}
-                              {p.name}
-                            </span>
-                            <span className="provider-card-meta">{p.base_url}</span>
-                          </button>
-                        );
-                      })}
-                    {pickSegment === 'custom' &&
-                      CUSTOM_PROTOCOLS.map((p) => {
-                        const active = form.provider === p.kind;
-                        return (
-                          <button
-                            type="button"
-                            key={p.kind}
-                            role="option"
-                            aria-selected={active}
-                            className={`provider-card${active ? ' active' : ''}`}
-                            onClick={() => pickProvider(p.kind, '')}
-                          >
-                            <span className="provider-card-title">{t(p.labelKey)}</span>
-                            <span className="provider-card-meta">{t(p.hintKey)}</span>
-                          </button>
-                        );
-                      })}
-                    {pickSegment !== 'custom' &&
-                      ((pickSegment === 'agent' && !agentCards.length) ||
-                        (pickSegment === 'preset' && !presetCards.length)) && (
-                        <div className="provider-grid-empty">{t('没有匹配的供应商')}</div>
-                      )}
-                  </div>
-                </div>
-              )}
-              {hostEditions.length ? (
-                <div className="form-group">
-                  <label>{t('账号版本')}</label>
-                  <Tabs<string>
-                    items={hostEditions.map((item) => ({ key: item.id, label: item.label }))}
-                    active={selectedEditionId}
-                    onChange={(id) => setForm({ ...form, provider: id })}
-                    ariaLabel={t('账号版本')}
-                  />
-                  <div className="form-hint">
-                    {t('国内版与国际版是两套独立账号，凭证不通用。')}
-                  </div>
-                </div>
-              ) : null}
-              {editing || accountChannels.length > 0 ? (
-                <Select
-                  label={t('渠道')}
-                  value={form.channel_id}
-                  onChange={(e) => setForm({ ...form, channel_id: e.target.value })}
-                  disabled={Boolean(editing)}
-                >
-                  {accountChannels.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </Select>
-              ) : (
-                <div className="form-hint" style={{ marginBottom: 8 }}>
-                  {t('还没有账号型渠道：保存时会按所选供应商自动创建一个')}
-                </div>
-              )}
-              <Input
-                label={t('账号名（可选）')}
-                placeholder="account-1"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-              />
-              {selectedProvider?.openai_compatible === false &&
-              !selectedProvider?.native_supported ? (
-                <div className="form-hint form-hint-warn">
-                  {t('该供应商上游需要私有协议/签名（请求体与响应都要转换），标准 OpenAI 转发会失败；请填写自建转换网关地址，或等待专用适配。')}
-                </div>
-              ) : null}
-              <Input
-                label={t('上游地址（可选，留空用 provider 默认）')}
-                placeholder={selectedProvider?.default_base_url || 'https://api.deepseek.com'}
-                value={form.base_url}
-                onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-              />
-              {selectedProvider?.kind === 'trae' ? (
-                <div className="form-hint">
-                  {t('Trae 还要 X-Uid / X-Machine-Id / X-Device-Id：从抓包复制后填在下方「额外请求头」。')}
-                </div>
-              ) : null}
-              {selectedProvider?.native_supported ? null : (
-                <Input
-                  label={t('对话路径（可选，默认 /chat/completions）')}
-                  placeholder={selectedProvider?.chat_path || '/api/chat'}
-                  hint={t('登录态型供应商的私有接口路径；留空按 provider 默认或标准 OpenAI 路径拼接。')}
-                  value={form.chat_path}
-                  onChange={(e) => setForm({ ...form, chat_path: e.target.value })}
-                />
-              )}
-              <div className="form-group">
-                <label>{t('从抓包请求头导入（可选）')}</label>
-                <textarea
-                  className="form-input"
-                  rows={3}
-                  placeholder={
-                    'Cookie: sessionid=...\nAuthorization: Bearer eyJ...\nx-token: ...'
-                  }
-                  value={rawHeaders}
-                  onChange={(e) => setRawHeaders(e.target.value)}
-                />
-                <div style={{ marginTop: 6 }}>
+            <div className="as-dlg-body">
+              <nav className="as-dlg-rail" aria-label={t('设置分组')}>
+                {DLG_SEGS.map((seg) => (
                   <button
+                    key={seg.key}
                     type="button"
-                    className="btn btn-outline btn-sm"
-                    onClick={applyRawHeaders}
-                    disabled={!rawHeaders.trim()}
+                    className={`as-dlg-nav${dlgSeg === seg.key ? ' active' : ''}`}
+                    onClick={() => setDlgSeg(seg.key)}
                   >
-                    {t('解析并填充凭证与请求头')}
+                    {DLG_ICONS[seg.icon]}
+                    <span>{t(seg.label)}</span>
                   </button>
-                </div>
-                <div className="form-hint">
-                  {t('从浏览器开发者工具「请求头」整段复制：Cookie / Bearer 自动填入凭证，其余进入额外请求头。')}
-                </div>
+                ))}
+              </nav>
+              <div className="as-dlg-main">
+                {/* ── 基本信息：供应商 / 版本 / 渠道 / 名称 ── */}
+                {dlgSeg === 'basic' && (
+                  <>
+                    <Select
+                      label={t('Provider')}
+                      value={form.provider}
+                      onChange={(e) => setForm({ ...form, provider: e.target.value })}
+                    >
+                      {providers.filter((p) => !isCardHidden(p.kind)).map((p) => (
+                        <option key={p.kind} value={p.kind}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </Select>
+                    {hostEditions.length ? (
+                      <div className="form-group">
+                        <label>{t('账号版本')}</label>
+                        <Tabs<string>
+                          items={hostEditions.map((item) => ({ key: item.id, label: item.label }))}
+                          active={selectedEditionId}
+                          onChange={(id) => setForm({ ...form, provider: id })}
+                          ariaLabel={t('账号版本')}
+                        />
+                        <div className="form-hint">
+                          {t('国内版与国际版是两套独立账号，凭证不通用。')}
+                        </div>
+                      </div>
+                    ) : null}
+                    {editing || accountChannels.length > 0 ? (
+                      <Select
+                        label={t('渠道')}
+                        value={form.channel_id}
+                        onChange={(e) => setForm({ ...form, channel_id: e.target.value })}
+                        disabled={Boolean(editing)}
+                      >
+                        {accountChannels.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </Select>
+                    ) : (
+                      <div className="form-hint" style={{ marginBottom: 8 }}>
+                        {t('还没有账号型渠道：保存时会按所选供应商自动创建一个')}
+                      </div>
+                    )}
+                    <Input
+                      label={t('账号名（可选）')}
+                      placeholder="account-1"
+                      value={form.name}
+                      onChange={(e) => setForm({ ...form, name: e.target.value })}
+                    />
+                  </>
+                )}
+                {/* ── 凭证：对话路径 / 抓包导入 / 凭证 / 额外请求头 ── */}
+                {dlgSeg === 'credential' && (
+                  <>
+                    {selectedProvider?.kind === 'trae' ? (
+                      <div className="form-hint">
+                        {t('Trae 还要 X-Uid / X-Machine-Id / X-Device-Id：从抓包复制后填在下方「额外请求头」。')}
+                      </div>
+                    ) : null}
+                    {selectedProvider?.native_supported ? null : (
+                      <Input
+                        label={t('对话路径（可选，默认 /chat/completions）')}
+                        placeholder={selectedProvider?.chat_path || '/api/chat'}
+                        hint={t('登录态型供应商的私有接口路径；留空按 provider 默认或标准 OpenAI 路径拼接。')}
+                        value={form.chat_path}
+                        onChange={(e) => setForm({ ...form, chat_path: e.target.value })}
+                      />
+                    )}
+                    <div className="form-group">
+                      <label>{t('从抓包请求头导入（可选）')}</label>
+                      <textarea
+                        className="form-input"
+                        rows={3}
+                        placeholder={
+                          'Cookie: sessionid=...\nAuthorization: Bearer eyJ...\nx-token: ...'
+                        }
+                        value={rawHeaders}
+                        onChange={(e) => setRawHeaders(e.target.value)}
+                      />
+                      <div style={{ marginTop: 6 }}>
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-sm"
+                          onClick={applyRawHeaders}
+                          disabled={!rawHeaders.trim()}
+                        >
+                          {t('解析并填充凭证与请求头')}
+                        </button>
+                      </div>
+                      <div className="form-hint">
+                        {t('从浏览器开发者工具「请求头」整段复制：Cookie / Bearer 自动填入凭证，其余进入额外请求头。')}
+                      </div>
+                    </div>
+                    <Input
+                      label={credentialLabel}
+                      type="password"
+                      placeholder={
+                        editing
+                          ? t('留空表示不修改')
+                          : sessionAuth === 'cookie'
+                            ? 'sessionid=...; token=...'
+                            : 'sk-...'
+                      }
+                      hint={credentialHint}
+                      value={form.api_key}
+                      onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+                    />
+                    {editing && (
+                      <label className="as-check">
+                        <input
+                          type="checkbox"
+                          checked={form.clear_key}
+                          onChange={(e) => setForm({ ...form, clear_key: e.target.checked })}
+                        />
+                        <span>{t('清除现有凭证')}</span>
+                      </label>
+                    )}
+                    <div className="form-group">
+                      <label>{t('额外请求头（每行 Key: Value）')}</label>
+                      <textarea
+                        className="form-input"
+                        rows={3}
+                        placeholder={'origin: https://example.com\nx-token: {credential}'}
+                        value={form.extra_headers}
+                        onChange={(e) => setForm({ ...form, extra_headers: e.target.value })}
+                      />
+                      <div className="form-hint">
+                        {selectedProvider?.native_supported
+                          ? t('内置适配已带该供应商的默认请求头；只有 Trae 这类需要设备身份的上游才要在这里补。')
+                          : t('登录态型供应商按抓包补齐专用请求头；值里的 {credential} 会替换为凭证。')}
+                      </div>
+                    </div>
+                  </>
+                )}
+                {/* ── 代理与连接：私有协议提示 / 上游地址 / 代理 ── */}
+                {dlgSeg === 'proxy' && (
+                  <>
+                    {selectedProvider?.openai_compatible === false &&
+                    !selectedProvider?.native_supported ? (
+                      <div className="form-hint form-hint-warn">
+                        {t('该供应商上游需要私有协议/签名（请求体与响应都要转换），标准 OpenAI 转发会失败；请填写自建转换网关地址，或等待专用适配。')}
+                      </div>
+                    ) : null}
+                    <Input
+                      label={t('上游地址（可选，留空用 provider 默认）')}
+                      placeholder={selectedProvider?.default_base_url || 'https://api.deepseek.com'}
+                      value={form.base_url}
+                      onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                    />
+                    <ProxySelector
+                      value={form.proxy || editing?.proxy || ''}
+                      onChange={(next) => setForm({ ...form, proxy: next, clear_proxy: false })}
+                      placeholder={editing?.proxy || 'socks5://127.0.0.1:1080'}
+                    />
+                  </>
+                )}
+                {/* ── 限制器：规则列表 + 二级弹层编辑入口 ── */}
+                {dlgSeg === 'limiter' && (
+                  <div className="as-limiter-rules">
+                    {limiters.length === 0 ? (
+                      <div className="as-limiter-empty">
+                        {t('暂无限流规则。命中规则时自动跳过该账号或直接停用，避免无效重试。')}
+                      </div>
+                    ) : (
+                      limiters.map((rule, i) => (
+                        <div key={`${i}-${rule.type}`} className="as-limiter-rule">
+                          <Switch
+                            checked={rule.enabled !== false}
+                            onChange={(v) => toggleLimiter(i, v)}
+                            ariaLabel={t('启用规则')}
+                            title={t('启用规则')}
+                          />
+                          <span className="as-limiter-text">{describeLimiterRule(rule)}</span>
+                          <span className="as-limiter-ops">
+                            <button
+                              type="button"
+                              className="as-act"
+                              onClick={() => openLimiterEditor(i)}
+                              title={t('编辑')}
+                            >
+                              <Pencil size={13} />
+                            </button>
+                            <button
+                              type="button"
+                              className="as-act as-act-danger"
+                              onClick={() => removeLimiter(i)}
+                              title={t('删除')}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </span>
+                        </div>
+                      ))
+                    )}
+                    <div>
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        onClick={() => openLimiterEditor(-1)}
+                      >
+                        <Plus size={14} /> {t('新增限制器')}
+                      </button>
+                      <div className="form-hint">
+                        {t('规则保存后写入账号的 limiters 字段；调度器按规则在选号阶段跳过或停用账号。')}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {/* ── 高级：调度参数 / 白名单 / 余额查询 / 到期 / 状态 ── */}
+                {dlgSeg === 'advanced' && (
+                  <>
+                    <div className="as-dlg-grid2">
+                      <Input
+                        label={t('优先级')}
+                        type="number"
+                        value={form.priority}
+                        onChange={(e) => setForm({ ...form, priority: e.target.value })}
+                      />
+                      <Input
+                        label={t('权重')}
+                        type="number"
+                        min="1"
+                        value={form.weight}
+                        onChange={(e) => setForm({ ...form, weight: e.target.value })}
+                      />
+                    </div>
+                    <Input
+                      label={t('并发上限')}
+                      type="number"
+                      min="0"
+                      hint={t('(0 = 不限)')}
+                      value={form.max_concurrency}
+                      onChange={(e) => setForm({ ...form, max_concurrency: e.target.value })}
+                    />
+                    <Input
+                      label={t('模型白名单（可选，逗号分隔）')}
+                      placeholder="deepseek-chat, deepseek-reasoner"
+                      value={form.models}
+                      onChange={(e) => setForm({ ...form, models: e.target.value })}
+                    />
+                    <Select
+                      label={t('余额自动查询')}
+                      hint={t('按间隔自动拉取上游余额并展示上次读数；仅支持余额查询的供应商生效')}
+                      value={form.usage_query_interval_secs}
+                      onChange={(e) => setForm({ ...form, usage_query_interval_secs: e.target.value })}
+                    >
+                      <option value="0">{t('关闭')}</option>
+                      <option value="3600">{t('每小时')}</option>
+                      <option value="21600">{t('每 6 小时')}</option>
+                      <option value="43200">{t('每 12 小时')}</option>
+                      <option value="86400">{t('每天')}</option>
+                    </Select>
+                    <Input
+                      label={t('凭证到期时间（可选）')}
+                      type="number"
+                      hint={t('(留空则永不过期)')}
+                      value={form.expires_at}
+                      onChange={(e) => setForm({ ...form, expires_at: e.target.value })}
+                    />
+                    <Select
+                      label={t('状态')}
+                      value={form.status}
+                      onChange={(e) => setForm({ ...form, status: e.target.value })}
+                    >
+                      <option value="enabled">{t('启用')}</option>
+                      <option value="disabled">{t('停用')}</option>
+                    </Select>
+                  </>
+                )}
               </div>
-              <Input
-                label={credentialLabel}
-                type="password"
-                placeholder={
-                  editing
-                    ? t('留空表示不修改')
-                    : sessionAuth === 'cookie'
-                      ? 'sessionid=...; token=...'
-                      : 'sk-...'
-                }
-                hint={credentialHint}
-                value={form.api_key}
-                onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-              />
-              {editing && (
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <input
-                    type="checkbox"
-                    checked={form.clear_key}
-                    onChange={(e) => setForm({ ...form, clear_key: e.target.checked })}
-                  />
-                  <span>{t('清除现有凭证')}</span>
-                </label>
-              )}
-              <div className="form-group">
-                <label>{t('额外请求头（每行 Key: Value）')}</label>
-                <textarea
-                  className="form-input"
-                  rows={3}
-                  placeholder={'origin: https://example.com\nx-token: {credential}'}
-                  value={form.extra_headers}
-                  onChange={(e) => setForm({ ...form, extra_headers: e.target.value })}
-                />
-                <div className="form-hint">
-                  {selectedProvider?.native_supported
-                    ? t('内置适配已带该供应商的默认请求头；只有 Trae 这类需要设备身份的上游才要在这里补。')
-                    : t('登录态型供应商按抓包补齐专用请求头；值里的 {credential} 会替换为凭证。')}
-                </div>
-              </div>
-              <ProxySelector
-                value={form.proxy || editing?.proxy || ''}
-                onChange={(next) => setForm({ ...form, proxy: next, clear_proxy: false })}
-                placeholder={editing?.proxy || 'socks5://127.0.0.1:1080'}
-              />
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <Input
-                  label={t('优先级')}
-                  type="number"
-                  value={form.priority}
-                  onChange={(e) => setForm({ ...form, priority: e.target.value })}
-                />
-                <Input
-                  label={t('权重')}
-                  type="number"
-                  min="1"
-                  value={form.weight}
-                  onChange={(e) => setForm({ ...form, weight: e.target.value })}
-                />
-              </div>
-              <Input
-                label={t('并发上限')}
-                type="number"
-                min="0"
-                hint={t('(0 = 不限)')}
-                value={form.max_concurrency}
-                onChange={(e) => setForm({ ...form, max_concurrency: e.target.value })}
-              />
-              <Input
-                label={t('模型白名单（可选，逗号分隔）')}
-                placeholder="deepseek-chat, deepseek-reasoner"
-                value={form.models}
-                onChange={(e) => setForm({ ...form, models: e.target.value })}
-              />
-              <Select
-                label={t('余额自动查询')}
-                hint={t('按间隔自动拉取上游余额并展示上次读数；仅支持余额查询的供应商生效')}
-                value={form.usage_query_interval_secs}
-                onChange={(e) => setForm({ ...form, usage_query_interval_secs: e.target.value })}
-              >
-                <option value="0">{t('关闭')}</option>
-                <option value="3600">{t('每小时')}</option>
-                <option value="21600">{t('每 6 小时')}</option>
-                <option value="43200">{t('每 12 小时')}</option>
-                <option value="86400">{t('每天')}</option>
-              </Select>
-              <Input
-                label={t('凭证到期时间（可选）')}
-                type="number"
-                hint={t('(留空则永不过期)')}
-                value={form.expires_at}
-                onChange={(e) => setForm({ ...form, expires_at: e.target.value })}
-              />
-              <Select
-                label={t('状态')}
-                value={form.status}
-                onChange={(e) => setForm({ ...form, status: e.target.value })}
-              >
-                <option value="enabled">{t('启用')}</option>
-                <option value="disabled">{t('停用')}</option>
-              </Select>
             </div>
             <div className="modal-footer">
+              {limiterError ? <span className="as-dlg-err">{limiterError}</span> : null}
               <Button variant="secondary" onClick={closeModal}>
                 {t('取消')}
               </Button>
@@ -1870,6 +2468,136 @@ export default function AccountSessions(): JSX.Element {
               </Button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* 限制器二级弹层：叠在账号设置弹窗之上（对齐 Agent2API 第二层编辑体验） */}
+      {limiterEditor && (
+        <div className="modal-overlay as-lim-overlay">
+          <div className="modal as-lim-modal" role="dialog" aria-modal="true">
+            <div className="modal-header">
+              <h3>{limiterEditor.index >= 0 ? t('编辑限制器') : t('新增限制器')}</h3>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setLimiterEditor(null)}
+              >
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              <div className="as-lim-row">
+                <span className="as-lim-label">{t('类型')}</span>
+                <div className="as-lim-seg">
+                  <button
+                    type="button"
+                    className={limiterEditor.draft.type === 'balance' ? 'active' : ''}
+                    onClick={() => updateLimiterDraft({ type: 'balance' })}
+                  >
+                    {t('余额')}
+                  </button>
+                  <button
+                    type="button"
+                    className={limiterEditor.draft.type === 'token' ? 'active' : ''}
+                    onClick={() => updateLimiterDraft({ type: 'token' })}
+                  >
+                    {t('Token 消耗')}
+                  </button>
+                </div>
+              </div>
+              <div className="as-lim-row">
+                <span className="as-lim-label">{t('命中后')}</span>
+                <div className="as-lim-cond">
+                  <Select
+                    value={limiterEditor.draft.action}
+                    onChange={(e) =>
+                      updateLimiterDraft({ action: e.target.value as LimiterDraft['action'] })
+                    }
+                  >
+                    <option value="skip">{t('跳过本次（自动恢复）')}</option>
+                    <option value="disable">{t('停用账号（需手动启用）')}</option>
+                  </Select>
+                </div>
+              </div>
+              <div className="as-lim-row">
+                <span className="as-lim-label">{t('阈值')}</span>
+                <div className="as-lim-cond">
+                  <Input
+                    type="number"
+                    min="0"
+                    value={limiterEditor.draft.thresholdInput}
+                    onChange={(e) => updateLimiterDraft({ thresholdInput: e.target.value })}
+                  />
+                  {limiterEditor.draft.type === 'token' ? (
+                    <Select
+                      className="as-lim-unit"
+                      value={limiterEditor.draft.tokenUnit}
+                      onChange={(e) =>
+                        updateLimiterDraft({
+                          tokenUnit: e.target.value as LimiterDraft['tokenUnit'],
+                        })
+                      }
+                    >
+                      <option value="unit">{t('个')}</option>
+                      <option value="wan">{t('万')}</option>
+                    </Select>
+                  ) : (
+                    <span className="as-lim-suffix">{t('余额低于该值时触发')}</span>
+                  )}
+                </div>
+              </div>
+              {limiterEditor.draft.type === 'token' ? (
+                <div className="as-lim-row">
+                  <span className="as-lim-label">{t('周期')}</span>
+                  <div className="as-lim-cond">
+                    <Select
+                      value={limiterEditor.draft.reset}
+                      onChange={(e) =>
+                        updateLimiterDraft({ reset: e.target.value as LimiterDraft['reset'] })
+                      }
+                    >
+                      <option value="fixed">{t('固定周期')}</option>
+                      <option value="daily">{t('每日重置（零点）')}</option>
+                    </Select>
+                    {limiterEditor.draft.reset === 'fixed' ? (
+                      <div className="as-lim-period">
+                        <Input
+                          type="number"
+                          min="0"
+                          value={limiterEditor.draft.periodInput}
+                          onChange={(e) => updateLimiterDraft({ periodInput: e.target.value })}
+                        />
+                        <Select
+                          value={limiterEditor.draft.periodUnit}
+                          onChange={(e) =>
+                            updateLimiterDraft({
+                              periodUnit: e.target.value as LimiterDraft['periodUnit'],
+                            })
+                          }
+                        >
+                          <option value="minutes">{t('分钟')}</option>
+                          <option value="hours">{t('小时')}</option>
+                        </Select>
+                        <span className="as-lim-suffix">{t('30 分钟 ~ 24 小时')}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : (
+                <div className="as-lim-row">
+                  <span className="as-lim-label">{t('周期')}</span>
+                  <span className="as-lim-suffix">{t('余额型无需周期，始终生效')}</span>
+                </div>
+              )}
+              {limiterError ? <div className="as-lim-error">{limiterError}</div> : null}
+            </div>
+            <div className="modal-footer">
+              <Button variant="secondary" onClick={() => setLimiterEditor(null)}>
+                {t('取消')}
+              </Button>
+              <Button onClick={saveLimiterEditor}>{t('确定')}</Button>
+            </div>
+          </div>
         </div>
       )}
 

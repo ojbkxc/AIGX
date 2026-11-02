@@ -164,6 +164,15 @@ pub struct UserModelAccum {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub cost: i64,
+    /// 缓存分项：使个人缓存节省估算（report_scope 的 cache_savings 用户支）
+    /// 与主档同算法（按模型查价 × cache_input − 实收）。旧行无这些字段读 0，
+    /// rebuild 补齐。
+    #[serde(default)]
+    pub cache_hits: u64,
+    #[serde(default)]
+    pub cache_input: u64,
+    #[serde(default)]
+    pub cache_billed: i64,
 }
 
 /// 用户行的轻量渠道维（个人 Top 渠道榜；name 键、容忍并入 other）。
@@ -307,6 +316,9 @@ impl Named for UserModelAccum {
         self.tokens_in = self.tokens_in.saturating_add(src.tokens_in);
         self.tokens_out = self.tokens_out.saturating_add(src.tokens_out);
         self.cost = self.cost.saturating_add(src.cost);
+        self.cache_hits += src.cache_hits;
+        self.cache_input = self.cache_input.saturating_add(src.cache_input);
+        self.cache_billed = self.cache_billed.saturating_add(src.cache_billed);
     }
 }
 
@@ -402,6 +414,11 @@ pub fn fold_user_row(row: &mut UserDailyRow, log: &RequestLog) {
         a.tokens_in = a.tokens_in.saturating_add(log.input_tokens);
         a.tokens_out = a.tokens_out.saturating_add(log.output_tokens);
         a.cost = a.cost.saturating_add(log.cost);
+        if log.cache_hit {
+            a.cache_hits += 1;
+            a.cache_input = a.cache_input.saturating_add(log.input_tokens);
+            a.cache_billed = a.cache_billed.saturating_add(log.cost);
+        }
     });
     prune_accum(&mut row.models, USER_MODEL_CAP, |a| a.count);
 
@@ -531,6 +548,18 @@ where
 /// Σby_model，按 count 降序（tie：总 token 降序）——top_models/model_distribution 口径。
 pub fn merge_models(rows: &[DailyAgg]) -> Vec<ModelAccum> {
     let mut v = merge_dim(rows, |r| &r.by_model);
+    v.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then((b.tokens_in + b.tokens_out).cmp(&(a.tokens_in + a.tokens_out)))
+    });
+    v
+}
+
+/// Σ 用户行 models，按 count 降序——个人缓存节省估算口径（与主档 merge_models
+/// 同构，仅行类型不同；OTHER 长尾组由调用方判 approx）。
+pub fn merge_user_models(rows: &[UserDailyRow]) -> Vec<UserModelAccum> {
+    let mut v = merge_dim(rows, |r| &r.models);
     v.sort_by(|a, b| {
         b.count
             .cmp(&a.count)

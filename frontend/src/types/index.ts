@@ -584,6 +584,8 @@ export interface ModelMetaOverride {
   owned_by: string;
   context_length?: number | null;
   capabilities?: string[];
+  /** 思考等级候选（可选，新后端提供；旧后端忽略该字段） */
+  reasoning_levels?: string[];
 }
 
 // ==================== 上游模型目录发现 ====================
@@ -684,6 +686,8 @@ export interface ManagedModelSource {
   name: string;
   /** 账号 id（仅 kind=account） */
   account_id?: string;
+  /** 来源细分（可选，新后端提供）：remote=远程拉取 / modelsdev=社区目录补齐 / manual=手动登记 */
+  source?: string;
 }
 
 /** 统一模型管理里的定价条目（对应后端 `pricing::ModelPrice`） */
