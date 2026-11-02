@@ -21,6 +21,7 @@ mod channel;
 mod chat_session;
 mod checkin;
 mod config;
+mod continuation;
 mod cron;
 mod debug_traffic;
 mod egress;
