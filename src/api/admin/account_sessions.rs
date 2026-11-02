@@ -999,28 +999,43 @@ pub async fn probe_channel(state: &AppState, channel: &Channel) -> ChannelTestRe
 // ── 清冷却 ──────────────────────────────────────────────────────────
 
 /// POST /api/account-sessions/:id/reset-cooldown
+///
+/// 可选 body `{model: "..."}` 只清该模型的冷却（`"*"` = 整号冷却），
+/// 不带 model 或 body = 全部清除（旧调用方行为不变）。
 pub async fn handle_reset_account_session_cooldowns(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body: Option<Json<Value>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    if !state.account_sessions.reset_cooldowns(&id) {
+    let model = body
+        .as_ref()
+        .and_then(|Json(v)| v.get("model"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let Some(cleared) = state.account_sessions.clear_cooldown(&id, model.as_deref()) else {
         return Err(error_response(
             "Account session not found",
             StatusCode::NOT_FOUND,
         ));
-    }
+    };
     let admin_id = admin_id_from_session(&state, &headers).await;
     record_audit(
         &state,
         &admin_id,
         "reset_account_session_cooldown",
-        &format!("id={id}"),
+        &format!(
+            "id={id} model={} cleared={cleared}",
+            model.as_deref().unwrap_or("*all*")
+        ),
         None,
         None,
     );
-    Ok(Json(json!({ "success": true, "data": null })))
+    Ok(Json(
+        json!({ "success": true, "data": { "cleared": cleared } }),
+    ))
 }
 
 // ── provider 目录 / 统计 ────────────────────────────────────────────

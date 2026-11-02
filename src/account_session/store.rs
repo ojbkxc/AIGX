@@ -544,6 +544,42 @@ impl AccountSessionStore {
         true
     }
 
+    /// 按模型清冷却：`Some(model)` 只删该条（`"*"` = 整号哨兵），`None` 全清。
+    /// 返回实际删除的条目数；账号不存在返回 `None`。
+    ///
+    /// 语义对齐 Agent2API 的 rate-limits/clear —— 可逆操作：清掉后若上游
+    /// 仍在限流，下一次失败会重新标记，因此前端无需二次确认。
+    pub fn clear_cooldown(&self, id: &str, model: Option<&str>) -> Option<usize> {
+        let (snapshot, cleared) = {
+            let mut sessions = self.inner.sessions.write();
+            let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
+                return None;
+            };
+            let cleared = match model {
+                Some(key) => usize::from(session.cooldowns.remove(key).is_some()),
+                None => {
+                    let n = session.cooldowns.len();
+                    session.cooldowns.clear();
+                    if n > 0 {
+                        // 与 reset_cooldowns 同口径：全清视为一次手动恢复
+                        session.consecutive_errors = 0;
+                        session.last_error = None;
+                    }
+                    n
+                }
+            };
+            session.updated_at = chrono::Utc::now().timestamp();
+            (session.clone(), cleared)
+        };
+        if let Err(e) = self.persist(&snapshot) {
+            tracing::warn!(
+                "persist account session {} after cooldown clear: {e}",
+                snapshot.id
+            );
+        }
+        Some(cleared)
+    }
+
     /// 设置配置态状态（`enabled` / `disabled`）。返回是否命中账号。
     pub fn set_status(&self, id: &str, status: &str) -> bool {
         let snapshot = {
@@ -824,6 +860,53 @@ mod tests {
             assert!(pool.acquire("ch", "other-model", None).is_some());
             assert!(pool.reset_cooldowns(&account.id));
             assert!(pool.acquire("ch", "upstream-x", None).is_some());
+        });
+    }
+
+    #[test]
+    fn clear_cooldown_removes_single_model_entry() {
+        with_secret_dir("clear-cooldown", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            let failure = FailureType::ServerError;
+            pool.record_failure(&account.id, "model-a", &failure, "boom-a", None);
+            pool.record_failure(&account.id, "model-b", &failure, "boom-b", None);
+            // 只清 model-a：b 仍在冷却
+            assert_eq!(pool.clear_cooldown(&account.id, Some("model-a")), Some(1));
+            assert!(pool.acquire("ch", "model-a", None).is_some());
+            assert!(pool.acquire("ch", "model-b", None).is_none());
+            // 不存在的键：命中账号但没删掉任何东西
+            assert_eq!(pool.clear_cooldown(&account.id, Some("ghost")), Some(0));
+            // 整号清：剩余全没了，last_error 一并清
+            assert_eq!(pool.clear_cooldown(&account.id, None), Some(1));
+            let loaded = pool.get(&account.id).unwrap();
+            assert!(loaded.cooldowns.is_empty());
+            assert!(loaded.last_error.is_none());
+            // 账号不存在：None
+            assert_eq!(pool.clear_cooldown("no-such-id", None), None);
+        });
+    }
+
+    #[test]
+    fn clear_cooldown_can_remove_account_wide_sentinel() {
+        with_secret_dir("clear-cooldown-sentinel", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            let failure = FailureType::RateLimited {
+                scope: crate::channel::circuit_breaker::RateLimitScope::Account,
+                retry_after: Some(90),
+            };
+            pool.record_failure(&account.id, "model-a", &failure, "429", Some(429));
+            assert!(pool.acquire("ch", "model-a", None).is_none());
+            // 哨兵键 "*" 单独可清，清完全号恢复可用
+            assert_eq!(
+                pool.clear_cooldown(
+                    &account.id,
+                    Some(crate::account_session::model::ACCOUNT_WIDE_COOLDOWN)
+                ),
+                Some(1)
+            );
+            assert!(pool.acquire("ch", "model-a", None).is_some());
         });
     }
 

@@ -452,19 +452,62 @@ tr:hover .as-act:not(:disabled) {
   background: rgba(229, 72, 77, 0.1);
 }
 
-/* ── 冷却明细展开行（对齐 Agent2API row-panel：通栏面板 + 标签流）── */
-.as-cooldown-toggle {
-  border: none;
-  background: transparent;
-  padding: 0;
-  font: inherit;
-  color: inherit;
+/* ── 冷却列（对齐 Agent2API LimitsCell：黄徽章「n 个模型 ▾」+ 最早恢复倒计时；
+      无冷却给绿点「正常」而不是光杆「—」） ── */
+.as-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.as-ok-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #30a46c;
+  box-shadow: 0 0 0 3px rgba(48, 164, 108, 0.18);
+}
+
+.as-limits-badge {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid rgba(255, 178, 0, 0.45);
+  background: rgba(255, 178, 0, 0.12);
+  color: var(--warn-text, #b26a00);
+  border-radius: 8px;
+  padding: 3px 8px;
   cursor: pointer;
+  font: inherit;
   text-align: left;
 }
 
-.as-cooldown-toggle:hover {
-  text-decoration: underline;
+.as-limits-badge:hover {
+  background: rgba(255, 178, 0, 0.2);
+}
+
+.as-limits-badge.is-open {
+  box-shadow: 0 0 0 2px rgba(255, 178, 0, 0.25);
+}
+
+.as-limits-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.as-limits-caret {
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.as-limits-sub {
+  font-size: 11px;
+  opacity: 0.85;
 }
 
 .as-panel-tbody td {
@@ -486,6 +529,21 @@ tr:hover .as-act:not(:disabled) {
 
 .as-panel-head strong {
   font-size: 12.5px;
+}
+
+.as-panel-clear-all {
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.as-panel-clear-all:hover {
+  color: var(--text-main, var(--text-color));
+  background: rgba(127, 127, 127, 0.12);
 }
 
 .as-panel-close {
@@ -511,6 +569,65 @@ tr:hover .as-act:not(:disabled) {
   font-size: 12px;
 }
 
-.as-panel-body .is-off {
-  opacity: 0.5;
+.as-panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.as-limit-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.06));
+  border: 1px solid var(--border-color);
+}
+
+.as-limit-model {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--text-main, var(--text-color));
+  min-width: 140px;
+}
+
+.as-badge-cooling {
+  background: rgba(255, 178, 0, 0.16);
+  color: var(--warn-text, #b26a00);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.as-clear-one {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.as-clear-one:hover {
+  color: var(--text-main, var(--text-color));
+  background: rgba(127, 127, 127, 0.12);
+}
+
+/* ── 状态列行内启停（对齐 Agent2API StatusCell：Switch 直接 PATCH） ── */
+.as-status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.as-status-switch.glass-switch {
+  transform: scale(0.72);
+  transform-origin: left center;
+  flex: none;
 }

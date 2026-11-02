@@ -16,7 +16,7 @@ import { useToast } from '../components/Toast';
 import AddAccountDialog from '../components/AddAccountDialog';
 import ProxySelector from '../components/ProxySelector';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, EmptyState, Input, Loading, Select, SkeletonTable, Tabs, Textarea } from '../components/ui';
+import { Button, Card, EmptyState, Input, Loading, Select, SkeletonTable, Switch, Tabs, Textarea } from '../components/ui';
 import type {
   AccountProviderItem,
   AccountSessionItem,
@@ -169,6 +169,10 @@ export default function AccountSessions(): JSX.Element {
   const [orderSaving, setOrderSaving] = useState(false);
   /** 冷却明细展开行（对齐 Agent2API row-panel：点冷却格展开完整明细） */
   const [cooldownOpenId, setCooldownOpenId] = useState<string | null>(null);
+  /** 冷却读数的抓取时刻（后端返回的是「剩余秒数」，本地按秒表往前推） */
+  const cooldownLoadedAt = useRef<number>(Date.now());
+  // 有冷却时挂一个 1 秒定时器把倒计时推走（对齐 Agent2API 的 live「x 后恢复」）
+  const [, setCooldownTick] = useState(0);
   /** 自动余额查询只做一次（load 内触发，见 load） */
   const autoBalanceDone = useRef(false);
 
@@ -183,6 +187,7 @@ export default function AccountSessions(): JSX.Element {
         api.accountSessionStats(),
       ]);
       setSessions(sessionsRes.data ?? []);
+      cooldownLoadedAt.current = Date.now();
       const channels = channelsRes.data ?? [];
       setAccountChannels(channels.filter((c) => c.channel_type === 'account'));
       setProviders(providersRes.data ?? []);
@@ -197,6 +202,16 @@ export default function AccountSessions(): JSX.Element {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 冷却倒计时：任一账号仍有未到期冷却就每秒重画一次（数据本身不重拉）
+  const hasActiveCooldown = sessions.some((s) =>
+    Object.values(s.cooldowns || {}).some((v) => Number(v) > 0),
+  );
+  useEffect(() => {
+    if (!hasActiveCooldown) return undefined;
+    const timer = window.setInterval(() => setCooldownTick((c) => c + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveCooldown]);
 
   const openCreate = (): void => {
     setEditing(null);
@@ -638,15 +653,43 @@ export default function AccountSessions(): JSX.Element {
     });
   };
 
-  const cooldownSummary = (session: AccountSessionItem): string => {
-    const entries = Object.entries(session.cooldowns || {});
-    if (entries.length === 0) return '—';
-    // `*` 是整号冷却哨兵（账号级限流/认证失败/余额耗尽），渲染成「全部模型」
-    // 比露出一颗星号有用得多
-    return entries
-      .slice(0, 3)
-      .map(([model, secs]) => `${model === '*' ? t('全部模型') : model} ${secs}s`)
-      .join(' · ');
+  // ── 冷却展示（对齐 Agent2API：剩余秒本地倒推 + `*` 哨兵 = 整号冷却） ──
+
+  /** 本地剩余秒数：抓取时刻的「剩余秒」减去已过时间，钳到 0 */
+  const cooldownRemaining = (secs: number): number => {
+    const elapsed = (Date.now() - cooldownLoadedAt.current) / 1000;
+    return Math.max(0, Math.ceil(Number(secs) - elapsed));
+  };
+
+  /** 未到期冷却条目，按剩余时间升序（最早的恢复在最前） */
+  const activeCooldowns = (session: AccountSessionItem): Array<[string, number]> =>
+    Object.entries(session.cooldowns || {})
+      .map(([model, secs]) => [model, cooldownRemaining(Number(secs))] as [string, number])
+      .filter(([, rem]) => rem > 0)
+      .sort((a, b) => a[1] - b[1]);
+
+  /** 秒数 → 人话（`90s` / `5m 30s` / `1h 5m`，不带 i18n 单位） */
+  const fmtDuration = (secs: number): string => {
+    if (secs < 60) return `${secs}s`;
+    if (secs < 3600) {
+      const m = Math.floor(secs / 60);
+      const s = secs % 60;
+      return s ? `${m}m ${s}s` : `${m}m`;
+    }
+    const h = Math.floor(secs / 3600);
+    return `${h}h ${Math.floor((secs % 3600) / 60)}m`;
+  };
+
+  // 清除单个模型的冷却标记（对齐 Agent2API rate-limits/clear 的 {model} 语义）
+  const handleClearOneCooldown = async (session: AccountSessionItem, model: string): Promise<void> => {
+    setError('');
+    try {
+      await api.resetAccountSessionCooldowns(session.id, model);
+      addToast(t('已清除标记'));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   // 运行态 → 本地化文案（与渠道管理的启用/禁用口径一致）
@@ -1242,9 +1285,26 @@ export default function AccountSessions(): JSX.Element {
                       {session.base_url && <div className="form-hint">{session.base_url}</div>}
                     </td>
                     <td>
-                      <span className={`badge ${statusClass(session.status)}`}>
-                        {statusLabel(session.status)}
-                      </span>
+                      {/* 行内启停 Switch（对齐 Agent2API StatusCell：直接 PATCH 状态，无需进操作列） */}
+                      <div className="as-status-line">
+                        <Switch
+                          className="as-status-switch"
+                          checked={session.status === 'enabled'}
+                          disabled={session.status === 'expired'}
+                          ariaLabel={t('启用/停用')}
+                          title={
+                            session.status === 'expired'
+                              ? t('凭证已过期，请先更新凭证或到期时间')
+                              : session.status === 'enabled'
+                                ? t('停用')
+                                : t('启用')
+                          }
+                          onChange={() => void handleToggleStatus(session)}
+                        />
+                        <span className={`badge ${statusClass(session.status)}`}>
+                          {statusLabel(session.status)}
+                        </span>
+                      </div>
                       {(session.in_flight ?? 0) > 0 && (
                         <div className="form-hint">
                           {t('进行中')} {session.in_flight}
@@ -1261,18 +1321,37 @@ export default function AccountSessions(): JSX.Element {
                     </td>
                     <td>{successRate(session)}</td>
                     <td>
-                      {Object.keys(session.cooldowns || {}).length === 0 ? (
-                        '—'
-                      ) : (
-                        <button
-                          type="button"
-                          className="as-cooldown-toggle"
-                          title={t('点击展开完整冷却明细')}
-                          onClick={() => setCooldownOpenId(cooldownOpenId === session.id ? null : session.id)}
-                        >
-                          {cooldownSummary(session)}
-                        </button>
-                      )}
+                      {(() => {
+                        const active = activeCooldowns(session);
+                        if (active.length === 0) {
+                          return (
+                            <span className="as-ok">
+                              <span className="as-ok-dot" aria-hidden="true" />
+                              {t('正常')}
+                            </span>
+                          );
+                        }
+                        const whole = active.some(([model]) => model === '*');
+                        const open = cooldownOpenId === session.id;
+                        return (
+                          <button
+                            type="button"
+                            className={`as-limits-badge${open ? ' is-open' : ''}`}
+                            title={t('点击展开完整冷却明细')}
+                            onClick={() => setCooldownOpenId(open ? null : session.id)}
+                          >
+                            <span className="as-limits-main">
+                              {whole
+                                ? t('整号冷却')
+                                : t('{{n}} 个模型', { n: active.length })}
+                              <span className="as-limits-caret">{open ? '▴' : '▾'}</span>
+                            </span>
+                            <span className="as-limits-sub">
+                              {t('最早 {{time}} 恢复', { time: fmtDuration(active[0][1]) })}
+                            </span>
+                          </button>
+                        );
+                      })()}
                     </td>
                     <td>
                       <div className="actions-cell as-actions">
@@ -1302,21 +1381,7 @@ export default function AccountSessions(): JSX.Element {
                         >
                           <Pencil size={13} />
                         </button>
-                        <button
-                          type="button"
-                          className="as-act"
-                          onClick={() => handleToggleStatus(session)}
-                          disabled={session.status === 'expired'}
-                          title={
-                            session.status === 'expired'
-                              ? t('凭证已过期，请先更新凭证或到期时间')
-                              : session.status === 'enabled'
-                                ? t('停用')
-                                : t('启用')
-                          }
-                        >
-                          <Power size={13} />
-                        </button>
+                        {/* 启停已上移至状态列 Switch（对齐 Agent2API StatusCell），操作列不再重复 */}
                         <button
                           type="button"
                           className="as-act"
@@ -1358,14 +1423,23 @@ export default function AccountSessions(): JSX.Element {
               {cooldownOpenId && (() => {
                 const open = sessions.find((s) => s.id === cooldownOpenId);
                 if (!open) return null;
-                const entries = Object.entries(open.cooldowns || {});
+                const entries = activeCooldowns(open);
                 return (
                   <tbody className="as-panel-tbody">
                     <tr className="as-panel-row">
                       <td colSpan={10}>
                         <div className="as-panel-head">
                           <strong>{open.name}</strong>
-                          <span className="form-hint">{t('冷却明细（上游模型 → 剩余秒数）')}</span>
+                          <span className="form-hint">
+                            {t('冷却来自上游 429/限额失败，到期自动解除；手动清除后若仍限流会再次标记')}
+                          </span>
+                          <button
+                            type="button"
+                            className="as-panel-clear-all"
+                            onClick={() => void handleResetCooldowns(open)}
+                          >
+                            {t('全部清除')}
+                          </button>
                           <button type="button" className="as-panel-close" onClick={() => setCooldownOpenId(null)} title={t('收起')}>
                             ✕
                           </button>
@@ -1373,11 +1447,20 @@ export default function AccountSessions(): JSX.Element {
                         {entries.length === 0 ? (
                           <div className="as-panel-body">{t('当前没有冷却中的模型。')}</div>
                         ) : (
-                          <div className="as-panel-body">
-                            {entries.map(([model, secs]) => (
-                              <span key={model} className={`mm-src-tag${secs > 0 ? '' : ' is-off'}`}>
-                                {model === '*' ? t('全部模型') : model} · {secs}s
-                              </span>
+                          <div className="as-panel-list">
+                            {entries.map(([model, rem]) => (
+                              <div key={model} className="as-limit-row">
+                                <code className="as-limit-model">{model === '*' ? t('全部模型') : model}</code>
+                                <span className="as-badge-cooling">{t('冷却中')}</span>
+                                <span className="form-hint">{t('剩 {{time}}', { time: fmtDuration(rem) })}</span>
+                                <button
+                                  type="button"
+                                  className="as-clear-one"
+                                  onClick={() => void handleClearOneCooldown(open, model)}
+                                >
+                                  {t('清除标记')}
+                                </button>
+                              </div>
                             ))}
                           </div>
                         )}

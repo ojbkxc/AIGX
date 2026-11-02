@@ -565,8 +565,16 @@ export const api = {
     request<ApiResponse<{ created?: number; skipped?: number }>>('POST', `${API_BASE}/account-sessions/bulk`, data),
   testAccountSession: (id: string): Promise<ApiResponse<{ success?: boolean; latency_ms?: number; model?: string; message?: string }>> =>
     request<ApiResponse<{ success?: boolean; latency_ms?: number; model?: string; message?: string }>>('POST', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/test`),
-  resetAccountSessionCooldowns: (id: string): Promise<ApiResponse<null>> =>
-    request<ApiResponse<null>>('POST', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/reset-cooldown`),
+  /** 清冷却：传 model 只清该模型（`*` = 整号冷却），不传 = 全部清除 */
+  resetAccountSessionCooldowns: (
+    id: string,
+    model?: string,
+  ): Promise<ApiResponse<{ cleared?: number }>> =>
+    request<ApiResponse<{ cleared?: number }>>(
+      'POST',
+      `${API_BASE}/account-sessions/${encodeURIComponent(id)}/reset-cooldown`,
+      model ? { model } : undefined,
+    ),
   /** 账号余额/额度（支持 12 家；不支持返回 400 错误信息） */
   getAccountSessionBalance: (id: string): Promise<ApiResponse<AccountBalance>> =>
     request<ApiResponse<AccountBalance>>('GET', `${API_BASE}/account-sessions/${encodeURIComponent(id)}/balance`),
