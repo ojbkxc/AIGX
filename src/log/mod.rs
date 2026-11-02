@@ -1655,7 +1655,7 @@ mod tests {
         assert_eq!(r1.skipped_shrink, 0);
         let day_after_1 = serde_json::to_value(s2.daily.load_day(&yday).unwrap()).unwrap();
         let user_after_1 =
-            serde_json::to_value(s2.daily.load_user_range("u1", &yday, &yday)[0]).unwrap();
+            serde_json::to_value(s2.daily.load_user_range("u1", &yday, &yday)[0].clone()).unwrap();
         // marker 已存在时 cron 会跳过；手动重建路径 clear 后再跑等价
         s2.daily.clear_backfill_marker().unwrap();
         let r2 = s2.backfill_history(5000).unwrap();
@@ -1665,7 +1665,7 @@ mod tests {
             day_after_1
         );
         assert_eq!(
-            serde_json::to_value(s2.daily.load_user_range("u1", &yday, &yday)[0]).unwrap(),
+            serde_json::to_value(s2.daily.load_user_range("u1", &yday, &yday)[0].clone()).unwrap(),
             user_after_1
         );
     }

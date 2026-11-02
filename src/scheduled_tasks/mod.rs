@@ -31,7 +31,7 @@ use crate::api::openai::AppState;
 pub mod task_state;
 pub mod types;
 
-use self::task_state::{self, TaskState};
+use self::task_state::TaskState;
 use self::types::{
     IntervalTask, IntervalTaskPatch, ScheduledSettings, DEFAULT_CREDENTIAL_MAINTENANCE_MINUTES,
     DEFAULT_LOGS_AUTO_REFRESH_SECONDS, DEFAULT_MODEL_REFRESH_MINUTES,
@@ -280,6 +280,8 @@ pub async fn configure(
     let before = settings_of(&config.scheduled_tasks, id);
     apply_patch(&mut config.scheduled_tasks, id, patch);
     let after = settings_of(&config.scheduled_tasks, id);
+    // 新间隔按 patch 后的设置算——config 马上要被 update 移走，先取出来。
+    let new_interval_ms = interval_ms(task, &config.scheduled_tasks);
     state
         .config_manager
         .update(config)
@@ -292,7 +294,7 @@ pub async fn configure(
             task_state::schedule_now(&state_key(id))?;
         } else if before.interval != after.interval {
             // 改间隔：按**新**间隔从上次尝试起重新计时（要马上跑有「立即执行」按钮）
-            task_state::reschedule(&state_key(id), interval_ms(task, &config.scheduled_tasks))?;
+            task_state::reschedule(&state_key(id), new_interval_ms)?;
         }
     }
     if before != after {

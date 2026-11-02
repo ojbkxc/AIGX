@@ -585,7 +585,7 @@ pub async fn handle_report_top_sources(
         &user_filter,
         120,
         || {
-            let mut items: Vec<ChannelAggRow> = Vec::new();
+            let mut items: Vec<ChannelAggRow>;
             if state.log_store.daily.agg_available() {
                 match &user_filter {
                     None => {
@@ -792,7 +792,7 @@ pub async fn handle_report_overview(
                 let mut cost = 0i64;
                 let mut present: std::collections::BTreeSet<String> =
                     std::collections::BTreeSet::new();
-                let mut top_models: Vec<(String, u64)> = Vec::new();
+                let mut top_models: Vec<(String, u64)>;
                 match &user_filter {
                     None => {
                         let rows = state.log_store.daily.load_range(&from, &to);
