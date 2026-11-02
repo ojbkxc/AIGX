@@ -319,6 +319,19 @@ async fn main() -> anyhow::Result<()> {
     // 账号池「同账号重试」档与非流式响应体超时
     crate::config::set_retry_self_count(config.usage.retry_self_count);
     crate::config::set_body_timeout_secs(config.usage.body_timeout_secs);
+    // 出站指纹脱敏开关（请求体侧；保存设置时实时更新）
+    crate::config::set_sanitize_fingerprints(config.usage.sanitize_fingerprints);
+    // Cline 伪装头覆盖表（对齐 Agent2API「设置 → 网关 → Cline 伪装头」）：
+    // 启动时从配置恢复进程级快照；保存设置时热更新
+    crate::config::set_cline_header_overrides(
+        config
+            .usage
+            .cline_headers
+            .overrides
+            .clone()
+            .into_iter()
+            .collect(),
+    );
     // 直接换号/换渠道状态码名单（选路时同步判定，保存设置时实时更新）
     crate::config::set_retry_on_status_codes(config.usage.retry_on_status.clone());
 
@@ -1529,6 +1542,9 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/routing/defaults",
             get(api::admin::handle_routing_defaults),
         )
+        // 路由队列预演（对照 Agent2API「设置 → 路由 → 候选队列」：只读，
+        // 不推进 round_robin 游标；round_robin 下实际首挑由游标决定）
+        .route("/api/routing/queue", get(api::admin::handle_routing_queue))
         // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）
         .route(
             "/api/gateway/prompt",
@@ -1539,6 +1555,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/sanitize",
             get(api::admin::handle_get_sanitize).put(api::admin::handle_update_sanitize),
+        )
+        // Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」）
+        .route(
+            "/api/cline-headers",
+            get(api::admin::handle_get_cline_headers).put(api::admin::handle_update_cline_headers),
         )
         // 数据管理（存储概览 + 全量备份/恢复；对照 Agent2API「设置 → 数据」）
         .route("/api/storage", get(api::admin::handle_storage_overview))

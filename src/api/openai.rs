@@ -1738,6 +1738,17 @@ pub async fn handle_chat_completions(
         .into_response();
     }
 
+    // 出站指纹脱敏（对照 Agent2API sanitizeBlacklistFingerprints）：发送上游前
+    // 剥离客户端注入的审核黑名单指纹（模板句最小改写 + 表头键值整段删除）。
+    // 放在网关提示词注入之前——apply_prompt 注入的是网关自身文案，不该被触碰。
+    let messages = {
+        let mut msgs = messages;
+        if crate::config::sanitize_fingerprints_enabled() {
+            crate::sanitize::strip_chat_messages(&mut msgs);
+        }
+        msgs
+    };
+
     // 构建 ChatFormat
     // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
     // passthrough 不动（零开销）；custom 替换 / append 追加网关提示词；

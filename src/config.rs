@@ -402,11 +402,39 @@ pub struct UsageConfig {
     /// 只统计续写轮，不含首轮；复读检测（两轮文本几乎一模一样）会提前收手。
     #[serde(default = "default_auto_continue_max_rounds")]
     pub auto_continue_max_rounds: u8,
+    /// 出站指纹脱敏开关（对齐 Agent2API `sanitizeBlacklistFingerprints`，默认**开**）。
+    ///
+    /// 开启时转发层在发送上游前剥离请求体里的上游审核黑名单指纹
+    /// （表头键值整段删除、模板句最小改写，见 `crate::sanitize`）。与
+    /// `/api/sanitize` 的「额外脱敏请求头名单」（表头侧）互补：那边管
+    /// 请求头，这边管请求体。关掉等于把客户端 system 模板原样发给上游
+    /// ——那正是模板句被误拦的原因，所以默认开启。
+    #[serde(default = "default_sanitize_fingerprints")]
+    pub sanitize_fingerprints: bool,
+    /// Cline 伪装头覆盖表（对齐 Agent2API `clineHeaders`，只存用户改过的键）。
+    ///
+    /// 默认值取自 `account_session::registry::SESSION_PROVIDERS` 里 cline
+    /// 渠道的请求头模板，不落盘；空串值 = 这个头不发；键缺失 = 回落默认。
+    #[serde(default)]
+    pub cline_headers: ClineHeadersConfig,
+}
+
+/// Cline 伪装头覆盖表（键 → 值；只存用户改过/新增的键）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClineHeadersConfig {
+    /// 用户改过的头（原样持久化；空串 = 不发这个头）。
+    #[serde(default)]
+    pub overrides: std::collections::HashMap<String, String>,
 }
 
 /// 续写最多额外轮数的默认值（对齐上游 autoContinueMaxRounds）。
 fn default_auto_continue_max_rounds() -> u8 {
     3
+}
+
+/// 指纹脱敏默认开启（关闭意味着客户端模板原样出站，可能被上游误拦）。
+fn default_sanitize_fingerprints() -> bool {
+    true
 }
 
 /// 排队退避次数上限的默认值（对齐上游 queueMaxWaits）。
@@ -651,6 +679,8 @@ impl Default for UsageConfig {
             queue_wait_seconds: 0,
             auto_continue: false,
             auto_continue_max_rounds: default_auto_continue_max_rounds(),
+            sanitize_fingerprints: default_sanitize_fingerprints(),
+            cline_headers: Default::default(),
             billing_flat_quota: default_billing_flat_quota(),
         }
     }
@@ -941,6 +971,45 @@ pub fn body_timeout_secs() -> u64 {
 /// 由 main 与 settings 更新端点写入快照（1–3600）。
 pub fn set_body_timeout_secs(v: u64) {
     BODY_TIMEOUT_SECS.store(v.clamp(1, 3_600), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 出站指纹脱敏开关的进程级快照（转发层每请求同步读取，默认**开**）。
+///
+/// 数据面转发路径无法 await 配置，与 `log_body` 同理走原子快照零开销。
+static SANITIZE_FINGERPRINTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// 读取指纹脱敏开关（供转发层同步访问）。
+pub fn sanitize_fingerprints_enabled() -> bool {
+    SANITIZE_FINGERPRINTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 与 settings 更新端点写入快照。
+pub fn set_sanitize_fingerprints(v: bool) {
+    SANITIZE_FINGERPRINTS.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Cline 伪装头覆盖表的进程级快照（键值对列表；空表 = 全部回落代码内默认）。
+///
+/// `HashMap::new` 不是 const fn，与 `RETRY_ON_STATUS` 同型用
+/// `Vec<(String, String)>` 承载（写少读多：读路径拷贝列表，写路径仅管理端
+/// 保存时触发）。键值对顺序不保证——消费方按需重建 HashMap。
+static CLINE_HEADER_OVERRIDES: std::sync::RwLock<Vec<(String, String)>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// 读取 Cline 伪装头覆盖表快照（转发层同步访问）。
+pub fn cline_header_overrides() -> Vec<(String, String)> {
+    CLINE_HEADER_OVERRIDES
+        .read()
+        .map(|list| list.clone())
+        .unwrap_or_default()
+}
+
+/// 由 main 与 cline-headers 更新端点写入快照。
+pub fn set_cline_header_overrides(entries: Vec<(String, String)>) {
+    if let Ok(mut list) = CLINE_HEADER_OVERRIDES.write() {
+        *list = entries;
+    }
 }
 
 /// 账号池「同账号重试」次数的进程级快照（对齐 Agent2API retryCount）。

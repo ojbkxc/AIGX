@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import type { RouteStrategy, RoutingPolicyItem, StickyMode } from '../types';
+import type { RouteStrategy, RoutingPolicyItem, RoutingQueueItem, StickyMode } from '../types';
 
 /**
  * 路由策略（系统设置 → 运维 → 路由）
@@ -79,6 +79,10 @@ export default function RoutingPanel(): JSX.Element {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [runtime, setRuntime] = useState<RoutingPolicyItem['runtime']>();
+  // 候选队列预演（只读；round_robin 下实际首挑由游标决定，预演以静态排序为准）
+  const [queueModel, setQueueModel] = useState('');
+  const [queue, setQueue] = useState<RoutingQueueItem>();
+  const [queueLoading, setQueueLoading] = useState(false);
   const [form, setForm] = useState<FormState>({
     strategy: 'weighted',
     sticky: 'auto',
@@ -180,6 +184,21 @@ export default function RoutingPanel(): JSX.Element {
       addToast(t('已回填默认值（尚未保存）'));
     } catch (err) {
       addToast(err instanceof Error ? err.message : String(err), 'error');
+    }
+  };
+
+  // 候选队列预演：复用数据面同一套过滤排序（只读，不推进轮询游标）
+  const loadQueue = async (): Promise<void> => {
+    const m = queueModel.trim();
+    if (!m) return;
+    setQueueLoading(true);
+    try {
+      const res = await api.getRoutingQueue(m);
+      setQueue(res?.data);
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setQueueLoading(false);
     }
   };
 
@@ -338,6 +357,62 @@ export default function RoutingPanel(): JSX.Element {
             </div>
             <div className="form-hint">
               {t('健康×成本×RPM 三维权重（默认 0.4/0.4/0.2）。只在「多因子调度」策略下参与排序，改小成本权重=优先健康渠道。')}
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label>{t('候选队列预演')}</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                className="form-input"
+                placeholder={t('输入模型名，如 gpt-4o')}
+                value={queueModel}
+                onChange={(e) => setQueueModel(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void loadQueue();
+                }}
+              />
+              <button
+                className="btn btn-secondary"
+                onClick={() => void loadQueue()}
+                disabled={queueLoading || !queueModel.trim()}
+              >
+                {queueLoading ? t('加载中...') : t('预演')}
+              </button>
+            </div>
+            {queue && (
+              <div style={{ marginTop: 8 }}>
+                {queue.ordered?.length ? (
+                  <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
+                    {queue.ordered.map((c, i) => (
+                      <li key={c.id}>
+                        {i === 0 ? <strong>{`${i + 1}. ${c.name}（队首）`}</strong> : `${i + 1}. ${c.name}`}
+                        <span className="form-hint">{` · ${c.provider} · ${c.state ?? 'closed'}`}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="form-hint">{t('没有可用候选')}</div>
+                )}
+                {queue.blocked && queue.blocked.length > 0 && (
+                  <>
+                    <div className="form-hint">{t('被挡在门外：')}</div>
+                    <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
+                      {queue.blocked.map((c) => (
+                        <li key={c.id}>{`${c.name} — ${c.reason ?? ''}`}</li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+                {form.strategy === 'round_robin' && (
+                  <div className="form-hint">
+                    {t('组内轮询下实际首挑由游标决定，预演以静态排序为准。')}
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="form-hint">
+              {t('只读预演：按当前策略回显该模型的候选队列与被拦截渠道，保存策略前先看看效果。')}
             </div>
           </div>
 

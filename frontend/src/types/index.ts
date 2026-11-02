@@ -1464,6 +1464,38 @@ export interface RoutingPolicyItem {
   };
 }
 
+/** 路由队列预演条目（GET /api/routing/queue；对照 Agent2API「设置 → 路由 → 候选队列」） */
+export interface RoutingQueueEntryItem {
+  id: string;
+  name: string;
+  provider: string;
+  /** 断路器状态：closed / open / halfopen */
+  state: string;
+  /** 仅 blocked 条目携带：被挡原因（断路器打开 / 半开试探 / 冷却中或未声明该模型） */
+  reason?: string;
+}
+
+/** 路由队列预演结果（GET /api/routing/queue?model=xxx；只读预演，不推进轮询游标） */
+export interface RoutingQueueItem {
+  strategy: RouteStrategy;
+  sticky: StickyMode;
+  model: string;
+  /** 静态排序后的首选渠道 id（round_robin 下实际首挑由游标决定，见界面提示） */
+  pickedId: string | null;
+  ordered: RoutingQueueEntryItem[];
+  blocked: RoutingQueueEntryItem[];
+}
+
+/** Cline 伪装头（GET/PUT /api/cline-headers；对照 Agent2API 的 cline_headers 模块） */
+export interface ClineHeadersItem {
+  /** 代码内置默认值（用于区分「改回了默认」与「本来就没改」） */
+  defaults: Record<string, string>;
+  /** 用户覆盖表原样回显（空串 = 该头不发送） */
+  overrides: Record<string, string>;
+  /** 默认值 + 覆盖表合并后的生效值 */
+  effective: Record<string, string>;
+}
+
 /** 系统提示词注入（GET/PUT /api/gateway/prompt；对照 Agent2API 网关设置） */
 export type PromptMode = 'passthrough' | 'custom' | 'append';
 

@@ -374,6 +374,13 @@ pub async fn handle_messages(
         }
     }
 
+    // 出站指纹脱敏（对照 Agent2API sanitizeBlacklistFingerprints）：发送上游前
+    // 剥离客户端注入的审核黑名单指纹。放在网关提示词注入之前——
+    // apply_prompt 注入的是网关自身文案，不该被触碰。
+    if crate::config::sanitize_fingerprints_enabled() {
+        crate::sanitize::strip_chat_messages(&mut all_messages);
+    }
+
     // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
     // 客户端 system 已折进消息列表头，再统一走网关策略（custom 会替换它）
     let all_messages = match crate::prompt::apply_prompt_for(

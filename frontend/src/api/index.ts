@@ -81,6 +81,8 @@ import type {
   ModelMetadataStatus,
   ModelMetadataRefreshResult,
   RoutingPolicyItem,
+  RoutingQueueItem,
+  ClineHeadersItem,
   GatewayPromptItem,
   SanitizeHeadersItem,
   CheckinBenefitsData,
@@ -705,6 +707,17 @@ export const api = {
     request<ApiResponse<RoutingPolicyItem>>('PUT', `${API_BASE}/routing`, data),
   getRoutingDefaults: (): Promise<ApiResponse<RoutingPolicyItem>> =>
     request<ApiResponse<RoutingPolicyItem>>('GET', `${API_BASE}/routing/defaults`),
+  // 路由候选队列预演（对照 Agent2API「设置 → 路由 → 队列」：只读，不推进轮询游标）
+  getRoutingQueue: (model: string): Promise<ApiResponse<RoutingQueueItem>> =>
+    request<ApiResponse<RoutingQueueItem>>(
+      'GET',
+      `${API_BASE}/routing/queue?model=${encodeURIComponent(model)}`,
+    ),
+  // Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」；保存即生效）
+  getClineHeaders: (): Promise<ApiResponse<ClineHeadersItem>> =>
+    request<ApiResponse<ClineHeadersItem>>('GET', `${API_BASE}/cline-headers`),
+  saveClineHeaders: (overrides: Record<string, string>): Promise<ApiResponse<ClineHeadersItem>> =>
+    request<ApiResponse<ClineHeadersItem>>('PUT', `${API_BASE}/cline-headers`, { overrides }),
   // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」；热生效）
   getGatewayPrompt: (): Promise<ApiResponse<GatewayPromptItem>> =>
     request<ApiResponse<GatewayPromptItem>>('GET', `${API_BASE}/gateway/prompt`),

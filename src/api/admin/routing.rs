@@ -225,3 +225,90 @@ pub async fn handle_routing_defaults(
         "scheduler_weights": d.scheduler_weights,
     })))
 }
+/// GET /api/routing/queue?model=xxx — 候选队列预演（对照 Agent2API 路由队列可见化）。
+///
+/// 只读预演：复用数据面同一套过滤排序（`select_for_model`：启用/冷却/
+/// 断路器/AIMD 过滤 + 策略排序，**不推进 round_robin 游标**），把
+/// 「谁排第一、谁被挡在门外」回显给管理页，保存策略前就能看到效果。
+/// 注意：round_robin 策略下实际首挑由游标决定，预演以静态排序为准；
+/// weighted / ranked 策略下预演与实际首挑一致（页面文案已注明）。
+pub async fn handle_routing_queue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let model = q
+        .get("model")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            super::common::error_response(
+                "缺少 model 查询参数",
+                axum::http::StatusCode::BAD_REQUEST,
+            )
+        })?;
+
+    let policy = state.routing_policy.snapshot();
+    // 通过筛选的有序候选（与数据面 resolve_bridges 同一口径：按当前路由
+    // 策略过滤排序——预演的队首才有「首挑预测」价值）
+    let ordered = state.channel_store.select_for_model_by_strategy(
+        model,
+        policy.strategy,
+        &state.pricing_store,
+    );
+    let breaker_map = state.channel_store.circuit_breaker().get_status_map();
+
+    let ordered_json: Vec<Value> = ordered
+        .iter()
+        .map(|c| {
+            json!({
+                "id": c.id,
+                "name": c.name,
+                "provider": c.channel_type.as_str(),
+                "state": breaker_map
+                    .get(&c.id)
+                    .cloned()
+                    .unwrap_or_else(|| "closed".to_string()),
+            })
+        })
+        .collect();
+
+    // 被挡在门外的启用渠道：进不了 ordered 的都算（冷却/熔断/流控/未声明该模型）
+    let ordered_ids: Vec<&str> = ordered.iter().map(|c| c.id.as_str()).collect();
+    let blocked_json: Vec<Value> = state
+        .channel_store
+        .list()
+        .iter()
+        .filter(|c| c.is_enabled() && !ordered_ids.contains(&c.id.as_str()))
+        .map(|c| {
+            let breaker_status = breaker_map
+                .get(&c.id)
+                .cloned()
+                .unwrap_or_else(|| "closed".to_string());
+            let reason = if breaker_status == "open" {
+                "断路器打开"
+            } else if breaker_status == "halfopen" {
+                "断路器半开（试探中）"
+            } else {
+                "冷却中 / 流控受限 / 未声明该模型"
+            };
+            json!({
+                "id": c.id,
+                "name": c.name,
+                "provider": c.channel_type.as_str(),
+                "state": breaker_status,
+                "reason": reason,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "strategy": policy.strategy,
+        "sticky": policy.sticky,
+        "model": model,
+        "pickedId": ordered.first().map(|c| c.id.clone()),
+        "ordered": ordered_json,
+        "blocked": blocked_json,
+    })))
+}

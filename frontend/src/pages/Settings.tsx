@@ -18,6 +18,7 @@ import UpdatePanel from '../components/UpdatePanel';
 import AgentSettingsPanel from '../components/AgentSettingsPanel';
 import GatewayPanel from '../components/GatewayPanel';
 import SanitizePanel from '../components/SanitizePanel';
+import ClineHeadersPanel from '../components/ClineHeadersPanel';
 import SecurityPolicyPanel from '../components/SecurityPolicyPanel';
 import PromptPanel from '../components/PromptPanel';
 import DebugTrafficPanel from '../components/DebugTrafficPanel';
@@ -942,6 +943,10 @@ export default function Settings() {
             <GatewayPanel />
             <div style={{ marginTop: 16 }}>
               <SanitizePanel />
+            </div>
+            <div style={{ marginTop: 16 }}>
+              {/* Cline 伪装头覆盖表（对照 Agent2API；保存后下一个 Cline 请求生效） */}
+              <ClineHeadersPanel />
             </div>
             <div style={{ marginTop: 16 }}>
               <PromptPanel />

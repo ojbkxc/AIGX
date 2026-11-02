@@ -5,6 +5,7 @@ pub mod backup;
 pub mod cache;
 pub mod channels;
 pub mod checkin_center;
+pub mod cline_headers;
 pub mod common;
 pub mod dashboard;
 pub mod debug;
@@ -209,4 +210,9 @@ pub use network::{
 };
 
 // 路由策略（对照 Agent2API「设置 → 路由」；数据面 resolve_bridges 每请求读快照）
-pub use routing::{handle_get_routing, handle_routing_defaults, handle_update_routing};
+pub use routing::{
+    handle_get_routing, handle_routing_defaults, handle_routing_queue, handle_update_routing,
+};
+
+// Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」）
+pub use cline_headers::{handle_get_cline_headers, handle_update_cline_headers};

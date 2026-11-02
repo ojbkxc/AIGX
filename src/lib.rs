@@ -42,6 +42,7 @@ pub mod proxy_pool;
 pub mod quota_monitor;
 pub mod ratelimit;
 pub mod redemption;
+pub mod sanitize;
 pub mod semantic;
 pub mod sse;
 pub mod storage;

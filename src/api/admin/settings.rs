@@ -67,6 +67,8 @@ pub struct LimitsRequest {
     pub auto_continue: Option<bool>,
     /// 续写最多额外轮数（1~8，默认 3）
     pub auto_continue_max_rounds: Option<u8>,
+    /// 出站指纹脱敏开关（请求体侧；表头侧名单见 /api/sanitize）
+    pub sanitize_fingerprints: Option<bool>,
 }
 
 /// 签到设置请求体（enabled + 奖励区间）
@@ -171,6 +173,7 @@ pub async fn handle_get_limits(
             "queue_wait_seconds": config.usage.queue_wait_seconds,
             "auto_continue": config.usage.auto_continue,
             "auto_continue_max_rounds": config.usage.auto_continue_max_rounds,
+            "sanitize_fingerprints": config.usage.sanitize_fingerprints,
         })
     })))
 }
@@ -329,6 +332,11 @@ pub async fn handle_update_limits(
             config.usage.auto_continue,
             config.usage.auto_continue_max_rounds as u64,
         );
+    }
+    if let Some(v) = body.sanitize_fingerprints {
+        config.usage.sanitize_fingerprints = v;
+        // 同步进程级快照（转发层每个请求同步读取，保存即生效、无需重启）
+        crate::config::set_sanitize_fingerprints(v);
     }
     // 换号重试间隔立即生效（账号池运行时读取）
     state
