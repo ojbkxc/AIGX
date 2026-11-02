@@ -171,6 +171,10 @@ fn account(provider: &str, base_url: &str) -> AccountSession {
         total_latency_ms: 0,
         expires_at: None,
         in_flight: 0,
+        usage_query_interval_secs: None,
+        last_balance_at: None,
+        last_balance: None,
+        last_balance_error: None,
         created_at: 0,
         updated_at: 0,
     }
