@@ -91,6 +91,7 @@ import type {
   StorageOverviewItem,
   BackupImportResult,
   ScheduledTaskList,
+  ScheduledTaskItem,
   ScheduledTaskPatch,
   ScheduledTaskRunResult,
 } from '@/types';
@@ -505,7 +506,7 @@ export const api = {
   patchScheduledTask: (
     id: string,
     patch: ScheduledTaskPatch,
-  ): Promise<ApiResponse<ScheduledTaskList>> =>
+  ): Promise<ApiResponse<ScheduledTaskItem>> =>
     request('PATCH', `${API_BASE}/scheduled-tasks/${id}`, patch),
   runScheduledTask: (id: string): Promise<ApiResponse<ScheduledTaskRunResult>> =>
     request('POST', `${API_BASE}/scheduled-tasks/${id}/run`, {}),
