@@ -165,6 +165,23 @@ impl SqliteStore {
         Ok(keys)
     }
 
+    /// 列出前缀内、字典序在 `[from, to)` 区间的键（升序）。
+    ///
+    /// key 的时间戳/日期中段定长，字典序等价数值序；`key >= ? AND key < ?`
+    /// 直接吃主键 autoindex 的范围扫描，把「窗口类读」从全表降为近窗。
+    pub fn list_range(&self, prefix: &str, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn.lock();
+        let pattern = format!("{prefix}%");
+        let mut stmt = conn.prepare_cached(
+            "SELECT key FROM kv WHERE key LIKE ?1 AND key >= ?2 AND key < ?3 ORDER BY key",
+        )?;
+        let keys: Vec<String> = stmt
+            .query_map(rusqlite::params![&pattern, from, to], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(keys)
+    }
+
     /// 列出所有键值对（支持前缀匹配）
     pub fn list_pairs<T: DeserializeOwned>(
         &self,
@@ -257,6 +274,45 @@ mod tests {
         let (_dir, store) = new_test_store();
         let val: Option<String> = store.get("nonexistent").unwrap();
         assert_eq!(val, None);
+    }
+
+    #[test]
+    fn test_list_range_half_open_interval() {
+        let (_dir, store) = new_test_store();
+        for k in [
+            "dailyagg:d:2026-10-30",
+            "dailyagg:d:2026-10-31",
+            "dailyagg:d:2026-11-01",
+            "dailyagg:d:2026-11-02",
+            "dailyagg:u:alice:2026-11-01",
+        ] {
+            store.put(k, &1).unwrap();
+        }
+        // from 含键、to 开区间排除
+        let keys = store
+            .list_range(
+                "dailyagg:d:",
+                "dailyagg:d:2026-10-31",
+                "dailyagg:d:2026-11-02",
+            )
+            .unwrap();
+        assert_eq!(keys, vec!["dailyagg:d:2026-10-31", "dailyagg:d:2026-11-01"]);
+        // 空区间
+        let empty = store
+            .list_range(
+                "dailyagg:d:",
+                "dailyagg:d:2026-12-01",
+                "dailyagg:d:2026-12-31",
+            )
+            .unwrap();
+        assert!(empty.is_empty());
+        // 前缀过滤生效：跨整个前缀族但排除其他前缀
+        let all = store
+            .list_range("dailyagg:", "dailyagg:", "dailyagg:~")
+            .unwrap();
+        assert_eq!(all.len(), 5);
+        let other = store.list("reqlog:").unwrap();
+        assert!(other.is_empty());
     }
 
     #[test]

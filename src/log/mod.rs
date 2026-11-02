@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use crate::storage::FileStore;
 
+pub mod daily_agg;
 pub mod inflight;
 
 // ── RequestLog ─────────────────────────────────────────────────────
@@ -1283,6 +1284,8 @@ pub struct LogStore {
     pub requests: RequestLogStore,
     pub audits: AuditLogStore,
     pub security: SecurityEventStore,
+    /// 按天聚合（记账热路径同步维护，报表读它不扫明细）。
+    pub daily: daily_agg::DailyAggStore,
 }
 
 impl LogStore {
@@ -1290,14 +1293,19 @@ impl LogStore {
         Self {
             requests: RequestLogStore::new(store.clone()),
             audits: AuditLogStore::new(store.clone()),
-            security: SecurityEventStore::new(store),
+            security: SecurityEventStore::new(store.clone()),
+            daily: daily_agg::DailyAggStore::new(store),
         }
     }
 
     /// 便捷方法：记录请求日志（忽略错误，仅 tracing）
     pub fn record_request(&self, log: RequestLog) {
-        if let Err(e) = self.requests.add(log) {
-            tracing::warn!("Failed to record request log: {e}");
+        match self.requests.add(log) {
+            Ok(entry) => {
+                // 聚合失败只 warn：丢一条统计仅报表少一个数，不影响转发/计费。
+                self.daily.record(&entry);
+            }
+            Err(e) => tracing::warn!("Failed to record request log: {e}"),
         }
     }
 

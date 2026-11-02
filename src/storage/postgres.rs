@@ -47,6 +47,12 @@ enum Cmd {
         limit: usize,
         reply: SyncSender<anyhow::Result<Vec<String>>>,
     },
+    ListRange {
+        prefix: String,
+        from: String,
+        to: String,
+        reply: SyncSender<anyhow::Result<Vec<String>>>,
+    },
 }
 
 /// PostgreSQL 持久化 KV 存储（同步接口，内部桥接 sqlx）
@@ -161,6 +167,18 @@ impl PgStore {
         let new_value = f(existing);
         self.put(key, &new_value)?;
         Ok(old)
+    }
+
+    /// 前缀内字典序 `[from, to)` 区间的键（升序，索引范围扫描）
+    pub fn list_range(&self, prefix: &str, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
+        let (reply, rx) = sync_channel(1);
+        self.send(Cmd::ListRange {
+            prefix: prefix.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            reply,
+        })?;
+        rx.recv()?
     }
 
     fn send(&self, cmd: Cmd) -> anyhow::Result<()> {
@@ -281,6 +299,30 @@ fn pg_worker(rx: Receiver<Cmd>, url: &str, max_conn: u32) -> anyhow::Result<()> 
                         .fetch_all(&pool)
                         .await
                         .map_err(|e| anyhow::anyhow!("pg list_latest: {e}"))?;
+                        Ok::<Vec<String>, anyhow::Error>(
+                            rows.into_iter().map(|r| r.get::<String, _>(0)).collect(),
+                        )
+                    }
+                    .await;
+                    let _ = reply.send(r);
+                }
+                Cmd::ListRange {
+                    prefix,
+                    from,
+                    to,
+                    reply,
+                } => {
+                    let pattern = format!("{prefix}%");
+                    let r = async {
+                        let rows = sqlx::query(
+                            "SELECT key FROM kv WHERE key LIKE $1 AND key >= $2 AND key < $3 ORDER BY key",
+                        )
+                        .bind(&pattern)
+                        .bind(&from)
+                        .bind(&to)
+                        .fetch_all(&pool)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("pg list_range: {e}"))?;
                         Ok::<Vec<String>, anyhow::Error>(
                             rows.into_iter().map(|r| r.get::<String, _>(0)).collect(),
                         )

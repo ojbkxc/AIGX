@@ -146,6 +146,17 @@ impl JsonFileStore {
         Ok(keys)
     }
 
+    /// 前缀内字典序 `[from, to)` 区间的键（与 SqliteStore::list_range 同语义，
+    /// JSON 后端 list + filter 降级）。
+    pub fn list_range(&self, prefix: &str, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
+        // list 已按字典序升序，filter 保序，无需再排。
+        self.list(prefix).map(|keys| {
+            keys.into_iter()
+                .filter(|k| k.as_str() >= from && k.as_str() < to)
+                .collect()
+        })
+    }
+
     /// 原子插入（key 已存在返回 false）。JSON 后端用写锁近似 CAS：
     /// 非默认 feature，仅保证单进程内的互斥（跨进程靠文件系统，尽力而为）。
     pub fn put_if_absent<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<bool> {
@@ -283,6 +294,18 @@ impl FileStore {
             FileStoreInner::Sqlite(s) => s.list_latest_keys(prefix, limit),
             #[cfg(feature = "postgres")]
             FileStoreInner::Postgres(p) => p.list_latest_keys(prefix, limit),
+        }
+    }
+
+    /// 列出前缀内、字典序在 `[from, to)` 区间的键（升序）。
+    ///
+    /// 供按天聚合的窗口类读用：定长时间戳/日期中段使字典序等价数值序，
+    /// 键范围扫把「最近 N 分钟」类查询从全表降为近窗（吃主键索引）。
+    pub fn list_range(&self, prefix: &str, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.list_range(prefix, from, to),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => p.list_range(prefix, from, to),
         }
     }
 
