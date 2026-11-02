@@ -131,7 +131,7 @@ AIGX `frontend/src/pages/ModelManage.tsx`（2115 行）+ `src/model/manage.rs` +
 | 项 | 上游 | AIGX 现状 | 落点 |
 |---|---|---|---|
 | DPoP 私钥随凭据落盘 | ✅ `dpop_key_pair` 落库 | ✅ **已补**（登录落 `dpop_d`/`code_verifier` 到 `Credential.fields`，refresh_token 落 `refresh_secret`） | `src/account_login/mod.rs`（`LoginFlow::extra_fields/refresh_token` + `persist_account`）、`src/account_login/codearts.rs` |
-| refresh_token 落盘 + 自动续期（提前 15min） | ✅ `providers/codearts/refresh.rs` | ✅ **已补（CodeArts）** | `src/account_session/refresh.rs`（`refresh_codearts` + `supports_refresh`/`needs_refresh` 分派） |
+| refresh_token 落盘 + 自动续期（提前 15min） | ✅ `providers/codearts/refresh.rs`（含**单飞** `refresh_flight.rs`） | ✅ **已补** | `src/account_session/refresh.rs`（`refresh_codearts` + `supports_refresh`/`needs_refresh` 分派）、**单飞** `src/account_session/flight.rs`（无 Done 槽 + leader RAII 守卫，语义对齐上游 `refresh_flight.rs`）、**401 后强制刷新** `src/bridge/account.rs` `note_failure` → `store.mark_credential_rejected` |
 | OfficeAce 同样的 DPoP 续期 | ✅（协议不同） | ✅ **已补**（`refresh_officeace`：同一 STS 端点 + `DPoP` proof，表单少 `code_verifier`；续的是**控制面**临时 AK/SK，转发用网关 Basic 凭据不过期故不动。登录时把控制面凭据 + 一次性 refresh_token 整包 JSON 落 `refresh_secret`，签到/余额因此不再 2 小时后失效） | `src/account_session/refresh.rs`（`refresh_officeace`）、`src/account_login/officeace.rs`（`extra_fields`/`refresh_token`） |
 | 「无法生成本机 P-256 密钥」报错 | —— | ✅ **已修**（旧 `3e0c6421` 用 uuid 16 字节当 32 字节标量必失败；`f552cc06` 改 getrandom 32 字节，已含在 1.0.28） | `src/account_login/codearts.rs:72-99` |
 

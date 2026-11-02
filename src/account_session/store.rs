@@ -632,6 +632,44 @@ impl AccountSessionStore {
         CasOutcome::Updated
     }
 
+    /// 上游明确拒了这枚凭据（401/403）：把 `expires_at` 拉到现在。
+    ///
+    /// 两个后果，都是我们要的：
+    ///   1. `needs_refresh` 立刻为真 → 下一轮巡检（≤10 分钟）会去换证；
+    ///   2. `is_expired` 立刻为真 → `sweep` 把它标成 `expired` 移出轮换，
+    ///      不再拿一枚已死的令牌去撞上游（换证成功后 `update_tokens_cas` 会
+    ///      写回新的 `expires_at`，`sweep` 随即恢复 `enabled`）。
+    ///
+    /// 只对**支持续期**的 provider 生效：不可续期的家（如纯 Key 类）被标记后
+    /// 除重新登录/粘贴外无法自愈，那属于另一套语义，不在这里顺手改掉。
+    ///
+    /// 返回是否真的标了（provider 不支持续期 / 账号不存在时为 false）。
+    pub fn mark_credential_rejected(&self, id: &str, provider: &str) -> bool {
+        if !super::refresh::supports_refresh(provider) {
+            return false;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let snapshot = {
+            let mut sessions = self.inner.sessions.write();
+            let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
+                return false;
+            };
+            // 已经是「过期/待刷」状态就不重复写盘（避免 401 风暴下的无谓持久化）
+            if session.expires_at.is_some_and(|at| at > 0 && at <= now) {
+                return false;
+            }
+            session.expires_at = Some(now);
+            session.status = "expired".to_string();
+            session.last_error = Some("upstream rejected credential (401/403)".to_string());
+            session.updated_at = now;
+            session.clone()
+        };
+        if let Err(e) = self.persist(&snapshot) {
+            tracing::warn!("persist rejected credential {}: {e}", snapshot.id);
+        }
+        true
+    }
+
     /// 周期维护：清理过期冷却、同步凭证过期状态。返回本轮变更条数。
     pub fn sweep(&self, now: i64) -> u64 {
         let mut touched: Vec<AccountSession> = Vec::new();
@@ -887,6 +925,41 @@ mod tests {
             );
             // 凭证坏了，换模型也救不回来
             assert!(pool.acquire("ch", "other-model", None).is_none());
+        });
+    }
+
+    #[test]
+    fn rejected_credential_is_flagged_for_refresh() {
+        with_secret_dir("rejected-cred", || {
+            let pool = pool();
+            let mut account = session("ch", "acct", 0);
+            account.provider = "codearts".to_string();
+            account.refresh_secret = "refresh-token".to_string();
+            // 远端到期还早：光看 expires_at 判不出「凭据已被上游拒」
+            account.expires_at = Some(chrono::Utc::now().timestamp() + 3_600);
+            let account = pool.upsert(account).unwrap();
+            assert!(
+                !crate::account_session::refresh::needs_refresh(&account, chrono::Utc::now().timestamp()),
+                "离到期还有一小时，本来不该刷"
+            );
+
+            assert!(pool.mark_credential_rejected(&account.id, "codearts"));
+            let after = pool.get(&account.id).unwrap();
+            let now = chrono::Utc::now().timestamp();
+            assert!(after.is_expired(now), "被上游拒后要移出轮换");
+            assert_eq!("expired", after.status);
+            assert!(
+                crate::account_session::refresh::needs_refresh(&after, now),
+                "打完标必须排进续期队列 —— 否则账号就死在那了"
+            );
+
+            // 重复标记不重复写盘（第二次返回 false）
+            assert!(!pool.mark_credential_rejected(&account.id, "codearts"));
+
+            // 不可续期的 provider 不参与这套自愈
+            let plain = pool.upsert(session("ch", "plain", 0)).unwrap();
+            assert!(!pool.mark_credential_rejected(&plain.id, "openai"));
+            assert_eq!("enabled", pool.get(&plain.id).unwrap().status);
         });
     }
 

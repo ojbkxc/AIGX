@@ -8,8 +8,11 @@
 //!   与 access 分开写会把账号弄丢）；
 //! - 过期窗口按家不同：qoder/autoclaw 提前 5 分钟，trae 提前 24 小时，
 //!   codearts 提前 15 分钟，officeace 提前 30 分钟；
-//! - 不做单飞与指数退避：调度是 10 分钟一轮的串行巡检，重复刷新幂等
-//!   （refresh_token 轮换后旧的失效，但 CAS 保证只有一次写入生效）。
+//! - **单飞**（`account_session::flight`）：同一份凭据的并发刷新只发一次请求。
+//!   CodeArts / OfficeAce 的 refresh_token 是**一次性**的，并发换证会把它烧掉 ——
+//!   CAS 只保证「写回一次生效」，拦不住令牌被消耗两次，所以并发必须在发请求前
+//!   收口（巡检轮次与管理面强制刷新端点会撞车）。不做指数退避：调度是 10 分钟
+//!   一轮的串行巡检。
 //!
 //! 刷新令牌来源：`AccountSession.refresh_secret`（管理面可粘贴；登录流程也会
 //! 捕获 —— 见 `LoginFlow::refresh_token`）。CodeArts 续期除 refresh_token 还要
@@ -44,13 +47,19 @@ const OFFICEACE_TOKEN_URL: &str = "https://sts.cn-north-4.myhuaweicloud.com/v1/o
 const OFFICEACE_CLIENT_ID: &str = "pdp5_for_agentarts";
 
 /// 一次刷新的结果。`Invalid` = refresh_token 也死了，只能重新登录。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RefreshOutcome {
     Refreshed(String),
     Stale,
     Invalid(String),
     Failed(String),
 }
+
+/// 进程级单飞表：key = provider + 账号 id + 凭据指纹（见 `flight::key`）。
+///
+/// 载荷是 `RefreshOutcome` —— 等待者直接复用 leader 的结果，不再重复换证。
+static REFRESH_FLIGHTS: crate::account_session::flight::Table<RefreshOutcome> =
+    crate::account_session::flight::Table::new();
 
 /// 新令牌三件套（时间戳统一为 unix **秒**，与 `AccountSession.expires_at` 同口径）。
 struct TokenSet {
@@ -131,14 +140,44 @@ pub async fn refresh_expiring(pool: &AccountSessionStore, client: &Client) -> u6
 }
 
 /// 刷新单个账号并 CAS 落盘。失败不写任何字段。
+///
+/// 走**单飞**：同一份凭据的并发刷新只发一次真实请求，等待者复用 leader 的结果。
+/// 这是正确性要求而非优化 —— CodeArts / OfficeAce 的 refresh_token 一次性，
+/// 并发换证会把令牌烧掉（CAS 拦不住令牌被消耗两次）。
 pub async fn refresh_one(
     pool: &AccountSessionStore,
     client: &Client,
     session: &AccountSession,
 ) -> RefreshOutcome {
+    let key = crate::account_session::flight::key(
+        &session.provider,
+        &session.id,
+        &session.refresh_secret,
+    );
+    match crate::account_session::flight::fly(&REFRESH_FLIGHTS, &key, move || {
+        refresh_one_inner(pool, client, session)
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        // 单飞层的错误（等待超时 / leader 被取消）当作一次失败：不改写凭据，
+        // 下一轮巡检或用户重试都会重新发起。
+        Err(error) => RefreshOutcome::Failed(error),
+    }
+}
+
+/// 真正干活的路径（由单飞的 leader 执行）：换证 → CAS 落盘。
+///
+/// 返回 `Err` 只用于单飞层能识别的异常；业务上的失败（令牌失效、网络错误）
+/// 一律是 `Ok(RefreshOutcome::Invalid/Failed)` —— 它们不该被当成「单飞崩了」。
+async fn refresh_one_inner(
+    pool: &AccountSessionStore,
+    client: &Client,
+    session: &AccountSession,
+) -> Result<RefreshOutcome, String> {
     let expected = session.credential.secret_plain();
     if expected.trim().is_empty() {
-        return RefreshOutcome::Failed("账号没有 access token".to_string());
+        return Ok(RefreshOutcome::Failed("账号没有 access token".to_string()));
     }
     let result = match session.provider.as_str() {
         "qoder" | "qoder-intl" => refresh_qoder(client, session).await,
@@ -147,16 +186,16 @@ pub async fn refresh_one(
         "codearts" => refresh_codearts(client, session).await,
         "officeace" => refresh_officeace(client, session).await,
         other => {
-            return RefreshOutcome::Failed(format!("{other} 暂不支持自动刷新"));
+            return Ok(RefreshOutcome::Failed(format!("{other} 暂不支持自动刷新")));
         }
     };
     let tokens = match result {
         Ok(tokens) => tokens,
-        Err(outcome) => return outcome,
+        Err(outcome) => return Ok(outcome),
     };
     let mut next = session.credential.clone();
     next.secret = tokens.access.clone();
-    match pool.update_tokens_cas(
+    Ok(match pool.update_tokens_cas(
         &session.id,
         &expected,
         next,
@@ -172,7 +211,7 @@ pub async fn refresh_one(
         )),
         CasOutcome::Stale => RefreshOutcome::Stale,
         CasOutcome::Missing => RefreshOutcome::Failed("账号已被删除".to_string()),
-    }
+    })
 }
 
 /// 发 JSON 请求，返回 (status, body)。

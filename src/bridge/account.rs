@@ -133,6 +133,21 @@ impl AccountBridge {
             model,
             secs
         );
+        // 上游明确拒了这枚凭据（401/403）：标记为待刷（对齐 Agent2API「401 后强制
+        // 刷新」）。凭据是一次性的 refresh_token 换来的，真失效时 waits 到
+        // 「临期」还早，光靠 `expires_at` 判不出来 —— 不打这个标，续期永远不会
+        // 触发（`needs_refresh` 恒假），账号就死在那了。
+        if matches!(failure, crate::channel::circuit_breaker::FailureType::AuthFailed) {
+            if self
+                .sessions
+                .mark_credential_rejected(lease.id(), &lease.session().provider)
+            {
+                tracing::info!(
+                    "account {} credential rejected upstream; queued for refresh",
+                    lease.id()
+                );
+            }
+        }
         crate::api::openai::is_retryable_bridge_error(error)
     }
 
