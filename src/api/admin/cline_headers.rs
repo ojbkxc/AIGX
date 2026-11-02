@@ -104,8 +104,11 @@ pub async fn handle_update_cline_headers(
 
     // 持久化（config.toml）+ 进程级快照热更（下一请求生效）
     // 配置侧是 HashMap（serde 默认宽度），校验侧用 BTreeMap（确定性遍历），
-    // 这里做一次转换而不是为了对齐容器去改校验函数的语义。
-    config.usage.cline_headers.overrides = overrides.iter().cloned().collect();
+    // 这里逐对搬一次；BTreeMap 的 iter 产出 (&K, &V)，需显式解引用再克隆。
+    config.usage.cline_headers.overrides = overrides
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     state.config_manager.update(config).await.map_err(|e| {
         super::common::error_response(
             &format!("Cline 伪装头持久化失败: {e}"),
