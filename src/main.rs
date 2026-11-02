@@ -121,6 +121,11 @@ async fn main() -> anyhow::Result<()> {
     crate::config::set_strip_newline_keepalive(config.usage.strip_newline_keepalive);
     // models.dev 元数据补齐开关快照（模型元信息查询与刷新协程同步读取）
     crate::config::set_models_dev_enabled(config.usage.models_dev_enabled);
+    // 排队等待设置快照（Qoder 桥每个请求同步读取，见 config::queue_settings）
+    crate::config::set_queue_settings(
+        config.usage.queue_max_waits as u64,
+        config.usage.queue_wait_seconds as u64,
+    );
     // 按次计费固定额度快照（数据面同步路径读取，见 config::billing_flat_quota）
     crate::config::set_billing_flat_quota(config.usage.billing_flat_quota);
 

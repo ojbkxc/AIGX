@@ -4,15 +4,19 @@
 //! - 推理：`POST {gateway}/algo/api/v2/service/pro/sse/agent_chat_generation`
 //!   （`FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`）；
 //! - 鉴权是 COSY 自签名（见 [`super::qoder_cosy`]），**请求体先编码再签名**；
-//! - 响应 SSE 多包一层信封 `{statusCodeValue, body}`，内层才是 OpenAI chunk。
+//! - 响应 SSE 多包一层信封 `{statusCodeValue, body}`，内层才是 OpenAI chunk；
+//! - 免费模型繁忙走**排队制**（HTTP 403 + 业务码 10605，或 200 信封内的同族
+//!   JSON），排队态在首帧下发之前按上游建议退避重发（见 [`queue_backoff`]）。
 //!
 //! 账号身份（uid / email / name / machine_id）从访问令牌的 JWT 声明里读，
 //! 读不到时用令牌哈希派生稳定值（上游只把它当展示与设备标识）。
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
+use futures::stream::BoxStream;
 use futures::StreamExt;
 use serde_json::{json, Map, Value};
 
@@ -115,6 +119,86 @@ impl Bridge for QoderBridge {
         _ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
         let identity = identity_of(&self.token);
+        // ── 为什么这里是一个循环（对照 Agent2API qoder::forward_conversation）──
+        // 上游对免费模型走排队制，繁忙时回「暂不可服务，建议 N 秒后再来」
+        // （403 + 10605，或 200 的信封首帧里同族 JSON）。那是**可以原地等
+        // 一会儿重发**的状态（官方 CLI 就这么做），所以「构造 → 发送 →
+        // 预读首帧」每轮重跑：排队就睡一觉再来，其它错误按原样返回。
+        // 首帧之后（流已开始下发）不再退避 —— 那时客户端的 HTTP 头早已
+        // 发出，换不了任何东西，排队帧只能在流里落定成错误。
+        let mut queue_waits: usize = 0;
+        let mut queue_waited_ms: u64 = 0;
+        loop {
+            // 每轮都重新构造：COSY 签名覆盖 request_id 与请求体，**重放同一份
+            // 签名**会被上游判成重复请求（403 / code 103），所以退避之后必须
+            // 换一份新的 request_id 与签名（build_body 每轮生成新 id）。
+            let mut state = match self.attempt_open(req, &identity).await {
+                Ok(state) => state,
+                Err(Attempt::Fatal(e)) => return Err(e),
+                Err(Attempt::Queued(queued)) => {
+                    if let Err(e) =
+                        queue_backoff(&mut queue_waits, &mut queue_waited_ms, &queued).await
+                    {
+                        return Err(e);
+                    }
+                    continue;
+                }
+            };
+            // 首帧预读：拿到 HTTP 200 不能直接返回 —— 排队/业务错误恰恰写在
+            // 200 的信封里。此刻还没有任何字节下发，排队可以无损退避重发。
+            // 等待上限与编排层首帧守卫同一预算（响应头等待超时）。
+            let deadline = crate::bridge::sse_first_event_deadline();
+            let head = tokio::time::timeout(deadline, advance(&mut state)).await;
+            let first = match head {
+                Err(_) => {
+                    return Err(BridgeError::Timeout {
+                        elapsed_ms: deadline.as_millis() as u64,
+                        cause: "Qoder 首帧等待超时（上游建流后未下发事件）".to_string(),
+                    })
+                }
+                Ok(Step::Queued(queued)) => {
+                    if let Err(e) =
+                        queue_backoff(&mut queue_waits, &mut queue_waited_ms, &queued).await
+                    {
+                        return Err(e);
+                    }
+                    continue;
+                }
+                // 上游正常关闭（空流）：返回空流，交由下游空响应机制处理
+                Ok(Step::End) => return Ok(futures::stream::empty().boxed()),
+                Ok(Step::Item(item)) => item,
+            };
+            // 续流：状态机原样带下去，预读帧补回流首（编排层的首帧守卫会
+            // 立即拿到已到达的首帧，不会二次等待）
+            let rest = futures::stream::unfold(state, |mut state| async move {
+                match advance(&mut state).await {
+                    Step::Item(item) => Some((item, state)),
+                    Step::End => None,
+                    // 中途才出现的排队信封：头已发出、退不了避，只能在流里
+                    // 落定成 503 错误收尾（与上游流内错误同一语义）
+                    Step::Queued(queued) => {
+                        state.flow.ended = true;
+                        Some((Err(queued_error(&queued, 0)), state))
+                    }
+                }
+            });
+            return Ok(futures::stream::once(async move { first })
+                .chain(rest)
+                .boxed());
+        }
+    }
+}
+
+impl QoderBridge {
+    /// 一次上游往返：构造 body → 编码 → 签名 → 发送 → 建流状态。
+    ///
+    /// HTTP 非 2xx 的响应体先过排队识别（403 + 10605 是排队族的主形态）；
+    /// 其它失败按原样交回（`Attempt::Fatal`）。
+    async fn attempt_open(
+        &self,
+        req: &ChatFormat,
+        identity: &Identity,
+    ) -> Result<StreamState, Attempt> {
         let body = build_body(req, &identity.user_id);
         let encoded = qoder_cosy::encode_body(body.to_string().as_bytes());
         let url = self.url();
@@ -129,7 +213,7 @@ impl Bridge for QoderBridge {
                 machine_id: &identity.machine_id,
             },
         )
-        .map_err(BridgeError::Config)?;
+        .map_err(|e| Attempt::Fatal(BridgeError::Config(e)))?;
         headers.push(("Content-Type".to_string(), "application/json".to_string()));
         headers.push(("Accept".to_string(), "text/event-stream".to_string()));
         headers.push(("Cache-Control".to_string(), "no-cache".to_string()));
@@ -144,83 +228,100 @@ impl Bridge for QoderBridge {
         let resp = builder
             .send()
             .await
-            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+            .map_err(|e| Attempt::Fatal(BridgeError::Transport(e.to_string())))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             let text = resp.text().await.unwrap_or_default();
-            return Err(BridgeError::upstream_status(
+            if let Some(queued) = scan_queue_signals(&text) {
+                return Err(Attempt::Queued(queued));
+            }
+            return Err(Attempt::Fatal(BridgeError::upstream_status(
                 status,
                 format!("Qoder 返回 HTTP {status}：{}", head(&text)),
-            ));
+            )));
         }
 
-        let id = format!("qoder-{}", uuid::Uuid::new_v4());
-        let model = req.model.clone();
-        let bytes = resp.bytes_stream();
+        Ok(StreamState {
+            bytes: resp.bytes_stream().boxed(),
+            decoder: SseDecoder::new(),
+            pending: VecDeque::new(),
+            flow: Flow {
+                id: format!("qoder-{}", uuid::Uuid::new_v4()),
+                model: req.model.clone(),
+                ended: false,
+            },
+        })
+    }
+}
 
-        let stream = futures::stream::unfold(
-            (
-                bytes,
-                SseDecoder::new(),
-                VecDeque::<Result<ChatChunk, BridgeError>>::new(),
-                Flow {
-                    id,
-                    model,
-                    ended: false,
-                },
-            ),
-            |(mut bytes, mut decoder, mut pending, mut flow)| async move {
-                loop {
-                    if let Some(item) = pending.pop_front() {
-                        return Some((item, (bytes, decoder, pending, flow)));
-                    }
-                    if flow.ended {
-                        return None;
-                    }
-                    match bytes.next().await {
-                        Some(Ok(chunk)) => {
-                            let events = decoder.feed(chunk.as_ref());
-                            for event in events {
-                                match decode_event(&event, &flow.id, &flow.model) {
-                                    Decoded::Nothing => {}
-                                    Decoded::Chunk(chunk) => pending.push_back(Ok(chunk)),
-                                    Decoded::Done => {
-                                        pending.push_back(Ok(ChatChunk {
-                                            id: flow.id.clone(),
-                                            model: flow.model.clone(),
-                                            delta: ChatDelta::default(),
-                                            finish_reason: Some(FinishReason::Stop),
-                                            usage: None,
-                                        }));
-                                        flow.ended = true;
-                                    }
-                                    Decoded::Err(err) => {
-                                        pending.push_back(Err(err));
-                                        flow.ended = true;
-                                    }
-                                }
-                            }
+/// 流推进状态（原 `stream::unfold` 元组的具名化：预读与续流共用一台状态机）。
+struct StreamState {
+    bytes: BoxStream<'static, Result<bytes::Bytes, reqwest::Error>>,
+    decoder: SseDecoder,
+    pending: VecDeque<Result<ChatChunk, BridgeError>>,
+    flow: Flow,
+}
+
+/// 状态机推进一步的结果。
+enum Step {
+    /// 产出一个下发项（或内建错误帧）
+    Item(Result<ChatChunk, BridgeError>),
+    /// 读到排队信封（该轮响应的剩余字节作废，由调用方决定退避或落定）
+    Queued(Queued),
+    /// 流已终止且无积压
+    End,
+}
+
+/// 推进状态机直到产出：pending 有货先出货；否则持续读网络包喂解码器。
+async fn advance(state: &mut StreamState) -> Step {
+    loop {
+        if let Some(item) = state.pending.pop_front() {
+            return Step::Item(item);
+        }
+        if state.flow.ended {
+            return Step::End;
+        }
+        match state.bytes.next().await {
+            Some(Ok(chunk)) => {
+                let events = state.decoder.feed(chunk.as_ref());
+                for event in events {
+                    match decode_event(&event, &state.flow.id, &state.flow.model) {
+                        Decoded::Nothing => {}
+                        Decoded::Chunk(chunk) => state.pending.push_back(Ok(chunk)),
+                        Decoded::Done => {
+                            state.pending.push_back(Ok(stop_chunk(&state.flow)));
+                            state.flow.ended = true;
                         }
-                        Some(Err(e)) => {
-                            pending.push_back(Err(BridgeError::Transport(e.to_string())));
-                            flow.ended = true;
+                        Decoded::Err(err) => {
+                            state.pending.push_back(Err(err));
+                            state.flow.ended = true;
                         }
-                        None => {
-                            pending.push_back(Ok(ChatChunk {
-                                id: flow.id.clone(),
-                                model: flow.model.clone(),
-                                delta: ChatDelta::default(),
-                                finish_reason: Some(FinishReason::Stop),
-                                usage: None,
-                            }));
-                            flow.ended = true;
-                        }
+                        Decoded::Queued(queued) => return Step::Queued(queued),
                     }
                 }
-            },
-        );
+            }
+            Some(Err(e)) => {
+                state
+                    .pending
+                    .push_back(Err(BridgeError::Transport(e.to_string())));
+                state.flow.ended = true;
+            }
+            None => {
+                state.pending.push_back(Ok(stop_chunk(&state.flow)));
+                state.flow.ended = true;
+            }
+        }
+    }
+}
 
-        Ok(stream.boxed())
+/// 流收尾帧（正常 stop，无增量）。
+fn stop_chunk(flow: &Flow) -> ChatChunk {
+    ChatChunk {
+        id: flow.id.clone(),
+        model: flow.model.clone(),
+        delta: ChatDelta::default(),
+        finish_reason: Some(FinishReason::Stop),
+        usage: None,
     }
 }
 
@@ -235,6 +336,7 @@ enum Decoded {
     Chunk(ChatChunk),
     Done,
     Err(BridgeError),
+    Queued(Queued),
 }
 
 fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
@@ -261,6 +363,11 @@ fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
                                 .unwrap_or_else(|| body.to_string())
                         })
                         .unwrap_or_default();
+                    // 信封业务错误先判排队：排队帧交回调用方退避重发（HTTP 200
+                    // 里还没下发任何字节，重发无损），其它错误照旧落定成流内错误
+                    if let Some(queued) = scan_queue_signals(&raw) {
+                        return Decoded::Queued(queued);
+                    }
                     return Decoded::Err(BridgeError::upstream_status(
                         status as u16,
                         format!("Qoder 上游错误（{status}）：{}", head(&raw)),
@@ -586,6 +693,235 @@ fn head(text: &str) -> String {
     text.chars().take(240).collect()
 }
 
+// ── 排队等待（对照 Agent2API qoder::chat::Queued / queue_backoff）──────────
+//
+// 上游对免费模型（如 qfmodel）走排队制：空闲直接出字，繁忙时回一句
+// 「暂不可服务，建议 N 秒后再来」——**不是错误，是暂时排不上号**。官方
+// CLI 与参考实现（qoder2api / 9router）的处理都是按建议时长睡一觉再发
+// 同一请求。排队族的主形态是 HTTP 403 + 业务码 10605，正文常是多层嵌套
+// 的 JSON 字符串（`{"code":"403","message":"{\"code\":\"10605\",…}"}`），
+// 取值要顺着 message/body/data 一路钻；另一形态是 HTTP 200 的信封首帧
+// （statusCodeValue=403 + 同族 body），因此调用方必须**预读首帧**才能
+// 无损重发（见 chat_stream 的循环）。
+//
+// 排队与一般错误的唯一区别是「还能再试」：做成类型而不是看状态码猜，
+// 是因为 403 会同时骗过鉴权续期与熔断分类（10605 曾被误报成登录失效）。
+
+/// 一次上游往返的结果分类（桥内私有，不进入 BridgeError 体系）。
+enum Attempt {
+    /// 排队态：调用方退避后重建请求重发
+    Queued(Queued),
+    /// 其它失败：原样交回编排层（换渠道 / 熔断都按既有语义）
+    Fatal(BridgeError),
+}
+
+/// 上游排队态信号（业务码 10605 那一族字段）。
+struct Queued {
+    /// 上游建议的重试间隔（毫秒，已带缺省与 5~30 秒钳制）
+    retry_after_ms: u64,
+    /// 上游原文（截断；进日志与最终错误体，便于排障）
+    raw: String,
+    /// 排障信息（`queueType` / `queueCount` / 服务可用性）
+    detail: String,
+}
+
+/// 排队中：官方错误码表 "10605 Model request is queued"。
+const QUEUE_CODE: &str = "10605";
+/// 嵌套 JSON 的钻取深度上限（防病态输入下的环；实测两层就到底了）。
+const SIGNAL_SCAN_DEPTH: usize = 5;
+
+/// JS 真值语义（`isQueued` / `serviceAvailable` 上游给过布尔与数字两种形态）。
+fn signal_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64() != Some(0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+    }
+}
+
+/// 顺着嵌套 JSON 抠排队信号。
+///
+/// 判定：业务码 10605 是硬信号；`isQueued` 为真；或「声明服务不可用 +
+/// 带了队列档位」的组合（上游换码时的兜底）。正文不是 JSON 时走裸文本
+/// 兜底（转义形态把反斜杠去掉即可匹配）。
+fn scan_queue_signals(raw: &str) -> Option<Queued> {
+    let mut codes: Vec<String> = Vec::new();
+    let mut is_queued = false;
+    let mut retry_after_secs: Option<u64> = None;
+    let mut queue_type: Option<String> = None;
+    let mut service_available: Option<bool> = None;
+    let mut queue_count: Option<i64> = None;
+
+    let mut current = Some(raw.to_string());
+    let mut depth = 0usize;
+    while let Some(text) = current.take() {
+        depth += 1;
+        if depth > SIGNAL_SCAN_DEPTH {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            break;
+        };
+        if let Some(code) = value.get("code") {
+            match code {
+                Value::String(text) => codes.push(text.trim().to_string()),
+                Value::Number(number) => codes.push(number.to_string()),
+                _ => {}
+            }
+        }
+        if value.get("isQueued").map(signal_truthy).unwrap_or(false) {
+            is_queued = true;
+        }
+        if retry_after_secs.is_none() {
+            retry_after_secs = ["retryAfterSeconds", "waitTime"]
+                .iter()
+                .find_map(|key| value.get(*key).and_then(seconds_of));
+        }
+        if queue_type.is_none() {
+            queue_type = value
+                .get("queueType")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if service_available.is_none() {
+            service_available = value.get("serviceAvailable").map(signal_truthy);
+        }
+        if queue_count.is_none() {
+            queue_count = value.get("queueCount").and_then(Value::as_i64);
+        }
+        // 下一层：内嵌的 JSON 字符串（上游一层套一层地放 message / body / data）
+        current = ["message", "body", "data", "error"]
+            .iter()
+            .find_map(|key| value.get(*key).and_then(Value::as_str))
+            .map(str::to_string)
+            .filter(|text| text.trim_start().starts_with('{'));
+    }
+
+    let hit = codes.iter().any(|code| code == QUEUE_CODE)
+        || is_queued
+        || (queue_type.is_some() && service_available == Some(false))
+        || raw_has_queue_code(raw);
+    if !hit {
+        return None;
+    }
+    let mut notes: Vec<String> = Vec::new();
+    if let Some(kind) = &queue_type {
+        notes.push(format!("队列 {kind}"));
+    }
+    if let Some(count) = queue_count {
+        notes.push(format!("排队 {count}"));
+    }
+    if service_available == Some(false) {
+        notes.push("上游声明服务不可用".to_string());
+    }
+    Some(Queued {
+        retry_after_ms: queue_wait_ms(retry_after_secs),
+        raw: raw.chars().take(300).collect(),
+        detail: notes.join("，"),
+    })
+}
+
+/// 秒数的两种形态（数字 / 数字字符串）。
+fn seconds_of(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) => text.trim().parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+/// 裸文本兜底：正文不是 JSON 时也能认出业务码（`\"code\":\"10605\"` 这类
+/// 转义形态把反斜杠去掉就与普通形态同形）。
+fn raw_has_queue_code(raw: &str) -> bool {
+    let flat: String = raw.chars().filter(|ch| *ch != '\\').collect();
+    flat.contains(&format!("\"code\":\"{QUEUE_CODE}\""))
+        || flat.contains(&format!("\"code\":{QUEUE_CODE}"))
+        || flat.contains(&format!("\"code\": \"{QUEUE_CODE}\""))
+}
+
+/// 单次排队等待的时长（毫秒）：跟随上游建议，缺省 15 秒，钳在 5~30 秒。
+///
+/// 上限 30 秒与实测的建议值区间（9~30 秒）同档：等得比上游建议更久没有
+/// 意义，只会把客户端的首字等待拖长。
+fn queue_wait_ms(retry_after_secs: Option<u64>) -> u64 {
+    const MIN_SECS: u64 = 5;
+    const MAX_SECS: u64 = 30;
+    const FALLBACK_SECS: u64 = 15;
+    retry_after_secs
+        .unwrap_or(FALLBACK_SECS)
+        .clamp(MIN_SECS, MAX_SECS)
+        * 1000
+}
+
+/// 排队态落定：**503** + 一句「不是登录态或额度问题」。
+///
+/// 状态码不能是 401 / 429：那两档在编排层与本项目内部都带动作（刷新凭证 /
+/// 落限额冷却），排队既不是凭证问题也不是账号问题。与参考实现
+/// （qoder2api 插件的 `qoder_model_busy`）取同一档。
+fn queued_error(queued: &Queued, waited_ms: u64) -> BridgeError {
+    let waited = if waited_ms >= 1000 {
+        waited_ms / 1000
+    } else {
+        0
+    };
+    let waited_note = if waited > 0 {
+        format!("（已按上游建议等待 {waited} 秒仍不可服务）")
+    } else {
+        String::new()
+    };
+    BridgeError::upstream_status(
+        503,
+        format!(
+            "qoder_model_busy：上游模型排队中，暂不可服务{waited_note}（上游原文：{}）",
+            queued.raw
+        ),
+    )
+}
+
+/// 排队退避：还能等就睡一觉并返回 `Ok`（调用方重新签名再发一次）；
+/// 预算用尽返回 `Err`（排队落定成 503，文案带已等待时长与上游原文）。
+///
+/// ── 等待预算为什么要看「响应头等待超时」────────────────────────
+/// 排队等待发生在**首帧之前**（客户端的 200 头还没发出），吃掉的是用户给
+/// 「等待响应超时」的那份预算（与首帧守卫同一快照，实时生效）。用户把它
+/// 调小就说明不接受一次请求卡那么久 —— 那就不等，直接给一条能看懂的排队
+/// 错误。`max_waits = 0` = 不等待：排队即 503 快速失败。
+async fn queue_backoff(
+    waits: &mut usize,
+    waited_ms: &mut u64,
+    queued: &Queued,
+) -> Result<(), BridgeError> {
+    let (max_waits, wait_seconds) = crate::config::queue_settings();
+    // 单次时长：设置里写死了就用它，否则跟随上游建议（已在分类时钳过）
+    let wait_ms = if wait_seconds > 0 {
+        wait_seconds.saturating_mul(1000)
+    } else {
+        queued.retry_after_ms
+    };
+    let budget_ms = crate::bridge::sse_first_event_deadline().as_millis() as u64;
+    if *waits >= max_waits as usize || waited_ms.saturating_add(wait_ms) > budget_ms {
+        return Err(queued_error(queued, *waited_ms));
+    }
+    *waits += 1;
+    *waited_ms += wait_ms;
+    tracing::info!(
+        "⏳ Qoder 上游模型排队中{}，{} 秒后重试（第 {}/{} 次）",
+        if queued.detail.is_empty() {
+            String::new()
+        } else {
+            format!("（{}）", queued.detail)
+        },
+        wait_ms / 1000,
+        *waits,
+        max_waits,
+    );
+    tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,5 +1000,38 @@ mod tests {
         let identity = identity_of("not-a-jwt-token");
         assert!(!identity.user_id.is_empty());
         assert_eq!(identity.machine_id.len(), 32);
+    }
+
+    #[test]
+    fn queue_signal_recognizes_nested_10605() {
+        // 真实形态：HTTP 403 正文三层嵌套（外层 code=403，内层 message 又是 JSON 字符串）
+        let raw = r#"{"code":"403","message":"{\"code\":\"10605\",\"message\":\"{\\\"isQueued\\\":true,\\\"retryAfterSeconds\\\":20,\\\"queueType\\\":\\\"p3\\\",\\\"serviceAvailable\\\":false}\"}"}"#;
+        let queued = scan_queue_signals(raw).expect("嵌套 10605 必须识别成排队");
+        assert_eq!(queued.retry_after_ms, 20_000);
+        assert!(queued.detail.contains("队列 p3"));
+        assert!(queued.detail.contains("服务不可用"));
+    }
+
+    #[test]
+    fn queue_signal_falls_back_to_bare_text() {
+        let raw = "upstream returned error: \\\"code\\\":\\\"10605\\\"";
+        assert!(scan_queue_signals(raw).is_some());
+        let not_queue =
+            r#"{"code":"403","message":"{\"code\":\"105\",\"message\":\"token expired\"}"}"#;
+        assert!(
+            scan_queue_signals(not_queue).is_none(),
+            "鉴权失效绝不能判成排队"
+        );
+    }
+
+    #[test]
+    fn queue_wait_ms_follows_and_clamps_suggestion() {
+        assert_eq!(queue_wait_ms(None), 15_000);
+        assert_eq!(queue_wait_ms(Some(20)), 20_000);
+        assert_eq!(queue_wait_ms(Some(2)), 5_000);
+        assert_eq!(queue_wait_ms(Some(300)), 30_000);
+        // 数字字符串形态同值（上游给过 "20"）
+        let raw = r#"{"isQueued":true,"waitTime":"12"}"#;
+        assert_eq!(scan_queue_signals(raw).unwrap().retry_after_ms, 12_000);
     }
 }

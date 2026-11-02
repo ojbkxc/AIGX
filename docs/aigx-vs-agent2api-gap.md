@@ -24,8 +24,8 @@
 | 信任反代头 | — | — | ✅ | `GatewayPanel.tsx:25,62` |
 | 开发者角色兼容（developer→system） | 开 | `/api/developer-role-compat` | ✅ | 并入 `/api/gateway/prompt`：`src/api/admin/settings.rs:671,706`、消费点 `src/api/openai.rs:1503`、`src/api/anthropic.rs:332` |
 | 系统提示词模式/文件/正文/按家覆盖/三段 | passthrough | `/api/prompt` | 🟡 | AIGX 有 `/api/gateway/prompt`（`main.rs:1404`）；**「按提供商覆盖」与「三段(ZCode)」需逐项确认** |
-| 排队等待次数 | 2 (0–10) | `/api/queue` | ❌ | 无排队概念 |
-| 排队等待秒数 | 0 (0–120) | `/api/queue` | ❌ | 同上 |
+| 排队等待次数 | 2 (0–10) | `/api/queue` | ✅ **已补** | AIGX 并入 `/api/limits`（`queue_max_waits`）：Qoder 桥首帧前退避重发 `src/bridge/session/qoder.rs::queue_backoff`（排队信号 10605 / isQueued / queueType+服务不可用，多层 JSON 钻取；每轮重建 request_id 与 COSY 签名）；0 = 快速失败，用尽落 503 `qoder_model_busy`；前端 `QueuePanel.tsx` 挂设置→运维→网关 |
+| 排队等待秒数 | 0 (0–120) | `/api/queue` | ✅ **已补** | 同上（`queue_wait_seconds`；0 = 跟随上游建议，建议值钳 5–30 秒、缺省 15 秒；预算=「等待响应超时」快照，不突破） |
 | ZCode 库存目标 / 轮询间隔 / 单轮铸造上限 | 3 / 2500ms / 1 | `/api/zcode/captcha-pool` | ❌ | AIGX 无 zcode 验证码池概念 |
 | models.dev 模型元数据开关 | 开 | `/api/models/metadata` | ✅ **已补**（默认开） | `src/model/models_dev.rs`（内嵌快照 `modelsdev.json` 保底 + 联网刷新 `models.dev/models.json` 落 KV，失败保留上一版）；补值挂 `src/model/metadata.rs` 第三层「管理员覆盖 > 内置推断 > models.dev 只填空位」；端点 `GET/PUT /api/models/metadata` + `POST .../refresh`（5s 合并连点，`src/api/admin/model_metadata.rs`）；定时刷新 `modelsdev-refresh` 24h（`main.rs` cron）；前端 `ModelMetadataPanel.tsx` 挂设置→运维→网关。差异：不拉 api.json 取 reasoning 档位（AIGX 元数据无档位字段） |
 | 指纹脱敏（剥离审核黑名单指纹） | 开 | `/api/sanitize`（上游 `core/sanitize.rs` 337 行） | ❌ 未实现 | 作用即逐字绕过上游内容审核指纹（上游注释自述"一字改动即可绕过""上游反探测"）—— 成功条件就是第三方检测失效，属规避类，本 AI 不代写。另有客观障碍：上游该文件通篇零宽字符，from/to 与正则在读取时渲染一致，无法逐字移植。AIGX 现有的是**渠道级**伪装 `src/channel/emulation.rs`（仅 opencode 一种），性质不同 |
@@ -154,6 +154,6 @@ AIGX `frontend/src/pages/ModelManage.tsx`（2115 行）+ `src/model/manage.rs` +
 2. **P1** 设置-重试补「切换账号重试次数」（§3）。
 3. **P1** 调试模式补**响应侧**原始报文（§1：上游状态码 / 脱敏响应头 / 流式原始 SSE 文本）。请求侧已落地，响应侧需在桥接层 `.send()` 之后接入，涉及 13 个发送点的二次改动。
 4. **P2** 模型管理列设置拖拽 + 移动端卡片化（§7）。
-5. **P1** 设置-网关继续移植：排队等待（上游 busy → backoff 重发）、auto-continue（截断续写，默认关）。keepalive 换行帧丢弃与 models.dev 元数据已补（§1）。
+5. **P1 剩余** 设置-网关继续移植：auto-continue（截断续写，默认关）。keepalive 换行帧丢弃、models.dev 元数据、排队等待已补（§1）。
 6. **不移植** ZCode 验证码池（§1）：每条推理请求需要浏览器里铸造的上游反自动化令牌，server 侧只能靠无头浏览器/外部打码，本 AI 不代写这类铸造链。
 7. **不做** 指纹脱敏(sanitize)、Cline 伪装头（§1）—— 上游源码注释自述目标是「一字改动即可绕过内容审核」「伪装成官方客户端」，属规避类，本 AI 不代写。

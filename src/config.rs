@@ -364,6 +364,27 @@ pub struct UsageConfig {
     /// 确实需要指向内网的场景，由管理员显式开启。
     #[serde(default)]
     pub allow_internal_upstream: bool,
+    /// 排队退避最多等待次数（对齐 Agent2API `queueMaxWaits`，0~10，默认 2）。
+    ///
+    /// Qoder 类上游在模型繁忙时不报错而是排队：回「暂不可服务，建议 N 秒后
+    /// 再来」（HTTP 403 + 业务码 10605，或 SSE 信封 statusCodeValue 403）。
+    /// 桥接层在**首字节下发之前**按建议时长睡一觉再重发同一请求（每轮重建
+    /// request_id 与签名——重放旧签名会被上游判成重复请求）。0 = 不等：
+    /// 排队直接落 503 快速失败。
+    #[serde(default = "default_queue_max_waits")]
+    pub queue_max_waits: u8,
+    /// 排队单次等待秒数（对齐 Agent2API `queueWaitSeconds`，0~120，默认 0）。
+    ///
+    /// 0 = 跟随上游建议（`retryAfterSeconds`，钳在 5~30 秒，上游没给时 15 秒）；
+    /// >0 = 写死这个间隔。排队等待吃的是「响应头等待超时」那份预算，
+    /// 本设置不会突破该预算。
+    #[serde(default)]
+    pub queue_wait_seconds: u8,
+}
+
+/// 排队退避次数上限的默认值（对齐上游 queueMaxWaits）。
+fn default_queue_max_waits() -> u8 {
+    2
 }
 
 fn default_billing_flat_quota() -> i64 {
@@ -589,6 +610,8 @@ impl Default for UsageConfig {
             strip_newline_keepalive: false,
             models_dev_enabled: default_models_dev_enabled(),
             allow_internal_upstream: false,
+            queue_max_waits: default_queue_max_waits(),
+            queue_wait_seconds: 0,
             billing_flat_quota: default_billing_flat_quota(),
         }
     }
@@ -673,6 +696,27 @@ pub fn models_dev_enabled() -> bool {
 /// 由 main 启动与模型元数据更新端点写入快照。
 pub fn set_models_dev_enabled(v: bool) {
     MODELS_DEV_ENABLED.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 排队等待设置快照（桥接层每个请求同步读取，管理端保存即生效）。
+///
+/// `max_waits = 0` 表示快速失败（排队立即落 503）；`wait_seconds = 0` 表示
+/// 单次时长跟随上游建议。与上游 `config::queue_settings` 同语义。
+static QUEUE_MAX_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(2);
+static QUEUE_WAIT_SECONDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 读取排队设置：`(最多等待次数, 单次秒数; 0=跟随上游建议)`。
+pub fn queue_settings() -> (u64, u64) {
+    (
+        QUEUE_MAX_WAITS.load(std::sync::atomic::Ordering::Relaxed),
+        QUEUE_WAIT_SECONDS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// 由 main 启动与限额更新端点写入快照（越界值钳制后再存，快照即合法域）。
+pub fn set_queue_settings(max_waits: u64, wait_seconds: u64) {
+    QUEUE_MAX_WAITS.store(max_waits.min(10), std::sync::atomic::Ordering::Relaxed);
+    QUEUE_WAIT_SECONDS.store(wait_seconds.min(120), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 按次计费每次固定扣减额度的进程级快照（数据面同步路径读取）。

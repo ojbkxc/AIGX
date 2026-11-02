@@ -135,6 +135,36 @@ AIGX 在 OpenAI 协议桥接层统一过滤——判据本身足够严格，误�
 没有档位字段，少一个网络依赖；上游展示 `capSources` 每键来源，AIGX 面板只展示
 目录整体状态（count/updatedAt/source），不逐模型标源。
 
+### 10. 排队等待（Agent2API 设置 → 通用 → 排队等待）
+
+| AIGX | Agent2API 蓝本 |
+|---|---|
+| `src/bridge/session/qoder.rs::queue_backoff` + `chat_stream` 的退避循环 | `providers/qoder/mod.rs::queue_backoff` + forward 循环 |
+| `scan_queue_signals`（10605 / isQueued / queueType+服务不可用，多层 JSON 钻取 + 裸文本兜底） | `providers/qoder/errors.rs::scan_signals` + `raw_has_code` |
+| `queue_wait_ms`（跟随上游建议，缺省 15 秒，钳 5~30 秒） | `chat::queue_wait_ms`（同口径） |
+| `queued_error`（503 + `qoder_model_busy`，绝不 401/429） | `chat::queued_error` |
+| 首帧预读（200 信封里的排队帧在字节下发前拦下重发） | `piping::prefetch_stream_head` |
+| 设置 `usage.queue_max_waits` / `queue_wait_seconds`（原子快照） | `config::queue_settings`（KEY_QUEUE_*） |
+| `/api/limits` GET/PUT 透传两项（AIGX 无独立 `/api/queue`） | `api/queue_api.rs`（`GET/PUT /api/queue`） |
+| `frontend/src/components/QueuePanel.tsx`（设置 → 运维 → 网关） | 设置页「通用 → 排队等待」 |
+| 退避预算 = `bridge::sse_first_event_deadline()`（「等待响应超时」快照） | `timeout_settings().headers_ms()` |
+
+关键语义（与上游一致）：
+
+- **排队不是错误**：不能落 401（触发续期）也不能落 429（触发限额冷却）——
+  既不是凭证问题也不是账号问题，换账号也一样在排队。
+- **每轮重建 request_id 与签名**：COSY 签名覆盖 request_id 与请求体，
+  重放同一份签名会被上游判成重复请求（403 / code 103）。
+- **只在首帧之前退避**：流已开始下发后客户端 HTTP 头早已发出，换不了任何东西，
+  排队帧只能在流里落定成错误收尾。
+- 排队用尽落 503 后被数据面 failover 按 5xx 处理（换下一渠道）——
+  对应上游编排层拿到 503 后继续它的重试/换号策略。
+
+差异（有意为之）：上游用专用端点 `/api/queue`（对齐 `/api/timeouts` 形态），
+AIGX 把两项并入既有 `/api/limits`（与 `strip_newline_keepalive` 同一模式）；
+上游 `max_waits=0` 时记录 note_attempt_retry 的阶段化请求日志，AIGX 侧以
+`tracing::info!` 呈现退避过程（AIGX 请求日志无尝试明细结构）。
+
 ## 后续手工同步上游的方法
 
 1. 拉上游最新代码：`git -C C:\GitHub\Agent2API-main pull`（或重新下载 zip）。

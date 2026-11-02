@@ -55,6 +55,10 @@ pub struct LimitsRequest {
     pub billing_flat_quota: Option<i64>,
     /// 是否允许上游地址指向内网（SSRF 防护逃生阀，默认 false）
     pub allow_internal_upstream: Option<bool>,
+    /// 排队退避最多等待次数（0~10，默认 2；0 = 排队即 503 快速失败）
+    pub queue_max_waits: Option<u8>,
+    /// 排队单次等待秒数（0~120，默认 0 = 跟随上游建议）
+    pub queue_wait_seconds: Option<u8>,
 }
 
 /// 签到设置请求体（enabled + 奖励区间）
@@ -153,6 +157,8 @@ pub async fn handle_get_limits(
             "strip_newline_keepalive": config.usage.strip_newline_keepalive,
             "billing_flat_quota": config.usage.billing_flat_quota,
             "allow_internal_upstream": config.usage.allow_internal_upstream,
+            "queue_max_waits": config.usage.queue_max_waits,
+            "queue_wait_seconds": config.usage.queue_wait_seconds,
         })
     })))
 }
@@ -278,6 +284,20 @@ pub async fn handle_update_limits(
         // SSRF 防护逃生阀：开启后允许上游地址指向内网（自托管 Ollama 等）。
         // 保存后立即生效（渠道/账号保存时实时读配置快照）。
         config.usage.allow_internal_upstream = v;
+    }
+    if let Some(v) = body.queue_max_waits {
+        config.usage.queue_max_waits = v.min(10);
+        crate::config::set_queue_settings(
+            config.usage.queue_max_waits as u64,
+            config.usage.queue_wait_seconds as u64,
+        );
+    }
+    if let Some(v) = body.queue_wait_seconds {
+        config.usage.queue_wait_seconds = v.min(120);
+        crate::config::set_queue_settings(
+            config.usage.queue_max_waits as u64,
+            config.usage.queue_wait_seconds as u64,
+        );
     }
     // 换号重试间隔立即生效（账号池运行时读取）
     state

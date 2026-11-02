@@ -20,6 +20,7 @@ import SecurityPolicyPanel from '../components/SecurityPolicyPanel';
 import PromptPanel from '../components/PromptPanel';
 import DebugTrafficPanel from '../components/DebugTrafficPanel';
 import StreamCompatPanel from '../components/StreamCompatPanel';
+import QueuePanel from '../components/QueuePanel';
 import ModelMetadataPanel from '../components/ModelMetadataPanel';
 import RoutingPanel from '../components/RoutingPanel';
 import DataManagement from '../components/DataManagement';
@@ -889,6 +890,9 @@ export default function Settings() {
             </div>
             <div style={{ marginTop: 16 }}>
               <StreamCompatPanel />
+            </div>
+            <div style={{ marginTop: 16 }}>
+              <QueuePanel />
             </div>
             <div style={{ marginTop: 16 }}>
               <ModelMetadataPanel />
