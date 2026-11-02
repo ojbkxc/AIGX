@@ -15,7 +15,6 @@ export default function Heatmap({ data, lang }: { data: HeatmapCell[]; lang?: st
   const { t } = useTranslation();
   const [picked, setPicked] = useState<HeatmapCell | null>(null);
   const [hovered, setHovered] = useState<HeatmapCell | null>(null);
-  if (!data.length) return null;
   const boxWidth = Math.max(measured || 720, 320);
 
   const isZh = (lang ?? 'zh').startsWith('zh');
@@ -65,6 +64,9 @@ export default function Heatmap({ data, lang }: { data: HeatmapCell[]; lang?: st
     }
     return { out, months, thresholds, size, height: topH + 7 * step - gap + 2, width: Math.max(gridW, boxWidth) };
   }, [data, boxWidth, isZh]);
+
+  // hooks 全部执行完再早退（空数据时 useMemo 各分支均安全出空视图）
+  if (!data.length) return null;
 
   const COLORS = ['var(--bg-color)', 'rgba(47,111,237,0.25)', 'rgba(47,111,237,0.45)', 'rgba(47,111,237,0.7)', 'rgb(47,111,237)'];
   const readCell = hovered ?? picked;

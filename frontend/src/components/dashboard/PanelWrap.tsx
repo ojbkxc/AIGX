@@ -13,6 +13,8 @@ interface Props {
   empty?: JSX.Element | null;
   /** data 为空时的文案（后端返回 null / 空数组） */
   emptyText?: string;
+  // data 的实际形状由各面板的 query 泛型保证；外壳只判空并透传。
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   children: (data: any) => JSX.Element;
   style?: React.CSSProperties;
   className?: string;

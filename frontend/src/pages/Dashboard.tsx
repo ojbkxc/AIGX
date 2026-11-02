@@ -72,8 +72,8 @@ export default function Dashboard(): JSX.Element {
 
   const ov = overviewQ.data;
   const savings = savingsQ.data;
-  const daily = dailyQ.data ?? [];
-  const models = modelsQ.data ?? [];
+  const daily = useMemo(() => dailyQ.data ?? [], [dailyQ.data]);
+  const models = useMemo(() => modelsQ.data ?? [], [modelsQ.data]);
   const health = healthQ.data ?? [];
   const rt = realtimeQ.data;
   const ts = todayQ.data;
