@@ -112,6 +112,8 @@ function statusClass(status?: string): string {
 const BALANCE_PROVIDERS: ReadonlySet<string> = new Set([
   'qoder', 'qoder-intl', 'autoclaw', 'autoclaw-intl', 'xiaohuanxiong',
   'zcode', 'zcode-intl', 'kuku', 'loomy', 'officeace', 'accio', 'accio-cn',
+  'catpaw', 'orcaterm', 'cline', 'cline-free', 'cline-pass', 'antigravity',
+  'workbuddy', 'workbuddy-intl', 'trae', 'codearts',
 ]);
 
 export default function AccountSessions(): JSX.Element {
