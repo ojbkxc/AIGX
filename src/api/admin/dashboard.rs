@@ -7,6 +7,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Json,
 };
+use chrono::TimeZone;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -420,22 +421,66 @@ pub async fn handle_report_heatmap(
                         .daily
                         .load_range(&from, &to)
                         .into_iter()
-                        .map(|r| json!({ "date": r.date, "cost": r.cost, "count": r.requests }))
+                        .map(|r| {
+                            // tooltip 的按模型分解（A2A 口径 ≤8）：按当日 token 降序
+                            let mut ms = r.by_model.clone();
+                            ms.sort_by_key(|m| std::cmp::Reverse(m.tokens_in + m.tokens_out));
+                            json!({
+                                "date": r.date,
+                                "cost": r.cost,
+                                "count": r.requests,
+                                "tokens": r.tokens_in + r.tokens_out,
+                                "models": ms
+                                    .into_iter()
+                                    .take(8)
+                                    .map(|m| {
+                                        json!({
+                                            "model": m.name,
+                                            "tokens": m.tokens_in + m.tokens_out
+                                        })
+                                    })
+                                    .collect::<Vec<Value>>(),
+                            })
+                        })
                         .collect(),
                     Some(uid) => state
                         .log_store
                         .daily
                         .load_user_range(uid, &from, &to)
                         .into_iter()
-                        .map(|r| json!({ "date": r.date, "cost": r.cost, "count": r.count }))
+                        .map(|r| {
+                            let mut ms = r.models.clone();
+                            ms.sort_by_key(|m| std::cmp::Reverse(m.tokens_in + m.tokens_out));
+                            json!({
+                                "date": r.date,
+                                "cost": r.cost,
+                                "count": r.count,
+                                "tokens": r.tokens_in + r.tokens_out,
+                                "models": ms
+                                    .into_iter()
+                                    .take(8)
+                                    .map(|m| {
+                                        json!({
+                                            "model": m.name,
+                                            "tokens": m.tokens_in + m.tokens_out
+                                        })
+                                    })
+                                    .collect::<Vec<Value>>(),
+                            })
+                        })
                         .collect(),
                 };
                 return json!(pts);
             }
             let to_ts_end = date_start_ts(&to) + 86_400 - 1;
             let logs = state.log_store.requests.all_sorted_asc();
-            let mut daily: std::collections::BTreeMap<String, (i64, u64)> =
+            // 回退现算与聚合同形状（tokens/models 一并补齐，前端不分支）
+            let mut daily: std::collections::BTreeMap<String, (i64, u64, u64)> =
                 std::collections::BTreeMap::new();
+            let mut per_day_models: std::collections::BTreeMap<
+                String,
+                std::collections::BTreeMap<String, u64>,
+            > = std::collections::BTreeMap::new();
             for l in &logs {
                 if l.created_at < from_ts || l.created_at > to_ts_end {
                     continue;
@@ -446,13 +491,36 @@ pub async fn handle_report_heatmap(
                     }
                 }
                 let day = daily_agg::date_key(l.created_at);
-                let entry = daily.entry(day).or_insert((0, 0));
+                let entry = daily.entry(day.clone()).or_insert((0, 0, 0));
                 entry.0 += l.cost;
                 entry.1 += 1;
+                entry.2 += l.input_tokens + l.output_tokens;
+                *per_day_models
+                    .entry(day)
+                    .or_default()
+                    .entry(l.model.clone())
+                    .or_insert(0) += l.input_tokens + l.output_tokens;
             }
             json!(daily
                 .into_iter()
-                .map(|(date, (cost, count))| json!({ "date": date, "cost": cost, "count": count }))
+                .map(|(date, (cost, count, tokens))| {
+                    let mut ms: Vec<(String, u64)> = per_day_models
+                        .remove(&date)
+                        .map(|m| m.into_iter().collect())
+                        .unwrap_or_default();
+                    ms.sort_by_key(|(_, tk)| std::cmp::Reverse(*tk));
+                    json!({
+                        "date": date,
+                        "cost": cost,
+                        "count": count,
+                        "tokens": tokens,
+                        "models": ms
+                            .into_iter()
+                            .take(8)
+                            .map(|(model, tk)| json!({ "model": model, "tokens": tk }))
+                            .collect::<Vec<Value>>(),
+                    })
+                })
                 .collect::<Vec<Value>>())
         },
     );
@@ -462,14 +530,27 @@ pub async fn handle_report_heatmap(
 /// Top 渠道/来源排行（Agent2API Top accounts/providers 的 AIGX 对应物）。
 ///
 /// AIGX 的请求日志没有 provider 与账号维度，只有 `channel_name`——
-/// Top 提供商与 Top 账号在这里统一为「Top 渠道」（渠道名即来源标签），
-/// 按请求数与消费额双指标排序。
+/// Top 提供商与 Top 账号在这里统一为「Top 渠道」（渠道名即来源标签）。
+/// 管理员五指标（请求/消费/Token/成功率/平均延迟，A2A 全量口径）；
+/// 个人视图的渠道名后端本不暴露、聚合行也只有名字（ChannelLite），
+/// tokens/success_rate/avg_latency 对个人支给 null（前端个人面板改用
+/// Top 模型榜，不消费这些列）。
+struct ChannelAggRow {
+    name: String,
+    count: u64,
+    cost: i64,
+    tokens: u64,
+    successful: u64,
+    latency_sum: u64,
+}
+
 pub async fn handle_report_top_sources(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<ReportQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
+    let personal = user_filter.is_some();
     let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
     let data = cached_report(
         "top_sources",
@@ -477,34 +558,51 @@ pub async fn handle_report_top_sources(
         &user_filter,
         120,
         || {
-            let mut items: Vec<(String, u64, i64)> = Vec::new();
+            let mut items: Vec<ChannelAggRow> = Vec::new();
             if state.log_store.daily.agg_available() {
                 match &user_filter {
                     None => {
                         let rows = state.log_store.daily.load_range(&from, &to);
                         // 按展示名再聚合（id 维改名的两个渠道现同名 → 合并，与现口径一致）。
-                        let mut by_name: std::collections::HashMap<String, (u64, i64)> =
+                        let mut by_name: std::collections::HashMap<String, ChannelAggRow> =
                             std::collections::HashMap::new();
                         for c in daily_agg::merge_channels(&rows) {
                             let name = c.name.unwrap_or_else(|| "unknown".to_string());
-                            let e = by_name.entry(name).or_insert((0, 0));
-                            e.0 += c.count;
-                            e.1 += c.cost;
+                            let e = by_name.entry(name.clone()).or_insert(ChannelAggRow {
+                                name,
+                                count: 0,
+                                cost: 0,
+                                tokens: 0,
+                                successful: 0,
+                                latency_sum: 0,
+                            });
+                            e.count += c.count;
+                            e.cost += c.cost;
+                            e.tokens += c.tokens_in + c.tokens_out;
+                            e.successful += c.successful;
+                            e.latency_sum += c.latency_sum;
                         }
-                        items = by_name.into_iter().map(|(k, v)| (k, v.0, v.1)).collect();
+                        items = by_name.into_values().collect();
                     }
                     Some(uid) => {
                         let rows = state.log_store.daily.load_user_range(uid, &from, &to);
                         items = daily_agg::merge_dim(&rows, |r| &r.channels)
                             .into_iter()
-                            .map(|c| (c.name, c.count, c.cost))
+                            .map(|c| ChannelAggRow {
+                                name: c.name,
+                                count: c.count,
+                                cost: c.cost,
+                                tokens: 0,
+                                successful: 0,
+                                latency_sum: 0,
+                            })
                             .collect();
                     }
                 }
             } else {
                 let to_ts_end = date_start_ts(&to) + 86_400 - 1;
                 let logs = state.log_store.requests.all_sorted_asc();
-                let mut sources: std::collections::HashMap<String, (u64, i64)> =
+                let mut sources: std::collections::HashMap<String, ChannelAggRow> =
                     std::collections::HashMap::new();
                 for l in &logs {
                     if l.created_at < from_ts || l.created_at > to_ts_end {
@@ -519,17 +617,56 @@ pub async fn handle_report_top_sources(
                         .channel_name
                         .clone()
                         .unwrap_or_else(|| "unknown".to_string());
-                    let entry = sources.entry(name).or_insert((0, 0));
-                    entry.0 += 1;
-                    entry.1 += l.cost;
+                    let e = sources.entry(name.clone()).or_insert(ChannelAggRow {
+                        name,
+                        count: 0,
+                        cost: 0,
+                        tokens: 0,
+                        successful: 0,
+                        latency_sum: 0,
+                    });
+                    e.count += 1;
+                    if l.status_code < 400 {
+                        e.successful += 1;
+                    }
+                    e.cost += l.cost;
+                    e.tokens += l.input_tokens + l.output_tokens;
+                    e.latency_sum += l.latency_ms;
                 }
-                items = sources.into_iter().map(|(k, v)| (k, v.0, v.1)).collect();
+                items = sources.into_values().collect();
             }
-            items.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+            items.sort_by(|a, b| b.count.cmp(&a.count).then(b.cost.cmp(&a.cost)));
             items.truncate(10);
             json!(items
                 .into_iter()
-                .map(|(name, count, cost)| json!({ "name": name, "count": count, "cost": cost }))
+                .map(|c| {
+                    // 个人支无渠道级 token/成功/延迟数据 → null（不虚构 0%）
+                    let (tokens, success_rate, avg_latency) = if personal {
+                        (Value::Null, Value::Null, Value::Null)
+                    } else {
+                        (
+                            json!(c.tokens),
+                            json!(if c.count > 0 {
+                                (c.successful as f64 / c.count as f64 * 10000.0).round() / 100.0
+                            } else {
+                                0.0
+                            }),
+                            json!(if c.count > 0 {
+                                (c.latency_sum / c.count) as u64
+                            } else {
+                                0
+                            }),
+                        )
+                    };
+                    json!({
+                        "name": c.name,
+                        "count": c.count,
+                        "cost": c.cost,
+                        "tokens": tokens,
+                        "success_rate": success_rate,
+                        "avg_latency_ms": avg_latency,
+                    })
+                })
                 .collect::<Vec<Value>>())
         },
     );
@@ -946,6 +1083,130 @@ pub async fn handle_report_cache_rates(
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
+/// GET /api/dashboard/report/cache_trend_24h — 近 24 个本地整点缓存命中双轴序列。
+///
+/// A2A「近 24 小时命中率折线」的 AIGX 对应物：左轴命中率、右轴总 Token。
+/// 分钟级窗口日聚合覆盖不了——与 cache_rates 同款走 `reqlog:` 键区间读
+/// （护栏 2 万条，超限每元素标 `sampled:true`）。窗口固定 24h，不受
+/// days/start/end 影响。
+pub async fn handle_report_cache_trend_24h(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
+    let now = chrono::Utc::now().timestamp();
+    // 缓存键只到小时粒度：同一小时内反复打开页面命中 60s TTL 不误重算，
+    // 跨小时自动重算（补全上一个完整小时的数据）。
+    let slot = local_hour_key(now);
+    let data = cached_report("cache_trend_24h", &slot, &user_filter, 60, move || {
+        // 多取 1 小时余量：首桶可能只覆盖 [now−24h, 桶起点] 的部分区间，
+        // 起点按整点桶表精确过滤即可。
+        let from = now - 25 * 3600;
+        let (logs, sampled) = state
+            .log_store
+            .requests
+            .list_window(from, now, 20_000)
+            .unwrap_or_default();
+        let filtered: Vec<crate::log::RequestLog> = logs
+            .into_iter()
+            .filter(|l| match (&user_filter, l.user_id.as_deref()) {
+                (None, _) => true,
+                (Some(uid), Some(lu)) => lu == uid.as_str(),
+                (Some(_), None) => false,
+            })
+            .collect();
+        json!(bucket_hours(&filtered, now, sampled))
+    });
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+/// unix 秒 → 本地整点键 `YYYY-MM-DDTHH`（A2A 的时区口径由后端定死：服务器本地）。
+fn local_hour_key(ts: i64) -> String {
+    chrono::Local
+        .timestamp_opt(ts, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%dT%H").to_string())
+        .unwrap_or_default()
+}
+
+/// 把明细按本地整点分进「含当前小时的近 24 桶」（升序，缺数据的桶补零行）。
+///
+/// 纯函数便于单测；logs 需调用方先按 user 过滤。口径与 cache_rates 同一条：
+/// 命中率 = 命中请求数/总请求数（cache_hit 是请求级布尔），附命中请求承担
+/// 的输入 Token；models 分解按 token 降序取前 8（hover 多行气泡用）。
+fn bucket_hours(logs: &[crate::log::RequestLog], now: i64, sampled: bool) -> Vec<Value> {
+    // 当前本地整点起点，往回 23 个桶
+    let Some(now_dt) = chrono::Local.timestamp_opt(now, 0).single() else {
+        return Vec::new();
+    };
+    let Some(cur) = now_dt
+        .with_minute(0)
+        .and_then(|d| d.with_second(0))
+        .and_then(|d| d.with_nanosecond(0))
+    else {
+        return Vec::new();
+    };
+    let mut keys: Vec<(String, i64, i64)> = Vec::with_capacity(24);
+    for i in (0..24i64).rev() {
+        let dt = cur - chrono::Duration::hours(i);
+        keys.push((
+            dt.format("%Y-%m-%dT%H").to_string(),
+            dt.timestamp(),
+            dt.timestamp() + 3600,
+        ));
+    }
+    // 每桶 (total, hit, input, hit_input, total_tokens, model→tokens)
+    let mut acc: Vec<(
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        std::collections::BTreeMap<String, u64>,
+    )> = (0..keys.len()).map(|_| Default::default()).collect();
+    for l in logs {
+        let Some(idx) = keys
+            .iter()
+            .position(|(_, s, e)| l.created_at >= *s && l.created_at < *e)
+        else {
+            continue;
+        };
+        let a = &mut acc[idx];
+        a.0 += 1;
+        a.2 += l.input_tokens;
+        a.4 = a.4.saturating_add(l.input_tokens + l.output_tokens);
+        if l.cache_hit {
+            a.1 += 1;
+            a.3 += l.input_tokens;
+        }
+        *a.5.entry(l.model.clone()).or_insert(0) += l.input_tokens + l.output_tokens;
+    }
+    acc
+        .into_iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let mut ms: Vec<(String, u64)> = a.5.into_iter().collect();
+            ms.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(&y.0)));
+            json!({
+                "hour": keys[i].0,
+                "requests": a.0,
+                "hit_requests": a.1,
+                "rate": if a.0 > 0 { (a.1 as f64 / a.0 as f64 * 10000.0).round() / 100.0 } else { 0.0 },
+                "input_tokens": a.2,
+                "hit_input_tokens": a.3,
+                "total_tokens": a.4,
+                "models": ms
+                    .into_iter()
+                    .take(8)
+                    .map(|(model, tk)| json!({ "model": model, "tokens": tk }))
+                    .collect::<Vec<Value>>(),
+                // 键区间读护栏标记（与 cache_rates 同手法：挂元素不增数组）
+                "sampled": sampled,
+            })
+        })
+        .collect()
+}
+
 /// 按天消费/请求趋势（Agent2API dailyTrend）：供仪表盘折线复用。
 ///
 /// 每行附 `models`（当日 Top6 模型 {model,count}，新字段向后兼容）——
@@ -976,7 +1237,13 @@ pub async fn handle_report_daily_trend(
                                 ms.sort_by_key(|m| std::cmp::Reverse(m.count));
                                 ms.into_iter()
                                     .take(6)
-                                    .map(|m| json!({ "model": m.name, "count": m.count }))
+                                    .map(|m| {
+                                        json!({
+                                            "model": m.name,
+                                            "count": m.count,
+                                            "tokens": m.tokens_in + m.tokens_out,
+                                        })
+                                    })
                                     .collect()
                             };
                             json!({
@@ -997,7 +1264,13 @@ pub async fn handle_report_daily_trend(
                             let top: Vec<Value> = ms
                                 .into_iter()
                                 .take(6)
-                                .map(|m| json!({ "model": m.name, "count": m.count }))
+                                .map(|m| {
+                                    json!({
+                                        "model": m.name,
+                                        "count": m.count,
+                                        "tokens": m.tokens_in + m.tokens_out,
+                                    })
+                                })
                                 .collect();
                             json!({
                                 "date": r.date, "count": r.count,
@@ -1015,7 +1288,7 @@ pub async fn handle_report_daily_trend(
                 std::collections::BTreeMap::new();
             let mut per_day_models: std::collections::BTreeMap<
                 String,
-                std::collections::HashMap<String, u64>,
+                std::collections::HashMap<String, (u64, u64)>,
             > = std::collections::BTreeMap::new();
             for l in &logs {
                 if l.created_at < from_ts || l.created_at > to_ts_end {
@@ -1032,25 +1305,28 @@ pub async fn handle_report_daily_trend(
                 e.1 = e.1.saturating_add(l.input_tokens);
                 e.2 = e.2.saturating_add(l.output_tokens);
                 e.3 = e.3.saturating_add(l.cost);
-                *per_day_models
+                let tk = l.input_tokens + l.output_tokens;
+                let m = per_day_models
                     .entry(day)
                     .or_default()
                     .entry(l.model.clone())
-                    .or_insert(0) += 1;
+                    .or_insert((0, 0));
+                m.0 += 1;
+                m.1 = m.1.saturating_add(tk);
             }
             json!(daily
                 .into_iter()
                 .map(|(date, (count, it, ot, cost))| {
-                    let mut ms: Vec<(String, u64)> = per_day_models
+                    let mut ms: Vec<(String, (u64, u64))> = per_day_models
                         .remove(&date)
                         .unwrap_or_default()
                         .into_iter()
                         .collect();
-                    ms.sort_by_key(|a| std::cmp::Reverse(a.1));
+                    ms.sort_by_key(|a| std::cmp::Reverse(a.1 .0));
                     let top: Vec<Value> = ms
                         .into_iter()
                         .take(6)
-                        .map(|(model, c)| json!({ "model": model, "count": c }))
+                        .map(|(model, (c, tk))| json!({ "model": model, "count": c, "tokens": tk }))
                         .collect();
                     json!({
                         "date": date, "count": count,
@@ -1098,5 +1374,63 @@ mod tests {
         let (from, to, _) = resolve_window(10, None, Some("2026-06-15"));
         assert_eq!(to, "2026-06-15");
         assert_eq!(from, "2026-06-06");
+    }
+
+    fn bkt_log(ts: i64, model: &str, it: u64, ot: u64, hit: bool) -> crate::log::RequestLog {
+        let mut l = crate::log::RequestLog::new();
+        l.created_at = ts;
+        l.model = model.to_string();
+        l.input_tokens = it;
+        l.output_tokens = ot;
+        l.cache_hit = hit;
+        l
+    }
+
+    /// 空数据也给满 24 桶（补零行）；hour 键严格递增且都是 13 字符。
+    #[test]
+    fn bucket_hours_always_yields_24_slots() {
+        let now = chrono::Utc::now().timestamp();
+        let out = bucket_hours(&[], now, false);
+        assert_eq!(out.len(), 24);
+        assert_eq!(out[23]["requests"], 0);
+        assert_eq!(out[23]["rate"], 0.0);
+        assert_eq!(out[23]["sampled"], false);
+        let hours: Vec<&str> = out.iter().map(|v| v["hour"].as_str().unwrap()).collect();
+        for w in hours.windows(2) {
+            assert!(w[0] < w[1], "桶键必须严格升序: {:?} > {:?}", w[1], w[0]);
+        }
+        assert_eq!(hours[23], local_hour_key(now), "末桶 = 当前本地整点");
+    }
+
+    /// 命中/总量/token 归并进正确桶；models 分解按 token 降序。
+    #[test]
+    fn bucket_hours_groups_by_hour_and_decomposes_models() {
+        let now = chrono::Utc::now().timestamp();
+        let two_ago = now - 2 * 3600 - 1; // 2 个整点桶之前（桶 [cur−2h, cur−1h)）
+        let logs = vec![
+            bkt_log(now, "gpt-4", 100, 20, true),
+            bkt_log(now, "gpt-4", 50, 10, false),
+            bkt_log(now, "claude", 500, 1, false),
+            bkt_log(two_ago, "gpt-4", 1, 1, false),
+        ];
+        let out = bucket_hours(&logs, now, true);
+        let cur = &out[23];
+        assert_eq!(cur["requests"], 3);
+        assert_eq!(cur["hit_requests"], 1);
+        assert_eq!(cur["rate"], 33.33);
+        assert_eq!(cur["input_tokens"], 650);
+        assert_eq!(cur["hit_input_tokens"], 100);
+        assert_eq!(cur["total_tokens"], 682);
+        assert_eq!(cur["sampled"], true);
+        // models 按 token 降序：claude 501 > gpt-4 180
+        let ms = cur["models"].as_array().unwrap();
+        assert_eq!(ms[0]["model"], "claude");
+        assert_eq!(ms[0]["tokens"], 501);
+        assert_eq!(ms[1]["model"], "gpt-4");
+        assert_eq!(ms[1]["tokens"], 180);
+        // 2 桶前那条按它自己的整点键定位（now 处于钟点的位置不定，索引会变）
+        let key2 = local_hour_key(two_ago);
+        let slot = out.iter().find(|v| v["hour"] == key2).expect("早桶存在");
+        assert_eq!(slot["requests"], 1);
     }
 }

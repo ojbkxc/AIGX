@@ -114,6 +114,12 @@ pub struct ChannelAccum {
     /// 延迟毫秒和（均值 = latency_sum / count）
     pub latency_sum: u64,
     pub cost: i64,
+    /// 渠道维 token 用量（Top 渠道榜第五指标；serde default——上线前
+    /// 的旧聚合行无此字段，读作 0，手动重建后补齐）。
+    #[serde(default)]
+    pub tokens_in: u64,
+    #[serde(default)]
+    pub tokens_out: u64,
 }
 
 /// 主档的按用户累计项（user_ranking，Top 榜用途，容忍并入其他）。
@@ -266,6 +272,8 @@ impl Named for ChannelAccum {
         self.successful += src.successful;
         self.latency_sum = self.latency_sum.saturating_add(src.latency_sum);
         self.cost = self.cost.saturating_add(src.cost);
+        self.tokens_in = self.tokens_in.saturating_add(src.tokens_in);
+        self.tokens_out = self.tokens_out.saturating_add(src.tokens_out);
         // 展示名搬运：self 缺名时采用被并入项的名字（修剪进 other 时不丢标签）。
         if self.name.is_none() {
             self.name = src.name.clone();
@@ -356,6 +364,8 @@ pub fn fold_request(agg: &mut DailyAgg, log: &RequestLog) {
         }
         a.latency_sum = a.latency_sum.saturating_add(log.latency_ms);
         a.cost = a.cost.saturating_add(log.cost);
+        a.tokens_in = a.tokens_in.saturating_add(log.input_tokens);
+        a.tokens_out = a.tokens_out.saturating_add(log.output_tokens);
         if log.channel_name.is_some() {
             a.name = log.channel_name.clone();
         }

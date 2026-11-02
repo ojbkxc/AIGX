@@ -1541,6 +1541,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             get(api::admin::handle_report_cache_rates),
         )
         .route(
+            "/api/dashboard/report/cache_trend_24h",
+            get(api::admin::handle_report_cache_trend_24h),
+        )
+        .route(
             "/api/dashboard/report/daily_trend",
             get(api::admin::handle_report_daily_trend),
         )

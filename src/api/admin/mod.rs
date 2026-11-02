@@ -113,8 +113,8 @@ pub use subscriptions::{
 
 pub use dashboard::{
     handle_cache_savings, handle_consumption_trend, handle_model_distribution,
-    handle_report_cache_rates, handle_report_daily_trend, handle_report_heatmap,
-    handle_report_models, handle_report_overview, handle_report_token_trend,
+    handle_report_cache_rates, handle_report_cache_trend_24h, handle_report_daily_trend,
+    handle_report_heatmap, handle_report_models, handle_report_overview, handle_report_token_trend,
     handle_report_top_sources, handle_scheduler_status,
 };
 
