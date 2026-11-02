@@ -11,6 +11,7 @@ import { useToast } from '../components/Toast';
  * - 连续失败锁定：同 IP 连续失败达阈值即锁定（默认开 / 5 次）
  * - 锁定时长：默认 5 分钟
  * - 每分钟登录尝试上限：默认 10 次
+ * - 机器人校验：登录/注册/验证码登录前的 ALTCHA 工作量证明（默认开）
  *
  * 生效时机：阈值 / 上限 / 开关走进程级快照，**保存即生效**；
  * 锁定时长是失败计数缓存的 TTL（建缓存时固定），**改后需重启服务生效**
@@ -26,6 +27,7 @@ export default function SecurityPolicyPanel(): JSX.Element {
   const [failThreshold, setFailThreshold] = useState('5');
   const [lockMinutes, setLockMinutes] = useState('5');
   const [rateLimit, setRateLimit] = useState('10');
+  const [captchaEnabled, setCaptchaEnabled] = useState(true);
 
   useEffect(() => {
     void (async () => {
@@ -37,6 +39,7 @@ export default function SecurityPolicyPanel(): JSX.Element {
         setFailThreshold(String(d.failThreshold ?? 5));
         setLockMinutes(String(d.lockMinutes ?? 5));
         setRateLimit(String(d.rateLimitPerMinute ?? 10));
+        setCaptchaEnabled(d.captchaEnabled !== false);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -69,6 +72,7 @@ export default function SecurityPolicyPanel(): JSX.Element {
         fail_threshold: failVal,
         lock_minutes: lockVal,
         rate_limit_per_minute: rateVal,
+        captcha_enabled: captchaEnabled,
       });
       const d = res?.data;
       if (d) {
@@ -76,8 +80,9 @@ export default function SecurityPolicyPanel(): JSX.Element {
         setFailThreshold(String(d.failThreshold ?? failVal));
         setLockMinutes(String(d.lockMinutes ?? lockVal));
         setRateLimit(String(d.rateLimitPerMinute ?? rateVal));
+        setCaptchaEnabled(d.captchaEnabled !== false);
       }
-      addToast(t('安全策略已保存（阈值/上限立即生效，锁定时长需重启服务）'));
+      addToast(t('安全策略已保存（阈值/上限/开关立即生效，锁定时长需重启服务）'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -94,7 +99,7 @@ export default function SecurityPolicyPanel(): JSX.Element {
       <div className="card-header">
         <h2>{t('安全策略')}</h2>
         <p className="card-subtitle">
-          {t('登录失败锁定与登录限流的门槛；阈值/上限/开关保存即生效，锁定时长改后需重启服务。')}
+          {t('登录失败锁定、登录限流与人机校验的门槛；阈值/上限/开关保存即生效，锁定时长改后需重启服务。')}
         </p>
       </div>
       <div className="card-body">
@@ -152,6 +157,20 @@ export default function SecurityPolicyPanel(): JSX.Element {
                 onChange={(e) => setRateLimit(e.target.value)}
               />
               <div className="form-hint">{t('同一 IP 每分钟允许的登录尝试次数（1-1000）。')}</div>
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={captchaEnabled}
+                onChange={(e) => setCaptchaEnabled(e.target.checked)}
+              />
+              <span>{t('启用机器人校验（无感人机验证）')}</span>
+            </label>
+            <div className="form-hint">
+              {t('开启后登录、注册、邮箱验证码登录前需完成 ALTCHA 工作量证明；真人不需操作，脚本会被拦在密码校验之前。')}
             </div>
           </div>
 

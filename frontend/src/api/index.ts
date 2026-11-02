@@ -186,21 +186,22 @@ async function request<T = unknown>(
 
 export const api = {
   // ==================== 顶层便捷方法（页面直调，沿用后端路由契约） ====================
-  login: (email: string, password: string): Promise<ApiResponse<LoginResult>> =>
-    request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login`, { email, password }, { skipAuthRedirect: true }),
+  login: (email: string, password: string, captcha?: string): Promise<ApiResponse<LoginResult>> =>
+    request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login`, { email, password, captcha }, { skipAuthRedirect: true }),
   loginSendCode: (email: string): Promise<ApiResponse<LoginCodeResult>> =>
     request<ApiResponse<LoginCodeResult>>('POST', `${API_BASE}/auth/login/send-code`, { email }, { skipAuthRedirect: true }),
-  loginWithCode: (email: string, code: string): Promise<ApiResponse<LoginResult>> =>
-    request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login/code`, { email, code }, { skipAuthRedirect: true }),
+  loginWithCode: (email: string, code: string, captcha?: string): Promise<ApiResponse<LoginResult>> =>
+    request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login/code`, { email, code, captcha }, { skipAuthRedirect: true }),
   loginTotp: (tmp_token: string, code: string): Promise<ApiResponse<LoginResult>> =>
     request<ApiResponse<LoginResult>>('POST', `${API_BASE}/auth/login/totp`, { tmp_token, code }, { skipAuthRedirect: true }),
   // 兼容历史调用顺序 (email, password, username?)：后端仅使用 email/password/username/aff_code 字段
-  register: (emailOrUsername: string, password: string, username?: string, affCode?: string): Promise<ApiResponse<RegisterResult>> =>
+  register: (emailOrUsername: string, password: string, username?: string, affCode?: string, captcha?: string): Promise<ApiResponse<RegisterResult>> =>
     request<ApiResponse<RegisterResult>>('POST', `${API_BASE}/auth/register`, {
       email: emailOrUsername,
       password,
       username: username ?? undefined,
       aff_code: affCode ?? undefined,
+      captcha,
     }),
   forgotPassword: (email: string): Promise<ApiResponse<MessageResult>> =>
     request<ApiResponse<MessageResult>>('POST', `${API_BASE}/auth/forgot-password`, { email }, { skipAuthRedirect: true }),

@@ -7,6 +7,7 @@ pub mod account;
 pub mod account_login;
 pub mod account_session;
 pub mod agent;
+pub mod altcha;
 pub mod api;
 pub mod auth;
 pub mod bridge;

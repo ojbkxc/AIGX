@@ -478,6 +478,18 @@ pub struct SecurityPolicyConfig {
     /// 同一来源 IP 每分钟允许的登录尝试次数（默认 10，范围 1-1000）。
     #[serde(default = "default_rate_limit_per_minute")]
     pub rate_limit_per_minute: u32,
+    /// 是否启用机器人校验（ALTCHA proof-of-work，默认开）。
+    ///
+    /// 开启后，登录 / 注册这类**公开认证边界**必须先领题、由客户端算力解出
+    /// answer 再随请求提交；脚本每试一个密码都要先花一次算力，暴破与抢注从
+    /// 零成本变成逐请求成本。对真人无感——题目在页面加载时就算完了。
+    /// 失败锁定拦的是「同源高频失败」（换 IP 就绕开），本项补的是另一维。
+    #[serde(default = "default_captcha_enabled")]
+    pub captcha_enabled: bool,
+}
+
+fn default_captcha_enabled() -> bool {
+    true
 }
 
 fn default_lockout_enabled() -> bool {
@@ -503,6 +515,7 @@ impl Default for SecurityPolicyConfig {
             fail_threshold: default_fail_threshold(),
             lock_minutes: default_lock_minutes(),
             rate_limit_per_minute: default_rate_limit_per_minute(),
+            captcha_enabled: default_captcha_enabled(),
         }
     }
 }
@@ -515,6 +528,7 @@ impl SecurityPolicyConfig {
             fail_threshold: self.fail_threshold.clamp(1, 100),
             lock_minutes: self.lock_minutes.clamp(1, 1440),
             rate_limit_per_minute: self.rate_limit_per_minute.clamp(1, 1000),
+            captcha_enabled: self.captcha_enabled,
         }
     }
 }
@@ -644,6 +658,9 @@ static SECURITY_LOCKOUT_ENABLED: std::sync::atomic::AtomicBool =
 static SECURITY_FAIL_THRESHOLD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(5);
 /// 每分钟登录尝试上限（默认 10）。
 static SECURITY_RATE_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(10);
+/// 是否启用机器人校验（ALTCHA proof-of-work，默认开）。
+static SECURITY_CAPTCHA_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
 /// 读取「是否启用失败锁定」快照。
 pub fn security_lockout_enabled() -> bool {
@@ -664,6 +681,11 @@ pub fn security_rate_limit_per_minute() -> u32 {
         .max(1)
 }
 
+/// 读取「是否启用机器人校验」快照（登录 / 注册 handler 同步读取）。
+pub fn security_captcha_enabled() -> bool {
+    SECURITY_CAPTCHA_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// 由 main 启动与 settings 更新端点写入三个快照。
 pub fn set_security_policy(lockout_enabled: bool, fail_threshold: u32, rate_limit_per_minute: u32) {
     SECURITY_LOCKOUT_ENABLED.store(lockout_enabled, std::sync::atomic::Ordering::Relaxed);
@@ -672,6 +694,11 @@ pub fn set_security_policy(lockout_enabled: bool, fail_threshold: u32, rate_limi
         rate_limit_per_minute.max(1),
         std::sync::atomic::Ordering::Relaxed,
     );
+}
+
+/// 由 main 启动与 settings 更新端点写入机器人校验开关。
+pub fn set_security_captcha(v: bool) {
+    SECURITY_CAPTCHA_ENABLED.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 渠道级最大重试次数的进程级快照（数据面选路同步读取，默认 2）。

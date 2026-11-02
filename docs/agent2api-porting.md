@@ -52,7 +52,7 @@
 | `src/api/admin/settings.rs`（`GET/PUT /api/security/policy`） | 上游 `api/security*.rs` |
 | `frontend/src/components/SecurityPolicyPanel.tsx`（设置 → 安全顶部） | `ui-islands/.../settings-page.tsx` 的安全 tab |
 
-把原先硬编码在 `src/api/admin/auth.rs`（阈值 5 / 限流 10）与 `main.rs`（锁定 TTL 300s）的三个门槛抽成可配项：连续失败锁定开关 / 失败阈值 / 锁定时长 / 每分钟登录上限。默认值与原硬编码一致，行为不变。阈值/开关走原子快照保存即生效；锁定时长是失败计数缓存 TTL，改后需重启（与网关监听地址同口径）。差异：上游的 ALTCHA 机器人校验未移植。
+把原先硬编码在 `src/api/admin/auth.rs`（阈值 5 / 限流 10）与 `main.rs`（锁定 TTL 300s）的三个门槛抽成可配项：连续失败锁定开关 / 失败阈值 / 锁定时长 / 每分钟登录上限。默认值与原硬编码一致，行为不变。阈值/开关走原子快照保存即生效；锁定时长是失败计数缓存 TTL，改后需重启（与网关监听地址同口径）。ALTCHA 机器人校验见下一节（同一面板内的开关）。
 
 ### 6. 调试模式 · 上游原始报文（Agent2API 设置 → 网关 → 调试模式）
 
@@ -72,6 +72,25 @@
 - 关闭开关时桥接层零开销（`traced()` 先判原子快照，不做 `try_clone`/`build`）；关闭时顺手清空缓冲。
 
 `src/account_session/registry.rs` 的 `AGENT2API_PROVIDERS` 已对齐上游 24 家全名单（workbuddy/-intl、raccoon、catpaw、autoclaw/-intl、qoder/-intl、cline-free/pass、accio/-cn、zcode/-intl、codearts、trae、loomy、kuku、monkeycode/-intl、commandcode、antigravity、officeace、orcaterm）。
+
+### 7. 机器人校验 · ALTCHA 工作量证明（Agent2API 设置 → 安全 → 机器人校验）
+
+| AIGX | Agent2API 蓝本 |
+|---|---|
+| `src/altcha.rs`（SHA-256 PoW：签发题面、HMAC 验签、内存台账、10 分钟过期、用后即焚） | `server/src/server/altcha.rs` |
+| `GET /api/auth/captcha`（公开端点；开关关闭回 400） | 上游同款领题路由 |
+| `src/api/admin/auth.rs` 三处 gate：`handle_login` / `handle_register` / `handle_login_with_code`，均放在限流/失败计数**之前** | 上游登录 / 注册前置校验 |
+| 开关 `security.captcha_enabled`（默认**开**）：`/api/security/policy` GET/PUT + main 启动快照 | config `security.captchaEnabled` |
+| `frontend/src/lib/altcha.ts`（求解器，含纯 JS SHA-256 兜底） | `ui/panel-captcha.js` |
+| `frontend/src/hooks/useAltcha.ts` + `components/AltchaWidget.tsx`（登录 / 注册页共用） | 上游 widget |
+
+设计要点：
+
+- **真人无感**：页面挂载即领题并在后台枚举 `sha256(salt + n)`，答案算完前提交按钮只会提示「正在完成机器人校验」。
+- **不依赖安全上下文**：官方 altcha widget 在 `http://<内网IP>` 下会因 `crypto.subtle` 缺失直接失败；本实现检测不到原生 Web Crypto 时改用内置纯 JS SHA-256（数学完全一致，服务端不区分），局域网 http 部署可用。
+- **用后即焚**：`verify` 成功即从台账删除，同一 payload 不能换第二个密码；因此前端每次提交后（无论成败）都重新领题。
+- **防伪造**：台账只认本服务器签发过的 challenge，`signature = HMAC-SHA256(secret, challenge)`，secret 首次生成后落 KV（`auth.altcha_secret`），从不外发。
+- **成本可控**：`maxnumber` 随机 5–10 万，浏览器百毫秒级完成；脚本每试一次都要重解一道题。
 
 ## 后续手工同步上游的方法
 

@@ -1336,6 +1336,8 @@ export interface SecurityPolicyItem {
   lockMinutes: number;
   /** 同一 IP 每分钟允许的登录尝试次数 */
   rateLimitPerMinute: number;
+  /** 是否要求登录/注册前完成机器人校验（ALTCHA proof-of-work） */
+  captchaEnabled: boolean;
   /** 保存后需重启才生效的字段名（当前为 lockMinutes） */
   restartRequiredFields?: string[];
 }

@@ -12,6 +12,7 @@ mod account;
 mod account_login;
 mod account_session;
 mod agent;
+mod altcha;
 mod api;
 mod auth;
 mod bridge;
@@ -400,6 +401,8 @@ async fn main() -> anyhow::Result<()> {
         security.fail_threshold,
         security.rate_limit_per_minute,
     );
+    // 机器人校验开关快照（登录 / 注册 handler 同步读取）
+    config::set_security_captcha(security.captcha_enabled);
 
     // 邮箱验证码登录：<email> → 6 位验证码（TTL=5 分钟）
     let login_code_cache = Arc::new(
@@ -982,6 +985,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     let admin_routes = Router::new()
         // Auth handlers (来自 api::admin::auth)
         .route("/api/auth/login", post(api::admin::handle_login))
+        // 公开端点：机器人校验领题（登录页提交前先解一道 ALTCHA proof-of-work）
+        .route("/api/auth/captcha", get(api::admin::handle_captcha))
         // 公开端点：按客户端 IP 推荐界面语言（登录页默认语言；无代理头时返回 null）
         .route("/api/public/geo-lang", get(api::admin::handle_geo_lang))
         .route(

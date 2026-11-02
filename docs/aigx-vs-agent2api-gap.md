@@ -71,7 +71,7 @@
 | 上游项 | 默认 | AIGX 现状 | AIGX 落点 / 缺口 |
 |---|---|---|---|
 | 网关跨域（CORS 开关） | 关 | ✅ | 见网关表 |
-| 机器人校验（ALTCHA） | 开 | ❌ | **缺**（AIGX 有登录限流+连续失败锁定 5min、IP 管理，但无人机校验） |
+| 机器人校验（ALTCHA） | 开 | ✅ **已补**（默认开，可在设置 → 安全关闭） | `src/altcha.rs`（SHA-256 PoW：签发 / HMAC 验签 / 内存台账 / 10 分钟过期 / 用后即焚）、`GET /api/auth/captcha`、登录 / 注册 / 邮箱验证码登录三处 gate（`src/api/admin/auth.rs`）、前端 `frontend/src/lib/altcha.ts` + `hooks/useAltcha.ts` + `components/AltchaWidget.tsx`（无 Web Crypto 时用纯 JS SHA-256 兜底，局域网 http 部署可用） |
 | 面板登出 | 动作 | ✅ | 有认证体系 |
 | **策略化安全配置面**（登录失败锁定阈值/自动封禁规则） | — | ✅ **已补**（`/api/security/policy` 可配「连续失败锁定开关 / 失败阈值 / 锁定时长 / 每分钟登录上限」，前端 `SecurityPolicyPanel.tsx` 挂在设置 → 安全顶部；阈值/开关保存即生效，锁定时长需重启） | `src/config.rs`（`SecurityPolicyConfig` + 原子快照）、`src/api/admin/settings.rs`、`src/api/admin/auth.rs`、`frontend/src/components/SecurityPolicyPanel.tsx` |
 
@@ -150,8 +150,8 @@ AIGX `frontend/src/pages/ModelManage.tsx`（2115 行）+ `src/model/manage.rs` +
 
 ## 建议优先级（未开始）
 
-1. **已完成**：WorkBuddy 合并卡（§8）、CodeArts/OfficeAce DPoP 落盘 + 续期（§9）、安全策略面（§5）、调试模式**请求侧**原始报文（§1）。
-2. **P1** 设置-重试补「切换账号重试次数」（§3）；安全补 ALTCHA（§5）。
+1. **已完成**：WorkBuddy 合并卡（§8）、CodeArts/OfficeAce DPoP 落盘 + 续期（§9）、安全策略面 + ALTCHA 人机校验（§5）、调试模式**请求侧**原始报文（§1）。
+2. **P1** 设置-重试补「切换账号重试次数」（§3）。
 3. **P1** 调试模式补**响应侧**原始报文（§1：上游状态码 / 脱敏响应头 / 流式原始 SSE 文本）。请求侧已落地，响应侧需在桥接层 `.send()` 之后接入，涉及 13 个发送点的二次改动。
 4. **P2** 模型管理列设置拖拽 + 移动端卡片化（§7）。
 5. **P2** 排队等待、ZCode 验证码池、models.dev 元数据、keepalive/auto-continue（§1，多为上游桌面端特有，AIGX 是 server 可评估不采纳）。

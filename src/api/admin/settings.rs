@@ -537,6 +537,8 @@ pub struct SecurityPolicyRequest {
     pub fail_threshold: Option<u32>,
     pub lock_minutes: Option<u64>,
     pub rate_limit_per_minute: Option<u32>,
+    /// 机器人校验（ALTCHA proof-of-work）开关
+    pub captcha_enabled: Option<bool>,
 }
 
 fn security_policy_json(config: &crate::config::SecurityPolicyConfig) -> Value {
@@ -545,8 +547,9 @@ fn security_policy_json(config: &crate::config::SecurityPolicyConfig) -> Value {
         "failThreshold": config.fail_threshold,
         "lockMinutes": config.lock_minutes,
         "rateLimitPerMinute": config.rate_limit_per_minute,
+        "captchaEnabled": config.captcha_enabled,
         // `lockMinutes` 是失败计数缓存的 TTL，建缓存时固定 → 改后需重启服务生效；
-        // 其余三项走原子快照，保存即生效。
+        // 其余走原子快照，保存即生效。
         "restartRequiredFields": ["lockMinutes"],
     })
 }
@@ -585,6 +588,9 @@ pub async fn handle_update_security_policy(
     if let Some(v) = body.rate_limit_per_minute {
         config.security.rate_limit_per_minute = v;
     }
+    if let Some(v) = body.captcha_enabled {
+        config.security.captcha_enabled = v;
+    }
     config.security = config.security.normalized();
     // 阈值 / 限流 / 开关立即生效（登录 handler 读进程级快照）
     crate::config::set_security_policy(
@@ -592,6 +598,8 @@ pub async fn handle_update_security_policy(
         config.security.fail_threshold,
         config.security.rate_limit_per_minute,
     );
+    // 机器人校验开关走进程级快照，保存即生效
+    crate::config::set_security_captcha(config.security.captcha_enabled);
     match state.config_manager.update(config).await {
         Ok(()) => {
             let updated = state.config_manager.get().await;

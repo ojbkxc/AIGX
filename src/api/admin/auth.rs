@@ -25,6 +25,9 @@ use uuid::Uuid;
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+    /// ALTCHA 机器人校验 payload（base64 的 JSON；开关关闭时可缺省）。
+    #[serde(default)]
+    pub captcha: Option<String>,
 }
 
 /// 注册请求
@@ -54,6 +57,9 @@ pub struct RegisterRequest {
     /// 邀请人邀请码（对齐 new-api aff_code；可选，无效码静默忽略）
     #[serde(default)]
     pub aff_code: String,
+    /// ALTCHA 机器人校验 payload（base64 的 JSON；开关关闭时可缺省）。
+    #[serde(default)]
+    pub captcha: Option<String>,
 }
 
 /// OAuth 登录回调处理
@@ -87,6 +93,23 @@ pub struct LinuxDoCallbackParams {
 /// ============================================================
 /// 认证 API Handlers
 /// ============================================================
+/// GET /api/auth/captcha - 领取机器人校验题（ALTCHA challenge）
+///
+/// 公开端点（登录页在提交前先领题）。开关关闭时回 400，前端据此隐藏校验组件。
+/// 响应体是**裸 challenge 对象**（不带 success/data 信封）——与 Agent2API 同形，
+/// 便于前端直接交给解题器。
+pub async fn handle_captcha(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    match crate::altcha::challenge(&state) {
+        Some(challenge) => Ok(Json(challenge)),
+        None => Err(error_response(
+            "机器人校验当前未启用",
+            StatusCode::BAD_REQUEST,
+        )),
+    }
+}
+
 /// POST /api/auth/login - 管理员登录
 pub async fn handle_login(
     State(state): State<AppState>,
@@ -98,6 +121,21 @@ pub async fn handle_login(
     let rate_limit = crate::config::security_rate_limit_per_minute();
     let fail_threshold = crate::config::security_fail_threshold();
     let lockout_enabled = crate::config::security_lockout_enabled();
+
+    // ── 机器人校验（ALTCHA proof-of-work）：放在限流/锁定之前，让「无答案的
+    //    脚本请求」最先被挡掉，连失败计数都不必消耗 ──
+    if crate::config::security_captcha_enabled() {
+        let token = body.captcha.as_deref().unwrap_or("");
+        if token.trim().is_empty() {
+            return Err(error_response(
+                "请先完成机器人校验",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        if let Err(message) = crate::altcha::verify(&state, token) {
+            return Err(error_response(&message, StatusCode::BAD_REQUEST));
+        }
+    }
 
     // 真实来源 IP：优先信任的代理头（trust_proxy_headers 开启时），
     // 否则用 TCP 对端地址。原来两者都拿不到时全站共用 "unknown" 键 ——
@@ -298,6 +336,21 @@ pub async fn handle_register(
     headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // ── 机器人校验（ALTCHA proof-of-work）：注册是「抢注管理员」的公开入口，
+    //    与登录同口径 —— 先验题，再进限流计数 ──
+    if crate::config::security_captcha_enabled() {
+        let token = body.captcha.as_deref().unwrap_or("");
+        if token.trim().is_empty() {
+            return Err(error_response(
+                "请先完成机器人校验",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        if let Err(message) = crate::altcha::verify(&state, token) {
+            return Err(error_response(&message, StatusCode::BAD_REQUEST));
+        }
+    }
+
     // ── 速率限制：同 IP 每分钟最多 5 次 ──
     const REGISTER_RATE_LIMIT_PER_MINUTE: u32 = 5;
     let client_ip = extract_client_ip(&headers)
@@ -1394,6 +1447,9 @@ pub struct LoginCodeRequest {
 pub struct LoginWithCodeRequest {
     pub email: String,
     pub code: String,
+    /// ALTCHA 机器人校验 payload（base64 的 JSON；开关关闭时可缺省）。
+    #[serde(default)]
+    pub captcha: Option<String>,
 }
 
 /// TOTP 二次验证登录 — 请求（P1：2FA）
@@ -1845,6 +1901,20 @@ pub async fn handle_login_with_code(
     headers: HeaderMap,
     Json(body): Json<LoginWithCodeRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // ── 机器人校验：与密码登录同口径，放在失败计数之前 ──
+    if crate::config::security_captcha_enabled() {
+        let token = body.captcha.as_deref().unwrap_or("");
+        if token.trim().is_empty() {
+            return Err(error_response(
+                "请先完成机器人校验",
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        if let Err(message) = crate::altcha::verify(&state, token) {
+            return Err(error_response(&message, StatusCode::BAD_REQUEST));
+        }
+    }
+
     let email = body.email.trim().to_lowercase();
     let code = body.code.trim();
     if email.is_empty() || code.is_empty() {

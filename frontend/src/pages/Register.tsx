@@ -4,6 +4,8 @@ import { useTranslation } from 'react-i18next';
 import { Eye, EyeOff } from 'lucide-react';
 import { api } from '../api';
 import { cycleTheme } from '../lib/theme';
+import { useAltcha } from '../hooks/useAltcha';
+import AltchaWidget from '../components/AltchaWidget';
 
 type UsernameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error';
 
@@ -28,6 +30,9 @@ export default function Register() {
   const [showPassword, setShowPassword] = useState(false);
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
+
+  // 机器人校验（ALTCHA）：提交时带上答案，失败后必须重新领题（服务端用后即焚）
+  const altcha = useAltcha();
 
   // 邀请码：从 ?aff= 或 ?aff_code= 查询参数读入（new-api 前端从 localStorage 读）
   const [affCode, setAffCode] = useState('');
@@ -129,10 +134,18 @@ export default function Register() {
       setError(t('两次密码输入不一致'));
       return;
     }
+    if (altcha.state === 'error') {
+      setError(t('机器人校验失败，请点击校验块重试'));
+      return;
+    }
+    if (altcha.state === 'verifying') {
+      setError(t('正在完成机器人校验，请稍候…'));
+      return;
+    }
 
     setLoading(true);
     try {
-      const res = (await api.register(email, password, username || undefined, affCode || undefined)) as RegisterResponse;
+      const res = (await api.register(email, password, username || undefined, affCode || undefined, altcha.payload ?? undefined)) as RegisterResponse;
       if (res.success) {
         // 注册成功后自动跳转登录页
         navigate('/login', { state: { registered: true, email } });
@@ -143,6 +156,8 @@ export default function Register() {
       setError(err instanceof Error ? err.message : t('注册失败'));
     } finally {
       setLoading(false);
+      // 服务端校验题用后即焚：每次提交后都重新领题
+      altcha.reset();
     }
   };
 
@@ -261,6 +276,9 @@ export default function Register() {
         {error && (
           <div className="error-message">{error}</div>
         )}
+
+        {/* 机器人校验：挂载即自动求解，真人不需操作；失败可点击重试 */}
+        <AltchaWidget state={altcha.state} onRetry={altcha.reset} />
 
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
           <div className="form-group">

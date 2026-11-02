@@ -4,6 +4,8 @@ import { useTranslation } from 'react-i18next';
 import { Eye, EyeOff } from 'lucide-react';
 import { api } from '../api';
 import { cycleTheme } from '../lib/theme';
+import { useAltcha } from '../hooks/useAltcha';
+import AltchaWidget from '../components/AltchaWidget';
 
 /**
  * 把登录接口的错误统一成用户能读懂的中文。
@@ -64,6 +66,17 @@ export default function Login(): JSX.Element {
   // 2FA/TOTP 二次验证状态：密码/验证码通过后需要 TOTP 码
   const [totpPending, setTotpPending] = useState<string | null>(null); // tmp_token
   const [totpCode, setTotpCode] = useState('');
+
+  // 机器人校验（ALTCHA）：提交时带上答案，失败后必须重新领题（服务端用后即焚）
+  const altcha = useAltcha();
+
+  /** 校验状态是否可提交：关闭时直接放行，未答完/失败则先提示。 */
+  const captchaReady = (): boolean => {
+    if (altcha.state === 'disabled' || altcha.state === 'verified') return true;
+    setError(t('正在完成机器人校验，请稍候…'));
+    if (altcha.state === 'error') altcha.reset();
+    return false;
+  };
 
   // 发送验证码（邮箱验证码登录）
   const handleSendCode = async (): Promise<void> => {
@@ -163,9 +176,10 @@ export default function Login(): JSX.Element {
       setError(t('请输入邮箱和验证码'));
       return;
     }
+    if (!captchaReady()) return;
     setLoading(true);
     try {
-      const res = await api.loginWithCode(email, code.trim());
+      const res = await api.loginWithCode(email, code.trim(), altcha.payload ?? undefined);
       if (res.success && res.data?.require_2fa) {
         setTotpPending(res.data.tmp_token ?? null);
         setTotpCode('');
@@ -178,6 +192,8 @@ export default function Login(): JSX.Element {
       setError(friendlyLoginError(err, t));
     } finally {
       setLoading(false);
+      // 服务端校验题用后即焚：每次提交后都重新领题，否则下一次必报「已过期」
+      altcha.reset();
     }
   };
 
@@ -331,9 +347,10 @@ export default function Login(): JSX.Element {
       setError(t('请输入邮箱/用户名和密码'));
       return;
     }
+    if (!captchaReady()) return;
     setLoading(true);
     try {
-      const res = await api.login(email, password);
+      const res = await api.login(email, password, altcha.payload ?? undefined);
       if (res.success && res.data?.require_2fa) {
         // 2FA/TOTP：密码已通过，进入二次验证步骤
         setTotpPending(res.data.tmp_token ?? null);
@@ -347,6 +364,8 @@ export default function Login(): JSX.Element {
       setError(friendlyLoginError(err, t));
     } finally {
       setLoading(false);
+      // 服务端校验题用后即焚：每次提交后都重新领题，否则下一次必报「已过期」
+      altcha.reset();
     }
   };
 
@@ -508,6 +527,8 @@ export default function Login(): JSX.Element {
           </form>
         ) : (
         <>
+        {/* 机器人校验：挂载即自动求解，真人不需操作；失败可点击重试 */}
+        <AltchaWidget state={altcha.state} onRetry={altcha.reset} />
 
         {/* 登录方式切换：密码 / 邮箱验证码 */}
         <div style={{
