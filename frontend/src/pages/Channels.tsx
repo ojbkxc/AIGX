@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import {
   Eye, EyeOff, ArrowLeftRight, MoreHorizontal, Search,
   Pencil, Gauge, Power, PowerOff, Loader2, MessageSquare, RotateCcw, Trash2,
-  DollarSign, Cloud, Sparkles, Gem, BrainCircuit, Layers,
+  DollarSign, Cloud, Sparkles, Gem, BrainCircuit, Layers, Settings2,
 } from 'lucide-react';
 import { api } from '../api';
 import { useListKeyboard } from '../hooks/useListKeyboard';
@@ -21,7 +21,7 @@ import {
   type ChannelQuirks,
   type PresetProvider,
 } from '../lib/channelPresets';
-import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination, Switch } from '../components/ui';
 import './Channels.css';
 
 interface ChannelItem {
@@ -155,6 +155,87 @@ function formatBalance(value: number, unit?: string): string {
   return `${value.toFixed(2)} ${unit}`;
 }
 
+// ── 列表交互（对齐 ModelManage：分段筛选/排序、列显隐、客户端分页，全部落盘）──
+
+/** localStorage 键 */
+const LS_FILTERS = 'aigx-ch-filters';
+const LS_COLS = 'aigx-ch-cols';
+const LS_PAGE_SIZE = 'aigx-ch-pagesize';
+
+const PAGE_SIZES = [20, 50, 100];
+
+function readLs<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    return { ...fallback, ...(JSON.parse(raw) as object) } as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeLs(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // 隐私模式等场景写失败不影响功能
+  }
+}
+
+type ChStateFilter = 'all' | 'on' | 'off';
+type ChTypeFilter = 'all' | 'cloudflare' | 'openai_compatible' | 'anthropic' | 'gemini' | 'zai' | 'account';
+/** 排序档位（方向即档位语义，同 ModelManage 倍率升/降分开的做法取常用向） */
+type ChSortMode = 'default' | 'priority' | 'response' | 'balance' | 'name';
+
+const CH_STATE_OPTIONS: Array<[ChStateFilter, string]> = [
+  ['all', '全部'],
+  ['on', '已启用'],
+  ['off', '已禁用'],
+];
+const CH_TYPE_OPTIONS: Array<[ChTypeFilter, string]> = [
+  ['all', '全部类型'],
+  ['openai_compatible', 'OpenAI 兼容'],
+  ['anthropic', 'Anthropic'],
+  ['gemini', 'Gemini'],
+  ['zai', 'Z.ai'],
+  ['cloudflare', 'CF'],
+  ['account', '账号型'],
+];
+const CH_SORT_OPTIONS: Array<[ChSortMode, string]> = [
+  ['default', '默认'],
+  ['priority', '优先级'],
+  ['response', '响应快'],
+  ['balance', '余额多'],
+  ['name', '名称'],
+];
+
+/** 可显隐列（check 勾选列与 actions 操作列锁定） */
+type ChColKey = 'id' | 'name' | 'type' | 'status' | 'models' | 'priority' | 'weight' | 'balance' | 'response' | 'testtime';
+const CH_COL_DEFS: Array<{ key: ChColKey; label: string }> = [
+  { key: 'id', label: 'ID' },
+  { key: 'name', label: '名称' },
+  { key: 'type', label: '类型' },
+  { key: 'status', label: '状态' },
+  { key: 'models', label: '模型' },
+  { key: 'priority', label: '优先级' },
+  { key: 'weight', label: '权重' },
+  { key: 'balance', label: '余额' },
+  { key: 'response', label: '响应' },
+  { key: 'testtime', label: '测试时间' },
+];
+const DEFAULT_COL_VIS: Record<ChColKey, boolean> = {
+  id: true,
+  name: true,
+  type: true,
+  status: true,
+  models: true,
+  priority: true,
+  weight: true,
+  balance: true,
+  response: true,
+  testtime: true,
+};
+
 export default function Channels(): JSX.Element {
   const [channels, setChannels] = useState<ChannelItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -274,10 +355,22 @@ export default function Channels(): JSX.Element {
     setRowMenuId(id);
   };
 
-  // ── 分页（服务端分页：page/pageSize/total）──
+  // ── 分页（客户端分页：全量拉取后本地过滤/排序/切片，交互对齐模型管理页）──
   const [page, setPage] = useState(1);
-  const [total, setTotal] = useState(0);
-  const pageSize = 20;
+  const [pageSize, setPageSize] = useState<number>(() => {
+    const n = Number(localStorage.getItem(LS_PAGE_SIZE));
+    return PAGE_SIZES.includes(n) ? n : 20;
+  });
+  const [jumpDraft, setJumpDraft] = useState('');
+
+  // ── 筛选 / 排序 / 列显隐（对齐 ModelManage 的交互面，全部落 localStorage）──
+  const storedFilters = readLs<{ state?: ChStateFilter; type?: ChTypeFilter; sort?: ChSortMode }>(LS_FILTERS, {});
+  const [stateFilter, setStateFilter] = useState<ChStateFilter>(storedFilters.state || 'all');
+  const [typeFilter, setTypeFilter] = useState<ChTypeFilter>(storedFilters.type || 'all');
+  const [sortMode, setSortMode] = useState<ChSortMode>(storedFilters.sort || 'default');
+  const [colVis, setColVis] = useState<Record<ChColKey, boolean>>(() => readLs(LS_COLS, DEFAULT_COL_VIS));
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
 
   function defaultForm(): ChannelFormState {
     return {
@@ -363,28 +456,19 @@ export default function Channels(): JSX.Element {
     setModalStep('form');
   }
 
-  // 挂载 / 翻页 / 搜索变化时加载列表。
-  //
-  // 单一 effect 依赖 `[page, search]`：搜索变化时先把页码重置到 1，由
-  // 同一个 effect 触发一次请求 —— 避免「page effect + search effect 各拉
-  // 一次」的重复请求，也避免搜索时用旧页码发请求的竞态。
-  // 搜索输入用 400ms 防抖（翻页不防抖，立即生效）。
+  // 全量拉取（page_size=0）：过滤/排序/分页全在前端，交互对齐模型管理页。
+  // 搜索/筛选不再触发请求；写操作后的 loadChannels() 刷新照常。
   useEffect(() => {
-    const delay = search.trim() ? 400 : 0;
-    const timer = window.setTimeout(() => {
-      loadChannels().catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : String(err));
-      });
-    }, delay);
-    return () => window.clearTimeout(timer);
+    void loadChannels().catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : String(err));
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, search]);
+  }, []);
 
-  // 搜索词变化时把页码重置到 1（避免「第 3 页 + 新搜索词」导致空页）。
-  // 单独一个 effect：它只改状态，不直接发请求。
+  // 筛选条件变化时把页码重置到 1（避免「第 3 页 + 新筛选」导致空页）
   useEffect(() => {
     setPage((prev) => (prev === 1 ? prev : 1));
-  }, [search]);
+  }, [search, stateFilter, typeFilter, sortMode, pageSize]);
 
   // 点击外部关闭"更多"菜单
   useEffect(() => {
@@ -398,35 +482,115 @@ export default function Channels(): JSX.Element {
     return () => document.removeEventListener('mousedown', handler);
   }, [moreOpen]);
 
-  // 过滤后的渠道列表（服务端搜索已过滤；此处仅兜底前端二次过滤——旧后端兼容）
-  const filtered = channels.filter((ch) => {
-    if (!search.trim()) return true;
-    const q = search.toLowerCase();
-    return (
-      ch.name.toLowerCase().includes(q) ||
-      ch.channel_type.toLowerCase().includes(q) ||
-      (ch.base_url || '').toLowerCase().includes(q) ||
-      (ch.models || []).some((m) => m.toLowerCase().includes(q))
-    );
-  });
+  // 过滤（搜索 + 状态 + 类型）+ 排序 —— 与模型管理页同管线，纯前端
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const out = channels.filter((ch) => {
+      if (stateFilter === 'on' && ch.status !== 'enabled') return false;
+      if (stateFilter === 'off' && ch.status === 'enabled') return false;
+      if (typeFilter !== 'all' && ch.channel_type !== typeFilter) return false;
+      if (!q) return true;
+      return (
+        ch.name.toLowerCase().includes(q) ||
+        ch.channel_type.toLowerCase().includes(q) ||
+        (ch.base_url || '').toLowerCase().includes(q) ||
+        (ch.models || []).some((m) => m.toLowerCase().includes(q))
+      );
+    });
+    if (sortMode !== 'default') {
+      out.sort((a, b) => {
+        if (sortMode === 'priority') return b.priority - a.priority;
+        if (sortMode === 'response') {
+          return (a.response_time ?? Number.POSITIVE_INFINITY) - (b.response_time ?? Number.POSITIVE_INFINITY);
+        }
+        if (sortMode === 'balance') {
+          return (b.balance ?? Number.NEGATIVE_INFINITY) - (a.balance ?? Number.NEGATIVE_INFINITY);
+        }
+        return a.name.localeCompare(b.name);
+      });
+    }
+    return out;
+  }, [channels, search, stateFilter, typeFilter, sortMode]);
 
-  // 总页数（服务端 total；旧后端无 total 时退化用当前页条数）
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  // 客户端分页
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const submitJump = (): void => {
+    const n = Number(jumpDraft);
+    if (Number.isFinite(n) && n >= 1 && n <= totalPages) setPage(Math.floor(n));
+    setJumpDraft('');
+  };
+  const pageRows = useMemo(
+    () => filtered.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize),
+    [filtered, page, pageSize],
+  );
+
+  // 档位变化时收敛页码（删渠道后当前页可能越界）
+  useEffect(() => {
+    setPage((prev) => Math.min(prev, totalPages));
+  }, [totalPages]);
+
+  // 筛选/排序/每页档位落盘（对齐 ModelManage 的 localStorage 记忆）
+  useEffect(() => {
+    writeLs(LS_FILTERS, { state: stateFilter, type: typeFilter, sort: sortMode });
+  }, [stateFilter, typeFilter, sortMode]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_PAGE_SIZE, String(pageSize));
+    } catch {
+      // 写入失败不影响功能
+    }
+  }, [pageSize]);
+
+  const colCls = (key: ChColKey): string => (colVis[key] ? '' : ' ch-hidden');
+
+  // 列设置浮层：点外部收起
+  useEffect(() => {
+    if (!colPanelOpen) return;
+    const handler = (e: MouseEvent): void => {
+      if (colPanelRef.current && !colPanelRef.current.contains(e.target as Node)) {
+        setColPanelOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [colPanelOpen]);
+
+  const toggleColVis = (key: ChColKey): void => {
+    setColVis((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      writeLs(LS_COLS, next);
+      return next;
+    });
+  };
+
+  const resetColVis = (): void => {
+    setColVis({ ...DEFAULT_COL_VIS });
+    writeLs(LS_COLS, DEFAULT_COL_VIS);
+  };
+
+  /** 点击复制（对齐 ModelManage 的 data-copy 交互） */
+  const copyText = (text: string): void => {
+    void navigator.clipboard?.writeText(text).then(
+      () => addToast(`${t('已复制')}: ${text}`),
+      () => addToast(t('复制失败'), 'error'),
+    );
+  };
 
   // 键盘导航（cc-haha 列表键盘体系）：/ 聚焦搜索、↑↓/j k 行高亮、Enter 打开编辑
+  // 作用域=当前页行（客户端分页后与表格渲染同源）
   const { searchRef, rowRefs, activeIndex, setActiveIndex } = useListKeyboard(
-    filtered.length,
-    (i) => { if (filtered[i]) openEdit(filtered[i]); },
+    pageRows.length,
+    (i) => { if (pageRows[i]) openEdit(pageRows[i]); },
     !loading && !showModal && !confirmState && !showChat && !moreOpen && rowMenuId === null,
   );
 
   // 全选/反选（仅当前过滤结果）
-  const allSelected = filtered.length > 0 && filtered.every((ch) => selected.has(ch.id));
+  const allSelected = pageRows.length > 0 && pageRows.every((ch) => selected.has(ch.id));
   const toggleAll = (): void => {
     if (allSelected) {
       setSelected(new Set());
     } else {
-      setSelected(new Set(filtered.map((ch) => ch.id)));
+      setSelected(new Set(pageRows.map((ch) => ch.id)));
     }
   };
   const toggleOne = (id: string | number): void => {
@@ -555,7 +719,7 @@ export default function Channels(): JSX.Element {
     setLoading(true);
     setError('');
     try {
-      const res = await api.listChannels({ search, page, pageSize });
+      const res = await api.listChannels({ page_size: 0 });
       const items: ChannelItem[] = (res?.data ?? []).map((ch: ApiChannelItem) => ({
         id: ch.id as string | number,
         seq: ch.seq,
@@ -584,7 +748,6 @@ export default function Channels(): JSX.Element {
         updated_at: typeof ch.updated_at === 'number' ? ch.updated_at : undefined,
       }));
       setChannels(items);
-      setTotal(typeof (res as { total?: number }).total === 'number' ? (res as { total: number }).total : items.length);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -894,10 +1057,10 @@ export default function Channels(): JSX.Element {
       {error && <div className="error-message">{error}</div>}
 
       <Card
-        title={`${t('所有渠道')} (${total})`}
+        title={`${t('所有渠道')} (${channels.length})`}
         actions={
           <div className="channels-toolbar">
-            {/* 搜索框（回车触发服务端搜索） */}
+            {/* 搜索框（本地即时过滤，无需回车） */}
             <div className="channels-search">
               <Search size={14} />
               <input
@@ -906,12 +1069,37 @@ export default function Channels(): JSX.Element {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    setPage(1);
-                    void loadChannels();
-                  }
+                  if (e.key === 'Enter') setPage(1);
                 }}
               />
+            </div>
+
+            {/* 列设置（显隐浮层，localStorage 记忆，对齐模型管理页） */}
+            <div className="ch-colset" ref={colPanelRef}>
+              <Button
+                variant="outline"
+                onClick={() => setColPanelOpen((v) => !v)}
+                title={t('列显示设置')}
+              >
+                <Settings2 size={16} />
+              </Button>
+              {colPanelOpen && (
+                <div className="ch-colset-panel" role="group" aria-label={t('列设置')}>
+                  {CH_COL_DEFS.map((c) => (
+                    <label key={c.key} className="ch-colset-row">
+                      <span>{c.label === 'ID' ? 'ID' : t(c.label)}</span>
+                      <Switch
+                        checked={colVis[c.key]}
+                        onChange={() => toggleColVis(c.key)}
+                        ariaLabel={`${t('显示列')} ${c.label}`}
+                      />
+                    </label>
+                  ))}
+                  <button type="button" className="ch-colset-reset" onClick={resetColVis}>
+                    {t('恢复默认')}
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* "更多"下拉 */}
@@ -942,6 +1130,51 @@ export default function Channels(): JSX.Element {
           />
         ) : (
           <>
+            {/* 筛选/排序分段（对齐模型管理页 mm-filters） */}
+            <div className="ch-filters">
+              <div className="ch-seg" role="tablist" aria-label={t('状态筛选')}>
+                {CH_STATE_OPTIONS.map(([v, label]) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className={`ch-seg-btn${stateFilter === v ? ' active' : ''}`}
+                    onClick={() => setStateFilter(v)}
+                  >
+                    {t(label)}
+                  </button>
+                ))}
+              </div>
+              <div className="ch-seg" role="tablist" aria-label={t('类型筛选')}>
+                {CH_TYPE_OPTIONS.map(([v, label]) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className={`ch-seg-btn${typeFilter === v ? ' active' : ''}`}
+                    onClick={() => setTypeFilter(v)}
+                  >
+                    {t(label)}
+                  </button>
+                ))}
+              </div>
+              <div className="ch-seg" role="tablist" aria-label={t('排序')}>
+                {CH_SORT_OPTIONS.map(([v, label]) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className={`ch-seg-btn${sortMode === v ? ' active' : ''}`}
+                    onClick={() => setSortMode(v)}
+                  >
+                    {t(label)}
+                  </button>
+                ))}
+              </div>
+              <span className="ch-filters-count">
+                {filtered.length === channels.length
+                  ? `${filtered.length} ${t('个渠道')}`
+                  : `${filtered.length} / ${channels.length} ${t('个渠道')}`}
+              </span>
+            </div>
+
             {/* 批量操作栏 */}
             {selected.size > 0 && (
               <div className="channels-bulk">
@@ -965,21 +1198,21 @@ export default function Channels(): JSX.Element {
                         aria-label={t('全选')}
                       />
                     </th>
-                    <th className="col-id">ID</th>
-                    <th className="col-name">{t('名称')}</th>
-                    <th className="col-type">{t('类型')}</th>
-                    <th className="col-status">{t('状态')}</th>
-                    <th className="col-models">{t('模型')}</th>
-                    <th className="col-priority">{t('优先级')}</th>
-                    <th className="col-weight">{t('权重')}</th>
-                    <th className="col-balance">{t('余额')}</th>
-                    <th className="col-response">{t('响应')}</th>
-                    <th className="col-testtime">{t('测试时间')}</th>
+                    <th className={`col-id${colCls('id')}`}>ID</th>
+                    <th className={`col-name${colCls('name')}`}>{t('名称')}</th>
+                    <th className={`col-type${colCls('type')}`}>{t('类型')}</th>
+                    <th className={`col-status${colCls('status')}`}>{t('状态')}</th>
+                    <th className={`col-models${colCls('models')}`}>{t('模型')}</th>
+                    <th className={`col-priority${colCls('priority')}`}>{t('优先级')}</th>
+                    <th className={`col-weight${colCls('weight')}`}>{t('权重')}</th>
+                    <th className={`col-balance${colCls('balance')}`}>{t('余额')}</th>
+                    <th className={`col-response${colCls('response')}`}>{t('响应')}</th>
+                    <th className={`col-testtime${colCls('testtime')}`}>{t('测试时间')}</th>
                     <th className="col-actions">{t('操作')}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((ch, i) => {
+                  {pageRows.map((ch, i) => {
                     const isEditingPriority = editingField?.id === ch.id && editingField?.field === 'priority';
                     const isEditingWeight = editingField?.id === ch.id && editingField?.field === 'weight';
                     const mappingEntries = Object.entries(ch.model_mapping || {});
@@ -990,7 +1223,7 @@ export default function Channels(): JSX.Element {
                       <tr
                         key={ch.id}
                         ref={(el) => { rowRefs.current[i] = el; }}
-                        className={`${selected.has(ch.id) ? 'selected' : ''} ${activeIndex === i ? 'kbd-active' : ''}`}
+                        className={`${selected.has(ch.id) ? 'selected' : ''} ${activeIndex === i ? 'kbd-active' : ''} ${ch.status === 'enabled' ? '' : 'ch-off'}`}
                         onMouseEnter={() => setActiveIndex(i)}
                       >
                         <td className="col-select">
@@ -1001,24 +1234,28 @@ export default function Channels(): JSX.Element {
                             aria-label={t('选择')}
                           />
                         </td>
-                        <td className="col-id" title={String(ch.id)}>
+                        <td className={`col-id${colCls('id')}`} title={String(ch.id)}>
                           {ch.seq ?? String(ch.id).slice(0, 8)}
                         </td>
-                        <td className="col-name">
-                          <div className="ch-name" title={ch.name}>{ch.name}</div>
+                        <td className={`col-name${colCls('name')}`}>
+                          <div className="ch-name ch-copy" title={t('点击复制名称')} onClick={() => copyText(ch.name)}>{ch.name}</div>
                           {(ch.base_url || ch.account_id) && (
-                            <div className="ch-sub" title={ch.base_url || ch.account_id}>
+                            <div
+                              className="ch-sub ch-copy"
+                              title={t('点击复制地址')}
+                              onClick={() => copyText(ch.base_url || ch.account_id || '')}
+                            >
                               {ch.base_url || ch.account_id}
                             </div>
                           )}
                         </td>
-                        <td className="col-type">
+                        <td className={`col-type${colCls('type')}`}>
                           <span className="ch-type-badge">
                             <TypeIcon size={12} />
                             {typeLabel(ch.channel_type)}
                           </span>
                         </td>
-                        <td className="col-status">
+                        <td className={`col-status${colCls('status')}`}>
                           <span
                             className={`ch-status-badge ${ch.status === 'enabled' ? 'ok' : 'bad'}`}
                             title={ch.last_error || undefined}
@@ -1026,13 +1263,19 @@ export default function Channels(): JSX.Element {
                             {ch.status === 'enabled' ? t('启用') : t('禁用')}
                           </span>
                         </td>
-                        <td className="col-models">
+                        <td className={`col-models${colCls('models')}`}>
                           {models.length === 0
                             ? <span className="ch-models-all">{t('全部')}</span>
                             : (
                               <div className="ch-models">
                                 {models.slice(0, 3).map((m) => (
-                                  <span key={m} className="ch-model-badge" style={{ color: modelBadgeColor(m), borderColor: modelBadgeColor(m) }}>
+                                  <span
+                                    key={m}
+                                    className="ch-model-badge ch-copy"
+                                    style={{ color: modelBadgeColor(m), borderColor: modelBadgeColor(m) }}
+                                    title={t('点击复制模型名')}
+                                    onClick={() => copyText(m)}
+                                  >
                                     {m}
                                   </span>
                                 ))}
@@ -1056,7 +1299,7 @@ export default function Channels(): JSX.Element {
                             </div>
                           )}
                         </td>
-                        <td className="col-priority">
+                        <td className={`col-priority${colCls('priority')}`}>
                           {isEditingPriority ? (
                             <input
                               type="number"
@@ -1085,7 +1328,7 @@ export default function Channels(): JSX.Element {
                             </span>
                           )}
                         </td>
-                        <td className="col-weight">
+                        <td className={`col-weight${colCls('weight')}`}>
                           {isEditingWeight ? (
                             <input
                               type="number"
@@ -1114,7 +1357,7 @@ export default function Channels(): JSX.Element {
                             </span>
                           )}
                         </td>
-                        <td className="col-balance">
+                        <td className={`col-balance${colCls('balance')}`}>
                           <button
                             className="balance-cell"
                             onClick={() => handleUpdateBalance(ch.id)}
@@ -1142,14 +1385,14 @@ export default function Channels(): JSX.Element {
                             )}
                           </button>
                         </td>
-                        <td className="col-response">
+                        <td className={`col-response${colCls('response')}`}>
                           {ch.response_time !== undefined ? (
                             <span className={`response-time-badge ${ch.response_time < 500 ? 'fast' : ch.response_time < 2000 ? 'medium' : 'slow'}`}>
                               {ch.response_time}ms
                             </span>
                           ) : '—'}
                         </td>
-                        <td className="col-testtime">
+                        <td className={`col-testtime${colCls('testtime')}`}>
                           {ch.test_time ? (
                             <span title={new Date(ch.test_time * 1000).toLocaleString()}>
                               {formatRelativeTime(ch.test_time * 1000)}
@@ -1205,16 +1448,57 @@ export default function Channels(): JSX.Element {
             </div>
 
             {/* 分页（公共 Pagination 组件，与 Logs 页统一） */}
-            {totalPages > 1 && (
-              <Pagination page={page} totalPages={totalPages} onChange={(p) => setPage(p)} />
-            )}
+            {/* 分页页脚：总数/区间 + 每页档位 + 跳页（对齐模型管理页脚） */}
+            <div className="ch-table-foot">
+              <span className="ch-foot-info">
+                {t('共')} {filtered.length} {t('条')}
+                {filtered.length > 0 &&
+                  ` · ${t('当前第')} ${(page - 1) * pageSize + 1}–${Math.min(
+                    page * pageSize,
+                    filtered.length,
+                  )} ${t('条')}`}
+              </span>
+              <div className="ch-foot-right">
+                <select
+                  className="form-input ch-pagesize"
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                  }}
+                  aria-label={t('每页条数')}
+                >
+                  {PAGE_SIZES.map((n) => (
+                    <option key={n} value={n}>
+                      {n} / {t('页')}
+                    </option>
+                  ))}
+                </select>
+                <Pagination page={page} totalPages={totalPages} onChange={(p) => setPage(p)} />
+                <span className="ch-jump">
+                  {t('跳至')}
+                  <input
+                    className="form-input"
+                    value={jumpDraft}
+                    onChange={(e) => setJumpDraft(e.target.value.replace(/\D/g, ''))}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') submitJump();
+                      if (e.key === 'Escape') setJumpDraft('');
+                    }}
+                    onBlur={submitJump}
+                    placeholder={String(page)}
+                    aria-label={t('跳至页码')}
+                  />
+                  {t('页')}
+                </span>
+              </div>
+            </div>
           </>
         )}
       </Card>
 
       {/* 行操作菜单（fixed 挂在 body 层级，逃出 Card/table 的 overflow 裁剪） */}
       {rowMenuId !== null && (() => {
-        const ch = filtered.find((c) => c.id === rowMenuId);
+        const ch = channels.find((c) => c.id === rowMenuId);
         if (!ch) return null;
         return (
           <div

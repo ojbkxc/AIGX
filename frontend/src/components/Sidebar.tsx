@@ -72,7 +72,6 @@ const navGroups: NavGroup[] = [
       navItems[2],  // 提示词库
       navItems[3],  // API 密钥
       navItems[4],  // 用量日志（全员可见，admin 看全部，普通用户看自己）
-      navItems[5],  // 模型管理（admin 可写；普通用户只读自己分组可见的模型与价格）
     ],
   },
   {
@@ -80,6 +79,7 @@ const navGroups: NavGroup[] = [
     labelKey: '管理',
     adminOnly: true,
     items: [
+      navItems[5],  // 模型管理（admin 可写；普通用户只读自己分组可见的模型与价格）
       navItems[6],  // 渠道管理
       navItems[17], // 账号池
       navItems[7],  // 定价倍率
