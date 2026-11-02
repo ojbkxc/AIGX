@@ -322,53 +322,12 @@ pub async fn run_now(state: &AppState, id: &str) -> Result<String, String> {
     run_backend(state, task, true).await
 }
 
-/// 「部分账号失败」算不算这一轮失败（`RunGuard::finish` 的 `success`）。
-///
-/// ── 为什么不算 ──────────────────────────────────────────────
-/// `success = false` 会按失败次数做指数退避（最长 24 小时）。而后端任务的失败常常
-/// 是**按账号**的：一个账号的登录态被上游作废就足以让每一轮都判失败一次，整条任务
-/// 于是被推到几小时后再跑，其余账号跟着一起变旧。失败本身已经如实进了结果与日志，
-/// 不需要再把整轮一起罚掉。
-///
-/// ── 为什么「一个都没成功」仍算失败 ─────────────────────────
-/// 全失败通常意味着更上游的问题（断网、出口被挡、上游整体故障）：这时保留退避。
-fn round_succeeded(succeeded: usize, failed: usize) -> bool {
-    failed == 0 || succeeded > 0
-}
-
 async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<String, String> {
     let settings = state.config_manager.get().await.scheduled_tasks;
 
-    // 更新检查：直接调 check（其内部有冷却保护），auto_apply 时发现新版本即应用。
-    if task.id == TASK_UPDATE_CHECK {
-        let config = state.config_manager.get().await;
-        if !config.update.enabled {
-            return Ok("软件更新开关已关闭，跳过".to_string());
-        }
-        let info = state
-            .update
-            .check(&config.update)
-            .await
-            .map_err(|error| error)?;
-        if config.update.auto_apply && info.get("hasUpdate").and_then(Value::as_bool) == Some(true)
-        {
-            if let Err(e) = state.update.start_apply(&config.update, false) {
-                tracing::warn!("[Update] 自动应用失败：{e}");
-            }
-        }
-        return Ok(
-            if info.get("hasUpdate").and_then(Value::as_bool) == Some(true) {
-                let summary = format!(
-                    "发现新版本 {}（当前 {}）",
-                    info["latestVersion"].as_str().unwrap_or(""),
-                    crate::update::CURRENT_VERSION
-                );
-                tracing::info!("[Update] {summary}");
-                summary
-            } else {
-                "已完成版本检查".to_string()
-            },
-        );
+    // 更新开关关闭时不占位直接跳过：占位是为了防并发与排期推进，开关关闭本就不该跑。
+    if task.id == TASK_UPDATE_CHECK && !state.config_manager.get().await.update.enabled {
+        return Ok("软件更新开关已关闭，跳过".to_string());
     }
 
     // 手动执行越不越过失败冷却：按**冷却记的是什么**分两类。
@@ -382,6 +341,37 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
         task_state::Claim::Deferred(state_state) => return Err(state_state.waiting_message()),
     };
     let (summary, success) = match task.id {
+        TASK_UPDATE_CHECK => {
+            let config = state.config_manager.get().await;
+            // check 内部有冷却保护；失败记退避（连续失败按间隔指数退避，避免打爆限额）。
+            match state.update.check(&config.update).await {
+                Ok(info) => {
+                    if config.update.auto_apply
+                        && info.get("hasUpdate").and_then(Value::as_bool) == Some(true)
+                    {
+                        if let Err(e) = state.update.start_apply(&config.update, false) {
+                            tracing::warn!("[Update] 自动应用失败：{e}");
+                        }
+                    }
+                    if info.get("hasUpdate").and_then(Value::as_bool) == Some(true) {
+                        let summary = format!(
+                            "发现新版本 {}（当前 {}）",
+                            info["latestVersion"].as_str().unwrap_or(""),
+                            crate::update::CURRENT_VERSION
+                        );
+                        tracing::info!("[Update] {summary}");
+                        (summary, true)
+                    } else {
+                        ("已完成版本检查".to_string(), true)
+                    }
+                }
+                Err(error) => {
+                    let summary = format!("版本检查失败（{error}）");
+                    tracing::warn!("[Tasks] {summary}");
+                    (summary, false)
+                }
+            }
+        }
         TASK_CREDENTIAL_MAINTENANCE => {
             let refreshed = crate::account_session::refresh::refresh_expiring(
                 &state.account_sessions,
