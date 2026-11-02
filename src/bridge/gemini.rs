@@ -241,12 +241,11 @@ impl Bridge for GeminiBridge {
     async fn chat(
         &self,
         req: &ChatFormat,
-        _ctx: &BridgeContext,
+        ctx: &BridgeContext,
     ) -> Result<ChatResponse, BridgeError> {
         let body = self.build_body(req, false);
         let url = self.generate_url(&req.model);
-        let resp = self
-            .post(&url, &body)
+        let resp = crate::debug_traffic::traced(self.post(&url, &body), ctx)
             .send()
             .await
             .map_err(|e| BridgeError::Transport(e.to_string()))?;
@@ -272,12 +271,11 @@ impl Bridge for GeminiBridge {
     async fn chat_stream(
         &self,
         req: &ChatFormat,
-        _ctx: &BridgeContext,
+        ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
         let body = self.build_body(req, true);
         let url = self.stream_url(&req.model);
-        let resp = self
-            .post(&url, &body)
+        let resp = crate::debug_traffic::traced(self.post(&url, &body), ctx)
             // 流式请求放宽总超时（共享 client 的 300s 是累计上限，会掐断长流）
             .timeout(crate::bridge::stream_request_timeout())
             .send()

@@ -332,6 +332,12 @@ pub struct UsageConfig {
     /// 默认关闭——关闭时零开销（无序列化、无存储、无字符截断拷贝）。
     #[serde(default)]
     pub log_body: bool,
+    /// 调试模式（上游原始报文）：开启后抓取 AIGX **实际发往上游**的
+    /// URL / 脱敏头 / 请求体，落在进程内环形缓冲（不写库），供设置页查看。
+    /// 与 `log_body` 互补——那边是下游（客户端）侧，这边是上游侧。
+    /// 默认关闭——关闭时桥接层零开销（`try_clone`/`build` 都不执行）。
+    #[serde(default)]
+    pub debug_traffic: bool,
     /// 按次计费每次固定扣减的额度数（全局统一，`billing_mode=count` 的
     /// 订阅套餐生效）。默认 2，与聊天页「1 次 = 2 额度」口径一致。
     /// 与 token 计费互斥：订阅计费模式为 count 时按此固定值扣，否则按 token 量。
@@ -547,6 +553,7 @@ impl Default for UsageConfig {
             retry_on_status: default_retry_on_status(),
             max_request_body_mb: default_max_request_body_mb(),
             log_body: false,
+            debug_traffic: false,
             allow_internal_upstream: false,
             billing_flat_quota: default_billing_flat_quota(),
         }
@@ -588,6 +595,23 @@ pub fn log_body_enabled() -> bool {
 /// 由 main 与 settings 更新端点写入快照
 pub fn set_log_body(v: bool) {
     LOG_BODY.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 调试模式（上游原始报文）开关的进程级快照（由 main 启动时写入）。
+///
+/// 与 `log_body` 同理：桥接层每个请求都要判一次开关，走原子快照零开销
+/// （关闭时分支预测直通，不做 `try_clone`/`build`）。管理端保存后立即生效，
+/// 无需重启（与 `log_body` 的区别——这里读出后直接决定抓不抓，没有缓存）。
+static DEBUG_TRAFFIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 读取调试模式开关（供桥接层同步访问）
+pub fn debug_traffic_enabled() -> bool {
+    DEBUG_TRAFFIC.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 与 settings 更新端点写入快照
+pub fn set_debug_traffic(v: bool) {
+    DEBUG_TRAFFIC.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 按次计费每次固定扣减额度的进程级快照（数据面同步路径读取）。

@@ -47,6 +47,8 @@ pub struct LimitsRequest {
     pub max_request_body_mb: Option<usize>,
     /// 请求日志快照开关（log_body）
     pub log_body: Option<bool>,
+    /// 调试模式（上游原始报文）开关
+    pub debug_traffic: Option<bool>,
     /// 按次计费每次固定扣减额度（billing_mode=count 的订阅生效）
     pub billing_flat_quota: Option<i64>,
     /// 是否允许上游地址指向内网（SSRF 防护逃生阀，默认 false）
@@ -145,6 +147,7 @@ pub async fn handle_get_limits(
             "retry_on_status": config.usage.retry_on_status,
             "max_request_body_mb": config.usage.max_request_body_mb,
             "log_body": config.usage.log_body,
+            "debug_traffic": config.usage.debug_traffic,
             "billing_flat_quota": config.usage.billing_flat_quota,
             "allow_internal_upstream": config.usage.allow_internal_upstream,
         })
@@ -245,6 +248,16 @@ pub async fn handle_update_limits(
         config.usage.log_body = v;
         // 同步进程级快照（数据面同步路径读取，立即生效）
         crate::config::set_log_body(v);
+    }
+    if let Some(v) = body.debug_traffic {
+        config.usage.debug_traffic = v;
+        // 同步进程级快照（桥接层每个请求读取，保存即生效、无需重启）
+        crate::config::set_debug_traffic(v);
+        // 关闭时顺手清空缓冲：避免关掉开关后旧报文还留在管理页上看得到
+        // （开启前的报文同样不该在开启后突然出现）。
+        if !v {
+            crate::debug_traffic::clear();
+        }
     }
     if let Some(v) = body.billing_flat_quota {
         if v > 0 {

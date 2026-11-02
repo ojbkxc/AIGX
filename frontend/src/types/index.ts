@@ -1340,6 +1340,42 @@ export interface SecurityPolicyItem {
   restartRequiredFields?: string[];
 }
 
+/** 调试模式 · 一条上游原始报文（GET /api/debug/traffic；仅请求侧） */
+export interface DebugTrafficEntry {
+  /** 记录时刻（毫秒 Unix 时间戳） */
+  ts: number;
+  /** 关联的请求 id（与请求日志同值） */
+  request_id: string;
+  /** 实际请求的上游模型真名（别名映射之后） */
+  model: string;
+  /** 实际承载的账号 id（账号型渠道才有） */
+  account_id?: string;
+  /** HTTP 方法 */
+  method: string;
+  /** 上游 URL（含路径与查询串） */
+  url: string;
+  /** 发给上游的请求头（**已脱敏**） */
+  headers: Record<string, string>;
+  /** 发给上游的请求体（超长已截断） */
+  body?: string;
+  /** 请求体是否被截断 */
+  truncated?: boolean;
+}
+
+/** 调试模式缓冲概览（GET /api/debug/traffic） */
+export interface DebugTrafficView {
+  /** 开关是否开启（关闭时 buffer 为空） */
+  enabled: boolean;
+  /** 环形缓冲上限条数 */
+  maxEntries: number;
+  /** 单条请求体截断上限（字节） */
+  maxBodyBytes: number;
+  /** 累计被挤掉的条数 */
+  dropped: number;
+  /** 最近抓到的报文（最新在前） */
+  entries: DebugTrafficEntry[];
+}
+
 /** 路由策略（GET/PUT /api/routing；对照 Agent2API「设置 → 路由」） */
 export type RouteStrategy = 'weighted' | 'round_robin' | 'ranked';
 export type StickyMode = 'auto' | 'session' | 'turn' | 'off';

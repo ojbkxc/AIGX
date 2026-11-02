@@ -77,6 +77,7 @@ import type {
   AgentSettingsItem,
   GatewaySettingsItem,
   SecurityPolicyItem,
+  DebugTrafficView,
   RoutingPolicyItem,
   GatewayPromptItem,
   StorageOverviewItem,
@@ -651,6 +652,12 @@ export const api = {
     request<ApiResponse<SecurityPolicyItem>>('GET', `${API_BASE}/security/policy`),
   saveSecurityPolicy: (data: Record<string, unknown>): Promise<ApiResponse<SecurityPolicyItem>> =>
     request<ApiResponse<SecurityPolicyItem>>('PUT', `${API_BASE}/security/policy`, data),
+  // 调试模式：上游原始报文（对照 Agent2API「设置 → 网关 → 调试模式」）。
+  // 开关走 /api/limits 的 debug_traffic 字段；这里只做读取与清空。
+  getDebugTraffic: (): Promise<ApiResponse<DebugTrafficView>> =>
+    request<ApiResponse<DebugTrafficView>>('GET', `${API_BASE}/debug/traffic`),
+  clearDebugTraffic: (): Promise<ApiResponse<{ cleared: number }>> =>
+    request<ApiResponse<{ cleared: number }>>('DELETE', `${API_BASE}/debug/traffic`),
   // 路由策略（对照 Agent2API「设置 → 路由」；保存即热生效，无需重启）
   getRoutingPolicy: (): Promise<ApiResponse<RoutingPolicyItem>> =>
     request<ApiResponse<RoutingPolicyItem>>('GET', `${API_BASE}/routing`),

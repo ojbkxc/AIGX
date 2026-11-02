@@ -54,7 +54,22 @@
 
 把原先硬编码在 `src/api/admin/auth.rs`（阈值 5 / 限流 10）与 `main.rs`（锁定 TTL 300s）的三个门槛抽成可配项：连续失败锁定开关 / 失败阈值 / 锁定时长 / 每分钟登录上限。默认值与原硬编码一致，行为不变。阈值/开关走原子快照保存即生效；锁定时长是失败计数缓存 TTL，改后需重启（与网关监听地址同口径）。差异：上游的 ALTCHA 机器人校验未移植。
 
-## 供应商对齐状态
+### 6. 调试模式 · 上游原始报文（Agent2API 设置 → 网关 → 调试模式）
+
+| AIGX | Agent2API 蓝本 |
+|---|---|
+| `src/debug_traffic.rs`（进程内环形缓冲 + 凭据头硬脱敏 + `traced()` 构造器包装） | `core/debug_traffic.rs`（独立 `debug_traffic` 表） |
+| `src/api/admin/debug.rs`（`GET/DELETE /api/debug/traffic`） | `api::debug_api` |
+| 开关 `usage.debug_traffic`：`/api/limits` GET/PUT + main 启动快照 | config `debugMode` |
+| `frontend/src/components/DebugTrafficPanel.tsx`（设置 → 运维 → 网关） | `ui/requests-panel.js` 调试详情 |
+| 桥接层抓取点：`src/bridge/{openai,anthropic,gemini,zai}.rs` 的 13 个 `.send()` 前 | 各家适配器 `build_chat_request` |
+
+差异与取舍：
+
+- **只抓请求侧**（URL / 脱敏后的请求头 / 最终请求体），落**进程内环形缓冲**（200 条、单条 64KB）而非数据表：请求侧体积小，省掉一次 schema 迁移；代价是重启即清空（调试模式本就是临时排障）。
+- **响应侧**（状态码 / 响应头 / 流式原始 SSE 文本）尚未移植——需要再动 13 个发送点在 `.send()` 之后接入。非流式响应体与错误体已由 `log_body` 的 `LogDebugSnapshot.response_body` 覆盖一部分。
+- 脱敏为**硬要求**：`authorization` / `cookie` / `x-api-key` / 各家自定义 token 头一律 `[redacted]`（名单见 `src/debug_traffic.rs` 的 `SENSITIVE_HEADERS`）。
+- 关闭开关时桥接层零开销（`traced()` 先判原子快照，不做 `try_clone`/`build`）；关闭时顺手清空缓冲。
 
 `src/account_session/registry.rs` 的 `AGENT2API_PROVIDERS` 已对齐上游 24 家全名单（workbuddy/-intl、raccoon、catpaw、autoclaw/-intl、qoder/-intl、cline-free/pass、accio/-cn、zcode/-intl、codearts、trae、loomy、kuku、monkeycode/-intl、commandcode、antigravity、officeace、orcaterm）。
 

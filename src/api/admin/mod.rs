@@ -7,6 +7,7 @@ pub mod channels;
 pub mod checkin_center;
 pub mod common;
 pub mod dashboard;
+pub mod debug;
 pub mod diagnostics;
 pub mod logs;
 pub mod mcp;
@@ -127,6 +128,9 @@ pub use backup::{handle_backup_export, handle_backup_import, handle_storage_over
 pub use notify::{handle_get_notify_config, handle_update_notify_config};
 
 pub use security::{handle_security_events, handle_security_summary};
+
+// 调试模式：上游原始报文查看/清空（对照 Agent2API `/api/debug/traffic`）
+pub use debug::{handle_clear_debug_traffic, handle_get_debug_traffic};
 
 pub use monitor::handle_monitor_system;
 

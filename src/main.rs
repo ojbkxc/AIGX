@@ -21,6 +21,7 @@ mod chat_session;
 mod checkin;
 mod config;
 mod cron;
+mod debug_traffic;
 mod egress;
 mod error_translate;
 mod graphql;
@@ -113,6 +114,8 @@ async fn main() -> anyhow::Result<()> {
     crate::config::set_trust_proxy_headers(config.trust_proxy_headers);
     // 请求日志快照开关快照（数据面同步路径读取，见 config::log_body_enabled）
     crate::config::set_log_body(config.usage.log_body);
+    // 调试模式（上游原始报文）开关快照（桥接层同步读取，见 config::debug_traffic_enabled）
+    crate::config::set_debug_traffic(config.usage.debug_traffic);
     // 按次计费固定额度快照（数据面同步路径读取，见 config::billing_flat_quota）
     crate::config::set_billing_flat_quota(config.usage.billing_flat_quota);
 
@@ -1407,6 +1410,12 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/security/policy",
             get(api::admin::handle_get_security_policy)
                 .put(api::admin::handle_update_security_policy),
+        )
+        // 调试模式：上游原始报文（对照 Agent2API「设置 → 网关 → 调试模式」）
+        .route(
+            "/api/debug/traffic",
+            get(api::admin::handle_get_debug_traffic)
+                .delete(api::admin::handle_clear_debug_traffic),
         )
         // 路由策略（对照 Agent2API「设置 → 路由」：策略/粘性/断路器/调度权重）
         .route(

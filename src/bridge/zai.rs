@@ -194,11 +194,10 @@ impl Bridge for ZaiBridge {
     async fn chat(
         &self,
         req: &ChatFormat,
-        _ctx: &BridgeContext,
+        ctx: &BridgeContext,
     ) -> Result<ChatResponse, BridgeError> {
         let body = self.build_body(req, false);
-        let resp = self
-            .post(&self.messages_url(), &body)
+        let resp = crate::debug_traffic::traced(self.post(&self.messages_url(), &body), ctx)
             .send()
             .await
             .map_err(|e| BridgeError::Transport(e.to_string()))?;
@@ -224,11 +223,10 @@ impl Bridge for ZaiBridge {
     async fn chat_stream(
         &self,
         req: &ChatFormat,
-        _ctx: &BridgeContext,
+        ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
         let body = self.build_body(req, true);
-        let resp = self
-            .post(&self.messages_url(), &body)
+        let resp = crate::debug_traffic::traced(self.post(&self.messages_url(), &body), ctx)
             .send()
             .await
             .map_err(|e| BridgeError::Transport(e.to_string()))?;

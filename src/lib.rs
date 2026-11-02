@@ -16,6 +16,7 @@ pub mod chat_session;
 pub mod checkin;
 pub mod config;
 pub mod cron;
+pub mod debug_traffic;
 pub mod egress;
 pub mod error_translate;
 pub mod graphql;

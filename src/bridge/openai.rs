@@ -404,7 +404,7 @@ impl Bridge for OpenaiCompatibleBridge {
     async fn chat(
         &self,
         req: &ChatFormat,
-        _ctx: &BridgeContext,
+        ctx: &BridgeContext,
     ) -> Result<ChatResponse, BridgeError> {
         let mut body = self.build_body(req);
         body["stream"] = serde_json::json!(false);
@@ -418,8 +418,7 @@ impl Bridge for OpenaiCompatibleBridge {
         }
 
         let (request, body) = self.apply_emulation(body);
-        let resp = request
-            .json(&body)
+        let resp = crate::debug_traffic::traced(request.json(&body), ctx)
             .send()
             .await
             .map_err(|e| BridgeError::Transport(e.to_string()))?;
@@ -539,7 +538,7 @@ impl Bridge for OpenaiCompatibleBridge {
     async fn chat_stream(
         &self,
         req: &ChatFormat,
-        _ctx: &BridgeContext,
+        ctx: &BridgeContext,
     ) -> Result<ChatChunkStream, BridgeError> {
         let mut body = self.build_body(req);
         body["stream"] = serde_json::json!(true);
@@ -547,12 +546,15 @@ impl Bridge for OpenaiCompatibleBridge {
         let (request, body) = self.apply_emulation(body);
         // 流式请求改用宽松的总超时（详见 `Bridge::stream_request_timeout`）：
         // 共享 client 的 300s 是累计上限，会掐断长流；空闲兜底交给 read_timeout。
-        let resp = request
-            .timeout(crate::bridge::stream_request_timeout())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+        let resp = crate::debug_traffic::traced(
+            request
+                .timeout(crate::bridge::stream_request_timeout())
+                .json(&body),
+            ctx,
+        )
+        .send()
+        .await
+        .map_err(|e| BridgeError::Transport(e.to_string()))?;
 
         if !resp.status().is_success() {
             return Err(super::capture_upstream_error_http(
@@ -618,19 +620,20 @@ impl Bridge for OpenaiCompatibleBridge {
     async fn embed(
         &self,
         req: &EmbeddingRequest,
-        _ctx: &BridgeContext,
+        ctx: &BridgeContext,
     ) -> Result<EmbeddingResponse, BridgeError> {
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
         let body = serde_json::json!({
             "model": req.model,
             "input": req.input,
         });
-        let resp = self
-            .auth_conditional(self.client.post(&url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+        let resp = crate::debug_traffic::traced(
+            self.auth_conditional(self.client.post(&url)).json(&body),
+            ctx,
+        )
+        .send()
+        .await
+        .map_err(|e| BridgeError::Transport(e.to_string()))?;
 
         if !resp.status().is_success() {
             return Err(super::capture_upstream_error_http(
@@ -693,7 +696,7 @@ impl Bridge for OpenaiCompatibleBridge {
     async fn rerank(
         &self,
         req: &RerankRequest,
-        _ctx: &BridgeContext,
+        ctx: &BridgeContext,
     ) -> Result<RerankResponse, BridgeError> {
         let url = format!("{}/rerank", self.base_url.trim_end_matches('/'));
         let body = serde_json::json!({
@@ -704,12 +707,13 @@ impl Bridge for OpenaiCompatibleBridge {
                 .collect::<Vec<_>>(),
             "top_n": req.top_n,
         });
-        let resp = self
-            .auth_conditional(self.client.post(&url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+        let resp = crate::debug_traffic::traced(
+            self.auth_conditional(self.client.post(&url)).json(&body),
+            ctx,
+        )
+        .send()
+        .await
+        .map_err(|e| BridgeError::Transport(e.to_string()))?;
 
         if !resp.status().is_success() {
             return Err(super::capture_upstream_error_http(
@@ -762,13 +766,15 @@ impl Bridge for OpenaiCompatibleBridge {
     ///
     /// 与 Chat Completions 不同，text_completion 使用顶层 `prompt` 字段。
     /// body 原样转发给上游的 /completions 端点，上游 2xx 时返回完整 JSON。
-    async fn complete(&self, body: &Value, _ctx: &BridgeContext) -> Result<Value, BridgeError> {
-        let resp = self
-            .auth_conditional(self.client.post(self.completions_url()))
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+    async fn complete(&self, body: &Value, ctx: &BridgeContext) -> Result<Value, BridgeError> {
+        let resp = crate::debug_traffic::traced(
+            self.auth_conditional(self.client.post(self.completions_url()))
+                .json(body),
+            ctx,
+        )
+        .send()
+        .await
+        .map_err(|e| BridgeError::Transport(e.to_string()))?;
 
         if !resp.status().is_success() {
             return Err(super::capture_upstream_error_http(
@@ -791,14 +797,16 @@ impl Bridge for OpenaiCompatibleBridge {
     async fn generate_image(
         &self,
         body: &Value,
-        _ctx: &BridgeContext,
+        ctx: &BridgeContext,
     ) -> Result<Value, BridgeError> {
-        let resp = self
-            .auth_conditional(self.client.post(self.images_url()))
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+        let resp = crate::debug_traffic::traced(
+            self.auth_conditional(self.client.post(self.images_url()))
+                .json(body),
+            ctx,
+        )
+        .send()
+        .await
+        .map_err(|e| BridgeError::Transport(e.to_string()))?;
 
         if !resp.status().is_success() {
             return Err(super::capture_upstream_error_http(
@@ -826,14 +834,16 @@ impl Bridge for OpenaiCompatibleBridge {
         &self,
         body: &Value,
         stream: bool,
-        _ctx: &BridgeContext,
+        ctx: &BridgeContext,
     ) -> Result<ResponsesPassthrough, BridgeError> {
-        let resp = self
-            .auth_conditional(self.client.post(self.responses_url()))
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+        let resp = crate::debug_traffic::traced(
+            self.auth_conditional(self.client.post(self.responses_url()))
+                .json(body),
+            ctx,
+        )
+        .send()
+        .await
+        .map_err(|e| BridgeError::Transport(e.to_string()))?;
 
         if !resp.status().is_success() {
             return Err(super::capture_upstream_error_http(
