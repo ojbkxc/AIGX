@@ -77,25 +77,36 @@ pub async fn handle_diagnostics_summary(
         "cooldown": in_cooldown,
     });
 
-    // ── 2. 今日用量摘要（dashboard.rs 同口径：内存遍历请求日志）──
+    // ── 2. 今日用量摘要（聚合闸门开 → 读今日主档一行；否则回退明细遍历）──
     let now_ts = chrono::Utc::now().timestamp();
     let today_start = today_start_ts(now_ts);
-    let logs = state.log_store.requests.all_sorted_asc();
-    let mut today_requests: u64 = 0;
-    let mut today_success: u64 = 0;
-    let mut today_input_tokens: u64 = 0;
-    let mut today_output_tokens: u64 = 0;
-    for l in &logs {
-        if l.created_at < today_start {
-            continue;
-        }
-        today_requests += 1;
-        today_input_tokens = today_input_tokens.saturating_add(l.input_tokens);
-        today_output_tokens = today_output_tokens.saturating_add(l.output_tokens);
-        if l.status_code < 400 {
-            today_success += 1;
-        }
-    }
+    let (today_requests, today_success, today_input_tokens, today_output_tokens) =
+        if state.log_store.daily.agg_available() {
+            let r = state
+                .log_store
+                .daily
+                .load_day(&crate::log::daily_agg::today_key())
+                .unwrap_or_default();
+            (r.requests, r.successful, r.tokens_in, r.tokens_out)
+        } else {
+            let logs = state.log_store.requests.all_sorted_asc();
+            let mut reqs = 0u64;
+            let mut succ = 0u64;
+            let mut it = 0u64;
+            let mut ot = 0u64;
+            for l in &logs {
+                if l.created_at < today_start {
+                    continue;
+                }
+                reqs += 1;
+                it = it.saturating_add(l.input_tokens);
+                ot = ot.saturating_add(l.output_tokens);
+                if l.status_code < 400 {
+                    succ += 1;
+                }
+            }
+            (reqs, succ, it, ot)
+        };
     let today_usage = json!({
         "requests": today_requests,
         "success": today_success,
@@ -105,12 +116,15 @@ pub async fn handle_diagnostics_summary(
         "output_tokens": today_output_tokens,
     });
 
-    // ── 3. 错误概况（近 24h 失败请求按状态码分组）──
+    // ── 3. 错误概况（近 24h 失败请求按状态码分组；键区间近窗读，不扫全表）──
     let day_ago = now_ts - 24 * 3600;
-    let failures: Vec<&crate::log::RequestLog> = logs
-        .iter()
-        .filter(|l| l.created_at >= day_ago && l.status_code >= 400)
-        .collect();
+    let (recent, _sampled) = state
+        .log_store
+        .requests
+        .list_window(day_ago, now_ts, 20_000)
+        .unwrap_or_default();
+    let failures: Vec<&crate::log::RequestLog> =
+        recent.iter().filter(|l| l.status_code >= 400).collect();
     let top_errors = top_errors_from(&failures, TOP_ERRORS_LIMIT, ERROR_MSG_MAX_LEN);
 
     // ── 4. 运行信息（版本 + 进程运行时长）──

@@ -47,7 +47,9 @@
 //! successful = `status_code < 400`（dashboard.rs 现口径）；
 //! cache_hits = 命中请求数、cache_input = 命中行 input_tokens 和、
 //! cache_billed = 命中行 cost 和（cache_savings.billed_cost 口径）；
-//! top_sources 按 `channel_name`（None→"unknown"）分组——现口径；
+//! top_sources 读侧按 by_channel 的展示名（channel_name，None→"unknown"）
+//! 再聚合——与现口径一致；分组键用 channel_id（对齐 channel_health 按 id
+//! join 渠道表），改名后两 id 同现名会自然合并；
 //! 不引入蓝本 is_test 排除（AIGX 无此字段，26 个漏斗调用点即现有报表
 //! 口径）；失败请求 token 不清零（AIGX 的日志本就记终态）。
 
@@ -78,6 +80,8 @@ const CHANNEL_CAP: usize = 64;
 const USER_CAP: usize = 256;
 /// 用户行 models 维上限（只服务个人 Top5）。
 const USER_MODEL_CAP: usize = 16;
+/// 用户行渠道维上限（个人 Top 渠道榜）。
+const USER_CHANNEL_CAP: usize = 16;
 
 /// 主档的按模型累计项。字段并集覆盖 models/token_trend/cache 类全部端点。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -96,9 +100,15 @@ pub struct ModelAccum {
 }
 
 /// 主档的按渠道累计项（top_sources / channel_health）。
+///
+/// 分组键是 `channel_id`（对齐 channel_health 现口径——按 id join 渠道表），
+/// `name` 只是最近一次记录的展示名快照（`top_sources` 按它聚合展示；
+/// 渠道改名后读侧会按最新名合并展示行）。`channel_id=None` 的流量归
+/// `__other__` 组（id 即 OTHER 字符串）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChannelAccum {
-    pub name: String,
+    pub id: String,
+    pub name: Option<String>,
     pub count: u64,
     pub successful: u64,
     /// 延迟毫秒和（均值 = latency_sum / count）
@@ -107,11 +117,14 @@ pub struct ChannelAccum {
 }
 
 /// 主档的按用户累计项（user_ranking，Top 榜用途，容忍并入其他）。
+/// 数值三元组与现 handler 的 `(count, cost, tokens)` 完全对应。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserAccum {
     pub id: String,
     pub count: u64,
     pub cost: i64,
+    /// input+output token 和（user_ranking 的 tokens 列）
+    pub tokens: u64,
 }
 
 /// 一天一行的主档。
@@ -136,11 +149,23 @@ pub struct DailyAgg {
     pub by_user: Vec<UserAccum>,
 }
 
-/// 模型名 + 次数（用户行的 Top 维）。
+/// 用户行的按模型累计项：带分模型 token/成本明细，使**个人**报表
+/// （report_models 用户支）与管理员同字段全精度，不受主档 cap 影响。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct NamedCount {
+pub struct UserModelAccum {
     pub name: String,
     pub count: u64,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cost: i64,
+}
+
+/// 用户行的轻量渠道维（个人 Top 渠道榜；name 键、容忍并入 other）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChannelLite {
+    pub name: String,
+    pub count: u64,
+    pub cost: i64,
 }
 
 /// 一个用户一天的全精度聚合行。
@@ -155,7 +180,11 @@ pub struct UserDailyRow {
     pub cache_hits: u64,
     pub cache_input: u64,
     #[serde(default)]
-    pub models: Vec<NamedCount>,
+    pub models: Vec<UserModelAccum>,
+    /// 展示名口径（channel_name None→"unknown"），与主档 by_channel 键不同：
+    /// 个人榜不 join 渠道表，按名字够用了。
+    #[serde(default)]
+    pub channels: Vec<ChannelLite>,
 }
 
 /// 回填标记值：as_of 记录回填覆盖到的最后一天（不含今天）。
@@ -198,7 +227,8 @@ pub fn cutoff_date_key(max_age_days: u64) -> String {
 }
 
 /// 名字型累计项的统一访问（三种维度结构 + 用户行的 models 共用泛型逻辑）。
-trait Named {
+/// `pub` 仅因 [`merge_dim`] 的公开泛型约束需要，方法仍是包内语义。
+pub trait Named {
     fn name_ref(&self) -> &str;
     fn set_name_mut(&mut self, name: &str);
     /// 把 src 的**数值字段**（不含名字）累加进 self——cap 修剪搬运用。
@@ -226,16 +256,20 @@ impl Named for ModelAccum {
 
 impl Named for ChannelAccum {
     fn name_ref(&self) -> &str {
-        &self.name
+        &self.id
     }
     fn set_name_mut(&mut self, name: &str) {
-        self.name = name.to_string();
+        self.id = name.to_string();
     }
     fn merge_values_from(&mut self, src: &Self) {
         self.count += src.count;
         self.successful += src.successful;
         self.latency_sum = self.latency_sum.saturating_add(src.latency_sum);
         self.cost = self.cost.saturating_add(src.cost);
+        // 展示名搬运：self 缺名时采用被并入项的名字（修剪进 other 时不丢标签）。
+        if self.name.is_none() {
+            self.name = src.name.clone();
+        }
     }
 }
 
@@ -249,10 +283,11 @@ impl Named for UserAccum {
     fn merge_values_from(&mut self, src: &Self) {
         self.count += src.count;
         self.cost = self.cost.saturating_add(src.cost);
+        self.tokens = self.tokens.saturating_add(src.tokens);
     }
 }
 
-impl Named for NamedCount {
+impl Named for UserModelAccum {
     fn name_ref(&self) -> &str {
         &self.name
     }
@@ -261,6 +296,22 @@ impl Named for NamedCount {
     }
     fn merge_values_from(&mut self, src: &Self) {
         self.count += src.count;
+        self.tokens_in = self.tokens_in.saturating_add(src.tokens_in);
+        self.tokens_out = self.tokens_out.saturating_add(src.tokens_out);
+        self.cost = self.cost.saturating_add(src.cost);
+    }
+}
+
+impl Named for ChannelLite {
+    fn name_ref(&self) -> &str {
+        &self.name
+    }
+    fn set_name_mut(&mut self, name: &str) {
+        self.name = name.to_string();
+    }
+    fn merge_values_from(&mut self, src: &Self) {
+        self.count += src.count;
+        self.cost = self.cost.saturating_add(src.cost);
     }
 }
 
@@ -295,14 +346,19 @@ pub fn fold_request(agg: &mut DailyAgg, log: &RequestLog) {
     });
     prune_accum(&mut agg.by_model, MODEL_CAP, |a| a.count);
 
-    let ch = log.channel_name.clone().unwrap_or_else(|| "unknown".into());
-    push_accum(&mut agg.by_channel, &ch, |a| {
+    // 分组键 = channel_id（对齐 channel_health 现口径）；无 id 流量归 other。
+    // 展示名每次覆盖为最近记录（渠道改名后报表跟新名）。
+    let cid = log.channel_id.clone().unwrap_or_else(|| OTHER.to_string());
+    push_accum(&mut agg.by_channel, &cid, |a| {
         a.count += 1;
         if ok {
             a.successful += 1;
         }
         a.latency_sum = a.latency_sum.saturating_add(log.latency_ms);
         a.cost = a.cost.saturating_add(log.cost);
+        if log.channel_name.is_some() {
+            a.name = log.channel_name.clone();
+        }
     });
     prune_accum(&mut agg.by_channel, CHANNEL_CAP, |a| a.count);
 
@@ -310,6 +366,9 @@ pub fn fold_request(agg: &mut DailyAgg, log: &RequestLog) {
         push_accum(&mut agg.by_user, uid, |a| {
             a.count += 1;
             a.cost = a.cost.saturating_add(log.cost);
+            a.tokens = a
+                .tokens
+                .saturating_add(log.input_tokens + log.output_tokens);
         });
         prune_accum(&mut agg.by_user, USER_CAP, |a| a.count);
     }
@@ -328,8 +387,23 @@ pub fn fold_user_row(row: &mut UserDailyRow, log: &RequestLog) {
         row.cache_hits += 1;
         row.cache_input = row.cache_input.saturating_add(log.input_tokens);
     }
-    push_accum(&mut row.models, &log.model, |a| a.count += 1);
+    push_accum(&mut row.models, &log.model, |a| {
+        a.count += 1;
+        a.tokens_in = a.tokens_in.saturating_add(log.input_tokens);
+        a.tokens_out = a.tokens_out.saturating_add(log.output_tokens);
+        a.cost = a.cost.saturating_add(log.cost);
+    });
     prune_accum(&mut row.models, USER_MODEL_CAP, |a| a.count);
+
+    let ch = log
+        .channel_name
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    push_accum(&mut row.channels, &ch, |a| {
+        a.count += 1;
+        a.cost = a.cost.saturating_add(log.cost);
+    });
+    prune_accum(&mut row.channels, USER_CHANNEL_CAP, |a| a.count);
 }
 
 /// 在累计数组里找/建 name 项并应用累加闭包。
@@ -426,6 +500,63 @@ pub fn aggregate_user_rows(
     out
 }
 
+/// 读侧跨日维度合并：多天的行按键求和（复用 merge_values_from，与写侧
+/// 搬运同一语义），`__other__` 组原样保留为一行。主档与用户行通用
+/// （R 是任意含该维度的行类型）。排序由调用方按各端点现口径决定。
+pub fn merge_dim<T, R, G>(rows: &[R], pick: G) -> Vec<T>
+where
+    T: Named + Default,
+    G: Fn(&R) -> &[T],
+{
+    let mut map: std::collections::HashMap<String, T> = std::collections::HashMap::new();
+    for row in rows {
+        for item in pick(row) {
+            let e = map.entry(item.name_ref().to_string()).or_default();
+            e.merge_values_from(item);
+        }
+    }
+    map.into_values().collect()
+}
+
+/// Σby_model，按 count 降序（tie：总 token 降序）——top_models/model_distribution 口径。
+pub fn merge_models(rows: &[DailyAgg]) -> Vec<ModelAccum> {
+    let mut v = merge_dim(rows, |r| &r.by_model);
+    v.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then((b.tokens_in + b.tokens_out).cmp(&(a.tokens_in + a.tokens_out)))
+    });
+    v
+}
+
+/// Σby_channel，按 count 降序——channel_health/top_sources 口径。
+pub fn merge_channels(rows: &[DailyAgg]) -> Vec<ChannelAccum> {
+    let mut v = merge_dim(rows, |r| &r.by_channel);
+    v.sort_by_key(|c| std::cmp::Reverse(c.count));
+    v
+}
+
+/// Σby_user，按 cost 降序——user_ranking 现口径（cost 主排）。
+pub fn merge_users(rows: &[DailyAgg]) -> Vec<UserAccum> {
+    let mut v = merge_dim(rows, |r| &r.by_user);
+    v.sort_by(|a, b| b.cost.cmp(&a.cost).then(b.count.cmp(&a.count)));
+    v
+}
+
+/// 当前连续活跃天数：含今天往前逐日计数，断档即停；今天无请求 = 0
+/// （A2A overview「当前连续天数（含今天往前）」口径）。
+pub fn streak_days(present: &std::collections::BTreeSet<String>, today: &str) -> u64 {
+    let Ok(mut d) = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d") else {
+        return 0;
+    };
+    let mut n = 0u64;
+    while present.contains(&d.format("%Y-%m-%d").to_string()) {
+        n += 1;
+        d -= chrono::Duration::days(1);
+    }
+    n
+}
+
 /// 按天聚合存储。挂在 `LogStore` 内，`record_request` 漏斗调用。
 pub struct DailyAggStore {
     store: Arc<FileStore>,
@@ -507,6 +638,13 @@ impl DailyAggStore {
             .list(MASTER_PREFIX)
             .map(|v| !v.is_empty())
             .unwrap_or(false)
+    }
+
+    /// 报表读路径的切换闸门：回填标记存在才走聚合——聚合覆盖「历史（回填）
+    /// + 今天（记账）」的完整链条从此闭合；标记缺失（新装未回填、或手动
+    /// 清掉触发的重建窗口）时各 handler 走旧全量现算路径，数字永不为假。
+    pub fn agg_available(&self) -> bool {
+        self.backfill_marker().is_some()
     }
 
     fn prefix_rows<T>(&self, prefix: &str) -> Vec<T>
@@ -739,5 +877,82 @@ mod tests {
         assert_eq!(users["a"]["2025-01-02"].count, 1);
         assert_eq!(users["a"]["2025-01-02"].date, "2025-01-02");
         assert_eq!(users.len(), 2); // a 与 b，None 不建行
+    }
+
+    /// 读侧合并：同键跨日求和、id 键渠道聚合、users 按 cost 主排
+    /// （user_ranking 现口径）、个人行 models 带分模型明细。
+    #[test]
+    fn merge_dim_sums_across_days() {
+        let mk = |uid: &str, model: &str, ch: (&str, &str), cost: i64, ts: i64| {
+            let mut l = log(Some(uid), model, Some(ch.1), cost, ts);
+            l.channel_id = Some(ch.0.to_string());
+            l
+        };
+        let logs = vec![
+            mk("a", "m1", ("c1", "chan"), 10, 1_735_689_600),
+            mk("a", "m1", ("c1", "chan"), 20, 1_735_689_690),
+            mk("b", "m2", ("c2", "other"), 5, 1_735_776_000),
+        ];
+        let days: Vec<DailyAgg> = aggregate_logs(&logs).into_values().collect();
+        let models = merge_models(&days);
+        assert_eq!(
+            (models[0].name.as_str(), models[0].count, models[0].cost),
+            ("m1", 2, 30)
+        );
+        let chans = merge_channels(&days);
+        assert_eq!(chans.len(), 2);
+        let c1 = chans.iter().find(|c| c.id == "c1").unwrap();
+        assert_eq!((c1.count, c1.successful, c1.latency_sum), (2, 2, 200));
+        assert_eq!(c1.name.as_deref(), Some("chan"));
+        let users = merge_users(&days);
+        assert_eq!(users[0].id, "a"); // cost 30 > b 5：user_ranking 主排
+        assert_eq!(users[0].tokens, 30); // (10+5)×2 条
+                                         // 用户行 models 全精度明细（个人 report_models 数据源）
+        let urows: Vec<UserDailyRow> = aggregate_user_rows(&logs)
+            .get("a")
+            .map(|m| m.values().cloned().collect())
+            .unwrap();
+        let a_models: Vec<UserModelAccum> = {
+            let mut map: std::collections::HashMap<String, UserModelAccum> =
+                std::collections::HashMap::new();
+            for r in &urows {
+                for m in &r.models {
+                    let e = map.entry(m.name.clone()).or_default();
+                    e.count += m.count;
+                    e.tokens_in += m.tokens_in;
+                    e.tokens_out += m.tokens_out;
+                    e.cost += m.cost;
+                }
+            }
+            map.into_values().collect()
+        };
+        assert_eq!(a_models[0].name, "m1");
+        assert_eq!(
+            (
+                a_models[0].tokens_in,
+                a_models[0].tokens_out,
+                a_models[0].cost
+            ),
+            (20, 10, 30)
+        );
+    }
+
+    /// streak：含今天往前连算到断档；今天无请求 = 0（A2A 口径）。
+    #[test]
+    fn streak_counts_back_to_gap() {
+        use std::collections::BTreeSet;
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+        let fmt = |d: chrono::NaiveDate| d.format("%Y-%m-%d").to_string();
+        let mut present: BTreeSet<String> = BTreeSet::new();
+        for back in [0, 1, 3] {
+            present.insert(fmt(today - chrono::Duration::days(back)));
+        }
+        assert_eq!(streak_days(&present, &fmt(today)), 2);
+        assert_eq!(
+            streak_days(&present, &fmt(today - chrono::Duration::days(3))),
+            1
+        );
+        present.remove(&fmt(today));
+        assert_eq!(streak_days(&present, &fmt(today)), 0);
     }
 }

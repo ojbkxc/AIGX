@@ -34,7 +34,7 @@ use super::common::{
 };
 
 use super::channels::mask_channel;
-use super::dashboard::{dashboard_start_ts, DashboardQuery};
+use super::dashboard::{resolve_window, DashboardQuery};
 use super::pricing::PriceRequest;
 use super::tokens::KeyRequest;
 use super::users::mask_user;
@@ -1819,35 +1819,49 @@ pub async fn handle_update_ratelimit_config(
 // 数据看板增强 API（功能 4）
 // ============================================================
 
-/// Dashboard 查询参数：时间范围（天数）。
+/// 用户消费 Top 榜（管理员视角）。
 ///
-/// - 默认 30 天，最大 90 天，最小 1 天。
-/// - 用于限制全量日志加载，避免性能退化。
+/// - 默认 30 天，1–365 天（原「最大 90」为双夹 bug，已统一）。
+/// - 聚合闸门开启时读按天聚合（与明细规模脱钩）；否则回退全量现算。
+/// - `__other__` 长尾组（超出 by_user cap 的用户并组，无单一身份）不进
+///   Top 榜——与现口径一致：cap 之外用户单体消费极低，本就无法进前 20。
 pub async fn handle_user_ranking(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<DashboardQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let start = dashboard_start_ts(q.days);
-    let logs = state.log_store.requests.list_all();
-    let mut by_user: HashMap<String, (u64, i64, u64)> = HashMap::new();
-    for l in &logs {
-        if l.created_at < start {
-            continue;
+    let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
+    let to_ts_end = super::dashboard::date_start_ts(&to) + 86_400 - 1;
+    let ranking: Vec<(String, u64, i64, u64)> = if state.log_store.daily.agg_available() {
+        let rows = state.log_store.daily.load_range(&from, &to);
+        // merge_users 已按 cost 降序（user_ranking 现主排口径）。
+        crate::log::daily_agg::merge_users(&rows)
+            .into_iter()
+            .filter(|u| u.id != crate::log::daily_agg::OTHER)
+            .map(|u| (u.id, u.count, u.cost, u.tokens))
+            .collect()
+    } else {
+        let logs = state.log_store.requests.list_all();
+        let mut by_user: HashMap<String, (u64, i64, u64)> = HashMap::new();
+        for l in &logs {
+            if l.created_at < from_ts || l.created_at > to_ts_end {
+                continue;
+            }
+            if let Some(uid) = &l.user_id {
+                let entry = by_user.entry(uid.clone()).or_insert((0, 0, 0));
+                entry.0 += 1;
+                entry.1 += l.cost;
+                entry.2 += l.input_tokens + l.output_tokens;
+            }
         }
-        if let Some(uid) = &l.user_id {
-            let entry = by_user.entry(uid.clone()).or_insert((0, 0, 0));
-            entry.0 += 1;
-            entry.1 += l.cost;
-            entry.2 += l.input_tokens + l.output_tokens;
-        }
-    }
-    let mut ranking: Vec<(String, u64, i64, u64)> = by_user
-        .into_iter()
-        .map(|(uid, (count, cost, tokens))| (uid, count, cost, tokens))
-        .collect();
-    ranking.sort_by_key(|b| std::cmp::Reverse(b.2));
+        let mut ranking: Vec<(String, u64, i64, u64)> = by_user
+            .into_iter()
+            .map(|(uid, (count, cost, tokens))| (uid, count, cost, tokens))
+            .collect();
+        ranking.sort_by_key(|b| std::cmp::Reverse(b.2));
+        ranking
+    };
     let data: Vec<Value> = ranking
         .into_iter()
         .take(20)
@@ -1869,21 +1883,34 @@ pub async fn handle_channel_health(
     Query(q): Query<DashboardQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let start = dashboard_start_ts(q.days);
+    let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
+    let to_ts_end = super::dashboard::date_start_ts(&to) + 86_400 - 1;
     let channels = state.channel_store.list();
-    let logs = state.log_store.requests.list_all();
     let mut by_channel: HashMap<String, (u64, u64, u64)> = HashMap::new();
-    for l in &logs {
-        if l.created_at < start {
-            continue;
-        }
-        if let Some(cid) = &l.channel_id {
-            let entry = by_channel.entry(cid.clone()).or_insert((0, 0, 0));
-            entry.0 += 1;
-            if l.status_code < 400 {
-                entry.1 += 1;
+    if state.log_store.daily.agg_available() {
+        let rows = state.log_store.daily.load_range(&from, &to);
+        for c in crate::log::daily_agg::merge_channels(&rows) {
+            // channel_id=None 的流量归 __other__，无法 join 渠道表——跳过
+            //（与现口径一致：现算路径本就只统计 Some(channel_id)）。
+            if c.id == crate::log::daily_agg::OTHER {
+                continue;
             }
-            entry.2 += l.latency_ms;
+            by_channel.insert(c.id, (c.count, c.successful, c.latency_sum));
+        }
+    } else {
+        let logs = state.log_store.requests.list_all();
+        for l in &logs {
+            if l.created_at < from_ts || l.created_at > to_ts_end {
+                continue;
+            }
+            if let Some(cid) = &l.channel_id {
+                let entry = by_channel.entry(cid.clone()).or_insert((0, 0, 0));
+                entry.0 += 1;
+                if l.status_code < 400 {
+                    entry.1 += 1;
+                }
+                entry.2 += l.latency_ms;
+            }
         }
     }
     // 批次6：补充断路器状态与健康追踪快照（巡检同款信号源）

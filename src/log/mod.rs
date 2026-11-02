@@ -676,6 +676,34 @@ impl RequestLogStore {
         logs
     }
 
+    /// 键区间读：`created_at ∈ [from_ts, to_ts]`（含两端）。
+    ///
+    /// `reqlog:{ts}:{id}` 时间戳定宽 10 位 → 键字典序等价数值序（sqlite.rs
+    /// 同论证），`list_range` 直接吃主键索引范围扫，把「最近 N 分钟/小时」
+    /// 类窗口读从全表降为近窗。超过 `max_rows` 截断并返回 `sampled=true`
+    /// （护栏：窗口内日志暴涨时报表宁可标注抽样也不扫穿）。
+    pub fn list_window(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+        max_rows: usize,
+    ) -> anyhow::Result<(Vec<RequestLog>, bool)> {
+        if from_ts > to_ts {
+            return Ok((Vec::new(), false));
+        }
+        let from = format!("reqlog:{from_ts}");
+        let to = format!("reqlog:{}", to_ts.saturating_add(1));
+        let keys = self.store.list_range("reqlog:", &from, &to)?;
+        let total = keys.len();
+        let mut logs = Vec::with_capacity(total.min(max_rows));
+        for k in keys.into_iter().take(max_rows) {
+            if let Some(l) = self.store.get::<RequestLog>(&k)? {
+                logs.push(l);
+            }
+        }
+        Ok((logs, total > max_rows))
+    }
+
     /// 按 ID 删除单条请求日志（best-effort，不存在视为成功）
     pub fn delete_by_id(&self, id: &str) -> anyhow::Result<()> {
         let keys = self.store.list("reqlog:")?;

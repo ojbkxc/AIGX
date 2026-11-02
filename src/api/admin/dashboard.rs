@@ -12,22 +12,70 @@ use serde_json::{json, Value};
 
 use super::super::openai::AppState;
 use super::common::{is_admin_user, verify_admin, verify_user};
+use crate::log::daily_agg;
 
-// Dashboard 查询参数：时间范围（天数）。
+// Dashboard 查询参数：时间范围（天数）+ 可选自然日起止覆盖（阶段 4 自定义区间；
+// start/end 合法时优先生效，缺省回退 days——向后兼容，旧前端请求行为不变）。
 #[derive(Debug, Deserialize)]
 pub struct DashboardQuery {
     #[serde(default = "default_dashboard_days")]
     pub days: u32,
+    #[serde(default)]
+    pub start: Option<String>,
+    #[serde(default)]
+    pub end: Option<String>,
 }
 
 fn default_dashboard_days() -> u32 {
     30
 }
 
-/// 将 days 限制在 [1, 90] 区间，并返回对应的 unix timestamp 下界。
-pub fn dashboard_start_ts(days: u32) -> i64 {
-    let days = days.clamp(1, 90) as i64;
-    chrono::Utc::now().timestamp() - days * 24 * 3600
+/// 校验 `YYYY-MM-DD`（定长 10 且可解析）；非法 → None（当缺省处理）。
+fn valid_date(s: Option<&str>) -> Option<String> {
+    let s = s?;
+    if s.len() != 10 || chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_err() {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+/// 日期回退 n 天（n ≥ 0）；解析失败原样返回（调用方已校验格式）。
+fn shift_date(date: &str, days_back: i64) -> String {
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.checked_sub_signed(chrono::Duration::days(days_back)))
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| date.to_string())
+}
+
+/// 自然日 UTC 起点（含）时间戳；解析失败 → i64::MIN。
+pub fn date_start_ts(date: &str) -> i64 {
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| dt.and_utc().timestamp())
+        .unwrap_or(i64::MIN)
+}
+
+/// 从查询参数解析自然日窗口 `[from, to]`（含端点）与起点时间戳。
+///
+/// - 语义统一为**自然日**（A2A 口径）：days=N → 含今天的 N 个自然日。
+///   旧路径的滚动 N×86400s 窗口与此在当天部分有微小差异，切聚合后一并收敛。
+/// - 跨度护栏 ≤365 天（起点自动拉近）；起止写反自动交换。
+pub fn resolve_window(days: u32, start: Option<&str>, end: Option<&str>) -> (String, String, i64) {
+    let today = daily_agg::today_key();
+    let mut to = valid_date(end).unwrap_or_else(|| today.clone());
+    let mut from =
+        valid_date(start).unwrap_or_else(|| shift_date(&to, days.clamp(1, 365) as i64 - 1));
+    if from > to {
+        std::mem::swap(&mut from, &mut to);
+    }
+    let max_from = shift_date(&to, 364);
+    if from < max_from {
+        from = max_from;
+    }
+    let from_ts = date_start_ts(&from);
+    (from, to, from_ts)
 }
 
 /// 消费趋势
@@ -37,25 +85,34 @@ pub async fn handle_consumption_trend(
     Query(q): Query<DashboardQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let start = dashboard_start_ts(q.days);
-    let logs = state.log_store.requests.all_sorted_asc();
-    let mut daily: std::collections::BTreeMap<String, (i64, u64)> =
-        std::collections::BTreeMap::new();
-    for l in &logs {
-        if l.created_at < start {
-            continue;
+    let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
+    let data: Vec<Value> = if state.log_store.daily.agg_available() {
+        state
+            .log_store
+            .daily
+            .load_range(&from, &to)
+            .into_iter()
+            .map(|r| json!({ "date": r.date, "cost": r.cost, "count": r.requests }))
+            .collect()
+    } else {
+        // 回填前（或手动重建窗口）：回退明细现算，数字永不为假。
+        let logs = state.log_store.requests.all_sorted_asc();
+        let mut daily: std::collections::BTreeMap<String, (i64, u64)> =
+            std::collections::BTreeMap::new();
+        for l in &logs {
+            if l.created_at < from_ts {
+                continue;
+            }
+            let day = daily_agg::date_key(l.created_at);
+            let entry = daily.entry(day).or_insert((0, 0));
+            entry.0 += l.cost;
+            entry.1 += 1;
         }
-        let day = chrono::DateTime::<chrono::Utc>::from_timestamp(l.created_at, 0)
-            .map(|d| d.format("%Y-%m-%d").to_string())
-            .unwrap_or_default();
-        let entry = daily.entry(day).or_insert((0, 0));
-        entry.0 += l.cost;
-        entry.1 += 1;
-    }
-    let data: Vec<Value> = daily
-        .into_iter()
-        .map(|(day, (cost, count))| json!({ "date": day, "cost": cost, "count": count }))
-        .collect();
+        daily
+            .into_iter()
+            .map(|(day, (cost, count))| json!({ "date": day, "cost": cost, "count": count }))
+            .collect()
+    };
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -66,19 +123,27 @@ pub async fn handle_model_distribution(
     Query(q): Query<DashboardQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let start = dashboard_start_ts(q.days);
-    let logs = state.log_store.requests.all_sorted_asc();
-    let mut models: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    for l in &logs {
-        if l.created_at < start {
-            continue;
+    let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
+    let data: Vec<Value> = if state.log_store.daily.agg_available() {
+        let rows = state.log_store.daily.load_range(&from, &to);
+        daily_agg::merge_models(&rows)
+            .into_iter()
+            .map(|m| json!({ "model": m.name, "count": m.count }))
+            .collect()
+    } else {
+        let logs = state.log_store.requests.all_sorted_asc();
+        let mut models: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for l in &logs {
+            if l.created_at < from_ts {
+                continue;
+            }
+            *models.entry(l.model.clone()).or_insert(0) += 1;
         }
-        *models.entry(l.model.clone()).or_insert(0) += 1;
-    }
-    let data: Vec<Value> = models
-        .into_iter()
-        .map(|(model, count)| json!({ "model": model, "count": count }))
-        .collect();
+        models
+            .into_iter()
+            .map(|(model, count)| json!({ "model": model, "count": count }))
+            .collect()
+    };
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -228,7 +293,43 @@ pub async fn handle_cache_savings(
     Query(q): Query<DashboardQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
-    let start = dashboard_start_ts(q.days);
+    let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
+    if state.log_store.daily.agg_available() {
+        let rows = state.log_store.daily.load_range(&from, &to);
+        let mut hit_count: u64 = 0;
+        let mut cache_tokens: u64 = 0;
+        let mut billed_cost: i64 = 0;
+        let mut saved_estimate: f64 = 0.0;
+        let mut approx = false;
+        for r in &rows {
+            hit_count = hit_count.saturating_add(r.cache_hits);
+            cache_tokens = cache_tokens.saturating_add(r.cache_input);
+            billed_cost = billed_cost.saturating_add(r.cache_billed);
+        }
+        // 节省估算按当前定价表逐模型算（top-128 次查询，比逐请求便宜）；
+        // 模型级口径与逐请求 max(0) 求和近似一致。
+        for m in daily_agg::merge_models(&rows) {
+            if m.name == daily_agg::OTHER {
+                // 长尾并组无单一模型价可查：节省记 0，响应标注近似。
+                approx = true;
+                continue;
+            }
+            if let Some(price) = state.pricing_store.get_price(&m.name) {
+                let full = price.input_price * m.cache_input as f64 / 1000.0;
+                saved_estimate += (full - m.cache_billed as f64).max(0.0);
+            }
+        }
+        let mut data = json!({
+            "hit_count": hit_count,
+            "cache_tokens": cache_tokens,
+            "billed_cost": billed_cost,
+            "saved_estimate": (saved_estimate * 100.0).round() / 100.0,
+        });
+        if approx {
+            data["approx"] = json!(true);
+        }
+        return Ok(Json(json!({ "success": true, "data": data })));
+    }
     let logs = state.log_store.requests.all_sorted_asc();
 
     let mut hit_count: u64 = 0;
@@ -236,7 +337,10 @@ pub async fn handle_cache_savings(
     let mut billed_cost: i64 = 0;
     let mut saved_estimate: f64 = 0.0;
 
-    for log in logs.iter().filter(|l| l.cache_hit && l.created_at >= start) {
+    for log in logs
+        .iter()
+        .filter(|l| l.cache_hit && l.created_at >= from_ts)
+    {
         hit_count += 1;
         cache_tokens = cache_tokens.saturating_add(log.input_tokens);
         billed_cost = billed_cost.saturating_add(log.cost);
@@ -266,11 +370,15 @@ pub async fn handle_cache_savings(
 // 普通用户只看自己的（按 `user_id` 过滤）——所以这四个端点走 `verify_user`
 // 而非 `verify_admin`，在 handler 内按 `is_admin_user` 收敛数据集。
 
-/// 报表查询参数：时间范围 + 可选的当前用户过滤（非管理员强制过滤）。
+/// 报表查询参数：时间范围 + 可选自然日起止（阶段 4 自定义区间）+ 用户过滤。
 #[derive(Debug, Deserialize)]
 pub struct ReportQuery {
     #[serde(default = "default_dashboard_days")]
     pub days: u32,
+    #[serde(default)]
+    pub start: Option<String>,
+    #[serde(default)]
+    pub end: Option<String>,
 }
 
 /// 鉴权并返回 (数据集过滤谓词所需的用户 ID Option, 是否管理员)。
@@ -290,40 +398,64 @@ async fn report_scope(
 
 /// 365 天日粒度消费热力图（Agent2API report 365d heatmap）。
 ///
-/// `days` 上限放宽到 365（复用 DashboardQuery 的 90 上限不够画全年）；
-/// 超过 365 的按 365 算，避免一次扫穿全部日志。
+/// 默认窗口由前端传 days=365；resolve_window 统一 clamp（修原先
+/// 「handler 夹 365 / start_ts 夹 90」双夹 bug——365 天报表实际只有 90 天）。
 pub async fn handle_report_heatmap(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<ReportQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
-    let days = q.days.clamp(1, 365) as i64;
-    let start = chrono::Utc::now().timestamp() - days * 24 * 3600;
-    let logs = state.log_store.requests.all_sorted_asc();
-
-    let mut daily: std::collections::BTreeMap<String, (i64, u64)> =
-        std::collections::BTreeMap::new();
-    for l in &logs {
-        if l.created_at < start {
-            continue;
-        }
-        if let Some(uid) = &user_filter {
-            if l.user_id.as_deref() != Some(uid.as_str()) {
-                continue;
+    let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
+    let data = cached_report(
+        "heatmap",
+        &format!("{from}:{to}"),
+        &user_filter,
+        120,
+        || {
+            if state.log_store.daily.agg_available() {
+                let pts: Vec<Value> = match &user_filter {
+                    None => state
+                        .log_store
+                        .daily
+                        .load_range(&from, &to)
+                        .into_iter()
+                        .map(|r| json!({ "date": r.date, "cost": r.cost, "count": r.requests }))
+                        .collect(),
+                    Some(uid) => state
+                        .log_store
+                        .daily
+                        .load_user_range(uid, &from, &to)
+                        .into_iter()
+                        .map(|r| json!({ "date": r.date, "cost": r.cost, "count": r.count }))
+                        .collect(),
+                };
+                return json!(pts);
             }
-        }
-        let day = chrono::DateTime::<chrono::Utc>::from_timestamp(l.created_at, 0)
-            .map(|d| d.format("%Y-%m-%d").to_string())
-            .unwrap_or_default();
-        let entry = daily.entry(day).or_insert((0, 0));
-        entry.0 += l.cost;
-        entry.1 += 1;
-    }
-    let data: Vec<Value> = daily
-        .into_iter()
-        .map(|(date, (cost, count))| json!({ "date": date, "cost": cost, "count": count }))
-        .collect();
+            let to_ts_end = date_start_ts(&to) + 86_400 - 1;
+            let logs = state.log_store.requests.all_sorted_asc();
+            let mut daily: std::collections::BTreeMap<String, (i64, u64)> =
+                std::collections::BTreeMap::new();
+            for l in &logs {
+                if l.created_at < from_ts || l.created_at > to_ts_end {
+                    continue;
+                }
+                if let Some(uid) = &user_filter {
+                    if l.user_id.as_deref() != Some(uid.as_str()) {
+                        continue;
+                    }
+                }
+                let day = daily_agg::date_key(l.created_at);
+                let entry = daily.entry(day).or_insert((0, 0));
+                entry.0 += l.cost;
+                entry.1 += 1;
+            }
+            json!(daily
+                .into_iter()
+                .map(|(date, (cost, count))| json!({ "date": date, "cost": cost, "count": count }))
+                .collect::<Vec<Value>>())
+        },
+    );
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -338,36 +470,69 @@ pub async fn handle_report_top_sources(
     Query(q): Query<ReportQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
-    let start = dashboard_start_ts(q.days);
-    let logs = state.log_store.requests.all_sorted_asc();
-
-    let mut sources: std::collections::HashMap<String, (u64, i64)> =
-        std::collections::HashMap::new();
-    for l in &logs {
-        if l.created_at < start {
-            continue;
-        }
-        if let Some(uid) = &user_filter {
-            if l.user_id.as_deref() != Some(uid.as_str()) {
-                continue;
+    let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
+    let data = cached_report(
+        "top_sources",
+        &format!("{from}:{to}"),
+        &user_filter,
+        120,
+        || {
+            let mut items: Vec<(String, u64, i64)> = Vec::new();
+            if state.log_store.daily.agg_available() {
+                match &user_filter {
+                    None => {
+                        let rows = state.log_store.daily.load_range(&from, &to);
+                        // 按展示名再聚合（id 维改名的两个渠道现同名 → 合并，与现口径一致）。
+                        let mut by_name: std::collections::HashMap<String, (u64, i64)> =
+                            std::collections::HashMap::new();
+                        for c in daily_agg::merge_channels(&rows) {
+                            let name = c.name.unwrap_or_else(|| "unknown".to_string());
+                            let e = by_name.entry(name).or_insert((0, 0));
+                            e.0 += c.count;
+                            e.1 += c.cost;
+                        }
+                        items = by_name.into_iter().map(|(k, v)| (k, v.0, v.1)).collect();
+                    }
+                    Some(uid) => {
+                        let rows = state.log_store.daily.load_user_range(uid, &from, &to);
+                        items = daily_agg::merge_dim(&rows, |r| &r.channels)
+                            .into_iter()
+                            .map(|c| (c.name, c.count, c.cost))
+                            .collect();
+                    }
+                }
+            } else {
+                let to_ts_end = date_start_ts(&to) + 86_400 - 1;
+                let logs = state.log_store.requests.all_sorted_asc();
+                let mut sources: std::collections::HashMap<String, (u64, i64)> =
+                    std::collections::HashMap::new();
+                for l in &logs {
+                    if l.created_at < from_ts || l.created_at > to_ts_end {
+                        continue;
+                    }
+                    if let Some(uid) = &user_filter {
+                        if l.user_id.as_deref() != Some(uid.as_str()) {
+                            continue;
+                        }
+                    }
+                    let name = l
+                        .channel_name
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let entry = sources.entry(name).or_insert((0, 0));
+                    entry.0 += 1;
+                    entry.1 += l.cost;
+                }
+                items = sources.into_iter().map(|(k, v)| (k, v.0, v.1)).collect();
             }
-        }
-        let name = l
-            .channel_name
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-        let entry = sources.entry(name).or_insert((0, 0));
-        entry.0 += 1;
-        entry.1 += l.cost;
-    }
-    let mut items: Vec<(String, u64, i64)> =
-        sources.into_iter().map(|(k, v)| (k, v.0, v.1)).collect();
-    items.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
-    items.truncate(10);
-    let data: Vec<Value> = items
-        .into_iter()
-        .map(|(name, count, cost)| json!({ "name": name, "count": count, "cost": cost }))
-        .collect();
+            items.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+            items.truncate(10);
+            json!(items
+                .into_iter()
+                .map(|(name, count, cost)| json!({ "name": name, "count": count, "cost": cost }))
+                .collect::<Vec<Value>>())
+        },
+    );
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -378,107 +543,219 @@ pub async fn handle_report_token_trend(
     Query(q): Query<ReportQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
-    let start = dashboard_start_ts(q.days);
-    let logs = state.log_store.requests.all_sorted_asc();
-
-    let mut daily: std::collections::BTreeMap<String, (u64, u64)> =
-        std::collections::BTreeMap::new();
-    for l in &logs {
-        if l.created_at < start {
-            continue;
-        }
-        if let Some(uid) = &user_filter {
-            if l.user_id.as_deref() != Some(uid.as_str()) {
-                continue;
+    let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
+    let data = cached_report(
+        "token_trend",
+        &format!("{from}:{to}"),
+        &user_filter,
+        120,
+        || {
+            if state.log_store.daily.agg_available() {
+                let pts: Vec<Value> = match &user_filter {
+                None => state
+                    .log_store
+                    .daily
+                    .load_range(&from, &to)
+                    .into_iter()
+                    .map(|r| {
+                        json!({ "date": r.date, "input_tokens": r.tokens_in, "output_tokens": r.tokens_out })
+                    })
+                    .collect(),
+                Some(uid) => state
+                    .log_store
+                    .daily
+                    .load_user_range(uid, &from, &to)
+                    .into_iter()
+                    .map(|r| {
+                        json!({ "date": r.date, "input_tokens": r.tokens_in, "output_tokens": r.tokens_out })
+                    })
+                    .collect(),
+            };
+                return json!(pts);
             }
-        }
-        let day = chrono::DateTime::<chrono::Utc>::from_timestamp(l.created_at, 0)
-            .map(|d| d.format("%Y-%m-%d").to_string())
-            .unwrap_or_default();
-        let entry = daily.entry(day).or_insert((0, 0));
-        entry.0 = entry.0.saturating_add(l.input_tokens);
-        entry.1 = entry.1.saturating_add(l.output_tokens);
-    }
-    let data: Vec<Value> = daily
-        .into_iter()
-        .map(|(date, (input, output))| {
-            json!({ "date": date, "input_tokens": input, "output_tokens": output })
-        })
-        .collect();
+            let to_ts_end = date_start_ts(&to) + 86_400 - 1;
+            let logs = state.log_store.requests.all_sorted_asc();
+            let mut daily: std::collections::BTreeMap<String, (u64, u64)> =
+                std::collections::BTreeMap::new();
+            for l in &logs {
+                if l.created_at < from_ts || l.created_at > to_ts_end {
+                    continue;
+                }
+                if let Some(uid) = &user_filter {
+                    if l.user_id.as_deref() != Some(uid.as_str()) {
+                        continue;
+                    }
+                }
+                let day = daily_agg::date_key(l.created_at);
+                let entry = daily.entry(day).or_insert((0, 0));
+                entry.0 = entry.0.saturating_add(l.input_tokens);
+                entry.1 = entry.1.saturating_add(l.output_tokens);
+            }
+            json!(daily
+                .into_iter()
+                .map(|(date, (input, output))| {
+                    json!({ "date": date, "input_tokens": input, "output_tokens": output })
+                })
+                .collect::<Vec<Value>>())
+        },
+    );
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
 /// 报表总览卡（Agent2API report overview：请求/成功/Token/活跃天数）。
 ///
 /// 成功率按 `status_code < 400` 计（与 Agent2API requests 表口径一致）。
+/// 新增 `streak`（当前连续活跃天数，A2A「含今天往前数」口径；旧前端
+/// 忽略新字段即可，向后兼容）。
 pub async fn handle_report_overview(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<ReportQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
-    let start = dashboard_start_ts(q.days);
-    let logs = state.log_store.requests.all_sorted_asc();
-
-    let mut total = 0u64;
-    let mut success = 0u64;
-    let mut input_tokens = 0u64;
-    let mut output_tokens = 0u64;
-    let mut cost = 0i64;
-    let mut days_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut models: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-
-    for l in &logs {
-        if l.created_at < start {
-            continue;
-        }
-        if let Some(uid) = &user_filter {
-            if l.user_id.as_deref() != Some(uid.as_str()) {
-                continue;
+    let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
+    let data = cached_report(
+        "overview",
+        &format!("{from}:{to}"),
+        &user_filter,
+        120,
+        || {
+            if state.log_store.daily.agg_available() {
+                let mut total = 0u64;
+                let mut success = 0u64;
+                let mut input_tokens = 0u64;
+                let mut output_tokens = 0u64;
+                let mut cost = 0i64;
+                let mut present: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                let mut top_models: Vec<(String, u64)> = Vec::new();
+                match &user_filter {
+                    None => {
+                        let rows = state.log_store.daily.load_range(&from, &to);
+                        for r in &rows {
+                            total += r.requests;
+                            success += r.successful;
+                            input_tokens = input_tokens.saturating_add(r.tokens_in);
+                            output_tokens = output_tokens.saturating_add(r.tokens_out);
+                            cost = cost.saturating_add(r.cost);
+                            if r.requests > 0 {
+                                present.insert(r.date.clone());
+                            }
+                        }
+                        top_models = daily_agg::merge_models(&rows)
+                            .into_iter()
+                            .filter(|m| m.name != daily_agg::OTHER)
+                            .take(5)
+                            .map(|m| (m.name, m.count))
+                            .collect();
+                    }
+                    Some(uid) => {
+                        let rows = state.log_store.daily.load_user_range(uid, &from, &to);
+                        for r in &rows {
+                            total += r.count;
+                            success += r.successful;
+                            input_tokens = input_tokens.saturating_add(r.tokens_in);
+                            output_tokens = output_tokens.saturating_add(r.tokens_out);
+                            cost = cost.saturating_add(r.cost);
+                            if r.count > 0 {
+                                present.insert(r.date.clone());
+                            }
+                        }
+                        top_models = daily_agg::merge_dim(&rows, |r| &r.models)
+                        .into_iter()
+                        .filter(|m| m.name != daily_agg::OTHER)
+                        .map(|m| (m.name, m.count))
+                        .collect::<Vec<_>>()
+                        // count 主排（merge_dim 不排序，此处补上）
+                        ;
+                        top_models.sort_by_key(|a| std::cmp::Reverse(a.1));
+                        top_models.truncate(5);
+                    }
+                }
+                // streak 锚定「今天」而非窗口尾（窗口尾若是过去的自定义 end，
+                // 连续天数按 A2A 语义仍从今日往前数）。
+                let streak = daily_agg::streak_days(&present, &daily_agg::today_key());
+                return json!({
+                    "total_requests": total,
+                    "success_requests": success,
+                    "success_rate": if total > 0 { (success as f64 / total as f64 * 10000.0).round() / 100.0 } else { 0.0 },
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_cost": cost,
+                    "active_days": present.len(),
+                    "streak": streak,
+                    "top_models": top_models.into_iter()
+                        .map(|(model, count)| json!({ "model": model, "count": count }))
+                        .collect::<Vec<Value>>(),
+                });
             }
-        }
-        total += 1;
-        if l.status_code < 400 {
-            success += 1;
-        }
-        input_tokens = input_tokens.saturating_add(l.input_tokens);
-        output_tokens = output_tokens.saturating_add(l.output_tokens);
-        cost = cost.saturating_add(l.cost);
-        if let Some(d) = chrono::DateTime::<chrono::Utc>::from_timestamp(l.created_at, 0) {
-            days_seen.insert(d.format("%Y-%m-%d").to_string());
-        }
-        *models.entry(l.model.clone()).or_insert(0) += 1;
-    }
-    let mut top_models: Vec<(String, u64)> = models.into_iter().collect();
-    top_models.sort_by_key(|a| std::cmp::Reverse(a.1));
-    top_models.truncate(5);
+            let to_ts_end = date_start_ts(&to) + 86_400 - 1;
+            let logs = state.log_store.requests.all_sorted_asc();
 
-    Ok(Json(json!({
-        "success": true,
-        "data": {
-            "total_requests": total,
-            "success_requests": success,
-            "success_rate": if total > 0 { (success as f64 / total as f64 * 10000.0).round() / 100.0 } else { 0.0 },
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_cost": cost,
-            "active_days": days_seen.len(),
-            "top_models": top_models.into_iter()
-                .map(|(model, count)| json!({ "model": model, "count": count }))
-                .collect::<Vec<Value>>(),
-        }
-    })))
+            let mut total = 0u64;
+            let mut success = 0u64;
+            let mut input_tokens = 0u64;
+            let mut output_tokens = 0u64;
+            let mut cost = 0i64;
+            let mut days_seen: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            let mut models: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+
+            for l in &logs {
+                if l.created_at < from_ts || l.created_at > to_ts_end {
+                    continue;
+                }
+                if let Some(uid) = &user_filter {
+                    if l.user_id.as_deref() != Some(uid.as_str()) {
+                        continue;
+                    }
+                }
+                total += 1;
+                if l.status_code < 400 {
+                    success += 1;
+                }
+                input_tokens = input_tokens.saturating_add(l.input_tokens);
+                output_tokens = output_tokens.saturating_add(l.output_tokens);
+                cost = cost.saturating_add(l.cost);
+                let d = daily_agg::date_key(l.created_at);
+                if !d.is_empty() {
+                    days_seen.insert(d);
+                }
+                *models.entry(l.model.clone()).or_insert(0) += 1;
+            }
+            let mut top_models: Vec<(String, u64)> = models.into_iter().collect();
+            top_models.sort_by_key(|a| std::cmp::Reverse(a.1));
+            top_models.truncate(5);
+            let streak = daily_agg::streak_days(&days_seen, &daily_agg::today_key());
+
+            json!({
+                "total_requests": total,
+                "success_requests": success,
+                "success_rate": if total > 0 { (success as f64 / total as f64 * 10000.0).round() / 100.0 } else { 0.0 },
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_cost": cost,
+                "active_days": days_seen.len(),
+                "streak": streak,
+                "top_models": top_models.into_iter()
+                    .map(|(model, count)| json!({ "model": model, "count": count }))
+                    .collect::<Vec<Value>>(),
+            })
+        },
+    );
+    Ok(Json(json!({ "success": true, "data": data })))
 }
 
 // ── 报表内存缓存 ────────────────────────────────────────────────────────────
 //
-// report 系列每次全量扫 `log_store.requests`（all_sorted_asc），日志量大时
-// 管理端会卡。这里加一层进程内 TTL 缓存：同一 (端点, 天数, 用户范围) 在 TTL
-// 窗口内直接回放上次结果。日志写入不主动失效（报表容忍 ≤TTL 的滞后），故
-// TTL 取短：明细类 60s、聚合类 120s。按天落盘聚合（仿 Agent2API request_daily）
-// 是后续的正解，见 docs/agent2api-porting.md 能力路线图。
+// report 系列在聚合闸门未开（回填前）仍可能全量扫明细，进程内 TTL 缓存
+// 兜住管理端体验：同一 (端点, 自然日窗口, 用户范围) 在 TTL 窗口内直接
+// 回放上次结果。日志写入不主动失效（报表容忍 ≤TTL 的滞后），TTL 取短：
+// 明细类 60s、聚合类 120s。按天落盘聚合上线后（本模块各 handler 的
+// agg_available 分支），全量扫只剩回退路径。
 
-type ReportCacheKey = (String, u32, String); // (端点, 天数, 用户范围: ""=全量 / user_id)
+type ReportCacheKey = (String, String, String); // (端点, 窗口 "from:to", 用户范围: ""=全量 / user_id)
 
 fn report_cache(
 ) -> &'static std::sync::Mutex<std::collections::HashMap<ReportCacheKey, (std::time::Instant, Value)>>
@@ -490,17 +767,17 @@ fn report_cache(
 }
 
 /// 命中缓存直接回放；未命中执行 `compute` 并落缓存。锁只护 map 本身，
-/// `compute` 在锁外执行（宁可同键并发算两次，也不把全量扫日志塞进临界区）。
+/// `compute` 在锁外执行（宁可同键并发算两次，也不把重计算塞进临界区）。
 fn cached_report(
     endpoint: &str,
-    days: u32,
+    window: &str,
     user_filter: &Option<String>,
     ttl_secs: u64,
     compute: impl FnOnce() -> Value,
 ) -> Value {
     let key: ReportCacheKey = (
         endpoint.to_string(),
-        days,
+        window.to_string(),
         user_filter.clone().unwrap_or_default(),
     );
     if let Ok(map) = report_cache().lock() {
@@ -528,14 +805,44 @@ pub async fn handle_report_models(
     Query(q): Query<ReportQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
-    let days = q.days.clamp(1, 365);
-    let data = cached_report("models", days, &user_filter, 120, || {
-        let start = dashboard_start_ts(days);
+    let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
+    let data = cached_report("models", &format!("{from}:{to}"), &user_filter, 120, || {
+        if state.log_store.daily.agg_available() {
+            let items: Vec<Value> = match &user_filter {
+                None => daily_agg::merge_models(&state.log_store.daily.load_range(&from, &to))
+                    .into_iter()
+                    .map(|m| {
+                        json!({
+                            "model": m.name, "count": m.count,
+                            "input_tokens": m.tokens_in, "output_tokens": m.tokens_out, "cost": m.cost,
+                        })
+                    })
+                    .collect(),
+                Some(uid) => {
+                    let mut merged = daily_agg::merge_dim(
+                        &state.log_store.daily.load_user_range(uid, &from, &to),
+                        |r| &r.models,
+                    );
+                    merged.sort_by_key(|m| std::cmp::Reverse(m.count));
+                    merged
+                        .into_iter()
+                        .map(|m| {
+                            json!({
+                                "model": m.name, "count": m.count,
+                                "input_tokens": m.tokens_in, "output_tokens": m.tokens_out, "cost": m.cost,
+                            })
+                        })
+                        .collect()
+                }
+            };
+            return json!(items);
+        }
+        let to_ts_end = date_start_ts(&to) + 86_400 - 1;
         let logs = state.log_store.requests.all_sorted_asc();
         let mut agg: std::collections::HashMap<String, (u64, u64, u64, i64)> =
             std::collections::HashMap::new();
         for l in &logs {
-            if l.created_at < start {
+            if l.created_at < from_ts || l.created_at > to_ts_end {
                 continue;
             }
             if let Some(uid) = &user_filter {
@@ -569,32 +876,149 @@ pub async fn handle_report_models(
 ///
 /// AIGX 日志的 `cache_hit` 是请求级布尔（无命中 token 数），口径取
 /// 「命中请求数 / 总请求数」，并附命中请求承担的输入 Token 作参考。
+/// 窗口粒度到分钟级，日聚合覆盖不了——走 `reqlog:` 键区间读（时间戳
+/// 定宽 → 字典序=数值序），最大窗口 7d 也只扫近窗键段；超过护栏条数
+/// 时截断并在响应标 `sampled:true`（宁可标注抽样，不扫穿全表）。
 pub async fn handle_report_cache_rates(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<ReportQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
-    let days = q.days.clamp(1, 365);
-    let data = cached_report("cache_rates", days, &user_filter, 60, || {
-        let start = dashboard_start_ts(days);
-        let now = chrono::Utc::now().timestamp();
-        let windows: [(&str, i64); 4] = [
-            ("10m", 600),
-            ("1h", 3600),
-            ("24h", 24 * 3600),
-            ("7d", 7 * 24 * 3600),
-        ];
-        let logs = state.log_store.requests.all_sorted_asc();
-        let mut out = Vec::new();
-        for (label, span) in windows {
-            let from = now - span;
-            let mut total = 0u64;
-            let mut hit = 0u64;
-            let mut input_tokens = 0u64;
-            let mut hit_input_tokens = 0u64;
+    let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
+    let data = cached_report(
+        "cache_rates",
+        &format!("{from}:{to}"),
+        &user_filter,
+        60,
+        || {
+            let now = chrono::Utc::now().timestamp();
+            let windows: [(&str, i64); 4] = [
+                ("10m", 600),
+                ("1h", 3600),
+                ("24h", 24 * 3600),
+                ("7d", 7 * 24 * 3600),
+            ];
+            // 一次近窗读覆盖最大窗口（7d），四档在内存里各自过滤时间下界。
+            let wide_from = (now - 7 * 24 * 3600).max(from_ts);
+            let (logs, sampled) = state
+                .log_store
+                .requests
+                .list_window(wide_from, now, 20_000)
+                .unwrap_or_default();
+            let mut out = Vec::new();
+            for (label, span) in windows {
+                let win_from = now - span;
+                let mut total = 0u64;
+                let mut hit = 0u64;
+                let mut input_tokens = 0u64;
+                let mut hit_input_tokens = 0u64;
+                for l in &logs {
+                    if l.created_at < win_from {
+                        continue;
+                    }
+                    if let Some(uid) = &user_filter {
+                        if l.user_id.as_deref() != Some(uid.as_str()) {
+                            continue;
+                        }
+                    }
+                    total += 1;
+                    input_tokens = input_tokens.saturating_add(l.input_tokens);
+                    if l.cache_hit {
+                        hit += 1;
+                        hit_input_tokens = hit_input_tokens.saturating_add(l.input_tokens);
+                    }
+                }
+                out.push(json!({
+                "window": label,
+                "requests": total,
+                "hit_requests": hit,
+                "rate": if total > 0 { (hit as f64 / total as f64 * 10000.0).round() / 100.0 } else { 0.0 },
+                "input_tokens": input_tokens,
+                "hit_input_tokens": hit_input_tokens,
+                // 键区间读护栏触发标记（新字段向后兼容，不新增数组元素）。
+                "sampled": sampled,
+            }));
+            }
+            json!(out)
+        },
+    );
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+/// 按天消费/请求趋势（Agent2API dailyTrend）：供仪表盘折线复用。
+///
+/// 每行附 `models`（当日 Top6 模型 {model,count}，新字段向后兼容）——
+/// 供热力图/趋势 hover 的按模型分解 tooltip（A2A 口径）。
+pub async fn handle_report_daily_trend(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ReportQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
+    let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
+    let data = cached_report(
+        "daily_trend",
+        &format!("{from}:{to}"),
+        &user_filter,
+        120,
+        || {
+            if state.log_store.daily.agg_available() {
+                let rows: Vec<Value> = match &user_filter {
+                    None => state
+                        .log_store
+                        .daily
+                        .load_range(&from, &to)
+                        .into_iter()
+                        .map(|r| {
+                            let top: Vec<Value> = {
+                                let mut ms = r.by_model.clone();
+                                ms.sort_by_key(|m| std::cmp::Reverse(m.count));
+                                ms.into_iter()
+                                    .take(6)
+                                    .map(|m| json!({ "model": m.name, "count": m.count }))
+                                    .collect()
+                            };
+                            json!({
+                                "date": r.date, "count": r.requests,
+                                "input_tokens": r.tokens_in, "output_tokens": r.tokens_out,
+                                "cost": r.cost, "models": top,
+                            })
+                        })
+                        .collect(),
+                    Some(uid) => state
+                        .log_store
+                        .daily
+                        .load_user_range(uid, &from, &to)
+                        .into_iter()
+                        .map(|r| {
+                            let mut ms = r.models.clone();
+                            ms.sort_by_key(|m| std::cmp::Reverse(m.count));
+                            let top: Vec<Value> = ms
+                                .into_iter()
+                                .take(6)
+                                .map(|m| json!({ "model": m.name, "count": m.count }))
+                                .collect();
+                            json!({
+                                "date": r.date, "count": r.count,
+                                "input_tokens": r.tokens_in, "output_tokens": r.tokens_out,
+                                "cost": r.cost, "models": top,
+                            })
+                        })
+                        .collect(),
+                };
+                return json!(rows);
+            }
+            let to_ts_end = date_start_ts(&to) + 86_400 - 1;
+            let logs = state.log_store.requests.all_sorted_asc();
+            let mut daily: std::collections::BTreeMap<String, (u64, u64, u64, i64)> =
+                std::collections::BTreeMap::new();
+            let mut per_day_models: std::collections::BTreeMap<
+                String,
+                std::collections::HashMap<String, u64>,
+            > = std::collections::BTreeMap::new();
             for l in &logs {
-                if l.created_at < from || l.created_at < start {
+                if l.created_at < from_ts || l.created_at > to_ts_end {
                     continue;
                 }
                 if let Some(uid) = &user_filter {
@@ -602,68 +1026,77 @@ pub async fn handle_report_cache_rates(
                         continue;
                     }
                 }
-                total += 1;
-                input_tokens = input_tokens.saturating_add(l.input_tokens);
-                if l.cache_hit {
-                    hit += 1;
-                    hit_input_tokens = hit_input_tokens.saturating_add(l.input_tokens);
-                }
+                let day = daily_agg::date_key(l.created_at);
+                let e = daily.entry(day.clone()).or_insert((0, 0, 0, 0));
+                e.0 += 1;
+                e.1 = e.1.saturating_add(l.input_tokens);
+                e.2 = e.2.saturating_add(l.output_tokens);
+                e.3 = e.3.saturating_add(l.cost);
+                *per_day_models
+                    .entry(day)
+                    .or_default()
+                    .entry(l.model.clone())
+                    .or_insert(0) += 1;
             }
-            out.push(json!({
-                "window": label,
-                "requests": total,
-                "hit_requests": hit,
-                "rate": if total > 0 { (hit as f64 / total as f64 * 10000.0).round() / 100.0 } else { 0.0 },
-                "input_tokens": input_tokens,
-                "hit_input_tokens": hit_input_tokens,
-            }));
-        }
-        json!(out)
-    });
+            json!(daily
+                .into_iter()
+                .map(|(date, (count, it, ot, cost))| {
+                    let mut ms: Vec<(String, u64)> = per_day_models
+                        .remove(&date)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect();
+                    ms.sort_by_key(|a| std::cmp::Reverse(a.1));
+                    let top: Vec<Value> = ms
+                        .into_iter()
+                        .take(6)
+                        .map(|(model, c)| json!({ "model": model, "count": c }))
+                        .collect();
+                    json!({
+                        "date": date, "count": count,
+                        "input_tokens": it, "output_tokens": ot, "cost": cost,
+                        "models": top,
+                    })
+                })
+                .collect::<Vec<Value>>())
+        },
+    );
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
-/// 按天消费/请求趋势（Agent2API dailyTrend）：供仪表盘折线复用。
-pub async fn handle_report_daily_trend(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<ReportQuery>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
-    let days = q.days.clamp(1, 365);
-    let data = cached_report("daily_trend", days, &user_filter, 120, || {
-        let start = dashboard_start_ts(days);
-        let logs = state.log_store.requests.all_sorted_asc();
-        let mut daily: std::collections::BTreeMap<String, (u64, u64, u64, i64)> =
-            std::collections::BTreeMap::new();
-        for l in &logs {
-            if l.created_at < start {
-                continue;
-            }
-            if let Some(uid) = &user_filter {
-                if l.user_id.as_deref() != Some(uid.as_str()) {
-                    continue;
-                }
-            }
-            let day = chrono::DateTime::<chrono::Utc>::from_timestamp(l.created_at, 0)
-                .map(|d| d.format("%Y-%m-%d").to_string())
-                .unwrap_or_default();
-            let e = daily.entry(day).or_insert((0, 0, 0, 0));
-            e.0 += 1;
-            e.1 = e.1.saturating_add(l.input_tokens);
-            e.2 = e.2.saturating_add(l.output_tokens);
-            e.3 = e.3.saturating_add(l.cost);
-        }
-        json!(daily
-            .into_iter()
-            .map(|(date, (count, it, ot, cost))| json!({
-                "date": date,
-                "count": count,
-                "input_tokens": it,
-                "output_tokens": ot,
-                "cost": cost,
-            }))
-            .collect::<Vec<Value>>())
-    });
-    Ok(Json(json!({ "success": true, "data": data })))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// days 语义 = 含今天的 N 个自然日（A2A 口径），from_ts 对齐日起点。
+    #[test]
+    fn resolve_window_days_is_calendar_inclusive() {
+        let (from, to, from_ts) = resolve_window(30, None, None);
+        assert_eq!(to, daily_agg::today_key());
+        assert_eq!(from, shift_date(&to, 29));
+        assert_eq!(from_ts, date_start_ts(&from));
+    }
+
+    /// custom 起止：写反交换、跨度 >365 拉近起点、非法格式忽略回 days。
+    #[test]
+    fn resolve_window_custom_swaps_and_clamps() {
+        let (from, to, _) = resolve_window(30, Some("2026-11-10"), Some("2026-11-01"));
+        assert_eq!((from.as_str(), to.as_str()), ("2026-11-01", "2026-11-10"));
+
+        let (from, to, _) = resolve_window(30, Some("1999-01-01"), Some("2026-11-01"));
+        assert_eq!(to, "2026-11-01");
+        assert_eq!(from, shift_date("2026-11-01", 364));
+
+        let (from, to, _) = resolve_window(7, Some("2026-11"), Some("garbage"));
+        assert_eq!(to, daily_agg::today_key());
+        assert_eq!(from, shift_date(&to, 6));
+    }
+
+    /// 单独指定 end（历史锚点）时 days 相对该尾日回溯。
+    #[test]
+    fn resolve_window_end_only_anchors_days_to_it() {
+        let (from, to, _) = resolve_window(10, None, Some("2026-06-15"));
+        assert_eq!(to, "2026-06-15");
+        assert_eq!(from, "2026-06-06");
+    }
 }
