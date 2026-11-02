@@ -313,8 +313,17 @@ pub struct UsageConfig {
     /// 流空闲超时（秒）——两次读取之间的最长静默，默认 30。
     #[serde(default = "default_stream_idle_secs")]
     pub stream_idle_secs: u64,
+    /// 非流式响应体超时（秒）——非流式请求读完整 body 的上限，默认 300。
+    /// 与 `api_timeout_secs`（请求总超时）独立：长上下文非流式请求可单独放宽。
+    #[serde(default = "default_body_timeout_secs")]
+    pub body_timeout_secs: u64,
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// 同一账号内的重试次数（0~10，默认 1）——上游抖动时先原地重试，
+    /// 避免立刻换号放大上游压力。换号次数由账号池的「账号路由」
+    /// （`RotationPolicy.max_attempts`）单独控制，两者职责不重叠。
+    #[serde(default = "default_retry_self_count")]
+    pub retry_self_count: u32,
     /// 账号换号之间的重试间隔（毫秒），默认 0（立即换号）。
     #[serde(default)]
     pub retry_interval_ms: u64,
@@ -423,6 +432,14 @@ fn default_headers_timeout() -> u64 {
 
 fn default_stream_idle_secs() -> u64 {
     30
+}
+
+fn default_body_timeout_secs() -> u64 {
+    300
+}
+
+fn default_retry_self_count() -> u32 {
+    1
 }
 
 fn default_retry_on_status() -> Vec<u16> {
@@ -619,7 +636,9 @@ impl Default for UsageConfig {
             connect_timeout_secs: default_connect_timeout(),
             headers_timeout_secs: default_headers_timeout(),
             stream_idle_secs: default_stream_idle_secs(),
+            body_timeout_secs: default_body_timeout_secs(),
             max_retries: default_max_retries(),
+            retry_self_count: default_retry_self_count(),
             retry_interval_ms: 0,
             retry_on_status: default_retry_on_status(),
             max_request_body_mb: default_max_request_body_mb(),
@@ -849,6 +868,93 @@ pub fn max_retries() -> u32 {
 /// 由 main 与 settings 更新端点写入快照（上限 10）。
 pub fn set_max_retries(v: u32) {
     MAX_RETRIES.store(v.min(10), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 管理员额外指定的「脱敏请求头」名单（大小写不敏感）。
+///
+/// 内置清单（`channel::is_sensitive_header` 与 `debug_traffic`）覆盖通用凭据头，
+/// 但各家上游的自定义头名会变——管理员可在设置页「网关 → 指纹脱敏」补充。
+/// 支持两种形态：完整头名（`x-foo-token`）与尾部通配（`x-foo-*`）。
+static EXTRA_SENSITIVE_HEADERS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// 归一化一条名单项：去空白、转小写；空串丢弃。
+fn normalize_sensitive_pattern(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// 写入额外脱敏头名单（去重、去空、归一化、上限 200 条）。
+pub fn set_extra_sensitive_headers(list: Vec<String>) {
+    let mut cleaned: Vec<String> = Vec::new();
+    for raw in list {
+        if let Some(pat) = normalize_sensitive_pattern(&raw) {
+            if !cleaned.contains(&pat) {
+                cleaned.push(pat);
+            }
+        }
+        if cleaned.len() >= 200 {
+            break;
+        }
+    }
+    if let Ok(mut guard) = EXTRA_SENSITIVE_HEADERS.write() {
+        *guard = cleaned;
+    }
+}
+
+/// 读取额外脱敏头名单（管理页回显用）。
+pub fn extra_sensitive_headers() -> Vec<String> {
+    EXTRA_SENSITIVE_HEADERS
+        .read()
+        .map(|guard| guard.clone())
+        .unwrap_or_default()
+}
+
+/// 命中额外名单？`name` 需已是小写。支持尾部 `*` 通配前缀匹配。
+pub fn is_extra_sensitive_header(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    EXTRA_SENSITIVE_HEADERS
+        .read()
+        .map(|guard| {
+            guard.iter().any(|pat| match pat.strip_suffix('*') {
+                Some(prefix) => lower.starts_with(prefix),
+                None => lower == *pat,
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// 非流式响应体超时（秒）的进程级快照。
+///
+/// 共享 client 的总超时是 `api_timeout_secs`；该快照用于给**非流式**请求
+/// 单独覆盖请求级超时（`RequestBuilder::timeout`），保存设置后立即生效。
+static BODY_TIMEOUT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(300);
+
+/// 读取非流式响应体超时（秒）。
+pub fn body_timeout_secs() -> u64 {
+    BODY_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 与 settings 更新端点写入快照（1–3600）。
+pub fn set_body_timeout_secs(v: u64) {
+    BODY_TIMEOUT_SECS.store(v.clamp(1, 3_600), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 账号池「同账号重试」次数的进程级快照（对齐 Agent2API retryCount）。
+/// 换号次数由账号池「账号路由」的 `RotationPolicy.max_attempts` 控制。
+static RETRY_SELF_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// 读取同一账号内的重试次数。
+pub fn retry_self_count() -> u32 {
+    RETRY_SELF_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 写入同一账号内的重试次数（上限 10）。
+pub fn set_retry_self_count(v: u32) {
+    RETRY_SELF_COUNT.store(v.min(10), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 「直接换号/换渠道状态码」的进程级快照（数据面同步判定）。

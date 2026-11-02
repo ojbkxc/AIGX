@@ -103,6 +103,59 @@ impl AccountBridge {
         }
     }
 
+    /// 同一账号内的额外重试次数（「请求重试」设置的两档之一，
+    /// 对齐 Agent2API retryCount）。
+    fn self_attempts(&self) -> usize {
+        crate::config::retry_self_count() as usize
+    }
+
+    /// 该失败是否应跳过「同账号重试」直接换号。
+    ///
+    /// 命中「直接换号状态码」名单（默认 402 余额不足）说明这枚凭据/账号已被
+    /// 上游判死，原地重试只会重复撞同一面墙，直接换号更快。
+    fn should_skip_self_retry(&self, error: &BridgeError) -> bool {
+        match error {
+            BridgeError::UpstreamStatus { status, .. } => crate::config::is_retry_status(*status),
+            _ => false,
+        }
+    }
+
+    /// 在持有同一 `bridge` 的前提下按「同账号重试」档位重试一次调用。
+    ///
+    /// `call` 接收 `Arc<dyn Bridge>`（与 `dispatch` 的 `op` 同形），每次重试
+    /// 用同一账号的 bridge 重发，不再经过选号；超时预算按整体 `started_at`
+    /// 递耗。返回最后一次结果。
+    async fn with_self_retry<T, F, Fut>(
+        &self,
+        started_at: Instant,
+        bridge: Arc<dyn Bridge>,
+        call: F,
+    ) -> Result<T, BridgeError>
+    where
+        F: Fn(Arc<dyn Bridge>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, BridgeError>>,
+    {
+        let mut inner = 0usize;
+        loop {
+            let Some(remaining) = remaining_budget(started_at) else {
+                return Err(rotation_timeout(started_at));
+            };
+            let attempt = match tokio::time::timeout(remaining, call(bridge.clone())).await {
+                Ok(result) => result,
+                Err(_) => Err(rotation_timeout(started_at)),
+            };
+            let retry = match &attempt {
+                Ok(_) => false,
+                Err(e) => inner < self.self_attempts() && !self.should_skip_self_retry(e),
+            };
+            if !retry {
+                return attempt;
+            }
+            inner += 1;
+            self.pause_before_retry().await;
+        }
+    }
+
     /// 构造失败（地址/代理/凭证配置问题）也要冷却该账号，避免反复踩坑。
     fn note_build_failure(&self, lease: &AccountLease, model: &str, error: &BridgeError) {
         let failure = ChannelStore::classify_bridge_error(error);
@@ -180,10 +233,10 @@ impl AccountBridge {
             if attempt > 0 {
                 self.pause_before_retry().await;
             }
-            let Some(remaining) = remaining_budget(started_at) else {
+            if remaining_budget(started_at).is_none() {
                 last = Some(rotation_timeout(started_at));
                 break;
-            };
+            }
             let Some(lease) = self.pick_account(model, alias) else {
                 break;
             };
@@ -196,11 +249,7 @@ impl AccountBridge {
                 }
             };
             let started = Instant::now();
-            let outcome = tokio::time::timeout(remaining, op(bridge)).await;
-            let result = match outcome {
-                Ok(result) => result,
-                Err(_) => Err(rotation_timeout(started_at)),
-            };
+            let result = self.with_self_retry(started_at, bridge, &op).await;
             match result {
                 Ok(value) => {
                     let elapsed = started.elapsed().as_millis() as u64;
@@ -237,10 +286,10 @@ impl Bridge for AccountBridge {
             if attempt > 0 {
                 self.pause_before_retry().await;
             }
-            let Some(remaining) = remaining_budget(started_at) else {
+            if remaining_budget(started_at).is_none() {
                 last = Some(rotation_timeout(started_at));
                 break;
-            };
+            }
             let Some(lease) = self.pick_account(&req.model, alias) else {
                 break;
             };
@@ -253,11 +302,11 @@ impl Bridge for AccountBridge {
                 }
             };
             let started = Instant::now();
-            let outcome = tokio::time::timeout(remaining, bridge.chat(req, ctx)).await;
-            let result = match outcome {
-                Ok(result) => result,
-                Err(_) => Err(rotation_timeout(started_at)),
-            };
+            let result = self
+                .with_self_retry(started_at, bridge.clone(), |b| async move {
+                    b.chat(req, ctx).await
+                })
+                .await;
             match result {
                 Ok(response) => {
                     let elapsed = started.elapsed().as_millis() as u64;
@@ -288,10 +337,10 @@ impl Bridge for AccountBridge {
             if attempt > 0 {
                 self.pause_before_retry().await;
             }
-            let Some(remaining) = remaining_budget(started_at) else {
+            if remaining_budget(started_at).is_none() {
                 last = Some(rotation_timeout(started_at));
                 break;
-            };
+            }
             let Some(lease) = self.pick_account(&req.model, alias) else {
                 break;
             };
@@ -304,11 +353,11 @@ impl Bridge for AccountBridge {
                 }
             };
             let started = Instant::now();
-            let outcome = tokio::time::timeout(remaining, bridge.chat_stream(req, ctx)).await;
-            let result = match outcome {
-                Ok(result) => result,
-                Err(_) => Err(rotation_timeout(started_at)),
-            };
+            let result = self
+                .with_self_retry(started_at, bridge.clone(), |b| async move {
+                    b.chat_stream(req, ctx).await
+                })
+                .await;
             match result {
                 Ok(stream) => {
                     let elapsed = started.elapsed().as_millis() as u64;

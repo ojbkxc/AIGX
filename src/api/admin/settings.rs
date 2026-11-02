@@ -41,7 +41,11 @@ pub struct LimitsRequest {
     pub connect_timeout_secs: Option<u64>,
     pub headers_timeout_secs: Option<u64>,
     pub stream_idle_secs: Option<u64>,
+    /// 非流式响应体超时（秒）
+    pub body_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
+    /// 同一账号内的重试次数（0~10）
+    pub retry_self_count: Option<u32>,
     pub retry_interval_ms: Option<u64>,
     pub retry_on_status: Option<Vec<u16>>,
     pub max_request_body_mb: Option<usize>,
@@ -152,7 +156,9 @@ pub async fn handle_get_limits(
             "connect_timeout_secs": config.usage.connect_timeout_secs,
             "headers_timeout_secs": config.usage.headers_timeout_secs,
             "stream_idle_secs": config.usage.stream_idle_secs,
+            "body_timeout_secs": config.usage.body_timeout_secs,
             "max_retries": config.usage.max_retries,
+            "retry_self_count": config.usage.retry_self_count,
             "retry_interval_ms": config.usage.retry_interval_ms,
             "retry_on_status": config.usage.retry_on_status,
             "max_request_body_mb": config.usage.max_request_body_mb,
@@ -229,6 +235,12 @@ pub async fn handle_update_limits(
     }
     if let Some(v) = body.stream_idle_secs {
         config.usage.stream_idle_secs = v.clamp(1, 600);
+    }
+    if let Some(v) = body.body_timeout_secs {
+        config.usage.body_timeout_secs = v.clamp(1, 3_600);
+    }
+    if let Some(v) = body.retry_self_count {
+        config.usage.retry_self_count = v.min(10);
     }
     if let Some(v) = body.retry_interval_ms {
         config.usage.retry_interval_ms = v.min(10_000);
@@ -327,6 +339,9 @@ pub async fn handle_update_limits(
         .set_retry_on_status(config.usage.retry_on_status.clone());
     // 渠道级重试次数立即生效（选路时读取进程级快照）
     crate::config::set_max_retries(config.usage.max_retries);
+    // 账号池「同账号重试」档与非流式响应体超时立即生效
+    crate::config::set_retry_self_count(config.usage.retry_self_count);
+    crate::config::set_body_timeout_secs(config.usage.body_timeout_secs);
     // 直接换号/换渠道状态码名单立即生效
     crate::config::set_retry_on_status_codes(config.usage.retry_on_status.clone());
     match state.config_manager.update(config).await {
@@ -815,6 +830,7 @@ pub async fn handle_get_gateway_prompt(
         "data": {
             "mode": cfg.mode,
             "text": cfg.text,
+            "models": cfg.models,
             "developer_role_compat": cfg.developer_role_compat,
         }
     })))
@@ -853,6 +869,41 @@ pub async fn handle_update_gateway_prompt(
     if let Some(v) = body.get("developer_role_compat").and_then(|v| v.as_bool()) {
         cfg.developer_role_compat = v;
     }
+    // 按模型覆盖：整块替换（前端提交完整表；键 = 模型名，null/空文本 = 删除该项）
+    if let Some(models) = body.get("models") {
+        if !models.is_object() && !models.is_null() {
+            return Err(error_response("models 必须是对象", StatusCode::BAD_REQUEST));
+        }
+        let mut next = std::collections::BTreeMap::new();
+        if let Some(map) = models.as_object() {
+            for (model, value) in map {
+                if value.is_null() {
+                    continue;
+                }
+                let mode = value
+                    .get("mode")
+                    .and_then(|m| m.as_str())
+                    .and_then(crate::prompt::PromptMode::parse)
+                    .unwrap_or(crate::prompt::PromptMode::Passthrough);
+                let text = value
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if text.chars().count() > 64_000 {
+                    return Err(error_response(
+                        &format!("模型 {model} 的提示词过长（上限 64000 字符）"),
+                        StatusCode::BAD_REQUEST,
+                    ));
+                }
+                next.insert(
+                    model.clone(),
+                    crate::prompt::ModelPromptOverride { mode, text },
+                );
+            }
+        }
+        cfg.models = next;
+    }
 
     state.gateway_prompt.update(cfg.clone()).map_err(|e| {
         error_response(
@@ -873,6 +924,86 @@ pub async fn handle_update_gateway_prompt(
             "mode": cfg.mode,
             "text": cfg.text,
             "developer_role_compat": cfg.developer_role_compat,
+            "models": cfg.models,
         }
+    })))
+}
+
+/// 脱敏请求头名单的持久化键。
+pub const SANITIZE_HEADERS_KEY: &str = "sanitize_header_blacklist";
+
+/// GET /api/sanitize —— 读取「额外脱敏请求头」名单（对照 Agent2API 设置 → 网关 → 指纹脱敏）。
+///
+/// 只返回管理员额外补充的部分；内置名单（authorization/cookie/x-*-token 等）
+/// 由前端固定展示为只读默认项。
+pub async fn handle_get_sanitize(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "extra_headers": crate::config::extra_sensitive_headers(),
+        }
+    })))
+}
+
+/// PUT /api/sanitize —— 保存额外脱敏头名单（热生效：下一请求即按新名单脱敏）。
+pub async fn handle_update_sanitize(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+
+    let list: Vec<String> = body
+        .get("extra_headers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    if list.len() > 200 {
+        return Err(error_response(
+            "额外脱敏头最多 200 条",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    // 头名合法性：只允许 token 字符与尾部通配 `*`，避免写入无法匹配的垃圾项。
+    for name in &list {
+        let body_part = name.trim_end_matches('*');
+        if body_part.is_empty()
+            || !body_part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(error_response(
+                &format!("非法的请求头名：{name}"),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+    }
+
+    // 落盘 + 进程级快照（两处都写：重启后从盘恢复，运行期走原子快照）
+    state
+        .alert_store
+        .put(SANITIZE_HEADERS_KEY, &list)
+        .map_err(|e| {
+            error_response(
+                &format!("Failed to save sanitize headers: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+    crate::config::set_extra_sensitive_headers(list.clone());
+    tracing::info!("脱敏请求头名单已更新: {} 条", list.len());
+
+    Ok(Json(json!({
+        "success": true,
+        "data": { "extra_headers": list }
     })))
 }

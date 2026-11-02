@@ -54,6 +54,21 @@ impl PromptMode {
     }
 }
 
+/// 单个模型的提示词覆盖。
+///
+/// AIGX 适配形态：A2A 按 provider 覆盖（它一家一个上游），而 AIGX 的数据面
+/// 入口在解析阶段只拿到客户端请求的**模型名**，provider 要等选路后才确定。
+/// 因此这里按「模型名」覆盖 —— 语义等价（都是「这一路请求用另一套提示词」），
+/// 且能在入口处直接判定。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelPromptOverride {
+    #[serde(default)]
+    pub mode: PromptMode,
+    /// 该模型的提示词文本（空文本 = 该模型不做注入）
+    #[serde(default)]
+    pub text: String,
+}
+
 /// 网关提示词配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GatewayPrompt {
@@ -63,6 +78,10 @@ pub struct GatewayPrompt {
     /// 提示词文本（custom/append 模式生效；空文本等价 passthrough）
     #[serde(default)]
     pub text: String,
+    /// 按模型覆盖（键 = 客户端请求里的模型名原文）：命中则整条替代全局
+    /// mode/text，未命中回落全局。空表 = 全部走全局（默认路径）。
+    #[serde(default)]
+    pub models: std::collections::BTreeMap<String, ModelPromptOverride>,
     /// developer 角色兼容（对照 A2A developerRoleCompat，默认开）：
     /// OpenAI 新 SDK 用 `role:"developer"` 取代 system，多数上游只认
     /// system——开启时入口解析把 developer 归一为 system；关闭时按原
@@ -80,6 +99,7 @@ impl Default for GatewayPrompt {
         Self {
             mode: PromptMode::Passthrough,
             text: String::new(),
+            models: std::collections::BTreeMap::new(),
             developer_role_compat: default_developer_role_compat(),
         }
     }
@@ -129,19 +149,39 @@ impl GatewayPromptStore {
 /// 返回 `Some(新列表)` = 改动过（调用方用返回值替换）；`None` = 不动
 /// （passthrough 或文本为空——默认路径零开销，连 Vec 都不分配）。
 pub fn apply_prompt(messages: &[ChatMessage], cfg: &GatewayPrompt) -> Option<Vec<ChatMessage>> {
-    if cfg.text.trim().is_empty() {
+    apply_prompt_for("", messages, cfg)
+}
+
+/// 按模型名应用提示词策略：先查该模型是否有专用覆盖，未命中回落全局。
+///
+/// 与 [`apply_prompt`] 是同一套逻辑，只是多了一层「按模型覆盖」的查表。
+pub fn apply_prompt_for(
+    model: &str,
+    messages: &[ChatMessage],
+    cfg: &GatewayPrompt,
+) -> Option<Vec<ChatMessage>> {
+    let (mode, text) = match cfg.models.get(model) {
+        Some(over) => (over.mode, over.text.as_str()),
+        None => (cfg.mode, cfg.text.as_str()),
+    };
+    apply_with(mode, text, messages)
+}
+
+/// 提示词策略本体：给定了模式与文本时如何改写消息列表。
+fn apply_with(mode: PromptMode, text: &str, messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
+    if text.trim().is_empty() {
         return None;
     }
     let gateway = || ChatMessage {
         role: Role::System,
-        content: Some(cfg.text.clone()),
+        content: Some(text.to_string()),
         content_blocks: None,
         name: None,
         tool_call_id: None,
         tool_calls: None,
         reasoning: None,
     };
-    match cfg.mode {
+    match mode {
         PromptMode::Passthrough => None,
         PromptMode::Custom => {
             // 替换：删掉全部 system 消息，头部插网关提示词
@@ -252,6 +292,54 @@ mod tests {
         let out = apply_prompt(&msgs, &cfg).unwrap();
         assert_eq!(out[0].content.as_deref(), Some("G"));
         assert_eq!(out[1].content.as_deref(), Some("q"));
+    }
+
+    #[test]
+    fn model_override_beats_global_and_falls_back_when_absent() {
+        let msgs = vec![user("q")];
+        let mut models = std::collections::BTreeMap::new();
+        models.insert(
+            "gpt-4o".to_string(),
+            ModelPromptOverride {
+                mode: PromptMode::Append,
+                text: "PER-MODEL".to_string(),
+            },
+        );
+        let cfg = GatewayPrompt {
+            mode: PromptMode::Custom,
+            text: "GLOBAL".to_string(),
+            models,
+            ..GatewayPrompt::default()
+        };
+        // 命中覆盖：用模型自己的文本
+        let hit = apply_prompt_for("gpt-4o", &msgs, &cfg).unwrap();
+        assert_eq!(hit[0].content.as_deref(), Some("PER-MODEL"));
+        // 未命中：回落全局
+        let miss = apply_prompt_for("claude-3-7", &msgs, &cfg).unwrap();
+        assert_eq!(miss[0].content.as_deref(), Some("GLOBAL"));
+    }
+
+    #[test]
+    fn model_override_with_empty_text_disables_injection_for_that_model() {
+        let msgs = vec![user("q")];
+        let mut models = std::collections::BTreeMap::new();
+        models.insert(
+            "silent-model".to_string(),
+            ModelPromptOverride {
+                mode: PromptMode::Append,
+                text: "  ".to_string(),
+            },
+        );
+        let cfg = GatewayPrompt {
+            mode: PromptMode::Custom,
+            text: "GLOBAL".to_string(),
+            models,
+            ..GatewayPrompt::default()
+        };
+        // 该模型文本为空 → 不做任何注入（即使全局是 custom）
+        assert!(apply_prompt_for("silent-model", &msgs, &cfg).is_none());
+        // 其它模型仍走全局
+        assert!(apply_prompt_for("other", &msgs, &cfg).is_some());
     }
 
     #[test]

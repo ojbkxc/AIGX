@@ -376,11 +376,14 @@ pub async fn handle_messages(
 
     // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
     // 客户端 system 已折进消息列表头，再统一走网关策略（custom 会替换它）
-    let all_messages =
-        match crate::prompt::apply_prompt(&all_messages, &state.gateway_prompt.snapshot()) {
-            Some(injected) => injected,
-            None => all_messages,
-        };
+    let all_messages = match crate::prompt::apply_prompt_for(
+        &model,
+        &all_messages,
+        &state.gateway_prompt.snapshot(),
+    ) {
+        Some(injected) => injected,
+        None => all_messages,
+    };
 
     let chat_req = ChatFormat {
         model: model.clone(),

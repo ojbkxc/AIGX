@@ -82,6 +82,7 @@ import type {
   ModelMetadataRefreshResult,
   RoutingPolicyItem,
   GatewayPromptItem,
+  SanitizeHeadersItem,
   StorageOverviewItem,
   BackupImportResult,
 } from '@/types';
@@ -688,6 +689,11 @@ export const api = {
     request<ApiResponse<GatewayPromptItem>>('GET', `${API_BASE}/gateway/prompt`),
   saveGatewayPrompt: (data: Record<string, unknown>): Promise<ApiResponse<GatewayPromptItem>> =>
     request<ApiResponse<GatewayPromptItem>>('PUT', `${API_BASE}/gateway/prompt`, data),
+  // 额外脱敏请求头名单（对照 Agent2API「设置 → 网关 → 指纹脱敏」；热生效）
+  getSanitize: (): Promise<ApiResponse<SanitizeHeadersItem>> =>
+    request<ApiResponse<SanitizeHeadersItem>>('GET', `${API_BASE}/sanitize`),
+  saveSanitize: (data: Record<string, unknown>): Promise<ApiResponse<SanitizeHeadersItem>> =>
+    request<ApiResponse<SanitizeHeadersItem>>('PUT', `${API_BASE}/sanitize`, data),
   // 数据管理（对照 Agent2API「设置 → 数据」：存储概览 + 全量备份/恢复）
   getStorageOverview: (): Promise<ApiResponse<StorageOverviewItem>> =>
     request<ApiResponse<StorageOverviewItem>>('GET', `${API_BASE}/storage`),

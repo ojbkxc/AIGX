@@ -418,10 +418,15 @@ impl Bridge for OpenaiCompatibleBridge {
         }
 
         let (request, body) = self.apply_emulation(body);
-        let resp = crate::debug_traffic::traced(request.json(&body), ctx)
-            .send()
-            .await
-            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+        let resp = crate::debug_traffic::traced(
+            request
+                .timeout(crate::bridge::nonstream_request_timeout())
+                .json(&body),
+            ctx,
+        )
+        .send()
+        .await
+        .map_err(|e| BridgeError::Transport(e.to_string()))?;
 
         if !resp.status().is_success() {
             return Err(super::capture_upstream_error_http(

@@ -295,6 +295,12 @@ async fn main() -> anyhow::Result<()> {
     // passthrough/custom/append 三模式，保存即生效
     let gateway_prompt = Arc::new(crate::prompt::GatewayPromptStore::with_store(store.clone()));
 
+    // 额外脱敏请求头名单（对照 Agent2API「设置 → 网关 → 指纹脱敏」）：
+    // 启动时从盘恢复进程级快照；保存设置时热更新
+    if let Ok(Some(list)) = store.get::<Vec<String>>("sanitize_header_blacklist") {
+        crate::config::set_extra_sensitive_headers(list);
+    }
+
     // 初始化账号型渠道账号池（渠道内第二级调度：账号级优先级/冷却/并发/粘性）
     let account_sessions = crate::account_session::AccountSessionStore::with_egress(
         store.clone(),
@@ -309,6 +315,9 @@ async fn main() -> anyhow::Result<()> {
     account_sessions.set_retry_on_status(config.usage.retry_on_status.clone());
     // 渠道级重试次数（「请求重试」设置；保存设置时也会实时更新）
     crate::config::set_max_retries(config.usage.max_retries);
+    // 账号池「同账号重试」档与非流式响应体超时
+    crate::config::set_retry_self_count(config.usage.retry_self_count);
+    crate::config::set_body_timeout_secs(config.usage.body_timeout_secs);
     // 直接换号/换渠道状态码名单（选路时同步判定，保存设置时实时更新）
     crate::config::set_retry_on_status_codes(config.usage.retry_on_status.clone());
 
@@ -1492,6 +1501,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/gateway/prompt",
             get(api::admin::handle_get_gateway_prompt)
                 .put(api::admin::handle_update_gateway_prompt),
+        )
+        // 额外脱敏请求头名单（对照 Agent2API「设置 → 网关 → 指纹脱敏」）
+        .route(
+            "/api/sanitize",
+            get(api::admin::handle_get_sanitize).put(api::admin::handle_update_sanitize),
         )
         // 数据管理（存储概览 + 全量备份/恢复；对照 Agent2API「设置 → 数据」）
         .route("/api/storage", get(api::admin::handle_storage_overview))

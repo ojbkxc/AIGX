@@ -7,9 +7,13 @@ import './App.css';
 import './styles/density.css';
 import './i18n';
 import { initTheme } from './lib/theme';
+import { initZoom } from './lib/zoom';
 
 // 初始化主题（system/light/dark 三态，system 跟随系统明暗）
 initTheme();
+
+// 初始化界面缩放（设置 → 站点 → 界面缩放，持久化在 localStorage）
+initZoom();
 
 // TanStack Query 全局客户端：
 // - 30s 轮询保持原有实时性

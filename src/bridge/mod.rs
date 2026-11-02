@@ -677,6 +677,15 @@ pub fn stream_request_timeout() -> Duration {
     Duration::from_secs(24 * 3600)
 }
 
+/// 非流式请求的响应体总超时（配置项 `body_timeout_secs`，默认 300s）。
+///
+/// 只用于**非流式**请求：`RequestBuilder::timeout` 是「建连到响应体读完」的
+/// 累计上限，对流式请求会掐断长流（流式走 `stream_request_timeout` + 空闲
+/// 超时）。非流式请求读完整 body 是必须的，给它一个独立可调的兜底。
+pub fn nonstream_request_timeout() -> Duration {
+    Duration::from_secs(crate::config::body_timeout_secs().max(1))
+}
+
 /// 下游 SSE 保活帧的间隔。
 pub const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 

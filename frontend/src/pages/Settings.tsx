@@ -6,6 +6,7 @@ import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Tabs, SkeletonList } from '../components/ui';
 import { getThemeMode, applyTheme, type ThemeMode } from '../lib/theme';
+import { getZoom, applyZoom, ZOOM_LEVELS } from '../lib/zoom';
 import Epay from './Epay';
 import Groups from './Groups';
 import Notify from './Notify';
@@ -16,6 +17,7 @@ import LogRetention from './LogRetention';
 import UpdatePanel from '../components/UpdatePanel';
 import AgentSettingsPanel from '../components/AgentSettingsPanel';
 import GatewayPanel from '../components/GatewayPanel';
+import SanitizePanel from '../components/SanitizePanel';
 import SecurityPolicyPanel from '../components/SecurityPolicyPanel';
 import PromptPanel from '../components/PromptPanel';
 import DebugTrafficPanel from '../components/DebugTrafficPanel';
@@ -35,7 +37,9 @@ interface LimitsForm {
   connect_timeout_secs: string;
   headers_timeout_secs: string;
   stream_idle_secs: string;
+  body_timeout_secs: string;
   max_retries: string;
+  retry_self_count: string;
   retry_interval_ms: string;
   retry_on_status: string;
   billing_flat_quota: string;
@@ -123,7 +127,9 @@ export default function Settings() {
     connect_timeout_secs: '',
     headers_timeout_secs: '',
     stream_idle_secs: '',
+    body_timeout_secs: '',
     max_retries: '',
+    retry_self_count: '',
     retry_interval_ms: '',
     retry_on_status: '',
     billing_flat_quota: '',
@@ -144,6 +150,9 @@ export default function Settings() {
 
   // 界面分区：主题三态（system/light/dark），与登录页/侧边栏切换共享同一份持久化
   const [theme, setTheme] = useState<ThemeMode>(() => getThemeMode());
+
+  // 界面缩放（80%–130%，localStorage 持久化；对照 Agent2API「设置 → 显示」）
+  const [zoom, setZoom] = useState<number>(() => getZoom());
 
   // 限流配置
   const [rlConfig, setRlConfig] = useState<RateLimitConfig | null>(null);
@@ -198,6 +207,14 @@ export default function Settings() {
     setTheme(mode);
     applyTheme(mode);
   };
+
+  const selectZoom = (scale: number) => {
+    setZoom(scale);
+    applyZoom(scale);
+  };
+
+  /** 仓库地址（反馈入口跳 GitHub issue 模板用）。 */
+  const REPO_URL = 'https://github.com/ojbkxc/AIGX';
 
   useEffect(() => {
     loadLimits();
@@ -357,7 +374,9 @@ export default function Settings() {
         connect_timeout_secs: data.connect_timeout_secs ?? '',
         headers_timeout_secs: data.headers_timeout_secs ?? '',
         stream_idle_secs: data.stream_idle_secs ?? '',
+        body_timeout_secs: data.body_timeout_secs ?? '',
         max_retries: data.max_retries ?? '',
+        retry_self_count: data.retry_self_count ?? '',
         retry_interval_ms: data.retry_interval_ms ?? '',
         retry_on_status: Array.isArray((data as { retry_on_status?: number[] }).retry_on_status)
           ? ((data as { retry_on_status?: number[] }).retry_on_status || []).join(', ')
@@ -388,7 +407,9 @@ export default function Settings() {
       limits.connect_timeout_secs,
       limits.headers_timeout_secs,
       limits.stream_idle_secs,
+      limits.body_timeout_secs,
       limits.max_retries,
+      limits.retry_self_count,
       limits.retry_interval_ms,
       limits.billing_flat_quota,
       limits.max_request_body_mb,
@@ -406,7 +427,9 @@ export default function Settings() {
     if (limits.connect_timeout_secs !== '') payload.connect_timeout_secs = Number(limits.connect_timeout_secs);
     if (limits.headers_timeout_secs !== '') payload.headers_timeout_secs = Number(limits.headers_timeout_secs);
     if (limits.stream_idle_secs !== '') payload.stream_idle_secs = Number(limits.stream_idle_secs);
+    if (limits.body_timeout_secs !== '') payload.body_timeout_secs = Number(limits.body_timeout_secs);
     if (limits.max_retries !== '') payload.max_retries = Number(limits.max_retries);
+    if (limits.retry_self_count !== '') payload.retry_self_count = Number(limits.retry_self_count);
     if (limits.retry_interval_ms !== '') payload.retry_interval_ms = Number(limits.retry_interval_ms);
     if (limits.billing_flat_quota !== '') payload.billing_flat_quota = Number(limits.billing_flat_quota);
     if (limits.max_request_body_mb !== '') payload.max_request_body_mb = Number(limits.max_request_body_mb);
@@ -434,6 +457,14 @@ export default function Settings() {
     }
     if (payload.stream_idle_secs != null && (payload.stream_idle_secs < 1 || payload.stream_idle_secs > 600)) {
       setError(t('流空闲超时必须在 1-600 秒之间'));
+      return;
+    }
+    if (payload.body_timeout_secs != null && (payload.body_timeout_secs < 1 || payload.body_timeout_secs > 3600)) {
+      setError(t('非流式响应体超时必须在 1-3600 秒之间'));
+      return;
+    }
+    if (payload.retry_self_count != null && (payload.retry_self_count < 0 || payload.retry_self_count > 10)) {
+      setError(t('同账号重试次数必须在 0-10 之间'));
       return;
     }
     if (payload.retry_interval_ms != null && (payload.retry_interval_ms < 0 || payload.retry_interval_ms > 10000)) {
@@ -555,9 +586,19 @@ export default function Settings() {
                   <span className="form-hint">{t('流式响应两次读取之间的最长静默，默认 30 秒（修改后重启生效）。')}</span>
                 </div>
                 <div className="form-group">
-                  <label>{t('最大重试次数')}</label>
+                  <label>{t('非流式响应体超时 (秒)')}</label>
+                  <input className="form-input" type="number" min="1" max="3600" placeholder="300" value={limits.body_timeout_secs} onChange={(e) => handleChange('body_timeout_secs', e.target.value)} />
+                  <span className="form-hint">{t('非流式请求读完整响应体的上限，默认 300 秒（保存后立即生效）。流式请求不受此项约束。')}</span>
+                </div>
+                <div className="form-group">
+                  <label>{t('最大重试次数（渠道切换）')}</label>
                   <input className="form-input" type="number" min="0" max="10" placeholder={t('settingsPlaceholderMaxRetries')} value={limits.max_retries} onChange={(e) => handleChange('max_retries', e.target.value)} />
                   <span className="form-hint">{t('渠道级失败切换的最大额外尝试次数（0 = 只尝试首选渠道，最多 10）；保存后立即生效。')}</span>
+                </div>
+                <div className="form-group">
+                  <label>{t('同账号重试次数')}</label>
+                  <input className="form-input" type="number" min="0" max="10" placeholder="1" value={limits.retry_self_count} onChange={(e) => handleChange('retry_self_count', e.target.value)} />
+                  <span className="form-hint">{t('账号池内同一账号原地重试的额外次数（0 = 失败即换号，最多 10）；保存后立即生效。换号次数在账号池「账号路由」里配置。')}</span>
                 </div>
                 <div className="form-group">
                   <label>{t('重试间隔 (毫秒)')}</label>
@@ -613,6 +654,22 @@ export default function Settings() {
                     </button>
                   );
                 })}
+              </div>
+              <div className="form-group" style={{ marginTop: 16, maxWidth: 280 }}>
+                <label>{t('界面缩放')}</label>
+                <select
+                  className="form-input"
+                  value={String(zoom)}
+                  onChange={(e) => selectZoom(Number(e.target.value))}
+                >
+                  {ZOOM_LEVELS.map((level) => (
+                    <option key={level} value={String(level)}>
+                      {Math.round(level * 100)}%
+                      {level === 1 ? t('（默认）') : ''}
+                    </option>
+                  ))}
+                </select>
+                <span className="form-hint">{t('整页等比缩放，保存在本机浏览器。')}</span>
               </div>
             </div>
           </div>
@@ -884,6 +941,9 @@ export default function Settings() {
           <div style={{ marginTop: 16, display: opsSub === 'gateway' ? 'block' : 'none' }}>
             <GatewayPanel />
             <div style={{ marginTop: 16 }}>
+              <SanitizePanel />
+            </div>
+            <div style={{ marginTop: 16 }}>
               <PromptPanel />
             </div>
             <div style={{ marginTop: 16 }}>
@@ -923,6 +983,7 @@ export default function Settings() {
       )}
 
       {activeTab === 'account' && (
+        <>
         <div className="card">
           <div className="card-header">
             <h2>{t('账户安全')}</h2>
@@ -954,6 +1015,53 @@ export default function Settings() {
             </form>
           </div>
         </div>
+
+        {/* 反馈与需求（对照 Agent2API「设置 → 反馈与需求」：跳 GitHub issue 模板） */}
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-header">
+            <h2>{t('反馈与需求')}</h2>
+            <p className="card-subtitle">
+              {t('问题反馈、功能建议与提供商/模型支持请求都走 GitHub issue，便于跟踪进度。')}
+            </p>
+          </div>
+          <div className="card-body">
+            <div className="settings-actions" style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              <a
+                className="btn btn-secondary"
+                href={`${REPO_URL}/issues/new?template=bug_report.yml`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {t('问题反馈')}
+              </a>
+              <a
+                className="btn btn-secondary"
+                href={`${REPO_URL}/issues/new?template=feature_request.yml`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {t('功能建议')}
+              </a>
+              <a
+                className="btn btn-secondary"
+                href={`${REPO_URL}/issues/new?template=provider_request.yml`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {t('请求提供商/模型支持')}
+              </a>
+              <a
+                className="btn btn-secondary"
+                href={`${REPO_URL}/issues`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {t('查看已有 issue')}
+              </a>
+            </div>
+          </div>
+        </div>
+        </>
       )}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />

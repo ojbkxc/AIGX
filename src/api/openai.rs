@@ -1737,8 +1737,13 @@ pub async fn handle_chat_completions(
 
     // 构建 ChatFormat
     // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）：
-    // passthrough 不动（零开销）；custom 替换 / append 追加网关提示词
-    let messages = match crate::prompt::apply_prompt(&messages, &state.gateway_prompt.snapshot()) {
+    // passthrough 不动（零开销）；custom 替换 / append 追加网关提示词；
+    // 按模型覆盖优先于全局设置（AIGX 入口只有模型名，故按模型挂）
+    let messages = match crate::prompt::apply_prompt_for(
+        &model,
+        &messages,
+        &state.gateway_prompt.snapshot(),
+    ) {
         Some(injected) => injected,
         None => messages,
     };

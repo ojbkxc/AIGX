@@ -1,0 +1,38 @@
+name: 请求支持提供商 / 模型
+description: 希望 AIGX 支持某个上游服务商或模型
+title: "[Provider] "
+labels: ["provider-request"]
+body:
+  - type: input
+    id: provider
+    attributes:
+      label: 提供商名称
+      placeholder: 例如 qoder / cline-free / 某自建网关
+    validations:
+      required: true
+  - type: input
+    id: homepage
+    attributes:
+      label: 官网或客户端下载地址
+    validations:
+      required: false
+  - type: textarea
+    id: capability
+    attributes:
+      label: 希望支持的能力
+      description: 勾选你需要的（登录 / 转发 / 余额查询 / 模型目录 / 签到 / 福利领取）
+      placeholder: |
+        - [ ] 登录接入账号
+        - [ ] 转发对话
+        - [ ] 余额查询
+        - [ ] 模型目录同步
+        - [ ] 签到 / 福利领取
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: 补充说明
+      description: 协议线索、抓包线索、社区已有实现等
+    validations:
+      required: false

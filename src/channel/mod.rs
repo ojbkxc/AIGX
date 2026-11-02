@@ -152,6 +152,9 @@ pub fn is_sensitive_header(name: &str) -> bool {
     if lower.starts_with("x-balance-") {
         return true;
     }
+    if crate::config::is_extra_sensitive_header(&lower) {
+        return true;
+    }
     matches!(
         lower.as_str(),
         "authorization"

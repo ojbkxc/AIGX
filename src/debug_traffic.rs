@@ -118,7 +118,9 @@ where
     let mut object = Map::new();
     for (name, value) in headers {
         let lower = name.as_ref().to_ascii_lowercase();
-        let shown = if SENSITIVE_HEADERS.contains(&lower.as_str()) {
+        let shown = if SENSITIVE_HEADERS.contains(&lower.as_str())
+            || crate::config::is_extra_sensitive_header(&lower)
+        {
             REDACTED
         } else {
             value.as_ref()

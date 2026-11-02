@@ -1433,7 +1433,14 @@ export type PromptMode = 'passthrough' | 'custom' | 'append';
 export interface GatewayPromptItem {
   mode: PromptMode;
   text: string;
+  /** 按模型覆盖（键 = 模型名；命中则整条替代全局 mode/text） */
+  models?: Record<string, { mode: PromptMode; text: string }>;
   developer_role_compat?: boolean;
+}
+
+/** 额外脱敏请求头名单（GET/PUT /api/sanitize） */
+export interface SanitizeHeadersItem {
+  extra_headers: string[];
 }
 
 /** 存储概览（GET /api/storage） */

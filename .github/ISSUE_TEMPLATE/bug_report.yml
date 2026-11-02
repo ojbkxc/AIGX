@@ -1,0 +1,50 @@
+name: 问题反馈
+description: 报告一个可复现的缺陷或异常行为
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量把「怎么复现」写清楚，这决定了问题能不能被定位。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 实际发生了什么？期望是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开…
+        2. 点击…
+        3. 看到…
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: AIGX 版本
+      description: 设置 → 更新 页可见（或 /api/update/status 的 currentVersion）
+    validations:
+      required: true
+  - type: dropdown
+    id: deploy
+    attributes:
+      label: 部署方式
+      options:
+        - Docker
+        - 裸机 Linux + systemd
+        - 其它
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志 / 截图
+      description: 服务端日志、浏览器控制台报错、截图（请先脱敏密钥与账号信息）
+    validations:
+      required: false

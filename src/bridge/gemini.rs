@@ -245,10 +245,14 @@ impl Bridge for GeminiBridge {
     ) -> Result<ChatResponse, BridgeError> {
         let body = self.build_body(req, false);
         let url = self.generate_url(&req.model);
-        let resp = crate::debug_traffic::traced(self.post(&url, &body), ctx)
-            .send()
-            .await
-            .map_err(|e| BridgeError::Transport(e.to_string()))?;
+        let resp = crate::debug_traffic::traced(
+            self.post(&url, &body)
+                .timeout(crate::bridge::nonstream_request_timeout()),
+            ctx,
+        )
+        .send()
+        .await
+        .map_err(|e| BridgeError::Transport(e.to_string()))?;
 
         if !resp.status().is_success() {
             return Err(capture_upstream_error_http(

@@ -35,6 +35,13 @@ const MODES: Array<{ value: PromptMode; label: string; tip: string }> = [
   },
 ];
 
+/** 单条「按模型覆盖」草稿（键=模型名）。 */
+interface ModelOverrideRow {
+  model: string;
+  mode: PromptMode;
+  text: string;
+}
+
 export default function PromptPanel(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
@@ -44,6 +51,7 @@ export default function PromptPanel(): JSX.Element {
   const [mode, setMode] = useState<PromptMode>('passthrough');
   const [text, setText] = useState('');
   const [devCompat, setDevCompat] = useState(true);
+  const [rows, setRows] = useState<ModelOverrideRow[]>([]);
 
   useEffect(() => {
     void (async () => {
@@ -54,6 +62,13 @@ export default function PromptPanel(): JSX.Element {
           setMode(d.mode ?? 'passthrough');
           setText(d.text ?? '');
           setDevCompat(d.developer_role_compat !== false);
+          setRows(
+            Object.entries(d.models ?? {}).map(([model, over]) => ({
+              model,
+              mode: over.mode ?? 'passthrough',
+              text: over.text ?? '',
+            })),
+          );
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -67,12 +82,31 @@ export default function PromptPanel(): JSX.Element {
     setSaving(true);
     setError('');
     try {
-      const res = await api.saveGatewayPrompt({ mode, text, developer_role_compat: devCompat });
+      // 空模型名 / 重名行直接丢弃（后者保留先出现的），避免写入无法命中的键
+      const models: Record<string, { mode: PromptMode; text: string }> = {};
+      for (const row of rows) {
+        const name = row.model.trim();
+        if (!name || models[name]) continue;
+        models[name] = { mode: row.mode, text: row.text };
+      }
+      const res = await api.saveGatewayPrompt({
+        mode,
+        text,
+        developer_role_compat: devCompat,
+        models,
+      });
       const d = res?.data;
       if (d) {
         setMode(d.mode ?? mode);
         setText(d.text ?? text);
         setDevCompat(d.developer_role_compat !== false);
+        setRows(
+          Object.entries(d.models ?? {}).map(([model, over]) => ({
+            model,
+            mode: over.mode ?? 'passthrough',
+            text: over.text ?? '',
+          })),
+        );
       }
       addToast(t('系统提示词已保存（下一请求即生效）'));
     } catch (err) {
@@ -80,6 +114,10 @@ export default function PromptPanel(): JSX.Element {
     } finally {
       setSaving(false);
     }
+  };
+
+  const updateRow = (index: number, patch: Partial<ModelOverrideRow>): void => {
+    setRows(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
   };
 
   if (loading) {
@@ -143,6 +181,72 @@ export default function PromptPanel(): JSX.Element {
             </label>
             <div className="form-hint">
               {t('OpenAI 新 SDK（o 系模型）用 developer 角色替代 system；开启时网关自动归一，关闭时按未知角色丢弃（老行为）。')}
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label>{t('按模型覆盖')}</label>
+            <div className="form-hint" style={{ marginBottom: 8 }}>
+              {t('命中模型名的请求整条走该行配置（模式 + 正文），未命中回落上面的全局设置。正文留空 = 该模型不做注入。')}
+            </div>
+            {rows.length === 0 ? (
+              <div className="empty-state">
+                <p>{t('暂无按模型覆盖，全部请求走全局设置')}</p>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {rows.map((row, i) => (
+                  <div
+                    key={`${row.model}-${i}`}
+                    style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 12 }}
+                  >
+                    <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                      <input
+                        className="form-input"
+                        style={{ flex: 2 }}
+                        placeholder={t('模型名（客户端请求里的原名）')}
+                        value={row.model}
+                        onChange={(e) => updateRow(i, { model: e.target.value })}
+                      />
+                      <select
+                        className="form-input"
+                        style={{ flex: 1 }}
+                        value={row.mode}
+                        onChange={(e) => updateRow(i, { mode: e.target.value as PromptMode })}
+                      >
+                        {MODES.map((m) => (
+                          <option key={m.value} value={m.value}>
+                            {t(m.label)}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => setRows(rows.filter((_, idx) => idx !== i))}
+                      >
+                        {t('删除')}
+                      </button>
+                    </div>
+                    <textarea
+                      className="form-input"
+                      rows={3}
+                      placeholder={t('该模型的提示词正文（留空 = 不注入）')}
+                      value={row.text}
+                      onChange={(e) => updateRow(i, { text: e.target.value })}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setRows([...rows, { model: '', mode: 'append', text: '' }])}
+              >
+                {t('添加模型覆盖')}
+              </button>
             </div>
           </div>
 
