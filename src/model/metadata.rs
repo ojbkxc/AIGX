@@ -1,12 +1,14 @@
 //! 模型元信息注册表（P1「模型元信息同步」）—— owned_by / 上下文长度 / 能力标签。
 //!
-//! 数据来源分三层（优先级从低到高）：
+//! 数据来源分四层（优先级从低到高）：
 //! 1. 内置推断：模型名前缀 → 归属厂商；常见模型 → 上下文长度；名字特征 → 能力标签
 //! 2. 渠道类型：list_models 聚合时由渠道的 channel_type 推导 owned_by（覆盖名字推断）
-//! 3. 管理员覆盖：FileStore `model_meta:{name}` 持久化（显式覆盖前两层）
+//! 3. models.dev 补齐（对齐 Agent2API，开关 `usage.models_dev_enabled` 默认开）：
+//!    内置表未声明的上下文长度 / 能力标签用社区目录**只填空位**，已声明不改写
+//! 4. 管理员覆盖：FileStore `model_meta:{name}` 持久化（显式覆盖前三层）
 //!
-//! 百年工程红线：不引 crate；上下文长度表为静态内置 + 按需覆盖，
-//! 不做联网同步（上游 /models 端点不含上下文长度字段）。
+//! 百年工程红线：不引 crate；上下文长度表为静态内置 + models.dev 联网补齐
+//! （内嵌快照保底，见 `models_dev` 模块）+ 按需覆盖。
 
 use anyhow::Result;
 use parking_lot::RwLock;
@@ -208,10 +210,11 @@ impl ModelMetadataRegistry {
         Ok(())
     }
 
-    /// 查询某模型的元信息（覆盖 > 内置推断）。
+    /// 查询某模型的元信息（覆盖 > 内置推断 > models.dev 补空位）。
     ///
     /// `channel_owned_by`：渠道维度推导的归属（优先于名字推断）；
-    /// 覆盖项存在时整体以覆盖为准。
+    /// 覆盖项存在时整体以覆盖为准。models.dev 只填「内置推断没声明」的
+    /// 上下文长度与能力标签（开关关闭时完全不参与）。
     pub fn get(&self, model: &str, channel_owned_by: Option<&str>) -> ModelMetadata {
         if let Some(m) = self.overrides.read().get(model) {
             return m.clone();
@@ -220,10 +223,35 @@ impl ModelMetadataRegistry {
             .or_else(|| infer_owned_by(model))
             .unwrap_or("aigx")
             .to_string();
+        let mut context_length = builtin_context_length(model);
+        let mut capabilities = infer_capabilities(model);
+        if crate::config::models_dev_enabled() {
+            if let Some(dev) = super::models_dev::lookup(model) {
+                if context_length.is_none() {
+                    context_length = dev.context.and_then(|n| u32::try_from(n).ok());
+                }
+                // 能力标签只有「默认 chat」（名字没命中任何特征）时才补，
+                // embedding / rerank 等显式推断结果原样保留
+                if capabilities.len() == 1 && capabilities[0] == "chat" {
+                    if dev.images {
+                        capabilities.push("vision".to_string());
+                    }
+                    if dev.video {
+                        capabilities.push("video".to_string());
+                    }
+                    if dev.tool_call {
+                        capabilities.push("tools".to_string());
+                    }
+                    if dev.reasoning {
+                        capabilities.push("reasoning".to_string());
+                    }
+                }
+            }
+        }
         ModelMetadata {
             owned_by,
-            context_length: builtin_context_length(model),
-            capabilities: infer_capabilities(model),
+            context_length,
+            capabilities,
         }
     }
 

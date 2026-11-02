@@ -1378,6 +1378,26 @@ export interface DebugTrafficView {
   entries: DebugTrafficEntry[];
 }
 
+/** models.dev 模型元数据状态（GET/PUT /api/models/metadata；对照 Agent2API 同名端点） */
+export interface ModelMetadataStatus {
+  /** 补齐开关（默认开；关闭 = 不刷新也不参与补值） */
+  enabled: boolean;
+  /** 目录生成/刷新时刻（毫秒时间戳；内嵌快照带原值） */
+  updatedAt: number | null;
+  /** 已装载条目数 */
+  count: number;
+  /** 来源标识（embedded / cache / https://models.dev） */
+  source: string;
+}
+
+/** 手动刷新结果（POST /api/models/metadata/refresh；恒 2xx，状态看 status） */
+export interface ModelMetadataRefreshResult {
+  status: 'refreshed' | 'disabled' | 'skipped' | 'failed';
+  message?: string | null;
+  count: number;
+  metadata?: ModelMetadataStatus;
+}
+
 /** 路由策略（GET/PUT /api/routing；对照 Agent2API「设置 → 路由」） */
 export type RouteStrategy = 'weighted' | 'round_robin' | 'ranked';
 export type StickyMode = 'auto' | 'session' | 'turn' | 'off';

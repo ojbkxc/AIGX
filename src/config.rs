@@ -345,6 +345,13 @@ pub struct UsageConfig {
     /// 不动上游请求）。默认关闭。
     #[serde(default)]
     pub strip_newline_keepalive: bool,
+    /// models.dev 模型元数据补齐开关（对齐 Agent2API `modelsDevEnabled`，默认**开**）。
+    ///
+    /// 开启时：内置推断未声明的上下文长度 / 能力标签用 models.dev 目录只填
+    /// 空位（管理员覆盖永远优先）；定时刷新 + 手动刷新照常。关闭时：补值
+    /// 与刷新都停，已装载目录也不再参与展示。
+    #[serde(default = "default_models_dev_enabled")]
+    pub models_dev_enabled: bool,
     /// 按次计费每次固定扣减的额度数（全局统一，`billing_mode=count` 的
     /// 订阅套餐生效）。默认 2，与聊天页「1 次 = 2 额度」口径一致。
     /// 与 token 计费互斥：订阅计费模式为 count 时按此固定值扣，否则按 token 量。
@@ -499,6 +506,10 @@ fn default_captcha_enabled() -> bool {
     true
 }
 
+fn default_models_dev_enabled() -> bool {
+    true
+}
+
 fn default_lockout_enabled() -> bool {
     true
 }
@@ -576,6 +587,7 @@ impl Default for UsageConfig {
             log_body: false,
             debug_traffic: false,
             strip_newline_keepalive: false,
+            models_dev_enabled: default_models_dev_enabled(),
             allow_internal_upstream: false,
             billing_flat_quota: default_billing_flat_quota(),
         }
@@ -648,6 +660,19 @@ pub fn strip_newline_keepalive() -> bool {
 /// 由 main 与 settings 更新端点写入快照。
 pub fn set_strip_newline_keepalive(v: bool) {
     STRIP_NEWLINE_KEEPALIVE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// models.dev 元数据补齐开关（默认开；模型元信息查询与刷新协程同步读取）。
+static MODELS_DEV_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// 读取 models.dev 补齐开关。
+pub fn models_dev_enabled() -> bool {
+    MODELS_DEV_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 启动与模型元数据更新端点写入快照。
+pub fn set_models_dev_enabled(v: bool) {
+    MODELS_DEV_ENABLED.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 按次计费每次固定扣减额度的进程级快照（数据面同步路径读取）。

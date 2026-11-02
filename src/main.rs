@@ -119,6 +119,8 @@ async fn main() -> anyhow::Result<()> {
     crate::config::set_debug_traffic(config.usage.debug_traffic);
     // 换行保活帧过滤开关快照（桥接层同步读取，见 config::strip_newline_keepalive）
     crate::config::set_strip_newline_keepalive(config.usage.strip_newline_keepalive);
+    // models.dev 元数据补齐开关快照（模型元信息查询与刷新协程同步读取）
+    crate::config::set_models_dev_enabled(config.usage.models_dev_enabled);
     // 按次计费固定额度快照（数据面同步路径读取，见 config::billing_flat_quota）
     crate::config::set_billing_flat_quota(config.usage.billing_flat_quota);
 
@@ -182,6 +184,12 @@ async fn main() -> anyhow::Result<()> {
     let model_metadata = Arc::new(model::metadata::ModelMetadataRegistry::new(store.clone()));
     if let Err(e) = model_metadata.load() {
         tracing::error!("Failed to load model metadata registry: {e}");
+    }
+
+    // models.dev 元数据目录：KV 缓存优先、内嵌快照保底（补值层，见 model::models_dev）
+    {
+        let (source, count) = model::models_dev::init(&store);
+        tracing::info!("models.dev metadata catalog loaded: {count} entries from {source}");
     }
 
     // 初始化统一模型管理的启停规则（provider × model）
@@ -723,6 +731,33 @@ async fn main() -> anyhow::Result<()> {
                 }),
             });
         }
+        // models.dev 元数据目录联网刷新（每 24h 一轮）：开关关闭直接跳过；
+        // 失败保留上一版目录（不退回内嵌快照，避免网络抖动把好数据换掉）。
+        {
+            let http = state.http_client.clone();
+            let store = state.alert_store.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "modelsdev-refresh",
+                interval: Duration::from_secs(86_400),
+                first_run_delay: Duration::from_secs(300),
+                run: Box::new(move || {
+                    let http = http.clone();
+                    let store = store.clone();
+                    Box::pin(async move {
+                        if !crate::config::models_dev_enabled() {
+                            return 0;
+                        }
+                        match crate::model::models_dev::refresh(&http, &store).await {
+                            Ok(count) => count as u64,
+                            Err(error) => {
+                                tracing::warn!("models.dev refresh failed: {error}");
+                                0
+                            }
+                        }
+                    })
+                }),
+            });
+        }
         // 服务器自动更新：每小时判断一次是否到配置的检查间隔；到点则拉
         // GitHub Release，开启「自动应用」时下载替换并 exec 自重启。
         {
@@ -857,7 +892,7 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         tracing::info!(
-            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, auto-update-check, log-retention-sweep, subscription-expire-reset)",
+            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-refresh, auto-update-check, log-retention-sweep, subscription-expire-reset, modelsdev-refresh)",
             scheduler.task_count()
         );
     }
@@ -1423,6 +1458,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/debug/traffic",
             get(api::admin::handle_get_debug_traffic)
                 .delete(api::admin::handle_clear_debug_traffic),
+        )
+        // models.dev 模型元数据（对照 Agent2API /api/models/metadata：开关 + 手动刷新）
+        .route(
+            "/api/models/metadata",
+            get(api::admin::handle_get_model_metadata).put(api::admin::handle_put_model_metadata),
+        )
+        .route(
+            "/api/models/metadata/refresh",
+            post(api::admin::handle_refresh_model_metadata),
         )
         // 路由策略（对照 Agent2API「设置 → 路由」：策略/粘性/断路器/调度权重）
         .route(

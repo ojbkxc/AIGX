@@ -108,6 +108,33 @@
 AIGX 在 OpenAI 协议桥接层统一过滤——判据本身足够严格，误丢风险只在「整帧只有换行」
 的正文帧上。
 
+### 9. models.dev 模型元数据（Agent2API 设置 → 网关 → models.dev 元数据）
+
+| AIGX | Agent2API 蓝本 |
+|---|---|
+| `src/model/models_dev.rs`（内嵌快照 + 联网刷新 + 内存索引） | `core/model_meta/{snapshot,refresh}.rs` |
+| `src/model/modelsdev.json`（编译期 `include_str!`，与上游同源文件） | `core/model_meta/modelsdev.json`（88KB / 518 条） |
+| 补值层 `src/model/metadata.rs::get`（覆盖 > 内置推断 > models.dev 只填空位） | `core/model_meta/fill.rs`（三层比较 + capSources） |
+| `GET/PUT /api/models/metadata` + `POST .../refresh`（`src/api/admin/model_metadata.rs`） | `api/model_meta.rs` |
+| 开关 `usage.models_dev_enabled`（默认开）+ 原子快照 | config `modelsDevEnabled`（「只有字面 false 算关」） |
+| `modelsdev-refresh` 24h（`main.rs` cron） | 共用 `task_state` 的模型目录刷新排期 |
+| `frontend/src/components/ModelMetadataPanel.tsx` | `settings-model.ts` 的 modelsDev 段 |
+
+关键语义（与上游一致）：
+
+- **只填空位**：管理员覆盖与内置推断已声明的上下文/能力绝不改写；
+  能力标签只在「默认 chat」（名字未命中任何特征）时补 vision/video/tools/reasoning。
+- **失败保留旧值**：联网刷新失败不动现有目录（内嵌快照只在 KV 无缓存的冷启动时兜底），
+  网络抖动不会把好数据换掉。
+- **索引键** `normalize_key`：模型名最后一段（截 `/` 与 `:`），只留 ASCII 字母数字并
+  小写 —— `openai/gpt-4o` → `gpt4o`，与上游 `snapshot.rs::key_of` 同口径。
+- **收录条件**：chat 且文本输出且有 limit 数值（上游 `is_chat_model` + `limit_of`）。
+- 手动刷新 5 秒合并连点（对齐上游 `MIN_INTERVAL`）。
+
+差异（有意为之）：不拉 api.json 取 reasoning effort 档位——AIGX 的 `ModelMetadata`
+没有档位字段，少一个网络依赖；上游展示 `capSources` 每键来源，AIGX 面板只展示
+目录整体状态（count/updatedAt/source），不逐模型标源。
+
 ## 后续手工同步上游的方法
 
 1. 拉上游最新代码：`git -C C:\GitHub\Agent2API-main pull`（或重新下载 zip）。

@@ -78,6 +78,8 @@ import type {
   GatewaySettingsItem,
   SecurityPolicyItem,
   DebugTrafficView,
+  ModelMetadataStatus,
+  ModelMetadataRefreshResult,
   RoutingPolicyItem,
   GatewayPromptItem,
   StorageOverviewItem,
@@ -659,6 +661,13 @@ export const api = {
     request<ApiResponse<DebugTrafficView>>('GET', `${API_BASE}/debug/traffic`),
   clearDebugTraffic: (): Promise<ApiResponse<{ cleared: number }>> =>
     request<ApiResponse<{ cleared: number }>>('DELETE', `${API_BASE}/debug/traffic`),
+  // models.dev 模型元数据（对照 Agent2API `/api/models/metadata`）：开关 + 状态 + 手动刷新。
+  getModelMetadata: (): Promise<ApiResponse<ModelMetadataStatus>> =>
+    request<ApiResponse<ModelMetadataStatus>>('GET', `${API_BASE}/models/metadata`),
+  saveModelMetadata: (enabled: boolean): Promise<ApiResponse<ModelMetadataStatus>> =>
+    request<ApiResponse<ModelMetadataStatus>>('PUT', `${API_BASE}/models/metadata`, { enabled }),
+  refreshModelMetadata: (): Promise<ApiResponse<ModelMetadataRefreshResult>> =>
+    request<ApiResponse<ModelMetadataRefreshResult>>('POST', `${API_BASE}/models/metadata/refresh`),
   // 路由策略（对照 Agent2API「设置 → 路由」；保存即热生效，无需重启）
   getRoutingPolicy: (): Promise<ApiResponse<RoutingPolicyItem>> =>
     request<ApiResponse<RoutingPolicyItem>>('GET', `${API_BASE}/routing`),
