@@ -383,6 +383,15 @@ fn paths_model_manage() -> Value {
         "/api/models/alias/remove": {
             "post": op_body("模型管理", "删除全局模型别名", "alias: string")
         },
+        "/api/models/alias/reasoning": {
+            "post": op_body("模型管理", "批量设置映射级思考等级", "aliases: string[], effort: string")
+        },
+        "/api/models/custom": {
+            "post": op_body("模型管理", "添加自定义模型登记", "provider: string, id: string")
+        },
+        "/api/models/custom/remove": {
+            "post": op_body("模型管理", "删除自定义模型登记", "provider: string, id: string")
+        },
     })
 }
 
@@ -1182,7 +1191,10 @@ mod tests {
         add("/api/mcp", &["post"]);
         add("/api/models/alias", &["post"]);
         add("/api/models/alias/remove", &["post"]);
+        add("/api/models/alias/reasoning", &["post"]);
         add("/api/models/available", &["get"]);
+        add("/api/models/custom", &["post"]);
+        add("/api/models/custom/remove", &["post"]);
         add("/api/models/manage", &["get"]);
         add("/api/models/meta", &["get"]);
         add("/api/models/meta/{model}", &["delete", "put"]);

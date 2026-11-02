@@ -245,6 +245,8 @@ pub struct AliasBody {
     /// 老前端不传这个键，行为与改造前完全一致。
     #[serde(default)]
     pub enabled: Option<bool>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 /// 别名合法性：字母数字与 `- _ . / :`，≤128（与 Agent2API `alias_valid` 同口径）。
@@ -288,6 +290,14 @@ pub async fn handle_set_alias(
         if let Err(e) = state.model_mapper.set_enabled(alias, enabled) {
             return Err(error_response(
                 &format!("保存别名开关失败：{e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
+        }
+    }
+    if let Some(effort) = &body.reasoning_effort {
+        if let Err(e) = state.model_mapper.set_reasoning(alias, Some(effort)) {
+            return Err(error_response(
+                &format!("保存映射思考等级失败：{e}"),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ));
         }
@@ -348,6 +358,101 @@ pub async fn handle_remove_alias(
     if let Err(e) = state.model_mapper.remove_custom(alias) {
         return Err(error_response(
             &format!("删除别名失败：{e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+    }
+    Ok(ok_view(&current_view(&state)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AliasReasoningBody {
+    pub aliases: Vec<String>,
+    pub effort: String,
+}
+
+pub async fn handle_set_alias_reasoning(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AliasReasoningBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let mut written = 0usize;
+    for alias in &body.aliases {
+        let a = alias.trim();
+        if a.is_empty() {
+            continue;
+        }
+        if state.model_mapper.all_mappings().contains_key(a) {
+            if let Err(e) = state.model_mapper.set_reasoning(a, Some(&body.effort)) {
+                return Err(error_response(
+                    &format!("保存映射思考等级失败：{e}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ));
+            }
+            written += 1;
+        }
+    }
+    Ok(Json(json!({
+        "success": true,
+        "data": { "written": written, "view": view_json(&current_view(&state)) }
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CustomModelBody {
+    pub provider: String,
+    pub id: String,
+}
+
+pub async fn handle_add_custom_model(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CustomModelBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let provider = body.provider.trim();
+    let id = body.id.trim();
+    if provider.is_empty() {
+        return Err(error_response("provider 不能为空", StatusCode::BAD_REQUEST));
+    }
+    if id.is_empty() {
+        return Err(error_response("模型 ID 不能为空", StatusCode::BAD_REQUEST));
+    }
+    if !alias_valid(id) {
+        return Err(error_response(
+            "模型 ID 只能包含字母、数字与 - _ . / :，且不超过 128 个字符",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if let Err(e) = state.model_mapper.add_custom_model(provider, id) {
+        return Err(error_response(
+            &format!("添加自定义模型失败：{e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+    }
+    Ok(ok_view(&current_view(&state)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CustomModelRemoveBody {
+    pub provider: String,
+    pub id: String,
+}
+
+pub async fn handle_remove_custom_model(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CustomModelRemoveBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let provider = body.provider.trim();
+    let id = body.id.trim();
+    if provider.is_empty() || id.is_empty() {
+        return Err(error_response("provider 与模型 ID 不能为空", StatusCode::BAD_REQUEST));
+    }
+    if let Err(e) = state.model_mapper.remove_custom_model(provider, id) {
+        return Err(error_response(
+            &format!("删除自定义模型失败：{e}"),
             StatusCode::INTERNAL_SERVER_ERROR,
         ));
     }

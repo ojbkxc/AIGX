@@ -27,6 +27,7 @@ pub mod prompts;
 pub mod proxy_pool_api;
 pub mod redemptions;
 pub mod routing;
+pub mod scheduled_tasks;
 pub mod security;
 pub mod settings;
 pub mod subscriptions;
@@ -76,8 +77,9 @@ pub use pricing::{
 
 // 统一模型管理（渠道模型 + 账号池模型聚合视图，参照 Agent2API 模型管理）
 pub use model_manage::{
-    handle_manage_view, handle_remove_alias, handle_remove_price, handle_set_alias,
-    handle_set_alias_state, handle_set_state, handle_upsert_model_price,
+    handle_add_custom_model, handle_manage_view, handle_remove_alias, handle_remove_custom_model,
+    handle_remove_price, handle_set_alias, handle_set_alias_reasoning, handle_set_alias_state,
+    handle_set_state, handle_upsert_model_price,
 };
 // 模型测试（钉 provider/账号/渠道的真实链路最小对话，对照 Agent2API model_test）
 pub use model_test::handle_model_test;

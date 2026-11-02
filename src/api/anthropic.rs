@@ -435,7 +435,7 @@ pub async fn handle_messages(
         // Anthropic `tool_choice` 原样透传（上游 Anthropic bridge 在 build_body
         // 里已识别 Anthropic 形状的 tool_choice）。同时兼容 OpenAI 形状。
         tool_choice: body.get("tool_choice").cloned(),
-        reasoning_effort: None,
+        reasoning_effort: state.model_mapper.reasoning_for(&model),
         web_search_options: None,
         extra: body.get("metadata").cloned(),
     };

@@ -1401,6 +1401,18 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/models/alias/remove",
             post(api::admin::handle_remove_alias),
         )
+        .route(
+            "/api/models/alias/reasoning",
+            post(api::admin::handle_set_alias_reasoning),
+        )
+        .route(
+            "/api/models/custom",
+            post(api::admin::handle_add_custom_model),
+        )
+        .route(
+            "/api/models/custom/remove",
+            post(api::admin::handle_remove_custom_model),
+        )
         // P1 模型元信息覆盖管理
         .route("/api/models/meta", get(api::admin::handle_model_meta_list))
         .route(

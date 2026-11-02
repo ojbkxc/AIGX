@@ -1,5 +1,6 @@
 use anyhow::Result;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -27,17 +28,46 @@ pub struct ModelMapper {
     /// 这类只读消费者的返回类型被迫改变。用一张并行的禁用集，
     /// 老存储原样可读、老调用点零改动。
     disabled: RwLock<std::collections::HashSet<String>>,
+    /// 映射级思考等级（alias → reasoning_effort）。
+    ///
+    /// 同样走平行集策略：老存储没有这个键，load 读不到就当空表。
+    /// 三态协议（与 Agent2API 同口径）：
+    /// - 键缺失 → 不动已有等级
+    /// - 空串 / null → 清空
+    /// - 非空字符串 → 设置
+    reasoning: RwLock<HashMap<String, String>>,
+    /// 手动登记的自定义模型（provider, model_id）。
+    ///
+    /// 管理员在模型管理页手动添加、上游渠道未发现（或暂未接入渠道）的模型。
+    /// 与渠道/账号发现的模型一起出现在清单里，可定价/测试/启停。
+    /// 不编造能力位元数据 —— 能力位由 models.dev 元数据或管理员覆盖决定。
+    custom_models: RwLock<Vec<CustomModelEntry>>,
     store: Arc<FileStore>,
 }
 
 /// 禁用集在存储里的键（与 `model_custom_map` 并列）。
 const DISABLED_KEY: &str = "model_custom_map_disabled";
 
+/// 映射级思考等级在存储里的键。
+const REASONING_KEY: &str = "model_custom_map_reasoning";
+
+/// 自定义模型登记在存储里的键。
+const CUSTOM_MODELS_KEY: &str = "model_custom_models";
+
+/// 一条自定义模型登记：`(provider, model_id)`。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct CustomModelEntry {
+    pub provider: String,
+    pub id: String,
+}
+
 impl ModelMapper {
     pub fn new(store: Arc<FileStore>) -> Self {
         Self {
             custom_map: RwLock::new(HashMap::new()),
             disabled: RwLock::new(std::collections::HashSet::new()),
+            reasoning: RwLock::new(HashMap::new()),
+            custom_models: RwLock::new(Vec::new()),
             store,
         }
     }
@@ -61,6 +91,18 @@ impl ModelMapper {
             disabled.clear();
             disabled.extend(off);
         }
+        // 映射级思考等级同样是后加的：老存储没有这个键，读不到就当空表
+        if let Some(rs) = self.store.get::<HashMap<String, String>>(REASONING_KEY)? {
+            let mut reasoning = self.reasoning.write();
+            reasoning.clear();
+            reasoning.extend(rs);
+        }
+        // 自定义模型登记同样是后加的：老存储没有这个键，读不到就当空表
+        if let Some(cm) = self.store.get::<Vec<CustomModelEntry>>(CUSTOM_MODELS_KEY)? {
+            let mut custom_models = self.custom_models.write();
+            custom_models.clear();
+            custom_models.extend(cm);
+        }
         Ok(())
     }
 
@@ -69,7 +111,11 @@ impl ModelMapper {
         let custom = self.custom_map.read().clone();
         self.store.put("model_custom_map", &custom)?;
         let disabled = self.disabled.read().clone();
-        self.store.put(DISABLED_KEY, &disabled)
+        self.store.put(DISABLED_KEY, &disabled)?;
+        let reasoning = self.reasoning.read().clone();
+        self.store.put(REASONING_KEY, &reasoning)?;
+        let custom_models = self.custom_models.read().clone();
+        self.store.put(CUSTOM_MODELS_KEY, &custom_models)
     }
 
     /// 解析模型名：查自定义映射，命中则改名，否则**原样透传**。
@@ -138,6 +184,88 @@ impl ModelMapper {
         self.disabled.read().clone()
     }
 
+    /// 全部映射级思考等级（alias → effort），管理面回读用。
+    pub fn all_reasoning(&self) -> HashMap<String, String> {
+        self.reasoning.read().clone()
+    }
+
+    /// 查某模型名的映射级思考等级。
+    ///
+    /// 仅当 `model` 是一条**已启用**的别名且配了思考等级时返回 `Some`。
+    /// 禁用别名不注入（与 `resolve` 同口径：关掉的映射不参与改名）。
+    ///
+    /// 读锁顺序：custom → disabled → reasoning，与写入路径一致，不会死锁。
+    pub fn reasoning_for(&self, model: &str) -> Option<String> {
+        if model.is_empty() {
+            return None;
+        }
+        let custom = self.custom_map.read();
+        if !custom.contains_key(model) {
+            return None;
+        }
+        if self.disabled.read().contains(model) {
+            return None;
+        }
+        self.reasoning.read().get(model).cloned()
+    }
+
+    /// 设置 / 清除某别名的映射级思考等级（三态协议）。
+    ///
+    /// - `Some(非空)` → 设置
+    /// - `Some(空串)` 或 `None` → 清除（不动已有值）
+    ///
+    /// 调用方（admin handler）负责在「键缺失」时不调用本方法。
+    pub fn set_reasoning(&self, alias: &str, effort: Option<&str>) -> Result<()> {
+        let mut reasoning = self.reasoning.write();
+        match effort {
+            Some(e) if !e.is_empty() => {
+                reasoning.insert(alias.to_string(), e.to_string());
+            }
+            _ => {
+                reasoning.remove(alias);
+            }
+        }
+        self.save()
+    }
+
+    /// 全部自定义模型登记（管理面 / 清单拼接用）。
+    pub fn custom_models(&self) -> Vec<CustomModelEntry> {
+        self.custom_models.read().clone()
+    }
+
+    /// 添加一条自定义模型登记。已存在的 (provider, id) 静默跳过。
+    pub fn add_custom_model(&self, provider: &str, id: &str) -> Result<()> {
+        let provider = provider.trim();
+        let id = id.trim();
+        if provider.is_empty() || id.is_empty() {
+            return Ok(());
+        }
+        let entry = CustomModelEntry {
+            provider: provider.to_string(),
+            id: id.to_string(),
+        };
+        let mut list = self.custom_models.write();
+        if !list.contains(&entry) {
+            list.push(entry);
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    /// 删除一条自定义模型登记。不存在时静默返回。
+    pub fn remove_custom_model(&self, provider: &str, id: &str) -> Result<()> {
+        let entry = CustomModelEntry {
+            provider: provider.to_string(),
+            id: id.to_string(),
+        };
+        let mut list = self.custom_models.write();
+        if let Some(pos) = list.iter().position(|e| *e == entry) {
+            list.remove(pos);
+            self.save()?;
+        }
+        Ok(())
+    }
+
     /// 设置自定义映射
     pub fn set_custom(&self, source: String, target: String) -> Result<()> {
         self.custom_map.write().insert(source, target);
@@ -172,6 +300,8 @@ impl ModelMapper {
         self.custom_map.write().remove(source);
         // 连带清掉禁用标记，否则同名别名将来重新建出来会继承旧状态
         self.disabled.write().remove(source);
+        // 连带清掉思考等级，否则同名别名重建会继承旧等级
+        self.reasoning.write().remove(source);
         self.save()
     }
 
@@ -179,6 +309,8 @@ impl ModelMapper {
     pub fn reset(&self) -> Result<()> {
         self.custom_map.write().clear();
         self.disabled.write().clear();
+        self.reasoning.write().clear();
+        self.custom_models.write().clear();
         self.save()
     }
 }
@@ -328,5 +460,41 @@ mod tests {
         m.load().unwrap();
         assert_eq!(m.resolve("old"), "new");
         assert!(m.is_enabled("old"));
+    }
+
+    #[test]
+    fn mapping_reasoning_inject_and_clear() {
+        let m = mapper();
+        m.set_custom("alias-1".into(), "gpt-4o".into()).unwrap();
+        assert_eq!(m.reasoning_for("alias-1"), None);
+        m.set_reasoning("alias-1", Some("high")).unwrap();
+        assert_eq!(m.reasoning_for("alias-1").as_deref(), Some("high"));
+        assert_eq!(m.reasoning_for("gpt-4o"), None);
+        m.set_reasoning("alias-1", Some("")).unwrap();
+        assert_eq!(m.reasoning_for("alias-1"), None);
+    }
+
+    #[test]
+    fn disabled_alias_does_not_inject_reasoning() {
+        let m = mapper();
+        m.set_custom("alias-2".into(), "gpt-4o".into()).unwrap();
+        m.set_reasoning("alias-2", Some("medium")).unwrap();
+        assert_eq!(m.reasoning_for("alias-2").as_deref(), Some("medium"));
+        m.set_enabled("alias-2", false).unwrap();
+        assert_eq!(m.reasoning_for("alias-2"), None);
+        m.set_enabled("alias-2", true).unwrap();
+        assert_eq!(m.reasoning_for("alias-2").as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn custom_models_add_remove_and_persist() {
+        let m = mapper();
+        m.add_custom_model("openai", "my-model").unwrap();
+        m.add_custom_model("anthropic", "claude-x").unwrap();
+        assert_eq!(m.custom_models().len(), 2);
+        m.add_custom_model("openai", "my-model").unwrap();
+        assert_eq!(m.custom_models().len(), 2);
+        m.remove_custom_model("openai", "my-model").unwrap();
+        assert_eq!(m.custom_models().len(), 1);
     }
 }

@@ -183,6 +183,9 @@ pub struct AliasEntry {
     pub target: String,
     /// 是否启用（关掉的别名仍出现在清单里，但不参与改名）
     pub enabled: bool,
+    /// 映射级思考等级（`reasoning_for` 的快照）。None = 未设置。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// 左栏分组。
@@ -331,6 +334,15 @@ pub fn build_view(
         }
     }
 
+    // 自定义模型登记（管理员手动添加、上游未发现的模型）
+    for entry in mapper.custom_models() {
+        if entry.id.is_empty() {
+            continue;
+        }
+        rows.entry((entry.provider.clone(), entry.id.clone()))
+            .or_insert_with(|| new_row(&entry.provider, &entry.id, metadata, pricing, mapper));
+    }
+
     // 启停状态 + 分组统计
     let mut groups: BTreeMap<String, ProviderGroup> = BTreeMap::new();
     let mut models: Vec<ManageModel> = Vec::with_capacity(rows.len());
@@ -386,6 +398,7 @@ fn new_row(
     let model_ratio = pricing.get_ratios().model_ratio(model);
     let all_mappings = mapper.all_mappings();
     let disabled = mapper.disabled_aliases();
+    let all_reasoning = mapper.all_reasoning();
     let alias_entries: Vec<AliasEntry> = all_mappings
         .iter()
         .filter(|(_, target)| *target == model)
@@ -393,6 +406,7 @@ fn new_row(
             alias: alias.clone(),
             target: target.clone(),
             enabled: !disabled.contains(alias),
+            reasoning_effort: all_reasoning.get(alias).cloned(),
         })
         .collect();
     let mut aliases: Vec<String> = alias_entries.iter().map(|e| e.alias.clone()).collect();

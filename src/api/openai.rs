@@ -202,6 +202,8 @@ pub struct AppState {
     pub prompt_source_cache: Arc<crate::api::admin::prompts::PromptSourceCache>,
     /// 服务器自动更新管理器（Release 检测 / 下载 / 原地替换 / 自重启）。
     pub update: crate::update::UpdateManager,
+    /// 间隔型定时任务的排期状态存储（凭证维护/模型刷新/版本检查的跨重启排期）。
+    pub scheduled_task_store: Arc<crate::storage::FileStore>,
 }
 
 impl AppState {
@@ -1786,7 +1788,8 @@ pub async fn handle_chat_completions(
         reasoning_effort: body
             .get("reasoning_effort")
             .and_then(|v| v.as_str())
-            .map(String::from),
+            .map(String::from)
+            .or_else(|| state.model_mapper.reasoning_for(&model)),
         web_search_options: body.get("web_search_options").cloned(),
         extra: None,
     };
@@ -5041,6 +5044,13 @@ pub async fn handle_list_models(
         if seen.insert(name.clone()) {
             model_list.push(build_entry(name, None));
         }
+    }
+    for entry in state.model_mapper.custom_models() {
+        if entry.id.is_empty() || !seen.insert(entry.id.clone()) {
+            continue;
+        }
+        let owned_by = crate::model::metadata::owned_by_for_channel_type(&entry.provider);
+        model_list.push(build_entry(&entry.id, Some(owned_by)));
     }
 
     Ok(Json(serde_json::json!({
