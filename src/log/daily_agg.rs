@@ -159,8 +159,11 @@ pub struct UserDailyRow {
 }
 
 /// 回填标记值：as_of 记录回填覆盖到的最后一天（不含今天）。
+///
+/// `pub`：`DailyAggStore::backfill_marker`（pub fn）返回它，private 类型会触发
+/// `private_interfaces`。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct BackfillMarker {
+pub struct BackfillMarker {
     as_of: String,
 }
 
