@@ -1863,6 +1863,30 @@ pub async fn handle_import_account_sessions_json(
                 continue;
             }
         }
+        // 账号限制规则（余额 / Token 两类）：从 entry 解析并按 create 同口径校验
+        // （validate_limiter_rules），非法规则整条拒绝——与 create 的「半保存比
+        // 不保存更难排查」一致。JSON null / 缺省 = 不带规则。
+        let entry_limiters = match entry.get("limiters").filter(|v| !v.is_null()) {
+            Some(v) => match serde_json::from_value::<
+                Vec<crate::account_session::model::AccountLimiterRule>,
+            >(v.clone())
+            {
+                Ok(rules) => {
+                    match crate::account_session::model::validate_limiter_rules(&rules) {
+                        Ok(()) => Some(rules),
+                        Err(msg) => {
+                            errors.push(format!("{name}: {msg}"));
+                            continue;
+                        }
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!("{name}: limiters 解析失败：{e}"));
+                    continue;
+                }
+            },
+            None => None,
+        };
         // 复用 create 的字段归一化：构造 AccountSessionRequest 走 apply_request
         let req = AccountSessionRequest {
             channel_id: channel.id.clone(),
@@ -1925,6 +1949,7 @@ pub async fn handle_import_account_sessions_json(
             }),
             expires_at: entry.get("expires_at").and_then(|v| v.as_i64()),
             usage_query_interval_secs: None,
+            limiters: entry_limiters,
         };
         let mut session = AccountSession::new(channel.id.clone(), String::new());
         session = apply_request(session, &req);
