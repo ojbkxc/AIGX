@@ -82,8 +82,8 @@
     font-size: 11px;
     font-weight: 500;
     white-space: nowrap;
-    color: var(--text-main);
-    background: var(--card-bg);
+    color: var(--text-1);
+    background: var(--surface-3);
     backdrop-filter: blur(var(--glass-blur));
     -webkit-backdrop-filter: blur(var(--glass-blur));
     border: 1px solid var(--border-color);
@@ -121,11 +121,22 @@
 :root {
   /* 设计令牌对齐 open-webui：中性灰度色板 + 现代圆角设计 */
   --bg-color: #ffffff;
-  --card-bg: #ffffff;
+  /* —— 层级 token（三档细分）：surface 背景层 / text 文字层 / control 输入控件层 / rail 侧栏 —— */
+  --surface-2: #fafafa;   /* 面板/区块层背景 */
+  --surface-3: #ffffff;   /* 卡片/弹窗/浮层背景 */
+  --text-1: #000000;      /* 主文本 */
+  --text-2: #828282;      /* 次要文本 */
+  --text-3: #b0b0b0;      /* 弱化文本 */
+  --control-bg: #ffffff;      /* 输入控件背景 */
+  --control-border: #d4d4d4;  /* 输入控件描边 */
+  --control-hover: #f0f0f0;   /* 输入控件悬停背景 */
+  --rail-bg: #fafafa;     /* 侧边栏背景 */
+  /* 旧 token 收口到层级 token（存量引用兼容层，新代码优先用上面的语义名） */
+  --card-bg: var(--surface-3);
   --border-color: #e5e5e5;
-  --text-main: #000000;
-  --text-muted: #828282;
-  --text-faint: #b0b0b0;
+  --text-main: var(--text-1);
+  --text-muted: var(--text-2);
+  --text-faint: var(--text-3);
   --primary-gradient: #000000;
   --accent-color: #000000;
   --primary-color: #000000;
@@ -135,8 +146,8 @@
   --amber: #f59e0b;
   --coral: #ef4444;
   --violet: #8b5cf6;
-  --input-bg: #ffffff;
-  --input-border: #d4d4d4;
+  --input-bg: var(--control-bg);
+  --input-border: var(--control-border);
   --input-text: #000000;
   --btn-secondary-bg: #f5f5f5;
   --btn-secondary-hover: #e5e5e5;
@@ -147,10 +158,10 @@
   --success-color: #10b981;
   --warning-color: #f59e0b;
   --danger-color: #ef4444;
-  --sidebar-bg: #fafafa;
+  --sidebar-bg: var(--rail-bg);
   --sidebar-menu-hover: #f0f0f0;
   --table-header-bg: #f5f5f5;
-  --section-item-bg: #fafafa;
+  --section-item-bg: var(--surface-2);
   --code-bg: #f5f5f5;
   --code-color: #1a1a1a;
   --code-border: #e5e5e5;
@@ -167,7 +178,7 @@
   --line-strong: #d4d4d4;
   --shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
   --hover-bg: rgba(0, 0, 0, 0.04);
-  --surface-bg: #fafafa;
+  --surface-bg: var(--surface-2);
   --danger-soft: rgba(239, 68, 68, 0.1);
   --danger: #ef4444;
   /* 语义色文字版（亮色主题用深色变体，避免彩色小字在白底上看不清） */
@@ -189,24 +200,34 @@
 
 :root[data-theme="dark"] {
   --bg-color: #171717;
-  --card-bg: #272727;
+  /* 层级 token（与浅色块成对定义，层级语义见 :root 注释） */
+  --surface-2: #1f1f1f;
+  --surface-3: #272727;
+  --text-1: #eeeeee;
+  --text-2: #a3a3a3;
+  --text-3: #737373;
+  --control-bg: #1f1f1f;
+  --control-border: #525252;
+  --control-hover: #3f3f3f;
+  --rail-bg: #1f1f1f;
+  --card-bg: var(--surface-3);
   --border-color: #3f3f3f;
-  --text-main: #eeeeee;
-  --text-muted: #a3a3a3;
-  --text-faint: #737373;
+  --text-main: var(--text-1);
+  --text-muted: var(--text-2);
+  --text-faint: var(--text-3);
   --primary-gradient: #ffffff;
   --accent-color: #ffffff;
   --primary-color: #ffffff;
   --primary-hover: #e5e5e5;
-  --input-bg: #1f1f1f;
-  --input-border: #525252;
+  --input-bg: var(--control-bg);
+  --input-border: var(--control-border);
   --input-text: #eeeeee;
   --btn-secondary-bg: #272727;
   --btn-secondary-hover: #3f3f3f;
   --btn-secondary-text: #eeeeee;
   --modal-overlay-bg: rgba(0, 0, 0, 0.7);
   --card-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
-  --sidebar-bg: #1f1f1f;
+  --sidebar-bg: var(--rail-bg);
   --sidebar-menu-hover: #272727;
   --table-header-bg: #1f1f1f;
   --section-item-bg: #1f1f1f;
@@ -217,7 +238,7 @@
   --accent-contrast: #171717;
   --line-strong: #525252;
   --hover-bg: rgba(255, 255, 255, 0.08);
-  --surface-bg: #1f1f1f;
+  --surface-bg: var(--surface-2);
   --danger-soft: rgba(239, 68, 68, 0.18);
   --danger: #ef4444;
   /* 暗色主题换成浅色变体（深色语义色在深底上不可读） */

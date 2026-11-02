@@ -25,7 +25,7 @@ import {
 import { api } from '../api';
 
 import { useToast } from '../components/Toast';
-import { Loading, EmptyState, Switch, Pagination, Tabs, Combobox } from '../components/ui';
+import { Loading, EmptyState, Switch, Pagination, Tabs, Combobox, Tooltip } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ModelTestDialog from '../components/ModelTestDialog';
 import { fmtCompact } from '../lib/utils';
@@ -1416,23 +1416,21 @@ export default function ModelManage(): JSX.Element {
           <td key={col} className={`mm-c-source ta-${colAlign.source}`}>
             <div className="mm-sources">
               {row.sources.slice(0, 3).map((s, i) => (
-                <span
+                <Tooltip
                   key={`${s.kind}-${s.channel_id}-${s.account_id ?? ''}-${i}`}
-                  className={`mm-src-tag${s.kind === 'account' ? '' : ' provider'}`}
-                  title={`${s.kind === 'account' ? t('账号') : t('渠道')}：${s.name}`}
+                  label={`${s.kind === 'account' ? t('账号') : t('渠道')}：${s.name}`}
                 >
-                  {/* 来源色点：远程蓝 / 内置灰 / 手动琥珀（Agent2API .src i 三态） */}
-                  <i className={srcDotClass(s)} />
-                  {s.name}
-                </span>
+                  <span className={`mm-src-tag${s.kind === 'account' ? '' : ' provider'}`}>
+                    {/* 来源色点：远程蓝 / 内置灰 / 手动琥珀（Agent2API .src i 三态） */}
+                    <i className={srcDotClass(s)} />
+                    {s.name}
+                  </span>
+                </Tooltip>
               ))}
               {row.sources.length > 3 && (
-                <span
-                  className="mm-src-more"
-                  title={row.sources.map((s) => s.name).join('\n')}
-                >
-                  +{row.sources.length - 3}
-                </span>
+                <Tooltip label={row.sources.map((s) => s.name).join('\n')}>
+                  <span className="mm-src-more">+{row.sources.length - 3}</span>
+                </Tooltip>
               )}
               {row.sources.length === 0 && <span className="mm-src-none">—</span>}
             </div>
@@ -1451,10 +1449,9 @@ export default function ModelManage(): JSX.Element {
                 const state = capDotState(row.capabilities, c.match);
                 const Icon = c.icon;
                 return (
-                  <span
+                  <Tooltip
                     key={c.key}
-                    className={`mm-cap-dot${state ? ` ${state}` : ''}`}
-                    title={`${t(c.label)}：${
+                    label={`${t(c.label)}：${
                       state === 'on'
                         ? t('可用')
                         : state === 'off'
@@ -1462,20 +1459,23 @@ export default function ModelManage(): JSX.Element {
                           : t('未测')
                     }`}
                   >
-                    <Icon size={10} />
-                  </span>
+                    <span className={`mm-cap-dot${state ? ` ${state}` : ''}`}>
+                      <Icon size={10} />
+                    </span>
+                  </Tooltip>
                 );
               })}
               {/* models.dev 补齐标记：能力来自社区目录补齐时加内侧描边小点 */}
               {row.sources.some((s) => s.source === 'modelsdev') && (
                 <span className="mm-cap-mark" title={t('能力由 models.dev 社区目录补齐')} />
               )}
-              <span
-                className={`mm-cap-ctx${row.context_length == null ? '' : ' filled'}`}
-                title={row.context_length == null ? t('上下文长度未声明') : `${row.context_length}`}
+              <Tooltip
+                label={row.context_length == null ? t('上下文长度未声明') : `${row.context_length}`}
               >
-                {row.context_length ? fmtCompact(row.context_length) : '—'}
-              </span>
+                <span className={`mm-cap-ctx${row.context_length == null ? '' : ' filled'}`}>
+                  {row.context_length ? fmtCompact(row.context_length) : '—'}
+                </span>
+              </Tooltip>
             </button>
           </td>
         );
@@ -1723,12 +1723,16 @@ export default function ModelManage(): JSX.Element {
                       </td>
                       <td>
                         <div className="mm-actions">
-                          <button type="button" className="mm-act-btn" onClick={() => openMetaEdit(model)} title={t('编辑')}>
-                            <Pencil size={11} />
-                          </button>
-                          <button type="button" className="mm-act-btn danger icon-only" onClick={() => removeMeta(model)} title={t('删除')}>
-                            <Trash2 size={11} />
-                          </button>
+                          <Tooltip label={t('编辑')}>
+                            <button type="button" className="mm-act-btn" onClick={() => openMetaEdit(model)}>
+                              <Pencil size={11} />
+                            </button>
+                          </Tooltip>
+                          <Tooltip label={t('删除')}>
+                            <button type="button" className="mm-act-btn danger icon-only" onClick={() => removeMeta(model)}>
+                              <Trash2 size={11} />
+                            </button>
+                          </Tooltip>
                         </div>
                       </td>
                     </tr>

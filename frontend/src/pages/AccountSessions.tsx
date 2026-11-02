@@ -11,7 +11,7 @@ import { useToast } from '../components/Toast';
 import AddAccountDialog from '../components/AddAccountDialog';
 import ProxySelector from '../components/ProxySelector';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, EmptyState, Input, Loading, Select, SkeletonTable, Switch, Tabs, Textarea } from '../components/ui';
+import { Button, Card, EmptyState, Input, Loading, Select, SkeletonTable, Switch, Tabs, Textarea, Tooltip } from '../components/ui';
 import type {
   AccountBalance,
   AccountLimiterRule,
@@ -1601,10 +1601,10 @@ export default function AccountSessions(): JSX.Element {
               const whole = active.some(([model]) => model === '*');
               const open = cooldownOpenId === s.id;
               return (
+              <Tooltip label={t('点击展开完整冷却明细')}>
                 <button
                   type="button"
                   className={`as-limits-badge${open ? ' is-open' : ''}`}
-                  title={t('点击展开完整冷却明细')}
                   onClick={() => setCooldownOpenId(open ? null : s.id)}
                 >
                   <span className="as-limits-main">
@@ -1617,6 +1617,7 @@ export default function AccountSessions(): JSX.Element {
                     {t('最早 {{time}} 恢复', { time: fmtDuration(active[0][1]) })}
                   </span>
                 </button>
+              </Tooltip>
               );
             })()}
           </td>
@@ -1643,14 +1644,15 @@ export default function AccountSessions(): JSX.Element {
               >
                 {syncingId === s.id ? <Loader2 size={13} className="spin" /> : <Download size={13} />}
               </button>
-              <button
-                type="button"
-                className="as-act"
-                onClick={() => openEdit(s)}
-                title={t('编辑')}
-              >
-                <Pencil size={13} />
-              </button>
+              <Tooltip label={t('编辑')}>
+                <button
+                  type="button"
+                  className="as-act"
+                  onClick={() => openEdit(s)}
+                >
+                  <Pencil size={13} />
+                </button>
+              </Tooltip>
               {/* 重置冷却：单模型直接清；多模型先弹菜单按模型挑（对齐 Agent2API 可按模型清除） */}
               <div
                 className="as-act-wrap"
@@ -1708,14 +1710,15 @@ export default function AccountSessions(): JSX.Element {
               >
                 {refreshingId === s.id ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}
               </button>
-              <button
-                type="button"
-                className="as-act danger"
-                onClick={() => handleDelete(s)}
-                title={t('删除')}
-              >
-                <Trash2 size={13} />
-              </button>
+              <Tooltip label={t('删除')}>
+                <button
+                  type="button"
+                  className="as-act danger"
+                  onClick={() => handleDelete(s)}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </Tooltip>
             </div>
           </td>
         );
@@ -1791,15 +1794,16 @@ export default function AccountSessions(): JSX.Element {
         actions={
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <div className="as-colset" ref={colPanelRef}>
-              <button
-                type="button"
-                className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
-                onClick={() => setColPanelOpen((v) => !v)}
-                title={t('列设置（显隐 / 列宽拖动）')}
-                aria-label={t('列设置')}
-              >
-                <Columns3 size={14} />
-              </button>
+              <Tooltip label={t('列设置（显隐 / 列宽拖动）')}>
+                <button
+                  type="button"
+                  className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                  onClick={() => setColPanelOpen((v) => !v)}
+                  aria-label={t('列设置')}
+                >
+                  <Columns3 size={14} />
+                </button>
+              </Tooltip>
               {colPanelOpen && (
                 <div className="as-colset-panel">
                   <div className="as-colset-head">
