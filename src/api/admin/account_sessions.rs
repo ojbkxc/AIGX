@@ -1867,6 +1867,7 @@ pub async fn handle_import_account_sessions_json(
                 })
             }),
             expires_at: entry.get("expires_at").and_then(|v| v.as_i64()),
+            usage_query_interval_secs: None,
         };
         let mut session = AccountSession::new(channel.id.clone(), String::new());
         session = apply_request(session, &req);

@@ -11,6 +11,7 @@
 //!   所以按 id 重读后再补两个字段；
 //! - 只处理 `supports_balance` 的家，其余账号即使配了间隔也跳过（不发无意义请求）。
 
+use futures::StreamExt;
 use reqwest::Client;
 
 use super::balance::{self, AccountBalance};
