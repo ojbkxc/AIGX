@@ -377,11 +377,11 @@ fn delta_chunk(
 }
 
 fn map_finish(raw: &str) -> FinishReason {
+    if crate::bridge::is_length_finish(raw) {
+        return FinishReason::Length;
+    }
     match raw.trim().to_ascii_lowercase().as_str() {
         "tool-calls" | "tool_calls" | "tool_use" => FinishReason::ToolCalls,
-        "length" | "max_tokens" | "max_output_tokens" | "model_context_window_exceeded" => {
-            FinishReason::Length
-        }
         _ => FinishReason::Stop,
     }
 }

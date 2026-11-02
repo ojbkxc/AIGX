@@ -908,9 +908,10 @@ pub(crate) fn normalize_base_url(base_url: String) -> String {
 }
 
 fn parse_finish_reason(s: &str) -> FinishReason {
+    if is_length_finish(s) {
+        return FinishReason::Length;
+    }
     match s {
-        "stop" => FinishReason::Stop,
-        "length" => FinishReason::Length,
         "content_filter" => FinishReason::ContentFilter,
         "tool_calls" => FinishReason::ToolCalls,
         _ => FinishReason::Stop,

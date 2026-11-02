@@ -177,6 +177,28 @@ pub enum FinishReason {
     ToolCalls,
 }
 
+/// `finish_reason` 是否属于「输出预算用尽」一族（大小写不敏感）。
+///
+/// 别名表与 Agent2API `continuation::LENGTH_FINISH_ALIASES` 逐字对应
+/// （8 个上游写法）：少认一个 = 那一族的截断整族漏掉，续写判据看不见它。
+/// 各桥的 `map_finish` 都先过这里，命中即 `FinishReason::Length`。
+pub fn is_length_finish(raw: &str) -> bool {
+    const LENGTH_FINISH_ALIASES: &[&str] = &[
+        "length",
+        "max_tokens",
+        "max_output_tokens",
+        "max_token",
+        "token_limit",
+        "model_context_window_exceeded",
+        "context_window_exceeded",
+        "context_length_exceeded",
+    ];
+    let trimmed = raw.trim();
+    LENGTH_FINISH_ALIASES
+        .iter()
+        .any(|alias| alias.eq_ignore_ascii_case(trimmed))
+}
+
 /// 聊天响应
 #[derive(Debug, Clone)]
 pub struct ChatResponse {

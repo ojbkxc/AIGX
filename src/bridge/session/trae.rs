@@ -363,8 +363,10 @@ fn finish_chunk(id: &str, model: &str, usage: Option<UsageStats>) -> ChatChunk {
 }
 
 fn map_finish(raw: &str) -> FinishReason {
+    if crate::bridge::is_length_finish(raw) {
+        return FinishReason::Length;
+    }
     match raw.trim().to_ascii_lowercase().as_str() {
-        "length" | "max_tokens" => FinishReason::Length,
         "tool_calls" | "tool-calls" => FinishReason::ToolCalls,
         "content_filter" | "safety" => FinishReason::ContentFilter,
         _ => FinishReason::Stop,

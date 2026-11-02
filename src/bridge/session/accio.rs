@@ -355,8 +355,10 @@ fn text_of(value: &Value, camel: &str, snake: &str) -> String {
 }
 
 fn map_finish_reason(raw: &str) -> FinishReason {
+    if crate::bridge::is_length_finish(raw) {
+        return FinishReason::Length;
+    }
     match raw.trim().to_ascii_uppercase().as_str() {
-        "MAX_TOKENS" | "LENGTH" => FinishReason::Length,
         "SAFETY" | "CONTENT_FILTER" => FinishReason::ContentFilter,
         _ => FinishReason::Stop,
     }

@@ -441,8 +441,10 @@ fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
 }
 
 fn map_finish(raw: &str) -> FinishReason {
+    if crate::bridge::is_length_finish(raw) {
+        return FinishReason::Length;
+    }
     match raw.trim().to_ascii_lowercase().as_str() {
-        "length" | "max_tokens" => FinishReason::Length,
         "tool_calls" | "tool-calls" => FinishReason::ToolCalls,
         "content_filter" => FinishReason::ContentFilter,
         _ => FinishReason::Stop,

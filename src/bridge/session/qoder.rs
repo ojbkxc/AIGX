@@ -470,8 +470,11 @@ fn chunk_to_delta(chunk: &Value, id: &str, model: &str) -> Decoded {
 }
 
 fn map_finish(raw: &str) -> FinishReason {
+    // length 族先走共享别名表（续写判据依赖它，见 crate::bridge::is_length_finish）
+    if crate::bridge::is_length_finish(raw) {
+        return FinishReason::Length;
+    }
     match raw.trim().to_ascii_lowercase().as_str() {
-        "length" | "max_tokens" => FinishReason::Length,
         "tool_calls" | "tool-calls" => FinishReason::ToolCalls,
         "content_filter" | "safety" => FinishReason::ContentFilter,
         _ => FinishReason::Stop,

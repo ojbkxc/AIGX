@@ -322,8 +322,10 @@ fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
 }
 
 fn map_finish_reason(raw: &str) -> FinishReason {
+    if crate::bridge::is_length_finish(raw) {
+        return FinishReason::Length;
+    }
     match raw.trim().to_ascii_uppercase().as_str() {
-        "MAX_TOKENS" => FinishReason::Length,
         "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" => FinishReason::ContentFilter,
         _ => FinishReason::Stop,
     }
