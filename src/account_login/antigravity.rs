@@ -28,7 +28,7 @@ const CLIENT_ID_PARTS: [&str; 2] = [
 ];
 const CLIENT_SECRET_PARTS: [&str; 2] = ["GOCSPX-K58FWR486LdLJ1mLB8", "sXC4z6qDAf"];
 
-fn client_id() -> String {
+pub(crate) fn client_id() -> String {
     std::env::var("ANTIGRAVITY_CLIENT_ID")
         .ok()
         .map(|value| value.trim().to_string())
@@ -36,7 +36,7 @@ fn client_id() -> String {
         .unwrap_or_else(|| CLIENT_ID_PARTS.concat())
 }
 
-fn client_secret() -> String {
+pub(crate) fn client_secret() -> String {
     std::env::var("ANTIGRAVITY_CLIENT_SECRET")
         .ok()
         .map(|value| value.trim().to_string())

@@ -14,7 +14,7 @@
 //! 取消/超时/完成后保留 10 分钟，取任务时顺手清过期项。
 
 mod accio;
-mod antigravity;
+pub(crate) mod antigravity;
 mod catpaw;
 mod cline;
 pub(crate) mod codearts;
