@@ -1871,15 +1871,13 @@ pub async fn handle_import_account_sessions_json(
                 Vec<crate::account_session::model::AccountLimiterRule>,
             >(v.clone())
             {
-                Ok(rules) => {
-                    match crate::account_session::model::validate_limiter_rules(&rules) {
-                        Ok(()) => Some(rules),
-                        Err(msg) => {
-                            errors.push(format!("{name}: {msg}"));
-                            continue;
-                        }
+                Ok(rules) => match crate::account_session::model::validate_limiter_rules(&rules) {
+                    Ok(()) => Some(rules),
+                    Err(msg) => {
+                        errors.push(format!("{name}: {msg}"));
+                        continue;
                     }
-                }
+                },
                 Err(e) => {
                     errors.push(format!("{name}: limiters 解析失败：{e}"));
                     continue;

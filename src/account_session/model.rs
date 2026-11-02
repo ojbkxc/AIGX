@@ -571,7 +571,9 @@ mod tests {
         assert!(rule("token", "disable", Some("fixed"), Some(3600))
             .validate()
             .is_ok());
-        assert!(rule("token", "skip", Some("daily"), None).validate().is_ok());
+        assert!(rule("token", "skip", Some("daily"), None)
+            .validate()
+            .is_ok());
         // 类型 / 动作白名单
         assert!(rule("quota", "skip", None, None).validate().is_err());
         assert!(rule("balance", "pause", None, None).validate().is_err());
