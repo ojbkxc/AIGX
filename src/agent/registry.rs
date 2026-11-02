@@ -887,6 +887,8 @@ fn build_tools() -> Vec<ToolDef> {
                         State(s.clone()),
                         h.clone(),
                         Path(id),
+                        // Agent 侧一律全清（不带按模型清除的 body）
+                        None,
                     )
                     .await)
                 })

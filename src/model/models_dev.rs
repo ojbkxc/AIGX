@@ -108,15 +108,16 @@ pub fn lookup(model: &str) -> Option<DevEntry> {
 /// 启动装载：KV 缓存优先，缺省回落内嵌快照。返回（来源, 条目数）。
 pub fn init(store: &FileStore) -> (&'static str, usize) {
     let cached: Option<Catalog> = store.get::<Catalog>(KV_CATALOG).ok().flatten();
-    let (catalog, source) = match cached {
+    let (loaded, source) = match cached {
         Some(cached) if !cached.models.is_empty() => (cached, "cache"),
         _ => (
             parse_snapshot(EMBEDDED_SNAPSHOT).unwrap_or_default(),
             "embedded",
         ),
     };
-    let count = catalog.models.len();
-    *catalog().write() = catalog;
+    let count = loaded.models.len();
+    // 局部名不能叫 `catalog`：会把同名函数遮蔽掉（E0618）
+    *catalog().write() = loaded;
     (source, count)
 }
 
@@ -232,15 +233,16 @@ pub async fn refresh(client: &Client, store: &FileStore) -> Result<usize, String
     if models.is_empty() {
         return Err("未解析出任何可用模型条目".to_string());
     }
-    let catalog = Catalog {
+    // 局部名不能叫 `catalog`：会把同名函数遮蔽掉（E0618）
+    let fresh = Catalog {
         models,
         generated_at: Some(Utc::now().timestamp_millis()),
         source: "https://models.dev".to_string(),
     };
-    let count = catalog.models.len();
+    let count = fresh.models.len();
     // KV 落盘尽力而为：写失败内存仍生效（下次启动回落内嵌快照）
-    let _ = store.put(KV_CATALOG, &catalog);
-    *catalog().write() = catalog;
+    let _ = store.put(KV_CATALOG, &fresh);
+    *catalog().write() = fresh;
     Ok(count)
 }
 

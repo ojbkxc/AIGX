@@ -23,9 +23,8 @@
 //!   - **不在 await 点持有 `MutexGuard`**：所有表操作都在同步函数里完成，
 //!     锁在函数返回前释放（否则 future 不是 `Send`，转发跑在多线程运行时上）。
 //!   - **先移除表项、再写结果/发信号**：这样「结果可读」蕴含「表项已释放」。
-//!   - **key 绝不打印**：key 含凭据指纹，只作为 `HashMap` 的键；日志只打账号 id。
+//!   - **key 绝不打印**：key 含凭据指纹，只作为单飞表的键；日志只打账号 id。
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -94,8 +93,12 @@ impl<T: Clone> Cell<T> {
 }
 
 /// 进程级单飞表：key → 正在进行的飞行。
+///
+/// 用 `Vec` 而非 `HashMap`：`static` 初始化要求 `const fn new`，而
+/// `HashMap::new` 在当前 MSRV 不是 const（`Vec::new` 是）。表里只放
+/// **正在进行**的刷新，天然极小（通常 0–3 格），线性查找没有性能顾虑。
 pub struct Table<T> {
-    cells: Mutex<HashMap<String, Arc<Cell<T>>>>,
+    cells: Mutex<Vec<(String, Arc<Cell<T>>)>>,
 }
 
 impl<T> Default for Table<T> {
@@ -107,24 +110,39 @@ impl<T> Default for Table<T> {
 impl<T> Table<T> {
     pub const fn new() -> Self {
         Self {
-            cells: Mutex::new(HashMap::new()),
+            cells: Mutex::new(Vec::new()),
         }
     }
 
+    /// 移除一格（仅当仍是本轮那一格：避免误删后来者的新飞行）。
+    fn release(&self, key: &str, cell: &Arc<Cell<T>>) {
+        let mut cells = lock(&self.cells);
+        if let Some(pos) = cells
+            .iter()
+            .position(|(k, c)| k == key && Arc::ptr_eq(c, cell))
+        {
+            cells.remove(pos);
+        }
+    }
+}
+
+impl<T: 'static> Table<T> {
     /// 加入（或发起）一次飞行。
     pub fn join(self: &'static Self, key: &str) -> Join<T> {
-        let mut cells = lock(&self.cells);
-        if let Some(cell) = cells.get(key) {
-            // 订阅先于返回：leader 结束时的信号一定发生在「表项移除」之后，
-            // 因此「join 时表项还在」蕴含「订阅早于这次信号」，不会错过唤醒。
-            let rx = cell.signal.subscribe();
-            return Join::Waiter(Waiter {
-                cell: cell.clone(),
-                rx,
-            });
+        {
+            let cells = lock(&self.cells);
+            if let Some((_, cell)) = cells.iter().find(|(k, _)| k == key) {
+                // 订阅先于返回：leader 结束时的信号一定发生在「表项移除」之后，
+                // 因此「join 时表项还在」蕴含「订阅早于这次信号」，不会错过唤醒。
+                let rx = cell.signal.subscribe();
+                return Join::Waiter(Waiter {
+                    cell: cell.clone(),
+                    rx,
+                });
+            }
         }
         let cell = Arc::new(Cell::new());
-        cells.insert(key.to_string(), cell.clone());
+        lock(&self.cells).push((key.to_string(), cell.clone()));
         Join::Leader(Leader {
             key: key.to_string(),
             cell,
@@ -132,20 +150,10 @@ impl<T> Table<T> {
             published: false,
         })
     }
-
-    /// 移除一格（仅当仍是本轮那一格：避免误删后来者的新飞行）。
-    fn release(&self, key: &str, cell: &Arc<Cell<T>>) {
-        let mut cells = lock(&self.cells);
-        if let Some(current) = cells.get(key) {
-            if Arc::ptr_eq(current, cell) {
-                cells.remove(key);
-            }
-        }
-    }
 }
 
 /// 一次飞行的加入结果。
-pub enum Join<T> {
+pub enum Join<T: 'static> {
     /// 本次是 leader：负责真正执行操作并 `finish`。
     Leader(Leader<T>),
     /// 已有同 key 的飞行：等它的结果。
@@ -153,14 +161,14 @@ pub enum Join<T> {
 }
 
 /// leader：结束（含被 drop 取消）时释放占位并唤醒等待者。
-pub struct Leader<T> {
+pub struct Leader<T: 'static> {
     key: String,
     cell: Arc<Cell<T>>,
     table: &'static Table<T>,
     published: bool,
 }
 
-impl<T: Clone> Leader<T> {
+impl<T: Clone + 'static> Leader<T> {
     /// 发布结果：**先移除表项，再写结果、发信号**。
     fn publish(&mut self, result: Result<T, String>) {
         self.table.release(&self.key, &self.cell);
@@ -179,7 +187,7 @@ impl<T: Clone> Leader<T> {
     }
 }
 
-impl<T> Drop for Leader<T> {
+impl<T: 'static> Drop for Leader<T> {
     fn drop(&mut self) {
         if !self.published {
             // 取消路径：占位必须释放、等待者必须被唤醒（否则这格再也刷不了）
@@ -236,7 +244,7 @@ impl<T: Clone> Waiter<T> {
 /// 不会重复换证（一次性令牌因此只被消耗一次）、也不会重复写。
 pub async fn fly<T, F, Fut>(table: &'static Table<T>, key: &str, operation: F) -> Result<T, String>
 where
-    T: Clone,
+    T: Clone + 'static,
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
 {
