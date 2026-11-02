@@ -613,6 +613,9 @@ pub fn model_declared_by_channel(state: &AppState, model: &str) -> bool {
 ///
 /// 当 `try_charge` 失败或扣费后余额低于阈值时，发送 `QuotaLow` 通知
 /// （参照非流式分支阈值计算，与 handle_chat_completions 非流式分支一致）。
+// 与同族 charge_usage_with_tools / settle_usage 参数对齐（含缓存量透传），
+// 不为规避参数计数拆散计费语义。
+#[allow(clippy::too_many_arguments)]
 pub fn charge_usage(
     state: &AppState,
     api_key: &super::auth::ApiKey,

@@ -128,7 +128,7 @@ impl<T> Table<T> {
 
 impl<T: 'static> Table<T> {
     /// 加入（或发起）一次飞行。
-    pub fn join(self: &'static Self, key: &str) -> Join<T> {
+    pub fn join(&'static self, key: &str) -> Join<T> {
         {
             let cells = lock(&self.cells);
             if let Some((_, cell)) = cells.iter().find(|(k, _)| k == key) {

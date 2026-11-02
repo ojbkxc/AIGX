@@ -552,9 +552,7 @@ impl AccountSessionStore {
     pub fn clear_cooldown(&self, id: &str, model: Option<&str>) -> Option<usize> {
         let (snapshot, cleared) = {
             let mut sessions = self.inner.sessions.write();
-            let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
-                return None;
-            };
+            let session = sessions.iter_mut().find(|s| s.id == id)?;
             let cleared = match model {
                 Some(key) => usize::from(session.cooldowns.remove(key).is_some()),
                 None => {

@@ -136,11 +136,7 @@ impl Bridge for QoderBridge {
                 Ok(state) => state,
                 Err(Attempt::Fatal(e)) => return Err(e),
                 Err(Attempt::Queued(queued)) => {
-                    if let Err(e) =
-                        queue_backoff(&mut queue_waits, &mut queue_waited_ms, &queued).await
-                    {
-                        return Err(e);
-                    }
+                    queue_backoff(&mut queue_waits, &mut queue_waited_ms, &queued).await?;
                     continue;
                 }
             };
@@ -157,11 +153,7 @@ impl Bridge for QoderBridge {
                     })
                 }
                 Ok(Step::Queued(queued)) => {
-                    if let Err(e) =
-                        queue_backoff(&mut queue_waits, &mut queue_waited_ms, &queued).await
-                    {
-                        return Err(e);
-                    }
+                    queue_backoff(&mut queue_waits, &mut queue_waited_ms, &queued).await?;
                     continue;
                 }
                 // 上游正常关闭（空流）：返回空流，交由下游空响应机制处理

@@ -312,6 +312,9 @@ impl TurnAccumulator {
 ///
 /// 返回「要不要续下一轮」；`repeat` 与「本轮无产出」在这里拦（上游同两处
 /// 条件），轮数与开关上限由调用侧持有。
+// 参数是续写判据的完整集合，与上游 wants_another_round 的入参一一对应，
+// 不为规避参数计数拆散语义。
+#[allow(clippy::too_many_arguments)]
 pub fn wants_another_round(
     joined_text: &str,
     joined_reasoning: &str,
@@ -382,10 +385,10 @@ fn unbalanced_brackets(tail: &str) -> bool {
     for c in tail.chars() {
         match c {
             '[' | '{' | '(' => stack.push(c),
-            ')' | ']' | '}' => {
-                if matching_opener(c).is_some_and(|opener| stack.last() == Some(&opener)) {
-                    stack.pop();
-                }
+            c @ (')' | ']' | '}')
+                if matching_opener(c).is_some_and(|opener| stack.last() == Some(&opener)) =>
+            {
+                stack.pop();
             }
             _ => {}
         }
@@ -599,7 +602,7 @@ pub async fn continue_non_streaming(
     let mut any_tool_calls = current.has_tool_calls;
     let mut last_round_text: Option<String> = None;
     let mut rounds_done = 1usize;
-    let mut usages = vec![response.usage.clone()];
+    let mut usages = vec![response.usage];
     loop {
         let produced = !current.text.trim().is_empty() || !current.reasoning.trim().is_empty();
         if !wants_another_round(
@@ -622,7 +625,7 @@ pub async fn continue_non_streaming(
         let prev_round_text = std::mem::take(&mut current.text);
         match bridge.chat(&req, ctx).await {
             Ok(resp) => {
-                usages.push(resp.usage.clone());
+                usages.push(resp.usage);
                 current = parts_of_response(&resp);
                 last_round_text = Some(prev_round_text);
                 joined_text.push_str(&current.text);

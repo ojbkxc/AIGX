@@ -86,10 +86,7 @@ static LAST_REFRESH_AT_MS: AtomicI64 = AtomicI64::new(0);
 /// 索引键：取模型名最后一段（截掉 provider 前缀 `/` 与 `:`），
 /// 只留 ASCII 字母数字并转小写 —— 与上游 `snapshot.rs::key_of` 同口径。
 pub fn normalize_key(model: &str) -> String {
-    let last = model
-        .rsplit(|c| c == '/' || c == ':')
-        .next()
-        .unwrap_or(model);
+    let last = model.rsplit(['/', ':']).next().unwrap_or(model);
     last.chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .flat_map(char::to_lowercase)
