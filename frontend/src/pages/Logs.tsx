@@ -4,6 +4,7 @@ import { Trash2, Eraser, EyeOff, Eye } from 'lucide-react';
 import { api } from '../api';
 import { isAdmin, fmtCompact } from '../lib/utils';
 import { useListKeyboard } from '../hooks/useListKeyboard';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { RequestLogDetail, AuditLogDetail } from '../components/LogDetailDialogs';
@@ -133,10 +134,12 @@ export default function Logs(): JSX.Element {
 
   // 请求序号：快速翻页/切筛选时旧响应晚到不覆盖新数据
   const loadSeq = useRef(0);
-  const load = async () => {
+  const load = async (silent = false) => {
     const seq = ++loadSeq.current;
-    setLoading(true);
-    setError('');
+    if (!silent) {
+      setLoading(true);
+      setError('');
+    }
     try {
       let resTotal = 0;
       if (tab === 'requests') {
@@ -167,11 +170,20 @@ export default function Logs(): JSX.Element {
       }
     } catch (err) {
       if (seq !== loadSeq.current) return;
+      if (silent) return; // 轮询失败不覆盖页面错误状态，等下一次或手动刷新
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
   };
+
+  // 前端自动刷新：按「定时任务」页配置的 logsAutoRefresh/requestsAutoRefresh
+  // 轮询本页（requests tab → 请求日志刷新，audits tab → 系统事件刷新）。
+  // 页面不可见时跳过，配置改动最多滞后一个周期生效。
+  const autoRefreshTaskId = tab === 'requests' ? 'requestsAutoRefresh' : 'logsAutoRefresh';
+  useAutoRefresh(autoRefreshTaskId, () => {
+    void load(true);
+  });
 
   const handleBatchDelete = () => {
     if (selected.size === 0) return;

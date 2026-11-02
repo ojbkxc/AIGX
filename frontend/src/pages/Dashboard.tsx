@@ -4,6 +4,7 @@
 // 普通用户 = 个人账单口径（report_scope 收敛），admin 专属端点 enabled=false
 // 根本不发请求。时间档六档含自定义区间（start/end 参数，热力图固定 365 天）。
 import { useMemo, useState } from 'react';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { useIsFetching, useQueryClient } from '@tanstack/react-query';
@@ -69,6 +70,12 @@ export default function Dashboard(): JSX.Element {
   const usageQ = useUsageSummary({ enabled: admin });
   const limitsQ = useLimits({ enabled: admin });
   const meQ = usePersonalMe({ enabled: !admin });
+
+  // 报表自动刷新：按「定时任务」页配置的 reportAutoRefresh 周期重拉仪表盘。
+  // 页面不可见时跳过，配置改动最多滞后一个周期生效。
+  useAutoRefresh('reportAutoRefresh', () => {
+    queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+  });
 
   const ov = overviewQ.data;
   const savings = savingsQ.data;
