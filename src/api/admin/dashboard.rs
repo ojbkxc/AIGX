@@ -1452,7 +1452,8 @@ mod tests {
         assert_eq!(cur["rate"], 33.33);
         assert_eq!(cur["input_tokens"], 650);
         assert_eq!(cur["hit_input_tokens"], 100);
-        assert_eq!(cur["total_tokens"], 682);
+        // (100+20) + (50+10) + (500+1) = 681
+        assert_eq!(cur["total_tokens"], 681);
         assert_eq!(cur["sampled"], true);
         // models 按 token 降序：claude 501 > gpt-4 180
         let ms = cur["models"].as_array().unwrap();

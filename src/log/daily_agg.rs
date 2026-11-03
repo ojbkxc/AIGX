@@ -538,7 +538,14 @@ where
     let mut map: std::collections::HashMap<String, T> = std::collections::HashMap::new();
     for row in rows {
         for item in pick(row) {
-            let e = map.entry(item.name_ref().to_string()).or_default();
+            let key = item.name_ref().to_string();
+            // 必须先写回分组键：or_default() 造出的空项只承载数值，
+            // 不 set_name_mut 的话合并结果全是没有名字的空行
+            //（读侧 Top 榜会显示成空标题）。
+            let e = map.entry(key.clone()).or_default();
+            if e.name_ref().is_empty() {
+                e.set_name_mut(&key);
+            }
             e.merge_values_from(item);
         }
     }
@@ -820,17 +827,27 @@ mod tests {
     }
 
     /// cap 滞回修剪：超阈才动，残量搬运进 __other__，恒等式不破。
+    ///
+    /// 断言的是**滞回带**而不是精确长度：越过 `cap + cap/2` 才折叠一次、
+    /// 折到 cap 条 top + 1 条 other，之后继续累加。所以任意时刻
+    /// `cap + 1 <= len <= cap + cap/2 + 1`，不等于 `cap + 1`
+    ///（写成精确值是误解了滞回，会随条目数涨落而假红）。
     #[test]
     fn prune_moves_overflow_into_other_without_loss() {
         let mut agg = DailyAgg::default();
-        // 200 个不同模型 > MODEL_CAP + MODEL_CAP/2 = 192，触发修剪。
+        // 200 个不同模型 > MODEL_CAP + MODEL_CAP/2 = 192，必定触发过折叠。
         for i in 0..200u64 {
             fold_request(
                 &mut agg,
                 &log(None, &format!("model-{i:03}"), None, 1, i as i64),
             );
         }
-        assert!(agg.by_model.len() <= MODEL_CAP + 1); // top-cap + other
+        let hi = MODEL_CAP + MODEL_CAP / 2 + 1;
+        assert!(
+            agg.by_model.len() <= hi,
+            "滞回上限 {hi}，实际 {}",
+            agg.by_model.len()
+        );
         assert!(agg.by_model.iter().any(|m| m.name == OTHER));
         let msum: u64 = agg.by_model.iter().map(|m| m.count).sum();
         assert_eq!(msum, agg.requests, "修剪必须搬运而非丢弃");
@@ -951,20 +968,9 @@ mod tests {
             .get("a")
             .map(|m| m.values().cloned().collect())
             .unwrap();
-        let a_models: Vec<UserModelAccum> = {
-            let mut map: std::collections::HashMap<String, UserModelAccum> =
-                std::collections::HashMap::new();
-            for r in &urows {
-                for m in &r.models {
-                    let e = map.entry(m.name.clone()).or_default();
-                    e.count += m.count;
-                    e.tokens_in += m.tokens_in;
-                    e.tokens_out += m.tokens_out;
-                    e.cost += m.cost;
-                }
-            }
-            map.into_values().collect()
-        };
+        // 走生产合并函数（勿在测试里另写一份：曾经内联实现漏设 name，
+        // 断言空名字失败，掩盖了 merge_dim 的同款 bug）
+        let a_models: Vec<UserModelAccum> = merge_user_models(&urows);
         assert_eq!(a_models[0].name, "m1");
         assert_eq!(
             (

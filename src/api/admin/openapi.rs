@@ -1214,6 +1214,7 @@ mod tests {
         add("/api/models/test", &["post"]);
         add("/api/checkin-center", &["get"]);
         add("/api/checkin-center/records", &["delete", "get"]);
+        add("/api/checkin-center/records/mark-kept-active", &["post"]);
         add("/api/checkin-center/run", &["post"]);
         add("/api/checkin-center/schedules", &["get", "post"]);
         add("/api/checkin-center/schedules/remove", &["post"]);

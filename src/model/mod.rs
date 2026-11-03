@@ -216,13 +216,17 @@ impl ModelMapper {
     ///
     /// 调用方（admin handler）负责在「键缺失」时不调用本方法。
     pub fn set_reasoning(&self, alias: &str, effort: Option<&str>) -> Result<()> {
-        let mut reasoning = self.reasoning.write();
-        match effort {
-            Some(e) if !e.is_empty() => {
-                reasoning.insert(alias.to_string(), e.to_string());
-            }
-            _ => {
-                reasoning.remove(alias);
+        // 写锁必须在 save() 之前释放：save() 要读同一把锁，parking_lot::RwLock
+        // 不可重入 —— 守卫跨 save 持有会原地自死锁（管理端点永不返回）。
+        {
+            let mut reasoning = self.reasoning.write();
+            match effort {
+                Some(e) if !e.is_empty() => {
+                    reasoning.insert(alias.to_string(), e.to_string());
+                }
+                _ => {
+                    reasoning.remove(alias);
+                }
             }
         }
         self.save()
@@ -247,6 +251,8 @@ impl ModelMapper {
         let mut list = self.custom_models.write();
         if !list.contains(&entry) {
             list.push(entry);
+            // 先放锁再落盘：save() 读同一把锁，重入即死锁
+            drop(list);
             self.save()?;
         }
         Ok(())
@@ -261,6 +267,8 @@ impl ModelMapper {
         let mut list = self.custom_models.write();
         if let Some(pos) = list.iter().position(|e| *e == entry) {
             list.remove(pos);
+            // 先放锁再落盘：save() 读同一把锁，重入即死锁
+            drop(list);
             self.save()?;
         }
         Ok(())
