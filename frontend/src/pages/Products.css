@@ -1,0 +1,6 @@
+/* 套餐与兑换码 —— 单页双 Tab 的宿主页样式。
+   只负责 Tab 与子页之间的间距：子页自带 Card，已内嵌（embedded）时
+   不再渲染自己的 page-header（见 Plans / Redemptions）。 */
+.pd-tabs {
+  margin-bottom: 12px;
+}

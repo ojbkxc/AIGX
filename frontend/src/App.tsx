@@ -37,8 +37,7 @@ const Wallet = lazyPage(() => import('./pages/Wallet'));
 const Settings = lazyPage(() => import('./pages/Settings'));
 const Profile = lazyPage(() => import('./pages/Profile'));
 const Logs = lazyPage(() => import('./pages/Logs'));
-const Redemptions = lazyPage(() => import('./pages/Redemptions'));
-const Plans = lazyPage(() => import('./pages/Plans'));
+const Products = lazyPage(() => import('./pages/Products'));
 const Gateways = lazyPage(() => import('./pages/Gateways'));
 const ProxyPool = lazyPage(() => import('./pages/ProxyPool'));
 const Chat = lazyPage(() => import('./pages/Chat'));
@@ -163,8 +162,10 @@ export default function App(): JSX.Element {
           <Route path="/users" element={<AdminRoute><Users /></AdminRoute>} />
           <Route path="/wallet" element={<ProtectedLayout><Wallet /></ProtectedLayout>} />
           <Route path="/logs" element={<ProtectedLayout><Logs /></ProtectedLayout>} />
-          <Route path="/redemptions" element={<AdminRoute><Redemptions /></AdminRoute>} />
-          <Route path="/plans" element={<AdminRoute><Plans /></AdminRoute>} />
+          {/* 套餐与兑换码合并为单页双 Tab；旧路由重定向防书签失效 */}
+          <Route path="/products" element={<AdminRoute><Products /></AdminRoute>} />
+          <Route path="/redemptions" element={<Navigate to="/products?tab=redemptions" replace />} />
+          <Route path="/plans" element={<Navigate to="/products" replace />} />
           <Route path="/playground" element={<Navigate to="/chat" replace />} />
           <Route path="/chat" element={<ProtectedLayout><Chat /></ProtectedLayout>} />
           {/* 网络层管理已并入系统设置运维 tab，旧路由重定向防书签失效 */}

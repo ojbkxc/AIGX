@@ -95,7 +95,7 @@ interface IssuedKeyState {
   planName: string;
 }
 
-export default function Plans(): JSX.Element {
+export default function Plans({ embedded = false }: { embedded?: boolean } = {}): JSX.Element {
   const [plans, setPlans] = useState<PlanItem[]>([]);
   const [groups, setGroups] = useState<{ name?: string }[]>([]);
   const [loading, setLoading] = useState(true);
@@ -354,10 +354,12 @@ export default function Plans(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>{t('套餐管理')}</h1>
-        <p>{t('定义按量套餐模板：买家付款后按套餐发放带额度与有效期的 API 密钥')}</p>
-      </div>
+      {!embedded && (
+        <div className="page-header">
+          <h1>{t('套餐管理')}</h1>
+          <p>{t('定义按量套餐模板：买家付款后按套餐发放带额度与有效期的 API 密钥')}</p>
+        </div>
+      )}
 
       {error && <div className="error-message">{error}</div>}
 

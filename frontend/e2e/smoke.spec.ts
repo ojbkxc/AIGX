@@ -16,8 +16,8 @@ const ADMIN_PAGES: Array<[path: string, marker: string]> = [
   ['/settings', '设置'],
   ['/model-manage', '模型'],
   ['/model-manage?tab=ratio', '倍率'],
-  ['/plans', '套餐'],
-  ['/redemptions', '兑换'],
+  ['/products', '套餐'],
+  ['/products?tab=redemptions', '兑换'],
   ['/proxy-pool', '代理'],
   ['/scheduled-tasks', '定时'],
 ];

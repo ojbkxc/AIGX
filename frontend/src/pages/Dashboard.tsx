@@ -436,7 +436,7 @@ export default function Dashboard(): JSX.Element {
           <Link to="/keys" className="btn btn-outline">{t('管理 API 密钥')}</Link>
           <Link to="/mappings" className="btn btn-outline">{t('配置模型映射')}</Link>
           <Link to="/logs" className="btn btn-outline">{t('查看日志')}</Link>
-          <Link to="/redemptions" className="btn btn-outline">{t('兑换码管理')}</Link>
+          <Link to="/products?tab=redemptions" className="btn btn-outline">{t('兑换码管理')}</Link>
           <Link to="/settings" className="btn btn-outline">{t('调整限额')}</Link>
         </div>
       </div>

@@ -25,7 +25,7 @@ interface RedemptionItem {
   expires_at?: number;
 }
 
-export default function Redemptions(): JSX.Element {
+export default function Redemptions({ embedded = false }: { embedded?: boolean } = {}): JSX.Element {
   const [items, setItems] = useState<RedemptionItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -172,10 +172,12 @@ export default function Redemptions(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>{t('兑换码管理')}</h1>
-        <p>{t('批量生成、管理与兑换充值码')}</p>
-      </div>
+      {!embedded && (
+        <div className="page-header">
+          <h1>{t('兑换码管理')}</h1>
+          <p>{t('批量生成、管理与兑换充值码')}</p>
+        </div>
+      )}
 
       {error && <div className="error-message">{error}</div>}
 

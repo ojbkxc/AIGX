@@ -6,7 +6,7 @@ import { api } from '../api';
 import { isAdmin } from '../lib/utils';
 import {
   LayoutDashboard, Satellite, KeyRound,
-  Users, Wallet, Ticket, ScrollText, Package,
+  Users, Wallet, ScrollText, Package,
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Bot, Headphones, CalendarCheck, Globe, CalendarClock,
@@ -41,8 +41,7 @@ const navItems: NavItem[] = [
   // 渠道与账号池合并为一页双 Tab（账号型渠道是账号池的内部容器，不单独露脸）
   { path: '/channels', labelKey: '渠道与账号池', icon: Satellite, adminOnly: true },
   { path: '/users', labelKey: '用户管理', icon: Users, adminOnly: true },
-  { path: '/redemptions', labelKey: '兑换码', icon: Ticket, adminOnly: true },
-  { path: '/plans', labelKey: '套餐管理', icon: Package, adminOnly: true },
+  { path: '/products', labelKey: '套餐与兑换码', icon: Package, adminOnly: true },
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
   { path: '/agent', labelKey: 'AI 运维', icon: Bot, adminOnly: true },
   { path: '/checkin', labelKey: '签到中心', icon: CalendarCheck, adminOnly: true },
@@ -92,8 +91,7 @@ const navGroups: NavGroup[] = [
       navItemOf('/channels'),        // 渠道与账号池（上游渠道 + 账号池双 Tab）
       navItemOf('/proxy-pool'),      // 网络代理（出口代理池）
       navItemOf('/users'),           // 用户管理
-      navItemOf('/redemptions'),     // 兑换码
-      navItemOf('/plans'),           // 套餐管理
+      navItemOf('/products'),        // 套餐与兑换码（双 Tab）
       navItemOf('/checkin'),         // 签到中心
       navItemOf('/scheduled-tasks'), // 定时任务
       navItemOf('/settings'),        // 系统设置

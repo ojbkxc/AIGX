@@ -1991,5 +1991,7 @@
   "各阶段等待上游的最长时间，防止悬挂请求长期占用连接。": "Maximum wait per upstream stage, so hanging requests cannot hold connections open.",
   "上游失败后换渠道 / 换账号的策略。": "How to fail over to another channel or account when upstream errors.",
   "请求体大小上限": "Max request body size",
-  "数据面入站请求的硬上限，超出直接拒绝，防止超大请求打爆内存。": "Hard cap on inbound data-plane request size; oversized requests are rejected to protect memory."
+  "数据面入站请求的硬上限，超出直接拒绝，防止超大请求打爆内存。": "Hard cap on inbound data-plane request size; oversized requests are rejected to protect memory.",
+  "套餐与兑换码": "Plans & Redemption Codes",
+  "套餐定义带额度与有效期的商品模板；兑换码是同一份额度的一次性发放凭证，兑换后生成对应额度的密钥。": "A plan is a product template with quota and validity period; a redemption code is a one-off voucher for the same quota that issues a matching key when redeemed."
 }
