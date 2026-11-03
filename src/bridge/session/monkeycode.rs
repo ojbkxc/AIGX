@@ -8,8 +8,8 @@
 //!   `task-running` 里 `kind=acp_event` 的 `data` 是 JSON 字符串，再按
 //!   `agent_message_chunk` / `agent_thought_chunk` / `tool_call` 分出正文/思考/工具。
 
-use std::collections::VecDeque;
 use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
@@ -456,8 +456,8 @@ fn decode_running(value: &Value, id: &str, model: &str) -> Decoded {
                         id: Some(uuid::Uuid::new_v4().to_string()),
                         function_name: Some(name),
                         arguments: Some(arguments),
-                    signature: None,
-}]),
+                        signature: None,
+                    }]),
                 },
                 finish_reason: None,
                 usage: None,

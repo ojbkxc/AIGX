@@ -1,10 +1,5 @@
-use axum::{
-    http::StatusCode,
-    Json,
-};
-use serde_json::Value;
-use std::sync::Arc;
 use crate::account::AccountPool;
+use crate::api::auth::ApiKeyStore;
 use crate::channel::ChannelStore;
 use crate::config::ConfigManager;
 use crate::health::{HealthTracker, LivezState};
@@ -24,7 +19,9 @@ use crate::redemption::RedemptionStore;
 use crate::usage::UsageTracker;
 use crate::user::UserStore;
 use crate::user_group::UserGroupStore;
-use crate::api::auth::ApiKeyStore;
+use axum::{http::StatusCode, Json};
+use serde_json::Value;
+use std::sync::Arc;
 
 /// 共享应用状态
 #[derive(Clone)]
@@ -198,7 +195,11 @@ impl AppState {
     }
 }
 /// 创建 OpenAI 兼容的错误响应
-pub(crate) fn error_response(code: &str, message: &str, status: StatusCode) -> (StatusCode, Json<Value>) {
+pub(crate) fn error_response(
+    code: &str,
+    message: &str,
+    status: StatusCode,
+) -> (StatusCode, Json<Value>) {
     (
         status,
         Json(serde_json::json!({
@@ -220,7 +221,6 @@ pub(crate) fn current_body_limit_bytes(state: &AppState) -> usize {
 
 // SeaORM 数据库连接（仅当启用 sea-orm feature 时可用）
 #[cfg(feature = "sea-orm")]
-
 // 从请求中提取 API Key（H8：实现移至 `api::common`，此处通过 use 别名保持调用不变）
 use crate::api::common::extract_api_key_bearer_first as extract_api_key;
 // 从请求头提取客户端 IP（H8：实现移至 `api::common`）

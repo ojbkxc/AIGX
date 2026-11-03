@@ -9,8 +9,8 @@
 //! `record_empty`；非零则调用 `reset`。`record_empty` 返回 `true` 时，
 //! 调用方应把该渠道置入冷却或记入断路器失败（`FailureType::EmptyResponse`）。
 
-use std::collections::HashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 
 /// 默认阈值：连续 3 次空响应判定为故障。
 const DEFAULT_EMPTY_RESPONSE_THRESHOLD: u32 = 3;
@@ -50,9 +50,7 @@ impl EmptyResponseCounter {
     ///
     /// 接近阈值（threshold - 1）时打 warn 日志；超阈值时打更高级别 warn。
     pub fn record_empty(&self, channel_id: &str) -> bool {
-        let mut counters = self
-            .counters
-            .write();
+        let mut counters = self.counters.write();
         let count = counters.entry(channel_id.to_string()).or_insert(0);
         *count += 1;
         let exceeded = *count >= self.threshold;
@@ -84,9 +82,7 @@ impl EmptyResponseCounter {
 
     /// 成功（非空）响应后清零计数。
     pub fn reset(&self, channel_id: &str) {
-        let mut counters = self
-            .counters
-            .write();
+        let mut counters = self.counters.write();
         if let Some(count) = counters.get_mut(channel_id) {
             if *count > 0 {
                 tracing::debug!(
@@ -101,17 +97,13 @@ impl EmptyResponseCounter {
 
     /// 获取当前计数（监控/管理面用）。
     pub fn get_count(&self, channel_id: &str) -> u32 {
-        let counters = self
-            .counters
-            .read();
+        let counters = self.counters.read();
         counters.get(channel_id).copied().unwrap_or(0)
     }
 
     /// 管理员强制重置（返回 previous count）。
     pub fn force_reset(&self, channel_id: &str) -> u32 {
-        let mut counters = self
-            .counters
-            .write();
+        let mut counters = self.counters.write();
         let previous = counters.remove(channel_id).unwrap_or(0);
         if previous > 0 {
             tracing::info!(
@@ -125,9 +117,7 @@ impl EmptyResponseCounter {
 
     /// 所有非零计数的渠道（监控用）。
     pub fn get_all_counts(&self) -> Vec<(String, u32)> {
-        let counters = self
-            .counters
-            .read();
+        let counters = self.counters.read();
         counters
             .iter()
             .filter(|(_, &c)| c > 0)

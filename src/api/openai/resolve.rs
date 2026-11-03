@@ -3,12 +3,12 @@ use axum::{
     Json,
 };
 
+use super::*;
+use crate::api::common::extract_api_key_bearer_first as extract_api_key;
+use crate::api::common::extract_client_ip;
+use crate::bridge::Bridge;
 use serde_json::Value;
 use std::sync::Arc;
-use crate::bridge::Bridge;
-use super::*;
-use crate::api::common::extract_client_ip;
-use crate::api::common::extract_api_key_bearer_first as extract_api_key;
 
 /// 验证 API Key 并执行全部鉴权检查（状态/过期/模型白名单/额度/IP）。
 ///
@@ -287,7 +287,10 @@ pub(crate) fn is_retryable_bridge_error(e: &crate::bridge::BridgeError) -> bool 
 /// 解析计费分组：优先取绑定用户的 group，否则用 api_key.group。
 ///
 /// 参照 new-api：用户级 group 优先于 token 级 group。
-pub(crate) fn resolve_billing_group(state: &AppState, api_key: &crate::api::auth::ApiKey) -> String {
+pub(crate) fn resolve_billing_group(
+    state: &AppState,
+    api_key: &crate::api::auth::ApiKey,
+) -> String {
     if let Some(uid) = &api_key.user_id {
         if let Some(user) = state.user_store.get_by_id(uid) {
             if !user.group.is_empty() {
@@ -319,7 +322,10 @@ pub(crate) fn check_group_model_permission(
 ///
 /// 未配置价格的模型若被放行，事后计费将静默为 0（产生免费用量）；
 /// 在入口处拦截可避免“管理员忘记配置价格 → 用户免费白嫖”的资金损失。
-pub(crate) fn ensure_model_priced(state: &AppState, model: &str) -> Result<(), (StatusCode, Json<Value>)> {
+pub(crate) fn ensure_model_priced(
+    state: &AppState,
+    model: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
     if state.pricing_store.get_price(model).is_none() {
         // 放行：模型由任一启用渠道声明或发现（models ∪ discovered_models），
         // 即管理员显式暴露的模型——即便 pricing_store 无条目也允许调用（按 0 计费），

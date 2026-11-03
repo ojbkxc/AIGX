@@ -443,118 +443,119 @@ pub async fn handle_report_heatmap(
         {
             let state = state.clone();
             move || {
-            let user_filter = user_filter.clone();
-            if state.log_store.daily.agg_available() {
-                let pts: Vec<Value> = match &user_filter {
-                    None => state
-                        .log_store
-                        .daily
-                        .load_range(&from, &to)
-                        .into_iter()
-                        .map(|r| {
-                            // tooltip 的按模型分解（A2A 口径 ≤8）：按当日 token 降序
-                            let mut ms = r.by_model.clone();
-                            ms.sort_by_key(|m| std::cmp::Reverse(m.tokens_in + m.tokens_out));
-                            json!({
-                                "date": r.date,
-                                "cost": r.cost,
-                                "count": r.requests,
-                                "tokens": r.tokens_in + r.tokens_out,
-                                "models": ms
-                                    .into_iter()
-                                    .take(8)
-                                    .map(|m| {
-                                        json!({
-                                            "model": m.name,
-                                            "tokens": m.tokens_in + m.tokens_out
+                let user_filter = user_filter.clone();
+                if state.log_store.daily.agg_available() {
+                    let pts: Vec<Value> = match &user_filter {
+                        None => state
+                            .log_store
+                            .daily
+                            .load_range(&from, &to)
+                            .into_iter()
+                            .map(|r| {
+                                // tooltip 的按模型分解（A2A 口径 ≤8）：按当日 token 降序
+                                let mut ms = r.by_model.clone();
+                                ms.sort_by_key(|m| std::cmp::Reverse(m.tokens_in + m.tokens_out));
+                                json!({
+                                    "date": r.date,
+                                    "cost": r.cost,
+                                    "count": r.requests,
+                                    "tokens": r.tokens_in + r.tokens_out,
+                                    "models": ms
+                                        .into_iter()
+                                        .take(8)
+                                        .map(|m| {
+                                            json!({
+                                                "model": m.name,
+                                                "tokens": m.tokens_in + m.tokens_out
+                                            })
                                         })
-                                    })
-                                    .collect::<Vec<Value>>(),
+                                        .collect::<Vec<Value>>(),
+                                })
                             })
-                        })
-                        .collect(),
-                    Some(uid) => state
-                        .log_store
-                        .daily
-                        .load_user_range(uid, &from, &to)
-                        .into_iter()
-                        .map(|r| {
-                            let mut ms = r.models.clone();
-                            ms.sort_by_key(|m| std::cmp::Reverse(m.tokens_in + m.tokens_out));
-                            json!({
-                                "date": r.date,
-                                "cost": r.cost,
-                                "count": r.count,
-                                "tokens": r.tokens_in + r.tokens_out,
-                                "models": ms
-                                    .into_iter()
-                                    .take(8)
-                                    .map(|m| {
-                                        json!({
-                                            "model": m.name,
-                                            "tokens": m.tokens_in + m.tokens_out
+                            .collect(),
+                        Some(uid) => state
+                            .log_store
+                            .daily
+                            .load_user_range(uid, &from, &to)
+                            .into_iter()
+                            .map(|r| {
+                                let mut ms = r.models.clone();
+                                ms.sort_by_key(|m| std::cmp::Reverse(m.tokens_in + m.tokens_out));
+                                json!({
+                                    "date": r.date,
+                                    "cost": r.cost,
+                                    "count": r.count,
+                                    "tokens": r.tokens_in + r.tokens_out,
+                                    "models": ms
+                                        .into_iter()
+                                        .take(8)
+                                        .map(|m| {
+                                            json!({
+                                                "model": m.name,
+                                                "tokens": m.tokens_in + m.tokens_out
+                                            })
                                         })
-                                    })
-                                    .collect::<Vec<Value>>(),
+                                        .collect::<Vec<Value>>(),
+                                })
                             })
-                        })
-                        .collect(),
-                };
-                return json!(pts);
-            }
-            let to_ts_end = date_start_ts(&to) + 86_400 - 1;
-            let logs = state.log_store.requests.all_sorted_asc();
-            // 回退现算与聚合同形状（tokens/models 一并补齐，前端不分支）
-            let mut daily: std::collections::BTreeMap<String, (i64, u64, u64)> =
-                std::collections::BTreeMap::new();
-            let mut per_day_models: std::collections::BTreeMap<
-                String,
-                std::collections::BTreeMap<String, u64>,
-            > = std::collections::BTreeMap::new();
-            for l in &logs {
-                if l.created_at < from_ts || l.created_at > to_ts_end {
-                    continue;
+                            .collect(),
+                    };
+                    return json!(pts);
                 }
-                if let Some(uid) = &user_filter {
-                    if l.user_id.as_deref() != Some(uid.as_str()) {
+                let to_ts_end = date_start_ts(&to) + 86_400 - 1;
+                let logs = state.log_store.requests.all_sorted_asc();
+                // 回退现算与聚合同形状（tokens/models 一并补齐，前端不分支）
+                let mut daily: std::collections::BTreeMap<String, (i64, u64, u64)> =
+                    std::collections::BTreeMap::new();
+                let mut per_day_models: std::collections::BTreeMap<
+                    String,
+                    std::collections::BTreeMap<String, u64>,
+                > = std::collections::BTreeMap::new();
+                for l in &logs {
+                    if l.created_at < from_ts || l.created_at > to_ts_end {
                         continue;
                     }
+                    if let Some(uid) = &user_filter {
+                        if l.user_id.as_deref() != Some(uid.as_str()) {
+                            continue;
+                        }
+                    }
+                    let day = daily_agg::date_key(l.created_at);
+                    let entry = daily.entry(day.clone()).or_insert((0, 0, 0));
+                    entry.0 += l.cost;
+                    entry.1 += 1;
+                    entry.2 += l.input_tokens + l.output_tokens;
+                    *per_day_models
+                        .entry(day)
+                        .or_default()
+                        .entry(l.model.clone())
+                        .or_insert(0) += l.input_tokens + l.output_tokens;
                 }
-                let day = daily_agg::date_key(l.created_at);
-                let entry = daily.entry(day.clone()).or_insert((0, 0, 0));
-                entry.0 += l.cost;
-                entry.1 += 1;
-                entry.2 += l.input_tokens + l.output_tokens;
-                *per_day_models
-                    .entry(day)
-                    .or_default()
-                    .entry(l.model.clone())
-                    .or_insert(0) += l.input_tokens + l.output_tokens;
-            }
-            json!(daily
-                .into_iter()
-                .map(|(date, (cost, count, tokens))| {
-                    let mut ms: Vec<(String, u64)> = per_day_models
-                        .remove(&date)
-                        .map(|m| m.into_iter().collect())
-                        .unwrap_or_default();
-                    ms.sort_by_key(|(_, tk)| std::cmp::Reverse(*tk));
-                    json!({
-                        "date": date,
-                        "cost": cost,
-                        "count": count,
-                        "tokens": tokens,
-                        "models": ms
-                            .into_iter()
-                            .take(8)
-                            .map(|(model, tk)| json!({ "model": model, "tokens": tk }))
-                            .collect::<Vec<Value>>(),
+                json!(daily
+                    .into_iter()
+                    .map(|(date, (cost, count, tokens))| {
+                        let mut ms: Vec<(String, u64)> = per_day_models
+                            .remove(&date)
+                            .map(|m| m.into_iter().collect())
+                            .unwrap_or_default();
+                        ms.sort_by_key(|(_, tk)| std::cmp::Reverse(*tk));
+                        json!({
+                            "date": date,
+                            "cost": cost,
+                            "count": count,
+                            "tokens": tokens,
+                            "models": ms
+                                .into_iter()
+                                .take(8)
+                                .map(|(model, tk)| json!({ "model": model, "tokens": tk }))
+                                .collect::<Vec<Value>>(),
+                        })
                     })
-                })
-                .collect::<Vec<Value>>())
+                    .collect::<Vec<Value>>())
             }
         },
-    ).await;
+    )
+    .await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -591,115 +592,116 @@ pub async fn handle_report_top_sources(
         {
             let state = state.clone();
             move || {
-            let mut items: Vec<ChannelAggRow>;
-            if state.log_store.daily.agg_available() {
-                match &user_filter {
-                    None => {
-                        let rows = state.log_store.daily.load_range(&from, &to);
-                        // 按展示名再聚合（id 维改名的两个渠道现同名 → 合并，与现口径一致）。
-                        let mut by_name: std::collections::HashMap<String, ChannelAggRow> =
-                            std::collections::HashMap::new();
-                        for c in daily_agg::merge_channels(&rows) {
-                            let name = c.name.unwrap_or_else(|| "unknown".to_string());
-                            let e = by_name.entry(name.clone()).or_insert(ChannelAggRow {
-                                name,
-                                count: 0,
-                                cost: 0,
-                                tokens: 0,
-                                successful: 0,
-                                latency_sum: 0,
-                            });
-                            e.count += c.count;
-                            e.cost += c.cost;
-                            e.tokens += c.tokens_in + c.tokens_out;
-                            e.successful += c.successful;
-                            e.latency_sum += c.latency_sum;
+                let mut items: Vec<ChannelAggRow>;
+                if state.log_store.daily.agg_available() {
+                    match &user_filter {
+                        None => {
+                            let rows = state.log_store.daily.load_range(&from, &to);
+                            // 按展示名再聚合（id 维改名的两个渠道现同名 → 合并，与现口径一致）。
+                            let mut by_name: std::collections::HashMap<String, ChannelAggRow> =
+                                std::collections::HashMap::new();
+                            for c in daily_agg::merge_channels(&rows) {
+                                let name = c.name.unwrap_or_else(|| "unknown".to_string());
+                                let e = by_name.entry(name.clone()).or_insert(ChannelAggRow {
+                                    name,
+                                    count: 0,
+                                    cost: 0,
+                                    tokens: 0,
+                                    successful: 0,
+                                    latency_sum: 0,
+                                });
+                                e.count += c.count;
+                                e.cost += c.cost;
+                                e.tokens += c.tokens_in + c.tokens_out;
+                                e.successful += c.successful;
+                                e.latency_sum += c.latency_sum;
+                            }
+                            items = by_name.into_values().collect();
                         }
-                        items = by_name.into_values().collect();
+                        Some(uid) => {
+                            let rows = state.log_store.daily.load_user_range(uid, &from, &to);
+                            items = daily_agg::merge_dim(&rows, |r| &r.channels)
+                                .into_iter()
+                                .map(|c| ChannelAggRow {
+                                    name: c.name,
+                                    count: c.count,
+                                    cost: c.cost,
+                                    tokens: 0,
+                                    successful: 0,
+                                    latency_sum: 0,
+                                })
+                                .collect();
+                        }
                     }
-                    Some(uid) => {
-                        let rows = state.log_store.daily.load_user_range(uid, &from, &to);
-                        items = daily_agg::merge_dim(&rows, |r| &r.channels)
-                            .into_iter()
-                            .map(|c| ChannelAggRow {
-                                name: c.name,
-                                count: c.count,
-                                cost: c.cost,
-                                tokens: 0,
-                                successful: 0,
-                                latency_sum: 0,
-                            })
-                            .collect();
-                    }
-                }
-            } else {
-                let to_ts_end = date_start_ts(&to) + 86_400 - 1;
-                let logs = state.log_store.requests.all_sorted_asc();
-                let mut sources: std::collections::HashMap<String, ChannelAggRow> =
-                    std::collections::HashMap::new();
-                for l in &logs {
-                    if l.created_at < from_ts || l.created_at > to_ts_end {
-                        continue;
-                    }
-                    if let Some(uid) = &user_filter {
-                        if l.user_id.as_deref() != Some(uid.as_str()) {
+                } else {
+                    let to_ts_end = date_start_ts(&to) + 86_400 - 1;
+                    let logs = state.log_store.requests.all_sorted_asc();
+                    let mut sources: std::collections::HashMap<String, ChannelAggRow> =
+                        std::collections::HashMap::new();
+                    for l in &logs {
+                        if l.created_at < from_ts || l.created_at > to_ts_end {
                             continue;
                         }
+                        if let Some(uid) = &user_filter {
+                            if l.user_id.as_deref() != Some(uid.as_str()) {
+                                continue;
+                            }
+                        }
+                        let name = l
+                            .channel_name
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let e = sources.entry(name.clone()).or_insert(ChannelAggRow {
+                            name,
+                            count: 0,
+                            cost: 0,
+                            tokens: 0,
+                            successful: 0,
+                            latency_sum: 0,
+                        });
+                        e.count += 1;
+                        if l.status_code < 400 {
+                            e.successful += 1;
+                        }
+                        e.cost += l.cost;
+                        e.tokens += l.input_tokens + l.output_tokens;
+                        e.latency_sum += l.latency_ms;
                     }
-                    let name = l
-                        .channel_name
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let e = sources.entry(name.clone()).or_insert(ChannelAggRow {
-                        name,
-                        count: 0,
-                        cost: 0,
-                        tokens: 0,
-                        successful: 0,
-                        latency_sum: 0,
-                    });
-                    e.count += 1;
-                    if l.status_code < 400 {
-                        e.successful += 1;
-                    }
-                    e.cost += l.cost;
-                    e.tokens += l.input_tokens + l.output_tokens;
-                    e.latency_sum += l.latency_ms;
+                    items = sources.into_values().collect();
                 }
-                items = sources.into_values().collect();
-            }
-            items.sort_by(|a, b| b.count.cmp(&a.count).then(b.cost.cmp(&a.cost)));
-            items.truncate(10);
-            json!(items
-                .into_iter()
-                .map(|c| {
-                    // 个人支无渠道级 token/成功/延迟数据 → null（不虚构 0%）
-                    let (tokens, success_rate, avg_latency) = if personal {
-                        (Value::Null, Value::Null, Value::Null)
-                    } else {
-                        (
-                            json!(c.tokens),
-                            json!(if c.count > 0 {
-                                (c.successful as f64 / c.count as f64 * 10000.0).round() / 100.0
-                            } else {
-                                0.0
-                            }),
-                            json!(c.latency_sum.checked_div(c.count).unwrap_or(0)),
-                        )
-                    };
-                    json!({
-                        "name": c.name,
-                        "count": c.count,
-                        "cost": c.cost,
-                        "tokens": tokens,
-                        "success_rate": success_rate,
-                        "avg_latency_ms": avg_latency,
+                items.sort_by(|a, b| b.count.cmp(&a.count).then(b.cost.cmp(&a.cost)));
+                items.truncate(10);
+                json!(items
+                    .into_iter()
+                    .map(|c| {
+                        // 个人支无渠道级 token/成功/延迟数据 → null（不虚构 0%）
+                        let (tokens, success_rate, avg_latency) = if personal {
+                            (Value::Null, Value::Null, Value::Null)
+                        } else {
+                            (
+                                json!(c.tokens),
+                                json!(if c.count > 0 {
+                                    (c.successful as f64 / c.count as f64 * 10000.0).round() / 100.0
+                                } else {
+                                    0.0
+                                }),
+                                json!(c.latency_sum.checked_div(c.count).unwrap_or(0)),
+                            )
+                        };
+                        json!({
+                            "name": c.name,
+                            "count": c.count,
+                            "cost": c.cost,
+                            "tokens": tokens,
+                            "success_rate": success_rate,
+                            "avg_latency_ms": avg_latency,
+                        })
                     })
-                })
-                .collect::<Vec<Value>>())
+                    .collect::<Vec<Value>>())
             }
         },
-    ).await;
+    )
+    .await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -930,9 +932,9 @@ pub async fn handle_report_overview(
 
 type ReportCacheKey = (String, String, String); // (端点, 窗口 "from:to", 用户范围: ""=全量 / user_id)
 
-fn report_cache(
-) -> &'static parking_lot::Mutex<std::collections::HashMap<ReportCacheKey, (std::time::Instant, Value)>>
-{
+fn report_cache() -> &'static parking_lot::Mutex<
+    std::collections::HashMap<ReportCacheKey, (std::time::Instant, Value)>,
+> {
     static CACHE: std::sync::OnceLock<
         parking_lot::Mutex<std::collections::HashMap<ReportCacheKey, (std::time::Instant, Value)>>,
     > = std::sync::OnceLock::new();
@@ -960,7 +962,8 @@ async fn cached_report(
         window.to_string(),
         user_filter.unwrap_or_default(),
     );
-    { let map = report_cache().lock();
+    {
+        let map = report_cache().lock();
         if let Some((at, v)) = map.get(&key) {
             if at.elapsed() < std::time::Duration::from_secs(ttl_secs) {
                 return v.clone();
@@ -977,7 +980,8 @@ async fn cached_report(
             }),
         Err(_) => compute(),
     };
-    { let mut map = report_cache().lock();
+    {
+        let mut map = report_cache().lock();
         // 防止日志很长时缓存无限膨胀：超过 256 条整表清空（简单够用）
         if map.len() > 256 {
             map.clear();
@@ -1156,14 +1160,9 @@ pub async fn handle_report_cache_trend_24h(
     // 缓存键只到小时粒度：同一小时内反复打开页面命中 60s TTL 不误重算，
     // 跨小时自动重算（补全上一个完整小时的数据）。
     let slot = local_hour_key(now);
-    let data = cached_report(
-        "cache_trend_24h",
-        &slot,
-        user_filter.clone(),
-        60,
-        {
-            let state = state.clone();
-            move || {
+    let data = cached_report("cache_trend_24h", &slot, user_filter.clone(), 60, {
+        let state = state.clone();
+        move || {
             // 多取 1 小时余量：首桶可能只覆盖 [now−24h, 桶起点] 的部分区间，
             // 起点按整点桶表精确过滤即可。
             let from = now - 25 * 3600;
@@ -1181,9 +1180,9 @@ pub async fn handle_report_cache_trend_24h(
                 })
                 .collect();
             json!(bucket_hours(&filtered, now, sampled))
-            }
-        },
-    ).await;
+        }
+    })
+    .await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -1296,18 +1295,45 @@ pub async fn handle_report_daily_trend(
         {
             let state = state.clone();
             move || {
-            if state.log_store.daily.agg_available() {
-                let rows: Vec<Value> = match &user_filter {
-                    None => state
-                        .log_store
-                        .daily
-                        .load_range(&from, &to)
-                        .into_iter()
-                        .map(|r| {
-                            let top: Vec<Value> = {
-                                let mut ms = r.by_model.clone();
+                if state.log_store.daily.agg_available() {
+                    let rows: Vec<Value> = match &user_filter {
+                        None => state
+                            .log_store
+                            .daily
+                            .load_range(&from, &to)
+                            .into_iter()
+                            .map(|r| {
+                                let top: Vec<Value> = {
+                                    let mut ms = r.by_model.clone();
+                                    ms.sort_by_key(|m| std::cmp::Reverse(m.count));
+                                    ms.into_iter()
+                                        .take(6)
+                                        .map(|m| {
+                                            json!({
+                                                "model": m.name,
+                                                "count": m.count,
+                                                "tokens": m.tokens_in + m.tokens_out,
+                                            })
+                                        })
+                                        .collect()
+                                };
+                                json!({
+                                    "date": r.date, "count": r.requests,
+                                    "input_tokens": r.tokens_in, "output_tokens": r.tokens_out,
+                                    "cost": r.cost, "models": top,
+                                })
+                            })
+                            .collect(),
+                        Some(uid) => state
+                            .log_store
+                            .daily
+                            .load_user_range(uid, &from, &to)
+                            .into_iter()
+                            .map(|r| {
+                                let mut ms = r.models.clone();
                                 ms.sort_by_key(|m| std::cmp::Reverse(m.count));
-                                ms.into_iter()
+                                let top: Vec<Value> = ms
+                                    .into_iter()
                                     .take(6)
                                     .map(|m| {
                                         json!({
@@ -1316,100 +1342,74 @@ pub async fn handle_report_daily_trend(
                                             "tokens": m.tokens_in + m.tokens_out,
                                         })
                                     })
-                                    .collect()
-                            };
-                            json!({
-                                "date": r.date, "count": r.requests,
-                                "input_tokens": r.tokens_in, "output_tokens": r.tokens_out,
-                                "cost": r.cost, "models": top,
-                            })
-                        })
-                        .collect(),
-                    Some(uid) => state
-                        .log_store
-                        .daily
-                        .load_user_range(uid, &from, &to)
-                        .into_iter()
-                        .map(|r| {
-                            let mut ms = r.models.clone();
-                            ms.sort_by_key(|m| std::cmp::Reverse(m.count));
-                            let top: Vec<Value> = ms
-                                .into_iter()
-                                .take(6)
-                                .map(|m| {
-                                    json!({
-                                        "model": m.name,
-                                        "count": m.count,
-                                        "tokens": m.tokens_in + m.tokens_out,
-                                    })
+                                    .collect();
+                                json!({
+                                    "date": r.date, "count": r.count,
+                                    "input_tokens": r.tokens_in, "output_tokens": r.tokens_out,
+                                    "cost": r.cost, "models": top,
                                 })
-                                .collect();
-                            json!({
-                                "date": r.date, "count": r.count,
-                                "input_tokens": r.tokens_in, "output_tokens": r.tokens_out,
-                                "cost": r.cost, "models": top,
                             })
-                        })
-                        .collect(),
-                };
-                return json!(rows);
-            }
-            let to_ts_end = date_start_ts(&to) + 86_400 - 1;
-            let logs = state.log_store.requests.all_sorted_asc();
-            let mut daily: std::collections::BTreeMap<String, (u64, u64, u64, i64)> =
-                std::collections::BTreeMap::new();
-            let mut per_day_models: std::collections::BTreeMap<
-                String,
-                std::collections::HashMap<String, (u64, u64)>,
-            > = std::collections::BTreeMap::new();
-            for l in &logs {
-                if l.created_at < from_ts || l.created_at > to_ts_end {
-                    continue;
+                            .collect(),
+                    };
+                    return json!(rows);
                 }
-                if let Some(uid) = &user_filter {
-                    if l.user_id.as_deref() != Some(uid.as_str()) {
+                let to_ts_end = date_start_ts(&to) + 86_400 - 1;
+                let logs = state.log_store.requests.all_sorted_asc();
+                let mut daily: std::collections::BTreeMap<String, (u64, u64, u64, i64)> =
+                    std::collections::BTreeMap::new();
+                let mut per_day_models: std::collections::BTreeMap<
+                    String,
+                    std::collections::HashMap<String, (u64, u64)>,
+                > = std::collections::BTreeMap::new();
+                for l in &logs {
+                    if l.created_at < from_ts || l.created_at > to_ts_end {
                         continue;
                     }
+                    if let Some(uid) = &user_filter {
+                        if l.user_id.as_deref() != Some(uid.as_str()) {
+                            continue;
+                        }
+                    }
+                    let day = daily_agg::date_key(l.created_at);
+                    let e = daily.entry(day.clone()).or_insert((0, 0, 0, 0));
+                    e.0 += 1;
+                    e.1 = e.1.saturating_add(l.input_tokens);
+                    e.2 = e.2.saturating_add(l.output_tokens);
+                    e.3 = e.3.saturating_add(l.cost);
+                    let tk = l.input_tokens + l.output_tokens;
+                    let m = per_day_models
+                        .entry(day)
+                        .or_default()
+                        .entry(l.model.clone())
+                        .or_insert((0, 0));
+                    m.0 += 1;
+                    m.1 = m.1.saturating_add(tk);
                 }
-                let day = daily_agg::date_key(l.created_at);
-                let e = daily.entry(day.clone()).or_insert((0, 0, 0, 0));
-                e.0 += 1;
-                e.1 = e.1.saturating_add(l.input_tokens);
-                e.2 = e.2.saturating_add(l.output_tokens);
-                e.3 = e.3.saturating_add(l.cost);
-                let tk = l.input_tokens + l.output_tokens;
-                let m = per_day_models
-                    .entry(day)
-                    .or_default()
-                    .entry(l.model.clone())
-                    .or_insert((0, 0));
-                m.0 += 1;
-                m.1 = m.1.saturating_add(tk);
-            }
-            json!(daily
-                .into_iter()
-                .map(|(date, (count, it, ot, cost))| {
-                    let mut ms: Vec<(String, (u64, u64))> = per_day_models
-                        .remove(&date)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .collect();
-                    ms.sort_by_key(|a| std::cmp::Reverse(a.1 .0));
-                    let top: Vec<Value> = ms
+                json!(daily
+                    .into_iter()
+                    .map(|(date, (count, it, ot, cost))| {
+                        let mut ms: Vec<(String, (u64, u64))> = per_day_models
+                            .remove(&date)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect();
+                        ms.sort_by_key(|a| std::cmp::Reverse(a.1 .0));
+                        let top: Vec<Value> = ms
                         .into_iter()
                         .take(6)
                         .map(|(model, (c, tk))| json!({ "model": model, "count": c, "tokens": tk }))
                         .collect();
-                    json!({
-                        "date": date, "count": count,
-                        "input_tokens": it, "output_tokens": ot, "cost": cost,
-                        "models": top,
+                        json!({
+                            "date": date, "count": count,
+                            "input_tokens": it, "output_tokens": ot, "cost": cost,
+                            "models": top,
+                        })
                     })
-                })
-                .collect::<Vec<Value>>())
+                    .collect::<Vec<Value>>())
             }
         },
-    ).await;
+    )
+    .await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 

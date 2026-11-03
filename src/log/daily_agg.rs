@@ -701,7 +701,10 @@ impl DailyAggStore {
             .and_then(|d| d.succ_opt())
             .map(|d| format!("{prefix}{}", d.format("%Y-%m-%d")));
         let keys = match to_date_excl {
-            Some(to_key) => self.store.list_range(&prefix, &from, &to_key).unwrap_or_default(),
+            Some(to_key) => self
+                .store
+                .list_range(&prefix, &from, &to_key)
+                .unwrap_or_default(),
             None => self
                 .store
                 .list(&prefix)

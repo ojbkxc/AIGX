@@ -1,12 +1,9 @@
-use axum::{
-    http::StatusCode,
-    Json,
-};
+use axum::{http::StatusCode, Json};
 
+use super::*;
+use crate::bridge::ChatFormat;
 use serde_json::Value;
 use std::sync::Arc;
-use crate::bridge::ChatFormat;
-use super::*;
 
 /// 执行计费扣减（用户 quota + key used_quota）。
 ///
@@ -801,7 +798,6 @@ pub(crate) struct ResponsesStreamGuard {
     pub(crate) billing: Arc<ResponsesBillingState>,
 }
 
-
 impl Drop for StreamUsageGuard {
     fn drop(&mut self) {
         // 原子抢占计费权：仅当后缀事件未执行计费时（swap 返回 false）才兜底
@@ -839,7 +835,6 @@ impl Drop for StreamUsageGuard {
         }
     }
 }
-
 
 // G 仅需 Unpin：poll_next 通过 get_mut 访问 inner，要求整个结构体
 // Unpin；两个守卫（StreamUsageGuard/ResponsesStreamGuard）只含 Arc，

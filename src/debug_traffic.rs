@@ -24,9 +24,9 @@
 //! 「调试模式」）。关闭时 [`traced`] 直接透传构造器，不做 `try_clone` /
 //! `build`，零开销。
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};

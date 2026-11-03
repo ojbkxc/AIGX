@@ -176,7 +176,7 @@ fn parse_openai_chunk(
                         .and_then(|a| a.as_str())
                         .map(String::from),
                     signature: None,
-})
+                })
                 .collect()
         });
 

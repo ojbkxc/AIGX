@@ -383,7 +383,9 @@ impl FileStore {
     /// 多键原子写入（单事务）：中途失败全部回滚，消除「写到一半进程挂了」的中间态。
     /// 仅 SQLite 后端支持真事务；PG 后端逐条写（actor 串行，等效原子）；JSON 后端逐条写。
     pub fn write_batch(&self, entries: &[(&str, serde_json::Value)]) -> anyhow::Result<()> {
-        #[cfg(feature = "sqlite-kv")]
+        // 无 postgres feature 时 FileStoreInner 只有 Sqlite 一个变体，
+        // 模式必然匹配 —— 此时 `if let` 会被 clippy 判为 irrefutable。
+        #[cfg(all(feature = "sqlite-kv", feature = "postgres"))]
         if let FileStoreInner::Sqlite(sqlite) = &self.inner {
             return sqlite.transaction(|conn| {
                 for (key, val) in entries {
@@ -392,14 +394,31 @@ impl FileStore {
                 Ok(())
             });
         }
-        for (key, val) in entries {
-            self.put(key, val)?;
+        #[cfg(all(feature = "sqlite-kv", not(feature = "postgres")))]
+        {
+            let FileStoreInner::Sqlite(sqlite) = &self.inner;
+            return sqlite.transaction(|conn| {
+                for (key, val) in entries {
+                    sqlite::SqliteStore::put_conn(conn, key, val)?;
+                }
+                Ok(())
+            });
         }
-        Ok(())
+        #[allow(unreachable_code)]
+        {
+            for (key, val) in entries {
+                self.put(key, val)?;
+            }
+            Ok(())
+        }
     }
 
-    /// 写入原始 JSON 字符串（put_async 内部用；SQLite/PG 走 put_raw，JSON 后端直接写文件）。
+    /// 写入原始 JSON 字符串（`put_async` 内部用；SQLite/PG 走 `put_raw`，JSON 后端直接写文件）。
+    ///
+    /// 调用点在 `put_async` 里按后端各取所需，这里保留一个统一的便捷实现；
+    /// 当前 `put_async` 已原地分派，本方法暂无调用方，保留以免后端增减时重复。
     #[cfg(feature = "sqlite-kv")]
+    #[allow(dead_code)]
     fn put_raw(&self, key: &str, raw: &str) -> anyhow::Result<()> {
         match &self.inner {
             FileStoreInner::Sqlite(s) => s.put_raw(key, raw),

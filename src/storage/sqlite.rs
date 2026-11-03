@@ -23,7 +23,9 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// 轻量克隆（Arc 共享连接），供 FileStore::put_async 在 spawn_blocking 里落盘。
     pub(crate) fn cheap_clone(&self) -> SqliteStore {
-        SqliteStore { conn: self.conn.clone() }
+        SqliteStore {
+            conn: self.conn.clone(),
+        }
     }
 }
 

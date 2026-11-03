@@ -168,9 +168,7 @@ impl Session {
             last_message_id: 0,
             created_at: self.connected_at,
             last_used_at: self.last_used(),
-            metadata: self
-                .metadata
-                .read().clone(),
+            metadata: self.metadata.read().clone(),
         }
     }
 }

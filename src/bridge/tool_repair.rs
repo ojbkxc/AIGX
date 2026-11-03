@@ -328,15 +328,15 @@ mod tests {
                 id: Some("call_a".into()),
                 function_name: Some("f_a".into()),
                 arguments: Some(r#"{"a":1}"#.into()),
-                    signature: None,
-},
+                signature: None,
+            },
             super::super::ToolCallDelta {
                 index: 1,
                 id: Some("call_b".into()),
                 function_name: Some("f_b".into()),
                 arguments: Some(r#"{"b":2}"#.into()),
-                    signature: None,
-},
+                signature: None,
+            },
         ];
         let out = super::super::tool_repair::accumulate_tool_call_arguments(&deltas);
         assert_eq!(out.len(), 2);

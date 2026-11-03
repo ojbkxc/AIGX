@@ -273,8 +273,8 @@ fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
                                 .and_then(Value::as_str)
                                 .map(str::to_string),
                             arguments: fc.get("args").map(|a| a.to_string()),
-                    signature: None,
-});
+                            signature: None,
+                        });
                         continue;
                     }
                     let Some(part_text) = part.get("text").and_then(Value::as_str) else {

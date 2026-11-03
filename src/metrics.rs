@@ -153,9 +153,7 @@ impl Metrics {
 
     /// 模型健康等级（0/1/2）快照，由健康追踪层刷新。
     pub fn set_health(&self, model: &str, level: u8) {
-        self.health
-            .lock()
-            .insert(model.to_string(), level.min(2));
+        self.health.lock().insert(model.to_string(), level.min(2));
     }
 
     /// 渲染 Prometheus 文本格式。

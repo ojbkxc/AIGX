@@ -908,7 +908,8 @@ pub fn set_max_retries(v: u32) {
 /// 内置清单（`channel::is_sensitive_header` 与 `debug_traffic`）覆盖通用凭据头，
 /// 但各家上游的自定义头名会变——管理员可在设置页「网关 → 指纹脱敏」补充。
 /// 支持两种形态：完整头名（`x-foo-token`）与尾部通配（`x-foo-*`）。
-static EXTRA_SENSITIVE_HEADERS: parking_lot::RwLock<Vec<String>> = parking_lot::RwLock::new(Vec::new());
+static EXTRA_SENSITIVE_HEADERS: parking_lot::RwLock<Vec<String>> =
+    parking_lot::RwLock::new(Vec::new());
 
 /// 归一化一条名单项：去空白、转小写；空串丢弃。
 fn normalize_sensitive_pattern(raw: &str) -> Option<String> {
@@ -933,7 +934,8 @@ pub fn set_extra_sensitive_headers(list: Vec<String>) {
             break;
         }
     }
-    { let mut guard = EXTRA_SENSITIVE_HEADERS.write();
+    {
+        let mut guard = EXTRA_SENSITIVE_HEADERS.write();
         *guard = cleaned;
     }
 }
@@ -946,10 +948,13 @@ pub fn extra_sensitive_headers() -> Vec<String> {
 /// 命中额外名单？`name` 需已是小写。支持尾部 `*` 通配前缀匹配。
 pub fn is_extra_sensitive_header(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
-    EXTRA_SENSITIVE_HEADERS.read().iter().any(|pat| match pat.strip_suffix('*') {
-        Some(prefix) => lower.starts_with(prefix),
-        None => lower == *pat,
-    })
+    EXTRA_SENSITIVE_HEADERS
+        .read()
+        .iter()
+        .any(|pat| match pat.strip_suffix('*') {
+            Some(prefix) => lower.starts_with(prefix),
+            None => lower == *pat,
+        })
 }
 
 /// 非流式响应体超时（秒）的进程级快照。
@@ -999,7 +1004,8 @@ pub fn cline_header_overrides() -> Vec<(String, String)> {
 
 /// 由 main 与 cline-headers 更新端点写入快照。
 pub fn set_cline_header_overrides(entries: Vec<(String, String)>) {
-    { let mut list = CLINE_HEADER_OVERRIDES.write();
+    {
+        let mut list = CLINE_HEADER_OVERRIDES.write();
         *list = entries;
     }
 }
@@ -1044,7 +1050,8 @@ pub fn set_retry_on_status_codes(codes: Vec<u16>) {
             break;
         }
     }
-    { let mut list = RETRY_ON_STATUS.write();
+    {
+        let mut list = RETRY_ON_STATUS.write();
         *list = cleaned;
     }
 }

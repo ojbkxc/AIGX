@@ -4,8 +4,8 @@ use axum::{
     Json,
 };
 
-use serde_json::Value;
 use super::*;
+use serde_json::Value;
 
 /// GET /v1/models - 模型列表
 pub(crate) async fn handle_list_models(

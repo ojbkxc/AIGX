@@ -4,12 +4,10 @@ use axum::{
     Json,
 };
 
-use serde_json::Value;
-use crate::bridge::{
-    BridgeContext,
-};
 use super::*;
 use crate::api::common::extract_client_ip;
+use crate::bridge::BridgeContext;
+use serde_json::Value;
 
 /// POST /v1/completions - 文本补全
 ///

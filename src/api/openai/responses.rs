@@ -1,23 +1,17 @@
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::{
-        IntoResponse, Response,
-    },
+    response::{IntoResponse, Response},
     Json,
 };
 
-
-use std::sync::Arc;
-use serde_json::Value;
-use crate::bridge::{
-    BridgeContext,
-    ResponsesPassthrough,
-};
-use crate::channel::ChannelStore;
-use futures::StreamExt;
 use super::*;
 use crate::api::common::extract_client_ip;
+use crate::bridge::{BridgeContext, ResponsesPassthrough};
+use crate::channel::ChannelStore;
+use futures::StreamExt;
+use serde_json::Value;
+use std::sync::Arc;
 
 /// POST /v1/responses - OpenAI Responses API 透传
 ///

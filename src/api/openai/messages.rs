@@ -1,13 +1,8 @@
-use axum::{
-    http::StatusCode,
-    Json,
-};
+use axum::{http::StatusCode, Json};
 
-use serde_json::Value;
-use crate::bridge::{
-    ChatMessage, FinishReason, Role,
-};
 use super::*;
+use crate::bridge::{ChatMessage, FinishReason, Role};
+use serde_json::Value;
 
 /// 将 JSON Value 的消息数组解析为 ChatMessage 列表
 ///

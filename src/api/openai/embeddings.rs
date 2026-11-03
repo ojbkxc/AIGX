@@ -4,12 +4,10 @@ use axum::{
     Json,
 };
 
-use serde_json::Value;
-use crate::bridge::{
-    BridgeContext, EmbeddingRequest,
-};
 use super::*;
 use crate::api::common::extract_client_ip;
+use crate::bridge::{BridgeContext, EmbeddingRequest};
+use serde_json::Value;
 
 /// POST /v1/embeddings - 向量嵌入
 ///

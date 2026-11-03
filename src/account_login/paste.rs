@@ -195,10 +195,7 @@ pub fn kuku_cookie_from_sqlite_b64(b64: &str) -> Result<String, String> {
         .map_err(|error| format!("Cookies 文件内容不是有效的 base64：{error}"))?;
     let dir = std::env::temp_dir().join("aigx-kuku-import");
     std::fs::create_dir_all(&dir).map_err(|error| format!("创建临时目录失败：{error}"))?;
-    let path = dir.join(format!(
-        "cookies-{}",
-        std::process::id()
-    ));
+    let path = dir.join(format!("cookies-{}", std::process::id()));
     // 写临时副本再读：临时副本不存在「被客户端占用」一说；读后即删。
     std::fs::write(&path, &bytes).map_err(|error| format!("写入临时文件失败：{error}"))?;
     let result = kuku_cookie_from_sqlite_path(&path);
@@ -227,7 +224,9 @@ pub fn kuku_cookie_from_sqlite_path(path: &std::path::Path) -> Result<String, St
              WHERE host_key LIKE '%baidu%' AND value != '' \
                AND name NOT LIKE 'Hm\\_%' ESCAPE '\\' AND name != 'HMACCOUNT'",
         )
-        .map_err(|error| format!("Cookies 库里找不到 cookies 表（不是 Chromium Cookies 文件）：{error}"))?;
+        .map_err(|error| {
+            format!("Cookies 库里找不到 cookies 表（不是 Chromium Cookies 文件）：{error}")
+        })?;
     let rows = stmt
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -245,7 +244,9 @@ pub fn kuku_cookie_from_sqlite_path(path: &std::path::Path) -> Result<String, St
         } else if !name.eq_ignore_ascii_case("BDUSS")
             && !name.eq_ignore_ascii_case("STOKEN")
             && !name.eq_ignore_ascii_case("gfprotpl")
-            && !extras.iter().any(|(existing, _)| existing.eq_ignore_ascii_case(&name))
+            && !extras
+                .iter()
+                .any(|(existing, _)| existing.eq_ignore_ascii_case(&name))
         {
             extras.push((name, value));
         }
@@ -261,7 +262,11 @@ pub fn kuku_cookie_from_sqlite_path(path: &std::path::Path) -> Result<String, St
     if !stoken.is_empty() {
         parts.push(format!("STOKEN={stoken}"));
     }
-    parts.extend(extras.into_iter().map(|(name, value)| format!("{name}={value}")));
+    parts.extend(
+        extras
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}")),
+    );
     Ok(parts.join("; "))
 }
 

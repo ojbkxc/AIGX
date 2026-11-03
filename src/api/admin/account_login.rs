@@ -108,8 +108,9 @@ pub async fn handle_login_paste(
             named.name = body.name.trim().to_string();
             named
         };
-        let account_id = account_login::save_credentials(&state, &provider, &body.channel_id, creds)
-            .map_err(|error| error_response(&error, StatusCode::INTERNAL_SERVER_ERROR))?;
+        let account_id =
+            account_login::save_credentials(&state, &provider, &body.channel_id, creds)
+                .map_err(|error| error_response(&error, StatusCode::INTERNAL_SERVER_ERROR))?;
         return Ok(Json(
             json!({ "success": true, "data": { "accountId": account_id } }),
         ));

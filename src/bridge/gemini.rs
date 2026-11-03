@@ -591,7 +591,7 @@ fn parse_stream_event(
                     function_name: Some(name.to_string()),
                     arguments: Some(args.to_string()),
                     signature: None,
-});
+                });
             }
         }
     }

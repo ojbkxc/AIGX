@@ -1,3 +1,7 @@
+use super::*;
+use crate::api::common::extract_client_ip;
+use crate::bridge::{tool_repair, Bridge, BridgeContext, ChatFormat};
+use crate::channel::ChannelStore;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -11,12 +15,6 @@ use futures::StreamExt;
 use serde_json::Value;
 use std::convert::Infallible;
 use std::sync::Arc;
-use crate::bridge::{
-    tool_repair, Bridge, BridgeContext, ChatFormat,
-};
-use crate::channel::ChannelStore;
-use super::*;
-use crate::api::common::extract_client_ip;
 
 /// POST /v1/chat/completions - 聊天补全
 ///
