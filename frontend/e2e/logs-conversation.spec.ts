@@ -15,6 +15,8 @@ test.describe('请求日志对话浏览', () => {
 
     // mock 里第一条日志带 conversation
     await page.locator('tbody tr').first().click();
+    // 详情弹窗分档：对话内容在独立 Tab 里
+    await page.getByRole('tab', { name: '对话内容' }).click();
     const dlg = page.locator('.log-detail-conv');
     await expect(dlg).toBeVisible();
     await expect(dlg).toContainText('对话内容');
@@ -37,7 +39,10 @@ test.describe('请求日志对话浏览', () => {
     await page.goto('/logs');
     await page.locator('tbody tr').first().click();
 
-    // 这条 mock 日志没有 debug 字段 → 说明对话不依赖 log_body
+    // 这条 mock 日志没有 debug 字段 → 说明对话不依赖 log_body。
+    // 没有报文时「原始报文」Tab 根本不出现，对话 Tab 照常在。
+    await expect(page.getByRole('tab', { name: '原始报文' })).toHaveCount(0);
+    await page.getByRole('tab', { name: '对话内容' }).click();
     await expect(page.locator('.log-detail-conv')).toBeVisible();
     await expect(page.locator('.log-detail-debug')).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
@@ -48,6 +53,7 @@ test.describe('请求日志对话浏览', () => {
     await page.goto('/logs');
     // 第二条日志带 truncated_history
     await page.locator('tbody tr').nth(1).click();
+    await page.getByRole('tab', { name: '对话内容' }).click();
     await expect(page.locator('.log-detail-conv-note')).toBeVisible();
     await expect(page.locator('.log-detail-conv-note')).toContainText('较早的消息已省略');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
@@ -58,6 +64,7 @@ test.describe('请求日志对话浏览', () => {
     await page.goto('/logs');
     // 第一条 mock 日志带完整路由回放字段
     await page.locator('tbody tr').first().click();
+    await page.getByRole('tab', { name: '路由回放' }).click();
 
     const route = page.locator('.log-detail-route');
     await expect(route).toBeVisible();
@@ -76,6 +83,32 @@ test.describe('请求日志对话浏览', () => {
     // 被过滤渠道及原因
     await expect(route).toContainText('circuit_open');
     await expect(route).toContainText('health_check_failed');
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('原始报文 Tab 展示上游端点与请求/响应体', async ({ page, pageErrors }) => {
+    await loginAsAdmin(page);
+    await page.goto('/logs');
+
+    // 前两条 mock 日志无 debug → 该 Tab 不该出现（无数据不给空 Tab）
+    await page.locator('tbody tr').first().click();
+    await expect(page.getByRole('tab', { name: '原始报文' })).toHaveCount(0);
+    await expect(page.getByRole('tab', { name: '概览' })).toBeVisible();
+    await page.locator('.modal-close').click();
+
+    // 第三条带 debug → 多出「原始报文」Tab，内容完整
+    await page.locator('tbody tr').nth(2).click();
+    await page.getByRole('tab', { name: '原始报文' }).click();
+    const raw = page.locator('.log-detail-debug');
+    await expect(raw).toBeVisible();
+    await expect(raw).toContainText('上游端点');
+    await expect(raw).toContainText('https://upstream.example.com/v1/chat/completions');
+    await expect(raw).toContainText('rate limited');
+
+    // 切回概览：错误信息仍在概览里
+    await page.getByRole('tab', { name: '概览' }).click();
+    await expect(page.locator('.log-detail-error')).toContainText('upstream 429');
+
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });

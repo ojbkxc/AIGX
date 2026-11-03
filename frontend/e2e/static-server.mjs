@@ -187,6 +187,28 @@ const REQUEST_LOGS = [
       truncated_history: true,
     },
   },
+  {
+    // 开了 log_body 的条目：详情弹窗应多出「原始报文」Tab。
+    // 前两条故意不带 debug，用来锁「没有报文就不给空 Tab」的行为。
+    id: 'log-3',
+    created_at: 1761895800,
+    user_id: 'u-admin',
+    user_email: 'admin@aigx.local',
+    model: 'glm-4.7-flash',
+    channel_id: 'ch-1',
+    channel_name: 'lxchat-glm',
+    input_tokens: 10,
+    output_tokens: 20,
+    cost: 1,
+    latency_ms: 400,
+    status_code: 500,
+    error_msg: 'upstream 429',
+    debug: {
+      upstream_url: 'https://upstream.example.com/v1/chat/completions',
+      request_body: '{"model":"glm-4.7-flash","messages":[{"role":"user","content":"hi"}]}',
+      response_body: '{"error":{"message":"rate limited"}}',
+    },
+  },
 ];
 
 // ── 渠道列表（形状对齐 src/api/admin/channel.rs 的 ChannelItem）──

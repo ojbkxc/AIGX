@@ -1,7 +1,11 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { RequestLogItem, AuditLogItem } from '../pages/Logs';
 import { sourceLabel } from '../pages/Logs';
+import { Tabs } from './ui';
+
+/** 详情弹窗的视图分档：概览 / 对话 / 路由 / 原始报文 */
+type DetailTab = 'overview' | 'conversation' | 'route' | 'raw';
 
 /** 请求日志详情弹窗：全字段结构化展示（参照 new-api DetailsDialog） */
 export function RequestLogDetail({ log, admin, onClose }: {
@@ -10,6 +14,7 @@ export function RequestLogDetail({ log, admin, onClose }: {
   onClose: () => void;
 }): JSX.Element {
   const { t } = useTranslation();
+  const [tab, setTab] = useState<DetailTab>('overview');
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => { if (e.key === 'Escape') onClose(); };
@@ -39,25 +44,58 @@ export function RequestLogDetail({ log, admin, onClose }: {
     ...(admin && log.ip ? [{ label: 'IP', value: log.ip, mono: true }] : []),
   ];
 
+  // 分档可见性：后三档都是 admin 专属数据（后端对普通用户已剥离），
+  // 没有数据就不给空 Tab，避免用户点进去看到一片空白。
+  const hasConv = admin && !!log.conversation && (log.conversation?.messages.length ?? 0) > 0;
+  const hasRoute =
+    admin &&
+    !!(log.candidate_channels?.length || log.filtered_channels?.length || log.selected_channel);
+  const hasRaw = admin && !!log.debug;
+
+  const tabs: Array<{ key: DetailTab; label: string }> = [
+    { key: 'overview', label: t('概览') },
+    ...(hasConv ? [{ key: 'conversation' as DetailTab, label: t('对话内容') }] : []),
+    ...(hasRoute ? [{ key: 'route' as DetailTab, label: t('路由回放') }] : []),
+    ...(hasRaw ? [{ key: 'raw' as DetailTab, label: t('原始报文') }] : []),
+  ];
+  // 数据在弹窗打开后不会再被替换；但切档越界（例如从带报文的条目换到
+  // 不带的条目）会留下一个不存在的 key，这里回落到概览。
+  const active = tabs.some((x) => x.key === tab) ? tab : 'overview';
+
   return (
     <LogDetailShell title={t('请求日志详情')} onClose={onClose}>
-      <div className="log-detail-grid">
-        {rows.map((r) => (
-          <div key={r.label} className="log-detail-row">
-            <span className="log-detail-label">{r.label}</span>
-            <span className={`log-detail-value ${r.mono ? 'log-detail-mono' : ''}`}>{r.value}</span>
-          </div>
-        ))}
-      </div>
-      {log.error_msg && (
-        <div className="log-detail-error">
-          <div className="log-detail-label">{t('错误信息')}</div>
-          <pre className="log-detail-pre">{log.error_msg}</pre>
-        </div>
+      {tabs.length > 1 && (
+        <Tabs<DetailTab>
+          className="log-detail-tabs"
+          ariaLabel={t('请求日志详情')}
+          items={tabs}
+          active={active}
+          onChange={setTab}
+        />
       )}
+
+      {active === 'overview' && (
+        <>
+          <div className="log-detail-grid">
+            {rows.map((r) => (
+              <div key={r.label} className="log-detail-row">
+                <span className="log-detail-label">{r.label}</span>
+                <span className={`log-detail-value ${r.mono ? 'log-detail-mono' : ''}`}>{r.value}</span>
+              </div>
+            ))}
+          </div>
+          {log.error_msg && (
+            <div className="log-detail-error">
+              <div className="log-detail-label">{t('错误信息')}</div>
+              <pre className="log-detail-pre">{log.error_msg}</pre>
+            </div>
+          )}
+        </>
+      )}
+
       {/* 对话浏览：管理员点开日志就能看到这轮对话说了什么，
           无需去系统设置开调试模式。普通用户拿不到该字段（后端已剥离）。 */}
-      {admin && log.conversation && log.conversation.messages.length > 0 && (
+      {active === 'conversation' && hasConv && log.conversation && (
         <div className="log-detail-conv">
           <div className="log-detail-label">
             {t('对话内容')}
@@ -81,9 +119,10 @@ export function RequestLogDetail({ log, admin, onClose }: {
           </div>
         </div>
       )}
+
       {/* 路由回放：管理员可看到这次请求的调度决策 —— 候选渠道、谁被过滤及
           原因、最终选中谁。普通用户拿不到这些字段（后端已剥离）。 */}
-      {admin && (log.candidate_channels?.length || log.filtered_channels?.length || log.selected_channel) && (
+      {active === 'route' && hasRoute && (
         <div className="log-detail-route">
           <div className="log-detail-label">{t('路由回放')}</div>
           {log.candidate_channels && log.candidate_channels.length > 0 && (
@@ -119,7 +158,8 @@ export function RequestLogDetail({ log, admin, onClose }: {
           )}
         </div>
       )}
-      {admin && log.debug && (
+
+      {active === 'raw' && hasRaw && log.debug && (
         <div className="log-detail-debug">
           {log.debug.upstream_url && (
             <div className="log-detail-debug-block">

@@ -2492,3 +2492,8 @@ tr.kbd-active {
     width: 100%;
   }
 }
+
+/* 日志详情弹窗的分档标签（概览 / 对话 / 路由 / 原始报文） */
+.log-detail-tabs {
+  margin-bottom: 12px;
+}
