@@ -409,9 +409,7 @@ impl ApiKeyStore {
         api_key.last_used_at = Some(chrono::Utc::now().timestamp());
         let snapshot = api_key.clone();
         drop(keys);
-        if let Err(e) = self.store.put(&format!("apikey_{id}"), &snapshot) {
-            tracing::error!("Failed to persist apikey {} charge_quota: {}", id, e);
-        }
+        self.store.put_async(format!("apikey_{id}"), snapshot);
         true
     }
 
@@ -438,9 +436,7 @@ impl ApiKeyStore {
         api_key.reserved_quota += amount;
         let snapshot = api_key.clone();
         drop(keys);
-        if let Err(e) = self.store.put(&format!("apikey_{id}"), &snapshot) {
-            tracing::error!("Failed to persist apikey {} reserve_quota: {}", id, e);
-        }
+        self.store.put_async(format!("apikey_{id}"), snapshot);
         true
     }
 
@@ -466,9 +462,7 @@ impl ApiKeyStore {
         api_key.last_used_at = Some(chrono::Utc::now().timestamp());
         let snapshot = api_key.clone();
         drop(keys);
-        if let Err(e) = self.store.put(&format!("apikey_{id}"), &snapshot) {
-            tracing::error!("Failed to persist apikey {} settle_quota: {}", id, e);
-        }
+        self.store.put_async(format!("apikey_{id}"), snapshot);
     }
 
     /// 释放令牌预留额度（P1：两段式计费的取消/回滚路径）。
@@ -493,9 +487,7 @@ impl ApiKeyStore {
         api_key.reserved_quota -= release;
         let snapshot = api_key.clone();
         drop(keys);
-        if let Err(e) = self.store.put(&format!("apikey_{id}"), &snapshot) {
-            tracing::error!("Failed to persist apikey {} release_quota: {}", id, e);
-        }
+        self.store.put_async(format!("apikey_{id}"), snapshot);
     }
 
     /// 回收超时未结算的预留（G2：预留 TTL 解冻，与 UserStore 对称）。
@@ -509,13 +501,7 @@ impl ApiKeyStore {
                 key.reserved_quota = 0;
                 key.reserved_at = None;
                 let snapshot = key.clone();
-                if let Err(e) = self.store.put(&format!("apikey_{}", key.id), &snapshot) {
-                    tracing::error!(
-                        "Failed to persist stale apikey reservation {}: {}",
-                        key.id,
-                        e
-                    );
-                }
+                self.store.put_async(format!("apikey_{}", key.id), snapshot);
                 count += 1;
             }
         }
@@ -529,9 +515,7 @@ impl ApiKeyStore {
             api_key.updated_at = chrono::Utc::now().timestamp();
             let snapshot = api_key.clone();
             drop(keys);
-            if let Err(e) = self.store.put(&format!("apikey_{id}"), &snapshot) {
-                tracing::error!("Failed to persist apikey {} reset_used_quota: {}", id, e);
-            }
+            self.store.put_async(format!("apikey_{id}"), snapshot);
             true
         } else {
             false

@@ -215,6 +215,13 @@ impl UserStore {
         Ok(())
     }
 
+    /// 锁外异步落盘：快照已持有完整副本，丢给 blocking 线程池写存储，
+    /// 消除「写守卫内做同步 IO」的固有风险。失败仅记日志。
+    fn persist_async(&self, user: &User) {
+        let key = format!("user:{}", user.id);
+        self.store.put_async(key, user.clone());
+    }
+
     /// 创建用户（email 必填，username 可选）
     pub fn create(&self, email: &str, password: &str, role: Role, quota: i64) -> Result<User> {
         if email.is_empty() {
@@ -572,12 +579,10 @@ impl UserStore {
         }
         user.used_quota += amount;
         let snapshot = user.clone();
-        // 锁内落盘（并发安全）；失败只记日志不清零内存态——
-        // 计费已经在内存里扣了，回滚会让用户白嫖，宁可下次写盘纠正。
-        if let Err(e) = self.persist(&snapshot) {
-            tracing::error!("Failed to persist user {} try_charge: {}", id, e);
-        }
         drop(by_id);
+        // 锁外异步落盘；失败只记日志不清零内存态——计费已经在内存里扣了，
+        // 回滚会让用户白嫖，宁可下次写盘纠正。
+        self.persist_async(&snapshot);
         true
     }
 
@@ -605,11 +610,9 @@ impl UserStore {
         }
         user.reserved_quota += amount;
         let snapshot = user.clone();
-        // 锁内落盘（并发安全）
-        if let Err(e) = self.persist(&snapshot) {
-            tracing::error!("Failed to persist user {} reserve_quota: {}", id, e);
-        }
         drop(by_id);
+        // 锁外异步落盘（并发安全：后续修改会再次落盘最新值）
+        self.persist_async(&snapshot);
         true
     }
 
@@ -638,11 +641,8 @@ impl UserStore {
         // 实际消费转入 used_quota
         user.used_quota += actual;
         let snapshot = user.clone();
-        // 锁内落盘（并发安全）
-        if let Err(e) = self.persist(&snapshot) {
-            tracing::error!("Failed to persist user {} settle_quota: {}", id, e);
-        }
         drop(by_id);
+        self.persist_async(&snapshot);
     }
 
     /// 释放预留配额（P1：两段式计费的取消/回滚路径）。
@@ -672,11 +672,8 @@ impl UserStore {
         }
         user.reserved_quota -= release;
         let snapshot = user.clone();
-        // 锁内落盘（并发安全）
-        if let Err(e) = self.persist(&snapshot) {
-            tracing::error!("Failed to persist user {} release_quota: {}", id, e);
-        }
         drop(by_id);
+        self.persist_async(&snapshot);
     }
 
     /// 回收超时未结算的预留（G2：预留 TTL 解冻）。
