@@ -95,6 +95,9 @@ pub async fn handle_login_paste(
     }
     // KukuAI 文件导入分支：Cookies SQLite 文件 base64 → 解析出 Cookie 串，
     // 再走与粘贴登录完全相同的 verify_kuku 校验与落库（口径不分叉）。
+    // 解析依赖 rusqlite，仅 sqlite-kv feature 下可用；其余后端构建明确拒绝，
+    // 而不是让用户看到「请粘贴凭证」这种与操作不符的提示。
+    #[cfg(feature = "sqlite-kv")]
     if importing_file {
         let cookie = account_login::paste::kuku_cookie_from_sqlite_b64(body.auth_file_b64.trim())
             .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
@@ -113,6 +116,13 @@ pub async fn handle_login_paste(
                 .map_err(|error| error_response(&error, StatusCode::INTERNAL_SERVER_ERROR))?;
         return Ok(Json(
             json!({ "success": true, "data": { "accountId": account_id } }),
+        ));
+    }
+    #[cfg(not(feature = "sqlite-kv"))]
+    if importing_file {
+        return Err(error_response(
+            "当前构建不支持 Cookies 文件导入（需要 sqlite-kv 后端），请改用粘贴登录",
+            StatusCode::BAD_REQUEST,
         ));
     }
     let mut creds = match provider.as_str() {

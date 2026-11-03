@@ -23,6 +23,10 @@ use axum::{http::StatusCode, Json};
 use serde_json::Value;
 use std::sync::Arc;
 
+// SeaORM 数据库连接（仅当启用 sea-orm feature 时可用）
+#[cfg(feature = "sea-orm")]
+use sea_orm::DatabaseConnection;
+
 /// 共享应用状态
 #[derive(Clone)]
 pub struct AppState {
@@ -218,9 +222,3 @@ pub(crate) fn error_response(
 pub(crate) fn current_body_limit_bytes(state: &AppState) -> usize {
     state.config_manager.max_request_body_mb().max(1) * 1024 * 1024
 }
-
-// SeaORM 数据库连接（仅当启用 sea-orm feature 时可用）
-#[cfg(feature = "sea-orm")]
-// 从请求中提取 API Key（H8：实现移至 `api::common`，此处通过 use 别名保持调用不变）
-use crate::api::common::extract_api_key_bearer_first as extract_api_key;
-// 从请求头提取客户端 IP（H8：实现移至 `api::common`）

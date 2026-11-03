@@ -194,6 +194,30 @@ impl JsonFileStore {
         self.put(key, &new_value)?;
         Ok(old)
     }
+
+    /// 异步写入（JSON 后端降级实现）。
+    ///
+    /// 与 `FileStore::put_async` 同签名同语义：JSON 后端本就没有连接池/事务，
+    /// 直接同步写即可；失败仅记日志，不向调用方传播（调用方原本就是 error!）。
+    /// 保留这个降级实现，让热路径调用点不必按后端 feature 分叉。
+    pub fn put_async<T: Serialize + Send + 'static>(
+        &self,
+        key: impl Into<String> + Send + 'static,
+        value: T,
+    ) {
+        let key = key.into();
+        if let Err(e) = self.put(&key, &value) {
+            tracing::error!("put_async {key} failed: {e:#}");
+        }
+    }
+
+    /// 多键写入（JSON 后端逐条写，无事务）。
+    pub fn write_batch(&self, entries: &[(&str, serde_json::Value)]) -> anyhow::Result<()> {
+        for (key, val) in entries {
+            self.put(key, val)?;
+        }
+        Ok(())
+    }
 }
 
 /// 统一 KV 存储入口。
