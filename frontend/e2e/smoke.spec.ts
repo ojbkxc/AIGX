@@ -11,12 +11,12 @@ import type { Page } from '@playwright/test';
 /** 需要管理员权限的页面（AdminRoute 包裹） */
 const ADMIN_PAGES: Array<[path: string, marker: string]> = [
   ['/channels', '渠道'],
+  ['/channels?tab=accounts', '账号'],
   ['/users', '用户'],
   ['/settings', '设置'],
   ['/pricing', '定价'],
   ['/plans', '套餐'],
   ['/redemptions', '兑换'],
-  ['/account-sessions', '账号'],
   ['/proxy-pool', '代理'],
   ['/scheduled-tasks', '定时'],
 ];
@@ -130,7 +130,7 @@ test.describe('全站冒烟', () => {
       .locator('.sidebar-aside')
       .filter({ visible: true })
       .first()
-      .getByText('渠道管理', { exact: false })
+      .getByText('渠道与账号池', { exact: false })
       .click();
     await expect(page).toHaveURL(/\/channels$/);
     await expectRendered(page);

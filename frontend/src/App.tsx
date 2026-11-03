@@ -39,8 +39,7 @@ const Profile = lazyPage(() => import('./pages/Profile'));
 const Logs = lazyPage(() => import('./pages/Logs'));
 const Redemptions = lazyPage(() => import('./pages/Redemptions'));
 const Plans = lazyPage(() => import('./pages/Plans'));
-const Channels = lazyPage(() => import('./pages/Channels'));
-const AccountSessions = lazyPage(() => import('./pages/AccountSessions'));
+const Gateways = lazyPage(() => import('./pages/Gateways'));
 const ProxyPool = lazyPage(() => import('./pages/ProxyPool'));
 const Chat = lazyPage(() => import('./pages/Chat'));
 
@@ -144,8 +143,12 @@ export default function App(): JSX.Element {
           <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
           <Route path="/" element={<ProtectedLayout><Dashboard /></ProtectedLayout>} />
           <Route path="/accounts" element={<Navigate to="/channels" replace />} />
-          <Route path="/channels" element={<AdminRoute><Channels /></AdminRoute>} />
-          <Route path="/account-sessions" element={<AdminRoute><AccountSessions /></AdminRoute>} />
+          {/* 渠道与账号池合并为单页双 Tab：上游渠道默认，账号池走 ?tab=accounts */}
+          <Route path="/channels" element={<AdminRoute><Gateways /></AdminRoute>} />
+          <Route
+            path="/account-sessions"
+            element={<Navigate to="/channels?tab=accounts" replace />}
+          />
           <Route path="/proxy-pool" element={<AdminRoute><ProxyPool /></AdminRoute>} />
           <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
           {/* 已合并的旧路由 → 重定向到合并后位置 */}

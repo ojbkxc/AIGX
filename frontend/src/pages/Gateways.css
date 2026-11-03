@@ -1,0 +1,6 @@
+/* 渠道与账号池 —— 单页双 Tab 的宿主页样式。
+   只负责 Tab 与子页之间的间距：子页自身带 page-header 与 Card，
+   已内嵌（embedded）时不再渲染标题区（见 Channels / AccountSessions）。 */
+.gw-tabs {
+  margin-bottom: 12px;
+}

@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import {
   Eye, EyeOff, ArrowLeftRight, MoreHorizontal, Search,
   Pencil, Gauge, Power, PowerOff, Loader2, MessageSquare, RotateCcw, Trash2,
-  DollarSign, Cloud, Sparkles, Gem, BrainCircuit, Layers, Settings2, Plus, GripVertical,
+  DollarSign, Cloud, Sparkles, Gem, BrainCircuit, Settings2, Plus, GripVertical,
 } from 'lucide-react';
 import { api } from '../api';
 import { useListKeyboard } from '../hooks/useListKeyboard';
@@ -103,14 +103,15 @@ interface ChannelQuirksForm {
   client_emulation: string;
 }
 
-// 渠道类型选项 — 与后端 ChannelType 枚举对齐（snake_case）
+// 渠道类型选项 — 与后端 ChannelType 枚举对齐（snake_case）。
+// 不含 `account`：账号型渠道由「账号池」添加账号时自动创建，是内部容器，
+// 不提供手工新建入口（列表里也不展示，见 Channels 的 allChannels 过滤）。
 const CHANNEL_TYPES = [
   { value: 'cloudflare', labelKey: 'Cloudflare Workers AI', isRaw: true },
   { value: 'openai_compatible', labelKey: 'OpenAI 兼容 (DeepSeek/OpenRouter/...)' },
   { value: 'anthropic', labelKey: 'Anthropic 兼容' },
   { value: 'gemini', labelKey: 'Gemini (Google AI)', isRaw: true },
   { value: 'zai', labelKey: 'Zai (智谱AI)', isRaw: true },
-  { value: 'account', labelKey: '账号型渠道（多账号轮换）', isRaw: true },
 ];
 
 // 各渠道类型的默认 Base URL（创建时自动填充，减少用户手动输入）
@@ -123,7 +124,6 @@ const DEFAULT_BASE_URL = {
 const AUTH_HINT = {
   gemini: '鉴权方式：x-goog-api-key（在 API Key 字段填入 Google AI Studio 密钥）',
   zai: '鉴权方式：Bearer token（在 API Key 字段填入智谱 API Key）',
-  account: '账号型渠道不保存渠道级凭证：凭证与轮换请在「账号池」页按账号添加',
 };
 
 // 类型徽章图标（new-api ProviderBadge 同款思路：图标 + 着色标签）
@@ -133,7 +133,6 @@ const TYPE_ICONS: Record<string, typeof Cloud> = {
   anthropic: BrainCircuit,
   gemini: Gem,
   zai: Sparkles,
-  account: Layers,
 };
 
 // 模型名 → 稳定颜色（new-api autoColor 同思路：字符串 hash → HSL 色相）
@@ -185,7 +184,7 @@ function writeLs(key: string, value: unknown): void {
 }
 
 type ChStateFilter = 'all' | 'on' | 'off';
-type ChTypeFilter = 'all' | 'cloudflare' | 'openai_compatible' | 'anthropic' | 'gemini' | 'zai' | 'account';
+type ChTypeFilter = 'all' | 'cloudflare' | 'openai_compatible' | 'anthropic' | 'gemini' | 'zai';
 /** 排序档位（方向即档位语义，同 ModelManage 倍率升/降分开的做法取常用向） */
 type ChSortMode = 'default' | 'priority' | 'response' | 'balance' | 'name';
 /** 批量操作动作（对齐 ModelManage BatchAction） */
@@ -203,7 +202,6 @@ const CH_TYPE_OPTIONS: Array<[ChTypeFilter, string]> = [
   ['gemini', 'Gemini'],
   ['zai', 'Z.ai'],
   ['cloudflare', 'CF'],
-  ['account', '账号型'],
 ];
 const CH_SORT_OPTIONS: Array<[ChSortMode, string]> = [
   ['default', '默认'],
@@ -333,7 +331,12 @@ function readColItems(): ChColItem[] {
   return base;
 }
 
-export default function Channels(): JSX.Element {
+interface ChannelsProps {
+  /** 作为「渠道与账号池」双 Tab 的子页内嵌时隐藏自身标题区 */
+  embedded?: boolean;
+}
+
+export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.Element {
   const [channels, setChannels] = useState<ChannelItem[]>([]);
   const [loading, setLoading] = useState(true);
   const firstLoadRef = useRef(true);
@@ -984,7 +987,10 @@ export default function Channels(): JSX.Element {
         created_at: typeof ch.created_at === 'number' ? ch.created_at : undefined,
         updated_at: typeof ch.updated_at === 'number' ? ch.updated_at : undefined,
       }));
-      setChannels(items);
+      // 账号型渠道不在这里落库：它是账号池（AccountSessions）的内部容器，
+      // 由「添加账号」自动创建。这里过滤掉，而不是在渲染层过滤，避免
+      // 「批量操作 / 统计 / 空态判断」各处都得记得排除一遍。
+      setChannels(items.filter((ch) => ch.channel_type !== 'account'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1075,7 +1081,6 @@ export default function Channels(): JSX.Element {
     if (!form.name) { setError(t('名称为必填项')); return; }
     if (
       form.channel_type !== 'cloudflare' &&
-      form.channel_type !== 'account' &&
       !form.base_url
     ) {
       setError(t('非 Cloudflare 渠道需填写 Base URL'));
@@ -1285,11 +1290,13 @@ export default function Channels(): JSX.Element {
 
   return (
     <div>
-      {/* PageIntro 标题区 */}
-      <div className="page-header">
-        <h1>{t('渠道管理')}</h1>
-        <p>{t('管理上游 AI 渠道（支持混用 Cloudflare + 第三方 OpenAI 兼容上游）')}</p>
-      </div>
+      {/* PageIntro 标题区（内嵌到「渠道与账号池」双 Tab 时由宿主提供） */}
+      {!embedded && (
+        <div className="page-header">
+          <h1>{t('渠道管理')}</h1>
+          <p>{t('管理上游 AI 渠道（支持混用 Cloudflare + 第三方 OpenAI 兼容上游）')}</p>
+        </div>
+      )}
 
       {error && <div className="error-message">{error}</div>}
 

@@ -318,7 +318,12 @@ const DLG_ICONS: Record<(typeof DLG_SEGS)[number]['icon'], ReactNode> = {
   wrench: <Wrench size={15} />,
 };
 
-export default function AccountSessions(): JSX.Element {
+interface AccountSessionsProps {
+  /** 作为「渠道与账号池」双 Tab 的子页内嵌时隐藏自身标题区 */
+  embedded?: boolean;
+}
+
+export default function AccountSessions({ embedded = false }: AccountSessionsProps = {}): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
 
@@ -1763,14 +1768,16 @@ export default function AccountSessions(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>{t('账号池管理')}</h1>
-        <p>
-          {t(
-            '为账号型渠道管理多把上游凭证：账号级优先级/权重/并发上限与按上游模型的冷却，失败自动轮换'
-          )}
-        </p>
-      </div>
+      {!embedded && (
+        <div className="page-header">
+          <h1>{t('账号池管理')}</h1>
+          <p>
+            {t(
+              '为账号型渠道管理多把上游凭证：账号级优先级/权重/并发上限与按上游模型的冷却，失败自动轮换'
+            )}
+          </p>
+        </div>
+      )}
 
       {error && <div className="error-message">{error}</div>}
 

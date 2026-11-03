@@ -9,7 +9,7 @@ import {
   Users, Wallet, Ticket, ScrollText, Package,
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
-  Languages, LogOut, Coins, Bot, Headphones, Layers, CalendarCheck, Globe, CalendarClock,
+  Languages, LogOut, Coins, Bot, Headphones, CalendarCheck, Globe, CalendarClock,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -38,7 +38,8 @@ const navItems: NavItem[] = [
   { path: '/keys', labelKey: 'API 密钥', icon: KeyRound },
   { path: '/logs', labelKey: '用量日志', icon: ScrollText },
   { path: '/model-manage', labelKey: '模型管理', icon: Boxes, adminOnly: true },
-  { path: '/channels', labelKey: '渠道管理', icon: Satellite, adminOnly: true },
+  // 渠道与账号池合并为一页双 Tab（账号型渠道是账号池的内部容器，不单独露脸）
+  { path: '/channels', labelKey: '渠道与账号池', icon: Satellite, adminOnly: true },
   { path: '/pricing', labelKey: '定价倍率', icon: Coins, adminOnly: true },
   { path: '/users', labelKey: '用户管理', icon: Users, adminOnly: true },
   { path: '/redemptions', labelKey: '兑换码', icon: Ticket, adminOnly: true },
@@ -49,31 +50,37 @@ const navItems: NavItem[] = [
   { path: '/wallet', labelKey: '钱包', icon: Wallet },
   { path: '/tickets', labelKey: '工单', icon: Headphones },
   { path: '/profile', labelKey: '个人中心', icon: UserRound },
-  // 账号型渠道的账号池（渠道内账号级调度：优先级/冷却/并发）
-  { path: '/account-sessions', labelKey: '账号池', icon: Layers, adminOnly: true },
   // 网络代理池（集中管理出口：账号 proxy 字段 pool:/rotate 编码引用）
   { path: '/proxy-pool', labelKey: '网络代理', icon: Globe, adminOnly: true },
   // 定时任务（对照 Agent2API「定时任务」页：凭证维护/模型目录刷新/版本检查等）
   { path: '/scheduled-tasks', labelKey: '定时任务', icon: CalendarClock, adminOnly: true },
 ];
-
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
-// 管理员 17 项 / 客户 8 项。合并历史：
+// 管理员 16 项 / 客户 8 项。合并历史：
 // - 模型映射 → 模型管理页统一维护（渠道表单里已移除，避免三处可改）
 // - 易支付 + 用户分组 + 通知设置 + 安全监控 + IP 管理 → 系统设置 tab
 // - 定价倍率曾并入系统设置计费 tab，现拆回独立页（/pricing）
 // - 订单记录 → 钱包页内 tab
 // - 系统信息（AI 网关网络层管理）→ 系统设置运维 tab 网络层子标签（已下沉）
+// - 账号池 → 并入「渠道与账号池」双 Tab（账号型渠道只是账号池的容器）
+//
+// 分组按路径取条目而非下标：下标一旦因增删菜单漂移，就会静默错配到别的菜单。
+function navItemOf(path: string): NavItem {
+  const found = navItems.find((it) => it.path === path);
+  if (!found) throw new Error(`nav item not found: ${path}`);
+  return found;
+}
+
 const navGroups: NavGroup[] = [
   {
     key: 'general',
     labelKey: '通用',
     items: [
-      navItems[0],  // 仪表盘
-      navItems[1],  // 聊天
-      navItems[2],  // 提示词库
-      navItems[3],  // API 密钥
-      navItems[4],  // 用量日志（全员可见，admin 看全部，普通用户看自己）
+      navItemOf('/'),          // 仪表盘
+      navItemOf('/chat'),      // 聊天
+      navItemOf('/prompts'),   // 提示词库
+      navItemOf('/keys'),      // API 密钥
+      navItemOf('/logs'),      // 用量日志（全员可见，admin 看全部，普通用户看自己）
     ],
   },
   {
@@ -81,27 +88,26 @@ const navGroups: NavGroup[] = [
     labelKey: '管理',
     adminOnly: true,
     items: [
-      navItems[5],  // 模型管理（admin 可写；普通用户只读自己分组可见的模型与价格）
-      navItems[6],  // 渠道管理
-      navItems[17], // 账号池
-      navItems[18], // 网络代理（出口代理池）
-      navItems[7],  // 定价倍率
-      navItems[8],  // 用户管理
-      navItems[9],  // 兑换码
-      navItems[10], // 套餐管理
-      navItems[13], // 签到中心
-      navItems[19], // 定时任务
-      navItems[11], // 系统设置
-      navItems[12], // AI 运维
+      navItemOf('/model-manage'),    // 模型管理（admin 可写；普通用户只读自己分组可见的模型与价格）
+      navItemOf('/channels'),        // 渠道与账号池（上游渠道 + 账号池双 Tab）
+      navItemOf('/proxy-pool'),      // 网络代理（出口代理池）
+      navItemOf('/pricing'),         // 定价倍率
+      navItemOf('/users'),           // 用户管理
+      navItemOf('/redemptions'),     // 兑换码
+      navItemOf('/plans'),           // 套餐管理
+      navItemOf('/checkin'),         // 签到中心
+      navItemOf('/scheduled-tasks'), // 定时任务
+      navItemOf('/settings'),        // 系统设置
+      navItemOf('/agent'),           // AI 运维
     ],
   },
   {
     key: 'personal',
     labelKey: '个人',
     items: [
-      navItems[14], // 钱包
-      navItems[15], // 工单
-      navItems[16], // 个人中心
+      navItemOf('/wallet'),  // 钱包
+      navItemOf('/tickets'), // 工单
+      navItemOf('/profile'), // 个人中心
     ],
   },
 ];

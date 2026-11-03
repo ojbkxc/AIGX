@@ -1889,7 +1889,7 @@
   "累计记录数": "Total records",
   "保活": "Keep-alive",
   "保活模型链已保存": "Keep-alive model chain saved",
-  "当前为空清单（保存后恢复内置默认链）": "Current chain is empty (saving restores the built-in default chain)",
+  "当前为空清单（保存后恢复内置默认链）": "Empty list (saving restores built-in defaults)",
   "自动链执行中...": "Auto-chain running...",
   "自动链完成": "Auto-chain complete",
   "待领新手福利 {{n}}": "{{n}} onboarding benefits pending",
@@ -1900,7 +1900,6 @@
   "加入清单": "Add to list",
   "填入缺省链": "Fill defaults",
   "清空（=恢复默认）": "Clear (= restore defaults)",
-  "当前为空清单（保存后恢复内置默认链）": "Empty list (saving restores built-in defaults)",
   "移除": "Remove",
   "UMID 组件已就绪（{{path}}）": "UMID component ready ({{path}})",
   "UMID 组件未安装": "UMID component not installed",
@@ -1980,5 +1979,8 @@
   "加载定时任务失败": "Failed to load scheduled tasks",
   "间隔已保存": "Interval saved",
   "已开启": "Enabled",
-  "需在": "must be within"
+  "需在": "must be within",
+  "渠道与账号池": "Channels & Accounts",
+  "上游渠道": "Upstream Channels",
+  "上游渠道保存 Key / 模型映射 / 成本价；账号池管理登录态账号的多凭证轮换。账号型渠道是账号池的内部容器，不在此单独展示。": "Upstream channels hold keys, model mappings and cost prices; the account pool manages multi-credential rotation for login-based accounts. Account-type channels are internal containers of the account pool and are not listed here."
 }
