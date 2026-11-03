@@ -438,9 +438,12 @@ pub async fn handle_report_heatmap(
     let data = cached_report(
         "heatmap",
         &format!("{from}:{to}"),
-        &user_filter,
+        user_filter.clone(),
         120,
-        || {
+        {
+            let state = state.clone();
+            move || {
+            let user_filter = user_filter.clone();
             if state.log_store.daily.agg_available() {
                 let pts: Vec<Value> = match &user_filter {
                     None => state
@@ -549,8 +552,9 @@ pub async fn handle_report_heatmap(
                     })
                 })
                 .collect::<Vec<Value>>())
+            }
         },
-    );
+    ).await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -582,9 +586,11 @@ pub async fn handle_report_top_sources(
     let data = cached_report(
         "top_sources",
         &format!("{from}:{to}"),
-        &user_filter,
+        user_filter.clone(),
         120,
-        || {
+        {
+            let state = state.clone();
+            move || {
             let mut items: Vec<ChannelAggRow>;
             if state.log_store.daily.agg_available() {
                 match &user_filter {
@@ -691,8 +697,9 @@ pub async fn handle_report_top_sources(
                     })
                 })
                 .collect::<Vec<Value>>())
+            }
         },
-    );
+    ).await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -707,9 +714,11 @@ pub async fn handle_report_token_trend(
     let data = cached_report(
         "token_trend",
         &format!("{from}:{to}"),
-        &user_filter,
+        user_filter.clone(),
         120,
-        || {
+        {
+            let state = state.clone();
+            move || {
             if state.log_store.daily.agg_available() {
                 let pts: Vec<Value> = match &user_filter {
                 None => state
@@ -757,8 +766,9 @@ pub async fn handle_report_token_trend(
                     json!({ "date": date, "input_tokens": input, "output_tokens": output })
                 })
                 .collect::<Vec<Value>>())
+            }
         },
-    );
+    ).await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -777,9 +787,11 @@ pub async fn handle_report_overview(
     let data = cached_report(
         "overview",
         &format!("{from}:{to}"),
-        &user_filter,
+        user_filter.clone(),
         120,
-        || {
+        {
+            let state = state.clone();
+            move || {
             if state.log_store.daily.agg_available() {
                 let mut total = 0u64;
                 let mut success = 0u64;
@@ -902,8 +914,9 @@ pub async fn handle_report_overview(
                     .map(|(model, count)| json!({ "model": model, "count": count }))
                     .collect::<Vec<Value>>(),
             })
+            }
         },
-    );
+    ).await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -926,19 +939,26 @@ fn report_cache(
     CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// 命中缓存直接回放；未命中执行 `compute` 并落缓存。锁只护 map 本身，
-/// `compute` 在锁外执行（宁可同键并发算两次，也不把重计算塞进临界区）。
-fn cached_report(
+/// 命中缓存直接回放；未命中把 `compute` 挪到 blocking 池执行并落缓存。
+///
+/// 同步读库挪出 async worker（移植 Agent2API 68d0a4e 第 21 项：报表接口的
+/// 同步读库 spawn_blocking）——KV 读是 rusqlite 串行连接 + 逐键反序列化，
+/// 窗口大或走回退全量现算时能吃满几十毫秒，占着 tokio worker 会拖慢同
+/// worker 上的转发请求。锁只护 map 本身，`compute` 在锁外执行（宁可同键
+/// 并发算两次，也不把重计算塞进临界区）。
+///
+/// 无 tokio runtime（同步测试上下文）时直接同步执行，语义不变。
+async fn cached_report(
     endpoint: &str,
     window: &str,
-    user_filter: &Option<String>,
+    user_filter: Option<String>,
     ttl_secs: u64,
-    compute: impl FnOnce() -> Value,
+    compute: impl FnOnce() -> Value + Send + 'static,
 ) -> Value {
     let key: ReportCacheKey = (
         endpoint.to_string(),
         window.to_string(),
-        user_filter.clone().unwrap_or_default(),
+        user_filter.unwrap_or_default(),
     );
     { let map = report_cache().lock();
         if let Some((at, v)) = map.get(&key) {
@@ -947,7 +967,16 @@ fn cached_report(
             }
         }
     }
-    let fresh = compute();
+    let fresh = match tokio::runtime::Handle::try_current() {
+        Ok(_) => tokio::task::spawn_blocking(compute)
+            .await
+            .unwrap_or_else(|e| {
+                // compute panic（blocking 线程已捕获原 panic，进程未 abort）：
+                // 请求失败即可，不缓存空值
+                panic!("报表计算任务 join 失败：{e}")
+            }),
+        Err(_) => compute(),
+    };
     { let mut map = report_cache().lock();
         // 防止日志很长时缓存无限膨胀：超过 256 条整表清空（简单够用）
         if map.len() > 256 {
@@ -966,7 +995,9 @@ pub async fn handle_report_models(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let (user_filter, _is_admin) = report_scope(&state, &headers).await?;
     let (from, to, from_ts) = resolve_window(q.days, q.start.as_deref(), q.end.as_deref());
-    let data = cached_report("models", &format!("{from}:{to}"), &user_filter, 120, || {
+    let data = cached_report("models", &format!("{from}:{to}"), user_filter.clone(), 120, {
+        let state = state.clone();
+        move || {
         if state.log_store.daily.agg_available() {
             let items: Vec<Value> = match &user_filter {
                 None => daily_agg::merge_models(&state.log_store.daily.load_range(&from, &to))
@@ -1028,7 +1059,8 @@ pub async fn handle_report_models(
                 "cost": cost,
             }))
             .collect::<Vec<Value>>())
-    });
+        }
+    }).await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -1049,9 +1081,11 @@ pub async fn handle_report_cache_rates(
     let data = cached_report(
         "cache_rates",
         &format!("{from}:{to}"),
-        &user_filter,
+        user_filter.clone(),
         60,
-        || {
+        {
+            let state = state.clone();
+            move || {
             let now = chrono::Utc::now().timestamp();
             let windows: [(&str, i64); 4] = [
                 ("10m", 600),
@@ -1101,8 +1135,9 @@ pub async fn handle_report_cache_rates(
             }));
             }
             json!(out)
+            }
         },
-    );
+    ).await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -1124,9 +1159,11 @@ pub async fn handle_report_cache_trend_24h(
     let data = cached_report(
         "cache_trend_24h",
         &slot,
-        &user_filter.clone(),
+        user_filter.clone(),
         60,
-        move || {
+        {
+            let state = state.clone();
+            move || {
             // 多取 1 小时余量：首桶可能只覆盖 [now−24h, 桶起点] 的部分区间，
             // 起点按整点桶表精确过滤即可。
             let from = now - 25 * 3600;
@@ -1137,15 +1174,16 @@ pub async fn handle_report_cache_trend_24h(
                 .unwrap_or_default();
             let filtered: Vec<crate::log::RequestLog> = logs
                 .into_iter()
-                .filter(|l| match (&user_filter, l.user_id.as_deref()) {
+                .filter(|l| match (user_filter.clone(), l.user_id.as_deref()) {
                     (None, _) => true,
                     (Some(uid), Some(lu)) => lu == uid.as_str(),
                     (Some(_), None) => false,
                 })
                 .collect();
             json!(bucket_hours(&filtered, now, sampled))
+            }
         },
-    );
+    ).await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
@@ -1253,9 +1291,11 @@ pub async fn handle_report_daily_trend(
     let data = cached_report(
         "daily_trend",
         &format!("{from}:{to}"),
-        &user_filter,
+        user_filter.clone(),
         120,
-        || {
+        {
+            let state = state.clone();
+            move || {
             if state.log_store.daily.agg_available() {
                 let rows: Vec<Value> = match &user_filter {
                     None => state
@@ -1367,8 +1407,9 @@ pub async fn handle_report_daily_trend(
                     })
                 })
                 .collect::<Vec<Value>>())
+            }
         },
-    );
+    ).await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 

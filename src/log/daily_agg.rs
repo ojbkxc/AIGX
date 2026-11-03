@@ -659,20 +659,61 @@ impl DailyAggStore {
         self.store.get(&master_key(date)).ok().flatten()
     }
 
-    /// 读主档区间（含两端）。主档一天一键、量极小，前缀枚举即可。
+    /// 读主档区间（含两端）。
+    ///
+    /// 键 `dailyagg:d:{date}` 的日期段定长 → 字典序等价时间序（cutoff_date_key
+    /// 同论证），`list_range` 直接吃主键索引范围扫，把窗口读从「全前缀枚举
+    /// 再逐条反序列化过滤」降为「只读窗口内日键」（移植 Agent2API 68d0a4e
+    /// 报表窄列读的键域收窄思路：报表只碰窗口内的行）。
     pub fn load_range(&self, from_date: &str, to_date: &str) -> Vec<DailyAgg> {
-        self.prefix_rows::<DailyAgg>(MASTER_PREFIX)
-            .into_iter()
-            .filter(|a| {
-                !a.date.is_empty() && a.date.as_str() >= from_date && a.date.as_str() <= to_date
-            })
+        let from = master_key(from_date);
+        // to 端开区间：日期 +1 天（失效则退回全前缀扫描，正确性不变）
+        let to_date_excl = chrono::NaiveDate::parse_from_str(to_date, "%Y-%m-%d")
+            .ok()
+            .and_then(|d| d.succ_opt())
+            .map(|d| master_key(&d.format("%Y-%m-%d").to_string()));
+        let keys = match to_date_excl {
+            Some(to_key) => self
+                .store
+                .list_range(MASTER_PREFIX, &from, &to_key)
+                .unwrap_or_default(),
+            None => self
+                .store
+                .list(MASTER_PREFIX)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|k| k.as_str() >= from.as_str())
+                .collect(),
+        };
+        keys.into_iter()
+            .filter_map(|k| self.store.get::<DailyAgg>(&k).ok().flatten())
+            .filter(|a| !a.date.is_empty())
             .collect()
     }
 
-    /// 读某用户日行区间（含两端）。键 `dailyagg:u:{uid}:` 前缀命中主键索引。
+    /// 读某用户日行区间（含两端）。键 `dailyagg:u:{uid}:` 前缀命中主键索引，
+    /// 日期段定长 → 用 [`Self::load_range`] 同款键域收窄（见其注释）。
     pub fn load_user_range(&self, uid: &str, from_date: &str, to_date: &str) -> Vec<UserDailyRow> {
         let prefix = format!("{USER_PREFIX}{uid}:");
-        let mut rows = self.prefix_rows::<UserDailyRow>(&prefix);
+        let from = format!("{prefix}{from_date}");
+        let to_date_excl = chrono::NaiveDate::parse_from_str(to_date, "%Y-%m-%d")
+            .ok()
+            .and_then(|d| d.succ_opt())
+            .map(|d| format!("{prefix}{}", d.format("%Y-%m-%d")));
+        let keys = match to_date_excl {
+            Some(to_key) => self.store.list_range(&prefix, &from, &to_key).unwrap_or_default(),
+            None => self
+                .store
+                .list(&prefix)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|k| k.as_str() >= from.as_str())
+                .collect(),
+        };
+        let mut rows: Vec<UserDailyRow> = keys
+            .into_iter()
+            .filter_map(|k| self.store.get::<UserDailyRow>(&k).ok().flatten())
+            .collect();
         rows.retain(|r| r.date.as_str() >= from_date && r.date.as_str() <= to_date);
         rows.sort_by(|a, b| a.date.cmp(&b.date));
         rows
@@ -691,18 +732,6 @@ impl DailyAggStore {
     /// 清掉触发的重建窗口）时各 handler 走旧全量现算路径，数字永不为假。
     pub fn agg_available(&self) -> bool {
         self.backfill_marker().is_some()
-    }
-
-    fn prefix_rows<T>(&self, prefix: &str) -> Vec<T>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        let Ok(keys) = self.store.list(prefix) else {
-            return Vec::new();
-        };
-        keys.into_iter()
-            .filter_map(|k| self.store.get::<T>(&k).ok().flatten())
-            .collect()
     }
 
     /// 保留清理：删除日键**严格早于** cutoff 的主档与用户行，返回删除条数。
