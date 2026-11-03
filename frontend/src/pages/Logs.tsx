@@ -83,6 +83,10 @@ interface Filters {
   user: string;
   model: string;
   channel: string;
+  /** 状态：'' 全部 / 'ok' / 'error' */
+  status: string;
+  /** 关键词：模糊匹配模型/渠道/错误/用户 */
+  keyword: string;
   start: string;
   end: string;
 }
@@ -112,7 +116,7 @@ export default function Logs(): JSX.Element {
   /** 敏感信息脱敏开关（管理员：隐藏用户邮箱/渠道名/IP） */
   const [masked, setMasked] = useState(false);
 
-  const [filters, setFilters] = useState<Filters>({ user: '', model: '', channel: '', start: '', end: '' });
+  const [filters, setFilters] = useState<Filters>({ user: '', model: '', channel: '', status: '', keyword: '', start: '', end: '' });
 
   // 键盘导航（cc-haha 列表键盘体系）：/ 聚焦用户筛选、↑↓/j k 行高亮、Enter 打开详情
   const { searchRef, rowRefs, activeIndex, setActiveIndex } = useListKeyboard(
@@ -147,6 +151,8 @@ export default function Logs(): JSX.Element {
         if (filters.user) params.user = filters.user;
         if (filters.model) params.model = filters.model;
         if (filters.channel) params.channel = filters.channel;
+        if (filters.status) params.status = filters.status;
+        if (filters.keyword.trim()) params.keyword = filters.keyword.trim();
         // 时间范围筛选：datetime-local 值（本地时区）→ unix 秒
         if (filters.start) params.start = Math.floor(new Date(filters.start).getTime() / 1000);
         if (filters.end) params.end = Math.floor(new Date(filters.end).getTime() / 1000);
@@ -582,6 +588,33 @@ export default function Logs(): JSX.Element {
                 <input className="form-input" value={filters.channel} onChange={(e) => setFilters({ ...filters, channel: e.target.value })} placeholder={t('按渠道过滤')} />
               </div>
             )}
+            <div className="form-group">
+              <label>{t('关键词')}</label>
+              <input
+                className="form-input"
+                value={filters.keyword}
+                onChange={(e) => setFilters({ ...filters, keyword: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    if (page === 1) void load();
+                    else setPage(1);
+                  }
+                }}
+                placeholder={t('模型 / 渠道 / 错误信息')}
+              />
+            </div>
+            <div className="form-group">
+              <label>{t('状态')}</label>
+              <select
+                className="form-input"
+                value={filters.status}
+                onChange={(e) => setFilters({ ...filters, status: e.target.value })}
+              >
+                <option value="">{t('全部')}</option>
+                <option value="ok">{t('成功')}</option>
+                <option value="error">{t('失败')}</option>
+              </select>
+            </div>
             <div className="form-group">
               <label>{t('开始时间')}</label>
               <input

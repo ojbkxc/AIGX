@@ -1007,8 +1007,8 @@ pub async fn discover_models_plain(
         .to_string();
     let secret = session.credential.secret_plain();
     // 免鉴权账号（IP 白名单 / 本地 Ollama）不带 Authorization
-    let authed = !secret.is_empty()
-        && session.credential.kind != super::model::CREDENTIAL_KIND_NONE;
+    let authed =
+        !secret.is_empty() && session.credential.kind != super::model::CREDENTIAL_KIND_NONE;
 
     let client = sessions
         .client_for(session)

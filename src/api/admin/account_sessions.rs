@@ -529,7 +529,11 @@ pub async fn handle_create_account_session(
             )
             .await
             {
-                Ok(snapshot) => snapshot.models.into_iter().map(|m| m.id).collect::<Vec<_>>(),
+                Ok(snapshot) => snapshot
+                    .models
+                    .into_iter()
+                    .map(|m| m.id)
+                    .collect::<Vec<_>>(),
                 Err(_) => {
                     // 登录态供应商没有目录描述时走通用探测；两者都失败就放弃
                     match crate::account_session::catalog::discover_models_plain(

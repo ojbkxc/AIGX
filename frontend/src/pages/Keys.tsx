@@ -9,7 +9,7 @@ import { useToast } from '../components/Toast';
 import { fmtQuota, isAdmin } from '../lib/utils';
 import { useListKeyboard } from '../hooks/useListKeyboard';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination, MultiSelect } from '../components/ui';
 import './Keys.css';
 
 /** 客户端分页每页条数（与 Pricing 页一致） */
@@ -103,6 +103,8 @@ function modelBadgeColor(name: string): string {
 export default function Keys(): JSX.Element {
   const [tokens, setTokens] = useState<TokenItem[]>([]);
   const [groups, setGroups] = useState<GroupItem[]>([]);
+  /** 模型白名单候选（对话/运维页同源：/api/models/available） */
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const addToast = useToast();
@@ -170,6 +172,28 @@ export default function Keys(): JSX.Element {
 
   useEffect(() => {
     void load();
+  }, []);
+
+  // 模型白名单候选：与聊天页 / AI 运维页同源（网关聚合的可用模型）。
+  // 与 keys 列表分开拉，失败静默降级——候选拿不到时 MultiSelect 仍允许自由填。
+  useEffect(() => {
+    let mounted = true;
+    api.listModels()
+      .then((res) => {
+        if (!mounted) return;
+        const raw = Array.isArray(res) ? res : res?.data;
+        const list = Array.isArray(raw)
+          ? raw
+              .map((m) => (typeof m === 'string' ? m : (m as { id?: string })?.id ?? ''))
+              .filter(Boolean)
+              .sort()
+          : [];
+        setModelOptions(list);
+      })
+      .catch(() => undefined);
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const load = async (all = false) => {
@@ -1003,12 +1027,29 @@ export default function Keys(): JSX.Element {
                       <option key={g.name} value={g.name}>{g.name}</option>
                     ))}
                   </Select>
-                  <Input
-                    label={`${t('模型白名单')} ${t('(逗号分隔，留空则允许全部)')}`}
-                    placeholder={editing ? t('留空表示不修改') : 'glm-5.2, deepseek-v3, kimi-k2.6'}
-                    value={form.allowed_models}
-                    onChange={(e) => setForm({ ...form, allowed_models: e.target.value })}
-                  />
+                  {/* 模型白名单：候选来自网关可用模型（与聊天/运维页同源），
+                      也允许自由填。空 = 不限制，与 Agent2API 口径一致。 */}
+                  <div className="form-group">
+                    <label>
+                      {`${t('模型白名单')} ${t('(留空则允许全部)')}`}
+                    </label>
+                    <MultiSelect
+                      value={form.allowed_models
+                        .split(',')
+                        .map((s) => s.trim())
+                        .filter(Boolean)}
+                      onChange={(list) =>
+                        setForm({ ...form, allowed_models: list.join(', ') })
+                      }
+                      options={modelOptions}
+                      placeholder={
+                        editing
+                          ? t('留空表示不修改')
+                          : 'glm-5.2, deepseek-v3, kimi-k2.6'
+                      }
+                      emptyHint={t('暂无可用模型（先在模型管理里启用）')}
+                    />
+                  </div>
                   <Input
                     label={`${t('过期时间')} ${t('(留空则永不过期)')}`}
                     type="datetime-local"

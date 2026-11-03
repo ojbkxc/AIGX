@@ -1,0 +1,112 @@
+/* MultiSelect — 表单内联多选（标签形态） */
+
+.ms-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.ms-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--card-bg, #fff);
+  cursor: text;
+}
+
+.ms-box:focus-within {
+  border-color: var(--accent-color, #2f6fed);
+}
+
+.ms-box.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ms-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px 2px 8px;
+  border-radius: 4px;
+  background: var(--accent-soft, rgba(47, 111, 237, 0.12));
+  color: var(--accent-color, #2f6fed);
+  font-size: 12px;
+  line-height: 1.6;
+  max-width: 100%;
+}
+
+.ms-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ms-chip-x {
+  display: inline-flex;
+  padding: 1px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.ms-chip-x:hover {
+  opacity: 1;
+}
+
+.ms-input {
+  flex: 1 1 60px;
+  min-width: 60px;
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.ms-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  width: 100%;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--card-bg, #fff);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+}
+
+.ms-item {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ms-item.hover,
+.ms-item:hover {
+  background: var(--accent-soft, rgba(47, 111, 237, 0.12));
+}
+
+.ms-empty {
+  padding: 6px 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}

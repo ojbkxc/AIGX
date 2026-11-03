@@ -78,6 +78,12 @@ pub struct RequestLogQuery {
     pub model: Option<String>,
     #[serde(default)]
     pub channel: Option<String>,
+    /// 状态筛选：`ok`（2xx）/ `error`（非 2xx 或带错误信息）
+    #[serde(default)]
+    pub status: Option<String>,
+    /// 关键词：大小写不敏感，匹配 model / 渠道名 / 错误信息 / 用户
+    #[serde(default)]
+    pub keyword: Option<String>,
     #[serde(default)]
     pub start: Option<i64>,
     #[serde(default)]
@@ -163,12 +169,14 @@ pub async fn handle_list_request_logs(
         user_email = Some(user.id);
         (user_email.as_deref(), None)
     };
-    let (logs, total) = state.log_store.requests.list_with_filter(
+    let (logs, total) = state.log_store.requests.list_with_filter_ext(
         filter_user,
         q.model.as_deref(),
         filter_channel,
         q.start,
         q.end,
+        q.status.as_deref(),
+        q.keyword.as_deref(),
         q.page,
         q.effective_size(),
     );

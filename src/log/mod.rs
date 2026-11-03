@@ -845,6 +845,74 @@ impl RequestLogStore {
         (paged, total)
     }
 
+    /// 带状态/关键词的扩展筛选（在基础筛选之上再收窄）。
+    ///
+    /// - `status`：`ok` = 2xx 成功；`error` = 非 2xx 或带 `error_msg`
+    /// - `keyword`：大小写不敏感，匹配 model / channel_name / error_msg / user_id
+    ///
+    /// 不要扩展 `list_with_filter` 的签名：那是热路径（无筛选时走索引快路径），
+    /// 多出的条件会让所有调用点都被迫传 None。扩展筛选只在真正用到时退化全扫。
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_with_filter_ext(
+        &self,
+        user_id: Option<&str>,
+        model: Option<&str>,
+        channel_id: Option<&str>,
+        start: Option<i64>,
+        end: Option<i64>,
+        status: Option<&str>,
+        keyword: Option<&str>,
+        page: usize,
+        size: usize,
+    ) -> (Vec<RequestLog>, usize) {
+        let kw = keyword
+            .map(|k| k.trim().to_lowercase())
+            .filter(|k| !k.is_empty());
+        // 无扩展条件时直接走基础路径（保留索引快路径）
+        if status.is_none() && kw.is_none() {
+            return self.list_with_filter(user_id, model, channel_id, start, end, page, size);
+        }
+        let page = page.clamp(1, 10_000);
+        let size = size.clamp(1, Self::PAGE_SIZE_MAX);
+        let filtered: Vec<RequestLog> = self
+            .list_all()
+            .into_iter()
+            .filter(|l| Self::matches(l, user_id, model, channel_id, start, end))
+            .filter(|l| match status {
+                Some("ok") => (200..300).contains(&l.status_code),
+                Some("error") => !(200..300).contains(&l.status_code) || l.error_msg.is_some(),
+                _ => true,
+            })
+            .filter(|l| match &kw {
+                None => true,
+                Some(k) => {
+                    l.model.to_lowercase().contains(k)
+                        || l.channel_name
+                            .as_deref()
+                            .map(|c| c.to_lowercase().contains(k))
+                            .unwrap_or(false)
+                        || l.error_msg
+                            .as_deref()
+                            .map(|e| e.to_lowercase().contains(k))
+                            .unwrap_or(false)
+                        || l.user_id
+                            .as_deref()
+                            .map(|u| u.to_lowercase().contains(k))
+                            .unwrap_or(false)
+                }
+            })
+            .collect();
+        let total = filtered.len();
+        let start_idx = (page - 1) * size;
+        let paged = if start_idx >= total {
+            Vec::new()
+        } else {
+            let end_idx = (start_idx + size).min(total);
+            filtered[start_idx..end_idx].to_vec()
+        };
+        (paged, total)
+    }
+
     /// 导出全部（或按过滤条件）为 JSON 字符串（管理员视角，含全部字段）
     pub fn export_json(&self) -> String {
         self.export_json_filtered(None, None, None, None, None, true)
