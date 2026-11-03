@@ -2,7 +2,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use futures::StreamExt;
+
 use serde_json::Value;
 use std::sync::Arc;
 use crate::bridge::ChatFormat;

@@ -28,7 +28,7 @@ use crate::api::auth::ApiKeyStore;
 
 /// 共享应用状态
 #[derive(Clone)]
-pub(crate) struct AppState {
+pub struct AppState {
     pub api_client: Arc<CfApiClient>,
     pub model_mapper: Arc<ModelMapper>,
     /// 模型元信息注册表（P1：owned_by/上下文长度/能力）

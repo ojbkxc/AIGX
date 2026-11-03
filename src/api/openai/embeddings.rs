@@ -3,10 +3,10 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use futures::StreamExt;
+
 use serde_json::Value;
 use crate::bridge::{
-    Bridge, BridgeContext, EmbeddingRequest,
+    BridgeContext, EmbeddingRequest,
 };
 use super::*;
 use crate::api::common::extract_client_ip;
