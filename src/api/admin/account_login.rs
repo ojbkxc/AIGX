@@ -68,6 +68,10 @@ pub struct PasteLoginRequest {
     pub site: String,
     #[serde(default)]
     pub name: String,
+    /// KukuAI Cookies 文件导入：`Network\Cookies` 文件内容的 base64
+    /// （与粘贴的 `secret` 二选一，给了文件就走文件导入分支）。
+    #[serde(default)]
+    pub auth_file_b64: String,
 }
 
 /// POST /api/account-sessions/login/paste
@@ -85,8 +89,30 @@ pub async fn handle_login_paste(
     let provider = crate::account_session::registry::normalize_kind(&body.provider);
     let client = reqwest::Client::new();
     let secret = body.secret.trim();
-    if secret.is_empty() {
+    let importing_file = provider == "kuku" && !body.auth_file_b64.trim().is_empty();
+    if secret.is_empty() && !importing_file {
         return Err(error_response("请粘贴凭证", StatusCode::BAD_REQUEST));
+    }
+    // KukuAI 文件导入分支：Cookies SQLite 文件 base64 → 解析出 Cookie 串，
+    // 再走与粘贴登录完全相同的 verify_kuku 校验与落库（口径不分叉）。
+    if importing_file {
+        let cookie = account_login::paste::kuku_cookie_from_sqlite_b64(body.auth_file_b64.trim())
+            .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
+        let creds = account_login::paste::verify_kuku(&client, &cookie)
+            .await
+            .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
+        let creds = if body.name.trim().is_empty() {
+            creds
+        } else {
+            let mut named = creds;
+            named.name = body.name.trim().to_string();
+            named
+        };
+        let account_id = account_login::save_credentials(&state, &provider, &body.channel_id, creds)
+            .map_err(|error| error_response(&error, StatusCode::INTERNAL_SERVER_ERROR))?;
+        return Ok(Json(
+            json!({ "success": true, "data": { "accountId": account_id } }),
+        ));
     }
     let mut creds = match provider.as_str() {
         "monkeycode" | "monkeycode-intl" => {

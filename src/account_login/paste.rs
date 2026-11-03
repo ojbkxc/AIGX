@@ -167,6 +167,104 @@ pub async fn verify_monkeycode(
 
 // ── KukuAI ──────────────────────────────────────────────────────────
 
+/// Cookies SQLite 文件（base64）→ 整段 Cookie 串（供 [`verify_kuku`] 校验）。
+///
+/// 移植自 Agent2API `kuku/credentials.rs` 的 `read_credentials_from_path`
+/// （issue 同源：客户端 Cookies 文件不是 Chromium 加密存储，`encrypted_value`
+/// 为空，凭据全在明文 `value` 列，rusqlite 只读打开直读即可，无需 DPAPI）。
+///
+/// 与上游的差异：上游接 `authFileB64` 落临时文件再读；这里同样先解 base64
+/// 落临时文件（rusqlite 不接受内存库外打开），读完即删。读出的全部百度域
+/// Cookie 拼成 `name=value; …` 串交给现有 `verify_kuku` 走同一套校验/归一化，
+/// 「解析」与「校验」共用一份口径，不会分叉。
+#[cfg(feature = "sqlite-kv")]
+pub fn kuku_cookie_from_sqlite_b64(b64: &str) -> Result<String, String> {
+    use base64::Engine;
+
+    // 粘贴框的长度上限（8 KiB）对 base64 的 Cookies 文件不够（实测几 MB 级），
+    // 单独给一个上限：40 MiB 的 base64 ≈ 30 MiB 文件，远超正常 Cookies 库。
+    const MAX_B64_LENGTH: usize = 40 * 1024 * 1024;
+    if b64.is_empty() {
+        return Err("缺少 Cookies 文件内容（authFileB64）".to_string());
+    }
+    if b64.len() > MAX_B64_LENGTH {
+        return Err("Cookies 文件过大，请确认选择的是 Network\\Cookies 文件".to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|error| format!("Cookies 文件内容不是有效的 base64：{error}"))?;
+    let dir = std::env::temp_dir().join("aigx-kuku-import");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("创建临时目录失败：{error}"))?;
+    let path = dir.join(format!(
+        "cookies-{}",
+        std::process::id()
+    ));
+    // 写临时副本再读：临时副本不存在「被客户端占用」一说；读后即删。
+    std::fs::write(&path, &bytes).map_err(|error| format!("写入临时文件失败：{error}"))?;
+    let result = kuku_cookie_from_sqlite_path(&path);
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
+/// 从指定路径的 Cookies SQLite 读出整段 Cookie 串（见
+/// [`kuku_cookie_from_sqlite_b64`]；路径版供测试直接用真实文件）。
+#[cfg(feature = "sqlite-kv")]
+pub fn kuku_cookie_from_sqlite_path(path: &std::path::Path) -> Result<String, String> {
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|error| {
+        format!(
+            "不是有效的 KukuAI Cookies 数据库（请选择 KukuAI 客户端数据目录下 Network\\Cookies 文件）：{error}"
+        )
+    })?;
+    // 读全部百度域 cookie（不只 BDUSS/STOKEN）：缺 BAIDUID 等会被判「未登录」；
+    // 统计类（Hm_* / HMACCOUNT）对认证无用，剔除。
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, value FROM cookies \
+             WHERE host_key LIKE '%baidu%' AND value != '' \
+               AND name NOT LIKE 'Hm\\_%' ESCAPE '\\' AND name != 'HMACCOUNT'",
+        )
+        .map_err(|error| format!("Cookies 库里找不到 cookies 表（不是 Chromium Cookies 文件）：{error}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("读取 Cookies 库失败：{error}"))?;
+    let mut bduss = String::new();
+    let mut stoken = String::new();
+    let mut extras: Vec<(String, String)> = Vec::new();
+    for row in rows.flatten() {
+        let (name, value) = row;
+        if name.eq_ignore_ascii_case("BDUSS") && bduss.is_empty() {
+            bduss = value;
+        } else if name.eq_ignore_ascii_case("STOKEN") && stoken.is_empty() {
+            stoken = value;
+        } else if !name.eq_ignore_ascii_case("BDUSS")
+            && !name.eq_ignore_ascii_case("STOKEN")
+            && !name.eq_ignore_ascii_case("gfprotpl")
+            && !extras.iter().any(|(existing, _)| existing.eq_ignore_ascii_case(&name))
+        {
+            extras.push((name, value));
+        }
+    }
+    // BDUSS 必填（百度通行证登录态，远长于 8；只拦明显残缺的值）
+    if bduss.chars().count() < 8 {
+        return Err(
+            "文件里没有有效的 BDUSS（请选择 KukuAI 客户端登录后生成的 Network\\Cookies 文件）"
+                .to_string(),
+        );
+    }
+    let mut parts = vec![format!("BDUSS={bduss}")];
+    if !stoken.is_empty() {
+        parts.push(format!("STOKEN={stoken}"));
+    }
+    parts.extend(extras.into_iter().map(|(name, value)| format!("{name}={value}")));
+    Ok(parts.join("; "))
+}
+
 /// 用粘贴的 Cookie 校验 KukuAI 登录态（BDUSS 必填）。
 pub async fn verify_kuku(
     client: &reqwest::Client,
@@ -313,5 +411,64 @@ mod tests {
         assert!(check_length("", "x").is_err());
         assert!(check_length(&"a".repeat(MAX_SECRET_LENGTH + 1), "x").is_err());
         assert!(check_length("abc", "x").is_ok());
+    }
+
+    #[cfg(feature = "sqlite-kv")]
+    #[test]
+    fn kuku_sqlite_import_reads_baidu_cookies() {
+        // 就地建一个最小 Cookies 库（与 Chromium 同 schema 关键列），验证：
+        // 百度域 cookie 全读出、Hm_* 统计类剔除、BDUSS 缺失报错、非 SQLite 报错。
+        let dir = std::env::temp_dir().join(format!("aigx-kuku-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Cookies");
+
+        // ① 正常库
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cookies (host_key TEXT, name TEXT, value TEXT);
+             INSERT INTO cookies VALUES
+               ('.baidu.com', 'BDUSS', 'bduss-value-xxxxxxxx'),
+               ('.baidu.com', 'STOKEN', 'stoken-value'),
+               ('.baidu.com', 'BAIDUID', 'baiduid-value'),
+               ('.baidu.com', 'Hm_lpvt_abc', 'stat'),
+               ('.baidu.com', 'HMACCOUNT', 'stat2'),
+               ('.other.com', 'BDUSS', 'not-baidu'),
+               ('.baidu.com', 'gfprotpl', 'genflowpro'),
+               ('.baidu.com', 'empty', '');",
+        )
+        .unwrap();
+        drop(conn);
+        let cookie = kuku_cookie_from_sqlite_path(&path).unwrap();
+        assert!(cookie.starts_with("BDUSS=bduss-value-xxxxxxxx"));
+        assert!(cookie.contains("STOKEN=stoken-value"));
+        assert!(cookie.contains("BAIDUID=baiduid-value"));
+        assert!(!cookie.contains("Hm_"));
+        assert!(!cookie.contains("HMACCOUNT"));
+        assert!(!cookie.contains("not-baidu"));
+        assert!(!cookie.contains("gfprotpl"));
+        let _ = std::fs::remove_file(&path);
+
+        // ② 没有 BDUSS 的库
+        let path2 = dir.join("Cookies2");
+        let conn = rusqlite::Connection::open(&path2).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cookies (host_key TEXT, name TEXT, value TEXT);
+             INSERT INTO cookies VALUES ('.baidu.com', 'BAIDUID', 'x');",
+        )
+        .unwrap();
+        drop(conn);
+        let error = kuku_cookie_from_sqlite_path(&path2).unwrap_err();
+        assert!(error.contains("BDUSS"));
+        let _ = std::fs::remove_file(&path2);
+
+        // ③ 非 SQLite 文件
+        let path3 = dir.join("Cookies3");
+        std::fs::write(&path3, b"not a database").unwrap();
+        assert!(kuku_cookie_from_sqlite_path(&path3).is_err());
+        let _ = std::fs::remove_file(&path3);
+        let _ = std::fs::remove_dir(&dir);
+
+        // ④ base64 版：空输入拒绝
+        assert!(kuku_cookie_from_sqlite_b64("").is_err());
     }
 }
