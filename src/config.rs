@@ -908,7 +908,7 @@ pub fn set_max_retries(v: u32) {
 /// 内置清单（`channel::is_sensitive_header` 与 `debug_traffic`）覆盖通用凭据头，
 /// 但各家上游的自定义头名会变——管理员可在设置页「网关 → 指纹脱敏」补充。
 /// 支持两种形态：完整头名（`x-foo-token`）与尾部通配（`x-foo-*`）。
-static EXTRA_SENSITIVE_HEADERS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+static EXTRA_SENSITIVE_HEADERS: parking_lot::RwLock<Vec<String>> = parking_lot::RwLock::new(Vec::new());
 
 /// 归一化一条名单项：去空白、转小写；空串丢弃。
 fn normalize_sensitive_pattern(raw: &str) -> Option<String> {
@@ -933,31 +933,23 @@ pub fn set_extra_sensitive_headers(list: Vec<String>) {
             break;
         }
     }
-    if let Ok(mut guard) = EXTRA_SENSITIVE_HEADERS.write() {
+    { let mut guard = EXTRA_SENSITIVE_HEADERS.write();
         *guard = cleaned;
     }
 }
 
 /// 读取额外脱敏头名单（管理页回显用）。
 pub fn extra_sensitive_headers() -> Vec<String> {
-    EXTRA_SENSITIVE_HEADERS
-        .read()
-        .map(|guard| guard.clone())
-        .unwrap_or_default()
+    EXTRA_SENSITIVE_HEADERS.read().clone()
 }
 
 /// 命中额外名单？`name` 需已是小写。支持尾部 `*` 通配前缀匹配。
 pub fn is_extra_sensitive_header(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
-    EXTRA_SENSITIVE_HEADERS
-        .read()
-        .map(|guard| {
-            guard.iter().any(|pat| match pat.strip_suffix('*') {
-                Some(prefix) => lower.starts_with(prefix),
-                None => lower == *pat,
-            })
-        })
-        .unwrap_or(false)
+    EXTRA_SENSITIVE_HEADERS.read().iter().any(|pat| match pat.strip_suffix('*') {
+        Some(prefix) => lower.starts_with(prefix),
+        None => lower == *pat,
+    })
 }
 
 /// 非流式响应体超时（秒）的进程级快照。
@@ -997,20 +989,17 @@ pub fn set_sanitize_fingerprints(v: bool) {
 /// `HashMap::new` 不是 const fn，与 `RETRY_ON_STATUS` 同型用
 /// `Vec<(String, String)>` 承载（写少读多：读路径拷贝列表，写路径仅管理端
 /// 保存时触发）。键值对顺序不保证——消费方按需重建 HashMap。
-static CLINE_HEADER_OVERRIDES: std::sync::RwLock<Vec<(String, String)>> =
-    std::sync::RwLock::new(Vec::new());
+static CLINE_HEADER_OVERRIDES: parking_lot::RwLock<Vec<(String, String)>> =
+    parking_lot::RwLock::new(Vec::new());
 
 /// 读取 Cline 伪装头覆盖表快照（转发层同步访问）。
 pub fn cline_header_overrides() -> Vec<(String, String)> {
-    CLINE_HEADER_OVERRIDES
-        .read()
-        .map(|list| list.clone())
-        .unwrap_or_default()
+    CLINE_HEADER_OVERRIDES.read().clone()
 }
 
 /// 由 main 与 cline-headers 更新端点写入快照。
 pub fn set_cline_header_overrides(entries: Vec<(String, String)>) {
-    if let Ok(mut list) = CLINE_HEADER_OVERRIDES.write() {
+    { let mut list = CLINE_HEADER_OVERRIDES.write();
         *list = entries;
     }
 }
@@ -1034,14 +1023,11 @@ pub fn set_retry_self_count(v: u32) {
 /// 该名单同时影响两处：
 /// - 账号池：命中即不做指数退避冷却（只给基础冷却），立刻换号；
 /// - 渠道级 failover：命中即视为可重试，切到下一个候选渠道。
-static RETRY_ON_STATUS: std::sync::RwLock<Vec<u16>> = std::sync::RwLock::new(Vec::new());
+static RETRY_ON_STATUS: parking_lot::RwLock<Vec<u16>> = parking_lot::RwLock::new(Vec::new());
 
 /// 判断状态码是否命中「直接换号/换渠道」名单。
 pub fn is_retry_status(code: u16) -> bool {
-    RETRY_ON_STATUS
-        .read()
-        .map(|list| list.contains(&code))
-        .unwrap_or(false)
+    RETRY_ON_STATUS.read().contains(&code)
 }
 
 /// 由 main 与 settings 更新端点写入快照（去重、100–599、上限 50）。
@@ -1058,7 +1044,7 @@ pub fn set_retry_on_status_codes(codes: Vec<u16>) {
             break;
         }
     }
-    if let Ok(mut list) = RETRY_ON_STATUS.write() {
+    { let mut list = RETRY_ON_STATUS.write();
         *list = cleaned;
     }
 }

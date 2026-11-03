@@ -7,7 +7,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange)](https://www.rust-lang.org)
 [![React](https://img.shields.io/badge/React-18-61DAFB)](https://react.dev)
 [![License](https://img.shields.io/badge/License-Source_Available-blue)](#许可证)
-[![Version](https://img.shields.io/badge/Version-1.0.18-blue)](https://github.com/ojbkxc/AIGX/releases/latest)
+[![Version](https://img.shields.io/badge/Version-1.0.30-blue)](https://github.com/ojbkxc/AIGX/releases/latest)
 [![CI](https://github.com/ojbkxc/AIGX/actions/workflows/ci.yml/badge.svg)](https://github.com/ojbkxc/AIGX/actions/workflows/ci.yml)
 
 [English](#english) · [中文](#中文)
@@ -88,14 +88,14 @@ docker run -d --name aigx \
 
 | 平台 | 资产名 |
 |---|---|
-| Linux x86_64 | `AIGX-1.0.18-linux-amd64` |
-| Linux ARM64 | `AIGX-1.0.18-linux-arm64` |
-| macOS Intel / Apple Silicon | `AIGX-1.0.18-macos-x86_64` / `AIGX-1.0.18-macos-arm64` |
-| Windows x86_64 | `AIGX-1.0.18-windows-amd64.exe` |
+| Linux x86_64 | `AIGX-1.0.30-linux-amd64` |
+| Linux ARM64 | `AIGX-1.0.30-linux-arm64` |
+| macOS Intel / Apple Silicon | `AIGX-1.0.30-macos-x86_64` / `AIGX-1.0.30-macos-arm64` |
+| Windows x86_64 | `AIGX-1.0.30-windows-amd64.exe` |
 
 ```bash
-chmod +x AIGX-1.0.18-linux-amd64
-./AIGX-1.0.18-linux-amd64
+chmod +x AIGX-1.0.30-linux-amd64
+./AIGX-1.0.30-linux-amd64
 ```
 
 > ⚠️ **前端是外置目录，不是打进二进制的**：管理面板需要 `static/` 与二进制**同级**。三选一拿到它：

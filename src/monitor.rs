@@ -16,7 +16,7 @@
 //! 采集器持有上次采样，由 `/api/monitor` handler 持有单例。
 
 #[cfg(target_os = "linux")]
-use std::sync::Mutex;
+use parking_lot::Mutex;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
 
@@ -139,7 +139,7 @@ impl SystemCollector {
             let idle = val(4) + val(5); // idle + iowait
             let total: u64 = (1..parts.len().min(11)).map(val).sum();
 
-            let mut last = self.last_cpu.lock().unwrap();
+            let mut last = self.last_cpu.lock();
             let now = Instant::now();
             let usage = match last.as_ref() {
                 Some((prev, _)) if total > prev.total => {

@@ -26,7 +26,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -179,12 +179,8 @@ impl TrafficEntry {
 
 /// 记录一条（内部接口，供 [`traced`] 调用）。
 fn push(entry: TrafficEntry) {
-    let mut buffer = match BUFFER.lock() {
-        Ok(b) => b,
-        // 中毒（持锁线程 panic）：环形缓冲只是调试视图，直接放弃本次写入即可，
-        // 绝不能因为调试功能把数据面带崩。
-        Err(_) => return,
-    };
+    // parking_lot 锁不会中毒；环形缓冲只是调试视图，不阻塞数据面语义。
+    let mut buffer = BUFFER.lock();
     while buffer.len() >= MAX_ENTRIES {
         buffer.pop_front();
         DROPPED.fetch_add(1, Ordering::Relaxed);
@@ -213,13 +209,10 @@ pub fn traced(req: reqwest::RequestBuilder, ctx: &BridgeContext) -> reqwest::Req
 
 /// 读取当前缓冲（最新在后）与概览计数。
 pub fn snapshot() -> Value {
-    let (entries, dropped) = match BUFFER.lock() {
-        Ok(b) => (
-            b.iter().cloned().collect::<Vec<_>>(),
-            DROPPED.load(Ordering::Relaxed),
-        ),
-        Err(_) => (Vec::new(), 0),
-    };
+    let b = BUFFER.lock();
+    let entries = b.iter().cloned().collect::<Vec<_>>();
+    let dropped = DROPPED.load(Ordering::Relaxed);
+    let (entries, dropped) = (entries, dropped);
     serde_json::json!({
         "enabled": crate::config::debug_traffic_enabled(),
         "maxEntries": MAX_ENTRIES,
@@ -232,14 +225,10 @@ pub fn snapshot() -> Value {
 
 /// 清空缓冲（返回清掉的条数）。
 pub fn clear() -> usize {
-    match BUFFER.lock() {
-        Ok(mut b) => {
-            let n = b.len();
-            b.clear();
-            n
-        }
-        Err(_) => 0,
-    }
+    let mut b = BUFFER.lock();
+    let n = b.len();
+    b.clear();
+    n
 }
 
 #[cfg(test)]

@@ -32,7 +32,7 @@
 //! - 备份文件（`aigx.bak` / `static.bak`）保留，支持一键回滚。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -167,7 +167,7 @@ struct Inner {
 /// 更新管理器（内部 Arc + Mutex，Clone 共享同一状态）。
 #[derive(Clone)]
 pub struct UpdateManager {
-    inner: Arc<Mutex<Inner>>,
+    inner: Arc<parking_lot::Mutex<Inner>>,
     store: Arc<FileStore>,
     data_dir: PathBuf,
     egress: Arc<crate::egress::EgressCache>,
@@ -216,7 +216,7 @@ impl UpdateManager {
         let _ = std::fs::create_dir_all(data_dir.join("updates"));
         let _ = PROCESS_STARTED_AT.set(now_ts());
         Self {
-            inner: Arc::new(Mutex::new(Inner {
+            inner: Arc::new(parking_lot::Mutex::new(Inner {
                 latest: persisted.latest,
                 checked_at: persisted.checked_at,
                 last_error: persisted.last_error,
@@ -239,11 +239,8 @@ impl UpdateManager {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+    fn lock(&self) -> parking_lot::MutexGuard<'_, Inner> {
+        self.inner.lock()
     }
 
     /// 把内存中的检查结果落库（重启后不重复消耗 GitHub 限额）。

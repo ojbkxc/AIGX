@@ -9,7 +9,7 @@
 //!   `agent_message_chunk` / `agent_thought_chunk` / `tool_call` 分出正文/思考/工具。
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
@@ -596,7 +596,7 @@ fn slots() -> &'static Mutex<(String, i64, Value)> {
 }
 
 fn cached_catalog(base: &str, now: i64) -> Option<Value> {
-    let guard = slots().lock().ok()?;
+    let guard = slots().lock();
     if guard.0 != base || now - guard.1 >= CATALOG_TTL_MS || guard.2.is_null() {
         return None;
     }
@@ -604,9 +604,8 @@ fn cached_catalog(base: &str, now: i64) -> Option<Value> {
 }
 
 fn store_catalog(base: &str, value: &Value, now: i64) {
-    if let Ok(mut guard) = slots().lock() {
-        *guard = (base.to_string(), now, value.clone());
-    }
+    let mut guard = slots().lock();
+    *guard = (base.to_string(), now, value.clone());
 }
 
 fn head(text: &str) -> String {

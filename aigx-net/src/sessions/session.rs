@@ -45,7 +45,7 @@ pub struct Session {
     /// 状态（原子操作避免锁）
     state: AtomicU8,
     /// 元数据
-    metadata: std::sync::RwLock<HashMap<String, String>>,
+    metadata: parking_lot::RwLock<HashMap<String, String>>,
     /// 最后使用时间（毫秒）
     last_used_at: AtomicI64,
     /// 连接时间戳
@@ -68,7 +68,7 @@ impl Session {
             model_id,
             config,
             state: AtomicU8::new(SessionState::Creating as u8),
-            metadata: std::sync::RwLock::new(HashMap::new()),
+            metadata: parking_lot::RwLock::new(HashMap::new()),
             last_used_at: AtomicI64::new(created_at),
             connected_at: created_at,
         }
@@ -170,9 +170,7 @@ impl Session {
             last_used_at: self.last_used(),
             metadata: self
                 .metadata
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+                .read().clone(),
         }
     }
 }

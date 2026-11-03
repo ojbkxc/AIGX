@@ -15,6 +15,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 dashmap = "6.0"
 async-trait = "0.1"
+parking_lot = "0.12"
 
 [package]
 name = "aigx"
@@ -106,10 +107,10 @@ anyhow = "1"
 
 # Utilities
 rand = "0.8"
+parking_lot = "0.12"
 base64 = "0.22"
 mime_guess = "2"
 thiserror = "1"
-parking_lot = "0.12"
 arc-swap = "1"
 dashmap = "6"
 futures = "0.3"

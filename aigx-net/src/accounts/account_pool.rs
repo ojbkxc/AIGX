@@ -87,7 +87,7 @@ pub struct AccountStatusSnapshot {
 /// 管理多个账号的状态和调度
 pub struct AccountPool {
     accounts: DashMap<String, Arc<Account>>,
-    config: std::sync::RwLock<PoolConfig>,
+    config: parking_lot::RwLock<PoolConfig>,
     total_requests: AtomicU64,
     failed_requests: AtomicU64,
     rr_counter: AtomicU64,
@@ -98,7 +98,7 @@ impl AccountPool {
     pub fn new(config: PoolConfig) -> Self {
         Self {
             accounts: DashMap::new(),
-            config: std::sync::RwLock::new(config),
+            config: parking_lot::RwLock::new(config),
             total_requests: AtomicU64::new(0),
             failed_requests: AtomicU64::new(0),
             rr_counter: AtomicU64::new(0),
@@ -139,7 +139,7 @@ impl AccountPool {
     pub fn get_account(&self) -> Option<Arc<Account>> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
 
-        let strategy = self.config.read().unwrap().strategy;
+        let strategy = self.config.read().strategy;
         let available: Vec<Arc<Account>> = self
             .accounts
             .iter()
@@ -236,7 +236,7 @@ impl AccountPool {
             invalid_accounts: invalid,
             total_requests: self.total_requests.load(Ordering::Relaxed),
             failed_requests: self.failed_requests.load(Ordering::Relaxed),
-            pool_strategy: self.config.read().unwrap().strategy,
+            pool_strategy: self.config.read().strategy,
         }
     }
 
@@ -261,7 +261,7 @@ impl AccountPool {
 
     /// 调整负载均衡策略
     pub fn set_strategy(&self, new_strategy: LoadBalanceStrategy) {
-        let mut config = self.config.write().unwrap();
+        let mut config = self.config.write();
         config.strategy = new_strategy;
         info!("Pool strategy changed to: {new_strategy:?}");
     }

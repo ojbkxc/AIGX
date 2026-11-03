@@ -918,12 +918,12 @@ pub async fn handle_report_overview(
 type ReportCacheKey = (String, String, String); // (端点, 窗口 "from:to", 用户范围: ""=全量 / user_id)
 
 fn report_cache(
-) -> &'static std::sync::Mutex<std::collections::HashMap<ReportCacheKey, (std::time::Instant, Value)>>
+) -> &'static parking_lot::Mutex<std::collections::HashMap<ReportCacheKey, (std::time::Instant, Value)>>
 {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<ReportCacheKey, (std::time::Instant, Value)>>,
+        parking_lot::Mutex<std::collections::HashMap<ReportCacheKey, (std::time::Instant, Value)>>,
     > = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+    CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
 }
 
 /// 命中缓存直接回放；未命中执行 `compute` 并落缓存。锁只护 map 本身，
@@ -940,7 +940,7 @@ fn cached_report(
         window.to_string(),
         user_filter.clone().unwrap_or_default(),
     );
-    if let Ok(map) = report_cache().lock() {
+    { let map = report_cache().lock();
         if let Some((at, v)) = map.get(&key) {
             if at.elapsed() < std::time::Duration::from_secs(ttl_secs) {
                 return v.clone();
@@ -948,7 +948,7 @@ fn cached_report(
         }
     }
     let fresh = compute();
-    if let Ok(mut map) = report_cache().lock() {
+    { let mut map = report_cache().lock();
         // 防止日志很长时缓存无限膨胀：超过 256 条整表清空（简单够用）
         if map.len() > 256 {
             map.clear();

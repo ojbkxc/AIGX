@@ -11,7 +11,7 @@
 //! AIGX 的颜色映射：管理员/付费用户 = Green，普通用户 = Yellow，
 //! 免费层/低优先级 = Red（由调用方按用户分组决定）。
 
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -241,25 +241,21 @@ impl BudgetBackend for InMemoryBudget {
             Some(e) => e,
             None => return ConsumeOutcome::OwnBucket,
         };
-        let mut buckets = entry.value().lock().unwrap_or_else(|e| {
-            // Shaper 尽力而为：中毒锁恢复继续
-            tracing::warn!(channel_id, "rate_budget 互斥锁中毒，恢复");
-            e.into_inner()
-        });
+        let mut buckets = entry.value().lock();
         buckets.refill_if_due();
         buckets.try_consume(color, est_tpm)
     }
 
     fn refund(&self, channel_id: &str, color: TrafficColor, tpm_to_return: u64) {
         if let Some(entry) = self.channels.get(channel_id) {
-            let mut buckets = entry.value().lock().unwrap_or_else(|e| e.into_inner());
+            let mut buckets = entry.value().lock();
             buckets.refund(color, tpm_to_return);
         }
     }
 
     fn snapshot(&self, channel_id: &str) -> Option<BudgetSnapshot> {
         let entry = self.channels.get(channel_id)?;
-        let buckets = entry.value().lock().unwrap_or_else(|e| e.into_inner());
+        let buckets = entry.value().lock();
         Some(BudgetSnapshot {
             rpm_cap: buckets.rpm_cap,
             rpm_remaining_green: buckets.rpm_remaining[color_idx(TrafficColor::Green)],

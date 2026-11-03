@@ -43,13 +43,13 @@ type ReqKey = (String, String, String);
 
 /// 指标聚合器。
 pub struct Metrics {
-    requests: std::sync::Mutex<BTreeMap<ReqKey, AtomicU64>>,
-    tokens: std::sync::Mutex<BTreeMap<(String, String), AtomicU64>>,
-    latency_sum_ms: std::sync::Mutex<BTreeMap<String, AtomicU64>>,
-    latency_count: std::sync::Mutex<BTreeMap<String, AtomicU64>>,
+    requests: parking_lot::Mutex<BTreeMap<ReqKey, AtomicU64>>,
+    tokens: parking_lot::Mutex<BTreeMap<(String, String), AtomicU64>>,
+    latency_sum_ms: parking_lot::Mutex<BTreeMap<String, AtomicU64>>,
+    latency_count: parking_lot::Mutex<BTreeMap<String, AtomicU64>>,
     /// 延迟直方图（批次6）：model → 每桶累计计数（+Inf 在 render 时由 count 补）
-    latency_hist: std::sync::Mutex<BTreeMap<String, Vec<AtomicU64>>>,
-    health: std::sync::Mutex<BTreeMap<String, u8>>,
+    latency_hist: parking_lot::Mutex<BTreeMap<String, Vec<AtomicU64>>>,
+    health: parking_lot::Mutex<BTreeMap<String, u8>>,
     inflight: AtomicI64,
     channels_enabled: AtomicU64,
     channels_disabled: AtomicU64,
@@ -60,17 +60,17 @@ pub struct Metrics {
 impl Metrics {
     fn new() -> Self {
         Self {
-            requests: std::sync::Mutex::new(BTreeMap::new()),
-            tokens: std::sync::Mutex::new(BTreeMap::new()),
-            latency_sum_ms: std::sync::Mutex::new(BTreeMap::new()),
-            latency_count: std::sync::Mutex::new(BTreeMap::new()),
-            health: std::sync::Mutex::new(BTreeMap::new()),
+            requests: parking_lot::Mutex::new(BTreeMap::new()),
+            tokens: parking_lot::Mutex::new(BTreeMap::new()),
+            latency_sum_ms: parking_lot::Mutex::new(BTreeMap::new()),
+            latency_count: parking_lot::Mutex::new(BTreeMap::new()),
+            health: parking_lot::Mutex::new(BTreeMap::new()),
             inflight: AtomicI64::new(0),
             channels_enabled: AtomicU64::new(0),
             channels_disabled: AtomicU64::new(0),
             cost_usd: AtomicU64::new(0),
             cost_cny: AtomicU64::new(0),
-            latency_hist: std::sync::Mutex::new(BTreeMap::new()),
+            latency_hist: parking_lot::Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -84,17 +84,17 @@ impl Metrics {
         };
         let status = status.to_string();
         {
-            let mut map = self.requests.lock().unwrap();
+            let mut map = self.requests.lock();
             map.entry((model.clone(), channel, status))
                 .or_default()
                 .fetch_add(1, Ordering::Relaxed);
         }
         {
-            let mut sum = self.latency_sum_ms.lock().unwrap();
+            let mut sum = self.latency_sum_ms.lock();
             sum.entry(model.clone())
                 .or_default()
                 .fetch_add(latency_ms, Ordering::Relaxed);
-            let mut count = self.latency_count.lock().unwrap();
+            let mut count = self.latency_count.lock();
             count
                 .entry(model.clone())
                 .or_default()
@@ -102,7 +102,7 @@ impl Metrics {
         }
         // 批次6：延迟直方图分桶（cumulative 计数，render 时按 Prometheus 习惯输出）
         {
-            let mut hist = self.latency_hist.lock().unwrap();
+            let mut hist = self.latency_hist.lock();
             let buckets = hist.entry(model).or_insert_with(|| {
                 LATENCY_BUCKETS_MS
                     .iter()
@@ -129,7 +129,7 @@ impl Metrics {
 
     /// 记录 token 用量。`ty` 取 `"prompt"` / `"completion"`。
     pub fn record_tokens(&self, model: &str, ty: &str, tokens: u64) {
-        let mut map = self.tokens.lock().unwrap();
+        let mut map = self.tokens.lock();
         map.entry((model.to_string(), ty.to_string()))
             .or_default()
             .fetch_add(tokens, Ordering::Relaxed);
@@ -155,7 +155,6 @@ impl Metrics {
     pub fn set_health(&self, model: &str, level: u8) {
         self.health
             .lock()
-            .unwrap()
             .insert(model.to_string(), level.min(2));
     }
 
@@ -165,7 +164,7 @@ impl Metrics {
         out.push_str("# HELP aigx_requests_total Total number of AI requests.\n");
         out.push_str("# TYPE aigx_requests_total counter\n");
         {
-            let map = self.requests.lock().unwrap();
+            let map = self.requests.lock();
             for ((model, channel, status), v) in map.iter() {
                 out.push_str(&format!(
                     "aigx_requests_total{{model=\"{}\",channel=\"{}\",status=\"{}\"}} {}\n",
@@ -179,7 +178,7 @@ impl Metrics {
         out.push_str("# HELP aigx_tokens_total Total tokens used.\n");
         out.push_str("# TYPE aigx_tokens_total counter\n");
         {
-            let map = self.tokens.lock().unwrap();
+            let map = self.tokens.lock();
             for ((model, ty), v) in map.iter() {
                 out.push_str(&format!(
                     "aigx_tokens_total{{model=\"{}\",type=\"{}\"}} {}\n",
@@ -192,12 +191,11 @@ impl Metrics {
         out.push_str("# HELP aigx_latency_ms Request latency in milliseconds.\n");
         out.push_str("# TYPE aigx_latency_ms summary\n");
         {
-            let sum = self.latency_sum_ms.lock().unwrap();
+            let sum = self.latency_sum_ms.lock();
             for (model, v) in sum.iter() {
                 let count = self
                     .latency_count
                     .lock()
-                    .unwrap()
                     .get(model)
                     .map(|c| c.load(Ordering::Relaxed))
                     .unwrap_or(0);
@@ -216,12 +214,11 @@ impl Metrics {
         out.push_str("# HELP aigx_request_latency_bucket Cumulative latency buckets.\n");
         out.push_str("# TYPE aigx_request_latency histogram\n");
         {
-            let hist = self.latency_hist.lock().unwrap();
+            let hist = self.latency_hist.lock();
             for (model, buckets) in hist.iter() {
                 let count = self
                     .latency_count
                     .lock()
-                    .unwrap()
                     .get(model)
                     .map(|c| c.load(Ordering::Relaxed))
                     .unwrap_or(0);
@@ -243,7 +240,6 @@ impl Metrics {
                     escape(model),
                     self.latency_sum_ms
                         .lock()
-                        .unwrap()
                         .get(model)
                         .map(|v| v.load(Ordering::Relaxed))
                         .unwrap_or(0)
@@ -260,7 +256,7 @@ impl Metrics {
         );
         out.push_str("# TYPE aigx_health_level gauge\n");
         {
-            let map = self.health.lock().unwrap();
+            let map = self.health.lock();
             for (model, level) in map.iter() {
                 out.push_str(&format!(
                     "aigx_health_level{{model=\"{}\"}} {}\n",

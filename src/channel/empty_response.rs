@@ -10,14 +10,14 @@
 //! 调用方应把该渠道置入冷却或记入断路器失败（`FailureType::EmptyResponse`）。
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 /// 默认阈值：连续 3 次空响应判定为故障。
 const DEFAULT_EMPTY_RESPONSE_THRESHOLD: u32 = 3;
 
 /// per-channel 连续空响应计数器。
 ///
-/// 线程安全：`std::sync::RwLock<HashMap>`，与 burncloud 实现一致。
+/// 线程安全：`parking_lot::RwLock<HashMap>`，与 burncloud 实现一致。
 /// 读写频率低（每次请求结束一次），RwLock 足够。
 pub struct EmptyResponseCounter {
     counters: RwLock<HashMap<String, u32>>,
@@ -52,8 +52,7 @@ impl EmptyResponseCounter {
     pub fn record_empty(&self, channel_id: &str) -> bool {
         let mut counters = self
             .counters
-            .write()
-            .expect("EmptyResponseCounter lock poisoned");
+            .write();
         let count = counters.entry(channel_id.to_string()).or_insert(0);
         *count += 1;
         let exceeded = *count >= self.threshold;
@@ -87,8 +86,7 @@ impl EmptyResponseCounter {
     pub fn reset(&self, channel_id: &str) {
         let mut counters = self
             .counters
-            .write()
-            .expect("EmptyResponseCounter lock poisoned");
+            .write();
         if let Some(count) = counters.get_mut(channel_id) {
             if *count > 0 {
                 tracing::debug!(
@@ -105,8 +103,7 @@ impl EmptyResponseCounter {
     pub fn get_count(&self, channel_id: &str) -> u32 {
         let counters = self
             .counters
-            .read()
-            .expect("EmptyResponseCounter lock poisoned");
+            .read();
         counters.get(channel_id).copied().unwrap_or(0)
     }
 
@@ -114,8 +111,7 @@ impl EmptyResponseCounter {
     pub fn force_reset(&self, channel_id: &str) -> u32 {
         let mut counters = self
             .counters
-            .write()
-            .expect("EmptyResponseCounter lock poisoned");
+            .write();
         let previous = counters.remove(channel_id).unwrap_or(0);
         if previous > 0 {
             tracing::info!(
@@ -131,8 +127,7 @@ impl EmptyResponseCounter {
     pub fn get_all_counts(&self) -> Vec<(String, u32)> {
         let counters = self
             .counters
-            .read()
-            .expect("EmptyResponseCounter lock poisoned");
+            .read();
         counters
             .iter()
             .filter(|(_, &c)| c > 0)

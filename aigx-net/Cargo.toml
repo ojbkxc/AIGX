@@ -26,3 +26,4 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 dashmap = { workspace = true }
 async-trait = { workspace = true }
+parking_lot = { workspace = true }
