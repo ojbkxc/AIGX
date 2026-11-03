@@ -13,6 +13,7 @@ use crate::bridge::Bridge;
 
 pub mod accio;
 pub mod antigravity;
+pub mod antigravity_signature_cache;
 pub mod catpaw;
 pub mod codearts;
 pub mod commandcode;

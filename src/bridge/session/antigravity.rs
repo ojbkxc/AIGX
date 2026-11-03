@@ -273,7 +273,8 @@ fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
                                 .and_then(Value::as_str)
                                 .map(str::to_string),
                             arguments: fc.get("args").map(|a| a.to_string()),
-                        });
+                    signature: None,
+});
                         continue;
                     }
                     let Some(part_text) = part.get("text").and_then(Value::as_str) else {
@@ -370,10 +371,40 @@ pub fn build_envelope(req: &ChatFormat) -> Value {
                 }
                 system.push_str(text);
             }
-            Role::Assistant => contents.push(json!({
-                "role": "model",
-                "parts": [{ "text": text }],
-            })),
+            Role::Assistant => {
+                if let Some(calls) = &message.tool_calls {
+                    // model 轮的工具调用：text part + 每个 functionCall 一个 part。
+                    // thoughtSignature 是 part 层级字段（Gemini Part 形态）。
+                    // 客户端带回的签名最优先（最忠实的一份，位置容忍三种写法），
+                    // 没带时留给 backfill_signatures 按缓存回填。
+                    let mut parts: Vec<Value> = Vec::new();
+                    if !text.trim().is_empty() {
+                        parts.push(json!({ "text": text }));
+                    }
+                    for call in calls {
+                        let signature = client_brought_signature(call);
+                        let mut fc = json!({
+                            "name": call.function_name,
+                            "args": serde_json::from_str::<Value>(&call.arguments)
+                                .unwrap_or(Value::Object(Map::new())),
+                        });
+                        if !call.id.is_empty() {
+                            fc["id"] = json!(call.id);
+                        }
+                        let mut part = json!({ "functionCall": fc });
+                        if let Some(sig) = signature {
+                            part["thoughtSignature"] = json!(sig);
+                        }
+                        parts.push(part);
+                    }
+                    contents.push(json!({ "role": "model", "parts": parts }));
+                } else {
+                    contents.push(json!({
+                        "role": "model",
+                        "parts": [{ "text": text }],
+                    }));
+                }
+            }
             _ => contents.push(json!({
                 "role": "user",
                 "parts": [{ "text": text }],
@@ -408,6 +439,10 @@ pub fn build_envelope(req: &ChatFormat) -> Value {
     }
 
     let mut request = Map::new();
+    // sessionId：会话稳定键（缓存兜底档的写入/读取键，见 antigravity_signature_cache）
+    let session = antigravity_session_id(&system, &req.model);
+    // 客户端没带回签名时按服务端缓存回填（客户端带回的签名在下方 tool 轮处理中最优先）
+    backfill_signatures(&mut contents, &session);
     request.insert("contents".to_string(), Value::Array(contents));
     if !system.is_empty() {
         request.insert(
@@ -432,6 +467,7 @@ pub fn build_envelope(req: &ChatFormat) -> Value {
         )),
     );
     envelope.insert("request".to_string(), Value::Object(request));
+    envelope.insert("sessionId".to_string(), json!(session));
     // `project`（cloudaicompanionProject）由调用方通过 body 额外字段透传；
     // 没给时不发该键（上游可能放宽按需校验，Agent2API 同口径）。
     if let Some(project) = req
@@ -445,8 +481,87 @@ pub fn build_envelope(req: &ChatFormat) -> Value {
     Value::Object(envelope)
 }
 
+/// 从客户端带回的 tool_call 中取思考签名（三种容忍位置：
+/// `extra_content.google.thought_signature`（Google 官方 OpenAI 兼容端点字段）、
+/// 裸 `thought_signature` / `thoughtSignature`）。
+/// 注意：ToolCall 结构只带 id/name/arguments，extra 字段在 parse_messages
+/// 阶段未保留 —— 返回 None，回填走服务端缓存（主键档已覆盖绝大多数客户端）。
+fn client_brought_signature(_call: &crate::bridge::ToolCall) -> Option<String> {
+    None
+}
+
 fn head(text: &str) -> String {
     text.chars().take(240).collect()
+}
+
+/// 会话稳定键：同一会话的多轮请求派生出同一个 id（签名缓存兜底档的键）。
+/// 对照 Agent2API `antigravity_outbound::session_id`：按 system + model 派生。
+/// system 为空时用固定占位（纯工具续接轮没有 system，但仍需与首轮同键——
+/// 兜底档只损失「不同会话同 system+model」的碰撞面，主键档不受影响）。
+fn antigravity_session_id(system: &str, model: &str) -> String {
+    use std::fmt::Write as _;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&(system, model), &mut hasher);
+    let h = std::hash::Hasher::finish(&hasher);
+    let mut out = String::new();
+    let _ = write!(out, "sess-{h:016x}");
+    out
+}
+
+/// 历史回放里缺签名的 `functionCall` part → 按服务端缓存回填。
+///
+/// 优先级：客户端带回的签名（在下方 tool 轮构建时已挂 part 层级）→
+/// call id 缓存 → 会话 + 函数名缓存。只扫 model 轮（functionCall 只长在
+/// model 轮上）。签名是 **part 层级**字段（与 functionCall 平级），插错
+/// 层级上游会报 `Unknown name "thoughtSignature" at …function_call`。
+fn backfill_signatures(contents: &mut [Value], session: &str) {
+    let mut backfilled = 0usize;
+    for turn in contents.iter_mut() {
+        if turn.get("role").and_then(Value::as_str) != Some("model") {
+            continue;
+        }
+        let Some(parts) = turn.get_mut("parts").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for part in parts.iter_mut() {
+            let Some(part_object) = part.as_object_mut() else {
+                continue;
+            };
+            let Some(call) = part_object.get("functionCall").and_then(Value::as_object) else {
+                continue;
+            };
+            let has_signature = part_object
+                .get("thoughtSignature")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some();
+            if has_signature {
+                continue;
+            }
+            let id = call
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            let name = call
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            let signature = super::antigravity_signature_cache::lookup_call(id)
+                .or_else(|| super::antigravity_signature_cache::lookup_for_session(session, name));
+            if let Some(signature) = signature {
+                part_object.insert("thoughtSignature".to_string(), Value::String(signature));
+                backfilled += 1;
+            }
+        }
+    }
+    if backfilled > 0 {
+        tracing::debug!(
+            "antigravity: 客户端未回带思考签名，按服务端缓存回填 {backfilled} 处 functionCall"
+        );
+    }
 }
 
 #[cfg(test)]

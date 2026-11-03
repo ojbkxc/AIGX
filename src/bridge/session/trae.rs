@@ -297,7 +297,8 @@ fn apply_event(
                                     .map(str::to_string)
                                     .unwrap_or_else(|| args.to_string())
                             }),
-                        })
+                    signature: None,
+})
                     })
                     .collect();
                 if !parsed.is_empty() {

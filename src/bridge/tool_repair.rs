@@ -300,12 +300,14 @@ mod tests {
                 id: Some("call_1".into()),
                 function_name: Some("get_weather".into()),
                 arguments: Some(r#"{city: "北"#.into()),
+                signature: None,
             },
             super::super::ToolCallDelta {
                 index: 0,
                 id: None,
                 function_name: None,
                 arguments: Some(r#"京"}"#.into()),
+                signature: None,
             },
         ];
         let out = super::super::tool_repair::accumulate_tool_call_arguments(&deltas);
@@ -326,13 +328,15 @@ mod tests {
                 id: Some("call_a".into()),
                 function_name: Some("f_a".into()),
                 arguments: Some(r#"{"a":1}"#.into()),
-            },
+                    signature: None,
+},
             super::super::ToolCallDelta {
                 index: 1,
                 id: Some("call_b".into()),
                 function_name: Some("f_b".into()),
                 arguments: Some(r#"{"b":2}"#.into()),
-            },
+                    signature: None,
+},
         ];
         let out = super::super::tool_repair::accumulate_tool_call_arguments(&deltas);
         assert_eq!(out.len(), 2);

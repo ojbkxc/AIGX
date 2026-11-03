@@ -590,7 +590,8 @@ fn parse_stream_event(
                     id: Some(format!("call_{}", uuid::Uuid::new_v4().simple())),
                     function_name: Some(name.to_string()),
                     arguments: Some(args.to_string()),
-                });
+                    signature: None,
+});
             }
         }
     }

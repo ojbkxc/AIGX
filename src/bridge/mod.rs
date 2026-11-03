@@ -46,6 +46,11 @@ pub struct ToolCallDelta {
     pub id: Option<String>,
     pub function_name: Option<String>,
     pub arguments: Option<String>,
+    /// Antigravity 思考签名（`thoughtSignature`）：随 tool_call 带出给
+    /// OpenAI 兼容客户端（放在非标位置 `extra_content.google.thought_signature`，
+    /// Google 自家端点同款），同时入服务端缓存（antigravity_signature_cache）。
+    /// 其余 bridge 恒为 `None`。
+    pub signature: Option<String>,
 }
 
 /// 聊天消息角色

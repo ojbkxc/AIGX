@@ -454,11 +454,19 @@ pub(crate) async fn handle_chat_completions(
                             // （同一次 chunk 内的多个 index 并行聚合，修复彼此独立）
                             let repaired =
                                 tool_repair::accumulate_tool_call_arguments(tool_calls);
+                            // Antigravity 思考签名随 tool_call 带出：位置取 Google
+                            // 自家 OpenAI 兼容端点的官方非标字段
+                            // extra_content.google.thought_signature。多数客户端会
+                            // 丢弃该字段 —— 那时请求侧按服务端缓存回填
+                            // （antigravity_signature_cache）。
+                            let signature = tool_calls
+                                .iter()
+                                .find_map(|tc| tc.signature.clone());
                             delta["tool_calls"] = Value::Array(
                                 repaired
                                     .iter()
                                     .map(|(idx, id, name, args)| {
-                                        serde_json::json!({
+                                        let mut item = serde_json::json!({
                                             "index": idx,
                                             "id": id,
                                             "type": "function",
@@ -466,7 +474,13 @@ pub(crate) async fn handle_chat_completions(
                                                 "name": name,
                                                 "arguments": args,
                                             }
-                                        })
+                                        });
+                                        if let Some(sig) = &signature {
+                                            item["extra_content"] = serde_json::json!({
+                                                "google": { "thought_signature": sig }
+                                            });
+                                        }
+                                        item
                                     })
                                     .collect(),
                             );

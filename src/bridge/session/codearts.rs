@@ -396,7 +396,8 @@ fn decode_event(event: &SseEvent, id: &str, model: &str) -> Decoded {
                                 .and_then(|function| function.get("arguments"))
                                 .and_then(Value::as_str)
                                 .map(str::to_string),
-                        })
+                    signature: None,
+})
                         .collect();
                     if !parsed.is_empty() {
                         delta.tool_calls = Some(parsed);

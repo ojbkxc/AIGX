@@ -175,7 +175,8 @@ fn parse_openai_chunk(
                         .and_then(|f| f.get("arguments"))
                         .and_then(|a| a.as_str())
                         .map(String::from),
-                })
+                    signature: None,
+})
                 .collect()
         });
 

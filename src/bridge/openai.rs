@@ -1066,7 +1066,8 @@ fn parse_sse_event(event: &str, id: &str, model: &str) -> Option<ChatChunk> {
                                     .and_then(|f| f.get("arguments"))
                                     .and_then(|a| a.as_str())
                                     .map(String::from),
-                            })
+                    signature: None,
+})
                             .collect()
                     });
                 // 流式推理增量：DeepSeek 系用 reasoning_content，OpenAI o 系列用 reasoning
