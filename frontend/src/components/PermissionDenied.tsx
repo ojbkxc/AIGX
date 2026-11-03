@@ -16,11 +16,11 @@ export default function PermissionDenied(): JSX.Element {
         </div>
         <h1>{t('无权访问')}</h1>
         <p className="route-error-detail">
-          {t('此页面仅管理员可用。你当前登录为普通用户，可前往 Playground、API 密钥或钱包。')}
+          {t('此页面仅管理员可用。你当前登录为普通用户，可前往聊天、API 密钥或钱包。')}
         </p>
         <div className="route-error-actions">
           <Link className="btn btn-primary btn-sm" to="/">{t('回到首页')}</Link>
-          <Link className="btn btn-outline btn-sm" to="/playground">{t('去 Playground')}</Link>
+          <Link className="btn btn-outline btn-sm" to="/chat">{t('去聊天')}</Link>
         </div>
       </div>
     </div>

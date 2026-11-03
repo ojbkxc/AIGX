@@ -97,7 +97,7 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
     for (const p of pageHits) out.push({ kind: 'page', path: p.path, title: t(p.labelKey), sub: t('页面') });
     for (const c of hits.channel.slice(0, 8)) out.push({ kind: 'entity', entity: 'channel', path: '/channels', title: c.name || '—', sub: c.base_url || '渠道' });
     for (const u of hits.user.slice(0, 8)) out.push({ kind: 'entity', entity: 'user', path: '/users', title: u.email || u.username || '—', sub: u.role || '用户' });
-    for (const m of hits.model.slice(0, 8)) out.push({ kind: 'entity', entity: 'model', path: '/playground', title: m.id || '—', sub: m.owned_by || '模型' });
+    for (const m of hits.model.slice(0, 8)) out.push({ kind: 'entity', entity: 'model', path: '/model-manage', title: m.id || '—', sub: m.owned_by || '模型' });
     for (const k of hits.token.slice(0, 8)) out.push({ kind: 'entity', entity: 'token', path: '/keys', title: k.name || '—', sub: k.group || '令牌' });
     return out;
   }, [pageHits, hits, t]);
