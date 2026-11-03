@@ -385,6 +385,9 @@ impl FileStore {
         }
         let sqlite = match &self.inner {
             FileStoreInner::Sqlite(s) => s.cheap_clone(),
+            // 上面已处理并 return；这里只为 match 穷举（启用 postgres 时才有该变体）。
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(_) => unreachable!("postgres 后端已在上面 return"),
         };
         // 无 tokio runtime（同步测试/启动早期）时直接同步写，语义不变
         if tokio::runtime::Handle::try_current().is_err() {
