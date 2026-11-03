@@ -9,6 +9,11 @@ use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 会话传输层
+///
+/// `#[allow(clippy::double_must_use)]`：`async_trait` 宏会给每个方法生成
+/// `#[must_use]`，与 Future 自身的 `must_use` 重复（clippy 1.99 报
+/// `double_must_use`）。该属性由宏生成、无法手改，只能在 trait 上豁免。
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait TransportLayer: Send + Sync {
     /// 发送消息

@@ -97,6 +97,11 @@ pub struct ConnectionPool {
 }
 
 /// 连接工厂接口
+///
+/// `#[allow(clippy::double_must_use)]`：`async_trait` 宏会给每个方法生成
+/// `#[must_use]`，与 Future 自身的 `must_use` 重复（clippy 1.99 报
+/// `double_must_use`）。该属性由宏生成、无法手改，只能在 trait 上豁免。
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait ConnectionFactory: Send + Sync {
     /// 创建新连接

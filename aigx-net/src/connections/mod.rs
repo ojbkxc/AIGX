@@ -160,6 +160,11 @@ impl ConnectionMetadata {
 /// 连接接口
 ///
 /// 定义所有连接类型共有的操作（async-trait 以支持 dyn Connection）
+///
+/// `#[allow(clippy::double_must_use)]`：`async_trait` 宏会给每个方法生成
+/// `#[must_use]`，与 Future 自身的 `must_use` 重复（clippy 1.99 报
+/// `double_must_use`）。该属性由宏生成、无法手改，只能在 trait 上豁免。
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait Connection: Send + Sync {
     /// 连接标识

@@ -25,7 +25,9 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy (default features)
-        run: cargo clippy --all-targets -- -D warnings
+        # --workspace：aigx-net 是 workspace 成员，裸 --all-targets 只检查
+        # 默认包，成员里的 clippy 错误会一路积压到没人看见。
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   frontend:
     name: build frontend
