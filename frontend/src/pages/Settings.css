@@ -13,6 +13,91 @@
   margin-bottom: 20px;
 }
 
+/* ── 左栏分类导航 + 右栏内容（对齐 Agent2API settings 的 CATEGORIES 布局）── */
+.settings-layout {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.settings-nav {
+  position: sticky;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--card-bg);
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13.5px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.settings-nav-item:hover {
+  color: var(--text-main);
+  background: var(--btn-secondary-hover);
+}
+
+.settings-nav-item.active {
+  color: var(--text-main);
+  background: var(--btn-secondary-bg);
+  font-weight: 600;
+}
+
+.settings-nav-item svg {
+  flex-shrink: 0;
+  opacity: 0.75;
+}
+
+.settings-nav-item.active svg {
+  opacity: 1;
+  color: var(--accent-color);
+}
+
+.settings-pane {
+  min-width: 0;
+}
+
+/* 窄屏：导航折成横向滚动条，内容占满 */
+@media (max-width: 900px) {
+  .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .settings-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .settings-nav-item {
+    width: auto;
+    white-space: nowrap;
+  }
+}
+
 /* 分区副标题（card-header 内） */
 .card-subtitle {
   margin: 4px 0 0;

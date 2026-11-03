@@ -118,8 +118,7 @@
 }
 
 /* ── 输入区底部工具组（new-api PromptInputTools 观感）── */
-.pg-tools,
-.pg-tools-right {
+.pg-tools {
   display: flex;
   align-items: center;
   gap: 2px;
@@ -441,7 +440,7 @@
 
 /* ── 游乐园形态移动端适配 ── */
 @media (max-width: 640px) {
-  .pg-tools-right .model-picker {
+  .chat-debugger-playground .chat-debugger-input-actions .model-picker {
     min-width: 120px;
   }
 

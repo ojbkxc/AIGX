@@ -1982,5 +1982,14 @@
   "需在": "must be within",
   "渠道与账号池": "Channels & Accounts",
   "上游渠道": "Upstream Channels",
-  "上游渠道保存 Key / 模型映射 / 成本价；账号池管理登录态账号的多凭证轮换。账号型渠道是账号池的内部容器，不在此单独展示。": "Upstream channels hold keys, model mappings and cost prices; the account pool manages multi-credential rotation for login-based accounts. Account-type channels are internal containers of the account pool and are not listed here."
+  "上游渠道保存 Key / 模型映射 / 成本价；账号池管理登录态账号的多凭证轮换。账号型渠道是账号池的内部容器，不在此单独展示。": "Upstream channels hold keys, model mappings and cost prices; the account pool manages multi-credential rotation for login-based accounts. Account-type channels are internal containers of the account pool and are not listed here.",
+  "超时": "Timeouts",
+  "限流与缓存": "Rate limits & cache",
+  "数据": "Data",
+  "路由": "Routing",
+  "按次计费": "Per-request billing",
+  "各阶段等待上游的最长时间，防止悬挂请求长期占用连接。": "Maximum wait per upstream stage, so hanging requests cannot hold connections open.",
+  "上游失败后换渠道 / 换账号的策略。": "How to fail over to another channel or account when upstream errors.",
+  "请求体大小上限": "Max request body size",
+  "数据面入站请求的硬上限，超出直接拒绝，防止超大请求打爆内存。": "Hard cap on inbound data-plane request size; oversized requests are rejected to protect memory."
 }

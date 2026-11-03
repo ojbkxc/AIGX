@@ -618,11 +618,24 @@
   border: none;
   background: transparent;
   box-shadow: none;
+  outline: none;
   min-height: 44px;
   max-height: 160px;
   font-size: 0.9375rem;
   line-height: 1.55;
   padding: 6px 4px;
+  color: var(--text-main);
+  font-family: inherit;
+}
+
+.chat-debugger-input-shell textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 0.75;
+}
+
+.chat-debugger-input-shell textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .chat-debugger-input-shell textarea:focus {
@@ -652,11 +665,11 @@
   gap: 8px;
 }
 
-/* 输入区左组：+ 附件菜单 + 上下文估算 */
+/* 输入区左组：+ 附件菜单 + 上下文估算（间距对齐 AI 运维页 .agent-input-left） */
 .chat-debugger-input-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -755,6 +768,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   width: 36px;
   height: 36px;
   padding: 0;
@@ -780,6 +794,12 @@
   background: var(--danger, #dc2626);
   box-shadow: 0 2px 8px -2px rgba(220, 38, 38, 0.5);
   animation: chat-debugger-pulse 1.2s ease-in-out infinite;
+}
+
+/* 生成中：与 AI 运维页 .agent-send-fab.stop 一致，换成危险色停止钮 */
+.chat-debugger-send-fab.stop {
+  background: var(--danger-color, #ef4444);
+  box-shadow: 0 2px 8px -2px rgba(220, 38, 38, 0.5);
 }
 
 .chat-debugger-send-fab.busy {

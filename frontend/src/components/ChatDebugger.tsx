@@ -1243,6 +1243,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             </div>
           )}
           <textarea
+            className="chat-debugger-input"
             rows={2}
             placeholder={recording ? t('录音中…再次点击麦克风结束') : transcribing ? t('语音转文字中…') : t('输入消息，Enter 发送，Shift+Enter 换行')}
             value={input}
@@ -1357,10 +1358,8 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             </div>
             <div className="chat-debugger-input-actions">
               {playground && (
-                /* new-api 游乐园：模型选择器在输入区底部工具行（清空按钮右侧、发送按钮左侧） */
-                <div className="pg-tools-right">
-                  {playgroundModelPicker}
-                </div>
+                /* 模型选择器与 AI 运维页一致：裸放 pill，不套边框容器 */
+                playgroundModelPicker
               )}
               {!playground && (
                 <button type="button" className="btn btn-outline btn-sm" onClick={clearAll} disabled={busy || !messages.length} title={t('清空对话')}>
@@ -1370,7 +1369,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
               {/* Lxchat 式圆形三态按钮：空输入=语音，有输入=发送，生成中=停止 */}
               <button
                 type="button"
-                className={`chat-debugger-send-fab ${recording ? 'recording' : ''} ${transcribing ? 'busy' : ''}`}
+                className={`chat-debugger-send-fab ${recording ? 'recording' : ''} ${busy ? 'stop' : ''} ${transcribing ? 'busy' : ''}`}
                 onClick={() => {
                   if (busy) { stopStreaming(); return; }
                   if (!input.trim() && !attachments.length) { void startRecording(); return; }

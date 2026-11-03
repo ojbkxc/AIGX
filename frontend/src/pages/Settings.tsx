@@ -1,6 +1,10 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Monitor, Sun, Moon } from 'lucide-react';
+import {
+  Monitor, Sun, Moon,
+  SlidersHorizontal, Sparkles, Network, Route as RouteIcon, RotateCcw,
+  Timer, Gauge, CreditCard, Database, Bell, ShieldCheck, Download, User,
+} from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
@@ -79,11 +83,28 @@ interface DataResponse<T> {
   data?: T;
 }
 
-type SettingsTab = 'site' | 'billing' | 'ops' | 'update' | 'security' | 'account';
-/** billing 分区子标签（易支付 / 用户分组；定价倍率已拆为独立页 /pricing） */
+/**
+ * 设置分区：对齐 Agent2API settings-page 的 CATEGORIES（general / assistant /
+ * gateway / routing / retry / timeout / security / data …），把原先埋在
+ * 「运维 → 子标签」和「站点 → API 配置」里的超时、重试拆成独立分类。
+ */
+type SettingsTab =
+  | 'general'
+  | 'assistant'
+  | 'gateway'
+  | 'routing'
+  | 'retry'
+  | 'timeout'
+  | 'perf'
+  | 'billing'
+  | 'data'
+  | 'notify'
+  | 'security'
+  | 'update'
+  | 'account';
+
+/** 计费分区子标签（易支付 / 用户分组） */
 type BillingSubTab = 'epay' | 'groups';
-/** ops 分区子标签（通知 / 限流 / 缓存 / 价格同步 / 汇率 / 日志保留 / 网络层 / AI 助手 / 网关 / 路由） */
-type OpsSubTab = 'notify' | 'ratelimit' | 'cache' | 'pricesync' | 'exchange' | 'logs' | 'network' | 'assistant' | 'gateway' | 'routing' | 'data';
 
 // 格式化字节数为人类可读单位
 function fmtBytes(bytes: number | null | undefined): string {
@@ -119,6 +140,55 @@ const LIMIT_FIELDS: Array<{ field: 'daily_limit' | 'monthly_limit' | 'threshold'
   { field: 'threshold', labelKey: '告警阈值 (%)', hintKey: '触发告警的限额使用百分比（0-100）。', min: 0, max: 100 },
 ];
 
+/** 超时分类：五个时间窗，对齐 Agent2API 的「超时」pane（TIMEOUT_FIELDS）。 */
+const TIMEOUT_FIELDS: Array<{
+  field: 'api_timeout_secs' | 'connect_timeout_secs' | 'headers_timeout_secs' | 'stream_idle_secs' | 'body_timeout_secs';
+  label: string;
+  hint: string;
+  min: number;
+  max: number;
+  placeholder: string;
+}> = [
+  { field: 'api_timeout_secs', label: '请求总超时 (秒)', hint: '单次上游请求的总时长上限，默认 300 秒（修改后重启生效）。', min: 5, max: 3600, placeholder: '300' },
+  { field: 'connect_timeout_secs', label: '连接超时 (秒)', hint: '与上游建立 TCP/TLS 连接的上限，默认 10 秒（修改后重启生效）。', min: 1, max: 300, placeholder: '10' },
+  { field: 'headers_timeout_secs', label: '响应头等待 / 首事件上限 (秒)', hint: '等待上游响应头与流式首个事件的上限，默认 60 秒（保存后立即生效）。', min: 1, max: 600, placeholder: '60' },
+  { field: 'stream_idle_secs', label: '流空闲超时 (秒)', hint: '流式响应两次读取之间的最长静默，默认 30 秒（修改后重启生效）。', min: 1, max: 600, placeholder: '30' },
+  { field: 'body_timeout_secs', label: '非流式响应体超时 (秒)', hint: '非流式请求读完整响应体的上限，默认 300 秒（保存后立即生效）。流式请求不受此项约束。', min: 1, max: 3600, placeholder: '300' },
+];
+
+/** 重试分类：渠道切换 / 同账号原地重试 / 间隔 / 直接换号状态码。 */
+const RETRY_FIELDS: Array<{
+  field: 'max_retries' | 'retry_self_count' | 'retry_interval_ms' | 'retry_on_status';
+  label: string;
+  hint: string;
+  type: 'number' | 'text';
+  min?: number;
+  max?: number;
+  placeholder: string;
+}> = [
+  { field: 'max_retries', label: '最大重试次数（渠道切换）', hint: '渠道级失败切换的最大额外尝试次数（0 = 只尝试首选渠道，最多 10）；保存后立即生效。', type: 'number', min: 0, max: 10, placeholder: '2' },
+  { field: 'retry_self_count', label: '同账号重试次数', hint: '账号池内同一账号原地重试的额外次数（0 = 失败即换号，最多 10）；保存后立即生效。换号次数在账号池「账号路由」里配置。', type: 'number', min: 0, max: 10, placeholder: '1' },
+  { field: 'retry_interval_ms', label: '重试间隔 (毫秒)', hint: '账号池换号重试之间的等待时间，0 = 立即换号（保存后立即生效）。', type: 'number', min: 0, max: 10000, placeholder: '0' },
+  { field: 'retry_on_status', label: '直接换号/换渠道状态码（逗号分隔）', hint: '命中这些上游状态码时不做指数退避冷却（只给基础冷却）并直接换号，同时在渠道级重试中视为可重试；默认 402（余额不足）。', type: 'text', placeholder: '402' },
+];
+
+/** 设置分类：左栏导航，对齐 Agent2API settings-page 的 CATEGORIES。 */
+const SETTINGS_CATEGORIES: Array<{ key: SettingsTab; label: string; icon: typeof Sun }> = [
+  { key: 'general', label: '通用', icon: SlidersHorizontal },
+  { key: 'assistant', label: 'AI 助手', icon: Sparkles },
+  { key: 'gateway', label: '网关', icon: Network },
+  { key: 'routing', label: '路由', icon: RouteIcon },
+  { key: 'retry', label: '重试', icon: RotateCcw },
+  { key: 'timeout', label: '超时', icon: Timer },
+  { key: 'perf', label: '限流与缓存', icon: Gauge },
+  { key: 'billing', label: '计费', icon: CreditCard },
+  { key: 'data', label: '数据', icon: Database },
+  { key: 'notify', label: '通知', icon: Bell },
+  { key: 'security', label: '安全', icon: ShieldCheck },
+  { key: 'update', label: '更新', icon: Download },
+  { key: 'account', label: '账户', icon: User },
+];
+
 export default function Settings() {
   const [limits, setLimits] = useState<LimitsForm>({
     daily_limit: '',
@@ -142,12 +212,11 @@ export default function Settings() {
   const addToast = useToast();
   const { t } = useTranslation();
 
-  // 当前激活的配置分区：四 tab 信息架构对齐 new-api System Settings
-  // 站点（原通用+界面）/ 计费（易支付+用户分组；定价倍率已拆独立页 /pricing）/ 运维（通知+限流+缓存+价格同步）/ 安全（安全监控+IP管理）
-  const [activeTab, setActiveTab] = useState<SettingsTab>('site');
-  // 分区内子标签：避免 billing/ops 长页面垂直堆叠（易支付曾被压到最底）
+  // 当前激活的配置分类：左侧导航（对齐 Agent2API 的 CATEGORIES），
+  // 每类只渲染自己那块，不再靠子标签层层下钻。
+  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+  // 计费分区子标签（易支付 / 用户分组）
   const [billingSub, setBillingSub] = useState<BillingSubTab>('epay');
-  const [opsSub, setOpsSub] = useState<OpsSubTab>('notify');
 
   // 界面分区：主题三态（system/light/dark），与登录页/侧边栏切换共享同一份持久化
   const [theme, setTheme] = useState<ThemeMode>(() => getThemeMode());
@@ -516,24 +585,31 @@ export default function Settings() {
 
       {error && <div className="error-message">{error}</div>}
 
-      <Tabs<SettingsTab>
-        items={[
-          { key: 'site', label: t('站点') },
-          { key: 'billing', label: t('计费/易支付') },
-          { key: 'ops', label: t('运维') },
-          { key: 'update', label: t('更新') },
-          { key: 'security', label: t('安全') },
-          { key: 'account', label: t('账户') },
-        ]}
-        active={activeTab}
-        onChange={setActiveTab}
-        ariaLabel={t('设置分区')}
-        className="settings-tabs"
-      />
+      <div className="settings-layout">
+        {/* 左栏分类导航：对齐 Agent2API 的 CATEGORIES（超时/重试从「API 配置」里拆出来） */}
+        <nav className="settings-nav" aria-label={t('设置分区')}>
+          {SETTINGS_CATEGORIES.map((c) => {
+            const Icon = c.icon;
+            const active = c.key === activeTab;
+            return (
+              <button
+                key={c.key}
+                type="button"
+                className={`settings-nav-item ${active ? 'active' : ''}`}
+                aria-current={active ? 'page' : undefined}
+                onClick={() => setActiveTab(c.key)}
+              >
+                <Icon size={15} />
+                <span>{t(c.label)}</span>
+              </button>
+            );
+          })}
+        </nav>
 
-      {activeTab === 'site' && (
+        <div className="settings-pane">
+      {activeTab === 'general' && (
         <>
-          {/* 站点 = 原通用 + 界面：使用限额 + API 策略 + 主题 */}
+          {/* 通用 = 使用限额 + 界面（主题 / 缩放） */}
           <div className="card">
             <div className="card-header">
               <h2>{t('使用限额')}</h2>
@@ -556,71 +632,6 @@ export default function Settings() {
                     <span className="form-hint">{t(f.hintKey)}</span>
                   </div>
                 ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="card" style={{ marginTop: 16 }}>
-            <div className="card-header">
-              <h2>{t('API 配置')}</h2>
-            </div>
-            <div className="card-body">
-              <div className="settings-form">
-                <div className="form-group">
-                  <label>{t('请求总超时 (秒)')}</label>
-                  <input className="form-input" type="number" min="5" max="3600" placeholder="300" value={limits.api_timeout_secs} onChange={(e) => handleChange('api_timeout_secs', e.target.value)} />
-                  <span className="form-hint">{t('单次上游请求的总时长上限，默认 300 秒（修改后重启生效）。')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('连接超时 (秒)')}</label>
-                  <input className="form-input" type="number" min="1" max="300" placeholder="10" value={limits.connect_timeout_secs} onChange={(e) => handleChange('connect_timeout_secs', e.target.value)} />
-                  <span className="form-hint">{t('与上游建立 TCP/TLS 连接的上限，默认 10 秒（修改后重启生效）。')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('响应头等待 / 首事件上限 (秒)')}</label>
-                  <input className="form-input" type="number" min="1" max="600" placeholder="60" value={limits.headers_timeout_secs} onChange={(e) => handleChange('headers_timeout_secs', e.target.value)} />
-                  <span className="form-hint">{t('等待上游响应头与流式首个事件的上限，默认 60 秒（保存后立即生效）。')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('流空闲超时 (秒)')}</label>
-                  <input className="form-input" type="number" min="1" max="600" placeholder="30" value={limits.stream_idle_secs} onChange={(e) => handleChange('stream_idle_secs', e.target.value)} />
-                  <span className="form-hint">{t('流式响应两次读取之间的最长静默，默认 30 秒（修改后重启生效）。')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('非流式响应体超时 (秒)')}</label>
-                  <input className="form-input" type="number" min="1" max="3600" placeholder="300" value={limits.body_timeout_secs} onChange={(e) => handleChange('body_timeout_secs', e.target.value)} />
-                  <span className="form-hint">{t('非流式请求读完整响应体的上限，默认 300 秒（保存后立即生效）。流式请求不受此项约束。')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('最大重试次数（渠道切换）')}</label>
-                  <input className="form-input" type="number" min="0" max="10" placeholder={t('settingsPlaceholderMaxRetries')} value={limits.max_retries} onChange={(e) => handleChange('max_retries', e.target.value)} />
-                  <span className="form-hint">{t('渠道级失败切换的最大额外尝试次数（0 = 只尝试首选渠道，最多 10）；保存后立即生效。')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('同账号重试次数')}</label>
-                  <input className="form-input" type="number" min="0" max="10" placeholder="1" value={limits.retry_self_count} onChange={(e) => handleChange('retry_self_count', e.target.value)} />
-                  <span className="form-hint">{t('账号池内同一账号原地重试的额外次数（0 = 失败即换号，最多 10）；保存后立即生效。换号次数在账号池「账号路由」里配置。')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('重试间隔 (毫秒)')}</label>
-                  <input className="form-input" type="number" min="0" max="10000" placeholder="0" value={limits.retry_interval_ms} onChange={(e) => handleChange('retry_interval_ms', e.target.value)} />
-                  <span className="form-hint">{t('账号池换号重试之间的等待时间，0 = 立即换号（保存后立即生效）。')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('直接换号/换渠道状态码（逗号分隔）')}</label>
-                  <input className="form-input" placeholder="402" value={limits.retry_on_status} onChange={(e) => handleChange('retry_on_status', e.target.value)} />
-                  <span className="form-hint">{t('命中这些上游状态码时不做指数退避冷却（只给基础冷却）并直接换号，同时在渠道级重试中视为可重试；默认 402（余额不足）。')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('按次计费固定额度')}</label>
-                  <input className="form-input" type="number" min="1" placeholder="2" value={limits.billing_flat_quota} onChange={(e) => handleChange('billing_flat_quota', e.target.value)} />
-                  <span className="form-hint">{t('订阅计费模式为「按次」时，每次请求固定扣减的额度（全局统一，默认 2）。')}</span>
-                </div>
-                <div className="form-group">
-                  <label>{t('请求体大小上限 (MB)')}</label>
-                  <input className="form-input" type="number" min="1" placeholder="25" value={limits.max_request_body_mb} onChange={(e) => handleChange('max_request_body_mb', e.target.value)} />
-                  <span className="form-hint">{t('数据面接口单次请求体最大大小（含音频上传），超出返回 413，防止超大请求打爆内存。默认 25MB。')}</span>
-                </div>
                 <div className="settings-actions">
                   <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
                     {saving ? t('保存中...') : t('保存更改')}
@@ -677,51 +688,75 @@ export default function Settings() {
         </>
       )}
 
-      {activeTab === 'billing' && (
-        <>
-          {/* 计费 = 易支付 + 用户分组（子标签切换；定价倍率已拆为独立页 /pricing） */}
-          <Tabs<BillingSubTab>
-            items={[
-              { key: 'epay', label: t('易支付配置') },
-              { key: 'groups', label: t('用户分组') },
-            ]}
-            active={billingSub}
-            onChange={setBillingSub}
-            ariaLabel={t('计费设置分区')}
-          />
-          <div style={{ marginTop: 16 }}>
-            {billingSub === 'epay' && <Epay />}
-            {billingSub === 'groups' && <Groups />}
+      {activeTab === 'timeout' && (
+        <div className="card">
+          <div className="card-header">
+            <h2>{t('超时')}</h2>
+            <p className="card-subtitle">{t('各阶段等待上游的最长时间，防止悬挂请求长期占用连接。')}</p>
           </div>
-        </>
+          <div className="card-body">
+            <div className="settings-form">
+              {TIMEOUT_FIELDS.map((f) => (
+                <div key={f.field} className="form-group">
+                  <label>{t(f.label)}</label>
+                  <input
+                    className="form-input"
+                    type="number"
+                    min={f.min}
+                    max={f.max}
+                    placeholder={f.placeholder}
+                    value={limits[f.field]}
+                    onChange={(e) => handleChange(f.field, e.target.value)}
+                  />
+                  <span className="form-hint">{t(f.hint)}</span>
+                </div>
+              ))}
+              <div className="settings-actions">
+                <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+                  {saving ? t('保存中...') : t('保存更改')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
-      {activeTab === 'ops' && (
-        <>
-          {/* 运维 = 通知设置 + 限流配置 + 缓存管理 + 价格同步 + 汇率 + 网络层（子标签切换） */}
-          <Tabs<OpsSubTab>
-            items={[
-              { key: 'notify', label: t('通知设置') },
-              { key: 'ratelimit', label: t('限流配置') },
-              { key: 'cache', label: t('缓存管理') },
-              { key: 'pricesync', label: t('价格同步') },
-              { key: 'exchange', label: t('汇率配置') },
-              { key: 'logs', label: t('日志保留') },
-              { key: 'network', label: t('网络层') },
-              { key: 'assistant', label: t('AI 助手') },
-              { key: 'gateway', label: t('网关') },
-              { key: 'routing', label: t('路由') },
-              { key: 'data', label: t('数据') },
-            ]}
-            active={opsSub}
-            onChange={setOpsSub}
-            ariaLabel={t('运维设置分区')}
-          />
-          <div style={{ marginTop: 16, display: opsSub === 'notify' ? 'block' : 'none' }}>
-            <Notify />
+      {activeTab === 'retry' && (
+        <div className="card">
+          <div className="card-header">
+            <h2>{t('重试')}</h2>
+            <p className="card-subtitle">{t('上游失败后换渠道 / 换账号的策略。')}</p>
           </div>
-          <div style={{ marginTop: 16, display: opsSub === 'ratelimit' ? 'block' : 'none' }}>
-            <div className="card">
+          <div className="card-body">
+            <div className="settings-form">
+              {RETRY_FIELDS.map((f) => (
+                <div key={f.field} className="form-group">
+                  <label>{t(f.label)}</label>
+                  <input
+                    className="form-input"
+                    type={f.type}
+                    min={f.min}
+                    max={f.max}
+                    placeholder={f.placeholder}
+                    value={limits[f.field]}
+                    onChange={(e) => handleChange(f.field, e.target.value)}
+                  />
+                  <span className="form-hint">{t(f.hint)}</span>
+                </div>
+              ))}
+              <div className="settings-actions">
+                <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+                  {saving ? t('保存中...') : t('保存更改')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'perf' && (
+        <>
+          <div className="card">
             <div className="card-header">
               <h2>{t('限流配置')}</h2>
             </div>
@@ -769,10 +804,8 @@ export default function Settings() {
               )}
             </div>
           </div>
-          </div>
 
-          <div style={{ marginTop: 16, display: opsSub === 'cache' ? 'block' : 'none' }}>
-          <div className="card">
+          <div className="card" style={{ marginTop: 16 }}>
             <div className="card-header">
               <h2>{t('缓存管理')}</h2>
             </div>
@@ -818,10 +851,47 @@ export default function Settings() {
               )}
             </div>
           </div>
+        </>
+      )}
+
+      {activeTab === 'billing' && (
+        <>
+          {/* 计费 = 易支付 + 用户分组（子标签切换） */}
+          <Tabs<BillingSubTab>
+            items={[
+              { key: 'epay', label: t('易支付配置') },
+              { key: 'groups', label: t('用户分组') },
+            ]}
+            active={billingSub}
+            onChange={setBillingSub}
+            ariaLabel={t('计费设置分区')}
+          />
+          <div style={{ marginTop: 16 }}>
+            {billingSub === 'epay' && <Epay />}
+            {billingSub === 'groups' && <Groups />}
           </div>
 
-          <div style={{ marginTop: 16, display: opsSub === 'pricesync' ? 'block' : 'none' }}>
-          <div className="card">
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-header">
+              <h2>{t('按次计费')}</h2>
+            </div>
+            <div className="card-body">
+              <div className="settings-form">
+                <div className="form-group">
+                  <label>{t('按次计费固定额度')}</label>
+                  <input className="form-input" type="number" min="1" placeholder="2" value={limits.billing_flat_quota} onChange={(e) => handleChange('billing_flat_quota', e.target.value)} />
+                  <span className="form-hint">{t('订阅计费模式为「按次」时，每次请求固定扣减的额度（全局统一，默认 2）。')}</span>
+                </div>
+                <div className="settings-actions">
+                  <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+                    {saving ? t('保存中...') : t('保存更改')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
             <div className="card-header">
               <h2>{t('价格同步')}</h2>
             </div>
@@ -879,10 +949,8 @@ export default function Settings() {
               )}
             </div>
           </div>
-          </div>
 
-          <div style={{ marginTop: 16, display: opsSub === 'exchange' ? 'block' : 'none' }}>
-          <div className="card">
+          <div className="card" style={{ marginTop: 16 }}>
             <div className="card-header">
               <h2>{t('汇率配置')}</h2>
             </div>
@@ -927,54 +995,80 @@ export default function Settings() {
               )}
             </div>
           </div>
-          </div>
-          <div style={{ marginTop: 16, display: opsSub === 'logs' ? 'block' : 'none' }}>
-            {/* 日志保留（保留天数/容量上限/手动清理） */}
-            <LogRetention />
-          </div>
-          <div style={{ marginTop: 16, display: opsSub === 'network' ? 'block' : 'none' }}>
-            {/* 网络层管理（原 /network-layer 独立页并入；display:none 切换保留组件状态） */}
+        </>
+      )}
+
+      {activeTab === 'gateway' && (
+        <>
+          {/* 网关 = 监听/CORS + 网络层 + 请求侧伪装与兼容开关（原 ops 子标签合流） */}
+          <GatewayPanel />
+          <div style={{ marginTop: 16 }}>
             <NetworkLayer />
           </div>
-          <div style={{ marginTop: 16, display: opsSub === 'assistant' ? 'block' : 'none' }}>
-            <AgentSettingsPanel />
+          <div style={{ marginTop: 16 }}>
+            <SanitizePanel />
           </div>
-          <div style={{ marginTop: 16, display: opsSub === 'gateway' ? 'block' : 'none' }}>
-            <GatewayPanel />
-            <div style={{ marginTop: 16 }}>
-              <SanitizePanel />
-            </div>
-            <div style={{ marginTop: 16 }}>
-              {/* Cline 伪装头覆盖表（对照 Agent2API；保存后下一个 Cline 请求生效） */}
-              <ClineHeadersPanel />
-            </div>
-            <div style={{ marginTop: 16 }}>
-              <PromptPanel />
-            </div>
-            <div style={{ marginTop: 16 }}>
-              <DebugTrafficPanel />
-            </div>
-            <div style={{ marginTop: 16 }}>
-              <StreamCompatPanel />
-            </div>
-            <div style={{ marginTop: 16 }}>
-              <QueuePanel />
-            </div>
-            <div style={{ marginTop: 16 }}>
-              <AutoContinuePanel />
-            </div>
-            <div style={{ marginTop: 16 }}>
-              <ModelMetadataPanel />
-            </div>
+          <div style={{ marginTop: 16 }}>
+            {/* Cline 伪装头覆盖表（对照 Agent2API；保存后下一个 Cline 请求生效） */}
+            <ClineHeadersPanel />
           </div>
-          <div style={{ marginTop: 16, display: opsSub === 'routing' ? 'block' : 'none' }}>
-            <RoutingPanel />
+          <div style={{ marginTop: 16 }}>
+            <PromptPanel />
           </div>
-          <div style={{ marginTop: 16, display: opsSub === 'data' ? 'block' : 'none' }}>
-            <DataManagement />
+          <div style={{ marginTop: 16 }}>
+            <DebugTrafficPanel />
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <StreamCompatPanel />
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <QueuePanel />
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <AutoContinuePanel />
+          </div>
+          <div style={{ marginTop: 16 }}>
+            <ModelMetadataPanel />
+          </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-header">
+              <h2>{t('请求体大小上限')}</h2>
+              <p className="card-subtitle">{t('数据面入站请求的硬上限，超出直接拒绝，防止超大请求打爆内存。')}</p>
+            </div>
+            <div className="card-body">
+              <div className="settings-form">
+                <div className="form-group">
+                  <label>{t('请求体大小上限 (MB)')}</label>
+                  <input className="form-input" type="number" min="1" placeholder="25" value={limits.max_request_body_mb} onChange={(e) => handleChange('max_request_body_mb', e.target.value)} />
+                  <span className="form-hint">{t('数据面接口单次请求体最大大小（含音频上传），超出返回 413，防止超大请求打爆内存。默认 25MB。')}</span>
+                </div>
+                <div className="settings-actions">
+                  <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+                    {saving ? t('保存中...') : t('保存更改')}
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </>
       )}
+
+      {activeTab === 'routing' && <RoutingPanel />}
+
+      {activeTab === 'assistant' && <AgentSettingsPanel />}
+
+      {activeTab === 'data' && (
+        <>
+          {/* 数据 = 存储/备份 + 日志保留（原 ops 的 data / logs 子标签） */}
+          <DataManagement />
+          <div style={{ marginTop: 16 }}>
+            <LogRetention />
+          </div>
+        </>
+      )}
+
+      {activeTab === 'notify' && <Notify />}
 
       {activeTab === 'update' && <UpdatePanel />}
 
@@ -1070,7 +1164,8 @@ export default function Settings() {
       )}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
-
+        </div>
+      </div>
     </div>
   );
 }

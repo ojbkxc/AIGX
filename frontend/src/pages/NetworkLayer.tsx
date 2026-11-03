@@ -637,7 +637,7 @@ export default function NetworkLayer(): JSX.Element {
             </p>
           </div>
         </div>
-        {!scheduler || scheduler.channels.length === 0 ? (
+        {!scheduler || !Array.isArray(scheduler.channels) || scheduler.channels.length === 0 ? (
           <p className="text-gray-500 text-sm py-4">{t('暂无调度数据')}</p>
         ) : (
           <div className="overflow-x-auto">
