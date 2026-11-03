@@ -1,0 +1,54 @@
+/* RatioPanel.css — 倍率配置面板（模型管理第三 Tab）。
+   原 Pricing.css 里的 .ratio-* 规则迁到这里：Pricing 独立页已退化为
+   重定向，样式只服务本组件。 */
+
+.ratio-panel {
+  padding: 12px 14px 16px;
+}
+
+.ratio-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.ratio-panel-empty {
+  margin: 8px 0;
+}
+
+.ratio-panel-table {
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.ratio-panel-err {
+  color: rgb(239, 68, 68);
+}
+
+.ratio-hint {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+  line-height: 1.5;
+}
+
+.ratio-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  padding: 0 2px;
+}
+
+.ratio-textarea {
+  font-family: 'JetBrainsMono', 'SF Mono', 'Consolas', monospace;
+  font-size: 12px;
+  resize: vertical;
+  min-height: 180px;
+  line-height: 1.5;
+}
+
+@media (max-width: 960px) {
+  .ratio-grid {
+    grid-template-columns: 1fr;
+  }
+}

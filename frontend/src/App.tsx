@@ -45,7 +45,6 @@ const Chat = lazyPage(() => import('./pages/Chat'));
 
 const ModelManage = lazyPage(() => import('./pages/ModelManage'));
 const Prompts = lazyPage(() => import('./pages/Prompts'));
-const Pricing = lazyPage(() => import('./pages/Pricing'));
 const Agent = lazyPage(() => import('./pages/Agent'));
 const Tickets = lazyPage(() => import('./pages/Tickets'));
 const CheckinCenter = lazyPage(() => import('./pages/CheckinCenter'));
@@ -153,7 +152,8 @@ export default function App(): JSX.Element {
           <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
           {/* 已合并的旧路由 → 重定向到合并后位置 */}
           <Route path="/mappings" element={<Navigate to="/channels" replace />} />
-          <Route path="/pricing" element={<AdminRoute><Pricing /></AdminRoute>} />
+          {/* 倍率配置已并入模型管理第三 Tab，旧路由重定向防书签失效 */}
+          <Route path="/pricing" element={<Navigate to="/model-manage?tab=ratio" replace />} />
           <Route path="/groups" element={<Navigate to="/settings" replace />} />
           <Route path="/orders" element={<Navigate to="/wallet" replace />} />
           <Route path="/epay" element={<Navigate to="/settings" replace />} />

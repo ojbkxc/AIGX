@@ -2450,3 +2450,45 @@ tr.kbd-active {
   margin: 0;
   font-size: 11px;
 }
+
+/* 页面私有子标签（签到中心等）：原本定义在已删除的 Pricing.css，
+   现收敛到全局样式表，避免单页依赖另一个页面的样式文件。 */
+.sub-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--btn-secondary-bg);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  width: fit-content;
+}
+
+.sub-tab {
+  padding: 6px 14px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  font-family: inherit;
+}
+
+.sub-tab:hover {
+  color: var(--text-main);
+  background: var(--btn-secondary-hover);
+}
+
+.sub-tab.active {
+  background: var(--card-bg);
+  color: var(--text-main);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+@media (max-width: 768px) {
+  .sub-tabs {
+    width: 100%;
+  }
+}

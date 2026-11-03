@@ -9,7 +9,7 @@ import {
   Users, Wallet, Ticket, ScrollText, Package,
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
-  Languages, LogOut, Coins, Bot, Headphones, CalendarCheck, Globe, CalendarClock,
+  Languages, LogOut, Bot, Headphones, CalendarCheck, Globe, CalendarClock,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -40,7 +40,6 @@ const navItems: NavItem[] = [
   { path: '/model-manage', labelKey: '模型管理', icon: Boxes, adminOnly: true },
   // 渠道与账号池合并为一页双 Tab（账号型渠道是账号池的内部容器，不单独露脸）
   { path: '/channels', labelKey: '渠道与账号池', icon: Satellite, adminOnly: true },
-  { path: '/pricing', labelKey: '定价倍率', icon: Coins, adminOnly: true },
   { path: '/users', labelKey: '用户管理', icon: Users, adminOnly: true },
   { path: '/redemptions', labelKey: '兑换码', icon: Ticket, adminOnly: true },
   { path: '/plans', labelKey: '套餐管理', icon: Package, adminOnly: true },
@@ -63,6 +62,7 @@ const navItems: NavItem[] = [
 // - 订单记录 → 钱包页内 tab
 // - 系统信息（AI 网关网络层管理）→ 系统设置运维 tab 网络层子标签（已下沉）
 // - 账号池 → 并入「渠道与账号池」双 Tab（账号型渠道只是账号池的容器）
+// - 定价倍率 → 并入模型管理第三 Tab（模型价格/别名/倍率是同一条记录的不同侧面）
 //
 // 分组按路径取条目而非下标：下标一旦因增删菜单漂移，就会静默错配到别的菜单。
 function navItemOf(path: string): NavItem {
@@ -91,7 +91,6 @@ const navGroups: NavGroup[] = [
       navItemOf('/model-manage'),    // 模型管理（admin 可写；普通用户只读自己分组可见的模型与价格）
       navItemOf('/channels'),        // 渠道与账号池（上游渠道 + 账号池双 Tab）
       navItemOf('/proxy-pool'),      // 网络代理（出口代理池）
-      navItemOf('/pricing'),         // 定价倍率
       navItemOf('/users'),           // 用户管理
       navItemOf('/redemptions'),     // 兑换码
       navItemOf('/plans'),           // 套餐管理

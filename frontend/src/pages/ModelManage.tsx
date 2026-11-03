@@ -28,6 +28,7 @@ import { useToast } from '../components/Toast';
 import { Loading, EmptyState, Switch, Pagination, Tabs, Combobox, Tooltip } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ModelTestDialog from '../components/ModelTestDialog';
+import RatioPanel from '../components/RatioPanel';
 import { fmtCompact } from '../lib/utils';
 import type { AliasEntry, ManageView, ManagedModel, ModelMetaOverride, ChannelItem } from '../types';
 import './ModelManage.css';
@@ -47,7 +48,7 @@ const LS_COLCFG = 'aigx-mm-colcfg';
 const LS_COLW = 'aigx-mm-colw';
 const LS_PAGE_SIZE = 'aigx-mm-pagesize';
 
-type MainTab = 'catalog' | 'meta';
+type MainTab = 'catalog' | 'meta' | 'ratio';
 /** 启停筛选（多一档「有映射」，对齐 Agent2API MODEL_STATE_OPTIONS） */
 type StateFilter = 'all' | 'on' | 'off' | 'mapped';
 type PriceFilter = 'all' | 'priced' | 'unpriced';
@@ -1320,6 +1321,15 @@ export default function ModelManage(): JSX.Element {
     }
   }, [searchParams]);
 
+  // 旧 /pricing 重定向到 ?tab=ratio：按 URL 参数切 Tab（只认已注册的 Tab，
+  // 避免手改 URL 把 tab 置成非法值导致整页空白）。
+  useEffect(() => {
+    const want = searchParams.get('tab');
+    if (want && (['catalog', 'meta', 'ratio'] as string[]).includes(want)) {
+      setTab(want as MainTab);
+    }
+  }, [searchParams]);
+
   const toggleSelectAllPage = () => {
     const keys = (groupedMode ? filtered : pageRows).map(rowKey);
     setSelected((prev) => {
@@ -1678,13 +1688,16 @@ export default function ModelManage(): JSX.Element {
         items={[
           { key: 'catalog', label: t('模型目录') },
           { key: 'meta', label: t('元信息覆盖') },
+          { key: 'ratio', label: t('定价倍率') },
         ]}
         active={tab}
         onChange={(k) => setTab(k as MainTab)}
         ariaLabel={t('模型管理')}
       />
 
-      {tab === 'meta' ? (
+      {tab === 'ratio' ? (
+        <RatioPanel />
+      ) : tab === 'meta' ? (
         <div className="mm-panel">
           <div className="mm-titlebar">
             <div className="mm-title">

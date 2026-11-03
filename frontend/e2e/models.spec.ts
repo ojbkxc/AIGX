@@ -269,4 +269,25 @@ test.describe('模型管理', () => {
     await page.getByRole('tab', { name: '模型目录' }).click();
     await expect(page.locator('.mm-layout')).toBeVisible();
   });
+
+  test('定价倍率 Tab 渲染倍率表格（旧 /pricing 已并入此处）', async ({ page, pageErrors }) => {
+    await page.getByRole('tab', { name: '定价倍率' }).click();
+    // 面板骨架：标题栏 + 两张倍率表（模型倍率 / 分组倍率）
+    await expect(page.locator('.ratio-panel')).toBeVisible();
+    await expect(page.locator('.ratio-panel')).toContainText('模型倍率');
+    await expect(page.locator('.ratio-panel')).toContainText('分组倍率');
+    // 目录 Tab 的左栏布局不应再显示
+    await expect(page.locator('.mm-layout')).toHaveCount(0);
+
+    await page.getByRole('tab', { name: '模型目录' }).click();
+    await expect(page.locator('.mm-layout')).toBeVisible();
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('旧 /pricing 书签重定向到模型管理倍率 Tab', async ({ page, pageErrors }) => {
+    await page.goto('/pricing');
+    await expect(page).toHaveURL(/\/model-manage\?tab=ratio$/);
+    await expect(page.locator('.ratio-panel')).toBeVisible();
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
 });
