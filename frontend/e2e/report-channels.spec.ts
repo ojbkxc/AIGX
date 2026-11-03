@@ -54,15 +54,10 @@ test.describe('仪表盘报表', () => {
     await loginAsAdmin(page, { sessions: [] });
     await page.goto('/');
     await expect(page.locator('.main-content')).toContainText('Top 渠道');
-    // 热力图是 365 个 14px 小方格的 grid
-    const cells = await page.evaluate(() => {
-      const grids = Array.from(document.querySelectorAll('div'));
-      const heat = grids.find((d) => {
-        const s = getComputedStyle(d);
-        return s.display === 'grid' && s.gridTemplateColumns.includes('14px');
-      });
-      return heat ? heat.children.length : 0;
-    });
+    // 热力图（GitHub 贡献图布局）：一天一个 svg rect，stub 给满 365 天
+    const heatCard = page.locator('.section-card', { hasText: '消费热力图' });
+    await expect(heatCard.locator('svg')).toBeVisible();
+    const cells = await heatCard.locator('svg rect').count();
     expect(cells).toBeGreaterThan(300);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });

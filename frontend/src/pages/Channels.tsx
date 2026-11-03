@@ -679,6 +679,15 @@ export default function Channels(): JSX.Element {
     return () => document.removeEventListener('mousedown', handler);
   }, [colPanelOpen]);
 
+  // 窄屏（<520px）：面板以视口为锚（fixed），top 跟随按钮底部，
+  // 避免面板右对齐到工具栏按钮时左缘溢出屏外、被 .card 的 overflow:hidden 裁掉手柄列。
+  useEffect(() => {
+    if (!colPanelOpen || !colPanelRef.current) return;
+    const btn = colPanelRef.current.querySelector('button');
+    if (!btn) return;
+    colPanelRef.current.style.setProperty('--ch-colset-top', `${btn.getBoundingClientRect().bottom + 6}px`);
+  }, [colPanelOpen]);
+
   /** 提交列配置：改内存即重画，写盘只在明确动作时（开关/对齐/松手/重置） */
   const commitColItems = useCallback((next: ChColItem[], persist: boolean): void => {
     setColItems(next);

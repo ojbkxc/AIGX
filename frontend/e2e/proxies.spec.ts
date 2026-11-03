@@ -89,10 +89,11 @@ test.describe('账号弹窗代理选择器', () => {
     await page.goto('/account-sessions');
     // 等列表加载后点编辑（第一条账号）
     await expect(page.locator('tbody tr').first()).toBeVisible({ timeout: 5000 });
-    await page.locator('tbody tr').first().locator('button[title="编辑"]').first().click();
-    // 弹窗里应有代理选择器（下拉含「直连」选项）
+    await page.locator('tbody tr').first().locator('button[aria-label="编辑"]').first().click();
+    // 弹窗是五分组导航（基本信息/凭证/代理/限制器/高级），切到「代理」分组
     const modal = page.locator('.modal-overlay, [role="dialog"]').first();
     await expect(modal).toBeVisible();
+    await modal.locator('.as-dlg-nav', { hasText: '代理' }).click();
     await expect(modal.locator('.proxy-selector')).toBeVisible();
     await expect(modal.locator('.proxy-selector select option', { hasText: '直连' })).toHaveCount(1);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);

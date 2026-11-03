@@ -212,7 +212,7 @@ test.describe('模型管理', () => {
     await expect(modal).toBeVisible();
     await expect(modal).toContainText('批量操作');
     await expect(modal.locator('.mm-batch-models code')).toHaveCount(1);
-    await expect(modal.locator('.mm-batch-action')).toHaveCount(3);
+    await expect(modal.locator('.mm-batch-action')).toHaveCount(4);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });

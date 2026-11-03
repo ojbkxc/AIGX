@@ -1648,6 +1648,7 @@ export default function AccountSessions(): JSX.Element {
                 <button
                   type="button"
                   className="as-act"
+                  aria-label={t('编辑')}
                   onClick={() => openEdit(s)}
                 >
                   <Pencil size={13} />
@@ -1714,6 +1715,7 @@ export default function AccountSessions(): JSX.Element {
                 <button
                   type="button"
                   className="as-act danger"
+                  aria-label={t('删除')}
                   onClick={() => handleDelete(s)}
                 >
                   <Trash2 size={13} />
@@ -2043,7 +2045,7 @@ export default function AccountSessions(): JSX.Element {
                 </tr>
               </thead>
               <tbody>
-                {groupedList
+                {groupedList.length
                   ? groupedList.map((g) => (
                       <Fragment key={g.provider}>
                         {/* 分组带（对齐 Agent2API grp-band：家图标 + 家名 + 计数） */}

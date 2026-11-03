@@ -1046,6 +1046,15 @@ export default function ModelManage(): JSX.Element {
     return () => window.removeEventListener('mousedown', onDown);
   }, [colPanelOpen]);
 
+  // 窄屏（<520px）：面板以视口为锚（fixed），top 跟随按钮底部，
+  // 避免面板右对齐到工具栏按钮时左缘溢出屏外、被 .card 的 overflow:hidden 裁掉手柄列。
+  useEffect(() => {
+    if (!colPanelOpen || !colPanelRef.current) return;
+    const btn = colPanelRef.current.querySelector('button');
+    if (!btn) return;
+    colPanelRef.current.style.setProperty('--mm-colset-top', `${btn.getBoundingClientRect().bottom + 6}px`);
+  }, [colPanelOpen]);
+
   // 面板收起 / 组件卸载时把拖动会话收干净（对齐上游：卸载补写盘，防内存与 localStorage 漂移）
   const finishColDrag = useCallback(() => {
     if (!colDragCleanup.current) return;

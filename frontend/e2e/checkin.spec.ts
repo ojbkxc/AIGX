@@ -19,22 +19,24 @@ test.describe('签到中心', () => {
   });
 
   test('顶部统计与分组账号表渲染', async ({ page, pageErrors }) => {
-    // 四张统计卡：今日完成 1/2、可签到账号 2、支持上游 2、定时签到 1
-    await expect(page.locator('.ck-stat')).toHaveCount(4);
+    // 五张统计卡：今日完成 1/2、可签到账号 2、支持上游 2、累计记录数、定时计划启用 1/1
+    await expect(page.locator('.ck-stat')).toHaveCount(5);
     const statsText = await page.locator('.ck-stats').innerText();
     expect(statsText).toContain('今日完成');
     expect(statsText).toContain('可签到账号');
     expect(statsText).toContain('支持的上游');
 
-    // provider 分组标题带 已签/总数
-    await expect(page.locator('.ck-table')).toHaveCount(1);
-    await expect(page.locator('.main-content')).toContainText('WorkBuddy 国内版');
+    // provider 分组卡：默认折叠，账号表在展开后才渲染
+    await expect(page.locator('.ck-prov-block')).toHaveCount(1);
+    await expect(page.locator('.ck-prov-name')).toContainText('WorkBuddy 国内版');
+    await expect(page.locator('.ck-prov-sub')).toContainText('已签 1');
+    await page.locator('.ck-prov-row').click();
 
-    // 两个账号行，一个已签一个未签
+    // 展开后两个账号行，一个已签一个待签
     const rows = page.locator('.ck-table tbody tr');
     await expect(rows).toHaveCount(2);
     await expect(rows.nth(0)).toContainText('已签');
-    await expect(rows.nth(1)).toContainText('未签');
+    await expect(rows.nth(1)).toContainText('待签');
     await expect(rows.nth(0)).toContainText('签到成功 +100');
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
@@ -48,6 +50,8 @@ test.describe('签到中心', () => {
       }
     });
 
+    // 先展开 provider 分组，账号表才渲染
+    await page.locator('.ck-prov-row').click();
     const row = page.locator('.ck-table tbody tr', { hasText: 'workbuddy-2' });
     await row.getByRole('button', { name: '签到' }).click();
 

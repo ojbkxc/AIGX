@@ -1146,6 +1146,21 @@ table tbody td input[type="checkbox"] {
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
 }
 
+/* 窄屏（<520px）：面板以视口为锚（fixed），宽度自适应。
+   工具栏在窄屏会换行，按钮不再贴视口右缘，面板若仍右对齐到按钮，
+   左缘会溢出屏外、被 .card 的 overflow:hidden 裁掉手柄列（drag 手柄不可点）。
+   参照 Agent2API 的 Popover（Portal + 视口碰撞）原则：fixed 逃逸祖先裁剪，
+   top 由 JS 在打开时注入（--ch-colset-top，见 Channels.tsx）。 */
+@media (max-width: 520px) {
+  .ch-colset-panel {
+    position: fixed;
+    top: var(--ch-colset-top, 260px);
+    left: 12px;
+    right: auto;
+    width: min(330px, calc(100vw - 24px));
+  }
+}
+
 /* 面板表头与数据行共用同一套网格：手柄 / 列名 / 显示 / 对齐 */
 .ch-colset-grid {
   display: grid;

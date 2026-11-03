@@ -929,6 +929,18 @@
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
 }
 
+/* 窄屏（<520px）：同 Channels 页的 colset 面板——fixed 逃逸 .card 裁剪，
+   宽度自适应视口，top 由 JS 注入（--mm-colset-top，见 ModelManage.tsx）。 */
+@media (max-width: 520px) {
+  .mm-colset-panel {
+    position: fixed;
+    top: var(--mm-colset-top, 260px);
+    left: 12px;
+    right: auto;
+    width: min(330px, calc(100vw - 24px));
+  }
+}
+
 /* 面板表头与数据行共用同一套网格：手柄 / 列名 / 显示 / 对齐 */
 .mm-colset-grid {
   display: grid;

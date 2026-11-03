@@ -251,11 +251,17 @@ const CHANNELS = [
 ];
 
 // ── 报表端点（形状对齐 src/api/admin/dashboard.rs 的 report/*）──
-const REPORT_HEATMAP = Array.from({ length: 30 }, (_, i) => ({
-  date: `2025-10-${String(i + 1).padStart(2, '0')}`,
-  cost: i % 5 === 0 ? 0 : i * 3,
-  count: i % 5 === 0 ? 0 : i * 2,
-}));
+// 连续 365 天（UTC 日期字符串），贴合前端 days=365 的热力窗口
+const REPORT_HEATMAP = Array.from({ length: 365 }, (_, i) => {
+  const d = new Date(Date.UTC(2025, 10, 1) - (364 - i) * 86400_000);
+  const date = d.toISOString().slice(0, 10);
+  return {
+    date,
+    cost: i % 5 === 0 ? 0 : i * 3,
+    count: i % 5 === 0 ? 0 : i * 2,
+    tokens: i % 5 === 0 ? 0 : i * 1200,
+  };
+});
 const REPORT_OVERVIEW = {
   total_requests: 120,
   success_requests: 118,
