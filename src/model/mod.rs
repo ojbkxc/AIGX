@@ -108,14 +108,18 @@ impl ModelMapper {
 
     /// 保存自定义映射到存储
     pub fn save(&self) -> Result<()> {
+        // 四键单事务写入：此前逐条 put，中途失败会留下「映射改了、禁用没改」的中间态
         let custom = self.custom_map.read().clone();
-        self.store.put("model_custom_map", &custom)?;
         let disabled = self.disabled.read().clone();
-        self.store.put(DISABLED_KEY, &disabled)?;
         let reasoning = self.reasoning.read().clone();
-        self.store.put(REASONING_KEY, &reasoning)?;
         let custom_models = self.custom_models.read().clone();
-        self.store.put(CUSTOM_MODELS_KEY, &custom_models)
+        self.store.write_batch(&[
+            ("model_custom_map", serde_json::to_value(&custom)?),
+            (DISABLED_KEY, serde_json::to_value(&disabled)?),
+            (REASONING_KEY, serde_json::to_value(&reasoning)?),
+            (CUSTOM_MODELS_KEY, serde_json::to_value(&custom_models)?),
+        ])?;
+        Ok(())
     }
 
     /// 解析模型名：查自定义映射，命中则改名，否则**原样透传**。

@@ -984,6 +984,100 @@ pub fn supports(provider: &str) -> bool {
     spec_for(provider).is_some()
 }
 
+/// 通用模型发现：对**任意** API-Key 型供应商拉一次上游 `/models`。
+///
+/// 与 [`sync_account_catalog`] 的分工：
+/// - `sync_account_catalog` 只覆盖 `spec_for` 里那批登录态供应商（含私有
+///   解析器 / 签名 / 静态兜底），按账号落缓存；
+/// - 本函数覆盖剩下的 OpenAI 兼容 / Anthropic / Gemini 直连供应商——它们
+///   的目录端点就是标准形态，不需要逐家特判。用于「账号刚建好、模型白名单
+///   还空着」时自动补一份清单，避免账号进了池子却在模型管理里看不见。
+///
+/// 不落缓存、不编造模型名：拉不到就返回错误，由调用方决定是否忽略。
+pub async fn discover_models_plain(
+    sessions: &AccountSessionStore,
+    session: &AccountSession,
+) -> Result<Vec<String>, String> {
+    let spec = registry::find(&session.provider)
+        .ok_or_else(|| format!("未知供应商 {}", session.provider))?;
+    let base = super::adapter::effective_base_url(session)
+        .map_err(|e| format!("上游地址不可用：{e}"))?
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    let secret = session.credential.secret_plain();
+    // 免鉴权账号（IP 白名单 / 本地 Ollama）不带 Authorization
+    let authed = !secret.is_empty()
+        && session.credential.kind != super::model::CREDENTIAL_KIND_NONE;
+
+    let client = sessions
+        .client_for(session)
+        .map_err(|e| format!("出口客户端不可用：{e}"))?;
+
+    let url = match spec.protocol {
+        registry::Protocol::Openai => {
+            format!("{}/models", crate::bridge::openai::normalize_base_url(base))
+        }
+        registry::Protocol::Anthropic => format!("{base}/v1/models"),
+        registry::Protocol::Gemini => format!("{base}/models"),
+    };
+
+    let mut req = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS));
+    match spec.protocol {
+        registry::Protocol::Anthropic => {
+            if authed {
+                req = req.header("x-api-key", &secret);
+            }
+            req = req.header("anthropic-version", "2023-06-01");
+        }
+        registry::Protocol::Gemini => {
+            if authed {
+                req = req.header("x-goog-api-key", &secret);
+            }
+        }
+        registry::Protocol::Openai => {
+            // 登录态供应商的专用头仍然要带（缺头一律 403 的那几家）
+            if let Some(meta) = registry::session_meta(&session.provider) {
+                for (name, template) in meta.headers {
+                    req = req.header(*name, template.replace("{credential}", &secret));
+                }
+            }
+            for (name, value) in &session.extra_headers {
+                req = req.header(name, value.replace("{credential}", &secret));
+            }
+            if authed {
+                req = req.bearer_auth(&secret);
+            }
+        }
+    }
+
+    let resp = req.send().await.map_err(|e| format!("请求失败：{e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("上游返回 {status}"));
+    }
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败：{e}"))?;
+    let value: Value =
+        serde_json::from_str(&text).map_err(|e| format!("响应不是合法 JSON：{e}"))?;
+    // 三家都是 `{data:[{id}]}` 或 `{models:[{name}]}` 形态，`parse_response`
+    // 两种都认（非 OpenAI 形态走 `models` 分支，并剥 `models/` 前缀）。
+    let entries = parse_response(&value, true);
+    if entries.is_empty() {
+        // OpenAI 兼容供应商有时只回 `{models:[...]}`，openai_shape 分支取不到
+        let retry = parse_response(&value, false);
+        if retry.is_empty() {
+            return Err("上游返回的模型目录为空".to_string());
+        }
+        return Ok(retry.into_iter().map(|e| e.id).collect());
+    }
+    Ok(entries.into_iter().map(|e| e.id).collect())
+}
+
 /// 已支持目录发现的供应商清单（管理面下拉用）。
 pub fn supported_providers() -> Vec<&'static str> {
     vec![

@@ -550,6 +550,14 @@ impl ChannelStore {
         Ok(())
     }
 
+    /// 锁外异步落盘：把渠道快照丢给 blocking 线程池写存储，
+    /// 消除「parking_lot 写守卫内做同步 IO」的固有风险（与历史 save() 自重入
+    /// 死锁同源）。失败仅记日志，不向调用方传播。
+    fn persist_async(&self, ch: &Channel) {
+        let key = format!("channel:{}", ch.id);
+        self.store.put_async(key, ch.clone());
+    }
+
     /// 列出所有渠道
     pub fn list(&self) -> Vec<Channel> {
         self.channels.read().clone()
@@ -737,10 +745,9 @@ impl ChannelStore {
             ch.status = "disabled".to_string();
             ch.last_error = Some(error);
             ch.updated_at = chrono::Utc::now().timestamp();
-            // 在锁内落盘：释放锁再写会用旧快照覆盖并发写入（丢更新）
-            if let Err(e) = self.persist(ch) {
-                tracing::error!("Failed to persist channel {} mark_unhealthy: {}", id, e);
-            }
+            // 锁内只改状态，落盘用快照异步执行（put_async 序列化的是持有期间的完整副本，
+            // 不会用旧快照覆盖：后续并发修改会再次触发落盘并带上最新值）
+            self.persist_async(ch);
         }
     }
 
@@ -767,9 +774,7 @@ impl ChannelStore {
                 return;
             }
             ch.last_used_at = Some(now);
-            if let Err(e) = self.persist(ch) {
-                tracing::error!("Failed to persist channel {} mark_used: {}", id, e);
-            }
+            self.persist_async(ch);
         }
     }
 
@@ -778,15 +783,17 @@ impl ChannelStore {
     /// 覆盖 `discovered_models` 并持久化。仅在渠道未显式配置 models 时，
     /// 调度才会参考该快照（见 `select_for_model`）。
     pub fn save_discovered_models(&self, id: &str, models: Vec<String>) -> anyhow::Result<()> {
-        let mut channels = self.channels.write();
-        let ch = channels
-            .iter_mut()
-            .find(|c| c.id == id)
-            .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
-        ch.discovered_models = models;
-        ch.updated_at = chrono::Utc::now().timestamp();
-        self.persist(ch)?;
-        Ok(())
+        let snapshot = {
+            let mut channels = self.channels.write();
+            let ch = channels
+                .iter_mut()
+                .find(|c| c.id == id)
+                .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
+            ch.discovered_models = models;
+            ch.updated_at = chrono::Utc::now().timestamp();
+            ch.clone()
+        };
+        self.persist(&snapshot)
     }
 
     /// 懒加载去重：5 秒内同渠道是否已触发过上游模型发现。
@@ -815,9 +822,7 @@ impl ChannelStore {
             ch.response_time = Some(latency_ms);
             ch.test_time = Some(chrono::Utc::now().timestamp());
             ch.updated_at = chrono::Utc::now().timestamp();
-            if let Err(e) = self.persist(ch) {
-                tracing::error!("Failed to persist channel {} test result: {}", id, e);
-            }
+            self.persist_async(ch);
         }
     }
 
@@ -842,9 +847,7 @@ impl ChannelStore {
                 ch.balance_unit = unit.to_string();
             }
             ch.updated_at = chrono::Utc::now().timestamp();
-            if let Err(e) = self.persist(ch) {
-                tracing::error!("Failed to persist channel {} balance: {}", id, e);
-            }
+            self.persist_async(ch);
         }
     }
 

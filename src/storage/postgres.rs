@@ -100,6 +100,17 @@ impl PgStore {
         }
     }
 
+    /// 写入原始 JSON 字符串（FileStore::put_async 落盘用，免二次序列化）。
+    pub fn put_raw(&self, key: &str, raw: &str) -> anyhow::Result<()> {
+        let (reply, rx) = sync_channel(1);
+        self.send(Cmd::Put {
+            key: key.to_string(),
+            value: raw.to_string(),
+            reply,
+        })?;
+        rx.recv()?
+    }
+
     /// 写入 JSON 值（INSERT ... ON CONFLICT 更新）
     pub fn put<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<()> {
         let content = serde_json::to_string(value)?;

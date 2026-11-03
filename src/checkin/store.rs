@@ -168,7 +168,9 @@ impl CheckinStore {
     }
 
     fn persist_schedules(&self) -> Result<()> {
-        self.store.put(SCHEDULE_KEY, &*self.schedules.read())
+        // 先 clone 再释放读锁，避免读守卫存活于整个 put（锁内同步 IO）
+        let snapshot = self.schedules.read().clone();
+        self.store.put(SCHEDULE_KEY, &snapshot)
     }
 
     // ── 设置 ──

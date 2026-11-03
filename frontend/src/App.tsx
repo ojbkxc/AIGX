@@ -50,6 +50,7 @@ const Pricing = lazyPage(() => import('./pages/Pricing'));
 const Agent = lazyPage(() => import('./pages/Agent'));
 const Tickets = lazyPage(() => import('./pages/Tickets'));
 const CheckinCenter = lazyPage(() => import('./pages/CheckinCenter'));
+const ScheduledTasks = lazyPage(() => import('./pages/ScheduledTasks'));
 
 /** 懒加载页面兜底骨架（与全局 loading 视觉一致） */
 function PageFallback(): JSX.Element {
@@ -172,6 +173,7 @@ export default function App(): JSX.Element {
           <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
           <Route path="/agent" element={<AdminRoute><Agent /></AdminRoute>} />
           <Route path="/checkin" element={<AdminRoute><CheckinCenter /></AdminRoute>} />
+          <Route path="/scheduled-tasks" element={<AdminRoute><ScheduledTasks /></AdminRoute>} />
           <Route path="/tickets" element={<ProtectedLayout><Tickets /></ProtectedLayout>} />
           <Route path="/profile" element={<ProtectedLayout><Profile /></ProtectedLayout>} />
           <Route path="*" element={<RouteErrorPage status={404} />} />

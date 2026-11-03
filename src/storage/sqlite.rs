@@ -17,7 +17,14 @@ use std::sync::Arc;
 
 /// SQLite 持久化 KV 存储
 pub struct SqliteStore {
-    conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Arc<Mutex<Connection>>,
+}
+
+impl SqliteStore {
+    /// 轻量克隆（Arc 共享连接），供 FileStore::put_async 在 spawn_blocking 里落盘。
+    pub(crate) fn cheap_clone(&self) -> SqliteStore {
+        SqliteStore { conn: self.conn.clone() }
+    }
 }
 
 impl SqliteStore {
@@ -74,6 +81,20 @@ impl SqliteStore {
     pub fn put<T: Serialize>(&self, key: &str, value: &T) -> anyhow::Result<()> {
         let content = serde_json::to_string(value)?;
         let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())",
+            rusqlite::params![key, content],
+        )?;
+        Ok(())
+    }
+
+    /// 在给定连接上写入（供事务内多键写；`transaction` 回调持有连接锁）。
+    pub(crate) fn put_conn(
+        conn: &rusqlite::Connection,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let content = serde_json::to_string(value)?;
         conn.execute(
             "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?1, ?2, unixepoch())",
             rusqlite::params![key, content],

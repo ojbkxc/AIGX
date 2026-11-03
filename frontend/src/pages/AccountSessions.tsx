@@ -265,13 +265,12 @@ function limiterRuleOfDraft(draft: LimiterDraft): { error: string } | { rule: Ac
 
 /* ══ 列定义（对齐 Agent2API accounts-columns：列宽拖动 + 列显隐 + 横滚底线） ══ */
 
-type AsCol = 'pick' | 'name' | 'channel' | 'provider' | 'status' | 'priority' | 'conn' | 'usage' | 'rate' | 'cooldown' | 'act';
+type AsCol = 'pick' | 'name' | 'provider' | 'status' | 'priority' | 'conn' | 'usage' | 'rate' | 'cooldown' | 'act';
 
 /** 全部列：默认宽（px）；flex 列没有用户覆盖时不写宽度，吃表格剩余宽度 */
 const AS_COLS: Array<{ key: AsCol; label: string; w: number; lock?: boolean; flex?: boolean }> = [
   { key: 'pick', label: '选择', w: 44, lock: true },
   { key: 'name', label: '账号', w: 210, lock: true, flex: true },
-  { key: 'channel', label: '渠道', w: 104 },
   { key: 'provider', label: 'Provider', w: 126 },
   { key: 'status', label: '状态', w: 92, lock: true },
   { key: 'priority', label: '优先级', w: 88 },
@@ -330,7 +329,10 @@ export default function AccountSessions(): JSX.Element {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const [channelFilter, setChannelFilter] = useState('');
+  /** 目标渠道（新增/导入时的落点）；不再是用户可见的筛选维度 */
+  const [channelFilter] = useState('');
+  /** 提供商筛选（对齐 Agent2API 账号页的 provider 下拉）：'' = 全部 */
+  const [providerFilter, setProviderFilter] = useState('');
   const [search, setSearch] = useState('');
 
   const [showModal, setShowModal] = useState(false);
@@ -1036,9 +1038,10 @@ export default function AccountSessions(): JSX.Element {
   /** 账号是否处于冷却中（任一上游真名还有剩余冷却秒数） */
   const isCooling = (s: AccountSessionItem): boolean =>
     Object.values(s.cooldowns || {}).some((v) => Number(v) > 0);
-  // 分段计数基于「渠道+搜索」过滤后、状态分段前的集合（计数口径=用户看到的池子）
+  // 分段计数基于「筛选+搜索」过滤后、状态分段前的集合（计数口径=用户看到的池子）
   const segBase = sessions.filter((s) => {
     if (channelFilter && s.channel_id !== channelFilter) return false;
+    if (providerFilter && s.provider !== providerFilter) return false;
     if (!needle) return true;
     return (
       s.name.toLowerCase().includes(needle) ||
@@ -1459,8 +1462,6 @@ export default function AccountSessions(): JSX.Element {
             )}
           </td>
         );
-      case 'channel':
-        return <td key={col} className="as-c-channel">{s.channel_name || s.channel_id}</td>;
       case 'provider':
         return (
           <td key={col} className="as-c-provider">
@@ -1879,17 +1880,21 @@ export default function AccountSessions(): JSX.Element {
         }
       >
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+          {/* 提供商筛选：对齐 Agent2API 账号页的左栏 provider 下拉。
+              渠道是内部容器，不该出现在筛选器里（用户心智里只有供应商）。 */}
           <Select
-            value={channelFilter}
-            onChange={(e) => setChannelFilter(e.target.value)}
-            aria-label={t('选择渠道')}
+            value={providerFilter}
+            onChange={(e) => setProviderFilter(e.target.value)}
+            aria-label={t('选择供应商')}
           >
-            <option value="">{t('全部渠道')}</option>
-            {accountChannels.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
+            <option value="">{t('全部供应商')}</option>
+            {Array.from(new Set(sessions.map((s) => s.provider).filter(Boolean)))
+              .sort()
+              .map((kind) => (
+                <option key={kind} value={kind}>
+                  {providers.find((p) => p.kind === kind)?.label || kind}
+                </option>
+              ))}
           </Select>
           <Input
             placeholder={t('搜索名称 / provider / 地址')}

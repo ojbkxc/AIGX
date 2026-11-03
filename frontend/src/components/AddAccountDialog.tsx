@@ -938,23 +938,11 @@ export default function AddAccountDialog({
               )}
 
               <details className="add-advanced">
-                <summary>{t('账号设置（渠道 / 优先级 / 并发等）')}</summary>
+                <summary>{t('账号设置（优先级 / 并发等）')}</summary>
                 <div className="add-advanced-body">
-                  {channels.length > 0 ? (
-                    <Select
-                      label={t('渠道')}
-                      value={advanced.channel_id}
-                      onChange={(e) => setAdvanced({ ...advanced, channel_id: e.target.value })}
-                    >
-                      {channels.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </Select>
-                  ) : (
-                    <p className="form-hint">{t('还没有账号型渠道：保存时会按所选供应商自动创建一个')}</p>
-                  )}
+                  {/* 渠道是内部容器（账号型渠道只用来给同一供应商的账号分组），
+                      对齐 Agent2API：用户心智里只有「供应商」，不提供渠道选择。
+                      保存时若没有可用渠道，后端自动按所选供应商创建。 */}
                   {!addConfig ? (
                     <Input
                       label={t('账号名（可选）')}

@@ -511,6 +511,54 @@ pub async fn handle_create_account_session(
         None,
         Some(json!({ "name": created.name, "provider": created.provider })),
     );
+    // 新账号没填模型白名单时，模型管理里就一行都看不到（账号型渠道的模型
+    // 只来自 `session.models`，落回 `channel.effective_models()` 也是空）。
+    // 这里异步补一次目录，让「加完账号就能在模型管理右栏筛出来」成立；
+    // 后台跑 + 失败静默：探测失败不该让建号请求失败（离线/限流都可能）。
+    if created.models.is_empty() {
+        let probe_state = state.clone();
+        let probe_id = created.id.clone();
+        tokio::spawn(async move {
+            let Some(session) = probe_state.account_sessions.get(&probe_id) else {
+                return;
+            };
+            let models = match crate::account_session::catalog::sync_account_catalog(
+                &probe_state.account_sessions,
+                &session,
+                true,
+            )
+            .await
+            {
+                Ok(snapshot) => snapshot.models.into_iter().map(|m| m.id).collect::<Vec<_>>(),
+                Err(_) => {
+                    // 登录态供应商没有目录描述时走通用探测；两者都失败就放弃
+                    match crate::account_session::catalog::discover_models_plain(
+                        &probe_state.account_sessions,
+                        &session,
+                    )
+                    .await
+                    {
+                        Ok(models) => models,
+                        Err(e) => {
+                            tracing::debug!("账号 {probe_id} 自动模型发现失败：{e}");
+                            return;
+                        }
+                    }
+                }
+            };
+            if models.is_empty() {
+                return;
+            }
+            if let Err(e) = crate::account_session::catalog::apply_catalog_to_session(
+                &probe_state.account_sessions,
+                &probe_id,
+                &models,
+                false,
+            ) {
+                tracing::debug!("账号 {probe_id} 写入模型清单失败：{e}");
+            }
+        });
+    }
     let now = chrono::Utc::now().timestamp();
     let view = session_json(&state.channel_store.list(), &created, now);
     Ok(Json(json!({ "success": true, "data": view })))

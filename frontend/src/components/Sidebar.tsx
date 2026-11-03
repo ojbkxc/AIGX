@@ -9,7 +9,7 @@ import {
   Users, Wallet, Ticket, ScrollText, Package,
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
-  Languages, LogOut, Coins, Bot, Headphones, Layers, CalendarCheck, Globe,
+  Languages, LogOut, Coins, Bot, Headphones, Layers, CalendarCheck, Globe, CalendarClock,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -53,10 +53,12 @@ const navItems: NavItem[] = [
   { path: '/account-sessions', labelKey: '账号池', icon: Layers, adminOnly: true },
   // 网络代理池（集中管理出口：账号 proxy 字段 pool:/rotate 编码引用）
   { path: '/proxy-pool', labelKey: '网络代理', icon: Globe, adminOnly: true },
+  // 定时任务（对照 Agent2API「定时任务」页：凭证维护/模型目录刷新/版本检查等）
+  { path: '/scheduled-tasks', labelKey: '定时任务', icon: CalendarClock, adminOnly: true },
 ];
 
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
-// 管理员 17 项 / 客户 9 项。合并历史：
+// 管理员 17 项 / 客户 8 项。合并历史：
 // - 模型映射 → 模型管理页统一维护（渠道表单里已移除，避免三处可改）
 // - 易支付 + 用户分组 + 通知设置 + 安全监控 + IP 管理 → 系统设置 tab
 // - 定价倍率曾并入系统设置计费 tab，现拆回独立页（/pricing）
@@ -82,11 +84,13 @@ const navGroups: NavGroup[] = [
       navItems[5],  // 模型管理（admin 可写；普通用户只读自己分组可见的模型与价格）
       navItems[6],  // 渠道管理
       navItems[17], // 账号池
+      navItems[18], // 网络代理（出口代理池）
       navItems[7],  // 定价倍率
       navItems[8],  // 用户管理
       navItems[9],  // 兑换码
       navItems[10], // 套餐管理
       navItems[13], // 签到中心
+      navItems[19], // 定时任务
       navItems[11], // 系统设置
       navItems[12], // AI 运维
     ],

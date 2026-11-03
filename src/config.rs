@@ -1088,11 +1088,15 @@ impl ConfigManager {
         cfg
     }
 
-    /// 保存配置到磁盘
+    /// 保存配置到磁盘（tmp+rename 原子写，避免断电/崩溃留下半截 TOML）
     pub async fn save(&self) -> anyhow::Result<()> {
-        let config = self.config.read().await;
-        let content = toml::to_string_pretty(&*config)?;
-        tokio::fs::write(&self.path, content).await?;
+        let content = {
+            let config = self.config.read().await;
+            toml::to_string_pretty(&*config)?
+        };
+        let tmp = self.path.with_extension("toml.tmp");
+        tokio::fs::write(&tmp, content).await?;
+        tokio::fs::rename(&tmp, &self.path).await?;
         Ok(())
     }
 

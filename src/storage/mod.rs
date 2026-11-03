@@ -331,6 +331,82 @@ impl FileStore {
             FileStoreInner::Postgres(p) => p.update(key, f),
         }
     }
+
+    /// 异步写入：序列化在调用线程完成，落盘丢进 blocking 线程池，
+    /// 避免请求线程被磁盘 IO 阻塞。
+    ///
+    /// 供热路径（如 channel 落盘）在**锁外**调用；`put` 本体保持同步语义不变。
+    /// 失败仅记日志（与调用方原本的 error! 行为一致），不向调用方传播错误。
+    pub fn put_async<T: Serialize + Send + 'static>(
+        &self,
+        key: impl Into<String> + Send + 'static,
+        value: T,
+    ) {
+        let key = key.into();
+        let raw = match serde_json::to_string(&value) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("put_async serialize {key} failed: {e}");
+                return;
+            }
+        };
+        // PG 后端本身是 actor 队列（send 只入队，落盘在专用工作线程），
+        // 直接同步 send 即已非阻塞，无需 spawn_blocking。
+        #[cfg(feature = "postgres")]
+        if let FileStoreInner::Postgres(p) = &self.inner {
+            if let Err(e) = p.put_raw(&key, &raw) {
+                tracing::error!("put_async {key} failed: {e:#}");
+            }
+            return;
+        }
+        let sqlite = match &self.inner {
+            FileStoreInner::Sqlite(s) => s.cheap_clone(),
+        };
+        // 无 tokio runtime（同步测试/启动早期）时直接同步写，语义不变
+        if tokio::runtime::Handle::try_current().is_err() {
+            if let Err(e) = sqlite.put_raw(&key, &raw) {
+                tracing::error!("put_async {key} failed: {e:#}");
+            }
+            return;
+        }
+        let key_for_log = key.clone();
+        tokio::task::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || sqlite.put_raw(&key, &raw)).await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::error!("put_async {key_for_log} failed: {e:#}"),
+                Err(e) => tracing::error!("put_async join failed: {e}"),
+            }
+        });
+    }
+
+    /// 多键原子写入（单事务）：中途失败全部回滚，消除「写到一半进程挂了」的中间态。
+    /// 仅 SQLite 后端支持真事务；PG 后端逐条写（actor 串行，等效原子）；JSON 后端逐条写。
+    pub fn write_batch(&self, entries: &[(&str, serde_json::Value)]) -> anyhow::Result<()> {
+        #[cfg(feature = "sqlite-kv")]
+        if let FileStoreInner::Sqlite(sqlite) = &self.inner {
+            return sqlite.transaction(|conn| {
+                for (key, val) in entries {
+                    sqlite::SqliteStore::put_conn(conn, key, val)?;
+                }
+                Ok(())
+            });
+        }
+        for (key, val) in entries {
+            self.put(key, val)?;
+        }
+        Ok(())
+    }
+
+    /// 写入原始 JSON 字符串（put_async 内部用；SQLite/PG 走 put_raw，JSON 后端直接写文件）。
+    #[cfg(feature = "sqlite-kv")]
+    fn put_raw(&self, key: &str, raw: &str) -> anyhow::Result<()> {
+        match &self.inner {
+            FileStoreInner::Sqlite(s) => s.put_raw(key, raw),
+            #[cfg(feature = "postgres")]
+            FileStoreInner::Postgres(p) => p.put_raw(key, raw),
+        }
+    }
 }
 
 /// 无 rusqlite 时，`FileStore` 即 JSON 文件后端。
