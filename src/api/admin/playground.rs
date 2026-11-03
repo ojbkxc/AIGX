@@ -477,52 +477,6 @@ pub async fn handle_playground_chat(
     }
 }
 
-/// GET /api/admin/playground/channels - 列出可用渠道（登录即可，列表已脱敏）
-///
-/// 普通用户只拿到**去重的模型名**：渠道 id/名称/启停状态属于运营资产，
-/// 暴露出去等于给出「站里有几家上游、各叫什么、挂了没」的侦察面。
-/// 管理员的 Playground 需要按渠道定向调试，才返回完整列表。
-pub async fn handle_playground_channels(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let user = verify_user(&state, &headers).await?;
-    if !user.is_admin() {
-        // 与 /api/models/available 同源：只给模型名，且按用户分组白名单过滤
-        let mut names: Vec<String> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for c in state.channel_store.list() {
-            if !c.is_enabled() {
-                continue;
-            }
-            for m in c.effective_models() {
-                if !m.is_empty()
-                    && seen.insert(m.clone())
-                    && state.user_group_store.allows_model(&user.group, m)
-                {
-                    names.push(m.clone());
-                }
-            }
-        }
-        names.sort();
-        return Ok(Json(json!({ "success": true, "data": names })));
-    }
-    let channels: Vec<Value> = state
-        .channel_store
-        .list()
-        .iter()
-        .map(|c| {
-            json!({
-                "id": &c.id,
-                "name": &c.name,
-                "status": &c.status,
-                "models": &c.models,
-            })
-        })
-        .collect();
-    Ok(Json(json!({ "success": true, "data": channels })))
-}
-
 /// POST /api/playground/images - Playground Images 模式（图片生成）
 ///
 /// 与 handle_playground_chat 同权限语义：登录即可用，普通用户不得指定

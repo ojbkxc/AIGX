@@ -35,6 +35,9 @@ import type {
   IpFilterEntry,
   CacheStatsItem,
   SystemMonitorItem,
+  DiagnosticsSummary,
+  DiagnosticsChannelProbes,
+  DiagnosticsBreakers,
   PricingSyncConfigItem,
   ExchangeRatesItem,
   IpFilterConfigItem,
@@ -1046,10 +1049,21 @@ export const api = {
     request<ApiResponse<Record<string, unknown>>>('PUT', `${API_BASE}/alerts/rules`, { rules }),
   getActiveAlerts: (): Promise<ApiList<AlertEvent>> =>
     request<ApiList<AlertEvent>>('GET', `${API_BASE}/alerts/active`),
+  /** 标记活跃告警已处理（移入历史） */
+  dismissAlert: (id: string | number): Promise<ApiResponse<{ resolved: string; message: string }>> =>
+    request<ApiResponse<{ resolved: string; message: string }>>('POST', `${API_BASE}/alerts/resolve`, { id }),
   getAlertHistory: (limit = 100): Promise<ApiList<AlertEvent>> =>
     request<ApiList<AlertEvent>>('GET', `${API_BASE}/alerts/history?limit=${limit}`),
   testAlert: (kind: string, value: unknown): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/alerts/test`, { kind, value }),
+
+  // 诊断（管理员）：系统体检摘要 / 渠道批量测活 / 熔断器快照
+  getDiagnosticsSummary: (): Promise<ApiResponse<DiagnosticsSummary>> =>
+    request<ApiResponse<DiagnosticsSummary>>('GET', `${API_BASE}/diagnostics/summary`),
+  getDiagnosticsChannels: (): Promise<ApiResponse<DiagnosticsChannelProbes>> =>
+    request<ApiResponse<DiagnosticsChannelProbes>>('GET', `${API_BASE}/diagnostics/channels`),
+  getDiagnosticsBreakers: (): Promise<ApiResponse<DiagnosticsBreakers>> =>
+    request<ApiResponse<DiagnosticsBreakers>>('GET', `${API_BASE}/diagnostics/breakers`),
 
   // 系统监控
   getSystemMonitor: (): Promise<ApiResponse<SystemMonitorItem>> =>
@@ -1150,11 +1164,11 @@ export const api = {
     model?: string;
     channel?: string;
     /** 空 model 时后端自动发现的实际生效模型 */
-    effective_model?: string | null;
+    effectiveModel?: string | null;
     /** 工具清单（name/label/risk），审批卡中文名与设置面板共用 */
     tools?: Array<{ name: string; label: string; risk: string }>;
   }>> =>
-    request<ApiResponse<{ model?: string; channel?: string }>>('GET', `${API_BASE}/agent/config`),
+    request<ApiResponse<{ model?: string; channel?: string; effectiveModel?: string | null; tools?: Array<{ name: string; label: string; risk: string }> }>>('GET', `${API_BASE}/agent/config`),
   // ==================== 聊天会话（按用户隔离的对话记录） ====================
   listChatSessions: (): Promise<ApiResponse<Array<{ id: string; title: string; model: string; created_at: number; updated_at: number }>>> =>
     request<ApiResponse<Array<{ id: string; title: string; model: string; created_at: number; updated_at: number }>>>('GET', `${API_BASE}/chat/sessions`),

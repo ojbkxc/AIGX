@@ -272,6 +272,17 @@ export default function Notify() {
     }
   };
 
+  /** 标记活跃告警已处理（后端移入历史） */
+  const dismissAlert = async (id: string | number): Promise<void> => {
+    try {
+      await api.dismissAlert(id);
+      addToast(t('告警已标记为已处理'));
+      loadAlerts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   if (loading) return <div className="loading">{t('加载通知配置')}</div>;
 
   return (
@@ -632,6 +643,15 @@ export default function Notify() {
                     </span>
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.message}>{a.message}</span>
                     <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>×{a.trigger_count}</span>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      style={{ marginLeft: 'auto', flexShrink: 0 }}
+                      onClick={() => void dismissAlert(a.id ?? 0)}
+                      title={t('标记为已处理（移入历史）')}
+                    >
+                      {t('已处理')}
+                    </button>
                   </div>
                 ))}
               </div>

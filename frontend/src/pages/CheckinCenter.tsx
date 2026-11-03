@@ -131,6 +131,13 @@ export default function CheckinCenter(): JSX.Element {
   const [busyKey, setBusyKey] = useState<string | null>(null);
   // 签到后的自动链在途：按钮禁用并显示进度，避免与手动点福利打架
   const [autoChaining, setAutoChaining] = useState(false);
+  /** 自动链逐个动作进度（done=已完成数，action=当前动作名） */
+  const [autoChainProgress, setAutoChainProgress] = useState<null | {
+    total: number;
+    done: number;
+    action: string;
+    stopped: boolean;
+  }>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -138,6 +145,10 @@ export default function CheckinCenter(): JSX.Element {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [scheduleForm, setScheduleForm] = useState<ScheduleForm>(EMPTY_SCHEDULE);
   const [savingSchedule, setSavingSchedule] = useState(false);
+
+  // 账号间隔（gap_ms）编辑：独立于 data 快照，避免整卡片重渲染
+  const [gapMsEdit, setGapMsEdit] = useState('');
+  const [gapSaving, setGapSaving] = useState(false);
 
   // 记录
   const [records, setRecords] = useState<CheckinRecord[]>([]);
@@ -157,7 +168,9 @@ export default function CheckinCenter(): JSX.Element {
     setError('');
     try {
       const res = await api.getCheckinCenter();
-      setData(res?.data ?? null);
+      const d = res?.data ?? null;
+      setData(d);
+      if (d?.settings) setGapMsEdit(String(d.settings.gap_ms ?? 800));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -213,11 +226,18 @@ export default function CheckinCenter(): JSX.Element {
       .flatMap((r) => (AUTO_CHAIN[r.provider] ?? []).map((action) => ({ r, action })));
     if (chain.length === 0) return;
     setAutoChaining(true);
+    setAutoChainProgress({ total: chain.length, done: 0, action: '', stopped: false });
     try {
-      for (const { r, action } of chain) {
+      for (let i = 0; i < chain.length; i++) {
+        const { r, action } = chain[i];
+        setAutoChainProgress({ total: chain.length, done: i, action, stopped: false });
         const res = await api.runCheckinBenefit(r.account_id, action);
         const result = res?.data;
-        if (result && !result.ok) break; // 失败即停，不拖垮后续动作
+        if (result && !result.ok) {
+          // 失败即停：标记停步原因，进度停在失败动作
+          setAutoChainProgress({ total: chain.length, done: i + 1, action, stopped: true });
+          break;
+        }
         // workbuddy-intl 保活+领取成功后回写台账（保活标记）
         if (action === 'keepalive_claim' && result?.ok) {
           try {
@@ -233,6 +253,26 @@ export default function CheckinCenter(): JSX.Element {
       // 自动链失败不拖垮签到结果展示
     } finally {
       setAutoChaining(false);
+    }
+  };
+
+  /** 保存账号间隔：校验非负数字后整份 settings 回写（与启用开关同接口） */
+  const saveGapMs = async (): Promise<void> => {
+    if (!data) return;
+    const n = Number(gapMsEdit);
+    if (!Number.isFinite(n) || n < 0) {
+      addToast(t('间隔必须为非负数字'), 'error');
+      return;
+    }
+    setGapSaving(true);
+    try {
+      await api.updateCheckinSettings({ ...data.settings, gap_ms: Math.floor(n) });
+      addToast(t('间隔已保存'));
+      await load();
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setGapSaving(false);
     }
   };
 
@@ -637,8 +677,7 @@ export default function CheckinCenter(): JSX.Element {
                 )}
               />
             ) : (
-              <div className="ck-prov-list">
-                {providers.map((group) => {
+              <div className="ck-prov-list">                {providers.map((group) => {
                   const open = expanded.has(group.provider);
                   const icon = providerIcon(group.provider);
                   return (
@@ -754,6 +793,36 @@ export default function CheckinCenter(): JSX.Element {
               </div>
             )}
           </Card>
+
+          {/* 自动链进度：签到成功后逐个动作串行执行的可视化（失败即停标记） */}
+          {autoChainProgress && (
+            <div className="ck-chain-progress">
+              <div className="ck-chain-head">
+                <span className="ck-chain-label">
+                  {t('自动链')}{autoChainProgress.stopped ? t('（已停止）') : ''}
+                  {autoChainProgress.action
+                    ? `：${autoChainProgress.action}`
+                    : autoChainProgress.done === autoChainProgress.total
+                      ? t('：全部完成')
+                      : ''}
+                </span>
+                <span className="ck-chain-count">
+                  {autoChainProgress.done}/{autoChainProgress.total}
+                </span>
+              </div>
+              <div className="ck-progress">
+                <span
+                  className="ck-progress-fill"
+                  style={{
+                    width:
+                      autoChainProgress.total > 0
+                        ? `${Math.min(100, (autoChainProgress.done / autoChainProgress.total) * 100)}%`
+                        : '0%',
+                  }}
+                />
+              </div>
+            </div>
+          )}
         </>
       ) : tab === 'schedule' ? (
         <>
@@ -778,7 +847,31 @@ export default function CheckinCenter(): JSX.Element {
                   {t('逐个签到之间的等待，避免并发触发上游风控。')}
                 </div>
               </div>
-              <span className="ck-setting-value">{data?.settings.gap_ms ?? 800}</span>
+              <div className="ck-gap-edit">
+                <input
+                  type="number"
+                  min={0}
+                  step={100}
+                  className="form-input ck-gap-input"
+                  value={gapMsEdit}
+                  onChange={(e) => setGapMsEdit(e.target.value)}
+                  onBlur={() => {
+                    if (gapMsEdit.trim() === '') setGapMsEdit(String(data?.settings.gap_ms ?? 800));
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void saveGapMs();
+                  }}
+                  aria-label={t('账号间隔（毫秒）')}
+                />
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  onClick={() => void saveGapMs()}
+                  disabled={gapSaving}
+                >
+                  {gapSaving ? t('保存中...') : t('保存')}
+                </button>
+              </div>
             </div>
           </Card>
 

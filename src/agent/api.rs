@@ -432,10 +432,13 @@ pub async fn handle_approval(
     Ok(Json(json!({ "success": ok, "data": null })))
 }
 
-/// GET /api/agent/config —— Agent 配置只读视图（前端模型选择器用）。
+/// GET /api/agent/config —— Agent 配置只读视图（前端模型选择器 + 工具标签用）。
 ///
-/// 返回当前 `[agent]` 的 model/channel（channel 锁定时模型选择器
-/// 仍可换模型，但渠道不换），与启用状态。
+/// 与 `/api/agent/settings` **同源同形状**（camelCase，复用
+/// `admin::settings::agent_settings_json`），额外附 `effectiveModel`
+/// （显式配置优先，空则自动发现的生效模型，前端展示「自动：xxx」）。
+///
+/// `enabled` / `systemPrompt` 等字段一并返回（管理员可见），前端按需取用。
 pub async fn handle_get_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -443,22 +446,16 @@ pub async fn handle_get_config(
     let _ = verify_admin(&state, &headers).await?;
     let agent = agent_state(&state)?;
     let cfg = agent.config();
+    let mut data = crate::api::admin::settings::agent_settings_json(&cfg);
     // effective_model：显式配置优先，空则自动发现（前端显示「自动：xxx」用）
-    let effective = crate::agent::llm::effective_model(&state, &cfg).ok();
-    // tools 精简清单：前端审批卡/工具开关的中文名从这里派生（不再手写标签表）
-    let tools: Vec<Value> = crate::agent::registry::all_tools()
-        .iter()
-        .map(|t| json!({ "name": t.name, "label": t.label, "risk": t.risk.as_str() }))
-        .collect();
-    Ok(Json(json!({
-        "success": true,
-        "data": {
-            "model": cfg.model,
-            "effective_model": effective,
-            "channel": cfg.channel,
-            "max_turns": cfg.max_turns,
-            "approval_timeout_secs": cfg.approval_timeout_secs,
-            "tools": tools,
-        }
-    })))
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert(
+            "effectiveModel".to_string(),
+            crate::agent::llm::effective_model(&state, &cfg)
+                .ok()
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+    Ok(Json(json!({ "success": true, "data": data })))
 }

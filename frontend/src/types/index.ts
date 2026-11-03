@@ -3,6 +3,8 @@
  * 统一的TypeScript类型系统，为整个前端应用提供类型基础
  */
 
+import type { ChannelQuirks } from '../lib/channelPresets';
+
 // ============================================================================
 // 核心领域类型
 // ============================================================================
@@ -314,20 +316,26 @@ export interface ChannelItem {
   seq?: number;
   name: string;
   channel_type?: string;
-  type?: string;
   base_url?: string;
   models?: string[];
   /// 上游 /models 自动发现并缓存的模型快照（"留空=全部"渠道调试下拉用）
   discovered_models?: string[];
+  /// 渠道状态（"enabled" / "disabled" 等）；后端始终返回
   status?: string;
-  enabled?: boolean;
   priority?: number;
   weight?: number;
-  max_concurrent?: number;
   /** 脱敏后的密钥；空字符串 = 无密钥渠道（免鉴权上游） */
   api_key?: string;
   model_mapping?: Record<string, string>;
   cost_pricing?: Record<string, { input_price?: number; output_price?: number; price_type?: string }>;
+  /// Cloudflare account_id（仅 channel_type=cloudflare 时有值）
+  account_id?: string;
+  /// 上游特判（预置供应商卡片写入；手工新建 = 空对象）
+  quirks?: ChannelQuirks | null;
+  /// 余额查询方案（空 = 只试 OpenAI 计费端点）
+  balance_scheme?: string;
+  /// 最近一次余额查询的展示单位（USD / CNY / % / quota …）
+  balance_unit?: string;
   created_at?: string | number;
   updated_at?: string;
   last_used_at?: number | null;
@@ -340,7 +348,6 @@ export interface ChannelItem {
   balance?: number | null;
   /// 最近一次查询到的上游 credit；后端 Option 序列化为 null
   credit?: number | null;
-  health?: ChannelHealth;
 }
 
 export interface TokenItem {
@@ -1688,4 +1695,76 @@ export interface ScheduledTaskPatch {
 export interface ScheduledTaskRunResult {
   summary: string;
   task: ScheduledTaskItem;
+}
+
+// ── 诊断（GET /api/diagnostics/* 三件套） ──
+
+/** 系统体检摘要（GET /api/diagnostics/summary 响应 data） */
+export interface DiagnosticsSummary {
+  /** 聚合时刻（unix 秒） */
+  generated_at: number;
+  channels: {
+    total: number;
+    enabled: number;
+    circuit_open: number;
+    circuit_halfopen: number;
+    cooldown: number;
+  };
+  today_usage: {
+    requests: number;
+    success: number;
+    success_rate: number;
+    input_tokens: number;
+    output_tokens: number;
+  };
+  errors_24h: {
+    total_failures: number;
+    top: Array<{ status_code: number; count: number; error_msg?: string }>;
+  };
+  runtime: {
+    version: string;
+    pid: number;
+    uptime_secs: number | null;
+    uptime_available: boolean;
+  };
+}
+
+/** 渠道批量测活条目（GET /api/diagnostics/channels 响应 data.channels[]） */
+export interface DiagnosticsChannelProbe {
+  channel_id: string;
+  name: string;
+  enabled: boolean;
+  /** alive / timeout / dead */
+  result: string;
+  latency_ms: number;
+  message: string;
+}
+
+/** 渠道批量测活（GET /api/diagnostics/channels 响应 data） */
+export interface DiagnosticsChannelProbes {
+  probed: number;
+  alive: number;
+  deadline_secs: number;
+  channels: DiagnosticsChannelProbe[];
+}
+
+/** 熔断器快照条目（GET /api/diagnostics/breakers 响应 data.breakers[]） */
+export interface DiagnosticsBreaker {
+  channel_id: string;
+  /** closed / open / halfopen */
+  state: string;
+  failure_count: number;
+  failure_type: string;
+  cooldown_remaining_secs: number;
+  rate_limit_remaining_secs: number;
+  probe_in_flight: boolean;
+  in_store_cooldown: boolean;
+}
+
+/** 熔断器快照（GET /api/diagnostics/breakers 响应 data） */
+export interface DiagnosticsBreakers {
+  tracked: number;
+  open: number;
+  halfopen: number;
+  breakers: DiagnosticsBreaker[];
 }

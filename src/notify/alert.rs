@@ -341,7 +341,29 @@ impl AlertRuleEvaluator {
     /// 标记告警解决（同步记入历史）
     pub fn resolve(&mut self, kind: &AlertKind) -> Option<Alert> {
         let alert_key = kind.to_string();
-        if let Some(mut alert) = self.active_alerts.remove(&alert_key) {
+        self.resolve_by_key(&alert_key)
+    }
+
+    /// 当前活跃告警（拷贝快照）
+    pub fn active_alerts(&self) -> Vec<Alert> {
+        self.active_alerts.values().cloned().collect()
+    }
+
+    /// 按告警 id 标记解决（同步记入历史）。
+    /// 活跃告警的 map key 是 kind 的 Display 串，前端只持有告警 id，
+    /// 因此这里先按 id 反查 kind 再 resolve。
+    pub fn resolve_by_id(&mut self, id: &str) -> Option<Alert> {
+        let key = self
+            .active_alerts
+            .iter()
+            .find(|(_, a)| a.id == id)
+            .map(|(k, _)| k.clone())?;
+        self.resolve_by_key(&key)
+    }
+
+    /// resolve 的共用实现：按 map key 移除活跃告警、置 Resolved 并记入历史
+    fn resolve_by_key(&mut self, key: &str) -> Option<Alert> {
+        if let Some(mut alert) = self.active_alerts.remove(key) {
             alert.status = AlertStatus::Resolved;
             alert.resolved_at = Some(Utc::now().timestamp());
             self.history.insert(0, alert.clone());
@@ -352,11 +374,6 @@ impl AlertRuleEvaluator {
         } else {
             None
         }
-    }
-
-    /// 当前活跃告警（拷贝快照）
-    pub fn active_alerts(&self) -> Vec<Alert> {
-        self.active_alerts.values().cloned().collect()
     }
 
     /// 告警消息（脱敏——不带密钥/上游 URL 等敏感数据）

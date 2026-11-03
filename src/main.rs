@@ -934,7 +934,7 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         tracing::info!(
-            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-usage-query, log-retention-sweep, subscription-expire-reset)",
+            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-usage-query, log-retention-sweep, daily-agg-backfill, subscription-expire-reset)",
             scheduler.task_count()
         );
     }
@@ -1637,6 +1637,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         .route("/api/alerts/active", get(api::admin::handle_alerts_active))
         .route(
+            "/api/alerts/resolve",
+            post(api::admin::handle_alert_resolve),
+        )
+        .route(
             "/api/alerts/history",
             get(api::admin::handle_alerts_history),
         )
@@ -1674,6 +1678,14 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/monitor/system",
             get(api::admin::handle_monitor_system),
+        )
+        .route(
+            "/api/monitor/health",
+            get(api::admin::handle_health),
+        )
+        .route(
+            "/api/monitor/healthz",
+            get(api::admin::handle_healthz),
         )
         // 只读诊断端点套件（AI 可运维第①步：全部只读，管理面鉴权）
         .route(
@@ -2234,8 +2246,26 @@ async fn handle_livez(State(state): State<AppState>) -> axum::response::Response
 }
 
 /// GET /readyz — 就绪检查
+///
+/// 除 draining 状态与配置就绪外，再做一次**轻量**存储读探测：
+/// 读一个从不写入的探针键，读不到（`Ok(None)`）视为正常——目标是验证
+/// 「存储层可访问」，而不是键存在。仅当读操作本身报错（DB 打不开/查询失败）
+/// 才判失败并返回 503。`/readyz` 被容器探针高频调用，因此只做单次 KV 读。
 async fn handle_readyz(State(state): State<AppState>) -> axum::response::Response {
-    health::readyz_response(&state.livez_state, true, false)
+    let storage_ok = storage_probe(&state.alert_store).await;
+    health::readyz_response(&state.livez_state, true, storage_ok, false)
+}
+
+/// 轻量存储可访问性探测。
+///
+/// `FileStore::get` 是同步阻塞调用（SQLite/PG），放到阻塞线程池执行，
+/// 避免在 async handler 里阻塞 tokio worker。用 `spawn_blocking` 的 join
+/// 失败（panic、runtime 关闭）同样视为探测失败。
+async fn storage_probe(store: &std::sync::Arc<crate::storage::FileStore>) -> bool {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.get::<serde_json::Value>("__readyz_probe").is_ok())
+        .await
+        .unwrap_or(false)
 }
 
 /// GET /health — 模型健康状态汇总

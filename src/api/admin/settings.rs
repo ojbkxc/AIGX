@@ -383,7 +383,11 @@ pub struct AgentSettingsRequest {
     pub disabled_tools: Option<Vec<String>>,
 }
 
-fn agent_settings_json(config: &crate::config::AgentConfig) -> Value {
+/// Agent 配置的规范 JSON 形状（camelCase，与 `/api/agent/settings` 完全一致）。
+///
+/// 被 `/api/agent/config`（运行期只读视图）复用，保证两个端点字段命名统一，
+/// 前端无需维护两套契约。
+pub(crate) fn agent_settings_json(config: &crate::config::AgentConfig) -> Value {
     let tools: Vec<Value> = crate::agent::tools::tool_specs()
         .iter()
         .map(|spec| {
@@ -399,10 +403,10 @@ fn agent_settings_json(config: &crate::config::AgentConfig) -> Value {
         "enabled": config.enabled,
         "model": config.model,
         "channel": config.channel,
-        "max_turns": config.max_turns,
-        "approval_timeout_secs": config.approval_timeout_secs,
-        "max_history": config.max_history,
-        "reasoning_effort": config.reasoning_effort,
+        "maxTurns": config.max_turns,
+        "approvalTimeoutSecs": config.approval_timeout_secs,
+        "maxHistory": config.max_history,
+        "reasoningEffort": config.reasoning_effort,
         "systemPrompt": config.system_prompt,
         "disabledTools": config.disabled_tools,
         "tools": tools,

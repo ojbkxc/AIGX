@@ -30,7 +30,8 @@ use crate::user_group::UserGroup;
 
 use super::super::openai::AppState;
 use super::common::{
-    admin_id_from_session, error_response, record_audit, verify_admin, verify_user,
+    admin_id_from_session, error_response, extract_client_ip, record_audit, verify_admin,
+    verify_user,
 };
 
 use super::channels::mask_channel;
@@ -2077,6 +2078,31 @@ pub async fn handle_alerts_active(
     Ok(Json(serde_json::json!({ "success": true, "data": alerts })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ResolveAlertRequest {
+    /// 活跃告警 id（GET /api/alerts/active 返回）
+    pub id: String,
+}
+
+/// POST /api/alerts/resolve - 标记活跃告警已处理（移入历史并记 resolved_at）
+pub async fn handle_alert_resolve(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ResolveAlertRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    match state.alert_evaluator.lock().resolve_by_id(&body.id) {
+        Some(a) => Ok(Json(serde_json::json!({
+            "success": true,
+            "data": { "resolved": a.id, "message": a.message }
+        }))),
+        None => Err(crate::api::admin::common::error_response(
+            "未找到该活跃告警（可能已被解决或不存在）",
+            StatusCode::NOT_FOUND,
+        )),
+    }
+}
+
 /// GET /api/alerts/history - 告警触发历史（最新在前，环形 500 条）
 #[derive(Debug, Deserialize)]
 pub struct AlertHistoryQuery {
@@ -2328,6 +2354,15 @@ pub async fn handle_stripe_webhook(
         Some(order) => {
             if let Err(e) = state.user_store.add_quota(&order.user_id, order.quota) {
                 tracing::error!("Failed to add quota for order {}: {e}", trade_no);
+                // S2：入账失败必须把订单放回 pending。否则回调重放时
+                // `complete_if_pending` 因状态已是 paid 返回 None，订单将永久
+                // 不入账。reopen 成功后等待 Stripe 重试即可补单。
+                if let Err(reopen_err) = state.order_store.reopen(&trade_no) {
+                    tracing::error!(
+                        "Failed to reopen order {} after add_quota failure: {reopen_err}",
+                        trade_no
+                    );
+                }
                 return error_response("Failed to add quota", StatusCode::INTERNAL_SERVER_ERROR)
                     .into_response();
             }
@@ -2355,10 +2390,18 @@ pub async fn handle_stripe_webhook(
 
 // ────────────────────────────────────────────────────────────────
 
-/// GET /api/auth/github — 跳转到 GitHub OAuth 授权页
-pub async fn handle_openapi_json() -> Json<Value> {
+/// GET /api-docs/openapi.json — OpenAPI 文档（需要管理员会话）
+///
+/// S4：原先匿名可读。改为 `verify_admin` 鉴权，避免向未认证访客暴露
+/// 全部管理/数据面接口清单与参数结构。若存在对外集成方依赖匿名读取，
+/// 需按报告说明回退或另设公开只读端点。
+pub async fn handle_openapi_json(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
     let version = env!("CARGO_PKG_VERSION");
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "openapi": "3.0.3",
         "info": {
             "title": "AIGX API",
@@ -2500,11 +2543,17 @@ pub async fn handle_openapi_json() -> Json<Value> {
                 "get": { "tags": ["System"], "summary": "健康检查", "responses": { "200": { "description": "服务健康" } } }
             }
         }
-    }))
+    })))
 }
 
-/// GET /swagger-ui — Swagger UI HTML 页面
-pub async fn handle_swagger_ui() -> axum::response::Html<&'static str> {
+/// GET /swagger-ui — Swagger UI HTML 页面（需要管理员会话）
+///
+/// S4：与 `/api-docs/openapi.json` 同口径加鉴权，避免匿名访客发现
+/// 管理面接口。公开集成场景见 openapi 注释中的回退说明。
+pub async fn handle_swagger_ui(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = verify_admin(&state, &headers).await {
+        return resp.into_response();
+    }
     let html = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2547,7 +2596,7 @@ pub async fn handle_swagger_ui() -> axum::response::Html<&'static str> {
     </script>
 </body>
 </html>"#;
-    axum::response::Html(html)
+    axum::response::Html(html).into_response()
 }
 
 // ── 功能 6：令牌轮换 ────────────────────────────────────────────────
@@ -2607,10 +2656,30 @@ pub async fn handle_rotate_token(
 //（与既有 `handle_channel_chat_test` 同源，但 playground 固定非流式 OpenAI 协议，
 // 且 channel_id 可选——缺省时选第一个启用渠道）。
 
+/// GET /api/users/check — 检查用户名/邮箱是否可用（注册页调用）。
+///
+/// S3：该端点匿名可调且直接返回账号是否存在，可被批量枚举。这里复用
+/// 登录限流器做 IP 级限流（20 次/分钟）；响应形状保持 `success/data.available`
+/// 不变，超限时返回既有错误形状的 429。
 pub async fn handle_check_username(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     Query(params): Query<CheckUsernameQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let client_ip = extract_client_ip(&headers)
+        .or_else(|| connect.map(|c| c.0.ip().to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+    let rate_key = format!("username-check:{client_ip}");
+    let attempts = state.login_limiter.get(&rate_key).await.unwrap_or(0);
+    if attempts >= 20 {
+        return Err(error_response(
+            "Too many requests, please try again later",
+            StatusCode::TOO_MANY_REQUESTS,
+        ));
+    }
+    state.login_limiter.insert(rate_key, attempts + 1).await;
+
     let name = params.username.trim();
     if name.is_empty() {
         return Err(error_response(

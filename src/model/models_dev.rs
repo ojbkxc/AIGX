@@ -15,8 +15,9 @@
 //!   失败保留旧值（KV 里的上一版仍可用），绝不因网络抖动退回空目录。
 //! - 与上游的差异：上游还拉 api.json 取 reasoning effort 档位；AIGX 的
 //!   ModelMetadata 没有档位字段，不拉（少一个网络依赖）。
-//! - 定时刷新挂 cron（24h 一轮，见 main.rs 的 modelsdev-refresh）；
-//!   手动刷新走 `POST /api/models/metadata/refresh`，5 秒内合并重复点击
+//! - 定时刷新挂 scheduled_tasks 的 `modelRefresh`（默认 1440 分钟/天，见
+//!   `scheduled_tasks/mod.rs` 的 `run_backend`）；手动刷新走
+//!   `POST /api/models/metadata/refresh`，5 秒内合并重复点击
 //!   （对齐上游 MANUAL 间隔下限）。
 //!
 //! 开关 `usage.models_dev_enabled` 默认**开**：关 = 不再联网刷新，

@@ -138,16 +138,3 @@ pub async fn handle_update_notify_config(
         "data": null
     })))
 }
-
-/// 发送测试通知
-pub async fn handle_send_test_notify(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _ = verify_admin(&state, &headers).await?;
-    // 未来实现：发送测试通知
-    Ok(Json(json!({
-        "success": true,
-        "data": null
-    })))
-}

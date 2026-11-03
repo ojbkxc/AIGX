@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next';
 import {
   Bot, Send, Square, ShieldAlert, Terminal, Eye, Wrench, Brain,
-  CheckCircle2, XCircle, History, MessageSquarePlus, Trash2,
+  CheckCircle2, XCircle, History, MessageSquarePlus, Trash2, Lock,
 } from 'lucide-react';
 import ModelPicker from '../components/ModelPicker';
 import SessionDrawer from '../components/chat/SessionDrawer';
@@ -102,9 +102,19 @@ export default function Agent(): JSX.Element {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  /** 审批卡遮罩误触提示：点遮罩只提示，不自动拒绝（审批必须显式选择） */
+  const [approvalWarn, setApprovalWarn] = useState(false);
 
   /** 工具中文名（审批卡展示）：从 /api/agent/config 的 tools[] 派生，不再手写标签表 */
   const [toolLabels, setToolLabels] = useState<Map<string, string>>(new Map());
+  /** 工具风险等级（审批卡展示用，readonly/low/high） */
+  const [toolRisks, setToolRisks] = useState<Map<string, string>>(new Map());
+  /** 配置 model 为空、后端自动发现的生效模型（展示「自动：xxx」） */
+  const [effectiveHint, setEffectiveHint] = useState('');
+  /** 渠道锁定：[agent].channel 非空时只走该渠道，ModelPicker 锁定到渠道模型列表 */
+  const [agentChannel, setAgentChannel] = useState('');
+  const [agentChannelName, setAgentChannelName] = useState('');
+  const [channelModels, setChannelModels] = useState<string[]>([]);
 
   // 启动时取 Agent 配置：模型选择器初值（显式配置优先，空则用自动发现的生效模型）
   // + 工具标签表（后端 registry 的 label 单一来源）
@@ -116,16 +126,41 @@ export default function Agent(): JSX.Element {
         const data = (res as unknown as {
           data?: {
             model?: string;
-            effective_model?: string | null;
-            tools?: Array<{ name: string; label: string }>;
+            effectiveModel?: string | null;
+            channel?: string;
+            tools?: Array<{ name: string; label: string; risk?: string }>;
           };
         }).data;
         // 竞态保护：用户已恢复历史会话时，配置初值不得覆盖会话自己的模型
         if (!sessionIdRef.current) {
-          setModel(data?.model || data?.effective_model || '');
+          setModel(data?.model || data?.effectiveModel || '');
         }
+        // 「自动：xxx」提示仅当配置未显式指定 model、生效模型由自动发现得出时展示
+        setEffectiveHint(!data?.model && data?.effectiveModel ? data.effectiveModel : '');
         if (data?.tools?.length) {
           setToolLabels(new Map(data.tools.map((tt) => [tt.name, tt.label])));
+          setToolRisks(new Map(data.tools.map((tt) => [tt.name, tt.risk ?? ''])));
+        }
+        // 渠道锁定：[agent].channel 非空时拉该渠道的模型列表，ModelPicker 锁定展示
+        const ch = (data?.channel ?? '').trim();
+        if (ch) {
+          setAgentChannel(ch);
+          api.listChannels()
+            .then((res2) => {
+              if (!mounted) return;
+              const list = (res2 as unknown as {
+                data?: Array<{ id: string; name: string; models?: string[]; discovered_models?: string[] }>;
+              }).data ?? [];
+              const found = list.find((c) => String(c.id) === ch);
+              if (found) {
+                setAgentChannelName(found.name);
+                setChannelModels(Array.from(new Set([
+                  ...(found.models ?? []),
+                  ...(found.discovered_models ?? []),
+                ])));
+              }
+            })
+            .catch(() => { /* 渠道列表失败静默降级：选择器不锁定，发送时后端仍只走锁定渠道 */ });
         }
       })
       .catch(() => { /* 配置读取失败静默降级：选择器空值，发送时走配置模型 */ });
@@ -475,8 +510,13 @@ export default function Agent(): JSX.Element {
                   onClick={() => {
                     setRole((r) => (r === 'observer' ? 'operator' : 'observer'));
                     // 切到运维员时顺手请求桌面通知授权：切走标签页时审批挂起才能提醒
-                    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-                      void Notification.requestPermission();
+                    if (typeof Notification !== 'undefined') {
+                      if (Notification.permission === 'default') {
+                        void Notification.requestPermission();
+                      } else if (Notification.permission === 'denied') {
+                        // 通知被拒：引导用户到浏览器站点设置里手动开启
+                        setError(t('浏览器通知已被拒绝，请在浏览器站点设置中开启通知后重试'));
+                      }
                     }
                   }}
                   title={role === 'observer' ? t('观察员：只读工具。点击切换为运维员') : t('运维员：可执行写工具（高危仍需审批）。点击切回观察员')}
@@ -508,7 +548,26 @@ export default function Agent(): JSX.Element {
                 </button>
               </div>
               <div className="agent-input-actions">
-                <ModelPicker value={model} onChange={setModel} compact />
+                {/* 渠道锁定徽标：[agent].channel 非空时提示仅走该渠道 */}
+                {agentChannel && (
+                  <span className="agent-channel-lock" title={t('Agent 已锁定渠道，只走该渠道的请求')}>
+                    <Lock size={11} />
+                    {agentChannelName || agentChannel}
+                  </span>
+                )}
+                <ModelPicker
+                  value={model}
+                  onChange={setModel}
+                  compact
+                  channelModels={channelModels}
+                  lockToChannel={!!(agentChannel && channelModels.length > 0)}
+                />
+                {/* 自动发现生效模型提示（配置未显式指定 model 时） */}
+                {effectiveHint && (
+                  <span className="agent-effort-hint" title={t('配置未指定模型，自动发现该生效模型')}>
+                    {t('自动')}：{effectiveHint}
+                  </span>
+                )}
                 {busy ? (
                   <button type="button" className="agent-send-fab stop" onClick={stop} title={t('停止')}>
                     <Square size={14} />
@@ -532,8 +591,8 @@ export default function Agent(): JSX.Element {
 
       {/* 审批弹卡（cc-haha PermissionDialog 语义：标题/工具/参数/三态选择） */}
       {pending && (
-        <div className="agent-approval-mask" onClick={() => void respondApproval('deny')}>
-          <div className="agent-approval-card" onClick={(e) => e.stopPropagation()}>
+        <div className="agent-approval-mask" onClick={() => setApprovalWarn(true)}>
+          <div className="agent-approval-card" onClick={(e) => { e.stopPropagation(); setApprovalWarn(false); }}>
             <div className="agent-approval-head">
               <ShieldAlert size={18} className="agent-approval-icon" />
               <div>
@@ -544,9 +603,18 @@ export default function Agent(): JSX.Element {
             <div className="agent-approval-tool">
               <code className="agent-approval-name">{pending.name}</code>
               <span className="agent-approval-desc">{toolLabels.get(pending.name) ?? t('高危写操作')}</span>
+              {(() => {
+                const r = toolRisks.get(pending.name);
+                if (!r) return null;
+                const label = r === 'readonly' ? t('只读') : r === 'low' ? t('低危') : t('高危');
+                return <span className={`agent-risk-badge ${r}`}>{label}</span>;
+              })()}
             </div>
             {pending.arguments && pending.arguments !== '{}' && (
               <pre className="agent-approval-args">{pending.arguments}</pre>
+            )}
+            {approvalWarn && (
+              <div className="agent-approval-warn">{t('请显式选择「允许」或「拒绝」')}</div>
             )}
             <div className="agent-approval-actions">
               <button type="button" className="agent-approval-deny" onClick={() => void respondApproval('deny')}>{t('拒绝')}</button>

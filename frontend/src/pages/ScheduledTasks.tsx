@@ -232,12 +232,20 @@ export default function ScheduledTasks(): JSX.Element {
                 <Badge tone="neutral">{t('空闲')}</Badge>
               )}
               <span style={{ color: 'var(--text-muted)' }}>
-                {t('上次执行')} {fmtTime(task.lastRunAt)}
+                {t('上次尝试')} {fmtTime(task.lastAttemptAt)}
+              </span>
+              <span style={{ color: 'var(--text-muted)' }}>
+                {t('上次成功')} {fmtTime(task.lastSuccessAt)}
               </span>
               <span style={{ color: 'var(--text-muted)' }}>
                 {t('下次执行')} {fmtTime(task.nextRunAt)}
               </span>
             </div>
+            {task.retryAt && task.retryAt > Date.now() && (
+              <div style={{ marginTop: 6, color: 'var(--warning-text, #d97706)' }}>
+                {t('失败冷却中，将于 {{when}} 重试', { when: fmtTime(task.retryAt) })}
+              </div>
+            )}
             {task.lastResult && (
               <div style={{ marginTop: 6, color: 'var(--text-muted)' }}>
                 {t('最近结果')}：{task.lastResult}
@@ -248,17 +256,27 @@ export default function ScheduledTasks(): JSX.Element {
                 {t('最近错误')}：{task.lastError}
               </div>
             )}
-            <div style={{ marginTop: 12 }}>
+            <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
               <Button
                 size="sm"
                 variant="outline"
                 onClick={() => void runNow(task)}
-                disabled={runningId === task.id || isRunning}
+                disabled={runningId === task.id || isRunning || !task.canRun}
+                title={task.canRun ? undefined : t('该任务当前不可执行')}
               >
                 {runningId === task.id ? t('执行中…') : t('立即执行')}
               </Button>
+              {!task.canRun && (
+                <span style={{ color: 'var(--text-muted)' }}>{t('当前不可执行')}</span>
+              )}
             </div>
           </>
+        )}
+
+        {task.runner === 'frontend' && (
+          <div style={{ marginTop: 6, color: 'var(--text-muted)' }}>
+            {t('仅页面可见时生效，不可见不请求')}
+          </div>
         )}
       </Card>
     );

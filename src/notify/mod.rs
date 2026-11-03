@@ -9,6 +9,16 @@
 //! - Webhook：通用 JSON POST（结构化告警载荷）
 //!
 //! 事件类型：充值成功 / 额度不足 / 渠道故障 / 提现请求 / 告警触发。
+//!
+//! ── 配置持久化：FileStore 优先，config.toml 仅作首次默认 ────────────
+//! `NotifyConfig` 存在**两处**存储：
+//! 1. TOML（`AppConfig.notify`）：启动时作为默认值注入；
+//! 2. FileStore（键 `notify_config`）：管理界面保存后落盘。
+//! 启动时 `restore_config` **用 FileStore 覆盖 TOML**——一旦界面保存过，
+//! 改 config.toml 不再生效（界面保存的值为准）。这是有意设计：界面配置
+//! 是运行期事实源，TOML 只是无界面历史时的兜底默认。运维须知：改通知
+//! 配置请走「设置 → 通知」界面，不要直接编辑 config.toml（改了也会被
+//! FileStore 里的旧值覆盖）。
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};

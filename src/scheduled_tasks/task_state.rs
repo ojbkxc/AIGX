@@ -165,23 +165,6 @@ fn change(key: &str, mutate: impl FnOnce(&mut TaskState)) -> Result<TaskState, S
     Ok(result)
 }
 
-pub fn store_value(key: &str, value: Value) -> Result<(), String> {
-    change(key, |state| state.value = Some(value)).map(|_| ())
-}
-
-/// 记一笔「外部已跑过」：按给定间隔把下次执行排到「现在 + 间隔」。
-///
-/// 用于别的代码路径直接跑了任务（没经过 `claim`）时，让调度循环知道节奏该重新算。
-pub fn note_external_run(key: &str, interval_ms: i64) -> Result<(), String> {
-    change(key, |state| {
-        let now = now_ms();
-        state.last_attempt_at = now;
-        state.interval_ms = interval_ms;
-        state.next_run_at = now.saturating_add(interval_ms);
-    })?;
-    Ok(())
-}
-
 /// 立即排到「下一拍就执行」（绕过冷却）。
 ///
 /// 用于「刚开启任务」语义：用户打开开关，希望下一个 tick 就跑一次，而不是按
@@ -191,14 +174,6 @@ pub fn schedule_now(key: &str) -> Result<(), String> {
         let now = now_ms();
         state.retry_at = 0;
         state.next_run_at = now;
-    })?;
-    Ok(())
-}
-
-/// 清除失败冷却（`retry_at` 置零）。
-pub fn clear_cooldown(key: &str) -> Result<(), String> {
-    change(key, |state| {
-        state.retry_at = 0;
     })?;
     Ok(())
 }

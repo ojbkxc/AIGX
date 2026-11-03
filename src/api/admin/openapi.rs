@@ -699,6 +699,9 @@ fn paths_settings_ops() -> Value {
         "/api/alerts/active": {
             "get": op("告警", "当前活跃告警")
         },
+        "/api/alerts/resolve": {
+            "post": op_body("告警", "标记活跃告警已处理（写操作）", "告警 id")
+        },
         "/api/alerts/history": {
             "get": op_params("告警", "告警历史", &[query_param("limit", "integer", "返回条数上限")])
         },
@@ -734,6 +737,12 @@ fn paths_monitor_security() -> Value {
     json!({
         "/api/monitor/system": {
             "get": op("监控", "系统资源快照（CPU/内存/负载，非 Linux 降级）")
+        },
+        "/api/monitor/health": {
+            "get": op("监控", "健康检查（真实 uptime/内存快照）")
+        },
+        "/api/monitor/healthz": {
+            "get": op("监控", "健康检查（无鉴权）")
         },
         "/api/monitor/security": {
             "get": op("监控", "安全汇总（评分与概览）")
@@ -1112,6 +1121,7 @@ mod tests {
         add("/api/aff", &["get"]);
         add("/api/aff_transfer", &["post"]);
         add("/api/alerts/active", &["get"]);
+        add("/api/alerts/resolve", &["post"]);
         add("/api/alerts/history", &["get"]);
         add("/api/alerts/rules", &["get", "put"]);
         add("/api/alerts/test", &["post"]);
@@ -1223,6 +1233,8 @@ mod tests {
         add("/api/monitor/security", &["get"]);
         add("/api/monitor/security/events", &["get"]);
         add("/api/monitor/system", &["get"]);
+        add("/api/monitor/health", &["get"]);
+        add("/api/monitor/healthz", &["get"]);
         add("/api/network/accounts", &["get"]);
         add("/api/network/accounts/{account_id}", &["delete", "post"]);
         add("/api/network/config/{config_id}", &["put"]);
