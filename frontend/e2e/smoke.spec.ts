@@ -18,6 +18,7 @@ const ADMIN_PAGES: Array<[path: string, marker: string]> = [
   ['/redemptions', '兑换'],
   ['/account-sessions', '账号'],
   ['/proxy-pool', '代理'],
+  ['/scheduled-tasks', '定时'],
 ];
 
 /** 普通登录即可访问的页面 */
