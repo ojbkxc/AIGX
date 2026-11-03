@@ -109,15 +109,35 @@ impl AccountBridge {
         crate::config::retry_self_count() as usize
     }
 
+    /// 测试辅助：should_skip_self_retry 的静态版本（不依赖 self 状态）。
+    #[cfg(test)]
+    fn should_skip_self_retry_for_test(error: &BridgeError) -> bool {
+        Self::classify_skip(error)
+    }
+
+    /// should_skip_self_retry 的纯判定核心。
+    fn classify_skip(error: &BridgeError) -> bool {
+        match error {
+            BridgeError::UpstreamStatus { status, .. } => {
+                crate::config::is_retry_status(*status) || *status == 404
+            }
+            BridgeError::ModelNotFound(_) => true,
+            _ => false,
+        }
+    }
+
     /// 该失败是否应跳过「同账号重试」直接换号。
     ///
     /// 命中「直接换号状态码」名单（默认 402 余额不足）说明这枚凭据/账号已被
     /// 上游判死，原地重试只会重复撞同一面墙，直接换号更快。
+    ///
+    /// 404 单独豁免（对照 Agent2API 814dcf2 / issue #255）：上游按**请求的
+    /// 路由/模型名**拒收——模型不在这一家的套餐里、路由不存在。结论只由
+    /// 「这份 body 长什么样」决定，同一账号重发同一份 body 必然得到同一个
+    /// 404，原地重试是纯白等；换号才是有意义的动作（别的账号可能有这个模型）。
+    /// 普通 400 不在豁免面（语义由上游定，重发是安全默认）。
     fn should_skip_self_retry(&self, error: &BridgeError) -> bool {
-        match error {
-            BridgeError::UpstreamStatus { status, .. } => crate::config::is_retry_status(*status),
-            _ => false,
-        }
+        Self::classify_skip(error)
     }
 
     /// 在持有同一 `bridge` 的前提下按「同账号重试」档位重试一次调用。
@@ -429,5 +449,34 @@ impl Bridge for AccountBridge {
             bridge.responses_passthrough(body, stream, ctx).await
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn should_skip(e: &BridgeError) -> bool {
+        AccountBridge::should_skip_self_retry_for_test(e)
+    }
+
+    /// 404 是按模型名/路由拒收的确定性失败：跳过同账号重试直接换号
+    /// （对照 Agent2API 814dcf2 / issue #255）。
+    #[test]
+    fn not_found_skips_self_retry() {
+        let mut sessions_err = BridgeError::UpstreamStatus {
+            status: 404,
+            retry_after: None,
+            message: "Invalid model.".to_string(),
+            parsed: None,
+            wire: crate::bridge::UpstreamWire::Unknown,
+        };
+        assert!(should_skip(&sessions_err));
+
+        // 反对照：400 语义由上游定，保留原地重发
+        if let BridgeError::UpstreamStatus { status, .. } = &mut sessions_err {
+            *status = 400;
+        }
+        assert!(!should_skip(&sessions_err));
     }
 }
