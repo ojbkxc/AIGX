@@ -30,6 +30,7 @@ import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ModelTestDialog from '../components/ModelTestDialog';
 import RatioPanel from '../components/RatioPanel';
 import { fmtCompact } from '../lib/utils';
+import { getFilter, setFilter } from '../lib/filterMemory';
 import type { AliasEntry, ManageView, ManagedModel, ModelMetaOverride, ChannelItem } from '../types';
 import './ModelManage.css';
 
@@ -350,17 +351,19 @@ export default function ModelManage(): JSX.Element {
   }, [view]);
 
   // ── 筛选（落盘记忆，对齐 Agent2API models-filters） ──
-  const [navKey, setNavKey] = useState<string>('all');
-  const [stateFilter, setStateFilter] = useState<StateFilter>(() => readLS(LS_FILTERS, { state: 'all' }).state as StateFilter);
-  const [priceFilter, setPriceFilter] = useState<PriceFilter>(() => readLS(LS_FILTERS, { price: 'all' }).price as PriceFilter);
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>(() => readLS(LS_FILTERS, { source: 'all' }).source as SourceFilter);
-  const [sortMode, setSortMode] = useState<SortMode>(() => readLS(LS_FILTERS, { sort: 'default' }).sort as SortMode);
+  const mmFilters = getFilter<Record<string, string>>(LS_FILTERS, { state: 'all', price: 'all', source: 'all', sort: 'default', navKey: 'all', query: '' });
+  const [navKey, setNavKey] = useState<string>(mmFilters.navKey || 'all');
+  const [stateFilter, setStateFilter] = useState<StateFilter>(mmFilters.state as StateFilter);
+  const [priceFilter, setPriceFilter] = useState<PriceFilter>(mmFilters.price as PriceFilter);
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>(mmFilters.source as SourceFilter);
+  const [sortMode, setSortMode] = useState<SortMode>(mmFilters.sort as SortMode);
   const [channelFilter, setChannelFilter] = useState('all');
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState<string>(mmFilters.query || '');
 
+  // 筛选变更即落盘（navKey 分组 / query 搜索同记，对齐 models-filters 的 provider / search）
   useEffect(() => {
-    writeLS(LS_FILTERS, { state: stateFilter, price: priceFilter, source: sourceFilter, sort: sortMode });
-  }, [stateFilter, priceFilter, sourceFilter, sortMode]);
+    setFilter(LS_FILTERS, { state: stateFilter, price: priceFilter, source: sourceFilter, sort: sortMode, navKey, query });
+  }, [stateFilter, priceFilter, sourceFilter, sortMode, navKey, query]);
 
   // 分页
   const [page, setPage] = useState(1);

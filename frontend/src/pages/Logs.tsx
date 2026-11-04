@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Trash2, Eraser, EyeOff, Eye } from 'lucide-react';
 import { api } from '../api';
 import { isAdmin, fmtCompact } from '../lib/utils';
+import { getFilter, setFilter } from '../lib/filterMemory';
 import { useListKeyboard } from '../hooks/useListKeyboard';
 import { useAutoRefresh } from '../hooks/useAutoRefresh';
 import { useToast } from '../components/Toast';
@@ -91,6 +92,11 @@ interface Filters {
   end: string;
 }
 
+/** 请求日志筛选的落盘键（filterMemory：跨次启动记忆，四页各自一键） */
+const LS_LOGS_FILTERS = 'aigx-logs-filters';
+/** 筛选默认值（空串 = 全部 / 不限；记忆按此收窄，存坏回落默认） */
+const DEFAULT_LOGS_FILTERS: Filters = { user: '', model: '', channel: '', status: '', keyword: '', start: '', end: '' };
+
 export default function Logs(): JSX.Element {
   const admin = isAdmin();
   const { t } = useTranslation();
@@ -116,7 +122,16 @@ export default function Logs(): JSX.Element {
   /** 敏感信息脱敏开关（管理员：隐藏用户邮箱/渠道名/IP） */
   const [masked, setMasked] = useState(false);
 
-  const [filters, setFilters] = useState<Filters>({ user: '', model: '', channel: '', status: '', keyword: '', start: '', end: '' });
+  // 筛选条件的记忆：启动时从 localStorage 恢复（首查参数随之生效），变更即落盘
+  const [filters, setFilters] = useState<Filters>(() => {
+    const saved = getFilter(LS_LOGS_FILTERS, DEFAULT_LOGS_FILTERS);
+    // user / channel 是管理员专属筛选维度：非管理员界面不渲染这两个输入，
+    // 记忆里残留的旧值会让列表被看不见的筛选悄悄过滤（服务端照单全收），恢复时清掉
+    return admin ? saved : { ...saved, user: '', channel: '' };
+  });
+  useEffect(() => {
+    setFilter(LS_LOGS_FILTERS, filters);
+  }, [filters]);
 
   // 键盘导航（cc-haha 列表键盘体系）：/ 聚焦用户筛选、↑↓/j k 行高亮、Enter 打开详情
   const { searchRef, rowRefs, activeIndex, setActiveIndex } = useListKeyboard(

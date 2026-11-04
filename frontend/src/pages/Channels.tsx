@@ -21,6 +21,7 @@ import {
   type ChannelQuirks,
   type PresetProvider,
 } from '../lib/channelPresets';
+import { getFilter, setFilter } from '../lib/filterMemory';
 import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination, Switch } from '../components/ui';
 import './Channels.css';
 
@@ -421,7 +422,6 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
   const [batchReport, setBatchReport] = useState('');
   // 批量删除需要删除密码（与单条删除同口径，ConfirmDialog requirePassword 的弹窗内形态）
   const [batchPassword, setBatchPassword] = useState('');
-  const [search, setSearch] = useState('');
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
 
@@ -471,10 +471,11 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
   const [jumpDraft, setJumpDraft] = useState('');
 
   // ── 筛选 / 排序 / 列显隐（对齐 ModelManage 的交互面，全部落 localStorage）──
-  const storedFilters = readLs<{ state?: ChStateFilter; type?: ChTypeFilter; sort?: ChSortMode }>(LS_FILTERS, {});
-  const [stateFilter, setStateFilter] = useState<ChStateFilter>(storedFilters.state || 'all');
-  const [typeFilter, setTypeFilter] = useState<ChTypeFilter>(storedFilters.type || 'all');
-  const [sortMode, setSortMode] = useState<ChSortMode>(storedFilters.sort || 'default');
+  const chFilters = getFilter<Record<string, string>>(LS_FILTERS, { state: 'all', type: 'all', sort: 'default', search: '' });
+  const [search, setSearch] = useState<string>(chFilters.search || '');
+  const [stateFilter, setStateFilter] = useState<ChStateFilter>(chFilters.state as ChStateFilter);
+  const [typeFilter, setTypeFilter] = useState<ChTypeFilter>(chFilters.type as ChTypeFilter);
+  const [sortMode, setSortMode] = useState<ChSortMode>(chFilters.sort as ChSortMode);
   // 列配置（顺序 / 显隐 / 对齐，对齐 ModelManage colItems）
   const [colItems, setColItems] = useState<ChColItem[]>(() => readColItems());
   // 列宽（拖表头右缘把手调整；localStorage 记忆，对齐 ModelManage 列宽拖动）
@@ -642,10 +643,10 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     setPage((prev) => Math.min(prev, totalPages));
   }, [totalPages]);
 
-  // 筛选/排序/每页档位落盘（对齐 ModelManage 的 localStorage 记忆）
+  // 筛选/排序/搜索落盘（对齐 ModelManage 的 localStorage 记忆）
   useEffect(() => {
-    writeLs(LS_FILTERS, { state: stateFilter, type: typeFilter, sort: sortMode });
-  }, [stateFilter, typeFilter, sortMode]);
+    setFilter(LS_FILTERS, { state: stateFilter, type: typeFilter, sort: sortMode, search });
+  }, [stateFilter, typeFilter, sortMode, search]);
   useEffect(() => {
     try {
       localStorage.setItem(LS_PAGE_SIZE, String(pageSize));
