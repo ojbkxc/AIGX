@@ -2251,6 +2251,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/keys", get(api::admin::handle_list_keys))
         .route("/api/keys", post(api::admin::handle_add_key))
         .route("/api/keys/:id", delete(api::admin::handle_delete_key))
+        // P2-4: keys 更新端点（复用 tokens 的 handle_update_token，keys/tokens 共享存储）
+        .route("/api/keys/:id", put(api::admin::handle_update_token))
         .route(
             "/api/tokens/:id/rotate",
             post(api::admin::handle_rotate_token),
