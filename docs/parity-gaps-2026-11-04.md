@@ -37,7 +37,7 @@
 
 | # | 项 | 来源 | 内容 | 落点 | 成本 | 影响 |
 |---|---|---|---|---|---|---|
-| P1-1 | **运行日志页** | #10 ❌ | level/category 字典 + 500 条环形 + sinceId 未读水位 + JSONL 导出 | 后端日志结构 + 前端新页 | 大 | 运行日志可观测性 |
+| P1-1 | **运行日志页** | #10 ❌ | level/category 字典 + 500 条环形 + sinceId 未读水位 + JSONL 导出 | **后端已实现**（`src/runtime_log.rs` + tracing layer + GET /api/logs/runtime + /export）；前端页待补 | 大 | 运行日志可观测性 |
 | P1-2 | **/v1/messages/count_tokens** | #3 ❌ | Claude Code 启动探测端点（chars/3.5 估算，标 estimated:true） | **已实现**（`src/api/anthropic.rs::handle_count_tokens` + 路由双挂） | 小 | Claude Code 兼容 |
 | P1-3 | **表格列定制** | #11 ❌ | 列显隐/顺序/对齐/列宽拖动（DataTable 列设置抽屉） | 前端组件 | 中 | 表格操作体验 |
 | P1-4 | **debug 开关端点** | #4 ⚠️ | /api/debug 开关端点（当前仅 config.toml） | **已实现**（`src/api/admin/debug.rs` GET/PUT；同时保留 /api/limits 入口） | 小 | 调试模式管理 |
