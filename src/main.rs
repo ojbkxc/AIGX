@@ -1789,6 +1789,9 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route("/api/storage", get(api::admin::handle_storage_overview))
         .route("/api/backup/export", get(api::admin::handle_backup_export))
         .route("/api/backup/import", post(api::admin::handle_backup_import))
+        // 数据升级（对照 Agent2API /api/upgrade + /api/upgrade/run；AIGX 原生 SQLite 无旧数据，端点保留对齐 API 面）
+        .route("/api/upgrade", get(api::admin::handle_get_upgrade))
+        .route("/api/upgrade/run", post(api::admin::handle_run_upgrade))
         // 通知配置
         .route(
             "/api/notify/config",

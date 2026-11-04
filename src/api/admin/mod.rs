@@ -34,6 +34,7 @@ pub mod subscriptions;
 pub mod tickets;
 pub mod tokens;
 pub mod update;
+pub mod upgrade; // 数据升级端点（对照 Agent2API /api/upgrade）
 pub mod users; // 网络层管理模块
 
 pub use auth::{
@@ -223,3 +224,6 @@ pub use scheduled_tasks::{configure_handler, list_handler, run_handler};
 
 // Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」）
 pub use cline_headers::{handle_get_cline_headers, handle_update_cline_headers};
+
+// 数据升级端点（对照 Agent2API /api/upgrade + /api/upgrade/run）
+pub use upgrade::{handle_get_upgrade, handle_run_upgrade};
