@@ -398,6 +398,83 @@ pub async fn handle_set_alias_reasoning(
     })))
 }
 
+/// POST /api/models/capabilities —— 手动覆盖某模型的能力标签。
+///
+/// 对照 Agent2API `POST /api/models/capabilities`（基线是 6 键类型化模型）。
+/// AIGX 的 `capabilities` 是 `Vec<String>` 标签集（chat / vision / tools /
+/// reasoning / embedding / image / audio / video / rerank），语义更轻。
+///
+/// 覆盖写入 `ModelMetadataRegistry`（FileStore 持久化），优先级高于内置推断
+/// 与 models.dev 补空位。只改 capabilities，保留现有 owned_by / context_length。
+/// 空数组合法（表示「该模型无任何能力标签」，前端据此禁用）。
+#[derive(Debug, Deserialize)]
+pub struct CapabilitiesBody {
+    pub model: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// 合法能力标签白名单（与 `infer_capabilities` / `CAPABILITY_HINTS` 同源）。
+fn valid_capability(cap: &str) -> bool {
+    matches!(
+        cap,
+        "chat"
+            | "vision"
+            | "video"
+            | "tools"
+            | "tool"
+            | "reasoning"
+            | "embedding"
+            | "rerank"
+            | "image"
+            | "audio"
+    )
+}
+
+pub async fn handle_set_capabilities(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CapabilitiesBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let model = body.model.trim();
+    if model.is_empty() {
+        return Err(error_response("model 不能为空", StatusCode::BAD_REQUEST));
+    }
+    // 校验能力标签合法性
+    for cap in &body.capabilities {
+        if !valid_capability(cap) {
+            return Err(error_response(
+                &format!("未知的能力标签: {cap}"),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+    }
+    let owned_by = state
+        .model_metadata
+        .get(model, None)
+        .owned_by;
+    let context_length = state
+        .model_metadata
+        .get(model, None)
+        .context_length;
+    let meta = crate::model::metadata::ModelMetadata {
+        owned_by,
+        context_length,
+        capabilities: body.capabilities.clone(),
+    };
+    if let Err(e) = state.model_metadata.set_override(model.to_string(), meta) {
+        return Err(error_response(
+            &format!("保存能力覆盖失败：{e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+    }
+    Ok(Json(json!({
+        "success": true,
+        "data": { "model": model, "capabilities": body.capabilities }
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CustomModelBody {
     pub provider: String,

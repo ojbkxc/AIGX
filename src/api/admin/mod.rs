@@ -82,7 +82,7 @@ pub use pricing::{
 pub use model_manage::{
     handle_add_custom_model, handle_manage_view, handle_remove_alias, handle_remove_custom_model,
     handle_remove_price, handle_set_alias, handle_set_alias_reasoning, handle_set_alias_state,
-    handle_set_state, handle_upsert_model_price,
+    handle_set_capabilities, handle_set_state, handle_upsert_model_price,
 };
 // 模型测试（钉 provider/账号/渠道的真实链路最小对话，对照 Agent2API model_test）
 pub use model_test::handle_model_test;

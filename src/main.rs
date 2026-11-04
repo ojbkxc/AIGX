@@ -1571,6 +1571,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             post(api::admin::handle_set_alias_reasoning),
         )
         .route(
+            "/api/models/capabilities",
+            post(api::admin::handle_set_capabilities),
+        )
+        .route(
             "/api/models/custom",
             post(api::admin::handle_add_custom_model),
         )
