@@ -15,6 +15,7 @@
 
 mod accio;
 pub(crate) mod antigravity;
+pub(crate) mod autoclaw;
 mod catpaw;
 mod cline;
 pub(crate) mod codearts;
@@ -237,6 +238,13 @@ pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result
         "trae" => trae::start(&client).await?,
         "codearts" => codearts::start(&client).await?,
         "officeace" => officeace::start(&client).await?,
+        "autoclaw" => {
+            // AutoClaw OAuth 需要验证码参数和回调基址——由单独的
+            // `start_oauth` 入口处理（见下方），这里不接管。
+            return Err(
+                "AutoClaw OAuth 请走 /api/account-sessions/login/oauth/start".to_string(),
+            )
+        }
         other => {
             return Err(format!(
                 "「{other}」的网页登录引擎尚未接入网关：请改用「填写凭证」粘贴登录态"
@@ -267,6 +275,125 @@ pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result
         "authUrl": started.auth_url,
         "provider": provider,
     }))
+}
+
+/// AutoClaw OAuth 专用发起入口（`POST /api/account-sessions/login/oauth/start`）。
+///
+/// 与 `start()` 的差异：AutoClaw 是回调型 OAuth，需要前端跑完阿里云验证码
+/// 后传 `captcha_verify_param`，且回调基址由网关端口决定（`callback_base`）。
+/// `vendor` 是 Zai / Google 之一（URL 里不带 task state——与上游 state 参数
+/// 名冲突，任务关联靠 provider + vendor 匹配）。
+pub async fn start_oauth(
+    state: &AppState,
+    provider: &str,
+    channel_id: &str,
+    vendor: &str,
+    captcha_verify_param: &str,
+    callback_base: &str,
+) -> Result<Value, String> {
+    let provider = registry::normalize_kind(provider);
+    if registry::session_meta(&provider).is_none() {
+        return Err(format!("「{provider}」不是登录态型供应商，不需要网页登录"));
+    }
+    if provider != "autoclaw" {
+        return Err("该端点仅支持 AutoClaw OAuth 登录".to_string());
+    }
+    let Some(v) = autoclaw::Vendor::from_id(vendor) else {
+        return Err(format!("未知的 OAuth 变体：{vendor}（可选 zai / google）"));
+    };
+    let userapi = if provider == "autoclaw" {
+        autoclaw::INTL_USERAPI
+    } else {
+        autoclaw::CN_USERAPI
+    };
+    let client = reqwest::Client::new();
+    let started = autoclaw::start(&client, userapi, v, captcha_verify_param, callback_base).await?;
+    let handle = register(Arc::new(Mutex::new(LoginTask {
+        state: started.state.clone(),
+        auth_url: started.auth_url.clone(),
+        provider: provider.clone(),
+        channel_id: channel_id.trim().to_string(),
+        done: false,
+        error: None,
+        account_id: None,
+        canceled: false,
+        finished_at: None,
+        flow: Some(started.flow.clone()),
+    })));
+    let flow = started.flow.clone();
+    let sessions = state.account_sessions.clone();
+    let channels = state.channel_store.clone();
+    let runner = handle.clone();
+    tokio::spawn(async move {
+        run_loop(runner, flow, sessions, channels).await;
+    });
+    Ok(json!({
+        "state": started.state,
+        "authUrl": started.auth_url,
+        "provider": provider,
+        "vendor": v.id(),
+    }))
+}
+
+/// 按 provider + vendor 查找进行中的 OAuth 任务（浏览器回调路由用）。
+///
+/// 回调 URL 不带 task state（与上游 state 参数名冲突），靠 provider + vendor
+/// 匹配最近发起的 pending 任务。找到后返回任务快照（含 flow）。
+pub fn find_pending_by_vendor(provider: &str, vendor: &str) -> Option<LoginTask> {
+    let provider = registry::normalize_kind(provider);
+    let mut tasks = lock(table());
+    sweep(&mut tasks);
+    tasks.values().find_map(|handle| {
+        let task = lock(handle);
+        if task.done || task.provider != provider {
+            return None;
+        }
+        // vendor 匹配：从 flow 里无法直接读 vendor（trait 对象），
+        // 但 autoclaw 的 navigate_uri 里带了 vendor id（`/auth/callback-{vendor}`），
+        // auth_url 里也带。这里用 auth_url 包含 vendor id 做匹配。
+        if task.auth_url.contains(vendor) {
+            Some(task.clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// 浏览器回调完成：换凭证 → 落账号 → 标记任务完成。
+///
+/// 供 `GET /auth/callback-{vendor}` 路由调用。回调 URL 带 code/state，
+/// 这里复用任务的 flow 上下文（navigate_uri / device_id / userapi）换凭证。
+pub async fn complete_browser_callback(
+    state: &AppState,
+    task: &LoginTask,
+    url: &str,
+) -> Result<String, String> {
+    let flow = task
+        .flow
+        .clone()
+        .ok_or_else(|| "登录任务的流程上下文已丢失，请重新发起".to_string())?;
+    let creds = flow
+        .submit_callback(url)
+        .await?
+        .ok_or_else(|| "回调未产生凭证".to_string())?;
+    let account_id = persist_account(
+        &state.account_sessions,
+        &state.channel_store,
+        &task.provider,
+        &task.channel_id,
+        creds,
+        flow.extra_fields(),
+        flow.refresh_token(),
+    )?;
+    // 标记任务完成（从表里移除，保留 10 分钟过期清理）
+    let state_str = task.state.clone();
+    if let Some(handle) = {
+        let tasks = lock(table());
+        tasks.get(&state_str).cloned()
+    } {
+        finish(&handle, Some(account_id.clone()), None);
+    }
+    Ok(account_id)
 }
 
 async fn run_loop(

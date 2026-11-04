@@ -2180,6 +2180,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/account-sessions/login/paste",
             post(api::admin::account_login::handle_login_paste),
         )
+        // AutoClaw OAuth 登录（Zai / Google）：风控验证码配置 + 发起
+        .route(
+            "/api/account-sessions/login/oauth/captcha-config",
+            get(api::admin::account_login::handle_login_oauth_captcha_config),
+        )
+        .route(
+            "/api/account-sessions/login/oauth/start",
+            post(api::admin::account_login::handle_login_oauth_start),
+        )
         .route(
             "/api/account-sessions/bulk",
             post(api::admin::account_sessions::handle_bulk_import_account_sessions),
@@ -2393,6 +2402,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .merge(openai_routes)
         .merge(anthropic_routes)
         .merge(crate::agent::api::router())
+        // AutoClaw OAuth 浏览器回调（免鉴权）
+        .route(
+            "/auth/callback-zai",
+            get(api::admin::account_login::handle_browser_oauth_callback),
+        )
+        .route(
+            "/auth/callback-google",
+            get(api::admin::account_login::handle_browser_oauth_callback),
+        )
         .route("/livez", get(handle_livez))
         .route("/readyz", get(handle_readyz))
         .route("/health", get(handle_health))
