@@ -99,3 +99,50 @@ pub async fn handle_refresh_model_metadata(
         },
     })))
 }
+
+/// POST /api/models/refresh —— 手动全量刷新模型清单（对照 Agent2API）。
+///
+/// 基线这里是「逐家刷新各自目录 + 返回聚合清单」的入口。AIGX 走 models.dev
+/// 统一目录，刷新动作与 `/api/models/metadata/refresh` 同源（同一份
+/// `manual_refresh`），但返回基线的汇总形状 `{results, refreshed, skipped, failed}`，
+/// 供前端按基线契约对接。`results` 为空数组（AIGX 无逐家结果，目录刷新是
+/// 单次 models.dev 拉取）。
+pub async fn handle_refresh_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    if !crate::config::models_dev_enabled() {
+        return Ok(Json(json!({
+            "success": true,
+            "data": {
+                "results": [],
+                "refreshed": 0,
+                "skipped": 0,
+                "failed": 0,
+                "message": "models.dev 元数据已关闭",
+            },
+        })));
+    }
+    let (status, message, count) =
+        crate::model::models_dev::manual_refresh(&state.http_client, &state.alert_store).await;
+    let (refreshed, skipped, failed) = match status.as_str() {
+        "refreshed" => (1, 0, 0),
+        "skipped" => (0, 1, 0),
+        "disabled" => (0, 0, 0),
+        _ => (0, 0, 1),
+    };
+    let enabled = crate::config::models_dev_enabled();
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "results": [],
+            "refreshed": refreshed,
+            "skipped": skipped,
+            "failed": failed,
+            "count": count,
+            "message": message,
+            "metadata": metadata_json(enabled),
+        },
+    })))
+}

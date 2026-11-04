@@ -59,7 +59,7 @@
 | P2-2 | zcode claim UI 参数 | #9 ⚠️ | BenefitsPanel.run 传 params（claim 模式需 plan_id + captcha_verify_param） | **已实现**（`BenefitsPanel.tsx`：ZCode 行「盘点套餐 → 选套餐 → 领套餐」，领时先取 `/api/zcode/captcha/config`，需验证码则弹滑块，带 `captcha_verify_param`/`captcha_verify_region` 提交） |
 | P2-3 | session 首屏/refresh | #4 ⚠️ | GET /api/session + POST /api/session/refresh |
 | P2-4 | keys PATCH 更新端点 | #4 ⚠️ | 密钥更新端点 | **已实现**（/api/keys/:id PUT 复用 handle_update_token） |
-| P2-5 | models/refresh 全量 | #4 ⚠️ | 全量刷新端点 | 未实现（仅 /api/models/metadata/refresh） |
+| P2-5 | models/refresh 全量 | #4 ⚠️ | 全量刷新端点 | **已实现**（`POST /api/models/refresh`：调用 `manual_refresh` 刷新 models.dev 目录，返回基线汇总形状 `{results, refreshed, skipped, failed, count, message}`；`/api/models/metadata/refresh` 保留） |
 | P2-6 | models/capabilities 手动覆盖 | #4 ⚠️ | 能力位手动覆盖 |
 | P2-7 | proxy-pool sync-clash | #4 ⚠️ | Clash Verge 同步 |
 | P2-8 | queue 次数参数 | #4 ⚠️ | 排队次数 HTTP 参数 | **已实现**（`GET/PUT /api/queue`：`queueMaxWaits`（0~10）/`queueWaitSeconds`（0~120），camelCase 键名对齐基线；部分字段更新；空桶校验） |

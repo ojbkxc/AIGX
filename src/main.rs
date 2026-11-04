@@ -1792,6 +1792,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/models/metadata/refresh",
             post(api::admin::handle_refresh_model_metadata),
         )
+        .route(
+            "/api/models/refresh",
+            post(api::admin::handle_refresh_models),
+        )
         // 路由策略（对照 Agent2API「设置 → 路由」：策略/粘性/断路器/调度权重）
         .route(
             "/api/routing",

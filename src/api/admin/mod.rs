@@ -146,6 +146,7 @@ pub use debug::{
 // models.dev 模型元数据：开关 + 状态 + 手动刷新（对照 Agent2API `/api/models/metadata`）
 pub use model_metadata::{
     handle_get_model_metadata, handle_put_model_metadata, handle_refresh_model_metadata,
+    handle_refresh_models,
 };
 
 pub use monitor::{handle_health, handle_healthz, handle_monitor_system};
