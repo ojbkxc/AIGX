@@ -324,6 +324,10 @@ pub struct UsageConfig {
     /// （`RotationPolicy.max_attempts`）单独控制，两者职责不重叠。
     #[serde(default = "default_retry_self_count")]
     pub retry_self_count: u32,
+    /// 切换账号重试次数（0~10，默认 5）——单次请求最多尝试几个账号。
+    /// 映射到 `RotationPolicy.max_attempts`（账号池路由），保存即生效。
+    #[serde(default = "default_retry_switch_count")]
+    pub retry_switch_count: u32,
     /// 账号换号之间的重试间隔（毫秒），默认 0（立即换号）。
     #[serde(default)]
     pub retry_interval_ms: u64,
@@ -468,6 +472,10 @@ fn default_body_timeout_secs() -> u64 {
 
 fn default_retry_self_count() -> u32 {
     1
+}
+
+fn default_retry_switch_count() -> u32 {
+    5
 }
 
 fn default_retry_on_status() -> Vec<u16> {
@@ -670,6 +678,7 @@ impl Default for UsageConfig {
             body_timeout_secs: default_body_timeout_secs(),
             max_retries: default_max_retries(),
             retry_self_count: default_retry_self_count(),
+            retry_switch_count: default_retry_switch_count(),
             retry_interval_ms: 0,
             retry_on_status: default_retry_on_status(),
             max_request_body_mb: default_max_request_body_mb(),
@@ -1022,6 +1031,19 @@ pub fn retry_self_count() -> u32 {
 /// 写入同一账号内的重试次数（上限 10）。
 pub fn set_retry_self_count(v: u32) {
     RETRY_SELF_COUNT.store(v.min(10), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 切换账号重试次数的进程级快照（映射到 `RotationPolicy.max_attempts`）。
+static RETRY_SWITCH_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(5);
+
+/// 读取切换账号重试次数（0~10）。
+pub fn retry_switch_count() -> u32 {
+    RETRY_SWITCH_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 写入切换账号重试次数（上限 10）。
+pub fn set_retry_switch_count(v: u32) {
+    RETRY_SWITCH_COUNT.store(v.min(10), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 「直接换号/换渠道状态码」的进程级快照（数据面同步判定）。

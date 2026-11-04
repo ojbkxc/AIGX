@@ -46,6 +46,8 @@ pub struct LimitsRequest {
     pub max_retries: Option<u32>,
     /// 同一账号内的重试次数（0~10）
     pub retry_self_count: Option<u32>,
+    /// 切换账号重试次数（0~10，默认 5）——单次请求最多尝试几个账号
+    pub retry_switch_count: Option<u32>,
     pub retry_interval_ms: Option<u64>,
     pub retry_on_status: Option<Vec<u16>>,
     pub max_request_body_mb: Option<usize>,
@@ -161,6 +163,7 @@ pub async fn handle_get_limits(
             "body_timeout_secs": config.usage.body_timeout_secs,
             "max_retries": config.usage.max_retries,
             "retry_self_count": config.usage.retry_self_count,
+            "retry_switch_count": config.usage.retry_switch_count,
             "retry_interval_ms": config.usage.retry_interval_ms,
             "retry_on_status": config.usage.retry_on_status,
             "max_request_body_mb": config.usage.max_request_body_mb,
@@ -244,6 +247,9 @@ pub async fn handle_update_limits(
     }
     if let Some(v) = body.retry_self_count {
         config.usage.retry_self_count = v.min(10);
+    }
+    if let Some(v) = body.retry_switch_count {
+        config.usage.retry_switch_count = v.min(10);
     }
     if let Some(v) = body.retry_interval_ms {
         config.usage.retry_interval_ms = v.min(10_000);
@@ -349,6 +355,12 @@ pub async fn handle_update_limits(
     crate::config::set_max_retries(config.usage.max_retries);
     // 账号池「同账号重试」档与非流式响应体超时立即生效
     crate::config::set_retry_self_count(config.usage.retry_self_count);
+    // 切换账号重试次数立即生效：映射到 RotationPolicy.max_attempts
+    // （max_attempts = retry_switch_count + 1，即「原账号 + 切换次数」）
+    crate::config::set_retry_switch_count(config.usage.retry_switch_count);
+    let mut policy = state.account_sessions.policy();
+    policy.max_attempts = (config.usage.retry_switch_count as usize + 1).clamp(1, 20);
+    let _ = state.account_sessions.set_policy(policy);
     crate::config::set_body_timeout_secs(config.usage.body_timeout_secs);
     // 直接换号/换渠道状态码名单立即生效
     crate::config::set_retry_on_status_codes(config.usage.retry_on_status.clone());

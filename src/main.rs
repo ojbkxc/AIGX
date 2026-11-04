@@ -329,6 +329,11 @@ async fn main() -> anyhow::Result<()> {
     crate::config::set_max_retries(config.usage.max_retries);
     // 账号池「同账号重试」档与非流式响应体超时
     crate::config::set_retry_self_count(config.usage.retry_self_count);
+    // 切换账号重试次数（映射到 RotationPolicy.max_attempts）
+    crate::config::set_retry_switch_count(config.usage.retry_switch_count);
+    let mut policy = account_sessions.policy();
+    policy.max_attempts = (config.usage.retry_switch_count as usize + 1).clamp(1, 20);
+    let _ = account_sessions.set_policy(policy);
     crate::config::set_body_timeout_secs(config.usage.body_timeout_secs);
     // 出站指纹脱敏开关（请求体侧；保存设置时实时更新）
     crate::config::set_sanitize_fingerprints(config.usage.sanitize_fingerprints);
