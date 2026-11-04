@@ -57,13 +57,13 @@
 |---|---|---|---|
 | P2-1 | AutoClaw 国际版 OAuth | #9 ⚠️ | 登录引擎扩展（基线 /api/session/login/oauth/*） | **已实现**（三步协议：① captcha-config 取风控配置 → ② oauth/start 取授权地址（需阿里云验证码参数）→ ③ 浏览器回调换凭证落账号；`GET /api/account-sessions/login/oauth/captcha-config`、`POST /api/account-sessions/login/oauth/start`、`GET /auth/callback-{zai|google}` 免鉴权路由；refresh_token 随账号落盘） |
 | P2-2 | zcode claim UI 参数 | #9 ⚠️ | BenefitsPanel.run 传 params（claim 模式需 plan_id + captcha_verify_param） | **已实现**（`BenefitsPanel.tsx`：ZCode 行「盘点套餐 → 选套餐 → 领套餐」，领时先取 `/api/zcode/captcha/config`，需验证码则弹滑块，带 `captcha_verify_param`/`captcha_verify_region` 提交） |
-| P2-3 | session 首屏/refresh | #4 ⚠️ | GET /api/session + POST /api/session/refresh |
+| P2-3 | session 首屏/refresh | #4 ⚠️ | GET /api/session + POST /api/session/refresh | **已实现**（`GET /api/session` 返回用户/权限/额度快照；`POST /api/session/refresh` 续期并返回最新快照） |
 | P2-4 | keys PATCH 更新端点 | #4 ⚠️ | 密钥更新端点 | **已实现**（/api/keys/:id PUT 复用 handle_update_token） |
 | P2-5 | models/refresh 全量 | #4 ⚠️ | 全量刷新端点 | **已实现**（`POST /api/models/refresh`：调用 `manual_refresh` 刷新 models.dev 目录，返回基线汇总形状 `{results, refreshed, skipped, failed, count, message}`；`/api/models/metadata/refresh` 保留） |
-| P2-6 | models/capabilities 手动覆盖 | #4 ⚠️ | 能力位手动覆盖 |
-| P2-7 | proxy-pool sync-clash | #4 ⚠️ | Clash Verge 同步 |
+| P2-6 | models/capabilities 手动覆盖 | #4 ⚠️ | 能力位手动覆盖 | **已实现**（`POST /api/models/capabilities`：按 provider×model 覆盖能力位（context/vision/audio/reasoning 等），`GET /api/models/capabilities` 查看覆盖表；`PUT /api/models/manage/:id/capabilities` 单条更新） |
+| P2-7 | proxy-pool sync-clash | #4 ⚠️ | Clash Verge 同步 | **已实现**（`POST /api/proxy-pool/sync-clash`：读 Clash Verge verge.yaml，把混合端口 + 各监听器镜像进池；`src/proxy_pool/clash.rs` 解析 + 3s TTL 缓存；`ProxyEntry` 加 source/listener_uid 区分 manual/clash） |
 | P2-8 | queue 次数参数 | #4 ⚠️ | 排队次数 HTTP 参数 | **已实现**（`GET/PUT /api/queue`：`queueMaxWaits`（0~10）/`queueWaitSeconds`（0~120），camelCase 键名对齐基线；部分字段更新；空桶校验） |
-| P2-9 | 用量报表字段对齐 | #5 ⚠️ | attempts 链/first_response_ms/sensitive_hits/phase 等 |
+| P2-9 | 用量报表字段对齐 | #5 ⚠️ | attempts 链/first_response_ms/sensitive_hits/phase 等 | **已实现**（请求日志表加 `attempts`（渠道尝试链）/`first_response_ms`（首字节耗时）/`sensitive_hits`（净化命中数）/`phase`（阶段标记）字段；`GET /api/usage/report` 响应含新字段） |
 | P2-10 | Responses/Completions 净化挂载 | #6 ⚠️ | 指纹脱敏挂到 Responses/Completions 路径 | **已实现**（`crate::sanitize::strip(&mut attempt_body)` 挂到 responses.rs / completions.rs 两路径） |
 | P2-11 | sanitize 命中统计 | #6 ⚠️ | 净化命中计数 | **已实现**（`STATS_HITS`/`STATS_REWRITES` 原子计数器 + `snapshot()`，GET /api/sanitize 响应加 `stats` 字段） |
 | P2-12 | 定时任务默认值对齐 | #8 ⚠️ | 6 条默认开（基线默认开 vs AIGX 全关） | **已实现**（ScheduledSettings 默认 enabled: true） |
@@ -71,17 +71,17 @@
 | P2-14 | routing 策略键 | #8 ❌ | strategy/sticky/failover/breaker | **已实现**（`GET/PUT /api/routing`：strategy/sticky/breaker/scheduler_weights；failover_backoff 由冷却/断路器/健康归档承担，不做独立开关） |
 | P2-15 | 日志/请求/聚合三档保留期配置 | #8 ❌ | retention 配置端点 | **已实现**（/api/logs/retention 已有 request/daily/audit 三档 + capacity） |
 | P2-16 | 目录配置 | #8 ❌ | logDir/requestStatsDir/debugDir | **已实现**（`ServerConfig` 新增 `log_dir`/`request_stats_dir`/`debug_dir` 可选字段；`storage_dirs()` 解析默认子目录；`GET/PUT /api/gateway/settings` 暴露并更新） |
-| P2-17 | growth school/travel | #7 ⚠️ | 另域+小程序 UA（文件内标注 unsupported） |
-| P2-18 | Qoder UMID 安装 | #7 ⚠️ | 只探测不安装（可用性风险） |
+| P2-17 | growth school/travel | #7 ⚠️ | 另域+小程序 UA | **不补**（基线标注 unsupported，另域+小程序 UA 属规避第三方检测类，AIGX 不做） |
+| P2-18 | Qoder UMID 安装 | #7 ⚠️ | 只探测不安装 | **不补**（安装 UMID 属桌面壳能力，AIGX 是 Web 网关；只探测已足够） |
 | P2-19 | 记录台账永久保留 + 筛选删除 | #7 ⚠️ | 90 天 prune vs 基线永久 + 无筛选删除 + 无 all=1 护栏 | **已实现**（`CheckinSettings.keep_days` 可配置（0=永久）；`DELETE /api/checkin-center/records` 支持 `all=1` 全清护栏 + 筛选删除 + `days=N` 三模式；`clear_all`/`remove_matching` 函数） |
 | P2-20 | cron Skip 语义对齐 | #7 ⚠️ | Skip 不补跑 vs scheduled_tasks 补一次 | **已对齐**（基线 core/scheduled_tasks 也是「只补一次，不补跑期间的每一轮」（line 33-34, 392）；AIGX scheduled_tasks/task_state.rs 同语义（line 181-190）；checkin scheduler 的当天去重 + 启动补签与基线一致） |
 | P2-21 | 时区口径统一 | #7 ⚠️ | 用户签到本地时区 vs 中心 UTC+8 | **已实现**（`CheckinSettings.timezone_offset` 可配置（0=系统本地时区，默认 8=UTC+8）；scheduler 的 `beijing()` 按配置偏移构造 FixedOffset；store 的 recent/clear/prune 同步使用配置时区；启动时按已加载设置初始化静态变量） |
-| P2-22 | 终端用户积分流水 | #5 ⚠️ | records 分页/earned/consumed 明细 |
-| P2-23 | 团队积分 | #5 ❌ | 无团队体系 |
-| P2-24 | promo/pet/asr 运营集成 | #5 ❌ | promo-banner/pet-work/asr |
-| P2-25 | 移动端列集 | #11 ❌ | mobile-columns（≤767px 行拆卡片） |
-| P2-26 | i18n 扩展 | #11 ❌ | zh-Hant/ja/ko/pt-BR（基线 6 语言） |
-| P2-27 | 模型管理列拖拽 + 移动端卡片化 | §7 P2 | 列设置拖拽排序 + 移动端卡片 |
+| P2-22 | 终端用户积分流水 | #5 ⚠️ | records 分页/earned/consumed 明细 | **已实现**（`GET /api/user/records`：合并签到获得（earned）与 API 消耗（consumed）成一条时间线后分页；查询参数 days/offset/limit/type；返回 earned_total/consumed_total/balance 汇总） |
+| P2-23 | 团队积分 | #5 ❌ | 无团队体系 | **不补**（AIGX 无团队体系，积分按用户维度管理；团队积分是基线 Agent2API 内部多租户功能，与 AIGX 的单用户/管理员模型不匹配） |
+| P2-24 | promo/pet/asr 运营集成 | #5 ❌ | promo-banner/pet-work/asr | **不补**（AIGX 是技术网关，不做运营活动/宠物/ASR 业务集成；这三项是基线 Agent2API 自有运营功能，非网关能力） |
+| P2-25 | 移动端列集 | #11 ❌ | mobile-columns（≤767px 行拆卡片） | **已实现**（`useMobileColumns` hook + `App.css` 卡片媒体查询；ModelManage/Channels/Logs/Tokens/Accounts/Plans/Users 等表格页接入；≤767px 自动行拆卡片） |
+| P2-26 | i18n 扩展 | #11 ❌ | zh-Hant/ja/ko/pt-BR（基线 6 语言） | **已实现**（`frontend/src/i18n/` 补 zh-Hant/ja/ko/pt-BR 四语言翻译；语言切换器注册新语言；翻译 key 覆盖全页面） |
+| P2-27 | 模型管理列拖拽 + 移动端卡片化 | §7 P2 | 列设置拖拽排序 + 移动端卡片 | **已实现**（ModelManage.tsx：列拖拽排序（colItems/draggingCol）+ 移动端卡片化（table-wrapper class + CSS media query）；两处 mm-table-wrap 加 table-wrapper 触发 useMobileColumns hook） |
 
 ## 4. 不补（仅一项）
 
