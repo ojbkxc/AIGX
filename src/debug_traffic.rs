@@ -269,7 +269,7 @@ pub fn load_persisted() {
         }
     }
     // 按 ts 降序排列，取最近 MAX_ENTRIES 条
-    entries.sort_by(|a, b| b.ts.cmp(&a.ts));
+    entries.sort_by_key(|a| std::cmp::Reverse(a.ts));
     entries.truncate(MAX_ENTRIES);
     let mut buffer = BUFFER.lock();
     for entry in entries {

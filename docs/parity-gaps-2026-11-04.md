@@ -47,7 +47,7 @@
 | P1-8 | **切换账号重试次数** | §3 P1 | 账号级 switch-count 字段（上游默认 5） | `src/api/admin/settings.rs` | 小 | 重试策略 |
 | P1-9 | **zcode 验证码池** | #4/#9 ❌ | 浏览器 WebView 铸造阿里云验证码令牌（device-mid/激活事件/3007 协议）+ /api/zcode/captcha + /api/zcode/captcha-pool + 池配置 | 前端（WebView/阿里云 SDK）+ 后端端点 | 大（原立场项，用户拍板补） | zcode 套餐领取绕过人机验证 |
 | P1-10 | **阿里云滑块求解器** | #9 🔧 | AutoClaw 国际版 OAuth 的阿里云滑块自动求解 | 前端求解器 + OAuth 链路 | 大（原立场项，用户拍板补） | AutoClaw 国际版登录 |
-| P1-11 | **Cline 伪装头** | §1 | /api/cline/headers 可编辑覆盖表（请求头伪装官方客户端） | 后端端点 + 前端面板 | 中（原立场项，用户拍板补） | 绕过上游客户端识别 |
+| P1-11 | **Cline 伪装头** | §1 | /api/cline/headers 可编辑覆盖表（请求头伪装官方客户端） | **已实现**（`src/api/admin/cline_headers.rs`：GET/PUT + 校验 + 持久化 + 热更新；路由 `/api/cline-headers`） | 绕过上游客户端识别 |
 | P1-12 | **指纹脱敏绕过用途** | §1 | core/sanitize.rs 移植（剥离审核黑名单指纹，337 行，零宽字符障碍需处理） | src/sanitize/ + 桥接层挂载 | 大（原立场项，用户拍板补） | 绕过内容审核指纹 |
 | P1-13 | **upgrade_api 数据迁移端点** | #4 ❌ | /api/upgrade 端点：auth.json 导入 + 旧项目数据迁移框架（AIGX 无现成旧数据，但需提供导入能力以备将来导入第三方数据） | 后端新端点 + migration 模块 | 中（原「不适用」项，用户拍板补） | 数据导入/迁移能力 |
 
