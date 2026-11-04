@@ -196,6 +196,10 @@ async fn main() -> anyhow::Result<()> {
     // 初始化账号池
     let account_pool = Arc::new(AccountPool::new(store.clone()));
 
+    // 调试报文持久化：注入 FileStore + 从上次运行恢复最近报文
+    crate::debug_traffic::set_store(store.clone());
+    crate::debug_traffic::load_persisted();
+
     // 初始化模型映射
     let model_mapper = Arc::new(ModelMapper::new(store.clone()));
     if let Err(e) = model_mapper.load() {

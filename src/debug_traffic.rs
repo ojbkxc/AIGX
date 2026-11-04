@@ -7,12 +7,10 @@
 //! ——即「按别名映射改写过 model、叠加过渠道静态头之后，最终出网的那一份」。
 //! 两者互补：前者回答「用户要什么」，后者回答「我们到底发出去了什么」。
 //!
-//! ── 为什么不写库 ─────────────────────────────────────────────
-//! 上游把报文落进独立的 `debug_traffic` 表（避免数 MB 的 SSE 报文把请求
-//! 明细表撑爆）。AIGX 这里**只抓请求侧、且落在进程内环形缓冲**（不写库）：
-//! 请求侧体积小（无 SSE 响应体），环形缓冲天然给出「最近 N 条」的视图，
-//! 也省掉一次 schema 迁移。代价是**重启即清空**——调试模式本就是临时排障
-//! 用的，与上游「不长期归档」的定位一致。
+//! ── 持久化（P1-5 落库）───────────────────────────────────────
+//! 1.0.32 起，每条报文同时写入 FileStore（`debug_traffic:<ts>` 键），
+//! 进程内环形缓冲保留用于快速读取。重启后从 FileStore 恢复最近
+//! MAX_ENTRIES 条，清空时同步删除 FileStore 中的报文。
 //!
 //! ── 脱敏是硬要求（不可关闭）──────────────────────────────────
 //! 请求头里的 `authorization` / `cookie` / `x-api-key` / 各家自定义 token
@@ -27,6 +25,7 @@
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -104,6 +103,14 @@ static BUFFER: Mutex<VecDeque<TrafficEntry>> = Mutex::new(VecDeque::new());
 
 /// 累计丢弃条数（超出 [`MAX_ENTRIES`] 被挤掉的总数），仅供概览展示。
 static DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// FileStore 句柄（启动时注入，用于报文持久化）。
+static STORE: OnceLock<std::sync::Arc<crate::storage::FileStore>> = OnceLock::new();
+
+/// 注入 FileStore（main 启动时调用一次）。
+pub fn set_store(store: std::sync::Arc<crate::storage::FileStore>) {
+    let _ = STORE.set(store);
+}
 
 /// 头集合脱敏：凭据类字段换成 [`REDACTED`]，其余原样；键统一小写。
 ///
@@ -185,7 +192,13 @@ fn push(entry: TrafficEntry) {
         buffer.pop_front();
         DROPPED.fetch_add(1, Ordering::Relaxed);
     }
-    buffer.push_back(entry);
+    buffer.push_back(entry.clone());
+
+    // 持久化到 FileStore（best-effort，失败不阻断数据面）
+    if let Some(store) = STORE.get() {
+        let key = format!("debug_traffic:{}", entry.ts);
+        let _ = store.put(&key, &entry);
+    }
 }
 
 /// 抓取构造器里已定稿的请求（URL/头/体），并把**原构造器**透传回去。
@@ -223,12 +236,45 @@ pub fn snapshot() -> Value {
     })
 }
 
-/// 清空缓冲（返回清掉的条数）。
+/// 清空缓冲（返回清掉的条数）。同步删除 FileStore 中的持久化报文。
 pub fn clear() -> usize {
     let mut b = BUFFER.lock();
     let n = b.len();
     b.clear();
+    // 删除 FileStore 中的报文
+    if let Some(store) = STORE.get() {
+        if let Ok(keys) = store.list("debug_traffic:") {
+            for key in keys {
+                let _ = store.delete(&key);
+            }
+        }
+    }
     n
+}
+
+/// 启动时从 FileStore 恢复最近报文到内存缓冲。
+///
+/// 读取所有 `debug_traffic:*` 键，按 ts 排序后取最近 MAX_ENTRIES 条载入。
+pub fn load_persisted() {
+    let Some(store) = STORE.get() else {
+        return;
+    };
+    let Ok(keys) = store.list("debug_traffic:") else {
+        return;
+    };
+    let mut entries: Vec<TrafficEntry> = Vec::new();
+    for key in keys {
+        if let Ok(Some(entry)) = store.get::<TrafficEntry>(&key) {
+            entries.push(entry);
+        }
+    }
+    // 按 ts 降序排列，取最近 MAX_ENTRIES 条
+    entries.sort_by(|a, b| b.ts.cmp(&a.ts));
+    entries.truncate(MAX_ENTRIES);
+    let mut buffer = BUFFER.lock();
+    for entry in entries {
+        buffer.push_back(entry);
+    }
 }
 
 #[cfg(test)]
