@@ -86,27 +86,27 @@ impl Default for ScheduledSettings {
     fn default() -> Self {
         Self {
             credential_maintenance: IntervalTask {
-                enabled: false,
+                enabled: true,
                 interval: DEFAULT_CREDENTIAL_MAINTENANCE_MINUTES,
             },
             model_refresh: IntervalTask {
-                enabled: false,
+                enabled: true,
                 interval: DEFAULT_MODEL_REFRESH_MINUTES,
             },
             update_check: IntervalTask {
-                enabled: false,
+                enabled: true,
                 interval: DEFAULT_UPDATE_CHECK_MINUTES,
             },
             logs_auto_refresh: IntervalTask {
-                enabled: false,
+                enabled: true,
                 interval: DEFAULT_LOGS_AUTO_REFRESH_SECONDS,
             },
             requests_auto_refresh: IntervalTask {
-                enabled: false,
+                enabled: true,
                 interval: DEFAULT_REQUESTS_AUTO_REFRESH_SECONDS,
             },
             report_auto_refresh: IntervalTask {
-                enabled: false,
+                enabled: true,
                 interval: DEFAULT_REPORT_AUTO_REFRESH_SECONDS,
             },
         }
