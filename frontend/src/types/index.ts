@@ -1548,9 +1548,84 @@ export interface GatewayPromptItem {
   developer_role_compat?: boolean;
 }
 
+/** 指纹脱敏命中统计（随 GET /api/sanitize 下发；进程内计数，重启归零） */
+export interface SanitizeStats {
+  /** 进入净化的请求数 */
+  hits: number;
+  /** 实际应用的改写次数 */
+  rewrites: number;
+}
+
 /** 额外脱敏请求头名单（GET/PUT /api/sanitize） */
 export interface SanitizeHeadersItem {
   extra_headers: string[];
+  /** 只读统计：仅 GET 返回，PUT 回显时可缺省 */
+  stats?: SanitizeStats;
+}
+
+/** 上游风控配置（`GET /api/zcode/captcha/config` 的 `captcha`） */
+export interface ZcodeCaptchaConfig {
+  enabled?: boolean;
+  sceneId?: string;
+  prefix?: string;
+  /** 阿里云站点（`cn` / `sgp` …），无痕铸造要它选对站点 */
+  region?: string;
+}
+
+/**
+ * ZCode 验证码令牌池概况（GET /api/zcode/captcha）。
+ *
+ * 同时是**铸造器每轮的输入**：`needsTokens`/`target`/`pollMs`/`maxPerRound`
+ * 三项决定了这一轮要不要铸、铸几个、隔多久再问（见 `lib/zcodeCaptchaPool.ts`）。
+ */
+export interface ZcodeCaptchaPoolStats {
+  /** 可用库存（不含过期令牌） */
+  ready: number;
+  /** 令牌寿命（毫秒，网关侧 `TOKEN_TTL_MS`） */
+  ttlMs: number;
+  /** 最旧那枚令牌已经放了几毫秒（`null` = 池子空） */
+  oldestAgeMs?: number | null;
+  minted: number;
+  consumed: number;
+  /** 上游回 3007 的次数（变大 = 池里的令牌不可信了，立刻补货） */
+  rejected: number;
+  /** 因过期被丢弃的枚数 */
+  stale: number;
+  lastChallengeAt?: number | null;
+  lastMintAt?: number | null;
+  /** 库存目标（够下一条请求立刻有得用即可） */
+  target: number;
+  /** 轮询间隔（毫秒） */
+  pollMs: number;
+  /** 单轮铸造上限 */
+  maxPerRound: number;
+  /** 是否存在 ZCode 账号（没有账号在用这条通道时一个都不铸） */
+  hasAccounts: boolean;
+  /** 网关算好的「这一轮该不该铸」 */
+  needsTokens: boolean;
+  /** 拿去取上游风控配置的账号 id（空串 = 没有 zcode 账号） */
+  captchaAccountId: string;
+}
+
+/** 令牌入池结果（POST /api/zcode/captcha） */
+export interface ZcodeCaptchaPushResult {
+  pushed: number;
+  ready: number;
+}
+
+/** 铸造节奏（GET/PUT /api/zcode/captcha-pool） */
+export interface ZcodeCaptchaPoolSettings {
+  target: number;
+  pollMs: number;
+  maxPerRound: number;
+  /** 三项各自的合法区间 `[min, max]`（界面据此渲染输入框的 min/max） */
+  ranges: {
+    target: [number, number];
+    pollMs: [number, number];
+    maxPerRound: [number, number];
+  };
+  ttlMs: number;
+  ready: number;
 }
 
 /** 存储概览（GET /api/storage） */

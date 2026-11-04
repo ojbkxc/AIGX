@@ -46,6 +46,7 @@ pub fn build_openapi_document() -> Value {
         paths_pricing(),
         paths_model_manage(),
         paths_checkin_center(),
+        paths_zcode_captcha(),
         paths_report(),
         paths_payment(),
         paths_logs(),
@@ -434,6 +435,30 @@ fn paths_checkin_center() -> Value {
         "/api/checkin-center/settings": {
             "get": op("签到中心", "读取签到设置"),
             "put": op_body("签到中心", "保存签到设置", "enabled: bool, gap_ms: integer")
+        },
+    })
+}
+
+/// ZCode 人机验证令牌池（对照 Agent2API `api/zcode_captcha{,_pool}.rs`）。
+///
+/// 单独成函数：库存概况 / 入池 / 风控配置 / 铸造节奏自成一族，
+/// 且 `paths_accounts_network` 已接近 `json!` 的展开深度上限。
+fn paths_zcode_captcha() -> Value {
+    json!({
+        "/api/zcode/captcha": {
+            "get": op("验证码池", "池子概况：库存 + 铸造节奏 + 该不该铸（有账号且低于目标）"),
+            "post": op_body("验证码池", "令牌入池（前端铸好一个推一个）",
+                "tokens?: [{param: string, region?: string}], param?: string, region?: string")
+        },
+        "/api/zcode/captcha/config": {
+            "get": op_params("验证码池", "上游风控配置（前端据此决定弹不弹滑块 / 铸不铸）", &[
+                query_param("account_id", "string", "用哪个 ZCode 账号取（省略则自动挑一个）")
+            ])
+        },
+        "/api/zcode/captcha-pool": {
+            "get": op("验证码池", "读取铸造节奏（库存目标 / 轮询间隔 / 单轮上限）"),
+            "put": op_body("验证码池", "保存铸造节奏",
+                "target?: integer(1~10), pollMs?: integer(1000~30000), maxPerRound?: integer(1~5)")
         },
     })
 }
@@ -1317,6 +1342,9 @@ mod tests {
         add("/api/users/self", &["put"]);
         add("/api/users/{id}", &["delete", "put"]);
         add("/api/users/{id}/2fa", &["delete"]);
+        add("/api/zcode/captcha", &["get", "post"]);
+        add("/api/zcode/captcha-pool", &["get", "put"]);
+        add("/api/zcode/captcha/config", &["get"]);
         add("/swagger-ui", &["get"]);
         m
     }

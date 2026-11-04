@@ -88,6 +88,10 @@ import type {
   ClineHeadersItem,
   GatewayPromptItem,
   SanitizeHeadersItem,
+  ZcodeCaptchaConfig,
+  ZcodeCaptchaPoolStats,
+  ZcodeCaptchaPushResult,
+  ZcodeCaptchaPoolSettings,
   CheckinBenefitsData,
   BenefitResult,
   KeepaliveConfig,
@@ -853,6 +857,30 @@ export const api = {
     request<ApiResponse<SanitizeHeadersItem>>('GET', `${API_BASE}/sanitize`),
   saveSanitize: (data: Record<string, unknown>): Promise<ApiResponse<SanitizeHeadersItem>> =>
     request<ApiResponse<SanitizeHeadersItem>>('PUT', `${API_BASE}/sanitize`, data),
+  // ZCode 验证码令牌池（对照 Agent2API「网关 → 验证码令牌池」）
+  getZcodeCaptcha: (): Promise<ApiResponse<ZcodeCaptchaPoolStats>> =>
+    request<ApiResponse<ZcodeCaptchaPoolStats>>('GET', `${API_BASE}/zcode/captcha`),
+  pushZcodeCaptchaTokens: (
+    tokens: { param: string; region?: string }[],
+  ): Promise<ApiResponse<ZcodeCaptchaPushResult>> =>
+    request<ApiResponse<ZcodeCaptchaPushResult>>('POST', `${API_BASE}/zcode/captcha`, {
+      tokens,
+    }),
+  getZcodeCaptchaConfig: (
+    accountId?: string,
+  ): Promise<ApiResponse<{ account_id: string; captcha: ZcodeCaptchaConfig | null }>> =>
+    request<ApiResponse<{ account_id: string; captcha: ZcodeCaptchaConfig | null }>>(
+      'GET',
+      `${API_BASE}/zcode/captcha/config${
+        accountId ? `?account_id=${encodeURIComponent(accountId)}` : ''
+      }`,
+    ),
+  getZcodeCaptchaPool: (): Promise<ApiResponse<ZcodeCaptchaPoolSettings>> =>
+    request<ApiResponse<ZcodeCaptchaPoolSettings>>('GET', `${API_BASE}/zcode/captcha-pool`),
+  saveZcodeCaptchaPool: (
+    data: Partial<Pick<ZcodeCaptchaPoolSettings, 'target' | 'pollMs' | 'maxPerRound'>>,
+  ): Promise<ApiResponse<ZcodeCaptchaPoolSettings>> =>
+    request<ApiResponse<ZcodeCaptchaPoolSettings>>('PUT', `${API_BASE}/zcode/captcha-pool`, data),
   // 数据管理（对照 Agent2API「设置 → 数据」：存储概览 + 全量备份/恢复）
   getStorageOverview: (): Promise<ApiResponse<StorageOverviewItem>> =>
     request<ApiResponse<StorageOverviewItem>>('GET', `${API_BASE}/storage`),

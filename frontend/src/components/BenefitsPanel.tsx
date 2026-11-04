@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { GripVertical, Plus, Play, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
+import { GripVertical, Play, Plus, RefreshCw, RotateCcw, ShieldCheck, Trash2 } from 'lucide-react';
 import { api } from '../api';
+import { CaptchaCancelledError, solve } from '../lib/aliyunCaptcha';
 import { providerIcon } from '../lib/providerIcons';
 import { useToast } from '../components/Toast';
 import { Badge, Button, Card, EmptyState, Input, Loading } from '../components/ui';
@@ -52,6 +53,21 @@ const OUTCOME_LABEL: Record<string, string> = {
 /** UMID 常驻提示条的轮询间隔（未就绪时等管理员放好文件）。 */
 const UMID_POLL_MS = 3000;
 
+/** ZCode 套餐（`preview` 返回的 `data.plans` 里我们真正用到的字段）。 */
+interface ZcodePlan {
+  plan_id?: string;
+  id?: string;
+  name?: string;
+  title?: string;
+  [key: string]: unknown;
+}
+
+/** 套餐 id（上游字段名在不同套餐里是 `plan_id` 或 `id`）。 */
+function planIdOf(plan: ZcodePlan): string {
+  const value = plan.plan_id ?? plan.id;
+  return typeof value === 'string' ? value : '';
+}
+
 interface UmidState {
   available: boolean;
   path?: string;
@@ -75,6 +91,13 @@ export default function BenefitsPanel(): JSX.Element {
   // UMID 常驻提示条状态（机器级，账号无关，挂在 Qoder 国际版行下）
   const [umid, setUmid] = useState<UmidState | null>(null);
   const [umidChecking, setUmidChecking] = useState(false);
+
+  // ZCode 「领套餐」：选中的套餐（点「领套餐」先盘点再选）。
+  // 验证码是**用户动作**（必须看得见、确认），所以不同账号行的点按一起只允许一个在跑。
+  const [planPicker, setPlanPicker] = useState<{ accountId: string; plans: ZcodePlan[] } | null>(
+    null,
+  );
+  const [claimingKey, setClaimingKey] = useState('');
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -108,6 +131,92 @@ export default function BenefitsPanel(): JSX.Element {
       addToast(err instanceof Error ? err.message : String(err), 'error');
     } finally {
       setRunning('');
+    }
+  };
+
+  // ── ZCode 限时套餐领取 ────────────────────────────────────
+
+  /** 盘点套餐（只读），然后把可选清单交给用户选。 */
+  const loadPlans = async (accountId: string): Promise<void> => {
+    const key = `${accountId}:plan`;
+    setRunning(key);
+    try {
+      const res = await api.runCheckinBenefit(accountId, 'plan', { mode: 'preview' });
+      const result = res?.data;
+      if (result) setResults((prev) => ({ ...prev, [key]: result }));
+      const plans = ((result?.data as { plans?: ZcodePlan[] } | undefined)?.plans ?? []).filter(
+        (plan) => planIdOf(plan).length > 0,
+      );
+      if (plans.length === 0) {
+        addToast(result?.message ?? t('当前没有可领的限时套餐'), result?.ok ? 'success' : 'error');
+        setPlanPicker(null);
+        return;
+      }
+      setPlanPicker({ accountId, plans });
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setRunning('');
+    }
+  };
+
+  /**
+   * 领一份套餐：先取上游风控配置 → 需要就弹滑块让用户拖 → 带验证串领取。
+   *
+   * 风控配置 `enabled:false` 时**不弹滑块**（上游此刻不要验证码），直接领。
+   * 取消滑块不算失败（不报红）。
+   */
+  const claimPlan = async (accountId: string, plan: ZcodePlan): Promise<void> => {
+    const planId = planIdOf(plan);
+    if (!planId) return;
+    const key = `${accountId}:plan`;
+    setClaimingKey(key);
+    try {
+      const configRes = await api.getZcodeCaptchaConfig(accountId);
+      const captcha = configRes?.data?.captcha;
+      if (captcha?.enabled && captcha.sceneId) {
+        await solve(
+          {
+            sceneId: captcha.sceneId,
+            prefix: captcha.prefix ?? '',
+            region: captcha.region ?? '',
+          },
+          // 拿串去领取：`captchaResult` = 上游接受这枚令牌，`bizResult` = 真领到了。
+          // 两者分开告诉 SDK「该不该收起滑块」：令牌被拒时要让用户重试。
+          async (verifyParam) => {
+            const attempt = await api.runCheckinBenefit(accountId, 'plan', {
+              mode: 'claim',
+              plan_id: planId,
+              captcha_verify_param: verifyParam,
+              captcha_verify_region: captcha.region ?? '',
+            });
+            const result = attempt?.data;
+            const code = Number((result?.data as { code?: unknown } | undefined)?.code ?? 0);
+            const accepted = code === 0 || code === 1002 || code === 1003 || code === 1005;
+            if (result) {
+              setResults((prev) => ({ ...prev, [key]: result }));
+              // 只有上游**接受了这枚令牌**才报一次：被拒时 SDK 会把滑块留给用户重拖，
+              // 每试一次弹一条红 toast 反而盖住了「再拖一次」这个信号。
+              if (accepted) addToast(result.message, result.ok ? 'success' : 'error');
+            }
+            return { captchaResult: accepted, bizResult: Boolean(result?.ok) };
+          },
+        );
+      } else {
+        const res = await api.runCheckinBenefit(accountId, 'plan', { mode: 'claim', plan_id: planId });
+        const result = res?.data;
+        if (result) {
+          setResults((prev) => ({ ...prev, [key]: result }));
+          addToast(result.message, result.ok ? 'success' : 'error');
+        }
+      }
+      setPlanPicker(null);
+      await load();
+    } catch (err) {
+      if (err instanceof CaptchaCancelledError) return;
+      addToast(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setClaimingKey('');
     }
   };
 
@@ -212,8 +321,14 @@ export default function BenefitsPanel(): JSX.Element {
           {data.accounts.map((account) => {
             const icon = providerIcon(account.provider);
             const isQoderIntl = account.provider === 'qoder-intl';
+            const isZcode = account.provider === 'zcode' || account.provider === 'zcode-intl';
             const wbActions = account.actions.filter((a) => WB_ACTIONS.includes(a as (typeof WB_ACTIONS)[number]));
-            const otherActions = account.actions.filter((a) => !WB_ACTIONS.includes(a as (typeof WB_ACTIONS)[number]));
+            const otherActions = account.actions.filter(
+              (a) =>
+                !WB_ACTIONS.includes(a as (typeof WB_ACTIONS)[number]) &&
+                // `plan` 在 ZCode 行由下面那块「盘点套餐/领套餐」接管，不再重复出一颗按钮
+                !(isZcode && a === 'plan'),
+            );
             return (
               <div key={account.id} className="bp-row">
                 <div className="bp-head">
@@ -282,6 +397,42 @@ export default function BenefitsPanel(): JSX.Element {
                     );
                   })}
                 </div>
+                {isZcode && (
+                  <div className="bp-plan-bar">
+                    <div className="bp-plan-line">
+                      <ShieldCheck size={14} />
+                      <span>{t('限时套餐：领取需要过一道人机验证（会弹出滑块，需你亲自拖）')}</span>
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        disabled={running === `${account.id}:plan` || claimingKey === `${account.id}:plan`}
+                        onClick={() => void loadPlans(account.id)}
+                      >
+                        <RefreshCw size={12} />
+                        {running === `${account.id}:plan` ? t('盘点中…') : t('盘点套餐')}
+                      </button>
+                    </div>
+                    {planPicker?.accountId === account.id && (
+                      <div className="bp-plan-list">
+                        {planPicker.plans.map((plan) => (
+                          <div className="bp-plan-row" key={planIdOf(plan)}>
+                            <span className="bp-plan-name">
+                              {String(plan.name ?? plan.title ?? planIdOf(plan))}
+                            </span>
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              disabled={claimingKey === `${account.id}:plan`}
+                              onClick={() => void claimPlan(account.id, plan)}
+                            >
+                              {claimingKey === `${account.id}:plan` ? t('领取中…') : t('领套餐')}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
                 {isQoderIntl && (
                   <div className={`bp-umid-bar${umid?.available ? ' is-ok' : ' is-warn'}`}>
                     <span className="bp-umid-icon">

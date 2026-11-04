@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
+import type { SanitizeStats } from '../types';
 import { useToast } from '../components/Toast';
 
 /**
@@ -22,6 +23,7 @@ export default function SanitizePanel(): JSX.Element {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [rows, setRows] = useState<string[]>([]);
+  const [stats, setStats] = useState<SanitizeStats | null>(null);
   const [draft, setDraft] = useState('');
 
   useEffect(() => {
@@ -29,6 +31,9 @@ export default function SanitizePanel(): JSX.Element {
       try {
         const res = await api.getSanitize();
         setRows(res?.data?.extra_headers ?? []);
+        // 命中统计是只读观测值（后端进程内原子计数器，重启归零）：
+        // 它只说明「到底有没有在干活」，不参与任何保存逻辑。
+        setStats(res?.data?.stats ?? null);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -57,6 +62,8 @@ export default function SanitizePanel(): JSX.Element {
       const payload = pending && !rows.includes(pending) ? [...rows, pending] : rows;
       const res = await api.saveSanitize({ extra_headers: payload });
       setRows(res?.data?.extra_headers ?? payload);
+      // 保存回显里也带 stats（后端已加），有就顺手刷新，没有就保留旧值
+      if (res?.data?.stats) setStats(res.data.stats);
       setDraft('');
       addToast(t('脱敏头名单已保存（下一请求即生效）'));
     } catch (err) {
@@ -84,6 +91,15 @@ export default function SanitizePanel(): JSX.Element {
           <div className="form-hint" style={{ marginBottom: 12 }}>
             {t('内置已覆盖：authorization / cookie / x-api-key，以及一切以 -token、-secret、-key 结尾的头。')}
           </div>
+
+          {stats && (
+            <div className="form-hint" style={{ marginBottom: 12 }}>
+              {t('净化命中（本次进程启动以来）：{{hits}} 个请求受影响，共改写 {{rewrites}} 处', {
+                hits: stats.hits,
+                rewrites: stats.rewrites,
+              })}
+            </div>
+          )}
 
           {rows.length === 0 ? (
             <div className="empty-state">

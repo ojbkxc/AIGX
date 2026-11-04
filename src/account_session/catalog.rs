@@ -1040,8 +1040,19 @@ pub async fn discover_models_plain(
         registry::Protocol::Openai => {
             // 登录态供应商的专用头仍然要带（缺头一律 403 的那几家）
             if let Some(meta) = registry::session_meta(&session.provider) {
-                for (name, template) in meta.headers {
-                    req = req.header(*name, template.replace("{credential}", &secret));
+                let defaults: Vec<(String, String)> = meta
+                    .headers
+                    .iter()
+                    .map(|(name, template)| {
+                        ((*name).to_string(), template.replace("{credential}", &secret))
+                    })
+                    .collect();
+                // 与对话路径同一份伪装头快照：上游按头做版本门禁，
+                // 目录/发现请求与转发请求不能两套身份。
+                for (name, value) in
+                    crate::config::apply_cline_header_overrides(&session.provider, defaults)
+                {
+                    req = req.header(name.as_str(), value.as_str());
                 }
             }
             for (name, value) in &session.extra_headers {
@@ -1305,6 +1316,8 @@ async fn fetch_remote(
             headers.push(((*name).to_string(), value));
         }
     }
+    // Cline 伪装头覆盖表（与对话路径同一份快照：目录请求也要漂成同一个客户端身份）
+    let mut headers = crate::config::apply_cline_header_overrides(&session.provider, headers);
     for (name, value) in &session.extra_headers {
         let value = value.replace("{credential}", &secret);
         headers.push((name.clone(), value));
