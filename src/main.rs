@@ -1323,6 +1323,12 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             post(api::admin::handle_reset_password),
         )
         .route("/api/auth/logout", post(api::admin::handle_logout))
+        // session 首屏/刷新（对照 Agent2API GET /api/session + POST /api/session/refresh）
+        .route("/api/session", get(api::admin::handle_get_session))
+        .route(
+            "/api/session/refresh",
+            post(api::admin::handle_refresh_session),
+        )
         .route(
             "/api/auth/change-password",
             post(api::admin::handle_change_password),

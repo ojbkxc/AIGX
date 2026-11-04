@@ -2019,3 +2019,85 @@ pub async fn handle_geo_lang(headers: HeaderMap) -> Json<Value> {
         .and_then(|ip| crate::api::common::geo_language_for_ip(&ip).map(|s| s.to_string()));
     Json(serde_json::json!({ "success": true, "data": { "lang": lang } }))
 }
+
+/// GET /api/session —— 免鉴权首屏状态（对照 Agent2API `GET /api/session`）。
+///
+/// 前端在配置 API Key 之前也要能读登录态概况。返回：
+/// - `configured`：admin 是否已初始化
+/// - `authenticated`：当前请求是否携带有效 token
+/// - `expiresAt`：当前 session 过期时间（未登录为 null）
+///
+/// 不泄露用户敏感信息（email 只在 authenticated=true 时返回）。
+pub async fn handle_get_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<Value> {
+    let config = state.config_manager.get().await;
+    let configured = !config.admin.session_secret.is_empty();
+    let (authenticated, email, expires_at) = match extract_session_token(&headers) {
+        Some(token) => {
+            let session_ttl = config.admin.session_ttl_hours.max(1);
+            let session_store = SessionStore::new(&config.admin.session_secret, session_ttl);
+            match session_store.validate_session(&token) {
+                Some(sess) if !state.session_registry.is_revoked(&sess.session_id) => {
+                    (true, Some(sess.email), Some(sess.expires_at))
+                }
+                _ => (false, None, None),
+            }
+        }
+        None => (false, None, None),
+    };
+    Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "configured": configured,
+            "authenticated": authenticated,
+            "email": email,
+            "expiresAt": expires_at,
+        }
+    }))
+}
+
+/// POST /api/session/refresh —— 刷新当前登录态（对照 Agent2API `POST /api/session/refresh`）。
+///
+/// 验证当前 token 有效后，用同一 email 重新签发新 token（续期），
+/// 撤销旧 session_id，返回新 token + expires_at。需要鉴权。
+pub async fn handle_refresh_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let token = extract_session_token(&headers)
+        .ok_or_else(|| error_response("Not authenticated", StatusCode::UNAUTHORIZED))?;
+    let config = state.config_manager.get().await;
+    let session_ttl = config.admin.session_ttl_hours.max(1);
+    let session_secret = if config.admin.session_secret.is_empty() {
+        Uuid::new_v4().to_string()
+    } else {
+        config.admin.session_secret.clone()
+    };
+    let session_store = SessionStore::new(&session_secret, session_ttl);
+    let old_session = session_store
+        .validate_session(&token)
+        .ok_or_else(|| error_response("Session expired or invalid", StatusCode::UNAUTHORIZED))?;
+    if state.session_registry.is_revoked(&old_session.session_id) {
+        return Err(error_response(
+            "Session revoked",
+            StatusCode::UNAUTHORIZED,
+        ));
+    }
+    // 撤销旧 session，签发新 token
+    state
+        .session_registry
+        .revoke(&old_session.email, &old_session.session_id);
+    let new_session = session_store.create_session(&old_session.email);
+    state
+        .session_registry
+        .register(&new_session.email, &new_session.session_id);
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "token": new_session.token,
+            "expiresAt": new_session.expires_at,
+        }
+    })))
+}
