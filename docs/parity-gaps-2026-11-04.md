@@ -18,7 +18,7 @@
 | 出站净化（#6） | ✅ | 指纹脱敏已补全：chat / responses / completions 三路径挂载 + 命中统计（P2-10/P2-11） |
 | 签到/定时（#7） | ⚠️ | ⚠️ workbuddy-intl 保活链不进调度、growth school/travel 未实现、Qoder UMID 只探测 |
 | 配置/升级（#8） | ⚠️ | 核心开关对齐；⚠️ 定时任务默认全关、超时默认值不同；❌ routing 策略键/保留期配置 |
-| 登录/验证码（#9） | ⚠️→✅ 局部 | ✅ ALTCHA + 阿里云求解器/令牌池（已补，P1-9/P1-10）；⚠️ AutoClaw OAuth |
+| 登录/验证码（#9） | ✅ | ALTCHA + 阿里云求解器/令牌池（P1-9/P1-10）+ AutoClaw OAuth（P2-1）均已补 |
 | 存储/日志（#10） | ⚠️ | ❌ 运行日志页、debug_traffic 落库、account_usage_records；⚠️ 请求明细字段缺口 ~30% |
 | UI 前端（#11） | ⚠️ | 12 面板 10✅/1⚠️/1❌（docs 页）；❌ 列定制/筛选记忆/移动端列集/i18n 扩展 |
 
@@ -55,7 +55,7 @@
 
 | # | 项 | 来源 | 内容 |
 |---|---|---|---|
-| P2-1 | AutoClaw 国际版 OAuth | #9 ⚠️ | 登录引擎扩展（基线 /api/session/login/oauth/*） |
+| P2-1 | AutoClaw 国际版 OAuth | #9 ⚠️ | 登录引擎扩展（基线 /api/session/login/oauth/*） | **已实现**（三步协议：① captcha-config 取风控配置 → ② oauth/start 取授权地址（需阿里云验证码参数）→ ③ 浏览器回调换凭证落账号；`GET /api/account-sessions/login/oauth/captcha-config`、`POST /api/account-sessions/login/oauth/start`、`GET /auth/callback-{zai|google}` 免鉴权路由；refresh_token 随账号落盘） |
 | P2-2 | zcode claim UI 参数 | #9 ⚠️ | BenefitsPanel.run 传 params（claim 模式需 plan_id + captcha_verify_param） | **已实现**（`BenefitsPanel.tsx`：ZCode 行「盘点套餐 → 选套餐 → 领套餐」，领时先取 `/api/zcode/captcha/config`，需验证码则弹滑块，带 `captcha_verify_param`/`captcha_verify_region` 提交） |
 | P2-3 | session 首屏/refresh | #4 ⚠️ | GET /api/session + POST /api/session/refresh |
 | P2-4 | keys PATCH 更新端点 | #4 ⚠️ | 密钥更新端点 | **已实现**（/api/keys/:id PUT 复用 handle_update_token） |
