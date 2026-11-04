@@ -207,14 +207,7 @@ pub async fn run_schedule(
         } else if outcome == CheckinOutcome::Failed {
             failed += 1;
         }
-        record(
-            store,
-            &session,
-            "schedule",
-            outcome,
-            &message,
-            kept_active,
-        );
+        record(store, &session, "schedule", outcome, &message, kept_active);
         if gap_ms > 0 {
             tokio::time::sleep(Duration::from_millis(gap_ms)).await;
         }

@@ -640,6 +640,10 @@ async fn every_provider_rejects_empty_credential() {
 // 台账标记由调度一次产出，不依赖前端手动回写。
 
 #[tokio::test]
+// 跨模块密钥目录锁必须在整个 mock + 调度期间持有：中途放锁会让别的测试
+// 线程换掉全局 data_dir，加密落库路径拿错密钥。这里持的是 std Mutex，
+// 但 guarded 区段内只有 mock 服务与本地调度，无真实阻塞风险。
+#[allow(clippy::await_holding_lock)]
 async fn schedule_runs_workbuddy_intl_full_keepalive_chain() {
     let _guard = crate::account_session::secret::test_lock()
         .lock()
@@ -662,11 +666,7 @@ async fn schedule_runs_workbuddy_intl_full_keepalive_chain() {
             200,
             json!({"id": "c1", "choices": [{"message": {"role": "assistant", "content": "hi"}}]}),
         ),
-        (
-            "/console/as/conversations/",
-            200,
-            json!({"id": "conv-1"}),
-        ),
+        ("/console/as/conversations/", 200, json!({"id": "conv-1"})),
     ])
     .await;
 
@@ -678,7 +678,11 @@ async fn schedule_runs_workbuddy_intl_full_keepalive_chain() {
     assert_eq!(outcome.ok, 1, "Full 链应算成功：{}", outcome.summary);
     assert_eq!(outcome.keepalive, 1, "保活计数应为 1：{}", outcome.summary);
     assert_eq!(outcome.failed, 0);
-    assert!(outcome.summary.contains("保活"), "摘要应含保活：{}", outcome.summary);
+    assert!(
+        outcome.summary.contains("保活"),
+        "摘要应含保活：{}",
+        outcome.summary
+    );
     // 四条路径都要打到：探测 + 领取 + 桌面 + 网页
     assert_hit(&state, "/billing/meter/checkin-activity-status");
     assert_hit(&state, "/v2/billing/meter/daily-checkin");
@@ -693,6 +697,8 @@ async fn schedule_runs_workbuddy_intl_full_keepalive_chain() {
 }
 
 #[tokio::test]
+// 同上：全局密钥目录锁贯穿整个断言过程。
+#[allow(clippy::await_holding_lock)]
 async fn schedule_keepalive_zero_when_both_pokes_fail() {
     // 两发保活都失败时保活计数必须为 0 —— 不能把「打了没点亮」算成保活成功；
     // 记录按 Pending 落账（claim 成功但保活链没跑成，稍后重试）。
