@@ -550,7 +550,7 @@ function ensureMintElements(elementId: string, buttonId: string) {
   if (!button) {
     button = document.createElement('button');
     button.id = buttonId;
-    button.type = 'button';
+    button.setAttribute('type', 'button');
     button.tabIndex = -1;
     button.setAttribute('aria-hidden', 'true');
     button.style.position = 'fixed';
