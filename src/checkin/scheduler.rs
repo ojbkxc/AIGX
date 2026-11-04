@@ -15,12 +15,23 @@
 //!
 //! 账号逐个签到、中间留间隔（`gap_ms`）。并发打上游是风控画像里的典型特征，
 //! 这条链宁可慢一点。
+//!
+//! ## 国际版保活链
+//!
+//! `workbuddy-intl` 在每日调度里走 **Full** 链（探测 + 条件领取 + 桌面/网页
+//! 最小对话保活），对齐 Agent2API「定时与批量签到恒走 `WorkbuddyActivity::Full`」：
+//! 每日活跃奖励的判据是网页通道那一下（`POST /console/as/conversations/`），
+//! 只探测+领取会让 intl 账号的保活计数恒为 0、`kept_active` 只能靠前端手动回写。
+//! 保活计数与 `kept_active` 台账标记由调度一次产出，`handle_mark_kept_active`
+//! 仅保留作补偿入口。
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{FixedOffset, Utc};
 
+use super::benefits::keepalive;
+use super::benefits::{BenefitOutcome, BenefitResult};
 use super::claim::{self, supports_checkin};
 use super::store::{CheckinOutcome, CheckinRecord, CheckinStore, ScheduleCounts};
 use crate::account_session::AccountSessionStore;
@@ -134,7 +145,7 @@ pub struct ScheduleOutcome {
     pub summary: String,
     /// 成功数（含「今日已领」）
     pub ok: usize,
-    /// 附带保活数（签到后自动链对国际版账号顺带保活）
+    /// 附带保活数（`workbuddy-intl` 的 Full 链顺带保活点亮的账号数）
     pub keepalive: usize,
     /// 失败数
     pub failed: usize,
@@ -157,6 +168,7 @@ pub async fn run_schedule(
     }
     let mut ok = 0usize;
     let mut failed = 0usize;
+    let mut keepalive = 0usize;
     let mut total = 0usize;
     for session in targets {
         total += 1;
@@ -175,30 +187,74 @@ pub async fn run_schedule(
                 continue;
             }
         };
-        let result = claim::claim_for(&client, &session).await;
-        if result.outcome.is_ok() {
+        // workbuddy-intl 走 Full 链（探测 + 条件领取 + 桌面/网页保活），
+        // 对齐 Agent2API「定时与批量签到恒走 WorkbuddyActivity::Full」；
+        // 其余家走普通 claim。保活计数与 kept_active 台账标记一次产出，
+        // 不再依赖前端手动回写。
+        let (outcome, message, kept_active) = if session.provider == "workbuddy-intl" {
+            let benefit = keepalive::run(store.file_store(), &client, &session, "full").await;
+            let hits = keepalive_hits(&benefit);
+            if hits > 0 {
+                keepalive += 1;
+            }
+            (benefit_outcome(&benefit), benefit.message, hits > 0)
+        } else {
+            let result = claim::claim_for(&client, &session).await;
+            (result.outcome, result.msg, false)
+        };
+        if outcome.is_ok() {
             ok += 1;
-        } else if result.outcome == CheckinOutcome::Failed {
+        } else if outcome == CheckinOutcome::Failed {
             failed += 1;
         }
         record(
             store,
             &session,
             "schedule",
-            result.outcome,
-            &result.msg,
-            false,
+            outcome,
+            &message,
+            kept_active,
         );
         if gap_ms > 0 {
             tokio::time::sleep(Duration::from_millis(gap_ms)).await;
         }
     }
     ScheduleOutcome {
-        summary: format!("成功 {ok}/{total}"),
+        summary: if keepalive > 0 {
+            format!("成功 {ok}/{total}，保活 {keepalive}")
+        } else {
+            format!("成功 {ok}/{total}")
+        },
         ok,
         failed,
-        keepalive: 0,
+        keepalive,
     }
+}
+
+/// BenefitResult → 台账结果分类。
+///
+/// Done / Already 算「今天完成了」，Pending 算未完成（不算失败），
+/// Failed / Skipped 算失败 —— 与 `claim::ClaimResult` 的口径一致。
+fn benefit_outcome(benefit: &BenefitResult) -> CheckinOutcome {
+    match (benefit.ok, benefit.outcome) {
+        (true, BenefitOutcome::Done) => CheckinOutcome::Success,
+        (true, BenefitOutcome::Already) => CheckinOutcome::Already,
+        (false, BenefitOutcome::Pending) => CheckinOutcome::Pending,
+        _ => CheckinOutcome::Failed,
+    }
+}
+
+/// 保活链点亮的通道数（桌面 + 网页各一发，0–2）。
+///
+/// 读 `keepalive::run` 落盘的记忆（`benefit:keepalive:{id}` 的 `keepalive_ok`）——
+/// 保活计数只认「真的点亮了通道」的账号，两发都失败时保活链算没跑成
+/// （`keepalive::run` 会返回 Pending，稍后重试）。
+fn keepalive_hits(benefit: &BenefitResult) -> usize {
+    benefit
+        .data
+        .get("keepalive_ok")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize
 }
 
 /// 收集参与签到的账号（启用 + 凭证未过期 + provider 在白名单内）。

@@ -632,3 +632,152 @@ async fn every_provider_rejects_empty_credential() {
         );
     }
 }
+
+// ── 每日调度：workbuddy-intl 走 Full 链（探测 + 领取 + 桌面/网页保活）──
+//
+// 对齐 Agent2API「定时与批量签到恒走 WorkbuddyActivity::Full」：调度链必须
+// 真的打到四条路径（探测 / 领取 / 桌面 / 网页），保活计数与 `kept_active`
+// 台账标记由调度一次产出，不依赖前端手动回写。
+
+#[tokio::test]
+async fn schedule_runs_workbuddy_intl_full_keepalive_chain() {
+    let _guard = crate::account_session::secret::test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::account_session::secret::set_data_dir(&temp_data_dir("full"));
+
+    let (base, state) = start_mock(vec![
+        (
+            "/billing/meter/checkin-activity-status",
+            200,
+            json!({"code": 0, "data": {"today_checked_in": false, "active": true}}),
+        ),
+        (
+            "/v2/billing/meter/daily-checkin",
+            200,
+            json!({"code": 0, "data": {"continuousDays": 2, "points": 10}}),
+        ),
+        (
+            "/v1/chat/completions",
+            200,
+            json!({"id": "c1", "choices": [{"message": {"role": "assistant", "content": "hi"}}]}),
+        ),
+        (
+            "/console/as/conversations/",
+            200,
+            json!({"id": "conv-1"}),
+        ),
+    ])
+    .await;
+
+    let (store, sessions, egress) = schedule_env();
+    sessions.upsert(account("workbuddy-intl", &base)).unwrap();
+
+    let outcome = super::scheduler::run_schedule(&store, &sessions, &egress, &[], 0).await;
+
+    assert_eq!(outcome.ok, 1, "Full 链应算成功：{}", outcome.summary);
+    assert_eq!(outcome.keepalive, 1, "保活计数应为 1：{}", outcome.summary);
+    assert_eq!(outcome.failed, 0);
+    assert!(outcome.summary.contains("保活"), "摘要应含保活：{}", outcome.summary);
+    // 四条路径都要打到：探测 + 领取 + 桌面 + 网页
+    assert_hit(&state, "/billing/meter/checkin-activity-status");
+    assert_hit(&state, "/v2/billing/meter/daily-checkin");
+    assert_hit(&state, "/v1/chat/completions");
+    assert_hit(&state, "/console/as/conversations/");
+    // 台账记录带保活标记（不再需要前端手动回写）
+    let records = store
+        .recent_records(1, Some("workbuddy-intl"), None, None, None)
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].kept_active, "台账应带保活标记");
+}
+
+#[tokio::test]
+async fn schedule_keepalive_zero_when_both_pokes_fail() {
+    // 两发保活都失败时保活计数必须为 0 —— 不能把「打了没点亮」算成保活成功；
+    // 记录按 Pending 落账（claim 成功但保活链没跑成，稍后重试）。
+    let _guard = crate::account_session::secret::test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::account_session::secret::set_data_dir(&temp_data_dir("poke-fail"));
+
+    let (base, state) = start_mock(vec![
+        (
+            "/billing/meter/checkin-activity-status",
+            200,
+            json!({"code": 0, "data": {"today_checked_in": false, "active": true}}),
+        ),
+        (
+            "/v2/billing/meter/daily-checkin",
+            200,
+            json!({"code": 0, "data": {"continuousDays": 1, "points": 5}}),
+        ),
+        (
+            "/v1/chat/completions",
+            500,
+            json!({"code": 1, "msg": "model busy"}),
+        ),
+        (
+            "/console/as/conversations/",
+            500,
+            json!({"code": 1, "msg": "server error"}),
+        ),
+    ])
+    .await;
+
+    let (store, sessions, egress) = schedule_env();
+    sessions.upsert(account("workbuddy-intl", &base)).unwrap();
+
+    let outcome = super::scheduler::run_schedule(&store, &sessions, &egress, &[], 0).await;
+
+    assert_eq!(outcome.keepalive, 0, "两发都失败时保活计数必须为 0");
+    assert_eq!(outcome.ok, 0);
+    assert_eq!(outcome.failed, 0, "Pending 不算失败");
+    assert_hit(&state, "/v1/chat/completions");
+    assert_hit(&state, "/console/as/conversations/");
+    let records = store
+        .recent_records(1, Some("workbuddy-intl"), None, None, None)
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert!(!records[0].kept_active, "保活没点亮时不该打保活标记");
+    assert!(
+        records[0].message.contains("保活"),
+        "文案应交代保活走向：{}",
+        records[0].message
+    );
+}
+
+/// 临时数据目录（密钥文件所在处；防并行测试互相换密钥）。
+fn temp_data_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "aigx-checkin-rt-{tag}-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// 临时 FileStore（调度测试要落台账与保活记忆）。
+fn temp_store() -> Arc<crate::storage::FileStore> {
+    let dir = std::env::temp_dir().join(format!(
+        "aigx-checkin-rt-fs-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    Arc::new(crate::storage::FileStore::new(dir))
+}
+
+/// 调度测试环境：签到台账 + 账号池 + 出口缓存（互相独立的临时库）。
+fn schedule_env() -> (
+    Arc<super::store::CheckinStore>,
+    crate::account_session::AccountSessionStore,
+    Arc<crate::egress::EgressCache>,
+) {
+    let store = Arc::new(super::store::CheckinStore::new(temp_store()));
+    store.load().unwrap();
+    let sessions = crate::account_session::AccountSessionStore::new(temp_store());
+    let egress = Arc::new(crate::egress::EgressCache::new());
+    (store, sessions, egress)
+}

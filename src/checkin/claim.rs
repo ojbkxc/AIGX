@@ -745,6 +745,11 @@ async fn autoclaw(client: &Client, session: &AccountSession, secret: &str) -> Cl
 // 国内：`POST {ep}/v2/billing/meter/daily-checkin`；已签到 = HTTP 400 +「已签到」。
 // 国际：先 `POST {ep}/billing/meter/checkin-activity-status`（**无 /v2**），
 //       `today_checked_in` → 已领；`!active` → 活动未开（中性）；否则走同一条领取。
+//
+// **国际版的每日调度走 Full 链**（探测 + 条件领取 + 桌面/网页最小对话保活，
+// 见 `benefits::keepalive::run("full")`，对齐 A2A「定时与批量签到恒走 Full」）：
+// 这里只负责「探测 + 领取」这一半，每日活跃奖励的判据是网页通道那一下，
+// 缺了保活会让 intl 账号的保活计数恒为 0（见 `scheduler::run_schedule`）。
 
 /// 从 JWT payload 里取账号 uid（`sub` / `uid` / `userId`），不校验签名。
 fn jwt_subject(token: &str) -> Option<String> {

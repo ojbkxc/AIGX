@@ -167,6 +167,14 @@ impl CheckinStore {
         Ok(())
     }
 
+    /// 底层 FileStore 句柄。
+    ///
+    /// 调度器跑国际版保活链要读 `checkin_keepalive` 模型链配置、写
+    /// `benefit:keepalive:*` 保活记忆 —— 两者都落在这个库里。
+    pub fn file_store(&self) -> &Arc<FileStore> {
+        &self.store
+    }
+
     fn persist_schedules(&self) -> Result<()> {
         // 先 clone 再释放读锁，避免读守卫存活于整个 put（锁内同步 IO）
         let snapshot = self.schedules.read().clone();

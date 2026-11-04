@@ -12,7 +12,11 @@
 //! - **WorkBuddy growth**：一棵任务树，多步 accept → 上报 → claim。
 //!
 //! 硬塞进按日台账会把「已结清」表达成「今天已领」，明天又白打一次上游。
-//! 所以本模块另立契约，并**不进入**每日 scheduler（限时动作只能手动触发）。
+//! 所以本模块另立契约：一次性 / 限时动作**不进入**每日 scheduler（只能手动
+//! 触发）。唯一例外是 **WB-intl 保活** —— 它是每日活跃执行，由
+//! `scheduler::run_schedule` 对 `workbuddy-intl` 账号直接调
+//! `keepalive::run("full")` 跑每日链（对齐 Agent2API「定时与批量签到恒走
+//! `WorkbuddyActivity::Full`」），保活计数与 `kept_active` 台账标记一次产出。
 //!
 //! ## 统一契约
 //!
