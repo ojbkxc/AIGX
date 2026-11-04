@@ -1720,7 +1720,7 @@ export default function ModelManage(): JSX.Element {
               message={t('暂无覆盖项。内置推断已覆盖常见模型，需要自定义归属/上下文/能力时在此添加')}
             />
           ) : (
-            <div className="mm-table-wrap">
+            <div className="mm-table-wrap table-wrapper">
               <table className="mm-table">
                 <thead>
                   <tr>
@@ -2102,7 +2102,7 @@ export default function ModelManage(): JSX.Element {
               />
             ) : (
               <>
-                <div className="mm-table-wrap">
+                <div className="mm-table-wrap table-wrapper">
                   <table className="mm-table">
                     <colgroup>
                       {visibleCols.map((col) => (

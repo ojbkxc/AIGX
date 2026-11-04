@@ -1495,3 +1495,26 @@ body.mm-colset-dragging {
 .mm-table td.ta-right {
   text-align: right;
 }
+
+/* ── 移动端卡片化（≤767px：配合 useMobileColumns + App.css 卡片布局）──
+   .mm-table-wrap 已加 table-wrapper 类，App.css 的卡片媒体查询自动生效；
+   这里只覆盖 mm-table 独有的桌面约束：max-height 视口钉死、table-layout fixed、
+   sticky 表头。卡片流不需要这些。 */
+@media (max-width: 767px) {
+  .mm-table-wrap {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  .mm-table {
+    table-layout: auto;
+    min-width: 0 !important;
+  }
+
+  /* sticky 表头在卡片布局下无意义（thead 已隐藏） */
+  .mm-table th {
+    position: static;
+    z-index: auto;
+  }
+}
+
