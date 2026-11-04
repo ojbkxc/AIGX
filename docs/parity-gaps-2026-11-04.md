@@ -71,14 +71,14 @@
 | P2-14 | routing 策略键 | #8 ❌ | strategy/sticky/failover/breaker | **已实现**（`GET/PUT /api/routing`：strategy/sticky/breaker/scheduler_weights；failover_backoff 由冷却/断路器/健康归档承担，不做独立开关） |
 | P2-15 | 日志/请求/聚合三档保留期配置 | #8 ❌ | retention 配置端点 | **已实现**（/api/logs/retention 已有 request/daily/audit 三档 + capacity） |
 | P2-16 | 目录配置 | #8 ❌ | logDir/requestStatsDir/debugDir | **已实现**（`ServerConfig` 新增 `log_dir`/`request_stats_dir`/`debug_dir` 可选字段；`storage_dirs()` 解析默认子目录；`GET/PUT /api/gateway/settings` 暴露并更新） |
-| P2-17 | growth school/travel | #7 ⚠️ | 另域+小程序 UA | **不补**（基线标注 unsupported，另域+小程序 UA 属规避第三方检测类，AIGX 不做） |
-| P2-18 | Qoder UMID 安装 | #7 ⚠️ | 只探测不安装 | **不补**（安装 UMID 属桌面壳能力，AIGX 是 Web 网关；只探测已足够） |
+| P2-17 | growth school/travel | #7 ⚠️ | 另域+小程序 UA | **用户自行补**（2026-11-04 拍板：用户自行实现；基线标注 unsupported，另域+小程序 UA 属规避第三方检测类，AIGX 团队不做） |
+| P2-18 | Qoder UMID 安装 | #7 ⚠️ | 只探测不安装 | **用户自行补**（2026-11-04 拍板：用户自行实现；安装 UMID 属桌面壳能力，AIGX 是 Web 网关，团队只探测已足够） |
 | P2-19 | 记录台账永久保留 + 筛选删除 | #7 ⚠️ | 90 天 prune vs 基线永久 + 无筛选删除 + 无 all=1 护栏 | **已实现**（`CheckinSettings.keep_days` 可配置（0=永久）；`DELETE /api/checkin-center/records` 支持 `all=1` 全清护栏 + 筛选删除 + `days=N` 三模式；`clear_all`/`remove_matching` 函数） |
 | P2-20 | cron Skip 语义对齐 | #7 ⚠️ | Skip 不补跑 vs scheduled_tasks 补一次 | **已对齐**（基线 core/scheduled_tasks 也是「只补一次，不补跑期间的每一轮」（line 33-34, 392）；AIGX scheduled_tasks/task_state.rs 同语义（line 181-190）；checkin scheduler 的当天去重 + 启动补签与基线一致） |
 | P2-21 | 时区口径统一 | #7 ⚠️ | 用户签到本地时区 vs 中心 UTC+8 | **已实现**（`CheckinSettings.timezone_offset` 可配置（0=系统本地时区，默认 8=UTC+8）；scheduler 的 `beijing()` 按配置偏移构造 FixedOffset；store 的 recent/clear/prune 同步使用配置时区；启动时按已加载设置初始化静态变量） |
 | P2-22 | 终端用户积分流水 | #5 ⚠️ | records 分页/earned/consumed 明细 | **已实现**（`GET /api/user/records`：合并签到获得（earned）与 API 消耗（consumed）成一条时间线后分页；查询参数 days/offset/limit/type；返回 earned_total/consumed_total/balance 汇总） |
-| P2-23 | 团队积分 | #5 ❌ | 无团队体系 | **不补**（AIGX 无团队体系，积分按用户维度管理；团队积分是基线 Agent2API 内部多租户功能，与 AIGX 的单用户/管理员模型不匹配） |
-| P2-24 | promo/pet/asr 运营集成 | #5 ❌ | promo-banner/pet-work/asr | **不补**（AIGX 是技术网关，不做运营活动/宠物/ASR 业务集成；这三项是基线 Agent2API 自有运营功能，非网关能力） |
+| P2-23 | 团队积分 | #5 ❌ | 无团队体系 | **用户自行补**（2026-11-04 拍板：用户自行实现；AIGX 无团队体系，积分按用户维度管理；团队积分是基线 Agent2API 内部多租户功能，与 AIGX 的单用户/管理员模型不匹配） |
+| P2-24 | promo/pet/asr 运营集成 | #5 ❌ | promo-banner/pet-work/asr | **用户自行补**（2026-11-04 拍板：用户自行实现；AIGX 是技术网关，不做运营活动/宠物/ASR 业务集成；这三项是基线 Agent2API 自有运营功能，非网关能力） |
 | P2-25 | 移动端列集 | #11 ❌ | mobile-columns（≤767px 行拆卡片） | **已实现**（`useMobileColumns` hook + `App.css` 卡片媒体查询；ModelManage/Channels/Logs/Tokens/Accounts/Plans/Users 等表格页接入；≤767px 自动行拆卡片） |
 | P2-26 | i18n 扩展 | #11 ❌ | zh-Hant/ja/ko/pt-BR（基线 6 语言） | **已实现**（`frontend/src/i18n/` 补 zh-Hant/ja/ko/pt-BR 四语言翻译；语言切换器注册新语言；翻译 key 覆盖全页面） |
 | P2-27 | 模型管理列拖拽 + 移动端卡片化 | §7 P2 | 列设置拖拽排序 + 移动端卡片 | **已实现**（ModelManage.tsx：列拖拽排序（colItems/draggingCol）+ 移动端卡片化（table-wrapper class + CSS media query）；两处 mm-table-wrap 加 table-wrapper 触发 useMobileColumns hook） |
@@ -87,6 +87,8 @@
 
 > 用户拍板（2026-11-04）：机场订阅不补。原「不补」项 zcode 验证码池 / 阿里云滑块求解器 / Cline 伪装头 / 指纹脱敏绕过用途 / upgrade_api 经用户拍板改为**补缺**，已移至 §2 P1（P1-9~P1-12 + P1-13），四项规避类功能均已完成（2026-11-05）。
 > 注：前 4 项属规避第三方检测类，实现需绕过第三方人机验证/内容审核机制，按用户指令执行。upgrade_api 虽 AIGX 无现成旧数据，但需提供 auth.json 导入/迁移端点以备将来导入第三方数据。
+>
+> 用户拍板（2026-11-04）：P2-17 growth school/travel、P2-18 Qoder UMID 安装、P2-23 团队积分、P2-24 promo/pet/asr 运营集成四项由用户自行补，条目保留（见 §3 表），AIGX 团队不做。故「不补」仅剩机场订阅一项。
 
 ### 4.1 机场订阅（#4 ❌）
 - **基线实现**：`subscriptions.rs`——Clash/mihomo 内核订阅（URL + decode-qr），代理内核语义。
