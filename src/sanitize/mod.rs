@@ -21,11 +21,12 @@
 //!   "Main branch (" 对应客户端注入形态）；
 //! - Codex 身份句 `Codex CLI` → `Codex CLI tool`（插词，与身份句同型）；
 //! - 反馈句 `To give feedback` → `To provide feedback`（参考注释明说 give→provide）；
-//! - 裸数字 `11-128`（上游反探测：请求体含其内部错误码即整单拦截）→ 换成
-//!   非断行连字符形态（参考注释"改写保留可读性与指代"；零宽类字符实测被
-//!   上游归一化剔除，普通文本字符里连字符族可用）；
-//! - 表头键名 `x-anthropic-billing-header`：键值形态整段删除；残留的裸键名
-//!   缩写为 `x-anthropic-billing-hdr`（参考注释"最小缩写 header→hdr"）。
+//! - 裸数字 `11128`（上游反探测：请求体含其内部错误码即整单拦截）→ 插一个
+//!   连字符改成 `11-128`（参考注释"改写保留可读性与指代"；零宽类字符实测
+//!   被上游归一化剔除）；
+//! - 表头键名 `x-anthropic-billing-header`：键值形态整段删除（以分号为分段
+//!   边界）；残留的裸键名缩写为 `x-anthropic-billing-hdr`（参考注释"最小
+//!   缩写 header→hdr"）。
 
 use std::sync::OnceLock;
 
@@ -38,11 +39,12 @@ use crate::bridge::ChatMessage;
 /// `strings.Contains` 口径）。
 const SANITIZE_FEATURES: &[&str] = &[
     "x-anthropic-billing-header", // 表头键值段键名（完整拼写；hdr 是缩写后形态）
+    "cc_entrypoint=",             // 尾随裸键值（截断前缀即可命中；可无表头键名）
     "You are Claude Code",        // 身份句（截断前缀即可命中）
     "Main branch (",              // 注入指令句（截断前缀即可命中）
     "You are a coding agent running in the Codex CLI", // Codex instructions 首段
     "github.com/anthropics/",     // 反馈句里的 Anthropic 仓库链接
-    "11-128",                     // 上游反探测：裸数字错误码
+    "11128",                      // 上游反探测：裸数字错误码
 ];
 
 /// 改写层：全模板句逐字替换（每句只改一个词，语义不变）。
@@ -71,20 +73,24 @@ const SANITIZE_REWRITES: &[(&str, &str)] = &[
         "To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
     ),
     (
-        // 上游反探测：请求体里出现裸数字 11-128 就整单拦截（与上下文无关）。
-        // 11-128 正是本类拦截自身的错误码，上游据此识别"在讨论/回显其内部
-        // 错误码"的请求。代价：用户对话中任何 11-128 都会被改写——但这串
-        // 数字出现在请求里本身就是拦截条件，不改写必然失败。改成非断行
-        // 连字符形态：保留可读性与指代，且不再是逐字命中的 ASCII 连字符串
-        // （零宽类字符无效——实测上游会归一化剔除）。
+        // 上游反探测：请求体里出现裸数字 11128 就整单拦截（与该数字的上下文
+        // 无关："code=11128" / 裸 "11128" / "错误码 11128" 全部命中）。
+        // 11128 正是本类拦截自身的错误码，上游据此识别"在讨论/回显其内部
+        // 错误码"的请求。代价：用户对话中任何 11128 都会被改写——但这串数字
+        // 出现在请求里本身就是拦截条件，不改写必然失败。插一个连字符保留
+        // 可读性与指代（零宽类字符无效——实测上游会归一化剔除）。
+        //
+        // 注意：from 是**纯数字**，不是 `11-128`。参考实现源码的 from 串曾
+        // 被其自身规则改写成 to 串，核对时以参考注释明确记载的原文 `11128`
+        // 为准，不要把改写后的形态当成指纹原文。
+        "11128",
         "11-128",
-        "11‑128",
     ),
 ];
 
 // ─── 正则（惰性编译一次）────────────────────────────────────
 //
-// `\s` 写成显式的 `[\t\n\r ]`、`\b` 用 `(?-u:...)` 关掉 Unicode 模式：
+// `\s` 写成显式的 `[\t\n\f\r ]`、`\b` 用 `(?-u:...)` 关掉 Unicode 模式：
 // 参考实现（Go 移植）里这两个类都是**纯 ASCII** 语义，与 Go 逐字对齐，
 // 否则「上游实测能绕过」这条结论就不再成立。
 
@@ -92,7 +98,9 @@ fn hdr_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         // 剥离层：表头键名即触发（与值无关），键值整段删除。
-        Regex::new(r"(?i)x-anthropic-billing-header[\t\n\r ]*:[^\n]*;?[\t\n\r ]*")
+        // 值以分号为分段边界：`[^;\n]*` 而不是 `[^\n]*`，否则同一行分号后的
+        // 其它键值也会被一并吞掉（过度删除）。
+        Regex::new(r"(?i)x-anthropic-billing-header[\t\n\r ]*:[^;\n]*;?[\t\n\f\r ]*")
             .expect("header 剥离正则必须可编译")
     })
 }
@@ -101,7 +109,7 @@ fn kv_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         // 剥离层：`cc_*=值` 键值段整段删除（尾随裸键值由调用方循环清理）。
-        Regex::new(r"(?i)(?-u:\b)cc_[a-z0-9_]+=[^;\n]*;?[\t\n\r ]*")
+        Regex::new(r"(?i)(?-u:\b)cc_[a-z0-9_]+=[^;\n]*;?[\t\n\f\r ]*")
             .expect("cc_ 键值正则必须可编译")
     })
 }
@@ -163,8 +171,9 @@ pub fn sanitize_text(text: &str) -> String {
     out
 }
 
-/// 特征预检：先走 `contains` 快速路径（零分配）；表头键名还有大小写变体
-/// 与裸键名形态，`contains` 大小写敏感会漏，必须再用 `(?i)` 正则兜底。
+/// 特征预检：先走 `contains` 快速路径（零分配）。`cc_entrypoint=` 是独立的
+/// 裸键值特征（可能没有表头键名，必须单列否则整条净化被跳过）；表头键名还有
+/// 大小写变体与裸键名形态，`contains` 大小写敏感会漏，必须再用 `(?i)` 正则兜底。
 fn has_fingerprint(text: &str) -> bool {
     SANITIZE_FEATURES
         .iter()
@@ -278,5 +287,197 @@ pub fn strip_chat_messages(messages: &mut [ChatMessage]) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::{ChatMessage, Role, ToolCall};
+
+    /// 构造一条带文本的桥接消息，减少测试样板。
+    fn msg(role: Role, content: Option<&str>) -> ChatMessage {
+        ChatMessage {
+            role,
+            content: content.map(str::to_string),
+            content_blocks: None,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning: None,
+        }
+    }
+
+    #[test]
+    fn no_fingerprint_returns_input() {
+        // Given 一段不含任何指纹特征的普通文本
+        let text = "hello world, nothing to sanitize";
+        // When 走单段净化
+        let out = sanitize_text(text);
+        // Then 一个字节都不改（预检零分配快速路径）
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn numeric_error_code_11128_rewritten() {
+        // Given 上游反探测的裸错误码原文
+        let text = "upstream returned code 11128";
+        // When 走单段净化
+        let out = sanitize_text(text);
+        // Then 必须破坏逐字匹配，而不是把真正的指纹漏放出去
+        assert_eq!(out, "upstream returned code 11-128");
+        assert!(!out.contains("11128"));
+    }
+
+    #[test]
+    fn hyphenated_version_range_untouched() {
+        // Given 用户文本里本来就是带连字符的版本区间（不是指纹）
+        let text = "supported versions: 11-128";
+        // When 走单段净化
+        let out = sanitize_text(text);
+        // Then 预检不命中，原样返回（避免误伤正常对话）
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn standalone_cc_entrypoint_kv_removed() {
+        // Given 只有 cc_ 键值、没有表头键名的一段文本（旧预检会漏）
+        let text = "cc_entrypoint=cli;";
+        // When 走单段净化
+        let out = sanitize_text(text);
+        // Then 整段删除，而不是因为预检不中而原样漏出
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn header_kv_segment_removed_keeps_tail() {
+        // Given 表头键值段后还有其它非指纹内容
+        let text = "x-anthropic-billing-header: cc_version=2.1.0; keep this";
+        // When 走单段净化
+        let out = sanitize_text(text);
+        // Then 只删到分号为止，后面的内容不能被吞掉
+        assert_eq!(out, "keep this");
+    }
+
+    #[test]
+    fn bare_header_key_abbreviated() {
+        // Given assistant 历史里反引号引用的裸键名（无冒号无值）
+        let text = "refer to `x-anthropic-billing-header` in docs";
+        // When 走单段净化
+        let out = sanitize_text(text);
+        // Then 最小缩写，破坏逐字匹配且保留可读性
+        assert_eq!(out, "refer to `x-anthropic-billing-hdr` in docs");
+    }
+
+    #[test]
+    fn mixed_case_bare_header_abbreviated() {
+        // Given 大小写变体（contains 快速路径不命中，靠 (?i) 正则兜底）
+        let text = "X-Anthropic-Billing-Header";
+        // When 走单段净化
+        let out = sanitize_text(text);
+        // Then 仍然缩写为统一形态
+        assert_eq!(out, "x-anthropic-billing-hdr");
+    }
+
+    #[test]
+    fn claude_identity_sentence_rewritten() {
+        // Given 客户端注入的身份句（带句号收尾）
+        let text = "You are Claude Code, Anthropic's official CLI for Claude.";
+        // When 走单段净化
+        let out = sanitize_text(text);
+        // Then 只插一个词，原有句尾标点保留
+        assert_eq!(
+            out,
+            "You are Claude Code, Anthropic's official CLI tool for Claude."
+        );
+    }
+
+    #[test]
+    fn multimodal_text_block_sanitized() {
+        // Given content 为多模态数组，只有 text 分片带指纹
+        let mut value = serde_json::json!([
+            {"type": "text", "text": "cc_entrypoint=cli;"},
+            {"type": "image_url", "image_url": {"url": "http://example.com/a.png"}}
+        ]);
+        // When 走 content 净化
+        sanitize_content(&mut value);
+        // Then 只改带 text 的分片，非文本分片原样保留
+        assert_eq!(value[0]["text"], "");
+        assert_eq!(value[1]["image_url"]["url"], "http://example.com/a.png");
+    }
+
+    #[test]
+    fn tool_call_arguments_sanitized() {
+        // Given 工具调用消息的 content 为 null、arguments 是字符串化 JSON
+        let mut body = serde_json::json!({
+            "messages": [{
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "function": {
+                        "name": "Read",
+                        "arguments": "{\"cmd\":\"echo cc_entrypoint=cli;\"}"
+                    }
+                }]
+            }]
+        });
+        // When 走请求体净化
+        strip(&mut body);
+        // Then arguments 里的键值段被剥离（不能因 content 缺失跳过整条消息）
+        let arguments = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments 应为字符串");
+        assert!(!arguments.contains("cc_entrypoint="));
+    }
+
+    #[test]
+    fn reasoning_content_sanitized() {
+        // Given assistant 消息的 reasoning_content 携带指纹
+        let mut body = serde_json::json!({
+            "messages": [{
+                "role": "assistant",
+                "content": "ok",
+                "reasoning_content": "code 11128"
+            }]
+        });
+        // When 走请求体净化
+        strip(&mut body);
+        // Then 与 content 同等净化
+        assert_eq!(body["messages"][0]["reasoning_content"], "code 11-128");
+    }
+
+    #[test]
+    fn chat_message_fields_sanitized() {
+        // Given content / content_blocks / reasoning / tool_calls 各带一处指纹
+        let mut message = msg(Role::Assistant, Some("plain"));
+        message.content_blocks = Some(vec![serde_json::json!({
+            "type": "text",
+            "text": "cc_entrypoint=cli;"
+        })]);
+        message.reasoning = Some("code 11128".to_string());
+        message.tool_calls = Some(vec![ToolCall {
+            id: "c1".to_string(),
+            function_name: "Read".to_string(),
+            arguments: "{\"p\":\"cc_entrypoint=cli;\"}".to_string(),
+        }]);
+        let mut messages = [message];
+        // When 走桥接消息净化
+        strip_chat_messages(&mut messages);
+        // Then 四类字段全部生效
+        assert_eq!(messages[0].content.as_deref(), Some("plain"));
+        assert_eq!(messages[0].content_blocks.as_ref().unwrap()[0]["text"], "");
+        assert_eq!(messages[0].reasoning.as_deref(), Some("code 11-128"));
+        let tool_arguments = &messages[0].tool_calls.as_ref().unwrap()[0].arguments;
+        assert!(!tool_arguments.contains("cc_entrypoint="));
+    }
+
+    #[test]
+    fn leading_trailing_whitespace_preserved() {
+        // Given 带首尾空白的文本（AIGX 有意区别于参考实现的末尾 trim）
+        let text = "  cc_entrypoint=cli;x  ";
+        // When 走单段净化
+        let out = sanitize_text(text);
+        // Then 只删键值段，不触碰未命中段的首尾空白
+        assert_eq!(out, "  x  ");
     }
 }
