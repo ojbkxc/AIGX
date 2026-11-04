@@ -38,18 +38,18 @@
 | # | 项 | 来源 | 内容 | 落点 | 成本 | 影响 |
 |---|---|---|---|---|---|---|
 | P1-1 | **运行日志页** | #10 ❌ | level/category 字典 + 500 条环形 + sinceId 未读水位 + JSONL 导出 | 后端日志结构 + 前端新页 | 大 | 运行日志可观测性 |
-| P1-2 | **/v1/messages/count_tokens** | #3 ❌ | Claude Code 启动探测端点（chars/3.5 估算，标 estimated:true） | 需与同事确认归属（e2e 曾验证 200 但代码无） | 小 | Claude Code 兼容 |
+| P1-2 | **/v1/messages/count_tokens** | #3 ❌ | Claude Code 启动探测端点（chars/3.5 估算，标 estimated:true） | **已实现**（`src/api/anthropic.rs::handle_count_tokens` + 路由双挂） | 小 | Claude Code 兼容 |
 | P1-3 | **表格列定制** | #11 ❌ | 列显隐/顺序/对齐/列宽拖动（DataTable 列设置抽屉） | 前端组件 | 中 | 表格操作体验 |
-| P1-4 | **debug 开关端点** | #4 ⚠️ | /api/debug 开关端点（当前仅 config.toml） | 后端 + 前端 | 小 | 调试模式管理 |
-| P1-5 | **debug_traffic 落库** | #10 ❌ | 内存环形缓冲改为持久化 | `src/debug_traffic.rs` | 中 | 调试报文可回溯 |
-| P1-6 | **account_usage_records 三件套** | #10 ❌ | 余额快照/到期查询/选路消费 | 后端 | 中 | 账号用量可观测 |
+| P1-4 | **debug 开关端点** | #4 ⚠️ | /api/debug 开关端点（当前仅 config.toml） | **已实现**（`src/api/admin/debug.rs` GET/PUT；同时保留 /api/limits 入口） | 小 | 调试模式管理 |
+| P1-5 | **debug_traffic 落库** | #10 ❌ | 内存环形缓冲改为持久化 | **已实现**（`src/debug_traffic.rs`：push 写 FileStore + load_persisted 启动恢复 + clear 同步删除） | 中 | 调试报文可回溯 |
+| P1-6 | **account_usage_records 三件套** | #10 ❌ | 余额快照/到期查询/选路消费 | **已实现**（余额快照+到期查询已有；选路消费：`should_skip_by_balance()` + `acquire_with` 接入） | 中 | 账号用量可观测 |
 | P1-7 | **调试模式响应侧原始报文** | §3 P1 | 13 个发送点二次改动（状态码/响应头/流式 SSE） | 桥接层 | 大（13 处） | 调试完整性 |
-| P1-8 | **切换账号重试次数** | §3 P1 | 账号级 switch-count 字段（上游默认 5） | `src/api/admin/settings.rs` | 小 | 重试策略 |
+| P1-8 | **切换账号重试次数** | §3 P1 | 账号级 switch-count 字段（上游默认 5） | **已实现**（`retry_switch_count` 字段 + 映射到 `RotationPolicy.max_attempts`） | 小 | 重试策略 |
 | P1-9 | **zcode 验证码池** | #4/#9 ❌ | 浏览器 WebView 铸造阿里云验证码令牌（device-mid/激活事件/3007 协议）+ /api/zcode/captcha + /api/zcode/captcha-pool + 池配置 | 前端（WebView/阿里云 SDK）+ 后端端点 | 大（原立场项，用户拍板补） | zcode 套餐领取绕过人机验证 |
 | P1-10 | **阿里云滑块求解器** | #9 🔧 | AutoClaw 国际版 OAuth 的阿里云滑块自动求解 | 前端求解器 + OAuth 链路 | 大（原立场项，用户拍板补） | AutoClaw 国际版登录 |
 | P1-11 | **Cline 伪装头** | §1 | /api/cline/headers 可编辑覆盖表（请求头伪装官方客户端） | **已实现**（`src/api/admin/cline_headers.rs`：GET/PUT + 校验 + 持久化 + 热更新；路由 `/api/cline-headers`） | 绕过上游客户端识别 |
 | P1-12 | **指纹脱敏绕过用途** | §1 | core/sanitize.rs 移植（剥离审核黑名单指纹，337 行，零宽字符障碍需处理） | src/sanitize/ + 桥接层挂载 | 大（原立场项，用户拍板补） | 绕过内容审核指纹 |
-| P1-13 | **upgrade_api 数据迁移端点** | #4 ❌ | /api/upgrade 端点：auth.json 导入 + 旧项目数据迁移框架（AIGX 无现成旧数据，但需提供导入能力以备将来导入第三方数据） | 后端新端点 + migration 模块 | 中（原「不适用」项，用户拍板补） | 数据导入/迁移能力 |
+| P1-13 | **upgrade_api 数据迁移端点** | #4 ❌ | /api/upgrade 端点：auth.json 导入 + 旧项目数据迁移框架（AIGX 无现成旧数据，但需提供导入能力以备将来导入第三方数据） | **已实现**（`src/api/admin/upgrade.rs`：GET /api/upgrade + POST /api/upgrade/run，幂等空跑保留 API 面） | 中 | 数据导入/迁移能力 |
 
 ## 3. P2 补缺（影响较小或语义错位）
 
