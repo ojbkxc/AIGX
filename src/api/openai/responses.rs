@@ -153,6 +153,8 @@ pub(crate) async fn handle_responses(
         }
         // 按上游模型名改写请求 body（bridges 从 body["model"] 构造上游请求）
         let mut attempt_body = body.clone();
+        // P2-10：指纹脱敏挂载（Responses 透传路径）
+        crate::sanitize::strip(&mut attempt_body);
         attempt_body["model"] = Value::String(upstream.clone());
         let attempt_start = std::time::Instant::now();
         // T2：SSE 首事件守卫——流式分支等第一个事件（30s 上限），上游挂起/
