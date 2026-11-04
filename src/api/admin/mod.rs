@@ -25,9 +25,9 @@ pub mod playground;
 pub mod pricing;
 pub mod prompts;
 pub mod proxy_pool_api;
+pub mod queue_api;
 pub mod redemptions;
 pub mod routing;
-pub mod queue_api;
 pub mod scheduled_tasks;
 pub mod security;
 pub mod settings;
@@ -42,13 +42,12 @@ pub mod zcode_captcha; // ZCode 人机验证令牌池（对照 Agent2API /api/zc
 pub use auth::{
     handle_captcha, handle_change_password, handle_forgot_password, handle_geo_lang,
     handle_get_session, handle_github_bind_start, handle_github_oauth_authorize,
-    handle_github_oauth_callback,
-    handle_google_bind_start, handle_google_oauth_authorize, handle_google_oauth_callback,
-    handle_linuxdo_bind_start, handle_linuxdo_oauth_authorize, handle_linuxdo_oauth_callback,
-    handle_login, handle_login_send_code, handle_login_totp, handle_login_with_code, handle_logout,
-    handle_oauth_consume, handle_oauth_unbind, handle_refresh_session, handle_register,
-    handle_reset_password,
-    handle_totp_disable, handle_totp_enable, handle_totp_setup,
+    handle_github_oauth_callback, handle_google_bind_start, handle_google_oauth_authorize,
+    handle_google_oauth_callback, handle_linuxdo_bind_start, handle_linuxdo_oauth_authorize,
+    handle_linuxdo_oauth_callback, handle_login, handle_login_send_code, handle_login_totp,
+    handle_login_with_code, handle_logout, handle_oauth_consume, handle_oauth_unbind,
+    handle_refresh_session, handle_register, handle_reset_password, handle_totp_disable,
+    handle_totp_enable, handle_totp_setup,
 };
 
 pub use users::{

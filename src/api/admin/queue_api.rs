@@ -10,8 +10,8 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::common::{error_response, verify_admin};
 use super::super::openai::AppState;
+use super::common::{error_response, verify_admin};
 
 /// PUT /api/queue 请求体。两项均可选，只传一项只更新一项。
 #[derive(Debug, Deserialize)]

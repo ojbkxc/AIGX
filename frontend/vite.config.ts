@@ -51,6 +51,10 @@ export default defineConfig({
   // 模块解析优先级：TS > JS（页面迁移期间保证 .tsx 优先于同名 .jsx 被加载）
   resolve: {
     extensions: ['.mjs', '.mts', '.ts', '.tsx', '.js', '.jsx', '.json'],
+    // Vite 不读 tsconfig paths，需在此显式映射 @ -> src
+    alias: {
+      '@': resolve(__dirname, 'src'),
+    },
   },
   server: {
     port: 3000,

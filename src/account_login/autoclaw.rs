@@ -119,10 +119,7 @@ pub fn navigate_uri(callback_base: &str, vendor: Vendor) -> String {
 /// AutoClaw 上游签名头（匿名形态，access 为空）。
 fn signed_headers() -> Vec<(String, String)> {
     let ts = chrono::Utc::now().timestamp().to_string();
-    let sign = format!(
-        "{:x}",
-        md5::compute(format!("{APPID}&{ts}&{APPKEY}"))
-    );
+    let sign = format!("{:x}", md5::compute(format!("{APPID}&{ts}&{APPKEY}")));
     vec![
         ("Content-Type".to_string(), "application/json".to_string()),
         ("Accept".to_string(), "*/*".to_string()),
@@ -143,7 +140,9 @@ fn signed_headers() -> Vec<(String, String)> {
 /// 上游业务码 → 用户能看懂的原因
 fn describe_oauth_error(code: i64, upstream_msg: &str) -> String {
     match code {
-        631_002 => "本次登录缺少风控验证（验证码未通过或已过期），请重新点击登录再试一次".to_string(),
+        631_002 => {
+            "本次登录缺少风控验证（验证码未通过或已过期），请重新点击登录再试一次".to_string()
+        }
         630_014 => "风控验证未通过，请重新点击登录再试一次".to_string(),
         631_001 => "授权码无效或已过期，请重新点击登录".to_string(),
         400_001 => "请求参数有误（登录链路内部错误，请重试）".to_string(),
@@ -203,11 +202,15 @@ async fn post_signed(
 ///
 /// 返回 `{enabled, region, prefix, sceneId, supplier}`。
 /// `enabled: false`（国内版）不是错误：前端据此不渲染 OAuth 按钮。
-pub async fn captcha_config(
-    userapi: &str,
-    client: &reqwest::Client,
-) -> Result<Value, String> {
-    let payload = post_signed(userapi, CAPTCHA_CONFIG_PATH, &json!({}), "获取风控验证配置", client).await?;
+pub async fn captcha_config(userapi: &str, client: &reqwest::Client) -> Result<Value, String> {
+    let payload = post_signed(
+        userapi,
+        CAPTCHA_CONFIG_PATH,
+        &json!({}),
+        "获取风控验证配置",
+        client,
+    )
+    .await?;
     let code = payload.get("code").and_then(Value::as_i64).unwrap_or(0);
     if code != 0 {
         let msg = payload.get("msg").and_then(Value::as_str).unwrap_or("");

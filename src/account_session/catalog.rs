@@ -1044,7 +1044,10 @@ pub async fn discover_models_plain(
                     .headers
                     .iter()
                     .map(|(name, template)| {
-                        ((*name).to_string(), template.replace("{credential}", &secret))
+                        (
+                            (*name).to_string(),
+                            template.replace("{credential}", &secret),
+                        )
                     })
                     .collect();
                 // 与对话路径同一份伪装头快照：上游按头做版本门禁，

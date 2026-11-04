@@ -2028,10 +2028,7 @@ pub async fn handle_geo_lang(headers: HeaderMap) -> Json<Value> {
 /// - `expiresAt`：当前 session 过期时间（未登录为 null）
 ///
 /// 不泄露用户敏感信息（email 只在 authenticated=true 时返回）。
-pub async fn handle_get_session(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Json<Value> {
+pub async fn handle_get_session(State(state): State<AppState>, headers: HeaderMap) -> Json<Value> {
     let config = state.config_manager.get().await;
     let configured = !config.admin.session_secret.is_empty();
     let (authenticated, email, expires_at) = match extract_session_token(&headers) {
@@ -2080,10 +2077,7 @@ pub async fn handle_refresh_session(
         .validate_session(&token)
         .ok_or_else(|| error_response("Session expired or invalid", StatusCode::UNAUTHORIZED))?;
     if state.session_registry.is_revoked(&old_session.session_id) {
-        return Err(error_response(
-            "Session revoked",
-            StatusCode::UNAUTHORIZED,
-        ));
+        return Err(error_response("Session revoked", StatusCode::UNAUTHORIZED));
     }
     // 撤销旧 session，签发新 token
     state

@@ -277,9 +277,7 @@ fn normalize(input: &EntryInput, existing: Option<&ProxyEntry>) -> Result<ProxyE
             .map(|e| e.source.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "manual".to_string()),
-        listener_uid: existing
-            .map(|e| e.listener_uid.clone())
-            .unwrap_or_default(),
+        listener_uid: existing.map(|e| e.listener_uid.clone()).unwrap_or_default(),
         protocol,
         host,
         port,
@@ -419,9 +417,9 @@ pub fn sync_clash() -> ClashSyncReport {
 
     // ① 目标集合逐条 upsert
     for (uid, name, port, enabled) in &targets {
-        let existing = entries.iter().position(|e| {
-            e.source == "clash" && e.listener_uid == *uid
-        });
+        let existing = entries
+            .iter()
+            .position(|e| e.source == "clash" && e.listener_uid == *uid);
         match existing {
             Some(index) => {
                 if entries[index].name != *name || entries[index].enabled != *enabled {
@@ -474,7 +472,10 @@ pub fn sync_clash() -> ClashSyncReport {
         let _ = write_entries(&entries);
     }
 
-    ClashSyncReport { changes, error: None }
+    ClashSyncReport {
+        changes,
+        error: None,
+    }
 }
 
 // ─── 解析（账号 proxy 字段 → 可用的代理 URL）────────────────────────

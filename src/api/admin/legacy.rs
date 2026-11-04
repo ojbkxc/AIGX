@@ -848,16 +848,10 @@ pub async fn handle_user_records(
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(20)
         .clamp(1, 100);
-    let flow_type = params
-        .get("type")
-        .map(|s| s.as_str())
-        .unwrap_or("all");
+    let flow_type = params.get("type").map(|s| s.as_str()).unwrap_or("all");
 
     // ── earned：签到奖励 ──
-    let mut earned = state
-        .checkin_store
-        .list_all(&u.id)
-        .unwrap_or_default();
+    let mut earned = state.checkin_store.list_all(&u.id).unwrap_or_default();
     // 签到记录存的是 local 日期，没有精确到秒的时间戳可按窗裁；
     // created_at 是 unix 秒，用它做窗口过滤。
     earned.retain(|c| c.created_at >= start_ts);
@@ -877,7 +871,10 @@ pub async fn handle_user_records(
 
     // ── 合并时间线（按 ts 倒序，最新优先）──
     enum Flow {
-        Earned { amount: i64, checkin_date: String },
+        Earned {
+            amount: i64,
+            checkin_date: String,
+        },
         Consumed {
             amount: i64,
             model: String,
@@ -914,7 +911,7 @@ pub async fn handle_user_records(
             },
         ));
     }
-    flows.sort_by(|a, b| b.0.cmp(&a.0));
+    flows.sort_by_key(|a| std::cmp::Reverse(a.0));
 
     let total = flows.len();
     let records: Vec<Value> = flows
@@ -922,7 +919,10 @@ pub async fn handle_user_records(
         .skip(offset)
         .take(limit)
         .map(|(ts, f)| match f {
-            Flow::Earned { amount, checkin_date } => serde_json::json!({
+            Flow::Earned {
+                amount,
+                checkin_date,
+            } => serde_json::json!({
                 "ts": ts,
                 "type": "earned",
                 "amount": amount,

@@ -149,15 +149,15 @@ async fn claim(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            headers.push(("X-Aliyun-Captcha-Verify-Region".to_string(), region.to_string()));
+            headers.push((
+                "X-Aliyun-Captcha-Verify-Region".to_string(),
+                region.to_string(),
+            ));
         }
     } else if let Some((param, region)) = crate::zcode_captcha::take() {
         // 没有任何前端参与时（定时任务、后台领取）从令牌池取一枚 ——
         // 池子由前端铸造器维护（见 `zcode_captcha` 模块头）。
-        headers.push((
-            crate::zcode_captcha::VERIFY_PARAM_HEADER.to_string(),
-            param,
-        ));
+        headers.push((crate::zcode_captcha::VERIFY_PARAM_HEADER.to_string(), param));
         if !region.trim().is_empty() {
             headers.push((
                 crate::zcode_captcha::VERIFY_REGION_HEADER.to_string(),

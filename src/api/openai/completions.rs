@@ -178,11 +178,7 @@ pub(crate) async fn handle_completions(
                     None,
                 );
             }
-            log.first_response_ms = ctx
-                .first_response_ms
-                .lock()
-                .ok()
-                .and_then(|g| *g);
+            log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
             state.log_store.record_request(log);
             rate_bundle.commit_tokens(0).await;
             crate::metrics::global().record_request(
@@ -282,11 +278,7 @@ pub(crate) async fn handle_completions(
                 None,
             );
         }
-        log.first_response_ms = ctx
-            .first_response_ms
-            .lock()
-            .ok()
-            .and_then(|g| *g);
+        log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
         state.log_store.record_request(log);
 
         // Prometheus 指标

@@ -57,7 +57,7 @@ pub fn checkin_tz_offset() -> i32 {
 pub(crate) fn beijing() -> FixedOffset {
     let offset = checkin_tz_offset();
     if offset == 0 {
-        chrono::Local::now().offset().clone()
+        *chrono::Local::now().offset()
     } else {
         FixedOffset::east_opt(offset * 3600).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap())
     }

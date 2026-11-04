@@ -30,8 +30,8 @@ use super::super::openai::AppState;
 use super::common::{error_response, verify_admin};
 use crate::config::{
     set_zcode_captcha_pool_settings, zcode_captcha_pool_settings, ZCODE_POOL_PER_ROUND_MAX,
-    ZCODE_POOL_PER_ROUND_MIN, ZCODE_POOL_POLL_MAX_MS, ZCODE_POOL_POLL_MIN_MS, ZCODE_POOL_TARGET_MAX,
-    ZCODE_POOL_TARGET_MIN,
+    ZCODE_POOL_PER_ROUND_MIN, ZCODE_POOL_POLL_MAX_MS, ZCODE_POOL_POLL_MIN_MS,
+    ZCODE_POOL_TARGET_MAX, ZCODE_POOL_TARGET_MIN,
 };
 use crate::zcode_captcha;
 
@@ -231,11 +231,7 @@ pub async fn handle_get_zcode_captcha_config(
     if !result.ok {
         return Err(error_response(&result.message, StatusCode::BAD_GATEWAY));
     }
-    let captcha = result
-        .data
-        .get("captcha")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let captcha = result.data.get("captcha").cloned().unwrap_or(Value::Null);
     Ok(Json(json!({
         "success": true,
         "data": {
@@ -274,7 +270,9 @@ pub async fn handle_get_zcode_captcha_pool(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
-    Ok(Json(json!({ "success": true, "data": pool_settings_view() })))
+    Ok(Json(
+        json!({ "success": true, "data": pool_settings_view() }),
+    ))
 }
 
 /// PUT /api/zcode/captcha-pool —— 改铸造节奏（落库 + 进程级快照热更）。
@@ -289,7 +287,10 @@ pub async fn handle_update_zcode_captcha_pool(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut config = verify_admin(&state, &headers).await?;
     let Some(object) = payload.as_object() else {
-        return Err(error_response("请求体必须是 JSON 对象", StatusCode::BAD_REQUEST));
+        return Err(error_response(
+            "请求体必须是 JSON 对象",
+            StatusCode::BAD_REQUEST,
+        ));
     };
     if let Some(value) = object.get("target").and_then(Value::as_u64) {
         config.usage.zcode_captcha_pool_target =

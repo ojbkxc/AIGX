@@ -1322,7 +1322,7 @@ pub fn storage_dirs(config: &AppConfig) -> StorageDirs {
     let base = expand_path(&config.server.data_dir);
     let resolve = |raw: &Option<String>, sub: &str| -> PathBuf {
         raw.as_deref()
-            .map(|p| expand_path(p))
+            .map(expand_path)
             .filter(|p| p.is_absolute())
             .unwrap_or_else(|| base.join(sub))
     };

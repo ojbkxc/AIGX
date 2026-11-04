@@ -563,11 +563,7 @@ pub async fn handle_messages(
                 log.candidate_channels = candidate_channel_ids.clone();
                 log.filtered_channels = filtered_channels.clone();
                 log.selected_channel = used_channel_id.clone();
-                log.first_response_ms = ctx
-                    .first_response_ms
-                    .lock()
-                    .ok()
-                    .and_then(|g| *g);
+                log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 crate::metrics::global().record_request(
@@ -1115,11 +1111,7 @@ pub async fn handle_messages(
                         log.conversation = Some(conv);
                     }
                 }
-                log.first_response_ms = ctx
-                    .first_response_ms
-                    .lock()
-                    .ok()
-                    .and_then(|g| *g);
+                log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
                 crate::metrics::global().record_request(
@@ -1242,11 +1234,7 @@ pub async fn handle_messages(
                     None,
                 );
             }
-            log.first_response_ms = ctx
-                .first_response_ms
-                .lock()
-                .ok()
-                .and_then(|g| *g);
+            log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
             state.log_store.record_request(log);
 
             // Prometheus 指标

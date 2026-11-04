@@ -357,10 +357,7 @@ pub async fn handle_pool_sync_clash(
         object.insert("changes".to_string(), Value::from(report.changes as u64));
         object.insert(
             "syncError".to_string(),
-            report
-                .error
-                .map(Value::from)
-                .unwrap_or(Value::Null),
+            report.error.map(Value::from).unwrap_or(Value::Null),
         );
     }
     Ok(Json(payload))

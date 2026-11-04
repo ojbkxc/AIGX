@@ -295,8 +295,7 @@ impl CheckinStore {
         keyword: Option<&str>,
     ) -> Result<Vec<CheckinRecord>> {
         let days = days.clamp(1, KEEP_DAYS as u32) as i64;
-        let today =
-            Self::now_tz();
+        let today = Self::now_tz();
         let keyword = keyword
             .map(|k| k.trim().to_lowercase())
             .filter(|k| !k.is_empty());
@@ -358,8 +357,7 @@ impl CheckinStore {
     /// 清空台账（`days` 天前的桶一并删除，保留窗口外的不动）。
     pub fn clear_records(&self, days: u32) -> Result<usize> {
         let days = days.clamp(1, KEEP_DAYS as u32) as i64;
-        let today =
-            Self::now_tz();
+        let today = Self::now_tz();
         let mut removed = 0usize;
         for offset in 0..days {
             let date = (today - chrono::Duration::days(offset))
@@ -446,8 +444,7 @@ impl CheckinStore {
         if keep_days <= 0 {
             return Ok(0);
         }
-        let today =
-            Self::now_tz();
+        let today = Self::now_tz();
         let cutoff = (today - chrono::Duration::days(keep_days))
             .format("%Y-%m-%d")
             .to_string();

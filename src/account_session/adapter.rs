@@ -227,9 +227,12 @@ mod tests {
             ("x-title".to_string(), String::new()),
         ]);
         let after = session_headers(&session, cline_meta);
-        assert!(after
-            .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case("user-agent") && value == "Cline/9.9.9"));
+        assert!(
+            after
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("user-agent")
+                    && value == "Cline/9.9.9")
+        );
         assert!(!after.iter().any(|(name, _)| name == "x-title"));
 
         // 非 cline 渠道不受覆盖表影响
@@ -237,9 +240,7 @@ mod tests {
         other.provider = "qoder".to_string();
         let qoder_meta = registry::session_meta("qoder").unwrap();
         let untouched = session_headers(&other, qoder_meta);
-        assert!(!untouched
-            .iter()
-            .any(|(_, value)| value == "Cline/9.9.9"));
+        assert!(!untouched.iter().any(|(_, value)| value == "Cline/9.9.9"));
 
         // 恢复空表，避免影响其它用例
         crate::config::set_cline_header_overrides(Vec::new());

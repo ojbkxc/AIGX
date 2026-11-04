@@ -135,7 +135,10 @@ pub fn read_clash_verge_config() -> ClashSnapshot {
 
     // 手动配置的监听器：脏项（缺 proxy / 端口非法 / 非映射）一律跳过
     let mut listeners: Vec<ClashListener> = Vec::new();
-    if let Some(items) = verge.get("verge_mixed_listeners").and_then(Yaml::as_sequence) {
+    if let Some(items) = verge
+        .get("verge_mixed_listeners")
+        .and_then(Yaml::as_sequence)
+    {
         for item in items {
             let Some(mapping) = item.as_mapping() else {
                 continue;
@@ -185,8 +188,7 @@ pub fn read_clash_verge_config() -> ClashSnapshot {
 // ─── 快照缓存 ───────────────────────────────────────────────
 
 /// 进程内快照缓存：`(取快照的时刻, 快照)`。
-static CLASH_CACHE: std::sync::Mutex<Option<(i64, ClashSnapshot)>> =
-    std::sync::Mutex::new(None);
+static CLASH_CACHE: std::sync::Mutex<Option<(i64, ClashSnapshot)>> = std::sync::Mutex::new(None);
 
 /// 取快照（默认走 3 秒 TTL 缓存）
 pub fn clash_snapshot() -> ClashSnapshot {

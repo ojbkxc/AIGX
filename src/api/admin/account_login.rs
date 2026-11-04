@@ -82,7 +82,10 @@ pub async fn handle_login_oauth_captcha_config(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     let provider = crate::account_session::registry::normalize_kind(
-        params.get("provider").map(String::as_str).unwrap_or("autoclaw"),
+        params
+            .get("provider")
+            .map(String::as_str)
+            .unwrap_or("autoclaw"),
     );
     if provider != "autoclaw" {
         return Err(error_response(
@@ -92,7 +95,7 @@ pub async fn handle_login_oauth_captcha_config(
     }
     let userapi = crate::account_login::autoclaw::INTL_USERAPI;
     let client = reqwest::Client::new();
-    match crate::account_login::autoclaw::captcha_config(&userapi, &client).await {
+    match crate::account_login::autoclaw::captcha_config(userapi, &client).await {
         Ok(config) => Ok(Json(json!({ "success": true, "data": config }))),
         Err(error) => Err(error_response(&error, StatusCode::BAD_REQUEST)),
     }
@@ -381,11 +384,7 @@ pub async fn handle_browser_oauth_callback(
 ) -> Html<String> {
     let path = uri.path();
     let Some(vendor) = path.strip_prefix("/auth/callback-") else {
-        return Html(page_html(
-            false,
-            "无效的回调地址",
-            "请从管理界面发起登录。",
-        ));
+        return Html(page_html(false, "无效的回调地址", "请从管理界面发起登录。"));
     };
     let code = params.get("code").map(String::as_str).unwrap_or("");
     let state_param = params.get("state").map(String::as_str).unwrap_or("");

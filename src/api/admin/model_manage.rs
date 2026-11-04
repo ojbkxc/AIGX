@@ -450,14 +450,8 @@ pub async fn handle_set_capabilities(
             ));
         }
     }
-    let owned_by = state
-        .model_metadata
-        .get(model, None)
-        .owned_by;
-    let context_length = state
-        .model_metadata
-        .get(model, None)
-        .context_length;
+    let owned_by = state.model_metadata.get(model, None).owned_by;
+    let context_length = state.model_metadata.get(model, None).context_length;
     let meta = crate::model::metadata::ModelMetadata {
         owned_by,
         context_length,

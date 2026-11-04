@@ -241,9 +241,7 @@ pub async fn start(state: &AppState, provider: &str, channel_id: &str) -> Result
         "autoclaw" => {
             // AutoClaw OAuth 需要验证码参数和回调基址——由单独的
             // `start_oauth` 入口处理（见下方），这里不接管。
-            return Err(
-                "AutoClaw OAuth 请走 /api/account-sessions/login/oauth/start".to_string(),
-            )
+            return Err("AutoClaw OAuth 请走 /api/account-sessions/login/oauth/start".to_string());
         }
         other => {
             return Err(format!(
