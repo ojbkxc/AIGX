@@ -454,6 +454,28 @@ impl AccountSession {
         self.cooling_until(model).is_some_and(|until| until > now)
     }
 
+    /// 余额限制器是否跳过此账号（选路消费，P1-6）。
+    ///
+    /// 检查 `limiters` 中的 balance 规则：若 `available` 低于阈值则跳过。
+    /// `available` 为 None（判不出）时返回 false（放行，与基线一致）。
+    pub fn should_skip_by_balance(&self) -> bool {
+        for limiter in &self.limiters {
+            if !limiter.enabled || limiter.kind != "balance" {
+                continue;
+            }
+            if limiter.action == "skip" || limiter.action == "disable" {
+                if let Some(balance) = &self.last_balance {
+                    if let Some(available) = balance.get("available").and_then(|v| v.as_f64()) {
+                        if available < limiter.threshold {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// 平均成功延迟（毫秒；无成功样本时为 0）。
     pub fn avg_latency_ms(&self) -> u64 {
         self.total_latency_ms

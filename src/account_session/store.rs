@@ -408,6 +408,10 @@ impl AccountSessionStore {
             if session.is_cooling(model, now) {
                 continue;
             }
+            // 余额限制器：available 低于阈值时跳过（P1-6 选路消费）
+            if session.should_skip_by_balance() {
+                continue;
+            }
             if session.max_concurrency > 0 && session.in_flight >= session.max_concurrency {
                 continue;
             }
