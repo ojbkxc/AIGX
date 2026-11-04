@@ -24,7 +24,6 @@ mod config;
 mod continuation;
 mod cron;
 mod debug_traffic;
-mod runtime_log;
 mod egress;
 mod error_translate;
 mod graphql;
@@ -47,6 +46,7 @@ mod proxy_pool;
 mod quota_monitor;
 mod ratelimit;
 mod redemption;
+mod runtime_log;
 mod sanitize;
 mod scheduled_tasks;
 mod semantic;
@@ -115,10 +115,7 @@ async fn main() -> anyhow::Result<()> {
     if json_logs {
         tracing_subscriber::registry()
             .with(log_filter)
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(JsonLogFormat),
-            )
+            .with(tracing_subscriber::fmt::layer().event_format(JsonLogFormat))
             .with(runtime_log_layer)
             .init();
     } else {

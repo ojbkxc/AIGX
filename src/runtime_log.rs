@@ -109,11 +109,7 @@ pub fn snapshot(since_id: Option<u64>) -> Value {
     let buffer = BUFFER.lock();
     let all: Vec<RuntimeLogEntry> = buffer.iter().cloned().collect();
     let entries: Vec<RuntimeLogEntry> = match since_id {
-        Some(sid) => all
-            .into_iter()
-            .rev()
-            .filter(|e| e.id > sid)
-            .collect(),
+        Some(sid) => all.into_iter().rev().filter(|e| e.id > sid).collect(),
         None => all.into_iter().rev().collect(),
     };
     serde_json::json!({

@@ -55,9 +55,9 @@ pub use users::{
 pub use logs::{
     handle_agg_rebuild, handle_cleanup_logs, handle_clear_audit_logs, handle_clear_preview,
     handle_clear_request_logs, handle_delete_audit_logs, handle_delete_request_logs,
-    handle_export_request_logs, handle_get_log_retention, handle_list_audit_logs,
-    handle_list_inflight, handle_list_request_logs, handle_terminate_inflight,
-    handle_update_log_retention, handle_get_runtime_logs, handle_export_runtime_logs,
+    handle_export_request_logs, handle_export_runtime_logs, handle_get_log_retention,
+    handle_get_runtime_logs, handle_list_audit_logs, handle_list_inflight,
+    handle_list_request_logs, handle_terminate_inflight, handle_update_log_retention,
 };
 
 pub use channels::{
@@ -137,7 +137,9 @@ pub use notify::{handle_get_notify_config, handle_update_notify_config};
 pub use security::{handle_security_events, handle_security_summary};
 
 // 调试模式：上游原始报文查看/清空（对照 Agent2API `/api/debug/traffic`）
-pub use debug::{handle_clear_debug_traffic, handle_get_debug, handle_get_debug_traffic, handle_update_debug};
+pub use debug::{
+    handle_clear_debug_traffic, handle_get_debug, handle_get_debug_traffic, handle_update_debug,
+};
 
 // models.dev 模型元数据：开关 + 状态 + 手动刷新（对照 Agent2API `/api/models/metadata`）
 pub use model_metadata::{
