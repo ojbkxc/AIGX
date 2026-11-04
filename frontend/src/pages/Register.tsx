@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, type ChangeEvent, type FormEvent } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { SUPPORTED_LANGS, setLanguage } from '../i18n';
 import { Eye, EyeOff } from 'lucide-react';
 import { api } from '../api';
 import { cycleTheme } from '../lib/theme';
@@ -165,11 +166,11 @@ export default function Register() {
     void cycleTheme();
   };
 
-  // 语言切换：zh ↔ en（与登录页一致，注册流程同样面向国外用户）
+  // 语言切换：循环 6 种语言（与登录页一致）
   const toggleLanguage = (): void => {
-    const next = i18n.language === 'zh' ? 'en' : 'zh';
-    localStorage.setItem('i18n_lang', next);
-    void i18n.changeLanguage(next);
+    const idx = SUPPORTED_LANGS.findIndex((l) => l.code === (i18n.language || 'zh'));
+    const next = SUPPORTED_LANGS[(idx + 1) % SUPPORTED_LANGS.length].code;
+    setLanguage(next);
   };
 
   return (
@@ -214,7 +215,10 @@ export default function Register() {
           }}
           title={t('切换语言')}
         >
-          {i18n.language === 'zh' ? 'EN' : '中'}
+          {(() => {
+            const idx = SUPPORTED_LANGS.findIndex((l) => l.code === (i18n.language || 'zh'));
+            return SUPPORTED_LANGS[(idx + 1) % SUPPORTED_LANGS.length].label;
+          })()}
         </button>
         <button
           onClick={toggleTheme}

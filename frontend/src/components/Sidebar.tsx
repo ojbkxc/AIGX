@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { SUPPORTED_LANGS, setLanguage } from '../i18n';
 import { cycleTheme } from '../lib/theme';
 import { api } from '../api';
 import { isAdmin } from '../lib/utils';
@@ -165,9 +166,9 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
   };
 
   const toggleLanguage = (): void => {
-    const next = i18n.language === 'zh' ? 'en' : 'zh';
-    localStorage.setItem('i18n_lang', next);
-    void i18n.changeLanguage(next);
+    const idx = SUPPORTED_LANGS.findIndex((l) => l.code === (i18n.language || 'zh'));
+    const next = SUPPORTED_LANGS[(idx + 1) % SUPPORTED_LANGS.length].code;
+    setLanguage(next);
   };
 
   const email = localStorage.getItem('email') || 'Admin';
@@ -261,7 +262,10 @@ function SidebarContent({ collapsed, onToggleCollapsed, isDrawer }: SidebarConte
               <button type="button" onClick={() => { setUserMenuOpen(false); toggleLanguage(); }}>
                 <Languages size={13} />
                 <span>{t('切换语言')}</span>
-                <span className="sidebar-user-menu-hint">{i18n.language === 'zh' ? 'EN' : '中'}</span>
+                <span className="sidebar-user-menu-hint">{(() => {
+                  const idx = SUPPORTED_LANGS.findIndex((l) => l.code === (i18n.language || 'zh'));
+                  return SUPPORTED_LANGS[(idx + 1) % SUPPORTED_LANGS.length].label;
+                })()}</span>
               </button>
               <button type="button" className="sidebar-user-menu-danger" onClick={() => { setUserMenuOpen(false); setLogoutConfirmOpen(true); }}>
                 <LogOut size={13} />
