@@ -2265,6 +2265,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/proxy-pool/test-account",
             post(api::admin::proxy_pool_api::handle_pool_test_account),
         )
+        // Clash Verge 出口同步（读取本机 verge.yaml，镜像监听器进池）
+        .route(
+            "/api/proxy-pool/sync-clash",
+            post(api::admin::proxy_pool_api::handle_pool_sync_clash),
+        )
         // 服务器自动更新（检查/应用/重启/回滚/设置）
         .route(
             "/api/update/status",

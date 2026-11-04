@@ -44,6 +44,8 @@ use std::time::Duration;
 
 use crate::storage::FileStore;
 
+pub mod clash;
+
 /// KV 键名（整份 JSON 数组读写）。
 pub const KV_KEY: &str = "proxy_pool_items";
 
@@ -90,12 +92,21 @@ const IP_ECHO_URL: &str = "https://api.ipify.org?format=json";
 // ─── 数据模型 ───────────────────────────────────────────────────────
 
 /// 池条目（手动录入；协议 http / socks5，地址 + 可选认证）。
+///
+/// `source` 区分条目来源：`manual`（手填）/ `clash`（从 Clash Verge 镜像）。
+/// `listener_uid` 仅 clash 来源有值，是 Clash Verge 监听器的稳定标识。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyEntry {
     pub id: String,
     pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// `manual`（默认，兼容存量数据）或 `clash`（镜像自 Clash Verge）。
+    #[serde(default)]
+    pub source: String,
+    /// clash 来源条目的监听器 uid（manual 来源为空）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub listener_uid: String,
     /// `http` 或 `socks5`（socks5h 由 reqwest 的 socks 支持自动覆盖远端解析）。
     #[serde(default)]
     pub protocol: String,
@@ -179,6 +190,8 @@ fn public(entry: &ProxyEntry) -> serde_json::Value {
         "id": entry.id,
         "name": entry.name,
         "enabled": entry.enabled,
+        "source": if entry.source.is_empty() { "manual" } else { entry.source.as_str() },
+        "listenerUid": entry.listener_uid,
         "protocol": entry.protocol,
         "host": entry.host,
         "port": entry.port,
@@ -259,6 +272,14 @@ fn normalize(input: &EntryInput, existing: Option<&ProxyEntry>) -> Result<ProxyE
             .unwrap_or_else(new_id),
         name,
         enabled: input.enabled,
+        // 保留已有条目的来源（clash 镜像条目被手动编辑时不降级为 manual）
+        source: existing
+            .map(|e| e.source.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "manual".to_string()),
+        listener_uid: existing
+            .map(|e| e.listener_uid.clone())
+            .unwrap_or_default(),
         protocol,
         host,
         port,
@@ -340,6 +361,120 @@ pub fn record_test(id: &str, result: &LastTest) -> Result<(), String> {
     entry.last_test = Some(result.clone());
     entry.updated_at = now();
     write_entries(&entries)
+}
+
+// ─── Clash Verge 同步 ────────────────────────────────────────────────
+
+/// 同步结果：变更条数 + 失败原因。
+///
+/// 「Clash 没装」不是错误路径 —— 池原样保留、不算失败，
+/// 只在 `error` 字段给一句说明。
+pub struct ClashSyncReport {
+    pub changes: usize,
+    pub error: Option<String>,
+}
+
+/// 把 Clash 当前出口集合整体镜像进池。
+///
+/// - 手动条目（`source != "clash"`）从不被碰。
+/// - 镜像条目按 `listener_uid` 匹配：Clash 改了名称/启用状态就更新，
+///   新增的监听器就插入，消失的就删除（严格镜像）。
+/// - clash 条目的 host/port 在同步时落库（指向 127.0.0.1:Clash端口）；
+///   Clash 改端口后需重新同步（3 秒 TTL 缓存保证 GET 列表读到最新）。
+pub fn sync_clash() -> ClashSyncReport {
+    let snapshot = clash::clash_snapshot();
+    if !snapshot.available {
+        return ClashSyncReport {
+            changes: 0,
+            error: Some(
+                snapshot
+                    .error
+                    .unwrap_or_else(|| clash::CLASH_UNAVAILABLE.to_string()),
+            ),
+        };
+    }
+
+    // 目标集合：混合端口排在最前
+    let mut targets: Vec<(String, String, u16, bool)> = Vec::new();
+    if let Some(port) = snapshot.mixed_port {
+        targets.push((
+            clash::CLASH_MIXED_UID.to_string(),
+            "Clash 混合端口（按规则分流）".to_string(),
+            port,
+            true,
+        ));
+    }
+    for listener in &snapshot.listeners {
+        targets.push((
+            listener.uid.clone(),
+            listener.name.clone(),
+            listener.port,
+            listener.enabled,
+        ));
+    }
+
+    let now_ts = now();
+    let mut entries = read_entries();
+    let mut changes = 0usize;
+
+    // ① 目标集合逐条 upsert
+    for (uid, name, port, enabled) in &targets {
+        let existing = entries.iter().position(|e| {
+            e.source == "clash" && e.listener_uid == *uid
+        });
+        match existing {
+            Some(index) => {
+                if entries[index].name != *name || entries[index].enabled != *enabled {
+                    entries[index].name = name.clone();
+                    entries[index].enabled = *enabled;
+                    entries[index].updated_at = now_ts;
+                    changes += 1;
+                }
+            }
+            None => {
+                entries.insert(
+                    0,
+                    ProxyEntry {
+                        id: new_id(),
+                        name: name.clone(),
+                        enabled: *enabled,
+                        source: "clash".to_string(),
+                        listener_uid: uid.clone(),
+                        protocol: "http".to_string(),
+                        host: "127.0.0.1".to_string(),
+                        port: *port,
+                        username: String::new(),
+                        password: String::new(),
+                        created_at: now_ts,
+                        updated_at: now_ts,
+                        last_test: None,
+                    },
+                );
+                changes += 1;
+            }
+        }
+    }
+
+    // ② Clash 侧已消失的镜像条目摘掉（严格镜像）
+    let before = entries.len();
+    let target_uids: std::collections::HashSet<&str> =
+        targets.iter().map(|(uid, ..)| uid.as_str()).collect();
+    entries.retain(|e| {
+        if e.source != "clash" {
+            return true;
+        }
+        !e.listener_uid.is_empty() && target_uids.contains(e.listener_uid.as_str())
+    });
+    let removed = before - entries.len();
+    if removed > 0 {
+        changes += removed;
+    }
+
+    if changes > 0 {
+        let _ = write_entries(&entries);
+    }
+
+    ClashSyncReport { changes, error: None }
 }
 
 // ─── 解析（账号 proxy 字段 → 可用的代理 URL）────────────────────────

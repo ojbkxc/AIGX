@@ -861,6 +861,9 @@ fn paths_accounts_network() -> Value {
         "/api/proxy-pool/test-account": {
             "post": op_body("网络代理", "按账号代理配置测试出口（或测临时串/直连）", "{ accountId } | { proxy }")
         },
+        "/api/proxy-pool/sync-clash": {
+            "post": op_body("网络代理", "同步 Clash Verge 出口到代理池（镜像监听器）", "")
+        },
         "/api/proxy-pool/update": {
             "post": op_body("网络代理", "编辑代理池条目（密码留空=保留旧值）", "")
         },
@@ -1095,6 +1098,7 @@ mod tests {
         add("/api/proxy-pool/remove", &["post"]);
         add("/api/proxy-pool/test", &["post"]);
         add("/api/proxy-pool/test-account", &["post"]);
+        add("/api/proxy-pool/sync-clash", &["post"]);
         add("/api/proxy-pool/update", &["post"]);
         add("/api/public/geo-lang", &["get"]);
         add("/api/tickets", &["get", "post"]);

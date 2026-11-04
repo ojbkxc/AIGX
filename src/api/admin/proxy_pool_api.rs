@@ -126,6 +126,8 @@ fn pool_payload(state: &AppState) -> Value {
         "success": true,
         "items": items,
         "total": items.len(),
+        // Clash Verge 可用性快照（前端据此显示「Clash 是否可用 / 有几个出口」）
+        "clash": pool::clash::clash_proxy_options(),
         // 账号 proxy 字段的编码协议说明（前端账号页下拉/提示用）
         "reference": {
             "pool": "pool:<id> —— 引用单条池条目",
@@ -337,6 +339,31 @@ pub async fn handle_pool_test_account(
         object.insert("proxy".to_string(), Value::String(label));
     }
     Ok(Json(data))
+}
+
+/// POST /api/proxy-pool/sync-clash — 手动同步 Clash Verge 出口到池。
+///
+/// 读取 Clash Verge 的 verge.yaml，把混合端口 + 各监听器镜像进池。
+/// 响应带本次变更条数与失败原因（「Clash 没装」不算错误，只是 error 说明）。
+pub async fn handle_pool_sync_clash(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let report = pool::sync_clash();
+    // 同步后返回最新列表 + Clash 快照（前端刷新表格）
+    let mut payload = pool_payload(&state);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("changes".to_string(), Value::from(report.changes as u64));
+        object.insert(
+            "syncError".to_string(),
+            report
+                .error
+                .map(Value::from)
+                .unwrap_or(Value::Null),
+        );
+    }
+    Ok(Json(payload))
 }
 
 #[cfg(test)]
