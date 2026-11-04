@@ -612,6 +612,24 @@ export const api = {
   /** 执行签到（对齐 new-api POST /api/user/checkin） */
   doCheckin: (): Promise<ApiResponse<{ quota_awarded: number; checkin_date: string }>> =>
     request<ApiResponse<{ quota_awarded: number; checkin_date: string }>>('POST', `${API_BASE}/checkin`),
+  /** 用户侧积分流水（签到获得 + API 消耗合并时间线） */
+  userRecords: (params: {
+    days?: number;
+    offset?: number;
+    limit?: number;
+    type?: 'all' | 'earned' | 'consumed';
+  }): Promise<ApiResponse<Record<string, unknown>>> => {
+    const query = new URLSearchParams();
+    if (params.days != null) query.set('days', String(params.days));
+    if (params.offset != null) query.set('offset', String(params.offset));
+    if (params.limit != null) query.set('limit', String(params.limit));
+    if (params.type) query.set('type', params.type);
+    const suffix = query.toString();
+    return request<ApiResponse<Record<string, unknown>>>(
+      'GET',
+      `${API_BASE}/user/records${suffix ? `?${suffix}` : ''}`,
+    );
+  },
   checkUsername: (username: string): Promise<ApiResponse<{ available?: boolean }>> =>
     request<ApiResponse<{ available?: boolean }>>('GET', `${API_BASE}/users/check?username=${encodeURIComponent(username)}`),
 
