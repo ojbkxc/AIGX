@@ -119,6 +119,13 @@ pub struct CheckinSettings {
     /// 台账保留天数（0 = 永久保留，不自动 prune）
     #[serde(default)]
     pub keep_days: i64,
+    /// 签到时区偏移（小时，默认 8 = UTC+8）。0 = 使用系统本地时区。
+    #[serde(default = "default_tz_offset")]
+    pub timezone_offset: i32,
+}
+
+fn default_tz_offset() -> i32 {
+    8
 }
 
 fn default_gap_ms() -> u64 {
@@ -131,6 +138,7 @@ impl Default for CheckinSettings {
             enabled: false,
             gap_ms: default_gap_ms(),
             keep_days: 0,
+            timezone_offset: default_tz_offset(),
         }
     }
 }
@@ -192,10 +200,13 @@ impl CheckinStore {
     }
 
     pub fn set_settings(&self, settings: CheckinSettings) -> Result<CheckinSettings> {
+        let tz_offset = settings.timezone_offset;
         {
             let mut guard = self.schedules.write();
             guard.settings = settings;
         }
+        // 同步时区偏移到 scheduler 的静态变量
+        super::scheduler::set_checkin_tz_offset(tz_offset);
         self.persist_schedules()?;
         Ok(self.settings())
     }
@@ -258,6 +269,11 @@ impl CheckinStore {
         format!("{RECORD_PREFIX}{date}")
     }
 
+    /// 当前时间（按配置的签到时区）。
+    fn now_tz() -> chrono::DateTime<chrono::FixedOffset> {
+        chrono::Utc::now().with_timezone(&super::scheduler::beijing())
+    }
+
     /// 追加一条记录（按日分桶）。
     pub fn append_record(&self, record: CheckinRecord) -> Result<()> {
         let key = Self::record_key(&record.date);
@@ -280,7 +296,7 @@ impl CheckinStore {
     ) -> Result<Vec<CheckinRecord>> {
         let days = days.clamp(1, KEEP_DAYS as u32) as i64;
         let today =
-            chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+            Self::now_tz();
         let keyword = keyword
             .map(|k| k.trim().to_lowercase())
             .filter(|k| !k.is_empty());
@@ -343,7 +359,7 @@ impl CheckinStore {
     pub fn clear_records(&self, days: u32) -> Result<usize> {
         let days = days.clamp(1, KEEP_DAYS as u32) as i64;
         let today =
-            chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+            Self::now_tz();
         let mut removed = 0usize;
         for offset in 0..days {
             let date = (today - chrono::Duration::days(offset))
@@ -431,7 +447,7 @@ impl CheckinStore {
             return Ok(0);
         }
         let today =
-            chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+            Self::now_tz();
         let cutoff = (today - chrono::Duration::days(keep_days))
             .format("%Y-%m-%d")
             .to_string();

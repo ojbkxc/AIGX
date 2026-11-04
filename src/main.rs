@@ -59,6 +59,7 @@ mod usage;
 mod user;
 mod user_group;
 mod web;
+mod zcode_captcha;
 
 // SeaORM 多数据库后端模块（仅当启用 sea-orm feature 时编译）
 #[cfg(feature = "sea-orm")]
@@ -263,6 +264,8 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = upstream_checkin.load() {
         tracing::error!("Failed to load upstream checkin store: {e}");
     }
+    // 同步签到时区偏移到 scheduler 静态变量（启动时按已加载的设置初始化）
+    crate::checkin::scheduler::set_checkin_tz_offset(upstream_checkin.settings().timezone_offset);
 
     // 初始化易支付客户端（运行时按配置即时构造，无需常驻）
     let epay_client = Arc::new(EpayClient::new(config.epay.clone()));
@@ -361,9 +364,15 @@ async fn main() -> anyhow::Result<()> {
             .into_iter()
             .collect(),
     );
+    // ZCode 验证码令牌池的铸造节奏（库存目标 / 轮询间隔 / 单轮上限）：
+    // 随 `GET /api/zcode/captcha` 下发给前端铸造器；保存设置时热更新。
+    crate::config::set_zcode_captcha_pool_settings(
+        config.usage.zcode_captcha_pool_target,
+        config.usage.zcode_captcha_pool_poll_ms,
+        config.usage.zcode_captcha_pool_max_per_round,
+    );
     // 直接换号/换渠道状态码名单（选路时同步判定，保存设置时实时更新）
     crate::config::set_retry_on_status_codes(config.usage.retry_on_status.clone());
-
     // 初始化模型定价目录
     let pricing_store = Arc::new(PricingStore::new(store.clone()));
 
@@ -1810,6 +1819,22 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/cline-headers",
             get(api::admin::handle_get_cline_headers).put(api::admin::handle_update_cline_headers),
+        )
+        // ZCode 人机验证令牌池（对照 Agent2API「网关 → 验证码令牌池」）：
+        // 概况/入池走同一路径，铸造节奏单开一条（参照 Agent2API 的
+        // /api/zcode/captcha 与 /api/zcode/captcha-pool 两条端点）
+        .route(
+            "/api/zcode/captcha",
+            get(api::admin::handle_get_zcode_captcha).post(api::admin::handle_push_zcode_captcha),
+        )
+        .route(
+            "/api/zcode/captcha/config",
+            get(api::admin::handle_get_zcode_captcha_config),
+        )
+        .route(
+            "/api/zcode/captcha-pool",
+            get(api::admin::handle_get_zcode_captcha_pool)
+                .put(api::admin::handle_update_zcode_captcha_pool),
         )
         // 数据管理（存储概览 + 全量备份/恢复；对照 Agent2API「设置 → 数据」）
         .route("/api/storage", get(api::admin::handle_storage_overview))

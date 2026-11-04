@@ -8,8 +8,9 @@
 //!
 //! ## 时区
 //!
-//! 计划时刻固定按 **UTC+8** 解释（与 Agent2API 一致），不跟随服务器本地
-//! 时区 —— 部署在海外服务器时「早上 9 点」仍然指北京时间 9 点。
+//! 计划时刻按配置的 `timezone_offset` 解释（默认 UTC+8，可在签到设置中改为
+//! 系统本地时区或其它偏移）。与 Agent2API 的「用户本地时区」口径对齐 ——
+//! 海外部署时不再硬绑北京时间。
 //!
 //! ## 串行执行
 //!
@@ -38,9 +39,28 @@ use crate::account_session::AccountSessionStore;
 
 const TICK: Duration = Duration::from_secs(30);
 
-/// UTC+8 固定偏移。
-fn beijing() -> FixedOffset {
-    FixedOffset::east_opt(8 * 3600).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap())
+/// 签到时区偏移（小时）。由 `set_settings` 更新，`beijing()` 读取。
+/// 0 = 使用系统本地时区（`chrono::Local`）。
+static CHECKIN_TZ_OFFSET: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(8);
+
+/// 设置签到时区偏移（由 store 的 `set_settings` 调用）。
+pub fn set_checkin_tz_offset(offset: i32) {
+    CHECKIN_TZ_OFFSET.store(offset, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 获取当前签到时区偏移。
+pub fn checkin_tz_offset() -> i32 {
+    CHECKIN_TZ_OFFSET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 按配置的偏移构造 FixedOffset（0 = 系统本地时区）。
+pub(crate) fn beijing() -> FixedOffset {
+    let offset = checkin_tz_offset();
+    if offset == 0 {
+        chrono::Local::now().offset().clone()
+    } else {
+        FixedOffset::east_opt(offset * 3600).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap())
+    }
 }
 
 /// 北京时间的今天（YYYY-MM-DD）。

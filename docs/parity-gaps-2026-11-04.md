@@ -15,7 +15,7 @@
 | 计费/报表（#5） | ⚠️→✅ 分层错位 | 支付/订阅/用户/告警 ✅ 自足；用量报表 ⚠️ 明细字段少；积分流水/团队积分缺 |
 | OpenAI 网关（#3） | ⚠️ | ❌ /v1/messages/count_tokens；⚠️ /v1/models 无 Anthropic 视图、超时/重试/队列无 HTTP 端点 |
 | 管理端 API（#4） | ⚠️→✅ 局部 | 27✅/12⚠️/8❌/3🔧；❌ qoder_umid/assistant/机场订阅（zcode 池已补） |
-| 出站净化（#6） | ⚠️ | 指纹脱敏有实现；⚠️ Responses/Completions 未挂净化、无命中统计 |
+| 出站净化（#6） | ✅ | 指纹脱敏已补全：chat / responses / completions 三路径挂载 + 命中统计（P2-10/P2-11） |
 | 签到/定时（#7） | ⚠️ | ⚠️ workbuddy-intl 保活链不进调度、growth school/travel 未实现、Qoder UMID 只探测 |
 | 配置/升级（#8） | ⚠️ | 核心开关对齐；⚠️ 定时任务默认全关、超时默认值不同；❌ routing 策略键/保留期配置 |
 | 登录/验证码（#9） | ⚠️→✅ 局部 | ✅ ALTCHA + 阿里云求解器/令牌池（已补，P1-9/P1-10）；⚠️ AutoClaw OAuth |
@@ -74,8 +74,8 @@
 | P2-17 | growth school/travel | #7 ⚠️ | 另域+小程序 UA（文件内标注 unsupported） |
 | P2-18 | Qoder UMID 安装 | #7 ⚠️ | 只探测不安装（可用性风险） |
 | P2-19 | 记录台账永久保留 + 筛选删除 | #7 ⚠️ | 90 天 prune vs 基线永久 + 无筛选删除 + 无 all=1 护栏 | **已实现**（`CheckinSettings.keep_days` 可配置（0=永久）；`DELETE /api/checkin-center/records` 支持 `all=1` 全清护栏 + 筛选删除 + `days=N` 三模式；`clear_all`/`remove_matching` 函数） |
-| P2-20 | cron Skip 语义对齐 | #7 ⚠️ | Skip 不补跑 vs scheduled_tasks 补一次 |
-| P2-21 | 时区口径统一 | #7 ⚠️ | 用户签到本地时区 vs 中心 UTC+8 |
+| P2-20 | cron Skip 语义对齐 | #7 ⚠️ | Skip 不补跑 vs scheduled_tasks 补一次 | **已对齐**（基线 core/scheduled_tasks 也是「只补一次，不补跑期间的每一轮」（line 33-34, 392）；AIGX scheduled_tasks/task_state.rs 同语义（line 181-190）；checkin scheduler 的当天去重 + 启动补签与基线一致） |
+| P2-21 | 时区口径统一 | #7 ⚠️ | 用户签到本地时区 vs 中心 UTC+8 | **已实现**（`CheckinSettings.timezone_offset` 可配置（0=系统本地时区，默认 8=UTC+8）；scheduler 的 `beijing()` 按配置偏移构造 FixedOffset；store 的 recent/clear/prune 同步使用配置时区；启动时按已加载设置初始化静态变量） |
 | P2-22 | 终端用户积分流水 | #5 ⚠️ | records 分页/earned/consumed 明细 |
 | P2-23 | 团队积分 | #5 ❌ | 无团队体系 |
 | P2-24 | promo/pet/asr 运营集成 | #5 ❌ | promo-banner/pet-work/asr |
@@ -85,7 +85,7 @@
 
 ## 4. 不补（仅一项）
 
-> 用户拍板（2026-11-04）：机场订阅不补。原「不补」项 zcode 验证码池 / 阿里云滑块求解器 / Cline 伪装头 / 指纹脱敏绕过用途 / upgrade_api 经用户拍板改为**补缺**，已移至 §2 P1（P1-9~P1-12 + P1-13）。
+> 用户拍板（2026-11-04）：机场订阅不补。原「不补」项 zcode 验证码池 / 阿里云滑块求解器 / Cline 伪装头 / 指纹脱敏绕过用途 / upgrade_api 经用户拍板改为**补缺**，已移至 §2 P1（P1-9~P1-12 + P1-13），四项规避类功能均已完成（2026-11-05）。
 > 注：前 4 项属规避第三方检测类，实现需绕过第三方人机验证/内容审核机制，按用户指令执行。upgrade_api 虽 AIGX 无现成旧数据，但需提供 auth.json 导入/迁移端点以备将来导入第三方数据。
 
 ### 4.1 机场订阅（#4 ❌）
