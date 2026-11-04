@@ -48,7 +48,7 @@
 | P1-9 | **zcode 验证码池** | #4/#9 ❌ | 浏览器铸阿里云验证码令牌（前端无痕铸造器 + 令牌池）+ /api/zcode/captcha + /api/zcode/captcha-pool + 节奏配置 | **已实现**（后端 `src/zcode_captcha.rs` 令牌池 + `src/api/admin/zcode_captcha.rs` 四个端点；前端 `lib/aliyunCaptcha.ts` 求解器 + `lib/zcodeCaptchaPool.ts` 后台铸造器 + `components/ZcodeCaptchaPanel.tsx`；领取侧 `zcode_claim.rs` 优先用前端当场求解、回落池子） | zcode 套餐领取绕过人机验证 |
 | P1-10 | **阿里云滑块求解器** | #9 🔧 | 阿里云无痕/滑块求解器（用户可见的滑块 + 无痕铸造两种模式） | **已实现**（`frontend/src/lib/aliyunCaptcha.ts`：`solve()` 走用户可见滑块，`mintTraceless()` 走无痕铸造；单实例一次一用、容器每次重建、预热 ≥2.1s；已接入 ZCode 领套餐链路） | 验证码求解能力（多用途） |
 | P1-11 | **Cline 伪装头** | §1 | /api/cline/headers 可编辑覆盖表（请求头伪装官方客户端） | **已实现**（`src/api/admin/cline_headers.rs`：GET/PUT + 校验 + 持久化 + 热更新；路由 `/api/cline-headers`） | 绕过上游客户端识别 |
-| P1-12 | **指纹脱敏绕过用途** | §1 | core/sanitize.rs 移植（剥离审核黑名单指纹，337 行，零宽字符障碍需处理） | src/sanitize/ + 桥接层挂载 | 大（原立场项，用户拍板补） | 绕过内容审核指纹 |
+| P1-12 | **指纹脱敏绕过用途** | §1 | core/sanitize.rs 移植（剥离审核黑名单指纹，337 行，零宽字符障碍需处理） | **已实现**（`src/sanitize/mod.rs`：静态规则 + 无状态净化 + 进程级快照开关 `usage.sanitize_fingerprints`（默认开）；挂载在 chat/responses/completions 三个转发路径；`/api/sanitize` GET/PUT + `SanitizePanel.tsx`） | 绕过内容审核指纹 |
 | P1-13 | **upgrade_api 数据迁移端点** | #4 ❌ | /api/upgrade 端点：auth.json 导入 + 旧项目数据迁移框架（AIGX 无现成旧数据，但需提供导入能力以备将来导入第三方数据） | **已实现**（`src/api/admin/upgrade.rs`：GET /api/upgrade + POST /api/upgrade/run，幂等空跑保留 API 面） | 中 | 数据导入/迁移能力 |
 
 ## 3. P2 补缺（影响较小或语义错位）
@@ -73,7 +73,7 @@
 | P2-16 | 目录配置 | #8 ❌ | logDir/requestStatsDir/debugDir |
 | P2-17 | growth school/travel | #7 ⚠️ | 另域+小程序 UA（文件内标注 unsupported） |
 | P2-18 | Qoder UMID 安装 | #7 ⚠️ | 只探测不安装（可用性风险） |
-| P2-19 | 记录台账永久保留 + 筛选删除 | #7 ⚠️ | 90 天 prune vs 基线永久 + 无筛选删除 + 无 all=1 护栏 |
+| P2-19 | 记录台账永久保留 + 筛选删除 | #7 ⚠️ | 90 天 prune vs 基线永久 + 无筛选删除 + 无 all=1 护栏 | **已实现**（`CheckinSettings.keep_days` 可配置（0=永久）；`DELETE /api/checkin-center/records` 支持 `all=1` 全清护栏 + 筛选删除 + `days=N` 三模式；`clear_all`/`remove_matching` 函数） |
 | P2-20 | cron Skip 语义对齐 | #7 ⚠️ | Skip 不补跑 vs scheduled_tasks 补一次 |
 | P2-21 | 时区口径统一 | #7 ⚠️ | 用户签到本地时区 vs 中心 UTC+8 |
 | P2-22 | 终端用户积分流水 | #5 ⚠️ | records 分页/earned/consumed 明细 |

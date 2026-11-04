@@ -191,8 +191,8 @@ pub async fn handle_checkin_run(
 
 #[derive(Debug, Deserialize)]
 pub struct RecordsQuery {
-    #[serde(default = "default_days")]
-    pub days: u32,
+    #[serde(default)]
+    pub days: Option<u32>,
     #[serde(default)]
     pub provider: Option<String>,
     #[serde(default)]
@@ -208,10 +208,10 @@ pub struct RecordsQuery {
     /// 分页大小（≤0 = 不分页，返回全部）
     #[serde(default = "default_page_size")]
     pub limit: usize,
-}
-
-fn default_days() -> u32 {
-    7
+    /// 清空全部记录的显式护栏（与基线 `all=1` 同义）。
+    /// 不传此参数且未指定任何筛选条件时返回 400，避免误触全清。
+    #[serde(default)]
+    pub all: Option<u32>,
 }
 
 fn default_page_size() -> usize {
@@ -235,7 +235,7 @@ pub async fn handle_checkin_records(
     let records = state
         .upstream_checkin
         .recent_records(
-            q.days,
+            q.days.unwrap_or(7),
             q.provider.as_deref().filter(|s| !s.is_empty()),
             q.account_id.as_deref().filter(|s| !s.is_empty()),
             outcome,
@@ -260,23 +260,87 @@ pub async fn handle_checkin_records(
     })))
 }
 
-/// DELETE /api/checkin-center/records —— 清空台账。
+/// DELETE /api/checkin-center/records —— 删除台账记录。
+///
+/// 三种模式（优先级从高到低）：
+/// 1. `?all=1` — 清空全部记录（显式护栏，不带筛选时必须指定）
+/// 2. 带筛选条件（provider/account_id/outcome/keyword）— 逐条删除匹配记录
+/// 3. `?days=N` — 清除最近 N 天的记录（按日桶删除）
+///
+/// 三者都不指定时返回 400，避免误触全清。
 pub async fn handle_clear_checkin_records(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<RecordsQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
-    let removed = state.upstream_checkin.clear_records(q.days).map_err(|e| {
-        error_response(
-            &format!("清空签到记录失败：{e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
-    Ok(Json(json!({
-        "success": true,
-        "data": { "removed": removed }
-    })))
+
+    // 1. all=1 显式全清
+    if q.all.is_some() {
+        let removed = state.upstream_checkin.clear_all().map_err(|e| {
+            error_response(
+                &format!("清空全部签到记录失败：{e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+        return Ok(Json(json!({
+            "success": true,
+            "data": { "removed": removed, "mode": "all" }
+        })));
+    }
+
+    // 2. 筛选删除（任一筛选条件存在即走此路径）
+    let has_filters = q.provider.is_some()
+        || q.account_id.is_some()
+        || q.outcome.is_some()
+        || q.keyword.as_ref().is_some_and(|k| !k.trim().is_empty());
+    if has_filters {
+        let outcome = match q.outcome.as_deref() {
+            Some("success") => Some(CheckinOutcome::Success),
+            Some("already") => Some(CheckinOutcome::Already),
+            Some("pending") => Some(CheckinOutcome::Pending),
+            Some("failed") => Some(CheckinOutcome::Failed),
+            _ => None,
+        };
+        let removed = state
+            .upstream_checkin
+            .remove_matching(
+                q.provider.as_deref().filter(|s| !s.is_empty()),
+                q.account_id.as_deref().filter(|s| !s.is_empty()),
+                outcome,
+                q.keyword.as_deref(),
+            )
+            .map_err(|e| {
+                error_response(
+                    &format!("按筛选删除签到记录失败：{e}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+            })?;
+        return Ok(Json(json!({
+            "success": true,
+            "data": { "removed": removed, "mode": "filter" }
+        })));
+    }
+
+    // 3. days=N 按日桶清除
+    if let Some(days) = q.days {
+        let removed = state.upstream_checkin.clear_records(days).map_err(|e| {
+            error_response(
+                &format!("清除签到记录失败：{e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+        return Ok(Json(json!({
+            "success": true,
+            "data": { "removed": removed, "mode": "days" }
+        })));
+    }
+
+    // 三者都不指定 → 400
+    Err(error_response(
+        "未指定删除范围：清空全部请带 all=1，按条件删除请带筛选参数，按天数清除请带 days=N",
+        StatusCode::BAD_REQUEST,
+    ))
 }
 
 /// GET /api/checkin-center/settings

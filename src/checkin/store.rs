@@ -116,6 +116,9 @@ pub struct CheckinSettings {
     /// 每个账号串行执行之间的间隔（毫秒，防风控）
     #[serde(default = "default_gap_ms")]
     pub gap_ms: u64,
+    /// 台账保留天数（0 = 永久保留，不自动 prune）
+    #[serde(default)]
+    pub keep_days: i64,
 }
 
 fn default_gap_ms() -> u64 {
@@ -127,6 +130,7 @@ impl Default for CheckinSettings {
         Self {
             enabled: false,
             gap_ms: default_gap_ms(),
+            keep_days: 0,
         }
     }
 }
@@ -354,15 +358,81 @@ impl CheckinStore {
         Ok(removed)
     }
 
-    /// 删掉超过保留期（`KEEP_DAYS`）的日桶。
+    /// 清空全部台账记录（删除所有日桶）。
+    ///
+    /// 对应基线 `DELETE /api/checkin-records?all=1` 的显式全清。
+    /// 调用方必须在端点层做 `all=1` 护栏校验，本函数不做二次检查。
+    pub fn clear_all(&self) -> Result<usize> {
+        let mut removed = 0usize;
+        for key in self.store.list(RECORD_PREFIX)? {
+            if let Some(bucket) = self.store.get::<Vec<CheckinRecord>>(&key)? {
+                removed += bucket.len();
+            }
+            self.store.delete(&key)?;
+        }
+        Ok(removed)
+    }
+
+    /// 按筛选条件删除匹配的记录（逐条删除，不删整个日桶）。
+    ///
+    /// 对应基线 `DELETE /api/checkin-records` 带筛选的删除语义。
+    /// 匹配逻辑与 [`recent_records`] 的过滤条件一致。
+    /// 空桶（删完后无记录）会被一并删除。
+    pub fn remove_matching(
+        &self,
+        provider: Option<&str>,
+        account_id: Option<&str>,
+        outcome: Option<CheckinOutcome>,
+        keyword: Option<&str>,
+    ) -> Result<usize> {
+        let keyword = keyword
+            .map(|k| k.trim().to_lowercase())
+            .filter(|k| !k.is_empty());
+        let mut removed = 0usize;
+        for key in self.store.list(RECORD_PREFIX)? {
+            let Some(bucket) = self.store.get::<Vec<CheckinRecord>>(&key)? else {
+                continue;
+            };
+            let bucket_len = bucket.len();
+            let kept: Vec<CheckinRecord> = bucket
+                .into_iter()
+                .filter(|r| {
+                    !(provider.map(|p| r.provider == p).unwrap_or(false)
+                        && account_id.map(|a| r.account_id == a).unwrap_or(false)
+                        && outcome.map(|o| r.outcome == o).unwrap_or(false)
+                        && keyword.as_ref().is_none_or(|k| {
+                            r.account_name.to_lowercase().contains(k)
+                                || r.account_id.to_lowercase().contains(k)
+                                || r.provider.to_lowercase().contains(k)
+                                || r.message.to_lowercase().contains(k)
+                        }))
+                })
+                .collect();
+            removed += bucket_len.saturating_sub(kept.len());
+            if kept.is_empty() {
+                self.store.delete(&key)?;
+            } else {
+                self.store.put(&key, &kept)?;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// 删掉超过保留期的日桶。
     ///
     /// 台账只在 `append_record` 里写入，没有别的地方会删旧桶；不清理的话
     /// 存储会随天数无限增长。调度每轮顺手调一次（30 秒一次，代价只是列一次
     /// 键前缀），保证长时间运行也不膨胀。
+    ///
+    /// `keep_days = 0`（默认）= 永久保留，不 prune。
     pub fn prune_records(&self) -> Result<usize> {
+        let keep_days = self.settings().keep_days;
+        if keep_days <= 0 {
+            return Ok(0);
+        }
         let today =
             chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
-        let cutoff = (today - chrono::Duration::days(KEEP_DAYS))
+        let cutoff = (today - chrono::Duration::days(keep_days))
             .format("%Y-%m-%d")
             .to_string();
         let mut removed = 0usize;
