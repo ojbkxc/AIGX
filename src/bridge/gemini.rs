@@ -253,9 +253,11 @@ impl Bridge for GeminiBridge {
         .send()
         .await
         .map_err(|e| BridgeError::Transport(e.to_string()))?;
+        crate::debug_traffic::traced_response(&resp, ctx);
 
         if !resp.status().is_success() {
             return Err(capture_upstream_error_http(
+                ctx,
                 resp.status(),
                 resp,
                 UpstreamWire::Vertex,
@@ -285,9 +287,11 @@ impl Bridge for GeminiBridge {
             .send()
             .await
             .map_err(|e| BridgeError::Transport(e.to_string()))?;
+        crate::debug_traffic::traced_response(&resp, ctx);
 
         if !resp.status().is_success() {
             return Err(capture_upstream_error_http(
+                ctx,
                 resp.status(),
                 resp,
                 UpstreamWire::Vertex,

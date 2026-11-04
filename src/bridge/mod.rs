@@ -602,7 +602,9 @@ pub fn response_is_json(resp: &reqwest::Response) -> bool {
 /// 从上游错误响应中捕获并解析错误体，返回 BridgeError::UpstreamStatus
 ///
 /// 参考 aisix 的 `capture_upstream_error_http` 设计。
+/// `ctx` 用于在错误路径抓取响应体（调试模式），不影响错误解析。
 pub async fn capture_upstream_error_http(
+    ctx: &BridgeContext,
     status: http::StatusCode,
     resp: reqwest::Response,
     wire: UpstreamWire,
@@ -610,6 +612,8 @@ pub async fn capture_upstream_error_http(
 ) -> BridgeError {
     let retry_after = parse_retry_after(resp.headers());
     let body = read_body_capped(resp, 64 * 1024).await;
+    // 调试模式：抓取错误响应体（best-effort，不影响错误解析）
+    crate::debug_traffic::traced_response_body(&String::from_utf8_lossy(&body), ctx);
     let parsed = parse(&body).map(|mut v| {
         v.message = v.message.map(|m| truncate_lossy(&m, 1024));
         v.kind = v.kind.map(|k| truncate_lossy(&k, 1024));

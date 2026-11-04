@@ -14,11 +14,11 @@
 | 账号渠道/登录态（#2） | ✅ 强于基线 | Provider 24/24 + 编译期断言；登录态 17 kind 刷新 |
 | 计费/报表（#5） | ⚠️→✅ 分层错位 | 支付/订阅/用户/告警 ✅ 自足；用量报表 ⚠️ 明细字段少；积分流水/团队积分缺 |
 | OpenAI 网关（#3） | ⚠️ | ❌ /v1/messages/count_tokens；⚠️ /v1/models 无 Anthropic 视图、超时/重试/队列无 HTTP 端点 |
-| 管理端 API（#4） | ⚠️ | 27✅/12⚠️/8❌/3🔧；❌ zcode 池/qoder_umid/assistant/机场订阅 |
+| 管理端 API（#4） | ⚠️→✅ 局部 | 27✅/12⚠️/8❌/3🔧；❌ qoder_umid/assistant/机场订阅（zcode 池已补） |
 | 出站净化（#6） | ⚠️ | 指纹脱敏有实现；⚠️ Responses/Completions 未挂净化、无命中统计 |
 | 签到/定时（#7） | ⚠️ | ⚠️ workbuddy-intl 保活链不进调度、growth school/travel 未实现、Qoder UMID 只探测 |
 | 配置/升级（#8） | ⚠️ | 核心开关对齐；⚠️ 定时任务默认全关、超时默认值不同；❌ routing 策略键/保留期配置 |
-| 登录/验证码（#9） | ⚠️ | ✅ ALTCHA 逐字移植；⚠️ AutoClaw OAuth、zcode claim UI；❌ zcode 验证码池（立场不补） |
+| 登录/验证码（#9） | ⚠️→✅ 局部 | ✅ ALTCHA + 阿里云求解器/令牌池（已补，P1-9/P1-10）；⚠️ AutoClaw OAuth |
 | 存储/日志（#10） | ⚠️ | ❌ 运行日志页、debug_traffic 落库、account_usage_records；⚠️ 请求明细字段缺口 ~30% |
 | UI 前端（#11） | ⚠️ | 12 面板 10✅/1⚠️/1❌（docs 页）；❌ 列定制/筛选记忆/移动端列集/i18n 扩展 |
 
@@ -43,10 +43,10 @@
 | P1-4 | **debug 开关端点** | #4 ⚠️ | /api/debug 开关端点（当前仅 config.toml） | **已实现**（`src/api/admin/debug.rs` GET/PUT；同时保留 /api/limits 入口） | 小 | 调试模式管理 |
 | P1-5 | **debug_traffic 落库** | #10 ❌ | 内存环形缓冲改为持久化 | **已实现**（`src/debug_traffic.rs`：push 写 FileStore + load_persisted 启动恢复 + clear 同步删除） | 中 | 调试报文可回溯 |
 | P1-6 | **account_usage_records 三件套** | #10 ❌ | 余额快照/到期查询/选路消费 | **已实现**（余额快照+到期查询已有；选路消费：`should_skip_by_balance()` + `acquire_with` 接入） | 中 | 账号用量可观测 |
-| P1-7 | **调试模式响应侧原始报文** | §3 P1 | 13 个发送点二次改动（状态码/响应头/流式 SSE） | 桥接层 | 大（13 处） | 调试完整性 |
+| P1-7 | **调试模式响应侧原始报文** | §3 P1 | 13 个发送点二次改动（状态码/响应头/错误体） | **已实现**（13 个发送点全部接入 `traced_response` 抓状态码+响应头；`capture_upstream_error_http` 内部接入 `traced_response_body` 抓错误响应体） | 桥接层 | 大（13 处） | 调试完整性 |
 | P1-8 | **切换账号重试次数** | §3 P1 | 账号级 switch-count 字段（上游默认 5） | **已实现**（`retry_switch_count` 字段 + 映射到 `RotationPolicy.max_attempts`） | 小 | 重试策略 |
-| P1-9 | **zcode 验证码池** | #4/#9 ❌ | 浏览器 WebView 铸造阿里云验证码令牌（device-mid/激活事件/3007 协议）+ /api/zcode/captcha + /api/zcode/captcha-pool + 池配置 | 前端（WebView/阿里云 SDK）+ 后端端点 | 大（原立场项，用户拍板补） | zcode 套餐领取绕过人机验证 |
-| P1-10 | **阿里云滑块求解器** | #9 🔧 | AutoClaw 国际版 OAuth 的阿里云滑块自动求解 | 前端求解器 + OAuth 链路 | 大（原立场项，用户拍板补） | AutoClaw 国际版登录 |
+| P1-9 | **zcode 验证码池** | #4/#9 ❌ | 浏览器铸阿里云验证码令牌（前端无痕铸造器 + 令牌池）+ /api/zcode/captcha + /api/zcode/captcha-pool + 节奏配置 | **已实现**（后端 `src/zcode_captcha.rs` 令牌池 + `src/api/admin/zcode_captcha.rs` 四个端点；前端 `lib/aliyunCaptcha.ts` 求解器 + `lib/zcodeCaptchaPool.ts` 后台铸造器 + `components/ZcodeCaptchaPanel.tsx`；领取侧 `zcode_claim.rs` 优先用前端当场求解、回落池子） | zcode 套餐领取绕过人机验证 |
+| P1-10 | **阿里云滑块求解器** | #9 🔧 | 阿里云无痕/滑块求解器（用户可见的滑块 + 无痕铸造两种模式） | **已实现**（`frontend/src/lib/aliyunCaptcha.ts`：`solve()` 走用户可见滑块，`mintTraceless()` 走无痕铸造；单实例一次一用、容器每次重建、预热 ≥2.1s；已接入 ZCode 领套餐链路） | 验证码求解能力（多用途） |
 | P1-11 | **Cline 伪装头** | §1 | /api/cline/headers 可编辑覆盖表（请求头伪装官方客户端） | **已实现**（`src/api/admin/cline_headers.rs`：GET/PUT + 校验 + 持久化 + 热更新；路由 `/api/cline-headers`） | 绕过上游客户端识别 |
 | P1-12 | **指纹脱敏绕过用途** | §1 | core/sanitize.rs 移植（剥离审核黑名单指纹，337 行，零宽字符障碍需处理） | src/sanitize/ + 桥接层挂载 | 大（原立场项，用户拍板补） | 绕过内容审核指纹 |
 | P1-13 | **upgrade_api 数据迁移端点** | #4 ❌ | /api/upgrade 端点：auth.json 导入 + 旧项目数据迁移框架（AIGX 无现成旧数据，但需提供导入能力以备将来导入第三方数据） | **已实现**（`src/api/admin/upgrade.rs`：GET /api/upgrade + POST /api/upgrade/run，幂等空跑保留 API 面） | 中 | 数据导入/迁移能力 |
@@ -56,7 +56,7 @@
 | # | 项 | 来源 | 内容 |
 |---|---|---|---|
 | P2-1 | AutoClaw 国际版 OAuth | #9 ⚠️ | 登录引擎扩展（基线 /api/session/login/oauth/*） |
-| P2-2 | zcode claim UI 参数 | #9 ⚠️ | BenefitsPanel.run 传 params（claim 模式需 plan_id + captcha_verify_param） |
+| P2-2 | zcode claim UI 参数 | #9 ⚠️ | BenefitsPanel.run 传 params（claim 模式需 plan_id + captcha_verify_param） | **已实现**（`BenefitsPanel.tsx`：ZCode 行「盘点套餐 → 选套餐 → 领套餐」，领时先取 `/api/zcode/captcha/config`，需验证码则弹滑块，带 `captcha_verify_param`/`captcha_verify_region` 提交） |
 | P2-3 | session 首屏/refresh | #4 ⚠️ | GET /api/session + POST /api/session/refresh |
 | P2-4 | keys PATCH 更新端点 | #4 ⚠️ | 密钥更新端点 | **已实现**（/api/keys/:id PUT 复用 handle_update_token） |
 | P2-5 | models/refresh 全量 | #4 ⚠️ | 全量刷新端点 | 未实现（仅 /api/models/metadata/refresh） |

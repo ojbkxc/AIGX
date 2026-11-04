@@ -95,6 +95,15 @@ pub struct TrafficEntry {
     /// 请求体是否被截断
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// 上游响应状态码（P1-7：响应侧抓取）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_status: Option<u16>,
+    /// 上游响应头（**已脱敏**，P1-7）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_headers: Option<Map<String, Value>>,
+    /// 上游响应体（仅错误路径抓取，截断至 [`MAX_BODY_BYTES`]，P1-7）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body: Option<String>,
 }
 
 /// 进程级环形缓冲。`Mutex<VecDeque<_>>`：写入是每请求一次（开关开启时），
@@ -180,6 +189,9 @@ impl TrafficEntry {
             headers,
             body,
             truncated,
+            response_status: None,
+            response_headers: None,
+            response_body: None,
         }
     }
 }
@@ -218,6 +230,64 @@ pub fn traced(req: reqwest::RequestBuilder, ctx: &BridgeContext) -> reqwest::Req
         push(TrafficEntry::from_request(&built, ctx));
     }
     req
+}
+
+/// 抓取上游响应的状态码与响应头（P1-7 响应侧报文）。
+///
+/// 在 `.send().await` 成功后、消费响应体之前调用：
+/// ```ignore
+/// let resp = debug_traffic::traced(builder, ctx).send().await?;
+/// debug_traffic::traced_response(&resp, ctx);
+/// ```
+/// 只读取 status + headers（零 body 消费），不影响后续 `resp.json()` /
+/// `resp.bytes_stream()` 的读取。开关关闭时零开销。
+pub fn traced_response(resp: &reqwest::Response, ctx: &BridgeContext) {
+    if !crate::config::debug_traffic_enabled() {
+        return;
+    }
+    let status = resp.status().as_u16();
+    let headers = redact_headers(
+        resp.headers()
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.to_str().unwrap_or("<binary>"))),
+    );
+    let mut buffer = BUFFER.lock();
+    // 找到刚 push 的那条（request_id 匹配），补上响应侧字段
+    if let Some(entry) = buffer
+        .iter_mut()
+        .rev()
+        .find(|e| e.request_id == ctx.request_id)
+    {
+        entry.response_status = Some(status);
+        entry.response_headers = Some(headers);
+    }
+}
+
+/// 抓取上游错误响应体（P1-7）：在错误路径消费 body 之前调用。
+///
+/// 错误响应的 body 通常很短（JSON 错误信息），读取后不影响后续解析。
+/// 调用点形如：
+/// ```ignore
+/// if !resp.status().is_success() {
+///     let body_text = resp.text().await.unwrap_or_default();
+///     debug_traffic::traced_response_body(&body_text, ctx);
+///     return Err(...);
+/// }
+/// ```
+pub fn traced_response_body(body: &str, ctx: &BridgeContext) {
+    if !crate::config::debug_traffic_enabled() {
+        return;
+    }
+    let (text, truncated) = truncate_bytes(body.as_bytes(), MAX_BODY_BYTES);
+    let mut buffer = BUFFER.lock();
+    if let Some(entry) = buffer
+        .iter_mut()
+        .rev()
+        .find(|e| e.request_id == ctx.request_id)
+    {
+        entry.response_body = Some(text);
+        entry.truncated = entry.truncated || truncated;
+    }
 }
 
 /// 读取当前缓冲（最新在后）与概览计数。
