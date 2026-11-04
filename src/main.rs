@@ -1748,6 +1748,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         // 调试模式：上游原始报文（对照 Agent2API「设置 → 网关 → 调试模式」）
         .route(
+            "/api/debug",
+            get(api::admin::handle_get_debug).put(api::admin::handle_update_debug),
+        )
+        .route(
             "/api/debug/traffic",
             get(api::admin::handle_get_debug_traffic)
                 .delete(api::admin::handle_clear_debug_traffic),
