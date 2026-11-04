@@ -107,6 +107,35 @@ pub struct RequestLog {
     /// 可接受范围；系统提示词只留长度、不存正文（常含站方内部指令）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<LogConversation>,
+    /// 首字节延迟（TTFB，毫秒）：从请求发出到上游响应首字节到达。
+    /// 流式请求的「用户看到第一个字的等待时间」就是它。未捕获为 None。
+    #[serde(default)]
+    pub first_response_ms: Option<u64>,
+    /// 本次请求的上游尝试次数（含重试；基线 attempts 链）。默认 1。
+    #[serde(default = "default_attempts")]
+    pub attempts: u32,
+    /// 本次请求命中的脱敏规则（对照基线 sensitive_hits）。
+    #[serde(default)]
+    pub sensitive_hits: Vec<SensitiveHit>,
+    /// 本次请求当前所处的转发阶段（对照基线 phase）：
+    /// `connecting` / `waiting` / `streaming` / `retrying` / `queued`。
+    /// 空串 = 终态（已完成或失败）。
+    #[serde(default)]
+    pub phase: String,
+}
+
+/// 默认尝试次数。
+fn default_attempts() -> u32 {
+    1
+}
+
+/// 一条脱敏命中（对照基线 `SensitiveHit`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SensitiveHit {
+    /// 命中的脱敏规则名（如 "phone" / "email" / "id_card"）
+    pub word: String,
+    /// 命中次数
+    pub count: u32,
 }
 
 /// 一条对话消息（角色 + 文本）。
@@ -435,6 +464,10 @@ impl RequestLog {
             cache_hit: false,
             debug: None,
             conversation: None,
+            first_response_ms: None,
+            attempts: 1,
+            sensitive_hits: Vec::new(),
+            phase: String::new(),
         }
     }
 }

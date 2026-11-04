@@ -324,6 +324,10 @@ fn record_agent_request_log(
         filtered_channels: Vec::new(),
         selected_channel: None,
         debug: None,
+        first_response_ms: None,
+        attempts: 1,
+        sensitive_hits: Vec::new(),
+        phase: String::new(),
     };
     state.log_store.record_request(log);
 }

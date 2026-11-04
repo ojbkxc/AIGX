@@ -537,6 +537,10 @@ fn write_test_log(
         filtered_channels: Vec::new(),
         selected_channel: None,
         debug: None,
+        first_response_ms: None,
+        attempts: 1,
+        sensitive_hits: Vec::new(),
+        phase: String::new(),
     };
     if let Err(e) = state.log_store.requests.add(log) {
         tracing::warn!("model_test request log write failed: {e}");

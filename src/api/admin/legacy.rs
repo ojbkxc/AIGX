@@ -3881,6 +3881,10 @@ fn record_chat_test_usage(
         filtered_channels: Vec::new(),
         selected_channel: None,
         debug,
+        first_response_ms: None,
+        attempts: 1,
+        sensitive_hits: Vec::new(),
+        phase: String::new(),
     };
     if let Err(e) = state.log_store.requests.add(log) {
         tracing::warn!("chat_test request log write failed: {e}");
@@ -3929,6 +3933,10 @@ fn record_chat_test_failure(
         filtered_channels: Vec::new(),
         selected_channel: None,
         debug: None,
+        first_response_ms: None,
+        attempts: 1,
+        sensitive_hits: Vec::new(),
+        phase: String::new(),
     };
     if let Err(e) = state.log_store.requests.add(log) {
         tracing::warn!("chat_test failure log write failed: {e}");

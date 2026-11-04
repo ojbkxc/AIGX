@@ -138,6 +138,8 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
             account_id: None,
             api_token: None,
             deadline: Some(Duration::from_secs(PROBE_TIMEOUT_SECS)),
+            request_start_ms: Arc::new(std::sync::Mutex::new(Some(chrono::Utc::now().timestamp_millis() as u64))),
+            first_response_ms: Arc::new(std::sync::Mutex::new(None)),
         };
 
         let start = std::time::Instant::now();

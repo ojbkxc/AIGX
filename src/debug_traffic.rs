@@ -242,6 +242,16 @@ pub fn traced(req: reqwest::RequestBuilder, ctx: &BridgeContext) -> reqwest::Req
 /// 只读取 status + headers（零 body 消费），不影响后续 `resp.json()` /
 /// `resp.bytes_stream()` 的读取。开关关闭时零开销。
 pub fn traced_response(resp: &reqwest::Response, ctx: &BridgeContext) {
+    // 首字节延迟（TTFB）：始终捕获，不依赖 debug 开关
+    if let (Some(start), Some(mut slot)) = (
+        ctx.request_start_ms.lock().ok().and_then(|g| *g),
+        ctx.first_response_ms.lock().ok(),
+    ) {
+        if slot.is_none() {
+            let now = chrono::Utc::now().timestamp_millis() as u64;
+            *slot = Some(now.saturating_sub(start));
+        }
+    }
     if !crate::config::debug_traffic_enabled() {
         return;
     }

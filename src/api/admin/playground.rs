@@ -101,6 +101,10 @@ pub(crate) fn record_playground_usage(
         filtered_channels: Vec::new(),
         selected_channel: None,
         debug: None,
+        first_response_ms: None,
+        attempts: 1,
+        sensitive_hits: Vec::new(),
+        phase: String::new(),
     };
     if let Err(e) = state.log_store.requests.add(log) {
         tracing::warn!("playground request log write failed: {e}");
@@ -165,6 +169,10 @@ pub(crate) fn record_playground_failure(
         filtered_channels: Vec::new(),
         selected_channel: None,
         debug: None,
+        first_response_ms: None,
+        attempts: 1,
+        sensitive_hits: Vec::new(),
+        phase: String::new(),
     };
     if let Err(e) = state.log_store.requests.add(log) {
         tracing::warn!("playground failure log write failed: {e}");

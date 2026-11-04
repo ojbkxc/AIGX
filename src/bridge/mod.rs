@@ -13,6 +13,7 @@
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// 账号型渠道 Bridge（渠道内账号级调度：选号 / 冷却 / 并发 / 轮换）
@@ -381,16 +382,23 @@ pub struct BridgeContext {
     pub account_id: Option<String>,
     pub api_token: Option<String>,
     pub deadline: Option<Duration>,
+    /// 请求发出时刻（Unix 毫秒），创建时填入。用于计算首字节延迟。
+    pub request_start_ms: Arc<std::sync::Mutex<Option<u64>>>,
+    /// 首字节延迟（TTFB，毫秒）。`traced_response` 收到响应时填入。
+    pub first_response_ms: Arc<std::sync::Mutex<Option<u64>>>,
 }
 
 impl BridgeContext {
     pub fn new(request_id: impl Into<String>, model: impl Into<String>) -> Self {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         Self {
             request_id: request_id.into(),
             model: model.into(),
             account_id: None,
             api_token: None,
             deadline: None,
+            request_start_ms: Arc::new(std::sync::Mutex::new(Some(now_ms))),
+            first_response_ms: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
