@@ -10,6 +10,7 @@ import {
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Bot, Headphones, CalendarCheck, Globe, CalendarClock, Stethoscope,
+  FileText,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -54,6 +55,8 @@ const navItems: NavItem[] = [
   { path: '/scheduled-tasks', labelKey: '定时任务', icon: CalendarClock, adminOnly: true },
   // 系统诊断（渠道体检/批量测活/熔断器快照，与 Agent 运维共用探测口径）
   { path: '/diagnostics', labelKey: '系统诊断', icon: Stethoscope, adminOnly: true },
+  // 接口接入文档（Base URL / 三协议端点 / 模型清单，对照 Agent2API「接口地址」页）
+  { path: '/docs', labelKey: '文档', icon: FileText, adminOnly: true },
 ];
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
 // 管理员 16 项 / 客户 8 项。合并历史：
@@ -97,6 +100,7 @@ const navGroups: NavGroup[] = [
       navItemOf('/checkin'),         // 签到中心
       navItemOf('/scheduled-tasks'), // 定时任务
       navItemOf('/diagnostics'),    // 系统诊断
+      navItemOf('/docs'),           // 文档（接口接入指引）
       navItemOf('/settings'),        // 系统设置
       navItemOf('/agent'),           // AI 运维
     ],

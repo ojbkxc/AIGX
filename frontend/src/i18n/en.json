@@ -2611,5 +2611,22 @@
   "限流剩余": "Rate limit left",
   "全部渠道断路器均为闭合状态": "All circuit breakers are closed",
   "测活完成": "Probe finished",
-  "测活失败": "Probe failed"
+  "测活失败": "Probe failed",
+  "文档": "Docs",
+  "接口接入指引：网关地址、三种对话协议与可用模型清单": "API integration guide: gateway address, three chat protocols, and the available model catalog",
+  "Base URL（网关地址）": "Base URL (Gateway Address)",
+  "填进客户端的「API 地址 / Base URL」栏": "Fill this into your client's \"API Address / Base URL\" field",
+  "对话协议（按客户端支持的类型选一行）": "Chat Protocols (pick the one your client supports)",
+  "多数 OpenAI 兼容客户端的默认协议": "Default protocol for most OpenAI-compatible clients",
+  "OpenAI 新协议（Codex、新版 SDK）": "OpenAI's newer protocol (Codex, new SDKs)",
+  "Claude Code / Anthropic SDK": "Claude Code / Anthropic SDK",
+  "鉴权方式": "Auth",
+  "模型列表": "Model List",
+  "模型来自全部启用渠道的聚合（与 /v1/models 同口径）；客户端自动拉取可用模型，配 Key 之前就能拉": "Models aggregated from all enabled channels (same catalog as /v1/models); clients fetch available models automatically, even before a key is configured",
+  "加载模型列表": "Loading model list",
+  "暂无可用模型。请先在渠道管理或账号池里配置上游": "No models available. Configure upstreams in Channels or the account pool first",
+  "共 {{n}} 个模型": "{{n}} models",
+  "鉴权用「API 密钥」页里任一启用的 Key：请求带 ": "Authenticate with any enabled key from the \"API Keys\" page: send ",
+  " 或 ": " or ",
+  "。一把启用的 Key 都没有时不鉴权（默认网关只监听 127.0.0.1；在设置页开启「局域网访问」后监听所有网卡，鉴权与安全闸门随之启用）。": ". With no enabled key, requests are unauthenticated (the gateway listens on 127.0.0.1 by default; enabling \"LAN access\" in settings listens on all interfaces, which also activates auth and security gates)."
 }
