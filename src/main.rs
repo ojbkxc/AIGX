@@ -2294,7 +2294,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
     // Anthropic 兼容 API 路由（同样双挂无前缀 /messages）
     let anthropic_routes = Router::new()
         .route("/v1/messages", post(api::anthropic::handle_messages))
-        .route("/messages", post(api::anthropic::handle_messages));
+        .route("/messages", post(api::anthropic::handle_messages))
+        .route(
+            "/v1/messages/count_tokens",
+            post(api::anthropic::handle_count_tokens),
+        )
+        .route(
+            "/messages/count_tokens",
+            post(api::anthropic::handle_count_tokens),
+        );
 
     Router::new()
         .merge(admin_routes)

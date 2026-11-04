@@ -1291,3 +1291,57 @@ pub async fn handle_messages(
         }
     }
 }
+
+/// POST /v1/messages/count_tokens — Anthropic 计数估算端点（Claude Code 启动探测）
+///
+/// 不做真实 token 计数，按 chars/3.5 估算并标记 estimated:true。
+/// 只需有效 API Key（不校验模型白名单/配额），因为不转发上游。
+pub async fn handle_count_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let key = match extract_api_key(&headers) {
+        Some(k) => k,
+        None => {
+            return anthropic_error(
+                "authentication_error",
+                "Missing API key",
+                StatusCode::UNAUTHORIZED,
+            )
+            .into_response()
+        }
+    };
+    if state.api_key_store.validate(&key).is_none() {
+        return anthropic_error(
+            "authentication_error",
+            "Invalid API key",
+            StatusCode::UNAUTHORIZED,
+        )
+        .into_response();
+    }
+
+    let mut total_chars: usize = 0;
+    if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
+        for msg in msgs {
+            if let Some(content) = msg.get("content") {
+                if let Some(text) = content.as_str() {
+                    total_chars += text.chars().count();
+                } else if let Some(blocks) = content.as_array() {
+                    for block in blocks {
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            total_chars += text.chars().count();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let estimated = ((total_chars as f64) / 3.5).round() as u64;
+    Json(serde_json::json!({
+        "count": estimated,
+        "estimated": true
+    }))
+    .into_response()
+}
