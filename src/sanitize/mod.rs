@@ -28,11 +28,16 @@
 //!   边界）；残留的裸键名缩写为 `x-anthropic-billing-hdr`（参考注释"最小
 //!   缩写 header→hdr"）。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use regex::Regex;
 
 use crate::bridge::ChatMessage;
+
+/// 命中统计（P2-11）：进入净化的请求数 + 改写应用次数。
+static STATS_HITS: AtomicU64 = AtomicU64::new(0);
+static STATS_REWRITES: AtomicU64 = AtomicU64::new(0);
 
 /// 特征预检：任一命中才进入净化（`str::contains` 快速路径，
 /// 普通请求全不中 → 原样返回，零分配）。匹配大小写敏感（对应参考的
@@ -139,10 +144,13 @@ pub fn sanitize_text(text: &str) -> String {
     if !has_fingerprint(text) {
         return text.to_string();
     }
+    // P2-11 命中统计：进入净化即计一次
+    STATS_HITS.fetch_add(1, Ordering::Relaxed);
     let mut out = text.to_string();
     for (from, to) in SANITIZE_REWRITES {
         if out.contains(from) {
             tracing::debug!("指纹脱敏改写命中: {from:?}");
+            STATS_REWRITES.fetch_add(1, Ordering::Relaxed);
             out = out.replace(from, to);
         }
     }
@@ -288,6 +296,14 @@ pub fn strip_chat_messages(messages: &mut [ChatMessage]) {
             }
         }
     }
+}
+
+/// 命中统计快照（P2-11）：进入净化的请求数 + 改写应用次数。
+pub fn snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "hits": STATS_HITS.load(Ordering::Relaxed),
+        "rewrites": STATS_REWRITES.load(Ordering::Relaxed),
+    })
 }
 
 #[cfg(test)]

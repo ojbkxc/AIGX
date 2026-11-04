@@ -969,6 +969,7 @@ pub async fn handle_get_sanitize(
         "success": true,
         "data": {
             "extra_headers": crate::config::extra_sensitive_headers(),
+            "stats": crate::sanitize::snapshot(),
         }
     })))
 }
