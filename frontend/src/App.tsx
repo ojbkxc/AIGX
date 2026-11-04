@@ -1,5 +1,5 @@
-import React, { lazy, Suspense } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import React, { lazy, Suspense, useEffect } from 'react';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import StatusLine from './components/StatusLine';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -7,6 +7,8 @@ import RouteErrorPage from './components/RouteErrorPage';
 import PermissionDenied from './components/PermissionDenied';
 import { ToastProvider } from './components/Toast';
 import { isAdmin } from './lib/utils';
+import { useMobileColumns } from './hooks/useMobileColumns';
+import { start as startCaptchaPool, stop as stopCaptchaPool } from './lib/zcodeCaptchaPool';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
@@ -134,10 +136,42 @@ function AdminRoute({ children }: AdminRouteProps) {
   return <ProtectedLayout>{children}</ProtectedLayout>;
 }
 
+/**
+ * ZCode 验证码令牌池的后台铸造器（管理端登录后自启）。
+ *
+ * ── 为什么不放在设置页 ────────────────────────────────────────
+ * 令牌是**转发链路**的输入（活动套餐通道每条请求都要一枚），而用户不会为了
+ * 发请求先去开着设置页。挂在这里 = 管理端一登录就开始守着。
+ *
+ * ── 为什么不能用 `useEffect([])` ───────────────────────────────
+ * 登录是**客户端跳转**（`Login.tsx` 里 `navigate('/')`），App 不会重挂载 ——
+ * 一个空依赖的 effect 只在首屏跑一次，那时还没登录，于是「不启动」的结论
+ * 会被记一辈子。所以这里 `useLocation()` 订阅路由：登录/登出走客户端跳转时
+ * 把 `active` 重新算一遍。
+ *
+ * 代价是每次路由变化都会 `stop()` + `start()` 一次 —— 两者都是幂等的
+ * （`stop` 只清计时器、`start` 只重排一次），不会漏掉循环。
+ *
+ * 非管理员不启动：这些接口都是管理接口，普通用户每轮只换回一条 401。
+ * 没有 ZCode 账号时铸造器自己退让不铸（网关的 `needsTokens` 判据）。
+ */
+function CaptchaPoolRunner(): null {
+  const { pathname } = useLocation();
+  const active = isAuthenticated() && isAdmin();
+  useEffect(() => {
+    if (!active) return undefined;
+    startCaptchaPool();
+    return () => stopCaptchaPool();
+  }, [active, pathname]);
+  return null;
+}
+
 export default function App(): JSX.Element {
+  useMobileColumns();
   return (
     <ErrorBoundary>
       <ToastProvider>
+        <CaptchaPoolRunner />
         <Routes>
           <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
           <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />

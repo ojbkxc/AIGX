@@ -2675,3 +2675,101 @@ td.align-left, th.align-left { text-align: left; }
 td.align-center, th.align-center { text-align: center; }
 td.align-right, th.align-right { text-align: right; }
 
+/* ── 移动端卡片化（≤767px：表格行拆卡片，列名注入 data-col）── */
+/* 对照 Agent2API ui/css/mobile.css 的表格卡片化口径 */
+@media (max-width: 767px) {
+  .table-wrapper {
+    overflow-x: hidden !important;
+  }
+
+  .table-wrapper table {
+    display: block;
+    table-layout: auto;
+    width: 100%;
+    min-width: 0 !important;
+  }
+
+  .table-wrapper thead {
+    display: none;
+  }
+
+  .table-wrapper tbody {
+    display: block;
+  }
+
+  .table-wrapper tr {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 10px;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 10px;
+    margin: 0 0 10px;
+    background: #fff;
+  }
+
+  /* 每格自带列名：表头文字由 useMobileColumns hook 注入到 td 的 data-col */
+  .table-wrapper td {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+    width: auto;
+    white-space: normal;
+  }
+
+  .table-wrapper td::before {
+    content: attr(data-col);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #9ca3af;
+  }
+
+  /* 含按钮 / 勾选框的格一律整行（操作列） */
+  .table-wrapper td:has(button, input[type="checkbox"], input[type="radio"]) {
+    grid-column: 1 / -1;
+  }
+
+  /* 单一 td 的行：分组标题 / 空态行，不显示列名 */
+  .table-wrapper tr > td:only-child {
+    grid-column: 1 / -1;
+  }
+  .table-wrapper tr > td:only-child::before {
+    content: none;
+  }
+
+  /* 操作按钮纵向堆 */
+  .table-wrapper td:has(button) {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  /* 长串折行 */
+  .table-wrapper td code, .table-wrapper td .mono {
+    word-break: break-all;
+    white-space: normal;
+  }
+
+  /* 内容区留白收窄 */
+  .content {
+    padding: 12px 12px 20px;
+  }
+
+  /* 面板头重排 */
+  .panel-head {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* 触控目标放大 */
+  .btn, button {
+    min-height: 36px;
+  }
+
+  /* 文档级横向溢出锁死 */
+  body {
+    overflow-x: hidden;
+  }
+}
