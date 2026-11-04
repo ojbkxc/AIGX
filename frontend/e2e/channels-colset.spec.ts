@@ -15,8 +15,8 @@ const PANEL_TOGGLE = '.ch-colset > button';
 
 /** 打开列设置面板，等表格数据渲染出来（面板在工具栏，表头异步加载） */
 async function openPanel(page: import('@playwright/test').Page): Promise<void> {
-  // 等表格表头出现，确认渠道数据已加载
-  await expect(page.locator('th.col-name')).toBeVisible();
+  // 等数据行出现（移动端 thead display:none，td 在桌面/移动端都可见）
+  await expect(page.locator('td.col-name').first()).toBeVisible();
   await page.locator(PANEL_TOGGLE).click();
   await expect(page.locator('.ch-colset-panel')).toBeVisible();
 }
@@ -127,8 +127,8 @@ test.describe('渠道列设置面板', () => {
     // 点恢复默认
     await page.locator('.ch-colset-reset').click();
 
-    // 权重表头回来
-    await expect(page.locator('th.col-weight')).toBeVisible();
+    // 权重表头回来（移动端 thead display:none，用 td 验证列已恢复可见）
+    await expect(page.locator('td.col-weight').first()).toBeVisible();
     // 响应列回到默认左对齐
     const thCls = await page.locator('th.col-response').evaluate((el) => el.className);
     expect(thCls).toContain('ta-left');

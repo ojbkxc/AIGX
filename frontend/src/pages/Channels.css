@@ -1155,6 +1155,7 @@ table tbody td input[type="checkbox"] {
   .ch-colset-panel {
     position: fixed;
     top: var(--ch-colset-top, 260px);
+    bottom: 12px;
     left: 12px;
     right: auto;
     width: min(330px, calc(100vw - 24px));
@@ -1191,6 +1192,17 @@ table tbody td input[type="checkbox"] {
   padding: 4px 12px 6px;
 }
 
+/* 窄屏覆盖：锚定 bottom 后面板高度由视口决定，
+   固定 max-height:320px 会让 rows+foot 超出视口、foot(tip) 覆盖 rows 内容。
+   必须在上面的全局 .ch-colset-rows 之后声明——同特异性下源顺序靠后胜出，
+   否则 max-height:320px 会压掉这里的 none。rows 改 flex:1 自适应滚动，foot 始终可见。 */
+@media (max-width: 520px) {
+  .ch-colset-rows {
+    max-height: none;
+    flex: 1 1 auto;
+  }
+}
+
 .ch-colset-row {
   padding: 5px 0;
   border-radius: 4px;
@@ -1212,6 +1224,7 @@ table tbody td input[type="checkbox"] {
   color: var(--text-muted);
   opacity: 0.5;
   cursor: grab;
+  touch-action: none;
 }
 
 .ch-colset-grip:hover {

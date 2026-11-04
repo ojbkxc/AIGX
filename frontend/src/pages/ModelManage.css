@@ -930,11 +930,13 @@
 }
 
 /* 窄屏（<520px）：同 Channels 页的 colset 面板——fixed 逃逸 .card 裁剪，
-   宽度自适应视口，top 由 JS 注入（--mm-colset-top，见 ModelManage.tsx）。 */
+   宽度自适应视口，top 由 JS 注入（--mm-colset-top，见 ModelManage.tsx）。
+   bottom 同时锚定视口底部，行区 flex:1 自适应滚动，foot 始终可见。 */
 @media (max-width: 520px) {
   .mm-colset-panel {
     position: fixed;
     top: var(--mm-colset-top, 260px);
+    bottom: 12px;
     left: 12px;
     right: auto;
     width: min(330px, calc(100vw - 24px));
@@ -971,6 +973,17 @@
   padding: 4px 12px 6px;
 }
 
+/* 窄屏覆盖：同 Channels 页——锚定 bottom 后面板高度由视口决定，
+   固定 max-height:320px 会让 rows+foot 超出视口、foot 覆盖 rows 内容。
+   必须在上面的全局 .mm-colset-rows 之后声明（同特异性源顺序靠后胜出），
+   否则 max-height:320px 会压掉这里的 none。 */
+@media (max-width: 520px) {
+  .mm-colset-rows {
+    max-height: none;
+    flex: 1 1 auto;
+  }
+}
+
 .mm-colset-row {
   padding: 5px 0;
   border-radius: 4px;
@@ -992,6 +1005,7 @@
   color: var(--text-muted);
   opacity: 0.5;
   cursor: grab;
+  touch-action: none;
 }
 
 .mm-colset-grip:hover {
