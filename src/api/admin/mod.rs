@@ -27,6 +27,7 @@ pub mod prompts;
 pub mod proxy_pool_api;
 pub mod redemptions;
 pub mod routing;
+pub mod queue_api;
 pub mod scheduled_tasks;
 pub mod security;
 pub mod settings;
@@ -36,6 +37,7 @@ pub mod tokens;
 pub mod update;
 pub mod upgrade; // 数据升级端点（对照 Agent2API /api/upgrade）
 pub mod users; // 网络层管理模块
+pub mod zcode_captcha; // ZCode 人机验证令牌池（对照 Agent2API /api/zcode/captcha*）
 
 pub use auth::{
     handle_captcha, handle_change_password, handle_forgot_password, handle_geo_lang,
@@ -221,6 +223,8 @@ pub use routing::{
     handle_get_routing, handle_routing_defaults, handle_routing_queue, handle_update_routing,
 };
 
+pub use queue_api::{handle_get_queue, handle_update_queue};
+
 // 间隔型定时任务（凭证维护/模型刷新/版本检查 + 三页自动刷新的开关与间隔）
 pub use scheduled_tasks::{configure_handler, list_handler, run_handler};
 
@@ -229,3 +233,9 @@ pub use cline_headers::{handle_get_cline_headers, handle_update_cline_headers};
 
 // 数据升级端点（对照 Agent2API /api/upgrade + /api/upgrade/run）
 pub use upgrade::{handle_get_upgrade, handle_run_upgrade};
+
+// ZCode 人机验证令牌池（概况 / 入池 / 风控配置 / 铸造节奏）
+pub use zcode_captcha::{
+    handle_get_zcode_captcha, handle_get_zcode_captcha_config, handle_get_zcode_captcha_pool,
+    handle_push_zcode_captcha, handle_update_zcode_captcha_pool,
+};

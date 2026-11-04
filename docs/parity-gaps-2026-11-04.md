@@ -62,7 +62,7 @@
 | P2-5 | models/refresh 全量 | #4 ⚠️ | 全量刷新端点 | 未实现（仅 /api/models/metadata/refresh） |
 | P2-6 | models/capabilities 手动覆盖 | #4 ⚠️ | 能力位手动覆盖 |
 | P2-7 | proxy-pool sync-clash | #4 ⚠️ | Clash Verge 同步 |
-| P2-8 | queue 次数参数 | #4 ⚠️ | 排队次数 HTTP 参数 |
+| P2-8 | queue 次数参数 | #4 ⚠️ | 排队次数 HTTP 参数 | **已实现**（`GET/PUT /api/queue`：`queueMaxWaits`（0~10）/`queueWaitSeconds`（0~120），camelCase 键名对齐基线；部分字段更新；空桶校验） |
 | P2-9 | 用量报表字段对齐 | #5 ⚠️ | attempts 链/first_response_ms/sensitive_hits/phase 等 |
 | P2-10 | Responses/Completions 净化挂载 | #6 ⚠️ | 指纹脱敏挂到 Responses/Completions 路径 | **已实现**（`crate::sanitize::strip(&mut attempt_body)` 挂到 responses.rs / completions.rs 两路径） |
 | P2-11 | sanitize 命中统计 | #6 ⚠️ | 净化命中计数 | **已实现**（`STATS_HITS`/`STATS_REWRITES` 原子计数器 + `snapshot()`，GET /api/sanitize 响应加 `stats` 字段） |

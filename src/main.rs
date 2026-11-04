@@ -1801,6 +1801,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/routing/defaults",
             get(api::admin::handle_routing_defaults),
         )
+        // 排队设置（对照 Agent2API「设置 → 排队」：queueMaxWaits / queueWaitSeconds）
+        .route(
+            "/api/queue",
+            get(api::admin::handle_get_queue).put(api::admin::handle_update_queue),
+        )
         // 路由队列预演（对照 Agent2API「设置 → 路由 → 候选队列」：只读，
         // 不推进 round_robin 游标；round_robin 下实际首挑由游标决定）
         .route("/api/routing/queue", get(api::admin::handle_routing_queue))
