@@ -55,6 +55,7 @@ pub mod usage;
 pub mod user;
 pub mod user_group;
 pub mod web;
+pub mod zcode_captcha;
 
 // SeaORM 多数据库后端模块（仅当启用 sea-orm feature 时编译）。
 //

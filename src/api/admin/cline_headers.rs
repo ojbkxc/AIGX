@@ -38,8 +38,9 @@ const MAX_VALUE_LEN: usize = 4096;
 /// 凭证构造）或协议必需（Content-Type）。覆盖表里出现它们一律 400。
 ///
 /// 必须拦在配置侧：覆盖表里写一个 Authorization 会在合并时顶掉真正的
-/// 凭证，把请求发成别人身份。
-const FIXED_HEADERS: [&str; 2] = ["Authorization", "Content-Type"];
+/// 凭证，把请求发成别人身份。与转发侧合并用的是**同一张表**
+/// （`crate::config::CLINE_FIXED_HEADER_NAMES`），不存在两处口径分裂。
+const FIXED_HEADERS: [&str; 2] = crate::config::CLINE_FIXED_HEADER_NAMES;
 
 /// cline 渠道（SESSION_PROVIDERS 键名）的默认请求头模板。
 fn default_headers() -> BTreeMap<String, String> {

@@ -5,9 +5,11 @@
 //! - **两个地区共用同一个平台域** `zcode.z.ai`（地区只影响推理平面）；
 //! - `X-Device-Mid` 是**硬要求**：必须是稳定 UUID，缺了或每次变都会被
 //!   上游判 3001 参数错误 —— 所以按账号落盘一枚，跨请求复用；
-//! - 领取要过**阿里云验证码**，上游只收「前端 webview 用官方 SDK 求解出来的
-//!   一串参数」；后端只做转发（`X-Aliyun-Captcha-Verify-Param`）。因此
-//!   `mode=claim` 需要前端把求解结果一起带上，纯后台无法自动领；
+//! - 领取要过**阿里云验证码**，上游只收「浏览器环境用官方 SDK 求解出来的
+//!   一串参数」；后端只做转发（`X-Aliyun-Captcha-Verify-Param`）。参数有两个
+//!   来源：前端点「领套餐」时当场求解（`params.captcha_verify_param`，优先），
+//!   或前端铸造器预先筑进令牌池的那几枚（`crate::zcode_captcha::take()`，
+//!   供定时/后台领取）。两边都没有时**如实失败**（池空 = headless 部署）。
 //! - 领取资格前置是两条**无鉴权**的激活事件（`app_launch` / `app_daily_active`），
 //!   探测为空时补报一次再重探（失败不阻断）。
 //!
@@ -136,10 +138,41 @@ async fn claim(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
+        // 前端手动求解（点「领套餐」时当场拖滑块）走这条：它比池子里的更可信
         headers.push((
             "X-Aliyun-Captcha-Verify-Param".to_string(),
             verify.to_string(),
         ));
+        if let Some(region) = params
+            .get("captcha_verify_region")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            headers.push(("X-Aliyun-Captcha-Verify-Region".to_string(), region.to_string()));
+        }
+    } else if let Some((param, region)) = crate::zcode_captcha::take() {
+        // 没有任何前端参与时（定时任务、后台领取）从令牌池取一枚 ——
+        // 池子由前端铸造器维护（见 `zcode_captcha` 模块头）。
+        headers.push((
+            crate::zcode_captcha::VERIFY_PARAM_HEADER.to_string(),
+            param,
+        ));
+        if !region.trim().is_empty() {
+            headers.push((
+                crate::zcode_captcha::VERIFY_REGION_HEADER.to_string(),
+                region,
+            ));
+        }
+    } else {
+        // 没令牌就别去撞墙上：上游一定回 3007，白费一次往返还把“无可用令牌”
+        // 这个真实原因盖成一句看不懂的英文。（headless / Docker 部署恒走这条：
+        // 没有 WebView 就铸不出令牌。）
+        return BenefitResult::failed(
+            "领取需要一枚阿里云验证码令牌，而令牌池此刻是空的：\
+             请在网关设置里保持管理页面打开（它会在后台铸造），\
+             或直接点本行的「领套餐」按钮当场求解",
+        );
     }
 
     // 资格前置：补报激活事件（无鉴权，失败不阻断）
@@ -190,7 +223,11 @@ async fn claim(
         1002 => BenefitResult::already("该套餐当前不可领").with_data(body),
         1004 => BenefitResult::failed("账号不符合该套餐的领取资格").with_data(body),
         1005 => BenefitResult::pending("当日领取额度已用尽，明天再试").with_data(body),
-        3007 => BenefitResult::failed("验证码校验未通过，请重新求解").with_data(body),
+        3007 => {
+            // 上游拒了这枚令牌：池子里剩下的同样不可信了，让前端立刻补货
+            crate::zcode_captcha::note_challenge();
+            BenefitResult::failed("验证码校验未通过，请重新求解").with_data(body)
+        }
         3001 => BenefitResult::failed("请求参数被拒（设备指纹或 plan_id 不对）").with_data(body),
         other => BenefitResult::failed(format!("领取失败（code={other}）")).with_data(body),
     }

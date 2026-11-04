@@ -32,16 +32,19 @@ pub fn effective_base_url(session: &AccountSession) -> Result<String, BridgeErro
     Ok(spec.default_base_url.to_string())
 }
 
-/// 合并请求头：provider 默认头 + 账号级额外头（同名以账号级为准）。
+/// 合并请求头：provider 默认头 + Cline 伪装头覆盖表 + 账号级额外头
+/// （同名以账号级为准；覆盖表只对 `cline*` 渠道生效，空串 = 不发这个头）。
 fn session_headers(
     session: &AccountSession,
     meta: &registry::SessionMeta,
 ) -> Vec<(String, String)> {
-    let mut merged: Vec<(String, String)> = meta
+    let merged: Vec<(String, String)> = meta
         .headers
         .iter()
         .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect();
+    // 先叠全局覆盖表（用户可改的伪装头），再叠账号级额外头：后者更具体，优先级更高。
+    let mut merged = crate::config::apply_cline_header_overrides(&session.provider, merged);
     for (name, value) in &session.extra_headers {
         let lower = name.to_ascii_lowercase();
         merged.retain(|(existing, _)| existing.to_ascii_lowercase() != lower);
@@ -204,8 +207,41 @@ mod tests {
             .collect();
         assert_eq!(ua.len(), 1, "同名请求头应只保留账号级一条");
         assert_eq!(ua[0].1, "custom/1.0");
-        assert!(merged
+    }
+
+    #[test]
+    fn admin_overrides_apply_to_cline_and_only_cline() {
+        // 快照为空时：Cline 默认头原样下发
+        crate::config::set_cline_header_overrides(Vec::new());
+        let mut session = AccountSession::new("ch", "acct");
+        session.provider = "cline-free".to_string();
+        let cline_meta = registry::session_meta("cline-free").unwrap();
+        let before = session_headers(&session, cline_meta);
+        assert!(before
             .iter()
-            .any(|(name, value)| name == "x-token" && value == "{credential}"));
+            .any(|(name, value)| name == "user-agent" && value == "Cline/3.0.62"));
+
+        // 写入覆盖表后：Cline 拿到覆盖值
+        crate::config::set_cline_header_overrides(vec![
+            ("User-Agent".to_string(), "Cline/9.9.9".to_string()),
+            ("x-title".to_string(), String::new()),
+        ]);
+        let after = session_headers(&session, cline_meta);
+        assert!(after
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("user-agent") && value == "Cline/9.9.9"));
+        assert!(!after.iter().any(|(name, _)| name == "x-title"));
+
+        // 非 cline 渠道不受覆盖表影响
+        let mut other = AccountSession::new("ch", "acct2");
+        other.provider = "qoder".to_string();
+        let qoder_meta = registry::session_meta("qoder").unwrap();
+        let untouched = session_headers(&other, qoder_meta);
+        assert!(!untouched
+            .iter()
+            .any(|(_, value)| value == "Cline/9.9.9"));
+
+        // 恢复空表，避免影响其它用例
+        crate::config::set_cline_header_overrides(Vec::new());
     }
 }
