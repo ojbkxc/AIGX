@@ -516,12 +516,20 @@ pub struct GatewaySettingsRequest {
     pub port: Option<u16>,
     pub cors_origins: Option<Vec<String>>,
     pub trust_proxy_headers: Option<bool>,
+    pub log_dir: Option<String>,
+    pub request_stats_dir: Option<String>,
+    pub debug_dir: Option<String>,
 }
 
 fn gateway_settings_json(config: &crate::config::AppConfig) -> Value {
+    let dirs = crate::config::storage_dirs(config);
     json!({
         "host": config.server.host,
         "port": config.server.port,
+        "dataDir": config.server.data_dir,
+        "logDir": config.server.log_dir.clone().unwrap_or_else(|| dirs.log_dir.to_string_lossy().into_owned()),
+        "requestStatsDir": config.server.request_stats_dir.clone().unwrap_or_else(|| dirs.request_stats_dir.to_string_lossy().into_owned()),
+        "debugDir": config.server.debug_dir.clone().unwrap_or_else(|| dirs.debug_dir.to_string_lossy().into_owned()),
         "corsOrigins": config.cors_origins,
         "trustProxyHeaders": config.trust_proxy_headers,
         "restartRequired": true,
@@ -595,6 +603,41 @@ pub async fn handle_update_gateway_settings(
     }
     if let Some(v) = body.trust_proxy_headers {
         config.trust_proxy_headers = v;
+    }
+    // 目录配置（logDir / requestStatsDir / debugDir）：空串 = 清除自定义、回落默认
+    for (field, label) in [
+        (&body.log_dir, "log_dir"),
+        (&body.request_stats_dir, "request_stats_dir"),
+        (&body.debug_dir, "debug_dir"),
+    ] {
+        if let Some(raw) = field {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                // 空串 = 清除自定义设置
+                if label == "log_dir" {
+                    config.server.log_dir = None;
+                } else if label == "request_stats_dir" {
+                    config.server.request_stats_dir = None;
+                } else {
+                    config.server.debug_dir = None;
+                }
+            } else {
+                let path = crate::config::expand_path(trimmed);
+                if !path.is_absolute() {
+                    return Err(error_response(
+                        &format!("{label} 必须是绝对路径"),
+                        StatusCode::BAD_REQUEST,
+                    ));
+                }
+                if label == "log_dir" {
+                    config.server.log_dir = Some(path.to_string_lossy().into_owned());
+                } else if label == "request_stats_dir" {
+                    config.server.request_stats_dir = Some(path.to_string_lossy().into_owned());
+                } else {
+                    config.server.debug_dir = Some(path.to_string_lossy().into_owned());
+                }
+            }
+        }
     }
     // 信任反代头立即生效（客户端 IP 提取走进程级快照）；
     // 监听地址/端口/CORS 需重启服务后生效。
@@ -1029,6 +1072,8 @@ pub async fn handle_update_sanitize(
 
     Ok(Json(json!({
         "success": true,
-        "data": { "extra_headers": list }
+        // 保存回显带上 stats：前端保存后会拿本次响应覆盖整个面板状态，
+        // 这里不返回的话命中计数会在保存后凭空消失（下一次刷新才回来）。
+        "data": { "extra_headers": list, "stats": crate::sanitize::snapshot() }
     })))
 }

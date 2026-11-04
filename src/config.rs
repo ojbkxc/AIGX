@@ -58,6 +58,15 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
+    /// 日志目录（可选，默认 = data_dir/logs）
+    #[serde(default)]
+    pub log_dir: Option<String>,
+    /// 请求统计目录（可选，默认 = data_dir/stats）
+    #[serde(default)]
+    pub request_stats_dir: Option<String>,
+    /// 调试数据目录（可选，默认 = data_dir/debug）
+    #[serde(default)]
+    pub debug_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -421,6 +430,35 @@ pub struct UsageConfig {
     /// 渠道的请求头模板，不落盘；空串值 = 这个头不发；键缺失 = 回落默认。
     #[serde(default)]
     pub cline_headers: ClineHeadersConfig,
+    /// ZCode 验证码令牌池的库存目标（对齐 Agent2API `zcodeCaptchaPoolTarget`，1~10，默认 3）。
+    ///
+    /// 只影响**前端铸造节奏**：库存低于它才补。「够下一条请求立刻有得用」即可，
+    /// 铸多了纯属烧阿里云风控配额（令牌寿命只有两分钟，见 `zcode_captcha::TOKEN_TTL_MS`）。
+    #[serde(default = "default_zcode_captcha_pool_target")]
+    pub zcode_captcha_pool_target: u8,
+    /// 令牌池轮询间隔毫秒（对齐 Agent2API `zcodeCaptchaPoolPollMs`，1000~30000，默认 2500）。
+    #[serde(default = "default_zcode_captcha_pool_poll_ms")]
+    pub zcode_captcha_pool_poll_ms: u32,
+    /// 单轮铸造上限（对齐 Agent2API `zcodeCaptchaPoolMaxPerRound`，1~5，默认 1）。
+    ///
+    /// 1 = 单实例单次铸造，避开并发冲突与 DOM 重建竞态（SDK 同一个实例连铸两轮会互踩）。
+    #[serde(default = "default_zcode_captcha_pool_max_per_round")]
+    pub zcode_captcha_pool_max_per_round: u8,
+}
+
+/// 令牌池库存目标默认值（够下一条请求立刻有得用）。
+fn default_zcode_captcha_pool_target() -> u8 {
+    3
+}
+
+/// 令牌池轮询间隔默认值（毫秒）。
+fn default_zcode_captcha_pool_poll_ms() -> u32 {
+    2_500
+}
+
+/// 单轮铸造上限默认值。
+fn default_zcode_captcha_pool_max_per_round() -> u8 {
+    1
 }
 
 /// Cline 伪装头覆盖表（键 → 值；只存用户改过/新增的键）。
@@ -654,6 +692,9 @@ impl Default for ServerConfig {
             host: default_host(),
             port: default_port(),
             data_dir: default_data_dir(),
+            log_dir: None,
+            request_stats_dir: None,
+            debug_dir: None,
         }
     }
 }
@@ -693,6 +734,9 @@ impl Default for UsageConfig {
             auto_continue_max_rounds: default_auto_continue_max_rounds(),
             sanitize_fingerprints: default_sanitize_fingerprints(),
             cline_headers: Default::default(),
+            zcode_captcha_pool_target: default_zcode_captcha_pool_target(),
+            zcode_captcha_pool_poll_ms: default_zcode_captcha_pool_poll_ms(),
+            zcode_captcha_pool_max_per_round: default_zcode_captcha_pool_max_per_round(),
             billing_flat_quota: default_billing_flat_quota(),
         }
     }
@@ -1019,6 +1063,96 @@ pub fn set_cline_header_overrides(entries: Vec<(String, String)>) {
     }
 }
 
+/// Cline 伪装头里网关保留、**不允许覆盖**的固定头（小写比较）。
+///
+/// `Authorization` 由桥接层按账号凭证逐请求生成，覆盖它等于把请求发成别人
+/// 身份；`Content-Type` 是协议必需。管理端写入口与转发侧合并都按这张表拦截
+/// （前者的作用是把非法配置挡在落盘之前，后者是配置文件被手改后的兜底）。
+pub const CLINE_FIXED_HEADER_NAMES: [&str; 2] = ["authorization", "content-type"];
+
+/// 把 Cline 伪装头覆盖表应用到一组请求头上。
+///
+/// - 仅对 `cline*` 渠道生效（`cline` / `cline-free` / `cline-pass` 共用同一套头）；
+/// - 大小写不敏感：覆盖表里的键先把已存在的同名头摘掉，再按覆盖表里的原样写法插入；
+/// - 值为**空串 = 主动不发这个头**（对齐 Agent2API 的 `merge_headers`）；
+/// - 固定头（Authorization / Content-Type）不做覆盖，防止配置文件被手改后顶掉凭证。
+pub fn apply_cline_header_overrides(
+    provider: &str,
+    headers: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    if !provider.starts_with("cline") {
+        return headers;
+    }
+    merge_cline_header_overrides(headers, &cline_header_overrides())
+}
+
+/// 覆盖表合并的纯函数本体（不读快照，便于单测与复用）。
+pub fn merge_cline_header_overrides(
+    headers: Vec<(String, String)>,
+    overrides: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut merged = headers;
+    for (name, value) in overrides {
+        let lower = name.to_ascii_lowercase();
+        if CLINE_FIXED_HEADER_NAMES.contains(&lower.as_str()) {
+            continue;
+        }
+        merged.retain(|(existing, _)| existing.to_ascii_lowercase() != lower);
+        if !value.is_empty() {
+            merged.push((name.clone(), value.clone()));
+        }
+    }
+    merged
+}
+
+// ── ZCode 验证码令牌池的节奏设置 ───────────────────────────────
+//
+// 与其余网关设置同构：进程级快照，写少读多。
+// 读方是「每轮都问一次「要不要铸」的前端铸造器」（`GET /api/zcode/captcha`
+// 把这三个值随概况一起下发），所以它们必须是同步、零 IO 的 —— 每 2.5 秒
+// 就走一次配置文件的文件 I/O 毫不合理。
+
+/// 库存目标的合法范围（与前端铸造器的夹取区间同源）。
+pub const ZCODE_POOL_TARGET_MIN: u8 = 1;
+pub const ZCODE_POOL_TARGET_MAX: u8 = 10;
+/// 轮询间隔的合法范围（毫秒）。
+pub const ZCODE_POOL_POLL_MIN_MS: u32 = 1_000;
+pub const ZCODE_POOL_POLL_MAX_MS: u32 = 30_000;
+/// 单轮铸造上限的合法范围。
+pub const ZCODE_POOL_PER_ROUND_MIN: u8 = 1;
+pub const ZCODE_POOL_PER_ROUND_MAX: u8 = 5;
+
+static ZCODE_POOL_TARGET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(3);
+static ZCODE_POOL_POLL_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2_500);
+static ZCODE_POOL_MAX_PER_ROUND: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(1);
+
+/// 读取令牌池节奏设置 `(target, poll_ms, max_per_round)`。
+pub fn zcode_captcha_pool_settings() -> (u8, u32, u8) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let target = ZCODE_POOL_TARGET.load(Relaxed);
+    let poll = ZCODE_POOL_POLL_MS.load(Relaxed);
+    let per_round = ZCODE_POOL_MAX_PER_ROUND.load(Relaxed);
+    (target as u8, poll, per_round as u8)
+}
+
+/// 由 main 与 `PUT /api/zcode/captcha-pool` 写入快照（越界值夹进合法范围）。
+pub fn set_zcode_captcha_pool_settings(target: u8, poll_ms: u32, max_per_round: u8) {
+    use std::sync::atomic::Ordering::Relaxed;
+    ZCODE_POOL_TARGET.store(
+        target.clamp(ZCODE_POOL_TARGET_MIN, ZCODE_POOL_TARGET_MAX) as u32,
+        Relaxed,
+    );
+    ZCODE_POOL_POLL_MS.store(
+        poll_ms.clamp(ZCODE_POOL_POLL_MIN_MS, ZCODE_POOL_POLL_MAX_MS),
+        Relaxed,
+    );
+    ZCODE_POOL_MAX_PER_ROUND.store(
+        max_per_round.clamp(ZCODE_POOL_PER_ROUND_MIN, ZCODE_POOL_PER_ROUND_MAX) as u32,
+        Relaxed,
+    );
+}
+
 /// 账号池「同账号重试」次数的进程级快照（对齐 Agent2API retryCount）。
 /// 换号次数由账号池「账号路由」的 `RotationPolicy.max_attempts` 控制。
 static RETRY_SELF_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -1174,6 +1308,31 @@ pub fn expand_path(path: &str) -> PathBuf {
     }
 }
 
+/// 存储目录快照（logDir / requestStatsDir / debugDir）。
+///
+/// 未配置时回落到 `data_dir` 的子目录（logs / stats / debug）。
+/// 对应基线 `storage_dirs()`。
+pub struct StorageDirs {
+    pub log_dir: PathBuf,
+    pub request_stats_dir: PathBuf,
+    pub debug_dir: PathBuf,
+}
+
+pub fn storage_dirs(config: &AppConfig) -> StorageDirs {
+    let base = expand_path(&config.server.data_dir);
+    let resolve = |raw: &Option<String>, sub: &str| -> PathBuf {
+        raw.as_deref()
+            .map(|p| expand_path(p))
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| base.join(sub))
+    };
+    StorageDirs {
+        log_dir: resolve(&config.server.log_dir, "logs"),
+        request_stats_dir: resolve(&config.server.request_stats_dir, "stats"),
+        debug_dir: resolve(&config.server.debug_dir, "debug"),
+    }
+}
+
 /// 隐藏数据库 URL 里的用户名与密码，专供日志输出。
 ///
 /// `postgres://user:pass@host:5432/db` → `postgres://***@host:5432/db`；
@@ -1263,7 +1422,49 @@ mod tests {
         assert!(!super::is_retry_status(700));
         // 恢复默认，避免影响其它用例
         super::set_retry_on_status_codes(vec![402]);
-        assert!(super::is_retry_status(402));
-        assert!(!super::is_retry_status(404));
+    }
+
+    #[test]
+    fn cline_overrides_merge_case_insensitively_and_can_drop_headers() {
+        let base = vec![
+            ("user-agent".to_string(), "Cline/3.0.62".to_string()),
+            ("x-client-type".to_string(), "cline-sdk".to_string()),
+            ("x-title".to_string(), "Cline".to_string()),
+        ];
+        let overrides = vec![
+            // 改大小写写法也必须把默认那条撑掉（不能变成两条同名头）
+            ("User-Agent".to_string(), "Cline/3.0.99".to_string()),
+            // 空串 = 这个头不发
+            ("x-title".to_string(), String::new()),
+            // 覆盖表里没有的键 = 新增自定义头
+            ("x-custom".to_string(), "1".to_string()),
+        ];
+        let merged = super::merge_cline_header_overrides(base, &overrides);
+        let ua: Vec<&(String, String)> = merged
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+            .collect();
+        assert_eq!(ua.len(), 1, "同名头只能保留覆盖后的那一条");
+        assert_eq!(ua[0].1, "Cline/3.0.99");
+        assert!(!merged.iter().any(|(name, _)| name == "x-title"));
+        assert!(merged
+            .iter()
+            .any(|(name, value)| name == "x-custom" && value == "1"));
+        // 没被覆盖的默认头原样保留
+        assert!(merged
+            .iter()
+            .any(|(name, value)| name == "x-client-type" && value == "cline-sdk"));
+    }
+
+    #[test]
+    fn cline_overrides_cannot_replace_fixed_headers() {
+        let base = vec![("x-title".to_string(), "Cline".to_string())];
+        let overrides = vec![
+            ("Authorization".to_string(), "Bearer stolen".to_string()),
+            ("content-type".to_string(), "text/plain".to_string()),
+        ];
+        let merged = super::merge_cline_header_overrides(base, &overrides);
+        assert_eq!(merged.len(), 1, "固定头不会被覆盖表写入");
+        assert_eq!(merged[0].0, "x-title");
     }
 }

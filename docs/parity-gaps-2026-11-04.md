@@ -68,9 +68,9 @@
 | P2-11 | sanitize 命中统计 | #6 ⚠️ | 净化命中计数 | **已实现**（`STATS_HITS`/`STATS_REWRITES` 原子计数器 + `snapshot()`，GET /api/sanitize 响应加 `stats` 字段） |
 | P2-12 | 定时任务默认值对齐 | #8 ⚠️ | 6 条默认开（基线默认开 vs AIGX 全关） | **已实现**（ScheduledSettings 默认 enabled: true） |
 | P2-13 | 超时默认值对齐 | #8 ⚠️ | connect 30→10、headers 300→60、stream 300→30 | **已实现**（默认值已是 10/60/30） |
-| P2-14 | routing 策略键 | #8 ❌ | strategy/sticky/failover/breaker |
+| P2-14 | routing 策略键 | #8 ❌ | strategy/sticky/failover/breaker | **已实现**（`GET/PUT /api/routing`：strategy/sticky/breaker/scheduler_weights；failover_backoff 由冷却/断路器/健康归档承担，不做独立开关） |
 | P2-15 | 日志/请求/聚合三档保留期配置 | #8 ❌ | retention 配置端点 | **已实现**（/api/logs/retention 已有 request/daily/audit 三档 + capacity） |
-| P2-16 | 目录配置 | #8 ❌ | logDir/requestStatsDir/debugDir |
+| P2-16 | 目录配置 | #8 ❌ | logDir/requestStatsDir/debugDir | **已实现**（`ServerConfig` 新增 `log_dir`/`request_stats_dir`/`debug_dir` 可选字段；`storage_dirs()` 解析默认子目录；`GET/PUT /api/gateway/settings` 暴露并更新） |
 | P2-17 | growth school/travel | #7 ⚠️ | 另域+小程序 UA（文件内标注 unsupported） |
 | P2-18 | Qoder UMID 安装 | #7 ⚠️ | 只探测不安装（可用性风险） |
 | P2-19 | 记录台账永久保留 + 筛选删除 | #7 ⚠️ | 90 天 prune vs 基线永久 + 无筛选删除 + 无 all=1 护栏 | **已实现**（`CheckinSettings.keep_days` 可配置（0=永久）；`DELETE /api/checkin-center/records` 支持 `all=1` 全清护栏 + 筛选删除 + `days=N` 三模式；`clear_all`/`remove_matching` 函数） |
