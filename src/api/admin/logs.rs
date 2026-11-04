@@ -644,3 +644,41 @@ pub async fn handle_agg_rebuild(
         "data": report
     })))
 }
+
+/// GET /api/logs/runtime — 读取运行日志环形缓冲快照。
+///
+/// 对照 Agent2API「运行日志页」后端。`since_id` 查询参数用于未读水位筛选
+/// （只返回 id > since_id 的新日志）。
+pub async fn handle_get_runtime_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<RuntimeLogsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": crate::runtime_log::snapshot(params.since_id),
+    })))
+}
+
+/// GET /api/logs/runtime/export — 导出运行日志为 JSONL。
+pub async fn handle_export_runtime_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    let body = crate::runtime_log::export_jsonl();
+    Ok((
+        axum::http::StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+        body,
+    )
+        .into_response())
+}
+
+/// 运行日志查询参数。
+#[derive(Debug, Deserialize)]
+pub struct RuntimeLogsQuery {
+    /// 未读水位：只返回 id 大于此值的日志（前端轮询用）。
+    pub since_id: Option<u64>,
+}

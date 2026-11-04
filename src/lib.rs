@@ -19,6 +19,7 @@ pub mod config;
 pub mod continuation;
 pub mod cron;
 pub mod debug_traffic;
+pub mod runtime_log;
 pub mod egress;
 pub mod error_translate;
 pub mod graphql;

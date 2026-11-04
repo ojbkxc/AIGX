@@ -57,7 +57,7 @@ pub use logs::{
     handle_clear_request_logs, handle_delete_audit_logs, handle_delete_request_logs,
     handle_export_request_logs, handle_get_log_retention, handle_list_audit_logs,
     handle_list_inflight, handle_list_request_logs, handle_terminate_inflight,
-    handle_update_log_retention,
+    handle_update_log_retention, handle_get_runtime_logs, handle_export_runtime_logs,
 };
 
 pub use channels::{

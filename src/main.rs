@@ -24,6 +24,7 @@ mod config;
 mod continuation;
 mod cron;
 mod debug_traffic;
+mod runtime_log;
 mod egress;
 mod error_translate;
 mod graphql;
@@ -71,6 +72,7 @@ use axum::Router;
 use std::time::Duration;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tracing_subscriber::prelude::*;
 
 use account::AccountPool;
 use api::auth::ApiKeyStore;
@@ -108,13 +110,23 @@ async fn main() -> anyhow::Result<()> {
     let json_logs = std::env::var("AIGX_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
+    // 运行日志捕获层：每个 tracing 事件推入环形缓冲（P1-1 运行日志页）
+    let runtime_log_layer = crate::runtime_log::RuntimeLogLayer;
     if json_logs {
-        tracing_subscriber::fmt()
-            .with_env_filter(log_filter)
-            .event_format(JsonLogFormat)
+        tracing_subscriber::registry()
+            .with(log_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(JsonLogFormat),
+            )
+            .with(runtime_log_layer)
             .init();
     } else {
-        tracing_subscriber::fmt().with_env_filter(log_filter).init();
+        tracing_subscriber::registry()
+            .with(log_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(runtime_log_layer)
+            .init();
     }
 
     // 加载配置
@@ -1639,6 +1651,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             put(api::admin::handle_update_log_retention),
         )
         .route("/api/logs/cleanup", post(api::admin::handle_cleanup_logs))
+        // 运行日志环形缓冲（P1-1：level/category 字典 + 500 条环形 + sinceId 水位 + JSONL 导出）
+        .route(
+            "/api/logs/runtime",
+            get(api::admin::handle_get_runtime_logs),
+        )
+        .route(
+            "/api/logs/runtime/export",
+            get(api::admin::handle_export_runtime_logs),
+        )
         // 日聚合手动重建（逃生门：聚合数字可疑时管理员一键重算历史）
         .route(
             "/api/logs/agg/rebuild",
