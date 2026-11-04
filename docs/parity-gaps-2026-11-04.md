@@ -58,18 +58,18 @@
 | P2-1 | AutoClaw 国际版 OAuth | #9 ⚠️ | 登录引擎扩展（基线 /api/session/login/oauth/*） |
 | P2-2 | zcode claim UI 参数 | #9 ⚠️ | BenefitsPanel.run 传 params（claim 模式需 plan_id + captcha_verify_param） |
 | P2-3 | session 首屏/refresh | #4 ⚠️ | GET /api/session + POST /api/session/refresh |
-| P2-4 | keys PATCH 更新端点 | #4 ⚠️ | 密钥更新端点 |
-| P2-5 | models/refresh 全量 | #4 ⚠️ | 全量刷新端点 |
+| P2-4 | keys PATCH 更新端点 | #4 ⚠️ | 密钥更新端点 | **已实现**（/api/keys/:id PUT 复用 handle_update_token） |
+| P2-5 | models/refresh 全量 | #4 ⚠️ | 全量刷新端点 | 未实现（仅 /api/models/metadata/refresh） |
 | P2-6 | models/capabilities 手动覆盖 | #4 ⚠️ | 能力位手动覆盖 |
 | P2-7 | proxy-pool sync-clash | #4 ⚠️ | Clash Verge 同步 |
 | P2-8 | queue 次数参数 | #4 ⚠️ | 排队次数 HTTP 参数 |
 | P2-9 | 用量报表字段对齐 | #5 ⚠️ | attempts 链/first_response_ms/sensitive_hits/phase 等 |
 | P2-10 | Responses/Completions 净化挂载 | #6 ⚠️ | 指纹脱敏挂到 Responses/Completions 路径 |
 | P2-11 | sanitize 命中统计 | #6 ⚠️ | 净化命中计数 |
-| P2-12 | 定时任务默认值对齐 | #8 ⚠️ | 6 条默认开（基线默认开 vs AIGX 全关） |
-| P2-13 | 超时默认值对齐 | #8 ⚠️ | connect 30→10、headers 300→60、stream 300→30 |
+| P2-12 | 定时任务默认值对齐 | #8 ⚠️ | 6 条默认开（基线默认开 vs AIGX 全关） | **已实现**（ScheduledSettings 默认 enabled: true） |
+| P2-13 | 超时默认值对齐 | #8 ⚠️ | connect 30→10、headers 300→60、stream 300→30 | **已实现**（默认值已是 10/60/30） |
 | P2-14 | routing 策略键 | #8 ❌ | strategy/sticky/failover/breaker |
-| P2-15 | 日志/请求/聚合三档保留期配置 | #8 ❌ | retention 配置端点 |
+| P2-15 | 日志/请求/聚合三档保留期配置 | #8 ❌ | retention 配置端点 | **已实现**（/api/logs/retention 已有 request/daily/audit 三档 + capacity） |
 | P2-16 | 目录配置 | #8 ❌ | logDir/requestStatsDir/debugDir |
 | P2-17 | growth school/travel | #7 ⚠️ | 另域+小程序 UA（文件内标注 unsupported） |
 | P2-18 | Qoder UMID 安装 | #7 ⚠️ | 只探测不安装（可用性风险） |
