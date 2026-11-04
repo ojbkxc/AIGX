@@ -24,7 +24,7 @@
 |---|---|---|---|---|
 | OpenAI Responses API | 有（`relay/responses_handler.go`） | 有：`/v1/responses` 路由 + `responses_passthrough`（透传，不经过 ChatFormat 转换） | 采纳：**保持现状**（透传已够用；需要计费/转换时再升级为转换模式） | — |
 | Realtime WebSocket | 有（`relay/websocket.go`） | 缺 | 改造采纳：**P2**（aigx-net 已有 WebSocket 实验层可复用；Realtime 是长连接，必须评估对单机网关的 goroutine/task 占用） | 5–8 人日 |
-| Rerank | 有（`rerank_handler.go`） | 缺 | 采纳：**P1**（rerank 是 RAG 客户刚需，实现简单：新增 bridge 方法 + 路由，参考 new-api 的 `channel/ali/rerank.go` 但用 ChatFormat 无关的独立 DTO） | 2–3 人日 |
+| Rerank | 有（`rerank_handler.go`） | 有：`/v1/rerank` 端点 + `Bridge::rerank`（1.0.29 已补，对齐 new-api 的 `channel/ali/rerank.go` 但用 ChatFormat 无关的独立 DTO） | 采纳：**已实现** | — |
 | Embedding | 有 | 有：`/v1/embeddings` + `Bridge::embed` | 采纳：**保持** | — |
 | Audio（TTS/STT） | 有（`audio_handler.go`） | 有：`/v1/audio/speech` + `/v1/audio/transcriptions` + `/v1/audio/translations`（`main.rs` 已挂全部三个路由） | 采纳：**保持**，P2 考虑补流式 TTS | — |
 | Image 生成 | 有（`image_handler.go`） | 有：`/v1/images/generations` | 采纳：**保持** | — |
@@ -43,11 +43,11 @@
 
 | 项 | new-api | AIGX 现状 | 决策 | 工作量粗估 |
 |---|---|---|---|---|
-| 配额预扣 + 结算（quota_reserve/tiered_settle） | 有 | 缺（`usage` 模块是「事后累加」，无预扣） | 改造采纳：**P1**——引入「预留/结算」两段式，对齐 long-running 流式请求的正确扣费语义 | 4–6 人日 |
+| 配额预扣 + 结算（quota_reserve/tiered_settle） | 有 | 有：1.0.29 已实现「预留/结算」两段式（`billing.rs` reservations/version + `auth.rs`），对齐 long-running 流式请求的正确扣费语义 | 改造采纳：**已实现** | — |
 | 缓存命中差异化计费 | 有 | 有 `cache_price` 字段（`pricing/mod.rs` + 管理 API）但数据面缓存命中当前记 0 费用 | 采纳：**P1**——把 `cache_price` 真正接到命中计费上（当前命中免费但已留痕，只需替换费用计算） | 1–2 人日 |
 | 模型定价配置中心（model_pricing_config） | 有 | 有 `PricingStore` + `/api/prices` CRUD + `price_sync.rs` | 采纳：**保持** | — |
 | 倍率体系（ratio_setting） | 有 | 有 `RatioConfig`（模型倍率 + 分组倍率）+ `/api/ratios` | 采纳：**保持** | — |
-| 订阅制（多种支付并行） | 有（Stripe/Creem/Epay/Waffo） | 有 Stripe + epay（`payment/`），无「订阅」语义 | 改造采纳：**P2**——订阅是「周期配额包」而非新支付渠道，先补周期任务再谈 | 6–10 人日 |
+| 订阅制（多种支付并行） | 有（Stripe/Creem/Epay/Waffo） | 有 Stripe + epay（`payment/`）；1.0.30 起有「周期订阅」语义（时长订阅 + 余额购买 + 独立配额池，`/api/subscription/*`），但非代理内核订阅（Clash/mihomo 配置同步不适用） | 改造采纳：**部分已实现**（计费订阅自足；代理内核订阅见差距清单 §4.1 不补） | — |
 | 违规罚金（violation_fee） | 有 | 缺 | **放弃**。理由：AIGX 是 API 网关而非内容平台，罚金是运营政策而非网关能力；需要时可经配额接口人工操作 | — |
 
 ## 五、认证安全
@@ -55,10 +55,10 @@
 | 项 | new-api | AIGX 现状 | 决策 | 工作量粗估 |
 |---|---|---|---|---|
 | Passkey/WebAuthn | 有 | 缺 | 改造采纳：**P2**（Rust 生态无成熟 crate，按百年红线需自研，成本高、收益中等，排后） | 8–10 人日 |
-| 2FA/TOTP | 有（`service/twofa.go`） | 缺 | 采纳：**P1**——TOTP 算法可用自有 100 行实现（HMAC-SHA1 + RFC 6238），不需要引 crate | 2–3 人日 |
+| 2FA/TOTP | 有（`service/twofa.go`） | 有：1.0.29 已实现 TOTP（HMAC-SHA1 + RFC 6238 自有实现，`src/auth/`），管理端可配置 | 采纳：**已实现** | — |
 | OIDC / 多 OAuth | 有（OIDC/Telegram/微信/Discord/LinuxDO） | 有 GitHub/Google OAuth（`src/oauth/`），无 OIDC | 改造采纳：**P2**——OIDC 是标准协议，一个通用实现覆盖多家 IdP，优先级高于逐一接厂商 SDK | 3–4 人日 |
-| 登录二次验证 | 有 | 有基础版（per-IP 登录限流 + 连续失败锁定 5 分钟，`api/admin/auth.rs`），无邮件/短信二次验证码 | 采纳：**P1** 补 email 验证码（复用现有 SMTP 通知能力） | 2 人日 |
-| 会话数上限与撤销 | 有 | 缺（Session 是无状态 HMAC token，无服务端会话列表） | 改造采纳：**P1**——引入会话注册表（jti + 用户维度计数），保持 HMAC 无状态校验但加「撤销检查」 | 2–3 人日 |
+| 登录二次验证 | 有 | 有：基础版（per-IP 登录限流 + 连续失败锁定）+ email 验证码二次验证（复用 SMTP 通知能力，`api/admin/auth.rs`）+ ALTCHA 人机校验（`src/altcha.rs`） | 采纳：**已实现** | — |
+| 会话数上限与撤销 | 有 | 有：1.0.30 起有会话注册表（jti + 用户维度计数 + 撤销检查，`src/session/`），HMAC 无状态校验 + 撤销列表 | 改造采纳：**已实现** | — |
 | casbin RBAC | 有 | 有 4 角色 RBAC（admin/manager/user/auditor，见 `AGENTS.md` 权限矩阵） | 采纳：**保持**，P2 考虑把权限矩阵下沉为可配置 | — |
 
 ## 六、模型治理
@@ -102,16 +102,11 @@
 
 **建议的 P1 后端缺口（按价值/成本排序）**：
 
-1. 缓存命中差异化计费接入（1–2 人日，直接省钱可视化）
-2. Rerank 端点（2–3 人日，RAG 客户刚需）
-3. 配额预留/结算（4–6 人日，计费正确性）
-4. 2FA/TOTP + email 二次验证（2–3 人日，安全水位）
-5. 会话注册表与撤销（2–3 人日，安全水位）
-6. 定时系统任务（2–3 人日，运营自动化基座）
-7. 模型元信息同步 + 缺失模型检测（2–3 人日，模型治理）
-8. 自动分组（2 人日，渠道运维）
+> 以下 8 项中 7 项已在 1.0.29–1.0.30 落地（缓存命中计费、Rerank、预留/结算、TOTP+email、会话撤销、定时系统任务、模型元信息同步），仅剩「自动分组」尚未实现。
 
-**P2 后端缺口**：Realtime WebSocket、长时任务框架（视频生成）、OIDC、Passkey、订阅制、阿里/腾讯/MiniMax 原生适配器。
+1. 自动分组（2 人日，渠道运维）——按模型/供应商自动归类渠道，减少手工分组。**其余 7 项已实现，见上方各表「AIGX 现状」列。**
+
+**P2 后端缺口**：Realtime WebSocket、长时任务框架（视频生成）、OIDC、Passkey、阿里/腾讯/MiniMax 原生适配器。（订阅制已在 1.0.30 实现计费订阅语义，代理内核订阅见差距清单 §4.1 不补。）
 
 ---
 
