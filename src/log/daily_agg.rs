@@ -223,11 +223,13 @@ pub fn today_key() -> String {
     date_key(chrono::Utc::now().timestamp())
 }
 
-fn master_key(date: &str) -> String {
+/// 主档键构造。`pub(crate)`：写入旁路（`log::writer`）批量折叠时复用同一布局。
+pub(crate) fn master_key(date: &str) -> String {
     format!("{MASTER_PREFIX}{date}")
 }
 
-fn user_key(uid: &str, date: &str) -> String {
+/// 用户日行键构造。`pub(crate)`：同 [`master_key`]。
+pub(crate) fn user_key(uid: &str, date: &str) -> String {
     format!("{USER_PREFIX}{uid}:{date}")
 }
 
@@ -607,19 +609,33 @@ pub fn streak_days(present: &std::collections::BTreeSet<String>, today: &str) ->
 pub struct DailyAggStore {
     store: Arc<FileStore>,
     /// 串行化主档/用户行的读-改-写（见模块头「原子性」）。
-    lock: Mutex<()>,
+    ///
+    /// `Arc`：与日志写入旁路（[`crate::log::writer`]）共享同一把锁——旁路
+    /// 的后台任务批量折叠聚合行时也要与回填/清理互斥，锁序恒为
+    /// 「聚合锁 → 连接锁」，无反向持锁，无死锁。
+    lock: Arc<Mutex<()>>,
 }
 
 impl DailyAggStore {
     pub fn new(store: Arc<FileStore>) -> Self {
         Self {
             store,
-            lock: Mutex::new(()),
+            lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// 聚合写锁句柄（与写入旁路共享，见字段注释）。
+    pub(crate) fn lock_handle(&self) -> Arc<Mutex<()>> {
+        self.lock.clone()
     }
 
     /// 记账挂点：折一条日志进主档与用户行。错误只记 warn 不外抛——
     /// 报表少一条统计绝不能演变成请求失败（蓝本「丢统计不丢计费」）。
+    ///
+    /// 热路径（`record_request`）现经 [`crate::log::writer::LogWriter`] 批量
+    /// 合并；本方法保留同步的单条语义，供测试与需要立即落库的调用点使用。
+    /// 主档与用户行的两次写合并为一次 `write_batch`（SQLite 单事务），
+    /// 少一次 commit。
     pub fn record(&self, log: &RequestLog) {
         let day = date_key(log.created_at);
         if day.is_empty() {
@@ -627,27 +643,28 @@ impl DailyAggStore {
         }
         let _guard = self.lock.lock();
         let result = (|| -> anyhow::Result<()> {
-            let mut agg: DailyAgg =
-                self.store
-                    .get(&master_key(&day))?
-                    .unwrap_or_else(|| DailyAgg {
-                        date: day.clone(),
-                        ..Default::default()
-                    });
+            let mkey = master_key(&day);
+            let mut agg: DailyAgg = self.store.get(&mkey)?.unwrap_or_else(|| DailyAgg {
+                date: day.clone(),
+                ..Default::default()
+            });
             fold_request(&mut agg, log);
-            self.store.put(&master_key(&day), &agg)?;
+            let mut entries: Vec<(String, serde_json::Value)> =
+                vec![(mkey, serde_json::to_value(&agg)?)];
             if let Some(uid) = &log.user_id {
-                let mut row: UserDailyRow =
-                    self.store
-                        .get(&user_key(uid, &day))?
-                        .unwrap_or(UserDailyRow {
-                            date: day.clone(),
-                            ..Default::default()
-                        });
+                let ukey = user_key(uid, &day);
+                let mut row: UserDailyRow = self.store.get(&ukey)?.unwrap_or(UserDailyRow {
+                    date: day.clone(),
+                    ..Default::default()
+                });
                 fold_user_row(&mut row, log);
-                self.store.put(&user_key(uid, &day), &row)?;
+                entries.push((ukey, serde_json::to_value(&row)?));
             }
-            Ok(())
+            let refs: Vec<(&str, serde_json::Value)> = entries
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.clone()))
+                .collect();
+            self.store.write_batch(&refs)
         })();
         if let Err(e) = result {
             tracing::warn!("按天聚合记账失败（{day}）：{e}");

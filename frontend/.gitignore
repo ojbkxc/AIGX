@@ -1,1 +1,5 @@
 .e2e-shots/
+
+# 仓库根的 .gitignore 忽略了 `scripts/`；前端的工具脚本需要入库，这里显式收回。
+!scripts/
+!scripts/**

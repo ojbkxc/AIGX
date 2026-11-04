@@ -43,11 +43,75 @@ pub fn error_response(message: &str, status: StatusCode) -> (StatusCode, Json<Va
     )
 }
 
+/// 强制改密门禁（纯函数，便于单测）。
+///
+/// - `must_change == false`：一律放行。
+/// - `must_change == true`：仅放行改密、登出、当前用户信息、健康探针与指标，
+///   其余管理接口一律拒绝。历史上这些白名单端点本就不经 `verify_admin`
+///   （`/metrics` 除外），因此门禁放在 `verify_admin` 内即可覆盖全部管理面。
+pub fn password_change_gate(path: &str, must_change: bool) -> bool {
+    if !must_change {
+        return true;
+    }
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/');
+    matches!(
+        path,
+        "/api/auth/change-password" | "/api/auth/logout" | "/api/users/me" | "/livez" | "/metrics"
+    )
+}
+
+/// 403 响应：必须先修改密码才能继续使用管理接口。
+///
+/// 前端依据 `code == "PASSWORD_CHANGE_REQUIRED"` 跳转改密页；`success/error`
+/// 字段与既有错误响应形状保持一致，避免破坏调用方解析。
+fn password_change_required() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "success": false,
+            "error": "Password change required",
+            "code": "PASSWORD_CHANGE_REQUIRED"
+        })),
+    )
+}
+
+/// 无原始 URI 时的兜底：Prometheus 系采集器抓取 `/metrics` 不应被改密门禁挡住。
+///
+/// 采集器仍须持有有效管理员会话（先过签名/权限校验）；这里只豁免
+/// 「首登默认管理员未改密」这一层，避免监控在部署后立刻失明。
+fn is_metrics_scrape(headers: &HeaderMap) -> bool {
+    const SCRAPERS: [&str; 6] = [
+        "prometheus/",
+        "victoriametrics/",
+        "vmagent/",
+        "grafana-agent/",
+        "alloy/",
+        "otelcol",
+    ];
+    if let Some(ua) = headers.get("user-agent").and_then(|v| v.to_str().ok()) {
+        let ua = ua.trim().to_ascii_lowercase();
+        if SCRAPERS.iter().any(|p| ua.starts_with(p)) {
+            return true;
+        }
+    }
+    headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|a| a.to_ascii_lowercase().contains("openmetrics-text"))
+        .unwrap_or(false)
+}
+
 /// 验证管理员认证
 ///
 /// 权限语义：
 /// - 无会话/会话失效/账号被禁用 → 401（前端据此踢出登录态）。
 /// - 已登录但非管理员 → 403（前端不应误踢，仅提示无权限）。
+/// - 已登录管理员但 `must_change_password` 未完成 → 白名单外一律 403
+///   （`code: PASSWORD_CHANGE_REQUIRED`），防止删除 localStorage 绕过首登改密。
 pub async fn verify_admin(
     state: &AppState,
     headers: &HeaderMap,
@@ -71,6 +135,23 @@ pub async fn verify_admin(
         // 若存在用户系统，校验该用户仍为管理员且启用
         if let Some(u) = state.user_store.get_by_email(&sess.email) {
             if u.status == "active" && u.is_admin() {
+                // S1：首登强制改密的**后端**强制点（前端 localStorage 跳转可被清空绕过）。
+                if u.must_change_password {
+                    // 反代若透传原始 URI，按路径精确判定白名单；
+                    // 否则仅豁免 Prometheus 采集器对 /metrics 的抓取。
+                    let path = headers
+                        .get("x-original-uri")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default();
+                    let allowed = if path.is_empty() {
+                        is_metrics_scrape(headers)
+                    } else {
+                        password_change_gate(path, true)
+                    };
+                    if !allowed {
+                        return Err(password_change_required());
+                    }
+                }
                 return Ok(config);
             }
             if u.status == "active" {
@@ -194,4 +275,80 @@ pub fn default_page() -> usize {
 /// 分页默认每页条数
 pub fn default_size() -> usize {
     20
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gate_opens_when_no_password_change_required() {
+        assert!(password_change_gate("/api/users", false));
+        assert!(password_change_gate("/anything/else", false));
+    }
+
+    #[test]
+    fn gate_allows_whitelist_when_password_change_required() {
+        for path in [
+            "/api/auth/change-password",
+            "/api/auth/change-password?x=1",
+            "/api/auth/logout",
+            "/api/users/me",
+            "/livez",
+            "/metrics",
+            "/metrics/",
+        ] {
+            assert!(
+                password_change_gate(path, true),
+                "whitelist path should pass: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_blocks_other_admin_paths_when_password_change_required() {
+        for path in [
+            "/api/users",
+            "/api/channels",
+            "/api/settings",
+            "/api-docs/openapi.json",
+            "/swagger-ui",
+        ] {
+            assert!(
+                !password_change_gate(path, true),
+                "non-whitelist path must be blocked: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn password_change_required_response_has_code_and_403() {
+        let (status, body) = password_change_required();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body.0["success"], Value::Bool(false));
+        assert_eq!(
+            body.0["code"],
+            Value::String("PASSWORD_CHANGE_REQUIRED".into())
+        );
+    }
+
+    #[test]
+    fn metrics_scraper_user_agents_are_recognized() {
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", "Prometheus/2.53.0".parse().unwrap());
+        assert!(is_metrics_scrape(&headers));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "accept",
+            "application/openmetrics-text; version=1.0.0"
+                .parse()
+                .unwrap(),
+        );
+        assert!(is_metrics_scrape(&headers));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", "Mozilla/5.0".parse().unwrap());
+        assert!(!is_metrics_scrape(&headers));
+    }
 }

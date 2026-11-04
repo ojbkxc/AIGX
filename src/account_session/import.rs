@@ -648,7 +648,20 @@ pub fn map_agent2api_record(
             name
         }
     };
-    session.base_url = a2a_first(obj, &["baseUrl", "base_url", "apiHost", "api_host"]);
+    // S5：导入的 base_url 会被网关主动请求（探活/转发），必须过 SSRF 校验。
+    // 单条不合规 → 返回 None，由调用方计入 skipped，不影响其余记录。
+    let base_url = a2a_first(obj, &["baseUrl", "base_url", "apiHost", "api_host"]);
+    if !base_url.is_empty() {
+        if let Err(rej) = crate::net_guard::validate_outbound_url(&base_url, false) {
+            tracing::warn!(
+                "agent2api import skipped record {}: base_url rejected: {}",
+                id,
+                rej.message()
+            );
+            return None;
+        }
+    }
+    session.base_url = base_url;
     session.refresh_secret = refresh;
     session.expires_at = a2a_expires_at(obj);
     session.credential = credential;
@@ -839,5 +852,22 @@ base_url = "https://stale.example/v1"
         assert!(map_agent2api_record("ch-1", &json!({"provider": "trae"})).is_none());
         assert!(map_agent2api_record("ch-1", &json!({"id": "x", "provider": "trae"})).is_none());
         assert!(map_agent2api_record("ch-1", &json!("not-an-object")).is_none());
+    }
+
+    #[test]
+    fn agent2api_record_skips_internal_base_url() {
+        // S5：本机环回与云元数据地址都必须在导入阶段被 SSRF 守卫跳过。
+        for base in ["http://127.0.0.1/x", "http://169.254.169.254/"] {
+            let record = json!({
+                "id": "ssrf-1",
+                "provider": "trae",
+                "sessionToken": "tok",
+                "baseUrl": base
+            });
+            assert!(
+                map_agent2api_record("ch-1", &record).is_none(),
+                "internal base_url must be skipped: {base}"
+            );
+        }
     }
 }

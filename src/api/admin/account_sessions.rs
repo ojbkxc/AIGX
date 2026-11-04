@@ -39,6 +39,56 @@ fn default_bulk_concurrency() -> u32 {
     3
 }
 
+/// 批量导入共享 base_url 的 SSRF 校验（空串 = 沿用 provider 默认地址，放行）。
+///
+/// 批量导入无法逐条给不同地址，因此校验一次；失败时**整批跳过并计数**，
+/// 不返回 400 —— 与「单条失败不拖垮整批」的导入语义一致。
+fn bulk_base_url_allowed(base_url: &str, allow_internal: bool) -> bool {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    crate::net_guard::validate_outbound_url(trimmed, allow_internal).is_ok()
+}
+
+/// 校验 Agent2API 导入的 SQLite 路径（S6）。
+///
+/// 只允许读取运行数据目录或系统临时目录下的文件：
+/// 1. 先拒绝含 `..` 的相对组件（即使目标存在也不放行）；
+/// 2. `canonicalize` 解析真实路径（消解符号链接）；
+/// 3. 结果必须落在任一允许根目录之内，否则拒绝。
+#[cfg(feature = "sqlite-kv")]
+fn validate_import_db_path(raw: &str) -> Result<std::path::PathBuf, String> {
+    use std::path::{Component, Path, PathBuf};
+
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("导入路径不能为空".to_string());
+    }
+    let requested = Path::new(raw);
+    if requested
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err("导入路径不允许包含 `..`（防目录穿越）".to_string());
+    }
+    let canonical = std::fs::canonicalize(requested)
+        .map_err(|e| format!("导入路径不可访问（{}）：{e}", requested.display()))?;
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = std::fs::canonicalize(crate::account_session::secret::data_dir()) {
+        roots.push(p);
+    }
+    if let Ok(p) = std::fs::canonicalize(std::env::temp_dir()) {
+        roots.push(p);
+    }
+    if roots.iter().any(|root| canonical.starts_with(root)) {
+        Ok(canonical)
+    } else {
+        Err("导入路径必须位于数据目录或系统临时目录下".to_string())
+    }
+}
+
 // ── 请求体 ──────────────────────────────────────────────────────────
 
 /// 新增 / 更新账号请求。
@@ -757,7 +807,7 @@ pub async fn handle_bulk_import_account_sessions(
     headers: HeaderMap,
     Json(body): Json<BulkImportRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
+    let config = verify_admin(&state, &headers).await?;
     let channel = ensure_account_channel(&state, body.channel_id.trim())?;
     let provider = if body.provider.trim().is_empty() {
         registry::DEFAULT_PROVIDER_KIND.to_string()
@@ -774,6 +824,12 @@ pub async fn handle_bulk_import_account_sessions(
     } else {
         body.name_prefix.trim().to_string()
     };
+    let base_url = body.base_url.trim().to_string();
+    // S5：批量导入此前直接落库 body.base_url，未过 SSRF 校验。
+    let base_url_allowed = bulk_base_url_allowed(&base_url, config.usage.allow_internal_upstream);
+    if !base_url_allowed {
+        tracing::warn!("bulk import base_url rejected by SSRF guard: {base_url}");
+    }
     let base_count = state.account_sessions.for_channel(&channel.id).len();
     let mut created: Vec<Value> = Vec::new();
     let mut skipped = 0usize;
@@ -797,9 +853,14 @@ pub async fn handle_bulk_import_account_sessions(
             skipped += 1;
             continue;
         }
+        if !base_url_allowed {
+            // 共享地址不合规：跳过该条并计数（不让整批失败）。
+            skipped += 1;
+            continue;
+        }
         let mut session = AccountSession::new(channel.id.clone(), String::new());
         session.provider = provider.clone();
-        session.base_url = body.base_url.trim().to_string();
+        session.base_url = base_url.clone();
         session.proxy = proxy.clone();
         session.priority = body.priority;
         session.weight = body.weight.max(1);
@@ -1670,7 +1731,9 @@ pub async fn handle_import_agent2api(
         (Some(path), None) => {
             #[cfg(feature = "sqlite-kv")]
             {
-                let path = std::path::PathBuf::from(path.trim());
+                // S6：路径白名单，避免把任意本机文件当 SQLite 打开。
+                let path = validate_import_db_path(path)
+                    .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
                 let records = crate::account_session::import::read_agent2api_db(&path)
                     .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
                 (records, path.to_string_lossy().to_string())
@@ -2037,4 +2100,44 @@ pub async fn handle_import_account_sessions_json(
         "success": true,
         "data": { "created": created, "skipped": skipped, "errors": errors },
     })))
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn bulk_import_rejects_internal_base_url() {
+        // S5：环回与云元数据地址在批量导入中必须被跳过。
+        assert!(!bulk_base_url_allowed("http://127.0.0.1/x", false));
+        assert!(!bulk_base_url_allowed("http://169.254.169.254/", false));
+        // 公网地址与空串（沿用 provider 默认）放行。
+        // 用公网 IP 字面量，避免离线环境 DNS 解析失败造成假阴性。
+        assert!(bulk_base_url_allowed("https://1.1.1.1/v1", false));
+        assert!(bulk_base_url_allowed("", false));
+    }
+
+    #[cfg(feature = "sqlite-kv")]
+    #[test]
+    fn import_db_path_rejects_traversal_and_outside_roots() {
+        // S6：`..` 组件直接拒绝，不依赖文件是否存在。
+        assert!(validate_import_db_path("../../etc/passwd").is_err());
+        // 系统根目录下的任意文件不在白名单根内。
+        #[cfg(unix)]
+        assert!(validate_import_db_path("/etc/passwd").is_err());
+    }
+
+    #[cfg(feature = "sqlite-kv")]
+    #[test]
+    fn import_db_path_accepts_file_under_temp_dir() {
+        let dir = std::env::temp_dir();
+        let file = dir.join(format!("aigx-import-{}.db", std::process::id()));
+        std::fs::write(&file, b"sqlite-placeholder").expect("write temp file");
+        let result = validate_import_db_path(file.to_string_lossy().as_ref());
+        let _ = std::fs::remove_file(&file);
+        assert!(
+            result.is_ok(),
+            "temp-dir file should be allowed: {result:?}"
+        );
+    }
 }

@@ -3,8 +3,9 @@
 // 替代旧 Dashboard.tsx 的「一次 allSettled 拉 15 个接口 + 位置化 pick(i)」：
 // - 每面板一个 useQuery：单面板失败只有该面板显示重试，不再整页数字残缺；
 // - placeholderData=keepPreviousData：切时间档时旧数据留在屏上不闪骨架；
-// - realtime 轮询 30s：v5 默认「页面隐藏暂停 + 在途请求跳过下一拍」，
-//   structuralSharing 默认开启（数据没变保持引用相等 → 不触发重渲染）。
+// - 轮询策略显式下沉到本层（全局默认 refetchInterval=false，见 main.tsx）：
+//   报表面板 60s、realtime 面板 30s，且 refetchIntervalInBackground: false
+//   （页面隐藏自动暂停；在途请求跳过下一拍；数据没变不触发重渲染）。
 import { keepPreviousData, useQuery, type UseQueryResult } from '@tanstack/react-query';
 import { api, type ReportWindow } from '../api';
 
@@ -34,7 +35,9 @@ export function usePanel<T>(
     queryFn: async () => unwrap<T>(await fetcher()),
     placeholderData: keepPreviousData,
     staleTime: (opts.staleSec ?? 60) * 1000,
-    refetchInterval: opts.pollMs,
+    // 显式轮询：默认报表面板 60s；realtime 面板传 pollMs: 30000 覆盖。
+    // 全局默认已关轮询，这里的值就是唯一事实来源。
+    refetchInterval: opts.pollMs ?? 60000,
     refetchIntervalInBackground: false,
     // 管理员专属端点在个人视图必须禁用，否则逐面板 403。
     enabled: opts.enabled ?? true,

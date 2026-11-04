@@ -101,12 +101,21 @@ use user_group::UserGroupStore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 初始化日志
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // 初始化日志：默认保持文本格式（不改变现有运维习惯）；
+    // 设置 AIGX_LOG_FORMAT=json 时切换为结构化 JSON（每行一个对象）。
+    let log_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let json_logs = std::env::var("AIGX_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    if json_logs {
+        tracing_subscriber::fmt()
+            .with_env_filter(log_filter)
+            .event_format(JsonLogFormat)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(log_filter).init();
+    }
 
     // 加载配置
     let config_manager = Arc::new(ConfigManager::new(None).await);
@@ -630,18 +639,11 @@ async fn main() -> anyhow::Result<()> {
         if state.has_sea_orm_backend() { "enabled" } else { "disabled (FileStore)" },
     );
 
-    // Prometheus 初始快照：渠道数量 + 模型健康等级（/metrics 查询用）。
-    // 请求处理路径会持续更新请求/token/latency 指标；此处在启动时一次性填充
-    // 渠道与健康状态。后续渠道增删/健康变化由各自调用点刷新（set_channels/set_health）。
-    {
-        let channels = state.channel_store.list();
-        let enabled = channels.iter().filter(|c| c.is_enabled()).count() as u64;
-        let disabled = channels.len() as u64 - enabled;
-        crate::metrics::global().set_channels(enabled, disabled);
-        for (model, level) in state.health_tracker.all_health() {
-            crate::metrics::global().set_health(&model, level.into());
-        }
-    }
+    // Prometheus 指标快照：渠道数量 + 模型健康等级（/metrics 查询用）。
+    // 构建期先填一次，避免首个采集窗口空窗；随后由后台任务每 30s 刷新
+    // （渠道增删 / 健康变化不经由 metrics 模块调用点，故不能只写一次）。
+    refresh_metrics_snapshot(&state.channel_store, &state.health_tracker);
+    spawn_metrics_refresh_task(state.channel_store.clone(), state.health_tracker.clone());
 
     // 构建路由
     // Start CF quota monitoring background task
@@ -946,6 +948,8 @@ async fn main() -> anyhow::Result<()> {
         "scheduled task loop started (credential maintenance / model refresh / update check)"
     );
 
+    // 关停时要 flush 日志队列，故先取出 Arc（state 随后被 build_router 消费）。
+    let log_store = state.log_store.clone();
     let app = build_router(state, &config);
 
     // 启动服务器
@@ -955,26 +959,205 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("Server listening on {}", addr);
 
-    // 优雅关闭：收到 SIGTERM/SIGINT 后标记 draining，等待现有请求完成
+    // 优雅关闭：收到 SIGTERM/SIGINT 后
+    //   1) 标记 draining（/readyz 立刻返回 503，摘流量）
+    //   2) axum 停止接受新连接并等待在途请求
+    //   3) 等待有上限（20s），超时则强制退出，绝不无限挂起
+    //   4) 关闭前 flush 日志异步队列，避免最后一批日志丢失
     // `into_make_service_with_connect_info` 让 handler 能拿到真实对端 IP
     // （ConnectInfo<SocketAddr>）：反向代理未开 trust_proxy_headers 时，
     // 登录/注册限流按真实来源 IP 计数，而不是全站共用一个 "unknown" 键。
     let livez = livez_state.clone();
-    axum::serve(
+    // oneshot 只用于「信号已收到」这一事件，让 drain 超时从信号时刻起算，
+    // 而不是从进程启动起算（否则正常运行 20s 后也会被误杀）。
+    let (drain_started_tx, drain_started_rx) = tokio::sync::oneshot::channel::<()>();
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        tokio::signal::ctrl_c().await.ok();
+        shutdown_signal().await;
         tracing::info!("Shutdown signal received, marking draining...");
         livez.mark_shutting_down();
-        // 给现有请求一些时间完成
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        tracing::info!("Graceful shutdown complete");
-    })
-    .await?;
+        let _ = drain_started_tx.send(());
+    });
+
+    const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+    let mut serve = Box::pin(std::future::IntoFuture::into_future(serve));
+    let serve_result = tokio::select! {
+        // 正常路径：所有在途请求完成（或 serve 出错）后返回
+        r = &mut serve => Some(r),
+        // 兜底路径：信号已到，但在途请求在 20s 内没排空 → 放弃等待强制退出
+        _ = async {
+            // 信号未到前不启用超时；`Err` 表示启动前 serve 已结束，此时分支永不触发
+            if drain_started_rx.await.is_err() {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(DRAIN_TIMEOUT).await;
+        } => None,
+    };
+    match serve_result {
+        Some(result) => result?,
+        None => tracing::warn!(
+            "Graceful shutdown timed out after {}s of draining; forcing exit with in-flight requests pending",
+            DRAIN_TIMEOUT.as_secs()
+        ),
+    }
+
+    // 关闭序列最后一步：把日志异步写队列刷干净（内部自带 10s 超时兜底）。
+    log_store.flush();
+    tracing::info!("Graceful shutdown complete");
 
     Ok(())
+}
+
+/// 等待进程终止信号：Unix 上监听 SIGTERM 或 SIGINT（Ctrl-C），
+/// 其他平台（Windows）没有 unix 信号模块，只等 Ctrl-C。
+///
+/// Docker/K8s 默认发 SIGTERM；不接它会把进程直接硬杀，
+/// 在途请求与日志队列全部丢失。
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to install SIGTERM handler: {e}");
+                tokio::signal::ctrl_c().await.ok();
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received"),
+            _ = sigterm.recv() => tracing::info!("SIGTERM received"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+        tracing::info!("ctrl-c received");
+    }
+}
+
+/// 计算并写入 `aigx_channels_*` 与 `aigx_health_level` 指标快照。
+fn refresh_metrics_snapshot(channel_store: &ChannelStore, health: &HealthTracker) {
+    let channels = channel_store.snapshot();
+    let enabled = channels.iter().filter(|c| c.is_enabled()).count() as u64;
+    let disabled = channels.len() as u64 - enabled;
+    let m = crate::metrics::global();
+    m.set_channels(enabled, disabled);
+    m.replace_health(
+        health
+            .all_health()
+            .into_iter()
+            .map(|(model, level)| (model, level.into())),
+    );
+}
+
+/// `/metrics` 中渠道数与健康等级的后台刷新任务（每 30s 一次）。
+///
+/// 这些值不经过请求处理路径更新，若只在启动写一次，运行期增删渠道
+/// 或健康状态变化都不会反映到 Prometheus，导致仪表盘长期显示陈旧数据。
+fn spawn_metrics_refresh_task(channel_store: Arc<ChannelStore>, health: Arc<HealthTracker>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // 启动时已填过一次，跳过第一次立即触发。
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            refresh_metrics_snapshot(&channel_store, &health);
+        }
+    });
+}
+
+/// JSON 日志格式化器（`AIGX_LOG_FORMAT=json` 时启用）。
+///
+/// 不依赖 tracing-subscriber 的 `json` feature（未在依赖特性中开启），
+/// 手写一个 `FormatEvent`：每行一个 JSON 对象，字段为
+/// `timestamp / level / target / message / span` 加上事件自带的结构化字段。
+/// 默认（不设该环境变量）仍走文本格式，避免影响现有日志采集。
+struct JsonLogFormat;
+
+struct JsonVisitor<'a> {
+    map: &'a mut serde_json::Map<String, serde_json::Value>,
+}
+
+impl tracing::field::Visit for JsonVisitor<'_> {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.map.insert(
+            field.name().to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+    }
+
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.map
+            .insert(field.name().to_string(), serde_json::Value::Bool(value));
+    }
+
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.map
+            .insert(field.name().to_string(), serde_json::json!(value));
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.map
+            .insert(field.name().to_string(), serde_json::json!(value));
+    }
+
+    fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
+        self.map
+            .insert(field.name().to_string(), serde_json::json!(value));
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.map.insert(
+            field.name().to_string(),
+            serde_json::Value::String(format!("{value:?}")),
+        );
+    }
+}
+
+impl<S, N> tracing_subscriber::fmt::FormatEvent<S, N> for JsonLogFormat
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'a> tracing_subscriber::fmt::FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        use std::fmt::Write as _;
+        let meta = event.metadata();
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "timestamp".to_string(),
+            serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+        );
+        map.insert(
+            "level".to_string(),
+            serde_json::Value::String(meta.level().as_str().to_string()),
+        );
+        map.insert(
+            "target".to_string(),
+            serde_json::Value::String(meta.target().to_string()),
+        );
+        if let Some(span) = ctx.lookup_current() {
+            map.insert(
+                "span".to_string(),
+                serde_json::Value::String(span.name().to_string()),
+            );
+        }
+        event.record(&mut JsonVisitor { map: &mut map });
+        let line = serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| {
+            "{\"level\":\"ERROR\",\"message\":\"log serialize failed\"}".into()
+        });
+        writeln!(writer, "{line}")
+    }
 }
 
 /// 确保配置中存在非空的 session_secret，否则生成随机 UUID 并持久化。
@@ -1679,14 +1862,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/monitor/system",
             get(api::admin::handle_monitor_system),
         )
-        .route(
-            "/api/monitor/health",
-            get(api::admin::handle_health),
-        )
-        .route(
-            "/api/monitor/healthz",
-            get(api::admin::handle_healthz),
-        )
+        .route("/api/monitor/health", get(api::admin::handle_health))
+        .route("/api/monitor/healthz", get(api::admin::handle_healthz))
         // 只读诊断端点套件（AI 可运维第①步：全部只读，管理面鉴权）
         .route(
             "/api/diagnostics/summary",
@@ -2129,7 +2306,71 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .layer(build_cors_layer(config))
         .layer(compression_layer())
         .layer(body_limit_mw)
+        // 最外层：每请求维护 in-flight 计数（含探针与静态资源请求）
+        .layer(axum::middleware::from_fn(track_inflight))
         .with_state(state)
+}
+
+/// in-flight 计数守卫：Drop 时把 `aigx_requests_inflight` 减一。
+///
+/// 用 Drop 而非「handler 返回后减一」是必须的：axum 的响应体是流式的，
+/// handler 返回时 body 往往尚未发送完毕；只有 body 被读完或客户端断开
+/// （body 被丢弃）时才真正算一次请求结束。
+struct InflightGuard(bool);
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            crate::metrics::global().request_finished();
+        }
+    }
+}
+
+/// 包装响应体，把守卫的生命周期绑到 body 上。
+struct InflightBody {
+    inner: axum::body::Body,
+    _guard: InflightGuard,
+}
+
+impl hyper::body::Body for InflightBody {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        <axum::body::Body as hyper::body::Body>::poll_frame(std::pin::Pin::new(&mut this.inner), cx)
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        <axum::body::Body as hyper::body::Body>::size_hint(&self.inner)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        <axum::body::Body as hyper::body::Body>::is_end_stream(&self.inner)
+    }
+}
+
+/// 每请求 in-flight 计数中间件：进入 +1，响应体结束/丢弃时 -1。
+async fn track_inflight(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    crate::metrics::global().request_started();
+    // 若本中间件在构造响应前被取消（客户端断开/任务 abort），守卫随之 Drop，
+    // 计数仍然会被正确回收，不会泄漏。
+    let guard = InflightGuard(true);
+    let res = next.run(req).await;
+    let (parts, body) = res.into_parts();
+    axum::response::Response::from_parts(
+        parts,
+        axum::body::Body::new(InflightBody {
+            inner: body,
+            _guard: guard,
+        }),
+    )
 }
 
 /// 根据配置构建受限 CORS 层。
@@ -2209,19 +2450,30 @@ fn compression_layer() -> CompressionLayer<
     CompressionLayer::new().compress_when(DefaultPredicate::new().and(SizeAbove::new(256)))
 }
 
-/// GET /metrics — Prometheus 指标文本输出（管理员鉴权）
+/// GET /metrics — Prometheus 指标文本输出
 ///
 /// 指标含各渠道模型调用量/成本/延迟等业务敏感数据，不设防会向任意
-/// 未认证访客泄露运营概况。校验管理员会话，失败返回 401。
+/// 未认证访客泄露运营概况。
+///
+/// 鉴权（满足其一即可）：
+/// 1. `Authorization: Bearer <AIGX_METRICS_TOKEN>` —— 供 Prometheus 采集器
+///    使用；仅当环境变量 `AIGX_METRICS_TOKEN` 已配置时该方式生效。
+///    采用常量时间比较，避免按字节比较泄露 token 前缀。
+/// 2. 管理员会话 —— 保留原有行为，供运维在后台手工查看。
+///
+/// 未配置 token 且无有效会话时返回 401（绝不匿名开放）。
 async fn handle_metrics(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     use axum::http::{header::CONTENT_TYPE, HeaderValue, StatusCode};
     use axum::response::IntoResponse;
-    if crate::api::admin::common::verify_admin(&state, &headers)
-        .await
-        .is_err()
+
+    let bearer_ok = metrics_bearer_authorized(&headers);
+    if !bearer_ok
+        && crate::api::admin::common::verify_admin(&state, &headers)
+            .await
+            .is_err()
     {
         return (
             StatusCode::UNAUTHORIZED,
@@ -2238,6 +2490,44 @@ async fn handle_metrics(
         HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
     )];
     (StatusCode::OK, headers, metrics::global().render()).into_response()
+}
+
+/// 校验 `Authorization: Bearer <AIGX_METRICS_TOKEN>`。
+///
+/// 未设置 `AIGX_METRICS_TOKEN` 时恒为 false（该通道不可用，回落到会话鉴权）。
+fn metrics_bearer_authorized(headers: &axum::http::HeaderMap) -> bool {
+    let Ok(expected) = std::env::var("AIGX_METRICS_TOKEN") else {
+        return false;
+    };
+    if expected.is_empty() {
+        return false;
+    }
+    let Some(value) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(token) = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))
+    else {
+        return false;
+    };
+    constant_time_eq(token.trim().as_bytes(), expected.as_bytes())
+}
+
+/// 常量时间字节比较：长度不同直接 false，长度相同则逐字节累加异或，
+/// 不提前 return，避免比较耗时随匹配前缀长度变化。
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// GET /livez — 存活检查

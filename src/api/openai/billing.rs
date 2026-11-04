@@ -184,6 +184,8 @@ pub(crate) fn charge_usage_with_tools(
     );
     // Prometheus 成本指标：pricing 以 USD 计价，cost 即向上取整后的美元配额
     // （单位 1 美元），统一折算为微美元累加，供 /metrics 展示 aigx_cost_usd_total。
+    // P1-5：返回「实际扣除额」而非名义 cost，未扣到的一律不计收入。
+    let mut collected = 0i64;
     if cost > 0 {
         crate::metrics::global().record_cost("usd", (cost as u64).saturating_mul(1_000_000));
         if let Some(uid) = &api_key.user_id {
@@ -205,9 +207,11 @@ pub(crate) fn charge_usage_with_tools(
                     remaining -= take;
                 }
             }
+            // 订阅池已实收的部分
+            collected = cost - remaining;
             let charged_wallet = if remaining > 0 {
                 if !state.subscription_store.wallet_overflow_allowed(uid, now) {
-                    // 订阅禁兜底：直接拒绝（key 侧不扣，保持一致性）
+                    // 订阅禁兜底：钱包部分不扣，收入只记订阅池实收（不再记名义 cost）
                     if let Some(u) = state.user_store.get_by_id(uid) {
                         state
                             .notify_service
@@ -216,9 +220,16 @@ pub(crate) fn charge_usage_with_tools(
                                 remaining: 0,
                             });
                     }
-                    return cost;
+                    if collected > 0 {
+                        let _ = state.api_key_store.charge_quota(&api_key.id, collected);
+                    }
+                    return collected;
                 }
-                state.user_store.try_charge(uid, remaining)
+                let ok = state.user_store.try_charge(uid, remaining);
+                if ok {
+                    collected += remaining;
+                }
+                ok
             } else {
                 true // 订阅池全额承接
             };
@@ -238,18 +249,21 @@ pub(crate) fn charge_usage_with_tools(
             }
             // 问题 6：try_charge 失败时跳过 charge_quota，保持计费一致性
             if charged_wallet {
-                let _ = state.api_key_store.charge_quota(&api_key.id, cost);
+                let _ = state.api_key_store.charge_quota(&api_key.id, collected);
             }
         } else {
             let _ = state.api_key_store.charge_quota(&api_key.id, cost);
+            collected = cost;
         }
     }
-    cost
+    collected
 }
-/// 预留记录（P1：两段式计费）
+/// 预留记录（P1：两段式计费；P0-2：用户/key 侧改为逐笔 token）
 pub(crate) struct Reservation {
-    pub reserved_user: i64,
-    pub reserved_key: i64,
+    /// 用户侧预留 token（0=无用户预留）
+    pub user_token: u64,
+    /// API key 侧预留 token（0=无 key 预留）
+    pub key_token: u64,
     /// 订阅池承接的部分（P2 订阅化：优先于用户钱包扣减，结算/释放时
     /// 按 SubscriptionStore 的预留语义同步归还）
     pub reserved_sub: i64,
@@ -286,8 +300,8 @@ pub(crate) fn reserve_usage(
 
     if estimated_cost <= 0 {
         return Ok(Reservation {
-            reserved_user: 0,
-            reserved_key: 0,
+            user_token: 0,
+            key_token: 0,
             reserved_sub: 0,
             sub_allocs: Vec::new(),
         });
@@ -333,56 +347,111 @@ pub(crate) fn reserve_usage(
         }
     }
 
-    // 预留用户配额（订阅池承接后的剩余部分）
-    let reserved_user = if remaining_cost > 0 {
+    // 预留用户配额（订阅池承接后的剩余部分；P0-2：拿 token 供精确结算）
+    let mut user_token: u64 = 0;
+    if remaining_cost > 0 {
         if let Some(uid) = &api_key.user_id {
-            if !state.user_store.reserve_quota(uid, remaining_cost) {
-                // 回滚订阅池预留
-                for (sid, amount) in &sub_allocs {
-                    state.subscription_store.release(sid, *amount);
+            match state.user_store.reserve_quota(uid, remaining_cost) {
+                Some(tok) => user_token = tok,
+                None => {
+                    // 回滚订阅池预留
+                    for (sid, amount) in &sub_allocs {
+                        state.subscription_store.release(sid, *amount);
+                    }
+                    return Err(error_response(
+                        "insufficient_quota",
+                        "User quota insufficient",
+                        StatusCode::PAYMENT_REQUIRED,
+                    ));
                 }
-                return Err(error_response(
-                    "insufficient_quota",
-                    "User quota insufficient",
-                    StatusCode::PAYMENT_REQUIRED,
-                ));
             }
-            remaining_cost
-        } else {
-            0
         }
-    } else {
-        0
-    };
+    }
 
     // 预留 API key 配额
-    let reserved_key = if !state
+    let key_token = match state
         .api_key_store
         .reserve_quota(&api_key.id, estimated_cost)
     {
-        // 回滚用户预留——必须用 release 语义（G1：settle 的并发钳制
-        // 可能归还到他人刚建立的预留；release 只解冻不产生消费）
-        if reserved_user > 0 {
-            if let Some(uid) = &api_key.user_id {
-                state.user_store.release_quota(uid, reserved_user);
+        Some(tok) => tok,
+        None => {
+            // 回滚用户预留——按 token 精确解冻（P0-2）
+            if user_token != 0 {
+                if let Some(uid) = &api_key.user_id {
+                    state.user_store.release_quota(uid, user_token);
+                }
             }
+            return Err(error_response(
+                "insufficient_quota",
+                "API key quota insufficient",
+                StatusCode::PAYMENT_REQUIRED,
+            ));
         }
-        return Err(error_response(
-            "insufficient_quota",
-            "API key quota insufficient",
-            StatusCode::PAYMENT_REQUIRED,
-        ));
-    } else {
-        estimated_cost
     };
 
     Ok(Reservation {
-        reserved_user,
-        reserved_key,
+        user_token,
+        key_token,
         reserved_sub,
         sub_allocs,
     })
 }
+/// 把一笔实际消费按「订阅池 → 用户钱包 → API key」分配结算，并摘除预留。
+///
+/// `settle_usage` 与 `settle_cache_hit` 共用此分配逻辑，保证两条路径对
+/// 预留的结算口径完全一致（P0-1：缓存命中此前只做 release，没有走这套
+/// 分配，导致预留虽归零但记账与正常路径不一致）。
+/// 返回实际入账总额（== `actual_cost`，超额部分由 settle_quota 记 overdraft）。
+fn distribute_settlement(
+    state: &AppState,
+    api_key: &crate::api::auth::ApiKey,
+    reservation: &Reservation,
+    actual_cost: i64,
+) {
+    // P2 订阅化：结算订阅池预留（多订阅逐个结算）。
+    // 实际消费按各订阅预留占比顺序承接：每个订阅先扣自身预留内的
+    // 部分（sub_take），不足部分溢出到钱包侧。用户钱包侧传 wallet_cost
+    // 作为实际消费，保证总账不重不漏。
+    let mut wallet_cost = actual_cost;
+    for (sid, reserved) in &reservation.sub_allocs {
+        let sub_take = (*reserved).min(wallet_cost);
+        state.subscription_store.settle(sid, *reserved, sub_take);
+        wallet_cost -= sub_take;
+        if wallet_cost <= 0 {
+            break;
+        }
+    }
+
+    // 结算用户配额（按 token 精确摘除预留；超额记 overdraft，P0-3）
+    if reservation.user_token != 0 {
+        if let Some(uid) = &api_key.user_id {
+            state
+                .user_store
+                .settle_quota(uid, reservation.user_token, wallet_cost);
+            // 余额通知
+            if let Some(u) = state.user_store.get_by_id(uid) {
+                let remaining = u.remaining();
+                let threshold = (u.quota / 10).clamp(1000, 10000);
+                if remaining < threshold {
+                    state
+                        .notify_service
+                        .notify_spawn(crate::notify::NotifyEvent::QuotaLow {
+                            user_email: u.email.clone(),
+                            remaining,
+                        });
+                }
+            }
+        }
+    }
+
+    // 结算 API key 配额
+    if reservation.key_token != 0 {
+        state
+            .api_key_store
+            .settle_quota(&api_key.id, reservation.key_token, actual_cost);
+    }
+}
+
 /// 结算预留配额（P1：两段式计费第二步）。
 ///
 /// 请求完成后调用，根据实际 token 消耗结算费用，释放多预留的部分。
@@ -417,51 +486,30 @@ pub(crate) fn settle_usage(
         crate::metrics::global().record_cost("usd", (actual_cost as u64).saturating_mul(1_000_000));
     }
 
-    // P2 订阅化：结算订阅池预留（多订阅逐个结算）。
-    // 实际消费按各订阅预留占比顺序承接：每个订阅先扣自身预留内的
-    // 部分（sub_take），不足部分溢出到钱包侧。reserved_user 的 settle
-    // 会把 reserved 释放并把差值入账——这里传 wallet_cost 作为钱包侧
-    // 实际消费，保证总账不重不漏。
-    let mut wallet_cost = actual_cost;
-    for (sid, reserved) in &reservation.sub_allocs {
-        let sub_take = (*reserved).min(wallet_cost);
-        state.subscription_store.settle(sid, *reserved, sub_take);
-        wallet_cost -= sub_take;
-        if wallet_cost <= 0 {
-            break;
-        }
-    }
-
-    // 结算用户配额
-    if reservation.reserved_user > 0 {
-        if let Some(uid) = &api_key.user_id {
-            state
-                .user_store
-                .settle_quota(uid, reservation.reserved_user, wallet_cost);
-            // 余额通知
-            if let Some(u) = state.user_store.get_by_id(uid) {
-                let remaining = u.remaining();
-                let threshold = (u.quota / 10).clamp(1000, 10000);
-                if remaining < threshold {
-                    state
-                        .notify_service
-                        .notify_spawn(crate::notify::NotifyEvent::QuotaLow {
-                            user_email: u.email.clone(),
-                            remaining,
-                        });
-                }
-            }
-        }
-    }
-
-    // 结算 API key 配额
-    if reservation.reserved_key > 0 {
-        state
-            .api_key_store
-            .settle_quota(&api_key.id, reservation.reserved_key, actual_cost);
-    }
+    distribute_settlement(state, api_key, reservation, actual_cost);
 
     actual_cost
+}
+/// 结算**网关响应缓存命中**的预留（P0-1）。
+///
+/// 命中请求不消耗上游资源，费用 = 调用方算好的 `cache_cost`（按缓存读价，
+/// 未配 cache_price 时为 0）。本函数按与正常路径**完全一致**的口径结算：
+/// 订阅池承接 → 用户钱包 → key 侧，逐笔摘除预留。返回实际入账额
+/// （恒等于 `cache_cost`，超限部分记 overdraft 而非漏记），调用方据此写
+/// `log.cost`，保证「预留归零、实扣 == 记录值」。`cache_cost == 0` 时
+/// 等价于全额退还预留（无消费）。
+pub(crate) fn settle_cache_hit(
+    state: &AppState,
+    api_key: &crate::api::auth::ApiKey,
+    reservation: &Reservation,
+    cache_cost: i64,
+) -> i64 {
+    let cache_cost = cache_cost.max(0);
+    if cache_cost > 0 {
+        crate::metrics::global().record_cost("usd", (cache_cost as u64).saturating_mul(1_000_000));
+    }
+    distribute_settlement(state, api_key, reservation, cache_cost);
+    cache_cost
 }
 /// 释放预留（P1：两段式计费的取消路径）。
 ///
@@ -474,11 +522,9 @@ pub(crate) fn release_reservation(
     api_key: &crate::api::auth::ApiKey,
     reservation: &Reservation,
 ) {
-    if reservation.reserved_user > 0 {
+    if reservation.user_token != 0 {
         if let Some(uid) = &api_key.user_id {
-            state
-                .user_store
-                .release_quota(uid, reservation.reserved_user);
+            state.user_store.release_quota(uid, reservation.user_token);
         }
     }
     if reservation.reserved_sub > 0 {
@@ -486,10 +532,10 @@ pub(crate) fn release_reservation(
             state.subscription_store.release(sid, *amount);
         }
     }
-    if reservation.reserved_key > 0 {
+    if reservation.key_token != 0 {
         state
             .api_key_store
-            .release_quota(&api_key.id, reservation.reserved_key);
+            .release_quota(&api_key.id, reservation.key_token);
     }
 }
 /// 流式计费共享状态：后缀事件（正常结束）与 Drop 守卫（断连兜底）共用。

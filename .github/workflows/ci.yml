@@ -130,6 +130,16 @@ jobs:
             args: "--no-default-features --features sea-orm,postgres"
           - name: check (sea-orm + mysql)
             args: "--no-default-features --features sea-orm,mysql"
+          # 发布产物专用的 feature 组合：多平台构建 workflow 与 Dockerfile
+          # 都用 `--features "sqlite-kv,postgres"`（rusqlite KV + PG 双后端），
+          # 它既不是默认组合也不是上面任何一项。v1.0.31 就是在这个组合上
+          # 首次编译才发现 `put_async` 的 match 非穷举，导致 Linux 两平台
+          # 构建失败、Release 只出了 5 个资产。发版组合必须在 PR 阶段就编译。
+          - name: check (release / sqlite-kv+postgres)
+            args: "--features \"sqlite-kv,postgres\""
+          # 全特性组合：新增 feature 时忘记加 cfg 门控，这里最先暴露。
+          - name: check (all features)
+            args: "--all-features"
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust toolchain

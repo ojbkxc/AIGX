@@ -2,7 +2,7 @@
 //!
 //! 提供 Kubernetes 标准的 /livez 和 /readyz 端点：
 //! - `/livez` — 进程存活检查（ping + shutdown 状态）
-//! - `/readyz` — 就绪检查（shutdown 状态 + 配置可用性）
+//! - `/readyz` — 就绪检查（shutdown 状态 + 配置可用性 + 存储可访问性）
 //!
 //! 状态机：
 //! ```text
@@ -94,7 +94,16 @@ pub fn livez_response(livez: &LivezState, verbose: bool) -> Response {
 }
 
 /// 响应 /readyz 请求
-pub fn readyz_response(livez: &LivezState, config_ready: bool, verbose: bool) -> Response {
+///
+/// `storage_ready` 由调用方做一次轻量读探测（不存在的键也算可访问，
+/// 只有读操作本身报错才视为失败）。`/readyz` 被容器探针高频调用，
+/// 因此这里不追加任何重查询。
+pub fn readyz_response(
+    livez: &LivezState,
+    config_ready: bool,
+    storage_ready: bool,
+    verbose: bool,
+) -> Response {
     let mut body = String::new();
     let mut failed = false;
 
@@ -111,6 +120,13 @@ pub fn readyz_response(livez: &LivezState, config_ready: bool, verbose: bool) ->
     } else {
         failed = true;
         body.push_str("[-]config failed: not ready\n");
+    }
+
+    if storage_ready {
+        body.push_str("[+]storage ok\n");
+    } else {
+        failed = true;
+        body.push_str("[-]storage failed: read error\n");
     }
 
     let headers = [
@@ -289,5 +305,24 @@ mod tests {
         state.mark_shutting_down();
         assert!(state.is_shutting_down());
         assert!(state.shutdown_check().is_err());
+    }
+
+    #[test]
+    fn readyz_reflects_storage_failure() {
+        let state = LivezState::new();
+        assert_eq!(
+            readyz_response(&state, true, true, false).status(),
+            StatusCode::OK
+        );
+        // 存储读失败 → 503
+        assert_eq!(
+            readyz_response(&state, true, false, false).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        // 配置未就绪 → 503
+        assert_eq!(
+            readyz_response(&state, false, true, false).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 }

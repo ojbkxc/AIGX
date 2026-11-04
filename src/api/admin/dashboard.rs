@@ -982,13 +982,35 @@ async fn cached_report(
     };
     {
         let mut map = report_cache().lock();
-        // 防止日志很长时缓存无限膨胀：超过 256 条整表清空（简单够用）
-        if map.len() > 256 {
-            map.clear();
-        }
+        evict_report_cache(&mut map, REPORT_CACHE_MAX);
         map.insert(key, (std::time::Instant::now(), fresh.clone()));
     }
     fresh
+}
+
+/// 报表缓存条目上限。
+const REPORT_CACHE_MAX: usize = 256;
+
+/// 缓存超限时按插入时间淘汰最旧的一批，保留较新的条目。
+///
+/// 取代原先的「超 256 条整表 `clear()`」：高基数场景（多用户 × 多窗口 ×
+/// 多端点）下整表清空会让所有报表一起击穿、周期性重算。这里每次只淘汰
+/// **最旧的四分之一**（至少 1 条），把「全清」退化为「滚动淘汰」，热条目
+/// 得以保留。`map` 的值是 `(Instant, Value)`，直接用其插入时间排序。
+fn evict_report_cache(
+    map: &mut std::collections::HashMap<ReportCacheKey, (std::time::Instant, Value)>,
+    max: usize,
+) {
+    if map.len() <= max {
+        return;
+    }
+    let evict = (max / 4).max(1);
+    let mut by_age: Vec<(ReportCacheKey, std::time::Instant)> =
+        map.iter().map(|(k, (at, _))| (k.clone(), *at)).collect();
+    by_age.sort_by_key(|(_, at)| *at);
+    for (k, _) in by_age.into_iter().take(evict) {
+        map.remove(&k);
+    }
 }
 
 /// 模型分布（Agent2API report models 维度）：按请求数/Token/消费额排布。
@@ -1506,5 +1528,37 @@ mod tests {
         let key2 = local_hour_key(two_ago);
         let slot = out.iter().find(|v| v["hour"] == key2).expect("早桶存在");
         assert_eq!(slot["requests"], 1);
+    }
+
+    /// 报表缓存超限时只滚动淘汰最旧的 25%，不整表清空；最新 key 始终保留。
+    #[test]
+    fn report_cache_evicts_oldest_quarter_not_all() {
+        use std::collections::HashMap;
+        use std::time::{Duration, Instant};
+
+        let base = Instant::now();
+        let key = |i: u64| (format!("e{i}"), String::new(), String::new());
+
+        // 精确验证淘汰规模：257 条触发一次淘汰 → 删最旧 64 条（256/4），剩 193。
+        let mut m: HashMap<ReportCacheKey, (Instant, Value)> = HashMap::new();
+        for i in 0..257u64 {
+            m.insert(key(i), (base + Duration::from_secs(i), json!(i)));
+        }
+        evict_report_cache(&mut m, 256);
+        assert_eq!(m.len(), 257 - 64, "只淘汰最旧 25%（64 条），不清空整表");
+        assert!(m.contains_key(&key(256)), "最新 key 必须保留");
+        assert!(!m.contains_key(&key(0)), "最旧 key 应被淘汰");
+        assert!(m.contains_key(&key(64)), "只淘汰最旧 64 条，第 65 老仍在");
+
+        // 模拟逐条插入 300 条：全程不超上限、不整表清空、最新在。
+        let mut acc: HashMap<ReportCacheKey, (Instant, Value)> = HashMap::new();
+        for i in 0..300u64 {
+            acc.insert(key(i), (base + Duration::from_secs(i), json!(i)));
+            evict_report_cache(&mut acc, 256);
+            assert!(acc.len() <= 256, "缓存不应突破上限");
+        }
+        assert!(!acc.is_empty() && acc.len() < 300, "应为部分淘汰而非全清");
+        assert!(acc.contains_key(&key(299)), "最新插入的 key 仍在");
+        assert!(!acc.contains_key(&key(0)), "最旧插入的 key 已淘汰");
     }
 }

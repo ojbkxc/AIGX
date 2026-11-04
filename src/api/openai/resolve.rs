@@ -346,7 +346,10 @@ pub(crate) fn ensure_model_priced(
 /// 账号型渠道的模型声明在账号上（`AccountSession.models`），渠道级 models 通常
 /// 为空 —— 只查渠道会让「只在账号池里声明的模型」被误判为未声明。
 pub(crate) fn model_declared_by_channel(state: &AppState, model: &str) -> bool {
-    state.channel_store.list().iter().any(|c| {
+    // 走只读快照（`Arc<Vec<Channel>>`）：每请求都会调用，返回的 Arc 仅做一次
+    // 指针拷贝，避免 `list()` 那样每请求 clone 全部渠道（含凭证字段）。
+    let channels = state.channel_store.snapshot();
+    channels.iter().any(|c| {
         if !c.is_enabled() {
             return false;
         }

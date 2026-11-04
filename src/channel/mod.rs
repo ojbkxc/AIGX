@@ -475,6 +475,13 @@ pub struct ChannelTestResult {
 /// - `scheduler`：CombinedScheduler 多因子调度（批次3）
 pub struct ChannelStore {
     channels: RwLock<Vec<Channel>>,
+    /// 读路径只读快照（每次写操作后在写锁内重建）。
+    ///
+    /// 热点读（每请求 `resolve` 里的模型定价判定）走它：`ArcSwap::load_full`
+    /// 只做一次指针拷贝，不再 clone 数百个含凭证字段的 `Channel`。
+    /// 写仍走 `RwLock<Vec<Channel>>` 就地修改（写远少于读），改完把新向量
+    /// 发布到此，二者在同一把写锁内更新，天然一致。
+    snapshot_cache: arc_swap::ArcSwap<Vec<Channel>>,
     store: Arc<FileStore>,
     /// channel cooldown table: channel_id -> cooldown expiry. Cooled-down channels are skipped during scheduling.
     cooldowns: dashmap::DashMap<String, Instant>,
@@ -507,6 +514,7 @@ impl ChannelStore {
     pub fn new(store: Arc<FileStore>) -> Self {
         let s = Self {
             channels: RwLock::new(Vec::new()),
+            snapshot_cache: arc_swap::ArcSwap::from_pointee(Vec::new()),
             store: store.clone(),
             cooldowns: dashmap::DashMap::new(),
             circuit_breaker: circuit_breaker::CircuitBreaker::with_defaults(),
@@ -541,8 +549,19 @@ impl ChannelStore {
                 .cmp(&a.priority)
                 .then(a.created_at.cmp(&b.created_at))
         });
-        *self.channels.write() = channels;
+        let mut guard = self.channels.write();
+        *guard = channels;
+        self.publish_snapshot(&guard);
         Ok(())
+    }
+
+    /// 用当前渠道集合重建只读快照。
+    ///
+    /// **必须在持有 `channels` 写锁时调用**：把「改数据」与「换快照」放进
+    /// 同一把写锁，保证并发写不会把旧版本快照覆盖回新版本（发布顺序 =
+    /// 修改顺序）。`ArcSwap::store` 自身不加锁，不会与写锁互相重入。
+    fn publish_snapshot(&self, channels: &[Channel]) {
+        self.snapshot_cache.store(Arc::new(channels.to_vec()));
     }
 
     fn persist(&self, ch: &Channel) -> anyhow::Result<()> {
@@ -558,9 +577,20 @@ impl ChannelStore {
         self.store.put_async(key, ch.clone());
     }
 
-    /// 列出所有渠道
+    /// 列出所有渠道（返回拥有所有权的 `Vec`，会 clone 全部渠道）。
+    ///
+    /// 兼容既有调用方；热路径请改用 [`Self::snapshot`]，避免每请求深拷贝。
     pub fn list(&self) -> Vec<Channel> {
         self.channels.read().clone()
+    }
+
+    /// 只读渠道快照 —— 内容是 [`Self::list`] 的零拷贝版本（同一集合、同一顺序）。
+    ///
+    /// 复用写路径发布的 `Arc<Vec<Channel>>`：`load_full` 只做一次原子指针
+    /// 拷贝，读侧无锁、无深拷贝。适合每请求都要遍历全量渠道的热路径
+    /// （如 `ensure_model_priced` 的模型声明判定）。
+    pub fn snapshot(&self) -> Arc<Vec<Channel>> {
+        self.snapshot_cache.load_full()
     }
 
     /// 获取单个渠道
@@ -589,13 +619,15 @@ impl ChannelStore {
             );
         }
         self.persist(&ch)?;
-        self.channels.write().push(ch.clone());
+        let mut channels = self.channels.write();
+        channels.push(ch.clone());
         // 维持排序
-        self.channels.write().sort_by(|a, b| {
+        channels.sort_by(|a, b| {
             b.priority
                 .cmp(&a.priority)
                 .then(a.created_at.cmp(&b.created_at))
         });
+        self.publish_snapshot(&channels);
         Ok(ch)
     }
 
@@ -624,13 +656,16 @@ impl ChannelStore {
                 .cmp(&a.priority)
                 .then(a.created_at.cmp(&b.created_at))
         });
+        self.publish_snapshot(&channels);
         Ok(ch)
     }
 
     /// 删除渠道
     pub fn remove(&self, id: &str) -> anyhow::Result<()> {
         self.store.delete(&format!("channel:{id}"))?;
-        self.channels.write().retain(|c| c.id != id);
+        let mut channels = self.channels.write();
+        channels.retain(|c| c.id != id);
+        self.publish_snapshot(&channels);
         Ok(())
     }
 
@@ -727,6 +762,7 @@ impl ChannelStore {
                 ch.last_error = Some(error);
                 ch.updated_at = chrono::Utc::now().timestamp();
             }
+            self.publish_snapshot(&channels);
         }
         let expiry = Instant::now() + Duration::from_secs(duration_secs);
         self.cooldowns.insert(id.to_string(), expiry);
@@ -749,6 +785,7 @@ impl ChannelStore {
             // 不会用旧快照覆盖：后续并发修改会再次触发落盘并带上最新值）
             self.persist_async(ch);
         }
+        self.publish_snapshot(&channels);
     }
 
     /// 标记渠道健康（恢复启用）
@@ -762,20 +799,27 @@ impl ChannelStore {
                 tracing::error!("Failed to persist channel {} mark_healthy: {}", id, e);
             }
         }
+        self.publish_snapshot(&channels);
     }
 
     /// 标记渠道已使用
     pub fn mark_used(&self, id: &str) {
         let mut channels = self.channels.write();
-        if let Some(ch) = channels.iter_mut().find(|c| c.id == id) {
-            let now = chrono::Utc::now().timestamp();
-            // 节流：60 秒内重复使用不重复落盘，避免热路径每次请求都同步写存储
-            if ch.last_used_at.is_some_and(|last| now - last < 60) {
-                return;
-            }
-            ch.last_used_at = Some(now);
-            self.persist_async(ch);
+        let Some(pos) = channels.iter().position(|c| c.id == id) else {
+            return;
+        };
+        let now = chrono::Utc::now().timestamp();
+        // 节流：60 秒内重复使用不重复落盘，避免热路径每次请求都同步写存储
+        if channels[pos]
+            .last_used_at
+            .is_some_and(|last| now - last < 60)
+        {
+            return;
         }
+        channels[pos].last_used_at = Some(now);
+        self.persist_async(&channels[pos]);
+        // 仅在确有变更时重建快照（mark_used 每请求调用，节流命中时不应付出重建成本）
+        self.publish_snapshot(&channels);
     }
 
     /// 保存渠道的上游模型发现快照（模型自动发现）。
@@ -791,7 +835,9 @@ impl ChannelStore {
                 .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
             ch.discovered_models = models;
             ch.updated_at = chrono::Utc::now().timestamp();
-            ch.clone()
+            let cloned = ch.clone();
+            self.publish_snapshot(&channels);
+            cloned
         };
         self.persist(&snapshot)
     }
@@ -824,6 +870,7 @@ impl ChannelStore {
             ch.updated_at = chrono::Utc::now().timestamp();
             self.persist_async(ch);
         }
+        self.publish_snapshot(&channels);
     }
 
     /// 保存最近一次查询到的上游余额（balance/credit），持久化。
@@ -849,6 +896,7 @@ impl ChannelStore {
             ch.updated_at = chrono::Utc::now().timestamp();
             self.persist_async(ch);
         }
+        self.publish_snapshot(&channels);
     }
 
     /// 查询上游真实余额（按渠道记录的 `balance_scheme` 分派）。
@@ -1583,6 +1631,79 @@ mod tests {
             assert_eq!(ch.last_error.as_deref(), Some("boom"));
             // disabled 不被选中
             assert!(s.select_for_model("m").is_empty());
+        });
+    }
+
+    /// `snapshot()` 与 `list()` 内容/顺序一致，且写操作后快照更新（旧快照不变）。
+    #[test]
+    fn snapshot_matches_list_and_updates_on_write() {
+        with_secret_dir("snapshot", || {
+            let s = store();
+            s.add(sample("a", 10, vec!["m"])).unwrap();
+            s.add(sample("b", 20, vec!["m"])).unwrap();
+
+            let ids = |chs: &[Channel]| chs.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+            let snap = s.snapshot();
+            assert_eq!(
+                ids(snap.as_ref()),
+                ids(&s.list()),
+                "snapshot 与 list 内容/顺序必须一致"
+            );
+            // priority 20 排前
+            assert_eq!(snap[0].id, "b");
+
+            // 写操作（update 提高 a 的优先级）后快照更新
+            let mut c = sample("a", 30, vec!["m"]);
+            c.name = "renamed".to_string();
+            s.update("a", c).unwrap();
+            let snap2 = s.snapshot();
+            assert_eq!(ids(snap2.as_ref()), ids(&s.list()));
+            assert_eq!(snap2[0].id, "a", "写后快照应反映最新排序");
+            assert_eq!(snap2[0].name, "renamed");
+
+            // 之前取出的快照是不可变的，不受后续写入影响
+            assert_eq!(snap[0].id, "b");
+
+            // 删除后快照同步收缩
+            s.remove("b").unwrap();
+            assert_eq!(s.snapshot().len(), 1);
+        });
+    }
+
+    /// 并发读快照 + 并发写不 panic，且读到的快照始终非空。
+    #[test]
+    fn snapshot_concurrent_reads_no_panic() {
+        with_secret_dir("snapshot-conc", || {
+            let s = Arc::new(store());
+            s.add(sample("base", 1, vec!["m"])).unwrap();
+
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                let s2 = s.clone();
+                handles.push(std::thread::spawn(move || {
+                    for _ in 0..300 {
+                        let snap = s2.snapshot();
+                        assert!(!snap.is_empty());
+                        // 同时读 list，验证两条读路径不互相干扰
+                        assert!(!s2.list().is_empty());
+                    }
+                }));
+            }
+            // 并发写：新增 + 冷却标记交替
+            let s3 = s.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..60 {
+                    if i % 2 == 0 {
+                        let _ = s3.add(sample(&format!("x{i}"), 1, vec!["m"]));
+                    } else {
+                        s3.mark_cooldown("base", format!("err{i}"), 1);
+                    }
+                }
+            }));
+            for h in handles {
+                h.join().expect("并发线程不应 panic");
+            }
+            assert!(!s.snapshot().is_empty());
         });
     }
 }

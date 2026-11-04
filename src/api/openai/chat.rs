@@ -679,30 +679,11 @@ pub(crate) async fn handle_chat_completions(
                     }
                 }
             };
-            if cache_cost > 0 {
-                crate::metrics::global()
-                    .record_cost("usd", (cache_cost as u64).saturating_mul(1_000_000));
-                if let Some(uid) = &api_key.user_id {
-                    let charged = state.user_store.try_charge(uid, cache_cost);
-                    if let Some(u) = state.user_store.get_by_id(uid) {
-                        let remaining = u.remaining();
-                        let threshold = (u.quota / 10).clamp(1000, 10000);
-                        if !charged || remaining < threshold {
-                            state.notify_service.notify_spawn(
-                                crate::notify::NotifyEvent::QuotaLow {
-                                    user_email: u.email.clone(),
-                                    remaining,
-                                },
-                            );
-                        }
-                    }
-                    if charged {
-                        let _ = state.api_key_store.charge_quota(&api_key.id, cache_cost);
-                    }
-                } else {
-                    let _ = state.api_key_store.charge_quota(&api_key.id, cache_cost);
-                }
-            }
+            // P0-1：缓存命中必须结算此前预留的配额，否则预留冻结到 TTL 才释放。
+            // 走与正常路径一致的分配逻辑（订阅池 → 用户钱包 → key），按
+            // cache_cost 结算并逐笔摘除预留：预留归零，实扣 == cache_cost；
+            // cache_cost==0（未配 cache_price）时即全额退还预留。
+            let cache_cost = settle_cache_hit(&state, &api_key, &reservation, cache_cost);
             state
                 .usage_tracker
                 .accumulate(0, 0, 0, prompt_tokens, 0, 0.0);

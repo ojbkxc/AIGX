@@ -49,13 +49,19 @@ pub struct ApiKey {
     /// 已用额度
     #[serde(default)]
     pub used_quota: i64,
-    /// 已预留但未结算的额度（P1：配额预留/结算两段式）
+    /// 逐笔未结算预留（P0-2：替代裸 reserved_quota，支持并发请求各自精确回收）
     #[serde(default)]
-    pub reserved_quota: i64,
+    pub reservations: Vec<crate::user::ReservationEntry>,
+    /// 预留 token 分配器（单调递增；0 保留表示「空预留」）
+    #[serde(default)]
+    pub next_reservation_token: u64,
+    /// 结算击穿限额的累计溢出额（P0-3；仅记账展示）
+    #[serde(default)]
+    pub overdraft_quota: i64,
+    /// 版本号（P1-4：异步落盘防乱序，每次修改自增）
+    #[serde(default)]
+    pub version: u64,
     /// IP 白名单（None=不限）
-    /// 最近一次预留的时间戳（G2：超时解冻依据，None=无未结算预留）
-    #[serde(default)]
-    pub reserved_at: Option<i64>,
     #[serde(default)]
     pub ip_limit: Option<Vec<String>>,
     /// 状态：active / disabled（与 is_active 并存，向后兼容）
@@ -112,9 +118,19 @@ impl ApiKey {
     /// 是否超出额度上限（含已预留）
     pub fn is_quota_exhausted(&self) -> bool {
         match self.quota_limit {
-            Some(limit) => self.used_quota + self.reserved_quota >= limit,
+            Some(limit) => self.used_quota + self.reserved_total() >= limit,
             None => false,
         }
+    }
+
+    /// 当前全部未结算预留之和（P0-2：逐笔预留的聚合视图）。
+    pub fn reserved_total(&self) -> i64 {
+        self.reservations.iter().map(|r| r.amount).sum()
+    }
+
+    /// 自增版本号（P1-4：每次修改调用，异步落盘据此丢弃旧快照）。
+    pub fn bump_version(&mut self) {
+        self.version = self.version.wrapping_add(1);
     }
 }
 
@@ -256,9 +272,11 @@ impl ApiKeyStore {
             expires_at: opts.expires_at,
             quota_limit: opts.quota_limit,
             used_quota: 0,
+            reservations: Vec::new(),
+            next_reservation_token: 0,
+            overdraft_quota: 0,
+            version: 0,
             ip_limit: opts.ip_limit,
-            reserved_quota: 0,
-            reserved_at: None,
             status: "active".to_string(),
             updated_at: now,
         };
@@ -289,6 +307,7 @@ impl ApiKeyStore {
         api_key.allowed_models = normalize_model_list(api_key.allowed_models.take());
         api_key.updated_at = chrono::Utc::now().timestamp();
         api_key.is_active = api_key.status == "active";
+        api_key.bump_version();
         let new_hash = hash_api_key(api_key.key.strip_prefix("sk-").unwrap_or(&api_key.key));
 
         self.store.put(&format!("apikey_{id}"), &api_key)?;
@@ -390,6 +409,17 @@ impl ApiKeyStore {
         Ok(api_key)
     }
 
+    /// 锁外异步落盘（P1-4：落盘前比较 version，旧快照丢弃，防乱序覆盖）。
+    fn persist_async(&self, api_key: &ApiKey) {
+        let key = format!("apikey_{}", api_key.id);
+        if let Ok(Some(current)) = self.store.get::<ApiKey>(&key) {
+            if current.version >= api_key.version {
+                return;
+            }
+        }
+        self.store.put_async(key, api_key.clone());
+    }
+
     /// 扣减令牌已用额度（配额不足返回 false）
     pub fn charge_quota(&self, id: &str, amount: i64) -> bool {
         if amount <= 0 {
@@ -407,44 +437,45 @@ impl ApiKeyStore {
         }
         api_key.used_quota += amount;
         api_key.last_used_at = Some(chrono::Utc::now().timestamp());
+        api_key.bump_version();
         let snapshot = api_key.clone();
         drop(keys);
-        self.store.put_async(format!("apikey_{id}"), snapshot);
+        self.persist_async(&snapshot);
         true
     }
 
-    /// 预留令牌额度（P1：两段式计费第一步）。
+    /// 预留令牌额度（P0-2：逐笔预留，返回 token）。
     ///
-    /// 将 `amount` 冻结到 `reserved_quota`，请求完成后由 `settle_quota` 结算。
-    pub fn reserve_quota(&self, id: &str, amount: i64) -> bool {
+    /// 返回 `Some(token)` 表示预留成功（token=0 表示 amount<=0 的空预留）；
+    /// `None` 表示超出 key 额度上限。
+    pub fn reserve_quota(&self, id: &str, amount: i64) -> Option<u64> {
         if amount <= 0 {
-            return true;
+            return Some(0);
         }
         let mut keys = self.keys.write();
-        let api_key = match keys.get_mut(id) {
-            Some(k) => k,
-            None => return false,
-        };
+        let api_key = keys.get_mut(id)?;
         if let Some(limit) = api_key.quota_limit {
-            if api_key.used_quota + api_key.reserved_quota + amount > limit {
-                return false;
+            if api_key.used_quota + api_key.reserved_total() + amount > limit {
+                return None;
             }
         }
-        if api_key.reserved_quota == 0 {
-            api_key.reserved_at = Some(chrono::Utc::now().timestamp());
-        }
-        api_key.reserved_quota += amount;
+        let token = api_key.next_reservation_token.wrapping_add(1);
+        api_key.next_reservation_token = token;
+        api_key.reservations.push(crate::user::ReservationEntry {
+            token,
+            amount,
+            at: chrono::Utc::now().timestamp(),
+        });
+        api_key.bump_version();
         let snapshot = api_key.clone();
         drop(keys);
-        self.store.put_async(format!("apikey_{id}"), snapshot);
-        true
+        self.persist_async(&snapshot);
+        Some(token)
     }
 
-    /// 结算令牌预留额度（P1：两段式计费第二步）。
-    ///
-    /// `reserved` 是预留总额，`actual` 是实际消费。释放预留，转入实际消费。
-    pub fn settle_quota(&self, id: &str, reserved: i64, actual: i64) {
-        if reserved <= 0 {
+    /// 结算令牌预留额度（P0-2：按 token 精确摘除；P0-3：超额记 overdraft）。
+    pub fn settle_quota(&self, id: &str, token: u64, actual: i64) {
+        if token == 0 {
             return;
         }
         let actual = actual.max(0);
@@ -453,25 +484,34 @@ impl ApiKeyStore {
             Some(k) => k,
             None => return,
         };
-        let release = reserved.min(api_key.reserved_quota);
-        if release >= api_key.reserved_quota {
-            api_key.reserved_at = None;
+        if let Some(pos) = api_key.reservations.iter().position(|r| r.token == token) {
+            api_key.reservations.remove(pos);
         }
-        api_key.reserved_quota -= release;
+        // P0-3：used_quota 照记（不白送），超限部分累计 overdraft
+        let limit = api_key.quota_limit.unwrap_or(i64::MAX);
+        let before_over = (api_key.used_quota - limit).max(0);
         api_key.used_quota += actual;
+        let over = (api_key.used_quota - limit).max(0) - before_over;
+        if over > 0 {
+            api_key.overdraft_quota += over;
+            tracing::warn!(
+                key = %api_key.id,
+                overdraft_delta = over,
+                used_quota = api_key.used_quota,
+                quota_limit = limit,
+                "settle_quota exceeded key quota_limit; recorded as overdraft"
+            );
+        }
         api_key.last_used_at = Some(chrono::Utc::now().timestamp());
+        api_key.bump_version();
         let snapshot = api_key.clone();
         drop(keys);
-        self.store.put_async(format!("apikey_{id}"), snapshot);
+        self.persist_async(&snapshot);
     }
 
-    /// 释放令牌预留额度（P1：两段式计费的取消/回滚路径）。
-    ///
-    /// 与 `settle_quota` 的区别见 `UserStore::release_quota`：这里只把
-    /// `reserved_quota` 解冻归还，不产生 used_quota 消费。请求失败、
-    /// 预留回滚、预留超时回收统一走此方法（2026-09-08 二轮审查 G1/G5）。
-    pub fn release_quota(&self, id: &str, amount: i64) {
-        if amount <= 0 {
+    /// 释放令牌预留额度（P0-2：按 token 精确归还，不产生 used 消费）。
+    pub fn release_quota(&self, id: &str, token: u64) {
+        if token == 0 {
             return;
         }
         let mut keys = self.keys.write();
@@ -479,29 +519,28 @@ impl ApiKeyStore {
             Some(k) => k,
             None => return,
         };
-        // 防御性上限：最多归还当前预留量
-        let release = amount.min(api_key.reserved_quota);
-        if release >= api_key.reserved_quota {
-            api_key.reserved_at = None;
-        }
-        api_key.reserved_quota -= release;
+        let Some(pos) = api_key.reservations.iter().position(|r| r.token == token) else {
+            return;
+        };
+        api_key.reservations.remove(pos);
+        api_key.bump_version();
         let snapshot = api_key.clone();
         drop(keys);
-        self.store.put_async(format!("apikey_{id}"), snapshot);
+        self.persist_async(&snapshot);
     }
 
-    /// 回收超时未结算的预留（G2：预留 TTL 解冻，与 UserStore 对称）。
+    /// 回收超时未结算的预留（P0-2：只清 `at < cutoff` 的逐笔条目）。
     pub fn release_stale_reservations(&self, ttl_secs: i64) -> u64 {
         let cutoff = chrono::Utc::now().timestamp() - ttl_secs;
         let mut count = 0u64;
         let mut keys = self.keys.write();
         for key in keys.values_mut() {
-            let stale = key.reserved_at.map(|t| t < cutoff).unwrap_or(false);
-            if stale && key.reserved_quota > 0 {
-                key.reserved_quota = 0;
-                key.reserved_at = None;
+            let before = key.reservations.len();
+            key.reservations.retain(|r| r.at >= cutoff);
+            if key.reservations.len() != before {
+                key.bump_version();
                 let snapshot = key.clone();
-                self.store.put_async(format!("apikey_{}", key.id), snapshot);
+                self.persist_async(&snapshot);
                 count += 1;
             }
         }
@@ -513,9 +552,10 @@ impl ApiKeyStore {
         if let Some(api_key) = keys.get_mut(id) {
             api_key.used_quota = 0;
             api_key.updated_at = chrono::Utc::now().timestamp();
+            api_key.bump_version();
             let snapshot = api_key.clone();
             drop(keys);
-            self.store.put_async(format!("apikey_{id}"), snapshot);
+            self.persist_async(&snapshot);
             true
         } else {
             false
@@ -821,7 +861,7 @@ mod session_registry_tests {
         assert!(!reg.revoke("a@x.com", "jti-1"));
     }
 
-    // ── 预留/结算/释放语义测试（P1 两段式，2026-09-08 G1/G5 修复）──
+    // ── 预留/结算/释放语义测试（P0-2 逐笔 token 化，2026-11-04）──
 
     fn key_store() -> ApiKeyStore {
         ApiKeyStore::new(Arc::new(FileStore::new(
@@ -829,58 +869,90 @@ mod session_registry_tests {
         )))
     }
 
-    /// 预留 → 结算：reserved 解冻，used 增加实际消费。
+    /// 预留 → 结算：按 token 摘除预留，used 增加实际消费。
     #[test]
     fn apikey_reserve_then_settle() {
         let s = key_store();
         let k = s.generate("t1").unwrap();
-        assert!(s.reserve_quota(&k.id, 100));
-        assert_eq!(s.validate(&k.key).unwrap().reserved_quota, 100);
-        s.settle_quota(&k.id, 100, 60);
+        let tok = s.reserve_quota(&k.id, 100).unwrap();
+        assert_eq!(s.validate(&k.key).unwrap().reserved_total(), 100);
+        s.settle_quota(&k.id, tok, 60);
         let after = s.validate(&k.key).unwrap();
-        assert_eq!(after.reserved_quota, 0);
+        assert_eq!(after.reserved_total(), 0);
         assert_eq!(after.used_quota, 60);
     }
 
-    /// 预留 → 释放：reserved 解冻，used 不变（无消费）。
+    /// 预留 → 释放：预留解冻，used 不变（无消费）。
     #[test]
     fn apikey_reserve_then_release() {
         let s = key_store();
         let k = s.generate("t2").unwrap();
-        assert!(s.reserve_quota(&k.id, 100));
-        s.release_quota(&k.id, 100);
+        let tok = s.reserve_quota(&k.id, 100).unwrap();
+        s.release_quota(&k.id, tok);
         let after = s.validate(&k.key).unwrap();
-        assert_eq!(after.reserved_quota, 0);
+        assert_eq!(after.reserved_total(), 0);
         assert_eq!(after.used_quota, 0);
     }
 
-    /// 释放量超过当前预留时只归还当前量（防御性上限，不产生负值）。
+    /// 释放未知 token 是 no-op（不误伤其他预留，取代旧钳制上限）。
     #[test]
-    fn apikey_release_clamped() {
+    fn apikey_release_unknown_token_noop() {
         let s = key_store();
         let k = s.generate("t3").unwrap();
-        assert!(s.reserve_quota(&k.id, 50));
-        s.release_quota(&k.id, 500);
+        let tok = s.reserve_quota(&k.id, 50).unwrap();
+        s.release_quota(&k.id, tok + 999);
         let after = s.validate(&k.key).unwrap();
-        assert_eq!(after.reserved_quota, 0);
+        assert_eq!(after.reserved_total(), 50);
         assert_eq!(after.used_quota, 0);
     }
 
-    /// G2：API key 预留带时间戳，超时未结算的预留被回收。
+    /// P0-3：key 结算超额 → used 照记、overdraft 记超出、is_quota_exhausted 仍成立。
+    #[test]
+    fn apikey_settle_overdraft() {
+        let s = key_store();
+        let opts = CreateApiKeyOptions {
+            name: "over".to_string(),
+            user_id: None,
+            group: "default".to_string(),
+            allowed_models: None,
+            expires_at: None,
+            quota_limit: Some(100),
+            ip_limit: None,
+            custom_key: None,
+        };
+        let k = s.generate_with_options(opts).unwrap();
+        let tok = s.reserve_quota(&k.id, 100).unwrap();
+        // 实际消费 150，超出 limit 50
+        s.settle_quota(&k.id, tok, 150);
+        let after = s.validate(&k.key).unwrap();
+        assert_eq!(after.reserved_total(), 0);
+        assert_eq!(after.used_quota, 150);
+        assert_eq!(after.overdraft_quota, 50);
+        assert!(after.is_quota_exhausted());
+    }
+
+    /// G2：API key 逐笔预留超时只清过期那条。
     #[test]
     fn apikey_stale_reservation_released() {
         let s = key_store();
         let k = s.generate("stale").unwrap();
-        assert!(s.reserve_quota(&k.id, 100));
-        assert!(s.validate(&k.key).unwrap().reserved_at.is_some());
+        let stale_tok = s.reserve_quota(&k.id, 100).unwrap();
+        let fresh_tok = s.reserve_quota(&k.id, 40).unwrap();
         {
             let mut keys = s.keys.write();
-            keys.get_mut(&k.id).unwrap().reserved_at = Some(chrono::Utc::now().timestamp() - 3600);
+            let entry = keys
+                .get_mut(&k.id)
+                .unwrap()
+                .reservations
+                .iter_mut()
+                .find(|r| r.token == stale_tok)
+                .unwrap();
+            entry.at = chrono::Utc::now().timestamp() - 3600;
         }
         assert_eq!(s.release_stale_reservations(30 * 60), 1);
         let after = s.validate(&k.key).unwrap();
-        assert_eq!(after.reserved_quota, 0);
-        assert!(after.reserved_at.is_none());
+        assert_eq!(after.reserved_total(), 40);
+        assert!(after.reservations.iter().any(|r| r.token == fresh_tok));
     }
 
     #[test]

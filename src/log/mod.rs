@@ -21,6 +21,7 @@ use crate::storage::FileStore;
 
 pub mod daily_agg;
 pub mod inflight;
+pub mod writer;
 
 // ── RequestLog ─────────────────────────────────────────────────────
 
@@ -543,37 +544,10 @@ impl RequestLogStore {
 
     /// B13：容量超限时删除最旧一批日志。
     ///
-    /// key 中 created_at 为数字字符串，字典序与数值序不一致
-    ///（如 "999" > "1000"），需 parse 后按数值排序再取最旧。
-    ///
-    /// 容量上限优先读运维保留配置（LogRetention 页设置），未配置时
-    /// 回退默认 10 万——原先硬编码 MAX_LOGS，管理员配置的容量被静默忽略。
+    /// 实现见自由函数 [`purge_request_overflow`]（日志写入旁路的批量
+    /// 消费者同样要跑这套容量兜底，抽出来两处共用）。
     fn purge_overflow(&self) -> anyhow::Result<()> {
-        let (_, capacity) = self.retention();
-        let max_logs = capacity.unwrap_or(Self::MAX_LOGS);
-        let keys = self.store.list("reqlog:")?;
-        if keys.len() < max_logs {
-            return Ok(());
-        }
-        let mut timed: Vec<(i64, String)> = keys
-            .into_iter()
-            .map(|k| {
-                let ts = k
-                    .strip_prefix("reqlog:")
-                    .and_then(|rest| rest.split(':').next())
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(i64::MAX);
-                (ts, k)
-            })
-            .collect();
-        timed.sort_by_key(|(ts, _)| *ts);
-        let excess = (timed.len().saturating_sub(max_logs) + Self::PURGE_BATCH).min(timed.len());
-        for (_, k) in timed.into_iter().take(excess) {
-            if let Err(e) = self.store.delete(&k) {
-                tracing::warn!("request log purge failed for {k}: {e}");
-            }
-        }
-        Ok(())
+        purge_request_overflow(&self.store)
     }
 
     /// 日志保留配置（运维设置持久化；None = 不按天数清理，只受容量上限约束）
@@ -1074,6 +1048,54 @@ fn csv_escape(s: &str) -> String {
     }
 }
 
+/// B13：请求日志容量兜底——超限时删除最旧一批。
+///
+/// key 中 created_at 为数字字符串，字典序与数值序不一致
+///（如 "999" > "1000"），需 parse 后按数值排序再取最旧。
+///
+/// 容量上限优先读运维保留配置（LogRetention 页设置），未配置时
+/// 回退默认 10 万——原先硬编码 MAX_LOGS，管理员配置的容量被静默忽略。
+///
+/// 抽成自由函数：写入路径（`RequestLogStore::add`）与异步批量写旁路
+///（[`writer::LogWriter`] 的消费者）共用，避免两处实现漂移。
+pub(crate) fn purge_request_overflow(store: &FileStore) -> anyhow::Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Retention {
+        #[serde(default)]
+        max_capacity: Option<usize>,
+    }
+    let capacity = store
+        .get::<Retention>("log_retention")
+        .ok()
+        .flatten()
+        .and_then(|r| r.max_capacity);
+    let max_logs = capacity.unwrap_or(RequestLogStore::MAX_LOGS);
+    let keys = store.list("reqlog:")?;
+    if keys.len() < max_logs {
+        return Ok(());
+    }
+    let mut timed: Vec<(i64, String)> = keys
+        .into_iter()
+        .map(|k| {
+            let ts = k
+                .strip_prefix("reqlog:")
+                .and_then(|rest| rest.split(':').next())
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(i64::MAX);
+            (ts, k)
+        })
+        .collect();
+    timed.sort_by_key(|(ts, _)| *ts);
+    let excess =
+        (timed.len().saturating_sub(max_logs) + RequestLogStore::PURGE_BATCH).min(timed.len());
+    for (_, k) in timed.into_iter().take(excess) {
+        if let Err(e) = store.delete(&k) {
+            tracing::warn!("request log purge failed for {k}: {e}");
+        }
+    }
+    Ok(())
+}
+
 /// 审计日志存储。
 ///
 /// key 格式：`auditlog:{created_at}:{id}`
@@ -1412,27 +1434,41 @@ pub struct LogStore {
     pub security: SecurityEventStore,
     /// 按天聚合（记账热路径同步维护，报表读它不扫明细）。
     pub daily: daily_agg::DailyAggStore,
+    /// 异步批量写旁路：`record_request` 只入队，后台合并落盘（见 [`writer`]）。
+    writer: writer::LogWriter,
 }
 
 impl LogStore {
     pub fn new(store: Arc<FileStore>) -> Self {
+        let daily = daily_agg::DailyAggStore::new(store.clone());
+        // 与 daily 共享聚合写锁：旁路批量折叠聚合行时也要和回填/清理互斥。
+        let writer = writer::LogWriter::new(store.clone(), daily.lock_handle());
         Self {
             requests: RequestLogStore::new(store.clone()),
             audits: AuditLogStore::new(store.clone()),
             security: SecurityEventStore::new(store.clone()),
-            daily: daily_agg::DailyAggStore::new(store),
+            daily,
+            writer,
         }
     }
 
-    /// 便捷方法：记录请求日志（忽略错误，仅 tracing）
+    /// 便捷方法：记录请求日志（忽略错误，仅 tracing）。
+    ///
+    /// 入队到异步批量写旁路：只做一次 `try_send`，**不阻塞请求线程**；
+    /// 队列满则丢弃并告警（丢一条统计远好过拖慢在途请求）。无 tokio
+    /// runtime 时旁路自动降级为同步写，语义与改造前一致。
     pub fn record_request(&self, log: RequestLog) {
-        match self.requests.add(log) {
-            Ok(entry) => {
-                // 聚合失败只 warn：丢一条统计仅报表少一个数，不影响转发/计费。
-                self.daily.record(&entry);
-            }
-            Err(e) => tracing::warn!("Failed to record request log: {e}"),
-        }
+        self.writer.send(writer::LogOp::Request(log));
+    }
+
+    /// 优雅关闭：阻塞直到异步写入队列排空（同步降级模式下立即返回）。
+    pub fn flush(&self) {
+        self.writer.flush();
+    }
+
+    /// 非阻塞尽力 flush：唤醒后台任务立即处理，不等待。
+    pub fn try_flush(&self) {
+        self.writer.try_flush();
     }
 
     /// 便捷方法：记录审计日志（忽略错误，仅 tracing）

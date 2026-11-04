@@ -36,6 +36,21 @@ pub enum Role {
 
 // Default impl removed — derived via #[derive(Default)]
 
+/// 单笔配额预留记录（P0-2）。
+///
+/// 替代原先的裸 `reserved_quota + reserved_at` 单值：同一用户并发请求各自
+/// 持有一个 token，结算/释放按 token 精确摘除，超时回收只清过期条目，
+/// 不会误伤仍在进行中的预留。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReservationEntry {
+    /// 预留 token（对应 `reserve_quota` 的返回值；0 保留表示空预留）
+    pub token: u64,
+    /// 预留金额
+    pub amount: i64,
+    /// 预留时间戳（超时回收依据）
+    pub at: i64,
+}
+
 /// 用户记录
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
@@ -55,12 +70,18 @@ pub struct User {
     /// 已用配额
     #[serde(default)]
     pub used_quota: i64,
-    /// 已预留但未结算的配额（P1：配额预留/结算两段式）
+    /// 逐笔未结算预留（P0-2：替代裸 reserved_quota，支持并发请求各自精确回收）
     #[serde(default)]
-    pub reserved_quota: i64,
-    /// 最近一次预留的时间戳（G2：超时解冻依据，None=无未结算预留）
+    pub reservations: Vec<ReservationEntry>,
+    /// 预留 token 分配器（单调递增；0 保留表示「空预留」）
     #[serde(default)]
-    pub reserved_at: Option<i64>,
+    pub next_reservation_token: u64,
+    /// 结算击穿限额的累计溢出额（P0-3；仅记账展示，remaining 仍以 0 为下限）
+    #[serde(default)]
+    pub overdraft_quota: i64,
+    /// 版本号（P1-4：异步落盘防乱序，每次修改自增）
+    #[serde(default)]
+    pub version: u64,
     /// 状态: active / disabled
     #[serde(default = "default_status")]
     pub status: String,
@@ -146,9 +167,19 @@ fn default_group() -> String {
 }
 
 impl User {
-    /// 剩余可用配额（扣除已用 + 已预留）
+    /// 剩余可用配额（扣除已用 + 已预留，非负）
     pub fn remaining(&self) -> i64 {
-        (self.quota - self.used_quota - self.reserved_quota).max(0)
+        (self.quota - self.used_quota - self.reserved_total()).max(0)
+    }
+
+    /// 当前全部未结算预留之和（P0-2：逐笔预留的聚合视图）。
+    pub fn reserved_total(&self) -> i64 {
+        self.reservations.iter().map(|r| r.amount).sum()
+    }
+
+    /// 自增版本号（P1-4：每次修改调用，异步落盘据此丢弃旧快照）。
+    pub fn bump_version(&mut self) {
+        self.version = self.version.wrapping_add(1);
     }
 
     /// 是否为管理员
@@ -217,8 +248,16 @@ impl UserStore {
 
     /// 锁外异步落盘：快照已持有完整副本，丢给 blocking 线程池写存储，
     /// 消除「写守卫内做同步 IO」的固有风险。失败仅记日志。
+    ///
+    /// P1-4：落盘前读回当前存储值，若其 version 不低于本快照则丢弃本次写入，
+    /// 避免旧快照后落盘把新值覆盖回退（重启后配额回血）。多一次读，可接受。
     fn persist_async(&self, user: &User) {
         let key = format!("user:{}", user.id);
+        if let Ok(Some(current)) = self.store.get::<User>(&key) {
+            if current.version >= user.version {
+                return;
+            }
+        }
         self.store.put_async(key, user.clone());
     }
 
@@ -241,8 +280,10 @@ impl UserStore {
             role,
             quota,
             used_quota: 0,
-            reserved_quota: 0,
-            reserved_at: None,
+            reservations: Vec::new(),
+            next_reservation_token: 0,
+            overdraft_quota: 0,
+            version: 0,
             status: "active".into(),
             group: "default".into(),
             totp_secret: String::new(),
@@ -295,8 +336,10 @@ impl UserStore {
             role,
             quota,
             used_quota: 0,
-            reserved_quota: 0,
-            reserved_at: None,
+            reservations: Vec::new(),
+            next_reservation_token: 0,
+            overdraft_quota: 0,
+            version: 0,
             status: "active".into(),
             group: "default".into(),
             totp_secret: String::new(),
@@ -351,8 +394,10 @@ impl UserStore {
             role: Role::User,
             quota,
             used_quota: 0,
-            reserved_quota: 0,
-            reserved_at: None,
+            reservations: Vec::new(),
+            next_reservation_token: 0,
+            overdraft_quota: 0,
+            version: 0,
             status: "active".into(),
             group: "default".into(),
             totp_secret: String::new(),
@@ -473,6 +518,7 @@ impl UserStore {
             .ok_or_else(|| anyhow::anyhow!("user not found"))?;
         let old_email = user.email.clone();
         mutator(user);
+        user.bump_version();
         // 邮箱变更校验（写锁内做，读到的 by_email 与写入之间无窗口）
         if user.email != old_email {
             if user.email.is_empty() {
@@ -524,6 +570,7 @@ impl UserStore {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("user not found"))?;
         user.quota += delta;
+        user.bump_version();
         let snapshot = user.clone();
         // 持久化必须在写锁内完成：若先放锁再写盘，两个并发修改各自拿到快照
         // 后，后写盘的可能反而是**更旧**的那份（T1 拿 S1 放锁 → T2 拿 S2 写盘
@@ -557,6 +604,7 @@ impl UserStore {
             anyhow::bail!("insufficient quota");
         }
         user.quota -= amount;
+        user.bump_version();
         let snapshot = user.clone();
         // 同 add_quota_atomic：锁内落盘，避免旧快照覆盖新快照
         self.persist(&snapshot)?;
@@ -578,6 +626,7 @@ impl UserStore {
             return false;
         }
         user.used_quota += amount;
+        user.bump_version();
         let snapshot = user.clone();
         drop(by_id);
         // 锁外异步落盘；失败只记日志不清零内存态——计费已经在内存里扣了，
@@ -586,44 +635,46 @@ impl UserStore {
         true
     }
 
-    /// 预留配额（P1：两段式计费第一步）。
+    /// 预留配额（P0-2：逐笔预留，返回 token）。
     ///
-    /// 在请求发起前调用，将 `amount` 从可用余额中「冻结」到 `reserved_quota`。
-    /// 请求完成后由 `settle_quota` 把实际消费从 reserved 转入 used_quota，
-    /// 多预留的部分由 `release_quota` 归还。
+    /// 在请求发起前调用，把 `amount` 冻结为一笔带 token 的预留记录。
+    /// 请求完成后由 `settle_quota(uid, token, actual)` 结算或
+    /// `release_quota(uid, token)` 取消；超时回收只清过期条目，
+    /// 并发请求各自持有 token、互不误伤。
     ///
-    /// 返回 true 表示预留成功，false 表示余额不足。
-    pub fn reserve_quota(&self, id: &str, amount: i64) -> bool {
+    /// 返回 `Some(token)` 表示预留成功（token=0 表示 amount<=0 的空预留）；
+    /// `None` 表示余额不足。
+    pub fn reserve_quota(&self, id: &str, amount: i64) -> Option<u64> {
         if amount <= 0 {
-            return true;
+            return Some(0);
         }
         let mut by_id = self.by_id.write();
-        let user = match by_id.get_mut(id) {
-            Some(u) => u,
-            None => return false,
-        };
+        let user = by_id.get_mut(id)?;
         if user.remaining() < amount {
-            return false;
+            return None;
         }
-        if user.reserved_quota == 0 {
-            user.reserved_at = Some(chrono::Utc::now().timestamp());
-        }
-        user.reserved_quota += amount;
+        let token = user.next_reservation_token.wrapping_add(1);
+        user.next_reservation_token = token;
+        user.reservations.push(ReservationEntry {
+            token,
+            amount,
+            at: chrono::Utc::now().timestamp(),
+        });
+        user.bump_version();
         let snapshot = user.clone();
         drop(by_id);
         // 锁外异步落盘（并发安全：后续修改会再次落盘最新值）
         self.persist_async(&snapshot);
-        true
+        Some(token)
     }
 
-    /// 结算预留配额（P1：两段式计费第二步）。
+    /// 结算预留配额（P0-2：按 token 精确摘除；P0-3：超额记 overdraft）。
     ///
-    /// `reserved` 是之前预留的总额，`actual` 是实际消费额（≤ reserved）。
-    /// 将 actual 转入 used_quota，剩余 (reserved - actual) 归还到可用余额。
-    ///
-    /// 若 actual > reserved（罕见：估算严重不足），超出部分直接从余额扣。
-    pub fn settle_quota(&self, id: &str, reserved: i64, actual: i64) {
-        if reserved <= 0 {
+    /// 摘除该 token 的预留并把 `actual` 计入 `used_quota`。若结算后
+    /// `used_quota` 超过 `quota`，本次新增的超出部分累计进 `overdraft_quota`
+    /// —— 债务照记不白送，同时 `remaining()` 以 0 为下限不会为负。
+    pub fn settle_quota(&self, id: &str, token: u64, actual: i64) {
+        if token == 0 {
             return;
         }
         let actual = actual.max(0);
@@ -632,32 +683,36 @@ impl UserStore {
             Some(u) => u,
             None => return,
         };
-        // 释放预留（不超过已预留量）
-        let release = reserved.min(user.reserved_quota);
-        if release >= user.reserved_quota {
-            user.reserved_at = None;
+        // 按 token 精确摘除本次预留（不存在则视为已结算，防御性 no-op）
+        if let Some(pos) = user.reservations.iter().position(|r| r.token == token) {
+            user.reservations.remove(pos);
         }
-        user.reserved_quota -= release;
-        // 实际消费转入 used_quota
+        // 记账：实际消费转入 used_quota
+        let before_over = (user.used_quota - user.quota).max(0);
         user.used_quota += actual;
+        let over = (user.used_quota - user.quota).max(0) - before_over;
+        if over > 0 {
+            user.overdraft_quota += over;
+            tracing::warn!(
+                user = %user.id,
+                overdraft_delta = over,
+                used_quota = user.used_quota,
+                quota = user.quota,
+                "settle_quota exceeded user quota; recorded as overdraft"
+            );
+        }
+        user.bump_version();
         let snapshot = user.clone();
         drop(by_id);
         self.persist_async(&snapshot);
     }
 
-    /// 释放预留配额（P1：两段式计费的取消/回滚路径）。
+    /// 释放预留配额（P0-2：按 token 精确归还，不产生任何消费）。
     ///
-    /// 与 `settle_quota` 的区别：settle 是「结算」——解冻预留并把实际消费
-    /// 转入 used_quota；release 是「取消」——只把预留解冻归还余额，
-    /// 不产生任何消费。请求失败、预留回滚、预留超时回收都走这里。
-    ///
-    /// 为什么必须独立成方法：settle 语义下 `actual=0` 看似等价于 release，
-    /// 但 settle 内部对并发场景有 `reserved.min(user.reserved_quota)` 的
-    /// 钳制，同一用户多请求并发时可能解冻到他人刚建立的预留（2026-09-08
-    /// 二轮审查 G1）。release 按「本次预留的实际持有量」精确归还，语义
-    /// 可审计且不依赖钳制。
-    pub fn release_quota(&self, id: &str, amount: i64) {
-        if amount <= 0 {
+    /// 请求失败、预留回滚、预留超时回收都走这里。按 token 摘除对应预留，
+    /// 不依赖任何「当前预留量」钳制，并发请求互不干扰。
+    pub fn release_quota(&self, id: &str, token: u64) {
+        if token == 0 {
             return;
         }
         let mut by_id = self.by_id.write();
@@ -665,31 +720,30 @@ impl UserStore {
             Some(u) => u,
             None => return,
         };
-        // 最多归还当前预留量：预留可能已被其他路径结算（防御性上限）
-        let release = amount.min(user.reserved_quota);
-        if release >= user.reserved_quota {
-            user.reserved_at = None;
-        }
-        user.reserved_quota -= release;
+        let Some(pos) = user.reservations.iter().position(|r| r.token == token) else {
+            return;
+        };
+        user.reservations.remove(pos);
+        user.bump_version();
         let snapshot = user.clone();
         drop(by_id);
         self.persist_async(&snapshot);
     }
 
-    /// 回收超时未结算的预留（G2：预留 TTL 解冻）。
+    /// 回收超时未结算的预留（P0-2：只清 `at < cutoff` 的逐笔条目）。
     ///
-    /// 进程崩溃 / 流式请求挂死会让预留永久冻结；周期任务按 `reserved_at`
-    /// 判断超时（默认 30 分钟，远超单请求上限），把整笔预留归还余额。
-    /// 返回解冻的账号数。
+    /// 进程崩溃 / 流式请求挂死会让预留永久冻结；周期任务按每笔预留的时间戳
+    /// 判断超时（默认 30 分钟，远超单请求上限），只归还过期那几笔，
+    /// 仍在进行中的并发预留不受影响。返回被回收的账号数。
     pub fn release_stale_reservations(&self, ttl_secs: i64) -> u64 {
         let cutoff = chrono::Utc::now().timestamp() - ttl_secs;
         let mut count = 0u64;
         let mut by_id = self.by_id.write();
         for user in by_id.values_mut() {
-            let stale = user.reserved_at.map(|t| t < cutoff).unwrap_or(false);
-            if stale && user.reserved_quota > 0 {
-                user.reserved_quota = 0;
-                user.reserved_at = None;
+            let before = user.reservations.len();
+            user.reservations.retain(|r| r.at >= cutoff);
+            if user.reservations.len() != before {
+                user.bump_version();
                 let snapshot = user.clone();
                 if let Err(e) = self.persist(&snapshot) {
                     tracing::error!(
@@ -779,6 +833,7 @@ impl UserStore {
         }
         user.aff_quota = 0;
         user.quota += amount;
+        user.bump_version();
         let snapshot = user.clone();
         drop(by_id);
         self.persist(&snapshot)?;
@@ -936,67 +991,120 @@ mod tests {
         let user: User = serde_json::from_str(legacy).unwrap();
         assert!(user.totp_recovery_codes.is_empty());
         assert!(user.totp_enabled);
+        // 旧数据无新增字段：reservations/version/overdraft 走 serde default
+        assert!(user.reservations.is_empty());
+        assert_eq!(user.version, 0);
+        assert_eq!(user.overdraft_quota, 0);
     }
 
-    // ── 预留/结算/释放语义测试（P1 两段式，2026-09-08 G1/G5 修复）──
+    // ── 预留/结算/释放语义测试（P0-2 逐笔 token 化，2026-11-04）──
 
-    /// 预留 → 结算：reserved 解冻，used 增加实际消费，余额正确。
+    /// 预留 → 结算：按 token 精确摘除预留，used 增加实际消费，余额正确。
     #[test]
     fn reserve_then_settle() {
         let s = store();
         let u = s.create("rs1@test.com", "pw", Role::User, 1000).unwrap();
-        assert!(s.reserve_quota(&u.id, 300));
-        assert_eq!(s.get_by_id(&u.id).unwrap().reserved_quota, 300);
-        s.settle_quota(&u.id, 300, 180);
+        let tok = s.reserve_quota(&u.id, 300).unwrap();
+        assert_eq!(s.get_by_id(&u.id).unwrap().reserved_total(), 300);
+        s.settle_quota(&u.id, tok, 180);
         let after = s.get_by_id(&u.id).unwrap();
-        assert_eq!(after.reserved_quota, 0);
+        assert_eq!(after.reserved_total(), 0);
         assert_eq!(after.used_quota, 180);
         assert_eq!(after.remaining(), 820);
     }
 
-    /// 预留 → 释放：reserved 解冻，used 不变（无消费归还）。
+    /// 缓存命中：预留 1000、命中成本 300 → 预留归零、used == 300（P0-1 止损）。
+    #[test]
+    fn cache_hit_settles_reservation() {
+        let s = store();
+        let u = s.create("cache1@test.com", "pw", Role::User, 5000).unwrap();
+        let tok = s.reserve_quota(&u.id, 1000).unwrap();
+        // 缓存命中按实际成本 300 结算（预留多出的 700 归还）
+        s.settle_quota(&u.id, tok, 300);
+        let after = s.get_by_id(&u.id).unwrap();
+        assert_eq!(after.reserved_total(), 0);
+        assert_eq!(after.used_quota, 300);
+        assert_eq!(after.remaining(), 4700);
+    }
+
+    /// 缓存命中成本为 0 → 预留全退、无消费（未配 cache_price）。
+    #[test]
+    fn cache_hit_zero_cost_releases_all() {
+        let s = store();
+        let u = s.create("cache2@test.com", "pw", Role::User, 5000).unwrap();
+        let tok = s.reserve_quota(&u.id, 1000).unwrap();
+        s.release_quota(&u.id, tok);
+        let after = s.get_by_id(&u.id).unwrap();
+        assert_eq!(after.reserved_total(), 0);
+        assert_eq!(after.used_quota, 0);
+        assert_eq!(after.remaining(), 5000);
+    }
+
+    /// 预留 → 释放：预留解冻，used 不变（无消费归还）。
     #[test]
     fn reserve_then_release() {
         let s = store();
         let u = s.create("rs2@test.com", "pw", Role::User, 1000).unwrap();
-        assert!(s.reserve_quota(&u.id, 300));
-        s.release_quota(&u.id, 300);
+        let tok = s.reserve_quota(&u.id, 300).unwrap();
+        s.release_quota(&u.id, tok);
         let after = s.get_by_id(&u.id).unwrap();
-        assert_eq!(after.reserved_quota, 0);
+        assert_eq!(after.reserved_total(), 0);
         assert_eq!(after.used_quota, 0);
         assert_eq!(after.remaining(), 1000);
     }
 
-    /// 释放量超过当前预留时只归还当前量（防御性上限）。
+    /// 释放未知 token 是 no-op（不误伤其他预留）。
     #[test]
-    fn release_clamped() {
+    fn release_unknown_token_noop() {
         let s = store();
         let u = s.create("rs3@test.com", "pw", Role::User, 1000).unwrap();
-        assert!(s.reserve_quota(&u.id, 50));
-        s.release_quota(&u.id, 500);
+        let tok = s.reserve_quota(&u.id, 50).unwrap();
+        s.release_quota(&u.id, tok + 999);
         let after = s.get_by_id(&u.id).unwrap();
-        assert_eq!(after.reserved_quota, 0);
+        assert_eq!(after.reserved_total(), 50);
         assert_eq!(after.used_quota, 0);
     }
 
-    /// G2：预留带时间戳，超时未结算的预留被周期任务解冻。
+    /// P0-2（关键）：并发两笔预留，清扫只清过期那条，另一条仍在。
     #[test]
-    fn stale_reservation_released_after_ttl() {
+    fn stale_sweep_keeps_fresh_reservation() {
         let s = store();
-        let u = s.create("stale@test.com", "pw", Role::User, 1000).unwrap();
-        assert!(s.reserve_quota(&u.id, 300));
-        assert!(s.get_by_id(&u.id).unwrap().reserved_at.is_some());
-        // 手动把预留时间拨到 1 小时前（模拟挂死请求）
+        let u = s.create("conc@test.com", "pw", Role::User, 1000).unwrap();
+        let stale_tok = s.reserve_quota(&u.id, 300).unwrap();
+        let fresh_tok = s.reserve_quota(&u.id, 200).unwrap();
+        // 只把第一笔拨到 1 小时前（模拟挂死请求）
         {
             let mut by_id = s.by_id.write();
-            by_id.get_mut(&u.id).unwrap().reserved_at = Some(chrono::Utc::now().timestamp() - 3600);
+            let entry = by_id
+                .get_mut(&u.id)
+                .unwrap()
+                .reservations
+                .iter_mut()
+                .find(|r| r.token == stale_tok)
+                .unwrap();
+            entry.at = chrono::Utc::now().timestamp() - 3600;
         }
-        // TTL 30 分钟：1 小时前的预留应被回收
         assert_eq!(s.release_stale_reservations(30 * 60), 1);
         let after = s.get_by_id(&u.id).unwrap();
-        assert_eq!(after.reserved_quota, 0);
-        assert!(after.reserved_at.is_none());
-        assert_eq!(after.remaining(), 1000);
+        // 过期那笔被清、在进行中的那笔保留
+        assert_eq!(after.reserved_total(), 200);
+        assert!(after.reservations.iter().any(|r| r.token == fresh_tok));
+        assert!(!after.reservations.iter().any(|r| r.token == stale_tok));
+    }
+
+    /// P0-3：结算超额 → used 记全额、overdraft 记超出部分、remaining 不为负。
+    #[test]
+    fn settle_overdraft_records_excess() {
+        let s = store();
+        let u = s.create("over@test.com", "pw", Role::User, 1000).unwrap();
+        let tok = s.reserve_quota(&u.id, 1000).unwrap();
+        // 实际消费 1500（估算严重不足）
+        s.settle_quota(&u.id, tok, 1500);
+        let after = s.get_by_id(&u.id).unwrap();
+        assert_eq!(after.reserved_total(), 0);
+        assert_eq!(after.used_quota, 1500);
+        assert_eq!(after.overdraft_quota, 500);
+        assert_eq!(after.remaining(), 0); // 不为负
     }
 
     /// G2：未超时的预留不受影响。
@@ -1004,11 +1112,30 @@ mod tests {
     fn fresh_reservation_not_released() {
         let s = store();
         let u = s.create("fresh@test.com", "pw", Role::User, 1000).unwrap();
-        assert!(s.reserve_quota(&u.id, 300));
+        s.reserve_quota(&u.id, 300).unwrap();
         assert_eq!(s.release_stale_reservations(30 * 60), 0);
         let after = s.get_by_id(&u.id).unwrap();
-        assert_eq!(after.reserved_quota, 300);
-        assert!(after.reserved_at.is_some());
+        assert_eq!(after.reserved_total(), 300);
+    }
+
+    /// P1-4：旧快照后写被丢弃（版本号防乱序覆盖）。
+    #[test]
+    fn stale_snapshot_write_discarded() {
+        let s = store();
+        let u = s.create("ver@test.com", "pw", Role::User, 1000).unwrap();
+        // 制造一次较新写入（update 同步落盘 + bump version）
+        s.update(&u.id, |user| user.username = "newer".to_string())
+            .unwrap();
+        let newer = s.get_by_id(&u.id).unwrap();
+        // 构造一份更旧的快照（version 更小、内容不同）
+        let mut older = newer.clone();
+        older.username = "stale".to_string();
+        older.version = newer.version.saturating_sub(1);
+        s.persist_async(&older);
+        // 落盘仍是较新那份
+        let on_disk: User = s.store.get(&format!("user:{}", u.id)).unwrap().unwrap();
+        assert_eq!(on_disk.username, "newer");
+        assert_eq!(on_disk.version, newer.version);
     }
 
     #[test]

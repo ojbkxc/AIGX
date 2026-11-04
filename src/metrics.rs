@@ -156,6 +156,21 @@ impl Metrics {
         self.health.lock().insert(model.to_string(), level.min(2));
     }
 
+    /// 用完整快照替换健康等级表（后台定时刷新用）。
+    ///
+    /// 与逐条 `set_health` 不同：已从 HealthTracker 消失的模型会被移除，
+    /// 避免运行期长期暴露过期模型的 `aigx_health_level` 序列。
+    pub fn replace_health<I>(&self, levels: I)
+    where
+        I: IntoIterator<Item = (String, u8)>,
+    {
+        let mut map = self.health.lock();
+        map.clear();
+        for (model, level) in levels {
+            map.insert(model, level.min(2));
+        }
+    }
+
     /// 渲染 Prometheus 文本格式。
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(2048);
@@ -336,6 +351,17 @@ mod tests {
         m.record_request("model\"x", "ch\"1", "ok", 1);
         let out = m.render();
         assert!(out.contains("model=\"model\\\"x\""));
+    }
+
+    #[test]
+    fn replace_health_drops_stale_models() {
+        let m = Metrics::new();
+        m.set_health("old-model", 2);
+        m.replace_health(vec![("new-model".to_string(), 1u8)]);
+        let out = m.render();
+        // 已被替换掉的模型不再输出
+        assert!(!out.contains("aigx_health_level{model=\"old-model\"}"));
+        assert!(out.contains("aigx_health_level{model=\"new-model\"} 1"));
     }
 
     #[test]

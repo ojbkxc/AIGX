@@ -14,6 +14,7 @@
 //! `NotifyConfig` 存在**两处**存储：
 //! 1. TOML（`AppConfig.notify`）：启动时作为默认值注入；
 //! 2. FileStore（键 `notify_config`）：管理界面保存后落盘。
+//!
 //! 启动时 `restore_config` **用 FileStore 覆盖 TOML**——一旦界面保存过，
 //! 改 config.toml 不再生效（界面保存的值为准）。这是有意设计：界面配置
 //! 是运行期事实源，TOML 只是无界面历史时的兜底默认。运维须知：改通知
