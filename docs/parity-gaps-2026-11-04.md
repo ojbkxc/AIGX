@@ -64,8 +64,8 @@
 | P2-7 | proxy-pool sync-clash | #4 ⚠️ | Clash Verge 同步 |
 | P2-8 | queue 次数参数 | #4 ⚠️ | 排队次数 HTTP 参数 |
 | P2-9 | 用量报表字段对齐 | #5 ⚠️ | attempts 链/first_response_ms/sensitive_hits/phase 等 |
-| P2-10 | Responses/Completions 净化挂载 | #6 ⚠️ | 指纹脱敏挂到 Responses/Completions 路径 |
-| P2-11 | sanitize 命中统计 | #6 ⚠️ | 净化命中计数 |
+| P2-10 | Responses/Completions 净化挂载 | #6 ⚠️ | 指纹脱敏挂到 Responses/Completions 路径 | **已实现**（`crate::sanitize::strip(&mut attempt_body)` 挂到 responses.rs / completions.rs 两路径） |
+| P2-11 | sanitize 命中统计 | #6 ⚠️ | 净化命中计数 | **已实现**（`STATS_HITS`/`STATS_REWRITES` 原子计数器 + `snapshot()`，GET /api/sanitize 响应加 `stats` 字段） |
 | P2-12 | 定时任务默认值对齐 | #8 ⚠️ | 6 条默认开（基线默认开 vs AIGX 全关） | **已实现**（ScheduledSettings 默认 enabled: true） |
 | P2-13 | 超时默认值对齐 | #8 ⚠️ | connect 30→10、headers 300→60、stream 300→30 | **已实现**（默认值已是 10/60/30） |
 | P2-14 | routing 策略键 | #8 ❌ | strategy/sticky/failover/breaker |
