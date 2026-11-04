@@ -810,6 +810,174 @@ pub async fn handle_do_checkin(
     }
 }
 
+/// GET /api/user/records — 用户侧积分流水（签到获得 + API 消耗）。
+///
+/// 把两条异构来源合并成一条时间线后分页：
+/// - earned：`checkin_store`（用户签到奖励，按 created_at 倒序）
+/// - consumed：`log_store.requests`（用户 API 调用，按 cost 扣减）
+///
+/// 为什么合并而不是分两个端点：用户看到的是「我的积分怎么变的」，
+/// 混排才能还原一条连贯的进出账时间线。分页是对合并后的时间线做，
+/// 而不是各自分页再拼（会漏掉跨页的交错顺序）。
+///
+/// 查询参数：
+/// - `days`：只看最近 N 天（默认 30，上限 365）
+/// - `offset` / `limit`：分页（默认 0 / 20，limit 上限 100）
+/// - `type`：`all`（默认）/ `earned` / `consumed` 只看某一类
+pub async fn handle_user_records(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let u = verify_user(&state, &headers).await?;
+
+    let days: i64 = params
+        .get("days")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(30)
+        .clamp(1, 365);
+    let now = chrono::Utc::now().timestamp();
+    let start_ts = now - days * 86400;
+
+    let offset: usize = params
+        .get("offset")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    let limit: usize = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(20)
+        .clamp(1, 100);
+    let flow_type = params
+        .get("type")
+        .map(|s| s.as_str())
+        .unwrap_or("all");
+
+    // ── earned：签到奖励 ──
+    let mut earned = state
+        .checkin_store
+        .list_all(&u.id)
+        .unwrap_or_default();
+    // 签到记录存的是 local 日期，没有精确到秒的时间戳可按窗裁；
+    // created_at 是 unix 秒，用它做窗口过滤。
+    earned.retain(|c| c.created_at >= start_ts);
+
+    // ── consumed：API 调用消耗 ──
+    let consumed = state
+        .log_store
+        .requests
+        .list_by_user(&u.id, Some(start_ts), None);
+    // 失败请求（cost=0）也进流水，让用户看到「这次调用没扣钱」的记录
+    // —— 否则失败的调用在流水里完全消失，用户会困惑为什么没记录。
+
+    // ── 汇总：窗口内总获得 / 总消耗 ──
+    // 先算汇总再消费 Vec，避免 move 后无法再借。
+    let earned_total: i64 = earned.iter().map(|c| c.quota_awarded).sum();
+    let consumed_total: i64 = consumed.iter().map(|l| l.cost).sum();
+
+    // ── 合并时间线（按 ts 倒序，最新优先）──
+    enum Flow {
+        Earned { amount: i64, checkin_date: String },
+        Consumed {
+            amount: i64,
+            model: String,
+            channel: Option<String>,
+            status: u16,
+            error: Option<String>,
+        },
+    }
+    let mut flows: Vec<(i64, Flow)> = Vec::with_capacity(earned.len() + consumed.len());
+    for c in earned {
+        if flow_type == "consumed" {
+            continue;
+        }
+        flows.push((
+            c.created_at,
+            Flow::Earned {
+                amount: c.quota_awarded,
+                checkin_date: c.checkin_date,
+            },
+        ));
+    }
+    for l in consumed {
+        if flow_type == "earned" {
+            continue;
+        }
+        flows.push((
+            l.created_at,
+            Flow::Consumed {
+                amount: l.cost,
+                model: l.model.clone(),
+                channel: l.channel_name.clone(),
+                status: l.status_code,
+                error: l.error_msg.clone(),
+            },
+        ));
+    }
+    flows.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let total = flows.len();
+    let records: Vec<Value> = flows
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(ts, f)| match f {
+            Flow::Earned { amount, checkin_date } => serde_json::json!({
+                "ts": ts,
+                "type": "earned",
+                "amount": amount,
+                "description": format!("每日签到（{checkin_date}）"),
+                "model": null,
+                "channel": null,
+            }),
+            Flow::Consumed {
+                amount,
+                model,
+                channel,
+                status,
+                error,
+            } => {
+                let desc = if (200u16..300).contains(status) {
+                    "API 调用".to_string()
+                } else {
+                    format!("API 调用失败（{status}）")
+                };
+                serde_json::json!({
+                    "ts": ts,
+                    "type": "consumed",
+                    "amount": amount,
+                    "description": desc,
+                    "model": model,
+                    "channel": channel,
+                    "status": status,
+                    "error": error,
+                })
+            }
+        })
+        .collect();
+
+    // 当前余额（用户记录实时算）
+    let balance = state
+        .user_store
+        .get_by_id(&u.id)
+        .map(|u| u.remaining())
+        .unwrap_or(0);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "records": records,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "earned_total": earned_total,
+            "consumed_total": consumed_total,
+            "balance": balance,
+            "days": days,
+        }
+    })))
+}
+
 /// 解析易支付回调参数（支持 GET query 与 POST form）
 fn collect_params(query: Option<&str>, body_bytes: &bytes::Bytes) -> HashMap<String, String> {
     let mut map = HashMap::new();

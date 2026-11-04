@@ -1388,6 +1388,8 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 签到（对齐 new-api GET/POST /api/user/checkin）—— 用户侧，发本站配额
         .route("/api/checkin", get(api::admin::handle_checkin_status))
         .route("/api/checkin", post(api::admin::handle_do_checkin))
+        // 用户侧积分流水（签到获得 + API 消耗合并时间线，分页）
+        .route("/api/user/records", get(api::admin::handle_user_records))
         // 聊天会话（按用户隔离的对话记录；与 Agent 会话同套机制）
         .route(
             "/api/chat/sessions",

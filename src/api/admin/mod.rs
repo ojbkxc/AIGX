@@ -206,7 +206,7 @@ pub use legacy::{
     handle_aff_transfer, handle_check_username, handle_do_checkin, handle_get_aff_code,
     handle_get_epay_config, handle_get_epay_info, handle_get_ratios, handle_me, handle_my_orders,
     handle_trigger_price_sync, handle_update_epay_config, handle_update_exchange_rates,
-    handle_update_ratios, handle_upsert_group_by_name,
+    handle_update_ratios, handle_upsert_group_by_name, handle_user_records,
 };
 
 // 签到（对齐 new-api GET/POST /api/user/checkin）

@@ -125,6 +125,22 @@ impl CheckinStore {
         list.sort_by(|a, b| a.checkin_date.cmp(&b.checkin_date));
         Ok(list)
     }
+
+    /// 全部签到记录（不限月份），按时间倒序（最新优先）。
+    ///
+    /// 用于用户侧积分流水端点：与 API 消耗明细合并成一条时间线后分页。
+    /// `list_month` 只给当月，跨月流水会漏；这里按 user_id 前缀扫全部键。
+    pub fn list_all(&self, user_id: &str) -> Result<Vec<Checkin>> {
+        let prefix = format!("checkin:{user_id}:");
+        let mut list = Vec::new();
+        for key in self.store.list(&prefix)? {
+            if let Some(rec) = self.store.get::<Checkin>(&key)? {
+                list.push(rec);
+            }
+        }
+        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(list)
+    }
 }
 
 #[cfg(test)]

@@ -697,6 +697,27 @@ impl RequestLogStore {
         logs
     }
 
+    /// 某用户的全部请求日志（按时间倒序），可限定时间窗。
+    ///
+    /// 给用户侧积分流水用：与签到奖励合并成时间线后分页，不能走
+    /// `list_with_filter`（它按页截断，会漏掉第 N+1 页之后的内容）。
+    /// 单用户日志量可控，全量载入内存再过滤可接受。
+    pub fn list_by_user(
+        &self,
+        user_id: &str,
+        start: Option<i64>,
+        end: Option<i64>,
+    ) -> Vec<RequestLog> {
+        self.list_all()
+            .into_iter()
+            .filter(|l| {
+                l.user_id.as_deref() == Some(user_id)
+                    && start.is_none_or(|s| l.created_at >= s)
+                    && end.is_none_or(|e| l.created_at <= e)
+            })
+            .collect()
+    }
+
     /// 键区间读：`created_at ∈ [from_ts, to_ts]`（含两端）。
     ///
     /// `reqlog:{ts}:{id}` 时间戳定宽 10 位 → 键字典序等价数值序（sqlite.rs
