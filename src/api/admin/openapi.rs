@@ -812,6 +812,12 @@ fn paths_accounts_network() -> Value {
         "/api/account-sessions/login/cancel": {
             "post": op_body("账号池", "取消等待中的网页登录", "")
         },
+        "/api/account-sessions/login/oauth/captcha-config": {
+            "get": op("账号池", "AutoClaw OAuth 风控验证码配置（前端据此初始化阿里云 SDK）")
+        },
+        "/api/account-sessions/login/oauth/start": {
+            "post": op_body("账号池", "发起 AutoClaw OAuth 登录（Zai/Google，需验证码参数）", "")
+        },
         "/api/account-sessions/login/paste": {
             "post": op_body("账号池", "粘贴式登录（归一化 + 校验后落账号）", "")
         },
@@ -1082,6 +1088,8 @@ mod tests {
         add("/api/account-sessions/import/sources", &["get"]);
         add("/api/account-sessions/login/callback", &["post"]);
         add("/api/account-sessions/login/cancel", &["post"]);
+        add("/api/account-sessions/login/oauth/captcha-config", &["get"]);
+        add("/api/account-sessions/login/oauth/start", &["post"]);
         add("/api/account-sessions/login/paste", &["post"]);
         add("/api/account-sessions/login/sms/send", &["post"]);
         add("/api/account-sessions/login/sms/verify", &["post"]);
