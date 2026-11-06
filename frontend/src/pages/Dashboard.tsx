@@ -3,7 +3,7 @@
 // 铺满全页）。权限矩阵：管理员 = A2A 全量报表 ∪ AIGX 渠道/租户维（一张不落）；
 // 普通用户 = 个人账单口径（report_scope 收敛），admin 专属端点 enabled=false
 // 根本不发请求。时间档六档含自定义区间（start/end 参数，热力图固定 365 天）。
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAutoRefresh } from '../hooks/useAutoRefresh';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
@@ -46,6 +46,17 @@ export default function Dashboard(): JSX.Element {
   const admin = isAdmin();
   const queryClient = useQueryClient();
   const fetching = useIsFetching({ queryKey: ['dashboard'] });
+  const scope = admin ? 'all' : 'personal';
+
+  // 角色变更清缓存：admin↔user 切换时清除仪表盘缓存，避免数据串号。
+  // scope 已在 queryKey 中隔离（'all' vs 'personal'），此处清理旧 scope 残留。
+  const prevAdmin = useRef(admin);
+  useEffect(() => {
+    if (prevAdmin.current !== admin) {
+      queryClient.removeQueries({ queryKey: ['dashboard'] });
+      prevAdmin.current = admin;
+    }
+  }, [admin, queryClient]);
 
   const [range, setRange] = useState<RangeKey>(() => initialRange());
   const [custom, setCustom] = useState(() => readCustomRange());
@@ -53,22 +64,23 @@ export default function Dashboard(): JSX.Element {
   const rLabel = rangeLabelOf(range, custom);
 
   // 全部 hooks 无条件调用（enabled 控制是否发请求，避免 admin 端点在个人视图 403）。
-  const overviewQ = useOverview(win);
-  const savingsQ = useCacheSavings(win);
-  const dailyQ = useDailyTrend(win);
-  const tokenTrendQ = useTokenTrend(win);
-  const modelsQ = useReportModels(win);
-  const ratesQ = useCacheRates(win);
-  const trend24Q = useCacheTrend24h();
-  const heatmapQ = useHeatmap({ days: 365 });
-  const sourcesQ = useTopSources(win, { enabled: admin });
-  const userRankQ = useUserRanking(win, { enabled: admin });
-  const healthQ = useChannelHealthQ(win, { enabled: admin });
-  const realtimeQ = useRealtime({ enabled: admin });
-  const todayQ = useTodayTokens({ enabled: admin });
-  const usageQ = useUsageSummary({ enabled: admin });
-  const limitsQ = useLimits({ enabled: admin });
-  const meQ = usePersonalMe({ enabled: !admin });
+  // scope 维度随 admin 角色走：admin='all' / user='personal'，queryKey 自动隔离。
+  const overviewQ = useOverview(win, { scope });
+  const savingsQ = useCacheSavings(win, { scope });
+  const dailyQ = useDailyTrend(win, { scope });
+  const tokenTrendQ = useTokenTrend(win, { scope });
+  const modelsQ = useReportModels(win, { scope });
+  const ratesQ = useCacheRates(win, { scope });
+  const trend24Q = useCacheTrend24h({ scope });
+  const heatmapQ = useHeatmap({ days: 365 }, { scope });
+  const sourcesQ = useTopSources(win, { enabled: admin, scope });
+  const userRankQ = useUserRanking(win, { enabled: admin, scope });
+  const healthQ = useChannelHealthQ(win, { enabled: admin, scope });
+  const realtimeQ = useRealtime({ enabled: admin, scope });
+  const todayQ = useTodayTokens({ enabled: admin, scope });
+  const usageQ = useUsageSummary({ enabled: admin, scope });
+  const limitsQ = useLimits({ enabled: admin, scope });
+  const meQ = usePersonalMe({ enabled: !admin, scope });
 
   // 报表自动刷新：按「定时任务」页配置的 reportAutoRefresh 周期重拉仪表盘。
   // 页面不可见时跳过，配置改动最多滞后一个周期生效。
@@ -87,11 +99,14 @@ export default function Dashboard(): JSX.Element {
   const lm = limitsQ.data;
   const me = meQ.data;
 
+  // 启用渠道数按 status==='enabled' 过滤（后端 channel_health 返回 status 字段，
+  // 取值 enabled/disabled，见 legacy.rs handle_channel_health；ChannelHealthRow
+  // 类型未声明该字段，用断言消费，避免为单个字段改 useDashboard.ts）。
   const channels = admin && health.length > 0
     ? {
         total: health.length,
         circuitOpen: health.filter((c) => String(c.circuit_breaker || 'closed').toLowerCase() === 'open').length,
-        enabled: health.length,
+        enabled: health.filter((c) => (c as { status?: string }).status === 'enabled').length,
       }
     : null;
 
@@ -233,10 +248,14 @@ export default function Dashboard(): JSX.Element {
 
       <LiveCards
         realtime={rt} realtimePending={realtimeQ.isPending}
+        realtimeError={realtimeQ.isError} realtimeRefetch={realtimeQ.refetch}
         activeUsersFallback={userRankQ.data?.length}
         activeChannelsFallback={health.length}
-        today={ts} usage={us}
-        monthlyUsed={monthlyUsed} monthlyLimit={monthlyLimit} lang={lang}
+        today={ts} todayError={todayQ.isError} todayRefetch={todayQ.refetch}
+        usage={us} usageError={usageQ.isError} usageRefetch={usageQ.refetch}
+        monthlyUsed={monthlyUsed} monthlyLimit={monthlyLimit}
+        limitsError={limitsQ.isError} limitsRefetch={limitsQ.refetch}
+        lang={lang}
       />
 
       {statCardsBlock}

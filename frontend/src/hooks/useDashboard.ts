@@ -21,9 +21,10 @@ export function windowKey(win: ReportWindow): string {
   return win.start && win.end ? `${win.start}~${win.end}` : `d${win.days ?? 30}`;
 }
 
-type PanelOpts = { staleSec?: number; pollMs?: number; enabled?: boolean };
+type PanelOpts = { staleSec?: number; pollMs?: number; enabled?: boolean; scope?: 'all' | 'personal' };
 
-/** 单面板查询：key=['dashboard', name, window]，统一 unwrap 与缓存策略 */
+/** 单面板查询：key=['dashboard', name, window, scope]，统一 unwrap 与缓存策略
+ *  scope 维度隔离 admin↔user 数据，避免角色切换时数据串号（admin='all' / user='personal'）。 */
 export function usePanel<T>(
   name: string,
   win: ReportWindow,
@@ -31,7 +32,7 @@ export function usePanel<T>(
   opts: PanelOpts = {},
 ): UseQueryResult<T | null, Error> {
   return useQuery<T | null>({
-    queryKey: ['dashboard', name, windowKey(win)],
+    queryKey: ['dashboard', name, windowKey(win), opts.scope ?? 'all'],
     queryFn: async () => unwrap<T>(await fetcher()),
     placeholderData: keepPreviousData,
     staleTime: (opts.staleSec ?? 60) * 1000,
@@ -232,8 +233,10 @@ export const useRealtime = (opts: PanelOpts = {}) =>
 export const useTodayTokens = (opts: PanelOpts = {}) =>
   usePanel<TodayTokens>('today_tokens', {}, () => api.getTodayTokens(), { staleSec: 45, ...opts });
 
+/** /usage/summary 瘦身：轮询传 lightweight=true，后端跳过 CF GraphQL 逐账号
+ * 查询（前端只用本地 token 字段）；需要上游额度时手动刷新走 POST /usage/summary。 */
 export const useUsageSummary = (opts: PanelOpts = {}) =>
-  usePanel<UsageSummary>('usage_summary', {}, () => api.getUsageSummary(), { staleSec: 60, ...opts });
+  usePanel<UsageSummary>('usage_summary', {}, () => api.getUsageSummary(true), { staleSec: 60, ...opts });
 
 export const useLimits = (opts: PanelOpts = {}) =>
   usePanel<{ monthly_used?: number; monthly_limit?: number | null }>('limits', {}, () => api.getLimits(), { staleSec: 60, ...opts });

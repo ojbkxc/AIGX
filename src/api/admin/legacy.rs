@@ -72,28 +72,38 @@ pub struct CheckUsernameQuery {
 pub async fn handle_usage_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
 
+    // ?lightweight=true：跳过 CF GraphQL 逐账号查询。仪表盘每 60s 轮询本端点，
+    // 而前端 LiveCards 只消费 total_tokens/total_input_tokens/total_output_tokens
+    // 三个本地字段（graphql/active_accounts 零消费），轮询时无需发起 N 次外部
+    // GraphQL 请求。默认行为不变：不带参数或参数非 true 时照常查询；需要上游
+    // 额度时手动刷新（POST /api/usage/summary 或 GET 不带参）。
+    let lightweight = params.get("lightweight").is_some_and(|v| v == "true");
+
     // 性能（H5/H6）：复用 AppState 的共享 reqwest::Client，避免每次请求新建客户端。
     let http_client = state.http_client.clone();
-    let accounts = state.account_pool.list();
     let mut graphql_results = Vec::new();
 
-    for account in &accounts {
-        match graphql::query_usage_summary(account, &http_client).await {
-            Ok(usage) => {
-                graphql_results.push(serde_json::json!({
-                    "account_id": account.account_id,
-                    "account_name": account.name,
-                    "neurons": usage.neurons,
-                    "requests": usage.requests,
-                    "today_neurons": usage.today_neurons,
-                    "today_requests": usage.today_requests,
-                }));
-            }
-            Err(e) => {
-                tracing::warn!("GraphQL query failed for account {}: {e}", account.name);
+    if !lightweight {
+        let accounts = state.account_pool.list();
+        for account in &accounts {
+            match graphql::query_usage_summary(account, &http_client).await {
+                Ok(usage) => {
+                    graphql_results.push(serde_json::json!({
+                        "account_id": account.account_id,
+                        "account_name": account.name,
+                        "neurons": usage.neurons,
+                        "requests": usage.requests,
+                        "today_neurons": usage.today_neurons,
+                        "today_requests": usage.today_requests,
+                    }));
+                }
+                Err(e) => {
+                    tracing::warn!("GraphQL query failed for account {}: {e}", account.name);
+                }
             }
         }
     }

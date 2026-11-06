@@ -246,8 +246,8 @@ export const api = {
     request<ApiResponse<{ url: string }>>('POST', `${API_BASE}/auth/${provider}/bind/start`, {}),
   oauthUnbind: (provider: string): Promise<ApiResponse<{ provider: string }>> =>
     request<ApiResponse<{ provider: string }>>('POST', `${API_BASE}/auth/oauth/unbind`, { provider }),
-  getUsageSummary: (): Promise<ApiResponse<UsageSummaryItem>> =>
-    request<ApiResponse<UsageSummaryItem>>('GET', `${API_BASE}/usage/summary`),
+  getUsageSummary: (lightweight = false): Promise<ApiResponse<UsageSummaryItem>> =>
+    request<ApiResponse<UsageSummaryItem>>('GET', `${API_BASE}/usage/summary${lightweight ? '?lightweight=true' : ''}`),
   getTodayTokens: (): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/tokens/today`),
   getLimits: (): Promise<ApiResponse<Record<string, unknown>>> =>
