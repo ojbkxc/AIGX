@@ -26,6 +26,7 @@ use crate::config::AppConfig;
 use crate::graphql;
 use crate::pricing::RatioConfig;
 use crate::user;
+use crate::user::checkin::CheckinError;
 use crate::user_group::UserGroup;
 
 use super::super::openai::AppState;
@@ -771,6 +772,11 @@ pub async fn handle_checkin_status(
 ///
 /// 每人每日一次，随机奖励 [min_quota, max_quota] 直进可用配额；
 /// 重复签到返回错误信息（new-api 用 success=false + message）。
+///
+/// 入账顺序：先 `add_quota` 入账成功、再落签到键——入账失败不写签到键，
+/// 用户当日可重试（原先先落键后入账，入账失败留下「已签到」死键，
+/// 当日再点直接被拒）。并发双击败者的冲回在 [`CheckinStore::checkin`]
+/// 内部完成（原额收回后再拒绝）。
 pub async fn handle_do_checkin(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -784,15 +790,10 @@ pub async fn handle_do_checkin(
             "message": "签到功能未启用",
         })));
     }
-    match state.checkin_store.checkin(&u.id, &setting) {
+    match state.checkin_store.checkin(&u.id, &setting, |amount| {
+        state.user_store.add_quota(&u.id, amount)
+    }) {
         Ok(rec) => {
-            if let Err(e) = state.user_store.add_quota(&u.id, rec.quota_awarded) {
-                tracing::error!("Checkin: add quota failed for {}: {e}", u.id);
-                return Err(error_response(
-                    "签到入账失败，请稍后重试",
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                ));
-            }
             tracing::info!("Checkin: user {} awarded {} quota", u.id, rec.quota_awarded);
             Ok(Json(serde_json::json!({
                 "success": true,
@@ -803,10 +804,18 @@ pub async fn handle_do_checkin(
                 }
             })))
         }
-        Err(e) => Ok(Json(serde_json::json!({
+        Err(CheckinError::AlreadyChecked) => Ok(Json(serde_json::json!({
             "success": false,
-            "message": e.to_string(),
+            "message": "今日已签到",
         }))),
+        Err(CheckinError::AwardFailed(m)) => Err(error_response(
+            &format!("签到入账失败，请稍后重试: {m}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+        Err(CheckinError::StoreFailed(m)) => Err(error_response(
+            &format!("签到落库失败: {m}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
     }
 }
 

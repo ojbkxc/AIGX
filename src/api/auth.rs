@@ -183,18 +183,23 @@ impl ApiKeyStore {
     /// 从存储加载密钥
     pub fn load(&self) -> Result<(), anyhow::Error> {
         let keys = self.store.list("apikey_")?;
-        let mut map = self.keys.write();
-        let mut hash_map = self.key_hash_map.write();
-
+        // 锁外读取所有密钥（同步 IO 不持写锁，避免写守卫内做磁盘 IO——
+        // 历史死锁同类结构）；持写锁仅做内存 map 插入（快路径）。
+        let mut loaded: Vec<(String, ApiKey, String)> = Vec::with_capacity(keys.len());
         for key in &keys {
             if let Some(api_key) = self.store.get::<ApiKey>(key)? {
                 let id = key.strip_prefix("apikey_").unwrap_or(key).to_string();
                 // 与 validate()/generate_with_options() 保持同一口径：
                 // 对去掉 "sk-" 前缀的 key 计算哈希，否则重启加载后鉴权全部失配
                 let hash = hash_api_key(api_key.key.strip_prefix("sk-").unwrap_or(&api_key.key));
-                hash_map.insert(hash, id.clone());
-                map.insert(id, api_key);
+                loaded.push((id, api_key, hash));
             }
+        }
+        let mut map = self.keys.write();
+        let mut hash_map = self.key_hash_map.write();
+        for (id, api_key, hash) in loaded {
+            hash_map.insert(hash, id.clone());
+            map.insert(id, api_key);
         }
 
         tracing::info!("Loaded {} API keys", map.len());
@@ -533,16 +538,22 @@ impl ApiKeyStore {
     pub fn release_stale_reservations(&self, ttl_secs: i64) -> u64 {
         let cutoff = chrono::Utc::now().timestamp() - ttl_secs;
         let mut count = 0u64;
-        let mut keys = self.keys.write();
-        for key in keys.values_mut() {
-            let before = key.reservations.len();
-            key.reservations.retain(|r| r.at >= cutoff);
-            if key.reservations.len() != before {
-                key.bump_version();
-                let snapshot = key.clone();
-                self.persist_async(&snapshot);
-                count += 1;
+        let mut dirty: Vec<ApiKey> = Vec::new();
+        {
+            let mut keys = self.keys.write();
+            for key in keys.values_mut() {
+                let before = key.reservations.len();
+                key.reservations.retain(|r| r.at >= cutoff);
+                if key.reservations.len() != before {
+                    key.bump_version();
+                    dirty.push(key.clone());
+                    count += 1;
+                }
             }
+        }
+        // 锁外异步落盘（P1-4：version 单调校验防乱序覆盖）
+        for snapshot in &dirty {
+            self.persist_async(snapshot);
         }
         count
     }

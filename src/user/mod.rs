@@ -572,11 +572,11 @@ impl UserStore {
         user.quota += delta;
         user.bump_version();
         let snapshot = user.clone();
-        // 持久化必须在写锁内完成：若先放锁再写盘，两个并发修改各自拿到快照
-        // 后，后写盘的可能反而是**更旧**的那份（T1 拿 S1 放锁 → T2 拿 S2 写盘
-        // → T1 写盘覆盖 S2），重启后数据回退（配额凭空变多/变少）。
-        self.persist(&snapshot)?;
         drop(by_id);
+        // 锁外异步落盘（P1-4：version 单调校验防乱序覆盖——旧注释担心的
+        // 「先放锁再写盘、后写覆盖前写」由 persist_async 的 version 比较兜住：
+        // 落盘前读回当前存储，version 不低于本快照则丢弃，杜绝旧值覆盖新值）。
+        self.persist_async(&snapshot);
         Ok(snapshot)
     }
 
@@ -606,9 +606,9 @@ impl UserStore {
         user.quota -= amount;
         user.bump_version();
         let snapshot = user.clone();
-        // 同 add_quota_atomic：锁内落盘，避免旧快照覆盖新快照
-        self.persist(&snapshot)?;
         drop(by_id);
+        // 锁外异步落盘（P1-4：version 单调校验防乱序覆盖）
+        self.persist_async(&snapshot);
         Ok(())
     }
 
@@ -738,22 +738,22 @@ impl UserStore {
     pub fn release_stale_reservations(&self, ttl_secs: i64) -> u64 {
         let cutoff = chrono::Utc::now().timestamp() - ttl_secs;
         let mut count = 0u64;
-        let mut by_id = self.by_id.write();
-        for user in by_id.values_mut() {
-            let before = user.reservations.len();
-            user.reservations.retain(|r| r.at >= cutoff);
-            if user.reservations.len() != before {
-                user.bump_version();
-                let snapshot = user.clone();
-                if let Err(e) = self.persist(&snapshot) {
-                    tracing::error!(
-                        "Failed to persist stale reservation release {}: {}",
-                        user.id,
-                        e
-                    );
+        let mut dirty: Vec<User> = Vec::new();
+        {
+            let mut by_id = self.by_id.write();
+            for user in by_id.values_mut() {
+                let before = user.reservations.len();
+                user.reservations.retain(|r| r.at >= cutoff);
+                if user.reservations.len() != before {
+                    user.bump_version();
+                    dirty.push(user.clone());
+                    count += 1;
                 }
-                count += 1;
             }
+        }
+        // 锁外异步落盘（P1-4：version 单调校验防乱序覆盖；put_async 内部记错误日志）
+        for snapshot in &dirty {
+            self.persist_async(snapshot);
         }
         count
     }

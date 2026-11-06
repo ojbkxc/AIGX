@@ -13,7 +13,10 @@
 //!   `daily_agg` 模块头「丢统计不丢计费」的取舍）。
 //! - 无 tokio runtime（单测/启动早期）时**降级为同步写**，语义与改造前
 //!   逐字一致——测试里 `record_request` 后立刻读到聚合行。
-//! - 优雅关闭靠 [`LogWriter::flush`] 阻塞到队列排空。
+//! - 优雅关闭靠 [`LogWriter::flush`] 阻塞到队列排空；`Drop` 亦会尽力
+//!   刷盘（panic/进程退出路径上后台消费者未必来得及冲完队列）。
+//! - 批量写失败时**回队重试**（见 [`run_consumer`]），`pending` 只按
+//!   实际落库条数递减，计数不虚高。
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -37,6 +40,9 @@ const BATCH_MAX: usize = 512;
 const FLUSH_INTERVAL_MS: u64 = 100;
 /// reqlog 容量兜底检查频率（与 `RequestLogStore::PURGE_CHECK_EVERY` 对齐）。
 const PURGE_CHECK_EVERY: u64 = 1000;
+/// 批量写失败回队后的退避时长：避免持久故障下消费者空转（回队成功 →
+/// 队列立即又有数据 → 无限循环重试）。
+const REQUEUE_BACKOFF_MS: u64 = 500;
 
 /// 一条待落库的日志操作。
 pub enum LogOp {
@@ -86,10 +92,13 @@ impl LogWriter {
             };
         }
         let (tx, rx) = mpsc::channel::<LogOp>(DEFAULT_CAPACITY);
+        // 消费者持有发送端克隆：批量写失败时把 ops 回队重试（见 run_consumer）。
+        let consumer_tx = tx.clone();
         tokio::spawn(run_consumer(
             store.clone(),
             daily_lock.clone(),
             rx,
+            consumer_tx,
             pending.clone(),
             flush_now.clone(),
             writes.clone(),
@@ -132,7 +141,11 @@ impl LogWriter {
         match &self.tx {
             None => {
                 // 同步降级：立即落库，语义与改造前一致。
-                let n = apply_ops(&self.store, &self.lock, vec![op]);
+                // 无队列可回队——失败只能丢弃并记 error（调用方 record_request 本就忽略错误）。
+                let n = apply_ops(&self.store, &self.lock, &[op]).unwrap_or_else(|e| {
+                    tracing::error!("同步降级模式日志落库失败，丢弃该条：{e}");
+                    0
+                });
                 bump_writes(&self.store, &self.writes, n);
             }
             Some(tx) => {
@@ -192,6 +205,20 @@ impl LogWriter {
     }
 }
 
+impl Drop for LogWriter {
+    fn drop(&mut self) {
+        // panic/进程退出路径上后台消费者未必来得及冲完队列——Drop 里同步
+        // 阻塞刷盘，尽最大努力不丢日志。
+        //
+        // 仅「异步模式且有消费者」才等待：tx 存在且 rx 不存在（rx 只挂在
+        // 无消费者测试模式）；同步降级（tx=None）与无消费者测试模式都不
+        // 阻塞（后者队列永远不会排空，等待只会空耗 10s）。
+        if self.tx.is_some() && self.rx.is_none() {
+            self.flush();
+        }
+    }
+}
+
 /// 补 id / created_at 默认值（与原 `RequestLogStore::add` 的规整逐字一致）。
 fn normalize(op: &mut LogOp) {
     let l = match op {
@@ -210,6 +237,7 @@ async fn run_consumer(
     store: Arc<FileStore>,
     lock: Arc<Mutex<()>>,
     mut rx: mpsc::Receiver<LogOp>,
+    tx: mpsc::Sender<LogOp>,
     pending: Arc<AtomicUsize>,
     flush_now: Arc<Notify>,
     writes: Arc<AtomicU64>,
@@ -235,14 +263,48 @@ async fn run_consumer(
         }
         let n = buf.len();
         let ops = std::mem::take(&mut buf);
-        let written = apply_ops(&store, &lock, ops);
-        pending.fetch_sub(n, Ordering::AcqRel);
-        bump_writes(&store, &writes, written);
+        match apply_ops(&store, &lock, &ops) {
+            Ok(written) => {
+                // pending 按**实际落库条数**递减：批量写是单事务，成功即整批落库。
+                pending.fetch_sub(n, Ordering::AcqRel);
+                bump_writes(&store, &writes, written);
+            }
+            Err(e) => {
+                // 批量写失败（单事务全回滚，无中间态）：整批回队重试，
+                // 回队失败的条（队列满/通道关）只能丢弃。
+                tracing::error!("日志批量写失败（{n} 条，含聚合），回队重试：{e}");
+                let dropped = requeue_ops(&tx, ops);
+                if dropped > 0 {
+                    tracing::error!(
+                        "日志批量写失败后回队失败，丢弃 {dropped} 条（队列已满/通道已关）"
+                    );
+                }
+                // 回队成功的条仍在 pending 计数里，不递减；只有丢弃的条
+                // 真正出队。回队后退避再轮询，避免持久故障下空转。
+                if dropped < n {
+                    tokio::time::sleep(std::time::Duration::from_millis(REQUEUE_BACKOFF_MS)).await;
+                }
+            }
+        }
         if closed {
             break;
         }
         buf = Vec::with_capacity(BATCH_MAX);
     }
+}
+
+/// 批量写失败后把 ops 回队重试；返回未能回队的条数（只能丢弃）。
+///
+/// 回队成功的条已经在 `pending` 计数里（发送端入队时计入过一次），
+/// 消费者随后会再次处理它们；因此调用方只对返回的丢弃条数递减计数。
+fn requeue_ops(tx: &mpsc::Sender<LogOp>, ops: Vec<LogOp>) -> usize {
+    let mut dropped = 0;
+    for op in ops {
+        if tx.try_send(op).is_err() {
+            dropped += 1;
+        }
+    }
+    dropped
 }
 
 /// 把一批操作落库：
@@ -251,10 +313,11 @@ async fn run_consumer(
 ///   一次、fold 完只 `put` 一次；
 /// - 明细 + 全部聚合行合并成**一次 `write_batch`**（SQLite 单事务）。
 ///
-/// 返回写入的 reqlog 明细条数（供容量兜底计数）。
-fn apply_ops(store: &FileStore, lock: &Mutex<()>, ops: Vec<LogOp>) -> u64 {
+/// 返回写入的 reqlog 明细条数（供容量兜底计数）；批量写失败返回 `Err`
+/// （单事务全回滚、无中间态，调用方可整批重试/回队）。
+fn apply_ops(store: &FileStore, lock: &Mutex<()>, ops: &[LogOp]) -> Result<u64, anyhow::Error> {
     if ops.is_empty() {
-        return 0;
+        return Ok(0);
     }
     // 锁序：聚合锁 → 连接锁（与 DailyAggStore/回填一致，无反向持锁）。
     let _guard = lock.lock();
@@ -264,7 +327,7 @@ fn apply_ops(store: &FileStore, lock: &Mutex<()>, ops: Vec<LogOp>) -> u64 {
     let mut by_uid_day: BTreeMap<(String, String), Vec<&RequestLog>> = BTreeMap::new();
     let mut reqlog_count = 0u64;
 
-    for op in &ops {
+    for op in ops {
         match op {
             LogOp::Request(l) => {
                 match serde_json::to_value(l) {
@@ -318,11 +381,11 @@ fn apply_ops(store: &FileStore, lock: &Mutex<()>, ops: Vec<LogOp>) -> u64 {
             .iter()
             .map(|(k, v)| (k.as_str(), v.clone()))
             .collect();
-        if let Err(e) = store.write_batch(&refs) {
-            tracing::warn!("批量写日志失败（{} 条，含聚合）：{e}", entries.len());
-        }
+        // 单事务全回滚：Err 时本批一条都没落库，调用方整批回队重试即可。
+        // 失败日志由调用方（消费者 error! / 同步模式 error!）输出，此处不重复记。
+        store.write_batch(&refs)?;
     }
-    reqlog_count
+    Ok(reqlog_count)
 }
 
 /// 把一条日志归入「按天」与「按用户天」分组（聚合折叠的上游）。
@@ -394,7 +457,7 @@ mod tests {
             .map(|i| log(Some("u1"), "gpt", 10, DAY0 + i))
             .collect();
         let ops: Vec<LogOp> = logs.into_iter().map(LogOp::Request).collect();
-        let written = apply_ops(&store, &lock, ops);
+        let written = apply_ops(&store, &lock, &ops).unwrap();
         assert_eq!(written, 7);
 
         let master = store
@@ -426,6 +489,35 @@ mod tests {
         }
         // 满队列丢弃的条目不进入 pending（应在 4 条容量内）。
         assert!(writer.pending() <= 4, "pending 不应超过容量");
+    }
+
+    /// 3b) 批量写失败回队：队列有空间时全部回队（pending 不递减），
+    /// 队列满/通道关时回队失败的条才丢弃（计数递减）。
+    #[test]
+    fn requeue_ops_only_drops_when_no_room() {
+        // 通道容量 2，先占满
+        let (tx, mut rx) = mpsc::channel::<LogOp>(2);
+        tx.try_send(LogOp::Request(log(Some("u"), "m", 1, DAY0)))
+            .unwrap();
+        tx.try_send(LogOp::Request(log(Some("u"), "m", 1, DAY0 + 1)))
+            .unwrap();
+
+        // 队列已满：回队全部失败，返回丢弃条数
+        let ops = vec![
+            LogOp::Request(log(Some("u"), "m", 1, DAY0 + 2)),
+            LogOp::Request(log(Some("u"), "m", 1, DAY0 + 3)),
+        ];
+        assert_eq!(requeue_ops(&tx, ops), 2, "队列满时回队全部失败");
+
+        // 腾出空间后回队成功，且 FIFO 保序（重放日志）
+        rx.try_recv().unwrap();
+        rx.try_recv().unwrap();
+        let ops = vec![LogOp::Request(log(Some("u"), "m", 1, DAY0 + 4))];
+        assert_eq!(requeue_ops(&tx, ops), 0, "队列有空位时回队成功");
+        match rx.try_recv().unwrap() {
+            LogOp::Request(l) => assert_eq!(l.created_at, DAY0 + 4),
+            LogOp::Daily(_) => panic!("回队条目应为原 Request 日志"),
+        }
     }
 
     /// 3) flush() 调用后队列确实排空且数据落库。
@@ -465,7 +557,7 @@ mod tests {
             LogOp::Request(log(Some("u1"), "m", 1, DAY1)),
             LogOp::Request(log(Some("u1"), "m", 1, DAY1 + 10)),
         ];
-        apply_ops(&store, &lock, ops);
+        apply_ops(&store, &lock, &ops).unwrap();
         let d0 = store
             .get::<DailyAgg>(&master_key(DAY0_STR))
             .unwrap()
@@ -503,7 +595,7 @@ mod tests {
             log(Some("u1"), "claude", 20, DAY1 + 5),
         ];
         let ops: Vec<LogOp> = fixture.clone().into_iter().map(LogOp::Request).collect();
-        apply_ops(&store, &lock, ops);
+        apply_ops(&store, &lock, &ops).unwrap();
 
         let expect_master = aggregate_logs(&fixture);
         let expect_users = aggregate_user_rows(&fixture);
