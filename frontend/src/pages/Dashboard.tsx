@@ -282,7 +282,7 @@ export default function Dashboard(): JSX.Element {
 
       <PanelWrap title={t('渠道健康状态')} query={healthQ} style={{ marginTop: 16 }}
         emptyText={t('暂无渠道健康数据')}>
-        {(data) => <ChannelHealth data={data} lang={lang} />}
+        {(data) => <ChannelHealth data={data} lang={lang} updatedAt={healthQ.dataUpdatedAt} />}
       </PanelWrap>
 
       {/* 快捷操作（管理员工具箱） */}
