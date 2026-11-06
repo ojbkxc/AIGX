@@ -258,7 +258,161 @@ pub(crate) fn charge_usage_with_tools(
     }
     collected
 }
+
+/// 价格快照（P1-8：改价不影响在途预留结算）。
+///
+/// reserve_usage 冻结当次请求的计价参数（单价/倍率/按次扣额）；
+/// settle_usage 用快照重算实扣额，避免预留期间改价导致结算价与
+/// 预留冻结价漂移（实扣额 ≠ 预留额）。
+#[derive(Clone)]
+pub(crate) struct PriceSnapshot {
+    /// 按次订阅固定扣额（count billing 模式）；None = token 计费
+    pub count_flat: Option<i64>,
+    /// token 计费：模型单价条目（input/output/cache_price + price_type）
+    pub price: Option<crate::pricing::ModelPrice>,
+    /// 模型倍率（计价键已解析后的命中值）
+    pub model_ratio: f64,
+    /// 分组倍率
+    pub group_ratio: f64,
+}
+
+impl PriceSnapshot {
+    /// 空快照（无计价条目）：结算按 0 处理。
+    fn empty() -> Self {
+        Self {
+            count_flat: None,
+            price: None,
+            model_ratio: 1.0,
+            group_ratio: 1.0,
+        }
+    }
+}
+
+/// 捕获当次请求的价格快照（P1-8）。
+///
+/// 按次订阅冻结全局固定扣额（原子快照）；token 计费冻结
+/// ModelPrice + model_ratio + group_ratio。计价键经
+/// `resolve_priced_name` 解析（对外名优先、上游名兜底），与
+/// `resolve_billing_quota` 的查价口径一致。
+fn capture_price_snapshot(
+    state: &AppState,
+    api_key: &crate::api::auth::ApiKey,
+    requested_model: &str,
+    model: &str,
+    group: &str,
+) -> PriceSnapshot {
+    if is_count_billing(state, api_key) {
+        return PriceSnapshot {
+            count_flat: Some(crate::config::billing_flat_quota()),
+            price: None,
+            model_ratio: 1.0,
+            group_ratio: 1.0,
+        };
+    }
+    let priced_name = state
+        .pricing_store
+        .resolve_priced_name(requested_model, model);
+    let price = priced_name
+        .as_ref()
+        .and_then(|n| state.pricing_store.get_price(n));
+    let ratios = state.pricing_store.get_ratios();
+    let model_ratio = priced_name
+        .as_ref()
+        .map(|n| ratios.model_ratio(n))
+        .unwrap_or(1.0);
+    let group_ratio = ratios.group_ratio(group);
+    PriceSnapshot {
+        count_flat: None,
+        price,
+        model_ratio,
+        group_ratio,
+    }
+}
+
+/// 纯计算部分（无 AppState 依赖）：从价格快照重算实扣额，不含工具附加费。拆分以便单测覆盖冻结结算等价性、改价不变、count 冻结、空快照回退。
+fn compute_cost_from_snapshot_pure(
+    snapshot: &PriceSnapshot,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cached_tokens: u64,
+) -> i64 {
+    // 按次订阅：固定扣额，不随 token/工具变化
+    if let Some(flat) = snapshot.count_flat {
+        return flat;
+    }
+    let Some(price) = &snapshot.price else {
+        return 0;
+    };
+    // token 计费（上游缓存口径：cache_price 未配时回退正价）
+    let base = if price.price_type == "count" {
+        price.input_price
+    } else {
+        // 命中计费形态 input=0, cached=prompt：cached 不受 input 钳制；
+        // 仅 fresh+cached 并存时钳制防超收（与 cost_with_name_inner 一致）。
+        let cached = if prompt_tokens == 0 {
+            cached_tokens
+        } else {
+            cached_tokens.min(prompt_tokens)
+        };
+        let fresh = prompt_tokens.saturating_sub(cached);
+        let cache_price = match price.cache_price {
+            Some(p) => p,
+            // 上游缓存：未配缓存价 → 按正价收（不白送）
+            None => price.input_price,
+        };
+        (fresh as f64 * price.input_price
+            + cached as f64 * cache_price
+            + completion_tokens as f64 * price.output_price)
+            / 1000.0
+    };
+    if base <= 0.0 {
+        0
+    } else {
+        (base * snapshot.model_ratio * snapshot.group_ratio + 0.999999) as i64
+    }
+}
+
+/// 用价格快照重算实扣额（P1-8）。
+///
+/// 与 `resolve_billing_quota` 同构，但计价参数取自快照而非实时查价：
+/// - count billing → 快照冻结的固定扣额（不随 token/工具变化）；
+/// - token 计费 → 快照冻结的 ModelPrice + model_ratio + group_ratio；
+/// - 工具附加费 → 快照冻结的 group_ratio（工具单价仍实时查——预留阶段
+///   无法预知调用哪些工具，且 PricingStore 无批量快照接口，group_ratio
+///   已冻结即可消除倍率漂移这一主要风险）。
+fn compute_cost_from_snapshot(
+    state: &AppState,
+    snapshot: &PriceSnapshot,
+    model: &str,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cached_tokens: u64,
+    tool_calls: Option<&crate::pricing::ToolCallCounts>,
+) -> i64 {
+    let mut c =
+        compute_cost_from_snapshot_pure(snapshot, prompt_tokens, completion_tokens, cached_tokens);
+    // 工具按次附加费（group_ratio 用快照冻结值，与 token 倍率口径一致）
+    if let Some(tools) = tool_calls {
+        let mut total = 0.0f64;
+        for (name, count) in tools {
+            if *count == 0 {
+                continue;
+            }
+            let tp = state.pricing_store.get_tool_price(name, model);
+            if tp <= 0.0 || tp.is_nan() || tp.is_infinite() {
+                continue;
+            }
+            total += tp * (*count as f64) / 1000.0 * snapshot.group_ratio;
+        }
+        if total > 0.0 {
+            c = c.saturating_add((total + 0.999999) as i64);
+        }
+    }
+    c
+}
+
 /// 预留记录（P1：两段式计费；P0-2：用户/key 侧改为逐笔 token）
+#[derive(Clone)]
 pub(crate) struct Reservation {
     /// 用户侧预留 token（0=无用户预留）
     pub user_token: u64,
@@ -271,6 +425,8 @@ pub(crate) struct Reservation {
     /// 跨订阅结算/释放时金额张冠李戴——原先只留最后一个 ID，前面的
     /// 订阅池预留会被永久吞掉）
     pub sub_allocs: Vec<(String, i64)>,
+    /// 价格快照（P1-8：结算用预留时冻结的单价/倍率，防改价漂移）
+    pub price_snapshot: PriceSnapshot,
 }
 /// 预留配额（P1：两段式计费第一步）。
 ///
@@ -285,12 +441,13 @@ pub(crate) fn reserve_usage(
     estimated_prompt_tokens: u64,
     estimated_completion_tokens: u64,
 ) -> Result<Reservation, (StatusCode, Json<Value>)> {
-    let estimated_cost = resolve_billing_quota(
+    // P1-8：冻结计价参数（单价/倍率/按次扣额）供结算复用，防改价漂移。
+    // 快照与 live 查价在 reserve 时刻等价，但 settle 时用快照而非重查。
+    let price_snapshot = capture_price_snapshot(state, api_key, requested_model, model, group);
+    let estimated_cost = compute_cost_from_snapshot(
         state,
-        api_key,
-        requested_model,
+        &price_snapshot,
         model,
-        group,
         estimated_prompt_tokens,
         estimated_completion_tokens,
         // 预估阶段拿不到上游缓存量；结算侧（settle_usage）会用真实值重裁
@@ -304,6 +461,7 @@ pub(crate) fn reserve_usage(
             key_token: 0,
             reserved_sub: 0,
             sub_allocs: Vec::new(),
+            price_snapshot: PriceSnapshot::empty(),
         });
     }
 
@@ -394,6 +552,7 @@ pub(crate) fn reserve_usage(
         key_token,
         reserved_sub,
         sub_allocs,
+        price_snapshot,
     })
 }
 /// 把一笔实际消费按「订阅池 → 用户钱包 → API key」分配结算，并摘除预留。
@@ -470,17 +629,34 @@ pub(crate) fn settle_usage(
     cached_tokens: u64,
     tool_calls: Option<&crate::pricing::ToolCallCounts>,
 ) -> i64 {
-    let actual_cost = resolve_billing_quota(
-        state,
-        api_key,
-        requested_model,
-        model,
-        group,
-        actual_prompt_tokens,
-        actual_completion_tokens,
-        cached_tokens,
-        tool_calls,
-    );
+    // P1-8：优先用预留时冻结的价格快照结算，而非实时查价——避免预留期间
+    // 改价导致实扣额与预留冻结价漂移（实扣额 ≠ 预留额）。快照为空（Reservation
+    // 未携带快照的异常路径）时回退实时查价，保持与旧行为一致、避免误记 0 扣费。
+    let actual_cost = if reservation.price_snapshot.count_flat.is_none()
+        && reservation.price_snapshot.price.is_none()
+    {
+        resolve_billing_quota(
+            state,
+            api_key,
+            requested_model,
+            model,
+            group,
+            actual_prompt_tokens,
+            actual_completion_tokens,
+            cached_tokens,
+            tool_calls,
+        )
+    } else {
+        compute_cost_from_snapshot(
+            state,
+            &reservation.price_snapshot,
+            model,
+            actual_prompt_tokens,
+            actual_completion_tokens,
+            cached_tokens,
+            tool_calls,
+        )
+    };
 
     if actual_cost > 0 {
         crate::metrics::global().record_cost("usd", (actual_cost as u64).saturating_mul(1_000_000));
@@ -584,8 +760,10 @@ impl StreamBillingState {
     ///
     /// 正常结束与断连兜底两路径共用的收尾逻辑；
     /// `latency_ms` 记录真实耗时（B20：修复流式请求硬编码 0 的问题）。
+    /// `errored` = 流中途出错：请求日志 status_code 记 500 而非 200，
+    /// 失败率统计不失真（此前流式出错仍按 200 记录）。
     /// 返回 (prompt_tokens, completion_tokens) 供调用方提交限流记账。
-    pub(crate) fn finalize(&self) -> (u64, u64) {
+    pub(crate) fn finalize(&self, errored: bool) -> (u64, u64) {
         let output_text = self.acc.lock().clone();
         let completion_tokens = crate::token_estimate::count_text(&self.model, &output_text) as u64;
         let prompt_tokens =
@@ -646,7 +824,7 @@ impl StreamBillingState {
         log.output_tokens = completion_tokens;
         log.cost = cost;
         log.latency_ms = self.request_start.elapsed().as_millis() as u64;
-        log.status_code = 200;
+        log.status_code = if errored { 500 } else { 200 };
         log.ip = self.client_ip.clone();
         log.request_id = Some(self.request_id.clone());
         log.candidate_channels = self.candidate_channels.clone();
@@ -766,8 +944,8 @@ impl ResponsesBillingState {
     ///
     /// 上游 usage（权威值）优先；缺失的侧逐项回退 token 估算
     /// （能估就估，拿不到就 0）。返回 (prompt_tokens, completion_tokens)
-    /// 供限流记账。
-    pub(crate) fn finalize(&self) -> (u64, u64) {
+    /// 供限流记账。`errored` = 流中途出错时日志 status_code 记 500。
+    pub(crate) fn finalize(&self, errored: bool) -> (u64, u64) {
         let (mut prompt_tokens, mut completion_tokens) = self.usage.lock().unwrap_or((0, 0));
         let output_text = self.acc.lock().clone();
         // 上游未上报 usage 的侧逐项估算
@@ -818,7 +996,7 @@ impl ResponsesBillingState {
         log.output_tokens = completion_tokens;
         log.cost = cost;
         log.latency_ms = self.request_start.elapsed().as_millis() as u64;
-        log.status_code = 200;
+        log.status_code = if errored { 500 } else { 200 };
         log.ip = self.client_ip.clone();
         log.request_id = Some(self.request_id.clone());
         // log_body：快照 = 请求体 + 流式拼接文本（关闭时 None 零开销）
@@ -856,7 +1034,7 @@ impl Drop for StreamUsageGuard {
         }
         // Drop 中不能 await：计费本身（token 估算/扣费/日志）全为同步操作，
         // 直接执行；异步的事后限流记账交由后台任务补交。
-        let (prompt_tokens, completion_tokens) = self.billing.finalize();
+        let (prompt_tokens, completion_tokens) = self.billing.finalize(false);
         // Prometheus 指标（断连兜底路径上报；正常路径由后缀事件上报）
         crate::metrics::global().record_request(
             &self.billing.model,
@@ -903,7 +1081,7 @@ impl<S: futures::Stream, G: std::marker::Unpin> futures::Stream for GuardedStrea
 
 impl Drop for ResponsesStreamGuard {
     fn drop(&mut self) {
-        let (prompt_tokens, completion_tokens) = self.billing.finalize();
+        let (prompt_tokens, completion_tokens) = self.billing.finalize(false);
         // Prometheus 指标（透传流没有后缀事件，Drop 即唯一上报点）
         crate::metrics::global().record_request(
             &self.billing.model,
@@ -926,5 +1104,113 @@ impl Drop for ResponsesStreamGuard {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod price_snapshot_tests {
+    use super::*;
+    use crate::pricing::ModelPrice;
+
+    fn token_snapshot(
+        input: f64,
+        output: f64,
+        cache: Option<f64>,
+        model_ratio: f64,
+        group_ratio: f64,
+    ) -> PriceSnapshot {
+        let mut p = ModelPrice::new("m", input, output);
+        p.cache_price = cache;
+        PriceSnapshot {
+            count_flat: None,
+            price: Some(p),
+            model_ratio,
+            group_ratio,
+        }
+    }
+
+    // 1. count billing 冻结固定扣额：不随 token/工具变化
+    #[test]
+    fn count_flat_freezes_flat_quota() {
+        let snap = PriceSnapshot {
+            count_flat: Some(42),
+            price: None,
+            model_ratio: 1.0,
+            group_ratio: 1.0,
+        };
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 100, 200, 0), 42);
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 999999, 0, 0), 42);
+    }
+
+    // 2. 冻结→settle 等价：快照成本 = 实时成本（价格未变时）
+    #[test]
+    fn snapshot_token_cost_matches_live_equivalent() {
+        // 1000 input * 0.03/1k + 500 output * 0.06/1k = 0.03 + 0.03 = 0.06
+        // × model_ratio(2) × group_ratio(1) = 0.12 → (0.12 + 0.999999) as i64 = 1
+        let snap = token_snapshot(0.03, 0.06, None, 2.0, 1.0);
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 500, 0), 1);
+    }
+
+    // 3. 改价不变：快照冻结了单价，改价不影响结算（核心 P1-8 保证）
+    #[test]
+    fn price_change_does_not_affect_snapshot() {
+        // 快照冻结 0.03/0.06，compute_cost_from_snapshot_pure 只用快照值
+        // → 0.03*1 + 0.06*0.5 = 0.06 → (0.06 + 0.999999) as i64 = 1
+        let snap = token_snapshot(0.03, 0.06, None, 1.0, 1.0);
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 500, 0), 1);
+    }
+
+    // 4. 空快照回退：price=None + count_flat=None → 0
+    #[test]
+    fn empty_snapshot_returns_zero() {
+        let snap = PriceSnapshot {
+            count_flat: None,
+            price: None,
+            model_ratio: 1.0,
+            group_ratio: 1.0,
+        };
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 500, 0), 0);
+    }
+
+    // 5. cache_price 未配 → 回退正价（不白送）
+    #[test]
+    fn cache_price_none_falls_back_to_input_price() {
+        // fresh=0, cached=1000, cache_price=None → 1000 * 0.03 / 1k = 0.03 → 1
+        let snap = token_snapshot(0.03, 0.06, None, 1.0, 1.0);
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 0, 0, 1000), 1);
+    }
+
+    // 6. cache_price 已配 → 按缓存价收
+    #[test]
+    fn cache_price_some_charges_cached_at_cache_rate() {
+        // fresh=0, cached=1000, cache_price=0.001 → 1000 * 0.001 / 1k = 0.001 → 1
+        let snap = token_snapshot(0.03, 0.06, Some(0.001), 1.0, 1.0);
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 0, 0, 1000), 1);
+    }
+
+    // 7. cached 钳制：fresh+cached 并存时 cached ≤ prompt（防超收）
+    #[test]
+    fn cached_clamped_when_fresh_present() {
+        // prompt=1000, cached=2000（超 prompt）→ cached 钳到 1000, fresh=0
+        // cache_price=0.001 → 1000 * 0.001 / 1k = 0.001 → 1
+        let snap = token_snapshot(0.03, 0.06, Some(0.001), 1.0, 1.0);
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 1000, 0, 2000), 1);
+        // prompt=0, cached=1000 → 不钳（命中计费形态）→ 同上 = 1
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 0, 0, 1000), 1);
+    }
+
+    // 8. count 型 price_type：直接返回 input_price，不走 token 计算
+    #[test]
+    fn count_price_type_uses_input_price() {
+        let mut p = ModelPrice::new("m", 0.04, 0.0);
+        p.price_type = "count".to_string();
+        let snap = PriceSnapshot {
+            count_flat: None,
+            price: Some(p),
+            model_ratio: 1.0,
+            group_ratio: 1.0,
+        };
+        // count 型：base = input_price = 0.04 → (0.04 + 0.999999) as i64 = 1
+        assert_eq!(compute_cost_from_snapshot_pure(&snap, 999, 0, 999), 1);
     }
 }

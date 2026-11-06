@@ -12,6 +12,8 @@
     "test:ui": "vitest --ui",
     "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit",
+    "i18n:check": "node scripts/i18n-fill-missing.mjs --check",
+    "i18n:check-todo": "node scripts/i18n-fill-missing.mjs --check-todo",
     "install:all": "npm install && npm run typecheck"
   },
   "dependencies": {

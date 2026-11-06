@@ -453,6 +453,17 @@ impl CircuitBreaker {
     /// - 其他：失败计数 +1
     pub fn record_failure(&self, channel_id: &str, failure_type: FailureType) {
         let mut entry = self.states.entry(channel_id.to_string()).or_default();
+
+        // 客户端请求错误（400/413/422…）：只更新最近失败类型（排障可见），
+        // **不动失败计数、不开断路器、不设冷却、不清试探租约** —— 渠道本身是健康的。
+        // 必须提前 return：否则 Open 期间的 400 会重置 last_failure_time 延长冷却起点、
+        // HalfOpen 期间的 400 会清掉在飞试探租约（与 channel/mod.rs 的契约一致）。
+        if matches!(failure_type, FailureType::ClientError) {
+            entry.failure_type = Some(failure_type);
+            entry.last_failure_time = Some(Instant::now());
+            return;
+        }
+
         entry.failure_type = Some(failure_type.clone());
         entry.last_failure_time = Some(Instant::now());
         // 失败即清零半开成功计数（A2A：半开期再失败 → 重新打开）
@@ -462,12 +473,7 @@ impl CircuitBreaker {
         entry.probe_lease_until = None;
 
         match &failure_type {
-            // 客户端请求错误：只更新最近失败类型（排障可见），**不动失败计数、
-            // 不开断路器、不设冷却** —— 渠道本身是健康的。
-            FailureType::ClientError => {
-                entry.failure_type = Some(failure_type);
-                entry.last_failure_time = Some(Instant::now());
-            }
+            // 永久性故障：放大计数 + 长冷却，避免反复重试坏密钥/空余额渠道
             FailureType::AuthFailed | FailureType::PaymentRequired => {
                 // 永久性故障：放大计数 + 长冷却，避免反复重试坏密钥/空余额渠道
                 entry

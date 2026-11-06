@@ -30,6 +30,7 @@ const enPath = path.join(srcDir, 'i18n', 'en.json');
 const args = new Set(process.argv.slice(2));
 const CHECK_ONLY = args.has('--check');
 const DRY_RUN = args.has('--dry-run');
+const CHECK_TODO = args.has('--check-todo');
 
 /** 只匹配「独立的」 t(...) 调用（排除 Element( / .t( 等误伤） */
 // 前置不能是单词字符 / $ / . —— 否则 `createElement(`、`foo.t(` 会被误当 i18n 调用。
@@ -70,6 +71,22 @@ function main() {
   const zh = JSON.parse(fs.readFileSync(zhPath, 'utf8'));
   const en = JSON.parse(fs.readFileSync(enPath, 'utf8'));
 
+  // --check-todo：只检查 en.json 里是否有 [TODO en] 占位值
+  if (CHECK_TODO) {
+    const todoEn = Object.entries(en).filter(([, v]) =>
+      typeof v === 'string' && v.startsWith('[TODO en]')
+    );
+    if (todoEn.length > 0) {
+      console.error(
+        `[i18n] 检查失败：en.json 有 ${todoEn.length} 个 [TODO en] 占位值`
+      );
+      todoEn.slice(0, 20).forEach(([k]) => console.error(`  - ${k}`));
+      process.exit(1);
+    }
+    console.log('[i18n] ✓ en.json 无 [TODO en] 占位值');
+    return;
+  }
+
   const missingInZh = [];
   const missingInEn = [];
   const missingInBoth = [];
@@ -96,10 +113,22 @@ function main() {
     }
   }
 
-  console.log(`[i18n] 扫描 ${files.length} 个 .tsx 文件，抽取 t() 字面量 key：${keys.size}`);
-  console.log(`[i18n] zh.json=${Object.keys(zh).length}  en.json=${Object.keys(en).length}`);
-  console.log(`[i18n] 缺失：zh ${missingInZh.length} 个 / en ${missingInEn.length} 个，两者都缺 ${missingInBoth.length} 个`);
-  console.log(`[i18n] 本次补齐：zh +${addedZh.length}，en +${addedEn.length}`);
+    console.log(`[i18n] 扫描 ${files.length} 个 .tsx 文件，抽取 t() 字面量 key：${keys.size}`);
+    console.log(`[i18n] zh.json=${Object.keys(zh).length}  en.json=${Object.keys(en).length}`);
+    console.log(`[i18n] 缺失：zh ${missingInZh.length} 个 / en ${missingInEn.length} 个，两者都缺 ${missingInBoth.length} 个`);
+
+    // [TODO en] 占位值计数：这些是英文界面直接渲染的占位文案，
+    // 属于线上文案故障（英文用户看到 "[TODO en] 中文"）。
+    const todoEn = Object.entries(en).filter(([, v]) =>
+      typeof v === 'string' && v.startsWith('[TODO en]')
+    );
+    if (todoEn.length > 0) {
+      console.warn(
+        `[i18n] ⚠ en.json 有 ${todoEn.length} 个 [TODO en] 占位值待人工翻译`
+      );
+    }
+
+    console.log(`[i18n] 本次补齐：zh +${addedZh.length}，en +${addedEn.length}`);
 
   // zh / en key 集合一致性校验
   const zhKeys = new Set(Object.keys(zh));

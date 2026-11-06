@@ -177,7 +177,43 @@ pub(crate) async fn handle_chat_completions(
             .map(String::from)
             .or_else(|| state.model_mapper.reasoning_for(&model)),
         web_search_options: body.get("web_search_options").cloned(),
-        extra: None,
+        // 透传白名单字段：这些是 OpenAI 协议标准参数，缓存键已认识它们
+        // （presence_penalty/frequency_penalty/seed/response_format），但此前
+        // extra: None 恒丢弃，导致不同 seed/response_format 的请求命中同一缓存
+        // 且效果相同。通过 extra 承载，build_body 会合并进请求体。
+        // stream_options 仅流式有意义（include_usage 终帧），非流式不提取。
+        extra: {
+            let mut obj = serde_json::Map::new();
+            for k in [
+                "response_format",
+                "seed",
+                "presence_penalty",
+                "frequency_penalty",
+                "n",
+                "parallel_tool_calls",
+                "logit_bias",
+                "max_completion_tokens",
+                "service_tier",
+            ] {
+                if let Some(v) = body.get(k) {
+                    if !v.is_null() {
+                        obj.insert(k.to_string(), v.clone());
+                    }
+                }
+            }
+            if is_stream {
+                if let Some(v) = body.get("stream_options") {
+                    if !v.is_null() {
+                        obj.insert("stream_options".to_string(), v.clone());
+                    }
+                }
+            }
+            if obj.is_empty() {
+                None
+            } else {
+                Some(Value::Object(obj))
+            }
+        },
     };
 
     let ctx = BridgeContext::new(request_id.clone(), model.clone());
@@ -407,7 +443,12 @@ pub(crate) async fn handle_chat_completions(
             ));
             let tool_calls_for_map = tool_calls.clone();
 
-            let sse_stream = stream.map(move |chunk_result| match chunk_result {
+            // 流中途出错标志：Err 分支置位，final_event 据此不发 [DONE]、
+            // metrics 记 error、日志 status_code 记 500（此前出错仍按成功处理）
+            let stream_errored = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stream_errored_for_map = stream_errored.clone();
+
+            let sse_stream = stream.flat_map(move |chunk_result| match chunk_result {
                     Ok(chunk) => {
                         // 累积内容文本用于事后估算 completion tokens
                         // （含 thinking 推理内容与工具调用参数，与 cf-ai-gw 的
@@ -496,10 +537,36 @@ pub(crate) async fn handle_chat_completions(
                             }]
                         })
                         .to_string();
-                        Ok::<_, Infallible>(Event::default().data(sse_data))
+                        let mut evs = vec![Ok::<_, Infallible>(Event::default().data(sse_data))];
+                        // 流式 usage 终帧：客户端请求 stream_options.include_usage=true 时
+                        // 回传 usage 帧（choices 空数组，OpenAI 官方契约）。此前
+                        // chat.rs 忽略 chunk.usage，客户端收不到 usage 帧。
+                        if let Some(usage) = &chunk.usage {
+                            let usage_data = serde_json::json!({
+                                "id": chunk.id,
+                                "object": "chat.completion.chunk",
+                                "created": chrono::Utc::now().timestamp(),
+                                "model": chunk.model,
+                                "choices": [],
+                                "usage": {
+                                    "prompt_tokens": usage.prompt_tokens,
+                                    "completion_tokens": usage.completion_tokens,
+                                    "total_tokens": usage.total_tokens,
+                                }
+                            })
+                            .to_string();
+                            evs.push(Ok::<_, Infallible>(Event::default().data(usage_data)));
+                        }
+                        futures::stream::iter(evs)
                     }
                     Err(e) => {
                         tracing::error!("Stream chunk error: {e}");
+                        // 标记流中途出错：final_event 据此不发 [DONE]、
+                        // metrics 记 error、日志记 500
+                        stream_errored_for_map.store(
+                            true,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
                         // 标准 SSE error 事件格式（与 OpenAI API 错误结构一致）：
                         //   event: error
                         //   data: {"error":{"message":"...","type":"...","code":"..."}}
@@ -514,7 +581,9 @@ pub(crate) async fn handle_chat_completions(
                             }
                         })
                         .to_string();
-                        Ok(Event::default().event("error").data(err_data))
+                        futures::stream::iter(vec![Ok::<_, Infallible>(
+                            Event::default().event("error").data(err_data),
+                        )])
                     }
                 });
 
@@ -556,7 +625,8 @@ pub(crate) async fn handle_chat_completions(
                     .charged
                     .swap(true, std::sync::atomic::Ordering::SeqCst)
                 {
-                    let (pt, ct) = billing_fin.finalize();
+                    let errored = stream_errored.load(std::sync::atomic::Ordering::SeqCst);
+                    let (pt, ct) = billing_fin.finalize(errored);
                     // C1 健康档案：流正常完成，按真实总时延补记延迟样本。
                     // 建流时已 note_success（清零断路器）；此处只补延迟，
                     // 不重复计成功次数（见 health_archive::note_latency）。
@@ -585,11 +655,12 @@ pub(crate) async fn handle_chat_completions(
                     )
                 };
 
-                // Prometheus 指标
+                // Prometheus 指标（流中途出错记 error，不再恒 ok）
+                let errored = stream_errored.load(std::sync::atomic::Ordering::SeqCst);
                 crate::metrics::global().record_request(
                     &billing_fin.model,
                     billing_fin.channel_id.as_deref().unwrap_or("unknown"),
-                    "ok",
+                    if errored { "error" } else { "ok" },
                     billing_fin.request_start.elapsed().as_millis() as u64,
                 );
                 crate::metrics::global().record_tokens(&billing_fin.model, "prompt", prompt_tokens);
@@ -599,7 +670,13 @@ pub(crate) async fn handle_chat_completions(
                     completion_tokens,
                 );
 
-                Ok::<_, Infallible>(Event::default().data("[DONE]"))
+                // 流中途出错不发 [DONE]：已发 error 事件，客户端应停止读取；
+                // 发 [DONE] 会让严格 SDK 把半截流当正常完成
+                if errored {
+                    Ok::<_, Infallible>(Event::default().data(""))
+                } else {
+                    Ok::<_, Infallible>(Event::default().data("[DONE]"))
+                }
             };
             let combined = sse_stream.chain(futures::stream::once(final_event));
 

@@ -5,8 +5,9 @@
 //! 的周期（秒），对每个启用渠道发一次 1-token 轻量探测：
 //! - 探测请求：`max_tokens=1` 的单轮 "ping"（成本几乎为 0，但能完整走
 //!   通鉴权 → 路由 → 响应链路，比 GET /models 更能反映真实可用性）
-//! - 结果写入 circuit_breaker / health_tracker（复用
-//!   `record_channel_success` / `record_channel_failure` 统一入口）
+//! - 结果写入 health_tracker / health_archive（复用
+//!   `record_channel_probe` 统一入口）；**不写断路器状态机**——探活是观测，
+//!   不应清在飞试探租约、不增试探成功计数、不清限流窗口（见 `ChannelStore::record_channel_probe`）
 //! - 断路器已 Open 的渠道跳过探测（避免无谓消耗上游配额；
 //!   冷却期结束的 HalfOpen 状态由 allow_request 放行试探）
 //!
@@ -147,10 +148,11 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
         let start = std::time::Instant::now();
         match bridge.chat(&probe_req, &ctx).await {
             Ok(_) => {
-                channel_store.record_channel_success(
+                channel_store.record_channel_probe(
                     &ch.id,
                     Some(&probe_model),
                     start.elapsed().as_millis() as u64,
+                    None,
                     None,
                 );
                 tracing::debug!(channel = %ch.id, "probe ok");
@@ -158,12 +160,12 @@ async fn probe_once(channel_store: &ChannelStore, http: &reqwest::Client) {
             Err(e) => {
                 let ft = ChannelStore::classify_bridge_error(&e);
                 tracing::warn!(channel = %ch.id, "probe failed: {e}");
-                channel_store.record_channel_failure(
+                channel_store.record_channel_probe(
                     &ch.id,
                     Some(&probe_model),
-                    ft,
-                    &e.to_string(),
-                    None,
+                    0,
+                    Some(ft),
+                    Some(&e.to_string()),
                 );
             }
         }

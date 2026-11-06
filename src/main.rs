@@ -2379,6 +2379,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/images/generations",
             post(api::openai::handle_images_generations),
         )
+        .route(
+            "/audio/transcriptions",
+            post(api::openai::handle_audio_transcriptions),
+        )
+        .route(
+            "/audio/translations",
+            post(api::openai::handle_audio_translations),
+        )
+        .route("/audio/speech", post(api::openai::handle_audio_speech))
         .route("/models", get(api::openai::handle_list_models))
         .route("/models/:model", get(api::openai::handle_get_model));
 
@@ -2530,6 +2539,7 @@ fn build_cors_layer(config: &config::AppConfig) -> CorsLayer {
             axum::http::Method::GET,
             axum::http::Method::POST,
             axum::http::Method::PUT,
+            axum::http::Method::PATCH,
             axum::http::Method::DELETE,
             axum::http::Method::OPTIONS,
         ])
@@ -2537,6 +2547,8 @@ fn build_cors_layer(config: &config::AppConfig) -> CorsLayer {
             axum::http::header::AUTHORIZATION,
             axum::http::header::CONTENT_TYPE,
             axum::http::header::ACCEPT,
+            // Anthropic 客户端用 x-api-key 头（与 Authorization 二选一）
+            axum::http::header::HeaderName::from_static("x-api-key"),
         ])
         .allow_credentials(true)
 }

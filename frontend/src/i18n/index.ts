@@ -4,14 +4,14 @@ import zh from './zh.json';
 
 export type AppLanguage = 'zh' | 'en' | 'zh-Hant' | 'ja' | 'ko' | 'pt-BR';
 
-/** 支持的语言清单（侧边栏/设置页切换器用） */
+/** 支持的语言清单（侧边栏/设置页切换器用）
+ *
+ * 只列「有完整翻译」的语言。ja / ko / pt-BR / zh-Hant 的语言包是空 `{}`，
+ * 选了会静默 fallbackLng 回中文（用户以为切了但界面没变），故不上架。
+ * 后续补齐翻译后再逐个加回。 */
 export const SUPPORTED_LANGS: Array<{ code: AppLanguage; label: string }> = [
   { code: 'zh', label: '简体中文' },
-  { code: 'zh-Hant', label: '繁體中文' },
   { code: 'en', label: 'English' },
-  { code: 'ja', label: '日本語' },
-  { code: 'ko', label: '한국어' },
-  { code: 'pt-BR', label: 'Português (BR)' },
 ];
 
 // 语言检测：优先 localStorage 的 'i18n_lang'，其次浏览器 navigator.language，默认 zh

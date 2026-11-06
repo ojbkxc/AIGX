@@ -440,6 +440,25 @@ pub async fn handle_messages(
         extra: body.get("metadata").cloned(),
     };
 
+    // P1 两段式计费：请求前预留配额，流式/非流式结算时多退少补。
+    // 此前 Anthropic 分支未接两段式（reservation: None），余额耗尽用户可在
+    // 单请求内超额消费。与 chat.rs 同口径。
+    let estimated_prompt_tokens =
+        crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64;
+    let estimated_completion_tokens = chat_req.max_tokens.unwrap_or(256).clamp(256, 4096) as u64;
+    let reservation = match super::openai::reserve_usage(
+        &state,
+        &api_key,
+        &model,
+        &model,
+        &billing_group,
+        estimated_prompt_tokens,
+        estimated_completion_tokens,
+    ) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+
     let ctx = BridgeContext::new(request_id.clone(), model.clone());
 
     if is_stream {
@@ -566,6 +585,8 @@ pub async fn handle_messages(
                 log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
+                // G5：失败路径释放预留——渠道全败时解冻，防止预留永久冻结
+                super::openai::release_reservation(&state, &api_key, &reservation);
                 crate::metrics::global().record_request(
                     &model,
                     used_channel_id.as_deref().unwrap_or("unknown"),
@@ -600,6 +621,11 @@ pub async fn handle_messages(
                 crate::pricing::ToolCallCounts::new(),
             ));
             let tool_calls_for_map = tool_calls.clone();
+
+            // 流中途出错标志：Err 分支置位，suffix 据此给 finalize 传 errored
+            // （日志 status_code 记 500 而非恒 200）
+            let stream_errored = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stream_errored_for_map = stream_errored.clone();
 
             // 前缀事件：仅 message_start（内容块统一由 middle 动态开启，
             // 参照 aisix AnthropicSseEncoder：文本块在首个文本增量到达时才开块，
@@ -816,6 +842,11 @@ pub async fn handle_messages(
                             }
                         }
                         Err(e) => {
+                            // 标记流中途出错：suffix 据此给 finalize 传 errored
+                            stream_errored_for_map.store(
+                                true,
+                                std::sync::atomic::Ordering::SeqCst,
+                            );
                             // T3：发给客户端的错误消息先脱敏（日志侧保留原始消息）
                             let safe_msg =
                                 crate::error_translate::sanitize_error_message(&e.to_string());
@@ -858,9 +889,8 @@ pub async fn handle_messages(
                     .map(|c| c.name.clone()),
                 candidate_channels: candidate_channel_ids.clone(),
                 filtered_channels: filtered_channels.clone(),
-                // anthropic 分支尚未接入两段式计费（P1 后续），
-                // 走 finalize 内 charge_usage_with_tools 旧路径
-                reservation: None,
+                // 两段式计费：reserve_usage 已在请求前完成，finalize 走 settle_usage
+                reservation: Some(reservation.clone()),
                 debug_request_body: if crate::config::log_body_enabled() {
                     Some(crate::bridge::chat_format_debug_json(&chat_req))
                 } else {
@@ -883,7 +913,8 @@ pub async fn handle_messages(
                     .charged
                     .swap(true, std::sync::atomic::Ordering::SeqCst)
                 {
-                    let (pt, ct) = billing_fin.finalize();
+                    let errored = stream_errored.load(std::sync::atomic::Ordering::SeqCst);
+                    let (pt, ct) = billing_fin.finalize(errored);
                     // 事后限流记账
                     rate_bundle.commit_tokens(pt + ct).await;
                     (pt, ct)
@@ -1114,6 +1145,8 @@ pub async fn handle_messages(
                 log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
+                // G5：失败路径释放预留——渠道全败时解冻，防止预留永久冻结
+                super::openai::release_reservation(&state, &api_key, &reservation);
                 crate::metrics::global().record_request(
                     &model,
                     used_channel_id.as_deref().unwrap_or("unknown"),
@@ -1156,15 +1189,18 @@ pub async fn handle_messages(
             // 归一（prompt 补上 creation+read，read 单独走缓存价）
             let billing_model = used_upstream.as_deref().unwrap_or(&model);
             let (billing_prompt, billing_cached) = response.usage.billing_tokens();
-            let cost = super::openai::charge_usage(
+            // 两段式计费：settle_usage 结算之前预留的配额，多退少补
+            let cost = super::openai::settle_usage(
                 &state,
                 &api_key,
                 &model,
                 billing_model,
                 &billing_group,
+                &reservation,
                 billing_prompt,
                 response.usage.completion_tokens,
                 billing_cached,
+                None,
             );
 
             // 事后限流记账
@@ -1298,7 +1334,9 @@ pub async fn handle_messages(
 /// POST /v1/messages/count_tokens — Anthropic 计数估算端点（Claude Code 启动探测）
 ///
 /// 不做真实 token 计数，按 chars/3.5 估算并标记 estimated:true。
-/// 只需有效 API Key（不校验模型白名单/配额），因为不转发上游。
+/// 不转发上游，故跳过模型白名单校验；但过期/禁用/额度/IP/用户余额仍校验
+/// （用 validate_listing，此前用 validate 只查 is_active，被禁用或额度耗尽
+/// 的 Key 仍可调，属鉴权口径不一致、可枚举 Key 有效性）。
 pub async fn handle_count_tokens(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1315,13 +1353,30 @@ pub async fn handle_count_tokens(
             .into_response()
         }
     };
-    if state.api_key_store.validate(&key).is_none() {
-        return anthropic_error(
-            "authentication_error",
-            "Invalid API key",
-            StatusCode::UNAUTHORIZED,
-        )
-        .into_response();
+    let client_ip = extract_client_ip(&headers);
+    match state
+        .api_key_store
+        .validate_listing(&key, client_ip.as_deref())
+    {
+        Ok(_) => {}
+        Err(e) => {
+            let (msg, code) = match &e {
+                crate::api::auth::ApiKeyError::Disabled => {
+                    ("API key is disabled".to_string(), StatusCode::FORBIDDEN)
+                }
+                crate::api::auth::ApiKeyError::QuotaExhausted
+                | crate::api::auth::ApiKeyError::UserQuotaExhausted => (
+                    "API key quota exhausted".to_string(),
+                    StatusCode::PAYMENT_REQUIRED,
+                ),
+                crate::api::auth::ApiKeyError::IpNotAllowed(ip) => (
+                    format!("IP '{ip}' is not allowed for this API key"),
+                    StatusCode::FORBIDDEN,
+                ),
+                _ => ("Invalid API key".to_string(), StatusCode::UNAUTHORIZED),
+            };
+            return anthropic_error("authentication_error", &msg, code).into_response();
+        }
     }
 
     let mut total_chars: usize = 0;

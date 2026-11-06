@@ -1326,6 +1326,41 @@ impl ChannelStore {
         }
     }
 
+    /// 探活结果记录：**只更新健康指标，不触碰断路器状态机**。
+    ///
+    /// 探活（`prober.rs`）的目的是观测渠道健康度，不应影响真实请求的断路器决策：
+    /// 不清 `probe_lease_until`（否则后台探活会清掉在飞试探的单飞租约，
+    /// 放行第二个并发试探）、不增 `half_open_successes`（合成成功可凑满阈值
+    /// 提前闭合断路器）、不清 `rate_limit_until`（慢请求迟到成功可覆盖刚设的限流窗口）。
+    ///
+    /// `failure_type = None` 表示探测成功；`Some(ft)` 表示探测失败（仅记健康指标）。
+    pub fn record_channel_probe(
+        &self,
+        channel_id: &str,
+        model: Option<&str>,
+        latency_ms: u64,
+        failure_type: Option<circuit_breaker::FailureType>,
+        error_message: Option<&str>,
+    ) {
+        match failure_type {
+            Some(ft) => {
+                self.health_tracker.record_error(
+                    channel_id,
+                    model,
+                    &ft,
+                    error_message.unwrap_or(""),
+                );
+                self.health_archive
+                    .note_failure(channel_id, error_message.unwrap_or(""));
+            }
+            None => {
+                self.health_tracker
+                    .record_success(channel_id, model, latency_ms);
+                self.health_archive.note_success(channel_id, latency_ms);
+            }
+        }
+    }
+
     /// 计入一次空响应 — 返回 `true` 表示连续空响应已超阈值（应触发故障处理）。
     ///
     /// 调用方在响应处理时检查 token 计数，零 token 则调用本方法；非零则调用

@@ -54,6 +54,10 @@ jobs:
       - name: Unit tests (vitest)
         working-directory: frontend
         run: npx vitest run
+      - name: i18n key consistency check
+        # 防回归：t() 字面量 key 必须在 zh/en 都存在，否则英文界面回退中文
+        working-directory: frontend
+        run: npm run i18n:check
       - name: Build frontend
         working-directory: frontend
         run: npm run build
@@ -148,20 +152,21 @@ jobs:
         with:
           key: ${{ matrix.name }}
       - name: ${{ matrix.name }}
-        run: cargo check ${{ matrix.args }}
+        run: cargo check ${{ matrix.args }} --locked
 
   test:
     name: cargo test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test
+        run: cargo test --locked
       - name: Verify release build
-        run: cargo build --release
+        run: cargo build --release --locked
 
   # 上游能力漂移巡检：Agent2API 加了新的签到家 / 模型目录家 / 改了目录端点，
   # AIGX 没跟上时这里会红。
@@ -175,7 +180,6 @@ jobs:
   upstream-drift:
     name: upstream drift (Agent2API)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Setup Python
@@ -201,8 +205,12 @@ jobs:
           python tools/sync_agent2api_credential_fields.py --upstream upstream-agent2api --check
           rc_fields=$?
           if [ $rc_data -ne 0 ] || [ $rc_cap -ne 0 ] || [ $rc_fields -ne 0 ]; then
-            echo "::warning::Agent2API 上游有 AIGX 尚未跟上的 provider 能力（数据层、能力层或凭证字段模板）。"
-            echo "::warning::数据层=provider id/展示名；能力层=签到名单/模型目录/目录端点；字段模板=账号记录的具名凭证字段。"
-            echo "::warning::字段模板可用 tools/sync_agent2api_credential_fields.py --write 半自动对齐；其余按 docs/agent2api-porting.md 的契约逐家移植后重跑本 job。"
+            echo "::error::Agent2API 上游有 AIGX 尚未跟上的 provider 能力（数据层、能力层或凭证字段模板）。"
+            echo "::error::数据层=provider id/展示名；能力层=签到名单/模型目录/目录端点；字段模板=账号记录的具名凭证字段。"
+            echo "::error::字段模板可用 tools/sync_agent2api_credential_fields.py --write 半自动对齐；其余按 docs/agent2api-porting.md 的契约逐家移植后重跑本 job。"
+            exit 1
           fi
-          exit 0
+          echo "upstream drift check passed: provider / capability / credential-field 均与上游一致"
+      - name: Note drift detection skipped
+        if: steps.upstream.outcome != 'success'
+        run: echo "::warning::上游 Agent2API 拉取失败，本次漂移巡检跳过（网络问题，不阻断 CI，但漂移不会被检出）"

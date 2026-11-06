@@ -271,17 +271,39 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Verify version consistency
-        # VERSION / Cargo.toml / frontend/package.json 三者必须一致——
-        # 否则线上「当前版本」显示与前端对不上，更新判定也会错位
+        # 版本号必须六处一致：VERSION / Cargo.toml / Cargo.lock(aigx 包) /
+        # frontend/package.json / frontend/package-lock.json / static/version.json
+        # —— 否则线上「当前版本」显示与前端、更新判定、构建产物全部错位。
         run: |
-          VER=$(cat VERSION)
-          CARGO_VER=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
-          PKG_VER=$(python3 -c "import json; print(json.load(open('frontend/package.json'))['version'])")
-          echo "VERSION=$VER Cargo=$CARGO_VER package.json=$PKG_VER"
-          [ "$VER" = "$CARGO_VER" ] && [ "$VER" = "$PKG_VER" ] || {
-            echo "::error::三处版本号不一致，请统一为同一版本（VERSION/Cargo.toml/frontend/package.json）"
-            exit 1
-          }
+          python3 - <<'PY'
+          import json, re, sys
+
+          version = open('VERSION').read().strip()
+          errors = []
+
+          def check(name, actual):
+              if actual != version:
+                  errors.append(f"{name} = {actual!r} != VERSION = {version!r}")
+
+          m = re.search(r'^version\s*=\s*"([^"]+)"', open('Cargo.toml').read(), re.M)
+          check("Cargo.toml", m.group(1) if m else "MISSING")
+
+          lock = open('Cargo.lock').read()
+          m = re.search(r'\[\[package\]\]\nname = "aigx"\nversion = "([^"]+)"', lock)
+          check("Cargo.lock(aigx)", m.group(1) if m else "MISSING")
+
+          check("package.json", json.load(open('frontend/package.json'))['version'])
+          check("package-lock.json", json.load(open('frontend/package-lock.json'))['version'])
+          check("static/version.json", json.load(open('static/version.json'))['version'])
+
+          print(f"VERSION={version}")
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              print("::error::版本号不一致，请统一六处（VERSION/Cargo.toml/Cargo.lock/package.json/package-lock.json/static/version.json）")
+              sys.exit(1)
+          print("六处版本号一致")
+          PY
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
