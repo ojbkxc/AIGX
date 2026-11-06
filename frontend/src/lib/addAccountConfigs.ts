@@ -633,6 +633,37 @@ function monkeycodeForm(provider: string, label: string, site: string): Provider
   };
 }
 
+/**
+ * ModelScope（魔搭）两站：国内版 `modelscope` / 国际版 `modelscope-intl`。
+ *
+ * ── 一枚令牌两用 ────────────────────────────────────────────
+ * 同一个 `ms-` 令牌既作 `Authorization: Bearer` 调推理，又作
+ * `Cookie: m_session_id=<令牌>` 读账号身份 / 魔粒余额 / 每日签到。
+ * 所以凭据只有一个字段，用户从魔搭的「访问令牌」页复制一次就够。
+ *
+ * ── 两个站点是两套独立账号 ─────────────────────────────────
+ * 国内站（modelscope.cn）与国际站（modelscope.ai）账号体系分开：令牌打错站点
+ * 会得到 401，所以两家各一张卡、各填各的令牌。
+ *
+ * ── 添加时的一次探活 ───────────────────────────────────────
+ * 令牌不透明、解不出身份，所以网关添加前必须打一次上游换回账号身份 ——
+ * 令牌无效 / 站点点错会在添加的那一刻就说清楚，而不是等第一次转发才失败。
+ */
+function modelscopeForm(provider: string, label: string, site: string, siteNote: string): ProviderAddConfig {
+  return {
+    provider,
+    label,
+    manualTitle: '粘贴 API 令牌',
+    manualNote: `粘贴 ModelScope 的 API 令牌（ms- 开头，在 ${site} 的「访问令牌」页获取）。${siteNote}这枚令牌两用：网关既用它调推理，也用它读账号身份、魔粒余额与每日签到。令牌长期有效、没有续期接口，失效后重新获取再粘一次即可。`,
+    addButton: `添加 ${label}账号`,
+    methods: ['paste', 'manual'],
+    fields: [
+      { key: 'accessToken', label: 'accessToken', rows: 3, target: 'credential', placeholder: 'ms- 开头的 API 令牌' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空则用上游账号昵称' },
+    ],
+  };
+}
+
 // 拆家 / 地区伴生：与 SESSION_ADD_CONFIGS 同一张表（后注册覆盖同名键）
 Object.assign(SESSION_ADD_CONFIGS, {
   'cline-free': clineForm('cline-free', 'Cline Free', '（免费额度池，模型名带 cline-free/ 前缀）'),
@@ -755,6 +786,42 @@ Object.assign(SESSION_ADD_CONFIGS, {
     fields: [
       { key: 'accessToken', label: 'accessToken', rows: 3, target: 'credential', placeholder: '粘贴 Accio 国内版的 accessToken' },
       { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空使用账号昵称或邮箱' },
+    ],
+  },
+  // ── 2026-11 上游 3.4.2 新增的 5 家（lobsterai/qwenwork 表单已移除：后端无对应实现）───────────────
+  // 智谱清言（chatglm.cn）：粘贴访问令牌（JWT）。上游还有访客模式与桌面端
+  // 导入，AIGX 表单层只保留粘贴入口（访客/桌面端不在表单配置范围内）。
+  chatglm: {
+    provider: 'chatglm',
+    label: '智谱清言',
+    manualTitle: '粘贴访问令牌',
+    manualNote:
+      '粘贴智谱清言的访问令牌（JWT，三段点分）。获取方式：浏览器打开 chatglm.cn 并登录后，在开发者工具的 Application → Cookies 里复制 chatglm_token 的值（也可以直接粘 chatglm_token=…; 整行）。粘贴后会先向上游校验一次，校验通过才落账号；登录账号的积分、签到能力都能用，之后由网关自动续期。',
+    addButton: '添加智谱清言账号',
+    methods: ['paste', 'manual'],
+    fields: [
+      { key: 'accessToken', label: 'accessToken', rows: 3, target: 'credential', placeholder: 'JWT（三段点分；也可直接粘贴 chatglm_token=… 整行）' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空则用账号昵称' },
+    ],
+  },
+  // ModelScope（魔搭）国内站 / 国际站：两站账号体系独立，各填各的令牌。
+  modelscope: modelscopeForm('modelscope', 'ModelScope 国内版', 'modelscope.cn', '这里填国内站（modelscope.cn）的账号：请粘贴国内站的令牌。国际站（modelscope.ai）是另一家 provider、另一套账号，两边的令牌不通用。'),
+  'modelscope-intl': modelscopeForm('modelscope-intl', 'ModelScope 国际版', 'modelscope.ai', '这里填国际站（modelscope.ai）的账号：请粘贴国际站的令牌。国内站（modelscope.cn）是另一家 provider、另一套账号，两边的令牌不通用。'),
+  // AtomCode（AtomGit / GitCode）：粘贴令牌对（后端 verify_atomcode 粘贴路径已通，
+  // 网页登录引擎尚未接入网关，故不提供 web 入口）。
+  atomcode: {
+    provider: 'atomcode',
+    label: 'AtomCode',
+    manualTitle: '粘贴令牌对',
+    manualNote:
+      '在 AtomGit 的 AtomCode 页面登出后取得 accessToken 粘贴进来即可添加账号。refreshToken / userId 仅展示，网关不提取、不换证（续期随插件走），粘贴 accessToken 就能落账号；约 7 天到期后需重新粘贴新令牌。',
+    addButton: '添加 AtomCode 账号',
+    methods: ['paste', 'manual'],
+    fields: [
+      { key: 'accessToken', label: '访问令牌', target: 'credential', placeholder: 'access_token' },
+      { key: 'refreshToken', label: '续期令牌', optional: true, placeholder: 'refresh_token' },
+      { key: 'userId', label: '用户 ID', optional: true, placeholder: '可选，用于生成账号标识' },
+      { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空用「AtomCode」' },
     ],
   },
 });

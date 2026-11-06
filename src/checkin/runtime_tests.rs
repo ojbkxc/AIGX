@@ -617,6 +617,218 @@ async fn officeace_claims_bonus() {
     assert_header(&state, "/v1/subscription/bonus/claim", "x-sdk-date");
 }
 
+// ── ModelScope（魔搭）─────────────────────────────────────────────
+//
+// 签到 = 调一次登录信息接口（调用即触发当日魔粒，幂等）。令牌两用：
+// `Cookie: m_session_id=<令牌>` + `Authorization: Bearer <令牌>`。
+
+#[tokio::test]
+async fn modelscope_checks_in_via_login_info() {
+    let (base, state) = start_mock(vec![(
+        "/api/v1/users/login/info",
+        200,
+        json!({"Code": 200, "Message": "Success", "Data": {"Name": "tester"}}),
+    )])
+    .await;
+
+    let result = claim_for(&reqwest::Client::new(), &account("modelscope", &base)).await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Success);
+    assert!(
+        result.msg.contains("魔粒"),
+        "文案应说明签到动作：{}",
+        result.msg
+    );
+    assert_hit(&state, "/api/v1/users/login/info");
+    assert_method(&state, "/api/v1/users/login/info", "GET");
+    // 令牌两用：Cookie m_session_id + Bearer
+    assert_header(&state, "/api/v1/users/login/info", "cookie");
+    assert_header_contains(
+        &state,
+        "/api/v1/users/login/info",
+        "cookie",
+        "m_session_id=",
+    );
+    assert_header_contains(
+        &state,
+        "/api/v1/users/login/info",
+        "authorization",
+        "Bearer",
+    );
+}
+
+#[tokio::test]
+async fn modelscope_reports_expired_session() {
+    let (base, _state) = start_mock(vec![(
+        "/api/v1/users/login/info",
+        401,
+        json!({"Code": 401, "Message": "unauthorized"}),
+    )])
+    .await;
+
+    let result = claim_for(&reqwest::Client::new(), &account("modelscope", &base)).await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Failed);
+    assert!(result.msg.contains("失效"), "文案：{}", result.msg);
+}
+
+#[tokio::test]
+async fn modelscope_reports_bad_business_code() {
+    let (base, _state) = start_mock(vec![(
+        "/api/v1/users/login/info",
+        200,
+        json!({"Code": 40001, "Message": "token expired"}),
+    )])
+    .await;
+
+    let result = claim_for(&reqwest::Client::new(), &account("modelscope", &base)).await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Failed);
+    assert!(
+        result.msg.contains("40001"),
+        "文案应含业务码：{}",
+        result.msg
+    );
+}
+
+// ── ZCode（领当天赠送套餐）──────────────────────────────────────
+
+/// 池是**进程级单例**（与 `zcode_captcha` 自己的池测试并行跑）：
+/// 「推一枚 → 取一枚」之间可能被并发测试偷走。取不到令牌时（claim
+/// 回「令牌池为空」）重推重试 —— 连试三次都空才把结果交给断言。
+async fn zcode_claim_with_pool_token(provider: &str, base: &str) -> super::ClaimResult {
+    let mut result = super::ClaimResult {
+        success: false,
+        msg: String::new(),
+        outcome: CheckinOutcome::Failed,
+    };
+    for _ in 0..3 {
+        crate::zcode_captcha::push("runtime-test-param", "cn");
+        result = claim_for(&reqwest::Client::new(), &account(provider, base)).await;
+        if !result.msg.contains("令牌池") {
+            return result;
+        }
+    }
+    result
+}
+
+#[tokio::test]
+async fn zcode_claims_daily_gift_plan() {
+    let today = chrono::Utc::now()
+        .with_timezone(&crate::checkin::scheduler::beijing())
+        .format("%Y%m%d")
+        .to_string();
+    let plan_id = format!("zcode-v3-start-plan-{today}");
+    let (base, state) = start_mock(vec![
+        (
+            "/api/v1/zcode-plan/billing/preview",
+            200,
+            json!({"code": 0, "data": {"plans": [
+                {"planId": "zcode-v3-coding-plan-001"},
+                {"planId": plan_id.clone()},
+            ]}}),
+        ),
+        ("/api/v1/event/report", 200, json!({"code": 0})),
+        // claim 序列：成功 → 已领（1003）→ 窗口未开（1002）
+        (
+            "/api/v1/zcode-plan/billing/claim",
+            200,
+            json!({"code": 0, "msg": "ok"}),
+        ),
+        (
+            "/api/v1/zcode-plan/billing/claim",
+            200,
+            json!({"code": 1003, "msg": "already claimed"}),
+        ),
+        (
+            "/api/v1/zcode-plan/billing/claim",
+            200,
+            json!({"code": 1002, "msg": "not claimable"}),
+        ),
+    ])
+    .await;
+
+    // ① 成功：探测 → 挑当天套餐 → 领取
+    let result = zcode_claim_with_pool_token("zcode", &base).await;
+    assert_eq!(
+        result.outcome,
+        CheckinOutcome::Success,
+        "文案：{}",
+        result.msg
+    );
+    assert_hit(&state, "/api/v1/zcode-plan/billing/preview");
+    assert_hit(&state, "/api/v1/zcode-plan/billing/claim");
+    // 领取请求：POST + plan_id + 验证码头 + 设备指纹
+    assert_method(&state, "/api/v1/zcode-plan/billing/claim", "POST");
+    assert_body_field(
+        &state,
+        "/api/v1/zcode-plan/billing/claim",
+        "plan_id",
+        &json!(plan_id),
+    );
+    assert_header(&state, "/api/v1/zcode-plan/billing/claim", "x-device-mid");
+    assert_header(
+        &state,
+        "/api/v1/zcode-plan/billing/claim",
+        "x-aliyun-captcha-verify-param",
+    );
+    // 资格前置：激活事件补报
+    assert_hit(&state, "/api/v1/event/report");
+
+    // ② 同一份套餐再领 → 1003 已领过（幂等）
+    let result = zcode_claim_with_pool_token("zcode", &base).await;
+    assert_eq!(
+        result.outcome,
+        CheckinOutcome::Already,
+        "文案：{}",
+        result.msg
+    );
+
+    // ③ 套餐不可领（窗口未开）→ Pending（不算失败）
+    let result = zcode_claim_with_pool_token("zcode", &base).await;
+    assert_eq!(
+        result.outcome,
+        CheckinOutcome::Pending,
+        "文案：{}",
+        result.msg
+    );
+}
+
+#[tokio::test]
+async fn zcode_reports_empty_plans_as_pending() {
+    // 窗口未开（19:00 前）：列表里没有当天赠送套餐 → Pending（不算失败）
+    let (base, _state) = start_mock(vec![(
+        "/api/v1/zcode-plan/billing/preview",
+        200,
+        json!({"code": 0, "data": {"plans": []}}),
+    )])
+    .await;
+
+    let result = claim_for(&reqwest::Client::new(), &account("zcode", &base)).await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Pending);
+    assert!(
+        result.msg.contains("19:00"),
+        "文案应说明窗口：{}",
+        result.msg
+    );
+}
+
+#[tokio::test]
+async fn zcode_reports_expired_session() {
+    let (base, _state) = start_mock(vec![(
+        "/api/v1/zcode-plan/billing/preview",
+        401,
+        json!({"code": 401, "msg": "unauthorized"}),
+    )])
+    .await;
+
+    let result = claim_for(&reqwest::Client::new(), &account("zcode", &base)).await;
+
+    assert_eq!(result.outcome, CheckinOutcome::Failed);
+    assert!(result.msg.contains("失效"), "文案：{}", result.msg);
+}
+
 // ── 通用：所有家的「空凭证」都应被拦住 ────────────────────────────
 
 #[tokio::test]

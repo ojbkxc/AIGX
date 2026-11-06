@@ -19,7 +19,7 @@ parking_lot = "0.12"
 
 [package]
 name = "aigx"
-version = "1.0.33"
+version = "1.0.34"
 description = "AIGX — OpenAI-compatible AI gateway with multi-account Cloudflare Workers AI and Epay support"
 edition = "2021"
 license-file = "LICENSE"

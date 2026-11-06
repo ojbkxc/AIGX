@@ -39,6 +39,31 @@ ALIASES = {
     "raccoon": "xiaohuanxiong",
 }
 
+# ── 能力边界豁免集（方案 C）─────────────────────────────────────────────
+# AIGX 对接 Agent2API 上游采用「方案 C：四层对齐 + 能力边界标注」。
+# 能力边界规则：AIGX 无实现的上游入口不自创、不显示、不假装。
+#
+# 这些 provider 在上游有表单/入口，但 AIGX **有意不实现**——闸门不因此报缺，
+# 但会在输出里如实标注豁免原因（能力边界的可执行标注）。
+#
+# ⚠️ 豁免集只豁免**已知有意不实现**的家。上游新增 provider 时，
+# 不在豁免集里的仍会报缺（触发跟进）——豁免不是放宽闸门。
+INTENTIONAL_FORM_GAPS: dict[str, str] = {
+    "lobsterai": (
+        "AIGX 无 lobsterai OAuth web 登录实现（上游靠插件 "
+        "providers::lobsterai::oauth）；已有账号走 account_session/import.rs "
+        "通用导入，注册表条目与 catalog spec 保留"
+    ),
+    "qwenwork": (
+        "AIGX 无 qwenwork 后端（上游由闭源插件 agent2api-providers 实现，"
+        "AIGX 无插件机制）；注册表不加条目"
+    ),
+    "qwenwork-intl": (
+        "AIGX 无 qwenwork-intl 后端（上游国际版已停用，由闭源插件实现）；"
+        "注册表不加条目"
+    ),
+}
+
 # ── 上游解析 ────────────────────────────────────────────────────────────────
 
 
@@ -147,9 +172,18 @@ def compute_drift(
         i for i in want if ALIASES.get(i, i) not in session_kinds
     )
 
-    # 表单覆盖：上游有表单的 provider 在 AIGX 的 addAccountConfigs 里也应有（同样过别名）
+    # 表单覆盖：上游有表单的 provider 在 AIGX 的 addAccountConfigs 里也应有（同样过别名）。
+    # 能力边界豁免集（INTENTIONAL_FORM_GAPS）里的家有意不实现——单列出来标注原因，
+    # 不进 form_missing（不触发 exit 1）。
     form_missing = sorted(
-        i for i in upstream_form_ids if ALIASES.get(i, i) not in form_ids
+        i for i in upstream_form_ids
+        if ALIASES.get(i, i) not in form_ids
+        and i not in INTENTIONAL_FORM_GAPS
+    )
+    form_exempted = sorted(
+        i for i in upstream_form_ids
+        if i in INTENTIONAL_FORM_GAPS
+        and ALIASES.get(i, i) not in form_ids
     )
 
     return {
@@ -157,6 +191,7 @@ def compute_drift(
         "extra": extra,
         "session_missing": session_missing,
         "form_missing": form_missing,
+        "form_exempted": form_exempted,
     }
 
 
@@ -197,6 +232,12 @@ def write_report(path: Path, drift: dict, upstream_ids: dict[str, str]) -> None:
     lines += [f"- `{i}`" for i in drift["session_missing"]] or ["- （无）"]
     lines += ["", "## 添加账号表单缺失（addAccountConfigs 未覆盖）", ""]
     lines += [f"- `{i}`" for i in drift["form_missing"]] or ["- （无）"]
+    lines += ["", "## 表单豁免（能力边界，有意不实现）", ""]
+    if drift["form_exempted"]:
+        for i in drift["form_exempted"]:
+            lines.append(f"- `{i}`：{INTENTIONAL_FORM_GAPS[i]}")
+    else:
+        lines.append("- （无）")
     lines += [
         "",
         "## 处理指引",
@@ -207,6 +248,8 @@ def write_report(path: Path, drift: dict, upstream_ids: dict[str, str]) -> None:
         "3. 表单缺失的，按上游 `add-account-configs.ts` 把字段收敛进",
         "   `frontend/src/lib/addAccountConfigs.ts`（数据照抄，渲染不用抄）。",
         "4. 能力层（refresh / balance / checkin / models）按 `docs/porting-contract.md` 移植。",
+        "5. 表单豁免集（`INTENTIONAL_FORM_GAPS`）是方案 C 能力边界的可执行标注——",
+        "   AIGX 无实现的上游入口不自创、不显示。新增豁免需在脚本里登记原因。",
         "",
     ]
     path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
@@ -250,6 +293,10 @@ def main() -> int:
         print(f"\n[登录态缺] {', '.join(drift['session_missing'])}")
     if drift["form_missing"]:
         print(f"\n[表单缺] {', '.join(drift['form_missing'])}")
+    if drift["form_exempted"]:
+        print(f"\n[表单豁免] {', '.join(drift['form_exempted'])}（能力边界，有意不实现）")
+        for provider in drift["form_exempted"]:
+            print(f"  - {provider}：{INTENTIONAL_FORM_GAPS[provider]}")
 
     if args.write:
         write_baseline(registry_rs, baseline, drift["missing"])

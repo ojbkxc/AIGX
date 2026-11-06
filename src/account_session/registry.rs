@@ -6,12 +6,37 @@
 //! - `Gemini` → `bridge::gemini::make_bridge`（x-goog-api-key）
 //!
 //! 新增一家 OpenAI 兼容供应商（同一把 Key 换域名）只需在 `PROVIDERS` 里加一条。
+//!
+//! ## 四层对齐（方案 C，2026-11-06 固化）
+//!
+//! AIGX 对接 Agent2API 上游（副本 `D:\GitHub\Agent2API-upstream-main`）按
+//! **四层**跟进，本文件承载其中两层：
+//!   - **注册表层**（本文件 `PROVIDERS` / `SESSION_PROVIDERS` /
+//!     `AGENT2API_PROVIDERS` ↔ 上游 `core/providers/mod.rs`）；
+//!   - **字段层**（本文件 `CREDENTIAL_FIELDS` ↔ 上游 `core/account_store/`）。
+//! 另两层：表单层 `frontend/src/lib/addAccountConfigs.ts`、签到层
+//! `src/checkin/claim.rs`，各层比对工具见 `tools/sync_agent2api_*.py`。
+//!
+//! ## 能力边界
+//!
+//! AIGX 无实现的上游入口**不显示、不自创、不假装**；注册表条目保留展示名
+//! 元数据（落盘契约与导入识别需要），但前端不显示死入口 —— 已有账号走
+//! `account_session/import.rs` 导入。上游由闭源插件仓实现的能力标注
+//! 「由上游插件实现，AIGX 未落地」（本文件只跟进主仓元数据层）。
+//!
+//! ## 跟进方式
+//!
+//! 上游发版 → 跑 `tools/sync_agent2api_providers.py` /
+//! `sync_agent2api_capabilities.py` / `sync_agent2api_credential_fields.py`
+//! （`--upstream D:\GitHub\Agent2API-upstream-main --check`）diff 四层 →
+//! 按能力边界规则更新。完整规则与能力矩阵见
+//! `docs/aigx-vs-agent2api-gap.md` 的「上游对齐规则」章节。
 
 /// 默认 provider（= OpenAI 兼容，需账号自带 base_url）。
 pub const DEFAULT_PROVIDER_KIND: &str = "openai_compatible";
 
 /// 上游基准清单 —— **Agent2API 的 provider 全集**（`core/providers/mod.rs`
-/// 的 `PROVIDERS` 注册表，2026-11-01 核对）。
+/// 的 `PROVIDERS` 注册表，2026-11-06 核对 3.4.2：24 家 → 29 家）。
 ///
 /// ## 这张表为什么存在
 ///
@@ -54,6 +79,12 @@ pub const AGENT2API_PROVIDERS: &[&str] = &[
     "antigravity",
     "officeace",
     "orcaterm",
+    // 上游 3.4.2 新增（2026-11-06 同步）：
+    "chatglm",
+    "modelscope",
+    "modelscope-intl",
+    "atomcode",
+    "lobsterai",
 ];
 
 /// 上游协议族，决定复用哪个原生 Bridge。
@@ -444,6 +475,40 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         label: "OrcaTerm",
         protocol: Protocol::Openai,
         default_base_url: "https://lightai.cloud.tencent.com",
+    },
+    // ── 上游 3.4.2 新增的 5 家（2026-11-06 同步）────────────────────
+    // 智谱清言 / ModelScope 两站 / AtomCode / LobsterAI。
+    // 默认地址抄自各家公开站点（上游实现已搬进闭源插件仓，端点知识
+    // 不再随主仓发布；用户可按账号覆盖）。
+    ProviderSpec {
+        kind: "chatglm",
+        label: "智谱清言",
+        protocol: Protocol::Openai,
+        default_base_url: "https://chatglm.cn/api/paas/v4",
+    },
+    ProviderSpec {
+        kind: "modelscope",
+        label: "ModelScope 国内版",
+        protocol: Protocol::Openai,
+        default_base_url: "https://modelscope.cn",
+    },
+    ProviderSpec {
+        kind: "modelscope-intl",
+        label: "ModelScope 国际版",
+        protocol: Protocol::Openai,
+        default_base_url: "https://modelscope.ai",
+    },
+    ProviderSpec {
+        kind: "atomcode",
+        label: "AtomCode",
+        protocol: Protocol::Openai,
+        default_base_url: "https://atomgit.com",
+    },
+    ProviderSpec {
+        kind: "lobsterai",
+        label: "LobsterAI",
+        protocol: Protocol::Openai,
+        default_base_url: "https://lobsterai.youdao.com",
     },
 ];
 
@@ -857,6 +922,70 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             openai_compatible: true,
         },
     ),
+    // ── 上游 3.4.2 新增的 5 家（2026-11-06 同步）────────────────────
+    // 字段形状抄自上游 account_store 的存量记录投影：
+    //   chatglm     = accessToken/refreshToken 顶层 + isGuest 标记
+    //   modelscope  = accessToken（ms- 令牌）+ userId/HavanaId
+    //   atomcode    = accessToken/refreshToken 顶层
+    //   lobsterai   = accessToken/refreshToken/uuid/firstKeyfrom/latestKeyfrom
+    // 默认地址抄自各家公开站点（上游实现已搬进闭源插件仓）。
+    (
+        "chatglm",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            base_url: "https://chatglm.cn/api/paas/v4",
+            chat_path: "",
+            headers: &[],
+            credential_hint: "粘贴智谱清言的访问令牌（JWT，三段点分）",
+            openai_compatible: true,
+        },
+    ),
+    (
+        "modelscope",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            base_url: "https://modelscope.cn",
+            chat_path: "/api/v1/chat/completions",
+            headers: &[],
+            credential_hint: "粘贴 ModelScope 的 API 令牌（ms- 开头）",
+            openai_compatible: true,
+        },
+    ),
+    // ModelScope 国际版（modelscope.ai）：与国内版同一套协议，站点不同。
+    (
+        "modelscope-intl",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            base_url: "https://modelscope.ai",
+            chat_path: "/api/v1/chat/completions",
+            headers: &[],
+            credential_hint: "粘贴 ModelScope 国际版的 API 令牌（ms- 开头）",
+            openai_compatible: true,
+        },
+    ),
+    (
+        "atomcode",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            base_url: "https://atomgit.com",
+            chat_path: "",
+            headers: &[],
+            credential_hint: "粘贴 AtomCode 的访问令牌（accessToken）",
+            openai_compatible: true,
+        },
+    ),
+    (
+        "lobsterai",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            base_url: "https://lobsterai.youdao.com",
+            chat_path: "",
+            headers: &[],
+            credential_hint:
+                "粘贴 LobsterAI 的访问令牌（accessToken；续期需 uuid/keyfrom，一般由网页登录下发）",
+            openai_compatible: true,
+        },
+    ),
 ];
 
 /// 查登录态型供应商元数据（非登录态型返回 None）。
@@ -1257,8 +1386,8 @@ mod tests {
         }
         assert_eq!(
             SESSION_PROVIDERS.len(),
-            25,
-            "登录态供应商应为 25 家（Agent2API 的 17 家 + 拆家的 8 个变体）"
+            30,
+            "登录态供应商应为 30 家（Agent2API 的 29 家 + AIGX 自有的 cline）"
         );
     }
 
@@ -1279,7 +1408,7 @@ mod tests {
             .iter()
             .filter(|(_, meta)| meta.openai_compatible)
             .count();
-        assert_eq!(compatible, 12, "可直接转发（OpenAI 兼容）的应为 12 家");
+        assert_eq!(compatible, 17, "可直接转发（OpenAI 兼容）的应为 17 家");
         let private: Vec<&str> = SESSION_PROVIDERS
             .iter()
             .filter(|(_, meta)| !meta.openai_compatible)

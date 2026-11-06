@@ -179,8 +179,10 @@ pub async fn handle_login_paste(
     let provider = crate::account_session::registry::normalize_kind(&body.provider);
     let client = reqwest::Client::new();
     let secret = body.secret.trim();
-    let importing_file = provider == "kuku" && !body.auth_file_b64.trim().is_empty();
-    if secret.is_empty() && !importing_file {
+    let file_provided = !body.auth_file_b64.trim().is_empty();
+    let importing_kuku = provider == "kuku" && file_provided;
+    let importing_chatglm = provider == "chatglm" && file_provided;
+    if secret.is_empty() && !importing_kuku && !importing_chatglm {
         return Err(error_response("请粘贴凭证", StatusCode::BAD_REQUEST));
     }
     // KukuAI 文件导入分支：Cookies SQLite 文件 base64 → 解析出 Cookie 串，
@@ -188,7 +190,7 @@ pub async fn handle_login_paste(
     // 解析依赖 rusqlite，仅 sqlite-kv feature 下可用；其余后端构建明确拒绝，
     // 而不是让用户看到「请粘贴凭证」这种与操作不符的提示。
     #[cfg(feature = "sqlite-kv")]
-    if importing_file {
+    if importing_kuku {
         let cookie = account_login::paste::kuku_cookie_from_sqlite_b64(body.auth_file_b64.trim())
             .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
         let creds = account_login::paste::verify_kuku(&client, &cookie)
@@ -209,7 +211,50 @@ pub async fn handle_login_paste(
         ));
     }
     #[cfg(not(feature = "sqlite-kv"))]
-    if importing_file {
+    if importing_kuku {
+        return Err(error_response(
+            "当前构建不支持 Cookies 文件导入（需要 sqlite-kv 后端），请改用粘贴登录",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    // 智谱清言文件导入分支：桌面客户端 Cookies SQLite 文件 base64 → 解析出
+    // (访问 JWT, 续期令牌) → verify_chatglm 校验 → 带续期令牌落账号。
+    // 与 KukuAI 同一读取套路（明文 value 列），续期令牌随 refresh_secret 落盘。
+    #[cfg(feature = "sqlite-kv")]
+    if importing_chatglm {
+        let (token, refresh) =
+            account_login::chatglm::chatglm_cookie_from_sqlite_b64(body.auth_file_b64.trim())
+                .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
+        let mut creds = account_login::chatglm::verify_chatglm(&client, &token)
+            .await
+            .map_err(|error| error_response(&error, StatusCode::BAD_REQUEST))?;
+        if !body.name.trim().is_empty() {
+            creds.name = body.name.trim().to_string();
+        }
+        // 文件导入读到的续期令牌优先（verify_chatglm 也可能从 JWT 读出一份，
+        // 文件导入那份更权威：它来自客户端实际落盘的刷新态 cookie）。
+        // 续期令牌放在 extra_headers 作临时载体（落库前取出并移除，不会变成
+        // 转发头；Credentials 没有单独的续期字段，extra_headers 是唯一载体）。
+        let refresh = refresh.or_else(|| {
+            creds
+                .extra_headers
+                .remove("refresh_token")
+                .filter(|value| !value.trim().is_empty())
+        });
+        let account_id = account_login::save_credentials_with_refresh(
+            &state,
+            &provider,
+            &body.channel_id,
+            creds,
+            refresh,
+        )
+        .map_err(|error| error_response(&error, StatusCode::INTERNAL_SERVER_ERROR))?;
+        return Ok(Json(
+            json!({ "success": true, "data": { "accountId": account_id } }),
+        ));
+    }
+    #[cfg(not(feature = "sqlite-kv"))]
+    if importing_chatglm {
         return Err(error_response(
             "当前构建不支持 Cookies 文件导入（需要 sqlite-kv 后端），请改用粘贴登录",
             StatusCode::BAD_REQUEST,
@@ -231,6 +276,12 @@ pub async fn handle_login_paste(
         "kuku" => account_login::paste::verify_kuku(&client, secret).await,
         "orcaterm" => account_login::paste::verify_orcaterm(secret).await,
         "commandcode" => account_login::paste::verify_commandcode(&client, secret).await,
+        "chatglm" => account_login::chatglm::verify_chatglm(&client, secret).await,
+        "modelscope" | "modelscope-intl" => {
+            account_login::modelscope::verify_modelscope(&client, &provider, secret).await
+        }
+        "atomcode" => account_login::modelscope::verify_atomcode(&client, secret).await,
+        "lobsterai" => account_login::lobsterai::verify_lobsterai(&client, secret).await,
         other => Err(format!(
             "「{other}」不走粘贴式登录（请用网页登录或「填写凭证」表单）"
         )),
@@ -239,8 +290,22 @@ pub async fn handle_login_paste(
     if !body.name.trim().is_empty() {
         creds.name = body.name.trim().to_string();
     }
-    let account_id = account_login::save_credentials(&state, &provider, &body.channel_id, creds)
-        .map_err(|error| error_response(&error, StatusCode::INTERNAL_SERVER_ERROR))?;
+    // 续期令牌：粘贴式登录的 verify 会把续期令牌放进 `extra_headers["refresh_token"]`
+    // （chatglm 从 JWT 载荷读出）。取出后随 `refresh_secret` 落盘；没有就 None
+    // （与 `save_credentials` 等价）。取出后从 extra_headers 移除，不让它混进
+    // `session.extra_headers`（那是转发用的头，不是续期凭据）。
+    let refresh_secret = creds
+        .extra_headers
+        .remove("refresh_token")
+        .filter(|value| !value.trim().is_empty());
+    let account_id = account_login::save_credentials_with_refresh(
+        &state,
+        &provider,
+        &body.channel_id,
+        creds,
+        refresh_secret,
+    )
+    .map_err(|error| error_response(&error, StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(
         json!({ "success": true, "data": { "accountId": account_id } }),
     ))

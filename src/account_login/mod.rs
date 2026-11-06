@@ -17,9 +17,12 @@ mod accio;
 pub(crate) mod antigravity;
 pub(crate) mod autoclaw;
 mod catpaw;
+pub(crate) mod chatglm;
 mod cline;
 pub(crate) mod codearts;
+pub(crate) mod lobsterai;
 pub mod loomy;
+pub(crate) mod modelscope;
 mod officeace;
 pub mod paste;
 mod qoder;
@@ -519,6 +522,32 @@ pub fn save_credentials(
         creds,
         HashMap::new(),
         String::new(),
+    )
+}
+
+/// 落账号并附带续期令牌（chatglm 等需要自动续期的家用）。
+///
+/// `refresh_secret` 是 `Option<String>`：`Some` 才写 `refresh_secret`；
+/// `None` 与 [`save_credentials`] 等价（不写续期令牌）。续期令牌随凭据
+/// 落盘（加密），由 `account_session::refresh` 在临期时换证。
+///
+/// 粘贴式登录的续期令牌从凭证里读出后放 `extra_headers["refresh_token"]`，
+/// 调用方取出再交给这里 —— 「解析」与「落盘」共用一份口径，不会分叉。
+pub fn save_credentials_with_refresh(
+    state: &AppState,
+    provider: &str,
+    channel_id: &str,
+    creds: Credentials,
+    refresh_secret: Option<String>,
+) -> Result<String, String> {
+    persist_account(
+        &state.account_sessions,
+        &state.channel_store,
+        provider,
+        channel_id,
+        creds,
+        HashMap::new(),
+        refresh_secret.unwrap_or_default(),
     )
 }
 

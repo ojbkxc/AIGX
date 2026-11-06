@@ -47,6 +47,8 @@ const CLINE_MARGIN: i64 = 600;
 const ORCATERN_MARGIN: i64 = 600;
 /// Antigravity（Google OAuth）access token 1 小时，提前 15 分钟续。
 const ANTIGRAVITY_MARGIN: i64 = 900;
+/// 智谱清言 JWT 约 2 小时，提前 10 分钟续（与 OrcaTerm 同窗口）。
+const CHATGLM_MARGIN: i64 = 600;
 
 /// CodeArts 换证端点与客户端标识（与登录换证同一套，见 `account_login::codearts`）。
 const CODEARTS_TOKEN_URL: &str = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens";
@@ -99,6 +101,7 @@ pub fn supports_refresh(provider: &str) -> bool {
             | "cline-pass"
             | "orcaterm"
             | "antigravity"
+            | "chatglm"
     )
 }
 
@@ -136,6 +139,7 @@ pub fn needs_refresh(session: &AccountSession, now: i64) -> bool {
         "cline" | "cline-free" | "cline-pass" => CLINE_MARGIN,
         "orcaterm" => ORCATERN_MARGIN,
         "antigravity" => ANTIGRAVITY_MARGIN,
+        "chatglm" => CHATGLM_MARGIN,
         _ => QODER_MARGIN,
     };
     exp - now <= margin
@@ -223,6 +227,7 @@ async fn refresh_one_inner(
         "cline" | "cline-free" | "cline-pass" => refresh_cline(client, session).await,
         "orcaterm" => refresh_orcaterm(client, session).await,
         "antigravity" => refresh_antigravity(client, session).await,
+        "chatglm" => refresh_chatglm(client, session).await,
         other => {
             return Ok(RefreshOutcome::Failed(format!("{other} 暂不支持自动刷新")));
         }
@@ -1276,6 +1281,69 @@ async fn refresh_antigravity(
     })
 }
 
+// ── 智谱清言 ─────────────────────────────────────────────────────
+//
+// 续期端点 `POST /chatglm/user-api/user/refresh`（chatglm.cn，实测可用）：
+// body `{refresh_token}` → 新 JWT（+ 可能轮换的 refresh_token）。响应可能是
+// 平铺 JSON 或 `{code, data}` 信封，两种都认；过期时间优先取响应字段，
+// 否则解码新 JWT 的 exp，再回退会话旧值。
+
+async fn refresh_chatglm(
+    client: &Client,
+    session: &AccountSession,
+) -> Result<TokenSet, RefreshOutcome> {
+    let rt_owned = refresh_plain(session);
+    let rt = rt_owned.trim();
+    if rt.is_empty() {
+        return Err(RefreshOutcome::Failed("缺少 refresh token".to_string()));
+    }
+    let headers = vec![
+        ("Content-Type".to_string(), "application/json".to_string()),
+        ("Accept".to_string(), "application/json".to_string()),
+    ];
+    let (status, value) = post_json(
+        client,
+        "https://chatglm.cn/chatglm/user-api/user/refresh",
+        &headers,
+        json!({ "refresh_token": rt }),
+    )
+    .await?;
+    if status == 401 || status == 403 {
+        return Err(RefreshOutcome::Invalid(
+            "智谱清言登录态已失效，请重新登录".to_string(),
+        ));
+    }
+    if !(200..300).contains(&status) {
+        return Err(RefreshOutcome::Failed(format!(
+            "智谱清言刷新被拒（HTTP {status}）"
+        )));
+    }
+    // 响应可能是平铺 JSON 或 `{code, data}` 信封；取 data（没有就用顶层）。
+    let data = value
+        .get("data")
+        .filter(|d| d.as_object().is_some_and(|o| !o.is_empty()))
+        .cloned()
+        .unwrap_or(value);
+    let access = first_str(&data, &["access_token", "accessToken", "token", "jwt"])
+        .map(|t| t.trim_start_matches("Bearer ").to_string())
+        .ok_or_else(|| RefreshOutcome::Failed("智谱清言刷新响应缺 access token".to_string()))?;
+    let refresh = first_str(&data, &["refresh_token", "refreshToken"])
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| rt.to_string());
+    // 过期时间：响应字段优先，否则解码新 JWT 的 exp，再回退会话旧值。
+    let expires_at = first_num(&data, &["expires_in"])
+        .filter(|secs| *secs > 0.0 && *secs < 86_400.0)
+        .map(|secs| chrono::Utc::now().timestamp() + secs as i64)
+        .or_else(|| first_num(&data, &["expires_at", "expiresAt"]).map(normalize_expire_ts))
+        .or_else(|| jwt_exp(&access))
+        .or(session.expires_at);
+    Ok(TokenSet {
+        access,
+        refresh,
+        expires_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1303,6 +1371,7 @@ mod tests {
         assert!(supports_refresh("cline-pass"));
         assert!(supports_refresh("orcaterm"));
         assert!(supports_refresh("antigravity"));
+        assert!(supports_refresh("chatglm"));
         assert!(!supports_refresh("loomy"));
         assert!(!supports_refresh("kuku"));
         assert!(!supports_refresh("catpaw"));

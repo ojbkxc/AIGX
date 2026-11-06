@@ -9,12 +9,23 @@
 //! 只接入 AIGX 已有登录态凭证、且上游协议已被验证过的 provider：
 //! `loomy` / `kuku` / `qoder` / `qoder-intl` / `xiaohuanxiong` /
 //! `autoclaw` / `autoclaw-intl` / `workbuddy` / `workbuddy-intl` /
-//! `trae` / `codearts` / `officeace`。
+//! `trae` / `codearts` / `officeace`，以及 2026-11 从上游 3.4.2 完整
+//! 移植的 7 家：`chatglm` / `modelscope` / `modelscope-intl` /
+//! `atomcode` / `lobsterai` / `zcode` / `zcode-intl`。
 //!
 //! 签到协议逐家移植自 Agent2API（`core/providers/*/checkin.rs`、`billing/`，
-//! MIT + 使用声明）。未列进白名单的 provider（`zcode` / `catpaw` / `accio` 等）
-//! **不接入**：它们没有每日签到通道，或协议尚未验证 —— 白名单默认不签，
-//! 最坏情况是「没签」，不会制造失败噪音。见 `supports_checkin`。
+//! MIT + 使用声明）。7 家新家里，`modelscope` 两地的签到 = 调一次登录
+//! 信息接口（调用即触发当日魔粒，幂等），端点明确，全量实现；`zcode`
+//! 两地的签到 = 领当天那份赠送套餐，按 AIGX `checkin/benefits/
+//! zcode_claim.rs` 已移植的同一套端点实现（窗口每天 19:00 开启，
+//! 无验证码令牌时如实失败）。`chatglm` / `atomcode` / `lobsterai` 三家的
+//! 签到实现随上游搬进**闭源插件仓**，主仓只有机制文档、没有公开端点 ——
+//! 它们进白名单是为了「签到范围」与上游对齐（CHECKIN_PROVIDERS 是落盘
+//! 契约），claim 分支如实报错（不落虚假成功台账），端点公开后补实现即可。
+//!
+//! 未列进白名单的 provider（`catpaw` / `accio` 等）**不接入**：它们没有
+//! 每日签到通道，或协议尚未验证 —— 白名单默认不签，最坏情况是「没签」，
+//! 不会制造失败噪音。见 `supports_checkin`。
 //!
 //! ## 为什么不用「黑名单」
 //!
@@ -45,6 +56,25 @@ pub const CHECKIN_PROVIDERS: &[&str] = &[
     "trae",
     "codearts",
     "officeace",
+    // 追加在**末尾**（与上游 CHECKIN_PROVIDERS 的追加顺序一致）：数组
+    // 顺序就是界面复选框与签到中心分组行的顺序，插在中间会让所有存量
+    // 用户的清单顺序变一下（没有功能影响，但没必要动）。
+    // 智谱清言：「每日登录积分」即本家的签到（访客账号不在范围 ——
+    // 访客没有积分体系，上游对签到接口一律 401）。
+    "chatglm",
+    // ModelScope（魔搭）两地：签到 = 调一次登录信息接口（调用即触发
+    // 当日魔粒，幂等）；两站各打各的网页站、令牌不通用。
+    "modelscope",
+    "modelscope-intl",
+    // AtomCode：「签到」= 领取免费 CodingPlan（一次性授权）。
+    "atomcode",
+    // LobsterAI（有道龙虾）：每日活动三步（查活动位 → 取上下文 →
+    // check_in），+100 积分/号/天。
+    "lobsterai",
+    // ZCode 两地：签到 = 领当天那份赠送套餐（窗口每天 19:00 开启，
+    // 生效时刻 19:01）。
+    "zcode",
+    "zcode-intl",
 ];
 
 /// 该 provider 是否支持签到。
@@ -63,6 +93,9 @@ pub fn supports_checkin(provider: &str) -> bool {
 /// - 端点与判据字段集中一处，一眼能对照上游；
 /// - 契约测试能断言「表里的每家都有实现分支」「端点非空」「判据字段非空」；
 /// - 上游改了路径 → 改这张表 → 测试与文档一起更新。
+///
+/// 端点在闭源插件仓的家（`note` 非空）：网关侧没有端点可登记，契约表
+/// 只登记机制说明；claim 分支如实报错，不落虚假成功台账。
 #[derive(Debug, Clone, Copy)]
 pub struct CheckinContract {
     /// provider kind（与 `CHECKIN_PROVIDERS` 同口径）。
@@ -73,6 +106,8 @@ pub struct CheckinContract {
     pub claim_path: &'static str,
     /// 判定「已签」时读的响应字段（点路径；空 = 该家不做幂等判定）。
     pub done_field: &'static str,
+    /// 机制说明（端点在闭源插件仓的家必填，其余家留空）。
+    pub note: &'static str,
 }
 
 /// 全部签到端点契约。
@@ -80,78 +115,155 @@ pub struct CheckinContract {
 /// 路径与判据逐条对照 Agent2API 的 `core/providers/<家>/checkin.rs` 与
 /// `core/billing/checkin.rs`（MIT 许可）。AIGX 的账号结构与 A2A 不同
 /// （单 secret vs 多层凭证），所以路径一致而**判据字段**按各家实测响应取。
+///
+/// 2026-11 追加的 7 家：`modelscope` 两地的端点明确（登录信息接口），
+/// `zcode` 两地复用 AIGX `checkin/benefits/zcode_claim.rs` 已移植的
+/// 套餐端点；`chatglm` / `atomcode` / `lobsterai` 的实现随上游搬进
+/// 闭源插件仓（404 不可得），契约表只登记机制说明（`note`），
+/// claim 分支如实报错。
 pub const CHECKIN_CONTRACTS: &[CheckinContract] = &[
     CheckinContract {
         provider: "loomy",
         status_path: "/points/first-login",
         claim_path: "/points/first-login",
         done_field: "/data/dailyBalance",
+        note: "",
     },
     CheckinContract {
         provider: "kuku",
         status_path: "/api/genflowpro/freepoint/homenew",
         claim_path: "/api/genflowpro/freepoint/taskComplete",
         done_field: "/data/reward_point",
+        note: "",
     },
     CheckinContract {
         provider: "qoder",
         status_path: "/sash/api/v1/me/campaigns",
         claim_path: "/sash/api/v1/me/campaigns/{campaign_id}/claim",
         done_field: "/data/items",
+        note: "",
     },
     CheckinContract {
         provider: "qoder-intl",
         status_path: "/sash/api/v1/me/campaigns",
         claim_path: "/sash/api/v1/me/campaigns/{campaign_id}/claim",
         done_field: "/data/items",
+        note: "",
     },
     CheckinContract {
         provider: "xiaohuanxiong",
         status_path: "/api/web/office/v3/setting_info",
         claim_path: "/api/web/office/v3/setting_info",
         done_field: "/benefit/amount",
+        note: "",
     },
     CheckinContract {
         provider: "autoclaw",
         status_path: "/autoclaw-proxy/proxy/autoclaw-task-list",
         claim_path: "/autoclaw-proxy/proxy/autoclaw-task-complete",
         done_field: "",
+        note: "",
     },
     CheckinContract {
         provider: "autoclaw-intl",
         status_path: "/autoclaw-proxy/proxy/autoclaw-task-list",
         claim_path: "/autoclaw-proxy/proxy/autoclaw-task-complete",
         done_field: "",
+        note: "",
     },
     CheckinContract {
         provider: "workbuddy",
         status_path: "/billing/meter/checkin-activity-status",
         claim_path: "/v2/billing/meter/daily-checkin",
         done_field: "",
+        note: "",
     },
     CheckinContract {
         provider: "workbuddy-intl",
         status_path: "/billing/meter/checkin-activity-status",
         claim_path: "/v2/billing/meter/daily-checkin",
         done_field: "",
+        note: "",
     },
     CheckinContract {
         provider: "trae",
         status_path: "/trae/api/v2/ug/checkin_credits/status",
         claim_path: "/trae/api/v2/ug/checkin_credits/claim",
         done_field: "/checked_in",
+        note: "",
     },
     CheckinContract {
         provider: "codearts",
         status_path: "/v1/ops/delivery",
         claim_path: "/v1/ops/claim",
         done_field: "/data/items",
+        note: "",
     },
     CheckinContract {
         provider: "officeace",
         status_path: "/v1/subscription",
         claim_path: "/v1/subscription/bonus/claim",
         done_field: "/data/bonus_skus",
+        note: "",
+    },
+    // ── 2026-11 从上游 3.4.2 移植的 7 家 ───────────────────────
+    CheckinContract {
+        provider: "chatglm",
+        status_path: "",
+        claim_path: "",
+        done_field: "",
+        note: "每日登录积分即本家的签到（访客账号不在范围 —— 访客没有积分\
+               体系，上游对签到接口一律 401）；实现随上游搬进闭源插件仓\
+               （providers::chatglm::checkin），主仓未公开端点",
+    },
+    CheckinContract {
+        provider: "modelscope",
+        status_path: "/api/v1/users/login/info",
+        claim_path: "/api/v1/users/login/info",
+        done_field: "",
+        note: "签到 = 调一次登录信息接口（调用即触发当日魔粒，幂等，无\
+               「已签」判据字段）；两站各打各的网页站、令牌不通用",
+    },
+    CheckinContract {
+        provider: "modelscope-intl",
+        status_path: "/api/v1/users/login/info",
+        claim_path: "/api/v1/users/login/info",
+        done_field: "",
+        note: "同 modelscope，国际站（modelscope.ai）",
+    },
+    CheckinContract {
+        provider: "atomcode",
+        status_path: "",
+        claim_path: "",
+        done_field: "",
+        note: "「签到」= 领取免费 CodingPlan（一次性授权，新账号必须领\
+               一次、套餐到期要能续领）；实现随上游搬进闭源插件仓\
+               （atomcode::checkin），主仓未公开端点",
+    },
+    CheckinContract {
+        provider: "lobsterai",
+        status_path: "",
+        claim_path: "",
+        done_field: "",
+        note: "每日活动三步（查活动位 → 取上下文 → check_in），+100 积分\
+               /号/天；幂等靠客户端（idempotencyKey + 上游 claimedToday\
+               预检）；实现随上游搬进闭源插件仓（lobsterai::checkin），\
+               主仓未公开端点",
+    },
+    CheckinContract {
+        provider: "zcode",
+        status_path: "/api/v1/zcode-plan/billing/preview",
+        claim_path: "/api/v1/zcode-plan/billing/claim",
+        done_field: "",
+        note: "签到 = 领当天那份赠送套餐（zcode-v3-start-plan-<日期>，\
+               窗口每天 19:00 开启）；幂等判据是 biz code 1003（已领过）",
+    },
+    CheckinContract {
+        provider: "zcode-intl",
+        status_path: "/api/v1/zcode-plan/billing/preview",
+        claim_path: "/api/v1/zcode-plan/billing/claim",
+        done_field: "",
+        note: "同 zcode（两地共用平台域 zcode.z.ai，令牌不通用）",
     },
 ];
 
@@ -184,6 +296,11 @@ pub async fn claim_for(client: &Client, session: &AccountSession) -> ClaimResult
         "trae" => trae(client, session, &secret).await,
         "codearts" => codearts(client, session, &secret).await,
         "officeace" => officeace(client, session).await,
+        "chatglm" => chatglm(),
+        "modelscope" | "modelscope-intl" => modelscope(client, session, &secret).await,
+        "atomcode" => atomcode(),
+        "lobsterai" => lobsterai(),
+        "zcode" | "zcode-intl" => zcode(client, session, &secret).await,
         other => failed(&format!("{other} 暂不支持自动签到")),
     }
 }
@@ -1468,6 +1585,360 @@ async fn officeace(client: &Client, session: &AccountSession) -> ClaimResult {
     }
 }
 
+// ── 智谱清言 ──────────────────────────────────────────────────────
+//
+// 每日登录积分即本家的签到（访客账号不在范围 —— 访客没有积分体系，
+// 上游对签到接口一律 401）。实现随上游搬进**闭源插件仓**
+// （`providers::chatglm::checkin`），主仓没有公开端点 —— 这里如实
+// 报错，不假装成功、不落虚假台账。端点公开后补实现即可。
+fn chatglm() -> ClaimResult {
+    failed(
+        "智谱清言的每日签到（登录积分）实现随上游搬进闭源插件仓，主仓未公开端点；\
+         登录账号待插件端点公开后接入（访客账号本就不在签到范围）",
+    )
+}
+
+// ── ModelScope（魔搭）─────────────────────────────────────────────
+//
+// 来源：Agent2API `providers::modelscope::checkin` 的模块头（实现已搬到
+// 闭源插件仓，主仓只剩机制文档；链路依据是 CPA 的 `modelscope-ratelimit`
+// 插件源码，2026-10 实测复核）。
+//
+// 签到 = 调一次登录信息接口：`GET {网页站}/api/v1/users/login/info`，
+// **调用本身即触发当日魔粒**（幂等，重复调不重复入账）—— 没有单独的
+// 「领取」动作，也没有「已签」判据字段。
+//
+// 令牌两用：同一枚 `ms-` 令牌既作推理的 `Authorization: Bearer`，也作
+// 网页接口的 `Cookie: m_session_id=<令牌>`（上游实测确认）。
+// 两个站点各打各的网页站、令牌不通用（打错得 401）：国内版
+// modelscope.cn、国际版 modelscope.ai，地区由 provider id 决定。
+
+const MODELSCOPE_CN_SITE: &str = "https://modelscope.cn";
+const MODELSCOPE_INTL_SITE: &str = "https://modelscope.ai";
+const MODELSCOPE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+
+/// URL 的源（`scheme://host[:port]`），路径与查询丢掉。
+fn url_origin(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let mut origin = format!("{}://{}", parsed.scheme(), parsed.host_str()?);
+    if let Some(port) = parsed.port() {
+        origin.push(':');
+        origin.push_str(&port.to_string());
+    }
+    Some(origin)
+}
+
+/// 签到站点根：账号 base_url 是推理端点（`api-inference.*`）时回落到
+/// 本家的网页站 —— 签到打的是网页站接口，拿推理主机拼路径必然 404；
+/// 自定义中转 / 镜像域名（非推理端点）则用它的源。
+fn modelscope_site(provider: &str, base_url: &str) -> String {
+    let default_site = if provider == "modelscope-intl" {
+        MODELSCOPE_INTL_SITE
+    } else {
+        MODELSCOPE_CN_SITE
+    };
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return default_site.to_string();
+    }
+    let host = url::Url::parse(trimmed)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string));
+    match host {
+        Some(host) if host.starts_with("api-inference.") => default_site.to_string(),
+        Some(_) => url_origin(trimmed).unwrap_or_else(|| default_site.to_string()),
+        None => default_site.to_string(),
+    }
+}
+
+async fn modelscope(client: &Client, session: &AccountSession, secret: &str) -> ClaimResult {
+    let site = modelscope_site(&session.provider, &session.base_url);
+    let url = format!("{site}/api/v1/users/login/info");
+    let headers = vec![
+        ("Cookie".to_string(), format!("m_session_id={secret}")),
+        ("Authorization".to_string(), format!("Bearer {secret}")),
+        ("Accept".to_string(), "application/json".to_string()),
+        ("User-Agent".to_string(), MODELSCOPE_UA.to_string()),
+    ];
+    let (status, value) =
+        match send_json(client, reqwest::Method::GET, &url, &headers, None, None).await {
+            Ok(pair) => pair,
+            Err(e) => return failed(&e),
+        };
+    if status == 401 || status == 403 {
+        return failed(
+            "ModelScope 登录态已失效或令牌打错了站点（两站令牌不通用），请重新登录该账号",
+        );
+    }
+    if status >= 400 {
+        let message = upstream_message(&value);
+        return failed(&format!(
+            "ModelScope 签到失败（HTTP {status}）{}",
+            if message.is_empty() {
+                String::new()
+            } else {
+                format!("：{message}")
+            }
+        ));
+    }
+    // 业务码：ModelScope 网页接口用 `Code`（200 = 成功）；缺省视为成功
+    // （HTTP 2xx 已足够 —— 调用本身即触发当日魔粒，幂等）。
+    if let Some(code) = value.get("Code").or_else(|| value.get("code")) {
+        let ok_code = code
+            .as_i64()
+            .map(|number| number == 200)
+            .or_else(|| code.as_str().map(|text| text == "200" || text == "0"))
+            .unwrap_or(true);
+        if !ok_code {
+            let message = value
+                .get("Message")
+                .or_else(|| value.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            return failed(&format!(
+                "ModelScope 签到失败（code={code}）{}",
+                if message.is_empty() {
+                    String::new()
+                } else {
+                    format!("：{message}")
+                }
+            ));
+        }
+    }
+    let label = if session.provider == "modelscope-intl" {
+        "国际版"
+    } else {
+        "国内版"
+    };
+    ok(format!("ModelScope（{label}）每日魔粒已签到"))
+}
+
+// ── AtomCode ──────────────────────────────────────────────────────
+//
+// 「签到」= 领取免费 CodingPlan（一次性授权：新账号必须领一次、套餐
+// 到期要能续领，所以需要一个逐账号、每天跑一次的调度与台账）。实现
+// 随上游搬进**闭源插件仓**（`atomcode::checkin`），主仓没有公开端点 ——
+// 如实报错，不落虚假台账。
+fn atomcode() -> ClaimResult {
+    failed(
+        "AtomCode 的签到（领取免费 CodingPlan，一次性授权）实现随上游搬进闭源插件仓，主仓未公开端点",
+    )
+}
+
+// ── LobsterAI（网易有道「有道龙虾」）─────────────────────────────
+//
+// 每日活动三步（查活动位 → 取上下文 → check_in），实测 +100 积分/号/天；
+// 幂等靠客户端（idempotencyKey + 上游的 `claimedToday` 预检）。实现随
+// 上游搬进**闭源插件仓**（`lobsterai::checkin`），主仓没有公开端点 ——
+// 如实报错，不落虚假台账。
+fn lobsterai() -> ClaimResult {
+    failed(
+        "LobsterAI 的每日签到（查活动位 → 取上下文 → check_in，+100 积分/号/天）\
+         实现随上游搬进闭源插件仓，主仓未公开端点",
+    )
+}
+
+// ── ZCode（国内版 / 国际版）──────────────────────────────────────
+//
+// 来源：Agent2API `providers/zcode/{claim,activation}.rs`（实现已搬到
+// 闭源插件仓，机制文档见上游 `auto_checkin.rs` 的 CHECKIN_PROVIDERS
+// 注释）+ AIGX `checkin/benefits/zcode_claim.rs`（同一套端点与 biz
+// code 已移植，本家的领取动作与之同形）。
+//
+// 签到 = 领当天那份赠送套餐（`zcode-v3-start-plan-<日期>` 这类）：
+//   ① preview 探测可领套餐（`GET /api/v1/zcode-plan/billing/preview`）；
+//   ② 挑出当天赠送套餐（planId 含 `start-plan`，优先含今日日期段的）；
+//   ③ claim 领取（`POST /api/v1/zcode-plan/billing/claim`，要验证码
+//      令牌 + 设备指纹）；同一期再领回 1003（已领过，幂等）。
+// 窗口每天 19:00 开启（生效时刻 19:01）：19:00 前没有当天套餐、或
+// 领取回 1002（不可领），都归「窗口未开」（Pending，不算失败）。
+// 领取验证按需交给已连接的管理界面（令牌池）；无令牌时如实失败，
+// 不记已领取。
+
+/// 套餐平台域（两地共用；推理域才分国内/国际）。
+const ZCODE_PLAN_HOST: &str = "https://zcode.z.ai";
+const ZCODE_APP_VERSION: &str = "1.0.0";
+const ZCODE_PLATFORM: &str = "web";
+
+/// 平台域解析：账号 base_url 是推理端点（open.bigmodel.cn / bigmodel.cn /
+/// api.z.ai）时不采信 —— 领取打的是平台域的活动接口，拿推理主机拼路径
+/// 必然 404；自定义中转域名则用它的源。
+fn zcode_plan_host(base_url: &str) -> String {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return ZCODE_PLAN_HOST.to_string();
+    }
+    let host = url::Url::parse(trimmed)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string));
+    match host {
+        Some(host) if host == "open.bigmodel.cn" || host == "bigmodel.cn" || host == "api.z.ai" => {
+            ZCODE_PLAN_HOST.to_string()
+        }
+        Some(_) => url_origin(trimmed).unwrap_or_else(|| ZCODE_PLAN_HOST.to_string()),
+        None => ZCODE_PLAN_HOST.to_string(),
+    }
+}
+
+/// 从套餐列表里挑「当天赠送套餐」的 planId：planId 含 `start-plan` 的
+/// 那份（上游每天下发一份带日期段的新套餐）；有多份时优先含今日日期段
+/// （`YYYYMMDD` 或 `MMDD`）的。挑不出来返回 None（窗口未开 / 活动未开始）。
+fn zcode_daily_plan_id(plans: &[Value]) -> Option<String> {
+    let now = chrono::Utc::now().with_timezone(&super::scheduler::beijing());
+    let today_full = now.format("%Y%m%d").to_string();
+    let today_short = now.format("%m%d").to_string();
+    let starts: Vec<&Value> = plans
+        .iter()
+        .filter(|plan| plan_id_text(plan).is_some_and(|id| id.contains("start-plan")))
+        .collect();
+    let picked = starts
+        .iter()
+        .find(|plan| {
+            plan_id_text(plan)
+                .is_some_and(|id| id.contains(&today_full) || id.contains(&today_short))
+        })
+        .or_else(|| starts.first());
+    picked.and_then(|plan| plan_id_text(plan))
+}
+
+/// 套餐的 planId（字段名各家客户端不统一，按已知形态依次找）。
+fn plan_id_text(plan: &Value) -> Option<String> {
+    plan.get("planId")
+        .or_else(|| plan.get("plan_id"))
+        .or_else(|| plan.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// claim 业务码 → 结果分类（与 `checkin/benefits/zcode_claim.rs` 同一口径）。
+fn zcode_claim_code_outcome(code: i64, plan_id: &str) -> ClaimResult {
+    match code {
+        0 => ok(format!("ZCode 每日赠送套餐已领取（{plan_id}）")),
+        1003 => already("今日赠送套餐已领取过"),
+        1002 => pending("ZCode 赠送套餐当前不可领（窗口未开或活动未开始）"),
+        1004 => failed("ZCode 账号不符合该套餐的领取资格"),
+        1005 => pending("ZCode 当日领取额度已用尽，明天再试"),
+        3007 => {
+            // 上游拒了这枚令牌：池子里剩下的同样不可信了，让前端立刻补货
+            crate::zcode_captcha::note_challenge();
+            failed("ZCode 验证码校验未通过，请重新求解后重试")
+        }
+        3001 => failed("ZCode 领取请求被拒（设备指纹或 plan_id 不对）"),
+        other => failed(&format!("ZCode 领取失败（code={other}）")),
+    }
+}
+
+async fn zcode(client: &Client, session: &AccountSession, secret: &str) -> ClaimResult {
+    let plan_host = zcode_plan_host(&session.base_url);
+    // 设备指纹：账号 extra_headers 优先，否则按账号 id 派生稳定 UUID
+    // （上游缺 / 非 UUID 一律拒 3001；与 `account_session::balance` 的
+    // zcode 余额查询同一口径）。
+    let device_mid = session
+        .extra_headers
+        .get("device_mid")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| crate::account_session::balance::stable_uuid(&session.id));
+    let mut headers = vec![
+        ("Content-Type".to_string(), "application/json".to_string()),
+        ("Authorization".to_string(), format!("Bearer {secret}")),
+        ("X-Device-Mid".to_string(), device_mid.clone()),
+    ];
+
+    // ① 探测可领套餐
+    let preview_url = format!(
+        "{plan_host}/api/v1/zcode-plan/billing/preview?app_version={ZCODE_APP_VERSION}&platform={ZCODE_PLATFORM}"
+    );
+    let (status, body) = match send_json(
+        client,
+        reqwest::Method::GET,
+        &preview_url,
+        &headers,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(e) => return failed(&e),
+    };
+    if status == 401 || status == 403 {
+        return failed("ZCode 登录态已失效，请重新登录该账号");
+    }
+    if !(200..300).contains(&status) {
+        return failed(&format!("ZCode 套餐预览失败（HTTP {status}）"));
+    }
+    let plans = body
+        .pointer("/data/plans")
+        .or_else(|| body.get("plans"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    // ② 挑当天赠送套餐（窗口未开时列表里没有 → Pending，不算失败）
+    let Some(plan_id) = zcode_daily_plan_id(&plans) else {
+        return pending("ZCode 当前没有可领的限时套餐（每日 19:00 开放，窗口未开时属正常）");
+    };
+
+    // ③ 领取（要验证码令牌：无令牌如实失败，不记已领取）
+    let Some((verify_param, verify_region)) = crate::zcode_captcha::take() else {
+        return failed(
+            "ZCode 领取需要一枚阿里云验证码令牌，而令牌池此刻是空的：\
+             请在网关设置里保持管理页面打开（它会在后台铸造），\
+             或直接点本行的「领套餐」按钮当场求解",
+        );
+    };
+    headers.push((
+        crate::zcode_captcha::VERIFY_PARAM_HEADER.to_string(),
+        verify_param,
+    ));
+    if !verify_region.trim().is_empty() {
+        headers.push((
+            crate::zcode_captcha::VERIFY_REGION_HEADER.to_string(),
+            verify_region,
+        ));
+    }
+    // 资格前置：补报激活事件（无鉴权，失败不阻断）
+    let uid = jwt_subject(secret).unwrap_or_default();
+    for event in ["app_launch", "app_daily_active"] {
+        let _ = send_json(
+            client,
+            reqwest::Method::POST,
+            &format!("{plan_host}/api/v1/event/report"),
+            &[("Content-Type".to_string(), "application/json".to_string())],
+            Some(json!({ "event": event, "user_id": &uid, "device_mid": &device_mid })),
+            None,
+        )
+        .await;
+    }
+    let claim_url = format!("{plan_host}/api/v1/zcode-plan/billing/claim");
+    let (status, body) = match send_json(
+        client,
+        reqwest::Method::POST,
+        &claim_url,
+        &headers,
+        Some(json!({ "plan_id": &plan_id })),
+        None,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(e) => return failed(&e),
+    };
+    if status == 401 || status == 403 {
+        return failed("ZCode 登录态已失效，请重新登录该账号");
+    }
+    let code = body
+        .get("code")
+        .and_then(Value::as_i64)
+        .or_else(|| body.get("code").and_then(Value::as_str)?.parse().ok())
+        .unwrap_or(0);
+    zcode_claim_code_outcome(code, &plan_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1491,6 +1962,13 @@ mod tests {
                         | "trae"
                         | "codearts"
                         | "officeace"
+                        | "chatglm"
+                        | "modelscope"
+                        | "modelscope-intl"
+                        | "atomcode"
+                        | "lobsterai"
+                        | "zcode"
+                        | "zcode-intl"
                 ),
                 "provider {provider} 在白名单里但没有实现"
             );
@@ -1512,7 +1990,17 @@ mod tests {
     #[test]
     fn every_contract_has_a_claim_endpoint() {
         for c in CHECKIN_CONTRACTS {
-            assert!(!c.claim_path.is_empty(), "{} 没有领取端点", c.provider);
+            // 端点在闭源插件仓的家（note 非空）：网关侧没有端点可登记，
+            // 契约表只登记机制说明 —— 这类家的「诚实失败」由 claim_for
+            // 分支负责，不在这里假装有端点。
+            if c.claim_path.is_empty() {
+                assert!(
+                    !c.note.trim().is_empty(),
+                    "{} 没有领取端点，也没有机制说明",
+                    c.provider
+                );
+                continue;
+            }
             assert!(
                 c.claim_path.starts_with('/'),
                 "{} 的领取端点应是相对路径（实际 {}）",
@@ -1587,9 +2075,189 @@ mod tests {
     #[test]
     fn unknown_provider_not_supported() {
         assert!(!supports_checkin("openai"));
-        assert!(!supports_checkin("zcode"));
         assert!(!supports_checkin("catpaw"));
+        assert!(!supports_checkin("accio"));
         assert!(supports_checkin("loomy"));
         assert!(supports_checkin("trae"));
+        // 2026-11 从上游 3.4.2 移植的 7 家
+        assert!(supports_checkin("chatglm"));
+        assert!(supports_checkin("modelscope"));
+        assert!(supports_checkin("modelscope-intl"));
+        assert!(supports_checkin("atomcode"));
+        assert!(supports_checkin("lobsterai"));
+        assert!(supports_checkin("zcode"));
+        assert!(supports_checkin("zcode-intl"));
+    }
+
+    // ── 2026-11 移植的 7 家的单元测试 ───────────────────────────
+
+    #[test]
+    fn modelscope_site_prefers_configured_origin_unless_inference_host() {
+        // 推理端点（api-inference.*）→ 回落本家的网页站
+        assert_eq!(
+            modelscope_site("modelscope", "https://api-inference.modelscope.cn/v1"),
+            MODELSCOPE_CN_SITE
+        );
+        assert_eq!(
+            modelscope_site(
+                "modelscope-intl",
+                "https://api-inference.modelscope.ai/v1/chat/completions"
+            ),
+            MODELSCOPE_INTL_SITE
+        );
+        // 自定义中转 / 镜像域名 → 用它的源（路径丢掉）
+        assert_eq!(
+            modelscope_site("modelscope", "https://my-relay.example.com/modelscope/v1"),
+            "https://my-relay.example.com"
+        );
+        // 未配置 → 网页站
+        assert_eq!(modelscope_site("modelscope", ""), MODELSCOPE_CN_SITE);
+        assert_eq!(modelscope_site("modelscope-intl", ""), MODELSCOPE_INTL_SITE);
+    }
+
+    #[test]
+    fn zcode_plan_host_prefers_configured_origin_unless_inference_host() {
+        // 推理端点 → 平台域
+        assert_eq!(
+            zcode_plan_host("https://open.bigmodel.cn/api/coding/paas/v4"),
+            ZCODE_PLAN_HOST
+        );
+        assert_eq!(
+            zcode_plan_host("https://api.z.ai/api/coding/paas/v4"),
+            ZCODE_PLAN_HOST
+        );
+        // 自定义中转 → 用它的源
+        assert_eq!(
+            zcode_plan_host("http://127.0.0.1:8080/zcode"),
+            "http://127.0.0.1:8080"
+        );
+        // 未配置 → 平台域
+        assert_eq!(zcode_plan_host(""), ZCODE_PLAN_HOST);
+    }
+
+    #[test]
+    fn zcode_daily_plan_picks_the_date_matching_gift_plan() {
+        let today = chrono::Utc::now()
+            .with_timezone(&crate::checkin::scheduler::beijing())
+            .format("%Y%m%d")
+            .to_string();
+        let plans = json!([
+            {"planId": "zcode-v3-coding-plan-001"},
+            {"planId": format!("zcode-v3-start-plan-{today}")},
+            {"planId": "zcode-v3-start-plan-old"}
+        ]);
+        let picked = zcode_daily_plan_id(plans.as_array().unwrap()).expect("应能挑出当天赠送套餐");
+        assert_eq!(
+            picked,
+            format!("zcode-v3-start-plan-{today}"),
+            "应优先挑 planId 含今日日期段的那份"
+        );
+    }
+
+    #[test]
+    fn zcode_daily_plan_falls_back_to_first_start_plan() {
+        // 日期段不匹配（跨日边界的极端情形）→ 回落第一份 start-plan
+        let plans = json!([
+            {"planId": "zcode-v3-start-plan-other"},
+            {"planId": "zcode-v3-start-plan-another"}
+        ]);
+        let picked = zcode_daily_plan_id(plans.as_array().unwrap()).expect("应能挑出 start-plan");
+        assert_eq!(picked, "zcode-v3-start-plan-other");
+    }
+
+    #[test]
+    fn zcode_daily_plan_none_without_gift_plan() {
+        let plans = json!([{"planId": "zcode-v3-coding-plan-001"}]);
+        assert!(zcode_daily_plan_id(plans.as_array().unwrap()).is_none());
+        assert!(zcode_daily_plan_id(&[]).is_none());
+    }
+
+    #[test]
+    fn zcode_claim_code_outcome_maps_biz_codes() {
+        let plan = "zcode-v3-start-plan-20261106";
+        assert_eq!(
+            zcode_claim_code_outcome(0, plan).outcome,
+            CheckinOutcome::Success
+        );
+        assert!(zcode_claim_code_outcome(0, plan).msg.contains(plan));
+        assert_eq!(
+            zcode_claim_code_outcome(1003, plan).outcome,
+            CheckinOutcome::Already
+        );
+        assert_eq!(
+            zcode_claim_code_outcome(1002, plan).outcome,
+            CheckinOutcome::Pending
+        );
+        assert_eq!(
+            zcode_claim_code_outcome(1005, plan).outcome,
+            CheckinOutcome::Pending
+        );
+        assert_eq!(
+            zcode_claim_code_outcome(1004, plan).outcome,
+            CheckinOutcome::Failed
+        );
+        assert_eq!(
+            zcode_claim_code_outcome(3001, plan).outcome,
+            CheckinOutcome::Failed
+        );
+        assert_eq!(
+            zcode_claim_code_outcome(3007, plan).outcome,
+            CheckinOutcome::Failed
+        );
+        assert_eq!(
+            zcode_claim_code_outcome(9999, plan).outcome,
+            CheckinOutcome::Failed
+        );
+    }
+
+    #[test]
+    fn plugin_only_providers_report_honest_errors() {
+        // chatglm / atomcode / lobsterai 的端点在闭源插件仓：claim_for
+        // 必须如实报错，不落虚假成功台账。
+        for provider in ["chatglm", "atomcode", "lobsterai"] {
+            let session = crate::account_session::model::AccountSession {
+                id: "t".to_string(),
+                channel_id: "c".to_string(),
+                name: "n".to_string(),
+                provider: provider.to_string(),
+                base_url: String::new(),
+                chat_path: None,
+                credential: crate::account_session::model::Credential {
+                    kind: CREDENTIAL_KIND_SESSION.to_string(),
+                    secret: "token".to_string(),
+                    fields: std::collections::HashMap::new(),
+                },
+                proxy: None,
+                status: "enabled".to_string(),
+                priority: 0,
+                weight: 1,
+                max_concurrency: 0,
+                models: Vec::new(),
+                extra_headers: std::collections::HashMap::new(),
+                refresh_secret: String::new(),
+                cooldowns: std::collections::HashMap::new(),
+                last_used_at: None,
+                last_error: None,
+                success_count: 0,
+                error_count: 0,
+                consecutive_errors: 0,
+                total_latency_ms: 0,
+                expires_at: None,
+                in_flight: 0,
+                usage_query_interval_secs: None,
+                limiters: Vec::new(),
+                last_balance_at: None,
+                last_balance: None,
+                last_balance_error: None,
+                created_at: 0,
+                updated_at: 0,
+            };
+            let result = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(claim_for(&Client::new(), &session));
+            assert!(!result.success, "{provider} 不该假装成功");
+            assert_eq!(result.outcome, CheckinOutcome::Failed);
+            assert!(!result.msg.is_empty(), "{provider} 应有明确错误文案");
+        }
     }
 }

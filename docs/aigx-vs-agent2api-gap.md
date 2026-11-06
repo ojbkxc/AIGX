@@ -15,6 +15,89 @@
 
 ---
 
+## 0.5 上游对齐规则：四层对齐 + 能力边界标注（方案 C，2026-11-06 固化）
+
+> 本节是 AIGX 对接 Agent2API 上游的**跟进机制**（用户拍板：方案 C）。
+> 上游副本：`D:\GitHub\Agent2API-upstream-main`（当前 3.4.2）；能力矩阵表反映
+> 2026-11-06 3.4.2 同步后的当前状态。文档其余章节是功能层差距分析，本节是
+> 「怎么跟」的规则。
+
+### 四层对齐（以 Agent2API 上游为基准）
+
+| 层 | AIGX 落点 | 上游基准 | 比对工具 |
+|---|---|---|---|
+| 注册表层 | `src/account_session/registry.rs`（`PROVIDERS` / `SESSION_PROVIDERS` / `AGENT2API_PROVIDERS` / `CREDENTIAL_FIELDS`） | `core/providers/mod.rs` 的 `PROVIDERS` | `tools/sync_agent2api_providers.py --check` |
+| 表单层 | `frontend/src/lib/addAccountConfigs.ts` 的 `SESSION_ADD_CONFIGS` | `ui-islands/src/islands/add-account-configs.ts` | 同上（表单覆盖比对） |
+| 字段层 | `registry.rs` 的 `CREDENTIAL_FIELDS` | `core/account_store/` 的凭证字段 | `tools/sync_agent2api_credential_fields.py --check` |
+| 签到层 | `src/checkin/claim.rs` 的 `CHECKIN_PROVIDERS` / `CHECKIN_CONTRACTS` | `core/auto_checkin.rs` 的 `CHECKIN_PROVIDERS` | `tools/sync_agent2api_capabilities.py --check` |
+
+> 目录层（`catalog.rs` 的 `spec_for` ↔ 上游 `providers/<家>/models.rs`）也由
+> `capabilities.py` 比对；上游 3.4.2 后除 cline 外模型目录实现搬进闭源插件仓，
+> 故上游主仓只剩 1 家的目录端点可比。
+
+### 能力边界规则
+
+- **full（已落地）**：注册表条目 + 后端实现 + 表单入口齐备。
+- **metadata（元数据保留）**：注册表条目照抄展示名（落盘契约与导入识别需要），
+  但后端未实现 → **前端不显示添加入口**；已有账号走
+  `src/account_session/import.rs` 通用导入路径。
+- **hidden（不显示）**：不显示、不自创、不假装 —— 上游由闭源插件仓实现的能力，
+  AIGX 无插件机制时不落地（例：qwenwork / qwenwork-intl）。
+
+### 跟进机制
+
+上游发版 → 跑三个漂移检查脚本 diff 四层 → 按能力边界规则更新：
+
+```bash
+python tools/sync_agent2api_providers.py --upstream D:\GitHub\Agent2API-upstream-main --check
+python tools/sync_agent2api_capabilities.py --upstream D:\GitHub\Agent2API-upstream-main --check
+python tools/sync_agent2api_credential_fields.py --upstream D:\GitHub\Agent2API-upstream-main --check
+```
+
+**脚本豁免机制**：`tools/sync_agent2api_providers.py` 的 `INTENTIONAL_FORM_GAPS`
+是能力边界的**可执行标注** —— 有意不实现的上游表单入口在脚本里豁免并记录原因；
+上游**新增** provider 时脚本仍报缺，触发跟进（豁免清单见脚本注释，不在此重复）。
+
+**插件仓边界**：上游 3.4.2 之后，登录/转发/目录/签到等执行体搬进闭源插件仓
+（`agent2api-providers`，主仓 404 不可得）。跟进范围 = **主仓元数据层**
+（注册表 / 表单 / 字段 / 签到契约）；插件专属能力标注「由上游插件实现，
+AIGX 未落地」，AIGX 侧只落契约与诚实报错，不假装成功。
+
+### 能力矩阵（2026-11-06，3.4.2 同步后）
+
+| provider | 注册表 | 表单 | 字段 | 签到 | 状态 |
+|---|---|---|---|---|---|
+| workbuddy / workbuddy-intl | ✅ | ✅ | — | ✅ | full |
+| xiaohuanxiong（上游 `raccoon`） | ✅ | ✅ | — | ✅ | full |
+| catpaw | ✅ | ✅ | — | 无（上游也无） | full |
+| autoclaw / autoclaw-intl | ✅ | ✅ | — | ✅ | full |
+| qoder / qoder-intl | ✅ | ✅ | ✅ | ✅ | full |
+| cline-free / cline-pass | ✅ | ✅ | — | 无（上游也无） | full |
+| accio / accio-cn | ✅ | ✅ | ✅ | 无（上游也无） | full |
+| zcode / zcode-intl | ✅ | ✅ | — | ✅（领赠送套餐） | full |
+| codearts | ✅ | ✅ | ✅ | ✅ | full |
+| trae | ✅ | ✅ | ✅ | ✅ | full |
+| loomy | ✅ | ✅ | ✅ | ✅ | full |
+| kuku | ✅ | ✅ | — | ✅ | full |
+| monkeycode / monkeycode-intl | ✅ | ✅ | ✅ | 无（上游也无） | full |
+| commandcode | ✅ | ✅ | ✅ | 无（上游也无） | full |
+| antigravity | ✅ | ✅ | ✅ | 无（上游也无） | full |
+| officeace | ✅ | ✅ | ✅ | ✅ | full |
+| orcaterm | ✅ | ✅ | — | 无（上游也无） | full |
+| chatglm | ✅ | ✅ | — | ✅（契约+诚实报错：端点在插件仓） | full |
+| modelscope / modelscope-intl | ✅ | ✅ | — | ✅（登录信息接口） | full |
+| atomcode | ✅ | ✅ | — | ✅（契约+诚实报错：端点在插件仓） | full |
+| lobsterai | ✅ | ❌（web 入口不显示） | — | ✅（契约+诚实报错） | **metadata**（已有账号走导入） |
+| qwenwork / qwenwork-intl | ❌ | ❌ | — | ❌ | **hidden**（上游闭源插件实现，AIGX 无插件机制） |
+
+> 签到列说明：19 家与上游 `CHECKIN_PROVIDERS` 完全对齐（capabilities 闸门
+> exit 0）；chatglm / atomcode / lobsterai 三家端点在闭源插件仓，AIGX 落契约与
+> 诚实报错、不落虚假成功台账；zcode 两地为「领当天赠送套餐」实现、
+> modelscope 两地为「调登录信息接口」实现；其余 10 家上游本就没有每日签到
+> （不进上游清单，AIGX 同样不签）。
+
+---
+
 ## 1. 设置页 · 网关（上游 tab `gateway`，15 项）
 
 | 上游项（i18n key） | 默认 | 上游端点 | AIGX 现状 | AIGX 落点 / 缺口 |

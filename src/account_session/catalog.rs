@@ -467,6 +467,52 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             body: None,
             parser: None,
         }),
+        // ModelScope（魔搭）国内站 / 国际站：OpenAI 兼容的 `/models` 端点，
+        // 响应是 `{data:[{id,...}]}`。两个站点各一份清单（账号体系独立）。
+        "modelscope" | "modelscope-intl" => Some(CatalogSpec {
+            path: "/api/v1/models",
+            openai_shape: true,
+            fallback: &[],
+            sign: None,
+            method: None,
+            body: None,
+            parser: None,
+        }),
+        // 智谱清言（chatglm.cn）：目录端点在插件仓（agent2api-providers），
+        // 主仓不再持有端点知识。path 留空 = 只有静态兜底；兜底表也留空
+        // （没有上游实测数据，不编造模型名）—— 该家当前显示「不支持目录发现」，
+        // 等插件仓端点确定后再补 path 与兜底表。
+        "chatglm" => Some(CatalogSpec {
+            path: "",
+            openai_shape: false,
+            fallback: &[],
+            sign: None,
+            method: None,
+            body: None,
+            parser: None,
+        }),
+        // AtomCode（AtomGit / GitCode）：目录端点在插件仓。同 chatglm，
+        // path 与兜底表都留空，等插件仓端点确定后再补。
+        "atomcode" => Some(CatalogSpec {
+            path: "",
+            openai_shape: false,
+            fallback: &[],
+            sign: None,
+            method: None,
+            body: None,
+            parser: None,
+        }),
+        // LobsterAI（网易有道「有道龙虾」）：目录端点在插件仓。同 chatglm，
+        // path 与兜底表都留空，等插件仓端点确定后再补。
+        "lobsterai" => Some(CatalogSpec {
+            path: "",
+            openai_shape: false,
+            fallback: &[],
+            sign: None,
+            method: None,
+            body: None,
+            parser: None,
+        }),
         _ => None,
     }
 }
@@ -1098,9 +1144,11 @@ pub fn supported_providers() -> Vec<&'static str> {
         "accio",
         "accio-cn",
         "antigravity",
+        "atomcode",
         "autoclaw",
         "autoclaw-intl",
         "catpaw",
+        "chatglm",
         "cline",
         "cline-free",
         "cline-pass",
@@ -1108,8 +1156,11 @@ pub fn supported_providers() -> Vec<&'static str> {
         "commandcode",
         "kuku",
         "loomy",
+        "lobsterai",
         "monkeycode",
         "monkeycode-intl",
+        "modelscope",
+        "modelscope-intl",
         "officeace",
         "orcaterm",
         "qoder",

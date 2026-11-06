@@ -430,7 +430,11 @@ async fn xiaohuanxiong(
 // 否则按账号 id 派生一个稳定 UUID（上游缺/非 UUID 会被拒 3001）。
 // 无桶时 available = None（不写 0）。
 
-fn stable_uuid(seed: &str) -> String {
+/// 按种子派生稳定 UUID（`version 4` 形态的随机位 + 稳定主体）。
+///
+/// `pub(crate)`：签到侧的 ZCode 领取也要设备指纹，复用同一口径
+/// （`checkin/claim.rs` 的 zcode 分支）。
+pub(crate) fn stable_uuid(seed: &str) -> String {
     let digest = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
