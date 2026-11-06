@@ -14,6 +14,7 @@
 //!   - **注册表层**（本文件 `PROVIDERS` / `SESSION_PROVIDERS` /
 //!     `AGENT2API_PROVIDERS` ↔ 上游 `core/providers/mod.rs`）；
 //!   - **字段层**（本文件 `CREDENTIAL_FIELDS` ↔ 上游 `core/account_store/`）。
+//!
 //! 另两层：表单层 `frontend/src/lib/addAccountConfigs.ts`、签到层
 //! `src/checkin/claim.rs`，各层比对工具见 `tools/sync_agent2api_*.py`。
 //!
