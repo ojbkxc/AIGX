@@ -2651,7 +2651,8 @@ pub async fn handle_import_account_sessions_json(
             expires_at: entry.get("expires_at").and_then(|v| v.as_i64()),
             usage_query_interval_secs: None,
             limiters: entry_limiters,
-            limiter_groups: Vec::new(),
+            // 导入不带条件组：None = 本次请求不指定（非"清空"），新建会话保持默认空组
+            limiter_groups: None,
             // Agent2API 导入不走自动建渠道（导入流程自己管理渠道归属）
             auto_channel: None,
         };
