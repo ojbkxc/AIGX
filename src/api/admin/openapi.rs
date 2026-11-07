@@ -1250,8 +1250,7 @@ mod tests {
         add("/api/ip/filter", &["get", "put"]);
         add("/api/ip/whitelist", &["post"]);
         add("/api/ip/whitelist/{pattern}", &["delete"]);
-        add("/api/keys", &["get", "post"]);
-        add("/api/keys/{id}", &["delete"]);
+        // legacy /api/keys 两条已删（路由与文档表同步移除，见 paths_tokens 注释）
         add("/api/limits", &["get", "put"]);
         add("/api/agent/settings", &["get", "put"]);
         add("/api/gateway/settings", &["get", "put"]);
