@@ -64,7 +64,15 @@ export default function RouteSticky(): JSX.Element {
     setErrMsg('');
     try {
       const res = await api.getRouteSticky(q);
-      setEntries(res?.data?.entries ?? []);
+      // 根因修复（CI e2e Object.entries(null) 崩溃）：旧桩把 /api/routing/sticky
+      // 兜底成 {data: []}——data 是**数组**，data.entries 即 Array.prototype.entries
+      // （native 方法，name='entries'），`?? []` 只拦 null/undefined 不拦函数 →
+      // 函数被当 updater 派发进 useState 队列 → basicStateReducer 执行
+      // fn(prev=null) → Object.entries(null) 崩。Array.isArray 守卫既挡住
+      // 「数组身上的 entries 方法」，也挡住任何非数组形状；useReducer 防御
+      // （d52f3a15）继续作为第二道保险保留。
+      const raw = res?.data?.entries;
+      setEntries(Array.isArray(raw) ? raw : []);
       setStickyMode(res?.data?.sticky ?? '');
       setDegraded(false);
     } catch (err) {

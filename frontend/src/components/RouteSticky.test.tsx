@@ -49,6 +49,15 @@ describe('RouteSticky（404 降级路径复现）', () => {
     expect(container.querySelector('.rs-list')).toBeNull();
   });
 
+  it('真凶回归：桩兜底 {data:[]}（数组身上的 entries 方法）不进 setter', async () => {
+    // CI 崩溃根因：EMPTY_LIST 兜底返回 data=[]（数组），data.entries 是
+    // Array.prototype.entries（native fn），`?? []` 不拦 → 函数被当 updater。
+    apiMock.getRouteSticky.mockResolvedValue({ success: true, data: [] });
+    const { container } = render(<>{<RouteSticky />}</> as ReactElement);
+    await waitFor(() => expect(screen.getByText('当前没有粘滞会话')).toBeTruthy(), { timeout: 3000 });
+    expect(container.querySelector('.rs-list')).toBeNull();
+  });
+
   it('正常列表渲染 + 逐条清除确认框可用', async () => {
     apiMock.getRouteSticky.mockResolvedValue({
       success: true,

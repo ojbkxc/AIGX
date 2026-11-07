@@ -76,7 +76,9 @@ export default function DebugTrafficPanel(): JSX.Element {
     return <div className="loading">{t('加载中')}</div>;
   }
 
-  const entries: DebugTrafficEntry[] = view?.entries ?? [];
+  // Array.isArray 守卫：桩兜底 {data:[]} 时 view 是数组，view.entries 是
+  // Array.prototype.entries（native 方法）而非列表——?? [] 不拦函数。
+  const entries: DebugTrafficEntry[] = Array.isArray(view?.entries) ? view!.entries : [];
 
   return (
     <div className="card">
