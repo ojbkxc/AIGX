@@ -84,6 +84,7 @@ impl DeepSeekWebBridge {
             .find(|(name, _)| name.eq_ignore_ascii_case("cookie"))
             .map(|(_, value)| value.clone())
             .filter(|value| !value.trim().is_empty());
+        let token = token.into();
         Self {
             base: base.into().trim_end_matches('/').to_string(),
             token: extract_user_token(&token),

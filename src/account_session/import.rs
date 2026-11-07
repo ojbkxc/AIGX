@@ -342,7 +342,7 @@ pub struct ImportScan {
 }
 
 /// 扫描 cc-switch 数据库。**永不失败**：错误都在返回值里。
-pub fn scan(existing_names: &HashSet<String>) -> ImportScan {
+pub fn scan(_existing_names: &HashSet<String>) -> ImportScan {
     let Some(path) = cc_switch_db_path() else {
         return ImportScan {
             available: false,
