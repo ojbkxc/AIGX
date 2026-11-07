@@ -380,6 +380,44 @@ function handle(req, res, p, bodyText) {
     if (p === '/api/network/status') return sendJson(res, { success: true, data: { enabled: true } });
     if (p === '/api/dashboard/realtime') return sendJson(res, { success: true, data: { window_secs: 300, total_requests: 0, qps: 0, avg_latency_ms: 0, error_rate: 0, errors: 0 } });
 
+    // 渠道健康 Tab（原系统诊断页并入）：三件套形状对齐 src/api/admin/diagnostics.rs
+    if (p === '/api/diagnostics/summary') {
+      return sendJson(res, {
+        success: true,
+        data: {
+          generated_at: 1761900000,
+          channels: { total: 3, enabled: 2, circuit_open: 1, circuit_halfopen: 0, cooldown: 0 },
+          today_usage: { requests: 42, success: 40, success_rate: 95.2, input_tokens: 3000, output_tokens: 900 },
+          errors_24h: { total_failures: 2, top: [{ status_code: 502, count: 2, error_msg: 'upstream connect failed' }] },
+          runtime: { version: '1.0.34-e2e', pid: 4321, uptime_secs: 3720, uptime_available: true },
+        },
+      });
+    }
+    if (p === '/api/diagnostics/breakers') {
+      return sendJson(res, {
+        success: true,
+        data: {
+          tracked: 1, open: 1, halfopen: 0,
+          breakers: [{
+            channel_id: 'ch-e2e-1', state: 'open', failure_count: 3, failure_type: 'upstream_5xx',
+            cooldown_remaining_secs: 45, rate_limit_remaining_secs: 0, probe_in_flight: false, in_store_cooldown: false,
+          }],
+        },
+      });
+    }
+    if (p === '/api/diagnostics/channels') {
+      return sendJson(res, {
+        success: true,
+        data: {
+          probed: 2, alive: 1, deadline_secs: 10,
+          channels: [
+            { channel_id: 'ch-e2e-1', name: 'e2e-openai', enabled: true, result: 'alive', latency_ms: 120, message: '' },
+            { channel_id: 'ch-e2e-2', name: 'e2e-anthropic', enabled: true, result: 'dead', latency_ms: 0, message: 'connect refused' },
+          ],
+        },
+      });
+    }
+
     // 渠道列表（渠道管理页）：返回三条样本，覆盖启用/禁用、有/无密钥、有/无余额、有/无模型映射
     if (p === '/api/channels' && req.method === 'GET') {
       return sendJson(res, { success: true, data: CHANNELS, total: CHANNELS.length, page: 1, size: CHANNELS.length });

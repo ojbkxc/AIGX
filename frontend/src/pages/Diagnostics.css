@@ -91,6 +91,14 @@
   margin-bottom: 10px;
 }
 
+/* embedded（渠道页第三 Tab「健康」）时的刷新按钮行：宿主页 Tab 已表达
+   页面层级，这里只补一个右对齐的操作位，与独立页 page-header 里的同款按钮等价 */
+.dx-embedded-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
 @media (max-width: 720px) {
   .dx-message {
     max-width: 180px;

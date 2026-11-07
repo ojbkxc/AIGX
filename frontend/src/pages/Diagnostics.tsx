@@ -57,14 +57,19 @@ function fmtUptime(secs: number): string {
 }
 
 /**
- * Diagnostics — 系统诊断页（管理员专属）。
+ * Diagnostics — 渠道健康面板（管理员专属）。
  *
- * 后端 /api/diagnostics/* 三件套此前无前端承接，本页补齐：
+ * 后端 /api/diagnostics/* 三件套的承接：
  * - 系统体检摘要：渠道统计 / 今日用量 / 24h 错误 top5 / 运行信息
  * - 渠道批量测活：一键触发全部启用渠道的轻量探测（只探测不修改）
  * - 熔断器快照：逐渠道断路器三态与冷却剩余
+ *
+ * 2026-11-07 起并入「渠道与账号池」页第三 Tab「健康」：三项数据全部以渠道为
+ * 粒度，放在渠道页旁边能直接「看到 → 去修」（07 报告 E.3）。独立顶级菜单
+ * /diagnostics 已下线（路由重定向防书签失效）。`embedded` 时去掉页面级
+ * 标题区（宿主页的 Tab 已表达层级），数据逻辑不变。
  */
-export default function Diagnostics(): JSX.Element {
+export default function Diagnostics({ embedded = false }: { embedded?: boolean }): JSX.Element {
   const { t } = useTranslation();
   const admin = isAdmin();
   const addToast = useToast();
@@ -131,20 +136,35 @@ export default function Diagnostics(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1>{t('系统诊断')}</h1>
-          <p>{t('渠道健康、用量概况与熔断器状态的一站式体检（与 Agent 运维共用同一套探测口径）')}</p>
+      {/* 独立路由已下线，仅 embedded=false（直接渲染兜底）时带标题区 */}
+      {!embedded && (
+        <div className="page-header">
+          <div>
+            <h1>{t('系统诊断')}</h1>
+            <p>{t('渠道健康、用量概况与熔断器状态的一站式体检（与 Agent 运维共用同一套探测口径）')}</p>
+          </div>
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={() => void loadSummary()}
+            disabled={loadingSummary}
+            style={{ gap: 6 }}
+          >
+            <RefreshCw size={13} /> {t('刷新')}
+          </button>
         </div>
-        <button
-          className="btn btn-outline btn-sm"
-          onClick={() => void loadSummary()}
-          disabled={loadingSummary}
-          style={{ gap: 6 }}
-        >
-          <RefreshCw size={13} /> {t('刷新')}
-        </button>
-      </div>
+      )}
+      {embedded && (
+        <div className="dx-embedded-actions">
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={() => void loadSummary()}
+            disabled={loadingSummary}
+            style={{ gap: 6 }}
+          >
+            <RefreshCw size={13} /> {t('刷新')}
+          </button>
+        </div>
+      )}
 
       {loadingSummary ? (
         <Loading text={t('加载诊断数据')} />

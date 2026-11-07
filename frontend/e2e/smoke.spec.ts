@@ -12,6 +12,7 @@ import type { Page } from '@playwright/test';
 const ADMIN_PAGES: Array<[path: string, marker: string]> = [
   ['/channels', '渠道'],
   ['/channels?tab=accounts', '账号'],
+  ['/channels?tab=health', '健康'],
   ['/users', '用户'],
   ['/settings', '设置'],
   ['/model-manage', '模型'],

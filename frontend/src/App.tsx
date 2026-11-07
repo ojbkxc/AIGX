@@ -50,8 +50,8 @@ const Agent = lazyPage(() => import('./pages/Agent'));
 const Tickets = lazyPage(() => import('./pages/Tickets'));
 const CheckinCenter = lazyPage(() => import('./pages/CheckinCenter'));
 const ScheduledTasks = lazyPage(() => import('./pages/ScheduledTasks'));
-const Diagnostics = lazyPage(() => import('./pages/Diagnostics'));
 const Docs = lazyPage(() => import('./pages/Docs'));
+const Plugins = lazyPage(() => import('./pages/Plugins'));
 
 /** 懒加载页面兜底骨架（与全局 loading 视觉一致） */
 function PageFallback(): JSX.Element {
@@ -210,8 +210,12 @@ export default function App(): JSX.Element {
           <Route path="/agent" element={<AdminRoute><Agent /></AdminRoute>} />
           <Route path="/checkin" element={<AdminRoute><CheckinCenter /></AdminRoute>} />
           <Route path="/scheduled-tasks" element={<AdminRoute><ScheduledTasks /></AdminRoute>} />
-          <Route path="/diagnostics" element={<AdminRoute><Diagnostics /></AdminRoute>} />
+          {/* 系统诊断并入渠道页第三 Tab「健康」（07 E.3：诊断三件套全部以渠道
+              为粒度）；独立路由重定向防书签失效 */}
+          <Route path="/diagnostics" element={<Navigate to="/channels?tab=health" replace />} />
           <Route path="/docs" element={<AdminRoute><Docs /></AdminRoute>} />
+          {/* 插件管理（契约对齐 Agent2API；后端建设中整页降级空态） */}
+          <Route path="/plugins" element={<AdminRoute><Plugins /></AdminRoute>} />
           <Route path="/tickets" element={<ProtectedLayout><Tickets /></ProtectedLayout>} />
           <Route path="/profile" element={<ProtectedLayout><Profile /></ProtectedLayout>} />
           <Route path="*" element={<RouteErrorPage status={404} />} />
