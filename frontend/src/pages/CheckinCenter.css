@@ -173,6 +173,107 @@
   cursor: pointer;
 }
 
+/* 逐家时刻覆盖行（编辑器升级：勾选后展开 time 输入 + 专属/默认标注） */
+.ck-provider-picks:has(.ck-provider-pick-row) {
+  flex-direction: column;
+  gap: 6px;
+}
+.ck-provider-pick-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 8px;
+  border: 1px solid var(--border, #ececec);
+  border-radius: 8px;
+}
+.ck-provider-pick-row.is-checked {
+  border-color: var(--primary, #2563eb);
+  background: var(--primary-bg, rgba(59, 130, 246, 0.05));
+}
+.ck-provider-pick-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.ck-pick-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--primary-bg, rgba(59, 130, 246, 0.12));
+  color: var(--primary, #2563eb);
+  white-space: nowrap;
+}
+.ck-pick-tag-mute {
+  background: var(--border, #ececec);
+  color: var(--text-muted, #666);
+}
+.ck-pick-time {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ck-pick-time .ck-time-input {
+  width: 104px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+.ck-pick-reset {
+  border: none;
+  background: none;
+  color: var(--primary, #2563eb);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+}
+
+/* 实际签到安排预览（按生效时刻分组） */
+.ck-preview-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.ck-preview-group {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+}
+.ck-preview-group code {
+  background: var(--border, #ececec);
+  padding: 1px 7px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.ck-preview-group span {
+  color: var(--text-muted, #666);
+  flex: 1;
+}
+
+/* 补签与重试块 */
+.ck-retry-block {
+  border-top: 1px dashed var(--border, #e5e5e5);
+  padding-top: 10px;
+}
+
+/* 成长巡检（travel/school）卡 */
+.ck-travel-edit {
+  align-items: flex-start;
+}
+.ck-travel-times {
+  width: 150px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12.5px;
+  resize: vertical;
+}
+.ck-travel-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 /* ── Tab 条右端全局状态徽标（对齐 Agent2API #checkin-badge） ── */
 .ck-tab-badge-slot {
   margin-left: auto;

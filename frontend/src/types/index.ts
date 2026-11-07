@@ -811,13 +811,19 @@ export interface CheckinSettings {
   enabled: boolean;
   /** 逐个签到之间的间隔（毫秒） */
   gap_ms: number;
+  /** 台账保留天数（0 = 永久保留不自动清理；后端 prune 口径） */
+  keep_days?: number;
+  /** 签到时区偏移（小时；缺省 8 = UTC+8，0 = 跟随系统本地时区） */
+  timezone_offset?: number;
+  /** 失败/窗口未开的重试间隔（毫秒；0 = 关闭重试，缺省 10 分钟） */
+  retry_gap_ms?: number;
 }
 
 export interface CheckinSchedule {
   id: string;
   label: string;
   enabled: boolean;
-  /** 每天时刻 HH:MM（北京时间） */
+  /** 每天时刻 HH:MM（按配置时区） */
   time: string;
   providers: string[];
   last_fired_date: string;
@@ -826,6 +832,20 @@ export interface CheckinSchedule {
   last_ok: number;
   last_keepalive: number;
   last_failed: number;
+  /** 逐家时刻覆盖（{provider: "HH:MM"}；后端 15f98321 起下发，三档回落：
+   *  条目覆盖 > 内置专属（如 qoder 10:01）> 条目 time） */
+  provider_times?: Record<string, string>;
+  /** 逐家已跑标记（{provider: date}）——同一条目可在多个窗口各跑一批 */
+  last_fired_providers?: Record<string, string>;
+  /* ── 以下为 be-fix #16-B 契约字段：后端未下发时前端 feature-detect 隐藏 ── */
+  /** 随机签到区间结束 HH:MM（缺省 = time 固定时刻执行） */
+  time_end?: string;
+  /** 定时补签时刻 HH:MM（空 = 关闭补签） */
+  retry_time?: string;
+  /** 补签/活动重试共用间隔（分钟） */
+  retry_gap_minutes?: number;
+  /** 活动窗口重试：每账号每天最多重试次数（0 = 关闭） */
+  retry_limit?: number;
 }
 
 export interface CheckinAccountRow {
@@ -854,6 +874,25 @@ export interface CheckinCenterData {
   /** 台账总条数（统计卡「累计记录数」） */
   records_total: number;
   today_summary: Array<{ provider: string; done: number; total: number }>;
+  /** 各家内置签到时刻（{provider: "HH:MM"}，如 qoder 10:01）；后端未下发时
+   *  编辑器不显示「平台专属」标注，预览按覆盖/默认时刻分组 */
+  builtin_times?: Record<string, string>;
+  /** 旅行/成长巡检状态（be-fix #16-B 落地后随 center 下发；缺省 = 不渲染巡检卡） */
+  travel?: CheckinTravelState;
+}
+
+/** 旅行/成长巡检（对照上游 checkin-schedule-extras TravelPanel / growth_scheduler） */
+export interface CheckinTravelState {
+  enabled?: boolean;
+  /** 每天自动巡检时刻列表（HH:MM，一行一个） */
+  times?: string[];
+  running?: boolean;
+  /** 今日已触发的时刻 */
+  fired_today?: string[];
+  last_result?: string;
+  /** 巡检能力不可用时的暂停原因 */
+  paused_reason?: string;
+  available?: boolean;
 }
 
 export interface CheckinRunResult {

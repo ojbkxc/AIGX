@@ -60,6 +60,7 @@ import type {
   CheckinRecord,
   CheckinSchedule,
   CheckinSettings,
+  CheckinTravelState,
   CheckinRunResult,
   TotpSetupResult,
   TotpEnableResult,
@@ -498,12 +499,24 @@ export const api = {
     enabled: boolean;
     time: string;
     providers: string[];
+    /** 逐家时刻覆盖（非空项才提交；空 = 回落内置/条目时刻） */
+    provider_times?: Record<string, string>;
+    /* ── be-fix #16-B 契约字段：后端未支持时不要发送（前端 feature-detect 门控）── */
+    time_end?: string;
+    retry_time?: string;
+    retry_gap_minutes?: number;
+    retry_limit?: number;
   }): Promise<ApiResponse<CheckinSchedule[]>> =>
     request('POST', `${API_BASE}/checkin-center/schedules`, schedule),
   removeCheckinSchedule: (id: string): Promise<ApiResponse<CheckinSchedule[]>> =>
     request('POST', `${API_BASE}/checkin-center/schedules/remove`, { id }),
   runCheckinSchedule: (id: string): Promise<ApiResponse<{ summary: string; ok: number; keepalive: number; failed: number }>> =>
     request('POST', `${API_BASE}/checkin-center/schedules/run`, { id }),
+  // 旅行/成长巡检（对照上游 growth_scheduler；be-fix #16-B 契约，未就绪 404 → 降级）
+  updateCheckinTravel: (body: { enabled?: boolean; times?: string[] }): Promise<ApiResponse<CheckinTravelState>> =>
+    request('PATCH', `${API_BASE}/checkin-center/travel`, body),
+  runCheckinTravelNow: (): Promise<ApiResponse<{ summary?: string; ok?: number; failed?: number }>> =>
+    request('POST', `${API_BASE}/checkin-center/travel/run`, {}),
 
   // 一次性 / 限时福利通道（新手礼 / 保活 / 成长任务 / 限时套餐 / UMID）
   getCheckinBenefits: (): Promise<ApiResponse<CheckinBenefitsData>> =>
