@@ -3495,7 +3495,14 @@ pub async fn handle_channel_chat_test(
                 account_url.clone(),
                 request_start,
             );
-            let mut response = Body::from_stream(body_stream).into_response();
+            // 保活：长思考模型调试时上游长时间无输出，空闲期注入 ": keepalive"
+            // 注释行（SSE 规范要求解析器忽略注释行，与数据面 /v1/responses 同法），
+            // 防前端/反代在响应完成前断流。
+            let keepalive_stream = crate::sse::KeepaliveStream::new(
+                body_stream,
+                crate::bridge::SSE_KEEPALIVE_INTERVAL,
+            );
+            let mut response = Body::from_stream(keepalive_stream).into_response();
             for (name, value) in [
                 ("Content-Type", "text/event-stream; charset=utf-8"),
                 ("Cache-Control", "no-cache"),
@@ -3614,7 +3621,8 @@ pub async fn handle_channel_chat_test(
                         ("Content-Type", "text/event-stream; charset=utf-8"),
                         ("Cache-Control", "no-cache"),
                     ];
-                    let mut response = Body::from_stream(chat_test_logged_stream(
+                    // 保活：透传流空闲期注入 ": keepalive" 注释行（与 responses 同法）
+                    let logged = chat_test_logged_stream(
                         resp.bytes_stream(),
                         state.clone(),
                         user.clone(),
@@ -3624,8 +3632,12 @@ pub async fn handle_channel_chat_test(
                         payload.clone(),
                         url.clone(),
                         request_start,
-                    ))
-                    .into_response();
+                    );
+                    let keepalive_stream = crate::sse::KeepaliveStream::new(
+                        logged,
+                        crate::bridge::SSE_KEEPALIVE_INTERVAL,
+                    );
+                    let mut response = Body::from_stream(keepalive_stream).into_response();
                     for (name, value) in upstream_headers {
                         if let Ok(value) = axum::http::HeaderValue::from_str(value) {
                             response.headers_mut().insert(name, value);
@@ -3759,7 +3771,8 @@ pub async fn handle_channel_chat_test(
                     ("Content-Type", "text/event-stream; charset=utf-8"),
                     ("Cache-Control", "no-cache"),
                 ];
-                let mut response = Body::from_stream(chat_test_logged_stream(
+                // 保活：透传流空闲期注入 ": keepalive" 注释行（与 responses 同法）
+                let logged = chat_test_logged_stream(
                     resp.bytes_stream(),
                     state.clone(),
                     user.clone(),
@@ -3769,8 +3782,10 @@ pub async fn handle_channel_chat_test(
                     payload.clone(),
                     url.clone(),
                     request_start,
-                ))
-                .into_response();
+                );
+                let keepalive_stream =
+                    crate::sse::KeepaliveStream::new(logged, crate::bridge::SSE_KEEPALIVE_INTERVAL);
+                let mut response = Body::from_stream(keepalive_stream).into_response();
                 for (name, value) in upstream_headers {
                     if let Ok(value) = axum::http::HeaderValue::from_str(value) {
                         response.headers_mut().insert(name, value);

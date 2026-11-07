@@ -382,6 +382,9 @@ pub async fn handle_chat(
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx)
         .map(|s| Ok::<axum::body::Bytes, std::convert::Infallible>(axum::body::Bytes::from(s)));
+    // 保活：Agent 工具执行间隔可能很长（审批等待/命令超时），空闲期注入
+    // ": keepalive" 注释行（SSE 规范要求解析器忽略注释行），防代理断流。
+    let stream = crate::sse::KeepaliveStream::new(stream, crate::bridge::SSE_KEEPALIVE_INTERVAL);
     let body = Body::from_stream(stream);
     let mut resp = Response::new(body);
     resp.headers_mut().insert(
