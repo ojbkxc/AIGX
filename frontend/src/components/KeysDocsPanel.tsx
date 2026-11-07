@@ -25,7 +25,8 @@ import { useToast } from '../components/Toast';
 import { Button, Card, EmptyState, Loading } from '../components/ui';
 import { isAdmin } from '../lib/utils';
 import type { GatewaySettingsItem, ModelInfo } from '../types';
-import './Docs.css';
+// 样式沿用原文档页的 Docs.css（页面已删，CSS 唯一消费者迁到这里）
+import '../pages/Docs.css';
 
 /** 通配监听地址：不是客户端可访问的地址，显示站点 origin 更实用 */
 const WILDCARD_HOSTS = ['0.0.0.0', '::', '::0', '127.0.0.1', 'localhost'];

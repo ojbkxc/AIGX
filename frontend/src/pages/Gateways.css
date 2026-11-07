@@ -1,6 +1,62 @@
-/* 渠道与账号池 —— 单页双 Tab 的宿主页样式。
+/* 渠道与账号池 —— 单页多 Tab 的宿主页样式。
    只负责 Tab 与子页之间的间距：子页自身带 page-header 与 Card，
    已内嵌（embedded）时不再渲染标题区（见 Channels / AccountSessions）。 */
 .gw-tabs {
   margin-bottom: 12px;
+}
+
+/* ── 网关运行参数面板（Tab「网关」，只读展示 /api/gateway/settings）── */
+.gw-note {
+  margin: 0 0 14px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.gw-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.gw-runtime-item {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--hover-bg, rgba(0, 0, 0, 0.03));
+}
+
+.gw-runtime-label {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.gw-runtime-value {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13.5px;
+  color: var(--text-main);
+}
+
+.gw-runtime-value code {
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--card-bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+}
+
+.gw-chip {
+  font-size: 11.5px;
+}
+
+.gw-runtime-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
 }
