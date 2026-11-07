@@ -501,9 +501,12 @@ impl UpdateManager {
             // - 旧版本 bundle（previous_version 对应的包，供再回滚）
             // 其余 .upd/.sha256 全删；staging 每轮已清。
             let updates_dir = self.data_dir.join("updates");
+            // `host_arch()` 在未知架构返回 None —— 此时不保留旧 bundle 资产
+            // （`and_then` 而非 `map`：map 会产出 `Option<Option<String>>`，
+            // 且把 `Option<&str>` 直接喂给 `&str` 形参是 E0308）。
             let keep = [
                 release.bundle.as_ref().map(|b| b.name.clone()),
-                server_bundle_name(&marker.previous_version, host_arch()).map(|s| s.to_string()),
+                host_arch().and_then(|arch| server_bundle_name(&marker.previous_version, arch)),
             ];
             if let Ok(entries) = std::fs::read_dir(&updates_dir) {
                 for entry in entries.flatten() {
