@@ -359,7 +359,7 @@ impl UpdateManager {
                     entries
                         .flatten()
                         .filter_map(|e| e.metadata().ok())
-                        .map(|m| m.len() as u64)
+                        .map(|m| m.len())
                         .sum::<u64>()
                 })
                 .unwrap_or(0),
