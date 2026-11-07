@@ -2251,6 +2251,16 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/account-sessions/:id/refresh",
             post(api::admin::account_sessions::handle_account_refresh),
         )
+        // 用量窗口（Phase1-A3，对齐上游 accounts_usage.rs）：快照轮询 +
+        // 手动批量/单账号查询（写回快照；有界并发 3，温路径）
+        .route(
+            "/api/account-sessions/usage/snapshot",
+            get(api::admin::account_sessions::handle_usage_snapshot),
+        )
+        .route(
+            "/api/account-sessions/usage",
+            post(api::admin::account_sessions::handle_usage_query),
+        )
         // 上游模型目录发现（抄 Agent2API 的 provider 模型目录）
         .route(
             "/api/account-sessions/catalog/sync",

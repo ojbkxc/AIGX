@@ -2768,3 +2768,52 @@ mod expiry_tests {
         assert_eq!(earliest_wallet_expiry(&Some(snap)), None);
     }
 }
+
+// ── 用量窗口（Phase1-A3，对齐上游 accounts_usage.rs）────────────────
+
+/// GET /api/account-sessions/usage/snapshot —— 各账号最近一次余额查询快照
+/// （手动与自动巡检同源；行带自己的 `at`，从未查过的不在 results，
+/// 计入 skipped）。界面轮询这一份即可跟上两条来源的节奏。
+pub async fn handle_usage_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let now = chrono::Utc::now().timestamp();
+    let (results, skipped) =
+        crate::account_session::usage_query::snapshot_all(&state.account_sessions);
+    Ok(Json(json!({
+        "success": true,
+        "data": { "at": now, "results": results, "skipped": skipped }
+    })))
+}
+
+/// POST /api/account-sessions/usage —— 手动批量/单账号余额查询（写回快照）。
+/// body 缺省 = 批量（全部支持查询的账号）；`{"id": "..."}` = 单账号。
+/// 有界并发 3（复用自动巡检口径，不并发轰炸上游——温路径）。
+pub async fn handle_usage_query(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<UsageQueryBody>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let id = body.and_then(|Json(b)| b.id).filter(|s| !s.is_empty());
+    let (results, skipped) = crate::account_session::usage_query::query_manual(
+        &state.account_sessions,
+        &state.http_client,
+        id.as_deref(),
+    )
+    .await;
+    Ok(Json(json!({
+        "success": true,
+        "data": { "results": results, "skipped": skipped }
+    })))
+}
+
+/// POST /api/account-sessions/usage 请求体（缺省 = 批量）。
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct UsageQueryBody {
+    /// 单账号查询（账号页每行的「余额」按钮）；空/缺省 = 批量
+    #[serde(default)]
+    pub id: Option<String>,
+}

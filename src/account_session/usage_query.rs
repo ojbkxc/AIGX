@@ -14,6 +14,8 @@
 use futures::StreamExt;
 use reqwest::Client;
 
+use serde_json::Value;
+
 use super::balance::{self, AccountBalance};
 use super::model::AccountSession;
 use super::store::AccountSessionStore;
@@ -92,6 +94,137 @@ pub async fn sweep(pool: &AccountSessionStore, client: &Client) -> u64 {
         }
     }
     done
+}
+
+// ── 手动查询与快照（Phase1-A3，对齐上游 accounts_usage.rs）─────────
+
+/// 一行查询结论（手动与快照同形，快照行多一个自己的 `at`）。
+fn result_row(
+    id: &str,
+    name: &str,
+    provider: &str,
+    usage: Option<Value>,
+    error: Option<String>,
+) -> Value {
+    serde_json::json!({
+        "id": id,
+        "name": name,
+        "provider": provider,
+        "usage": usage,
+        "error": error,
+    })
+}
+
+/// 写回一行查询结论（失败不清快照；写回前重读防冲掉数据面更新）。
+fn persist_outcome(
+    pool: &AccountSessionStore,
+    id: &str,
+    outcome: Result<AccountBalance, String>,
+    now: i64,
+) {
+    let Some(mut current) = pool.get(id) else {
+        return;
+    };
+    current.last_balance_at = Some(now);
+    match outcome {
+        Ok(balance) => {
+            current.last_balance = Some(snapshot(&balance));
+            current.last_balance_error = None;
+        }
+        Err(message) => {
+            current.last_balance_error = Some(message);
+        }
+    }
+    if let Err(error) = pool.upsert(current) {
+        tracing::warn!("account {id} balance snapshot not saved: {error}");
+    }
+}
+
+/// 手动批量/单账号余额查询（对齐上游 `query_all` 语义）：
+/// - `id` 缺省 = 全部**支持查询**的账号（不看启用状态——禁用只管转发，
+///   与余额查询无关，照抄上游说明）；
+/// - `id` 给定 = 只查这一个（单行「余额」按钮），未知 id 记 not_found 行。
+///
+/// 有界并发复用 [`CONCURRENCY`]（余额接口普遍 20s 超时，别把上游打疼）；
+/// 逐账号写回快照（同 [`sweep`] 口径）。返回 (results, skipped)——skipped
+/// 是「凭证不完整等被跳过」的数量，与上游同义。
+pub async fn query_manual(
+    pool: &AccountSessionStore,
+    client: &Client,
+    id: Option<&str>,
+) -> (Vec<Value>, usize) {
+    let now = chrono::Utc::now().timestamp();
+    let targets: Vec<AccountSession> = match id {
+        Some(id) => pool
+            .get(id)
+            .filter(|s| balance::supports_balance(&s.provider))
+            .into_iter()
+            .collect(),
+        None => pool
+            .all()
+            .into_iter()
+            .filter(|s| balance::supports_balance(&s.provider))
+            .collect(),
+    };
+    if id.is_some() && targets.is_empty() {
+        return (
+            vec![result_row(
+                id.unwrap_or_default(),
+                "",
+                "",
+                None,
+                Some("账号不存在或该供应商暂不支持余额查询".to_string()),
+            )],
+            0,
+        );
+    }
+    let results = futures::stream::iter(targets)
+        .map(|session| {
+            let client = client.clone();
+            async move {
+                let outcome = balance::query_balance(&client, &session).await;
+                (session.id, session.name, session.provider, outcome)
+            }
+        })
+        .buffer_unordered(CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    let mut rows = Vec::with_capacity(results.len());
+    for (id, name, provider, outcome) in results {
+        let (usage, error) = match &outcome {
+            Ok(balance) => (Some(snapshot(balance)), None),
+            Err(message) => (None, Some(message.clone())),
+        };
+        persist_outcome(pool, &id, outcome, now);
+        rows.push(result_row(&id, &name, &provider, usage, error));
+    }
+    (rows, 0)
+}
+
+/// 各账号最近一次查询结论快照（对齐上游 `usage_query::snapshot`）：
+/// 界面轮询这一份即可跟上自动/手动两条来源的节奏。行带自己的 `at`
+///（unix 秒；None = 从未查过，不出现在 results）。skipped = 支持查询
+/// 但从未查过的账号数（界面可显示「n 个未查询」）。
+pub fn snapshot_all(pool: &AccountSessionStore) -> (Vec<Value>, usize) {
+    let mut results = Vec::new();
+    let mut skipped = 0usize;
+    for session in pool.all() {
+        if !balance::supports_balance(&session.provider) {
+            continue;
+        }
+        match (session.last_balance_at, session.last_balance.clone()) {
+            (Some(at), usage) => results.push(serde_json::json!({
+                "id": session.id,
+                "name": session.name,
+                "provider": session.provider,
+                "usage": usage,
+                "error": session.last_balance_error,
+                "at": at,
+            })),
+            (None, _) => skipped += 1,
+        }
+    }
+    (results, skipped)
 }
 
 #[cfg(test)]
