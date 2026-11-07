@@ -156,7 +156,14 @@ impl NotifyService {
     /// 原先 update_config 只改内存，服务重启后 SMTP/Telegram 等配置
     /// 全部丢失回 config.toml 默认值——管理界面保存的配置必须落盘。
     pub async fn persist_config(&self, store: &crate::storage::FileStore) -> Result<(), String> {
-        let cfg = self.config.read().await.clone();
+        let mut cfg = self.config.read().await.clone();
+        // #17-⑤（生产实证 P3-9）：SMTP 密码不再明文落盘——持久化副本走
+        // `enc1:` AES-256-GCM 信封（密钥在数据目录，见 account_session::secret）。
+        // 内存快照保持明文（发信时用），只加密磁盘形态；已是 enc1: 的幂等。
+        cfg.smtp_password = crate::account_session::secret::seal_or_keep(
+            &cfg.smtp_password,
+            &crate::account_session::secret::data_dir(),
+        );
         store
             .put::<NotifyConfig>(NOTIFY_CONFIG_STORE_KEY, &cfg)
             .map_err(|e| format!("persist notify config: {e}"))
@@ -546,10 +553,16 @@ async fn send_smtp_raw(
         if !r.starts_with("334") {
             return Err(format!("SMTP username rejected: {}", r));
         }
+        // #17-⑤（P3-9）：smtp_password 的磁盘形态是 enc1: 信封（见
+        // persist_config）；发信时解开。旧明文存量原样通过（下次保存自动升级）。
+        let smtp_password = crate::account_session::secret::open_secret(
+            &cfg.smtp_password,
+            &crate::account_session::secret::data_dir(),
+        );
         transport
             .write_line(&format!(
                 "{}\r\n",
-                STANDARD.encode(cfg.smtp_password.as_bytes())
+                STANDARD.encode(smtp_password.as_bytes())
             ))
             .await?;
         let r = transport.read_line().await?;
