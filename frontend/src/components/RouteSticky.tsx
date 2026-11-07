@@ -10,7 +10,7 @@
  * （be-fix 后续任务提供；未就绪 404 → 空态降级，不报错不崩）。
  * 性能约束：手动刷新 + 搜索触发拉取，不轮询（搜索去抖 300ms）。
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { RefreshCw, Search } from 'lucide-react';
 import { api } from '../api';
@@ -25,10 +25,31 @@ function toMillis(v: number | undefined): number | null {
   return v < 1e11 ? v * 1000 : v;
 }
 
+/**
+ * entries 状态用 useReducer 而非 useState（CI e2e 崩溃防御）。
+ *
+ * 现象：/settings 路由 Tab 曾 100% 崩 `Object.entries(null) ← basicStateReducer
+ * ← useState`——有函数 action 进了本组件首个 useState 的更新队列（React 把
+ * `setState(fn)` 当惰性更新，fn 拿上一 state 当参执行）。源码三处 setEntries
+ * 全部是值更新（`res.data.entries ?? []` / `[]`），产物级排查也无法定位派发源。
+ *
+ * 防御：reducer 显式丢弃函数 action——无论谁误派函数，reducer 都不会执行它，
+ * 只按「数组则取值、否则保持原值」收敛。行为与 setState 完全一致（值更新路径），
+ * 但把整类「函数进队列」崩溃封死。
+ */
+type EntriesAction = RouteStickyList['entries'] | ((prev: RouteStickyList['entries']) => RouteStickyList['entries']);
+function entriesReducer(
+  prev: RouteStickyList['entries'],
+  action: EntriesAction,
+): RouteStickyList['entries'] {
+  if (typeof action === 'function') return prev;
+  return Array.isArray(action) ? action : prev;
+}
+
 export default function RouteSticky(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
-  const [entries, setEntries] = useState<RouteStickyList['entries']>([]);
+  const [entries, setEntries] = useReducer(entriesReducer, [] as RouteStickyList['entries']);
   const [stickyMode, setStickyMode] = useState('');
   const [loading, setLoading] = useState(true);
   const [degraded, setDegraded] = useState(false); // 端点 404：后端未就绪
