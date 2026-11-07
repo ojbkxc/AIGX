@@ -107,7 +107,8 @@ test.describe('账号池列表能力', () => {
   });
 
   test('按到期排序：已过期最前、无到期最后', async ({ page, pageErrors }) => {
-    await page.locator('.as-toggle', { hasText: '按到期排序' }).locator('input').check();
+    // 排序改下拉（对齐上游 accounts-sort 三档：调度优先序/按到期/按添加时间）
+    await page.locator('select[aria-label="列表排序"]').selectOption('credit');
     const rows = dataRows(page);
     await expect(rows).toHaveCount(4);
     // 第一行 = 已过期（wb-二号），最后一行 = 无到期（e2e-无到期）

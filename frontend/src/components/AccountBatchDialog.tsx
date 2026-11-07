@@ -243,6 +243,17 @@ export default function AccountBatchDialog({
   const okCount = receipts?.filter((r) => r.ok).length ?? 0;
   const failedList = receipts?.filter((r) => !r.ok) ?? [];
 
+  /** 后端保护类错误码 → 用户文案（be-fix 契约：referenced_by_channel / not_found） */
+  function errorText(r: AccountBatchReceipt): string {
+    if (r.error === 'referenced_by_channel') {
+      return t('账号被启用中的渠道引用，先解除引用或停用渠道再删除');
+    }
+    if (r.error === 'not_found') {
+      return t('账号不存在');
+    }
+    return r.error || t('未知错误');
+  }
+
   return (
     <div className="modal-overlay" role="dialog" aria-modal="true">
       <div className="modal as-batch-dlg">
@@ -398,7 +409,7 @@ export default function AccountBatchDialog({
                   {failedList.map((r) => (
                     <li key={r.id}>
                       <span>{nameOf(r.id)}</span>
-                      <span className="form-hint">{r.error || t('未知错误')}</span>
+                      <span className="form-hint">{errorText(r)}</span>
                     </li>
                   ))}
                 </ul>

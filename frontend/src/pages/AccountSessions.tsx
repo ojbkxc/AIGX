@@ -350,6 +350,8 @@ const LS_NAMEMASK = 'aigx-as-namemask';
 const LS_AUTOBAL = 'aigx-as-autobal'; // 自动余额轮询间隔（分钟）
 /** 分组折叠记忆（对齐 Agent2API accounts-store COLLAPSED_KEY：收起的分组跨次启动保留） */
 const LS_COLLAPSED = 'aigx-as-collapsed';
+/** 列表排序记忆（对齐上游 accounts-sort 的落盘偏好；'list' = 调度优先序） */
+const LS_SORTKEY = 'aigx-as-sortkey';
 
 /**
  * 连接数快照走 api.getAccountSessionConnections（已收敛进 api/index.ts）：
@@ -421,9 +423,13 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
 
   // 状态分段过滤（对齐 Agent2API 账号页：全部/启用/禁用/冷却中）
   const [statusSeg, setStatusSeg] = useState<'all' | 'enabled' | 'disabled' | 'cooling'>('all');
-  // 按到期排序（对齐上游 accounts-sort 的 credit/soon 档：最急着过期的排最前；
-  // 默认关闭保持「列表顺序 = 调度优先序」）
-  const [expirySort, setExpirySort] = useState(false);
+  // 列表排序（对齐上游 accounts-sort：展示序不改调度 priority；
+  // credit 档按凭证/套餐到期（最急着过期的排最前，没到期值排最后），
+  // added 档按创建时间新→旧；默认 list = 调度优先序，选择落盘 localStorage）
+  const [sortKey, setSortKey] = useState<'list' | 'credit' | 'added'>(() => {
+    const v = readLS<string>(LS_SORTKEY, 'list');
+    return v === 'credit' || v === 'added' ? v : 'list';
+  });
   // 勾选与批量操作（批量启停/删除，循环既有 PATCH/DELETE 端点）
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const [batchRunning, setBatchRunning] = useState(false);
@@ -1145,15 +1151,22 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
     return true;
   });
 
-  // 按到期排序（纯展示序，不改调度 priority；没到期值的排最后，已过期最前）
+  // 列表排序（纯展示序，不改调度 priority）
   const visibleSorted = useMemo(() => {
-    if (!expirySort) return visible;
+    if (sortKey === 'list') return visible;
     return [...visible].sort((a, b) => {
-      const ea = accountExpiryOf(a).at ?? Number.POSITIVE_INFINITY;
-      const eb = accountExpiryOf(b).at ?? Number.POSITIVE_INFINITY;
-      return ea - eb;
+      if (sortKey === 'credit') {
+        // credit：凭证/套餐到期升序（最急着过期最前），无到期值排最后（对齐上游 compareExpiry soon 档）
+        const ea = accountExpiryOf(a).at ?? Number.POSITIVE_INFINITY;
+        const eb = accountExpiryOf(b).at ?? Number.POSITIVE_INFINITY;
+        return ea - eb;
+      }
+      // added：创建时间新→旧（对齐上游 compareAdded new 档；缺 created_at 按 0 = 最早）
+      const ta = Number(a.created_at) || 0;
+      const tb = Number(b.created_at) || 0;
+      return tb - ta;
     });
-  }, [visible, expirySort]);
+  }, [visible, sortKey]);
 
   // ── 列显隐 / 列宽拖动（对齐 Agent2API accounts-columns + 模型管理同款交互）──
 
@@ -2137,18 +2150,21 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
             />
             <span>{t('分组')}</span>
           </label>
-          {/* 按到期排序（对齐上游 credit/soon 档）：最急着过期的排最前，纯展示序不改调度 */}
-          <label
-            className="as-toggle"
-            title={t('最急着过期的账号排最前（已过期最前，无到期值最后）；只影响显示，不改调度优先级')}
+          {/* 列表排序（对齐上游 accounts-sort）：到期最早/最新添加置顶，纯展示序不改调度 */}
+          <Select
+            aria-label={t('列表排序')}
+            className="as-autobal-select"
+            value={sortKey}
+            onChange={(e) => {
+              const v = e.target.value === 'credit' || e.target.value === 'added' ? e.target.value : 'list';
+              setSortKey(v);
+              writeLS(LS_SORTKEY, v);
+            }}
           >
-            <input
-              type="checkbox"
-              checked={expirySort}
-              onChange={(e) => setExpirySort(e.target.checked)}
-            />
-            <span>{t('按到期排序')}</span>
-          </label>
+            <option value="list">{t('调度优先序')}</option>
+            <option value="credit">{t('按到期排序')}</option>
+            <option value="added">{t('按添加时间（新→旧）')}</option>
+          </Select>
           {/* 自动余额周期轮询（间隔可配置；关闭时仅保留首次加载那一次查询） */}
           <Select
             aria-label={t('自动余额查询间隔')}
