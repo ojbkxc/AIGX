@@ -291,3 +291,69 @@ test.describe('模型管理', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });
+
+test.describe('模型管理 · 思考等级下拉与悬空映射', () => {
+  test.beforeEach(async ({ page }) => {
+    await loginAsAdmin(page, { sessions: [] });
+    await page.goto('/model-manage');
+    await expect(page.locator('h1')).toContainText('模型管理');
+  });
+
+  test('映射弹窗思考等级下拉：候选来自模型声明档位 + 自定义入口', async ({ page, pageErrors }) => {
+    // unpriced-model 行的「+ 映射」入口打开弹窗（无声明 → 兜底表候选）
+    const row = dataRows(page).filter({ hasText: 'unpriced-model' });
+    await row.locator('.mm-alias-add').click();
+    const modal = page.locator('.modal-overlay .modal').first();
+    await expect(modal).toBeVisible();
+
+    // 等级下拉存在且带「不覆盖」空档
+    const levelSelect = modal.locator('select').filter({ has: modal.locator('option', { hasText: '不覆盖' }) }).first();
+    await expect(levelSelect).toBeVisible();
+    // 无声明的模型 → 兜底候选表里有 high
+    await expect(levelSelect.locator('option', { hasText: 'high' })).toHaveCount(1);
+    // 自定义等级哨兵档存在
+    await expect(levelSelect.locator('option', { hasText: '自定义等级' })).toHaveCount(1);
+
+    // 选自定义 → 输入框露出
+    await levelSelect.selectOption('__custom__');
+    await expect(modal.locator('input[placeholder*="自定义等级"]')).toBeVisible();
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('映射弹窗思考等级：目标模型有声明的候选档位', async ({ page, pageErrors }) => {
+    // 双击 glm-4.7-flash 的映射名打开弹窗（无声明的模型走「+ 映射」；
+    // 声明档位的模型用别名弹窗的目标框切换验证）
+    const row = dataRows(page).filter({ hasText: 'unpriced-model' });
+    await row.locator('.mm-alias-add').click();
+    const modal = page.locator('.modal-overlay .modal').first();
+    await expect(modal).toBeVisible();
+
+    // 把目标模型切成有声明的 glm-4.7-flash：候选应换成声明的 low/medium/high
+    // （Combobox 输入即过滤，Enter 选定过滤后的第一项；idx 初始即 0）
+    const combo = modal.locator('.cb-input').first();
+    await combo.fill('glm-4.7-flash');
+    await page.keyboard.press('Enter');
+
+    const levelSelect = modal.locator('select').filter({ has: modal.locator('option', { hasText: '不覆盖' }) }).first();
+    await expect(levelSelect.locator('option', { hasText: 'low', exact: true })).toHaveCount(1);
+    await expect(levelSelect.locator('option', { hasText: 'medium', exact: true })).toHaveCount(1);
+    // 声明表里没有的档位不该出现（兜底表的 minimal/off 不在）
+    await expect(levelSelect.locator('option', { hasText: 'minimal' })).toHaveCount(0);
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('悬空映射提醒区：列出无宿主行的映射，删除入口可达', async ({ page, pageErrors }) => {
+    // 桩 mappings 里 alias-dangling 指向 gone-model（不在 models 清单）
+    const section = page.locator('.mm-dangling');
+    await expect(section).toBeVisible();
+    await expect(section).toContainText('未挂载的模型映射');
+    await expect(section.locator('.mm-dg-item')).toHaveCount(1);
+    await expect(section.locator('.mm-dg-item')).toContainText('alias-dangling');
+    await expect(section.locator('.mm-dg-item')).toContainText('gone-model');
+    await expect(section.locator('.mm-dg-item')).toContainText('目标已下线');
+
+    // 正常映射（alias-free → unpriced-model 有宿主行）不进悬空区
+    await expect(section.locator('.mm-dg-item', { hasText: 'alias-free' })).toHaveCount(0);
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+});
