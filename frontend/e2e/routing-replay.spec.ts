@@ -19,6 +19,12 @@ import { test, expect, loginAsAdmin } from './fixtures';
  * │       reason}[], truncated}[]        (mod.rs:438)                       │
  * │ 注意：无逐次尝试明细（attemptDetails 是上游概念，AIGX 由 #32 补），     │
  * │ 无明细时「执行路径」整节不渲染。                                       │
+ * │ ── 日志列表（用例 4 的 mock 依据，同样钉死）──                          │
+ * │   /api/logs/requests → {success, data: [...], total, page, size}       │
+ * │   （src/api/admin/logs.rs:192-196；前端 Logs.tsx:185 读 Array.isArray  │
+ * │   (res.data)——该对当前正确，勿改坏）                                   │
+ * │   行内可见列：时间/状态/模型/渠道/用量/费用/耗时（Logs.tsx:775-808）—— │
+ * │   l.id 只作 React key 不进 DOM（:750），定位行须用可见字段（模型/渠道）。│
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * 新端点用 page.route 层 mock，不动 static-server.mjs（桩文件属 fe-lists-fix 域）。
@@ -192,8 +198,9 @@ test.describe('路由回放', () => {
       }));
     await loginAsAdmin(page);
     await page.goto('/logs');
-    // 打开详情：行内主链元素（时间单元格文本含日期；用模型名定位行再点首格）
-    const row = page.locator('tbody tr', { hasText: 'gpt-4o' }).first();
+    // 打开详情：按「可见字段」定位行——表格不渲染 l.id（只作 React key，
+    // Logs.tsx:750），行内可见文本是时间/状态/模型/渠道/用量/费用/耗时
+    const row = page.locator('tbody tr').filter({ hasText: 'gpt-4o' }).first();
     await row.locator('td').first().click();
     await expect(page.locator('.log-detail-modal')).toBeVisible({ timeout: 10_000 });
     await page.locator('.log-detail-tabs button', { hasText: '路由回放' }).click();
