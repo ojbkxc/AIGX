@@ -1095,9 +1095,24 @@ mod tests {
             assert_eq!(reasons.disabled, 1);
             assert_eq!(reasons.provider_off, 2);
             assert_eq!(capture.rows.len(), 3);
-            assert_eq!(capture.rows[0].reason, "disabled");
-            assert_eq!(capture.rows[1].reason, "provider_not_allowed");
-            assert_eq!(capture.rows[2].account_name, "ok");
+            // 顺序无关断言（取证：AccountSessionStore::upsert 尾部对池做
+            // `sort_by(created_at, id)`——本测试三个账号同一秒创建，排序
+            // 落到 id（UUID）字典序，测试运行间不稳定；迭代顺序不是插入
+            // 序，断言按名归类比对，不能假设 [off, cool, ok]）。
+            let mut by_name: Vec<(String, String)> = capture
+                .rows
+                .iter()
+                .map(|r| (r.account_name.clone(), r.reason.clone()))
+                .collect();
+            by_name.sort();
+            assert_eq!(
+                by_name,
+                vec![
+                    ("cool".to_string(), "provider_not_allowed".to_string()),
+                    ("off".to_string(), "disabled".to_string()),
+                    ("ok".to_string(), "provider_not_allowed".to_string()),
+                ]
+            );
             // detail=None（开关关闭）：行为与 acquire_with_reasons 完全一致
             let (lease, reasons) =
                 pool.acquire_with_reasons_detail("ch", "m", None, |_| false, None, None);

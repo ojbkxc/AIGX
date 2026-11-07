@@ -521,22 +521,47 @@ mod tests {
 
     #[test]
     fn and_branch_requires_all_conditions() {
-        // 与分支：余额低 且 命中模型 gpt-4 —— 两个条件都要成立
+        // 与分支：余额低 且 模型 gpt-4 —— 两个条件都要成立。
+        //
+        // 语义取证（首次运行失败的根因，实现没改、测试前提错了）：
+        // `source_id="account"` 的余额条件**不带模型维度读数**——它读的是
+        // 账号主余额（`available`），对任何模型同名；条件里的 `models` 字段
+        // 只决定**拦截范围**（读数成立时拦哪些模型），不影响读数本身。
+        // 上游 evaluate.rs:104-106 同口径（非本地命中 reading.models =
+        // condition.models）。所以本例两个条件**都成立**（available 3.0 < 5
+        // 命中两次）→ 分支全命中 → 拦 gpt-4（target=models）。
         let mut low = cond(LimiterMetric::Remaining, LimiterComparison::Lt, 5.0);
         low.join = LimiterJoin::Or;
         let mut model_cond = cond(LimiterMetric::Remaining, LimiterComparison::Lt, 5.0);
         model_cond.join = LimiterJoin::And;
         model_cond.models = vec!["gpt-4".to_string()];
-        // 模型限定在余额快照上无键可读 → unknown；这里改用钱包行验证
         let groups = vec![LimiterGroup {
             enabled: true,
             action: LimiterAction::Skip,
             target: LimiterTarget::Models,
             conditions: vec![low, model_cond],
         }];
-        // 只有第一条成立（第二条 unknown）→ 分支不全中 → 不拦
+        // 分支全命中 → 拦 gpt-4（范围限 models）、不拦其他模型
         let v = evaluate_groups(&groups, Some(&balance(3.0)));
-        assert!(!v.blocks("gpt-4"));
+        assert!(v.blocks("gpt-4"));
+        assert!(!v.blocks("claude-3"), "拦截范围限定在条件声明的模型集");
+        // 「AND 分支里出现 unknown → 分支不命中」的另一半（真正 unknown 的
+        // 场景）：第二条件读不存在的钱包行 → unknown → 分支不全中 → 不拦
+        let mut unknown_cond = cond(LimiterMetric::Remaining, LimiterComparison::Lt, 5.0);
+        unknown_cond.join = LimiterJoin::And;
+        unknown_cond.source_id = "不存在的钱包行".to_string();
+        let groups_unknown = vec![LimiterGroup {
+            enabled: true,
+            action: LimiterAction::Skip,
+            target: LimiterTarget::Models,
+            conditions: vec![low, unknown_cond],
+        }];
+        let v = evaluate_groups(&groups_unknown, Some(&balance(3.0)));
+        assert!(
+            !v.blocks("gpt-4"),
+            "unknown 条件使与分支不成立（宁放勿误伤）"
+        );
+        assert!(v.unknown_reasons.iter().any(|r| r.contains("额度读数")));
     }
 
     #[test]
