@@ -341,8 +341,8 @@ pub async fn handle_update_token(
         if let Some(m) = &body.allowed_models {
             k.allowed_models = Some(m.clone());
         }
-        // 白名单更新：显式传数组才覆盖；空数组归一为不限由 normalize_model_list
-        // 在 generate 侧处理（更新侧直存，allows_provider 已兼容空=不限语义）
+        // 白名单更新：显式传数组才覆盖；空数组与 None 同义（不限）——
+        // handler 与 store.update 双侧都做归一化，防写入双语义
         if let Some(p) = &body.allowed_providers {
             k.allowed_providers = if p.is_empty() { None } else { Some(p.clone()) };
         }

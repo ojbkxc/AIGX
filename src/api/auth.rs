@@ -337,6 +337,7 @@ impl ApiKeyStore {
         let old_hash = hash_api_key(api_key.key.strip_prefix("sk-").unwrap_or(&api_key.key));
         mutator(&mut api_key);
         api_key.allowed_models = normalize_model_list(api_key.allowed_models.take());
+        api_key.allowed_providers = normalize_model_list(api_key.allowed_providers.take());
         api_key.updated_at = chrono::Utc::now().timestamp();
         api_key.is_active = api_key.status == "active";
         api_key.bump_version();
@@ -1066,6 +1067,52 @@ mod session_registry_tests {
         let after = s.validate(&k.key).unwrap();
         assert!(after.allowed_models.is_none());
         assert!(after.allows_model("any-model"));
+    }
+
+    /// provider 白名单：None/空 = 不限，非空名单按家放行；provider_filter
+    /// 归一空名单为 None（数据面 resolve 层的过滤视图）。
+    #[test]
+    fn allowed_providers_semantics() {
+        let s = key_store();
+        // 未设置 = 不限
+        let k = s.generate("p0").unwrap();
+        assert!(k.allowed_providers.is_none());
+        assert!(k.allows_provider("anthropic"));
+        assert!(k.provider_filter().is_none());
+        // 创建时空数组归一为 None（与 allowed_models 同语义）
+        let opts = CreateApiKeyOptions {
+            name: "p1".to_string(),
+            user_id: None,
+            group: "default".to_string(),
+            allowed_models: None,
+            allowed_providers: Some(vec![]),
+            expires_at: None,
+            quota_limit: None,
+            ip_limit: None,
+            custom_key: None,
+        };
+        let k = s.generate_with_options(opts).unwrap();
+        assert!(k.allowed_providers.is_none());
+        // 非空名单生效 + filter 视图
+        s.update(&k.id, |key| {
+            key.allowed_providers = Some(vec!["anthropic".to_string()]);
+        })
+        .unwrap();
+        let after = s.validate(&k.key).unwrap();
+        assert!(after.allows_provider("anthropic"));
+        assert!(!after.allows_provider("gemini"));
+        assert_eq!(
+            after.provider_filter().as_deref(),
+            Some(&["anthropic".to_string()][..])
+        );
+        // 更新侧空数组归一为 None（handle_update_token 同规则）
+        s.update(&k.id, |key| {
+            key.allowed_providers = Some(vec![]);
+        })
+        .unwrap();
+        let after = s.validate(&k.key).unwrap();
+        assert!(after.allowed_providers.is_none());
+        assert!(after.allows_provider("gemini"));
     }
 
     /// 自定义密钥值：非空用用户值（sk- 前缀可选），validate 双形态可命中。

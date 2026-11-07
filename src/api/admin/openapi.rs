@@ -280,12 +280,12 @@ fn paths_channels() -> Value {
 fn paths_tokens() -> Value {
     json!({
         "/api/tokens": {
-            "get": op_params("令牌", "列出令牌（本人；管理员可携 all/user 过滤）",
+            "get": op_params("令牌", "列出令牌（本人；管理员可携 all/user 过滤）。响应附 providers/modelsByProvider 候选表（白名单选择器数据源）；令牌对象含 allowed_models 与 allowed_providers（provider 白名单，None/空=不限）",
                 &[query_param("all", "string", "管理员查看全部（任意非空值生效）"), query_param("user", "string", "按邮箱/UUID 筛选（仅管理员）")]),
-            "post": op_body("令牌", "创建令牌", "name: string, expired_time/remain_quota 等可选字段")
+            "post": op_body("令牌", "创建令牌", "name: string, allowed_models/allowed_providers/expired_time/remain_quota 等可选字段")
         },
         "/api/tokens/{id}": {
-            "put": op_params("令牌", "更新令牌", &[path_param("id")]),
+            "put": op_params("令牌", "更新令牌（含 allowed_providers 白名单；空数组=不限）", &[path_param("id")]),
             "delete": op_params("令牌", "删除令牌", &[path_param("id")])
         },
         "/api/tokens/{id}/key": {
@@ -297,14 +297,9 @@ fn paths_tokens() -> Value {
         "/api/tokens/{id}/reset_used": {
             "post": op_params("令牌", "清零令牌已用额度", &[path_param("id")])
         },
-        "/api/tokens/today": { "get": op("令牌", "今日用量摘要（token 维度）") },
-        "/api/keys": {
-            "get": op("令牌", "列出 API Key"),
-            "post": op_body("令牌", "新增 API Key", "key/remark: string")
-        },
-        "/api/keys/{id}": {
-            "delete": op_params("令牌", "删除 API Key", &[path_param("id")])
-        }
+        "/api/tokens/today": { "get": op("令牌", "今日用量摘要（token 维度）") }
+        // legacy /api/keys 系列已删除：前端全量收敛到 /api/tokens（处理函数
+        // 保留，运维 Agent 工具面仍以库函数复用）
     })
 }
 
