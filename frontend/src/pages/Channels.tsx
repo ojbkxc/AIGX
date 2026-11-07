@@ -256,14 +256,9 @@ const CH_COL_DEFAULT_W: Record<string, number> = {
 /** 列对齐三档（对齐 ModelManage ALIGN_OPTIONS） */
 type ChAlign = 'left' | 'center' | 'right';
 
-/** 公共层列声明（键集合与默认值的唯一事实源；CH 数据列全部可显隐可拖序） */
-const CH_COL_DEFS: TableColumnDef[] = CH_COL_ORDER.map((key) => ({
-  key,
-  label: CH_COL_PANEL_LABEL[key],
-  align: CH_COL_DEFAULT_ALIGN[key],
-  width: CH_COL_DEFAULT_W[key],
-}));
-/** 各列默认对齐 = 现有 CSS 的观感（渠道表当前全左对齐），视觉不突变 */
+/** 各列默认对齐 = 现有 CSS 的观感（渠道表当前全左对齐），视觉不突变。
+ *  声明必须在 CH_COL_DEFS 之前：DEFS 的模块级 map 立即求值，引用后置 const
+ *  会 TDZ ReferenceError 打崩 /channels 整页（verifier 2026-11-08 打回项）。 */
 const CH_COL_DEFAULT_ALIGN: Record<ChColKey, ChAlign> = {
   id: 'left',
   name: 'left',
@@ -276,6 +271,14 @@ const CH_COL_DEFAULT_ALIGN: Record<ChColKey, ChAlign> = {
   response: 'left',
   testtime: 'left',
 };
+
+/** 公共层列声明（键集合与默认值的唯一事实源；CH 数据列全部可显隐可拖序） */
+const CH_COL_DEFS: TableColumnDef[] = CH_COL_ORDER.map((key) => ({
+  key,
+  label: CH_COL_PANEL_LABEL[key],
+  align: CH_COL_DEFAULT_ALIGN[key],
+  width: CH_COL_DEFAULT_W[key],
+}));
 
 /** 读原始 JSON（数组形态不能用 readLs：它会把数组摊成对象） */
 function readLsRaw<T>(key: string): T | null {

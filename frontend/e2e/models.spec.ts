@@ -219,39 +219,40 @@ test.describe('模型管理', () => {
 
   test('列设置可以关掉「定价」列', async ({ page, pageErrors }) => {
     await expect(page.locator('.mm-h-price')).toHaveCount(1);
-    await page.locator('.mm-colset .btn').click();
-    const panel = page.locator('.mm-colset-panel');
+    await page.locator('.mm-colset > button').click();
+    const panel = page.locator('.tbl-colset');
     await expect(panel).toBeVisible();
-    await panel.locator('.mm-colset-row', { hasText: '定价' }).getByRole('switch').click();
+    // 公共面板：原生 checkbox 开关（对齐 TableColumnSettings），按行内列名定位
+    await panel.locator('.tbl-colset-row', { hasText: '定价' }).locator('input[type="checkbox"]').click();
     await expect(page.locator('.mm-h-price')).toHaveCount(0);
     // 恢复默认，避免 localStorage 影响后续用例
-    await panel.locator('.mm-colset-reset').click();
+    await panel.locator('.tbl-colset-reset').click();
     await expect(page.locator('.mm-h-price')).toHaveCount(1);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
   test('列设置：对齐三档作用于表头与单元格，锁定列不可关', async ({ page, pageErrors }) => {
-    await page.locator('.mm-colset .btn').click();
-    const panel = page.locator('.mm-colset-panel');
+    await page.locator('.mm-colset > button').click();
+    const panel = page.locator('.tbl-colset');
     await expect(panel).toBeVisible();
 
-    // 定价列 → 居中（默认左）
-    const priceRow = panel.locator('.mm-colset-row', { hasText: '定价' });
-    await priceRow.getByRole('button', { name: '居中' }).click();
+    // 定价列 → 居中（默认左；公共面板三档文案 左/中/右）
+    const priceRow = panel.locator('.tbl-colset-row', { hasText: '定价' });
+    await priceRow.locator('.tbl-colset-align button', { hasText: '中' }).click();
     await expect(page.locator('.mm-h-price')).toHaveClass(/ta-center/);
 
     // 勾列（锁定）→ 改左对齐；默认是居中
-    const checkRow = panel.locator('.mm-colset-row', { hasText: '选择' });
-    await checkRow.getByRole('button', { name: '左', exact: true }).click();
+    const checkRow = panel.locator('.tbl-colset-row', { hasText: '选择' });
+    await checkRow.locator('.tbl-colset-align button', { hasText: '左' }).click();
     await expect(page.locator('.mm-h-check')).toHaveClass(/ta-left/);
 
     // 锁定列（选择/模型/操作）开关禁用，点不动
-    await expect(checkRow.getByRole('switch')).toBeDisabled();
-    await expect(panel.locator('.mm-colset-row', { hasText: '模型' }).getByRole('switch')).toBeDisabled();
+    await expect(checkRow.locator('input[type="checkbox"]')).toBeDisabled();
+    await expect(panel.locator('.tbl-colset-row', { hasText: '模型' }).locator('input[type="checkbox"]')).toBeDisabled();
 
     // 恢复默认：对齐回到各列声明值
-    await panel.locator('.mm-colset-reset').click();
+    await panel.locator('.tbl-colset-reset').click();
     await expect(page.locator('.mm-h-price')).toHaveClass(/ta-left/);
     await expect(page.locator('.mm-h-check')).toHaveClass(/ta-center/);
 

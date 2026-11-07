@@ -14,6 +14,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { GripVertical } from 'lucide-react';
 import type { TableColumnAlign, TableColumnDef, TableColumnItem } from '../../lib/tableColumns';
+import './TableColumnSettings.css';
 
 const ALIGN_OPTIONS: Array<{ value: TableColumnAlign; label: string }> = [
   { value: 'left', label: '左' },
@@ -53,6 +54,10 @@ export default function TableColumnSettings({
 
   const defByKey = new Map(defs.map((d) => [d.key, d]));
   const labelOf = (key: string): string => defByKey.get(key)?.label ?? key;
+  // 拖拽会话期间面板会因父级 setState 重渲染，闭包里的 items 会过期；
+  // 指针事件回调一律读 ref 拿最新序（否则 onUp 会把拖前的顺序落盘）。
+  const itemsRef = useRef<TableColumnItem[]>(items);
+  itemsRef.current = items;
 
   // 点外面收面板（mousedown 口径与 ModelManage 既有面板一致）
   useEffect(() => {
@@ -119,22 +124,21 @@ export default function TableColumnSettings({
       if (!over || !rows || !rows.contains(over)) return;
       const overKey = over.getAttribute('data-col-key');
       if (!overKey || overKey === key) return;
+      const cur = itemsRef.current;
+      const from = cur.findIndex((c) => c.key === key);
+      const to = cur.findIndex((c) => c.key === overKey);
+      if (from < 0 || to < 0) return;
+      const next = [...cur];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
       onChange(
-        (() => {
-          const from = items.findIndex((c) => c.key === key);
-          const to = items.findIndex((c) => c.key === overKey);
-          if (from < 0 || to < 0) return items;
-          const next = [...items];
-          const [moved] = next.splice(from, 1);
-          next.splice(to, 0, moved);
-          return next;
-        })(),
+        next,
         false, // 拖动过程不落盘
       );
     };
     const onUp = (): void => {
       teardown();
-      onChange(items, true); // 松手落盘（items 为最新闭包外值时由页面以函数式兜底）
+      onChange(itemsRef.current, true); // 松手落盘（读 ref，绝不是拖前快照）
     };
     dragCleanup.current = teardown;
     window.addEventListener('pointermove', onMove);
