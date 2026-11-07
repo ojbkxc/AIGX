@@ -388,8 +388,9 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
             }
             // 对齐 A2A round_succeeded：有失败且**全部**失败才算这轮失败
             //（部分成功说明链路是好的，不该整轮退避）；无临期账号（无动作）
-            // 也不算失败。失败计数含 refresh_token 失效（提醒用户重新登录）。
-            let success = stats.failed == 0 && stats.invalid == 0;
+            // 也不算失败。失效（refresh_token 过期）不进失败计数——重试无意义，
+            // 只能重新登录，故 invalid 单独看、不参与本判定。
+            let success = stats.failed == 0 || stats.refreshed > 0;
             (summary, success)
         }
         TASK_MODEL_REFRESH => {
