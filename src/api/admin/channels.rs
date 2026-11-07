@@ -279,7 +279,7 @@ pub async fn handle_list_channels(
     // 能精确命中的串（含 cloudflare 本身），乱传的值静默不过滤。
     let type_filter = params
         .get("channel_type")
-        .map(crate::channel::ChannelType::from_str_lossy)
+        .map(|t| crate::channel::ChannelType::from_str_lossy(t))
         .filter(|_| {
             params.get("channel_type").is_some_and(|raw| {
                 KNOWN_CHANNEL_TYPE_FILTERS.contains(&raw.to_lowercase().as_str())

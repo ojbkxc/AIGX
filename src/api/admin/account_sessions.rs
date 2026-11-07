@@ -679,7 +679,7 @@ pub async fn handle_create_account_session(
     // 前端两段式；channel_id 优先，同时给出以 channel_id 为准。
     let channel = if body.channel_id.trim().is_empty() {
         match &body.auto_channel {
-            Some(spec) => resolve_or_create_auto_channel(state, &body.provider, spec)?,
+            Some(spec) => resolve_or_create_auto_channel(&state, &body.provider, spec)?,
             None => {
                 return Err(error_response(
                     "需要指定 channel_id 或 auto_channel",
@@ -1594,10 +1594,7 @@ pub struct CatalogSyncRequest {
     #[serde(default = "default_true")]
     pub cleanup: bool,
 }
-
-fn default_true() -> bool {
-    true
-}
+// `default_true` 定义在文件前部（AutoChannelSpec 附近），此处复用
 
 /// POST /api/account-sessions/catalog/sync —— 同步上游模型目录。
 ///
@@ -2346,6 +2343,8 @@ pub async fn handle_import_account_sessions_json(
             expires_at: entry.get("expires_at").and_then(|v| v.as_i64()),
             usage_query_interval_secs: None,
             limiters: entry_limiters,
+            // Agent2API 导入不走自动建渠道（导入流程自己管理渠道归属）
+            auto_channel: None,
         };
         let mut session = AccountSession::new(channel.id.clone(), String::new());
         session = apply_request(session, &req);
