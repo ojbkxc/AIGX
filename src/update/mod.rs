@@ -1079,7 +1079,9 @@ fn static_dir_path(exe: &Path) -> PathBuf {
 fn consume_rollback_pending(exe: &Path) -> Result<(), String> {
     let exe_bak = backup_path(exe);
     if !exe_bak.is_file() {
-        anyhow::bail!("没有可回滚的程序备份");
+        // 函数签名是 Result<(), String>（与 rollback()/request_restart 的
+        // String 错误口径一致），不用 anyhow::bail!（类型不匹配 E0308）
+        return Err("没有可回滚的程序备份".to_string());
     }
     let failed = exe.with_file_name(format!("{}.failed", file_name_of(exe).unwrap_or("aigx")));
     let _ = std::fs::remove_file(&failed);
