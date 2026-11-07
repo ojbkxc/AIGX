@@ -50,7 +50,6 @@ const Agent = lazyPage(() => import('./pages/Agent'));
 const Tickets = lazyPage(() => import('./pages/Tickets'));
 const CheckinCenter = lazyPage(() => import('./pages/CheckinCenter'));
 const ScheduledTasks = lazyPage(() => import('./pages/ScheduledTasks'));
-const Docs = lazyPage(() => import('./pages/Docs'));
 const Plugins = lazyPage(() => import('./pages/Plugins'));
 
 /** 懒加载页面兜底骨架（与全局 loading 视觉一致） */
@@ -213,7 +212,10 @@ export default function App(): JSX.Element {
           {/* 系统诊断并入渠道页第三 Tab「健康」（07 E.3：诊断三件套全部以渠道
               为粒度）；独立路由重定向防书签失效 */}
           <Route path="/diagnostics" element={<Navigate to="/channels?tab=health" replace />} />
-          <Route path="/docs" element={<AdminRoute><Docs /></AdminRoute>} />
+          {/* 接入文档并入 API 密钥页第二 Tab（07 E.3：密钥与文档是同一件事的
+              两半——拿 key → 怎么填）。原 /docs 是管理员专属，并入后文档 Tab
+              对全员可见（面板内部按角色分层）；旧路由重定向防书签失效 */}
+          <Route path="/docs" element={<Navigate to="/keys?tab=docs" replace />} />
           {/* 插件管理（契约对齐 Agent2API；后端建设中整页降级空态） */}
           <Route path="/plugins" element={<AdminRoute><Plugins /></AdminRoute>} />
           <Route path="/tickets" element={<ProtectedLayout><Tickets /></ProtectedLayout>} />

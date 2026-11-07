@@ -11,7 +11,7 @@ import {
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Bot, Headphones, CalendarCheck, Globe, CalendarClock,
-  FileText, Puzzle,
+  Puzzle,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -54,8 +54,6 @@ const navItems: NavItem[] = [
   { path: '/proxy-pool', labelKey: '网络代理', icon: Globe, adminOnly: true },
   // 定时任务（对照 Agent2API「定时任务」页：凭证维护/模型目录刷新/版本检查等）
   { path: '/scheduled-tasks', labelKey: '定时任务', icon: CalendarClock, adminOnly: true },
-  // 接口接入文档（Base URL / 三协议端点 / 模型清单，对照 Agent2API「接口地址」页）
-  { path: '/docs', labelKey: '文档', icon: FileText, adminOnly: true },
   // 插件管理（契约对齐 Agent2API 插件页；后端建设中整页降级空态，就绪即生效）
   { path: '/plugins', labelKey: '插件管理', icon: Puzzle, adminOnly: true },
 ];
@@ -102,7 +100,8 @@ const navGroups: NavGroup[] = [
       navItemOf('/scheduled-tasks'), // 定时任务
       // 系统诊断 → 并入「渠道与账号池」第三 Tab「健康」（07 E.3：诊断三件套
       // 全部以渠道为粒度，看到问题就在旁边修），顶级菜单下线
-      navItemOf('/docs'),           // 文档（接口接入指引）
+      // 文档 → 并入「API 密钥」第二 Tab「接入文档」（07 E.3：密钥与文档是
+      // 同一件事的两半；且全员可见——普通用户也要知道怎么填客户端），顶级菜单下线
       navItemOf('/plugins'),        // 插件管理（后端建设中降级空态）
       navItemOf('/settings'),        // 系统设置
       navItemOf('/agent'),           // AI 运维

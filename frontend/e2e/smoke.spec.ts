@@ -27,6 +27,9 @@ const ADMIN_PAGES: Array<[path: string, marker: string]> = [
 const USER_PAGES: Array<[path: string, marker: string]> = [
   ['/', '仪表盘'],
   ['/keys', '密钥'],
+  // 接入文档 Tab（2026-11-07 自独立 /docs 管理员页并入，07 E.3）：
+  // 文档对全员可见（普通用户 Base URL 用站点 origin），管理员另见监听口径卡
+  ['/keys?tab=docs', '文档'],
   ['/wallet', '钱包'],
   ['/logs', '日志'],
   ['/chat', '聊天'],

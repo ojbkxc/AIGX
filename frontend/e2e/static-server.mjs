@@ -104,9 +104,131 @@ const MANAGE_VIEW = {
       aliases: [],
     },
   ],
-  mappings: { 'alias-free': 'unpriced-model', 'alias-off': 'unpriced-model' },
+  mappings: {
+    'alias-free': 'unpriced-model',
+    'alias-off': 'unpriced-model',
+    // 悬空映射：目标模型不在 models 清单里（上游下线），悬空区应列出并可删
+    'alias-dangling': 'gone-model',
+  },
   unpriced: 1,
 };
+
+// ── 元信息覆盖（含 reasoning_levels 声明：思考等级下拉三级回退的回归源）──
+const MODEL_META = {
+  'glm-4.7-flash': {
+    owned_by: 'zhipu',
+    context_length: 128000,
+    capabilities: ['chat', 'tool', 'vision'],
+    // 该模型自己声明的档位（候选下拉优先用它，而不是兜底表 off~max）
+    reasoning_levels: ['low', 'medium', 'high'],
+  },
+};
+
+// ── 账号供应商目录（含 category 三值，形状对齐 src/account_session/registry.rs 的
+// providers 端点；给添加账号五档弹窗回归用：agent/web/api 三形态各若干家）──
+const ACCOUNT_PROVIDERS = [
+  // agent 形态（登录态/cookie/JWT）
+  { kind: 'workbuddy', label: 'WorkBuddy 国内版', protocol: 'session', default_base_url: 'https://www.example-wb.com', auth: 'cookie', credential_hint: '粘贴 Cookie', chat_path: '/api/chat', openai_compatible: false, native_supported: true, category: 'agent' },
+  { kind: 'qoder', label: 'Qoder', protocol: 'session', default_base_url: 'https://www.qoder.com', auth: 'bearer', credential_hint: '粘贴 JWT', openai_compatible: false, native_supported: true, category: 'agent' },
+  // web 形态（网页版，走 deepseek-web/chatglm 这类网页桥）
+  { kind: 'deepseek-web', label: 'DeepSeek 网页版', protocol: 'web', default_base_url: 'https://chat.deepseek.com', auth: 'cookie', credential_hint: '粘贴登录 Cookie', openai_compatible: false, native_supported: true, category: 'web' },
+  { kind: 'chatglm', label: '智谱清言', protocol: 'web', default_base_url: 'https://chatglm.cn', auth: 'cookie', credential_hint: '粘贴登录 Cookie', openai_compatible: false, native_supported: true, category: 'web' },
+  // api 形态（API Key 型）
+  { kind: 'openai_compatible', label: 'OpenAI 兼容', protocol: 'openai', default_base_url: 'https://api.openai.com/v1', auth: null, openai_compatible: true, native_supported: true, category: 'api' },
+  { kind: 'anthropic_compatible', label: 'Anthropic 兼容', protocol: 'anthropic', default_base_url: 'https://api.anthropic.com', auth: null, openai_compatible: false, native_supported: true, category: 'api' },
+];
+
+// ── 账号池列表（分组折叠/有效期列/按到期排序回归用：两家 provider 各两条，
+// 一条带凭证到期（未来 3 天）、一条带套餐到期（未来 2 小时）、一条已过期、一条无到期）──
+const ACCOUNT_SESSIONS = [
+  {
+    id: 'acc-e2e-1', channel_id: 'ch-1', channel_name: 'lxchat-glm',
+    name: 'e2e-账号', provider: 'openai_compatible', base_url: 'https://upstream.example.com',
+    api_key: 'sk-***', proxy: 'pool:px_e2e_1', status: 'enabled', configured_status: 'enabled',
+    priority: 0, weight: 1, max_concurrency: 3, models: [], extra_headers: {},
+    // 3 天后到期（10 位秒 → 前端 expiryMillis 归一）
+    expires_at: Math.floor(Date.now() / 1000) + 3 * 86400,
+  },
+  {
+    id: 'acc-e2e-2', channel_id: 'ch-3', channel_name: 'workbuddy-pool',
+    name: 'wb-一号', provider: 'workbuddy', base_url: 'https://www.example-wb.com',
+    api_key: 'ey***', proxy: '', status: 'enabled', configured_status: 'enabled',
+    priority: 10, weight: 1, max_concurrency: 3, models: [], extra_headers: {},
+    // 无凭证到期，但余额快照的套餐 2 小时后到期（13 位毫秒）+ 一份待生效套餐
+    expires_at: null,
+    last_balance: {
+      available: 42, unit: '积分',
+      wallets: [{ type: 'credits', displayName: '积分池', balance: 42, total: 100 }],
+      subscription: { planName: '专业版', status: 'active', expireAt: Date.now() + 2 * 3600_000, remainQuota: 42, totalQuota: 100 },
+      plans: [
+        { name: '活动加赠', state: 'active' },
+        { name: '周末礼包', state: 'pending', pendingUntil: Math.floor(Date.now() / 1000) + 86400 },
+      ],
+    },
+  },
+  {
+    id: 'acc-e2e-3', channel_id: 'ch-3', channel_name: 'workbuddy-pool',
+    name: 'wb-二号', provider: 'workbuddy', base_url: 'https://www.example-wb.com',
+    api_key: 'ey***', proxy: '', status: 'disabled', configured_status: 'disabled',
+    priority: 5, weight: 1, max_concurrency: 3, models: [], extra_headers: {},
+    // 已过期（昨天）
+    expires_at: Math.floor(Date.now() / 1000) - 86400,
+  },
+  {
+    id: 'acc-e2e-4', channel_id: 'ch-1', channel_name: 'lxchat-glm',
+    name: 'e2e-无到期', provider: 'openai_compatible', base_url: 'https://upstream.example.com',
+    api_key: 'sk-***', proxy: '', status: 'enabled', configured_status: 'enabled',
+    priority: 0, weight: 1, max_concurrency: 0, models: [], extra_headers: {},
+  },
+];
+
+// ── 插件管理（/api/plugins 桩：一个已装包 + 目录商店两条，形状对齐 PluginsPayload；
+// 「运行中」宿主 + 一家已加载/一家未加载，验证启停开关/提供商行/卸载确认/诊断区）──
+const PLUGINS_PAYLOAD = {
+  packs: [
+    {
+      id: 'aigx-provider-pack', name: '提供商增强包', description: '为网关扩展多家 AI 提供商的示例插件包。',
+      version: '1.2.0', requiredVersion: null, updateRequired: false, compatibilityError: null,
+      enabled: true, signed: true, installedAt: Math.floor(Date.now() / 1000) - 86400 * 9,
+      entryPresent: true, protocol: 3, homepage: null, icon: null,
+      providers: [
+        { id: 'monkeyCode', label: 'MonkeyCode', enabled: true, loaded: true },
+        { id: 'orca-term', label: 'OrcaTerm', enabled: false, loaded: false },
+      ],
+      host: { running: true, providers: ['monkeyCode'], crashes: 0, disabled: false, lastError: null },
+      providerCategory: 'agent',
+    },
+  ],
+  host: { running: true, providers: ['monkeyCode'], crashes: 0, disabled: false, lastError: null },
+  adminPanels: [],
+  accountFeatures: {},
+  target: 'x86_64-unknown-linux-gnu',
+  protocol: 3,
+  pluginsDir: '/data/aigx/plugins',
+  catalog: {
+    available: true, current: 'v1', reason: null, error: false, checked: true, checking: false,
+    checkedAt: Math.floor(Date.now() / 1000) - 600,
+    plugins: [
+      {
+        id: 'aigx-provider-pack', name: '提供商增强包', description: '为网关扩展多家 AI 提供商。',
+        official: true, version: '1.2.0', page: 'https://example.com/changelog', notes: null,
+        prerelease: false, platforms: [{ target: 'x86_64-unknown-linux-gnu', size: 2097152, url: 'https://example.com/pack.zip', current: true }],
+      },
+      {
+        id: 'aigx-web-pack', name: '网页提供商包', description: '网页形态提供商扩展（智谱清言等）。',
+        official: true, version: null, page: null, prerelease: true,
+        platforms: [],
+      },
+    ],
+  },
+  updates: [
+    { id: 'aigx-provider-pack', available: false, checked: true, current: '1.2.0', latest: '1.2.0', reason: null, error: false, asset: null },
+  ],
+  operations: [],
+};
+
+/** 插件桩复位种子：desktop/mobile 两 project 串行共用进程，写操作会跨 project 残留 */
+const PLUGINS_SEED = () => JSON.parse(JSON.stringify(PLUGINS_PAYLOAD));
 
 // ── 签到中心快照（形状对齐 src/api/admin/checkin_center.rs）──
 const CHECKIN_CENTER = {
@@ -380,6 +502,15 @@ function handle(req, res, p, bodyText) {
     if (p === '/api/network/status') return sendJson(res, { success: true, data: { enabled: true } });
     if (p === '/api/dashboard/realtime') return sendJson(res, { success: true, data: { window_secs: 300, total_requests: 0, qps: 0, avg_latency_ms: 0, error_rate: 0, errors: 0 } });
 
+    // 网关监听设置（API 密钥页「接入文档」Tab 管理员视角读）：
+    // 通配地址 → 前端回退站点 origin（与生产通配口径一致）
+    if (p === '/api/gateway/settings') {
+      return sendJson(res, {
+        success: true,
+        data: { host: '0.0.0.0', port: 9527, corsOrigins: [], trustProxyHeaders: false },
+      });
+    }
+
     // 渠道健康 Tab（原系统诊断页并入）：三件套形状对齐 src/api/admin/diagnostics.rs
     if (p === '/api/diagnostics/summary') {
       return sendJson(res, {
@@ -425,6 +556,8 @@ function handle(req, res, p, bodyText) {
 
     // 统一模型管理
     if (p === '/api/models/manage') return sendJson(res, { success: true, data: MANAGE_VIEW });
+    // 元信息覆盖表（含 reasoning_levels 声明，供思考等级下拉候选回退）
+    if (p === '/api/models/meta') return sendJson(res, { success: true, data: MODEL_META });
     if (p === '/api/models/state') {
       // 启停后回读视图：不真的改状态，只验证请求能打通并返回同形数据
       return sendJson(res, { success: true, data: MANAGE_VIEW });
@@ -465,6 +598,16 @@ function handle(req, res, p, bodyText) {
       proxyPool.length = 0;
       proxyPool.push(...fresh);
       return sendJson(res, { success: true, items: proxyPool });
+    }
+
+    // E2E 状态复位：恢复插件桩预置态（启停/卸载写操作会改内存态）
+    if (p === '/api/__e2e/reset-plugins' && req.method === 'POST') {
+      const fresh = PLUGINS_SEED();
+      PLUGINS_PAYLOAD.packs = fresh.packs;
+      PLUGINS_PAYLOAD.host = fresh.host;
+      PLUGINS_PAYLOAD.catalog = fresh.catalog;
+      PLUGINS_PAYLOAD.updates = fresh.updates;
+      return sendJson(res, { success: true, data: null });
     }
 
     // 网络代理池（进程内数组，E2E 可驱动 CRUD）
@@ -523,18 +666,38 @@ function handle(req, res, p, bodyText) {
       return sendJson(res, { success: true, status: 200, ip: '203.0.113.42', duration_ms: 100, error: null, proxy: '' });
     }
 
-    // 账号池（预置一条，供账号弹窗代理选择器用例用）
+    // 账号池（分组折叠/有效期列回归用：两家 provider 四条，含到期/已过期/待生效）
     if (p === '/api/account-sessions' && req.method === 'GET') {
-      return sendJson(res, {
-        success: true,
-        data: [{
-          id: 'acc-e2e-1', channel_id: 'ch-1', channel_name: 'lxchat-glm',
-          name: 'e2e-账号', provider: 'openai_compatible', base_url: 'https://upstream.example.com',
-          api_key: 'sk-***', proxy: 'pool:px_e2e_1', status: 'enabled', configured_status: 'enabled',
-          priority: 0, weight: 1, max_concurrency: 3, models: [], extra_headers: {},
-        }],
-        total: 1,
-      });
+      return sendJson(res, { success: true, data: ACCOUNT_SESSIONS, total: ACCOUNT_SESSIONS.length });
+    }
+
+    // 供应商目录（含 category 三值：agent/web/api —— 添加账号五档弹窗回归用）
+    if (p === '/api/account-sessions/providers') {
+      return sendJson(res, { success: true, data: ACCOUNT_PROVIDERS, total: ACCOUNT_PROVIDERS.length });
+    }
+
+    // 插件管理（契约对齐 Agent2API api/plugins.rs；写端点回读同一份桩）
+    if (p === '/api/plugins' && req.method === 'GET') {
+      return sendJson(res, { success: true, data: PLUGINS_PAYLOAD });
+    }
+    if (/^\/api\/plugins\/(enable|uninstall|provider)$/.test(p) && req.method === 'POST') {
+      // 最小可动写桩：真改内存态，让启停/卸载用例能断言列表回读后的变化
+      const body = JSON.parse(bodyText || '{}');
+      if (p === '/api/plugins/enable') {
+        const pack = PLUGINS_PAYLOAD.packs.find((pk) => pk.id === body.id);
+        if (pack) pack.enabled = body.enabled !== false;
+      } else if (p === '/api/plugins/provider') {
+        const pack = PLUGINS_PAYLOAD.packs.find((pk) => pk.id === body.id);
+        const provider = pack?.providers.find((pv) => pv.id === body.provider);
+        if (provider) provider.enabled = body.enabled !== false;
+      } else if (p === '/api/plugins/uninstall') {
+        const idx = PLUGINS_PAYLOAD.packs.findIndex((pk) => pk.id === body.id);
+        if (idx >= 0) PLUGINS_PAYLOAD.packs.splice(idx, 1);
+      }
+      return sendJson(res, { success: true, data: { packs: PLUGINS_PAYLOAD.packs, host: PLUGINS_PAYLOAD.host } });
+    }
+    if (p === '/api/plugins/update' || p === '/api/plugins/release') {
+      return sendJson(res, { success: true, data: { error: false, reason: null } });
     }
 
     // 签到中心

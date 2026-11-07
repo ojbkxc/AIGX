@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useSearchParams } from 'react-router-dom';
 import {
   Eye, EyeOff, MoreHorizontal, Search, Pencil, Power, PowerOff,
   Loader2, RotateCcw, Trash2, Copy, Check, RefreshCcw,
@@ -9,11 +10,15 @@ import { useToast } from '../components/Toast';
 import { fmtQuota, isAdmin } from '../lib/utils';
 import { useListKeyboard } from '../hooks/useListKeyboard';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination, MultiSelect } from '../components/ui';
+import KeysDocsPanel from '../components/KeysDocsPanel';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination, MultiSelect, Tabs } from '../components/ui';
 import './Keys.css';
 
 /** 客户端分页每页条数（与 Pricing 页一致） */
 const PAGE_SIZE = 20;
+
+/** 页面 Tab：密钥管理 / 接入文档（文档 2026-11-07 自独立页并入，07 E.3） */
+type KeysTab = 'keys' | 'docs';
 
 interface TokenItem {
   id: string | number;
@@ -101,6 +106,19 @@ function modelBadgeColor(name: string): string {
 }
 
 export default function Keys(): JSX.Element {
+  // Tab 走 URL 参数（?tab=docs），与渠道页/模型管理页的合并 Tab 同构：
+  // 刷新/书签直达、文档 Tab 的链接可分享（/keys?tab=docs）
+  const [params, setParams] = useSearchParams();
+  const tabParam = params.get('tab');
+  const tab: KeysTab = tabParam === 'docs' ? 'docs' : 'keys';
+  const changeTab = (next: KeysTab): void => {
+    if (next === tab) return;
+    const nextParams = new URLSearchParams(params);
+    if (next === 'keys') nextParams.delete('tab');
+    else nextParams.set('tab', next);
+    setParams(nextParams, { replace: true });
+  };
+
   const [tokens, setTokens] = useState<TokenItem[]>([]);
   const [groups, setGroups] = useState<GroupItem[]>([]);
   /** 模型白名单候选（对话/运维页同源：/api/models/available） */
@@ -651,12 +669,28 @@ export default function Keys(): JSX.Element {
     <div>
       <div className="page-header">
         <h1>{t('API 密钥')}</h1>
-        <p>{t('创建与管理 API 密钥')}</p>
+        <p>{t('创建与管理 API 密钥，以及接入文档（网关地址、协议端点与可用模型）')}</p>
       </div>
 
-      {error && <div className="error-message">{error}</div>}
+      {/* 密钥 / 接入文档双 Tab（文档 2026-11-07 自独立页并入，07 E.3）：
+          密钥与文档是同一件事的两半——拿 key → 怎么填，合并后少一个顶级菜单。
+          文档 Tab 对所有登录用户可见（本页走 ProtectedLayout）；面板内部
+          按角色分层（普通用户 Base URL 用站点 origin，管理员额外看监听口径）。 */}
+      <Tabs<KeysTab>
+        className="keys-tabs"
+        ariaLabel={t('API 密钥')}
+        items={[
+          { key: 'keys', label: t('密钥管理') },
+          { key: 'docs', label: t('接入文档') },
+        ]}
+        active={tab}
+        onChange={changeTab}
+      />
 
-      <Card
+      <div hidden={tab !== 'keys'}>
+        {error && <div className="error-message">{error}</div>}
+
+        <Card
         title={`${viewAll ? t('全部令牌') : t('我的令牌')} (${tokens.length})`}
         actions={
           <div className="keys-toolbar">
@@ -909,6 +943,13 @@ export default function Keys(): JSX.Element {
           </>
         )}
       </Card>
+      </div>
+
+      {/* 接入文档 Tab：角色分层见 KeysDocsPanel 头注（全员可见 Base URL/协议/
+          模型清单；网关监听口径仅管理员） */}
+      <div hidden={tab !== 'docs'}>
+        <KeysDocsPanel />
+      </div>
 
       {/* 行操作菜单（fixed 挂在 body 层级，逃出 Card/table 的 overflow 裁剪） */}
       {rowMenuId !== null && (() => {

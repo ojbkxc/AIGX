@@ -2,6 +2,11 @@
  * 布局对齐 Channels.css（new-api keys 风格）：
  * 固定列宽 + 横向滚动 + 操作列 sticky right + 图标行操作 + ⋯ 下拉 */
 
+/* 密钥 / 接入文档双 Tab（文档 2026-11-07 并入，07 E.3）：与渠道页 gw-tabs 同款间距 */
+.keys-tabs {
+  margin-bottom: 12px;
+}
+
 .generated-key-box {
   background: var(--code-bg);
   border: 1px solid var(--border-color);
