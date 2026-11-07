@@ -458,7 +458,7 @@ pub async fn handle_set_capabilities(
         .model_metadata
         .all_overrides()
         .iter()
-        .find(|(name, _)| name == model)
+        .find(|(name, _)| name.as_str() == model)
         .map(|(_, meta)| meta.reasoning_levels.clone())
         .unwrap_or_default();
     let meta = crate::model::metadata::ModelMetadata {
