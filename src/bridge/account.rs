@@ -93,27 +93,38 @@ impl AccountBridge {
     /// 任一命中「已关停」就跳过该账号 —— 管理员在模型管理页关掉的是
     /// 「这家别再供这个模型」，而不是「把整个账号停用」。
     /// 插件面停用闸门是整家关停（比 rules 更粗一档）。
-    fn pick_account(&self, model: &str, alias: Option<&str>) -> Option<AccountLease> {
+    ///
+    /// 无候选时带回各过滤器的跳过计数（502 文案原因化，08-prod P1-1）。
+    fn pick_account(
+        &self,
+        model: &str,
+        alias: Option<&str>,
+    ) -> (
+        Option<AccountLease>,
+        crate::account_session::store::SkipReasons,
+    ) {
         let plugin_off = |provider: &str| {
             self.plugin_disabled
                 .as_ref()
                 .is_some_and(|gates| gates.is_disabled(provider))
         };
         match &self.rules {
-            None => self
-                .sessions
-                .acquire_with(&self.channel_id, model, alias, |provider| {
-                    !plugin_off(provider)
-                }),
-            Some(rules) => self
-                .sessions
-                .acquire_with(&self.channel_id, model, alias, |provider| {
-                    !plugin_off(provider)
-                        && !rules.is_disabled(provider, model)
-                        && alias
-                            .map(|a| !rules.is_disabled(provider, a))
-                            .unwrap_or(true)
-                }),
+            None => {
+                self.sessions
+                    .acquire_with_reasons(&self.channel_id, model, alias, |provider| {
+                        !plugin_off(provider)
+                    })
+            }
+            Some(rules) => {
+                self.sessions
+                    .acquire_with_reasons(&self.channel_id, model, alias, |provider| {
+                        !plugin_off(provider)
+                            && !rules.is_disabled(provider, model)
+                            && alias
+                                .map(|a| !rules.is_disabled(provider, a))
+                                .unwrap_or(true)
+                    })
+            }
         }
     }
 
@@ -253,10 +264,18 @@ impl AccountBridge {
     }
 
     /// 全部账号都不可用 / 都失败时的统一错误。
-    fn all_failed(&self, model: &str) -> BridgeError {
+    ///
+    /// `reasons` 是**最后一次**选号尝试的跳过计数（只有「第一轮就选不出」
+    /// 时才反映全貌；跑过几轮后选不出，冷却计数是失败造成的，同样有信息量）。
+    fn all_failed(
+        &self,
+        model: &str,
+        reasons: &crate::account_session::store::SkipReasons,
+    ) -> BridgeError {
         BridgeError::AllAccountsFailed(format!(
-            "channel {} exhausted all accounts for model {model}",
-            self.channel_id
+            "channel {} exhausted all accounts for model {model}（{}）",
+            self.channel_id,
+            reasons.summary()
         ))
     }
 
@@ -274,6 +293,7 @@ impl AccountBridge {
         let started_at = Instant::now();
         let alias = Some(ctx.model.as_str());
         let mut last: Option<BridgeError> = None;
+        let mut last_reasons = crate::account_session::store::SkipReasons::default();
         for attempt in 0..self.max_attempts() {
             if attempt > 0 {
                 self.pause_before_retry().await;
@@ -282,7 +302,9 @@ impl AccountBridge {
                 last = Some(rotation_timeout(started_at));
                 break;
             }
-            let Some(lease) = self.pick_account(model, alias) else {
+            let (lease, reasons) = self.pick_account(model, alias);
+            last_reasons = reasons;
+            let Some(lease) = lease else {
                 break;
             };
             let bridge = match adapter::build_bridge(lease.session(), &self.sessions) {
@@ -309,7 +331,7 @@ impl AccountBridge {
                 }
             }
         }
-        Err(last.unwrap_or_else(|| self.all_failed(model)))
+        Err(last.unwrap_or_else(|| self.all_failed(model, &last_reasons)))
     }
 }
 
@@ -327,6 +349,7 @@ impl Bridge for AccountBridge {
         let started_at = Instant::now();
         let alias = Some(ctx.model.as_str());
         let mut last: Option<BridgeError> = None;
+        let mut last_reasons = crate::account_session::store::SkipReasons::default();
         for attempt in 0..self.max_attempts() {
             if attempt > 0 {
                 self.pause_before_retry().await;
@@ -335,7 +358,9 @@ impl Bridge for AccountBridge {
                 last = Some(rotation_timeout(started_at));
                 break;
             }
-            let Some(lease) = self.pick_account(&req.model, alias) else {
+            let (lease, reasons) = self.pick_account(&req.model, alias);
+            last_reasons = reasons;
+            let Some(lease) = lease else {
                 break;
             };
             let bridge = match adapter::build_bridge(lease.session(), &self.sessions) {
@@ -367,7 +392,7 @@ impl Bridge for AccountBridge {
                 }
             }
         }
-        Err(last.unwrap_or_else(|| self.all_failed(&req.model)))
+        Err(last.unwrap_or_else(|| self.all_failed(&req.model, &last_reasons)))
     }
 
     async fn chat_stream(
@@ -378,6 +403,7 @@ impl Bridge for AccountBridge {
         let started_at = Instant::now();
         let alias = Some(ctx.model.as_str());
         let mut last: Option<BridgeError> = None;
+        let mut last_reasons = crate::account_session::store::SkipReasons::default();
         for attempt in 0..self.max_attempts() {
             if attempt > 0 {
                 self.pause_before_retry().await;
@@ -386,7 +412,9 @@ impl Bridge for AccountBridge {
                 last = Some(rotation_timeout(started_at));
                 break;
             }
-            let Some(lease) = self.pick_account(&req.model, alias) else {
+            let (lease, reasons) = self.pick_account(&req.model, alias);
+            last_reasons = reasons;
+            let Some(lease) = lease else {
                 break;
             };
             let bridge = match adapter::build_bridge(lease.session(), &self.sessions) {
@@ -423,7 +451,7 @@ impl Bridge for AccountBridge {
                 }
             }
         }
-        Err(last.unwrap_or_else(|| self.all_failed(&req.model)))
+        Err(last.unwrap_or_else(|| self.all_failed(&req.model, &last_reasons)))
     }
 
     async fn embed(

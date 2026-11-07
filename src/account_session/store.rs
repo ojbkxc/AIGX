@@ -66,6 +66,67 @@ pub enum CasOutcome {
     Missing,
 }
 
+/// 选号阶段各过滤器跳过的账号数（无候选时的原因化，502 文案用）。
+///
+/// 生产实证（08-prod P1-1）：502「exhausted all accounts」时账号
+/// `error_count=0` —— 按设计，选号层过滤掉的账号不尝试、不计错。
+/// 这份计数把「为什么一个都没选上」带回错误文案。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SkipReasons {
+    /// 渠道下没有任何账号（连被过滤的都没有）
+    pub no_accounts: bool,
+    /// 状态禁用
+    pub disabled: usize,
+    /// provider 被整家关停（模型管理规则 / 插件面闸门）
+    pub provider_off: usize,
+    /// 凭证已过期
+    pub expired: usize,
+    /// 模型不在账号白名单（models 为空 = 全支持，不计）
+    pub model_mismatch: usize,
+    /// 模型 / 账号级冷却中
+    pub cooling: usize,
+    /// 余额低于限制器阈值
+    pub balance_low: usize,
+    /// 并发占满（max_concurrency）
+    pub concurrency: usize,
+}
+
+impl SkipReasons {
+    /// 拼成一句人话（只列非零项；全空 = 「没有可用账号」）。
+    pub fn summary(&self) -> String {
+        if self.no_accounts {
+            return "渠道下没有账号".to_string();
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if self.disabled > 0 {
+            parts.push(format!("{} 个已禁用", self.disabled));
+        }
+        if self.provider_off > 0 {
+            parts.push(format!("{} 个 provider 被关停", self.provider_off));
+        }
+        if self.expired > 0 {
+            parts.push(format!("{} 个凭证过期", self.expired));
+        }
+        if self.model_mismatch > 0 {
+            parts.push(format!("{} 个不在模型白名单", self.model_mismatch));
+        }
+        if self.cooling > 0 {
+            parts.push(format!("{} 个冷却中", self.cooling));
+        }
+        if self.balance_low > 0 {
+            parts.push(format!("{} 个余额低于阈值", self.balance_low));
+        }
+        if self.concurrency > 0 {
+            parts.push(format!("{} 个并发占满", self.concurrency));
+        }
+        if parts.is_empty() {
+            "没有可用账号".to_string()
+        } else {
+            parts.join("、")
+        }
+    }
+}
+
 struct Inner {
     store: Arc<FileStore>,
     sessions: RwLock<Vec<AccountSession>>,
@@ -392,33 +453,71 @@ impl AccountSessionStore {
     where
         F: Fn(&str) -> bool,
     {
+        self.acquire_with_reasons(channel_id, model, alias, allow).0
+    }
+
+    /// [`Self::acquire_with`] 的可观测版：无候选时返回各过滤器的跳过计数
+    ///（502「exhausted」的原因化，08-prod P1-1：生产出现过 502 exhausted
+    /// 但账号 error_count=0 —— 选号层过滤掉的账号按设计不计错误，用户
+    /// 看不到「为什么一个都没选上」）。
+    ///
+    /// 有候选时计数字段无意义（不累计）。
+    pub fn acquire_with_reasons<F>(
+        &self,
+        channel_id: &str,
+        model: &str,
+        alias: Option<&str>,
+        allow: F,
+    ) -> (Option<AccountLease>, SkipReasons)
+    where
+        F: Fn(&str) -> bool,
+    {
         let now = chrono::Utc::now().timestamp();
         let mut sessions = self.inner.sessions.write();
         let mut candidates: Vec<usize> = Vec::new();
+        let mut reasons = SkipReasons::default();
+        let mut in_channel = 0usize;
         for (index, session) in sessions.iter().enumerate() {
-            if session.channel_id != channel_id || !session.is_enabled() {
+            if session.channel_id != channel_id {
+                continue;
+            }
+            in_channel += 1;
+            if !session.is_enabled() {
+                reasons.disabled += 1;
                 continue;
             }
             if !allow(&session.provider) {
+                reasons.provider_off += 1;
                 continue;
             }
-            if session.is_expired(now) || !session.supports_model_any(model, alias) {
+            if session.is_expired(now) {
+                reasons.expired += 1;
+                continue;
+            }
+            if !session.supports_model_any(model, alias) {
+                reasons.model_mismatch += 1;
                 continue;
             }
             if session.is_cooling(model, now) {
+                reasons.cooling += 1;
                 continue;
             }
             // 余额限制器：available 低于阈值时跳过（P1-6 选路消费）
             if session.should_skip_by_balance() {
+                reasons.balance_low += 1;
                 continue;
             }
             if session.max_concurrency > 0 && session.in_flight >= session.max_concurrency {
+                reasons.concurrency += 1;
                 continue;
             }
             candidates.push(index);
         }
+        if in_channel == 0 {
+            reasons.no_accounts = true;
+        }
         if candidates.is_empty() {
-            return None;
+            return (None, reasons);
         }
         // 最高优先级组内：权重随机（同组内再让空闲最久的账号权重更高）
         let max_priority = candidates
@@ -437,10 +536,13 @@ impl AccountSessionStore {
         let session = sessions[pick].clone();
         drop(sessions);
         self.persist_throttled(&session);
-        Some(AccountLease {
-            inner: self.inner.clone(),
-            session,
-        })
+        (
+            Some(AccountLease {
+                inner: self.inner.clone(),
+                session,
+            }),
+            reasons,
+        )
     }
 
     /// 记入一次成功（清该模型冷却、累计延迟）。
@@ -822,6 +924,67 @@ mod tests {
                 loaded.provider,
                 super::super::registry::DEFAULT_PROVIDER_KIND
             );
+        });
+    }
+
+    #[test]
+    fn skip_reasons_summary_only_lists_nonzero() {
+        let none = SkipReasons::default();
+        assert_eq!(none.summary(), "没有可用账号");
+        let empty_channel = SkipReasons {
+            no_accounts: true,
+            ..Default::default()
+        };
+        assert_eq!(empty_channel.summary(), "渠道下没有账号");
+        let mixed = SkipReasons {
+            cooling: 2,
+            balance_low: 1,
+            ..Default::default()
+        };
+        assert_eq!(mixed.summary(), "2 个冷却中、1 个余额低于阈值");
+        // 顺序稳定（禁用 → provider → 过期 → 白名单 → 冷却 → 余额 → 并发）
+        let full = SkipReasons {
+            no_accounts: false,
+            disabled: 1,
+            provider_off: 1,
+            expired: 1,
+            model_mismatch: 1,
+            cooling: 1,
+            balance_low: 1,
+            concurrency: 1,
+        };
+        assert_eq!(
+            full.summary(),
+            "1 个已禁用、1 个 provider 被关停、1 个凭证过期、1 个不在模型白名单、1 个冷却中、1 个余额低于阈值、1 个并发占满"
+        );
+    }
+
+    #[test]
+    fn acquire_with_reasons_counts_skip_causes() {
+        with_secret_dir("acquire-reasons", || {
+            let pool = pool();
+            // 禁用账号 + 冷却账号 + 可用账号
+            let mut disabled = session("ch", "off", 0);
+            disabled.status = "disabled".to_string();
+            pool.upsert(disabled).unwrap();
+            let cooling = pool.upsert(session("ch", "cool", 0)).unwrap();
+            pool.upsert(session("ch", "ok", 0)).unwrap();
+            // 给 cool 号挂上模型级冷却
+            let failure = FailureType::ServerError;
+            pool.record_failure(&cooling.id, "m", &failure, "boom", None);
+            // 有可用账号：租得到，reasons 不再有意义
+            let (lease, _) = pool.acquire_with_reasons("ch", "m", None, |_| true);
+            assert!(lease.is_some());
+            // 全部被挡：冷却 1 + 可用号用 provider 过滤挡掉
+            let (lease, reasons) = pool.acquire_with_reasons("ch", "m", None, |_| false);
+            assert!(lease.is_none());
+            assert_eq!(reasons.cooling, 1);
+            assert_eq!(reasons.provider_off, 1);
+            assert!(reasons.summary().contains("冷却"));
+            // 没有账号的渠道
+            let (lease, reasons) = pool.acquire_with_reasons("other", "m", None, |_| true);
+            assert!(lease.is_none());
+            assert!(reasons.no_accounts);
         });
     }
 
