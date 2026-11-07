@@ -18,14 +18,16 @@
 //!
 //! ── 响应帧语义（SSE 补丁流，与 OpenAI 完全不同）──────────────
 //! 每帧 `{"v": <值>, "p": "<JSON Patch 式路径>", "o": "<操作>"}`：
-//!   - `p:"response/content"` / `p:"response/thinking_content"`：v 是**增量**
-//!     文本（content=正文、thinking_content=思考）；
-//!   - `p:"response/fragments"` + `o:"APPEND"`：v 是 fragment 数组
-//!     `[{type:"RESPONSE"|"THINK", content:"…"}]`，content 是增量；
-//!   - `p:"response/status"`（或嵌套片段 status）`v:"FINISHED"`：终态；
-//!   - `p:"response/fragments/<n>/status"` 与 quasi_status / elapsed_secs /
-//!     token_usage / pending_fragment / conversation_mode / search_status：
-//!     噪声帧，跳过（ds2api 的 skip 表）。
+//!
+//! - `p:"response/content"` / `p:"response/thinking_content"`：v 是**增量**
+//!   文本（content=正文、thinking_content=思考）；
+//! - `p:"response/fragments"` + `o:"APPEND"`：v 是 fragment 数组
+//!   `[{type:"RESPONSE"|"THINK", content:"…"}]`，content 是增量；
+//! - `p:"response/status"`（或嵌套片段 status）`v:"FINISHED"`：终态；
+//! - `p:"response/fragments/<n>/status"` 与 quasi_status / elapsed_secs /
+//!   token_usage / pending_fragment / conversation_mode / search_status：
+//!   噪声帧，跳过（ds2api 的 skip 表）。
+//!
 //! 上游不发 `[DONE]`，由本模块在 FINISHED / EOF 时收尾。
 //!
 //! 模型映射：`deepseek-v4-flash`→model_type=default、`deepseek-v4-pro`→
@@ -497,10 +499,9 @@ fn collect_nested(v: &Value, parts: &mut Vec<(String, String)>, finished: &mut b
                 collect_patch(item, parts, finished);
             }
         }
-        Value::Object(object) => {
-            if object.contains_key("p") || object.contains_key("fragments") {
-                collect_patch(v, parts, finished);
-            }
+        // 对象带补丁字段（p / fragments）时递归；纯对象（如 {text}）不重复递归
+        Value::Object(object) if object.contains_key("p") || object.contains_key("fragments") => {
+            collect_patch(v, parts, finished);
         }
         _ => {}
     }
@@ -632,7 +633,7 @@ struct ResolvedModel {
 ///
 /// `-nothinking` 后缀关思考；别名（deepseek-chat 等）归一后取类型；
 /// 未知模型回落 default + 关思考（最保守）。
-pub fn resolve_model(requested: &str) -> ResolvedModel {
+fn resolve_model(requested: &str) -> ResolvedModel {
     let raw = requested.trim();
     let (base, no_thinking) = match raw.strip_suffix("-nothinking") {
         Some(base) => (base, true),

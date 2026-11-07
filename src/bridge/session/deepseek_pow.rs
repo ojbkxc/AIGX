@@ -50,6 +50,8 @@ fn rotl64(v: u64, k: u32) -> u64 {
 }
 
 /// Keccak-f[1600] 缺第 0 轮的置换（DeepSeekHashV1 的核心差异）。
+// （round 同时是 RC 的下标与「已跳过的轮数」语义，range 循环是刻意的）
+#[allow(clippy::needless_range_loop)]
 fn keccak_f23(state: &mut [u64; 25]) {
     let mut a = *state;
     for round in 1..24 {
