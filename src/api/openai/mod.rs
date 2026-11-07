@@ -19,7 +19,9 @@ mod images;
 mod messages;
 mod models;
 mod rerank;
-mod resolve;
+// `pub(crate)`：`api::anthropic` 等同级模块要直接用 `resolve::RouteCapture`
+// 做路由回放捕获（anthropic 不是 openai 的后代模块，私有 mod 会 E0603）。
+pub(crate) mod resolve;
 mod responses;
 mod state;
 

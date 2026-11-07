@@ -1156,7 +1156,11 @@ pub async fn handle_batch_account_sessions(
                     "disabled"
                 }
                 .to_string();
-                state.account_sessions.upsert(next)
+                state
+                    .account_sessions
+                    .upsert(next)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             }
             "set_proxy" => {
                 let mut next = prev.clone();
@@ -1164,7 +1168,11 @@ pub async fn handle_batch_account_sessions(
                     Some("") | None => None,
                     Some(p) => Some(p.to_string()),
                 };
-                state.account_sessions.upsert(next)
+                state
+                    .account_sessions
+                    .upsert(next)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             }
             "set_max_concurrency" => {
                 let Some(v) = body.max_concurrency else {
@@ -1172,7 +1180,11 @@ pub async fn handle_batch_account_sessions(
                 };
                 let mut next = prev.clone();
                 next.max_concurrency = v;
-                state.account_sessions.upsert(next)
+                state
+                    .account_sessions
+                    .upsert(next)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             }
             "query_settings" => {
                 let Some(enabled) = body.usage_query_enabled else {
@@ -1188,7 +1200,11 @@ pub async fn handle_batch_account_sessions(
                 } else {
                     None
                 };
-                state.account_sessions.upsert(next)
+                state
+                    .account_sessions
+                    .upsert(next)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             }
             "limiter" => {
                 let mode = body.limiter_mode.as_deref().unwrap_or_default();
@@ -1217,7 +1233,11 @@ pub async fn handle_batch_account_sessions(
                     "clear" => Vec::new(),
                     _ => return Err("unknown limiter_mode".to_string()),
                 };
-                state.account_sessions.upsert(next)
+                state
+                    .account_sessions
+                    .upsert(next)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             }
             "delete" => state
                 .account_sessions
