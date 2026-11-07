@@ -1854,3 +1854,131 @@ export interface DiagnosticsBreakers {
   halfopen: number;
   breakers: DiagnosticsBreaker[];
 }
+
+// ==================== 插件管理（/api/plugins，后端契约对齐 Agent2API） ====================
+// AIGX 后端插件管理面尚在建设（be-impl 任务 #3）；前端先按上游 api/plugins.rs 的
+// 响应形状定义契约并渲染，端点 404 时整页降级为「后端未就绪」空态，就绪后零改动生效。
+
+/** 插件包内一家提供商的启用/加载态 */
+export interface PluginPackProvider {
+  id: string;
+  label: string;
+  enabled: boolean;
+  /** 包进程已把该家适配加载进内存（未加载 = 启用但进程没起/加载失败） */
+  loaded: boolean;
+}
+
+/** 插件宿主进程状态（一包 = 一进程；后端未做进程化时恒 null） */
+export interface PluginHostState {
+  running: boolean;
+  providers: string[];
+  crashes: number;
+  disabled: boolean;
+  lastError?: string | null;
+}
+
+/** 已安装插件包摘要 */
+export interface PluginPackSummary {
+  id: string;
+  name: string;
+  description?: string | null;
+  version: string;
+  /** 网关要求的最小版本（低于它 = 需要补齐插件才加载） */
+  requiredVersion?: string | null;
+  updateRequired?: boolean;
+  compatibilityError?: string | null;
+  enabled: boolean;
+  signed: boolean;
+  installedAt: number;
+  /** 包的可执行文件是否在磁盘上（被手工删过 = false） */
+  entryPresent: boolean;
+  protocol: number;
+  homepage?: string | null;
+  icon?: string | null;
+  providers: PluginPackProvider[];
+  host?: PluginHostState | null;
+  providerCategory?: 'agent' | 'web';
+}
+
+/** 商店（发布目录）里的一个插件发布条目 */
+export interface StorePlugin {
+  id: string;
+  name: string;
+  description: string;
+  official: boolean;
+  version: string | null;
+  page: string | null;
+  notes?: string | null;
+  publishedAt?: string | null;
+  prerelease?: boolean;
+  error?: boolean;
+  reason?: string | null;
+  platforms: Array<{ target: string; size: number; url: string; current: boolean }>;
+  homepage?: string | null;
+  icon?: string | null;
+}
+
+/** 发布目录刷新态 */
+export interface PluginReleaseState {
+  available: boolean;
+  current: string;
+  plugins: StorePlugin[];
+  reason: string | null;
+  error: boolean;
+  checked?: boolean;
+  checking?: boolean;
+  checkedAt?: number;
+}
+
+/** 单包更新检查结果 */
+export interface PluginUpdate {
+  id: string;
+  available: boolean;
+  checked: boolean;
+  checkedAt?: number;
+  current: string;
+  required?: boolean;
+  requiredVersion?: string | null;
+  repairing?: boolean;
+  retryAt?: number;
+  latest: string | null;
+  notes?: string | null;
+  page?: string | null;
+  publishedAt?: string | null;
+  prerelease?: boolean;
+  asset: { target: string; size: number; url: string; current: boolean } | null;
+  reason: string | null;
+  error: boolean;
+}
+
+/** 在途的安装/更新操作（下载/校验/加载分阶段） */
+export interface PluginOperation {
+  id: string;
+  action: string;
+  stage: string;
+  active: boolean;
+  done: boolean;
+  received: number;
+  total: number;
+  percent: number | null;
+  version: string;
+  required?: boolean;
+  requiredVersion?: string | null;
+  error?: string | null;
+  hostError?: string | null;
+  updatedAt: number;
+}
+
+/** GET /api/plugins 响应 data */
+export interface PluginsPayload {
+  packs: PluginPackSummary[];
+  host: PluginHostState | null;
+  adminPanels?: string[];
+  accountFeatures?: Record<string, unknown>;
+  target: string;
+  protocol: number;
+  pluginsDir: string;
+  catalog: PluginReleaseState;
+  updates: PluginUpdate[];
+  operations: PluginOperation[];
+}

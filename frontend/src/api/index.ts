@@ -38,6 +38,7 @@ import type {
   DiagnosticsSummary,
   DiagnosticsChannelProbes,
   DiagnosticsBreakers,
+  PluginsPayload,
   PricingSyncConfigItem,
   ExchangeRatesItem,
   IpFilterConfigItem,
@@ -1111,6 +1112,29 @@ export const api = {
     request<ApiResponse<DiagnosticsChannelProbes>>('GET', `${API_BASE}/diagnostics/channels`),
   getDiagnosticsBreakers: (): Promise<ApiResponse<DiagnosticsBreakers>> =>
     request<ApiResponse<DiagnosticsBreakers>>('GET', `${API_BASE}/diagnostics/breakers`),
+
+  // ── 插件管理（管理员；后端契约对齐 Agent2API api/plugins.rs，AIGX 后端建设中）──
+  // 端点未上线（404）时页面整页降级「后端未就绪」空态，这里不吞错。
+  listPlugins: (): Promise<ApiResponse<PluginsPayload>> =>
+    request<ApiResponse<PluginsPayload>>('GET', `${API_BASE}/plugins`),
+  /** 启停整个插件包 */
+  setPluginEnabled: (id: string, enabled: boolean): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/plugins/enable`, { id, enabled }),
+  /** 启停包内单家提供商 */
+  setPluginProviderEnabled: (id: string, provider: string, enabled: boolean): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/plugins/provider`, { id, provider, enabled }),
+  /** 卸载插件包（账号数据保留，重装可续用） */
+  uninstallPlugin: (id: string): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/plugins/uninstall`, { id }),
+  /** 检查插件更新（返回 updates 快照） */
+  checkPluginUpdates: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/plugins/update`),
+  /** 刷新发布目录（返回 catalog 快照） */
+  refreshPluginRelease: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/plugins/release`),
+  /** 在途操作进度（安装/更新任务的阶段与字节读数） */
+  getPluginProgress: (): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('GET', `${API_BASE}/plugins/progress`),
 
   // 系统监控
   getSystemMonitor: (): Promise<ApiResponse<SystemMonitorItem>> =>
