@@ -337,11 +337,35 @@ impl ModelMapper {
     ) -> Result<Vec<(String, String)>> {
         // 先只读圈出待删条目，再一次性加写锁应用（锁顺序 custom → disabled
         // → reasoning，与 set_enabled / remove_custom 一致，不会死锁）
+        //
+        // 链式保护（不动点迭代）：target 是另一条映射的 alias（a→b→c 里的 b）
+        // 时，即使不在存活集也不能删 —— 除非那条映射本身也在本轮死亡。
+        // 迭代到不动点：链条末端死了，整条链一起清；末端还活着（哪怕中间
+        // 节点无渠道声明），整条链全保。
         let doomed: Vec<(String, String)> = {
             let custom = self.custom_map.read();
+            let mut doomed_aliases: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            loop {
+                let mut changed = false;
+                for (alias, target) in custom.iter() {
+                    if doomed_aliases.contains(alias) {
+                        continue;
+                    }
+                    let target_doomed = !alive.contains(target)
+                        && (!custom.contains_key(target) || doomed_aliases.contains(target));
+                    if target_doomed {
+                        doomed_aliases.insert(alias.clone());
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
             custom
                 .iter()
-                .filter(|(_, target)| !alive.contains(*target))
+                .filter(|(alias, _)| doomed_aliases.contains(*alias))
                 .map(|(alias, target)| (alias.clone(), target.clone()))
                 .collect()
         };
@@ -594,5 +618,18 @@ mod tests {
         let mut full = alive;
         full.insert("b".to_string());
         assert!(m.prune_stale_mappings(&full).unwrap().is_empty());
+    }
+
+    /// 链条末端死了 → 整条链（不动点）一起清，不留悬空中间层。
+    #[test]
+    fn prune_stale_removes_dead_chains_transitively() {
+        let m = mapper();
+        m.set_custom("a".into(), "b".into()).unwrap();
+        m.set_custom("b".into(), "c".into()).unwrap();
+        let mut alive = std::collections::HashSet::new();
+        alive.insert("other-model".to_string());
+        let removed = m.prune_stale_mappings(&alive).unwrap();
+        assert_eq!(removed.len(), 2, "末端 c 死亡 → b→c 与 a→b 一起清");
+        assert!(m.all_mappings().is_empty());
     }
 }
