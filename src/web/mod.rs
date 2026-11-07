@@ -44,9 +44,27 @@ pub fn serve_static_files() -> Router {
 
     Router::new()
         .fallback_service(ServeDir::new(&static_dir).fallback(tower::service_fn(
-            move |_req: Request<Body>| {
+            move |req: Request<Body>| {
                 let index_path = index_path.clone();
                 async move {
+                    // #17-⑥：未匹配的 /api/* 路径必须返回 404 JSON，不能落进
+                    // SPA fallback 返回 200 HTML——管理面探测（未鉴权路径枚举）
+                    // 会把「HTML 200」误读为「端点存在」，前端 fetch().json()
+                    // 也会解析失败报出误导性错误。SPA 只服务页面路由。
+                    if req.uri().path().starts_with("/api/") {
+                        return Ok::<Response<Body>, Infallible>(
+                            Response::builder()
+                                .status(StatusCode::NOT_FOUND)
+                                .header("content-type", "application/json")
+                                .body(Body::from(r#"{"success":false,"error":"Not found"}"#))
+                                .unwrap_or_else(|_| {
+                                    Response::builder()
+                                        .status(StatusCode::NOT_FOUND)
+                                        .body(Body::from("Not Found"))
+                                        .unwrap_or_else(|_| Response::new(Body::from("Not Found")))
+                                }),
+                        );
+                    }
                     // L1：Response::builder()...unwrap() 在 header/body 构造理论上不会失败，
                     // 但 unwrap 在 panic=unwind 下会终止服务线程。改为降级返回 500，增强健壮性。
                     let result: Result<Response<Body>, Infallible> =
