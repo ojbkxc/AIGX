@@ -329,8 +329,9 @@ async fn run_retry_round(
         .filter(|(id, _)| ledger.accounts.get(id.as_str()).copied().unwrap_or(0) <= now)
         .map(|(id, _)| id.clone())
         .collect();
+    let provider_filter = [provider.to_string()];
     let targets: Vec<crate::account_session::model::AccountSession> =
-        collect_targets(sessions, std::slice::from_ref(provider))
+        collect_targets(sessions, &provider_filter)
             .into_iter()
             .filter(|s| due.contains(&s.id))
             .collect();
