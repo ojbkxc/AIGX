@@ -320,6 +320,17 @@ impl UpdateManager {
             "writable": self.writable,
             "backupAvailable": backup_path(&self.exe).is_file(),
             "downloadDir": self.data_dir.join("updates").to_string_lossy(),
+            // #18-①：更新产物磁盘占用（.upd/.sha256/staging 合计字节）——
+            // 面板显示回收效果；冷路径只在本端点算一次
+            "downloadDirBytes": std::fs::read_dir(self.data_dir.join("updates"))
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|e| e.metadata().ok())
+                        .map(|m| m.len() as u64)
+                        .sum::<u64>()
+                })
+                .unwrap_or(0),
             "repository": repo_of(config),
             "apiBase": api_root(config),
             "appliedVersion": guard.applied.as_ref().map(|marker| marker.version.clone()),
@@ -484,6 +495,30 @@ impl UpdateManager {
                 release.tag,
                 CURRENT_VERSION
             );
+            // #18-①：回收更新产物（生产实证 39 个备份 527MB + 8 个 .upd
+            // 253MB，更新机制不回收）。保留策略：
+            // - 本轮下载的 .upd（回滚候选，rollback() 复用 force 模式）
+            // - 旧版本 bundle（previous_version 对应的包，供再回滚）
+            // 其余 .upd/.sha256 全删；staging 每轮已清。
+            let updates_dir = self.data_dir.join("updates");
+            let keep = [
+                release.bundle.as_ref().map(|b| b.name.clone()),
+                server_bundle_name(&marker.previous_version, host_arch()).map(|s| s.to_string()),
+            ];
+            if let Ok(entries) = std::fs::read_dir(&updates_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let is_bundle_artifact = name.ends_with(".upd") || name.ends_with(".sha256");
+                    let is_kept = keep
+                        .iter()
+                        .flatten()
+                        .any(|k| name == *k || name == format!("{k}.sha256"));
+                    if is_bundle_artifact && !is_kept {
+                        let _ = std::fs::remove_file(entry.path());
+                        tracing::debug!("update artifact reclaimed: {name}");
+                    }
+                }
+            }
             self.persist();
             if config.restart_after_apply {
                 if let Err(e) = self.request_restart() {
