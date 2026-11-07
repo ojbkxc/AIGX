@@ -2975,5 +2975,13 @@
   "重试间隔须为 0-1440 分钟（0 = 关闭重试）": "Retry interval must be 0-1440 minutes (0 = no retry)",
   "逐家覆盖或内置专属时刻优先生效；未覆盖的按条目时刻执行。": "Per-provider overrides and builtin times take precedence; uncovered providers use the entry time.",
   "自动巡检": "Automatic patrol",
-  "自动巡检已暂停：{{reason}}": "Automatic patrol paused: {{reason}}"
+  "自动巡检已暂停：{{reason}}": "Automatic patrol paused: {{reason}}",
+  "还有 {{n}} 条未记录": "+{{n}} not recorded",
+  "候选明细超过记录上限，还有 {{n}} 条未记录。": "Details exceeded the record cap — {{n}} more entries were not recorded.",
+  "列名": "[TODO en] 列名",
+  "锁定": "[TODO en] 锁定",
+  "拖动调整顺序": "[TODO en] 拖动调整顺序",
+  "拖动手柄调整顺序；双击表头把手还原列宽": "[TODO en] 拖动手柄调整顺序；双击表头把手还原列宽",
+  "逐账号跳过（{{n}} 渠道）": "Per-account skips ({{n}} channels)",
+  "逐账号跳过明细": "Per-account skip details"
 }

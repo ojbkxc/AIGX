@@ -19,6 +19,21 @@ export interface RouteReplayCandidateItem {
   reason?: string;
 }
 
+/** 逐账号跳过明细行（#26 有界化形状：去掉 channel_id，归属由分组承载） */
+export interface AccountSkipRow {
+  account_id: string;
+  account_name?: string;
+  reason?: string;
+}
+
+/** 按渠道分组的逐账号跳过（每渠道每请求最多 64 条，超出记 truncated） */
+export interface AccountSkipGroup {
+  channel_id: string;
+  skipped: AccountSkipRow[];
+  /** 超出上限未记录的条数（组头显示「还有 n 条未记录」） */
+  truncated?: number;
+}
+
 /** 路由回放尝试明细（每次真实上游调用一条；对照上游 attemptDetails 口径） */
 export interface RouteReplayAttemptItem {
   index?: number;
@@ -60,6 +75,11 @@ export interface RouteReplaySnapshot {
     };
   };
   attempts?: RouteReplayAttemptItem[];
+  /** 逐账号跳过明细（按渠道分组、有界 64 条/渠道 + truncated 计数；#26 形状，
+   *  与 RequestLog.account_skips 同构。旧数据缺省无此字段 → 不渲染该节） */
+  account_skips?: AccountSkipGroup[];
+  /** resolve 层候选被截断的条数（filtered 64 条上限的溢出计数） */
+  route_truncated?: number;
 }
 
 /** 粘滞会话列表（GET /api/routing/sticky；对照上游 routing_workspace get_sticky） */

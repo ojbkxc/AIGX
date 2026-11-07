@@ -158,6 +158,40 @@
 }
 .rr-cand-reason { margin: 2px 0 0; font-size: 12px; color: var(--text-muted, #888); }
 
+/* 逐账号跳过分组（#26 形状：按渠道折叠；详情弹窗与回放面板共用） */
+.rr-askips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rr-askip-group {
+  border: 1px solid var(--border, #ececec);
+  border-radius: 8px;
+  padding: 4px 8px;
+}
+.rr-askip-group > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12.5px;
+  list-style: none;
+}
+.rr-askip-group > summary::-webkit-details-marker { display: none; }
+.rr-askip-group > summary::before {
+  content: '▸';
+  color: var(--text-muted, #888);
+  transition: transform 0.15s;
+}
+.rr-askip-group[open] > summary::before { transform: rotate(90deg); }
+.rr-askip-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 4px;
+}
+
 /* 被跳过渠道 */
 .rr-blocked {
   display: flex;

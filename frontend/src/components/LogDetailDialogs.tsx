@@ -157,6 +157,36 @@ export function RequestLogDetail({ log, admin, onClose }: {
               </div>
             </div>
           )}
+          {/* 逐账号跳过明细（#26 有界形状：按渠道分组折叠；旧日志无字段不渲染。
+              rr-askip-* 样式随 RouteReplay.css 全局加载，两处共用同一形状） */}
+          {(log.account_skips?.length ?? 0) > 0 && (
+            <div className="log-detail-route-row">
+              <span className="log-detail-route-key">
+                {t('逐账号跳过（{{n}} 渠道）', { n: log.account_skips?.length ?? 0 })}
+              </span>
+              <div className="rr-askips">
+                {(log.account_skips ?? []).map((g) => (
+                  <details key={g.channel_id} className="rr-askip-group">
+                    <summary>
+                      <code>{g.channel_id}</code>
+                      <span className="rr-badge rr-badge-mute">{t('{{n}} 个账号', { n: g.skipped.length })}</span>
+                      {(g.truncated ?? 0) > 0 && (
+                        <span className="rr-badge rr-badge-bad">{t('还有 {{n}} 条未记录', { n: g.truncated ?? 0 })}</span>
+                      )}
+                    </summary>
+                    <div className="rr-askip-rows">
+                      {g.skipped.map((r, i) => (
+                        <div key={`${r.account_id}-${i}`} className="rr-blocked-item">
+                          <b>{r.account_name || r.account_id}</b>
+                          <p>{r.reason || ''}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                ))}
+              </div>
+            </div>
+          )}
           {/* 完整回放视图：请求当时的候选有序表/跳过原因/执行时间线/配置快照
               （GET /api/routing/replay/{request_id}，be-fix #12-B）。挂载在 Tab
               激活分支内 = 打开详情不拉数据，切到本 Tab 才单次拉取（无轮询）；

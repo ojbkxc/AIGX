@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { EmptyState, Loading } from './ui';
 import type {
+  AccountSkipGroup,
   RouteReplayAttemptItem,
   RouteReplayCandidateItem,
   RouteReplaySnapshot,
@@ -57,6 +58,44 @@ function stickyLabel(s: string | undefined, t: (k: string) => string): string {
 
 function candidateName(c: RouteReplayCandidateItem): string {
   return c.name || (c.id != null ? String(c.id) : '—');
+}
+
+/** 逐账号跳过分组（可折叠；形状守卫：groups 缺省/空 = 整节不渲染） */
+function AccountSkipGroups({ groups, routeTruncated, t }: {
+  groups: AccountSkipGroup[] | undefined;
+  routeTruncated?: number;
+  t: (k: string, opts?: Record<string, unknown>) => string;
+}): JSX.Element | null {
+  if (!groups?.length && !routeTruncated) return null;
+  return (
+    <section className="rr-section">
+      {groups?.length ? <h4>{t('逐账号跳过明细')}</h4> : null}
+      <div className="rr-askips">
+        {(groups ?? []).map((g) => (
+          <details key={g.channel_id} className="rr-askip-group">
+            <summary>
+              <code>{g.channel_id}</code>
+              <span className="rr-badge rr-badge-mute">{t('{{n}} 个账号', { n: g.skipped.length })}</span>
+              {(g.truncated ?? 0) > 0 && (
+                <span className="rr-badge rr-badge-bad">{t('还有 {{n}} 条未记录', { n: g.truncated ?? 0 })}</span>
+              )}
+            </summary>
+            <div className="rr-askip-rows">
+              {g.skipped.map((r, i) => (
+                <div key={`${r.account_id}-${i}`} className="rr-blocked-item">
+                  <b>{r.account_name || r.account_id}</b>
+                  <p>{r.reason || ''}</p>
+                </div>
+              ))}
+            </div>
+          </details>
+        ))}
+      </div>
+      {(routeTruncated ?? 0) > 0 && (
+        <p className="rr-note">{t('候选明细超过记录上限，还有 {{n}} 条未记录。', { n: routeTruncated ?? 0 })}</p>
+      )}
+    </section>
+  );
 }
 
 /** 时间线里的单次尝试：渠道名 + 阶段/状态徽标 + 耗时 + 错误/备注 */
@@ -232,6 +271,10 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
           </div>
         </section>
       )}
+
+      {/* 逐账号跳过明细（#26 有界形状：按渠道分组折叠，超出上限显示截断计数；
+          旧数据无该字段整节不渲染） */}
+      <AccountSkipGroups groups={snap.account_skips} routeTruncated={snap.route_truncated} t={t} />
 
       <section className="rr-section">
         <h4>{t('请求当时的配置')}</h4>

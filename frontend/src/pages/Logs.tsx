@@ -47,8 +47,17 @@ export interface RequestLogItem {
   };
   /** 调度决策回放：候选渠道列表（仅 admin 下发，普通用户已被后端剥离） */
   candidate_channels?: string[];
-  /** 被过滤的渠道及原因（仅 admin） */
+  /** 被过滤的渠道及原因（仅 admin；#26 起有界 64 条，溢出计入 route_truncated） */
   filtered_channels?: Array<{ channel_id: string; reason: string }>;
+  /** 逐账号跳过明细（仅 admin；#26 形状：按渠道分组 + 每渠道 64 条上限 + 截断计数，
+   *  与 GET /api/routing/replay 投影同构；旧日志无该字段） */
+  account_skips?: Array<{
+    channel_id: string;
+    skipped: Array<{ account_id: string; account_name?: string; reason?: string }>;
+    truncated?: number;
+  }>;
+  /** resolve 层候选截断计数（filtered 上限溢出；仅 admin） */
+  route_truncated?: number;
   /** 最终选中渠道（仅 admin） */
   selected_channel?: string;
 }
