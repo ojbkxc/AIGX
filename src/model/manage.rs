@@ -160,6 +160,10 @@ pub struct ManageModel {
     pub owned_by: String,
     pub context_length: Option<u32>,
     pub capabilities: Vec<String>,
+    /// 能力/上下文来源标记（Phase1-A4 capSources：user > modelsdev >
+    /// builtin；null = 该字段无读数）。前端可信度展示用。
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub cap_sources: serde_json::Value,
     /// 定价条目（未定价为 null，前端据此高亮）
     pub price: Option<ModelPrice>,
     /// 模型倍率（`ratio_config.model_ratio`，缺省 1.0）
@@ -393,7 +397,7 @@ fn new_row(
     mapper: &ModelMapper,
 ) -> ManageModel {
     let channel_owned_by = crate::model::metadata::owned_by_for_channel_type(provider);
-    let meta = metadata.get(model, channel_owned_by);
+    let (meta, cap_sources) = metadata.resolve_with_sources(model, channel_owned_by);
     let price = pricing.get_price(model);
     let model_ratio = pricing.get_ratios().model_ratio(model);
     let all_mappings = mapper.all_mappings();
@@ -422,6 +426,7 @@ fn new_row(
         owned_by: meta.owned_by,
         context_length: meta.context_length,
         capabilities: meta.capabilities,
+        cap_sources,
         price,
         model_ratio,
         aliases,

@@ -224,45 +224,101 @@ impl ModelMetadataRegistry {
     /// 覆盖项存在时整体以覆盖为准。models.dev 只填「内置推断没声明」的
     /// 上下文长度与能力标签（开关关闭时完全不参与）。
     pub fn get(&self, model: &str, channel_owned_by: Option<&str>) -> ModelMetadata {
+        self.resolve_with_sources(model, channel_owned_by).0
+    }
+
+    /// 解析元信息并给出**逐字段来源标记**（Phase1-A4 capSources，对齐上游
+    /// model_meta/fill.rs 的三态可信度）：`user`（管理员覆盖）>
+    /// `modelsdev`（models.dev 目录）> `builtin`（内置推断表）。管理面
+    /// 能力弹窗据此显示「这个能力是谁说的」，防误判。
+    ///
+    /// 来源判定与 [`Self::get`] 的合并逻辑同源（本方法是 get 的超集），
+    /// 两处不要各自演化。
+    pub fn resolve_with_sources(
+        &self,
+        model: &str,
+        channel_owned_by: Option<&str>,
+    ) -> (ModelMetadata, serde_json::Value) {
         if let Some(m) = self.overrides.read().get(model) {
-            return m.clone();
+            // 管理员覆盖整体获胜：非空字段全标 user
+            let caps: serde_json::Map<String, serde_json::Value> = m
+                .capabilities
+                .iter()
+                .map(|c| (c.clone(), serde_json::Value::from("user")))
+                .collect();
+            let sources = serde_json::json!({
+                "context_length": if m.context_length.is_some() { "user" } else { serde_json::Value::Null },
+                "capabilities": caps,
+                "reasoning_levels": if m.reasoning_levels.is_empty() { serde_json::Value::Null } else { "user" },
+            });
+            return (m.clone(), sources);
         }
         let owned_by = channel_owned_by
             .or_else(|| infer_owned_by(model))
             .unwrap_or("aigx")
             .to_string();
         let mut context_length = builtin_context_length(model);
+        let mut context_source = if context_length.is_some() {
+            "builtin"
+        } else {
+            ""
+        };
         let mut capabilities = infer_capabilities(model);
+        let mut cap_sources: serde_json::Map<String, serde_json::Value> = capabilities
+            .iter()
+            .map(|c| (c.clone(), serde_json::Value::from("builtin")))
+            .collect();
         if crate::config::models_dev_enabled() {
             if let Some(dev) = super::models_dev::lookup(model) {
                 if context_length.is_none() {
                     context_length = dev.context.and_then(|n| u32::try_from(n).ok());
+                    if context_length.is_some() {
+                        context_source = "modelsdev";
+                    }
                 }
                 // 能力标签只有「默认 chat」（名字没命中任何特征）时才补，
                 // embedding / rerank 等显式推断结果原样保留
                 if capabilities.len() == 1 && capabilities[0] == "chat" {
                     if dev.images {
                         capabilities.push("vision".to_string());
+                        cap_sources
+                            .insert("vision".to_string(), serde_json::Value::from("modelsdev"));
                     }
                     if dev.video {
                         capabilities.push("video".to_string());
+                        cap_sources
+                            .insert("video".to_string(), serde_json::Value::from("modelsdev"));
                     }
                     if dev.tool_call {
                         capabilities.push("tools".to_string());
+                        cap_sources
+                            .insert("tools".to_string(), serde_json::Value::from("modelsdev"));
                     }
                     if dev.reasoning {
                         capabilities.push("reasoning".to_string());
+                        cap_sources.insert(
+                            "reasoning".to_string(),
+                            serde_json::Value::from("modelsdev"),
+                        );
                     }
                 }
             }
         }
-        ModelMetadata {
-            owned_by,
-            context_length,
-            capabilities,
-            // 内置推断路径不产出思考等级：由覆盖项 / 前端声明提供
-            reasoning_levels: Vec::new(),
-        }
+        let sources = serde_json::json!({
+            "context_length": if context_source.is_empty() { serde_json::Value::Null } else { context_source },
+            "capabilities": cap_sources,
+            "reasoning_levels": serde_json::Value::Null,
+        });
+        (
+            ModelMetadata {
+                owned_by,
+                context_length,
+                capabilities,
+                // 内置推断路径不产出思考等级：由覆盖项 / 前端声明提供
+                reasoning_levels: Vec::new(),
+            },
+            sources,
+        )
     }
 
     /// 设置/更新覆盖项。
