@@ -9,6 +9,7 @@ pub mod cline_headers;
 pub mod common;
 pub mod dashboard;
 pub mod debug;
+pub mod desktop_import;
 pub mod diagnostics;
 pub mod logs;
 pub mod mcp;

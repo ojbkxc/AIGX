@@ -820,6 +820,12 @@ fn paths_accounts_network() -> Value {
         "/api/account-sessions/usage/snapshot": {
             "get": op("账号池", "各账号最近一次余额查询快照（手动+自动同源；行带自己的 at，skipped=未查询数）")
         },
+        "/api/account-sessions/desktop/sources": {
+            "get": op("账号池", "桌面端登录态来源白名单（固定路径；supported 标平台与解密可用性）")
+        },
+        "/api/account-sessions/desktop-import": {
+            "post": op_body("账号池", "桌面端登录态导入（仅 Windows；白名单来源只读，不接受路径参数；凭证 enc1: 落库不落日志）", "source_id（白名单 id）+ name?")
+        },
         "/api/account-sessions/batch": {
             "post": op_body("账号池", "批量操作六类（enable/disable/set_proxy/set_max_concurrency/query_settings/limiter/delete），逐账号回执 [{id,ok,error?}]；删除保护 error=referenced_by_channel", "op/ids + 按 op 的 payload（proxy/max_concurrency/usage_query_*/limiter_mode+limiters）")
         },
@@ -1137,6 +1143,8 @@ mod tests {
         add("/api/account-sessions/batch", &["post"]);
         add("/api/account-sessions/usage", &["post"]);
         add("/api/account-sessions/usage/snapshot", &["get"]);
+        add("/api/account-sessions/desktop/sources", &["get"]);
+        add("/api/account-sessions/desktop-import", &["post"]);
         add("/api/account-sessions/catalog/providers", &["get"]);
         add("/api/account-sessions/catalog/sync", &["post"]);
         add("/api/account-sessions/import", &["post"]);

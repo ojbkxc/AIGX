@@ -2257,6 +2257,17 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/account-sessions/usage/snapshot",
             get(api::admin::account_sessions::handle_usage_snapshot),
         )
+        // 桌面端登录态导入（#23 desktop 段）：固定路径白名单只读 + 平台门
+        //（仅 Windows；DPAPI 形态来源如实不支持）。安全红线见
+        // api/admin/desktop_import.rs 模块头
+        .route(
+            "/api/account-sessions/desktop/sources",
+            get(api::admin::desktop_import::handle_desktop_sources),
+        )
+        .route(
+            "/api/account-sessions/desktop-import",
+            post(api::admin::desktop_import::handle_desktop_import),
+        )
         .route(
             "/api/account-sessions/usage",
             post(api::admin::account_sessions::handle_usage_query),
