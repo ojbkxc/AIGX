@@ -19,23 +19,28 @@ async function openDrawer(page: import('@playwright/test').Page): Promise<void> 
 }
 
 test.describe('聊天 · 历史会话抽屉', () => {
-  test('聊天主区域铺满视口高度（输入区贴底、消息区可滚动）', async ({ page, pageErrors }) => {
+  test('聊天主区域内容流形态（输入区紧随消息上移、空状态可见模型选择）', async ({ page, pageErrors }) => {
     await loginAsAdmin(page);
     await page.goto('/chat');
     await expect(page.locator('.pg-shell')).toBeVisible();
 
     const vh = await page.evaluate(() => window.innerHeight);
 
-    // 修复前 .pg-shell 的 height:100% 在 auto 高度父级里退化为内容高度
-    // （实测约 269px），消息区被压扁、输入框悬在页面中部。
-    const shell = await page.locator('.pg-shell').boundingBox();
-    expect(shell).not.toBeNull();
-    expect(shell!.height).toBeGreaterThan(vh * 0.9);
-
-    // 输入区应贴近视口底部（允许状态行占用的空间）
+    // 内容流形态（对齐 AI 运维页 /agent）：去掉 /chat 的 main-content-full
+    // 特判后，主内容高度由内容撑，输入条不再被 100vh 钉死在视口底
+    // （用户反馈「输入框太下面、模型看不见」）。空会话下输入条应在
+    // 视口中上部（提示词网格 + 输入区整体上移），绝不能贴底。
     const inputRow = await page.locator('.chat-debugger-input-row').boundingBox();
     expect(inputRow).not.toBeNull();
-    expect(inputRow!.y + inputRow!.height).toBeGreaterThan(vh * 0.85);
+    expect(inputRow!.y + inputRow!.height).toBeLessThan(vh * 0.9);
+
+    // 空状态模型选择位：此前 playground 首屏无模型入口（只能在输入区右下角
+    // 切），现在空状态渲染居中大 pill——「很多模型都看不见」的修复位。
+    await expect(page.locator('.pg-empty .chat-debugger-empty-model .model-picker')).toBeVisible();
+    // 点击可展开全量模型下拉
+    await page.locator('.pg-empty .model-picker-btn').click();
+    await expect(page.locator('.pg-empty .model-picker-pop')).toBeVisible();
+    await expect(page.locator('.pg-empty .model-picker-pop .model-picker-item').first()).toBeVisible();
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
@@ -55,14 +60,23 @@ test.describe('聊天 · 历史会话抽屉', () => {
     );
     expect(rootPos).toBe(isNarrow ? 'fixed' : 'static');
 
-    // 几何下界用 85%：CI 的 Linux Chromium 常驻横向滚动条，布局视口比
-    // viewportSize().height 矮十几像素（实测 707/720 ≈ 98%），留余量避免假红；
-    // 回归时高度只有 ~269/720 ≈ 37%，远低于 85%，仍能抓住。
+    // 内容流形态（2026-11-07 布局重构）：桌面内嵌抽屉不再要求铺满视口高，
+    // 但会话很多时必须被视口高度上限钳住（max-height: calc(100vh - 120px)），
+    // 否则 30 条会话把页面撑到数屏高、列表自身不滚动。
+    // 窄屏覆盖层形态仍然是全屏 fixed。
     const viewportHeight = page.viewportSize()!.height;
     const drawerBox = await page.locator('.sd-panel').boundingBox();
     expect(drawerBox).not.toBeNull();
     expect(drawerBox!.y).toBeLessThanOrEqual(1);
-    expect(drawerBox!.height).toBeGreaterThan(viewportHeight * 0.85);
+    if (isNarrow) {
+      expect(drawerBox!.height).toBeGreaterThan(viewportHeight * 0.85);
+    } else {
+      expect(drawerBox!.height).toBeLessThanOrEqual(viewportHeight - 100);
+      // 列表自身可滚动（30 条 seed 会话）
+      const list = page.locator('.sd-list');
+      const scrollable = await list.evaluate((el) => el.scrollHeight > el.clientHeight);
+      expect(scrollable).toBe(true);
+    }
 
     // 面板背景必须不透明：曾用 var(--bg-elevated, rgba(255,255,255,.04))，
     // 该变量在主题体系中不存在，fallback 近乎全透明，亮色主题下侧栏文字

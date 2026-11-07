@@ -83,17 +83,13 @@ function ProtectedLayout({ children }: ProtectedLayoutProps) {
   return (
     <div className="app-container">
       <Sidebar />
-      {/* full-height 页面（当前为 /chat）：去掉内边距并把内容区高度钉死为
-          视口高度，否则 .pg-shell 的 height:100% 在 auto 高度的父级里退化成
-          内容高度，历史抽屉（absolute top/bottom 0）只能撑到输入区上方。
-          `has-statusline` 仅在 admin 时加：底部常驻状态行是 fixed 26px，
-          非 admin 不渲染，不该留空白。 */}
+      {/* /chat 与 /agent 同构走内容流：main-content 高度由内容撑，
+          输入条紧随最后一条消息（不再被 100vh 钉死在视口底——用户反馈
+          「输入框太靠下、模型看不见」）。历史抽屉的高度来自 .pg-shell 的
+          100%，在 auto 父级里退化为内容高度，抽屉自身 CSS 已按该形态
+          适配（.sd-root.sidebar 高度由外层 flex 决定，随内容伸缩）。 */}
       <main
-        className={[
-          'main-content',
-          location === '/chat' ? 'main-content-full' : '',
-          location === '/chat' && isAdmin() ? 'has-statusline' : '',
-        ].filter(Boolean).join(' ')}
+        className="main-content"
         key={location}
       >
         <div className="page-fade-enter">

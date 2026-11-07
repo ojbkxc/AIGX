@@ -5,7 +5,10 @@
 .pg-shell {
   position: relative;
   width: 100%;
-  height: 100%;
+  /* 内容流形态（对齐 Agent 页 .agent-shell）：高度由内容撑，不向视口要高度。
+     曾为 height:100%（配合 main-content-full 的 100vh 钉死），导致输入条
+     被压到视口底部、空状态提示词网格占满首屏（用户反馈「输入框太下面、
+     模型看不见」）。现在短对话时输入条紧随消息上移，长对话时自然滚动。 */
   min-height: 0;
   display: flex;
   /* 横向布局：历史会话抽屉（sidebar 变体）在左，对话区占剩余宽度——
@@ -20,6 +23,12 @@
   min-width: 0;
 }
 
+/* 内容流形态下给侧栏抽屉一个视口高度上限：会话很多时抽屉不再把页面
+   撑到数屏高（列表自身滚动），与 AI 运维页观感一致。 */
+.pg-shell .sd-root.sidebar .sd-panel {
+  max-height: calc(100vh - 120px);
+}
+
 /* 游乐园形态：消息流居中 max-w-4xl，与输入区同宽对齐 */
 .chat-debugger-playground .chat-debugger-messages {
   max-width: 56rem; /* new-api max-w-4xl */
@@ -28,7 +37,9 @@
 
 .chat-debugger-playground .chat-debugger-input-row {
   max-width: 56rem;
-  padding-bottom: 24px;
+  /* 内容流形态下输入区下缘留白（原 24px：全高钉底时代的视觉缓冲，
+     现在输入条随消息上移，24px 会在短对话下方拖出大片空档） */
+  padding-bottom: 12px;
 }
 
 /* ── new-api 式空状态 ── */
@@ -40,6 +51,26 @@
   gap: 18px;
   justify-items: center;
   text-align: center;
+}
+
+/* 空状态模型选择位（居中大 pill）：此前 playground 首屏没有任何模型入口，
+   只能从输入区右下角切——「模型列表看不见」。放在问候语上方，
+   复用非 playground 空状态 chat-debugger-empty-model 的布局意图。 */
+.pg-empty .chat-debugger-empty-model {
+  margin: 0;
+}
+
+.pg-empty .chat-debugger-empty-model .model-picker {
+  min-width: 240px;
+  max-width: 300px;
+}
+
+.pg-empty .chat-debugger-empty-model .model-picker .model-picker-btn {
+  min-height: 38px;
+  padding: 8px 18px;
+  font-size: 13.5px;
+  background: var(--card-bg);
+  box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.28);
 }
 
 .pg-empty-icon {

@@ -1102,8 +1102,13 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
 
       <div className="chat-debugger-messages">
         {messages.length === 0 && playground && (
-          /* 空状态：图标 + 标题 + 提示词按钮网格 */
+          /* 空状态：模型选择位 + 图标 + 标题 + 提示词按钮网格。
+           * 模型选择位此前只在非 playground 空状态渲染——playground 只能从
+           * 输入区右下角的紧凑 picker 切模型，首屏「看不见模型列表」
+           * （用户反馈「很多模型都看不见了」）。这里复用非 playground 的
+           * chat-debugger-empty-model 位（居中大 pill，点开即全量模型下拉）。 */
           <div className="pg-empty">
+            <div className="chat-debugger-empty-model">{playgroundModelPicker}</div>
             <div className="pg-empty-icon"><MessageSquarePlus size={20} /></div>
             <h2 className="pg-empty-title">{t('有什么可以帮忙的？')}</h2>
             <p className="pg-empty-sub">{t('选择一个常用任务快速开始，或在下方直接输入你的请求。')}</p>
