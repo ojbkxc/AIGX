@@ -2914,5 +2914,22 @@
   "组内轮询": "[TODO en] 组内轮询",
   "最终承载：{{name}}": "[TODO en] 最终承载：{{name}}",
   "Token 上限": "[TODO en] Token 上限",
-  "Token 周期用量": "[TODO en] Token 周期用量"
+  "Token 周期用量": "[TODO en] Token 周期用量",
+  "按添加时间（新→旧）": "[TODO en] 按添加时间（新→旧）",
+  "标题模型（留空 = 渠道默认首选）": "Title model (blank = channel default)",
+  "标题提示词": "Title prompt",
+  "标题已更新": "Title updated",
+  "标题总结设置": "Title summary settings",
+  "标题总结设置已保存": "Title summary settings saved",
+  "从此消息分叉新会话": "Fork a new session from this message",
+  "调度优先序": "[TODO en] 调度优先序",
+  "分叉": "fork",
+  "分叉新会话": "Fork new session",
+  "会话": "Session",
+  "立即总结当前会话": "Summarize current session now",
+  "列表排序": "[TODO en] 列表排序",
+  "首轮对话结束后自动总结一次标题；失败保持原标题，可在此手动重试。": "A title is summarized automatically once after the first round; on failure the original title is kept — retry here anytime.",
+  "未能生成标题（检查渠道与模型配置）": "Could not generate a title (check channel and model settings)",
+  "已从该消息分叉为新会话": "Forked into a new session from this message",
+  "账号被启用中的渠道引用，先解除引用或停用渠道再删除": "[TODO en] 账号被启用中的渠道引用，先解除引用或停用渠道再删除"
 }

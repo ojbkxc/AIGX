@@ -75,6 +75,9 @@ export interface ChatDebuggerProps {
   onOpenSessions?: () => void;
   /** 流式生成状态上报（宿主据此在生成中禁止切换/删除/新建会话，防止半截回复落盘） */
   onBusyChange?: (busy: boolean) => void;
+  /** 会话 fork（宿主 /chat 页提供）：按消息下标截取复制为新会话。
+   *  提供后才在 assistant 气泡操作区渲染分叉按钮（对照上游 onFork） */
+  onForkMessage?: (index: number) => void;
 }
 
 interface ChatChunkResult {
@@ -115,6 +118,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     hasMessages = false,
     onOpenSessions,
     onBusyChange,
+    onForkMessage,
   } = props;
   const { t } = useTranslation();
 
@@ -1188,6 +1192,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
               onSpeak={() => void speakMessage(i)}
               onRegenerate={() => void regenerate()}
               onDelete={() => deleteMessage(i)}
+              onFork={onForkMessage ? () => onForkMessage(i) : undefined}
             />
         ))}
         </Suspense>

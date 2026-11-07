@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
+import RouteReplayPanel from './RouteReplay';
+import RouteSticky from './RouteSticky';
 import type { RouteStrategy, RoutingPolicyItem, RoutingQueueItem, StickyMode } from '../types';
 
 /**
@@ -209,7 +211,10 @@ export default function RoutingPanel(): JSX.Element {
   const strategyTip = STRATEGIES.find((s) => s.value === form.strategy)?.tip ?? '';
   const stickyTip = STICKY_OPTIONS.find((s) => s.value === form.sticky)?.tip ?? '';
 
+  // 回放/粘滞两块作为独立卡片并列在策略卡之后（对照上游「路由」域：策略配置 /
+  // 回放 / 粘性会话三分）；各自内部管理加载态，不在本组件拉数据。
   return (
+    <>
     <div className="card">
       <div className="card-header">
         <h2>{t('路由策略')}</h2>
@@ -427,5 +432,8 @@ export default function RoutingPanel(): JSX.Element {
         </div>
       </div>
     </div>
+    <RouteReplayPanel />
+    <RouteSticky />
+    </>
   );
 }

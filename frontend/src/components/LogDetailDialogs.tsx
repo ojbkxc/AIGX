@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import type { RequestLogItem, AuditLogItem } from '../pages/Logs';
 import { sourceLabel } from '../pages/Logs';
 import { Tabs } from './ui';
+import { RouteReplayView } from './RouteReplay';
 
 /** 详情弹窗的视图分档：概览 / 对话 / 路由 / 原始报文 */
 type DetailTab = 'overview' | 'conversation' | 'route' | 'raw';
@@ -156,6 +157,11 @@ export function RequestLogDetail({ log, admin, onClose }: {
               </div>
             </div>
           )}
+          {/* 完整回放视图：请求当时的候选有序表/跳过原因/执行时间线/配置快照
+              （GET /api/routing/replay/{request_id}，be-fix #12-B）。挂载在 Tab
+              激活分支内 = 打开详情不拉数据，切到本 Tab 才单次拉取（无轮询）；
+              端点 404 / 无快照时组件内部空态降级，上方基础字段始终可见。 */}
+          <RouteReplayView requestId={log.id} />
         </div>
       )}
 

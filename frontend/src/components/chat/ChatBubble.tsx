@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Bot, User, Copy, Check, Pencil, Volume2, Square, RefreshCw, Trash2, Code, MoreVertical,
+  Bot, User, Copy, Check, Pencil, Volume2, Square, RefreshCw, Trash2, Code, MoreVertical, GitFork,
 } from 'lucide-react';
 import MessageViewer from '../MessageViewer';
 import type { DebugMessage } from '../ChatDebugger';
@@ -26,6 +26,9 @@ interface ChatBubbleProps {
   onSpeak: () => void;
   onRegenerate: () => void;
   onDelete?: () => void;
+  /** 从这条消息分叉新会话（对照上游 assistant-message-operations onFork；
+   *  仅 assistant 消息提供，截取含本条——上游 assistant_sessions.rs:101-109） */
+  onFork?: () => void;
 }
 
 export default function ChatBubble({
@@ -48,6 +51,7 @@ export default function ChatBubble({
   onSpeak,
   onRegenerate,
   onDelete,
+  onFork,
 }: ChatBubbleProps): JSX.Element {
   const { t } = useTranslation();
   const [showSource, setShowSource] = useState(false);
@@ -205,6 +209,18 @@ export default function ChatBubble({
                       <RefreshCw size={13} />
                     </button>
                   )}
+                  {/* 会话 fork：截取到本条（含）复制为新会话，原会话不动 */}
+                  {onFork && (
+                    <button
+                      type="button"
+                      className="chat-debugger-action-btn"
+                      title={t('从此消息分叉新会话')}
+                      onClick={onFork}
+                      disabled={isBusy}
+                    >
+                      <GitFork size={13} />
+                    </button>
+                  )}
                 </>
               )}
 
@@ -226,6 +242,11 @@ export default function ChatBubble({
                     <button type="button" onClick={() => { setShowSource((v) => !v); setShowMobileMenu(false); }}>
                       <Code size={13} /> {showSource ? t('渲染视图') : t('源码视图')}
                     </button>
+                    {message.role === 'assistant' && onFork && (
+                      <button type="button" onClick={() => { onFork(); setShowMobileMenu(false); }}>
+                        <GitFork size={13} /> {t('分叉新会话')}
+                      </button>
+                    )}
                     {onDelete && (
                       <button type="button" className="danger" onClick={() => { onDelete(); setShowMobileMenu(false); }}>
                         <Trash2 size={13} /> {t('删除')}

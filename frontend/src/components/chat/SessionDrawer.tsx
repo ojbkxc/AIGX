@@ -47,6 +47,9 @@ export interface SessionDrawerProps {
   onDelete: (id: string) => void;
   /** 标题（默认「会话列表」） */
   title?: string;
+  /** 头部额外操作（渲染在标题与收起按钮之间，如聊天页的标题总结设置）；
+   *  可选——AI 运维页不传，行为不变 */
+  headerExtra?: React.ReactNode;
 }
 
 export default function SessionDrawer({
@@ -60,6 +63,7 @@ export default function SessionDrawer({
   onCreate,
   onDelete,
   title,
+  headerExtra,
 }: SessionDrawerProps): JSX.Element | null {
   const { t } = useTranslation();
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
@@ -84,6 +88,7 @@ export default function SessionDrawer({
     <>
       <div className="sd-head">
         <span>{title ?? t('会话列表')}</span>
+        {headerExtra}
         <button type="button" className="sd-close" onClick={onClose} aria-label={t('收起')}>
           <ChevronLeft size={14} />
         </button>

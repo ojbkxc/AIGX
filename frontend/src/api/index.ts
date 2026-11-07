@@ -105,6 +105,8 @@ import type {
   ScheduledTaskPatch,
   ScheduledTaskRunResult,
 } from '@/types';
+// 路由回放/粘滞会话类型独立成文件（types/index.ts 正被 #13 并行编辑，避免共享大文件互卷在制品）
+import type { RouteReplaySnapshot, RouteStickyList } from '@/types/routing-replay';
 
 const API_BASE = '/api';
 
@@ -853,6 +855,23 @@ export const api = {
       'GET',
       `${API_BASE}/routing/queue?model=${encodeURIComponent(model)}`,
     ),
+  // 路由回放快照（对照 Agent2API「路由回放」：只读渲染请求当时保存的选路事实，
+  // 不以当前配置重算历史）。后端 GET /api/routing/replay/{request_id} 由 be-fix
+  // 任务 #12-B 提供；未就绪返回 404（err.status 可辨），调用方按空态降级。
+  getRouteReplay: (requestId: string | number): Promise<ApiResponse<RouteReplaySnapshot | null>> =>
+    request<ApiResponse<RouteReplaySnapshot | null>>(
+      'GET',
+      `${API_BASE}/routing/replay/${encodeURIComponent(String(requestId))}`,
+    ),
+  // 粘滞会话管理（对照 Agent2API api/routing_workspace.rs get_sticky/clear_sticky；
+  // 后端未就绪 404 → 空态降级）。query 按会话标识/渠道名模糊过滤。
+  getRouteSticky: (query = ''): Promise<ApiResponse<RouteStickyList>> =>
+    request<ApiResponse<RouteStickyList>>(
+      'GET',
+      `${API_BASE}/routing/sticky${query ? `?query=${encodeURIComponent(query)}` : ''}`,
+    ),
+  clearRouteSticky: (body: { id?: string; all?: boolean }): Promise<ApiResponse<{ cleared: number }>> =>
+    request<ApiResponse<{ cleared: number }>>('POST', `${API_BASE}/routing/sticky/clear`, body),
   // Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」；保存即生效）
   getClineHeaders: (): Promise<ApiResponse<ClineHeadersItem>> =>
     request<ApiResponse<ClineHeadersItem>>('GET', `${API_BASE}/cline-headers`),

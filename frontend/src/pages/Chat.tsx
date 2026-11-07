@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  BarChart3, Code2, GraduationCap, ClipboardList,
+  BarChart3, Code2, GraduationCap, ClipboardList, SlidersHorizontal,
 } from 'lucide-react';
 import { api } from '../api';
 import ChatDebugger, { type DebugMessage } from '../components/ChatDebugger';
@@ -75,6 +75,58 @@ interface PlaygroundSession {
 
 const uid = (): string => `pg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
+/* ── LLM 标题总结（对照上游 assistant_history.rs title / assistant-message-operations）──
+ * 上游由后端总结（config.title_model/title_prompt + titleGenerated 幂等位）；
+ * AIGX 无该后端，用 Playground 同一条 chat_test 链在前端完成（用户/管理员共用）。
+ * 可配 titleModel / titlePrompt（localStorage），首轮对话后自动一次，失败静默。 */
+const TITLE_CFG_KEY = 'aigx_chat_title_cfg';
+const TITLED_KEY = 'aigx_chat_titled';
+/** 默认提示词（上游 DEFAULT_TITLE_PROMPT 同语义：短标题、无引号无解释） */
+const DEFAULT_TITLE_PROMPT =
+  '你是会话标题生成器。根据对话摘录生成一个不超过 12 个字的简洁标题，直接输出标题本身，不要引号、标点或任何解释。';
+
+/** 标题总结配置（本机偏好；titleModel 留空 = 渠道默认首选模型） */
+interface ChatTitleCfg {
+  titleModel?: string;
+  titlePrompt?: string;
+}
+
+function loadTitleCfg(): ChatTitleCfg {
+  try {
+    const raw = localStorage.getItem(TITLE_CFG_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      titleModel: typeof parsed.titleModel === 'string' ? parsed.titleModel : '',
+      titlePrompt: typeof parsed.titlePrompt === 'string' ? parsed.titlePrompt : '',
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** 已自动总结过的会话 id（成败都记一次，防止每条消息都打一次 LLM）；本地封顶 200 条 */
+function loadTitledIds(): string[] {
+  try {
+    const raw = localStorage.getItem(TITLED_KEY);
+    const arr = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveTitledIds(ids: string[]): void {
+  try {
+    localStorage.setItem(TITLED_KEY, JSON.stringify(ids.slice(-200)));
+  } catch { /* 隐私模式等：静默（下次会重复尝试，可接受） */ }
+}
+
+/** 从模型回复里清洗出标题：去首尾引号/空白、截断（模型偶尔带引号或解释） */
+function cleanTitle(raw: string): string {
+  return raw.trim().replace(/^["'「『『]+/, '').replace(/["'」』』]+$/, '').split('\n')[0].trim().slice(0, 40);
+}
+
 const isDebugMessage = (m: unknown): m is DebugMessage => Boolean(
   m && typeof m === 'object' && ((m as DebugMessage).role === 'user' || (m as DebugMessage).role === 'assistant'),
 );
@@ -115,6 +167,9 @@ export default function Chat(): JSX.Element {
   const [sessions, setSessions] = useState<PlaygroundSession[]>([]);
   const [activeId, setActiveId] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false);
+  /** 标题总结设置弹层（headerExtra 挂抽屉头部；本机偏好存 localStorage） */
+  const [titleCfgOpen, setTitleCfgOpen] = useState(false);
+  const [cfgDraft, setCfgDraft] = useState<ChatTitleCfg>(() => loadTitleCfg());
   const [loading, setLoading] = useState(true);
   const saveTimer = useRef<number | null>(null);
   const loadedRef = useRef(false);
@@ -126,12 +181,6 @@ export default function Chat(): JSX.Element {
    *  否则切换前的落盘会把流式中间态的半截回复写进当前会话 */
   const busyRef = useRef(false);
   const addToast = useToast();
-  /** 会话操作守卫（对齐 Agent 页 `if (busy) return`）：生成中拦截并提示 */
-  const guardBusy = useCallback((): boolean => {
-    if (!busyRef.current) return false;
-    addToast(t('正在生成回复，请先停止再操作会话'), 'error');
-    return true;
-  }, [addToast, t]);
 
   /** 会话摘要列表（后端返回；消息按需拉取） */
   const persistSessions = (next: PlaygroundSession[]): void => {
@@ -152,6 +201,130 @@ export default function Chat(): JSX.Element {
       /* 离线/过期时静默；下次保存会覆盖 */
     }
   }, []);
+
+  /** 会话操作守卫（对齐 Agent 页 `if (busy) return`）：生成中拦截并提示 */
+  const guardBusy = useCallback((): boolean => {
+    if (!busyRef.current) return false;
+    addToast(t('正在生成回复，请先停止再操作会话'), 'error');
+    return true;
+  }, [addToast, t]);
+
+  /* ── 会话 fork（对照上游 fork：仅 assistant 消息可分叉，截取含本条；
+   *   AIGX 消息无 id 用下标；走既有 createChatSession + replaceChatMessages，
+   *   无需新后端端点。后端不可用时退化为本地临时会话（与新建会话同口径）。）── */
+  const forkSession = useCallback(async (idx: number): Promise<void> => {
+    if (guardBusy()) {
+      setDrawerOpen(false);
+      return;
+    }
+    const src = messagesRef.current;
+    const target = src[idx];
+    if (!target || target.role !== 'assistant') return;
+    if (saveTimer.current !== null) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    await saveActiveNow();
+    const sliced = src.slice(0, idx + 1).map((m) => ({ role: m.role, content: m.content }));
+    const curTitle = sessionsRef.current.find((s) => s.id === activeRef.current)?.title || '';
+    const baseTitle = curTitle && curTitle !== '新会话' ? curTitle : t('会话');
+    const forkTitle = `${baseTitle} · ${t('分叉')}`;
+    let newId = `local-fork-${Date.now().toString(36)}`;
+    try {
+      const created = await api.createChatSession({ title: forkTitle, model: modelRef.current });
+      const id = created.data?.id;
+      if (id) {
+        newId = id;
+        await api.replaceChatMessages(newId, sliced, false);
+      }
+    } catch {
+      /* 后端不可用：本地临时会话兜底（消息不持久化，与 createSession 同口径） */
+    }
+    persistSessions([
+      { id: newId, title: forkTitle, model: modelRef.current, updated_at: Math.floor(Date.now() / 1000) },
+      ...sessionsRef.current,
+    ]);
+    activeRef.current = newId;
+    messagesRef.current = sliced;
+    setActiveId(newId);
+    setMessages(sliced);
+    setDrawerOpen(false);
+    addToast(t('已从该消息分叉为新会话'));
+  }, [addToast, guardBusy, saveActiveNow, t]);
+
+  /* ── LLM 标题总结：首轮对话后自动一次；「新会话」或空标题才触发，
+   *   用户手动改过名的会话永不覆盖（对齐上游 titleGenerated 幂等语义）── */
+  const titledRef = useRef<Set<string>>(new Set(loadTitledIds()));
+  const summarizeTitle = useCallback(async (id: string): Promise<void> => {
+    // 只总结当前活动会话（消息在内存里；其余会话切换时自然满足条件）
+    if (id !== activeRef.current) return;
+    const msgs = messagesRef.current;
+    if (!msgs.length) return;
+    const excerpts = msgs
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .filter((m) => m.content.trim())
+      .slice(0, 4)
+      .map((m) => ({ role: m.role, text: m.content.slice(0, 2000) }));
+    // 需完成一轮对话（上游同口径：摘录里没有 assistant 回复就不总结）
+    if (!excerpts.some((e) => e.role === 'assistant')) return;
+    const cfg = loadTitleCfg();
+    try {
+      const res = await api.testChannelChat({
+        channel_id: '',
+        protocol: 'openai',
+        ...(cfg.titleModel ? { model: cfg.titleModel } : {}),
+        system_prompt: cfg.titlePrompt?.trim() || DEFAULT_TITLE_PROMPT,
+        message: JSON.stringify(excerpts),
+        max_tokens: 120,
+        stream: false,
+      });
+      const raw = res?.data?.content ?? (res?.stream ?? []).map((c) => c.content ?? '').join('');
+      const title = cleanTitle(raw);
+      if (!title) return;
+      await api.renameChatSession(id, title);
+      persistSessions(sessionsRef.current.map((s) => (s.id === id ? { ...s, title } : s)));
+    } catch {
+      /* 静默：总结失败保持原标题（本地偏好/网络/渠道问题都不该扰动对话） */
+    }
+  }, []);
+
+  const markTitled = useCallback((id: string): void => {
+    titledRef.current.add(id);
+    saveTitledIds([...titledRef.current]);
+  }, []);
+
+  /** 保存标题总结本机偏好（titleModel/titlePrompt 可配） */
+  const saveTitleCfg = (): void => {
+    try {
+      localStorage.setItem(TITLE_CFG_KEY, JSON.stringify(cfgDraft));
+    } catch { /* 隐私模式等：静默，本次会话内仍用草稿值 */ }
+    setTitleCfgOpen(false);
+    addToast(t('标题总结设置已保存'));
+  };
+
+  /** 手动重试当前会话标题（自动轮失败后的出口） */
+  const manualTitle = async (): Promise<void> => {
+    if (guardBusy()) return;
+    if (!activeRef.current || !messagesRef.current.length) return;
+    markTitled(activeRef.current);
+    await summarizeTitle(activeRef.current);
+    const cur = sessionsRef.current.find((s) => s.id === activeRef.current);
+    addToast(cur?.title && cur.title !== '新会话'
+      ? t('标题已更新')
+      : t('未能生成标题（检查渠道与模型配置）'));
+  };
+
+  useEffect(() => {
+    if (loading || !loadedRef.current || !activeId) return;
+    if (busyRef.current) return;
+    if (messages.length < 2) return;
+    if (!messages.some((m) => m.role === 'assistant' && m.content.trim())) return;
+    const cur = sessionsRef.current.find((s) => s.id === activeId);
+    if (!cur || (cur.title && cur.title !== '新会话')) return;
+    if (titledRef.current.has(activeId)) return;
+    markTitled(activeId);
+    void summarizeTitle(activeId);
+  }, [messages, activeId, loading, markTitled, summarizeTitle]);
 
   /** 一次性迁移旧 localStorage 会话到后端（成功后清旧键） */
   const importLegacySessions = useCallback(async (): Promise<PlaygroundSession[]> => {
@@ -441,6 +614,48 @@ export default function Chat(): JSX.Element {
         onSelect={(id) => void switchSession(id)}
         onCreate={() => void createSession()}
         onDelete={(id) => void deleteSession(id)}
+        headerExtra={(
+          <span className="sd-title-cfg">
+            <button
+              type="button"
+              className="sd-title-gear"
+              title={t('标题总结设置')}
+              onClick={() => setTitleCfgOpen((v) => !v)}
+            >
+              <SlidersHorizontal size={13} />
+            </button>
+            {titleCfgOpen && (
+              <div className="sd-title-pop">
+                <label>{t('标题模型（留空 = 渠道默认首选）')}</label>
+                <input
+                  className="form-input"
+                  placeholder="gpt-4o-mini"
+                  value={cfgDraft.titleModel ?? ''}
+                  onChange={(e) => setCfgDraft({ ...cfgDraft, titleModel: e.target.value })}
+                />
+                <label>{t('标题提示词')}</label>
+                <textarea
+                  className="form-input"
+                  rows={3}
+                  value={cfgDraft.titlePrompt ?? ''}
+                  placeholder={DEFAULT_TITLE_PROMPT}
+                  onChange={(e) => setCfgDraft({ ...cfgDraft, titlePrompt: e.target.value })}
+                />
+                <div className="sd-title-pop-actions">
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={saveTitleCfg}>
+                    {t('保存')}
+                  </button>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => void manualTitle()}>
+                    {t('立即总结当前会话')}
+                  </button>
+                </div>
+                <p className="sd-title-pop-hint">
+                  {t('首轮对话结束后自动总结一次标题；失败保持原标题，可在此手动重试。')}
+                </p>
+              </div>
+            )}
+          </span>
+        )}
       />
       <ChatDebugger
         key={loading ? 'loading' : activeId}
@@ -454,6 +669,7 @@ export default function Chat(): JSX.Element {
         hasMessages={messages.length > 0}
         onOpenSessions={() => setDrawerOpen((v) => !v)}
         onBusyChange={(b) => { busyRef.current = b; }}
+        onForkMessage={(idx) => void forkSession(idx)}
       />
     </div>
   );
