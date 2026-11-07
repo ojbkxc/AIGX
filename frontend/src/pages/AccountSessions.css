@@ -921,12 +921,151 @@ body.as-col-resizing {
   white-space: nowrap;
 }
 
-/* 分组带（对齐 Agent2API grp-band：家图标 + 家名 + 计数） */
+/* 分组带（对齐 Agent2API grp-band：家图标 + 家名 + 计数 + 统计 + 折叠箭头 + ⋯ 菜单） */
 .as-tr-group > td {
-  padding: 6px 10px !important;
+  padding: 0 !important;
   background: var(--surface-bg, rgba(127, 127, 127, 0.06));
   border-top: 1px solid var(--border-color);
   border-bottom: 1px solid var(--border-color);
+}
+
+/* 分组带内条：整条可点折叠（落在按钮上的点击各有动作，见 TSX 的 closest 判据） */
+.as-group-band {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  user-select: none;
+  min-width: 0;
+}
+
+.as-group-band:hover {
+  background: var(--hover-bg, rgba(128, 128, 128, 0.06));
+}
+
+.as-group-stat {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.as-group-fill {
+  flex: 1;
+}
+
+.as-group-fold {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.as-group-fold:hover {
+  background: var(--hover-bg);
+  color: var(--text-main);
+}
+
+.as-group-menu-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.as-group-menu-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.as-group-menu-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text-main);
+}
+
+/* ⋯ 菜单浮层（右对齐分组带，绝对定位在按钮下方） */
+.as-group-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  min-width: 168px;
+  padding: 4px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.as-group-menu-item {
+  border: none;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12px;
+  text-align: left;
+  padding: 6px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.as-group-menu-item:hover {
+  background: var(--hover-bg);
+}
+
+.as-group-menu-item:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.as-group-menu-sep {
+  height: 1px;
+  background: var(--border-color);
+  margin: 3px 2px;
+}
+
+/* 凭证有效期列：临期高亮（48h 内）+ 待生效套餐徽章 */
+.as-c-expiry {
+  font-size: 12px;
+}
+
+.as-expiry-left {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.as-expiry-left.soon {
+  color: var(--warn-color, #d98600);
+  font-weight: 600;
+}
+
+.as-pending-badge {
+  display: inline-block;
+  margin-top: 3px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--primary-color);
+  border: 1px solid var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+  white-space: nowrap;
+  cursor: help;
 }
 
 .as-group-label {

@@ -180,6 +180,48 @@ function usagePoolOf(bal: AccountBalance | null | undefined): UsagePoolView | nu
   };
 }
 
+/* ══ 凭证有效期列（对齐 Agent2API ExpiryCell：到期时间归一 + 剩余时长收短展示） ══ */
+
+/** 到期值归一到毫秒：后端各家给的 expires_at / expireAt 在 10 位秒与 13 位毫秒
+ *  之间漂过（对齐上游 expiryMillis 的归一规则，不归一会把 10 位秒读成 1970）。 */
+function expiryMillis(value: unknown): number | null {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n < 1e11 ? n * 1000 : n;
+}
+
+/** 距离到期的人话文案（「30 分钟后 / 5 小时后 / 3 天后」；完整时刻留给 title） */
+function expiryLeftText(leftMs: number): string {
+  if (leftMs < 3600_000) return `${Math.max(1, Math.round(leftMs / 60_000))} 分钟后`;
+  if (leftMs < 48 * 3600_000) return `${(leftMs / 3600_000).toFixed(1)} 小时后`;
+  return `${Math.floor(leftMs / (24 * 3600_000))} 天后`;
+}
+
+/** 账号的最早到期毫秒（凭证 expires_at 优先，缺省再看余额快照的套餐到期）。 */
+function accountExpiryOf(s: AccountSessionItem): { at: number | null; source: 'credential' | 'plan' | null } {
+  const cred = expiryMillis(s.expires_at);
+  if (cred != null) return { at: cred, source: 'credential' };
+  const bal = s.last_balance as AccountBalance | null | undefined;
+  const sub = bal?.subscription as Record<string, unknown> | null | undefined;
+  if (sub) {
+    const plan = expiryMillis(sub.expireAt ?? sub.expire_at);
+    if (plan != null) return { at: plan, source: 'plan' };
+  }
+  return { at: null, source: null };
+}
+
+/* ══ 待生效套餐徽章（对齐 Agent2API pendingPlans：plans[] 里 state=pending 的权益） ══ */
+
+/** 余额快照里待生效的套餐（后端给的 plans 数组带 pending 态才有；缺省 = 空）。 */
+function pendingPlansOf(s: AccountSessionItem): Array<Record<string, unknown>> {
+  const bal = s.last_balance as AccountBalance | null | undefined;
+  const plans = (bal as Record<string, unknown> | null | undefined)?.plans;
+  if (!Array.isArray(plans)) return [];
+  return plans.filter(
+    (p) => p && typeof p === 'object' && String((p as Record<string, unknown>).state || '') === 'pending',
+  ) as Array<Record<string, unknown>>;
+}
+
 /* ══ 账号限制器（对齐 Agent2API accounts-dialog-limiter：余额 / Token 两类规则） ══ */
 /* 规则类型 AccountLimiterRule 定义在 ../types（后端 PATCH limiters 键整块替换） */
 
@@ -265,7 +307,7 @@ function limiterRuleOfDraft(draft: LimiterDraft): { error: string } | { rule: Ac
 
 /* ══ 列定义（对齐 Agent2API accounts-columns：列宽拖动 + 列显隐 + 横滚底线） ══ */
 
-type AsCol = 'pick' | 'name' | 'provider' | 'status' | 'priority' | 'conn' | 'usage' | 'rate' | 'cooldown' | 'act';
+type AsCol = 'pick' | 'name' | 'provider' | 'status' | 'priority' | 'conn' | 'expiry' | 'usage' | 'rate' | 'cooldown' | 'act';
 
 /** 全部列：默认宽（px）；flex 列没有用户覆盖时不写宽度，吃表格剩余宽度 */
 const AS_COLS: Array<{ key: AsCol; label: string; w: number; lock?: boolean; flex?: boolean }> = [
@@ -275,6 +317,7 @@ const AS_COLS: Array<{ key: AsCol; label: string; w: number; lock?: boolean; fle
   { key: 'status', label: '状态', w: 92, lock: true },
   { key: 'priority', label: '优先级', w: 88 },
   { key: 'conn', label: '连接数', w: 60 },
+  { key: 'expiry', label: '有效期', w: 96 },
   { key: 'usage', label: '余额', w: 132 },
   { key: 'rate', label: '成功率', w: 64 },
   { key: 'cooldown', label: '冷却', w: 128 },
@@ -291,6 +334,8 @@ const LS_COLW = 'aigx-as-colw'; // 列宽覆盖
 const LS_GROUPED = 'aigx-as-grouped';
 const LS_NAMEMASK = 'aigx-as-namemask';
 const LS_AUTOBAL = 'aigx-as-autobal'; // 自动余额轮询间隔（分钟）
+/** 分组折叠记忆（对齐 Agent2API accounts-store COLLAPSED_KEY：收起的分组跨次启动保留） */
+const LS_COLLAPSED = 'aigx-as-collapsed';
 
 /**
  * 连接数快照走 api.getAccountSessionConnections（已收敛进 api/index.ts）：
@@ -362,6 +407,9 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
 
   // 状态分段过滤（对齐 Agent2API 账号页：全部/启用/禁用/冷却中）
   const [statusSeg, setStatusSeg] = useState<'all' | 'enabled' | 'disabled' | 'cooling'>('all');
+  // 按到期排序（对齐上游 accounts-sort 的 credit/soon 档：最急着过期的排最前；
+  // 默认关闭保持「列表顺序 = 调度优先序」）
+  const [expirySort, setExpirySort] = useState(false);
   // 勾选与批量操作（批量启停/删除，循环既有 PATCH/DELETE 端点）
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const [batchRunning, setBatchRunning] = useState(false);
@@ -393,7 +441,14 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
   const colPanelRef = useRef<HTMLDivElement | null>(null);
   const [grouped, setGrouped] = useState<boolean>(() => readLS(LS_GROUPED, false));
   const [nameMasked, setNameMasked] = useState<boolean>(() => readLS(LS_NAMEMASK, false));
+  /** 分组折叠记忆（localStorage；上游同款偏好：收起的组下次打开还是收着的） */
+  const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(
+    () => new Set(readLS<string[]>(LS_COLLAPSED, [])),
+  );
   const [autoBalanceMins, setAutoBalanceMins] = useState<number>(() => readLS(LS_AUTOBAL, 0));
+  /** 分组带 ⋯ 菜单（对齐上游 GroupMenu：整组启停/折叠；一次只开一份） */
+  const [groupMenuFor, setGroupMenuFor] = useState<string | null>(null);
+  const groupMenuRef = useRef<HTMLDivElement | null>(null);
   /** 连接数轮询读数（端点未上线时为空表，展示层用 in_flight 兜底） */
   const [connCounts, setConnCounts] = useState<Record<string, number>>({});
 
@@ -1073,6 +1128,16 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
     return true;
   });
 
+  // 按到期排序（纯展示序，不改调度 priority；没到期值的排最后，已过期最前）
+  const visibleSorted = useMemo(() => {
+    if (!expirySort) return visible;
+    return [...visible].sort((a, b) => {
+      const ea = accountExpiryOf(a).at ?? Number.POSITIVE_INFINITY;
+      const eb = accountExpiryOf(b).at ?? Number.POSITIVE_INFINITY;
+      return ea - eb;
+    });
+  }, [visible, expirySort]);
+
   // ── 列显隐 / 列宽拖动（对齐 Agent2API accounts-columns + 模型管理同款交互）──
 
   /** 当前可见列（隐藏的已从 DOM 摘掉，colSpan / colgroup / minWidth 都按它算） */
@@ -1174,6 +1239,51 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
     window.addEventListener('mousedown', onDown);
     return () => window.removeEventListener('mousedown', onDown);
   }, [clearMenuFor]);
+
+  // 分组带 ⋯ 菜单点外关闭
+  useEffect(() => {
+    if (!groupMenuFor) return undefined;
+    const onDown = (e: MouseEvent): void => {
+      if (groupMenuRef.current && !groupMenuRef.current.contains(e.target as Node)) {
+        setGroupMenuFor(null);
+      }
+    };
+    window.addEventListener('mousedown', onDown);
+    return () => window.removeEventListener('mousedown', onDown);
+  }, [groupMenuFor]);
+
+  // ── 分组折叠（对齐上游 toggleGroupCollapsed：收起/展开随点随存，跨次启动保留）──
+  const toggleGroupCollapsed = (provider: string): void => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(provider)) next.delete(provider);
+      else next.add(provider);
+      writeLS(LS_COLLAPSED, [...next]);
+      return next;
+    });
+  };
+
+  /** 整组启用/禁用（对齐上游 setGroupEnabled：循环既有 PATCH 端点，含被筛选隐藏的行） */
+  const runGroupEnabled = async (rows: AccountSessionItem[], enabled: boolean): Promise<void> => {
+    const targets = rows.filter((r) => (r.status === 'enabled') !== enabled);
+    if (!targets.length) return;
+    setBatchRunning(true);
+    setError('');
+    try {
+      const results = await Promise.allSettled(
+        targets.map((r) => api.patchAccountSession(r.id, { status: enabled ? 'enabled' : 'disabled' })),
+      );
+      const ok = results.filter((r) => r.status === 'fulfilled').length;
+      addToast(
+        enabled
+          ? t('整组启用完成：{{ok}}/{{total}}', { ok, total: targets.length })
+          : t('整组停用完成：{{ok}}/{{total}}', { ok, total: targets.length }),
+      );
+      await load();
+    } finally {
+      setBatchRunning(false);
+    }
+  };
 
   /** 勾选（列表重载后清掉已不存在的 id，避免幽灵选择） */
   const togglePick = (id: string): void => {
@@ -1432,7 +1542,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
     if (!grouped) return [];
     const groups: Array<{ provider: string; rows: AccountSessionItem[] }> = [];
     const indexOf = new Map<string, number>();
-    for (const s of visible) {
+    for (const s of visibleSorted) {
       const key = s.provider || 'unknown';
       let gi = indexOf.get(key);
       if (gi == null) {
@@ -1443,7 +1553,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
       groups[gi].rows.push(s);
     }
     return groups;
-  }, [grouped, visible]);
+  }, [grouped, visibleSorted]);
 
   // ── 表格单元格渲染（列配置驱动：列显隐 / 列宽 / 分组模式共用一套）──
   const renderCell = (col: AsCol, s: AccountSessionItem, orderIdx: number): ReactNode => {
@@ -1548,6 +1658,54 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
             })()}
           </td>
         );
+      case 'expiry': {
+        // 凭证有效期列（对齐上游 ExpiryCell：收短「N 天后」，完整时刻进 title；
+        // 套餐到期次选 —— 凭证没有到期值时用它顶上，区分来源）
+        const exp = accountExpiryOf(s);
+        const pending = pendingPlansOf(s);
+        if (exp.at == null && pending.length === 0) {
+          return (
+            <td key={col} className="as-c-expiry">
+              <span className="form-hint" title={t('记录里没有过期时间')}>—</span>
+            </td>
+          );
+        }
+        const left = exp.at != null ? exp.at - Date.now() : null;
+        return (
+          <td key={col} className="as-c-expiry">
+            {left != null && left <= 0 ? (
+              <span className="badge badge-danger" title={t('凭证已过期；更新凭证或到期时间后自动恢复')}>
+                {t('已过期')}
+              </span>
+            ) : left != null ? (
+              <span
+                className={`as-expiry-left${left < 48 * 3600_000 ? ' soon' : ''}`}
+                title={`${expiryLeftText(left)}过期（${new Date(exp.at as number).toLocaleString()}）${exp.source === 'plan' ? ` · ${t('套餐到期，非凭证到期')}` : ''}`}
+              >
+                {expiryLeftText(left)}
+              </span>
+            ) : null}
+            {pending.length > 0 && (
+              <span
+                className="as-pending-badge"
+                title={t('已领到、还没到生效时间的套餐（生效后余额列会按它显示）：{lines}', {
+                  lines: pending
+                    .map((p) => {
+                      const name = String(p.name || p.planId || t('套餐'));
+                      const at = expiryMillis(p.pendingUntil ?? p.startsAt);
+                      return at != null
+                        ? t('{name}（{time} 起生效）', { name, time: new Date(at).toLocaleString() })
+                        : name;
+                    })
+                    .join('\n'),
+                })}
+              >
+                {t('待生效 {n}', { n: pending.length })}
+              </span>
+            )}
+          </td>
+        );
+      }
       case 'usage': {
         // 余额列（主额度桶两行形态：套餐名 + 进度条 + 读数，对齐 Agent2API .usage-pool）
         const bal = balances[s.id];
@@ -1926,6 +2084,18 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
             />
             <span>{t('分组')}</span>
           </label>
+          {/* 按到期排序（对齐上游 credit/soon 档）：最急着过期的排最前，纯展示序不改调度 */}
+          <label
+            className="as-toggle"
+            title={t('最急着过期的账号排最前（已过期最前，无到期值最后）；只影响显示，不改调度优先级')}
+          >
+            <input
+              type="checkbox"
+              checked={expirySort}
+              onChange={(e) => setExpirySort(e.target.checked)}
+            />
+            <span>{t('按到期排序')}</span>
+          </label>
           {/* 自动余额周期轮询（间隔可配置；关闭时仅保留首次加载那一次查询） */}
           <Select
             aria-label={t('自动余额查询间隔')}
@@ -2063,22 +2233,108 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
               </thead>
               <tbody>
                 {groupedList.length
-                  ? groupedList.map((g) => (
+                  ? groupedList.map((g) => {
+                      const collapsed = collapsedGroups.has(g.provider);
+                      // 组统计：启用/禁用/冷却三档（对齐上游 grp-stat；冷却=启用态且有未到期冷却）
+                      const gEnabled = g.rows.filter((r) => r.status === 'enabled' && !isCooling(r)).length;
+                      const gDisabled = g.rows.filter((r) => r.status !== 'enabled').length;
+                      const gCooling = g.rows.filter((r) => r.status === 'enabled' && isCooling(r)).length;
+                      return (
                       <Fragment key={g.provider}>
-                        {/* 分组带（对齐 Agent2API grp-band：家图标 + 家名 + 计数） */}
+                        {/* 分组带（对齐 Agent2API grp-band：家图标 + 家名 + 统计 + 折叠箭头 + ⋯ 菜单） */}
                         <tr className="as-tr-group">
                           <td colSpan={visibleCols.length}>
-                            {providerIcon(g.provider) ? (
-                              <img className="provider-card-logo" src={providerIcon(g.provider) as string} alt="" />
-                            ) : null}
-                            <span className="as-group-label">{providerLabel(g.provider)}</span>
-                            <span className="as-group-count">{g.rows.length}</span>
+                            <div
+                              className="as-group-band"
+                              onClick={(e) => {
+                                // 落在按钮/表单控件上的点击各有动作，不顺势折叠（对齐上游 onBandClick 判据）
+                                if ((e.target as Element).closest('button, a, input, select, label')) return;
+                                if (String(window.getSelection?.() || '').length > 0) return;
+                                toggleGroupCollapsed(g.provider);
+                              }}
+                              title={collapsed ? t('展开这一组') : t('点击分组带折叠这一组')}
+                            >
+                              {providerIcon(g.provider) ? (
+                                <img className="provider-card-logo" src={providerIcon(g.provider) as string} alt="" />
+                              ) : null}
+                              <span className="as-group-label">{providerLabel(g.provider)}</span>
+                              <span className="as-group-count">{g.rows.length}</span>
+                              <span className="as-group-stat">
+                                {t('启用 {n}', { n: gEnabled })}
+                                {gDisabled > 0 ? ` · ${t('禁用 {n}', { n: gDisabled })}` : ''}
+                                {gCooling > 0 ? ` · ${t('冷却 {n}', { n: gCooling })}` : ''}
+                              </span>
+                              <span className="as-group-fill" />
+                              <button
+                                type="button"
+                                className="as-group-fold"
+                                aria-expanded={!collapsed}
+                                title={collapsed ? t('展开这一组') : t('折叠这一组')}
+                                onClick={() => toggleGroupCollapsed(g.provider)}
+                              >
+                                {collapsed ? '▸' : '▾'}
+                              </button>
+                              <div
+                                className="as-group-menu-wrap"
+                                ref={groupMenuFor === g.provider ? groupMenuRef : undefined}
+                              >
+                                <button
+                                  type="button"
+                                  className="as-group-menu-btn"
+                                  title={t('本组操作')}
+                                  aria-label={t('本组操作')}
+                                  onClick={() =>
+                                    setGroupMenuFor(groupMenuFor === g.provider ? null : g.provider)
+                                  }
+                                >
+                                  ⋯
+                                </button>
+                                {groupMenuFor === g.provider && (
+                                  <div className="as-group-menu">
+                                    <button
+                                      type="button"
+                                      className="as-group-menu-item"
+                                      disabled={batchRunning}
+                                      onClick={() => {
+                                        setGroupMenuFor(null);
+                                        void runGroupEnabled(g.rows, true);
+                                      }}
+                                    >
+                                      {t('全部启用（{n}）', { n: g.rows.length })}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="as-group-menu-item"
+                                      disabled={batchRunning}
+                                      onClick={() => {
+                                        setGroupMenuFor(null);
+                                        void runGroupEnabled(g.rows, false);
+                                      }}
+                                    >
+                                      {t('全部停用（{n}）', { n: g.rows.length })}
+                                    </button>
+                                    <div className="as-group-menu-sep" />
+                                    <button
+                                      type="button"
+                                      className="as-group-menu-item"
+                                      onClick={() => {
+                                        setGroupMenuFor(null);
+                                        toggleGroupCollapsed(g.provider);
+                                      }}
+                                    >
+                                      {collapsed ? t('展开这一组') : t('折叠这一组')}
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
                           </td>
                         </tr>
-                        {g.rows.map((row, idx) => renderRow(row, idx))}
+                        {!collapsed && g.rows.map((row, idx) => renderRow(row, idx))}
                       </Fragment>
-                    ))
-                  : visible.map((row) => renderRow(row, -1))}
+                      );
+                    })
+                  : visibleSorted.map((row) => renderRow(row, -1))}
               </tbody>
               {/* 冷却明细展开行（对齐 Agent2API row-panel：通栏面板 + 标签流） */}
               {cooldownOpenId && (() => {
