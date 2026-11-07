@@ -41,12 +41,13 @@ pub struct AccountBridge {
     /// 与 `plugin_disabled` 方向相反：那个是「这几家整体关停」，这个是
     /// 「这个 key 只许用这几家」。匹配单元与数据面同口径：账号 `provider`。
     allowed_providers: Option<Vec<String>>,
-    /// 逐账号跳过明细缓冲（Phase1-B 路由回放；`None` = 未开启回放）。
+    /// 逐账号跳过明细缓冲（Phase1-B/#26 路由回放；`None` = 未开启回放）。
     ///
     /// 请求本地共享缓冲：同一次请求可能轮换多个账号型渠道，共用一个
-    /// `Arc<Mutex<Vec>>`（请求内无竞争，锁持有微秒级），由调用方在记录
-    /// 日志时一次性 drain 进 `RequestLog.account_skips`。
-    account_capture: Option<Arc<std::sync::Mutex<Vec<crate::log::AccountSkip>>>>,
+    /// `Arc<Mutex<Vec<AccountSkipGroup>>>`（请求内无竞争，锁持有微秒级），
+    /// 由调用方在记录日志时一次性 drain 进 `RequestLog.account_skips`。
+    /// 每组行数有界 + 全组总字节兜底（log::cap_account_skip_groups）。
+    account_capture: Option<Arc<std::sync::Mutex<Vec<crate::log::AccountSkipGroup>>>>,
 }
 
 /// 同渠道账号轮换的总时间预算（与共享 Client 的单请求超时对齐）。
@@ -109,7 +110,7 @@ impl AccountBridge {
     /// 接入逐账号跳过明细缓冲（route_replay 开启时由 resolve 注入）。
     pub fn with_account_capture(
         mut self,
-        buf: Option<Arc<std::sync::Mutex<Vec<crate::log::AccountSkip>>>>,
+        buf: Option<Arc<std::sync::Mutex<Vec<crate::log::AccountSkipGroup>>>>,
     ) -> Self {
         self.account_capture = buf;
         self
@@ -141,12 +142,14 @@ impl AccountBridge {
             None => true,
             Some(list) => list.is_empty() || list.iter().any(|p| p == provider),
         };
-        // Phase1-B 路由回放：逐账号跳过明细（None = 开关关闭，零开销）
-        let mut capture_guard = self
+        // Phase1-B/#26 路由回放：每次选号的明细捕获槽（行数有界
+        // ROUTE_REPLAY_MAX_SKIPS，超出转 truncated），选完并进请求级共享
+        // 缓冲（按渠道分组 + 总字节兜底）。None = 开关关闭，零开销。
+        let mut slot = self
             .account_capture
             .as_ref()
-            .map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
-        let detail = capture_guard.as_deref_mut();
+            .map(|_| crate::log::AccountSkipCapture::new(self.channel_id.clone()));
+        let detail = slot.as_mut();
         // Phase1-A2 限制条件组门控：仅 limiter_groups（扁平规则走既有
         // balance_low 路径，双计会重复拦截）；未配置时 verdict 早退零开销
         let session_gate = |session: &crate::account_session::model::AccountSession| {
@@ -159,7 +162,7 @@ impl AccountBridge {
                 None
             }
         };
-        match &self.rules {
+        let (lease, reasons) = match &self.rules {
             None => self.sessions.acquire_with_reasons_detail(
                 &self.channel_id,
                 model,
@@ -183,7 +186,20 @@ impl AccountBridge {
                 Some(&session_gate),
                 detail,
             ),
+        };
+        // #26：把本次选号的捕获并进请求级共享缓冲（同渠道多次尝试共用一个
+        // 组；总字节兜底在 merge 链路里生效）
+        if let (Some(mut slot), Some(buf)) = (slot, self.account_capture.as_ref()) {
+            let group = slot.finish();
+            let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = buf.iter_mut().find(|g| g.channel_id == group.channel_id) {
+                existing.merge(group);
+            } else {
+                buf.push(group);
+            }
+            crate::log::cap_account_skip_groups(&mut buf);
         }
+        (lease, reasons)
     }
 
     /// 单次请求最多尝试的账号数（来自轮换策略）。

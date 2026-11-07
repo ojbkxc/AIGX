@@ -409,6 +409,7 @@ pub(crate) async fn handle_chat_completions(
                     log.filtered_channels
                         .extend(capture.filtered.iter().cloned());
                     log.route_config = capture.config.clone();
+                    log.route_truncated = capture.filtered_truncated;
                     log.account_skips = capture
                         .account_buf
                         .lock()
@@ -619,6 +620,10 @@ pub(crate) async fn handle_chat_completions(
                 filtered_channels.extend(capture.filtered.iter().cloned());
             }
             let route_config = route_capture.as_ref().and_then(|c| c.config.clone());
+            let route_truncated = route_capture
+                .as_ref()
+                .map(|c| c.filtered_truncated)
+                .unwrap_or(0);
             let account_skips = route_capture
                 .as_ref()
                 .map(|c| {
@@ -654,6 +659,7 @@ pub(crate) async fn handle_chat_completions(
                 candidate_channels: candidate_channel_ids.clone(),
                 filtered_channels: filtered_channels.clone(),
                 route_config,
+                route_truncated,
                 account_skips,
                 reservation: Some(reservation),
                 debug_request_body,
@@ -959,6 +965,7 @@ pub(crate) async fn handle_chat_completions(
                     log.filtered_channels
                         .extend(capture.filtered.iter().cloned());
                     log.route_config = capture.config.clone();
+                    log.route_truncated = capture.filtered_truncated;
                     log.account_skips = capture
                         .account_buf
                         .lock()

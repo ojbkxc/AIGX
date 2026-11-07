@@ -684,7 +684,7 @@ fn paths_settings_ops() -> Value {
             "get": op("路由", "查询路由策略默认值（恢复默认用）")
         },
         "/api/routing/replay/{request_id}": {
-            "get": op_params("路由", "路由回放快照（Phase1-B 只读投影：候选序/过滤原因/选中/策略快照/账号级逐账号细因；route_replay 开关开启的请求才有完整数据）", &[path_param("request_id")])
+            "get": op_params("路由", "路由回放快照（Phase1-B/#26 只读投影：候选序/过滤原因/选中/策略快照/account_skips 按渠道分组 {channel_id,skipped[],truncated} 且行数有界 64、route_truncated 为过滤截断计数；route_replay 开关开启的请求才有完整数据）", &[path_param("request_id")])
         },
         "/api/gateway/prompt": {
             "get": op("网关", "查询系统提示词注入配置（模式/文本）"),

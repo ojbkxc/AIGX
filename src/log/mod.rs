@@ -126,15 +126,25 @@ pub struct RequestLog {
     /// None 且不序列化（零存储/零序列化开销）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_config: Option<RouteConfigSnapshot>,
-    /// 账号级逐账号跳过细因（Phase1-B）：仅 `route_replay` 开关开启时捕获；
-    /// 关闭时为空且不序列化。规模有界（≤ Σ各账号型渠道的账号数）。
+    /// 账号级逐账号跳过细因（Phase1-B/#26）：按渠道分组，每组行数有界
+    ///（[`ROUTE_REPLAY_MAX_SKIPS`]，超出转 truncated 计数）；仅 `route_replay`
+    /// 开关开启时捕获，关闭时为空且不序列化。共享缓冲另有总字节兜底。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub account_skips: Vec<AccountSkip>,
+    pub account_skips: Vec<AccountSkipGroup>,
+    /// resolve 层 filtered_channels 的截断计数（#26；超出
+    /// [`ROUTE_REPLAY_MAX_FILTERED`] 的部分，不静默丢）。
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub route_truncated: usize,
 }
 
 /// 默认尝试次数。
 fn default_attempts() -> u32 {
     1
+}
+
+/// usize 零值序列化跳过判定。
+fn is_zero_usize(v: &usize) -> bool {
+    *v == 0
 }
 
 /// 一条脱敏命中（对照基线 `SensitiveHit`）。
@@ -395,19 +405,113 @@ pub struct RouteConfigSnapshot {
     pub sticky_enabled: bool,
 }
 
-/// 账号级跳过明细（Phase1-B 路由回放）：账号型渠道选号时逐账号的跳过原因。
+/// 账号级跳过明细行（Phase1-B/#26 路由回放）：账号型渠道选号时逐账号的
+/// 跳过原因。**不携带 channel_id**——同一次选号里每行都重复同一个值，
+/// 由 [`AccountSkipGroup`] 按渠道分组承载。
 ///
-/// 仅在 `route_replay` 开关开启时捕获（`acquire_with_reasons_detail`）；
-/// 每渠道最多等于该渠道账号数，规模有界。
+/// 仅在 `route_replay` 开关开启时捕获（`acquire_with_reasons_detail`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountSkip {
     pub account_id: String,
     pub account_name: String,
-    /// 归属的账号型渠道（一次请求可能轮换多个账号型渠道）
-    pub channel_id: String,
     /// 原因码：`disabled` / `provider_not_allowed` / `expired` / `model_mismatch` /
-    /// `cooling` / `balance_low` / `concurrency`（与 SkipReasons 档位一一对应）
+    /// `cooling` / `balance_low` / `concurrency` / `limiter_skip` / `limiter_disable`
+    ///（与 SkipReasons 档位一一对应）
     pub reason: String,
+}
+
+/// 每请求/每渠道保留的明细行上限（#26 内存有界红线）。
+///
+/// 渠道账号数是设备可控数据（可达数千），无上限时单请求缓冲可到 MB 级。
+/// 超出的行**不静默丢**：累进 [`AccountSkipGroup::truncated`]，回放面板显示
+/// 「还有 n 条未记录」。同一上限口径也用于 resolve 层 filtered_channels。
+pub const ROUTE_REPLAY_MAX_SKIPS: usize = 64;
+
+/// resolve 层 filtered_channels 的同口径上限（#26）。
+pub const ROUTE_REPLAY_MAX_FILTERED: usize = 64;
+
+/// 共享缓冲的总字节兜底（所有组合计；#26）。
+pub const ROUTE_REPLAY_MAX_BYTES: usize = 128 * 1024;
+
+/// 按渠道分组的账号跳过明细（回放面板的自然分组形态）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountSkipGroup {
+    pub channel_id: String,
+    pub skipped: Vec<AccountSkip>,
+    /// 超出 [`ROUTE_REPLAY_MAX_SKIPS`] 未记录的条数（不静默丢）
+    pub truncated: usize,
+}
+
+impl AccountSkipGroup {
+    /// 把一次选号的捕获并进本组（同渠道多次尝试共用一个组）：
+    /// 行数超上限转 truncated 计数。
+    pub fn merge(&mut self, group: AccountSkipGroup) {
+        let mut rows = group.skipped;
+        let mut truncated = group.truncated;
+        let room = ROUTE_REPLAY_MAX_SKIPS.saturating_sub(self.skipped.len());
+        let take = rows.len().min(room);
+        self.skipped.extend(rows.drain(..take));
+        truncated += rows.len();
+        self.truncated += truncated;
+    }
+
+    /// 序列化体积估算（字节兜底用；serde 实际输出略小，估算从宽）。
+    fn approx_bytes(&self) -> usize {
+        self.skipped
+            .iter()
+            .map(|r| r.account_id.len() + r.account_name.len() + r.reason.len() + 96)
+            .sum::<usize>()
+            + 128
+    }
+}
+
+/// 共享缓冲的总字节兜底（#26：防单条日志记录失控）。
+///
+/// 超限时**丢弃最旧的组**并把它的 truncated 并进最新的组（计数不丢），
+/// 保证总在界内。落库与内存走同一兜底。
+pub fn cap_account_skip_groups(groups: &mut Vec<AccountSkipGroup>) {
+    let mut total: usize = groups.iter().map(AccountSkipGroup::approx_bytes).sum();
+    while total > ROUTE_REPLAY_MAX_BYTES && groups.len() > 1 {
+        let oldest = groups.remove(0);
+        total = total.saturating_sub(oldest.approx_bytes());
+        if let Some(newest) = groups.last_mut() {
+            newest.truncated += oldest.truncated + oldest.skipped.len();
+        }
+    }
+}
+
+/// 选号一次（acquire 一调用）的明细捕获槽：store 侧 push，bridge 侧取出
+/// 并进共享缓冲。cap 在 push 时就地生效。
+#[derive(Debug, Default)]
+pub struct AccountSkipCapture {
+    pub channel_id: String,
+    pub rows: Vec<AccountSkip>,
+    pub truncated: usize,
+}
+
+impl AccountSkipCapture {
+    pub fn new(channel_id: impl Into<String>) -> Self {
+        Self {
+            channel_id: channel_id.into(),
+            ..Default::default()
+        }
+    }
+
+    fn push(&mut self, row: AccountSkip) {
+        if self.rows.len() < ROUTE_REPLAY_MAX_SKIPS {
+            self.rows.push(row);
+        } else {
+            self.truncated += 1;
+        }
+    }
+
+    fn finish(self) -> AccountSkipGroup {
+        AccountSkipGroup {
+            channel_id: self.channel_id,
+            skipped: self.rows,
+            truncated: self.truncated,
+        }
+    }
 }
 
 /// 请求/响应快照（排障用，仅 `log_body` 开关开启时记录）。
@@ -505,6 +609,7 @@ impl RequestLog {
             phase: String::new(),
             route_config: None,
             account_skips: Vec::new(),
+            route_truncated: 0,
         }
     }
 }

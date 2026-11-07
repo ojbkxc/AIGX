@@ -28,8 +28,11 @@ pub const REASON_KEY_PROVIDER_NOT_ALLOWED: &str = "key_provider_not_allowed";
 #[derive(Default)]
 pub(crate) struct RouteCapture {
     /// resolve 层被过滤的渠道（未进 failover 循环；运行期 failover 的
-    /// 过滤由 chat/anthropic 记录点另行并入 log.filtered_channels）
+    /// 过滤由 chat/anthropic 记录点另行并入 log.filtered_channels）。
+    /// 上限 [`crate::log::ROUTE_REPLAY_MAX_FILTERED`]（#26），超出转计数。
     pub filtered: Vec<crate::log::FilteredChannel>,
+    /// filtered 被截断的条数（不静默丢）
+    pub filtered_truncated: usize,
     /// 选路那一刻的策略快照
     pub config: Option<crate::log::RouteConfigSnapshot>,
     /// 逐账号跳过明细缓冲：账号型渠道的 AccountBridge 选号时填充，
@@ -43,6 +46,10 @@ impl RouteCapture {
     }
 
     fn push_filtered(&mut self, channel_id: &str, reason: &'static str) {
+        if self.filtered.len() >= crate::log::ROUTE_REPLAY_MAX_FILTERED {
+            self.filtered_truncated += 1;
+            return;
+        }
         self.filtered.push(crate::log::FilteredChannel {
             channel_id: channel_id.to_string(),
             reason: reason.to_string(),

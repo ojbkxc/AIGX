@@ -492,7 +492,7 @@ impl AccountSessionStore {
         alias: Option<&str>,
         allow: F,
         gate: Option<&dyn Fn(&AccountSession) -> Option<&'static str>>,
-        mut detail: Option<&mut Vec<crate::log::AccountSkip>>,
+        mut detail: Option<&mut crate::log::AccountSkipCapture>,
     ) -> (Option<AccountLease>, SkipReasons)
     where
         F: Fn(&str) -> bool,
@@ -509,15 +509,15 @@ impl AccountSessionStore {
             in_channel += 1;
             if !session.is_enabled() {
                 reasons.disabled += 1;
-                if let Some(buf) = detail.as_mut() {
-                    buf.push(self.skip_detail(session, "disabled"));
+                if let Some(cap) = detail.as_mut() {
+                    cap.push(self.skip_detail(session, "disabled"));
                 }
                 continue;
             }
             if !allow(&session.provider) {
                 reasons.provider_off += 1;
-                if let Some(buf) = detail.as_mut() {
-                    buf.push(self.skip_detail(session, "provider_not_allowed"));
+                if let Some(cap) = detail.as_mut() {
+                    cap.push(self.skip_detail(session, "provider_not_allowed"));
                 }
                 continue;
             }
@@ -526,45 +526,45 @@ impl AccountSessionStore {
             if let Some(gate) = gate {
                 if let Some(reason) = gate(session) {
                     reasons.limited += 1;
-                    if let Some(buf) = detail.as_mut() {
-                        buf.push(self.skip_detail(session, reason));
+                    if let Some(cap) = detail.as_mut() {
+                        cap.push(self.skip_detail(session, reason));
                     }
                     continue;
                 }
             }
             if session.is_expired(now) {
                 reasons.expired += 1;
-                if let Some(buf) = detail.as_mut() {
-                    buf.push(self.skip_detail(session, "expired"));
+                if let Some(cap) = detail.as_mut() {
+                    cap.push(self.skip_detail(session, "expired"));
                 }
                 continue;
             }
             if !session.supports_model_any(model, alias) {
                 reasons.model_mismatch += 1;
-                if let Some(buf) = detail.as_mut() {
-                    buf.push(self.skip_detail(session, "model_mismatch"));
+                if let Some(cap) = detail.as_mut() {
+                    cap.push(self.skip_detail(session, "model_mismatch"));
                 }
                 continue;
             }
             if session.is_cooling(model, now) {
                 reasons.cooling += 1;
-                if let Some(buf) = detail.as_mut() {
-                    buf.push(self.skip_detail(session, "cooling"));
+                if let Some(cap) = detail.as_mut() {
+                    cap.push(self.skip_detail(session, "cooling"));
                 }
                 continue;
             }
             // 余额限制器：available 低于阈值时跳过（P1-6 选路消费）
             if session.should_skip_by_balance() {
                 reasons.balance_low += 1;
-                if let Some(buf) = detail.as_mut() {
-                    buf.push(self.skip_detail(session, "balance_low"));
+                if let Some(cap) = detail.as_mut() {
+                    cap.push(self.skip_detail(session, "balance_low"));
                 }
                 continue;
             }
             if session.max_concurrency > 0 && session.in_flight >= session.max_concurrency {
                 reasons.concurrency += 1;
-                if let Some(buf) = detail.as_mut() {
-                    buf.push(self.skip_detail(session, "concurrency"));
+                if let Some(cap) = detail.as_mut() {
+                    cap.push(self.skip_detail(session, "concurrency"));
                 }
                 continue;
             }
@@ -602,7 +602,8 @@ impl AccountSessionStore {
         )
     }
 
-    /// 逐账号跳过明细的构造（Phase1-B；仅 route_replay 开启时被调用）。
+    /// 逐账号跳过明细行的构造（Phase1-B/#26；仅 route_replay 开启时被
+    /// 调用；行不带 channel_id——由 [`crate::log::AccountSkipGroup`] 分组承载）。
     fn skip_detail(
         &self,
         session: &AccountSession,
@@ -611,7 +612,6 @@ impl AccountSessionStore {
         crate::log::AccountSkip {
             account_id: session.id.clone(),
             account_name: session.name.clone(),
-            channel_id: session.channel_id.clone(),
             reason: reason.to_string(),
         }
     }
@@ -1090,7 +1090,6 @@ mod tests {
             assert_eq!(reasons.provider_off, 2);
             assert_eq!(detail.len(), 3);
             assert_eq!(detail[0].reason, "disabled");
-            assert_eq!(detail[0].channel_id, "ch");
             assert_eq!(detail[1].reason, "provider_not_allowed");
             assert_eq!(detail[2].account_name, "ok");
             // detail=None（开关关闭）：行为与 acquire_with_reasons 完全一致
@@ -1098,6 +1097,33 @@ mod tests {
                 pool.acquire_with_reasons_detail("ch", "m", None, |_| false, None, None);
             assert!(lease.is_none());
             assert_eq!(reasons.provider_off, 2);
+        });
+    }
+
+    /// #26：明细行数有界（ROUTE_REPLAY_MAX_SKIPS），超出转 truncated 不静默丢。
+    #[test]
+    fn acquire_detail_is_bounded() {
+        with_secret_dir("acquire-detail-bounded", || {
+            let pool = pool();
+            // 70 个全部禁用的账号 → 70 行明细，只留前 64 条
+            for i in 0..70 {
+                let mut s = session("ch", &format!("acct-{i}"), 0);
+                s.status = "disabled".to_string();
+                pool.upsert(s).unwrap();
+            }
+            let mut capture = crate::log::AccountSkipCapture::new("ch");
+            let (lease, reasons) = pool.acquire_with_reasons_detail(
+                "ch",
+                "m",
+                None,
+                |_| true,
+                None,
+                Some(&mut capture),
+            );
+            assert!(lease.is_none());
+            assert_eq!(reasons.disabled, 70);
+            assert_eq!(capture.rows.len(), crate::log::ROUTE_REPLAY_MAX_SKIPS);
+            assert_eq!(capture.truncated, 70 - crate::log::ROUTE_REPLAY_MAX_SKIPS);
         });
     }
 

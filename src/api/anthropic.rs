@@ -598,6 +598,7 @@ pub async fn handle_messages(
                     log.filtered_channels
                         .extend(capture.filtered.iter().cloned());
                     log.route_config = capture.config.clone();
+                    log.route_truncated = capture.filtered_truncated;
                     log.account_skips = capture
                         .account_buf
                         .lock()
@@ -891,6 +892,10 @@ pub async fn handle_messages(
                 filtered_channels.extend(capture.filtered.iter().cloned());
             }
             let route_config = route_capture.as_ref().and_then(|c| c.config.clone());
+            let route_truncated = route_capture
+                .as_ref()
+                .map(|c| c.filtered_truncated)
+                .unwrap_or(0);
             let account_skips = route_capture
                 .as_ref()
                 .map(|c| {
@@ -926,6 +931,7 @@ pub async fn handle_messages(
                 candidate_channels: candidate_channel_ids.clone(),
                 filtered_channels: filtered_channels.clone(),
                 route_config,
+                route_truncated,
                 account_skips,
                 // 两段式计费：reserve_usage 已在请求前完成，finalize 走 settle_usage
                 reservation: Some(reservation.clone()),
