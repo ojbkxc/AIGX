@@ -49,3 +49,22 @@ node bench.mjs --mode stream    --conc 8  --n 1500
 ## 回归判据（摘要）
 
 同机同 mock、全新库、warmup 50、每档 3 轮取中位；非流式 c8：RPS ≥ 基线−10% 报警 / −20% 打回；P50 ≤ +50% 报警 / +100% 打回；RSS ≤ +20% 报警。完整表见 15-audit.md A.3。
+
+## ⚠️ 代理污染（#27 归因，必读）
+
+本机若设 `http_proxy/HTTPS_PROXY/ALL_PROXY`（clash/mihomo 系默认全局），reqwest 会按标准语义把**上游请求交给代理重发**：UA 变 `Go-http-client/1.1`、逐请求 `Connection: close` 重拨 → Windows 16384 动态端口耗尽 → 流式 RPS 从 2000+ 崩到 45 且逐轮劣化。**这不是 AIGX 缺陷**。
+
+跑 bench 前必须排除压测目标：
+
+```bash
+NO_PROXY="localhost,127.0.0.1,::1,<mock地址>" no_proxy="<同左>" ./aigx.exe ...
+```
+
+验证方法：mock 端打印 `req.headers.connection`——出现 `"close"` + Go UA 即被代理劫持（脚本加 `MOCK_LOG_CONN=1`）。
+
+## 基线参考（v1.0.34 Windows 净室值，详见 _a2a-port-recon/15-audit.md A.2/A.8）
+
+- 1 渠道非流式 c8：2700~3230 RPS / P50 1.7ms；流式 c8 长跑 2000~2400 RPS 零劣化
+- 31 渠道（选路规模探针）：非流式 853 RPS / P50 7.7ms（≈0.19ms/渠道）
+- DB 尺寸对吞吐零敏感（48MB 上与 6MB 无差异）；RSS 全场景 44~52MB
+- 回归判据与快照 A/B 特判见 15-audit.md A.3
