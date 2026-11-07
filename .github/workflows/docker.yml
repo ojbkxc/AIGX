@@ -5,8 +5,9 @@
 name: Docker Publish
 
 on:
+  # 只在打 tag 时发布镜像（2026-11-08 用户决定，理由同 build.yml）：
+  # 每次 push main 都跑 Docker 构建会长时间占用 runner 并发，饿死 CI。
   push:
-    branches: [ main ]
     tags: [ 'v*.*.*' ]
   workflow_dispatch:
 

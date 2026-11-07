@@ -4,8 +4,12 @@
 name: Multi-platform Build
 
 on:
+  # 只在打 tag 时构建发布产物（2026-11-08 用户决定）：
+  # 原先 push 到 main/develop 也跑全平台 6 个 job + create-release，把
+  # GitHub 并发池占满，导致 CI 排队 20+ 分钟才开跑，拖慢每一轮迭代。
+  # 日常迭代只需要 CI（check/lint/test/e2e）；产物矩阵是**发版闸门**，
+  # 打 tag 时必跑，且仍是硬门禁。
   push:
-    branches: [ main, develop ]
     tags: [ 'v*.*.*' ]
   release:
     types: [ created ]
