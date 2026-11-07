@@ -62,6 +62,28 @@ pub async fn handle_channel_health_archive(
     })))
 }
 
+/// `channel_type` 查询参数可识别的精确值（from_str_lossy 的全部别名）。
+/// 未知值不过滤（from_str_lossy 会兜底 Cloudflare，不能让它把乱传的值
+/// 当成「过滤 cloudflare」）。
+const KNOWN_CHANNEL_TYPE_FILTERS: &[&str] = &[
+    "cloudflare",
+    "openai_compatible",
+    "openai-compatible",
+    "openai",
+    "anthropic",
+    "gemini",
+    "google",
+    "google_gemini",
+    "zai",
+    "z_ai",
+    "zhipu",
+    "glm",
+    "account",
+    "accounts",
+    "account_pool",
+    "account_session",
+];
+
 /// 渠道创建请求
 ///
 /// `api_key` 三态语义（对齐 cf-ai-gw expiresAt 的 undefined/null/值 模式）：
@@ -252,9 +274,25 @@ pub async fn handle_list_channels(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
+    // 渠道类型过滤（账号池「已建 API」下拉用：channel_type=account 只列
+    // 账号池容器渠道）。from_str_lossy 对未知值兜底 Cloudflare，因此只认
+    // 能精确命中的串（含 cloudflare 本身），乱传的值静默不过滤。
+    let type_filter = params
+        .get("channel_type")
+        .map(crate::channel::ChannelType::from_str_lossy)
+        .filter(|_| {
+            params.get("channel_type").is_some_and(|raw| {
+                KNOWN_CHANNEL_TYPE_FILTERS.contains(&raw.to_lowercase().as_str())
+            })
+        });
     // 注入展示用短编号：按创建时间升序 1..N（同列表排序键，新增渠道追加新号，
     // 既有渠道编号稳定不变；删除渠道不回收编号——避免错位显示）
-    let all = state.channel_store.list();
+    let all: Vec<Channel> = state
+        .channel_store
+        .list()
+        .into_iter()
+        .filter(|ch| type_filter.map(|t| ch.channel_type == t).unwrap_or(true))
+        .collect();
     let mut sorted: Vec<&Channel> = all.iter().collect();
     sorted.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
     let id_to_seq: std::collections::HashMap<&str, u64> = sorted
