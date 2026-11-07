@@ -1723,7 +1723,7 @@ pub async fn handle_sync_account_catalog(
     // 3. 存活集非空（渠道/定价全空且目录为空的冷启动态不清）。
     let mut removed_mappings: Vec<(String, String)> = Vec::new();
     if body.cleanup && remote_ok_accounts > 0 {
-        let alive = stale_mapping_alive_set(state, &fresh_catalog);
+        let alive = stale_mapping_alive_set(&state, &fresh_catalog);
         if !alive.is_empty() {
             match state.model_mapper.prune_stale_mappings(&alive) {
                 Ok(removed) if !removed.is_empty() => {
