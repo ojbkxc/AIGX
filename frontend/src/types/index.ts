@@ -1302,6 +1302,9 @@ export interface AccountProviderItem {
   native_supported?: boolean | null;
   /** 无默认地址 = 必须由账号自己填写上游地址 */
   requires_base_url?: boolean;
+  /** 供应商形态分类（后端 C1）：agent = 客户端登录态、web = 网页形态、
+   *  api = API Key 型；旧后端不带该字段（前端回退 auth 判据） */
+  category?: string | null;
 }
 
 /** 账号池按渠道聚合统计 */

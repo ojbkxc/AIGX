@@ -673,8 +673,9 @@ export const api = {
     request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/channels/${id}/test`),
   resetChannelCircuit: (id: string | number): Promise<ApiResponse<Record<string, unknown>>> =>
     request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/channels/${id}/reset-circuit`),
-  fetchChannelModels: (data: Record<string, unknown>): Promise<ApiResponse<{ models?: string[] }>> =>
-    request<ApiResponse<{ models?: string[] }>>('POST', `${API_BASE}/channels/fetch_models`, data),
+  /** 拉取上游模型清单；removed_mappings = 本次同步顺带清理的失效映射条数（旧后端不带该字段） */
+  fetchChannelModels: (data: Record<string, unknown>): Promise<ApiResponse<{ models?: string[]; removed_mappings?: number }>> =>
+    request<ApiResponse<{ models?: string[]; removed_mappings?: number }>>('POST', `${API_BASE}/channels/fetch_models`, data),
   getChannelBalance: (id: string | number): Promise<ApiResponse<{ balance?: number; credit?: number; unit?: string; wallets?: Array<{ type?: string; displayName?: string; balance?: number; unit?: string }>; scheme?: string }>> =>
     request<ApiResponse<{ balance?: number; credit?: number; unit?: string; wallets?: Array<{ type?: string; displayName?: string; balance?: number; unit?: string }>; scheme?: string }>>('GET', `${API_BASE}/channels/${id}/balance`),
   // 账号型渠道账号池（渠道内账号级调度：优先级/冷却/并发/粘性）

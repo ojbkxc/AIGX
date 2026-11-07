@@ -2133,8 +2133,8 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
       {showModal && !editing && (
         <AddAccountDialog
           providers={providers}
+          sessions={sessions}
           channels={accountChannels}
-          defaultChannelId={channelFilter || accountChannels[0]?.id || ''}
           onClose={closeModal}
           onCreated={load}
         />

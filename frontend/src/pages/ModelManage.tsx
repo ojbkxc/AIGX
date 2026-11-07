@@ -399,6 +399,8 @@ export default function ModelManage(): JSX.Element {
   const [fetchChannels, setFetchChannels] = useState<ChannelItem[]>([]);
   const [fetchingId, setFetchingId] = useState<string | null>(null);
   const [fetchDone, setFetchDone] = useState<Record<string, boolean>>({});
+  /** 每渠道本次拉取顺带清理的失效映射条数（后端 removed_mappings；0/缺省不展示） */
+  const [fetchCleaned, setFetchCleaned] = useState<Record<string, number>>({});
   /** 单渠道失败标记（重试即清除），对照 Agent2API 获取弹窗的状态徽标 */
   const [fetchFailed, setFetchFailed] = useState<Record<string, string>>({});
   const [fetchAllRunning, setFetchAllRunning] = useState(false);
@@ -930,6 +932,7 @@ export default function ModelManage(): JSX.Element {
   const openFetchModal = async () => {
     setFetchModal(true);
     setFetchDone({});
+    setFetchCleaned({});
     setFetchFailed({});
     try {
       const res = await api.listChannels({ page: 1, page_size: 200 });
@@ -967,22 +970,25 @@ export default function ModelManage(): JSX.Element {
     }
   };
 
-  const fetchOne = async (ch: ChannelItem): Promise<boolean> => {
+  /** 拉单渠道；返回本次顺带清理的失效映射条数（后端 removed_mappings，缺省 0） */
+  const fetchOne = async (ch: ChannelItem): Promise<{ ok: boolean; removed: number }> => {
     const cid = String(ch.id);
-    if (fetchingId) return false;
+    if (fetchingId) return { ok: false, removed: 0 };
     setFetchingId(cid);
     try {
-      await api.fetchChannelModels({ channel_id: cid });
+      const res = await api.fetchChannelModels({ channel_id: cid });
+      const removed = Number(res?.data?.removed_mappings ?? 0);
       setFetchDone((d) => ({ ...d, [cid]: true }));
+      setFetchCleaned((d) => ({ ...d, [cid]: removed }));
       setFetchFailed((f) => {
         const next = { ...f };
         delete next[cid];
         return next;
       });
-      return true;
+      return { ok: true, removed };
     } catch (err) {
       setFetchFailed((f) => ({ ...f, [cid]: err instanceof Error ? err.message : String(err) }));
-      return false;
+      return { ok: false, removed: 0 };
     } finally {
       setFetchingId(null);
     }
@@ -990,9 +996,13 @@ export default function ModelManage(): JSX.Element {
 
   /** 逐个点击（拉完刷新目录）；「全部拉取」里传 silent 由批处理统一刷新 */
   const fetchOneClick = async (ch: ChannelItem) => {
-    const ok = await fetchOne(ch);
+    const { ok, removed } = await fetchOne(ch);
     if (ok) {
-      addToast(t('已拉取') + `：${ch.name}`);
+      // 清理反馈：后端顺带清了失效映射时展示条数，0 条不显示
+      addToast(
+        t('已拉取') + `：${ch.name}`
+        + (removed > 0 ? ` · ${t('已清理失效映射 {n} 条', { n: removed })}` : ''),
+      );
       await load();
     } else {
       addToast(t('拉取失败'), 'error');
@@ -1005,15 +1015,21 @@ export default function ModelManage(): JSX.Element {
     setFetchAllRunning(true);
     let ok = 0;
     let fail = 0;
+    let cleaned = 0;
     try {
       for (const ch of fetchChannels) {
         const done = await fetchOne(ch);
-        if (done) ok += 1;
-        else fail += 1;
+        if (done.ok) {
+          ok += 1;
+          cleaned += done.removed;
+        } else {
+          fail += 1;
+        }
       }
       if (ok > 0) await load();
       addToast(
-        `${t('全部拉取完成')}：${ok} ${t('成功')}` + (fail > 0 ? ` · ${fail} ${t('失败')}` : ''),
+        `${t('全部拉取完成')}：${ok} ${t('成功')}` + (fail > 0 ? ` · ${fail} ${t('失败')}` : '')
+        + (cleaned > 0 ? ` · ${t('清理失效映射 {n} 条', { n: cleaned })}` : ''),
         fail > 0 ? 'error' : undefined,
       );
     } finally {
@@ -2702,7 +2718,12 @@ export default function ModelManage(): JSX.Element {
                             )}
                           </div>
                           {fetchDone[cid] ? (
-                            <span className="mm-badge-ok">{t('已拉取')}</span>
+                            <span className="mm-badge-ok">
+                              {t('已拉取')}
+                              {(fetchCleaned[cid] ?? 0) > 0
+                                ? ` · ${t('清理失效映射 {n} 条', { n: fetchCleaned[cid] })}`
+                                : ''}
+                            </span>
                           ) : (
                             <button
                               type="button"

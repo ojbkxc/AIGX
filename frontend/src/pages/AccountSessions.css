@@ -260,6 +260,67 @@
   color: var(--text-muted);
 }
 
+/* 「全部」档的分组带（通栏一格，对齐 Agent2API add-provider-band） */
+.add-card-band {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 2px 2px;
+}
+
+.add-card-band-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.add-card-band-stat {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.add-card-band-fill {
+  flex: 1;
+}
+
+.add-card-band-only {
+  border: none;
+  background: transparent;
+  color: var(--primary-color);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.add-card-band-only:hover {
+  background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+}
+
+/* 「新建自定义提供商」虚线卡 */
+.add-card.is-new {
+  border-style: dashed;
+}
+
+.add-card-initial.is-new {
+  background: transparent;
+  border: 1px dashed var(--border-color);
+  color: var(--text-muted);
+  font-size: 15px;
+}
+
+/* 跨分类命中提示（拦在卡片网格上方） */
+.add-cross-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 .add-method-row {
   display: flex;
   align-items: center;

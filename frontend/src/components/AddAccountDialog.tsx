@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { presetIcon, providerIcon } from '../lib/providerIcons';
@@ -20,15 +20,63 @@ import {
 import { useToast } from './Toast';
 import ProxySelector from './ProxySelector';
 import { Button, Input, Select, Tabs, Textarea } from './ui';
-import type { AccountProviderItem, ChannelItem } from '../types';
+import type { AccountProviderItem, AccountSessionItem, ChannelItem } from '../types';
 
 type Step = 'pick' | 'form';
-type Segment = 'agent' | 'preset' | 'custom';
+/** 第 1 步分档（对齐 Agent2API add-provider-pick）：全部 / Agent / Web / API 模板 / 已建 API */
+type Segment = 'all' | 'agent' | 'web' | 'preset' | 'existing';
+type GroupSegment = Exclude<Segment, 'all'>;
+/** 供应商形态分类（后端 C1 起在 providers 下发 category 字段） */
+type ProviderCategory = 'agent' | 'web' | 'api';
+/** 「新建自定义提供商」的协议（原三张协议卡的 kind） */
+type CustomProtocolKind = 'openai_compatible' | 'anthropic' | 'gemini';
+
+const GROUPED_SEGMENTS: GroupSegment[] = ['agent', 'web', 'preset', 'existing'];
+
+/** 供应商形态分类：后端带 category 时直接用；旧后端没有该字段时回退
+ *  「登录态型（auth != null）= agent、API Key 型 = api」，Web 档自然空态降级。 */
+function categoryOf(p: AccountProviderItem | undefined): ProviderCategory {
+  if (!p) return 'api';
+  if (p.category === 'web' || p.category === 'agent' || p.category === 'api') {
+    return p.category;
+  }
+  return p.auth != null ? 'agent' : 'api';
+}
+
+/** 协议下拉的展示名（CUSTOM_PROTOCOLS 的 labelKey 带「（自定义地址）」后缀，下拉里用短名） */
+const CUSTOM_PROTOCOL_LABELS: Record<string, string> = {
+  openai_compatible: 'OpenAI 兼容',
+  anthropic: 'Anthropic 兼容',
+  gemini: 'Gemini 兼容',
+};
+/** Base URL 占位随协议变化（对齐上游 add-custom-provider.tsx 的提示语义） */
+const CUSTOM_BASE_PLACEHOLDER: Record<string, string> = {
+  openai_compatible: 'https://open.bigmodel.cn/api/paas/v4',
+  anthropic: 'https://api.anthropic.com',
+  gemini: 'https://generativelanguage.googleapis.com/v1beta',
+};
+/** Base URL 提示随协议变化：Anthropic 填根地址、OpenAI 兼容带 /v1、Gemini 走 /models */
+const CUSTOM_BASE_HINT: Record<string, string> = {
+  openai_compatible: 'OpenAI 兼容填到 /v1，按 {base}/chat/completions 转发',
+  anthropic: 'Anthropic 协议填根地址，不要带 /v1，按 {base}/v1/messages 转发',
+  gemini: 'Gemini 协议填到 /v1beta，按 {base}/models 转发',
+};
+
+/** 「已建 API」档卡片：现有账号池（account 型渠道） */
+interface PoolCard {
+  id: string;
+  name: string;
+  /** 池内首个账号的 provider kind（空池为 ''） */
+  provider: string;
+  count: number;
+}
 
 export interface AddAccountDialogProps {
   providers: AccountProviderItem[];
+  /** 现有账号：给「已建 API」档推断各账号池的供应商，保存时按供应商复用账号池 */
+  sessions: AccountSessionItem[];
+  /** account 型渠道（账号池）清单：「已建 API」档的数据源 */
   channels: ChannelItem[];
-  defaultChannelId: string;
   onClose: () => void;
   onCreated: () => Promise<void> | void;
 }
@@ -133,8 +181,8 @@ function buildCredential(config: ProviderAddConfig, values: Record<string, strin
 
 export default function AddAccountDialog({
   providers,
+  sessions,
   channels,
-  defaultChannelId,
   onClose,
   onCreated,
 }: AddAccountDialogProps): JSX.Element {
@@ -142,7 +190,7 @@ export default function AddAccountDialog({
   const addToast = useToast();
 
   const [step, setStep] = useState<Step>('pick');
-  const [segment, setSegment] = useState<Segment>('agent');
+  const [segment, setSegment] = useState<Segment>('all');
   const [search, setSearch] = useState('');
   const [provider, setProvider] = useState('');
   /** 卡内「账号版本」档位（如 WorkBuddy 的 国内版/国际版），空 = 用 defaults */
@@ -154,13 +202,18 @@ export default function AddAccountDialog({
   const [noAuth, setNoAuth] = useState(false);
   const [method, setMethod] = useState<AddMethodId>('manual');
   const [values, setValues] = useState<Record<string, string>>({});
-  const [advanced, setAdvanced] = useState<AdvancedState>({
-    ...EMPTY_ADVANCED,
-    channel_id: defaultChannelId,
-  });
+  const [advanced, setAdvanced] = useState<AdvancedState>({ ...EMPTY_ADVANCED, channel_id: '' });
   const [rawHeaders, setRawHeaders] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // 「新建自定义提供商」：三张协议卡合成一个协议下拉（对齐上游 add-custom-provider）
+  const [customNew, setCustomNew] = useState(false);
+  const [protocol, setProtocol] = useState<CustomProtocolKind>('openai_compatible');
+  const [customName, setCustomName] = useState('');
+  // 「已建 API」档：点的是现有账号池卡（渠道归属随之固定）
+  const [poolName, setPoolName] = useState('');
+  const [needsProviderPick, setNeedsProviderPick] = useState(false);
+  const [channelExplicit, setChannelExplicit] = useState(false);
   // 网页登录：任务 state / 等待态 / 回调地址（远程部署兜底）
   const [loginState, setLoginState] = useState('');
   const [loginWaiting, setLoginWaiting] = useState(false);
@@ -201,41 +254,50 @@ export default function AddAccountDialog({
 
   const providerLabel = (p: AccountProviderItem): string => p.label || p.kind;
 
-  // 判重口径：只统计登录态家的地址（对齐 Agent2API：API Key 型不在 Agent 段
-  // 展示，预置段的 OpenAI/HuggingFace 等卡不该被后端目录判重滤掉）
+  const needle = search.trim().toLowerCase();
+  /** 跨字段命中（搜索为空 = 全命中） */
+  const hit = (...haystacks: string[]): boolean =>
+    !needle || haystacks.some((h) => h.toLowerCase().includes(needle));
+
+  // 判重口径：只统计非 API Key 型家的地址（对齐 Agent2API：API Key 型内置不单独
+  // 成卡，预置段的 OpenAI/HuggingFace 等卡不该被后端目录判重滤掉）
   const builtinUrls = useMemo(
     () => new Set(
       providers
-        .filter((p) => p.auth != null)
+        .filter((p) => categoryOf(p) !== 'api')
         .map((p) => normalizeUrl(p.default_base_url || '')),
     ),
     [providers],
   );
-  const needle = search.trim().toLowerCase();
-  // Agent 段只放登录态家（对齐 Agent2API：内置 = 有 OAuth/设备登录流的家；
-  // API Key 型全家走「预置 API」段，不在这里混排）
+  // Agent 档：登录态家（后端 category === 'agent'；旧后端回退 auth != null）
   const agentCards = providers.filter(
     (p) =>
-      p.auth != null
+      categoryOf(p) === 'agent'
       && !isCardHidden(p.kind)
-      && (!needle
-        || providerLabel(p).toLowerCase().includes(needle)
-        || p.kind.toLowerCase().includes(needle)
-        || (p.default_base_url || '').toLowerCase().includes(needle)),
+      && hit(providerLabel(p), p.kind, p.default_base_url || ''),
   );
-  const presetCards = PRESET_PROVIDERS.filter((p) => !builtinUrls.has(normalizeUrl(p.base_url))).filter(
+  // Web 档：网页形态家（后端 category === 'web'；后端未就绪时为空 → 空态降级）
+  const webCards = providers.filter(
     (p) =>
-      !needle
-      || p.name.toLowerCase().includes(needle)
-      || p.base_url.toLowerCase().includes(needle)
-      || (p.hint || '').toLowerCase().includes(needle),
+      categoryOf(p) === 'web'
+      && !isCardHidden(p.kind)
+      && hit(providerLabel(p), p.kind, p.default_base_url || ''),
   );
-
-  useEffect(() => {
-    // 弹窗打开时复位渠道选择（外层可能在筛选后重开）
-    setAdvanced((prev) => ({ ...prev, channel_id: defaultChannelId || channels[0]?.id || '' }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // API 模板档：纯前端常量表（对齐 Agent2API preset-providers）
+  const presetCards = PRESET_PROVIDERS.filter((p) => !builtinUrls.has(normalizeUrl(p.base_url))).filter(
+    (p) => hit(p.name, p.base_url, p.hint || ''),
+  );
+  // 已建 API 档：现有账号池（account 型渠道）。只列 API Key 型上游的池
+  // （登录态家的池与 Agent 档同源，不在这里重复出现）；空池也列出（正要往里
+  // 加第一个账号）。
+  const poolCards: PoolCard[] = channels
+    .map((ch) => {
+      const rows = sessions.filter((s) => s.channel_id === String(ch.id));
+      const provider = rows[0]?.provider || '';
+      return { id: String(ch.id), name: ch.name, provider, count: rows.length };
+    })
+    .filter((c) => !c.provider || categoryOf(providers.find((p) => p.kind === c.provider)) === 'api')
+    .filter((c) => hit(c.name, c.provider, providers.find((p) => p.kind === c.provider)?.label || ''));
 
   const pick = (kind: string, baseUrl: string, config?: ProviderAddConfig, preset?: PresetProviderItem): void => {
     setProvider(kind);
@@ -243,6 +305,12 @@ export default function AddAccountDialog({
     setBaseUrlHint(baseUrl);
     setBaseUrlPlaceholder(preset?.placeholder ?? '');
     setNoAuth(preset?.no_auth ?? false);
+    setCustomNew(false);
+    setProtocol('openai_compatible');
+    setCustomName('');
+    setPoolName('');
+    setNeedsProviderPick(false);
+    setChannelExplicit(false);
     setValues({});
     setRawHeaders('');
     setError('');
@@ -259,6 +327,60 @@ export default function AddAccountDialog({
     }));
     const methods = config?.methods?.length ? config.methods : (['manual'] as AddMethodId[]);
     setMethod(methods[0]);
+    setStep('form');
+  };
+
+  /** 「新建自定义提供商」：原三张协议卡合成一个协议下拉（对齐上游 add-custom-provider
+   *  的单 Select），Base URL 提示随所选协议变化 */
+  const pickCustomNew = (): void => {
+    setProvider('openai_compatible');
+    setEdition('');
+    setCustomNew(true);
+    setProtocol('openai_compatible');
+    setCustomName('');
+    setPoolName('');
+    setNeedsProviderPick(false);
+    setChannelExplicit(false);
+    setBaseUrlHint('');
+    setBaseUrlPlaceholder(CUSTOM_BASE_PLACEHOLDER.openai_compatible);
+    setNoAuth(false);
+    setValues({});
+    setRawHeaders('');
+    setError('');
+    setAdvanced((prev) => ({ ...EMPTY_ADVANCED, channel_id: prev.channel_id, base_url: '' }));
+    setMethod('manual');
+    setStep('form');
+  };
+
+  /** 协议切换：落库 kind 随协议走，Base URL 占位/提示回到该协议的默认
+   *  （对齐上游：预置覆盖在用户改协议时失效） */
+  const onProtocolChange = (next: string): void => {
+    setProtocol(next as CustomProtocolKind);
+    setProvider(next);
+    setBaseUrlPlaceholder(CUSTOM_BASE_PLACEHOLDER[next] || '');
+  };
+
+  /** 「已建 API」档：往现有账号池里再加一个账号（渠道归属固定为该池） */
+  const pickPool = (pool: PoolCard): void => {
+    const rows = sessions.filter((s) => s.channel_id === pool.id);
+    const provider = rows[0]?.provider || '';
+    const rowBase = rows[0]?.base_url || '';
+    setProvider(provider);
+    setEdition('');
+    setCustomNew(false);
+    setProtocol('openai_compatible');
+    setCustomName('');
+    setPoolName(pool.name);
+    setNeedsProviderPick(!provider);
+    setChannelExplicit(true);
+    setBaseUrlHint(rowBase);
+    setBaseUrlPlaceholder('');
+    setNoAuth(false);
+    setValues({});
+    setRawHeaders('');
+    setError('');
+    setAdvanced({ ...EMPTY_ADVANCED, channel_id: pool.id, base_url: rowBase });
+    setMethod('manual');
     setStep('form');
   };
 
@@ -489,16 +611,53 @@ export default function AddAccountDialog({
       setError(t('该供应商需要填写上游地址'));
       return;
     }
+    // 「新建自定义提供商」必须自填上游地址（anthropic / gemini 内置默认地址不适用）
+    if (customNew && !(advanced.base_url || '').trim()) {
+      setError(t('该供应商需要填写上游地址'));
+      return;
+    }
+    if (needsProviderPick && !provider) {
+      setError(t('请先选择供应商'));
+      return;
+    }
     setSaving(true);
     try {
       let credential = '';
       if (method === 'manual' || !addConfig) {
         credential = addConfig ? buildCredential(addConfig, values) : (values.credential || '').trim();
       }
-      let channelId = advanced.channel_id;
+      // 渠道并入账号池添加（A3 契约）：账号按供应商归池 ——
+      // 1) 「已建 API」档点卡进来：渠道就是所选账号池；
+      // 2) 否则复用同供应商且同上游地址的现有账号池（幂等，避免「XX 账号池
+      //    1/2/3」碎片；通用兼容 kind 同 kind 可能对应多家上游，再按地址区分）；
+      // 3) 再按自动命名（「{label} 账号池」）兜底复用；
+      // 4) 都没有才新建。
+      const poolLabel = customNew ? (customName.trim() || label) : label;
+      const poolName2 = `${poolLabel} ${t('账号池')}`.trim();
+      let channelId = '';
+      if (
+        channelExplicit
+        && advanced.channel_id
+        && channels.some((ch) => String(ch.id) === advanced.channel_id)
+      ) {
+        channelId = advanced.channel_id;
+      }
+      if (!channelId) {
+        const base = normalizeUrl((advanced.base_url || baseUrlHint).trim());
+        const sibling = sessions.find(
+          (s) => s.provider === activeProvider
+            && !!s.channel_id
+            && normalizeUrl(s.base_url || '') === base,
+        );
+        if (sibling?.channel_id) channelId = sibling.channel_id;
+      }
+      if (!channelId) {
+        const named = channels.find((ch) => ch.name === poolName2);
+        if (named) channelId = String(named.id);
+      }
       if (!channelId) {
         const created = await api.addChannel({
-          name: `${label} ${t('账号池')}`.trim(),
+          name: poolName2,
           channel_type: 'account',
           base_url: '',
           models: [],
@@ -562,6 +721,108 @@ export default function AddAccountDialog({
 
   const methods: AddMethodId[] = addConfig?.methods?.length ? addConfig.methods : ['manual'];
 
+  // ── 第 1 步：分档与分组渲染（对齐 Agent2API add-provider-pick）──
+
+  const segLabel = (seg: GroupSegment): string =>
+    seg === 'agent' ? 'Agent'
+      : seg === 'web' ? 'Web'
+        : seg === 'preset' ? t('API 模板')
+          : t('已建 API');
+
+  /** 每个分组的卡片节点（「全部」档的分组带与单档共用同一份渲染） */
+  const groupCards = (seg: GroupSegment): JSX.Element[] => {
+    if (seg === 'agent' || seg === 'web') {
+      const list = seg === 'agent' ? agentCards : webCards;
+      return list.map((p) => (
+        <button
+          type="button"
+          key={p.kind}
+          className="add-card"
+          onClick={() => pick(p.kind, p.default_base_url || '', addConfigOf(p.kind))}
+        >
+          {cardIcon(p.kind) ? (
+            <img className="add-card-logo" src={cardIcon(p.kind) as string} alt="" loading="lazy" />
+          ) : (
+            <span className="add-card-initial">{p.kind.slice(0, 1).toUpperCase()}</span>
+          )}
+          <span className="add-card-info">
+            <span className="add-card-name">
+              {providerLabel(p)}
+              {p.auth ? <span className="add-card-badge">{t('登录态')}</span> : null}
+              {p.native_supported ? <span className="add-card-badge">{t('专用适配')}</span> : null}
+            </span>
+            <span className="add-card-meta">{p.default_base_url || t('需自填地址')}</span>
+          </span>
+          <span className="add-card-go">›</span>
+        </button>
+      ));
+    }
+    if (seg === 'preset') {
+      return presetCards.map((p) => (
+        <button
+          type="button"
+          key={p.key}
+          className="add-card"
+          onClick={() => pick(presetKind(p.protocol), p.base_url, undefined, p)}
+        >
+          {presetIcon(p.key) ? (
+            <img
+              className="add-card-logo"
+              src={presetIcon(p.key) as string}
+              alt=""
+              loading="lazy"
+            />
+          ) : (
+            <span className="add-card-initial">{p.name.slice(0, 1).toUpperCase()}</span>
+          )}
+          <span className="add-card-info">
+            <span className="add-card-name">{p.name}</span>
+            <span className="add-card-meta">{p.hint || p.base_url || t('地址自填')}</span>
+          </span>
+          <span className="add-card-go">›</span>
+        </button>
+      ));
+    }
+    return poolCards.map((c) => (
+      <button type="button" key={c.id} className="add-card" onClick={() => pickPool(c)}>
+        <span className="add-card-initial">
+          {(providers.find((p) => p.kind === c.provider)?.label || c.name).slice(0, 1).toUpperCase()}
+        </span>
+        <span className="add-card-info">
+          <span className="add-card-name">{c.name}</span>
+          <span className="add-card-meta">
+            {c.count ? t('{n} 个账号，点击添加', { n: c.count }) : t('空账号池，点击添加账号')}
+          </span>
+        </span>
+        <span className="add-card-go">›</span>
+      </button>
+    ));
+  };
+
+  /** 「新建自定义提供商」卡：住在「已建 API」组第一张（搜索时收起——用户在找的是一家） */
+  const newProviderCard = (
+    <button type="button" key="__new__" className="add-card is-new" onClick={pickCustomNew}>
+      <span className="add-card-initial is-new">＋</span>
+      <span className="add-card-info">
+        <span className="add-card-name">{t('新建自定义提供商')}</span>
+        <span className="add-card-meta">{t('接入一个兼容上游')}</span>
+      </span>
+      <span className="add-card-go">›</span>
+    </button>
+  );
+
+  const grouped = segment === 'all';
+  const activeSegments: GroupSegment[] = grouped ? GROUPED_SEGMENTS : [segment as GroupSegment];
+  // 「全部」档：空组整组不出（连分组带一起收）；唯一例外是「已建 API」——
+  // 「新建自定义提供商」那张卡住在里面，没有搜索时永远可达
+  const shownGroups = activeSegments
+    .map((seg) => ({ seg, cards: groupCards(seg) }))
+    .filter((g) => g.cards.length > 0 || (g.seg === 'existing' && !needle));
+  const currentCount = shownGroups.reduce((sum, g) => sum + g.cards.length, 0);
+  const allHitCount = GROUPED_SEGMENTS.reduce((sum, seg) => sum + groupCards(seg).length, 0);
+  // 当前档搜不到而别档有时：给「看全部匹配」提示（对齐上游跨分类命中提示）
+  const otherHitCount = needle && !grouped && currentCount === 0 ? allHitCount : 0;
+
   return (
     <div className="add-account-root">
       {/* 第 1 步：选供应商 */}
@@ -578,15 +839,14 @@ export default function AddAccountDialog({
               <div className="add-pick-row">
                 <Tabs<Segment>
                   items={[
+                    { key: 'all', label: t('全部') },
                     { key: 'agent', label: 'Agent' },
-                    { key: 'preset', label: t('预置 API') },
-                    { key: 'custom', label: t('自定义') },
+                    { key: 'web', label: 'Web' },
+                    { key: 'preset', label: t('API 模板') },
+                    { key: 'existing', label: t('已建 API') },
                   ]}
                   active={segment}
-                  onChange={(key) => {
-                    setSegment(key);
-                    setSearch('');
-                  }}
+                  onChange={setSegment}
                   ariaLabel={t('供应商类型')}
                 />
                 <div className="add-search">
@@ -597,76 +857,51 @@ export default function AddAccountDialog({
                   />
                 </div>
               </div>
+              {/* 跨分类命中提示：拦在卡片网格上方，点一下直接切到「全部」 */}
+              {otherHitCount > 0 ? (
+                <div className="add-cross-hint">
+                  <span>
+                    {t('当前分类里没有「{keyword}」，其它分类有 {n} 个匹配', {
+                      keyword: search.trim(),
+                      n: otherHitCount,
+                    })}
+                  </span>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setSegment('all')}>
+                    {t('看全部匹配')}
+                  </Button>
+                </div>
+              ) : null}
               <div className="add-cards" role="listbox" aria-label={t('供应商列表')}>
-                {segment === 'agent' &&
-                  agentCards.map((p) => (
-                    <button
-                      type="button"
-                      key={p.kind}
-                      className="add-card"
-                      onClick={() => pick(p.kind, p.default_base_url || '', addConfigOf(p.kind))}
-                    >
-                      {cardIcon(p.kind) ? (
-                        <img className="add-card-logo" src={cardIcon(p.kind) as string} alt="" loading="lazy" />
-                      ) : (
-                        <span className="add-card-initial">{p.kind.slice(0, 1).toUpperCase()}</span>
-                      )}
-                      <span className="add-card-info">
-                        <span className="add-card-name">
-                          {providerLabel(p)}
-                          {p.auth ? <span className="add-card-badge">{t('登录态')}</span> : null}
-                          {p.native_supported ? <span className="add-card-badge">{t('专用适配')}</span> : null}
-                        </span>
-                        <span className="add-card-meta">{p.default_base_url || t('需自填地址')}</span>
-                      </span>
-                      <span className="add-card-go">›</span>
-                    </button>
-                  ))}
-                {segment === 'preset' &&
-                  presetCards.map((p) => (
-                    <button
-                      type="button"
-                      key={p.key}
-                      className="add-card"
-                      onClick={() => pick(presetKind(p.protocol), p.base_url, undefined, p)}
-                    >
-                      {presetIcon(p.key) ? (
-                        <img
-                          className="add-card-logo"
-                          src={presetIcon(p.key) as string}
-                          alt=""
-                          loading="lazy"
-                        />
-                      ) : (
-                        <span className="add-card-initial">{p.name.slice(0, 1).toUpperCase()}</span>
-                      )}
-                      <span className="add-card-info">
-                        <span className="add-card-name">{p.name}</span>
-                        <span className="add-card-meta">{p.hint || p.base_url || t('地址自填')}</span>
-                      </span>
-                      <span className="add-card-go">›</span>
-                    </button>
-                  ))}
-                {segment === 'custom' &&
-                  CUSTOM_PROTOCOLS.map((p) => (
-                    <button
-                      type="button"
-                      key={p.kind}
-                      className="add-card"
-                      onClick={() => pick(p.kind, '')}
-                    >
-                      <span className="add-card-initial">{p.kind.slice(0, 1).toUpperCase()}</span>
-                      <span className="add-card-info">
-                        <span className="add-card-name">{t(p.labelKey)}</span>
-                        <span className="add-card-meta">{t(p.hintKey)}</span>
-                      </span>
-                      <span className="add-card-go">›</span>
-                    </button>
-                  ))}
-                {((segment === 'agent' && !agentCards.length)
-                  || (segment === 'preset' && !presetCards.length)) && (
-                  <div className="add-cards-empty">{t('没有匹配的供应商')}</div>
-                )}
+                {shownGroups.map(({ seg, cards }) => (
+                  <Fragment key={seg}>
+                    {grouped ? (
+                      <div className="add-card-band" role="group" aria-label={segLabel(seg)}>
+                        <span className="add-card-band-name">{segLabel(seg)}</span>
+                        {cards.length ? (
+                          <span className="add-card-band-stat">{t('{count} 家', { count: cards.length })}</span>
+                        ) : null}
+                        <span className="add-card-band-fill" />
+                        <button type="button" className="add-card-band-only" onClick={() => setSegment(seg)}>
+                          {t('只看这一类')}
+                        </button>
+                      </div>
+                    ) : null}
+                    {seg === 'existing' && !needle ? newProviderCard : null}
+                    {cards}
+                  </Fragment>
+                ))}
+                {needle && currentCount === 0 ? (
+                  <div className="add-cards-empty">
+                    {t('没有匹配「{keyword}」的提供商', { keyword: search.trim() })}
+                  </div>
+                ) : null}
+                {!needle && currentCount === 0 && (segment === 'agent' || segment === 'web' || segment === 'preset') ? (
+                  <div className="add-cards-empty">
+                    {segment === 'web'
+                      ? t('内置暂未收录 Web 形态的供应商；可先用 Agent / API 模板添加。')
+                      : t('暂无可用供应商，请刷新后重试')}
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
@@ -679,7 +914,13 @@ export default function AddAccountDialog({
           <div className="modal add-modal-form">
             <div className="modal-header">
               <h3>
-                {addConfig ? t('登录 / 添加 {name} 账号', { name: label }) : t('添加 {name} 账号', { name: label })}
+                {poolName
+                  ? t('添加账号到「{name}」', { name: poolName })
+                  : customNew
+                    ? t('新建自定义提供商')
+                    : addConfig
+                      ? t('登录 / 添加 {name} 账号', { name: label })
+                      : t('添加 {name} 账号', { name: label })}
               </h3>
               <button type="button" className="modal-close" onClick={onClose}>
                 &times;
@@ -888,6 +1129,53 @@ export default function AddAccountDialog({
                 <div className="add-block">
                   <h4>{t('填写凭证')}</h4>
                   <p className="form-hint">{selectedProvider?.credential_hint || ''}</p>
+                  {/* 「新建自定义提供商」：原三张协议卡合成一个协议下拉（对齐上游
+                      add-custom-provider 的单 Select），落库 kind 随协议走 */}
+                  {customNew ? (
+                    <>
+                      <Select
+                        label={t('协议')}
+                        value={protocol}
+                        onChange={(e) => onProtocolChange(e.target.value)}
+                        aria-label={t('协议')}
+                      >
+                        {CUSTOM_PROTOCOLS.map((c) => (
+                          <option key={c.kind} value={c.kind}>
+                            {t(CUSTOM_PROTOCOL_LABELS[c.kind] || c.kind)}
+                          </option>
+                        ))}
+                      </Select>
+                      <Input
+                        label={t('渠道名称（可选）')}
+                        placeholder={t('例如：我的中转')}
+                        value={customName}
+                        onChange={(e) => setCustomName(e.target.value)}
+                      />
+                    </>
+                  ) : null}
+                  {/* 「已建 API」档：池内已有账号 → 供应商随池固定；空池 → 先选供应商 */}
+                  {poolName && !needsProviderPick ? (
+                    <p className="form-hint">{t('供应商')}：{label}</p>
+                  ) : null}
+                  {needsProviderPick ? (
+                    <Select
+                      label={t('供应商')}
+                      value={provider}
+                      aria-label={t('供应商')}
+                      onChange={(e) => {
+                        const kind = e.target.value;
+                        setProvider(kind);
+                        setBaseUrlHint(providers.find((p) => p.kind === kind)?.default_base_url || '');
+                      }}
+                    >
+                      <option value="">{t('请选择供应商')}</option>
+                      {providers
+                        .filter((p) => categoryOf(p) === 'api')
+                        .map((p) => (
+                          <option key={p.kind} value={p.kind}>{providerLabel(p)}</option>
+                        ))}
+                    </Select>
+                  ) : null}
                   <FieldInput
                     field={{
                       key: 'credential',
@@ -954,6 +1242,7 @@ export default function AddAccountDialog({
                   <Input
                     label={t('上游地址（可选，留空用 provider 默认）')}
                     placeholder={baseUrlPlaceholder || selectedProvider?.default_base_url || baseUrlHint || 'https://api.deepseek.com'}
+                    hint={customNew ? t(CUSTOM_BASE_HINT[protocol] || '') : undefined}
                     value={advanced.base_url}
                     onChange={(e) => setAdvanced({ ...advanced, base_url: e.target.value })}
                   />
