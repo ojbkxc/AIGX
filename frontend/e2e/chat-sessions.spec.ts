@@ -28,14 +28,21 @@ test.describe('聊天 · 历史会话抽屉', () => {
 
     // 内容流形态（对齐 AI 运维页 /agent）：去掉 /chat 的 main-content-full
     // 特判后，主内容高度由内容撑，输入条不再被 100vh 钉死在视口底
-    // （用户反馈「输入框太下面、模型看不见」）。空会话下输入条应在
-    // 视口中上部（提示词网格 + 输入区整体上移），绝不能贴底。
+    // （用户反馈「输入框太下面、模型看不见」）。会话已迁后端持久化（桩预置
+    // 30 条带消息的会话），首屏载入的是活动会话「会话 1」的消息——短会话下
+    // 输入条应紧随消息上移，绝不能贴底。
     const inputRow = await page.locator('.chat-debugger-input-row').boundingBox();
     expect(inputRow).not.toBeNull();
     expect(inputRow!.y + inputRow!.height).toBeLessThan(vh * 0.9);
 
     // 空状态模型选择位：此前 playground 首屏无模型入口（只能在输入区右下角
     // 切），现在空状态渲染居中大 pill——「很多模型都看不见」的修复位。
+    // 空状态的真实用户场景是「新对话」：会话后端持久化后 /chat 首屏恢复的是
+    // 活动会话的消息（不再是空的），所以经抽屉新建空会话（真实 UI 流，
+    // handleNewSession 会收起抽屉并清空消息区）后再断言模型选择位。
+    await openDrawer(page);
+    await page.getByRole('button', { name: '新会话' }).first().click();
+    await expect(page.locator('.sd-root.open')).toHaveCount(0);
     await expect(page.locator('.pg-empty .chat-debugger-empty-model .model-picker')).toBeVisible();
     // 点击可展开全量模型下拉
     await page.locator('.pg-empty .model-picker-btn').click();
@@ -67,7 +74,19 @@ test.describe('聊天 · 历史会话抽屉', () => {
     const viewportHeight = page.viewportSize()!.height;
     const drawerBox = await page.locator('.sd-panel').boundingBox();
     expect(drawerBox).not.toBeNull();
-    expect(drawerBox!.y).toBeLessThanOrEqual(1);
+    if (isNarrow) {
+      // 窄屏覆盖层形态（fixed inset:0）：贴视口顶。
+      expect(drawerBox!.y).toBeLessThanOrEqual(1);
+    } else {
+      // 桌面内嵌形态：抽屉顶与 .pg-shell 顶对齐（±2px）。曾断言 y<=1——那是
+      // main-content-full 时代（padding:0、100vh 满屏）的契约；2026-11-07 去
+      // 掉 /chat 特判改内容流后，.main-content 自带 28px 顶部内边距，抽屉顶
+      // 随内容流整体下移，是重构的预期结果而非回归。改相对断言后仍能抓住
+      // 「抽屉在内容区内被额外下推/浮动错位」类回归。
+      const shellY = (await page.locator('.pg-shell').boundingBox())!.y;
+      expect(drawerBox!.y).toBeGreaterThanOrEqual(shellY - 2);
+      expect(drawerBox!.y).toBeLessThanOrEqual(shellY + 2);
+    }
     if (isNarrow) {
       expect(drawerBox!.height).toBeGreaterThan(viewportHeight * 0.85);
     } else {
@@ -162,7 +181,7 @@ test.describe('聊天 · 历史会话抽屉', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('会话很多时可滚动，且滚到底能切换到最后一个会话', async ({ page, pageErrors }) => {
+  test('会话很多时可滚动，且滚到底能切换到列表深处的会话', async ({ page, pageErrors }) => {
     await loginAsAdmin(page);
     await page.goto('/chat');
     await openDrawer(page);
@@ -171,9 +190,12 @@ test.describe('聊天 · 历史会话抽屉', () => {
     const scrollable = await list.evaluate((el) => el.scrollHeight > el.clientHeight);
     expect(scrollable).toBe(true);
 
-    const last = page.locator('.sd-item-btn').last();
-    await last.scrollIntoViewIfNeeded();
-    await last.click();
+    // 按标题点「会话 30」（列表最深处的种子会话）。不点 .last()：桩进程状态
+    // 跨用例共享，其它用例（首屏空状态）新建的空会话「新会话」会追加到列表
+    // 末尾——点了它就拿不到种子消息文本，选择必须对追加不敏感。
+    const target = page.locator('.sd-item-btn', { hasText: '会话 30' });
+    await target.scrollIntoViewIfNeeded();
+    await target.click();
 
     await expect(page.locator('.sd-root.open')).toHaveCount(0);
     await expect(page.locator('.chat-debugger-messages')).toContainText('第 30 个会话的第 1 条消息');
