@@ -12,6 +12,17 @@ import AddAccountDialog from '../components/AddAccountDialog';
 import AccountBatchDialog from '../components/AccountBatchDialog';
 import ProxySelector from '../components/ProxySelector';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
+import TableColumnSettings from '../components/ui/TableColumnSettings';
+import { useColumnResize } from '../components/ui/useColumnResize';
+import {
+  applyTableColumns,
+  readTableColumns,
+  resetTableColumns,
+  writeTableColumns,
+  type TableColumnDef,
+  type TableColumnItem,
+  type TableColumnState,
+} from '../lib/tableColumns';
 import { Button, Card, EmptyState, Input, Loading, Select, SkeletonTable, Switch, Tabs, Textarea, Tooltip } from '../components/ui';
 import type {
   AccountBalance,
@@ -343,8 +354,19 @@ const AS_FLEX_MIN = 220;
 /** 拖动的下限：再窄里面的控件就点不准了 */
 const AS_MIN_COLW = 48;
 
-const LS_COLCFG = 'aigx-as-colcfg'; // 隐藏列
-const LS_COLW = 'aigx-as-colw'; // 列宽覆盖
+const LS_COLCFG = 'aigx-as-colcfg'; // 旧显隐表（公共层 v1 迁移源，读后由公共层接管）
+const LS_COLW = 'aigx-as-colw'; // 旧列宽覆盖（init 时一次性并进 v2 后删键）
+/** 公共列设置键（tableColumns v2：顺序/显隐/对齐/列宽 + defaults 快照） */
+const LS_TCOLS = 'aigx-tbl-cols.accounts';
+
+/** 公共列声明的锁定/弹性标注映射（w: px 默认宽；flex 列不写默认宽吃剩余空间） */
+const AS_COL_DEFS: TableColumnDef[] = AS_COLS.map((c) => ({
+  key: c.key,
+  label: c.label,
+  align: c.key === 'pick' || c.key === 'status' ? 'center' : 'left',
+  ...(c.flex ? {} : { width: c.w }),
+  ...(c.lock ? { locked: true } : {}),
+}));
 const LS_GROUPED = 'aigx-as-grouped';
 const LS_NAMEMASK = 'aigx-as-namemask';
 const LS_AUTOBAL = 'aigx-as-autobal'; // 自动余额轮询间隔（分钟）
@@ -458,8 +480,40 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
   const autoBalanceDone = useRef(false);
 
   // ── 列显隐 / 列宽 / 分组 / 姓名脱敏 / 自动余额周期轮询（对齐 Agent2API 账号表）──
-  const [hiddenCols, setHiddenCols] = useState<ReadonlySet<AsCol>>(() => new Set(readLS<AsCol[]>(LS_COLCFG, [])));
-  const [colWidths, setColWidths] = useState<Record<string, number>>(() => readLS(LS_COLW, {}));
+  // 列设置已迁公共层（tableColumns v2：顺序/显隐/对齐/列宽统一记忆）。
+  // 旧键一次性搬迁：as-colw 列宽覆盖并进 v2；as-colcfg 显隐表转成 v1 形态
+  // 喂给公共层迁移（v1 = {columns:[{key,visible,align}]}），搬完删旧键。
+  const [colState, setColState] = useState<TableColumnState>(() => {
+    let migrated = readTableColumns(LS_TCOLS, AS_COL_DEFS);
+    const legacyHidden = readLS<AsCol[]>(LS_COLCFG, []);
+    const legacyW = readLS<Record<string, number>>(LS_COLW, {});
+    if (legacyHidden.length > 0 && localStorage.getItem(LS_TCOLS) === null) {
+      // v1 形态只表达显隐：顺序/对齐取默认，hidden 的进 items 为 visible:false
+      const v1 = {
+        columns: AS_COLS.map((c) => ({
+          key: c.key,
+          visible: !legacyHidden.includes(c.key),
+          align: c.key === 'pick' || c.key === 'status' ? 'center' : 'left',
+        })),
+      };
+      try {
+        migrated = readTableColumns(LS_TCOLS, AS_COL_DEFS, () => JSON.stringify(v1));
+      } catch { /* 迁移失败退默认，不炸表 */ }
+    }
+    if (Object.keys(legacyW).length === 0) return migrated;
+    const merged: TableColumnState = {
+      ...migrated,
+      items: migrated.items.map((i) =>
+        legacyW[i.key] != null && i.width == null ? { ...i, width: legacyW[i.key] } : i,
+      ),
+    };
+    writeTableColumns(LS_TCOLS, merged);
+    try {
+      localStorage.removeItem(LS_COLCFG);
+      localStorage.removeItem(LS_COLW);
+    } catch { /* 静默 */ }
+    return merged;
+  });
   const [colPanelOpen, setColPanelOpen] = useState(false);
   const colPanelRef = useRef<HTMLDivElement | null>(null);
   const [grouped, setGrouped] = useState<boolean>(() => readLS(LS_GROUPED, false));
@@ -1170,81 +1224,70 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
 
   // ── 列显隐 / 列宽拖动（对齐 Agent2API accounts-columns + 模型管理同款交互）──
 
-  /** 当前可见列（隐藏的已从 DOM 摘掉，colSpan / colgroup / minWidth 都按它算） */
-  const visibleCols = useMemo<AsCol[]>(() => AS_COLS.filter((c) => !hiddenCols.has(c.key)).map((c) => c.key), [hiddenCols]);
+  /** 应用公共列设置：顺序 + 显隐（含列宽/对齐，公共层负责） */
+  const appliedCols = useMemo(() => applyTableColumns(colState, AS_COL_DEFS), [colState]);
+  /** 当前可见列 key（隐藏的已从 DOM 摘掉，colSpan / colgroup / minWidth 都按它算） */
+  const visibleCols = useMemo<AsCol[]>(() => appliedCols.map((c) => c.key as AsCol), [appliedCols]);
 
-  /** 列宽（colgroup 用）：弹性列没有用户覆盖时不写宽度，吃表格剩余宽度 */
+  /** 列宽（colgroup 用）：弹性列没有覆盖时不写宽度，吃表格剩余宽度 */
   const widthOf = (key: AsCol): number | undefined => {
-    const override = colWidths[key];
-    if (override) return override;
     const def = AS_COLS.find((c) => c.key === key);
-    return def?.flex ? undefined : def?.w;
+    const applied = appliedCols.find((c) => c.key === key);
+    return def?.flex ? applied?.width : applied?.width ?? def?.w;
   };
 
   /** 表格横滚底线：∑可见列宽（弹性列按下限），窄容器宁可横滚不压列 */
   const tableMinWidth = useMemo(
     () => visibleCols.reduce((sum, key) => {
-      const override = colWidths[key];
-      if (override) return sum + override;
+      const override = widthOf(key);
+      if (override != null) return sum + override;
       const def = AS_COLS.find((c) => c.key === key);
       return sum + (def?.flex ? AS_FLEX_MIN : def?.w ?? AS_MIN_COLW);
     }, 0),
-    [visibleCols, colWidths],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [visibleCols, colState],
   );
 
-  /** 显隐开关：锁定列不可关（表不能没有勾选框/账号名/状态/操作列） */
-  const toggleCol = (key: AsCol): void => {
-    if (AS_COLS.find((c) => c.key === key)?.lock) return;
-    setHiddenCols((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      writeLS(LS_COLCFG, [...next]);
-      return next;
+  /** 列设置变更（面板回调；persist=true 才落盘） */
+  const commitColState = useCallback((next: TableColumnItem[], persist: boolean) => {
+    setColState((prev) => {
+      const nextState: TableColumnState = { ...prev, items: next };
+      if (persist) writeTableColumns(LS_TCOLS, nextState);
+      return nextState;
     });
-  };
+  }, []);
 
-  /** 恢复默认：显隐与列宽一并还原 */
-  const resetColConfig = (): void => {
-    setHiddenCols(new Set());
-    setColWidths({});
-    writeLS(LS_COLCFG, []);
-    writeLS(LS_COLW, {});
-  };
+  /** 恢复默认：顺序+显隐+对齐+列宽一并还原（公共层 reset） */
+  const resetColConfig = useCallback((): void => {
+    setColState(resetTableColumns(LS_TCOLS, AS_COL_DEFS));
+  }, []);
 
-  /** 列宽拖动：拖表头右缘把手改宽，双击把手还原默认 */
-  const startColDrag = (key: AsCol, e: React.MouseEvent): void => {
-    e.preventDefault();
-    e.stopPropagation();
-    const th = (e.target as HTMLElement).closest('th');
-    const startW = th?.getBoundingClientRect().width ?? 100;
-    const startX = e.clientX;
-    document.body.classList.add('as-col-resizing');
-    const move = (ev: MouseEvent): void => {
-      const w = Math.max(AS_MIN_COLW, Math.round(startW + ev.clientX - startX));
-      setColWidths((prev) => ({ ...prev, [key]: w }));
-    };
-    const up = (): void => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-      document.body.classList.remove('as-col-resizing');
-      setColWidths((prev) => {
-        writeLS(LS_COLW, prev);
-        return prev;
-      });
-    };
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-  };
-
-  const resetColWidth = (key: AsCol): void => {
-    setColWidths((prev) => {
-      const next = { ...prev };
-      delete next[key];
-      writeLS(LS_COLW, next);
-      return next;
-    });
-  };
+  /** 列宽拖动改公共 hook（pointer events + 双击还原 + 末列无把手） */
+  const colResize = useColumnResize({
+    widths: Object.fromEntries(
+      colState.items.filter((i) => i.width != null).map((i) => [i.key, i.width as number]),
+    ),
+    setWidths: (next) => {
+      commitColState(
+        colState.items.map((i) => {
+          const w = next[i.key];
+          const defW = AS_COL_DEFS.find((d) => d.key === i.key)?.width;
+          // 与声明默认相等视为「还原」——删覆盖而不是存一个等于默认的值
+          if (w == null || (defW != null && w === defW)) {
+            const { width: _drop, ...rest } = i;
+            return rest;
+          }
+          return { ...i, width: w };
+        }),
+        true,
+      );
+    },
+    defaultWidths: Object.fromEntries(
+      AS_COL_DEFS.map((d) => [d.key, d.width]),
+    ),
+    lockedKeys: new Set(AS_COL_DEFS.filter((d) => d.locked).map((d) => d.key)),
+    onCommit: () => { /* 落盘已在 setWidths 内做 */ },
+  });
 
   // 列设置浮层点外关闭
   useEffect(() => {
@@ -2033,7 +2076,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
         actions={
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <div className="as-colset" ref={colPanelRef}>
-              <Tooltip label={t('列设置（显隐 / 列宽拖动）')}>
+              <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
                 <button
                   type="button"
                   className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
@@ -2044,35 +2087,15 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
                 </button>
               </Tooltip>
               {colPanelOpen && (
-                <div className="as-colset-panel">
-                  <div className="as-colset-head">
-                    <span>{t('列')}</span>
-                    <span>{t('显示')}</span>
-                  </div>
-                  <div className="as-colset-rows">
-                    {AS_COLS.map((col) => (
-                      <label key={col.key} className="as-colset-row">
-                        <span className="as-colset-name">{t(col.label)}</span>
-                        {col.lock ? (
-                          <span className="as-colset-fixed">{t('固定')}</span>
-                        ) : (
-                          <input
-                            type="checkbox"
-                            checked={!hiddenCols.has(col.key)}
-                            onChange={() => toggleCol(col.key)}
-                            aria-label={t(col.label)}
-                          />
-                        )}
-                      </label>
-                    ))}
-                  </div>
-                  <div className="as-colset-foot">
-                    <span className="as-colset-tip">{t('拖动表头右缘调列宽，双击把手还原')}</span>
-                    <button type="button" className="as-colset-reset" onClick={resetColConfig}>
-                      {t('恢复默认')}
-                    </button>
-                  </div>
-                </div>
+                <TableColumnSettings
+                  open
+                  onClose={() => setColPanelOpen(false)}
+                  defs={AS_COL_DEFS}
+                  items={colState.items}
+                  onChange={commitColState}
+                  onReset={resetColConfig}
+                  anchorRef={colPanelRef}
+                />
               )}
             </div>
             <Button variant="outline" onClick={() => void queryAllBalances(visible)}>
@@ -2266,7 +2289,14 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
               </colgroup>
               <thead>
                 <tr>
-                  {visibleCols.map((col) => (
+                  {visibleCols.map((col, idx) => {
+                    const colDef = AS_COL_DEFS.find((c) => c.key === col);
+                    const grip = colResize.gripProps(col, {
+                      isLast: idx === visibleCols.length - 1,
+                      locked: colDef?.locked,
+                      defaultWidth: colDef?.width,
+                    });
+                    return (
                     <th key={col} className={`as-h-${col}`}>
                       {col === 'pick' ? (
                         <input
@@ -2300,12 +2330,12 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
                         <span
                           className="as-col-grip"
                           title={t('拖动调整列宽 · 双击还原')}
-                          onMouseDown={(e) => startColDrag(col, e)}
-                          onDoubleClick={() => resetColWidth(col)}
+                          {...grip}
                         />
                       )}
                     </th>
-                  ))}
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>

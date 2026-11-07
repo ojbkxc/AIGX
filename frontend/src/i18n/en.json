@@ -2978,10 +2978,11 @@
   "自动巡检已暂停：{{reason}}": "Automatic patrol paused: {{reason}}",
   "还有 {{n}} 条未记录": "+{{n}} not recorded",
   "候选明细超过记录上限，还有 {{n}} 条未记录。": "Details exceeded the record cap — {{n}} more entries were not recorded.",
-  "列名": "[TODO en] 列名",
-  "锁定": "[TODO en] 锁定",
-  "拖动调整顺序": "[TODO en] 拖动调整顺序",
-  "拖动手柄调整顺序；双击表头把手还原列宽": "[TODO en] 拖动手柄调整顺序；双击表头把手还原列宽",
+  "列名": "Column",
+  "锁定": "Locked",
+  "拖动调整顺序": "Drag to reorder",
+  "拖动手柄调整顺序；双击表头把手还原列宽": "Drag the handle to reorder; double-click a header grip to reset its width",
   "逐账号跳过（{{n}} 渠道）": "Per-account skips ({{n}} channels)",
-  "逐账号跳过明细": "Per-account skip details"
+  "逐账号跳过明细": "Per-account skip details",
+  "列设置（显隐 / 顺序 / 对齐 / 列宽拖动）": "Column settings (visibility / order / alignment / width drag)"
 }
