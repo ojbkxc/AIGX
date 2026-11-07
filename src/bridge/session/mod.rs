@@ -15,6 +15,9 @@ pub mod accio;
 pub mod antigravity;
 pub mod antigravity_signature_cache;
 pub mod catpaw;
+/// 智谱清言网页版私有 SSE → 增量语义的状态机（移植自上游 `chatglm_stream.rs`）。
+/// 当前**未接入转发链路**（请求侧端点在闭源插件仓），见模块头「接线状态」。
+pub mod chatglm_stream;
 pub mod codearts;
 pub mod commandcode;
 pub mod deepseek_pow;
