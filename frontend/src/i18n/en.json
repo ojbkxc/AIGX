@@ -2984,5 +2984,7 @@
   "拖动手柄调整顺序；双击表头把手还原列宽": "Drag the handle to reorder; double-click a header grip to reset its width",
   "逐账号跳过（{{n}} 渠道）": "Per-account skips ({{n}} channels)",
   "逐账号跳过明细": "Per-account skip details",
-  "列设置（显隐 / 顺序 / 对齐 / 列宽拖动）": "Column settings (visibility / order / alignment / width drag)"
+  "列设置（显隐 / 顺序 / 对齐 / 列宽拖动）": "Column settings (visibility / order / alignment / width drag)",
+  "候选渠道": "Candidate channels",
+  "请求时间 {{time}}": "Request time {{time}}"
 }

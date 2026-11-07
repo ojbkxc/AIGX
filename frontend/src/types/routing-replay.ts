@@ -1,85 +1,39 @@
 /**
- * 路由回放 + 粘滞会话类型（fe-pages 任务 #14）。
+ * 路由回放类型（fe-pages #14/#31）。
  *
- * 独立成文件的原因：types/index.ts 正被 fe-lists-fix（任务 #13）并行编辑，
- * 共享大文件会让双方的 commit 互相卷入对方的在制品（共享工作区纪律）。
- * 新文件零冲突；后端就绪后如需并入 barrel 再统一迁移。
+ * **形状契约锚点（与后端同构，勿改字段名）**——后端投影出处：
+ * - handler：`src/api/admin/logs.rs:692-716 handle_get_route_replay`
+ * - 字段类型：`src/log/mod.rs`
+ *   - `candidate_channels: Vec<String>`（只有渠道 id）
+ *   - `filtered_channels: Vec<FilteredChannel{channel_id, reason}>`（mod.rs:391）
+ *   - `selected_channel: Option<String>`、`attempts: u32`（**计数非数组**，mod.rs:116）、
+ *     `phase: String`（mod.rs:124）
+ *   - `route_config: Option<RouteConfigSnapshot{strategy, sticky_enabled}>`（mod.rs:401）
+ *   - `route_truncated: usize`
+ *   - `account_skips: Vec<AccountSkipGroup{channel_id, skipped[], truncated}>`（mod.rs:438）
+ * - 日志只存 attempts 计数、**无逐次尝试明细**（上游 A2A 有 attemptDetails；
+ *   AIGX 补数据见 be-fix #32）——「执行时间线」在无明细时整节不渲染。
+ *
+ * e2e spec 必须按本清单构造 mock（防止「前端假定形状」假绿）。
  */
 
-/** 路由回放候选条目（ordered/blocked 通用；快照当时事实，只读不重算） */
-export interface RouteReplayCandidateItem {
-  id: string | number;
-  name?: string;
-  provider?: string;
-  priority?: number;
-  weight?: number;
-  /** blocked 侧：断路器/过滤状态（open/half_open/cooldown/…），缺省 = 普通过滤 */
-  state?: string;
-  /** 进入/被跳过的原因（后端 describe 口径） */
-  reason?: string;
+/** 被过滤渠道（含原因） */
+export interface RouteReplayFilteredItem {
+  channel_id: string;
+  reason: string;
 }
 
-/** 逐账号跳过明细行（#26 有界化形状：去掉 channel_id，归属由分组承载） */
+/** 路由策略快照（选路那一刻的形态） */
+export interface RouteReplayConfigSnapshot {
+  strategy?: string;
+  sticky_enabled?: boolean;
+}
+
+/** 逐账号跳过明细行（#26 有界形状；归属由分组承载） */
 export interface AccountSkipRow {
   account_id: string;
   account_name?: string;
   reason?: string;
-}
-
-/** 按渠道分组的逐账号跳过（每渠道每请求最多 64 条，超出记 truncated） */
-export interface AccountSkipGroup {
-  channel_id: string;
-  skipped: AccountSkipRow[];
-  /** 超出上限未记录的条数（组头显示「还有 n 条未记录」） */
-  truncated?: number;
-}
-
-/** 路由回放尝试明细（每次真实上游调用一条；对照上游 attemptDetails 口径） */
-export interface RouteReplayAttemptItem {
-  index?: number;
-  channel_id?: string | number;
-  channel_name?: string;
-  provider?: string;
-  account?: string;
-  /** 执行阶段（forward/stream/retry/…；缺省按一次调用渲染） */
-  phase?: string;
-  status?: number;
-  duration_ms?: number;
-  error?: string;
-  /** 非致命备注（如自动重试说明） */
-  notice?: string;
-}
-
-/** 路由回放快照（GET /api/routing/replay/{request_id}；be-fix #12-B 契约。
- *  字段宽容：缺什么隐藏什么，不因快照字段不全而报错） */
-export interface RouteReplaySnapshot {
-  request_id?: string | number;
-  model?: string;
-  status?: number;
-  duration_ms?: number;
-  first_response_ms?: number;
-  error?: string | null;
-  /** 最终承载渠道（id 或名称；ordered 内以 id 比对高亮） */
-  selected?: string | number;
-  route?: {
-    strategy?: string;
-    sticky?: string;
-    sticky_hit?: boolean;
-    session_id?: string;
-    ordered?: RouteReplayCandidateItem[];
-    blocked?: RouteReplayCandidateItem[];
-    config_snapshot?: {
-      captured_at?: number;
-      provider_count?: number;
-      account_count?: number;
-    };
-  };
-  attempts?: RouteReplayAttemptItem[];
-  /** 逐账号跳过明细（按渠道分组、有界 64 条/渠道 + truncated 计数；#26 形状，
-   *  与 RequestLog.account_skips 同构。旧数据缺省无此字段 → 不渲染该节） */
-  account_skips?: AccountSkipGroup[];
-  /** resolve 层候选被截断的条数（filtered 64 条上限的溢出计数） */
-  route_truncated?: number;
 }
 
 /** 粘滞会话列表（GET /api/routing/sticky；对照上游 routing_workspace get_sticky） */
@@ -96,4 +50,35 @@ export interface RouteStickyList {
   }>;
   now?: number;
   sticky?: string;
+}
+
+/** 按渠道分组的逐账号跳过（每渠道每请求最多 64 条，超出记 truncated） */
+export interface AccountSkipGroup {
+  channel_id: string;
+  skipped: AccountSkipRow[];
+  /** 超出上限未记录的条数（组头显示「还有 n 条未记录」） */
+  truncated?: number;
+}
+
+/** 路由回放响应（GET /api/routing/replay/{request_id}，与后端投影同构的扁平形状） */
+export interface RouteReplaySnapshot {
+  log_id?: string | number;
+  request_id?: string;
+  model?: string;
+  origin_model?: string;
+  created_at?: number;
+  status_code?: number;
+  /** 尝试次数（**计数**；非逐次明细） */
+  attempts?: number;
+  /** 执行阶段（forward/stream/…；日志最终态） */
+  phase?: string;
+  /** 候选有序表：只有渠道 id（名字缺省，前端有名字渠道映射则用、没有显示 id） */
+  candidate_channels?: string[];
+  filtered_channels?: RouteReplayFilteredItem[];
+  /** 最终承载渠道（id） */
+  selected_channel?: string | null;
+  route_config?: RouteReplayConfigSnapshot | null;
+  /** resolve 层候选截断计数（filtered 上限溢出） */
+  route_truncated?: number;
+  account_skips?: AccountSkipGroup[];
 }

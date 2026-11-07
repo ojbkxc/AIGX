@@ -1,23 +1,31 @@
 /**
  * RouteReplay — 路由回放面板（对照 Agent2API routing-replay / routing-exec-timeline）。
  *
- * 只读渲染请求**当时**保存的选路事实，修改当前路由不会改变这份记录：
- * - 快照：候选有序表（含选中高亮与逐条原因）、被跳过渠道（含状态与原因）、
- *   策略/粘性/配置快照卡
- * - 执行时间线：逐次上游尝试的渠道、阶段、耗时与错误（对得上日志 attempts 计数）
+ * 只读渲染请求**当时**保存的选路事实，修改当前路由不会改变这份记录。
  *
- * 数据源：GET /api/routing/replay/{request_id}（be-fix 任务 #12-B）。
- * 三态降级：端点 404（后端未就绪）/ 200 无快照（旧记录或快照未启用）/ 请求失败。
+ * 数据形状（#31 契约对齐，出处见 types/routing-replay.ts 锚点）：后端投影是
+ * **扁平**形状——candidate_channels 只有 id、attempts 是计数、无逐次尝试明细。
+ * 本组件在渲染前做归一化：
+ *   candidate_channels → 候选序条目（{id}；有渠道名映射则显示名）
+ *   filtered_channels  → 被跳过条目（{id, reason}）
+ *   selected_channel   → 最终承载（与候选/过滤比对，命中则高亮）
+ *   route_config       → 策略/粘性卡
+ *   account_skips      → 逐账号跳过分组（折叠 + 截断计数）
+ * 空态守卫 = 「有没有任何回放字段」（旧日志/开关关闭 → 全部缺省 → 降级提示）。
+ * 「执行路径」时间线在无逐次明细（attempts 只是计数）时整节不渲染——明细
+ * 数据缺口由 be-fix #32 补。
+ *
+ * 数据源：GET /api/routing/replay/{request_id}（be-fix Phase1-B）。
+ * 三态降级：端点 404（未就绪）/ 200 无回放字段（旧记录）/ 请求失败。
  * 性能约束：挂载即单次拉取、不轮询、无首屏开销（日志详情 Tab 激活才挂载）。
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { EmptyState, Loading } from './ui';
 import type {
   AccountSkipGroup,
-  RouteReplayAttemptItem,
-  RouteReplayCandidateItem,
+  RouteReplayFilteredItem,
   RouteReplaySnapshot,
 } from '../types/routing-replay';
 import './RouteReplay.css';
@@ -28,8 +36,8 @@ function toMillis(v: number | undefined): number | null {
   return v < 1e11 ? v * 1000 : v;
 }
 
-/** 耗时收短：ms → 「820ms / 1.2s / 1m04s」 */
-function fmtDuration(ms: number | undefined): string {
+/** 耗时收短：ms → 「820ms / 1.2s / 1m04s」（#32 逐次明细落库后时间线恢复使用） */
+export function fmtDuration(ms: number | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return '—';
   if (ms < 1000) return `${Math.round(ms)}ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)}s`;
@@ -46,32 +54,17 @@ function strategyLabel(s: string | undefined, t: (k: string) => string): string 
   }
 }
 
-function stickyLabel(s: string | undefined, t: (k: string) => string): string {
-  switch (s) {
-    case 'auto': return t('自动（5min）');
-    case 'session': return t('长会话（6h）');
-    case 'turn': return t('每轮');
-    case 'off': return t('关闭');
-    default: return s ? s : t('未记录');
-  }
-}
-
-function candidateName(c: RouteReplayCandidateItem): string {
-  return c.name || (c.id != null ? String(c.id) : '—');
-}
-
 /** 逐账号跳过分组（可折叠；形状守卫：groups 缺省/空 = 整节不渲染） */
-function AccountSkipGroups({ groups, routeTruncated, t }: {
+function AccountSkipGroups({ groups, t }: {
   groups: AccountSkipGroup[] | undefined;
-  routeTruncated?: number;
   t: (k: string, opts?: Record<string, unknown>) => string;
 }): JSX.Element | null {
-  if (!groups?.length && !routeTruncated) return null;
+  if (!groups?.length) return null;
   return (
     <section className="rr-section">
-      {groups?.length ? <h4>{t('逐账号跳过明细')}</h4> : null}
+      <h4>{t('逐账号跳过明细')}</h4>
       <div className="rr-askips">
-        {(groups ?? []).map((g) => (
+        {groups.map((g) => (
           <details key={g.channel_id} className="rr-askip-group">
             <summary>
               <code>{g.channel_id}</code>
@@ -91,40 +84,7 @@ function AccountSkipGroups({ groups, routeTruncated, t }: {
           </details>
         ))}
       </div>
-      {(routeTruncated ?? 0) > 0 && (
-        <p className="rr-note">{t('候选明细超过记录上限，还有 {{n}} 条未记录。', { n: routeTruncated ?? 0 })}</p>
-      )}
     </section>
-  );
-}
-
-/** 时间线里的单次尝试：渠道名 + 阶段/状态徽标 + 耗时 + 错误/备注 */
-function AttemptStep({ a, t }: { a: RouteReplayAttemptItem; t: (k: string) => string }): JSX.Element {
-  const name = a.channel_name || (a.channel_id != null ? String(a.channel_id) : '') || a.provider || t('未知渠道');
-  const failed = Boolean(a.error);
-  const phase = a.phase ? a.phase : '';
-  const barPct = a.duration_ms != null && a.duration_ms >= 0
-    ? Math.max(4, Math.min(100, Math.round((a.duration_ms / 30_000) * 100)))
-    : null;
-  return (
-    <li className={`rr-step ${failed ? 'rr-step-failed' : ''}`}>
-      <span className="rr-step-mark" aria-hidden="true" />
-      <div className="rr-step-body">
-        <div className="rr-step-head">
-          <b>{name}</b>
-          {a.status != null && (
-            <span className={`rr-badge ${failed ? 'rr-badge-bad' : 'rr-badge-ok'}`}>{a.status}</span>
-          )}
-          {phase && <span className="rr-badge rr-badge-mute">{phase}</span>}
-          {a.duration_ms != null && <span className="rr-step-dur">{fmtDuration(a.duration_ms)}</span>}
-        </div>
-        {barPct != null && (
-          <div className="rr-step-bar"><i style={{ width: `${barPct}%` }} /></div>
-        )}
-        {a.error && <p className="rr-step-err">{a.error}</p>}
-        {!a.error && a.notice && <p className="rr-step-note">{a.notice}</p>}
-      </div>
-    </li>
   );
 }
 
@@ -159,9 +119,24 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
     return () => { alive = false; };
   }, [requestId]);
 
+  /* 归一化：扁平投影 → 渲染模型（字段出处见 types 锚点；全 Array.isArray 守卫，
+   * 「数组身上的同名方法」教训见 6fa14e6a） */
+  const view = useMemo(() => {
+    if (!snap) return null;
+    const candidates = (Array.isArray(snap.candidate_channels) ? snap.candidate_channels : [])
+      .map((id) => ({ id: String(id) }));
+    const filtered: RouteReplayFilteredItem[] = (Array.isArray(snap.filtered_channels)
+      ? snap.filtered_channels : [])
+      .filter((f) => f && f.channel_id != null)
+      .map((f) => ({ channel_id: String(f.channel_id), reason: f.reason || '' }));
+    const selected = snap.selected_channel != null ? String(snap.selected_channel) : '';
+    const skipsGroups = Array.isArray(snap.account_skips) ? snap.account_skips : [];
+    return { candidates, filtered, selected, skipsGroups };
+  }, [snap]);
+
   if (loading) return <div className="rr-loading"><Loading text={t('加载路由回放')} /></div>;
 
-  // 端点 404：后端快照能力尚未就绪（be-fix #12-B），空态降级不报错
+  // 端点 404：后端快照能力尚未就绪，空态降级不报错
   if (errStatus === 404) {
     return (
       <EmptyState
@@ -176,7 +151,12 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
       </div>
     );
   }
-  if (!snap || (!snap.route && !snap.attempts?.length)) {
+  // 无任何回放字段 = 旧记录或 route_replay 开关关闭（#31：判据是「有没有回放
+  // 字段」，不再是 route 对象/attempts 数组——后端 attempts 是计数）
+  if (!view || (
+    !view.candidates.length && !view.filtered.length
+    && !view.selected && !view.skipsGroups.length && !snap?.route_config
+  )) {
     return (
       <div className="rr-degraded">
         <p>{t('该请求没有保存选路快照（旧记录或快照未启用），下方为日志基础字段。')}</p>
@@ -184,69 +164,46 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
     );
   }
 
-  const route = snap.route ?? {};
-  const ordered = Array.isArray(route.ordered) ? route.ordered : [];
-  const blocked = Array.isArray(route.blocked) ? route.blocked : [];
-  const attempts = Array.isArray(snap.attempts) ? snap.attempts : [];
-  const selected = snap.selected;
-  const selectedName = selected != null
-    ? [...ordered, ...blocked].find((c) => String(c.id) === String(selected))?.name || String(selected)
-    : '';
-  const cs = route.config_snapshot;
-  const captured = toMillis(cs?.captured_at);
+  const rc = snap?.route_config;
+  const captured = toMillis(snap?.created_at);
+  const { candidates, filtered, selected, skipsGroups } = view;
 
   return (
     <div className="rr-root">
       <div className="rr-chips">
-        <span className="rr-badge rr-badge-brand">{strategyLabel(route.strategy, t)}</span>
-        <span className="rr-badge rr-badge-mute">{t('会话粘性：{{mode}}', { mode: stickyLabel(route.sticky, t) })}</span>
-        {route.sticky_hit && <span className="rr-badge rr-badge-ok">{t('命中会话粘滞')}</span>}
-        {selectedName && (
-          <span className="rr-badge rr-badge-brand">{t('最终承载：{{name}}', { name: selectedName })}</span>
+        <span className="rr-badge rr-badge-brand">{strategyLabel(rc?.strategy, t)}</span>
+        <span className="rr-badge rr-badge-mute">
+          {t('会话粘性：{{mode}}', { mode: rc?.sticky_enabled ? t('启用') : t('关闭') })}
+        </span>
+        {selected && (
+          <span className="rr-badge rr-badge-brand">{t('最终承载：{{name}}', { name: selected })}</span>
         )}
       </div>
       <p className="rr-note">{t('这是请求当时保存的选路快照，修改当前路由不会改变这份记录。')}</p>
 
       <div className="rr-metrics">
-        <div><b>{fmtDuration(snap.duration_ms)}</b><span>{t('总耗时')}</span></div>
-        <div><b>{fmtDuration(snap.first_response_ms)}</b><span>{t('首帧')}</span></div>
-        <div><b>{attempts.length || '—'}</b><span>{t('尝试次数')}</span></div>
-        <div><b>{blocked.length || '—'}</b><span>{t('跳过候选')}</span></div>
+        <div><b>{snap?.status_code ?? '—'}</b><span>{t('状态码')}</span></div>
+        <div><b>{snap?.attempts ?? '—'}</b><span>{t('尝试次数')}</span></div>
+        <div><b>{candidates.length || '—'}</b><span>{t('候选渠道')}</span></div>
+        <div><b>{filtered.length || '—'}</b><span>{t('跳过候选')}</span></div>
       </div>
 
-      <section className="rr-section">
-        <h4>{t('执行路径')}</h4>
-        <ol className="rr-timeline">
-          <li className="rr-step rr-step-entry">
-            <span className="rr-step-mark" aria-hidden="true" />
-            <div className="rr-step-body">
-              <div className="rr-step-head"><b>{t('请求进入')}</b></div>
-              <p>{snap.model || '—'}</p>
-            </div>
-          </li>
-          {attempts.map((a, i) => <AttemptStep key={i} a={a} t={t} />)}
-        </ol>
-        {!attempts.length && <p className="rr-note">{t('没有保存调用明细')}</p>}
-      </section>
-
-      {ordered.length > 0 && (
+      {/* 逐次尝试明细（attemptDetails）日志尚不存（be-fix #32 补数据）：
+          有明细才渲染本节，目前始终整节不渲染 */}
+      {candidates.length > 0 && (
         <section className="rr-section">
           <h4>{t('候选顺序')}</h4>
           <ol className="rr-ordered">
-            {ordered.map((c, i) => {
-              const picked = selected != null && String(c.id) === String(selected);
+            {candidates.map((c, i) => {
+              const picked = selected && c.id === selected;
               return (
-                <li key={`${String(c.id)}-${i}`} className={picked ? 'is-picked' : ''}>
+                <li key={`${c.id}-${i}`} className={picked ? 'is-picked' : ''}>
                   <span className="rr-rank">{i + 1}</span>
                   <div className="rr-cand">
                     <div className="rr-cand-head">
-                      <b>{candidateName(c)}</b>
-                      {c.provider && <span className="rr-cand-provider">{c.provider}</span>}
-                      {c.priority != null && <span className="rr-cand-meta">P{c.priority}</span>}
-                      {c.weight != null && <span className="rr-cand-meta">W{c.weight}</span>}
+                      <b className="rr-mono">{c.id}</b>
                       {picked && <span className="rr-badge rr-badge-brand">{t('选中')}</span>}
                     </div>
-                    {c.reason && <p className="rr-cand-reason">{c.reason}</p>}
                   </div>
                 </li>
               );
@@ -255,42 +212,35 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
         </section>
       )}
 
-      {blocked.length > 0 && (
+      {filtered.length > 0 && (
         <section className="rr-section">
           <h4>{t('被跳过的渠道')}</h4>
           <div className="rr-blocked">
-            {blocked.map((c, i) => (
-              <div key={`${String(c.id)}-${i}`} className="rr-blocked-item">
-                <span className={`rr-badge ${c.state === 'open' || c.state === 'half_open' ? 'rr-badge-bad' : 'rr-badge-mute'}`}>
-                  {c.state || t('过滤')}
-                </span>
-                <b>{candidateName(c)}</b>
-                <p>{c.reason || ''}</p>
+            {filtered.map((f, i) => (
+              <div key={`${f.channel_id}-${i}`} className="rr-blocked-item">
+                <code>{f.channel_id}</code>
+                <p>{f.reason}</p>
               </div>
             ))}
           </div>
+          {(snap?.route_truncated ?? 0) > 0 && (
+            <p className="rr-note">
+              {t('候选明细超过记录上限，还有 {{n}} 条未记录。', { n: snap?.route_truncated ?? 0 })}
+            </p>
+          )}
         </section>
       )}
 
-      {/* 逐账号跳过明细（#26 有界形状：按渠道分组折叠，超出上限显示截断计数；
-          旧数据无该字段整节不渲染） */}
-      <AccountSkipGroups groups={snap.account_skips} routeTruncated={snap.route_truncated} t={t} />
+      <AccountSkipGroups groups={skipsGroups} t={t} />
 
       <section className="rr-section">
         <h4>{t('请求当时的配置')}</h4>
         <div className="rr-kv">
-          <span>{t('策略：{{s}}', { s: strategyLabel(route.strategy, t) })}</span>
-          <span>{t('会话粘性：{{mode}}', { mode: stickyLabel(route.sticky, t) })}</span>
-          {cs?.provider_count != null && (
-            <span>{t('{{providers}} 个提供商 / {{accounts}} 个账号', {
-              providers: cs.provider_count,
-              accounts: cs.account_count ?? 0,
-            })}</span>
-          )}
-          {route.session_id && <span className="rr-mono" title={route.session_id}>{t('会话标识 {{id}}', { id: route.session_id.slice(0, 12) })}</span>}
+          <span>{t('策略：{{s}}', { s: strategyLabel(rc?.strategy, t) })}</span>
+          <span>{t('会话粘性：{{mode}}', { mode: rc?.sticky_enabled ? t('启用') : t('关闭') })}</span>
         </div>
         {captured != null && (
-          <p className="rr-note">{t('快照保存于 {{time}}', { time: new Date(captured).toLocaleString() })}</p>
+          <p className="rr-note">{t('请求时间 {{time}}', { time: new Date(captured).toLocaleString() })}</p>
         )}
       </section>
     </div>
@@ -309,7 +259,7 @@ export default function RouteReplayPanel(): JSX.Element {
   };
 
   return (
-    <div className="card">
+    <div className="card rr-panel">
       <div className="card-header">
         <h2>{t('路由回放')}</h2>
         <p className="card-subtitle">
