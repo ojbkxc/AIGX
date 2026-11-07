@@ -324,6 +324,26 @@ function capsToForm(caps: string[]): Pick<MetaForm, 'capsMode' | 'capTool' | 'ca
 
 type BatchAction = 'enable' | 'disable' | 'remove-price' | 'set-reasoning';
 
+/* ── 思考等级候选（对齐 Agent2API models-reasoning：三级回落） ── */
+
+/** 兜底候选表（与上游 FALLBACK_LEVELS 同源；正常路径用模型声明/覆盖档位） */
+const FALLBACK_REASONING_LEVELS: readonly string[] = ['off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+
+/** 「自定义等级」下拉哨兵：选中只是把输入框露出来，不是真等级（对齐上游 CUSTOM_LEVEL） */
+const CUSTOM_LEVEL = '__custom__';
+
+/**
+ * 一条映射能绑的候选等级（三级回落，对齐上游 levels()）：
+ *   ① 目标模型的覆盖声明（overrides[id].reasoning_levels）；
+ *   ② 没声明 → 本地兜底表。
+ * 已声明但为空 = 明确「这家不认识任何档位」，不回落（返回空表）。
+ */
+function reasoningLevelCandidates(overrides: Record<string, ModelMetaOverride>, modelId: string): string[] {
+  const declared = overrides[modelId]?.reasoning_levels;
+  if (Array.isArray(declared)) return declared.filter((l): l is string => typeof l === 'string' && l.trim().length > 0);
+  return [...FALLBACK_REASONING_LEVELS];
+}
+
 // ── 主组件 ───────────────────────────────────────────────────────────
 
 export default function ModelManage(): JSX.Element {
@@ -1371,6 +1391,49 @@ export default function ModelManage(): JSX.Element {
     });
   };
 
+  // ── 悬空映射（对齐 Agent2API models-dangling：目标模型不在清单里 → 挂不到任何行）──
+  // 后端给了 dangling_mappings / mappings 带标记就用后端事实；旧后端没给时前端
+  // 按「mappings 的 target 不在任何模型行 id 里」自行推断（宁可列出待确认，
+  // 也不让这批映射既看不见又删不掉）。
+  const danglingMappings = useMemo<Array<{ alias: string; target: string; fromBackend: boolean }>>(() => {
+    const v = view;
+    if (!v) return [];
+    if (Array.isArray(v.dangling_mappings)) {
+      return v.dangling_mappings
+        .filter((m) => m && typeof m.alias === 'string')
+        .map((m) => ({ alias: m.alias, target: String(m.target || ''), fromBackend: true }));
+    }
+    const liveIds = new Set(v.models.map((m) => m.id.toLowerCase()));
+    const out: Array<{ alias: string; target: string; fromBackend: boolean }> = [];
+    for (const [alias, raw] of Object.entries(v.mappings || {})) {
+      // 条目值兼容两种形态：纯串 / 对象（对象优先看 dangling 标记）
+      const target = typeof raw === 'string' ? raw : String(raw?.target || '');
+      if (typeof raw === 'object' && raw?.dangling === true) {
+        out.push({ alias, target, fromBackend: true });
+        continue;
+      }
+      if (target && !liveIds.has(target.toLowerCase())) {
+        out.push({ alias, target, fromBackend: false });
+      }
+    }
+    return out.sort((a, b) => a.alias.localeCompare(b.alias));
+  }, [view]);
+
+  /** 删除一条悬空映射（复用既有 removeModelAlias；删到不剩时区块自己消失） */
+  const removeDangling = (alias: string, target: string): void => {
+    setConfirmState({
+      title: t('删除未挂载的映射'),
+      message: t('确定删除映射「{{alias}} → {{target}}」？它指向的上游模型已不在清单里。删除后该对外名即可重新使用。', { alias, target }),
+      confirmText: t('删除'),
+      danger: true,
+      onConfirm: async () => {
+        const res = await api.removeModelAlias(alias);
+        acceptView(res?.data);
+        addToast(t('已删除映射'));
+      },
+    });
+  };
+
   const submitJump = () => {
     const n = Number(jumpDraft);
     if (Number.isInteger(n) && n >= 1 && n <= totalPages) setPage(n);
@@ -2084,6 +2147,66 @@ export default function ModelManage(): JSX.Element {
               </select>
             </div>
 
+            {/* 悬空映射提醒（数据健康提示，不随搜索/筛选缩水——对齐上游 DanglingMappings） */}
+            {danglingMappings.length > 0 && (
+              <section className="mm-dangling" aria-label={t('未挂载的模型映射')}>
+                <div className="mm-dg-head">
+                  <span className="mm-dg-title">{t('未挂载的模型映射')}</span>
+                  <span className="mm-dg-count">{danglingMappings.length}</span>
+                </div>
+                <p className="mm-dg-hint">
+                  {t('这些映射指向的上游模型已不在当前清单里，挂不到任何模型行上：用对应别名发请求会失败。删除后该对外名即可重新使用。')}
+                </p>
+                <ul className="mm-dg-list">
+                  {danglingMappings.map(({ alias, target }) => {
+                    const isDefault = alias === target;
+                    return (
+                      <li key={`${alias}\u0001${target}`} className="mm-dg-item">
+                        <code
+                          className="mm-dg-alias"
+                          title={t('点击复制：{name}', { name: alias })}
+                          onClick={() => copyText(alias)}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => { if (e.key === 'Enter') copyText(alias); }}
+                        >
+                          {alias}
+                        </code>
+                        {isDefault ? (
+                          <span className="mm-dg-tag">{t('默认绑定')}</span>
+                        ) : (
+                          <>
+                            <span className="mm-dg-arrow" aria-hidden="true"> → </span>
+                            <code
+                              className="mm-dg-target"
+                              title={t('点击复制：{name}', { name: target })}
+                              onClick={() => copyText(target)}
+                              role="button"
+                              tabIndex={0}
+                              onKeyDown={(e) => { if (e.key === 'Enter') copyText(target); }}
+                            >
+                              {target}
+                            </code>
+                          </>
+                        )}
+                        <span className="mm-dg-state" title={t('上游已经不再提供这个模型（可能已下线或改了 ID）')}>
+                          {t('目标已下线')}
+                        </span>
+                        <button
+                          type="button"
+                          className="mm-act-btn danger"
+                          title={t('删除这条映射')}
+                          onClick={() => removeDangling(alias, target)}
+                        >
+                          {t('删除')}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+            )}
+
             {/* 批量条（勾选后出现，对齐 Agent2API batch-chip） */}
             {selected.size > 0 && (
               <div className="mm-batch-chip">
@@ -2487,17 +2610,55 @@ export default function ModelManage(): JSX.Element {
                 />
               </div>
               <div className="form-group">
-                <label>{t('映射级思考等级（留空 = 不设置）')}</label>
-                <input
-                  className="form-input"
-                  value={aliasForm.reasoning_effort}
-                  onChange={(e) => setAliasForm({ ...aliasForm, reasoning_effort: e.target.value })}
-                  placeholder="off / minimal / low / medium / high / xhigh"
-                  disabled={savingAlias}
-                />
-                <span className="form-hint">
-                  {t('仅当客户端未在请求里显式指定 reasoning_effort 时叠加；留空清除已有等级')}
-                </span>
+                <label>{t('映射级思考等级（不覆盖 = 跟随客户端）')}</label>
+                {(() => {
+                  // 候选三级回落（模型声明 > 兜底表），弹窗打开时目标模型即锁定
+                  const candidates = reasoningLevelCandidates(overrides, aliasForm.target.trim());
+                  const current = aliasForm.reasoning_effort.trim();
+                  const isCustom = current !== '' && !candidates.includes(current);
+                  const selectValue = current === '' ? '' : isCustom ? CUSTOM_LEVEL : current;
+                  return (
+                    <>
+                      <select
+                        className="form-input"
+                        value={selectValue}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setAliasForm({
+                            ...aliasForm,
+                            // 哨兵 = 保留当前值（露出自定义输入框）；空串 = 不覆盖
+                            reasoning_effort: v === CUSTOM_LEVEL ? current : v,
+                          });
+                        }}
+                        disabled={savingAlias}
+                      >
+                        <option value="">{t('不覆盖（跟随客户端请求）')}</option>
+                        {candidates.map((level) => (
+                          <option key={level} value={level}>{level}</option>
+                        ))}
+                        {/* 已有等级不在候选里时也要能显示出来（否则 select 显示空白） */}
+                        {isCustom && <option value={CUSTOM_LEVEL}>{t('自定义等级…（{level}）', { level: current })}</option>}
+                        {!isCustom && <option value={CUSTOM_LEVEL}>{t('自定义等级…')}</option>}
+                      </select>
+                      {selectValue === CUSTOM_LEVEL && (
+                        <input
+                          className="form-input"
+                          style={{ marginTop: 6 }}
+                          value={aliasForm.reasoning_effort}
+                          onChange={(e) => setAliasForm({ ...aliasForm, reasoning_effort: e.target.value })}
+                          placeholder={t('自定义等级（例如 custom-high）')}
+                          disabled={savingAlias}
+                          autoFocus
+                        />
+                      )}
+                      <span className="form-hint">
+                        {candidates.length
+                          ? t('仅当客户端未在请求里显式指定 reasoning_effort 时叠加；候选来自该模型的元信息覆盖声明，未声明时用通用档位。')
+                          : t('该模型声明了空档位表（上游不认识任何等级），建议留空不覆盖。')}
+                      </span>
+                    </>
+                  );
+                })()}
               </div>
               <div className="mm-alias-preview">
                 {aliasForm.alias.trim() && aliasForm.target.trim() ? (

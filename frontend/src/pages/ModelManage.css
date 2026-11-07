@@ -1532,3 +1532,104 @@ body.mm-colset-dragging {
   }
 }
 
+
+/* ── 悬空映射提醒区（对齐 Agent2API models-dangling：数据健康提示，不随筛选缩水） ── */
+.mm-dangling {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warn-color, #d98600) 45%, var(--border-color));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warn-color, #d98600) 6%, var(--card-bg));
+}
+
+.mm-dg-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.mm-dg-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.mm-dg-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warn-color, #d98600);
+  border: 1px solid var(--warn-color, #d98600);
+  border-radius: 999px;
+  padding: 0 7px;
+  line-height: 1.5;
+}
+
+.mm-dg-hint {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.55;
+  margin: 0 0 8px;
+}
+
+.mm-dg-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mm-dg-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: var(--surface-bg, rgba(127, 127, 127, 0.06));
+}
+
+.mm-dg-item:hover {
+  background: var(--hover-bg, rgba(128, 128, 128, 0.1));
+}
+
+.mm-dg-alias,
+.mm-dg-target {
+  font-size: 11.5px;
+  color: var(--primary-color);
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.mm-dg-alias:hover,
+.mm-dg-target:hover {
+  text-decoration: underline;
+}
+
+.mm-dg-arrow {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.mm-dg-tag {
+  font-size: 10px;
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.mm-dg-state {
+  font-size: 10.5px;
+  color: var(--warn-color, #d98600);
+  white-space: nowrap;
+}
+
+.mm-dg-item .mm-act-btn {
+  margin-left: auto;
+}

@@ -757,10 +757,12 @@ export interface ManagedProviderGroup {
 export interface ManageView {
   providers: ManagedProviderGroup[];
   models: ManagedModel[];
-  /** 全局别名映射 alias → target */
-  mappings: Record<string, string>;
+  /** 全局别名映射 alias → target（条目值也接受对象形态，新后端可带悬空标记） */
+  mappings: Record<string, string | { target?: string; dangling?: boolean; enabled?: boolean }>;
   /** 未定价的模型数 */
   unpriced: number;
+  /** 后端标记的悬空映射（目标模型不在清单里）；旧后端不返回，前端按 mappings 自行推断 */
+  dangling_mappings?: Array<{ alias: string; target: string }>;
 }
 
 // ==================== 模型测试（POST /api/models/test） ====================
