@@ -768,6 +768,32 @@ pub fn geo_language_for_ip(ip: &str) -> Option<&'static str> {
     }
 }
 
+/// 提取行为回归（#18-④ 取证：生产 security_event 66/181 条 IP=unknown 的
+/// 根因是本函数的**安全默认**，不是缺陷）——`trust_proxy_headers=false`
+/// （默认）时 X-Forwarded-For / X-Real-IP 一律不认，客户端可伪造这两个头
+/// 冒充白名单 IP 绕过 ip_limit/注入日志归属。反代部署须显式开开关。
+/// 本测试钉住这个默认，防止将来被「顺手修掉」。
+#[cfg(test)]
+mod client_ip_tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn proxy_headers_ignored_by_default() {
+        // 保存/恢复进程级快照，不污染其他测试
+        let original = crate::config::trust_proxy_headers();
+        crate::config::set_trust_proxy_headers(false);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
+        headers.insert("x-real-ip", "5.6.7.8".parse().unwrap());
+        assert_eq!(extract_client_ip(&headers), None);
+        // 反代场景显式开启后：XFF 首段优先
+        crate::config::set_trust_proxy_headers(true);
+        assert_eq!(extract_client_ip(&headers).as_deref(), Some("1.2.3.4"));
+        crate::config::set_trust_proxy_headers(original);
+    }
+}
+
 #[cfg(test)]
 mod geo_tests {
     use super::*;

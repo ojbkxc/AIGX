@@ -90,6 +90,13 @@ pub async fn handle_checkin_center(
             "today_summary": summary.iter().map(|(k, (done, total))| json!({
                 "provider": k, "done": done, "total": total
             })).collect::<Vec<_>>(),
+            // #18-⑤（生产实证：三处开关全关，签到静默不跑，用户以为坏了）：
+            // 定时总开关关 + 重试间隔关（retry_gap_ms=0）+ 无启用计划 ⇒
+            // all_disabled=true，前端据此显示显著提示 + 一键开启入口。
+            // 是否开启由用户决策——后端只如实上报，不擅自改配置。
+            "all_disabled": !settings.enabled
+                && settings.retry_gap_ms == 0
+                && state.upstream_checkin.schedules().iter().all(|s| !s.enabled),
         }
     })))
 }
