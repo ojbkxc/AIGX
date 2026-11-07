@@ -29,6 +29,8 @@ pub struct Model {
     pub group: String,
     /// 模型白名单（JSON 数组，None=不限）
     pub allowed_models: Option<String>,
+    /// Provider 白名单（JSON 数组，None=不限；07 D 章 allowedProviders）
+    pub allowed_providers: Option<String>,
     /// 过期时间（unix timestamp，None=永不过期）
     pub expires_at: Option<i64>,
     /// 额度上限（None=不限）

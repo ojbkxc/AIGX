@@ -9,6 +9,7 @@
 
 pub mod m20260807_000001_init;
 pub mod m20260908_000002_add_totp;
+pub mod m20261107_000003_add_api_key_allowed_providers;
 
 use sea_orm_migration::prelude::*;
 
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20260807_000001_init::Migration),
             Box::new(m20260908_000002_add_totp::Migration),
+            Box::new(m20261107_000003_add_api_key_allowed_providers::Migration),
         ]
     }
 }

@@ -74,7 +74,8 @@ fn resolve_candidates(
             channel: Some(ch),
         }]);
     }
-    let candidates = resolve_bridges_with_affinity(state, model, None);
+    // 运维 Agent 的 LLM 调用无用户 Key（管理面自用），provider 白名单不适用
+    let candidates = resolve_bridges_with_affinity(state, model, None, None);
     if candidates.is_empty() {
         return Err(AgentLlmError::NoBridge);
     }

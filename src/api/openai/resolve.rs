@@ -99,8 +99,9 @@ pub(crate) fn resolve_bridges_with_affinity(
     state: &AppState,
     model: &str,
     session_id: Option<&str>,
+    allowed_providers: Option<&[String]>,
 ) -> Vec<BridgeCandidate> {
-    let mut result = resolve_bridges(state, model);
+    let mut result = resolve_bridges(state, model, allowed_providers);
     let policy = state.routing_policy.snapshot();
     if let Some(sid) = session_id {
         if policy.sticky.sticky_enabled() {
@@ -123,7 +124,11 @@ pub(crate) fn resolve_bridges_with_affinity(
     result
 }
 /// 无亲和性版本（既有端点沿用：embeddings/images/audio 等无会话语义的请求）。
-pub(crate) fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandidate> {
+pub(crate) fn resolve_bridges(
+    state: &AppState,
+    model: &str,
+    allowed_providers: Option<&[String]>,
+) -> Vec<BridgeCandidate> {
     let mut result: Vec<BridgeCandidate> = Vec::new();
 
     // 第一级：通用渠道——按路由策略选取（对照 Agent2API「设置 → 路由」）：
@@ -145,6 +150,16 @@ pub(crate) fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandid
                 .is_disabled(ch.channel_type.as_str(), model)
         {
             continue;
+        }
+        // Key 级 provider 白名单（07 D 章 allowedProviders）：渠道型按
+        // channel_type 过滤；账号型无单一 provider，进 AccountBridge 后按
+        // 账号 provider 过滤（与上面 model_rules 的分层同一形状）。
+        if let Some(allowed) = allowed_providers {
+            if ch.channel_type != crate::channel::ChannelType::Account
+                && !allowed.iter().any(|p| p == ch.channel_type.as_str())
+            {
+                continue;
+            }
         }
         match ch.channel_type {
             // 空密钥渠道合法（免鉴权上游 / 网关侧 IP 白名单）：
@@ -204,7 +219,8 @@ pub(crate) fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandid
                         state.account_sessions.clone(),
                     )
                     .with_rules(state.model_rules.clone())
-                    .with_plugin_disabled(state.provider_gates.clone()),
+                    .with_plugin_disabled(state.provider_gates.clone())
+                    .with_allowed_providers(allowed_providers.map(<[String]>::to_vec)),
                 );
                 result.push((bridge, Some(ch.id.clone()), Some(ch.clone())));
             }

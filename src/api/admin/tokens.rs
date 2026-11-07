@@ -14,6 +14,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::openai::AppState;
 use super::common::{error_response, verify_user};
@@ -31,6 +32,9 @@ pub struct KeyRequest {
     pub group: Option<String>,
     #[serde(default)]
     pub allowed_models: Option<Vec<String>>,
+    /// Provider 白名单（None/空 = 不限；07 D 章 allowedProviders）
+    #[serde(default)]
+    pub allowed_providers: Option<Vec<String>>,
     #[serde(default)]
     pub expires_at: Option<i64>,
     #[serde(default)]
@@ -48,6 +52,7 @@ pub struct UpdateTokenRequest {
     pub name: Option<String>,
     pub group: Option<String>,
     pub allowed_models: Option<Vec<String>>,
+    pub allowed_providers: Option<Vec<String>>,
     pub expires_at: Option<i64>,
     pub quota_limit: Option<i64>,
     pub ip_limit: Option<Vec<String>>,
@@ -73,6 +78,7 @@ pub fn mask_token(k: &ApiKey) -> Value {
         "user_id": k.user_id,
         "group": k.group,
         "allowed_models": k.allowed_models,
+        "allowed_providers": k.allowed_providers,
         "expires_at": k.expires_at,
         "quota_limit": k.quota_limit,
         "used_quota": k.used_quota,
@@ -152,7 +158,61 @@ pub async fn handle_list_tokens(
             v
         })
         .collect();
-    Ok(Json(json!({ "success": true, "data": tokens })))
+    let (providers, models_by_provider) = provider_candidates(&state);
+    Ok(Json(json!({
+        "success": true,
+        "data": tokens,
+        // 候选表（07 D 章，对齐上游 keys_api.rs:60-80）：前端白名单选择器
+        // 用，避免前端烤死 provider/模型清单
+        "providers": providers,
+        "modelsByProvider": models_by_provider,
+    })))
+}
+
+/// 候选表聚合（07 D 章：providers + modelsByProvider，上游 `keys_api.rs:60-80`）。
+///
+/// - **providers**：渠道型渠道的 `channel_type` ∪ 账号池出现过的 provider kind，
+///   即数据面白名单可填的全部合法值（与 `ApiKey::allows_provider` 同口径）；
+/// - **modelsByProvider**：每家下实际可用的模型集合——渠道型取该类型全部渠道的
+///   `models ∪ discovered_models`；账号型取该家账号的模型白名单，白名单为空
+///   （= 跟随渠道）时并入归属渠道的模型。
+///
+/// 返回 `(providers, modelsByProvider)`；都用 BTree 排序保证响应稳定。
+pub(crate) fn provider_candidates(state: &AppState) -> (Vec<String>, Value) {
+    let mut models_by: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // 渠道型：按 channel_type 聚合
+    for ch in state.channel_store.list() {
+        if ch.channel_type == crate::channel::ChannelType::Account {
+            continue;
+        }
+        let entry = models_by
+            .entry(ch.channel_type.as_str().to_string())
+            .or_default();
+        for m in ch.models.iter().chain(ch.discovered_models.iter()) {
+            entry.insert(m.clone());
+        }
+    }
+    // 账号型：按账号 provider 聚合（空白名单 = 跟随归属渠道）
+    for s in state.account_sessions.all() {
+        let entry = models_by.entry(s.provider.clone()).or_default();
+        if s.models.is_empty() {
+            if let Some(ch) = state.channel_store.get(&s.channel_id) {
+                for m in ch.models.iter().chain(ch.discovered_models.iter()) {
+                    entry.insert(m.clone());
+                }
+            }
+        } else {
+            for m in s.models.iter() {
+                entry.insert(m.clone());
+            }
+        }
+    }
+    let providers: Vec<String> = models_by.keys().cloned().collect();
+    let models_by_provider = models_by
+        .into_iter()
+        .map(|(k, v)| (k, Value::from(v.into_iter().collect::<Vec<_>>())))
+        .collect::<BTreeMap<_, _>>();
+    (providers, json!(models_by_provider))
 }
 
 /// 查看令牌明文密钥（对齐 new-api `POST /api/token/:id/key`）
@@ -204,6 +264,7 @@ pub async fn handle_add_token(
         user_id,
         group: body.group.unwrap_or_else(|| "default".to_string()),
         allowed_models: body.allowed_models,
+        allowed_providers: body.allowed_providers,
         expires_at: body.expires_at,
         quota_limit: body.quota_limit,
         ip_limit: body.ip_limit,
@@ -279,6 +340,11 @@ pub async fn handle_update_token(
         }
         if let Some(m) = &body.allowed_models {
             k.allowed_models = Some(m.clone());
+        }
+        // 白名单更新：显式传数组才覆盖；空数组归一为不限由 normalize_model_list
+        // 在 generate 侧处理（更新侧直存，allows_provider 已兼容空=不限语义）
+        if let Some(p) = &body.allowed_providers {
+            k.allowed_providers = if p.is_empty() { None } else { Some(p.clone()) };
         }
         if let Some(e) = body.expires_at {
             k.expires_at = Some(e);

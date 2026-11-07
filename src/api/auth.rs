@@ -40,6 +40,13 @@ pub struct ApiKey {
     /// 模型白名单（None=不限）
     #[serde(default)]
     pub allowed_models: Option<Vec<String>>,
+    /// Provider 白名单（None=不限；07 D 章 allowedProviders 对齐项）。
+    ///
+    /// 匹配单元与数据面一致：渠道型渠道 = `channel_type.as_str()`
+    /// （openai_compatible/anthropic/gemini/zai/cloudflare），账号型 = 账号的
+    /// `provider` kind。空列表与 `None` 同义（不限，见 normalize_model_list）。
+    #[serde(default)]
+    pub allowed_providers: Option<Vec<String>>,
     /// 过期时间（unix timestamp，None=永不过期）
     #[serde(default)]
     pub expires_at: Option<i64>,
@@ -105,6 +112,24 @@ impl ApiKey {
             None => true,
             Some(list) => list.is_empty() || list.iter().any(|m| m == model),
         }
+    }
+
+    /// 是否允许使用指定 provider 域的渠道/账号。
+    ///
+    /// `None` 与 `Some(vec![])` 均表示不限（与 allows_model 同语义：空=全部放行）。
+    pub fn allows_provider(&self, provider: &str) -> bool {
+        match &self.allowed_providers {
+            None => true,
+            Some(list) => list.is_empty() || list.iter().any(|p| p == provider),
+        }
+    }
+
+    /// 数据面过滤视图：空名单归一为 `None`（不限），非空返回拷贝。
+    ///
+    /// resolve 层拿它做候选渠道过滤（渠道型按 channel_type、账号型传进
+    /// AccountBridge 按账号 provider 过滤），避免每个调用点重复归一化。
+    pub fn provider_filter(&self) -> Option<Vec<String>> {
+        normalize_model_list(self.allowed_providers.clone())
     }
 
     /// 是否允许来自指定 IP
@@ -236,6 +261,7 @@ impl ApiKeyStore {
             user_id: None,
             group: "default".to_string(),
             allowed_models: None,
+            allowed_providers: None,
             expires_at: None,
             quota_limit: None,
             ip_limit: None,
@@ -274,6 +300,7 @@ impl ApiKeyStore {
             user_id: opts.user_id,
             group: opts.group,
             allowed_models: normalize_model_list(opts.allowed_models),
+            allowed_providers: normalize_model_list(opts.allowed_providers),
             expires_at: opts.expires_at,
             quota_limit: opts.quota_limit,
             used_quota: 0,
@@ -608,6 +635,8 @@ pub struct CreateApiKeyOptions {
     pub user_id: Option<String>,
     pub group: String,
     pub allowed_models: Option<Vec<String>>,
+    /// Provider 白名单（None/空 = 不限）
+    pub allowed_providers: Option<Vec<String>>,
     pub expires_at: Option<i64>,
     pub quota_limit: Option<i64>,
     pub ip_limit: Option<Vec<String>>,
@@ -926,6 +955,7 @@ mod session_registry_tests {
             user_id: None,
             group: "default".to_string(),
             allowed_models: None,
+            allowed_providers: None,
             expires_at: None,
             quota_limit: Some(100),
             ip_limit: None,
@@ -1013,6 +1043,7 @@ mod session_registry_tests {
             user_id: None,
             group: "default".to_string(),
             allowed_models: Some(vec![]),
+            allowed_providers: None,
             expires_at: None,
             quota_limit: None,
             ip_limit: None,
@@ -1046,6 +1077,7 @@ mod session_registry_tests {
             user_id: None,
             group: "default".to_string(),
             allowed_models: None,
+            allowed_providers: None,
             expires_at: None,
             quota_limit: None,
             ip_limit: None,
@@ -1067,6 +1099,7 @@ mod session_registry_tests {
             user_id: None,
             group: "default".to_string(),
             allowed_models: None,
+            allowed_providers: None,
             expires_at: None,
             quota_limit: None,
             ip_limit: None,
@@ -1084,6 +1117,7 @@ mod session_registry_tests {
             user_id: None,
             group: "default".to_string(),
             allowed_models: None,
+            allowed_providers: None,
             expires_at: None,
             quota_limit: None,
             ip_limit: None,

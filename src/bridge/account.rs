@@ -36,6 +36,11 @@ pub struct AccountBridge {
     /// 「这家别供这个模型」，这里管「这家整个别供」。读的是
     /// `ProviderGates` 的内存集合——启停即时生效、无每请求 IO。
     plugin_disabled: Option<crate::api::admin::plugins::ProviderGates>,
+    /// Key 级 provider 白名单（07 D 章 allowedProviders；`None`/空 = 不限）。
+    ///
+    /// 与 `plugin_disabled` 方向相反：那个是「这几家整体关停」，这个是
+    /// 「这个 key 只许用这几家」。匹配单元与数据面同口径：账号 `provider`。
+    allowed_providers: Option<Vec<String>>,
 }
 
 /// 同渠道账号轮换的总时间预算（与共享 Client 的单请求超时对齐）。
@@ -69,6 +74,7 @@ impl AccountBridge {
             sessions,
             rules: None,
             plugin_disabled: None,
+            allowed_providers: None,
         }
     }
 
@@ -84,6 +90,12 @@ impl AccountBridge {
         gates: crate::api::admin::plugins::ProviderGates,
     ) -> Self {
         self.plugin_disabled = Some(gates);
+        self
+    }
+
+    /// 接入 Key 级 provider 白名单（空列表与 `None` 同义 = 不限）。
+    pub fn with_allowed_providers(mut self, allowed: Option<Vec<String>>) -> Self {
+        self.allowed_providers = allowed;
         self
     }
 
@@ -108,17 +120,23 @@ impl AccountBridge {
                 .as_ref()
                 .is_some_and(|gates| gates.is_disabled(provider))
         };
+        // Key 白名单：名单内（或名单为空/未接入）才放行
+        let key_allowed = |provider: &str| match &self.allowed_providers {
+            None => true,
+            Some(list) => list.is_empty() || list.iter().any(|p| p == provider),
+        };
         match &self.rules {
             None => {
                 self.sessions
                     .acquire_with_reasons(&self.channel_id, model, alias, |provider| {
-                        !plugin_off(provider)
+                        key_allowed(provider) && !plugin_off(provider)
                     })
             }
             Some(rules) => {
                 self.sessions
                     .acquire_with_reasons(&self.channel_id, model, alias, |provider| {
-                        !plugin_off(provider)
+                        key_allowed(provider)
+                            && !plugin_off(provider)
                             && !rules.is_disabled(provider, model)
                             && alias
                                 .map(|a| !rules.is_disabled(provider, a))

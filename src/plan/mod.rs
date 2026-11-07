@@ -277,6 +277,7 @@ impl PlanStore {
                 p.group.clone()
             },
             allowed_models: p.allowed_models.clone(),
+            allowed_providers: None,
             expires_at: p.compute_expires_at(),
             quota_limit: if p.quota > 0 { Some(p.quota) } else { None },
             ip_limit: None,

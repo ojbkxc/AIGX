@@ -405,6 +405,7 @@ pub async fn handle_add_key(
             user_id: None,
             group: "default".to_string(),
             allowed_models: None,
+            allowed_providers: None,
             expires_at: None,
             quota_limit: None,
             ip_limit: None,

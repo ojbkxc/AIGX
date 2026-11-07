@@ -309,8 +309,12 @@ pub async fn handle_messages(
 
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover。
     // 阶段2：带亲和性选取——粘性窗口内命中渠道置顶
-    let candidates =
-        super::openai::resolve_bridges_with_affinity(&state, &model, session_id.as_deref());
+    let candidates = super::openai::resolve_bridges_with_affinity(
+        &state,
+        &model,
+        session_id.as_deref(),
+        api_key.provider_filter().as_deref(),
+    );
     if candidates.is_empty() {
         return anthropic_error(
             "service_unavailable",

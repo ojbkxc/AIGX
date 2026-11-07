@@ -78,7 +78,7 @@ pub(crate) async fn handle_embeddings(
     ensure_model_priced(&state, &model_owned)?;
 
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
-    let candidates = resolve_bridges(&state, &model_owned);
+    let candidates = resolve_bridges(&state, &model_owned, api_key.provider_filter().as_deref());
     if candidates.is_empty() {
         return Err(error_response(
             "no_bridge",
