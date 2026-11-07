@@ -653,6 +653,13 @@ async fn main() -> anyhow::Result<()> {
         ),
         update,
         scheduled_task_store: store.clone(),
+        provider_gates: {
+            let gates = crate::api::admin::plugins::ProviderGates::new(store.clone());
+            if let Err(e) = gates.load() {
+                tracing::warn!("[Plugins] {e}（按全启用处理）");
+            }
+            gates
+        },
     };
 
     tracing::info!(
@@ -2278,6 +2285,35 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/proxy-pool/sync-clash",
             post(api::admin::proxy_pool_api::handle_pool_sync_clash),
+        )
+        // 插件管理面（对照 Agent2API /api/plugins*；契约化不进程化）
+        .route(
+            "/api/plugins",
+            get(api::admin::plugins::handle_list_plugins),
+        )
+        .route(
+            "/api/plugins/enable",
+            post(api::admin::plugins::handle_set_plugin_enabled),
+        )
+        .route(
+            "/api/plugins/provider",
+            post(api::admin::plugins::handle_set_plugin_provider_enabled),
+        )
+        .route(
+            "/api/plugins/uninstall",
+            post(api::admin::plugins::handle_uninstall_plugin),
+        )
+        .route(
+            "/api/plugins/update",
+            get(api::admin::plugins::handle_check_plugin_updates),
+        )
+        .route(
+            "/api/plugins/release",
+            get(api::admin::plugins::handle_refresh_plugin_release),
+        )
+        .route(
+            "/api/plugins/progress",
+            get(api::admin::plugins::handle_get_plugin_progress),
         )
         // 服务器自动更新（检查/应用/重启/回滚/设置）
         .route(

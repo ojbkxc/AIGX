@@ -313,17 +313,21 @@ async fn run_retry_round(
     let records = store
         .recent_records(1, Some(provider), None, None, None)
         .unwrap_or_default();
-    let mut last_by_account: HashMap<&str, &CheckinRecord> = HashMap::new();
+    // 账号 id → 末次记录（recent_records 按 ts 倒序，只在缺失时插入 =
+    // 拿到的是最新一条）
+    let mut last_by_account: HashMap<String, &CheckinRecord> = HashMap::new();
     for r in &records {
-        last_by_account.entry(r.account_id.as_str()).or_insert(r);
+        last_by_account
+            .entry(r.account_id.clone())
+            .or_insert_with(|| r);
     }
     // 到点且次数未用尽的未签账号
     let due: Vec<String> = last_by_account
         .iter()
         .filter(|(_, r)| !r.ok && matches!(r.source.as_str(), "schedule" | "retry" | "makeup"))
-        .filter(|(id, _)| ledger.attempts.get(*id).copied().unwrap_or(0) < RETRY_LIMIT)
-        .filter(|(id, _)| ledger.accounts.get(*id).copied().unwrap_or(0) <= now)
-        .map(|(id, _)| id.to_string())
+        .filter(|(id, _)| ledger.attempts.get(id.as_str()).copied().unwrap_or(0) < RETRY_LIMIT)
+        .filter(|(id, _)| ledger.accounts.get(id.as_str()).copied().unwrap_or(0) <= now)
+        .map(|(id, _)| id.clone())
         .collect();
     let targets: Vec<crate::account_session::model::AccountSession> =
         collect_targets(sessions, std::slice::from_ref(provider))
@@ -358,9 +362,10 @@ async fn run_retry_round(
             ledger.attempts.remove(&session.id);
         } else {
             *ledger.attempts.entry(session.id.clone()).or_insert(0) += 1;
-            ledger
-                .accounts
-                .insert(session.id.clone(), now + (settings.retry_gap_ms / 1000));
+            ledger.accounts.insert(
+                session.id.clone(),
+                now + (settings.retry_gap_ms as i64 / 1000),
+            );
         }
         if settings.gap_ms > 0 {
             tokio::time::sleep(Duration::from_millis(settings.gap_ms)).await;

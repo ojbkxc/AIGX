@@ -181,6 +181,8 @@ pub struct AppState {
     pub update: crate::update::UpdateManager,
     /// 间隔型定时任务的排期状态存储（凭证维护/模型刷新/版本检查的跨重启排期）。
     pub scheduled_task_store: Arc<crate::storage::FileStore>,
+    /// 插件面的 provider 启停闸门（管理面写、数据面选号过滤读；KV 持久化）。
+    pub provider_gates: crate::api::admin::plugins::ProviderGates,
 }
 impl AppState {
     /// 返回是否启用了 SeaORM 后端。

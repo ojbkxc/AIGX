@@ -30,6 +30,12 @@ pub struct AccountBridge {
     /// 账号型渠道的 provider 只存在于账号上，渠道层拿不到，只能在这里过滤。
     /// `None` = 未接入规则（测试与旧调用点），行为与改造前一致。
     rules: Option<Arc<crate::model::manage::ModelRules>>,
+    /// 插件面停用的 provider 名单（停用 = 选号跳过该家的账号，账号数据保留）。
+    ///
+    /// `None` = 未接入（测试与旧调用点）。与 `rules` 互补：rules 管
+    /// 「这家别供这个模型」，这里管「这家整个别供」。读的是
+    /// `ProviderGates` 的内存集合——启停即时生效、无每请求 IO。
+    plugin_disabled: Option<crate::api::admin::plugins::ProviderGates>,
 }
 
 /// 同渠道账号轮换的总时间预算（与共享 Client 的单请求超时对齐）。
@@ -62,6 +68,7 @@ impl AccountBridge {
             channel_id: channel_id.into(),
             sessions,
             rules: None,
+            plugin_disabled: None,
         }
     }
 
@@ -71,18 +78,38 @@ impl AccountBridge {
         self
     }
 
+    /// 接入插件面的 provider 停用闸门（停用 = 该家账号不参与选号，即时生效）。
+    pub fn with_plugin_disabled(
+        mut self,
+        gates: crate::api::admin::plugins::ProviderGates,
+    ) -> Self {
+        self.plugin_disabled = Some(gates);
+        self
+    }
+
     /// 选一个可用账号；`model` 是上游真名，`alias` 是用户可见名。
     ///
     /// 规则过滤在这一层做：`(账号 provider, 上游真名)` 与 `(provider, 别名)`
     /// 任一命中「已关停」就跳过该账号 —— 管理员在模型管理页关掉的是
     /// 「这家别再供这个模型」，而不是「把整个账号停用」。
+    /// 插件面停用闸门是整家关停（比 rules 更粗一档）。
     fn pick_account(&self, model: &str, alias: Option<&str>) -> Option<AccountLease> {
+        let plugin_off = |provider: &str| {
+            self.plugin_disabled
+                .as_ref()
+                .is_some_and(|gates| gates.is_disabled(provider))
+        };
         match &self.rules {
-            None => self.sessions.acquire(&self.channel_id, model, alias),
+            None => self
+                .sessions
+                .acquire_with(&self.channel_id, model, alias, |provider| {
+                    !plugin_off(provider)
+                }),
             Some(rules) => self
                 .sessions
                 .acquire_with(&self.channel_id, model, alias, |provider| {
-                    !rules.is_disabled(provider, model)
+                    !plugin_off(provider)
+                        && !rules.is_disabled(provider, model)
                         && alias
                             .map(|a| !rules.is_disabled(provider, a))
                             .unwrap_or(true)

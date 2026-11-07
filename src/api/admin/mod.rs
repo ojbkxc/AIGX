@@ -22,6 +22,7 @@ pub mod openapi;
 pub mod orders;
 pub mod plans;
 pub mod playground;
+pub mod plugins; // 插件管理面（对照 Agent2API /api/plugins*，契约化不进程化）
 pub mod pricing;
 pub mod prompts;
 pub mod proxy_pool_api;

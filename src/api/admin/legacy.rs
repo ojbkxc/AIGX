@@ -3462,7 +3462,8 @@ pub async fn handle_channel_chat_test(
             ch.id.clone(),
             state.account_sessions.clone(),
         )
-        .with_rules(state.model_rules.clone());
+        .with_rules(state.model_rules.clone())
+        .with_plugin_disabled(state.provider_gates.clone());
         // 记账用请求体快照（与既有透传路径口径一致：含 model + messages）
         let payload_for_log = serde_json::json!({ "model": upstream, "messages": messages });
         let account_url = format!("account://{}", ch.id);

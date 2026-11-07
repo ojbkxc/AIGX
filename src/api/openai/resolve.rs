@@ -203,7 +203,8 @@ pub(crate) fn resolve_bridges(state: &AppState, model: &str) -> Vec<BridgeCandid
                         ch.id.clone(),
                         state.account_sessions.clone(),
                     )
-                    .with_rules(state.model_rules.clone()),
+                    .with_rules(state.model_rules.clone())
+                    .with_plugin_disabled(state.provider_gates.clone()),
                 );
                 result.push((bridge, Some(ch.id.clone()), Some(ch.clone())));
             }
