@@ -137,7 +137,8 @@ fn make_bridge_for_channel(
                 ch.id.clone(),
                 state.account_sessions.clone(),
             )
-            .with_rules(state.model_rules.clone()),
+            .with_rules(state.model_rules.clone())
+            .with_plugin_disabled(state.provider_gates.clone()),
         )),
         // Cloudflare 渠道走 Hub 专用桥
         ChannelType::Cloudflare => state.hub.get_specialized("cloudflare"),

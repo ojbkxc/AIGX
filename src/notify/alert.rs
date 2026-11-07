@@ -338,6 +338,32 @@ impl AlertRuleEvaluator {
         Some(alert)
     }
 
+    /// 评估并自动恢复：值回到阈值以下时解决该活跃告警（08-prod P2-5）。
+    ///
+    /// 此前巡检只触发不恢复——渠道延迟降回正常（或渠道不再被调用、拿不到
+    /// 新样本）后告警仍永久 active，成了噪音面板。这里在 `evaluate` 的
+    /// 「低于阈值 → None」分支上顺带 resolve：巡检下一轮看到值正常就关闭。
+    /// 返回 Recovered = 本次**恢复**的告警（与触发对称，调用方可分发
+    /// 「已恢复」通知）。
+    pub fn evaluate_with_recovery(&mut self, kind: &AlertKind, current_value: u64) -> Outcome {
+        let below = self
+            .rules
+            .iter()
+            .find(|r| r.enabled && Self::rule_matches(r, kind))
+            .is_none_or(|rule| current_value < rule.threshold);
+        if below {
+            // 值正常（或无规则）：活跃告警自动恢复
+            if let Some(alert) = self.resolve(kind) {
+                return Outcome::Recovered(alert);
+            }
+            return Outcome::None;
+        }
+        match self.evaluate(kind, current_value) {
+            Some(alert) => Outcome::Triggered(alert),
+            None => Outcome::None,
+        }
+    }
+
     /// 标记告警解决（同步记入历史）
     pub fn resolve(&mut self, kind: &AlertKind) -> Option<Alert> {
         let alert_key = kind.to_string();
@@ -411,6 +437,17 @@ impl AlertRuleEvaluator {
     }
 }
 
+/// [`AlertRuleEvaluator::evaluate_with_recovery`] 的三态结果。
+#[derive(Debug, Clone)]
+pub enum Outcome {
+    /// 触发了新告警（或静默期外的重复触发）
+    Triggered(Alert),
+    /// 值回常态，活跃告警被自动解决
+    Recovered(Alert),
+    /// 无事发生（低于阈值且无活跃告警 / 规则禁用）
+    None,
+}
+
 // ── 测试 ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -460,6 +497,32 @@ mod tests {
         assert_eq!(resolved.status, AlertStatus::Resolved);
         assert!(resolved.resolved_at.is_some());
         assert!(ev.active_alerts().is_empty());
+    }
+
+    #[test]
+    fn evaluate_with_recovery_auto_resolves_when_back_to_normal() {
+        // 08-prod P2-5：高延迟告警触发后，值降回阈值以下 → 下一轮巡检自动恢复
+        let mut ev = AlertRuleEvaluator::new(AlertRule::defaults());
+        let k = AlertKind::ChannelHighLatency {
+            channel_id: "ch1".into(),
+        };
+        // 超阈值 → 触发
+        match ev.evaluate_with_recovery(&k, 55_000) {
+            Outcome::Triggered(alert) => assert_eq!(alert.status, AlertStatus::Active),
+            other => panic!("应触发，实际 {other:?}"),
+        }
+        assert_eq!(ev.active_alerts().len(), 1);
+        // 降回正常 → 自动恢复
+        match ev.evaluate_with_recovery(&k, 900) {
+            Outcome::Recovered(alert) => {
+                assert_eq!(alert.status, AlertStatus::Resolved);
+                assert!(alert.resolved_at.is_some());
+            }
+            other => panic!("应恢复，实际 {other:?}"),
+        }
+        assert!(ev.active_alerts().is_empty());
+        // 再查一次：无事发生（无活跃告警可恢复）
+        assert!(matches!(ev.evaluate_with_recovery(&k, 900), Outcome::None));
     }
 
     #[test]

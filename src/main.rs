@@ -815,12 +815,14 @@ async fn main() -> anyhow::Result<()> {
         // 天数未配置时不清理（容量上限 purge_overflow 仍然兜底）。
         {
             let log_store = state.log_store.clone();
+            let kv_store = state.scheduled_task_store.clone();
             scheduler.spawn(cron::TaskSpec {
                 name: "log-retention-sweep",
                 interval: Duration::from_secs(86400),
                 first_run_delay: Duration::from_secs(600),
                 run: Box::new(move || {
                     let ls = log_store.clone();
+                    let kv = kv_store.clone();
                     Box::pin(async move {
                         let (days, _capacity, audit_days, daily_days) =
                             ls.requests.retention_full();
@@ -855,6 +857,11 @@ async fn main() -> anyhow::Result<()> {
                                 Err(e) => tracing::warn!("日聚合保留清理失败: {e}"),
                             }
                         }
+                        // 第四档：遗留 KV 键清扫（08-prod P2-8）。`token_daily_*` /
+                        // `token_monthly_*` 是日聚合上线前的旧格式记账键（数据已
+                        // 折进 dailyagg 主档），`price:e2e-*` 是测试残留。清完即
+                        // 静默（幂等：之后每轮 0 条）。
+                        removed += legacy_kv_sweep(&kv);
                         removed
                     })
                 }),
@@ -2535,6 +2542,37 @@ async fn track_inflight(
 ///
 /// - 若 `config.cors_origins` 非空：仅允许列表中的来源（生产环境推荐）。
 /// - 若 `config.cors_origins` 为空但 `config.server_address` 非空：允许 server_address 来源。
+/// 遗留 KV 键清扫（log-retention-sweep 第四档，08-prod P2-8）。
+///
+/// 生产实证的垃圾键：`token_daily_*` / `token_monthly_*`（日聚合上线前的
+/// 旧格式记账键，2026-09~11 遗留 17 条，数据已折进 dailyagg 主档）、
+/// `price:e2e-*`（E2E 测试残留）。幂等：清完即 0，无副作用的纯删除。
+fn legacy_kv_sweep(store: &std::sync::Arc<crate::storage::FileStore>) -> u64 {
+    const LEGACY_PREFIXES: &[&str] = &["token_daily_", "token_monthly_", "price:e2e-"];
+    let mut removed = 0u64;
+    for prefix in LEGACY_PREFIXES {
+        let keys = match store.list(prefix) {
+            Ok(keys) => keys,
+            Err(e) => {
+                tracing::debug!("遗留键清扫跳过前缀 {prefix}（读失败：{e}）");
+                continue;
+            }
+        };
+        for key in keys {
+            match store.delete(&key) {
+                Ok(()) => removed += 1,
+                Err(e) => tracing::debug!("遗留键 {key} 删除失败：{e}"),
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(
+            "[Retention] 清理遗留 KV 键 {removed} 条（token_daily_*/token_monthly_*/price:e2e-*）"
+        );
+    }
+    removed
+}
+
 /// - 否则：默认允许 localhost 开发来源（127.0.0.1 与 localhost，常见端口）。
 ///
 /// 不再使用 `CorsLayer::permissive()` 以避免任意来源带来的安全风险。

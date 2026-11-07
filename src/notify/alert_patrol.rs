@@ -16,7 +16,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::channel::ChannelStore;
-use crate::notify::alert::{AlertKind, AlertLevel, AlertRule, AlertRuleEvaluator};
+use crate::notify::alert::{AlertKind, AlertLevel, AlertRule, AlertRuleEvaluator, Outcome};
 use crate::notify::NotifyService;
 
 /// 共享告警评估器（管理 API 与巡检任务共用）
@@ -67,7 +67,8 @@ async fn patrol_once(
             .map(|s| s == "open")
             .unwrap_or(false);
 
-        // 渠道连续失败（circuit breaker 打开时告警）
+        // 渠道连续失败（circuit breaker 打开时告警；恢复时自动关闭——
+        // 08-prod P2-5：此前只触发不恢复，断路器合上后告警仍永久 active）
         let kind_failure = AlertKind::ChannelFailure {
             channel_id: channel.id.clone(),
         };
@@ -77,17 +78,33 @@ async fn patrol_once(
             if let Some(alert) = alert {
                 dispatch_alert(notify_service, &alert.level, &alert.message).await;
             }
+        } else {
+            // 断路器合上 = 故障恢复：活跃的失败告警自动关闭
+            if let Outcome::Recovered(alert) =
+                evaluator.lock().evaluate_with_recovery(&kind_failure, 0)
+            {
+                dispatch_recovery(notify_service, &alert.message).await;
+            }
         }
 
-        // 渠道延迟（health_manager 的模型平均延迟 EMA → 渠道均值 ms）
+        // 渠道延迟（health_manager 的模型平均延迟 EMA → 渠道均值 ms）。
+        // 延迟降回阈值以下时自动恢复（evaluate_with_recovery 的三态）。
         if let Some(s) = &summary {
             let kind_latency = AlertKind::ChannelHighLatency {
                 channel_id: channel.id.clone(),
             };
             let avg_ms = s.overall_avg_latency_ms as u64;
-            let alert = evaluator.lock().evaluate(&kind_latency, avg_ms);
-            if let Some(alert) = alert {
-                dispatch_alert(notify_service, &alert.level, &alert.message).await;
+            let outcome = evaluator
+                .lock()
+                .evaluate_with_recovery(&kind_latency, avg_ms);
+            match outcome {
+                Outcome::Triggered(alert) => {
+                    dispatch_alert(notify_service, &alert.level, &alert.message).await;
+                }
+                Outcome::Recovered(alert) => {
+                    dispatch_recovery(notify_service, &alert.message).await;
+                }
+                Outcome::None => {}
             }
         }
     }
@@ -97,13 +114,28 @@ async fn patrol_once(
     // 非 Linux 平台计算 usage_percent 不可得则跳过（evaluate 传入 0 永不触发）
     let mem_percent = memory_usage_percent();
     if mem_percent > 0 {
-        let alert = evaluator
+        let outcome = evaluator
             .lock()
-            .evaluate(&AlertKind::MemoryHigh, mem_percent);
-        if let Some(alert) = alert {
-            dispatch_alert(notify_service, &alert.level, &alert.message).await;
+            .evaluate_with_recovery(&AlertKind::MemoryHigh, mem_percent);
+        match outcome {
+            Outcome::Triggered(alert) => {
+                dispatch_alert(notify_service, &alert.level, &alert.message).await;
+            }
+            Outcome::Recovered(alert) => {
+                dispatch_recovery(notify_service, &alert.message).await;
+            }
+            Outcome::None => {}
         }
     }
+}
+
+/// 分发一条「已恢复」通知（与触发对称；级别降为 info 色调）。
+async fn dispatch_recovery(notify_service: &Arc<NotifyService>, message: &str) {
+    tracing::info!("alert recovered: {message}");
+    notify_service.notify_spawn(crate::notify::NotifyEvent::AlertTriggered {
+        level: "info".to_string(),
+        message: format!("✅ 已恢复：{message}"),
+    });
 }
 
 /// 分发一条告警到全部已配置渠道
