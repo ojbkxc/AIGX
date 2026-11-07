@@ -105,11 +105,11 @@ function InstalledPackCard({
       </div>
       {pack.description ? <p className="pl-card-desc">{pack.description}</p> : null}
       <p className="pl-card-meta">
-        {t('{{count}} 家提供商 · 安装于 {time}', { count: pack.providers.length, time: fmtInstalledAt(pack.installedAt) })}
+        {t('{{count}} 家提供商 · 安装于 {{time}}', { count: pack.providers.length, time: fmtInstalledAt(pack.installedAt) })}
       </p>
       <div className="pl-card-state">
         <span>{pack.host?.running ? t('运行中') : t('未运行')}</span>
-        <span>{t('已加载 {count} 家', { count: loadedCount })}</span>
+        <span>{t('已加载 {{count}} 家', { count: loadedCount })}</span>
       </div>
       {pack.compatibilityError ? (
         <p className="pl-card-err" title={pack.compatibilityError}>{pack.compatibilityError}</p>

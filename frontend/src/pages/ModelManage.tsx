@@ -2626,8 +2626,10 @@ export default function ModelManage(): JSX.Element {
                           const v = e.target.value;
                           setAliasForm({
                             ...aliasForm,
-                            // 哨兵 = 保留当前值（露出自定义输入框）；空串 = 不覆盖
-                            reasoning_effort: v === CUSTOM_LEVEL ? current : v,
+                            // 哨兵 = 进入自定义编辑：空值时先给一个可编辑的种子值
+                            // （保持空会让 select 弹回「不覆盖」，输入框永远露不出来），
+                            // 已有值则原样保留（切档不丢用户输入）
+                            reasoning_effort: v === CUSTOM_LEVEL ? (current || 'custom') : v,
                           });
                         }}
                         disabled={savingAlias}

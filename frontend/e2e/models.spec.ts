@@ -306,11 +306,12 @@ test.describe('模型管理 · 思考等级下拉与悬空映射', () => {
     const modal = page.locator('.modal-overlay .modal').first();
     await expect(modal).toBeVisible();
 
-    // 等级下拉存在且带「不覆盖」空档
-    const levelSelect = modal.locator('select').filter({ has: modal.locator('option', { hasText: '不覆盖' }) }).first();
+    // 等级下拉存在且带「不覆盖」空档（弹窗内唯一原生 select）
+    const levelSelect = modal.locator('select').first();
     await expect(levelSelect).toBeVisible();
-    // 无声明的模型 → 兜底候选表里有 high
-    await expect(levelSelect.locator('option', { hasText: 'high' })).toHaveCount(1);
+    await expect(levelSelect.locator('option', { hasText: '不覆盖' })).toHaveCount(1);
+    // 无声明的模型 → 兜底候选表里有 high（按 value 匹配，防 xhigh 子串误中）
+    await expect(levelSelect.locator('option[value="high"]')).toHaveCount(1);
     // 自定义等级哨兵档存在
     await expect(levelSelect.locator('option', { hasText: '自定义等级' })).toHaveCount(1);
 
@@ -334,11 +335,11 @@ test.describe('模型管理 · 思考等级下拉与悬空映射', () => {
     await combo.fill('glm-4.7-flash');
     await page.keyboard.press('Enter');
 
-    const levelSelect = modal.locator('select').filter({ has: modal.locator('option', { hasText: '不覆盖' }) }).first();
-    await expect(levelSelect.locator('option', { hasText: 'low', exact: true })).toHaveCount(1);
-    await expect(levelSelect.locator('option', { hasText: 'medium', exact: true })).toHaveCount(1);
+    const levelSelect = modal.locator('select').first();
+    await expect(levelSelect.locator('option[value="low"]')).toHaveCount(1);
+    await expect(levelSelect.locator('option[value="medium"]')).toHaveCount(1);
     // 声明表里没有的档位不该出现（兜底表的 minimal/off 不在）
-    await expect(levelSelect.locator('option', { hasText: 'minimal' })).toHaveCount(0);
+    await expect(levelSelect.locator('option[value="minimal"]')).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 

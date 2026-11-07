@@ -8,7 +8,7 @@ import { test, expect, loginAsAdmin } from './fixtures';
  * - 待生效套餐徽章（last_balance.plans pending）
  * - 按到期排序：已过期最前、无到期最后
  *
- * 桩数据（static-server.mjs）：4 条账号 —— openai_compatible×2（3 天后到期/无到期）
+ * 桩数据（static-server.mjs）：4 条账号 —— openai_compatible×2（5 天后到期/无到期）
  * + workbuddy×2（套餐 2 小时后到期+待生效/已过期），分组后两组各 2 行。
  */
 
@@ -18,15 +18,16 @@ const dataRows = (page: import('@playwright/test').Page) =>
 test.describe('账号池列表能力', () => {
   test.beforeEach(async ({ page }) => {
     await loginAsAdmin(page);
-    // 清掉列配置/折叠记忆，避免上一个用例的偏好串场
-    await page.addInitScript(() => {
+    await page.goto('/channels');
+    // 清掉列配置/折叠记忆，避免上一个用例的偏好串场（evaluate 只作用于
+    // 当前页面，不会像 addInitScript 那样在同用例的 reload 里再清一次）
+    await page.evaluate(() => {
       localStorage.removeItem('aigx-as-collapsed');
       localStorage.removeItem('aigx-as-colcfg');
       localStorage.removeItem('aigx-as-colw');
       localStorage.removeItem('aigx-as-grouped');
     });
-    await page.goto('/channels');
-    // 进「账号池」Tab（Gateways 双 Tab 容器）
+    // 进「账号池」Tab（Gateways 多 Tab 容器）
     await page.getByRole('tab', { name: '账号池' }).click();
     await expect(page.locator('.as-table')).toBeVisible({ timeout: 10000 });
   });
@@ -91,8 +92,9 @@ test.describe('账号池列表能力', () => {
     // 有效期列默认显示
     await expect(page.locator('.as-h-expiry')).toHaveCount(1);
 
-    // 3 天后到期 → 「3 天后」
-    await expect(dataRows(page).filter({ hasText: 'e2e-账号' })).toContainText('3 天后');
+    // 5 天后到期 → 「N 天后」（floor 取整：跨天级剩余，天数随服务器快照
+    // 与渲染时刻的秒差在 N-1~N 间浮动，断言形态而非具体数字）
+    await expect(dataRows(page).filter({ hasText: 'e2e-账号' })).toContainText(/天后/);
     // 已过期 → 红徽章
     await expect(dataRows(page).filter({ hasText: 'wb-二号' }).locator('.badge-danger')).toBeVisible();
     // 无到期 → 「—」
@@ -119,9 +121,8 @@ test.describe('账号池列表能力', () => {
     await page.locator('.as-group-band .as-group-label').first().click();
     await expect(dataRows(page)).toHaveCount(2);
 
-    // 刷新页面：分组开关与折叠态都从 localStorage 恢复
-    await page.reload();
-    await page.getByRole('tab', { name: '账号池' }).click();
+    // 刷新页面（URL 带 tab=accounts）：分组开关与折叠态都从 localStorage 恢复
+    await page.goto('/channels?tab=accounts');
     await expect(page.locator('.as-table')).toBeVisible({ timeout: 10000 });
     await expect(page.locator('.as-tr-group')).toHaveCount(2);
     await expect(dataRows(page)).toHaveCount(2);

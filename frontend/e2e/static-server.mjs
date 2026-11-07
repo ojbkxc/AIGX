@@ -139,18 +139,18 @@ const ACCOUNT_PROVIDERS = [
 ];
 
 // ── 账号池列表（分组折叠/有效期列/按到期排序回归用：两家 provider 各两条，
-// 一条带凭证到期（未来 3 天）、一条带套餐到期（未来 2 小时）、一条已过期、一条无到期）──
+// 一条带凭证到期（未来 5 天）、一条带套餐到期（未来 2 小时）、一条已过期、一条无到期）──
 const ACCOUNT_SESSIONS = [
   {
-    id: 'acc-e2e-1', channel_id: 'ch-1', channel_name: 'lxchat-glm',
+    id: 'acc-e2e-1', channel_id: 'ch-9', channel_name: 'lxchat-glm',
     name: 'e2e-账号', provider: 'openai_compatible', base_url: 'https://upstream.example.com',
     api_key: 'sk-***', proxy: 'pool:px_e2e_1', status: 'enabled', configured_status: 'enabled',
     priority: 0, weight: 1, max_concurrency: 3, models: [], extra_headers: {},
-    // 3 天后到期（10 位秒 → 前端 expiryMillis 归一）
-    expires_at: Math.floor(Date.now() / 1000) + 3 * 86400,
+    // 5 天后到期（10 位秒 → 前端 expiryMillis 归一；取 5 天避开「N 天后」的取整边界）
+    expires_at: Math.floor(Date.now() / 1000) + 5 * 86400,
   },
   {
-    id: 'acc-e2e-2', channel_id: 'ch-3', channel_name: 'workbuddy-pool',
+    id: 'acc-e2e-2', channel_id: 'ch-8', channel_name: 'workbuddy-pool',
     name: 'wb-一号', provider: 'workbuddy', base_url: 'https://www.example-wb.com',
     api_key: 'ey***', proxy: '', status: 'enabled', configured_status: 'enabled',
     priority: 10, weight: 1, max_concurrency: 3, models: [], extra_headers: {},
@@ -167,7 +167,7 @@ const ACCOUNT_SESSIONS = [
     },
   },
   {
-    id: 'acc-e2e-3', channel_id: 'ch-3', channel_name: 'workbuddy-pool',
+    id: 'acc-e2e-3', channel_id: 'ch-8', channel_name: 'workbuddy-pool',
     name: 'wb-二号', provider: 'workbuddy', base_url: 'https://www.example-wb.com',
     api_key: 'ey***', proxy: '', status: 'disabled', configured_status: 'disabled',
     priority: 5, weight: 1, max_concurrency: 3, models: [], extra_headers: {},
@@ -175,7 +175,7 @@ const ACCOUNT_SESSIONS = [
     expires_at: Math.floor(Date.now() / 1000) - 86400,
   },
   {
-    id: 'acc-e2e-4', channel_id: 'ch-1', channel_name: 'lxchat-glm',
+    id: 'acc-e2e-4', channel_id: 'ch-9', channel_name: 'lxchat-glm',
     name: 'e2e-无到期', provider: 'openai_compatible', base_url: 'https://upstream.example.com',
     api_key: 'sk-***', proxy: '', status: 'enabled', configured_status: 'enabled',
     priority: 0, weight: 1, max_concurrency: 0, models: [], extra_headers: {},
@@ -227,8 +227,10 @@ const PLUGINS_PAYLOAD = {
   operations: [],
 };
 
-/** 插件桩复位种子：desktop/mobile 两 project 串行共用进程，写操作会跨 project 残留 */
-const PLUGINS_SEED = () => JSON.parse(JSON.stringify(PLUGINS_PAYLOAD));
+/** 插件桩复位种子：桌面/移动两个 project 串行共用进程，写操作会跨 project 残留。
+ *  注意必须克隆「初始字面量」而不是运行时的 PLUGINS_PAYLOAD（后者已被写操作改过），
+ *  否则复位 = 把已改坏的状态再克隆一遍（自引用复位 bug）。 */
+const PLUGINS_SEED = JSON.parse(JSON.stringify(PLUGINS_PAYLOAD));
 
 // ── 签到中心快照（形状对齐 src/api/admin/checkin_center.rs）──
 const CHECKIN_CENTER = {
@@ -391,6 +393,39 @@ const CHANNELS = [
     response_time: 2400,
     test_time: 0,
     last_error: 'upstream 429',
+  },
+  {
+    // account 型渠道（账号池容器）：添加账号弹窗「已建 API」档的池卡数据源
+    id: 'ch-9',
+    seq: 9,
+    name: 'lxchat-glm',
+    channel_type: 'account',
+    base_url: '',
+    api_key: null,
+    priority: 0,
+    weight: 1,
+    status: 'enabled',
+    models: [],
+    response_time: 0,
+    test_time: 0,
+    last_error: null,
+  },
+  {
+    // account 型渠道：workbuddy 账号池（登录态家的池；「已建 API」档按
+    // provider category=api 过滤，这个池属 agent 家，不出现在该档）
+    id: 'ch-8',
+    seq: 8,
+    name: 'workbuddy-pool',
+    channel_type: 'account',
+    base_url: 'https://www.example-wb.com',
+    api_key: null,
+    priority: 0,
+    weight: 1,
+    status: 'enabled',
+    models: [],
+    response_time: 0,
+    test_time: 0,
+    last_error: null,
   },
 ];
 
@@ -602,11 +637,10 @@ function handle(req, res, p, bodyText) {
 
     // E2E 状态复位：恢复插件桩预置态（启停/卸载写操作会改内存态）
     if (p === '/api/__e2e/reset-plugins' && req.method === 'POST') {
-      const fresh = PLUGINS_SEED();
-      PLUGINS_PAYLOAD.packs = fresh.packs;
-      PLUGINS_PAYLOAD.host = fresh.host;
-      PLUGINS_PAYLOAD.catalog = fresh.catalog;
-      PLUGINS_PAYLOAD.updates = fresh.updates;
+      PLUGINS_PAYLOAD.packs = JSON.parse(JSON.stringify(PLUGINS_SEED.packs));
+      PLUGINS_PAYLOAD.host = JSON.parse(JSON.stringify(PLUGINS_SEED.host));
+      PLUGINS_PAYLOAD.catalog = JSON.parse(JSON.stringify(PLUGINS_SEED.catalog));
+      PLUGINS_PAYLOAD.updates = JSON.parse(JSON.stringify(PLUGINS_SEED.updates));
       return sendJson(res, { success: true, data: null });
     }
 

@@ -98,7 +98,7 @@ test.describe('添加账号五档弹窗', () => {
     await expect(protocolSelect.locator('option', { hasText: 'Gemini 兼容' })).toHaveCount(1);
 
     // 切 Anthropic：Base URL 提示变「不要带 /v1」（根地址口径）
-    await protocolSelect.selectOption('anthropic_compatible');
+    await protocolSelect.selectOption('anthropic');
     await expect(form).toContainText('不要带 /v1');
     // 切回 OpenAI：提示回到「填到 /v1」的口径
     await protocolSelect.selectOption('openai_compatible');
