@@ -17,6 +17,8 @@ pub mod antigravity_signature_cache;
 pub mod catpaw;
 pub mod codearts;
 pub mod commandcode;
+pub mod deepseek_pow;
+pub mod deepseek_web;
 pub mod kuku;
 pub mod monkeycode;
 pub mod orcaterm;
@@ -59,6 +61,9 @@ pub fn build(
             base, credential, client,
         ))),
         "trae" => Some(Arc::new(trae::TraeBridge::new(
+            base, credential, headers, client,
+        ))),
+        "deepseek-web" => Some(Arc::new(deepseek_web::DeepSeekWebBridge::new(
             base, credential, headers, client,
         ))),
         _ => None,
@@ -105,5 +110,6 @@ pub fn supports(kind: &str) -> bool {
             | "catpaw"
             | "monkeycode"
             | "monkeycode-intl"
+            | "deepseek-web"
     )
 }

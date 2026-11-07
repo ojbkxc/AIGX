@@ -191,6 +191,16 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         protocol: Protocol::Openai,
         default_base_url: "https://api.deepseek.com",
     },
+    // DeepSeek 网页版（chat.deepseek.com）：登录态型 —— 粘贴网页端的
+    // userToken（localStorage.userToken.value），转发走私有协议 Bridge
+    // （会话创建 + PoW 挑战 + SSE 补丁帧，见 `bridge::session::deepseek_web`）。
+    // 注意与 API Key 型的 `deepseek`（api.deepseek.com）是两个 provider。
+    ProviderSpec {
+        kind: "deepseek-web",
+        label: "DeepSeek 网页版",
+        protocol: Protocol::Openai,
+        default_base_url: "https://chat.deepseek.com",
+    },
     ProviderSpec {
         kind: "openrouter",
         label: "OpenRouter",
@@ -987,6 +997,38 @@ pub const SESSION_PROVIDERS: &[(&str, SessionMeta)] = &[
             openai_compatible: true,
         },
     ),
+    // DeepSeek 网页版（chat.deepseek.com）：私有协议（会话创建 + PoW +
+    // SSE 补丁帧），转发必须走 `bridge::session::deepseek_web`。
+    // 凭证是网页端的 userToken（浏览器 localStorage.userToken.value；
+    // 也可粘整段 Cookie，Bridge 会按名提取 userToken）。上游没有续期
+    // 端点（ds2api 实测口径：登录态失效只能回官方网页重新登录后更新），
+    // 也不接受 sk- 前缀的收费 API Key。
+    (
+        "deepseek-web",
+        SessionMeta {
+            auth: SessionAuth::Bearer,
+            base_url: "https://chat.deepseek.com",
+            chat_path: "/api/v0/chat/completion",
+            headers: &[
+                ("accept", "application/json"),
+                ("accept-charset", "UTF-8"),
+                ("accept-language", "zh-CN,zh;q=0.9"),
+                ("x-client-bundle-id", "com.deepseek.chat"),
+                ("x-client-platform", "web"),
+                ("x-client-version", "3.1.0"),
+                ("x-client-locale", "zh_CN"),
+                ("x-client-timezone-offset", "28800"),
+                (
+                    "user-agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                ),
+                ("origin", "https://chat.deepseek.com"),
+                ("referer", "https://chat.deepseek.com/"),
+            ],
+            credential_hint: "粘贴 DeepSeek 网页版的 userToken（chat.deepseek.com 登录后，开发者工具控制台执行 localStorage.getItem('userToken') 取 .value；或整段 Cookie）",
+            openai_compatible: false,
+        },
+    ),
 ];
 
 /// 查登录态型供应商元数据（非登录态型返回 None）。
@@ -1353,9 +1395,20 @@ pub const CREDENTIAL_FIELDS: &[(&str, &[CredentialField])] = &[
 ];
 // END AGENT2API-CREDENTIAL-FIELDS
 
+// DeepSeek 网页版的凭证字段（AIGX 自有 provider，不在上游同步工具覆盖范围）。
+// 网页登录态 = userToken（Bearer）+ 可选整段 Cookie（部分风控场景需要）。
+const DEEPSEEK_WEB_CREDENTIAL_FIELDS: &[CredentialField] = &[CredentialField {
+    name: "cookie",
+    required: false,
+    hint: "整段 Cookie（可选；userToken 为主凭证，Cookie 用于风控场景）",
+}];
+
 /// 查某 provider 的凭证字段模板（kind 先归一；空表 = 单 secret 直连型）。
 pub fn credential_fields_for(kind: &str) -> &'static [CredentialField] {
     let canonical = normalize_kind(kind);
+    if canonical == "deepseek-web" {
+        return DEEPSEEK_WEB_CREDENTIAL_FIELDS;
+    }
     CREDENTIAL_FIELDS
         .iter()
         .find(|(k, _)| *k == canonical)
@@ -1415,8 +1468,8 @@ mod tests {
         }
         assert_eq!(
             SESSION_PROVIDERS.len(),
-            30,
-            "登录态供应商应为 30 家（Agent2API 的 29 家 + AIGX 自有的 cline）"
+            31,
+            "登录态供应商应为 31 家（Agent2API 的 29 家 + AIGX 自有的 cline 与 deepseek-web）"
         );
     }
 
@@ -1443,7 +1496,7 @@ mod tests {
             .filter(|(_, meta)| !meta.openai_compatible)
             .map(|(kind, _)| *kind)
             .collect();
-        assert_eq!(private.len(), 13, "私有协议供应商应为 13 家");
+        assert_eq!(private.len(), 14, "私有协议供应商应为 14 家");
         for kind in private {
             assert!(
                 crate::bridge::session::supports(kind),

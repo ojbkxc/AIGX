@@ -282,6 +282,9 @@ pub async fn handle_login_paste(
         }
         "atomcode" => account_login::modelscope::verify_atomcode(&client, secret).await,
         "lobsterai" => account_login::lobsterai::verify_lobsterai(&client, secret).await,
+        // DeepSeek 网页版：userToken 形态校验（拒绝 sk- 付费 Key），
+        // 不做上游探活（没有无副作用的只读校验端点）
+        "deepseek-web" => account_login::deepseek_web::verify_deepseek_web(secret).await,
         other => Err(format!(
             "「{other}」不走粘贴式登录（请用网页登录或「填写凭证」表单）"
         )),

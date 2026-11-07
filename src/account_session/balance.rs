@@ -83,6 +83,15 @@ pub async fn query_balance(
         "workbuddy" | "workbuddy-intl" => workbuddy(client, session, &secret).await,
         "trae" => trae(client, session, &secret).await,
         "codearts" => codearts(client, session, &secret).await,
+        // ── 已登记但明确不支持余额查询的家（原因写入文案，管理面直接展示）──
+        // DeepSeek 网页版：网页对话免费，没有公开的余额/额度端点
+        // （ds2api 一系实现也只做转发不做余额），不编造数字。
+        "deepseek-web" => Err("DeepSeek 网页版为免费对话，没有余额查询端点".to_string()),
+        // 智谱清言：积分体系端点在上游闭源插件仓内（主仓只保留访客判定与
+        // 令牌迁移），端点知识缺失，按「不自创」规则如实报不支持。
+        "chatglm" => {
+            Err("智谱清言的积分查询端点未公开（上游在闭源插件内），暂不支持余额查询".to_string())
+        }
         other => Err(format!("{other} 暂不支持余额查询")),
     }
 }

@@ -513,9 +513,91 @@ fn spec_for(provider: &str) -> Option<CatalogSpec> {
             body: None,
             parser: None,
         }),
+        // DeepSeek 网页版（chat.deepseek.com）：网页版没有 /models 目录端点
+        // （ds2api 一系同样只有静态清单）。path 留空 = 只下发静态兜底表；
+        // 表内容对齐 ds2api `config/models.go` 的静态模型清单：四个基础档 +
+        // 各自的 -nothinking 变体（-search 档强制关思考）。上下文长度上游
+        // 未公布，留 0（不编造）。
+        "deepseek-web" => Some(CatalogSpec {
+            path: "",
+            openai_shape: false,
+            fallback: DEEPSEEK_WEB_FALLBACK,
+            sign: None,
+            method: None,
+            body: None,
+            parser: None,
+        }),
         _ => None,
     }
 }
+
+/// DeepSeek 网页版兜底表（网页版无目录端点，清单对齐 ds2api 静态表）。
+const DEEPSEEK_WEB_FALLBACK: &[FallbackModel] = &[
+    FallbackModel {
+        id: "deepseek-v4-flash",
+        upstream_key: "",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "deepseek-v4-flash-search",
+        upstream_key: "",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "deepseek-v4-pro",
+        upstream_key: "",
+        reasoning: true,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "deepseek-v4-vision",
+        upstream_key: "",
+        reasoning: true,
+        vision: true,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "deepseek-v4-flash-nothinking",
+        upstream_key: "",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "deepseek-v4-flash-search-nothinking",
+        upstream_key: "",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "deepseek-v4-pro-nothinking",
+        upstream_key: "",
+        reasoning: false,
+        vision: false,
+        tool: true,
+        context_window: 0,
+    },
+    FallbackModel {
+        id: "deepseek-v4-vision-nothinking",
+        upstream_key: "",
+        reasoning: false,
+        vision: true,
+        tool: true,
+        context_window: 0,
+    },
+];
 
 /// AutoClaw 兜底表（上游无远程目录接口）。
 ///

@@ -20,6 +20,7 @@ mod catpaw;
 pub(crate) mod chatglm;
 mod cline;
 pub(crate) mod codearts;
+pub(crate) mod deepseek_web;
 pub(crate) mod lobsterai;
 pub mod loomy;
 pub(crate) mod modelscope;

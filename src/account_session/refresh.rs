@@ -81,6 +81,10 @@ struct TokenSet {
 }
 
 /// 支持自动刷新的 provider。
+///
+/// 注意 `deepseek-web` **有意不在列**：网页版 userToken 没有续期端点
+/// （ds2api 实测口径：登录态失效只能回官方网页重新登录后更新），
+/// `needs_refresh` 对未列出的家恒为 false，不会误触发。
 pub fn supports_refresh(provider: &str) -> bool {
     matches!(
         provider,
