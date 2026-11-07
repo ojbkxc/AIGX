@@ -593,6 +593,9 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "last_error": session.last_error,
         "last_used_at": session.last_used_at,
         "expires_at": session.expires_at,
+        // 积分/套餐最早到期时刻（余额快照 wallets[] 里最早的 expireAt；
+        // None = 余额没查过或家不报到期）。列表「凭证有效期列 / 按到期排序」用。
+        "credit_expires_at": earliest_wallet_expiry(&session.last_balance),
         // 余额自动查询（间隔 + 上次读数快照；查询失败时保留上一次成功值）
         "usage_query_interval_secs": session.usage_query_interval_secs,
         "last_balance_at": session.last_balance_at,
@@ -601,6 +604,37 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "created_at": session.created_at,
         "updated_at": session.updated_at,
     })
+}
+
+/// 从余额快照的 `wallets[]` 里取**最早**的 `expireAt`（unix 秒）。
+///
+/// 「还能用多久」由最先到期的那份额度决定。字段名兼容 `expireAt` / `expire_at`；
+/// 无到期语义（或没查过余额）给 None。字符串数字与毫秒秒都收（各家快照口径
+/// 不一，> 10^12 视为毫秒）。
+fn earliest_wallet_expiry(balance: &Option<serde_json::Value>) -> Option<i64> {
+    let balance = balance.as_ref()?;
+    let wallets = balance.get("wallets")?.as_array()?;
+    let mut earliest: Option<i64> = None;
+    for wallet in wallets {
+        let raw = wallet
+            .get("expireAt")
+            .or_else(|| wallet.get("expire_at"))
+            .and_then(serde_json::Value::as_i64)
+            .or_else(|| {
+                wallet
+                    .get("expireAt")
+                    .or_else(|| wallet.get("expire_at"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<i64>().ok())
+            });
+        let Some(at) = raw else { continue };
+        // 毫秒口径归一到秒
+        let at = if at > 10_000_000_000 { at / 1000 } else { at };
+        if at > 0 {
+            earliest = Some(earliest.map_or(at, |current| current.min(at)));
+        }
+    }
+    earliest
 }
 
 // ── 列表 ────────────────────────────────────────────────────────────
@@ -1769,7 +1803,7 @@ pub async fn handle_sync_account_catalog(
 /// - 自定义模型登记（管理员手动登记的模型，绝不清理）
 /// - 本轮拉回的目录条目（id ∪ upstream 真名）
 /// - 全部现有映射的 target（链式映射 a→b→c 中 b 被 a 引用，不可删）
-fn stale_mapping_alive_set(
+pub(crate) fn stale_mapping_alive_set(
     state: &AppState,
     fresh_catalog: &std::collections::HashSet<String>,
 ) -> std::collections::HashSet<String> {
@@ -2421,5 +2455,40 @@ mod security_tests {
             result.is_ok(),
             "temp-dir file should be allowed: {result:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn earliest_wallet_expiry_variants() {
+        // 没查过余额 / 无 wallets 字段
+        assert_eq!(earliest_wallet_expiry(&None), None);
+        assert_eq!(earliest_wallet_expiry(&Some(json!({"available": 1}))), None);
+        // camelCase 秒
+        let snap = json!({
+            "wallets": [
+                { "total": 100, "expireAt": 1799000000 },
+                { "total": 50, "expireAt": 1798000000 },
+            ]
+        });
+        assert_eq!(
+            earliest_wallet_expiry(&Some(snap)),
+            Some(1798000000) // 取最早
+        );
+        // snake_case / 字符串数字 / 毫秒归一
+        let snap = json!({
+            "wallets": [
+                { "expire_at": "1798000000" },
+                { "expireAt": 1798000000_123i64 },
+            ]
+        });
+        assert_eq!(earliest_wallet_expiry(&Some(snap)), Some(1798000000));
+        // 0 = 无到期语义
+        let snap = json!({ "wallets": [ { "expireAt": 0 } ] });
+        assert_eq!(earliest_wallet_expiry(&Some(snap)), None);
     }
 }

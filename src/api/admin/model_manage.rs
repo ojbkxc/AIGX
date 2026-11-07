@@ -452,10 +452,20 @@ pub async fn handle_set_capabilities(
     }
     let owned_by = state.model_metadata.get(model, None).owned_by;
     let context_length = state.model_metadata.get(model, None).context_length;
+    // 能力覆盖不能顺手清掉思考等级：既有覆盖的 reasoning_levels 原样保留
+    //（否则「改个能力标签 → 等级下拉回到空」）。
+    let reasoning_levels = state
+        .model_metadata
+        .all_overrides()
+        .iter()
+        .find(|(name, _)| name == model)
+        .map(|(_, meta)| meta.reasoning_levels.clone())
+        .unwrap_or_default();
     let meta = crate::model::metadata::ModelMetadata {
         owned_by,
         context_length,
         capabilities: body.capabilities.clone(),
+        reasoning_levels,
     };
     if let Err(e) = state.model_metadata.set_override(model.to_string(), meta) {
         return Err(error_response(

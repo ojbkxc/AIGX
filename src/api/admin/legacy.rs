@@ -61,6 +61,14 @@ pub struct FetchModelsRequest {
     pub api_key: String,
     #[serde(default)]
     pub channel_id: String,
+    /// 拉取成功后顺带清理失效映射（缺省 true；与账号池目录同步同口径，
+    /// 前端 ModelManage「获取模型」按钮消费 removed_mappings）。
+    #[serde(default = "default_cleanup")]
+    pub cleanup: bool,
+}
+
+fn default_cleanup() -> bool {
+    true
 }
 
 /// 检查用户名/邮箱是否可用
@@ -1503,12 +1511,51 @@ pub async fn handle_fetch_channel_models(
         }
     }
 
+    // ── 失效映射自动清理（与账号池目录同步同一条链，三重闸门）────────
+    // 1. 请求方显式允许（cleanup，缺省 true）；
+    // 2. 本轮**真实回源**拿到非空目录（fetch_upstream_models 失败在前面
+    //    已经 Err 返回，能走到这里就是回源成功）；
+    // 3. 存活集非空（冷启动态不清）。
+    // 前端 ModelManage 已消费 removed_mappings 字段，此前后端缺省 0。
+    let mut removed_mappings: Vec<(String, String)> = Vec::new();
+    let cleanup_ran = body.cleanup && !models.is_empty();
+    if cleanup_ran {
+        let fresh: std::collections::HashSet<String> = models.iter().cloned().collect();
+        let alive = crate::api::admin::account_sessions::stale_mapping_alive_set(&state, &fresh);
+        if !alive.is_empty() {
+            match state.model_mapper.prune_stale_mappings(&alive) {
+                Ok(removed) if !removed.is_empty() => {
+                    tracing::info!(
+                        "渠道模型拉取后自动清理失效映射：{} 条 → {:?}",
+                        removed.len(),
+                        removed
+                            .iter()
+                            .map(|(a, t)| format!("{a}→{t}"))
+                            .collect::<Vec<_>>()
+                    );
+                    removed_mappings = removed;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!("失效映射清理落盘失败：{e}");
+                }
+            }
+        }
+    }
+
     Ok(Json(serde_json::json!({
         "success": true,
         "data": {
             "url": url,
             "models": models,
             "count": models.len(),
+            // 自动清理结果（前端「获取模型」弹窗展示；cleanup_ran=false 表示闸门未通过）
+            "removed_mappings": removed_mappings
+                .iter()
+                .map(|(alias, target)| serde_json::json!({ "alias": alias, "target": target }))
+                .collect::<Vec<_>>(),
+            "removed_mapping_count": removed_mappings.len(),
+            "cleanup_ran": cleanup_ran,
         }
     })))
 }

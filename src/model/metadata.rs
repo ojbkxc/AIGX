@@ -29,6 +29,14 @@ pub struct ModelMetadata {
     /// 能力标签（chat / embedding / rerank / image / audio）
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// 思考等级候选（low / medium / high / …；管理员覆盖与前端下拉用）。
+    ///
+    /// 2026-11 前后端契约修复：前端 `ModelManage` 早已发送该字段但后端
+    /// `ModelMetaRequest` 缺失，serde 默认忽略未知字段 → 保存即丢、重载即空
+    ///（07-recon2 A.5「前后端契约断裂」）。存量 KV 无此键 → serde default
+    /// 空数组，零迁移。
+    #[serde(default)]
+    pub reasoning_levels: Vec<String>,
 }
 
 // ── 内置推断表 ──────────────────────────────────────────────────────
@@ -252,6 +260,8 @@ impl ModelMetadataRegistry {
             owned_by,
             context_length,
             capabilities,
+            // 内置推断路径不产出思考等级：由覆盖项 / 前端声明提供
+            reasoning_levels: Vec::new(),
         }
     }
 
@@ -344,12 +354,17 @@ mod tests {
                 owned_by: "my-org".into(),
                 context_length: Some(2000),
                 capabilities: vec!["chat".into()],
+                reasoning_levels: vec!["low".into(), "high".into()],
             },
         )
         .unwrap();
         let m = reg.get("gpt-4o", Some("cloudflare"));
         assert_eq!(m.owned_by, "my-org");
         assert_eq!(m.context_length, Some(2000));
+        assert_eq!(
+            m.reasoning_levels,
+            vec!["low".to_string(), "high".to_string()]
+        );
 
         // 删除覆盖后回落
         reg.remove_override("gpt-4o").unwrap();
@@ -374,6 +389,7 @@ mod tests {
                 owned_by: "my-gemini".into(),
                 context_length: Some(2_000_000),
                 capabilities: vec!["chat".into(), "vision".into()],
+                reasoning_levels: vec![],
             },
         )
         .unwrap();

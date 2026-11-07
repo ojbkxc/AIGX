@@ -338,6 +338,10 @@ pub struct ModelMetaRequest {
     pub context_length: Option<u32>,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// 思考等级候选（前端已发送、后端此前缺失 → 保存即丢；见
+    /// `model::metadata::ModelMetadata::reasoning_levels` 的契约修复说明）。
+    #[serde(default)]
+    pub reasoning_levels: Vec<String>,
 }
 
 /// GET /api/models/meta - 全部模型元信息覆盖项
@@ -362,6 +366,7 @@ pub async fn handle_model_meta_set(
         owned_by: body.owned_by,
         context_length: body.context_length,
         capabilities: body.capabilities,
+        reasoning_levels: body.reasoning_levels,
     };
     match state
         .model_metadata
