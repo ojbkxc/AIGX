@@ -375,37 +375,87 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
             }
         }
         TASK_CREDENTIAL_MAINTENANCE => {
-            let refreshed = crate::account_session::refresh::refresh_expiring(
+            let stats = crate::account_session::refresh::refresh_expiring(
                 &state.account_sessions,
                 &state.http_client,
             )
             .await;
-            let summary = format!("刷新 {refreshed} 个临期账号");
-            if refreshed > 0 {
-                tracing::info!("[Maintenance] 凭证自动维护：{summary}");
+            let summary = format!("凭证维护：{}", stats.summary_text());
+            if stats.is_empty() {
+                tracing::debug!("[Maintenance] {summary}");
+            } else {
+                tracing::info!("[Maintenance] {summary}");
             }
-            (summary, true)
+            // 对齐 A2A round_succeeded：有失败且**全部**失败才算这轮失败
+            //（部分成功说明链路是好的，不该整轮退避）；无临期账号（无动作）
+            // 也不算失败。失败计数含 refresh_token 失效（提醒用户重新登录）。
+            let success = stats.failed == 0 && stats.invalid == 0;
+            (summary, success)
         }
         TASK_MODEL_REFRESH => {
             if !crate::config::models_dev_enabled() {
                 ("models.dev 元数据开关已关闭，跳过".to_string(), true)
             } else {
-                match crate::model::models_dev::refresh(
+                let (count, catalog_ok, catalog_note) = match crate::model::models_dev::refresh(
                     &state.http_client,
                     &state.scheduled_task_store,
                 )
                 .await
                 {
-                    Ok(count) => {
-                        let summary = format!("models.dev 元数据已更新 {count} 条");
-                        tracing::info!("[Tasks] {summary}");
-                        (summary, true)
+                    Ok(count) => (count, true, String::new()),
+                    Err(error) => (0, false, format!("models.dev 元数据刷新失败（{error}）")),
+                };
+                // 顺带刷一遍渠道模型清单（对齐 A2A catalog_refresh：上游
+                // 关模型后本地目录要等下次发现才收敛，期间请求吃 404/502——
+                // 生产实证见 08-prod「目录漂移」）。只刷启用且带渠道级凭证的
+                // openai_compat 渠道；逐渠道失败不判整轮失败（各渠道独立）。
+                let mut refreshed_channels = 0usize;
+                for ch in state.channel_store.list() {
+                    if !ch.is_enabled()
+                        || ch.channel_type != crate::channel::ChannelType::OpenaiCompatible
+                        || ch.base_url.trim().is_empty()
+                    {
+                        continue;
                     }
-                    Err(error) => {
-                        let summary = format!("models.dev 元数据刷新失败（{error}）");
-                        tracing::warn!("[Tasks] {summary}");
-                        (summary, false)
+                    let api_key = ch.decode_api_key();
+                    match crate::api::admin::fetch_upstream_models(
+                        &state,
+                        ch.channel_type,
+                        &ch.base_url,
+                        &api_key,
+                        &ch.quirks,
+                    )
+                    .await
+                    {
+                        Ok((_, models)) => {
+                            if !models.is_empty() {
+                                let _ = state.channel_store.save_discovered_models(&ch.id, models);
+                                refreshed_channels += 1;
+                            }
+                        }
+                        Err((status, body)) => {
+                            let message = body
+                                .get("message")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default();
+                            tracing::warn!(
+                                "[Tasks] 渠道「{}」模型清单刷新失败：HTTP {status} {message}",
+                                ch.name
+                            );
+                        }
                     }
+                }
+                let mut summary = format!("models.dev 元数据已更新 {count} 条");
+                if refreshed_channels > 0 {
+                    summary.push_str(&format!("，刷新 {refreshed_channels} 个渠道清单"));
+                }
+                if !catalog_ok {
+                    summary.push_str(&format!("；{catalog_note}"));
+                    tracing::warn!("[Tasks] {summary}");
+                    (summary, false)
+                } else {
+                    tracing::info!("[Tasks] {summary}");
+                    (summary, true)
                 }
             }
         }
@@ -445,7 +495,15 @@ pub fn spawn(state: AppState) {
                 if !settings_of(&settings, task.id).enabled {
                     continue;
                 }
+                // 状态条目缺失（启动时 store 不可用 / KV 被清 / 新任务 id）
+                // 不跳过：按「从未跑过」交给 run_backend → claim 重建排期，
+                // 否则该任务会永久停摆直到下一次重启（C-7）。
                 let Some(state_state) = states.get(&state_key(task.id)) else {
+                    if let Err(error) =
+                        task_state::reschedule(&state_key(task.id), interval_ms(task, &settings))
+                    {
+                        tracing::warn!("[Tasks] 重建「{}」排期失败：{error}", task.label);
+                    }
                     continue;
                 };
                 // 在跑（长任务）或还没到点（含失败冷却 / 占位租约）都跳过

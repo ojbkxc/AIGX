@@ -149,32 +149,68 @@ pub fn needs_refresh(session: &AccountSession, now: i64) -> bool {
     exp - now <= margin
 }
 
+/// 巡检一轮的逐项计数（凭证维护任务的成败判定用，对齐 A2A
+/// `round_succeeded`：有失败且**全部**失败才算这一轮失败）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RefreshSummary {
+    /// 成功刷新数
+    pub refreshed: u64,
+    /// 失败数（网络 / 上游报错，值得退避重试）
+    pub failed: u64,
+    /// refresh_token 已失效数（重试无意义，只能重新登录；不进失败计数）
+    pub invalid: u64,
+}
+
+impl RefreshSummary {
+    /// 没有任何账号需要刷新时为 true（无动作不算失败）。
+    pub fn is_empty(&self) -> bool {
+        self.refreshed == 0 && self.failed == 0 && self.invalid == 0
+    }
+
+    /// 一句话摘要。
+    pub fn summary_text(&self) -> String {
+        if self.is_empty() {
+            return "没有临期账号".to_string();
+        }
+        let mut parts = vec![format!("刷新 {} 个", self.refreshed)];
+        if self.failed > 0 {
+            parts.push(format!("失败 {} 个", self.failed));
+        }
+        if self.invalid > 0 {
+            parts.push(format!("失效 {} 个", self.invalid));
+        }
+        parts.join("，")
+    }
+}
+
 /// 巡检一轮：把所有临期账号串行刷新（每轮一个账号只刷一次）。
-/// 返回成功刷新数。
-pub async fn refresh_expiring(pool: &AccountSessionStore, client: &Client) -> u64 {
+/// 返回逐项计数（成功 / 失败 / 失效）。
+pub async fn refresh_expiring(pool: &AccountSessionStore, client: &Client) -> RefreshSummary {
     let now = chrono::Utc::now().timestamp();
     let targets: Vec<AccountSession> = pool
         .all()
         .into_iter()
         .filter(|s| needs_refresh(s, now))
         .collect();
-    let mut done = 0u64;
+    let mut summary = RefreshSummary::default();
     for session in targets {
         match refresh_one(pool, client, &session).await {
             RefreshOutcome::Refreshed(msg) => {
                 tracing::info!("account {} token refreshed: {msg}", session.id);
-                done += 1;
+                summary.refreshed += 1;
             }
             RefreshOutcome::Invalid(msg) => {
                 tracing::warn!("account {} refresh token invalid: {msg}", session.id);
+                summary.invalid += 1;
             }
             RefreshOutcome::Failed(msg) => {
                 tracing::warn!("account {} refresh failed: {msg}", session.id);
+                summary.failed += 1;
             }
             RefreshOutcome::Stale => {}
         }
     }
-    done
+    summary
 }
 
 /// 刷新单个账号并 CAS 落盘。失败不写任何字段。
@@ -1380,6 +1416,26 @@ mod tests {
         assert!(!supports_refresh("kuku"));
         assert!(!supports_refresh("catpaw"));
         assert!(!supports_refresh("openai"));
+    }
+
+    #[test]
+    fn refresh_summary_text_composition() {
+        let empty = RefreshSummary::default();
+        assert!(empty.is_empty());
+        assert_eq!(empty.summary_text(), "没有临期账号");
+
+        let ok = RefreshSummary {
+            refreshed: 3,
+            ..Default::default()
+        };
+        assert_eq!(ok.summary_text(), "刷新 3 个");
+
+        let mixed = RefreshSummary {
+            refreshed: 1,
+            failed: 2,
+            invalid: 1,
+        };
+        assert_eq!(mixed.summary_text(), "刷新 1 个，失败 2 个，失效 1 个");
     }
 
     #[test]

@@ -165,14 +165,15 @@ fn change(key: &str, mutate: impl FnOnce(&mut TaskState)) -> Result<TaskState, S
     Ok(result)
 }
 
-/// 立即排到「下一拍就执行」（绕过冷却）。
+/// 立即排到「下一拍就执行」。
 ///
 /// 用于「刚开启任务」语义：用户打开开关，希望下一个 tick 就跑一次，而不是按
-/// 上次尝试时间算出的旧排期干等。
+/// 上次尝试时间算出的旧排期干等。**失败冷却仍然优先**（`due_at()` 取
+/// `next_run_at` 与 `retry_at` 的较大值）：冷却记的是上游配额桶什么时候
+/// 恢复，拨开关绕过它只会再吃一次 403（对齐 A2A `schedule_now` 的语义）。
 pub fn schedule_now(key: &str) -> Result<(), String> {
     change(key, |state| {
         let now = now_ms();
-        state.retry_at = 0;
         state.next_run_at = now;
     })?;
     Ok(())
