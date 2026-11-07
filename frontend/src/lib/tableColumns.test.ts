@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from 'vitest';
 import {
   applyTableColumns,
   defaultTableColumns,
+  evolveTableColumns,
   readTableColumns,
   resetTableColumns,
   writeTableColumns,
@@ -194,5 +195,78 @@ describe('applyTableColumns', () => {
     expect(byKey.get('name')?.width).toBe(500); // 用户覆盖
     expect(byKey.get('act')?.width).toBe(120); // 声明默认
     expect(byKey.get('status')?.width).toBeUndefined(); // 弹性
+  });
+});
+
+describe('evolveTableColumns 默认值演进（消费 defaults 快照）', () => {
+  const NEW_DEFS: TableColumnDef[] = [
+    { key: 'check', label: '选择', align: 'left', width: 40, locked: true }, // align center→left、宽 34→40
+    { key: 'name', label: '名称', width: 260 }, // 宽 200→260
+    { key: 'status', label: '状态', align: 'right' }, // 对齐 left→right
+    { key: 'act', label: '操作', width: 120, locked: true },
+  ];
+
+  it('用户未动的字段跟随新默认', () => {
+    const st = defaultTableColumns(DEFS); // 全默认（旧）
+    const evolved = evolveTableColumns(st, NEW_DEFS);
+    const byKey = new Map(evolved.items.map((i) => [i.key, i]));
+    expect(byKey.get('check')?.align).toBe('left'); // 跟随新默认
+    expect(byKey.get('check')?.width).toBe(40);
+    expect(byKey.get('name')?.width).toBe(260);
+    expect(byKey.get('status')?.align).toBe('right');
+    // 快照刷新为新声明默认
+    expect(evolved.defaults).toEqual(defaultTableColumns(NEW_DEFS).defaults);
+  });
+
+  it('用户动过的字段保留（默认变了也不重置）', () => {
+    const st = defaultTableColumns(DEFS);
+    const customized: TableColumnState = {
+      ...st,
+      items: st.items.map((i) =>
+        i.key === 'check' ? { ...i, align: 'right' as const, width: 77 }
+        : i.key === 'name' ? { ...i, visible: false, width: 400 }
+        : i,
+      ),
+    };
+    const evolved = evolveTableColumns(customized, NEW_DEFS);
+    const byKey = new Map(evolved.items.map((i) => [i.key, i]));
+    expect(byKey.get('check')?.align).toBe('right'); // 用户挑的
+    expect(byKey.get('check')?.width).toBe(77);
+    expect(byKey.get('name')?.visible).toBe(false); // 用户隐藏的
+    expect(byKey.get('name')?.width).toBe(400);
+    expect(byKey.get('status')?.align).toBe('right'); // 未动 → 跟随
+  });
+
+  it('边界：用户值恰好等于旧默认 → 视为未动，跟随新默认', () => {
+    const st = defaultTableColumns(DEFS);
+    // 用户把 name 宽度显式设为旧默认 200（与未设置等值）
+    const touched: TableColumnState = {
+      ...st,
+      items: st.items.map((i) => (i.key === 'name' ? { ...i, width: 200 } : i)),
+    };
+    const evolved = evolveTableColumns(touched, NEW_DEFS);
+    const byKey = new Map(evolved.items.map((i) => [i.key, i]));
+    expect(byKey.get('name')?.width).toBe(260); // 跟随新默认
+  });
+
+  it('defaults 快照缺失时保守不演进（保留用户值）', () => {
+    const st = defaultTableColumns(DEFS);
+    const noSnapshot: TableColumnState = {
+      v: 2,
+      defaults: [],
+      items: st.items.map((i) => (i.key === 'name' ? { ...i, align: 'right' as const } : i)),
+    };
+    const evolved = evolveTableColumns(noSnapshot, NEW_DEFS);
+    expect(evolved.items.find((i) => i.key === 'name')?.align).toBe('right');
+  });
+
+  it('readTableColumns 走演进：声明改了、未动字段自动跟随', () => {
+    // 存盘基于旧 DEFS；用 NEW_DEFS 读
+    const s = memStore();
+    const oldState = defaultTableColumns(DEFS);
+    writeTableColumns(KEY, oldState, s.setItem);
+    const read = readTableColumns(KEY, NEW_DEFS, s.getItem);
+    const byKey = new Map(read.items.map((i) => [i.key, i]));
+    expect(byKey.get('name')?.width).toBe(260); // 未动 → 跟随新声明
   });
 });

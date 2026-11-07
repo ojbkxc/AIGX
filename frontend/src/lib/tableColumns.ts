@@ -175,7 +175,9 @@ export function readTableColumns(
     const items = sanitizeItems(obj.items, defs);
     if (!items) return full;
     const defaults = sanitizeItems(obj.defaults, defs);
-    return { v: TABLE_COLUMNS_VERSION, defaults: defaults ?? full.defaults, items };
+    // 默认值演进：声明默认随版本变化时，未动字段跟随新默认（见 evolveTableColumns）
+    const state: TableColumnState = { v: TABLE_COLUMNS_VERSION, defaults: defaults ?? full.defaults, items };
+    return evolveTableColumns(state, defs);
   }
   const migrated = migrateV1(parsed, defs);
   return migrated ?? full;
@@ -258,4 +260,37 @@ export function isColumnVisible(state: TableColumnState, key: string): boolean {
   const item = state.items.find((i) => i.key === key);
   if (!item) return true;
   return item.visible || item.locked === true;
+}
+
+/**
+ * 默认值演进（消费 defaults 快照）：列声明默认值随版本变化时，
+ * 「用户没动过的字段」跟随新默认，「用户动过的字段」保留用户选择。
+ *
+ * 判据（逐字段）：item 值 == 旧默认（快照里的 defaults）→ 视为未动，采纳新声明默认；
+ * item 值 != 旧默认 → 用户动过，保留。含边界：用户值恰好等于旧默认也视为未动
+ * （无法区分「碰巧没改」，跟随新默认是更符合直觉的取舍）。
+ * defaults 快照缺失（旧数据/迁移产物）时保守不演进——宁可保留用户值，不误重置。
+ * 列序不动（演进只管字段值）；快照刷新为新声明默认。
+ */
+export function evolveTableColumns(state: TableColumnState, defs: TableColumnDef[]): TableColumnState {
+  const full = defaultTableColumns(defs);
+  if (!Array.isArray(state.defaults) || state.defaults.length === 0) return state;
+  const oldBy = new Map(state.defaults.map((d) => [d.key, d]));
+  const newDefBy = new Map(full.items.map((d) => [d.key, d]));
+  const items = state.items.map((cur) => {
+    const newDef = newDefBy.get(cur.key);
+    const old = oldBy.get(cur.key);
+    if (!newDef || !old) return cur;
+    const next = { ...cur };
+    // visible：未动（== 旧默认）→ 跟随新声明
+    if (cur.visible === old.visible) next.visible = newDef.visible;
+    // align：同上
+    if (cur.align === old.align) next.align = newDef.align ?? 'left';
+    // width：缺省语义对齐（undefined = 弹性/未覆盖）；与旧默认一致才跟随
+    const curW = cur.width ?? undefined;
+    const oldW = old.width ?? undefined;
+    if (curW === oldW) next.width = newDef.width;
+    return next;
+  });
+  return { v: TABLE_COLUMNS_VERSION, defaults: full.defaults, items };
 }
