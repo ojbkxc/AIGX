@@ -634,6 +634,12 @@ export interface CatalogSyncResult {
   errors: CatalogSyncError[];
   ok_count: number;
   error_count: number;
+  /** 同步后自动清理的失效映射明细（后端 cleanup 闸门通过才非空；旧后端无此字段） */
+  removed_mappings?: Array<{ alias: string; target: string }>;
+  /** 清理条数（0 = 没清或没失效映射） */
+  removed_mapping_count?: number;
+  /** 后端是否真的跑了清理（false = 三重闸门未通过未执行） */
+  cleanup_ran?: boolean;
 }
 
 // ==================== 从本机客户端导入账号 ====================

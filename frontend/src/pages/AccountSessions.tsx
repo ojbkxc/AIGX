@@ -855,7 +855,12 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
       const failed = data?.errors ?? [];
       if (ok.length > 0) {
         setCatalogModal(ok);
-        addToast(t('已同步模型目录') + ` · ${ok[0].count} ${t('个模型')}`);
+        // 清理反馈：后端同步后自动清掉的失效全局映射条数（0 条不显示）
+        const removed = Number(data?.removed_mapping_count ?? 0);
+        addToast(
+          t('已同步模型目录') + ` · ${ok[0].count} ${t('个模型')}`
+          + (removed > 0 ? ` · ${t('已清理失效映射 {n} 条', { n: removed })}` : ''),
+        );
         await load();
       }
       if (failed.length > 0) {
