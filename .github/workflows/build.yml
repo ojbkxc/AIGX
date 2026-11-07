@@ -69,6 +69,7 @@ jobs:
           mkdir -p build/2024-Linux-x86_64
           cargo build --release --features "sqlite-kv,postgres"
           mv target/release/aigx build/2024-Linux-x86_64/aigx
+          cp UPDATE.txt build/2024-Linux-x86_64/UPDATE.txt
 
       - name: Upload AMD64 artifact
         uses: actions/upload-artifact@v4
@@ -121,6 +122,7 @@ jobs:
           cargo build --release --features "sqlite-kv,postgres" --target aarch64-unknown-linux-gnu
           mkdir -p build/2024-Linux-arm64
           mv target/aarch64-unknown-linux-gnu/release/aigx build/2024-Linux-arm64/aigx
+          cp UPDATE.txt build/2024-Linux-arm64/UPDATE.txt
 
       - name: Upload ARM64 artifact
         uses: actions/upload-artifact@v4
@@ -163,6 +165,7 @@ jobs:
           if not exist build mkdir build
           if not exist build\2024-Windows-x86_64 mkdir build\2024-Windows-x86_64
           copy target\x86_64-pc-windows-gnu\release\aigx.exe build\2024-Windows-x86_64\aigx.exe
+          copy UPDATE.txt build\2024-Windows-x86_64\UPDATE.txt
 
       - name: Upload Windows AMD64 artifact
         uses: actions/upload-artifact@v4
@@ -203,6 +206,7 @@ jobs:
           cargo build --release --target x86_64-apple-darwin
           mkdir -p build/2024-macOS-x86_64
           cp target/x86_64-apple-darwin/release/aigx build/2024-macOS-x86_64/aigx
+          cp UPDATE.txt build/2024-macOS-x86_64/UPDATE.txt
 
       - name: Upload macOS Intel artifact
         uses: actions/upload-artifact@v4
@@ -243,6 +247,7 @@ jobs:
           mkdir -p build/2024-macOS-arm64
           cargo build --release --target aarch64-apple-darwin
           cp target/aarch64-apple-darwin/release/aigx build/2024-macOS-arm64/aigx
+          cp UPDATE.txt build/2024-macOS-arm64/UPDATE.txt
 
       - name: Upload macOS ARM64 artifact
         uses: actions/upload-artifact@v4

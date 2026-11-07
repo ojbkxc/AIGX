@@ -55,6 +55,11 @@ const MAX_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
 const BUNDLE_MAGIC: &[u8; 7] = b"AIGXUP1";
 const CHECK_KEY: &str = "update:last_check";
 const APPLIED_KEY: &str = "update:applied";
+/// Windows 回滚挂起标记（#28）：Windows 运行中的 .exe 被文件锁死，
+/// 无法像 Linux 那样 rename 原地替换——回滚动作只写标记+校验备份，
+/// 下次服务重启时由 [`UpdateManager::consume_rollback_pending`] 完成
+/// 替换（备份 aigx.bak → aigx.exe，进程未运行时文件锁已释放）。
+const ROLLBACK_PENDING_KEY: &str = "update:rollback_pending";
 /// 重启请求计数（每次 +1；前端据此与 startedAt 一起判定「重启真的发生了」）。
 const RESTART_EPOCH_KEY: &str = "update:restart_epoch";
 /// 最近一次 exec 自重启的失败原因（成功重启后进程无记忆，此项重启即清）。
@@ -210,6 +215,31 @@ impl UpdateManager {
             restart_error = None;
             let _ = store.put(PENDING_RESTART_KEY, &false);
             let _ = store.delete(RESTART_ERROR_KEY);
+        }
+        // #28（Windows 回滚）：启动时消费回滚挂起标记——进程此时刚起，
+        // .exe 文件锁已由上一个退出进程释放，可以安全替换。
+        // Linux 走原有 rename 原地路径（行为不变），这里只服务 Windows；
+        // 标记在任意平台写入都合法，消费端按平台分派。
+        let consume_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aigx"));
+        if store
+            .get::<bool>(ROLLBACK_PENDING_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or(false)
+        {
+            match consume_rollback_pending(&consume_exe) {
+                Ok(()) => {
+                    let _ = store.delete(ROLLBACK_PENDING_KEY);
+                    tracing::warn!(
+                        "pending rollback applied at startup (binary restored from .bak)"
+                    );
+                }
+                Err(e) => {
+                    // 替换失败不阻塞启动：保留标记，下次重启再试；记录原因
+                    let _ = store.put(RESTART_ERROR_KEY, format!("rollback pending failed: {e}"));
+                    tracing::error!("pending rollback failed: {e}");
+                }
+            }
         }
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("aigx"));
         let writable = writable_exe_dir(&exe);
@@ -738,9 +768,42 @@ impl UpdateManager {
     }
 
     /// 回滚到上一版本（备份由上一次成功安装留下）。
+    ///
+    /// 平台分派（#28）：Linux 沿用 rename 原地替换（运行中的可执行文件可
+    /// 改名）；Windows 的 .exe 被运行锁锁死，只能写挂起标记、下次启动时
+    /// 替换（[`consume_rollback_pending`]）。两端 HTTP 语义一致：
+    /// Linux 返回 restored（重启即生效），Windows 返回 scheduled（用户
+    /// 重启服务后生效）——前端 UpdatePanel 据此提示，不再「按钮在但报错」。
     pub fn rollback(&self, config: &UpdateConfig) -> Result<Value, String> {
         if !supported() {
             return Err("当前平台不支持原地回滚".to_string());
+        }
+        // Windows：写挂起标记 + 预检备份存在，替换推迟到下次启动
+        if cfg!(not(target_os = "linux")) {
+            let exe_bak = backup_path(&self.exe);
+            if !exe_bak.is_file() {
+                return Err("没有可回滚的程序备份（aigx.exe.bak）".to_string());
+            }
+            self.store
+                .put(ROLLBACK_PENDING_KEY, &true)
+                .map_err(|e| format!("写入回滚标记失败: {e}"))?;
+            {
+                let mut guard = self.lock();
+                guard.pending_restart = true;
+                guard.applied = None;
+            }
+            let _ = self.store.delete(APPLIED_KEY);
+            self.persist();
+            if config.restart_after_apply {
+                // 尽力触发重启（Windows 上 exec 重启不支持时提示手动重启）
+                let _ = self.request_restart();
+            }
+            tracing::warn!("rollback scheduled for next restart (windows)");
+            return Ok(json!({
+                "scheduled": true,
+                "needRestart": true,
+                "message": "回滚已安排：重启 AIGX 服务后生效（Windows 下运行中的程序无法原地替换）"
+            }));
         }
         {
             let guard = self.lock();
@@ -918,7 +981,11 @@ async fn download_text(
 
 /// 是否支持原地更新（仅 Linux 服务器/容器）。
 pub fn supported() -> bool {
-    cfg!(target_os = "linux")
+    // #28：Windows 产物是头等发布目标（6 平台矩阵硬门禁），网页端
+    // 更新/回滚语义在 Windows 上同样成立——更新沿用 .upd 链路，
+    // 回滚走「挂起标记 + 下次启动替换」（运行中的 .exe 被文件锁锁死，
+    // 只能推迟到进程退出后替换）。
+    cfg!(any(target_os = "linux", target_os = "windows"))
 }
 
 /// 本机架构对应的发布包后缀。
@@ -1002,6 +1069,45 @@ fn static_dir_path(exe: &Path) -> PathBuf {
         return adjacent;
     }
     crate::web::find_static_dir().unwrap_or(adjacent)
+}
+
+/// 消费 Windows 回滚挂起标记：aigx.bak → aigx（进程未运行，锁已释放）。
+///
+/// 仅替换二进制；static 目录的备份恢复沿用 [`UpdateManager::rollback`]
+/// 在 Linux 上的同一逻辑——但 Windows 启动时 static 没有运行锁，直接
+/// 按备份恢复（有备份才动，与 Linux 行为一致）。
+fn consume_rollback_pending(exe: &Path) -> Result<(), String> {
+    let exe_bak = backup_path(exe);
+    if !exe_bak.is_file() {
+        anyhow::bail!("没有可回滚的程序备份");
+    }
+    let failed = exe.with_file_name(format!("{}.failed", file_name_of(exe).unwrap_or("aigx")));
+    let _ = std::fs::remove_file(&failed);
+    std::fs::rename(exe, &failed).map_err(|e| format!("移走当前程序失败: {e}"))?;
+    std::fs::rename(&exe_bak, exe).map_err(|e| {
+        let _ = std::fs::rename(&failed, exe);
+        format!("恢复备份程序失败: {e}")
+    })?;
+    let _ = std::fs::remove_file(&failed);
+    // static 目录恢复（有备份才动）
+    let static_dir = static_dir_path(exe);
+    let static_bak = backup_path(&static_dir);
+    if static_bak.exists() {
+        let failed_static = static_dir.with_file_name(format!(
+            "{}.failed",
+            file_name_of(&static_dir).unwrap_or("static")
+        ));
+        remove_dir(&failed_static);
+        if static_dir.exists() {
+            let _ = std::fs::rename(&static_dir, &failed_static);
+        }
+        if let Err(e) = std::fs::rename(&static_bak, &static_dir) {
+            tracing::error!("restore static dir failed: {e}");
+            return Err(format!("程序已回滚，但 static 目录恢复失败: {e}"));
+        }
+        remove_dir(&failed_static);
+    }
+    Ok(())
 }
 
 fn backup_path(path: &Path) -> PathBuf {

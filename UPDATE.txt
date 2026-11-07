@@ -1,0 +1,71 @@
+AIGX 服务端 · 升级 / 回滚速查（UPDATE.txt）
+=============================================
+
+随发布包分发。覆盖三种部署形态：裸机（systemd / 手动运行）、Docker、Windows。
+数据库与配置位置见「文件位置」一节；失败排查见最后一节。
+
+──────────────────────────────────────────────
+一、网页端升级（推荐，三端通用）
+──────────────────────────────────────────────
+管理面板 → 「软件更新」页 → 检查更新 → 应用更新。
+  · Linux：应用后自动 exec 重启，约 5 秒内恢复服务（无缝，不换 PID）。
+  · Windows：应用后需手动重启 AIGX 服务（运行中的 .exe 无法原地替换）。
+    面板会显示「待重启」状态。
+  · Docker：面板更新仅更新宿主二进制；容器部署请用镜像升级（见下）。
+
+Docker 升级：
+  docker pull ghcr.io/ojbkxc/aigx:latest
+  docker compose down && docker compose up -d
+  （数据卷不随镜像变动，升级不丢数据。）
+
+──────────────────────────────────────────────
+二、回滚
+──────────────────────────────────────────────
+前提：上一次升级成功时会自动留下备份（程序 aigx.bak / aigx.exe.bak，
+      前端 static.bak）。没有备份就没有回滚——面板会如实提示。
+
+Linux（立即生效）：
+  方法一：管理面板 → 软件更新 → 「回滚到上一版本」→ 自动重启。
+  方法二（面板不可用时）：停服务 →
+      mv aigx aigx.failed && mv aigx.bak aigx
+      mv static static.failed && mv static.bak static   （static 有备份才做）
+      → 重启服务。
+
+Windows（重启后生效）：
+  面板点「回滚」→ 系统写入回滚标记（运行中的 .exe 被锁，无法立即替换）
+  → 重启 AIGX 服务（net stop Aigx && net start Aigx，或任务管理器重启进程）
+  → 启动时自动完成替换并恢复服务。
+  失败时看日志里的 "pending rollback" 行（见第四节）。
+
+Docker：回滚 = 拉回旧版本镜像并重启容器
+  docker pull ghcr.io/ojbkxc/aigx:v<旧版本号>
+  docker compose down && docker compose up -d
+
+──────────────────────────────────────────────
+三、文件位置
+──────────────────────────────────────────────
+  程序二进制        Linux: /opt/aigx/aigx 或解包目录；Windows: 安装目录\aigx.exe
+  前端静态资源      程序同级 static/ 目录
+  数据目录（KV/SQLite） data/（含 aigx.db、账号/渠道/密钥 JSON）
+  配置文件          config.toml（程序同级；含监听地址、trust_proxy_headers 等）
+  更新包下载目录    data/updates/（升级成功后自动回收，仅留当前+上一版）
+  加密密钥文件      data 目录内（account_session 凭证加密用，丢失=凭证不可解）
+  服务名（systemd） aigx.service；Windows 服务名 Aigx
+
+  备份建议：升级前手动备一份 data/ 目录（尤其升级跨大版本时）。
+
+──────────────────────────────────────────────
+四、失败排查（先看这两处）
+──────────────────────────────────────────────
+  1. 服务日志（tracing 输出）：systemd 用 `journalctl -u aigx -n 200`；
+     Windows 用「事件查看器」或 stdout 重定向文件。搜关键字：
+       update applied / rollback / pending rollback / exec 自重启失败
+  2. 状态 KV：data/ 下 update:* 键（update:restart_error 记录自重启失败原因，
+     update:applied 记录最近一次成功应用的版本）。
+  常见问题：
+  · 升级后页面白屏 → 浏览器强刷（index.html no-cache，但旧资源可能被
+    Service Worker 缓存）；仍白屏则回滚（第二节）。
+  · 「exec 自重启失败」→ 用 systemd/服务管理器重启服务即可，二进制已换好。
+  · Windows 回滚不生效 → 确认真重启了服务（不是注销/断开）；看日志
+    "pending rollback" 行的失败原因。
+  · 更新包校验失败 → 网络问题，重试；多次失败检查代理设置（更新页可配代理）。
