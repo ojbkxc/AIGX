@@ -189,7 +189,7 @@ impl AccountBridge {
         };
         // #26：把本次选号的捕获并进请求级共享缓冲（同渠道多次尝试共用一个
         // 组；总字节兜底在 merge 链路里生效）
-        if let (Some(mut slot), Some(buf)) = (slot, self.account_capture.as_ref()) {
+        if let (Some(slot), Some(buf)) = (slot, self.account_capture.as_ref()) {
             let group = slot.finish();
             let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(existing) = buf.iter_mut().find(|g| g.channel_id == group.channel_id) {

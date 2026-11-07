@@ -247,9 +247,9 @@ impl ModelMetadataRegistry {
                 .map(|c| (c.clone(), serde_json::Value::from("user")))
                 .collect();
             let sources = serde_json::json!({
-                "context_length": if m.context_length.is_some() { "user" } else { serde_json::Value::Null },
+                "context_length": if m.context_length.is_some() { serde_json::Value::from("user") } else { serde_json::Value::Null },
                 "capabilities": caps,
-                "reasoning_levels": if m.reasoning_levels.is_empty() { serde_json::Value::Null } else { "user" },
+                "reasoning_levels": if m.reasoning_levels.is_empty() { serde_json::Value::Null } else { serde_json::Value::from("user") },
             });
             return (m.clone(), sources);
         }
@@ -305,7 +305,7 @@ impl ModelMetadataRegistry {
             }
         }
         let sources = serde_json::json!({
-            "context_length": if context_source.is_empty() { serde_json::Value::Null } else { context_source },
+            "context_length": if context_source.is_empty() { serde_json::Value::Null } else { serde_json::Value::from(context_source) },
             "capabilities": cap_sources,
             "reasoning_levels": serde_json::Value::Null,
         });
