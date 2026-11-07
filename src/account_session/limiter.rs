@@ -550,11 +550,14 @@ mod tests {
         let mut unknown_cond = cond(LimiterMetric::Remaining, LimiterComparison::Lt, 5.0);
         unknown_cond.join = LimiterJoin::And;
         unknown_cond.source_id = "不存在的钱包行".to_string();
+        // `low` 已 move 进上面的 groups，这里重建一份等价首条件（join=Or）
+        let mut low_again = cond(LimiterMetric::Remaining, LimiterComparison::Lt, 5.0);
+        low_again.join = LimiterJoin::Or;
         let groups_unknown = vec![LimiterGroup {
             enabled: true,
             action: LimiterAction::Skip,
             target: LimiterTarget::Models,
-            conditions: vec![low, unknown_cond],
+            conditions: vec![low_again, unknown_cond],
         }];
         let v = evaluate_groups(&groups_unknown, Some(&balance(3.0)));
         assert!(
