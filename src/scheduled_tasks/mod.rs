@@ -324,6 +324,23 @@ pub async fn run_now(state: &AppState, id: &str) -> Result<String, String> {
     run_backend(state, task, true).await
 }
 
+/// 维护轮成败判定（C-6，对齐 A2A `round_succeeded` 的**意图**）。
+///
+/// 上游判据 `failed == 0 || succeeded > 0`（core/scheduled_tasks.rs:306-308）：
+/// 部分成功说明链路是好的，不整轮退避——否则一个长期失效的账号（如长期
+/// 401）会让每轮都判失败、退避顶到 24h，其余能刷的账号跟着停摆（上游
+/// :397-406 明确警告过这个反模式）。全失败才保留退避：那通常是更上游的
+/// 问题（断网、出口被挡），别按原间隔反复打上游。
+///
+/// 与上游字面公式的差异：上游没有独立的失效桶，dead token 计入 failed；
+/// AIGX 的 `invalid` 不进 `failed`（refresh.rs:160「重试无意义，只能重新
+/// 登录」），因此这里把 invalid 排除在判定外——「仅失效」轮说明请求打到了
+/// 上游并拿到确定性拒绝，链路是好的，不退避（与上游意图一致，仅当
+/// refreshed==0 && failed==0 && invalid>0 时与上游字面行为不同）。
+fn maintenance_round_succeeded(stats: &crate::account_session::refresh::RefreshSummary) -> bool {
+    stats.failed == 0 || stats.refreshed > 0
+}
+
 async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<String, String> {
     let settings = state.config_manager.get().await.scheduled_tasks;
 
@@ -386,11 +403,9 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
             } else {
                 tracing::info!("[Maintenance] {summary}");
             }
-            // 对齐 A2A round_succeeded：有失败且**全部**失败才算这轮失败
-            //（部分成功说明链路是好的，不该整轮退避）；无临期账号（无动作）
-            // 也不算失败。失效（refresh_token 过期）不进失败计数——重试无意义，
-            // 只能重新登录，故 invalid 单独看、不参与本判定。
-            let success = stats.failed == 0 || stats.refreshed > 0;
+            // 成败判定抽成 [`maintenance_round_succeeded`]（C-6）：部分成功不退避、
+            // 无动作不退避、全失败才退避；invalid 不参与判定（见 helper 文档）
+            let success = maintenance_round_succeeded(&stats);
             (summary, success)
         }
         TASK_MODEL_REFRESH => {
@@ -521,4 +536,33 @@ pub fn spawn(state: AppState) {
             tokio::time::sleep(Duration::from_millis(TICK_MS)).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::maintenance_round_succeeded;
+    use crate::account_session::refresh::RefreshSummary;
+
+    fn summary(refreshed: u64, failed: u64, invalid: u64) -> RefreshSummary {
+        RefreshSummary {
+            refreshed,
+            failed,
+            invalid,
+        }
+    }
+
+    /// C-6：维护轮成败判定语义（对齐 A2A round_succeeded 意图，见 helper 文档）。
+    #[test]
+    fn maintenance_round_succeeded_semantics() {
+        // 无临期账号：无动作不算失败，不退避
+        assert!(maintenance_round_succeeded(&summary(0, 0, 0)));
+        // 部分成功（含失败/失效并存）：链路是好的，不整轮退避——C-6 修复点
+        assert!(maintenance_round_succeeded(&summary(3, 2, 1)));
+        assert!(maintenance_round_succeeded(&summary(1, 5, 0)));
+        // 全失败：保留退避（更上游问题的信号）
+        assert!(!maintenance_round_succeeded(&summary(0, 4, 0)));
+        // 仅失效：请求打到了上游（拿到确定性拒绝），链路是好的，不退避
+        //（与上游字面行为的唯一分歧点，理由见 helper 文档）
+        assert!(maintenance_round_succeeded(&summary(0, 0, 2)));
+    }
 }
