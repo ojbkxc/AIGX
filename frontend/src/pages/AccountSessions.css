@@ -1522,3 +1522,202 @@ body.as-col-resizing {
   color: var(--text-main, var(--text-color));
   font-weight: 600;
 }
+
+/* ══ 批量操作对话框（AccountBatchDialog；对齐上游 accounts-batch-dialog 交互） ══ */
+
+.as-batch-dlg {
+  width: min(720px, calc(100vw - 48px));
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+}
+
+.as-batch-dlg .modal-body {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* 将作用于：账号名列表（超高折行，最多两行后滚动） */
+.as-batch-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.as-batch-names {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  max-height: 54px;
+  overflow-y: auto;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+/* 七个动作 radio（2 列网格，窄屏 1 列） */
+.as-batch-ops {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 14px;
+  margin-top: 6px;
+}
+
+@media (max-width: 560px) {
+  .as-batch-ops { grid-template-columns: 1fr; }
+}
+
+.as-batch-op {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  cursor: pointer;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.as-batch-op:hover {
+  background: var(--hover-bg);
+}
+
+.as-batch-op.on {
+  border-color: var(--primary-color);
+  background: var(--hover-bg);
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.as-batch-op input {
+  accent-color: var(--primary-color);
+}
+
+/* 行内双列（限制器类型/动作、阈值/窗口） */
+.as-batch-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.as-batch-row > * {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 危险操作勾选确认（删除 / 替换全部 / 清空全部） */
+.as-batch-arm {
+  border: 1px dashed var(--danger-color, #d64545);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.as-batch-arm-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-main);
+}
+
+.as-batch-arm-label input {
+  accent-color: var(--danger-color, #d64545);
+}
+
+.as-batch-danger-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--danger-color, #d64545);
+}
+
+/* 逐条回执（部分失败时保留弹窗展示明细） */
+.as-batch-receipts {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 13px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.as-batch-receipts p.ok { color: var(--text-main); }
+.as-batch-receipts p.warn { color: var(--danger-color, #d64545); }
+
+.as-batch-receipts ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.as-batch-receipts li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.as-batch-error {
+  color: var(--danger-color, #d64545);
+  font-size: 13px;
+  margin: 0;
+}
+
+/* ══ 余额格分窗口读数（上游 usage windows；后端下发 windows[] 才出现） ══ */
+
+.as-usage-windows {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.as-usage-window {
+  display: grid;
+  grid-template-columns: minmax(52px, auto) 1fr auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.as-usage-window-label {
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.as-usage-window-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--hover-bg);
+  overflow: hidden;
+  display: inline-block;
+}
+
+.as-usage-window-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--primary-color);
+  opacity: 0.75;
+}
+
+.as-usage-window.warn .as-usage-window-bar > span {
+  background: #e6a23c;
+  opacity: 1;
+}
+
+.as-usage-window-view {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.as-usage-window.warn .as-usage-window-view {
+  color: #e6a23c;
+  font-weight: 600;
+}

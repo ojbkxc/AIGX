@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type FormEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Columns3, Download, Eye, EyeOff, FlaskConical, Globe, KeyRound, Loader2, Pencil, Plus, Power,
+  Columns3, Download, Eye, EyeOff, FlaskConical, Globe, KeyRound, ListChecks, Loader2, Pencil, Plus, Power,
   RefreshCw, RotateCcw, SlidersHorizontal, Trash2, Upload, User, Wallet, Wrench,
 } from 'lucide-react';
 import { api } from '../api';
@@ -9,6 +9,7 @@ import { providerIcon } from '../lib/providerIcons';
 import { addConfigOf, cardKindOf, isCardHidden } from '../lib/addAccountConfigs';
 import { useToast } from '../components/Toast';
 import AddAccountDialog from '../components/AddAccountDialog';
+import AccountBatchDialog from '../components/AccountBatchDialog';
 import ProxySelector from '../components/ProxySelector';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, EmptyState, Input, Loading, Select, SkeletonTable, Switch, Tabs, Textarea, Tooltip } from '../components/ui';
@@ -18,6 +19,7 @@ import type {
   AccountProviderItem,
   AccountSessionItem,
   AccountSessionStatsItem,
+  AccountUsageWindow,
   CatalogSyncAccount,
   ChannelItem,
   ImportSourceEntry,
@@ -54,6 +56,18 @@ function formatAgo(unixSeconds: number): string {
   if (delta < 3600) return `${Math.floor(delta / 60)} 分钟前`;
   if (delta < 86400) return `${Math.floor(delta / 3600)} 小时前`;
   return `${Math.floor(delta / 86400)} 天前`;
+}
+
+/** 用量窗口展示名（对齐上游 usageWindowLabel：5h/weekly/monthly/daily → 中文短名） */
+function usageWindowTitle(w: AccountUsageWindow): string {
+  const code = (w.window || '').trim();
+  const lower = code.toLowerCase();
+  const name = lower === '5h' ? '5 小时'
+    : lower === 'weekly' ? '每周'
+    : lower === 'monthly' ? '每月'
+    : lower === 'daily' ? '每日'
+    : code;
+  return (w.label || [w.group, name].filter(Boolean).join(' · ') || name || '窗口').trim();
 }
 
 const EMPTY_FORM: SessionFormState = {  channel_id: '',
@@ -413,11 +427,14 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
   // 勾选与批量操作（批量启停/删除，循环既有 PATCH/DELETE 端点）
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const [batchRunning, setBatchRunning] = useState(false);
+  // 批量操作对话框（六类 + 限制器五模式 + 逐条回执，对齐上游 accounts-batch-dialog；
+  // AccountBatchDialog 内部优先走批量端点、未上线自动降级循环 PATCH/DELETE）
+  const [batchDlgOpen, setBatchDlgOpen] = useState(false);
   // 余额查询（后端 :id/balance 支持 12 家）与手动刷新凭证（:id/refresh）
   // ok 分支同时带主额度桶视图（.as-usage-pool 两行形态的数据）
   type BalanceView =
     | { state: 'loading' }
-    | { state: 'ok'; pool: UsagePoolView | null; text: string }
+    | { state: 'ok'; pool: UsagePoolView | null; text: string; windows?: AccountUsageWindow[] }
     | { state: 'err'; text: string };
   const [balances, setBalances] = useState<Record<string, BalanceView>>({});
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
@@ -1343,7 +1360,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
       const d = res.data;
       const pool = usagePoolOf(d);
       const text = pool?.text ?? t('读数不可用');
-      setBalances((prev) => ({ ...prev, [session.id]: { state: 'ok', pool, text } }));
+      setBalances((prev) => ({ ...prev, [session.id]: { state: 'ok', pool, text, windows: d?.windows } }));
     } catch (err) {
       setBalances((prev) => ({
         ...prev,
@@ -1749,6 +1766,42 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
             {!bal && s.last_balance_error && (
               <div className="form-hint" title={s.last_balance_error}>{t('自动查询失败')}</div>
             )}
+            {(() => {
+              // 分窗口额度读数（上游 usage windows；后端用量窗口端点起下发，
+              // 旧后端无 windows 字段 → 不渲染，余额格维持主额度桶形态）
+              const wins = bal?.state === 'ok' ? (bal.windows ?? []) : (s.last_balance?.windows ?? []);
+              if (!wins.length) return null;
+              return (
+                <div className="as-usage-windows">
+                  {wins.map((w, i) => {
+                    const pct = typeof w.remaining_percent === 'number'
+                      ? Math.max(0, Math.min(100, w.remaining_percent))
+                      : null;
+                    const unlimited = w.unlimited === true;
+                    const tone = unlimited || (pct != null && pct >= 20) ? 'ok' : pct != null ? 'warn' : 'muted';
+                    const reset = w.resets_at && w.resets_at > 0
+                      ? new Date(w.resets_at * 1000).toLocaleString()
+                      : '';
+                    const label = usageWindowTitle(w);
+                    return (
+                      <div
+                        key={w.key || `${w.group ?? ''}-${w.window ?? ''}-${i}`}
+                        className={`as-usage-window ${tone}`}
+                        title={reset ? `${label} · ${t('重置于 {{time}}', { time: reset })}` : label}
+                      >
+                        <span className="as-usage-window-label">{label}</span>
+                        <span className="as-usage-window-bar" aria-hidden="true">
+                          <span style={pct != null ? { width: `${Math.round(pct)}%` } : undefined} />
+                        </span>
+                        <span className="as-usage-window-view">
+                          {unlimited ? t('不限') : pct != null ? t('剩 {{pct}}%', { pct: Math.round(pct) }) : t('读数未知')}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </td>
         );
       }
@@ -2162,6 +2215,14 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
               onClick={askBatchDelete}
             >
               <Trash2 size={14} /> {t('批量删除')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={batchRunning}
+              onClick={() => setBatchDlgOpen(true)}
+            >
+              <ListChecks size={14} /> {t('批量操作…')}
             </Button>
             <Button variant="outline" size="sm" onClick={() => setPicked(new Set())}>
               {t('清除选择')}
@@ -2843,6 +2904,20 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
             </div>
           </div>
         </div>
+      )}
+
+      {batchDlgOpen && picked.size > 0 && (
+        <AccountBatchDialog
+          ids={[...picked]}
+          accounts={sessions}
+          busy={batchRunning}
+          onClose={() => setBatchDlgOpen(false)}
+          onApplied={async () => {
+            setPicked(new Set());
+            addToast(t('批量操作完成'));
+            await load();
+          }}
+        />
       )}
 
       {showBulk && (

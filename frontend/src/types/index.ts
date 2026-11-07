@@ -1283,6 +1283,66 @@ export interface AccountBalance {
   /** 明细桶：{type, displayName, balance, total?, used?} */
   wallets?: Array<Record<string, unknown>>;
   subscription?: Record<string, unknown> | null;
+  /**
+   * 分窗口额度读数（上游 usage windows：5h/周/月等多窗独立限额）。
+   * 后端用量窗口端点（#12-A3）起下发；缺省 = 旧后端，余额格按主额度桶渲染。
+   */
+  windows?: AccountUsageWindow[];
+}
+
+/** 分窗口额度读数（余额快照 windows[] 条目；百分比与绝对值都可能缺省） */
+export interface AccountUsageWindow {
+  /** 结构标识（同组去重用；缺省按 group+window 拼） */
+  key?: string;
+  /** 分组名（多来源账号的窗口归属，如套餐名） */
+  group?: string;
+  /** 展示名（缺省按 group·window 拼） */
+  label?: string;
+  /** 窗口代码（5h / weekly / monthly / daily…） */
+  window?: string;
+  /** 剩余百分比（0-100；null = 上游没给） */
+  remaining_percent?: number | null;
+  /** 剩余绝对值（与 remaining_percent 二选一形态） */
+  remaining?: number | null;
+  limit?: number | null;
+  /** 上游明示无上限 */
+  unlimited?: boolean;
+  /** 重置时刻（unix 秒；缺省 = 未返回） */
+  resets_at?: number | null;
+}
+
+/** 批量操作 op（对齐上游 accounts_batch 六类；启停拆 enable/disable 两值） */
+export type AccountBatchOp =
+  | 'enable'
+  | 'disable'
+  | 'set_proxy'
+  | 'set_max_concurrency'
+  | 'query_settings'
+  | 'limiter'
+  | 'delete';
+
+/** 批量操作请求（POST /api/account-sessions/batch；逐条执行、部分失败不影响成功项） */
+export interface AccountBatchRequest {
+  op: AccountBatchOp;
+  ids: string[];
+  /** op=set_proxy：代理串（socks5/socks5h/http(s)/pool:/rotate:） */
+  proxy?: string;
+  /** op=set_max_concurrency：0 = 不限 */
+  max_concurrency?: number;
+  /** op=query_settings：自动查询开关 + 间隔秒（0 = 关闭） */
+  usage_query_enabled?: boolean;
+  usage_query_interval_secs?: number;
+  /** op=limiter：五模式（append/replace 需带 limiters；enable/disable/clear 只翻开关） */
+  limiter_mode?: 'append' | 'replace' | 'enable' | 'disable' | 'clear';
+  limiters?: AccountLimiterRule[];
+}
+
+/** 批量操作逐条回执 */
+export interface AccountBatchReceipt {
+  id: string;
+  ok: boolean;
+  /** 失败原因（删除保护=渠道挂引用等；成功项缺省） */
+  error?: string;
 }
 
 /** 账号导出文件（GET /api/account-sessions/export；含明文凭证，须当密码本保管） */

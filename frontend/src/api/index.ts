@@ -5,6 +5,8 @@
 
 import type {
   AccountBalance,
+  AccountBatchReceipt,
+  AccountBatchRequest,
   AccountExportFile,
   AccountProviderItem,
   AccountSessionItem,
@@ -716,6 +718,13 @@ export const api = {
     request<ApiResponse<AccountSessionItem>>('PATCH', `${API_BASE}/account-sessions/${encodeURIComponent(id)}`, data),
   deleteAccountSession: (id: string): Promise<ApiResponse<MessageResult>> =>
     request<ApiResponse<MessageResult>>('DELETE', `${API_BASE}/account-sessions/${encodeURIComponent(id)}`),
+  /**
+   * 批量操作六类（POST /api/account-sessions/batch，#12-A1 端点）：
+   * 单请求多账号 + 逐条回执。端点未上线（404/501）时抛错由页面捕获，
+   * 降级回循环 PATCH/DELETE 路径（前端逐账号合成 payload，功能等价）。
+   */
+  batchAccountSessions: (data: AccountBatchRequest): Promise<ApiResponse<AccountBatchReceipt[]>> =>
+    request<ApiResponse<AccountBatchReceipt[]>>('POST', `${API_BASE}/account-sessions/batch`, data),
   bulkImportAccountSessions: (data: Record<string, unknown>): Promise<ApiResponse<{ created?: number; skipped?: number }>> =>
     request<ApiResponse<{ created?: number; skipped?: number }>>('POST', `${API_BASE}/account-sessions/bulk`, data),
   testAccountSession: (id: string): Promise<ApiResponse<{ success?: boolean; latency_ms?: number; model?: string; message?: string }>> =>
