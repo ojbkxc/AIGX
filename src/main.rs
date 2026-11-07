@@ -2348,11 +2348,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             get(api::admin::update::handle_get_update_settings)
                 .put(api::admin::update::handle_put_update_settings),
         )
-        .route("/api/keys", get(api::admin::handle_list_keys))
-        .route("/api/keys", post(api::admin::handle_add_key))
-        .route("/api/keys/:id", delete(api::admin::handle_delete_key))
-        // P2-4: keys 更新端点（复用 tokens 的 handle_update_token，keys/tokens 共享存储）
-        .route("/api/keys/:id", put(api::admin::handle_update_token))
+        // legacy /api/keys 系列路由已删除（07 D 章-3 收敛重复端点）：前端已
+        // 全量收敛到 /api/tokens（能力全：分组/额度/轮换/双角色）。三个
+        // handle_*_key 处理函数保留——运维 Agent 的工具面（agent/registry）
+        // 仍以库函数形式复用它们。
         .route(
             "/api/tokens/:id/rotate",
             post(api::admin::handle_rotate_token),
@@ -2538,10 +2537,6 @@ async fn track_inflight(
     )
 }
 
-/// 根据配置构建受限 CORS 层。
-///
-/// - 若 `config.cors_origins` 非空：仅允许列表中的来源（生产环境推荐）。
-/// - 若 `config.cors_origins` 为空但 `config.server_address` 非空：允许 server_address 来源。
 /// 遗留 KV 键清扫（log-retention-sweep 第四档，08-prod P2-8）。
 ///
 /// 生产实证的垃圾键：`token_daily_*` / `token_monthly_*`（日聚合上线前的
@@ -2573,6 +2568,10 @@ fn legacy_kv_sweep(store: &std::sync::Arc<crate::storage::FileStore>) -> u64 {
     removed
 }
 
+/// 根据配置构建受限 CORS 层。
+///
+/// - 若 `config.cors_origins` 非空：仅允许列表中的来源（生产环境推荐）。
+/// - 若 `config.cors_origins` 为空但 `config.server_address` 非空：允许 server_address 来源。
 /// - 否则：默认允许 localhost 开发来源（127.0.0.1 与 localhost，常见端口）。
 ///
 /// 不再使用 `CorsLayer::permissive()` 以避免任意来源带来的安全风险。
