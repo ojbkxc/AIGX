@@ -4137,6 +4137,7 @@ fn record_chat_test_usage(
         sensitive_hits: Vec::new(),
         phase: String::new(),
         route_config: None,
+        route_truncated: 0,
         account_skips: Vec::new(),
     };
     if let Err(e) = state.log_store.requests.add(log) {
@@ -4191,6 +4192,7 @@ fn record_chat_test_failure(
         sensitive_hits: Vec::new(),
         phase: String::new(),
         route_config: None,
+        route_truncated: 0,
         account_skips: Vec::new(),
     };
     if let Err(e) = state.log_store.requests.add(log) {

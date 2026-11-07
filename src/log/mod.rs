@@ -497,7 +497,11 @@ impl AccountSkipCapture {
         }
     }
 
-    fn push(&mut self, row: AccountSkip) {
+    /// 记一行跳过明细；超 [`ROUTE_REPLAY_MAX_SKIPS`] 转 truncated 计数（不静默丢）。
+    ///
+    /// `pub(crate)`：`account_session::store::acquire_with_reasons_detail` 是
+    /// 唯一调用方（选号时逐账号 push）。
+    pub(crate) fn push(&mut self, row: AccountSkip) {
         if self.rows.len() < ROUTE_REPLAY_MAX_SKIPS {
             self.rows.push(row);
         } else {
@@ -505,7 +509,8 @@ impl AccountSkipCapture {
         }
     }
 
-    fn finish(self) -> AccountSkipGroup {
+    /// 收口成按渠道分组的明细；`bridge::account` 取值后并进请求级共享缓冲。
+    pub(crate) fn finish(self) -> AccountSkipGroup {
         AccountSkipGroup {
             channel_id: self.channel_id,
             skipped: self.rows,

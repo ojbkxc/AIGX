@@ -331,6 +331,7 @@ fn record_agent_request_log(
         sensitive_hits: Vec::new(),
         phase: String::new(),
         route_config: None,
+        route_truncated: 0,
         account_skips: Vec::new(),
     };
     state.log_store.record_request(log);

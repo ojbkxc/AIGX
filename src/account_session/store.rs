@@ -1082,22 +1082,22 @@ mod tests {
             pool.record_failure(&cooling.id, "m", &failure, "boom", None);
             // 全挡（allow=false）：off/disabled、cool/provider_not_allowed、
             // ok/provider_not_allowed —— 三条明细
-            let mut detail: Vec<crate::log::AccountSkip> = Vec::new();
+            let mut capture = crate::log::AccountSkipCapture::new("ch");
             let (lease, reasons) = pool.acquire_with_reasons_detail(
                 "ch",
                 "m",
                 None,
                 |_| false,
                 None,
-                Some(&mut detail),
+                Some(&mut capture),
             );
             assert!(lease.is_none());
             assert_eq!(reasons.disabled, 1);
             assert_eq!(reasons.provider_off, 2);
-            assert_eq!(detail.len(), 3);
-            assert_eq!(detail[0].reason, "disabled");
-            assert_eq!(detail[1].reason, "provider_not_allowed");
-            assert_eq!(detail[2].account_name, "ok");
+            assert_eq!(capture.rows.len(), 3);
+            assert_eq!(capture.rows[0].reason, "disabled");
+            assert_eq!(capture.rows[1].reason, "provider_not_allowed");
+            assert_eq!(capture.rows[2].account_name, "ok");
             // detail=None（开关关闭）：行为与 acquire_with_reasons 完全一致
             let (lease, reasons) =
                 pool.acquire_with_reasons_detail("ch", "m", None, |_| false, None, None);

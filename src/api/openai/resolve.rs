@@ -35,9 +35,9 @@ pub(crate) struct RouteCapture {
     pub filtered_truncated: usize,
     /// 选路那一刻的策略快照
     pub config: Option<crate::log::RouteConfigSnapshot>,
-    /// 逐账号跳过明细缓冲：账号型渠道的 AccountBridge 选号时填充，
+    /// 逐账号跳过明细缓冲：账号型渠道的 AccountBridge 选号时按渠道分组填充，
     /// 调用方记录日志时 drain。请求本地（同请求多账号渠道共享）。
-    pub account_buf: Arc<std::sync::Mutex<Vec<crate::log::AccountSkip>>>,
+    pub account_buf: Arc<std::sync::Mutex<Vec<crate::log::AccountSkipGroup>>>,
 }
 
 impl RouteCapture {
