@@ -972,6 +972,18 @@ pub async fn handle_delete_account_session(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
+    // 删除保护（与批量 delete 同一口径）：账号被渠道 account_id 显式绑定时拒删
+    let referenced = state
+        .channel_store
+        .list()
+        .into_iter()
+        .any(|c| c.account_id == id);
+    if referenced {
+        return Err(error_response(
+            "referenced_by_channel",
+            StatusCode::CONFLICT,
+        ));
+    }
     let removed = state.account_sessions.remove(&id).map_err(|e| {
         error_response(
             &format!("Failed to delete account session: {e}"),
@@ -994,6 +1006,228 @@ pub async fn handle_delete_account_session(
         None,
     );
     Ok(Json(json!({ "success": true, "data": null })))
+}
+
+// ── 批量操作六类（Phase1-A1，对齐上游 accounts_batch.rs）────────────
+
+/// POST /api/account-sessions/batch 请求体（契约与 fe-lists-fix 13-gap §7.3 对齐）。
+#[derive(Debug, Deserialize)]
+pub struct BatchAccountsRequest {
+    /// 操作：`enable` / `disable` / `set_proxy` / `set_max_concurrency` /
+    /// `query_settings` / `limiter` / `delete`；未知 op 直接 400（不做部分执行）
+    pub op: String,
+    /// 目标账号 id 列表（逐条回执，未知 id 记 `not_found` 不中断）
+    pub ids: Vec<String>,
+    /// op=set_proxy：出口代理（空串 = 清除代理）
+    #[serde(default)]
+    pub proxy: Option<String>,
+    /// op=set_max_concurrency：0 = 不限
+    #[serde(default)]
+    pub max_concurrency: Option<u32>,
+    /// op=query_settings：自动余额查询开关（false = 关闭 = interval 置 None）
+    #[serde(default)]
+    pub usage_query_enabled: Option<bool>,
+    /// op=query_settings：查询间隔秒（enabled=true 时缺省沿用现值，再缺省 3600）
+    #[serde(default)]
+    pub usage_query_interval_secs: Option<u64>,
+    /// op=limiter：`append` / `replace` / `enable` / `disable` / `clear`
+    #[serde(default)]
+    pub limiter_mode: Option<String>,
+    /// op=limiter：append/replace 时必带（整组通用额度口径）
+    #[serde(default)]
+    pub limiters: Option<Vec<crate::account_session::model::AccountLimiterRule>>,
+}
+
+/// 批量操作六类。逐账号回执：部分失败不影响成功项，成功也回执（ok:true）。
+/// 删除保护：账号被渠道 `account_id` 显式绑定时拒删（`referenced_by_channel`），
+/// 与单删语义同一判定，避免批量绕过。
+///
+/// 性能影响：温路径（管理页批量运维，非数据面热路径）；逐条 upsert 走既有
+/// 异步落盘旁路，无新增锁/IO 模式；ids 规模有界（前端分批），每条一次
+/// AccountSession 克隆 + 序列化。
+pub async fn handle_batch_account_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BatchAccountsRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    // 未知 op：整体 400，不做部分执行（契约①）
+    let known = matches!(
+        body.op.as_str(),
+        "enable"
+            | "disable"
+            | "set_proxy"
+            | "set_max_concurrency"
+            | "query_settings"
+            | "limiter"
+            | "delete"
+    );
+    if !known {
+        return Err(error_response(
+            &format!("unknown batch op: {}", body.op),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    // limiter op 的参数前置校验（append/replace 需带规则并通过 validate）
+    let limiter_rules = if body.op == "limiter" {
+        let mode = body.limiter_mode.as_deref().ok_or_else(|| {
+            error_response(
+                "limiter_mode is required for op=limiter",
+                StatusCode::BAD_REQUEST,
+            )
+        })?;
+        match mode {
+            "append" | "replace" => {
+                let rules = body.limiters.clone().ok_or_else(|| {
+                    error_response(
+                        "limiters is required for append/replace",
+                        StatusCode::BAD_REQUEST,
+                    )
+                })?;
+                validate_limiters(&rules)?;
+                Some(rules)
+            }
+            "enable" | "disable" | "clear" => None,
+            other => {
+                return Err(error_response(
+                    &format!("unknown limiter_mode: {other}"),
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
+        }
+    } else {
+        None
+    };
+    if body.ids.is_empty() {
+        return Err(error_response(
+            "ids must not be empty",
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    // 删除保护参照表：渠道显式绑定的 account_id 集合（一次快照，O(渠道数)）
+    let bound_account_ids: std::collections::HashSet<String> = if body.op == "delete" {
+        state
+            .channel_store
+            .list()
+            .into_iter()
+            .filter(|c| !c.account_id.is_empty())
+            .map(|c| c.account_id)
+            .collect()
+    } else {
+        Default::default()
+    };
+
+    let mut receipts: Vec<Value> = Vec::with_capacity(body.ids.len());
+    let mut ok_count = 0usize;
+    for id in &body.ids {
+        let Some(prev) = state.account_sessions.get(id) else {
+            receipts.push(json!({ "id": id, "ok": false, "error": "not_found" }));
+            continue;
+        };
+        // 批量 delete 的引用保护（契约②）
+        if body.op == "delete" && bound_account_ids.contains(id) {
+            receipts.push(json!({
+                "id": id, "ok": false, "error": "referenced_by_channel",
+            }));
+            continue;
+        }
+        let result: Result<(), String> = (|| match body.op.as_str() {
+            "enable" | "disable" => {
+                let mut next = prev.clone();
+                next.status = if body.op == "enable" {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+                .to_string();
+                state.account_sessions.upsert(next)
+            }
+            "set_proxy" => {
+                let mut next = prev.clone();
+                next.proxy = match body.proxy.as_deref() {
+                    Some("") | None => None,
+                    Some(p) => Some(p.to_string()),
+                };
+                state.account_sessions.upsert(next)
+            }
+            "set_max_concurrency" => {
+                let Some(v) = body.max_concurrency else {
+                    return Err("max_concurrency is required".to_string());
+                };
+                let mut next = prev.clone();
+                next.max_concurrency = v;
+                state.account_sessions.upsert(next)
+            }
+            "query_settings" => {
+                let Some(enabled) = body.usage_query_enabled else {
+                    return Err("usage_query_enabled is required".to_string());
+                };
+                let mut next = prev.clone();
+                next.usage_query_interval_secs = if enabled {
+                    Some(
+                        body.usage_query_interval_secs
+                            .or(next.usage_query_interval_secs)
+                            .unwrap_or(3600),
+                    )
+                } else {
+                    None
+                };
+                state.account_sessions.upsert(next)
+            }
+            "limiter" => {
+                let mode = body.limiter_mode.as_deref().unwrap_or_default();
+                let mut next = prev.clone();
+                next.limiters = match mode {
+                    "append" => {
+                        let mut rules = next.limiters.clone();
+                        rules.extend(limiter_rules.clone().unwrap_or_default());
+                        rules
+                    }
+                    "replace" => limiter_rules.clone().unwrap_or_default(),
+                    "enable" => {
+                        let mut rules = next.limiters.clone();
+                        for r in rules.iter_mut() {
+                            r.enabled = true;
+                        }
+                        rules
+                    }
+                    "disable" => {
+                        let mut rules = next.limiters.clone();
+                        for r in rules.iter_mut() {
+                            r.enabled = false;
+                        }
+                        rules
+                    }
+                    "clear" => Vec::new(),
+                    _ => return Err("unknown limiter_mode".to_string()),
+                };
+                state.account_sessions.upsert(next)
+            }
+            "delete" => state
+                .account_sessions
+                .remove(id)
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            _ => Err("unreachable".to_string()),
+        })();
+        match result {
+            Ok(()) => {
+                ok_count += 1;
+                receipts.push(json!({ "id": id, "ok": true }));
+            }
+            Err(e) => receipts.push(json!({ "id": id, "ok": false, "error": e })),
+        }
+    }
+    let admin_id = admin_id_from_session(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        &format!("batch_account_{}", body.op),
+        &format!("count={} ok={}", body.ids.len(), ok_count),
+        Some(json!({ "ids": body.ids })),
+        None,
+    );
+    Ok(Json(json!({ "success": true, "data": receipts })))
 }
 
 // ── 批量导入 ────────────────────────────────────────────────────────

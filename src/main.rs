@@ -2156,6 +2156,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
                 .post(api::admin::account_sessions::handle_create_account_session),
         )
         .route(
+            "/api/account-sessions/batch",
+            post(api::admin::account_sessions::handle_batch_account_sessions),
+        )
+        .route(
             "/api/account-sessions/providers",
             get(api::admin::account_sessions::handle_list_account_providers),
         )

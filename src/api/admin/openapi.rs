@@ -814,6 +814,9 @@ fn paths_accounts_network() -> Value {
             "get": op("账号池", "列出账号型渠道的账号（凭证/代理脱敏）"),
             "post": op_body("账号池", "新增账号", "channel + 凭证/代理/优先级/并发/模型")
         },
+        "/api/account-sessions/batch": {
+            "post": op_body("账号池", "批量操作六类（enable/disable/set_proxy/set_max_concurrency/query_settings/limiter/delete），逐账号回执 [{id,ok,error?}]；删除保护 error=referenced_by_channel", "op/ids + 按 op 的 payload（proxy/max_concurrency/usage_query_*/limiter_mode+limiters）")
+        },
         "/api/account-sessions/catalog/providers": {
             "get": op("账号池", "支持模型目录发现的供应商清单")
         },
@@ -1125,6 +1128,7 @@ mod tests {
         };
         add("/api-docs/openapi.json", &["get"]);
         add("/api/account-sessions", &["get", "post"]);
+        add("/api/account-sessions/batch", &["post"]);
         add("/api/account-sessions/catalog/providers", &["get"]);
         add("/api/account-sessions/catalog/sync", &["post"]);
         add("/api/account-sessions/import", &["post"]);
