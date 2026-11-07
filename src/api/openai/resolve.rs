@@ -154,12 +154,7 @@ pub(crate) fn resolve_bridges_with_affinity(
     allowed_providers: Option<&[String]>,
     mut capture: Option<&mut RouteCapture>,
 ) -> Vec<BridgeCandidate> {
-    let mut result = resolve_bridges(
-        state,
-        model,
-        allowed_providers,
-        capture.as_mut().map(|c| &mut **c),
-    );
+    let mut result = resolve_bridges(state, model, allowed_providers, capture.as_deref_mut());
     let policy = state.routing_policy.snapshot();
     if let Some(sid) = session_id {
         if policy.sticky.sticky_enabled() {

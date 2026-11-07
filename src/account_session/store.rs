@@ -151,6 +151,12 @@ pub struct AccountSessionStore {
     inner: Arc<Inner>,
 }
 
+/// 条件组限制裁决门（A2）：对单个账号求值，返回 `Some(原因码)` 表示跳过该账号。
+///
+/// 单独立名而非内联写 `Option<&dyn Fn(..) -> ..>`：调用点与签名两处都要用，
+/// 内联写法触发 `clippy::type_complexity`。
+pub type LimiterGate<'a> = &'a dyn Fn(&AccountSession) -> Option<&'static str>;
+
 impl AccountSessionStore {
     /// 打开账号池（内部自建出口 Client 池）。
     pub fn new(store: Arc<FileStore>) -> Self {
@@ -491,7 +497,7 @@ impl AccountSessionStore {
         model: &str,
         alias: Option<&str>,
         allow: F,
-        gate: Option<&dyn Fn(&AccountSession) -> Option<&'static str>>,
+        gate: Option<LimiterGate<'_>>,
         mut detail: Option<&mut crate::log::AccountSkipCapture>,
     ) -> (Option<AccountLease>, SkipReasons)
     where

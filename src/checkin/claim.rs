@@ -2246,6 +2246,7 @@ mod tests {
                 in_flight: 0,
                 usage_query_interval_secs: None,
                 limiters: Vec::new(),
+                limiter_groups: Vec::new(),
                 last_balance_at: None,
                 last_balance: None,
                 last_balance_error: None,

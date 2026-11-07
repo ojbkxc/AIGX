@@ -215,22 +215,12 @@ pub fn validate_groups(groups: &mut [LimiterGroup]) -> Result<(), String> {
 // ── 求值 ────────────────────────────────────────────────────────────
 
 /// 一条条件的读数（求值中间态；reason 供回放/排查）。
+#[derive(Default)]
 struct Reading {
     hit: bool,
     known: bool,
     models: Vec<String>,
     reason: String,
-}
-
-impl Default for Reading {
-    fn default() -> Self {
-        Self {
-            hit: false,
-            known: false,
-            models: Vec::new(),
-            reason: String::new(),
-        }
-    }
 }
 
 /// 求值结论：skip（按模型/整号）与 disable 是否命中。
@@ -252,7 +242,7 @@ impl LimiterVerdict {
             return true;
         }
         let model = model.to_ascii_lowercase();
-        self.skip_models.iter().any(|m| *m == model)
+        self.skip_models.contains(&model)
     }
 }
 
@@ -304,7 +294,7 @@ fn read_balance_metric(balance: Option<&Value>, condition: &LimiterCondition) ->
             _ => Some(v),
         }
     };
-    match value.map(percent).flatten() {
+    match value.and_then(percent) {
         Some(v) if v.is_finite() => Reading {
             hit: compare(v, condition),
             known: true,
@@ -388,7 +378,7 @@ fn group_state(
             for i in &branch {
                 for m in &readings[*i].models {
                     let lower = m.to_ascii_lowercase();
-                    if !branch_models.iter().any(|x| *x == lower) {
+                    if !branch_models.contains(&lower) {
                         branch_models.push(lower);
                     }
                 }
