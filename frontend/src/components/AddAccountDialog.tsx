@@ -471,6 +471,8 @@ export default function AddAccountDialog({
     setLoginError('');
     setLoginWaiting(true);
     try {
+      // channel_id 缺省时登录引擎按 provider 找同名账号池，找不到就建
+      //（与 auto_channel 同语义，渠道对用户隐形）
       const res = await api.startAccountLogin({ provider: activeProvider, channel_id: advanced.channel_id });
       const data = res.data;
       if (!data?.state || !data.authUrl) throw new Error(t('登录发起失败'));
@@ -626,12 +628,12 @@ export default function AddAccountDialog({
       if (method === 'manual' || !addConfig) {
         credential = addConfig ? buildCredential(addConfig, values) : (values.credential || '').trim();
       }
-      // 渠道并入账号池添加（A3 契约）：账号按供应商归池 ——
-      // 1) 「已建 API」档点卡进来：渠道就是所选账号池；
+      // 渠道并入账号池添加（A3 契约，后端 auto_channel 原子建号）：
+      // 1) 「已建 API」档点卡进来：channel_id 就是所选账号池（后端校验归属）；
       // 2) 否则复用同供应商且同上游地址的现有账号池（幂等，避免「XX 账号池
       //    1/2/3」碎片；通用兼容 kind 同 kind 可能对应多家上游，再按地址区分）；
       // 3) 再按自动命名（「{label} 账号池」）兜底复用；
-      // 4) 都没有才新建。
+      // 4) 都没有才走 auto_channel 让服务端原子建渠道 + 建账号。
       const poolLabel = customNew ? (customName.trim() || label) : label;
       const poolName2 = `${poolLabel} ${t('账号池')}`.trim();
       let channelId = '';
@@ -655,16 +657,6 @@ export default function AddAccountDialog({
         const named = channels.find((ch) => ch.name === poolName2);
         if (named) channelId = String(named.id);
       }
-      if (!channelId) {
-        const created = await api.addChannel({
-          name: poolName2,
-          channel_type: 'account',
-          base_url: '',
-          models: [],
-        });
-        channelId = created?.data?.id != null ? String(created.data.id) : '';
-        if (!channelId) throw new Error(t('创建账号型渠道失败'));
-      }
       const headers = parseHeaders(advanced.extra_headers);
       if (addConfig) {
         for (const field of addConfig.fields) {
@@ -675,7 +667,6 @@ export default function AddAccountDialog({
       }
       const nameField = addConfig?.fields.find((f) => f.target === 'name');
       const payload: Record<string, unknown> = {
-        channel_id: channelId,
         name: (nameField ? values[nameField.key] || '' : advanced.name).trim(),
         provider: activeProvider,
         base_url: (advanced.base_url || baseUrlHint).trim(),
@@ -689,6 +680,13 @@ export default function AddAccountDialog({
         expires_at: advanced.expires_at.trim() ? Number(advanced.expires_at) : null,
         proxy: advanced.proxy.trim(),
       };
+      if (channelId) {
+        payload.channel_id = channelId;
+      } else {
+        // 没有可复用的账号池：auto_channel 让服务端原子建渠道 + 建账号
+        // （后端幂等复用同名 account 型渠道；替代前端两段式，失败可整体回滚）
+        payload.auto_channel = { name: poolName2 };
+      }
       if (method === 'manual' || !addConfig) {
         payload.api_key = noAuth ? '' : credential;
       }

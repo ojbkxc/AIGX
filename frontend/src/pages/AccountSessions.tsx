@@ -415,7 +415,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
     try {
       const [sessionsRes, channelsRes, providersRes, statsRes] = await Promise.all([
         api.listAccountSessions(),
-        api.listChannels(),
+        api.listChannels({ channel_type: 'account' }),
         api.accountProviders(),
         api.accountSessionStats(),
       ]);
