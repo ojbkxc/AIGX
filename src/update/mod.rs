@@ -236,7 +236,9 @@ impl UpdateManager {
                 }
                 Err(e) => {
                     // 替换失败不阻塞启动：保留标记，下次重启再试；记录原因
-                    let _ = store.put(RESTART_ERROR_KEY, format!("rollback pending failed: {e}"));
+                    // （store.put 泛型吃 &T——先绑定再引用，E0308）
+                    let message = format!("rollback pending failed: {e}");
+                    let _ = store.put(RESTART_ERROR_KEY, &message);
                     tracing::error!("pending rollback failed: {e}");
                 }
             }

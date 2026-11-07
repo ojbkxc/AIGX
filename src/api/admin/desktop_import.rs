@@ -160,11 +160,16 @@ fn read_plaintext_token(src: &DesktopSource) -> Result<String, String> {
     }
     let content = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {e}"))?;
     let raw = match src.token_pointer {
-        Some(pointer) => serde_json::from_str::<Value>(&content)
-            .ok()
-            .and_then(|v| v.pointer(pointer).and_then(Value::as_str))
-            .map(|s| s.to_string())
-            .ok_or_else(|| "文件里找不到令牌字段（结构不符合预期）".to_string())?,
+        // E0515：先落成 owned Value 再取路径字段（不能从局部 &Value 借引用返回）
+        Some(pointer) => {
+            let parsed: Value = serde_json::from_str(&content)
+                .map_err(|e| format!("来源文件不是合法 JSON: {e}"))?;
+            parsed
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .map(|s| s.to_string())
+                .ok_or_else(|| "文件里找不到令牌字段（结构不符合预期）".to_string())?
+        }
         None => content,
     };
     Ok(normalize_token(&raw))
