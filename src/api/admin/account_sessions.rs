@@ -1418,6 +1418,18 @@ pub struct CatalogSyncRequest {
     /// 写回时是否覆盖（false = 只追加目录新增的模型）。
     #[serde(default)]
     pub replace: bool,
+    /// 是否在拉取成功后自动清理失效映射（target 不在存活集的全局映射）。
+    ///
+    /// 安全边界（硬要求）：只有**至少一个账号本轮成功回源到非空目录**
+    /// （`source == "remote"`）时才执行清理；缓存命中 / 静态兜底 / 拉取失败
+    /// 一律不动，防止一次网络抖动把用户映射删光。缺省 = true（对齐用户
+    /// 诉求「拉取模型后把遗留的失效映射清掉」）；前端可显式传 false 关闭。
+    #[serde(default = "default_true")]
+    pub cleanup: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// POST /api/account-sessions/catalog/sync —— 同步上游模型目录。
@@ -1433,6 +1445,11 @@ pub async fn handle_sync_account_catalog(
     let sessions = state.account_sessions.clone();
     let mut results: Vec<Value> = Vec::new();
     let mut errors: Vec<Value> = Vec::new();
+    // 清理判定用：本轮成功回源（source=remote）且目录非空的账号数。
+    // ≥1 才允许触发失效映射清理 —— 拉取失败/缓存/兜底一律不清理。
+    let mut remote_ok_accounts: usize = 0;
+    // 本轮拉回的目录条目全集（id ∪ upstream 真名），清理时并入存活集
+    let mut fresh_catalog: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // 目标账号集合：指定账号 id，或按 provider 展开
     let targets: Vec<crate::account_session::model::AccountSession> = match &body.account_id {
@@ -1495,6 +1512,17 @@ pub async fn handle_sync_account_catalog(
                         Err(e) => apply_error = Some(e),
                     }
                 }
+                // 只有「成功回源且目录非空」才计入清理触发条件并收集条目：
+                // cache/fallback 意味着本轮没有真实的新鲜数据，不清
+                if snapshot.source == "remote" && !snapshot.models.is_empty() {
+                    remote_ok_accounts += 1;
+                    for entry in &snapshot.models {
+                        fresh_catalog.insert(entry.id.clone());
+                        if let Some(up) = &entry.upstream {
+                            fresh_catalog.insert(up.clone());
+                        }
+                    }
+                }
                 results.push(json!({
                     "account_id": session.id,
                     "name": name,
@@ -1518,6 +1546,38 @@ pub async fn handle_sync_account_catalog(
         }
     }
 
+    // ── 失效映射自动清理 ─────────────────────────────────────────────
+    //
+    // 用户诉求：「新获取的模型里没有老模型了，之前遗留的映射要清掉」。
+    // 三重安全闸门（缺一不可）：
+    // 1. 请求方显式要求清理（cleanup，缺省 true）；
+    // 2. 本轮至少一个账号**成功回源**到非空目录（remote_ok_accounts ≥ 1）——
+    //    全部失败 / 只命中缓存 / 只拿到静态兜底时绝不清理；
+    // 3. 存活集非空（渠道/定价全空且目录为空的冷启动态不清）。
+    let mut removed_mappings: Vec<(String, String)> = Vec::new();
+    if body.cleanup && remote_ok_accounts > 0 {
+        let alive = stale_mapping_alive_set(state, &fresh_catalog);
+        if !alive.is_empty() {
+            match state.model_mapper.prune_stale_mappings(&alive) {
+                Ok(removed) if !removed.is_empty() => {
+                    tracing::info!(
+                        "目录同步后自动清理失效映射：{} 条 → {:?}",
+                        removed.len(),
+                        removed
+                            .iter()
+                            .map(|(a, t)| format!("{a}→{t}"))
+                            .collect::<Vec<_>>()
+                    );
+                    removed_mappings = removed;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!("失效映射清理落盘失败：{e}");
+                }
+            }
+        }
+    }
+
     Ok(Json(json!({
         "success": true,
         "data": {
@@ -1525,8 +1585,64 @@ pub async fn handle_sync_account_catalog(
             "errors": errors,
             "ok_count": results.len(),
             "error_count": errors.len(),
+            // 自动清理结果（前端弹窗展示；cleaned=false 表示闸门未通过未执行）
+            "removed_mappings": removed_mappings
+                .iter()
+                .map(|(alias, target)| json!({ "alias": alias, "target": target }))
+                .collect::<Vec<_>>(),
+            "removed_mapping_count": removed_mappings.len(),
+            "cleanup_ran": body.cleanup && remote_ok_accounts > 0,
         }
     })))
+}
+
+/// 失效映射判定的「存活集」：映射 target 出现在其中任意一处即视为存活。
+///
+/// 口径对齐数据面 `model_declared_by_channel`（resolve.rs）+ 补充三类引用源，
+/// 宁可漏删不可误删：
+/// - 启用渠道/账号声明的模型（含 discovered_models 发现快照）
+/// - 定价表（pricing_store）与渠道级成本价（cost_pricing 的 key 与 value）
+/// - 自定义模型登记（管理员手动登记的模型，绝不清理）
+/// - 本轮拉回的目录条目（id ∪ upstream 真名）
+/// - 全部现有映射的 target（链式映射 a→b→c 中 b 被 a 引用，不可删）
+fn stale_mapping_alive_set(
+    state: &AppState,
+    fresh_catalog: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    let mut alive: std::collections::HashSet<String> = fresh_catalog.clone();
+    for ch in state.channel_store.list() {
+        if !ch.is_enabled() {
+            continue;
+        }
+        for m in ch.effective_models() {
+            alive.insert(m.clone());
+        }
+        // 账号型渠道的模型声明在账号上（同 model_declared_by_channel 口径）
+        if ch.channel_type == ChannelType::Account {
+            for s in state.account_sessions.for_channel(&ch.id) {
+                if s.status == "enabled" {
+                    for m in &s.models {
+                        alive.insert(m.clone());
+                    }
+                }
+            }
+        }
+        // 渠道级成本价的 key（= 映射后的上游名）与 value（映射目标名也算声明）
+        for name in ch.cost_pricing.keys() {
+            alive.insert(name.clone());
+        }
+    }
+    for price in state.pricing_store.list_prices() {
+        alive.insert(price.model_name);
+    }
+    for entry in state.model_mapper.custom_models() {
+        alive.insert(entry.id);
+    }
+    // 现有映射的 target 整体并入：被其他别名引用的中间名不可删
+    for target in state.model_mapper.all_mappings().into_values() {
+        alive.insert(target);
+    }
+    alive
 }
 
 /// GET /api/account-sessions/catalog/providers —— 支持目录发现的供应商清单。

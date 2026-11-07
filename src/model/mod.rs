@@ -317,6 +317,51 @@ impl ModelMapper {
         self.save()
     }
 
+    /// 拉取模型目录后自动清理**失效映射**：删除 target 不在存活集里的条目。
+    ///
+    /// `alive` 由调用方预先合并（启用渠道/账号的模型声明 ∪ 定价表 ∪
+    /// 自定义模型登记 ∪ 本轮拉回的目录 ∪ 全部现有映射的 target 本身）。
+    /// 把「映射 target」整体并入存活集是刻意的保守取舍：链式映射
+    /// （a→b→c）中 b 被 a 引用，即使 b 自身无渠道声明也不该被误删。
+    ///
+    /// 与 [`Self::remove_custom`](Self::remove_custom) 同语义：禁用标记与
+    /// 思考等级连带清除，避免孤儿状态残留。返回删除的 (alias, target) 列表，
+    /// 供调用方写日志 / 回传前端展示。
+    ///
+    /// 调用方硬约束（不在此处校验，见 handle_sync_account_catalog）：
+    /// **仅当本轮至少一个账号成功回源到非空目录时才允许调用** ——
+    /// 拉取失败 / 缓存命中 / 静态兜底一律不清理，防止一次网络抖动删光映射。
+    pub fn prune_stale_mappings(
+        &self,
+        alive: &std::collections::HashSet<String>,
+    ) -> Result<Vec<(String, String)>> {
+        // 先只读圈出待删条目，再一次性加写锁应用（锁顺序 custom → disabled
+        // → reasoning，与 set_enabled / remove_custom 一致，不会死锁）
+        let doomed: Vec<(String, String)> = {
+            let custom = self.custom_map.read();
+            custom
+                .iter()
+                .filter(|(_, target)| !alive.contains(*target))
+                .map(|(alias, target)| (alias.clone(), target.clone()))
+                .collect()
+        };
+        if doomed.is_empty() {
+            return Ok(Vec::new());
+        }
+        {
+            let mut custom = self.custom_map.write();
+            let mut disabled = self.disabled.write();
+            let mut reasoning = self.reasoning.write();
+            for (alias, _) in &doomed {
+                custom.remove(alias);
+                disabled.remove(alias);
+                reasoning.remove(alias);
+            }
+        }
+        self.save()?;
+        Ok(doomed)
+    }
+
     /// 清空所有自定义映射
     pub fn reset(&self) -> Result<()> {
         self.custom_map.write().clear();
@@ -508,5 +553,46 @@ mod tests {
         assert_eq!(m.custom_models().len(), 2);
         m.remove_custom_model("openai", "my-model").unwrap();
         assert_eq!(m.custom_models().len(), 1);
+    }
+
+    #[test]
+    fn prune_stale_removes_only_dead_targets() {
+        let m = mapper();
+        m.set_custom("alive".into(), "gpt-4o".into()).unwrap();
+        m.set_custom("dead".into(), "retired-model".into()).unwrap();
+        m.set_enabled("dead", false).unwrap();
+        m.set_reasoning("dead", Some("high")).unwrap();
+
+        let mut alive = std::collections::HashSet::new();
+        alive.insert("gpt-4o".to_string());
+        let removed = m.prune_stale_mappings(&alive).unwrap();
+
+        assert_eq!(
+            removed,
+            vec![("dead".to_string(), "retired-model".to_string())]
+        );
+        assert!(m.all_mappings().contains_key("alive"));
+        assert!(!m.all_mappings().contains_key("dead"));
+        // 禁用标记与思考等级连带清除，不留孤儿状态
+        assert!(!m.disabled_aliases().contains("dead"));
+        assert!(!m.all_reasoning().contains_key("dead"));
+    }
+
+    #[test]
+    fn prune_stale_keeps_chain_targets_and_noop_when_empty() {
+        let m = mapper();
+        // 链式映射：a→b→c，b 无渠道声明但被 a 引用，不能删
+        m.set_custom("a".into(), "b".into()).unwrap();
+        m.set_custom("b".into(), "c".into()).unwrap();
+        let mut alive = std::collections::HashSet::new();
+        alive.insert("c".to_string());
+        let removed = m.prune_stale_mappings(&alive).unwrap();
+        assert!(removed.is_empty(), "链式中间 target 不该被误删");
+        assert_eq!(m.all_mappings().len(), 2);
+
+        // 存活集包含全部 target → 零删除且不落盘
+        let mut full = alive;
+        full.insert("b".to_string());
+        assert!(m.prune_stale_mappings(&full).unwrap().is_empty());
     }
 }
