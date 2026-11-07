@@ -342,7 +342,10 @@ pub struct ImportScan {
 }
 
 /// 扫描 cc-switch 数据库。**永不失败**：错误都在返回值里。
-pub fn scan(_existing_names: &HashSet<String>) -> ImportScan {
+// `existing_names` 仅在 sqlite-kv 分支里用于去重；无 rusqlite 构建下不引用，
+// 用 cfg_attr 压掉那一种构建里的 unused 警告（clippy -D warnings 会判红）。
+#[cfg_attr(not(feature = "sqlite-kv"), allow(unused_variables))]
+pub fn scan(existing_names: &HashSet<String>) -> ImportScan {
     let Some(path) = cc_switch_db_path() else {
         return ImportScan {
             available: false,
