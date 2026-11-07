@@ -975,12 +975,14 @@ mod tests {
             // 有可用账号：租得到，reasons 不再有意义
             let (lease, _) = pool.acquire_with_reasons("ch", "m", None, |_| true);
             assert!(lease.is_some());
-            // 全部被挡：冷却 1 + 可用号用 provider 过滤挡掉
+            // 全部被挡：策略门（provider 过滤）先于瞬态态（冷却）计数——
+            // 关停/白名单是根因，冷却是伴随态，502 文案要给可行动的原因。
+            // off 号也被过滤，所以 provider_off=2、cooling=0。
             let (lease, reasons) = pool.acquire_with_reasons("ch", "m", None, |_| false);
             assert!(lease.is_none());
-            assert_eq!(reasons.cooling, 1);
-            assert_eq!(reasons.provider_off, 1);
-            assert!(reasons.summary().contains("冷却"));
+            assert_eq!(reasons.provider_off, 2);
+            assert_eq!(reasons.cooling, 0);
+            assert!(reasons.summary().contains("provider"));
             // 没有账号的渠道
             let (lease, reasons) = pool.acquire_with_reasons("other", "m", None, |_| true);
             assert!(lease.is_none());

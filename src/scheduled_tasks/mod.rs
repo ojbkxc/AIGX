@@ -419,7 +419,7 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                     }
                     let api_key = ch.decode_api_key();
                     match crate::api::admin::fetch_upstream_models(
-                        &state,
+                        state,
                         ch.channel_type,
                         &ch.base_url,
                         &api_key,

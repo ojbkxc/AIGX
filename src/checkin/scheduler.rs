@@ -231,8 +231,8 @@ async fn run_due(
     }
 }
 
-/// 重试间隔（毫秒）与每账号每天重试次数上限（对齐 A2A `RETRY_GAP_MS` 缺省）。
-const RETRY_GAP_MS: u64 = 10 * 60 * 1000;
+/// 每账号每天重试次数上限（间隔改由「签到设置」的 retry_gap_ms 驱动，
+/// 对齐 A2A `RETRY_GAP_MS` 缺省 10min 的语义迁移到了设置存储）。
 const RETRY_LIMIT: i64 = 3;
 
 /// 今天该重试的家：主轮已跑、时刻已过、且这家还有没签上的账号。

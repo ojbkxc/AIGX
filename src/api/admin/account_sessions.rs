@@ -2483,7 +2483,7 @@ mod expiry_tests {
         let snap = json!({
             "wallets": [
                 { "expire_at": "1798000000" },
-                { "expireAt": 1798000000_123i64 },
+                { "expireAt": 1_798_000_000_123i64 },
             ]
         });
         assert_eq!(earliest_wallet_expiry(&Some(snap)), Some(1798000000));
