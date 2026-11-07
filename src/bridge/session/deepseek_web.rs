@@ -428,13 +428,11 @@ fn decode_event(
 /// 1. `p:"response/content"` / `"response/thinking_content"`：v = 增量文本
 ///    （v 也可能是 `{text}` 对象，取其 text）；
 /// 2. `p:"response/fragments"` + `o:"APPEND"`：v = `[{type, content}]`；
-/// 3. `v:"FINISHED"`（顶层 v 或嵌套 status 路径）＝ 终态。
+/// 3. `v:"FINISHED"`（status 路径或无路径的裸 v）＝ 终态。
+///
+/// 判定顺序对齐 ds2api：**先 skip 噪声路径，再判 status / 终态** ——
+/// 片段级 `fragments/<n>/status` 的 FINISHED 是单片完成态，不是全文终态。
 fn collect_patch(value: &Value, parts: &mut Vec<(String, String)>, finished: &mut bool) {
-    // 顶层 v 判终态
-    if value.get("v").and_then(Value::as_str) == Some("FINISHED") {
-        *finished = true;
-        return;
-    }
     let path = value
         .get("p")
         .and_then(Value::as_str)
@@ -443,8 +441,7 @@ fn collect_patch(value: &Value, parts: &mut Vec<(String, String)>, finished: &mu
     if skip_path(&path) {
         return;
     }
-    let has_v = value.get("v").is_some();
-    if !has_v {
+    let Some(v) = value.get("v") else {
         // 数组形态：一帧里内嵌多条补丁（每条 {p, o, v}）
         if let Some(items) = value.as_array() {
             for item in items {
@@ -452,15 +449,19 @@ fn collect_patch(value: &Value, parts: &mut Vec<(String, String)>, finished: &mu
             }
         }
         return;
-    }
-    let v = value.get("v").cloned().unwrap_or(Value::Null);
-    if path == "response/status" && v.as_str().map(str::trim) == Some("FINISHED") {
+    };
+    // 显式 status 路径：FINISHED = 全文终态
+    if (path == "response/status" || path == "status")
+        && v.as_str()
+            .map(|s| s.trim().eq_ignore_ascii_case("FINISHED"))
+            .unwrap_or(false)
+    {
         *finished = true;
         return;
     }
     match path.as_str() {
-        "response/content" => push_part(parts, "text", &v),
-        "response/thinking_content" => push_part(parts, "thinking", &v),
+        "response/content" => push_part(parts, "text", v),
+        "response/thinking_content" => push_part(parts, "thinking", v),
         "response/fragments" => {
             if value
                 .get("o")
@@ -468,25 +469,40 @@ fn collect_patch(value: &Value, parts: &mut Vec<(String, String)>, finished: &mu
                 .map(|op| op.eq_ignore_ascii_case("APPEND"))
                 .unwrap_or(false)
             {
-                append_fragments(&v, parts);
+                append_fragments(v, parts);
             }
         }
-        _ => {
-            // 兜底：对象/数组里的嵌套补丁（`response` 包裹形态等）递归收集
-            match &v {
-                Value::Array(items) => {
-                    for item in items {
-                        collect_patch(item, parts, finished);
-                    }
-                }
-                Value::Object(object) => {
-                    if object.contains_key("p") || object.contains_key("fragments") {
-                        collect_patch(&v, parts, finished);
-                    }
-                }
-                _ => {}
+        p if p.starts_with("response/fragments") && p.contains("/content") => {
+            // 直接索引到片段 content 的路径（ THINK/RESPONSE 归属状态不可
+            // 复原）：默认按正文处理 —— 思考内容的常规到达路径是 APPEND
+            push_part(parts, "text", v);
+        }
+        "" => {
+            // 无路径的裸 "FINISHED" = 终态（ds2api appendChunkValueContent 口径）
+            if v.as_str() == Some("FINISHED") {
+                *finished = true;
+                return;
+            }
+            collect_nested(v, parts, finished);
+        }
+        _ => collect_nested(v, parts, finished),
+    }
+}
+
+/// 兜底：对象/数组里的嵌套补丁（`response` 包裹形态等）递归收集。
+fn collect_nested(v: &Value, parts: &mut Vec<(String, String)>, finished: &mut bool) {
+    match v {
+        Value::Array(items) => {
+            for item in items {
+                collect_patch(item, parts, finished);
             }
         }
+        Value::Object(object) => {
+            if object.contains_key("p") || object.contains_key("fragments") {
+                collect_patch(v, parts, finished);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -815,18 +831,11 @@ mod tests {
             &mut flow,
             &mut pending,
         );
-        assert_eq!(
-            pending
-                .pop_front()
-                .unwrap()
-                .unwrap()
-                .delta
-                .content
-                .as_deref(),
-            Some("片段1")
-        );
-        let tail = pending.pop_front().unwrap().unwrap();
-        assert_eq!(tail.finish_reason, Some(FinishReason::Stop));
+        // 数组帧：递归收集到内容增量 + FINISHED 终态 → 单 chunk 带内容与 Stop
+        let chunk = pending.pop_front().unwrap().unwrap();
+        assert_eq!(chunk.delta.content.as_deref(), Some("片段1"));
+        assert_eq!(chunk.finish_reason, Some(FinishReason::Stop));
+        assert!(pending.is_empty(), "收尾后不应再有帧");
     }
 
     #[test]

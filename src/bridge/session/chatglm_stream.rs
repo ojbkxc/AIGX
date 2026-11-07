@@ -74,6 +74,7 @@ pub enum ChatglmEvent {
 ///
 /// 输入是**已解码的 SSE `data:` 载荷**（AIGX 的 `SseDecoder` 产物；上游
 /// 的裸 `HEARTBEAT` 心跳不带花括号、不是 JSON，喂进来会被原样跳过）。
+#[derive(Default)]
 pub struct ChatFromChatglmStream {
     finished: bool,
     /// 当前内容段的 key（上游 `logic_id`，缺失时退回落 `part.id`）。
@@ -89,12 +90,7 @@ pub struct ChatFromChatglmStream {
 
 impl ChatFromChatglmStream {
     pub fn new() -> Self {
-        Self {
-            finished: false,
-            segment_key: String::new(),
-            segment_text: String::new(),
-            segment_thinking: String::new(),
-        }
+        Self::default()
     }
 
     /// 吃一条上游 SSE 载荷，吐出要下发的事件。
@@ -224,12 +220,6 @@ impl ChatFromChatglmStream {
         let text = advance_segment(&mut self.segment_text, full_text, is_snapshot);
         let thinking = advance_segment(&mut self.segment_thinking, full_thinking, is_snapshot);
         (text, thinking)
-    }
-}
-
-impl Default for ChatFromChatglmStream {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
