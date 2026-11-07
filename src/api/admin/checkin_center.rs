@@ -21,6 +21,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 use super::super::openai::AppState;
 use super::common::{error_response, verify_admin};
@@ -390,6 +391,10 @@ pub struct ScheduleBody {
     pub time: String,
     #[serde(default)]
     pub providers: Vec<String>,
+    /// 逐家时刻覆盖（`{provider: "HH:MM"}`；空串 = 撤销覆盖）。前端未传时
+    /// 保持存量值（编辑别家字段不该把覆盖清掉）。
+    #[serde(default)]
+    pub provider_times: Option<HashMap<String, String>>,
 }
 
 fn default_true() -> bool {
@@ -425,21 +430,50 @@ pub async fn handle_upsert_checkin_schedule(
     // 保存计划只改配置：运行状态（上次触发/结果/成功·保活·失败计数）必须从现有
     // 计划继承，否则编辑一次就把界面「上次执行」清空，且空 last_fired_date 会让
     // 调度器当天重复触发签到（浪费上游日配额）。
-    let (last_fired_date, last_result, last_ok, last_keepalive, last_failed) = state
-        .upstream_checkin
-        .schedules()
-        .into_iter()
-        .find(|s| s.id == body.id)
-        .map(|s| {
-            (
-                s.last_fired_date,
-                s.last_result,
-                s.last_ok,
-                s.last_keepalive,
-                s.last_failed,
-            )
-        })
-        .unwrap_or_default();
+    let (last_fired_date, last_result, last_ok, last_keepalive, last_failed, last_fired_providers) =
+        state
+            .upstream_checkin
+            .schedules()
+            .into_iter()
+            .find(|s| s.id == body.id)
+            .map(|s| {
+                (
+                    s.last_fired_date,
+                    s.last_result,
+                    s.last_ok,
+                    s.last_keepalive,
+                    s.last_failed,
+                    s.last_fired_providers,
+                )
+            })
+            .unwrap_or_default();
+    // 逐家时刻覆盖：前端未传时沿用存量；传了则按三档语义归一（只认签到白名单
+    // 里的家 + HH:MM 格式，非法值丢弃 —— 宁可回落条目时刻也不带脏数据进调度）。
+    let provider_times = match body.provider_times {
+        Some(overrides) => {
+            let mut cleaned: HashMap<String, String> = HashMap::new();
+            for (provider, time) in overrides {
+                if !supports_checkin(&provider) {
+                    continue;
+                }
+                let time = time.trim().to_string();
+                if time.is_empty() {
+                    // 空串 = 撤销覆盖，保留为空串（让「撤掉覆盖」生效）
+                    cleaned.insert(provider, String::new());
+                } else if scheduler::is_hhmm(&time) {
+                    cleaned.insert(provider, time);
+                }
+            }
+            cleaned
+        }
+        None => state
+            .upstream_checkin
+            .schedules()
+            .into_iter()
+            .find(|s| s.id == body.id)
+            .map(|s| s.provider_times)
+            .unwrap_or_default(),
+    };
     let list = state
         .upstream_checkin
         .upsert_schedule(CheckinSchedule {
@@ -448,7 +482,9 @@ pub async fn handle_upsert_checkin_schedule(
             enabled: body.enabled,
             time: body.time,
             providers: body.providers,
+            provider_times,
             last_fired_date,
+            last_fired_providers,
             last_result,
             last_ok,
             last_keepalive,

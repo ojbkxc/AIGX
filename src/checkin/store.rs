@@ -79,14 +79,24 @@ pub struct CheckinSchedule {
     pub id: String,
     pub label: String,
     pub enabled: bool,
-    /// 每天执行的时刻（HH:MM，UTC+8）
+    /// 每天执行的时刻（HH:MM，按配置时区）
     pub time: String,
     /// 参与签到的 provider（空 = 全部支持的）
     #[serde(default)]
     pub providers: Vec<String>,
-    /// 上次触发日期（YYYY-MM-DD，当天去重用）
+    /// 逐家时刻覆盖（`{provider: "HH:MM"}`；空串 = 撤销覆盖回落内置/条目时刻）。
+    /// 三档取值：条目覆盖 > 内置专属（qoder 10:01 / zcode 19:01）> 条目 time。
+    /// 存量配置零迁移：没覆盖的家照旧按条目时刻跑。
+    #[serde(default)]
+    pub provider_times: HashMap<String, String>,
+    /// 上次触发日期（YYYY-MM-DD，当天去重用；存量兼容字段）
     #[serde(default)]
     pub last_fired_date: String,
+    /// 逐家已跑标记（`{provider: date}`）：同一条条目可在 00:01 / 10:01 /
+    /// 19:01 各跑一批。为空 = 升级前的旧条目，回退用 `last_fired_date` 判定
+    /// （否则升级当天会把已签过的家全部重签一遍）。
+    #[serde(default)]
+    pub last_fired_providers: HashMap<String, String>,
     /// 上次结果摘要
     #[serde(default)]
     pub last_result: String,
@@ -122,6 +132,10 @@ pub struct CheckinSettings {
     /// 签到时区偏移（小时，默认 8 = UTC+8）。0 = 使用系统本地时区。
     #[serde(default = "default_tz_offset")]
     pub timezone_offset: i32,
+    /// 失败/窗口未开的重试间隔（毫秒，0 = 关掉重试；缺省 10 分钟，
+    /// 对齐 A2A `RETRY_GAP_MS`）。
+    #[serde(default = "default_retry_gap_ms")]
+    pub retry_gap_ms: u64,
 }
 
 fn default_tz_offset() -> i32 {
@@ -132,6 +146,10 @@ fn default_gap_ms() -> u64 {
     800
 }
 
+fn default_retry_gap_ms() -> u64 {
+    10 * 60 * 1000
+}
+
 impl Default for CheckinSettings {
     fn default() -> Self {
         Self {
@@ -139,6 +157,7 @@ impl Default for CheckinSettings {
             gap_ms: default_gap_ms(),
             keep_days: 0,
             timezone_offset: default_tz_offset(),
+            retry_gap_ms: default_retry_gap_ms(),
         }
     }
 }
@@ -242,7 +261,8 @@ impl CheckinStore {
         Ok(self.schedules())
     }
 
-    /// 记下某计划今天已触发（当天去重）。`counts` 落「成功 n·保活 n·失败 n」供界面展示。
+    /// 记下某计划今天已触发（当天去重，整条维度）。`counts` 落「成功 n·保活 n·
+    /// 失败 n」供界面展示。
     pub fn mark_fired(
         &self,
         id: &str,
@@ -258,6 +278,21 @@ impl CheckinStore {
                 schedule.last_ok = counts.ok;
                 schedule.last_keepalive = counts.keepalive;
                 schedule.last_failed = counts.failed;
+            }
+        }
+        self.persist_schedules()
+    }
+
+    /// 记下某计划的某家 provider 今天已跑（逐家去重）。执行前调用——
+    /// 中途被杀也不会在重启后重跑整条计划（对齐 A2A「先落标记再执行」）。
+    pub fn mark_fired_provider(&self, id: &str, provider: &str, date: &str) -> Result<()> {
+        {
+            let mut guard = self.schedules.write();
+            if let Some(schedule) = guard.schedules.iter_mut().find(|s| s.id == id) {
+                schedule
+                    .last_fired_providers
+                    .insert(provider.to_string(), date.to_string());
+                schedule.last_fired_date = date.to_string();
             }
         }
         self.persist_schedules()
@@ -514,7 +549,9 @@ mod tests {
                 enabled: true,
                 time: "09:00".into(),
                 providers: vec!["loomy".into()],
+                provider_times: HashMap::new(),
                 last_fired_date: String::new(),
+                last_fired_providers: HashMap::new(),
                 last_result: String::new(),
                 last_ok: 0,
                 last_keepalive: 0,
