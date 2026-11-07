@@ -80,9 +80,10 @@ async fn patrol_once(
             }
         } else {
             // 断路器合上 = 故障恢复：活跃的失败告警自动关闭
-            if let Outcome::Recovered(alert) =
-                evaluator.lock().evaluate_with_recovery(&kind_failure, 0)
-            {
+            // （先绑定再分支：if let 头部的临时 MutexGuard 寿命会延入 if-let
+            // 体，体内 .await 跨 guard 持有 → future 非 Send，tokio::spawn 编译失败）
+            let outcome = evaluator.lock().evaluate_with_recovery(&kind_failure, 0);
+            if let Outcome::Recovered(alert) = outcome {
                 dispatch_recovery(notify_service, &alert.message).await;
             }
         }
