@@ -1050,6 +1050,34 @@ pub fn normalize_kind(kind: &str) -> String {
         .unwrap_or_else(|| kind.trim().to_string())
 }
 
+// ── Web 端 / Agent 端 / API 三分类（对齐上游 Agent2API 的 provider_category）──
+//
+// 上游把 provider 分两类：`web`（网页端产品 —— 登录态来自网页 Cookie/令牌，
+// 上游是网页对话协议）与 `agent`（编码工具 / CLI 形态）。上游的 category 由
+// 插件包 pack.json 的 `provider_category` 包级声明（core/plugin_host/
+// ownership.rs），AIGX 没有插件机制，直接用一张静态表表达。
+//
+// AIGX 另有大量「API Key 直连」供应商（上游归在 preset/前端常量表），下发时
+// 单独标 `api`，前端「添加账号」弹窗据此分 Agent / Web / API 模板三段。
+//
+// 分类只影响前端展示分段，不参与转发链路 —— 因此表外一律回退：
+// 登录态型按 `agent`、其余按 `api` 处理，存量数据不需要迁移。
+
+/// 归为 Web 端产品的 provider kind（上游 web 包声明 `provider_category: "web"` 的家）。
+pub const WEB_PROVIDER_KINDS: &[&str] = &["chatglm", "deepseek-web"];
+
+/// provider 分类标识：`web`（网页端产品）/ `agent`（编码工具形态的登录态家）/
+/// `api`（API Key 直连，含预置模板的落点）。
+pub fn category(kind: &str) -> &'static str {
+    if WEB_PROVIDER_KINDS.contains(&kind) {
+        "web"
+    } else if session_meta(kind).is_some() {
+        "agent"
+    } else {
+        "api"
+    }
+}
+
 // ── 凭证字段模板（Agent2API 账号结构同步）─────────────────────────────
 //
 // Agent2API 的账号记录是**扁平 JSON**：除通用键（accessToken/refreshToken/
@@ -1429,6 +1457,17 @@ mod tests {
         assert!(session_meta("Cline").is_some());
         assert!(session_meta(" trae ").is_some());
         assert!(session_meta("openai").is_none());
+    }
+
+    /// 分类三值：web 家显式登记；登录态型缺省 agent；API Key 型 api。
+    /// 表外未知 kind 也按 api 回退 —— 分类只影响展示分段，不影响转发。
+    #[test]
+    fn category_splits_web_agent_api() {
+        assert_eq!(category("chatglm"), "web");
+        assert_eq!(category("deepseek-web"), "web");
+        assert_eq!(category("trae"), "agent");
+        assert_eq!(category("openai"), "api");
+        assert_eq!(category("not-a-kind"), "api");
     }
 
     #[test]

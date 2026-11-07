@@ -152,6 +152,42 @@ pub struct AccountSessionRequest {
     /// 空数组 = 清空全部规则。校验失败整单拒绝（400）。
     #[serde(default)]
     pub limiters: Option<Vec<crate::account_session::model::AccountLimiterRule>>,
+    /// 自动创建/复用承载渠道（渠道并入账号池添加流）。
+    ///
+    /// 语义：`channel_id` 为空且给了 `auto_channel` 时，服务端**原子地**
+    /// 建（或幂等复用）一个账号型渠道，再把账号挂上去——替代前端此前的
+    /// 「先 POST /api/channels 再 POST /api/account-sessions」两段式。
+    /// `channel_id` 仍优先；`auto_channel` 缺省 = 现行为不变。
+    #[serde(default)]
+    pub auto_channel: Option<AutoChannelSpec>,
+}
+
+/// 「预置 API」一键建号的渠道规格（随 `AccountSessionRequest.auto_channel`）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutoChannelSpec {
+    /// 渠道名（空/缺省 = `{provider 展示名} 账号池`，与前端旧兜底同名）。
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 渠道级上游地址（账号型渠道通常留空，地址由账号携带）。
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// 预置供应商卡片写入的上游特判（urlSuffix / 静态头 / anthropicToolType /
+    /// clientEmulation）。
+    #[serde(default)]
+    pub quirks: Option<crate::channel::ChannelQuirks>,
+    /// 余额查询方案（见 `channel::balance::SCHEMES`）。
+    #[serde(default)]
+    pub balance_scheme: Option<String>,
+    /// 渠道级模型映射（请求名 → 上游真名）。
+    #[serde(default)]
+    pub model_mapping: HashMap<String, String>,
+    /// 渠道级成本价。
+    #[serde(default)]
+    pub cost_pricing: HashMap<String, crate::pricing::ModelPrice>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 账号部分更新请求（PATCH）：只应用显式给出的字段。
@@ -239,6 +275,101 @@ fn ensure_account_channel(
         ));
     }
     Ok(channel)
+}
+
+/// 「预置 API」一键建号的渠道解析：幂等复用或新建账号型渠道。
+///
+/// 幂等规则：已存在「同名 + 账号型」渠道时直接复用（且用本请求的
+/// base_url/quirks/balance_scheme 等覆盖其渠道级字段，保证预置卡规格
+/// 权威），避免反复添加产生「XX 账号池 1/2/3」碎片渠道。找不到才新建，
+/// 渠道名缺省 `{provider 展示名} 账号池`（与前端旧兜底同名）。
+///
+/// 事务语义（对齐上游 api/custom_providers.rs 的「新建必须一次带首个账号」）：
+/// 账号落库失败时渠道保留——渠道本身是合法的空池，前端重试会幂等复用，
+/// 不会产生碎片；比「失败回滚删渠道」少了删除瞬间的竞态窗口。
+fn resolve_or_create_auto_channel(
+    state: &AppState,
+    provider: &str,
+    spec: &AutoChannelSpec,
+) -> Result<Channel, (StatusCode, Json<Value>)> {
+    let kind = registry::normalize_kind(provider);
+    let default_name = format!("{} 账号池", provider_label(&kind));
+    let name = spec
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(&default_name)
+        .to_string();
+    let base_url = spec.base_url.as_deref().unwrap_or_default().trim();
+
+    // 幂等复用：同名账号型渠道（有则取第一个，按创建序无强约束——同名本身即用户意图）
+    let existing = state
+        .channel_store
+        .list()
+        .into_iter()
+        .find(|ch| ch.channel_type == ChannelType::Account && ch.name == name);
+    if let Some(ch) = existing {
+        // 预置规格权威覆盖：只覆盖渠道级运维字段，不动 id/priority/统计
+        let mut updated = ch.clone();
+        if !base_url.is_empty() {
+            updated.base_url = base_url.to_string();
+        }
+        if let Some(quirks) = &spec.quirks {
+            updated.quirks = quirks.clone();
+        }
+        if let Some(scheme) = &spec.balance_scheme {
+            updated.balance_scheme = scheme.clone();
+        }
+        if !spec.model_mapping.is_empty() {
+            updated.model_mapping = spec.model_mapping.clone();
+        }
+        if !spec.cost_pricing.is_empty() {
+            updated.cost_pricing = spec.cost_pricing.clone();
+        }
+        return state.channel_store.update(&ch.id, updated).map_err(|e| {
+            error_response(
+                &format!("Failed to update auto channel: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        });
+    }
+
+    let mut ch = Channel {
+        id: String::new(),
+        name: name.clone(),
+        channel_type: ChannelType::Account,
+        base_url: base_url.to_string(),
+        api_key: String::new(),
+        priority: 0,
+        weight: 1,
+        status: "enabled".to_string(),
+        models: Vec::new(),
+        account_id: String::new(),
+        model_mapping: spec.model_mapping.clone(),
+        cost_pricing: spec.cost_pricing.clone(),
+        last_error: None,
+        last_used_at: None,
+        discovered_models: Vec::new(),
+        response_time: None,
+        test_time: None,
+        balance: None,
+        credit: None,
+        quirks: spec.quirks.clone().unwrap_or_default(),
+        balance_scheme: spec.balance_scheme.clone().unwrap_or_default(),
+        balance_unit: String::new(),
+        created_at: 0,
+        updated_at: 0,
+    };
+    // 与 ChannelRequest 同口径：非空 base_url 过 SSRF 校验（账号型渠道
+    // base_url 通常为空，但预置卡可能带渠道级地址）
+    ch.balance_scheme = ch.balance_scheme.trim().to_string();
+    state.channel_store.add(ch).map_err(|e| {
+        error_response(
+            &format!("Failed to create auto channel: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })
 }
 
 /// 把请求字段写入账号（`api_key` 三态 / 空字段保持原值）。
@@ -531,7 +662,34 @@ pub async fn handle_create_account_session(
             return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
         }
     }
-    let channel = ensure_account_channel(&state, body.channel_id.trim())?;
+    // auto_channel 的渠道级地址同样会被转发/探活用到，与 handle_add_channel
+    // 同口径过 SSRF 校验（空 = 沿用 provider 默认，放行）
+    if let Some(spec) = &body.auto_channel {
+        let ch_base = spec.base_url.as_deref().unwrap_or_default().trim();
+        if !ch_base.is_empty() {
+            if let Err(rej) = crate::net_guard::validate_outbound_url(
+                ch_base,
+                config.usage.allow_internal_upstream,
+            ) {
+                return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
+            }
+        }
+    }
+    // auto_channel：channel_id 为空时原子「建/复用渠道 + 建账号」，替代
+    // 前端两段式；channel_id 优先，同时给出以 channel_id 为准。
+    let channel = if body.channel_id.trim().is_empty() {
+        match &body.auto_channel {
+            Some(spec) => resolve_or_create_auto_channel(state, &body.provider, spec)?,
+            None => {
+                return Err(error_response(
+                    "需要指定 channel_id 或 auto_channel",
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
+        }
+    } else {
+        ensure_account_channel(&state, body.channel_id.trim())?
+    };
     // 限制规则先校验再应用：非法就整单拒绝，不产生「存了一半」的账号
     validate_limiters(body.limiters.as_deref().unwrap_or_default())?;
     let mut session = AccountSession::new(channel.id.clone(), String::new());
@@ -559,7 +717,12 @@ pub async fn handle_create_account_session(
         "create_account_session",
         &format!("channel={} id={}", created.channel_id, created.id),
         None,
-        Some(json!({ "name": created.name, "provider": created.provider })),
+        Some(json!({
+            "name": created.name,
+            "provider": created.provider,
+            // auto_channel 建号时记录渠道来源（新建 or 复用），便于排查碎片渠道
+            "auto_channel": body.channel_id.trim().is_empty() && body.auto_channel.is_some(),
+        })),
     );
     // 新账号没填模型白名单时，模型管理里就一行都看不到（账号型渠道的模型
     // 只来自 `session.models`，落回 `channel.effective_models()` 也是空）。
@@ -1240,6 +1403,10 @@ pub async fn handle_list_account_providers(
             "label": spec.label,
             "protocol": spec.protocol.as_str(),
             "default_base_url": spec.default_base_url,
+            // 分类（web = 网页端产品 / agent = 编码工具形态的登录态家 /
+            // api = API Key 直连）：前端「添加账号」弹窗据此分三段展示，
+            // 对齐上游 Agent2API provider_category。转发链路不读它。
+            "category": registry::category(spec.kind),
             // 登录态型供应商：鉴权方式与凭证粘贴提示（前端据此改变输入提示）
             "auth": session.map(|m| m.auth.as_str()),
             "credential_hint": session.map(|m| m.credential_hint),
