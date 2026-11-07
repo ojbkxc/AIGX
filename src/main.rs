@@ -137,6 +137,8 @@ async fn main() -> anyhow::Result<()> {
     crate::config::set_trust_proxy_headers(config.trust_proxy_headers);
     // 请求日志快照开关快照（数据面同步路径读取，见 config::log_body_enabled）
     crate::config::set_log_body(config.usage.log_body);
+    // 路由回放快照开关快照（resolve/选号路径读取，见 config::route_replay_enabled）
+    crate::config::set_route_replay(config.usage.route_replay);
     // 调试模式（上游原始报文）开关快照（桥接层同步读取，见 config::debug_traffic_enabled）
     crate::config::set_debug_traffic(config.usage.debug_traffic);
     // 换行保活帧过滤开关快照（桥接层同步读取，见 config::strip_newline_keepalive）
@@ -1839,6 +1841,12 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 路由队列预演（对照 Agent2API「设置 → 路由 → 候选队列」：只读，
         // 不推进 round_robin 游标；round_robin 下实际首挑由游标决定）
         .route("/api/routing/queue", get(api::admin::handle_routing_queue))
+        // 路由回放快照（Phase1-B：只读投影，route_replay 开关开启的请求
+        // 才有完整数据；管理员鉴权，冷路径）
+        .route(
+            "/api/routing/replay/:request_id",
+            get(api::admin::logs::handle_get_route_replay),
+        )
         // 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）
         .route(
             "/api/gateway/prompt",

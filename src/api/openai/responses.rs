@@ -105,6 +105,7 @@ pub(crate) async fn handle_responses(
         &model,
         session_id.as_deref(),
         api_key.provider_filter().as_deref(),
+        None,
     );
     if candidates.is_empty() {
         return error_response(

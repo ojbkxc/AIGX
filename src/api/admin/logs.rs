@@ -7,7 +7,7 @@
 //! - 使用 `super::super::common` 访问共享认证逻辑
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
 };
@@ -681,4 +681,41 @@ pub async fn handle_export_runtime_logs(
 pub struct RuntimeLogsQuery {
     /// 未读水位：只返回 id 大于此值的日志（前端轮询用）。
     pub since_id: Option<u64>,
+}
+
+/// GET /api/routing/replay/{request_id} —— 路由回放只读投影（Phase1-B）。
+///
+/// 只吐回放相关字段（候选序/过滤原因/选中/策略快照/账号级逐账号细因/
+/// attempts/phase），不携带对话与计费明细——回放面板的数据源与日志详情
+/// 解耦。`route_replay` 开关关闭的历史日志里相应字段为缺省（空/None）。
+/// 管理员鉴权；冷路径（按 request_id 线性扫保留窗口，有 retention 上限）。
+pub async fn handle_get_route_replay(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let log = state
+        .log_store
+        .requests
+        .get_by_request_id(&request_id)
+        .ok_or_else(|| error_response("Log not found", StatusCode::NOT_FOUND))?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "log_id": log.id,
+            "request_id": log.request_id,
+            "model": log.model,
+            "origin_model": log.origin_model,
+            "created_at": log.created_at,
+            "status_code": log.status_code,
+            "attempts": log.attempts,
+            "phase": log.phase,
+            "candidate_channels": log.candidate_channels,
+            "filtered_channels": log.filtered_channels,
+            "selected_channel": log.selected_channel,
+            "route_config": log.route_config,
+            "account_skips": log.account_skips,
+        }
+    })))
 }

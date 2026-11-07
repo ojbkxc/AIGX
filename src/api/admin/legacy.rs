@@ -4136,6 +4136,8 @@ fn record_chat_test_usage(
         attempts: 1,
         sensitive_hits: Vec::new(),
         phase: String::new(),
+        route_config: None,
+        account_skips: Vec::new(),
     };
     if let Err(e) = state.log_store.requests.add(log) {
         tracing::warn!("chat_test request log write failed: {e}");
@@ -4188,6 +4190,8 @@ fn record_chat_test_failure(
         attempts: 1,
         sensitive_hits: Vec::new(),
         phase: String::new(),
+        route_config: None,
+        account_skips: Vec::new(),
     };
     if let Err(e) = state.log_store.requests.add(log) {
         tracing::warn!("chat_test failure log write failed: {e}");

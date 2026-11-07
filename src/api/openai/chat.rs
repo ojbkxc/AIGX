@@ -96,11 +96,18 @@ pub(crate) async fn handle_chat_completions(
 
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover。
     // 阶段2：带亲和性选取——粘性窗口内命中渠道置顶
+    // Phase1-B 路由回放：开关开启时随选路捕获过滤原因/策略快照（关闭=零分配）
+    let mut route_capture = if crate::config::route_replay_enabled() {
+        Some(crate::api::openai::resolve::RouteCapture::new())
+    } else {
+        None
+    };
     let candidates = resolve_bridges_with_affinity(
         &state,
         &model,
         session_id.as_deref(),
         api_key.provider_filter().as_deref(),
+        route_capture.as_mut(),
     );
     if candidates.is_empty() {
         return error_response(
@@ -397,6 +404,17 @@ pub(crate) async fn handle_chat_completions(
                 log.candidate_channels = candidate_channel_ids.clone();
                 log.filtered_channels = filtered_channels.clone();
                 log.selected_channel = used_channel_id.clone();
+                // Phase1-B 路由回放：并入 resolve 层过滤原因与策略快照
+                if let Some(capture) = route_capture.as_ref() {
+                    log.filtered_channels
+                        .extend(capture.filtered.iter().cloned());
+                    log.route_config = capture.config.clone();
+                    log.account_skips = capture
+                        .account_buf
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                }
                 // log_body：失败路径快照——上游原始错误信息进 response_body
                 if debug_request_body.is_some() {
                     log.debug = crate::log::LogDebugSnapshot::new(
@@ -595,6 +613,21 @@ pub(crate) async fn handle_chat_completions(
             // 流结束：估算 token、扣费、commit_tokens、记录日志（问题 3）
             // B05：计费状态由后缀事件与 Drop 守卫共享（原子标志互斥）——
             // 正常结束时后缀事件计费；客户端断连导致流被 drop 时由守卫兜底。
+            // Phase1-B 路由回放：并入 resolve 层过滤原因与策略快照（开关关闭
+            // 时 route_capture 为 None，两行均零开销）
+            if let Some(capture) = route_capture.as_ref() {
+                filtered_channels.extend(capture.filtered.iter().cloned());
+            }
+            let route_config = route_capture.as_ref().and_then(|c| c.config.clone());
+            let account_skips = route_capture
+                .as_ref()
+                .map(|c| {
+                    c.account_buf
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                })
+                .unwrap_or_default();
             let billing = Arc::new(StreamBillingState {
                 state: state.clone(),
                 api_key: api_key.clone(),
@@ -620,6 +653,8 @@ pub(crate) async fn handle_chat_completions(
                     .map(|c| c.name.clone()),
                 candidate_channels: candidate_channel_ids.clone(),
                 filtered_channels: filtered_channels.clone(),
+                route_config,
+                account_skips,
                 reservation: Some(reservation),
                 debug_request_body,
             });
@@ -919,6 +954,17 @@ pub(crate) async fn handle_chat_completions(
                 log.candidate_channels = candidate_channel_ids.clone();
                 log.filtered_channels = filtered_channels.clone();
                 log.selected_channel = used_channel_id.clone();
+                // Phase1-B 路由回放：并入 resolve 层过滤原因与策略快照
+                if let Some(capture) = route_capture.as_ref() {
+                    log.filtered_channels
+                        .extend(capture.filtered.iter().cloned());
+                    log.route_config = capture.config.clone();
+                    log.account_skips = capture
+                        .account_buf
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                }
                 // log_body：失败路径快照——上游原始错误信息进 response_body
                 if debug_request_body.is_some() {
                     log.debug = crate::log::LogDebugSnapshot::new(
@@ -1028,6 +1074,16 @@ pub(crate) async fn handle_chat_completions(
             log.status_code = 200;
             log.ip = client_ip.clone();
             log.request_id = Some(request_id.clone());
+            // P1-7 + Phase1-B 路由回放：候选/过滤/选中/策略快照（此前成功
+            // 路径漏记路由字段，一并补齐）
+            log.candidate_channels = candidate_channel_ids.clone();
+            log.filtered_channels = filtered_channels.clone();
+            log.selected_channel = used_channel_id.clone();
+            if let Some(capture) = route_capture.as_ref() {
+                log.filtered_channels
+                    .extend(capture.filtered.iter().cloned());
+                log.route_config = capture.config.clone();
+            }
             // log_body：快照 = 请求体 + 响应正文（content 优先，tool_calls 计数）
             if debug_request_body.is_some() {
                 let resp_snapshot = serde_json::json!({

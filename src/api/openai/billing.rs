@@ -750,6 +750,10 @@ pub(crate) struct StreamBillingState {
     /// P1-7：调度决策回放（流式路径补全）
     pub(crate) candidate_channels: Vec<String>,
     pub(crate) filtered_channels: Vec<crate::log::FilteredChannel>,
+    /// Phase1-B 路由回放：选路时刻的策略快照（route_replay 开关关闭时 None）
+    pub(crate) route_config: Option<crate::log::RouteConfigSnapshot>,
+    /// Phase1-B 路由回放：逐账号跳过明细（开关关闭时空）
+    pub(crate) account_skips: Vec<crate::log::AccountSkip>,
     /// P1：预留记录（两段式计费）
     pub(crate) reservation: Option<Reservation>,
     /// 日志快照：客户端请求体（log_body 开关开启时填充，None 时零开销）
@@ -830,6 +834,9 @@ impl StreamBillingState {
         log.candidate_channels = self.candidate_channels.clone();
         log.filtered_channels = self.filtered_channels.clone();
         log.selected_channel = self.channel_id.clone();
+        // Phase1-B 路由回放：策略快照（开关关闭时 None，序列化跳过）
+        log.route_config = self.route_config.clone();
+        log.account_skips = self.account_skips.clone();
         // 对话快照（**默认记录**，不依赖 log_body 开关）：管理员点开日志就能看到
         // 这轮对话说了什么，无需先去系统设置打开调试模式。
         {

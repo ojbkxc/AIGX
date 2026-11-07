@@ -354,6 +354,14 @@ pub struct UsageConfig {
     /// 默认关闭——关闭时零开销（无序列化、无存储、无字符截断拷贝）。
     #[serde(default)]
     pub log_body: bool,
+    /// 路由回放快照开关（route_replay，Phase1-B）：开启后每次转发的
+    /// resolve 过滤原因 / 路由策略快照 / 账号级逐账号跳过细因落进请求日志，
+    /// 供 `GET /api/routing/replay/{request_id}` 只读回放。
+    /// 性能约束（Phase1 红线）：关闭时**零增量**——不捕获、不序列化、不落库；
+    /// 开启时捕获走请求栈上小结构，落库复用 LogWriter 既有异步有界队列
+    /// （满队列丢弃不阻塞），读路径无新增锁。默认关闭。
+    #[serde(default)]
+    pub route_replay: bool,
     /// 调试模式（上游原始报文）：开启后抓取 AIGX **实际发往上游**的
     /// URL / 脱敏头 / 请求体，落在进程内环形缓冲（不写库），供设置页查看。
     /// 与 `log_body` 互补——那边是下游（客户端）侧，这边是上游侧。
@@ -724,6 +732,7 @@ impl Default for UsageConfig {
             retry_on_status: default_retry_on_status(),
             max_request_body_mb: default_max_request_body_mb(),
             log_body: false,
+            route_replay: false,
             debug_traffic: false,
             strip_newline_keepalive: false,
             models_dev_enabled: default_models_dev_enabled(),
@@ -777,6 +786,23 @@ pub fn log_body_enabled() -> bool {
 /// 由 main 与 settings 更新端点写入快照
 pub fn set_log_body(v: bool) {
     LOG_BODY.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 路由回放快照开关的进程级快照（由 main 启动时写入）。
+///
+/// 与 `log_body` 同理：数据面 resolve/选号路径每个请求都要判一次开关，
+/// 走原子快照零开销（关闭时分支预测直通，不构造捕获结构）。管理端保存后
+/// 立即生效（settings 端点同步写快照）。
+static ROUTE_REPLAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 读取路由回放快照开关（供数据面 resolve/日志路径同步访问）
+pub fn route_replay_enabled() -> bool {
+    ROUTE_REPLAY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 与 settings 更新端点写入快照
+pub fn set_route_replay(v: bool) {
+    ROUTE_REPLAY.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 调试模式（上游原始报文）开关的进程级快照（由 main 启动时写入）。

@@ -541,6 +541,8 @@ fn write_test_log(
         attempts: 1,
         sensitive_hits: Vec::new(),
         phase: String::new(),
+        route_config: None,
+        account_skips: Vec::new(),
     };
     if let Err(e) = state.log_store.requests.add(log) {
         tracing::warn!("model_test request log write failed: {e}");

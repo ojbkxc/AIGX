@@ -309,11 +309,18 @@ pub async fn handle_messages(
 
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover。
     // 阶段2：带亲和性选取——粘性窗口内命中渠道置顶
+    // Phase1-B 路由回放：开关开启时随选路捕获过滤原因/策略快照（关闭=零分配）
+    let mut route_capture = if crate::config::route_replay_enabled() {
+        Some(crate::api::openai::resolve::RouteCapture::new())
+    } else {
+        None
+    };
     let candidates = super::openai::resolve_bridges_with_affinity(
         &state,
         &model,
         session_id.as_deref(),
         api_key.provider_filter().as_deref(),
+        route_capture.as_mut(),
     );
     if candidates.is_empty() {
         return anthropic_error(
@@ -586,6 +593,17 @@ pub async fn handle_messages(
                 log.candidate_channels = candidate_channel_ids.clone();
                 log.filtered_channels = filtered_channels.clone();
                 log.selected_channel = used_channel_id.clone();
+                // Phase1-B 路由回放：并入 resolve 层过滤原因与策略快照
+                if let Some(capture) = route_capture.as_ref() {
+                    log.filtered_channels
+                        .extend(capture.filtered.iter().cloned());
+                    log.route_config = capture.config.clone();
+                    log.account_skips = capture
+                        .account_buf
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                }
                 log.first_response_ms = ctx.first_response_ms.lock().ok().and_then(|g| *g);
                 state.log_store.record_request(log);
                 rate_bundle.commit_tokens(0).await;
@@ -868,6 +886,20 @@ pub async fn handle_messages(
             // 后缀：计费 + 按块序收尾 content_block_stop + message_delta + message_stop（问题 3/7）
             // B05：计费状态由后缀事件与 Drop 守卫共享（原子标志互斥）——
             // 正常结束时后缀事件计费；客户端断连导致流被 drop 时由守卫兜底。
+            // Phase1-B 路由回放：并入 resolve 层过滤原因与策略快照
+            if let Some(capture) = route_capture.as_ref() {
+                filtered_channels.extend(capture.filtered.iter().cloned());
+            }
+            let route_config = route_capture.as_ref().and_then(|c| c.config.clone());
+            let account_skips = route_capture
+                .as_ref()
+                .map(|c| {
+                    c.account_buf
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                })
+                .unwrap_or_default();
             let billing = std::sync::Arc::new(super::openai::StreamBillingState {
                 state: state.clone(),
                 api_key: api_key.clone(),
@@ -893,6 +925,8 @@ pub async fn handle_messages(
                     .map(|c| c.name.clone()),
                 candidate_channels: candidate_channel_ids.clone(),
                 filtered_channels: filtered_channels.clone(),
+                route_config,
+                account_skips,
                 // 两段式计费：reserve_usage 已在请求前完成，finalize 走 settle_usage
                 reservation: Some(reservation.clone()),
                 debug_request_body: if crate::config::log_body_enabled() {

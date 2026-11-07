@@ -472,6 +472,24 @@ impl AccountSessionStore {
     where
         F: Fn(&str) -> bool,
     {
+        self.acquire_with_reasons_detail(channel_id, model, alias, allow, None)
+    }
+
+    /// [`Self::acquire_with_reasons`] 的回放版（Phase1-B 路由回放）：
+    /// `detail` 非 None 时逐账号记录跳过原因（`route_replay` 开关驱动，
+    /// 请求本地缓冲，仅此一个消费者）。判定路径与原方法**完全一致**——
+    /// None 时零额外分配，与不开回放时同开销。
+    pub fn acquire_with_reasons_detail<F>(
+        &self,
+        channel_id: &str,
+        model: &str,
+        alias: Option<&str>,
+        allow: F,
+        mut detail: Option<&mut Vec<crate::log::AccountSkip>>,
+    ) -> (Option<AccountLease>, SkipReasons)
+    where
+        F: Fn(&str) -> bool,
+    {
         let now = chrono::Utc::now().timestamp();
         let mut sessions = self.inner.sessions.write();
         let mut candidates: Vec<usize> = Vec::new();
@@ -484,31 +502,52 @@ impl AccountSessionStore {
             in_channel += 1;
             if !session.is_enabled() {
                 reasons.disabled += 1;
+                if let Some(buf) = detail.as_mut() {
+                    buf.push(self.skip_detail(session, "disabled"));
+                }
                 continue;
             }
             if !allow(&session.provider) {
                 reasons.provider_off += 1;
+                if let Some(buf) = detail.as_mut() {
+                    buf.push(self.skip_detail(session, "provider_not_allowed"));
+                }
                 continue;
             }
             if session.is_expired(now) {
                 reasons.expired += 1;
+                if let Some(buf) = detail.as_mut() {
+                    buf.push(self.skip_detail(session, "expired"));
+                }
                 continue;
             }
             if !session.supports_model_any(model, alias) {
                 reasons.model_mismatch += 1;
+                if let Some(buf) = detail.as_mut() {
+                    buf.push(self.skip_detail(session, "model_mismatch"));
+                }
                 continue;
             }
             if session.is_cooling(model, now) {
                 reasons.cooling += 1;
+                if let Some(buf) = detail.as_mut() {
+                    buf.push(self.skip_detail(session, "cooling"));
+                }
                 continue;
             }
             // 余额限制器：available 低于阈值时跳过（P1-6 选路消费）
             if session.should_skip_by_balance() {
                 reasons.balance_low += 1;
+                if let Some(buf) = detail.as_mut() {
+                    buf.push(self.skip_detail(session, "balance_low"));
+                }
                 continue;
             }
             if session.max_concurrency > 0 && session.in_flight >= session.max_concurrency {
                 reasons.concurrency += 1;
+                if let Some(buf) = detail.as_mut() {
+                    buf.push(self.skip_detail(session, "concurrency"));
+                }
                 continue;
             }
             candidates.push(index);
@@ -543,6 +582,20 @@ impl AccountSessionStore {
             }),
             reasons,
         )
+    }
+
+    /// 逐账号跳过明细的构造（Phase1-B；仅 route_replay 开启时被调用）。
+    fn skip_detail(
+        &self,
+        session: &AccountSession,
+        reason: &'static str,
+    ) -> crate::log::AccountSkip {
+        crate::log::AccountSkip {
+            account_id: session.id.clone(),
+            account_name: session.name.clone(),
+            channel_id: session.channel_id.clone(),
+            reason: reason.to_string(),
+        }
     }
 
     /// 记入一次成功（清该模型冷却、累计延迟）。
@@ -987,6 +1040,39 @@ mod tests {
             let (lease, reasons) = pool.acquire_with_reasons("other", "m", None, |_| true);
             assert!(lease.is_none());
             assert!(reasons.no_accounts);
+        });
+    }
+
+    /// Phase1-B：逐账号跳过明细（route_replay 回放）——计数与明细一一对应。
+    #[test]
+    fn acquire_reasons_detail_records_per_account() {
+        with_secret_dir("acquire-detail", || {
+            let pool = pool();
+            let mut disabled = session("ch", "off", 0);
+            disabled.status = "disabled".to_string();
+            pool.upsert(disabled).unwrap();
+            let cooling = pool.upsert(session("ch", "cool", 0)).unwrap();
+            pool.upsert(session("ch", "ok", 0)).unwrap();
+            let failure = FailureType::ServerError;
+            pool.record_failure(&cooling.id, "m", &failure, "boom", None);
+            // 全挡（allow=false）：off/disabled、cool/provider_not_allowed、
+            // ok/provider_not_allowed —— 三条明细
+            let mut detail: Vec<crate::log::AccountSkip> = Vec::new();
+            let (lease, reasons) =
+                pool.acquire_with_reasons_detail("ch", "m", None, |_| false, Some(&mut detail));
+            assert!(lease.is_none());
+            assert_eq!(reasons.disabled, 1);
+            assert_eq!(reasons.provider_off, 2);
+            assert_eq!(detail.len(), 3);
+            assert_eq!(detail[0].reason, "disabled");
+            assert_eq!(detail[0].channel_id, "ch");
+            assert_eq!(detail[1].reason, "provider_not_allowed");
+            assert_eq!(detail[2].account_name, "ok");
+            // detail=None（开关关闭）：行为与 acquire_with_reasons 完全一致
+            let (lease, reasons) =
+                pool.acquire_with_reasons_detail("ch", "m", None, |_| false, None);
+            assert!(lease.is_none());
+            assert_eq!(reasons.provider_off, 2);
         });
     }
 

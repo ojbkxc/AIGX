@@ -122,6 +122,14 @@ pub struct RequestLog {
     /// 空串 = 终态（已完成或失败）。
     #[serde(default)]
     pub phase: String,
+    /// 路由策略快照（Phase1-B）：仅 `route_replay` 开关开启时记录，关闭时
+    /// None 且不序列化（零存储/零序列化开销）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_config: Option<RouteConfigSnapshot>,
+    /// 账号级逐账号跳过细因（Phase1-B）：仅 `route_replay` 开关开启时捕获；
+    /// 关闭时为空且不序列化。规模有界（≤ Σ各账号型渠道的账号数）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub account_skips: Vec<AccountSkip>,
 }
 
 /// 默认尝试次数。
@@ -375,6 +383,33 @@ pub struct FilteredChannel {
     pub reason: String,
 }
 
+/// 路由策略快照（Phase1-B 路由回放）：选路那一刻的策略形态。
+///
+/// 只存回放所需的最小集（策略名 + 粘滞开关），不做全量配置深拷贝——
+/// 热路径上这是每请求一次的小结构，字段数有界。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteConfigSnapshot {
+    /// 路由策略（weighted / round_robin / ranked）
+    pub strategy: String,
+    /// 会话粘滞是否启用
+    pub sticky_enabled: bool,
+}
+
+/// 账号级跳过明细（Phase1-B 路由回放）：账号型渠道选号时逐账号的跳过原因。
+///
+/// 仅在 `route_replay` 开关开启时捕获（`acquire_with_reasons_detail`）；
+/// 每渠道最多等于该渠道账号数，规模有界。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountSkip {
+    pub account_id: String,
+    pub account_name: String,
+    /// 归属的账号型渠道（一次请求可能轮换多个账号型渠道）
+    pub channel_id: String,
+    /// 原因码：`disabled` / `provider_not_allowed` / `expired` / `model_mismatch` /
+    /// `cooling` / `balance_low` / `concurrency`（与 SkipReasons 档位一一对应）
+    pub reason: String,
+}
+
 /// 请求/响应快照（排障用，仅 `log_body` 开关开启时记录）。
 ///
 /// 对齐 new-api 无落库、仅 stdout DEBUG 的缺陷：AIGX 把快照直接挂在
@@ -468,6 +503,8 @@ impl RequestLog {
             attempts: 1,
             sensitive_hits: Vec::new(),
             phase: String::new(),
+            route_config: None,
+            account_skips: Vec::new(),
         }
     }
 }
@@ -718,11 +755,20 @@ impl RequestLogStore {
             .collect()
     }
 
+    /// Phase1-B 路由回放：按 request_id（或日志 id）取单条请求日志。
+    ///
+    /// 管理面冷路径：线性扫保留窗口内的日志（有 retention 上限），不做
+    /// 额外索引；命中最新一条即返回。
+    pub fn get_by_request_id(&self, request_id: &str) -> Option<RequestLog> {
+        self.list_all()
+            .into_iter()
+            .find(|l| l.id == request_id || l.request_id.as_deref() == Some(request_id))
+    }
+
     /// 键区间读：`created_at ∈ [from_ts, to_ts]`（含两端）。
     ///
     /// `reqlog:{ts}:{id}` 时间戳定宽 10 位 → 键字典序等价数值序（sqlite.rs
-    /// 同论证），`list_range` 直接吃主键索引范围扫，把「最近 N 分钟/小时」
-    /// 类窗口读从全表降为近窗。超过 `max_rows` 截断并返回 `sampled=true`
+    /// 同论证），`list_range` 直接吃主键索引范围扫，把「最近 N 分钟/小时」    /// 类窗口读从全表降为近窗。超过 `max_rows` 截断并返回 `sampled=true`
     /// （护栏：窗口内日志暴涨时报表宁可标注抽样也不扫穿）。
     pub fn list_window(
         &self,

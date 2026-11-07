@@ -10,6 +10,46 @@ use crate::bridge::Bridge;
 use serde_json::Value;
 use std::sync::Arc;
 
+// ── Phase1-B 路由回放捕获 ───────────────────────────────────────────
+//
+// 性能约束（Phase1 红线，逐条对齐 verifier 审查基线）：
+// - 捕获结构是栈上小 Vec，落库**复用 LogOp::Request → LogWriter 既有异步
+//   有界队列**（满队列丢弃不阻塞），不新增任何 IO 路径或全局锁；
+// - 过滤原因用常量码（&'static str），**无逐候选 String 格式化**；每过滤
+//   一个渠道仅一次 channel_id 克隆，规模 O(渠道数)、大小有界；
+// - 开关关闭（`route_replay_enabled()==false`）时调用方传 None，零分配。
+
+/// resolve 层过滤原因码（前端按码映射文案；运行期 failover 的原因沿用
+/// chat/anthropic 记录点已有的人类可读文案，两者键空间不重叠）
+pub const REASON_MODEL_RULES_DISABLED: &str = "model_rules_disabled";
+pub const REASON_KEY_PROVIDER_NOT_ALLOWED: &str = "key_provider_not_allowed";
+
+/// 一次转发的路由捕获（`route_replay` 开关开启时才有实例）。
+#[derive(Default)]
+pub(crate) struct RouteCapture {
+    /// resolve 层被过滤的渠道（未进 failover 循环；运行期 failover 的
+    /// 过滤由 chat/anthropic 记录点另行并入 log.filtered_channels）
+    pub filtered: Vec<crate::log::FilteredChannel>,
+    /// 选路那一刻的策略快照
+    pub config: Option<crate::log::RouteConfigSnapshot>,
+    /// 逐账号跳过明细缓冲：账号型渠道的 AccountBridge 选号时填充，
+    /// 调用方记录日志时 drain。请求本地（同请求多账号渠道共享）。
+    pub account_buf: Arc<std::sync::Mutex<Vec<crate::log::AccountSkip>>>,
+}
+
+impl RouteCapture {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn push_filtered(&mut self, channel_id: &str, reason: &'static str) {
+        self.filtered.push(crate::log::FilteredChannel {
+            channel_id: channel_id.to_string(),
+            reason: reason.to_string(),
+        });
+    }
+}
+
 /// 验证 API Key 并执行全部鉴权检查（状态/过期/模型白名单/额度/IP）。
 ///
 /// 参照 new-api token.go 的校验逻辑。返回 ApiKey 实例供计费使用。
@@ -95,13 +135,24 @@ pub(crate) fn verify_api_key_listing(
 /// 阶段2：`resolve_bridges_with_affinity` 在此之上叠加 session 粘性路由——
 /// 亲和缓存命中的渠道被移到候选列表首位（若仍在候选池且未被断路器拦截）。
 /// 粘性档位由路由策略控制：`off` 时跳过亲和（每请求独立选路）。
+///
+/// Phase1-B 路由回放：`capture` 非 None 时（`route_replay` 开关开启），
+/// resolve 层的过滤原因与策略快照随选路填充进捕获结构，随请求日志落库。
+/// 性能约束：开关关闭传 None，**零增量**；开启时每过滤一个渠道仅一次
+/// channel_id 克隆（原因用常量码，无逐候选 String 格式化），规模 O(渠道数)。
 pub(crate) fn resolve_bridges_with_affinity(
     state: &AppState,
     model: &str,
     session_id: Option<&str>,
     allowed_providers: Option<&[String]>,
+    mut capture: Option<&mut RouteCapture>,
 ) -> Vec<BridgeCandidate> {
-    let mut result = resolve_bridges(state, model, allowed_providers);
+    let mut result = resolve_bridges(
+        state,
+        model,
+        allowed_providers,
+        capture.as_mut().map(|c| &mut **c),
+    );
     let policy = state.routing_policy.snapshot();
     if let Some(sid) = session_id {
         if policy.sticky.sticky_enabled() {
@@ -128,6 +179,7 @@ pub(crate) fn resolve_bridges(
     state: &AppState,
     model: &str,
     allowed_providers: Option<&[String]>,
+    mut capture: Option<&mut RouteCapture>,
 ) -> Vec<BridgeCandidate> {
     let mut result: Vec<BridgeCandidate> = Vec::new();
 
@@ -135,6 +187,12 @@ pub(crate) fn resolve_bridges(
     // weighted=priority 分组+组内加权随机（默认）；round_robin=组内确定性
     // 轮询；ranked=多因子 health×cost×rpm（策略来自 /api/routing，可热更）
     let policy = state.routing_policy.snapshot();
+    if let Some(c) = capture.as_mut() {
+        c.config = Some(crate::log::RouteConfigSnapshot {
+            strategy: policy.strategy.as_str().to_string(),
+            sticky_enabled: policy.sticky.sticky_enabled(),
+        });
+    }
     let candidates = state.channel_store.select_for_model_by_strategy(
         model,
         policy.strategy,
@@ -149,6 +207,9 @@ pub(crate) fn resolve_bridges(
                 .model_rules
                 .is_disabled(ch.channel_type.as_str(), model)
         {
+            if let Some(c) = capture.as_mut() {
+                c.push_filtered(&ch.id, REASON_MODEL_RULES_DISABLED);
+            }
             continue;
         }
         // Key 级 provider 白名单（07 D 章 allowedProviders）：渠道型按
@@ -158,6 +219,9 @@ pub(crate) fn resolve_bridges(
             if ch.channel_type != crate::channel::ChannelType::Account
                 && !allowed.iter().any(|p| p == ch.channel_type.as_str())
             {
+                if let Some(c) = capture.as_mut() {
+                    c.push_filtered(&ch.id, REASON_KEY_PROVIDER_NOT_ALLOWED);
+                }
                 continue;
             }
         }
@@ -213,6 +277,8 @@ pub(crate) fn resolve_bridges(
             }
             crate::channel::ChannelType::Account => {
                 // 账号型渠道：凭证不进 Channel，bridge 在调用时按账号池选号
+                // Phase1-B：route_replay 开启时共享逐账号跳过明细缓冲
+                let account_capture = capture.as_ref().map(|c| c.account_buf.clone());
                 let bridge: Arc<dyn crate::bridge::Bridge> = Arc::new(
                     crate::bridge::account::AccountBridge::new(
                         ch.id.clone(),
@@ -220,7 +286,8 @@ pub(crate) fn resolve_bridges(
                     )
                     .with_rules(state.model_rules.clone())
                     .with_plugin_disabled(state.provider_gates.clone())
-                    .with_allowed_providers(allowed_providers.map(<[String]>::to_vec)),
+                    .with_allowed_providers(allowed_providers.map(<[String]>::to_vec))
+                    .with_account_capture(account_capture),
                 );
                 result.push((bridge, Some(ch.id.clone()), Some(ch.clone())));
             }

@@ -75,7 +75,7 @@ fn resolve_candidates(
         }]);
     }
     // 运维 Agent 的 LLM 调用无用户 Key（管理面自用），provider 白名单不适用
-    let candidates = resolve_bridges_with_affinity(state, model, None, None);
+    let candidates = resolve_bridges_with_affinity(state, model, None, None, None);
     if candidates.is_empty() {
         return Err(AgentLlmError::NoBridge);
     }
@@ -330,6 +330,8 @@ fn record_agent_request_log(
         attempts: 1,
         sensitive_hits: Vec::new(),
         phase: String::new(),
+        route_config: None,
+        account_skips: Vec::new(),
     };
     state.log_store.record_request(log);
 }

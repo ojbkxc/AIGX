@@ -41,6 +41,12 @@ pub struct AccountBridge {
     /// 与 `plugin_disabled` 方向相反：那个是「这几家整体关停」，这个是
     /// 「这个 key 只许用这几家」。匹配单元与数据面同口径：账号 `provider`。
     allowed_providers: Option<Vec<String>>,
+    /// 逐账号跳过明细缓冲（Phase1-B 路由回放；`None` = 未开启回放）。
+    ///
+    /// 请求本地共享缓冲：同一次请求可能轮换多个账号型渠道，共用一个
+    /// `Arc<Mutex<Vec>>`（请求内无竞争，锁持有微秒级），由调用方在记录
+    /// 日志时一次性 drain 进 `RequestLog.account_skips`。
+    account_capture: Option<Arc<std::sync::Mutex<Vec<crate::log::AccountSkip>>>>,
 }
 
 /// 同渠道账号轮换的总时间预算（与共享 Client 的单请求超时对齐）。
@@ -75,6 +81,7 @@ impl AccountBridge {
             rules: None,
             plugin_disabled: None,
             allowed_providers: None,
+            account_capture: None,
         }
     }
 
@@ -96,6 +103,15 @@ impl AccountBridge {
     /// 接入 Key 级 provider 白名单（空列表与 `None` 同义 = 不限）。
     pub fn with_allowed_providers(mut self, allowed: Option<Vec<String>>) -> Self {
         self.allowed_providers = allowed;
+        self
+    }
+
+    /// 接入逐账号跳过明细缓冲（route_replay 开启时由 resolve 注入）。
+    pub fn with_account_capture(
+        mut self,
+        buf: Option<Arc<std::sync::Mutex<Vec<crate::log::AccountSkip>>>>,
+    ) -> Self {
+        self.account_capture = buf;
         self
     }
 
@@ -125,24 +141,34 @@ impl AccountBridge {
             None => true,
             Some(list) => list.is_empty() || list.iter().any(|p| p == provider),
         };
+        // Phase1-B 路由回放：逐账号跳过明细（None = 开关关闭，零开销）
+        let mut capture_guard = self
+            .account_capture
+            .as_ref()
+            .map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
+        let detail = capture_guard.as_deref_mut();
         match &self.rules {
-            None => {
-                self.sessions
-                    .acquire_with_reasons(&self.channel_id, model, alias, |provider| {
-                        key_allowed(provider) && !plugin_off(provider)
-                    })
-            }
-            Some(rules) => {
-                self.sessions
-                    .acquire_with_reasons(&self.channel_id, model, alias, |provider| {
-                        key_allowed(provider)
-                            && !plugin_off(provider)
-                            && !rules.is_disabled(provider, model)
-                            && alias
-                                .map(|a| !rules.is_disabled(provider, a))
-                                .unwrap_or(true)
-                    })
-            }
+            None => self.sessions.acquire_with_reasons_detail(
+                &self.channel_id,
+                model,
+                alias,
+                |provider| key_allowed(provider) && !plugin_off(provider),
+                detail,
+            ),
+            Some(rules) => self.sessions.acquire_with_reasons_detail(
+                &self.channel_id,
+                model,
+                alias,
+                |provider| {
+                    key_allowed(provider)
+                        && !plugin_off(provider)
+                        && !rules.is_disabled(provider, model)
+                        && alias
+                            .map(|a| !rules.is_disabled(provider, a))
+                            .unwrap_or(true)
+                },
+                detail,
+            ),
         }
     }
 
