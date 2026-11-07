@@ -176,7 +176,7 @@ export default function ProxySelector({ value, onChange, placeholder }: Props): 
               emit('custom', poolId, rotateIds, e.target.value);
             }}
           />
-          <span className="form-hint">{t('支持 http(s):// 与 socks5://，可带 userinfo')}</span>
+          <span className="form-hint">{t('支持 http(s)://、socks5://、socks5h://，可带 userinfo；socks5 会按 socks5h（远端 DNS）处理')}</span>
         </div>
       )}
 

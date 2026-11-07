@@ -2583,7 +2583,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
                     <ProxySelector
                       value={form.proxy || editing?.proxy || ''}
                       onChange={(next) => setForm({ ...form, proxy: next, clear_proxy: false })}
-                      placeholder={editing?.proxy || 'socks5://127.0.0.1:1080'}
+                      placeholder={editing?.proxy || 'socks5h://127.0.0.1:1080'}
                     />
                   </>
                 )}
@@ -2890,7 +2890,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
               />
               <Input
                 label={t('出口代理（可选）')}
-                placeholder="socks5://127.0.0.1:1080"
+                placeholder="socks5h://127.0.0.1:1080"
                 value={bulk.proxy}
                 onChange={(e) => setBulk({ ...bulk, proxy: e.target.value })}
               />

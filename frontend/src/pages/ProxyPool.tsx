@@ -211,7 +211,11 @@ export default function ProxyPool(): JSX.Element {
                   <option value="http">http</option>
                   <option value="https">https</option>
                   <option value="socks5">socks5</option>
+                  <option value="socks5h">socks5h</option>
                 </Select>
+                <span className="form-hint">
+                  {t('socks5 与 socks5h 均可：socks5 会按 socks5h（DNS 在代理端解析）处理')}
+                </span>
               </div>
             </div>
             <div className="proxy-form-row">
