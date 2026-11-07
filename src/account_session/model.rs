@@ -286,6 +286,12 @@ pub struct AccountSession {
     /// 调度器在选号阶段消费（后续任务接入）。
     #[serde(default)]
     pub limiters: Vec<AccountLimiterRule>,
+    /// 限制条件组（Phase1-A2 契约，对齐上游 core/limiter Group）。
+    ///
+    /// **双读**：非空时优先生效；为空时把 [`Self::limiters`] 扁平规则降维
+    /// 成单条件组（`limiter::groups_from_flat`），存量数据零迁移。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limiter_groups: Vec<crate::account_session::limiter::LimiterGroup>,
     /// 续期令牌（refreshToken / Coding Plan JWT / deviceId 等）。
     ///
     /// 与 `credential.secret` 同口径落盘（`enc1:` AES-256-GCM，见
@@ -382,6 +388,7 @@ impl AccountSession {
             models: Vec::new(),
             extra_headers: HashMap::new(),
             limiters: Vec::new(),
+            limiter_groups: Vec::new(),
             refresh_secret: String::new(),
             cooldowns: HashMap::new(),
             last_used_at: None,
@@ -452,6 +459,26 @@ impl AccountSession {
     /// 该上游模型是否处于冷却期。
     pub fn is_cooling(&self, model: &str, now: i64) -> bool {
         self.cooling_until(model).is_some_and(|until| until > now)
+    }
+
+    /// 生效的限制条件组（Phase1-A2 **双读**）：条件组非空时用条件组；
+    /// 为空时把存量扁平规则降维成单条件组（`limiter::groups_from_flat`），
+    /// 存量数据零迁移——与上游 `effective_groups_in` 同一语义。
+    pub fn effective_limiter_groups(&self) -> Vec<crate::account_session::limiter::LimiterGroup> {
+        if !self.limiter_groups.is_empty() {
+            return self.limiter_groups.clone();
+        }
+        crate::account_session::limiter::groups_from_flat(&self.limiters)
+    }
+
+    /// 选号阶段的限制器裁决（Phase1-A2）：条件组求值。余额类即时生效；
+    /// 本地计数类（tokens/requests）在计数器接入前恒 unknown 不命中
+    ///（宁放勿误伤）。选路消费点在 `acquire` 过滤闭包（A2 接线）。
+    pub fn limiter_verdict(&self) -> crate::account_session::limiter::LimiterVerdict {
+        crate::account_session::limiter::evaluate_groups(
+            &self.effective_limiter_groups(),
+            self.last_balance.as_ref(),
+        )
     }
 
     /// 余额限制器是否跳过此账号（选路消费，P1-6）。

@@ -152,6 +152,11 @@ pub struct AccountSessionRequest {
     /// 空数组 = 清空全部规则。校验失败整单拒绝（400）。
     #[serde(default)]
     pub limiters: Option<Vec<crate::account_session::model::AccountLimiterRule>>,
+    /// 限制条件组（Phase1-A2 契约，对齐上游 core/limiter Group；camelCase
+    /// 线格式与前端/上游一致）。三态同 limiters：缺省 = 保持原值；
+    /// 空数组 = 清空并回落扁平双读。校验失败整单拒绝（400）。
+    #[serde(default)]
+    pub limiter_groups: Option<Vec<crate::account_session::limiter::LimiterGroup>>,
     /// 自动创建/复用承载渠道（渠道并入账号池添加流）。
     ///
     /// 语义：`channel_id` 为空且给了 `auto_channel` 时，服务端**原子地**
@@ -450,6 +455,10 @@ fn apply_request(mut session: AccountSession, body: &AccountSessionRequest) -> A
     // 在进本函数前用 validate_limiters 挡下（本函数不返回 Result）。
     if let Some(rules) = &body.limiters {
         session.limiters = rules.clone();
+    }
+    // 条件组整块替换（Phase1-A2；缺省 = 保持原值，空数组 = 清空回落扁平双读）
+    if let Some(groups) = &body.limiter_groups {
+        session.limiter_groups = groups.clone();
     }
     session.models = Vec::new();
     for model in &body.models {
@@ -942,6 +951,13 @@ pub async fn handle_patch_account_session(
     if let Some(rules) = &body.limiters {
         validate_limiters(rules)?;
         next.limiters = rules.clone();
+    }
+    // 限制条件组（Phase1-A2）：缺省 = 保持原值；给了就校验后整块替换
+    //（空数组 = 清空回落扁平双读）；校验失败整单拒绝（400）
+    if let Some(mut groups) = body.limiter_groups.clone() {
+        crate::account_session::limiter::validate_groups(&mut groups)
+            .map_err(|e| error_response(&e, StatusCode::BAD_REQUEST))?;
+        next.limiter_groups = groups;
     }
     let saved = state.account_sessions.upsert(next).map_err(|e| {
         error_response(
