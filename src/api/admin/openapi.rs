@@ -878,7 +878,7 @@ fn paths_accounts_network() -> Value {
         },
         "/api/proxy-pool": {
             "get": op("网络代理", "代理池列表（含账号引用统计）"),
-            "post": op_body("网络代理", "新建代理池条目（http/https/socks5）", "")
+            "post": op_body("网络代理", "新建代理池条目（http/https/socks5/socks5h）", "")
         },
         "/api/proxy-pool/enable": {
             "post": op_body("网络代理", "启用/禁用代理池条目", "{ id, enabled }")

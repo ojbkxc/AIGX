@@ -24,7 +24,7 @@
 //! | `pool:<id>` | 引用池条目（条目被删/禁用时**报错**而不是静默直连） |
 //! | `rotate` | 轮询池里全部启用条目（逐请求换出口 = 换 IP） |
 //! | `rotate:<id>,<id>,…` | 轮询指定条目（最多 64 条） |
-//! | 其余（`http://` / `socks5://` …） | 原样当代理 URL（存量数据零迁移） |
+//! | 其余（`http://` / `socks5://` / `socks5h://` …） | 原样当代理 URL（存量数据零迁移） |
 //!
 //! ## 轮询档（对照 A2A 的 `core::proxy_rotate`）
 //!
@@ -91,7 +91,7 @@ const IP_ECHO_URL: &str = "https://api.ipify.org?format=json";
 
 // ─── 数据模型 ───────────────────────────────────────────────────────
 
-/// 池条目（手动录入；协议 http / socks5，地址 + 可选认证）。
+/// 池条目（手动录入；协议 http / https / socks5 / socks5h，地址 + 可选认证）。
 ///
 /// `source` 区分条目来源：`manual`（手填）/ `clash`（从 Clash Verge 镜像）。
 /// `listener_uid` 仅 clash 来源有值，是 Clash Verge 监听器的稳定标识。
@@ -107,7 +107,8 @@ pub struct ProxyEntry {
     /// clash 来源条目的监听器 uid（manual 来源为空）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub listener_uid: String,
-    /// `http` 或 `socks5`（socks5h 由 reqwest 的 socks 支持自动覆盖远端解析）。
+    /// `http` / `https` / `socks5` / `socks5h`（socks5h = 域名由代理远端
+    /// 解析；socks5 经 EgressCache 归一后也是远端解析）。
     #[serde(default)]
     pub protocol: String,
     pub host: String,
@@ -248,8 +249,8 @@ fn normalize(input: &EntryInput, existing: Option<&ProxyEntry>) -> Result<ProxyE
             p
         }
     };
-    if protocol != "http" && protocol != "socks5" && protocol != "https" {
-        return Err("代理协议只支持 http / https / socks5".to_string());
+    if !matches!(protocol.as_str(), "http" | "https" | "socks5" | "socks5h") {
+        return Err("代理协议只支持 http / https / socks5 / socks5h".to_string());
     }
     let host = clean(&input.host, MAX_HOST_LENGTH);
     if host.is_empty() {
@@ -866,5 +867,22 @@ mod tests {
         let url = describe_proxy(Some("socks5://user:pass@1.2.3.4:1080"));
         assert_eq!(url, "socks5://1.2.3.4:1080");
         assert!(!url.contains("user"));
+    }
+
+    #[test]
+    fn accepts_socks5h_protocol_entries() {
+        let _guard = TEST_LOCK.lock();
+        let _ = STORE.set(install_temp().clone());
+        let mut input = sample("远端解析节点", 1080);
+        input.protocol = "socks5h".to_string();
+        let created = create(&input).expect("create socks5h entry");
+        let id = created["id"].as_str().unwrap().to_string();
+        // entry_url 直拼 scheme，socks5h 条目解析出 socks5h:// URL
+        let url = resolve_proxy(Some(&format!("pool:{id}")), "acct").expect("resolve");
+        assert_eq!(url.as_deref(), Some("socks5h://127.0.0.1:1080"));
+        // 大小写归一：SOCKS5H 也收
+        let mut upper = sample("大写", 1081);
+        upper.protocol = "SOCKS5H".to_string();
+        assert!(create(&upper).is_ok());
     }
 }

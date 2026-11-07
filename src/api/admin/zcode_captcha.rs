@@ -213,10 +213,10 @@ pub async fn handle_get_zcode_captcha_config(
             StatusCode::BAD_REQUEST,
         ));
     }
+    // 出口走 `client_for`（与数据面/签到同链路，解析 pool:/rotate 编码）
     let client = state
         .account_sessions
-        .egress()
-        .client(session.proxy.as_deref())
+        .client_for(&session)
         .map_err(|e| error_response(&format!("出口配置错误：{e}"), StatusCode::BAD_REQUEST))?;
     // 复用福利通道的 config 分支（同一份端点与鉴权，不另写一套请求构造）
     let result = crate::checkin::benefits::run(

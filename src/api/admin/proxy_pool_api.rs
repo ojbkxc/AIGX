@@ -133,7 +133,7 @@ fn pool_payload(state: &AppState) -> Value {
             "pool": "pool:<id> —— 引用单条池条目",
             "rotateAll": "rotate —— 轮询全部启用条目（逐请求换出口 IP）",
             "rotateIds": "rotate:<id>,<id> —— 轮询指定条目",
-            "url": "http(s)/socks5 URL —— 直填代理串（存量兼容）",
+            "url": "http(s)/socks5(h) URL —— 直填代理串（存量兼容）",
         },
     })
 }

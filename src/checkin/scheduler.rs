@@ -175,7 +175,7 @@ pub struct ScheduleOutcome {
 pub async fn run_schedule(
     store: &CheckinStore,
     sessions: &AccountSessionStore,
-    egress: &crate::egress::EgressCache,
+    _egress: &crate::egress::EgressCache,
     providers: &[String],
     gap_ms: u64,
 ) -> ScheduleOutcome {
@@ -192,7 +192,10 @@ pub async fn run_schedule(
     let mut total = 0usize;
     for session in targets {
         total += 1;
-        let client = match egress.client(session.proxy.as_deref()) {
+        // 出口统一走 `client_for`（解析 `pool:` / `rotate` 编码）——绕开
+        // 它会把「pool:px_x」直接喂给 reqwest 导致 invalid proxy，配了
+        // 代理池的账号签到必失败（C-1）。
+        let client = match sessions.client_for(&session) {
             Ok(client) => client,
             Err(e) => {
                 record(

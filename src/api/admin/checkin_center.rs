@@ -127,11 +127,8 @@ pub async fn handle_checkin_run(
     let mut results: Vec<Value> = Vec::with_capacity(targets.len());
     let mut ok = 0usize;
     for session in &targets {
-        let client = match state
-            .account_sessions
-            .egress()
-            .client(session.proxy.as_deref())
-        {
+        // 出口统一走 `client_for`（解析 pool:/rotate 编码），与数据面同链路
+        let client = match state.account_sessions.client_for(session) {
             Ok(client) => client,
             Err(e) => {
                 let message = format!("出口配置错误：{e}");
@@ -609,11 +606,10 @@ pub async fn handle_benefit_run(
     let Some(session) = state.account_sessions.get(&body.account_id) else {
         return Err(error_response("账号不存在", StatusCode::NOT_FOUND));
     };
-    // 出口走账号自己的代理（与转发/签到同一条链路）
+    // 出口走账号自己的代理（与转发/签到同一条链路，解析 pool:/rotate 编码）
     let client = state
         .account_sessions
-        .egress()
-        .client(session.proxy.as_deref())
+        .client_for(&session)
         .map_err(|e| error_response(&format!("出口配置错误：{e}"), StatusCode::BAD_REQUEST))?;
     let result = crate::checkin::benefits::run(
         &state.account_sessions,

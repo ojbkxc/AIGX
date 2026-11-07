@@ -8,6 +8,10 @@
 //! 支持 `http://` / `https://` / `socks5://` / `socks5h://`（reqwest 的
 //! `socks` feature 已在 Cargo.toml 打开）。代理串非法时返回错误而不是
 //! 静默直连——否则账号流量会从错误的出口 IP 发出。
+//!
+//! `socks5://` 在内部归一为 `socks5h://`（远端 DNS 解析）：配 socks5
+//! 出口的账号往往正是为了绕开本机 DNS 污染，reqwest 的 `socks5://` 是
+//! 本地解析、`socks5h://` 才把域名交给代理解析（对齐 A2A 的 egress 行为）。
 
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -82,8 +86,18 @@ impl EgressCache {
 }
 
 /// 归一化代理串：去首尾空白，空串代表直连（作为缓存键）。
+///
+/// `socks5://` 归一为 `socks5h://`（对齐 A2A 的 `core/egress.rs`）：reqwest
+/// 的 `socks5://` 是本地 DNS 解析、`socks5h://` 才把域名交给代理远端解析；
+/// 配 socks5 出口的账号往往正是为了绕开本机 DNS 污染，所以内部统一换成
+/// 远端解析的等价 scheme（账号里 / UI 上存的仍是 socks5）。两种写法归一
+/// 后共享同一份 Client 缓存。
 fn normalize_proxy(proxy: Option<&str>) -> String {
-    proxy.map(str::trim).unwrap_or_default().to_string()
+    let raw = proxy.map(str::trim).unwrap_or_default();
+    match raw.strip_prefix("socks5://") {
+        Some(rest) => format!("socks5h://{rest}"),
+        None => raw.to_string(),
+    }
 }
 
 /// 构造出口 Client：强制 HTTP/1.1（与全局共享 Client 同策略，防 h2 PING
@@ -124,15 +138,50 @@ mod tests {
     }
 
     #[test]
+    fn normalize_proxy_maps_socks5_to_socks5h() {
+        // socks5 → socks5h（远端解析，对齐 A2A egress 行为）
+        assert_eq!(
+            normalize_proxy(Some(" socks5://1.2.3.4:1080 ")),
+            "socks5h://1.2.3.4:1080"
+        );
+        assert_eq!(
+            normalize_proxy(Some("socks5://u:p@1.2.3.4:1080")),
+            "socks5h://u:p@1.2.3.4:1080"
+        );
+        // 显式 socks5h / 其它 scheme 原样保留
+        assert_eq!(
+            normalize_proxy(Some("socks5h://1.2.3.4:1080")),
+            "socks5h://1.2.3.4:1080"
+        );
+        assert_eq!(
+            normalize_proxy(Some("http://1.2.3.4:8080")),
+            "http://1.2.3.4:8080"
+        );
+    }
+
+    #[test]
+    fn socks5_and_socks5h_share_cached_client() {
+        let cache = EgressCache::new();
+        let a = cache
+            .client(Some("socks5://127.0.0.1:1080"))
+            .expect("socks5 client");
+        let b = cache
+            .client(Some("socks5h://127.0.0.1:1080"))
+            .expect("socks5h client");
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
     fn rejects_malformed_proxy_url() {
         let cache = EgressCache::new();
         assert!(cache.client(Some("://broken")).is_err());
     }
 
     #[test]
-    fn accepts_socks5_proxy() {
+    fn accepts_socks5_and_socks5h_proxy() {
         let cache = EgressCache::new();
         assert!(cache.client(Some("socks5://127.0.0.1:1080")).is_ok());
+        assert!(cache.client(Some("socks5h://127.0.0.1:1080")).is_ok());
     }
 
     #[test]
