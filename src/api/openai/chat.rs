@@ -98,7 +98,7 @@ pub(crate) async fn handle_chat_completions(
     // 阶段2：带亲和性选取——粘性窗口内命中渠道置顶
     // Phase1-B 路由回放：开关开启时随选路捕获过滤原因/策略快照（关闭=零分配）
     let mut route_capture = if crate::config::route_replay_enabled() {
-        Some(crate::api::openai::resolve::RouteCapture::new())
+        Some(crate::api::openai::RouteCapture::new())
     } else {
         None
     };
