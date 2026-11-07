@@ -147,12 +147,25 @@ impl AccountBridge {
             .as_ref()
             .map(|m| m.lock().unwrap_or_else(|e| e.into_inner()));
         let detail = capture_guard.as_deref_mut();
+        // Phase1-A2 限制条件组门控：仅 limiter_groups（扁平规则走既有
+        // balance_low 路径，双计会重复拦截）；未配置时 verdict 早退零开销
+        let session_gate = |session: &crate::account_session::model::AccountSession| {
+            let verdict = session.limiter_group_verdict();
+            if verdict.disable {
+                Some("limiter_disable")
+            } else if verdict.blocks(model) {
+                Some("limiter_skip")
+            } else {
+                None
+            }
+        };
         match &self.rules {
             None => self.sessions.acquire_with_reasons_detail(
                 &self.channel_id,
                 model,
                 alias,
                 |provider| key_allowed(provider) && !plugin_off(provider),
+                Some(&session_gate),
                 detail,
             ),
             Some(rules) => self.sessions.acquire_with_reasons_detail(
@@ -167,6 +180,7 @@ impl AccountBridge {
                             .map(|a| !rules.is_disabled(provider, a))
                             .unwrap_or(true)
                 },
+                Some(&session_gate),
                 detail,
             ),
         }

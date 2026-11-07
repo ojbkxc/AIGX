@@ -215,6 +215,10 @@ pub struct AccountSessionPatch {
     /// 空数组 = 清空。整块替换（对齐前端「规则列表一次全量提交」）。
     #[serde(default)]
     pub limiters: Option<Vec<crate::account_session::model::AccountLimiterRule>>,
+    /// 限制条件组（Phase1-A2 契约，对齐上游 core/limiter Group）。三态同
+    /// limiters：缺省 = 保持原值；空数组 = 清空回落扁平双读。校验失败 400。
+    #[serde(default)]
+    pub limiter_groups: Option<Vec<crate::account_session::limiter::LimiterGroup>>,
 }
 
 impl AccountSessionPatch {
@@ -2647,6 +2651,7 @@ pub async fn handle_import_account_sessions_json(
             expires_at: entry.get("expires_at").and_then(|v| v.as_i64()),
             usage_query_interval_secs: None,
             limiters: entry_limiters,
+            limiter_groups: Vec::new(),
             // Agent2API 导入不走自动建渠道（导入流程自己管理渠道归属）
             auto_channel: None,
         };

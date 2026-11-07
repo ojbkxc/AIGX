@@ -87,6 +87,8 @@ pub struct SkipReasons {
     pub cooling: usize,
     /// 余额低于限制器阈值
     pub balance_low: usize,
+    /// 限制条件组命中（Phase1-A2：skip 按模型/整号 与 disable 均记此档）
+    pub limited: usize,
     /// 并发占满（max_concurrency）
     pub concurrency: usize,
 }
@@ -115,6 +117,9 @@ impl SkipReasons {
         }
         if self.balance_low > 0 {
             parts.push(format!("{} 个余额低于阈值", self.balance_low));
+        }
+        if self.limited > 0 {
+            parts.push(format!("{} 个被限制规则拦截", self.limited));
         }
         if self.concurrency > 0 {
             parts.push(format!("{} 个并发占满", self.concurrency));
@@ -472,19 +477,21 @@ impl AccountSessionStore {
     where
         F: Fn(&str) -> bool,
     {
-        self.acquire_with_reasons_detail(channel_id, model, alias, allow, None)
+        self.acquire_with_reasons_detail(channel_id, model, alias, allow, None, None)
     }
 
-    /// [`Self::acquire_with_reasons`] 的回放版（Phase1-B 路由回放）：
+    /// [`Self::acquire_with_reasons`] 的回放+门控版（Phase1-B/A2）：
     /// `detail` 非 None 时逐账号记录跳过原因（`route_replay` 开关驱动，
-    /// 请求本地缓冲，仅此一个消费者）。判定路径与原方法**完全一致**——
-    /// None 时零额外分配，与不开回放时同开销。
+    /// 请求本地缓冲，仅此一个消费者）；`gate` 非 None 时逐账号做**条件组
+    /// 限制裁决**（返回 Some(原因码) = 跳过该账号，disable/skip 均记
+    /// `limited` 档）。两者皆 None 时判定路径与原方法完全一致，零额外分配。
     pub fn acquire_with_reasons_detail<F>(
         &self,
         channel_id: &str,
         model: &str,
         alias: Option<&str>,
         allow: F,
+        gate: Option<&dyn Fn(&AccountSession) -> Option<&'static str>>,
         mut detail: Option<&mut Vec<crate::log::AccountSkip>>,
     ) -> (Option<AccountLease>, SkipReasons)
     where
@@ -513,6 +520,17 @@ impl AccountSessionStore {
                     buf.push(self.skip_detail(session, "provider_not_allowed"));
                 }
                 continue;
+            }
+            // 限制条件组裁决（Phase1-A2）：skip/disable 命中均跳过该账号；
+            // 余额类即时生效，本地计数类在计数器接入前恒不命中（宁放勿误伤）
+            if let Some(gate) = gate {
+                if let Some(reason) = gate(session) {
+                    reasons.limited += 1;
+                    if let Some(buf) = detail.as_mut() {
+                        buf.push(self.skip_detail(session, reason));
+                    }
+                    continue;
+                }
             }
             if session.is_expired(now) {
                 reasons.expired += 1;
@@ -995,7 +1013,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(mixed.summary(), "2 个冷却中、1 个余额低于阈值");
-        // 顺序稳定（禁用 → provider → 过期 → 白名单 → 冷却 → 余额 → 并发）
+        // 顺序稳定（禁用 → provider → 过期 → 白名单 → 冷却 → 余额 → 限制 → 并发）
         let full = SkipReasons {
             no_accounts: false,
             disabled: 1,
@@ -1004,11 +1022,12 @@ mod tests {
             model_mismatch: 1,
             cooling: 1,
             balance_low: 1,
+            limited: 1,
             concurrency: 1,
         };
         assert_eq!(
             full.summary(),
-            "1 个已禁用、1 个 provider 被关停、1 个凭证过期、1 个不在模型白名单、1 个冷却中、1 个余额低于阈值、1 个并发占满"
+            "1 个已禁用、1 个 provider 被关停、1 个凭证过期、1 个不在模型白名单、1 个冷却中、1 个余额低于阈值、1 个被限制规则拦截、1 个并发占满"
         );
     }
 
@@ -1058,8 +1077,14 @@ mod tests {
             // 全挡（allow=false）：off/disabled、cool/provider_not_allowed、
             // ok/provider_not_allowed —— 三条明细
             let mut detail: Vec<crate::log::AccountSkip> = Vec::new();
-            let (lease, reasons) =
-                pool.acquire_with_reasons_detail("ch", "m", None, |_| false, Some(&mut detail));
+            let (lease, reasons) = pool.acquire_with_reasons_detail(
+                "ch",
+                "m",
+                None,
+                |_| false,
+                None,
+                Some(&mut detail),
+            );
             assert!(lease.is_none());
             assert_eq!(reasons.disabled, 1);
             assert_eq!(reasons.provider_off, 2);
@@ -1070,7 +1095,7 @@ mod tests {
             assert_eq!(detail[2].account_name, "ok");
             // detail=None（开关关闭）：行为与 acquire_with_reasons 完全一致
             let (lease, reasons) =
-                pool.acquire_with_reasons_detail("ch", "m", None, |_| false, None);
+                pool.acquire_with_reasons_detail("ch", "m", None, |_| false, None, None);
             assert!(lease.is_none());
             assert_eq!(reasons.provider_off, 2);
         });

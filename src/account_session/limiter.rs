@@ -54,6 +54,7 @@ pub enum LimiterTarget {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LimiterMetric {
+    #[default]
     Remaining,
     RemainingPercent,
     Used,
@@ -159,7 +160,7 @@ pub const MAX_CONDITION_MODELS: usize = 128;
 
 impl LimiterGroup {
     /// 写入前校验（对齐上游 normalize_groups 的约束；错误为中文文案）。
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&mut self) -> Result<(), String> {
         if self.conditions.is_empty() || self.conditions.len() > MAX_CONDITIONS {
             return Err("每个条件组必须有 1~32 条条件".to_string());
         }
@@ -327,7 +328,7 @@ fn compare(value: f64, condition: &LimiterCondition) -> bool {
 
 /// 本地计数类读数（tokens/requests）：**计数器在 A2 接入**，接入前恒
 /// unknown（不命中 + 原因明示），宁放勿误伤。
-fn read_local_metric(condition: &LimiterCondition) -> Reading {
+fn read_local_metric() -> Reading {
     Reading {
         reason: "本地消耗计数器尚未接入（A2）".to_string(),
         ..Default::default()
@@ -336,7 +337,7 @@ fn read_local_metric(condition: &LimiterCondition) -> Reading {
 
 fn read_condition(balance: Option<&Value>, condition: &LimiterCondition) -> Reading {
     if condition.metric.is_local() {
-        read_local_metric(condition)
+        read_local_metric()
     } else {
         read_balance_metric(balance, condition)
     }
@@ -474,7 +475,9 @@ pub fn groups_from_flat(
                         } else {
                             LimiterReset::Fixed
                         },
-                        seconds: rule.period.unwrap_or(0),
+                        // 扁平规则的 period 已被 validate_limiters 卡在 30min~24h，
+                        // try_from 实际不可能溢出；i64::MAX 兜底防病态值直通
+                        seconds: i64::try_from(rule.period.unwrap_or(0)).unwrap_or(i64::MAX),
                         ..LimiterWindow::default()
                     }),
                 }],

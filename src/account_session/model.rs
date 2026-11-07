@@ -471,12 +471,17 @@ impl AccountSession {
         crate::account_session::limiter::groups_from_flat(&self.limiters)
     }
 
-    /// 选号阶段的限制器裁决（Phase1-A2）：条件组求值。余额类即时生效；
-    /// 本地计数类（tokens/requests）在计数器接入前恒 unknown 不命中
-    ///（宁放勿误伤）。选路消费点在 `acquire` 过滤闭包（A2 接线）。
-    pub fn limiter_verdict(&self) -> crate::account_session::limiter::LimiterVerdict {
+    /// 选号阶段的限制器裁决（Phase1-A2）：**仅条件组**——存量扁平规则
+    /// 走既有消费路径（balance_low 桶），在此重复求值会双计。未配置时
+    /// 早退零开销（性能红线：选号热路径不为一项空配置付循环代价）。
+    /// 余额类即时生效；本地计数类在计数器接入前恒 unknown 不命中
+    ///（宁放勿误伤）。消费点在 `acquire` 门控（A2 接线）。
+    pub fn limiter_group_verdict(&self) -> crate::account_session::limiter::LimiterVerdict {
+        if self.limiter_groups.is_empty() {
+            return Default::default();
+        }
         crate::account_session::limiter::evaluate_groups(
-            &self.effective_limiter_groups(),
+            &self.limiter_groups,
             self.last_balance.as_ref(),
         )
     }
