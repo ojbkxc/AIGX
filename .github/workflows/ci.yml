@@ -29,6 +29,24 @@ jobs:
         # 默认包，成员里的 clippy 错误会一路积压到没人看见。
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  route-inventory:
+    name: route inventory gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      # 双向硬断言（见 tools/extract_routes.py 模块 docstring）：
+      #   真实路由 ⊆ 文档 ∪ 豁免   （新路由未登记且未豁免 → 红）
+      #   文档 ⊆ 真实路由           （文档虚构了不存在的路由 → 红）
+      # 补上单测 covers_all_real_admin_routes 管不到的那一段：单测只保证
+      # 「文档 ↔ real_admin_routes() 清单」相等，管不到「清单 ↔ main.rs 真实
+      # 路由」；两边一起漏登时断言仍绿，本闸门静态提取真实路由来兜底。
+      - name: "Gate: admin routes documented or explicitly exempt"
+        run: python tools/extract_routes.py .
+
   frontend:
     name: build frontend
     runs-on: ubuntu-latest
