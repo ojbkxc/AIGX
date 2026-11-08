@@ -1,9 +1,22 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Loading, EmptyState } from '../components/ui';
+import {
+  applyTableColumns,
+  readTableColumns,
+  resetTableColumns,
+  writeTableColumns,
+  type TableColumnDef,
+  type TableColumnItem,
+  type TableColumnState,
+} from '../lib/tableColumns';
+import TableColumnSettings from '../components/ui/TableColumnSettings';
+import { useColumnResize } from '../components/ui/useColumnResize';
+import { Tooltip } from '../components/ui';
+import { Columns3 } from 'lucide-react';
 import './Groups.css';
 
 interface GroupItem {
@@ -26,7 +39,52 @@ type ModalError = string;
 /** 计费实际读取的分组倍率表（RatioConfig.group_ratio） */
 type GroupRatioMap = Record<string, number>;
 
+
+const LS_TCOLS = 'aigx-tbl-cols.groups';
+/** 列声明 */
+const GRP_COL_DEFS: TableColumnDef[] = [
+  { key: 'name', label: '分组名称', width: 160, locked: true },
+  { key: 'ratio', label: '倍率', align: 'right', width: 100 },
+  { key: 'models', label: '允许模型', width: 220 },
+  { key: 'desc', label: '描述', width: 260 },
+  { key: 'act', label: '操作', width: 140, locked: true },
+];
+
 export default function Groups(): JSX.Element {
+  // 列设置已迁公共层（tableColumns v2）
+  const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, GRP_COL_DEFS));
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
+  const commitCols = useCallback((next: TableColumnItem[], persist: boolean) => {
+    setColState((prev) => {
+      const nextState: TableColumnState = { ...prev, items: next };
+      if (persist) writeTableColumns(LS_TCOLS, nextState);
+      return nextState;
+    });
+  }, []);
+  const resetCols = useCallback(() => setColState(resetTableColumns(LS_TCOLS, GRP_COL_DEFS)), []);
+  const appliedCols = useMemo(() => applyTableColumns(colState, GRP_COL_DEFS), [colState]);
+  const visibleKeySet = useMemo(() => new Set(appliedCols.map((c) => c.key)), [appliedCols]);
+  const colResize = useColumnResize({
+    widths: Object.fromEntries(colState.items.filter((i) => i.width != null).map((i) => [i.key, i.width as number])),
+    setWidths: (next) => {
+      commitCols(
+        colState.items.map((i) => {
+          const w = next[i.key];
+          const defW = GRP_COL_DEFS.find((d) => d.key === i.key)?.width;
+          if (w == null || (defW != null && w === defW)) {
+            const { width: _drop, ...rest } = i;
+            return rest;
+          }
+          return { ...i, width: w };
+        }),
+        true,
+      );
+    },
+    defaultWidths: Object.fromEntries(GRP_COL_DEFS.map((d) => [d.key, d.width])),
+    lockedKeys: new Set(GRP_COL_DEFS.filter((d) => d.locked).map((d) => d.key)),
+    onCommit: () => { /* 落盘已在 setWidths 内做 */ },
+  });
   const { t } = useTranslation();
   const addToast = useToast();
   const [groups, setGroups] = useState<GroupItem[]>([]);
@@ -175,7 +233,34 @@ export default function Groups(): JSX.Element {
         ) : (
           <Card
             title={`${t('所有分组')} (${groups.length})`}
-            actions={<Button onClick={openAdd}>{t('+ 新建分组')}</Button>}
+            actions={
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
+                  <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
+                    <button
+                      type="button"
+                      className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                      onClick={() => setColPanelOpen((v) => !v)}
+                      aria-label={t('列设置')}
+                    >
+                      <Columns3 size={14} />
+                    </button>
+                  </Tooltip>
+                  {colPanelOpen && (
+                    <TableColumnSettings
+                      open
+                      onClose={() => setColPanelOpen(false)}
+                      defs={GRP_COL_DEFS}
+                      items={colState.items}
+                      onChange={commitCols}
+                      onReset={resetCols}
+                      anchorRef={colPanelRef}
+                    />
+                  )}
+                </div>
+                <Button onClick={openAdd}>{t('+ 新建分组')}</Button>
+              </div>
+            }
           >
             {groups.length === 0 ? (
               <EmptyState
@@ -185,24 +270,45 @@ export default function Groups(): JSX.Element {
             ) : (
               <div className="table-wrapper">
                 <table>
+                  <colgroup>
+                    {appliedCols.map((c) => (
+                      <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                    ))}
+                  </colgroup>
                   <thead>
                     <tr>
-                      <th>{t('分组名称')}</th>
-                      <th>{t('倍率')}</th>
-                      <th>{t('允许模型')}</th>
-                      <th>{t('描述')}</th>
-                      <th>{t('操作')}</th>
+                      {appliedCols.map((c, idx) => {
+                        const grip = colResize.gripProps(c.key, {
+                          isLast: idx === appliedCols.length - 1,
+                          locked: c.locked,
+                          defaultWidth: c.width,
+                        });
+                        return (
+                          <th
+                            key={c.key}
+                            style={c.width != null ? { width: `${c.width}px` } : undefined}
+                          >
+                            {t(GRP_COL_DEFS.find((d) => d.key === c.key)?.label ?? c.key)}
+                            {c.key !== 'act' && (
+                              <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                            )}
+                          </th>
+                        );
+                      })}
                     </tr>
                   </thead>
                   <tbody>
                     {groups.map((g) => (
                       <tr key={g.name}>
+{visibleKeySet.has('name') && (
                         <td>
                           <strong>{g.name}</strong>
                           {g.name === 'default' && (
                             <span className="default-tag">{t('默认')}</span>
                           )}
                         </td>
+)}
+{visibleKeySet.has('ratio') && (
                         <td>
                           <span
                             className="ratio-badge"
@@ -212,6 +318,8 @@ export default function Groups(): JSX.Element {
                             ×{groupRatios[g.name] != null ? groupRatios[g.name] : 1}
                           </span>
                         </td>
+)}
+{visibleKeySet.has('models') && (
                         <td
                           style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                           title={Array.isArray(g.allowed_models) && g.allowed_models.length > 0 ? g.allowed_models.join(', ') : t('全部')}
@@ -220,9 +328,13 @@ export default function Groups(): JSX.Element {
                             ? g.allowed_models.join(', ')
                             : t('全部')}
                         </td>
+)}
+{visibleKeySet.has('desc') && (
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                           {g.description || '—'}
                         </td>
+)}
+                        {visibleKeySet.has('act') && (
                         <td>
                           <div className="actions-cell">
                             <button className="btn btn-outline btn-sm" onClick={() => openEdit(g)}>
@@ -235,6 +347,7 @@ export default function Groups(): JSX.Element {
                             )}
                           </div>
                         </td>
+                      )}
                       </tr>
                     ))}
                   </tbody>

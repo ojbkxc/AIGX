@@ -1,9 +1,22 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { EmptyState, SkeletonTable } from '../components/ui';
+import {
+  applyTableColumns,
+  readTableColumns,
+  resetTableColumns,
+  writeTableColumns,
+  type TableColumnDef,
+  type TableColumnItem,
+  type TableColumnState,
+} from '../lib/tableColumns';
+import TableColumnSettings from '../components/ui/TableColumnSettings';
+import { useColumnResize } from '../components/ui/useColumnResize';
+import { Tooltip } from '../components/ui';
+import { Columns3 } from 'lucide-react';
 import './IpManagement.css';
 
 type TabKey = 'whitelist' | 'blacklist';
@@ -23,7 +36,49 @@ interface IpFilterResponse {
 // IpManagement 页面：IP 白名单/黑名单管理。
 // 参照 Groups.jsx / Keys.jsx 的 CRUD 界面模式。
 // 规则支持单 IP 或 CIDR 表示法（如 192.168.0.0/24）。
+
+const LS_TCOLS = 'aigx-tbl-cols.ip';
+/** 列声明 */
+const IP_COL_DEFS: TableColumnDef[] = [
+  { key: 'cidr', label: 'IP / CIDR', width: 220, locked: true },
+  { key: 'remark', label: '备注', width: 240 },
+  { key: 'act', label: '操作', width: 120, locked: true },
+];
 export default function IpManagement() {
+  // 列设置已迁公共层（tableColumns v2）
+  const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, IP_COL_DEFS));
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
+  const commitCols = useCallback((next: TableColumnItem[], persist: boolean) => {
+    setColState((prev) => {
+      const nextState: TableColumnState = { ...prev, items: next };
+      if (persist) writeTableColumns(LS_TCOLS, nextState);
+      return nextState;
+    });
+  }, []);
+  const resetCols = useCallback(() => setColState(resetTableColumns(LS_TCOLS, IP_COL_DEFS)), []);
+  const appliedCols = useMemo(() => applyTableColumns(colState, IP_COL_DEFS), [colState]);
+  const visibleKeySet = useMemo(() => new Set(appliedCols.map((c) => c.key)), [appliedCols]);
+  const colResize = useColumnResize({
+    widths: Object.fromEntries(colState.items.filter((i) => i.width != null).map((i) => [i.key, i.width as number])),
+    setWidths: (next) => {
+      commitCols(
+        colState.items.map((i) => {
+          const w = next[i.key];
+          const defW = IP_COL_DEFS.find((d) => d.key === i.key)?.width;
+          if (w == null || (defW != null && w === defW)) {
+            const { width: _drop, ...rest } = i;
+            return rest;
+          }
+          return { ...i, width: w };
+        }),
+        true,
+      );
+    },
+    defaultWidths: Object.fromEntries(IP_COL_DEFS.map((d) => [d.key, d.width])),
+    lockedKeys: new Set(IP_COL_DEFS.filter((d) => d.locked).map((d) => d.key)),
+    onCommit: () => { /* 落盘已在 setWidths 内做 */ },
+  });
   const { t } = useTranslation();
   const addToast = useToast();
 
@@ -203,6 +258,30 @@ export default function IpManagement() {
             >
               {t('黑名单')} ({blacklist.length})
             </button>
+            {/* 列设置（公共层；白/黑名单共用一份列集） */}
+            <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
+              <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
+                <button
+                  type="button"
+                  className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                  onClick={() => setColPanelOpen((v) => !v)}
+                  aria-label={t('列设置')}
+                >
+                  <Columns3 size={14} />
+                </button>
+              </Tooltip>
+              {colPanelOpen && (
+                <TableColumnSettings
+                  open
+                  onClose={() => setColPanelOpen(false)}
+                  defs={IP_COL_DEFS}
+                  items={colState.items}
+                  onChange={commitCols}
+                  onReset={resetCols}
+                  anchorRef={colPanelRef}
+                />
+              )}
+            </div>
           </div>
 
           {/* 添加规则表单 */}
@@ -252,11 +331,28 @@ export default function IpManagement() {
           ) : (
             <div className="table-wrapper">
               <table>
+                <colgroup>
+                  {appliedCols.map((c) => (
+                    <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                  ))}
+                </colgroup>
                 <thead>
                   <tr>
-                    <th>{t('IP / CIDR')}</th>
-                    <th>{t('备注')}</th>
-                    <th>{t('操作')}</th>
+                    {appliedCols.map((c, idx) => {
+                      const grip = colResize.gripProps(c.key, {
+                        isLast: idx === appliedCols.length - 1,
+                        locked: c.locked,
+                        defaultWidth: c.width,
+                      });
+                      return (
+                        <th key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined}>
+                          {t(IP_COL_DEFS.find((d) => d.key === c.key)?.label ?? c.key)}
+                          {c.key !== 'cidr' && c.key !== 'act' && (
+                            <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                          )}
+                        </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody>
@@ -265,8 +361,13 @@ export default function IpManagement() {
                     const n = renderNote(item);
                     return (
                       <tr key={p || i}>
+                        {visibleKeySet.has('cidr') && (
                         <td><code style={{ background: 'var(--card-bg)', padding: '2px 6px', borderRadius: 4 }}>{p}</code></td>
+                        )}
+                        {visibleKeySet.has('remark') && (
                         <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{n || '—'}</td>
+                        )}
+                        {visibleKeySet.has('act') && (
                         <td>
                           <div className="actions-cell">
                             <button className="btn btn-danger btn-sm" onClick={() => handleRemove(item)}>
@@ -274,6 +375,7 @@ export default function IpManagement() {
                             </button>
                           </div>
                         </td>
+                        )}
                       </tr>
                     );
                   })}
