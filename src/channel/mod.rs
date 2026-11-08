@@ -890,6 +890,57 @@ impl ChannelStore {
         self.persist(&snapshot)
     }
 
+    /// 圈出渠道级悬空映射（P2-8，**只读**，不落盘）。
+    ///
+    /// `alive` = 该渠道有效模型清单（调用方组装：`models` 非空用白名单 /
+    /// 空用 `discovered_models` 快照 / 都无传空切片 = 无判定依据不清理）。
+    /// 判定口径与 [`crate::model::prune_stale_channel_mappings`] 一致。
+    /// 返回悬空 (alias, target) 列表，供对账报告展示。
+    ///
+    /// 两阶段流程（lead 裁定）：第一阶段对账只用本方法（只报告），
+    /// 第二阶段等报告数字确认后才用 [`Self::prune_stale_channel_mappings`] 删除。
+    pub fn report_stale_channel_mappings(
+        &self,
+        id: &str,
+        alive: &[String],
+    ) -> Vec<(String, String)> {
+        self.get(id)
+            .map(|ch| crate::model::prune_stale_channel_mappings(&ch.model_mapping, alive))
+            .unwrap_or_default()
+    }
+
+    /// 渠道级悬空映射清理（P2-8，**破坏性**：删 `model_mapping` 条目并落盘）。
+    ///
+    /// 判定口径同 [`Self::report_stale_channel_mappings`]；doomed 非空时在写锁内
+    /// 改映射 → `persist` → `publish_snapshot`（锁序与 `update` 一致）。
+    /// 返回删除列表供日志/审计。**仅在 lead 两阶段裁定第二阶段放行后调用**。
+    pub fn prune_stale_channel_mappings(
+        &self,
+        id: &str,
+        alive: &[String],
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let doomed: Vec<(String, String)> = self.report_stale_channel_mappings(id, alive);
+        if doomed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let snapshot = {
+            let mut channels = self.channels.write();
+            let ch = channels
+                .iter_mut()
+                .find(|c| c.id == id)
+                .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
+            for (alias, _) in &doomed {
+                ch.model_mapping.remove(alias);
+            }
+            ch.updated_at = chrono::Utc::now().timestamp();
+            let cloned = ch.clone();
+            self.publish_snapshot(&channels);
+            cloned
+        };
+        self.persist(&snapshot)?;
+        Ok(doomed)
+    }
+
     /// 懒加载去重：5 秒内同渠道是否已触发过上游模型发现。
     ///
     /// 返回 true 表示允许本次拉取，false 表示近期已拉过应跳过。
@@ -1750,6 +1801,63 @@ mod tests {
             assert_eq!(picked.len(), 2);
             // priority 20 排前
             assert_eq!(picked[0].id, "b");
+        });
+    }
+
+    /// #33 第一阶段：悬空映射报告（只读，不落盘）——对账段当前接的就是它。
+    #[test]
+    fn store_report_stale_channel_mappings_is_readonly() {
+        with_secret_dir("report-stale", || {
+            let s = store();
+            let mut ch = sample("a", 10, vec!["good-alias"]);
+            ch.model_mapping = HashMap::from([
+                ("dead".to_string(), "t1".to_string()),
+                ("good-alias".to_string(), "t2".to_string()),
+            ]);
+            s.add(ch).unwrap();
+
+            let removed = s.report_stale_channel_mappings("a", &["good-alias".to_string()]);
+            assert_eq!(removed, vec![("dead".to_string(), "t1".to_string())]);
+            // 只读：映射未变
+            let after = s.get("a").unwrap();
+            assert_eq!(after.model_mapping.len(), 2);
+            assert!(after.model_mapping.contains_key("dead"));
+            // 无判定依据（空清单）→ 不清理
+            assert!(s.report_stale_channel_mappings("a", &[]).is_empty());
+        });
+    }
+
+    /// #33 第二阶段能力（本阶段不在 modelRefresh 接线）：真删 + 落盘 + 幂等。
+    #[test]
+    fn store_prune_stale_channel_mappings_deletes_and_persists() {
+        with_secret_dir("prune-stale", || {
+            let s = store();
+            let mut ch = sample("a", 10, vec!["good-alias"]);
+            ch.model_mapping = HashMap::from([
+                ("dead".to_string(), "t1".to_string()),
+                ("good-alias".to_string(), "t2".to_string()),
+            ]);
+            s.add(ch).unwrap();
+
+            let removed = s
+                .prune_stale_channel_mappings("a", &["good-alias".to_string()])
+                .unwrap();
+            assert_eq!(removed, vec![("dead".to_string(), "t1".to_string())]);
+
+            // 内存快照已删
+            let after = s.get("a").unwrap();
+            assert!(!after.model_mapping.contains_key("dead"));
+            assert_eq!(after.model_mapping.len(), 1);
+
+            // 持久化生效：重新 load 后仍是删除后的状态
+            s.load().unwrap();
+            let reloaded = s.get("a").unwrap();
+            assert!(!reloaded.model_mapping.contains_key("dead"));
+            // 幂等：再清一次返回空
+            assert!(s
+                .prune_stale_channel_mappings("a", &["good-alias".to_string()])
+                .unwrap()
+                .is_empty());
         });
     }
 

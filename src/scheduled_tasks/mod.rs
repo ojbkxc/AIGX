@@ -448,16 +448,17 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                         Ok((_, models)) => {
                             if !models.is_empty() {
                                 // 对账（P2-6②）：有效清单 = models 非空用白名单，空用本轮发现快照。
-                                // 必须先于 save_discovered_models（其 move 掉 models）
+                                // 必须先于 save_discovered_models（其 move 掉 models）。
+                                // 第一阶段（lead 裁定）：悬空清单走 ChannelStore::report——只报告不删；
+                                // 第二阶段等报告数字确认后改调 prune_stale_channel_mappings 删除。
                                 let alive: Vec<String> = if !ch.models.is_empty() {
                                     ch.models.clone()
                                 } else {
                                     models.clone()
                                 };
-                                let stale_mappings = crate::model::prune_stale_channel_mappings(
-                                    &ch.model_mapping,
-                                    &alive,
-                                );
+                                let stale_mappings = state
+                                    .channel_store
+                                    .report_stale_channel_mappings(&ch.id, &alive);
                                 // 声明了但上游本轮已不提供（疑似下线）；models 空 = 全支持，无下线概念
                                 let declared_not_found: Vec<String> = if ch.models.is_empty() {
                                     Vec::new()
