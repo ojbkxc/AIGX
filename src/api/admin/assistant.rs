@@ -648,10 +648,11 @@ mod tests {
     fn assistant_tools_risk_field_is_canonical() {
         let specs = tools::tool_specs();
         assert!(!specs.is_empty(), "注册表为空——本值域钉将变成空转");
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         for t in specs {
             let row = tool_json(t);
-            let risk = row["risk"].as_str().unwrap_or_default();
+            // owned：`row` 是循环内局部值，借出的 `&str` 活不出迭代（E0597）
+            let risk = row["risk"].as_str().unwrap_or_default().to_string();
             assert_eq!(
                 risk,
                 t.risk.as_str(),
@@ -659,7 +660,7 @@ mod tests {
                 t.name
             );
             assert!(
-                CANONICAL.contains(&risk),
+                CANONICAL.contains(&risk.as_str()),
                 "{}：risk={risk:?} 越出规范值域 {:?}（历史手拼别名 {:?} 已于 #18 废弃）",
                 t.name,
                 CANONICAL,
@@ -668,7 +669,7 @@ mod tests {
             seen.insert(risk);
         }
         // 三档都得真被测到（某档从注册表消失时提醒改预期，而不是让钉变成空转）。
-        let expected: BTreeSet<&str> = CANONICAL.iter().copied().collect();
+        let expected: BTreeSet<String> = CANONICAL.iter().map(|s| (*s).to_string()).collect();
         assert_eq!(
             seen, expected,
             "注册表 risk 分布与规范值域不吻合（实际: {seen:?}）"
