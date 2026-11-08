@@ -72,6 +72,12 @@ pub const MASTER_PREFIX: &str = "dailyagg:d:";
 pub const USER_PREFIX: &str = "dailyagg:u:";
 /// 回填完成标记键。**不在**主档/用户行前缀族内，sweep/区间读不会误碰。
 pub const BACKFILL_MARKER: &str = "dailyagg:backfill_done";
+/// 聚合行落盘口径标记键（值 = 写入这些行时生效的 `timezone_offset`）。
+///
+/// 存在理由＝**迁移幂等**：`LogStore::tz_migrate` 靠它判断「库里的行已经是目标
+/// 口径」，重复调用不再删一遍、重算一遍。缺省（老库从未迁移过）由调用方传的
+/// `offset_from` 兜底。
+pub const TZ_MARKER: &str = "dailyagg:tz_offset";
 
 /// 主档 by_model 上限。
 const MODEL_CAP: usize = 128;
@@ -285,6 +291,18 @@ pub fn cutoff_date_key(max_age_days: u64) -> String {
     let keep = max_age_days.saturating_sub(1) as i64;
     let now = chrono::Utc::now().timestamp();
     date_key(now - keep * 24 * 3600)
+}
+
+/// 报表日往前 `days_back` 天（定长 `YYYY-MM-DD` ↔ `NaiveDate`）；解析失败原样返回。
+///
+/// 迁移窗口上界（「昨天」）用它。与 `LogStore::backfill_history` 里回填 marker 的
+/// `as_of` 同语义：**回填/迁移都不覆盖今天**（今天归运行期 RMW）。
+pub fn shift_day(date: &str, days_back: i64) -> String {
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.checked_sub_signed(chrono::Duration::days(days_back)))
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| date.to_string())
 }
 
 /// 名字型累计项的统一访问（三种维度结构 + 用户行的 models 共用泛型逻辑）。
@@ -857,6 +875,80 @@ impl DailyAggStore {
     /// 手动重建端点用：清掉标记（允许下一次自动回填重跑）。
     pub fn clear_backfill_marker(&self) -> anyhow::Result<()> {
         self.store.delete(BACKFILL_MARKER)
+    }
+
+    /// 读「聚合行当前落在哪个报表偏移下」（None = 老库从未记过）。
+    pub fn tz_marker(&self) -> Option<i32> {
+        self.store.get(TZ_MARKER).ok().flatten()
+    }
+
+    /// 落口径标记（只由 `LogStore::tz_migrate` 在迁移成功后写）。
+    pub fn set_tz_marker(&self, offset: i32) -> anyhow::Result<()> {
+        self.store.put(TZ_MARKER, &offset)
+    }
+
+    /// 主档 ∪ 用户行覆盖到的**最早**报表日；没有任何聚合行 → None。
+    ///
+    /// 迁移窗口的下界用它：口径变更后只有「已经落盘的聚合行」才可能停留在旧口径，
+    /// 明细本身没有时间戳歧义。区间只扫键名，不反序列化行。
+    pub fn earliest_day(&self) -> anyhow::Result<Option<String>> {
+        let mut min: Option<String> = None;
+        for key in self.store.list(MASTER_PREFIX)? {
+            if let Some(date) = key.strip_prefix(MASTER_PREFIX) {
+                if date.len() == 10 && min.as_deref().is_none_or(|m| date < m) {
+                    min = Some(date.to_string());
+                }
+            }
+        }
+        for key in self.store.list(USER_PREFIX)? {
+            let Some(rest) = key.strip_prefix(USER_PREFIX) else {
+                continue;
+            };
+            // uid 是 uuid（无冒号），日期是尾段 10 字符 —— 与 prune_before 同解析。
+            if let Some(date) = rest.rsplit(':').next() {
+                if date.len() == 10 && min.as_deref().is_none_or(|m| date < m) {
+                    min = Some(date.to_string());
+                }
+            }
+        }
+        Ok(min)
+    }
+
+    /// 删除 **含两端** `[from, to]` 区间内的聚合行（主档 + 用户行），返回条数。
+    ///
+    /// 与 [`Self::prune_before`] 同构（两段扫描 + 同样的尾段日期解析），差别：
+    /// ①区间含两端而不是「严格早于 cutoff」；②不碰回填 marker。
+    ///
+    /// 为什么不能拿 `prune_before("9999-12-31")` 代替：那会把**窗口外（今天）**的
+    /// 运行期数据一起抹掉，而回填只覆盖 `date < 今天`，报表当场开天窗。
+    /// 时区迁移需要的是「只清旧口径那几天」，然后让回填按新口径重写。
+    pub fn delete_day_range(&self, from: &str, to: &str) -> anyhow::Result<usize> {
+        if from > to {
+            return Ok(0);
+        }
+        let _guard = self.lock.lock();
+        let mut removed = 0usize;
+        let range = from..=to;
+        for key in self.store.list(MASTER_PREFIX)? {
+            if let Some(date) = key.strip_prefix(MASTER_PREFIX) {
+                if date.len() == 10 && range.contains(&date) {
+                    self.store.delete(&key)?;
+                    removed += 1;
+                }
+            }
+        }
+        for key in self.store.list(USER_PREFIX)? {
+            let Some(rest) = key.strip_prefix(USER_PREFIX) else {
+                continue;
+            };
+            if let Some(date) = rest.rsplit(':').next() {
+                if date.len() == 10 && range.contains(&date) {
+                    self.store.delete(&key)?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
     }
 }
 

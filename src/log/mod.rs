@@ -1844,6 +1844,75 @@ impl LogStore {
         self.daily.set_backfill_marker(&yesterday)?;
         Ok(report)
     }
+
+    /// 报表时区迁移：把存量聚合行从 `offset_from` 口径重算到 `offset_to` 口径。
+    ///
+    /// **只在显式调用时动数据**（生产机不做隐式重写库）——启动与 cron 都不碰这里，
+    /// 入口是 `POST /api/logs/agg/tz-migrate`。
+    ///
+    /// 操作序（顺序不可调；任一步中断都必须停在「读路径退回明细现算」的安全态）：
+    /// 1. 校验 `offset_to` 就是当前生效口径（进程快照 = 配置文件那份）。否则进程
+    ///    重启后配置回退，重算出来的数据反而与运行期口径不一致 —— 先存设置再迁移。
+    /// 2. **幂等短路**：口径标记（[`daily_agg::TZ_MARKER`]）已是目标偏移就直接返回，
+    ///    不删不重算（老库无标记时以调用方声明的 `offset_from` 兜底）。
+    /// 3. 清回填 marker：迁移期间报表读路径退回明细现算，绝不端出半新半旧的假数。
+    /// 4. 删窗口 `[最早聚合日, 昨天]` 的旧口径行 —— **必须先删**：回填的 shrink
+    ///    守卫（既有行计数更大就保留不动，见上面 `backfill_history`）会把旧口径的
+    ///    大值原样留下，不删就迁不动。不能用 `prune_before("9999-12-31")` 代替，
+    ///    那会连今天一起抹掉，而回填不管今天 → 报表开天窗。
+    /// 5. `backfill_history` 按新口径全量重算（只覆盖 date < 今天 → **切换当日偏低、
+    ///    次日自愈**，端点必须把这条回给运维）。
+    /// 6. 落口径标记（下一步的幂等判据）。
+    ///
+    /// 三坑（端点响应里原样回给运维，别只写在文档）：①第 4 步之前必须先存偏移设置，
+    /// 否则第 1 步直接 400；②升级后到本次调用之间报表是**新旧口径分裂**的；③切换
+    /// 当日「今天」只累计切换之后到达的日志，次日才自愈。
+    pub fn tz_migrate(&self, offset_from: i32, offset_to: i32) -> anyhow::Result<TzMigrateReport> {
+        let current = crate::config::report_tz_offset();
+        anyhow::ensure!(
+            current == offset_to,
+            "目标偏移 {offset_to} 与当前生效口径 {current} 不一致：请先在报表设置里保存偏移，再调迁移端点"
+        );
+        let today = daily_agg::today_key();
+        let window_to = daily_agg::shift_day(&today, 1);
+        let earliest = self.daily.earliest_day()?;
+        let mut report = TzMigrateReport {
+            // 「自该日起的聚合行都是新口径」：最早落盘日；空库 → 今天
+            effective_from: earliest.clone().unwrap_or_else(|| today.clone()),
+            window_to: window_to.clone(),
+            ..Default::default()
+        };
+        // 老库从未记过口径 → 以调用方声明的旧口径为准（生产现状 = UTC+0）
+        let stored = self.daily.tz_marker().unwrap_or(offset_from);
+        if stored == offset_to {
+            return Ok(report);
+        }
+        self.daily.clear_backfill_marker()?;
+        if let Some(from) = earliest.as_deref() {
+            if from <= window_to.as_str() {
+                report.window_applied = true;
+                report.rows_deleted = self.daily.delete_day_range(from, &window_to)?;
+            }
+        }
+        report.backfill = self.backfill_history(5000)?;
+        self.daily.set_tz_marker(offset_to)?;
+        Ok(report)
+    }
+}
+
+/// 时区迁移的统计返回（`POST /api/logs/agg/tz-migrate` 直接回给运维）。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TzMigrateReport {
+    /// 新口径生效起始报表日（含）。空库 = 今天。
+    pub effective_from: String,
+    /// 删除窗上界 = 昨天（回填/迁移都不覆盖今天）。
+    pub window_to: String,
+    /// 是否真的执行了删除（false = 窗口空或聚合行只到今天）。
+    pub window_applied: bool,
+    /// 删掉的旧口径聚合行数（主档 + 用户行）。
+    pub rows_deleted: usize,
+    /// 重算统计（含 shrink 守卫拒绝数，正常迁移后应为 0——窗口已先删干净）。
+    pub backfill: BackfillReport,
 }
 
 /// 回填/重建的统计返回（cron 与 `POST /api/logs/agg/rebuild` 共用形状）。
@@ -2032,6 +2101,231 @@ mod tests {
             serde_json::to_value(s2.daily.load_user_range("u1", &yday, &yday)[0].clone()).unwrap(),
             user_after_1
         );
+    }
+
+    /// 「过去第 `days_back` 天的 20:00 UTC」。
+    ///
+    /// 挑 20:00Z 是有原因的：它在 UTC+8 口径下归**次日**，所以同一瞬间的新旧口径
+    /// 必然差一天 —— 迁移测试要的就是这个错位（换成 02:00Z 两种口径同日，测试就
+    /// 变成空转）。
+    fn ts_at_2000z(days_back: i64) -> i64 {
+        let now = chrono::Utc::now().timestamp();
+        let day = chrono::DateTime::<chrono::Utc>::from_timestamp(now - days_back * 86_400, 0)
+            .unwrap()
+            .date_naive();
+        day.and_hms_opt(20, 0, 0).unwrap().and_utc().timestamp()
+    }
+
+    /// 只落明细、不产生运行期聚合行（`add` 不经 `record_request` 漏斗）。
+    fn add_log_at(s: &LogStore, ts: i64, uid: &str) {
+        let mut l = RequestLog::new();
+        l.created_at = ts;
+        l.user_id = Some(uid.to_string());
+        l.model = "gpt-4".to_string();
+        s.requests.add(l).unwrap();
+    }
+
+    /// 预置「旧口径落盘」的主档 + 用户行，requests/count 故意虚大。
+    fn seed_old_row(s: &LogStore, date: &str) {
+        s.daily
+            .overwrite_day(&daily_agg::DailyAgg {
+                date: date.to_string(),
+                requests: 999,
+                ..Default::default()
+            })
+            .unwrap();
+        s.daily
+            .overwrite_user_row(
+                "u1",
+                &daily_agg::UserDailyRow {
+                    date: date.to_string(),
+                    count: 999,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    /// **生产真路径 0→8**（现网机器是 GMT+0，升到缺省 8 就要走这条）。
+    ///
+    /// 钉四件事：①旧口径键被删干净；②新口径键 = 重算值（999 那条虚大行没活下来
+    /// = shrink 守卫确实被「先删后算」绕开，否则它会把旧值原样留着，迁了个寂寞）；
+    /// ③今天不在窗口内（这就是不能用 `prune_before("9999-12-31")` 全删的理由：回填
+    /// 不管今天，删了就开天窗）；④两个 marker 都落到新状态。
+    #[test]
+    fn tz_migrate_zero_to_eight_rewrites_old_keys() {
+        let s = store();
+        let t_a = ts_at_2000z(3);
+        let t_b = ts_at_2000z(2);
+        add_log_at(&s, t_a, "u1");
+        add_log_at(&s, t_b, "u1");
+        let old_a = daily_agg::date_key_at(t_a, 0);
+        let old_b = daily_agg::date_key_at(t_b, 0);
+        let new_a = daily_agg::date_key_at(t_a, 8);
+        let new_b = daily_agg::date_key_at(t_b, 8);
+        // 错位前提本身也要钉住（否则整条测试退化成空转）。
+        // 口径 0 = **系统本地**（见 `report_tz_of`），CI runner 是 UTC ⇒ 与 +8 必然
+        // 差一天；只有在 UTC+9 及以东的机器上跑才会退化（那不是代码问题，故写进
+        // 失败信息而不是悄悄放过）。
+        assert_eq!(old_b, new_a, "20:00Z 在 +8 归次日 → 键整体前移一天");
+        assert_ne!(
+            old_a, new_a,
+            "0→8 必须真的错位：本机系统口径需早于 UTC+9（CI runner = UTC）"
+        );
+        seed_old_row(&s, &old_a);
+        seed_old_row(&s, &old_b);
+        let today = daily_agg::today_key();
+        s.daily
+            .overwrite_day(&daily_agg::DailyAgg {
+                date: today.clone(),
+                requests: 7,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let r = s.tz_migrate(0, 8).unwrap();
+        assert!(r.window_applied);
+        assert_eq!(r.rows_deleted, 4, "主档 2 + 用户行 2，今天的行不在窗口内");
+        assert_eq!(r.effective_from, old_a, "窗口下界 = 最早落盘日");
+        assert_eq!(r.window_to, daily_agg::shift_day(&today, 1));
+        assert_eq!(r.backfill.scanned, 2);
+        assert_eq!(r.backfill.days_written, 2);
+        assert_eq!(r.backfill.user_rows_written, 2);
+        assert_eq!(
+            r.backfill.skipped_shrink, 0,
+            "先删后算 → 守卫不该拦（拦了就是没迁动）"
+        );
+        // 旧键彻底消失
+        assert!(s.daily.load_day(&old_a).is_none(), "旧键 {old_a} 不该剩");
+        assert!(
+            s.daily.load_user_range("u1", &old_a, &old_a).is_empty(),
+            "旧键 {old_a} 的用户行不该剩"
+        );
+        // 新键 = 重算值；new_a 与 old_b 同名，正是「删掉虚大 999 → 写回 1」的现场
+        assert_eq!(s.daily.load_day(&new_a).unwrap().requests, 1);
+        assert_eq!(s.daily.load_day(&new_b).unwrap().requests, 1);
+        assert_eq!(s.daily.load_user_range("u1", &new_b, &new_b)[0].count, 1);
+        // 今天没被碰
+        assert_eq!(
+            s.daily.load_day(&today).unwrap().requests,
+            7,
+            "窗口上界是昨天，今天归运行期记账"
+        );
+        assert_eq!(s.daily.tz_marker(), Some(8));
+        assert!(s.daily.agg_available(), "重算完要重新闭合读路径闸门");
+    }
+
+    /// **幂等**：重复迁移不再删、不再重算（生产上运维多点一次按钮不能把报表抖一遍）。
+    #[test]
+    fn tz_migrate_is_idempotent_on_second_call() {
+        let s = store();
+        let t_a = ts_at_2000z(3);
+        let t_b = ts_at_2000z(2);
+        add_log_at(&s, t_a, "u1");
+        add_log_at(&s, t_b, "u1");
+        let old_a = daily_agg::date_key_at(t_a, 0);
+        let new_a = daily_agg::date_key_at(t_a, 8);
+        let new_b = daily_agg::date_key_at(t_b, 8);
+        seed_old_row(&s, &old_a);
+        seed_old_row(&s, &daily_agg::date_key_at(t_b, 0));
+        let today = daily_agg::today_key();
+        s.daily
+            .overwrite_day(&daily_agg::DailyAgg {
+                date: today.clone(),
+                requests: 7,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let first = s.tz_migrate(0, 8).unwrap();
+        assert!(first.window_applied);
+        assert_eq!(first.rows_deleted, 4);
+        let after_first = serde_json::to_value(s.daily.load_day(&new_b).unwrap()).unwrap();
+        let user_after =
+            serde_json::to_value(s.daily.load_user_range("u1", &new_b, &new_b)[0].clone()).unwrap();
+
+        let second = s.tz_migrate(0, 8).unwrap();
+        assert!(!second.window_applied, "第二次不该再删窗口");
+        assert_eq!(second.rows_deleted, 0);
+        assert_eq!(second.backfill.scanned, 0, "幂等短路：不该再跑一遍全量回填");
+        assert_eq!(second.backfill.days_written, 0);
+        assert_eq!(second.backfill.user_rows_written, 0);
+        // old_a 已在首轮删掉 → 最早落盘日前移到 new_a
+        assert_eq!(second.effective_from, new_a);
+        // 数据逐字节不变（没有二次改写、也没有二次搬运 cap）
+        assert_eq!(
+            serde_json::to_value(s.daily.load_day(&new_b).unwrap()).unwrap(),
+            after_first
+        );
+        assert_eq!(
+            serde_json::to_value(s.daily.load_user_range("u1", &new_b, &new_b)[0].clone()).unwrap(),
+            user_after
+        );
+        assert_eq!(s.daily.load_day(&today).unwrap().requests, 7);
+        assert_eq!(s.daily.tz_marker(), Some(8));
+    }
+
+    /// 空库（新装/明细已全清）：不删不算，只把两个 marker 落位。
+    #[test]
+    fn tz_migrate_without_data_only_lands_markers() {
+        let s = store();
+        let r = s.tz_migrate(0, 8).unwrap();
+        assert!(!r.window_applied);
+        assert_eq!(r.rows_deleted, 0);
+        assert_eq!(
+            r.effective_from,
+            daily_agg::today_key(),
+            "空库 → 生效日即今天"
+        );
+        assert_eq!(r.backfill.scanned, 0);
+        assert_eq!(r.backfill.days_written, 0);
+        assert!(
+            s.daily.agg_available(),
+            "无历史可回填 = 回填完成，链条照样闭合（与 backfill_history 同语义）"
+        );
+        assert_eq!(s.daily.tz_marker(), Some(8));
+    }
+
+    /// 顺序坑：目标偏移必须已是生效口径，否则重启后配置回退、重算数据反而与运行期
+    /// 不一致。校验必须**先于任何写入**（失败时不留半个 marker）。
+    #[test]
+    fn tz_migrate_requires_target_offset_to_be_live() {
+        let s = store();
+        let cur = crate::config::report_tz_offset();
+        let err = s.tz_migrate(0, cur + 1).unwrap_err().to_string();
+        assert!(
+            err.contains("报表设置"),
+            "错序调用要指路「先存设置」: {err}"
+        );
+        assert_eq!(s.daily.tz_marker(), None, "校验失败不得留下任何写入");
+        assert!(!s.daily.agg_available());
+    }
+
+    /// `delete_day_range` 含两端、区间外不动、反向区间空转。
+    #[test]
+    fn delete_day_range_covers_both_ends() {
+        let s = store();
+        let (d1, d2, d3) = (
+            daily_agg::day_key_back(1),
+            daily_agg::day_key_back(2),
+            daily_agg::day_key_back(3),
+        );
+        for d in [&d1, &d2, &d3] {
+            seed_old_row(&s, d);
+        }
+        // from > to → 直接 0，不扫库
+        assert_eq!(
+            s.daily
+                .delete_day_range("2026-01-02", "2026-01-01")
+                .unwrap(),
+            0
+        );
+        // 删 [d3, d2]：两端都在内，d1（昨天）保留
+        let removed = s.daily.delete_day_range(&d3, &d2).unwrap();
+        assert_eq!(removed, 4, "主档 2 + 用户行 2");
+        assert!(s.daily.load_day(&d3).is_none(), "下界含端点");
+        assert!(s.daily.load_day(&d2).is_none(), "上界含端点");
+        assert!(s.daily.load_day(&d1).is_some(), "窗口外不动");
     }
 
     #[test]
