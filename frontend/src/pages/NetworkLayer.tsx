@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Columns3 } from 'lucide-react';
 
 import { useTranslation } from 'react-i18next';
 import {
@@ -14,6 +15,17 @@ import type { NetworkStatusRaw, NetworkAccount } from '../types/network';
 import type { SchedulerStatusItem, SchedulerChannelItem } from '../types';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
+import {
+  applyTableColumns,
+  readTableColumns,
+  resetTableColumns,
+  writeTableColumns,
+  type TableColumnDef,
+  type TableColumnItem,
+  type TableColumnState,
+} from '../lib/tableColumns';
+import TableColumnSettings from '../components/ui/TableColumnSettings';
+import { Tooltip } from '../components/ui';
 import './NetworkLayer.css';
 
 /** 网络层持久化配置（与后端 NetworkLayerConfig 对齐） */
@@ -41,6 +53,22 @@ const STRATEGY_OPTIONS = [
   { value: 'weighted', labelKey: '权重均衡' },
   { value: 'random', labelKey: '随机选择' },
   { value: 'least-loaded', labelKey: '最空闲优先' },
+];
+
+const LS_TCOLS = 'aigx-tbl-cols.networklayer';
+/** 诊断面板表列声明（两张表共用一份：账号表 / 渠道诊断表列并集，per-table 过滤渲染） */
+const NL_COL_DEFS: TableColumnDef[] = [
+  { key: 'name', label: '名称', width: 180 },
+  { key: 'id', label: '账号 ID', width: 140 },
+  { key: 'status', label: '状态', align: 'center', width: 90 },
+  { key: 'last_used', label: '最近使用', width: 150 },
+  { key: 'act', label: '操作', width: 90, locked: true },
+  { key: 'channel', label: '渠道', width: 160 },
+  { key: 'breaker', label: '断路器', align: 'center', width: 100 },
+  { key: 'health', label: '健康', align: 'center', width: 90 },
+  { key: 'aimd', label: 'AIMD 限额', align: 'right', width: 110 },
+  { key: 'success', label: '当日成功率', align: 'right', width: 110 },
+  { key: 'trips', label: '熔断次数', align: 'right', width: 100 },
 ];
 
 function fmtLatency(ms: number | null | undefined): string {
@@ -86,6 +114,22 @@ function fmtRate(val: number | null | undefined): string {
 export default function NetworkLayer(): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
+  // 诊断面板列设置（公共层；两张表共用一份键——列并集管理，per-table 过滤渲染）
+  const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, NL_COL_DEFS));
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
+  const commitNLCols = useCallback((next: TableColumnItem[], persist: boolean) => {
+    setColState((prev) => {
+      const nextState: TableColumnState = { ...prev, items: next };
+      if (persist) writeTableColumns(LS_TCOLS, nextState);
+      return nextState;
+    });
+  }, []);
+  const resetNLCols = useCallback(() => setColState(resetTableColumns(LS_TCOLS, NL_COL_DEFS)), []);
+  const nlCols = useMemo(() => applyTableColumns(colState, NL_COL_DEFS), [colState]);
+  const nlKeySet = useMemo(() => new Set(nlCols.map((c) => c.key)), [nlCols]);
+  // 注：本页表格为 tailwind 自适应布局（无固定宽 colgroup），列宽拖拽不适用——
+  // 列设置只覆盖显隐/顺序/对齐（面板中锁定列语义不变）。
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [networkStatus, setNetworkStatus] = useState<NetworkStatusRaw | null>(null);
@@ -534,12 +578,38 @@ export default function NetworkLayer(): JSX.Element {
             <div className="glass-card">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-xl font-semibold text-white">{t('账号管理')}</h2>
+                <div className="flex items-center gap-2">
+                {/* 列设置（公共层；两张诊断表共用一份列集） */}
+                <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
+                  <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
+                    <button
+                      type="button"
+                      className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                      onClick={() => setColPanelOpen((v) => !v)}
+                      aria-label={t('列设置')}
+                    >
+                      <Columns3 size={14} />
+                    </button>
+                  </Tooltip>
+                  {colPanelOpen && (
+                    <TableColumnSettings
+                      open
+                      onClose={() => setColPanelOpen(false)}
+                      defs={NL_COL_DEFS}
+                      items={colState.items}
+                      onChange={commitNLCols}
+                      onReset={resetNLCols}
+                      anchorRef={colPanelRef}
+                    />
+                  )}
+                </div>
                 <button
                   onClick={() => setShowAccountForm((v) => !v)}
                   className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition font-medium text-sm"
                 >
                   {showAccountForm ? t('收起') : t('添加账号')}
                 </button>
+                </div>
               </div>
               {showAccountForm && (
                 <div className="bg-gray-800/50 rounded-xl p-5 mb-4 grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -586,26 +656,40 @@ export default function NetworkLayer(): JSX.Element {
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
+                    <colgroup>
+                      {nlCols.filter((c) => ['name','id','status','last_used','act'].includes(c.key)).map((c) => (
+                        <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                      ))}
+                    </colgroup>
                     <thead>
                       <tr className="text-gray-400 text-left border-b border-gray-700">
-                        <th className="py-2 pr-4">{t('名称')}</th>
-                        <th className="py-2 pr-4">{t('账号 ID')}</th>
-                        <th className="py-2 pr-4">{t('状态')}</th>
-                        <th className="py-2 pr-4">{t('最近使用')}</th>
-                        <th className="py-2 pr-4">{t('操作')}</th>
+                        {nlCols.filter((c) => ['name','id','status','last_used','act'].includes(c.key)).map((c) => (
+                          <th key={c.key} className="py-2 pr-4">
+                            {t(NL_COL_DEFS.find((d) => d.key === c.key)?.label ?? c.key)}
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
                       {accounts.map((a) => (
                         <tr key={a.id} className="border-b border-gray-800">
+                          {nlKeySet.has('name') && (
                           <td className="py-2 pr-4 text-white">{a.name}</td>
+                          )}
+                          {nlKeySet.has('id') && (
                           <td className="py-2 pr-4 text-gray-300">{a.account_id}</td>
+                          )}
+                          {nlKeySet.has('status') && (
                           <td className="py-2 pr-4">
                             <span className={a.status === 'active' ? 'text-green-500' : a.status === 'error' ? 'text-red-500' : 'text-yellow-500'}>
                               {a.status}
                             </span>
                           </td>
+                          )}
+                          {nlKeySet.has('last_used') && (
                           <td className="py-2 pr-4 text-gray-400">{formatTimestamp(a.last_used_at ?? undefined)}</td>
+                          )}
+                          {nlKeySet.has('act') && (
                           <td className="py-2 pr-4">
                             <button
                               onClick={() => handleRemoveAccount(a.id)}
@@ -614,6 +698,7 @@ export default function NetworkLayer(): JSX.Element {
                               {t('删除')}
                             </button>
                           </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>
@@ -642,14 +727,18 @@ export default function NetworkLayer(): JSX.Element {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
+              <colgroup>
+                {nlCols.filter((c) => ['channel','breaker','health','aimd','success','trips'].includes(c.key)).map((c) => (
+                  <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                ))}
+              </colgroup>
               <thead>
                 <tr className="text-gray-400 text-left border-b border-gray-700">
-                  <th className="py-2 pr-4">{t('渠道')}</th>
-                  <th className="py-2 pr-4">{t('断路器')}</th>
-                  <th className="py-2 pr-4">{t('健康')}</th>
-                  <th className="py-2 pr-4">{t('AIMD 限额')}</th>
-                  <th className="py-2 pr-4">{t('当日成功率')}</th>
-                  <th className="py-2 pr-4">{t('熔断次数')}</th>
+                  {nlCols.filter((c) => ['channel','breaker','health','aimd','success','trips'].includes(c.key)).map((c) => (
+                    <th key={c.key} className="py-2 pr-4">
+                      {t(NL_COL_DEFS.find((d) => d.key === c.key)?.label ?? c.key)}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
@@ -663,7 +752,8 @@ export default function NetworkLayer(): JSX.Element {
                           {ch.channel_type} · {ch.enabled ? t('启用') : t('停用')} · W{ch.weight}
                         </div>
                       </td>
-                      <td className="py-2 pr-4">
+                      {nlKeySet.has('breaker') && (
+<td className="py-2 pr-4">
                         <span className="inline-flex items-center gap-1.5">
                           <span className="w-2 h-2 rounded-full" style={{ background: breakerColor(state) }} />
                           <span style={{ color: breakerColor(state) }}>{breakerLabel(state, t)}</span>
@@ -680,7 +770,9 @@ export default function NetworkLayer(): JSX.Element {
                           </div>
                         )}
                       </td>
-                      <td className="py-2 pr-4">
+)}
+                      {nlKeySet.has('health') && (
+<td className="py-2 pr-4">
                         {ch.health ? (
                           <>
                             <div className={ch.health.auth_ok ? 'text-green-500' : 'text-red-500'}>
@@ -699,7 +791,9 @@ export default function NetworkLayer(): JSX.Element {
                           <span className="text-gray-600">—</span>
                         )}
                       </td>
-                      <td className="py-2 pr-4">
+)}
+                      {nlKeySet.has('aimd') && (
+<td className="py-2 pr-4">
                         {ch.aimd ? (
                           <>
                             <span className="text-white font-medium">{ch.aimd.current_limit}</span>
@@ -709,7 +803,9 @@ export default function NetworkLayer(): JSX.Element {
                           <span className="text-gray-600">—</span>
                         )}
                       </td>
-                      <td className="py-2 pr-4">
+)}
+                      {nlKeySet.has('success') && (
+<td className="py-2 pr-4">
                         {ch.archive ? (
                           <span style={{ color: ch.archive.success_rate >= 95 ? 'rgb(34,197,94)' : ch.archive.success_rate >= 80 ? 'rgb(234,179,8)' : 'rgb(239,68,68)' }}>
                             {fmtRate(ch.archive.success_rate)}
@@ -718,7 +814,9 @@ export default function NetworkLayer(): JSX.Element {
                           <span className="text-gray-600">—</span>
                         )}
                       </td>
-                      <td className="py-2 pr-4">
+)}
+                      {nlKeySet.has('trips') && (
+<td className="py-2 pr-4">
                         {ch.archive ? (
                           <span className={ch.archive.trips > 0 ? 'text-yellow-500 font-medium' : 'text-gray-600'}>
                             {ch.archive.trips}
@@ -727,6 +825,7 @@ export default function NetworkLayer(): JSX.Element {
                           <span className="text-gray-600">—</span>
                         )}
                       </td>
+)}
                     </tr>
                   );
                 })}
