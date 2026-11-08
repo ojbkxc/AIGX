@@ -1,10 +1,21 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CalendarCheck, ChevronRight, Play, Plus, RefreshCw, Trash2, X } from 'lucide-react';
+import { CalendarCheck, ChevronRight, Play, Plus, RefreshCw, Trash2, X, Columns3 } from 'lucide-react';
 import { api } from '../api';
 import { providerIcon } from '../lib/providerIcons';
 import { useToast } from '../components/Toast';
 import { Badge, Card, EmptyState, Loading, Switch } from '../components/ui';
+import {
+  applyTableColumns,
+  readTableColumns,
+  resetTableColumns,
+  writeTableColumns,
+  type TableColumnDef,
+  type TableColumnItem,
+  type TableColumnState,
+} from '../lib/tableColumns';
+import TableColumnSettings from '../components/ui/TableColumnSettings';
+import { Tooltip } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import BenefitsPanel from '../components/BenefitsPanel';
 import type { CheckinCenterData, CheckinRecord, CheckinRunResult, CheckinSchedule } from '../types';
@@ -113,7 +124,33 @@ const EMPTY_SCHEDULE: ScheduleForm = {
  * Asia/Shanghai，设置 offset=0 后展示与执行脱钩（#21 补做项）。 */
 import { localDateKey, nextRunLabel } from '../lib/checkinTz';
 
+
+const LS_TCOLS = 'aigx-tbl-cols.checkin-records';
+/** 签到记录表列声明（时间/说明锁定） */
+const CK_REC_COL_DEFS: TableColumnDef[] = [
+  { key: 'time', label: '时间', width: 150, locked: true },
+  { key: 'account', label: '账号', width: 180 },
+  { key: 'provider', label: '上游', width: 110 },
+  { key: 'source', label: '来源', width: 90 },
+  { key: 'result', label: '结果', width: 100 },
+  { key: 'note', label: '说明', width: 260 },
+];
+
 export default function CheckinCenter(): JSX.Element {
+  // 签到记录表列设置（公共层；分页为服务端 offset/limit 原口径不动）
+  const [recCols, setRecCols] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, CK_REC_COL_DEFS));
+  const [recPanelOpen, setRecPanelOpen] = useState(false);
+  const recPanelRef = useRef<HTMLDivElement | null>(null);
+  const commitRecCols = useCallback((next: TableColumnItem[], persist: boolean) => {
+    setRecCols((prev) => {
+      const nextState: TableColumnState = { ...prev, items: next };
+      if (persist) writeTableColumns(LS_TCOLS, nextState);
+      return nextState;
+    });
+  }, []);
+  const resetRecCols = useCallback(() => setRecCols(resetTableColumns(LS_TCOLS, CK_REC_COL_DEFS)), []);
+  const appliedRecCols = useMemo(() => applyTableColumns(recCols, CK_REC_COL_DEFS), [recCols]);
+  const recKeySet = useMemo(() => new Set(appliedRecCols.map((c) => c.key)), [appliedRecCols]);
   const { t } = useTranslation();
   const addToast = useToast();
 
@@ -1383,6 +1420,30 @@ export default function CheckinCenter(): JSX.Element {
           title={t('签到记录')}
           actions={
             <div className="ck-records-tools">
+              {/* 列设置（公共层；签到记录表专用） */}
+              <div className="as-colset" ref={recPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
+                <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
+                  <button
+                    type="button"
+                    className={`btn btn-outline btn-sm${recPanelOpen ? ' as-colset-open' : ''}`}
+                    onClick={() => setRecPanelOpen((v) => !v)}
+                    aria-label={t('列设置')}
+                  >
+                    <Columns3 size={14} />
+                  </button>
+                </Tooltip>
+                {recPanelOpen && (
+                  <TableColumnSettings
+                    open
+                    onClose={() => setRecPanelOpen(false)}
+                    defs={CK_REC_COL_DEFS}
+                    items={recCols.items}
+                    onChange={commitRecCols}
+                    onReset={resetRecCols}
+                    anchorRef={recPanelRef}
+                  />
+                )}
+              </div>
               <div className="ck-seg" role="group" aria-label={t('时间筛选')}>
                 {[
                   { v: 1, label: t('今天') },
@@ -1459,39 +1520,61 @@ export default function CheckinCenter(): JSX.Element {
           ) : (
             <>
               <table className="ck-table">
+                <colgroup>
+                  {appliedRecCols.map((c) => (
+                    <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                  ))}
+                </colgroup>
                 <thead>
                   <tr>
-                    <th style={{ width: 150 }}>{t('时间')}</th>
-                    <th>{t('账号')}</th>
-                    <th style={{ width: 110 }}>{t('上游')}</th>
-                    <th style={{ width: 90 }}>{t('来源')}</th>
-                    <th style={{ width: 100 }}>{t('结果')}</th>
-                    <th>{t('说明')}</th>
+                    {appliedRecCols.map((c, idx) => {
+                      const gripProps = { title: t('拖动调整列宽 · 双击还原') };
+                      return (
+                      <th key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined}>
+                        {t(CK_REC_COL_DEFS.find((d) => d.key === c.key)?.label ?? c.key)}
+                        {c.key !== 'time' && c.key !== 'note' && idx >= 0 && (
+                          <span className="as-col-grip" {...gripProps} />
+                        )}
+                      </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody>
                   {records.map((record, index) => (
                     <tr key={`${record.ts}-${record.account_id}-${index}`}>
+                      {recKeySet.has('time') && (
                       <td>
                         {new Date(record.ts * 1000).toLocaleString()}
                         {record.date && <div className="ck-time-subtle">{record.date}</div>}
                       </td>
+                      )}
+                      {recKeySet.has('account') && (
                       <td>
                         {record.account_name || record.account_id}
                         {record.kept_active && <Badge tone="info">{t('保活')}</Badge>}
                       </td>
+                      )}
+                      {recKeySet.has('provider') && (
                       <td>{record.provider}</td>
+                      )}
+                      {recKeySet.has('source') && (
                       <td className="ck-record-source">
                         {t(SOURCE_LABEL[record.source] ?? record.source)}
                       </td>
+                      )}
+                      {recKeySet.has('result') && (
                       <td>
                         <Badge tone={OUTCOME_TONE[record.outcome] ?? 'neutral'}>
                           {t(OUTCOME_LABEL[record.outcome] ?? record.outcome)}
                         </Badge>
                       </td>
+                      )}
+                      {recKeySet.has('note') && (
                       <td className={record.outcome === 'failed' ? 'ck-message ck-record-detail-fail' : 'ck-message'}>
                         {record.message || '—'}
                       </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
