@@ -587,6 +587,10 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "extra_headers": crate::channel::mask_sensitive_headers(&session.extra_headers),
         // 账号限制规则（余额 / Token 两类）；编辑弹窗读它回填规则列表
         "limiters": session.limiters,
+        // 条件组（#29/#61）：编辑弹窗「生效来源」徽标判据 + 条件组草稿回填。
+        // 缺省 None → 序列化为 null → 前端 ?? [] 容忍；体积成本与 limiters
+        // 同量级（条件组用户存量极少），不做编辑弹窗专用回填端点。
+        "limiter_groups": session.limiter_groups,
         // 续期令牌只暴露「有没有」与脱敏形态，不回明文
         "has_refresh_token": !session.refresh_secret.is_empty(),
         "refresh_token": if session.refresh_secret.is_empty() {
