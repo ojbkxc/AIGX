@@ -76,11 +76,11 @@ pub async fn handle_assistant_tools(
             "label": t.label,
             "description": t.description,
             "schema": (t.schema)(),
-            "risk": match t.risk {
-                RiskLevel::ReadOnly => "read_only",
-                RiskLevel::LowRisk => "low_risk",
-                RiskLevel::HighRisk => "high_risk",
-            },
+            // #18：单一取值来源。此前此处手拼 read_only/low_risk/high_risk，
+            // 与其余 3 处输出点（agent/runner.rs、api/admin/settings.rs、
+            // api/admin/user_tools.rs）的 RiskLevel::as_str() 值域割裂，
+            // 下游按值过滤会踩到第三套命名。
+            "risk": t.risk.as_str(),
         })
     };
     let tools: Vec<Value> = if user.is_admin() {
