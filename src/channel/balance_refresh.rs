@@ -376,18 +376,24 @@ mod tests {
             "{\"total_granted\":100,\"total_used\":0}",
             200,
         );
-        let store = store();
+        let store = Arc::new(store());
         let mut ch = sample("gone", &mock.base_url);
         ch.balance_query_interval_secs = Some(3600);
         store.add(ch).unwrap();
 
         let client = reqwest::Client::new();
-        let sweep_future = sweep(&store, &client);
+        // 先让巡检真正开跑——future 是惰性的，不 spawn 就不会执行：
+        // 首轮 poll 发生在 tokio::time::sleep 让出之后，list 拿到「gone」，
+        // 查询打向 mock（延迟 200ms 留出在途窗口）。
+        let sweep_handle = tokio::spawn({
+            let store = Arc::clone(&store);
+            async move { sweep(&store, &client).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
         // 查询在途时删掉渠道：写回找不到记录应静默跳过
-        std::thread::sleep(Duration::from_millis(50));
         store.remove("gone").unwrap();
-        let done = sweep_future.await;
-        assert_eq!(done, 1); // 查询本身成功
+        let done = sweep_handle.await.unwrap();
+        assert_eq!(done, 1); // 查询本身成功（写回静默跳过不影响计数）
         assert!(store.get("gone").is_none());
     }
 
