@@ -407,7 +407,8 @@ async fn ensure_channel(
             }
         }
     }
-    c.post(format!("{base}/api/channels"))
+    let resp = c
+        .post(format!("{base}/api/channels"))
         .bearer_auth(token)
         .json(&json!({
             "name": name, "channel_type": channel_type,
@@ -417,9 +418,15 @@ async fn ensure_channel(
         }))
         .send()
         .await
-        .expect("create channel")
-        .error_for_status()
-        .expect("create channel ok");
+        .expect("create channel");
+    if !resp.status().is_success() {
+        // 失败时把状态码与响应体打进 panic（body 即根因，400/401/403 的 body 直接指路）
+        panic!(
+            "create channel 失败: {} body={}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
+    }
 }
 
 // ─── 观测面 ───
@@ -592,6 +599,23 @@ async fn run_surface(
         .collect();
     let q_after = key_used_quota(c, base, admin).await;
 
+    // 诊断转储：断言失败时 CI stdout 段直接可见每条新日志（先报根因再判性质）
+    for l in &fresh {
+        println!(
+            "  [fresh] rid={}|status={}|in={}|out={}|cost={}|lat={}|err={}|ch={}",
+            l.get("request_id").and_then(|r| r.as_str()).unwrap_or("?"),
+            l.get("status_code").and_then(|s| s.as_u64()).unwrap_or(0),
+            l.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0),
+            l.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0),
+            l.get("cost").and_then(|x| x.as_f64()).unwrap_or(0.0),
+            l.get("latency_ms").and_then(|t| t.as_u64()).unwrap_or(0),
+            l.get("error_msg").and_then(|e| e.as_str()).unwrap_or(""),
+            l.get("channel_name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("?"),
+        );
+    }
+
     let n499: Vec<&Value> = fresh
         .iter()
         .filter(|l| l.get("status_code").and_then(|s| s.as_u64()) == Some(499))
@@ -711,23 +735,35 @@ async fn disconnect_499_billing_dual_surface() {
     )
     .await;
     for m in ["mock-model", "mock-model-anth"] {
-        c.post(format!("{base}/api/pricing"))
+        let resp = c
+            .post(format!("{base}/api/pricing"))
             .bearer_auth(&admin)
             .json(&json!({"model_name": m, "input_price": 50, "output_price": 100, "price_type": "token"}))
             .send()
             .await
-            .expect("pricing")
-            .error_for_status()
-            .expect("pricing ok");
+            .expect("pricing");
+        if !resp.status().is_success() {
+            panic!(
+                "pricing 失败: {} body={}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            );
+        }
     }
-    c.post(format!("{base}/api/tokens"))
+    let resp = c
+        .post(format!("{base}/api/tokens"))
         .bearer_auth(&admin)
         .json(&json!({"name": "e147-key", "custom_key": KEY}))
         .send()
         .await
-        .expect("create key")
-        .error_for_status()
-        .expect("create key ok");
+        .expect("create key");
+    if !resp.status().is_success() {
+        panic!(
+            "create key 失败: {} body={}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
+    }
 
     // 4) 双面冒烟（非 200 即拓扑无效）
     let smoke = c
