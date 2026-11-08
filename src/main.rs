@@ -1856,6 +1856,23 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         // 路由队列预演（对照 Agent2API「设置 → 路由 → 候选队列」：只读，
         // 不推进 round_robin 游标；round_robin 下实际首挑由游标决定）
         .route("/api/routing/queue", get(api::admin::handle_routing_queue))
+        // 多规则档案管理面（#40 第 2 步，契约 §5）：整份档案读写 + 单组 CRUD
+        // + 判定预演（与 queue 共用同一判定序列，可指定 group_id 预演）
+        .route(
+            "/api/routing/profiles",
+            get(api::admin::handle_get_routing_profiles)
+                .put(api::admin::handle_put_routing_profiles),
+        )
+        .route(
+            "/api/routing/profiles/group/:id",
+            get(api::admin::handle_get_routing_group)
+                .put(api::admin::handle_put_routing_group)
+                .delete(api::admin::handle_delete_routing_group),
+        )
+        .route(
+            "/api/routing/preview",
+            post(api::admin::handle_routing_preview),
+        )
         // 路由回放快照（Phase1-B：只读投影，route_replay 开关开启的请求
         // 才有完整数据；管理员鉴权，冷路径）
         .route(
