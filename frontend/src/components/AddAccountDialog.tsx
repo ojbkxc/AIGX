@@ -21,6 +21,7 @@ import { useToast } from './Toast';
 import ProxySelector from './ProxySelector';
 import { Button, Input, Select, Tabs, Textarea } from './ui';
 import type { AccountProviderItem, AccountSessionItem, ChannelItem } from '../types';
+import type { DesktopSourceItem } from '../types/desktop';
 
 type Step = 'pick' | 'form';
 /** 第 1 步分档（对齐 Agent2API add-provider-pick）：全部 / Agent / Web / API 模板 / 已建 API */
@@ -229,6 +230,16 @@ export default function AddAccountDialog({
   // 粘贴式登录（网关归一化 + 校验一次后落账号）
   const [pasteBusy, setPasteBusy] = useState(false);
   const [pasteHint, setPasteHint] = useState('');
+  // 桌面客户端登录态导入（#22 desktop 段；provider 无关——后端白名单分发 +
+  // auto_channel 原子建号。supported 由后端按 cfg!(windows)+encrypted 给）
+  const [desktopPick, setDesktopPick] = useState(false);
+  const [desktopSources, setDesktopSources] = useState<DesktopSourceItem[] | null>(null);
+  const [desktopName, setDesktopName] = useState('');
+  const [desktopBusyId, setDesktopBusyId] = useState('');
+  const [desktopError, setDesktopError] = useState('');
+  // 重复提供商检测（#22）：新建自定义提供商提交时命中同协议+同归一化地址 →
+  // 警告条二次确认（AIGX 本就自动并入同池，这里是把行为显式告知）
+  const [dupAck, setDupAck] = useState(false);
 
   const selectedProvider = providers.find((p) => p.kind === provider);
   const addConfig = addConfigOf(provider);
@@ -306,6 +317,7 @@ export default function AddAccountDialog({
     setBaseUrlPlaceholder(preset?.placeholder ?? '');
     setNoAuth(preset?.no_auth ?? false);
     setCustomNew(false);
+    setDesktopPick(false);
     setProtocol('openai_compatible');
     setCustomName('');
     setPoolName('');
@@ -336,6 +348,7 @@ export default function AddAccountDialog({
     setProvider('openai_compatible');
     setEdition('');
     setCustomNew(true);
+    setDupAck(false);
     setProtocol('openai_compatible');
     setCustomName('');
     setPoolName('');
@@ -368,6 +381,7 @@ export default function AddAccountDialog({
     setProvider(provider);
     setEdition('');
     setCustomNew(false);
+    setDesktopPick(false);
     setProtocol('openai_compatible');
     setCustomName('');
     setPoolName(pool.name);
@@ -618,6 +632,16 @@ export default function AddAccountDialog({
       setError(t('该供应商需要填写上游地址'));
       return;
     }
+    // 重复提供商检测（#22）：同协议 + 同归一化地址的已有账号 → 首次提交只
+    // 弹警告条二次确认（本次添加会自动并入同一账号池，不重复建池——提交链
+    // 的 sibling 复用逻辑不变）；用户点「仍要新建」后放行
+    if (customNew && !dupAck) {
+      const dup = findDuplicate();
+      if (dup) {
+        setError(t('检测到同协议、同上游地址的已有账号（渠道「{{name}}」，{{n}} 个账号）——确认并入同一账号池请点上方「仍要新建」', { name: dup.channelName, n: dup.count }));
+        return;
+      }
+    }
     if (needsProviderPick && !provider) {
       setError(t('请先选择供应商'));
       return;
@@ -715,9 +739,70 @@ export default function AddAccountDialog({
     }
   };
 
+  /** 「桌面客户端登录态」入口：provider 无关（后端白名单分发 + auto_channel
+   *  原子建号），sources 的 supported 由后端按平台/加密态给出 */
+  const pickDesktop = (): void => {
+    setDesktopPick(true);
+    setCustomNew(false);
+    setPoolName('');
+    setDesktopSources(null);
+    setDesktopName('');
+    setDesktopBusyId('');
+    setDesktopError('');
+    setDupAck(false);
+    setStep('form');
+    void (async () => {
+      try {
+        const res = await api.getDesktopSources();
+        setDesktopSources(res?.data ?? []);
+      } catch (err) {
+        setDesktopError(err instanceof Error ? err.message : String(err));
+      }
+    })();
+  };
+
+  /** 执行桌面导入：POST {source_id, name}（固定路径白名单在后端；前端无路径参数） */
+  const runDesktopImport = async (sourceId: string): Promise<void> => {
+    setDesktopBusyId(sourceId);
+    setDesktopError('');
+    try {
+      await api.importDesktopAccount({
+        source_id: sourceId,
+        name: desktopName.trim() || undefined,
+      });
+      addToast(t('桌面登录态已导入，账号已创建'));
+      await onCreated();
+      onClose();
+    } catch (err) {
+      setDesktopError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDesktopBusyId('');
+    }
+  };
+
+  /** 「新建自定义提供商」提交前的重复检测（#22）：同协议 + 同归一化地址的
+   *  已有账号 → 警告条二次确认（本次添加会自动并入同一账号池，不重复建池） */
+  const findDuplicate = (): { channelName: string; count: number } | null => {
+    const base = normalizeUrl((advanced.base_url || '').trim());
+    if (!base) return null;
+    const rows = sessions.filter(
+      (s) => s.provider === activeProvider && normalizeUrl(s.base_url || '') === base,
+    );
+    if (!rows.length) return null;
+    const ch = channels.find((c) => String(c.id) === rows[0]?.channel_id);
+    return { channelName: ch?.name || `#${String(rows[0]?.channel_id ?? '')}`, count: rows.length };
+  };
+  /** 当前是否命中重复（仅 customNew 形态检测；渲染警告条与提交拦截共用） */
+  const dupInfo = customNew ? findDuplicate() : null;
+
   const cardIcon = (kind: string): string | null => providerIcon(kind);
 
   const methods: AddMethodId[] = addConfig?.methods?.length ? addConfig.methods : ['manual'];
+  // file 段（#22）：有粘贴/手填能力的家统一追加「凭证文件」入口——文件内容
+  // 读入粘贴域后走同一校验链（后端 #23：前端解析 + 既有创建端点，无独立端点）
+  if (addConfig && (methods.includes('paste') || methods.includes('manual')) && !methods.includes('file')) {
+    methods.push('file');
+  }
 
   // ── 第 1 步：分档与分组渲染（对齐 Agent2API add-provider-pick）──
 
@@ -809,6 +894,19 @@ export default function AddAccountDialog({
     </button>
   );
 
+  // 「桌面客户端登录态」卡（#22 desktop 段）：与自定义卡同住「已建 API」组，
+  // provider 无关（后端白名单 4 来源固定路径只读 + auto_channel 原子建号）
+  const desktopCard = (
+    <button type="button" key="__desktop__" className="add-card is-new" onClick={pickDesktop}>
+      <span className="add-card-initial is-new">🖥</span>
+      <span className="add-card-info">
+        <span className="add-card-name">{t('桌面客户端登录态')}</span>
+        <span className="add-card-meta">{t('读取本机客户端登录态文件（固定路径白名单，仅 Windows）')}</span>
+      </span>
+      <span className="add-card-go">›</span>
+    </button>
+  );
+
   const grouped = segment === 'all';
   const activeSegments: GroupSegment[] = grouped ? GROUPED_SEGMENTS : [segment as GroupSegment];
   // 「全部」档：空组整组不出（连分组带一起收）；唯一例外是「已建 API」——
@@ -884,7 +982,7 @@ export default function AddAccountDialog({
                         </button>
                       </div>
                     ) : null}
-                    {seg === 'existing' && !needle ? newProviderCard : null}
+                    {seg === 'existing' && !needle ? [newProviderCard, desktopCard] : null}
                     {cards}
                   </Fragment>
                 ))}
@@ -925,7 +1023,50 @@ export default function AddAccountDialog({
               </button>
             </div>
             <div className="modal-body">
-              {addConfig ? (
+              {/* ── desktop 段（#22）：provider 无关的白名单导入，独立形态 ── */}
+              {desktopPick ? (
+                <div className="add-block">
+                  <h4>{t('桌面客户端登录态导入')}</h4>
+                  <p className="form-hint">
+                    {t('从本机客户端的登录态文件读取令牌（固定路径白名单只读，请求不带路径；仅管理员，仅 Windows）。导入走与粘贴式完全相同的落库链。')}
+                  </p>
+                  <Input
+                    label={t('备注名（可选，作用于本次导入的所有账号）')}
+                    placeholder={t('可选，留空则用来源展示名')}
+                    value={desktopName}
+                    onChange={(e) => setDesktopName(e.target.value)}
+                  />
+                  {desktopError ? <div className="error-message">{desktopError}</div> : null}
+                  {desktopSources === null ? (
+                    <p className="form-hint">{t('加载来源清单…')}</p>
+                  ) : desktopSources.length === 0 ? (
+                    <p className="form-hint">{t('后端未配置任何桌面来源')}</p>
+                  ) : (
+                    <div className="add-desktop-list">
+                      {desktopSources.map((s) => (
+                        <div key={s.id} className={`add-desktop-row${s.supported ? '' : ' is-off'}`}>
+                          <div className="add-desktop-main">
+                            <b>{s.label}</b>
+                            <code title={s.path}>{s.path}</code>
+                            {!s.supported && s.unsupportedReason ? (
+                              <span className="form-hint">{s.unsupportedReason}</span>
+                            ) : null}
+                          </div>
+                          <Button
+                            type="button"
+                            variant={s.supported ? 'primary' : 'outline'}
+                            size="sm"
+                            disabled={!s.supported || desktopBusyId !== ''}
+                            onClick={() => void runDesktopImport(s.id)}
+                          >
+                            {desktopBusyId === s.id ? t('导入中…') : s.supported ? t('导入') : t('不支持')}
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : addConfig ? (
                 <>
                   {addConfig.editions?.length ? (
                     <div className="add-method-row">
@@ -1097,6 +1238,102 @@ export default function AddAccountDialog({
                     </div>
                   ) : null}
 
+                  {/* ── file 段（#22）：选择凭据文件 → 读入粘贴域 → 走既有校验链。
+                      后端 #23 结论：前端解析 + 既有创建端点，无独立端点。JSON
+                      预检失败不拦（按纯令牌处理），由粘贴校验给最终结论。── */}
+                  {method === 'file' && addConfig ? (
+                    <div className="add-block">
+                      <h4>{t('导入凭证文件')}</h4>
+                      <p className="form-hint">{addConfig.fileImport?.note || t('选择保存下来的凭据 JSON / 文本文件，内容读入后走粘贴校验链。')}</p>
+                      <div className="add-btn-row">
+                        <label className="btn btn-primary" style={{ cursor: 'pointer' }}>
+                          {t('选择文件')}
+                          <input
+                            type="file"
+                            accept=".json,.txt,application/json,text/plain"
+                            style={{ display: 'none' }}
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              e.target.value = '';
+                              if (!file) return;
+                              void file.text().then((content) => {
+                                const credField = addConfig.fields.find((f) => f.target === 'credential');
+                                if (!credField) return;
+                                const trimmed = content.trim();
+                                try {
+                                  JSON.parse(trimmed);
+                                } catch {
+                                  setPasteHint(t('文件不是合法 JSON，按纯令牌处理（最终以校验结果为准）'));
+                                }
+                                setValue(credField.key, trimmed);
+                                setMethod('paste');
+                                setPasteHint(t('已读入 {{name}}（{{n}} 字符），确认后点「校验并添加」', { name: file.name, n: trimmed.length }));
+                              });
+                            }}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* ── guest 段（#22）：后端无 guest/access 端点（上游闭源插件），
+                      形态 = 访客令牌指引 + 粘贴走既有校验链 ── */}
+                  {method === 'guest' && addConfig?.guest ? (
+                    <div className="add-block">
+                      <h4>{t('访客模式')}</h4>
+                      <p className="form-hint">{addConfig.guest.note}</p>
+                      {addConfig.fields.map((field) => (
+                        <FieldInput
+                          key={field.key}
+                          field={field}
+                          value={values[field.key] || ''}
+                          onChange={(v) => setValue(field.key, v)}
+                        />
+                      ))}
+                      <div className="add-btn-row" style={{ marginTop: 10 }}>
+                        <Button type="button" onClick={() => void submitPaste()} disabled={pasteBusy}>
+                          {pasteBusy ? t('校验并添加中…') : t('校验并添加')}
+                        </Button>
+                        {pasteHint ? <span className="form-hint">{pasteHint}</span> : null}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* ── oauth 段（#22）：指引打开官方授权页 + 粘贴 accessToken
+                      （上游 OauthLoginConfig 的 modes 即粘贴字段；网页语境无
+                      滑块桥，指引如实写明）── */}
+                  {method === 'oauth' && addConfig?.oauth ? (
+                    <div className="add-block">
+                      <h4>{addConfig.oauth.title || t('网页授权')}</h4>
+                      <p className="form-hint">{addConfig.oauth.note}</p>
+                      {addConfig.oauth.url ? (
+                        <div className="add-btn-row" style={{ marginBottom: 10 }}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => window.open(addConfig.oauth!.url, '_blank', 'noopener,noreferrer')}
+                          >
+                            {addConfig.oauth.button || t('打开官方授权页')}
+                          </Button>
+                        </div>
+                      ) : null}
+                      {addConfig.fields.map((field) => (
+                        <FieldInput
+                          key={field.key}
+                          field={field}
+                          value={values[field.key] || ''}
+                          onChange={(v) => setValue(field.key, v)}
+                        />
+                      ))}
+                      <div className="add-btn-row" style={{ marginTop: 10 }}>
+                        <Button type="button" onClick={() => void submitPaste()} disabled={pasteBusy}>
+                          {pasteBusy ? t('校验并添加中…') : t('校验并添加')}
+                        </Button>
+                        {pasteHint ? <span className="form-hint">{pasteHint}</span> : null}
+                      </div>
+                    </div>
+                  ) : null}
+
                   {method === 'manual' ? (
                     <div className="add-block">
                       <h4>{t('从抓包请求头导入（可选）')}</h4>
@@ -1242,8 +1479,25 @@ export default function AddAccountDialog({
                     placeholder={baseUrlPlaceholder || selectedProvider?.default_base_url || baseUrlHint || 'https://api.deepseek.com'}
                     hint={customNew ? t(CUSTOM_BASE_HINT[protocol] || '') : undefined}
                     value={advanced.base_url}
-                    onChange={(e) => setAdvanced({ ...advanced, base_url: e.target.value })}
+                    onChange={(e) => { setAdvanced({ ...advanced, base_url: e.target.value }); setDupAck(false); }}
                   />
+                  {/* 重复提供商检测警告条（#22）：customNew + 同协议同地址已有
+                      账号时出现；「仍要新建」置 dupAck 放行提交。命中时 base_url
+                      变更会因 dupAck 已置位跳过再检——重置由输入变化触发 */}
+                  {customNew && dupInfo ? (
+                    <div className="add-dup-warn" role="alert">
+                      <span>
+                        {t('已存在同协议、同上游地址的账号：渠道「{{name}}」（{{n}} 个账号）。本次添加会自动并入该账号池，不会重复建池。', { name: dupInfo.channelName, n: dupInfo.count })}
+                      </span>
+                      {dupAck ? (
+                        <span className="form-hint">{t('已确认并入，可继续提交')}</span>
+                      ) : (
+                        <Button type="button" variant="outline" size="sm" onClick={() => setDupAck(true)}>
+                          {t('仍要新建')}
+                        </Button>
+                      )}
+                    </div>
+                  ) : null}
                   <Input
                     label={t('对话路径（可选，默认 /chat/completions）')}
                     placeholder={selectedProvider?.chat_path || '/api/chat'}

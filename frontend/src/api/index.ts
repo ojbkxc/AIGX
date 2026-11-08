@@ -108,6 +108,8 @@ import type {
 } from '@/types';
 // 路由回放/粘滞会话类型独立成文件（types/index.ts 正被 #13 并行编辑，避免共享大文件互卷在制品）
 import type { RouteReplaySnapshot, RouteStickyList } from '@/types/routing-replay';
+// 桌面导入来源类型（#22；独立文件理由同上）
+import type { DesktopSourceItem } from '@/types/desktop';
 
 const API_BASE = '/api';
 
@@ -731,6 +733,12 @@ export const api = {
   // 部分更新（状态/优先级/权重/并发/名称），不会清空地址/模型/代理/凭证
   patchAccountSession: (id: string, data: Record<string, unknown>): Promise<ApiResponse<AccountSessionItem>> =>
     request<ApiResponse<AccountSessionItem>>('PATCH', `${API_BASE}/account-sessions/${encodeURIComponent(id)}`, data),
+  // 桌面客户端登录态导入（#22 desktop 段；后端 desktop_import.rs——白名单
+  // 只读 + 固定路径，请求体只有 source_id+name，无路径参数）
+  getDesktopSources: (): Promise<ApiResponse<DesktopSourceItem[]>> =>
+    request<ApiResponse<DesktopSourceItem[]>>('GET', `${API_BASE}/account-sessions/desktop/sources`),
+  importDesktopAccount: (data: { source_id: string; name?: string }): Promise<ApiResponse<Record<string, unknown>>> =>
+    request<ApiResponse<Record<string, unknown>>>('POST', `${API_BASE}/account-sessions/desktop-import`, data),
   deleteAccountSession: (id: string): Promise<ApiResponse<MessageResult>> =>
     request<ApiResponse<MessageResult>>('DELETE', `${API_BASE}/account-sessions/${encodeURIComponent(id)}`),
   /**

@@ -11,7 +11,7 @@
  * intl 变体（autoclaw/qoder/accio/zcode/monkeycode）上游也是分开两张卡。
  */
 
-export type AddMethodId = 'web' | 'sms' | 'manual' | 'paste';
+export type AddMethodId = 'web' | 'sms' | 'manual' | 'paste' | 'file' | 'guest' | 'oauth';
 
 export interface AddField {
   /** 表单草稿里的键（也是展示顺序） */
@@ -81,6 +81,16 @@ export interface ProviderAddConfig {
   sms?: {
     note: string;
   };
+  /** 凭证文件导入（#22 file 段说明）：声明后「添加方式」追加「凭证文件」——
+   *  选择 JSON/文本文件 → 内容填进粘贴域 → 走既有校验链（后端 #23 结论：
+   *  前端解析 + 既有创建端点，无独立端点） */
+  fileImport?: { note: string };
+  /** 访客模式（#22 guest 段）：后端 #23 结论——AIGX 无 guest/access 端点
+   *  （上游在闭源插件里，不猜测实现），形态=指引 + 粘贴访客令牌走既有链 */
+  guest?: { note: string };
+  /** 网页授权（#22 oauth 段）：指引打开官方授权页 + 粘贴 accessToken
+   *  （上游 OauthLoginConfig 的 modes 就是粘贴字段；网页语境无滑块桥） */
+  oauth?: { title?: string; note: string; url?: string; button?: string };
 }
 
 /** 通用 API Key 型供应商（非登录态）没有独立配置，按 provider 元数据兜底 */
@@ -531,7 +541,17 @@ export const SESSION_ADD_CONFIGS: Record<string, ProviderAddConfig> = {
     manualNote:
       '国际版与国内版账号体系独立，请填国际版的凭证。未填 refreshToken 无法自动续期。',
     addButton: '添加 AutoClaw 国际版账号',
-    methods: ['manual'],
+    methods: ['manual', 'oauth', 'file'],
+    // 网页授权（上游 oauthLogin：国际版唯一登录方式，Zai/Google）。上游点按钮
+    // 会先过阿里云滑块（桌面桥 ui/autoclaw-oauth.js），网页语境没有该桥——
+    // 如实指引：在官方登录页过滑块并登录后，把 accessToken 粘回本弹窗。
+    oauth: {
+      note:
+        '国际版官方唯一的登录方式是网页授权（Zai / Google）。流程：打开官方登录页 → 完成一次阿里云滑块验证（官方风控）→ 选择 Zai 或 Google 登录 → 从客户端 data.bin 或登录响应里复制 accessToken 粘贴进来。网页弹窗无法替你过滑块，授权页操作完成后回到这里粘贴。',
+      url: 'https://autoglm-api.autoglm.ai/',
+      button: '打开 AutoClaw 国际版登录页',
+    },
+    fileImport: { note: '选择官方插件 / CLIProxyAPI 落盘的凭据 JSON（整段含 refreshToken/oauth_context 可自动续期），读入后走粘贴校验链。' },
     fields: [
       { key: 'token', label: 'token', rows: 3, target: 'credential', placeholder: '国际版账号的 access token（明文 JWT）' },
       { key: 'refreshToken', label: 'refreshToken', rows: 2, optional: true, placeholder: '没有则无法自动续期' },
@@ -798,7 +818,15 @@ Object.assign(SESSION_ADD_CONFIGS, {
     manualNote:
       '粘贴智谱清言的访问令牌（JWT，三段点分）。获取方式：浏览器打开 chatglm.cn 并登录后，在开发者工具的 Application → Cookies 里复制 chatglm_token 的值（也可以直接粘 chatglm_token=…; 整行）。粘贴后会先向上游校验一次，校验通过才落账号；登录账号的积分、签到能力都能用，之后由网关自动续期。',
     addButton: '添加智谱清言账号',
-    methods: ['paste', 'manual'],
+    methods: ['paste', 'manual', 'guest', 'file'],
+    // 访客模式（上游 guestLogin）：后端 #23 结论——guest/access 在上游闭源
+    // 插件里，AIGX 不猜测实现；访客令牌粘贴即等价（访客无积分体系，照抄
+    // 上游文案的如实声明）
+    guest: {
+      note:
+        '访客模式不需要登录：在 chatglm.cn 未登录状态下打开网页版，从开发者工具的 Application → Cookies 里复制 chatglm_token 的值粘贴进来即可（网关会按访客链路校验落账号）。注意：访客账号没有积分体系——积分、签到、活动领取对访客如实跳过；想要积分就用「粘贴凭证」粘一个已登录账号的令牌。',
+    },
+    fileImport: { note: '选择官方导出/抓包保存的凭据 JSON（整段），读入后走粘贴校验链。' },
     fields: [
       { key: 'accessToken', label: 'accessToken', rows: 3, target: 'credential', placeholder: 'JWT（三段点分；也可直接粘贴 chatglm_token=… 整行）' },
       { key: 'name', label: '备注名', optional: true, target: 'name', placeholder: '可选，留空则用账号昵称' },
@@ -832,6 +860,9 @@ export const ADD_METHOD_LABELS: Record<AddMethodId, string> = {
   sms: '手机验证码登录',
   manual: '填写凭证',
   paste: '粘贴凭证（校验后添加）',
+  file: '凭证文件',
+  guest: '访客模式',
+  oauth: '网页授权',
 };
 
 export function addConfigOf(provider: string): ProviderAddConfig | undefined {
