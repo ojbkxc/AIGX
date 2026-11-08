@@ -30,6 +30,12 @@ fn default_data_dir() -> String {
     "~/.aigx".to_string()
 }
 
+/// 生成资产目录总量上限默认 1GiB（#48）：按单张 ≤32MiB 估算约 32 张，
+/// 对调试/回看足够，又不会让磁盘无界增长。
+fn default_generated_images_max_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+
 fn default_daily_limit() -> u64 {
     10000
 }
@@ -72,6 +78,11 @@ pub struct ServerConfig {
     /// 默认关闭，行为与既往一致（响应原样透传、不落盘）。
     #[serde(default)]
     pub save_generated_images: bool,
+    /// 生成图片资产目录的总量上限（字节，#48）。开启落盘后目录会随
+    /// 每次生成单调增长，故由 retention sweep 按 mtime 从最旧淘汰，
+    /// 直到总量回落到上限内；`0` = 不设上限（不淘汰，运维逃生口）。
+    #[serde(default = "default_generated_images_max_bytes")]
+    pub generated_images_max_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -752,6 +763,7 @@ impl Default for ServerConfig {
             request_stats_dir: None,
             debug_dir: None,
             save_generated_images: false,
+            generated_images_max_bytes: default_generated_images_max_bytes(),
         }
     }
 }

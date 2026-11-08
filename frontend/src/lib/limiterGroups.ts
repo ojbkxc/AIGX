@@ -135,12 +135,14 @@ function flatWindow(rule: AccountLimiterRule): LimiterWindow {
   return { reset: 'total', seconds: 0 };
 }
 
-/** 组摘要（列表一行）：动作 + 目标 + 条件数（如「skip · 整号 · 2 条件」） */
+/** 组摘要（列表一行）：动作 + 目标 + 条件数（如「skip · 整号 · 2 条件」）。
+ *  本地计数（tokens/requests）在计数器接入前恒 unknown 不命中（#29 现状边界），
+ *  列表摘要显式带「（暂未生效）」防用户误以为已在判定中生效。 */
 export function describeGroup(g: LimiterGroup): string {
   const action = g.action === 'disable' ? '停用账号' : '跳过本轮';
   const target = g.target === 'account' ? '整号' : '限定模型';
   const local = g.conditions.filter((c) => isLocalMetric(c.metric)).length;
   const parts = [`${action} · ${target} · ${g.conditions.length} 条件`];
-  if (local > 0) parts.push(`${local} 条本地计数`);
+  if (local > 0) parts.push(`${local} 条本地计数（暂未生效）`);
   return parts.join(' · ');
 }

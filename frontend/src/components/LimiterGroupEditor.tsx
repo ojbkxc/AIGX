@@ -200,7 +200,14 @@ export default function LimiterGroupEditor({ initial, onSave, onClose }: Props):
                     value={c.metric}
                     onChange={(e) => {
                       const metric = e.target.value as LimiterMetric;
-                      patchCondition(i, { metric, window: isLocalMetric(metric) ? c.window ?? { reset: 'fixed', seconds: 86_400 } : null });
+                      // 切指标**不动 window 对象本身**：startsAt/endsAt/utcOffsetMinutes
+                      // 是 v1 不暴露的透传字段，置 null 会把既有值抹掉（复核缺口 3）；
+                      // 仅在 local 类且无 window 时给默认窗口。保存归一时非 local
+                      // 仍按后端要求置 null（handleSave），此处不重复承担该职责。
+                      patchCondition(i, {
+                        metric,
+                        window: c.window ?? (isLocalMetric(metric) ? { reset: 'fixed', seconds: 86_400 } : null),
+                      });
                     }}
                   >
                     {(Object.keys(METRIC_LABELS) as LimiterMetric[]).map((m) => (
