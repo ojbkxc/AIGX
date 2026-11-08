@@ -1,9 +1,22 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, type FormEvent, useRef, useCallback, useMemo} from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { Button, Card, Input, EmptyState, SkeletonCards, SkeletonTable } from '../components/ui';
+import {
+  applyTableColumns,
+  readTableColumns,
+  resetTableColumns,
+  writeTableColumns,
+  type TableColumnDef,
+  type TableColumnItem,
+  type TableColumnState,
+} from '../lib/tableColumns';
+import TableColumnSettings from '../components/ui/TableColumnSettings';
+import { useColumnResize } from '../components/ui/useColumnResize';
+import { Tooltip } from '../components/ui';
+import { Columns3 } from 'lucide-react';
 import { fmtQuota } from '../lib/utils';
 
 interface WalletUser {
@@ -80,7 +93,52 @@ interface WalletOrder {
 // 预设充值档位（new-api 式快捷金额）
 const AMOUNT_PRESETS = [10, 50, 100, 500];
 
+
+const LS_TCOLS = 'aigx-tbl-cols.wallet-orders';
+/** 订单表列声明（订单号/操作语义锁定——订单无操作列，单号即主键） */
+const WALLET_ORDER_COL_DEFS: TableColumnDef[] = [
+  { key: 'trade_no', label: '订单号', width: 240, locked: true },
+  { key: 'amount', label: '金额', align: 'right', width: 100 },
+  { key: 'quota', label: '配额', align: 'right', width: 110 },
+  { key: 'pay', label: '支付方式', width: 110 },
+  { key: 'status', label: '状态', align: 'center', width: 90 },
+  { key: 'created', label: '创建时间', width: 160 },
+];
 export default function Wallet(): JSX.Element {
+  // 订单表列设置（公共层；订阅小表 5 列固定不接）
+  const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, WALLET_ORDER_COL_DEFS));
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
+  const commitOrderCols = useCallback((next: TableColumnItem[], persist: boolean) => {
+    setColState((prev) => {
+      const nextState: TableColumnState = { ...prev, items: next };
+      if (persist) writeTableColumns(LS_TCOLS, nextState);
+      return nextState;
+    });
+  }, []);
+  const resetOrderCols = useCallback(() => setColState(resetTableColumns(LS_TCOLS, WALLET_ORDER_COL_DEFS)), []);
+  const orderCols = useMemo(() => applyTableColumns(colState, WALLET_ORDER_COL_DEFS), [colState]);
+  const orderKeySet = useMemo(() => new Set(orderCols.map((c) => c.key)), [orderCols]);
+  const orderResize = useColumnResize({
+    widths: Object.fromEntries(colState.items.filter((i) => i.width != null).map((i) => [i.key, i.width as number])),
+    setWidths: (next) => {
+      commitOrderCols(
+        colState.items.map((i) => {
+          const w = next[i.key];
+          const defW = WALLET_ORDER_COL_DEFS.find((d) => d.key === i.key)?.width;
+          if (w == null || (defW != null && w === defW)) {
+            const { width: _drop, ...rest } = i;
+            return rest;
+          }
+          return { ...i, width: w };
+        }),
+        true,
+      );
+    },
+    defaultWidths: Object.fromEntries(WALLET_ORDER_COL_DEFS.map((d) => [d.key, d.width])),
+    lockedKeys: new Set(WALLET_ORDER_COL_DEFS.filter((d) => d.locked).map((d) => d.key)),
+    onCommit: () => { /* 落盘已在 setWidths 内做 */ },
+  });
   const [me, setMe] = useState<WalletUser | null>(null);
   const [epay, setEpay] = useState<EpayConfig | null>(null);
   const [orders, setOrders] = useState<WalletOrder[]>([]);
@@ -659,29 +717,79 @@ export default function Wallet(): JSX.Element {
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
-      <Card title={`${t('我的订单')} (${orders.length})`}>
+      <Card
+        title={`${t('我的订单')} (${orders.length})`}
+        actions={
+          <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
+            <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
+              <button
+                type="button"
+                className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                onClick={() => setColPanelOpen((v) => !v)}
+                aria-label={t('列设置')}
+              >
+                <Columns3 size={14} />
+              </button>
+            </Tooltip>
+            {colPanelOpen && (
+              <TableColumnSettings
+                open
+                onClose={() => setColPanelOpen(false)}
+                defs={WALLET_ORDER_COL_DEFS}
+                items={colState.items}
+                onChange={commitOrderCols}
+                onReset={resetOrderCols}
+                anchorRef={colPanelRef}
+              />
+            )}
+          </div>
+        }
+      >
         {orders.length === 0 ? (
           <EmptyState message={t('暂无订单')} icon="🧾" />
         ) : (
           <div className="table-wrapper">
             <table>
+              <colgroup>
+                {orderCols.map((c) => (
+                  <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                ))}
+              </colgroup>
               <thead>
                 <tr>
-                  <th>{t('订单号')}</th>
-                  <th>{t('金额')}</th>
-                  <th>{t('配额')}</th>
-                  <th>{t('支付方式')}</th>
-                  <th>{t('状态')}</th>
-                  <th>{t('创建时间')}</th>
+                  {orderCols.map((c, idx) => {
+                    const grip = orderResize.gripProps(c.key, {
+                      isLast: idx === orderCols.length - 1,
+                      locked: c.locked,
+                      defaultWidth: c.width,
+                    });
+                    return (
+                      <th key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined}>
+                        {t(WALLET_ORDER_COL_DEFS.find((d) => d.key === c.key)?.label ?? c.key)}
+                        {c.key !== 'trade_no' && (
+                          <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                        )}
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
                 {orders.map((o) => (
                   <tr key={o.trade_no}>
+                    {orderKeySet.has('trade_no') && (
                     <td><code className="key-value" style={{ maxWidth: 240 }}>{o.trade_no}</code></td>
+                    )}
+                    {orderKeySet.has('amount') && (
                     <td>¥{Number(o.money || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    )}
+                    {orderKeySet.has('quota') && (
                     <td>{fmtQuota(o.quota != null ? o.quota : (o.amount || 0) * (epay?.price || 1))}</td>
+                    )}
+                    {orderKeySet.has('pay') && (
                     <td>{o.payment_method}</td>
+                    )}
+                    {orderKeySet.has('status') && (
                     <td>
                       <span className={
                         o.status === 'paid' ? 'badge badge-success'
@@ -691,7 +799,10 @@ export default function Wallet(): JSX.Element {
                         {o.status === 'paid' ? t('已支付') : o.status === 'expired' ? t('已过期') : t('待支付')}
                       </span>
                     </td>
+                    )}
+                    {orderKeySet.has('created') && (
                     <td>{o.create_time ? new Date(o.create_time * 1000).toLocaleString() : '—'}</td>
+                    )}
                   </tr>
                 ))}
               </tbody>
