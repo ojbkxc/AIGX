@@ -56,6 +56,8 @@ pub struct AppState {
     pub channel_store: Arc<ChannelStore>,
     /// 路由策略（对照 Agent2API「设置 → 路由」：策略/粘性/断路器/调度权重）
     pub routing_policy: Arc<crate::channel::routing_policy::RoutingPolicyStore>,
+    /// 终端用户工具权限策略（#34 P0：组级 allowlist + 全局开关，默认全关）
+    pub user_tool_policy: Arc<crate::agent::user_tool_policy::UserToolPolicyStore>,
     /// 系统提示词注入（对照 Agent2API「设置 → 网关 → 系统提示词」）
     pub gateway_prompt: Arc<crate::prompt::GatewayPromptStore>,
     /// 账号型渠道的账号池（渠道内第二级调度：账号级优先级/冷却/并发/粘性）

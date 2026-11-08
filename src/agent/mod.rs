@@ -21,6 +21,7 @@ pub mod registry;
 pub mod runner;
 pub mod session;
 pub mod tools;
+pub mod user_tool_policy;
 
 use std::sync::Arc;
 

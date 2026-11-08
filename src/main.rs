@@ -300,6 +300,9 @@ async fn main() -> anyhow::Result<()> {
     // 可配可热更；数据面 resolve_bridges 每请求读快照分派
     let routing_policy =
         Arc::new(crate::channel::routing_policy::RoutingPolicyStore::with_store(store.clone()));
+    // 终端用户工具权限策略（#34 P0）：与路由策略同构的快照存储，默认全关
+    let user_tool_policy =
+        Arc::new(crate::agent::user_tool_policy::UserToolPolicyStore::with_store(store.clone()));
     // 启动时把持久化的路由策略热应用到各组件（免重启生效）：
     // 断路器（开关+三参）、亲和 TTL、调度权重
     {
@@ -614,6 +617,7 @@ async fn main() -> anyhow::Result<()> {
         livez_state: livez_state.clone(),
         channel_store,
         routing_policy,
+        user_tool_policy,
         gateway_prompt,
         account_sessions,
         pricing_store,
