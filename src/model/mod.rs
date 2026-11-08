@@ -2,6 +2,7 @@ use anyhow::Result;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::storage::FileStore;
@@ -420,6 +421,63 @@ impl ModelMapper {
     }
 }
 
+/// 渠道级悬空映射判定（P2-8，方案见 `_a2a-port-recon/42-catalog-drift-plan.md`）。
+///
+/// 纯函数：圈出 `Channel.model_mapping` 里**永不生效**的条目，由调用方落盘。
+/// 判定口径（与数据面 `Channel::resolve_channel_mapping` 同口径，精确字符串匹配）：
+///
+/// - `alive` = 该渠道的有效模型清单（调用方组装：`models` 非空用白名单；
+///   空则用 `discovered_models` 快照；**都为空时传空切片 = 无判定依据，不清理**）；
+/// - alias 不在 `alive` 中 → 悬空候选：alias 不被请求 ⇒ 渠道不会被选中
+///   （数据面 `supports_model` 口径）⇒ 映射永不命中；
+/// - 链式保护：alias 是存活映射链的中间节点（被清单内 alias 引用）时保留。
+///   不动点迭代：存活集沿 target 边扩展，收敛后清单外的孤立节点才删——
+///   a→b→c 中 b 不在清单但 a 在 ⇒ 整链保；链末端死 ⇒ 整链一起清；
+/// - 空 target 条目：`resolve_channel_mapping` 恒跳过（`!next.is_empty()`），
+///   视为坏条目无条件删——不影响引用它的映射链（链式解析从 alias 出发，
+///   target 无需在映射表里）。
+///
+/// 返回待删条目的 (alias, target) 列表（按 alias 排序，便于测试稳定）。
+pub fn prune_stale_channel_mappings(
+    mapping: &HashMap<String, String>,
+    alive: &[String],
+) -> Vec<(String, String)> {
+    if mapping.is_empty() || alive.is_empty() {
+        return Vec::new();
+    }
+    // 存活集初始 = 清单内且出现在映射表里的 alias
+    let mut protected: HashSet<&String> = HashSet::new();
+    for (alias, _) in mapping.iter() {
+        if alive.iter().any(|m| m == alias) {
+            protected.insert(alias);
+        }
+    }
+    // 不动点迭代：存活 alias 的 target 也是链中间节点，必须保
+    loop {
+        let mut changed = false;
+        for (alias, target) in mapping.iter() {
+            if protected.contains(&alias) {
+                if let Some((key, _)) = mapping.get_key_value(target) {
+                    if protected.insert(key) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // 空 target 坏条目 + 清单外且未受保护的 alias
+    let mut removed: Vec<(String, String)> = mapping
+        .iter()
+        .filter(|(alias, target)| target.is_empty() || !protected.contains(*alias))
+        .map(|(a, t)| (a.clone(), t.clone()))
+        .collect();
+    removed.sort();
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,5 +713,103 @@ mod tests {
         let removed = m.prune_stale_mappings(&alive).unwrap();
         assert_eq!(removed.len(), 2, "末端 c 死亡 → b→c 与 a→b 一起清");
         assert!(m.all_mappings().is_empty());
+    }
+
+    // ── 渠道级悬空映射判定（P2-8）：prune_stale_channel_mappings ─────────────
+
+    fn channel_mapping(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn channel_alive(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn channel_prune_basic() {
+        let mapping = channel_mapping(&[("dead-alias", "t1"), ("good-alias", "t2")]);
+        let removed = prune_stale_channel_mappings(&mapping, &channel_alive(&["good-alias"]));
+        assert_eq!(removed, vec![("dead-alias".to_string(), "t1".to_string())]);
+    }
+
+    #[test]
+    fn channel_prune_empty_alive_skips() {
+        // 无判定依据（白名单与快照都没有）→ 一律不清理
+        let mapping = channel_mapping(&[("any", "t1")]);
+        assert!(prune_stale_channel_mappings(&mapping, &[]).is_empty());
+        assert!(prune_stale_channel_mappings(&mapping, &channel_alive(&[])).is_empty());
+    }
+
+    #[test]
+    fn channel_prune_chain_protection() {
+        // a→b→c，a 在清单，b 不在：b 是中间节点被 a 引用 → 整链保
+        let mapping = channel_mapping(&[("a", "b"), ("b", "c")]);
+        let removed = prune_stale_channel_mappings(&mapping, &channel_alive(&["a"]));
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn channel_prune_full_chain_death() {
+        // 全链不在清单 → 整链清（不动点迭代）
+        let mapping = channel_mapping(&[("a", "b"), ("b", "c")]);
+        let removed = prune_stale_channel_mappings(&mapping, &channel_alive(&["other"]));
+        assert_eq!(
+            removed,
+            vec![
+                ("a".to_string(), "b".to_string()),
+                ("b".to_string(), "c".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn channel_prune_self_loop() {
+        // 自环在清单 → 保（resolve 视为无映射，无害，不主动清）
+        let mapping = channel_mapping(&[("a", "a")]);
+        assert!(prune_stale_channel_mappings(&mapping, &channel_alive(&["a"])).is_empty());
+        // 自环不在清单 → 孤立死环，删
+        let removed = prune_stale_channel_mappings(&mapping, &channel_alive(&["other"]));
+        assert_eq!(removed, vec![("a".to_string(), "a".to_string())]);
+    }
+
+    #[test]
+    fn channel_prune_empty_target() {
+        // 空 target 坏条目无条件删；引用它的 a→b（b 在清单）保留
+        let mapping = channel_mapping(&[("b", ""), ("a", "b")]);
+        let removed = prune_stale_channel_mappings(&mapping, &channel_alive(&["a", "b"]));
+        assert_eq!(removed, vec![("b".to_string(), String::new())]);
+    }
+
+    #[test]
+    fn channel_prune_fixpoint_isolated_head() {
+        // a→b、b→c：b 在清单 → b、c 保（c 被 b 引用）；a 不在清单且 target b
+        // 受保护 → a 是孤立死链头，删
+        let mapping = channel_mapping(&[("a", "b"), ("b", "c")]);
+        let removed = prune_stale_channel_mappings(&mapping, &channel_alive(&["b"]));
+        assert_eq!(removed, vec![("a".to_string(), "b".to_string())]);
+    }
+
+    #[test]
+    fn channel_prune_idempotent() {
+        let mapping = channel_mapping(&[("dead", "t1"), ("good", "t2")]);
+        let first = prune_stale_channel_mappings(&mapping, &channel_alive(&["good"]));
+        assert_eq!(first.len(), 1);
+        // 模拟清理后再跑：mapping 已移除死条目 → 返回空
+        let cleaned: HashMap<String, String> = mapping
+            .into_iter()
+            .filter(|(a, _)| !first.iter().any(|(x, _)| x == a))
+            .collect();
+        assert!(prune_stale_channel_mappings(&cleaned, &channel_alive(&["good"])).is_empty());
+    }
+
+    #[test]
+    fn channel_prune_exact_match() {
+        // 精确匹配口径：大小写变体不归一，与 resolve_channel_mapping 一致
+        let mapping = channel_mapping(&[("GPT-4", "t1")]);
+        let removed = prune_stale_channel_mappings(&mapping, &channel_alive(&["gpt-4"]));
+        assert_eq!(removed, vec![("GPT-4".to_string(), "t1".to_string())]);
     }
 }
