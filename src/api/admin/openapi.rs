@@ -41,6 +41,7 @@ pub fn build_openapi_document() -> Value {
     for part in [
         paths_auth(),
         paths_users(),
+        paths_user_tools(),
         paths_channels(),
         paths_tokens(),
         paths_pricing(),
@@ -242,6 +243,19 @@ fn paths_users() -> Value {
         "/api/checkin": {
             "get": op("用户", "查询今日签到状态"),
             "post": op("用户", "执行每日签到（送配额）")
+        }
+    })
+}
+
+/// 用户工具策略（#34 §5.1，喂 #65 UserTools 配置页；配置 100% 管理员）。
+fn paths_user_tools() -> Value {
+    json!({
+        "/api/user-tools/policy": {
+            "get": op("用户工具", "读当前用户工具策略快照（enabled + 组 allowlist + 生效版本号）"),
+            "put": op_body("用户工具", "全量更新用户工具策略（超限 409 + 原因；写后热更；回带保存后的策略）", "UserToolPolicy: { enabled: boolean, groups: { [组名]: { allowlist: string[] } } }，allowlist 含 \"*\" 表示该组获得 LowRisk 全集")
+        },
+        "/api/user-tools/catalog": {
+            "get": op("用户工具", "工具目录（全部工具 + risk + has_user_exec + 当前策略命中状态 policy_hit）")
         }
     })
 }
@@ -1617,6 +1631,8 @@ mod tests {
         add("/api/users/self", &["put"]);
         add("/api/users/{id}", &["delete", "put"]);
         add("/api/users/{id}/2fa", &["delete"]);
+        add("/api/user-tools/policy", &["get", "put"]);
+        add("/api/user-tools/catalog", &["get"]);
         add("/api/zcode/captcha", &["get", "post"]);
         add("/api/zcode/captcha-pool", &["get", "put"]);
         add("/api/zcode/captcha/config", &["get"]);

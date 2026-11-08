@@ -1890,6 +1890,17 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/routing/preview",
             post(api::admin::handle_routing_preview),
         )
+        // 用户工具策略（#34 §5.1，喂 #65 UserTools 配置页）：快照读写 + 工具目录
+        // （配置 100% 管理员；终端用户只消费生效结果，不新增用户侧配置端点）
+        .route(
+            "/api/user-tools/policy",
+            get(api::admin::user_tools::handle_get_user_tool_policy)
+                .put(api::admin::user_tools::handle_put_user_tool_policy),
+        )
+        .route(
+            "/api/user-tools/catalog",
+            get(api::admin::user_tools::handle_get_user_tool_catalog),
+        )
         // 路由回放快照（Phase1-B：只读投影，route_replay 开关开启的请求
         // 才有完整数据；管理员鉴权，冷路径）
         .route(
