@@ -90,7 +90,11 @@ const KNOWN_CHANNEL_TYPE_FILTERS: &[&str] = &[
 /// - 缺省 / `None`：不涉及密钥（新增=空密钥渠道，如免鉴权上游；更新=保持原值）
 /// - `Some("")`：显式清除密钥
 /// - `Some("sk-..")`：设置新密钥
-#[derive(Debug, Deserialize)]
+///
+/// `Serialize` **只为让「表单字段名单」能在测试里派生**（见本文件测试
+/// `channel_fields_are_all_accounted_for_by_form_or_backfill`），
+/// 不是行为变更：本结构仍然只被反序列化（请求体入口），没有任何出口序列化它。
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct ChannelRequest {
     pub name: String,
     #[serde(default)]
@@ -826,6 +830,9 @@ async fn verify_admin_password(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 只在 #43 守卫里用 ⇒ 必须放在 `mod tests` 内（放模块顶层会在 lib 目标下
+    // 变成 unused_import，而 `cargo check` 看不见，2de58e68 那轮踩过同型）。
+    use std::collections::BTreeSet;
 
     /// 造渠道：**走 `to_channel`**（本模块唯一的「请求 → Channel」构造点），
     /// 不写字段全字面量 —— `Channel` 一加字段，字面量会集体 E0063
@@ -970,5 +977,217 @@ mod tests {
         );
         assert_eq!(fresh.balance_last_query_at, None);
         assert_eq!(fresh.balance_last_error, None);
+    }
+
+    // ================= #43：防「新字段被 PUT 静默清零」复发的派生守卫 =================
+    //
+    // 名单**一律从真实数据源派生，不许手写 `&'static str` 数组**（lead 2026-11-09 明确
+    // 否决过手写台账：那本身就是第二份名单，加字段照样漏）。三个来源：
+    // - 字段全集＝`Channel` 结构体文本（`declared_channel_fields`）；
+    // - 表单侧＝`serde_json::to_value(&ChannelRequest)` 的键（`ChannelRequest` 因此加
+    //   `Serialize`，只为派生名单，非行为变更）；
+    // - 回填侧＝**真跑一遍 `preserve_non_form_fields`，取「值真的变了」的键**
+    //   （名单由函数体自己交代）。
+    //
+    // 「运行态字段只能由产出它的那条路径写」是这条守卫与 PATCH 不接受
+    // `balance_last_query_at`/`balance_last_error` 写入（写了等于造假）的共同精神。
+    //
+    // **正例模板**（将来给 `Channel` 加字段的人照这个办）：
+    // `account_sessions.rs` 的 `resolve_or_create_auto_channel` 复用分支——它不重建
+    // Channel，而是 `let mut updated = ch.clone();` 后逐字段覆盖再 `update`，
+    // 所以新字段**天然保留**，不需要在第 N 个出口补回填。反例才是 PUT：表单不含的字段
+    // 被 `to_channel()` 硬置 `None`，漏一处就静默清零。
+
+    /// `Channel` 结构体声明的字段名清单——从**结构体文本**派生。
+    ///
+    /// 不用 `serde_json::to_value` 当权威清单：带 `skip_serializing_if` 的字段在值为空时
+    /// 根本不出现，纯 serde 口径对「新加一条可跳过字段」是**静默漏检**，而漏检的守卫等于
+    /// 没有守卫。结构体文本没有这个盲区。
+    /// `include_str!` 编译期内联（不依赖 cwd，也不依赖 CI 镜像里装了什么），
+    /// 先例＝`agent::registry.rs` 的 `ROUTE_SOURCES`。
+    fn declared_channel_fields() -> BTreeSet<String> {
+        const SRC: &str = include_str!("../../channel/mod.rs");
+        const MARK: &str = "pub struct Channel {";
+        let hits = SRC.matches(MARK).count();
+        assert_eq!(
+            hits, 1,
+            "MARK `{}` 在 channel/mod.rs 里应恰好出现一次，实得 {} 次：结构体定义写法变了要同步本守卫",
+            MARK, hits
+        );
+        let at = SRC.find(MARK).expect("上面已断言 MARK 存在");
+        let bytes = SRC.as_bytes();
+        let mut depth = 1usize;
+        let mut i = at + MARK.len();
+        while i < bytes.len() && depth > 0 {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        let body = &SRC[at + MARK.len()..i - 1];
+        let out: BTreeSet<String> = body.lines().filter_map(struct_field_name).collect();
+        // 量级地板（同 registry.rs 的做法）：清单一旦塌掉，下面的 ⊆ 断言会「全体假绿」。
+        assert!(
+            out.len() >= 20,
+            "从结构体只解析出 {} 个字段，量级应为 ~27：解析口径分叉",
+            out.len()
+        );
+        out
+    }
+
+    /// 结构体正文里的一行是不是字段声明（属性行以 `#` 开头、文档注释以 `/` 开头，都不算）。
+    /// 形状只认 `pub 名: 类型,` —— `Channel` 全字段都是 `pub`，非 pub 字段出现时这里会漏，
+    /// 但漏掉的字段同时也不会被 `to_channel`/`preserve_non_form_fields` 写到，
+    /// 且第 0) 段「结构体字段 == 序列化键」的断言会因为它对不上而响。
+    fn struct_field_name(raw: &str) -> Option<String> {
+        let rest = raw.trim().strip_prefix("pub ")?;
+        let (name, _ty) = rest.split_once(':')?;
+        Some(name.trim().to_string())
+    }
+
+    /// JSON 对象的键集合。
+    fn json_keys(v: &Value) -> BTreeSet<String> {
+        v.as_object()
+            .map(|m| m.keys().cloned().collect())
+            .expect("应为 JSON 对象")
+    }
+
+    /// 给每条字段灌**可区分的非默认值**。两个用途：当回填测试的 prev，
+    /// 以及证明「序列化能看见全部字段」——三条带 `skip_serializing_if` 的
+    /// （`quirks`/`balance_scheme`/`balance_unit`）必须被填上，否则它们从 JSON 里消失。
+    /// 仍然只走 `channel_for_mask()`（＝`to_channel`）再改字段，不写字段全字面量。
+    fn sentinel_channel() -> Channel {
+        let mut ch = channel_for_mask();
+        ch.id = "prev-sentinel".to_string();
+        ch.name = "sentinel-name".to_string();
+        ch.base_url = "https://sentinel.invalid".to_string();
+        ch.api_key = "enc:sentinel".to_string();
+        ch.priority = 7;
+        ch.weight = 3;
+        ch.status = "disabled".to_string();
+        ch.models = vec!["sentinel-model".to_string()];
+        ch.model_mapping = [("a".to_string(), "b".to_string())].into_iter().collect();
+        ch.account_id = "acct-sentinel".to_string();
+        ch.quirks = serde_json::from_value(json!({ "url_suffix": "?beta=true" }))
+            .expect("最小特判可反序列化");
+        ch.balance_scheme = "openai".to_string();
+        ch.balance_unit = "USD".to_string();
+        ch.response_time = Some(111);
+        ch.test_time = Some(222);
+        ch.balance = Some(3.5);
+        ch.credit = Some(4.5);
+        ch.discovered_models = vec!["discovered-1".to_string()];
+        ch.last_used_at = Some(333);
+        ch.last_error = Some("sentinel-last-error".to_string());
+        ch.created_at = 1;
+        ch.updated_at = 2;
+        ch.balance_query_interval_secs = Some(3600);
+        ch.balance_last_query_at = Some(1_700_000_000);
+        ch.balance_last_error = Some("sentinel-balance-error".to_string());
+        ch
+    }
+
+    /// 表单侧名单：最小请求体反序列化后**再序列化**。
+    /// serde 会吐出全部声明字段（与输入带不带那些键无关），所以加字段自动进集合。
+    fn form_field_names() -> BTreeSet<String> {
+        let req: ChannelRequest =
+            serde_json::from_value(json!({ "name": "form-keys" })).expect("最小请求体可反序列化");
+        json_keys(
+            &serde_json::to_value(&req)
+                .expect("ChannelRequest 可序列化（加 Serialize 就是为了这一句）"),
+        )
+    }
+
+    /// 回填侧名单：**真跑** `preserve_non_form_fields`，取「值真的变了」的键。
+    fn backfilled_field_names() -> BTreeSet<String> {
+        let prev = sentinel_channel();
+        let mut rebuilt = channel_for_mask();
+        let before = serde_json::to_value(&rebuilt).expect("Channel 可序列化");
+        preserve_non_form_fields(&mut rebuilt, &prev);
+        let after = serde_json::to_value(&rebuilt).expect("Channel 可序列化");
+        let mut all = json_keys(&before);
+        all.extend(json_keys(&after));
+        let names: BTreeSet<String> = all
+            .into_iter()
+            .filter(|key| before.get(key.as_str()) != after.get(key.as_str()))
+            .collect();
+        names
+    }
+
+    /// #43 主守卫：`Channel` 字段 ⊆ 表单字段 ∪ PUT 回填名单 ∪ 处理器自赋字段。
+    #[test]
+    fn channel_fields_are_all_accounted_for_by_form_or_backfill() {
+        let declared = declared_channel_fields();
+        let form = form_field_names();
+        let backfilled = backfilled_field_names();
+
+        // 0) 哨兵的序列化键必须与结构体字段**一模一样**：这条先把「serde 视野完整性」钉住，
+        //    否则后面所有派生名单都可能建立在一个漏了字段的世界视图上（rename/跳过都会在这里响）。
+        let sentinel_json = json_keys(&serde_json::to_value(sentinel_channel()).expect("可序列化"));
+        assert_eq!(
+            declared, sentinel_json,
+            "结构体字段与序列化键对不上：哨兵夹具没覆盖到某条带 skip_serializing_if 的字段，\
+             或字段加了 #[serde(rename)]（本守卫按「Rust 字段名＝JSON 键名」口径写）"
+        );
+
+        // 1) 主断言：每条字段都要有归属。`id`/`updated_at` 是唯一无法从数据源派生的两条，
+        //    各有明确理由（见下面第 3 段的自校验），不是「先塞进来再说」。
+        let handler_set: BTreeSet<String> = ["id", "updated_at"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        // 用 `iter().filter()` 而不是任何「集合减法」写法：std 的 `BTreeSet` 只有
+        // `difference`/`intersection` 这类**稳定**迭代器，`subtract` 不存在；本机不能编译，
+        // 编不过的提交会卡住全队，所以这里只用最保守的 API 组合。
+        let orphans: BTreeSet<String> = declared
+            .iter()
+            .filter(|k| {
+                let k = k.as_str();
+                !form.contains(k) && !backfilled.contains(k) && !handler_set.contains(k)
+            })
+            .cloned()
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "PUT /api/channels/:id 会静默清零这些字段：{orphans:?}。二选一：\
+             加进 `ChannelRequest`（表单可编辑，to_channel 会带上）\
+             或加进 `preserve_non_form_fields`（运行态，只能由产出它的那条路径写）。\
+             另一条正路是别整条重建：见 account_sessions.rs 的 \
+             `resolve_or_create_auto_channel` 复用分支（clone + 逐字段覆盖 ⇒ 天然保留）"
+        );
+
+        // 2) 回填名单不得与表单字段相交：相交＝用户在表单里提交的值会被 prev 盖回去。
+        let clash: Vec<&String> = form.intersection(&backfilled).collect();
+        assert!(
+            clash.is_empty(),
+            "preserve_non_form_fields 覆盖了表单字段 {clash:?}：提交值会被 prev 盖掉"
+        );
+
+        // 3) `handler_set` 自我收缩：这两条一旦不再是 Channel 字段、或有了归属（进了表单/
+        //    回填名单），这条就响，逼着这里同步——防止它变成越塞越宽的垃圾桶。
+        for key in ["id", "updated_at"] {
+            assert!(
+                declared.contains(key),
+                "`{key}` 已不是 Channel 字段，handler_set 要同步删除"
+            );
+            assert!(
+                !form.contains(key) && !backfilled.contains(key),
+                "`{key}` 现在已有归属，不该再留在 handler_set"
+            );
+        }
+
+        // 4) #32 PR2 修的那条缺陷本身不许从名单里滑出去（三键必须在回填名单里）。
+        for key in [
+            "balance_query_interval_secs",
+            "balance_last_query_at",
+            "balance_last_error",
+        ] {
+            assert!(
+                backfilled.contains(key),
+                "余额巡检三键之一 `{key}` 不在回填名单里：PUT 又会把它清零了"
+            );
+        }
     }
 }
