@@ -610,6 +610,17 @@ fn session_json(channels: &[Channel], session: &AccountSession, now: i64) -> Val
         "last_error": session.last_error,
         "last_used_at": session.last_used_at,
         "expires_at": session.expires_at,
+        // 登录态可观测性（#35）：**只是提醒锚点**，不参与选路。
+        // `expires_at` 是上游给的权威到期时间（Loomy 一类根本不给，留 null）；
+        // `relogin_due_at` 是我们**已确证**寿命推算出的提醒时刻（有且仅有登录
+        // 请求体里写死过寿命的家才算得出，见 model::RELOGIN_KNOWN_TTL_SECS）。
+        // 前端展示「N 天后需重新登录」直接用 `relogin_due_at - now`，别自己
+        // 按 provider 猜天数（猜 = 假红源头）。
+        "logged_in_at": session.logged_in_at,
+        "relogin_due_at": session.relogin_due_at(),
+        "relogin_notified_at": session.relogin_notified_at,
+        // 连续被上游拒凭据的次数（转 `needs_relogin` 的过程量，展示用）
+        "consecutive_rejections": session.consecutive_rejections,
         // 积分/套餐最早到期时刻（余额快照 wallets[] 里最早的 expireAt；
         // None = 余额没查过或家不报到期）。列表「凭证有效期列 / 按到期排序」用。
         "credit_expires_at": earliest_wallet_expiry(&session.last_balance),
