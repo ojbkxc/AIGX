@@ -911,32 +911,33 @@ impl ChannelStore {
 
     /// 渠道级悬空映射清理（P2-8，**破坏性**：删 `model_mapping` 条目并落盘）。
     ///
-    /// 判定口径同 [`Self::report_stale_channel_mappings`]；doomed 非空时在写锁内
-    /// 改映射 → `persist` → `publish_snapshot`（锁序与 `update` 一致）。
+    /// 判定口径同 [`Self::report_stale_channel_mappings`]；**判定与删除在同一把
+    /// 写锁内完成**（共用同一渠道快照，无「先取再锁」的并发窗口）。doomed 非空时
+    /// `persist` + `publish_snapshot`（锁序与 `update` 一致）。
     /// 返回删除列表供日志/审计。**仅在 lead 两阶段裁定第二阶段放行后调用**。
     pub fn prune_stale_channel_mappings(
         &self,
         id: &str,
         alive: &[String],
     ) -> anyhow::Result<Vec<(String, String)>> {
-        let doomed: Vec<(String, String)> = self.report_stale_channel_mappings(id, alive);
-        if doomed.is_empty() {
-            return Ok(Vec::new());
-        }
-        let snapshot = {
+        let (doomed, snapshot) = {
             let mut channels = self.channels.write();
             let ch = channels
                 .iter_mut()
                 .find(|c| c.id == id)
                 .ok_or_else(|| anyhow::anyhow!("channel not found"))?;
+            let doomed = crate::model::prune_stale_channel_mappings(&ch.model_mapping, alive);
             for (alias, _) in &doomed {
                 ch.model_mapping.remove(alias);
             }
             ch.updated_at = chrono::Utc::now().timestamp();
             let cloned = ch.clone();
             self.publish_snapshot(&channels);
-            cloned
+            (doomed, cloned)
         };
+        if doomed.is_empty() {
+            return Ok(Vec::new());
+        }
         self.persist(&snapshot)?;
         Ok(doomed)
     }
