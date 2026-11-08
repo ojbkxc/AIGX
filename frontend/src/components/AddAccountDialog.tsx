@@ -654,7 +654,7 @@ export default function AddAccountDialog({
       for (const field of addConfig.fields) {
         if (field.optional) continue;
         if (!(values[field.key] || '').trim()) {
-          setError(t('请填写 {label}', { label: field.label }));
+          setError(t('请填写 {{label}}', { label: field.label }));
           return;
         }
       }
@@ -910,7 +910,7 @@ export default function AddAccountDialog({
         <span className="add-card-info">
           <span className="add-card-name">{c.name}</span>
           <span className="add-card-meta">
-            {c.count ? t('{n} 个账号，点击添加', { n: c.count }) : t('空账号池，点击添加账号')}
+            {c.count ? t('{{n}} 个账号，点击添加', { n: c.count }) : t('空账号池，点击添加账号')}
           </span>
         </span>
         <span className="add-card-go">›</span>
@@ -993,7 +993,7 @@ export default function AddAccountDialog({
               {otherHitCount > 0 ? (
                 <div className="add-cross-hint">
                   <span>
-                    {t('当前分类里没有「{keyword}」，其它分类有 {n} 个匹配', {
+                    {t('当前分类里没有「{{keyword}}」，其它分类有 {{n}} 个匹配', {
                       keyword: search.trim(),
                       n: otherHitCount,
                     })}
@@ -1010,7 +1010,7 @@ export default function AddAccountDialog({
                       <div className="add-card-band" role="group" aria-label={segLabel(seg)}>
                         <span className="add-card-band-name">{segLabel(seg)}</span>
                         {cards.length ? (
-                          <span className="add-card-band-stat">{t('{count} 家', { count: cards.length })}</span>
+                          <span className="add-card-band-stat">{t('{{count}} 家', { count: cards.length })}</span>
                         ) : null}
                         <span className="add-card-band-fill" />
                         <button type="button" className="add-card-band-only" onClick={() => setSegment(seg)}>
@@ -1051,8 +1051,8 @@ export default function AddAccountDialog({
                   : customNew
                     ? t('新建自定义提供商')
                     : addConfig
-                      ? t('登录 / 添加 {name} 账号', { name: label })
-                      : t('添加 {name} 账号', { name: label })}
+                      ? t('登录 / 添加 {{name}} 账号', { name: label })
+                      : t('添加 {{name}} 账号', { name: label })}
               </h3>
               <button type="button" className="modal-close" onClick={onClose}>
                 &times;
@@ -1122,7 +1122,7 @@ export default function AddAccountDialog({
                       items={methods.map((id) => ({ key: id, label: ADD_METHOD_LABELS[id] }))}
                       active={method}
                       onChange={setMethod}
-                      ariaLabel={t('{label} 账号的添加方式', { label })}
+                      ariaLabel={t('{{label}} 账号的添加方式', { label })}
                     />
                   </div>
 

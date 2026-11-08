@@ -1007,7 +1007,7 @@ export default function ModelManage(): JSX.Element {
       // 清理反馈：后端顺带清了失效映射时展示条数，0 条不显示
       addToast(
         t('已拉取') + `：${ch.name}`
-        + (removed > 0 ? ` · ${t('已清理失效映射 {n} 条', { n: removed })}` : ''),
+        + (removed > 0 ? ` · ${t('已清理失效映射 {{n}} 条', { n: removed })}` : ''),
       );
       await load();
     } else {
@@ -1035,7 +1035,7 @@ export default function ModelManage(): JSX.Element {
       if (ok > 0) await load();
       addToast(
         `${t('全部拉取完成')}：${ok} ${t('成功')}` + (fail > 0 ? ` · ${fail} ${t('失败')}` : '')
-        + (cleaned > 0 ? ` · ${t('清理失效映射 {n} 条', { n: cleaned })}` : ''),
+        + (cleaned > 0 ? ` · ${t('清理失效映射 {{n}} 条', { n: cleaned })}` : ''),
         fail > 0 ? 'error' : undefined,
       );
     } finally {
@@ -2749,7 +2749,7 @@ export default function ModelManage(): JSX.Element {
                             <span className="mm-badge-ok">
                               {t('已拉取')}
                               {(fetchCleaned[cid] ?? 0) > 0
-                                ? ` · ${t('清理失效映射 {n} 条', { n: fetchCleaned[cid] })}`
+                                ? ` · ${t('清理失效映射 {{n}} 条', { n: fetchCleaned[cid] })}`
                                 : ''}
                             </span>
                           ) : (

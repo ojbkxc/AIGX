@@ -1020,7 +1020,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
         const removed = Number(data?.removed_mapping_count ?? 0);
         addToast(
           t('已同步模型目录') + ` · ${ok[0].count} ${t('个模型')}`
-          + (removed > 0 ? ` · ${t('已清理失效映射 {n} 条', { n: removed })}` : ''),
+          + (removed > 0 ? ` · ${t('已清理失效映射 {{n}} 条', { n: removed })}` : ''),
         );
         await load();
       }
@@ -1796,13 +1796,13 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
                       const name = String(p.name || p.planId || t('套餐'));
                       const at = expiryMillis(p.pendingUntil ?? p.startsAt);
                       return at != null
-                        ? t('{name}（{time} 起生效）', { name, time: new Date(at).toLocaleString() })
+                        ? t('{{name}}（{{time}} 起生效）', { name, time: new Date(at).toLocaleString() })
                         : name;
                     })
                     .join('\n'),
                 })}
               >
-                {t('待生效 {n}', { n: pending.length })}
+                {t('待生效 {{n}}', { n: pending.length })}
               </span>
             )}
           </td>
@@ -2396,9 +2396,9 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
                               <span className="as-group-label">{providerLabel(g.provider)}</span>
                               <span className="as-group-count">{g.rows.length}</span>
                               <span className="as-group-stat">
-                                {t('启用 {n}', { n: gEnabled })}
-                                {gDisabled > 0 ? ` · ${t('禁用 {n}', { n: gDisabled })}` : ''}
-                                {gCooling > 0 ? ` · ${t('冷却 {n}', { n: gCooling })}` : ''}
+                                {t('启用 {{n}}', { n: gEnabled })}
+                                {gDisabled > 0 ? ` · ${t('禁用 {{n}}', { n: gDisabled })}` : ''}
+                                {gCooling > 0 ? ` · ${t('冷却 {{n}}', { n: gCooling })}` : ''}
                               </span>
                               <span className="as-group-fill" />
                               <button
@@ -2696,7 +2696,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
                       <div className="form-hint">
                         {selectedProvider?.native_supported
                           ? t('内置适配已带该供应商的默认请求头；只有 Trae 这类需要设备身份的上游才要在这里补。')
-                          : t('登录态型供应商按抓包补齐专用请求头；值里的 {credential} 会替换为凭证。')}
+                          : t('登录态型供应商按抓包补齐专用请求头；值里的 {{credential}} 会替换为凭证。')}
                       </div>
                     </div>
                   </>

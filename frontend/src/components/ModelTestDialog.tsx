@@ -411,7 +411,7 @@ export default function ModelTestDialog({ target, onClose }: Props): JSX.Element
               <div className="mt-results-foot">
                 <span className="mt-summary">
                   {running
-                    ? t('正在测 {n} 个来源，已完成 {d}。').replace('{n}', String(slots.length)).replace('{d}', String(doneCount))
+                    ? t('正在测 {{n}} 个来源，已完成 {{d}}。', { n: slots.length, d: doneCount })
                     : failCount > 0
                       ? `${okCount} ${t('成功')} · ${failCount} ${t('失败')}`
                       : t('全部成功')}
