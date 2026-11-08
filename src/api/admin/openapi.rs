@@ -683,6 +683,13 @@ fn paths_settings_ops() -> Value {
         "/api/routing/defaults": {
             "get": op("路由", "查询路由策略默认值（恢复默认用）")
         },
+        // #38 粘滞会话管理面（对照 Agent2API routing_workspace 的 get_sticky/clear_sticky）
+        "/api/routing/sticky": {
+            "get": op_params("路由", "当前粘滞条目快照（session+model 亲和；条目含渠道名映射与双 TTL 剩余秒；total/truncated 有界 500）", &[query_param("query", "string", "可选：对 session_id/model/channel_id/渠道名的小写包含过滤")])
+        },
+        "/api/routing/sticky/clear": {
+            "post": op_body("路由", "解除粘滞（只删内存亲和记录，不写策略快照；下次该会话选路自然重走 HRW）", "id（单条，GET 返回的 id）| all:true（全清）；两者皆缺 400")
+        },
         "/api/assistant/tools": {
             "get": op("助手", "聊天助手工具目录（管理员+开关开启→非 HighRisk 全集；否则空清单）")
         },
@@ -1296,6 +1303,12 @@ mod tests {
         add("/api/gateway/settings", &["get", "put"]);
         add("/api/routing", &["get", "put"]);
         add("/api/routing/defaults", &["get"]);
+        // #38 粘滞会话管理面两条。此前漏登且测试不红 —— 本清单与 main.rs
+        // 之间是**人工对照**（`covers_all_real_admin_routes` 只保证
+        // 文档 ↔ 本清单相等，管不到本清单 ↔ 真实路由），漏 add 时两边
+        // 一起少、断言仍绿。机器化对照见 #44 评估（未落地，等拍板）。
+        add("/api/routing/sticky", &["get"]);
+        add("/api/routing/sticky/clear", &["post"]);
         add("/api/routing/replay/{request_id}", &["get"]);
         add("/api/update/cleanup-artifacts", &["post"]);
         add("/api/assistant/tools", &["get"]);
