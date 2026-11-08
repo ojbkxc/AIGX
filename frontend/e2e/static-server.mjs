@@ -681,7 +681,11 @@ async function handleChatTestDouble(res, bodyText) {
       synthesized = true;
       break;
     }
-    // 未到 `[DONE]` 就结束（客户端 abort 等）：只补发已缓冲字节，**不**合成尾帧
+    // 未到 `[DONE]` 就结束（客户端 abort 等）：只补发已缓冲字节，**不**合成尾帧。
+    // 口径说明（be-api 2026-11-09 确认）：线上真因是断线时**响应体流本身被 drop**，
+    // 网关就算合成也发不出去 ⇒ 前端永远观测不到尾帧，这条不变量只能由后端读码/单测钉。
+    // ⚠️ 但「前端无数字」≠「不计费」：记账侧走 Drop 守卫兜底仍会落日志（报表 prompt
+    // tokens 口径另议，见 47 号报告 §8）。本桩只镜像**界面可见**那一半。
     if (!synthesized && pending && !res.destroyed) res.write(pending);
     if (synthesized) await up.body.cancel().catch(() => undefined);
   } catch {
