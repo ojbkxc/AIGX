@@ -230,7 +230,10 @@ export default function RouteSticky(): JSX.Element {
               const { session, model } = splitStickyId(e.id);
               return (
                 <div key={e.id} className="rs-item">
-                  <code className="rs-id" title={model ? `${session} / ${model}` : session}>
+                  {/* title 必须存**原样内部编码 id**（与清除时 POST body 数据同源）：
+                      e2e 单条清除用例从 title 读完整 id 做回传断言；人读格式
+                      （session / model）只放行内可见文本，不进 title。 */}
+                  <code className="rs-id" title={e.id}>
                     {session.length > 24 ? `${session.slice(0, 24)}…` : session}
                   </code>
                   {model ? (
