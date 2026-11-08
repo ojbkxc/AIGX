@@ -157,8 +157,9 @@ test.describe('添加账号 · file/desktop/guest/oauth 四段 + 重复检测', 
     await page.locator('.add-method-row button', { hasText: '凭证文件' }).click();
     await expect(page.locator('h4', { hasText: '导入凭证文件' })).toBeVisible();
     const fileContent = JSON.stringify({ chatglm_token: 'eyJ-from-file' });
-    // 「选择文件」是 label 包裹的隐藏 input（非 button role），直接定位 input
-    await page.locator('.add-block input[type=file]').setInputFiles({
+    // 「选择文件」是 label 包裹的隐藏 input（非 button role）；两个 file input
+    // （JSON 凭据 / Cookies SQLite #41）用 data-testid 区分，防止命中 2 个
+    await page.locator('input[data-testid="file-input-json"]').setInputFiles({
       name: 'cred.json', mimeType: 'application/json', buffer: Buffer.from(fileContent),
     });
     await expect(page.getByLabel('accessToken')).toHaveValue(fileContent);

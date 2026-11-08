@@ -1286,6 +1286,7 @@ export default function AddAccountDialog({
                           {t('选择文件')}
                           <input
                             type="file"
+                            data-testid="file-input-json"
                             accept=".json,.txt,application/json,text/plain"
                             style={{ display: 'none' }}
                             onChange={(e) => {
@@ -1317,6 +1318,7 @@ export default function AddAccountDialog({
                               {t('选择 Cookies SQLite 文件')}
                               <input
                                 type="file"
+                                data-testid="file-input-cookies"
                                 accept=".sqlite,.db,.sqlite3,application/octet-stream"
                                 style={{ display: 'none' }}
                                 onChange={(e) => {
