@@ -330,30 +330,27 @@ pub(crate) async fn handle_chat_completions(
                 Ok(s) => {
                     // #32 路由回放：建流成功轮明细（流式终态在计费守卫，此处
                     // 记「建流成功」结论；phase 由终态字段承载）
-                    if route_capture.is_some() {
-                        route_capture
-                            .as_mut()
-                            .unwrap()
-                            .push_attempt(crate::log::AttemptDetail {
-                                index: attempt_index,
-                                channel_id: cid.clone().unwrap_or_default(),
-                                channel_name: ch_ref
-                                    .as_ref()
-                                    .map(|c| c.name.clone())
-                                    .unwrap_or_default(),
-                                provider: ch_ref
-                                    .as_ref()
-                                    .map(|c| c.channel_type.as_str().to_string())
-                                    .unwrap_or_default(),
-                                account: String::new(),
-                                model: upstream.clone(),
-                                sticky_hit,
-                                started_at: attempt_started_at,
-                                finished_at: Some(chrono::Utc::now().timestamp()),
-                                status: Some(200),
-                                error: None,
-                                notice: None,
-                            });
+                    if let Some(capture) = route_capture.as_mut() {
+                        capture.push_attempt(crate::log::AttemptDetail {
+                            index: attempt_index,
+                            channel_id: cid.clone().unwrap_or_default(),
+                            channel_name: ch_ref
+                                .as_ref()
+                                .map(|c| c.name.clone())
+                                .unwrap_or_default(),
+                            provider: ch_ref
+                                .as_ref()
+                                .map(|c| c.channel_type.as_str().to_string())
+                                .unwrap_or_default(),
+                            account: String::new(),
+                            model: upstream.clone(),
+                            sticky_hit,
+                            started_at: attempt_started_at,
+                            finished_at: Some(chrono::Utc::now().timestamp()),
+                            status: Some(200),
+                            error: None,
+                            notice: None,
+                        });
                     }
                     // 阶段2：流建立成功——记入健康/亲和（断路器成功、延迟 EMA、
                     // 空响应计数清零、粘性路由建立）。流中途失败由计费守卫兜底，
@@ -393,30 +390,27 @@ pub(crate) async fn handle_chat_completions(
                         );
                     }
                     // #32 路由回放：失败轮明细（含不可重试的终态轮）
-                    if route_capture.is_some() {
-                        route_capture
-                            .as_mut()
-                            .unwrap()
-                            .push_attempt(crate::log::AttemptDetail {
-                                index: attempt_index,
-                                channel_id: cid.clone().unwrap_or_default(),
-                                channel_name: ch_ref
-                                    .as_ref()
-                                    .map(|c| c.name.clone())
-                                    .unwrap_or_default(),
-                                provider: ch_ref
-                                    .as_ref()
-                                    .map(|c| c.channel_type.as_str().to_string())
-                                    .unwrap_or_default(),
-                                account: String::new(),
-                                model: upstream.clone(),
-                                sticky_hit,
-                                started_at: attempt_started_at,
-                                finished_at: Some(chrono::Utc::now().timestamp()),
-                                status: e.http_status().try_into().ok(),
-                                error: Some(e.to_string()),
-                                notice: None,
-                            });
+                    if let Some(capture) = route_capture.as_mut() {
+                        capture.push_attempt(crate::log::AttemptDetail {
+                            index: attempt_index,
+                            channel_id: cid.clone().unwrap_or_default(),
+                            channel_name: ch_ref
+                                .as_ref()
+                                .map(|c| c.name.clone())
+                                .unwrap_or_default(),
+                            provider: ch_ref
+                                .as_ref()
+                                .map(|c| c.channel_type.as_str().to_string())
+                                .unwrap_or_default(),
+                            account: String::new(),
+                            model: upstream.clone(),
+                            sticky_hit,
+                            started_at: attempt_started_at,
+                            finished_at: Some(chrono::Utc::now().timestamp()),
+                            status: Some(e.http_status()),
+                            error: Some(e.to_string()),
+                            notice: None,
+                        });
                     }
                     if !is_retryable_bridge_error(&e) {
                         // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
@@ -978,30 +972,27 @@ pub(crate) async fn handle_chat_completions(
                         );
                     }
                     // #32 路由回放：非流式成功轮明细
-                    if route_capture.is_some() {
-                        route_capture
-                            .as_mut()
-                            .unwrap()
-                            .push_attempt(crate::log::AttemptDetail {
-                                index: attempt_index,
-                                channel_id: cid.clone().unwrap_or_default(),
-                                channel_name: ch_ref
-                                    .as_ref()
-                                    .map(|c| c.name.clone())
-                                    .unwrap_or_default(),
-                                provider: ch_ref
-                                    .as_ref()
-                                    .map(|c| c.channel_type.as_str().to_string())
-                                    .unwrap_or_default(),
-                                account: String::new(),
-                                model: upstream.clone(),
-                                sticky_hit,
-                                started_at: attempt_started_at,
-                                finished_at: Some(chrono::Utc::now().timestamp()),
-                                status: Some(200),
-                                error: None,
-                                notice: None,
-                            });
+                    if let Some(capture) = route_capture.as_mut() {
+                        capture.push_attempt(crate::log::AttemptDetail {
+                            index: attempt_index,
+                            channel_id: cid.clone().unwrap_or_default(),
+                            channel_name: ch_ref
+                                .as_ref()
+                                .map(|c| c.name.clone())
+                                .unwrap_or_default(),
+                            provider: ch_ref
+                                .as_ref()
+                                .map(|c| c.channel_type.as_str().to_string())
+                                .unwrap_or_default(),
+                            account: String::new(),
+                            model: upstream.clone(),
+                            sticky_hit,
+                            started_at: attempt_started_at,
+                            finished_at: Some(chrono::Utc::now().timestamp()),
+                            status: Some(200),
+                            error: None,
+                            notice: None,
+                        });
                     }
                     response_opt = Some(resp);
                     used_channel_id = cid;
@@ -1026,30 +1017,27 @@ pub(crate) async fn handle_chat_completions(
                         );
                     }
                     // #32 路由回放：失败轮明细（含不可重试的终态轮）
-                    if route_capture.is_some() {
-                        route_capture
-                            .as_mut()
-                            .unwrap()
-                            .push_attempt(crate::log::AttemptDetail {
-                                index: attempt_index,
-                                channel_id: cid.clone().unwrap_or_default(),
-                                channel_name: ch_ref
-                                    .as_ref()
-                                    .map(|c| c.name.clone())
-                                    .unwrap_or_default(),
-                                provider: ch_ref
-                                    .as_ref()
-                                    .map(|c| c.channel_type.as_str().to_string())
-                                    .unwrap_or_default(),
-                                account: String::new(),
-                                model: upstream.clone(),
-                                sticky_hit,
-                                started_at: attempt_started_at,
-                                finished_at: Some(chrono::Utc::now().timestamp()),
-                                status: e.http_status().try_into().ok(),
-                                error: Some(e.to_string()),
-                                notice: None,
-                            });
+                    if let Some(capture) = route_capture.as_mut() {
+                        capture.push_attempt(crate::log::AttemptDetail {
+                            index: attempt_index,
+                            channel_id: cid.clone().unwrap_or_default(),
+                            channel_name: ch_ref
+                                .as_ref()
+                                .map(|c| c.name.clone())
+                                .unwrap_or_default(),
+                            provider: ch_ref
+                                .as_ref()
+                                .map(|c| c.channel_type.as_str().to_string())
+                                .unwrap_or_default(),
+                            account: String::new(),
+                            model: upstream.clone(),
+                            sticky_hit,
+                            started_at: attempt_started_at,
+                            finished_at: Some(chrono::Utc::now().timestamp()),
+                            status: Some(e.http_status()),
+                            error: Some(e.to_string()),
+                            notice: None,
+                        });
                     }
                     if !is_retryable_bridge_error(&e) {
                         // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回

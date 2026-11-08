@@ -154,7 +154,7 @@ pub async fn handle_backup_import(
     }
 
     // 1. 恢复前自动备份当前全量（含日志，防丢）——与加密导入共用同一辅助
-    let pre_path = snapshot_current(&state).await.map_err(|e| e)?;
+    let pre_path = snapshot_current(&state).await?;
 
     // 2. 逐键写回（合并 upsert）
     let mut written = 0usize;

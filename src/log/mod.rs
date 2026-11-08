@@ -2248,8 +2248,12 @@ mod attempt_detail_tests {
             sticky_hit: index == 1,
             started_at: 1_700_000_000,
             finished_at: Some(1_700_000_001),
-            status: if index % 2 == 0 { Some(502) } else { Some(200) },
-            error: (index % 2 == 0).then(|| "upstream boom".to_string()),
+            status: if index.is_multiple_of(2) {
+                Some(502)
+            } else {
+                Some(200)
+            },
+            error: index.is_multiple_of(2).then(|| "upstream boom".to_string()),
             notice: None,
         }
     }

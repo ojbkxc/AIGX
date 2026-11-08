@@ -468,9 +468,7 @@ pub async fn handle_backup_import_encrypted(
     }
 
     // 恢复前自动备份当前全量（与明文导入同一安全顺序）
-    let pre_path = super::backup::snapshot_current(&state)
-        .await
-        .map_err(|e| e)?;
+    let pre_path = super::backup::snapshot_current(&state).await?;
 
     // 逐键写回（合并 upsert；键长守卫与明文导入同口径）
     let mut written = 0usize;
