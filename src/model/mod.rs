@@ -447,7 +447,7 @@ pub fn prune_stale_channel_mappings(
     }
     // 存活集初始 = 清单内且出现在映射表里的 alias
     let mut protected: HashSet<&String> = HashSet::new();
-    for (alias, _) in mapping.iter() {
+    for alias in mapping.keys() {
         if alive.iter().any(|m| m == alias) {
             protected.insert(alias);
         }
