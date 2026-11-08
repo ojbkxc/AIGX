@@ -156,21 +156,28 @@ fn effort_level(raw: Option<&str>) -> Option<String> {
     }
 }
 
-/// 单次非流式推理（工具调用用）。带 failover。
-///
-/// 每次推理落一条 RequestLog（key_id="agent"），成功与失败都记——
-/// AI 运维对话在用量日志页可见（与渠道调试/Playground 同口径）。
-///
-/// 返回 (`ChatResponse`, 实际使用的上游模型名, 渠道 id)。
+/// 单次非流式推理（工具调用用）。带 failover。请求日志来源固定为 "agent"。
 pub async fn chat_once(
     state: &AppState,
     config: &AgentConfig,
     messages: Vec<ChatMessage>,
     tools: Option<Vec<serde_json::Value>>,
 ) -> Result<(ChatResponse, String, Option<String>), AgentLlmError> {
+    chat_once_as(state, config, messages, tools, "agent").await
+}
+
+/// [`chat_once`] 的多来源变体：`key_id` 决定请求日志的来源标签
+/// （agent 主循环="agent"，聊天自动标题="chat_title"），其余行为一致。
+pub async fn chat_once_as(
+    state: &AppState,
+    config: &AgentConfig,
+    messages: Vec<ChatMessage>,
+    tools: Option<Vec<serde_json::Value>>,
+    key_id: &str,
+) -> Result<(ChatResponse, String, Option<String>), AgentLlmError> {
     let model = effective_model(state, config)?;
     let candidates = resolve_candidates(state, config, &model)?;
-    let request_id = format!("agent-{}", uuid::Uuid::new_v4());
+    let request_id = format!("{key_id}-{}", uuid::Uuid::new_v4());
     let ctx = BridgeContext::new(request_id.clone(), model.clone());
 
     let mut last_error: Option<String> = None;
@@ -216,6 +223,7 @@ pub async fn chat_once(
                 }
                 record_agent_request_log(
                     state,
+                    key_id,
                     &request_id,
                     &model,
                     &upstream,
@@ -241,6 +249,7 @@ pub async fn chat_once(
                 }
                 record_agent_request_log(
                     state,
+                    key_id,
                     &request_id,
                     &model,
                     &upstream,
@@ -273,12 +282,13 @@ pub async fn chat_once(
 
 /// Agent 推理落请求日志（成功/失败都记，不扣费——运维自环不产生销售成本）。
 ///
-/// - key_id = "agent"（用量日志页展示为「AI 运维」来源标签）
+/// - key_id：来源标签（"agent"=运维主循环；"chat_title"=聊天自动标题）
 /// - user_id = None（系统身份）
 /// - input token 按消息文本估算（自环响应 usage 缺失时输出按 0）
 #[allow(clippy::too_many_arguments)]
 fn record_agent_request_log(
     state: &AppState,
+    key_id: &str,
     request_id: &str,
     model: &str,
     upstream_model: &str,
@@ -305,7 +315,7 @@ fn record_agent_request_log(
     let log = crate::log::RequestLog {
         id: request_id.to_string(),
         user_id: None,
-        key_id: Some("agent".to_string()),
+        key_id: Some(key_id.to_string()),
         channel_id: channel_id.map(|s| s.to_string()),
         channel_name: channel_name.map(|s| s.to_string()),
         model: model.to_string(),

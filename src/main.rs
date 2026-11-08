@@ -1428,6 +1428,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             post(crate::chat_session::handle_append_chat_message)
                 .put(crate::chat_session::handle_replace_chat_messages),
         )
+        .route(
+            "/api/chat/sessions/:id/fork",
+            post(crate::chat_session::handle_fork_chat_session),
+        )
         // 签到中心（管理员替上游账号签到，与上面的用户签到是两套）
         .route(
             "/api/checkin-center",

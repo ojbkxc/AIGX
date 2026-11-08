@@ -221,6 +221,41 @@ impl Default for UpdateConfig {
 ///
 /// Agent 的"大脑"走 AIGX 自己的渠道（进程内直调 bridge，复用渠道调度/
 /// 熔断/亲和，但不经 HTTP 端口与计费），模型与渠道均可配置。
+/// 聊天功能配置（`[chat]` 段）：对话增值能力（目前只有 LLM 自动标题）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatConfig {
+    /// 会话 LLM 自动标题开关（默认关，与 `[agent].enabled` 同口径——避免
+    /// 未配置模型/渠道时每个新会话都白打一次失败请求）。
+    /// 开启后：会话首条用户消息落库时，异步走进程内自环（渠道调度 +
+    /// failover，与 agent 同链）生成标题；失败静默保持截断标题。
+    #[serde(default)]
+    pub auto_title: bool,
+    /// 标题生成模型（空 = 自动发现启用+已定价模型，与 `[agent].model` 同口径）。
+    #[serde(default)]
+    pub title_model: String,
+    /// 标题生成锁定渠道 ID（空 = 走全局调度）。
+    #[serde(default)]
+    pub title_channel: String,
+    /// 发给 LLM 的首条用户消息最大字符数（默认 500，超出截断）。
+    #[serde(default = "default_title_prompt_chars")]
+    pub title_prompt_chars: usize,
+}
+
+fn default_title_prompt_chars() -> usize {
+    500
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            auto_title: false,
+            title_model: String::new(),
+            title_channel: String::new(),
+            title_prompt_chars: default_title_prompt_chars(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// 是否启用 AI 运维 Agent（默认关闭，避免未配置模型时误启）。
@@ -601,6 +636,9 @@ pub struct AppConfig {
     /// AI 运维 Agent 配置（`[agent]` 段，自举式运维工作台）。
     #[serde(default)]
     pub agent: AgentConfig,
+    /// 聊天功能配置（`[chat]` 段：LLM 自动标题等增值能力）。
+    #[serde(default)]
+    pub chat: ChatConfig,
     /// 渠道调度配置（`[channel]` 段）。
     #[serde(default)]
     pub channel: ChannelConfig,
