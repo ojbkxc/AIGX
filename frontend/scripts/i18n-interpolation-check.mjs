@@ -32,14 +32,12 @@ const PACKS = ['zh.json', 'en.json', 'zh-Hant.json', 'ja.json', 'ko.json', 'pt-B
 /** 白名单：键侧本身写单花括号的动态拼接/文档占位键。
  *  - CUSTOM_BASE_HINT 长版×3（AddAccountDialog:61-63，t(值) 无 options，
  *    {base} 为文档占位语义——89f50547/#56 判定）
- *  - 「{{name}}」列的对齐（TableColumnDef.label，labelOf→t(label) 通用
- *    渲染器不传 options，改双括号会渲染空白）
- *  （hintKey 短版×3 已随死字段删除，不再需要豁免——#57） */
+ *  （「{{name}}」列的对齐与 hintKey 短版×3 已随 S1/#57 孤儿清理删除，
+ *    白名单同步收敛——0fa531cc 即删调用点，键无消费） */
 const WHITELIST = new Set([
   'OpenAI 兼容填到 /v1，按 {base}/chat/completions 转发',
   'Anthropic 协议填根地址，不要带 /v1，按 {base}/v1/messages 转发',
   'Gemini 协议填到 /v1beta，按 {base}/models 转发',
-  '「{{name}}」列的对齐',
 ]);
 
 /** 剥掉 {{x}} 后再抓单括号 {x}（lookaround 口径） */
