@@ -59,6 +59,7 @@ jobs:
         working-directory: frontend
         run: npm run i18n:check
       - name: Build frontend
+        id: build
         working-directory: frontend
         run: npm run build
       - name: Verify frontend output
@@ -75,7 +76,13 @@ jobs:
             exit 1
           fi
           echo "static/ up to date"
+      # 即便上面那条「static 漂移」失败也把本次构建产物传出来：
+      # 本步骤的比对就是拿这次构建跟入库的 static/ 比，所以它的输出是 static/ 的
+      # 权威来源。本地没有构建条件（磁盘吃紧/无非本机构建环境）时，直接取这个
+      # 产物回填 static/ 再提交，比对必然通过。
+      # 条件限定为「构建本身成功」——tsc/eslint 挂掉时不该产出可被误当成有效产物的包。
       - name: Upload frontend artifact
+        if: always() && steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: aigx-static
