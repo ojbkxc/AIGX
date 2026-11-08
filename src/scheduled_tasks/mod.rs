@@ -447,9 +447,8 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                     {
                         Ok((_, models)) => {
                             if !models.is_empty() {
-                                let _ = state.channel_store.save_discovered_models(&ch.id, models);
-                                refreshed_channels += 1;
-                                // 对账（P2-6②）：有效清单 = models 非空用白名单，空用本轮发现快照
+                                // 对账（P2-6②）：有效清单 = models 非空用白名单，空用本轮发现快照。
+                                // 必须先于 save_discovered_models（其 move 掉 models）
                                 let alive: Vec<String> = if !ch.models.is_empty() {
                                     ch.models.clone()
                                 } else {
@@ -481,6 +480,8 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                                             .collect::<Vec<_>>(),
                                     }));
                                 }
+                                let _ = state.channel_store.save_discovered_models(&ch.id, models);
+                                refreshed_channels += 1;
                             }
                         }
                         Err((status, body)) => {
