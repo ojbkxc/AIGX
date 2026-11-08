@@ -649,7 +649,7 @@ pub fn resolve_profile(
             .iter()
             .flatten()
             .filter_map(|(_, p)| p.default_group.as_deref())
-            .last(),
+            .next_back(),
     };
     let group = effective_group.and_then(|gid| profiles.find_group(gid, requested_model));
 
