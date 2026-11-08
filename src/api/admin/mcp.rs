@@ -148,8 +148,9 @@ fn initialize_result() -> Value {
 ///
 /// 读 `config_manager`（落盘真值）而不是 `agent_state` 的运行期快照：后者只在
 /// 设置页 PUT 成功后同步，Agent 未启用时干脆是 `None`——用它会让「关了没关」。
+/// 取法与 runner/assistant/注册表入口共用 [`crate::agent::registry::disabled_tools_of`]。
 async fn disabled_tools(state: &AppState) -> Vec<String> {
-    state.config_manager.get().await.agent.disabled_tools
+    crate::agent::registry::disabled_tools_of(state).await
 }
 
 /// 白名单查找（fail-closed：高危、被管理员禁用、白名单外一视同仁地拒绝）。
@@ -275,9 +276,9 @@ fn tool_error(text: String) -> Value {
 /// 告知禁用状态不构成信息泄露。
 fn rejected_tool_result(name: &str, disabled: &[String]) -> Value {
     if crate::agent::registry::tool_disabled(name, disabled) {
-        tool_error(format!(
-            "Tool {name} is disabled by administrator (disabled_tools)"
-        ))
+        // 文案与注册表执行入口（`disabled_reject`）同源：同一个拒绝在本面
+        // 走前门还是走兜底，回给客户端的话必须一字不差。
+        tool_error(crate::agent::registry::disabled_tool_message(name))
     } else {
         tool_error(format!("Unknown tool: {name} (not in MCP whitelist)"))
     }
@@ -514,8 +515,13 @@ mod tests {
         let r = rejected_tool_result(&victim, &disabled);
         assert_eq!(r["isError"], true);
         let msg = r["content"][0]["text"].as_str().unwrap();
+        assert_eq!(
+            msg,
+            crate::agent::registry::disabled_tool_message(&victim),
+            "MCP 前门的禁用文案必须与注册表执行入口一字不差（同一拒绝只有一种说法）"
+        );
         assert!(
-            msg.contains("disabled by administrator"),
+            msg.contains("已被管理员禁用"),
             "禁用文案应说明是被管理员禁用，实际: {msg}"
         );
         // 不在禁用集里的名字仍按「未知工具」回，两种拒绝不互相冒充

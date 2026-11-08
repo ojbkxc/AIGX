@@ -149,16 +149,14 @@ pub async fn run(
                 // 工具审计 target：优先取主目标参数，回退原始参数摘要
                 let target = tool_target(&call.function_name, &args);
                 // 执行侧兜底：disabled_tools 不只是从下发清单剔除——模型幻觉/
-                // 上下文残留仍可能叫出被禁工具，这里再挡一道（判定与下发同一函数）
+                // 上下文残留仍可能叫出被禁工具，这里再挡一道（判定与下发同一函数；
+                // 文案与 registry::exec_tool 的入口门槛同源，见 disabled_tool_message）
                 if crate::agent::registry::tool_disabled(
                     &call.function_name,
                     &config.disabled_tools,
                 ) {
                     let outcome = tools::ToolOutcome {
-                        text: format!(
-                            "工具 {} 已被管理员禁用（disabled_tools），未执行",
-                            call.function_name
-                        ),
+                        text: crate::agent::registry::disabled_tool_message(&call.function_name),
                         ok: false,
                     };
                     on_event(AgentEvent::ToolResult {

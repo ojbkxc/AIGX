@@ -279,6 +279,32 @@ pub fn tool_disabled(name: &str, disabled: &[String]) -> bool {
     disabled.iter().any(|d| d == name)
 }
 
+/// 禁用拒绝的统一文案——runner 的执行侧兜底、[`disabled_reject`]（即
+/// [`exec_tool`] / [`exec_user_tool`] 的入口门槛）、MCP 的拒绝回包都说这一句。
+///
+/// 同一个拒绝在三个面上有三种措辞只会变成排障噪音（#35 批1 后半，lead 追加要求）。
+pub fn disabled_tool_message(name: &str) -> String {
+    format!("工具 {name} 已被管理员禁用（disabled_tools），未执行")
+}
+
+/// 执行入口的禁用门槛：命中返回 JSON-RPC 错误（`-32601`，与「未知工具」同码不同文）。
+///
+/// 这一层把「约定安全」变成「结构安全」：此前 `disabled_tools` 只在三个调用方
+/// 各自预筛（runner 兜底 / MCP `find_tool_spec` / assistant `exec_denial`），
+/// 今天无缺口，但新增第四个调用方忘加即漏——正是本仓 `mark_unhealthy` 只补一处
+/// 的同形态。纯函数以便单测直接钉死（`exec_tool` 需要 [`AppState`]，单测不构造）。
+pub fn disabled_reject(name: &str, disabled: &[String]) -> Option<(i64, String)> {
+    tool_disabled(name, disabled).then(|| (-32601, disabled_tool_message(name)))
+}
+
+/// 落盘配置里的禁用清单（三面共用同一取法）。
+///
+/// **不要**改读 `state.agent_state` 的运行期快照：Agent 未启用时它是 `None`，
+/// 「关了就是关了」会变成「没开 Agent 时禁用不生效」。
+pub async fn disabled_tools_of(state: &AppState) -> Vec<String> {
+    state.config_manager.get().await.agent.disabled_tools
+}
+
 /// 下发给外部消费方的「可见集」= 非高危 ∩ 未被管理员禁用。
 ///
 /// 「关了就是关了」：可见集与 [`find_visible_tool`] 的准入判定同源，因此不存在
@@ -318,6 +344,10 @@ pub fn openai_tools_of(tools: impl Iterator<Item = &'static ToolDef>) -> Vec<Val
 }
 
 /// 分发执行（Agent / MCP 共用入口）。
+///
+/// 入口自带禁用门槛（[`disabled_reject`]）：调用方**不需要**先筛也能拦住被禁用的
+/// 工具——调用方的预筛仍然保留，它们负责各自的 UX 与审计文案，这里只保证「走这个
+/// 门就一定执行不到」（#35 批1 后半）。
 pub async fn exec_tool(
     state: &AppState,
     headers: &HeaderMap,
@@ -330,6 +360,9 @@ pub async fn exec_tool(
             format!("Unknown tool: {name} (not in agent whitelist)"),
         ));
     };
+    if let Some(err) = disabled_reject(name, &disabled_tools_of(state).await) {
+        return Err(err);
+    }
     (tool.exec)(state, headers, args).await
 }
 
@@ -343,7 +376,8 @@ pub fn user_exposed_tools() -> impl Iterator<Item = &'static ToolDef> {
 
 /// 终端用户工具执行入口：只走 `user_exec`（与 [`exec_tool`] 的管理员执行体并列）。
 ///
-/// 未知工具 / 未声明用户域执行体 / 高危 → 拒绝（执行侧兜底，不依赖调用方预筛）。
+/// 未知工具 / 被管理员禁用 / 未声明用户域执行体 / 高危 → 拒绝（执行侧兜底，不依赖
+/// 调用方预筛；禁用那一刀见 [`disabled_reject`]，与 [`exec_tool`] 同一门槛）。
 pub async fn exec_user_tool(
     state: &AppState,
     headers: &HeaderMap,
@@ -356,6 +390,9 @@ pub async fn exec_user_tool(
             format!("Unknown tool: {name} (not in agent whitelist)"),
         ));
     };
+    if let Some(err) = disabled_reject(name, &disabled_tools_of(state).await) {
+        return Err(err);
+    }
     let Some(user_exec) = tool.user_exec else {
         return Err((
             -32601,
@@ -3561,6 +3598,81 @@ mod tests {
             visible_tools(&[]).iter().all(|t| t.name != high.as_str()),
             "高危不得出现在可见集"
         );
+    }
+
+    /// 执行入口的禁用门槛（#35 批1 后半，lead 追加的「结构安全」那一刀）：
+    /// 判定本身要能被绕过列表直接调用时仍拦得住，且文案与 runner 的执行侧兜底
+    /// 一字不差（同一个拒绝在三个面上有三种说法 = 排障噪音）。
+    #[test]
+    fn disabled_reject_blocks_direct_calls_with_runner_wording() {
+        let victim = all_tools().first().expect("注册表非空").name.to_string();
+        let disabled = vec![victim.clone()];
+
+        let (code, msg) = disabled_reject(&victim, &disabled).expect("禁用必须有拒绝");
+        assert_eq!(code, -32601, "禁用沿用 JSON-RPC「方法不可用」同码");
+        assert_eq!(
+            msg,
+            disabled_tool_message(&victim),
+            "拒绝文案必须来自单点函数，不许各处各抄一版"
+        );
+        assert!(
+            msg.contains("已被管理员禁用") && msg.contains("disabled_tools"),
+            "要同时说清现象与配置项，实际: {msg}"
+        );
+        // 未禁用的名字绝不误伤（含前缀/大小写变体，判定全等）
+        assert!(disabled_reject(&victim, &[]).is_none());
+        assert!(disabled_reject(&format!("{victim}_typo"), &disabled).is_none());
+        assert!(disabled_reject(&victim.to_uppercase(), &disabled).is_none());
+        assert!(disabled_reject("", &disabled).is_none());
+    }
+
+    /// 防空转哨兵：上面那条测的是判定本身，这一条钉「两个执行入口确实调了它」。
+    ///
+    /// `exec_tool` / `exec_user_tool` 需要 [`AppState`]（单测不构造），所以无法
+    /// 端到端跑一遍；改为对源码文本做锚定——谁把门槛从入口摘掉（或改名），
+    /// 这条立刻红，避免「判定函数还在、但没人调」这种约定安全退化的样子。
+    #[test]
+    fn exec_entries_are_structurally_gated() {
+        let src = include_str!("registry.rs");
+        for entry in ["pub async fn exec_tool(", "pub async fn exec_user_tool("] {
+            let at = src
+                .find(entry)
+                .unwrap_or_else(|| panic!("找不到执行入口签名: {entry}"));
+            // 函数体：从签名的 '{' 起按花括号配平取到结尾
+            let open = src[at..]
+                .find('{')
+                .unwrap_or_else(|| panic!("{entry} 没有函数体"));
+            let body_start = at + open;
+            let mut depth = 0usize;
+            let mut body_end = None;
+            for (i, c) in src[body_start..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            body_end = Some(body_start + i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let body = &src[body_start..body_end.unwrap_or(body_start)];
+            assert!(
+                body.contains("disabled_reject("),
+                "{entry} 未调用 disabled_reject——禁用门槛必须住在执行入口里，\
+                 不能只靠调用方预筛（#35 批1 后半的结构安全）"
+            );
+            let gate = body.find("disabled_reject(").unwrap();
+            let admin_dispatch = body.find("(tool.exec)(state");
+            let user_dispatch = body.find("user_exec(state");
+            let call_at = admin_dispatch.or(user_dispatch).unwrap_or(usize::MAX);
+            assert!(
+                gate < call_at,
+                "{entry} 的门槛写在执行体之后 = 已经执行过了"
+            );
+        }
     }
 
     /// #34 用户域工具台账（首发四件套；新增用户域工具必须同步本表）。

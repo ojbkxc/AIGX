@@ -67,7 +67,7 @@ pub fn tools_enabled() -> bool {
 /// 不读 `agent_state` 快照——后者在 Agent 未启用时是 `None`，用它就会出现
 /// 「设置页关了、助手面还在下发」。判定口径统一走 `registry::tool_disabled`。
 async fn disabled_tools(state: &AppState) -> Vec<String> {
-    state.config_manager.get().await.agent.disabled_tools
+    crate::agent::registry::disabled_tools_of(state).await
 }
 
 /// 助手面执行前的拦截原因（#35 批1 后半）。
@@ -91,9 +91,9 @@ impl DenyKind {
     /// 回灌给模型的说明（模型据此换路，不要静默丢调用）。
     fn reply_text(self, label: &str) -> String {
         match self {
-            DenyKind::Disabled => {
-                format!("工具 {label} 已被管理员禁用（disabled_tools），未执行")
-            }
+            // 禁用那一句话与 runner 兜底 / MCP 前门 / 注册表执行入口共用
+            // [`crate::agent::registry::disabled_tool_message`]
+            DenyKind::Disabled => crate::agent::registry::disabled_tool_message(label),
             DenyKind::HighRiskNoApproval => {
                 format!("工具 {label} 属高危，聊天助手面不执行（未接入审批矩阵）")
             }
