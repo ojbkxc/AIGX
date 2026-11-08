@@ -102,12 +102,15 @@ pub(crate) async fn handle_chat_completions(
     } else {
         None
     };
-    let candidates = resolve_bridges_with_affinity(
+    // #40 §1 接缝（会话型端点）：从请求体推出能力需求（tools/images/video）
+    // 供选路能力过滤——chat 侧 messages 列表 + 顶层 tools/tool_choice
+    let candidates = resolve_bridges_with_affinity_needs(
         &state,
         &model,
         session_id.as_deref(),
         api_key.provider_filter().as_deref(),
         route_capture.as_mut(),
+        super::needs::from_chat_body(&body),
     );
     if candidates.is_empty() {
         return openai_error_response(

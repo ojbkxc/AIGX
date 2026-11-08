@@ -315,12 +315,15 @@ pub async fn handle_messages(
     } else {
         None
     };
-    let candidates = super::openai::resolve_bridges_with_affinity(
+    // #40 §1 接缝（会话型端点）：anthropic body 同扫 messages/content blocks
+    //（from_chat_body 对两个列表通用；能力推导与 openai 面同口径）
+    let candidates = super::openai::resolve_bridges_with_affinity_needs(
         &state,
         &model,
         session_id.as_deref(),
         api_key.provider_filter().as_deref(),
         route_capture.as_mut(),
+        crate::api::openai::from_chat_body(&body),
     );
     if candidates.is_empty() {
         return anthropic_error(
