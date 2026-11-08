@@ -2105,3 +2105,28 @@ export interface ChatSessionSummary {
   forked_from_seq?: number | null;
   title_source?: string | null;
 }
+
+/**
+ * 终端用户工具策略（#65；设计稿 §4.1 复用 RoutingPolicyStore 快照模式）。
+ * `enabled` 默认 false（关闭时终端用户纯聊天，与历史逐字节等价）；
+ * `groups[组名].allowlist` 空数组 = 该组无工具，["*"] = 该组获 LowRisk 全集。 */
+export interface UserToolGroupPolicy {
+  allowlist: string[];
+}
+
+export interface UserToolPolicy {
+  enabled: boolean;
+  groups: Record<string, UserToolGroupPolicy>;
+}
+
+/** 工具目录项（§5.1 GET /api/user-tools/catalog；配置界面用） */
+export interface UserToolCatalogItem {
+  /** 工具全名（aigx_*，与 registry 同源） */
+  name: string;
+  label: string;
+  risk: 'ReadOnly' | 'LowRisk' | 'HighRisk';
+  /** 工具作者是否声明了用户域执行体（双执行体 D1） */
+  has_user_exec: boolean;
+  /** 当前策略命中状态（端点回带；缺省 = 未计算） */
+  policy_hit?: boolean;
+}

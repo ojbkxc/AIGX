@@ -11,7 +11,7 @@ import {
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Bot, Headphones, CalendarCheck, Globe, CalendarClock,
-  Puzzle, Route as RouteIcon,
+  Puzzle, Route as RouteIcon, ShieldCheck,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -58,6 +58,8 @@ const navItems: NavItem[] = [
   { path: '/scheduled-tasks', labelKey: '定时任务', icon: CalendarClock, adminOnly: true },
   // 插件管理（契约对齐 Agent2API 插件页；后端建设中整页降级空态，就绪即生效）
   { path: '/plugins', labelKey: '插件管理', icon: Puzzle, adminOnly: true },
+  // 用户工具权限（#34/#65：终端用户工具回路策略配置，默认关）
+  { path: '/user-tools', labelKey: '用户工具权限', icon: ShieldCheck, adminOnly: true },
 ];
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
 // 管理员 19 项 / 客户 8 项。合并历史：
@@ -100,6 +102,7 @@ const navGroups: NavGroup[] = [
       navItemOf('/products'),        // 套餐与兑换码（双 Tab）
       navItemOf('/routing'),         // 路由（分层档案 / 预演 / 回放 / 粘滞）
       navItemOf('/checkin'),         // 签到中心
+      navItemOf('/user-tools'),      // 用户工具权限（工具回路策略）
       navItemOf('/scheduled-tasks'), // 定时任务
       // 系统诊断 → 并入「渠道与账号池」第三 Tab「健康」（07 E.3：诊断三件套
       // 全部以渠道为粒度，看到问题就在旁边修），顶级菜单下线
