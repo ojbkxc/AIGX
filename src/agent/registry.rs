@@ -2486,6 +2486,7 @@ fn build_tools() -> Vec<ToolDef> {
                 "/api/models/metadata",
                 "/api/debug",
                 "/api/debug/traffic",
+                "/api/report/settings",
                 "/api/checkin-center/benefits/keepalive",
                 "/api/checkin-center/benefits",
             ],
@@ -2498,7 +2499,7 @@ fn build_tools() -> Vec<ToolDef> {
                             "updateSettings","logsRetention","queue","ratelimit","ratios","ipFilter","notify",
                             "clineHeaders","userToolsPolicy","userToolsCatalog","routing","routingDefaults",
                             "routingProfiles","alertsRules","pricingSyncConfig","exchangeRates","modelMetadata",
-                            "debug","debugTraffic","checkinKeepalive","checkinBenefits"
+                            "debug","debugTraffic","reportSettings","checkinKeepalive","checkinBenefits"
                         ], "description": "配置视图 key" }
                     },
                     "required": ["key"]
@@ -2870,8 +2871,8 @@ mod tests {
                 let mut depth = 1usize;
                 let mut m = q + 1;
                 let mut start2: Option<usize> = None;
-                let mut end2: Option<usize> = None;
-                loop {
+                // end2 由下面两个 break 点产出；预赋 None 是死值（clippy unused_assignments）
+                let end2 = loop {
                     if m >= b.len() {
                         panic!("`.route({raw})` 的调用括号未闭合");
                     }
@@ -2884,8 +2885,7 @@ mod tests {
                         b')' => {
                             depth -= 1;
                             if depth == 0 {
-                                end2 = Some(m);
-                                break;
+                                break Some(m);
                             }
                             m += 1;
                         }
@@ -2894,13 +2894,12 @@ mod tests {
                                 start2 = Some(skip_ws(b, m + 1));
                                 m += 1;
                             } else {
-                                end2 = Some(m); // 第三个及以后实参不看（同 CI）
-                                break;
+                                break Some(m); // 第三个及以后实参不看（同 CI）
                             }
                         }
                         _ => m += 1,
                     }
-                }
+                };
                 let handler = match (start2, end2) {
                     (Some(s), Some(e)) if e > s => &src[s..e],
                     _ => "",
@@ -2954,7 +2953,7 @@ mod tests {
         ledger
             .iter()
             .flat_map(|(_, paths)| paths.iter())
-            .map(|p| norm_route_path(p))
+            .map(|p| norm_route_path(*p))
             .collect()
     }
 
@@ -3242,7 +3241,8 @@ mod tests {
         assert!(
             universe.len() >= 200,
             "路由提取异常：管理面只提取到 {} 条（量级应为 ~300）。多半是路由写法变了导致提取口径分叉，\
-             此时 A–E 会全体假绿，必须先同步本测试与 tools/extract_routes.py"
+             此时 A–E 会全体假绿，必须先同步本测试与 tools/extract_routes.py",
+            universe.len()
         );
         assert!(
             real.values().all(|ms| !ms.is_empty()),
