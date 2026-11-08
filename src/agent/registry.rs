@@ -2922,8 +2922,8 @@ mod tests {
         out
     }
 
-    /// 闸门宇宙 = 管理面（与 openapi.rs 的范围口径一致）：`/api*` + `/api-docs*`
-    /// + `/swagger-ui*`。数据面 `/v1/*` 是产品协议面（OpenAI/Anthropic 兼容，自带
+    /// 闸门宇宙 = 管理面（与 openapi.rs 的范围口径一致）：`/api*`、`/api-docs*`、
+    /// `/swagger-ui*`。数据面 `/v1/*` 是产品协议面（OpenAI/Anthropic 兼容，自带
     /// `/v1/models` 自描述），`/health`/`/livez`/`/readyz`/`/metrics` 是编排器探针——
     /// 都不是「AI 可运维的管理面」，故不入账（35 条，逐条核过）。
     fn gate_universe(real: &BTreeMap<String, BTreeSet<String>>) -> BTreeSet<String> {
@@ -2956,7 +2956,7 @@ mod tests {
         ledger
             .iter()
             .flat_map(|(_, paths)| paths.iter())
-            .map(|p| norm_route_path(*p))
+            .map(|p| norm_route_path(p))
             .collect()
     }
 
