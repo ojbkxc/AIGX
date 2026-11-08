@@ -28,6 +28,10 @@ const DEFAULT_PG_ICONS = [BarChart3, ClipboardList, Code2, GraduationCap];
  * 流式占位「…」、错误「⚠️ …」、停止「⏹ …」都带这些标记，它们只在界面上提示
  * 本次结果，不是真正的模型回复。回传历史时要排除，否则会把一串报错当上下文
  * 发给上游（详见 handleSend 的 history 过滤）。
+ *
+ * #37 后正常停止路径不再产生「⏹ …」文本（标记走 `toolState`，正文原样保留），
+ * 这里的 `⏹` 分支仍要留着：兼容旧会话里已烘焙进正文的停止文案，以及「占位气泡
+ * 还没建起来就被停掉」时兜底新起的那条。
  */
 function isTransientAssistantText(content: string | undefined): boolean {
   const s = (content ?? '').trim();
@@ -683,26 +687,25 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === 'Aborted' || msg === 'AbortError' || /abort/i.test(msg)) {
-        // 用户主动停止：补一句生成已停止，不弹出错误
+        // 用户主动停止：在**同一只气泡**里标中止，不新起「⏹」气泡（#37，对齐
+        // F4/工具卡片支的原地标记口径）。标记走 `toolState` 而不是拼进 content：
+        // 正文要原样回传历史 / 复制 / 朗读，混进 UI 提示等于把「已停止生成」
+        // 当成模型上一轮回复发给上游（见 isTransientAssistantText 的注释）。
         setMessages((prev) => {
           const next = prev.slice();
           const last = next[next.length - 1];
-          // 已收到工具分片：原地标中断（不新起气泡，否则卡片重复）
-          if (last && last.role === 'assistant' && last.toolCalls?.length) {
+          if (last && last.role === 'assistant') {
+            // 停在「…」占位阶段：占位没有信息量，清成空串，气泡只剩中止标记
             const blank = last.content === '…' || !last.content.trim();
             next[next.length - 1] = {
               ...last,
-              ...(blank ? { content: `⏹ ${t('已停止生成')}` } : {}),
+              ...(blank ? { content: '' } : {}),
               toolState: 'interrupted',
             };
             return next;
           }
-          // 停在「…」占位阶段时直接替换占位，避免留下空白气泡
-          if (last && last.role === 'assistant' && (last.content === '…' || !last.content.trim())) {
-            next[next.length - 1] = { ...last, content: `⏹ ${t('已停止生成')}` };
-          } else {
-            next.push({ role: 'assistant', content: `⏹ ${t('已停止生成')}` });
-          }
+          // 末尾不是 assistant 气泡（占位气泡还没建起来就被停掉）：只能新起一条
+          next.push({ role: 'assistant', content: `⏹ ${t('已停止生成')}` });
           return next;
         });
         abortRef.current = null;

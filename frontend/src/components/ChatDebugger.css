@@ -582,6 +582,14 @@
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* #37：停止标记——与正文同一只气泡内的收尾行（原实现是另起一只「⏹」气泡）。
+   色调对齐工具卡片的中止状态徽标 .tc-status-warn。 */
+.chat-debugger-msg-stopped {
+  padding: 2px 4px 0;
+  font-size: 12px;
+  color: var(--warning-text, #b45309);
+}
+
 /* 输入区：open-webui 式三段式圆角大输入框 */
 .chat-debugger-input-row {
   display: flex;

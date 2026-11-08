@@ -11,6 +11,8 @@ export interface DebugMessage {
   toolCalls?: ToolCallState[];
   /** 本次回复的用量收尾（#63；usage 终帧，旧上游可能缺省） */
   usage?: ChatStreamUsage;
-  /** 工具调用卡片整体状态（有 toolCalls 时才有意义） */
+  /** 本次回复的整体状态。有 toolCalls 时驱动卡片着色；无 toolCalls 时
+   *  `interrupted` 会让气泡自身渲染「已停止生成」标记（#37）。
+   *  标记走状态而非拼进 `content`：正文要保持纯净（回传历史 / 复制 / 朗读）。 */
   toolState?: 'streaming' | 'done' | 'interrupted' | 'error';
 }

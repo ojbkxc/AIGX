@@ -124,6 +124,17 @@ export default function ChatBubble({
               )}
             </div>
 
+            {/* #37：停止标记与正文同泡（原实现另起一只「⏹」气泡，看起来像两条回答）。
+                标记走 toolState 而非拼进 content——正文要保持纯净，回传历史/复制/朗读
+                都不该带上 UI 提示。有工具卡片时不渲染：卡片自带「停止」状态徽标，
+                两处同开就是重复标注。 */}
+            {message.role === 'assistant' && message.toolState === 'interrupted'
+              && !(message.toolCalls && message.toolCalls.length > 0) && (
+              <div className="chat-debugger-msg-stopped" data-testid="msg-stopped">
+                {'⏹'} {t('已停止生成')}
+              </div>
+            )}
+
             {/* 工具调用卡片（#63）：参数/结果折叠，流式/中断/错误三态着色 */}
             {message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0 && (
               <ToolCallCard
