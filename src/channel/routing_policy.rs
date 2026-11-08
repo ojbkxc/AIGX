@@ -16,12 +16,9 @@
 //!   （AIGX 断路器 HalfOpen 成功即恢复，无独立 success_threshold，不强造）
 //! - 调度权重：A2A 无此项；AIGX 把闲置的 `set_scheduler_config()` 接上
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 
 use crate::channel::scheduler::SchedulerPolicyConfig;
-use crate::storage::FileStore;
 
 /// 持久化键。
 pub const ROUTING_POLICY_KEY: &str = "routing_policy";
@@ -163,6 +160,336 @@ impl Default for BreakerPolicy {
     }
 }
 
+// ── #40 路由多规则体系（契约冻结稿：20-routing-contract-freeze.md，仓库外）──
+//
+// 三条不可动摇的形态（契约 §0/§2.1/§2.3）：
+// 1. **不新建平行体系**：规则档案是 `RoutingPolicy` 的**字段**，从而复用
+//    `RoutingPolicyStore` 的单次 `snapshot()` —— 每请求仍只一次 Arc 指针拷贝，
+//    无 IO / 无 DB / 无 KV / 无新锁。
+// 2. **逐字段三态覆盖**（不是 A2A 的「档案整体替换」）：`None` = 继承下层，
+//    `Some(默认值)` = 显式置为该值，`Some(空集合)` = 显式清空。与本仓
+//    `model::ModelMapper` 的 `reasoning` 字段既有三态口径一致 —— 否则同一个
+//    仓库里会并存两套覆盖语义，后来者无法从仓库自身推断该用哪套。
+// 3. **档案以「请求名」为键、以「全局映射名」兜底**（同 `pricing` 的
+//    `resolve_priced_name(requested, upstream)` 范式）。不用渠道级映射名为键：
+//    解析发生在候选渠道选择**之前**，此刻不存在唯一上游名，且多对一无反向索引。
+
+/// 路由档案各项上限（契约 §1/§3：**超限拒绝写入**，不静默截断）。
+pub mod caps {
+    /// 模型级档案数上限
+    pub const MAX_MODELS: usize = 500;
+    /// 参与 / 排除提供商名单长度上限
+    pub const MAX_PROVIDERS: usize = 256;
+    /// 账号顺序 / 排除账号名单长度上限
+    pub const MAX_ACCOUNTS: usize = 10_000;
+    /// 路由组数上限
+    pub const MAX_GROUPS: usize = 500;
+    /// 单组成员数上限
+    pub const MAX_MEMBERS: usize = 256;
+    /// 单层排序规则条数上限（对齐 A2A）
+    pub const MAX_SORT_RULES: usize = 2;
+}
+
+/// 提供商作用域。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderScope {
+    /// 自动并入新出现的提供商（A2A providerScope=all 的语义）
+    #[default]
+    All,
+    /// 只用 `providers` 列出的
+    Listed,
+}
+
+/// 参与名单（AIGX 口径的 provider / 账号标识）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoutingScope {
+    #[serde(default)]
+    pub provider_scope: ProviderScope,
+    /// 上限 [`caps::MAX_PROVIDERS`]
+    #[serde(default)]
+    pub providers: Vec<String>,
+    /// 上限 [`caps::MAX_PROVIDERS`]
+    #[serde(default)]
+    pub disabled_providers: Vec<String>,
+    /// 账号 id 优先级顺序（先出现的先试）；上限 [`caps::MAX_ACCOUNTS`]
+    #[serde(default)]
+    pub account_order: Vec<String>,
+    /// 上限 [`caps::MAX_ACCOUNTS`]
+    #[serde(default)]
+    pub excluded_accounts: Vec<String>,
+}
+
+/// 能力需求（请求体推出：tools / images / video）。
+///
+/// AIGX 无需扩数据模型：账号目录已产出 `tool` / `vision` / `video` 标签，
+/// 直接做集合包含判定（映射处只有 [`RequestNeeds::required_tags`] 一处）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestNeeds {
+    #[serde(default)]
+    pub tools: bool,
+    #[serde(default)]
+    pub images: bool,
+    #[serde(default)]
+    pub video: bool,
+}
+
+impl RequestNeeds {
+    /// 与本 crate 能力标签对齐的**唯一**映射处（别在别处再写一遍）。
+    pub fn required_tags(&self) -> impl Iterator<Item = &'static str> {
+        [
+            self.tools.then_some("tool"),
+            self.images.then_some("vision"),
+            self.video.then_some("video"),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.tools && !self.images && !self.video
+    }
+}
+
+/// 排序方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortDir {
+    Asc,
+    Desc,
+}
+
+/// 账号排序规则（**AIGX 口径**，数据源见 `account_session` 的
+/// `created_at` / `expires_at` / `last_balance` / `limiters`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "on", rename_all = "snake_case")]
+pub enum AccountSortRule {
+    /// 按余额（`last_balance`；形态随 provider 而异，无法归一者不参与排序）
+    Balance { dir: SortDir },
+    /// 按加入时间（`created_at`）
+    Added { dir: SortDir },
+    /// 按凭证到期（`expires_at`）
+    Expires { dir: SortDir },
+    /// 按配额重置时刻（limiter 的 reset）
+    QuotaReset { dir: SortDir },
+}
+
+/// 单层档案。**每个字段都是 `Option`**（三态，见模块头注释第 2 条）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoutingProfile {
+    #[serde(default)]
+    pub scope: Option<RoutingScope>,
+    #[serde(default)]
+    pub strategy: Option<RouteStrategy>,
+    #[serde(default)]
+    pub sticky: Option<StickyMode>,
+    #[serde(default)]
+    pub needs: Option<RequestNeeds>,
+    /// 上限 [`caps::MAX_SORT_RULES`] 条；超限拒绝写入
+    #[serde(default)]
+    pub sort_rules: Option<Vec<AccountSortRule>>,
+    /// 该层指定的默认路由组 id（§6.1 优先级链第 3 环）
+    #[serde(default)]
+    pub default_group: Option<String>,
+}
+
+/// 字段 → 生效层。用枚举而非 String：热路径零分配。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layer {
+    Global,
+    Model,
+    Group,
+}
+
+/// 逐字段来源，供管理面 / 回放显示（长度 ≤ 字段数 × 层数，静态枚举，零 String）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileProvenance {
+    pub scope: Option<Layer>,
+    pub strategy: Option<Layer>,
+    pub sticky: Option<Layer>,
+    pub needs: Option<Layer>,
+    pub sort_rules: Option<Layer>,
+    pub default_group: Option<Layer>,
+}
+
+impl ProfileProvenance {
+    /// 本次实际参与覆盖的层（界面显示「规则命中在哪一层」用）。
+    ///
+    /// 只在管理面/预演调用（热路径不调），故此处允许一次小 `Vec` 分配。
+    pub fn applied_layers(&self) -> Vec<Layer> {
+        let mut out = Vec::with_capacity(3);
+        for l in [
+            self.scope,
+            self.strategy,
+            self.sticky,
+            self.needs,
+            self.sort_rules,
+            self.default_group,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !out.contains(&l) {
+                out.push(l);
+            }
+        }
+        out
+    }
+}
+
+/// 解析结果：逐字段生效值 + provenance。
+///
+/// 为什么要 provenance：分层覆盖一旦上线，「用户改了 global 的策略但某模型
+/// 没生效」这类问题只能靠「这个字段来自哪一层」解释；没有它界面上只能显示
+/// 结果值，管理员会反复怀疑配置没保存。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedProfile {
+    pub scope: RoutingScope,
+    pub strategy: RouteStrategy,
+    pub sticky: StickyMode,
+    pub needs: RequestNeeds,
+    pub sort_rules: Vec<AccountSortRule>,
+    pub default_group: Option<String>,
+    pub provenance: ProfileProvenance,
+}
+
+/// 路由组成员（映射 A2A `config/routing_groups.rs`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutingMember {
+    pub provider: String,
+    pub model: String,
+    #[serde(default = "default_true")]
+    pub included: bool,
+    /// 上限 [`caps::MAX_ACCOUNTS`]
+    #[serde(default)]
+    pub accounts: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 路由组（AIGX 用 `id` 查找，故容器用 `Vec`，不照搬 A2A 的 `HashMap<id,_>`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutingGroup {
+    pub id: String,
+    pub name: String,
+    /// 该组服务的模型（A2A 的组是 per-model 的）
+    pub model: String,
+    #[serde(default)]
+    pub strategy: RouteStrategy,
+    #[serde(default)]
+    pub sticky: StickyMode,
+    /// 上限 [`caps::MAX_MEMBERS`]
+    #[serde(default)]
+    pub members: Vec<RoutingMember>,
+}
+
+/// 三层容器：global / 模型级 / 路由组。
+///
+/// `models` 用 `BTreeMap` 而非 `HashMap`：序列化稳定（整份配置会写进 FileStore
+/// KV 与磁盘备份），且解析是按名精确查找。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoutingProfiles {
+    #[serde(default)]
+    pub global: RoutingProfile,
+    /// 模型级档案；上限 [`caps::MAX_MODELS`]
+    #[serde(default)]
+    pub models: std::collections::BTreeMap<String, RoutingProfile>,
+    /// 上限 [`caps::MAX_GROUPS`]
+    #[serde(default)]
+    pub groups: Vec<RoutingGroup>,
+}
+
+impl RoutingProfiles {
+    /// 上限校验（写入前调用；超限**拒绝写入**，不静默截断）。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.models.len() > caps::MAX_MODELS {
+            return Err(format!(
+                "模型档案数 {} 超上限 {}",
+                self.models.len(),
+                caps::MAX_MODELS
+            ));
+        }
+        if self.groups.len() > caps::MAX_GROUPS {
+            return Err(format!(
+                "路由组数 {} 超上限 {}",
+                self.groups.len(),
+                caps::MAX_GROUPS
+            ));
+        }
+        check_profile("global", &self.global)?;
+        for (name, p) in &self.models {
+            check_profile(name, p)?;
+        }
+        for g in &self.groups {
+            if g.members.len() > caps::MAX_MEMBERS {
+                return Err(format!(
+                    "路由组 `{}` 成员数 {} 超上限 {}",
+                    g.id,
+                    g.members.len(),
+                    caps::MAX_MEMBERS
+                ));
+            }
+            for m in &g.members {
+                if m.accounts.len() > caps::MAX_ACCOUNTS {
+                    return Err(format!(
+                        "路由组 `{}` 成员 `{}/{}` 账号数 {} 超上限 {}",
+                        g.id,
+                        m.provider,
+                        m.model,
+                        m.accounts.len(),
+                        caps::MAX_ACCOUNTS
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 按 id 找组（组是 per-model 的：`model` 非空且不匹配则该组不适用）。
+    pub fn find_group(&self, id: &str, requested_model: &str) -> Option<&RoutingGroup> {
+        self.groups
+            .iter()
+            .find(|g| g.id == id && (g.model.is_empty() || g.model == requested_model))
+    }
+}
+
+/// 单层档案的上限校验。
+fn check_profile(name: &str, p: &RoutingProfile) -> Result<(), String> {
+    if let Some(s) = &p.scope {
+        for (field, len, cap) in [
+            ("providers", s.providers.len(), caps::MAX_PROVIDERS),
+            (
+                "disabled_providers",
+                s.disabled_providers.len(),
+                caps::MAX_PROVIDERS,
+            ),
+            ("account_order", s.account_order.len(), caps::MAX_ACCOUNTS),
+            (
+                "excluded_accounts",
+                s.excluded_accounts.len(),
+                caps::MAX_ACCOUNTS,
+            ),
+        ] {
+            if len > cap {
+                return Err(format!("档案 `{name}` 的 {field} 数 {len} 超上限 {cap}"));
+            }
+        }
+    }
+    if let Some(r) = &p.sort_rules {
+        if r.len() > caps::MAX_SORT_RULES {
+            return Err(format!(
+                "档案 `{name}` 的排序规则 {} 条超上限 {}",
+                r.len(),
+                caps::MAX_SORT_RULES
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 路由策略整份配置。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RoutingPolicy {
@@ -178,6 +505,30 @@ pub struct RoutingPolicy {
     /// 多因子调度权重（strategy=ranked 时生效；健康/成本/RPM）
     #[serde(default)]
     pub scheduler_weights: SchedulerPolicyConfig,
+    /// 多规则档案总开关。**默认 false**：所有新代码路径短路 = 与历史逐字节
+    /// 等价（老 KV 数据无该字段 → 反序列化即 false，零迁移）。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 多规则档案（global / 模型级 / 路由组）
+    #[serde(default)]
+    pub profiles: RoutingProfiles,
+}
+
+/// 多规则档案总开关的**进程级快照**（由 [`RoutingPolicyStore`] 在加载/保存时
+/// 镜像 `RoutingPolicy.enabled`；照 `config::assistant_tools_enabled` 的既有模式）。
+///
+/// 数据面每请求都要判一次「档案是否启用」；走原子快照与既有配置开关同模式：
+/// 关闭时分支预测直通，不触碰档案结构。
+static PROFILES_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 读取多规则档案总开关（进程级快照，镜像自 `RoutingPolicy.enabled`）。
+pub fn routing_profiles_enabled() -> bool {
+    PROFILES_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 [`RoutingPolicyStore`] 在加载 / 保存时写入快照（勿在别处调用）。
+pub fn set_routing_profiles_enabled(v: bool) {
+    PROFILES_ENABLED.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 路由策略运行时持有者：进程级快照，保存即生效。
@@ -191,6 +542,7 @@ pub struct RoutingPolicyStore {
 impl RoutingPolicyStore {
     /// 无持久化构建（测试用；配置不落盘）。
     pub fn in_memory(policy: RoutingPolicy) -> Self {
+        set_routing_profiles_enabled(policy.enabled);
         Self {
             current: parking_lot::RwLock::new(Arc::new(policy)),
             store: None,
@@ -204,6 +556,7 @@ impl RoutingPolicyStore {
             .ok()
             .flatten()
             .unwrap_or_default();
+        set_routing_profiles_enabled(policy.enabled);
         Self {
             current: parking_lot::RwLock::new(Arc::new(policy)),
             store: Some(store),
@@ -216,11 +569,19 @@ impl RoutingPolicyStore {
     }
 
     /// 更新并持久化（返回生效值）。
+    ///
+    /// 写入前做档案上限校验（契约 §1/§3）：**超限拒绝写入**（返回 Err），
+    /// 不静默截断 —— 静默截断会让界面显示的配置与实际生效的不一致。
     pub fn update(&self, policy: RoutingPolicy) -> anyhow::Result<RoutingPolicy> {
+        policy
+            .profiles
+            .validate()
+            .map_err(|e| anyhow::anyhow!("路由档案超限：{e}"))?;
         if let Some(store) = &self.store {
             store.put(ROUTING_POLICY_KEY, &policy)?;
         }
         *self.current.write() = Arc::new(policy.clone());
+        set_routing_profiles_enabled(policy.enabled);
         Ok(policy)
     }
 }
@@ -228,6 +589,7 @@ impl RoutingPolicyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel::Channel;
 
     #[test]
     fn defaults_match_a2a_semantics() {
@@ -278,6 +640,11 @@ mod tests {
 
     #[test]
     fn store_update_hot_swap() {
+        // 本用例会写 `enabled` 的进程级镜像，与同模块其他写镜像的用例
+        // 共用跨模块测试锁（`secret::test_lock`），避免并行下读到别家的值。
+        let _guard = crate::account_session::secret::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let store = RoutingPolicyStore::in_memory(RoutingPolicy::default());
         let mut p = store.snapshot();
         assert_eq!(p.strategy, RouteStrategy::Weighted);
@@ -328,5 +695,152 @@ mod tests {
         assert!(!StickyMode::sticky_enabled_from(&p));
         p.sticky = StickyMode::Session;
         assert!(StickyMode::sticky_enabled_from(&p));
+    }
+
+    // ── #40 路由多规则体系 ─────────────────────────────────────────────
+
+    /// 上限校验（契约 §1/§3）：**超限拒绝写入**，不静默截断。
+    #[test]
+    fn caps_reject_over_limit_writes() {
+        let _guard = crate::account_session::secret::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut profiles = RoutingProfiles::default();
+        assert!(profiles.validate().is_ok());
+
+        // 排序规则：2 条 ok / 3 条拒
+        profiles.global.sort_rules = Some(vec![
+            AccountSortRule::Balance { dir: SortDir::Asc },
+            AccountSortRule::Added { dir: SortDir::Desc },
+        ]);
+        assert!(profiles.validate().is_ok());
+        profiles.global.sort_rules = Some(vec![
+            AccountSortRule::Balance { dir: SortDir::Asc },
+            AccountSortRule::Added { dir: SortDir::Desc },
+            AccountSortRule::Expires { dir: SortDir::Asc },
+        ]);
+        let err = profiles.validate().unwrap_err();
+        assert!(err.contains("排序规则"), "{err}");
+        profiles.global.sort_rules = None;
+
+        // providers 超上限
+        profiles.global.scope = Some(RoutingScope {
+            providers: (0..=caps::MAX_PROVIDERS).map(|i| format!("p{i}")).collect(),
+            ..RoutingScope::default()
+        });
+        assert!(profiles.validate().is_err());
+        profiles.global.scope = None;
+
+        // 组数超上限
+        profiles.groups = (0..=caps::MAX_GROUPS)
+            .map(|i| RoutingGroup {
+                id: format!("g{i}"),
+                name: String::new(),
+                model: String::new(),
+                strategy: RouteStrategy::Weighted,
+                sticky: StickyMode::Auto,
+                members: Vec::new(),
+            })
+            .collect();
+        assert!(profiles.validate().is_err());
+        // 单组成员数超上限
+        profiles.groups = vec![RoutingGroup {
+            id: "g".to_string(),
+            name: String::new(),
+            model: String::new(),
+            strategy: RouteStrategy::Weighted,
+            sticky: StickyMode::Auto,
+            members: (0..=caps::MAX_MEMBERS)
+                .map(|i| RoutingMember {
+                    provider: "p".to_string(),
+                    model: format!("m{i}"),
+                    included: true,
+                    accounts: Vec::new(),
+                })
+                .collect(),
+        }];
+        assert!(profiles.validate().is_err());
+
+        // 单写入路径（store.update）必须同样拦住
+        let store = RoutingPolicyStore::in_memory(RoutingPolicy::default());
+        let bad = RoutingPolicy {
+            enabled: true,
+            profiles,
+            ..RoutingPolicy::default()
+        };
+        assert!(store.update(bad).is_err());
+        assert_eq!(
+            store.snapshot().profiles.groups.len(),
+            0,
+            "拒绝写入后现值不变"
+        );
+    }
+
+    /// 老 KV 数据（无 `enabled` / `profiles`）零迁移；三态序列化往返不丢语义。
+    #[test]
+    fn legacy_kv_without_profiles_loads_disabled() {
+        let v: RoutingPolicy = serde_json::from_str(r#"{"strategy":"ranked"}"#).unwrap();
+        assert!(!v.enabled);
+        assert_eq!(v.profiles, RoutingProfiles::default());
+        assert!(v.profiles.models.is_empty());
+
+        // None = 继承（缺失或 null 同义）；空对象 = Some(全默认) = 显式清空
+        let p: RoutingProfile = serde_json::from_value(
+            serde_json::json!({"scope": {}, "strategy": null, "sticky": "session"}),
+        )
+        .unwrap();
+        assert_eq!(p.strategy, None);
+        assert_eq!(p.sticky, Some(StickyMode::Session));
+        assert_eq!(p.scope, Some(RoutingScope::default()));
+        let j = serde_json::to_value(&p).unwrap();
+        assert_eq!(j["sticky"], serde_json::json!("session"));
+        assert!(j["strategy"].is_null());
+        let back: RoutingProfile = serde_json::from_value(j).unwrap();
+        assert_eq!(back, p);
+
+        let empty: RoutingProfile = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty, RoutingProfile::default());
+    }
+
+    /// `needs` 标签映射只有一处（`required_tags`），别处不得再写一遍。
+    #[test]
+    fn request_needs_tags() {
+        let n = RequestNeeds {
+            tools: true,
+            images: true,
+            video: false,
+        };
+        assert_eq!(
+            n.required_tags().collect::<Vec<_>>(),
+            vec!["tool", "vision"]
+        );
+        assert!(!n.is_empty());
+        let all = RequestNeeds {
+            tools: true,
+            images: true,
+            video: true,
+        };
+        assert_eq!(all.required_tags().count(), 3);
+        assert!(RequestNeeds::default().is_empty());
+        assert_eq!(RequestNeeds::default().required_tags().count(), 0);
+    }
+
+    /// `enabled` 的进程级快照镜像 `RoutingPolicy.enabled`（数据面无锁读）。
+    #[test]
+    fn profiles_enabled_snapshot_tracks_store() {
+        let _guard = crate::account_session::secret::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let store = RoutingPolicyStore::in_memory(RoutingPolicy::default());
+        assert!(!routing_profiles_enabled(), "默认关");
+        store
+            .update(RoutingPolicy {
+                enabled: true,
+                ..RoutingPolicy::default()
+            })
+            .unwrap();
+        assert!(routing_profiles_enabled());
+        store.update(RoutingPolicy::default()).unwrap();
+        assert!(!routing_profiles_enabled());
     }
 }
