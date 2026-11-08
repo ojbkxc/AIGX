@@ -58,11 +58,26 @@ describe('RouteSticky（404 降级路径复现）', () => {
     expect(container.querySelector('.rs-list')).toBeNull();
   });
 
-  it('正常列表渲染 + 逐条清除确认框可用', async () => {
+  // 后端 be-fix #38 已入库的真实形状：id = `session_id\u{1f}model`（清除原样回传），
+  // expires_at/updated_at 是 unix 秒，无 channel_name/provider，500 条截断无分页。
+  const STICKY_ID = `sess-abcdefghijklmnop\u001fglm-5.1`;
+
+  it('真实形状：id 拆分展示（不含控制字符），逐条清除原样回传 id', async () => {
     apiMock.getRouteSticky.mockResolvedValue({
       success: true,
       data: {
-        entries: [{ id: 'a'.repeat(64), channel_id: 'ch-1', channel_name: '渠道一' }],
+        entries: [
+          {
+            id: STICKY_ID,
+            channel_id: 'ch-1',
+            expires_at: 1_700_000_600,
+            updated_at: 1_700_000_000,
+            sticky_remaining_secs: 120,
+            hard_remaining_secs: 600,
+          },
+        ],
+        total: 1,
+        truncated: false,
         now: 1_700_000_000,
         sticky: 'auto',
       },
@@ -70,9 +85,40 @@ describe('RouteSticky（404 降级路径复现）', () => {
     apiMock.clearRouteSticky.mockResolvedValue({ success: true, data: { cleared: 1 } });
     const { container } = render(<>{<RouteSticky />}</> as ReactElement);
     await waitFor(() => expect(container.querySelector('.rs-item')).toBeTruthy(), { timeout: 3000 });
-    // 「全部清除」可点开确认框（danger 分支）
-    await (container.querySelector('.card-body button:nth-of-type(2)') as HTMLElement)?.click();
-    expect(true).toBe(true);
+    const row = container.querySelector('.rs-item') as HTMLElement;
+    expect(row.textContent).toContain('sess-abcdefghijklmnop');
+    expect(row.textContent).toContain('glm-5.1');
+    expect(row.textContent).toContain('#ch-1');
+    // 分隔符是内部编码，不该出现在可见文本里
+    expect(row.textContent).not.toContain('\u001f');
+    // total 回执可见；未被截断时不给截断提示
+    expect(container.querySelector('.rs-total')?.textContent).not.toContain('已截断');
+
+    // 逐条清除：行内「清除」→ 弹窗确认 → payload 必须原样带后端 id
+    await (row.querySelector('.rs-clear') as HTMLElement).click();
+    const confirmBtn = container.querySelector('.modal-footer button.btn-primary') as HTMLElement;
+    expect(confirmBtn).toBeTruthy();
+    await confirmBtn.click();
+    await waitFor(() =>
+      expect(apiMock.clearRouteSticky).toHaveBeenCalledWith({ id: STICKY_ID }),
+    );
+  });
+
+  it('截断回执：truncated=true 时提示「已截断」（列出的一页不是全部）', async () => {
+    apiMock.getRouteSticky.mockResolvedValue({
+      success: true,
+      data: {
+        entries: [{ id: STICKY_ID, channel_id: 'ch-1', expires_at: 1_700_000_600 }],
+        total: 1200,
+        truncated: true,
+        now: 1_700_000_000,
+        sticky: 'session',
+      },
+    });
+    const { container } = render(<>{<RouteSticky />}</> as ReactElement);
+    await waitFor(() => expect(container.querySelector('.rs-total')).toBeTruthy(), { timeout: 3000 });
+    expect(container.querySelector('.rs-total')?.textContent).toContain('1200');
+    expect(container.querySelector('.rs-total')?.textContent).toContain('已截断');
   });
 
   it('搜索去抖后带 query 重拉', async () => {

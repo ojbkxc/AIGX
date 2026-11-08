@@ -36,19 +36,44 @@ export interface AccountSkipRow {
   reason?: string;
 }
 
-/** 粘滞会话列表（GET /api/routing/sticky；对照上游 routing_workspace get_sticky） */
+/** 粘滞条目（GET /api/routing/sticky；对照 Agent2API routing_workspace get_sticky）。
+ *
+ * **形状契约锚点（后端为源，勿按前端假设改字段）**——后端投影出处：
+ * `src/api/admin/routing.rs handle_get_route_sticky`（be-fix #38，已入库）。
+ *
+ * - `id` = 内部编码 `session_id` + U+001F + `model`（**原样回传**用于清除；
+ *   展示需按 U+001F 拆分，见 RouteSticky.tsx `splitStickyId`）
+ * - 时间/剩余量：`expires_at` / `updated_at` 是 **unix 秒**；
+ *   `*_remaining_secs` 是剩余秒数（`sticky_remaining_secs=0` 表示已出粘性窗口、
+ *   下次选路重走 HRW，但条目还在硬 TTL 内）
+ * - 后端**不返回**渠道名/协议域（只有 channel_id） */
+export interface RouteStickyEntry {
+  /** 内部编码 `session_id\u{1f}model`（清除时原样回传） */
+  id: string;
+  channel_id?: string | null;
+  /** 硬过期时刻（unix 秒） */
+  expires_at?: number;
+  /** 建立/最后写入时刻（unix 秒） */
+  updated_at?: number;
+  /** 距退出粘性窗口的剩余秒数（0 = 已不再影响选路） */
+  sticky_remaining_secs?: number;
+  /** 距硬过期（被物理清除）的剩余秒数 */
+  hard_remaining_secs?: number;
+}
+
+/** 粘滞列表响应体（GET /api/routing/sticky 的 data）。
+ *
+ * 后端按 `ROUTE_STICKY_MAX_SNAPSHOT = 500` 截断（无分页参数），
+ * 超出部分由 `total` + `truncated` 回执。 */
 export interface RouteStickyList {
-  entries: Array<{
-    /** 会话粘滞标识（后端口径原样回传，逐条清除时原样带上） */
-    id: string;
-    channel_id?: string | number;
-    channel_name?: string;
-    provider?: string;
-    /** 过期时刻（秒/毫秒自适应用 expiryMillis 口径）；缺省不显示 */
-    expires_at?: number;
-    updated_at?: number;
-  }>;
+  entries: RouteStickyEntry[];
+  /** 过滤后总数（截断前） */
+  total?: number;
+  /** 是否被快照上限截断（true 时 entries 只是一部分） */
+  truncated?: boolean;
+  /** 服务端当前时刻（unix 秒） */
   now?: number;
+  /** 当前粘性档位：auto / session / turn / off */
   sticky?: string;
 }
 

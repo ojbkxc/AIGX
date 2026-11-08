@@ -885,13 +885,19 @@ export const api = {
       `${API_BASE}/routing/replay/${encodeURIComponent(String(requestId))}`,
     ),
   // 粘滞会话管理（对照 Agent2API api/routing_workspace.rs get_sticky/clear_sticky；
-  // 后端未就绪 404 → 空态降级）。query 按会话标识/渠道名模糊过滤。
+  // 后端 be-fix #38 已入库）。query 按会话标识/模型/渠道 id 模糊过滤；
+  // 后端按 500 条快照截断（无分页参数），超出部分看 data.total / data.truncated。
   getRouteSticky: (query = ''): Promise<ApiResponse<RouteStickyList>> =>
     request<ApiResponse<RouteStickyList>>(
       'GET',
       `${API_BASE}/routing/sticky${query ? `?query=${encodeURIComponent(query)}` : ''}`,
     ),
-  clearRouteSticky: (body: { id?: string; all?: boolean }): Promise<ApiResponse<{ cleared: number }>> =>
+  // 清除口径：id = 列表原样回传的内部编码（session\u{1f}model）；all: true 全清。
+  // 二者至少给一个，否则后端 400。
+  clearRouteSticky: (body: {
+    id?: string;
+    all?: boolean;
+  }): Promise<ApiResponse<{ cleared: number }>> =>
     request<ApiResponse<{ cleared: number }>>('POST', `${API_BASE}/routing/sticky/clear`, body),
   // Cline 伪装头覆盖表（对照 Agent2API「设置 → 网关 → Cline 伪装头」；保存即生效）
   getClineHeaders: (): Promise<ApiResponse<ClineHeadersItem>> =>
