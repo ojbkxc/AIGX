@@ -742,10 +742,7 @@ mod tests {
         let child_msgs = st.messages("u1", &out.session.id).unwrap();
         // 尾部保留：第一条是被丢 50 条后的 m50，最后一条是分叉点
         assert_eq!(child_msgs[0].content, "m50");
-        assert_eq!(
-            child_msgs.last().unwrap().content,
-            &format!("m{}", total - 1)
-        );
+        assert_eq!(child_msgs.last().unwrap().content, format!("m{}", total - 1));
     }
 
     #[test]
