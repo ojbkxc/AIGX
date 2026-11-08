@@ -231,6 +231,13 @@ pub(crate) fn resolve_bridges(
         &state.pricing_store,
     );
     let plan = crate::channel::routing_policy::plan_route(&policy, &profile, &candidates);
+    // #40 §2 账号级规则（参与名单 / 排序规则）：档案里真配了内容才构造
+    // （默认关 = 零额外分配；空 Vec 的 clone 不分配）。同一次请求的所有
+    // 账号型候选共享同一份，逐候选只做 Arc/小 Vec clone。
+    let account_scope = (!profile.scope.account_order.is_empty()
+        || !profile.scope.excluded_accounts.is_empty())
+    .then(|| std::sync::Arc::new(profile.scope.clone()));
+    let account_sort_rules = profile.sort_rules.clone();
     for ch in plan.iter() {
         // 统一模型管理里按 (provider, model) 关掉的模型不再进候选。
         // 账号型渠道的 provider 由账号决定，渠道级无从判断 —— 那一层由
@@ -320,7 +327,8 @@ pub(crate) fn resolve_bridges(
                     .with_rules(state.model_rules.clone())
                     .with_plugin_disabled(state.provider_gates.clone())
                     .with_allowed_providers(allowed_providers.map(<[String]>::to_vec))
-                    .with_account_capture(account_capture),
+                    .with_account_capture(account_capture)
+                    .with_account_rules(account_scope.clone(), account_sort_rules.clone()),
                 );
                 result.push((bridge, Some(ch.id.clone()), Some(ch.clone())));
             }

@@ -54,6 +54,14 @@ pub struct AccountBridge {
     /// 由调用方（`plan_route` 落地后从请求体推需求）经 [`Self::with_capabilities`]
     /// 注入；选号层据此按账号目录的能力位做精确过滤。
     capabilities: crate::model::capability::CapabilityMask,
+    /// 路由档案的账号级规则（#40 §2）：参与名单（`excluded_accounts` /
+    /// `account_order`）与账号排序规则。
+    ///
+    /// `None` / 空 = 不接入，选号走既有「优先级组内加权随机」（逐字节等价）。
+    /// 用 `Arc` 而非借用：`Arc<dyn Bridge>` 要求 `'static`，且同一次请求的多个
+    /// 账号型渠道候选共享同一份档案（Arc clone 廉价）。
+    scope: Option<Arc<crate::channel::routing_policy::RoutingScope>>,
+    sort_rules: Vec<crate::channel::routing_policy::AccountSortRule>,
 }
 
 /// 同渠道账号轮换的总时间预算（与共享 Client 的单请求超时对齐）。
@@ -90,7 +98,22 @@ impl AccountBridge {
             allowed_providers: None,
             account_capture: None,
             capabilities: crate::model::capability::CapabilityMask::EMPTY,
+            scope: None,
+            sort_rules: Vec::new(),
         }
+    }
+
+    /// 接入路由档案的账号级规则（#40 §2）。
+    ///
+    /// 不接入（默认）时选号行为逐字节不变。
+    pub fn with_account_rules(
+        mut self,
+        scope: Option<Arc<crate::channel::routing_policy::RoutingScope>>,
+        sort_rules: Vec<crate::channel::routing_policy::AccountSortRule>,
+    ) -> Self {
+        self.scope = scope;
+        self.sort_rules = sort_rules;
+        self
     }
 
     /// 接入本次请求的能力需求（#40 §1）。
@@ -187,6 +210,8 @@ impl AccountBridge {
                     gate: Some(&session_gate),
                     detail,
                     needs: self.capabilities,
+                    scope: self.scope.as_deref(),
+                    sort_rules: &self.sort_rules,
                 },
             ),
             Some(rules) => self.sessions.acquire_with_reasons_detail(
@@ -205,6 +230,8 @@ impl AccountBridge {
                     gate: Some(&session_gate),
                     detail,
                     needs: self.capabilities,
+                    scope: self.scope.as_deref(),
+                    sort_rules: &self.sort_rules,
                 },
             ),
         };

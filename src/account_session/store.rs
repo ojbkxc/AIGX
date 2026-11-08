@@ -88,6 +88,8 @@ pub struct SkipReasons {
     /// 模型能力位不满足请求需求（#40 §1：图/工具/视频）。**只计有证据的拒否**
     /// —— 能力标签缺失（老账号目录快照）按放行处理，不计入本档。
     pub capability: usize,
+    /// 被参与名单显式排除（#40 §2 的 `excluded_accounts`）
+    pub scope_excluded: usize,
     /// 模型 / 账号级冷却中
     pub cooling: usize,
     /// 余额低于限制器阈值
@@ -119,6 +121,9 @@ impl SkipReasons {
         }
         if self.capability > 0 {
             parts.push(format!("{} 个不支持请求能力", self.capability));
+        }
+        if self.scope_excluded > 0 {
+            parts.push(format!("{} 个被参与名单排除", self.scope_excluded));
         }
         if self.cooling > 0 {
             parts.push(format!("{} 个冷却中", self.cooling));
@@ -184,6 +189,12 @@ pub struct AcquireFilters<'a> {
     pub detail: Option<&'a mut crate::log::AccountSkipCapture>,
     /// 能力需求（#40 §1；`EMPTY` = 不做能力过滤）。
     pub needs: CapabilityMask,
+    /// 参与名单（#40 §2；`None` = 不裁剪）。provider 级裁剪在渠道候选阶段
+    /// （`routing_policy::plan_route`）做完了，这里只用账号级的
+    /// `excluded_accounts`（硬裁）与 `account_order`（先试序）。
+    pub scope: Option<&'a crate::channel::routing_policy::RoutingScope>,
+    /// 账号排序规则（#40 §2；空 = 保持既有「优先级组内加权随机」）。
+    pub sort_rules: &'a [crate::channel::routing_policy::AccountSortRule],
 }
 
 impl AccountSessionStore {
@@ -604,6 +615,8 @@ impl AccountSessionStore {
             gate,
             detail,
             needs,
+            scope,
+            sort_rules,
         } = filters;
         let mut detail = detail;
         let now = chrono::Utc::now().timestamp();
@@ -636,6 +649,17 @@ impl AccountSessionStore {
                     cap.push(self.skip_detail(session, "provider_not_allowed"));
                 }
                 continue;
+            }
+            // 参与名单硬裁（#40 §2）：显式排除的账号不进候选。名单通常是短表，
+            // 逐项精确比较、零分配（与「候选循环内零分配」红线一致）。
+            if let Some(scope) = scope {
+                if scope.excluded_accounts.iter().any(|id| id == &session.id) {
+                    reasons.scope_excluded += 1;
+                    if let Some(cap) = detail.as_mut() {
+                        cap.push(self.skip_detail(session, "scope_excluded"));
+                    }
+                    continue;
+                }
             }
             // 限制条件组裁决（Phase1-A2）：skip/disable 命中均跳过该账号；
             // 余额类即时生效，本地计数类在计数器接入前恒不命中（宁放勿误伤）
@@ -705,7 +729,14 @@ impl AccountSessionStore {
         if candidates.is_empty() {
             return (None, reasons);
         }
-        // 最高优先级组内：权重随机（同组内再让空闲最久的账号权重更高）
+        // 最高优先级组内：权重随机（同组内再让空闲最久的账号权重更高）。
+        //
+        // #40 §2：档案给了 `account_order` / `sort_rules` 时改用**确定性排序**
+        // 选号（排序规则与加权随机互斥——否则「按余额排」会被随机权重推翻）。
+        // 排序只在本组内进行：priority 是管理员显式设定的硬约束，不能被排序
+        // 规则推翻（与 `ChannelStore::select_for_model_ranked` 同口径）。
+        // 规则全都判不出结论（读数缺失）时 `pick_by_rules` 返回 None → 回落
+        // 加权随机，规则空转而不是把负载均衡悄悄关掉。
         let max_priority = candidates
             .iter()
             .map(|index| sessions[*index].priority)
@@ -715,7 +746,9 @@ impl AccountSessionStore {
             .into_iter()
             .filter(|index| sessions[*index].priority == max_priority)
             .collect();
-        let pick = pick_weighted(&sessions, &group, now);
+        let order = scope.map(|s| s.account_order.as_slice()).unwrap_or(&[]);
+        let pick = pick_by_rules(&sessions, &group, order, sort_rules)
+            .unwrap_or_else(|| pick_weighted(&sessions, &group, now));
         let next_in_flight = sessions[pick].in_flight.saturating_add(1);
         sessions[pick].in_flight = next_in_flight;
         sessions[pick].last_used_at = Some(now);
@@ -1076,6 +1109,132 @@ fn pick_weighted(sessions: &[AccountSession], group: &[usize], now: i64) -> usiz
     group[0]
 }
 
+/// #40 §2 排序选号：在**最高优先级组内**按档案规则挑一个账号。
+///
+/// 返回 `None` = 本组没有任何**可判**的排序信息（没配规则、或配了但读数全缺）
+/// → 调用方回落 [`pick_weighted`]，既有负载均衡不被悄悄关掉。
+///
+/// 顺序：
+/// 1. `account_order`：名单内**先出现的先试**；名单外账号垫底但**不排除**
+///    （排除是 `excluded_accounts` 的职责）。名单命中即定论。
+/// 2. `sort_rules`：逐条比较，第一条判出差异者胜出。读数缺失（`None`）恒排在
+///    有读数者之后，**不硬造排序键**（见 [`cmp_opt`]）。
+///
+/// 全程只做整数/浮点比较——零分配。
+fn pick_by_rules(
+    sessions: &[AccountSession],
+    group: &[usize],
+    order: &[String],
+    rules: &[crate::channel::routing_policy::AccountSortRule],
+) -> Option<usize> {
+    if group.is_empty() {
+        return None;
+    }
+    if !order.is_empty() {
+        let ranked = group
+            .iter()
+            .map(|index| account_rank(&sessions[*index], order))
+            .min()
+            .unwrap_or(usize::MAX);
+        if ranked != usize::MAX {
+            return group
+                .iter()
+                .copied()
+                .find(|index| account_rank(&sessions[*index], order) == ranked);
+        }
+    }
+    if rules.is_empty() {
+        return None;
+    }
+    let mut best = group[0];
+    let mut decided = false;
+    for &candidate in &group[1..] {
+        match cmp_by_rules(&sessions[candidate], &sessions[best], rules) {
+            std::cmp::Ordering::Less => {
+                best = candidate;
+                decided = true;
+            }
+            std::cmp::Ordering::Greater => decided = true,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    decided.then_some(best)
+}
+
+/// 账号在 `account_order` 里的名次（未列入 = 垫底）。
+fn account_rank(session: &AccountSession, order: &[String]) -> usize {
+    order
+        .iter()
+        .position(|id| id == &session.id)
+        .unwrap_or(usize::MAX)
+}
+
+/// 按排序规则比较两个账号（`Less` = a 先试）。
+fn cmp_by_rules(
+    a: &AccountSession,
+    b: &AccountSession,
+    rules: &[crate::channel::routing_policy::AccountSortRule],
+) -> std::cmp::Ordering {
+    use crate::channel::routing_policy::AccountSortRule;
+    for rule in rules {
+        let ord = match *rule {
+            AccountSortRule::Added { dir } => cmp_opt(Some(a.created_at), Some(b.created_at), dir),
+            // 无到期时刻（0/None = 不过期）视为缺读数：垫底，不当作「最早到期」
+            AccountSortRule::Expires { dir } => cmp_opt(
+                a.expires_at.filter(|at| *at > 0),
+                b.expires_at.filter(|at| *at > 0),
+                dir,
+            ),
+            AccountSortRule::Balance { dir } => {
+                cmp_opt(balance_available(a), balance_available(b), dir)
+            }
+            // 配额重置时刻：账号上**没有**持久化该时刻 —— `AccountLimiterRule.reset`
+            // 是模式串（`fixed`/`daily`）不是时间戳，本地计数窗口也还没落盘，
+            // 故无键可比 → 恒 Equal（不影响顺序），**不硬造排序键**。
+            AccountSortRule::QuotaReset { .. } => std::cmp::Ordering::Equal,
+        };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// 单条规则的可选读数比较：缺读数恒排在有读数者之后（与方向无关）。
+fn cmp_opt<T: PartialOrd>(
+    a: Option<T>,
+    b: Option<T>,
+    dir: crate::channel::routing_policy::SortDir,
+) -> std::cmp::Ordering {
+    use crate::channel::routing_policy::SortDir;
+    use std::cmp::Ordering;
+    let ord = match (a, b) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    };
+    match dir {
+        SortDir::Asc => ord,
+        SortDir::Desc => ord.reverse(),
+    }
+}
+
+/// 归一后的余额读数：`last_balance.available`。
+///
+/// 与既有两个消费者同口径（`limiter::read_balance_metric`、
+/// `AccountSession::should_skip_by_balance`），产出方是
+/// `usage_query::snapshot`（`{available, unit, wallets, subscription}`）。
+/// 归一不出来的账号返回 `None` → 不参与余额排序（**不硬造键**）。
+fn balance_available(session: &AccountSession) -> Option<f64> {
+    session
+        .last_balance
+        .as_ref()?
+        .get("available")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1142,7 +1301,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(mixed.summary(), "2 个冷却中、1 个余额低于阈值");
-        // 顺序稳定（禁用 → provider → 过期 → 白名单 → 能力 → 冷却 → 余额 → 限制 → 并发）
+        // 顺序稳定（禁用 → provider → 过期 → 白名单 → 能力 → 名单 → 冷却 → 余额 → 限制 → 并发）
         let full = SkipReasons {
             no_accounts: false,
             disabled: 1,
@@ -1150,6 +1309,7 @@ mod tests {
             expired: 1,
             model_mismatch: 1,
             capability: 1,
+            scope_excluded: 1,
             cooling: 1,
             balance_low: 1,
             limited: 1,
@@ -1157,7 +1317,7 @@ mod tests {
         };
         assert_eq!(
             full.summary(),
-            "1 个已禁用、1 个 provider 被关停、1 个凭证过期、1 个不在模型白名单、1 个不支持请求能力、1 个冷却中、1 个余额低于阈值、1 个被限制规则拦截、1 个并发占满"
+            "1 个已禁用、1 个 provider 被关停、1 个凭证过期、1 个不在模型白名单、1 个不支持请求能力、1 个被参与名单排除、1 个冷却中、1 个余额低于阈值、1 个被限制规则拦截、1 个并发占满"
         );
     }
 
@@ -1365,6 +1525,216 @@ mod tests {
     /// 造一份能力索引。
     fn index_of(entries: &[(&str, &[&str])]) -> super::super::catalog::AccountCapabilityIndex {
         super::super::catalog::AccountCapabilityIndex::from_snapshot(&catalog_snapshot(entries))
+    }
+
+    /// #40 §2：`excluded_accounts` 是硬裁（进不了候选，且计 `scope_excluded`）。
+    #[test]
+    fn acquire_scope_excludes_listed_accounts() {
+        with_secret_dir("scope-excluded", || {
+            let pool = pool();
+            let excluded = pool.upsert(session("ch", "excluded", 9)).unwrap();
+            let kept = pool.upsert(session("ch", "kept", 0)).unwrap();
+            let scope = crate::channel::routing_policy::RoutingScope {
+                excluded_accounts: vec![excluded.id.clone()],
+                ..Default::default()
+            };
+            let mut capture = crate::log::AccountSkipCapture::new("ch");
+            let (lease, reasons) = pool.acquire_with_reasons_detail(
+                "ch",
+                "m",
+                None,
+                |_| true,
+                AcquireFilters {
+                    scope: Some(&scope),
+                    detail: Some(&mut capture),
+                    ..Default::default()
+                },
+            );
+            // 被排除的是高优先级账号：仍然选不中它
+            assert_eq!(lease.map(|l| l.id().to_string()), Some(kept.id.clone()));
+            assert_eq!(reasons.scope_excluded, 1);
+            let rows: Vec<(String, String)> = capture
+                .rows
+                .iter()
+                .map(|r| (r.account_name.clone(), r.reason.clone()))
+                .collect();
+            assert_eq!(
+                rows,
+                vec![("excluded".to_string(), "scope_excluded".to_string())]
+            );
+        });
+    }
+
+    /// #40 §2：`account_order` 名单内**先出现的先试**（名单外账号不排除）。
+    #[test]
+    fn acquire_account_order_picks_first_listed() {
+        with_secret_dir("scope-order", || {
+            let pool = pool();
+            let a = pool.upsert(session("ch", "a", 0)).unwrap();
+            let b = pool.upsert(session("ch", "b", 0)).unwrap();
+            let order = |ids: Vec<String>| crate::channel::routing_policy::RoutingScope {
+                account_order: ids,
+                ..Default::default()
+            };
+            let first = pool.acquire_with_reasons_detail(
+                "ch",
+                "m",
+                None,
+                |_| true,
+                AcquireFilters {
+                    scope: Some(&order(vec![b.id.clone(), a.id.clone()])),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(first.0.map(|l| l.id().to_string()), Some(b.id.clone()));
+            // 顺序反转 → 首选也随之反转
+            let first = pool.acquire_with_reasons_detail(
+                "ch",
+                "m",
+                None,
+                |_| true,
+                AcquireFilters {
+                    scope: Some(&order(vec![a.id.clone(), b.id.clone()])),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(first.0.map(|l| l.id().to_string()), Some(a.id.clone()));
+            // 名单里没有的账号不因此被排除（只是垫底）
+            let first = pool.acquire_with_reasons_detail(
+                "ch",
+                "m",
+                None,
+                |_| true,
+                AcquireFilters {
+                    scope: Some(&order(vec!["no-such-account".to_string()])),
+                    ..Default::default()
+                },
+            );
+            assert!(first.0.is_some());
+        });
+    }
+
+    /// #40 §2 排序规则：`Added` 取 `created_at`；读数缺失者垫底（不硬造键）。
+    #[test]
+    fn acquire_sort_rules_order_by_created_at() {
+        use crate::channel::routing_policy::{AccountSortRule, SortDir};
+        with_secret_dir("sort-added", || {
+            let pool = pool();
+            let mut older = session("ch", "older", 0);
+            older.created_at = 100;
+            let older = pool.upsert(older).unwrap();
+            let mut newer = session("ch", "newer", 0);
+            newer.created_at = 200;
+            let newer = pool.upsert(newer).unwrap();
+            let pick_with = |dir| {
+                pool.acquire_with_reasons_detail(
+                    "ch",
+                    "m",
+                    None,
+                    |_| true,
+                    AcquireFilters {
+                        sort_rules: &[AccountSortRule::Added { dir }],
+                        ..Default::default()
+                    },
+                )
+                .0
+                .map(|l| l.id().to_string())
+            };
+            assert_eq!(pick_with(SortDir::Desc), Some(newer.id.clone()));
+            assert_eq!(pick_with(SortDir::Asc), Some(older.id.clone()));
+        });
+    }
+
+    /// #40 §2 平台化：读数全缺时规则**空转**，回落既有加权随机（不硬造排序键）。
+    #[test]
+    fn pick_by_rules_is_noop_without_readings() {
+        use crate::channel::routing_policy::{AccountSortRule, SortDir};
+        let mut a = AccountSession::new("ch", "a");
+        a.created_at = 10;
+        a.expires_at = None;
+        a.last_balance = None;
+        let mut b = AccountSession::new("ch", "b");
+        b.created_at = 20;
+        b.expires_at = Some(0);
+        // 余额形态不是 `{available: number}` 的（如纯字符串）同样算缺读数
+        b.last_balance = Some(serde_json::json!({"available": "120.5"}));
+        let sessions = vec![a, b];
+        let group = vec![0usize, 1];
+        // 两条规则都判不出差异 → None（调用方回落 pick_weighted）
+        assert_eq!(
+            pick_by_rules(
+                &sessions,
+                &group,
+                &[],
+                &[AccountSortRule::Balance { dir: SortDir::Desc }]
+            ),
+            None
+        );
+        // 配额重置时刻：账号上没有持久化该时刻（reset 是模式串）→ 同样不判
+        assert_eq!(
+            pick_by_rules(
+                &sessions,
+                &group,
+                &[],
+                &[AccountSortRule::QuotaReset { dir: SortDir::Asc }]
+            ),
+            None
+        );
+        // 未配任何规则 / 空候选：同样 None
+        assert_eq!(pick_by_rules(&sessions, &group, &[], &[]), None);
+        assert_eq!(pick_by_rules(&sessions, &[], &[], &[]), None);
+        // 归一成功的余额参与排序：有读数者胜出
+        let mut poor = AccountSession::new("ch", "poor");
+        poor.last_balance = Some(serde_json::json!({"available": 1.0}));
+        let mut rich = AccountSession::new("ch", "rich");
+        rich.last_balance = Some(serde_json::json!({"available": 300.0}));
+        assert_eq!(
+            pick_by_rules(
+                &[poor, rich],
+                &group,
+                &[],
+                &[AccountSortRule::Balance { dir: SortDir::Desc }]
+            ),
+            Some(1)
+        );
+    }
+
+    /// #40 §2 排序规则：`Expires` 把「无到期」当缺读数（垫底），不当作最早到期。
+    #[test]
+    fn cmp_by_rules_treats_missing_readings_as_unknown() {
+        use crate::channel::routing_policy::{AccountSortRule, SortDir};
+        let mut never = AccountSession::new("ch", "never");
+        never.expires_at = None;
+        let mut later = AccountSession::new("ch", "later");
+        later.expires_at = Some(2_000_000_000);
+        // Asc（最早到期优先）：无到期者垫底
+        assert_eq!(
+            cmp_by_rules(
+                &later,
+                &never,
+                &[AccountSortRule::Expires { dir: SortDir::Asc }]
+            ),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            cmp_by_rules(
+                &never,
+                &later,
+                &[AccountSortRule::Expires { dir: SortDir::Asc }]
+            ),
+            std::cmp::Ordering::Greater
+        );
+        // 两边都无到期 → 无结论（回落既有选号）
+        let mut never2 = AccountSession::new("ch", "never2");
+        never2.expires_at = Some(0);
+        assert_eq!(
+            cmp_by_rules(
+                &never,
+                &never2,
+                &[AccountSortRule::Expires { dir: SortDir::Asc }]
+            ),
+            std::cmp::Ordering::Equal
+        );
     }
 
     /// #40 §1 默认等价：`needs` 为空时能力索引完全不参与判定。
