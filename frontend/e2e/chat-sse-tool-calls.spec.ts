@@ -229,6 +229,9 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     // 中断态：已收到的正文原样保留（不被「已停止生成」覆盖）、卡片标「停止」
     await expect(assistant).toContainText('部分回复');
     await expect(card).toContainText('停止');
+    // #37：有工具卡片时中止标记只由卡片状态徽标承担，气泡里不再叠一份文字标记
+    // （否则同一次中止在一只气泡内出现两处「停止」）。
+    await expect(assistant.locator('[data-testid="msg-stopped"]')).toHaveCount(0);
     // 参数未被中断清空：卡片折叠态点「输入」展开，仍能看到已收到的分片
     await card.getByRole('button', { name: '输入' }).click();
     await expect(card.locator('[data-testid="tool-call-args"]')).toContainText('{"q":"aigx');
@@ -351,14 +354,21 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     // 纪律同 #22：反向断言若早于帧落地就会立刻成立＝假绿，必须先等过那个时间窗。
     await page.waitForTimeout(2600);
 
-    // 停止已生效：⏹ 气泡出现（无工具分片时「已停止生成」按既定设计单独成泡，
-    // 见 ChatDebugger.tsx abort 支路 6086f4a2/#63），busy 复位
-    await expect(page.locator('.chat-debugger-msg-assistant', { hasText: '已停止生成' })).toHaveCount(1);
+    // 停止已生效，busy 复位
     await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
-    // 已收到的部分正文保留在同一只气泡里，未被回滚/覆盖
+
+    // #37 钉住「同泡追加」：**已收到 #25 那版兼容定位（两处 `hasText` 各数一只）
+    // 会让「正文一泡 + 停止一泡」的旧形态照样绿，故本单撤掉兼容写法**，改成三条
+    // 互相咬合的断言：①标记在那只含部分正文的气泡**里面**；②助手气泡总数仍为 1
+    // （改回 push 新泡 → ①②同时红，本地变异验证过）；③正文本身不含标记文案。
+    // ③ 钉的是实现选择——标记走 `toolState` 而非拼进 `content`，于是回传历史 /
+    // 复制 / 朗读拿到的都只有正文（`isTransientAssistantText` 的排除口径）。
     const partial = page.locator('.chat-debugger-msg-assistant', { hasText: '两跳' });
     await expect(partial).toHaveCount(1);
+    await expect(partial.locator('[data-testid="msg-stopped"]')).toHaveCount(1);
+    await expect(page.locator('.chat-debugger-msg-assistant')).toHaveCount(1);
     await expect(partial.locator('.chat-debugger-msg-content')).toContainText('两跳');
+    await expect(partial.locator('.chat-debugger-msg-content')).not.toContainText('已停止生成');
     // 关键反向断言：尾帧从未到达 ⇒ 界面不得出现 usage 数字。
     // 不只查那只气泡——整屏一起查，免得「数字被画到别处」漏网。
     await expect(partial.locator('[data-testid="usage-summary"]')).toHaveCount(0);
