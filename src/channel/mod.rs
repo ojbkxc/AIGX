@@ -30,6 +30,9 @@ pub mod affinity;
 pub mod aimd;
 /// 渠道级余额查询（七种方案，见 [`balance::SCHEMES`]）
 pub mod balance;
+/// 渠道余额周期刷新巡检（照抄账号池 `usage_query` 的 opt-in 模式，
+/// 按渠道独立间隔 `balance_query_interval_secs` 到期即查）
+pub mod balance_refresh;
 pub mod balancer;
 pub mod circuit_breaker;
 pub mod empty_response;
@@ -309,6 +312,21 @@ pub struct Channel {
     /// 最近一次余额查询的展示单位（USD / CNY / % / quota …），随余额一起写回
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub balance_unit: String,
+    /// 余额周期自动查询间隔（秒）。`None` / 0 = 关闭（默认，opt-in）。
+    ///
+    /// 照抄账号池 `usage_query_interval_secs`：每个渠道独立定频，
+    /// 由 `channel::balance_refresh` 的巡检按到期判定触发。
+    /// **显式序列化 `null`**（无 skip_serializing_if）：`None = 跳过` =
+    /// opt-in 关闭，与「旧数据无此键」本就该是同一状态，前端不需要
+    /// 区分第三态（lead 裁定 2026-11-09）。
+    #[serde(default)]
+    pub balance_query_interval_secs: Option<u64>,
+    /// 上次余额查询时间（unix 秒；`None` = 从未查过）。
+    #[serde(default)]
+    pub balance_last_query_at: Option<i64>,
+    /// 上次余额查询失败原因（成功后清空为 `None`，即 JSON `null`）。
+    #[serde(default)]
+    pub balance_last_error: Option<String>,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -918,6 +936,42 @@ impl ChannelStore {
                 ch.balance_unit = unit.to_string();
             }
             ch.updated_at = chrono::Utc::now().timestamp();
+            self.persist_async(ch);
+        }
+        self.publish_snapshot(&channels);
+    }
+
+    /// 周期刷新写回（**不 bump `updated_at`**：周期读数 ≠ 配置变更，
+    /// 避免间隔 <1h 的渠道永远显示「刚刚更新」、稀释审计记录）。
+    ///
+    /// - `Ok`：balance/credit/unit 三键与 [`save_balance_with_unit`] 的字段
+    ///   写入逐字一致（手动端点 `handle_get_channel_balance` 同款调用），
+    ///   再清 `balance_last_error`、置 `balance_last_query_at`；
+    /// - `Err`：只记 `balance_last_error` + `balance_last_query_at`，
+    ///   **不动余额快照**（失败不清快照，防上游抖动把界面上本来有数的
+    ///   余额擦成空白，照抄 `usage_query` 设计要点）。
+    pub fn save_balance_refresh(
+        &self,
+        id: &str,
+        at: i64,
+        outcome: Result<crate::channel::balance::BalanceReading, String>,
+    ) {
+        let mut channels = self.channels.write();
+        if let Some(ch) = channels.iter_mut().find(|c| c.id == id) {
+            match outcome {
+                Ok(reading) => {
+                    ch.balance = reading.available;
+                    ch.credit = None;
+                    if !reading.unit.is_empty() {
+                        ch.balance_unit = reading.unit;
+                    }
+                    ch.balance_last_error = None;
+                }
+                Err(message) => {
+                    ch.balance_last_error = Some(message);
+                }
+            }
+            ch.balance_last_query_at = Some(at);
             self.persist_async(ch);
         }
         self.publish_snapshot(&channels);
@@ -1663,6 +1717,9 @@ mod tests {
             quirks: ChannelQuirks::default(),
             balance_scheme: String::new(),
             balance_unit: String::new(),
+            balance_query_interval_secs: None,
+            balance_last_query_at: None,
+            balance_last_error: None,
             last_error: None,
             last_used_at: None,
             discovered_models: Vec::new(),

@@ -814,6 +814,27 @@ async fn main() -> anyhow::Result<()> {
                 }),
             });
         }
+        // 渠道余额周期刷新：按渠道独立间隔（balance_query_interval_secs）到期
+        // 即查，写回 balance/balance_unit 快照供界面展示。未配间隔的渠道一律
+        // 跳过（opt-in）；手动 GET /api/channels/:id/balance 不受影响。
+        // 回滚口径：删掉本块即关停，存量渠道字段保留无害。
+        {
+            let channel_store = state.channel_store.clone();
+            let http = state.http_client.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "channel-balance-refresh",
+                interval: Duration::from_secs(60),
+                first_run_delay: Duration::from_secs(120),
+                run: Box::new(move || {
+                    let cs = channel_store.clone();
+                    let http = http.clone();
+                    Box::pin(async move {
+                        crate::channel::balance_refresh::sweep(&cs, &http).await;
+                        0
+                    })
+                }),
+            });
+        }
         // 登录态提醒巡检（#35）：把「需要人工重登」这件事送到站内告警面。
         // 刻意与数据面解耦 —— 每次 401 都要过的路径不顺手拿告警锁（性能红线），
         // 逐出选路是即时的，这里只负责让人看见（≤一个周期的延迟）。
@@ -1018,7 +1039,7 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         tracing::info!(
-            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-usage-query, account-session-relogin-notice, log-retention-sweep, daily-agg-backfill, subscription-expire-reset)",
+            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-usage-query, channel-balance-refresh, account-session-relogin-notice, log-retention-sweep, daily-agg-backfill, subscription-expire-reset)",
             scheduler.task_count()
         );
     }
