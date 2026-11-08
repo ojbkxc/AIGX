@@ -222,7 +222,7 @@ pub async fn handle_assistant_chat(
         ));
     }
     let tools_on = tools_enabled() && user.is_admin();
-    let max_rounds = body.max_rounds.unwrap_or(MAX_ROUNDS).min(MAX_ROUNDS).max(1);
+    let max_rounds = body.max_rounds.unwrap_or(MAX_ROUNDS).clamp(1, MAX_ROUNDS);
 
     let ch = pick_channel(
         &state,
@@ -265,7 +265,9 @@ pub async fn handle_assistant_chat(
     let mut rounds: u32 = 0;
     let mut tool_trace: Vec<Value> = Vec::new();
     let mut tool_total_chars: usize = 0;
-    let mut final_content = String::new();
+    // 延迟初始化：两条 break 路径都先赋值（clippy unused_assignments——
+    // String::new() 初值从未被读）
+    let final_content;
     // #34-①（lead 评审）：openai_tools() 是全量 73 个含 20 高危——助手面
     // 只给 mcp_tools() 非 HighRisk 子集（exec 前的 deny 是第二重，不是唯一一重）
     let tools_schema: Vec<Value> = if tools_on {
