@@ -528,27 +528,43 @@ pub async fn handle_put_routing_profiles(
     Json(req): Json<RoutingProfilesUpdate>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
-    let mut policy = state.routing_policy.snapshot().as_ref().clone();
-    if let Some(p) = req.profiles {
-        policy.profiles = p;
-    }
-    if let Err(e) = policy.profiles.validate() {
-        return Err(super::common::error_response(
-            &format!("路由档案超限：{e}"),
-            axum::http::StatusCode::BAD_REQUEST,
-        ));
-    }
-    // store.update 内再跑一次 validate（防其他写入路径绕过的兜底）
-    let saved = state.routing_policy.update(policy).map_err(|e| {
-        super::common::error_response(
-            &format!("路由策略持久化失败: {e}"),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
+    let saved = replace_routing_profiles(&state.routing_policy, req.profiles)
+        .map_err(|(code, msg)| super::common::error_response(&msg, code))?;
     Ok(Json(json!({
         "enabled": saved.enabled,
         "profiles": saved.profiles,
     })))
+}
+
+/// [`handle_put_routing_profiles`] 的写入逻辑（纯函数，handler 与端点级单测
+/// 共用同一份判定）：读当前快照 → 只替换 `profiles` 字段（`None` = 不动，
+/// 端点契约「提供哪份改哪份」）→ `validate()` 超限拒绝 → `update()` 落盘热更。
+///
+/// `enabled` 等其余字段**原样保留**（update 是整份替换的 copy-on-write，
+/// 读-改-写保证它们不被冲掉）——这是「enabled 唯一写入口是 `PUT /api/routing`」
+/// 的实现侧闸门，单测 `replace_routing_profiles_swaps_body_and_keeps_enabled`
+/// 钉住。
+fn replace_routing_profiles(
+    store: &crate::channel::routing_policy::RoutingPolicyStore,
+    profiles: Option<RoutingProfiles>,
+) -> Result<RoutingPolicy, (axum::http::StatusCode, String)> {
+    let mut policy = store.snapshot().as_ref().clone();
+    if let Some(p) = profiles {
+        policy.profiles = p;
+    }
+    if let Err(e) = policy.profiles.validate() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("路由档案超限：{e}"),
+        ));
+    }
+    // store.update 内再跑一次 validate（防其他写入路径绕过的兜底）
+    store.update(policy).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("路由策略持久化失败: {e}"),
+        )
+    })
 }
 
 /// GET /api/routing/profiles/group/:id — 单组读（404 = 不存在）。
@@ -714,4 +730,177 @@ pub async fn handle_routing_preview(
         "blocked": blocked_json,
         "skipped": plan.skipped,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::channel::routing_policy::{
+        AccountSortRule, RoutingMember, RoutingProfile, RoutingScope, SortDir,
+    };
+
+    fn store() -> crate::channel::routing_policy::RoutingPolicyStore {
+        crate::channel::routing_policy::RoutingPolicyStore::in_memory(RoutingPolicy::default())
+    }
+
+    /// 造一个路由组（strategy/sticky 缺省 = 继承上层，三态语义）。
+    fn group(id: &str, members: Vec<RoutingMember>) -> RoutingGroup {
+        RoutingGroup {
+            id: id.to_string(),
+            name: String::new(),
+            model: String::new(),
+            strategy: None,
+            sticky: None,
+            members,
+        }
+    }
+
+    /// 造一份超限档案（每种形态只超一个维度，其余合规；纯构造，无字段重赋）。
+    fn over_limit(kind: &str) -> RoutingProfiles {
+        match kind {
+            "models" => RoutingProfiles {
+                models: (0..=caps::MAX_MODELS)
+                    .map(|i| (format!("m{i}"), RoutingProfile::default()))
+                    .collect(),
+                ..RoutingProfiles::default()
+            },
+            "groups" => RoutingProfiles {
+                groups: (0..=caps::MAX_GROUPS)
+                    .map(|i| group(&format!("g{i}"), Vec::new()))
+                    .collect(),
+                ..RoutingProfiles::default()
+            },
+            "providers" => RoutingProfiles {
+                global: RoutingProfile {
+                    scope: Some(RoutingScope {
+                        providers: (0..=caps::MAX_PROVIDERS).map(|i| format!("p{i}")).collect(),
+                        ..Default::default()
+                    }),
+                    ..RoutingProfile::default()
+                },
+                ..RoutingProfiles::default()
+            },
+            "accounts" => RoutingProfiles {
+                groups: vec![group(
+                    "g",
+                    vec![RoutingMember {
+                        provider: "openai".to_string(),
+                        model: "m".to_string(),
+                        included: true,
+                        accounts: (0..=caps::MAX_ACCOUNTS).map(|i| format!("a{i}")).collect(),
+                    }],
+                )],
+                ..RoutingProfiles::default()
+            },
+            "sort_rules" => RoutingProfiles {
+                global: RoutingProfile {
+                    sort_rules: Some(vec![
+                        AccountSortRule::Added { dir: SortDir::Desc },
+                        AccountSortRule::Expires { dir: SortDir::Asc },
+                        AccountSortRule::Balance { dir: SortDir::Desc },
+                    ]),
+                    ..RoutingProfile::default()
+                },
+                ..RoutingProfiles::default()
+            },
+            other => unreachable!("未知超限形态 {other}"),
+        }
+    }
+
+    /// #40 §3 硬要求：五个维度超限一律拒绝（400），且**现值不被改坏**。
+    #[test]
+    fn replace_routing_profiles_rejects_over_limit_and_keeps_current() {
+        let store = store();
+        // 先放一份合法现值，验证失败时原样保留（copy-on-write 不得半途污染）
+        store
+            .update(RoutingPolicy {
+                enabled: true,
+                profiles: RoutingProfiles {
+                    global: RoutingProfile {
+                        strategy: Some(RouteStrategy::Ranked),
+                        ..RoutingProfile::default()
+                    },
+                    ..RoutingProfiles::default()
+                },
+                ..RoutingPolicy::default()
+            })
+            .unwrap();
+
+        for kind in ["models", "groups", "providers", "accounts", "sort_rules"] {
+            let err = replace_routing_profiles(&store, Some(over_limit(kind)))
+                .expect_err("超限必须拒绝写入");
+            assert_eq!(
+                err.0,
+                axum::http::StatusCode::BAD_REQUEST,
+                "{kind} 映射 400"
+            );
+            assert!(
+                err.1.contains("超限"),
+                "{kind} 的报错应含「超限」：{}",
+                err.1
+            );
+            // 现值原样：enabled / strategy 保留、档案数不变
+            let snap = store.snapshot();
+            assert!(snap.enabled, "拒绝写入不得波及 enabled");
+            assert_eq!(snap.profiles.global.strategy, Some(RouteStrategy::Ranked));
+            assert!(snap.profiles.models.is_empty());
+            assert!(snap.profiles.groups.is_empty());
+        }
+    }
+
+    /// #40 §3 写入分工闸门：本端点只换 profiles 本体，**enabled 保持原值**
+    /// （update 是整份替换，漏掉读-改-写就会把总开关冲掉）。
+    #[test]
+    fn replace_routing_profiles_swaps_body_and_keeps_enabled() {
+        let store = store();
+        store
+            .update(RoutingPolicy {
+                enabled: true,
+                profiles: RoutingProfiles {
+                    groups: vec![group("old", Vec::new())],
+                    ..RoutingProfiles::default()
+                },
+                ..RoutingPolicy::default()
+            })
+            .unwrap();
+
+        let mut next = RoutingProfiles::default();
+        next.models.insert(
+            "gpt-4o".to_string(),
+            RoutingProfile {
+                strategy: Some(RouteStrategy::RoundRobin),
+                ..RoutingProfile::default()
+            },
+        );
+        let out = replace_routing_profiles(&store, Some(next)).unwrap();
+        assert!(out.enabled, "enabled 不是本端点的写入口，必须保留现值");
+        assert!(out.profiles.groups.is_empty(), "整份替换：旧组不残留");
+        assert_eq!(
+            out.profiles.models.get("gpt-4o").map(|p| p.strategy),
+            Some(Some(RouteStrategy::RoundRobin))
+        );
+        // 快照热更：下一次 snapshot() 读到的就是新档案
+        assert!(store.snapshot().profiles.models.contains_key("gpt-4o"));
+    }
+
+    /// #40 §3 缺省语义（契约口径：提供哪份改哪份）：请求不带 profiles
+    /// （`None`）= 什么都不改，既不清空也不动 enabled。
+    #[test]
+    fn replace_routing_profiles_absent_profiles_keeps_current() {
+        let store = store();
+        store
+            .update(RoutingPolicy {
+                enabled: true,
+                profiles: RoutingProfiles {
+                    groups: vec![group("old", Vec::new())],
+                    ..RoutingProfiles::default()
+                },
+                ..RoutingPolicy::default()
+            })
+            .unwrap();
+        let out = replace_routing_profiles(&store, None).unwrap();
+        assert!(out.enabled);
+        assert_eq!(out.profiles.groups.len(), 1);
+        assert_eq!(out.profiles.groups[0].id, "old");
+    }
 }
