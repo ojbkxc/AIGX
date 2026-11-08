@@ -508,6 +508,10 @@ pub async fn handle_messages(
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
+            attempt_counter += 1;
+            let attempt_index = attempt_counter;
+            let attempt_started_at = chrono::Utc::now().timestamp();
+            let sticky_hit = affinity_hit_id.as_deref() == cid.as_deref();
             let attempt_start = std::time::Instant::now();
             // T2：SSE 首事件守卫——建流成功后等第一个事件（30s 上限），
             // 上游挂起/建流后立刻断流 → 按失败处理（熔断记账 + failover）
@@ -651,7 +655,8 @@ pub async fn handle_messages(
                 log.filtered_channels = filtered_channels.clone();
                 log.selected_channel = used_channel_id.clone();
                 // Phase1-B 路由回放：并入 resolve 层过滤原因与策略快照
-                if let Some(capture) = route_capture.as_ref() {
+                // （as_mut：attempt_details 按值取出，as_ref 借用不可）
+                if let Some(capture) = route_capture.as_mut() {
                     log.filtered_channels
                         .extend(capture.filtered.iter().cloned());
                     log.route_config = capture.config.clone();
@@ -955,6 +960,17 @@ pub async fn handle_messages(
                 .as_ref()
                 .map(|c| c.filtered_truncated)
                 .unwrap_or(0);
+            // #32：流式路径把 failover 循环里捕获的逐次尝试明细移交给计费守卫
+            // （成功轮的终态在守卫里写，故此处按值取出而非借用）。
+            let (attempt_details, attempt_details_truncated) = route_capture
+                .as_mut()
+                .map(|c| {
+                    (
+                        std::mem::take(&mut c.attempts),
+                        std::mem::take(&mut c.attempts_truncated),
+                    )
+                })
+                .unwrap_or_default();
             let account_skips = route_capture
                 .as_ref()
                 .map(|c| {
@@ -1406,9 +1422,23 @@ pub async fn handle_messages(
             log.ip = client_ip.clone();
             log.request_id = Some(request_id.clone());
             // P1-7：调度决策回放字段（与 openai 非流式成功路径对齐）
+            // + Phase1-B 路由回放策略快照 / #32 逐次尝试明细
             log.candidate_channels = candidate_channel_ids.clone();
             log.filtered_channels = filtered_channels.clone();
             log.selected_channel = used_channel_id.clone();
+            if let Some(capture) = route_capture.as_mut() {
+                log.filtered_channels
+                    .extend(capture.filtered.iter().cloned());
+                log.route_config = capture.config.clone();
+                log.route_truncated = capture.filtered_truncated;
+                log.attempt_details = std::mem::take(&mut capture.attempts);
+                log.attempt_details_truncated = capture.attempts_truncated;
+                log.account_skips = capture
+                    .account_buf
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+            }
             // 对话快照（默认记录，不依赖 log_body 开关）
             {
                 let mut conv = crate::log::LogConversation::from_chat_messages(&chat_req.messages);

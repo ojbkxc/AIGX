@@ -289,12 +289,7 @@ pub(crate) async fn handle_chat_completions(
         let mut cont_bridge: Option<Arc<dyn Bridge>> = None;
         let mut cont_req: Option<ChatFormat> = None;
         // #32 路由回放：真实上游调用计数（unpriced 跳过不计——没发请求）
-        let mut attempt_counter: u32 = 0;
         // 亲和命中判定与 resolve 同源（本渠道被粘滞置顶）
-        let affinity_hit_id = session_id
-            .as_deref()
-            .and_then(|sid| state.channel_store.affinity_cache().lookup(sid, &model));
-        // #32 路由回放：真实上游调用计数 + 亲和命中判定（同 resolve 口径）
         let mut attempt_counter: u32 = 0;
         let affinity_hit_id = session_id
             .as_deref()
@@ -473,7 +468,8 @@ pub(crate) async fn handle_chat_completions(
                 log.filtered_channels = filtered_channels.clone();
                 log.selected_channel = used_channel_id.clone();
                 // Phase1-B 路由回放：并入 resolve 层过滤原因与策略快照
-                if let Some(capture) = route_capture.as_ref() {
+                // （as_mut：attempt_details 按值取出，as_ref 借用不可）
+                if let Some(capture) = route_capture.as_mut() {
                     log.filtered_channels
                         .extend(capture.filtered.iter().cloned());
                     log.route_config = capture.config.clone();
@@ -694,6 +690,17 @@ pub(crate) async fn handle_chat_completions(
                 .as_ref()
                 .map(|c| c.filtered_truncated)
                 .unwrap_or(0);
+            // #32：流式路径把 failover 循环里捕获的逐次尝试明细移交给计费守卫
+            // （成功轮的终态在守卫里写，故此处按值取出而非借用）。
+            let (attempt_details, attempt_details_truncated) = route_capture
+                .as_mut()
+                .map(|c| {
+                    (
+                        std::mem::take(&mut c.attempts),
+                        std::mem::take(&mut c.attempts_truncated),
+                    )
+                })
+                .unwrap_or_default();
             let account_skips = route_capture
                 .as_ref()
                 .map(|c| {
@@ -951,6 +958,10 @@ pub(crate) async fn handle_chat_completions(
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
+            attempt_counter += 1;
+            let attempt_index = attempt_counter;
+            let attempt_started_at = chrono::Utc::now().timestamp();
+            let sticky_hit = affinity_hit_id.as_deref() == cid.as_deref();
             let attempt_start = std::time::Instant::now();
             match bridge.chat(&attempt_req, &ctx).await {
                 Ok(resp) => {
@@ -1091,7 +1102,8 @@ pub(crate) async fn handle_chat_completions(
                 log.filtered_channels = filtered_channels.clone();
                 log.selected_channel = used_channel_id.clone();
                 // Phase1-B 路由回放：并入 resolve 层过滤原因与策略快照
-                if let Some(capture) = route_capture.as_ref() {
+                // （as_mut：attempt_details 按值取出，as_ref 借用不可）
+                if let Some(capture) = route_capture.as_mut() {
                     log.filtered_channels
                         .extend(capture.filtered.iter().cloned());
                     log.route_config = capture.config.clone();
@@ -1214,14 +1226,22 @@ pub(crate) async fn handle_chat_completions(
             log.ip = client_ip.clone();
             log.request_id = Some(request_id.clone());
             // P1-7 + Phase1-B 路由回放：候选/过滤/选中/策略快照（此前成功
-            // 路径漏记路由字段，一并补齐）
+            // 路径漏记路由字段，一并补齐）。#32：逐次尝试明细同样并入。
             log.candidate_channels = candidate_channel_ids.clone();
             log.filtered_channels = filtered_channels.clone();
             log.selected_channel = used_channel_id.clone();
-            if let Some(capture) = route_capture.as_ref() {
+            if let Some(capture) = route_capture.as_mut() {
                 log.filtered_channels
                     .extend(capture.filtered.iter().cloned());
                 log.route_config = capture.config.clone();
+                log.route_truncated = capture.filtered_truncated;
+                log.attempt_details = std::mem::take(&mut capture.attempts);
+                log.attempt_details_truncated = capture.attempts_truncated;
+                log.account_skips = capture
+                    .account_buf
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
             }
             // log_body：快照 = 请求体 + 响应正文（content 优先，tool_calls 计数）
             if debug_request_body.is_some() {

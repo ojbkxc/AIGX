@@ -543,6 +543,8 @@ fn write_test_log(
         phase: String::new(),
         route_config: None,
         route_truncated: 0,
+        attempt_details: Vec::new(),
+        attempt_details_truncated: 0,
         account_skips: Vec::new(),
     };
     if let Err(e) = state.log_store.requests.add(log) {

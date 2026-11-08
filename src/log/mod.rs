@@ -2257,7 +2257,8 @@ mod attempt_detail_tests {
     /// #32：明细行数有界（ROUTE_REPLAY_MAX_ATTEMPTS），超出转计数不静默丢。
     #[test]
     fn attempt_capture_is_bounded() {
-        let mut capture = crate::api::openai::resolve::RouteCapture::default();
+        // 走再导出路径：`mod resolve` 是私有的，`resolve::` 路径在 test target 不可见
+        let mut capture = crate::api::openai::RouteCapture::default();
         for i in 1..=ROUTE_REPLAY_MAX_ATTEMPTS as u32 + 10 {
             capture.push_attempt(detail(i));
         }
