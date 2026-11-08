@@ -1839,6 +1839,15 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/routing/defaults",
             get(api::admin::handle_routing_defaults),
         )
+        // 粘滞会话管理面（#38：管理员查看/解除粘滞，替代「只能等 TTL」）
+        .route(
+            "/api/routing/sticky",
+            get(api::admin::handle_get_route_sticky),
+        )
+        .route(
+            "/api/routing/sticky/clear",
+            post(api::admin::handle_clear_route_sticky),
+        )
         // 排队设置（对照 Agent2API「设置 → 排队」：queueMaxWaits / queueWaitSeconds）
         .route(
             "/api/queue",

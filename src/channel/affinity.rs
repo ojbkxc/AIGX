@@ -32,6 +32,21 @@ struct CacheEntry {
     created_at: Instant,
 }
 
+/// 管理面粘滞条目视图（`AffinityCache::snapshot` 产出的只读副本，
+/// 供 `GET /api/routing/sticky` 组 JSON；不走 serde，由 handler 手动组）。
+#[derive(Debug, Clone)]
+pub struct StickySnapshotEntry {
+    pub session_id: String,
+    pub model: String,
+    pub channel_id: String,
+    /// 距写入的秒数
+    pub age_secs: u64,
+    /// 粘性窗口剩余秒数（0 = 已出粘性窗口但未过硬 TTL，下次选路重走 HRW）
+    pub sticky_remaining_secs: u64,
+    /// 硬过期剩余秒数（到期后条目被 `lookup` 顺带清除）
+    pub hard_remaining_secs: u64,
+}
+
 /// 亲和性缓存 — DashMap 实现，双 TTL。
 ///
 /// 线程安全：所有方法通过 DashMap 的内部分片锁保护。
@@ -120,6 +135,62 @@ impl AffinityCache {
     pub fn evict(&self, session_id: &str, model: &str) {
         let compound = (session_id.to_string(), model.to_string());
         self.entries.remove(&compound);
+    }
+
+    /// 管理面：清除指定 `(session_id, model)` 的亲和条目。返回是否确实删除。
+    ///
+    /// 语义与 [`Self::evict`] 相同（只删内存亲和记录，不动策略配置）；
+    /// 单独提供返回值供管理端点回执「清除了几条」。
+    pub fn evict_session(&self, session_id: &str, model: &str) -> bool {
+        self.entries
+            .remove(&(session_id.to_string(), model.to_string()))
+            .is_some()
+    }
+
+    /// 管理面：清空全部亲和条目，返回清除条数（并发下近似值）。
+    ///
+    /// 只影响亲和缓存本身；策略设置（sticky 档位）不受影响。
+    pub fn clear_all(&self) -> usize {
+        let n = self.entries.len();
+        self.entries.clear();
+        n
+    }
+
+    /// 管理面：粘滞条目只读快照（供 `GET /api/routing/sticky`）。
+    ///
+    /// **性能红线**：管理面低频路径。`DashMap::iter` 逐分片取读锁、逐条
+    /// clone 后随 Guard 释放——单条 O(1)、不持全局锁，数据面 lookup/insert
+    /// 的分片写只被单条 clone 时长的读锁短暂交错，不被长阻塞。
+    /// 过滤已过硬 TTL 的僵尸条目（只过滤不清除——管理面读不触发数据面写，
+    /// 清除仍归 `purge_expired` 的容量路径与 `lookup` 顺带清除）。
+    ///
+    /// 返回 `(条目视图, 过滤后总数)`；`limit` 截断视图，超出由调用方按
+    /// `total > 视图长` 回执 truncated（参照 #26 `ROUTE_REPLAY_MAX_*` 口径）。
+    pub fn snapshot(&self, limit: usize) -> (Vec<StickySnapshotEntry>, usize) {
+        let now = Instant::now();
+        let sticky_ttl = *self.sticky_ttl.read();
+        let hard_ttl = *self.hard_ttl.read();
+        let mut all: Vec<StickySnapshotEntry> = self
+            .entries
+            .iter()
+            .map(|kv| {
+                let (session_id, model) = kv.key();
+                let entry = kv.value();
+                let age = now.duration_since(entry.created_at);
+                StickySnapshotEntry {
+                    session_id: session_id.clone(),
+                    model: model.clone(),
+                    channel_id: entry.channel_id.clone(),
+                    age_secs: age.as_secs(),
+                    sticky_remaining_secs: sticky_ttl.saturating_sub(age.as_secs()),
+                    hard_remaining_secs: hard_ttl.saturating_sub(age.as_secs()),
+                }
+            })
+            .collect();
+        all.retain(|e| e.hard_remaining_secs > 0);
+        let total = all.len();
+        all.truncate(limit);
+        (all, total)
     }
 
     /// 热更新 TTL（路由设置「会话粘性」档位切换时调用）。

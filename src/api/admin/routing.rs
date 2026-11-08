@@ -316,3 +316,114 @@ pub async fn handle_routing_queue(
         "blocked": blocked_json,
     })))
 }
+
+// ── 粘滞会话管理面（#38；对照 Agent2API routing_workspace 的 get_sticky/clear_sticky）──
+
+/// 管理面粘滞快照单条上限：超出截断并以 `truncated` 回执
+/// （参照 #26 `ROUTE_REPLAY_MAX_*` 的有界口径，防大缓存撑爆响应）。
+const ROUTE_STICKY_MAX_SNAPSHOT: usize = 500;
+/// 快照 id 的内部编码分隔符（单元分隔符 U+001F）：model 名理论上可含任意
+/// 可打印字符，用控制字符杜绝歧义。前端不解析 id，清除时原样回传。
+const ROUTE_STICKY_ID_SEP: char = '\u{1f}';
+
+/// GET /api/routing/sticky?query= — 当前粘滞条目快照（admin）。
+///
+/// - `query`（可选）：对 session_id / model / channel_id 的小写包含过滤
+/// - `data.sticky`：当前粘滞档位（auto / session / turn / off，snake_case）
+/// - `data.total / truncated`：过滤后总数 + 是否被快照上限截断
+///
+/// 性能：`AffinityCache::snapshot` 逐分片短读锁、单条 clone 即放——
+/// 管理面低频路径，不改数据面选路热路径（affinity.rs 模块注释有锁分析）。
+pub async fn handle_get_route_sticky(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let policy = state.routing_policy.snapshot();
+    let (entries, total) = state
+        .channel_store
+        .affinity_cache()
+        .snapshot(ROUTE_STICKY_MAX_SNAPSHOT);
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let q = params
+        .get("query")
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+    let items: Vec<Value> = entries
+        .into_iter()
+        .filter(|e| {
+            q.is_empty()
+                || e.session_id.to_lowercase().contains(&q)
+                || e.model.to_lowercase().contains(&q)
+                || e.channel_id.to_lowercase().contains(&q)
+        })
+        .map(|e| {
+            json!({
+                // 内部编码 session<U+001F>model；前端清除时原样回传
+                "id": format!("{}{ROUTE_STICKY_ID_SEP}{}", e.session_id, e.model),
+                "channel_id": e.channel_id,
+                // 硬过期时刻（unix 秒；前端 expiryMillis 的 <1e11 视为秒口径）
+                "expires_at": now_unix + e.hard_remaining_secs as i64,
+                "updated_at": now_unix - e.age_secs as i64,
+                "sticky_remaining_secs": e.sticky_remaining_secs,
+                "hard_remaining_secs": e.hard_remaining_secs,
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "entries": items,
+            "total": total,
+            "truncated": total > ROUTE_STICKY_MAX_SNAPSHOT,
+            "now": now_unix,
+            "sticky": policy.sticky,
+        }
+    })))
+}
+
+/// POST /api/routing/sticky/clear 请求体：单条（`id`）与全清（`all`）二选一；
+/// 都传以 `id` 优先；都不给 400。
+#[derive(Debug, Deserialize)]
+pub struct RouteStickyClearRequest {
+    pub id: Option<String>,
+    pub all: Option<bool>,
+}
+
+/// POST /api/routing/sticky/clear — 解除粘滞（admin）。
+///
+/// 语义对齐 [`crate::channel::affinity::AffinityCache::evict`]：只删内存亲和
+/// 记录，不写策略快照、不产生新状态——下次该会话选路自然重走 HRW。
+pub async fn handle_clear_route_sticky(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<RouteStickyClearRequest>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let cache = state.channel_store.affinity_cache();
+    let cleared = if let Some(id) = body.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let mut parts = id.split(ROUTE_STICKY_ID_SEP);
+        match (parts.next(), parts.next()) {
+            (Some(sid), Some(model)) if !sid.is_empty() && !model.is_empty() => {
+                u32::from(cache.evict_session(sid, model))
+            }
+            // 非法 / 过期 id：不 500，回 0 条（幂等清除）
+            _ => 0,
+        }
+    } else if body.all == Some(true) {
+        cache.clear_all()
+    } else {
+        return Err(super::common::error_response(
+            "id 与 all 至少提供一个（单条清除传 GET 返回的 id；全清传 all:true）",
+            axum::http::StatusCode::BAD_REQUEST,
+        ));
+    };
+    Ok(Json(json!({
+        "success": true,
+        "data": { "cleared": cleared }
+    })))
+}
