@@ -1,15 +1,28 @@
-import { useState, useEffect, useRef, type MouseEvent } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Trash2, Eraser, EyeOff, Eye } from 'lucide-react';
 import { api } from '../api';
 import { isAdmin, fmtCompact } from '../lib/utils';
 import { getFilter, setFilter } from '../lib/filterMemory';
+import {
+  applyTableColumns,
+  readTableColumns,
+  resetTableColumns,
+  writeTableColumns,
+  type TableColumnDef,
+  type TableColumnItem,
+  type TableColumnState,
+} from '../lib/tableColumns';
+import TableColumnSettings from '../components/ui/TableColumnSettings';
+import { useColumnResize } from '../components/ui/useColumnResize';
+import { TablePaginationFooter, usePageSize, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
+import { Columns3 } from 'lucide-react';
 import { useListKeyboard } from '../hooks/useListKeyboard';
 import { useAutoRefresh } from '../hooks/useAutoRefresh';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import { RequestLogDetail, AuditLogDetail } from '../components/LogDetailDialogs';
-import { Button, Card, Loading, EmptyState, Pagination } from '../components/ui';
+import { Button, Card, Loading, EmptyState, Tooltip } from '../components/ui';
 
 export type LogTab = 'requests' | 'audits';
 type LogView = 'table' | 'timeline';
@@ -103,6 +116,38 @@ interface Filters {
 
 /** 请求日志筛选的落盘键（filterMemory：跨次启动记忆，四页各自一键） */
 const LS_LOGS_FILTERS = 'aigx-logs-filters';
+/** 公共列设置键（按 Tab 分键：请求日志 / 审计日志列集不同） */
+const LS_TCOLS_REQ = 'aigx-tbl-cols.logs.requests';
+const LS_TCOLS_AUDIT = 'aigx-tbl-cols.logs.audit';
+/** 公共每页条数键（服务端真分页；Logs 原为固定 20 无记忆键，无搬迁） */
+const LS_PSZ = 'aigx-tbl-pagesize.logs';
+
+/** 请求日志列声明（check/user 渠道为管理员专属，非管理员 defs 不含即不可见不可拖） */
+function logsReqColDefs(admin: boolean): TableColumnDef[] {
+  return [
+    ...(admin ? [{ key: 'check', label: '选择', align: 'center' as const, width: 36, locked: true }] : []),
+    ...(admin ? [{ key: 'user', label: '用户', width: 190 }] : []),
+    { key: 'time', label: '时间', width: 170, locked: true },
+    { key: 'model', label: '模型', width: 150 },
+    ...(admin ? [{ key: 'channel', label: '渠道', width: 120 }] : []),
+    { key: 'tokens', label: 'Tokens', align: 'right' as const, width: 110 },
+    { key: 'cost', label: '费用', align: 'right' as const, width: 100 },
+    { key: 'latency', label: '延迟', align: 'right' as const, width: 90 },
+    { key: 'status', label: '状态', align: 'center' as const, width: 90 },
+  ];
+}
+
+/** 审计日志列声明 */
+function logsAuditColDefs(admin: boolean): TableColumnDef[] {
+  return [
+    ...(admin ? [{ key: 'check', label: '选择', align: 'center' as const, width: 36, locked: true }] : []),
+    { key: 'admin', label: '管理员', width: 190 },
+    { key: 'time', label: '时间', width: 170, locked: true },
+    { key: 'action', label: '操作', width: 140 },
+    { key: 'target', label: '目标', width: 200 },
+    { key: 'change', label: '变更', width: 300 },
+  ];
+}
 /** 筛选默认值（空串 = 全部 / 不限；记忆按此收窄，存坏回落默认） */
 const DEFAULT_LOGS_FILTERS: Filters = { user: '', model: '', channel: '', status: '', keyword: '', start: '', end: '' };
 
@@ -114,7 +159,9 @@ export default function Logs(): JSX.Element {
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const size = 20;
+  // 每页条数走公共 usePageSize（SERVER 档位：服务端真分页无「全部」档，绝不退化全量取数）
+  const [pageSize, setPageSize] = usePageSize(LS_PSZ, SERVER_PAGE_SIZES, 20);
+  const size = typeof pageSize === 'number' ? pageSize : 20;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [exporting, setExporting] = useState<'json' | 'csv' | null>(null);
@@ -141,6 +188,65 @@ export default function Logs(): JSX.Element {
   useEffect(() => {
     setFilter(LS_LOGS_FILTERS, filters);
   }, [filters]);
+
+  // 列设置已迁公共层（tableColumns v2）。两个 Tab 列集不同 → 各自一份键；
+  // defs 含管理员专属列（check/user/channel），登录态变化时读回走演进/插回，
+  // 非 admin 的 defs 不含这些列（多余的存盘键被公共层丢弃，安全）。
+  const [reqCols, setReqCols] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS_REQ, logsReqColDefs(admin)));
+  const [auditCols, setAuditCols] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS_AUDIT, logsAuditColDefs(admin)));
+  useEffect(() => {
+    // 登录态变化（登录/登出）后 defs 形状变了：以新 defs 重读走演进
+    setReqCols(readTableColumns(LS_TCOLS_REQ, logsReqColDefs(admin)));
+    setAuditCols(readTableColumns(LS_TCOLS_AUDIT, logsAuditColDefs(admin)));
+  }, [admin]);
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
+  const activeColState = tab === 'requests' ? reqCols : auditCols;
+  const activeSetColState = tab === 'requests' ? setReqCols : setAuditCols;
+  const activeLSKey = tab === 'requests' ? LS_TCOLS_REQ : LS_TCOLS_AUDIT;
+  const activeDefs = tab === 'requests' ? logsReqColDefs(admin) : logsAuditColDefs(admin);
+  /** 列设置变更（面板回调；persist=true 才落盘） */
+  const commitCols = useCallback((next: TableColumnItem[], persist: boolean) => {
+    activeSetColState((prev) => {
+      const nextState: TableColumnState = { ...prev, items: next };
+      if (persist) writeTableColumns(activeLSKey, nextState);
+      return nextState;
+    });
+  }, [activeSetColState, activeLSKey]);
+  const resetCols = useCallback(() => {
+    activeSetColState(resetTableColumns(activeLSKey, activeDefs));
+  }, [activeSetColState, activeLSKey, activeDefs]);
+  /** 当前 Tab 的可见列（顺序 + 显隐；列宽/对齐由公共层管理） */
+  const appliedCols = useMemo(() => applyTableColumns(activeColState, activeDefs), [activeColState, activeDefs]);
+  const visibleKeySet = useMemo(() => new Set(appliedCols.map((c) => c.key)), [appliedCols]);
+  const colAlignMap = useMemo(() => {
+    const map = {} as Record<string, string>;
+    for (const item of activeColState.items) map[item.key] = item.align;
+    return map;
+  }, [activeColState]);
+  /** 列宽拖动（公共 hook；widths 由 activeColState.items 派生，落盘走 commitCols） */
+  const colResize = useColumnResize({
+    widths: Object.fromEntries(
+      activeColState.items.filter((i) => i.width != null).map((i) => [i.key, i.width as number]),
+    ),
+    setWidths: (next) => {
+      commitCols(
+        activeColState.items.map((i) => {
+          const w = next[i.key];
+          const defW = activeDefs.find((d) => d.key === i.key)?.width;
+          if (w == null || (defW != null && w === defW)) {
+            const { width: _drop, ...rest } = i;
+            return rest;
+          }
+          return { ...i, width: w };
+        }),
+        true,
+      );
+    },
+    defaultWidths: Object.fromEntries(activeDefs.map((d) => [d.key, d.width])),
+    lockedKeys: new Set(activeDefs.filter((d) => d.locked).map((d) => d.key)),
+    onCommit: () => { /* 落盘已在 setWidths 内做 */ },
+  });
 
   // 键盘导航（cc-haha 列表键盘体系）：/ 聚焦用户筛选、↑↓/j k 行高亮、Enter 打开详情
   const { searchRef, rowRefs, activeIndex, setActiveIndex } = useListKeyboard(
@@ -535,6 +641,32 @@ export default function Logs(): JSX.Element {
               {masked ? t('已脱敏') : t('脱敏开关')}
             </button>
           )}
+          {view === 'table' && (
+            /* 列设置（公共面板；仅表格视图，时间线视图无列概念） */
+            <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
+              <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
+                <button
+                  type="button"
+                  className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                  onClick={() => setColPanelOpen((v) => !v)}
+                  aria-label={t('列设置')}
+                >
+                  <Columns3 size={14} />
+                </button>
+              </Tooltip>
+              {colPanelOpen && (
+                <TableColumnSettings
+                  open
+                  onClose={() => setColPanelOpen(false)}
+                  defs={activeDefs}
+                  items={activeColState.items}
+                  onChange={commitCols}
+                  onReset={resetCols}
+                  anchorRef={colPanelRef}
+                />
+              )}
+            </div>
+          )}
         </div>
       </Card>
 
@@ -701,45 +833,75 @@ export default function Logs(): JSX.Element {
         ) : (
           <div className="table-wrapper">
             <table>
+              <colgroup>
+                {appliedCols.map((c) => (
+                  <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                ))}
+              </colgroup>
               <thead>
                 {tab === 'requests' ? (
                   <tr>
-                    {admin && (
-                      <th style={{ width: 36 }}>
-                        <input
-                          type="checkbox"
-                          checked={logs.length > 0 && selected.size === logs.length}
-                          onChange={toggleSelectAll}
-                          aria-label={t('全选')}
-                        />
-                      </th>
-                    )}
-                    {admin && <th style={{ width: 190 }}>{t('用户')}</th>}
-                    <th>{t('时间')}</th>
-                    <th>{t('模型')}</th>
-                    {admin && <th>{t('渠道')}</th>}
-                    <th>{t('Tokens')}</th>
-                    <th>{t('费用')}</th>
-                    <th>{t('延迟')}</th>
-                    <th>{t('状态')}</th>
+                    {appliedCols.map((c, idx) => {
+                      const grip = colResize.gripProps(c.key, {
+                        isLast: idx === appliedCols.length - 1,
+                        locked: c.locked,
+                        defaultWidth: c.width,
+                      });
+                      const label = logsReqColDefs(admin).find((d) => d.key === c.key)?.label ?? c.key;
+                      return (
+                        <th
+                          key={c.key}
+                          style={c.width != null ? { width: `${c.width}px` } : undefined}
+                          className={colAlignMap[c.key] === 'right' ? 'ta-right' : colAlignMap[c.key] === 'center' ? 'ta-center' : undefined}
+                        >
+                          {c.key === 'check' ? (
+                            <input
+                              type="checkbox"
+                              checked={logs.length > 0 && selected.size === logs.length}
+                              onChange={toggleSelectAll}
+                              aria-label={t('全选')}
+                            />
+                          ) : (
+                            t(label)
+                          )}
+                          {c.key !== 'check' && (
+                            <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                          )}
+                        </th>
+                      );
+                    })}
                   </tr>
                 ) : (
                   <tr>
-                    {admin && (
-                      <th style={{ width: 36 }}>
-                        <input
-                          type="checkbox"
-                          checked={logs.length > 0 && selected.size === logs.length}
-                          onChange={toggleSelectAll}
-                          aria-label={t('全选')}
-                        />
-                      </th>
-                    )}
-                    <th>{t('管理员')}</th>
-                    <th>{t('时间')}</th>
-                    <th>{t('操作')}</th>
-                    <th>{t('目标')}</th>
-                    <th>{t('变更')}</th>
+                    {appliedCols.map((c, idx) => {
+                      const grip = colResize.gripProps(c.key, {
+                        isLast: idx === appliedCols.length - 1,
+                        locked: c.locked,
+                        defaultWidth: c.width,
+                      });
+                      const label = logsAuditColDefs(admin).find((d) => d.key === c.key)?.label ?? c.key;
+                      return (
+                        <th
+                          key={c.key}
+                          style={c.width != null ? { width: `${c.width}px` } : undefined}
+                          className={colAlignMap[c.key] === 'right' ? 'ta-right' : colAlignMap[c.key] === 'center' ? 'ta-center' : undefined}
+                        >
+                          {c.key === 'check' ? (
+                            <input
+                              type="checkbox"
+                              checked={logs.length > 0 && selected.size === logs.length}
+                              onChange={toggleSelectAll}
+                              aria-label={t('全选')}
+                            />
+                          ) : (
+                            t(label)
+                          )}
+                          {c.key !== 'check' && (
+                            <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                          )}
+                        </th>
+                      );
+                    })}
                   </tr>
                 )}
               </thead>
@@ -754,7 +916,7 @@ export default function Logs(): JSX.Element {
                       onMouseEnter={() => setActiveIndex(i)}
                       title={t('点击查看详情')}
                     >
-                      {admin && (
+                      {admin && visibleKeySet.has('check') && (
                         <td onClick={(e) => e.stopPropagation()}>
                           <input
                             type="checkbox"
@@ -764,7 +926,7 @@ export default function Logs(): JSX.Element {
                           />
                         </td>
                       )}
-                      {admin && (
+                      {admin && visibleKeySet.has('user') && (
                         <td style={{ maxWidth: 190 }}>
                           <span className="log-user-cell">
                             <span className="log-user-avatar">{(userDisplay(l.user_email, l.user_id) || '?').charAt(0).toUpperCase()}</span>
@@ -772,6 +934,7 @@ export default function Logs(): JSX.Element {
                           </span>
                         </td>
                       )}
+                      {visibleKeySet.has('time') && (
                       <td style={{ whiteSpace: 'nowrap' }}>
                         {fmtTime(l.created_at)}
                         <div>
@@ -785,27 +948,38 @@ export default function Logs(): JSX.Element {
                           )}
                         </div>
                       </td>
+                      )}
+                      {visibleKeySet.has('model') && (
                       <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.model || ''}>
                         {l.model || '—'}
                         {l.origin_model && l.origin_model !== l.model && (
                           <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>← {l.origin_model}</div>
                         )}
                       </td>
-                      {admin && (
+                      )}
+                      {admin && visibleKeySet.has('channel') && (
                         <td style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.channel_name || ''}>
                           {masked ? mask(l.channel_name) : (l.channel_name || '—')}
                         </td>
                       )}
+                      {visibleKeySet.has('tokens') && (
                       <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
                         <span>{fmtCompact(l.input_tokens ?? 0)}</span>
                         <span style={{ color: 'var(--text-muted)' }}> / </span>
                         <span>{fmtCompact(l.output_tokens ?? 0)}</span>
                       </td>
+                      )}
+                      {visibleKeySet.has('cost') && (
                       <td style={{ whiteSpace: 'nowrap' }}>¥{l.cost}</td>
+                      )}
+                      {visibleKeySet.has('latency') && (
                       <td style={{ whiteSpace: 'nowrap' }}>{l.latency_ms}ms</td>
+                      )}
+                      {visibleKeySet.has('status') && (
                       <td>
                         <span className={(l.status_code ?? 0) < 400 ? 'badge badge-success' : 'badge badge-danger'}>{l.status_code}</span>
                       </td>
+                      )}
                     </tr>
                   ) : (
                     <tr
@@ -816,7 +990,7 @@ export default function Logs(): JSX.Element {
                       onMouseEnter={() => setActiveIndex(i)}
                       title={t('点击查看详情')}
                     >
-                      {admin && (
+                      {admin && visibleKeySet.has('check') && (
                         <td onClick={(e) => e.stopPropagation()}>
                           <input
                             type="checkbox"
@@ -826,18 +1000,28 @@ export default function Logs(): JSX.Element {
                           />
                         </td>
                       )}
+                      {visibleKeySet.has('admin') && (
                       <td style={{ maxWidth: 170 }}>
                         <span className="log-user-cell">
                           <span className="log-user-avatar">{(userDisplay(l.admin_email, l.admin_id) || '?').charAt(0).toUpperCase()}</span>
                           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{userDisplay(l.admin_email, l.admin_id)}</span>
                         </span>
                       </td>
+                      )}
+                      {visibleKeySet.has('time') && (
                       <td style={{ whiteSpace: 'nowrap' }}>{fmtTime(l.created_at)}</td>
+                      )}
+                      {visibleKeySet.has('action') && (
                       <td><code style={{ background: 'var(--card-bg)', padding: '2px 6px', borderRadius: 4 }}>{l.action}</code></td>
+                      )}
+                      {visibleKeySet.has('target') && (
                       <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={l.target || ''}>{l.target}</td>
+                      )}
+                      {visibleKeySet.has('change') && (
                       <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, color: 'var(--text-muted)' }} title={l.after || '—'}>
                         {l.after || '—'}
                       </td>
+                      )}
                     </tr>
                   )
                 )}
@@ -846,8 +1030,16 @@ export default function Logs(): JSX.Element {
           </div>
         )}
 
-        {totalPages > 1 && (
-          <Pagination page={page} totalPages={totalPages} onChange={setPage} />
+        {view === 'table' && (
+          <TablePaginationFooter
+            total={total}
+            page={page}
+            totalPages={totalPages}
+            size={pageSize}
+            sizes={SERVER_PAGE_SIZES}
+            onSizeChange={(n) => { setPageSize(n); setPage(1); }}
+            onPageChange={setPage}
+          />
         )}
       </Card>
 
