@@ -17,8 +17,15 @@ import { test, expect, loginAsAdmin } from './fixtures';
  * │     route_truncated: number                                            │
  * │     account_skips: {channel_id, skipped:{account_id,account_name,      │
  * │       reason}[], truncated}[]        (mod.rs:438)                       │
- * │ 注意：无逐次尝试明细（attemptDetails 是上游概念，AIGX 由 #32 补），     │
- * │ 无明细时「执行路径」整节不渲染。                                       │
+ * │ ── 逐次尝试明细（#32 落库，7de5d392）──                                 │
+ * │   attempt_details: {index, channel_id, channel_name, provider,         │
+ * │     account, model, stickyHit, startedAt, finishedAt, status, error,   │
+ * │     notice}[]                        (mod.rs:491-515，serde camelCase) │
+ * │   attempt_details_truncated: number  (mod.rs:145；上限 64，:480)        │
+ * │   投影：logs.rs:719-720；开关关闭/旧日志不序列化该字段（mod.rs:2286）   │
+ * │   → 前端形状守卫：缺省 = 整节不渲染；断言口径 details.length ≤ attempts │
+ * │   且 index 连续 1..=n（be-fix 契约）。                                 │
+ * │ 注意：无逐次尝试明细时「执行路径」整节不渲染。                         │
  * │ ── 日志列表（用例 4 的 mock 依据，同样钉死）──                          │
  * │   /api/logs/requests → {success, data: [...], total, page, size}       │
  * │   （src/api/admin/logs.rs:192-196；前端 Logs.tsx:185 读 Array.isArray  │
@@ -63,6 +70,23 @@ const FLAT_SNAP = {
         truncated: 0,
       },
     ],
+    // #32 逐次尝试明细（形状 = mod.rs:491-515 camelCase；index 连续 1..=2，
+    // ≤ attempts 计数 2——be-fix 断言口径）
+    attempt_details: [
+      {
+        index: 1, channel_id: 'ch-1', channel_name: '渠道一', provider: 'openai',
+        account: '', model: 'gpt-4o-2024', stickyHit: false,
+        startedAt: 1762000000, finishedAt: 1762000002, status: 502,
+        error: '上游 502 Bad Gateway', notice: null,
+      },
+      {
+        index: 2, channel_id: 'ch-2', channel_name: '渠道二', provider: 'openai',
+        account: '', model: 'gpt-4o', stickyHit: true,
+        startedAt: 1762000002, finishedAt: 1762000003, status: 200,
+        error: null, notice: null,
+      },
+    ],
+    attempt_details_truncated: 0,
   },
 };
 
@@ -121,8 +145,23 @@ test.describe('路由回放', () => {
     await expect(page.locator('.rr-kv')).toContainText('多因子调度');
     await expect(page.locator('.rr-kv')).toContainText('启用');
 
-    // 执行路径整节不渲染（attempts 只是计数，无逐次明细——#32 才补）
-    await expect(page.locator('.rr-timeline')).toHaveCount(0);
+    // 执行路径时间线（#32）：请求进入 + 2 次尝试；断言口径 details.length(2)
+    // ≤ attempts 计数(2) 且 index 连续 1..=n（be-fix 契约）
+    await expect(page.locator('.rr-timeline .rr-step')).toHaveCount(3);
+    await expect(page.locator('.rr-timeline').getByText('请求进入')).toBeVisible();
+    const failedStep = page.locator('.rr-timeline .rr-step-failed');
+    await expect(failedStep).toHaveCount(1);
+    await expect(failedStep).toContainText('渠道一');
+    await expect(failedStep).toContainText('502');
+    await expect(failedStep).toContainText('上游 502 Bad Gateway');
+    // 成功步：粘滞命中徽章 + 耗时（finishedAt-startedAt = 1s）
+    const okStep = page.locator('.rr-timeline .rr-step').nth(2);
+    await expect(okStep).toContainText('渠道二');
+    await expect(okStep).toContainText('粘滞命中');
+    await expect(okStep).toContainText('1.0s');
+    await expect(okStep).toContainText('gpt-4o');
+    // truncated=0 → 无溢出提示
+    await expect(page.locator('.rr-note', { hasText: '尝试明细超过记录上限' })).toHaveCount(0);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });

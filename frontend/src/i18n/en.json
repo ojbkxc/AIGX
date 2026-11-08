@@ -2986,5 +2986,9 @@
   "逐账号跳过明细": "Per-account skip details",
   "列设置（显隐 / 顺序 / 对齐 / 列宽拖动）": "Column settings (visibility / order / alignment / width drag)",
   "候选渠道": "Candidate channels",
-  "请求时间 {{time}}": "Request time {{time}}"
+  "请求时间 {{time}}": "Request time {{time}}",
+  "尝试明细超过记录上限，还有 {{n}} 条未记录。": "Attempt details exceeded the record cap — {{n}} more entries were not recorded.",
+  "客户端模型 {{client}} → 实际模型 {{model}}": "Client model {{client}} → upstream model {{model}}",
+  "上游模型 {{m}}": "Upstream model {{m}}",
+  "粘滞命中": "Sticky hit"
 }

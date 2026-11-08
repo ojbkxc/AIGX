@@ -25,6 +25,7 @@ import { api } from '../api';
 import { EmptyState, Loading } from './ui';
 import type {
   AccountSkipGroup,
+  RouteReplayAttemptItem,
   RouteReplayFilteredItem,
   RouteReplaySnapshot,
 } from '../types/routing-replay';
@@ -88,6 +89,37 @@ function AccountSkipGroups({ groups, t }: {
   );
 }
 
+/** 执行时间线的单次尝试（#32 AttemptDetail：渠道/状态/耗时/错误/粘滞命中） */
+function AttemptStep({ a, t }: { a: RouteReplayAttemptItem; t: (k: string, opts?: Record<string, unknown>) => string }): JSX.Element {
+  const failed = a.error != null;
+  const durMs = a.startedAt > 0 && a.finishedAt != null && a.finishedAt >= a.startedAt
+    ? (a.finishedAt - a.startedAt) * 1000
+    : undefined;
+  const barPct = durMs != null ? Math.max(4, Math.min(100, Math.round((durMs / 30_000) * 100))) : null;
+  return (
+    <li className={`rr-step ${failed ? 'rr-step-failed' : ''}`}>
+      <span className="rr-step-mark" aria-hidden="true" />
+      <div className="rr-step-body">
+        <div className="rr-step-head">
+          <b>{a.channel_name || a.channel_id || t('未知渠道')}</b>
+          {a.status != null && (
+            <span className={`rr-badge ${failed ? 'rr-badge-bad' : 'rr-badge-ok'}`}>{a.status}</span>
+          )}
+          {a.stickyHit && <span className="rr-badge rr-badge-ok">{t('粘滞命中')}</span>}
+          {a.provider && <span className="rr-badge rr-badge-mute">{a.provider}</span>}
+          {durMs != null && <span className="rr-step-dur">{fmtDuration(durMs)}</span>}
+        </div>
+        {a.model && <p className="rr-step-model">{t('上游模型 {{m}}', { m: a.model })}</p>}
+        {barPct != null && (
+          <div className="rr-step-bar"><i style={{ width: `${barPct}%` }} /></div>
+        )}
+        {a.error && <p className="rr-step-err">{a.error}</p>}
+        {!a.error && a.notice && <p className="rr-step-note">{a.notice}</p>}
+      </div>
+    </li>
+  );
+}
+
 /** 单请求回放视图：懒挂载 + 单次拉取（调用方控制挂载时机即可实现按需加载） */
 export function RouteReplayView({ requestId }: { requestId: string | number }): JSX.Element {
   const { t } = useTranslation();
@@ -131,7 +163,11 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
       .map((f) => ({ channel_id: String(f.channel_id), reason: f.reason || '' }));
     const selected = snap.selected_channel != null ? String(snap.selected_channel) : '';
     const skipsGroups = Array.isArray(snap.account_skips) ? snap.account_skips : [];
-    return { candidates, filtered, selected, skipsGroups };
+    // 逐次尝试明细（#32）：缺省无此字段 = 整节不渲染；index 连续 1..=n
+    const details = Array.isArray(snap.attempt_details)
+      ? snap.attempt_details.filter((a) => a && a.index != null)
+      : [];
+    return { candidates, filtered, selected, skipsGroups, details };
   }, [snap]);
 
   if (loading) return <div className="rr-loading"><Loading text={t('加载路由回放')} /></div>;
@@ -155,7 +191,7 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
   // 字段」，不再是 route 对象/attempts 数组——后端 attempts 是计数）
   if (!view || (
     !view.candidates.length && !view.filtered.length
-    && !view.selected && !view.skipsGroups.length && !snap?.route_config
+    && !view.selected && !view.skipsGroups.length && !view.details.length && !snap?.route_config
   )) {
     return (
       <div className="rr-degraded">
@@ -166,7 +202,8 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
 
   const rc = snap?.route_config;
   const captured = toMillis(snap?.created_at);
-  const { candidates, filtered, selected, skipsGroups } = view;
+  const { candidates, filtered, selected, skipsGroups, details } = view;
+  const attemptsTruncated = snap?.attempt_details_truncated ?? 0;
 
   return (
     <div className="rr-root">
@@ -188,8 +225,33 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
         <div><b>{filtered.length || '—'}</b><span>{t('跳过候选')}</span></div>
       </div>
 
-      {/* 逐次尝试明细（attemptDetails）日志尚不存（be-fix #32 补数据）：
-          有明细才渲染本节，目前始终整节不渲染 */}
+      {/* 执行路径时间线（#32 attempt_details 落库后启用）：缺省无字段 = 整节
+          不渲染（旧日志）；断言口径 details.length ≤ attempts 且 index 连续 */}
+      {details.length > 0 && (
+        <section className="rr-section">
+          <h4>{t('执行路径')}</h4>
+          <ol className="rr-timeline">
+            <li className="rr-step rr-step-entry">
+              <span className="rr-step-mark" aria-hidden="true" />
+              <div className="rr-step-body">
+                <div className="rr-step-head"><b>{t('请求进入')}</b></div>
+                <p>
+                  {snap?.origin_model && snap.model && snap.origin_model !== snap.model
+                    ? t('客户端模型 {{client}} → 实际模型 {{model}}', { client: snap.origin_model, model: snap.model })
+                    : (snap?.model || '—')}
+                </p>
+              </div>
+            </li>
+            {details.map((a, i) => <AttemptStep key={`${a.index}-${i}`} a={a} t={t} />)}
+          </ol>
+          {attemptsTruncated > 0 && (
+            <p className="rr-note">
+              {t('尝试明细超过记录上限，还有 {{n}} 条未记录。', { n: attemptsTruncated })}
+            </p>
+          )}
+        </section>
+      )}
+
       {candidates.length > 0 && (
         <section className="rr-section">
           <h4>{t('候选顺序')}</h4>
