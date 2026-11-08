@@ -8,8 +8,9 @@
 //!    FileStore 键 [`USER_TOOL_POLICY_KEY`]，老数据缺字段回落默认值（零迁移）。
 //! 2. [`user_tool_allowed`]——纯函数判定（零 IO / 零锁），短路顺序见函数注释。
 //!
-//! **本批不含**：`ToolDef.user_exec` 声明、写工具二次确认、计费接线、配额——
-//! 那些在后续批次接入回灌层时才引入。此处 `has_user_exec` 由调用方传入。
+//! **本批不含**：计费接线、配额——那些在后续批次接入回灌层时才引入。
+//! `ToolDef.user_exec` 声明见 [`crate::agent::registry`]，写工具二次确认事件形状
+//! 见 [`crate::agent::confirm`]；此处 `has_user_exec` 由调用方传入。
 //!
 //! 默认全关（契约 §0）：`enabled=false` 时判定一律拒绝，与历史纯聊天逐字节等价。
 

@@ -49,10 +49,19 @@ pub struct ToolDef {
     pub target_key: &'static str,
     /// 本工具覆盖的管理面路由前缀（防漂移测试）。
     pub covers: &'static [&'static str],
+    /// 管理员域执行体（直调管理面 handler，内部 `verify_admin`）。
     pub exec: ExecFn,
+    /// 终端用户域执行体（#34 双执行体）：**用户域 handler**——内部 `verify_user`
+    /// 身份校验 + `user_id` 数据域过滤，只读写调用者自己的数据；禁直接构造 HTTP
+    /// （网络出口仅限 channel/bridge）；结果一律过 [`handler_to_outcome`]（16K 截断）。
+    ///
+    /// `None` = 该工具对终端用户不可见（工具作者显式声明才对用户暴露）；
+    /// 即便声明了，判定层仍会按「risk 封顶 LowRisk + 组 allowlist」二次过滤。
+    pub user_exec: Option<ExecFn>,
 }
 
-/// 声明构造器（保持调用点紧凑）。
+/// 声明构造器（保持调用点紧凑）。`user_exec` 默认为 `None`——
+/// 需要用户域执行体的工具用 [`ToolDef::user_exec`] 链式声明。
 #[allow(clippy::too_many_arguments)]
 fn td(
     name: &'static str,
@@ -73,6 +82,21 @@ fn td(
         target_key,
         covers,
         exec,
+        user_exec: None,
+    }
+}
+
+impl ToolDef {
+    /// 声明终端用户域执行体（构建期链式调用；避免改动 [`td`] 的既有调用点）。
+    #[must_use]
+    pub fn user_exec(mut self, f: ExecFn) -> Self {
+        self.user_exec = Some(f);
+        self
+    }
+
+    /// 是否对终端用户暴露：声明了用户域执行体且非高危（D2 硬封顶）。
+    pub fn is_user_exposed(&self) -> bool {
+        self.user_exec.is_some() && self.risk != RiskLevel::HighRisk
     }
 }
 
@@ -112,6 +136,95 @@ fn account_id_args() -> Value {
 /// handler 结果 → 工具结果（截断 + 脱敏在 `handler_to_outcome` 内）。
 fn out(result: HandlerResult) -> ExecResult {
     Ok(handler_to_outcome(result))
+}
+
+// ── 终端用户域执行体（#34 双执行体）────────────────────────────────
+//
+// 执行约束（设计稿 §5.3）：内部 `verify_user` 身份校验 + `user_id` 数据域限定；
+// 禁直接构造 HTTP（网络出口仅限 channel/bridge）；结果一律过 `handler_to_outcome`
+// （16K 截断 + 脱敏）。只服务终端用户会话——管理员会话仍走各自的 `exec`。
+
+/// 用户域日志分页上限（收紧：用户侧一次最多 20 条；管理员面不设此限）。
+const USER_LOG_PAGE_MAX: usize = 20;
+
+/// 用户域日志窗口天数上限。
+const USER_LOG_DAYS_MAX: i64 = 30;
+
+/// 用户域：查本人额度/用量（`WHERE user_id = ?`；近 30 天请求数与消耗）。
+async fn user_usage_domain(state: &AppState, headers: &HeaderMap) -> HandlerResult {
+    let u = crate::api::admin::common::verify_user(state, headers).await?;
+    let since = chrono::Utc::now().timestamp() - 30 * 86_400;
+    let logs = state
+        .log_store
+        .requests
+        .list_by_user(&u.id, Some(since), None);
+    let input_tokens: u64 = logs.iter().map(|l| l.input_tokens).sum();
+    let output_tokens: u64 = logs.iter().map(|l| l.output_tokens).sum();
+    let cost: i64 = logs.iter().map(|l| l.cost).sum();
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "user_id": u.id,
+            "quota": u.quota,
+            "used_quota": u.used_quota,
+            "remaining": u.remaining(),
+            "window_days": 30,
+            "requests": logs.len(),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost": cost,
+        }
+    })))
+}
+
+/// 用户域：查本人请求日志（`user_id` 限定 + 分页/窗口收紧 + 剥离管理员排障字段）。
+///
+/// 与管理员口径的 `aigx_query_logs` 差异：不接受 `user`/`channel` 过滤（恒为本人），
+/// 不回传渠道名/IP/原始请求名（`log::RequestLog` 注释明确「用户不展示」）。
+async fn user_logs_domain(state: &AppState, headers: &HeaderMap, args: &Value) -> HandlerResult {
+    let u = crate::api::admin::common::verify_user(state, headers).await?;
+    let page = args
+        .get("page")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1) as usize;
+    let size = args
+        .get("size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(USER_LOG_PAGE_MAX as u64)
+        .clamp(1, USER_LOG_PAGE_MAX as u64) as usize;
+    let days = args
+        .get("days")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(7)
+        .clamp(1, USER_LOG_DAYS_MAX);
+    let since = chrono::Utc::now().timestamp() - days * 86_400;
+    let logs = state
+        .log_store
+        .requests
+        .list_by_user(&u.id, Some(since), None);
+    let total = logs.len();
+    let rows: Vec<Value> = logs
+        .into_iter()
+        .skip((page - 1).saturating_mul(size))
+        .take(size)
+        .map(|l| {
+            json!({
+                "ts": l.created_at,
+                "model": l.model,
+                "status": l.status_code,
+                "input_tokens": l.input_tokens,
+                "output_tokens": l.output_tokens,
+                "latency_ms": l.latency_ms,
+                "cost": l.cost,
+                "error": l.error_msg,
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "success": true,
+        "data": { "total": total, "page": page, "size": size, "days": days, "logs": rows }
+    })))
 }
 
 // ── 注册表 ─────────────────────────────────────────────────────────
@@ -170,6 +283,44 @@ pub async fn exec_tool(
         ));
     };
     (tool.exec)(state, headers, args).await
+}
+
+/// 终端用户可下发的工具集（#34「下发即过滤」）：声明了 `user_exec` 且非高危。
+///
+/// 组 allowlist 判定在此之上再筛一层；HighRisk 封顶在这里与判定层双重生效
+/// （双保险，任一失效都不至于把高危工具漏给终端用户）。
+pub fn user_exposed_tools() -> impl Iterator<Item = &'static ToolDef> {
+    all_tools().iter().filter(|t| t.is_user_exposed())
+}
+
+/// 终端用户工具执行入口：只走 `user_exec`（与 [`exec_tool`] 的管理员执行体并列）。
+///
+/// 未知工具 / 未声明用户域执行体 / 高危 → 拒绝（执行侧兜底，不依赖调用方预筛）。
+pub async fn exec_user_tool(
+    state: &AppState,
+    headers: &HeaderMap,
+    name: &str,
+    args: &Value,
+) -> ExecResult {
+    let Some(tool) = find_tool(name) else {
+        return Err((
+            -32601,
+            format!("Unknown tool: {name} (not in agent whitelist)"),
+        ));
+    };
+    let Some(user_exec) = tool.user_exec else {
+        return Err((
+            -32601,
+            format!("Tool {name} has no user execution body (not available to end users)"),
+        ));
+    };
+    if tool.risk == RiskLevel::HighRisk {
+        return Err((
+            -32603,
+            format!("Tool {name} is high-risk and never exposed to end users"),
+        ));
+    }
+    user_exec(state, headers, args).await
 }
 
 fn build_tools() -> Vec<ToolDef> {
@@ -372,7 +523,19 @@ fn build_tools() -> Vec<ToolDef> {
                     out(admin::handle_list_request_logs(State(s.clone()), h.clone(), Query(q)).await)
                 })
             },
-        ),
+        )
+        .user_exec(|s, h, a| Box::pin(async move { out(user_logs_domain(s, h, a).await) })),
+        td(
+            "aigx_query_usage",
+            "本人额度与用量",
+            "只读：当前调用者的额度与近 30 天用量（配额/已用/剩余/请求数/tokens）",
+            ReadOnly,
+            "",
+            &["/api/user/records"],
+            no_args,
+            |s, h, _a| Box::pin(async move { out(user_usage_domain(s, h).await) }),
+        )
+        .user_exec(|s, h, _a| Box::pin(async move { out(user_usage_domain(s, h).await) })),
         td(
             "aigx_get_pricing",
             "列出模型定价",
@@ -1282,7 +1445,14 @@ fn build_tools() -> Vec<ToolDef> {
                     out(admin::handle_available_models(State(s.clone()), h.clone()).await)
                 })
             },
-        ),
+        )
+        // #34 用户域：只读公开目录（`handle_available_models` 内部 verify_user +
+        // 用户分组模型白名单过滤，与管理员面共用同一份可用模型口径）。
+        .user_exec(|s, h, _a| {
+            Box::pin(async move {
+                out(admin::handle_available_models(State(s.clone()), h.clone()).await)
+            })
+        }),
         // ── 签到中心 ──
         td(
             "aigx_checkin_overview",
@@ -1327,7 +1497,12 @@ fn build_tools() -> Vec<ToolDef> {
                     .await)
                 })
             },
-        ),
+        )
+        // #34 用户域：本人每日签到（`handle_do_checkin` 内部 verify_user，只给
+        // 自己入账；管理面的账号池签到走上面的 `exec`，两条执行体互不串域）。
+        .user_exec(|s, h, _a| {
+            Box::pin(async move { out(admin::handle_do_checkin(State(s.clone()), h.clone()).await) })
+        }),
         td(
             "aigx_checkin_records",
             "签到台账",
@@ -1874,6 +2049,43 @@ mod tests {
         assert_eq!(
             names, expect,
             "MCP tools/list 与 registry::mcp_tools 不一致"
+        );
+    }
+
+    /// #34 用户域工具台账（首发四件套；新增用户域工具必须同步本表）。
+    const USER_TOOLS: &[&str] = &[
+        "aigx_checkin_run",
+        "aigx_query_usage",
+        "aigx_query_logs",
+        "aigx_available_models",
+    ];
+
+    /// 防漂移（#34）：用户域工具集 = 声明了 `user_exec` 且非高危的工具，
+    /// 必须与 [`USER_TOOLS`] 台账逐一对齐；高危工具永不声明 `user_exec`（D2）。
+    #[test]
+    fn user_tool_surface_declared_and_capped() {
+        for t in all_tools() {
+            if t.user_exec.is_some() {
+                assert_ne!(
+                    t.risk,
+                    RiskLevel::HighRisk,
+                    "高危工具 {} 不得声明 user_exec（D2 硬封顶）",
+                    t.name
+                );
+                assert!(!t.covers.is_empty(), "用户域工具 {} 须声明 covers", t.name);
+            }
+        }
+        for name in USER_TOOLS {
+            let t = find_tool(name).unwrap_or_else(|| panic!("台账工具 {name} 不在注册表"));
+            assert!(t.user_exec.is_some(), "{name} 未声明 user_exec");
+            assert!(t.is_user_exposed(), "{name} 应对终端用户暴露");
+        }
+        let exposed: Vec<&str> = user_exposed_tools().map(|t| t.name).collect();
+        assert_eq!(
+            exposed.len(),
+            USER_TOOLS.len(),
+            "用户域工具集 {:?} 与 USER_TOOLS 台账不一致",
+            exposed
         );
     }
 
