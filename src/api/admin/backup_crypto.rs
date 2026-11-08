@@ -122,7 +122,7 @@ fn seal_line(key: &[u8; 32], line_no: usize, plaintext: &[u8]) -> Result<String,
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "密钥长度不受支持".to_string())?;
     let mut nonce_bytes = [0u8; 12];
     // 进程内 CSPRNG：随机 nonce 逐条独立（GCM 前提）；行号进 AAD 不进 nonce
-    getrandom(&mut nonce_bytes)?;
+    fill_random(&mut nonce_bytes)?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let aad = format!("{MAGIC}:{line_no}");
     let ct = cipher
@@ -201,21 +201,24 @@ fn write_encrypted_backup(
 
     let mut line_no = 0usize;
     let mut records = 0usize;
-    for key in &all_keys {
-        if !include_logs && log_prefixes.iter().any(|p| key.starts_with(p)) {
+    // 注意：循环变量是 **KV 键名**，不能叫 key —— 上面那个 `key` 是
+    // Argon2id 派生的 AES 密钥，两者被同名遮蔽过一次（用键名当加密密钥，
+    // 编译期就暴露成 E0308）。
+    for kv_key in &all_keys {
+        if !include_logs && log_prefixes.iter().any(|p| kv_key.starts_with(p)) {
             continue;
         }
-        let value: Value = match store.get(key) {
+        let value: Value = match store.get(kv_key) {
             Ok(Some(v)) => v,
             Ok(None) => continue, // 竞态下键被删：跳过
             Err(e) => {
                 // 单键读失败不阻断整份备份（键损坏≠整库不可备份）
-                tracing::warn!("加密备份跳过损坏键 {key}: {e}");
+                tracing::warn!("加密备份跳过损坏键 {kv_key}: {e}");
                 continue;
             }
         };
         line_no += 1;
-        let plaintext = serde_json::to_string(&json!({ "key": key, "value": value }))
+        let plaintext = serde_json::to_string(&json!({ "key": kv_key, "value": value }))
             .map_err(|e| format!("序列化记录失败: {e}"))?;
         out.push_str(&seal_line(&key, line_no, plaintext.as_bytes())?);
         out.push('\n');
@@ -249,7 +252,8 @@ fn read_encrypted_backup(content: &str, password: &str) -> Result<Vec<(String, V
         let plaintext = open_line(&key, line_no, line)?;
         let record: Value = serde_json::from_slice(&plaintext)
             .map_err(|_| format!("第 {line_no} 行解密后不是合法记录"))?;
-        let key = record
+        // 键名用 kv_key：`key` 是派生的 AES 密钥，别遮蔽（写入侧踩过）
+        let kv_key = record
             .get("key")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("第 {line_no} 行缺少 key 字段"))?
@@ -258,7 +262,7 @@ fn read_encrypted_backup(content: &str, password: &str) -> Result<Vec<(String, V
             .get("value")
             .cloned()
             .ok_or_else(|| format!("第 {line_no} 行缺少 value 字段"))?;
-        records.push((key, value));
+        records.push((kv_key, value));
     }
     Ok(records)
 }
@@ -407,19 +411,19 @@ pub async fn handle_backup_import_encrypted(
                 })?);
             }
             "file" => {
-                if let Some(size) = field.metadata().map(|m| m.size_hint().1) {
-                    if size > MAX_PACKAGE_BYTES {
-                        return Err(error_response(
-                            &format!("包超过大小上限 {MAX_PACKAGE_BYTES} 字节"),
-                            StatusCode::PAYLOAD_TOO_LARGE,
-                        ));
-                    }
-                }
+                // axum 0.7 的 Field 没有 metadata()/size_hint()，拿不到声明长度
+                // ——改为**边读边限**（否则超大包会先撑爆内存再报错）。
                 let mut buf = Vec::new();
                 use axum::body::HttpBody;
                 while let Some(chunk) = field.chunk().await.map_err(|e| {
                     error_response(&format!("读取包失败: {e}"), StatusCode::BAD_REQUEST)
                 })? {
+                    if buf.len() as u64 + chunk.len() as u64 > MAX_PACKAGE_BYTES {
+                        return Err(error_response(
+                            &format!("包超过大小上限 {MAX_PACKAGE_BYTES} 字节"),
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                        ));
+                    }
                     buf.extend_from_slice(&chunk);
                 }
                 package = Some(buf);
