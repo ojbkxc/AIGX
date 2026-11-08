@@ -505,17 +505,23 @@ pub async fn handle_get_routing_profiles(
     })))
 }
 
-/// PUT /api/routing/profiles 请求体：提供哪份改哪份（`profiles` 是**整份**
-/// 替换 —— 模型级档案/组的增量编辑走单组端点或先 GET 改完再 PUT）。
+/// PUT /api/routing/profiles 请求体：**只承载 profiles 本体**（整份替换 ——
+/// 模型级档案/组的增量编辑走单组端点或先 GET 改完再 PUT）。
+///
+/// **没有 `enabled` 字段（有意为之）**：总开关的唯一写入口是
+/// `PUT /api/routing`（[`handle_update_routing`]，前端 fe-routing 已联调）。
+/// 同一字段留两个写入口就是两份真相 —— `enabled` 在本请求体里根本不存在，
+/// 读-改-写路径天然保留其原值，不会被整份替换冲成默认。
 #[derive(Debug, Deserialize)]
 pub struct RoutingProfilesUpdate {
-    #[serde(default)]
-    pub enabled: Option<bool>,
     #[serde(default)]
     pub profiles: Option<RoutingProfiles>,
 }
 
-/// PUT /api/routing/profiles — 整份保存（上限校验，超限 400 拒绝写入）。
+/// PUT /api/routing/profiles — 保存 profiles 本体（上限校验，超限 400 拒绝写入）。
+///
+/// 写路径：读当前快照 → 只替换 `profiles` 字段 → `validate()` → `update()`；
+/// `enabled` 等其余字段保持原值。总开关走 `PUT /api/routing`。
 pub async fn handle_put_routing_profiles(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -523,9 +529,6 @@ pub async fn handle_put_routing_profiles(
 ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
     verify_admin(&state, &headers).await?;
     let mut policy = state.routing_policy.snapshot().as_ref().clone();
-    if let Some(v) = req.enabled {
-        policy.enabled = v;
-    }
     if let Some(p) = req.profiles {
         policy.profiles = p;
     }
