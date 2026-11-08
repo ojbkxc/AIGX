@@ -163,6 +163,25 @@ pub async fn handle_model_distribution(
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
+/// 渠道概览的单行出口形状（`handle_channel_stats` 专用，纯函数便于单测）。
+///
+/// ⚠️ 这个出口**不走** `admin::channels::mask_channel`（它是自拼 `json!` 的轻量视图），
+/// 所以 `last_error` 必须在这里自己过一遍公共脱敏 helper，否则等于绕开脱敏把上游
+/// 响应正文原文吐给管理面（值来源：`mark_unhealthy(&id, result.message)`）。
+/// 用 `as_deref().map(...)` 保持 `None → null` 的原形状不变。
+fn channel_stats_row(c: &crate::channel::Channel) -> Value {
+    json!({
+        "id": c.id,
+        "name": c.name,
+        "status": c.status,
+        "last_error": c
+            .last_error
+            .as_deref()
+            .map(crate::error_translate::sanitize_error_message),
+        "last_used_at": c.last_used_at,
+    })
+}
+
 /// 渠道统计
 pub async fn handle_channel_stats(
     State(state): State<AppState>,
@@ -173,15 +192,7 @@ pub async fn handle_channel_stats(
         .channel_store
         .list()
         .iter()
-        .map(|c| {
-            json!({
-                "id": c.id,
-                "name": c.name,
-                "status": c.status,
-                "last_error": c.last_error,
-                "last_used_at": c.last_used_at,
-            })
-        })
+        .map(channel_stats_row)
         .collect();
     Ok(Json(json!({
         "success": true,
@@ -1702,5 +1713,56 @@ mod tests {
         assert!(!acc.is_empty() && acc.len() < 300, "应为部分淘汰而非全清");
         assert!(acc.contains_key(&key(299)), "最新插入的 key 仍在");
         assert!(!acc.contains_key(&key(0)), "最旧插入的 key 已淘汰");
+    }
+
+    /// 渠道概览出口（[`channel_stats_row`]，**不走** `admin::channels::mask_channel`）
+    /// 必须自己过一遍公共脱敏 helper。
+    ///
+    /// 钉两侧，缺一侧都不算闭合：
+    /// ①凭证形态（`Bearer <token>` / `sk-<alnum>`）在出口变成 `***`；
+    /// ②**非凭证诊断文本逐字保留**——`sanitize_error_message` 只做「超 500 字符截断
+    ///    + 只换这两类形态」，把它当全文摘要用会静默吞掉运维要看的原文。
+    #[test]
+    fn channel_stats_row_redacts_credentials_but_keeps_diagnosis_verbatim() {
+        // (原文, 必须逐字保留的前缀, 期望的掩码, 不得再出现的明文片段)
+        for (raw, head, masked, leak) in [
+            (
+                "上游返回 HTTP 401：invalid api key provided: sk-ABC123def456",
+                "上游返回 HTTP 401：invalid api key provided: ",
+                "sk-***",
+                "ABC123def456",
+            ),
+            (
+                "余额查询失败：Authorization: Bearer abcdef123456",
+                "余额查询失败：Authorization: ",
+                "Bearer ***",
+                "abcdef123456",
+            ),
+        ] {
+            let ch: crate::channel::Channel = serde_json::from_value(json!({
+                "id": "ch-obs",
+                "name": "overview-exit",
+                "last_error": raw,
+            }))
+            .expect("最小 Channel 可反序列化");
+            let row = channel_stats_row(&ch);
+            let s = row["last_error"].as_str().unwrap_or_else(|| {
+                panic!(
+                    "脱敏后 last_error 应仍是字符串，实得 {:?}",
+                    row["last_error"]
+                )
+            });
+            assert!(s.ends_with(masked), "凭证形态没被替换成 {masked}: {s}");
+            assert!(s.starts_with(head), "非凭证诊断原文被改写: {s}");
+            assert!(!s.contains(leak), "出口仍带明文凭证: {s}");
+        }
+
+        // 脱敏不得改出口形状：未出过错的渠道仍是 null（前端按 string|null 读）。
+        let clean: crate::channel::Channel =
+            serde_json::from_value(json!({ "id": "ch-2", "name": "clean" })).unwrap();
+        assert!(
+            channel_stats_row(&clean)["last_error"].is_null(),
+            "None 不该被写成空串"
+        );
     }
 }
