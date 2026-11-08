@@ -4044,6 +4044,38 @@ fn resolve_tail_usage(
     )
 }
 
+/// #38/P1：流尾「到底发哪些字节」的决策，从 `done` 闭包里抽成纯函数。
+///
+/// 抽函数的唯一目的是**让「错误帧后不补 usage 尾帧」这条不变量可测**：原先它
+/// 是 `futures::stream::once(async move { … })` 闭包里的 inline 判断，闭包宿主
+/// 还要构造吃 `AppState` 的守卫，按本仓「带测的先例全是纯函数」的路子没法直接测。
+///
+/// 返回 `(待发字节, 需要回写 usage_slot 的值)`。**语义与搬动前逐字节一致**，
+/// 「是否发帧」这个可观测形状一个都没改（⇒ 前端桩与 e2e 零跟进）：
+/// - `errored == true` ⇒ 恰为 `data: [DONE]\n\n`，**不含 usage 帧**，也不回写。
+///   错误帧自己已经带 `[DONE]` 收尾；再挂一帧估算 usage，前端会在错误气泡后面
+///   显示莫名数字（前端不在 `[DONE]` 停，也不替后端兜底）——这是**显示假数字**，
+///   比数字失真严重，所以这条必须由单测钉住。
+/// - 否则走 [`resolve_tail_usage`]：上游真值 → `estimated` 键不写、不回写
+///   （slot 里已经是真值）；估算 → 尾帧带 `estimated: true`，并把**同一份数字**
+///   作为第二返回值交回调用方写 slot，保证展示与扣费同口径。
+fn usage_tail_bytes(
+    errored: bool,
+    upstream_usage: Option<Value>,
+    prompt_tokens_est: u64,
+    model: &str,
+    output: &str,
+    frame_id: &str,
+) -> (String, Option<Value>) {
+    if errored {
+        return ("data: [DONE]\n\n".to_string(), None);
+    }
+    let (usage, estimated) = resolve_tail_usage(upstream_usage, prompt_tokens_est, model, output);
+    let frame = usage_tail_frame(frame_id, model, &usage, estimated);
+    // 只有估算分支需要回写：真值本来就在 slot 里，重复写一次是多余的。
+    (frame, if estimated { Some(usage) } else { None })
+}
+
 /// 账号池 chat_test 流式包装：把 AccountBridge 的归一化 `ChatChunk` 序列化为
 /// OpenAI SSE 帧（与数据面 /v1/chat/completions 的 wire 形状一致，前端
 /// `parseSseFrame` 按 choices[0].delta 解析），并在流结束/drop 时记账。
@@ -4168,6 +4200,10 @@ fn account_chat_test_stream(
         request_start: std::time::Instant,
         acc: std::sync::Arc<parking_lot::Mutex<String>>,
         usage_slot: std::sync::Arc<parking_lot::Mutex<Option<Value>>>,
+        // #38/P2(b)：调用方用 count_chat_prompt 算好的 prompt 估算值。
+        // 客户端断连时 done 闭包根本不执行、slot 留空，守卫必须还能给出
+        // 与数据面同口径的 prompt 数字（原先这里只能传 Null → 记 0）。
+        prompt_tokens_est: u64,
         fired: std::sync::atomic::AtomicBool,
     }
     impl std::ops::Drop for AccountStreamGuard {
@@ -4177,14 +4213,32 @@ fn account_chat_test_stream(
             }
             let output = self.acc.lock().clone();
             // #21/B：展示与扣费同源——流尾已把最终 usage（上游真值或估算）写回
-            // slot，记账直接吃它；客户端断连等没走到流尾的情况，slot 里要么只剩
-            // 上游真值、要么为空（空则保持原 Null→按文本估算的口径）。
+            // slot，记账直接吃它。
+            //
+            // #38/P2(b)：客户端断连时 `done` 闭包根本不执行，slot 可能是空的。
+            // 以前这里退化成 `Value::Null`，`extract_usage_tokens` 只能给出
+            // `(0, 0)` → 日志 prompt_tokens 记 0、completion 由文本估算兜底；
+            // 而数据面（`billing.rs::finalize` / `write_499`）恒用
+            // `count_chat_prompt` 估 prompt，同一笔请求在报表两处口径不一致。
+            // 本链路手上本来就有调用方给的 prompt 估算值，所以补齐到同口径，
+            // completion 仍走 `resolve_tail_usage` 的 `count_text` —— 与
+            // `record_chat_test_usage` 内部那段兜底用的是同一个算法，
+            // **不引入第二个数字来源**，只有 prompt 从 0 变成估算值。
+            // （日志 debug 快照的形状随之从「纯正文」变成 `{"usage":…,
+            //   "choices":[{"message":{"content":正文}}]}`，正文仍在，可排查性不降。）
             let usage_json = match self.usage_slot.lock().clone() {
                 Some(u) => serde_json::json!({
                     "usage": u,
                     "choices": [{ "message": { "content": output } }],
                 }),
-                None => Value::Null,
+                None => {
+                    let (usage, _) =
+                        resolve_tail_usage(None, self.prompt_tokens_est, &self.model, &output);
+                    serde_json::json!({
+                        "usage": usage,
+                        "choices": [{ "message": { "content": output } }],
+                    })
+                }
             };
             record_chat_test_usage(
                 &self.state,
@@ -4211,32 +4265,28 @@ fn account_chat_test_stream(
         request_start,
         acc: acc.clone(),
         usage_slot: usage_slot.clone(),
+        prompt_tokens_est,
         fired: std::sync::atomic::AtomicBool::new(false),
     };
 
     let done = futures::stream::once(async move {
-        if errored_for_tail.load(std::sync::atomic::Ordering::Relaxed) {
-            return Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(
-                b"data: [DONE]\n\n",
-            ));
-        }
-        // #21/B：流尾补一帧 usage（此前归一化链路结构上不可能带 usage，前端
-        // 只能显示空数字）。取值规则见 resolve_tail_usage：上游真值优先。
-        let upstream_usage = usage_for_tail.lock().clone();
-        let output = acc_for_tail.lock().clone();
-        let (usage, estimated) =
-            resolve_tail_usage(upstream_usage, prompt_tokens_est, &model_for_tail, &output);
-        if estimated {
-            // 回写估算值，记账守卫吃同一口径（展示 = 扣费，不分裂）
-            *usage_for_tail.lock() = Some(usage.clone());
-        }
-        let frame = usage_tail_frame(
-            &format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+        // #38/P1：发不发尾帧、发什么内容的决策已抽进 usage_tail_bytes（纯函数、
+        // 有单测钉形状），这里只剩「取共享状态 → 调它 → 回写」的胶水。
+        // errored 分支同样会先 clone 一次 slot/acc 并生成 frame_id：两者都无
+        // 副作用（只读取锁、uuid 不外泄），实际发出的字节与搬动前逐字节一致。
+        let (tail, writeback) = usage_tail_bytes(
+            errored_for_tail.load(std::sync::atomic::Ordering::Relaxed),
+            usage_for_tail.lock().clone(),
+            prompt_tokens_est,
             &model_for_tail,
-            &usage,
-            estimated,
+            &acc_for_tail.lock().clone(),
+            &format!("chatcmpl-{}", uuid::Uuid::new_v4()),
         );
-        Ok::<_, std::convert::Infallible>(bytes::Bytes::from(frame))
+        if let Some(usage) = writeback {
+            // 估算分支回写，记账守卫吃同一口径（展示 = 扣费，不分裂）
+            *usage_for_tail.lock() = Some(usage);
+        }
+        Ok::<_, std::convert::Infallible>(bytes::Bytes::from(tail))
     });
     // 先记成功：chat_test 记账以 drop 守卫为准，这里只做包装
     crate::api::openai::GuardedStream {
@@ -4504,6 +4554,22 @@ where
             let output = self.acc.lock().clone();
             // 嗅到真 usage → 包装成完整响应形状（extract 读 /usage；日志
             // 快照同时保留累积文本）；没嗅到则维持 Null → 文本估算兜底。
+            //
+            // #38/P2 裁决 **(b)**：透传链路**不做** prompt 估算兜底（与上面
+            // AccountStreamGuard 里补齐的账号池链路刻意不同）：
+            // - 这条流透传的是上游**已经发出去的字节**，手上没有可直接复用的
+            //   请求体口径；账号池那边能算是因为调用方本来就给了
+            //   `count_chat_prompt(model, chat_req)`。
+            // - 两个调用方支路（OpenAI 协议透传与 Anthropic 协议透传，
+            //   见各自 handler 里 `chat_test_logged_stream(` 的调用点，**都是流式透传**）
+            //   里 Anthropic 支的 usage 命名是 `input_tokens`/`output_tokens`，
+            //   `openai_stream_usage` 刻意不收（收了会把计费打成 0）；要给它估
+            //   prompt 就得**复刻它自己的消息序列化** ⇒ #31 同型的「复刻与真实
+            //   请求体漂移」假口径风险：**一个错数比一个诚实的 0 更有害**。
+            // 因此**断线（或没嗅到终帧）时日志里的 token 数仅供参考**：
+            // prompt 记 0、completion 由累积文本估算。扣费不受影响——chat_test
+            // 按次收费（2 额度），不看 token；记账仍在本守卫里落日志，界面没数字
+            // ≠ 没落账。真要补这一口径属新需求，先过 lead（另立任务）。
             let usage_json = match self.usage_slot.lock().clone() {
                 Some(u) => serde_json::json!({
                     "usage": u,
@@ -4872,5 +4938,68 @@ mod tests {
         // 空输出（尚未收到增量即收尾）：估算 0，但字段齐备，前端不会拿到 null
         let (usage, _) = resolve_tail_usage(None, 5, "gpt-4o", "");
         assert_eq!(usage["completion_tokens"], serde_json::json!(0));
+    }
+
+    /// #38/P1：`done` 闭包的字节级决策（抽成 `usage_tail_bytes` 后才可测）。
+    /// 一支测试同时钉三件事：①错误后**只**发 `[DONE]`（不发 usage 帧、不回写）
+    /// ②上游真值不带 `estimated` 且不重复回写 ③估算支带回写的必须与前端看到的同一份。
+    #[test]
+    fn tail_bytes_errored_emits_done_only() {
+        // ① 错误帧之后：恰为 `data: [DONE]\n\n`，一字节都不能多。
+        //    前端不在 `[DONE]` 处停、也不替后端兜底，多挂一帧 usage 就是让界面
+        //    在错误气泡后面显示**假数字** —— 这条不变量此前前后端双裸。
+        let (tail, writeback) = usage_tail_bytes(
+            true,
+            Some(serde_json::json!({
+                "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2
+            })),
+            120,
+            "gpt-4o",
+            "半截输出",
+            "chatcmpl-err",
+        );
+        assert_eq!(tail, "data: [DONE]\n\n");
+        assert!(!tail.contains("usage"), "错误收尾不得带 usage 帧: {tail}");
+        assert!(writeback.is_none(), "错误分支不得回写 slot");
+
+        // ② 上游真值：帧内不标 estimated，且不回写（slot 里本来就是真值）
+        let real = serde_json::json!({
+            "prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13
+        });
+        let (tail, writeback) = usage_tail_bytes(
+            false,
+            Some(real.clone()),
+            120,
+            "gpt-4o",
+            "输出",
+            "chatcmpl-real",
+        );
+        let frame = frame_of(&tail);
+        assert_eq!(frame["usage"], real);
+        assert!(
+            frame.get("estimated").is_none(),
+            "上游真值不得标 estimated: {frame}"
+        );
+        assert_eq!(writeback, None, "真值分支不该重复回写");
+
+        // ③ 估算支：标 estimated，且回写值必须与发出去的那帧完全同一份
+        //    （展示 = 扣费，两处不能各有算法）
+        let output = "这是一段用于验证估算口径的输出文本";
+        let (tail, writeback) =
+            usage_tail_bytes(false, None, 120, "gpt-4o", output, "chatcmpl-est");
+        let frame = frame_of(&tail);
+        assert_eq!(frame["estimated"], serde_json::json!(true));
+        let completion = crate::token_estimate::count_text("gpt-4o", output) as u64;
+        assert_ne!(completion, 0);
+        assert_eq!(frame["usage"]["prompt_tokens"], serde_json::json!(120));
+        assert_eq!(
+            frame["usage"]["completion_tokens"],
+            serde_json::json!(completion)
+        );
+        let written = writeback.expect("估算分支必须回写 slot");
+        assert_eq!(
+            written, frame["usage"],
+            "回写值必须与前端看到的那份一致（不分裂口径）"
+        );
     }
 }
