@@ -820,6 +820,7 @@ async fn main() -> anyhow::Result<()> {
         {
             let log_store = state.log_store.clone();
             let kv_store = state.scheduled_task_store.clone();
+            let cfg_manager = state.config_manager.clone();
             scheduler.spawn(cron::TaskSpec {
                 name: "log-retention-sweep",
                 interval: Duration::from_secs(86400),
@@ -827,6 +828,7 @@ async fn main() -> anyhow::Result<()> {
                 run: Box::new(move || {
                     let ls = log_store.clone();
                     let kv = kv_store.clone();
+                    let cm = cfg_manager.clone();
                     Box::pin(async move {
                         let (days, _capacity, audit_days, daily_days) =
                             ls.requests.retention_full();
@@ -866,6 +868,17 @@ async fn main() -> anyhow::Result<()> {
                         // 折进 dailyagg 主档），`price:e2e-*` 是测试残留。清完即
                         // 静默（幂等：之后每轮 0 条）。
                         removed += legacy_kv_sweep(&kv);
+                        // 第五档：生成图片资产目录的容量淘汰（#48）。上限
+                        // 与日志 max_capacity 同口径（容量而非天数）；落盘
+                        // 开关默认关时目录不存在，本档空转、行为不变。
+                        let cfg = cm.get().await;
+                        let assets_dir = crate::config::expand_path(&cfg.server.data_dir)
+                            .join("generated_images");
+                        removed += crate::api::openai::sweep_generated_assets(
+                            &assets_dir,
+                            cfg.server.generated_images_max_bytes,
+                        )
+                        .removed;
                         removed
                     })
                 }),

@@ -756,6 +756,100 @@ pub(crate) async fn persist_generated_assets(state: &AppState, result: &mut Valu
     }
 }
 
+/// 生成资产目录容量淘汰的结果（#48）：sweep 的日志记录与单测断言共用。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AssetSweepStats {
+    /// 参与统计的资产文件数（仅白名单形态的常规文件）。
+    pub scanned: u64,
+    /// 淘汰前目录字节总量。
+    pub bytes_before: u64,
+    /// 被淘汰（已删除）的文件数。
+    pub removed: u64,
+    /// 被淘汰的字节数。
+    pub removed_bytes: u64,
+    /// 淘汰后目录字节总量。
+    pub bytes_after: u64,
+}
+
+/// `{data_dir}/generated_images/` 的容量淘汰（#48）。
+///
+/// 口径与日志保留的 `max_capacity` 一致——都是「总量上限」而非按天：单张
+/// 资产可达 32MiB，目录随每次生成单调增长，容量才是真正的风险面。超限时
+/// 按 mtime 从最旧开始删，直到回落到 `max_bytes` 以内（LRU）。
+///
+/// 边界（与 #36 的防穿越口径对齐，本函数只读+删、不放开读取）：
+/// - 只认 `is_safe_asset_name` 白名单形态（`img-<uuid>.<ext>`）的**常规
+///   文件**；子目录、符号链接、非白名单文件既不统计也不删除（回滚候选
+///   `.bak`、运维临时文件等同处一地时不受影响）。
+/// - 落盘是一次性 `fs::write`（无「写入中」的中间态文件），最新生成的
+///   资产 mtime 最大、天然排在淘汰序列末尾，进行中的生成不会被误删。
+/// - `max_bytes == 0` 视为不限；目录不存在（从未落盘/开关关闭）直接空转。
+pub(crate) fn sweep_generated_assets(dir: &std::path::Path, max_bytes: u64) -> AssetSweepStats {
+    let mut stats = AssetSweepStats::default();
+    if max_bytes == 0 {
+        return stats;
+    }
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return stats;
+    };
+    // (mtime, 名字, 大小, 路径)：名字做 tie-break，同 mtime 下顺序确定。
+    let mut files: Vec<(std::time::SystemTime, String, u64, std::path::PathBuf)> = Vec::new();
+    for entry in read_dir.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_safe_asset_name(&name) {
+            continue;
+        }
+        // symlink_metadata 不跟随链接：目录/符号链接一律不参与
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if meta.is_symlink() || !meta.is_file() {
+            continue;
+        }
+        files.push((
+            meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+            name,
+            meta.len(),
+            entry.path(),
+        ));
+    }
+    stats.scanned = files.len() as u64;
+    stats.bytes_before = files.iter().map(|f| f.2).sum();
+    if stats.bytes_before <= max_bytes {
+        stats.bytes_after = stats.bytes_before;
+        return stats;
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let mut total = stats.bytes_before;
+    for (_, name, len, path) in files {
+        if total <= max_bytes {
+            break;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                total = total.saturating_sub(len);
+                stats.removed += 1;
+                stats.removed_bytes += len;
+            }
+            // 删失败（被占用/已消失）不计数、继续下一个，下轮再兜。
+            Err(e) => tracing::warn!("generated_images 淘汰失败 {name}: {e}"),
+        }
+    }
+    stats.bytes_after = total;
+    if stats.removed > 0 {
+        tracing::info!(
+            "generated_images 容量淘汰: 删除 {} 个文件/{} 字节, 目录 {} → {} 字节 (上限 {} 字节, 扫描 {} 个)",
+            stats.removed,
+            stats.removed_bytes,
+            stats.bytes_before,
+            stats.bytes_after,
+            max_bytes,
+            stats.scanned
+        );
+    }
+    stats
+}
+
 /// GET /v1/images/assets/:name - 下载落盘的生成资产（#36）。
 ///
 /// 鉴权：有效 API Key（不校验模型白名单，对齐 /v1/models 的 listing 鉴权）。
@@ -884,6 +978,131 @@ mod asset_guard_tests {
             assert!(!is_downloadable_asset(&meta));
             let _ = std::fs::remove_dir_all(&outside);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// 生成资产目录容量淘汰的单测（#48）。
+#[cfg(test)]
+mod asset_retention_tests {
+    use super::{sweep_generated_assets, AssetSweepStats};
+
+    fn temp_assets_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("aigx-assets-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn asset_name() -> String {
+        format!("img-{}.png", uuid::Uuid::new_v4())
+    }
+
+    /// 写一个资产并把 mtime 设为 `age_secs` 秒前——淘汰顺序用显式 mtime
+    /// 钉住，不依赖文件系统的 mtime 精度（同秒创建也能排出先后）。
+    fn write_asset(dir: &std::path::Path, name: &str, size: usize, age_secs: u64) {
+        let path = dir.join(name);
+        std::fs::write(&path, vec![0u8; size]).expect("write asset");
+        let mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+        let f = std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open asset");
+        f.set_times(std::fs::FileTimes::new().set_modified(mtime))
+            .expect("set asset mtime");
+    }
+
+    /// 超限时按 mtime 从最旧淘汰，直到回落到上限内。
+    #[test]
+    fn sweep_evicts_oldest_until_under_cap() {
+        let dir = temp_assets_dir();
+        let names: Vec<String> = (0..5).map(|_| asset_name()).collect();
+        // names[0] 最旧（1000s 前）… names[4] 最新（960s 前），各 4 字节
+        for (i, n) in names.iter().enumerate() {
+            write_asset(&dir, n, 4, 1000 - i as u64 * 10);
+        }
+
+        let stats = sweep_generated_assets(&dir, 8);
+        assert_eq!(stats.scanned, 5);
+        assert_eq!(stats.bytes_before, 20);
+        assert_eq!(stats.removed, 3);
+        assert_eq!(stats.removed_bytes, 12);
+        assert_eq!(stats.bytes_after, 8);
+        // 最旧的 3 个被淘汰，最新的 2 个留下
+        for (i, n) in names.iter().enumerate() {
+            assert_eq!(
+                dir.join(n).exists(),
+                i >= 3,
+                "asset {i} 存在性与 LRU 预期不符"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 只统计/删除白名单形态的常规文件；最新资产（可能正被客户端下载）
+    /// 排在淘汰序列末尾而存活；非白名单文件、子目录、符号链接一律不动。
+    #[test]
+    fn sweep_only_touches_whitelisted_regular_files() {
+        let dir = temp_assets_dir();
+        let (old, mid, newest) = (asset_name(), asset_name(), asset_name());
+        write_asset(&dir, &old, 4, 900);
+        write_asset(&dir, &mid, 4, 800);
+        write_asset(&dir, &newest, 4, 100);
+        // 回滚候选形态的大文件（非白名单）：不统计也不删
+        let bak = dir.join("aigx.bak");
+        std::fs::write(&bak, vec![0u8; 4096]).expect("write bak");
+        // 子目录：不统计也不删
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        // 符号链接（名字合法但指向目录外）：不统计也不删
+        #[cfg(unix)]
+        let link = dir.join(asset_name());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&bak, &link).expect("create symlink");
+
+        let stats = sweep_generated_assets(&dir, 4);
+        assert_eq!(stats.scanned, 3, "目录/链接/非白名单文件不得计入");
+        assert_eq!(stats.bytes_before, 12);
+        assert_eq!(stats.removed, 2);
+        assert_eq!(stats.bytes_after, 4);
+        assert!(!dir.join(&old).exists());
+        assert!(!dir.join(&mid).exists());
+        assert!(dir.join(&newest).exists(), "最新资产须保留（LRU 末尾）");
+        assert!(bak.exists(), "非白名单文件不得被删");
+        assert!(nested.is_dir(), "子目录不得被删");
+        #[cfg(unix)]
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("stat link")
+                .is_symlink(),
+            "符号链接不得被删"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 上限未配（0 = 不限）/ 未超限 / 目录不存在：都不删东西。
+    #[test]
+    fn sweep_is_noop_when_unbounded_under_cap_or_dir_missing() {
+        let dir = temp_assets_dir();
+        let n = asset_name();
+        write_asset(&dir, &n, 100, 10);
+
+        let stats = sweep_generated_assets(&dir, 0);
+        assert_eq!(stats, AssetSweepStats::default());
+        assert!(dir.join(&n).exists());
+
+        let stats = sweep_generated_assets(&dir, 1000);
+        assert_eq!(stats.scanned, 1);
+        assert_eq!(stats.bytes_before, 100);
+        assert_eq!(stats.removed, 0);
+        assert_eq!(stats.bytes_after, 100);
+        assert!(dir.join(&n).exists());
+
+        let missing = std::env::temp_dir().join(format!("aigx-assets-{}", uuid::Uuid::new_v4()));
+        assert_eq!(
+            sweep_generated_assets(&missing, 1024),
+            AssetSweepStats::default()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
