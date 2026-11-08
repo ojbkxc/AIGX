@@ -169,6 +169,23 @@ pub struct AccountSessionStore {
 /// 内联写法触发 `clippy::type_complexity`。
 pub type LimiterGate<'a> = &'a dyn Fn(&AccountSession) -> Option<&'static str>;
 
+/// 选号阶段的可选过滤器（#40 §1）。
+///
+/// 三者都是**请求级**、缺省即「不启用」的过滤器，收成一个参数：选号入口的
+/// 参数表已到 clippy 上限（`too_many_arguments`），而 #40 后续步骤（参与名单 /
+/// 排序规则）还要继续往下传请求级规则，逐次加形参不是可持续形态。
+///
+/// 全部缺省（[`Default`]）时选号判定路径与改造前**逐字节等价**。
+#[derive(Default)]
+pub struct AcquireFilters<'a> {
+    /// 条件组限制裁决门（Phase1-A2）。
+    pub gate: Option<LimiterGate<'a>>,
+    /// 逐账号跳过明细捕获（Phase1-B/#26；仅 `route_replay` 开启时非 None）。
+    pub detail: Option<&'a mut crate::log::AccountSkipCapture>,
+    /// 能力需求（#40 §1；`EMPTY` = 不做能力过滤）。
+    pub needs: CapabilityMask,
+}
+
 impl AccountSessionStore {
     /// 打开账号池（内部自建出口 Client 池）。
     pub fn new(store: Arc<FileStore>) -> Self {
@@ -561,39 +578,34 @@ impl AccountSessionStore {
     where
         F: Fn(&str) -> bool,
     {
-        self.acquire_with_reasons_detail(
-            channel_id,
-            model,
-            alias,
-            allow,
-            None,
-            None,
-            CapabilityMask::EMPTY,
-        )
+        self.acquire_with_reasons_detail(channel_id, model, alias, allow, AcquireFilters::default())
     }
 
     /// [`Self::acquire_with_reasons`] 的回放+门控+能力过滤版（Phase1-B/A2、#40 §1）：
-    /// `detail` 非 None 时逐账号记录跳过原因（`route_replay` 开关驱动，
-    /// 请求本地缓冲，仅此一个消费者）；`gate` 非 None 时逐账号做**条件组
-    /// 限制裁决**（返回 Some(原因码) = 跳过该账号，disable/skip 均记
-    /// `limited` 档）；`needs` 非空时按账号目录能力位做**精确过滤**
-    /// （上游名已定，见 `catalog::AccountCapabilityIndex`）。
+    /// 可选过滤器收在 [`AcquireFilters`] 里（`detail` 非 None 逐账号记录跳过
+    /// 原因；`gate` 非 None 逐账号做条件组限制裁决；`needs` 非空按账号目录
+    /// 能力位精确过滤，此刻上游名已定）。
     ///
-    /// 三者皆缺省（`None` / `CapabilityMask::EMPTY`）时判定路径与原方法
-    /// 完全一致，零额外分配 —— 这是「默认关 = 与今天逐字节等价」的形式。
+    /// 三者皆缺省（`AcquireFilters::default()`）时判定路径与原方法完全一致，
+    /// 零额外分配 —— 这是「默认关 = 与今天逐字节等价」的形式。
     pub fn acquire_with_reasons_detail<F>(
         &self,
         channel_id: &str,
         model: &str,
         alias: Option<&str>,
         allow: F,
-        gate: Option<LimiterGate<'_>>,
-        mut detail: Option<&mut crate::log::AccountSkipCapture>,
-        needs: CapabilityMask,
+        filters: AcquireFilters<'_>,
     ) -> (Option<AccountLease>, SkipReasons)
     where
         F: Fn(&str) -> bool,
     {
+        // 解构后 `detail` 需要可变绑定（逐账号 push），故单独 rebind 成 mut。
+        let AcquireFilters {
+            gate,
+            detail,
+            needs,
+        } = filters;
+        let mut detail = detail;
         let now = chrono::Utc::now().timestamp();
         let mut sessions = self.inner.sessions.write();
         // 能力索引只在有需求时上锁（空需求 = 老路径，连锁都不碰）。
@@ -1200,9 +1212,10 @@ mod tests {
                 "m",
                 None,
                 |_| false,
-                None,
-                Some(&mut capture),
-                CapabilityMask::EMPTY,
+                AcquireFilters {
+                    detail: Some(&mut capture),
+                    ..Default::default()
+                },
             );
             assert!(lease.is_none());
             assert_eq!(reasons.disabled, 1);
@@ -1232,9 +1245,7 @@ mod tests {
                 "m",
                 None,
                 |_| false,
-                None,
-                None,
-                CapabilityMask::EMPTY,
+                AcquireFilters::default(),
             );
             assert!(lease.is_none());
             assert_eq!(reasons.provider_off, 2);
@@ -1258,9 +1269,10 @@ mod tests {
                 "m",
                 None,
                 |_| true,
-                None,
-                Some(&mut capture),
-                CapabilityMask::EMPTY,
+                AcquireFilters {
+                    detail: Some(&mut capture),
+                    ..Default::default()
+                },
             );
             assert!(lease.is_none());
             assert_eq!(reasons.disabled, 70);
@@ -1368,9 +1380,7 @@ mod tests {
                 "m",
                 None,
                 |_| true,
-                None,
-                None,
-                CapabilityMask::EMPTY,
+                AcquireFilters::default(),
             );
             assert!(lease.is_some(), "无需求时不得因能力位裁人");
             assert_eq!(reasons.capability, 0);
@@ -1396,15 +1406,22 @@ mod tests {
                 "m",
                 None,
                 |_| true,
-                None,
-                Some(&mut capture),
-                CapabilityMask::VISION,
+                AcquireFilters {
+                    detail: Some(&mut capture),
+                    needs: CapabilityMask::VISION,
+                    ..Default::default()
+                },
             );
             let lease = lease.expect("无证据的账号必须仍可被选中");
             assert_eq!(lease.id(), b.id.as_str(), "被裁的是有证据的 a");
             assert_eq!(reasons.capability, 1);
+            let rows: Vec<(String, String)> = capture
+                .rows
+                .iter()
+                .map(|r| (r.account_name.clone(), r.reason.clone()))
+                .collect();
             assert_eq!(
-                capture.rows,
+                rows,
                 vec![("a".to_string(), "capability_mismatch".to_string())]
             );
         });
@@ -1426,9 +1443,10 @@ mod tests {
                 "m",
                 None,
                 |_| true,
-                None,
-                None,
-                CapabilityMask::TOOL.union(CapabilityMask::VIDEO),
+                AcquireFilters {
+                    needs: CapabilityMask::TOOL.union(CapabilityMask::VIDEO),
+                    ..Default::default()
+                },
             );
             assert!(lease.is_some());
             assert_eq!(reasons.capability, 0);
@@ -1438,9 +1456,10 @@ mod tests {
                 "m",
                 None,
                 |_| true,
-                None,
-                None,
-                CapabilityMask::VISION,
+                AcquireFilters {
+                    needs: CapabilityMask::VISION,
+                    ..Default::default()
+                },
             );
             assert!(lease.is_none());
             assert_eq!(reasons.capability, 1);

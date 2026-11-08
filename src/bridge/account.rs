@@ -183,9 +183,11 @@ impl AccountBridge {
                 model,
                 alias,
                 |provider| key_allowed(provider) && !plugin_off(provider),
-                Some(&session_gate),
-                detail,
-                self.capabilities,
+                crate::account_session::store::AcquireFilters {
+                    gate: Some(&session_gate),
+                    detail,
+                    needs: self.capabilities,
+                },
             ),
             Some(rules) => self.sessions.acquire_with_reasons_detail(
                 &self.channel_id,
@@ -199,9 +201,11 @@ impl AccountBridge {
                             .map(|a| !rules.is_disabled(provider, a))
                             .unwrap_or(true)
                 },
-                Some(&session_gate),
-                detail,
-                self.capabilities,
+                crate::account_session::store::AcquireFilters {
+                    gate: Some(&session_gate),
+                    detail,
+                    needs: self.capabilities,
+                },
             ),
         };
         // #26：把本次选号的捕获并进请求级共享缓冲（同渠道多次尝试共用一个
