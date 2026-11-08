@@ -1,9 +1,37 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, EmptyState, SkeletonTable, Pagination } from '../components/ui';
+import { Button, Card, EmptyState, SkeletonTable } from '../components/ui';
+import { Tooltip } from '../components/ui';
+import { Columns3 } from 'lucide-react';
+import {
+  applyTableColumns,
+  readTableColumns,
+  resetTableColumns,
+  writeTableColumns,
+  type TableColumnDef,
+  type TableColumnItem,
+  type TableColumnState,
+} from '../lib/tableColumns';
+import TableColumnSettings from '../components/ui/TableColumnSettings';
+import { useColumnResize } from '../components/ui/useColumnResize';
+import { TablePaginationFooter, usePageSize, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
+
+const LS_PSZ = 'aigx-tbl-pagesize.redemptions';
+const LS_TCOLS = 'aigx-tbl-cols.redemptions';
+/** 兑换码表列声明（code/操作锁定） */
+const RED_COL_DEFS: TableColumnDef[] = [
+  { key: 'code', label: '兑换码', width: 260, locked: true },
+  { key: 'name', label: '名称', width: 140 },
+  { key: 'quota', label: '面额', align: 'right', width: 110 },
+  { key: 'status', label: '状态', align: 'center', width: 90 },
+  { key: 'used_by', label: '使用者', width: 140 },
+  { key: 'created', label: '创建时间', width: 160 },
+  { key: 'expires', label: '过期时间', width: 160 },
+  { key: 'act', label: '操作', width: 100, locked: true },
+];
 import { fmtQuota } from '../lib/utils';
 
 interface GenForm {
@@ -29,6 +57,41 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
   const [items, setItems] = useState<RedemptionItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize(LS_PSZ, SERVER_PAGE_SIZES, 20);
+  const size = typeof pageSize === 'number' ? pageSize : 20;
+  const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, RED_COL_DEFS));
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
+  const commitCols = useCallback((next: TableColumnItem[], persist: boolean) => {
+    setColState((prev) => {
+      const nextState: TableColumnState = { ...prev, items: next };
+      if (persist) writeTableColumns(LS_TCOLS, nextState);
+      return nextState;
+    });
+  }, []);
+  const resetCols = useCallback(() => setColState(resetTableColumns(LS_TCOLS, RED_COL_DEFS)), []);
+  const appliedCols = useMemo(() => applyTableColumns(colState, RED_COL_DEFS), [colState]);
+  const visibleKeySet = useMemo(() => new Set(appliedCols.map((c) => c.key)), [appliedCols]);
+  const colResize = useColumnResize({
+    widths: Object.fromEntries(colState.items.filter((i) => i.width != null).map((i) => [i.key, i.width as number])),
+    setWidths: (next) => {
+      commitCols(
+        colState.items.map((i) => {
+          const w = next[i.key];
+          const defW = RED_COL_DEFS.find((d) => d.key === i.key)?.width;
+          if (w == null || (defW != null && w === defW)) {
+            const { width: _drop, ...rest } = i;
+            return rest;
+          }
+          return { ...i, width: w };
+        }),
+        true,
+      );
+    },
+    defaultWidths: Object.fromEntries(RED_COL_DEFS.map((d) => [d.key, d.width])),
+    lockedKeys: new Set(RED_COL_DEFS.filter((d) => d.locked).map((d) => d.key)),
+    onCommit: () => { /* 落盘已在 setWidths 内做 */ },
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const addToast = useToast();
@@ -54,7 +117,7 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
     setLoading(true);
     setError('');
     try {
-      const res = await api.listRedemptions({ page: String(page), size: '20' });
+      const res = await api.listRedemptions({ page: String(page), size: String(size) });
       setItems(Array.isArray(res?.data) ? (res.data as unknown as RedemptionItem[]) : []);
       setTotal(res?.total || 0);
     } catch (err) {
@@ -168,7 +231,7 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
     );
   };
 
-  const totalPages = Math.ceil(total / 20);
+  const totalPages = Math.ceil(total / size);
 
   return (
     <div>
@@ -224,7 +287,34 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
         </Card>
       )}
 
-      <Card title={`${t('兑换码列表')} (${total})`}>
+      <Card
+        title={`${t('兑换码列表')} (${total})`}
+        actions={
+          <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
+            <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
+              <button
+                type="button"
+                className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                onClick={() => setColPanelOpen((v) => !v)}
+                aria-label={t('列设置')}
+              >
+                <Columns3 size={14} />
+              </button>
+            </Tooltip>
+            {colPanelOpen && (
+              <TableColumnSettings
+                open
+                onClose={() => setColPanelOpen(false)}
+                defs={RED_COL_DEFS}
+                items={colState.items}
+                onChange={commitCols}
+                onReset={resetCols}
+                anchorRef={colPanelRef}
+              />
+            )}
+          </div>
+        }
+      >
         {loading ? (
           <SkeletonTable columns={8} rows={6} />
         ) : items.length === 0 ? (
@@ -232,21 +322,37 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
         ) : (
           <div className="table-wrapper">
             <table>
+              <colgroup>
+                {appliedCols.map((c) => (
+                  <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                ))}
+              </colgroup>
               <thead>
                 <tr>
-                  <th>{t('兑换码')}</th>
-                  <th>{t('名称')}</th>
-                  <th>{t('面额')}</th>
-                  <th>{t('状态')}</th>
-                  <th>{t('使用者')}</th>
-                  <th>{t('创建时间')}</th>
-                  <th>{t('过期时间')}</th>
-                  <th>{t('操作')}</th>
+                  {appliedCols.map((c, idx) => {
+                    const grip = colResize.gripProps(c.key, {
+                      isLast: idx === appliedCols.length - 1,
+                      locked: c.locked,
+                      defaultWidth: c.width,
+                    });
+                    return (
+                      <th
+                        key={c.key}
+                        style={c.width != null ? { width: `${c.width}px` } : undefined}
+                      >
+                        {t(RED_COL_DEFS.find((d) => d.key === c.key)?.label ?? c.key)}
+                        {c.key !== 'code' && c.key !== 'act' && (
+                          <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                        )}
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
                 {items.map((r) => (
                   <tr key={r.id}>
+                    {visibleKeySet.has('code') && (
                     <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <code className="key-value" style={{ maxWidth: 200 }}>{r.code}</code>
@@ -255,17 +361,32 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
                         )}
                       </div>
                     </td>
+                    )}
+                    {visibleKeySet.has('name') && (
                     <td>{r.name || '—'}</td>
+                    )}
+                    {visibleKeySet.has('quota') && (
                     <td>{fmtQuota(r.quota)}</td>
+                    )}
+                    {visibleKeySet.has('status') && (
                     <td>{statusBadge(r)}</td>
+                    )}
+                    {visibleKeySet.has('used_by') && (
                     <td>{r.used_by || '—'}</td>
+                    )}
+                    {visibleKeySet.has('created') && (
                     <td>{r.created_at ? new Date(r.created_at > 1e12 ? r.created_at : r.created_at * 1000).toLocaleString() : '—'}</td>
+                    )}
+                    {visibleKeySet.has('expires') && (
                     <td>{fmtTime(r.expires_at)}</td>
+                    )}
+                    {visibleKeySet.has('act') && (
                     <td>
                       {r.status === 1 && (
                         <button className="btn btn-outline btn-sm" style={{ color: 'rgb(239,68,68)' }} onClick={() => handleDelete(r.id)}>{t('删除')}</button>
                       )}
                     </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -273,10 +394,14 @@ export default function Redemptions({ embedded = false }: { embedded?: boolean }
           </div>
         )}
 
-        <Pagination
+        <TablePaginationFooter
+          total={total}
           page={page}
           totalPages={Math.max(1, totalPages)}
-          onChange={setPage}
+          size={pageSize}
+          sizes={SERVER_PAGE_SIZES}
+          onSizeChange={(n) => { setPageSize(n); setPage(1); }}
+          onPageChange={setPage}
         />
 
         <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />

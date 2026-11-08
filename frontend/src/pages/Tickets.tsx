@@ -1,10 +1,39 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { MessageSquarePlus, ChevronLeft, Send, X } from 'lucide-react';
+import { MessageSquarePlus, ChevronLeft, Send, X, Columns3 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { isAdmin } from '../lib/utils';
-import { Button, Card, Input, Select, Textarea, EmptyState, SkeletonTable, Pagination, Badge } from '../components/ui';
+import { Button, Card, Input, Select, Textarea, EmptyState, SkeletonTable, Badge } from '../components/ui';
+import { Tooltip } from '../components/ui';
+import {
+  applyTableColumns,
+  readTableColumns,
+  resetTableColumns,
+  writeTableColumns,
+  type TableColumnDef,
+  type TableColumnItem,
+  type TableColumnState,
+} from '../lib/tableColumns';
+import TableColumnSettings from '../components/ui/TableColumnSettings';
+import { useColumnResize } from '../components/ui/useColumnResize';
+import { TablePaginationFooter, usePageSize, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
+
+const LS_PSZ = 'aigx-tbl-pagesize.tickets';
+const LS_TCOLS = 'aigx-tbl-cols.tickets';
+/** 工单表列声明（submitter 仅 admin；主题/操作锁定） */
+function ticketsColDefs(admin: boolean): TableColumnDef[] {
+  return [
+    ...(admin ? [{ key: 'submitter', label: '提交人', width: 160 }] : []),
+    { key: 'subject', label: '主题', width: 240, locked: true },
+    { key: 'priority', label: '优先级', align: 'center', width: 90 },
+    { key: 'status', label: '状态', align: 'center', width: 90 },
+    { key: 'reply', label: '回复状态', align: 'center', width: 100 },
+    { key: 'created', label: '提交时间', width: 160 },
+    { key: 'updated', label: '最后更新', width: 160 },
+    { key: 'act', label: '操作', width: 100, locked: true },
+  ];
+}
 import type { TicketItem, TicketMessageItem } from '../types';
 import './Tickets.css';
 
@@ -64,7 +93,47 @@ export default function Tickets(): JSX.Element {
   const [replyFilter, setReplyFilter] = useState<string>('');
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(1);
-  const size = 20;
+  const [pageSize, setPageSize] = usePageSize(LS_PSZ, SERVER_PAGE_SIZES, 20);
+  const size = typeof pageSize === 'number' ? pageSize : 20;
+  // 列设置已迁公共层（tableColumns v2；admin 形态进 defs）
+  const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, ticketsColDefs(admin)));
+  useEffect(() => {
+    // 登录态变化后 defs 形状变了：以新 defs 重读走演进
+    setColState(readTableColumns(LS_TCOLS, ticketsColDefs(admin)));
+  }, [admin]);
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
+  const activeDefs = useMemo(() => ticketsColDefs(admin), [admin]);
+  const commitCols = useCallback((next: TableColumnItem[], persist: boolean) => {
+    setColState((prev) => {
+      const nextState: TableColumnState = { ...prev, items: next };
+      if (persist) writeTableColumns(LS_TCOLS, nextState);
+      return nextState;
+    });
+  }, []);
+  const resetCols = useCallback(() => setColState(resetTableColumns(LS_TCOLS, activeDefs)), [activeDefs]);
+  const appliedCols = useMemo(() => applyTableColumns(colState, activeDefs), [colState, activeDefs]);
+  const visibleKeySet = useMemo(() => new Set(appliedCols.map((c) => c.key)), [appliedCols]);
+  const colResize = useColumnResize({
+    widths: Object.fromEntries(colState.items.filter((i) => i.width != null).map((i) => [i.key, i.width as number])),
+    setWidths: (next) => {
+      commitCols(
+        colState.items.map((i) => {
+          const w = next[i.key];
+          const defW = activeDefs.find((d) => d.key === i.key)?.width;
+          if (w == null || (defW != null && w === defW)) {
+            const { width: _drop, ...rest } = i;
+            return rest;
+          }
+          return { ...i, width: w };
+        }),
+        true,
+      );
+    },
+    defaultWidths: Object.fromEntries(activeDefs.map((d) => [d.key, d.width])),
+    lockedKeys: new Set(activeDefs.filter((d) => d.locked).map((d) => d.key)),
+    onCommit: () => { /* 落盘已在 setWidths 内做 */ },
+  });
   const [total, setTotal] = useState(0);
 
   const loadList = async () => {
@@ -324,6 +393,30 @@ export default function Tickets(): JSX.Element {
         title={`${admin ? t('全部工单') : t('我的工单')} (${total})`}
         actions={
           admin ? (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
+              <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
+                <button
+                  type="button"
+                  className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                  onClick={() => setColPanelOpen((v) => !v)}
+                  aria-label={t('列设置')}
+                >
+                  <Columns3 size={14} />
+                </button>
+              </Tooltip>
+              {colPanelOpen && (
+                <TableColumnSettings
+                  open
+                  onClose={() => setColPanelOpen(false)}
+                  defs={activeDefs}
+                  items={colState.items}
+                  onChange={commitCols}
+                  onReset={resetCols}
+                  anchorRef={colPanelRef}
+                />
+              )}
+            </div>
             <div className="tk-filters">
               <Input
                 placeholder={t('搜索工单主题 / 提交人…')}
@@ -350,6 +443,7 @@ export default function Tickets(): JSX.Element {
                 <option value="1">{t('待用户回复')}</option>
               </Select>
             </div>
+            </div>
           ) : undefined
         }
       >
@@ -360,22 +454,39 @@ export default function Tickets(): JSX.Element {
         ) : (
           <div className="table-wrapper">
             <table>
+              <colgroup>
+                {appliedCols.map((c) => (
+                  <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                ))}
+              </colgroup>
               <thead>
                 <tr>
-                  {admin && <th>{t('提交人')}</th>}
-                  <th>{t('主题')}</th>
-                  <th>{t('优先级')}</th>
-                  <th>{t('状态')}</th>
-                  <th>{t('回复状态')}</th>
-                  <th>{t('提交时间')}</th>
-                  <th>{t('最后更新')}</th>
-                  <th>{t('操作')}</th>
+                  {appliedCols.map((c, idx) => {
+                    const grip = colResize.gripProps(c.key, {
+                      isLast: idx === appliedCols.length - 1,
+                      locked: c.locked,
+                      defaultWidth: c.width,
+                    });
+                    return (
+                      <th
+                        key={c.key}
+                        style={c.width != null ? { width: `${c.width}px` } : undefined}
+                      >
+                        {t(activeDefs.find((d) => d.key === c.key)?.label ?? c.key)}
+                        {c.key !== 'subject' && c.key !== 'act' && (
+                          <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                        )}
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
                 {visibleTickets.map((tk) => (
                   <tr key={tk.id}>
-                    {admin && <td>{tk.email || tk.user_id}</td>}
+                    {admin && visibleKeySet.has('submitter') && (
+                    <td>{tk.email || tk.user_id}</td>
+                    )}
                     <td><strong>{tk.subject}</strong></td>
                     <td><Badge tone={levelTone(tk.level)}>{levelText(t, tk.level)}</Badge></td>
                     <td>{statusBadge(t, tk.status)}</td>
@@ -395,10 +506,14 @@ export default function Tickets(): JSX.Element {
         )}
 
         {admin && !loading && !q && (
-          <Pagination
+          <TablePaginationFooter
+            total={total}
             page={page}
             totalPages={Math.max(1, Math.ceil(total / size))}
-            onChange={setPage}
+            size={pageSize}
+            sizes={SERVER_PAGE_SIZES}
+            onSizeChange={(n) => { setPageSize(n); setPage(1); }}
+            onPageChange={setPage}
           />
         )}
       </Card>
