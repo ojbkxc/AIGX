@@ -803,14 +803,17 @@ mod tests {
     fn user_tool_visible_lets_disabled_win_over_allowlist() {
         use crate::agent::user_tool_policy::{GroupPolicy, UserToolPolicy};
         let t = crate::agent::registry::find_tool("aigx_query_usage").expect("aigx_query_usage");
-        let mut policy = UserToolPolicy::default();
-        policy.enabled = true;
-        policy.groups.insert(
-            "vip".to_string(),
-            GroupPolicy {
-                allowlist: vec!["*".to_string()],
-            },
-        );
+        let policy = UserToolPolicy {
+            enabled: true,
+            groups: [(
+                "vip".to_string(),
+                GroupPolicy {
+                    allowlist: vec!["*".to_string()],
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
 
         assert!(
             user_tool_visible(t, &policy, "vip", &[]),
