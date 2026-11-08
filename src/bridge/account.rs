@@ -48,6 +48,12 @@ pub struct AccountBridge {
     /// 由调用方在记录日志时一次性 drain 进 `RequestLog.account_skips`。
     /// 每组行数有界 + 全组总字节兜底（log::cap_account_skip_groups）。
     account_capture: Option<Arc<std::sync::Mutex<Vec<crate::log::AccountSkipGroup>>>>,
+    /// 本次请求的能力需求（#40 §1：图 / 工具 / 视频）。
+    ///
+    /// `CapabilityMask::EMPTY`（默认）= 不做能力过滤，行为与改造前逐字节一致。
+    /// 由调用方（`plan_route` 落地后从请求体推需求）经 [`Self::with_capabilities`]
+    /// 注入；选号层据此按账号目录的能力位做精确过滤。
+    capabilities: crate::model::capability::CapabilityMask,
 }
 
 /// 同渠道账号轮换的总时间预算（与共享 Client 的单请求超时对齐）。
@@ -83,7 +89,16 @@ impl AccountBridge {
             plugin_disabled: None,
             allowed_providers: None,
             account_capture: None,
+            capabilities: crate::model::capability::CapabilityMask::EMPTY,
         }
+    }
+
+    /// 接入本次请求的能力需求（#40 §1）。
+    ///
+    /// 不接入（或传 `EMPTY`）时选号路径不碰能力索引 —— 默认关。
+    pub fn with_capabilities(mut self, needs: crate::model::capability::CapabilityMask) -> Self {
+        self.capabilities = needs;
+        self
     }
 
     /// 接入统一模型管理的启停规则。
@@ -170,6 +185,7 @@ impl AccountBridge {
                 |provider| key_allowed(provider) && !plugin_off(provider),
                 Some(&session_gate),
                 detail,
+                self.capabilities,
             ),
             Some(rules) => self.sessions.acquire_with_reasons_detail(
                 &self.channel_id,
@@ -185,6 +201,7 @@ impl AccountBridge {
                 },
                 Some(&session_gate),
                 detail,
+                self.capabilities,
             ),
         };
         // #26：把本次选号的捕获并进请求级共享缓冲（同渠道多次尝试共用一个

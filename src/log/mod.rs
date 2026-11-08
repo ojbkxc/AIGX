@@ -423,8 +423,8 @@ pub struct AccountSkip {
     pub account_id: String,
     pub account_name: String,
     /// 原因码：`disabled` / `provider_not_allowed` / `expired` / `model_mismatch` /
-    /// `cooling` / `balance_low` / `concurrency` / `limiter_skip` / `limiter_disable`
-    ///（与 SkipReasons 档位一一对应）
+    /// `capability_mismatch` / `cooling` / `balance_low` / `concurrency` /
+    /// `limiter_skip` / `limiter_disable`（与 SkipReasons 档位一一对应）
     pub reason: String,
 }
 

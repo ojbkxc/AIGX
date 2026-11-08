@@ -510,6 +510,15 @@ pub struct ChannelStore {
     scheduler_config_cache: parking_lot::RwLock<scheduler::SchedulerPolicyConfig>,
 }
 
+/// 渠道级候选粗筛闭包（#40 路由多规则 §1）：返回 `false` 的渠道在**候选构造
+/// 阶段**（priority/weight 分组之前）就被裁掉。
+///
+/// 用 `dyn Fn` 而非泛型参数：调用点只有一两处，不必给整族 `select_for_model*`
+/// 变体都加类型参数（对照 `account_session::store::LimiterGate`）。
+/// 闭包在渠道循环内求值，**不得分配**（典型实现
+/// `AccountSessionStore::channel_may_serve` 只读两把锁 + 掩码比较）。
+pub type ChannelGate<'a> = &'a dyn Fn(&Channel) -> bool;
+
 impl ChannelStore {
     pub fn new(store: Arc<FileStore>) -> Self {
         let s = Self {
@@ -679,6 +688,20 @@ impl ChannelStore {
     ///
     /// 批次3增强：过滤阶段额外跳过 AIMD 冷却中的渠道（`aimd_allows`）。
     pub fn select_for_model(&self, model: &str) -> Vec<Channel> {
+        self.select_for_model_filtered(model, None)
+    }
+
+    /// [`Self::select_for_model`] 的**带能力粗筛**版本（#40 路由多规则 §1）。
+    ///
+    /// `coarse` 与既有过滤条件（启用 / 模型声明 / 冷却 / 断路器 / AIMD）同一
+    /// 位置求值，即「候选构造阶段」—— 被裁的渠道不进后续 priority/weight 分组，
+    /// 也不进 failover 循环。传 `None` 时与今天逐字节等价（这是默认形态：
+    /// `RoutingPolicy.enabled=false` / 请求无能力需求时都不接粗筛）。
+    pub fn select_for_model_filtered(
+        &self,
+        model: &str,
+        coarse: Option<ChannelGate<'_>>,
+    ) -> Vec<Channel> {
         let mut candidates: Vec<Channel> = self
             .channels
             .read()
@@ -694,6 +717,7 @@ impl ChannelStore {
                     && !self.is_in_cooldown(&c.id)
                     && self.circuit_breaker.allow_request(&c.id)
                     && self.aimd_allows(&c.id)
+                    && coarse.is_none_or(|gate| gate(*c))
             })
             .cloned()
             .collect();
@@ -1143,7 +1167,18 @@ impl ChannelStore {
         model: &str,
         pricing_store: &crate::pricing::PricingStore,
     ) -> Vec<Channel> {
-        let candidates = self.select_for_model(model);
+        self.select_for_model_ranked_filtered(model, pricing_store, None)
+    }
+
+    /// [`Self::select_for_model_ranked`] 的带能力粗筛版本（#40 §1）：
+    /// 粗筛在候选构造阶段生效，其后才做多因子重排。
+    pub fn select_for_model_ranked_filtered(
+        &self,
+        model: &str,
+        pricing_store: &crate::pricing::PricingStore,
+        coarse: Option<ChannelGate<'_>>,
+    ) -> Vec<Channel> {
+        let candidates = self.select_for_model_filtered(model, coarse);
         if candidates.len() <= 1 {
             return candidates;
         }
@@ -1526,12 +1561,27 @@ impl ChannelStore {
         strategy: routing_policy::RouteStrategy,
         pricing_store: &crate::pricing::PricingStore,
     ) -> Vec<Channel> {
+        self.select_for_model_by_strategy_filtered(model, strategy, pricing_store, None)
+    }
+
+    /// [`Self::select_for_model_by_strategy`] 的带能力粗筛版本（#40 §1）。
+    ///
+    /// 三个策略分支都在**候选构造阶段**接同一个 `coarse`：被裁的渠道既
+    /// 不参与加权随机，也不参与轮询游标（轮换表按候选集算，候选集变化时
+    /// 只有平移没有漂移 —— 与 RoundRobin 分支的既有注释同口径）。
+    pub fn select_for_model_by_strategy_filtered(
+        &self,
+        model: &str,
+        strategy: routing_policy::RouteStrategy,
+        pricing_store: &crate::pricing::PricingStore,
+        coarse: Option<ChannelGate<'_>>,
+    ) -> Vec<Channel> {
         match strategy {
             routing_policy::RouteStrategy::Ranked => {
-                self.select_for_model_ranked(model, pricing_store)
+                self.select_for_model_ranked_filtered(model, pricing_store, coarse)
             }
             routing_policy::RouteStrategy::RoundRobin => {
-                let mut candidates = self.select_for_model(model);
+                let mut candidates = self.select_for_model_filtered(model, coarse);
                 if candidates.len() <= 1 {
                     return candidates;
                 }
@@ -1558,7 +1608,9 @@ impl ChannelStore {
                 }
                 candidates
             }
-            routing_policy::RouteStrategy::Weighted => self.select_for_model(model),
+            routing_policy::RouteStrategy::Weighted => {
+                self.select_for_model_filtered(model, coarse)
+            }
         }
     }
 }
@@ -1628,6 +1680,35 @@ mod tests {
             let picked = s.select_for_model("deepseek-chat");
             assert_eq!(picked.len(), 2);
             // priority 20 排前
+            assert_eq!(picked[0].id, "b");
+        });
+    }
+
+    /// #40 §1 粗筛：`coarse` 在候选构造阶段裁渠道；`None` 与既有选取逐字节等价。
+    #[test]
+    fn select_for_model_coarse_gate_trims_candidates() {
+        with_secret_dir("coarse-gate", || {
+            let s = store();
+            s.add(sample("a", 20, vec!["m"])).unwrap();
+            s.add(sample("b", 10, vec!["m"])).unwrap();
+            // 不接粗筛：两条都在（既有行为）
+            assert_eq!(s.select_for_model("m").len(), 2);
+            assert_eq!(s.select_for_model_filtered("m", None).len(), 2);
+            // 裁掉高优先级的 a：候选里只剩 b（粗筛发生在 priority 分组之前）
+            let gate = |c: &Channel| c.id != "a";
+            let picked = s.select_for_model_filtered("m", Some(&gate));
+            assert_eq!(picked.len(), 1);
+            assert_eq!(picked[0].id, "b");
+            // 策略分派路径接的是同一个粗筛
+            let picked = s.select_for_model_by_strategy_filtered(
+                "m",
+                routing_policy::RouteStrategy::Weighted,
+                &crate::pricing::PricingStore::new(std::sync::Arc::new(FileStore::new(
+                    TempDir::new().unwrap().path().to_path_buf(),
+                ))),
+                Some(&gate),
+            );
+            assert_eq!(picked.len(), 1);
             assert_eq!(picked[0].id, "b");
         });
     }

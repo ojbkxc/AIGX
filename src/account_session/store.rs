@@ -11,6 +11,7 @@
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use rand::Rng;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use super::rotate::{self, RotationPolicy};
 use crate::bridge::BridgeError;
 use crate::channel::circuit_breaker::FailureType;
 use crate::egress::EgressCache;
+use crate::model::capability::CapabilityMask;
 use crate::storage::FileStore;
 
 /// KV 键前缀（`acctses:{channel_id}:{account_id}`）。
@@ -83,6 +85,9 @@ pub struct SkipReasons {
     pub expired: usize,
     /// 模型不在账号白名单（models 为空 = 全支持，不计）
     pub model_mismatch: usize,
+    /// 模型能力位不满足请求需求（#40 §1：图/工具/视频）。**只计有证据的拒否**
+    /// —— 能力标签缺失（老账号目录快照）按放行处理，不计入本档。
+    pub capability: usize,
     /// 模型 / 账号级冷却中
     pub cooling: usize,
     /// 余额低于限制器阈值
@@ -112,6 +117,9 @@ impl SkipReasons {
         if self.model_mismatch > 0 {
             parts.push(format!("{} 个不在模型白名单", self.model_mismatch));
         }
+        if self.capability > 0 {
+            parts.push(format!("{} 个不支持请求能力", self.capability));
+        }
         if self.cooling > 0 {
             parts.push(format!("{} 个冷却中", self.cooling));
         }
@@ -135,6 +143,10 @@ impl SkipReasons {
 struct Inner {
     store: Arc<FileStore>,
     sessions: RwLock<Vec<AccountSession>>,
+    /// 账号目录能力索引（#40 §1）：启动时按账号构建，目录同步时增量刷新。
+    /// 选号热路径按模型名查能力位，**零 DB 读**（见 `catalog::AccountCapabilityIndex`）。
+    /// 备份/外部直写 KV 恢复后需重启才生效 —— 与 `ModelMetadataRegistry` 同口径。
+    capabilities: RwLock<HashMap<String, Arc<super::catalog::AccountCapabilityIndex>>>,
     egress: Arc<EgressCache>,
     policy: RwLock<RotationPolicy>,
     /// 换号重试间隔（毫秒，0 = 立即换号）；由「请求重试」设置实时驱动。
@@ -169,6 +181,7 @@ impl AccountSessionStore {
             inner: Arc::new(Inner {
                 store,
                 sessions: RwLock::new(Vec::new()),
+                capabilities: RwLock::new(HashMap::new()),
                 egress,
                 policy: RwLock::new(RotationPolicy::default()),
                 retry_interval_ms: AtomicU64::new(0),
@@ -204,8 +217,73 @@ impl AccountSessionStore {
             }
         }
         sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        // #40 §1：按账号构建能力索引（每账号一次 KV 读，仅发生在启动/重载）。
+        // 无目录缓存的账号不进表 —— 查询侧把「不在表里」当无证据放行。
+        let mut capabilities: HashMap<String, Arc<super::catalog::AccountCapabilityIndex>> =
+            HashMap::with_capacity(sessions.len());
+        for session in &sessions {
+            let key = super::catalog::cache_key(&session.provider, &session.id);
+            if let Ok(Some(snapshot)) = self
+                .inner
+                .store
+                .get::<super::catalog::CatalogSnapshot>(&key)
+            {
+                capabilities.insert(
+                    session.id.clone(),
+                    Arc::new(super::catalog::AccountCapabilityIndex::from_snapshot(
+                        &snapshot,
+                    )),
+                );
+            }
+        }
         *self.inner.sessions.write() = sessions;
+        *self.inner.capabilities.write() = capabilities;
         Ok(())
+    }
+
+    /// 刷新某账号的能力索引（#40 §1）。
+    ///
+    /// **唯一调用方**是 `catalog::save_cache`（目录缓存的唯一写入口），
+    /// 故不存在第二处需要失效的地方。
+    pub(crate) fn set_catalog_index(
+        &self,
+        account_id: &str,
+        index: Arc<super::catalog::AccountCapabilityIndex>,
+    ) {
+        self.inner
+            .capabilities
+            .write()
+            .insert(account_id.to_string(), index);
+    }
+
+    /// 渠道级能力粗筛（#40 §1 的第一级）。
+    ///
+    /// 返回 `false` = **有证据**表明该渠道下没有任何账号能满足 `required`
+    /// （调用方据此在候选构造阶段裁掉整条渠道）；返回 `true` = 可能有
+    /// （含「无证据」的放行，见 `AccountCapabilityIndex` 的三态口径）。
+    ///
+    /// 只读两把锁、零分配：闭包用在渠道候选循环里。
+    pub fn channel_may_serve(&self, channel_id: &str, required: CapabilityMask) -> bool {
+        if required.is_empty() {
+            return true;
+        }
+        // 锁序统一 sessions → capabilities（与 acquire 路径一致）
+        let sessions = self.inner.sessions.read();
+        let capabilities = self.inner.capabilities.read();
+        let mut evidence = false;
+        for session in sessions.iter().filter(|s| s.channel_id == channel_id) {
+            let Some(index) = capabilities.get(&session.id) else {
+                continue;
+            };
+            if !index.has_evidence() {
+                continue;
+            }
+            evidence = true;
+            if index.any().covers(required) {
+                return true;
+            }
+        }
+        !evidence
     }
 
     /// KV 键。
@@ -483,14 +561,26 @@ impl AccountSessionStore {
     where
         F: Fn(&str) -> bool,
     {
-        self.acquire_with_reasons_detail(channel_id, model, alias, allow, None, None)
+        self.acquire_with_reasons_detail(
+            channel_id,
+            model,
+            alias,
+            allow,
+            None,
+            None,
+            CapabilityMask::EMPTY,
+        )
     }
 
-    /// [`Self::acquire_with_reasons`] 的回放+门控版（Phase1-B/A2）：
+    /// [`Self::acquire_with_reasons`] 的回放+门控+能力过滤版（Phase1-B/A2、#40 §1）：
     /// `detail` 非 None 时逐账号记录跳过原因（`route_replay` 开关驱动，
     /// 请求本地缓冲，仅此一个消费者）；`gate` 非 None 时逐账号做**条件组
     /// 限制裁决**（返回 Some(原因码) = 跳过该账号，disable/skip 均记
-    /// `limited` 档）。两者皆 None 时判定路径与原方法完全一致，零额外分配。
+    /// `limited` 档）；`needs` 非空时按账号目录能力位做**精确过滤**
+    /// （上游名已定，见 `catalog::AccountCapabilityIndex`）。
+    ///
+    /// 三者皆缺省（`None` / `CapabilityMask::EMPTY`）时判定路径与原方法
+    /// 完全一致，零额外分配 —— 这是「默认关 = 与今天逐字节等价」的形式。
     pub fn acquire_with_reasons_detail<F>(
         &self,
         channel_id: &str,
@@ -499,12 +589,20 @@ impl AccountSessionStore {
         allow: F,
         gate: Option<LimiterGate<'_>>,
         mut detail: Option<&mut crate::log::AccountSkipCapture>,
+        needs: CapabilityMask,
     ) -> (Option<AccountLease>, SkipReasons)
     where
         F: Fn(&str) -> bool,
     {
         let now = chrono::Utc::now().timestamp();
         let mut sessions = self.inner.sessions.write();
+        // 能力索引只在有需求时上锁（空需求 = 老路径，连锁都不碰）。
+        // 锁序统一 sessions → capabilities，与 `channel_may_serve` 一致。
+        let capabilities = if needs.is_empty() {
+            None
+        } else {
+            Some(self.inner.capabilities.read())
+        };
         let mut candidates: Vec<usize> = Vec::new();
         let mut reasons = SkipReasons::default();
         let mut in_channel = 0usize;
@@ -549,6 +647,19 @@ impl AccountSessionStore {
                 reasons.model_mismatch += 1;
                 if let Some(cap) = detail.as_mut() {
                     cap.push(self.skip_detail(session, "model_mismatch"));
+                }
+                continue;
+            }
+            // 能力精筛（#40 §1）：上游名已定，按本账号目录里该模型的能力位判定。
+            // 只有**有证据的拒否**才裁人；无目录/老快照/名字未收录一律放行。
+            // （写成嵌套 if-let 会触发 clippy::collapsible_if，故先取索引再判。）
+            let capability_index = capabilities.as_ref().and_then(|caps| caps.get(&session.id));
+            let blocked = capability_index
+                .is_some_and(|index| index.verdict(model, alias, needs) == Some(false));
+            if blocked {
+                reasons.capability += 1;
+                if let Some(cap) = detail.as_mut() {
+                    cap.push(self.skip_detail(session, "capability_mismatch"));
                 }
                 continue;
             }
@@ -1019,13 +1130,14 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(mixed.summary(), "2 个冷却中、1 个余额低于阈值");
-        // 顺序稳定（禁用 → provider → 过期 → 白名单 → 冷却 → 余额 → 限制 → 并发）
+        // 顺序稳定（禁用 → provider → 过期 → 白名单 → 能力 → 冷却 → 余额 → 限制 → 并发）
         let full = SkipReasons {
             no_accounts: false,
             disabled: 1,
             provider_off: 1,
             expired: 1,
             model_mismatch: 1,
+            capability: 1,
             cooling: 1,
             balance_low: 1,
             limited: 1,
@@ -1033,7 +1145,7 @@ mod tests {
         };
         assert_eq!(
             full.summary(),
-            "1 个已禁用、1 个 provider 被关停、1 个凭证过期、1 个不在模型白名单、1 个冷却中、1 个余额低于阈值、1 个被限制规则拦截、1 个并发占满"
+            "1 个已禁用、1 个 provider 被关停、1 个凭证过期、1 个不在模型白名单、1 个不支持请求能力、1 个冷却中、1 个余额低于阈值、1 个被限制规则拦截、1 个并发占满"
         );
     }
 
@@ -1090,6 +1202,7 @@ mod tests {
                 |_| false,
                 None,
                 Some(&mut capture),
+                CapabilityMask::EMPTY,
             );
             assert!(lease.is_none());
             assert_eq!(reasons.disabled, 1);
@@ -1114,8 +1227,15 @@ mod tests {
                 ]
             );
             // detail=None（开关关闭）：行为与 acquire_with_reasons 完全一致
-            let (lease, reasons) =
-                pool.acquire_with_reasons_detail("ch", "m", None, |_| false, None, None);
+            let (lease, reasons) = pool.acquire_with_reasons_detail(
+                "ch",
+                "m",
+                None,
+                |_| false,
+                None,
+                None,
+                CapabilityMask::EMPTY,
+            );
             assert!(lease.is_none());
             assert_eq!(reasons.provider_off, 2);
         });
@@ -1140,6 +1260,7 @@ mod tests {
                 |_| true,
                 None,
                 Some(&mut capture),
+                CapabilityMask::EMPTY,
             );
             assert!(lease.is_none());
             assert_eq!(reasons.disabled, 70);
@@ -1209,6 +1330,158 @@ mod tests {
             assert!(loaded.last_error.is_none());
             // 账号不存在：None
             assert_eq!(pool.clear_cooldown("no-such-id", None), None);
+        });
+    }
+
+    /// 造一份目录快照（#40 §1 能力索引测试用）。
+    fn catalog_snapshot(entries: &[(&str, &[&str])]) -> super::super::catalog::CatalogSnapshot {
+        super::super::catalog::CatalogSnapshot {
+            models: entries
+                .iter()
+                .map(|(id, caps)| super::super::catalog::CatalogEntry {
+                    id: (*id).to_string(),
+                    upstream: None,
+                    context_length: None,
+                    capabilities: caps.iter().map(|c| c.to_string()).collect(),
+                })
+                .collect(),
+            fetched_at: 1,
+            source: "remote".to_string(),
+        }
+    }
+
+    /// 造一份能力索引。
+    fn index_of(entries: &[(&str, &[&str])]) -> super::super::catalog::AccountCapabilityIndex {
+        super::super::catalog::AccountCapabilityIndex::from_snapshot(&catalog_snapshot(entries))
+    }
+
+    /// #40 §1 默认等价：`needs` 为空时能力索引完全不参与判定。
+    #[test]
+    fn acquire_without_needs_ignores_capability_index() {
+        with_secret_dir("needs-off", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            // 目录明确说这个模型不支持视觉 —— 但本次请求没有能力需求
+            pool.set_catalog_index(&account.id, Arc::new(index_of(&[("m", &["tool"])])));
+            let (lease, reasons) = pool.acquire_with_reasons_detail(
+                "ch",
+                "m",
+                None,
+                |_| true,
+                None,
+                None,
+                CapabilityMask::EMPTY,
+            );
+            assert!(lease.is_some(), "无需求时不得因能力位裁人");
+            assert_eq!(reasons.capability, 0);
+            // 匿名入口（acquire）同样不受影响
+            assert!(pool.acquire("ch", "m", None).is_some());
+        });
+    }
+
+    /// #40 §1 精筛：只有**有证据的拒否**才裁人；无证据（老快照 / 名字未收录）放行。
+    #[test]
+    fn acquire_needs_rejects_only_evidenced_mismatch() {
+        with_secret_dir("needs-on", || {
+            let pool = pool();
+            // a：目录说 m 只支持工具（明确不支持视觉）→ 应被裁
+            let a = pool.upsert(session("ch", "a", 5)).unwrap();
+            pool.set_catalog_index(&a.id, Arc::new(index_of(&[("m", &["tool"])])));
+            // b：老快照（条目在但没有能力位）→ 无证据，放行
+            let b = pool.upsert(session("ch", "b", 0)).unwrap();
+            pool.set_catalog_index(&b.id, Arc::new(index_of(&[("m", &[])])));
+            let mut capture = crate::log::AccountSkipCapture::new("ch");
+            let (lease, reasons) = pool.acquire_with_reasons_detail(
+                "ch",
+                "m",
+                None,
+                |_| true,
+                None,
+                Some(&mut capture),
+                CapabilityMask::VISION,
+            );
+            let lease = lease.expect("无证据的账号必须仍可被选中");
+            assert_eq!(lease.id(), b.id.as_str(), "被裁的是有证据的 a");
+            assert_eq!(reasons.capability, 1);
+            assert_eq!(
+                capture.rows,
+                vec![("a".to_string(), "capability_mismatch".to_string())]
+            );
+        });
+    }
+
+    /// #40 §1 精筛：证据说支持 → 放行；别名命中能力位同样算数。
+    #[test]
+    fn acquire_needs_passes_when_capability_evidenced() {
+        with_secret_dir("needs-pass", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            pool.set_catalog_index(
+                &account.id,
+                Arc::new(index_of(&[("m", &["tools", "reasoning", "video"])])),
+            );
+            // tools（复数）与 tool 同义
+            let (lease, reasons) = pool.acquire_with_reasons_detail(
+                "ch",
+                "m",
+                None,
+                |_| true,
+                None,
+                None,
+                CapabilityMask::TOOL.union(CapabilityMask::VIDEO),
+            );
+            assert!(lease.is_some());
+            assert_eq!(reasons.capability, 0);
+            // 要视觉：已知不支持 → 裁
+            let (lease, reasons) = pool.acquire_with_reasons_detail(
+                "ch",
+                "m",
+                None,
+                |_| true,
+                None,
+                None,
+                CapabilityMask::VISION,
+            );
+            assert!(lease.is_none());
+            assert_eq!(reasons.capability, 1);
+        });
+    }
+
+    /// #40 §1 粗筛：渠道级只看「有无证据」与「并集是否覆盖」。
+    #[test]
+    fn channel_may_serve_uses_catalog_evidence() {
+        with_secret_dir("coarse", || {
+            let pool = pool();
+            let account = pool.upsert(session("ch", "acct", 0)).unwrap();
+            // 未同步过目录 → 无证据 → 放行
+            assert!(pool.channel_may_serve("ch", CapabilityMask::VISION));
+            pool.set_catalog_index(&account.id, Arc::new(index_of(&[("m", &["tool"])])));
+            // 有证据且并集不含视觉 → 整条渠道可裁
+            assert!(!pool.channel_may_serve("ch", CapabilityMask::VISION));
+            assert!(pool.channel_may_serve("ch", CapabilityMask::TOOL));
+            // 别的渠道的账号不参与本渠道判定
+            assert!(pool.channel_may_serve("other", CapabilityMask::VISION));
+            // 无需求恒真
+            assert!(pool.channel_may_serve("ch", CapabilityMask::EMPTY));
+        });
+    }
+
+    /// #40 §1：索引在启动加载时按目录缓存重建（重启后不丢）。
+    #[test]
+    fn load_builds_capability_index_from_catalog_cache() {
+        with_secret_dir("needs-load", || {
+            let pool = pool();
+            let created = pool.upsert(session("ch", "acct", 0)).unwrap();
+            // 直接写目录缓存（= 目录同步流程的落盘形态），再 load 一次（= 重启）
+            pool.store()
+                .put(
+                    &super::super::catalog::cache_key(&created.provider, &created.id),
+                    &catalog_snapshot(&[("m", &["tool"])]),
+                )
+                .unwrap();
+            pool.load().unwrap();
+            assert!(!pool.channel_may_serve("ch", CapabilityMask::VISION));
+            assert!(pool.channel_may_serve("ch", CapabilityMask::TOOL));
         });
     }
 
