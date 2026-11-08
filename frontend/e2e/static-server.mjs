@@ -353,6 +353,18 @@ const REQUEST_LOGS = [
 // 此前 /api/channels 落到 EMPTY_LIST，渠道页在 E2E 里恒为「暂无渠道」空态，
 // 表格与列设置面板一行都没被覆盖。这里给三条，覆盖启用/禁用、有密钥/无密钥、
 // 有余额/无余额、有映射/全模型四种形态。
+//
+// #32 PR3 三键（`balance_query_interval_secs` / `balance_last_query_at` /
+// `balance_last_error`）按 `mask_channel` 的口径**恒显式给出**（关就写 null，
+// 不是省略键）——省略键与显式 null 在后端是同一个状态，桩里若省掉，前端「把
+// undefined 与 null 分两种画法」的偏差就永远测不出来。四条样本铺开四种形态：
+//   ch-1 = 定频开启（每 6 小时，有上次读数、无失败）
+//   ch-2 = 显式 null（关闭）
+//   ch-3 = 定频开启但上次巡检失败（带脱敏后的失败文案）
+//   ch-4 = 显式 `0`（`Some(0)`）：PATCH 侧已归一成 None，但 `is_due`
+//          （src/channel/balance_refresh.rs:34 的 `.filter(|v| *v > 0)` + 同文件
+//          L170「显式 0 = 关闭」那条单测）仍然防它，说明这条形状**真能到前端**
+//          （手写 config.toml / 旧版持久化数据）。画成「每 0 秒查一次」就是假信息。
 const CHANNELS = [
   {
     id: 'ch-1',
@@ -370,6 +382,10 @@ const CHANNELS = [
     credit: 3.2,
     balance_unit: 'USD',
     balance_scheme: 'openai_billing',
+    // #32：每 6 小时巡检；上次读数固定给 2 天前（相对时间只断言前缀，不断言「2 天前」字样）
+    balance_query_interval_secs: 21600,
+    balance_last_query_at: 1761900000 - 2 * 86400,
+    balance_last_error: null,
     response_time: 320,
     test_time: 1761900000,
     quirks: null,
@@ -386,6 +402,10 @@ const CHANNELS = [
     weight: 1,
     status: 'enabled',
     models: [],
+    // #32：关闭态。键必须在、值为 null（与「这条数据比字段更早」同形）
+    balance_query_interval_secs: null,
+    balance_last_query_at: null,
+    balance_last_error: null,
     response_time: 880,
     test_time: 1761896400,
     quirks: { headers: { 'X-E2E': '1' } },
@@ -404,9 +424,40 @@ const CHANNELS = [
     models: ['claude-sonnet-4-20250514'],
     balance: -1.5,
     balance_unit: 'USD',
+    // #32：每 30 分钟巡检失败过一次。文案是后端 `mask_error_text` 处理后的形状
+    // （`Bearer <token>` 已打码、上游正文片段原样保留），桩照形状给，不照理想给。
+    balance_query_interval_secs: 86400,
+    balance_last_query_at: 1761900000,
+    balance_last_error: '上游返回 HTTP 401：{"error":"invalid Bearer *** key"}',
     response_time: 2400,
     test_time: 0,
     last_error: 'upstream 429',
+  },
+  {
+    // #32 PR3：显式 `0` 那条。巡检侧 `is_due` 已把它当关闭（见上方注释），
+    // 界面必须同样收成「未启用」，不能显示「每 0 秒」/「下次查询 = 刚刚」。
+    // 上次读数留个非空值：只有这样才能测出「间隔已关但时间戳还在」时
+    // 前端是不是还照着时间戳画一条「上次查询」——那种画法是自相矛盾的。
+    id: 'ch-4',
+    seq: 4,
+    name: 'legacy-zero-interval',
+    channel_type: 'openai_compatible',
+    base_url: 'https://legacy.example.com/v1',
+    api_key: 'sk-e2e-4',
+    priority: 0,
+    weight: 1,
+    status: 'enabled',
+    models: ['gpt-4o-mini'],
+    balance: 0.4,
+    balance_unit: 'USD',
+    balance_scheme: 'openai_billing',
+    balance_query_interval_secs: 0,
+    balance_last_query_at: 1761900000,
+    balance_last_error: null,
+    response_time: 500,
+    test_time: 1761900000,
+    quirks: null,
+    last_error: null,
   },
   {
     // account 型渠道（账号池容器）：添加账号弹窗「已建 API」档的池卡数据源
@@ -850,6 +901,88 @@ function handle(req, res, p, bodyText) {
     // 渠道列表（渠道管理页）：返回三条样本，覆盖启用/禁用、有/无密钥、有/无余额、有/无模型映射
     if (p === '/api/channels' && req.method === 'GET') {
       return sendJson(res, { success: true, data: CHANNELS, total: CHANNELS.length, page: 1, size: CHANNELS.length });
+    }
+
+    // #32 PR3 渠道写端点（PUT / PATCH / POST），照后端真实语义写。
+    // 形状来源（**已于 `1a51d6f0` 落在 main**，2026-11-09 现跑 `git show origin/main:…` 对账）：
+    //   · `ChannelRequest`（POST/PUT body，src/api/admin/channels.rs）**不含**
+    //     `balance_query_interval_secs` ⇒ PUT 带上也会被 serde 丢弃，PATCH 是这条配置的唯一写路径；
+    //   · PUT 走 `preserve_non_form_fields`（channels.rs:633，调用点 :673）把三键从已存渠道
+    //     搬回来 ⇒ 保存一次表单**不该**把巡检关掉；
+    //   · PATCH 的三态（`apply_interval_patch`，legacy.rs:1296）：键不存在 = 保持原值；
+    //     显式 null 或 0 = 关闭；**非负整数**封顶 30 天；其余形状（字符串/负数/小数/对象）
+    //     = **忽略不改动**（后端沿用 `api_key` 臂的既有口径，不新增 400）。运行态两键
+    //     不接受 PATCH 写入（写了是造假）。
+    // 本桩**只回显不改写** `CHANNELS`：进程被全部 spec 共用（desktop/mobile 两轮串跑，
+    // 本地还 reuseExistingServer），写坏一条会把后续用例的显示态带偏
+    // （同一个坑见 proxies.spec.ts 的复位接口注释）。需要「保存后回读真的变了」的用例
+    // 在自己内部建 per-test 副本 —— 见 channels-balance-refresh.spec.ts 的 useChannelStore。
+    const channelById = (id) => CHANNELS.find((c) => c.id === id);
+    if (p === '/api/channels' && req.method === 'POST') {
+      // 新建：后端 `to_channel` 恒按「不参与巡检」起步（opt-in 默认），桩照此返回。
+      // id 固定串即可：前端只看 `data.id`（决定是否补那一刀 PATCH），不消费列表里的新行。
+      // 桩里没有这条持久行 ⇒ 随后 PATCH ch-new 会 404：要测「新建 + 设间隔」请在 spec
+      // 内建副本（useChannelStore 同款），别把桩改成能持久化（跨 spec 污染）。
+      return sendJson(res, {
+        success: true,
+        data: {
+          id: 'ch-new',
+          balance_query_interval_secs: null,
+          balance_last_query_at: null,
+          balance_last_error: null,
+        },
+      });
+    }
+    // ⚠️ id 用 exec 取捕获组，别 `p.split('/')[2]`：`/api/channels/ch-1` 切出来
+    // [0]=''、[1]='api'、[2]='channels'、[3]='ch-1' —— 取 [2] 永远查不到渠道、恒 404。
+    // 写路径用例都跑在 spec 内的 per-test 副本上（见下方注释），所以这条分支
+    // 没有用例经过，写错也不会红 —— 由 channels-balance-refresh.spec.ts 的
+    // 「直打桩的 PATCH」那条用例钉住可达性 + 只回显不改写。
+    const chHit = /^\/api\/channels\/([^/]+)$/.exec(p);
+    if (chHit && (req.method === 'PUT' || req.method === 'PATCH')) {
+      const id = decodeURIComponent(chHit[1]);
+      const body = JSON.parse(bodyText || '{}');
+      const stored = channelById(id);
+      if (!stored) return sendJson(res, { success: false, error: { message: 'Channel not found' } }, 404);
+      if (req.method === 'PUT') {
+        // 三键原样保留（PUT body 带不带都一样：`ChannelRequest` 没这个字段）
+        return sendJson(res, {
+          success: true,
+          data: {
+            ...stored, ...body,
+            balance_query_interval_secs: stored.balance_query_interval_secs ?? null,
+            balance_last_query_at: stored.balance_last_query_at ?? null,
+            balance_last_error: stored.balance_last_error ?? null,
+          },
+        });
+      }
+      // PATCH：巡检间隔按后端三态归一（`apply_interval_patch`）；运行态两键**不接受写入**
+      // （body 里出现也只回显已存值，写了是造假）。其余字段（status / priority / weight
+      // 这类内联编辑）照 body 回显，让「PATCH 一个字段」的调用方拿到自洽的响应。
+      const keptInterval = stored.balance_query_interval_secs ?? null;
+      const nextInterval = Object.prototype.hasOwnProperty.call(
+        body,
+        'balance_query_interval_secs',
+      )
+        ? (() => {
+            const raw = body.balance_query_interval_secs;
+            if (raw === null) return null;
+            // 只认非负整数：`as_u64` 取不到值（字符串 / 负数 / 小数 / 对象）时后端**不改**，
+            // 收成关闭就是把「一次没生效的 PATCH」显示成「关掉了」——另一种假信息
+            if (!Number.isInteger(raw) || raw < 0) return keptInterval;
+            return raw === 0 ? null : Math.min(raw, 30 * 86400);
+          })()
+        : keptInterval;
+      return sendJson(res, {
+        success: true,
+        data: {
+          ...stored,
+          ...body,
+          balance_query_interval_secs: nextInterval,
+          balance_last_query_at: stored.balance_last_query_at ?? null,
+          balance_last_error: stored.balance_last_error ?? null,
+        },
+      });
     }
 
     // 统一模型管理
