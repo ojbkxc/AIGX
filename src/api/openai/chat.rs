@@ -297,7 +297,7 @@ pub(crate) async fn handle_chat_completions(
         // #47：AttemptStart 级守卫——覆盖「预留已建、上游请求已发出、首事件
         // 未到」的断开窗口（E1/E2 实测漏记漏计费）。每轮真实调用前更新
         // 渠道/模型归因；计费接管点见各 handoff()。
-        let mut attempt_guard = crate::api::openai::billing::AttemptStartGuard {
+        let mut attempt_guard = super::billing::AttemptStartGuard {
             state: state.clone(),
             api_key: api_key.clone(),
             requested_model: model.clone(),
@@ -966,7 +966,7 @@ pub(crate) async fn handle_chat_completions(
             .as_deref()
             .and_then(|sid| state.channel_store.affinity_cache().lookup(sid, &model));
         // #47：AttemptStart 级守卫（同流式分支；E1 非流式断开实测漏记漏计费）
-        let mut attempt_guard = crate::api::openai::billing::AttemptStartGuard {
+        let mut attempt_guard = super::billing::AttemptStartGuard {
             state: state.clone(),
             api_key: api_key.clone(),
             requested_model: model.clone(),

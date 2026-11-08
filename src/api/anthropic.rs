@@ -487,7 +487,7 @@ pub async fn handle_messages(
         // #32 路由回放：真实上游调用计数 + 亲和命中判定（同 resolve 口径）
 
         // #47：AttemptStart 级守卫（同 openai 面；首事件前断开实测漏记漏计费）
-        let mut attempt_guard = super::openai::billing::AttemptStartGuard {
+        let mut attempt_guard = crate::api::openai::AttemptStartGuard {
             state: state.clone(),
             api_key: api_key.clone(),
             requested_model: model.clone(),
@@ -1177,7 +1177,7 @@ pub async fn handle_messages(
         // #32 路由回放：真实上游调用计数 + 亲和命中判定（同 resolve 口径）
 
         // #47：AttemptStart 级守卫（同 openai 面；首事件前断开实测漏记漏计费）
-        let mut attempt_guard = super::openai::billing::AttemptStartGuard {
+        let mut attempt_guard = crate::api::openai::AttemptStartGuard {
             state: state.clone(),
             api_key: api_key.clone(),
             requested_model: model.clone(),

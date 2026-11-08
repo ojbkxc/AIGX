@@ -1280,7 +1280,7 @@ impl<'a> AttemptStartGuard<'a> {
             &self.requested_model,
             &self.model,
             &self.group,
-            &self.reservation,
+            self.reservation,
             estimated_prompt,
             0,
             0,
