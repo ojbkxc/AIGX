@@ -155,7 +155,12 @@ test.describe('路由回放', () => {
     await openReplayPanel(page, 'req-404');
     // 限定在回放面板卡片内断言（RouteSticky 的 EmptyState 兄弟挂载，避免 strict 歧义）
     await expect(page.locator('.rr-panel .empty-state').first()).toContainText('路由回放快照端点尚未就绪');
-    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+    // 本用例**故意**让端点返回 404，浏览器必然记录一条
+    // `console: Failed to load resource: ... 404`（fixtures.ts:72-74 收 console error）。
+    // 「自己制造 404 又要求零报错」是自相矛盾的断言，所以只排除这一条预期内的
+    // 404 噪声，其余任何 console/page error 仍然拦截。
+    const unexpected = pageErrors.filter((e) => !/404/.test(e));
+    expect(unexpected, unexpected.join('\n')).toEqual([]);
   });
 
   test('日志详情：路由回放 Tab 渲染逐账号跳过分组（#26 形状）', async ({ page, pageErrors }) => {
@@ -201,7 +206,10 @@ test.describe('路由回放', () => {
     // 打开详情：按「可见字段」定位行——表格不渲染 l.id（只作 React key，
     // Logs.tsx:750），行内可见文本是时间/状态/模型/渠道/用量/费用/耗时
     const row = page.locator('tbody tr').filter({ hasText: 'gpt-4o' }).first();
-    await row.locator('td').first().click();
+    // 点**模型列**而不是首列：`Logs.tsx:815` 的详情开关挂在 `<tr onClick>`，
+    // 而 `Logs.tsx:820` 对首列（勾选框）`td` 做了 `stopPropagation`
+    // ——点 `td.first()` 只会切换选中、永远不开详情弹窗（原断言因此超时）。
+    await row.getByText('gpt-4o').click();
     await expect(page.locator('.log-detail-modal')).toBeVisible({ timeout: 10_000 });
     await page.locator('.log-detail-tabs button', { hasText: '路由回放' }).click();
 
