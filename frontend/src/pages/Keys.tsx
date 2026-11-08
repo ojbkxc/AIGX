@@ -1,21 +1,51 @@
-import { useState, useEffect, useMemo, useRef, type FormEvent } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import {
+  Columns3,
   Eye, EyeOff, MoreHorizontal, Search, Pencil, Power, PowerOff,
   Loader2, RotateCcw, Trash2, Copy, Check, RefreshCcw,
 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import { fmtQuota, isAdmin } from '../lib/utils';
+import {
+  applyTableColumns,
+  readTableColumns,
+  resetTableColumns,
+  writeTableColumns,
+  type TableColumnDef,
+  type TableColumnItem,
+  type TableColumnState,
+} from '../lib/tableColumns';
+import TableColumnSettings from '../components/ui/TableColumnSettings';
+import { useColumnResize } from '../components/ui/useColumnResize';
+import { TablePaginationFooter, usePageSize, CLIENT_PAGE_SIZES } from '../components/ui/TableShell';
+import { Tooltip } from '../components/ui';
 import { useListKeyboard } from '../hooks/useListKeyboard';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import KeysDocsPanel from '../components/KeysDocsPanel';
-import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination, MultiSelect, Tabs } from '../components/ui';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable, MultiSelect, Tabs } from '../components/ui';
 import './Keys.css';
 
 /** 客户端分页每页条数（与 Pricing 页一致） */
-const PAGE_SIZE = 20;
+const LS_PSZ = 'aigx-tbl-pagesize.keys';
+const LS_TCOLS = 'aigx-tbl-cols.keys';
+/** 密钥表列声明（select/actions 锁定） */
+const KEYS_COL_DEFS: TableColumnDef[] = [
+  { key: 'select', label: '选择', align: 'center', width: 32, locked: true },
+  { key: 'name', label: '名称', width: 150 },
+  { key: 'user', label: '用户', width: 150 },
+  { key: 'status', label: '状态', align: 'center', width: 80 },
+  { key: 'key', label: '密钥', width: 220 },
+  { key: 'quota', label: '额度', align: 'right', width: 130 },
+  { key: 'group', label: '分组', width: 100 },
+  { key: 'models', label: '模型', width: 160 },
+  { key: 'expires', label: '过期', width: 150 },
+  { key: 'created', label: '创建时间', width: 150 },
+  { key: 'actions', label: '操作', width: 130, locked: true },
+];
+const DEFAULT_PAGE_SIZE = 20;
 
 /** 页面 Tab：密钥管理 / 接入文档（文档 2026-11-07 自独立页并入，07 E.3） */
 type KeysTab = 'keys' | 'docs';
@@ -155,8 +185,43 @@ export default function Keys(): JSX.Element {
   const [viewAll, setViewAll] = useState(false);
   // 防止 load() 依赖 viewAll 造成初始双请求：仅由切换控件显式触发重新拉取
   const viewAllRef = useRef(false);
-  // 客户端分页：搜索过滤变化时回第 1 页
+  // 客户端分页：搜索过滤变化时回第 1 页；每页条数公共 usePageSize（CLIENT 档位含 'all'）
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = usePageSize(LS_PSZ, CLIENT_PAGE_SIZES, DEFAULT_PAGE_SIZE);
+  // 列设置已迁公共层（tableColumns v2）
+  const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, KEYS_COL_DEFS));
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
+  const commitKeysCols = useCallback((next: TableColumnItem[], persist: boolean) => {
+    setColState((prev) => {
+      const nextState: TableColumnState = { ...prev, items: next };
+      if (persist) writeTableColumns(LS_TCOLS, nextState);
+      return nextState;
+    });
+  }, []);
+  const resetKeysCols = useCallback(() => setColState(resetTableColumns(LS_TCOLS, KEYS_COL_DEFS)), []);
+  const appliedCols = useMemo(() => applyTableColumns(colState, KEYS_COL_DEFS), [colState]);
+  const visibleKeySet = useMemo(() => new Set(appliedCols.map((c) => c.key)), [appliedCols]);
+  const colResize = useColumnResize({
+    widths: Object.fromEntries(colState.items.filter((i) => i.width != null).map((i) => [i.key, i.width as number])),
+    setWidths: (next) => {
+      commitKeysCols(
+        colState.items.map((i) => {
+          const w = next[i.key];
+          const defW = KEYS_COL_DEFS.find((d) => d.key === i.key)?.width;
+          if (w == null || (defW != null && w === defW)) {
+            const { width: _drop, ...rest } = i;
+            return rest;
+          }
+          return { ...i, width: w };
+        }),
+        true,
+      );
+    },
+    defaultWidths: Object.fromEntries(KEYS_COL_DEFS.map((d) => [d.key, d.width])),
+    lockedKeys: new Set(KEYS_COL_DEFS.filter((d) => d.locked).map((d) => d.key)),
+    onCommit: () => { /* 落盘已在 setWidths 内做 */ },
+  });
   // 菜单用 fixed 定位挂在 body 层级：Card/table-wrap 的 overflow 会裁掉
   // 行内 absolute 弹层（尤其最后一行向下弹出时），fixed 可逃出所有裁剪容器
   const [rowMenuId, setRowMenuId] = useState<string | number | null>(null);
@@ -252,9 +317,10 @@ export default function Keys(): JSX.Element {
   }, [tokens, q]);
 
   // 客户端分页：页码越界时钳到最后一页（删除/过滤收缩后不落空页）
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pageSizeNum = pageSize === 'all' ? Math.max(1, filtered.length) : pageSize;
+  const totalPages = Math.max(1, Math.ceil((pageSize === 'all' ? filtered.length : filtered.length / pageSizeNum) || 1));
   const safePage = Math.min(page, totalPages);
-  const pageItems = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const pageItems = pageSize === 'all' ? filtered : filtered.slice((safePage - 1) * pageSizeNum, safePage * pageSizeNum);
 
   // 键盘导航（cc-haha 列表键盘体系）：/ 聚焦搜索、↑↓/j k 行高亮、Enter 打开编辑
   const { searchRef, rowRefs, activeIndex, setActiveIndex } = useListKeyboard(
@@ -703,6 +769,29 @@ export default function Keys(): JSX.Element {
                 onChange={(e) => { setSearch(e.target.value); setPage(1); }}
               />
             </div>
+            <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
+              <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
+                <button
+                  type="button"
+                  className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                  onClick={() => setColPanelOpen((v) => !v)}
+                  aria-label={t('列设置')}
+                >
+                  <Columns3 size={14} />
+                </button>
+              </Tooltip>
+              {colPanelOpen && (
+                <TableColumnSettings
+                  open
+                  onClose={() => setColPanelOpen(false)}
+                  defs={KEYS_COL_DEFS}
+                  items={colState.items}
+                  onChange={commitKeysCols}
+                  onReset={resetKeysCols}
+                  anchorRef={colPanelRef}
+                />
+              )}
+            </div>
             {isAdmin() && (
               <Button variant="outline" size="sm" onClick={toggleViewAll}>
                 {viewAll ? t('只看自己的') : t('查看全部用户')}
@@ -729,26 +818,41 @@ export default function Keys(): JSX.Element {
 
             <div className="table-wrapper keys-table-wrap">
               <table className="keys-table">
+                <colgroup>
+                  {appliedCols.map((c) => (
+                    <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                  ))}
+                </colgroup>
                 <thead>
                   <tr>
-                    <th className="col-select" style={{ width: 32 }}>
-                      <input
-                        type="checkbox"
-                        checked={allSelected}
-                        onChange={toggleAll}
-                        aria-label={t('全选')}
-                      />
-                    </th>
-                    <th className="col-name">{t('名称')}</th>
-                    <th className="col-user">{t('用户')}</th>
-                    <th className="col-status">{t('状态')}</th>
-                    <th className="col-key">{t('密钥')}</th>
-                    <th className="col-quota">{t('额度')}</th>
-                    <th className="col-group">{t('分组')}</th>
-                    <th className="col-models">{t('模型')}</th>
-                    <th className="col-expires">{t('过期')}</th>
-                    <th className="col-created">{t('创建时间')}</th>
-                    <th className="col-actions">{t('操作')}</th>
+                    {appliedCols.map((c, idx) => {
+                      const grip = colResize.gripProps(c.key, {
+                        isLast: idx === appliedCols.length - 1,
+                        locked: c.locked,
+                        defaultWidth: c.width,
+                      });
+                      return (
+                        <th
+                          key={c.key}
+                          className={`col-${c.key}${c.align === 'right' ? ' ta-right' : ''}`}
+                          style={c.width != null ? { width: `${c.width}px` } : undefined}
+                        >
+                          {c.key === 'select' ? (
+                            <input
+                              type="checkbox"
+                              checked={allSelected}
+                              onChange={toggleAll}
+                              aria-label={t('全选')}
+                            />
+                          ) : (
+                            t(KEYS_COL_DEFS.find((d) => d.key === c.key)?.label ?? c.key)
+                          )}
+                          {c.key !== 'select' && c.key !== 'actions' && (
+                            <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                          )}
+                        </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody>
@@ -776,19 +880,26 @@ export default function Keys(): JSX.Element {
                             aria-label={t('选择')}
                           />
                         </td>
+{visibleKeySet.has('name') && (
                         <td className="col-name">
                           <div className="tk-name" title={tk.name}>{tk.name}</div>
                         </td>
+                        )}
+{visibleKeySet.has('user') && (
                         <td className="col-user">
                           {tk.user_email
                             ? <span className="tk-user-email" title={tk.user_email}>{tk.user_email}</span>
                             : <span className="tk-user-none">—</span>}
                         </td>
+                        )}
+{visibleKeySet.has('status') && (
                         <td className="col-status">
                           <span className={`tk-status-badge ${expired ? 'warn' : disabled ? 'bad' : 'ok'}`}>
                             {expired ? t('已过期') : disabled ? t('禁用') : t('启用')}
                           </span>
                         </td>
+                        )}
+{visibleKeySet.has('key') && (
                         <td className="col-key">
                           <div className="tk-key-cell">
                             <code className="tk-key-code" title={revealedKeys[tk.id] ? (plainKeys[tk.id] || '') : maskShown}>
@@ -825,6 +936,8 @@ export default function Keys(): JSX.Element {
                             </button>
                           </div>
                         </td>
+                        )}
+{visibleKeySet.has('quota') && (
                         <td className="col-quota">
                           {limit ? (
                             <div className="tk-quota" title={`${t('已用')} ${fmtQuota(used)} / ${t('上限')} ${fmtQuota(limit)}`}>
@@ -845,9 +958,13 @@ export default function Keys(): JSX.Element {
                             </span>
                           )}
                         </td>
+                        )}
+{visibleKeySet.has('group') && (
                         <td className="col-group">
                           <span className="tk-group-badge">{tk.group || 'default'}</span>
                         </td>
+                        )}
+{visibleKeySet.has('models') && (
                         <td className="col-models">
                           {models.length === 0
                             ? <span className="tk-models-all">{t('全部')}</span>
@@ -867,6 +984,8 @@ export default function Keys(): JSX.Element {
                               </div>
                             )}
                         </td>
+                        )}
+{visibleKeySet.has('expires') && (
                         <td className="col-expires">
                           {tk.expires_at
                             ? (
@@ -879,6 +998,8 @@ export default function Keys(): JSX.Element {
                             )
                             : <span className="tk-never">{t('永不过期')}</span>}
                         </td>
+                        )}
+{visibleKeySet.has('created') && (
                         <td className="col-created">
                           {tk.created_at
                             ? (
@@ -890,6 +1011,7 @@ export default function Keys(): JSX.Element {
                             )
                             : '—'}
                         </td>
+                        )}
                         <td className="col-actions">
                           <div className="tk-actions">
                             <button
@@ -928,14 +1050,15 @@ export default function Keys(): JSX.Element {
             </div>
 
             {/* 客户端分页：页码导航 + 总数（全选/批量仍作用于过滤集，与分页前语义一致） */}
-            {totalPages > 1 && (
-              <div className="pagination-meta">
-                <Pagination page={safePage} totalPages={totalPages} onChange={setPage} />
-                <span className="pagination-total">
-                  {t('共 {{count}} 条', { count: filtered.length })}
-                </span>
-              </div>
-            )}
+            <TablePaginationFooter
+              total={filtered.length}
+              page={safePage}
+              totalPages={totalPages}
+              size={pageSize}
+              sizes={CLIENT_PAGE_SIZES}
+              onSizeChange={(n) => { setPageSize(n); setPage(1); }}
+              onPageChange={setPage}
+            />
 
             {filtered.length === 0 && search && (
               <EmptyState message={t('无匹配结果')} icon="🔍" />
