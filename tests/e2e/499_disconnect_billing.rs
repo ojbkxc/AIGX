@@ -784,7 +784,10 @@ async fn disconnect_499_billing_dual_surface() {
         .expect("smoke anthropic");
     assert_eq!(smoke.status(), StatusCode::OK, "anthropic 冒烟应 200");
 
-    // 5) 基线
+    // 5) 基线（冒烟日志经异步 LogStore writer 落库——先等其 settle，
+    // 否则冒烟日志可能落在基线查询之后被计入「新日志」（本轮第 5 条日志根因：
+    // 测试前提竞态，非产品缺陷非重复计费））
+    tokio::time::sleep(SETTLE_WAIT).await;
     let ids0: std::collections::HashSet<String> = all_logs(&c, &base, &admin)
         .await
         .into_iter()
