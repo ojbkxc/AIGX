@@ -2726,7 +2726,25 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
                 {/* ── 限制器：条件组（#29 主编辑面）+ 旧版扁平规则（兼容保留） ── */}
                 {dlgSeg === 'limiter' && (
                   <div className="as-limiter-rules">
-                    <div className="as-lg-title">{t('限制条件组')}</div>
+                    <div className="as-lg-title">
+                      {t('限制条件组')}
+                      {/* 生效来源徽标（#29 复核缺口 1）：账号当前持久化的事实——
+                          limiter_groups 非空 → 后端按条件组判定；空但有扁平规则 →
+                          后端降维（groups_from_flat）按扁平判定；两者都无 → 不显示。
+                          判据用 editing（打开弹窗时的持久化快照），不随草稿中间态闪变。 */}
+                      {(() => {
+                        const hasGroups = (editing?.limiter_groups?.length ?? 0) > 0;
+                        const hasFlat = (editing?.limiters?.length ?? 0) > 0;
+                        if (!hasGroups && !hasFlat) return null;
+                        return (
+                          <span className={`as-lg-source-badge${hasGroups ? '' : ' flat'}`}>
+                            {hasGroups
+                              ? t('当前生效：条件组（{{n}} 组）', { n: editing?.limiter_groups?.length ?? 0 })
+                              : t('当前生效：扁平规则（降维）')}
+                          </span>
+                        );
+                      })()}
+                    </div>
                     {limiterGroupsDraft.length === 0 ? (
                       <div className="as-limiter-empty">
                         {t('余额 / 百分比 / 本地计数读数 × 且/或分支 × 模型范围，比旧规则更灵活；未添加时按下方旧规则判定。')}

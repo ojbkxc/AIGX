@@ -1429,6 +1429,27 @@ body.as-col-resizing {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-main, var(--text-color));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 生效来源徽标（#29 复核缺口 1）：条件组=主色 / 扁平降维=中性 */
+.as-lg-source-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 9px;
+  border: 1px solid var(--primary-color);
+  color: var(--primary-color);
+  background: var(--accent-soft, rgba(99, 102, 241, 0.08));
+}
+
+.as-lg-source-badge.flat {
+  border-color: var(--border-color);
+  color: var(--text-muted);
+  background: var(--hover-bg);
 }
 
 .as-lg-hint {
