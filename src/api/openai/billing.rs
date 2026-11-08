@@ -1140,6 +1140,7 @@ impl Drop for ResponsesStreamGuard {
 /// 归因到渠道会误伤健康度。
 /// #47：499 日志写入的可测核心（单测覆盖；估算结算仍由 write_499 走
 /// settle_usage，行为级验证归 E1/E2）。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_attempt_499_log(
     log_store: &crate::log::LogStore,
     key_id: &str,
@@ -1175,7 +1176,9 @@ pub(crate) struct AttemptStartGuard {
     pub group: String,
     /// 预留句柄（**owned clone**：Reservation::Clone 语义=克隆体与原件恰好
     /// 一方 commit；守卫只读 token 供结算、并发槽位由任一方 Drop 释放——
-    /// 持引用会与流式成功路径的 move 冲突（E0505））
+    /// 持引用会与流式成功路径的 move 冲突（E0505））。
+    /// ⚠️「恰好一方 commit」是**调用纪律**而非类型保证——写 #47 相关代码
+    /// 时勿把结算挂在错误的实例上（S2 裁决注明）。
     pub reservation: Reservation,
     /// 每轮真实上游调用前更新（Drop 时取最后尝试的渠道归因）
     pub channel_id: String,
