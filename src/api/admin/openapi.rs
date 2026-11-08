@@ -1471,7 +1471,9 @@ mod tests {
         // #38 粘滞会话管理面两条。此前漏登且测试不红 —— 本清单与 main.rs
         // 之间是**人工对照**（`covers_all_real_admin_routes` 只保证
         // 文档 ↔ 本清单相等，管不到本清单 ↔ 真实路由），漏 add 时两边
-        // 一起少、断言仍绿。机器化对照见 #44 评估（未落地，等拍板）。
+        // 一起少、断言仍绿。#46 已落地机器化对照：CI 闸门
+        // `tools/extract_routes.py` 静态提取 main.rs 真实路由，双向断言
+        // 「真实 ⊆ 文档∪豁免」+「文档 ⊆ 真实」，越界即红（见 tests::EXEMPT）。
         add("/api/routing/sticky", &["get"]);
         add("/api/routing/sticky/clear", &["post"]);
         add("/api/routing/replay/{request_id}", &["get"]);
@@ -1622,6 +1624,27 @@ mod tests {
         m
     }
 
+    /// 有意**不写进** OpenAPI 自描述文档的管理面路由：(路径, 理由)。
+    ///
+    /// 这些路由真实存在于 main.rs，但公开自描述会把运维 AI 引到它们上面、
+    /// 放大凭据暴露面，故只做豁免、不做文档。豁免表是「真实路由 ⊆ 文档」这条
+    /// 硬规矩的**唯一**例外出口，每条必须写明理由。
+    ///
+    /// 消费方：CI 闸门 `tools/extract_routes.py`（按文本解析本表）——
+    /// 正向断言用 `文档 ∪ 豁免` 覆盖真实路由，豁免一侧即取自此处。
+    /// 改本表格式时须同步脚本的正则。单测 `exempt_routes_stay_undocumented`
+    /// 反向自检：豁免项若哪天被写进文档，说明理由已不成立，会红。
+    const EXEMPT: &[(&str, &str)] = &[
+        (
+            "/api/debug",
+            "调试模式开关，与 /api/debug/traffic 成对，仅供本机排障，不自描述",
+        ),
+        (
+            "/api/debug/traffic",
+            "返回上游原始报文，含 Authorization / API key 等凭据残留，不自描述",
+        ),
+    ];
+
     fn document_paths(doc: &Value) -> BTreeMap<String, Vec<String>> {
         let paths = doc["paths"].as_object().expect("paths is object");
         let mut out = BTreeMap::new();
@@ -1696,6 +1719,26 @@ mod tests {
             actual, expected,
             "文档 paths 与 main.rs 真实管理面路由不一致（左侧=文档，右侧=路由表）"
         );
+    }
+
+    /// 豁免表自检：每条豁免路径必须「真实存在但不入文档」。
+    ///
+    /// - 理由非空：豁免的唯一出口必须写明为什么，否则后人无从判断可否解除；
+    /// - 不在文档里：若哪天有人把豁免路由写进了文档，说明「不公开自描述」的
+    ///   理由已不成立，须重新评估（要么撤豁免、要么撤文档条目）。
+    ///
+    /// 注意本测只覆盖「豁免 ↔ 文档」这一侧；「豁免 ↔ main.rs 真实路由」由
+    /// CI 闸门 `tools/extract_routes.py` 覆盖（单测无法读 main.rs 路由）。
+    #[test]
+    fn exempt_routes_stay_undocumented() {
+        let doc = document_paths(&build_openapi_document());
+        for (path, reason) in EXEMPT {
+            assert!(!reason.trim().is_empty(), "豁免路由 {path} 缺理由");
+            assert!(
+                !doc.contains_key(*path),
+                "豁免路由 {path} 已被写进文档，豁免理由不再成立，请撤豁免或撤文档条目"
+            );
+        }
     }
 
     /// 数量锚点：文档路径数必须等于路由对照表的条目数。
