@@ -717,7 +717,7 @@ impl ChannelStore {
                     && !self.is_in_cooldown(&c.id)
                     && self.circuit_breaker.allow_request(&c.id)
                     && self.aimd_allows(&c.id)
-                    && coarse.is_none_or(|gate| gate(*c))
+                    && coarse.is_none_or(|gate| gate(c))
             })
             .cloned()
             .collect();
