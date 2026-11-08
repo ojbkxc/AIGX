@@ -473,6 +473,168 @@ function sendJson(res, body, status = 200) {
 }
 
 
+// ── #22：流式 usage 的「两跳」桩（镜像后端 #21-A 的注入语义）─────────────────
+//
+// 为什么要两跳：此前 chat-sse-tool-calls.spec 的内联桩**无条件**吐 usage 终帧，
+// 「界面出现 usage 数字」只证明桩自己的形状（#31 同型假绿）。真实链路里 usage
+// 终帧是上游**只有在收到 `stream_options.include_usage` 时**才发的，而该字段由
+// 后端注入出站请求体（legacy.rs `build_openai_chat_test_payload`）。e2e 里
+// `ChannelChatTestRequest` 字段全显式无 flatten，前端也不发该字段，所以条件不能
+// 取自「前端请求体」——只能把因果链本身照搬进来：
+//
+//   前端 ─▶ /api/channels/chat_test（后端双：重建出站 payload；stream 时注入
+//           stream_options；上游 400 则去字段单次重试；SSE 原样透传）
+//        ─▶ /mock-upstream/chat/completions（上游双：真 OpenAI 行为，
+//           **只有**收到该字段才在 [DONE] 前吐 usage 终帧）
+//
+// 于是「后端双漏注入 / 上游漏条件」⇒ 界面无数字 ⇒ 断言红，桩不再自证。
+// 用例通过 message 文本选上游档位：含 E2E_LEGACY_MARK 的模拟「不识别
+// stream_options 的老 vLLM/自建网关」——收到该字段直接 400，被去字段重试后
+// 正常流式但**不带** usage 终帧（正好钉住反例：数字不是前端自造的）。
+
+/** 上游双吐的正文分片（拼起来是「两跳链路验证」） */
+const E2E_UPSTREAM_WORDS = ['两跳', '链路', '验证'];
+/** 老上游触发标记：出现在 messages 里即模拟不识别 stream_options 的网关 */
+const E2E_LEGACY_MARK = '[e2e-upstream:legacy]';
+/** 上游双的 usage 数字（固定值便于断言；total = prompt + completion） */
+const E2E_UPSTREAM_USAGE = { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 };
+
+const sseHeaders = {
+  'Content-Type': 'text/event-stream; charset=utf-8',
+  'Cache-Control': 'no-store',
+  Connection: 'keep-alive',
+};
+
+/** 把一条 OpenAI chunk 对象序列化成 SSE 帧 */
+const openaiChunkFrame = (model, extra) =>
+  `data: ${JSON.stringify({
+    id: 'chatcmpl-e2e', object: 'chat.completion.chunk', created: 1762000000, model, ...extra,
+  })}\n\n`;
+
+/**
+ * 上游双：OpenAI `/chat/completions` 的流式行为。
+ *
+ * 关键条件（去桩自证的本体）：`usage` 终帧**只在**请求带
+ * `stream_options.include_usage === true` 时产出——与真实 OpenAI 一致。
+ * 老上游档（messages 含 E2E_LEGACY_MARK）收到 stream_options 直接 400。
+ */
+function handleMockUpstream(res, bodyText) {
+  let body = {};
+  try {
+    body = JSON.parse(bodyText || '{}');
+  } catch {
+    return sendJson(res, { error: { message: 'invalid json body' } }, 400);
+  }
+  const model = typeof body.model === 'string' ? body.model : 'e2e-model';
+  const stream = body.stream === true;
+  const wantsUsage = body.stream_options?.include_usage === true;
+  const legacy = JSON.stringify(body.messages ?? '').includes(E2E_LEGACY_MARK);
+
+  if (legacy && body.stream_options !== undefined) {
+    // 老 vLLM/自建网关：整字段不认识 → 400（后端双据此去字段重试一次）
+    return sendJson(
+      res,
+      { error: { message: 'unknown field: stream_options', type: 'invalid_request_error' } },
+      400,
+    );
+  }
+
+  if (!stream) {
+    // 非流式：OpenAI 恒带 usage（与 stream_options 无关），本单不依赖该分支
+    return sendJson(res, {
+      id: 'chatcmpl-e2e', object: 'chat.completion', model,
+      choices: [{ index: 0, message: { role: 'assistant', content: E2E_UPSTREAM_WORDS.join('') }, finish_reason: 'stop' }],
+      usage: E2E_UPSTREAM_USAGE,
+    });
+  }
+
+  const frames = [
+    openaiChunkFrame(model, { choices: [{ index: 0, delta: { role: 'assistant' } }] }),
+    ...E2E_UPSTREAM_WORDS.map((w) => openaiChunkFrame(model, { choices: [{ index: 0, delta: { content: w } }] })),
+    openaiChunkFrame(model, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+  ];
+  if (wantsUsage) {
+    frames.push(openaiChunkFrame(model, { choices: [], usage: E2E_UPSTREAM_USAGE }));
+  }
+  frames.push('data: [DONE]\n\n');
+
+  res.writeHead(200, sseHeaders);
+  let i = 0;
+  const tick = () => {
+    // 客户端 abort（点「停止生成」）后 res 已销毁：停掉泵，别继续写
+    if (res.destroyed || res.writableEnded) return;
+    if (i >= frames.length) return res.end();
+    res.write(frames[i++]);
+    setTimeout(tick, 60);
+  };
+  tick();
+}
+
+/**
+ * 后端双：复刻 legacy.rs `handle_channel_chat_test` 的 OpenAI 支关键行为——
+ * 从前端请求体**重建**出站 payload（#21-A：`stream` 时注入
+ * `stream_options.include_usage`）、上游 400 时去字段单次重试、上游 SSE
+ * 字节流原样透传给前端。
+ *
+ * 注意：这里的「注入」是 e2e 对 #21-A 的镜像。真正的注入由后端做（有 Rust
+ * 单测钉住 payload builder），本桩的作用是：让前端 e2e 的 usage 断言依赖
+ * 这条因果链，而不是依赖测试作者手写的帧。
+ */
+async function handleChatTestDouble(res, bodyText) {
+  let body = {};
+  try {
+    body = JSON.parse(bodyText || '{}');
+  } catch {
+    return sendJson(res, { success: false, error: 'invalid json body' }, 400);
+  }
+  // 与后端 `#[serde(default = "default_true")] stream` 对齐：缺省即流式
+  const stream = body.stream !== false;
+  const history = Array.isArray(body.history) ? body.history : [];
+  const messages = [...history, { role: 'user', content: body.message ?? '' }];
+  const payload = {
+    model: typeof body.model === 'string' && body.model ? body.model : 'glm-4',
+    messages,
+    stream,
+  };
+  if (stream) payload.stream_options = { include_usage: true };
+
+  const callUpstream = (p) => fetch(`http://127.0.0.1:${PORT}/mock-upstream/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(p),
+  });
+
+  let up = await callUpstream(payload);
+  if (up.status === 400 && stream && payload.stream_options) {
+    // #21-A 的 400 兜底：个别老上游不识别该字段 → 去字段重试一次（一次往返）
+    const stripped = { ...payload };
+    delete stripped.stream_options;
+    const retry = await callUpstream(stripped).catch(() => null);
+    if (retry) {
+      up = retry;
+    }
+  }
+  if (!up.ok) {
+    const text = await up.text().catch(() => '');
+    return sendJson(res, { success: false, error: text || `上游失败 ${up.status}` }, 502);
+  }
+  res.writeHead(200, {
+    'Content-Type': up.headers.get('content-type') || 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  // 逐块转发：保持「渐进」语义（用例断言首帧可见而末帧未出，靠这个）
+  try {
+    for await (const chunk of up.body) {
+      if (res.destroyed) break;
+      res.write(chunk);
+    }
+  } catch {
+    // 客户端 abort：上游流被切断属正常
+  }
+  res.end();
+}
+
+
 /** 聊天会话的内存态（E2E 每次启动清零）。
  *  预置两条带消息的会话：抽屉相关用例需要「多会话 + 可切换」的初始状态。 */
 const chatSessions = new Map();
@@ -518,6 +680,11 @@ const server = http.createServer((req, res) => {
 });
 
 function handle(req, res, p, bodyText) {
+
+  // #22：上游双——后端双的出站目标，故意不放在 /api 下（前端永不调用它）
+  if (p === '/mock-upstream/chat/completions' && req.method === 'POST') {
+    return handleMockUpstream(res, bodyText);
+  }
 
   if (p.startsWith('/api/') || p.startsWith('/v1/')) {
     // 少数需要具体形状的端点
@@ -575,6 +742,11 @@ function handle(req, res, p, bodyText) {
         return sendJson(res, { success: false, error: 'auto_title 开启时 title_prompt_chars 不能为 0' }, 400);
       }
       return sendJson(res, { success: true, data: CHAT_SETTINGS });
+    }
+
+    // #22：chat_test 后端双（两跳链路入口，此前该路径落到 EMPTY_LIST 兜底）
+    if (p === '/api/channels/chat_test' && req.method === 'POST') {
+      return handleChatTestDouble(res, bodyText);
     }
 
     // 渠道健康 Tab（原系统诊断页并入）：三件套形状对齐 src/api/admin/diagnostics.rs
