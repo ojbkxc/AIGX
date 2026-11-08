@@ -2311,8 +2311,11 @@ mod tests {
         });
     }
 
-    /// #35 C1/C2 —— 计数与锚点必须落盘：重启把「已经撞了两次」忘掉的话，
-    /// 阈值永远数不满；提醒去重位丢在内存里的话，重启就再喊一遍。
+    /// #35 C1/C2 —— 已经生效的逐出态与提醒去重位必须落盘。
+    ///
+    /// 计数本身走的是既有 30s 节流（`persist_throttled`）：「没撞满就重启」
+    /// 最多退回重新数三次，不会出假象；**翻态那一次是立即写**，所以重启绝不会
+    /// 把一个已经被上游拒死的账号偷偷放回调度台。这条测试钉的是后者。
     #[test]
     fn relogin_state_survives_restart() {
         with_secret_dir("relogin-restart", || {
@@ -2323,19 +2326,27 @@ mod tests {
             account.provider = "loomy".to_string();
             account.logged_in_at = Some(chrono::Utc::now().timestamp() - 11 * 86_400);
             let account = pool.upsert(account).unwrap();
-            assert!(pool.record_credential_rejection(&account.id, "upstream 401"));
+            let anchor = account.logged_in_at;
+            // 阈值之下返回 false（发声与写盘都只在翻态那一次）
+            for _ in 0..2 {
+                assert!(!pool.record_credential_rejection(&account.id, "upstream 401"));
+            }
+            assert!(pool.record_credential_rejection(&account.id, "upstream 403"));
             assert!(pool.mark_relogin_notified(&account.id, chrono::Utc::now().timestamp()));
 
             // 模拟重启：同一份 KV 再开一个池
             let reopened = AccountSessionStore::new(store);
             let loaded = reopened.get(&account.id).unwrap();
-            assert_eq!(1, loaded.consecutive_rejections, "计数没落盘就会白撞");
-            assert_eq!(account.logged_in_at, loaded.logged_in_at);
-            assert!(loaded.relogin_notified_at.is_some());
-            // 第三次拒绝在重启后仍然数得满
-            assert!(reopened.record_credential_rejection(&account.id, "upstream 401"));
-            assert!(reopened.record_credential_rejection(&account.id, "upstream 401"));
-            assert!(reopened.get(&account.id).unwrap().needs_relogin());
+            assert!(
+                loaded.needs_relogin(),
+                "逐出态没落盘 = 重启后又偷偷上线接客"
+            );
+            assert_eq!(3, loaded.consecutive_rejections, "翻态那次必须立即写");
+            assert_eq!(anchor, loaded.logged_in_at, "C2 锚点跨重启");
+            assert!(
+                loaded.relogin_notified_at.is_some(),
+                "提醒去重位丢了就会重启后再喊一遍"
+            );
         });
     }
 

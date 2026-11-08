@@ -12,8 +12,6 @@
 //! （`needs_relogin` → 逐出选路）是即时生效的，这里只负责**让人看见**，
 //! 一个巡检周期（≤5 分钟）的延迟换热路径干净，值。
 
-use std::sync::Arc;
-
 use super::store::AccountSessionStore;
 use crate::notify::alert::{AlertKind, AlertLevel};
 use crate::notify::alert_patrol::SharedAlertEvaluator;
@@ -94,6 +92,8 @@ pub fn check_relogin(sessions: &AccountSessionStore, alerts: &SharedAlertEvaluat
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::account_session::model::AccountSession;
     use crate::notify::alert::AlertRuleEvaluator;
