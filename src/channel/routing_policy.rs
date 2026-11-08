@@ -641,16 +641,17 @@ pub fn resolve_profile(
         model_layer.map(|p| (Layer::Model, p)),
     ];
 
-    // 生效组 id（契约 §6.1）：显式 group_id（第 1/2 环）优先；否则取最右侧
-    // 提供了 `default_group` 的档案层（第 3 环）。
-    let effective_group = match group_id {
-        Some(g) => Some(g),
-        None => layers
-            .iter()
-            .flatten()
-            .filter_map(|(_, p)| p.default_group.as_deref())
-            .last(),
-    };
+    // 生效组 id（契约 §6.1）：显式 group_id（第 1/2 环）优先；否则自左向右扫，
+    // 最后一个提供了 `default_group` 的档案层胜出（第 3 环；与逐字段合并同一
+    // 把尺 ——「最右侧不是 None 的层」生效）
+    let mut effective_group = group_id;
+    if effective_group.is_none() {
+        for (_, p) in layers.iter().flatten() {
+            if let Some(g) = p.default_group.as_deref() {
+                effective_group = Some(g);
+            }
+        }
+    }
     let group = effective_group.and_then(|gid| profiles.find_group(gid, requested_model));
 
     // 逐字段三态覆盖：只记「谁提供」，循环外物化（避免逐层 clone）
