@@ -1,8 +1,34 @@
-import { useState, useEffect, type MouseEvent } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import SystemMonitorPanel from '../components/SystemMonitorPanel';
-import { Button, Card, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
+import { Button, Card, EmptyState, Select, SkeletonTable } from '../components/ui';
+import {
+  applyTableColumns,
+  readTableColumns,
+  resetTableColumns,
+  writeTableColumns,
+  type TableColumnDef,
+  type TableColumnItem,
+  type TableColumnState,
+} from '../lib/tableColumns';
+import TableColumnSettings from '../components/ui/TableColumnSettings';
+import { useColumnResize } from '../components/ui/useColumnResize';
+import { TablePaginationFooter, usePageSize, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
+import { Tooltip } from '../components/ui';
+import { Columns3 } from 'lucide-react';
+
+const LS_PSZ = 'aigx-tbl-pagesize.security';
+const LS_TCOLS = 'aigx-tbl-cols.security';
+/** 安全事件列声明（时间/详情锁定） */
+const SEC_COL_DEFS: TableColumnDef[] = [
+  { key: 'time', label: '时间', width: 170, locked: true },
+  { key: 'type', label: '类型', width: 140 },
+  { key: 'ip', label: 'IP', width: 130 },
+  { key: 'user', label: '用户', width: 180 },
+  { key: 'detail', label: '详情', width: 320 },
+  { key: 'severity', label: '严重程度', align: 'center', width: 100 },
+];
 import './Security.css';
 
 interface SecurityOverview {
@@ -63,7 +89,41 @@ export default function Security(): JSX.Element {
   const [events, setEvents] = useState<SecurityEvent[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const size = 20;
+  const [pageSize, setPageSize] = usePageSize(LS_PSZ, SERVER_PAGE_SIZES, 20);
+  const size = typeof pageSize === 'number' ? pageSize : 20;
+  const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, SEC_COL_DEFS));
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
+  const commitCols = useCallback((next: TableColumnItem[], persist: boolean) => {
+    setColState((prev) => {
+      const nextState: TableColumnState = { ...prev, items: next };
+      if (persist) writeTableColumns(LS_TCOLS, nextState);
+      return nextState;
+    });
+  }, []);
+  const resetCols = useCallback(() => setColState(resetTableColumns(LS_TCOLS, SEC_COL_DEFS)), []);
+  const appliedCols = useMemo(() => applyTableColumns(colState, SEC_COL_DEFS), [colState]);
+  const visibleKeySet = useMemo(() => new Set(appliedCols.map((c) => c.key)), [appliedCols]);
+  const colResize = useColumnResize({
+    widths: Object.fromEntries(colState.items.filter((i) => i.width != null).map((i) => [i.key, i.width as number])),
+    setWidths: (next) => {
+      commitCols(
+        colState.items.map((i) => {
+          const w = next[i.key];
+          const defW = SEC_COL_DEFS.find((d) => d.key === i.key)?.width;
+          if (w == null || (defW != null && w === defW)) {
+            const { width: _drop, ...rest } = i;
+            return rest;
+          }
+          return { ...i, width: w };
+        }),
+        true,
+      );
+    },
+    defaultWidths: Object.fromEntries(SEC_COL_DEFS.map((d) => [d.key, d.width])),
+    lockedKeys: new Set(SEC_COL_DEFS.filter((d) => d.locked).map((d) => d.key)),
+    onCommit: () => { /* 落盘已在 setWidths 内做 */ },
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -164,7 +224,32 @@ export default function Security(): JSX.Element {
 
       {/* 系统资源监控（CPU/内存/负载，自动轮询） */}
       <Card title={t('系统资源')} bodyClassName="">
-        <SystemMonitorPanel />
+
+        actions={
+          <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
+            <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
+              <button
+                type="button"
+                className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                onClick={() => setColPanelOpen((v) => !v)}
+                aria-label={t('列设置')}
+              >
+                <Columns3 size={14} />
+              </button>
+            </Tooltip>
+            {colPanelOpen && (
+              <TableColumnSettings
+                open
+                onClose={() => setColPanelOpen(false)}
+                defs={SEC_COL_DEFS}
+                items={colState.items}
+                onChange={commitCols}
+                onReset={resetCols}
+                anchorRef={colPanelRef}
+              />
+            )}
+          </div>
+        }        <SystemMonitorPanel />
       </Card>
 
       {/* 概览卡片 */}
@@ -226,13 +311,30 @@ export default function Security(): JSX.Element {
           <div className="table-wrapper">
             <table>
               <thead>
+                <colgroup>
+                  {appliedCols.map((c) => (
+                    <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                  ))}
+                </colgroup>
                 <tr>
-                  <th>{t('时间')}</th>
-                  <th>{t('类型')}</th>
-                  <th>IP</th>
-                  <th>{t('用户')}</th>
-                  <th>{t('详情')}</th>
-                  <th>{t('严重程度')}</th>
+                  {appliedCols.map((c, idx) => {
+                    const grip = colResize.gripProps(c.key, {
+                      isLast: idx === appliedCols.length - 1,
+                      locked: c.locked,
+                      defaultWidth: c.width,
+                    });
+                    return (
+                      <th
+                        key={c.key}
+                        style={c.width != null ? { width: `${c.width}px` } : undefined}
+                      >
+                        {c.key === 'ip' ? 'IP' : t(SEC_COL_DEFS.find((d) => d.key === c.key)?.label ?? c.key)}
+                        {c.key !== 'time' && c.key !== 'detail' && (
+                          <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                        )}
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
@@ -240,24 +342,36 @@ export default function Security(): JSX.Element {
                   const severity = ev.severity || ev.level || 'info';
                   return (
                     <tr key={ev.id ?? `${ev.created_at}-${ev.ip}`}>
+{visibleKeySet.has('time') && (
                       <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                         {fmtTime(ev.created_at || ev.time || ev.timestamp)}
                       </td>
+)}
+{visibleKeySet.has('type') && (
                       <td>
                         <code style={{ background: 'var(--card-bg)', padding: '2px 6px', borderRadius: 4, fontSize: 12 }}>
                           {ev.type || ev.event_type || '—'}
                         </code>
                       </td>
+)}
+{visibleKeySet.has('ip') && (
                       <td style={{ fontSize: 12 }}>{ev.ip || ev.client_ip || '—'}</td>
+)}
+{visibleKeySet.has('user') && (
                       <td style={{ fontSize: 12 }} title={ev.user || ev.user_id || ev.username || ''}>{ev.user || ev.user_id || ev.username || '—'}</td>
+)}
+{visibleKeySet.has('detail') && (
                       <td style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: 'var(--text-muted)' }} title={ev.detail || ev.details || ev.message || ''}>
                         {ev.detail || ev.details || ev.message || '—'}
                       </td>
+)}
+{visibleKeySet.has('severity') && (
                       <td>
                         <span className={severityBadgeClass(severity)}>
                           {severityLabel(severity)}
                         </span>
                       </td>
+)}
                     </tr>
                   );
                 })}
@@ -266,10 +380,14 @@ export default function Security(): JSX.Element {
           </div>
         )}
 
-        <Pagination
+        <TablePaginationFooter
+          total={total}
           page={page}
-          totalPages={Math.max(1, totalPages)}
-          onChange={setPage}
+          totalPages={totalPages}
+          size={pageSize}
+          sizes={SERVER_PAGE_SIZES}
+          onSizeChange={(n) => { setPageSize(n); setPage(1); }}
+          onPageChange={setPage}
         />
       </Card>
     </div>
