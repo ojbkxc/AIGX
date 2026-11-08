@@ -362,6 +362,11 @@ pub struct UsageConfig {
     /// （满队列丢弃不阻塞），读路径无新增锁。默认关闭。
     #[serde(default)]
     pub route_replay: bool,
+    /// 聊天助手工具回路开关（#34）：开启后管理员的聊天助手可执行
+    /// registry 非 HighRisk 工具（≈53 个，含审计）；关闭=纯聊天。
+    /// 默认关闭——关闭时助手端点只多两次 verify_user。
+    #[serde(default)]
+    pub assistant_tools: bool,
     /// 调试模式（上游原始报文）：开启后抓取 AIGX **实际发往上游**的
     /// URL / 脱敏头 / 请求体，落在进程内环形缓冲（不写库），供设置页查看。
     /// 与 `log_body` 互补——那边是下游（客户端）侧，这边是上游侧。
@@ -733,6 +738,7 @@ impl Default for UsageConfig {
             max_request_body_mb: default_max_request_body_mb(),
             log_body: false,
             route_replay: false,
+            assistant_tools: false,
             debug_traffic: false,
             strip_newline_keepalive: false,
             models_dev_enabled: default_models_dev_enabled(),
@@ -803,6 +809,19 @@ pub fn route_replay_enabled() -> bool {
 /// 由 main 与 settings 更新端点写入快照
 pub fn set_route_replay(v: bool) {
     ROUTE_REPLAY.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 聊天助手工具回路开关的进程级快照（由 main 启动时写入）。
+static ASSISTANT_TOOLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 读取聊天助手工具回路开关
+pub fn assistant_tools_enabled() -> bool {
+    ASSISTANT_TOOLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 与 settings 更新端点写入快照
+pub fn set_assistant_tools(v: bool) {
+    ASSISTANT_TOOLS.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 调试模式（上游原始报文）开关的进程级快照（由 main 启动时写入）。

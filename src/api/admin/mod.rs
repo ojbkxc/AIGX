@@ -1,5 +1,6 @@
 pub mod account_login;
 pub mod account_sessions;
+pub mod assistant;
 pub mod auth;
 pub mod backup;
 pub mod backup_crypto;

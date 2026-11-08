@@ -220,7 +220,11 @@ pub struct PlaygroundChatRequest {
 ///
 /// 抽成一处是因为 chat / images / tts / transcriptions 四个入口都要做，
 /// 分散实现迟早会漏掉某个（改造前 images/tts/transcriptions 就没有余额预检）。
-fn playground_guard(state: &AppState, user: &crate::user::User, model: &str) -> Option<Response> {
+pub(crate) fn playground_guard(
+    state: &AppState,
+    user: &crate::user::User,
+    model: &str,
+) -> Option<Response> {
     if user.is_admin() {
         return None;
     }

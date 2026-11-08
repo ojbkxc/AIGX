@@ -139,6 +139,8 @@ async fn main() -> anyhow::Result<()> {
     crate::config::set_log_body(config.usage.log_body);
     // 路由回放快照开关快照（resolve/选号路径读取，见 config::route_replay_enabled）
     crate::config::set_route_replay(config.usage.route_replay);
+    // 聊天助手工具回路开关快照（见 config::assistant_tools_enabled）
+    crate::config::set_assistant_tools(config.usage.assistant_tools);
     // 调试模式（上游原始报文）开关快照（桥接层同步读取，见 config::debug_traffic_enabled）
     crate::config::set_debug_traffic(config.usage.debug_traffic);
     // 换行保活帧过滤开关快照（桥接层同步读取，见 config::strip_newline_keepalive）
@@ -2282,6 +2284,16 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/account-sessions/desktop-import",
             post(api::admin::desktop_import::handle_desktop_import),
+        )
+        // 聊天助手工具回路（#34）：工具目录 + 多轮 tool-call 循环
+        //（计费走 playground 同链；tools 限管理员，开关默认关）
+        .route(
+            "/api/assistant/tools",
+            get(api::admin::assistant::handle_assistant_tools),
+        )
+        .route(
+            "/api/assistant/chat",
+            post(api::admin::assistant::handle_assistant_chat),
         )
         .route(
             "/api/account-sessions/usage",

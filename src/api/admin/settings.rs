@@ -56,6 +56,8 @@ pub struct LimitsRequest {
     /// 路由回放快照开关（route_replay）：resolve 过滤原因/策略快照/账号级
     /// 跳过细因落请求日志，供 /api/routing/replay 回放。默认关闭零开销。
     pub route_replay: Option<bool>,
+    /// 聊天助手工具回路开关（#34；默认关闭）
+    pub assistant_tools: Option<bool>,
     /// 调试模式（上游原始报文）开关
     pub debug_traffic: Option<bool>,
     /// 丢弃上游换行保活帧开关
@@ -172,6 +174,7 @@ pub async fn handle_get_limits(
             "max_request_body_mb": config.usage.max_request_body_mb,
             "log_body": config.usage.log_body,
             "route_replay": config.usage.route_replay,
+            "assistant_tools": config.usage.assistant_tools,
             "debug_traffic": config.usage.debug_traffic,
             "strip_newline_keepalive": config.usage.strip_newline_keepalive,
             "billing_flat_quota": config.usage.billing_flat_quota,
@@ -293,6 +296,10 @@ pub async fn handle_update_limits(
         config.usage.route_replay = v;
         // 同步进程级快照（resolve/选号路径读取，立即生效）
         crate::config::set_route_replay(v);
+    }
+    if let Some(v) = body.assistant_tools {
+        config.usage.assistant_tools = v;
+        crate::config::set_assistant_tools(v);
     }
     if let Some(v) = body.debug_traffic {
         config.usage.debug_traffic = v;

@@ -683,6 +683,12 @@ fn paths_settings_ops() -> Value {
         "/api/routing/defaults": {
             "get": op("路由", "查询路由策略默认值（恢复默认用）")
         },
+        "/api/assistant/tools": {
+            "get": op("助手", "聊天助手工具目录（管理员+开关开启→非 HighRisk 全集；否则空清单）")
+        },
+        "/api/assistant/chat": {
+            "post": op_body("助手", "工具回路聊天（多轮 tool-call 循环，12 轮上限；计费走订阅池+钱包；一条请求日志归集全程）", "model/messages[{role,content}]/channel_id?/max_rounds?")
+        },
         "/api/routing/replay/{request_id}": {
             "get": op_params("路由", "路由回放快照（Phase1-B/#26/#32 只读投影：候选序/过滤原因/选中/策略快照/account_skips 按渠道分组且有界/attempt_details 逐次上游尝试明细（index/channel/provider/model/stickyHit/startedAt/finishedAt/status/error/notice；有界 64+截断计数）/route_truncated 与 attempt_details_truncated 截断计数；route_replay 开关开启的请求才有完整数据）", &[path_param("request_id")])
         },
@@ -1288,6 +1294,8 @@ mod tests {
         add("/api/routing", &["get", "put"]);
         add("/api/routing/defaults", &["get"]);
         add("/api/routing/replay/{request_id}", &["get"]);
+        add("/api/assistant/tools", &["get"]);
+        add("/api/assistant/chat", &["post"]);
         add("/api/gateway/prompt", &["get", "put"]);
         add("/api/storage", &["get"]);
         add("/api/backup/export-encrypted", &["post"]);
