@@ -716,6 +716,8 @@ pub async fn handle_get_route_replay(
             "selected_channel": log.selected_channel,
             "route_config": log.route_config,
             "route_truncated": log.route_truncated,
+            "attempt_details": log.attempt_details,
+            "attempt_details_truncated": log.attempt_details_truncated,
             "account_skips": log.account_skips,
         }
     })))

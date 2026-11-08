@@ -35,6 +35,11 @@ pub(crate) struct RouteCapture {
     pub filtered_truncated: usize,
     /// 选路那一刻的策略快照
     pub config: Option<crate::log::RouteConfigSnapshot>,
+    /// 逐次上游尝试明细（#32「执行时间线」）：failover 循环里每次真实
+    /// 上游调用一条，行数有界（超出转 [`Self::attempts_truncated`]）。
+    pub attempts: Vec<crate::log::AttemptDetail>,
+    /// attempts 被截断的条数（不静默丢）
+    pub attempts_truncated: usize,
     /// 逐账号跳过明细缓冲：账号型渠道的 AccountBridge 选号时按渠道分组填充，
     /// 调用方记录日志时 drain。请求本地（同请求多账号渠道共享）。
     pub account_buf: Arc<std::sync::Mutex<Vec<crate::log::AccountSkipGroup>>>,
@@ -54,6 +59,20 @@ impl RouteCapture {
             channel_id: channel_id.to_string(),
             reason: reason.to_string(),
         });
+    }
+
+    /// 追加一条尝试明细（#32；行数有界，超出转计数——不静默丢）。
+    /// 错误摘要截断 300 字符（对齐 agent/llm 的错误截断口径）。
+    pub(crate) fn push_attempt(&mut self, detail: crate::log::AttemptDetail) {
+        if self.attempts.len() >= crate::log::ROUTE_REPLAY_MAX_ATTEMPTS {
+            self.attempts_truncated += 1;
+            return;
+        }
+        let mut detail = detail;
+        if let Some(err) = detail.error.take() {
+            detail.error = Some(err.chars().take(300).collect());
+        }
+        self.attempts.push(detail);
     }
 }
 

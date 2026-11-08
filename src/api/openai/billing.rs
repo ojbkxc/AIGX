@@ -754,6 +754,8 @@ pub(crate) struct StreamBillingState {
     pub(crate) route_config: Option<crate::log::RouteConfigSnapshot>,
     /// Phase1-B/#26：resolve 层过滤截断计数（不静默丢）
     pub(crate) route_truncated: usize,
+    /// #32 路由回放：逐次上游尝试明细（「执行时间线」数据源）
+    pub(crate) attempt_details: Vec<crate::log::AttemptDetail>,
     /// Phase1-B/#26 路由回放：逐账号跳过明细（按渠道分组、行数有界）
     pub(crate) account_skips: Vec<crate::log::AccountSkipGroup>,
     /// P1：预留记录（两段式计费）
@@ -839,6 +841,7 @@ impl StreamBillingState {
         // Phase1-B 路由回放：策略快照（开关关闭时 None，序列化跳过）
         log.route_config = self.route_config.clone();
         log.route_truncated = self.route_truncated;
+        log.attempt_details = self.attempt_details.clone();
         log.account_skips = self.account_skips.clone();
         // 对话快照（**默认记录**，不依赖 log_body 开关）：管理员点开日志就能看到
         // 这轮对话说了什么，无需先去系统设置打开调试模式。

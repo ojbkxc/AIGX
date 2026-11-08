@@ -484,6 +484,11 @@ pub async fn handle_messages(
             .filter_map(|(_, cid, _)| cid.clone())
             .collect();
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
+        // #32 路由回放：真实上游调用计数 + 亲和命中判定（同 resolve 口径）
+        let mut attempt_counter: u32 = 0;
+        let affinity_hit_id = session_id
+            .as_deref()
+            .and_then(|sid| state.channel_store.affinity_cache().lookup(sid, &model));
         for (bridge, cid, ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
@@ -524,6 +529,32 @@ pub async fn handle_messages(
                             ),
                         );
                     }
+                    // #32 路由回放：建流成功轮明细（流式终态在计费守卫）
+                    if route_capture.is_some() {
+                        route_capture
+                            .as_mut()
+                            .unwrap()
+                            .push_attempt(crate::log::AttemptDetail {
+                                index: attempt_index,
+                                channel_id: cid.clone().unwrap_or_default(),
+                                channel_name: ch_ref
+                                    .as_ref()
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_default(),
+                                provider: ch_ref
+                                    .as_ref()
+                                    .map(|c| c.channel_type.as_str().to_string())
+                                    .unwrap_or_default(),
+                                account: String::new(),
+                                model: upstream.clone(),
+                                sticky_hit,
+                                started_at: attempt_started_at,
+                                finished_at: Some(chrono::Utc::now().timestamp()),
+                                status: Some(200),
+                                error: None,
+                                notice: None,
+                            });
+                    }
                     stream_opt = Some(s);
                     used_channel_id = cid;
                     used_upstream = Some(upstream);
@@ -544,6 +575,32 @@ pub async fn handle_messages(
                             &e.to_string(),
                             session_id.as_deref(),
                         );
+                    }
+                    // #32 路由回放：失败轮明细
+                    if route_capture.is_some() {
+                        route_capture
+                            .as_mut()
+                            .unwrap()
+                            .push_attempt(crate::log::AttemptDetail {
+                                index: attempt_index,
+                                channel_id: cid.clone().unwrap_or_default(),
+                                channel_name: ch_ref
+                                    .as_ref()
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_default(),
+                                provider: ch_ref
+                                    .as_ref()
+                                    .map(|c| c.channel_type.as_str().to_string())
+                                    .unwrap_or_default(),
+                                account: String::new(),
+                                model: upstream.clone(),
+                                sticky_hit,
+                                started_at: attempt_started_at,
+                                finished_at: Some(chrono::Utc::now().timestamp()),
+                                status: e.http_status().try_into().ok(),
+                                error: Some(e.to_string()),
+                                notice: None,
+                            });
                     }
                     if !super::openai::is_retryable_bridge_error(&e) {
                         // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
@@ -599,6 +656,8 @@ pub async fn handle_messages(
                         .extend(capture.filtered.iter().cloned());
                     log.route_config = capture.config.clone();
                     log.route_truncated = capture.filtered_truncated;
+                    log.attempt_details = std::mem::take(&mut capture.attempts);
+                    log.attempt_details_truncated = capture.attempts_truncated;
                     log.account_skips = capture
                         .account_buf
                         .lock()
@@ -932,6 +991,8 @@ pub async fn handle_messages(
                 filtered_channels: filtered_channels.clone(),
                 route_config,
                 route_truncated,
+                attempt_details,
+                attempt_details_truncated,
                 account_skips,
                 // 两段式计费：reserve_usage 已在请求前完成，finalize 走 settle_usage
                 reservation: Some(reservation.clone()),
@@ -1073,6 +1134,11 @@ pub async fn handle_messages(
             .filter_map(|(_, cid, _)| cid.clone())
             .collect();
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
+        // #32 路由回放：真实上游调用计数 + 亲和命中判定（同 resolve 口径）
+        let mut attempt_counter: u32 = 0;
+        let affinity_hit_id = session_id
+            .as_deref()
+            .and_then(|sid| state.channel_store.affinity_cache().lookup(sid, &model));
         for (bridge, cid, ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
@@ -1092,6 +1158,10 @@ pub async fn handle_messages(
             // 按上游模型名构造本次尝试的请求（bridges 从 chat_req.model 构造上游 body）
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
+            attempt_counter += 1;
+            let attempt_index = attempt_counter;
+            let attempt_started_at = chrono::Utc::now().timestamp();
+            let sticky_hit = affinity_hit_id.as_deref() == cid.as_deref();
             let attempt_start = std::time::Instant::now();
             match bridge.chat(&attempt_req, &ctx).await {
                 Ok(resp) => {
@@ -1106,6 +1176,32 @@ pub async fn handle_messages(
                                 &state.routing_policy.snapshot(),
                             ),
                         );
+                    }
+                    // #32 路由回放：非流式成功轮明细
+                    if route_capture.is_some() {
+                        route_capture
+                            .as_mut()
+                            .unwrap()
+                            .push_attempt(crate::log::AttemptDetail {
+                                index: attempt_index,
+                                channel_id: cid.clone().unwrap_or_default(),
+                                channel_name: ch_ref
+                                    .as_ref()
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_default(),
+                                provider: ch_ref
+                                    .as_ref()
+                                    .map(|c| c.channel_type.as_str().to_string())
+                                    .unwrap_or_default(),
+                                account: String::new(),
+                                model: upstream.clone(),
+                                sticky_hit,
+                                started_at: attempt_started_at,
+                                finished_at: Some(chrono::Utc::now().timestamp()),
+                                status: Some(200),
+                                error: None,
+                                notice: None,
+                            });
                     }
                     response_opt = Some(resp);
                     used_channel_id = cid;
@@ -1127,6 +1223,32 @@ pub async fn handle_messages(
                             &e.to_string(),
                             session_id.as_deref(),
                         );
+                    }
+                    // #32 路由回放：失败轮明细
+                    if route_capture.is_some() {
+                        route_capture
+                            .as_mut()
+                            .unwrap()
+                            .push_attempt(crate::log::AttemptDetail {
+                                index: attempt_index,
+                                channel_id: cid.clone().unwrap_or_default(),
+                                channel_name: ch_ref
+                                    .as_ref()
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_default(),
+                                provider: ch_ref
+                                    .as_ref()
+                                    .map(|c| c.channel_type.as_str().to_string())
+                                    .unwrap_or_default(),
+                                account: String::new(),
+                                model: upstream.clone(),
+                                sticky_hit,
+                                started_at: attempt_started_at,
+                                finished_at: Some(chrono::Utc::now().timestamp()),
+                                status: e.http_status().try_into().ok(),
+                                error: Some(e.to_string()),
+                                notice: None,
+                            });
                     }
                     if !super::openai::is_retryable_bridge_error(&e) {
                         // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回

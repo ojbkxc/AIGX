@@ -135,6 +135,14 @@ pub struct RequestLog {
     /// [`ROUTE_REPLAY_MAX_FILTERED`] 的部分，不静默丢）。
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub route_truncated: usize,
+    /// 逐次上游尝试明细（#32「执行时间线」数据源）：仅 `route_replay`
+    /// 开关开启时捕获，关闭时为空且不序列化。行数有界
+    ///（[`ROUTE_REPLAY_MAX_ATTEMPTS`]，超出转 truncated 计数）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempt_details: Vec<AttemptDetail>,
+    /// attempt 明细的截断计数（#32；不静默丢）。
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub attempt_details_truncated: usize,
 }
 
 /// 默认尝试次数。
@@ -465,6 +473,47 @@ impl AccountSkipGroup {
     }
 }
 
+/// 每请求保留的逐次尝试明细上限（#32，与 #26 的 64 口径一致）。
+///
+/// 尝试次数由渠道数决定（设备可控），无上限时多渠道 failover 可产生
+/// 几十条明细；超出转 `attempt_details_truncated` 计数，不静默丢。
+pub const ROUTE_REPLAY_MAX_ATTEMPTS: usize = 64;
+
+/// 逐次上游尝试明细（#32 路由回放「执行时间线」数据源）。
+///
+/// 字段与上游 `request_stats/record.rs AttemptDetail` 对齐后按 AIGX 现实
+/// 裁剪：AIGX 的账号轮换发生在 AccountBridge 内部（一次渠道尝试内多账号），
+/// 渠道级明细拿不到单账号维度——`account` 恒空串（上游语义：空=无账号记录）；
+/// `retries[]`（渠道内自重试）与 `body_bytes` 同理不可见，不建字段。
+/// `notice` 字段位保留（上游有「代理回退直连」提示，AIGX v1 无来源恒 None）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttemptDetail {
+    /// 序号（1 起；与 `attempts` 计数同口径：真实上游调用次数）
+    pub index: u32,
+    pub channel_id: String,
+    pub channel_name: String,
+    /// 渠道协议域（channel_type.as_str()；账号型恒 "account"）
+    pub provider: String,
+    /// 承载账号展示名（AIGX 渠道级明细拿不到，恒空串——见类型注释）
+    pub account: String,
+    /// 本轮尝试的上游真实模型名（映射后）
+    pub model: String,
+    /// 亲和粘滞命中（本渠道被置顶）
+    pub sticky_hit: bool,
+    /// 开始时刻（unix 秒）
+    pub started_at: i64,
+    /// 结束时刻（unix 秒；None = 未定论——流式成功轮的终态在计费守卫，
+    /// 这里只记建流结论，流式成功轮 finished_at=建流成功时刻）
+    pub finished_at: Option<i64>,
+    /// HTTP 状态码（None = 传输层失败/未定论）
+    pub status: Option<u16>,
+    /// 失败摘要（成功为 None；截断 300 字符）
+    pub error: Option<String>,
+    /// 提示（v1 恒 None，契约位）
+    pub notice: Option<String>,
+}
+
 /// 共享缓冲的总字节兜底（#26：防单条日志记录失控）。
 ///
 /// 超限时**丢弃最旧的组**并把它的 truncated 并进最新的组（计数不丢），
@@ -615,6 +664,8 @@ impl RequestLog {
             route_config: None,
             account_skips: Vec::new(),
             route_truncated: 0,
+            attempt_details: Vec::new(),
+            attempt_details_truncated: 0,
         }
     }
 }
@@ -2179,5 +2230,66 @@ mod tests {
         assert!(admin.contains("conversation"));
         assert!(admin.contains("candidate_channels"));
         assert!(admin.contains("秘密对话"));
+    }
+}
+
+#[cfg(test)]
+mod attempt_detail_tests {
+    use super::*;
+
+    fn detail(index: u32) -> AttemptDetail {
+        AttemptDetail {
+            index,
+            channel_id: format!("ch-{}", index % 3),
+            channel_name: format!("渠道 {}", index % 3),
+            provider: "openai_compatible".to_string(),
+            account: String::new(),
+            model: "gpt-test".to_string(),
+            sticky_hit: index == 1,
+            started_at: 1_700_000_000,
+            finished_at: Some(1_700_000_001),
+            status: if index % 2 == 0 { Some(502) } else { Some(200) },
+            error: (index % 2 == 0).then(|| "upstream boom".to_string()),
+            notice: None,
+        }
+    }
+
+    /// #32：明细行数有界（ROUTE_REPLAY_MAX_ATTEMPTS），超出转计数不静默丢。
+    #[test]
+    fn attempt_capture_is_bounded() {
+        let mut capture = crate::api::openai::resolve::RouteCapture::default();
+        for i in 1..=ROUTE_REPLAY_MAX_ATTEMPTS as u32 + 10 {
+            capture.push_attempt(detail(i));
+        }
+        assert_eq!(capture.attempts.len(), ROUTE_REPLAY_MAX_ATTEMPTS);
+        assert_eq!(capture.attempts_truncated, 10);
+        // 错误摘要截断（300 字符）
+        assert!(capture.attempts.iter().all(|d| {
+            d.error
+                .as_ref()
+                .map(|e| e.chars().count() <= 300)
+                .unwrap_or(true)
+        }));
+        // 序号口径：前 64 条是 1..=64（与 attempts 计数同口径、不跳号）
+        assert_eq!(capture.attempts.first().map(|d| d.index), Some(1));
+        assert_eq!(
+            capture.attempts.last().map(|d| d.index),
+            Some(ROUTE_REPLAY_MAX_ATTEMPTS as u32)
+        );
+    }
+
+    /// #32：开关关闭（字段空/零）时不序列化——serde skip 判定。
+    #[test]
+    fn attempt_fields_skipped_when_off() {
+        let log = RequestLog::new();
+        let json = serde_json::to_string(&log).unwrap();
+        assert!(!json.contains("attempt_details"));
+        assert!(!json.contains("attempt_details_truncated"));
+        // 开启（有数据）时序列化
+        let mut log = RequestLog::new();
+        log.attempt_details = vec![detail(1)];
+        let json = serde_json::to_string(&log).unwrap();
+        assert!(json.contains("attempt_details"));
+        assert!(json.contains("stickyHit"));
     }
 }
