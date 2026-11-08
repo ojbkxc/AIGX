@@ -1469,7 +1469,19 @@ pub async fn handle_fetch_channel_models(
     headers: HeaderMap,
     Json(body): Json<FetchModelsRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _config = verify_admin(&state, &headers).await?;
+    let config = verify_admin(&state, &headers).await?;
+    // SSRF 防护（#17-① 收口）：本端点接受 body 任意 base_url 且会真实发起
+    // 上游请求——是六面里最后一个没盖住的入口（渠道 save 时校验过，但这里
+    // 的 body.base_url 可绕过渠道存储直连任意内网地址）。与新增/更新渠道
+    // 同口径：默认拒绝内网/环回/元数据，allow_internal_upstream 显式放行。
+    if !body.base_url.trim().is_empty() {
+        if let Err(rej) = crate::net_guard::validate_outbound_url(
+            &body.base_url,
+            config.usage.allow_internal_upstream,
+        ) {
+            return Err(error_response(&rej.message(), StatusCode::BAD_REQUEST));
+        }
+    }
 
     // 密钥优先级：body 明文 > 已存渠道解码 > 空
     let api_key = if !body.api_key.is_empty() {
