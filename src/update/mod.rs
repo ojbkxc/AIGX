@@ -528,32 +528,9 @@ impl UpdateManager {
                 CURRENT_VERSION
             );
             // #18-①：回收更新产物（生产实证 39 个备份 527MB + 8 个 .upd
-            // 253MB，更新机制不回收）。保留策略：
-            // - 本轮下载的 .upd（回滚候选，rollback() 复用 force 模式）
-            // - 旧版本 bundle（previous_version 对应的包，供再回滚）
-            // 其余 .upd/.sha256 全删；staging 每轮已清。
-            let updates_dir = self.data_dir.join("updates");
-            // `host_arch()` 在未知架构返回 None —— 此时不保留旧 bundle 资产
-            // （`and_then` 而非 `map`：map 会产出 `Option<Option<String>>`，
-            // 且把 `Option<&str>` 直接喂给 `&str` 形参是 E0308）。
-            let keep = [
-                release.bundle.as_ref().map(|b| b.name.clone()),
-                host_arch().and_then(|arch| server_bundle_name(&marker.previous_version, arch)),
-            ];
-            if let Ok(entries) = std::fs::read_dir(&updates_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    let is_bundle_artifact = name.ends_with(".upd") || name.ends_with(".sha256");
-                    let is_kept = keep
-                        .iter()
-                        .flatten()
-                        .any(|k| name == *k || name == format!("{k}.sha256"));
-                    if is_bundle_artifact && !is_kept {
-                        let _ = std::fs::remove_file(entry.path());
-                        tracing::debug!("update artifact reclaimed: {name}");
-                    }
-                }
-            }
+            // 253MB，更新机制不回收）。逻辑收敛到 `cleanup_artifacts`，
+            // 与手动清理端点（handle_update_cleanup_artifacts）共用同一口径。
+            self.cleanup_artifacts(release.bundle.as_ref().map(|b| b.name.as_str()));
             self.persist();
             if config.restart_after_apply {
                 if let Err(e) = self.request_restart() {
@@ -567,6 +544,51 @@ impl UpdateManager {
             );
             self.persist();
         }
+    }
+
+    /// #18-① 更新产物回收（apply 成功后与手动清理端点共用同一口径）。
+    ///
+    /// 保留策略（**不能误删回滚候选**）：
+    /// - `current_bundle`：本轮/当前下载的 `.upd`（回滚候选，rollback() 复用 force 模式）
+    /// - 上一版 bundle：`applied.previous_version` 对应的包（供再回滚）
+    /// 其余 `.upd`/`.sha256` 全删。返回 `(删除文件数, 回收字节数)`。
+    pub(crate) fn cleanup_artifacts(&self, current_bundle: Option<&str>) -> (usize, u64) {
+        let updates_dir = self.data_dir.join("updates");
+        // `host_arch()` 在未知架构返回 None —— 此时不保留旧 bundle 资产
+        // （`and_then` 而非 `map`：map 会产出 `Option<Option<String>>`，
+        // 且把 `Option<&str>` 直接喂给 `&str` 形参是 E0308）。
+        let previous_version = self
+            .lock()
+            .applied
+            .as_ref()
+            .map(|m| m.previous_version.clone())
+            .unwrap_or_default();
+        let keep = [
+            current_bundle.map(str::to_string),
+            host_arch().and_then(|arch| server_bundle_name(&previous_version, arch)),
+        ];
+        let mut removed = 0usize;
+        let mut bytes = 0u64;
+        if let Ok(entries) = std::fs::read_dir(&updates_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_bundle_artifact = name.ends_with(".upd") || name.ends_with(".sha256");
+                let is_kept = keep
+                    .iter()
+                    .flatten()
+                    .any(|k| name == *k || name == format!("{k}.sha256"));
+                if is_bundle_artifact && !is_kept {
+                    if let Ok(meta) = entry.metadata() {
+                        bytes = bytes.saturating_add(meta.len());
+                    }
+                    if std::fs::remove_file(entry.path()).is_ok() {
+                        removed += 1;
+                    }
+                    tracing::debug!("update artifact reclaimed: {name}");
+                }
+            }
+        }
+        (removed, bytes)
     }
 
     async fn do_apply(&self, config: &UpdateConfig, release: &ReleaseInfo) -> Result<(), String> {

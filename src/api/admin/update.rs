@@ -145,6 +145,35 @@ pub async fn handle_update_rollback(
     }
 }
 
+/// POST /api/update/cleanup-artifacts —— 一键清理更新产物。
+///
+/// 保留当前版本与上一版各一代回滚候选（`.upd` + `.sha256`），其余全删；
+/// 返回 `{ removed, bytes }`。逻辑与 apply 成功后的自动回收共用同一实现
+/// （`UpdateManager::cleanup_artifacts`），避免两套回收口径漂移。
+pub async fn handle_update_cleanup_artifacts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _config = verify_admin(&state, &headers).await?;
+    // 当前版本的 bundle 名（保留作回滚候选）；未知架构时为 None。
+    let current = crate::update::host_arch()
+        .and_then(|arch| crate::update::server_bundle_name(crate::update::CURRENT_VERSION, arch));
+    let (removed, bytes) = state.update.cleanup_artifacts(current.as_deref());
+    let admin_id = admin_id_from_session(&state, &headers).await;
+    record_audit(
+        &state,
+        &admin_id,
+        "cleanup_update_artifacts",
+        "update",
+        Some(json!({ "version": crate::update::CURRENT_VERSION })),
+        Some(json!({ "removed": removed, "bytes": bytes })),
+    );
+    Ok(Json(json!({
+        "success": true,
+        "data": { "removed": removed, "bytes": bytes },
+    })))
+}
+
 /// GET /api/update/settings —— 自动更新配置（令牌脱敏）。
 pub async fn handle_get_update_settings(
     State(state): State<AppState>,
