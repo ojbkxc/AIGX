@@ -60,6 +60,22 @@ pub fn tools_enabled() -> bool {
     crate::config::assistant_tools_enabled()
 }
 
+/// 工具目录条目构造（纯函数，handler 与单测共用——同 `user_tools.rs::catalog_payload` 姿势）。
+///
+/// `risk` 必须走 `RiskLevel::as_str()`（`agent/tools.rs`）：全库 4 处 risk 输出点
+/// （本函数、`agent/runner.rs`、`api/admin/settings.rs`、`api/admin/user_tools.rs`）
+/// 单一取值来源。#18 之前此处手拼 `read_only/low_risk/high_risk` 第三套命名，
+/// 值域由 `tests::assistant_tools_risk_field_is_canonical` 钉死，防再退化（#28）。
+fn tool_json(t: &crate::agent::registry::ToolDef) -> Value {
+    json!({
+        "name": t.name,
+        "label": t.label,
+        "description": t.description,
+        "schema": (t.schema)(),
+        "risk": t.risk.as_str(),
+    })
+}
+
 /// 工具目录（GET /api/assistant/tools）。
 ///
 /// 管理员（开关开）→ 非 HighRisk 全集（≈53，registry::mcp_tools 同口径）；
@@ -70,19 +86,6 @@ pub async fn handle_assistant_tools(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let user = verify_user(&state, &headers).await?;
-    let tool_json = |t: &crate::agent::registry::ToolDef| {
-        json!({
-            "name": t.name,
-            "label": t.label,
-            "description": t.description,
-            "schema": (t.schema)(),
-            // #18：单一取值来源。此前此处手拼 read_only/low_risk/high_risk，
-            // 与其余 3 处输出点（agent/runner.rs、api/admin/settings.rs、
-            // api/admin/user_tools.rs）的 RiskLevel::as_str() 值域割裂，
-            // 下游按值过滤会踩到第三套命名。
-            "risk": t.risk.as_str(),
-        })
-    };
     let tools: Vec<Value> = if user.is_admin() {
         if !tools_enabled() {
             Vec::new()
@@ -614,4 +617,79 @@ fn make_channel_bridge(
         }
     };
     Ok(bridge)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// 规范值域——唯一来源 [`RiskLevel::as_str`]（`agent/tools.rs`）。
+    const CANONICAL: [&str; 3] = ["readonly", "low", "high"];
+    /// 历史上在本端点手拼过的第三套命名：出现即说明有人把值域写回了 handler。
+    const LEGACY_ALIASES: [&str; 3] = ["read_only", "low_risk", "high_risk"];
+
+    /// 单源定义本身也要钉住：三档字面量不许悄悄改名（改名＝契约变更，要走发版说明）。
+    #[test]
+    fn risk_level_as_str_literals_are_pinned() {
+        assert_eq!(RiskLevel::ReadOnly.as_str(), "readonly");
+        assert_eq!(RiskLevel::LowRisk.as_str(), "low");
+        assert_eq!(RiskLevel::HighRisk.as_str(), "high");
+    }
+
+    /// #28：钉死 `GET /api/assistant/tools` 的 risk 值域（防 #18/D-1 类退化）。
+    ///
+    /// #18 把此处的手拼 match 改成了 `t.risk.as_str()`，但端点此前**没有任何测试**
+    /// 覆盖 risk 字段（`user_tools.rs` 的单测只钉 catalog 端点），再手拼不会被 CI 拦。
+    /// 本测走 [`tool_json`]（纯函数，handler 与单测共用），逐条断言：
+    /// ①出参与 `RiskLevel::as_str()` 同源；②值落在规范三值内（`read_only/low_risk/high_risk`
+    /// 这类别名因此天然不合法）；③注册表里三档都被真测到（防钉变成空转）。
+    #[test]
+    fn assistant_tools_risk_field_is_canonical() {
+        let specs = tools::tool_specs();
+        assert!(!specs.is_empty(), "注册表为空——本值域钉将变成空转");
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for t in specs {
+            let row = tool_json(t);
+            let risk = row["risk"].as_str().unwrap_or_default();
+            assert_eq!(
+                risk,
+                t.risk.as_str(),
+                "{}：risk 必须与 RiskLevel::as_str() 单一来源一致",
+                t.name
+            );
+            assert!(
+                CANONICAL.contains(&risk),
+                "{}：risk={risk:?} 越出规范值域 {:?}（历史手拼别名 {:?} 已于 #18 废弃）",
+                t.name,
+                CANONICAL,
+                LEGACY_ALIASES
+            );
+            seen.insert(risk);
+        }
+        // 三档都得真被测到（某档从注册表消失时提醒改预期，而不是让钉变成空转）。
+        let expected: BTreeSet<&str> = CANONICAL.iter().copied().collect();
+        assert_eq!(
+            seen, expected,
+            "注册表 risk 分布与规范值域不吻合（实际: {seen:?}）"
+        );
+    }
+
+    /// 管理面分支口径：handler 过滤 HighRisk 后清单只剩 readonly/low（值域同钉）。
+    #[test]
+    fn assistant_tools_admin_surface_excludes_high() {
+        let rows: Vec<Value> = tools::tool_specs()
+            .iter()
+            .filter(|t| t.risk != RiskLevel::HighRisk)
+            .map(tool_json)
+            .collect();
+        assert!(!rows.is_empty(), "管理面清单为空");
+        for row in &rows {
+            assert!(
+                matches!(row["risk"].as_str(), Some("readonly") | Some("low")),
+                "管理面清单出现高危条目：{}",
+                row["name"]
+            );
+        }
+    }
 }
