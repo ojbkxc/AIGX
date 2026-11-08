@@ -1915,11 +1915,10 @@ mod tests {
     #[test]
     fn daily_prune_boundary_keeps_today_and_cutoff_day() {
         let s = store();
-        let day = |back: i64| {
-            (chrono::Utc::now().naive_utc().date() - chrono::Duration::days(back))
-                .format("%Y-%m-%d")
-                .to_string()
-        };
+        // 日键一律走 `day_key_back`（与 `today_key`/`cutoff_date_key` 同一快照口径）。
+        // 以前这里用 `Utc::now().naive_utc().date() - days(back)` 造键再比：缺省偏移
+        // 从隐式 UTC 变成 8 之后，UTC runner 的 16:00-23:59 会两边不同日 → 间歇假红。
+        let day = daily_agg::day_key_back;
         let today = daily_agg::today_key();
         assert_eq!(day(0), today);
         // 造三天行：今天、截止日（今天−2）、截止日前一天（今天−3）

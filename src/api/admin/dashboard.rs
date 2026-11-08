@@ -49,12 +49,27 @@ fn shift_date(date: &str, days_back: i64) -> String {
         .unwrap_or_else(|| date.to_string())
 }
 
-/// 自然日 UTC 起点（含）时间戳；解析失败 → i64::MIN。
+/// 报表日 0 点（含）的 unix 起点；解析失败 → i64::MIN。
+///
+/// 口径 = `[report] timezone_offset`（与 [`daily_agg::date_key`] 同源）。**这里必须
+/// 跟日键同口径**：它是「聚合读」与「明细现算回退」两条路共用的窗口下界，一边 UTC
+/// 一边偏移就会把同一面板劈成两套日界（P3-14 原始症状的复发形态，比现状更糟）。
+/// 7 个生产调用点 + `legacy.rs` 两处签名零改动，随快照自动切换。
 pub fn date_start_ts(date: &str) -> i64 {
+    date_start_ts_at(date, crate::config::report_tz_offset())
+}
+
+/// [`date_start_ts`] 的**纯函数变体**（单测直接喂 offset，不碰全局快照）。
+///
+/// 算法：naive 日 0 点当作报表时区的 0 点 → 减掉偏移秒数得到 unix 秒。固定偏移下
+/// 日长恒 86400s，故 `date_start_ts(d) + 86_400 - 1` 是当日最后一秒（`offset = 0`
+/// 且本地时区正在夏令时切换的那一日不成立，见 `config::ReportConfig` 文档）。
+pub fn date_start_ts_at(date: &str, offset: i32) -> i64 {
+    let tz = daily_agg::report_tz_of(offset);
     chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
         .ok()
         .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .map(|dt| dt.and_utc().timestamp())
+        .map(|nd| nd.and_utc().timestamp() - tz.local_minus_utc() as i64)
         .unwrap_or(i64::MIN)
 }
 
@@ -1201,16 +1216,31 @@ pub async fn handle_report_cache_trend_24h(
                     (Some(_), None) => false,
                 })
                 .collect();
-            json!(bucket_hours(&filtered, now, sampled))
+            json!(bucket_hours(
+                &filtered,
+                now,
+                sampled,
+                crate::config::report_tz_offset()
+            ))
         }
     })
     .await;
     Ok(Json(json!({ "success": true, "data": data })))
 }
 
-/// unix 秒 → 本地整点键 `YYYY-MM-DDTHH`（A2A 的时区口径由后端定死：服务器本地）。
+/// unix 秒 → 报表时区整点键 `YYYY-MM-DDTHH`。
+///
+/// P3-14：口径从「服务器本地（`chrono::Local`）」改为 `[report] timezone_offset`
+/// 快照，与日粒度同一条边界——以前同一面板上「日粒度=UTC、小时桶=Local」两套边界
+/// 并存，是 08-prod 记录的原始症状。缓存 slot 键随之变（形态不变，跨口径自然失效
+/// 重算，无害）。
 fn local_hour_key(ts: i64) -> String {
-    chrono::Local
+    hour_key_at(ts, crate::config::report_tz_offset())
+}
+
+/// [`local_hour_key`] 的纯函数变体（单测喂 offset，不吃全局快照）。
+fn hour_key_at(ts: i64, offset: i32) -> String {
+    daily_agg::report_tz_of(offset)
         .timestamp_opt(ts, 0)
         .single()
         .map(|dt| dt.format("%Y-%m-%dT%H").to_string())
@@ -1227,14 +1257,21 @@ type HourBucketAcc = (
     std::collections::BTreeMap<String, u64>,
 );
 
-/// 把明细按本地整点分进「含当前小时的近 24 桶」（升序，缺数据的桶补零行）。
+/// 把明细按报表时区整点分进「含当前小时的近 24 桶」（升序，缺数据的桶补零行）。
 ///
-/// 纯函数便于单测；logs 需调用方先按 user 过滤。口径与 cache_rates 同一条：
-/// 命中率 = 命中请求数/总请求数（cache_hit 是请求级布尔），附命中请求承担
-/// 的输入 Token；models 分解按 token 降序取前 8（hover 多行气泡用）。
-fn bucket_hours(logs: &[crate::log::RequestLog], now: i64, sampled: bool) -> Vec<Value> {
-    // 当前本地整点起点，往回 23 个桶
-    let Some(now_dt) = chrono::Local.timestamp_opt(now, 0).single() else {
+/// 纯函数便于单测（`offset` 由调用方给，测试直接喂值、不碰全局快照）；logs 需调用方
+/// 先按 user 过滤。口径与 cache_rates 同一条：命中率 = 命中请求数/总请求数（cache_hit
+/// 是请求级布尔），附命中请求承担的输入 Token；models 分解按 token 降序取前 8
+/// （hover 多行气泡用）。
+fn bucket_hours(
+    logs: &[crate::log::RequestLog],
+    now: i64,
+    sampled: bool,
+    offset: i32,
+) -> Vec<Value> {
+    // 当前报表时区整点起点，往回 23 个桶
+    let tz = daily_agg::report_tz_of(offset);
+    let Some(now_dt) = tz.timestamp_opt(now, 0).single() else {
         return Vec::new();
     };
     let Some(cur) = now_dt
@@ -1471,6 +1508,103 @@ mod tests {
         assert_eq!(from, "2026-06-06");
     }
 
+    /// **P3-14 的核心防复发钉**：报表窗口下界（`date_start_ts_at`，明细现算回退路径
+    /// 用它）与日键（`daily_agg::date_key_at`，聚合路径用它）必须是**同一条日界**。
+    /// 两条路径一旦分裂，同一面板上「日粒度」与「自定义区间」的数字会对不上，比现状
+    /// （UTC vs Local 两套并存）更难查。三种 offset 各钉一遍往返恒等 + 谓词选出同一批。
+    #[test]
+    fn day_window_and_day_key_are_the_same_boundary() {
+        for offset in [0i32, 8, -3] {
+            let day = "2026-11-08";
+            let start = date_start_ts_at(day, offset);
+            let end = start + 86_400 - 1;
+            assert_ne!(start, i64::MIN, "offset={offset} 合法日期不该解析失败");
+            assert_eq!(
+                daily_agg::date_key_at(start, offset),
+                day,
+                "offset={offset}：窗口下界必须落在当日"
+            );
+            assert_eq!(
+                daily_agg::date_key_at(end, offset),
+                day,
+                "offset={offset}：+86400−1 仍是当日最后一秒（固定偏移下日长恒 86400）"
+            );
+            assert_eq!(daily_agg::date_key_at(end + 1, offset), "2026-11-09");
+            assert_eq!(daily_agg::date_key_at(start - 1, offset), "2026-11-07");
+            // 谓词等价：时间窗选出的样本 = 日键选出的样本（读侧两条路必须给同一日同一数）
+            let samples = [start - 1, start, start + 3600, end - 1, end, end + 1];
+            let by_window = samples
+                .iter()
+                .filter(|ts| **ts >= start && **ts <= end)
+                .count();
+            let by_key = samples
+                .iter()
+                .filter(|ts| daily_agg::date_key_at(**ts, offset) == day)
+                .count();
+            assert_eq!(
+                by_window, by_key,
+                "offset={offset}：窗口谓词与日键选出的不是同一批（{samples:?}）"
+            );
+            assert_eq!(
+                by_window, 4,
+                "offset={offset}：当日样本数应为 4（钉住用例本身）"
+            );
+        }
+    }
+
+    /// 小时键随 offset 平移（原 `Local` 口径换成报表时区口径后，跨口径必须真的动）。
+    ///
+    /// 具体钟点只钉**固定偏移**；`offset = 0` 分支与系统本地时区比对，不写死字面量
+    /// ——CI runner 是 UTC 属于巧合，拿它当期望值就是下一个「换机器就红」的假红雷。
+    #[test]
+    fn hour_keys_follow_report_offset() {
+        // 2026-11-08T16:30:00Z
+        let ts = chrono::NaiveDate::from_ymd_opt(2026, 11, 8)
+            .unwrap()
+            .and_hms_opt(16, 30, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        assert_eq!(hour_key_at(ts, 8), "2026-11-09T00", "UTC+8 已跨日");
+        assert_eq!(hour_key_at(ts, 5), "2026-11-08T21");
+        assert_eq!(hour_key_at(ts, -3), "2026-11-08T13");
+        // offset = 0 → 跟随系统本地时区（与 `chrono::Local` 的墙钟一致即可）
+        let local_key = chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+            .map(|d| {
+                d.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%dT%H")
+                    .to_string()
+            })
+            .unwrap();
+        assert_eq!(hour_key_at(ts, 0), local_key, "offset=0 = 系统本地");
+        // 同一 now 喂不同 offset：末桶随动，桶数与升序不变
+        let keys = |off: i32| -> Vec<String> {
+            bucket_hours(&[], ts, false, off)
+                .iter()
+                .map(|v| v["hour"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let (a, b) = (keys(5), keys(8));
+        assert_eq!(a.len(), 24);
+        assert_eq!(b.len(), 24);
+        assert_eq!(a[23], hour_key_at(ts, 5));
+        assert_eq!(b[23], hour_key_at(ts, 8));
+        assert_ne!(a[23], b[23], "offset 变了末桶必须变");
+        assert!(b.windows(2).all(|w| w[0] < w[1]), "跨日也要严格升序");
+    }
+
+    /// 快照变体与纯函数变体同源（防止有人只改其中一个 → 生产与测试口径分家）。
+    #[test]
+    fn snapshot_variants_match_pure_variants() {
+        let off = crate::config::report_tz_offset();
+        let ts = 1_730_000_000_i64;
+        assert_eq!(
+            date_start_ts("2026-11-08"),
+            date_start_ts_at("2026-11-08", off)
+        );
+        assert_eq!(local_hour_key(ts), hour_key_at(ts, off));
+    }
+
     fn bkt_log(ts: i64, model: &str, it: u64, ot: u64, hit: bool) -> crate::log::RequestLog {
         let mut l = crate::log::RequestLog::new();
         l.created_at = ts;
@@ -1481,11 +1615,15 @@ mod tests {
         l
     }
 
+    /// 桶/窗口口径类测试统一喂显式 offset（**不碰全局快照** → 与并行用例互不污染，
+    /// 也不受 CI runner 的 `Local` 影响；P3-14 的验收点恰恰是「口径可换、内部自洽」）。
+    const TZ_OFF: i32 = 8;
+
     /// 空数据也给满 24 桶（补零行）；hour 键严格递增且都是 13 字符。
     #[test]
     fn bucket_hours_always_yields_24_slots() {
         let now = chrono::Utc::now().timestamp();
-        let out = bucket_hours(&[], now, false);
+        let out = bucket_hours(&[], now, false, TZ_OFF);
         assert_eq!(out.len(), 24);
         assert_eq!(out[23]["requests"], 0);
         assert_eq!(out[23]["rate"], 0.0);
@@ -1494,7 +1632,11 @@ mod tests {
         for w in hours.windows(2) {
             assert!(w[0] < w[1], "桶键必须严格升序: {:?} > {:?}", w[1], w[0]);
         }
-        assert_eq!(hours[23], local_hour_key(now), "末桶 = 当前本地整点");
+        assert_eq!(
+            hours[23],
+            hour_key_at(now, TZ_OFF),
+            "末桶 = 当前报表时区整点"
+        );
     }
 
     /// 命中/总量/token 归并进正确桶；models 分解按 token 降序。
@@ -1508,7 +1650,7 @@ mod tests {
             bkt_log(now, "claude", 500, 1, false),
             bkt_log(two_ago, "gpt-4", 1, 1, false),
         ];
-        let out = bucket_hours(&logs, now, true);
+        let out = bucket_hours(&logs, now, true, TZ_OFF);
         let cur = &out[23];
         assert_eq!(cur["requests"], 3);
         assert_eq!(cur["hit_requests"], 1);
@@ -1525,7 +1667,7 @@ mod tests {
         assert_eq!(ms[1]["model"], "gpt-4");
         assert_eq!(ms[1]["tokens"], 180);
         // 2 桶前那条按它自己的整点键定位（now 处于钟点的位置不定，索引会变）
-        let key2 = local_hour_key(two_ago);
+        let key2 = hour_key_at(two_ago, TZ_OFF);
         let slot = out.iter().find(|v| v["hour"] == key2).expect("早桶存在");
         assert_eq!(slot["requests"], 1);
     }

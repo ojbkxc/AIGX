@@ -78,14 +78,19 @@ pub async fn handle_diagnostics_summary(
     });
 
     // ── 2. 今日用量摘要（聚合闸门开 → 读今日主档一行；否则回退明细遍历）──
+    //
+    // 「今日」的日界两路必须同源：聚合路读 `daily_agg::today_key()`（报表时区），
+    // 回退路用 `today_start_ts` 过滤明细——本函数的 offset 就是前者的口径，P3-14
+    // 之前它写死 UTC，同一面板「今日诊断」与「今日报表」会差 8 小时。
     let now_ts = chrono::Utc::now().timestamp();
-    let today_start = today_start_ts(now_ts);
+    let tz_off = crate::config::report_tz_offset();
+    let today_start = today_start_ts(now_ts, tz_off);
     let (today_requests, today_success, today_input_tokens, today_output_tokens) =
         if state.log_store.daily.agg_available() {
             let r = state
                 .log_store
                 .daily
-                .load_day(&crate::log::daily_agg::today_key())
+                .load_day(&crate::log::daily_agg::date_key_at(now_ts, tz_off))
                 .unwrap_or_default();
             (r.requests, r.successful, r.tokens_in, r.tokens_out)
         } else {
@@ -248,14 +253,18 @@ pub async fn handle_diagnostics_breakers(
 
 // ── 纯逻辑（可单测） ────────────────────────────────────────────────
 
-/// UTC 当天 0 点的 unix 时间戳（失败时回退到 24h 前，保证聚合不空转）。
-fn today_start_ts(now_ts: i64) -> i64 {
-    let midnight = chrono::Utc
+/// 报表时区当天 0 点的 unix 时间戳（失败时回退到 24h 前，保证聚合不空转）。
+///
+/// `offset` 由 handler 传 `[report] timezone_offset` 快照，与读聚合那一支的
+/// `daily_agg::date_key_at(now, tz_off)` 同源（P3-14：这里原本写死 UTC，
+/// 同页「今日诊断」与「今日报表」在 UTC+8 机器上差 8 小时）。
+fn today_start_ts(now_ts: i64, offset: i32) -> i64 {
+    let tz = crate::log::daily_agg::report_tz_of(offset);
+    let midnight = tz
         .timestamp_opt(now_ts, 0)
         .single()
         .and_then(|dt| dt.date_naive().and_hms_opt(0, 0, 0))
-        .and_then(|nd| chrono::Utc.from_local_datetime(&nd).single())
-        .map(|dt| dt.timestamp());
+        .map(|nd| nd.and_utc().timestamp() - tz.local_minus_utc() as i64);
     midnight.unwrap_or(now_ts - 24 * 3600)
 }
 
@@ -387,18 +396,44 @@ mod tests {
     }
 
     #[test]
-    fn today_start_is_midnight_utc_or_fallback() {
-        // 2026-01-15 12:34:56 UTC → 当天 0 点
+    fn today_start_is_midnight_in_report_tz() {
+        // 2026-01-15 12:34:56 UTC → 报表时区当天 0 点
         let now = chrono::Utc
             .with_ymd_and_hms(2026, 1, 15, 12, 34, 56)
             .unwrap()
             .timestamp();
-        let start = today_start_ts(now);
-        let expect = chrono::Utc
-            .with_ymd_and_hms(2026, 1, 15, 0, 0, 0)
-            .unwrap()
-            .timestamp();
-        assert_eq!(start, expect);
+        // 固定偏移钉具体值（offset = 0 走系统本地，字面量只在 runner 恰好 UTC 时才
+        // 等于 UTC 日界 → 0 分支改用下面的「同源性」断言，不留机器依赖的假红雷）。
+        // offset = 8 → 本地 20:34，日界回拨到 UTC 1 月 14 日 16:00
+        assert_eq!(
+            today_start_ts(now, 8),
+            chrono::Utc
+                .with_ymd_and_hms(2026, 1, 14, 16, 0, 0)
+                .unwrap()
+                .timestamp()
+        );
+        // offset = -3 → 本地 09:34，日界在 UTC 1 月 15 日 03:00
+        assert_eq!(
+            today_start_ts(now, -3),
+            chrono::Utc
+                .with_ymd_and_hms(2026, 1, 15, 3, 0, 0)
+                .unwrap()
+                .timestamp()
+        );
+        // **两条「今日」路径同源**（handler 里聚合路用 `date_key_at`、回退路用本函数）：
+        // 窗口下界必须与 now 落在同一个报表日，且不得倒退超过一天。
+        for off in [0i32, 8, -3] {
+            let start = today_start_ts(now, off);
+            assert_eq!(
+                crate::log::daily_agg::date_key_at(start, off),
+                crate::log::daily_agg::date_key_at(now, off),
+                "offset={off}：回退路下界与聚合路日键不是同一个报表日"
+            );
+            assert!(
+                start <= now && now - start < 24 * 3600,
+                "offset={off}：日界应在 now 之前且不超过 24h（{start} vs {now}）"
+            );
+        }
     }
 
     #[test]

@@ -272,6 +272,53 @@ impl Default for ChatConfig {
     }
 }
 
+/// 报表日/时口径缺省偏移（小时）= 北京。
+///
+/// 三处同源共用这一个常量：`[report]` 段的 serde 缺省、进程级快照初值、
+/// `AppConfig::default()`。与签到族缺省一致（`checkin/scheduler.rs` 的
+/// `CHECKIN_TZ_OFFSET` 初值同为 8），避免同一面板出现两种「今天」。
+const REPORT_TZ_DEFAULT_OFFSET: i32 = 8;
+
+/// 报表口径配置（`[report]` 段）：日聚合/明细现算/小时桶统一的时区偏移。
+///
+/// 背景（生产体检 P3-14）：日聚合键自上线起按 **UTC** 落盘
+/// （`log::daily_agg::date_key`），同页 24h 小时桶按 **服务器本地**
+/// （`api::admin::dashboard::local_hour_key`）——两套日边界并存。生产机是 GMT+0
+/// 时两者重合掩盖了分歧；换到 UTC+8 机器就表现为「今日报表少算 8 小时 / 跨零点
+/// 的数据归错天」。本段把两侧统一到同一个可配偏移。
+///
+/// ── 生效时机 ────────────────────────────────────────────────
+/// 走进程级原子快照（[`set_report_tz_offset`]），**保存即生效**：切换之后到达的
+/// 日志即刻按新口径归日。
+///
+/// ⚠️ **历史数据不自动重算**（生产机不做隐式重写库）：存量日键仍是旧口径，需要
+/// 管理员显式调 `POST /api/logs/agg/tz-migrate`（先删窗口内旧键、再按新口径回填）。
+/// 升级后到调用迁移端点之间的窗口内，报表会出现「新旧两套口径分裂」；切换当日的
+/// 「今天」只累计切换之后到达的日志（回填范围不含今天），**次日自愈**。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportConfig {
+    /// 报表时区偏移（小时）。缺省 **8 = 北京日界**（发布即变更语义，见上）。
+    ///
+    /// `0` = 跟随系统本地时区，语义与签到中心一致，但**它不是通用安全值**，两点代价：
+    /// ①口径随部署环境漂（换机、改 `/etc/localtime`、容器 `TZ` 都会悄悄改报表日界，
+    /// 运维不可预期）；②本地时区含夏令时时日长非 86400 秒，「日尾 = 日首 + 86400 − 1」
+    /// 那类算法会偏一小时。**生产建议显式配数值偏移**（中国业务填 `8`）而非留 0。
+    #[serde(default = "default_report_timezone_offset")]
+    pub timezone_offset: i32,
+}
+
+fn default_report_timezone_offset() -> i32 {
+    REPORT_TZ_DEFAULT_OFFSET
+}
+
+impl Default for ReportConfig {
+    fn default() -> Self {
+        Self {
+            timezone_offset: default_report_timezone_offset(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// 是否启用 AI 运维 Agent（默认关闭，避免未配置模型时误启）。
@@ -655,6 +702,9 @@ pub struct AppConfig {
     /// 聊天功能配置（`[chat]` 段：LLM 自动标题等增值能力）。
     #[serde(default)]
     pub chat: ChatConfig,
+    /// 报表口径配置（`[report]` 段：日/时聚合的时区偏移，P3-14）。
+    #[serde(default)]
+    pub report: ReportConfig,
     /// 渠道调度配置（`[channel]` 段）。
     #[serde(default)]
     pub channel: ChannelConfig,
@@ -1038,6 +1088,38 @@ pub fn set_security_policy(lockout_enabled: bool, fail_threshold: u32, rate_limi
 /// 由 main 启动与 settings 更新端点写入机器人校验开关。
 pub fn set_security_captcha(v: bool) {
     SECURITY_CAPTCHA_ENABLED.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+// ── 报表时区快照（`[report]` 段）────────────────────────────────
+//
+// 记账热路径每条日志都要算一次日界（`log::writer::group_log` 批量折叠 +
+// `DailyAggStore::record`），读侧每条明细也要分组一次。走原子快照：一次
+// atomic load，无锁、无 `ConfigManager::try_read`（后者既违反 Phase1 性能
+// 守门「热路径不新增锁/原子竞争」，try_read 失败还得兜默认值 → 口径会随机漂移）。
+// 与签到族 `CHECKIN_TZ_OFFSET`（`checkin/scheduler.rs`）同构。
+
+/// 报表时区偏移（小时）的进程级快照，缺省 8 = 北京日界；`0` = 系统本地。
+static REPORT_TZ_OFFSET: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(REPORT_TZ_DEFAULT_OFFSET);
+
+/// 读取报表时区偏移快照（供 `log::daily_agg` 的日界函数与报表窗口使用）。
+pub fn report_tz_offset() -> i32 {
+    REPORT_TZ_OFFSET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 由 main 启动与 `PUT /api/report/settings` 写入快照（保存即生效）。
+pub fn set_report_tz_offset(offset: i32) {
+    REPORT_TZ_OFFSET.store(offset, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 报表时区偏移合法区间（含端点）：UTC-12 … UTC+14，覆盖地球上真实存在的固定偏移。
+pub const REPORT_TZ_OFFSET_MIN: i32 = -12;
+/// 见 [`REPORT_TZ_OFFSET_MIN`]。
+pub const REPORT_TZ_OFFSET_MAX: i32 = 14;
+
+/// 偏移是否合法（env 侧越界静默忽略、`PUT /api/report/settings` 侧返回 400）。
+pub fn report_tz_offset_valid(offset: i32) -> bool {
+    (REPORT_TZ_OFFSET_MIN..=REPORT_TZ_OFFSET_MAX).contains(&offset)
 }
 
 /// 渠道级最大重试次数的进程级快照（数据面选路同步读取，默认 2）。
@@ -1486,6 +1568,14 @@ fn apply_env_overrides(mut config: AppConfig) -> AppConfig {
         if let Ok(n) = v.parse() {
             if n > 0 {
                 config.usage.max_request_body_mb = n;
+            }
+        }
+    }
+    // 报表时区偏移（越界与非数字一律忽略，保持配置文件/缺省值）
+    if let Ok(v) = std::env::var("AIGX_REPORT__TIMEZONE_OFFSET") {
+        if let Ok(n) = v.parse::<i32>() {
+            if report_tz_offset_valid(n) {
+                config.report.timezone_offset = n;
             }
         }
     }

@@ -13,8 +13,9 @@
 //! 上游侧维度。AIGX 是多租户网关：**普通用户看个人报表的数字必须全精度**
 //! （那是他自己的账单），不能容忍长尾被 Top 榜的 cap 折进「其他」。所以：
 //!
-//!   - `dailyagg:d:{YYYY-MM-DD}` **主档**（UTC 日，与现 handler 的
-//!     `from_timestamp(created_at).format("%Y-%m-%d")` 口径逐字一致）：
+//!   - `dailyagg:d:{YYYY-MM-DD}` **主档**（**报表时区**日，口径由
+//!     [`date_key`] 单点决定 = `[report] timezone_offset`，缺省 8；历史上曾是
+//!     与 handler 逐字一致的 UTC 日，P3-14 起统一，键形态不变、只是归日边界变）：
 //!     总量平铺 + 三个 Top 维度数组，各自带 cap 与 `__other__` 兜底组，
 //!     **写侧**保证「Σ维度 = 总量」恒等式（修剪只搬运、不丢失）。
 //!     by_user 维只服务管理员 Top 榜，尾部并入 `__other__`。
@@ -211,14 +212,57 @@ pub struct BackfillMarker {
     as_of: String,
 }
 
-/// unix 秒 → UTC 自然日键（与现 handler 的换算逐字一致）。
+/// unix 秒 → **报表时区**自然日键（口径取 `[report] timezone_offset` 快照）。
+///
+/// 日界的全部下游（写侧记账/回填、读侧现算回退、保留清理）都只吃这一个函数与其
+/// 两个派生函数，所以改口径只需改这里 —— 调用点签名零改动。
 pub fn date_key(created_at: i64) -> String {
+    date_key_at(created_at, crate::config::report_tz_offset())
+}
+
+/// unix 秒 → 指定偏移下的自然日键（**纯函数**：offset 由调用方给，单测直接喂值、
+/// 不碰全局快照，避免并行测试互相污染）。
+///
+/// `offset` 语义与 `[report] timezone_offset` 一致：小时数，`0` = 系统本地时区。
+/// 固定偏移下日间长度恒为 86400 秒，「日尾 = 日首 + 86400 − 1」恒成立；`0` 在
+/// 夏令时区不成立（见 `config::ReportConfig::timezone_offset` 文档）。
+pub fn date_key_at(created_at: i64, offset: i32) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(created_at, 0)
-        .map(|d| d.format("%Y-%m-%d").to_string())
+        .map(|d| {
+            d.with_timezone(&report_tz_of(offset))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
         .unwrap_or_default()
 }
 
-/// 今天的 UTC 日键。
+/// 按配置的偏移构造 `FixedOffset`（`0` = 系统本地当前偏移，照抄签到族
+/// `checkin::scheduler::beijing` 的语义与兜底）。
+///
+/// 越界偏移（正常路径进不来：`AIGX_REPORT__TIMEZONE_OFFSET` 与 `[report]` 的写入
+/// 口都按 `-12..=14` 校验）兜到 UTC+0，与签到同口径——宁可口径退回可预期的 UTC，
+/// 也不要 panic 把记账热路径带崩。
+pub fn report_tz_of(offset: i32) -> chrono::FixedOffset {
+    if offset == 0 {
+        *chrono::Local::now().offset()
+    } else {
+        chrono::FixedOffset::east_opt(offset.saturating_mul(3600))
+            .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).unwrap())
+    }
+}
+
+/// 「今天往前 `days_back` 个报表日」的日键（**测试与迁移共用**）。
+///
+/// 存在理由：以前测试用 `Utc::now().naive_utc().date() - days(n)` 造键再与
+/// [`today_key`] 比，缺省偏移从隐式 UTC 变成 8 之后，这种写法在 UTC runner 的
+/// 16:00-23:59 区间必红（约 1/3 概率的间歇假红）。统一走本函数 = 与生产同源。
+pub fn day_key_back(days_back: i64) -> String {
+    let offset = crate::config::report_tz_offset();
+    let now = chrono::Utc::now().timestamp();
+    date_key_at(now - days_back.saturating_mul(24 * 3600), offset)
+}
+
+/// 今天的报表时区日键。
 pub fn today_key() -> String {
     date_key(chrono::Utc::now().timestamp())
 }
@@ -236,7 +280,7 @@ pub(crate) fn user_key(uid: &str, date: &str) -> String {
 /// N 个自然日保留（含今天）→ 最早应保留的日键；日键定长，字典序即时间序。
 ///
 /// 对齐蓝本「保留 N 天 = 含今天在内的 N 个自然日」：cutoff = 今天 − (N−1)，
-/// 严格小于 cutoff 的行才删。
+/// 严格小于 cutoff 的行才删。自然日口径同 [`date_key`]（报表时区快照）。
 pub fn cutoff_date_key(max_age_days: u64) -> String {
     let keep = max_age_days.saturating_sub(1) as i64;
     let now = chrono::Utc::now().timestamp();
@@ -866,13 +910,70 @@ mod tests {
         assert_eq!(date_key(i64::MIN), "");
     }
 
-    /// 跨 UTC 午夜的日键换算；定长日键字典序即时间序。
+    /// 系统本地时区下的日键 —— `offset = 0` 分支的参照。
+    ///
+    /// **不写死 UTC 字面量**：`0` 的语义是「跟随系统本地」，CI runner 恰好是 UTC
+    /// 属于巧合；把巧合当期望值就是下一个「换机器/换 TZ 就红」的间歇假红雷（本单
+    /// 要消灭的正是这类雷，不能自己再埋一个）。
+    fn local_date_key(ts: i64) -> String {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+            .map(|d| {
+                d.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d")
+                    .to_string()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 跨午夜的日键换算（**offset 显式喂值**，不吃全局快照 → 不受并行用例污染）；
+    /// 定长日键字典序即时间序。
+    ///
+    /// P3-14 前这条写作 `date_key(day0)`（隐式 UTC）；缺省偏移变 8 后同一时间戳
+    /// 归属会随快照变，故钉死成纯函数变体，并额外验「只有 16:00-24:00 UTC 这 8
+    /// 小时会挪日」——这就是报表时区改动的全部影响面。
     #[test]
     fn day_keys_split_at_midnight() {
         let day0 = 1_735_689_600_i64; // 2025-01-01T00:00:00Z
-        assert_eq!(date_key(day0), "2025-01-01");
-        assert_eq!(date_key(day0 - 1), "2024-12-31");
+        assert_eq!(
+            date_key_at(day0, 0),
+            local_date_key(day0),
+            "offset=0 = 系统本地"
+        );
+        assert_eq!(
+            date_key_at(day0 - 1, 0),
+            local_date_key(day0 - 1),
+            "offset=0 = 系统本地"
+        );
         assert!("2024-12-31" < "2025-01-01");
+        // UTC+8：16:00Z 之后才归次日；15:59:59Z 仍归当日
+        assert_eq!(date_key_at(day0 - 1, 8), "2025-01-01");
+        assert_eq!(date_key_at(day0 - 8 * 3600 - 1, 8), "2024-12-31");
+        assert_eq!(date_key_at(day0 - 8 * 3600, 8), "2025-01-01");
+        // 负偏移（UTC-3）：日界在 03:00Z，02:59:59Z 还属前一日
+        assert_eq!(date_key_at(day0 + 3 * 3600 - 1, -3), "2024-12-31");
+        assert_eq!(date_key_at(day0 + 3 * 3600, -3), "2025-01-01");
+    }
+
+    /// 日界函数族的口径一致性：`today_key` / `day_key_back` / `date_key` 必须同源
+    /// （三者都读同一快照）。`day_key_back` 是给测试用的「按报表日回退 n 天」，
+    /// 用它替代「拿 UTC 日历造键再与 `today_key()` 比」那种在 UTC runner 下午必红
+    /// 的写法（P3-14 已知坑，缺省 8 后 16:00-23:59 UTC 之间 ≈1/3 概率假红）。
+    #[test]
+    fn day_key_back_is_consistent_with_today_key() {
+        let today = today_key();
+        assert_eq!(day_key_back(0), today, "back=0 必须等于 today_key");
+        assert_eq!(today.len(), 10, "日键定长，字典序即时间序");
+        let prev = day_key_back(1);
+        assert!(prev < today, "回退一天必须更早: {prev} !< {today}");
+        // 相邻报表日之间恰好差 1 个日历日（86400s 在固定偏移下恒等）
+        let d_today = chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d").unwrap();
+        let d_prev = chrono::NaiveDate::parse_from_str(&prev, "%Y-%m-%d").unwrap();
+        assert_eq!(d_today - d_prev, chrono::Duration::days(1));
+        assert_eq!(day_key_back(2), {
+            (d_prev - chrono::Duration::days(1))
+                .format("%Y-%m-%d")
+                .to_string()
+        });
     }
 
     /// cap 滞回修剪：超阈才动，残量搬运进 __other__，恒等式不破。
