@@ -851,7 +851,11 @@ async fn disconnect_499_billing_dual_surface() {
         "mock hits 应为 10（双面冒烟 2 + 用例 8，断连用例上游必须真实执行）"
     );
 
-    let _ = mock_task.await;
+    // mock 任务无 graceful shutdown（axum::serve 永续）→ 尾部 await 会永久阻塞。
+    // abort 回收（历史教训：本测试从未从头到尾走完过——一直红在断言上，
+    // 尾部代码属「未被证明可达」＝没写；本轮 18 分钟未收尾才暴露）。
+    mock_task.abort();
+    let _ = mock_task.await; // 收 JoinError（aborted）
     println!("499 回归双表面全绿：hits={hits} q_end={q_end}");
 
     // 正常收尾：显式 drop 守卫（kill+wait）；panic 路径由 Drop 兜底
