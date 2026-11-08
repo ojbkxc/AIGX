@@ -1,10 +1,23 @@
-import { useState, useEffect, useRef, type FormEvent } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Pencil, Power, PowerOff, MoreHorizontal, KeyRound, Trash2 } from 'lucide-react';
+import { Pencil, Power, PowerOff, MoreHorizontal, KeyRound, Trash2, Columns3 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
-import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
+import {
+  applyTableColumns,
+  readTableColumns,
+  resetTableColumns,
+  writeTableColumns,
+  type TableColumnDef,
+  type TableColumnItem,
+  type TableColumnState,
+} from '../lib/tableColumns';
+import TableColumnSettings from '../components/ui/TableColumnSettings';
+import { useColumnResize } from '../components/ui/useColumnResize';
+import { TablePaginationFooter, usePageSize, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
+import { Tooltip } from '../components/ui';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
 import { fmtQuota } from '../lib/utils';
 import './Users.css';
 
@@ -48,6 +61,24 @@ const EMPTY_FORM: UserFormState = {
   remark: '',
 };
 
+// 公共键与列声明（模块级；[LS] 行操作菜单注释位置原属组件内）
+const LS_PSZ = 'aigx-tbl-pagesize.users';
+const LS_TCOLS = 'aigx-tbl-cols.users';
+/** 用户表列声明（email/操作锁定；配额三列右对齐） */
+const USER_COL_DEFS: TableColumnDef[] = [
+  { key: 'email', label: '邮箱', width: 220, locked: true },
+  { key: 'username', label: '昵称', width: 140 },
+  { key: 'remark', label: '备注', width: 140 },
+  { key: 'role', label: '角色', align: 'center', width: 90 },
+  { key: 'group', label: '分组', width: 100 },
+  { key: 'quota', label: '总配额', align: 'right', width: 110 },
+  { key: 'used', label: '已用', align: 'right', width: 100 },
+  { key: 'remain', label: '剩余配额', align: 'right', width: 110 },
+  { key: 'status', label: '状态', align: 'center', width: 80 },
+  { key: 'created', label: '创建时间', width: 160 },
+  { key: 'act', label: '操作', width: 120, locked: true },
+];
+
 export default function Users(): JSX.Element {
   const [users, setUsers] = useState<UserItem[]>([]);
   const [groups, setGroups] = useState<GroupItem[]>([]);
@@ -69,10 +100,51 @@ export default function Users(): JSX.Element {
   // 搜索关键字（邮箱/昵称/备注，走后端 keyword 过滤以覆盖全量数据）
   const [query, setQuery] = useState('');
   const [keyword, setKeyword] = useState('');
-  // 分页（对齐 Logs/Channels）
+  // 分页（服务端真分页：page/size 发后端，total 由响应回带；每页条数公共 usePageSize）
   const [page, setPage] = useState(1);
-  const size = 20;
+  const [pageSize, setPageSize] = usePageSize(LS_PSZ, SERVER_PAGE_SIZES, 20);
+  const size = typeof pageSize === 'number' ? pageSize : 20;
   const [total, setTotal] = useState(0);
+
+  // 列设置已迁公共层（tableColumns v2）
+  const [colState, setColState] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, USER_COL_DEFS));
+  const [colPanelOpen, setColPanelOpen] = useState(false);
+  const colPanelRef = useRef<HTMLDivElement | null>(null);
+  const commitCols = useCallback((next: TableColumnItem[], persist: boolean) => {
+    setColState((prev) => {
+      const nextState: TableColumnState = { ...prev, items: next };
+      if (persist) writeTableColumns(LS_TCOLS, nextState);
+      return nextState;
+    });
+  }, []);
+  const resetCols = useCallback(() => setColState(resetTableColumns(LS_TCOLS, USER_COL_DEFS)), []);
+  const appliedCols = useMemo(() => applyTableColumns(colState, USER_COL_DEFS), [colState]);
+  const visibleKeySet = useMemo(() => new Set(appliedCols.map((c) => c.key)), [appliedCols]);
+  const colAlignMap = useMemo(() => {
+    const map = {} as Record<string, string>;
+    for (const item of colState.items) map[item.key] = item.align;
+    return map;
+  }, [colState]);
+  const colResize = useColumnResize({
+    widths: Object.fromEntries(colState.items.filter((i) => i.width != null).map((i) => [i.key, i.width as number])),
+    setWidths: (next) => {
+      commitCols(
+        colState.items.map((i) => {
+          const w = next[i.key];
+          const defW = USER_COL_DEFS.find((d) => d.key === i.key)?.width;
+          if (w == null || (defW != null && w === defW)) {
+            const { width: _drop, ...rest } = i;
+            return rest;
+          }
+          return { ...i, width: w };
+        }),
+        true,
+      );
+    },
+    defaultWidths: Object.fromEntries(USER_COL_DEFS.map((d) => [d.key, d.width])),
+    lockedKeys: new Set(USER_COL_DEFS.filter((d) => d.locked).map((d) => d.key)),
+    onCommit: () => { /* 落盘已在 setWidths 内做 */ },
+  });
 
   // 行操作菜单（fixed 挂在 body 层级，逃出 Card/table 的 overflow 裁剪；同渠道/密钥页）
   const [rowMenuId, setRowMenuId] = useState<string | number | null>(null);
@@ -352,6 +424,29 @@ export default function Users(): JSX.Element {
               onChange={(e) => setQuery(e.target.value)}
               style={{ width: 220 }}
             />
+            <div className="as-colset" ref={colPanelRef} style={{ position: 'relative', display: 'inline-block' }}>
+              <Tooltip label={t('列设置（显隐 / 顺序 / 对齐 / 列宽拖动）')}>
+                <button
+                  type="button"
+                  className={`btn btn-outline btn-sm${colPanelOpen ? ' as-colset-open' : ''}`}
+                  onClick={() => setColPanelOpen((v) => !v)}
+                  aria-label={t('列设置')}
+                >
+                  <Columns3 size={14} />
+                </button>
+              </Tooltip>
+              {colPanelOpen && (
+                <TableColumnSettings
+                  open
+                  onClose={() => setColPanelOpen(false)}
+                  defs={USER_COL_DEFS}
+                  items={colState.items}
+                  onChange={commitCols}
+                  onReset={resetCols}
+                  anchorRef={colPanelRef}
+                />
+              )}
+            </div>
             <Button onClick={openCreate}>{t('+ 新建用户')}</Button>
           </div>
         }
@@ -364,38 +459,72 @@ export default function Users(): JSX.Element {
         ) : (
           <div className="table-wrapper">
             <table>
+              <colgroup>
+                {appliedCols.map((c) => (
+                  <col key={c.key} data-col-key={c.key} style={c.width != null ? { width: `${c.width}px` } : undefined} />
+                ))}
+              </colgroup>
               <thead>
                 <tr>
-                  <th>{t('邮箱')}</th>
-                  <th>{t('昵称')}</th>
-                  <th>{t('备注')}</th>
-                  <th>{t('角色')}</th>
-                  <th>{t('分组')}</th>
-                  <th>{t('总配额')}</th>
-                  <th>{t('已用')}</th>
-                  <th>{t('剩余配额')}</th>
-                  <th>{t('状态')}</th>
-                  <th>{t('创建时间')}</th>
-                  <th>{t('操作')}</th>
+                  {appliedCols.map((c, idx) => {
+                    const grip = colResize.gripProps(c.key, {
+                      isLast: idx === appliedCols.length - 1,
+                      locked: c.locked,
+                      defaultWidth: c.width,
+                    });
+                    return (
+                      <th
+                        key={c.key}
+                        style={c.width != null ? { width: `${c.width}px` } : undefined}
+                        className={colAlignMap[c.key] === 'right' ? 'ta-right' : colAlignMap[c.key] === 'center' ? 'ta-center' : undefined}
+                      >
+                        {t(USER_COL_DEFS.find((d) => d.key === c.key)?.label ?? c.key)}
+                        {c.key !== 'act' && c.key !== 'email' && (
+                          <span className="as-col-grip" title={t('拖动调整列宽 · 双击还原')} {...grip} />
+                        )}
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
                 {visibleUsers.map((u) => (
                   <tr key={u.id}>
+                    {visibleKeySet.has('email') && (
                     <td><strong>{u.email}</strong></td>
+                    )}
+                    {visibleKeySet.has('username') && (
                     <td>{u.username || '—'}</td>
+                    )}
+                    {visibleKeySet.has('remark') && (
                     <td>{u.remark || '—'}</td>
+                    )}
+                    {visibleKeySet.has('role') && (
                     <td>{u.role === 'admin' ? t('管理员') : t('普通用户')}</td>
+                    )}
+                    {visibleKeySet.has('group') && (
                     <td>{u.group || 'default'}</td>
+                    )}
+                    {visibleKeySet.has('quota') && (
                     <td>{fmtQuota(u.quota)}</td>
+                    )}
+                    {visibleKeySet.has('used') && (
                     <td>{fmtQuota(u.used_quota)}</td>
+                    )}
+                    {visibleKeySet.has('remain') && (
                     <td>{fmtQuota((u.quota || 0) - (u.used_quota || 0))}</td>
+                    )}
+                    {visibleKeySet.has('status') && (
                     <td>
                       <span className={u.status === 'active' ? 'badge badge-success' : 'badge badge-danger'}>
                         {u.status === 'active' ? t('启用') : t('禁用')}
                       </span>
                     </td>
+                    )}
+                    {visibleKeySet.has('created') && (
                     <td>{u.created_at ? new Date(u.created_at > 1e12 ? u.created_at : u.created_at * 1000).toLocaleString() : '—'}</td>
+                    )}
+                    {visibleKeySet.has('act') && (
                     <td>
                       <div className="us-actions">
                         <button
@@ -427,6 +556,7 @@ export default function Users(): JSX.Element {
                         </div>
                       </div>
                     </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -468,9 +598,17 @@ export default function Users(): JSX.Element {
 
       {(() => {
         const totalPages = Math.ceil(total / size);
-        return totalPages > 1 ? (
-          <Pagination page={page} totalPages={totalPages} onChange={setPage} />
-        ) : null;
+        return (
+          <TablePaginationFooter
+            total={total}
+            page={page}
+            totalPages={totalPages}
+            size={pageSize}
+            sizes={SERVER_PAGE_SIZES}
+            onSizeChange={(n) => { setPageSize(n); setPage(1); }}
+            onPageChange={setPage}
+          />
+        );
       })()}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
