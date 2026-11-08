@@ -53,7 +53,8 @@ export default function TableColumnSettings({
   const [draggingKey, setDraggingKey] = useState<string | null>(null);
 
   const defByKey = new Map(defs.map((d) => [d.key, d]));
-  const labelOf = (key: string): string => defByKey.get(key)?.label ?? key;
+  // #39 方案 B：套 t() 使列名随语言切换（四处渲染点共用这一个出口）
+  const labelOf = (key: string): string => t(defByKey.get(key)?.label ?? key);
   // 拖拽会话期间面板会因父级 setState 重渲染，闭包里的 items 会过期；
   // 指针事件回调一律读 ref 拿最新序（否则 onUp 会把拖前的顺序落盘）。
   const itemsRef = useRef<TableColumnItem[]>(items);
