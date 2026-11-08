@@ -15,7 +15,8 @@ use serde_json::Value;
 use crate::api::openai::AppState;
 
 pub use crate::agent::registry::{
-    all_tools as tool_specs, exec_tool, find_tool, openai_tools, ExecResult, ToolDef,
+    all_tools as tool_specs, exec_tool, find_tool, openai_tools, openai_tools_of, ExecResult,
+    ToolDef,
 };
 
 /// 工具风险等级。

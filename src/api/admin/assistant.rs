@@ -108,6 +108,67 @@ pub struct AssistantMessageIn {
     pub tool_call_id: Option<String>,
 }
 
+/// #34-② 计费/落日志守卫：正常完成走 [`Self::settle`]；中途上游错误与
+/// 客户端断开（axum drop 整个 handler future）由 Drop 兜底——已消耗轮次
+/// 照记不漏（与 #35 数据面结论同源不同面：助手面把「上游请求已发出」
+/// 作为记账起点；写路径全部同步、LogWriter 异步队列不阻塞 Drop）。
+struct AssistantBilling {
+    state: AppState,
+    user_id: String,
+    is_admin: bool,
+    model: String,
+    channel_id: String,
+    channel_name: String,
+    prompt: u64,
+    completion: u64,
+    rounds: u32,
+    started: std::time::Instant,
+    error: Option<String>,
+    handled: bool,
+}
+
+impl AssistantBilling {
+    fn write(&mut self) {
+        super::playground::record_playground_usage(
+            &self.state,
+            &self.user_id,
+            self.is_admin,
+            "assistant",
+            &self.model,
+            Some(&self.channel_id),
+            Some(&self.channel_name),
+            self.prompt,
+            self.completion,
+            self.started.elapsed().as_millis() as u64,
+        );
+        let mut log = crate::log::RequestLog::new();
+        log.user_id = Some(self.user_id.clone());
+        log.channel_id = Some(self.channel_id.clone());
+        log.channel_name = Some(self.channel_name.clone());
+        log.model = self.model.clone();
+        log.input_tokens = self.prompt;
+        log.output_tokens = self.completion;
+        log.latency_ms = self.started.elapsed().as_millis() as u64;
+        log.status_code = if self.error.is_some() { 502 } else { 200 };
+        log.error_msg = self.error.clone();
+        log.attempts = self.rounds;
+        self.state.log_store.record_request(log);
+        self.handled = true;
+    }
+
+    fn settle(mut self) {
+        self.write();
+    }
+}
+
+impl Drop for AssistantBilling {
+    fn drop(&mut self) {
+        if !self.handled {
+            self.write();
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AssistantChatRequest {
     pub model: String,
@@ -171,12 +232,27 @@ pub async fn handle_assistant_chat(
     )?;
     let bridge = make_channel_bridge(&state, &ch)?;
 
+    let mut billing = AssistantBilling {
+        state: state.clone(),
+        user_id: user.id.clone(),
+        is_admin: user.is_admin(),
+        model: body.model.clone(),
+        channel_id: ch.id.clone(),
+        channel_name: ch.name.clone(),
+        prompt: 0,
+        completion: 0,
+        rounds: 0,
+        started: std::time::Instant::now(),
+        error: None,
+        handled: false,
+    };
     let mut messages: Vec<crate::bridge::ChatMessage> = body
         .messages
         .iter()
         .map(|m| crate::bridge::ChatMessage {
             role: to_role(&m.role).unwrap_or(Role::User),
             content: Some(m.content.clone()),
+            reasoning: None,
             content_blocks: None,
             name: m.name.clone(),
             tool_call_id: m.tool_call_id.clone(),
@@ -190,15 +266,21 @@ pub async fn handle_assistant_chat(
     let mut tool_trace: Vec<Value> = Vec::new();
     let mut tool_total_chars: usize = 0;
     let mut final_content = String::new();
+    // #34-①（lead 评审）：openai_tools() 是全量 73 个含 20 高危——助手面
+    // 只给 mcp_tools() 非 HighRisk 子集（exec 前的 deny 是第二重，不是唯一一重）
     let tools_schema: Vec<Value> = if tools_on {
-        tools::openai_tools()
+        tools::openai_tools_of(
+            tools::tool_specs()
+                .iter()
+                .filter(|t| t.risk != RiskLevel::HighRisk),
+        )
     } else {
         Vec::new()
     };
 
-    let request_start = std::time::Instant::now();
     loop {
         rounds += 1;
+        billing.rounds = rounds;
         let req = ChatFormat {
             model: body.model.clone(),
             messages: messages.clone(),
@@ -219,19 +301,29 @@ pub async fn handle_assistant_chat(
             extra: None,
         };
         let ctx = BridgeContext::new(format!("assistant-{}", uuid::Uuid::new_v4()), &body.model);
-        let resp = bridge
-            .chat(&req, &ctx)
-            .await
-            .map_err(|e| error_response(&format!("上游调用失败: {e}"), StatusCode::BAD_GATEWAY))?;
+        let resp = match bridge.chat(&req, &ctx).await {
+            Ok(r) => r,
+            // #34-②：中途失败 → Drop 兜底把已消耗轮次记账+落日志（error 标记）
+            Err(e) => {
+                billing.error = Some(format!("上游调用失败: {e}"));
+                return Err(error_response(
+                    &format!("上游调用失败: {e}"),
+                    StatusCode::BAD_GATEWAY,
+                ));
+            }
+        };
         total_prompt += resp.usage.prompt_tokens;
         total_completion += resp.usage.completion_tokens;
-        let content = resp.message.content_str();
+        billing.prompt = total_prompt;
+        billing.completion = total_completion;
+        let content = resp.message.content_str().to_string();
         match resp.message.tool_calls.clone() {
             Some(calls) if !calls.is_empty() && rounds < max_rounds && tools_on => {
                 // 助手消息（含 tool_calls）回灌，保持 OpenAI 多轮形状
                 messages.push(crate::bridge::ChatMessage {
                     role: Role::Assistant,
                     content: Some(content.clone()),
+                    reasoning: None,
                     content_blocks: None,
                     name: None,
                     tool_call_id: None,
@@ -256,6 +348,7 @@ pub async fn handle_assistant_chat(
                         messages.push(crate::bridge::ChatMessage {
                             role: Role::Tool,
                             content: Some(format!("未知工具: {}", call.function_name)),
+                            reasoning: None,
                             content_blocks: None,
                             name: Some(call.function_name.clone()),
                             tool_call_id: Some(call.id.clone()),
@@ -279,6 +372,7 @@ pub async fn handle_assistant_chat(
                         messages.push(crate::bridge::ChatMessage {
                             role: Role::Tool,
                             content: Some("该工具不对聊天助手开放".to_string()),
+                            reasoning: None,
                             content_blocks: None,
                             name: Some(call.function_name.clone()),
                             tool_call_id: Some(call.id.clone()),
@@ -311,6 +405,7 @@ pub async fn handle_assistant_chat(
                     messages.push(crate::bridge::ChatMessage {
                         role: Role::Tool,
                         content: Some(out.text),
+                        reasoning: None,
                         content_blocks: None,
                         name: Some(call.function_name.clone()),
                         tool_call_id: Some(call.id.clone()),
@@ -329,30 +424,8 @@ pub async fn handle_assistant_chat(
         }
     }
 
-    // 计费（playground 同链：订阅池优先+钱包兜底，管理员豁免）+ 一条请求日志
-    super::playground::record_playground_usage(
-        &state,
-        &user.id,
-        user.is_admin(),
-        "assistant",
-        &body.model,
-        Some(&ch.id),
-        Some(&ch.name),
-        total_prompt,
-        total_completion,
-        request_start.elapsed().as_millis() as u64,
-    );
-    let mut log = crate::log::RequestLog::new();
-    log.user_id = Some(user.id.clone());
-    log.channel_id = Some(ch.id.clone());
-    log.channel_name = Some(ch.name.clone());
-    log.model = body.model.clone();
-    log.input_tokens = total_prompt;
-    log.output_tokens = total_completion;
-    log.latency_ms = request_start.elapsed().as_millis() as u64;
-    log.status_code = 200;
-    log.attempts = rounds;
-    state.log_store.record_request(log);
+    // 计费 + 一条请求日志（守卫 settle；Drop 兜底已覆盖中途失败/断开）
+    billing.settle();
 
     Ok(Json(json!({
         "success": true,

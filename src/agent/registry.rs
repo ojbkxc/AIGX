@@ -133,10 +133,16 @@ pub fn mcp_tools() -> impl Iterator<Item = &'static ToolDef> {
     all_tools().iter().filter(|t| t.risk != RiskLevel::HighRisk)
 }
 
-/// OpenAI function-calling 的 `tools` 数组（Agent 用）。
+/// OpenAI function-calling 的 `tools` 数组（Agent 用，**全量含高危**——
+/// Agent 面有审批矩阵兜底；聊天助手面用 [`openai_tools_of`] 传过滤子集，
+/// 不要改本函数语义）。
 pub fn openai_tools() -> Vec<Value> {
-    all_tools()
-        .iter()
+    openai_tools_of(all_tools().iter())
+}
+
+/// [`openai_tools`] 的可过滤构造层（#34：assistant 只传非 HighRisk 子集）。
+pub fn openai_tools_of(tools: impl Iterator<Item = &'static ToolDef>) -> Vec<Value> {
+    tools
         .map(|t| {
             json!({
                 "type": "function",
