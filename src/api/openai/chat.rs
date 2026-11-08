@@ -294,6 +294,24 @@ pub(crate) async fn handle_chat_completions(
         let affinity_hit_id = session_id
             .as_deref()
             .and_then(|sid| state.channel_store.affinity_cache().lookup(sid, &model));
+        // #47：AttemptStart 级守卫——覆盖「预留已建、上游请求已发出、首事件
+        // 未到」的断开窗口（E1/E2 实测漏记漏计费）。每轮真实调用前更新
+        // 渠道/模型归因；计费接管点见各 handoff()。
+        let mut attempt_guard = crate::api::openai::billing::AttemptStartGuard {
+            state: state.clone(),
+            api_key: api_key.clone(),
+            requested_model: model.clone(),
+            group: billing_group.clone(),
+            reservation: &reservation,
+            channel_id: String::new(),
+            channel_name: String::new(),
+            model: model.clone(),
+            chat_req: chat_req.clone(),
+            request_id: request_id.clone(),
+            ip: client_ip.clone(),
+            user_id: api_key.user_id.clone(),
+            handled: false,
+        };
         for (bridge, cid, ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
@@ -320,6 +338,12 @@ pub(crate) async fn handle_chat_completions(
             let attempt_start = std::time::Instant::now();
             let attempt_started_at = chrono::Utc::now().timestamp();
             let sticky_hit = affinity_hit_id.as_deref() == cid.as_deref();
+            // #47：更新最后尝试的渠道/模型归因（Drop 时 499 落在此渠道头上）
+            attempt_guard.channel_id = cid.clone().unwrap_or_default();
+            attempt_guard.channel_name =
+                ch_ref.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+            attempt_guard.model = upstream.clone();
+            attempt_guard.chat_req = attempt_req.clone();
             // T2：SSE 首事件守卫——建流成功后等第一个事件（30s 上限），
             // 上游挂起/建流后立刻断流 → 按失败处理（熔断记账 + failover）
             let attempt = match bridge.chat_stream(&attempt_req, &ctx).await {
@@ -328,6 +352,9 @@ pub(crate) async fn handle_chat_completions(
             };
             match attempt {
                 Ok(s) => {
+                    // #47：首事件已到 → 计费接管点（StreamUsageGuard 稍后构造，
+                    // 流中断开由其 Drop 兜底，本守卫退出不再记账）
+                    attempt_guard.handoff();
                     // #32 路由回放：建流成功轮明细（流式终态在计费守卫，此处
                     // 记「建流成功」结论；phase 由终态字段承载）
                     if let Some(capture) = route_capture.as_mut() {
@@ -414,6 +441,8 @@ pub(crate) async fn handle_chat_completions(
                     }
                     if !is_retryable_bridge_error(&e) {
                         // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
+                        // #47：终态失败由下方既有失败日志+预留释放路径记账 → 接管
+                        attempt_guard.handoff();
                         last_error = Some(e);
                         used_channel_id = cid;
                         break;
@@ -431,6 +460,8 @@ pub(crate) async fn handle_chat_completions(
         let stream = match stream_opt {
             Some(s) => s,
             None => {
+                // #47：全败由下方既有失败日志+预留释放路径记账 → 接管
+                attempt_guard.handoff();
                 let e = last_error.unwrap_or_else(|| {
                     crate::bridge::BridgeError::AllAccountsFailed(
                         "all channels failed for streaming request".into(),
@@ -934,6 +965,22 @@ pub(crate) async fn handle_chat_completions(
         let affinity_hit_id = session_id
             .as_deref()
             .and_then(|sid| state.channel_store.affinity_cache().lookup(sid, &model));
+        // #47：AttemptStart 级守卫（同流式分支；E1 非流式断开实测漏记漏计费）
+        let mut attempt_guard = crate::api::openai::billing::AttemptStartGuard {
+            state: state.clone(),
+            api_key: api_key.clone(),
+            requested_model: model.clone(),
+            group: billing_group.clone(),
+            reservation: &reservation,
+            channel_id: String::new(),
+            channel_name: String::new(),
+            model: model.clone(),
+            chat_req: chat_req.clone(),
+            request_id: request_id.clone(),
+            ip: client_ip.clone(),
+            user_id: api_key.user_id.clone(),
+            handled: false,
+        };
         for (bridge, cid, ch_ref) in candidates {
             if let Some(c) = &cid {
                 state.channel_store.mark_used(c);
@@ -957,8 +1004,16 @@ pub(crate) async fn handle_chat_completions(
             let attempt_started_at = chrono::Utc::now().timestamp();
             let sticky_hit = affinity_hit_id.as_deref() == cid.as_deref();
             let attempt_start = std::time::Instant::now();
+            // #47：更新最后尝试的渠道/模型归因（Drop 时 499 落在此渠道头上）
+            attempt_guard.channel_id = cid.clone().unwrap_or_default();
+            attempt_guard.channel_name =
+                ch_ref.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+            attempt_guard.model = upstream.clone();
+            attempt_guard.chat_req = attempt_req.clone();
             match bridge.chat(&attempt_req, &ctx).await {
                 Ok(resp) => {
+                    // #47：响应已收 → 计费接管点（下方 settle_usage 记账）
+                    attempt_guard.handoff();
                     // 阶段2：成功——记入断路器/健康追踪/亲和性/空响应计数
                     if let Some(c) = &cid {
                         state.channel_store.record_channel_success_with_sticky(
@@ -1041,6 +1096,8 @@ pub(crate) async fn handle_chat_completions(
                     }
                     if !is_retryable_bridge_error(&e) {
                         // 4xx 客户端错误与请求本身相关，换渠道大概率同样失败，直接返回
+                        // #47：终态失败由下方既有失败日志+预留释放路径记账 → 接管
+                        attempt_guard.handoff();
                         last_error = Some(e);
                         used_channel_id = cid;
                         break;
@@ -1058,6 +1115,8 @@ pub(crate) async fn handle_chat_completions(
         let response = match response_opt {
             Some(r) => r,
             None => {
+                // #47：全败由下方既有失败日志+预留释放路径记账 → 接管
+                attempt_guard.handoff();
                 let e = last_error.unwrap_or_else(|| {
                     crate::bridge::BridgeError::AllAccountsFailed(
                         "all channels failed for non-streaming request".into(),

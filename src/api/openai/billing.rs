@@ -1230,3 +1230,95 @@ mod price_snapshot_tests {
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 999, 0, 999), 1);
     }
 }
+
+// ── #47：AttemptStart 级守卫（首事件前客户端断开的漏记漏计费）────────
+
+/// 覆盖「预留已建、上游请求已发出、首事件未到」窗口的记账守卫。
+///
+/// 客户端在此窗口断开 → handler future 在 await 点被 axum drop，正常
+/// 计费/日志链（settle_usage / StreamUsageGuard）从未开始，无守卫可兜底
+/// → 上游已真实执行而 AIGX 零账（#35 E1/E2 实测）。
+///
+/// 用法：failover 循环前构造（预留已建），每轮真实上游调用前更新
+/// channel/model；正常路径在计费接管点显式 `handoff()`（流式=StreamUsageGuard
+/// 构造处、非流式=settle_usage 处）；Drop 时若未接管 → 记一条
+/// **status=499**（client closed before first event）+ 按估算结算：
+/// prompt 用预留时的同一估算器重算、completion 未知记 0（预留差额由
+/// settle_quota 自动解冻）。**不记渠道失败/冷却**——499 是客户端行为，
+/// 归因到渠道会误伤健康度。
+pub(crate) struct AttemptStartGuard<'a> {
+    pub state: AppState,
+    pub api_key: crate::api::auth::ApiKey,
+    pub requested_model: String,
+    pub group: String,
+    pub reservation: &'a crate::ratelimit::limiter::Reservation,
+    /// 每轮真实上游调用前更新（Drop 时取最后尝试的渠道归因）
+    pub channel_id: String,
+    pub channel_name: String,
+    pub model: String,
+    /// prompt 估算输入（每轮请求体可能随模型映射变化）
+    pub chat_req: ChatFormat,
+    pub request_id: String,
+    pub ip: Option<String>,
+    pub user_id: Option<String>,
+    pub handled: bool,
+}
+
+impl<'a> AttemptStartGuard<'a> {
+    /// 计费接管点（流式=StreamUsageGuard 构造处；非流式=settle_usage 处）。
+    pub fn handoff(&mut self) {
+        self.handled = true;
+    }
+
+    /// Drop 兜底写账：status=499 + 按估算结算（prompt 估算、completion 0）。
+    fn write_499(&mut self) {
+        let estimated_prompt =
+            crate::token_estimate::count_chat_prompt(&self.model, &self.chat_req) as u64;
+        let cost = settle_usage(
+            &self.state,
+            &self.api_key,
+            &self.requested_model,
+            &self.model,
+            &self.group,
+            &self.reservation,
+            estimated_prompt,
+            0,
+            0,
+            None,
+        );
+        let mut log = crate::log::RequestLog::new();
+        log.user_id = self.user_id.clone();
+        log.key_id = Some(self.api_key.id.clone());
+        log.channel_id = Some(self.channel_id.clone());
+        log.channel_name = self
+            .state
+            .channel_store
+            .get(&self.channel_id)
+            .map(|c| c.name.clone());
+        log.model = self.model.clone();
+        log.input_tokens = estimated_prompt;
+        log.output_tokens = 0;
+        log.cost = cost;
+        log.latency_ms = 0;
+        log.status_code = 499;
+        log.error_msg = Some("client closed before first event".to_string());
+        log.ip = self.ip.clone();
+        log.request_id = Some(self.request_id.clone());
+        self.state.log_store.record_request(log);
+        tracing::warn!(
+            "[499] client closed before first event: channel={}/model={} est_prompt={} cost={}",
+            self.channel_id,
+            self.model,
+            estimated_prompt,
+            cost
+        );
+    }
+}
+
+impl Drop for AttemptStartGuard<'_> {
+    fn drop(&mut self) {
+        if !self.handled {
+            self.write_499();
+        }
+    }
+}

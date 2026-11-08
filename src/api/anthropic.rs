@@ -485,6 +485,23 @@ pub async fn handle_messages(
             .collect();
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
         // #32 路由回放：真实上游调用计数 + 亲和命中判定（同 resolve 口径）
+
+        // #47：AttemptStart 级守卫（同 openai 面；首事件前断开实测漏记漏计费）
+        let mut attempt_guard = super::openai::billing::AttemptStartGuard {
+            state: state.clone(),
+            api_key: api_key.clone(),
+            requested_model: model.clone(),
+            group: billing_group.clone(),
+            reservation: &reservation,
+            channel_id: String::new(),
+            channel_name: String::new(),
+            model: model.clone(),
+            chat_req: chat_req.clone(),
+            request_id: request_id.clone(),
+            ip: client_ip.clone(),
+            user_id: api_key.user_id.clone(),
+            handled: false,
+        };
         let mut attempt_counter: u32 = 0;
         let affinity_hit_id = session_id
             .as_deref()
@@ -509,6 +526,13 @@ pub async fn handle_messages(
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
             attempt_counter += 1;
+
+            // #47：更新最后尝试的渠道/模型归因（Drop 时 499 落在此渠道头上）
+            attempt_guard.channel_id = cid.clone().unwrap_or_default();
+            attempt_guard.channel_name =
+                ch_ref.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+            attempt_guard.model = upstream.clone();
+            attempt_guard.chat_req = attempt_req.clone();
             let attempt_index = attempt_counter;
             let attempt_started_at = chrono::Utc::now().timestamp();
             let sticky_hit = affinity_hit_id.as_deref() == cid.as_deref();
@@ -521,6 +545,8 @@ pub async fn handle_messages(
             };
             match attempt {
                 Ok(s) => {
+                    // #47：计费接管点/记账点（见各分支语义）
+                    attempt_guard.handoff();
                     // 阶段2：流建立成功——记入断路器/健康追踪/亲和性
                     if let Some(c) = &cid {
                         state.channel_store.record_channel_success_with_sticky(
@@ -610,6 +636,8 @@ pub async fn handle_messages(
                         state.channel_store.mark_cooldown(cid, e.to_string(), 60);
                     }
                     tracing::warn!("messages stream failover: channel {cid:?} failed: {e}, trying next channel");
+                    // #47：计费接管点/记账点（见各分支语义）
+                    attempt_guard.handoff();
                     last_error = Some(e);
                 }
             }
@@ -622,6 +650,8 @@ pub async fn handle_messages(
                         "all channels failed for streaming request".into(),
                     )
                 });
+                // #47：计费接管点/记账点（见各分支语义）
+                attempt_guard.handoff();
                 let latency_ms = request_start.elapsed().as_millis() as u64;
                 let status_code = StatusCode::from_u16(e.http_status())
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -1145,6 +1175,23 @@ pub async fn handle_messages(
             .collect();
         let mut filtered_channels: Vec<crate::log::FilteredChannel> = Vec::new();
         // #32 路由回放：真实上游调用计数 + 亲和命中判定（同 resolve 口径）
+
+        // #47：AttemptStart 级守卫（同 openai 面；首事件前断开实测漏记漏计费）
+        let mut attempt_guard = super::openai::billing::AttemptStartGuard {
+            state: state.clone(),
+            api_key: api_key.clone(),
+            requested_model: model.clone(),
+            group: billing_group.clone(),
+            reservation: &reservation,
+            channel_id: String::new(),
+            channel_name: String::new(),
+            model: model.clone(),
+            chat_req: chat_req.clone(),
+            request_id: request_id.clone(),
+            ip: client_ip.clone(),
+            user_id: api_key.user_id.clone(),
+            handled: false,
+        };
         let mut attempt_counter: u32 = 0;
         let affinity_hit_id = session_id
             .as_deref()
@@ -1169,12 +1216,21 @@ pub async fn handle_messages(
             let mut attempt_req = chat_req.clone();
             attempt_req.model = upstream.clone();
             attempt_counter += 1;
+
+            // #47：更新最后尝试的渠道/模型归因（Drop 时 499 落在此渠道头上）
+            attempt_guard.channel_id = cid.clone().unwrap_or_default();
+            attempt_guard.channel_name =
+                ch_ref.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+            attempt_guard.model = upstream.clone();
+            attempt_guard.chat_req = attempt_req.clone();
             let attempt_index = attempt_counter;
             let attempt_started_at = chrono::Utc::now().timestamp();
             let sticky_hit = affinity_hit_id.as_deref() == cid.as_deref();
             let attempt_start = std::time::Instant::now();
             match bridge.chat(&attempt_req, &ctx).await {
                 Ok(resp) => {
+                    // #47：计费接管点/记账点（见各分支语义）
+                    attempt_guard.handoff();
                     // 阶段2：成功——记入断路器/健康追踪/亲和性
                     if let Some(c) = &cid {
                         state.channel_store.record_channel_success_with_sticky(
@@ -1266,6 +1322,8 @@ pub async fn handle_messages(
                     tracing::warn!(
                         "messages failover: channel {cid:?} failed: {e}, trying next channel"
                     );
+                    // #47：计费接管点/记账点（见各分支语义）
+                    attempt_guard.handoff();
                     last_error = Some(e);
                 }
             }
@@ -1278,6 +1336,8 @@ pub async fn handle_messages(
                         "all channels failed for non-streaming request".into(),
                     )
                 });
+                // #47：计费接管点/记账点（见各分支语义）
+                attempt_guard.handoff();
                 let latency_ms = request_start.elapsed().as_millis() as u64;
                 let status_code = StatusCode::from_u16(e.http_status())
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
