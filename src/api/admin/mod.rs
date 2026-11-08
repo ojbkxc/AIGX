@@ -226,8 +226,10 @@ pub use network::{
 
 // 路由策略（对照 Agent2API「设置 → 路由」；数据面 resolve_bridges 每请求读快照）
 pub use routing::{
-    handle_clear_route_sticky, handle_get_route_sticky, handle_get_routing,
-    handle_routing_defaults, handle_routing_queue, handle_update_routing,
+    handle_clear_route_sticky, handle_delete_routing_group, handle_get_route_sticky,
+    handle_get_routing, handle_get_routing_group, handle_get_routing_profiles,
+    handle_put_routing_group, handle_put_routing_profiles, handle_routing_defaults,
+    handle_routing_preview, handle_routing_queue, handle_update_routing,
 };
 
 pub use queue_api::{handle_get_queue, handle_update_queue};

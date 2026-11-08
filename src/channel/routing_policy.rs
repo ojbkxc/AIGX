@@ -463,6 +463,52 @@ impl RoutingProfiles {
             .iter()
             .find(|g| g.id == id && (g.model.is_empty() || g.model == requested_model))
     }
+
+    /// 按 id 取组（单组 CRUD 读侧；不过 per-model 判定 —— 管理面要看原样）。
+    pub fn group(&self, id: &str) -> Option<&RoutingGroup> {
+        self.groups.iter().find(|g| g.id == id)
+    }
+
+    /// 单组写入（upsert：同 id 替换，否则追加）。
+    ///
+    /// 上限校验（组数 / 成员 / 账号）交由调用方跑 [`Self::validate`] ——
+    /// 校验必须看**整份**配置（组数上限是容器属性），不在单组方法里重复。
+    pub fn upsert_group(&mut self, group: RoutingGroup) {
+        match self.groups.iter_mut().find(|g| g.id == group.id) {
+            Some(slot) => *slot = group,
+            None => self.groups.push(group),
+        }
+    }
+
+    /// 删除组：返回是否真的删了；同时把各档案层指向该组的
+    /// `default_group` 引用清成 `None` —— 不留悬空引用（否则解析时静默
+    /// 忽略，界面看不出「配置的组已经不存在」）。
+    pub fn remove_group(&mut self, id: &str) -> bool {
+        let before = self.groups.len();
+        self.groups.retain(|g| g.id != id);
+        if self.groups.len() == before {
+            return false;
+        }
+        if self.global.default_group.as_deref() == Some(id) {
+            self.global.default_group = None;
+        }
+        for p in self.models.values_mut() {
+            if p.default_group.as_deref() == Some(id) {
+                p.default_group = None;
+            }
+        }
+        true
+    }
+
+    /// 各档案层 `default_group` 指向 `id` 的引用数（管理面删除确认回执用）。
+    pub fn default_group_refs(&self, id: &str) -> usize {
+        usize::from(self.global.default_group.as_deref() == Some(id))
+            + self
+                .models
+                .values()
+                .filter(|p| p.default_group.as_deref() == Some(id))
+                .count()
+    }
 }
 
 /// 单层档案的上限校验。
@@ -1257,6 +1303,56 @@ mod tests {
         assert_eq!(r2.provenance.strategy, None);
         assert_eq!(r2.sticky, StickyMode::Session);
         assert_eq!(r2.provenance.sticky, Some(Layer::Group));
+    }
+
+    /// 单组 CRUD：upsert 同 id 替换不重复；删除连带清 `default_group`
+    /// 悬空引用（global 与模型级两层都要清）。
+    #[test]
+    fn group_crud_upsert_and_remove_clears_refs() {
+        let mut profiles = RoutingProfiles::default();
+        let mk = |id: &str, name: &str| RoutingGroup {
+            id: id.to_string(),
+            name: name.to_string(),
+            model: String::new(),
+            strategy: None,
+            sticky: None,
+            members: Vec::new(),
+        };
+
+        profiles.upsert_group(mk("g1", "一"));
+        profiles.upsert_group(mk("g2", "二"));
+        assert_eq!(profiles.groups.len(), 2);
+        // 同 id 再写 = 替换（不产生第二条）
+        profiles.upsert_group(mk("g1", "一改"));
+        assert_eq!(profiles.groups.len(), 2);
+        assert_eq!(profiles.group("g1").unwrap().name, "一改");
+        assert!(profiles.group("missing").is_none());
+
+        // 档案层引用 g1 后删除：引用被清、g2 不受影响
+        profiles.global.default_group = Some("g1".to_string());
+        profiles.models.insert(
+            "gpt-4o".to_string(),
+            RoutingProfile {
+                default_group: Some("g1".to_string()),
+                ..RoutingProfile::default()
+            },
+        );
+        profiles.models.insert(
+            "other".to_string(),
+            RoutingProfile {
+                default_group: Some("g2".to_string()),
+                ..RoutingProfile::default()
+            },
+        );
+        assert_eq!(profiles.default_group_refs("g1"), 2);
+        assert!(profiles.remove_group("g1"));
+        assert!(!profiles.remove_group("g1"), "重复删除返回 false");
+        assert_eq!(profiles.global.default_group, None);
+        assert_eq!(profiles.models["gpt-4o"].default_group, None);
+        assert_eq!(
+            profiles.models["other"].default_group.as_deref(),
+            Some("g2")
+        );
     }
 
     /// `plan_route`：scope 裁剪（白名单 / 排除名单）+ 直通路径 + 计数。

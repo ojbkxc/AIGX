@@ -11,7 +11,7 @@
 //! - 断路器参数：`CircuitBreaker::update_params`（下一请求生效）
 //! - 调度权重：`ChannelStore::set_scheduler_config`（原闲置接线，接上）
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use serde::Deserialize;
@@ -19,7 +19,10 @@ use serde_json::{json, Value};
 
 use super::super::openai::AppState;
 use super::common::verify_admin;
-use crate::channel::routing_policy::{BreakerPolicy, RouteStrategy, RoutingPolicy, StickyMode};
+use crate::channel::routing_policy::{
+    caps, BreakerPolicy, RequestNeeds, RouteStrategy, RoutingGroup, RoutingPolicy, RoutingProfiles,
+    StickyMode,
+};
 
 /// GET /api/routing — 当前路由策略 + 运行时状态。
 pub async fn handle_get_routing(
@@ -293,7 +296,30 @@ pub async fn handle_routing_queue(
     );
     let plan = crate::channel::routing_policy::plan_route(&policy, &profile, &ordered);
     let breaker_map = state.channel_store.circuit_breaker().get_status_map();
+    let (ordered_json, blocked_json) = queue_projection(&state, &plan, &breaker_map);
 
+    Ok(Json(json!({
+        "strategy": profile.strategy,
+        "sticky": profile.sticky,
+        "model": model,
+        "pickedId": plan.first().map(|c| c.id.clone()),
+        "ordered": ordered_json,
+        "blocked": blocked_json,
+        // #40 附加字段（旧前端不读即忽略，保持既有字段语义不变）：
+        // 档案总开关、实际命中的层、被档案裁掉的原因计数
+        "profilesEnabled": policy.enabled,
+        "appliedLayers": profile.provenance.applied_layers(),
+        "skipped": plan.skipped,
+    })))
+}
+
+/// 预演投影（`/api/routing/queue` 与 `/api/routing/preview` 共用，**不造
+/// 第二套**）：plan 的参与候选 + 被挡门外的启用渠道两段 JSON。
+fn queue_projection(
+    state: &AppState,
+    plan: &crate::channel::routing_policy::RoutePlan<'_>,
+    breaker_map: &std::collections::HashMap<String, String>,
+) -> (Vec<Value>, Vec<Value>) {
     let ordered_json: Vec<Value> = plan
         .iter()
         .map(|c| {
@@ -337,20 +363,7 @@ pub async fn handle_routing_queue(
             })
         })
         .collect();
-
-    Ok(Json(json!({
-        "strategy": profile.strategy,
-        "sticky": profile.sticky,
-        "model": model,
-        "pickedId": plan.first().map(|c| c.id.clone()),
-        "ordered": ordered_json,
-        "blocked": blocked_json,
-        // #40 附加字段（旧前端不读即忽略，保持既有字段语义不变）：
-        // 档案总开关、实际命中的层、被档案裁掉的原因计数
-        "profilesEnabled": policy.enabled,
-        "appliedLayers": profile.provenance.applied_layers(),
-        "skipped": plan.skipped,
-    })))
+    (ordered_json, blocked_json)
 }
 
 // ── 粘滞会话管理面（#38；对照 Agent2API routing_workspace 的 get_sticky/clear_sticky）──
@@ -474,5 +487,228 @@ pub async fn handle_clear_route_sticky(
     Ok(Json(json!({
         "success": true,
         "data": { "cleared": cleared }
+    })))
+}
+
+// ── 多规则档案管理面（#40 第 2 步；契约冻结稿 §5：在既有 /api/routing/* 上扩）──
+
+/// GET /api/routing/profiles — 整份档案读回（含总开关）。
+pub async fn handle_get_routing_profiles(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let policy = state.routing_policy.snapshot();
+    Ok(Json(json!({
+        "enabled": policy.enabled,
+        "profiles": policy.profiles,
+    })))
+}
+
+/// PUT /api/routing/profiles 请求体：提供哪份改哪份（`profiles` 是**整份**
+/// 替换 —— 模型级档案/组的增量编辑走单组端点或先 GET 改完再 PUT）。
+#[derive(Debug, Deserialize)]
+pub struct RoutingProfilesUpdate {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub profiles: Option<RoutingProfiles>,
+}
+
+/// PUT /api/routing/profiles — 整份保存（上限校验，超限 400 拒绝写入）。
+pub async fn handle_put_routing_profiles(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<RoutingProfilesUpdate>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let mut policy = state.routing_policy.snapshot().as_ref().clone();
+    if let Some(v) = req.enabled {
+        policy.enabled = v;
+    }
+    if let Some(p) = req.profiles {
+        policy.profiles = p;
+    }
+    if let Err(e) = policy.profiles.validate() {
+        return Err(super::common::error_response(
+            &format!("路由档案超限：{e}"),
+            axum::http::StatusCode::BAD_REQUEST,
+        ));
+    }
+    // store.update 内再跑一次 validate（防其他写入路径绕过的兜底）
+    let saved = state.routing_policy.update(policy).map_err(|e| {
+        super::common::error_response(
+            &format!("路由策略持久化失败: {e}"),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    Ok(Json(json!({
+        "enabled": saved.enabled,
+        "profiles": saved.profiles,
+    })))
+}
+
+/// GET /api/routing/profiles/group/:id — 单组读（404 = 不存在）。
+pub async fn handle_get_routing_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let policy = state.routing_policy.snapshot();
+    policy
+        .profiles
+        .group(&id)
+        .map(|g| Json(json!(g)))
+        .ok_or_else(|| {
+            super::common::error_response(
+                &format!("路由组 `{id}` 不存在"),
+                axum::http::StatusCode::NOT_FOUND,
+            )
+        })
+}
+
+/// PUT /api/routing/profiles/group/:id — 单组 upsert（同 id 替换，否则追加）。
+///
+/// body.id 为空时以路径 id 为准；两者都有且不一致则 400（防「改 A 写成 B」）。
+pub async fn handle_put_routing_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(mut group): Json<RoutingGroup>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    if group.id.is_empty() {
+        group.id = id.clone();
+    }
+    if group.id != id {
+        return Err(super::common::error_response(
+            &format!("body.id `{}` 与路径 id `{id}` 不一致", group.id),
+            axum::http::StatusCode::BAD_REQUEST,
+        ));
+    }
+    let mut policy = state.routing_policy.snapshot().as_ref().clone();
+    if policy.profiles.group(&id).is_none() && policy.profiles.groups.len() >= caps::MAX_GROUPS {
+        return Err(super::common::error_response(
+            &format!("路由组数已达上限 {}", caps::MAX_GROUPS),
+            axum::http::StatusCode::BAD_REQUEST,
+        ));
+    }
+    policy.profiles.upsert_group(group);
+    if let Err(e) = policy.profiles.validate() {
+        return Err(super::common::error_response(
+            &format!("路由档案超限：{e}"),
+            axum::http::StatusCode::BAD_REQUEST,
+        ));
+    }
+    let saved = state.routing_policy.update(policy).map_err(|e| {
+        super::common::error_response(
+            &format!("路由策略持久化失败: {e}"),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    let group = saved.profiles.group(&id).cloned();
+    Ok(Json(json!({ "group": group })))
+}
+
+/// DELETE /api/routing/profiles/group/:id — 删除组并连带清各档案层
+/// `default_group` 悬空引用（`clearedDefaultGroupRefs` 回执清了几处）。
+pub async fn handle_delete_routing_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let mut policy = state.routing_policy.snapshot().as_ref().clone();
+    let refs_before = policy.profiles.default_group_refs(&id);
+    if !policy.profiles.remove_group(&id) {
+        return Err(super::common::error_response(
+            &format!("路由组 `{id}` 不存在"),
+            axum::http::StatusCode::NOT_FOUND,
+        ));
+    }
+    state.routing_policy.update(policy).map_err(|e| {
+        super::common::error_response(
+            &format!("路由策略持久化失败: {e}"),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    Ok(Json(json!({
+        "removed": id,
+        "clearedDefaultGroupRefs": refs_before,
+    })))
+}
+
+/// POST /api/routing/preview 请求体（契约 §5：{model, needs, group_id}）。
+#[derive(Debug, Deserialize)]
+pub struct RoutingPreviewRequest {
+    pub model: String,
+    #[serde(default)]
+    pub needs: Option<RequestNeeds>,
+    /// 显式指定路由组（契约 §6.1 第 1 环的预演形态；数据面的 Key 授权链
+    /// 在后续步骤接入 —— 预演端点是管理面，不模拟 Key 白名单）。
+    #[serde(default)]
+    pub group_id: Option<String>,
+}
+
+/// POST /api/routing/preview — 判定预演（复用 queue 的投影 helper 与数据面
+/// 同一判定序列），比 GET /api/routing/queue 多支持 `group_id` 与
+/// `needs` 入参，并回显 resolved profile 的逐字段 provenance。
+///
+/// 注：`needs` 当前只回显（resolved.needs + provenance）—— 渠道级能力粗筛
+/// 接线（§2.4 `channel_may_serve`）由 #40 §1 步骤负责，落地后预演自然同口径。
+pub async fn handle_routing_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<RoutingPreviewRequest>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    verify_admin(&state, &headers).await?;
+    let model = body.model.trim();
+    if model.is_empty() {
+        return Err(super::common::error_response(
+            "model 不能为空",
+            axum::http::StatusCode::BAD_REQUEST,
+        ));
+    }
+    let policy = state.routing_policy.snapshot();
+    let group_id = body
+        .group_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    // 与数据面 / queue 完全同一判定序列（#31 教训：预演不造第二套）
+    let profile = crate::channel::routing_policy::resolve_profile(
+        &policy,
+        model,
+        &state.model_mapper,
+        group_id,
+    );
+    let ordered = state.channel_store.select_for_model_by_strategy(
+        model,
+        profile.strategy,
+        &state.pricing_store,
+    );
+    let plan = crate::channel::routing_policy::plan_route(&policy, &profile, &ordered);
+    let breaker_map = state.channel_store.circuit_breaker().get_status_map();
+    let (ordered_json, blocked_json) = queue_projection(&state, &plan, &breaker_map);
+
+    Ok(Json(json!({
+        "model": model,
+        "requestedGroupId": group_id,
+        "profilesEnabled": policy.enabled,
+        "resolved": {
+            "strategy": profile.strategy,
+            "sticky": profile.sticky,
+            "needs": profile.needs,
+            "defaultGroup": profile.default_group,
+            "scope": profile.scope,
+            "sortRules": profile.sort_rules,
+            "provenance": profile.provenance,
+            "appliedLayers": profile.provenance.applied_layers(),
+        },
+        "pickedId": plan.first().map(|c| c.id.clone()),
+        "ordered": ordered_json,
+        "blocked": blocked_json,
+        "skipped": plan.skipped,
     })))
 }
