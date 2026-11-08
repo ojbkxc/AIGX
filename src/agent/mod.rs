@@ -8,6 +8,7 @@
 //! - [`runner`]：多轮循环（LLM 推理 → 解析工具调用 → 执行 → 回填）。
 //! - [`session`]：会话持久化（FileStore KV，`agent_session:`/`agent_msg:` 前缀）。
 //! - [`approval`]：审批矩阵（高危写挂起人工确认，阶段二接入）。
+//! - [`confirm`]：终端用户写工具二次确认事件形状（#34，30s 超时，不进审批矩阵）。
 //! - [`audit`]：全程审计留痕 + 决策回放。
 //!
 //! 安全底线：写操作分低危（自动+审计）与高危（审批矩阵人工确认），
@@ -16,6 +17,7 @@
 pub mod api;
 pub mod approval;
 pub mod audit;
+pub mod confirm;
 pub mod llm;
 pub mod registry;
 pub mod runner;
