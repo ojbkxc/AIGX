@@ -390,7 +390,16 @@ mod tests {
             async move { sweep(&store, &client).await }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
-        // 查询在途时删掉渠道：写回找不到记录应静默跳过
+        // 直接观测「查询确实在途」：mock 已至少收到一次请求（fixture 的
+        // in_flight_max 计数器）。不这样做的话「在途窗口」只靠 delay 排
+        // 在 read_request_head 之后的间接推理，fixture 一改就悄悄退化。
+        assert!(
+            mock.in_flight_max.load(Ordering::Relaxed) >= 1,
+            "查询应在 remove 前已出发（fixture 时序前提）"
+        );
+        // 失败方向：若 sweep 没在 remove 前 poll 到，list() 空 →
+        // targets.is_empty() 早退 → done=0 → 下面的断言必红（硬失败，
+        // 不是假绿）——这条不变量不能破坏。
         store.remove("gone").unwrap();
         let done = sweep_handle.await.unwrap();
         assert_eq!(done, 1); // 查询本身成功（写回静默跳过不影响计数）

@@ -801,7 +801,10 @@ impl ChannelStore {
         if !error.is_empty() {
             let mut channels = self.channels.write();
             if let Some(ch) = channels.iter_mut().find(|c| c.id == id) {
-                ch.last_error = Some(error);
+                // 落库前脱敏（#42）：冷却触发的报错同样可能带上游正文
+                // （各协议面调用点都是 `e.to_string()`），凭证形态必须
+                // 拦在库内——与 mark_unhealthy 同口径。
+                ch.last_error = Some(crate::error_translate::sanitize_error_message(&error));
                 ch.updated_at = chrono::Utc::now().timestamp();
             }
             self.publish_snapshot(&channels);
@@ -821,7 +824,10 @@ impl ChannelStore {
         let mut channels = self.channels.write();
         if let Some(ch) = channels.iter_mut().find(|c| c.id == id) {
             ch.status = "disabled".to_string();
-            ch.last_error = Some(error);
+            // 落库前脱敏（#42）：上游错误正文可能回显凭证（401/403 常回显
+            // 密钥/账号标识），该字段经 mask_channel 出界面；写入侧一道覆盖
+            // 所有调用点（同 balance_last_error 口径），排障原文在调用方日志。
+            ch.last_error = Some(crate::error_translate::sanitize_error_message(&error));
             ch.updated_at = chrono::Utc::now().timestamp();
             // 锁内只改状态，落盘用快照异步执行（put_async 序列化的是持有期间的完整副本，
             // 不会用旧快照覆盖：后续并发修改会再次触发落盘并带上最新值）
@@ -1810,6 +1816,42 @@ mod tests {
             assert_eq!(ch.last_error.as_deref(), Some("boom"));
             // disabled 不被选中
             assert!(s.select_for_model("m").is_empty());
+        });
+    }
+
+    /// #42 写入侧脱敏：mark_unhealthy / mark_cooldown 落库前过
+    /// sanitize_error_message——凭证形态替换、非凭证诊断文本逐字保留。
+    #[test]
+    fn mark_unhealthy_and_cooldown_sanitize_last_error() {
+        with_secret_dir("sanitize", || {
+            let s = store();
+            s.add(sample("a", 10, vec![])).unwrap();
+
+            // 凭证形态必须被替换（sk- 与 Bearer 两道）
+            s.mark_unhealthy(
+                "a",
+                "上游返回 HTTP 401：invalid api key provided: sk-abcdef1234567890".to_string(),
+            );
+            let ch = s.get("a").unwrap();
+            assert_eq!(
+                ch.last_error.as_deref(),
+                Some("上游返回 HTTP 401：invalid api key provided: sk-***"),
+                "mark_unhealthy 落库值必须脱敏"
+            );
+
+            // Bearer 形态同样替换
+            s.mark_cooldown("a", "Authorization: Bearer tok123".to_string(), 60);
+            let ch = s.get("a").unwrap();
+            assert_eq!(ch.last_error.as_deref(), Some("Authorization: Bearer ***"));
+
+            // 非凭证诊断文本逐字保留（防脱敏过度吃掉排障信息）
+            s.mark_unhealthy("a", "渠道上游超时（15s），已标记不健康".to_string());
+            let ch = s.get("a").unwrap();
+            assert_eq!(
+                ch.last_error.as_deref(),
+                Some("渠道上游超时（15s），已标记不健康"),
+                "诊断文本不得被改动"
+            );
         });
     }
 
