@@ -220,9 +220,15 @@ async fn spawn_server(home: &std::path::Path, log_path: &std::path::Path) -> (Ch
     let aigx_dir = home.join(".aigx");
     std::fs::create_dir_all(&aigx_dir).expect("create .aigx dir");
     let cfg_data_dir = data_dir.to_string_lossy().replace('\\', "/");
+    // allow_internal_upstream=true：渠道 base_url 指向 loopback mock，
+    // handle_add_channel 的 SSRF 防护（net_guard::validate_outbound_url）
+    // 默认拒绝 127.0.0.1/内网段 → 400；逃生阀须显式开启（该字段注释
+    // 即「自托管内网上游场景」口径）。
     std::fs::write(
         aigx_dir.join("config.toml"),
-        format!("[server]\nhost = \"127.0.0.1\"\nport = {port}\ndata_dir = \"{cfg_data_dir}\"\n"),
+        format!(
+            "[server]\nhost = \"127.0.0.1\"\nport = {port}\ndata_dir = \"{cfg_data_dir}\"\n[usage]\nallow_internal_upstream = true\n"
+        ),
     )
     .expect("write config.toml");
 
