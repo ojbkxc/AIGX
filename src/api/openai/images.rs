@@ -770,9 +770,13 @@ pub(crate) async fn handle_generated_asset(
     // symlink_metadata 读链接本身（不跟随）：符号链接不是本服务产出的形态
     let meta = tokio::fs::symlink_metadata(&path)
         .await
-        .map_err(|_| error_response("asset not found", StatusCode::NOT_FOUND))?;
+        .map_err(|_| error_response("asset_not_found", "asset not found", StatusCode::NOT_FOUND))?;
     if meta.is_symlink() {
-        return Err(error_response("asset not found", StatusCode::NOT_FOUND));
+        return Err(error_response(
+            "asset_not_found",
+            "asset not found",
+            StatusCode::NOT_FOUND,
+        ));
     }
     if meta.len() > MAX_ASSET_BYTES {
         return Err(error_response(
@@ -783,15 +787,20 @@ pub(crate) async fn handle_generated_asset(
     }
     let bytes = tokio::fs::read(&path)
         .await
-        .map_err(|_| error_response("asset not found", StatusCode::NOT_FOUND))?;
+        .map_err(|_| error_response("asset_not_found", "asset not found", StatusCode::NOT_FOUND))?;
     let mime = mime_guess::from_path(&name)
         .first_or_octet_stream()
         .to_string();
     let mut resp = Response::new(axum::body::Body::from(bytes));
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_str(&mime)
-            .map_err(|_| error_response("invalid asset name", StatusCode::BAD_REQUEST))?,
+        axum::http::HeaderValue::from_str(&mime).map_err(|_| {
+            error_response(
+                "invalid_request",
+                "invalid asset name",
+                StatusCode::BAD_REQUEST,
+            )
+        })?,
     );
     Ok(resp)
 }
