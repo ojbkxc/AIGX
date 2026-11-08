@@ -62,30 +62,52 @@ pub fn tools_enabled() -> bool {
 
 /// 工具目录（GET /api/assistant/tools）。
 ///
-/// 管理员 + 开关开启 → 非 HighRisk 全集（≈53，registry::mcp_tools 同口径）；
-/// 其余（普通用户 / 开关关）→ 空清单（前端据此隐藏工具入口）。
+/// 管理员（开关开）→ 非 HighRisk 全集（≈53，registry::mcp_tools 同口径）；
+/// 普通用户（开关开）→ user_exec 声明集 ∩ 组 allowlist（#34 v2 双身份，
+/// user_tool_allowed 判定，设计稿 D1-D8）；开关关 → 空清单（前端隐藏工具入口）。
 pub async fn handle_assistant_tools(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let user = verify_user(&state, &headers).await?;
-    let tools: Vec<Value> = if user.is_admin() && tools_enabled() {
-        tools::tool_specs()
-            .iter()
-            .filter(|t| t.risk != RiskLevel::HighRisk)
-            .map(|t| {
-                json!({
-                    "name": t.name,
-                    "label": t.label,
-                    "description": t.description,
-                    "schema": (t.schema)(),
-                    "risk": match t.risk {
-                        RiskLevel::ReadOnly => "read_only",
-                        RiskLevel::LowRisk => "low_risk",
-                        RiskLevel::HighRisk => "high_risk",
-                    },
-                })
+    let tool_json = |t: &crate::agent::registry::ToolDef| {
+        json!({
+            "name": t.name,
+            "label": t.label,
+            "description": t.description,
+            "schema": (t.schema)(),
+            "risk": match t.risk {
+                RiskLevel::ReadOnly => "read_only",
+                RiskLevel::LowRisk => "low_risk",
+                RiskLevel::HighRisk => "high_risk",
+            },
+        })
+    };
+    let tools: Vec<Value> = if user.is_admin() {
+        if !tools_enabled() {
+            Vec::new()
+        } else {
+            tools::tool_specs()
+                .iter()
+                .filter(|t| t.risk != RiskLevel::HighRisk)
+                .map(tool_json)
+                .collect()
+        }
+    } else if tools_enabled() {
+        // #34 v2：普通用户域——user_exec 声明 ∩ 组 allowlist（判定函数带
+        // 14 单测；执行侧 exec_user_tool 还有一层兜底，两重防线）
+        let policy = state.user_tool_policy.snapshot();
+        tools::user_exposed_tools()
+            .filter(|t| {
+                crate::agent::user_tool_policy::user_tool_allowed(
+                    &policy,
+                    &user.group,
+                    t.name,
+                    t.risk,
+                    t.user_exec.is_some(),
+                ) == crate::agent::user_tool_policy::ToolPermission::Allow
             })
+            .map(tool_json)
             .collect()
     } else {
         Vec::new()
@@ -221,7 +243,10 @@ pub async fn handle_assistant_chat(
             ),
         ));
     }
-    let tools_on = tools_enabled() && user.is_admin();
+    // #34 v2：普通用户也走工具回路（tools_enabled 总闸 + 双身份执行体分派）
+    let tools_on = tools_enabled();
+    // 普通用户的可执行集：user_exec 声明 ∩ 组 allowlist（与 /tools 同判定）
+    let policy = state.user_tool_policy.snapshot();
     let max_rounds = body.max_rounds.unwrap_or(MAX_ROUNDS).clamp(1, MAX_ROUNDS);
 
     let ch = pick_channel(
@@ -270,12 +295,25 @@ pub async fn handle_assistant_chat(
     let final_content;
     // #34-①（lead 评审）：openai_tools() 是全量 73 个含 20 高危——助手面
     // 只给 mcp_tools() 非 HighRisk 子集（exec 前的 deny 是第二重，不是唯一一重）
+    // Schema 按身份分派：管理员=非 HighRisk 全集；普通用户=可执行集
     let tools_schema: Vec<Value> = if tools_on {
-        tools::openai_tools_of(
-            tools::tool_specs()
-                .iter()
-                .filter(|t| t.risk != RiskLevel::HighRisk),
-        )
+        if user.is_admin() {
+            tools::openai_tools_of(
+                tools::tool_specs()
+                    .iter()
+                    .filter(|t| t.risk != RiskLevel::HighRisk),
+            )
+        } else {
+            tools::openai_tools_of(tools::user_exposed_tools().filter(|t| {
+                crate::agent::user_tool_policy::user_tool_allowed(
+                    &policy,
+                    &user.group,
+                    t.name,
+                    t.risk,
+                    t.user_exec.is_some(),
+                ) == crate::agent::user_tool_policy::ToolPermission::Allow
+            }))
+        }
     } else {
         Vec::new()
     };
@@ -358,45 +396,62 @@ pub async fn handle_assistant_chat(
                         });
                         continue;
                     };
-                    if def.risk == RiskLevel::HighRisk {
-                        super::common::record_audit(
-                            &state,
-                            &user.email,
-                            "assistant_tool_denied",
-                            def.name,
-                            None,
-                            Some(json!({ "reason": "high risk not allowed in assistant" })),
+                    // #34 v2 双身份执行分派：
+                    // - 管理员：registry exec_tool（非 HighRisk，与 Agent 同语义）
+                    // - 普通用户：user_tool_allowed 判定（Allowlist/组启用/非高危）
+                    //   → exec_user_tool（user_exec 执行体）；拒绝原因回灌 LLM
+                    let out: ToolOutcome = if user.is_admin() {
+                        let args: Value = serde_json::from_str(&call.arguments)
+                            .unwrap_or_else(|_| json!({ "_raw": call.arguments }));
+                        match tools::exec_tool(&state, &headers, &call.function_name, &args).await {
+                            Ok(o) => o,
+                            Err((_code, msg)) => ToolOutcome {
+                                text: msg,
+                                ok: false,
+                            },
+                        }
+                    } else {
+                        let perm = crate::agent::user_tool_policy::user_tool_allowed(
+                            &policy,
+                            &user.group,
+                            &call.function_name,
+                            def.risk,
+                            def.user_exec.is_some(),
                         );
-                        tool_trace.push(json!({
-                            "name": call.function_name, "ok": false,
-                            "summary": "高危工具不对聊天助手开放",
-                        }));
-                        messages.push(crate::bridge::ChatMessage {
-                            role: Role::Tool,
-                            content: Some("该工具不对聊天助手开放".to_string()),
-                            reasoning: None,
-                            content_blocks: None,
-                            name: Some(call.function_name.clone()),
-                            tool_call_id: Some(call.id.clone()),
-                            tool_calls: None,
-                        });
-                        continue;
-                    }
-                    let args: Value = serde_json::from_str(&call.arguments)
-                        .unwrap_or_else(|_| json!({ "_raw": call.arguments }));
-                    let out: ToolOutcome = match tools::exec_tool(
-                        &state,
-                        &headers,
-                        &call.function_name,
-                        &args,
-                    )
-                    .await
-                    {
-                        Ok(o) => o,
-                        Err((_code, msg)) => ToolOutcome {
-                            text: msg,
-                            ok: false,
-                        },
+                        if perm != crate::agent::user_tool_policy::ToolPermission::Allow {
+                            super::common::record_audit(
+                                &state,
+                                &user.email,
+                                "assistant_tool_denied",
+                                def.name,
+                                None,
+                                Some(json!({ "reason": format!("{perm:?}") })),
+                            );
+                            ToolOutcome {
+                                text: format!(
+                                    "工具 {} 不对当前用户开放（策略拒绝：{perm:?}）",
+                                    def.label
+                                ),
+                                ok: false,
+                            }
+                        } else {
+                            let args: Value = serde_json::from_str(&call.arguments)
+                                .unwrap_or_else(|_| json!({ "_raw": call.arguments }));
+                            match crate::agent::registry::exec_user_tool(
+                                &state,
+                                &headers,
+                                &call.function_name,
+                                &args,
+                            )
+                            .await
+                            {
+                                Ok(o) => o,
+                                Err((_code, msg)) => ToolOutcome {
+                                    text: msg,
+                                    ok: false,
+                                },
+                            }
+                        }
                     };
                     tool_total_chars += out.text.chars().count();
                     tool_trace.push(json!({
