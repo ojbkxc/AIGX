@@ -689,6 +689,9 @@ fn paths_settings_ops() -> Value {
         "/api/assistant/chat": {
             "post": op_body("助手", "工具回路聊天（多轮 tool-call 循环，12 轮上限；计费走订阅池+钱包；一条请求日志归集全程）", "model/messages[{role,content}]/channel_id?/max_rounds?")
         },
+        "/api/update/cleanup-artifacts": {
+            "post": op("更新", "一键清理更新产物（保留当前与上一版各一代回滚候选；返回 removed/bytes）")
+        },
         "/api/routing/replay/{request_id}": {
             "get": op_params("路由", "路由回放快照（Phase1-B/#26/#32 只读投影：候选序/过滤原因/选中/策略快照/account_skips 按渠道分组且有界/attempt_details 逐次上游尝试明细（index/channel/provider/model/stickyHit/startedAt/finishedAt/status/error/notice；有界 64+截断计数）/route_truncated 与 attempt_details_truncated 截断计数；route_replay 开关开启的请求才有完整数据）", &[path_param("request_id")])
         },
@@ -1294,6 +1297,7 @@ mod tests {
         add("/api/routing", &["get", "put"]);
         add("/api/routing/defaults", &["get"]);
         add("/api/routing/replay/{request_id}", &["get"]);
+        add("/api/update/cleanup-artifacts", &["post"]);
         add("/api/assistant/tools", &["get"]);
         add("/api/assistant/chat", &["post"]);
         add("/api/gateway/prompt", &["get", "put"]);

@@ -2408,6 +2408,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             post(api::admin::update::handle_update_rollback),
         )
         .route(
+            "/api/update/cleanup-artifacts",
+            post(api::admin::update::handle_update_cleanup_artifacts),
+        )
+        .route(
             "/api/update/settings",
             get(api::admin::update::handle_get_update_settings)
                 .put(api::admin::update::handle_put_update_settings),
