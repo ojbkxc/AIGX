@@ -59,7 +59,8 @@ describe('RouteSticky（404 降级路径复现）', () => {
   });
 
   // 后端 be-fix #38 已入库的真实形状：id = `session_id\u{1f}model`（清除原样回传），
-  // expires_at/updated_at 是 unix 秒，无 channel_name/provider，500 条截断无分页。
+  // expires_at/updated_at 是 unix 秒，channel_name 可空（7a513e2a 补），
+  // 500 条截断无分页。
   const STICKY_ID = `sess-abcdefghijklmnop\u001fglm-5.1`;
 
   it('真实形状：id 拆分展示（不含控制字符），逐条清除原样回传 id', async () => {
@@ -70,6 +71,7 @@ describe('RouteSticky（404 降级路径复现）', () => {
           {
             id: STICKY_ID,
             channel_id: 'ch-1',
+            channel_name: '渠道一',
             expires_at: 1_700_000_600,
             updated_at: 1_700_000_000,
             sticky_remaining_secs: 120,
@@ -88,7 +90,7 @@ describe('RouteSticky（404 降级路径复现）', () => {
     const row = container.querySelector('.rs-item') as HTMLElement;
     expect(row.textContent).toContain('sess-abcdefghijklmnop');
     expect(row.textContent).toContain('glm-5.1');
-    expect(row.textContent).toContain('#ch-1');
+    expect(row.textContent).toContain('渠道一'); // channel_name 优先于 #id
     // 分隔符是内部编码，不该出现在可见文本里
     expect(row.textContent).not.toContain('\u001f');
     // total 回执可见；未被截断时不给截断提示
@@ -104,11 +106,18 @@ describe('RouteSticky（404 降级路径复现）', () => {
     );
   });
 
-  it('截断回执：truncated=true 时提示「已截断」（列出的一页不是全部）', async () => {
+  it('渠道名缺省时回落 #渠道 id；truncated=true 提示「已截断」', async () => {
     apiMock.getRouteSticky.mockResolvedValue({
       success: true,
       data: {
-        entries: [{ id: STICKY_ID, channel_id: 'ch-1', expires_at: 1_700_000_600 }],
+        entries: [
+          {
+            id: STICKY_ID,
+            channel_id: 'ch-9',
+            channel_name: null,
+            expires_at: 1_700_000_600,
+          },
+        ],
         total: 1200,
         truncated: true,
         now: 1_700_000_000,
@@ -117,6 +126,7 @@ describe('RouteSticky（404 降级路径复现）', () => {
     });
     const { container } = render(<>{<RouteSticky />}</> as ReactElement);
     await waitFor(() => expect(container.querySelector('.rs-total')).toBeTruthy(), { timeout: 3000 });
+    expect(container.querySelector('.rs-item')?.textContent).toContain('#ch-9');
     expect(container.querySelector('.rs-total')?.textContent).toContain('1200');
     expect(container.querySelector('.rs-total')?.textContent).toContain('已截断');
   });

@@ -12,6 +12,7 @@
  * - 行 id = 内部编码 `session_id\u{1f}model`，清除时**原样回传**；
  *   展示时按 U+001F 拆分（控制字符不可见，整串截断会把模型名切掉）
  * - `expires_at` 是 unix 秒（toMillis 的 <1e11 口径自适应）
+ * - `channel_name` 优先显示（渠道已删则 null → 回落 `#channel_id`）
  * - 后端按 500 条截断、无分页参数：超出由 `total` / `truncated` 回执
  * 性能约束：手动刷新 + 搜索触发拉取，不轮询（搜索去抖 300ms）。
  */
@@ -238,7 +239,7 @@ export default function RouteSticky(): JSX.Element {
                     </span>
                   ) : null}
                   <span className="rs-chan">
-                    {e.channel_id ? `#${e.channel_id}` : '—'}
+                    {e.channel_name || (e.channel_id ? `#${e.channel_id}` : '—')}
                   </span>
                   {exp != null && (
                     <span className="rs-exp">

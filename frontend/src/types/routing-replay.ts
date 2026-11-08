@@ -46,11 +46,13 @@ export interface AccountSkipRow {
  * - 时间/剩余量：`expires_at` / `updated_at` 是 **unix 秒**；
  *   `*_remaining_secs` 是剩余秒数（`sticky_remaining_secs=0` 表示已出粘性窗口、
  *   下次选路重走 HRW，但条目还在硬 TTL 内）
- * - 后端**不返回**渠道名/协议域（只有 channel_id） */
+ * - `channel_name` 由 7a513e2a 补上（渠道已删则为 null）；**不返回**协议域 */
 export interface RouteStickyEntry {
   /** 内部编码 `session_id\u{1f}model`（清除时原样回传） */
   id: string;
   channel_id?: string | null;
+  /** 渠道名（渠道已删/未命中则 null → 前端回落 `#channel_id`） */
+  channel_name?: string | null;
   /** 硬过期时刻（unix 秒） */
   expires_at?: number;
   /** 建立/最后写入时刻（unix 秒） */
