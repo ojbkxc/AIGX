@@ -3202,5 +3202,13 @@
   "点击复制：{{name}}": "Click to copy: {{name}}",
   "自定义等级…（{{level}}）": "Custom level… ({{level}})",
   "提供商设置（{{n}}）": "Provider settings ({{n}})",
-  "已领到、还没到生效时间的套餐（生效后余额列会按它显示）：{{lines}}": "Plans already claimed but not yet effective (the balance column reflects them once active): {{lines}}"
+  "已领到、还没到生效时间的套餐（生效后余额列会按它显示）：{{lines}}": "Plans already claimed but not yet effective (the balance column reflects them once active): {{lines}}",
+  "分叉会话": "Fork session",
+  "分叉失败": "Fork failed",
+  "分叉为新会话": "Fork as new session",
+  "父已删": "Parent deleted",
+  "空会话无可分叉消息": "Empty session has no messages to fork",
+  "手工": "Manual",
+  "已分叉为新会话：复制 {{copied}} 条": "Forked as new session: copied {{copied}} messages",
+  "已分叉为新会话：复制 {{copied}} 条，超界截断 {{dropped}} 条": "Forked as new session: copied {{copied}} messages, {{dropped}} out-of-range truncated"
 }
