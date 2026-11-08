@@ -37,11 +37,17 @@ function toMillis(v: number | undefined): number | null {
   return v < 1e11 ? v * 1000 : v;
 }
 
-/** 耗时收短：ms → 「820ms / 1.2s / 1m04s」（#32 逐次明细落库后时间线恢复使用） */
+/** 耗时收短：ms → 「820ms / 1.2s / 1m04s」（#32 逐次明细落库后时间线恢复使用）
+ *
+ * 秒档固定 1 位小数：上游 `routing-ui.tsx:56-61 formatDuration` 也是
+ * `toFixed(1)`，注释示例「1.2s」同样只有 1 位。此前写成
+ * `toFixed(ms < 10_000 ? 2 : 1)`，10s 以下吐「1.00s」，与注释/上游/e2e
+ * 断言（routing-replay.spec.ts:161 期望 `1.0s`）三方都不一致。
+ */
 export function fmtDuration(ms: number | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return '—';
   if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)}s`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
   const m = Math.floor(ms / 60_000);
   return `${m}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, '0')}s`;
 }
