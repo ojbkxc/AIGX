@@ -227,7 +227,7 @@
   "Anthropic /v1/messages": "Anthropic /v1/messages",
   "停用": "Disable",
   "编辑": "Edit",
-  "删除": "Removed",
+  "删除": "Delete",
   "编辑渠道": "Edit Channel",
   "添加渠道": "Add Channel",
   "渠道类型": "Channel Type",

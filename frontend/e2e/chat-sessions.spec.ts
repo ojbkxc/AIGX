@@ -265,9 +265,9 @@ test.describe('聊天 · 历史会话抽屉', () => {
     const beforeCount = await page.locator('.sd-item').count();
     expect(beforeCount).toBeGreaterThan(1);
     // 删除第 2 个（非活动）会话（点击后弹确认框）。
-    // #58 起每行有两个 `.sd-item-del`（分叉 + 删除），裸 nth(1) 会命中
-    // 第 1 行的删除按钮（= 删活动会话，恰好条数相同而假绿/假红）。按 title
-    // 精确点名「删除」，再取第 2 行。
+    // #58 起每行有三个 `.sd-item-del`（SessionDrawer L189 分叉 / L201 重命名 /
+    // L215 删除），裸 nth(1) 会命中第 1 行的删除按钮（= 删活动会话，恰好条数
+    // 相同而假绿/假红）。按 title 精确点名「删除」，再取第 2 行。
     await page.locator('.sd-item-del[title="删除"]').nth(1).click();
     await page.getByRole('dialog').getByRole('button', { name: '删除' }).click();
 

@@ -284,7 +284,7 @@ export function AuditLogDetail({ log, onClose }: {
                 <div className="log-detail-change-row-head">
                   <span className="log-detail-change-badge">{c.key}</span>
                   <span className={`log-detail-change-kind log-detail-kind-${c.kind}`}>
-                    {c.kind === 'added' ? t('新增') : c.kind === 'removed' ? t('删除') : t('修改')}
+                    {c.kind === 'added' ? t('新增') : c.kind === 'removed' ? t('已删除') : t('修改')}
                   </span>
                 </div>
                 {c.kind !== 'added' && (

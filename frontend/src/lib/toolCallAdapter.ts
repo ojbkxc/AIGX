@@ -136,7 +136,8 @@ export function isToolCallWireMode(v: unknown): v is ToolCallWireMode {
  * 把一个分片并入已聚合列表（纯函数，便于单测与流式状态机复用）。
  *
  * 合并规则：
- * - 同 index 视为同一次调用；`id`/`name` 只取首次出现的非空值（分片帧不带）；
+ * - 同 index 视为同一次调用；`id`/`name` 覆盖式取最新非空值（常规分片帧不带，
+ *   带非空值的后续帧以后者为准）；
  * - `arguments` 逐片拼接（首帧常为空串）；`result` 覆盖式取最新非空值
  *   （回灌层可能多帧更新结果，取最后一份）；
  * - 新 index 追加到末尾，保证渲染顺序与模型下发顺序一致。

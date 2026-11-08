@@ -11,7 +11,7 @@ import type { Page } from '@playwright/test';
  * 覆盖三态：
  *   1. 正常流：增量正文逐 token 上屏 → 工具分片按 index 聚合 → usage 收尾；
  *   2. 中断：点「停止」后保留已收到的部分，卡片标「停止」；
- *   3. 错误：SSE error 帧以「⚠️」收尾，不出现占位空泡叠加。
+ *   3. 错误：error 帧在已流出正文后追加「⚠️」尾巴收尾，不出现占位空泡叠加。
  */
 
 type StreamScript = {
@@ -206,6 +206,8 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
 
     const bubbles = page.locator('.chat-debugger-msg-assistant');
     await expect(bubbles.last()).toContainText('上游限流', { timeout: 5000 });
+    // F4：错误帧是「追加」不是「覆盖」——已流出的正文必须保留在同一气泡里
+    await expect(bubbles.last()).toContainText('写了一半');
     // 错误就地收尾：当前错误气泡只有 1 个（不出现「…」+「⚠️」双泡叠加）。
     // 注意桩进程的会话状态跨用例共享，前序用例的消息可能已被持久化回来，
     // 所以只数「带错误文案」的气泡，不数全部助手气泡。

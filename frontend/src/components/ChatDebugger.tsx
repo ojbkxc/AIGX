@@ -628,8 +628,10 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
               } else if (delta.kind === 'usage' && delta.usage) {
                 patch.usage = delta.usage;
               } else if (delta.kind === 'error' && delta.isEnd) {
-                // 流式错误帧：就地收尾为「⚠️」气泡（不把错误当正文拼接）
-                patch.content = `⚠️ ${delta.content}`;
+                // 流式错误帧：在已流出正文后追加「⚠️」尾巴（与中断态「保留已收到
+                // 分片」同惯例，不吞信息；F4 #19）。正文为空时才是单警告气泡。
+                const errBase = last.content === '…' ? '' : last.content;
+                patch.content = errBase ? `${errBase}\n\n⚠️ ${delta.content}` : `⚠️ ${delta.content}`;
                 if (patch.toolCalls?.length) patch.toolState = 'error';
               } else {
                 const base = last.content === '…' ? '' : last.content;
