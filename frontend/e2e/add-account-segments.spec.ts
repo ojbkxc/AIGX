@@ -52,7 +52,9 @@ const PROVIDERS = {
 
 const CHANNELS = {
   success: true,
-  data: [{ id: 9001, name: '我的中转 账号池', type: 'account', status: 'enabled' }],
+  // channel_type 必须叫这个名：页面按 c.channel_type === 'account' 过滤
+  // （AccountSessions.tsx:559），写成 type 会被滤空 → findDuplicate 拿不到渠道名
+  data: [{ id: 'ch-dup', name: '我的中转 账号池', channel_type: 'account', status: 'enabled' }],
 };
 
 /** 桌面来源桩（形状 = desktop_import.rs:165-176；cline 明文 supported） */
@@ -114,13 +116,13 @@ test.describe('添加账号 · file/desktop/guest/oauth 四段 + 重复检测', 
 
   test('chatglm：guest/oauth/file 三方法齐备；file 读文件填入粘贴域并提交', async ({ page, pageErrors }) => {
     const created: Array<Record<string, unknown>> = [];
-    await page.route(/\/api\/account-sessions(\?|$)/, (r) => {
-      if (r.request().method() === 'POST') {
-        created.push(r.request().postDataJSON() as Record<string, unknown>);
-        return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { id: 'acc-new' } }) });
-      }
-      return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(SESSIONS) });
+    // guest/oauth 块的提交走 submitPaste → POST login/paste（非 create 端点）
+    await page.route(/\/api\/account-sessions\/login\/paste(\?|$)/, (r) => {
+      created.push(r.request().postDataJSON() as Record<string, unknown>);
+      return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { accountId: 'acc-new' } }) });
     });
+    await page.route(/\/api\/account-sessions(\?|$)/, (r) =>
+      r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(SESSIONS) }));
 
     await page.goto('/channels?tab=accounts');
     await page.getByRole('button', { name: '添加账号' }).first().click();
@@ -135,39 +137,46 @@ test.describe('添加账号 · file/desktop/guest/oauth 四段 + 重复检测', 
     expect(tabText.join('|')).toContain('凭证文件');
     expect(tabText.join('|')).not.toContain('网页授权');
 
-    // guest 块：说明 + 粘贴域 + 提交（POST api_key = 粘贴值）
+    // guest 块：说明 + 粘贴域 + 提交（submitPaste → POST login/paste，
+    // body = {provider, channel_id, secret, name}——AddAccountDialog.tsx:567-599、
+    // api/index.ts:826、后端 account_login.rs:173）
     await page.locator('.add-method-row button', { hasText: '访客模式' }).click();
     await expect(page.locator('h4', { hasText: '访客模式' })).toBeVisible();
     await expect(page.locator('.add-block', { hasText: '访客模式' })).toContainText('没有积分体系');
     await page.getByLabel('accessToken').fill('eyJ-guest-token');
     await page.getByRole('button', { name: '校验并添加' }).click();
     await expect.poll(() => created.length).toBe(1);
-    expect(created[0].api_key).toBe('eyJ-guest-token');
+    expect(created[0].secret).toBe('eyJ-guest-token');
+    expect(created[0].provider).toBe('chatglm');
 
-    // file 块：选择 JSON 文件 → 内容进粘贴域 → 提交 body 带文件内容
+    // file 块：选择 JSON 文件 → 内容进粘贴域 → 提交 body 带文件内容。
+    // 上一次 guest 提交成功会关闭弹窗（submitPaste 成功路径 onClose）→ 重开
+    await page.getByRole('button', { name: '添加账号' }).first().click();
+    await page.getByPlaceholder('搜索提供商…').fill('智谱');
+    await page.locator('.add-card', { hasText: '智谱清言' }).first().click();
     await page.locator('.add-method-row button', { hasText: '凭证文件' }).click();
     await expect(page.locator('h4', { hasText: '导入凭证文件' })).toBeVisible();
     const fileContent = JSON.stringify({ chatglm_token: 'eyJ-from-file' });
-    await page.getByRole('button', { name: '选择文件' }).setInputFiles({
+    // 「选择文件」是 label 包裹的隐藏 input（非 button role），直接定位 input
+    await page.locator('.add-block input[type=file]').setInputFiles({
       name: 'cred.json', mimeType: 'application/json', buffer: Buffer.from(fileContent),
     });
     await expect(page.getByLabel('accessToken')).toHaveValue(fileContent);
     await page.getByRole('button', { name: '校验并添加' }).click();
     await expect.poll(() => created.length).toBe(2);
-    expect(created[1].api_key).toBe(fileContent);
+    expect(created[1].secret).toBe(fileContent);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
   test('oauth 段：autoclaw-intl 指引 + 授权页按钮 + 粘贴提交', async ({ page, pageErrors }) => {
     const created: Array<Record<string, unknown>> = [];
-    await page.route(/\/api\/account-sessions(\?|$)/, (r) => {
-      if (r.request().method() === 'POST') {
-        created.push(r.request().postDataJSON() as Record<string, unknown>);
-        return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { id: 'acc-new' } }) });
-      }
-      return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(SESSIONS) });
+    await page.route(/\/api\/account-sessions\/login\/paste(\?|$)/, (r) => {
+      created.push(r.request().postDataJSON() as Record<string, unknown>);
+      return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { accountId: 'acc-new' } }) });
     });
+    await page.route(/\/api\/account-sessions(\?|$)/, (r) =>
+      r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(SESSIONS) }));
 
     await page.goto('/channels?tab=accounts');
     await page.getByRole('button', { name: '添加账号' }).first().click();
@@ -186,7 +195,8 @@ test.describe('添加账号 · file/desktop/guest/oauth 四段 + 重复检测', 
     await page.getByLabel('token（必填）').fill('eyJ-oauth-token');
     await page.getByRole('button', { name: '校验并添加' }).click();
     await expect.poll(() => created.length).toBe(1);
-    expect(created[0].api_key).toBe('eyJ-oauth-token');
+    expect(created[0].secret).toBe('eyJ-oauth-token');
+    expect(created[0].provider).toBe('autoclaw-intl');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
@@ -205,6 +215,9 @@ test.describe('添加账号 · file/desktop/guest/oauth 四段 + 重复检测', 
     // 「新建自定义提供商」卡（已建 API 组第一张）
     await page.locator('.add-card', { hasText: '新建自定义提供商' }).first().click();
     await page.getByLabel('渠道名称（可选）').fill('我的中转');
+    // 上游地址/凭证在折叠的「账号设置」details 里：先展开再填（closed details
+    // 内容对 Playwright 不可见——CI :214 的 not visible 即此）
+    await page.locator('.add-advanced > summary').click();
     await page.getByLabel('上游地址（可选，留空用 provider 默认）').fill('https://dup.example.com/v1');
     await page.getByLabel('API Key').fill('sk-test');
 
