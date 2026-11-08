@@ -196,17 +196,40 @@ fn server_log_tail(log_path: &std::path::Path) -> String {
         .join("\n")
 }
 
-/// 起真实 aigx 二进制（env 配置，scout 实证口径）+ 就绪轮询。
-/// 返回 (RAII 守卫, base URL)：守卫在调用方作用域内存活，
-/// 正常结束/panic 均 kill+wait（无僵尸）。
-async fn spawn_server(
-    data_dir: &std::path::Path,
-    log_path: &std::path::Path,
-) -> (ChildGuard, String) {
+/// 起真实 aigx 二进制 + 就绪轮询。返回 (RAII 守卫, base URL)：
+/// 守卫在调用方作用域内存活，正常结束/panic 均 kill+wait（无僵尸）。
+///
+/// 隔离策略（两层，缺一不可）：
+/// 1. **预写 `$HOME/.aigx/config.toml`**（含 [server] host/port/data_dir）——
+///    使 ConfigManager 走 load() 路径（config.rs L1416-1417），env 覆盖与
+///    文件双双生效；
+/// 2. **子进程设 HOME=tempdir**——配置/数据库/日志全部落在 tempdir。
+///
+/// 为什么必须预写文件：首次启动（无 config.toml）时 ConfigManager::new
+/// 走 default 存盘分支（config.rs L1418-1420），**不调 apply_env_overrides**
+/// ⇒ AIGX_SERVER__* 全部被忽略，网关起在默认 8080、数据落真实 ~/.aigx
+/// （产品缺陷，见 53-499-regression-impl.md §6 / 工单 #41）。
+/// 注意：dirs::home_dir() 在 Linux 读 $HOME；Windows 走 Win API 忽略 env——
+/// 本测试以 CI(linux) 为准。
+async fn spawn_server(home: &std::path::Path, log_path: &std::path::Path) -> (ChildGuard, String) {
     let port = free_port();
+    let data_dir = home.join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    // 预写 config.toml：load() 路径 = env 覆盖与文件双双生效（首启 default 分支
+    // 不覆盖 env，见上方注释的产品缺陷）
+    let aigx_dir = home.join(".aigx");
+    std::fs::create_dir_all(&aigx_dir).expect("create .aigx dir");
+    let cfg_data_dir = data_dir.to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        aigx_dir.join("config.toml"),
+        format!("[server]\nhost = \"127.0.0.1\"\nport = {port}\ndata_dir = \"{cfg_data_dir}\"\n"),
+    )
+    .expect("write config.toml");
+
     let exe = env!("CARGO_BIN_EXE_aigx");
     let mut cmd = Command::new(exe);
-    cmd.env("AIGX_SERVER__DATA_DIR", data_dir);
+    cmd.env("HOME", home);
+    cmd.env("AIGX_SERVER__DATA_DIR", &data_dir);
     cmd.env("AIGX_SERVER__PORT", port.to_string());
     cmd.env("AIGX_SERVER__HOST", "127.0.0.1");
     // 中间盒/代理 env 一律清掉（网关出站直连 mock；CI runner 无此问题，本机防御）
@@ -236,8 +259,9 @@ async fn spawn_server(
                 server_log_tail(log_path)
             );
         }
+        // 就绪判据：healthz 有响应（比只等端口更严——DB/路由都起来才会答）
         if client
-            .get(format!("{base}/api/auth/captcha"))
+            .get(format!("{base}/api/monitor/healthz"))
             .send()
             .await
             .is_ok()
@@ -649,12 +673,10 @@ async fn disconnect_499_billing_dual_surface() {
             .expect("mock serve");
     });
 
-    // 2) 网关实例（临时 data dir + 独立端口；RAII 守卫持有子进程）
+    // 2) 网关实例（tempdir HOME 隔离 + 预写 config.toml；RAII 守卫持有子进程）
     let tmp = tempfile::tempdir().expect("tempdir");
-    let data_dir = tmp.path().join("data");
-    std::fs::create_dir_all(&data_dir).expect("create data dir");
     let log_path = tmp.path().join("server.log");
-    let (child, base) = spawn_server(&data_dir, &log_path).await;
+    let (child, base) = spawn_server(tmp.path(), &log_path).await;
     let port = port_of(&base);
     let mock_base = format!("http://127.0.0.1:{mock_port}");
 
