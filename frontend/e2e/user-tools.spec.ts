@@ -25,10 +25,10 @@ const CATALOG = {
   success: true,
   data: {
     tools: [
-      { name: 'aigx_checkin_run', label: '执行签到', risk: 'LowRisk', has_user_exec: true, policy_hit: true },
-      { name: 'aigx_query_usage', label: '查我的用量', risk: 'ReadOnly', has_user_exec: true },
-      { name: 'aigx_query_logs', label: '查全部日志', risk: 'ReadOnly', has_user_exec: false },
-      { name: 'aigx_channel_delete', label: '删除渠道', risk: 'HighRisk', has_user_exec: false },
+      { name: 'aigx_checkin_run', label: '执行签到', risk: 'low', has_user_exec: true, policy_hit: true },
+      { name: 'aigx_query_usage', label: '查我的用量', risk: 'readonly', has_user_exec: true },
+      { name: 'aigx_query_logs', label: '查全部日志', risk: 'readonly', has_user_exec: false },
+      { name: 'aigx_channel_delete', label: '删除渠道', risk: 'high', has_user_exec: false },
     ],
   },
 };
@@ -147,7 +147,7 @@ test.describe('用户工具权限管理面', () => {
         await r.fulfill({
           status: 409,
           contentType: 'application/json',
-          body: JSON.stringify({ success: false, message: '条件组数量超过上限' }),
+          body: JSON.stringify({ success: false, error: '条件组数量超过上限' }),
         });
         return;
       }

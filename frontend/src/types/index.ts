@@ -2161,7 +2161,8 @@ export interface UserToolCatalogItem {
   /** 工具全名（aigx_*，与 registry 同源） */
   name: string;
   label: string;
-  risk: 'ReadOnly' | 'LowRisk' | 'HighRisk';
+  /** 值域与后端 RiskLevel::as_str 对齐（tools.rs:36-41）：小写 readonly/low/high */
+  risk: 'readonly' | 'low' | 'high';
   /** 工具作者是否声明了用户域执行体（双执行体 D1） */
   has_user_exec: boolean;
   /** 当前策略命中状态（端点回带；缺省 = 未计算） */

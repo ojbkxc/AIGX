@@ -22,8 +22,8 @@ const EMPTY_POLICY: UserToolPolicy = { enabled: false, groups: {} };
 
 /** 风险徽标配色（ReadOnly=中性 / LowRisk=主色 / HighRisk=危险禁用） */
 function riskBadgeClass(risk: UserToolCatalogItem['risk']): string {
-  if (risk === 'HighRisk') return 'ut-risk high';
-  if (risk === 'LowRisk') return 'ut-risk low';
+  if (risk === 'high') return 'ut-risk high';
+  if (risk === 'low') return 'ut-risk low';
   return 'ut-risk readonly';
 }
 
@@ -122,7 +122,7 @@ export default function UserTools(): JSX.Element {
       if (on) return ['*'];
       // 关掉通配回落到目录里可配置的 LowRisk/ReadOnly 集（排除 HighRisk/无 user_exec）
       return catalog
-        .filter((c) => c.has_user_exec && c.risk !== 'HighRisk')
+        .filter((c) => c.has_user_exec && c.risk !== 'high')
         .map((c) => c.name);
     });
   };
@@ -159,7 +159,7 @@ export default function UserTools(): JSX.Element {
     wildcard || draftAllowlist.includes(name);
   /** 可配置工具 = 已声明 user_exec 且非 HighRisk（D1/D2 封顶在目录层已挡，双保险显示禁用） */
   const configurable = (c: UserToolCatalogItem): boolean =>
-    c.has_user_exec && c.risk !== 'HighRisk';
+    c.has_user_exec && c.risk !== 'high';
 
   if (loading) {
     return (
@@ -248,7 +248,7 @@ export default function UserTools(): JSX.Element {
                       <span className="ut-tool-label" title={c.name}>{c.label}</span>
                       <code className="ut-tool-name">{c.name}</code>
                       {c.policy_hit === true && <span className="ut-hit">{t('当前命中')}</span>}
-                      {c.risk === 'HighRisk' && <span className="ut-flag danger">{t('高危（永不暴露）')}</span>}
+                      {c.risk === 'high' && <span className="ut-flag danger">{t('高危（永不暴露）')}</span>}
                       {!c.has_user_exec && <span className="ut-flag">{t('未声明用户执行体')}</span>}
                     </span>
                     <span className={riskBadgeClass(c.risk)}>{c.risk}</span>
