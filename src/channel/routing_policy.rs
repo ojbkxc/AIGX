@@ -704,12 +704,199 @@ pub fn resolve_profile(
     out
 }
 
+// ── 判定统一：plan_route（契约 §3）────────────────────────────────────
+
+/// 候选渠道的只读视图（契约 §3 `CandidateRef`）：`plan_route` 只读渠道本体，
+/// 不 clone 渠道（含凭证字段），热路径上零 String 分配。
+#[derive(Debug, Clone, Copy)]
+pub struct CandidateRef<'a> {
+    pub channel: &'a crate::channel::Channel,
+}
+
+impl<'a> CandidateRef<'a> {
+    pub fn id(&self) -> &'a str {
+        self.channel.id.as_str()
+    }
+
+    /// 提供商口径 = `ChannelType::as_str()`（与 Key 级 `allowed_providers`
+    /// 过滤同一命名空间，见 `api/openai/resolve.rs`）。
+    pub fn provider(&self) -> &'a str {
+        self.channel.channel_type.as_str()
+    }
+}
+
+/// 参与候选集合：要么原切片直通（零分配），要么裁剪后的下标视图。
+#[derive(Debug)]
+pub enum PlanCandidates<'a> {
+    /// 档案未启用 / 无需裁剪：原切片直通（零分配、零拷贝）
+    All(&'a [crate::channel::Channel]),
+    /// 按档案 scope 裁剪后的参与候选（仅此时分配一次小 Vec）
+    Kept(Vec<CandidateRef<'a>>),
+}
+
+impl<'a> PlanCandidates<'a> {
+    pub fn iter(&self) -> PlanIter<'a, '_> {
+        match self {
+            Self::All(s) => PlanIter::All(s.iter()),
+            Self::Kept(v) => PlanIter::Kept(v.iter()),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::All(s) => s.len(),
+            Self::Kept(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// 统一两臂的迭代器（两臂 item 都是 `&Channel`，故可共用一个类型）。
+#[derive(Debug)]
+pub enum PlanIter<'a, 's> {
+    All(std::slice::Iter<'a, crate::channel::Channel>),
+    Kept(std::slice::Iter<'s, CandidateRef<'a>>),
+}
+
+impl<'a, 's> Iterator for PlanIter<'a, 's> {
+    type Item = &'a crate::channel::Channel;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::All(it) => it.next(),
+            Self::Kept(it) => it.next().map(|c| c.channel),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::All(it) => it.size_hint(),
+            Self::Kept(it) => it.size_hint(),
+        }
+    }
+}
+
+/// 被裁掉的原因计数。原因码词汇沿用既有枚举（不新增 `format!`）：
+/// `provider_not_allowed`（对照 `api/openai/resolve.rs` 的
+/// `REASON_KEY_PROVIDER_NOT_ALLOWED`）、`provider_disabled`。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkipSummary {
+    /// 渠道提供商不在档案 `providers` 名单内
+    pub provider_not_allowed: usize,
+    /// 渠道提供商落在档案 `disabled_providers` 内
+    pub provider_disabled: usize,
+}
+
+/// 一次选路判定结果（转发与预演共用同一份）。
+#[derive(Debug)]
+pub struct RoutePlan<'a> {
+    /// 参与候选（已按档案 scope 裁剪，保持调用方给的顺序）
+    pub candidates: PlanCandidates<'a>,
+    /// 裁掉的原因计数
+    pub skipped: SkipSummary,
+}
+
+impl<'a> RoutePlan<'a> {
+    /// 按序产出参与候选的渠道本体（直通时零分配）。
+    pub fn iter(&self) -> PlanIter<'a, '_> {
+        self.candidates.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.candidates.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.candidates.is_empty()
+    }
+
+    /// 队首（= 实际首挑预测；预演面板的 `pickedId` 用它，避免 #31 那类
+    /// 「回放投影与真实形状不匹配」）。
+    pub fn first(&self) -> Option<&'a crate::channel::Channel> {
+        self.candidates.iter().next()
+    }
+}
+
+/// **唯一选路判定入口**：转发（`api/openai/resolve.rs` → `channel/mod.rs`）与
+/// 预演（`api/admin/routing.rs::handle_routing_queue`）都必须调它。
+///
+/// 为什么先 [`resolve_profile`] 再本函数（而不是像契约 §3 草稿那样在
+/// `plan_route` 内部一并解析）：候选选取（`select_for_model_by_strategy`）
+/// 需要**先知道生效 strategy**，故两个调用点走同一序列
+/// 「resolve_profile → 按生效 strategy 选候选 → plan_route 裁剪」；
+/// 判定规则只有这一份，预演的队首因此必然等于转发的首挑。
+///
+/// 性能：`enabled=false` 或无需裁剪时返回原切片直通（**零分配**）；裁剪时
+/// **候选循环内零分配**（只做字符串比较，无 `format!`/`to_string`/`Vec` 扩容）。
+///
+/// 账号级规则（`account_order` / `excluded_accounts` / `sort_rules`）不在本
+/// 函数处理：候选是渠道级，账号身份在 `AccountSessionStore::acquire` 才确定
+/// （契约 §2.4 的两级「粗筛/精筛」分离），那一级在账号侧统一实现。
+pub fn plan_route<'a>(
+    policy: &RoutingPolicy,
+    profile: &ResolvedProfile,
+    candidates: &'a [crate::channel::Channel],
+) -> RoutePlan<'a> {
+    // 总开关关闭：短路（与历史逐字节等价，零分配）
+    if !policy.enabled {
+        return RoutePlan {
+            candidates: PlanCandidates::All(candidates),
+            skipped: SkipSummary::default(),
+        };
+    }
+    let scope = &profile.scope;
+    let listed = matches!(scope.provider_scope, ProviderScope::Listed);
+    if !listed && scope.disabled_providers.is_empty() {
+        // 无裁剪可做：直接直通，不为「没规则」分配
+        return RoutePlan {
+            candidates: PlanCandidates::All(candidates),
+            skipped: SkipSummary::default(),
+        };
+    }
+    let mut kept: Vec<CandidateRef<'a>> = Vec::with_capacity(candidates.len());
+    let mut skipped = SkipSummary::default();
+    for ch in candidates {
+        let provider = ch.channel_type.as_str();
+        if scope
+            .disabled_providers
+            .iter()
+            .any(|p| p.as_str() == provider)
+        {
+            skipped.provider_disabled += 1;
+            continue;
+        }
+        if listed && !scope.providers.iter().any(|p| p.as_str() == provider) {
+            skipped.provider_not_allowed += 1;
+            continue;
+        }
+        kept.push(CandidateRef { channel: ch });
+    }
+    RoutePlan {
+        candidates: PlanCandidates::Kept(kept),
+        skipped,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel::Channel;
     use crate::storage::FileStore;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    /// 一条最小渠道（其余字段全走 serde 默认，避免夹具随 `Channel` 加字段漂移）。
+    fn ch(id: &str, provider: &str) -> Channel {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": id,
+            "channel_type": provider,
+        }))
+        .unwrap()
+    }
 
     /// 空的全局映射表（档案键兜底查找用）。
     fn mapper(dir: &TempDir) -> crate::model::ModelMapper {
@@ -823,6 +1010,50 @@ mod tests {
     }
 
     // ── #40 路由多规则体系 ─────────────────────────────────────────────
+
+    /// 门槛用例（契约 §0）：**总开关关闭时与历史逐字节等价** —— 策略基座
+    /// 原样返回、档案一律不参与、候选原样直通（预演队首因此与历史一致）。
+    #[test]
+    fn profiles_disabled_is_byte_identical_to_legacy() {
+        let dir = TempDir::new().unwrap();
+        let m = mapper(&dir);
+        let mut policy = RoutingPolicy {
+            strategy: RouteStrategy::RoundRobin,
+            sticky: StickyMode::Off,
+            ..RoutingPolicy::default()
+        };
+        assert!(!policy.enabled, "契约 §0：默认必须是关");
+        // 塞一份「看起来会生效」的档案
+        policy.profiles.global.strategy = Some(RouteStrategy::Ranked);
+        policy.profiles.global.sticky = Some(StickyMode::Session);
+        policy.profiles.global.scope = Some(RoutingScope {
+            provider_scope: ProviderScope::Listed,
+            providers: vec!["anthropic".to_string()],
+            ..RoutingScope::default()
+        });
+        policy.profiles.models.insert(
+            "gpt-4o".to_string(),
+            RoutingProfile {
+                strategy: Some(RouteStrategy::Weighted),
+                ..RoutingProfile::default()
+            },
+        );
+
+        let r = resolve_profile(&policy, "gpt-4o", &m, None);
+        assert_eq!(r.strategy, RouteStrategy::RoundRobin, "关闭时不动策略");
+        assert_eq!(r.sticky, StickyMode::Off);
+        assert!(r.scope.providers.is_empty(), "关闭时不用档案名单");
+        assert_eq!(r.provenance, ProfileProvenance::default());
+        assert_eq!(r.provenance.applied_layers(), Vec::new());
+
+        let cands = vec![ch("a", "anthropic"), ch("b", "openai_compatible")];
+        let plan = plan_route(&policy, &r, &cands);
+        assert!(matches!(plan.candidates, PlanCandidates::All(_)));
+        assert_eq!(plan.len(), 2, "关闭时零裁剪");
+        assert_eq!(plan.skipped, SkipSummary::default());
+        assert_eq!(plan.first().unwrap().id, "a", "顺序与输入一致");
+        assert!(!plan.is_empty());
+    }
 
     /// 三态覆盖 + provenance：`None` 继承下层、`Some(值)` 覆盖。
     #[test]
@@ -991,6 +1222,61 @@ mod tests {
         // 显式指定的组对匹配模型生效
         let r4 = resolve_profile(&policy, "gpt-4o", &m, Some("g1"));
         assert_eq!(r4.provenance.strategy, Some(Layer::Group));
+    }
+
+    /// `plan_route`：scope 裁剪（白名单 / 排除名单）+ 直通路径 + 计数。
+    #[test]
+    fn plan_route_filters_by_provider_scope() {
+        let dir = TempDir::new().unwrap();
+        let m = mapper(&dir);
+        let cands = vec![
+            ch("a", "anthropic"),
+            ch("b", "openai_compatible"),
+            ch("c", "anthropic"),
+        ];
+        let mut policy = RoutingPolicy {
+            enabled: true,
+            ..RoutingPolicy::default()
+        };
+
+        // 1) 未配 scope：直通（零分配路径）
+        let r = resolve_profile(&policy, "m", &m, None);
+        let p = plan_route(&policy, &r, &cands);
+        assert!(matches!(p.candidates, PlanCandidates::All(_)));
+        assert_eq!(p.len(), 3);
+
+        // 2) Listed 白名单
+        policy.profiles.global.scope = Some(RoutingScope {
+            provider_scope: ProviderScope::Listed,
+            providers: vec!["anthropic".to_string()],
+            ..RoutingScope::default()
+        });
+        let r = resolve_profile(&policy, "m", &m, None);
+        let p = plan_route(&policy, &r, &cands);
+        assert_eq!(
+            p.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
+        assert_eq!(p.skipped.provider_not_allowed, 1);
+        assert_eq!(p.skipped.provider_disabled, 0);
+        assert_eq!(p.first().unwrap().id, "a");
+
+        // 3) All 口径下的排除名单
+        policy.profiles.global.scope = Some(RoutingScope {
+            disabled_providers: vec!["openai_compatible".to_string()],
+            ..RoutingScope::default()
+        });
+        let r = resolve_profile(&policy, "m", &m, None);
+        let p = plan_route(&policy, &r, &cands);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p.skipped.provider_disabled, 1);
+
+        // 4) 关闭总开关：即便名单还在也直通（= 历史）
+        policy.enabled = false;
+        let r = resolve_profile(&policy, "m", &m, None);
+        let p = plan_route(&policy, &r, &cands);
+        assert!(matches!(p.candidates, PlanCandidates::All(_)));
+        assert_eq!(p.len(), 3);
     }
 
     /// 上限校验（契约 §1/§3）：**超限拒绝写入**，不静默截断。

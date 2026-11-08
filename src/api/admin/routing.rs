@@ -36,6 +36,9 @@ pub async fn handle_get_routing(
         "sticky": policy.sticky,
         "breaker": policy.breaker,
         "scheduler_weights": policy.scheduler_weights,
+        // #40：只**新增**字段（既有字段语义不变，旧前端不受影响）
+        "enabled": policy.enabled,
+        "profiles": policy.profiles,
         "runtime": {
             "affinity_entries": state.channel_store.affinity_cache().len(),
             "breaker_open": breaker_open,
@@ -59,6 +62,9 @@ pub struct RoutingUpdateRequest {
     /// 调度权重（health/cost/rpm，strategy=ranked 时生效）
     #[serde(default)]
     pub scheduler_weights: Option<SchedulerWeightsUpdate>,
+    /// #40 多规则档案总开关（缺省 = 保持现值）
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,8 +163,21 @@ pub async fn handle_update_routing(
             ));
         }
     }
+    // #40 档案总开关（档案本体的读写端点在后续步骤落地；上限校验见下）
+    if let Some(v) = req.enabled {
+        policy.enabled = v;
+    }
 
     // 持久化 + 快照热更（策略/粘性下一请求生效）
+    //
+    // 档案上限校验（#40 契约 §1/§3）：超限**拒绝写入**（400，客户端问题），
+    // 不静默截断；`store.update` 内还有同一道校验兜底（防别的写入路径绕过）。
+    if let Err(e) = policy.profiles.validate() {
+        return Err(super::common::error_response(
+            &format!("路由档案超限：{e}"),
+            axum::http::StatusCode::BAD_REQUEST,
+        ));
+    }
     state.routing_policy.update(policy.clone()).map_err(|e| {
         super::common::error_response(
             &format!("路由策略持久化失败: {e}"),
@@ -209,6 +228,9 @@ pub async fn handle_update_routing(
         "sticky": policy.sticky,
         "breaker": policy.breaker,
         "scheduler_weights": policy.scheduler_weights,
+        // #40 新增字段（既有字段不变）
+        "enabled": policy.enabled,
+        "profiles": policy.profiles,
     })))
 }
 
@@ -227,6 +249,9 @@ pub async fn handle_routing_defaults(
         "sticky": d.sticky,
         "breaker": BreakerPolicy::default(),
         "scheduler_weights": d.scheduler_weights,
+        // #40 新增字段（默认关；档案空）
+        "enabled": d.enabled,
+        "profiles": d.profiles,
     })))
 }
 /// GET /api/routing/queue?model=xxx — 候选队列预演（对照 Agent2API 路由队列可见化）。
@@ -254,16 +279,22 @@ pub async fn handle_routing_queue(
         })?;
 
     let policy = state.routing_policy.snapshot();
+    // #40 判定统一（契约 §3）：预演与数据面 `resolve_bridges` 走**同一序列**
+    // ——resolve_profile → 按生效 strategy 选候选 → plan_route 裁剪。此前预演
+    // 自成一套口径，正是 #31「回放投影与真实形状不匹配」那类事故的来源。
+    let profile =
+        crate::channel::routing_policy::resolve_profile(&policy, model, &state.model_mapper, None);
     // 通过筛选的有序候选（与数据面 resolve_bridges 同一口径：按当前路由
     // 策略过滤排序——预演的队首才有「首挑预测」价值）
     let ordered = state.channel_store.select_for_model_by_strategy(
         model,
-        policy.strategy,
+        profile.strategy,
         &state.pricing_store,
     );
+    let plan = crate::channel::routing_policy::plan_route(&policy, &profile, &ordered);
     let breaker_map = state.channel_store.circuit_breaker().get_status_map();
 
-    let ordered_json: Vec<Value> = ordered
+    let ordered_json: Vec<Value> = plan
         .iter()
         .map(|c| {
             json!({
@@ -279,7 +310,7 @@ pub async fn handle_routing_queue(
         .collect();
 
     // 被挡在门外的启用渠道：进不了 ordered 的都算（冷却/熔断/流控/未声明该模型）
-    let ordered_ids: Vec<&str> = ordered.iter().map(|c| c.id.as_str()).collect();
+    let ordered_ids: Vec<&str> = plan.iter().map(|c| c.id.as_str()).collect();
     let blocked_json: Vec<Value> = state
         .channel_store
         .list()
@@ -308,12 +339,17 @@ pub async fn handle_routing_queue(
         .collect();
 
     Ok(Json(json!({
-        "strategy": policy.strategy,
-        "sticky": policy.sticky,
+        "strategy": profile.strategy,
+        "sticky": profile.sticky,
         "model": model,
-        "pickedId": ordered.first().map(|c| c.id.clone()),
+        "pickedId": plan.first().map(|c| c.id.clone()),
         "ordered": ordered_json,
         "blocked": blocked_json,
+        // #40 附加字段（旧前端不读即忽略，保持既有字段语义不变）：
+        // 档案总开关、实际命中的层、被档案裁掉的原因计数
+        "profilesEnabled": policy.enabled,
+        "appliedLayers": profile.provenance.applied_layers(),
+        "skipped": plan.skipped,
     })))
 }
 

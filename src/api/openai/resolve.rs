@@ -209,19 +209,29 @@ pub(crate) fn resolve_bridges(
     // 第一级：通用渠道——按路由策略选取（对照 Agent2API「设置 → 路由」）：
     // weighted=priority 分组+组内加权随机（默认）；round_robin=组内确定性
     // 轮询；ranked=多因子 health×cost×rpm（策略来自 /api/routing，可热更）
+    //
+    // #40 多规则档案：与预演（`api/admin/routing.rs::handle_routing_queue`）
+    // 走**同一判定序列**（契约 §3）：resolve_profile → 按生效 strategy 选候选
+    // → plan_route 裁剪。`enabled=false`（默认）时 resolve_profile 直接返回
+    // 策略基座、plan_route 原切片直通 —— 与历史逐字节等价且零额外分配。
+    // 组 id 的第 1/2 环（请求头 / Key 绑定，契约 §6.1）随 `ApiKey` 字段在后续
+    // 步骤接入，本步两处调用点均传 None（只走 global / 模型档案两层）。
     let policy = state.routing_policy.snapshot();
+    let profile =
+        crate::channel::routing_policy::resolve_profile(&policy, model, &state.model_mapper, None);
     if let Some(c) = capture.as_mut() {
         c.config = Some(crate::log::RouteConfigSnapshot {
-            strategy: policy.strategy.as_str().to_string(),
+            strategy: profile.strategy.as_str().to_string(),
             sticky_enabled: policy.sticky.sticky_enabled(),
         });
     }
     let candidates = state.channel_store.select_for_model_by_strategy(
         model,
-        policy.strategy,
+        profile.strategy,
         &state.pricing_store,
     );
-    for ch in &candidates {
+    let plan = crate::channel::routing_policy::plan_route(&policy, &profile, &candidates);
+    for ch in plan.iter() {
         // 统一模型管理里按 (provider, model) 关掉的模型不再进候选。
         // 账号型渠道的 provider 由账号决定，渠道级无从判断 —— 那一层由
         // `AccountSessionStore::acquire` 按账号白名单过滤，这里跳过即可。
