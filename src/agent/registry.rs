@@ -13,6 +13,21 @@
 //!
 //! 新增工具只改本文件一条声明；新增管理域必须给某个工具 `covers` 命中或进
 //! 测试豁免表，否则 `openapi_domains_have_tool_coverage` 会红。
+//!
+//! ## v2（#34）：`user_exec` 双执行体
+//!
+//! v1 只服务管理员域（单一 `exec` 直调管理面 handler）。v2 起每条工具可另声明
+//! 用户域执行体 [`ToolDef::user_exec`]，形成双执行体：
+//!
+//! - **管理员**：走 [`exec_tool`]（registry `exec`，内部 `verify_admin`），原状不变；
+//! - **普通用户**：先过判定层 [`super::user_tool_policy::user_tool_allowed`]
+//!   （组 allowlist + risk 封顶 LowRisk），放行后经 [`exec_user_tool`] 入口执行
+//!   `user_exec`（内部 `verify_user` + `user_id` 数据域过滤）；HighRisk 在执行侧
+//!   二次拦截（下发即过滤 + 执行兜底双保险）。写工具执行前另有二次确认门
+//!   （[`super::confirm`]，P0 铁律不可降级）。
+//!
+//! 相关演进：f263249c 权限存储与判定层 → 392a1c99 双身份工具回路 →
+//! ea13cb64 写工具二次确认门。
 
 use std::future::Future;
 use std::pin::Pin;
