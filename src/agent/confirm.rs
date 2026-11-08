@@ -124,8 +124,8 @@ mod tests {
     fn event_name_and_timeout_are_contract() {
         assert_eq!(CONFIRM_EVENT, "confirm_request");
         assert_eq!(CONFIRM_TIMEOUT_SECS, 30);
-        // 远短于审批矩阵 300s
-        assert!(CONFIRM_TIMEOUT_SECS < 300);
+        // 远短于审批矩阵 300s（编译期校验）
+        const { assert!(CONFIRM_TIMEOUT_SECS < 300) };
     }
 
     #[test]
