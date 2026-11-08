@@ -1246,13 +1246,15 @@ mod price_snapshot_tests {
 /// prompt 用预留时的同一估算器重算、completion 未知记 0（预留差额由
 /// settle_quota 自动解冻）。**不记渠道失败/冷却**——499 是客户端行为，
 /// 归因到渠道会误伤健康度。
-pub(crate) struct AttemptStartGuard<'a> {
+pub(crate) struct AttemptStartGuard {
     pub state: AppState,
     pub api_key: crate::api::auth::ApiKey,
     pub requested_model: String,
     pub group: String,
-    /// 预留句柄（billing 自有 Reservation 类型——chat.rs 的同名变量就是它）
-    pub reservation: &'a Reservation,
+    /// 预留句柄（**owned clone**：Reservation::Clone 语义=克隆体与原件恰好
+    /// 一方 commit；守卫只读 token 供结算、并发槽位由任一方 Drop 释放——
+    /// 持引用会与流式成功路径的 move 冲突（E0505））
+    pub reservation: Reservation,
     /// 每轮真实上游调用前更新（Drop 时取最后尝试的渠道归因）
     pub channel_id: String,
     pub channel_name: String,
@@ -1265,7 +1267,7 @@ pub(crate) struct AttemptStartGuard<'a> {
     pub handled: bool,
 }
 
-impl<'a> AttemptStartGuard<'a> {
+impl AttemptStartGuard {
     /// 计费接管点（流式=StreamUsageGuard 构造处；非流式=settle_usage 处）。
     pub fn handoff(&mut self) {
         self.handled = true;
@@ -1316,7 +1318,7 @@ impl<'a> AttemptStartGuard<'a> {
     }
 }
 
-impl Drop for AttemptStartGuard<'_> {
+impl Drop for AttemptStartGuard {
     fn drop(&mut self) {
         if !self.handled {
             self.write_499();
