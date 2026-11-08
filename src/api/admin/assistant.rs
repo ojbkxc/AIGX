@@ -435,6 +435,49 @@ pub async fn handle_assistant_chat(
                                 ok: false,
                             }
                         } else {
+                            // P0 铁律（设计稿 §3.3/D8）：写工具（LowRisk+）在
+                            // 用户域执行前必须二次确认——非流式 v1 的形态是
+                            // 「回灌确认卡指令」：把 confirm_request 事件载荷
+                            // 作为 role:tool 结果回灌，LLM 据此生成给用户的
+                            // 确认话术；用户下一轮口头确认后重新发起调用。
+                            // （SSE 版将改为 confirm_request 事件流；执行侧
+                            // exec_user_tool 不再重复校验风险，本门是唯一闸。）
+                            if crate::agent::confirm::write_requires_confirm(def.risk) {
+                                let confirm = crate::agent::confirm::ConfirmRequest::new(
+                                    def.name,
+                                    def.label,
+                                    &call.arguments.chars().take(300).collect::<String>(),
+                                );
+                                super::common::record_audit(
+                                    &state,
+                                    &user.email,
+                                    "assistant_tool_confirm_requested",
+                                    def.name,
+                                    None,
+                                    Some(json!({ "request_id": confirm.request_id })),
+                                );
+                                tool_trace.push(json!({
+                                    "name": call.function_name,
+                                    "ok": false,
+                                    "summary": format!("写工具 {} 需要用户二次确认", def.label),
+                                    "confirm_request": serde_json::to_value(&confirm)
+                                        .unwrap_or(Value::Null),
+                                }));
+                                messages.push(crate::bridge::ChatMessage {
+                                    role: Role::Tool,
+                                    content: Some(format!(
+                                        "该操作（{}）需要用户二次确认。请把以下确认请求展示给用户，并说明用户回复「确认」后才会执行：{}",
+                                        def.label,
+                                        serde_json::to_string(&confirm).unwrap_or_default()
+                                    )),
+                                    reasoning: None,
+                                    content_blocks: None,
+                                    name: Some(call.function_name.clone()),
+                                    tool_call_id: Some(call.id.clone()),
+                                    tool_calls: None,
+                                });
+                                continue;
+                            }
                             let args: Value = serde_json::from_str(&call.arguments)
                                 .unwrap_or_else(|_| json!({ "_raw": call.arguments }));
                             match crate::agent::registry::exec_user_tool(
