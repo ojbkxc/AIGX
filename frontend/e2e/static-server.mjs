@@ -502,6 +502,8 @@ const E2E_ACCOUNT_WORDS = ['账号', '池', '归一'];
 const E2E_LEGACY_MARK = '[e2e-upstream:legacy]';
 /** 账号池触发标记：出现在 messages 里即模拟「上游压根不回报 usage」的归一化链路 */
 const E2E_ACCOUNT_MARK = '[e2e-upstream:account]';
+/** 慢速档标记：帧间隔从 60ms 拉到 500ms，给「中途点停止」留出能断言的窗口（#25） */
+const E2E_SLOW_MARK = '[e2e-upstream:slow]';
 /** 上游双的 usage 数字（固定值便于断言；total = prompt + completion） */
 const E2E_UPSTREAM_USAGE = { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 };
 /** 后端双合成的估算数字（#21-B `usage_tail_frame()` 镜像），刻意与上游真值不同 */
@@ -529,6 +531,9 @@ const gatewayUsageTailFrame = () =>
  * 关键条件（去桩自证的本体）：`usage` 终帧**只在**请求带
  * `stream_options.include_usage === true` 时产出——与真实 OpenAI 一致。
  * 老上游档（messages 含 E2E_LEGACY_MARK）收到 stream_options 直接 400。
+ * 慢速档（E2E_SLOW_MARK）把帧间隔拉到 500ms：给「中途点停止」用例留出
+ * 可断言的窗口（默认 60ms 时 usage 尾帧约 300ms 就到，点停止必然抢在它后面，
+ * 反向断言会因「帧未落地即成立」假绿）。
  */
 function handleMockUpstream(res, bodyText) {
   let body = {};
@@ -544,6 +549,8 @@ function handleMockUpstream(res, bodyText) {
   const legacy = msgBlob.includes(E2E_LEGACY_MARK);
   // 账号池档：模拟非 OpenAI 原生的归一化上游——即便收到 stream_options 也**不回报** usage
   const account = msgBlob.includes(E2E_ACCOUNT_MARK);
+  // 慢速档（#25）：帧间隔 500ms，让「点停止」能抢在 usage 尾帧之前
+  const slow = msgBlob.includes(E2E_SLOW_MARK);
   const words = account ? E2E_ACCOUNT_WORDS : E2E_UPSTREAM_WORDS;
 
   if (legacy && body.stream_options !== undefined) {
@@ -581,7 +588,7 @@ function handleMockUpstream(res, bodyText) {
     if (res.destroyed || res.writableEnded) return;
     if (i >= frames.length) return res.end();
     res.write(frames[i++]);
-    setTimeout(tick, 60);
+    setTimeout(tick, slow ? 500 : 60);
   };
   tick();
 }

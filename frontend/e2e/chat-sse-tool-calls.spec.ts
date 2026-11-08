@@ -16,7 +16,7 @@ import type { Page } from '@playwright/test';
  * 前三个用例与末尾「形状用例」是页内桩——帧序列由测试作者手写，只能证明
  * **前端会解析这个形状**，不能证明**线上会有这个帧**。#17/F1 的病根正在这里：
  * 原 `usageFrame()` 无条件吐 usage 终帧，于是「界面出现 usage 数字」只是桩自证
- * （#31 同型假绿）。中间三个用例不打页内桩，请求真打到 static-server 的
+ * （#31 同型假绿）。中间四个用例不打页内桩，请求真打到 static-server 的
  * **两跳链**（后端双按 #21-A 注入 `stream_options.include_usage` → 上游双只在
  * 收到该字段时才产 usage 终帧；账号池档则由后端双按 #21-B 合成
  * `estimated:true` 尾帧），数字出现与否、角标出现与否都由那条因果链决定。
@@ -116,6 +116,14 @@ const LEGACY_MARK = '[e2e-upstream:legacy]';
 
 /** 触发「账号池归一化」档（#21-B 镜像）：上游不回报 usage，后端双合成 estimated 尾帧 */
 const ACCOUNT_MARK = '[e2e-upstream:account]';
+
+/**
+ * 触发「慢速上游」档（#25）：帧间隔 60ms → 500ms。
+ * 用途——「中途点停止」用例必须让 abort **落在 usage 尾帧之前**：默认 60ms 档
+ * 下整条流约 300ms 就跑完（尾帧 ~250ms 到），点停止永远抢在后面，反向断言
+ * 「不得出现数字」会在帧未落地时立刻成立 = 假绿（同 #22 的顺序纪律）。
+ */
+const SLOW_MARK = '[e2e-upstream:slow]';
 
 /** 后端双合成的估算数字（与 static-server.mjs 的 E2E_GATEWAY_USAGE 一致）；
  *  刻意与上游真值 TWO_HOP_USAGE 不同——断言到 26/9/35 才证明走的是合成支路 */
@@ -226,6 +234,10 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     await expect(card.locator('[data-testid="tool-call-args"]')).toContainText('{"q":"aigx');
     // busy 复位
     await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
+    // #25（①）：中断收尾**不得凭空出现 usage 数字**。页内桩这条流压根没有 usage 帧，
+    // 所以这条钉的是「前端不会自己造一个 usage 出来」；真链路上的同一不变量在
+    // 下面「两跳中途停止」用例里验（那边帧确实存在，只是 abort 落在到达之前）。
+    await expect(assistant.locator('[data-testid="usage-summary"]')).toHaveCount(0);
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
@@ -311,6 +323,46 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     // 上游不发 usage 终帧 ⇒ 界面**绝不能**出现 usage 数字。此前页内桩无条件
     // 吐帧，这条回归根本测不出来——数字看起来「前端自造」也能过。
     await expect(assistant.locator('[data-testid="usage-summary"]')).toHaveCount(0);
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  // ── #25：两跳链路「中途停止」——abort 抢在 usage 尾帧之前 ⇒ 界面不得有数字 ──
+  //
+  // #22 的反例钉的是「上游不吐帧」，本例钉的是另一条：**帧存在但没到达**。
+  // 慢速档（SLOW_MARK，500ms/帧）下 usage 尾帧约在 2.5s 才到、`[DONE]` 在 3s，
+  // 而停止点在 0.5s 之后——于是「不出现数字」由 abort 截断这条因果决定，
+  // 不是「桩压根没这帧」。纪律同 #22：反向断言必须**先跨过尾帧本应到达的
+  // 时间窗**再断言缺失，否则帧未落地即成立 = 假绿。
+
+  test('两跳中途停止：abort 落在 usage 尾帧之前 → 保留部分正文但不得出现数字（#25）', async ({ page, pageErrors }) => {
+    await gotoChat(page);
+    await newSession(page);
+    await send(page, `走两跳链路但慢一点 ${SLOW_MARK}`);
+
+    const body = page.locator('.chat-debugger-msg-assistant').last().locator('.chat-debugger-msg-content');
+    // 第 1 个正文分片（500ms 档下 t≈0.5s）上屏即停手
+    await expect(body).toContainText('两跳', { timeout: 10000 });
+    // 此刻仍在流中：完整正文未出现 ⇒ 证明停止点确实落在尾帧之前（不是自然收尾）
+    await expect(body).not.toContainText('两跳链路验证');
+
+    await page.locator('.chat-debugger-send-fab').click();
+
+    // 跨过「尾帧本应到达」的窗口（500ms 档：尾帧 2.5s、`[DONE]` 3s，停止在 ~0.6s）。
+    // 纪律同 #22：反向断言若早于帧落地就会立刻成立＝假绿，必须先等过那个时间窗。
+    await page.waitForTimeout(2600);
+
+    // 停止已生效：⏹ 气泡出现（无工具分片时「已停止生成」按既定设计单独成泡，
+    // 见 ChatDebugger.tsx abort 支路 6086f4a2/#63），busy 复位
+    await expect(page.locator('.chat-debugger-msg-assistant', { hasText: '已停止生成' })).toHaveCount(1);
+    await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
+    // 已收到的部分正文保留在同一只气泡里，未被回滚/覆盖
+    const partial = page.locator('.chat-debugger-msg-assistant', { hasText: '两跳' });
+    await expect(partial).toHaveCount(1);
+    await expect(partial.locator('.chat-debugger-msg-content')).toContainText('两跳');
+    // 关键反向断言：尾帧从未到达 ⇒ 界面不得出现 usage 数字。
+    // 不只查那只气泡——整屏一起查，免得「数字被画到别处」漏网。
+    await expect(partial.locator('[data-testid="usage-summary"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="usage-summary"]')).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
