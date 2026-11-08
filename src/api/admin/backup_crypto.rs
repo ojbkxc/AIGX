@@ -399,7 +399,9 @@ pub async fn handle_backup_import_encrypted(
     crate::api::admin::common::verify_admin(&state, &headers).await?;
     let mut password: Option<String> = None;
     let mut package: Option<Vec<u8>> = None;
-    while let Some(field) = multipart
+    // `mut` 是必要的：`Field::chunk(&mut self)` 要可变绑定（`text(self)` 按值吃，
+    // 两者共用同一个变量，故整体声明 mut）。
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| error_response(&format!("读取上传字段失败: {e}"), StatusCode::BAD_REQUEST))?
@@ -414,7 +416,6 @@ pub async fn handle_backup_import_encrypted(
                 // axum 0.7 的 Field 没有 metadata()/size_hint()，拿不到声明长度
                 // ——改为**边读边限**（否则超大包会先撑爆内存再报错）。
                 let mut buf = Vec::new();
-                use axum::body::HttpBody;
                 while let Some(chunk) = field.chunk().await.map_err(|e| {
                     error_response(&format!("读取包失败: {e}"), StatusCode::BAD_REQUEST)
                 })? {
