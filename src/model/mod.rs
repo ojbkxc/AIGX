@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::storage::FileStore;
 
+pub mod capability;
 pub mod manage;
 pub mod metadata;
 pub mod models_dev;

@@ -182,6 +182,16 @@ const ACCOUNT_SESSIONS = [
   },
 ];
 
+// ── 粘滞会话管理面桩（#38；形状对齐 admin/routing.rs sticky 端点）──
+// id 内部编码 session+US 控制符+model（前端原样回传不解析）；进程内数组
+// 可被清除写操作驱动；expires_at/updated_at 每次 GET 现算（unix 秒）。
+let stickyMode = 'auto';
+let stickyEntries = [
+  { id: 'sess-e2e-1\u001fgpt-4o', channel_id: 'ch-1', channel_name: 'lxchat-glm' },
+  { id: 'sess-e2e-2\u001fclaude-3', channel_id: 'ch-2', channel_name: 'workbuddy-pool' },
+  { id: 'sess-e2e-3\u001fglm-4', channel_id: 'ch-1', channel_name: 'lxchat-glm' },
+];
+
 // ── 插件管理（/api/plugins 桩：一个已装包 + 目录商店两条，形状对齐 PluginsPayload；
 // 「运行中」宿主 + 一家已加载/一家未加载，验证启停开关/提供商行/卸载确认/诊断区）──
 const PLUGINS_PAYLOAD = {
@@ -642,6 +652,41 @@ function handle(req, res, p, bodyText) {
       PLUGINS_PAYLOAD.catalog = JSON.parse(JSON.stringify(PLUGINS_SEED.catalog));
       PLUGINS_PAYLOAD.updates = JSON.parse(JSON.stringify(PLUGINS_SEED.updates));
       return sendJson(res, { success: true, data: null });
+    }
+
+    // 粘滞会话管理面（#38；形状对齐 admin/routing.rs handle_get_route_sticky /
+    // handle_clear_route_sticky）。query 对 id/渠道名/channel_id 小写包含过滤。
+    if (p === '/api/routing/sticky' && req.method === 'GET') {
+      const q = (new URL(req.url, 'http://x').searchParams.get('query') || '').trim().toLowerCase();
+      const now = Math.floor(Date.now() / 1000);
+      const filtered = stickyEntries.filter((e) =>
+        q === '' ||
+        e.id.toLowerCase().includes(q) ||
+        (e.channel_name || '').toLowerCase().includes(q) ||
+        (e.channel_id || '').toLowerCase().includes(q));
+      return sendJson(res, {
+        success: true,
+        data: {
+          entries: filtered.map((e) => ({ ...e, expires_at: now + 1500, updated_at: now - 300 })),
+          total: filtered.length,
+          truncated: false,
+          now,
+          sticky: stickyMode,
+        },
+      });
+    }
+    if (p === '/api/routing/sticky/clear' && req.method === 'POST') {
+      const body = JSON.parse(bodyText || '{}');
+      let cleared = 0;
+      if (typeof body.id === 'string' && body.id.trim()) {
+        const before = stickyEntries.length;
+        stickyEntries = stickyEntries.filter((e) => e.id !== body.id);
+        cleared = before - stickyEntries.length;
+      } else if (body.all === true) {
+        cleared = stickyEntries.length;
+        stickyEntries = [];
+      }
+      return sendJson(res, { success: true, data: { cleared } });
     }
 
     // 网络代理池（进程内数组，E2E 可驱动 CRUD）

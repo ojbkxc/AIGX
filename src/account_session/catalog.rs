@@ -29,6 +29,7 @@
 //! 「同步模型」按钮，而不是给一个必然失败的入口。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -182,6 +183,109 @@ pub struct CatalogSnapshot {
     /// 来源：`remote`（上游拉回）/ `fallback`（静态兜底）/ `cache`（命中缓存）。
     #[serde(default)]
     pub source: String,
+}
+
+/// 账号目录的**能力索引**（#40 路由多规则 §1 的账号级精筛数据源）。
+///
+/// 由 [`CatalogSnapshot`] 归一而来，**只存在于进程内存**：选路要在选号循环里
+/// 按模型名查能力位，而目录快照落在 SQLite KV —— 每查一次就是一次 DB 读 +
+/// JSON 解析，绝不能让候选循环去读它（#40 性能红线）。
+///
+/// ## 三态口径（这是本结构最重要的语义）
+///
+/// | 情形 | 判定 |
+/// |---|---|
+/// | 条目带标签，且覆盖所需位 | 放行 |
+/// | 条目带标签，缺所需位 | **拒绝**（已知不支持） |
+/// | 条目不带标签（`capabilities` 字段是后加的，老快照没有） | 放行（未知） |
+/// | 模型名不在索引里（该家无目录发现 / 尚未同步过） | 放行（未知） |
+///
+/// **为什么未知一律放行**：升级后老快照与未同步过的账号全都算「无能力信息」，
+/// 若未知即拒绝，这些账号会**无声地**退出候选池（选号层过滤掉的账号按设计
+/// 不计错误，用户只看到 502，账号 `error_count` 仍是 0 —— 08-prod P1-1 的
+/// 事故形态）。与既有 limiter「本地计数类在计数器接入前恒不命中（宁放勿误伤）」
+/// 同口径：**有证据才裁人**。
+///
+/// ## 名字判定
+///
+/// 只做**精确相等**：目录条目的 `id`（用户可见名）与 `upstream`（上游真名）
+/// 两个键都进表，查询侧用请求的（上游真名, 别名）两个名字去查。不引入第三套
+/// 名字等价启发式（前缀 / 大小写 / 别名表）——「这算不算同一个模型」由既有的
+/// `AccountSession::supports_model_any` 负责，本索引只回答「覆盖到的那个模型
+/// 带什么标签」。
+#[derive(Debug, Default)]
+pub struct AccountCapabilityIndex {
+    /// 是否存在任何「带标签」的条目（粗筛判据：全无证据 = 放行）。
+    evidence: bool,
+    /// 全部条目能力位的并集（用于「这个账号有没有任何一个模型能满足需求」）。
+    any: crate::model::capability::CapabilityMask,
+    /// 模型名 → 能力位（`id` 与上游真名两个键都进表，先写入者优先）。
+    by_name: HashMap<String, crate::model::capability::CapabilityMask>,
+}
+
+impl AccountCapabilityIndex {
+    /// 由目录快照构建。
+    pub fn from_snapshot(snapshot: &CatalogSnapshot) -> Self {
+        let mut index = Self::default();
+        for entry in &snapshot.models {
+            if entry.capabilities.is_empty() {
+                // 老快照（pick_capabilities 上线前写入的）没有能力位：算未知，不进表
+                continue;
+            }
+            let mask = crate::model::capability::CapabilityMask::from_tags(&entry.capabilities);
+            index.evidence = true;
+            index.any = index.any.union(mask);
+            for name in std::iter::once(&entry.id).chain(entry.upstream.as_ref()) {
+                index.by_name.entry(name.clone()).or_insert(mask);
+            }
+        }
+        index
+    }
+
+    /// 是否有任何能力证据（无 = 该账号的能力位未知）。
+    pub fn has_evidence(&self) -> bool {
+        self.evidence
+    }
+
+    /// 全部条目能力位的并集。
+    pub fn any(&self) -> crate::model::capability::CapabilityMask {
+        self.any
+    }
+
+    /// 按模型名查能力位（未收录返回 `None`）。
+    pub fn mask_for(&self, name: &str) -> Option<crate::model::capability::CapabilityMask> {
+        self.by_name.get(name).copied()
+    }
+
+    /// 判定：这个账号能否服务带 `required` 需求的 `model`（别名兜底）。
+    ///
+    /// 返回 `None` = **无证据 → 放行**（见上表）；`Some(false)` = 已知不支持。
+    /// 两个名字任一命中且满足即放行（与 `supports_model_any` 的「任一命中」
+    /// 同形状）；两个名字都已知但都不满足才拒。
+    pub fn verdict(
+        &self,
+        model: &str,
+        alias: Option<&str>,
+        required: crate::model::capability::CapabilityMask,
+    ) -> Option<bool> {
+        if required.is_empty() || !self.evidence {
+            return None;
+        }
+        let mut known = false;
+        for name in std::iter::once(model).chain(alias) {
+            if let Some(mask) = self.mask_for(name) {
+                known = true;
+                if mask.covers(required) {
+                    return Some(true);
+                }
+            }
+        }
+        if known {
+            Some(false)
+        } else {
+            None
+        }
+    }
 }
 
 /// 一个供应商的目录端点描述。
@@ -1255,7 +1359,7 @@ pub fn supported_providers() -> Vec<&'static str> {
 }
 
 /// 缓存键：按 provider + 账号 id 分格。
-fn cache_key(provider: &str, account_id: &str) -> String {
+pub(crate) fn cache_key(provider: &str, account_id: &str) -> String {
     format!("{CACHE_PREFIX}{provider}:{account_id}")
 }
 
@@ -1288,6 +1392,12 @@ fn save_cache(
     let _ = sessions
         .store()
         .put(&cache_key(provider, account_id), snapshot);
+    // #40 §1：能力索引随目录一起刷新（本函数是目录缓存的**唯一**写入口，
+    // 故索引不存在第二处需要失效的地方）。
+    sessions.set_catalog_index(
+        account_id,
+        Arc::new(AccountCapabilityIndex::from_snapshot(snapshot)),
+    );
 }
 
 /// 静态兜底目录。
@@ -2308,5 +2418,87 @@ mod tests {
         for kind in supported_providers() {
             assert!(supports(kind), "{kind} 在清单里但 spec_for 不认");
         }
+    }
+
+    /// 造一份目录条目（只为索引测试用）。
+    fn entry(id: &str, upstream: Option<&str>, caps: &[&str]) -> CatalogEntry {
+        CatalogEntry {
+            id: id.to_string(),
+            upstream: upstream.map(|s| s.to_string()),
+            context_length: None,
+            capabilities: caps.iter().map(|c| c.to_string()).collect(),
+        }
+    }
+
+    fn snapshot(models: Vec<CatalogEntry>) -> CatalogSnapshot {
+        CatalogSnapshot {
+            models,
+            fetched_at: 1,
+            source: "remote".to_string(),
+        }
+    }
+
+    #[test]
+    fn capability_index_matches_by_both_names() {
+        use crate::model::capability::CapabilityMask;
+        let snap = snapshot(vec![
+            entry("GLM-5.3", Some("gmodel"), &["tool", "vision"]),
+            entry("glm-5.3-flash", None, &["tools"]),
+        ]);
+        let index = AccountCapabilityIndex::from_snapshot(&snap);
+        assert!(index.has_evidence());
+        // 用户可见名与上游真名都进表
+        assert_eq!(index.mask_for("GLM-5.3"), index.mask_for("gmodel"));
+        // 复数 tags 与单数 tool 同义（两套词表归一到一位）
+        assert!(index
+            .mask_for("glm-5.3-flash")
+            .is_some_and(|m| m.covers(CapabilityMask::TOOL)));
+
+        // 任一名字命中且满足即放行
+        assert_eq!(
+            index.verdict("gmodel", Some("GLM-5.3"), CapabilityMask::VISION),
+            Some(true)
+        );
+        // 两个名字都已知但都不满足 → 拒
+        assert_eq!(
+            index.verdict("glm-5.3-flash", None, CapabilityMask::VISION),
+            Some(false)
+        );
+        // 名字不在目录里 → 无证据（调用方放行）
+        assert_eq!(index.verdict("unknown", None, CapabilityMask::VISION), None);
+        // 无需求 → 不判定
+        assert_eq!(index.verdict("GLM-5.3", None, CapabilityMask::EMPTY), None);
+    }
+
+    #[test]
+    fn capability_index_treats_untagged_entries_as_unknown() {
+        use crate::model::capability::CapabilityMask;
+        // 老快照（pick_capabilities 上线前）：条目在，但没有能力位
+        let legacy = snapshot(vec![entry("glm-5.3", None, &[])]);
+        let index = AccountCapabilityIndex::from_snapshot(&legacy);
+        assert!(!index.has_evidence(), "无标签 = 无证据");
+        assert_eq!(index.verdict("glm-5.3", None, CapabilityMask::VIDEO), None);
+
+        // 空目录同样无证据
+        let empty = AccountCapabilityIndex::from_snapshot(&snapshot(Vec::new()));
+        assert!(!empty.has_evidence());
+        assert_eq!(empty.verdict("glm-5.3", None, CapabilityMask::TOOL), None);
+    }
+
+    #[test]
+    fn capability_index_any_is_the_union() {
+        use crate::model::capability::CapabilityMask;
+        let snap = snapshot(vec![
+            entry("a", None, &["chat"]),
+            entry("b", None, &["video"]),
+            entry("c", None, &["tool"]),
+        ]);
+        let index = AccountCapabilityIndex::from_snapshot(&snap);
+        assert!(index.any().covers(CapabilityMask::VIDEO));
+        assert!(index.any().covers(CapabilityMask::TOOL));
+        assert!(!index.any().covers(CapabilityMask::VISION));
+        // 「带标签但三位全无」的条目（如只有 chat）仍是**有证据**：它明确说了
+        // 自己不支持视觉/工具/视频，粗筛才敢据此裁人。
+        assert!(index.has_evidence());
     }
 }
