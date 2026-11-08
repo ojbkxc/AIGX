@@ -3534,7 +3534,7 @@ mod tests {
 
         let names: Vec<&str> = visible_tools(&disabled).iter().map(|t| t.name).collect();
         assert!(
-            !names.iter().any(|n| *n == victim.as_str()),
+            !names.contains(&victim.as_str()),
             "禁用后仍在可见集: {victim}"
         );
         assert_eq!(
