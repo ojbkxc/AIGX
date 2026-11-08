@@ -523,6 +523,87 @@ pub async fn handle_update_agent_settings(
     }
 }
 
+// ── 聊天设置（`[chat]` 段：LLM 自动标题）────────────────────────
+
+/// 聊天设置请求体（缺省字段保持原值；键名 snake_case，与 agent 面同口径）。
+#[derive(Debug, Deserialize)]
+pub struct ChatSettingsRequest {
+    pub auto_title: Option<bool>,
+    pub title_model: Option<String>,
+    pub title_channel: Option<String>,
+    pub title_prompt_chars: Option<usize>,
+}
+
+/// 聊天配置的规范 JSON 形状（camelCase，与 `agent_settings_json` 同款手构）。
+fn chat_settings_json(config: &crate::config::ChatConfig) -> Value {
+    json!({
+        "autoTitle": config.auto_title,
+        "titleModel": config.title_model,
+        "titleChannel": config.title_channel,
+        "titlePromptChars": config.title_prompt_chars,
+    })
+}
+
+/// 危险组合校验：开启自动标题但提示词截断长度为 0 → 标题永不生成。
+/// 其他取值原样存（前端负责兜底），与仓库既有惯例一致。
+fn validate_chat_combo(config: &crate::config::ChatConfig) -> Result<(), &'static str> {
+    if config.auto_title && config.title_prompt_chars == 0 {
+        Err("开启自动标题时，标题提示字符数不能为 0")
+    } else {
+        Ok(())
+    }
+}
+
+/// GET /api/chat/settings —— 查询聊天设置（LLM 自动标题开关与模型/渠道）。
+pub async fn handle_get_chat_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = verify_admin(&state, &headers).await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": chat_settings_json(&config.chat),
+    })))
+}
+
+/// PUT /api/chat/settings —— 保存聊天设置（写 config.toml 并热生效：
+/// `chat_session/title.rs` 每次生成标题前都 `config_manager.get()` 取最新值）。
+pub async fn handle_update_chat_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ChatSettingsRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut config = verify_admin(&state, &headers).await?;
+    if let Some(v) = body.auto_title {
+        config.chat.auto_title = v;
+    }
+    if let Some(v) = body.title_model.as_deref() {
+        config.chat.title_model = v.trim().to_string();
+    }
+    if let Some(v) = body.title_channel.as_deref() {
+        config.chat.title_channel = v.trim().to_string();
+    }
+    if let Some(v) = body.title_prompt_chars {
+        config.chat.title_prompt_chars = v;
+    }
+    if let Err(msg) = validate_chat_combo(&config.chat) {
+        return Err(error_response(msg, StatusCode::BAD_REQUEST));
+    }
+    match state.config_manager.update(config).await {
+        Ok(()) => {
+            let updated = state.config_manager.get().await;
+            Ok(Json(json!({
+                "success": true,
+                "data": chat_settings_json(&updated.chat),
+            })))
+        }
+        Err(e) => Err(error_response(
+            &format!("Failed to save chat settings: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
 // ── 网关设置（监听地址 / CORS / 反代信任）──────────────────────────
 
 /// 网关设置请求体（缺省字段保持原值）。
@@ -1092,4 +1173,79 @@ pub async fn handle_update_sanitize(
         // 这里不返回的话命中计数会在保存后凭空消失（下一次刷新才回来）。
         "data": { "extra_headers": list, "stats": crate::sanitize::snapshot() }
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_settings_json_shape_is_camel_case() {
+        let cfg = crate::config::ChatConfig {
+            auto_title: true,
+            title_model: "gpt-4o-mini".to_string(),
+            title_channel: "ch-1".to_string(),
+            title_prompt_chars: 300,
+        };
+        assert_eq!(
+            chat_settings_json(&cfg),
+            json!({
+                "autoTitle": true,
+                "titleModel": "gpt-4o-mini",
+                "titleChannel": "ch-1",
+                "titlePromptChars": 300,
+            })
+        );
+    }
+
+    #[test]
+    fn chat_settings_request_accepts_snake_case_partial_body() {
+        // 契约：PUT body 为 snake_case，缺省字段保持原值（None）。
+        let body: ChatSettingsRequest =
+            serde_json::from_str(r#"{"auto_title": true, "title_prompt_chars": 800}"#).unwrap();
+        assert_eq!(body.auto_title, Some(true));
+        assert_eq!(body.title_prompt_chars, Some(800));
+        assert_eq!(body.title_model, None);
+        assert_eq!(body.title_channel, None);
+    }
+
+    #[test]
+    fn validate_chat_combo_rejects_zero_with_auto_title() {
+        let mut cfg = crate::config::ChatConfig::default();
+        cfg.auto_title = true;
+        cfg.title_prompt_chars = 0;
+        assert!(validate_chat_combo(&cfg).is_err(), "危险组合必须 400");
+        // 关闭自动标题时 0 无碍；开启且有截断长度亦无碍。
+        cfg.auto_title = false;
+        assert!(validate_chat_combo(&cfg).is_ok());
+        cfg.auto_title = true;
+        cfg.title_prompt_chars = 1;
+        assert!(validate_chat_combo(&cfg).is_ok());
+    }
+
+    #[tokio::test]
+    async fn update_config_manager_hot_effect_and_persist() {
+        // PUT 的热生效机制等价验证：config_manager.update 写内存 + 原子落盘，
+        // 之后 get()（title.rs 每次生成标题前的取法）拿到的必须是最新值。
+        let dir = tempfile::TempDir::new().unwrap();
+        let cm = crate::config::ConfigManager::new(Some(dir.path().join("config.toml"))).await;
+        let mut cfg = cm.get().await;
+        assert!(!cfg.chat.auto_title, "默认必须是关闭");
+        cfg.chat.auto_title = true;
+        cfg.chat.title_model = "deepseek-chat".to_string();
+        cfg.chat.title_prompt_chars = 123;
+        cm.update(cfg).await.unwrap();
+
+        let after = cm.get().await;
+        assert!(after.chat.auto_title);
+        assert_eq!(after.chat.title_model, "deepseek-chat");
+        assert_eq!(after.chat.title_prompt_chars, 123);
+
+        // 重启口径：从磁盘重载仍须是同一份值（config.toml 已持久化）。
+        let reloaded =
+            crate::config::ConfigManager::new(Some(dir.path().join("config.toml"))).await;
+        let disk = reloaded.get().await;
+        assert!(disk.chat.auto_title);
+        assert_eq!(disk.chat.title_prompt_chars, 123);
+    }
 }

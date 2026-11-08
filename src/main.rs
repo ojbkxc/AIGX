@@ -1800,6 +1800,10 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
                 .put(api::admin::handle_update_agent_settings),
         )
         .route(
+            "/api/chat/settings",
+            get(api::admin::handle_get_chat_settings).put(api::admin::handle_update_chat_settings),
+        )
+        .route(
             "/api/gateway/settings",
             get(api::admin::handle_get_gateway_settings)
                 .put(api::admin::handle_update_gateway_settings),

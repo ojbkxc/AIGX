@@ -752,6 +752,10 @@ fn paths_settings_ops() -> Value {
             "get": op("AI 助手", "查询 AI 助手设置（模型/提示词/工具开关/轮数）"),
             "put": op_body("AI 助手", "更新 AI 助手设置（写操作）", "model/systemPrompt/disabledTools/maxTurns/approvalTimeout")
         },
+        "/api/chat/settings": {
+            "get": op("设置", "查询聊天设置（LLM 自动标题开关/模型/渠道/提示字符数），响应 camelCase"),
+            "put": op_body("设置", "更新聊天设置（写操作，热生效）", "auto_title/title_model/title_channel/title_prompt_chars（snake_case，缺省保持原值）")
+        },
         // Agent 工作台（src/agent/api.rs 的独立 router，main.rs 里 merge 进来）
         "/api/agent/config": {
             "get": op("AI 助手", "Agent 配置只读视图（与 /api/agent/settings 同源同形状，附 effectiveModel 生效模型）")
@@ -1429,6 +1433,7 @@ mod tests {
         add("/api/channels/{id}/patch", &["patch"]);
         add("/api/channels/{id}/reset-circuit", &["post"]);
         add("/api/channels/{id}/test", &["post"]);
+        add("/api/chat/settings", &["get", "put"]);
         add("/api/chat/sessions", &["get", "post"]);
         add("/api/chat/sessions/{id}", &["delete", "get"]);
         add("/api/chat/sessions/{id}/fork", &["post"]);
