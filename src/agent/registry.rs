@@ -2457,7 +2457,7 @@ fn build_tools() -> Vec<ToolDef> {
         td(
             "aigx_config_view",
             "配置现状视图",
-            "只读：按 key 读一份配置/现状视图（全局热生效配置的读取面；写侧另有一批工具，本工具不改任何东西）。key 取值：settings=模型映射、limits=限额、securityPolicy=安全策略、sanitize=脱敏规则、gatewaySettings/gatewayPrompt=网关设置与系统提示词、updateSettings=更新设置、logsRetention=日志保留、queue=队列、ratelimit=限流、ratios=倍率、ipFilter=IP 黑白名单、notify=通知配置（凭据字段已脱敏）、clineHeaders=转发头、userToolsPolicy/userToolsCatalog=终端用户工具面、routing/routingDefaults/routingProfiles=路由策略、alertsRules=告警规则、pricingSyncConfig/exchangeRates=定价同步与汇率、modelMetadata=模型元数据、debug/debugTraffic=调试开关与在途抓包、checkinKeepalive/checkinBenefits=签到保活与权益",
+            "只读：按 key 读一份配置/现状视图（全局热生效配置的读取面；写侧另有一批工具，本工具不改任何东西）。key 取值：settings=模型映射、limits=限额、securityPolicy=安全策略、sanitize=脱敏规则、gatewaySettings/gatewayPrompt=网关设置与系统提示词、updateSettings=更新设置、logsRetention=日志保留、queue=队列、ratelimit=限流、ratios=倍率、ipFilter=IP 黑白名单、notify=通知配置（凭据字段已脱敏）、clineHeaders=转发头、userToolsPolicy/userToolsCatalog=终端用户工具面、routing/routingDefaults/routingProfiles=路由策略、alertsRules=告警规则、pricingSyncConfig/exchangeRates=定价同步与汇率、modelMetadata=模型元数据、debug/debugTraffic=调试开关与在途抓包、reportSettings=报表时区偏移与存量口径、checkinKeepalive/checkinBenefits=签到保活与权益",
             ReadOnly,
             "key",
             &[
@@ -2546,6 +2546,9 @@ fn build_tools() -> Vec<ToolDef> {
                         }
                         "debug" => admin::handle_get_debug(State(s.clone()), h.clone()).await,
                         "debugTraffic" => admin::handle_get_debug_traffic(State(s.clone()), h.clone()).await,
+                        "reportSettings" => {
+                            admin::handle_get_report_settings(State(s.clone()), h.clone()).await
+                        }
                         "checkinKeepalive" => admin::handle_get_keepalive(State(s.clone()), h.clone()).await,
                         "checkinBenefits" => admin::handle_benefits_list(State(s.clone()), h.clone()).await,
                         _ => return Err((-32602, format!("Invalid params: unknown config key {key}"))),
@@ -3081,6 +3084,7 @@ mod tests {
                 "/api/notify/test-telegram",
                 "/api/alerts/test",
                 "/api/logs/agg/rebuild",
+                "/api/logs/agg/tz-migrate",
                 "/api/logs/audits/clear",
                 "/api/logs/requests/clear",
                 "/api/logs/inflight/{id}/terminate",
@@ -3201,6 +3205,7 @@ mod tests {
                 "/api/pricing/exchange-rates",
                 "/api/models/metadata",
                 "/api/debug",
+                "/api/report/settings",
                 "/api/checkin-center/benefits/keepalive",
             ],
         ),
