@@ -44,7 +44,7 @@ const SESSIONS = {
 const PROVIDERS = {
   success: true,
   data: [
-    { kind: 'chatglm', label: '智谱清言', category: 'agent', auth: {}, default_base_url: 'https://chatglm.cn' },
+    { kind: 'chatglm', label: '智谱清言', category: 'web', auth: 'cookie', default_base_url: 'https://chatglm.cn' },
     { kind: 'autoclaw-intl', label: 'AutoClaw 国际版', category: 'agent', auth: {}, default_base_url: 'https://autoglm-api.autoglm.ai' },
   ],
   total: 2,
@@ -76,12 +76,10 @@ test.describe('添加账号 · file/desktop/guest/oauth 四段 + 重复检测', 
   });
 
   test('desktop 段：来源清单渲染（supported/灰态）+ 导入请求只有 source_id/name', async ({ page, pageErrors }) => {
-    await page.route('**/api/account-sessions**', (r) => {
-      if (r.request().method() === 'POST' && r.request().url().includes('/desktop-import')) {
-        return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { id: 'acc-new' } }) });
-      }
-      return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(SESSIONS) });
-    });
+    await page.route(/\/api\/account-sessions\/desktop-import(\?|$)/, (r) =>
+      r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { id: 'acc-new' } }) }));
+    await page.route(/\/api\/account-sessions(\?|$)/, (r) =>
+      r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(SESSIONS) }));
     await page.route('**/api/account-sessions/desktop/sources', (r) =>
       r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(DESKTOP_SOURCES) }));
 
@@ -115,8 +113,10 @@ test.describe('添加账号 · file/desktop/guest/oauth 四段 + 重复检测', 
   });
 
   test('chatglm：guest/oauth/file 三方法齐备；file 读文件填入粘贴域并提交', async ({ page, pageErrors }) => {
-    await page.route('**/api/account-sessions**', (r) => {
-      if (r.request().method() === 'POST' && !r.request().url().includes('providers')) {
+    const created: Array<Record<string, unknown>> = [];
+    await page.route(/\/api\/account-sessions(\?|$)/, (r) => {
+      if (r.request().method() === 'POST') {
+        created.push(r.request().postDataJSON() as Record<string, unknown>);
         return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { id: 'acc-new' } }) });
       }
       return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(SESSIONS) });
@@ -124,29 +124,21 @@ test.describe('添加账号 · file/desktop/guest/oauth 四段 + 重复检测', 
 
     await page.goto('/channels?tab=accounts');
     await page.getByRole('button', { name: '添加账号' }).first().click();
-    // 搜索命中 chatglm 卡（Agent 档）
+    // 搜索命中 chatglm 卡（Web 档——档位对齐桩 static-server.mjs:135）
     await page.getByPlaceholder('搜索提供商…').fill('智谱');
     await page.locator('.add-card', { hasText: '智谱清言' }).first().click();
 
-    // 三方法齐备（file 由对话框对 paste 家统一追加）
+    // 三方法齐备（file 由对话框对 paste 家统一追加；oauth 只属 autoclaw-intl）
     const tabs = page.locator('.add-method-row .ui-tabs button, .add-method-row button');
     const tabText = await tabs.allInnerTexts();
     expect(tabText.join('|')).toContain('访客模式');
-    expect(tabText.join('|')).toContain('网页授权');
     expect(tabText.join('|')).toContain('凭证文件');
+    expect(tabText.join('|')).not.toContain('网页授权');
 
     // guest 块：说明 + 粘贴域 + 提交（POST api_key = 粘贴值）
     await page.locator('.add-method-row button', { hasText: '访客模式' }).click();
     await expect(page.locator('h4', { hasText: '访客模式' })).toBeVisible();
     await expect(page.locator('.add-block', { hasText: '访客模式' })).toContainText('没有积分体系');
-    const created: Array<Record<string, unknown>> = [];
-    await page.route('**/api/account-sessions', async (r) => {
-      if (r.request().method() === 'POST') {
-        created.push(r.request().postDataJSON() as Record<string, unknown>);
-        return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { id: 'acc-new' } }) });
-      }
-      return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(SESSIONS) });
-    });
     await page.getByLabel('accessToken').fill('eyJ-guest-token');
     await page.getByRole('button', { name: '校验并添加' }).click();
     await expect.poll(() => created.length).toBe(1);
@@ -168,8 +160,10 @@ test.describe('添加账号 · file/desktop/guest/oauth 四段 + 重复检测', 
   });
 
   test('oauth 段：autoclaw-intl 指引 + 授权页按钮 + 粘贴提交', async ({ page, pageErrors }) => {
-    await page.route('**/api/account-sessions**', (r) => {
-      if (r.request().method() === 'POST' && !r.request().url().includes('providers')) {
+    const created: Array<Record<string, unknown>> = [];
+    await page.route(/\/api\/account-sessions(\?|$)/, (r) => {
+      if (r.request().method() === 'POST') {
+        created.push(r.request().postDataJSON() as Record<string, unknown>);
         return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { id: 'acc-new' } }) });
       }
       return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(SESSIONS) });
@@ -189,17 +183,17 @@ test.describe('添加账号 · file/desktop/guest/oauth 四段 + 重复检测', 
       page.getByRole('button', { name: '打开 AutoClaw 国际版登录页' }).click(),
     ]);
     if (popup) await popup.close();
-    await page.getByLabel('token').fill('eyJ-oauth-token');
+    await page.getByLabel('token（必填）').fill('eyJ-oauth-token');
     await page.getByRole('button', { name: '校验并添加' }).click();
-    await expect.poll(() => page.evaluate(() => true)).toBe(true);
-    // 提交体断言（capture 经由上一个 route；这里用全局数组兜底）
+    await expect.poll(() => created.length).toBe(1);
+    expect(created[0].api_key).toBe('eyJ-oauth-token');
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
   test('重复检测：同协议同地址已有账号 → 警告条 → 仍要新建放行', async ({ page, pageErrors }) => {
     const created: Array<Record<string, unknown>> = [];
-    await page.route('**/api/account-sessions**', (r) => {
-      if (r.request().method() === 'POST' && !r.request().url().includes('providers') && !r.request().url().includes('desktop')) {
+    await page.route(/\/api\/account-sessions(\?|$)/, (r) => {
+      if (r.request().method() === 'POST') {
         created.push(r.request().postDataJSON() as Record<string, unknown>);
         return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, data: { id: 'acc-new' } }) });
       }
