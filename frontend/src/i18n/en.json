@@ -3054,5 +3054,11 @@
   "视频识别": "Video recognition",
   "基本信息": "Basic info",
   "连接数": "Connections",
-  "高级": "Advanced"
+  "高级": "Advanced",
+  "解析 Cookies 库并添加": "[TODO en] 解析 Cookies 库并添加",
+  "解析中…": "[TODO en] 解析中…",
+  "请先选择 Cookies SQLite 文件": "[TODO en] 请先选择 Cookies SQLite 文件",
+  "选择 Cookies SQLite 文件": "[TODO en] 选择 Cookies SQLite 文件",
+  "已读入 {{name}}（{{n}} 字节），点「解析 Cookies 库并添加」": "[TODO en] 已读入 {{name}}（{{n}} 字节），点「解析 Cookies 库并添加」",
+  "Cookies 库：{{name}}（base64 就绪）": "[TODO en] Cookies 库：{{name}}（base64 就绪）"
 }

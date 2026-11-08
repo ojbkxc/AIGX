@@ -230,6 +230,11 @@ export default function AddAccountDialog({
   // 粘贴式登录（网关归一化 + 校验一次后落账号）
   const [pasteBusy, setPasteBusy] = useState(false);
   const [pasteHint, setPasteHint] = useState('');
+  /** Cookies SQLite 文件（#41）：chatglm/kuku 桌面客户端 Cookies 库 base64，
+   *  随 login/paste body 的 auth_file_b64 提交（后端 account_login.rs:199-215
+   *  专用分支：解析出令牌 + 续期令牌一并落库）。非这两家不显示入口。 */
+  const [cookieFileB64, setCookieFileB64] = useState('');
+  const [cookieFileName, setCookieFileName] = useState('');
   // 桌面客户端登录态导入（#22 desktop 段；provider 无关——后端白名单分发 +
   // auto_channel 原子建号。supported 由后端按 cfg!(windows)+encrypted 给）
   const [desktopPick, setDesktopPick] = useState(false);
@@ -561,6 +566,37 @@ export default function AddAccountDialog({
       setSmsHint(err instanceof Error ? err.message : String(err));
     } finally {
       setSmsBusy(false);
+    }
+  };
+
+  /** Cookies SQLite 文件解析提交（#41）：chatglm/kuku 专用——body 带
+   *  auth_file_b64、secret 留空（后端文件分支只看 auth_file_b64）。 */
+  const submitCookieFile = async (): Promise<void> => {
+    setPasteHint('');
+    if (!provider) {
+      setPasteHint(t('请选择供应商'));
+      return;
+    }
+    if (!cookieFileB64) {
+      setPasteHint(t('请先选择 Cookies SQLite 文件'));
+      return;
+    }
+    setPasteBusy(true);
+    try {
+      await api.pasteAccountLogin({
+        provider: activeProvider,
+        channel_id: advanced.channel_id,
+        secret: '',
+        name: advanced.name.trim(),
+        auth_file_b64: cookieFileB64,
+      });
+      addToast(t('账号已添加'));
+      await onCreated();
+      onClose();
+    } catch (err) {
+      setPasteHint(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPasteBusy(false);
     }
   };
 
@@ -1272,7 +1308,49 @@ export default function AddAccountDialog({
                             }}
                           />
                         </label>
+                        {/* ── Cookies SQLite 文件（#41）：chatglm/kuku 桌面客户端
+                            的 Cookies 库走后端 auth_file_b64 专用分支（解析出
+                            令牌 + 续期令牌一并落库），与 JSON 凭据文件是两条路。── */}
+                        {(activeProvider === 'chatglm' || activeProvider === 'kuku') && (
+                          <>
+                            <label className="btn btn-outline" style={{ cursor: 'pointer' }}>
+                              {t('选择 Cookies SQLite 文件')}
+                              <input
+                                type="file"
+                                accept=".sqlite,.db,.sqlite3,application/octet-stream"
+                                style={{ display: 'none' }}
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  e.target.value = '';
+                                  if (!file) return;
+                                  setCookieFileName(file.name);
+                                  const reader = new FileReader();
+                                  reader.onload = () => {
+                                    const result = String(reader.result || '');
+                                    // dataURL 前缀（data:...;base64,）剥掉只留 base64
+                                    const b64 = result.includes(',') ? result.slice(result.indexOf(',') + 1) : result;
+                                    setCookieFileB64(b64);
+                                    setPasteHint(t('已读入 {{name}}（{{n}} 字节），点「解析 Cookies 库并添加」', { name: file.name, n: file.size }));
+                                  };
+                                  reader.readAsDataURL(file);
+                                }}
+                              />
+                            </label>
+                            {cookieFileB64 ? (
+                              <Button
+                                type="button"
+                                onClick={() => void submitCookieFile()}
+                                disabled={pasteBusy}
+                              >
+                                {pasteBusy ? t('解析中…') : t('解析 Cookies 库并添加')}
+                              </Button>
+                            ) : null}
+                          </>
+                        )}
                       </div>
+                      {cookieFileName ? (
+                        <div className="form-hint">{t('Cookies 库：{{name}}（base64 就绪）', { name: cookieFileName })}</div>
+                      ) : null}
                     </div>
                   ) : null}
 
