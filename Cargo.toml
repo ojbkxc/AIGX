@@ -49,7 +49,7 @@ mysql = ["sea-orm/sqlx-mysql", "sea-orm-migration/sqlx-mysql"]
 
 [dependencies]
 # HTTP
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "multipart"] }
 axum-extra = "0.9"
 tokio = { workspace = true }
 hyper = { version = "1", features = ["full"] }

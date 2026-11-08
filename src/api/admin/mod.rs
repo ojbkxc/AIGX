@@ -2,6 +2,7 @@ pub mod account_login;
 pub mod account_sessions;
 pub mod auth;
 pub mod backup;
+pub mod backup_crypto;
 pub mod cache;
 pub mod channels;
 pub mod checkin_center;
@@ -135,7 +136,7 @@ pub use settings::{
 };
 
 // 数据管理（存储概览 + 全量备份/恢复；对照 Agent2API「设置 → 数据」）
-pub use backup::{handle_backup_export, handle_backup_import, handle_storage_overview};
+pub use backup::{handle_backup_import, handle_storage_overview};
 
 pub use notify::{handle_get_notify_config, handle_update_notify_config};
 

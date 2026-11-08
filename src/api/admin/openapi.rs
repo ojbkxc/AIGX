@@ -693,9 +693,17 @@ fn paths_settings_ops() -> Value {
         "/api/storage": {
             "get": op("数据", "存储概览（KV 总键数/分组统计/库文件大小）")
         },
-        "/api/backup/export": {
-            "get": op("数据", "全量导出 KV 备份 JSON（include_logs=false 跳过日志键）")
+        "/api/backup/export-encrypted": {
+            "post": op_body("数据管理", "生成口令加密备份（AIGXBAK1：Argon2id+AES-256-GCM 流式包；口令只经请求体，不落盘不进日志）", "password（≥8 字符）+ include_logs?")
         },
+        "/api/backup/download": {
+            "get": op_params("数据管理", "下载加密备份包（?file=export-*.aigxbak，文件名只认本模块产出形态，防路径穿越）", &[query_param("file", "string", "加密包文件名")])
+        },
+        "/api/backup/import-encrypted": {
+            "post": op_body("数据管理", "上传加密包并恢复（multipart：file+password；解密全量校验先行，恢复前自动备份当前全量）", "multipart file+password")
+        },
+        // 明文导出 /api/backup/export 已移除（#33 安全缺口本体）：
+        // 改用 export-encrypted 三件套；明文导入保留（存量旧包迁移）。
         "/api/backup/import": {
             "post": op_body("数据", "导入备份恢复（先自动快照当前全量到 backups/ 再写回）", "BackupDocument{version,exported_at,include_logs,kv}")
         },
@@ -1282,7 +1290,9 @@ mod tests {
         add("/api/routing/replay/{request_id}", &["get"]);
         add("/api/gateway/prompt", &["get", "put"]);
         add("/api/storage", &["get"]);
-        add("/api/backup/export", &["get"]);
+        add("/api/backup/export-encrypted", &["post"]);
+        add("/api/backup/download", &["get"]);
+        add("/api/backup/import-encrypted", &["post"]);
         add("/api/backup/import", &["post"]);
         add("/api/logs/audits", &["delete", "get"]);
         add("/api/logs/audits/clear", &["delete"]);

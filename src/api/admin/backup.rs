@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -27,8 +27,8 @@ use super::common::{error_response, record_audit, verify_admin};
 /// 备份文档格式版本（未来结构变更时的兼容判据）。
 const BACKUP_FORMAT_VERSION: u32 = 1;
 
-/// 日志类键前缀（include_logs=false 时排除）。
-const LOG_PREFIXES: &[&str] = &["reqlog:", "auditlog:"];
+/// 日志类键前缀（include_logs=false 时排除；加密导出复用同一口径）。
+pub(crate) const LOG_PREFIXES: &[&str] = &["reqlog:", "auditlog:"];
 
 /// 面板展示的键前缀分组（存储概览用）。
 const STORAGE_GROUPS: &[(&str, &str)] = &[
@@ -115,62 +115,10 @@ pub async fn handle_storage_overview(
     })))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct BackupExportQuery {
-    /// 是否包含请求/审计日志键（默认 false：日志体积大且可再生）
-    #[serde(default)]
-    pub include_logs: Option<bool>,
-}
-
-/// GET /api/backup/export —— 全量导出 KV 为 JSON 文档（浏览器直接下载）。
-pub async fn handle_backup_export(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<BackupExportQuery>,
-) -> Result<Json<BackupDocument>, (axum::http::StatusCode, Json<Value>)> {
-    verify_admin(&state, &headers).await?;
-    let include_logs = q.include_logs.unwrap_or(false);
-
-    let all_keys = state.alert_store.list("").map_err(|e| {
-        error_response(
-            &format!("列出键失败: {e}"),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
-    let mut kv = BTreeMap::new();
-    for key in &all_keys {
-        if !include_logs && LOG_PREFIXES.iter().any(|p| key.starts_with(p)) {
-            continue;
-        }
-        match state.alert_store.get::<Value>(key) {
-            Ok(Some(v)) => {
-                kv.insert(key.clone(), v);
-            }
-            Ok(None) => {} // 竞态下键被删：跳过
-            Err(e) => {
-                // 单键读失败不阻断整份备份（键损坏≠整库不可备份）
-                tracing::warn!("备份跳过损坏键 {key}: {e}");
-            }
-        }
-    }
-
-    let doc = BackupDocument {
-        version: BACKUP_FORMAT_VERSION,
-        exported_at: chrono::Utc::now().timestamp(),
-        include_logs,
-        kv,
-    };
-    let admin_id = crate::api::admin::common::admin_id_from_session(&state, &headers).await;
-    record_audit(
-        &state,
-        &admin_id,
-        "backup.export",
-        &format!("导出备份（{} 键，含日志={include_logs}）", doc.kv.len()),
-        None,
-        None,
-    );
-    Ok(Json(doc))
-}
+// 明文导出端点已移除（#33 安全缺口本体）：全量 KV 含凭证/密钥/用户表，
+// admin 磁盘出现一份绕过 enc1: 的整库明文副本。改用加密导出三件套
+//（backup_crypto.rs）；明文**导入**保留（存量旧包迁移必需）。
+// BackupExportQuery 随之删除（Query 参数只服务于明文导出）。
 
 /// POST /api/backup/import —— 导入恢复。
 ///
@@ -205,49 +153,8 @@ pub async fn handle_backup_import(
         ));
     }
 
-    // 1. 恢复前自动备份当前全量（含日志，防丢）
-    let snapshot_keys = state.alert_store.list("").map_err(|e| {
-        error_response(
-            &format!("列出当前键失败: {e}"),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
-    let mut snapshot = BTreeMap::new();
-    for key in &snapshot_keys {
-        if let Ok(Some(v)) = state.alert_store.get::<Value>(key) {
-            snapshot.insert(key.clone(), v);
-        }
-    }
-    let pre_doc = BackupDocument {
-        version: BACKUP_FORMAT_VERSION,
-        exported_at: chrono::Utc::now().timestamp(),
-        include_logs: true,
-        kv: snapshot,
-    };
-    let data_dir = crate::config::expand_path(&state.config_manager.get().await.server.data_dir);
-    let backups_dir = data_dir.join("backups");
-    std::fs::create_dir_all(&backups_dir).map_err(|e| {
-        error_response(
-            &format!("创建备份目录失败: {e}"),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
-    let pre_path = backups_dir.join(format!(
-        "pre-import-{}.json",
-        chrono::Utc::now().format("%Y%m%d-%H%M%S")
-    ));
-    let pre_content = serde_json::to_string(&pre_doc).map_err(|e| {
-        error_response(
-            &format!("序列化恢复前备份失败: {e}"),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
-    std::fs::write(&pre_path, pre_content).map_err(|e| {
-        error_response(
-            &format!("写入恢复前备份失败: {e}"),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
+    // 1. 恢复前自动备份当前全量（含日志，防丢）——与加密导入共用同一辅助
+    let pre_path = snapshot_current(&state).await.map_err(|e| e)?;
 
     // 2. 逐键写回（合并 upsert）
     let mut written = 0usize;
@@ -291,4 +198,56 @@ pub async fn handle_backup_import(
             "pre_import_backup": pre_path.display().to_string(),
         }
     })))
+}
+
+/// 恢复前自动备份当前全量 KV（含日志）到 `{data_dir}/backups/pre-import-<ts>.json`。
+///
+/// 明文导入与加密导入（backup_crypto）共用同一安全顺序；同步文件 IO，
+/// 冷路径（低频管理操作）。
+pub(crate) async fn snapshot_current(
+    state: &AppState,
+) -> Result<std::path::PathBuf, (axum::http::StatusCode, Json<Value>)> {
+    let snapshot_keys = state.alert_store.list("").map_err(|e| {
+        error_response(
+            &format!("列出当前键失败: {e}"),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    let mut snapshot = BTreeMap::new();
+    for key in &snapshot_keys {
+        if let Ok(Some(v)) = state.alert_store.get::<Value>(key) {
+            snapshot.insert(key.clone(), v);
+        }
+    }
+    let pre_doc = BackupDocument {
+        version: BACKUP_FORMAT_VERSION,
+        exported_at: chrono::Utc::now().timestamp(),
+        include_logs: true,
+        kv: snapshot,
+    };
+    let data_dir = crate::config::expand_path(&state.config_manager.get().await.server.data_dir);
+    let backups_dir = data_dir.join("backups");
+    std::fs::create_dir_all(&backups_dir).map_err(|e| {
+        error_response(
+            &format!("创建备份目录失败: {e}"),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    let pre_path = backups_dir.join(format!(
+        "pre-import-{}.json",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    ));
+    let pre_content = serde_json::to_string(&pre_doc).map_err(|e| {
+        error_response(
+            &format!("序列化恢复前备份失败: {e}"),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    std::fs::write(&pre_path, pre_content).map_err(|e| {
+        error_response(
+            &format!("写入恢复前备份失败: {e}"),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    Ok(pre_path)
 }

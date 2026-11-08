@@ -1881,8 +1881,23 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         )
         // 数据管理（存储概览 + 全量备份/恢复；对照 Agent2API「设置 → 数据」）
         .route("/api/storage", get(api::admin::handle_storage_overview))
-        .route("/api/backup/export", get(api::admin::handle_backup_export))
+        // 明文导出端点已移除（#33 安全缺口本体：全量 KV 含凭证/密钥落浏览器
+        // 磁盘）；改用加密导出三件套。明文导入保留（存量旧包迁移）。
         .route("/api/backup/import", post(api::admin::handle_backup_import))
+        // 加密整库备份（#33）：口令 AEAD 流式包（AIGXBAK1，Argon2id + AES-256-GCM），
+        // 口令只经请求体（不落盘不进日志不进审计载荷）
+        .route(
+            "/api/backup/export-encrypted",
+            post(api::admin::backup_crypto::handle_backup_export_encrypted),
+        )
+        .route(
+            "/api/backup/download",
+            get(api::admin::backup_crypto::handle_backup_download),
+        )
+        .route(
+            "/api/backup/import-encrypted",
+            post(api::admin::backup_crypto::handle_backup_import_encrypted),
+        )
         // 数据升级（对照 Agent2API /api/upgrade + /api/upgrade/run；AIGX 原生 SQLite 无旧数据，端点保留对齐 API 面）
         .route("/api/upgrade", get(api::admin::handle_get_upgrade))
         .route("/api/upgrade/run", post(api::admin::handle_run_upgrade))
