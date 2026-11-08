@@ -28,6 +28,52 @@ pub const CREDENTIAL_KIND_NONE: &str = "none";
 /// （模型名只允许字母数字与 `- _ . / :`），不会与真实模型冲突。
 pub const ACCOUNT_WIDE_COOLDOWN: &str = "*";
 
+/// 配置态：登录态已被上游拒绝，**需要人工重新登录**（#35 C1）。
+///
+/// 只出现在**不可自动续期**的家（loomy 这类 `!supports_refresh` 的 session
+/// 型供应商）：上游把凭据本身拒了（401/403），AIGX 手里没有 refresh token，
+/// 谁也续不了——除了人来登一次，没有任何自动路径能救。
+///
+/// 为什么要单独一个值而不是复用 `disabled`（lead 派单口径）：
+/// - `disabled` = 管理员**主动**关的，恢复动作是「重新启用」；
+/// - `needs_relogin` = 上游踢的，恢复动作是「重新登录（换凭据）」；
+///   把二者混成一个值，运维面板就会让人去点一个点了也没用的开关。
+///
+/// 与 `expires_at` 无关：本状态**不改** `expires_at`（不写估算过期时间，
+/// 那是「两周后集体假红」的坑）。
+pub const STATUS_NEEDS_RELOGIN: &str = "needs_relogin";
+
+/// 连续被上游拒绝多少次才认定「登录态已死」（#35 C1）。
+///
+/// 3 次是**假阳性与真静默的折中**：上游偶发 401（网关抖动、时钟偏差、
+/// 单号被限流误判）不该把账号打成「等人来登」；但真死了又不该像现在
+/// 这样只写 cooldown、面板上一片 `enabled` 无人知晓。
+pub const RELOGIN_REJECTION_THRESHOLD: u64 = 3;
+
+/// 到期提醒提前量（秒）——固定寿命上游在到期前 3 天提醒重登（#35 C2）。
+pub const RELOGIN_REMINDER_BEFORE_SECS: i64 = 3 * 24 * 3600;
+
+/// 已**取证确认**的登录态寿命（provider → 秒）。
+///
+/// ⚠️ 只收有确证的家，别填估算值。loomy 的依据是登录请求里的
+/// `expire: 14 * 24 * 3600`（`account_login/loomy.rs`），上游 14 天硬寿命；
+/// 其余家（含其它 session 型供应商）的真实存活期没有证据（#36 取证域），
+/// 写进来就会在两周后集体假红。**不在表里 = 不出到期提醒**（宁缺勿假红），
+/// 真死了由 C1 的上游实证链（连续 401/403）兜住。
+///
+/// 为什么写在 model 而不是 `registry::SessionMeta`：这条表只服务 #35 的
+/// 提醒判定，放 catalog 会让「ProviderSpec 声明了 TTL」与「我们取证确认了
+/// TTL」两种语义混成一件事。
+const RELOGIN_KNOWN_TTL_SECS: &[(&str, i64)] = &[("loomy", 14 * 24 * 3600)];
+
+/// 该 provider 已确证的登录态寿命（秒）；`None` = 未知/不过期，不提醒。
+pub fn relogin_ttl_secs(provider: &str) -> Option<i64> {
+    RELOGIN_KNOWN_TTL_SECS
+        .iter()
+        .find(|(name, _)| *name == provider)
+        .map(|(_, secs)| *secs)
+}
+
 /// 一条账号限制规则（余额 / Token 两类，对齐前端 `LimiterRule` 与 Agent2API
 /// 的 `accounts-dialog-limiter`；JSON 字段名与 Agent2API `LimiterRule::to_json`
 /// 同名：`type` / `action` / `threshold` / `reset` / `period` / `enabled`）。
@@ -325,6 +371,28 @@ pub struct AccountSession {
     /// 凭证过期时间（unix 秒；None / 0 = 不过期）。
     #[serde(default)]
     pub expires_at: Option<i64>,
+    /// 连续被上游拒绝**凭证本身**的次数（401/403 且该家不可自动续期）。
+    ///
+    /// 与 [`Self::consecutive_errors`] 不同：那个是「这次请求失败了」（含
+    /// 限流、网络抖动），这个是「上游说这把钥匙不是钥匙」。成功一次即清零；
+    /// 达到 [`RELOGIN_REJECTION_THRESHOLD`] 转 [`STATUS_NEEDS_RELOGIN`]（#35 C1）。
+    #[serde(default)]
+    pub consecutive_rejections: u64,
+    /// 本次登录态的建立时间（unix 秒）。**只在登录成功落盘处写**，
+    /// 运行期不改动；`None` = 存量数据（升级前建的账号）或非登录态型。
+    ///
+    /// 用途是 #35 C2 的到期提醒：`logged_in_at + 已确证寿命` 才是提醒锚点。
+    /// 刻意与 [`Self::expires_at`] 分开——后者是上游给的**权威**过期时间，
+    /// Loomy 这类根本不给（只有我们请求时 `expire: 14d` 的一厢情愿），
+    /// 拿估算值填它会让选路在两周后集体假红（lead 红线：不写估算 expires_at）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logged_in_at: Option<i64>,
+    /// 最近一次「登录态即将到期」提醒的发出时间（unix 秒，#35 C2）。
+    ///
+    /// 去重位：同一轮登录态只提醒一次。重登成功时 `logged_in_at` 被刷新，
+    /// `relogin_notified_at < logged_in_at` → 下一轮到期重新计入提醒。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relogin_notified_at: Option<i64>,
     /// 运行态并发占用（不落盘）。
     #[serde(skip)]
     pub in_flight: u32,
@@ -398,6 +466,9 @@ impl AccountSession {
             consecutive_errors: 0,
             total_latency_ms: 0,
             expires_at: None,
+            consecutive_rejections: 0,
+            logged_in_at: None,
+            relogin_notified_at: None,
             in_flight: 0,
             usage_query_interval_secs: None,
             last_balance_at: None,
@@ -413,15 +484,105 @@ impl AccountSession {
         self.status == "enabled"
     }
 
+    /// 配置态是否「等人工重新登录」（#35 C1）。
+    ///
+    /// 单独成问而不写 `session.status == "needs_relogin"`：这个值同时出现在
+    /// 选路跳过、502 计数、管理面徽标与提醒巡检四处，拼写漂移就是静默失效。
+    pub fn needs_relogin(&self) -> bool {
+        self.status == STATUS_NEEDS_RELOGIN
+    }
+
+    /// 本轮登录态的确证到期时刻（unix 秒）；`None` = 无确证寿命 / 无登录锚点。
+    ///
+    /// **只是提醒锚点**：不写 `expires_at`、不参与选路与过期判定（#36 取证
+    /// 之前它是我们对上游寿命唯一的、且有据可查的读数）。
+    pub fn relogin_due_at(&self) -> Option<i64> {
+        let at = self.logged_in_at.filter(|at| *at > 0)?;
+        relogin_ttl_secs(&self.provider).map(|ttl| at.saturating_add(ttl))
+    }
+
+    /// #35 C2：本轮登录态**是否到了该提醒的份上**（且本轮尚未提醒过）。
+    ///
+    /// 三个条件缺一不可：
+    /// 1. 落在「到期前 3 天」窗口内（[`RELOGIN_REMINDER_BEFORE_SECS`]）；
+    /// 2. **已过期不提醒**——到期后上游会直接拒（401/403），那条路有 C1 的
+    ///    实证链兜底；这里再喊一次就是两份重复噪音，且「靠算术断定已死」
+    ///    正是 lead 划红线的假红来源；
+    /// 3. 本轮没提醒过（`relogin_notified_at` 为空，或提醒发生在本次登录
+    ///    之前 —— 重登后 `logged_in_at` 被刷新，提醒重新计入）。
+    pub fn relogin_reminder_pending(&self, now: i64) -> bool {
+        let Some(due) = self.relogin_due_at() else {
+            return false;
+        };
+        if now >= due {
+            return false;
+        }
+        if now < due.saturating_sub(RELOGIN_REMINDER_BEFORE_SECS) {
+            return false;
+        }
+        self.relogin_notified_at
+            .is_none_or(|at| at < self.logged_in_at.unwrap_or(0))
+    }
+
+    /// 记一次「上游拒绝这枚凭据」（401/403，且该家不可自动续期，#35 C1）。
+    ///
+    /// 返回 `true` = **本次刚好**把配置态转成 [`STATUS_NEEDS_RELOGIN`]。
+    ///
+    /// 只在 `enabled` 态转换：`disabled` 是管理员的主动决定、`expired` 已经
+    /// 是更准确的读数，都不该被这里覆盖（否则「谁关的号」这个问题就没人答得上了）。
+    /// **不碰 `expires_at`**——那是选路判据，估算值写进去会让账号两周后集体假红。
+    pub fn note_credential_rejected(&mut self, last_error: impl Into<String>) -> bool {
+        self.consecutive_rejections = self.consecutive_rejections.saturating_add(1);
+        self.last_error = Some(last_error.into());
+        self.updated_at = chrono::Utc::now().timestamp();
+        if self.consecutive_rejections < RELOGIN_REJECTION_THRESHOLD || !self.is_enabled() {
+            return false;
+        }
+        self.status = STATUS_NEEDS_RELOGIN.to_string();
+        // 提醒去重位随状态一起复位：C2 那条「即将到期」的提醒发过没发过，
+        // 都不构成「已经告诉用户要重新登录」的理由。不复位的话，凡是先收到
+        // 过期提醒、两天后果然死掉的账号（最常见的一条时间线）就**永远收不到
+        // C1 告警** —— 这正是要治的静默失效本身。
+        self.relogin_notified_at = None;
+        true
+    }
+
+    /// #35 C1：该不该为「已失效、需人工重登」发声（本轮尚未发过）。
+    pub fn relogin_required_pending(&self) -> bool {
+        self.needs_relogin() && self.relogin_notified_at.is_none()
+    }
+
+    /// 清掉「等人工重登」信号：拒绝计数归零，`needs_relogin` 回到 `enabled`。
+    ///
+    /// **只回滚本模块写过的状态**——人工停用（`disabled`）不在此复活。
+    /// 调用点：上游接受了一次请求（记成功）、凭据被换（重登成功）。
+    pub fn reset_relogin_signal(&mut self) {
+        self.consecutive_rejections = 0;
+        if self.needs_relogin() {
+            self.status = "enabled".to_string();
+        }
+    }
+
+    /// 本轮登录态到期提醒已发出（#35 C2 的去重位）。
+    pub fn mark_relogin_notified(&mut self, now: i64) {
+        self.relogin_notified_at = Some(now);
+    }
+
     /// 凭证是否已过期（`expires_at` 为 0 / None 视为不过期）。
     pub fn is_expired(&self, now: i64) -> bool {
         self.expires_at.is_some_and(|at| at > 0 && at <= now)
     }
 
-    /// 对外展示的运行态（`expired` / `disabled` / `enabled`）。
+    /// 对外展示的运行态（`expired` / `needs_relogin` / `disabled` / `enabled`）。
+    ///
+    /// `needs_relogin` 单独成值而不是并入 `disabled`（#35 契约：前端零特判，
+    /// 照此渲染徽标）：管理员看到的是「这把钥匙被上游拒了，去重登」，
+    /// 不是「我把号关了，谁开的？」。
     pub fn runtime_status(&self, now: i64) -> &'static str {
         if self.is_expired(now) {
             "expired"
+        } else if self.needs_relogin() {
+            STATUS_NEEDS_RELOGIN
         } else if !self.is_enabled() {
             "disabled"
         } else {
@@ -595,6 +756,186 @@ mod tests {
         assert_eq!(session.runtime_status(100), "expired");
         session.expires_at = None;
         assert_eq!(session.runtime_status(100), "enabled");
+    }
+
+    // ── #35 C1：不可续期家的「需人工重登」判定 ──────────────────────────
+
+    #[test]
+    fn new_account_defaults_to_enabled_without_relogin_state() {
+        // 「enabled 初值」+ 新字段零值：新建与存量行都必须落在可直接调度的态
+        let session = AccountSession::new("ch-1", "loomy-1");
+        assert_eq!(session.status, "enabled");
+        assert!(session.is_enabled());
+        assert!(!session.needs_relogin());
+        assert_eq!(session.consecutive_rejections, 0);
+        assert_eq!(session.logged_in_at, None);
+        assert_eq!(session.relogin_notified_at, None);
+        assert_eq!(session.runtime_status(1_700_000_000), "enabled");
+        // api_key 型默认 provider 不在确证寿命表里 → 没有到期锚点
+        assert_eq!(session.relogin_due_at(), None);
+    }
+
+    #[test]
+    fn legacy_row_deserializes_with_relogin_defaults() {
+        // 零迁移：#35 之前落盘的账号 JSON 没有这三个字段，读回来必须是
+        // 「未拒绝 / 无登录锚点」而不是 0 值 panic 或误判到期。
+        let session: AccountSession =
+            serde_json::from_str(r#"{"id":"a","channel_id":"c","provider":"loomy"}"#)
+                .expect("存量行应可反序列化");
+        assert_eq!(session.status, "enabled");
+        assert_eq!(session.consecutive_rejections, 0);
+        assert_eq!(session.logged_in_at, None);
+        assert_eq!(session.relogin_due_at(), None);
+        assert!(!session.relogin_reminder_pending(chrono::Utc::now().timestamp()));
+    }
+
+    #[test]
+    fn three_rejections_switch_to_needs_relogin_without_touching_expiry() {
+        let mut session = AccountSession::new("ch-1", "loomy-1");
+        session.provider = "loomy".to_string();
+        // 上游从不给 loomy 过期时间；这里给一个「远期」值验证 C1 不去改它
+        let before = Some(9_999_999_999);
+        session.expires_at = before;
+        assert!(!session.note_credential_rejected("upstream 401"));
+        assert!(!session.note_credential_rejected("upstream 401"));
+        assert!(
+            session.note_credential_rejected("upstream 403"),
+            "第 3 次应刚好翻转（返回 true 供调用方发一次告警）"
+        );
+        assert_eq!(session.status, STATUS_NEEDS_RELOGIN);
+        assert!(session.needs_relogin());
+        assert!(!session.is_enabled());
+        assert_eq!(session.consecutive_rejections, 3);
+        assert_eq!(session.last_error.as_deref(), Some("upstream 403"));
+        assert_eq!(session.expires_at, before, "C1 铁律：不改 expires_at");
+        assert_eq!(session.runtime_status(1_700_000_000), "needs_relogin");
+        // 已经翻转后再被拒：不重复发声（否则 401 风暴 = 告警风暴）
+        assert!(!session.note_credential_rejected("upstream 401"));
+        assert_eq!(session.status, STATUS_NEEDS_RELOGIN);
+    }
+
+    #[test]
+    fn two_rejections_stay_enabled_and_success_clears_them() {
+        // 「两次不触发」：阈值之下绝不改配置态（假阳性 = 把好账号踢出调度）
+        let mut session = AccountSession::new("ch-1", "loomy-1");
+        session.provider = "loomy".to_string();
+        assert!(!session.note_credential_rejected("upstream 401"));
+        assert!(!session.note_credential_rejected("upstream 401"));
+        assert_eq!(session.status, "enabled");
+        assert_eq!(session.consecutive_rejections, 2);
+        // 上游又认了 → 连续计数归零（与 consecutive_errors 同口径），
+        // 抖动两场 401 的账号不会累计成「死了」
+        session.reset_relogin_signal();
+        assert_eq!(session.consecutive_rejections, 0);
+        assert_eq!(session.status, "enabled");
+        assert!(!session.note_credential_rejected("upstream 401"));
+        assert!(!session.note_credential_rejected("upstream 401"));
+        assert_eq!(session.status, "enabled");
+    }
+
+    #[test]
+    fn relogin_state_is_reset_and_selection_returns() {
+        // 「重登恢复 enabled」：换了凭据之后必须回到 enabled（否则新钥匙
+        // 仍被选路排除，管理员只能看到「需要重登」却已经登过了）
+        let mut session = AccountSession::new("ch-1", "loomy-1");
+        session.provider = "loomy".to_string();
+        for _ in 0..3 {
+            session.note_credential_rejected("upstream 401");
+        }
+        assert!(session.needs_relogin());
+        session.reset_relogin_signal();
+        assert_eq!(session.status, "enabled");
+        assert!(!session.needs_relogin());
+        assert_eq!(session.consecutive_rejections, 0);
+    }
+
+    #[test]
+    fn manual_disable_is_not_resurrected_by_rejections_or_reset() {
+        // 人工停用 / 已判过期是**更强的既有事实**，C1 不覆盖（否则「谁关的号」
+        // 这类问题从此没人答得上）
+        let mut session = AccountSession::new("ch-1", "loomy-1");
+        session.provider = "loomy".to_string();
+        session.status = "disabled".to_string();
+        for _ in 0..5 {
+            assert!(!session.note_credential_rejected("upstream 401"));
+        }
+        assert_eq!(session.status, "disabled");
+        session.reset_relogin_signal();
+        assert_eq!(session.status, "disabled", "重置只回滚本模块写的状态");
+        assert_eq!(session.consecutive_rejections, 0);
+    }
+
+    // ── #35 C2：固定寿命上游的到期前提醒 ────────────────────────────────
+
+    const DAY: i64 = 24 * 3600;
+
+    fn loomy_logged_in_days_ago(now: i64, days: i64) -> AccountSession {
+        let mut session = AccountSession::new("ch-1", "loomy-1");
+        session.provider = "loomy".to_string();
+        session.logged_in_at = Some(now - days * DAY);
+        session
+    }
+
+    #[test]
+    fn relogin_reminder_fires_in_the_last_three_days() {
+        let now = 1_700_000_000;
+        // 已登 12 天（剩 2 天）→ 命中
+        let hit = loomy_logged_in_days_ago(now, 12);
+        assert_eq!(hit.relogin_due_at(), Some(now - 12 * DAY + 14 * DAY));
+        assert!(hit.relogin_reminder_pending(now), "到期前 3 天内应提醒");
+        // 正好提前 3 天的边界（含）→ 命中
+        assert!(loomy_logged_in_days_ago(now, 11).relogin_reminder_pending(now));
+        // 已登 10 天（剩 4 天）→ 不命中
+        assert!(
+            !loomy_logged_in_days_ago(now, 10).relogin_reminder_pending(now),
+            "窗口外不该提醒"
+        );
+        // 已过期 → 不靠算术断定，交给 C1 的上游实证链
+        assert!(!loomy_logged_in_days_ago(now, 15).relogin_reminder_pending(now));
+    }
+
+    #[test]
+    fn relogin_reminder_is_notified_once_per_login() {
+        // 「已确认不再发」：提醒发出后本轮登录态不再重复发
+        let now = 1_700_000_000;
+        let mut session = loomy_logged_in_days_ago(now, 12);
+        assert!(session.relogin_reminder_pending(now));
+        session.mark_relogin_notified(now);
+        assert!(!session.relogin_reminder_pending(now), "已提醒过不该再发");
+        // 再往后的窗口内也不发（去重位是持久化的，跨重启同样有效）
+        assert!(!session.relogin_reminder_pending(now + DAY));
+        // 重登：logged_in_at 刷新 + 去重位清空 → 下一轮到期重新计入
+        session.logged_in_at = Some(now + DAY);
+        session.relogin_notified_at = None;
+        assert!(!session.relogin_reminder_pending(now + DAY), "刚重登不该催");
+        let later = now + DAY + 12 * DAY;
+        assert!(
+            session.relogin_reminder_pending(later),
+            "新一轮到期应重新提醒"
+        );
+    }
+
+    #[test]
+    fn relogin_reminder_requires_confirmed_ttl_only() {
+        // 表外的家（含其它 session 型供应商）没有确证寿命 → 永不出到期提醒。
+        // 这条是 lead 红线：估算值会让两周后集体假红。
+        let now = 1_700_000_000;
+        for provider in ["openai", "deepseek_web", "kimi", "codearts"] {
+            let mut session = AccountSession::new("ch-1", provider);
+            session.provider = provider.to_string();
+            session.logged_in_at = Some(now - 13 * DAY);
+            assert_eq!(
+                session.relogin_due_at(),
+                None,
+                "{provider} 不在确证寿命表里"
+            );
+            assert!(
+                !session.relogin_reminder_pending(now),
+                "{provider} 不该提醒"
+            );
+        }
+        assert_eq!(relogin_ttl_secs("loomy"), Some(14 * DAY));
+        assert_eq!(relogin_ttl_secs("openai"), None);
     }
 
     /// 限制规则白名单：合法形态放行，类型/动作/阈值/周期越界各自挡下。

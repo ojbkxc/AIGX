@@ -71,6 +71,14 @@ pub enum AlertKind {
     AbnormalTraffic,
     /// 成本环比增幅（%）
     CostAnomaly,
+    /// 账号登录态已被上游连续拒绝，需人工重新登录（#35 C1）。
+    ///
+    /// 只给**不可自动续期**的家（loomy / deepseek_web / kuku 这类
+    /// `!supports_refresh`）——可续期家走 `mark_credential_rejected` 的刷新链，
+    /// 不该出现在「等人来登」的面板上。
+    AccountReloginRequired { account_id: String },
+    /// 账号登录态即将到期（固定寿命上游，提前 3 天提醒；#35 C2）。
+    AccountReloginSoon { account_id: String },
 }
 
 impl std::fmt::Display for AlertKind {
@@ -92,6 +100,12 @@ impl std::fmt::Display for AlertKind {
             }
             AlertKind::AbnormalTraffic => write!(f, "AbnormalTraffic"),
             AlertKind::CostAnomaly => write!(f, "CostAnomaly"),
+            AlertKind::AccountReloginRequired { account_id } => {
+                write!(f, "AccountReloginRequired({account_id})")
+            }
+            AlertKind::AccountReloginSoon { account_id } => {
+                write!(f, "AccountReloginSoon({account_id})")
+            }
         }
     }
 }
@@ -338,6 +352,54 @@ impl AlertRuleEvaluator {
         Some(alert)
     }
 
+    /// 事件型告警：不经阈值规则，由触发方直接给文案（#35 登录态提醒链）。
+    ///
+    /// 与 [`Self::evaluate`] 的三点区别：
+    /// 1. **不查 `rules`**——登录态提醒不是「指标越限」，不该要求管理员先建
+    ///    规则才生效（默认规则集里没有这两类 kind；若仍走 `evaluate`，#35 的
+    ///    提醒会在出厂状态下静默失效）；
+    /// 2. `message` 由调用方给定（只有触发方知道账号名等上下文）；
+    /// 3. 只写**站内**告警面（`active_alerts` + `history`），**不经 NotifyService
+    ///    分发**——lead 约束「C2 提醒走站内通知，别动 Telegram/Email/Slack/
+    ///    Webhook 那 4 个渠道」，所以这里刻意不调 notify 链。
+    ///
+    /// 去重：同 key 在 `silence_secs` 窗口内重复调用返回 `None`（不叠加、不
+    /// 刷历史）。跨进程的持久化去重位在 `AccountSession::relogin_notified_at`
+    /// （#35 C2），这里的静默只是「一轮风暴内不刷屏」的兜底。
+    pub fn raise_event(
+        &mut self,
+        kind: &AlertKind,
+        level: AlertLevel,
+        message: String,
+        silence_secs: u64,
+    ) -> Option<Alert> {
+        let alert_key = kind.to_string();
+        let now = Utc::now().timestamp();
+        if let Some(existing) = self.active_alerts.get(&alert_key) {
+            if now - existing.triggered_at < silence_secs as i64 {
+                return None;
+            }
+        }
+        let alert = Alert {
+            id: Uuid::new_v4().to_string(),
+            kind: kind.clone(),
+            level,
+            status: AlertStatus::Active,
+            message,
+            triggered_at: now,
+            resolved_at: None,
+            trigger_count: self
+                .active_alerts
+                .get(&alert_key)
+                .map(|a| a.trigger_count + 1)
+                .unwrap_or(1),
+        };
+        self.active_alerts.insert(alert_key, alert.clone());
+        self.history.insert(0, alert.clone());
+        self.history.truncate(ALERT_HISTORY_LIMIT);
+        Some(alert)
+    }
+
     /// 评估并自动恢复：值回到阈值以下时解决该活跃告警（08-prod P2-5）。
     ///
     /// 此前巡检只触发不恢复——渠道延迟降回正常（或渠道不再被调用、拿不到
@@ -423,6 +485,15 @@ impl AlertRuleEvaluator {
                 format!("异常流量 {current} req/min（阈值 {threshold}）")
             }
             AlertKind::CostAnomaly => format!("成本异常增长 {current}%（阈值 {threshold}%）"),
+            // 事件型告警（#35）：不走阈值规则，文案由触发方经
+            // [`AlertRuleEvaluator::raise_event`] 传入；这里只是兜底
+            // （万一有人给这两个 kind 配了阈值规则也不会漏臂）。
+            AlertKind::AccountReloginRequired { account_id } => {
+                format!("账号 {account_id} 登录态已被上游拒绝 {current} 次，需重新登录")
+            }
+            AlertKind::AccountReloginSoon { account_id } => {
+                format!("账号 {account_id} 登录态即将到期，请提前重新登录")
+            }
         }
     }
 
@@ -578,6 +649,73 @@ mod tests {
             ev.evaluate(&AlertKind::QueueBacklog, 5);
         }
         assert_eq!(ev.history().len(), ALERT_HISTORY_LIMIT);
+    }
+
+    #[test]
+    fn raise_event_triggers_without_any_matching_rule() {
+        // #35：默认规则集里没有登录态这两类 kind——事件型提醒必须照样能落地
+        // （否则出厂状态下「不可续期家凭据被连续拒绝」的提醒静默失效）。
+        let mut ev = AlertRuleEvaluator::new(AlertRule::defaults());
+        assert!(ev.rules().iter().all(|r| !matches!(
+            r.kind,
+            AlertKind::AccountReloginRequired { .. } | AlertKind::AccountReloginSoon { .. }
+        )));
+        let k = AlertKind::AccountReloginRequired {
+            account_id: "loomy-1".into(),
+        };
+        let alert = ev
+            .raise_event(&k, AlertLevel::Warning, "账号 loomy-1 需重新登录".into(), 0)
+            .expect("无规则也应触发");
+        assert_eq!(alert.level, AlertLevel::Warning);
+        assert_eq!(alert.status, AlertStatus::Active);
+        assert_eq!(alert.trigger_count, 1);
+        assert_eq!(ev.active_alerts().len(), 1);
+        assert_eq!(ev.history().len(), 1);
+    }
+
+    #[test]
+    fn raise_event_silences_duplicates_within_window() {
+        // 静默窗口内重复 raise → None（不刷历史、不叠加计数）；窗口外再次触发
+        // → trigger_count 递增（沿用 evaluate 的计数口径）。
+        let mut ev = AlertRuleEvaluator::new(vec![]);
+        let k = AlertKind::AccountReloginSoon {
+            account_id: "loomy-1".into(),
+        };
+        assert!(ev
+            .raise_event(&k, AlertLevel::Warning, "a".into(), 3600)
+            .is_some());
+        assert!(
+            ev.raise_event(&k, AlertLevel::Warning, "b".into(), 3600)
+                .is_none(),
+            "静默期内应压制"
+        );
+        assert_eq!(ev.active_alerts().len(), 1);
+        assert_eq!(ev.history().len(), 1);
+        // 静默期 0 = 每轮都可再触发
+        let again = ev
+            .raise_event(&k, AlertLevel::Warning, "c".into(), 0)
+            .expect("静默期外应再触发");
+        assert_eq!(again.trigger_count, 2);
+    }
+
+    #[test]
+    fn raise_event_resolved_allows_new_instance() {
+        // 「已处理（解决）」后再到期提醒应能重新落地：resolve 移出 active，
+        // 下一次 raise 的 key 不再命中静默判断。
+        let mut ev = AlertRuleEvaluator::new(vec![]);
+        let k = AlertKind::AccountReloginSoon {
+            account_id: "loomy-2".into(),
+        };
+        ev.raise_event(&k, AlertLevel::Warning, "a".into(), 86_400)
+            .unwrap();
+        assert!(ev
+            .raise_event(&k, AlertLevel::Warning, "b".into(), 86_400)
+            .is_none());
+        assert!(ev.resolve(&k).is_some());
+        let after = ev
+            .raise_event(&k, AlertLevel::Warning, "c".into(), 86_400)
+            .expect("已解决后应能再提醒");
+        assert_eq!(after.trigger_count, 1);
     }
 
     #[test]

@@ -814,6 +814,26 @@ async fn main() -> anyhow::Result<()> {
                 }),
             });
         }
+        // 登录态提醒巡检（#35）：把「需要人工重登」这件事送到站内告警面。
+        // 刻意与数据面解耦 —— 每次 401 都要过的路径不顺手拿告警锁（性能红线），
+        // 逐出选路是即时的，这里只负责让人看见（≤一个周期的延迟）。
+        // 只写告警中心（active + history），不经 NotifyService，那 4 个渠道不动。
+        {
+            let sessions = state.account_sessions.clone();
+            let alerts = state.alert_evaluator.clone();
+            scheduler.spawn(cron::TaskSpec {
+                name: "account-session-relogin-notice",
+                interval: Duration::from_secs(300),
+                first_run_delay: Duration::from_secs(45),
+                run: Box::new(move || {
+                    let pool = sessions.clone();
+                    let alerts = alerts.clone();
+                    Box::pin(async move {
+                        crate::account_session::maintenance::check_relogin(&pool, &alerts)
+                    })
+                }),
+            });
+        }
         // models.dev 元数据目录刷新 / 服务器自动更新检查：已迁入 scheduled_tasks
         // 间隔型定时任务循环（见 `scheduled_tasks::spawn`），开关与间隔在「定时任务」页可配。
         // 服务器自动更新检查：已迁入 scheduled_tasks 间隔型定时任务循环
@@ -998,7 +1018,7 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         tracing::info!(
-            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-usage-query, log-retention-sweep, daily-agg-backfill, subscription-expire-reset)",
+            "cron scheduler started: {} task(s) (session-registry-sweep, reservation-sweep, health-archive-flush, account-session-sweep, account-session-usage-query, account-session-relogin-notice, log-retention-sweep, daily-agg-backfill, subscription-expire-reset)",
             scheduler.task_count()
         );
     }

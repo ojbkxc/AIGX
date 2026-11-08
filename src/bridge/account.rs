@@ -373,14 +373,29 @@ impl AccountBridge {
         if matches!(
             failure,
             crate::channel::circuit_breaker::FailureType::AuthFailed
-        ) && self
-            .sessions
-            .mark_credential_rejected(lease.id(), &lease.session().provider)
-        {
-            tracing::info!(
-                "account {} credential rejected upstream; queued for refresh",
-                lease.id()
-            );
+        ) {
+            let provider = lease.session().provider.as_str();
+            if self.sessions.mark_credential_rejected(lease.id(), provider) {
+                tracing::info!(
+                    "account {} credential rejected upstream; queued for refresh",
+                    lease.id()
+                );
+            } else if !crate::account_session::refresh::supports_refresh(provider)
+                // 不可自动续期的家（loomy 这类短信登录态）：没有刷新链可走，
+                // 再撞下去只是白耗上游配额 + 让面板假装一切正常。连续三次
+                // 就把账号转 `needs_relogin` 并逐出选路（#35 C1）；站内告警由
+                // `account_session::maintenance::check_relogin` 发（热路径不
+                // 碰告警器：这里每请求都过，性能红线）。
+                && self.sessions.record_credential_rejection(
+                    lease.id(),
+                    &format!("upstream rejected credential (401/403): {error}"),
+                )
+            {
+                tracing::warn!(
+                    "account {} credential rejected repeatedly by a non-refreshable provider; marked needs_relogin",
+                    lease.id()
+                );
+            }
         }
         crate::api::openai::is_retryable_bridge_error(error)
     }

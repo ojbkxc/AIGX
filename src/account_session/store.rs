@@ -79,6 +79,12 @@ pub struct SkipReasons {
     pub no_accounts: bool,
     /// 状态禁用
     pub disabled: usize,
+    /// 登录态被上游连续拒绝，需人工重新登录（#35 C1）。
+    ///
+    /// **刻意与 `disabled` 分开**：那档的恢复动作是「重新启用」，这档的恢复
+    /// 动作是「重新登录」——混成一个数，502 文案就会把人指向一个点了没用
+    /// 的开关。
+    pub needs_relogin: usize,
     /// provider 被整家关停（模型管理规则 / 插件面闸门）
     pub provider_off: usize,
     /// 凭证已过期
@@ -109,6 +115,9 @@ impl SkipReasons {
         let mut parts: Vec<String> = Vec::new();
         if self.disabled > 0 {
             parts.push(format!("{} 个已禁用", self.disabled));
+        }
+        if self.needs_relogin > 0 {
+            parts.push(format!("{} 个需重新登录", self.needs_relogin));
         }
         if self.provider_off > 0 {
             parts.push(format!("{} 个 provider 被关停", self.provider_off));
@@ -423,6 +432,26 @@ impl AccountSessionStore {
         } else {
             next.provider = super::registry::normalize_kind(&next.provider);
         }
+        // 换凭据 = 重登（管理面粘贴新钥匙 / 各家登录流程覆盖同一行）：
+        // 「等人工重登」信号必须清零，否则新钥匙仍背着 `needs_relogin`，
+        // 账号白登一次还是不进调度（#35 C1「重登恢复 enabled」）；登录锚点
+        // 也在这里刷新（#35 C2 的到期提醒以它为起点重新计时）。
+        // 只比**明文**：密文每次 upsert 都带新 nonce 重加密，比密文会把
+        // 「只改名字」的编辑误判成换凭据。
+        let credential_replaced = {
+            let sessions = self.inner.sessions.read();
+            sessions
+                .iter()
+                .find(|s| s.id == next.id)
+                .is_some_and(|slot| {
+                    slot.credential.secret_plain() != next.credential.secret_plain()
+                })
+        };
+        if credential_replaced {
+            next.reset_relogin_signal();
+            next.logged_in_at = Some(now);
+            next.relogin_notified_at = None;
+        }
         self.persist(&next)?;
         {
             let mut sessions = self.inner.sessions.write();
@@ -636,6 +665,16 @@ impl AccountSessionStore {
                 continue;
             }
             in_channel += 1;
+            // 需人工重登的账号先单独计档再跳过（#35 C1）。放在 `is_enabled`
+            // 之前：那种态的 `is_enabled()` 同样是 false，混进 `disabled` 档
+            // 会把「去重登」的人引到「重新启用」按钮上。
+            if session.needs_relogin() {
+                reasons.needs_relogin += 1;
+                if let Some(cap) = detail.as_mut() {
+                    cap.push(self.skip_detail(session, "needs_relogin"));
+                }
+                continue;
+            }
             if !session.is_enabled() {
                 reasons.disabled += 1;
                 if let Some(cap) = detail.as_mut() {
@@ -780,14 +819,22 @@ impl AccountSessionStore {
 
     /// 记入一次成功（清该模型冷却、累计延迟）。
     pub fn record_success(&self, id: &str, model: &str, latency_ms: u64) {
-        let snapshot = {
+        let (snapshot, status_changed) = {
             let mut sessions = self.inner.sessions.write();
             let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
                 return;
             };
+            // 只有「本来在等重登」才需要关注状态变化——用布尔而不是克隆
+            // status 字符串：这是每请求一次的热路径（性能红线）。
+            let was_relogin = session.needs_relogin();
             session.success_count = session.success_count.saturating_add(1);
             session.total_latency_ms = session.total_latency_ms.saturating_add(latency_ms);
             session.consecutive_errors = 0;
+            // 上游认了这把钥匙 → 「等人工重登」信号作废（#35 C1）。正常路径下
+            // needs_relogin 的账号已经不进选号、走不到这里；留这一手是给
+            // 「人工置回 enabled 后真跑通了」与旁路直调（余额/测试链）收尾，
+            // 顺带把连续拒绝计数清零 —— 否则攒够三次就又翻回 needs_relogin。
+            session.reset_relogin_signal();
             // 清该模型冷却；整号冷却也一并清掉 —— 账号既然成功响应，
             // 之前的账号级限流/认证失败窗口已经过去，继续挂着只会白白
             // 让账号退出调度。
@@ -797,9 +844,18 @@ impl AccountSessionStore {
                 .remove(crate::account_session::model::ACCOUNT_WIDE_COOLDOWN);
             session.last_error = None;
             session.updated_at = chrono::Utc::now().timestamp();
-            session.clone()
+            (session.clone(), was_relogin)
         };
-        self.persist_throttled(&snapshot);
+        // 状态从 needs_relogin 翻回 enabled 是一次**配置态**变更，必须立即落盘：
+        // 节流窗口内崩掉会让内存与 KV 分叉（KV 还写着 needs_relogin，
+        // 重启后账号又被踢出调度，而人已经在管理面看到它「正常」了）。
+        if status_changed {
+            if let Err(e) = self.persist(&snapshot) {
+                tracing::warn!("persist account session {} after success: {e}", snapshot.id);
+            }
+        } else {
+            self.persist_throttled(&snapshot);
+        }
     }
 
     /// 记入一次失败（按失败类型冷却），返回冷却秒数。
@@ -925,11 +981,83 @@ impl AccountSessionStore {
                 return false;
             };
             session.status = status.to_string();
+            // 管理员手动置回 enabled = 「我已经处理过了」（重登 / 确认无碍）。
+            // 不顺手清零连续拒绝计数的话，下一次 401 会**立刻**把它又打回
+            // needs_relogin（计数还停在阈值上），这个手动入口就成了空按钮。
+            if status == "enabled" {
+                session.consecutive_rejections = 0;
+                session.relogin_notified_at = None;
+            }
             session.updated_at = chrono::Utc::now().timestamp();
             session.clone()
         };
         if let Err(e) = self.persist(&snapshot) {
             tracing::warn!("persist account session {} status: {e}", snapshot.id);
+        }
+        true
+    }
+
+    /// 上游拒了这枚凭据（401/403），且该家**不可自动续期**（#35 C1）。
+    ///
+    /// 按账号累计连续拒绝次数，达到
+    /// [`super::model::RELOGIN_REJECTION_THRESHOLD`] 就把配置态转成
+    /// [`super::model::STATUS_NEEDS_RELOGIN`]：账号立刻退出选路（跳过原因
+    /// 单列一档，不混进 `disabled`），并由提醒巡检（`maintenance::check_relogin`）
+    /// 发一次站内告警。
+    ///
+    /// 口径与既有刷新链的分工：可自动续期的家**不该调这里**（那是
+    /// [`Self::mark_credential_rejected`] 的活），调用点在
+    /// `bridge::account::note_failure`，按 `refresh::supports_refresh` 分流。
+    ///
+    /// **不改 `expires_at`**：那是调度判据，我们手上没有上游给的真过期时间，
+    /// 写估算值等于两周后集体假红（lead 红线）。
+    ///
+    /// 返回是否**本次刚**转成 `needs_relogin`（`false` = 仍在计数 / 已在该态 /
+    /// 账号不存在）——告警由提醒巡检发，这里不重复发声。
+    pub fn record_credential_rejection(&self, id: &str, message: &str) -> bool {
+        let (snapshot, flipped) = {
+            let mut sessions = self.inner.sessions.write();
+            let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
+                return false;
+            };
+            // 已在该态：不再计数也不再写盘（401 风暴下这是每请求一次的热路径，
+            // 一次多余 put 就是一整份 KV 重写）
+            if session.needs_relogin() {
+                return false;
+            }
+            // 先改后拷：snapshot 必须带上本次计数的结果（顺序反了就把
+            // 「第 3 次撞墙」这件事丢在内存里没落盘）
+            let flipped = session.note_credential_rejected(message);
+            (session.clone(), flipped)
+        };
+        // 计数也要落盘（节流）：只写内存的话重启就把「已经撞了两次」忘掉，
+        // 阈值永远数不满 —— 静默失效比吵一点更糟。
+        if flipped {
+            if let Err(e) = self.persist(&snapshot) {
+                tracing::warn!("persist account session {} relogin: {e}", snapshot.id);
+            }
+        } else {
+            self.persist_throttled(&snapshot);
+        }
+        flipped
+    }
+
+    /// 标记「本轮登录态的重登提醒已发过」（#35 C2 去重位）。返回是否命中账号。
+    pub fn mark_relogin_notified(&self, id: &str, now: i64) -> bool {
+        let snapshot = {
+            let mut sessions = self.inner.sessions.write();
+            let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
+                return false;
+            };
+            session.mark_relogin_notified(now);
+            session.updated_at = now;
+            session.clone()
+        };
+        if let Err(e) = self.persist(&snapshot) {
+            tracing::warn!(
+                "persist account session {} relogin notice: {e}",
+                snapshot.id
+            );
         }
         true
     }
@@ -1015,6 +1143,8 @@ impl AccountSessionStore {
     ///
     /// 只对**支持续期**的 provider 生效：不可续期的家（如纯 Key 类）被标记后
     /// 除重新登录/粘贴外无法自愈，那属于另一套语义，不在这里顺手改掉。
+    /// ——「另一套语义」现已落地为 [`Self::record_credential_rejection`]
+    /// （#35 C1：连续拒绝 → `needs_relogin`），分流点在 `bridge::account`。
     ///
     /// 返回是否真的标了（provider 不支持续期 / 账号不存在时为 false）。
     pub fn mark_credential_rejected(&self, id: &str, provider: &str) -> bool {
@@ -1301,10 +1431,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(mixed.summary(), "2 个冷却中、1 个余额低于阈值");
-        // 顺序稳定（禁用 → provider → 过期 → 白名单 → 能力 → 名单 → 冷却 → 余额 → 限制 → 并发）
+        // 顺序稳定（禁用 → 需重登 → provider → 过期 → 白名单 → 能力 → 名单 → 冷却 → 余额 → 限制 → 并发）
         let full = SkipReasons {
             no_accounts: false,
             disabled: 1,
+            needs_relogin: 1,
             provider_off: 1,
             expired: 1,
             model_mismatch: 1,
@@ -1317,7 +1448,7 @@ mod tests {
         };
         assert_eq!(
             full.summary(),
-            "1 个已禁用、1 个 provider 被关停、1 个凭证过期、1 个不在模型白名单、1 个不支持请求能力、1 个被参与名单排除、1 个冷却中、1 个余额低于阈值、1 个被限制规则拦截、1 个并发占满"
+            "1 个已禁用、1 个需重新登录、1 个 provider 被关停、1 个凭证过期、1 个不在模型白名单、1 个不支持请求能力、1 个被参与名单排除、1 个冷却中、1 个余额低于阈值、1 个被限制规则拦截、1 个并发占满"
         );
     }
 
@@ -2033,6 +2164,178 @@ mod tests {
             let plain = pool.upsert(session("ch", "plain", 0)).unwrap();
             assert!(!pool.mark_credential_rejected(&plain.id, "openai"));
             assert_eq!("enabled", pool.get(&plain.id).unwrap().status);
+        });
+    }
+
+    /// #35 C1 —— 三次撞墙才转态，期间 `expires_at` 一个字节都不动。
+    #[test]
+    fn credential_rejection_threshold_sets_needs_relogin() {
+        with_secret_dir("relogin-threshold", || {
+            let pool = pool();
+            let mut account = session("ch", "loomy-acct", 0);
+            account.provider = "loomy".to_string();
+            account.expires_at = Some(chrono::Utc::now().timestamp() + 3_600);
+            let account = pool.upsert(account).unwrap();
+            assert_eq!("enabled", account.status, "新建账号的初值是 enabled");
+
+            // 两次不触发：只是计数，选路照常
+            assert!(!pool.record_credential_rejection(&account.id, "upstream 401"));
+            assert!(!pool.record_credential_rejection(&account.id, "upstream 401"));
+            let mid = pool.get(&account.id).unwrap();
+            assert_eq!("enabled", mid.status, "没到阈值不该动状态");
+            assert_eq!(2, mid.consecutive_rejections);
+            assert!(pool.acquire("ch", "m", None).is_some(), "计数中不该逐出");
+
+            // 第三次触发
+            assert!(pool.record_credential_rejection(&account.id, "upstream 403"));
+            let after = pool.get(&account.id).unwrap();
+            assert!(after.needs_relogin());
+            // lead 红线：不写估算 expires_at —— 转态靠 status，不靠伪造到期
+            assert_eq!(after.expires_at, account.expires_at);
+            assert!(after
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("403")));
+
+            // 已在该态：不重复计数、不重复返回 true（401 风暴下每请求一次，
+            // 一次多余的 true 就是一条重复告警、一次多余的全份 KV 重写）
+            assert!(!pool.record_credential_rejection(&account.id, "upstream 401"));
+            assert_eq!(3, pool.get(&account.id).unwrap().consecutive_rejections);
+            // 不存在的账号：静默 false，不 panic
+            assert!(!pool.record_credential_rejection("nope", "upstream 401"));
+        });
+    }
+
+    /// #35 C1 —— 逐出选路，且跳过原因**单列一档**（不混进 `disabled`）。
+    #[test]
+    fn needs_relogin_account_is_skipped_with_its_own_reason() {
+        with_secret_dir("relogin-skip", || {
+            let pool = pool();
+            let mut dead = session("ch", "dead", 0);
+            dead.provider = "loomy".to_string();
+            let dead_id = pool.upsert(dead).unwrap().id.clone();
+            // 人工停用的账号作对照组：两档必须分得开
+            let off = pool.upsert(session("ch", "off", 0)).unwrap();
+            pool.set_status(&off.id, "disabled");
+            for _ in 0..3 {
+                pool.record_credential_rejection(&dead_id, "upstream 401");
+            }
+
+            // 渠道里只剩这两个，都进不了候选
+            let (lease, reasons) = pool.acquire_with_reasons("ch", "m", None, |_| true);
+            assert!(lease.is_none());
+            assert_eq!(reasons.needs_relogin, 1, "需重登单独计一档");
+            assert_eq!(reasons.disabled, 1, "别把需重登算进已禁用");
+            let text = reasons.summary();
+            assert!(text.contains("需重新登录"), "502 文案要能指对动作：{text}");
+            assert!(text.contains("已禁用"), "{text}");
+            // 不参与选号计数：被过滤掉的账号不尝试、不计错（P1-1 口径）
+            assert_eq!(pool.get(&dead_id).unwrap().error_count, 0);
+        });
+    }
+
+    /// #35 C1/C2 —— 换凭据（重登）把状态、计数、提醒位、锚点一起复位。
+    #[test]
+    fn relogin_state_resets_when_credential_replaced() {
+        with_secret_dir("relogin-recover", || {
+            let pool = pool();
+            let mut account = session("ch", "loomy-acct", 0);
+            account.provider = "loomy".to_string();
+            account.logged_in_at = Some(chrono::Utc::now().timestamp() - 12 * 86_400);
+            account.relogin_notified_at = Some(chrono::Utc::now().timestamp() - 60);
+            let mut account = pool.upsert(account).unwrap();
+            for _ in 0..3 {
+                pool.record_credential_rejection(&account.id, "upstream 401");
+            }
+            assert!(pool.get(&account.id).unwrap().needs_relogin());
+
+            // 人工置回 enabled：计数与提醒位一起清（否则下个 401 立刻打回原形，
+            // 这个入口就成了空按钮）
+            assert!(pool.set_status(&account.id, "enabled"));
+            let back = pool.get(&account.id).unwrap();
+            assert_eq!("enabled", back.status);
+            assert_eq!(0, back.consecutive_rejections);
+            assert!(back.relogin_notified_at.is_none());
+
+            // 真重登（同一行换新钥匙）：状态回 enabled + 锚点刷新 + 提醒重新计入
+            for _ in 0..3 {
+                pool.record_credential_rejection(&account.id, "upstream 401");
+            }
+            account = pool.get(&account.id).unwrap();
+            account.credential.secret = "sk-brand-new".to_string();
+            let renewed = pool.upsert(account).unwrap();
+            assert_eq!("enabled", renewed.status, "换了钥匙就该重新进调度");
+            assert_eq!(0, renewed.consecutive_rejections);
+            assert!(renewed.relogin_notified_at.is_none(), "到期提醒重新计入");
+            assert!(renewed
+                .logged_in_at
+                .is_some_and(|at| at >= chrono::Utc::now().timestamp() - 5));
+            assert!(pool.acquire("ch", "m", None).is_some());
+
+            // 只改名字（凭据没换）不该被当成重登
+            let mut rename = pool.get(&renewed.id).unwrap();
+            for _ in 0..3 {
+                pool.record_credential_rejection(&rename.id, "upstream 401");
+            }
+            rename = pool.get(&renewed.id).unwrap();
+            rename.name = "renamed".to_string();
+            let kept = pool.upsert(rename).unwrap();
+            assert!(
+                kept.needs_relogin(),
+                "密文每轮 upsert 都重加密，比明文才不会被误判成换钥匙"
+            );
+        });
+    }
+
+    /// #35 C1 —— 上游认了这把钥匙（记成功）就退出需重登态，且立即落盘。
+    #[test]
+    fn success_returns_needs_relogin_account_to_rotation() {
+        with_secret_dir("relogin-success", || {
+            let pool = pool();
+            let mut account = session("ch", "loomy-acct", 0);
+            account.provider = "loomy".to_string();
+            let account = pool.upsert(account).unwrap();
+            for _ in 0..3 {
+                pool.record_credential_rejection(&account.id, "upstream 401");
+            }
+            // 旁路直调（余额/测试链）跑通了：状态与计数一起复位
+            pool.record_success(&account.id, "m", 10);
+            let after = pool.get(&account.id).unwrap();
+            assert_eq!("enabled", after.status);
+            assert_eq!(0, after.consecutive_rejections);
+            assert!(after.last_error.is_none());
+            // 人工停用过的账号不被成功复活
+            pool.set_status(&account.id, "disabled");
+            pool.record_success(&account.id, "m", 10);
+            assert_eq!("disabled", pool.get(&account.id).unwrap().status);
+        });
+    }
+
+    /// #35 C1/C2 —— 计数与锚点必须落盘：重启把「已经撞了两次」忘掉的话，
+    /// 阈值永远数不满；提醒去重位丢在内存里的话，重启就再喊一遍。
+    #[test]
+    fn relogin_state_survives_restart() {
+        with_secret_dir("relogin-restart", || {
+            let dir = TempDir::new().unwrap();
+            let store = Arc::new(FileStore::new(dir.path().to_path_buf()));
+            let pool = AccountSessionStore::new(Arc::clone(&store));
+            let mut account = session("ch", "loomy-acct", 0);
+            account.provider = "loomy".to_string();
+            account.logged_in_at = Some(chrono::Utc::now().timestamp() - 11 * 86_400);
+            let account = pool.upsert(account).unwrap();
+            assert!(pool.record_credential_rejection(&account.id, "upstream 401"));
+            assert!(pool.mark_relogin_notified(&account.id, chrono::Utc::now().timestamp()));
+
+            // 模拟重启：同一份 KV 再开一个池
+            let reopened = AccountSessionStore::new(store);
+            let loaded = reopened.get(&account.id).unwrap();
+            assert_eq!(1, loaded.consecutive_rejections, "计数没落盘就会白撞");
+            assert_eq!(account.logged_in_at, loaded.logged_in_at);
+            assert!(loaded.relogin_notified_at.is_some());
+            // 第三次拒绝在重启后仍然数得满
+            assert!(reopened.record_credential_rejection(&account.id, "upstream 401"));
+            assert!(reopened.record_credential_rejection(&account.id, "upstream 401"));
+            assert!(reopened.get(&account.id).unwrap().needs_relogin());
         });
     }
 

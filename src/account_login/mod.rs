@@ -578,6 +578,11 @@ fn persist_account(
     session.extra_headers = creds.extra_headers;
     session.expires_at = creds.expires_at;
     session.refresh_secret = refresh_token;
+    // 登录锚点（#35 C2）：落盘即「这一次登录成功」的时刻，到期提醒按它算。
+    // 上游不给过期时间也不给 refresh token 的家（loomy）没有别的地方能知道
+    // 「这把钥匙是哪天领的」，而 `expires_at` 只有上游给了真值才写 ——
+    // 估算值绝不进 `expires_at`（那是调度判据，假值会让账号集体假红）。
+    session.logged_in_at = Some(chrono::Utc::now().timestamp());
     if session.name.trim().is_empty() {
         let count = sessions.for_channel(&channel.id).len();
         session.name = format!("{}#{}", label_of(provider), count + 1);
