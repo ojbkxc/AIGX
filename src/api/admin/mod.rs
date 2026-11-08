@@ -40,6 +40,7 @@ pub mod tickets;
 pub mod tokens;
 pub mod update;
 pub mod upgrade; // 数据升级端点（对照 Agent2API /api/upgrade）
+pub mod user_tools; // 用户工具策略管理面（#34 §5.1：GET/PUT policy + GET catalog）
 pub mod users; // 网络层管理模块
 pub mod zcode_captcha; // ZCode 人机验证令牌池（对照 Agent2API /api/zcode/captcha*）
 
