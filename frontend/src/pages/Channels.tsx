@@ -5,6 +5,7 @@ import {
   Eye, EyeOff, ArrowLeftRight, MoreHorizontal, Search,
   Pencil, Gauge, Power, PowerOff, Loader2, MessageSquare, RotateCcw, Trash2,
   DollarSign, Cloud, Sparkles, Gem, BrainCircuit, Settings2, Plus,
+  Timer, AlertTriangle,
 } from 'lucide-react';
 import { api } from '../api';
 import { useListKeyboard } from '../hooks/useListKeyboard';
@@ -69,6 +70,17 @@ interface ChannelItem {
   balance_scheme?: string;
   /** 余额展示单位（USD / CNY / % / quota …；随余额查询响应回填） */
   balance_unit?: string;
+  /**
+   * #32 PR3 三键。后端 `mask_channel` 恒显式序列化（无 `skip_serializing_if`），
+   * 所以 `null` 与「旧数据缺字段」在界面上是**同一个状态**：一律按「未启用」画，
+   * 不出现「未配置」这种区分，也不把 0 读成「每 0 秒查一次」。
+   * 口径详见 `types/index.ts` 的 `ChannelItem`。
+   */
+  balance_query_interval_secs?: number | null;
+  /** 上次自动巡检查询时间（unix **秒**；手动刷新不写这条） */
+  balance_last_query_at?: number | null;
+  /** 上次自动巡检失败文案（出口侧已脱敏，仍可能含上游正文片段） */
+  balance_last_error?: string | null;
 }
 
 /**
@@ -83,6 +95,39 @@ const BALANCE_CREDENTIAL_HEADERS = [
   'x-balance-username',
   'x-balance-password',
 ];
+
+/**
+ * #32 PR3 周期余额巡检档位（秒）。刻意与账号池「余额自动查询」（AccountSessions）
+ * 用同一组档位：同一套语义两处形状，用户不需要重新学，也避免后端 30 天上限
+ * （`apply_interval_patch` 的 `secs.min(30 * 86_400)`）被自由输入框绕开后
+ * 出现「界面写 100 天、库里存 30 天」的落差。
+ */
+const BALANCE_INTERVAL_OPTIONS = [
+  // 关闭档用「未启用」而不是账号池页的「关闭」：`关闭` 这个 key 的英文值是
+  // "Close"（按钮义：关闭窗口），当状态词用会在英文界面渲染成 "Close"。
+  // `未启用` 的英文是 "Disabled"，且与本文件徽章关闭态同一个词。账号池页那处
+  // 是既有问题，不在本次面内顺手改（改了要重跑该页 e2e），已单独报 lead。
+  { value: '0', labelKey: '未启用' },
+  { value: '3600', labelKey: '每小时' },
+  { value: '21600', labelKey: '每 6 小时' },
+  { value: '43200', labelKey: '每 12 小时' },
+  { value: '86400', labelKey: '每天' },
+] as const;
+
+/**
+ * 三态归一（**唯一**入口，渲染层不要再各自判）：`null` / `undefined` / `0`
+ * 一律收成 `null` = 未启用。
+ *
+ * 为什么必须收成同一个值：后端 `mask_channel` 三键恒显式序列化、不带
+ * `skip_serializing_if`，所以「巡检关闭」与「旧数据压根没这个字段」在线上是
+ * **同一条 JSON**，前端无从区分，只能统一显示「未启用」——显示「未配置」
+ * 等于凭空造出一个界面上不存在、也无法通过操作到达的状态。
+ * `0` 也要归一：`apply_interval_patch` 把 0 当关闭，但手写 config / 旧库存量
+ * 可能是 `Some(0)`，照字面渲染会变成「每 0 秒查一次」。
+ */
+function normalizeIntervalSecs(value?: number | null): number | null {
+  return typeof value === 'number' && value > 0 ? value : null;
+}
 
 interface ChannelFormState {
   name: string;
@@ -102,6 +147,13 @@ interface ChannelFormState {
   quirks: ChannelQuirksForm;
   /** 余额查询方案（空 = OpenAI 计费端点） */
   balance_scheme: string;
+  /**
+   * #32 PR3 周期余额巡检间隔（秒，字符串照表单口径）。
+   * **写入只走 PATCH**：后端 `ChannelRequest`（POST/PUT body）没有这个字段，
+   * PUT 带上也会被 serde 静默忽略，所以 `buildPayload()` 刻意不带它 ——
+   * 让 payload 假装能写这个值是下一坑（详见 handleSave 注释）。
+   */
+  balance_query_interval_secs: string;
   /** 余额查询额外凭证（按 header 名存，提交时并入 quirks.headers） */
   balance_fields: Record<string, string>;
 }
@@ -506,6 +558,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       cost_pricing: {},
       quirks: { url_suffix: '', headers: '', anthropic_tool_type: '', client_emulation: '' },
       balance_scheme: '',
+      balance_query_interval_secs: '0',
       balance_fields: {},
     };
   }
@@ -908,6 +961,17 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
         balance_unit: ch.balance_unit || '',
         created_at: typeof ch.created_at === 'number' ? ch.created_at : undefined,
         updated_at: typeof ch.updated_at === 'number' ? ch.updated_at : undefined,
+        // #32 PR3 三键：后端恒显式序列化（null 与旧数据缺字段同态），照
+        // last_used_at 的口径收成 `number | null`，渲染层只需判 `=== null`，
+        // 不会漏 `undefined` 这一支（新字段两侧都得有值，否则老桩数据会画歪）。
+        balance_query_interval_secs:
+          typeof ch.balance_query_interval_secs === 'number' ? ch.balance_query_interval_secs : null,
+        balance_last_query_at:
+          typeof ch.balance_last_query_at === 'number' ? ch.balance_last_query_at : null,
+        balance_last_error:
+          typeof ch.balance_last_error === 'string' && ch.balance_last_error
+            ? ch.balance_last_error
+            : null,
       }));
       // 账号型渠道不在这里落库：它是账号池（AccountSessions）的内部容器，
       // 由「添加账号」自动创建。这里过滤掉，而不是在渲染层过滤，避免
@@ -950,6 +1014,12 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       cost_pricing: ch.cost_pricing || {},
       quirks: quirksToForm(ch.quirks),
       balance_scheme: ch.balance_scheme || '',
+      // #32 PR3 巡检间隔回填：三态（null / undefined / 0）已在 loadChannels
+      // 收成 null，这里统一落 '0' = 关闭档。后端 mask_channel 恒显式序列化，
+      // 「这条渠道从没这字段」与「用户亲手关掉」是同一个值，回填只有一种落点。
+      // 非档位值（如手写 config 的 7200）原样回填，由下拉里的「自定义」项接住
+      // ——不静默改成最近档位，否则一次「只改名称」的保存会顺手把间隔改写掉。
+      balance_query_interval_secs: String(ch.balance_query_interval_secs ?? 0),
       // 余额凭证存在 quirks.headers 里，编辑时回填到专用输入框（并从 headers 文本里剔除，
       // 避免同一份值既在文本框又在专用框、提交时互相覆盖）
       balance_fields: extractBalanceFields(ch.quirks),
@@ -989,6 +1059,10 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       // 编辑时也总是提交，用户清空表单即等于「清掉特判」
       quirks: formToQuirks(form.quirks, form.balance_fields) ?? {},
       balance_scheme: form.balance_scheme,
+      // #32 PR3：巡检间隔**刻意不放进 PUT/POST body**——后端 `ChannelRequest` 没有
+      // 这个字段，带上只会被 serde 静默吞掉，看起来「提交了」其实什么都没发生。
+      // 写在 payload 里更是个陷阱：下一个人会以为 PUT 能改它。唯一写路径是 PATCH，
+      // 见 `persistIntervalIfNeeded`。
     };
     if (form.no_key) {
       payload.api_key = null; // 显式清除
@@ -997,6 +1071,27 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     }
     // 否则不带 api_key 字段 = 不涉及
     return payload;
+  };
+
+  /**
+   * #32 PR3：把巡检间隔落到后端，**只在值真的变了的时候发**。
+   *
+   * 为什么一定要有一发 PATCH：后端 `ChannelRequest`（POST/PUT body）不带这三键，
+   * serde 会静默丢弃 ⇒ PATCH 是这条配置的**唯一写路径**，不走 PATCH 就等于写不进去。
+   *
+   * 为什么**不能**改成「每次保存都无条件补一刀 PATCH」（lead 2026-11-08 裁定）：
+   * PUT 丢字段是后端缺陷，正解是 `preserve_non_form_fields` 把三键从已存渠道搬回来
+   * （该函数已随 `1a51d6f0` 落在 main，src/api/admin/channels.rs:633，PUT 调用点 :673）；
+   * 前端每次重发同一份值只是把那个缺陷盖住，还会让下一个人以为 PUT 是好的。
+   * 值没变 ⇒ 一条 PATCH 都不该发，这一点由 e2e「未改间隔保存后不发 PATCH」钉住；
+   * PUT 侧的保留由 e2e「PUT 响应三键不变」+ be-api 的后端单测两头钉。
+   *
+   * `0` 与 `null` 在后端 `apply_interval_patch` 里归一为同一个「关闭」，所以档位
+   * `0` 原样发数字即可，不需要特判成 null。
+   */
+  const persistIntervalIfNeeded = async (id: string | number, prevSecs: number, nextSecs: number): Promise<void> => {
+    if (prevSecs === nextSecs) return;
+    await api.patchChannel(id, { balance_query_interval_secs: nextSecs });
   };
 
   const handleSave = async (): Promise<void> => {
@@ -1012,17 +1107,33 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     setError('');
     try {
       const payload = buildPayload();
+      // 三态 → 数字（0 = 关闭）；NaN/空串按关闭处理，别让 undefined 变成 PATCH 里的 null 之外形状
+      const nextSecs = Number(form.balance_query_interval_secs) || 0;
       if (editChannel) {
         await api.updateChannel(editChannel.id, payload);
         addToast(t('渠道更新成功'));
+        await persistIntervalIfNeeded(
+          editChannel.id,
+          normalizeIntervalSecs(editChannel.balance_query_interval_secs) ?? 0,
+          nextSecs,
+        );
       } else {
-        await api.addChannel(payload);
+        const created = await api.addChannel(payload);
         addToast(t('渠道添加成功'));
+        // 新建渠道后端恒按「不参与巡检」起步（`to_channel` 硬置 None 是正确的
+        // opt-in 默认），用户在下拉里选了非关闭档才补这刀
+        const newId = created.data?.id;
+        if (newId !== undefined && newId !== null && nextSecs !== 0) {
+          await persistIntervalIfNeeded(newId, 0, nextSecs);
+        }
       }
       closeModal();
       loadChannels();
     } catch (err) {
+      // PUT 已成功而 PATCH 失败也会走到这里：文案点明是间隔没写进去，
+      // 别让人以为整个渠道都没保存（下面的 loadChannels 会把真实状态刷回来）
       setError(err instanceof Error ? err.message : String(err));
+      loadChannels();
     } finally {
       setSaving(false);
     }
@@ -1202,6 +1313,40 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     // 百分比余额（OpenCode / 商汤）：<20% 告警；金额：<$5 告警
     const warn = (unit || '').toUpperCase() === '%' ? 20 : 5;
     return v < warn ? 'warning' : 'success';
+  };
+
+  /**
+   * #32 PR3 周期余额巡检徽章（余额格右侧那条）。
+   *
+   * **关闭态也要渲染**：不渲染就等于把「这条渠道不参与巡检」这个运维最需要的
+   * 信息藏掉，而它恰恰是默认态（新建渠道 opt-in 关闭）。账号型渠道不进这张表
+   * （loadChannels 已过滤），这里不需要再判一次。
+   *
+   * 「上次查询」只报**自动**巡检：手动点余额格走 `handle_get_channel_balance`，
+   * 它写回 balance/unit 但**不写** `balance_last_query_at`（巡检运行态，手点一次
+   * 记一笔等于给「周期任务在跑」造假）。所以文案带「自动」并注明「由周期任务更新」，
+   * 否则用户刚手动刷过、见时间没动会判定界面坏了。
+   */
+  const describeBalanceRefresh = (ch: ChannelItem): { state: 'off' | 'ok' | 'error'; title: string } => {
+    const secs = normalizeIntervalSecs(ch.balance_query_interval_secs);
+    if (secs === null) {
+      // 文案就一句「未启用」——`null` / 缺字段 / `0` 到这儿已经收成同一个状态，
+      // 界面上不存在第二种「没配」的写法（lead 裁定：三键显式 null 与旧数据同态）
+      return { state: 'off', title: `${t('余额自动查询')}: ${t('未启用')}` };
+    }
+    const preset = BALANCE_INTERVAL_OPTIONS.find((o) => Number(o.value) === secs);
+    // 档位外的值（手写 config 的 7200）照字面写秒数，不就近取整到档位——
+    // 就近取整会把「后端实际按 7200 跑」显示成「每 6 小时」，是一条假信息
+    const intervalText = preset ? t(preset.labelKey) : `${secs}${t('秒')}`;
+    const at =
+      typeof ch.balance_last_query_at === 'number' && ch.balance_last_query_at > 0
+        ? formatRelativeTime(ch.balance_last_query_at * 1000)
+        : t('从未查询');
+    // 秒 → 毫秒：后端这三条是 unix **秒**（`chrono::Utc::now().timestamp()`），
+    // 而 formatRelativeTime 收毫秒。直接把秒喂进去会得到「56 年前」。
+    const base = `${t('余额自动查询')}: ${intervalText} · ${t('上次查询')}: ${at}（${t('由周期任务更新')}）`;
+    if (!ch.balance_last_error) return { state: 'ok', title: base };
+    return { state: 'error', title: `${base} · ${t('自动查询失败')}: ${ch.balance_last_error}` };
   };
 
   // 仅首次加载显示整页骨架：搜索/翻页时若也早退，搜索框与工具栏会被卸载，
@@ -1584,6 +1729,26 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                               </>
                             )}
                           </button>
+                          {/* #32 PR3 周期余额巡检徽标：关闭态也画（默认态更需要看得见）。
+                              独立于上面那个「点击更新余额」的 button —— 塞进按钮里
+                              会把 tooltip 抢成按钮的「点击更新余额」，两种口径就混了。 */}
+                          {(() => {
+                            const refresh = describeBalanceRefresh(ch);
+                            return (
+                              <span
+                                className={`ch-balance-refresh s-${refresh.state}`}
+                                data-testid="balance-refresh"
+                                data-state={refresh.state}
+                                data-interval={normalizeIntervalSecs(ch.balance_query_interval_secs) ?? 0}
+                                title={refresh.title}
+                                aria-label={refresh.title}
+                              >
+                                {refresh.state === 'error'
+                                  ? <AlertTriangle size={11} />
+                                  : <Timer size={11} />}
+                              </span>
+                            );
+                          })()}
                         </td>
                         <td className={`col-response${colCls('response')} ta-${colAlign.response}`}>
                           {ch.response_time !== undefined ? (
@@ -2056,6 +2221,25 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                       {Object.entries(BALANCE_SCHEME_LABELS).map(([value, label]) => (
                         <option key={value} value={value}>{label}</option>
                       ))}
+                    </Select>
+                    {/* #32 PR3 周期余额巡检间隔。档位与账号池页同款；
+                        非档位值（手写 config 留下的 7200 之类）由下面那条
+                        「自定义」项接住——不接住的话下拉会显示空白，
+                        用户以为没配，实际后端在查。 */}
+                    <Select
+                      label={t('余额自动查询')}
+                      hint={t('按间隔自动拉取上游余额并展示上次读数；仅支持余额查询的供应商生效')}
+                      value={form.balance_query_interval_secs}
+                      onChange={(e) => setForm((f) => ({ ...f, balance_query_interval_secs: e.target.value }))}
+                    >
+                      {BALANCE_INTERVAL_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
+                      ))}
+                      {!BALANCE_INTERVAL_OPTIONS.some((o) => o.value === form.balance_query_interval_secs) && (
+                        <option value={form.balance_query_interval_secs}>
+                          {`${Number(form.balance_query_interval_secs) || 0} ${t('秒')}（${t('自定义')}）`}
+                        </option>
+                      )}
                     </Select>
                     {(() => {
                       const preset = PRESET_PROVIDERS.find((p) => p.balanceScheme === form.balance_scheme);

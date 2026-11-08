@@ -349,6 +349,17 @@ export interface ChannelItem {
   balance?: number | null;
   /// 最近一次查询到的上游 credit；后端 Option 序列化为 null
   credit?: number | null;
+  /// #32 PR3：周期余额巡检间隔（秒）。后端 `mask_channel` 三键**恒显式序列化**、
+  /// 不带 `skip_serializing_if` ⇒ `null` 与「旧数据没这字段」是同一个状态，
+  /// 一律按「未启用」渲染，**不能**区分成「未配置」，也不能画成「每 0 秒」。
+  balance_query_interval_secs?: number | null;
+  /// 上次**自动巡检查询**时间（unix **秒**）。手动「点击更新余额」刻意不写这条
+  /// （只有 `channel::balance_refresh` 巡检写回），所以文案口径是「上次自动查询」，
+  /// 并注明「由周期任务更新」——否则用户点了刷新却发现时间没动，会以为界面坏了。
+  balance_last_query_at?: number | null;
+  /// 上次自动巡检的失败文案（已过出口侧 `mask_error_text` 脱敏：截断 500、
+  /// `Bearer <token>`/`sk-<alnum>` 打码；裸 JWT / 手机号不在拦围内，best-effort）。
+  balance_last_error?: string | null;
 }
 
 export interface TokenItem {

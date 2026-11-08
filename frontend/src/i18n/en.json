@@ -3244,5 +3244,8 @@
   "发给模型的首条用户消息最大字符数（默认 500，超出截断）。": "Maximum characters of the first user message sent to the model (default 500, truncated beyond).",
   "聊天设置已保存": "Chat settings saved",
   "估算": "Estimated",
-  "由网关估算，非上游回报": "Estimated by the gateway, not reported by the upstream"
+  "由网关估算，非上游回报": "Estimated by the gateway, not reported by the upstream",
+  "上次查询": "Last query",
+  "从未查询": "Never queried",
+  "由周期任务更新": "updated by the periodic task"
 }

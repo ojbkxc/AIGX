@@ -287,6 +287,38 @@
   margin-left: 4px;
 }
 
+/* ── #32 PR3 周期余额巡检徽标（余额格右侧） ──
+   关闭态也照样画：`balance_query_interval_secs` 为 null/0 是**默认态**，
+   不画就等于把「这条渠道不参与巡检」这条运维最需要的信息藏起来。
+   三档配色对齐 .tc-status-* 的既有口径（中性 / 提示 / 告警），
+   关闭用 muted 而不是 danger —— 关闭不是故障。 */
+.ch-balance-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 4px;
+  border-radius: 4px;
+  vertical-align: middle;
+  cursor: help;
+}
+
+.ch-balance-refresh.s-off {
+  color: var(--text-muted);
+  background: var(--code-bg);
+}
+
+.ch-balance-refresh.s-ok {
+  color: var(--success-color, #10b981);
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.ch-balance-refresh.s-error {
+  color: var(--warning-color, #f59e0b);
+  background: rgba(245, 158, 11, 0.15);
+}
+
 /* ── 行操作（直接图标按钮 + ⋯ 下拉） ── */
 .ch-actions {
   display: flex;
