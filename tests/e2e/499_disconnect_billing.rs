@@ -543,6 +543,8 @@ async fn complete_request(c: &reqwest::Client, base: &str, path: &str, body: Val
 
 /// 单面 4 用例 + 断言族（A1/A1b/A1c/A1d/A3/A3b/A2/A4），移植 verify.mjs 口径。
 /// 返回本面结束后的 used_quota（供跨面总账）。
+/// `hits` 为 mock 上游命中计数（注入计数断言消息：第 5 条日志判别——
+/// hits=10 ⇒ 属冒烟日志迟到；hits>10 ⇒ 有请求被二次处理）。
 #[allow(clippy::too_many_arguments)] // 断言族参数即上下文，拆结构体反而稀释可读性（billing.rs 同款先例）
 async fn run_surface(
     c: &reqwest::Client,
@@ -556,6 +558,7 @@ async fn run_surface(
     ids0: &std::collections::HashSet<String>,
     q_prev: u64,
     total_cost_sink: &mut u64,
+    hits: &AtomicU64,
 ) -> u64 {
     let path = proto.path();
     // 请求体构造（唯一体纪律：每次 unique_content 递增）
@@ -631,8 +634,9 @@ async fn run_surface(
     assert_eq!(
         fresh.len(),
         4,
-        "{tag}：新日志应恰 4 条，实际 {}",
-        fresh.len()
+        "{tag}：新日志应恰 4 条，实际 {}（mock hits={}；预期 10=冒烟2+用例8，>10 ⇒ 有请求被二次处理）",
+        fresh.len(),
+        hits.load(Ordering::SeqCst)
     );
     assert_eq!(
         n499.len(),
@@ -813,6 +817,7 @@ async fn disconnect_499_billing_dual_surface() {
         &ids0,
         q0,
         &mut total_cost,
+        &mock.hits,
     )
     .await;
 
@@ -829,6 +834,7 @@ async fn disconnect_499_billing_dual_surface() {
         &ids0,
         q1,
         &mut total_cost,
+        &mock.hits,
     )
     .await;
 
