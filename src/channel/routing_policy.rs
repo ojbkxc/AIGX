@@ -374,6 +374,12 @@ fn default_true() -> bool {
 }
 
 /// 路由组（AIGX 用 `id` 查找，故容器用 `Vec`，不照搬 A2A 的 `HashMap<id,_>`）。
+///
+/// **`strategy`/`sticky` 是 `Option`（三态），与 [`RoutingProfile`] 同一套语义**
+/// （`None`=继承上层 / `Some(值)`=显式设置）。组最常见的用法是「只改参与名单、
+/// 不改策略」——若沿用非 Option，「组不设 strategy」会回落 `Weighted` **覆盖掉**
+/// 上层的 `Ranked`（静默回退，管理员无感知）。单测
+/// `group_optional_fields_inherit_upper_layers` 钉住。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutingGroup {
     pub id: String,
@@ -381,9 +387,9 @@ pub struct RoutingGroup {
     /// 该组服务的模型（A2A 的组是 per-model 的）
     pub model: String,
     #[serde(default)]
-    pub strategy: RouteStrategy,
+    pub strategy: Option<RouteStrategy>,
     #[serde(default)]
-    pub sticky: StickyMode,
+    pub sticky: Option<StickyMode>,
     /// 上限 [`caps::MAX_MEMBERS`]
     #[serde(default)]
     pub members: Vec<RoutingMember>,
@@ -517,26 +523,14 @@ pub struct RoutingPolicy {
     pub profiles: RoutingProfiles,
 }
 
-/// 多规则档案总开关的**进程级快照**（由 [`RoutingPolicyStore`] 在加载/保存时
-/// 镜像 `RoutingPolicy.enabled`；照 `config::assistant_tools_enabled` 的既有模式）。
-///
-/// 数据面每请求都要判一次「档案是否启用」；走原子快照与既有配置开关同模式：
-/// 关闭时分支预测直通，不触碰档案结构。
-static PROFILES_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// 读取多规则档案总开关（进程级快照，镜像自 `RoutingPolicy.enabled`）。
-pub fn routing_profiles_enabled() -> bool {
-    PROFILES_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// 由 [`RoutingPolicyStore`] 在加载 / 保存时写入快照（勿在别处调用）。
-pub fn set_routing_profiles_enabled(v: bool) {
-    PROFILES_ENABLED.store(v, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// 路由策略运行时持有者：进程级快照，保存即生效。
 ///
 /// 数据面每请求 `snapshot()`（Arc clone），读写均无锁竞争。
+///
+/// **「档案是否启用」只读 `policy.enabled`（快照字段）**，不另设进程级
+/// 静态镜像：`RoutingPolicy.enabled` 运行期可热更（[`Self::update`]），
+/// 静态镜像一旦与快照脱节就是两份真相（`config::assistant_tools_enabled`
+/// 那种模式只适用于「启动时定格、不变」的配置）。
 pub struct RoutingPolicyStore {
     current: parking_lot::RwLock<Arc<RoutingPolicy>>,
     store: Option<Arc<FileStore>>,
@@ -545,7 +539,6 @@ pub struct RoutingPolicyStore {
 impl RoutingPolicyStore {
     /// 无持久化构建（测试用；配置不落盘）。
     pub fn in_memory(policy: RoutingPolicy) -> Self {
-        set_routing_profiles_enabled(policy.enabled);
         Self {
             current: parking_lot::RwLock::new(Arc::new(policy)),
             store: None,
@@ -559,7 +552,6 @@ impl RoutingPolicyStore {
             .ok()
             .flatten()
             .unwrap_or_default();
-        set_routing_profiles_enabled(policy.enabled);
         Self {
             current: parking_lot::RwLock::new(Arc::new(policy)),
             store: Some(store),
@@ -584,7 +576,6 @@ impl RoutingPolicyStore {
             store.put(ROUTING_POLICY_KEY, &policy)?;
         }
         *self.current.write() = Arc::new(policy.clone());
-        set_routing_profiles_enabled(policy.enabled);
         Ok(policy)
     }
 }
@@ -693,14 +684,16 @@ pub fn resolve_profile(
         out.default_group = Some(v.to_string());
         out.provenance.default_group = Some(*layer);
     }
-    // 组层：`RoutingGroup` 的 strategy/sticky 是非 Option（契约 §1 定义），
-    // 故「选中组」即提供这两个字段（组值缺省时即为枚举默认值 —— 组级未配
-    // strategy 的组会覆盖上层策略，此形态待第 2 步的组 CRUD 端点上线时复核）。
+    // 组层：与档案层同一套三态语义（组字段 `None` = 继承上层，不覆盖）。
     if let Some(g) = group {
-        out.strategy = g.strategy;
-        out.sticky = g.sticky;
-        out.provenance.strategy = Some(Layer::Group);
-        out.provenance.sticky = Some(Layer::Group);
+        if let Some(v) = g.strategy {
+            out.strategy = v;
+            out.provenance.strategy = Some(Layer::Group);
+        }
+        if let Some(v) = g.sticky {
+            out.sticky = v;
+            out.provenance.sticky = Some(Layer::Group);
+        }
     }
     out
 }
@@ -953,11 +946,6 @@ mod tests {
 
     #[test]
     fn store_update_hot_swap() {
-        // 本用例会写 `enabled` 的进程级镜像，与同模块其他写镜像的用例
-        // 共用跨模块测试锁（`secret::test_lock`），避免并行下读到别家的值。
-        let _guard = crate::account_session::secret::test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let store = RoutingPolicyStore::in_memory(RoutingPolicy::default());
         let mut p = store.snapshot();
         assert_eq!(p.strategy, RouteStrategy::Weighted);
@@ -1197,8 +1185,8 @@ mod tests {
             id: "g1".to_string(),
             name: "组一".to_string(),
             model: "gpt-4o".to_string(),
-            strategy: RouteStrategy::RoundRobin,
-            sticky: StickyMode::Session,
+            strategy: Some(RouteStrategy::RoundRobin),
+            sticky: Some(StickyMode::Session),
             members: Vec::new(),
         });
 
@@ -1223,6 +1211,52 @@ mod tests {
         // 显式指定的组对匹配模型生效
         let r4 = resolve_profile(&policy, "gpt-4o", &m, Some("g1"));
         assert_eq!(r4.provenance.strategy, Some(Layer::Group));
+    }
+
+    /// 组的 `strategy`/`sticky` 是三态（与 RoutingProfile 同套语义）：
+    /// **组不设 strategy 时生效 strategy 仍为上层的值** —— 若按 A2A 的非
+    /// Option 形态，这里会回落 Weighted 静默覆盖掉上层的 Ranked。
+    #[test]
+    fn group_optional_fields_inherit_upper_layers() {
+        let dir = TempDir::new().unwrap();
+        let m = mapper(&dir);
+        let mut policy = RoutingPolicy {
+            strategy: RouteStrategy::Ranked,
+            sticky: StickyMode::Off,
+            enabled: true,
+            ..RoutingPolicy::default()
+        };
+        policy.profiles.groups.push(RoutingGroup {
+            id: "g1".to_string(),
+            name: "只改名单".to_string(),
+            model: String::new(),
+            strategy: None,
+            sticky: None,
+            members: vec![RoutingMember {
+                provider: "anthropic".to_string(),
+                model: "gpt-4o".to_string(),
+                included: true,
+                accounts: Vec::new(),
+            }],
+        });
+
+        let r = resolve_profile(&policy, "gpt-4o", &m, Some("g1"));
+        assert_eq!(
+            r.strategy,
+            RouteStrategy::Ranked,
+            "组未设 strategy → 继承策略基座"
+        );
+        assert_eq!(r.provenance.strategy, None, "组未提供 → 不记 Group 来源");
+        assert_eq!(r.sticky, StickyMode::Off);
+        assert_eq!(r.provenance.sticky, None);
+
+        // 组只显式设其中一个字段：另一个仍继承
+        policy.profiles.groups[0].sticky = Some(StickyMode::Session);
+        let r2 = resolve_profile(&policy, "gpt-4o", &m, Some("g1"));
+        assert_eq!(r2.strategy, RouteStrategy::Ranked);
+        assert_eq!(r2.provenance.strategy, None);
+        assert_eq!(r2.sticky, StickyMode::Session);
+        assert_eq!(r2.provenance.sticky, Some(Layer::Group));
     }
 
     /// `plan_route`：scope 裁剪（白名单 / 排除名单）+ 直通路径 + 计数。
@@ -1283,9 +1317,6 @@ mod tests {
     /// 上限校验（契约 §1/§3）：**超限拒绝写入**，不静默截断。
     #[test]
     fn caps_reject_over_limit_writes() {
-        let _guard = crate::account_session::secret::test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let mut profiles = RoutingProfiles::default();
         assert!(profiles.validate().is_ok());
 
@@ -1318,8 +1349,8 @@ mod tests {
                 id: format!("g{i}"),
                 name: String::new(),
                 model: String::new(),
-                strategy: RouteStrategy::Weighted,
-                sticky: StickyMode::Auto,
+                strategy: None,
+                sticky: None,
                 members: Vec::new(),
             })
             .collect();
@@ -1329,8 +1360,8 @@ mod tests {
             id: "g".to_string(),
             name: String::new(),
             model: String::new(),
-            strategy: RouteStrategy::Weighted,
-            sticky: StickyMode::Auto,
+            strategy: None,
+            sticky: None,
             members: (0..=caps::MAX_MEMBERS)
                 .map(|i| RoutingMember {
                     provider: "p".to_string(),
@@ -1406,22 +1437,20 @@ mod tests {
         assert_eq!(RequestNeeds::default().required_tags().count(), 0);
     }
 
-    /// `enabled` 的进程级快照镜像 `RoutingPolicy.enabled`（数据面无锁读）。
+    /// `enabled` 的唯一真相是快照字段：store 热更后 `snapshot().enabled` 翻转
+    /// （不设进程级静态镜像 —— 那是与快照漂移的第二份真相）。
     #[test]
-    fn profiles_enabled_snapshot_tracks_store() {
-        let _guard = crate::account_session::secret::test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+    fn enabled_flag_reads_policy_snapshot() {
         let store = RoutingPolicyStore::in_memory(RoutingPolicy::default());
-        assert!(!routing_profiles_enabled(), "默认关");
+        assert!(!store.snapshot().enabled, "默认关");
         store
             .update(RoutingPolicy {
                 enabled: true,
                 ..RoutingPolicy::default()
             })
             .unwrap();
-        assert!(routing_profiles_enabled());
+        assert!(store.snapshot().enabled);
         store.update(RoutingPolicy::default()).unwrap();
-        assert!(!routing_profiles_enabled());
+        assert!(!store.snapshot().enabled);
     }
 }
