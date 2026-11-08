@@ -604,6 +604,97 @@ pub async fn handle_update_chat_settings(
     }
 }
 
+// ── 报表设置（`[report]` 段：报表日界时区，#20 / 生产体检 P3-14）────────
+
+/// 报表设置请求体（缺省字段保持原值；键名 snake_case，与 chat/agent 面同口径，
+/// 额外收 camelCase 别名是因为前端面板习惯 camelCase —— 两种都认，文档只写一种）。
+#[derive(Debug, Deserialize)]
+pub struct ReportSettingsRequest {
+    #[serde(alias = "timezoneOffset")]
+    pub timezone_offset: Option<i32>,
+}
+
+/// 报表配置的规范 JSON 形状（camelCase，与 `chat_settings_json` 同款手构）。
+///
+/// 三个"口径"字段各自回答不同问题，混用会误导运维，故都吐出去：
+/// - `timezoneOffset`：**配置文件里存的值**（本次 PUT 想要的口径）；
+/// - `effectiveOffset`：**进程当前生效值**（原子快照，读路径实际用的那个）。
+///   两者正常相同；不同说明有写入路径绕过了本端点（例如将来新增的通用 config
+///   导入），前端据此提示"需重启"；
+/// - `storedOffset`：**存量聚合行**落盘时的口径（`None` = 老库没记过口径标记）。
+///   它与 `effectiveOffset` 不等 ⇒ 报表日界已切但历史还没重算，需要迁移。
+fn report_settings_json(config: &crate::config::ReportConfig, stored_offset: Option<i32>) -> Value {
+    let effective = crate::config::report_tz_offset();
+    json!({
+        "timezoneOffset": config.timezone_offset,
+        "effectiveOffset": effective,
+        "storedOffset": stored_offset,
+        // 老库无标记（None）保守按「需要迁移」提示：迁移本身幂等，空库只落标记
+        "needsMigration": stored_offset != Some(effective),
+        "minOffset": crate::config::REPORT_TZ_OFFSET_MIN,
+        "maxOffset": crate::config::REPORT_TZ_OFFSET_MAX,
+    })
+}
+
+/// GET /api/report/settings —— 查询报表设置（日界时区偏移 + 存量聚合行口径）。
+pub async fn handle_get_report_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let config = verify_admin(&state, &headers).await?;
+    let stored = state.log_store.daily.tz_marker();
+    Ok(Json(json!({
+        "success": true,
+        "data": report_settings_json(&config.report, stored),
+    })))
+}
+
+/// PUT /api/report/settings —— 保存报表设置（写 config.toml 并**热生效**）。
+///
+/// 生效范围只到「切换之后到达的日志」：日聚合键（`log::daily_agg::date_key`）、
+/// 24h 小时桶（`dashboard::hour_key_at`）、今日窗口（`diagnostics::today_start_ts`）
+/// 都读同一个原子快照，保存即刻切。
+///
+/// ⚠️ **存量聚合行不在本端点职责内**（生产机不做隐式重写库）：需要管理员显式调
+/// `POST /api/logs/agg/tz-migrate` 重算历史，响应里的 `needsMigration` 就是给
+/// 前端画提示条用的判据。
+pub async fn handle_update_report_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ReportSettingsRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut config = verify_admin(&state, &headers).await?;
+    if let Some(v) = body.timezone_offset {
+        if !crate::config::report_tz_offset_valid(v) {
+            return Err(error_response(
+                &format!(
+                    "报表时区偏移必须在 {}~{} 之间（整数小时，UTC 偏移）",
+                    crate::config::REPORT_TZ_OFFSET_MIN,
+                    crate::config::REPORT_TZ_OFFSET_MAX
+                ),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        config.report.timezone_offset = v;
+    }
+    match state.config_manager.update(config).await {
+        Ok(()) => {
+            let updated = state.config_manager.get().await;
+            // 保存即生效：报表读路径（日键/小时桶/日窗口）全部读这个快照
+            crate::config::set_report_tz_offset(updated.report.timezone_offset);
+            let stored = state.log_store.daily.tz_marker();
+            Ok(Json(json!({
+                "success": true,
+                "data": report_settings_json(&updated.report, stored),
+            })))
+        }
+        Err(e) => Err(error_response(
+            &format!("Failed to save report settings: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
 // ── 网关设置（监听地址 / CORS / 反代信任）──────────────────────────
 
 /// 网关设置请求体（缺省字段保持原值）。
@@ -1207,6 +1298,63 @@ mod tests {
         assert_eq!(body.title_prompt_chars, Some(800));
         assert_eq!(body.title_model, None);
         assert_eq!(body.title_channel, None);
+    }
+
+    /// 报表设置响应形状：三个"口径"字段语义不同，谁等谁不等决定 `needsMigration`。
+    ///
+    /// 断言一律拿 `report_tz_offset()` 现值当基准，**不写死 8** —— 快照是进程级
+    /// 原子，写死数值等于假设"本测试二进制里没人改过它"，那是会随测试顺序烂掉的
+    /// 间歇红（同 #20 批1 的 offset=0 教训）。当前全仓只有 `main.rs` 启动注入与
+    /// 本端点会写它，二者都不在单元测试二进制里跑，故现值恒等于缺省。
+    #[test]
+    fn report_settings_json_shape_and_migration_flag() {
+        use crate::config::{ReportConfig, REPORT_TZ_OFFSET_MAX, REPORT_TZ_OFFSET_MIN};
+        let live = crate::config::report_tz_offset();
+        let cfg = ReportConfig {
+            timezone_offset: live,
+        };
+
+        let same = report_settings_json(&cfg, Some(live));
+        assert_eq!(same["timezoneOffset"], json!(live));
+        assert_eq!(same["effectiveOffset"], json!(live));
+        assert_eq!(
+            same["needsMigration"],
+            json!(false),
+            "存量口径 = 生效口径 ⇒ 不该催迁移"
+        );
+
+        // 存量行停在别的口径（含老库 None）⇒ 一律提示需要迁移
+        let stale = report_settings_json(&cfg, Some(live + 1));
+        assert_eq!(stale["needsMigration"], json!(true));
+        assert_eq!(stale["storedOffset"], json!(live + 1));
+        let legacy = report_settings_json(&cfg, None);
+        assert_eq!(
+            legacy["needsMigration"],
+            json!(true),
+            "老库无口径标记，保守按需要迁移（迁移幂等，空库只落标记）"
+        );
+        assert!(legacy["storedOffset"].is_null());
+
+        // 边界随响应一起吐给前端，免得前端自己抄一份常量
+        assert_eq!(same["minOffset"], json!(REPORT_TZ_OFFSET_MIN));
+        assert_eq!(same["maxOffset"], json!(REPORT_TZ_OFFSET_MAX));
+    }
+
+    /// 契约：PUT body 主用 snake_case（与 chat/agent 面一致），camelCase 只作别名
+    /// 兼容前端手写；缺省字段保持原值。两种拼法都钉住，否则改一边就把另一端打挂。
+    #[test]
+    fn report_settings_request_accepts_both_cases_and_partial_body() {
+        let snake: ReportSettingsRequest =
+            serde_json::from_str(r#"{"timezone_offset": -3}"#).unwrap();
+        assert_eq!(snake.timezone_offset, Some(-3));
+        let camel: ReportSettingsRequest =
+            serde_json::from_str(r#"{"timezoneOffset": 14}"#).unwrap();
+        assert_eq!(camel.timezone_offset, Some(14));
+        let empty: ReportSettingsRequest = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(
+            empty.timezone_offset, None,
+            "缺省字段必须保持原值，不能被零值覆盖"
+        );
     }
 
     #[test]

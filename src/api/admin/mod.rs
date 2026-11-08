@@ -61,11 +61,12 @@ pub use users::{
 };
 
 pub use logs::{
-    handle_agg_rebuild, handle_cleanup_logs, handle_clear_audit_logs, handle_clear_preview,
-    handle_clear_request_logs, handle_delete_audit_logs, handle_delete_request_logs,
-    handle_export_request_logs, handle_export_runtime_logs, handle_get_log_retention,
-    handle_get_runtime_logs, handle_list_audit_logs, handle_list_inflight,
-    handle_list_request_logs, handle_terminate_inflight, handle_update_log_retention,
+    handle_agg_rebuild, handle_agg_tz_migrate, handle_cleanup_logs, handle_clear_audit_logs,
+    handle_clear_preview, handle_clear_request_logs, handle_delete_audit_logs,
+    handle_delete_request_logs, handle_export_request_logs, handle_export_runtime_logs,
+    handle_get_log_retention, handle_get_runtime_logs, handle_list_audit_logs,
+    handle_list_inflight, handle_list_request_logs, handle_terminate_inflight,
+    handle_update_log_retention,
 };
 
 pub use channels::{
@@ -131,10 +132,11 @@ pub use dashboard::{
 
 pub use settings::{
     handle_get_agent_settings, handle_get_chat_settings, handle_get_gateway_prompt,
-    handle_get_gateway_settings, handle_get_limits, handle_get_oauth_config, handle_get_sanitize,
-    handle_get_security_policy, handle_get_settings, handle_update_agent_settings,
-    handle_update_chat_settings, handle_update_gateway_prompt, handle_update_gateway_settings,
-    handle_update_limits, handle_update_oauth_config, handle_update_sanitize,
+    handle_get_gateway_settings, handle_get_limits, handle_get_oauth_config,
+    handle_get_report_settings, handle_get_sanitize, handle_get_security_policy,
+    handle_get_settings, handle_update_agent_settings, handle_update_chat_settings,
+    handle_update_gateway_prompt, handle_update_gateway_settings, handle_update_limits,
+    handle_update_oauth_config, handle_update_report_settings, handle_update_sanitize,
     handle_update_security_policy, handle_update_settings,
 };
 

@@ -681,6 +681,9 @@ fn paths_logs() -> Value {
         "/api/logs/agg/rebuild": {
             "post": op("日志", "手动重建日聚合（逃生门：聚合数字可疑时重算历史，写操作）")
         },
+        "/api/logs/agg/tz-migrate": {
+            "post": op_body("日志", "报表时区迁移（逃生门：改了 [report] timezone_offset 后重算存量聚合行，写操作）。响应附 tzEffectiveFrom + notices，含「窗口内旧口径聚合行先删除再回填、绕开回填的 shrink 守卫」与「不覆盖今天、切换当日偏低次日自愈」两条坑", "offset_from?/offset_to?（snake_case，另有 camelCase 别名；缺省：旧口径 0 → 新口径取当前生效值）")
+        },
         "/api/logs/audits": {
             "get": op_params("日志", "查询审计日志（分页）", &[
                 query_param("page", "integer", "页码（默认 1）"),
@@ -755,6 +758,10 @@ fn paths_settings_ops() -> Value {
         "/api/chat/settings": {
             "get": op("设置", "查询聊天设置（LLM 自动标题开关/模型/渠道/提示字符数），响应 camelCase"),
             "put": op_body("设置", "更新聊天设置（写操作，热生效）", "auto_title/title_model/title_channel/title_prompt_chars（snake_case，缺省保持原值）")
+        },
+        "/api/report/settings": {
+            "get": op("设置", "查询报表设置（日界时区偏移），响应 camelCase：timezoneOffset（配置值）/effectiveOffset（进程生效值）/storedOffset（存量聚合行口径，null=老库无标记）/needsMigration（存量需重算）/minOffset/maxOffset"),
+            "put": op_body("设置", "更新报表设置（写操作，保存即热生效；存量聚合行不自动重算，需另调 /api/logs/agg/tz-migrate）", "timezone_offset（整数小时 UTC 偏移，-12~14，另有 camelCase 别名 timezoneOffset；缺省保持原值）")
         },
         // Agent 工作台（src/agent/api.rs 的独立 router，main.rs 里 merge 进来）
         "/api/agent/config": {
@@ -1477,6 +1484,7 @@ mod tests {
         add("/api/agent/sessions/{id}/chat", &["post"]);
         add("/api/agent/approvals/{request_id}", &["post"]);
         add("/api/gateway/settings", &["get", "put"]);
+        add("/api/report/settings", &["get", "put"]);
         add("/api/routing", &["get", "put"]);
         add("/api/routing/defaults", &["get"]);
         // #46 补登：#40 多规则档案 / 候选队列 / 判定预演四条
@@ -1528,6 +1536,7 @@ mod tests {
         add("/api/logs/inflight/{id}/terminate", &["post"]);
         add("/api/logs/requests/clear-preview", &["get"]);
         add("/api/logs/agg/rebuild", &["post"]);
+        add("/api/logs/agg/tz-migrate", &["post"]);
         add("/api/mcp", &["post"]);
         add("/api/models/alias", &["post"]);
         add("/api/models/alias/remove", &["post"]);

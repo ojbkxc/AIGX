@@ -271,6 +271,9 @@ async fn main() -> anyhow::Result<()> {
     // 同步签到时区偏移到 scheduler 静态变量（启动时按已加载的设置初始化）
     crate::checkin::scheduler::set_checkin_tz_offset(upstream_checkin.settings().timezone_offset);
 
+    // 同步报表时区偏移到进程级快照（报表日口径单一来源，见 config::report_tz_offset）
+    crate::config::set_report_tz_offset(config.report.timezone_offset);
+
     // 初始化易支付客户端（运行时按配置即时构造，无需常驻）
     let epay_client = Arc::new(EpayClient::new(config.epay.clone()));
     let stripe_client = Arc::new(StripeClient::new(config.stripe.clone()));
@@ -1763,6 +1766,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/api/logs/agg/rebuild",
             post(api::admin::handle_agg_rebuild),
         )
+        // 报表时区迁移（逃生门：改了 [report] timezone_offset 后重算存量聚合行，幂等）
+        .route(
+            "/api/logs/agg/tz-migrate",
+            post(api::admin::handle_agg_tz_migrate),
+        )
         // 数据看板
         .route(
             "/api/dashboard/consumption_trend",
@@ -1843,6 +1851,12 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
         .route(
             "/api/chat/settings",
             get(api::admin::handle_get_chat_settings).put(api::admin::handle_update_chat_settings),
+        )
+        // 报表时区配置（[report] timezone_offset，整数小时 UTC 偏移，改后需调迁移端点重算历史）
+        .route(
+            "/api/report/settings",
+            get(api::admin::handle_get_report_settings)
+                .put(api::admin::handle_update_report_settings),
         )
         .route(
             "/api/gateway/settings",

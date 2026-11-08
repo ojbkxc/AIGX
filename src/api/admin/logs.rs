@@ -645,6 +645,112 @@ pub async fn handle_agg_rebuild(
     })))
 }
 
+/// 报表时区迁移请求体（`POST /api/logs/agg/tz-migrate`）。
+///
+/// 两个字段都可缺省：`offset_to` 缺省取**当前生效口径**（正常用法就是"把存量行
+/// 追平到我刚保存的偏移"）；`offset_from` 缺省 0 = 生产现状 UTC+0，且**只在老库没有
+/// 口径标记时**才用到（有标记时以标记为准，见 `LogStore::tz_migrate`）。
+#[derive(Debug, Default, Deserialize)]
+pub struct TzMigrateRequest {
+    #[serde(alias = "offsetFrom")]
+    pub offset_from: Option<i32>,
+    #[serde(alias = "offsetTo")]
+    pub offset_to: Option<i32>,
+}
+
+/// 迁移响应里固定回给运维的四条坑（**不许只写在文档里**——面板/CLI 直接读这里）。
+///
+/// 前三条＝本单约定的"三坑"，第四条＝实现层的关键顺序，缺一条都会被当成"没迁动"
+/// 的 bug 报回来。窗口值由调用处 `format!` 填实际日期，避免"文档里的日期"过期。
+fn tz_migrate_notices(
+    offset_to: i32,
+    effective_from: &str,
+    window_to: &str,
+    today: &str,
+) -> Vec<String> {
+    vec![
+        format!(
+            "顺序坑：目标偏移 UTC{offset_to:+} 必须先在「设置 → 报表」保存并生效，否则本端点直接 400（重算用的口径必须与运行期写入口径同源，否则重启后配置回退、数据和运行期又错开）。"
+        ),
+        format!(
+            "分裂窗口：升级到本次调用之间，报表是新旧两套口径混排——新到日志已按 UTC{offset_to:+} 归日，存量聚合行仍停在旧口径。本次重算区间 [{effective_from}, {window_to}] 闭合该窗口。"
+        ),
+        format!(
+            "切换当日偏低、次日自愈：回填与迁移都不覆盖今天（{today} 归运行期记账），所以切换当日的报表只包含切换之后到达的请求。"
+        ),
+        format!(
+            "先删后算：区间 [{effective_from}, {window_to}] 内的旧口径聚合行是**先删除再回填**的。回填自带 shrink 守卫（既有行计数更大就保留不动），不先删就会把旧口径的大值原样留下、等于没迁；若 data.backfill.skipped_shrink 非 0，说明区间外还有被守卫拦住的行，需人工核对明细是否已被 retention 裁过。"
+        ),
+    ]
+}
+
+/// POST /api/logs/agg/tz-migrate — 报表时区迁移（#20，逃生门，写操作）。
+///
+/// 与 `/api/logs/agg/rebuild` 的关系：rebuild 只按**当前**口径重算历史日，
+/// 迁移 = 「先删掉旧口径落在窗口内的聚合行，再走同一条回填」+ 落口径标记。
+/// 因此迁移**不自动发生在启动/cron**（生产机不做隐式重写库），必须管理员显式点。
+///
+/// 全程幂等：`dailyagg:tz_offset` 标记已是目标口径就直接返回，不再删也不再重算
+/// （运维多点一次按钮不会把报表抖一遍）。
+pub async fn handle_agg_tz_migrate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TzMigrateRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _ = verify_admin(&state, &headers).await?;
+    let offset_to = body
+        .offset_to
+        .unwrap_or_else(crate::config::report_tz_offset);
+    let offset_from = body.offset_from.unwrap_or(0);
+    for (v, label) in [
+        (offset_from, "旧口径 offset_from"),
+        (offset_to, "新口径 offset_to"),
+    ] {
+        if !crate::config::report_tz_offset_valid(v) {
+            return Err(error_response(
+                &format!(
+                    "{label}={v} 越界：必须在 {}~{} 之间（整数小时，UTC 偏移）",
+                    crate::config::REPORT_TZ_OFFSET_MIN,
+                    crate::config::REPORT_TZ_OFFSET_MAX
+                ),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+    }
+    let report = state
+        .log_store
+        .tz_migrate(offset_from, offset_to)
+        .map_err(|e| {
+            error_response(
+                &format!("Agg tz migrate failed: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+    super::common::record_audit(
+        &state,
+        &super::common::admin_id_from_session(&state, &headers).await,
+        "report.tz_migrate",
+        "daily_agg",
+        Some(serde_json::json!({ "offsetFrom": offset_from, "offsetTo": offset_to })),
+        Some(serde_json::to_value(&report).unwrap_or_default()),
+    );
+    tracing::info!("报表时区迁移完成: {report:?}");
+    let today = crate::log::daily_agg::today_key();
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": report,
+        // 与 data.effective_from 同值，另给前端一个稳定驼峰键（面板不必知道内核字段名）
+        "tzEffectiveFrom": report.effective_from,
+        "today": today,
+        "notices": tz_migrate_notices(
+            offset_to,
+            &report.effective_from,
+            &report.window_to,
+            &today,
+        ),
+    })))
+}
+
 /// GET /api/logs/runtime — 读取运行日志环形缓冲快照。
 ///
 /// 对照 Agent2API「运行日志页」后端。`since_id` 查询参数用于未读水位筛选
@@ -721,4 +827,67 @@ pub async fn handle_get_route_replay(
             "account_skips": log.account_skips,
         }
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 迁移响应必须把四条坑原文吐给调用方（本单约定：**不许只写在文档里**）。
+    ///
+    /// 逐条断言而不是只数条数：漏字就会让运维把"窗口内先删再回填"当成默认行为，
+    /// 而这条恰恰是排查"迁移后数字没变"的第一现场。
+    #[test]
+    fn tz_migrate_notices_spell_out_every_pit() {
+        let notices = tz_migrate_notices(8, "2026-01-31", "2026-11-07", "2026-11-08");
+        assert_eq!(notices.len(), 4, "四条坑少一条都算缺陷：{notices:?}");
+        let joined = notices.join("\n");
+        // ① 顺序坑：偏移没先保存 → 400
+        assert!(
+            joined.contains("先在「设置 → 报表」保存"),
+            "缺顺序坑：{joined}"
+        );
+        assert!(joined.contains("UTC+8"), "缺目标偏移：{joined}");
+        // ② 分裂窗口 + 重算区间（日期必须是真的窗口，不能是模板占位）
+        assert!(
+            joined.contains("新旧两套口径混排"),
+            "缺分裂窗口坑：{joined}"
+        );
+        assert!(
+            joined.contains("[2026-01-31, 2026-11-07]"),
+            "重算区间没写实际日期：{joined}"
+        );
+        // ③ 切换当日偏低、次日自愈
+        assert!(
+            joined.contains("切换当日偏低、次日自愈"),
+            "缺当日偏低坑：{joined}"
+        );
+        // ④ 先删后算绕开 shrink 守卫（排查"数字没变"的第一现场）
+        assert!(joined.contains("先删后算"), "缺先删后算坑：{joined}");
+        assert!(
+            joined.contains("shrink 守卫"),
+            "没点出 shrink 守卫这条根因：{joined}"
+        );
+        assert!(
+            joined.contains("skipped_shrink"),
+            "没给运维可核对的字段名：{joined}"
+        );
+    }
+
+    /// 请求体两种命名都收（面板习惯 camelCase，命令行用 snake_case），且允许空体。
+    #[test]
+    fn tz_migrate_request_accepts_both_cases_and_partial_body() {
+        let parse = |raw: &str| -> (Option<i32>, Option<i32>) {
+            let v: TzMigrateRequest = serde_json::from_str(raw).expect("应能解析");
+            (v.offset_from, v.offset_to)
+        };
+        assert_eq!(parse(r#"{"offset_from":-3}"#), (Some(-3), None));
+        assert_eq!(parse(r#"{"offsetTo":14}"#), (None, Some(14)));
+        assert_eq!(
+            parse(r#"{"offsetFrom":8,"offset_to":8}"#),
+            (Some(8), Some(8))
+        );
+        // 空体＝"把存量行追平到我刚保存的口径"，是正常用法
+        assert_eq!(parse("{}"), (None, None));
+    }
 }
