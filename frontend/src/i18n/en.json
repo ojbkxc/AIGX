@@ -3199,12 +3199,12 @@
   "启用 {{n}}": "{{n}} enabled",
   "当前生效：扁平规则（降维）": "Active: flat rules (degraded)",
   "当前生效：条件组（{{n}} 组）": "Active: condition groups ({{n}})",
-  "没有匹配「{{keyword}}」的提供商": "No providers matching \"{keyword}\"",
-  "添加账号到「{{name}}」": "Add account to \"{name}\"",
-  "全部启用（{{n}}）": "Enable all ({n})",
-  "全部停用（{{n}}）": "Disable all ({n})",
-  "点击复制：{{name}}": "Click to copy: {name}",
-  "自定义等级…（{{level}}）": "Custom level… ({level})",
-  "提供商设置（{{n}}）": "Provider settings ({n})",
-  "已领到、还没到生效时间的套餐（生效后余额列会按它显示）：{{lines}}": "Plans already claimed but not yet effective (the balance column reflects them once active): {lines}"
+  "没有匹配「{{keyword}}」的提供商": "No providers matching \"{{keyword}}\"",
+  "添加账号到「{{name}}」": "Add account to \"{{name}}\"",
+  "全部启用（{{n}}）": "Enable all ({{n}})",
+  "全部停用（{{n}}）": "Disable all ({{n}})",
+  "点击复制：{{name}}": "Click to copy: {{name}}",
+  "自定义等级…（{{level}}）": "Custom level… ({{level}})",
+  "提供商设置（{{n}}）": "Provider settings ({{n}})",
+  "已领到、还没到生效时间的套餐（生效后余额列会按它显示）：{{lines}}": "Plans already claimed but not yet effective (the balance column reflects them once active): {{lines}}"
 }
