@@ -278,3 +278,19 @@
     box-shadow: 0 0 40px rgba(0, 0, 0, 0.35);
   }
 }
+
+/* #52：行内重命名编辑态 */
+.sd-item.editing {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sd-rename-input {
+  font-size: 12.5px;
+  padding: 4px 8px;
+  width: 100%;
+}
+.sd-rename-error {
+  font-size: 11px;
+  color: #d64545;
+}

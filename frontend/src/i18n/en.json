@@ -3228,5 +3228,9 @@
   "用户工具策略已保存": "User tool policy saved",
   "用户工具策略端点尚未就绪（后端建设中）。就绪后这里配置组级允许清单与全局开关。": "User tool policy endpoints are not ready yet (backend under construction). Once ready, configure group allowlists and the global switch here.",
   "关闭时终端用户纯聊天，行为与历史逐字节等价。默认关闭。": "When off, end users get plain chat, byte-identical to historical behavior. Off by default.",
-  "开启后，组内被允许的工具才会出现在终端用户的聊天工具清单中；写操作需用户在聊天中逐次确认。": "When on, only tools allowed for the group appear in end users' chat tool list; write operations require per-action confirmation in chat."
+  "开启后，组内被允许的工具才会出现在终端用户的聊天工具清单中；写操作需用户在聊天中逐次确认。": "When on, only tools allowed for the group appear in end users' chat tool list; write operations require per-action confirmation in chat.",
+  "标题不能为空": "Title cannot be empty",
+  "重命名": "Rename",
+  "重命名会话": "Rename session",
+  "重命名失败": "Rename failed"
 }

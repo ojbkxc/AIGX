@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { ChevronLeft, GitFork, MessageSquarePlus, Trash2 } from 'lucide-react';
+import { ChevronLeft, GitFork, MessageSquarePlus, Pencil, Trash2 } from 'lucide-react';
 import ConfirmDialog, { type ConfirmState } from '../ConfirmDialog';
 import './SessionDrawer.css';
 
@@ -37,6 +37,8 @@ export interface SessionDrawerItem {
   parent_session_id?: string | null;
   /** #58：命名来源三态 "user"/"auto"/缺省 → 徽标「手工/自动」 */
   title_source?: string | null;
+  /** #52：会话是否有消息——false 时 fork 入口禁用（tooltip「空会话无可分叉消息」） */
+  forkable?: boolean;
 }
 
 export interface SessionDrawerProps {
@@ -52,6 +54,11 @@ export interface SessionDrawerProps {
   /** #58：行级 fork 入口（可选——AI 运维页不传，行为不变）。
    *  语义由调用方实现：活动会话从最新消息分叉；非活动会话就地复制。 */
   onFork?: (id: string) => void;
+  /** #52：行级重命名入口（可选）。调用方负责 PATCH 后端并回写列表；
+   *  提供后在列表项渲染「编辑」按钮 + 行内编辑态（Enter 提交 / Esc 取消 /
+   *  空标题校验拒绝提交）。rename 语义上把 title_source 置 "user"
+   *  （后端约定：user 档永不被自动标题覆盖）。 */
+  onRename?: (id: string, title: string) => void;
   /** 标题（默认「会话列表」） */
   title?: string;
   /** 头部额外操作（渲染在标题与收起按钮之间，如聊天页的标题总结设置）；
@@ -70,11 +77,16 @@ export default function SessionDrawer({
   onCreate,
   onDelete,
   onFork,
+  onRename,
   title,
   headerExtra,
 }: SessionDrawerProps): JSX.Element | null {
   const { t } = useTranslation();
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  // #52：行内重命名编辑态（编辑中的会话 id + 草稿；Enter 提交/Esc 取消）
+  const [renameId, setRenameId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [renameError, setRenameError] = useState('');
   // hook 必须在提前 return 之前调用（open 切换时 hooks 数量不能变）
   const isNarrow = useIsNarrow();
 
@@ -120,6 +132,38 @@ export default function SessionDrawer({
         {sessions.map((s) => {
           // #58：父悬空容忍——parent id 不在当前列表（被删）→「父已删」徽标
           const parentGone = Boolean(s.parent_session_id) && !sessions.some((x) => x.id === s.parent_session_id);
+          // #52：行内重命名态（该条目进入编辑模式）
+          if (onRename && renameId === s.id) {
+            return (
+              <div key={s.id} className={`sd-item editing ${s.id === activeId ? 'active' : ''}`}>
+                <input
+                  type="text"
+                  className="sd-rename-input form-input"
+                  aria-label={t('重命名会话')}
+                  value={renameDraft}
+                  autoFocus
+                  onChange={(e) => { setRenameDraft(e.target.value); setRenameError(''); }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      const next = renameDraft.trim();
+                      if (!next) { setRenameError(t('标题不能为空')); return; }
+                      onRename(s.id, next);
+                      setRenameId(null);
+                      setRenameError('');
+                    }
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      setRenameId(null);
+                      setRenameError('');
+                    }
+                  }}
+                  onBlur={() => { setRenameId(null); setRenameError(''); }}
+                />
+                {renameError && <span className="sd-rename-error">{renameError}</span>}
+              </div>
+            );
+          }
           return (
           <div key={s.id} className={`sd-item ${s.id === activeId ? 'active' : ''}`}>
             <button
@@ -143,10 +187,27 @@ export default function SessionDrawer({
               <button
                 type="button"
                 className="sd-item-del"
-                title={t('分叉为新会话')}
-                onClick={() => onFork(s.id)}
+                title={s.forkable === false ? t('空会话无可分叉消息') : t('分叉为新会话')}
+                aria-label={t('分叉为新会话')}
+                disabled={s.forkable === false}
+                onClick={() => { if (s.forkable !== false) onFork(s.id); }}
               >
                 <GitFork size={12} />
+              </button>
+            )}
+            {onRename && (
+              <button
+                type="button"
+                className="sd-item-del"
+                title={t('重命名')}
+                aria-label={t('重命名')}
+                onClick={() => {
+                  setRenameId(s.id);
+                  setRenameDraft(s.title || '');
+                  setRenameError('');
+                }}
+              >
+                <Pencil size={12} />
               </button>
             )}
             <button

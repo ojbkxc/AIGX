@@ -330,11 +330,29 @@ export default function Chat(): JSX.Element {
       const title = cleanTitle(raw);
       if (!title) return;
       await api.renameChatSession(id, title);
+      // 自动总结不改 title_source（保持 auto/缺省）；用户手动 rename 才置
+      // "user"（见 renameSession——后端约定 user 档永不被 auto 覆盖）
       persistSessions(sessionsRef.current.map((s) => (s.id === id ? { ...s, title } : s)));
     } catch {
       /* 静默：总结失败保持原标题（本地偏好/网络/渠道问题都不该扰动对话） */
     }
   }, []);
+
+  /** #52：用户手动重命名——PATCH 后端并把本地档位即时切 "user"（徽标
+   *  「手工」）。后端约定：user 档永不被自动标题覆盖（title_source 语义）。 */
+  const renameSession = useCallback(async (id: string, next: string): Promise<void> => {
+    try {
+      await api.renameChatSession(id, next);
+      persistSessions(sessionsRef.current.map((s) => (
+        s.id === id ? { ...s, title: next, title_source: 'user' } : s
+      )));
+      if (id === activeRef.current) {
+        // 抽屉外无标题展示位，无需同步消息区；保持 activeRef 一致即可
+      }
+    } catch (err) {
+      addToast(`${t('重命名失败')}：${err instanceof Error ? err.message : String(err)}`, 'error');
+    }
+  }, [addToast, t]);
 
   const markTitled = useCallback((id: string): void => {
     titledRef.current.add(id);
@@ -661,12 +679,16 @@ export default function Chat(): JSX.Element {
           meta: new Date(s.updated_at * 1000).toLocaleDateString(),
           parent_session_id: s.parent_session_id ?? null,
           title_source: s.title_source ?? null,
+          // #52：fork 可用性——活动会话按内存消息数；非活动会话未知（列表
+          // 接口不回消息数），缺省允许、点了由 forkFromDrawer 二次校验
+          forkable: s.id === activeId ? messages.length > 0 : undefined,
         }))}
         activeId={activeId}
         onSelect={(id) => void switchSession(id)}
         onCreate={() => void createSession()}
         onDelete={(id) => void deleteSession(id)}
         onFork={(id) => void forkFromDrawer(id)}
+        onRename={(id, next) => void renameSession(id, next)}
         headerExtra={(
           <span className="sd-title-cfg">
             <button
