@@ -3311,6 +3311,57 @@ fn charge_chat_test_request(state: &AppState, user_id: &str) {
     }
 }
 
+/// OpenAI 协议 chat_test 出站请求体（抽纯函数供单测钉住注入行为）。
+///
+/// #21/F1：流式必须带 `stream_options.include_usage=true`——OpenAI 兼容
+/// 上游只在收到该字段时才发 usage 终帧，透传链路此前恒缺，导致前端
+/// extractUsage 拿不到数字、记账只能用文本估算兜底。注入先例背书：
+/// 数据面 chat.rs 对客户端 stream_options 原样并入、
+/// bridge/session/codearts.rs 无条件注入长期在跑未见 400 事故；
+/// 个别不识别的老上游（老 vLLM/自建网关）由调用侧 400 兜底单次重试。
+#[allow(clippy::too_many_arguments)] // 参数即请求体字段，平铺比再包一层结构体直白
+fn build_openai_chat_test_payload(
+    upstream: &str,
+    messages: Vec<Value>,
+    stream: bool,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+    max_tokens: Option<u32>,
+    frequency_penalty: Option<f64>,
+    presence_penalty: Option<f64>,
+    reasoning: Option<&'static str>,
+) -> Value {
+    let mut payload = serde_json::json!({
+        "model": upstream,
+        "messages": messages,
+        "stream": stream,
+    });
+    // 采样参数（原本前端发了但后端未落地，导致参数面板形同虚设）
+    if let Some(v) = temperature {
+        payload["temperature"] = serde_json::json!(v);
+    }
+    if let Some(v) = top_p {
+        payload["top_p"] = serde_json::json!(v);
+    }
+    if let Some(v) = max_tokens {
+        payload["max_tokens"] = serde_json::json!(v);
+    }
+    if let Some(v) = frequency_penalty {
+        payload["frequency_penalty"] = serde_json::json!(v);
+    }
+    if let Some(v) = presence_penalty {
+        payload["presence_penalty"] = serde_json::json!(v);
+    }
+    // 深度思考：OpenAI 兼容上游统一用 reasoning_effort
+    if let Some(effort) = reasoning {
+        payload["reasoning_effort"] = serde_json::json!(effort);
+    }
+    if stream {
+        payload["stream_options"] = serde_json::json!({ "include_usage": true });
+    }
+    payload
+}
+
 /// 渠道对话调试入口（原 admin.rs 逐字搬运）。
 pub async fn handle_channel_chat_test(
     State(state): State<AppState>,
@@ -3555,6 +3606,9 @@ pub async fn handle_channel_chat_test(
                 payload_for_log.clone(),
                 account_url.clone(),
                 request_start,
+                // #21/B：提示 token 估算（与数据面 / 499 同款口径），仅在
+                // 上游未回 usage 时用于合成尾帧与记账
+                crate::token_estimate::count_chat_prompt(&model, &chat_req) as u64,
             );
             // 保活：长思考模型调试时上游长时间无输出，空闲期注入 ": keepalive"
             // 注释行（SSE 规范要求解析器忽略注释行，与数据面 /v1/responses 同法），
@@ -3622,38 +3676,55 @@ pub async fn handle_channel_chat_test(
     // ── OpenAI 协议 ──
     if !is_anthropic {
         let url = ch.quirks.append_suffix(&format!("{base}/chat/completions"));
-        let mut payload = serde_json::json!({
-            "model": upstream,
-            "messages": messages,
-            "stream": stream,
-        });
-        // 采样参数（原本前端发了但后端未落地，导致参数面板形同虚设）
-        if let Some(v) = body.temperature {
-            payload["temperature"] = serde_json::json!(v);
-        }
-        if let Some(v) = body.top_p {
-            payload["top_p"] = serde_json::json!(v);
-        }
-        if let Some(v) = body.max_tokens {
-            payload["max_tokens"] = serde_json::json!(v);
-        }
-        if let Some(v) = body.frequency_penalty {
-            payload["frequency_penalty"] = serde_json::json!(v);
-        }
-        if let Some(v) = body.presence_penalty {
-            payload["presence_penalty"] = serde_json::json!(v);
-        }
-        // 深度思考：OpenAI 兼容上游统一用 reasoning_effort
-        if let Some(effort) = reasoning_effort_level(&body.reasoning_effort) {
-            payload["reasoning_effort"] = serde_json::json!(effort);
-        }
-        let mut req = client.post(&url).json(&payload);
-        if !api_key.is_empty() {
-            req = req.bearer_auth(&api_key);
-        }
-        // 渠道级静态头（预置供应商的客户端伪装头等）
-        req = ch.quirks.apply_headers(req);
-        return match req.send().await {
+        let mut payload = build_openai_chat_test_payload(
+            &upstream,
+            messages,
+            stream,
+            body.temperature,
+            body.top_p,
+            body.max_tokens,
+            body.frequency_penalty,
+            body.presence_penalty,
+            reasoning_effort_level(&body.reasoning_effort),
+        );
+        let build_req = |p: &Value| {
+            let mut r = client.post(&url).json(p);
+            if !api_key.is_empty() {
+                r = r.bearer_auth(&api_key);
+            }
+            // 渠道级静态头（预置供应商的客户端伪装头等）
+            ch.quirks.apply_headers(r)
+        };
+        let sent = build_req(&payload).send().await;
+        // #21/A 400 兜底：个别 OpenAI 兼容上游（老 vLLM/自建网关）不识别
+        // stream_options 直接 400 → 去掉该字段单次重试（成本一次往返，
+        // 不新增渠道能力位开关）。重试也发不出去则保留原 400 走统一失败分支。
+        let sent = match sent {
+            Ok(resp) if stream && resp.status() == reqwest::StatusCode::BAD_REQUEST => {
+                let mut stripped = payload.clone();
+                if let Some(obj) = stripped.as_object_mut() {
+                    obj.remove("stream_options");
+                }
+                match build_req(&stripped).send().await {
+                    Ok(retry) => {
+                        tracing::warn!(
+                            "chat_test 上游 400（疑似不识别 stream_options），去字段重试一次: ch={}",
+                            ch.id
+                        );
+                        payload = stripped;
+                        Ok(retry)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "chat_test stream_options 重试发送失败: {e}，保留原 400 响应"
+                        );
+                        Ok(resp)
+                    }
+                }
+            }
+            other => other,
+        };
+        return match sent {
             Ok(resp) => {
                 let status = resp.status();
                 if !status.is_success() {
@@ -3926,6 +3997,53 @@ pub async fn handle_channel_chat_test(
     }
 }
 
+/// #21/B：账号池归一化流尾部合成的 usage 收尾帧（`[DONE]` 前最后一帧）。
+///
+/// 抽成纯函数便于行为测试钉死形状：OpenAI `chat.completion.chunk` 口径、
+/// `choices` 为空数组（不再带正文）、顶层 `usage` 带三个数字；
+/// `estimated=true` 时额外挂同名标记供前端画「估算」角标，上游真值时不写该键。
+/// 返回完整字节串（尾帧 + `[DONE]`），前端两条流式链路的解析入口一致。
+fn usage_tail_frame(id: &str, model: &str, usage: &Value, estimated: bool) -> String {
+    let mut frame = serde_json::json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": chrono::Utc::now().timestamp(),
+        "model": model,
+        "choices": [],
+        "usage": usage,
+    });
+    if estimated {
+        frame["estimated"] = serde_json::json!(true);
+    }
+    format!("data: {}\n\ndata: [DONE]\n\n", frame)
+}
+
+/// #21/B：流尾 usage 的取值规则 —— **上游真值优先，缺失才自报估算**。
+///
+/// 账号池归一化链路的 usage 只能由后端合成：bridge 若已从上游解析到真值
+/// （`ChatChunk.usage`，OpenAI include_usage 终帧 / Anthropic message_delta），
+/// 原样采用且不标记；否则按「提示估算 + 输出文本估算」自报并置
+/// `estimated=true`，同一数字回写给记账守卫，保证展示与扣费是同一口径。
+fn resolve_tail_usage(
+    upstream_usage: Option<Value>,
+    prompt_tokens_est: u64,
+    model: &str,
+    output: &str,
+) -> (Value, bool) {
+    if let Some(u) = upstream_usage {
+        return (u, false);
+    }
+    let completion = crate::token_estimate::count_text(model, output) as u64;
+    (
+        serde_json::json!({
+            "prompt_tokens": prompt_tokens_est,
+            "completion_tokens": completion,
+            "total_tokens": prompt_tokens_est + completion,
+        }),
+        true,
+    )
+}
+
 /// 账号池 chat_test 流式包装：把 AccountBridge 的归一化 `ChatChunk` 序列化为
 /// OpenAI SSE 帧（与数据面 /v1/chat/completions 的 wire 形状一致，前端
 /// `parseSseFrame` 按 choices[0].delta 解析），并在流结束/drop 时记账。
@@ -3943,15 +4061,38 @@ fn account_chat_test_stream(
     request_body: Value,
     upstream_url: String,
     request_start: std::time::Instant,
+    // #21/B：调用方用 `count_chat_prompt`（与数据面 / 499 同款口径）算好的
+    // 提示 token 估算值，仅在流尾没有上游真 usage 时兜底合成 usage 帧。
+    prompt_tokens_est: u64,
 ) -> impl Stream<Item = Result<bytes::Bytes, std::convert::Infallible>> {
     // 输出文本累积（估算 completion tokens；含 reasoning）
     let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
     let acc_for_map = acc.clone();
+    // #21/B：bridge 归一化块的 usage 字段（OpenAI include_usage 终帧 /
+    // Anthropic message_delta 已在 bridge 内解析成 UsageStats）。有真值时
+    // 流尾直接用真值（estimated=false），没有才自报估算。
+    let usage_slot = std::sync::Arc::new(parking_lot::Mutex::new(Option::<Value>::None));
+    let usage_for_map = usage_slot.clone();
+    let model_for_tail = model.clone();
+    let acc_for_tail = acc.clone();
+    let usage_for_tail = usage_slot.clone();
+    // 出错帧自带 `[DONE]` 收尾，此时不再补 usage 尾帧（避免错误气泡后面挂估算数字）
+    let errored = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let errored_for_map = errored.clone();
+    let errored_for_tail = errored;
 
     let mapped = inner.map(
         move |chunk_result| -> Result<bytes::Bytes, std::convert::Infallible> {
             match chunk_result {
                 Ok(chunk) => {
+                    // #21/B：上游真 usage 优先留存（bridge 已归一化为 UsageStats）
+                    if let Some(stats) = &chunk.usage {
+                        *usage_for_map.lock() = Some(serde_json::json!({
+                            "prompt_tokens": stats.prompt_tokens,
+                            "completion_tokens": stats.completion_tokens,
+                            "total_tokens": stats.total_tokens,
+                        }));
+                    }
                     let mut delta = serde_json::json!({
                         "content": chunk.delta.content.clone().unwrap_or_default(),
                     });
@@ -4001,6 +4142,7 @@ fn account_chat_test_stream(
                 Err(e) => {
                     // 与数据面同款标准 SSE 错误帧：前端解析后以错误气泡收尾
                     tracing::warn!("account chat_test stream error: {e}");
+                    errored_for_map.store(true, std::sync::atomic::Ordering::Relaxed);
                     let safe_msg = crate::error_translate::sanitize_error_message(&e.to_string());
                     let err_data = serde_json::json!({
                     "error": { "message": safe_msg, "type": e.error_type(), "code": e.error_type() }
@@ -4025,6 +4167,7 @@ fn account_chat_test_stream(
         upstream_url: String,
         request_start: std::time::Instant,
         acc: std::sync::Arc<parking_lot::Mutex<String>>,
+        usage_slot: std::sync::Arc<parking_lot::Mutex<Option<Value>>>,
         fired: std::sync::atomic::AtomicBool,
     }
     impl std::ops::Drop for AccountStreamGuard {
@@ -4033,13 +4176,23 @@ fn account_chat_test_stream(
                 return;
             }
             let output = self.acc.lock().clone();
+            // #21/B：展示与扣费同源——流尾已把最终 usage（上游真值或估算）写回
+            // slot，记账直接吃它；客户端断连等没走到流尾的情况，slot 里要么只剩
+            // 上游真值、要么为空（空则保持原 Null→按文本估算的口径）。
+            let usage_json = match self.usage_slot.lock().clone() {
+                Some(u) => serde_json::json!({
+                    "usage": u,
+                    "choices": [{ "message": { "content": output } }],
+                }),
+                None => Value::Null,
+            };
             record_chat_test_usage(
                 &self.state,
                 &self.user,
                 &self.channel_id,
                 &self.channel_name,
                 &self.model,
-                &Value::Null,
+                &usage_json,
                 Some(&output),
                 &self.request_body,
                 &self.upstream_url,
@@ -4057,11 +4210,33 @@ fn account_chat_test_stream(
         upstream_url,
         request_start,
         acc: acc.clone(),
+        usage_slot: usage_slot.clone(),
         fired: std::sync::atomic::AtomicBool::new(false),
     };
 
-    let done = futures::stream::once(async {
-        Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(b"data: [DONE]\n\n"))
+    let done = futures::stream::once(async move {
+        if errored_for_tail.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(
+                b"data: [DONE]\n\n",
+            ));
+        }
+        // #21/B：流尾补一帧 usage（此前归一化链路结构上不可能带 usage，前端
+        // 只能显示空数字）。取值规则见 resolve_tail_usage：上游真值优先。
+        let upstream_usage = usage_for_tail.lock().clone();
+        let output = acc_for_tail.lock().clone();
+        let (usage, estimated) =
+            resolve_tail_usage(upstream_usage, prompt_tokens_est, &model_for_tail, &output);
+        if estimated {
+            // 回写估算值，记账守卫吃同一口径（展示 = 扣费，不分裂）
+            *usage_for_tail.lock() = Some(usage.clone());
+        }
+        let frame = usage_tail_frame(
+            &format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+            &model_for_tail,
+            &usage,
+            estimated,
+        );
+        Ok::<_, std::convert::Infallible>(bytes::Bytes::from(frame))
     });
     // 先记成功：chat_test 记账以 drop 守卫为准，这里只做包装
     crate::api::openai::GuardedStream {
@@ -4216,6 +4391,18 @@ fn record_chat_test_failure(
     }
 }
 
+/// 从 SSE 帧里取 OpenAI 口径的 usage 终帧内容（顶层 `usage`）。
+///
+/// 只认 `prompt_tokens`/`completion_tokens` 命名 —— Anthropic `message_delta`
+/// 的 usage 是 `input_tokens`/`output_tokens`，`extract_usage_tokens` 读不到，
+/// 若当上游真值会把计费打成 0，故此处刻意不收（维持原按文本估算口径）。
+fn openai_stream_usage(frame: &Value) -> Option<Value> {
+    frame
+        .get("usage")
+        .filter(|u| u.get("prompt_tokens").is_some() || u.get("completion_tokens").is_some())
+        .cloned()
+}
+
 /// chat_test 流式透传包装流：边转发边累积 SSE 增量，流结束（正常或断连
 /// drop）时估算 token 并落日志。
 ///
@@ -4242,6 +4429,13 @@ where
     // 输出文本累积（估算 completion tokens 用）
     let acc = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
     let acc_for_map = acc.clone();
+    // #21/A★：嗅探透传流的 OpenAI usage 终帧（注入 stream_options 后上游
+    // 才会发）。记账此前恒传 Null 只能文本估算；嗅到真值后喂计费，数字
+    // 同时变准。仅收 prompt_tokens/completion_tokens 形状——Anthropic
+    // message_delta 的 usage 是 input/output_tokens 命名，extract 不消费，
+    // 维持原估算口径不动。
+    let usage_slot = std::sync::Arc::new(parking_lot::Mutex::new(Option::<Value>::None));
+    let usage_for_map = usage_slot.clone();
 
     let mapped = inner.map(move |item| {
         if let Ok(chunk) = &item {
@@ -4272,6 +4466,10 @@ where
                             if let Some(t) = v.pointer("/delta/text").and_then(|c| c.as_str()) {
                                 crate::token_estimate::push_capped(&mut acc_for_map.lock(), t);
                             }
+                            // usage 终帧（顶层 usage，OpenAI include_usage 口径）
+                            if let Some(u) = openai_stream_usage(&v) {
+                                *usage_for_map.lock() = Some(u);
+                            }
                         }
                     }
                 } else {
@@ -4295,6 +4493,7 @@ where
         upstream_url: String,
         request_start: std::time::Instant,
         acc: std::sync::Arc<parking_lot::Mutex<String>>,
+        usage_slot: std::sync::Arc<parking_lot::Mutex<Option<Value>>>,
         fired: std::sync::atomic::AtomicBool,
     }
     impl std::ops::Drop for ChatTestLogGuard {
@@ -4303,13 +4502,22 @@ where
                 return;
             }
             let output = self.acc.lock().clone();
+            // 嗅到真 usage → 包装成完整响应形状（extract 读 /usage；日志
+            // 快照同时保留累积文本）；没嗅到则维持 Null → 文本估算兜底。
+            let usage_json = match self.usage_slot.lock().clone() {
+                Some(u) => serde_json::json!({
+                    "usage": u,
+                    "choices": [{ "message": { "content": output } }],
+                }),
+                None => Value::Null,
+            };
             record_chat_test_usage(
                 &self.state,
                 &self.user,
                 &self.channel_id,
                 &self.channel_name,
                 &self.model,
-                &Value::Null,
+                &usage_json,
                 Some(&output),
                 &self.request_body,
                 &self.upstream_url,
@@ -4327,6 +4535,7 @@ where
         upstream_url,
         request_start,
         acc: acc.clone(),
+        usage_slot,
         fired: std::sync::atomic::AtomicBool::new(false),
     };
 
@@ -4468,5 +4677,200 @@ pub async fn handle_test_webhook(
             &format!("发送失败: {e}"),
             StatusCode::INTERNAL_SERVER_ERROR,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn one_message() -> Vec<Value> {
+        vec![serde_json::json!({ "role": "user", "content": "你好" })]
+    }
+
+    fn frame_of(bytes_str: &str) -> Value {
+        let first = bytes_str
+            .split("\n\n")
+            .next()
+            .and_then(|l| l.strip_prefix("data: "))
+            .unwrap_or_else(|| panic!("非法 SSE 帧: {bytes_str:?}"));
+        serde_json::from_str(first).unwrap_or_else(|e| panic!("帧不是合法 JSON: {e}"))
+    }
+
+    /// #21/A：流式必须注入 stream_options.include_usage，非流式不带（否则上游 400）
+    #[test]
+    fn stream_payload_injects_include_usage_only_when_streaming() {
+        let streaming = build_openai_chat_test_payload(
+            "gpt-4o",
+            one_message(),
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            streaming["stream_options"]["include_usage"],
+            serde_json::json!(true)
+        );
+        assert_eq!(streaming["model"], serde_json::json!("gpt-4o"));
+        assert_eq!(streaming["stream"], serde_json::json!(true));
+
+        let non_streaming = build_openai_chat_test_payload(
+            "gpt-4o",
+            one_message(),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            non_streaming.get("stream_options").is_none(),
+            "非流式带 stream_options 会被上游拒绝"
+        );
+    }
+
+    /// 采样参数/推理档位：有值才落字段，无值不得出现 null（上游会当非法参数）
+    #[test]
+    fn payload_keeps_absent_sampling_params_out_of_body() {
+        let full = build_openai_chat_test_payload(
+            "m",
+            one_message(),
+            false,
+            Some(0.7),
+            Some(0.9),
+            Some(128),
+            Some(-1.0),
+            Some(0.5),
+            Some("high"),
+        );
+        assert_eq!(full["temperature"], serde_json::json!(0.7));
+        assert_eq!(full["top_p"], serde_json::json!(0.9));
+        assert_eq!(full["max_tokens"], serde_json::json!(128));
+        assert_eq!(full["frequency_penalty"], serde_json::json!(-1.0));
+        assert_eq!(full["presence_penalty"], serde_json::json!(0.5));
+        assert_eq!(full["reasoning_effort"], serde_json::json!("high"));
+
+        let bare = build_openai_chat_test_payload(
+            "m",
+            one_message(),
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        for key in [
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "frequency_penalty",
+            "presence_penalty",
+            "reasoning_effort",
+        ] {
+            assert!(bare.get(key).is_none(), "{key} 无值时不应出现在请求体");
+        }
+    }
+
+    /// #21/B：账号池归一化链路尾帧形状 —— 上游真值不带 estimated，自报估算必须带
+    #[test]
+    fn usage_tail_frame_shape_and_estimated_marker() {
+        let usage = serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+        });
+
+        let estimated = usage_tail_frame("chatcmpl-test", "deepseek-chat", &usage, true);
+        let mut parts = estimated.split("\n\n");
+        let first = parts.next().unwrap();
+        assert!(first.starts_with("data: {"), "首段应为 usage 尾帧: {first}");
+        assert_eq!(
+            parts.next().unwrap(),
+            "data: [DONE]",
+            "尾帧必须在 [DONE] 之前"
+        );
+        let frame = frame_of(&estimated);
+        assert_eq!(frame["id"], serde_json::json!("chatcmpl-test"));
+        assert_eq!(frame["object"], serde_json::json!("chat.completion.chunk"));
+        assert_eq!(frame["model"], serde_json::json!("deepseek-chat"));
+        assert!(frame["created"].is_number());
+        // 收尾帧不再带正文增量
+        assert_eq!(frame["choices"].as_array().unwrap().len(), 0);
+        assert_eq!(frame["usage"]["prompt_tokens"], serde_json::json!(10));
+        assert_eq!(frame["usage"]["total_tokens"], serde_json::json!(15));
+        assert_eq!(frame["estimated"], serde_json::json!(true));
+
+        let real = usage_tail_frame("chatcmpl-test", "deepseek-chat", &usage, false);
+        assert!(
+            frame_of(&real).get("estimated").is_none(),
+            "上游真值不得标 estimated"
+        );
+    }
+
+    /// 透传链路的 usage 嗅探口径：只收 OpenAI 命名（prompt/completion_tokens），
+    /// Anthropic 的 input/output_tokens 维持原估算兜底，不误当上游真值
+    #[test]
+    fn passthrough_usage_sniff_accepts_only_openai_named_usage() {
+        let openai = serde_json::json!({
+            "choices": [],
+            "usage": { "prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7 },
+        });
+        assert_eq!(
+            openai_stream_usage(&openai),
+            Some(serde_json::json!({
+                "prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7
+            }))
+        );
+
+        let anthropic = serde_json::json!({
+            "type": "message_delta",
+            "usage": { "input_tokens": 3, "output_tokens": 4 },
+        });
+        assert_eq!(openai_stream_usage(&anthropic), None);
+
+        // 增量帧没有 usage，也不能误取
+        let plain = serde_json::json!({
+            "choices": [{ "index": 0, "delta": { "content": "你好" } }],
+        });
+        assert_eq!(openai_stream_usage(&plain), None);
+    }
+
+    /// #21/B：尾帧取值优先级 —— 上游真值覆盖估算；估算分支的口径必须是
+    /// 「调用方给的 prompt 估算 + count_text(输出文本)」，且 estimated=true
+    #[test]
+    fn tail_usage_prefers_upstream_and_estimates_otherwise() {
+        let real = serde_json::json!({
+            "prompt_tokens": 999, "completion_tokens": 111, "total_tokens": 1110
+        });
+        let (usage, estimated) = resolve_tail_usage(Some(real.clone()), 1, "gpt-4o", "任意输出");
+        assert_eq!(usage, real);
+        assert!(!estimated, "上游真值不得标 estimated");
+
+        let output = "这是一段模型输出文本，用来验证估算口径。";
+        let (usage, estimated) = resolve_tail_usage(None, 120, "gpt-4o", output);
+        assert!(estimated);
+        let expect_completion = crate::token_estimate::count_text("gpt-4o", output) as u64;
+        assert_ne!(expect_completion, 0);
+        assert_eq!(usage["prompt_tokens"], serde_json::json!(120));
+        assert_eq!(
+            usage["completion_tokens"],
+            serde_json::json!(expect_completion)
+        );
+        assert_eq!(
+            usage["total_tokens"],
+            serde_json::json!(120 + expect_completion)
+        );
+
+        // 空输出（尚未收到增量即收尾）：估算 0，但字段齐备，前端不会拿到 null
+        let (usage, _) = resolve_tail_usage(None, 5, "gpt-4o", "");
+        assert_eq!(usage["completion_tokens"], serde_json::json!(0));
     }
 }
