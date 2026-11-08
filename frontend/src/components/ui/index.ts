@@ -12,8 +12,6 @@ export { default as Select } from './Select';
 export { default as Textarea } from './Textarea';
 export { default as Tabs } from './Tabs';
 export { default as FileInput } from './FileInput';
-export { default as DataTable } from './DataTable';
-export { default as ColumnSettingsDrawer } from './ColumnSettingsDrawer';
 export { default as MobileDrawer } from './MobileDrawer';
 export { default as Switch } from './Switch';
 export { default as Tooltip } from './Tooltip';
