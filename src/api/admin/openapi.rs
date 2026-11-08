@@ -150,6 +150,7 @@ fn query_param(name: &str, ty: &str, desc: &str) -> Value {
 fn paths_auth() -> Value {
     json!({
         "/api/auth/login": { "post": op_pub("认证", "用户登录（返回管理会话 token）") },
+        "/api/auth/captcha": { "get": op_pub("认证", "领取机器人校验题（ALTCHA challenge；开关关闭时 400，前端据此隐藏校验组件）") },
         "/api/auth/login/send-code": { "post": op_pub("认证", "发送邮箱验证码（验证码登录前置）") },
         "/api/auth/login/code": { "post": op_pub("认证", "邮箱验证码登录") },
         "/api/auth/login/totp": { "post": op_pub("认证", "TOTP 两步验证登录（密码通过后携码换会话）") },
@@ -161,6 +162,8 @@ fn paths_auth() -> Value {
         "/api/auth/reset-password": { "post": op_pub("认证", "凭重置 token 重置密码") },
         "/api/auth/change-password": { "post": op_body("认证", "修改本人密码", "old_password/new_password: string") },
         "/api/auth/logout": { "post": op("认证", "登出（撤销会话）") },
+        "/api/session": { "get": op_pub("认证", "首屏登录态概况（configured/authenticated/expiresAt；未登录不报错，email 仅在已认证时返回）") },
+        "/api/session/refresh": { "post": op("认证", "刷新当前登录态（同 email 续签新 token，撤销旧 session_id）") },
         "/api/auth/github": { "get": op_pub("认证", "GitHub OAuth 授权跳转") },
         "/api/auth/github/callback": { "get": op_pub("认证", "GitHub OAuth 回调") },
         "/api/auth/google": { "get": op_pub("认证", "Google OAuth 授权跳转") },
@@ -226,6 +229,15 @@ fn paths_users() -> Value {
         "/api/chat/sessions/{id}/messages": {
             "post": op_body("用户", "追加一条消息", "role/content/extra"),
             "put": op_body("用户", "整表替换消息（编辑/重发后 debounce 保存）", "messages: [{role, content, extra}]")
+        },
+        "/api/chat/sessions/{id}/fork": {
+            "post": op_params("用户", "从指定消息处分叉出新会话（保留前序上下文）", &[path_param("id")])
+        },
+        "/api/user/records": {
+            "get": op_params("用户", "本人积分流水（签到获得 + API 消耗合并时间线）", &[
+                query_param("page", "integer", "页码（默认 1）"),
+                query_param("size", "integer", "每页条数（默认 20）")
+            ])
         },
         "/api/checkin": {
             "get": op("用户", "查询今日签到状态"),
@@ -376,6 +388,22 @@ fn paths_model_manage() -> Value {
         "/api/models/alias": {
             "post": op_body("模型管理", "设置全局模型别名", "alias/target: string")
         },
+        "/api/models/alias/state": {
+            "post": op_body("模型管理", "启停全局模型别名（不改映射，只切是否生效）", "alias: string, enabled: bool")
+        },
+        "/api/models/capabilities": {
+            "post": op_body("模型管理", "设置模型能力标签（vision/tools/reasoning 等）", "provider?: string, model: string, capabilities: object")
+        },
+        "/api/models/refresh": {
+            "post": op("模型管理", "触发上游模型发现刷新（写操作）")
+        },
+        "/api/models/metadata": {
+            "get": op("模型管理", "读取 models.dev 元数据同步开关与最近同步状态"),
+            "put": op_body("模型管理", "更新 models.dev 元数据同步开关（写操作）", "enabled: bool")
+        },
+        "/api/models/metadata/refresh": {
+            "post": op("模型管理", "立即拉取 models.dev 元数据（写操作）")
+        },
         "/api/models/alias/remove": {
             "post": op_body("模型管理", "删除全局模型别名", "alias: string")
         },
@@ -431,6 +459,16 @@ fn paths_checkin_center() -> Value {
             "get": op("签到中心", "读取签到设置"),
             "put": op_body("签到中心", "保存签到设置", "enabled: bool, gap_ms: integer")
         },
+        "/api/checkin-center/benefits": {
+            "get": op("签到中心", "一次性/限时福利通道清单（新手礼 / 保活 / 成长任务 / 限时套餐 / UMID）")
+        },
+        "/api/checkin-center/benefits/run": {
+            "post": op_body("签到中心", "执行指定福利通道", "id: string, account_ids?: string[]")
+        },
+        "/api/checkin-center/benefits/keepalive": {
+            "get": op("签到中心", "读取保活福利配置"),
+            "put": op_body("签到中心", "保存保活福利配置", "enabled: bool, 间隔/范围等字段")
+        },
     })
 }
 
@@ -463,6 +501,9 @@ fn paths_report() -> Value {
     json!({
         "/api/dashboard/report/cache_rates": {
             "get": op_params("看板", "缓存命中率多窗口（10m/1h/24h/7d）", &[query_param("days", "integer", "回溯天数")])
+        },
+        "/api/dashboard/report/cache_trend_24h": {
+            "get": op("看板", "近 24 小时小时粒度缓存命中趋势")
         },
         "/api/dashboard/report/daily_trend": {
             "get": op_params("看板", "按天请求/Token 趋势", &[query_param("days", "integer", "回溯天数")])
@@ -601,6 +642,31 @@ fn paths_logs() -> Value {
         "/api/logs/requests/clear": {
             "delete": op("日志", "清空全部请求日志（写操作）")
         },
+        "/api/logs/requests/clear-preview": {
+            "get": op_params("日志", "删除前预览：告诉管理员会清掉多少条请求日志", &[
+                query_param("days", "integer", "回溯天数（0/缺省=全部）")
+            ])
+        },
+        "/api/logs/inflight": {
+            "get": op("日志", "在途请求快照（谁在跑、跑了多久；RequestLog 只在结束后落库）")
+        },
+        "/api/logs/inflight/{id}/terminate": {
+            "post": op_params("日志", "终止指定在途请求（写操作）", &[path_param("id")])
+        },
+        "/api/logs/runtime": {
+            "get": op_params("日志", "运行日志环形缓冲（level/category 字典 + 500 条 + sinceId 水位）", &[
+                query_param("level", "string", "按级别过滤"),
+                query_param("category", "string", "按类别过滤"),
+                query_param("since_id", "integer", "水位（只取更新的条目）"),
+                query_param("limit", "integer", "返回条数上限")
+            ])
+        },
+        "/api/logs/runtime/export": {
+            "get": op("日志", "导出运行日志 JSONL（Content-Disposition 附件）")
+        },
+        "/api/logs/agg/rebuild": {
+            "post": op("日志", "手动重建日聚合（逃生门：聚合数字可疑时重算历史，写操作）")
+        },
         "/api/logs/audits": {
             "get": op_params("日志", "查询审计日志（分页）", &[
                 query_param("page", "integer", "页码（默认 1）"),
@@ -672,6 +738,24 @@ fn paths_settings_ops() -> Value {
             "get": op("AI 助手", "查询 AI 助手设置（模型/提示词/工具开关/轮数）"),
             "put": op_body("AI 助手", "更新 AI 助手设置（写操作）", "model/systemPrompt/disabledTools/maxTurns/approvalTimeout")
         },
+        // Agent 工作台（src/agent/api.rs 的独立 router，main.rs 里 merge 进来）
+        "/api/agent/config": {
+            "get": op("AI 助手", "Agent 配置只读视图（与 /api/agent/settings 同源同形状，附 effectiveModel 生效模型）")
+        },
+        "/api/agent/sessions": {
+            "get": op("AI 助手", "列出 Agent 会话"),
+            "post": op_body("AI 助手", "新建 Agent 会话", "title?: string, role?: 'observer' | 'operator'")
+        },
+        "/api/agent/sessions/{id}": {
+            "get": op_params("AI 助手", "会话详情 + 全部消息", &[path_param("id")]),
+            "delete": op_params("AI 助手", "删除会话及其消息（顺带清免审集）", &[path_param("id")])
+        },
+        "/api/agent/sessions/{id}/chat": {
+            "post": op_params("AI 助手", "对话（SSE 流式推 AgentEvent；body: message/model?/reasoning_effort?/role?）", &[path_param("id")])
+        },
+        "/api/agent/approvals/{request_id}": {
+            "post": op_params("AI 助手", "审批响应（写操作；body: action = allow | deny | remember）", &[path_param("request_id")])
+        },
         "/api/gateway/settings": {
             "get": op("网关", "查询网关设置（监听地址/CORS/反代信任）"),
             "put": op_body("网关", "更新网关设置（重启后生效）", "host/port/corsOrigins/trustProxyHeaders")
@@ -690,6 +774,26 @@ fn paths_settings_ops() -> Value {
         "/api/routing/sticky/clear": {
             "post": op_body("路由", "解除粘滞（只删内存亲和记录，不写策略快照；下次该会话选路自然重走 HRW）", "id（单条，GET 返回的 id）| all:true（全清）；两者皆缺 400")
         },
+        // #40 多规则档案 + 候选队列 + 判定预演（契约 §5）
+        "/api/routing/queue": {
+            "get": op_params("路由", "候选队列预演（只读，不推进 round_robin 游标；round_robin 下实际首挑由游标决定）", &[
+                query_param("provider", "string", "按上游过滤"),
+                query_param("model", "string", "按模型过滤"),
+                query_param("session_id", "string", "按会话算粘滞命中")
+            ])
+        },
+        "/api/routing/profiles": {
+            "get": op("路由", "读取多规则档案全量（组列表 + 规则）"),
+            "put": op_body("路由", "整份写入多规则档案（写操作）", "profiles/version 等档案字段")
+        },
+        "/api/routing/profiles/group/{id}": {
+            "get": op_params("路由", "读取单个规则组", &[path_param("id")]),
+            "put": op_params("路由", "写入/更新单个规则组（写操作）", &[path_param("id")]),
+            "delete": op_params("路由", "删除单个规则组（写操作）", &[path_param("id")])
+        },
+        "/api/routing/preview": {
+            "post": op_body("路由", "判定预演（与队列共用同一判定序列，可指定 group_id 预演某组）", "provider/model/session_id/group_id 等")
+        },
         "/api/assistant/tools": {
             "get": op("助手", "聊天助手工具目录（管理员+开关开启→非 HighRisk 全集；否则空清单）")
         },
@@ -705,6 +809,38 @@ fn paths_settings_ops() -> Value {
         "/api/gateway/prompt": {
             "get": op("网关", "查询系统提示词注入配置（模式/文本）"),
             "put": op_body("网关", "更新系统提示词注入（热生效）", "mode(passthrough/custom/append)/text")
+        },
+        "/api/sanitize": {
+            "get": op("网关", "查询额外脱敏请求头名单（指纹脱敏）"),
+            "put": op_body("网关", "更新额外脱敏请求头名单（热生效）", "headers: string[]")
+        },
+        "/api/cline-headers": {
+            "get": op("网关", "查询 Cline 伪装头覆盖表"),
+            "put": op_body("网关", "更新 Cline 伪装头覆盖表（热生效）", "headers: object")
+        },
+        "/api/security/policy": {
+            "get": op("安全", "查询安全策略（登录失败锁定 / 登录限流阈值）"),
+            "put": op_body("安全", "更新安全策略（保存即生效）", "登录失败次数/锁定时长/限流阈值")
+        },
+        "/api/queue": {
+            "get": op("网关", "查询排队设置（并发满时等待上限）"),
+            "put": op_body("网关", "更新排队设置（热生效）", "queueMaxWaits: integer, queueWaitSeconds: integer")
+        },
+        "/api/scheduled-tasks": {
+            "get": op("定时任务", "列出间隔型定时任务（状态/间隔/上次运行）")
+        },
+        "/api/scheduled-tasks/{id}": {
+            "patch": op_params("定时任务", "配置任务开关/间隔（写操作）", &[path_param("id")]),
+            "post": op_params("定时任务", "配置任务开关/间隔（POST 别名，与 PATCH 同 handler）", &[path_param("id")])
+        },
+        "/api/scheduled-tasks/{id}/run": {
+            "post": op_params("定时任务", "立即执行一次（写操作）", &[path_param("id")])
+        },
+        "/api/upgrade": {
+            "get": op("更新", "查询数据升级状态（AIGX 原生 SQLite 无旧数据，端点保留对齐 API 面）")
+        },
+        "/api/upgrade/run": {
+            "post": op("更新", "执行数据升级（写操作）")
         },
         "/api/storage": {
             "get": op("数据", "存储概览（KV 总键数/分组统计/库文件大小）")
@@ -979,6 +1115,15 @@ fn paths_accounts_network() -> Value {
         "/api/account-sessions/stats": {
             "get": op("账号池", "按渠道聚合的账号池统计（启用/冷却/并发/成败）")
         },
+        "/api/account-sessions/connections": {
+            "get": op("账号池", "各账号实时并发占用快照（连接数列 2s 轮询）")
+        },
+        "/api/account-sessions/export": {
+            "get": op("账号池", "导出账号池 JSON 迁移包（含明文凭证，仅管理员；写进响应体不落盘）")
+        },
+        "/api/account-sessions/import/json": {
+            "post": op_body("账号池", "从 JSON 迁移包导入账号池（幂等更新）", "导出的迁移包结构")
+        },
         "/api/account-sessions/bulk": {
             "post": op_body("账号池", "批量导入凭证（每行 Name,Key 或仅 Key）", "channel_id + credentials")
         },
@@ -1169,10 +1314,13 @@ mod tests {
         add("/api/account-sessions/usage/snapshot", &["get"]);
         add("/api/account-sessions/desktop/sources", &["get"]);
         add("/api/account-sessions/desktop-import", &["post"]);
+        add("/api/account-sessions/export", &["get"]);
         add("/api/account-sessions/catalog/providers", &["get"]);
         add("/api/account-sessions/catalog/sync", &["post"]);
+        add("/api/account-sessions/connections", &["get"]);
         add("/api/account-sessions/import", &["post"]);
         add("/api/account-sessions/import/agent2api", &["post"]);
+        add("/api/account-sessions/import/json", &["post"]);
         add("/api/account-sessions/import/sources", &["get"]);
         add("/api/account-sessions/login/callback", &["post"]);
         add("/api/account-sessions/login/cancel", &["post"]);
@@ -1232,6 +1380,7 @@ mod tests {
         add("/api/alerts/history", &["get"]);
         add("/api/alerts/rules", &["get", "put"]);
         add("/api/alerts/test", &["post"]);
+        add("/api/auth/captcha", &["get"]);
         add("/api/auth/change-password", &["post"]);
         add("/api/auth/forgot-password", &["post"]);
         add("/api/auth/github", &["get"]);
@@ -1268,6 +1417,7 @@ mod tests {
         add("/api/channels/{id}/test", &["post"]);
         add("/api/chat/sessions", &["get", "post"]);
         add("/api/chat/sessions/{id}", &["delete", "get"]);
+        add("/api/chat/sessions/{id}/fork", &["post"]);
         add("/api/chat/sessions/{id}/messages", &["post", "put"]);
         add("/api/chat/sessions/{id}/rename", &["post"]);
         add("/api/checkin", &["get", "post"]);
@@ -1277,6 +1427,7 @@ mod tests {
         add("/api/dashboard/model_distribution", &["get"]);
         add("/api/dashboard/realtime", &["get"]);
         add("/api/dashboard/report/cache_rates", &["get"]);
+        add("/api/dashboard/report/cache_trend_24h", &["get"]);
         add("/api/dashboard/report/daily_trend", &["get"]);
         add("/api/dashboard/report/heatmap", &["get"]);
         add("/api/dashboard/report/models", &["get"]);
@@ -1300,9 +1451,23 @@ mod tests {
         // legacy /api/keys 两条已删（路由与文档表同步移除，见 paths_tokens 注释）
         add("/api/limits", &["get", "put"]);
         add("/api/agent/settings", &["get", "put"]);
+        // Agent 工作台（src/agent/api.rs 独立 router）
+        add("/api/agent/config", &["get"]);
+        add("/api/agent/sessions", &["get", "post"]);
+        add("/api/agent/sessions/{id}", &["delete", "get"]);
+        add("/api/agent/sessions/{id}/chat", &["post"]);
+        add("/api/agent/approvals/{request_id}", &["post"]);
         add("/api/gateway/settings", &["get", "put"]);
         add("/api/routing", &["get", "put"]);
         add("/api/routing/defaults", &["get"]);
+        // #46 补登：#40 多规则档案 / 候选队列 / 判定预演四条
+        add("/api/routing/queue", &["get"]);
+        add("/api/routing/profiles", &["get", "put"]);
+        add(
+            "/api/routing/profiles/group/{id}",
+            &["delete", "get", "put"],
+        );
+        add("/api/routing/preview", &["post"]);
         // #38 粘滞会话管理面两条。此前漏登且测试不红 —— 本清单与 main.rs
         // 之间是**人工对照**（`covers_all_real_admin_routes` 只保证
         // 文档 ↔ 本清单相等，管不到本清单 ↔ 真实路由），漏 add 时两边
@@ -1314,6 +1479,16 @@ mod tests {
         add("/api/assistant/tools", &["get"]);
         add("/api/assistant/chat", &["post"]);
         add("/api/gateway/prompt", &["get", "put"]);
+        // #46 补登：网关指纹/排队 + 安全策略 + 定时任务 + 数据升级
+        add("/api/sanitize", &["get", "put"]);
+        add("/api/cline-headers", &["get", "put"]);
+        add("/api/queue", &["get", "put"]);
+        add("/api/security/policy", &["get", "put"]);
+        add("/api/scheduled-tasks", &["get"]);
+        add("/api/scheduled-tasks/{id}", &["patch", "post"]);
+        add("/api/scheduled-tasks/{id}/run", &["post"]);
+        add("/api/upgrade", &["get"]);
+        add("/api/upgrade/run", &["post"]);
         add("/api/storage", &["get"]);
         add("/api/backup/export-encrypted", &["post"]);
         add("/api/backup/download", &["get"]);
@@ -1326,14 +1501,25 @@ mod tests {
         add("/api/logs/requests/clear", &["delete"]);
         add("/api/logs/requests/export", &["get"]);
         add("/api/logs/retention", &["get", "put"]);
+        add("/api/logs/runtime", &["get"]);
+        add("/api/logs/runtime/export", &["get"]);
+        add("/api/logs/inflight", &["get"]);
+        add("/api/logs/inflight/{id}/terminate", &["post"]);
+        add("/api/logs/requests/clear-preview", &["get"]);
+        add("/api/logs/agg/rebuild", &["post"]);
         add("/api/mcp", &["post"]);
         add("/api/models/alias", &["post"]);
         add("/api/models/alias/remove", &["post"]);
         add("/api/models/alias/reasoning", &["post"]);
+        add("/api/models/alias/state", &["post"]);
+        add("/api/models/capabilities", &["post"]);
         add("/api/models/available", &["get"]);
         add("/api/models/custom", &["post"]);
         add("/api/models/custom/remove", &["post"]);
         add("/api/models/manage", &["get"]);
+        add("/api/models/metadata", &["get", "put"]);
+        add("/api/models/metadata/refresh", &["post"]);
+        add("/api/models/refresh", &["post"]);
         add("/api/models/meta", &["get"]);
         add("/api/models/meta/{model}", &["delete", "put"]);
         add("/api/models/price", &["post"]);
@@ -1341,6 +1527,9 @@ mod tests {
         add("/api/models/state", &["post"]);
         add("/api/models/test", &["post"]);
         add("/api/checkin-center", &["get"]);
+        add("/api/checkin-center/benefits", &["get"]);
+        add("/api/checkin-center/benefits/run", &["post"]);
+        add("/api/checkin-center/benefits/keepalive", &["get", "put"]);
         add("/api/checkin-center/records", &["delete", "get"]);
         add("/api/checkin-center/records/mark-kept-active", &["post"]);
         add("/api/checkin-center/run", &["post"]);
@@ -1391,6 +1580,8 @@ mod tests {
         add("/api/redemptions/batch", &["post"]);
         add("/api/redemptions/redeem", &["post"]);
         add("/api/redemptions/{id}", &["delete"]);
+        add("/api/session", &["get"]);
+        add("/api/session/refresh", &["post"]);
         add("/api/settings", &["get", "put"]);
         add("/api/stripe/topup", &["post"]);
         add("/api/subscription/admin/bind", &["post"]);
@@ -1413,6 +1604,7 @@ mod tests {
         add("/api/usage/models", &["get"]);
         add("/api/usage/summary", &["get", "post"]);
         add("/api/usage/trend", &["get"]);
+        add("/api/user/records", &["get"]);
         add("/api/user/epay/notify", &["get", "post"]);
         add("/api/user/epay/return", &["get", "post"]);
         add("/api/user/stripe/webhook", &["post"]);
