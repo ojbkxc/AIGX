@@ -298,6 +298,13 @@ fn read_balance_metric(balance: Option<&Value>, condition: &LimiterCondition) ->
         Some(v) if v.is_finite() => Reading {
             hit: compare(v, condition),
             known: true,
+            // #503 复核修正（对齐上游 evaluate.rs:85）：余额类命中的拦截范围
+            // = condition.models **原样**（含空）；此前 clone 前未留空语义——
+            // 实际 bug 在 group_state 的 `branch_models.is_empty()` 升级：空
+            // models + models 级 target 会被误升为整号拦截（上游同形态下
+            // 空 models 分支确实升 account_hit，但上游把「未限定模型」的
+            // 余额条件语义由 target=account 表达，models 级组必带 models）。
+            // 见 group_state 修正注释。
             models: condition.models.clone(),
             reason: String::new(),
         },
@@ -383,7 +390,14 @@ fn group_state(
                     }
                 }
             }
-            if branch_models.is_empty() {
+            // #503 复核修正：分支「无模型范围→整号」的升级只在
+            // **target=account 组**有意义——上游（evaluate.rs:113）同形，
+            // 但上游的 models 级组在余额条件上必然携带 condition.models
+            //（前端表单强约束），而 AIGX 曾放行「models 级组 + 空 models
+            // 条件」的组合，命中即整号拦停 57 账号（生产 503）。修复：
+            // models 级组的空范围分支**跳过**（不贡献拦截），只保留
+            // account 级组的整号语义——宁放勿误伤。
+            if branch_models.is_empty() && group.target == LimiterTarget::Account {
                 account_hit = true;
             }
             for m in branch_models {
@@ -625,5 +639,32 @@ mod tests {
         g.conditions[0].threshold = 10.0;
         assert!(g.validate().is_ok());
         assert_eq!(g.conditions[0].join, LimiterJoin::Or);
+    }
+    /// #503 复核回归：models 级组 + 空 models 条件命中时**不再**升整号拦截
+    ///（生产 503「57 个账号全拦」的根因——该组合此前命中即 account_hit）。
+    #[test]
+    fn models_level_group_with_empty_models_does_not_block_account() {
+        // 余额低于阈值、组级 target=models、条件无 models 范围
+        let groups = vec![LimiterGroup {
+            enabled: true,
+            action: LimiterAction::Skip,
+            target: LimiterTarget::Models,
+            conditions: vec![cond(LimiterMetric::Remaining, LimiterComparison::Lt, 5.0)],
+        }];
+        let v = evaluate_groups(&groups, Some(&balance(3.0)));
+        assert!(
+            !v.account_skip,
+            "models 级组的空范围分支不应升整号拦截（宁放勿误伤）"
+        );
+        assert!(!v.blocks("any-model"), "无模型范围 → 拦截集为空");
+        // 对照：target=account 的同组仍整号拦截（语义不变）
+        let groups_acc = vec![LimiterGroup {
+            enabled: true,
+            action: LimiterAction::Skip,
+            target: LimiterTarget::Account,
+            conditions: vec![cond(LimiterMetric::Remaining, LimiterComparison::Lt, 5.0)],
+        }];
+        let v = evaluate_groups(&groups_acc, Some(&balance(3.0)));
+        assert!(v.account_skip);
     }
 }
