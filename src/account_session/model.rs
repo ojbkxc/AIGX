@@ -461,16 +461,6 @@ impl AccountSession {
         self.cooling_until(model).is_some_and(|until| until > now)
     }
 
-    /// 生效的限制条件组（Phase1-A2 **双读**）：条件组非空时用条件组；
-    /// 为空时把存量扁平规则降维成单条件组（`limiter::groups_from_flat`），
-    /// 存量数据零迁移——与上游 `effective_groups_in` 同一语义。
-    pub fn effective_limiter_groups(&self) -> Vec<crate::account_session::limiter::LimiterGroup> {
-        if !self.limiter_groups.is_empty() {
-            return self.limiter_groups.clone();
-        }
-        crate::account_session::limiter::groups_from_flat(&self.limiters)
-    }
-
     /// 选号阶段的限制器裁决（Phase1-A2）：**仅条件组**——存量扁平规则
     /// 走既有消费路径（balance_low 桶），在此重复求值会双计。未配置时
     /// 早退零开销（性能红线：选号热路径不为一项空配置付循环代价）。
