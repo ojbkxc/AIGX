@@ -25,14 +25,14 @@ pub(crate) async fn handle_rerank(
     let client_ip = extract_client_ip(&headers);
 
     let model = body.get("model").and_then(|m| m.as_str()).ok_or_else(|| {
-        error_response(
+        openai_error_response(
             "invalid_model",
             "Missing model field",
             StatusCode::BAD_REQUEST,
         )
     })?;
     let query = body.get("query").and_then(|q| q.as_str()).ok_or_else(|| {
-        error_response(
+        openai_error_response(
             "invalid_query",
             "Missing query field",
             StatusCode::BAD_REQUEST,
@@ -53,7 +53,7 @@ pub(crate) async fn handle_rerank(
     // 网络层闸门：管理员关闭网络层时拒绝转发
     let _nl_cfg = crate::api::admin::network::load_network_config(&state);
     if !_nl_cfg.enabled {
-        return Err(error_response(
+        return Err(openai_error_response(
             "network_layer_disabled",
             "网络层已停用：推理转发被管理员关闭。请稍后重试。",
             StatusCode::SERVICE_UNAVAILABLE,
@@ -74,7 +74,7 @@ pub(crate) async fn handle_rerank(
         Ok(b) => b,
         Err(e) => {
             let retry_after = e.retry_after_secs().unwrap_or(60);
-            return Err(error_response(
+            return Err(openai_error_response(
                 "rate_limit_exceeded",
                 &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
                 StatusCode::TOO_MANY_REQUESTS,
@@ -96,7 +96,7 @@ pub(crate) async fn handle_rerank(
         None,
     );
     if candidates.is_empty() {
-        return Err(error_response(
+        return Err(openai_error_response(
             "no_bridge",
             "No bridge available",
             StatusCode::SERVICE_UNAVAILABLE,
@@ -126,7 +126,7 @@ pub(crate) async fn handle_rerank(
         })
         .unwrap_or_default();
     if documents.is_empty() {
-        return Err(error_response(
+        return Err(openai_error_response(
             "invalid_documents",
             "documents must be a non-empty array",
             StatusCode::BAD_REQUEST,

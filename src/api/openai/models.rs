@@ -212,7 +212,7 @@ pub(crate) async fn handle_get_model(
             "permission": []
         })))
     } else {
-        Err(error_response(
+        Err(openai_error_response(
             "model_not_found",
             &format!("Model '{model}' not found"),
             StatusCode::NOT_FOUND,

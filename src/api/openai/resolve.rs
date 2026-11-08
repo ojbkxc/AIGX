@@ -84,13 +84,14 @@ pub(crate) fn verify_api_key_full(
     headers: &HeaderMap,
     model: &str,
 ) -> Result<crate::api::auth::ApiKey, (StatusCode, Json<Value>)> {
-    let key = extract_api_key(headers)
-        .ok_or_else(|| error_response("auth_error", "Missing API key", StatusCode::UNAUTHORIZED))?;
+    let key = extract_api_key(headers).ok_or_else(|| {
+        openai_error_response("auth_error", "Missing API key", StatusCode::UNAUTHORIZED)
+    })?;
     let ip = extract_client_ip(headers);
     // 全局 IP 过滤（批次3）：白名单/黑名单优先于 token 级校验
     if let Some(ip_str) = ip.as_deref() {
         if let Err(ip_err) = crate::ip::check_ip(&state.ip_filter.get(), ip_str) {
-            return Err(error_response(
+            return Err(openai_error_response(
                 "ip_blocked",
                 &ip_err.to_string(),
                 StatusCode::FORBIDDEN,
@@ -113,7 +114,7 @@ pub(crate) fn verify_api_key_full(
                 | ApiKeyError::UserQuotaExhausted
                 | ApiKeyError::IpNotAllowed(_) => StatusCode::FORBIDDEN,
             };
-            error_response("auth_error", &e.to_string(), status)
+            openai_error_response("auth_error", &e.to_string(), status)
         })
 }
 /// 列举类端点（`/v1/models`）的鉴权：完整校验但跳过模型白名单。
@@ -121,12 +122,13 @@ pub(crate) fn verify_api_key_listing(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<crate::api::auth::ApiKey, (StatusCode, Json<Value>)> {
-    let key = extract_api_key(headers)
-        .ok_or_else(|| error_response("auth_error", "Missing API key", StatusCode::UNAUTHORIZED))?;
+    let key = extract_api_key(headers).ok_or_else(|| {
+        openai_error_response("auth_error", "Missing API key", StatusCode::UNAUTHORIZED)
+    })?;
     let ip = extract_client_ip(headers);
     if let Some(ip_str) = ip.as_deref() {
         if let Err(ip_err) = crate::ip::check_ip(&state.ip_filter.get(), ip_str) {
-            return Err(error_response(
+            return Err(openai_error_response(
                 "ip_blocked",
                 &ip_err.to_string(),
                 StatusCode::FORBIDDEN,
@@ -146,7 +148,7 @@ pub(crate) fn verify_api_key_listing(
                 | ApiKeyError::UserQuotaExhausted
                 | ApiKeyError::IpNotAllowed(_) => StatusCode::FORBIDDEN,
             };
-            error_response("auth_error", &e.to_string(), status)
+            openai_error_response("auth_error", &e.to_string(), status)
         })
 }
 /// 根据模型名解析提供商并获取全部候选 Bridge（B06：渠道 failover）。
@@ -415,7 +417,7 @@ pub(crate) fn check_group_model_permission(
 ) -> Result<String, (StatusCode, Json<Value>)> {
     let group = resolve_billing_group(state, api_key);
     if !state.user_group_store.allows_model(&group, model) {
-        return Err(error_response(
+        return Err(openai_error_response(
             "model_not_allowed",
             &format!("Model '{model}' is not allowed for group '{group}'"),
             StatusCode::FORBIDDEN,
@@ -437,7 +439,7 @@ pub(crate) fn ensure_model_priced(
         // 避免列表显示可用但调用 503 的体验割裂。仅对"无渠道声明又无定价"的
         // 任意模型名才拒绝（防止用户猜模型名蹭免费）。
         if !model_declared_by_channel(state, model) {
-            return Err(error_response(
+            return Err(openai_error_response(
                 "model_not_priced",
                 &format!("Model '{model}' has no price configured, contact admin"),
                 StatusCode::SERVICE_UNAVAILABLE,

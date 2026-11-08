@@ -34,7 +34,7 @@ pub(crate) async fn handle_responses(
     let model = match body.get("model").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
         None => {
-            return error_response(
+            return openai_error_response(
                 "invalid_model",
                 "Missing model field",
                 StatusCode::BAD_REQUEST,
@@ -75,7 +75,7 @@ pub(crate) async fn handle_responses(
         Ok(b) => b,
         Err(e) => {
             let retry_after = e.retry_after_secs().unwrap_or(60);
-            return error_response(
+            return openai_error_response(
                 "rate_limit_exceeded",
                 &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
                 StatusCode::TOO_MANY_REQUESTS,
@@ -108,7 +108,7 @@ pub(crate) async fn handle_responses(
         None,
     );
     if candidates.is_empty() {
-        return error_response(
+        return openai_error_response(
             "no_bridge",
             "No bridge available for the requested model",
             StatusCode::SERVICE_UNAVAILABLE,
@@ -127,7 +127,7 @@ pub(crate) async fn handle_responses(
         body.get("input"),
         Some(Value::String(_)) | Some(Value::Array(_))
     ) {
-        return error_response(
+        return openai_error_response(
             "invalid_input",
             "input field is required",
             StatusCode::BAD_REQUEST,

@@ -24,7 +24,7 @@ pub(crate) async fn handle_images_generations(
     let client_ip = extract_client_ip(&headers);
 
     let model = body.get("model").and_then(|m| m.as_str()).ok_or_else(|| {
-        error_response(
+        openai_error_response(
             "invalid_model",
             "Missing model field",
             StatusCode::BAD_REQUEST,
@@ -44,7 +44,7 @@ pub(crate) async fn handle_images_generations(
     // 网络层闸门：管理员关闭网络层时拒绝转发
     let _nl_cfg = crate::api::admin::network::load_network_config(&state);
     if !_nl_cfg.enabled {
-        return Err(error_response(
+        return Err(openai_error_response(
             "network_layer_disabled",
             "网络层已停用：推理转发被管理员关闭。请稍后重试。",
             StatusCode::SERVICE_UNAVAILABLE,
@@ -65,7 +65,7 @@ pub(crate) async fn handle_images_generations(
         Ok(b) => b,
         Err(e) => {
             let retry_after = e.retry_after_secs().unwrap_or(60);
-            return Err(error_response(
+            return Err(openai_error_response(
                 "rate_limit_exceeded",
                 &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
                 StatusCode::TOO_MANY_REQUESTS,
@@ -87,7 +87,7 @@ pub(crate) async fn handle_images_generations(
         None,
     );
     if candidates.is_empty() {
-        return Err(error_response(
+        return Err(openai_error_response(
             "no_bridge",
             "No bridge available",
             StatusCode::SERVICE_UNAVAILABLE,
@@ -307,14 +307,14 @@ pub(crate) async fn handle_images_edits(
     // 边读边限收集表单项：文本字段与文件字段统一走 chunk 循环
     let mut parts: Vec<ImageEditFormPart> = Vec::new();
     while let Some(mut field) = multipart.next_field().await.map_err(|e| {
-        error_response(
+        openai_error_response(
             "invalid_request",
             &format!("Failed to read multipart form: {e}"),
             StatusCode::BAD_REQUEST,
         )
     })? {
         if parts.len() >= MAX_MULTIPART_FIELDS {
-            return Err(error_response(
+            return Err(openai_error_response(
                 "invalid_request",
                 "Too many multipart fields",
                 StatusCode::BAD_REQUEST,
@@ -328,14 +328,14 @@ pub(crate) async fn handle_images_edits(
             .unwrap_or_else(|| "application/octet-stream".to_string());
         let mut buf: Vec<u8> = Vec::new();
         while let Some(chunk) = field.chunk().await.map_err(|e| {
-            error_response(
+            openai_error_response(
                 "invalid_request",
                 &format!("Failed to read field: {e}"),
                 StatusCode::BAD_REQUEST,
             )
         })? {
             if append_bounded(&mut buf, &chunk, body_limit).is_err() {
-                return Err(error_response(
+                return Err(openai_error_response(
                     "request_too_large",
                     &format!("multipart body exceeds limit of {body_limit} bytes"),
                     StatusCode::PAYLOAD_TOO_LARGE,
@@ -351,7 +351,7 @@ pub(crate) async fn handle_images_edits(
             }),
             None => {
                 let value = String::from_utf8(buf).map_err(|_| {
-                    error_response(
+                    openai_error_response(
                         "invalid_request",
                         "multipart text field is not UTF-8",
                         StatusCode::BAD_REQUEST,
@@ -372,7 +372,7 @@ pub(crate) async fn handle_images_edits(
         })
         .filter(|m| !m.is_empty())
         .ok_or_else(|| {
-            error_response(
+            openai_error_response(
                 "invalid_model",
                 "Missing model field",
                 StatusCode::BAD_REQUEST,
@@ -382,7 +382,7 @@ pub(crate) async fn handle_images_edits(
     if !parts.iter().any(|p| {
         matches!(p, ImageEditFormPart::File { name, .. } if name == "image" || name == "image[]")
     }) {
-        return Err(error_response(
+        return Err(openai_error_response(
             "invalid_request",
             "Missing image file in request",
             StatusCode::BAD_REQUEST,
@@ -391,7 +391,7 @@ pub(crate) async fn handle_images_edits(
     if !parts.iter().any(|p| {
         matches!(p, ImageEditFormPart::Text { name, value } if name == "prompt" && !value.trim().is_empty())
     }) {
-        return Err(error_response(
+        return Err(openai_error_response(
             "invalid_request",
             "Missing prompt field",
             StatusCode::BAD_REQUEST,
@@ -411,7 +411,7 @@ pub(crate) async fn handle_images_edits(
     // 网络层闸门：管理员关闭网络层时拒绝转发
     let _nl_cfg = crate::api::admin::network::load_network_config(&state);
     if !_nl_cfg.enabled {
-        return Err(error_response(
+        return Err(openai_error_response(
             "network_layer_disabled",
             "网络层已停用：推理转发被管理员关闭。请稍后重试。",
             StatusCode::SERVICE_UNAVAILABLE,
@@ -432,7 +432,7 @@ pub(crate) async fn handle_images_edits(
         Ok(b) => b,
         Err(e) => {
             let retry_after = e.retry_after_secs().unwrap_or(60);
-            return Err(error_response(
+            return Err(openai_error_response(
                 "rate_limit_exceeded",
                 &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
                 StatusCode::TOO_MANY_REQUESTS,
@@ -454,7 +454,7 @@ pub(crate) async fn handle_images_edits(
         None,
     );
     if candidates.is_empty() {
-        return Err(error_response(
+        return Err(openai_error_response(
             "no_bridge",
             "No bridge available",
             StatusCode::SERVICE_UNAVAILABLE,
@@ -759,7 +759,7 @@ pub(crate) async fn handle_generated_asset(
 ) -> Result<Response, (StatusCode, Json<Value>)> {
     verify_api_key_listing(&state, &headers)?;
     if !is_safe_asset_name(&name) {
-        return Err(error_response(
+        return Err(openai_error_response(
             "invalid_request",
             "invalid asset name",
             StatusCode::BAD_REQUEST,
@@ -768,26 +768,26 @@ pub(crate) async fn handle_generated_asset(
     let data_dir = crate::config::expand_path(&state.config_manager.get().await.server.data_dir);
     let path = data_dir.join("generated_images").join(&name);
     // symlink_metadata 读链接本身（不跟随）：符号链接不是本服务产出的形态
-    let meta = tokio::fs::symlink_metadata(&path)
-        .await
-        .map_err(|_| error_response("asset_not_found", "asset not found", StatusCode::NOT_FOUND))?;
+    let meta = tokio::fs::symlink_metadata(&path).await.map_err(|_| {
+        openai_error_response("asset_not_found", "asset not found", StatusCode::NOT_FOUND)
+    })?;
     if meta.is_symlink() {
-        return Err(error_response(
+        return Err(openai_error_response(
             "asset_not_found",
             "asset not found",
             StatusCode::NOT_FOUND,
         ));
     }
     if meta.len() > MAX_ASSET_BYTES {
-        return Err(error_response(
+        return Err(openai_error_response(
             "request_too_large",
             &format!("asset exceeds limit of {MAX_ASSET_BYTES} bytes"),
             StatusCode::PAYLOAD_TOO_LARGE,
         ));
     }
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|_| error_response("asset_not_found", "asset not found", StatusCode::NOT_FOUND))?;
+    let bytes = tokio::fs::read(&path).await.map_err(|_| {
+        openai_error_response("asset_not_found", "asset not found", StatusCode::NOT_FOUND)
+    })?;
     let mime = mime_guess::from_path(&name)
         .first_or_octet_stream()
         .to_string();
@@ -795,7 +795,7 @@ pub(crate) async fn handle_generated_asset(
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_str(&mime).map_err(|_| {
-            error_response(
+            openai_error_response(
                 "invalid_request",
                 "invalid asset name",
                 StatusCode::BAD_REQUEST,

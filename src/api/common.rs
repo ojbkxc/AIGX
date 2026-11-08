@@ -13,7 +13,7 @@
 //! ## 关于 `verify_api_key_full`
 //!
 //! 该函数在 openai.rs / anthropic.rs 中逻辑相同，但错误响应格式不同
-//! （OpenAI `error_response` vs Anthropic `anthropic_error`），且依赖各自模块的
+//! （OpenAI `openai_error_response` vs Anthropic `anthropic_error`），且依赖各自模块的
 //! `AppState` 引用与错误构造器。强行抽取需引入泛型错误 trait，收益有限且易破坏
 //! API 兼容，故保留在各自模块内。本模块只抽取无争议的纯工具函数。
 

@@ -200,8 +200,11 @@ impl AppState {
         }
     }
 }
-/// 创建 OpenAI 兼容的错误响应
-pub(crate) fn error_response(
+/// 创建 OpenAI 兼容的错误响应（三参：code, message, status）。
+///
+/// 注意：与 `api::admin` 域的 `error_response`（两参：message, status）签名不同，
+/// 故更名以消除跨域搬运代码时的 arity 陷阱（#36 曾因此把 8 个 Rust job 推红）。
+pub(crate) fn openai_error_response(
     code: &str,
     message: &str,
     status: StatusCode,

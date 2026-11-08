@@ -497,7 +497,7 @@ pub(crate) fn reserve_usage(
             for (sid, amount) in &sub_allocs {
                 state.subscription_store.release(sid, *amount);
             }
-            return Err(error_response(
+            return Err(openai_error_response(
                 "insufficient_quota",
                 "Subscription quota insufficient",
                 StatusCode::PAYMENT_REQUIRED,
@@ -516,7 +516,7 @@ pub(crate) fn reserve_usage(
                     for (sid, amount) in &sub_allocs {
                         state.subscription_store.release(sid, *amount);
                     }
-                    return Err(error_response(
+                    return Err(openai_error_response(
                         "insufficient_quota",
                         "User quota insufficient",
                         StatusCode::PAYMENT_REQUIRED,
@@ -539,7 +539,7 @@ pub(crate) fn reserve_usage(
                     state.user_store.release_quota(uid, user_token);
                 }
             }
-            return Err(error_response(
+            return Err(openai_error_response(
                 "insufficient_quota",
                 "API key quota insufficient",
                 StatusCode::PAYMENT_REQUIRED,

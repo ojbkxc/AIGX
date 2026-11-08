@@ -31,7 +31,7 @@ pub(crate) async fn handle_audio_transcriptions(
         .nth(1)
         .map(|s| s.to_string())
         .ok_or_else(|| {
-            error_response(
+            openai_error_response(
                 "invalid_request",
                 "Missing boundary in content-type",
                 StatusCode::BAD_REQUEST,
@@ -41,7 +41,7 @@ pub(crate) async fn handle_audio_transcriptions(
     let bytes = match axum::body::to_bytes(body, current_body_limit_bytes(&state)).await {
         Ok(b) => b,
         Err(e) => {
-            return Err(error_response(
+            return Err(openai_error_response(
                 "read_error",
                 &format!("Failed to read body: {e}"),
                 StatusCode::BAD_REQUEST,
@@ -57,7 +57,7 @@ pub(crate) async fn handle_audio_transcriptions(
     // 网络层闸门：管理员关闭网络层时拒绝转发
     let _nl_cfg = crate::api::admin::network::load_network_config(&state);
     if !_nl_cfg.enabled {
-        return Err(error_response(
+        return Err(openai_error_response(
             "network_layer_disabled",
             "网络层已停用：推理转发被管理员关闭。请稍后重试。",
             StatusCode::SERVICE_UNAVAILABLE,
@@ -78,7 +78,7 @@ pub(crate) async fn handle_audio_transcriptions(
         Ok(b) => b,
         Err(e) => {
             let retry_after = e.retry_after_secs().unwrap_or(60);
-            return Err(error_response(
+            return Err(openai_error_response(
                 "rate_limit_exceeded",
                 &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
                 StatusCode::TOO_MANY_REQUESTS,
@@ -156,7 +156,7 @@ pub(crate) async fn handle_audio_transcriptions(
                     channel_name: model.clone(),
                     error: format!("Transcription error: {e}"),
                 });
-            Err(error_response(
+            Err(openai_error_response(
                 "api_error",
                 &format!("Transcription error: {e}"),
                 StatusCode::BAD_GATEWAY,
@@ -186,7 +186,7 @@ pub(crate) async fn handle_audio_translations(
         .nth(1)
         .map(|s| s.to_string())
         .ok_or_else(|| {
-            error_response(
+            openai_error_response(
                 "invalid_request",
                 "Missing boundary in content-type",
                 StatusCode::BAD_REQUEST,
@@ -196,7 +196,7 @@ pub(crate) async fn handle_audio_translations(
     let bytes = match axum::body::to_bytes(body, current_body_limit_bytes(&state)).await {
         Ok(b) => b,
         Err(e) => {
-            return Err(error_response(
+            return Err(openai_error_response(
                 "read_error",
                 &format!("Failed to read body: {e}"),
                 StatusCode::BAD_REQUEST,
@@ -212,7 +212,7 @@ pub(crate) async fn handle_audio_translations(
     // 网络层闸门：管理员关闭网络层时拒绝转发
     let _nl_cfg = crate::api::admin::network::load_network_config(&state);
     if !_nl_cfg.enabled {
-        return Err(error_response(
+        return Err(openai_error_response(
             "network_layer_disabled",
             "网络层已停用：推理转发被管理员关闭。请稍后重试。",
             StatusCode::SERVICE_UNAVAILABLE,
@@ -233,7 +233,7 @@ pub(crate) async fn handle_audio_translations(
         Ok(b) => b,
         Err(e) => {
             let retry_after = e.retry_after_secs().unwrap_or(60);
-            return Err(error_response(
+            return Err(openai_error_response(
                 "rate_limit_exceeded",
                 &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
                 StatusCode::TOO_MANY_REQUESTS,
@@ -311,7 +311,7 @@ pub(crate) async fn handle_audio_translations(
                     channel_name: model.clone(),
                     error: format!("Translation error: {e}"),
                 });
-            Err(error_response(
+            Err(openai_error_response(
                 "api_error",
                 &format!("Translation error: {e}"),
                 StatusCode::BAD_GATEWAY,
@@ -340,7 +340,7 @@ pub(crate) async fn handle_audio_speech(
     // 网络层闸门：管理员关闭网络层时拒绝转发
     let _nl_cfg = crate::api::admin::network::load_network_config(&state);
     if !_nl_cfg.enabled {
-        return Err(error_response(
+        return Err(openai_error_response(
             "network_layer_disabled",
             "网络层已停用：推理转发被管理员关闭。请稍后重试。",
             StatusCode::SERVICE_UNAVAILABLE,
@@ -361,7 +361,7 @@ pub(crate) async fn handle_audio_speech(
         Ok(b) => b,
         Err(e) => {
             let retry_after = e.retry_after_secs().unwrap_or(60);
-            return Err(error_response(
+            return Err(openai_error_response(
                 "rate_limit_exceeded",
                 &format!("Rate limit exceeded. Retry after {} seconds.", retry_after),
                 StatusCode::TOO_MANY_REQUESTS,
@@ -376,7 +376,7 @@ pub(crate) async fn handle_audio_speech(
     ensure_model_priced(&state, &model_owned)?;
 
     let input = body.get("input").and_then(|i| i.as_str()).ok_or_else(|| {
-        error_response(
+        openai_error_response(
             "invalid_input",
             "Missing input field",
             StatusCode::BAD_REQUEST,
@@ -460,7 +460,7 @@ pub(crate) async fn handle_audio_speech(
                     channel_name: model_owned.clone(),
                     error: format!("Text-to-speech error: {e}"),
                 });
-            Err(error_response(
+            Err(openai_error_response(
                 "api_error",
                 &format!("Text-to-speech error: {e}"),
                 StatusCode::BAD_GATEWAY,
@@ -561,7 +561,7 @@ pub(crate) fn parse_multipart_audio(
 
     file_data
         .ok_or_else(|| {
-            error_response(
+            openai_error_response(
                 "invalid_request",
                 "Missing audio file in request",
                 StatusCode::BAD_REQUEST,
