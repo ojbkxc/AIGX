@@ -16,7 +16,9 @@
 //! 同形，便于逐字段回归比对。在此基础上加两处 AIGX 侧信号（本仓把
 //! `/v1/images/*` 独立成 handler，请求体里没有 `messages`）：
 //!
-//! - 图像类端点（[`image_endpoint`]）：端点本身就是图像语义，不看 body；
+//! - 图像**编辑**端点（[`image_edits`]）：输入图走 multipart（不在 JSON
+//!   body 里），语义由路径本身给定；**generations 不设 images**（见该函数
+//!   文档 —— 上游把 images 位定义为「图片输入」，文生图置 true 是语义错位）；
 //! - `input` 列表（[`from_chat_body`]）：OpenAI Responses 形态把消息放在
 //!   `input` 而不是 `messages`，逐条扫描口径与 `messages` 一致。
 //!
@@ -39,13 +41,22 @@ const IMAGE_PART_TYPES: [&str; 3] = ["image_url", "input_image", "image"];
 /// 同上，视频输入（上游 `from_body` 的三写法）。
 const VIDEO_PART_TYPES: [&str; 3] = ["video_url", "input_video", "video"];
 
-/// 图像类端点（`/v1/images/generations`、`/v1/images/edits`）的能力需求。
+/// `/v1/images/generations` 的能力需求：**空**。
 ///
-/// 不需要解析 body：edits 的输入图走 multipart（不在 JSON body 里），
-/// generations 的语义由路径本身给定。端点级口径按 #40 工单取「图像类端点 →
-/// `images`」；即便推不出（例如老账号目录无能力标签），下游也是**放行**
-/// （见模块头「降级」），不会误伤。
-pub(crate) fn image_endpoint() -> RequestNeeds {
+/// generations 是文生图，请求体里没有输入图 —— 而 `images` 位在上游 A2A 的
+/// 定义就是「图片输入」（`supportsImages` / `supports_image`，最终映射到
+/// 目录的 `vision` 标签），`vision` ≠ 生图能力。置 `true` 不会带来任何正向
+/// 过滤收益，只会把「没有 vision 标签的生图渠道」在粗筛阶段误伤掉。
+/// 空 = 两级过滤双短路放行，与未接线前逐字节一致。
+pub(crate) fn image_generations() -> RequestNeeds {
+    RequestNeeds::default()
+}
+
+/// `/v1/images/edits` 的能力需求：图像输入（`images`）。
+///
+/// edits 的输入图走 multipart（不在 JSON body 里，[`from_chat_body`] 读不到），
+/// 端点本身就是「以图改图」的语义，由路径给定。
+pub(crate) fn image_edits() -> RequestNeeds {
     RequestNeeds {
         images: true,
         ..RequestNeeds::default()
@@ -242,11 +253,17 @@ mod tests {
     }
 
     #[test]
-    fn image_endpoint_needs_images_only() {
-        let needs = image_endpoint();
-        assert!(needs.images);
-        assert!(!needs.tools && !needs.video);
-        assert_eq!(mask(needs), CapabilityMask::VISION);
+    fn image_edits_needs_images_but_generations_does_not() {
+        // edits：以图改图，输入图走 multipart，端点级置 images
+        let edits = image_edits();
+        assert!(edits.images);
+        assert!(!edits.tools && !edits.video);
+        assert_eq!(mask(edits), CapabilityMask::VISION);
+        // generations：文生图，请求无输入图 —— images 位是「图片输入」
+        // （vision），置 true 只会误伤无 vision 标签的生图渠道，必须为空
+        // （空 = 双短路放行，与未接线前逐字节一致）
+        assert!(image_generations().is_empty());
+        assert_eq!(mask(image_generations()), CapabilityMask::EMPTY);
     }
 
     #[test]

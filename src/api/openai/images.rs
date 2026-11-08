@@ -80,13 +80,14 @@ pub(crate) async fn handle_images_generations(
     ensure_model_priced(&state, &model_owned)?;
 
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover
-    // #40 §1：图像类端点的能力需求（images）在选路**之前**推出并传下去
+    // #40 §1：generations 是文生图、请求无输入图 → 空需求（双短路放行；
+    // 「images 位 = 图片输入」，置 true 只会误伤无 vision 标签的生图渠道）
     let candidates = resolve_bridges_needs(
         &state,
         &model_owned,
         api_key.provider_filter().as_deref(),
         None,
-        image_endpoint(),
+        image_generations(),
     );
     if candidates.is_empty() {
         return Err(openai_error_response(
@@ -449,14 +450,14 @@ pub(crate) async fn handle_images_edits(
     ensure_model_priced(&state, &model_owned)?;
 
     // B06：获取候选渠道列表，失败时逐个 failover（与 generations 同语义）
-    // #40 §1：同上，图像需求在选路前推出（edits 的输入图走 multipart，
-    // 端点级口径见 `needs::image_endpoint`）
+    // #40 §1：edits 的输入图走 multipart（from_chat_body 读不到），端点级
+    // 置 images（口径见 `needs::image_edits`）
     let candidates = resolve_bridges_needs(
         &state,
         &model_owned,
         api_key.provider_filter().as_deref(),
         None,
-        image_endpoint(),
+        image_edits(),
     );
     if candidates.is_empty() {
         return Err(openai_error_response(

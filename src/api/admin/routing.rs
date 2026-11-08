@@ -23,6 +23,7 @@ use crate::channel::routing_policy::{
     caps, BreakerPolicy, RequestNeeds, RouteStrategy, RoutingGroup, RoutingPolicy, RoutingProfiles,
     StickyMode,
 };
+use crate::model::capability::CapabilityMask;
 
 /// GET /api/routing — 当前路由策略 + 运行时状态。
 pub async fn handle_get_routing(
@@ -674,8 +675,11 @@ pub struct RoutingPreviewRequest {
 /// 同一判定序列），比 GET /api/routing/queue 多支持 `group_id` 与
 /// `needs` 入参，并回显 resolved profile 的逐字段 provenance。
 ///
-/// 注：`needs` 当前只回显（resolved.needs + provenance）—— 渠道级能力粗筛
-/// 接线（§2.4 `channel_may_serve`）由 #40 §1 步骤负责，落地后预演自然同口径。
+/// `needs` 与数据面同口径（#40 §1）：body 里的 needs（管理员模拟的本次请求
+/// 需求）走与 `resolve_bridges_needs` 同一条渠道级粗筛
+/// （`channel_may_serve`，掩码来自**唯一映射链** `required_tags` →
+/// `CapabilityMask::from_tags`）；空 = 不过滤。账号级精筛在预演不展开
+/// （候选是渠道级投影，账号身份在选号时才确定 —— 与数据面的两级分离一致）。
 pub async fn handle_routing_preview(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -702,11 +706,26 @@ pub async fn handle_routing_preview(
         &state.model_mapper,
         group_id,
     );
-    let ordered = state.channel_store.select_for_model_by_strategy(
-        model,
-        profile.strategy,
-        &state.pricing_store,
-    );
+    let ordered = {
+        // #40 §1 预演同口径：needs → 掩码 → 渠道级粗筛（与数据面
+        // resolve_bridges_needs 里的同一判定，非账号渠道由 channel_may_serve
+        // 放行、无目录证据放行 —— 「宁放勿误伤」）
+        let needs_mask = CapabilityMask::from_tags(body.needs.unwrap_or_default().required_tags());
+        let capability_gate = |ch: &crate::channel::Channel| {
+            state.account_sessions.channel_may_serve(&ch.id, needs_mask)
+        };
+        let coarse: Option<crate::channel::ChannelGate<'_>> = if needs_mask.is_empty() {
+            None
+        } else {
+            Some(&capability_gate)
+        };
+        state.channel_store.select_for_model_by_strategy_filtered(
+            model,
+            profile.strategy,
+            &state.pricing_store,
+            coarse,
+        )
+    };
     let plan = crate::channel::routing_policy::plan_route(&policy, &profile, &ordered);
     let breaker_map = state.channel_store.circuit_breaker().get_status_map();
     let (ordered_json, blocked_json) = queue_projection(&state, &plan, &breaker_map);
