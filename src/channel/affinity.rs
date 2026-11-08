@@ -182,8 +182,8 @@ impl AffinityCache {
                     model: model.clone(),
                     channel_id: entry.channel_id.clone(),
                     age_secs: age.as_secs(),
-                    sticky_remaining_secs: sticky_ttl.saturating_sub(age.as_secs()),
-                    hard_remaining_secs: hard_ttl.saturating_sub(age.as_secs()),
+                    sticky_remaining_secs: sticky_ttl.saturating_sub(age).as_secs(),
+                    hard_remaining_secs: hard_ttl.saturating_sub(age).as_secs(),
                 }
             })
             .collect();

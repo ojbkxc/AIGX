@@ -345,6 +345,14 @@ pub async fn handle_get_route_sticky(
         .channel_store
         .affinity_cache()
         .snapshot(ROUTE_STICKY_MAX_SNAPSHOT);
+    // id → 渠道名映射：Arc 快照读（load_full 原子指针拷贝，读侧无锁），
+    // 让管理面显示渠道名而不是裸 id（前端 channel_name 优先、缺省回落 #id）。
+    let channel_names: std::collections::HashMap<String, String> = state
+        .channel_store
+        .snapshot()
+        .iter()
+        .map(|c| (c.id.clone(), c.name.clone()))
+        .collect();
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -360,12 +368,17 @@ pub async fn handle_get_route_sticky(
                 || e.session_id.to_lowercase().contains(&q)
                 || e.model.to_lowercase().contains(&q)
                 || e.channel_id.to_lowercase().contains(&q)
+                || channel_names
+                    .get(&e.channel_id)
+                    .map(|n| n.to_lowercase().contains(&q))
+                    .unwrap_or(false)
         })
         .map(|e| {
             json!({
                 // 内部编码 session<U+001F>model；前端清除时原样回传
                 "id": format!("{}{ROUTE_STICKY_ID_SEP}{}", e.session_id, e.model),
                 "channel_id": e.channel_id,
+                "channel_name": channel_names.get(&e.channel_id).cloned(),
                 // 硬过期时刻（unix 秒；前端 expiryMillis 的 <1e11 视为秒口径）
                 "expires_at": now_unix + e.hard_remaining_secs as i64,
                 "updated_at": now_unix - e.age_secs as i64,
@@ -409,10 +422,10 @@ pub async fn handle_clear_route_sticky(
         let mut parts = id.split(ROUTE_STICKY_ID_SEP);
         match (parts.next(), parts.next()) {
             (Some(sid), Some(model)) if !sid.is_empty() && !model.is_empty() => {
-                u32::from(cache.evict_session(sid, model))
+                usize::from(cache.evict_session(sid, model))
             }
             // 非法 / 过期 id：不 500，回 0 条（幂等清除）
-            _ => 0,
+            _ => 0usize,
         }
     } else if body.all == Some(true) {
         cache.clear_all()
