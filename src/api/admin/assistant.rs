@@ -70,6 +70,78 @@ async fn disabled_tools(state: &AppState) -> Vec<String> {
     state.config_manager.get().await.agent.disabled_tools
 }
 
+/// 助手面执行前的拦截原因（#35 批1 后半）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DenyKind {
+    /// 管理员在设置页勾掉了该工具（`disabled_tools`）。
+    Disabled,
+    /// 高危工具：聊天助手面没有审批矩阵，幻觉出的名字不能像 Agent 面那样直接执行。
+    HighRiskNoApproval,
+}
+
+impl DenyKind {
+    /// 审计 `assistant_tool_denied` 的 reason 字段（稳定字符串，前端/排查用）。
+    fn audit_reason(self) -> &'static str {
+        match self {
+            DenyKind::Disabled => "disabled_tools",
+            DenyKind::HighRiskNoApproval => "high_risk_without_approval_matrix",
+        }
+    }
+
+    /// 回灌给模型的说明（模型据此换路，不要静默丢调用）。
+    fn reply_text(self, label: &str) -> String {
+        match self {
+            DenyKind::Disabled => {
+                format!("工具 {label} 已被管理员禁用（disabled_tools），未执行")
+            }
+            DenyKind::HighRiskNoApproval => {
+                format!("工具 {label} 属高危，聊天助手面不执行（未接入审批矩阵）")
+            }
+        }
+    }
+}
+
+/// 执行前准入判定（与下发口径同源，纯函数供单测直接钉死）。
+///
+/// 「关了就是关了」的第二重：清单与回路 schema 已经过滤过一轮，模型幻觉/上下文
+/// 残留仍可能叫出被禁用的名字，这里必须独立再挡一次——只补出口不补执行正是本仓
+/// 反复复发的形态。高危那一刀只对管理员生效：普通用户分支由 `user_tool_allowed`
+/// 自己封顶高危（D2：高危永不声明 `user_exec`）。
+fn exec_denial(
+    def: &crate::agent::registry::ToolDef,
+    is_admin: bool,
+    disabled: &[String],
+) -> Option<DenyKind> {
+    if crate::agent::registry::tool_disabled(def.name, disabled) {
+        Some(DenyKind::Disabled)
+    } else if is_admin && def.risk == RiskLevel::HighRisk {
+        Some(DenyKind::HighRiskNoApproval)
+    } else {
+        None
+    }
+}
+
+/// 普通用户域某个工具能否下发（#34 组 allowlist ∩ #35 管理员禁用清单）。
+///
+/// 清单（`GET /api/assistant/tools`）与回路 schema 两条出口共用本函数，禁用项
+/// 两处同时消失；执行侧另有 [`exec_denial`] 兜第二重。禁用优先于 allowlist：
+/// 组里就算写了 `"*"`，被管理员关掉的工具也不下发、也不可执行。
+fn user_tool_visible(
+    t: &crate::agent::registry::ToolDef,
+    policy: &crate::agent::user_tool_policy::UserToolPolicy,
+    group: &str,
+    disabled: &[String],
+) -> bool {
+    !crate::agent::registry::tool_disabled(t.name, disabled)
+        && crate::agent::user_tool_policy::user_tool_allowed(
+            policy,
+            group,
+            t.name,
+            t.risk,
+            t.user_exec.is_some(),
+        ) == crate::agent::user_tool_policy::ToolPermission::Allow
+}
+
 /// 工具目录条目构造（纯函数，handler 与单测共用——同 `user_tools.rs::catalog_payload` 姿势）。
 ///
 /// `risk` 必须走 `RiskLevel::as_str()`（`agent/tools.rs`）：全库 4 处 risk 输出点
@@ -112,20 +184,11 @@ pub async fn handle_assistant_tools(
                 .collect()
         }
     } else if tools_enabled() {
-        // #34 v2：普通用户域——user_exec 声明 ∩ 组 allowlist（判定函数带
+        // #34 v2：普通用户域——user_exec 声明 ∩ 组 allowlist ∩ 未禁用（判定函数带
         // 14 单测；执行侧 exec_user_tool 还有一层兜底，两重防线）
         let policy = state.user_tool_policy.snapshot();
         tools::user_exposed_tools()
-            .filter(|t| {
-                crate::agent::user_tool_policy::user_tool_allowed(
-                    &policy,
-                    &user.group,
-                    t.name,
-                    t.risk,
-                    t.user_exec.is_some(),
-                ) == crate::agent::user_tool_policy::ToolPermission::Allow
-            })
-            .filter(|t| !crate::agent::registry::tool_disabled(t.name, &disabled))
+            .filter(|t| user_tool_visible(t, &policy, &user.group, &disabled))
             .map(tool_json)
             .collect()
     } else {
@@ -324,16 +387,7 @@ pub async fn handle_assistant_chat(
         } else {
             tools::openai_tools_of(
                 tools::user_exposed_tools()
-                    .filter(|t| {
-                        crate::agent::user_tool_policy::user_tool_allowed(
-                            &policy,
-                            &user.group,
-                            t.name,
-                            t.risk,
-                            t.user_exec.is_some(),
-                        ) == crate::agent::user_tool_policy::ToolPermission::Allow
-                    })
-                    .filter(|t| !crate::agent::registry::tool_disabled(t.name, &disabled)),
+                    .filter(|t| user_tool_visible(t, &policy, &user.group, &disabled)),
             )
         }
     } else {
@@ -419,39 +473,19 @@ pub async fn handle_assistant_chat(
                         continue;
                     };
                     // 「关了就是关了」第二道（#35 批1 后半）：schema 已按 risk +
-                    // disabled_tools 过滤，但模型幻觉/上下文残留仍可能叫出被禁用的名字；
-                    // 这里的判定与下发口径同源（`registry::tool_disabled`），因此不存在
-                    // 「列表里没了但还能调」。顺带补上管理员分支的同族漏洞：助手面没有
-                    // 审批矩阵，幻觉出的高危名不能像 Agent 面那样直接执行（普通用户分支
-                    // 由 `user_tool_allowed` 自己封顶高危，故只对管理员额外拦这一刀）。
-                    let denied =
-                        if crate::agent::registry::tool_disabled(&call.function_name, &disabled) {
-                            Some("disabled_tools")
-                        } else if user.is_admin() && def.risk == RiskLevel::HighRisk {
-                            Some("high_risk_without_approval_matrix")
-                        } else {
-                            None
-                        };
-                    if let Some(reason) = denied {
+                    // disabled_tools 过滤，但模型幻觉/上下文残留仍可能叫出被禁用的名字，
+                    // 执行前这层 deny 与下发口径同源（`exec_denial`），因此不存在
+                    // 「列表里没了但还能调」。判定与原因文案都是纯函数，单测直接钉。
+                    if let Some(kind) = exec_denial(def, user.is_admin(), &disabled) {
                         super::common::record_audit(
                             &state,
                             &user.email,
                             "assistant_tool_denied",
                             def.name,
                             None,
-                            Some(json!({ "reason": reason })),
+                            Some(json!({ "reason": kind.audit_reason() })),
                         );
-                        let text = if reason == "disabled_tools" {
-                            format!(
-                                "工具 {} 已被管理员禁用（disabled_tools），未执行",
-                                def.label
-                            )
-                        } else {
-                            format!(
-                                "工具 {} 属高危，聊天助手面不执行（未接入审批矩阵）",
-                                def.label
-                            )
-                        };
+                        let text = kind.reply_text(def.label);
                         tool_trace.push(json!({
                             "name": call.function_name, "ok": false, "summary": text,
                         }));
@@ -702,6 +736,94 @@ mod tests {
         assert_eq!(RiskLevel::ReadOnly.as_str(), "readonly");
         assert_eq!(RiskLevel::LowRisk.as_str(), "low");
         assert_eq!(RiskLevel::HighRisk.as_str(), "high");
+    }
+
+    /// 「关了就是关了」执行面（#35 批1 后半）：执行前的 deny 必须独立于下发口径成立，
+    /// 且原因/文案分得清「被禁用」与「高危无审批矩阵」。高危那一刀只对管理员拦
+    /// （普通用户分支由 `user_tool_allowed` 封顶高危，D2 保证高危永不声明 user_exec）。
+    #[test]
+    fn exec_denial_blocks_disabled_and_admin_high_risk() {
+        let low = crate::agent::registry::find_tool("aigx_query_usage").expect("aigx_query_usage");
+        let high = crate::agent::registry::find_tool("aigx_key_delete").expect("aigx_key_delete");
+        assert_eq!(
+            high.risk,
+            RiskLevel::HighRisk,
+            "取样前提：key_delete 是高危"
+        );
+        let disabled = vec!["aigx_query_usage".to_string()];
+
+        assert_eq!(
+            exec_denial(low, true, &disabled),
+            Some(DenyKind::Disabled),
+            "被禁用的工具即使下发过也必须拦在执行前"
+        );
+        assert_eq!(
+            exec_denial(low, false, &disabled),
+            Some(DenyKind::Disabled),
+            "普通用户同样吃禁用清单"
+        );
+        assert_eq!(exec_denial(low, true, &[]), None, "没禁用就不该拦");
+        assert_eq!(
+            exec_denial(high, true, &[]),
+            Some(DenyKind::HighRiskNoApproval),
+            "助手面无审批矩阵，幻觉出的高危名不给执行"
+        );
+        // 禁用优先于高危：两个理由同时成立时报更贴近管理员意图的那个
+        assert_eq!(
+            exec_denial(high, true, &["aigx_key_delete".to_string()]),
+            Some(DenyKind::Disabled)
+        );
+        assert_eq!(
+            exec_denial(high, false, &[]),
+            None,
+            "用户分支的高危交给 user_tool_allowed，不在这里重复拦"
+        );
+
+        let text = DenyKind::Disabled.reply_text("访问令牌删除");
+        assert!(
+            text.contains("已被管理员禁用"),
+            "禁用文案要说明原因: {text}"
+        );
+        assert!(
+            !DenyKind::HighRiskNoApproval
+                .reply_text("访问令牌删除")
+                .contains("已被管理员禁用"),
+            "两种拒绝的文案不能互相冒充"
+        );
+        assert_eq!(DenyKind::Disabled.audit_reason(), "disabled_tools");
+        assert_eq!(
+            DenyKind::HighRiskNoApproval.audit_reason(),
+            "high_risk_without_approval_matrix"
+        );
+    }
+
+    /// 「关了就是关了」下发面（#35 批1 后半）：普通用户清单/回路 schema 共用的判定里，
+    /// 管理员禁用清单必须压过组 allowlist（哪怕写了 `"*"` 通配）。
+    #[test]
+    fn user_tool_visible_lets_disabled_win_over_allowlist() {
+        use crate::agent::user_tool_policy::{GroupPolicy, UserToolPolicy};
+        let t = crate::agent::registry::find_tool("aigx_query_usage").expect("aigx_query_usage");
+        let mut policy = UserToolPolicy::default();
+        policy.enabled = true;
+        policy.groups.insert(
+            "vip".to_string(),
+            GroupPolicy {
+                allowlist: vec!["*".to_string()],
+            },
+        );
+
+        assert!(
+            user_tool_visible(t, &policy, "vip", &[]),
+            "前提：通配 allowlist 下该工具本来对用户开放"
+        );
+        assert!(
+            !user_tool_visible(t, &policy, "vip", &[t.name.to_string()]),
+            "allowlist 写了通配也要输给管理员禁用清单"
+        );
+        assert!(
+            !user_tool_visible(t, &policy, "other-group", &[]),
+            "未配置的组本来就没有工具（前提校验）"
+        );
     }
 
     /// #28：钉死 `GET /api/assistant/tools` 的 risk 值域（防 #18/D-1 类退化）。
