@@ -17,12 +17,13 @@ import { test, expect, loginAsAdmin } from './fixtures';
  * 打开路径：/settings → 路由 Tab（RoutingPanel 内嵌 RouteSticky）。
  */
 
-/** 打开「系统设置 → 路由」并滚到粘滞会话卡 */
+/** 打开「路由页 → 粘滞会话」并滚到粘滞会话卡 */
 async function openStickyPanel(page: import('@playwright/test').Page): Promise<void> {
   await loginAsAdmin(page);
-  await page.goto('/settings');
-  await page.locator('.settings-nav-item', { hasText: '路由' }).first().click();
-  // RoutingPanel 挂载后 RouteSticky 卡随其后（策略卡 → 粘滞卡）
+  // 路由域已从「系统设置 → 路由」独立成页（#40）：/routing 单页多模式（配置/回放/粘滞）
+  await page.goto('/routing');
+  await page.getByRole('tab', { name: '粘滞会话', exact: true }).click();
+  // RouteSticky 卡（h2 粘滞会话）
   await expect(page.locator('h2', { hasText: '粘滞会话' })).toBeVisible();
 }
 
