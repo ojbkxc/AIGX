@@ -696,6 +696,15 @@ pub(crate) fn is_safe_asset_name(name: &str) -> bool {
         && !name.contains("..")
 }
 
+/// 下载目标是否为可用的常规文件（#36）。
+///
+/// 传 `symlink_metadata`（不跟随）的结果：符号链接可能是被放置到
+/// 资产目录、指向目录之外文件的越权读取入口，一律拒绝；目录也拒绝
+/// （读取必然失败，提前给出 404）。抽成纯函数以便单测钉住。
+fn is_downloadable_asset(meta: &std::fs::Metadata) -> bool {
+    !meta.is_symlink() && meta.is_file()
+}
+
 /// 把响应中的 b64_json 图片落盘到 `{data_dir}/generated_images/`（#36）。
 ///
 /// 开关 `server.save_generated_images` 默认关——关闭时函数是 no-op，
@@ -771,7 +780,7 @@ pub(crate) async fn handle_generated_asset(
     let meta = tokio::fs::symlink_metadata(&path).await.map_err(|_| {
         openai_error_response("asset_not_found", "asset not found", StatusCode::NOT_FOUND)
     })?;
-    if meta.is_symlink() {
+    if !is_downloadable_asset(&meta) {
         return Err(openai_error_response(
             "asset_not_found",
             "asset not found",
@@ -807,7 +816,7 @@ pub(crate) async fn handle_generated_asset(
 
 #[cfg(test)]
 mod asset_guard_tests {
-    use super::{append_bounded, is_safe_asset_name};
+    use super::{append_bounded, is_downloadable_asset, is_safe_asset_name};
 
     #[test]
     fn path_traversal_names_are_rejected() {
@@ -838,5 +847,43 @@ mod asset_guard_tests {
         // 再来 1 字节即超限，被拒且不写入
         assert!(append_bounded(&mut buf, &[0u8], max).is_err());
         assert_eq!(buf.len(), 16);
+    }
+
+    /// 下载目标形态：常规文件放行，目录与符号链接拒绝。
+    ///
+    /// 符号链接用真实文件系统构造（`#[cfg(unix)]`；Windows 建链需
+    /// 特权，跳过该段）。防穿越补的是这一层——`is_safe_asset_name`
+    /// 只管文件名字符集，管不到「名字合法但指向目录之外」的链接。
+    #[test]
+    fn symlink_and_directory_assets_are_rejected() {
+        let dir = std::env::temp_dir().join(format!("aigx-asset-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let real = dir.join("img-real.png");
+        std::fs::write(&real, b"png").expect("write asset");
+
+        // 常规文件：放行
+        assert!(is_downloadable_asset(
+            &std::fs::symlink_metadata(&real).expect("stat asset")
+        ));
+        // 目录：拒绝
+        assert!(!is_downloadable_asset(
+            &std::fs::symlink_metadata(&dir).expect("stat dir")
+        ));
+
+        // 符号链接指向资产目录之外的敏感文件：拒绝（symlink_metadata 不跟随）
+        #[cfg(unix)]
+        {
+            let outside = std::env::temp_dir().join(format!("aigx-out-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&outside).expect("create outside dir");
+            let secret = outside.join("secret.png");
+            std::fs::write(&secret, b"secret").expect("write secret");
+            let link = dir.join("img-link.png");
+            std::os::unix::fs::symlink(&secret, &link).expect("create symlink");
+            let meta = std::fs::symlink_metadata(&link).expect("stat link");
+            assert!(meta.is_symlink());
+            assert!(!is_downloadable_asset(&meta));
+            let _ = std::fs::remove_dir_all(&outside);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
