@@ -551,6 +551,7 @@ impl UpdateManager {
     /// 保留策略（**不能误删回滚候选**）：
     /// - `current_bundle`：本轮/当前下载的 `.upd`（回滚候选，rollback() 复用 force 模式）
     /// - 上一版 bundle：`applied.previous_version` 对应的包（供再回滚）
+    ///
     /// 其余 `.upd`/`.sha256` 全删。返回 `(删除文件数, 回收字节数)`。
     pub(crate) fn cleanup_artifacts(&self, current_bundle: Option<&str>) -> (usize, u64) {
         let updates_dir = self.data_dir.join("updates");
