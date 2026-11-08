@@ -214,9 +214,13 @@ pub async fn handle_update_routing(
 
 /// 默认值（前端「恢复默认」按钮用；不落盘，仅回显）。
 pub async fn handle_routing_defaults(
-    _state: State<AppState>,
-    _headers: HeaderMap,
+    state: State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    // #17-②：管理面端点统一鉴权（FE 唯一调用点=登录后的 RoutingPanel
+    // 「恢复默认」回显）。虽只返回静态默认值（零敏感信息），但与同组
+    // /api/routing/* 端点对齐，避免「为什么唯独这个不用登录」的困惑。
+    crate::api::admin::common::verify_admin(&state, &headers).await?;
     let d = RoutingPolicy::default();
     Ok(Json(json!({
         "strategy": d.strategy,

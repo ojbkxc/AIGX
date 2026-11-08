@@ -278,8 +278,12 @@ pub async fn handle_desktop_import(
 
 /// GET /api/account-sessions/desktop/sources —— 白名单清单（前端渲染）。
 pub async fn handle_desktop_sources(
-    State(_state): State<AppState>,
-    _headers: HeaderMap,
-) -> Json<Value> {
-    Json(json!({ "success": true, "data": list_sources() }))
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // #17-②（lead 复核抓的真缺口）：来源白名单含本机文件路径/加密形态等
+    // 侦察信息，未鉴权枚举=「这台机器有哪些客户端登录态可导入」泄露。
+    // 模块头红线②「仅管理员」对 discover/import/sources 三个动作一致生效。
+    crate::api::admin::common::verify_admin(&state, &headers).await?;
+    Ok(Json(json!({ "success": true, "data": list_sources() })))
 }
