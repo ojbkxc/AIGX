@@ -26,7 +26,7 @@ const CATALOG = {
   data: {
     tools: [
       { name: 'aigx_checkin_run', label: '执行签到', risk: 'LowRisk', has_user_exec: true, policy_hit: true },
-      { name: 'aigx_query_self_usage', label: '查我的用量', risk: 'ReadOnly', has_user_exec: true },
+      { name: 'aigx_query_usage', label: '查我的用量', risk: 'ReadOnly', has_user_exec: true },
       { name: 'aigx_query_logs', label: '查全部日志', risk: 'ReadOnly', has_user_exec: false },
       { name: 'aigx_channel_delete', label: '删除渠道', risk: 'HighRisk', has_user_exec: false },
     ],
@@ -122,7 +122,7 @@ test.describe('用户工具权限管理面', () => {
     await page.locator('select.ut-group-select').selectOption('default');
 
     // 勾选一个工具 → allowlist 写入
-    const usage = page.locator('.ut-matrix-row', { hasText: 'aigx_query_self_usage' });
+    const usage = page.locator('.ut-matrix-row', { hasText: 'aigx_query_usage' });
     await usage.locator('input[type="checkbox"]').check();
 
     // 开通全局开关 + 保存
@@ -132,7 +132,7 @@ test.describe('用户工具权限管理面', () => {
     await expect.poll(() => putBodies.length).toBeGreaterThanOrEqual(1);
     const body = putBodies[0] as { enabled?: boolean; groups?: Record<string, { allowlist: string[] }> };
     expect(body.enabled).toBe(true);
-    expect(body.groups?.default?.allowlist).toContain('aigx_query_self_usage');
+    expect(body.groups?.default?.allowlist).toContain('aigx_query_usage');
     // 保存成功回执
     await expect(page.locator('body')).toContainText('已保存');
 
