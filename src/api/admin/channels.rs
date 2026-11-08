@@ -213,6 +213,26 @@ pub fn mask_secret(secret: &str) -> String {
     }
 }
 
+/// #32 PR2：渠道错误文案的**唯一**出口侧脱敏道。
+///
+/// `last_error` 与 `balance_last_error` 的值都不是本地生成的短语，而是**上游响应内容**：
+/// - `last_error` ← `mark_unhealthy(&id, result.message)`；
+/// - `balance_last_error` ← `channel::balance` 的失败分支
+///   （`上游返回 HTTP {status}：{shorten(正文, 160)}` / `商汤登录失败（HTTP {status}）：{shorten(正文, 120)}`）。
+///
+/// 401/403 类正文常回显渠道侧凭证（转发密钥、控制台令牌），所以两个键**必须走同一道**：
+/// 只处理新加的 `balance_last_error` 而放过已在库里的 `last_error`，等于换个键继续漏。
+///
+/// 底下调的是 `error_translate::sanitize_error_message`（与数据面发给客户端的错误出口
+/// 同一函数），它只做三件事：截断到 500 字符、`Bearer <token>` → `Bearer ***`、
+/// `sk-<alnum>` → `sk-***`，**其余文本逐字符原样保留**。刻意不额外抹掉状态码与文案，
+/// 因为运维排障就靠 `last_error` 这句话——脱敏过度等于把可观测性拆了。
+/// 它的边界要如实登记：只拦这两类形态，**裸 JWT / 手机号 / `"access_token":"…"` 不在拦围内**
+/// （best-effort，非安全保证，与该函数既有文档一致）。
+fn mask_error_text(raw: Option<&str>) -> Option<String> {
+    raw.map(crate::error_translate::sanitize_error_message)
+}
+
 /// 构造渠道 JSON 响应（脱敏 API Key）
 /// `seq`：展示用短编号（列表接口按创建顺序注入 1..N；单渠道场景传 None 留空）。
 /// 构造渠道 JSON 响应（脱敏 API Key 与余额查询凭证）
@@ -224,6 +244,7 @@ pub fn mask_secret(secret: &str) -> String {
 /// - `quirks.headers` 里的 `x-balance-*`（控制台令牌 / 账号密码）→ 全掩码。
 ///   这些是**余额查询专用凭证**，与转发密钥同等敏感；`mask_channel` 会把
 ///   整条 quirks 序列化给前端，不剔除等于把控制台密码明文吐出来。
+/// - `last_error` / `balance_last_error`（上游文案，可能回显凭证）→ 见 [`mask_error_text`]。
 pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
     let masked_key = mask_secret(&ch.api_key);
     // quirks.headers 脱敏：敏感头（余额凭证 / 客户端令牌 / 账号密码）整体
@@ -249,7 +270,7 @@ pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
         "model_mapping": ch.model_mapping,
         "cost_pricing": ch.cost_pricing,
         "account_id": ch.account_id,
-        "last_error": ch.last_error,
+        "last_error": mask_error_text(ch.last_error.as_deref()),
         "last_used_at": ch.last_used_at,
         "response_time": ch.response_time,
         "test_time": ch.test_time,
@@ -258,6 +279,14 @@ pub fn mask_channel(ch: &Channel, seq: Option<u64>) -> Value {
         "quirks": quirks,
         "balance_scheme": ch.balance_scheme,
         "balance_unit": ch.balance_unit,
+        // #32 PR2：渠道型周期余额查询三键（配置态 + 巡检写回的运行态）。
+        // - `balance_query_interval_secs`：`None` = 不参与周期巡检（0/null 在 PATCH
+        //   里就归一成 None），前端据此画「关闭」而不是「1970 年下次查询」；
+        // - `balance_last_query_at`：unix 秒，只说明「什么时候查过」，无凭证语义；
+        // - `balance_last_error`：失败文案，**含上游正文片段** ⇒ 与 `last_error` 同规则。
+        "balance_query_interval_secs": ch.balance_query_interval_secs,
+        "balance_last_query_at": ch.balance_last_query_at,
+        "balance_last_error": mask_error_text(ch.balance_last_error.as_deref()),
         "created_at": ch.created_at,
         "updated_at": ch.updated_at,
     })
@@ -590,9 +619,35 @@ pub async fn handle_add_channel(
     }
 }
 
+/// 用于 PUT 时把「表单里没有但存库里有」的字段从已存渠道搬回来。
+///
+/// `ChannelRequest::to_channel()` 重建整条 Channel，表单里没有的字段（运行态读数 +
+/// 只在 PATCH 面暴露的巡检配置）会被硬置成 `None` ⇒ 必须按已存渠道回填，否则在渠道
+/// 表单里点一次保存就会静默关掉周期余额巡检并清空其读数；而 `ChannelRequest` 不含这
+/// 三键、PATCH 是唯一写路径，丢了补不回来（2026-11-09 fe-fix 在 PR3 侦察时发现）。
+///
+/// 抽成纯函数是为了能直接单测（`handle_update_channel` 要吃 `AppState` + `verify_admin`）。
+/// `quirks` / `balance_scheme` / `api_key` 那些「表单提交了就覆盖」的分支依赖
+/// `ChannelRequest`，留在调用方处理；`to_channel()` 里把三键硬置 `None` 是「新建渠道」
+/// 正确的 opt-in 默认，不改构造器。
+fn preserve_non_form_fields(ch: &mut Channel, prev: &Channel) {
+    ch.response_time = prev.response_time;
+    ch.test_time = prev.test_time;
+    ch.balance = prev.balance;
+    ch.credit = prev.credit;
+    ch.balance_unit = prev.balance_unit.clone();
+    ch.discovered_models = prev.discovered_models.clone();
+    ch.last_used_at = prev.last_used_at;
+    ch.last_error = prev.last_error.clone();
+    ch.created_at = prev.created_at;
+    ch.balance_query_interval_secs = prev.balance_query_interval_secs;
+    ch.balance_last_query_at = prev.balance_last_query_at;
+    ch.balance_last_error = prev.balance_last_error.clone();
+}
+
 /// 更新渠道信息
 ///
-/// PUT 全量更新：保留既有测试结果/余额等运维字段（to_channel 不携带这些，
+/// PUT 全量更新：保留既有测试结果/余额等运维字段（`to_channel` 不携带这些，
 /// 旧实现直接 add 会把它们清零），再覆盖表单提交的字段。
 pub async fn handle_update_channel(
     State(state): State<AppState>,
@@ -614,15 +669,8 @@ pub async fn handle_update_channel(
     // 保留运维字段（test_time/response_time/balance/credit/discovered_models/
     // last_used_at/created_at）：编辑表单不提交这些，不应被清空
     if let Some(prev) = state.channel_store.get(&id) {
-        ch.response_time = prev.response_time;
-        ch.test_time = prev.test_time;
-        ch.balance = prev.balance;
-        ch.credit = prev.credit;
-        ch.balance_unit = prev.balance_unit.clone();
-        ch.discovered_models = prev.discovered_models;
-        ch.last_used_at = prev.last_used_at;
-        ch.last_error = prev.last_error;
-        ch.created_at = prev.created_at;
+        // 表单不携带的运行态/巡检字段：一律按已存渠道回填（见函数文档）
+        preserve_non_form_fields(&mut ch, &prev);
         // quirks / 余额方案：缺省（前端未提交）→ 保持原值；提交了 → 覆盖
         if body.quirks.is_none() {
             ch.quirks = prev.quirks.clone();
@@ -774,3 +822,153 @@ async fn verify_admin_password(
 
 // TODO: 继续迁移剩余 10 个 channel handler
 // publish_channel, unpublish_channel, channel_health, channel_metrics 等
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 造渠道：**走 `to_channel`**（本模块唯一的「请求 → Channel」构造点），
+    /// 不写字段全字面量 —— `Channel` 一加字段，字面量会集体 E0063
+    /// （#32 PR1 就是这么把 main 编红的，4 个构造点 + 1 个 test target 构造点）。
+    fn channel_for_mask() -> Channel {
+        let req: ChannelRequest =
+            serde_json::from_value(json!({ "name": "mask-test" })).expect("最小请求体可反序列化");
+        req.to_channel("ch-mask".to_string())
+    }
+
+    /// PR2 要求①：两个含上游文案的键**都**过同一道脱敏——凭证形态必须消失。
+    /// 只钉新加的 `balance_last_error` 而放过已在漏的 `last_error` 就是假闭合，
+    /// 所以这里用同一个 `for` 覆盖两个键，而不是写两条各测各的。
+    #[test]
+    fn both_error_keys_share_one_redaction() {
+        let mut ch = channel_for_mask();
+        ch.last_error =
+            Some(r#"上游返回 HTTP 401：invalid api key provided: sk-ABC123def456"#.to_string());
+        ch.balance_last_error =
+            Some(r#"余额查询失败：Authorization: Bearer eyJhbGciOiJIUzI1NiJ9"#.to_string());
+        let v = mask_channel(&ch, None);
+
+        for key in ["last_error", "balance_last_error"] {
+            let s = v[key]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} 脱敏后应仍是字符串，实得 {:?}", v[key]));
+            assert!(
+                !s.contains("sk-ABC123def456"),
+                "{key} 仍带明文 sk- 密钥: {s}"
+            );
+            assert!(
+                !s.contains("eyJhbGciOiJIUzI1NiJ9"),
+                "{key} 仍带明文 Bearer 令牌: {s}"
+            );
+        }
+        // 掩码后的形状（证明走的是 sanitize 而不是整句抹掉）
+        assert!(v["last_error"].as_str().unwrap().contains("sk-***"));
+        assert!(v["balance_last_error"]
+            .as_str()
+            .unwrap()
+            .contains("Bearer ***"));
+
+        // 要求②：**非凭证的诊断文本原样保留**（运维排障靠这句话，抹了等于拆可观测性）
+        assert_eq!(
+            v["last_error"].as_str().unwrap(),
+            r#"上游返回 HTTP 401：invalid api key provided: sk-***"#
+        );
+        assert_eq!(
+            v["balance_last_error"].as_str().unwrap(),
+            r#"余额查询失败：Authorization: Bearer ***"#
+        );
+    }
+
+    /// 两键为 `None` 时必须序列化出 `null`，而不是 `"****"` / `""`——
+    /// 前端「最近错误」列按 null 判空态，非空字符串会画出一条从未发生过的错误。
+    #[test]
+    fn absent_error_keys_stay_null() {
+        let ch = channel_for_mask();
+        let v = mask_channel(&ch, None);
+        assert!(
+            v["last_error"].is_null(),
+            "last_error 缺省应为 null，实得 {:?}",
+            v["last_error"]
+        );
+        assert!(
+            v["balance_last_error"].is_null(),
+            "balance_last_error 缺省应为 null，实得 {:?}",
+            v["balance_last_error"]
+        );
+    }
+
+    /// 三键里另两键**不该**被脱敏改动碰到：数字与时间戳是配置/运行态语义，
+    /// 掩码它们会让前端周期列显示空值（`balance_query_interval_secs` 被抹 = 看起来没开）。
+    #[test]
+    fn interval_and_timestamp_keys_pass_through_unchanged() {
+        let mut ch = channel_for_mask();
+        ch.balance_query_interval_secs = Some(3600);
+        ch.balance_last_query_at = Some(1_730_000_000);
+        let v = mask_channel(&ch, None);
+        assert_eq!(v["balance_query_interval_secs"], json!(3600));
+        assert_eq!(v["balance_last_query_at"], json!(1_730_000_000));
+        // 关闭态（PATCH 把 0/null 归一成 None）必须是 null，让前端画「关闭」
+        // 而不是回落成 0（0 会被读成「每 0 秒查一次」）。
+        let mut off = channel_for_mask();
+        off.balance_query_interval_secs = None;
+        assert!(mask_channel(&off, None)["balance_query_interval_secs"].is_null());
+    }
+
+    /// prev 夹具：已开定频 + 有巡检运行态读数（走 `to_channel` 再改字段，
+    /// 不用全字段字面量——理由见 [`channel_for_mask`]）。
+    fn channel_with_balance_runtime() -> Channel {
+        let mut ch = channel_for_mask();
+        ch.balance_query_interval_secs = Some(3600);
+        ch.balance_last_query_at = Some(1_700_000_000);
+        ch.balance_last_error = Some("上游返回 HTTP 401：invalid api key provided".to_string());
+        ch
+    }
+
+    /// 回归钉子（lead 要求）：PUT 用 `to_channel()` 重建整条 Channel，而 `ChannelRequest`
+    /// 不含余额巡检三键 ⇒ 必须按 prev 回填。缺了回填，用户在渠道表单里点一次保存就会
+    /// **静默关掉周期余额巡检并清空读数**，且 PATCH 是唯一写路径 ⇒ 丢了补不回来。
+    #[test]
+    fn put_preserves_balance_triplet_from_prev() {
+        let prev = channel_with_balance_runtime();
+        // 模拟「只改名字」的一次表单保存：走同一个 to_channel 重建路径
+        let mut fresh = channel_for_mask();
+        fresh.name = "renamed-by-form".to_string();
+        assert_eq!(
+            fresh.balance_query_interval_secs, None,
+            "前提：to_channel 重建后三键必为 None（否则这条测试钉不住缺陷本身）"
+        );
+
+        preserve_non_form_fields(&mut fresh, &prev);
+
+        assert_eq!(
+            fresh.balance_query_interval_secs,
+            Some(3600),
+            "一次表单保存不得关掉周期余额巡检"
+        );
+        assert_eq!(fresh.balance_last_query_at, Some(1_700_000_000));
+        assert_eq!(fresh.balance_last_error, prev.balance_last_error);
+        // 回填只搬「表单不携带」的字段，真正提交的内容不能被 prev 覆盖回去
+        assert_eq!(fresh.name, "renamed-by-form", "回填越界覆盖了表单提交字段");
+    }
+
+    /// 关闭态也必须原样保留：回填不是「默认帮你打开」，也不该造出从未发生过的读数。
+    /// 与上一合起来才钉住「回填 ＝ 逐键等于 prev」，而不是「回填 ＝ 写一组看起来合理的值」。
+    #[test]
+    fn put_preserves_closed_balance_triplet_without_fabricating() {
+        let prev = channel_for_mask(); // 三键全 None
+        let mut fresh = channel_with_balance_runtime();
+        assert!(
+            fresh.balance_query_interval_secs.is_some(),
+            "前提：fresh 带着脏值进入"
+        );
+
+        preserve_non_form_fields(&mut fresh, &prev);
+
+        assert_eq!(
+            fresh.balance_query_interval_secs, None,
+            "关闭态被回填成 Some = 表单保存把巡检打开了"
+        );
+        assert_eq!(fresh.balance_last_query_at, None);
+        assert_eq!(fresh.balance_last_error, None);
+    }
+}

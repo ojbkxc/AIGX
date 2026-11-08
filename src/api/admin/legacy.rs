@@ -1277,6 +1277,38 @@ pub async fn handle_epay_return(
 // 通用渠道管理（功能 2 - 核心数据层）
 // ============================================================
 
+/// `balance_query_interval_secs` 的 PATCH **三态**语义：
+/// - `None`（键不存在）= 保持原值不动；
+/// - `Some(Value::Null)`（显式 `null`）= 关闭周期巡检；`0` 同样归一成关闭
+///   （消费侧 `channel::balance_refresh` 的到期判定里 `None` = 不参与巡检，`0` 若原样入库
+///   会被前端读成「每 0 秒查一次」）；
+/// - `Some(数值)` = 定频秒数，上限 30 天（照账号侧 `usage_query_interval_secs` 同款口径，
+///   防误填巨大值把「下次查询」推到永远）。
+///
+/// 入参用 `Option<&Value>` 而不是调用方先 `match`：三态必须**都在函数内**才谈得上都在函数内被测。
+/// 这里不能"简化"成 `body.get(..).and_then(|v| v.as_u64())`——裸 `Value` 上「键不存在」与
+/// 「显式 null」会塌成同一个 `None`，那样**关不掉**定频（账号侧同名三态走强类型
+/// `Option<u64>` body，JSON `null` 反序列化即 `None` = 缺省保持，所以那边天然不需要这个分支）。
+/// 形状照本文件 `api_key` 三态臂（已有先例，非新发明）。
+///
+/// 返回 `()` 而非 `Result`：非法类型（字符串/负数/对象）沿用 `api_key` 臂既有口径
+/// 「忽略、不改动」，不新增 400 语义——那是行为变化，不在 #32 面。
+fn apply_interval_patch(slot: &mut Option<u64>, patch: Option<&Value>) {
+    match patch {
+        None => {}
+        Some(Value::Null) => *slot = None,
+        Some(v) => {
+            if let Some(secs) = v.as_u64() {
+                *slot = if secs == 0 {
+                    None
+                } else {
+                    Some(secs.min(30 * 86_400))
+                };
+            }
+        }
+    }
+}
+
 pub async fn handle_patch_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1372,6 +1404,13 @@ pub async fn handle_patch_channel(
             String::new()
         };
     }
+    // #32 PR2：渠道型周期余额查询间隔。三态语义与「不能和式取值」的理由见 `apply_interval_patch`。
+    // `balance_last_query_at` / `balance_last_error` 是巡检写回的**运行态**，刻意**不接受 PATCH 写入**
+    // （写了等于造假：界面显示一次从未发生过的查询）。
+    apply_interval_patch(
+        &mut ch.balance_query_interval_secs,
+        body.get("balance_query_interval_secs"),
+    );
 
     match state.channel_store.update(&id, ch) {
         Ok(c) => Ok(Json(
@@ -5001,5 +5040,74 @@ mod tests {
             written, frame["usage"],
             "回写值必须与前端看到的那份一致（不分裂口径）"
         );
+    }
+
+    // ==== #32 PR2：渠道余额定频间隔的 PATCH 三态 ====
+
+    /// 三态之「缺省」：请求体不带该键时，无论原值是设过还是关着，都不得改动。
+    /// 钉的是 PATCH 的部分更新契约——改个渠道名不能顺手把定频关掉（也不能凭空打开）。
+    #[test]
+    fn interval_patch_absent_key_keeps_current_value() {
+        let mut on = Some(600);
+        apply_interval_patch(&mut on, None);
+        assert_eq!(on, Some(600), "缺省键不得改动已设的间隔");
+
+        let mut off = None;
+        apply_interval_patch(&mut off, None);
+        assert_eq!(off, None, "缺省键不得凭空打开定频");
+    }
+
+    /// 三态之「关闭」：显式 `null` 与 `0` 都要能把**已设的值**关掉。
+    /// 这条就是 #32 的真实缺口：若写成 `body.get(..).and_then(as_u64)`，
+    /// `null` 会被读成「缺省」⇒ 前端点「关闭」永远关不掉周期巡检。
+    /// `0` 归一成关闭而非原样入库，否则界面把它读成「每 0 秒查一次」。
+    #[test]
+    fn interval_patch_null_and_zero_close_an_existing_interval() {
+        for patch in [serde_json::Value::Null, serde_json::json!(0)] {
+            let mut slot = Some(600);
+            apply_interval_patch(&mut slot, Some(&patch));
+            assert_eq!(slot, None, "关闭态必须落 None: {patch}");
+        }
+    }
+
+    /// 三态之「设值」：正常值原样写入、超过 30 天夹到上限；
+    /// 非法类型（字符串/负数/小数/对象/数组）一律忽略不改动——沿用本文件 `api_key`
+    /// 三态臂的既有口径，不新增 400 语义（那属行为变化，不在 #32 面）。
+    #[test]
+    fn interval_patch_number_sets_and_ignores_bad_types() {
+        let mut slot = None;
+        apply_interval_patch(&mut slot, Some(&serde_json::json!(3600)));
+        assert_eq!(slot, Some(3600));
+
+        apply_interval_patch(&mut slot, Some(&serde_json::json!(30 * 86_400 + 999)));
+        assert_eq!(slot, Some(30 * 86_400), "必须夹到 30 天上限");
+
+        apply_interval_patch(&mut slot, Some(&serde_json::json!(u64::MAX)));
+        assert_eq!(slot, Some(30 * 86_400), "极大值不得把下次查询推到永远");
+
+        for bad in [
+            serde_json::json!("3600"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!({ "secs": 60 }),
+            serde_json::json!([60]),
+        ] {
+            apply_interval_patch(&mut slot, Some(&bad));
+            assert_eq!(slot, Some(30 * 86_400), "非法类型不得改动原值: {bad}");
+        }
+    }
+
+    /// 三态里最易塌缩的一对差异，钉成单点断言：同一份原值 `Some(600)`，
+    /// 「不带键」与「显式 null」必须得出**不同**结果。
+    /// 谁将来把三态"简化"成和式取值，这条先红（`interval_patch` 的函数文档写了为什么）。
+    #[test]
+    fn interval_patch_distinguishes_absent_from_explicit_null() {
+        let mut kept = Some(600);
+        apply_interval_patch(&mut kept, None);
+        let mut closed = Some(600);
+        apply_interval_patch(&mut closed, Some(&serde_json::Value::Null));
+        assert_eq!(kept, Some(600), "不带键 ⇒ 保持");
+        assert_eq!(closed, None, "显式 null ⇒ 关闭");
+        assert_ne!(kept, closed, "两个状态塌成同一个就没法关定频了");
     }
 }
