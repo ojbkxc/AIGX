@@ -1251,7 +1251,8 @@ pub(crate) struct AttemptStartGuard<'a> {
     pub api_key: crate::api::auth::ApiKey,
     pub requested_model: String,
     pub group: String,
-    pub reservation: &'a crate::ratelimit::limiter::Reservation,
+    /// 预留句柄（billing 自有 Reservation 类型——chat.rs 的同名变量就是它）
+    pub reservation: &'a Reservation,
     /// 每轮真实上游调用前更新（Drop 时取最后尝试的渠道归因）
     pub channel_id: String,
     pub channel_name: String,
