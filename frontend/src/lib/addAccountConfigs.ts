@@ -1040,11 +1040,13 @@ export const PRESET_PROVIDERS: PresetProviderItem[] = [
   },
 ];
 
-/** 自定义分段：三种协议，地址由用户自己填。 */
-export const CUSTOM_PROTOCOLS: Array<{ kind: string; labelKey: string; hintKey: string }> = [
-  { kind: 'openai_compatible', labelKey: 'OpenAI 兼容（自定义地址）', hintKey: '按 {base}/chat/completions 转发' },
-  { kind: 'anthropic', labelKey: 'Anthropic 兼容（自定义地址）', hintKey: '按 {base}/v1/messages 转发' },
-  { kind: 'gemini', labelKey: 'Gemini 兼容（自定义地址）', hintKey: '按 {base}/models 转发' },
+/** 自定义分段：三种协议，地址由用户自己填。
+ *  （hintKey 字段已删——#57：全仓无 t(hintKey) 消费点，死字段；地址格式
+ *  说明由 CUSTOM_BASE_HINT 按协议动态给出，AddAccountDialog.tsx:1560。） */
+export const CUSTOM_PROTOCOLS: Array<{ kind: string; labelKey: string }> = [
+  { kind: 'openai_compatible', labelKey: 'OpenAI 兼容（自定义地址）' },
+  { kind: 'anthropic', labelKey: 'Anthropic 兼容（自定义地址）' },
+  { kind: 'gemini', labelKey: 'Gemini 兼容（自定义地址）' },
 ];
 
 /** 协议 → 落库 provider kind（预置模板按协议落到对应兼容 kind）。 */
