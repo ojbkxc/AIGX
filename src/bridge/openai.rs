@@ -881,12 +881,14 @@ impl Bridge for OpenaiCompatibleBridge {
                     data,
                 } => {
                     // 客户端声明的 content-type 可能畸形（mime_str 拒绝），
-                    // 退回 application/octet-stream 重建，文件字节不受影响
-                    let file_part = reqwest::multipart::Part::bytes(data.clone())
+                    // 退回 application/octet-stream 重建，文件字节不受影响。
+                    // 注：`Part::bytes` 的入参约束是 `Into<Cow<'static, [u8]>>`，
+                    // 而 `bytes::Bytes` 没有实现该转换 —— 必须显式 `to_vec()`。
+                    let file_part = reqwest::multipart::Part::bytes(data.to_vec())
                         .file_name(filename.clone())
                         .mime_str(content_type)
                         .unwrap_or_else(|_| {
-                            reqwest::multipart::Part::bytes(data.clone())
+                            reqwest::multipart::Part::bytes(data.to_vec())
                                 .file_name(filename.clone())
                                 .mime_str("application/octet-stream")
                                 .expect("octet-stream is a valid mime type")
