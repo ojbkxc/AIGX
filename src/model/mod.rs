@@ -144,6 +144,29 @@ impl ModelMapper {
         model.to_string()
     }
 
+    /// 借用版 [`resolve`](Self::resolve)：命中映射时把**映射名**交给闭包，未命中
+    /// 交给**原名**，语义与 `resolve` 逐条对齐（含「被关掉的别名不改名」）。
+    ///
+    /// 存在的理由：调用方只用这个名字**查一次表**（见
+    /// `channel::routing_policy::resolve_profile` 的档案键兜底），
+    /// 为它分配一个用完即弃的 `String` 是纯浪费。
+    ///
+    /// 读锁顺序与 [`resolve`](Self::resolve) 一致（先 `custom_map` 后 `disabled`），
+    /// 且闭包在**持读锁**期间执行：闭包内不得再取本结构体的锁。
+    pub fn resolve_with<R>(&self, model: &str, f: impl FnOnce(&str) -> R) -> R {
+        if model.is_empty() {
+            return f(model);
+        }
+        let custom = self.custom_map.read();
+        if let Some(mapped) = custom.get(model) {
+            if self.disabled.read().contains(model) {
+                return f(model);
+            }
+            return f(mapped.as_str());
+        }
+        f(model)
+    }
+
     /// 获取所有映射（用户自定义的别名表）
     pub fn all_mappings(&self) -> HashMap<String, String> {
         self.custom_map.read().clone()

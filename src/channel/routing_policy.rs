@@ -16,9 +16,12 @@
 //!   （AIGX 断路器 HalfOpen 成功即恢复，无独立 success_threshold，不强造）
 //! - 调度权重：A2A 无此项；AIGX 把闲置的 `set_scheduler_config()` 接上
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::channel::scheduler::SchedulerPolicyConfig;
+use crate::storage::FileStore;
 
 /// 持久化键。
 pub const ROUTING_POLICY_KEY: &str = "routing_policy";
@@ -586,10 +589,132 @@ impl RoutingPolicyStore {
     }
 }
 
+// ── 分层解析（契约 §2.2）──────────────────────────────────────────────
+
+/// 解析某请求名当前生效的档案：**逐字段三态覆盖**，基座是 `RoutingPolicy`
+/// 自身（`strategy` / `sticky` 取策略现值，新字段取内置默认）。
+///
+/// 层序（自左向右，最右侧「字段不是 None」的层生效）：
+/// `global` → `profiles.models[<档案键>]` → `profiles.groups[<生效组 id>]`
+///
+/// 档案键（契约 §2.3）：`profiles.models` 命中请求名优先；未命中则用
+/// **全局映射名**再查一次（同 `pricing::resolve_priced_name` 的范式）。
+///
+/// `enabled=false` 时直接返回基座（不动档案、零额外分配）= 与历史逐字节等价。
+pub fn resolve_profile(
+    policy: &RoutingPolicy,
+    requested_model: &str,
+    global_mapper: &crate::model::ModelMapper,
+    group_id: Option<&str>,
+) -> ResolvedProfile {
+    // 基座 = 策略现值（不是「内置默认」：否则启用档案会静默重置管理员配的
+    // strategy/sticky —— 那正是契约要避免的「规则漂移」）
+    let mut out = ResolvedProfile {
+        scope: RoutingScope::default(),
+        strategy: policy.strategy,
+        sticky: policy.sticky,
+        needs: RequestNeeds::default(),
+        sort_rules: Vec::new(),
+        default_group: None,
+        provenance: ProfileProvenance::default(),
+    };
+    if !policy.enabled {
+        return out;
+    }
+    let profiles = &policy.profiles;
+
+    // 档案键查找：请求名优先 → 全局映射名兜底（借用查找，不为此分配 String）
+    let mut model_layer = profiles.models.get(requested_model);
+    if model_layer.is_none() && !profiles.models.is_empty() {
+        model_layer = global_mapper.resolve_with(requested_model, |mapped| {
+            if mapped == requested_model {
+                None
+            } else {
+                profiles.models.get(mapped)
+            }
+        });
+    }
+
+    // 参与解析的档案层（有序小数组，最多 2 层：global + 模型级）
+    let layers: [Option<(Layer, &RoutingProfile)>; 2] = [
+        Some((Layer::Global, &profiles.global)),
+        model_layer.map(|p| (Layer::Model, p)),
+    ];
+
+    // 生效组 id（契约 §6.1）：显式 group_id（第 1/2 环）优先；否则取最右侧
+    // 提供了 `default_group` 的档案层（第 3 环）。
+    let effective_group = match group_id {
+        Some(g) => Some(g),
+        None => layers
+            .iter()
+            .flatten()
+            .filter_map(|(_, p)| p.default_group.as_deref())
+            .last(),
+    };
+    let group = effective_group.and_then(|gid| profiles.find_group(gid, requested_model));
+
+    // 逐字段三态覆盖：只记「谁提供」，循环外物化（避免逐层 clone）
+    let mut scope_ref: Option<(&Layer, &RoutingScope)> = None;
+    let mut sort_rules_ref: Option<(&Layer, &[AccountSortRule])> = None;
+    let mut default_group_ref: Option<(&Layer, &str)> = None;
+    for (layer, p) in layers.iter().flatten() {
+        if let Some(v) = p.scope.as_ref() {
+            scope_ref = Some((layer, v));
+        }
+        if let Some(v) = p.strategy {
+            out.strategy = v;
+            out.provenance.strategy = Some(*layer);
+        }
+        if let Some(v) = p.sticky {
+            out.sticky = v;
+            out.provenance.sticky = Some(*layer);
+        }
+        if let Some(v) = p.needs {
+            out.needs = v;
+            out.provenance.needs = Some(*layer);
+        }
+        if let Some(v) = p.sort_rules.as_deref() {
+            sort_rules_ref = Some((layer, v));
+        }
+        if let Some(v) = p.default_group.as_deref() {
+            default_group_ref = Some((layer, v));
+        }
+    }
+    if let Some((layer, v)) = scope_ref {
+        out.scope = v.clone();
+        out.provenance.scope = Some(*layer);
+    }
+    if let Some((layer, v)) = sort_rules_ref {
+        out.sort_rules = v.to_vec();
+        out.provenance.sort_rules = Some(*layer);
+    }
+    if let Some((layer, v)) = default_group_ref {
+        out.default_group = Some(v.to_string());
+        out.provenance.default_group = Some(*layer);
+    }
+    // 组层：`RoutingGroup` 的 strategy/sticky 是非 Option（契约 §1 定义），
+    // 故「选中组」即提供这两个字段（组值缺省时即为枚举默认值 —— 组级未配
+    // strategy 的组会覆盖上层策略，此形态待第 2 步的组 CRUD 端点上线时复核）。
+    if let Some(g) = group {
+        out.strategy = g.strategy;
+        out.sticky = g.sticky;
+        out.provenance.strategy = Some(Layer::Group);
+        out.provenance.sticky = Some(Layer::Group);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel::Channel;
+    use crate::storage::FileStore;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    /// 空的全局映射表（档案键兜底查找用）。
+    fn mapper(dir: &TempDir) -> crate::model::ModelMapper {
+        crate::model::ModelMapper::new(Arc::new(FileStore::new(dir.path().to_path_buf())))
+    }
 
     #[test]
     fn defaults_match_a2a_semantics() {
@@ -698,6 +823,175 @@ mod tests {
     }
 
     // ── #40 路由多规则体系 ─────────────────────────────────────────────
+
+    /// 三态覆盖 + provenance：`None` 继承下层、`Some(值)` 覆盖。
+    #[test]
+    fn profile_tri_state_override_and_provenance() {
+        let dir = TempDir::new().unwrap();
+        let m = mapper(&dir);
+        let mut policy = RoutingPolicy {
+            enabled: true,
+            ..RoutingPolicy::default()
+        };
+        policy.profiles.global.strategy = Some(RouteStrategy::Ranked);
+        policy.profiles.global.needs = Some(RequestNeeds {
+            images: true,
+            ..RequestNeeds::default()
+        });
+        policy.profiles.models.insert(
+            "gpt-4o".to_string(),
+            RoutingProfile {
+                sticky: Some(StickyMode::Session),
+                ..RoutingProfile::default()
+            },
+        );
+
+        let r = resolve_profile(&policy, "gpt-4o", &m, None);
+        assert_eq!(
+            r.strategy,
+            RouteStrategy::Ranked,
+            "模型级未设 → 继承 global"
+        );
+        assert_eq!(r.provenance.strategy, Some(Layer::Global));
+        assert_eq!(r.sticky, StickyMode::Session, "模型级覆盖");
+        assert_eq!(r.provenance.sticky, Some(Layer::Model));
+        assert!(r.needs.images);
+        assert_eq!(r.provenance.needs, Some(Layer::Global));
+        assert_eq!(r.provenance.scope, None);
+        assert_eq!(r.provenance.sort_rules, None);
+        assert_eq!(
+            r.provenance.applied_layers(),
+            vec![Layer::Global, Layer::Model]
+        );
+
+        // 未命中档案的模型：只剩 global 一层；sticky 落策略基座
+        let r2 = resolve_profile(&policy, "claude-3-5", &m, None);
+        assert_eq!(r2.strategy, RouteStrategy::Ranked);
+        assert_eq!(r2.provenance.strategy, Some(Layer::Global));
+        assert_eq!(r2.sticky, RoutingPolicy::default().sticky);
+        assert_eq!(r2.provenance.sticky, None);
+    }
+
+    /// `Some(空集合)` = **显式清空**（模型级「不用 global 的参与名单」）。
+    #[test]
+    fn profile_explicit_clear_overrides_inherited() {
+        let dir = TempDir::new().unwrap();
+        let m = mapper(&dir);
+        let mut policy = RoutingPolicy {
+            enabled: true,
+            ..RoutingPolicy::default()
+        };
+        policy.profiles.global.scope = Some(RoutingScope {
+            providers: vec!["anthropic".to_string()],
+            excluded_accounts: vec!["acct-1".to_string()],
+            ..RoutingScope::default()
+        });
+        policy.profiles.models.insert(
+            "gpt-4o".to_string(),
+            RoutingProfile {
+                scope: Some(RoutingScope::default()),
+                ..RoutingProfile::default()
+            },
+        );
+
+        let r = resolve_profile(&policy, "gpt-4o", &m, None);
+        assert!(
+            r.scope.providers.is_empty(),
+            "显式空 scope 覆盖 global 名单"
+        );
+        assert!(r.scope.excluded_accounts.is_empty());
+        assert_eq!(r.provenance.scope, Some(Layer::Model));
+
+        let r2 = resolve_profile(&policy, "other", &m, None);
+        assert_eq!(r2.scope.providers, vec!["anthropic".to_string()]);
+        assert_eq!(r2.provenance.scope, Some(Layer::Global));
+    }
+
+    /// 档案键（契约 §2.3）：请求名优先；未命中用**全局映射名**兜底；
+    /// 被关掉的别名与 `ModelMapper::resolve` 同口径（不改名）。
+    #[test]
+    fn profile_lookup_falls_back_to_global_mapping() {
+        let dir = TempDir::new().unwrap();
+        let m = mapper(&dir);
+        m.set_custom("gpt-4o".to_string(), "gpt-4o-2024-08-06".to_string())
+            .unwrap();
+        let mut policy = RoutingPolicy {
+            enabled: true,
+            ..RoutingPolicy::default()
+        };
+        policy.profiles.models.insert(
+            "gpt-4o-2024-08-06".to_string(),
+            RoutingProfile {
+                strategy: Some(RouteStrategy::Ranked),
+                ..RoutingProfile::default()
+            },
+        );
+
+        let r = resolve_profile(&policy, "gpt-4o", &m, None);
+        assert_eq!(
+            r.strategy,
+            RouteStrategy::Ranked,
+            "别名兜底命中上游真名的档案"
+        );
+        assert_eq!(r.provenance.strategy, Some(Layer::Model));
+
+        let r2 = resolve_profile(&policy, "gpt-3.5", &m, None);
+        assert_eq!(r2.provenance.strategy, None, "无映射 → 只有 global");
+
+        assert!(m.set_enabled("gpt-4o", false).unwrap(), "别名存在才可切换");
+        let r3 = resolve_profile(&policy, "gpt-4o", &m, None);
+        assert_eq!(r3.provenance.strategy, None, "关掉的别名不参与改名");
+    }
+
+    /// 组层（契约 §6.1 第 3 环）：`default_group` 命中的组提供
+    /// strategy/sticky（provenance=Group）；组是 per-model 的。
+    #[test]
+    fn profile_group_layer_and_per_model_scope() {
+        let dir = TempDir::new().unwrap();
+        let m = mapper(&dir);
+        let mut policy = RoutingPolicy {
+            enabled: true,
+            ..RoutingPolicy::default()
+        };
+        policy.profiles.global.strategy = Some(RouteStrategy::Ranked);
+        policy.profiles.models.insert(
+            "gpt-4o".to_string(),
+            RoutingProfile {
+                default_group: Some("g1".to_string()),
+                ..RoutingProfile::default()
+            },
+        );
+        policy.profiles.groups.push(RoutingGroup {
+            id: "g1".to_string(),
+            name: "组一".to_string(),
+            model: "gpt-4o".to_string(),
+            strategy: RouteStrategy::RoundRobin,
+            sticky: StickyMode::Session,
+            members: Vec::new(),
+        });
+
+        let r = resolve_profile(&policy, "gpt-4o", &m, None);
+        assert_eq!(
+            r.strategy,
+            RouteStrategy::RoundRobin,
+            "组层覆盖模型层/global"
+        );
+        assert_eq!(r.provenance.strategy, Some(Layer::Group));
+        assert_eq!(r.sticky, StickyMode::Session);
+        assert_eq!(r.provenance.sticky, Some(Layer::Group));
+        assert_eq!(r.default_group.as_deref(), Some("g1"));
+        assert_eq!(r.provenance.default_group, Some(Layer::Model));
+
+        // 别的模型：组是 per-model 的 → 不套用
+        let r2 = resolve_profile(&policy, "other", &m, None);
+        assert_eq!(r2.provenance.strategy, Some(Layer::Global));
+        // 显式指定的组同样过 per-model 判定
+        let r3 = resolve_profile(&policy, "other", &m, Some("g1"));
+        assert_eq!(r3.provenance.strategy, Some(Layer::Global));
+        // 显式指定的组对匹配模型生效
+        let r4 = resolve_profile(&policy, "gpt-4o", &m, Some("g1"));
+        assert_eq!(r4.provenance.strategy, Some(Layer::Group));
+    }
 
     /// 上限校验（契约 §1/§3）：**超限拒绝写入**，不静默截断。
     #[test]
