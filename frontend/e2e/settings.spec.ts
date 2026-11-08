@@ -20,7 +20,7 @@ test.describe('系统设置分类', () => {
   test('左栏渲染全部分类，默认落在通用', async ({ page, pageErrors }) => {
     await expect(nav(page)).toBeVisible();
     // 「路由」已独立成页 /routing（#40 分层档案 + 预演 + 回放 + 粘滞），不再在此列
-    for (const label of ['通用', 'AI 助手', '网关', '重试', '超时', '计费', '数据', '通知', '安全', '更新', '账户']) {
+    for (const label of ['通用', 'AI 助手', '聊天', '网关', '重试', '超时', '计费', '数据', '通知', '安全', '更新', '账户']) {
       await expect(nav(page).locator('.settings-nav-item', { hasText: label })).toHaveCount(1);
     }
     // 默认分类高亮，右栏是通用（使用限额 + 主题）
@@ -84,6 +84,37 @@ test.describe('系统设置分类', () => {
 
     await nav(page).getByRole('button', { name: '计费', exact: true }).click();
     await expect(page.locator('.settings-pane')).toContainText('按次计费');
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('聊天分类：自动标题开关 + 保存走 snake body（#11 契约）', async ({ page, pageErrors }) => {
+    await nav(page).locator('.settings-nav-item', { hasText: '聊天' }).click();
+    const pane = page.locator('.settings-pane');
+
+    // 面板渲染：开关 + 截断长度输入 + 渠道下拉含「全局调度」默认项
+    await expect(pane.locator('label', { hasText: '启用会话自动标题' })).toHaveCount(1);
+    await expect(pane.locator('input[type=number]')).toHaveCount(1);
+    await expect(pane.locator('option', { hasText: '全局调度' })).toHaveCount(1);
+
+    // 开关 + 改截断长度
+    await pane.locator('label', { hasText: '启用会话自动标题' }).locator('input[type=checkbox]').check();
+    await pane.locator('input[type=number]').fill('800');
+
+    const [req, resp] = await Promise.all([
+      page.waitForRequest((r) => r.url().includes('/api/chat/settings') && r.method() === 'PUT'),
+      page.waitForResponse((r) => r.url().includes('/api/chat/settings') && r.request().method() === 'PUT'),
+      pane.locator('.settings-actions .btn-primary').click(),
+    ]);
+    // 冻结契约：PUT body snake_case；GET 响应 camelCase（含回显）
+    expect(JSON.parse(req.postData() || '{}')).toMatchObject({
+      auto_title: true,
+      title_prompt_chars: 800,
+    });
+    expect(resp.status()).toBe(200);
+    expect(await resp.json()).toMatchObject({
+      success: true,
+      data: { autoTitle: true, titlePromptChars: 800 },
+    });
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });

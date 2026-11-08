@@ -50,6 +50,10 @@ const ME_OAUTH_SEED = { oauth_github: true, oauth_google: false, oauth_linuxdo: 
 /** 列表类接口统一返回空数组，避免各页面因结构不符而报错 */
 const EMPTY_LIST = JSON.stringify({ success: true, data: [], total: 0, page: 1, size: 20 });
 
+// ── 聊天设置（GET/PUT /api/chat/settings，#10/#11）──
+// GET 响应 camelCase；PUT body snake_case（后端 ChatConfig serde），桩内互映射。
+const CHAT_SETTINGS = { autoTitle: false, titleModel: '', titleChannel: '', titlePromptChars: 500 };
+
 // ── 统一模型管理视图（形状对齐 src/model/manage.rs 的 view_json）──
 // 给两条渠道来源 + 一条账号池来源，用于验证左栏分组、来源 chips、启停开关、
 // 「未定价」统计与搜索筛选。
@@ -554,6 +558,23 @@ function handle(req, res, p, bodyText) {
         success: true,
         data: { host: '0.0.0.0', port: 9527, corsOrigins: [], trustProxyHeaders: false },
       });
+    }
+
+    // 聊天设置（#10 契约：GET camel 出 / PUT snake 入；PUT 即热生效）
+    if (p === '/api/chat/settings' && req.method === 'GET') {
+      return sendJson(res, { success: true, data: CHAT_SETTINGS });
+    }
+    if (p === '/api/chat/settings' && req.method === 'PUT') {
+      const body = JSON.parse(bodyText || '{}');
+      if (typeof body.auto_title === 'boolean') CHAT_SETTINGS.autoTitle = body.auto_title;
+      if (typeof body.title_model === 'string') CHAT_SETTINGS.titleModel = body.title_model;
+      if (typeof body.title_channel === 'string') CHAT_SETTINGS.titleChannel = body.title_channel;
+      if (Number.isFinite(body.title_prompt_chars)) CHAT_SETTINGS.titlePromptChars = body.title_prompt_chars;
+      // 复刻后端唯一 400 组合：auto_title=true 且 title_prompt_chars=0
+      if (CHAT_SETTINGS.autoTitle && CHAT_SETTINGS.titlePromptChars === 0) {
+        return sendJson(res, { success: false, error: 'auto_title 开启时 title_prompt_chars 不能为 0' }, 400);
+      }
+      return sendJson(res, { success: true, data: CHAT_SETTINGS });
     }
 
     // 渠道健康 Tab（原系统诊断页并入）：三件套形状对齐 src/api/admin/diagnostics.rs

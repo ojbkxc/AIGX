@@ -85,6 +85,7 @@ import type {
   UpdateSettingsItem,
   AccountRotationPolicyItem,
   AgentSettingsItem,
+  ChatSettingsItem,
   GatewaySettingsItem,
   SecurityPolicyItem,
   DebugTrafficView,
@@ -853,6 +854,11 @@ export const api = {
     request<ApiResponse<AgentSettingsItem>>('GET', `${API_BASE}/agent/settings`),
   saveAgentSettings: (data: Record<string, unknown>): Promise<ApiResponse<AgentSettingsItem>> =>
     request<ApiResponse<AgentSettingsItem>>('PUT', `${API_BASE}/agent/settings`, data),
+  /** 聊天设置（/api/chat/settings，#10）：GET 响应 camelCase，PUT body snake_case（同 agent 面请求侧）；保存即热生效 */
+  getChatSettings: (): Promise<ApiResponse<ChatSettingsItem>> =>
+    request<ApiResponse<ChatSettingsItem>>('GET', `${API_BASE}/chat/settings`),
+  saveChatSettings: (data: Record<string, unknown>): Promise<ApiResponse<ChatSettingsItem>> =>
+    request<ApiResponse<ChatSettingsItem>>('PUT', `${API_BASE}/chat/settings`, data),
   getGatewaySettings: (): Promise<ApiResponse<GatewaySettingsItem>> =>
     request<ApiResponse<GatewaySettingsItem>>('GET', `${API_BASE}/gateway/settings`),
   saveGatewaySettings: (data: Record<string, unknown>): Promise<ApiResponse<GatewaySettingsItem>> =>

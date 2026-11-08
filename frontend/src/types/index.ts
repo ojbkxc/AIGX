@@ -1549,6 +1549,22 @@ export interface AgentSettingsItem {
   tools: AgentToolItem[];
 }
 
+/**
+ * 聊天功能设置（GET/PUT /api/chat/settings，#10/#11）。
+ * 字段对齐后端 `src/config.rs` ChatConfig（camel 出、snake 入由 api 层封装）。
+ * 保存即热生效（title.rs 每次生成前重读配置，无需重启）。
+ */
+export interface ChatSettingsItem {
+  /** 会话 LLM 自动标题开关（默认关，与 agent.enabled 同口径） */
+  autoTitle: boolean;
+  /** 标题生成模型（空 = 自动发现启用+已定价模型） */
+  titleModel: string;
+  /** 标题生成锁定渠道（空 = 走全局调度） */
+  titleChannel: string;
+  /** 首条用户消息发给模型的最大字符数（默认 500，超出截断；后端不 clamp，前端兜底 ≥1，0 会被 400） */
+  titlePromptChars: number;
+}
+
 /** 网关设置（监听地址 / CORS / 反代信任） */
 export interface GatewaySettingsItem {
   host: string;

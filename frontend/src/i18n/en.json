@@ -3232,5 +3232,15 @@
   "标题不能为空": "Title cannot be empty",
   "重命名": "Rename",
   "重命名会话": "Rename session",
-  "重命名失败": "Rename failed"
+  "重命名失败": "Rename failed",
+  "对话增值能力：LLM 自动为会话生成标题；保存后立即生效，无需重启。": "Chat add-ons: LLM auto-generates conversation titles; saving takes effect immediately, no restart needed.",
+  "启用会话自动标题": "Enable automatic conversation titles",
+  "开启后新会话首条消息落库时异步生成标题；生成失败保持截断标题，静默不弹错。": "When enabled, the first message of a new conversation triggers async title generation; on failure the truncated title is kept silently.",
+  "标题模型": "Title Model",
+  "留空自动发现启用且已定价的模型（与 AI 助手同口径）。": "Leave empty to auto-discover an enabled, priced model (same convention as AI Assistant).",
+  "全局调度（默认）": "Global scheduling (default)",
+  "指定后标题生成只走该渠道；留空按全局优先级自动选路。": "When set, title generation uses only this channel; leave empty to route by global priority.",
+  "提示词截断长度（字符）": "Prompt Truncation (characters)",
+  "发给模型的首条用户消息最大字符数（默认 500，超出截断）。": "Maximum characters of the first user message sent to the model (default 500, truncated beyond).",
+  "聊天设置已保存": "Chat settings saved"
 }
