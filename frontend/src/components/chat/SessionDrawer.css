@@ -219,6 +219,25 @@
   text-overflow: ellipsis;
 }
 
+/* #58：fork 追溯/命名来源徽标（父已删/手工/自动） */
+.sd-badge {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 9.5px;
+  line-height: 1.4;
+  padding: 0 5px;
+  border-radius: 7px;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.sd-badge-gone {
+  color: var(--danger-color, #d64545);
+  border-color: var(--danger-color, #d64545);
+}
+
 .sd-item-meta {
   font-size: 11px;
   color: var(--text-muted, #6b7280);

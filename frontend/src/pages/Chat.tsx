@@ -65,12 +65,16 @@ interface LegacySession {
   updated_at: number;
 }
 
-/** 会话摘要（列表用；消息按需从后端拉） */
+/** 会话摘要（列表用；消息按需从后端拉）。
+ *  parent/title_source 供 Drawer 父子追溯与命名来源徽标（#58；
+ *  本地持久化沿用旧形状时缺省，列表加载走后端 ChatSessionSummary 补齐）。 */
 interface PlaygroundSession {
   id: string;
   title: string;
   model: string;
   updated_at: number;
+  parent_session_id?: string | null;
+  title_source?: string | null;
 }
 
 const uid = (): string => `pg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -209,9 +213,10 @@ export default function Chat(): JSX.Element {
     return true;
   }, [addToast, t]);
 
-  /* ── 会话 fork（对照上游 fork：仅 assistant 消息可分叉，截取含本条；
-   *   AIGX 消息无 id 用下标；走既有 createChatSession + replaceChatMessages，
-   *   无需新后端端点。后端不可用时退化为本地临时会话（与新建会话同口径）。）── */
+  /* ── 会话 fork（#58：改调 #37 后端有界 fork——200 条 / 128KiB 上限由
+   *   后端保证，dropped 如实回执；原「createChatSession + replace 前端
+   *   拼接」路径删除。message_seq = 消息下标（0-based 含该条，两侧同序）。
+   *   后端不可用 → toast 报错，不再退化为无上界的本地拼接。── */
   const forkSession = useCallback(async (idx: number): Promise<void> => {
     if (guardBusy()) {
       setDrawerOpen(false);
@@ -225,32 +230,75 @@ export default function Chat(): JSX.Element {
       saveTimer.current = null;
     }
     await saveActiveNow();
-    const sliced = src.slice(0, idx + 1).map((m) => ({ role: m.role, content: m.content }));
-    const curTitle = sessionsRef.current.find((s) => s.id === activeRef.current)?.title || '';
-    const baseTitle = curTitle && curTitle !== '新会话' ? curTitle : t('会话');
-    const forkTitle = `${baseTitle} · ${t('分叉')}`;
-    let newId = `local-fork-${Date.now().toString(36)}`;
+    const srcId = activeRef.current;
+    if (!srcId) return;
     try {
-      const created = await api.createChatSession({ title: forkTitle, model: modelRef.current });
-      const id = created.data?.id;
-      if (id) {
-        newId = id;
-        await api.replaceChatMessages(newId, sliced, false);
-      }
-    } catch {
-      /* 后端不可用：本地临时会话兜底（消息不持久化，与 createSession 同口径） */
+      const res = await api.forkChatSession(srcId, idx);
+      const session = res.data?.session;
+      const copied = res.data?.copied ?? 0;
+      const dropped = res.data?.dropped ?? 0;
+      if (!session?.id) throw new Error(t('分叉失败'));
+      const newId = session.id;
+      // 消息切片本地直取（与后端 [0, message_seq] 同构，免二次拉取）
+      const sliced = src.slice(0, idx + 1).map((m) => ({ role: m.role, content: m.content }));
+      persistSessions([
+        { id: newId, title: session.title || t('分叉会话'), model: session.model || modelRef.current, updated_at: Math.floor(Date.now() / 1000), parent_session_id: session.parent_session_id ?? srcId, title_source: session.title_source ?? null },
+        ...sessionsRef.current,
+      ]);
+      activeRef.current = newId;
+      messagesRef.current = sliced;
+      setActiveId(newId);
+      setMessages(sliced);
+      setDrawerOpen(false);
+      addToast(
+        dropped > 0
+          ? t('已分叉为新会话：复制 {{copied}} 条，超界截断 {{dropped}} 条', { copied, dropped })
+          : t('已分叉为新会话：复制 {{copied}} 条', { copied }),
+      );
+    } catch (err) {
+      addToast(`${t('分叉失败')}：${err instanceof Error ? err.message : String(err)}`, 'error');
     }
-    persistSessions([
-      { id: newId, title: forkTitle, model: modelRef.current, updated_at: Math.floor(Date.now() / 1000) },
-      ...sessionsRef.current,
-    ]);
-    activeRef.current = newId;
-    messagesRef.current = sliced;
-    setActiveId(newId);
-    setMessages(sliced);
-    setDrawerOpen(false);
-    addToast(t('已从该消息分叉为新会话'));
   }, [addToast, guardBusy, saveActiveNow, t]);
+
+  /* ── Drawer 行级 fork（#58）：活动会话 = 从最新消息分叉（消息在内存直取）；
+   *   非活动会话 = 拉一次消息数后按最后一条分叉（就地复制，不切换当前会话）。
+   *   message_seq 与消息下标同序（后端 0-based 含该条）。 ── */
+  const forkFromDrawer = useCallback(async (id: string): Promise<void> => {
+    if (guardBusy()) return;
+    if (id === activeRef.current) {
+      const last = messagesRef.current.length - 1;
+      if (last < 0) {
+        addToast(t('空会话无可分叉消息'));
+        return;
+      }
+      await forkSession(last);
+      return;
+    }
+    try {
+      const detail = await api.getChatSession(id);
+      const n = detail.data?.messages?.length ?? 0;
+      if (n === 0) {
+        addToast(t('空会话无可分叉消息'));
+        return;
+      }
+      const res = await api.forkChatSession(id, n - 1);
+      const session = res.data?.session;
+      if (!session?.id) throw new Error(t('分叉失败'));
+      const copied = res.data?.copied ?? 0;
+      const dropped = res.data?.dropped ?? 0;
+      persistSessions([
+        { id: session.id, title: session.title || t('分叉会话'), model: session.model || '', updated_at: Math.floor(Date.now() / 1000), parent_session_id: session.parent_session_id ?? id, title_source: session.title_source ?? null },
+        ...sessionsRef.current,
+      ]);
+      addToast(
+        dropped > 0
+          ? t('已分叉为新会话：复制 {{copied}} 条，超界截断 {{dropped}} 条', { copied, dropped })
+          : t('已分叉为新会话：复制 {{copied}} 条', { copied }),
+      );
+    } catch (err) {
+      addToast(`${t('分叉失败')}：${err instanceof Error ? err.message : String(err)}`, 'error');
+    }
+  }, [addToast, guardBusy, forkSession, t]);
 
   /* ── LLM 标题总结：首轮对话后自动一次；「新会话」或空标题才触发，
    *   用户手动改过名的会话永不覆盖（对齐上游 titleGenerated 幂等语义）── */
@@ -375,7 +423,9 @@ export default function Chat(): JSX.Element {
           id: s.id,
           title: s.title,
           model: s.model,
-          updated_at: s.updated_at,
+          updated_at: s.updated_at ?? 0,
+          parent_session_id: s.parent_session_id ?? null,
+          title_source: s.title_source ?? null,
         }));
       } catch {
         list = [];
@@ -609,11 +659,14 @@ export default function Chat(): JSX.Element {
           id: s.id,
           title: s.title || t('新会话'),
           meta: new Date(s.updated_at * 1000).toLocaleDateString(),
+          parent_session_id: s.parent_session_id ?? null,
+          title_source: s.title_source ?? null,
         }))}
         activeId={activeId}
         onSelect={(id) => void switchSession(id)}
         onCreate={() => void createSession()}
         onDelete={(id) => void deleteSession(id)}
+        onFork={(id) => void forkFromDrawer(id)}
         headerExtra={(
           <span className="sd-title-cfg">
             <button

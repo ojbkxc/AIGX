@@ -2088,3 +2088,20 @@ export interface PluginsPayload {
   updates: PluginUpdate[];
   operations: PluginOperation[];
 }
+
+/**
+ * 聊天会话摘要（GET /api/chat/sessions 列表项 / fork 响应的 session）。
+ * 后端锚点：src/chat_session/mod.rs:70-83（serde camelCase）。
+ * parent_session_id / forked_from_seq（#37 父子追溯，父删子悬空容忍）；
+ * title_source 三态："user"（手工改名，永不被自动标题覆盖）/"auto"（首条消息
+ * 截 30 字）/缺省（旧数据）。 */
+export interface ChatSessionSummary {
+  id: string;
+  title: string;
+  model: string;
+  created_at?: number;
+  updated_at?: number;
+  parent_session_id?: string | null;
+  forked_from_seq?: number | null;
+  title_source?: string | null;
+}

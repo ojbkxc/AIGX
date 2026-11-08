@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { ChevronLeft, MessageSquarePlus, Trash2 } from 'lucide-react';
+import { ChevronLeft, GitFork, MessageSquarePlus, Trash2 } from 'lucide-react';
 import ConfirmDialog, { type ConfirmState } from '../ConfirmDialog';
 import './SessionDrawer.css';
 
@@ -33,6 +33,10 @@ export interface SessionDrawerItem {
   title: string;
   /** 列表项元信息（角色/日期/消息数等，调用方拼好） */
   meta?: string;
+  /** #58：父会话 id（fork 产物；父被删时前端显示「父已删」容忍徽标） */
+  parent_session_id?: string | null;
+  /** #58：命名来源三态 "user"/"auto"/缺省 → 徽标「手工/自动」 */
+  title_source?: string | null;
 }
 
 export interface SessionDrawerProps {
@@ -45,6 +49,9 @@ export interface SessionDrawerProps {
   onSelect: (id: string) => void;
   onCreate: () => void;
   onDelete: (id: string) => void;
+  /** #58：行级 fork 入口（可选——AI 运维页不传，行为不变）。
+   *  语义由调用方实现：活动会话从最新消息分叉；非活动会话就地复制。 */
+  onFork?: (id: string) => void;
   /** 标题（默认「会话列表」） */
   title?: string;
   /** 头部额外操作（渲染在标题与收起按钮之间，如聊天页的标题总结设置）；
@@ -62,6 +69,7 @@ export default function SessionDrawer({
   onSelect,
   onCreate,
   onDelete,
+  onFork,
   title,
   headerExtra,
 }: SessionDrawerProps): JSX.Element | null {
@@ -109,7 +117,10 @@ export default function SessionDrawer({
         {!loading && sessions.length === 0 && (
           <div className="sd-empty">{t('暂无会话')}</div>
         )}
-        {sessions.map((s) => (
+        {sessions.map((s) => {
+          // #58：父悬空容忍——parent id 不在当前列表（被删）→「父已删」徽标
+          const parentGone = Boolean(s.parent_session_id) && !sessions.some((x) => x.id === s.parent_session_id);
+          return (
           <div key={s.id} className={`sd-item ${s.id === activeId ? 'active' : ''}`}>
             <button
               type="button"
@@ -120,9 +131,24 @@ export default function SessionDrawer({
                 if (variant === 'overlay') onClose();
               }}
             >
-              <span className="sd-item-title">{s.title || t('新会话')}</span>
+              <span className="sd-item-title">
+                {s.title || t('新会话')}
+                {parentGone && <span className="sd-badge sd-badge-gone">{t('父已删')}</span>}
+                {s.title_source === 'user' && <span className="sd-badge">{t('手工')}</span>}
+                {s.title_source === 'auto' && <span className="sd-badge">{t('自动')}</span>}
+              </span>
               {s.meta && <span className="sd-item-meta">{s.meta}</span>}
             </button>
+            {onFork && (
+              <button
+                type="button"
+                className="sd-item-del"
+                title={t('分叉为新会话')}
+                onClick={() => onFork(s.id)}
+              >
+                <GitFork size={12} />
+              </button>
+            )}
             <button
               type="button"
               className="sd-item-del"
@@ -132,7 +158,8 @@ export default function SessionDrawer({
               <Trash2 size={12} />
             </button>
           </div>
-        ))}
+          );
+        })}
       </div>
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </>
