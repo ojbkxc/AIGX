@@ -175,6 +175,9 @@ impl ChannelRequest {
                 .map(validate_balance_scheme)
                 .unwrap_or_default(),
             balance_unit: String::new(),
+            balance_query_interval_secs: None,
+            balance_last_query_at: None,
+            balance_last_error: None,
             created_at: now,
             updated_at: now,
         }

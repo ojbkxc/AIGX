@@ -367,6 +367,9 @@ fn resolve_or_create_auto_channel(
         quirks: spec.quirks.clone().unwrap_or_default(),
         balance_scheme: spec.balance_scheme.clone().unwrap_or_default(),
         balance_unit: String::new(),
+        balance_query_interval_secs: None,
+        balance_last_query_at: None,
+        balance_last_error: None,
         created_at: 0,
         updated_at: 0,
     };

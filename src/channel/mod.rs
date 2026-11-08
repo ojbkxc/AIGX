@@ -968,7 +968,13 @@ impl ChannelStore {
                     ch.balance_last_error = None;
                 }
                 Err(message) => {
-                    ch.balance_last_error = Some(message);
+                    // 落库前脱敏：上游错误正文可能回显凭证（balance.rs 的
+                    // get_json 把响应正文前 160 字符放进 message，401/403
+                    // 常回显密钥/账号标识）。该字段经 mask_channel 出界面；
+                    // 字段是新的（零存量），写入侧一道即全覆盖；排障原文在
+                    // sweep 的服务端日志里。
+                    ch.balance_last_error =
+                        Some(crate::error_translate::sanitize_error_message(&message));
                 }
             }
             ch.balance_last_query_at = Some(at);

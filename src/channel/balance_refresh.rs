@@ -89,12 +89,14 @@ pub async fn sweep(store: &ChannelStore, client: &Client) -> u64 {
 
     let mut done = 0u64;
     for (id, outcome) in results {
+        match &outcome {
+            Ok(_) => done += 1,
+            // 服务端日志留原文（排障用，不外发）；落库走 sanitize_error_message
+            Err(message) => tracing::warn!("channel {id} balance query failed: {message}"),
+        }
         // 写回前不再重读：查询期间渠道被删时 save_balance_refresh 静默跳过；
         // 渠道配置若被改（间隔/凭证），本轮仍按 list 快照的口径查，下轮生效。
         store.save_balance_refresh(&id, now, outcome);
-        if outcome.is_ok() {
-            done += 1;
-        }
     }
     done
 }
@@ -105,6 +107,7 @@ mod tests {
     use super::*;
     use crate::storage::FileStore;
     use std::collections::{BTreeMap, HashMap};
+    use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -466,6 +469,24 @@ mod tests {
         assert_eq!(ch.balance_last_error.as_deref(), Some("上游返回 HTTP 500"));
         assert_eq!(ch.balance_last_query_at, Some(1_000_000));
         assert_eq!(ch.updated_at, before); // 失败也不 bump
+    }
+
+    #[test]
+    fn save_balance_refresh_err_branch_sanitizes_credentials() {
+        // 上游 401 正文可能回显密钥（balance.rs 的 get_json 把响应正文
+        // 前 160 字符放进 message）：落库前必须脱敏，否则经 mask_channel
+        // 泄漏到界面。字段是新的（零存量），写入侧一道即全覆盖；排障原文
+        // 在 sweep 的服务端日志里。
+        let store = store();
+        let ch = sample("a", "https://api.deepseek.com");
+        store.add(ch).unwrap();
+        let raw = "401: {\"error\":\"Incorrect API key provided: sk-abcdef1234567890\"}";
+        store.save_balance_refresh("a", 1_000_000, Err(raw.to_string()));
+        let ch = store.get("a").unwrap();
+        assert_eq!(
+            ch.balance_last_error.as_deref(),
+            Some("401: {\"error\":\"Incorrect API key provided: sk-***\"}")
+        );
     }
 
     #[test]

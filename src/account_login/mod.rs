@@ -636,6 +636,9 @@ fn ensure_channel(
         quirks: Default::default(),
         balance_scheme: String::new(),
         balance_unit: String::new(),
+        balance_query_interval_secs: None,
+        balance_last_query_at: None,
+        balance_last_error: None,
         created_at: 0,
         updated_at: 0,
     };
