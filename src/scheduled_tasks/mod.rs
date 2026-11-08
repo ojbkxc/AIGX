@@ -426,6 +426,8 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                 // 生产实证见 08-prod「目录漂移」）。只刷启用且带渠道级凭证的
                 // openai_compat 渠道；逐渠道失败不判整轮失败（各渠道独立）。
                 let mut refreshed_channels = 0usize;
+                // 目录对账（P2-6②）：声明 vs 发现差异 + 渠道级悬空映射统计（只读）
+                let mut drift_channels: Vec<Value> = Vec::new();
                 for ch in state.channel_store.list() {
                     if !ch.is_enabled()
                         || ch.channel_type != crate::channel::ChannelType::OpenaiCompatible
@@ -447,6 +449,38 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                             if !models.is_empty() {
                                 let _ = state.channel_store.save_discovered_models(&ch.id, models);
                                 refreshed_channels += 1;
+                                // 对账（P2-6②）：有效清单 = models 非空用白名单，空用本轮发现快照
+                                let alive: Vec<String> = if !ch.models.is_empty() {
+                                    ch.models.clone()
+                                } else {
+                                    models.clone()
+                                };
+                                let stale_mappings = crate::model::prune_stale_channel_mappings(
+                                    &ch.model_mapping,
+                                    &alive,
+                                );
+                                // 声明了但上游本轮已不提供（疑似下线）；models 空 = 全支持，无下线概念
+                                let declared_not_found: Vec<String> = if ch.models.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    ch.models
+                                        .iter()
+                                        .filter(|m| !models.contains(m))
+                                        .cloned()
+                                        .collect()
+                                };
+                                // 有漂移迹象（疑似下线 / 悬空映射）才进报告
+                                if !declared_not_found.is_empty() || !stale_mappings.is_empty() {
+                                    drift_channels.push(json!({
+                                        "id": ch.id,
+                                        "name": ch.name,
+                                        "declared_not_found": declared_not_found,
+                                        "stale_mappings": stale_mappings
+                                            .iter()
+                                            .map(|(a, t)| json!({ "alias": a, "target": t }))
+                                            .collect::<Vec<_>>(),
+                                    }));
+                                }
                             }
                         }
                         Err((status, body)) => {
@@ -461,9 +495,44 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                         }
                     }
                 }
+                // 对账报告落 KV（catalog:drift:latest）——诊断页/健康页可读
+                let n_drift = drift_channels.len();
+                let n_gone: usize = drift_channels
+                    .iter()
+                    .map(|c| {
+                        c["declared_not_found"]
+                            .as_array()
+                            .map(|a| a.len())
+                            .unwrap_or(0)
+                    })
+                    .sum();
+                let n_stale: usize = drift_channels
+                    .iter()
+                    .map(|c| c["stale_mappings"].as_array().map(|a| a.len()).unwrap_or(0))
+                    .sum();
+                if n_drift > 0 {
+                    let report = json!({
+                        "at": chrono::Utc::now().timestamp(),
+                        "channels": drift_channels,
+                    });
+                    if let Err(e) = state
+                        .scheduled_task_store
+                        .put("catalog:drift:latest", &report)
+                    {
+                        tracing::warn!("[Tasks] 目录对账报告写入失败：{e}");
+                    }
+                }
                 let mut summary = format!("models.dev 元数据已更新 {count} 条");
                 if refreshed_channels > 0 {
                     summary.push_str(&format!("，刷新 {refreshed_channels} 个渠道清单"));
+                }
+                if n_drift > 0 {
+                    tracing::info!(
+                        "[Tasks] 目录对账：{n_drift} 个渠道有漂移迹象（{n_gone} 条疑似下线模型，{n_stale} 条悬空映射，详情见 catalog:drift:latest）"
+                    );
+                    summary.push_str(&format!(
+                        "，目录对账 {n_drift} 渠道有漂移迹象（{n_gone} 条疑似下线，{n_stale} 条悬空映射）"
+                    ));
                 }
                 if !catalog_ok {
                     summary.push_str(&format!("；{catalog_note}"));
