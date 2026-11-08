@@ -4115,6 +4115,32 @@ fn usage_tail_bytes(
     (frame, if estimated { Some(usage) } else { None })
 }
 
+/// #38 遗留口子 2：把「记账守卫喂给 [`record_chat_test_usage`] 的那份 JSON」抽成纯函数。
+///
+/// 原先这段决策 inline 在 `AccountStreamGuard::drop` 里，而 `drop` 要拿 `AppState`
+/// 和各 store 才能记账，与本仓「带测的全是纯函数」的先例相悖
+/// ⇒ P2(b) 落的那条「断线时不再传 `Value::Null`」**当时没有单测**，钉住的只是它调用的
+/// [`resolve_tail_usage`]。抽出来之后守卫臂只剩一行胶水，**形状**可以被单测钉住。
+///
+/// 语义**逐字节照搬搬动前**（一个分支都不改）：slot 有值 ⇒ 原样采用（上游真值、或正常收尾时
+/// `usage_tail_bytes` 回写的估算，都在 slot 里，估算入参不参与）；slot 空（客户端断连，
+/// `done` 闭包根本没执行）⇒ 用调用方给的 `prompt_tokens_est` 合成同一份估算。
+/// 两支都带 `choices[0].message.content = 正文`，所以日志 debug 快照的可排查性不降。
+fn tail_account_usage_json(
+    slot: Option<Value>,
+    prompt_tokens_est: u64,
+    model: &str,
+    output: &str,
+) -> Value {
+    // `unwrap_or_else`（惰性）：slot 有值时连估算都不该跑。
+    let usage =
+        slot.unwrap_or_else(|| resolve_tail_usage(None, prompt_tokens_est, model, output).0);
+    serde_json::json!({
+        "usage": usage,
+        "choices": [{ "message": { "content": output } }],
+    })
+}
+
 /// 账号池 chat_test 流式包装：把 AccountBridge 的归一化 `ChatChunk` 序列化为
 /// OpenAI SSE 帧（与数据面 /v1/chat/completions 的 wire 形状一致，前端
 /// `parseSseFrame` 按 choices[0].delta 解析），并在流结束/drop 时记账。
@@ -4251,34 +4277,15 @@ fn account_chat_test_stream(
                 return;
             }
             let output = self.acc.lock().clone();
-            // #21/B：展示与扣费同源——流尾已把最终 usage（上游真值或估算）写回
-            // slot，记账直接吃它。
-            //
-            // #38/P2(b)：客户端断连时 `done` 闭包根本不执行，slot 可能是空的。
-            // 以前这里退化成 `Value::Null`，`extract_usage_tokens` 只能给出
-            // `(0, 0)` → 日志 prompt_tokens 记 0、completion 由文本估算兜底；
-            // 而数据面（`billing.rs::finalize` / `write_499`）恒用
-            // `count_chat_prompt` 估 prompt，同一笔请求在报表两处口径不一致。
-            // 本链路手上本来就有调用方给的 prompt 估算值，所以补齐到同口径，
-            // completion 仍走 `resolve_tail_usage` 的 `count_text` —— 与
-            // `record_chat_test_usage` 内部那段兜底用的是同一个算法，
-            // **不引入第二个数字来源**，只有 prompt 从 0 变成估算值。
-            // （日志 debug 快照的形状随之从「纯正文」变成 `{"usage":…,
-            //   "choices":[{"message":{"content":正文}}]}`，正文仍在，可排查性不降。）
-            let usage_json = match self.usage_slot.lock().clone() {
-                Some(u) => serde_json::json!({
-                    "usage": u,
-                    "choices": [{ "message": { "content": output } }],
-                }),
-                None => {
-                    let (usage, _) =
-                        resolve_tail_usage(None, self.prompt_tokens_est, &self.model, &output);
-                    serde_json::json!({
-                        "usage": usage,
-                        "choices": [{ "message": { "content": output } }],
-                    })
-                }
-            };
+            // #21/B + #38/P2(b)：展示与扣费同源，取值/形状的规则全在
+            // `tail_account_usage_json`（纯函数、有单测钉住「断线时不再传 Null」）。
+            // 这里只剩「取共享状态 → 调它 → 记账」的胶水。
+            let usage_json = tail_account_usage_json(
+                self.usage_slot.lock().clone(),
+                self.prompt_tokens_est,
+                &self.model,
+                &output,
+            );
             record_chat_test_usage(
                 &self.state,
                 &self.user,
@@ -5109,5 +5116,64 @@ mod tests {
         assert_eq!(kept, Some(600), "不带键 ⇒ 保持");
         assert_eq!(closed, None, "显式 null ⇒ 关闭");
         assert_ne!(kept, closed, "两个状态塌成同一个就没法关定频了");
+    }
+
+    /// #38 遗留口子 2：记账守卫那条臂**不再传 `Value::Null`**，并且与前端看到的
+    /// 尾帧是同一份数字。`AccountStreamGuard::drop` 本身要吃 `AppState` 没法单测，
+    /// 钉它调用的纯函数 `tail_account_usage_json` 是唯一可行姿势（lead 2026-11-09 批准）。
+    #[test]
+    fn account_usage_json_synthesizes_prompt_when_slot_empty() {
+        let model = "gpt-4o";
+        let output = "这是一段用于验证守卫臂的输出文本";
+        let completion = crate::token_estimate::count_text(model, output) as u64;
+        assert_ne!(
+            completion, 0,
+            "夹具文本必须能估出非零 completion，否则下面断言是空的"
+        );
+
+        // ① 断线臂（slot 空）：prompt 用调用方估算、completion 用文本估算，
+        //    且**与前端会看到的那帧 usage 同一份数字** —— 展示 = 扣费，不许两处各有算法。
+        //    （P2(b) 之前这里退化成 Null ⇒ extract_usage_tokens 给 (0, 估算)，
+        //      报表里 prompt 消耗被系统性低估；这条断言就是那个修复的钉子。）
+        let from_guard = tail_account_usage_json(None, 120, model, output);
+        let (tail, writeback) = usage_tail_bytes(false, None, 120, model, output, "chatcmpl-arm");
+        let frame = frame_of(&tail);
+        assert_eq!(
+            from_guard["usage"], frame["usage"],
+            "守卫合成值必须与尾帧一致：{from_guard} vs {frame}"
+        );
+        let written = writeback.expect("估算分支必须回写 slot");
+        assert_eq!(
+            from_guard["usage"], written,
+            "回写值与守卫合成值必须同一份（正常收尾与断线两条路都汇到同一口径）"
+        );
+        assert_eq!(from_guard["usage"]["prompt_tokens"], serde_json::json!(120));
+        assert_eq!(
+            from_guard["usage"]["completion_tokens"],
+            serde_json::json!(completion)
+        );
+        assert_eq!(
+            from_guard["usage"]["total_tokens"],
+            serde_json::json!(120 + completion)
+        );
+
+        // ② 正文仍在快照里：`record_chat_test_usage` 的 `usage_json.is_null()` 分支
+        //    从此不再走，这是**有意的形状变化**（数据面 499 与账号池正常收尾早就是这个形状），
+        //    但可排查性不许因此下降。
+        assert_eq!(
+            from_guard["choices"][0]["message"]["content"],
+            serde_json::json!(output)
+        );
+
+        // ③ slot 有值（上游真值 / 正常收尾回写）⇒ 原样采用，估算入参完全不起作用。
+        let real = serde_json::json!({
+            "prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10
+        });
+        let kept = tail_account_usage_json(Some(real.clone()), 999, model, output);
+        assert_eq!(kept["usage"], real, "slot 有值时估算入参不得掺进去");
+        assert_eq!(
+            kept["choices"][0]["message"]["content"],
+            serde_json::json!(output)
+        );
     }
 }
