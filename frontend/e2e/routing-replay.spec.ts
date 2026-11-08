@@ -90,11 +90,12 @@ const FLAT_SNAP = {
   },
 };
 
-/** 打开「系统设置 → 路由」并提交一个请求 ID 回放 */
+/** 打开「路由页 → 回放」并提交一个请求 ID 回放 */
 async function openReplayPanel(page: import('@playwright/test').Page, requestId: string): Promise<void> {
   await loginAsAdmin(page);
-  await page.goto('/settings');
-  await page.locator('.settings-nav-item', { hasText: '路由' }).first().click();
+  // 路由域已从「系统设置 → 路由」独立成页（#40）：/routing 单页多模式
+  await page.goto('/routing');
+  await page.getByRole('tab', { name: '回放', exact: true }).click();
   await expect(page.locator('.rr-panel h2', { hasText: '路由回放' })).toBeVisible();
   await page.getByPlaceholder('粘贴请求日志里的请求 ID').fill(requestId);
   await page.getByRole('button', { name: '回放', exact: true }).click();

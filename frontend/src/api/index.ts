@@ -108,6 +108,14 @@ import type {
 } from '@/types';
 // 路由回放/粘滞会话类型独立成文件（types/index.ts 正被 #13 并行编辑，避免共享大文件互卷在制品）
 import type { RouteReplaySnapshot, RouteStickyList } from '@/types/routing-replay';
+// 路由多规则体系（#40）类型独立成文件（同上：不碰 types/index.ts）
+import type {
+  RoutingPreviewItem,
+  RoutingPreviewRequest,
+  RoutingProfiles,
+  RoutingPolicyWithProfiles,
+  RoutingQueueWithLayers,
+} from '@/types/routing-profile';
 // 桌面导入来源类型（#22；独立文件理由同上）
 import type { DesktopSourceItem } from '@/types/desktop';
 
@@ -864,18 +872,29 @@ export const api = {
   refreshModelMetadata: (): Promise<ApiResponse<ModelMetadataRefreshResult>> =>
     request<ApiResponse<ModelMetadataRefreshResult>>('POST', `${API_BASE}/models/metadata/refresh`),
   // 路由策略（对照 Agent2API「设置 → 路由」；保存即热生效，无需重启）
-  getRoutingPolicy: (): Promise<ApiResponse<RoutingPolicyItem>> =>
-    request<ApiResponse<RoutingPolicyItem>>('GET', `${API_BASE}/routing`),
+  getRoutingPolicy: (): Promise<ApiResponse<RoutingPolicyWithProfiles>> =>
+    request<ApiResponse<RoutingPolicyWithProfiles>>('GET', `${API_BASE}/routing`),
   saveRoutingPolicy: (data: Record<string, unknown>): Promise<ApiResponse<RoutingPolicyItem>> =>
     request<ApiResponse<RoutingPolicyItem>>('PUT', `${API_BASE}/routing`, data),
+  // #40 多规则总开关：PUT /api/routing 是读-改-写，只传 enabled 不会碰其他字段
+  saveRoutingEnabled: (enabled: boolean): Promise<ApiResponse<RoutingPolicyItem>> =>
+    request<ApiResponse<RoutingPolicyItem>>('PUT', `${API_BASE}/routing`, { enabled }),
+  // #40 整份档案读写（契约 §5）。PUT 端点由后端 be-routing 提供；
+  // 未就绪时返回 404（调用方按「端点未就绪」降级，不谎报保存成功）。
+  saveRoutingProfiles: (profiles: RoutingProfiles): Promise<ApiResponse<RoutingProfiles>> =>
+    request<ApiResponse<RoutingProfiles>>('PUT', `${API_BASE}/routing/profiles`, profiles),
   getRoutingDefaults: (): Promise<ApiResponse<RoutingPolicyItem>> =>
     request<ApiResponse<RoutingPolicyItem>>('GET', `${API_BASE}/routing/defaults`),
   // 路由候选队列预演（对照 Agent2API「设置 → 路由 → 队列」：只读，不推进轮询游标）
-  getRoutingQueue: (model: string): Promise<ApiResponse<RoutingQueueItem>> =>
-    request<ApiResponse<RoutingQueueItem>>(
+  getRoutingQueue: (model: string): Promise<ApiResponse<RoutingQueueItem & RoutingQueueWithLayers>> =>
+    request<ApiResponse<RoutingQueueItem & RoutingQueueWithLayers>>(
       'GET',
       `${API_BASE}/routing/queue?model=${encodeURIComponent(model)}`,
     ),
+  // #40 档案预演（契约 §5）：与真实转发走同一个 plan_route，返回命中层与逐字段来源。
+  // 后端未就绪 → 404 / 405，调用方按「未就绪」降级，绝不在界面上自己算候选。
+  previewRouting: (req: RoutingPreviewRequest): Promise<ApiResponse<RoutingPreviewItem>> =>
+    request<ApiResponse<RoutingPreviewItem>>('POST', `${API_BASE}/routing/preview`, req),
   // 路由回放快照（对照 Agent2API「路由回放」：只读渲染请求当时保存的选路事实，
   // 不以当前配置重算历史）。后端 GET /api/routing/replay/{request_id} 由 be-fix
   // 任务 #12-B 提供；未就绪返回 404（err.status 可辨），调用方按空态降级。

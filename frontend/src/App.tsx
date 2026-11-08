@@ -45,6 +45,8 @@ const ProxyPool = lazyPage(() => import('./pages/ProxyPool'));
 const Chat = lazyPage(() => import('./pages/Chat'));
 
 const ModelManage = lazyPage(() => import('./pages/ModelManage'));
+// 路由域独立成页（#40）：分层档案 + 预演 + 回放 + 粘滞需要同屏上下文
+const Routing = lazyPage(() => import('./pages/Routing'));
 const Prompts = lazyPage(() => import('./pages/Prompts'));
 const Agent = lazyPage(() => import('./pages/Agent'));
 const Tickets = lazyPage(() => import('./pages/Tickets'));
@@ -205,6 +207,9 @@ export default function App(): JSX.Element {
           <Route path="/model-manage" element={<AdminRoute><ModelManage /></AdminRoute>} />
           <Route path="/model-presets" element={<Navigate to="/model-manage" replace />} />
           <Route path="/prompts" element={<ProtectedLayout><Prompts /></ProtectedLayout>} />
+          {/* 路由域（#40）：配置（分层档案/基础策略/预演）+ 回放 + 粘滞单页多模式；
+              原先挂在 /settings?tab=routing，独立成页后旧入口已下线 */}
+          <Route path="/routing" element={<AdminRoute><Routing /></AdminRoute>} />
           <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
           <Route path="/agent" element={<AdminRoute><Agent /></AdminRoute>} />
           <Route path="/checkin" element={<AdminRoute><CheckinCenter /></AdminRoute>} />

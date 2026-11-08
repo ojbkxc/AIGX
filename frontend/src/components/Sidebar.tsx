@@ -11,7 +11,7 @@ import {
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
   Languages, LogOut, Bot, Headphones, CalendarCheck, Globe, CalendarClock,
-  Puzzle,
+  Puzzle, Route as RouteIcon,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -44,6 +44,8 @@ const navItems: NavItem[] = [
   { path: '/channels', labelKey: '渠道与账号池', icon: Satellite, adminOnly: true },
   { path: '/users', labelKey: '用户管理', icon: Users, adminOnly: true },
   { path: '/products', labelKey: '套餐与兑换码', icon: Package, adminOnly: true },
+  // 路由域（#40）：分层档案 / 基础策略 / 预演 / 回放 / 粘滞单页多模式
+  { path: '/routing', labelKey: '路由', icon: RouteIcon, adminOnly: true },
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
   { path: '/agent', labelKey: 'AI 运维', icon: Bot, adminOnly: true },
   { path: '/checkin', labelKey: '签到中心', icon: CalendarCheck, adminOnly: true },
@@ -58,7 +60,7 @@ const navItems: NavItem[] = [
   { path: '/plugins', labelKey: '插件管理', icon: Puzzle, adminOnly: true },
 ];
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
-// 管理员 16 项 / 客户 8 项。合并历史：
+// 管理员 19 项 / 客户 8 项。合并历史：
 // - 模型映射 → 模型管理页统一维护（渠道表单里已移除，避免三处可改）
 // - 易支付 + 用户分组 + 通知设置 + 安全监控 + IP 管理 → 系统设置 tab
 // - 定价倍率曾并入系统设置计费 tab，现拆回独立页（/pricing）
@@ -96,6 +98,7 @@ const navGroups: NavGroup[] = [
       navItemOf('/proxy-pool'),      // 网络代理（出口代理池）
       navItemOf('/users'),           // 用户管理
       navItemOf('/products'),        // 套餐与兑换码（双 Tab）
+      navItemOf('/routing'),         // 路由（分层档案 / 预演 / 回放 / 粘滞）
       navItemOf('/checkin'),         // 签到中心
       navItemOf('/scheduled-tasks'), // 定时任务
       // 系统诊断 → 并入「渠道与账号池」第三 Tab「健康」（07 E.3：诊断三件套

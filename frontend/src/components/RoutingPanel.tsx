@@ -2,12 +2,10 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
-import RouteReplayPanel from './RouteReplay';
-import RouteSticky from './RouteSticky';
-import type { RouteStrategy, RoutingPolicyItem, RoutingQueueItem, StickyMode } from '../types';
+import type { RouteStrategy, RoutingPolicyItem, StickyMode } from '../types';
 
 /**
- * 路由策略（系统设置 → 运维 → 路由）
+ * 基础路由策略（/routing 页 → 基础策略）
  *
  * 对照 Agent2API「设置 → 路由」：把 AIGX 选路组件（priority+weight 分组、
  * RoundRobin、多因子调度、亲和粘性、断路器）的硬编码旋钮收敛为可配置项。
@@ -19,6 +17,10 @@ import type { RouteStrategy, RoutingPolicyItem, RoutingQueueItem, StickyMode } f
  * - 调度权重：多因子策略下健康/成本/RPM 三维权重
  *
  * 全部热生效：保存后下一请求即按新策略选路，无需重启。
+ *
+ * ⚠ 本组件只管**基础层**。#40 的分层档案（全局/模型级/路由组三态覆盖）、
+ * 候选预演与命中层、回放、粘滞各自在 `/routing` 页的分区里 —— 原先内嵌
+ * 在此的队列预演与回放/粘滞卡片已迁到那里，避免同一功能两处可看。
  */
 
 const STRATEGIES: Array<{ value: RouteStrategy; label: string; tip: string }> = [
@@ -81,10 +83,6 @@ export default function RoutingPanel(): JSX.Element {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [runtime, setRuntime] = useState<RoutingPolicyItem['runtime']>();
-  // 候选队列预演（只读；round_robin 下实际首挑由游标决定，预演以静态排序为准）
-  const [queueModel, setQueueModel] = useState('');
-  const [queue, setQueue] = useState<RoutingQueueItem>();
-  const [queueLoading, setQueueLoading] = useState(false);
   const [form, setForm] = useState<FormState>({
     strategy: 'weighted',
     sticky: 'auto',
@@ -189,21 +187,6 @@ export default function RoutingPanel(): JSX.Element {
     }
   };
 
-  // 候选队列预演：复用数据面同一套过滤排序（只读，不推进轮询游标）
-  const loadQueue = async (): Promise<void> => {
-    const m = queueModel.trim();
-    if (!m) return;
-    setQueueLoading(true);
-    try {
-      const res = await api.getRoutingQueue(m);
-      setQueue(res?.data);
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : String(err), 'error');
-    } finally {
-      setQueueLoading(false);
-    }
-  };
-
   if (loading) {
     return <div className="loading">{t('加载中')}</div>;
   }
@@ -211,13 +194,10 @@ export default function RoutingPanel(): JSX.Element {
   const strategyTip = STRATEGIES.find((s) => s.value === form.strategy)?.tip ?? '';
   const stickyTip = STICKY_OPTIONS.find((s) => s.value === form.sticky)?.tip ?? '';
 
-  // 回放/粘滞两块作为独立卡片并列在策略卡之后（对照上游「路由」域：策略配置 /
-  // 回放 / 粘性会话三分）；各自内部管理加载态，不在本组件拉数据。
   return (
-    <>
     <div className="card">
       <div className="card-header">
-        <h2>{t('路由策略')}</h2>
+        <h2>{t('基础策略')}</h2>
         <p className="card-subtitle">
           {t('渠道选路的策略、会话粘性、断路器与调度权重；全部热生效，保存后下一请求即按新策略选路。')}
         </p>
@@ -365,62 +345,6 @@ export default function RoutingPanel(): JSX.Element {
             </div>
           </div>
 
-          <div className="form-group">
-            <label>{t('候选队列预演')}</label>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                className="form-input"
-                placeholder={t('输入模型名，如 gpt-4o')}
-                value={queueModel}
-                onChange={(e) => setQueueModel(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void loadQueue();
-                }}
-              />
-              <button
-                className="btn btn-secondary"
-                onClick={() => void loadQueue()}
-                disabled={queueLoading || !queueModel.trim()}
-              >
-                {queueLoading ? t('加载中...') : t('预演')}
-              </button>
-            </div>
-            {queue && (
-              <div style={{ marginTop: 8 }}>
-                {queue.ordered?.length ? (
-                  <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
-                    {queue.ordered.map((c, i) => (
-                      <li key={c.id}>
-                        {i === 0 ? <strong>{`${i + 1}. ${c.name}（队首）`}</strong> : `${i + 1}. ${c.name}`}
-                        <span className="form-hint">{` · ${c.provider} · ${c.state ?? 'closed'}`}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <div className="form-hint">{t('没有可用候选')}</div>
-                )}
-                {queue.blocked && queue.blocked.length > 0 && (
-                  <>
-                    <div className="form-hint">{t('被挡在门外：')}</div>
-                    <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
-                      {queue.blocked.map((c) => (
-                        <li key={c.id}>{`${c.name} — ${c.reason ?? ''}`}</li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-                {form.strategy === 'round_robin' && (
-                  <div className="form-hint">
-                    {t('组内轮询下实际首挑由游标决定，预演以静态排序为准。')}
-                  </div>
-                )}
-              </div>
-            )}
-            <div className="form-hint">
-              {t('只读预演：按当前策略回显该模型的候选队列与被拦截渠道，保存策略前先看看效果。')}
-            </div>
-          </div>
-
           <div className="settings-actions" style={{ display: 'flex', gap: 8 }}>
             <button className="btn btn-primary" onClick={() => void save()} disabled={saving}>
               {saving ? t('保存中...') : t('保存更改')}
@@ -432,8 +356,5 @@ export default function RoutingPanel(): JSX.Element {
         </div>
       </div>
     </div>
-    <RouteReplayPanel />
-    <RouteSticky />
-    </>
   );
 }
