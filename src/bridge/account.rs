@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use super::{Bridge, BridgeContext, BridgeError, ChatChunkStream};
 use super::{ChatFormat, ChatResponse};
-use super::{EmbeddingRequest, EmbeddingResponse, RerankRequest};
+use super::{EmbeddingRequest, EmbeddingResponse, ImageEditFormPart, RerankRequest};
 use super::{RerankResponse, ResponsesPassthrough};
 use crate::account_session::adapter;
 use crate::account_session::store::{AccountLease, AccountSessionStore};
@@ -564,6 +564,17 @@ impl Bridge for AccountBridge {
     ) -> Result<Value, BridgeError> {
         self.dispatch(&ctx.model, ctx, |bridge| async move {
             bridge.generate_image(body, ctx).await
+        })
+        .await
+    }
+
+    async fn edit_image(
+        &self,
+        parts: &[ImageEditFormPart],
+        ctx: &BridgeContext,
+    ) -> Result<Value, BridgeError> {
+        self.dispatch(&ctx.model, ctx, |bridge| async move {
+            bridge.edit_image(parts, ctx).await
         })
         .await
     }

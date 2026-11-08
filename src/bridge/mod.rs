@@ -749,6 +749,24 @@ where
     }
 }
 
+/// `/v1/images/edits` 的 multipart 表单项。
+///
+/// 客户端 multipart 由数据面解析成该枚举（文本字段 + 文件字段），
+/// Bridge 端再重组为上游 multipart 转发——与 `generate_image` 的
+/// JSON 透传形态对齐：解析在 handler、协议转换在 Bridge。
+#[derive(Debug, Clone)]
+pub enum ImageEditFormPart {
+    /// 文本字段（model、prompt、n、size、response_format…）
+    Text { name: String, value: String },
+    /// 文件字段（image / image[] / mask），body 保持原始字节
+    File {
+        name: String,
+        filename: String,
+        content_type: String,
+        data: bytes::Bytes,
+    },
+}
+
 /// 提供商适配器 trait，参考 aisix Bridge trait 设计
 ///
 /// async_trait 宏会为返回 `Pin<Box<dyn Future>>` 的方法生成 `#[must_use]`，
@@ -812,6 +830,19 @@ pub trait Bridge: Send + Sync + 'static {
     ) -> Result<Value, BridgeError> {
         Err(BridgeError::Config(
             "this provider does not support image generation".into(),
+        ))
+    }
+
+    /// 图片编辑（`/v1/images/edits`）：把解析好的 multipart 表单项
+    /// 重组为上游请求转发。默认不支持（返回 Config 错误，failover
+    /// 循环会按与 generate_image 相同的语义处理）。
+    async fn edit_image(
+        &self,
+        _parts: &[ImageEditFormPart],
+        _ctx: &BridgeContext,
+    ) -> Result<Value, BridgeError> {
+        Err(BridgeError::Config(
+            "this provider does not support image edits".into(),
         ))
     }
 

@@ -2460,6 +2460,11 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/v1/images/generations",
             post(api::openai::handle_images_generations),
         )
+        .route("/v1/images/edits", post(api::openai::handle_images_edits))
+        .route(
+            "/v1/images/assets/:name",
+            get(api::openai::handle_generated_asset),
+        )
         .route(
             "/v1/audio/transcriptions",
             post(api::openai::handle_audio_transcriptions),
@@ -2485,6 +2490,7 @@ fn build_router(state: AppState, config: &config::AppConfig) -> Router {
             "/images/generations",
             post(api::openai::handle_images_generations),
         )
+        .route("/images/edits", post(api::openai::handle_images_edits))
         .route(
             "/audio/transcriptions",
             post(api::openai::handle_audio_transcriptions),

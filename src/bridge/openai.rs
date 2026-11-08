@@ -149,6 +149,13 @@ impl OpenaiCompatibleBridge {
         ))
     }
 
+    fn images_edits_url(&self) -> String {
+        self.quirks.append_suffix(&format!(
+            "{}/images/edits",
+            self.base_url.trim_end_matches('/')
+        ))
+    }
+
     /// 按鉴权方式附加请求头：
     /// - `Bearer`：空密钥不发送 Authorization（见 `apply_conditional_bearer`）
     /// - `Cookie`：凭证原样放进 `Cookie` 头
@@ -853,7 +860,68 @@ impl Bridge for OpenaiCompatibleBridge {
         Ok(json)
     }
 
-    /// Responses API 透传：body 原样转发给上游的 /responses 端点。
+    /// 图片编辑：把 handler 解析好的 multipart 表单项重组为上游
+    /// `/images/edits` 请求。字段值/文件字节原样转发（model 已由
+    /// handler 按渠道映射改写），返回 OpenAI 格式结果。
+    async fn edit_image(
+        &self,
+        parts: &[ImageEditFormPart],
+        ctx: &BridgeContext,
+    ) -> Result<Value, BridgeError> {
+        let mut form = reqwest::multipart::Form::new();
+        for part in parts {
+            match part {
+                ImageEditFormPart::Text { name, value } => {
+                    form = form.text(name.clone(), value.clone());
+                }
+                ImageEditFormPart::File {
+                    name,
+                    filename,
+                    content_type,
+                    data,
+                } => {
+                    // 客户端声明的 content-type 可能畸形（mime_str 拒绝），
+                    // 退回 application/octet-stream 重建，文件字节不受影响
+                    let file_part = reqwest::multipart::Part::bytes(data.clone())
+                        .file_name(filename.clone())
+                        .mime_str(content_type)
+                        .unwrap_or_else(|_| {
+                            reqwest::multipart::Part::bytes(data.clone())
+                                .file_name(filename.clone())
+                                .mime_str("application/octet-stream")
+                                .expect("octet-stream is a valid mime type")
+                        });
+                    form = form.part(name.clone(), file_part);
+                }
+            }
+        }
+        let resp = crate::debug_traffic::traced(
+            self.auth_conditional(self.client.post(self.images_edits_url()))
+                .multipart(form),
+            ctx,
+        )
+        .send()
+        .await
+        .map_err(|e| BridgeError::Transport(e.to_string()))?;
+        crate::debug_traffic::traced_response(&resp, ctx);
+
+        if !resp.status().is_success() {
+            return Err(super::capture_upstream_error_http(
+                ctx,
+                resp.status(),
+                resp,
+                UpstreamWire::OpenAI,
+                parse_openai_error,
+            )
+            .await);
+        }
+
+        let json: Value = resp
+            .json()
+            .await
+            .map_err(|e| BridgeError::UpstreamDecode(e.to_string()))?;
+        Ok(json)
+    }
     ///
     /// body（含 model/input/stream 等全部字段）不重写、不增删，
     /// 上游 2xx 时非流式返回完整 JSON、流式返回 SSE 原始字节流；

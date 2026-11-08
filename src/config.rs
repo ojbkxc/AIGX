@@ -67,6 +67,11 @@ pub struct ServerConfig {
     /// 调试数据目录（可选，默认 = data_dir/debug）
     #[serde(default)]
     pub debug_dir: Option<String>,
+    /// 生成图片资产落盘开关（#36）。开启后 /v1/images/* 响应中的
+    /// b64_json 图片写入 `{data_dir}/generated_images/` 并附下载路径；
+    /// 默认关闭，行为与既往一致（响应原样透传、不落盘）。
+    #[serde(default)]
+    pub save_generated_images: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -746,6 +751,7 @@ impl Default for ServerConfig {
             log_dir: None,
             request_stats_dir: None,
             debug_dir: None,
+            save_generated_images: false,
         }
     }
 }
