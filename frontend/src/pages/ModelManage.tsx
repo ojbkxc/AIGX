@@ -2021,7 +2021,7 @@ export default function ModelManage(): JSX.Element {
                       <li key={`${alias}\u0001${target}`} className="mm-dg-item">
                         <code
                           className="mm-dg-alias"
-                          title={t('点击复制：{name}', { name: alias })}
+                          title={t('点击复制：{{name}}', { name: alias })}
                           onClick={() => copyText(alias)}
                           role="button"
                           tabIndex={0}
@@ -2036,7 +2036,7 @@ export default function ModelManage(): JSX.Element {
                             <span className="mm-dg-arrow" aria-hidden="true"> → </span>
                             <code
                               className="mm-dg-target"
-                              title={t('点击复制：{name}', { name: target })}
+                              title={t('点击复制：{{name}}', { name: target })}
                               onClick={() => copyText(target)}
                               role="button"
                               tabIndex={0}
@@ -2504,7 +2504,7 @@ export default function ModelManage(): JSX.Element {
                           <option key={level} value={level}>{level}</option>
                         ))}
                         {/* 已有等级不在候选里时也要能显示出来（否则 select 显示空白） */}
-                        {isCustom && <option value={CUSTOM_LEVEL}>{t('自定义等级…（{level}）', { level: current })}</option>}
+                        {isCustom && <option value={CUSTOM_LEVEL}>{t('自定义等级…（{{level}}）', { level: current })}</option>}
                         {!isCustom && <option value={CUSTOM_LEVEL}>{t('自定义等级…')}</option>}
                       </select>
                       {selectValue === CUSTOM_LEVEL && (

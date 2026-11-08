@@ -1024,7 +1024,7 @@ export default function AddAccountDialog({
                 ))}
                 {needle && currentCount === 0 ? (
                   <div className="add-cards-empty">
-                    {t('没有匹配「{keyword}」的提供商', { keyword: search.trim() })}
+                    {t('没有匹配「{{keyword}}」的提供商', { keyword: search.trim() })}
                   </div>
                 ) : null}
                 {!needle && currentCount === 0 && (segment === 'agent' || segment === 'web' || segment === 'preset') ? (
@@ -1047,7 +1047,7 @@ export default function AddAccountDialog({
             <div className="modal-header">
               <h3>
                 {poolName
-                  ? t('添加账号到「{name}」', { name: poolName })
+                  ? t('添加账号到「{{name}}」', { name: poolName })
                   : customNew
                     ? t('新建自定义提供商')
                     : addConfig

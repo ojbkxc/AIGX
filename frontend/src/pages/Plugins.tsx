@@ -133,7 +133,7 @@ function InstalledPackCard({
           </label>
           {pack.providers.length > 0 && (
             <Button variant="outline" size="sm" onClick={() => setProvidersOpen((v) => !v)}>
-              {providersOpen ? t('收起提供商') : t('提供商设置（{n}）', { n: pack.providers.length })}
+              {providersOpen ? t('收起提供商') : t('提供商设置（{{n}}）', { n: pack.providers.length })}
             </Button>
           )}
           <Tooltip label={t('卸载后账号数据保留，重新安装可继续使用')}>

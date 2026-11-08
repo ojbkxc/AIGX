@@ -1790,7 +1790,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
             {pending.length > 0 && (
               <span
                 className="as-pending-badge"
-                title={t('已领到、还没到生效时间的套餐（生效后余额列会按它显示）：{lines}', {
+                title={t('已领到、还没到生效时间的套餐（生效后余额列会按它显示）：{{lines}}', {
                   lines: pending
                     .map((p) => {
                       const name = String(p.name || p.planId || t('套餐'));
@@ -2436,7 +2436,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
                                         void runGroupEnabled(g.rows, true);
                                       }}
                                     >
-                                      {t('全部启用（{n}）', { n: g.rows.length })}
+                                      {t('全部启用（{{n}}）', { n: g.rows.length })}
                                     </button>
                                     <button
                                       type="button"
@@ -2447,7 +2447,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
                                         void runGroupEnabled(g.rows, false);
                                       }}
                                     >
-                                      {t('全部停用（{n}）', { n: g.rows.length })}
+                                      {t('全部停用（{{n}}）', { n: g.rows.length })}
                                     </button>
                                     <div className="as-group-menu-sep" />
                                     <button
