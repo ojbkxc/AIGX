@@ -164,3 +164,67 @@ test.describe('签到计划编辑器（契约字段门控）', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });
+
+/**
+ * 签到时区边界（#21 补做项，lead 指示：边界值显式构造）。
+ *
+ * 「下次执行」的日切口径 = settings.timezone_offset（store.rs:132，小时；
+ * 0=跟随系统）——展示实现 src/lib/checkinTz.ts（nextRunLabel），与后端
+ * scheduler.rs beijing() 同语义。本用例锁 offset=8 档的**日切边界**：
+ * 北京 23:30 现刻，23:45 未到 → 今天；09:00 已过 → 明天（跨日）。
+ *
+ * page.clock 定针（Playwright 1.63）：日期动态取「今天 UTC 15:30Z」——
+ * 不冻结到历史日期，避免 fixtures 登录态（24h 有效期）被判过期。
+ * offset=0（跟随系统帧）的边界矩阵由 vitest checkinTz.test.ts 显式覆盖
+ * （镜像断言，e2e 无法控制运行机器时区，不在浏览器层重复）。
+ *
+ * mock 形状锚点：center payload 出处 static-server.mjs:236-255（CHECKIN_CENTER）
+ * + types/index.ts CheckinCenterData；timezone_offset 语义 = store.rs:132。
+ */
+test.describe('签到时区边界（page.clock 定针）', () => {
+  test('UTC+8：日切前未到 → 今天；已过 → 明天（跨日）', async ({ page, pageErrors }) => {
+    test.skip((page.viewportSize()?.width ?? 0) < 900, '桌面设置卡形态');
+    // 定针「今天 UTC 15:30Z」= 北京 23:30（UTC+8）
+    const now = new Date();
+    const pinnedMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 15, 30, 0);
+    await page.clock.setFixedTime(new Date(pinnedMs));
+
+    // 两条计划：23:45（北京帧未到 → 今天）与 09:00（已过 → 明天跨日）
+    await page.route('**/api/checkin-center', (r) =>
+      r.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          data: {
+            settings: { enabled: true, gap_ms: 500, timezone_offset: 8 },
+            supported_providers: ['workbuddy'],
+            providers: [],
+            schedules: [
+              { id: 'sch-1', label: '夜班', enabled: true, time: '23:45', providers: ['workbuddy'], last_fired_date: '', last_result: '', last_ok: 0, last_keepalive: 0, last_failed: 0 },
+              { id: 'sch-2', label: '早班', enabled: true, time: '09:00', providers: ['workbuddy'], last_fired_date: '', last_result: '', last_ok: 0, last_keepalive: 0, last_failed: 0 },
+            ],
+            records_total: 0,
+            today_summary: [],
+          },
+        }),
+      }));
+    await loginAsAdmin(page);
+    await page.goto('/checkin');
+    await page.locator('.sub-tab', { hasText: '定时签到' }).click();
+
+    // 期望值：北京帧（UTC+8 数学）今天/明天的 MM-DD，测试内现算
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    const bj = new Date(pinnedMs + 8 * 3_600_000);
+    const bjTomorrow = new Date(pinnedMs + 8 * 3_600_000 + 86_400_000);
+    const todayLabel = `${pad(bj.getUTCMonth() + 1)}-${pad(bj.getUTCDate())} 23:45`;
+    const tomorrowLabel = `${pad(bjTomorrow.getUTCMonth() + 1)}-${pad(bjTomorrow.getUTCDate())} 09:00`;
+
+    const rowNight = page.locator('.ck-sched-row', { hasText: '夜班' });
+    await expect(rowNight.locator('.ck-sched-next')).toContainText(todayLabel);
+    const rowMorning = page.locator('.ck-sched-row', { hasText: '早班' });
+    await expect(rowMorning.locator('.ck-sched-next')).toContainText(tomorrowLabel);
+
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+});

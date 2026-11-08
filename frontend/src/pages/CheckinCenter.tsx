@@ -107,38 +107,11 @@ const EMPTY_SCHEDULE: ScheduleForm = {
   retryLimit: '3',
 };
 
-/** 北京时间 MM-DD HH:mm —— 「下次执行」用（对齐 Agent2API 的下次时刻展示） */
-function beijingNextRun(time: string): string {
-  const fmt = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
-  const parts = fmt.formatToParts(new Date());
-  const get = (type: Intl.DateTimeFormatPartTypes) =>
-    parts.find((p) => p.type === type)?.value ?? '00';
-  const nowHM = `${get('hour')}:${get('minute')}`;
-  const today = `${get('month')}-${get('day')}`;
-  if (time >= nowHM) return `${today} ${time}`;
-  const tomorrow = fmt.formatToParts(new Date(Date.now() + 86_400_000));
-  const t2 = (type: Intl.DateTimeFormatPartTypes) =>
-    tomorrow.find((p) => p.type === type)?.value ?? '00';
-  return `${t2('month')}-${t2('day')} ${time}`;
-}
-
-/** 北京时间的 YYYY-MM-DD（与后端 last_fired_date 同口径） */
-function beijingDateStr(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
-}
+/* 「下次执行 / 今日已执行」的时区口径已抽到 src/lib/checkinTz.ts（纯函数 +
+ * 边界值单测 checkinTz.test.ts）：按 settings.timezone_offset 计算（缺省 8
+ * = UTC+8；0 = 跟随系统本地时区），与后端执行口径一致——此前硬编码
+ * Asia/Shanghai，设置 offset=0 后展示与执行脱钩（#21 补做项）。 */
+import { localDateKey, nextRunLabel } from '../lib/checkinTz';
 
 export default function CheckinCenter(): JSX.Element {
   const { t } = useTranslation();
@@ -604,12 +577,13 @@ export default function CheckinCenter(): JSX.Element {
     return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [scheduleForm, effectiveTime]);
 
-  /** 顶栏徽标（对齐 Agent2API #checkin-badge） */
+  /** 顶栏徽标（对齐 Agent2API #checkin-badge）：日期比对按配置时区 */
   const autoBadge = useMemo(() => {
     if (!data) return null;
     const enabled = data.settings.enabled;
+    const tz = data.settings.timezone_offset ?? 8;
     const firedToday = (data.schedules ?? []).some(
-      (s) => s.enabled && s.last_fired_date === beijingDateStr(),
+      (s) => s.enabled && s.last_fired_date === localDateKey(tz),
     );
     if (!enabled) {
       return (
@@ -1305,7 +1279,9 @@ export default function CheckinCenter(): JSX.Element {
                         </div>
                       </div>
                       <div className="ck-sched-next">
-                        {schedule.enabled ? t('下次 {{when}}', { when: beijingNextRun(schedule.time) }) : '—'}
+                        {schedule.enabled
+                          ? t('下次 {{when}}', { when: nextRunLabel(schedule.time, data?.settings.timezone_offset ?? 8) })
+                          : '—'}
                       </div>
                       <div className="ck-sched-ops">
                         <button
