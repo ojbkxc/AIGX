@@ -1018,16 +1018,53 @@ export interface PlaygroundRawResult {
   message?: string;
 }
 
+/** 流式用量收尾（OpenAI `stream_options.include_usage` 终帧 / 后端汇总帧）。 */
+export interface ChatStreamUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}
+
+/**
+ * 单条 tool_call 增量（已由适配层归一化）。
+ * 流式协议里同一次调用按 `index` 分片下发：首帧带 id/name，后续帧只带
+ * arguments 分片；结果（role:tool 回灌）可能以 result/output 字段出现。
+ */
+export interface ToolCallDelta {
+  index: number;
+  id?: string;
+  name?: string;
+  arguments?: string;
+  result?: string;
+}
+
+/** UI 侧聚合后的工具调用（分片已拼接；result 由回灌层落地后填充）。 */
+export interface ToolCallState {
+  index: number;
+  id?: string;
+  name?: string;
+  arguments: string;
+  result?: string;
+}
+
+/** 工具调用卡片状态（流式 / 完成 / 中断 / 错误） */
+export type ToolCallCardState = 'streaming' | 'done' | 'interrupted' | 'error';
+
 /**
  * 真·流式回调：SSE 每解析到一个增量（OpenAI delta / Anthropic delta.text）
  * 立即回调一次。isEnd 标记 [DONE] / message_stop 帧。
  * kind 区分内容增量：reasoning 为深度思考（DeepSeek 式折叠面板），
- * content 为正文。error/end 帧沿用 content。
+ * content 为正文，tool_call 为工具调用分片，usage 为用量收尾。
+ * error/end 帧沿用 content。
  */
 export type ChatStreamDelta = {
   content: string;
   isEnd: boolean;
-  kind?: 'content' | 'reasoning';
+  kind?: 'content' | 'reasoning' | 'tool_call' | 'usage' | 'error';
+  /** kind = tool_call 时的归一化分片 */
+  toolCall?: ToolCallDelta;
+  /** kind = usage 时的用量 */
+  usage?: ChatStreamUsage;
 };
 
 export type ChatStreamCallback = (delta: ChatStreamDelta) => void;

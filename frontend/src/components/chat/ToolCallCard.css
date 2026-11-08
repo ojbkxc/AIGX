@@ -1,0 +1,172 @@
+/* ── ToolCallCard — 工具调用折叠卡片（#63）──
+ * 状态色走主题变量（--text-muted / --border-color），亮暗主题共用；
+ * 参数/结果是等宽块，流式未闭合 JSON 原样展示不解析。 */
+
+.tc-card {
+  margin-top: 8px;
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
+  border-radius: 12px;
+  background: var(--card-bg-subtle, rgba(0, 0, 0, 0.02));
+  overflow: hidden;
+  font-size: 12.5px;
+}
+
+:root[data-theme='dark'] .tc-card {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.tc-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.tc-title {
+  flex: 0 0 auto;
+}
+
+.tc-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.06);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tc-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.tc-status-active { color: var(--accent-color, #2563eb); }
+.tc-status-done { color: var(--text-muted); }
+.tc-status-warn { color: #b45309; }
+.tc-status-error { color: #dc2626; }
+
+.tc-spin {
+  animation: tc-spin 0.9s linear infinite;
+}
+
+@keyframes tc-spin {
+  to { transform: rotate(360deg); }
+}
+
+.tc-item {
+  padding: 0 12px 10px;
+}
+
+.tc-item + .tc-item {
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-color, rgba(0, 0, 0, 0.07));
+}
+
+.tc-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.tc-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-main);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tc-id {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 400;
+}
+
+.tc-fold,
+.tc-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tc-fold {
+  margin-left: auto;
+}
+
+.tc-fold:hover,
+.tc-copy:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-main);
+}
+
+.tc-block {
+  margin-top: 6px;
+  border-radius: 8px;
+  background: var(--code-bg, rgba(0, 0, 0, 0.04));
+  overflow: hidden;
+}
+
+.tc-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.tc-pre {
+  margin: 0;
+  padding: 2px 10px 10px;
+  color: var(--code-color, var(--text-main));
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.tc-pending {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.tc-usage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--border-color, rgba(0, 0, 0, 0.07));
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}

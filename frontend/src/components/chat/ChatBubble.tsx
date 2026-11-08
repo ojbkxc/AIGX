@@ -4,6 +4,7 @@ import {
   Bot, User, Copy, Check, Pencil, Volume2, Square, RefreshCw, Trash2, Code, MoreVertical, GitFork,
 } from 'lucide-react';
 import MessageViewer from '../MessageViewer';
+import ToolCallCard from './ToolCallCard';
 import type { DebugMessage } from '../ChatDebugger';
 
 interface ChatBubbleProps {
@@ -123,8 +124,17 @@ export default function ChatBubble({
               )}
             </div>
 
+            {/* 工具调用卡片（#63）：参数/结果折叠，流式/中断/错误三态着色 */}
+            {message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0 && (
+              <ToolCallCard
+                calls={message.toolCalls}
+                state={message.toolState ?? 'done'}
+                usage={message.usage}
+              />
+            )}
+
             {/* B7: 消息元数据 */}
-            {(timestamp || responseDuration) && (
+            {(timestamp || responseDuration || message.usage) && (
               <div className="chat-debugger-msg-meta">
                 {timestamp && (
                   <span className="chat-debugger-msg-time">
@@ -137,6 +147,20 @@ export default function ChatBubble({
                     data-speed={responseDuration < 500 ? 'fast' : responseDuration < 2000 ? 'mid' : 'slow'}
                   >
                     {(responseDuration / 1000).toFixed(1)}s
+                  </span>
+                )}
+                {/* usage 收尾（#63）：无工具卡片时在这里展示；有卡片时卡片内展示 */}
+                {message.usage && !(message.toolCalls && message.toolCalls.length > 0) && (
+                  <span className="chat-debugger-msg-usage" data-testid="usage-summary">
+                    {message.usage.prompt_tokens !== undefined && (
+                      <span>{t('输入 Tokens')}: {message.usage.prompt_tokens}</span>
+                    )}
+                    {message.usage.completion_tokens !== undefined && (
+                      <span>{t('输出 Tokens')}: {message.usage.completion_tokens}</span>
+                    )}
+                    {message.usage.total_tokens !== undefined && (
+                      <span>{t('总 Token')}: {message.usage.total_tokens}</span>
+                    )}
                   </span>
                 )}
               </div>

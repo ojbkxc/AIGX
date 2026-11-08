@@ -7,6 +7,8 @@ import {
 } from 'lucide-react';
 import { api, testChannelChatStream, directChannelChatStream } from '../api';
 import { fmtCompact } from '../lib/utils';
+import { mergeToolCallDelta, type ToolCallWireMode } from '../lib/toolCallAdapter';
+import type { ChatStreamUsage, ToolCallDelta } from '../types';
 import type { DebugMessage } from './chat/types';
 import ModelPicker from './ModelPicker';
 import './ChatDebugger.css';
@@ -78,6 +80,10 @@ export interface ChatDebuggerProps {
   /** 会话 fork（宿主 /chat 页提供）：按消息下标截取复制为新会话。
    *  提供后才在 assistant 气泡操作区渲染分叉按钮（对照上游 onFork） */
   onForkMessage?: (index: number) => void;
+  /** tool_call 线上形状（#63 可配置适配层）：默认 auto 识别全部已知形状；
+   *  be-fix 回灌层落地后若形状有偏差，只改此值或 lib/toolCallAdapter。
+   *  role_tool 模式给「回灌层只发顶层 tool_calls」时的兜底。 */
+  toolCallMode?: ToolCallWireMode;
 }
 
 interface ChatChunkResult {
@@ -119,6 +125,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
     onOpenSessions,
     onBusyChange,
     onForkMessage,
+    toolCallMode = 'auto',
   } = props;
   const { t } = useTranslation();
 
@@ -597,7 +604,7 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
           messageTimestamps.current.set(assistantIdx, requestStartTime);
           return [...prev, { role: 'assistant', content: '…' }];
         });
-        const onDelta = (delta: { content: string; isEnd?: boolean; kind?: string }): void => {
+        const onDelta = (delta: { content: string; isEnd?: boolean; kind?: string; toolCall?: ToolCallDelta; usage?: ChatStreamUsage }): void => {
           lastDeltaAtRef.current = Date.now();
           if (!streamingStartedRef.current) {
             streamingStartedRef.current = true;
@@ -610,10 +617,20 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
             const next = prev.slice();
             const last = next[next.length - 1];
             if (last && last.role === 'assistant') {
-              // reasoning 与正文分流：思考走折叠面板，正文清占位「…」
+              // reasoning 与正文分流：思考走折叠面板，正文清占位「…」；
+              // 工具调用分片按 index 聚合进卡片，用量单独收尾（#63）
               const patch: DebugMessage = { ...last };
               if (delta.kind === 'reasoning') {
                 patch.reasoning = (last.reasoning ?? '') + delta.content;
+              } else if (delta.kind === 'tool_call' && delta.toolCall) {
+                patch.toolCalls = mergeToolCallDelta(last.toolCalls ?? [], delta.toolCall);
+                patch.toolState = 'streaming';
+              } else if (delta.kind === 'usage' && delta.usage) {
+                patch.usage = delta.usage;
+              } else if (delta.kind === 'error' && delta.isEnd) {
+                // 流式错误帧：就地收尾为「⚠️」气泡（不把错误当正文拼接）
+                patch.content = `⚠️ ${delta.content}`;
+                if (patch.toolCalls?.length) patch.toolState = 'error';
               } else {
                 const base = last.content === '…' ? '' : last.content;
                 patch.content = delta.isEnd ? base : base + delta.content;
@@ -625,17 +642,23 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         };
         if (directUpstream) {
           // 无密钥渠道：浏览器直连上游，请求不经服务器中转
-          await directChannelChatStream(directUpstream, body, onDelta, controller.signal);
+          await directChannelChatStream(directUpstream, body, onDelta, controller.signal, { toolCallMode });
         } else {
-          await testChannelChatStream(body, onDelta, controller.signal);
+          await testChannelChatStream(body, onDelta, controller.signal, { toolCallMode });
         }
         abortRef.current = null;
-        // 空流兜底提示（避免界面出现永久空白气泡）
+        // 流正常收尾：工具卡片从「进行中」切「完成」；结果未回灌时也保留
+        // 参数（回灌层落地后 adapter 补齐 result，UI 零改动）
         setMessages((prev) => {
           const next = prev.slice();
           const last = next[next.length - 1];
-          if (last && last.role === 'assistant' && !last.reasoning && (last.content === '…' || !last.content.trim())) {
-            next[next.length - 1] = { ...last, content: `⚠️ ${t('上游未返回内容')}` };
+          if (last && last.role === 'assistant') {
+            if (last.toolCalls?.length) {
+              next[next.length - 1] = { ...last, toolState: 'done' };
+            } else if (!last.reasoning && (last.content === '…' || !last.content.trim())) {
+              // 空流兜底提示（避免界面出现永久空白气泡）
+              next[next.length - 1] = { ...last, content: `⚠️ ${t('上游未返回内容')}` };
+            }
           }
           return next;
         });
@@ -662,6 +685,16 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         setMessages((prev) => {
           const next = prev.slice();
           const last = next[next.length - 1];
+          // 已收到工具分片：原地标中断（不新起气泡，否则卡片重复）
+          if (last && last.role === 'assistant' && last.toolCalls?.length) {
+            const blank = last.content === '…' || !last.content.trim();
+            next[next.length - 1] = {
+              ...last,
+              ...(blank ? { content: `⏹ ${t('已停止生成')}` } : {}),
+              toolState: 'interrupted',
+            };
+            return next;
+          }
           // 停在「…」占位阶段时直接替换占位，避免留下空白气泡
           if (last && last.role === 'assistant' && (last.content === '…' || !last.content.trim())) {
             next[next.length - 1] = { ...last, content: `⏹ ${t('已停止生成')}` };
@@ -682,7 +715,14 @@ export default function ChatDebugger(props: ChatDebuggerProps): JSX.Element {
         const next = prev.slice();
         const last = next[next.length - 1];
         if (last && last.role === 'assistant' && isTransientAssistantText(last.content)) {
-          next[next.length - 1] = { ...last, content: `⚠️ ${msg}` };
+          next[next.length - 1] = {
+            ...last,
+            content: `⚠️ ${msg}`,
+            // 已收到工具分片：卡片标错误，保留部分参数供排查（#63）
+            ...(last.toolCalls?.length ? { toolState: 'error' as const } : {}),
+          };
+        } else if (last && last.role === 'assistant' && last.toolCalls?.length) {
+          next[next.length - 1] = { ...last, toolState: 'error' };
         } else {
           next.push({ role: 'assistant', content: `⚠️ ${msg}` });
         }

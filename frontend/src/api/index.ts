@@ -121,6 +121,8 @@ import type {
 } from '@/types/routing-profile';
 // 桌面导入来源类型（#22；独立文件理由同上）
 import type { DesktopSourceItem } from '@/types/desktop';
+// 工具调用 / usage 帧适配层（#63；回灌层未定，形状变更只改适配层）
+import { extractToolCalls, extractUsage, type ToolCallWireMode } from '@/lib/toolCallAdapter';
 
 const API_BASE = '/api';
 
@@ -1418,7 +1420,9 @@ export const api = {
 export function parseSseFrame(
   frame: string,
   onDelta: ChatStreamCallback,
+  opts: { toolCallMode?: ToolCallWireMode } = {},
 ): boolean {
+  const toolCallMode = opts.toolCallMode ?? 'auto';
   let ended = false;
   const lines = frame
     .split('\n')
@@ -1443,10 +1447,18 @@ export function parseSseFrame(
       if (parsed.type === 'error' || parsed.error) {
         const raw = parsed.error as Record<string, unknown> | string | undefined;
         const msg = typeof raw === 'string' ? raw : (raw?.message as string | undefined) ?? '上游流式错误';
-        onDelta({ content: msg, isEnd: true });
+        // 标记 kind=error：ChatDebugger 据此以「⚠️」收尾而不是当正文拼接
+        onDelta({ content: msg, isEnd: true, kind: 'error' });
         ended = true;
         continue;
       }
+      // 工具调用分片 / 用量收尾（#63）：形状全部走适配层归一化，
+      // 回灌层落地后只改 toolCallAdapter，不动解析与 UI。
+      for (const tc of extractToolCalls(parsed, toolCallMode)) {
+        onDelta({ content: '', isEnd: false, kind: 'tool_call', toolCall: tc });
+      }
+      const usage = extractUsage(parsed);
+      if (usage) onDelta({ content: '', isEnd: false, kind: 'usage', usage });
       // Anthropic delta
       const anthropicDelta = parsed.delta as { text?: string } | undefined;
       if (anthropicDelta && typeof anthropicDelta.text === 'string' && anthropicDelta.text) {
@@ -1482,6 +1494,7 @@ export async function testChannelChatStream(
   data: PlaygroundChatRequest,
   onDelta: ChatStreamCallback,
   signal?: AbortSignal,
+  opts: { toolCallMode?: ToolCallWireMode } = {},
 ): Promise<void> {
   const res = await fetch(`${API_BASE}/channels/chat_test`, {
     method: 'POST',
@@ -1523,7 +1536,7 @@ export async function testChannelChatStream(
     throw new Error(msg || `Request failed with status ${res.status}`);
   }
 
-  await readSseResponse(res, onDelta, signal);
+  await readSseResponse(res, onDelta, signal, opts);
 }
 
 /**
@@ -1537,6 +1550,7 @@ export async function readSseResponse(
   res: Response,
   onDelta: ChatStreamCallback,
   signal?: AbortSignal,
+  opts: { toolCallMode?: ToolCallWireMode } = {},
 ): Promise<void> {
   const contentType = res.headers.get('Content-Type') || '';
   if (!contentType.includes('text/event-stream')) {
@@ -1552,6 +1566,12 @@ export async function readSseResponse(
     }
     const p = (parsed ?? {}) as Record<string, unknown>;
     const data = (p.data ?? {}) as Record<string, unknown>;
+    // 工具调用 / 用量：非流式整帧也要走同一适配层（上游降级时常见）
+    for (const tc of extractToolCalls(p, opts.toolCallMode ?? 'auto')) {
+      onDelta({ content: '', isEnd: false, kind: 'tool_call', toolCall: tc });
+    }
+    const usage = extractUsage(p);
+    if (usage) onDelta({ content: '', isEnd: false, kind: 'usage', usage });
     // 中转路径包一层 data.content；直连上游是 OpenAI 原生 choices 形状
     let content = typeof data.content === 'string' ? data.content : '';
     if (!content) {
@@ -1574,7 +1594,7 @@ export async function readSseResponse(
   let ended = false;
 
   const handleFrame = (frame: string): void => {
-    ended = parseSseFrame(frame, onDelta) || ended;
+    ended = parseSseFrame(frame, onDelta, opts) || ended;
   };
 
   for (;;) {
@@ -1614,6 +1634,7 @@ export async function directChannelChatStream(
   data: PlaygroundChatRequest,
   onDelta: ChatStreamCallback,
   signal?: AbortSignal,
+  opts: { toolCallMode?: ToolCallWireMode } = {},
 ): Promise<void> {
   if (!channel.base_url || !channel.base_url.trim()) {
     throw new Error('渠道未配置 Base URL，无法直连');
@@ -1690,7 +1711,7 @@ export async function directChannelChatStream(
     throw new Error(msg || `Upstream HTTP ${res.status}`);
   }
 
-  await readSseResponse(res, onDelta, signal);
+  await readSseResponse(res, onDelta, signal, opts);
 }
 
 export default api;

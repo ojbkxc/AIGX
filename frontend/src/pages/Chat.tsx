@@ -6,6 +6,7 @@ import {
 import { api } from '../api';
 import ChatDebugger, { type DebugMessage } from '../components/ChatDebugger';
 import SessionDrawer from '../components/chat/SessionDrawer';
+import type { ChatStreamUsage, ToolCallState } from '../types';
 import { useToast } from '../components/Toast';
 import './Chat.css';
 
@@ -135,6 +136,49 @@ const isDebugMessage = (m: unknown): m is DebugMessage => Boolean(
   m && typeof m === 'object' && ((m as DebugMessage).role === 'user' || (m as DebugMessage).role === 'assistant'),
 );
 
+/** 消息 → 后端落库形状（#63）：工具调用/用量等非正文数据放 extra，
+ *  正文仍走 content，保证旧后端（忽略 extra）与旧数据（无 extra）双向兼容。 */
+function toPersistedMessage(m: DebugMessage): { role: string; content: string; extra?: unknown } {
+  const extra: Record<string, unknown> = {};
+  if (m.reasoning) extra.reasoning = m.reasoning;
+  if (m.toolCalls?.length) extra.tool_calls = m.toolCalls;
+  if (m.toolState) extra.tool_state = m.toolState;
+  if (m.usage) extra.usage = m.usage;
+  if (m.attachments?.length) extra.attachments = m.attachments;
+  return {
+    role: m.role,
+    content: m.content,
+    ...(Object.keys(extra).length ? { extra } : {}),
+  };
+}
+
+/** 后端消息 → 本地 DebugMessage（extra 是自由形状：逐字段防御性读取） */
+function fromPersistedMessage(m: { role: string; content: string; extra?: unknown }): DebugMessage {
+  const msg: DebugMessage = { role: m.role === 'user' ? 'user' : 'assistant', content: m.content ?? '' };
+  const extra = m.extra && typeof m.extra === 'object' ? (m.extra as Record<string, unknown>) : null;
+  if (!extra) return msg;
+  if (typeof extra.reasoning === 'string' && extra.reasoning) msg.reasoning = extra.reasoning;
+  if (Array.isArray(extra.tool_calls)) msg.toolCalls = extra.tool_calls.filter(isToolCallState);
+  if (extra.tool_state === 'done' || extra.tool_state === 'interrupted' || extra.tool_state === 'error') {
+    msg.toolState = extra.tool_state;
+  }
+  if (extra.usage && typeof extra.usage === 'object') msg.usage = extra.usage as ChatStreamUsage;
+  if (Array.isArray(extra.attachments)) {
+    msg.attachments = extra.attachments.filter(
+      (a): a is { kind: 'image' | 'video' | 'audio'; url: string } => Boolean(
+        a && typeof a === 'object' && typeof (a as { url?: unknown }).url === 'string',
+      ),
+    );
+  }
+  return msg;
+}
+
+function isToolCallState(v: unknown): v is ToolCallState {
+  return Boolean(v && typeof v === 'object'
+    && typeof (v as ToolCallState).index === 'number'
+    && typeof (v as ToolCallState).arguments === 'string');
+}
+
 function readSessions(): LegacySession[] {
   try {
     const raw = localStorage.getItem(SESSIONS_KEY);
@@ -199,7 +243,7 @@ export default function Chat(): JSX.Element {
     try {
       await api.replaceChatMessages(
         id,
-        messagesRef.current.map((m) => ({ role: m.role, content: m.content })),
+        messagesRef.current.map(toPersistedMessage),
       );
     } catch {
       /* 离线/过期时静默；下次保存会覆盖 */
@@ -240,7 +284,7 @@ export default function Chat(): JSX.Element {
       if (!session?.id) throw new Error(t('分叉失败'));
       const newId = session.id;
       // 消息切片本地直取（与后端 [0, message_seq] 同构，免二次拉取）
-      const sliced = src.slice(0, idx + 1).map((m) => ({ role: m.role, content: m.content }));
+      const sliced = src.slice(0, idx + 1);
       persistSessions([
         { id: newId, title: session.title || t('分叉会话'), model: session.model || modelRef.current, updated_at: Math.floor(Date.now() / 1000), parent_session_id: session.parent_session_id ?? srcId, title_source: session.title_source ?? null },
         ...sessionsRef.current,
@@ -411,7 +455,7 @@ export default function Chat(): JSX.Element {
         if (s.messages.length) {
           await api.replaceChatMessages(
             id,
-            s.messages.map((m) => ({ role: m.role, content: m.content })),
+            s.messages.map(toPersistedMessage),
             false,
           );
         }
@@ -483,7 +527,7 @@ export default function Chat(): JSX.Element {
         const detail = await api.getChatSession(active);
         msgs = (detail.data?.messages ?? [])
           .filter((m) => isDebugMessage(m))
-          .map((m) => ({ role: m.role, content: m.content }));
+          .map((m) => fromPersistedMessage(m));
         model = detail.data?.session.model ?? '';
       } catch {
         msgs = [];
@@ -576,7 +620,7 @@ export default function Chat(): JSX.Element {
       const detail = await api.getChatSession(id);
       msgs = (detail.data?.messages ?? [])
         .filter((m) => isDebugMessage(m))
-        .map((m) => ({ role: m.role, content: m.content }));
+        .map((m) => fromPersistedMessage(m));
       model = detail.data?.session.model ?? '';
     } catch {
       msgs = [];
@@ -654,7 +698,7 @@ export default function Chat(): JSX.Element {
         const detail = await api.getChatSession(target.id);
         const msgs = (detail.data?.messages ?? [])
           .filter((m) => isDebugMessage(m))
-          .map((m) => ({ role: m.role, content: m.content }));
+          .map((m) => fromPersistedMessage(m));
         messagesRef.current = msgs;
         setMessages(msgs);
       } catch { /* 空消息列表兜底 */ }

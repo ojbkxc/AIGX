@@ -75,7 +75,8 @@ describe('parseSseFrame — Anthropic SSE', () => {
   it('error 帧输出错误并结束', () => {
     const frame = 'data: {"type":"error","error":{"type":"overloaded_error","message":"过载"}}\n\n';
     const { deltas, ended } = collect(frame);
-    expect(deltas).toEqual([{ content: '过载', isEnd: true }]);
+    // #63：错误帧带 kind='error'，ChatDebugger 据此以「⚠️」收尾而非拼正文
+    expect(deltas).toEqual([{ content: '过载', isEnd: true, kind: 'error' }]);
     expect(ended).toBe(true);
   });
 });
