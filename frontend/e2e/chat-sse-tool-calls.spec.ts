@@ -13,12 +13,13 @@ import type { Page } from '@playwright/test';
  *   2. 中断：点「停止」后保留已收到的部分，卡片标「停止」；
  *   3. 错误：error 帧在已流出正文后追加「⚠️」尾巴收尾，不出现占位空泡叠加。
  *
- * 前三个用例是「页内桩」——帧序列由测试作者手写，只能证明**前端会解析这个形状**，
- * 不能证明**线上会有这个帧**。#17/F1 的病根正在这里：原 `usageFrame()` 无条件
- * 吐 usage 终帧，于是「界面出现 usage 数字」只是桩自证（#31 同型假绿）。
- * 最后两个用例不打页内桩，请求真打到 static-server 的**两跳链**（后端双按
- * #21-A 注入 `stream_options.include_usage` → 上游双只在收到该字段时才产
- * usage 终帧），usage 数字出现与否由那条因果链决定——漏注入即红。
+ * 前三个用例与末尾「形状用例」是页内桩——帧序列由测试作者手写，只能证明
+ * **前端会解析这个形状**，不能证明**线上会有这个帧**。#17/F1 的病根正在这里：
+ * 原 `usageFrame()` 无条件吐 usage 终帧，于是「界面出现 usage 数字」只是桩自证
+ * （#31 同型假绿）。中间三个用例不打页内桩，请求真打到 static-server 的
+ * **两跳链**（后端双按 #21-A 注入 `stream_options.include_usage` → 上游双只在
+ * 收到该字段时才产 usage 终帧；账号池档则由后端双按 #21-B 合成
+ * `estimated:true` 尾帧），数字出现与否、角标出现与否都由那条因果链决定。
  */
 
 type StreamScript = {
@@ -96,8 +97,13 @@ const toolFrame = (tool: Record<string, unknown>): string =>
  * `stream_options.include_usage` 条件产出（后端 #21-A 负责注入），页内手写
  * 帧无条件吐 = #17/F1 假绿本体。因果链验证在文件末尾的两个两跳用例里。
  */
-const usageFrame = (prompt: number, completion: number, total: number): string =>
-  `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total } })}\n\n`;
+const usageFrame = (prompt: number, completion: number, total: number, estimated = false): string =>
+  `data: ${JSON.stringify({
+    choices: [],
+    usage: { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total },
+    // #24：口径标记挂在帧顶层（与 usage 同级），照 #21-B 的合成形状写
+    ...(estimated ? { estimated: true } : {}),
+  })}\n\n`;
 
 /**
  * 两跳链路的固定数字（与 static-server.mjs 的 E2E_UPSTREAM_USAGE 一致）：
@@ -107,6 +113,13 @@ const TWO_HOP_USAGE = { prompt: 11, completion: 7, total: 18 };
 
 /** 触发「老 vLLM」档：上游收到 stream_options 直接 400，后端双去字段重试 */
 const LEGACY_MARK = '[e2e-upstream:legacy]';
+
+/** 触发「账号池归一化」档（#21-B 镜像）：上游不回报 usage，后端双合成 estimated 尾帧 */
+const ACCOUNT_MARK = '[e2e-upstream:account]';
+
+/** 后端双合成的估算数字（与 static-server.mjs 的 E2E_GATEWAY_USAGE 一致）；
+ *  刻意与上游真值 TWO_HOP_USAGE 不同——断言到 26/9/35 才证明走的是合成支路 */
+const GATEWAY_USAGE = { prompt: 26, completion: 9, total: 35 };
 
 async function gotoChat(page: Page): Promise<void> {
   await loginAsAdmin(page);
@@ -172,6 +185,9 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     // 正常收尾：卡片完成态 + usage 展示
     await expect(card).toContainText('完成');
     await expect(card.locator('[data-testid="usage-summary"]')).toContainText('20');
+    // #24：真值帧不带 `estimated` ⇒ 卡片内不得出现「估算」角标。
+    // 与末尾「形状用例：估算帧」成对——只测有角标会退化成「角标恒开」的假绿。
+    await expect(card.locator('[data-testid="usage-estimated"]')).toHaveCount(0);
 
     // busy 已复位（发送按钮回到「发送」）
     await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
@@ -269,6 +285,9 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
 
     // busy 复位
     await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
+    // #24 口径区分（下半边）：该帧由**上游回报**，不带 estimated ⇒ 必须没有角标。
+    // 与末尾账号池用例（有角标 + 另一组数字）成对，才叫「两种口径可区分」。
+    await expect(assistant.locator('[data-testid="usage-estimated"]')).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
@@ -292,6 +311,66 @@ test.describe('聊天 · SSE 渐进渲染与工具调用卡片', () => {
     // 上游不发 usage 终帧 ⇒ 界面**绝不能**出现 usage 数字。此前页内桩无条件
     // 吐帧，这条回归根本测不出来——数字看起来「前端自造」也能过。
     await expect(assistant.locator('[data-testid="usage-summary"]')).toHaveCount(0);
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  // ── #24：估算口径角标（消费 #21-B 的 `estimated` 尾帧）────────────────────
+  //
+  // 账号池归一化链路里 usage 不是上游回报的，而是网关**估**出来的，口径必须
+  // 能在界面上和真值区分开。e2e 侧把这条链镜像进 static-server：上游双对该档
+  // 压根不回报 usage，后端双按 #21-B 在 `[DONE]` **前**合成
+  // `{choices:[], usage:{…}, estimated:true}`（标记在帧顶层，不是 usage 内字段）。
+  // ⇒ 「角标出现」依赖合成链 + 顶层键透传，不依赖测试作者手写帧。
+
+  test('两跳·账号池档：后端双合成 estimated 尾帧 → 数字带「估算」角标（#24）', async ({ page, pageErrors }) => {
+    await gotoChat(page);
+    await newSession(page);
+    await send(page, `走账号池归一化链路 ${ACCOUNT_MARK}`);
+
+    const assistant = page.locator('.chat-debugger-msg-assistant').last();
+    // 该档正文与真值档不同（「账号池归一」），档位选错不会撞绿
+    await expect(assistant.locator('.chat-debugger-msg-content'))
+      .toContainText('账号池归一', { timeout: 10000 });
+
+    // 合成尾帧的数字（26/9/35）只能来自后端双——上游该档压根不回报 usage
+    const usage = assistant.locator('[data-testid="usage-summary"]');
+    await expect(usage).toContainText(`${GATEWAY_USAGE.prompt}`);
+    await expect(usage).toContainText(`${GATEWAY_USAGE.completion}`);
+    await expect(usage).toContainText(`${GATEWAY_USAGE.total}`);
+
+    // 关键断言：这组数字是网关估算的 ⇒ 角标必须出现（且文案与真值档不同源）
+    const badge = usage.locator('[data-testid="usage-estimated"]');
+    await expect(badge).toHaveCount(1);
+    await expect(badge).toContainText(/估算|Estimated/);
+
+    await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  });
+
+  test('形状用例：工具卡片内的 usage 带 estimated → 角标进卡片、meta 不重复渲染（#24）', async ({ page, pageErrors }) => {
+    // ⚠️ 页内桩只证明「前端会渲染该形状」；线上会有该帧由上面的账号池两跳用例负责。
+    // 本例补的是**第二个渲染位**（有工具卡片时 usage 在卡片内，而非气泡 meta）。
+    await installSseStub(page, {
+      frames: [
+        toolFrame({ index: 0, id: 'call_e', type: 'function', function: { name: 'list_files', arguments: '{}' } }),
+        contentFrame('已列出'),
+        usageFrame(4, 3, 7, true),
+        'data: [DONE]\n\n',
+      ],
+    });
+    await gotoChat(page);
+    await newSession(page);
+    await send(page, '列一下文件');
+
+    const assistant = page.locator('.chat-debugger-msg-assistant').last();
+    const card = page.locator('[data-testid="tool-call-card"]').last();
+    await expect(card.locator('[data-testid="usage-summary"]')).toContainText('7');
+    await expect(card.locator('[data-testid="usage-estimated"]')).toHaveCount(1);
+    // 二选一渲染：有卡片时气泡 meta 不再重复出一份 usage（角标也不会出现两处）
+    await expect(assistant.locator('.chat-debugger-msg-usage')).toHaveCount(0);
+    await expect(assistant.locator('[data-testid="usage-estimated"]')).toHaveCount(1);
+
+    await expect(page.locator('.chat-debugger-send-fab.stop')).toHaveCount(0);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 });

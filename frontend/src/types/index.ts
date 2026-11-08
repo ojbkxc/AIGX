@@ -1018,11 +1018,21 @@ export interface PlaygroundRawResult {
   message?: string;
 }
 
-/** 流式用量收尾（OpenAI `stream_options.include_usage` 终帧 / 后端汇总帧）。 */
+/**
+ * 流式用量收尾（OpenAI `stream_options.include_usage` 终帧 / 后端汇总帧）。
+ *
+ * `estimated`（#24，接 #21-B）：后端账号池归一化链路在流尾**合成**的 usage 是
+ * 估算值——prompt 优先用上游回报真值、缺失才走 `count_chat_prompt` 估算，
+ * completion 同理回退到对输出文本 `count_text`；两者都齐才写这一帧。合成场景
+ * 帧里带顶层 `estimated: true`，上游回报真值时**不写**该键。UI 据此画角标，
+ * 让用户分得清「扣费同源估算」与「上游真值」。
+ */
 export interface ChatStreamUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  /** true = 后端估算（非上游回报）；缺省/未带 = 上游真值 */
+  estimated?: boolean;
 }
 
 /**

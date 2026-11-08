@@ -161,6 +161,12 @@ export default function ChatBubble({
                     {message.usage.total_tokens !== undefined && (
                       <span>{t('总 Token')}: {message.usage.total_tokens}</span>
                     )}
+                    {/* #24：后端估算口径角标（#21-B 合成尾帧），与上游真值区分 */}
+                    {message.usage.estimated === true && (
+                      <span className="usage-estimated-badge" data-testid="usage-estimated" title={t('由网关估算，非上游回报')}>
+                        {t('估算')}
+                      </span>
+                    )}
                   </span>
                 )}
               </div>

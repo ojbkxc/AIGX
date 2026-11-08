@@ -110,6 +110,11 @@ export function extractToolCalls(
  * OpenAI 契约：`stream_options.include_usage=true` 时终帧为
  * `{choices:[], usage:{prompt_tokens,...}}`（choices 空数组是官方信号）。
  * 部分兼容上游把 usage 挂在最后一个带 choices 的帧上，这里两种都接。
+ *
+ * `estimated`（#24，接 #21-B）：账号池归一化链路的尾帧由后端**合成**，口径是
+ * 估算值，标记挂在帧的**顶层**（与 usage 同级，非 usage 内字段）——透传出来
+ * 供 UI 画角标；上游真值帧不带该键 ⇒ `estimated` 缺省（不写 false，保持
+ * 「没这个概念」与「显式说是估算」的区分，也免得多出一个无意义的键）。
  */
 export function extractUsage(frame: Record<string, unknown>): ChatStreamUsage | null {
   const usage = asRecord(frame.usage) ?? asRecord(asRecord(frame.data)?.usage);
@@ -124,6 +129,7 @@ export function extractUsage(frame: Record<string, unknown>): ChatStreamUsage | 
     ...(prompt !== undefined ? { prompt_tokens: prompt } : {}),
     ...(completion !== undefined ? { completion_tokens: completion } : {}),
     ...(total !== undefined ? { total_tokens: total } : {}),
+    ...(frame.estimated === true ? { estimated: true } : {}),
   };
 }
 

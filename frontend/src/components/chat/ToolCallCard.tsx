@@ -143,6 +143,12 @@ export default function ToolCallCard({ calls, state, usage }: ToolCallCardProps)
             <span>{t('输出 Tokens')}: {usage.completion_tokens}</span>
           )}
           {total !== undefined && <span>{t('总 Token')}: {total}</span>}
+          {/* #24：后端估算口径角标（#21-B 合成尾帧），与上游真值区分 */}
+          {usage.estimated === true && (
+            <span className="usage-estimated-badge" data-testid="usage-estimated" title={t('由网关估算，非上游回报')}>
+              {t('估算')}
+            </span>
+          )}
         </div>
       )}
     </div>

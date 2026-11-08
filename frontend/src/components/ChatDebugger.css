@@ -1048,6 +1048,20 @@
   align-self: flex-end;
 }
 
+/* #24：usage 口径角标——「后端估算」（#21-B 合成尾帧）与上游真值的唯一视觉区分位。
+   紧凑版：全局 .badge 的 4px 10px 在 11px 元数据行里过大。 */
+.usage-estimated-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--amber);
+  font-size: 10px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+
 .chat-debugger-msg-time::before {
   content: '🕐 ';
   opacity: 0.6;

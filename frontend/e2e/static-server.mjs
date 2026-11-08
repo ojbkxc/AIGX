@@ -490,14 +490,22 @@ function sendJson(res, body, status = 200) {
 // 于是「后端双漏注入 / 上游漏条件」⇒ 界面无数字 ⇒ 断言红，桩不再自证。
 // 用例通过 message 文本选上游档位：含 E2E_LEGACY_MARK 的模拟「不识别
 // stream_options 的老 vLLM/自建网关」——收到该字段直接 400，被去字段重试后
-// 正常流式但**不带** usage 终帧（正好钉住反例：数字不是前端自造的）。
+// 正常流式但**不带** usage 终帧（正好钉住反例：数字不是前端自造的）；
+// 含 E2E_ACCOUNT_MARK 的模拟「账号池归一化上游压根不回报 usage」——由后端双
+// 按 #21-B 合成带 `estimated:true` 的 usage 尾帧（#24 角标用例的口径来源）。
 
 /** 上游双吐的正文分片（拼起来是「两跳链路验证」） */
 const E2E_UPSTREAM_WORDS = ['两跳', '链路', '验证'];
+/** 账号池档的正文分片（拼起来是「账号池归一」）——与真值档可分辨，选错档不会撞绿 */
+const E2E_ACCOUNT_WORDS = ['账号', '池', '归一'];
 /** 老上游触发标记：出现在 messages 里即模拟不识别 stream_options 的网关 */
 const E2E_LEGACY_MARK = '[e2e-upstream:legacy]';
+/** 账号池触发标记：出现在 messages 里即模拟「上游压根不回报 usage」的归一化链路 */
+const E2E_ACCOUNT_MARK = '[e2e-upstream:account]';
 /** 上游双的 usage 数字（固定值便于断言；total = prompt + completion） */
 const E2E_UPSTREAM_USAGE = { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 };
+/** 后端双合成的估算数字（#21-B `usage_tail_frame()` 镜像），刻意与上游真值不同 */
+const E2E_GATEWAY_USAGE = { prompt_tokens: 26, completion_tokens: 9, total_tokens: 35 };
 
 const sseHeaders = {
   'Content-Type': 'text/event-stream; charset=utf-8',
@@ -510,6 +518,10 @@ const openaiChunkFrame = (model, extra) =>
   `data: ${JSON.stringify({
     id: 'chatcmpl-e2e', object: 'chat.completion.chunk', created: 1762000000, model, ...extra,
   })}\n\n`;
+
+/** #21-B：后端合成的估算 usage 尾帧。`estimated` 挂在帧顶层（与 usage 同级） */
+const gatewayUsageTailFrame = () =>
+  `data: ${JSON.stringify({ choices: [], usage: E2E_GATEWAY_USAGE, estimated: true })}\n\n`;
 
 /**
  * 上游双：OpenAI `/chat/completions` 的流式行为。
@@ -528,7 +540,11 @@ function handleMockUpstream(res, bodyText) {
   const model = typeof body.model === 'string' ? body.model : 'e2e-model';
   const stream = body.stream === true;
   const wantsUsage = body.stream_options?.include_usage === true;
-  const legacy = JSON.stringify(body.messages ?? '').includes(E2E_LEGACY_MARK);
+  const msgBlob = JSON.stringify(body.messages ?? '');
+  const legacy = msgBlob.includes(E2E_LEGACY_MARK);
+  // 账号池档：模拟非 OpenAI 原生的归一化上游——即便收到 stream_options 也**不回报** usage
+  const account = msgBlob.includes(E2E_ACCOUNT_MARK);
+  const words = account ? E2E_ACCOUNT_WORDS : E2E_UPSTREAM_WORDS;
 
   if (legacy && body.stream_options !== undefined) {
     // 老 vLLM/自建网关：整字段不认识 → 400（后端双据此去字段重试一次）
@@ -543,17 +559,17 @@ function handleMockUpstream(res, bodyText) {
     // 非流式：OpenAI 恒带 usage（与 stream_options 无关），本单不依赖该分支
     return sendJson(res, {
       id: 'chatcmpl-e2e', object: 'chat.completion', model,
-      choices: [{ index: 0, message: { role: 'assistant', content: E2E_UPSTREAM_WORDS.join('') }, finish_reason: 'stop' }],
+      choices: [{ index: 0, message: { role: 'assistant', content: words.join('') }, finish_reason: 'stop' }],
       usage: E2E_UPSTREAM_USAGE,
     });
   }
 
   const frames = [
     openaiChunkFrame(model, { choices: [{ index: 0, delta: { role: 'assistant' } }] }),
-    ...E2E_UPSTREAM_WORDS.map((w) => openaiChunkFrame(model, { choices: [{ index: 0, delta: { content: w } }] })),
+    ...words.map((w) => openaiChunkFrame(model, { choices: [{ index: 0, delta: { content: w } }] })),
     openaiChunkFrame(model, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
   ];
-  if (wantsUsage) {
+  if (wantsUsage && !account) {
     frames.push(openaiChunkFrame(model, { choices: [], usage: E2E_UPSTREAM_USAGE }));
   }
   frames.push('data: [DONE]\n\n');
@@ -623,11 +639,44 @@ async function handleChatTestDouble(res, bodyText) {
     'Cache-Control': 'no-store',
   });
   // 逐块转发：保持「渐进」语义（用例断言首帧可见而末帧未出，靠这个）
+  //
+  // 账号池档（#21-B 镜像）：上游压根不回报 usage，由「后端双」在 `[DONE]`
+  // **之前**合成 usage 尾帧，估算口径标记挂在**帧顶层**（与 usage 同级，
+  // 不是 usage 内字段）。合成顺序照搬线上；注意前端对 `[DONE]` **之后**的帧
+  // 也会解析（parseSseFrame 见 DONE 只置 ended 并 continue，不退出循环），
+  // 所以「尾帧必须在 DONE 前」这条约束由 #21-B 的 Rust 单测钉住，本桩只保证
+  // 帧形状与到达顺序同源。角标断言的因果落在「后端双合成 + 顶层键透传」。
+  const account = JSON.stringify(messages).includes(E2E_ACCOUNT_MARK);
+  const DONE_LINE = 'data: [DONE]';
+  const dec = new TextDecoder();
+  let pending = '';
+  let synthesized = false;
   try {
     for await (const chunk of up.body) {
       if (res.destroyed) break;
-      res.write(chunk);
+      if (!account || !stream) {
+        res.write(chunk);
+        continue;
+      }
+      pending += typeof chunk === 'string' ? chunk : dec.decode(chunk, { stream: true });
+      const at = pending.indexOf(DONE_LINE);
+      if (at < 0) {
+        // 滚动窗口：留住可能被切断的标记尾部，其余先转发（不牺牲渐进性）
+        const keep = DONE_LINE.length - 1;
+        if (pending.length > keep) {
+          res.write(pending.slice(0, pending.length - keep));
+          pending = pending.slice(pending.length - keep);
+        }
+        continue;
+      }
+      res.write(pending.slice(0, at) + gatewayUsageTailFrame() + pending.slice(at));
+      pending = '';
+      synthesized = true;
+      break;
     }
+    // 未到 `[DONE]` 就结束（客户端 abort 等）：只补发已缓冲字节，**不**合成尾帧
+    if (!synthesized && pending && !res.destroyed) res.write(pending);
+    if (synthesized) await up.body.cancel().catch(() => undefined);
   } catch {
     // 客户端 abort：上游流被切断属正常
   }

@@ -3242,5 +3242,7 @@
   "指定后标题生成只走该渠道；留空按全局优先级自动选路。": "When set, title generation uses only this channel; leave empty to route by global priority.",
   "提示词截断长度（字符）": "Prompt Truncation (characters)",
   "发给模型的首条用户消息最大字符数（默认 500，超出截断）。": "Maximum characters of the first user message sent to the model (default 500, truncated beyond).",
-  "聊天设置已保存": "Chat settings saved"
+  "聊天设置已保存": "Chat settings saved",
+  "估算": "Estimated",
+  "由网关估算，非上游回报": "Estimated by the gateway, not reported by the upstream"
 }

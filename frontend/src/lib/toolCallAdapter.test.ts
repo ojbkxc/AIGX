@@ -86,6 +86,31 @@ describe('toolCallAdapter — usage 提取', () => {
     expect(extractUsage({ usage: { prompt_tokens: 'ten' } })).toBeNull();
     expect(extractUsage({ usage: {} })).toBeNull();
   });
+
+  // #24：#21-B 合成尾帧的口径标记挂在帧顶层（与 usage 同级），必须透传出来供 UI 画角标
+  it('estimated 透传：顶层键 true → 结果带 estimated:true', () => {
+    expect(extractUsage({
+      choices: [],
+      estimated: true,
+      usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 },
+    })).toEqual({ prompt_tokens: 4, completion_tokens: 3, total_tokens: 7, estimated: true });
+  });
+
+  it('estimated 区分口径：上游真值帧不写该键（不是 false）', () => {
+    const truth = extractUsage({ choices: [], usage: { total_tokens: 9 } });
+    expect(truth).toEqual({ total_tokens: 9 });
+    expect('estimated' in (truth ?? {})).toBe(false);
+    // 后端只在估算场景写 true，误写 false / 字符串同样不落
+    expect(extractUsage({ choices: [], estimated: false, usage: { total_tokens: 9 } }))
+      .toEqual({ total_tokens: 9 });
+    expect(extractUsage({ choices: [], estimated: 'true', usage: { total_tokens: 9 } }))
+      .toEqual({ total_tokens: 9 });
+  });
+
+  it('estimated 嵌在 usage 内（形状分歧）不落——只认顶层键', () => {
+    expect(extractUsage({ choices: [], usage: { total_tokens: 9, estimated: true } }))
+      .toEqual({ total_tokens: 9 });
+  });
 });
 
 describe('mergeToolCallDelta — 分片聚合', () => {
