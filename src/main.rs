@@ -927,6 +927,15 @@ async fn main() -> anyhow::Result<()> {
                             cfg.server.generated_images_max_bytes,
                         )
                         .removed;
+                        // 第六档：终态审批留痕 TTL（#35 批1 后半）。approval.rs 模块头
+                        // 一直宣称「终态留痕，7 天后清扫」但全仓无实现，`agent_approval:*`
+                        // 只增不减；只删「已终结 ∩ 超 7 天」，pending 一律不动。
+                        // kv 与 AgentState 用的是同一个 FileStore（main 构造处 store.clone()），
+                        // 所以这里不需要另取 agent_state。
+                        removed += crate::agent::approval::sweep_terminal_approvals(
+                            &kv,
+                            crate::agent::approval::TRACE_TTL_DAYS,
+                        );
                         removed
                     })
                 }),

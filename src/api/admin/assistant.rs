@@ -1,8 +1,9 @@
 //! 聊天助手工具回路（#34，面向管理员的 Chat 内工具调用；终端用户 v1 纯聊天）。
 //!
 //! ── 定位与身份模型（v1 契约，lead 定稿前先看这段）──────────────
-//! 复用 agent 三层 registry 的工具面（[`crate::agent::registry::mcp_tools`]，
-//! 非 HighRisk 全集，条数随注册表变化）给**管理员**的聊天页提供工具回路；终端用户 v1
+//! 复用 agent 三层 registry 的工具面（[`crate::agent::registry::visible_tools`]，
+//! 非 HighRisk ∩ 未被 `disabled_tools` 禁用，条数随注册表与开关变化）给**管理员**的
+//! 聊天页提供工具回路；终端用户 v1
 //! **不带工具**（纯聊天+计费）。原因：registry 的 exec 闭包直连管理面
 //! handler（内部 verify_admin），普通用户的会话头会被 401/403 拦截——
 //! 若为此铸造「内部 admin 会话」就是隐藏管理员账号（安全反模式）；若把
@@ -60,6 +61,15 @@ pub fn tools_enabled() -> bool {
     crate::config::assistant_tools_enabled()
 }
 
+/// 管理员禁用集（`config.agent.disabled_tools`，#35 批1 后半）。
+///
+/// 与 MCP 面同一读法：读 `config_manager`（落盘真值 + 设置页 PUT 即时刷新），
+/// 不读 `agent_state` 快照——后者在 Agent 未启用时是 `None`，用它就会出现
+/// 「设置页关了、助手面还在下发」。判定口径统一走 `registry::tool_disabled`。
+async fn disabled_tools(state: &AppState) -> Vec<String> {
+    state.config_manager.get().await.agent.disabled_tools
+}
+
 /// 工具目录条目构造（纯函数，handler 与单测共用——同 `user_tools.rs::catalog_payload` 姿势）。
 ///
 /// `risk` 必须走 `RiskLevel::as_str()`（`agent/tools.rs`）：全库 4 处 risk 输出点
@@ -78,22 +88,26 @@ fn tool_json(t: &crate::agent::registry::ToolDef) -> Value {
 
 /// 工具目录（GET /api/assistant/tools）。
 ///
-/// 管理员（开关开）→ 非 HighRisk 全集（与 `registry::mcp_tools` 同口径，条数随注册表
-/// 变化，所以这里不写死数字）；
-/// 普通用户（开关开）→ user_exec 声明集 ∩ 组 allowlist（#34 v2 双身份，
-/// user_tool_allowed 判定，设计稿 D1-D8）；开关关 → 空清单（前端隐藏工具入口）。
+/// 管理员（开关开）→ 非 HighRisk ∩ 未被 `disabled_tools` 禁用（与
+/// `registry::visible_tools` 同口径，条数随注册表与开关变化，所以这里不写死数字）；
+/// 普通用户（开关开）→ user_exec 声明集 ∩ 组 allowlist ∩ 未被 `disabled_tools`
+/// 禁用（#34 v2 双身份，user_tool_allowed 判定，设计稿 D1-D8）；
+/// 开关关 → 空清单（前端隐藏工具入口）。
+///
+/// `disabled_tools` 是管理员级的全局开关，不区分身份：关掉的工具两条分支都不下发、
+/// 也不执行（见 `chat` 里的执行前 deny），语义与 Agent 面 runner 一致。
 pub async fn handle_assistant_tools(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let user = verify_user(&state, &headers).await?;
+    let disabled = disabled_tools(&state).await;
     let tools: Vec<Value> = if user.is_admin() {
         if !tools_enabled() {
             Vec::new()
         } else {
-            tools::tool_specs()
-                .iter()
-                .filter(|t| t.risk != RiskLevel::HighRisk)
+            crate::agent::registry::visible_tools(&disabled)
+                .into_iter()
                 .map(tool_json)
                 .collect()
         }
@@ -111,6 +125,7 @@ pub async fn handle_assistant_tools(
                     t.user_exec.is_some(),
                 ) == crate::agent::user_tool_policy::ToolPermission::Allow
             })
+            .filter(|t| !crate::agent::registry::tool_disabled(t.name, &disabled))
             .map(tool_json)
             .collect()
     } else {
@@ -249,6 +264,9 @@ pub async fn handle_assistant_chat(
     }
     // #34 v2：普通用户也走工具回路（tools_enabled 总闸 + 双身份执行体分派）
     let tools_on = tools_enabled();
+    // 管理员禁用集（#35 批1 后半）：下发 schema 与执行前 deny 共用同一个读取结果，
+    // 保证「关了就是关了」不会因为两处取数时刻不同而分叉。
+    let disabled = disabled_tools(&state).await;
     // 普通用户的可执行集：user_exec 声明 ∩ 组 allowlist（与 /tools 同判定）
     let policy = state.user_tool_policy.snapshot();
     let max_rounds = body.max_rounds.unwrap_or(MAX_ROUNDS).clamp(1, MAX_ROUNDS);
@@ -297,26 +315,26 @@ pub async fn handle_assistant_chat(
     // 延迟初始化：两条 break 路径都先赋值（clippy unused_assignments——
     // String::new() 初值从未被读）
     let final_content;
-    // #34-①（lead 评审）：openai_tools() 是全量 73 个含 20 高危——助手面
-    // 只给 mcp_tools() 非 HighRisk 子集（exec 前的 deny 是第二重，不是唯一一重）
-    // Schema 按身份分派：管理员=非 HighRisk 全集；普通用户=可执行集
+    // #34-①（lead 评审）：openai_tools() 是全量含高危——助手面只给「非 HighRisk ∩
+    // 未被 disabled_tools 禁用」子集（exec 前的 deny 是第二重，不是唯一一重）
+    // Schema 按身份分派：管理员=可见集；普通用户=可执行集（同样吃禁用清单）
     let tools_schema: Vec<Value> = if tools_on {
         if user.is_admin() {
-            tools::openai_tools_of(
-                tools::tool_specs()
-                    .iter()
-                    .filter(|t| t.risk != RiskLevel::HighRisk),
-            )
+            tools::openai_tools_of(crate::agent::registry::visible_tools(&disabled).into_iter())
         } else {
-            tools::openai_tools_of(tools::user_exposed_tools().filter(|t| {
-                crate::agent::user_tool_policy::user_tool_allowed(
-                    &policy,
-                    &user.group,
-                    t.name,
-                    t.risk,
-                    t.user_exec.is_some(),
-                ) == crate::agent::user_tool_policy::ToolPermission::Allow
-            }))
+            tools::openai_tools_of(
+                tools::user_exposed_tools()
+                    .filter(|t| {
+                        crate::agent::user_tool_policy::user_tool_allowed(
+                            &policy,
+                            &user.group,
+                            t.name,
+                            t.risk,
+                            t.user_exec.is_some(),
+                        ) == crate::agent::user_tool_policy::ToolPermission::Allow
+                    })
+                    .filter(|t| !crate::agent::registry::tool_disabled(t.name, &disabled)),
+            )
         }
     } else {
         Vec::new()
@@ -400,6 +418,54 @@ pub async fn handle_assistant_chat(
                         });
                         continue;
                     };
+                    // 「关了就是关了」第二道（#35 批1 后半）：schema 已按 risk +
+                    // disabled_tools 过滤，但模型幻觉/上下文残留仍可能叫出被禁用的名字；
+                    // 这里的判定与下发口径同源（`registry::tool_disabled`），因此不存在
+                    // 「列表里没了但还能调」。顺带补上管理员分支的同族漏洞：助手面没有
+                    // 审批矩阵，幻觉出的高危名不能像 Agent 面那样直接执行（普通用户分支
+                    // 由 `user_tool_allowed` 自己封顶高危，故只对管理员额外拦这一刀）。
+                    let denied =
+                        if crate::agent::registry::tool_disabled(&call.function_name, &disabled) {
+                            Some("disabled_tools")
+                        } else if user.is_admin() && def.risk == RiskLevel::HighRisk {
+                            Some("high_risk_without_approval_matrix")
+                        } else {
+                            None
+                        };
+                    if let Some(reason) = denied {
+                        super::common::record_audit(
+                            &state,
+                            &user.email,
+                            "assistant_tool_denied",
+                            def.name,
+                            None,
+                            Some(json!({ "reason": reason })),
+                        );
+                        let text = if reason == "disabled_tools" {
+                            format!(
+                                "工具 {} 已被管理员禁用（disabled_tools），未执行",
+                                def.label
+                            )
+                        } else {
+                            format!(
+                                "工具 {} 属高危，聊天助手面不执行（未接入审批矩阵）",
+                                def.label
+                            )
+                        };
+                        tool_trace.push(json!({
+                            "name": call.function_name, "ok": false, "summary": text,
+                        }));
+                        messages.push(crate::bridge::ChatMessage {
+                            role: Role::Tool,
+                            content: Some(text),
+                            reasoning: None,
+                            content_blocks: None,
+                            name: Some(call.function_name.clone()),
+                            tool_call_id: Some(call.id.clone()),
+                            tool_calls: None,
+                        });
+                        continue;
+                    }
                     // #34 v2 双身份执行分派：
                     // - 管理员：registry exec_tool（非 HighRisk，与 Agent 同语义）
                     // - 普通用户：user_tool_allowed 判定（Allowlist/组启用/非高危）

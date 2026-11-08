@@ -6,9 +6,11 @@
 //!
 //! ## 协议子集（零依赖手写，不引 rmcp）
 //! - `initialize`：握手 → protocolVersion + serverInfo + tools 能力声明
-//! - `tools/list`：返回全部非高危工具（与 `registry::mcp_tools` 同源，条数随注册表
-//!   变化，所以这里不写死数字；name/中文 description/inputSchema）
-//! - `tools/call`：白名单校验后执行工具，结果 JSON 序列化为 text content
+//! - `tools/list`：返回非高危 ∩ 未被管理员禁用（`config.agent.disabled_tools`）的
+//!   工具（与 `registry::visible_tools` 同源，条数随注册表与开关变化，所以这里
+//!   不写死数字；name/中文 description/inputSchema）
+//! - `tools/call`：白名单校验（含 disabled_tools）后执行工具，结果 JSON 序列化为
+//!   text content
 //!
 //! ## fail-closed
 //! - 未知 method → JSON-RPC -32601；未知工具名 → isError 响应，
@@ -71,6 +73,10 @@ pub async fn handle_mcp(
     body: Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _config = verify_admin(&state, &headers).await?;
+    // 管理员禁用集（`config.agent.disabled_tools`）：#35 批1 后半前这里只按 risk
+    // 过滤，设置页关掉工具后 MCP 面照旧能列能调——「关了就是关了」要求列与调
+    // 两道都用同一个判定（`registry::tool_disabled`），故在此一次性读出后下传。
+    let disabled = disabled_tools(&state).await;
 
     // envelope 不完整（非 JSON / 缺 jsonrpc / 缺 method）按 parse 失败 → -32700
     let Some((id, method, params)) = parse_request(&body) else {
@@ -83,8 +89,8 @@ pub async fn handle_mcp(
 
     let resp = match method.as_str() {
         "initialize" => jsonrpc_ok(id, initialize_result()),
-        "tools/list" => jsonrpc_ok(id, tools_list_result()),
-        "tools/call" => match handle_tools_call(&state, &headers, &params).await {
+        "tools/list" => jsonrpc_ok(id, tools_list_result(&disabled)),
+        "tools/call" => match handle_tools_call(&state, &headers, &params, &disabled).await {
             Ok(result) => jsonrpc_ok(id, result),
             Err((code, msg)) => jsonrpc_error(id, code, &msg),
         },
@@ -135,17 +141,30 @@ fn initialize_result() -> Value {
 // 历史上这里养过第二份 19 项静态白名单，与 agent::tools 各自漂移。现在
 // spec 与执行体只在 `agent::registry`（一条工具 = 一条声明），MCP 是
 // 「非高危子集」的消费方（高危写留给 Agent 审批矩阵，外部客户端不给碰）。
+// 准入判定只有一个来源：`registry::visible_tools` / `registry::find_visible_tool`
+// 同时吃 risk 与 disabled_tools，列与调共用，所以不存在「列里没有但能调」。
 
-/// 白名单查找（fail-closed：高危与白名单外一视同仁地拒绝）。
-fn find_tool_spec(name: &str) -> Option<&'static crate::agent::registry::ToolDef> {
-    crate::agent::registry::find_tool(name)
-        .filter(|t| t.risk != crate::agent::tools::RiskLevel::HighRisk)
+/// 管理员禁用集（`config.agent.disabled_tools`）。
+///
+/// 读 `config_manager`（落盘真值）而不是 `agent_state` 的运行期快照：后者只在
+/// 设置页 PUT 成功后同步，Agent 未启用时干脆是 `None`——用它会让「关了没关」。
+async fn disabled_tools(state: &AppState) -> Vec<String> {
+    state.config_manager.get().await.agent.disabled_tools
+}
+
+/// 白名单查找（fail-closed：高危、被管理员禁用、白名单外一视同仁地拒绝）。
+fn find_tool_spec(
+    name: &str,
+    disabled: &[String],
+) -> Option<&'static crate::agent::registry::ToolDef> {
+    crate::agent::registry::find_visible_tool(name, disabled)
 }
 
 /// tools/list 响应（与 registry 同源；readOnlyHint 驱动客户端写前提示）。
-pub(crate) fn tools_list_result() -> Value {
+pub(crate) fn tools_list_result(disabled: &[String]) -> Value {
     json!({
-        "tools": crate::agent::registry::mcp_tools()
+        "tools": crate::agent::registry::visible_tools(disabled)
+            .into_iter()
             .map(|t| {
                 json!({
                     "name": t.name,
@@ -169,6 +188,7 @@ async fn handle_tools_call(
     state: &AppState,
     headers: &HeaderMap,
     params: &Value,
+    disabled: &[String],
 ) -> Result<Value, (i64, String)> {
     let Some(name) = params.get("name").and_then(|n| n.as_str()) else {
         return Err((
@@ -187,12 +207,12 @@ async fn handle_tools_call(
         ));
     }
 
-    // fail-closed：白名单外（含高危）工具名直接拒绝，不触碰任何内部逻辑
-    if find_tool_spec(name).is_none() {
-        return Ok(unknown_tool_result(name));
+    // fail-closed：白名单外（含高危/被禁用）工具名直接拒绝，不触碰任何内部逻辑
+    if find_tool_spec(name, disabled).is_none() {
+        return Ok(rejected_tool_result(name, disabled));
     }
 
-    let exec = exec_tool(state, headers, name, &arguments);
+    let exec = exec_tool(state, headers, name, &arguments, disabled);
     match tokio::time::timeout(Duration::from_secs(TOOL_CALL_TIMEOUT_SECS), exec).await {
         Ok(result) => result,
         Err(_) => Err((
@@ -208,9 +228,10 @@ async fn exec_tool(
     headers: &HeaderMap,
     name: &str,
     arguments: &Value,
+    disabled: &[String],
 ) -> Result<Value, (i64, String)> {
     use crate::agent::tools::RiskLevel;
-    let tool = find_tool_spec(name).ok_or_else(|| {
+    let tool = find_tool_spec(name, disabled).ok_or_else(|| {
         (
             -32601,
             format!("Unknown tool: {name} (not in MCP whitelist)"),
@@ -247,9 +268,19 @@ fn tool_error(text: String) -> Value {
     json!({ "content": [ { "type": "text", "text": text } ], "isError": true })
 }
 
-/// 未知工具 fail-closed 响应（不透传任何内部信息，只回工具名本身）。
-fn unknown_tool_result(name: &str) -> Value {
-    tool_error(format!("Unknown tool: {name} (not in MCP whitelist)"))
+/// 准入失败响应（fail-closed，不透传任何内部执行信息）。
+///
+/// 两种拒绝分开说：被管理员禁用要说清「是被禁的」，否则调用方会以为工具不存在、
+/// 反复重试或改用别的路径绕过；两者都不执行任何内部逻辑。MCP 面已过 `verify_admin`，
+/// 告知禁用状态不构成信息泄露。
+fn rejected_tool_result(name: &str, disabled: &[String]) -> Value {
+    if crate::agent::registry::tool_disabled(name, disabled) {
+        tool_error(format!(
+            "Tool {name} is disabled by administrator (disabled_tools)"
+        ))
+    } else {
+        tool_error(format!("Unknown tool: {name} (not in MCP whitelist)"))
+    }
 }
 
 // ── 参数辅助 ───────────────────────────────────────────────────────
@@ -389,7 +420,7 @@ mod tests {
         let specs: Vec<&crate::agent::registry::ToolDef> =
             crate::agent::registry::mcp_tools().collect();
         assert!(!specs.is_empty(), "MCP 工具面不能为空");
-        let tools = tools_list_result()["tools"].as_array().unwrap().clone();
+        let tools = tools_list_result(&[])["tools"].as_array().unwrap().clone();
         assert_eq!(tools.len(), specs.len(), "tools/list 与 registry 计数一致");
         let mut seen = std::collections::BTreeSet::new();
         for t in &tools {
@@ -435,8 +466,8 @@ mod tests {
     #[test]
     fn unknown_tool_fail_closed() {
         // 白名单外工具不进入 exec_tool，直接 fail-closed
-        assert!(find_tool_spec("aigx_delete_everything").is_none());
-        let r = unknown_tool_result("aigx_delete_everything");
+        assert!(find_tool_spec("aigx_delete_everything", &[]).is_none());
+        let r = rejected_tool_result("aigx_delete_everything", &[]);
         assert_eq!(r["isError"], true);
         assert_eq!(r["content"][0]["type"], "text");
         let msg = r["content"][0]["text"].as_str().unwrap();
@@ -446,6 +477,51 @@ mod tests {
         );
         // 破坏性名称不透传到任何内部路径（响应里只出现名字本身）
         assert_eq!(r["content"].as_array().unwrap().len(), 1);
+    }
+
+    /// 「关了就是关了」（#35 批1 后半）：disabled_tools 在 MCP 面同时管列与调，
+    /// 且被禁用的说明文案要与「工具不存在」区分开，免得调用方以为注册表漏了。
+    #[test]
+    fn disabled_tools_are_hidden_from_list_and_rejected_on_call() {
+        let victim = crate::agent::registry::mcp_tools()
+            .next()
+            .expect("MCP 面非空")
+            .name
+            .to_string();
+        let disabled = vec![victim.clone()];
+
+        // 空禁用集时列 == 注册表口径（证明本函数没偷偷再过滤一层 risk）
+        let all = tools_list_result(&[])["tools"].as_array().unwrap().clone();
+        assert_eq!(
+            all.len(),
+            crate::agent::registry::mcp_tools().count(),
+            "disabled=[] 时 tools/list 应与 registry::mcp_tools 同数"
+        );
+
+        let list = tools_list_result(&disabled)["tools"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(list.len(), all.len() - 1, "禁用一条应少一条");
+        let names: Vec<&str> = list.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(
+            !names.contains(&victim.as_str()),
+            "被禁用工具仍在 tools/list: {victim}"
+        );
+
+        // 列没了也不给调（白名单判定与列同源）
+        assert!(find_tool_spec(&victim, &disabled).is_none());
+        let r = rejected_tool_result(&victim, &disabled);
+        assert_eq!(r["isError"], true);
+        let msg = r["content"][0]["text"].as_str().unwrap();
+        assert!(
+            msg.contains("disabled by administrator"),
+            "禁用文案应说明是被管理员禁用，实际: {msg}"
+        );
+        // 不在禁用集里的名字仍按「未知工具」回，两种拒绝不互相冒充
+        let other = names[0].to_string();
+        assert!(find_tool_spec(&other, &disabled).is_some());
+        assert!(find_tool_spec(&other, &[]).is_some());
     }
 
     #[test]

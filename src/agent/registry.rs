@@ -263,8 +263,35 @@ pub fn find_tool(name: &str) -> Option<&'static ToolDef> {
 }
 
 /// MCP 面：只暴露非高危（高危写留给 Agent 审批矩阵，外部客户端不给碰）。
+///
+/// 本函数**不看 `disabled_tools`**——它是「注册表口径」而非「下发口径」；
+/// 需要管理员开关参与时用 [`visible_tools`] / [`find_visible_tool`]。
 pub fn mcp_tools() -> impl Iterator<Item = &'static ToolDef> {
     all_tools().iter().filter(|t| t.risk != RiskLevel::HighRisk)
+}
+
+/// `disabled_tools` 命中判定——Agent(runner)/MCP/assistant 三面共用的唯一口径（#35 批1 后半）。
+///
+/// 全等比较、不放宽：`api/admin/settings.rs` 的 PUT 已对每项 trim + 去空，工具名是
+/// `aigx_*` 蛇形全名；改成前缀/忽略大小写匹配只会误伤邻近工具（禁 `aigx_key_add`
+/// 顺带干掉 `aigx_key_delete` 这类事故）。
+pub fn tool_disabled(name: &str, disabled: &[String]) -> bool {
+    disabled.iter().any(|d| d == name)
+}
+
+/// 下发给外部消费方的「可见集」= 非高危 ∩ 未被管理员禁用。
+///
+/// 「关了就是关了」：可见集与 [`find_visible_tool`] 的准入判定同源，因此不存在
+/// 「列表里没了但还能调」或「列表里还在但调不动」两种分叉。
+pub fn visible_tools(disabled: &[String]) -> Vec<&'static ToolDef> {
+    mcp_tools()
+        .filter(|t| !tool_disabled(t.name, disabled))
+        .collect()
+}
+
+/// 准入查找（fail-closed）：不存在 / 高危 / 被禁用三种情况一律 `None`。
+pub fn find_visible_tool(name: &str, disabled: &[String]) -> Option<&'static ToolDef> {
+    find_tool(name).filter(|t| t.risk != RiskLevel::HighRisk && !tool_disabled(t.name, disabled))
 }
 
 /// OpenAI function-calling 的 `tools` 数组（Agent 用，**全量含高危**——
@@ -3474,7 +3501,7 @@ mod tests {
             );
         }
         // MCP tools/list 必须与注册表同源（不允许再养第二份白名单）
-        let list = crate::api::admin::mcp::tools_list_result();
+        let list = crate::api::admin::mcp::tools_list_result(&[]);
         let names: Vec<&str> = list["tools"]
             .as_array()
             .expect("tools/list 有 tools 数组")
@@ -3484,7 +3511,55 @@ mod tests {
         let expect: Vec<&str> = mcp_tools().map(|t| t.name).collect();
         assert_eq!(
             names, expect,
-            "MCP tools/list 与 registry::mcp_tools 不一致"
+            "MCP tools/list 与 registry::mcp_tools 不一致（disabled=[] 时）"
+        );
+    }
+
+    /// 三面（Agent/MCP/assistant）共用的禁用口径（#35 批1 后半）：列与调同时消失，
+    /// 且判定只认全等——前缀/大小写变体不得误伤邻近工具。
+    #[test]
+    fn disabled_tools_drop_from_visibility_and_admission() {
+        let victim = mcp_tools()
+            .next()
+            .expect("非高危工具面非空")
+            .name
+            .to_string();
+        let disabled = vec![victim.clone()];
+
+        assert!(tool_disabled(&victim, &disabled));
+        // 判定不放宽：改一个字符/换大小写都不算命中
+        assert!(!tool_disabled(&format!("{victim}_typo"), &disabled));
+        assert!(!tool_disabled(&victim.to_uppercase(), &disabled));
+        assert!(!tool_disabled("", &disabled));
+
+        let names: Vec<&str> = visible_tools(&disabled).iter().map(|t| t.name).collect();
+        assert!(
+            !names.iter().any(|n| *n == victim.as_str()),
+            "禁用后仍在可见集: {victim}"
+        );
+        assert_eq!(
+            visible_tools(&[]).len() - 1,
+            names.len(),
+            "禁用一条只少一条，其余工具不受影响"
+        );
+        // 列里没了 ≠ 能调：准入判定与可见集同源
+        assert!(find_visible_tool(&victim, &disabled).is_none());
+        assert!(find_visible_tool(&victim, &[]).is_some());
+
+        // 高危与禁用是两条独立门槛：高危无需禁用也不给（Agent 面另有审批矩阵）
+        let high = all_tools()
+            .iter()
+            .find(|t| t.risk == RiskLevel::HighRisk)
+            .expect("存在高危工具")
+            .name
+            .to_string();
+        assert!(
+            find_visible_tool(&high, &[]).is_none(),
+            "高危不得进管理面准入"
+        );
+        assert!(
+            visible_tools(&[]).iter().all(|t| t.name != high.as_str()),
+            "高危不得出现在可见集"
         );
     }
 

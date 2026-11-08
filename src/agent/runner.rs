@@ -99,7 +99,9 @@ pub async fn run(
         on_event(AgentEvent::Thinking { turn: turns }).await;
 
         let mut tools = tools::openai_tools();
-        // 工具开关：禁用项不下发给模型（模型看不到就不会调用）
+        // 工具开关：禁用项不下发给模型（模型看不到就不会调用）。
+        // 判定口径走 `registry::tool_disabled`——MCP 面与 assistant 面共用同一个函数，
+        // 三面不会再各自漂移（#35 批1 后半）。
         if !config.disabled_tools.is_empty() {
             tools.retain(|tool| {
                 let name = tool
@@ -107,7 +109,7 @@ pub async fn run(
                     .and_then(|f| f.get("name"))
                     .and_then(|n| n.as_str())
                     .unwrap_or("");
-                !config.disabled_tools.iter().any(|d| d == name)
+                !crate::agent::registry::tool_disabled(name, &config.disabled_tools)
             });
         }
         let (resp, _upstream, _cid) =
@@ -147,12 +149,11 @@ pub async fn run(
                 // 工具审计 target：优先取主目标参数，回退原始参数摘要
                 let target = tool_target(&call.function_name, &args);
                 // 执行侧兜底：disabled_tools 不只是从下发清单剔除——模型幻觉/
-                // 上下文残留仍可能叫出被禁工具，这里再挡一道
-                if config
-                    .disabled_tools
-                    .iter()
-                    .any(|d| d == &call.function_name)
-                {
+                // 上下文残留仍可能叫出被禁工具，这里再挡一道（判定与下发同一函数）
+                if crate::agent::registry::tool_disabled(
+                    &call.function_name,
+                    &config.disabled_tools,
+                ) {
                     let outcome = tools::ToolOutcome {
                         text: format!(
                             "工具 {} 已被管理员禁用（disabled_tools），未执行",

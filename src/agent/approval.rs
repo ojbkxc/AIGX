@@ -9,7 +9,8 @@
 //! 此前 pending/remembered 纯内存：超时后 pending 表项无人清理（泄漏），
 //! 重启后「本会话总是允许」丢失。现在落盘：
 //!
-//! - `agent_approval:{request_id}` → [`StoredApproval`]（终态留痕，7 天后清扫）
+//! - `agent_approval:{request_id}` → [`StoredApproval`]（终态留痕，7 天后由
+//!   [`sweep_terminal_approvals`] 清扫——log-retention-sweep 第六档，#35 批1 后半）
 //! - `agent_approval_remembered:{session_id}` → 免审工具名列表
 //!
 //! 重启后 pending **不复活**（oneshot sender 已死，恢复无意义）——启动清扫把
@@ -208,11 +209,137 @@ impl AgentApprovals {
 /// `config.agent.approval_timeout_secs`（见 runner::run）。
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// 终态审批留痕保留天数——模块头「终态留痕，7 天后清扫」那句的实现口径，
+/// 由 `main.rs` 的 log-retention-sweep 第六档消费（#35 批1 后半）。
+pub const TRACE_TTL_DAYS: i64 = 7;
+
+/// 清扫终态审批留痕，返回删除条数。
+///
+/// 只删满足两个条件的 `agent_approval:*`：① `status != "pending"`（approved /
+/// denied / remembered / timeout 四种终态）；② `created_at` 早于 `now - ttl_days`。
+/// 设计约束：
+/// - pending 一律不动——可能仍有人在审批卡前犹豫，超时由 runner 落 `timeout`，
+///   下一轮清扫再收；
+/// - 读不到 / 反序列化失败的键**跳过不删**：宁留一条垃圾，也不误删形状未知的数据；
+/// - 免审集合是另一个前缀（`agent_approval_remembered:`，生命周期跟会话走，由
+///   [`AgentApprovals::forget_session`] 删），`list(PENDING_PREFIX)` 不会命中它
+///   （第 14 个字符是 `_` 而非 `:`），所以本函数不碰它。
+pub fn sweep_terminal_approvals(store: &FileStore, ttl_days: i64) -> u64 {
+    let cutoff = chrono::Utc::now().timestamp() - ttl_days * 86400;
+    let keys = match store.list(PENDING_PREFIX) {
+        Ok(keys) => keys,
+        Err(e) => {
+            tracing::debug!("审批留痕清扫跳过（列键失败：{e}）");
+            return 0;
+        }
+    };
+    let mut removed = 0u64;
+    for key in keys {
+        let rec = match store.get::<StoredApproval>(&key) {
+            Ok(Some(rec)) => rec,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::debug!("审批留痕 {key} 解析失败，保留不删：{e}");
+                continue;
+            }
+        };
+        if rec.status == "pending" || rec.created_at >= cutoff {
+            continue;
+        }
+        match store.delete(&key) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::debug!("审批留痕 {key} 删除失败：{e}"),
+        }
+    }
+    if removed > 0 {
+        tracing::info!("[Retention] 清理终态审批留痕 {removed} 条（超过 {ttl_days} 天）");
+    }
+    removed
+}
+
 /// 从配置计算审批超时（0/缺失回退缺省 300s）。
 pub fn approval_timeout_from(secs: u64) -> Duration {
     if secs == 0 {
         APPROVAL_TIMEOUT
     } else {
         Duration::from_secs(secs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(request_id: &str, status: &str, age_days: i64) -> StoredApproval {
+        StoredApproval {
+            request_id: request_id.to_string(),
+            tool: "aigx_patch_channel".to_string(),
+            session_id: "s1".to_string(),
+            args_json: "{}".to_string(),
+            created_at: chrono::Utc::now().timestamp() - age_days * 86400,
+            status: status.to_string(),
+        }
+    }
+
+    /// 清扫只动「终态 ∩ 超期」那一格：pending 恒留、未超期恒留、形状不认识的不碰；
+    /// 免审集合是隔壁前缀，必须完全不受影响（#35 批1 后半）。
+    #[test]
+    fn sweep_removes_only_expired_terminal_records() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = FileStore::new(dir.path().to_path_buf());
+        store
+            .put(
+                "agent_approval:old_denied",
+                &rec("old_denied", "denied", 30),
+            )
+            .unwrap();
+        store
+            .put(
+                "agent_approval:old_pending",
+                &rec("old_pending", "pending", 30),
+            )
+            .unwrap();
+        store
+            .put(
+                "agent_approval:fresh_approved",
+                &rec("fresh_approved", "approved", 1),
+            )
+            .unwrap();
+        // 同前缀但不是 StoredApproval 形状（历史脏键/别的写入方）
+        store
+            .put("agent_approval:junk", &"not-an-approval")
+            .unwrap();
+        store
+            .put(
+                "agent_approval_remembered:s1",
+                &vec!["aigx_patch_channel".to_string()],
+            )
+            .unwrap();
+
+        assert_eq!(
+            sweep_terminal_approvals(&store, 7),
+            1,
+            "只应删掉超期终态那一条"
+        );
+        let pending: Option<StoredApproval> = store.get("agent_approval:old_pending").unwrap();
+        assert!(
+            pending.is_some(),
+            "pending 不得被清扫（可能仍有人在审批卡前）"
+        );
+        let fresh: Option<StoredApproval> = store.get("agent_approval:fresh_approved").unwrap();
+        assert!(fresh.is_some(), "未超期的终态不得被清扫");
+        let gone: Option<StoredApproval> = store.get("agent_approval:old_denied").unwrap();
+        assert!(gone.is_none(), "超期终态应已删除");
+        let junk: Option<String> = store.get("agent_approval:junk").unwrap();
+        assert!(junk.is_some(), "解析失败的键宁留不误删");
+        let remembered: Option<Vec<String>> = store.get("agent_approval_remembered:s1").unwrap();
+        assert_eq!(
+            remembered,
+            Some(vec!["aigx_patch_channel".to_string()]),
+            "免审集合前缀不应被 PENDING_PREFIX 命中"
+        );
+
+        // 幂等：第二轮没有东西可删
+        assert_eq!(sweep_terminal_approvals(&store, 7), 0, "清扫必须幂等");
     }
 }
