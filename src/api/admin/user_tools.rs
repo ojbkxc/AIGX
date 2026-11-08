@@ -144,10 +144,8 @@ fn policy_payload(policy: &UserToolPolicy) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::tools::RiskLevel;
     use crate::agent::user_tool_policy::GroupPolicy;
     use std::collections::BTreeMap;
-    use std::sync::Arc;
 
     fn store() -> UserToolPolicyStore {
         UserToolPolicyStore::in_memory(UserToolPolicy::default())
