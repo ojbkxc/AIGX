@@ -1211,16 +1211,28 @@ mod tests {
 
     #[test]
     fn validate_chat_combo_rejects_zero_with_auto_title() {
-        let mut cfg = crate::config::ChatConfig::default();
-        cfg.auto_title = true;
-        cfg.title_prompt_chars = 0;
-        assert!(validate_chat_combo(&cfg).is_err(), "危险组合必须 400");
-        // 关闭自动标题时 0 无碍；开启且有截断长度亦无碍。
-        cfg.auto_title = false;
-        assert!(validate_chat_combo(&cfg).is_ok());
-        cfg.auto_title = true;
-        cfg.title_prompt_chars = 1;
-        assert!(validate_chat_combo(&cfg).is_ok());
+        // 危险组合（开自动标题 + 截断 0）必须拒；其余组合原样放行。
+        let zero_off = crate::config::ChatConfig {
+            auto_title: false,
+            title_prompt_chars: 0,
+            ..Default::default()
+        };
+        let zero_on = crate::config::ChatConfig {
+            auto_title: true,
+            title_prompt_chars: 0,
+            ..Default::default()
+        };
+        let one_on = crate::config::ChatConfig {
+            auto_title: true,
+            title_prompt_chars: 1,
+            ..Default::default()
+        };
+        assert!(
+            validate_chat_combo(&zero_off).is_ok(),
+            "关闭自动标题时 0 无碍"
+        );
+        assert!(validate_chat_combo(&zero_on).is_err(), "危险组合必须 400");
+        assert!(validate_chat_combo(&one_on).is_ok());
     }
 
     #[tokio::test]
