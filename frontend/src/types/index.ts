@@ -4,6 +4,7 @@
  */
 
 import type { ChannelQuirks } from '../lib/channelPresets';
+import type { LimiterGroup } from './limiter';
 
 // ============================================================================
 // 核心领域类型
@@ -1293,6 +1294,12 @@ export interface AccountSessionItem {
   last_balance_error?: string | null;
   /** 账号级限制器规则（PATCH limiters 键整块替换） */
   limiters?: AccountLimiterRule[];
+  /**
+   * 限制条件组（#29，camelCase 线格式，形状见 ./limiter.ts；后端
+   * src/account_session/limiter.rs:141 LimiterGroup）。缺省/空 = 回落扁平
+   * limiters 双读；非空时条件组优先生效。
+   */
+  limiter_groups?: LimiterGroup[];
   created_at?: number;
   updated_at?: number;
 }

@@ -10,6 +10,8 @@ import { addConfigOf, cardKindOf, isCardHidden } from '../lib/addAccountConfigs'
 import { useToast } from '../components/Toast';
 import AddAccountDialog from '../components/AddAccountDialog';
 import AccountBatchDialog from '../components/AccountBatchDialog';
+import LimiterGroupEditor from '../components/LimiterGroupEditor';
+import { describeGroup, flatToGroups } from '../lib/limiterGroups';
 import ProxySelector from '../components/ProxySelector';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import TableColumnSettings from '../components/ui/TableColumnSettings';
@@ -35,6 +37,7 @@ import type {
   ChannelItem,
   ImportSourceEntry,
 } from '../types';
+import type { LimiterGroup } from '../types/limiter';
 import './AccountSessions.css';
 
 interface SessionFormState {
@@ -536,6 +539,11 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
   const limitersBaseline = useRef<string>('[]');
   const [limiterEditor, setLimiterEditor] = useState<{ index: number; draft: LimiterDraft } | null>(null);
   const [limiterError, setLimiterError] = useState('');
+  /** 条件组草稿（#29）：非空时调度优先按条件组判定，为空回落旧扁平规则 */
+  const [limiterGroupsDraft, setLimiterGroupsDraft] = useState<LimiterGroup[]>([]);
+  const limiterGroupsBaseline = useRef<string>('[]');
+  /** 条件组二级弹层：index = 编辑组下标；-1 = 新增 */
+  const [lgEditor, setLgEditor] = useState<{ index: number } | null>(null);
 
   // ── 按模型清限流（操作列重置按钮：多模型冷却时先弹菜单选模型）──
   const [clearMenuFor, setClearMenuFor] = useState<string | null>(null);
@@ -641,9 +649,14 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
     const rules = session.limiters ?? [];
     setLimiters(rules.map((rule) => ({ ...rule })));
     limitersBaseline.current = JSON.stringify(rules);
+    // 条件组草稿（#29）：同基线策略；浅拷两层避免编辑时污染原对象
+    const groups = session.limiter_groups ?? [];
+    setLimiterGroupsDraft(groups.map((g) => ({ ...g, conditions: g.conditions.map((c) => ({ ...c })) })));
+    limiterGroupsBaseline.current = JSON.stringify(groups);
     setDlgSeg('basic');
     setLimiterEditor(null);
     setLimiterError('');
+    setLgEditor(null);
     setRawHeaders('');
     setShowModal(true);
   };
@@ -653,6 +666,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
     setEditing(null);
     setSaving(false);
     setLimiterEditor(null);
+    setLgEditor(null);
   };
 
   const openBulk = (): void => {
@@ -840,9 +854,24 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
             );
           }
         }
+        // 条件组（#29）随限制器之后单独 PATCH：缺省=保持、空数组=清空回落旧规则
+        if (JSON.stringify(limiterGroupsDraft) !== limiterGroupsBaseline.current) {
+          try {
+            await api.patchAccountSession(editing.id, { limiter_groups: limiterGroupsDraft });
+            limiterGroupsBaseline.current = JSON.stringify(limiterGroupsDraft);
+          } catch (lgErr) {
+            addToast(
+              `${t('条件组保存失败')}：${lgErr instanceof Error ? lgErr.message : String(lgErr)}`,
+              'error',
+            );
+          }
+        }
         addToast(t('账号已保存'));
       } else {
         payload.api_key = form.api_key.trim();
+        // 弹窗内配置的限制规则/条件组随创建一并落库（有值才带，缺省 = 空）
+        if (limiters.length > 0) payload.limiters = limiters;
+        if (limiterGroupsDraft.length > 0) payload.limiter_groups = limiterGroupsDraft;
         await api.createAccountSession(payload);
         addToast(t('账号已创建'));
       }
@@ -2694,9 +2723,69 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
                     />
                   </>
                 )}
-                {/* ── 限制器：规则列表 + 二级弹层编辑入口 ── */}
+                {/* ── 限制器：条件组（#29 主编辑面）+ 旧版扁平规则（兼容保留） ── */}
                 {dlgSeg === 'limiter' && (
                   <div className="as-limiter-rules">
+                    <div className="as-lg-title">{t('限制条件组')}</div>
+                    {limiterGroupsDraft.length === 0 ? (
+                      <div className="as-limiter-empty">
+                        {t('余额 / 百分比 / 本地计数读数 × 且/或分支 × 模型范围，比旧规则更灵活；未添加时按下方旧规则判定。')}
+                      </div>
+                    ) : (
+                      <>
+                        {limiterGroupsDraft.map((g, i) => (
+                          <div key={i} className="as-limiter-rule">
+                            <Switch
+                              checked={g.enabled}
+                              onChange={(v) =>
+                                setLimiterGroupsDraft(limiterGroupsDraft.map((x, j) => (j === i ? { ...x, enabled: v } : x)))
+                              }
+                              ariaLabel={t('启用条件组')}
+                              title={t('启用条件组')}
+                            />
+                            <span className="as-limiter-text">{describeGroup(g)}</span>
+                            <span className="as-limiter-ops">
+                              <button
+                                type="button"
+                                className="as-act"
+                                onClick={() => setLgEditor({ index: i })}
+                                title={t('编辑')}
+                              >
+                                <Pencil size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                className="as-act as-act-danger"
+                                onClick={() => setLimiterGroupsDraft(limiterGroupsDraft.filter((_, j) => j !== i))}
+                                title={t('删除')}
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </span>
+                          </div>
+                        ))}
+                        <div className="as-lg-hint">{t('条件组已配置：调度判定以条件组为准，下方旧规则不再参与。')}</div>
+                      </>
+                    )}
+                    <div className="as-lg-actions">
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        onClick={() => setLgEditor({ index: -1 })}
+                      >
+                        <Plus size={14} /> {t('新增条件组')}
+                      </button>
+                      {limiterGroupsDraft.length === 0 && limiters.length > 0 ? (
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-sm"
+                          onClick={() => setLimiterGroupsDraft(flatToGroups(limiters))}
+                        >
+                          {t('从旧规则导入')}
+                        </button>
+                      ) : null}
+                    </div>
+                    <div className="as-lg-divider">{t('旧版限制规则（简单余额 / Token 上限）')}</div>
                     {limiters.length === 0 ? (
                       <div className="as-limiter-empty">
                         {t('暂无限流规则。命中规则时自动跳过该账号或直接停用，避免无效重试。')}
@@ -2951,6 +3040,22 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
           </div>
         </div>
       )}
+
+      {/* 条件组二级弹层（#29）：叠在账号设置弹窗之上，保存回写草稿待主保存 PATCH */}
+      {lgEditor ? (
+        <LimiterGroupEditor
+          initial={lgEditor.index >= 0 ? limiterGroupsDraft[lgEditor.index] ?? null : null}
+          onSave={(g) => {
+            setLimiterGroupsDraft((prev) =>
+              lgEditor.index >= 0
+                ? prev.map((x, i) => (i === lgEditor.index ? g : x))
+                : [...prev, g],
+            );
+            setLgEditor(null);
+          }}
+          onClose={() => setLgEditor(null)}
+        />
+      ) : null}
 
       {batchDlgOpen && picked.size > 0 && (
         <AccountBatchDialog
