@@ -19,7 +19,7 @@
 //! 运行：cargo test --locked（并入 CI `test` job）。本机禁编译（无 MSVC 链接器），
 //! 迭代走 CI：push → ci.py <sha> → 红了看 cilog.py 日志。
 
-use std::process::{Child, Command};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -169,17 +169,15 @@ async fn mock_handler(State(st): State<Arc<MockState>>, req: Request) -> Respons
 
 // ─── 网关实例（子进程）───
 
-/// 起真实 aigx 二进制（env 配置，scout 实证口径）+ 就绪轮询。
-/// Drop 时 kill 防泄漏。
-struct ServerHandle {
-    child: Child,
-    base: String,
-}
+/// RAII 守卫：Drop = kill + wait，覆盖所有提前退出路径（含 panic）。
+/// clippy::zombie_processes 要求 spawn 出的子进程在所有代码路径上收敛
+/// （wait 或 kill+wait），裸 `Child` 在 panic 路径 drop 不 wait 会成僵尸。
+struct ChildGuard(std::process::Child);
 
-impl Drop for ServerHandle {
+impl Drop for ChildGuard {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
@@ -198,7 +196,13 @@ fn server_log_tail(log_path: &std::path::Path) -> String {
         .join("\n")
 }
 
-async fn spawn_server(data_dir: &std::path::Path, log_path: &std::path::Path) -> ServerHandle {
+/// 起真实 aigx 二进制（env 配置，scout 实证口径）+ 就绪轮询。
+/// 返回 (RAII 守卫, base URL)：守卫在调用方作用域内存活，
+/// 正常结束/panic 均 kill+wait（无僵尸）。
+async fn spawn_server(
+    data_dir: &std::path::Path,
+    log_path: &std::path::Path,
+) -> (ChildGuard, String) {
     let port = free_port();
     let exe = env!("CARGO_BIN_EXE_aigx");
     let mut cmd = Command::new(exe);
@@ -219,7 +223,8 @@ async fn spawn_server(data_dir: &std::path::Path, log_path: &std::path::Path) ->
     let out = std::fs::File::create(log_path).expect("create server log");
     cmd.stdout(out.try_clone().expect("clone log"));
     cmd.stderr(out);
-    let child = cmd.spawn().expect("spawn aigx binary");
+    // spawn 后立即包裹 RAII 守卫：此后任何路径（panic/return）drop 都 kill+wait
+    let child = ChildGuard(cmd.spawn().expect("spawn aigx binary"));
     let base = format!("http://127.0.0.1:{port}");
 
     let client = client();
@@ -237,7 +242,7 @@ async fn spawn_server(data_dir: &std::path::Path, log_path: &std::path::Path) ->
             .await
             .is_ok()
         {
-            return ServerHandle { child, base };
+            return (child, base);
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -644,13 +649,12 @@ async fn disconnect_499_billing_dual_surface() {
             .expect("mock serve");
     });
 
-    // 2) 网关实例（临时 data dir + 独立端口）
+    // 2) 网关实例（临时 data dir + 独立端口；RAII 守卫持有子进程）
     let tmp = tempfile::tempdir().expect("tempdir");
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("create data dir");
     let log_path = tmp.path().join("server.log");
-    let server = spawn_server(&data_dir, &log_path).await;
-    let base = server.base.clone();
+    let (child, base) = spawn_server(&data_dir, &log_path).await;
     let port = port_of(&base);
     let mock_base = format!("http://127.0.0.1:{mock_port}");
 
@@ -776,4 +780,7 @@ async fn disconnect_499_billing_dual_surface() {
 
     let _ = mock_task.await;
     println!("499 回归双表面全绿：hits={hits} q_end={q_end}");
+
+    // 正常收尾：显式 drop 守卫（kill+wait）；panic 路径由 Drop 兜底
+    drop(child);
 }
