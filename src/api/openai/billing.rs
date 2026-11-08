@@ -1138,6 +1138,36 @@ impl Drop for ResponsesStreamGuard {
 /// prompt 用预留时的同一估算器重算、completion 未知记 0（预留差额由
 /// settle_quota 自动解冻）。**不记渠道失败/冷却**——499 是客户端行为，
 /// 归因到渠道会误伤健康度。
+/// #47：499 日志写入的可测核心（单测覆盖；估算结算仍由 write_499 走
+/// settle_usage，行为级验证归 E1/E2）。
+pub(crate) fn write_attempt_499_log(
+    log_store: &crate::log::LogStore,
+    key_id: &str,
+    channel_id: &str,
+    channel_name: Option<String>,
+    model: &str,
+    estimated_prompt: u64,
+    cost: i64,
+    ip: Option<String>,
+    request_id: &str,
+) {
+    let mut log = crate::log::RequestLog::new();
+    log.user_id = None;
+    log.key_id = Some(key_id.to_string());
+    log.channel_id = Some(channel_id.to_string());
+    log.channel_name = channel_name;
+    log.model = model.to_string();
+    log.input_tokens = estimated_prompt;
+    log.output_tokens = 0;
+    log.cost = cost;
+    log.latency_ms = 0;
+    log.status_code = 499;
+    log.error_msg = Some("client closed before first event".to_string());
+    log.ip = ip;
+    log.request_id = Some(request_id.to_string());
+    log_store.record_request(log);
+}
+
 pub(crate) struct AttemptStartGuard {
     pub state: AppState,
     pub api_key: crate::api::auth::ApiKey,
@@ -1181,31 +1211,19 @@ impl AttemptStartGuard {
             0,
             None,
         );
-        let mut log = crate::log::RequestLog::new();
-        log.user_id = self.user_id.clone();
-        log.key_id = Some(self.api_key.id.clone());
-        log.channel_id = Some(self.channel_id.clone());
-        log.channel_name = self
-            .state
-            .channel_store
-            .get(&self.channel_id)
-            .map(|c| c.name.clone());
-        log.model = self.model.clone();
-        log.input_tokens = estimated_prompt;
-        log.output_tokens = 0;
-        log.cost = cost;
-        log.latency_ms = 0;
-        log.status_code = 499;
-        log.error_msg = Some("client closed before first event".to_string());
-        log.ip = self.ip.clone();
-        log.request_id = Some(self.request_id.clone());
-        self.state.log_store.record_request(log);
-        tracing::warn!(
-            "[499] client closed before first event: channel={}/model={} est_prompt={} cost={}",
-            self.channel_id,
-            self.model,
+        write_attempt_499_log(
+            &self.state.log_store,
+            &self.api_key.id,
+            &self.channel_id,
+            self.state
+                .channel_store
+                .get(&self.channel_id)
+                .map(|c| c.name.clone()),
+            &self.model,
             estimated_prompt,
-            cost
+            cost,
+            self.ip.clone(),
+            &self.request_id,
         );
     }
 }
@@ -1323,5 +1341,42 @@ mod price_snapshot_tests {
         };
         // count 型：base = input_price = 0.04 → (0.04 + 0.999999) as i64 = 1
         assert_eq!(compute_cost_from_snapshot_pure(&snap, 999, 0, 999), 1);
+    }
+    /// #47 单测盲区补齐（lead 复核）：499 日志写入的字段断言——
+    /// Drop→write_499 的日志级行为由此钉住；估算结算走 E1/E2 行为级验证。
+    #[test]
+    fn attempt_499_log_fields() {
+        let dir = std::env::temp_dir().join(format!("aigx-499-log-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let log_store = crate::log::LogStore::new(std::sync::Arc::new(
+            crate::storage::FileStore::new(dir.clone()),
+        ));
+        write_attempt_499_log(
+            &log_store,
+            "key-1",
+            "ch-9",
+            Some("测试渠道".to_string()),
+            "gpt-test",
+            321,
+            45,
+            Some("9.9.9.9".to_string()),
+            "req-499",
+        );
+        let logs = log_store.requests.list_all();
+        let hit = logs
+            .iter()
+            .find(|l| l.request_id.as_deref() == Some("req-499"))
+            .expect("499 日志应存在");
+        assert_eq!(hit.status_code, 499);
+        assert_eq!(hit.input_tokens, 321);
+        assert_eq!(hit.output_tokens, 0);
+        assert_eq!(hit.cost, 45);
+        assert_eq!(
+            hit.error_msg.as_deref(),
+            Some("client closed before first event")
+        );
+        assert_eq!(hit.ip.as_deref(), Some("9.9.9.9"));
+        assert_eq!(hit.channel_id.as_deref(), Some("ch-9"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
