@@ -2,7 +2,7 @@ import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Monitor, Sun, Moon,
-  SlidersHorizontal, Sparkles, Network, Route as RouteIcon, RotateCcw,
+  SlidersHorizontal, Sparkles, Network, RotateCcw,
   Timer, Gauge, CreditCard, Database, Bell, ShieldCheck, Download, User,
 } from 'lucide-react';
 import { api } from '../api';
@@ -31,7 +31,6 @@ import StreamCompatPanel from '../components/StreamCompatPanel';
 import QueuePanel from '../components/QueuePanel';
 import AutoContinuePanel from '../components/AutoContinuePanel';
 import ModelMetadataPanel from '../components/ModelMetadataPanel';
-import RoutingPanel from '../components/RoutingPanel';
 import DataManagement from '../components/DataManagement';
 import './Settings.css';
 
@@ -86,14 +85,16 @@ interface DataResponse<T> {
 
 /**
  * 设置分区：对齐 Agent2API settings-page 的 CATEGORIES（general / assistant /
- * gateway / routing / retry / timeout / security / data …），把原先埋在
+ * gateway / retry / timeout / security / data …），把原先埋在
  * 「运维 → 子标签」和「站点 → API 配置」里的超时、重试拆成独立分类。
+ *
+ * 「路由」已升级为独立页 `/routing`（#40 分层档案 + 预演 + 回放 + 粘滞需要
+ * 同屏上下文），不再作为此处的分类 —— 上游也是独立的路由域。
  */
 type SettingsTab =
   | 'general'
   | 'assistant'
   | 'gateway'
-  | 'routing'
   | 'retry'
   | 'timeout'
   | 'perf'
@@ -178,7 +179,6 @@ const SETTINGS_CATEGORIES: Array<{ key: SettingsTab; label: string; icon: typeof
   { key: 'general', label: '通用', icon: SlidersHorizontal },
   { key: 'assistant', label: 'AI 助手', icon: Sparkles },
   { key: 'gateway', label: '网关', icon: Network },
-  { key: 'routing', label: '路由', icon: RouteIcon },
   { key: 'retry', label: '重试', icon: RotateCcw },
   { key: 'timeout', label: '超时', icon: Timer },
   { key: 'perf', label: '限流与缓存', icon: Gauge },
@@ -1059,7 +1059,6 @@ export default function Settings() {
         </>
       )}
 
-      {activeTab === 'routing' && <RoutingPanel />}
 
       {activeTab === 'assistant' && <AgentSettingsPanel />}
 

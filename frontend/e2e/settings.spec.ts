@@ -19,7 +19,8 @@ test.describe('系统设置分类', () => {
 
   test('左栏渲染全部分类，默认落在通用', async ({ page, pageErrors }) => {
     await expect(nav(page)).toBeVisible();
-    for (const label of ['通用', 'AI 助手', '网关', '路由', '重试', '超时', '计费', '数据', '通知', '安全', '更新', '账户']) {
+    // 「路由」已独立成页 /routing（#40 分层档案 + 预演 + 回放 + 粘滞），不再在此列
+    for (const label of ['通用', 'AI 助手', '网关', '重试', '超时', '计费', '数据', '通知', '安全', '更新', '账户']) {
       await expect(nav(page).locator('.settings-nav-item', { hasText: label })).toHaveCount(1);
     }
     // 默认分类高亮，右栏是通用（使用限额 + 主题）
