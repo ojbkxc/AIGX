@@ -100,12 +100,15 @@ pub(crate) async fn handle_responses(
 
     // B06：获取候选渠道列表（priority/weight 排序），失败时逐个 failover。
     // 阶段2：带亲和性选取——粘性窗口内命中渠道置顶
-    let candidates = resolve_bridges_with_affinity(
+    // #40 §1：请求体 → 能力需求（tools / images / video）在选路前推出；
+    // Responses 形态的消息在 `input` 里（推导层两个列表都扫）
+    let candidates = resolve_bridges_with_affinity_needs(
         &state,
         &model,
         session_id.as_deref(),
         api_key.provider_filter().as_deref(),
         None,
+        from_chat_body(&body),
     );
     if candidates.is_empty() {
         return openai_error_response(

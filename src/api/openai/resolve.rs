@@ -7,6 +7,8 @@ use super::*;
 use crate::api::common::extract_api_key_bearer_first as extract_api_key;
 use crate::api::common::extract_client_ip;
 use crate::bridge::Bridge;
+use crate::channel::routing_policy::RequestNeeds;
+use crate::model::capability::CapabilityMask;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -168,6 +170,10 @@ pub(crate) fn verify_api_key_listing(
 /// resolve 层的过滤原因与策略快照随选路填充进捕获结构，随请求日志落库。
 /// 性能约束：开关关闭传 None，**零增量**；开启时每过滤一个渠道仅一次
 /// channel_id 克隆（原因用常量码，无逐候选 String 格式化），规模 O(渠道数)。
+///
+/// #40 §1：本函数 = [`resolve_bridges_with_affinity_needs`] 传
+/// `RequestNeeds::default()`（无需求 = 不做能力过滤，与历史逐字节等价）。
+/// 能从请求体推出能力需求的调用方用 `_needs` 版本（chat 侧见 #47 收口）。
 pub(crate) fn resolve_bridges_with_affinity(
     state: &AppState,
     model: &str,
@@ -175,7 +181,33 @@ pub(crate) fn resolve_bridges_with_affinity(
     allowed_providers: Option<&[String]>,
     capture: Option<&mut RouteCapture>,
 ) -> Vec<BridgeCandidate> {
-    let mut result = resolve_bridges(state, model, allowed_providers, capture);
+    resolve_bridges_with_affinity_needs(
+        state,
+        model,
+        session_id,
+        allowed_providers,
+        capture,
+        RequestNeeds::default(),
+    )
+}
+
+/// [`resolve_bridges_with_affinity`] 的带能力需求版本（#40 §1 的**会话端点接缝**）。
+///
+/// 与默认版本的差别只有一处：`needs` 非空时按能力位过滤候选（语义见
+/// [`resolve_bridges_needs`]）；亲和置顶逻辑逐字节相同（过滤发生在候选构造
+/// 阶段，置顶只在过滤后的候选池里找，命中不了就自然不做置顶）。
+///
+/// 会话型端点（chat / anthropic / responses）应在调 `resolve_bridges` **之前**
+/// 从请求体推出需求（`api::openai::needs::from_chat_body`）传进来。
+pub(crate) fn resolve_bridges_with_affinity_needs(
+    state: &AppState,
+    model: &str,
+    session_id: Option<&str>,
+    allowed_providers: Option<&[String]>,
+    capture: Option<&mut RouteCapture>,
+    needs: RequestNeeds,
+) -> Vec<BridgeCandidate> {
+    let mut result = resolve_bridges_needs(state, model, allowed_providers, capture, needs);
     let policy = state.routing_policy.snapshot();
     if let Some(sid) = session_id {
         if policy.sticky.sticky_enabled() {
@@ -198,11 +230,46 @@ pub(crate) fn resolve_bridges_with_affinity(
     result
 }
 /// 无亲和性版本（既有端点沿用：embeddings/images/audio 等无会话语义的请求）。
+///
+/// #40 §1：本函数 = [`resolve_bridges_needs`] 传
+/// `RequestNeeds::default()`（无需求 = 不做能力过滤，与历史逐字节等价）。
 pub(crate) fn resolve_bridges(
     state: &AppState,
     model: &str,
     allowed_providers: Option<&[String]>,
+    capture: Option<&mut RouteCapture>,
+) -> Vec<BridgeCandidate> {
+    resolve_bridges_needs(
+        state,
+        model,
+        allowed_providers,
+        capture,
+        RequestNeeds::default(),
+    )
+}
+
+/// 带能力需求的候选构造（#40 §1 数据面接线）。
+///
+/// `needs` 由调用方从请求体推出（唯一推导层 `api::openai::needs`），本函数
+/// 只把它走**唯一映射链**换成能力位——
+/// `RequestNeeds::required_tags()` → `CapabilityMask::from_tags` ——
+/// 绝不在这里再写一遍「这个需求叫什么标签」。
+///
+/// 两级接线（`needs` 为空时两级都短路，零额外开销/零行为变化）：
+/// - **渠道级粗筛**：`AccountSessionStore::channel_may_serve`（账号目录能力位
+///   的并集）在候选构造阶段裁渠道 —— 粗筛必须在 `select_for_model_by_strategy`
+///   的分组之前，否则被裁的渠道还会参与加权随机/轮询游标；
+/// - **账号级精筛**：`AccountBridge::with_capabilities`（此刻上游真名已定，
+///   按该账号目录里这个模型的能力位精确判定）。
+///
+/// 两者都是**有证据才裁**：目录无标签 / 模型名未收录 / 非账号型渠道一律放行
+/// （#40-B 降级口径「宁放勿误伤」）。
+pub(crate) fn resolve_bridges_needs(
+    state: &AppState,
+    model: &str,
+    allowed_providers: Option<&[String]>,
     mut capture: Option<&mut RouteCapture>,
+    needs: RequestNeeds,
 ) -> Vec<BridgeCandidate> {
     let mut result: Vec<BridgeCandidate> = Vec::new();
 
@@ -225,11 +292,27 @@ pub(crate) fn resolve_bridges(
             sticky_enabled: policy.sticky.sticky_enabled(),
         });
     }
-    let candidates = state.channel_store.select_for_model_by_strategy(
-        model,
-        profile.strategy,
-        &state.pricing_store,
-    );
+    // #40 §1：本次请求的能力需求 → 能力位掩码。走**唯一映射链**
+    // （`required_tags` → `CapabilityMask::from_tags`），本函数不认识标签名；
+    // `EMPTY` = 无需求 = 两级过滤全短路（零额外开销、与历史逐字节等价）。
+    let needs_mask = CapabilityMask::from_tags(needs.required_tags());
+    let candidates = {
+        // 渠道级粗筛：`channel_may_serve` 只读两把锁 + 掩码比较，无分配。
+        let capability_gate = |ch: &crate::channel::Channel| {
+            state.account_sessions.channel_may_serve(&ch.id, needs_mask)
+        };
+        let coarse: Option<crate::channel::ChannelGate<'_>> = if needs_mask.is_empty() {
+            None
+        } else {
+            Some(&capability_gate)
+        };
+        state.channel_store.select_for_model_by_strategy_filtered(
+            model,
+            profile.strategy,
+            &state.pricing_store,
+            coarse,
+        )
+    };
     let plan = crate::channel::routing_policy::plan_route(&policy, &profile, &candidates);
     // #40 §2 账号级规则（参与名单 / 排序规则）：档案里真配了内容才构造
     // （默认关 = 零额外分配；空 Vec 的 clone 不分配）。同一次请求的所有
@@ -318,6 +401,8 @@ pub(crate) fn resolve_bridges(
             crate::channel::ChannelType::Account => {
                 // 账号型渠道：凭证不进 Channel，bridge 在调用时按账号池选号
                 // Phase1-B：route_replay 开启时共享逐账号跳过明细缓冲
+                // #40 §1 账号级精筛：把本次请求的能力位注入选号层（EMPTY =
+                // 不接，行为与改造前逐字节一致）
                 let account_capture = capture.as_ref().map(|c| c.account_buf.clone());
                 let bridge: Arc<dyn crate::bridge::Bridge> = Arc::new(
                     crate::bridge::account::AccountBridge::new(
@@ -328,7 +413,8 @@ pub(crate) fn resolve_bridges(
                     .with_plugin_disabled(state.provider_gates.clone())
                     .with_allowed_providers(allowed_providers.map(<[String]>::to_vec))
                     .with_account_capture(account_capture)
-                    .with_account_rules(account_scope.clone(), account_sort_rules.clone()),
+                    .with_account_rules(account_scope.clone(), account_sort_rules.clone())
+                    .with_capabilities(needs_mask),
                 );
                 result.push((bridge, Some(ch.id.clone()), Some(ch.clone())));
             }

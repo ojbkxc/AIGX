@@ -18,6 +18,8 @@ mod embeddings;
 mod images;
 mod messages;
 mod models;
+// #40 §1：请求体 → 能力需求的推导层（唯一标签映射链见该模块头注释）
+mod needs;
 mod rerank;
 // 私有：跨模块用 RouteCapture 的调用方（api::anthropic）走下面 `pub use resolve::*`
 // 的再导出，不用 `resolve::` 模块路径 —— 那要求 mod 至少 pub(crate)。
@@ -41,6 +43,8 @@ pub use images::*;
 pub use messages::*;
 #[allow(unused_imports)]
 pub use models::*;
+#[allow(unused_imports)]
+pub use needs::*;
 #[allow(unused_imports)]
 pub use rerank::*;
 #[allow(unused_imports)]
