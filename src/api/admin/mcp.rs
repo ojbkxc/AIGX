@@ -6,7 +6,8 @@
 //!
 //! ## 协议子集（零依赖手写，不引 rmcp）
 //! - `initialize`：握手 → protocolVersion + serverInfo + tools 能力声明
-//! - `tools/list`：返回 19 个白名单工具（name/中文 description/inputSchema）
+//! - `tools/list`：返回全部非高危工具（与 `registry::mcp_tools` 同源，条数随注册表
+//!   变化，所以这里不写死数字；name/中文 description/inputSchema）
 //! - `tools/call`：白名单校验后执行工具，结果 JSON 序列化为 text content
 //!
 //! ## fail-closed

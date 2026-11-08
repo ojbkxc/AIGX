@@ -11,8 +11,14 @@
 //! - [`all_tools`] 全量；[`mcp_tools`] 只出非高危（MCP 面约定）；
 //! - 防漂移测试（本文件 `tests`）：域覆盖 / MCP 非高危子集 / spec 合法性。
 //!
-//! 新增工具只改本文件一条声明；新增管理域必须给某个工具 `covers` 命中或进
-//! 测试豁免表，否则 `openapi_domains_have_tool_coverage` 会红。
+//! 新增工具只改本文件一条声明。管理面路由的覆盖对账由本文件 `tests` 的台账闸门
+//! 负责，唯一数据源是**真实路由表**（`main.rs` + `agent/api.rs` 里注册的
+//! `.route(…)`，口径与 CI 的 `tools/extract_routes.py` 对齐）：每条真实路由必须
+//! 落在「工具 `covers` ∪ `EXEMPT_PREFIXES` ∪ `KNOWN_GAPS`」三处之一，都不落则
+//! `every_real_route_is_registered` 会红；路径有写方法却只被 ReadOnly 工具 owns 的，
+//! 由 `write_side_pending_matches_reality` 单独盯（`WRITE_SIDE_PENDING`）。
+//! ——不再靠手写域清单（旧 `REQUIRED_DOMAINS` / `openapi_domains_have_tool_coverage`
+//! 的病灶见 tests 开头：清单与路由表脱钩后，绿灯只代表清单没人改）。
 //!
 //! ## v2（#34）：`user_exec` 双执行体
 //!
@@ -338,6 +344,34 @@ pub async fn exec_user_tool(
     user_exec(state, headers, args).await
 }
 
+// ── #35 批1 执行体辅助 ─────────────────────────────────────────────
+
+/// 把「挂起人工审批数」注入只读视图：优先落进 `data` 段，没有 `data` 对象
+/// 才落顶层（`/api/assistant/tools` 这类自带结构的视图保持原形状）。
+fn with_pending_approvals(mut v: Value, pending: usize) -> Value {
+    let obj = if v.get("data").and_then(Value::as_object).is_some() {
+        v.get_mut("data").and_then(Value::as_object_mut)
+    } else {
+        v.as_object_mut()
+    };
+    if let Some(obj) = obj {
+        obj.insert("pendingApprovals".to_string(), json!(pending));
+    }
+    v
+}
+
+/// `GET /api/scheduled-tasks` 的执行体（[`admin::scheduled_tasks::list_handler`]）返回
+/// `Result<Response, ...>`（已 `into_response`，进不了 [`out`] 的 `HandlerResult`）。
+/// 这里按其**同款口径**（`verify_admin` + `scheduled_tasks::list`）组一份 JSON 信封，
+/// 语义与路由一致——不是绕开鉴权，是绕开 `Response` 装箱。
+async fn scheduled_tasks_status(state: &AppState, headers: &HeaderMap) -> HandlerResult {
+    crate::api::admin::common::verify_admin(state, headers).await?;
+    Ok(Json(json!({
+        "success": true,
+        "data": crate::scheduled_tasks::list(state).await,
+    })))
+}
+
 fn build_tools() -> Vec<ToolDef> {
     use RiskLevel::{HighRisk, LowRisk, ReadOnly};
     vec![
@@ -417,18 +451,6 @@ fn build_tools() -> Vec<ToolDef> {
                     >("aigx_list_users", a)?;
                     out(admin::handle_list_users(State(s.clone()), h.clone(), Query(q)).await)
                 })
-            },
-        ),
-        td(
-            "aigx_list_keys",
-            "列出 API 密钥",
-            "只读：列出 API 密钥（脱敏）",
-            ReadOnly,
-            "",
-            &["/api/keys"],
-            no_args,
-            |s, h, _a| {
-                Box::pin(async move { out(admin::handle_list_keys(State(s.clone()), h.clone()).await) })
             },
         ),
         td(
@@ -718,11 +740,12 @@ fn build_tools() -> Vec<ToolDef> {
         ),
         td(
             "aigx_key_add",
-            "新增 API 密钥",
-            "写操作（可回滚）：新增 API 密钥",
+            "新增访问令牌",
+            "写操作（可回滚）：新增 API 访问令牌（POST /api/tokens；#35 批1 收敛：原指向无路由的 \
+             legacy /api/keys，现与 `aigx_list_tokens` 同数据源 api_key_store）",
             LowRisk,
             "name",
-            &["/api/keys"],
+            &["/api/tokens"],
             || {
                 json!({
                     "type": "object",
@@ -737,7 +760,7 @@ fn build_tools() -> Vec<ToolDef> {
             |s, h, a| {
                 Box::pin(async move {
                     let body: admin::tokens::KeyRequest = parse_tool_args("aigx_key_add", a)?;
-                    out(admin::handle_add_key(State(s.clone()), h.clone(), Json(body)).await)
+                    out(admin::handle_add_token(State(s.clone()), h.clone(), Json(body)).await)
                 })
             },
         ),
@@ -906,22 +929,22 @@ fn build_tools() -> Vec<ToolDef> {
         ),
         td(
             "aigx_key_delete",
-            "删除 API 密钥",
-            "高危写：删除 API 密钥（不可逆，需审批）",
+            "删除访问令牌",
+            "高危写：删除 API 访问令牌（DELETE /api/tokens/{id}；不可逆，需审批。#35 批1 收敛：原指向无路由的 legacy /api/keys/{id}）",
             HighRisk,
             "key_id",
-            &["/api/keys/{id}"],
+            &["/api/tokens/{id}"],
             || {
                 json!({
                     "type": "object",
-                    "properties": { "key_id": { "type": "string", "description": "密钥 ID" } },
+                    "properties": { "key_id": { "type": "string", "description": "令牌 ID" } },
                     "required": ["key_id"]
                 })
             },
             |s, h, a| {
                 Box::pin(async move {
                     let id = require_arg(a, "key_id")?;
-                    out(admin::handle_delete_key(State(s.clone()), h.clone(), Path(id)).await)
+                    out(admin::handle_delete_token(State(s.clone()), h.clone(), Path(id)).await)
                 })
             },
         ),
@@ -1966,6 +1989,717 @@ fn build_tools() -> Vec<ToolDef> {
                 })
             },
         ),
+        // ══ #35 批1：只读观测补齐（按域聚合，一条工具 owns 多条同域路由）══
+        //
+        // 本段全部是「既有管理面 GET handler 直调」：不新增路由、不改 handler、
+        // 不引入写侧。写侧（POST/PUT/DELETE）按批 2 的高危审批基线逐条论证。
+        // 分派口径：`view`/`key` 走 enum 白名单（防模型瞎传），未知值直接 -32602。
+        td(
+            "aigx_dashboard_stats",
+            "运维大盘视图",
+            "只读：运维大盘视图（view 选 realtime/channelHealth/consumptionTrend/modelDistribution/cacheSavings/userRanking/schedulerStatus/cacheTrend24h；days 或 start/end 决定窗口）",
+            ReadOnly,
+            "view",
+            &[
+                "/api/dashboard/realtime",
+                "/api/dashboard/channel_health",
+                "/api/dashboard/consumption_trend",
+                "/api/dashboard/model_distribution",
+                "/api/dashboard/cache_savings",
+                "/api/dashboard/user_ranking",
+                "/api/dashboard/scheduler_status",
+                "/api/dashboard/report/cache_trend_24h",
+            ],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "view": { "type": "string", "enum": ["realtime","channelHealth","consumptionTrend","modelDistribution","cacheSavings","userRanking","schedulerStatus","cacheTrend24h"], "description": "视图种类" },
+                        "days": { "type": "integer", "minimum": 1, "maximum": 365, "description": "时间范围（天），默认 30；仅趋势/分布/健康/排行视图消费" },
+                        "start": { "type": "string", "description": "起始日 YYYY-MM-DD（给了就覆盖 days）" },
+                        "end": { "type": "string", "description": "结束日 YYYY-MM-DD" }
+                    },
+                    "required": ["view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let view = require_arg(a, "view")?;
+                    let q: admin::dashboard::DashboardQuery =
+                        parse_tool_args("aigx_dashboard_stats", a)?;
+                    out(match view.as_str() {
+                        "realtime" => admin::handle_realtime(State(s.clone()), h.clone()).await,
+                        "channelHealth" => admin::handle_channel_health(State(s.clone()), h.clone(), Query(q)).await,
+                        "consumptionTrend" => admin::handle_consumption_trend(State(s.clone()), h.clone(), Query(q)).await,
+                        "modelDistribution" => admin::handle_model_distribution(State(s.clone()), h.clone(), Query(q)).await,
+                        "cacheSavings" => admin::handle_cache_savings(State(s.clone()), h.clone(), Query(q)).await,
+                        "userRanking" => admin::handle_user_ranking(State(s.clone()), h.clone(), Query(q)).await,
+                        "schedulerStatus" => admin::handle_scheduler_status(State(s.clone()), h.clone()).await,
+                        "cacheTrend24h" => admin::handle_report_cache_trend_24h(State(s.clone()), h.clone()).await,
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_system_health",
+            "系统资源与健康",
+            "只读：系统资源快照与健康检查（view 选 system=CPU/内存/负载进程、app=精简健康态、probe=healthz 存活探针）",
+            ReadOnly,
+            "view",
+            &[
+                "/api/monitor/system",
+                "/api/monitor/health",
+                "/api/monitor/healthz",
+            ],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "view": { "type": "string", "enum": ["system", "app", "probe"], "description": "视图种类" }
+                    },
+                    "required": ["view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let view = require_arg(a, "view")?;
+                    out(match view.as_str() {
+                        "system" => admin::handle_monitor_system(State(s.clone()), h.clone()).await,
+                        "app" => admin::handle_health(State(s.clone()), h.clone()).await,
+                        "probe" => admin::handle_healthz(State(s.clone()), h.clone()).await,
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_security_watch",
+            "安全事件观测",
+            "只读：安全汇总与安全事件流（view 选 summary/events；events 可按 type/range 过滤并分页）",
+            ReadOnly,
+            "view",
+            &["/api/monitor/security", "/api/monitor/security/events"],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "view": { "type": "string", "enum": ["summary", "events"], "description": "视图种类" },
+                        "type": { "type": "string", "description": "事件类型过滤（仅 events）" },
+                        "range": { "type": "string", "description": "时间范围（仅 events，如 today/7d）" },
+                        "page": { "type": "integer", "minimum": 1 },
+                        "page_size": { "type": "integer", "minimum": 1 }
+                    },
+                    "required": ["view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let view = require_arg(a, "view")?;
+                    let q: admin::security::SecurityEventsQuery =
+                        parse_tool_args("aigx_security_watch", a)?;
+                    out(match view.as_str() {
+                        "summary" => admin::handle_security_summary(State(s.clone()), h.clone()).await,
+                        "events" => admin::handle_security_events(State(s.clone()), h.clone(), Query(q)).await,
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_log_watch",
+            "运行日志与审计",
+            "只读：运行日志/在途请求/审计日志/清理预演（view 选 runtime/inflight/audits/clearPreview；runtime 用 since_id 增量拉，audits 分页，clearPreview 只统计不落刀）",
+            ReadOnly,
+            "view",
+            &[
+                "/api/logs/runtime",
+                "/api/logs/inflight",
+                "/api/logs/audits",
+                "/api/logs/requests/clear-preview",
+            ],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "view": { "type": "string", "enum": ["runtime", "inflight", "audits", "clearPreview"], "description": "视图种类" },
+                        "since_id": { "type": "integer", "minimum": 0, "description": "运行日志未读水位（只回 id 大于此值的行）" },
+                        "page": { "type": "integer", "minimum": 1, "description": "审计日志页码" },
+                        "size": { "type": "integer", "minimum": 1, "description": "审计日志每页条数" },
+                        "days": { "type": "integer", "minimum": 0, "description": "clearPreview 只统计最近 N 天（0/缺省=全部）" }
+                    },
+                    "required": ["view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let view = require_arg(a, "view")?;
+                    out(match view.as_str() {
+                        "runtime" => {
+                            let q: admin::logs::RuntimeLogsQuery =
+                                parse_tool_args("aigx_log_watch", a)?;
+                            admin::handle_get_runtime_logs(State(s.clone()), h.clone(), Query(q)).await
+                        }
+                        "inflight" => admin::handle_list_inflight(State(s.clone()), h.clone()).await,
+                        "audits" => {
+                            let q: admin::logs::AuditLogQuery =
+                                parse_tool_args("aigx_log_watch", a)?;
+                            admin::handle_list_audit_logs(State(s.clone()), h.clone(), Query(q)).await
+                        }
+                        "clearPreview" => {
+                            let q: admin::logs::ClearPreviewQuery =
+                                parse_tool_args("aigx_log_watch", a)?;
+                            admin::handle_clear_preview(State(s.clone()), h.clone(), Query(q)).await
+                        }
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_alert_console",
+            "告警台",
+            "只读：当前活跃告警与历史告警（view 选 active/history；history 可 limit 限条数，上限 500）",
+            ReadOnly,
+            "view",
+            &["/api/alerts/active", "/api/alerts/history"],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "view": { "type": "string", "enum": ["active", "history"], "description": "视图种类" },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "history 返回条数，默认 100" }
+                    },
+                    "required": ["view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let view = require_arg(a, "view")?;
+                    let q: admin::legacy::AlertHistoryQuery =
+                        parse_tool_args("aigx_alert_console", a)?;
+                    out(match view.as_str() {
+                        "active" => admin::handle_alerts_active(State(s.clone()), h.clone()).await,
+                        "history" => admin::handle_alerts_history(State(s.clone()), h.clone(), Query(q)).await,
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_plugin_status",
+            "插件/内置供应商目录状态",
+            "只读：插件清单与在途/更新状态（view 选 list/progress/updates/release；内置 provider 目录随版本发布，progress/updates/release 为空态说明）",
+            ReadOnly,
+            "view",
+            &[
+                "/api/plugins",
+                "/api/plugins/progress",
+                "/api/plugins/update",
+                "/api/plugins/release",
+            ],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "view": { "type": "string", "enum": ["list", "progress", "updates", "release"], "description": "视图种类" }
+                    },
+                    "required": ["view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let view = require_arg(a, "view")?;
+                    out(match view.as_str() {
+                        "list" => admin::plugins::handle_list_plugins(State(s.clone()), h.clone()).await,
+                        "progress" => {
+                            admin::plugins::handle_get_plugin_progress(State(s.clone()), h.clone()).await
+                        }
+                        "updates" => {
+                            admin::plugins::handle_check_plugin_updates(State(s.clone()), h.clone()).await
+                        }
+                        "release" => {
+                            admin::plugins::handle_refresh_plugin_release(State(s.clone()), h.clone()).await
+                        }
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_usage_analytics",
+            "用量分析",
+            "只读：用量汇总/趋势/按模型分布（view 选 summary/trend/models；summary 可带 user/channel/model 等过滤参数）",
+            ReadOnly,
+            "view",
+            &["/api/usage/summary", "/api/usage/trend", "/api/usage/models"],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "view": { "type": "string", "enum": ["summary", "trend", "models"], "description": "视图种类" },
+                        "user": { "type": "string", "description": "按用户过滤（仅 summary）" },
+                        "channel": { "type": "string", "description": "按渠道过滤（仅 summary）" },
+                        "model": { "type": "string", "description": "按模型过滤（仅 summary）" }
+                    },
+                    "required": ["view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let view = require_arg(a, "view")?;
+                    out(match view.as_str() {
+                        "summary" => {
+                            let q = crate::api::admin::mcp::args_to_string_map(a);
+                            admin::handle_usage_summary(State(s.clone()), h.clone(), Query(q)).await
+                        }
+                        "trend" => admin::handle_usage_trend(State(s.clone()), h.clone()).await,
+                        "models" => admin::handle_usage_models(State(s.clone()), h.clone()).await,
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_network_status",
+            "网络层状态",
+            "只读：网络层（CF 账号池）状态与账号明细（view 选 status/accounts；含池规模/健康统计/活跃数，仅管理员）",
+            ReadOnly,
+            "view",
+            &["/api/network/status", "/api/network/accounts"],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "view": { "type": "string", "enum": ["status", "accounts"], "description": "视图种类" }
+                    },
+                    "required": ["view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let view = require_arg(a, "view")?;
+                    out(match view.as_str() {
+                        "status" => admin::health_check(State(s.clone()), h.clone()).await,
+                        "accounts" => admin::list_network_accounts(State(s.clone()), h.clone()).await,
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_routing_watch",
+            "路由决策观测",
+            "只读：粘性映射/排队快照/单请求路由回放（view 选 sticky/queue/replay；replay 需 request_id，`route_replay` 开关关闭的历史请求回放字段为缺省）",
+            ReadOnly,
+            "view",
+            &[
+                "/api/routing/sticky",
+                "/api/routing/queue",
+                "/api/routing/replay/{request_id}",
+            ],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "view": { "type": "string", "enum": ["sticky", "queue", "replay"], "description": "视图种类" },
+                        "request_id": { "type": "string", "description": "回放目标请求 ID（view=replay 必填）" }
+                    },
+                    "required": ["view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let view = require_arg(a, "view")?;
+                    out(match view.as_str() {
+                        "sticky" | "queue" => {
+                            let q = crate::api::admin::mcp::args_to_string_map(a);
+                            if view == "sticky" {
+                                admin::handle_get_route_sticky(State(s.clone()), h.clone(), Query(q)).await
+                            } else {
+                                admin::handle_routing_queue(State(s.clone()), h.clone(), Query(q)).await
+                            }
+                        }
+                        "replay" => {
+                            let id = require_arg(a, "request_id")?;
+                            admin::logs::handle_get_route_replay(State(s.clone()), h.clone(), Path(id)).await
+                        }
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_upstream_watch",
+            "上游账号池接入观测",
+            "只读：上游账号（Agent2API 型）接入侧观测（view 选 connections/importSources/desktopSources/usageSnapshot；不含登录流程与导出）",
+            ReadOnly,
+            "view",
+            &[
+                "/api/account-sessions/connections",
+                "/api/account-sessions/import/sources",
+                "/api/account-sessions/desktop/sources",
+                "/api/account-sessions/usage/snapshot",
+            ],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "view": { "type": "string", "enum": ["connections", "importSources", "desktopSources", "usageSnapshot"], "description": "视图种类" }
+                    },
+                    "required": ["view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let view = require_arg(a, "view")?;
+                    out(match view.as_str() {
+                        "connections" => {
+                            admin::account_sessions::handle_account_session_connections(
+                                State(s.clone()),
+                                h.clone(),
+                            )
+                            .await
+                        }
+                        "importSources" => {
+                            admin::account_sessions::handle_scan_import_sources(
+                                State(s.clone()),
+                                h.clone(),
+                            )
+                            .await
+                        }
+                        "desktopSources" => {
+                            admin::desktop_import::handle_desktop_sources(
+                                State(s.clone()),
+                                h.clone(),
+                            )
+                            .await
+                        }
+                        "usageSnapshot" => {
+                            admin::account_sessions::handle_usage_snapshot(
+                                State(s.clone()),
+                                h.clone(),
+                            )
+                            .await
+                        }
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_subscription_watch",
+            "订阅与套餐观测",
+            "只读：套餐清单/调用者自身订阅/指定用户的订阅（view 选 plans/self/userSubscriptions；后者需 user_id）",
+            ReadOnly,
+            "view",
+            &[
+                "/api/subscription/plans",
+                "/api/subscription/self",
+                "/api/subscription/admin/users/{id}/subscriptions",
+            ],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "view": { "type": "string", "enum": ["plans", "self", "userSubscriptions"], "description": "视图种类" },
+                        "user_id": { "type": "string", "description": "用户 ID（view=userSubscriptions 必填）" }
+                    },
+                    "required": ["view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let view = require_arg(a, "view")?;
+                    out(match view.as_str() {
+                        "plans" => admin::handle_subscription_plans(State(s.clone()), h.clone()).await,
+                        "self" => admin::handle_subscription_self(State(s.clone()), h.clone()).await,
+                        "userSubscriptions" => {
+                            let id = require_arg(a, "user_id")?;
+                            admin::handle_subscription_admin_list(State(s.clone()), h.clone(), Path(id)).await
+                        }
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_channel_detail",
+            "渠道明细",
+            "只读：单渠道上游余额与健康归档（view 选 balance/healthArchive，需 channel_id；与 `aigx_account_balance`（账号池侧）分属两个对象）",
+            ReadOnly,
+            "channel_id",
+            &["/api/channels/{id}/balance", "/api/channels/{id}/health-archive"],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "channel_id": { "type": "string", "description": "渠道 ID" },
+                        "view": { "type": "string", "enum": ["balance", "healthArchive"], "description": "视图种类" }
+                    },
+                    "required": ["channel_id", "view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let id = require_channel_id(a)?;
+                    let view = require_arg(a, "view")?;
+                    out(match view.as_str() {
+                        "balance" => admin::handle_get_channel_balance(State(s.clone()), h.clone(), Path(id)).await,
+                        "healthArchive" => {
+                            admin::handle_channel_health_archive(State(s.clone()), h.clone(), Path(id)).await
+                        }
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_config_view",
+            "配置现状视图",
+            "只读：按 key 读一份配置/现状视图（全局热生效配置的读取面；写侧另有一批工具，本工具不改任何东西）。key 取值：settings=模型映射、limits=限额、securityPolicy=安全策略、sanitize=脱敏规则、gatewaySettings/gatewayPrompt=网关设置与系统提示词、updateSettings=更新设置、logsRetention=日志保留、queue=队列、ratelimit=限流、ratios=倍率、ipFilter=IP 黑白名单、notify=通知配置（凭据字段已脱敏）、clineHeaders=转发头、userToolsPolicy/userToolsCatalog=终端用户工具面、routing/routingDefaults/routingProfiles=路由策略、alertsRules=告警规则、pricingSyncConfig/exchangeRates=定价同步与汇率、modelMetadata=模型元数据、debug/debugTraffic=调试开关与在途抓包、checkinKeepalive/checkinBenefits=签到保活与权益",
+            ReadOnly,
+            "key",
+            &[
+                "/api/settings",
+                "/api/limits",
+                "/api/security/policy",
+                "/api/sanitize",
+                "/api/gateway/settings",
+                "/api/gateway/prompt",
+                "/api/update/settings",
+                "/api/logs/retention",
+                "/api/queue",
+                "/api/ratelimit/config",
+                "/api/ratios",
+                "/api/ip/filter",
+                "/api/notify/config",
+                "/api/cline-headers",
+                "/api/user-tools/policy",
+                "/api/user-tools/catalog",
+                "/api/routing",
+                "/api/routing/defaults",
+                "/api/routing/profiles",
+                "/api/alerts/rules",
+                "/api/pricing/sync-config",
+                "/api/pricing/exchange-rates",
+                "/api/models/metadata",
+                "/api/debug",
+                "/api/debug/traffic",
+                "/api/checkin-center/benefits/keepalive",
+                "/api/checkin-center/benefits",
+            ],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string", "enum": [
+                            "settings","limits","securityPolicy","sanitize","gatewaySettings","gatewayPrompt",
+                            "updateSettings","logsRetention","queue","ratelimit","ratios","ipFilter","notify",
+                            "clineHeaders","userToolsPolicy","userToolsCatalog","routing","routingDefaults",
+                            "routingProfiles","alertsRules","pricingSyncConfig","exchangeRates","modelMetadata",
+                            "debug","debugTraffic","checkinKeepalive","checkinBenefits"
+                        ], "description": "配置视图 key" }
+                    },
+                    "required": ["key"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let key = require_arg(a, "key")?;
+                    out(match key.as_str() {
+                        "settings" => admin::handle_get_settings(State(s.clone()), h.clone()).await,
+                        "limits" => admin::handle_get_limits(State(s.clone()), h.clone()).await,
+                        "securityPolicy" => admin::handle_get_security_policy(State(s.clone()), h.clone()).await,
+                        "sanitize" => admin::handle_get_sanitize(State(s.clone()), h.clone()).await,
+                        "gatewaySettings" => admin::handle_get_gateway_settings(State(s.clone()), h.clone()).await,
+                        "gatewayPrompt" => admin::handle_get_gateway_prompt(State(s.clone()), h.clone()).await,
+                        "updateSettings" => {
+                            admin::update::handle_get_update_settings(State(s.clone()), h.clone()).await
+                        }
+                        "logsRetention" => admin::handle_get_log_retention(State(s.clone()), h.clone()).await,
+                        "queue" => admin::handle_get_queue(State(s.clone()), h.clone()).await,
+                        "ratelimit" => admin::handle_get_ratelimit_config(State(s.clone()), h.clone()).await,
+                        "ratios" => admin::handle_get_ratios(State(s.clone()), h.clone()).await,
+                        "ipFilter" => admin::handle_get_ip_filter(State(s.clone()), h.clone()).await,
+                        "notify" => admin::handle_get_notify_config(State(s.clone()), h.clone()).await,
+                        "clineHeaders" => admin::handle_get_cline_headers(State(s.clone()), h.clone()).await,
+                        "userToolsPolicy" => {
+                            admin::user_tools::handle_get_user_tool_policy(State(s.clone()), h.clone()).await
+                        }
+                        "userToolsCatalog" => {
+                            admin::user_tools::handle_get_user_tool_catalog(State(s.clone()), h.clone()).await
+                        }
+                        "routing" => admin::handle_get_routing(State(s.clone()), h.clone()).await,
+                        "routingDefaults" => admin::handle_routing_defaults(State(s.clone()), h.clone()).await,
+                        "routingProfiles" => {
+                            admin::handle_get_routing_profiles(State(s.clone()), h.clone()).await
+                        }
+                        "alertsRules" => admin::handle_alert_rules_list(State(s.clone()), h.clone()).await,
+                        "pricingSyncConfig" => {
+                            admin::handle_get_price_sync_config(State(s.clone()), h.clone()).await
+                        }
+                        "exchangeRates" => admin::handle_get_exchange_rates(State(s.clone()), h.clone()).await,
+                        "modelMetadata" => {
+                            admin::handle_get_model_metadata(State(s.clone()), h.clone()).await
+                        }
+                        "debug" => admin::handle_get_debug(State(s.clone()), h.clone()).await,
+                        "debugTraffic" => admin::handle_get_debug_traffic(State(s.clone()), h.clone()).await,
+                        "checkinKeepalive" => admin::handle_get_keepalive(State(s.clone()), h.clone()).await,
+                        "checkinBenefits" => admin::handle_benefits_list(State(s.clone()), h.clone()).await,
+                        _ => return Err((-32602, format!("Invalid params: unknown config key {key}"))),
+                    })
+                })
+            },
+        ),
+        td(
+            "aigx_agent_self_status",
+            "助手自身状态",
+            "只读：AI 运维助手自身的运行态（view 选 runtime=生效配置+disabledTools+effectiveModel、saved=设置页保存值、assistant=聊天助手工具面）。附带 pendingApprovals（当前挂起的人工审批数）——AI 看不到自己的开关与审批队列是运维盲区（#35 批1）。**不提供写侧**：助手不改自己的边界",
+            ReadOnly,
+            "view",
+            &[
+                "/api/agent/config",
+                "/api/agent/settings",
+                "/api/assistant/tools",
+            ],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "view": { "type": "string", "enum": ["runtime", "saved", "assistant"], "description": "视图种类" }
+                    },
+                    "required": ["view"]
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let view = require_arg(a, "view")?;
+                    let pending = s
+                        .agent_state
+                        .as_deref()
+                        .map(|agent| agent.approvals.pending_count())
+                        .unwrap_or(0);
+                    let r = match view.as_str() {
+                        "runtime" => {
+                            crate::agent::api::handle_get_config(State(s.clone()), h.clone()).await
+                        }
+                        "saved" => admin::handle_get_agent_settings(State(s.clone()), h.clone()).await,
+                        "assistant" => {
+                            admin::assistant::handle_assistant_tools(State(s.clone()), h.clone()).await
+                        }
+                        _ => return Err((-32602, format!("Invalid params: unknown view {view}"))),
+                    };
+                    let r = match r {
+                        Ok(Json(v)) => Json(with_pending_approvals(v, pending)),
+                        e => return out(e),
+                    };
+                    out(Ok(r))
+                })
+            },
+        ),
+        td(
+            "aigx_scheduled_task_list",
+            "定时任务清单",
+            "只读：全部间隔型定时任务的开关/间隔/上次与下次运行状态（触发与改配置是写侧，批 2 走审批）",
+            ReadOnly,
+            "",
+            &["/api/scheduled-tasks"],
+            no_args,
+            |s, h, _a| Box::pin(async move { out(scheduled_tasks_status(s, h).await) }),
+        ),
+        td(
+            "aigx_proxy_pool_status",
+            "代理池清单",
+            "只读：代理池条目与可用性统计（增删改/测活/sync-clash 属写侧，批 2）",
+            ReadOnly,
+            "",
+            &["/api/proxy-pool"],
+            no_args,
+            |s, h, _a| {
+                Box::pin(async move {
+                    out(admin::proxy_pool_api::handle_pool_list(State(s.clone()), h.clone()).await)
+                })
+            },
+        ),
+        td(
+            "aigx_cache_stats",
+            "缓存命中率",
+            "只读：响应缓存统计（命中率/条目数/节省量；清缓存是写侧，批 2）",
+            ReadOnly,
+            "",
+            &["/api/cache/stats"],
+            no_args,
+            |s, h, _a| {
+                Box::pin(async move { out(admin::handle_cache_stats(State(s.clone()), h.clone()).await) })
+            },
+        ),
+        td(
+            "aigx_storage_overview",
+            "存储占用",
+            "只读：存储占用总览（KV/文件/日志各段大小；备份导入导出属写侧与二进制流，不给）",
+            ReadOnly,
+            "",
+            &["/api/storage"],
+            no_args,
+            |s, h, _a| {
+                Box::pin(async move { out(admin::handle_storage_overview(State(s.clone()), h.clone()).await) })
+            },
+        ),
+        td(
+            "aigx_ticket_console",
+            "工单台",
+            "只读：管理员工单列表（可按 id/status/reply_status 过滤并分页；回复与关闭是写侧，批 2）",
+            ReadOnly,
+            "",
+            &["/api/admin/tickets"],
+            || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "按工单 ID 精确查" },
+                        "status": { "type": "integer", "description": "工单状态过滤" },
+                        "reply_status": { "type": "integer", "description": "回复状态过滤" },
+                        "page": { "type": "integer", "minimum": 1 },
+                        "page_size": { "type": "integer", "minimum": 1 }
+                    },
+                    "required": []
+                })
+            },
+            |s, h, a| {
+                Box::pin(async move {
+                    let q: admin::tickets::AdminTicketQuery =
+                        parse_tool_args("aigx_ticket_console", a)?;
+                    out(admin::handle_admin_list_tickets(State(s.clone()), h.clone(), Query(q)).await)
+                })
+            },
+        ),
+        td(
+            "aigx_pricing_gaps",
+            "缺定价模型清单",
+            "只读：出现在流量里但没有定价的模型（定价漂移排障入口；同步/估算/改价是写侧，批 2）",
+            ReadOnly,
+            "",
+            &["/api/pricing/missing-models"],
+            no_args,
+            |s, h, _a| {
+                Box::pin(async move {
+                    out(admin::handle_missing_pricing_models(State(s.clone()), h.clone()).await)
+                })
+            },
+        ),
+        td(
+            "aigx_token_activity",
+            "令牌今日消耗",
+            "只读：今日 API 令牌消耗概览（回读明文 key 的 /api/tokens/{id}/key 不给助手）",
+            ReadOnly,
+            "",
+            &["/api/tokens/today"],
+            no_args,
+            |s, h, _a| {
+                Box::pin(async move { out(admin::handle_tokens_today(State(s.clone()), h.clone()).await) })
+            },
+        ),
     ]
 }
 
@@ -1973,71 +2707,753 @@ fn build_tools() -> Vec<ToolDef> {
 mod tests {
     use super::*;
 
-    /// 管理域路由前缀：每个域必须被某个工具的 covers 命中（或进豁免表）。
-    /// 新增管理端点时：给工具 covers 加前缀，或显式加进 EXEMPT_PREFIXES。
-    const REQUIRED_DOMAINS: &[&str] = &[
-        "/api/models/manage",
-        "/api/models/state",
-        "/api/models/price",
-        "/api/models/alias",
-        "/api/models/meta",
-        "/api/models/available",
-        "/api/checkin-center",
-        "/api/dashboard/report",
-        "/api/account-sessions",
-        "/api/channels",
-        "/api/users",
-        "/api/tokens",
-        "/api/keys",
-        "/api/pricing",
-        "/api/logs",
-        "/api/diagnostics",
-        "/api/update",
+    // ═══════════════════════════════════════════════════════════════════════
+    // #35 批1：覆盖率闸门——数据源换成**真实路由表**，不再是手写域清单
+    //
+    // 旧闸门（本批删除）手写 17 条 REQUIRED_DOMAINS 前缀 + 13 条裸豁免前缀，
+    // 判据是「这个前缀下有没有工具 covers」。前缀是人手抄的，只抄了抄的人记得的域。
+    // 病灶：手写清单与真实路由表脱钩后，绿灯只代表「清单没被人想起来改」，
+    // 不代表工具面真的覆盖了项目。同一批数据的实证：
+    //   · 清单里的 `/api/keys` 根本没注册过路由，工具的 covers 也跟着写了幽灵
+    //     `/api/keys`，闸门一路绿；
+    //   · 301 条 /api 路由里真正被工具 owns 的只有 60 条（20%），闸门照样绿。
+    // 新闸门把唯一数据源换成路由注册源码：`main.rs` + `agent/api.rs` 里每条
+    // `.route("…")` 都是必须被登记的对象，登记去向只有三个：
+    //   工具 covers（有工具）／ EXEMPT_PREFIXES（有意不给）／ KNOWN_GAPS（有意欠着，带理由与归属批次）。
+    // 三处都不落 → 红（A）；落了但理由已失效 → 也红（B/C/D/E）。
+    // 于是闸门「对新缺口立刻变红、对已登记缺口允许绿」，且批 2 补掉一条却忘了删
+    // 台账行时同样变红——台账跟着实现走，而不是实现跟着台账躺。
+    //
+    // ── 与 CI 提取器 tools/extract_routes.py 的口径对齐（逐条）──
+    //   文件集合  ROUTE_FILES = [src/main.rs, src/agent/api.rs]   ←→ ROUTE_SOURCES（include_str! 编译期内联，不依赖 cwd，也不依赖 CI 镜像里有没有 python）
+    //   触发写法  正则 `\.route\s*\(`                             ←→ 找 `.route` 后「只允许空白再跟 (」；`.route_layer(` / `set_route_replay` 一律不算
+    //   路径实参  第一个顶层实参里第一个字符串字面量，须以 / 开头  ←→ 同；**有意不同**：CI 对不合状的静默跳过，本测试 panic（宁可红得难看，不许悄悄少算一条）
+    //   规范化    `:id` / `:id<正则>` → `{id}`、去结尾 /          ←→ norm_route_path 逐字符同逻辑
+    //   方法集合  第二个顶层实参文本里扫 get|post|put|delete|
+    //             patch|head|options 且后跟 `(`，关键字前一个字符
+    //             不能是标识符字符（挡 handle_delete_xxx）        ←→ scan_methods 同规则；同样不排除字符串内文本（现网 0 处差异）
+    //   顶层逗号  只取 args[1]，第三个及以后实参不看              ←→ 同样在第一个顶层逗号处截断
+    //   范围      管理面 /api* + /api-docs* + /swagger-ui*         ←→ gate_universe 同（见其文档）
+    // 2026-11-09 对 373 处 `.route(` 全量对跑：338 条路径、方法集合逐条相同，
+    // 无非字面量路径、无注释掉的 `.route(`、无单实参调用。将来路由写法变了导致两边
+    // 分叉时，`route_extractor_is_still_anchored` 与各处 panic 会响，不会假绿。
+    //
+    // ── 粒度：路径，不是「路径 + 方法」──
+    // 一条路径只要有工具 owns 就算登记。理由：风险级与审批是**工具**的属性，方法级
+    // 台账会把 301 条炸成 500+ 行、红到没人能推；而方法级欠债其实集中且可枚举，
+    // 单列成 WRITE_SIDE_PENDING（E）盯住——那才是真盲区。例：`/api/settings` 有 GET
+    // 有 PUT，aigx_config_view 只 owns GET，在 A/B 里它是「已覆盖」，只有 E 看得出
+    // 「AI 看得见却动不了」。反例存档：`/api/routing/preview` 是 POST 却是纯投影
+    // 计算，按「方法=写就欠债」的死规则会被误判，所以 E 判的是「该路径的写方法
+    // 有没有任何非 ReadOnly 工具 owns」，而不是「有没有写方法」。
+    // ═══════════════════════════════════════════════════════════════════════
+
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// 路由提取源，与 `tools/extract_routes.py::ROUTE_FILES` 一一对应。
+    const ROUTE_SOURCES: [&str; 2] = [include_str!("../main.rs"), include_str!("api.rs")];
+
+    /// 写方法：路径有它们、owns 它的工具却全是 ReadOnly ⇒ 方法级欠债。
+    const WRITE_VERBS: [&str; 4] = ["post", "put", "patch", "delete"];
+
+    /// HTTP 方法关键字表（同 CI 的 `METHOD_RE`）。
+    const METHOD_WORDS: [&str; 7] = ["get", "post", "put", "delete", "patch", "head", "options"];
+
+    fn is_ident_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+
+    /// 跳过 ASCII 空白，返回第一个非空白字节下标（越界则返回 len）。
+    fn skip_ws(src: &[u8], mut i: usize) -> usize {
+        while i < src.len() && src[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    }
+
+    /// `start` 应在开引号之后；返回收尾引号下标，反斜杠转义整体跳过。
+    fn quote_end(src: &[u8], mut i: usize) -> usize {
+        while i < src.len() {
+            match src[i] {
+                b'\\' => i += 2,
+                b'"' => return i,
+                _ => i += 1,
+            }
+        }
+        panic!("路由源码里有没收尾的字符串字面量——提取器口径已与 CI 分叉，请同步本测试与 tools/extract_routes.py");
+    }
+
+    /// `:id` / `:id<正则>` → `{id}`，并去掉结尾多余的 `/`。对齐 python `norm_path`。
+    fn norm_route_path(p: &str) -> String {
+        let cs: Vec<char> = p.chars().collect();
+        let mut out = String::with_capacity(p.len());
+        let mut i = 0usize;
+        while i < cs.len() {
+            // 同 CI 正则的 `(?<=/)`：冒号前必须是 `/`，且紧跟字母/下划线才算参数段
+            if cs[i] == ':' && i > 0 && cs[i - 1] == '/' && i + 1 < cs.len() {
+                let mut name = String::new();
+                let mut j = i + 1;
+                if cs[j].is_ascii_alphabetic() || cs[j] == '_' {
+                    while j < cs.len() && (cs[j].is_ascii_alphanumeric() || cs[j] == '_') {
+                        name.push(cs[j]);
+                        j += 1;
+                    }
+                    if j < cs.len() && cs[j] == '<' {
+                        let mut k = j + 1;
+                        while k < cs.len() && cs[k] != '>' {
+                            k += 1;
+                        }
+                        if k < cs.len() {
+                            j = k + 1;
+                        }
+                    }
+                    out.push('{');
+                    out.push_str(&name);
+                    out.push('}');
+                    i = j;
+                    continue;
+                }
+            }
+            out.push(cs[i]);
+            i += 1;
+        }
+        while out.len() > 1 && out.ends_with('/') {
+            out.pop();
+        }
+        out
+    }
+
+    /// 扫 handler 表达式文本里的 HTTP 方法（对齐 CI：不排除字符串内的文本，
+    /// 只要求关键字前一个字符不是标识符字符、后面紧跟 `(`）。
+    fn scan_methods(handler: &str) -> BTreeSet<String> {
+        let hb = handler.as_bytes();
+        let mut ms = BTreeSet::new();
+        for word in METHOD_WORDS {
+            let mut s = 0usize;
+            while let Some(rel) = handler[s..].find(word) {
+                let k = s + rel;
+                s = k + word.len();
+                if k > 0 && is_ident_byte(hb[k - 1]) {
+                    continue;
+                }
+                let t = skip_ws(hb, k + word.len());
+                if t < hb.len() && hb[t] == b'(' {
+                    ms.insert(word.to_string());
+                }
+            }
+        }
+        ms
+    }
+
+    /// 提取「真实路径 → HTTP 方法集合」。口径见本节开头与 CI 的对齐表；
+    /// 遇到不认识的写法直接 panic，绝不静默少算一条路由。
+    fn extract_real_routes() -> BTreeMap<String, BTreeSet<String>> {
+        const ROUTE_MARK: &str = ".route";
+        let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for src in ROUTE_SOURCES {
+            let b = src.as_bytes();
+            let mut pos = 0usize;
+            while let Some(rel) = src[pos..].find(ROUTE_MARK) {
+                let at = pos + rel;
+                pos = at + ROUTE_MARK.len();
+                let mut j = skip_ws(b, at + ROUTE_MARK.len());
+                if j >= b.len() || b[j] != b'(' {
+                    continue; // `.route_layer(` / `set_route_replay`：不是路由注册
+                }
+                j = skip_ws(b, j + 1);
+                if j >= b.len() || b[j] != b'"' {
+                    panic!("`.route(` 的第一个实参不是字符串字面量：{:.60}", &src[at..]);
+                }
+                let q = quote_end(b, j + 1);
+                let raw = &src[j + 1..q];
+                // 括号配对取第二个顶层实参（= handler 表达式）；字符串里的括号跳过。
+                let mut depth = 1usize;
+                let mut m = q + 1;
+                let mut start2: Option<usize> = None;
+                let mut end2: Option<usize> = None;
+                loop {
+                    if m >= b.len() {
+                        panic!("`.route({raw})` 的调用括号未闭合");
+                    }
+                    match b[m] {
+                        b'"' => m = quote_end(b, m + 1) + 1,
+                        b'(' => {
+                            depth += 1;
+                            m += 1;
+                        }
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end2 = Some(m);
+                                break;
+                            }
+                            m += 1;
+                        }
+                        b',' if depth == 1 => {
+                            if start2.is_none() {
+                                start2 = Some(skip_ws(b, m + 1));
+                                m += 1;
+                            } else {
+                                end2 = Some(m); // 第三个及以后实参不看（同 CI）
+                                break;
+                            }
+                        }
+                        _ => m += 1,
+                    }
+                }
+                let handler = match (start2, end2) {
+                    (Some(s), Some(e)) if e > s => &src[s..e],
+                    _ => "",
+                };
+                if !raw.starts_with('/') {
+                    continue; // 对齐 CI：非 `/` 开头不算路由（现网 0 处）
+                }
+                let mut ms = scan_methods(handler);
+                if ms.is_empty() {
+                    // 对齐 CI 的 {"?"}。真出现说明路由写法超出两边口径，
+                    // 由 route_extractor_is_still_anchored 响，不留在这儿糊过去。
+                    ms.insert("?".to_string());
+                }
+                out.entry(norm_route_path(raw)).or_default().extend(ms);
+            }
+        }
+        out
+    }
+
+    /// 闸门宇宙 = 管理面（与 openapi.rs 的范围口径一致）：`/api*` + `/api-docs*`
+    /// + `/swagger-ui*`。数据面 `/v1/*` 是产品协议面（OpenAI/Anthropic 兼容，自带
+    /// `/v1/models` 自描述），`/health`/`/livez`/`/readyz`/`/metrics` 是编排器探针——
+    /// 都不是「AI 可运维的管理面」，故不入账（35 条，逐条核过）。
+    fn gate_universe(real: &BTreeMap<String, BTreeSet<String>>) -> BTreeSet<String> {
+        real.keys()
+            .filter(|p| p.starts_with("/api") || p.starts_with("/swagger-ui"))
+            .cloned()
+            .collect()
+    }
+
+    /// 工具 covers 的倒排：规范化后的真实路径 → owns 它的工具名。
+    /// 注意是**精确路径**命中，不是前缀——前缀式匹配正是旧闸门虚报覆盖率的病根。
+    fn covers_index() -> BTreeMap<String, Vec<&'static str>> {
+        let mut m: BTreeMap<String, Vec<&'static str>> = BTreeMap::new();
+        for t in all_tools() {
+            for c in t.covers {
+                m.entry(norm_route_path(c)).or_default().push(t.name);
+            }
+        }
+        m
+    }
+
+    /// 裸前缀豁免命中判据：等于该前缀，或落在该前缀之下。
+    fn is_exempt(p: &str) -> bool {
+        EXEMPT_PREFIXES
+            .iter()
+            .any(|(prefix, _)| p == *prefix || p.starts_with(&format!("{prefix}/")))
+    }
+
+    fn ledger_paths(ledger: &[(&str, &[&str])]) -> BTreeSet<String> {
+        ledger
+            .iter()
+            .flat_map(|(_, paths)| paths.iter())
+            .map(|p| norm_route_path(p))
+            .collect()
+    }
+
+    /// 该路径现算出来的写方法（无写方法 → 空表；顺序固定，报错可读）。
+    fn write_verbs_of(real: &BTreeMap<String, BTreeSet<String>>, p: &str) -> Vec<&'static str> {
+        match real.get(p) {
+            Some(ms) => WRITE_VERBS
+                .iter()
+                .copied()
+                .filter(|w| ms.contains(*w))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// 有意**不给 AI 面**的域（裸前缀 + 理由）。判据是「这个域的功能本身不提供」，
+    /// 不是「这个域暂时没工具」——后者必须进 `KNOWN_GAPS`。每条必须命中 ≥1 条真实
+    /// 路由（见 `exempt_prefixes_are_alive_and_not_covered`），否则就是僵尸例外：
+    /// 旧表里的 `/api/payment` 就是这么一条（0 条路由，本批已删）。
+    const EXEMPT_PREFIXES: &[(&str, &str)] = &[
+        ("/api/auth", "登录/会话签发：人在环流程，且会让凭据过一遍 LLM"),
+        (
+            "/api/chat/sessions",
+            "用户私域聊天记录，不给运维 Agent（旧裸前缀 `/api/chat` 太宽，本批收窄；`/api/chat/settings` 是欠债，已进 KNOWN_GAPS）",
+        ),
+        ("/api/epay", "支付回调（上游签名校验），不是运维动作"),
+        ("/api/stripe", "支付回调（同上）"),
+        ("/api/topup", "充值下单/跳转页"),
+        ("/api/user/epay", "用户侧支付发起（钱 + 人在环）"),
+        ("/api/user/stripe", "用户侧支付发起（同上）"),
+        ("/api/tickets", "工单是用户↔人工的通道；Agent 侧另有 /api/admin/tickets"),
+        ("/api/prompts", "提示词库：未纳入运维工具面规划"),
+        ("/api/oauth", "上游 OAuth 跳转，必须浏览器在场"),
+        ("/api/mcp", "MCP 服务自身端点（是 Agent 入口，不是被管对象）"),
+        (
+            "/api/agent/sessions",
+            "Agent 会话存储：让 AI 读写自己的会话历史 = 自我改写（lead 裁定①不做）",
+        ),
+        (
+            "/api/agent/approvals",
+            "审批队列 REST：审批必须人在环；AI 只能经 aigx_agent_self_status 读现状，不许自己批自己",
+        ),
+        ("/api-docs", "OpenAPI 静态文档入口"),
+        ("/swagger-ui", "文档 UI"),
+        (
+            "/api/prices",
+            "lead 裁定④：已废弃/与 /api/pricing 重复，转豁免不补工具",
+        ),
+        (
+            "/api/upgrade",
+            "lead 裁定④：已废弃，与 /api/update 重复，转豁免不补工具",
+        ),
     ];
 
-    /// 明确不给工具的域（人工维护的边界：认证/支付/工单/Agent 自身…）。
-    const EXEMPT_PREFIXES: &[&str] = &[
-        // 个人聊天会话（用户私域，不给运维 Agent 暴露）
-        "/api/chat",
-        "/api/auth",
-        "/api/payment",
-        "/api/epay",
-        "/api/stripe",
-        "/api/topup",
-        "/api/tickets",
-        "/api/prompts",
-        "/api/oauth",
-        "/api/agent",
-        "/api/mcp",
-        "/api-docs",
-        "/swagger-ui",
+    /// 已知缺口台账：真实存在、暂无工具、且**已逐条论证过为什么现在不做**。
+    /// 每条带理由 + 归属批次；批 2/批 3 补掉后必须删掉该行，否则
+    /// `gap_ledger_has_no_stale_entries` 红。欠债有归属，才不会像旧 `REQUIRED_DOMAINS`
+    /// 那样半年后没人记得某条为什么被豁免。
+    const KNOWN_GAPS: &[(&str, &[&str])] = &[
+        (
+            "批 2·写侧配置族（改完全局热生效，按批1定调②一律 HighRisk 进审批）",
+            &[
+                "/api/chat/settings",
+                "/api/zcode/captcha-pool",
+                "/api/update/cleanup-artifacts",
+                "/api/network/config/{config_id}",
+                "/api/ip/blacklist",
+                "/api/ip/blacklist/{pattern}",
+                "/api/ip/whitelist",
+                "/api/ip/whitelist/{pattern}",
+                "/api/routing/profiles/group/{id}",
+            ],
+        ),
+        (
+            "批 2·写侧资源族（单对象增删改；可逆且作用域受限的才逐条论证降 LowRisk）",
+            &[
+                "/api/channels/{id}/patch",
+                "/api/groups/{name}",
+                "/api/plans/{id}",
+                "/api/plans/{id}/issue",
+                "/api/redemptions/{id}",
+                "/api/redemptions/batch",
+                "/api/redemptions/redeem",
+                "/api/models/meta/{model}",
+                "/api/models/custom",
+                "/api/models/custom/remove",
+                "/api/models/alias/reasoning",
+                "/api/models/alias/state",
+                "/api/models/capabilities",
+                "/api/accounts/{id}",
+                "/api/network/accounts/{account_id}",
+                "/api/proxy-pool/update",
+                "/api/proxy-pool/remove",
+                "/api/proxy-pool/enable",
+                "/api/proxy-pool/sync-clash",
+                "/api/plugins/enable",
+                "/api/plugins/provider",
+                "/api/plugins/uninstall",
+                "/api/scheduled-tasks/{id}",
+                "/api/tokens/{id}/reset_used",
+                "/api/tokens/{id}/rotate",
+                "/api/orders/{id}/complete",
+                "/api/checkin-center/schedules/remove",
+                "/api/checkin-center/records/mark-kept-active",
+                "/api/users/self",
+                "/api/admin/tickets/close",
+                "/api/admin/tickets/reply",
+                "/api/alerts/resolve",
+            ],
+        ),
+        (
+            "批 2·运维动作族（测活/刷新/清理/重建/终止；含上游真金与外发通知，逐条论证）",
+            &[
+                "/api/channels/chat_test",
+                "/api/channels/fetch_models",
+                "/api/models/refresh",
+                "/api/models/metadata/refresh",
+                "/api/models/test",
+                "/api/accounts/test",
+                "/api/proxy-pool/test",
+                "/api/proxy-pool/test-account",
+                "/api/notify/test-email",
+                "/api/notify/test-slack",
+                "/api/notify/test-webhook",
+                "/api/notify/test-telegram",
+                "/api/alerts/test",
+                "/api/logs/agg/rebuild",
+                "/api/logs/audits/clear",
+                "/api/logs/requests/clear",
+                "/api/logs/inflight/{id}/terminate",
+                "/api/cache/clear",
+                "/api/routing/sticky/clear",
+                "/api/routing/preview",
+                "/api/pricing/estimate",
+                "/api/pricing/sync",
+                "/api/network/restart",
+                "/api/checkin-center/schedules/run",
+                "/api/checkin-center/benefits/run",
+                "/api/scheduled-tasks/{id}/run",
+                "/api/checkin",
+            ],
+        ),
+        (
+            "批 2·资金与账户安全族（钱/2FA 语义，定级需 lead 单独拍板，不在批1 讨论范围）",
+            &[
+                "/api/aff_transfer",
+                "/api/subscription/balance/pay",
+                "/api/subscription/admin/bind",
+                "/api/subscription/admin/subscriptions/{id}/cancel",
+                "/api/users/{id}/2fa",
+            ],
+        ),
+        (
+            "不给 AI 面·凭据/隐私/二进制流（明文密钥、含凭据的导出、加密备份、CSV 流、管理员个人域）",
+            &[
+                "/api/tokens/{id}/key",
+                "/api/account-sessions/export",
+                "/api/backup/download",
+                "/api/backup/export-encrypted",
+                "/api/backup/import",
+                "/api/backup/import-encrypted",
+                "/api/logs/requests/export",
+                "/api/logs/runtime/export",
+                "/api/aff",
+                "/api/users/me",
+                "/api/orders/me",
+                "/api/session",
+                "/api/session/refresh",
+            ],
+        ),
+        (
+            "不给 AI 面·人在环流程（登录/验证码/导入向导/批量重算：需要浏览器或人工在场，工具化只会让 AI 卡在等人）",
+            &[
+                "/api/account-sessions/login/callback",
+                "/api/account-sessions/login/cancel",
+                "/api/account-sessions/login/oauth/captcha-config",
+                "/api/account-sessions/login/oauth/start",
+                "/api/account-sessions/login/paste",
+                "/api/account-sessions/login/sms/send",
+                "/api/account-sessions/login/sms/verify",
+                "/api/account-sessions/login/start",
+                "/api/account-sessions/login/wait",
+                "/api/account-sessions/desktop-import",
+                "/api/account-sessions/import",
+                "/api/account-sessions/import/agent2api",
+                "/api/account-sessions/import/json",
+                "/api/account-sessions/batch",
+                "/api/account-sessions/usage",
+                "/api/zcode/captcha",
+            ],
+        ),
+        (
+            "不给 AI 面·人工试跑与对话入口（playground 真金烧上游 / assistant 对话本身；工具回路另有条目）",
+            &[
+                "/api/playground/chat",
+                "/api/playground/images",
+                "/api/playground/transcriptions",
+                "/api/playground/tts",
+                "/api/assistant/chat",
+            ],
+        ),
+        (
+            "批 2·观测补漏（需具体账号 ID、账号缺席即 404 的窄视图，等批 2 一起定 enum 口径）",
+            &[
+                "/api/zcode/captcha/config",
+            ],
+        ),
+        (
+            "批 3·形状不合（handler 不吃 State / 返回裸 Json 而非 HandlerResult / 公开探测接口），要工具化得先改 handler",
+            &[
+                "/api/users/check",
+                "/api/public/geo-lang",
+            ],
+        ),
     ];
 
+    /// 方法级欠债台账：路径有写方法（POST/PUT/PATCH/DELETE），但 owns 它的工具**全是**
+    /// ReadOnly——「AI 看得见这个东西，却动不了」。路径粒度看不出这层（该路径算已覆盖），
+    /// 所以单列本表，并由 E 按真实方法集现算逐条对跑：批 2 给某条加了写工具后该行必须删。
+    /// 这也是 lead 裁定②（写侧 config 族一律 HighRisk 进审批）的机器化落点，
+    /// 免得「哪些写侧要给、给什么级别」退化成口头知识。
+    const WRITE_SIDE_PENDING: &[(&str, &[&str])] = &[
+        (
+            "批 2·写侧配置族（lead 裁定②：全局热生效的 config 一律 HighRisk 进审批；读侧已由 aigx_config_view 提供）",
+            &[
+                "/api/settings",
+                "/api/limits",
+                "/api/security/policy",
+                "/api/sanitize",
+                "/api/gateway/settings",
+                "/api/gateway/prompt",
+                "/api/update/settings",
+                "/api/logs/retention",
+                "/api/queue",
+                "/api/ratelimit/config",
+                "/api/ratios",
+                "/api/ip/filter",
+                "/api/notify/config",
+                "/api/cline-headers",
+                "/api/user-tools/policy",
+                "/api/routing",
+                "/api/routing/profiles",
+                "/api/alerts/rules",
+                "/api/pricing/sync-config",
+                "/api/pricing/exchange-rates",
+                "/api/models/metadata",
+                "/api/debug",
+                "/api/checkin-center/benefits/keepalive",
+            ],
+        ),
+        (
+            "批 2·运维动作族（清理/重算：删日志、清流量缓冲、刷新汇总——可逆性差，逐条论证）",
+            &[
+                "/api/logs/audits",
+                "/api/logs/requests",
+                "/api/debug/traffic",
+                "/api/usage/summary",
+            ],
+        ),
+        (
+            "批 2·写侧资源族（单对象 create：列表工具只 owns GET，POST 侧无人）",
+            &[
+                "/api/accounts",
+                "/api/plans",
+                "/api/users",
+                "/api/proxy-pool",
+            ],
+        ),
+        (
+            "不给 AI 面·Agent 自身边界（lead 裁定①：只读给 aigx_agent_self_status，PUT /api/agent/settings 永不让 AI 改自己）",
+            &[
+                "/api/agent/settings",
+            ],
+        ),
+    ];
+
+    /// 哨兵：提取器自身必须仍在真实地提取到东西。
+    /// 若有人把路由注册改成 nest / 宏 / 动态拼接，宇宙会（半静默地）缩小甚至归零，
+    /// 那么 A–E 五条断言会因为「空集 ⊆ 任何东西」而全体假绿——那正是本闸门要根治的病，
+    /// 所以先给闸门自己上一道：量级地板 + 口径漂移必须在这里响。
     #[test]
-    fn openapi_domains_have_tool_coverage() {
-        for domain in REQUIRED_DOMAINS {
+    fn route_extractor_is_still_anchored() {
+        let real = extract_real_routes();
+        let universe = gate_universe(&real);
+        assert!(
+            universe.len() >= 200,
+            "路由提取异常：管理面只提取到 {} 条（量级应为 ~300）。多半是路由写法变了导致提取口径分叉，\
+             此时 A–E 会全体假绿，必须先同步本测试与 tools/extract_routes.py"
+        );
+        assert!(
+            real.values().all(|ms| !ms.is_empty()),
+            "存在方法集为空的路由（提取器缺陷）"
+        );
+        let unknown = real
+            .values()
+            .flatten()
+            .filter(|m| m.as_str() == "?")
+            .count();
+        assert_eq!(
+            unknown, 0,
+            "有 `.route(…)` 的 handler 里扫不出 HTTP 方法：本测试与 CI 提取器口径分叉，\
+             或新写法（any()/fallback）需要两边同时支持"
+        );
+    }
+
+    /// A：真实路由表里不允许有「谁都没登记」的路径。
+    /// 登记去向 = 工具 covers ∪ `EXEMPT_PREFIXES` ∪ `KNOWN_GAPS`。
+    #[test]
+    fn every_real_route_is_registered() {
+        let real = extract_real_routes();
+        let universe = gate_universe(&real);
+        let covered = covers_index();
+        let gaps = ledger_paths(KNOWN_GAPS);
+        let mut orphans: Vec<String> = Vec::new();
+        for p in &universe {
+            if covered.contains_key(p) || gaps.contains(p.as_str()) || is_exempt(p) {
+                continue;
+            }
+            orphans.push(format!(
+                "    {p}  [写方法: {}]",
+                write_verbs_of(&real, p).join("+")
+            ));
+        }
+        assert!(
+            orphans.is_empty(),
+            "管理面路由未登记（{}/{} 条）：\n{}\n\
+             修法三选一——① 给某条工具的 covers 加这条路径；② 有意不给 AI 面 → 进 `EXEMPT_PREFIXES` 并写理由；\
+             ③ 有意先欠着 → 进 `KNOWN_GAPS` 并写理由 + 归属批次。",
+            orphans.len(),
+            universe.len(),
+            orphans.join("\n")
+        );
+    }
+
+    /// B：台账不许腐烂。每条 `KNOWN_GAPS` 必须仍是真实路由、仍无工具、且不与豁免重叠。
+    #[test]
+    fn gap_ledger_has_no_stale_entries() {
+        let universe = gate_universe(&extract_real_routes());
+        let covered = covers_index();
+        for &(reason, paths) in KNOWN_GAPS {
+            for p in paths {
+                let np = norm_route_path(p);
+                assert!(
+                    universe.contains(&np),
+                    "`KNOWN_GAPS` 僵尸行：`{np}`（批次「{reason}」）已不是真实路由，删掉它"
+                );
+                assert!(
+                    !covered.contains_key(&np),
+                    "`KNOWN_GAPS` 过时行：`{np}` 已被工具 covers（{:?}），从「{reason}」删掉它",
+                    covered.get(&np).map(|v| v.join(",")).unwrap_or_default()
+                );
+                assert!(
+                    !is_exempt(&np),
+                    "`KNOWN_GAPS` 与 `EXEMPT_PREFIXES` 重叠：`{np}` 既算豁免又算欠债，二者留一个"
+                );
+            }
+        }
+    }
+
+    /// C：工具 `covers` 必须命中真实路由——幽灵 `/api/keys`（有 covers、无路由）就是这么抓的。
+    #[test]
+    fn tool_covers_point_at_real_routes() {
+        let universe = gate_universe(&extract_real_routes());
+        let mut ghosts = Vec::new();
+        for t in all_tools() {
+            for c in t.covers {
+                if !universe.contains(&norm_route_path(c)) {
+                    ghosts.push(format!("    {} → covers `{c}`", t.name));
+                }
+            }
+        }
+        assert!(
+            ghosts.is_empty(),
+            "工具 covers 指向不存在的路由（{} 条）：\n{}\n\
+             要么路由本就没有（covers 改指真实路由，参考本批 aigx_key_add/aigx_key_delete 的收敛），\
+             要么路由已删（删掉 covers 里的这条）。",
+            ghosts.len(),
+            ghosts.join("\n")
+        );
+    }
+
+    /// D：豁免必须活着（否则是僵尸例外），且不与工具 covers 矛盾。
+    /// 后半段沿用旧闸门的判据：豁免域的本意是「不提供该域的功能」，但「以该域为
+    /// **数据源**」的工具不算提供功能——`aigx_openapi_search` 的 covers 是
+    /// `/api/openapi.json`，它读 OpenAPI 文档去**发现**别的端点，而不是提供「读
+    /// OpenAPI 文档」这个能力。所以矛盾判据是「cover 落在该域**之下**」（比该域更长
+    /// 的子路径），而不是「等于该域」。
+    #[test]
+    fn exempt_prefixes_are_alive_and_not_covered() {
+        let universe = gate_universe(&extract_real_routes());
+        for &(prefix, reason) in EXEMPT_PREFIXES {
             assert!(
-                all_tools().iter().any(|t| t
-                    .covers
+                !reason.trim().is_empty(),
+                "豁免 `{prefix}` 没写理由（理由会腐烂成口头知识）"
+            );
+            assert!(
+                universe
                     .iter()
-                    .any(|c| c.starts_with(domain) || domain.starts_with(c))),
-                "管理域 {domain} 没有任何工具覆盖（请加工具 covers，或更新 REQUIRED_DOMAINS/EXEMPT_PREFIXES）"
+                    .any(|p| p.as_str() == prefix || p.starts_with(&format!("{prefix}/"))),
+                "僵尸豁免：前缀 `{prefix}`（理由：{reason}）下已无任何真实路由，删掉这条豁免"
             );
         }
-        for domain in EXEMPT_PREFIXES {
-            // 豁免域本意是「不提供这个域的功能」。
-            //
-            // 但「以该域为**数据源**」的工具不算提供功能 ——
-            // `aigx_openapi_search` 的 covers 就是 `/api/openapi.json`：
-            // 它读 OpenAPI 文档去**发现**别的端点，而不是提供「读 OpenAPI
-            // 文档」这个能力。所以判据是「cover 落在该豁免域**之下**」
-            // （比该域更长，即真的是它的子路径），而不是「等于该域」。
+        for t in all_tools() {
+            for c in t.covers {
+                let np = norm_route_path(c);
+                for &(prefix, reason) in EXEMPT_PREFIXES {
+                    assert!(
+                        !(np.starts_with(prefix) && np.len() > prefix.len()),
+                        "豁免域与 covers 矛盾：工具 {} 覆盖了 `{np}`，而 `{prefix}` 声明整域不给 AI 面（{reason}）",
+                        t.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// E：写侧欠债台账必须与真实方法集现算结果逐条一致（不多不少）。
+    #[test]
+    fn write_side_pending_matches_reality() {
+        let real = extract_real_routes();
+        let covered = covers_index();
+        let read_only: BTreeSet<&'static str> = all_tools()
+            .iter()
+            .filter(|t| t.risk == RiskLevel::ReadOnly)
+            .map(|t| t.name)
+            .collect();
+        // 路径 → 现算依据（写方法 + owns 它的工具），报错时直接给出，不用人去复算
+        let mut computed: BTreeMap<String, String> = BTreeMap::new();
+        for p in real.keys().filter(|p| p.starts_with("/api/")) {
+            let wv = write_verbs_of(&real, p);
+            if wv.is_empty() {
+                continue; // 纯只读路径，没有方法级欠债可言
+            }
+            let owners = match covered.get(p) {
+                Some(o) if !o.is_empty() => o,
+                // 没有任何工具 owns ⇒ 路径级欠债，归 KNOWN_GAPS 管（A/B 已盯）
+                _ => continue,
+            };
+            if owners.iter().all(|n| read_only.contains(*n)) {
+                computed.insert(
+                    p.clone(),
+                    format!("write={} owners={}", wv.join("+"), owners.join(",")),
+                );
+            }
+        }
+        let listed = ledger_paths(WRITE_SIDE_PENDING);
+        let mut unlisted: Vec<String> = Vec::new();
+        for (p, why) in &computed {
+            if !listed.contains(p.as_str()) {
+                unlisted.push(format!("    {p}  [{why}]"));
+            }
+        }
+        let mut stale: Vec<String> = Vec::new();
+        for p in &listed {
+            if !computed.contains_key(p.as_str()) {
+                stale.push(format!("    {p}"));
+            }
+        }
+        assert!(
+            unlisted.is_empty() && stale.is_empty(),
+            "`WRITE_SIDE_PENDING` 与真实方法集分叉（漏记 {} 条 / 过时 {} 条）。\n\
+             漏记（该路径有写方法、owns 它的工具却全是 ReadOnly，台账没登记）：\n{}\n\
+             过时（台账里还欠着，实际已有非只读工具 owns）：\n{}\n\
+             背景：批 2 给某条加了写工具后，必须删掉该条台账行（本测试就是逼着删）。",
+            unlisted.len(),
+            stale.len(),
+            unlisted.join("\n"),
+            stale.join("\n")
+        );
+    }
+
+    /// 台账卫生：台账内不得重复登记，组不得空、理由不得空，两条台账语义互斥。
+    /// （旧 `REQUIRED_DOMAINS` 的烂法之一就是同一条径写两遍、谁也不负责。）
+    #[test]
+    fn ledgers_are_unique_and_reasoned() {
+        for (tag, ledger) in [
+            ("KNOWN_GAPS", KNOWN_GAPS),
+            ("WRITE_SIDE_PENDING", WRITE_SIDE_PENDING),
+        ] {
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            for &(reason, paths) in ledger {
+                assert!(!reason.trim().is_empty(), "{tag} 有一组没写理由/归属批次");
+                assert!(
+                    !paths.is_empty(),
+                    "{tag} 有一组空路径列表（「{reason}」），删掉它"
+                );
+                for p in paths {
+                    let np = norm_route_path(p);
+                    assert!(seen.insert(np.clone()), "{tag} 重复登记 `{np}`");
+                }
+            }
+        }
+        // 语义互斥：`KNOWN_GAPS` 要求「无工具 owns」，`WRITE_SIDE_PENDING` 要求「有工具 owns」。
+        let gaps = ledger_paths(KNOWN_GAPS);
+        let pending = ledger_paths(WRITE_SIDE_PENDING);
+        for p in &gaps {
             assert!(
-                !all_tools().iter().any(|t| t
-                    .covers
-                    .iter()
-                    .any(|c| { c.starts_with(domain) && c.len() > domain.len() })),
-                "豁免域 {domain} 被工具覆盖了（EXEMPT_PREFIXES 与 covers 矛盾）"
+                !pending.contains(p.as_str()),
+                "台账冲突：`{p}` 既算无工具欠债（`KNOWN_GAPS`）又算写侧欠债（`WRITE_SIDE_PENDING`）"
             );
         }
     }

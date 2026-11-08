@@ -163,7 +163,8 @@ pub use diagnostics::{
     handle_diagnostics_breakers, handle_diagnostics_channels, handle_diagnostics_summary,
 };
 
-// 内嵌 MCP server（AI 可运维第②步：Streamable HTTP JSON-RPC 端点 + 11 工具白名单）
+// 内嵌 MCP server（AI 可运维第②步：Streamable HTTP JSON-RPC 端点 + 非高危工具白名单，
+// 名单与 registry::mcp_tools 同源，条数随注册表变化）
 pub use mcp::handle_mcp;
 
 // 管理面 OpenAPI 3.1 自描述（零依赖静态构造，覆盖全部管理面真实路由）

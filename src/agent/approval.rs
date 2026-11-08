@@ -186,8 +186,7 @@ impl AgentApprovals {
         }
     }
 
-    /// 当前挂起数（测试用）。
-    #[allow(dead_code)]
+    /// 当前挂起数（`aigx_agent_self_status` 只读工具汇报审批队列现状用，#35 批1）。
     pub fn pending_count(&self) -> usize {
         self.pending.lock().len()
     }

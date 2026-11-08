@@ -2,11 +2,11 @@
 //!
 //! ── 定位与身份模型（v1 契约，lead 定稿前先看这段）──────────────
 //! 复用 agent 三层 registry 的工具面（[`crate::agent::registry::mcp_tools`]，
-//! 非 HighRisk ≈53 个）给**管理员**的聊天页提供工具回路；终端用户 v1
+//! 非 HighRisk 全集，条数随注册表变化）给**管理员**的聊天页提供工具回路；终端用户 v1
 //! **不带工具**（纯聊天+计费）。原因：registry 的 exec 闭包直连管理面
 //! handler（内部 verify_admin），普通用户的会话头会被 401/403 拦截——
 //! 若为此铸造「内部 admin 会话」就是隐藏管理员账号（安全反模式）；若把
-//! 53 个工具改成身份感知执行是 8 人周级重构。v1 先让管理员在 Chat 页
+//! 整个非高危工具面改成身份感知执行是 8 人周级重构。v1 先让管理员在 Chat 页
 //! 用上工具（与 Agent.tsx 同权限语义：headers 原样透传，审批矩阵与审计
 //! 零绕过——非 HighRisk 免审批、写操作审计照记），终端用户工具待权限
 //! 模型决策。
@@ -78,7 +78,8 @@ fn tool_json(t: &crate::agent::registry::ToolDef) -> Value {
 
 /// 工具目录（GET /api/assistant/tools）。
 ///
-/// 管理员（开关开）→ 非 HighRisk 全集（≈53，registry::mcp_tools 同口径）；
+/// 管理员（开关开）→ 非 HighRisk 全集（与 `registry::mcp_tools` 同口径，条数随注册表
+/// 变化，所以这里不写死数字）；
 /// 普通用户（开关开）→ user_exec 声明集 ∩ 组 allowlist（#34 v2 双身份，
 /// user_tool_allowed 判定，设计稿 D1-D8）；开关关 → 空清单（前端隐藏工具入口）。
 pub async fn handle_assistant_tools(
