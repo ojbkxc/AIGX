@@ -19,7 +19,7 @@ async function openDrawer(page: import('@playwright/test').Page): Promise<void> 
 }
 
 test.describe('聊天 · 历史会话抽屉', () => {
-  test('聊天主区域内容流形态（输入区紧随消息上移、空状态可见模型选择）', async ({ page, pageErrors }) => {
+  test('聊天主区域内容流形态（输入区紧随消息上移、中间无模型下拉）', async ({ page, pageErrors }) => {
     await loginAsAdmin(page);
     await page.goto('/chat');
     await expect(page.locator('.pg-shell')).toBeVisible();
@@ -35,19 +35,21 @@ test.describe('聊天 · 历史会话抽屉', () => {
     expect(inputRow).not.toBeNull();
     expect(inputRow!.y + inputRow!.height).toBeLessThan(vh * 0.9);
 
-    // 空状态模型选择位：此前 playground 首屏无模型入口（只能在输入区右下角
-    // 切），现在空状态渲染居中大 pill——「很多模型都看不见」的修复位。
-    // 空状态的真实用户场景是「新对话」：会话后端持久化后 /chat 首屏恢复的是
-    // 活动会话的消息（不再是空的），所以经抽屉新建空会话（真实 UI 流，
-    // handleNewSession 会收起抽屉并清空消息区）后再断言模型选择位。
+    // 空状态**不再**渲染居中大模型下拉（用户反馈「聊天页中间别加什么模型下拉」）：
+    // 模型唯一入口收在输入区右下角的紧凑 picker。进入空状态（经抽屉新建会话，
+    // 真实 UI 流）后断言「中间无模型位、而输入区 picker 可用」。
     await openDrawer(page);
     await page.getByRole('button', { name: '新会话' }).first().click();
     await expect(page.locator('.sd-root.open')).toHaveCount(0);
-    await expect(page.locator('.pg-empty .chat-debugger-empty-model .model-picker')).toBeVisible();
-    // 点击可展开全量模型下拉
-    await page.locator('.pg-empty .model-picker-btn').click();
-    await expect(page.locator('.pg-empty .model-picker-pop')).toBeVisible();
-    await expect(page.locator('.pg-empty .model-picker-pop .model-picker-item').first()).toBeVisible();
+    // 中间空状态区域不得出现任何模型选择器
+    await expect(page.locator('.pg-empty .chat-debugger-empty-model')).toHaveCount(0);
+    await expect(page.locator('.pg-empty .model-picker')).toHaveCount(0);
+    // 输入区右下角的唯一入口存在且可展开
+    const inputPicker = page.locator('.chat-debugger-input-actions .model-picker');
+    await expect(inputPicker).toBeVisible();
+    await inputPicker.locator('.model-picker-btn').click();
+    await expect(inputPicker.locator('.model-picker-pop')).toBeVisible();
+    await expect(inputPicker.locator('.model-picker-pop .model-picker-item').first()).toBeVisible();
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });

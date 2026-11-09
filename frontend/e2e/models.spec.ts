@@ -140,14 +140,22 @@ test.describe('模型管理', () => {
     const cell = row.locator('.mm-alias-cell');
     await expect(cell).toBeVisible();
 
-    // 两条映射：一条启用（alias-free）、一条关闭（alias-off）
+    // 真两条映射（alias-free 启用 / alias-off 关闭）+ 一条派生的
+    // 「模型名→自己（原样透传）」identity 提示 chip（需求3：映射字段要包含
+    // 模型名本身）。identity chip 无开关、可 × 隐藏，故单独断言。
     const chips = cell.locator('.mm-alias');
-    await expect(chips).toHaveCount(2);
+    await expect(chips).toHaveCount(3);
     await expect(cell.locator('.mm-alias.is-off')).toHaveCount(1);
     await expect(cell.locator('.mm-alias.is-off')).toContainText('alias-off');
 
-    // 每条 chip 都有开关
-    await expect(cell.locator('.mm-alias').first().getByRole('switch')).toBeVisible();
+    // identity chip：文本为模型自身名，带「原样透传」标签，且**不带**开关
+    const identity = cell.locator('.mm-alias-identity');
+    await expect(identity).toHaveCount(1);
+    await expect(identity).toContainText('unpriced-model');
+    await expect(identity.getByRole('switch')).toHaveCount(0);
+
+    // 真实映射 chip 都有开关（identity 排除在外）
+    await expect(cell.locator('.mm-alias:not(.mm-alias-identity)').first().getByRole('switch')).toBeVisible();
 
     // 行内「+ 映射」入口存在
     await expect(cell.locator('.mm-alias-add')).toBeVisible();

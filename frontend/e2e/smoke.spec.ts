@@ -41,14 +41,22 @@ const USER_PAGES: Array<[path: string, marker: string]> = [
 /** 页面主体已渲染（不是加载骨架、也不是空白） */
 async function expectRendered(page: Page): Promise<void> {
   await expect(page.locator('.main-content')).toBeVisible();
-  // 有内容：出现标题或任意交互控件
-  const hasContent = await page.evaluate(() => {
-    const main = document.querySelector('.main-content');
-    if (!main) return false;
-    const text = (main.textContent || '').trim();
-    return text.length > 10 || main.querySelectorAll('button, input, table').length > 0;
-  });
-  expect(hasContent).toBe(true);
+  // 主体内容是**异步**出现的：懒加载路由先挂骨架、接口返回后才填内容。
+  // 原先一次性 evaluate 会在骨架那一瞬读成空白 → 慢机（CI）上必现假失败，
+  // 且在本地按全量套件跑时偶发（与页面无关，失败页面每次都不同）。
+  // 改为轮询至出现标题或任意交互控件，消除这类与渲染时序相关的抖动。
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const main = document.querySelector('.main-content');
+          if (!main) return false;
+          const text = (main.textContent || '').trim();
+          return text.length > 10 || main.querySelectorAll('button, input, table').length > 0;
+        }),
+      { timeout: 10_000 },
+    )
+    .toBe(true);
 }
 
 test.describe('全站冒烟', () => {
