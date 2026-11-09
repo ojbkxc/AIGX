@@ -8,7 +8,21 @@
 //! 高危 action ⇒ 整条取最高级（同 U-F 的 plan / redemption / token 先例）。故
 //! `aigx_proxy_pool_manage` 因含 `remove`（不可逆删除，且有账号引用时拒绝）与
 //! `sync-clash`（严格镜像会摘除已消失的条目）整体判 `HighRisk`（自动进审批）；
-//! `aigx_ticket_ops` 两 action 均可回滚，判 `LowRisk`。
+//! `aigx_ticket_ops` 亦判 `HighRisk` —— 判据 4「影响域溢出到第三方」：`reply` 写入
+//! **用户可见的工单消息行**（用户经 `GET /api/tickets?id=` 读到），`close` 亦为用户可见状态；
+//! 即 AI 可直接对外（真实用户）发话，与 G6 通知族被移出 AI 面同族。见下表调用链取证。
+//!
+//! `aigx_ticket_ops` 触达用户的取证（调用链逐跳，非仅函数体 grep）：
+//! - `admin::handle_admin_reply_ticket`（`api/admin/tickets.rs:271`）→ `:288`
+//!   `state.ticket_store.reply_by_admin` → `ticket/mod.rs:204` → `append_message`
+//!   （`ticket/mod.rs:212-246`）→ `persist_message`（`ticket/mod.rs:106-108`）写
+//!   `ticket_msg:*`，并把 `reply_status` 置 `REPLY_WAIT_USER`（`:228-232`）。
+//! - `admin::handle_admin_close_ticket`（`tickets.rs:294`）→ `:301` `ticket_store.close`
+//!   → `ticket/mod.rs:249-258` 写 `ticket:*`（`status=1`）。
+//! - 用户侧可见出口：`handle_user_list_tickets`（`tickets.rs:55`）在 `?id=` 时回
+//!   `data.message`（`tickets.rs:69-79`）—— 管理员回复即呈现给该工单的用户。
+//! - 全链**无** `notify`/`email`/`webhook`/`push`/站内通知行（`ticket/mod.rs` 内 0 命中；
+//!   `ticket_store` 的写入点仅 `tickets.rs` 各 handler + `users.rs:370` 删除）。
 //!
 //! `handle_pool_test` / `handle_pool_test_account` **不在本工具**：57 §2 G3 与任务 #5 把探活族
 //! 归 `aigx_probe`（U-A，HIGH），本工具不重复覆盖其路由（同一路由两工具 owns 会让模型选错）。
@@ -17,7 +31,7 @@
 
 use super::*;
 use crate::proxy_pool as pool;
-use RiskLevel::{HighRisk, LowRisk};
+use RiskLevel::HighRisk;
 
 /// `aigx_proxy_pool_manage` 的 action 白名单（schema enum 与分派表同源，防「列了却调不到」）。
 const PROXY_POOL_MANAGE_ACTIONS: [&str; 6] = [
@@ -117,8 +131,8 @@ pub(super) fn tools() -> Vec<ToolDef> {
         td(
             "aigx_ticket_ops",
             "工单运维",
-            "写操作（可回滚）：回复工单（reply，可重开已关闭工单）与关闭工单（close）",
-            LowRisk,
+            "高危写：回复工单（reply，写入用户可见的工单消息、可重开已关闭工单）与关闭工单（close，用户可见状态；回复即对真实用户发话，需审批）",
+            HighRisk,
             "id",
             &["/api/admin/tickets/reply", "/api/admin/tickets/close"],
             ticket_ops_schema,
@@ -213,7 +227,7 @@ mod tests {
     const TICKET_COVERS: &[&str] = &["/api/admin/tickets/reply", "/api/admin/tickets/close"];
 
     /// 「列」侧：两条工具声明台账——名称/risk/target_key/covers 逐条钉死，
-    /// 高危不得进 MCP 面、低危必须在 MCP 面（三面共用同一 risk 口径）。
+    /// 两条均 HighRisk ⇒ 均不得进 MCP 面（三面共用同一 risk 口径）。
     #[test]
     fn ue_tools_declared_with_expected_risk_and_covers() {
         let pool_tool = find_tool("aigx_proxy_pool_manage").expect("代理池管理工具未注册");
@@ -234,16 +248,16 @@ mod tests {
         let ticket_tool = find_tool("aigx_ticket_ops").expect("工单运维工具未注册");
         assert_eq!(
             ticket_tool.risk,
-            RiskLevel::LowRisk,
-            "见 covers 理由：可回滚写"
+            RiskLevel::HighRisk,
+            "判据 4：reply 写入用户可见的工单消息行 ⇒ 影响域溢出到第三方，整条 HighRisk"
         );
         assert_eq!(ticket_tool.target_key, "id", "target_key");
         for c in TICKET_COVERS {
             assert!(ticket_tool.covers.contains(c), "缺 covers {c}");
         }
         assert!(
-            mcp_tools().any(|t| t.name == "aigx_ticket_ops"),
-            "低危应进 MCP 面"
+            mcp_tools().all(|t| t.name != "aigx_ticket_ops"),
+            "高危不得进 MCP 面"
         );
     }
 
