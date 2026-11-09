@@ -276,19 +276,19 @@ export default function Agent(): JSX.Element {
       return t('上游服务暂时不可用，已自动重试多轮仍未恢复。请稍等片刻后再试，或更换其他模型。');
     }
     if (s.includes('no available channel') || s.includes('no bridge available')) {
-      return t('该模型当前没有可用渠道或账号（可能均被禁用或正在冷却中）。请稍后重试，或在「渠道管理」检查该模型的渠道/账号状态，或更换其他模型。');
+      return t('该模型当前没有可用供应商或账号（可能均被禁用或正在冷却中）。请稍后重试，或在「供应商」检查该模型的供应商/账号状态，或更换其他模型。');
     }
     if (s.includes('all accounts failed')) {
       return t('该模型的可用账号均不可用（账号可能都在冷却中或需要重新登录）。请稍后重试，或到账号管理检查账号状态，或更换其他模型。');
     }
     if (s.includes('transport error') || s.includes('error sending request')) {
-      return t('上游渠道网络不可达（可能正在维护或存在网络异常）。请稍后重试，或更换其他模型。');
+      return t('上游供应商网络不可达（可能正在维护或存在网络异常）。请稍后重试，或更换其他模型。');
     }
     if (s.includes('authentication error') || s.includes('auth failed') || s.includes(' 401')) {
-      return t('上游渠道鉴权失败（渠道密钥可能已失效）。请联系管理员检查该渠道的密钥配置。');
+      return t('上游供应商鉴权失败（供应商密钥可能已失效）。请联系管理员检查该供应商的密钥配置。');
     }
     if (s.includes('rate limited') || s.includes(' 429')) {
-      return t('上游渠道限流，请稍后重试。');
+      return t('上游供应商限流，请稍后重试。');
     }
     if (s.includes('timed out')) {
       return t('上游请求超时，请稍后重试。');
@@ -460,10 +460,10 @@ export default function Agent(): JSX.Element {
           {messages.length === 0 && (
             <div className="agent-empty">
               <div className="agent-empty-title">{t('AI 运维工作台')}</div>
-              <p className="agent-empty-sub">{t('用 AI 运维你的网关——查渠道、看用户、测健康、排故障')}</p>
+              <p className="agent-empty-sub">{t('用 AI 运维你的网关——查供应商、看用户、测健康、排故障')}</p>
               <div className="agent-empty-prompts">
                 {[
-                  { icon: <Terminal size={13} />, text: t('看下系统状态，哪些渠道挂了？') },
+                  { icon: <Terminal size={13} />, text: t('看下系统状态，哪些供应商挂了？') },
                   { icon: <Eye size={13} />, text: t('今天的用量与成本报表') },
                   { icon: <MessageSquarePlus size={13} />, text: t('列出全部用户和密钥') },
                 ].map((p, i) => (
@@ -586,7 +586,7 @@ export default function Agent(): JSX.Element {
               <div className="agent-input-actions">
                 {/* 渠道锁定徽标：[agent].channel 非空时提示仅走该渠道 */}
                 {agentChannel && (
-                  <span className="agent-channel-lock" title={t('Agent 已锁定渠道，只走该渠道的请求')}>
+                  <span className="agent-channel-lock" title={t('Agent 已锁定供应商，只走该供应商的请求')}>
                     <Lock size={11} />
                     {agentChannelName || agentChannel}
                   </span>

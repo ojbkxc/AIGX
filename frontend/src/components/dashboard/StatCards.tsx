@@ -1,4 +1,6 @@
-// 概览统计卡（A2A overview 六格 + AIGX 三格：总成本/缓存节省/渠道数）。
+// 概览统计卡（区间概览六格：总请求/成功请求/总 Token/总成本/活跃天数/连续天数）。
+// 三张重复卡已删：Top 模型（ModelPanels 已有）、缓存节省估算（CachePanels 已有）、
+// 渠道（供应商健康面板已有）——见规格 §12.2。
 // 成功率 0 请求时给「—」而不是 0%（A2A 空数据口径）；连续天数含今天往前数。
 import { useTranslation } from 'react-i18next';
 import { StatCard } from '../ui';
@@ -7,21 +9,16 @@ import type { OverviewData } from '../../hooks/useDashboard';
 
 interface Props {
   overview: OverviewData | null;
-  /** 缓存节省（cache_savings.saved_estimate，配额原始值） */
-  savedEstimate?: number | null;
-  savedApprox?: boolean;
-  channels?: { total: number; enabled: number; circuitOpen: number } | null;
   lang?: string;
   rangeLabel?: string;
 }
 
-export default function StatCards({ overview, savedEstimate, savedApprox, channels, lang, rangeLabel }: Props): JSX.Element {
+export default function StatCards({ overview, lang, rangeLabel }: Props): JSX.Element {
   const { t } = useTranslation();
   const o = overview ?? {};
   const total = o.total_requests ?? 0;
   const success = o.success_requests ?? 0;
   const rate = total > 0 ? ((success / total) * 100).toFixed(1) + '%' : '—';
-  const top = (o.top_models ?? [])[0];
   const cards: JSX.Element[] = [
     <StatCard
       key="requests"
@@ -59,29 +56,7 @@ export default function StatCards({ overview, savedEstimate, savedApprox, channe
       value={fmtInt(o.streak, lang)}
       desc={t('含今天在内往前数')}
     />,
-    <StatCard
-      key="topModel"
-      title={t('Top 模型')}
-      value={top ? top.model ?? '—' : '—'}
-      desc={top ? t('请求 {{n}} 次', { n: fmtInt(top.count, lang) }) : t('所选范围内还没有模型用量')}
-    />,
-    <StatCard
-      key="saved"
-      title={t('缓存节省估算')}
-      value={savedEstimate != null ? fmtCost(savedEstimate, lang) : '—'}
-      desc={savedApprox ? t('含「其他」模型近似，仅供参考') : t('按当前定价折算')}
-    />,
   ];
-  if (channels && channels.total > 0) {
-    cards.push(
-      <StatCard
-        key="channels"
-        title={t('渠道')}
-        value={String(channels.enabled)}
-        desc={channels.circuitOpen > 0 ? t('{{n}} 个熔断中', { n: channels.circuitOpen }) : t('全部启用渠道')}
-      />,
-    );
-  }
   return (
     <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))' }}>
       {cards}

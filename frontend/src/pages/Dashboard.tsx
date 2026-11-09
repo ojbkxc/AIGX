@@ -99,17 +99,6 @@ export default function Dashboard(): JSX.Element {
   const lm = limitsQ.data;
   const me = meQ.data;
 
-  // 启用渠道数按 status==='enabled' 过滤（后端 channel_health 返回 status 字段，
-  // 取值 enabled/disabled，见 legacy.rs handle_channel_health；ChannelHealthRow
-  // 类型未声明该字段，用断言消费，避免为单个字段改 useDashboard.ts）。
-  const channels = admin && health.length > 0
-    ? {
-        total: health.length,
-        circuitOpen: health.filter((c) => String(c.circuit_breaker || 'closed').toLowerCase() === 'open').length,
-        enabled: health.filter((c) => (c as { status?: string }).status === 'enabled').length,
-      }
-    : null;
-
   const trendRows = useMemo(() => daily.map((d) => ({
     date: d.date ?? '',
     value: d.cost ?? 0,
@@ -198,9 +187,6 @@ export default function Dashboard(): JSX.Element {
       ) : (
         <StatCards
           overview={ov ?? null}
-          savedEstimate={savings?.saved_estimate}
-          savedApprox={savings?.approx}
-          channels={channels}
           lang={lang}
           rangeLabel={rLabel}
         />
@@ -208,11 +194,39 @@ export default function Dashboard(): JSX.Element {
     </div>
   );
 
-  // ── 普通用户个人视图 ──
+  // 快捷操作：紧凑工具栏（不占整卡高度），置于 header 之下、实时卡之上；
+  // 管理员与普通用户各一套（规格 §12.1）。
+  const quickActions = (
+    <div className="quick-toolbar">
+      <span className="quick-toolbar-label">{t('快捷操作')}</span>
+      {admin ? (
+        <>
+          <Link to="/channels" className="btn btn-primary btn-sm">{t('管理供应商')}</Link>
+          <Link to="/model-manage" className="btn btn-outline btn-sm">{t('模型管理')}</Link>
+          <Link to="/keys" className="btn btn-outline btn-sm">{t('管理 API 密钥')}</Link>
+          <Link to="/users" className="btn btn-outline btn-sm">{t('用户管理')}</Link>
+          <Link to="/logs" className="btn btn-outline btn-sm">{t('查看日志')}</Link>
+          <Link to="/products?tab=redemptions" className="btn btn-outline btn-sm">{t('兑换码管理')}</Link>
+          <Link to="/settings" className="btn btn-outline btn-sm">{t('调整限额')}</Link>
+        </>
+      ) : (
+        <>
+          <Link to="/chat" className="btn btn-primary btn-sm">{t('打开聊天')}</Link>
+          <Link to="/keys" className="btn btn-outline btn-sm">{t('管理 API 密钥')}</Link>
+          <Link to="/logs" className="btn btn-outline btn-sm">{t('用量日志')}</Link>
+          <Link to="/wallet" className="btn btn-outline btn-sm">{t('钱包充值')}</Link>
+          <Link to="/profile" className="btn btn-outline btn-sm">{t('个人中心')}</Link>
+        </>
+      )}
+    </div>
+  );
+
+  // ── 普通用户个人视图（快捷操作同样置顶，其余顺序不变）──
   if (!admin) {
     return (
       <div>
         {header}
+        {quickActions}
         <QuotaCards monthlyUsed={monthlyUsed} monthlyLimit={monthlyLimit} lang={lang} />
         <div style={{ marginTop: 16 }} />
         {statCardsBlock}
@@ -223,29 +237,19 @@ export default function Dashboard(): JSX.Element {
           totalTokens={modelTotalTokens} lang={lang} rLabel={rLabel} personal />
         <CachePanels ratesQuery={ratesQ} trendQuery={trend24Q} savings={savings} lang={lang} />
         <HeatmapPanel query={heatmapQ} lang={lang} />
-
-        {/* 快捷操作（个人工具箱） */}
-        <div className="card" style={{ marginTop: 16 }}>
-          <div className="card-header">
-            <h2>{t('快捷操作')}</h2>
-          </div>
-          <div className="card-body quick-actions">
-            <Link to="/chat" className="btn btn-primary">{t('打开聊天')}</Link>
-            <Link to="/keys" className="btn btn-outline">{t('管理 API 密钥')}</Link>
-            <Link to="/logs" className="btn btn-outline">{t('用量日志')}</Link>
-            <Link to="/wallet" className="btn btn-outline">{t('钱包充值')}</Link>
-            <Link to="/profile" className="btn btn-outline">{t('个人中心')}</Link>
-          </div>
-        </div>
       </div>
     );
   }
 
-  // ── 管理员全局视图 ──
+  // ── 管理员全局视图（顺序见规格 §12.2）──
   return (
     <div>
       {header}
 
+      {/* 2) 快捷操作条 */}
+      {quickActions}
+
+      {/* 3) 实时四卡 + 4) 今日用量 / Token 统计 / 本月限额三卡 */}
       <LiveCards
         realtime={rt} realtimePending={realtimeQ.isPending}
         realtimeError={realtimeQ.isError} realtimeRefetch={realtimeQ.refetch}
@@ -258,19 +262,27 @@ export default function Dashboard(): JSX.Element {
         lang={lang}
       />
 
+      {/* 5) 区间概览六卡 */}
       {statCardsBlock}
 
+      {/* 6) 供应商健康（只显示启用中的供应商，见 §13） */}
+      <PanelWrap title={t('供应商健康状态')} query={healthQ} style={{ marginBottom: 16 }}
+        emptyText={t('暂无供应商健康数据')}>
+        {(data) => <ChannelHealth data={data} lang={lang} updatedAt={healthQ.dataUpdatedAt} />}
+      </PanelWrap>
+
+      {/* 7) 消费趋势 + Token 趋势 */}
       <ConsumptionPanel query={dailyQ} rows={trendRows} lang={lang} rLabel={rLabel} />
       <TokenTrendPanel query={tokenTrendQ} lang={lang} rLabel={rLabel} />
-      {/* 缓存效率：四窗口卡 + 近 24h 双轴折线 */}
+      {/* 8) 缓存效率：四窗口卡 + 近 24h 双轴折线 */}
       <CachePanels ratesQuery={ratesQ} trendQuery={trend24Q} savings={savings} lang={lang} />
-      {/* 模型分布环形图 + Top 模型榜 */}
+      {/* 9) 模型分布环形图 + Top 模型榜 */}
       <ModelPanels query={modelsQ} donutData={donutData} colors={donutColors}
         totalTokens={modelTotalTokens} lang={lang} rLabel={rLabel} personal={false} />
 
-      {/* Top 渠道榜 + 用户消费榜 */}
+      {/* 10) Top 供应商榜 + 用户消费榜 */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(400px, 100%), 1fr))', gap: 16, marginTop: 16 }}>
-        <PanelWrap title={t('Top 渠道（{{range}}）', { range: t(rLabel) })} query={sourcesQ} emptyText={t('暂无渠道数据')}>
+        <PanelWrap title={t('Top 供应商（{{range}}）', { range: t(rLabel) })} query={sourcesQ} emptyText={t('暂无供应商数据')}>
           {(data) => <TopSources data={data} lang={lang} />}
         </PanelWrap>
         <PanelWrap title={t('用户消费排行（Top 20）')} query={userRankQ} emptyText={t('暂无用户排行数据')}>
@@ -278,28 +290,8 @@ export default function Dashboard(): JSX.Element {
         </PanelWrap>
       </div>
 
+      {/* 11) 活跃热力图 */}
       <HeatmapPanel query={heatmapQ} lang={lang} />
-
-      <PanelWrap title={t('渠道健康状态')} query={healthQ} style={{ marginTop: 16 }}
-        emptyText={t('暂无渠道健康数据')}>
-        {(data) => <ChannelHealth data={data} lang={lang} updatedAt={healthQ.dataUpdatedAt} />}
-      </PanelWrap>
-
-      {/* 快捷操作（管理员工具箱） */}
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-header">
-          <h2>{t('快捷操作')}</h2>
-        </div>
-        <div className="card-body quick-actions">
-          <Link to="/channels" className="btn btn-primary">{t('管理渠道')}</Link>
-          <Link to="/model-manage" className="btn btn-outline">{t('模型管理')}</Link>
-          <Link to="/keys" className="btn btn-outline">{t('管理 API 密钥')}</Link>
-          <Link to="/users" className="btn btn-outline">{t('用户管理')}</Link>
-          <Link to="/logs" className="btn btn-outline">{t('查看日志')}</Link>
-          <Link to="/products?tab=redemptions" className="btn btn-outline">{t('兑换码管理')}</Link>
-          <Link to="/settings" className="btn btn-outline">{t('调整限额')}</Link>
-        </div>
-      </div>
     </div>
   );
 }

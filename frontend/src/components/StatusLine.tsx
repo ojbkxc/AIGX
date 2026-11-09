@@ -107,7 +107,7 @@ export default function StatusLine(): JSX.Element | null {
         {t('错误率')} {(errorRate * 100).toFixed(1)}%
       </span>
       <span className={cls(openBreakers > 0)}>
-        {t('熔断渠道')} {openBreakers}
+        {t('熔断供应商')} {openBreakers}
       </span>
       <span className={cls(false)}>RPS {rps.toFixed(1)}</span>
       <span className={cls(latencyBad)}>

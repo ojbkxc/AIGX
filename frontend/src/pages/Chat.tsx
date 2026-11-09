@@ -421,7 +421,7 @@ export default function Chat(): JSX.Element {
     const cur = sessionsRef.current.find((s) => s.id === activeRef.current);
     addToast(cur?.title && cur.title !== '新会话'
       ? t('标题已更新')
-      : t('未能生成标题（检查渠道与模型配置）'));
+      : t('未能生成标题（检查供应商与模型配置）'));
   };
 
   useEffect(() => {
@@ -745,7 +745,7 @@ export default function Chat(): JSX.Element {
             </button>
             {titleCfgOpen && (
               <div className="sd-title-pop">
-                <label>{t('标题模型（留空 = 渠道默认首选）')}</label>
+                <label>{t('标题模型（留空 = 供应商默认首选）')}</label>
                 <input
                   className="form-input"
                   placeholder="gpt-4o-mini"

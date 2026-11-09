@@ -107,7 +107,7 @@ function AttemptStep({ a, t }: { a: RouteReplayAttemptItem; t: (k: string, opts?
       <span className="rr-step-mark" aria-hidden="true" />
       <div className="rr-step-body">
         <div className="rr-step-head">
-          <b>{a.channel_name || a.channel_id || t('未知渠道')}</b>
+          <b>{a.channel_name || a.channel_id || t('未知供应商')}</b>
           {a.status != null && (
             <span className={`rr-badge ${failed ? 'rr-badge-bad' : 'rr-badge-ok'}`}>{a.status}</span>
           )}
@@ -227,7 +227,7 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
       <div className="rr-metrics">
         <div><b>{snap?.status_code ?? '—'}</b><span>{t('状态码')}</span></div>
         <div><b>{snap?.attempts ?? '—'}</b><span>{t('尝试次数')}</span></div>
-        <div><b>{candidates.length || '—'}</b><span>{t('候选渠道')}</span></div>
+        <div><b>{candidates.length || '—'}</b><span>{t('候选供应商')}</span></div>
         <div><b>{filtered.length || '—'}</b><span>{t('跳过候选')}</span></div>
       </div>
 
@@ -282,7 +282,7 @@ export function RouteReplayView({ requestId }: { requestId: string | number }): 
 
       {filtered.length > 0 && (
         <section className="rr-section">
-          <h4>{t('被跳过的渠道')}</h4>
+          <h4>{t('被跳过的供应商')}</h4>
           <div className="rr-blocked">
             {filtered.map((f, i) => (
               <div key={`${f.channel_id}-${i}`} className="rr-blocked-item">

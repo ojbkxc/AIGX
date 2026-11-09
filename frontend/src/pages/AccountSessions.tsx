@@ -405,11 +405,16 @@ const DLG_ICONS: Record<(typeof DLG_SEGS)[number]['icon'], ReactNode> = {
 };
 
 interface AccountSessionsProps {
-  /** 作为「渠道与账号池」双 Tab 的子页内嵌时隐藏自身标题区 */
+  /** 作为「供应商」页「账号池」Tab 的子页内嵌时隐藏自身标题区 */
   embedded?: boolean;
+  /**
+   * 供应商列表下钻：`?provider=<channel_id>` 作为初始目标渠道。
+   * 只做初值（无 UI 切换），调度逻辑与内部筛选行为保持原样。
+   */
+  initialChannelFilter?: string;
 }
 
-export default function AccountSessions({ embedded = false }: AccountSessionsProps = {}): JSX.Element {
+export default function AccountSessions({ embedded = false, initialChannelFilter }: AccountSessionsProps = {}): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
 
@@ -420,8 +425,9 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  /** 目标渠道（新增/导入时的落点）；不再是用户可见的筛选维度 */
-  const [channelFilter] = useState('');
+  /** 目标渠道（新增/导入时的落点）；不再是用户可见的筛选维度。
+   *  初值来自 URL `?provider=`（供应商列表「管理账号」下钻），之后不再变化。 */
+  const [channelFilter] = useState(initialChannelFilter ?? '');
   /** 提供商筛选（对齐 Agent2API 账号页的 provider 下拉）：'' = 全部 */
   const [providerFilter, setProviderFilter] = useState('');
   const [search, setSearch] = useState('');
@@ -807,7 +813,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
         });
         channelId = created?.data?.id != null ? String(created.data.id) : '';
         if (!channelId) {
-          throw new Error(t('创建账号型渠道失败'));
+          throw new Error(t('创建账号池失败'));
         }
       }
       const payload: Record<string, unknown> = {
@@ -888,7 +894,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
     e.preventDefault();
     setError('');
     if (!bulk.channel_id) {
-      setError(t('请选择渠道'));
+      setError(t('请选择供应商'));
       return;
     }
     if (!bulk.credentials.trim()) {
@@ -985,7 +991,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
       );
       const data = res.data;
       addToast(
-        `${t('导入完成')}: ${data?.created_count ?? 0} ${t('个渠道')}` +
+        `${t('导入完成')}: ${data?.created_count ?? 0} ${t('个供应商')}` +
           (data?.error_count ? ` · ${data?.error_count} ${t('个失败')}` : ''),
       );
       setShowImportScan(false);
@@ -2074,7 +2080,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
           <h1>{t('账号池管理')}</h1>
           <p>
             {t(
-              '为账号型渠道管理多把上游凭证：账号级优先级/权重/并发上限与按上游模型的冷却，失败自动轮换'
+              '为账号池型供应商管理多把上游凭证：账号级优先级/权重/并发上限与按上游模型的冷却，失败自动轮换'
             )}
           </p>
         </div>
@@ -2084,7 +2090,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
 
       {accountChannels.length === 0 && (
         <div className="error-message">
-          {t('还没有账号型渠道：添加账号并保存时会按所选供应商自动创建账号型渠道')}
+          {t('还没有账号池：添加账号并保存时会按所选供应商自动创建账号池')}
         </div>
       )}
 
@@ -2302,7 +2308,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
           <EmptyState
             message={
               accountChannels.length === 0
-                ? t('还没有账号：点击「添加账号」，保存时会按所选供应商自动创建账号型渠道')
+                ? t('还没有账号：点击「添加账号」，保存时会按所选供应商自动创建账号池')
                 : t('暂无账号，点击「添加账号」或「批量导入」开始')
             }
             action={<Button onClick={openCreate}>{t('添加账号')}</Button>}
@@ -2594,7 +2600,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
                     ) : null}
                     {editing || accountChannels.length > 0 ? (
                       <Select
-                        label={t('渠道')}
+                        label={t('供应商')}
                         value={form.channel_id}
                         onChange={(e) => setForm({ ...form, channel_id: e.target.value })}
                         disabled={Boolean(editing)}
@@ -2607,7 +2613,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
                       </Select>
                     ) : (
                       <div className="form-hint" style={{ marginBottom: 8 }}>
-                        {t('还没有账号型渠道：保存时会按所选供应商自动创建一个')}
+                        {t('还没有账号池：保存时会按所选供应商自动创建一个账号池')}
                       </div>
                     )}
                     <Input
@@ -3100,7 +3106,7 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
             </div>
             <div className="modal-body">
               <Select
-                label={t('渠道')}
+                label={t('供应商')}
                 value={bulk.channel_id}
                 onChange={(e) => setBulk({ ...bulk, channel_id: e.target.value })}
               >
@@ -3385,14 +3391,14 @@ export default function AccountSessions({ embedded = false }: AccountSessionsPro
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
             <h3>{t('导入账号')}</h3>
             <p className="form-hint">
-              {t('解析到 {{count}} 个账号。选择统一落点渠道，或留空按文件内记录的渠道匹配。同渠道同名账号会跳过（不覆盖在线凭证）。', { count: importJsonEntries.length })}
+              {t('解析到 {{count}} 个账号。选择统一落点供应商，或留空按文件内记录的供应商匹配。同供应商同名账号会跳过（不覆盖在线凭证）。', { count: importJsonEntries.length })}
             </p>
             <Select
               value={importJsonChannel}
               onChange={(e) => setImportJsonChannel(e.target.value)}
-              aria-label={t('目标渠道')}
+              aria-label={t('目标供应商')}
             >
-              <option value="">{t('按文件内渠道匹配')}</option>
+              <option value="">{t('按文件内供应商匹配')}</option>
               {accountChannels.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}

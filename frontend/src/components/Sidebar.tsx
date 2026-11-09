@@ -10,8 +10,8 @@ import {
   Users, Wallet, ScrollText, Package,
   Settings, ChevronDown, Menu, UserRound,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Boxes, BookOpen, Sun,
-  Languages, LogOut, Bot, Headphones, CalendarCheck, Globe, CalendarClock,
-  Puzzle, Route as RouteIcon, ShieldCheck,
+  Languages, LogOut, Bot, Headphones, Globe,
+  Puzzle, Route as RouteIcon,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import MobileDrawer from './ui/MobileDrawer';
@@ -40,36 +40,35 @@ const navItems: NavItem[] = [
   { path: '/keys', labelKey: 'API 密钥', icon: KeyRound },
   { path: '/logs', labelKey: '用量日志', icon: ScrollText },
   { path: '/model-manage', labelKey: '模型管理', icon: Boxes, adminOnly: true },
-  // 渠道与账号池合并为一页双 Tab（账号型渠道是账号池的内部容器，不单独露脸）
-  { path: '/channels', labelKey: '渠道与账号池', icon: Satellite, adminOnly: true },
+  // 供应商页：统一列表（API Key 型 + 账号池型）+ 账号池 / 健康 / 签到 子 Tab
+  { path: '/channels', labelKey: '供应商', icon: Satellite, adminOnly: true },
   { path: '/users', labelKey: '用户管理', icon: Users, adminOnly: true },
   { path: '/products', labelKey: '套餐与兑换码', icon: Package, adminOnly: true },
   // 路由域（#40）：分层档案 / 基础策略 / 预演 / 回放 / 粘滞单页多模式
   { path: '/routing', labelKey: '路由', icon: RouteIcon, adminOnly: true },
   { path: '/settings', labelKey: '系统设置', icon: Settings, adminOnly: true },
   { path: '/agent', labelKey: 'AI 运维', icon: Bot, adminOnly: true },
-  { path: '/checkin', labelKey: '签到中心', icon: CalendarCheck, adminOnly: true },
   { path: '/wallet', labelKey: '钱包', icon: Wallet },
   { path: '/tickets', labelKey: '工单', icon: Headphones },
   { path: '/profile', labelKey: '个人中心', icon: UserRound },
   // 网络代理池（集中管理出口：账号 proxy 字段 pool:/rotate 编码引用）
   { path: '/proxy-pool', labelKey: '网络代理', icon: Globe, adminOnly: true },
-  // 定时任务（对照 Agent2API「定时任务」页：凭证维护/模型目录刷新/版本检查等）
-  { path: '/scheduled-tasks', labelKey: '定时任务', icon: CalendarClock, adminOnly: true },
   // 插件管理（契约对齐 Agent2API 插件页；后端建设中整页降级空态，就绪即生效）
   { path: '/plugins', labelKey: '插件管理', icon: Puzzle, adminOnly: true },
-  // 用户工具权限（#34/#65：终端用户工具回路策略配置，默认关）
-  { path: '/user-tools', labelKey: '用户工具权限', icon: ShieldCheck, adminOnly: true },
 ];
 // 分组平铺（new-api NavGroup 同款：短分组标签 + 组内平铺菜单，无折叠交互）。
-// 管理员 19 项 / 客户 8 项。合并历史：
+// 管理员 16 项 / 客户 8 项。合并历史：
 // - 模型映射 → 模型管理页统一维护（渠道表单里已移除，避免三处可改）
 // - 易支付 + 用户分组 + 通知设置 + 安全监控 + IP 管理 → 系统设置 tab
 // - 定价倍率曾并入系统设置计费 tab，现拆回独立页（/pricing）
 // - 订单记录 → 钱包页内 tab
 // - 系统信息（AI 网关网络层管理）→ 系统设置运维 tab 网络层子标签（已下沉）
-// - 账号池 → 并入「渠道与账号池」双 Tab（账号型渠道只是账号池的容器）
-// - 定价倍率 → 并入模型管理第三 Tab（模型价格/别名/倍率是同一条记录的不同侧面）
+// - 账号池 → 并入「供应商」页「账号池」Tab（账号池是供应商的凭证形态）
+// - 签到中心 → 并入「供应商」页「签到」Tab（每日额度领取与账号池强耦合）
+// - 用户工具权限 → 并入「用户管理」页「工具权限」Tab
+// - 定时任务 → 并入「系统设置」分类（scheduled）
+// - 定价倍率 → 并入模型管理「定价倍率」Tab（模型价格/别名/倍率是同一条记录的不同侧面）
+// - 元信息覆盖 → 并入模型管理「模型目录」行内能力弹窗 + 工具栏「覆盖管理」
 //
 // 分组按路径取条目而非下标：下标一旦因增删菜单漂移，就会静默错配到别的菜单。
 function navItemOf(path: string): NavItem {
@@ -96,20 +95,20 @@ const navGroups: NavGroup[] = [
     adminOnly: true,
     items: [
       navItemOf('/model-manage'),    // 模型管理（admin 可写；普通用户只读自己分组可见的模型与价格）
-      navItemOf('/channels'),        // 渠道与账号池（上游渠道 + 账号池双 Tab）
+      navItemOf('/channels'),        // 供应商（统一列表 + 账号池 / 健康 / 签到 子 Tab）
       navItemOf('/proxy-pool'),      // 网络代理（出口代理池）
-      navItemOf('/users'),           // 用户管理
+      navItemOf('/users'),           // 用户管理（含「工具权限」Tab）
       navItemOf('/products'),        // 套餐与兑换码（双 Tab）
       navItemOf('/routing'),         // 路由（分层档案 / 预演 / 回放 / 粘滞）
-      navItemOf('/checkin'),         // 签到中心
-      navItemOf('/user-tools'),      // 用户工具权限（工具回路策略）
-      navItemOf('/scheduled-tasks'), // 定时任务
-      // 系统诊断 → 并入「渠道与账号池」第三 Tab「健康」（07 E.3：诊断三件套
+      // 签到中心 → 并入「供应商」页「签到」Tab（每日额度领取与账号池强耦合），顶级菜单下线
+      // 用户工具权限 → 并入「用户管理」页「工具权限」Tab，顶级菜单下线
+      // 定时任务 → 并入「系统设置」分类（scheduled），顶级菜单下线
+      // 系统诊断 → 并入「供应商」页「健康」Tab（07 E.3：诊断三件套
       // 全部以渠道为粒度，看到问题就在旁边修），顶级菜单下线
       // 文档 → 并入「API 密钥」第二 Tab「接入文档」（07 E.3：密钥与文档是
       // 同一件事的两半；且全员可见——普通用户也要知道怎么填客户端），顶级菜单下线
       navItemOf('/plugins'),        // 插件管理（后端建设中降级空态）
-      navItemOf('/settings'),        // 系统设置
+      navItemOf('/settings'),        // 系统设置（含「定时任务」分类）
       navItemOf('/agent'),           // AI 运维
     ],
   },

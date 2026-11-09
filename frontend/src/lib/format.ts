@@ -74,10 +74,17 @@ export function fmtPct(rate: number | null | undefined): string {
 /**
  * 成本读数：¥ + 原始配额值（口径定案见文件头；null → —）。
  * 全仪表盘唯一出口——旧 fmtMoney 与 cost/100 两套并存是 bug。
+ * 货币金额统一两位小数 + 千分位；负数写成 `-¥1.00`（负号在币号外）。
  */
 export function fmtCost(value: number | null | undefined, lang?: Lang): string {
   if (value == null) return '—';
-  return `¥${fmtInt(Math.round(Number(value) || 0), lang)}`;
+  const n = Number(value) || 0;
+  const rounded = Number(n.toFixed(2));
+  const abs = Math.abs(rounded).toLocaleString(
+    NUMBER_LOCALES[isZh(lang) ? 'zh' : 'en'] ?? 'en-US',
+    { minimumFractionDigits: 2, maximumFractionDigits: 2 },
+  );
+  return `${rounded < 0 ? '-' : ''}¥${abs}`;
 }
 
 // ── 图表几何（A2A report-charts.ts 移植，纯计算便于单测） ──────────

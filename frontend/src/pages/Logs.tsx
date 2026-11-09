@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Trash2, Eraser, EyeOff, Eye } from 'lucide-react';
 import { api } from '../api';
 import { isAdmin, fmtCompact } from '../lib/utils';
+import { fmtCost } from '../lib/format';
 import { getFilter, setFilter } from '../lib/filterMemory';
 import {
   applyTableColumns,
@@ -89,7 +90,7 @@ export interface AuditLogItem {
 
 /** key_id 特殊来源 → 可读标签（非真实 API Key） */
 const SOURCE_LABELS: Record<string, string> = {
-  chat_test: '渠道调试',
+  chat_test: '供应商调试',
   agent: 'AI 运维',
   'playground:chat': 'Playground 对话',
   'playground:images': 'Playground 图片',
@@ -129,7 +130,7 @@ function logsReqColDefs(admin: boolean): TableColumnDef[] {
     ...(admin ? [{ key: 'user', label: '用户', width: 190 }] : []),
     { key: 'time', label: '时间', width: 170, locked: true },
     { key: 'model', label: '模型', width: 150 },
-    ...(admin ? [{ key: 'channel', label: '渠道', width: 120 }] : []),
+    ...(admin ? [{ key: 'channel', label: '供应商', width: 120 }] : []),
     { key: 'tokens', label: 'Tokens', align: 'right' as const, width: 110 },
     { key: 'cost', label: '费用', align: 'right' as const, width: 100 },
     { key: 'latency', label: '延迟', align: 'right' as const, width: 90 },
@@ -153,7 +154,8 @@ const DEFAULT_LOGS_FILTERS: Filters = { user: '', model: '', channel: '', status
 
 export default function Logs(): JSX.Element {
   const admin = isAdmin();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const [tab, setTab] = useState<LogTab>('requests');
   const [view, setView] = useState<LogView>('table');
   const [logs, setLogs] = useState<LogItem[]>([]);
@@ -634,7 +636,7 @@ export default function Logs(): JSX.Element {
               type="button"
               className="btn btn-outline btn-sm"
               onClick={() => setMasked((v) => !v)}
-              title={masked ? t('显示敏感信息') : t('隐藏敏感信息（用户邮箱/渠道名等打码）')}
+              title={masked ? t('显示敏感信息') : t('隐藏敏感信息（用户邮箱/供应商名等打码）')}
               style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
             >
               {masked ? <EyeOff size={14} /> : <Eye size={14} />}
@@ -689,7 +691,7 @@ export default function Logs(): JSX.Element {
                   <tr>
                     <th>{t('请求 ID')}</th>
                     <th>{t('模型')}</th>
-                    <th>{t('渠道')}</th>
+                    <th>{t('供应商')}</th>
                     <th>{t('已运行')}</th>
                     <th>{t('类型')}</th>
                     <th>{t('操作')}</th>
@@ -740,8 +742,8 @@ export default function Logs(): JSX.Element {
             )}
             {admin && (
               <div className="form-group">
-                <label>{t('渠道 ID')}</label>
-                <input className="form-input" value={filters.channel} onChange={(e) => setFilters({ ...filters, channel: e.target.value })} placeholder={t('按渠道过滤')} />
+                <label>{t('供应商 ID')}</label>
+                <input className="form-input" value={filters.channel} onChange={(e) => setFilters({ ...filters, channel: e.target.value })} placeholder={t('按供应商过滤')} />
               </div>
             )}
             <div className="form-group">
@@ -756,7 +758,7 @@ export default function Logs(): JSX.Element {
                     else setPage(1);
                   }
                 }}
-                placeholder={t('模型 / 渠道 / 错误信息')}
+                placeholder={t('模型 / 供应商 / 错误信息')}
               />
             </div>
             <div className="form-group">
@@ -973,7 +975,7 @@ export default function Logs(): JSX.Element {
                       </td>
                       )}
                       {visibleKeySet.has('cost') && (
-                      <td style={{ whiteSpace: 'nowrap' }}>¥{l.cost}</td>
+                      <td style={{ whiteSpace: 'nowrap' }}>{fmtCost(l.cost, lang)}</td>
                       )}
                       {visibleKeySet.has('latency') && (
                       <td style={{ whiteSpace: 'nowrap' }}>{l.latency_ms}ms</td>

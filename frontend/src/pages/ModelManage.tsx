@@ -16,6 +16,7 @@ import {
   RefreshCw,
   Search,
   Settings2,
+  SlidersHorizontal,
   Tag,
   Trash2,
   Video,
@@ -65,7 +66,7 @@ const LS_PSZ = 'aigx-tbl-pagesize.models';
 
 /** 公共层列声明（定义在 COL_DEFAULT_ALIGN 之后；见下方 MM_COL_DEFS） */
 
-type MainTab = 'catalog' | 'meta' | 'ratio';
+type MainTab = 'catalog' | 'ratio';
 /** 启停筛选（多一档「有映射」，对齐 Agent2API MODEL_STATE_OPTIONS） */
 type StateFilter = 'all' | 'on' | 'off' | 'mapped';
 type PriceFilter = 'all' | 'priced' | 'unpriced';
@@ -494,6 +495,8 @@ export default function ModelManage(): JSX.Element {
   const [metaForm, setMetaForm] = useState<MetaForm>(EMPTY_META_FORM);
   const [metaError, setMetaError] = useState('');
   const [savingMeta, setSavingMeta] = useState(false);
+  // 覆盖项管理弹窗（原「元信息覆盖」Tab 并入目录后，列表 + 删除入口收在这里）
+  const [overridesModal, setOverridesModal] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -610,7 +613,7 @@ export default function ModelManage(): JSX.Element {
   const removePrice = (row: ManagedModel) => {
     setConfirmState({
       title: t('删除定价'),
-      message: t('删除后该模型将按 0 计费（如仍有渠道声明则会放行）。确认删除？') + ` ${row.id}`,
+      message: t('删除后该模型将按 0 计费（如仍有供应商声明则会放行）。确认删除？') + ` ${row.id}`,
       confirmText: t('删除'),
       danger: true,
       onConfirm: async () => {
@@ -1299,10 +1302,11 @@ export default function ModelManage(): JSX.Element {
   }, [searchParams]);
 
   // 旧 /pricing 重定向到 ?tab=ratio：按 URL 参数切 Tab（只认已注册的 Tab，
-  // 避免手改 URL 把 tab 置成非法值导致整页空白）。
+  // 避免手改 URL 把 tab 置成非法值导致整页空白）。?tab=meta 已并入目录
+  // （由 App 重定向到 ?tab=catalog），这里忽略未知值回落到当前 tab。
   useEffect(() => {
     const want = searchParams.get('tab');
-    if (want && (['catalog', 'meta', 'ratio'] as string[]).includes(want)) {
+    if (want && (['catalog', 'ratio'] as string[]).includes(want)) {
       setTab(want as MainTab);
     }
   }, [searchParams]);
@@ -1451,7 +1455,7 @@ export default function ModelManage(): JSX.Element {
               {row.sources.slice(0, 3).map((s, i) => (
                 <Tooltip
                   key={`${s.kind}-${s.channel_id}-${s.account_id ?? ''}-${i}`}
-                  label={`${s.kind === 'account' ? t('账号') : t('渠道')}：${s.name}`}
+                  label={`${s.kind === 'account' ? t('账号') : t('供应商')}：${s.name}`}
                 >
                   <span className={`mm-src-tag${s.kind === 'account' ? '' : ' provider'}`}>
                     {/* 来源色点：远程蓝 / 内置灰 / 手动琥珀（Agent2API .src i 三态） */}
@@ -1551,6 +1555,9 @@ export default function ModelManage(): JSX.Element {
                     }}
                   >
                     <span className="mm-alias-text">{entry.alias}</span>
+                    {/* 对外名 → 目标名：目标名常显（弱化色/小字号），不再只藏在 tooltip 里 */}
+                    <span className="mm-alias-arrow" aria-hidden="true">→</span>
+                    <span className="mm-alias-target">{entry.target}</span>
                     {entry.reasoning_effort && (
                       <span className="mm-alias-reason" title={`映射思考等级: ${entry.reasoning_effort}`}>
                         · {entry.reasoning_effort}
@@ -1574,7 +1581,9 @@ export default function ModelManage(): JSX.Element {
                   title={t('未配置改名：请求按模型原样透传（自身名可直接调用）')}
                 >
                   <span className="mm-alias-text">{row.id}</span>
-                  <span className="mm-alias-identity-tag">{t('原样透传')}</span>
+                  <span className="mm-alias-arrow" aria-hidden="true">→</span>
+                  <span className="mm-alias-target">{row.id}</span>
+                  <span className="mm-alias-identity-tag">{t('原样')}</span>
                   <button
                     type="button"
                     className="mm-alias-x"
@@ -1607,7 +1616,7 @@ export default function ModelManage(): JSX.Element {
                 disabled={row.sources.length === 0}
                 title={
                   row.sources.length === 0
-                    ? t('该模型没有可用来源（启用账号或渠道），无法测试')
+                    ? t('该模型没有可用来源（启用账号或供应商），无法测试')
                     : t('沿真实链路发一条最小对话，验证可用性与延迟')
                 }
                 onClick={() => setTestTarget(row)}
@@ -1719,7 +1728,7 @@ export default function ModelManage(): JSX.Element {
       <div className="page-header">
         <div>
           <h1>{t('模型管理')}</h1>
-          <p>{t('渠道与账号池的模型统一在此管理：测试、启停、定价、映射。')}</p>
+          <p>{t('供应商与账号池的模型统一在此管理：测试、启停、定价、映射。')}</p>
         </div>
         <button className="btn btn-outline btn-sm" onClick={() => void load()} disabled={loading} style={{ gap: 6 }}>
           <RefreshCw size={13} />
@@ -1732,7 +1741,6 @@ export default function ModelManage(): JSX.Element {
       <Tabs
         items={[
           { key: 'catalog', label: t('模型目录') },
-          { key: 'meta', label: t('元信息覆盖') },
           { key: 'ratio', label: t('定价倍率') },
         ]}
         active={tab}
@@ -1742,73 +1750,6 @@ export default function ModelManage(): JSX.Element {
 
       {tab === 'ratio' ? (
         <RatioPanel />
-      ) : tab === 'meta' ? (
-        <div className="mm-panel">
-          <div className="mm-titlebar">
-            <div className="mm-title">
-              <span className="mm-title-name">{t('元信息覆盖')}</span>
-              <span className="mm-meta">{t('覆盖内置推断的归属方 / 上下文长度 / 能力声明')}</span>
-            </div>
-            <div className="mm-head-actions">
-              <button className="btn btn-outline btn-sm" onClick={openMetaCreate} style={{ gap: 6 }}>
-                <Plus size={13} />
-                {t('新增覆盖')}
-              </button>
-            </div>
-          </div>
-          {Object.keys(overrides).length === 0 ? (
-            <EmptyState
-              icon="🏷️"
-              message={t('暂无覆盖项。内置推断已覆盖常见模型，需要自定义归属/上下文/能力时在此添加')}
-            />
-          ) : (
-            <div className="mm-table-wrap table-wrapper">
-              <table className="mm-table">
-                <thead>
-                  <tr>
-                    <th>{t('模型')}</th>
-                    <th>{t('归属方')}</th>
-                    <th>{t('上下文长度')}</th>
-                    <th>{t('能力')}</th>
-                    <th style={{ width: 96 }}>{t('操作')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {Object.entries(overrides).map(([model, o]) => (
-                    <tr key={model}>
-                      <td>
-                        <span className="mm-mid">{model}</span>
-                      </td>
-                      <td>{o.owned_by}</td>
-                      <td>{o.context_length ?? '—'}</td>
-                      <td>
-                        <div className="mm-sources">
-                          {(o.capabilities ?? []).map((c) => (
-                            <span key={c} className="mm-src-tag provider">{c}</span>
-                          ))}
-                        </div>
-                      </td>
-                      <td>
-                        <div className="mm-actions">
-                          <Tooltip label={t('编辑')}>
-                            <button type="button" className="mm-act-btn" onClick={() => openMetaEdit(model)}>
-                              <Pencil size={11} />
-                            </button>
-                          </Tooltip>
-                          <Tooltip label={t('删除')}>
-                            <button type="button" className="mm-act-btn danger icon-only" onClick={() => removeMeta(model)}>
-                              <Trash2 size={11} />
-                            </button>
-                          </Tooltip>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
       ) : (
         <div className="mm-layout">
           {/* 左栏：分组导航（对齐 Agent2API prov-rail） */}
@@ -1825,9 +1766,9 @@ export default function ModelManage(): JSX.Element {
               <span className="mm-rail-count">{providerStats.total}</span>
             </button>
 
-            <div className="mm-rail-title">{t('渠道供应商')}</div>
+            <div className="mm-rail-title">{t('供应商')}</div>
             {channelRails.length === 0 ? (
-              <div className="mm-rail-empty">{t('暂无启用的渠道')}</div>
+              <div className="mm-rail-empty">{t('暂无启用的供应商')}</div>
             ) : (
               channelRails.map((c) => (
                 <button
@@ -1946,6 +1887,17 @@ export default function ModelManage(): JSX.Element {
                   <Plus size={13} />
                   {t('添加模型')}
                 </button>
+                {/* 原「元信息覆盖」Tab 的列表 + 新增入口收进这个弹窗（Tab 已并入目录） */}
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  onClick={() => setOverridesModal(true)}
+                  style={{ gap: 6 }}
+                  title={t('查看 / 新增 / 删除元信息覆盖（归属方、上下文长度、能力声明）')}
+                >
+                  <SlidersHorizontal size={13} />
+                  {t('覆盖管理')}
+                </button>
                 <div className="mm-colset" ref={colPanelRef}>
                   <button
                     type="button"
@@ -2028,16 +1980,16 @@ export default function ModelManage(): JSX.Element {
                 aria-label={t('来源筛选')}
               >
                 <option value="all">{t('全部来源')}</option>
-                <option value="channel">{t('仅渠道')}</option>
+                <option value="channel">{t('仅供应商')}</option>
                 <option value="account">{t('仅账号池')}</option>
               </select>
               <select
                 className="form-input mm-mini-select"
                 value={channelFilter}
                 onChange={(e) => setChannelFilter(e.target.value)}
-                aria-label={t('渠道筛选')}
+                aria-label={t('供应商筛选')}
               >
-                <option value="all">{t('全部渠道')}</option>
+                <option value="all">{t('全部供应商')}</option>
                 {channelOptions.map(([cid, name]) => (
                   <option key={cid} value={cid}>
                     {name}
@@ -2145,7 +2097,7 @@ export default function ModelManage(): JSX.Element {
                     ? t('没有匹配「') + query + t('」的模型')
                     : stateFilter !== 'all' || priceFilter !== 'all' || navKey !== 'all'
                       ? t('没有匹配的模型')
-                      : t('暂无模型。请先在渠道管理或账号池里配置上游。')
+                      : t('暂无模型。请先在供应商或账号池里配置上游。')
                 }
               />
             ) : (
@@ -2232,6 +2184,88 @@ export default function ModelManage(): JSX.Element {
                 )}
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ── 覆盖管理弹窗（原「元信息覆盖」Tab 的列表/新增/删除入口，Tab 已并入目录） ── */}
+      {overridesModal && (
+        <div className="modal-overlay" onClick={() => setOverridesModal(false)}>
+          <div className="modal mm-overrides-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{t('元信息覆盖')}</h3>
+              <button className="modal-close" onClick={() => setOverridesModal(false)}>
+                &times;
+              </button>
+            </div>
+            <div className="modal-body">
+              <p className="mm-dialog-note">
+                {t('覆盖内置推断的归属方 / 上下文长度 / 能力声明')}
+              </p>
+              <div className="mm-overrides-toolbar">
+                <button className="btn btn-primary btn-sm" onClick={openMetaCreate} style={{ gap: 6 }}>
+                  <Plus size={13} />
+                  {t('新增覆盖')}
+                </button>
+              </div>
+              {Object.keys(overrides).length === 0 ? (
+                <EmptyState
+                  icon="🏷️"
+                  message={t('暂无覆盖项。内置推断已覆盖常见模型，需要自定义归属/上下文/能力时在此添加')}
+                />
+              ) : (
+                <div className="mm-table-wrap mm-overrides-table">
+                  <table className="mm-table">
+                    <thead>
+                      <tr>
+                        <th>{t('模型')}</th>
+                        <th>{t('归属方')}</th>
+                        <th>{t('上下文长度')}</th>
+                        <th>{t('能力')}</th>
+                        <th style={{ width: 96 }}>{t('操作')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(overrides).map(([model, o]) => (
+                        <tr key={model}>
+                          <td>
+                            <span className="mm-mid">{model}</span>
+                          </td>
+                          <td>{o.owned_by}</td>
+                          <td>{o.context_length ?? '—'}</td>
+                          <td>
+                            <div className="mm-sources">
+                              {(o.capabilities ?? []).map((c) => (
+                                <span key={c} className="mm-src-tag provider">{c}</span>
+                              ))}
+                            </div>
+                          </td>
+                          <td>
+                            <div className="mm-actions">
+                              <Tooltip label={t('编辑')}>
+                                <button type="button" className="mm-act-btn" onClick={() => openMetaEdit(model)}>
+                                  <Pencil size={11} />
+                                </button>
+                              </Tooltip>
+                              <Tooltip label={t('删除')}>
+                                <button type="button" className="mm-act-btn danger icon-only" onClick={() => removeMeta(model)}>
+                                  <Trash2 size={11} />
+                                </button>
+                              </Tooltip>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setOverridesModal(false)}>
+                {t('关闭')}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2714,15 +2748,15 @@ export default function ModelManage(): JSX.Element {
             </div>
             <div className="modal-body">
               <p className="mm-dialog-note">
-                {t('从上游 /models 接口拉取模型清单（写入渠道的「上游发现」快照）。账号型渠道请在账号池里维护模型白名单。')}
+                {t('从上游 /models 接口拉取模型清单（写入供应商的「上游发现」快照）。账号池型供应商请在账号池里维护模型白名单。')}
               </p>
               {fetchChannels.length === 0 ? (
-                <EmptyState icon="📡" message={t('暂无启用的可拉取渠道')} />
+                <EmptyState icon="📡" message={t('暂无启用的可拉取供应商')} />
               ) : (
                 <>
                   <div className="mm-fetch-toolbar">
                     <span className="mm-fetch-summary">
-                      {t('共')} {fetchChannels.length} {t('个渠道')}
+                      {t('共')} {fetchChannels.length} {t('个供应商')}
                       {Object.keys(fetchDone).length > 0 &&
                         ` · ${t('成功')} ${Object.keys(fetchDone).length}`}
                       {Object.keys(fetchFailed).length > 0 &&
@@ -2813,7 +2847,7 @@ export default function ModelManage(): JSX.Element {
             </div>
             <div className="modal-body">
               <p className="mm-dialog-note">
-                {t('手动登记上游未发现（或暂未接入渠道）的模型，使其出现在模型清单里，可定价 / 测试 / 启停。不编造能力位元数据。')}
+                {t('手动登记上游未发现（或暂未接入供应商）的模型，使其出现在模型清单里，可定价 / 测试 / 启停。不编造能力位元数据。')}
               </p>
               {addModelError && <div className="error-message">{addModelError}</div>}
               <div className="form-group">

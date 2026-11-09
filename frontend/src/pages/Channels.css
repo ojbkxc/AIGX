@@ -177,6 +177,42 @@
   opacity: 0.75;
 }
 
+/* 形态徽章（供应商列表新增列：API Key 型 / 账号池型） */
+.ch-kind-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.ch-kind-badge svg {
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+.ch-kind-badge.is-key {
+  background: var(--accent-soft, rgba(99, 102, 241, 0.08));
+  color: var(--accent-color, #6366f1);
+  border-color: color-mix(in srgb, var(--accent-color, #6366f1) 28%, transparent);
+}
+
+.ch-kind-badge.is-account {
+  background: var(--code-bg);
+  color: var(--code-color);
+  border-color: var(--border-color);
+}
+
+/* 账号数列：tabular-nums 让 enabled/total 对齐 */
+.channels-table .col-accounts {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-main);
+}
+
 /* 状态徽章 */
 .ch-status-badge {
   display: inline-flex;

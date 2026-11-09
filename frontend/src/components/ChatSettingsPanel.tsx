@@ -109,7 +109,7 @@ export default function ChatSettingsPanel(): JSX.Element {
           </div>
 
           <div className="form-group">
-            <label>{t('渠道锁定')}</label>
+            <label>{t('供应商锁定')}</label>
             <select
               className="form-input"
               value={titleChannel}
@@ -122,7 +122,7 @@ export default function ChatSettingsPanel(): JSX.Element {
                 </option>
               ))}
             </select>
-            <div className="form-hint">{t('指定后标题生成只走该渠道；留空按全局优先级自动选路。')}</div>
+            <div className="form-hint">{t('指定后标题生成只走该供应商；留空按全局优先级自动选路。')}</div>
           </div>
 
           <div className="form-group">

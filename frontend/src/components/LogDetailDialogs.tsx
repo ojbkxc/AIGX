@@ -4,6 +4,7 @@ import type { RequestLogItem, AuditLogItem } from '../pages/Logs';
 import { sourceLabel } from '../pages/Logs';
 import { Tabs } from './ui';
 import { RouteReplayView } from './RouteReplay';
+import { fmtCost } from '../lib/format';
 
 /** 详情弹窗的视图分档：概览 / 对话 / 路由 / 原始报文 */
 type DetailTab = 'overview' | 'conversation' | 'route' | 'raw';
@@ -33,13 +34,13 @@ export function RequestLogDetail({ log, admin, onClose }: {
     // 已剥离），故标签用「模型」而不再写「模型（映射后）」，避免误导。
     { label: admin ? t('模型（映射后）') : t('模型'), value: log.model || '—', mono: true },
     ...(admin ? [{ label: t('原始模型名'), value: log.origin_model || '—', mono: true }] : []),
-    ...(admin ? [{ label: t('渠道'), value: log.channel_name ? `${log.channel_name}${log.channel_id ? ` (#${log.channel_id})` : ''}` : (log.channel_id ? `#${log.channel_id}` : '—') }] : []),
+    ...(admin ? [{ label: t('供应商'), value: log.channel_name ? `${log.channel_name}${log.channel_id ? ` (#${log.channel_id})` : ''}` : (log.channel_id ? `#${log.channel_id}` : '—') }] : []),
     { label: t('输入 Tokens'), value: String(log.input_tokens ?? 0) },
     { label: t('输出 Tokens'), value: String(log.output_tokens ?? 0) },
-    { label: t('费用'), value: `¥${log.cost ?? 0}` },
+    { label: t('费用'), value: fmtCost(log.cost ?? 0) },
     ...(admin ? [
-      { label: t('渠道成本'), value: `¥${log.channel_cost ?? log.cost ?? 0}` },
-      { label: t('利润'), value: log.channel_cost != null ? `¥${(log.cost ?? 0) - log.channel_cost}` : '—' },
+      { label: t('供应商成本'), value: fmtCost(log.channel_cost ?? log.cost ?? 0) },
+      { label: t('利润'), value: log.channel_cost != null ? fmtCost((log.cost ?? 0) - log.channel_cost) : '—' },
     ] : []),
     { label: t('延迟'), value: `${log.latency_ms ?? 0}ms` },
     { label: t('状态码'), value: String(log.status_code ?? '—') },
@@ -164,7 +165,7 @@ export function RequestLogDetail({ log, admin, onClose }: {
           {(log.account_skips?.length ?? 0) > 0 && (
             <div className="log-detail-route-row">
               <span className="log-detail-route-key">
-                {t('逐账号跳过（{{n}} 渠道）', { n: log.account_skips?.length ?? 0 })}
+                {t('逐账号跳过（{{n}} 供应商）', { n: log.account_skips?.length ?? 0 })}
               </span>
               <div className="rr-askips">
                 {(log.account_skips ?? []).map((g) => (

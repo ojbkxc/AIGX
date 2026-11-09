@@ -15,7 +15,7 @@ export default function TopSources({ data, lang }: { data: TopSource[]; lang?: s
         <thead>
           <tr>
             <th>#</th>
-            <th>{t('渠道')}</th>
+            <th>{t('供应商')}</th>
             <th style={{ width: '22%' }}>{t('请求占比')}</th>
             <th className="num">{t('请求数')}</th>
             <th className="num">{t('消费')}</th>

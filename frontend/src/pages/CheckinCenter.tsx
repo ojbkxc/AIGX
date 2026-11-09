@@ -137,7 +137,12 @@ const CK_REC_COL_DEFS: TableColumnDef[] = [
   { key: 'note', label: '说明', width: 260 },
 ];
 
-export default function CheckinCenter(): JSX.Element {
+interface CheckinCenterProps {
+  /** 作为供应商页「签到」子页内嵌时隐藏自身标题区（页内 4 个二级 Tab 保留） */
+  embedded?: boolean;
+}
+
+export default function CheckinCenter({ embedded = false }: CheckinCenterProps = {}): JSX.Element {
   // 签到记录表列设置（公共层；分页为服务端 offset/limit 原口径不动）
   const [recCols, setRecCols] = useState<TableColumnState>(() => readTableColumns(LS_TCOLS, CK_REC_COL_DEFS));
   const [recPanelOpen, setRecPanelOpen] = useState(false);
@@ -870,28 +875,30 @@ export default function CheckinCenter(): JSX.Element {
 
   return (
     <div>
-      <div className="page-header">
-        <div>
-          <h1>{t('签到中心')}</h1>
-          <p>
-            {t(
-              '替账号池里的上游账号每日领取它们自带的额度。与钱包里的「用户签到」是两套。'
-            )}
-          </p>
+      {!embedded && (
+        <div className="page-header">
+          <div>
+            <h1>{t('签到中心')}</h1>
+            <p>
+              {t(
+                '替账号池里的上游账号每日领取它们自带的额度。与钱包里的「用户签到」是两套。'
+              )}
+            </p>
+          </div>
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={() => void load()}
+            disabled={loading}
+            style={{ gap: 6 }}
+          >
+            <RefreshCw size={13} /> {t('刷新')}
+          </button>
         </div>
-        <button
-          className="btn btn-outline btn-sm"
-          onClick={() => void load()}
-          disabled={loading}
-          style={{ gap: 6 }}
-        >
-          <RefreshCw size={13} /> {t('刷新')}
-        </button>
-      </div>
+      )}
 
       {error && <div className="error-message">{error}</div>}
 
-      <div className="sub-tabs">
+      <div className="sub-tabs ck-sub-tabs">
         {tabs.map((item) => (
           <button
             key={item.key}

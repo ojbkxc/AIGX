@@ -118,7 +118,7 @@ export default function GroupEditor({
 
       {groups.length === 0 ? (
         <div className="rt-state-note rt-state-inherit">
-          {t('还没有路由组。没有组时请求只走 global 与模型级档案 —— 需要「某模型专走某批渠道/账号」时才建组。')}
+          {t('还没有路由组。没有组时请求只走 global 与模型级档案 —— 需要「某模型专走某批供应商/账号」时才建组。')}
         </div>
       ) : null}
 

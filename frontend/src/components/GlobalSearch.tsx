@@ -95,7 +95,7 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
   const rows: Row[] = useMemo(() => {
     const out: Row[] = [];
     for (const p of pageHits) out.push({ kind: 'page', path: p.path, title: t(p.labelKey), sub: t('页面') });
-    for (const c of hits.channel.slice(0, 8)) out.push({ kind: 'entity', entity: 'channel', path: '/channels', title: c.name || '—', sub: c.base_url || '渠道' });
+    for (const c of hits.channel.slice(0, 8)) out.push({ kind: 'entity', entity: 'channel', path: '/channels', title: c.name || '—', sub: c.base_url || '供应商' });
     for (const u of hits.user.slice(0, 8)) out.push({ kind: 'entity', entity: 'user', path: '/users', title: u.email || u.username || '—', sub: u.role || '用户' });
     for (const m of hits.model.slice(0, 8)) out.push({ kind: 'entity', entity: 'model', path: '/model-manage', title: m.id || '—', sub: m.owned_by || '模型' });
     for (const k of hits.token.slice(0, 8)) out.push({ kind: 'entity', entity: 'token', path: '/keys', title: k.name || '—', sub: k.group || '令牌' });
@@ -130,7 +130,7 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
     const cEnd = cStart + hits.channel.length;
     const uEnd = cEnd + hits.user.length;
     const mEnd = uEnd + hits.model.length;
-    if (i === cStart && hits.channel.length > 0) return t('渠道');
+    if (i === cStart && hits.channel.length > 0) return t('供应商');
     if (i === cEnd && hits.user.length > 0) return t('用户');
     if (i === uEnd && hits.model.length > 0) return t('模型');
     if (i === mEnd && hits.token.length > 0) return t('令牌');
@@ -147,7 +147,7 @@ export default function GlobalSearch({ open, onClose, navItems }: GlobalSearchPr
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={t('搜索页面、渠道、模型、用户、令牌…')}
+            placeholder={t('搜索页面、供应商、模型、用户、令牌…')}
             aria-label={t('全局搜索')}
           />
           <button type="button" className="global-search-close" onClick={onClose} aria-label={t('关闭')}>

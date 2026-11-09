@@ -15,7 +15,9 @@ test.describe('签到中心', () => {
   test.beforeEach(async ({ page }) => {
     await loginAsAdmin(page, { sessions: [] });
     await page.goto('/checkin');
-    await expect(page.locator('h1')).toContainText('签到中心');
+    // 新 IA：/checkin 重定向到供应商页「签到」Tab（embedded 无 h1），
+    // 用签到页自己的二级 Tab 作为就绪信号（standalone 与 embedded 通用）。
+    await expect(page.locator('.ck-sub-tabs .sub-tab', { hasText: '签到中心' })).toBeVisible();
   });
 
   test('顶部统计与分组账号表渲染', async ({ page, pageErrors }) => {

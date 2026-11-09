@@ -10,6 +10,152 @@
   text-decoration: none;
 }
 
+/* 快捷操作紧凑工具栏（规格 §12.1：header 之下、实时卡之上，不占整卡高度） */
+.quick-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.quick-toolbar .btn {
+  text-decoration: none;
+}
+
+.quick-toolbar-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+
+/* ── 供应商健康面板（规格 §13：紧凑表格 + 可点击 chips + 表头排序）────── */
+.ch-chipbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.ch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+}
+
+.ch-chip.is-active {
+  font-weight: 600;
+}
+
+.ch-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.ch-hidden-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.ch-tools {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.ch-search {
+  height: 28px;
+  width: 180px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--input-text);
+}
+
+.ch-fresh {
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  margin-left: auto;
+}
+
+/* 移动端横向滚动兜底（不折行、不溢出；规避全局 .table-wrapper 的卡片化） */
+.ch-table-scroll {
+  overflow-x: auto;
+}
+
+.ch-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.ch-table th,
+.ch-table td {
+  padding: 8px 10px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.ch-table th.num,
+.ch-table td.num {
+  text-align: right;
+}
+
+.ch-table .ch-name {
+  font-weight: 600;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ch-table .ch-err {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+}
+
+.ch-th-sort {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.ch-th-sort.is-active {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.ch-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
 .stat-card-top {
   display: flex;
   justify-content: space-between;

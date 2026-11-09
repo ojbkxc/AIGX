@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type FormEvent } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Pencil, Power, PowerOff, MoreHorizontal, KeyRound, Trash2, Columns3 } from 'lucide-react';
 import { api } from '../api';
@@ -17,8 +18,9 @@ import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
 import { TablePaginationFooter, useServerPaging, SERVER_PAGE_SIZES } from '../components/ui/TableShell';
 import { Tooltip } from '../components/ui';
-import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable, Tabs } from '../components/ui';
 import { fmtQuota } from '../lib/utils';
+import UserTools from './UserTools';
 import './Users.css';
 
 interface UserItem {
@@ -61,6 +63,9 @@ const EMPTY_FORM: UserFormState = {
   remark: '',
 };
 
+/** 页面分区：用户列表 / 工具权限（原独立菜单「用户工具权限」并入） */
+type UsersTab = 'users' | 'tools';
+
 // 公共键与列声明（模块级；[LS] 行操作菜单注释位置原属组件内）
 const LS_PSZ = 'aigx-tbl-pagesize.users';
 const LS_TCOLS = 'aigx-tbl-cols.users';
@@ -92,6 +97,22 @@ export default function Users(): JSX.Element {
   const { t } = useTranslation();
 
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+
+  // Tab 状态走 URL ?tab=（users 默认 / tools 工具权限），与 ModelManage 同构
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [tab, setTab] = useState<UsersTab>(() =>
+    searchParams.get('tab') === 'tools' ? 'tools' : 'users',
+  );
+  useEffect(() => {
+    // 旧 /user-tools 重定向到 /users?tab=tools 后由 URL 驱动 Tab；只认已注册值
+    setTab(searchParams.get('tab') === 'tools' ? 'tools' : 'users');
+  }, [searchParams]);
+  const selectTab = (key: UsersTab): void => {
+    setTab(key);
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', key);
+    setSearchParams(next, { replace: true });
+  };
 
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<UserItem | null>(null);
@@ -379,7 +400,7 @@ export default function Users(): JSX.Element {
     });
   };
 
-  if (loading && firstLoadRef.current) {
+  if (loading && firstLoadRef.current && tab === 'users') {
     return <SkeletonTable columns={6} rows={7} />;
   }
 
@@ -393,6 +414,22 @@ export default function Users(): JSX.Element {
         <p>{t('管理系统用户、角色与配额')}</p>
       </div>
 
+      <div style={{ marginTop: 16, marginBottom: 16 }}>
+        <Tabs<UsersTab>
+          items={[
+            { key: 'users', label: t('用户列表') },
+            { key: 'tools', label: t('工具权限') },
+          ]}
+          active={tab}
+          onChange={selectTab}
+          ariaLabel={t('用户管理分区')}
+        />
+      </div>
+
+      {tab === 'tools' && <UserTools embedded />}
+
+      {tab === 'users' && (
+        <>
       {error && <div className="error-message">{error}</div>}
 
       {me && (
@@ -608,6 +645,8 @@ export default function Users(): JSX.Element {
         onSizeChange={setSize}
         onPageChange={setPage}
       />
+        </>
+      )}
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 

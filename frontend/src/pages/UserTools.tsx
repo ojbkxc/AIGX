@@ -27,7 +27,12 @@ function riskBadgeClass(risk: UserToolCatalogItem['risk']): string {
   return 'ut-risk readonly';
 }
 
-export default function UserTools(): JSX.Element {
+interface UserToolsProps {
+  /** 作为「用户管理 → 工具权限」Tab 的子页内嵌时隐藏自带 Card 标题 */
+  embedded?: boolean;
+}
+
+export default function UserTools({ embedded = false }: UserToolsProps = {}): JSX.Element {
   const { t } = useTranslation();
   const addToast = useToast();
   const [loading, setLoading] = useState(true);
@@ -172,7 +177,7 @@ export default function UserTools(): JSX.Element {
   if (degraded) {
     return (
       <div className="page-container">
-        <Card title={t('用户工具权限')}>
+        <Card title={embedded ? undefined : t('用户工具权限')}>
           <EmptyState
             icon="🛡️"
             message={t('用户工具策略端点尚未就绪（后端建设中）。就绪后这里配置组级允许清单与全局开关。')}
@@ -185,11 +190,13 @@ export default function UserTools(): JSX.Element {
   return (
     <div className="page-container">
       <Card
-        title={t('用户工具权限')}
+        title={embedded ? undefined : t('用户工具权限')}
         actions={
-          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
-            <RefreshCw size={14} /> {t('刷新')}
-          </Button>
+          embedded ? undefined : (
+            <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+              <RefreshCw size={14} /> {t('刷新')}
+            </Button>
+          )
         }
       >
         <div className="ut-switch-row">

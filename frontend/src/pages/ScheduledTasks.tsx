@@ -18,7 +18,12 @@ function fmtTime(ms: number | null): string {
   }
 }
 
-export default function ScheduledTasks(): JSX.Element {
+interface ScheduledTasksProps {
+  /** 作为系统设置「定时任务」分类内嵌时隐藏自带 h1 */
+  embedded?: boolean;
+}
+
+export default function ScheduledTasks({ embedded = false }: ScheduledTasksProps = {}): JSX.Element {
   const { t } = useTranslation();
   const admin = isAdmin();
   const addToast = useToast();
@@ -284,7 +289,7 @@ export default function ScheduledTasks(): JSX.Element {
 
   return (
     <div>
-      <h1 style={{ marginBottom: 16 }}>{t('定时任务')}</h1>
+      {!embedded && <h1 style={{ marginBottom: 16 }}>{t('定时任务')}</h1>}
       {backendTasks.length > 0 && (
         <SectionCard title={t('后端任务')}>
           {backendTasks.map(renderTask)}

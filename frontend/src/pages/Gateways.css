@@ -1,8 +1,66 @@
-/* 渠道与账号池 —— 单页多 Tab 的宿主页样式。
+/* 供应商 —— 单页多 Tab 的宿主页样式。
    只负责 Tab 与子页之间的间距：子页自身带 page-header 与 Card，
    已内嵌（embedded）时不再渲染标题区（见 Channels / AccountSessions）。 */
 .gw-tabs {
   margin-bottom: 12px;
+}
+
+/* 标题区：h1「供应商」短，避免被长副标题挤成竖排（换行改为副标题整行） */
+.gw-header {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.gw-header h1 {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.gw-header p {
+  flex: 1 1 320px;
+}
+
+/* ── 网关运行参数折叠条（原 Tab「网关」降级为供应商 Tab 顶部的只读信息条）── */
+.gw-runtime-collapse {
+  margin: 0 0 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-bg);
+}
+
+.gw-runtime-collapse > summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  user-select: none;
+  list-style: none;
+}
+
+.gw-runtime-collapse > summary::-webkit-details-marker {
+  display: none;
+}
+
+.gw-runtime-collapse > summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 8px;
+  transition: transform 0.12s;
+}
+
+.gw-runtime-collapse[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.gw-runtime-collapse > summary:hover {
+  color: var(--text-main);
+}
+
+/* 面板自带 Card（标题「网关运行参数」），嵌进折叠条时压掉重复外框 */
+.gw-runtime-collapse .card {
+  border: 0;
+  box-shadow: none;
+  padding-top: 0;
 }
 
 /* ── 网关运行参数面板（Tab「网关」，只读展示 /api/gateway/settings）── */

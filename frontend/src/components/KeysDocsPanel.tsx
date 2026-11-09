@@ -202,7 +202,7 @@ export default function KeysDocsPanel(): JSX.Element {
         }
       >
         <p className="docs-note">
-          {t('模型来自全部启用渠道的聚合（与 /v1/models 同口径）；客户端自动拉取可用模型，配 Key 之前就能拉')}
+          {t('模型来自全部启用供应商的聚合（与 /v1/models 同口径）；客户端自动拉取可用模型，配 Key 之前就能拉')}
         </p>
         <p className="docs-note">
           {t('若你的密钥配置了「模型白名单」，实际可调用的模型以密钥列表里该白名单为准。')}
@@ -215,7 +215,7 @@ export default function KeysDocsPanel(): JSX.Element {
             action={<Button size="sm" onClick={() => void loadModels()}>{t('重试')}</Button>}
           />
         ) : models.length === 0 ? (
-          <EmptyState message={t('暂无可用模型。请先在渠道管理或账号池里配置上游')} />
+          <EmptyState message={t('暂无可用模型。请先在供应商或账号池里配置上游')} />
         ) : (
           <>
             <div className="docs-model-count">{t('共 {{n}} 个模型', { n: models.length })}</div>

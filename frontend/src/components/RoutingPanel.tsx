@@ -27,17 +27,17 @@ const STRATEGIES: Array<{ value: RouteStrategy; label: string; tip: string }> = 
   {
     value: 'weighted',
     label: '加权随机',
-    tip: '渠道按优先级分组，组内按权重随机（默认现状）。同优先级渠道按权重比例分摊流量。',
+    tip: '供应商按优先级分组，组内按权重随机（默认现状）。同优先级供应商按权重比例分摊流量。',
   },
   {
     value: 'round_robin',
     label: '组内轮询',
-    tip: '同优先级组内确定性轮询：请求 1→2→3→1… 均匀分布。想把手里的渠道摊开用、不让某一个一直扛时选它。',
+    tip: '同优先级组内确定性轮询：请求 1→2→3→1… 均匀分布。想把手里的供应商摊开用、不让某一个一直扛时选它。',
   },
   {
     value: 'ranked',
     label: '多因子调度',
-    tip: '同优先级组内按 健康×成本×RPM 几何加权评分排序（权重见下方「调度权重」）。需要省钱或避开工健康差的渠道时选它。',
+    tip: '同优先级组内按 健康×成本×RPM 几何加权评分排序（权重见下方「调度权重」）。需要省钱或避开工健康差的供应商时选它。',
   },
 ];
 
@@ -45,12 +45,12 @@ const STICKY_OPTIONS: Array<{ value: StickyMode; label: string; tip: string }> =
   {
     value: 'auto',
     label: '自动',
-    tip: '同一会话 5 分钟内尽量跟住同一渠道，30 分钟强制过期。多数场景用它——多轮对话少换渠道，也不至于把渠道焊死。',
+    tip: '同一会话 5 分钟内尽量跟住同一供应商，30 分钟强制过期。多数场景用它——多轮对话少换供应商，也不至于把供应商焊死。',
   },
   {
     value: 'session',
     label: '长会话',
-    tip: '同一会话 6 小时内跟住同一渠道。适合一坐几个小时的长会话，上游的上下文缓存能吃到更多。',
+    tip: '同一会话 6 小时内跟住同一供应商。适合一坐几个小时的长会话，上游的上下文缓存能吃到更多。',
   },
   {
     value: 'turn',
@@ -60,7 +60,7 @@ const STICKY_OPTIONS: Array<{ value: StickyMode; label: string; tip: string }> =
   {
     value: 'off',
     label: '关闭',
-    tip: '完全不做会话粘性，每个请求独立选路。渠道池均匀性优先于上游缓存命中时选它。',
+    tip: '完全不做会话粘性，每个请求独立选路。供应商池均匀性优先于上游缓存命中时选它。',
   },
 ];
 
@@ -199,7 +199,7 @@ export default function RoutingPanel(): JSX.Element {
       <div className="card-header">
         <h2>{t('基础策略')}</h2>
         <p className="card-subtitle">
-          {t('渠道选路的策略、会话粘性、断路器与调度权重；全部热生效，保存后下一请求即按新策略选路。')}
+          {t('供应商选路的策略、会话粘性、断路器与调度权重；全部热生效，保存后下一请求即按新策略选路。')}
         </p>
         {runtime && (
           <p className="card-subtitle">
@@ -255,7 +255,7 @@ export default function RoutingPanel(): JSX.Element {
                 checked={form.breakerEnabled}
                 onChange={(e) => setForm({ ...form, breakerEnabled: e.target.checked })}
               />
-              <span>{t('启用断路器（连续失败自动熔断渠道；关闭后仍记录失败但不拦截）')}</span>
+              <span>{t('启用断路器（连续失败自动熔断供应商；关闭后仍记录失败但不拦截）')}</span>
             </label>
             {form.breakerEnabled && (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginTop: 8 }}>
@@ -269,7 +269,7 @@ export default function RoutingPanel(): JSX.Element {
                     value={form.breakerThreshold}
                     onChange={(e) => setForm({ ...form, breakerThreshold: e.target.value })}
                   />
-                  <div className="form-hint">{t('连续失败多少次后熔断该渠道（1-20）')}</div>
+                  <div className="form-hint">{t('连续失败多少次后熔断该供应商（1-20）')}</div>
                 </div>
                 <div className="form-group">
                   <label>{t('冷却秒数')}</label>
@@ -341,7 +341,7 @@ export default function RoutingPanel(): JSX.Element {
               </div>
             </div>
             <div className="form-hint">
-              {t('健康×成本×RPM 三维权重（默认 0.4/0.4/0.2）。只在「多因子调度」策略下参与排序，改小成本权重=优先健康渠道。')}
+              {t('健康×成本×RPM 三维权重（默认 0.4/0.4/0.2）。只在「多因子调度」策略下参与排序，改小成本权重=优先健康供应商。')}
             </div>
           </div>
 

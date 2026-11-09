@@ -20,7 +20,7 @@ test.describe('系统设置分类', () => {
   test('左栏渲染全部分类，默认落在通用', async ({ page, pageErrors }) => {
     await expect(nav(page)).toBeVisible();
     // 「路由」已独立成页 /routing（#40 分层档案 + 预演 + 回放 + 粘滞），不再在此列
-    for (const label of ['通用', 'AI 助手', '聊天', '网关', '重试', '超时', '计费', '数据', '通知', '安全', '更新', '账户']) {
+    for (const label of ['通用', 'AI 助手', '聊天', '网关', '重试', '超时', '计费', '数据', '定时任务', '通知', '安全', '更新']) {
       await expect(nav(page).locator('.settings-nav-item', { hasText: label })).toHaveCount(1);
     }
     // 默认分类高亮，右栏是通用（使用限额 + 主题）
@@ -48,10 +48,10 @@ test.describe('系统设置分类', () => {
   test('重试分类四个字段，含状态码文本框', async ({ page, pageErrors }) => {
     await nav(page).locator('.settings-nav-item', { hasText: '重试' }).click();
     const pane = page.locator('.settings-pane');
-    await expect(pane).toContainText('最大重试次数（渠道切换）');
+    await expect(pane).toContainText('最大重试次数（供应商切换）');
     await expect(pane).toContainText('同账号重试次数');
     await expect(pane).toContainText('重试间隔');
-    await expect(pane).toContainText('直接换号/换渠道状态码');
+    await expect(pane).toContainText('直接换号/换供应商状态码');
     // 状态码是文本输入（逗号分隔），不是数字框
     await expect(pane.locator('input[type=text]')).toHaveCount(1);
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);

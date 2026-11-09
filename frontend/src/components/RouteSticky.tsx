@@ -175,7 +175,7 @@ export default function RouteSticky(): JSX.Element {
       <div className="card-header">
         <h2>{t('粘滞会话')}</h2>
         <p className="card-subtitle">
-          {t('会话粘滞让同一会话跟住同一渠道（复用上游上下文缓存）。当前模式：{{mode}}；排障或想换渠道时在此清除。', {
+          {t('会话粘滞让同一会话跟住同一供应商（复用上游上下文缓存）。当前模式：{{mode}}；排障或想换供应商时在此清除。', {
             mode: stickyMode || t('未记录'),
           })}
         </p>
@@ -188,7 +188,7 @@ export default function RouteSticky(): JSX.Element {
               <input
                 className="form-input"
                 style={{ paddingLeft: 30 }}
-                placeholder={t('按会话标识或渠道名搜索')}
+                placeholder={t('按会话标识或供应商名搜索')}
                 value={keyword}
                 onChange={(e) => onKeyword(e.target.value)}
               />

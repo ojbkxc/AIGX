@@ -74,7 +74,7 @@ const titleOf = async (page: Page, seq: number): Promise<string> =>
   (await badgeOf(page, seq).getAttribute('title')) ?? '';
 
 /**
- * 打开编辑弹窗：行菜单「更多操作」→「编辑渠道」。
+ * 打开编辑弹窗：行菜单「更多操作」→「编辑供应商」。
  * 菜单面板是挂在 body 层级的 `.ch-row-menu-panel`（逃 table 的 overflow 裁剪），
  * 项就是面板里的裸 button，没有专用 class。
  *
@@ -89,7 +89,7 @@ const titleOf = async (page: Page, seq: number): Promise<string> =>
  */
 async function openEditModal(page: Page, seq: number): Promise<void> {
   const trig = rowOf(page, seq).locator('.ch-row-menu button');
-  const editItem = page.locator('.ch-row-menu-panel button', { hasText: '编辑渠道' });
+  const editItem = page.locator('.ch-row-menu-panel button', { hasText: '编辑供应商' });
   await expect(async () => {
     if ((await editItem.count()) === 0) await trig.click();
     // 断言放在回调里：toPass 靠「回调抛错」才重试，只点不判等于只跑一轮。

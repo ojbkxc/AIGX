@@ -215,7 +215,7 @@ test.describe('添加账号 · file/desktop/guest/oauth 四段 + 重复检测', 
     await page.getByRole('button', { name: '添加账号' }).first().click();
     // 「新建自定义提供商」卡（已建 API 组第一张）
     await page.locator('.add-card', { hasText: '新建自定义提供商' }).first().click();
-    await page.getByLabel('渠道名称（可选）').fill('我的中转');
+    await page.getByLabel('账号池名称（可选）').fill('我的中转');
     // 上游地址/凭证在折叠的「账号设置」details 里：先展开再填（closed details
     // 内容对 Playwright 不可见——CI :214 的 not visible 即此）
     await page.locator('.add-advanced > summary').click();

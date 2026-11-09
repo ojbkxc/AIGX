@@ -1,5 +1,5 @@
 import React, { lazy, Suspense, useEffect } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation, useSearchParams } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import StatusLine from './components/StatusLine';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -42,7 +42,6 @@ const Logs = lazyPage(() => import('./pages/Logs'));
 const Products = lazyPage(() => import('./pages/Products'));
 const Gateways = lazyPage(() => import('./pages/Gateways'));
 const ProxyPool = lazyPage(() => import('./pages/ProxyPool'));
-const UserTools = lazyPage(() => import('./pages/UserTools'));
 const Chat = lazyPage(() => import('./pages/Chat'));
 
 const ModelManage = lazyPage(() => import('./pages/ModelManage'));
@@ -51,9 +50,34 @@ const Routing = lazyPage(() => import('./pages/Routing'));
 const Prompts = lazyPage(() => import('./pages/Prompts'));
 const Agent = lazyPage(() => import('./pages/Agent'));
 const Tickets = lazyPage(() => import('./pages/Tickets'));
-const CheckinCenter = lazyPage(() => import('./pages/CheckinCenter'));
-const ScheduledTasks = lazyPage(() => import('./pages/ScheduledTasks'));
 const Plugins = lazyPage(() => import('./pages/Plugins'));
+
+/**
+ * 带查询参数重定向的路由包装。
+ *
+ * 为什么不用 `<Navigate>` 字面量：这些旧入口（bookmark / 外部链接）形如
+ * `/settings?tab=account`，目标 URL 由「当前路径 + 迁移后的 tab 值」拼成，
+ * 且必须保留其余参数（如 `/model-manage?channel_id=x&tab=meta` 的筛选口径）。
+ * React Router 的 `<Navigate>` 一旦加上就不会再渲染子路由，包一层组件按
+ * `useSearchParams()` 判断即可精确命中「只有这个 tab 才跳」的语义。
+ */
+function SettingsRoute(): JSX.Element {
+  const [params] = useSearchParams();
+  // 系统设置「账户」Tab 已移除：改密与 must_change_password 清标记统一在个人中心
+  if (params.get('tab') === 'account') return <Navigate to="/profile" replace />;
+  return <AdminRoute><Settings /></AdminRoute>;
+}
+
+function ModelManageRoute(): JSX.Element {
+  const [params] = useSearchParams();
+  // 「元信息覆盖」Tab 已并入模型目录：旧链接落到目录，其余参数原样保留
+  if (params.get('tab') === 'meta') {
+    const next = new URLSearchParams(params);
+    next.set('tab', 'catalog');
+    return <Navigate to={`/model-manage?${next.toString()}`} replace />;
+  }
+  return <AdminRoute><ModelManage /></AdminRoute>;
+}
 
 /** 懒加载页面兜底骨架（与全局 loading 视觉一致） */
 function PageFallback(): JSX.Element {
@@ -175,14 +199,15 @@ export default function App(): JSX.Element {
           <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
           <Route path="/" element={<ProtectedLayout><Dashboard /></ProtectedLayout>} />
           <Route path="/accounts" element={<Navigate to="/channels" replace />} />
-          {/* 渠道与账号池合并为单页双 Tab：上游渠道默认，账号池走 ?tab=accounts */}
+          {/* 供应商页：统一列表（providers）+ 账号池 / 健康 / 签到 子 Tab */}
           <Route path="/channels" element={<AdminRoute><Gateways /></AdminRoute>} />
           <Route
             path="/account-sessions"
             element={<Navigate to="/channels?tab=accounts" replace />}
           />
           <Route path="/proxy-pool" element={<AdminRoute><ProxyPool /></AdminRoute>} />
-          <Route path="/user-tools" element={<AdminRoute><UserTools /></AdminRoute>} />
+          {/* 用户工具权限已并入用户管理「工具权限」Tab（旧路由重定向防书签失效） */}
+          <Route path="/user-tools" element={<Navigate to="/users?tab=tools" replace />} />
           <Route path="/keys" element={<ProtectedLayout><Keys /></ProtectedLayout>} />
           {/* 已合并的旧路由 → 重定向到合并后位置 */}
           <Route path="/mappings" element={<Navigate to="/channels" replace />} />
@@ -205,18 +230,20 @@ export default function App(): JSX.Element {
           <Route path="/chat" element={<ProtectedLayout><Chat /></ProtectedLayout>} />
           {/* 网络层管理已并入系统设置运维 tab，旧路由重定向防书签失效 */}
           <Route path="/network-layer" element={<Navigate to="/settings" replace />} />
-          {/* 模型管理（渠道 + 账号池合流，admin）：旧的 /model-presets 目录页并入此处 */}
-          <Route path="/model-manage" element={<AdminRoute><ModelManage /></AdminRoute>} />
+          {/* 模型管理（供应商 + 账号池合流，admin）：旧的 /model-presets 目录页并入此处 */}
+          <Route path="/model-manage" element={<ModelManageRoute />} />
           <Route path="/model-presets" element={<Navigate to="/model-manage" replace />} />
           <Route path="/prompts" element={<ProtectedLayout><Prompts /></ProtectedLayout>} />
           {/* 路由域（#40）：配置（分层档案/基础策略/预演）+ 回放 + 粘滞单页多模式；
               原先挂在 /settings?tab=routing，独立成页后旧入口已下线 */}
           <Route path="/routing" element={<AdminRoute><Routing /></AdminRoute>} />
-          <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
+          <Route path="/settings" element={<SettingsRoute />} />
           <Route path="/agent" element={<AdminRoute><Agent /></AdminRoute>} />
-          <Route path="/checkin" element={<AdminRoute><CheckinCenter /></AdminRoute>} />
-          <Route path="/scheduled-tasks" element={<AdminRoute><ScheduledTasks /></AdminRoute>} />
-          {/* 系统诊断并入渠道页第三 Tab「健康」（07 E.3：诊断三件套全部以渠道
+          {/* 签到中心已并入供应商页「签到」Tab（旧路由重定向防书签失效） */}
+          <Route path="/checkin" element={<Navigate to="/channels?tab=checkin" replace />} />
+          {/* 定时任务已并入系统设置「定时任务」分类（旧路由重定向防书签失效） */}
+          <Route path="/scheduled-tasks" element={<Navigate to="/settings?tab=scheduled" replace />} />
+          {/* 系统诊断并入供应商页「健康」Tab（07 E.3：诊断三件套全部以渠道
               为粒度）；独立路由重定向防书签失效 */}
           <Route path="/diagnostics" element={<Navigate to="/channels?tab=health" replace />} />
           {/* 接入文档并入 API 密钥页第二 Tab（07 E.3：密钥与文档是同一件事的

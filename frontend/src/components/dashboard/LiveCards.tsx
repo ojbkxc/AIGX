@@ -80,7 +80,7 @@ export default function LiveCards({
           </div>
           <div className="stat-card">
             <div className="stat-card-top">
-              <div className="stat-title">{t('活跃渠道')}</div>
+              <div className="stat-title">{t('活跃供应商')}</div>
               <div className="stat-icon-badge" style={{ background: 'rgba(47, 111, 237, 0.15)', color: '#7ca4f5' }}>🔗</div>
             </div>
             <div className="stat-value" style={{ fontSize: '24px' }}>{fmtInt(rt?.active_channels ?? activeChannelsFallback, lang)}</div>

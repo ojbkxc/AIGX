@@ -31,7 +31,7 @@ test.describe('列表页搜索不卸载工具栏', () => {
   test('渠道管理：搜索后工具栏与搜索框保持挂载', async ({ page, pageErrors }) => {
     await loginAsAdmin(page);
     await page.goto('/channels');
-    await expect(page.locator('.main-content')).toContainText('渠道');
+    await expect(page.locator('.main-content')).toContainText('供应商');
 
     const search = page.locator('.main-content input[placeholder*="搜索"]').first();
     await expect(search).toBeVisible();
@@ -41,7 +41,7 @@ test.describe('列表页搜索不卸载工具栏', () => {
     await expect(search).toBeVisible();
     await expect(search).toHaveValue('lxchat');
     // 工具栏按钮不应随骨架消失
-    await expect(page.getByRole('button', { name: /添加渠道/ }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: /添加供应商/ }).first()).toBeVisible();
 
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });

@@ -151,6 +151,8 @@ export interface UserRankRow {
 export interface ChannelHealthRow {
   id?: string | number;
   name?: string;
+  /** 供应商启用状态（后端 handle_channel_health 返回 enabled/disabled；缺省视为启用） */
+  status?: string;
   success_rate?: number | null;
   success_count?: number;
   total_requests?: number;
@@ -159,6 +161,8 @@ export interface ChannelHealthRow {
   circuit_breaker?: string;
   avg_latency_ms?: number;
   consecutive_empty?: number | null;
+  /** 最近一次错误摘要（后端顶层字段；health.last_error 亦有） */
+  last_error?: string | null;
   health?: { error_rate?: number | null; last_error?: string } | null;
 }
 

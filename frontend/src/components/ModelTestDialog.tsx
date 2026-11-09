@@ -47,9 +47,9 @@ function statusHint(status: number | undefined, t: (s: string) => string): strin
   switch (status) {
     case 401:
     case 403:
-      return t('凭证无效或权限不足：检查账号凭证 / 渠道密钥是否过期。');
+      return t('凭证无效或权限不足：检查账号凭证 / 供应商密钥是否过期。');
     case 404:
-      return t('上游不认识这个模型名：刷新模型清单，或检查渠道映射。');
+      return t('上游不认识这个模型名：刷新模型清单，或检查供应商映射。');
     case 429:
       return t('上游限流或额度不足：稍后再试，或检查账号余额。');
     case 504:
@@ -291,7 +291,7 @@ export default function ModelTestDialog({ target, onClose }: Props): JSX.Element
                       disabled={running}
                     />
                     <span className={`mm-src-tag${s.kind === 'account' ? '' : ' provider'}`}>
-                      {s.kind === 'account' ? t('账号') : t('渠道')}
+                      {s.kind === 'account' ? t('账号') : t('供应商')}
                     </span>
                     <span className="mt-source-name">{s.name}</span>
                   </label>
@@ -338,7 +338,7 @@ export default function ModelTestDialog({ target, onClose }: Props): JSX.Element
                   <div key={slot.key} className="mt-slot">
                     <div className="mt-slot-head">
                       <span className={`mm-src-tag${slot.kind === 'account' ? '' : ' provider'}`}>
-                        {slot.kind === 'account' ? t('账号') : t('渠道')}
+                        {slot.kind === 'account' ? t('账号') : t('供应商')}
                       </span>
                       <strong>{slot.name}</strong>
                       {slot.running ? (

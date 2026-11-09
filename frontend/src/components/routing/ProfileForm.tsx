@@ -152,7 +152,7 @@ export default function ProfileForm({
       {/* 1. 选路策略（枚举 → 无「清空」语义） */}
       <TriStateField
         label={t('选路策略')}
-        hint={t('同优先级组内怎么挑渠道。')}
+        hint={t('同优先级组内怎么挑供应商。')}
         state={fieldState(value, 'strategy')}
         onStateChange={(s) => setField('strategy', s)}
         allowClear={false}
@@ -179,7 +179,7 @@ export default function ProfileForm({
       {/* 2. 会话粘性（枚举 → 无「清空」语义） */}
       <TriStateField
         label={t('会话粘性')}
-        hint={t('同一会话是否跟住同一渠道（复用上游上下文缓存）。')}
+        hint={t('同一会话是否跟住同一供应商（复用上游上下文缓存）。')}
         state={fieldState(value, 'sticky')}
         onStateChange={(s) => setField('sticky', s)}
         allowClear={false}
@@ -206,7 +206,7 @@ export default function ProfileForm({
       {/* 3. 参与名单 */}
       <TriStateField
         label={t('参与名单')}
-        hint={t('限定这个模型能走哪些提供商与账号；名单外的渠道在选路前就被裁掉。')}
+        hint={t('限定这个模型能走哪些提供商与账号；名单外的供应商在选路前就被裁掉。')}
         state={fieldState(value, 'scope')}
         onStateChange={(s) => setField('scope', s)}
         clearNote={t('不限制提供商与账号（空名单 = 谁都能参与）。')}
@@ -239,7 +239,7 @@ export default function ProfileForm({
               </div>
               {noProvider ? (
                 <div className="rt-notice rt-notice-warn" style={{ marginBottom: 10 }}>
-                  {t('已选「仅列出的提供商」但列表为空 —— 该模型将没有任何候选渠道。槽位名请填渠道的「提供商」值（如 openai / anthropic）。')}
+                  {t('已选「仅列出的提供商」但列表为空 —— 该模型将没有任何候选供应商。槽位名请填供应商的「提供商」值（如 openai / anthropic）。')}
                 </div>
               ) : null}
               <div className="rt-grid2">

@@ -73,7 +73,7 @@ export default function ChannelHealth({
   updatedAt?: number;
 }): JSX.Element {
   const { t } = useTranslation();
-  const [filter, setFilter] = useState<'all' | 'abnormal' | 'warning' | 'circuit'>('all');
+  const [filter, setFilter] = useState<'all' | Cat>('all');
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'default', dir: 'desc' });
   const [now, setNow] = useState(() => Date.now());
@@ -85,11 +85,20 @@ export default function ChannelHealth({
     return () => clearInterval(timer);
   }, [updatedAt]);
 
+  // 只统计/展示状态为「启用」的供应商（后端 status 取值 enabled/disabled，见
+  // legacy.rs handle_channel_health，每条渠道恒带该字段）。非 enabled 一律隐藏，
+  // 不参与汇总/筛选/排序。
+  const enabledRows = useMemo(
+    () => data.filter((c) => c.status === 'enabled'),
+    [data],
+  );
+  const disabledCount = data.length - enabledRows.length;
+
   // 汇总条：健康/警告/异常按成功率三档计，熔断单独按断路器 open 计
   // （一个渠道可同时计入异常与熔断，四项之和可能大于渠道总数）
   const counts = useMemo(() => {
     const c = { healthy: 0, warning: 0, abnormal: 0, circuit: 0 };
-    for (const ch of data) {
+    for (const ch of enabledRows) {
       const r = rateOf(ch);
       if (r >= 95) c.healthy += 1;
       else if (r >= 80) c.warning += 1;
@@ -97,12 +106,12 @@ export default function ChannelHealth({
       if (breakerOf(ch) === 'open') c.circuit += 1;
     }
     return c;
-  }, [data]);
+  }, [enabledRows]);
 
-  // 筛选 + 搜索 + 排序（口径与汇总条一致，全部前端计算）
+  // 筛选 + 搜索 + 排序（口径与汇总条一致，全部前端计算；已排除停用供应商）
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const filtered = data.filter((c) => {
+    const filtered = enabledRows.filter((c) => {
       if (filter !== 'all') {
         const r = rateOf(c);
         if (filter === 'circuit') {
@@ -110,6 +119,10 @@ export default function ChannelHealth({
         } else if (filter === 'abnormal' && !(r < 80)) {
           return false;
         } else if (filter === 'warning' && !(r >= 80 && r < 95)) {
+          return false;
+        } else if (filter === 'healthy' && !(r >= 95)) {
+          return false;
+        } else if (filter === 'halfopen' && breakerOf(c) !== 'halfopen') {
           return false;
         }
       }
@@ -129,7 +142,7 @@ export default function ChannelHealth({
         case 'success': return (rateOf(a) - rateOf(b)) * dir;
       }
     });
-  }, [data, filter, search, sort]);
+  }, [enabledRows, filter, search, sort]);
 
   // 数据新鲜度：「N 秒前更新」，跨档位用分钟/小时文案
   const elapsed = updatedAt != null ? Math.max(0, Math.floor((now - updatedAt) / 1000)) : null;
@@ -141,161 +154,126 @@ export default function ChannelHealth({
         : t('{{n}} 小时前更新', { n: Math.floor(elapsed / 3600) })
     : null;
 
-  const filters: Array<{ key: 'all' | 'abnormal' | 'warning' | 'circuit'; label: string; color: string }> = [
-    { key: 'all', label: t('全部'), color: 'var(--text-main)' },
-    { key: 'abnormal', label: t('异常'), color: CAT_STYLE.abnormal.dot },
-    { key: 'warning', label: t('警告'), color: CAT_STYLE.warning.dot },
-    { key: 'circuit', label: t('熔断'), color: CAT_STYLE.circuit.dot },
+  // 汇总 chips 兜底胶囊（异常/熔断为红、警告为黄、健康为绿），点击即筛选
+  const chips: Array<{ key: 'all' | Cat; label: string; count: number; color: string }> = [
+    { key: 'all', label: t('全部'), count: enabledRows.length, color: 'var(--text-main)' },
+    { key: 'healthy', label: t(CAT_LABEL.healthy), count: counts.healthy, color: CAT_STYLE.healthy.dot },
+    { key: 'warning', label: t(CAT_LABEL.warning), count: counts.warning, color: CAT_STYLE.warning.dot },
+    { key: 'abnormal', label: t(CAT_LABEL.abnormal), count: counts.abnormal, color: CAT_STYLE.abnormal.dot },
+    { key: 'circuit', label: t(CAT_LABEL.circuit), count: counts.circuit, color: CAT_STYLE.circuit.dot },
   ];
-  const sorts: Array<{ key: SortKey; label: string }> = [
-    { key: 'default', label: t('默认排序') },
-    { key: 'error', label: t('错误率') },
-    { key: 'requests', label: t('请求量') },
-    { key: 'latency', label: t('延迟') },
+  // 表头可排序的列（默认严重度由 sort.key==='default' 提供）
+  const sortCols: Array<{ key: SortKey; label: string }> = [
     { key: 'success', label: t('成功率') },
+    { key: 'error', label: t('错误率') },
+    { key: 'latency', label: t('平均延迟') },
+    { key: 'requests', label: t('请求数') },
   ];
+  const toggleSort = (key: SortKey): void => {
+    setSort((prev) => (
+      prev.key === key ? { key, dir: prev.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' }
+    ));
+  };
+  const rowColor = (bad: number, warn: number, value: number): string =>
+    value >= bad ? CAT_STYLE.abnormal.dot : value >= warn ? CAT_STYLE.warning.dot : 'var(--text-main)';
 
   return (
     <div>
-      {/* 顶部状态汇总条 */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-        {(['healthy', 'warning', 'abnormal', 'circuit'] as const).map((cat) => {
-          const st = CAT_STYLE[cat];
+      {/* 汇总 chips：健康/警告/异常/熔断计数，点击即筛选（再次点击回到全部） */}
+      <div className="ch-chipbar">
+        {chips.map((chip) => {
+          const active = filter === chip.key;
           return (
-            <span key={cat} style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              padding: '4px 10px', borderRadius: 999, fontSize: 12,
-              background: 'var(--surface-2)', color: 'var(--text-muted)',
-            }}>
-              <span style={{ width: 8, height: 8, borderRadius: '50%', background: st.dot, display: 'inline-block' }} />
-              {t(CAT_LABEL[cat])} <b style={{ color: st.badgeColor }}>{counts[cat]}</b>
-            </span>
+            <button
+              key={chip.key}
+              type="button"
+              aria-pressed={active}
+              onClick={() => setFilter(active && chip.key !== 'all' ? 'all' : chip.key)}
+              className={`ch-chip${active ? ' is-active' : ''}`}
+              style={active ? { borderColor: 'transparent', background: chip.color, color: 'var(--bg-color)' } : undefined}
+            >
+              <span className="ch-chip-dot" style={{ background: chip.color }} />
+              {chip.label} <b>{chip.count}</b>
+            </button>
           );
         })}
+        {disabledCount > 0 && (
+          <span className="ch-hidden-hint">{t('已隐藏 {{n}} 个已停用供应商', { n: disabledCount })}</span>
+        )}
       </div>
 
-      {/* 筛选排序栏：状态筛选 + 搜索 + 排序 + 数据新鲜度 */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
-        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-          {filters.map((f) => {
-            const active = filter === f.key;
-            return (
-              <button key={f.key} type="button" onClick={() => setFilter(f.key)} style={{
-                padding: '3px 10px', borderRadius: 999, fontSize: 12,
-                border: `1px solid ${active ? 'transparent' : 'var(--border-color)'}`,
-                background: active ? f.color : 'transparent',
-                color: active ? 'var(--bg-color)' : 'var(--text-muted)',
-                cursor: 'pointer',
-              }}>
-                {f.label}
-              </button>
-            );
-          })}
-        </div>
+      {/* 工具条：搜索 + 数据新鲜度（排序改为点表头） */}
+      <div className="ch-tools">
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder={t('搜索')}
-          style={{
-            height: 26, width: 150, padding: '0 10px', borderRadius: 999,
-            fontSize: 12, border: '1px solid var(--input-border)',
-            background: 'var(--input-bg)', color: 'var(--input-text)',
-          }}
+          aria-label={t('搜索')}
+          className="ch-search"
         />
-        <div style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
-          {sorts.map((s) => {
-            const active = sort.key === s.key && s.key !== 'default';
-            const arrow = active ? (sort.dir === 'desc' ? ' ↓' : ' ↑') : '';
-            return (
-              <button key={s.key} type="button" onClick={() => setSort((prev) => (
-                prev.key === s.key
-                  ? { key: s.key, dir: prev.dir === 'desc' ? 'asc' : 'desc' }
-                  : { key: s.key, dir: 'desc' }
-              ))} style={{
-                padding: '3px 10px', borderRadius: 999, fontSize: 12,
-                border: `1px solid ${sort.key === s.key ? 'transparent' : 'var(--border-color)'}`,
-                background: sort.key === s.key ? 'var(--text-main)' : 'transparent',
-                color: sort.key === s.key ? 'var(--bg-color)' : 'var(--text-muted)',
-                cursor: 'pointer',
-              }}>
-                {s.label}{s.key === 'default' ? '' : arrow}
-              </button>
-            );
-          })}
-        </div>
-        {freshLabel && (
-          <span style={{ fontSize: 12, color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{freshLabel}</span>
-        )}
+        {freshLabel && <span className="ch-fresh">{freshLabel}</span>}
       </div>
 
-      {/* 卡片网格：异常/熔断默认置顶（由 rows 排序保证） */}
-      {rows.length === 0 ? (
+      {enabledRows.length === 0 ? (
         <div className="empty-state" style={{ padding: 22, textAlign: 'center' }}>
-          <p style={{ margin: 0 }}>{t('无匹配渠道')}</p>
+          <p style={{ margin: 0 }}>{t('暂无启用中的供应商')}</p>
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="empty-state" style={{ padding: 22, textAlign: 'center' }}>
+          <p style={{ margin: 0 }}>{t('无匹配供应商')}</p>
         </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
-          {rows.map((c, i) => {
-            const totalReq = c.total_requests ?? 0;
-            const successRate = rateOf(c);
-            const errorRate = errorRateOf(c);
-            const cat = categoryOf(c);
-            const st = CAT_STYLE[cat];
-            // 次要信息折叠到详情行
-            const details: Array<{ label: string; value: string; color?: string }> = [];
-            if (c.health?.last_error) {
-              details.push({ label: t('最近错误'), value: c.health.last_error });
-            }
-            if (c.consecutive_empty != null && c.consecutive_empty > 0) {
-              details.push({
-                label: t('连续空响应'),
-                value: String(c.consecutive_empty),
-                color: c.consecutive_empty >= 3 ? CAT_STYLE.abnormal.badgeColor : 'var(--text-main)',
-              });
-            }
-            if (c.health?.error_rate != null && c.health.error_rate > 0) {
-              details.push({ label: t('实时错误率'), value: `${(c.health.error_rate * 100).toFixed(1)}%` });
-            }
-            return (
-              <div key={c.id ?? i} className="stat-card" style={{ padding: 16 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontWeight: 600, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.name ?? undefined}>
-                    {c.name || `Channel#${c.id ?? i}`}
-                  </span>
-                  <span style={{
-                    padding: '2px 8px', borderRadius: 999, fontSize: 11, flexShrink: 0,
-                    background: st.badgeBg, color: st.badgeColor,
-                  }}>
-                    {t(CAT_LABEL[cat])}
-                  </span>
-                </div>
-                <div style={{ marginTop: 10, display: 'flex', alignItems: 'baseline', gap: 6 }}>
-                  <span style={{ fontSize: 28, fontWeight: 700, color: st.badgeColor, lineHeight: 1 }}>{successRate.toFixed(1)}%</span>
-                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('成功率')}</span>
-                </div>
-                <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px', fontSize: 13 }}>
-                  <div style={{ color: 'var(--text-muted)' }}>
-                    {t('错误率')}: <span style={{ color: errorRate > 20 ? CAT_STYLE.abnormal.badgeColor : 'var(--text-main)', fontWeight: 600 }}>{errorRate.toFixed(1)}%</span>
-                  </div>
-                  <div style={{ color: 'var(--text-muted)' }}>
-                    {t('平均延迟')}: <span style={{ color: 'var(--text-main)' }}>{fmtInt(c.avg_latency_ms || 0, lang)}ms</span>
-                  </div>
-                  <div style={{ color: 'var(--text-muted)', gridColumn: 'span 2' }}>
-                    {t('请求数')}: <span style={{ color: 'var(--text-main)' }}>{fmtInt(totalReq || c.requests || 0, lang)}</span>
-                  </div>
-                </div>
-                {details.length > 0 && (
-                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border-color)', fontSize: 12 }}>
-                    {details.map((d, j) => (
-                      <div key={j} style={{ color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={d.value}>
-                        {d.label}: <span style={{ color: d.color ?? 'var(--text-main)', fontWeight: 600 }}>{d.value}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+        <div className="ch-table-scroll">
+          <table className="ch-table">
+            <thead>
+              <tr>
+                <th>{t('供应商')}</th>
+                <th>{t('状态')}</th>
+                {sortCols.map((col) => {
+                  const active = sort.key === col.key;
+                  const arrow = active ? (sort.dir === 'desc' ? ' ↓' : ' ↑') : '';
+                  return (
+                    <th key={col.key} className="num">
+                      <button type="button" className={`ch-th-sort${active ? ' is-active' : ''}`} onClick={() => toggleSort(col.key)}>
+                        {col.label}{arrow}
+                      </button>
+                    </th>
+                  );
+                })}
+                <th>{t('最近错误')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((c, i) => {
+                const cat = categoryOf(c);
+                const st = CAT_STYLE[cat];
+                const successRate = rateOf(c);
+                const errorRate = errorRateOf(c);
+                const lastError = c.health?.last_error ?? c.last_error;
+                return (
+                  <tr key={c.id ?? i}>
+                    <td className="ch-name" title={c.name ?? undefined}>
+                      {c.name || `Channel#${c.id ?? i}`}
+                    </td>
+                    <td>
+                      <span className="ch-badge" style={{ background: st.badgeBg, color: st.badgeColor }}>
+                        {t(CAT_LABEL[cat])}
+                      </span>
+                    </td>
+                    <td className="num" style={{ color: successRate < 80 ? CAT_STYLE.abnormal.dot : successRate < 95 ? CAT_STYLE.warning.dot : 'var(--text-main)', fontWeight: 600 }}>
+                      {successRate.toFixed(1)}%
+                    </td>
+                    <td className="num" style={{ color: rowColor(20, 5, errorRate), fontWeight: 600 }}>
+                      {errorRate.toFixed(1)}%
+                    </td>
+                    <td className="num">{fmtInt(c.avg_latency_ms || 0, lang)}ms</td>
+                    <td className="num">{fmtInt(c.total_requests ?? c.requests ?? 0, lang)}</td>
+                    <td className="ch-err" title={lastError ?? undefined}>{lastError || '—'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

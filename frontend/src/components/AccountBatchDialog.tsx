@@ -246,7 +246,7 @@ export default function AccountBatchDialog({
   /** 后端保护类错误码 → 用户文案（be-fix 契约：referenced_by_channel / not_found） */
   function errorText(r: AccountBatchReceipt): string {
     if (r.error === 'referenced_by_channel') {
-      return t('账号被启用中的渠道引用，先解除引用或停用渠道再删除');
+      return t('账号被启用中的供应商引用，先解除引用或停用供应商再删除');
     }
     if (r.error === 'not_found') {
       return t('账号不存在');

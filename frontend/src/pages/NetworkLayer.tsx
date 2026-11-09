@@ -63,7 +63,7 @@ const NL_COL_DEFS: TableColumnDef[] = [
   { key: 'status', label: '状态', align: 'center', width: 90 },
   { key: 'last_used', label: '最近使用', width: 150 },
   { key: 'act', label: '操作', width: 90, locked: true },
-  { key: 'channel', label: '渠道', width: 160 },
+  { key: 'channel', label: '供应商', width: 160 },
   { key: 'breaker', label: '断路器', align: 'center', width: 100 },
   { key: 'health', label: '健康', align: 'center', width: 90 },
   { key: 'aimd', label: 'AIMD 限额', align: 'right', width: 110 },
@@ -367,15 +367,15 @@ export default function NetworkLayer(): JSX.Element {
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <p className="text-2xl font-bold text-white">{cp?.total_connections ?? 0}</p>
-                    <p className="text-xs text-gray-400">{t('总渠道数')}</p>
+                    <p className="text-xs text-gray-400">{t('总供应商数')}</p>
                   </div>
                   <div>
                     <p className="text-2xl font-bold text-blue-500">{cp?.active_connections ?? 0}</p>
-                    <p className="text-xs text-gray-400">{t('启用渠道')}</p>
+                    <p className="text-xs text-gray-400">{t('启用供应商')}</p>
                   </div>
                   <div>
                     <p className="text-2xl font-bold text-yellow-500">{cp?.idle_connections ?? 0}</p>
-                    <p className="text-xs text-gray-400">{t('停用渠道')}</p>
+                    <p className="text-xs text-gray-400">{t('停用供应商')}</p>
                   </div>
                   <div>
                     <p className="text-2xl font-bold text-purple-500">{fmtLatency(cp?.avg_latency_ms)}</p>
@@ -839,7 +839,7 @@ export default function NetworkLayer(): JSX.Element {
       <ConfirmDialog
         state={showRestartConfirm ? {
           title: t('确认重启网络层'),
-          message: t('重启后将重置所有渠道的断路器和健康追踪状态（不影响在途请求）。确定要继续吗？'),
+          message: t('重启后将重置所有供应商的断路器和健康追踪状态（不影响在途请求）。确定要继续吗？'),
           confirmText: t('确认重启'),
           danger: true,
           onConfirm: handleRestart,

@@ -202,7 +202,7 @@ export const PRESET_PROVIDERS: PresetProvider[] = [
   {
     key: 'sub2api', name: 'Sub2API', icon: 'sub2api.png',
     protocol: 'openai_compatible', baseUrl: '',
-    hint: '自建聚合面板：填你自己的站点地址。余额查询用该渠道的 API Key 打 {base}/v1/usage',
+    hint: '自建聚合面板：填你自己的站点地址。余额查询用该供应商的 API Key 打 {base}/v1/usage',
     balanceScheme: 'sub2api',
   },
   {

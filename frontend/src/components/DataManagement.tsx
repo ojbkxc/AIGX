@@ -94,7 +94,7 @@ export default function DataManagement(): JSX.Element {
       setConfirmState({
         title: t('导入备份'),
         message: t(
-          '将写入 {{count}} 个键（合并覆盖同名键）。导入前会自动把当前数据快照到服务器 backups/ 目录。部分数据（渠道/用户等）需刷新页面后重新加载。继续？',
+          '将写入 {{count}} 个键（合并覆盖同名键）。导入前会自动把当前数据快照到服务器 backups/ 目录。部分数据（供应商/用户等）需刷新页面后重新加载。继续？',
           { count: kvCount },
         ),
         confirmText: t('开始导入'),

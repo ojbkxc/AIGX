@@ -1656,7 +1656,7 @@ export async function directChannelChatStream(
   opts: { toolCallMode?: ToolCallWireMode } = {},
 ): Promise<void> {
   if (!channel.base_url || !channel.base_url.trim()) {
-    throw new Error('渠道未配置 Base URL，无法直连');
+    throw new Error('供应商未配置 Base URL，无法直连');
   }
   const isAnthropic = (channel.channel_type || '').toLowerCase() === 'anthropic';
   const rawBase = channel.base_url.trim().replace(/\/+$/, '');
@@ -1709,7 +1709,7 @@ export async function directChannelChatStream(
     if (signal?.aborted) throw err;
     throw new Error(
       `直连失败（请求未发或被 CORS 拦截）：上游 ${base} 不允许浏览器跨域访问。` +
-      '可改用经服务器中转的普通渠道，或在上游网关配置 CORS 允许本站来源。',
+      '可改用经服务器中转的普通供应商，或在上游网关配置 CORS 允许本站来源。',
     );
   }
 

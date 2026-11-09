@@ -288,6 +288,21 @@
   white-space: nowrap;
 }
 
+/* 嵌入供应商页后二级 Tab：窄屏允许横向滚动，不换行折断 */
+.ck-sub-tabs {
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ck-sub-tabs::-webkit-scrollbar {
+  display: none;
+}
+.ck-sub-tabs .sub-tab,
+.ck-sub-tabs .ck-tab-badge-slot {
+  flex: none;
+  white-space: nowrap;
+}
+
 .ck-tab-badge.is-on {
   color: var(--accent-color);
   border: 1px solid var(--accent-color);

@@ -142,13 +142,13 @@ export default function AgentSettingsPanel(): JSX.Element {
           </div>
 
           <div className="form-group">
-            <label>{t('渠道锁定')}</label>
+            <label>{t('供应商锁定')}</label>
             <select
               className="form-input"
               value={channel}
               onChange={(e) => setChannel(e.target.value)}
             >
-              <option value="">{t('自动选择渠道（默认）')}</option>
+              <option value="">{t('自动选择供应商（默认）')}</option>
               {channels.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
@@ -156,7 +156,7 @@ export default function AgentSettingsPanel(): JSX.Element {
               ))}
             </select>
             <div className="form-hint">
-              {t('指定后 AI 助手只通过该渠道调用模型（排障用）；留空则按优先级自动选路。')}
+              {t('指定后 AI 助手只通过该供应商调用模型（排障用）；留空则按优先级自动选路。')}
             </div>
           </div>
 

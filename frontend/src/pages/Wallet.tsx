@@ -482,7 +482,7 @@ export default function Wallet(): JSX.Element {
                     className={`wallet-amount-preset ${active ? 'active' : ''}`}
                     onClick={() => setAmount(String(v))}
                   >
-                    <span className="wallet-amount-num">¥{v}</span>
+                    <span className="wallet-amount-num">¥{Number(v).toFixed(2)}</span>
                     <span className="wallet-amount-quota">
                       {fmtQuota(quotaFor(v))} {t('配额')}
                       {discountFor(v) < 1 && <em style={{ marginLeft: 4, fontStyle: 'normal', color: '#34d399' }}>{t('折扣')} {discountFor(v)}</em>}
@@ -521,7 +521,7 @@ export default function Wallet(): JSX.Element {
               {/* 实付结算块 */}
               <div className="wallet-pay-summary">
                 <span>{t('实付金额')}</span>
-                <span className="wallet-pay-amount">¥{payMoney(Number(amount) || 0)}</span>
+                <span className="wallet-pay-amount">¥{payMoney(Number(amount) || 0).toFixed(2)}</span>
                 <span className="wallet-pay-arrow">→</span>
                 <span>{t('获得配额')}</span>
                 <span className="wallet-pay-quota">{fmtQuota(quotaFor(Number(amount) || 0))}</span>

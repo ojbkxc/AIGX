@@ -24,12 +24,12 @@ test.describe('模型管理', () => {
     await expect(page.locator('h1')).toContainText('模型管理');
   });
 
-  test('左栏分三段：渠道供应商 / 账号池提供商 / 自定义提供商', async ({ page, pageErrors }) => {
+  test('左栏分三段：供应商 / 账号池提供商 / 自定义提供商', async ({ page, pageErrors }) => {
     const rail = page.locator('.mm-rail');
     await expect(rail).toBeVisible();
 
     // 三个分段标题都在
-    await expect(rail).toContainText('渠道供应商');
+    await expect(rail).toContainText('供应商');
     await expect(rail).toContainText('账号池提供商');
     await expect(rail).toContainText('自定义提供商');
 
@@ -148,14 +148,21 @@ test.describe('模型管理', () => {
     await expect(cell.locator('.mm-alias.is-off')).toHaveCount(1);
     await expect(cell.locator('.mm-alias.is-off')).toContainText('alias-off');
 
-    // identity chip：文本为模型自身名，带「原样透传」标签，且**不带**开关
+    // identity chip：显示「模型名 → 同名」（具体模型名 + 方向），右侧「原样」标签，
+    // 且**不带**开关。箭头/目标名的 class 只用于定位，内容断言用语义正则。
     const identity = cell.locator('.mm-alias-identity');
     await expect(identity).toHaveCount(1);
-    await expect(identity).toContainText('unpriced-model');
+    await expect(identity).toContainText(/unpriced-model\s*→\s*unpriced-model/);
+    await expect(identity).toContainText('原样');
     await expect(identity.getByRole('switch')).toHaveCount(0);
 
-    // 真实映射 chip 都有开关（identity 排除在外）
+    // 真实映射 chip 都有开关（identity 排除在外），且目标模型名可见（不再只在 tooltip 里）
     await expect(cell.locator('.mm-alias:not(.mm-alias-identity)').first().getByRole('switch')).toBeVisible();
+    const freeChip = cell.locator('.mm-alias', { hasText: 'alias-free' });
+    await expect(freeChip).toContainText(/alias-free\s*→\s*unpriced-model/);
+    await expect(cell.locator('.mm-alias.is-off', { hasText: 'alias-off' })).toContainText(
+      /alias-off\s*→\s*unpriced-model/,
+    );
 
     // 行内「+ 映射」入口存在
     await expect(cell.locator('.mm-alias-add')).toBeVisible();
@@ -267,16 +274,33 @@ test.describe('模型管理', () => {
     expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
-  test('元信息覆盖 Tab 可切换并渲染', async ({ page, pageErrors }) => {
-    await page.getByRole('tab', { name: '元信息覆盖' }).click();
-    const text = await page.locator('.main-content').innerText();
-    expect(text.length).toBeGreaterThan(10);
-    // 目录 Tab 的布局不应再显示
-    await expect(page.locator('.mm-layout')).toHaveCount(0);
-    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
+  test('覆盖管理弹窗列出覆盖项，删除入口可达', async ({ page, pageErrors }) => {
+    // 原「元信息覆盖」Tab 已并入模型目录：入口在目录工具栏
+    await expect(page.getByRole('tab', { name: '元信息覆盖' })).toHaveCount(0);
 
-    await page.getByRole('tab', { name: '模型目录' }).click();
+    await page.getByRole('button', { name: '覆盖管理' }).click();
+    const modal = page.locator('.modal-overlay .modal').first();
+    await expect(modal).toBeVisible();
+    await expect(modal).toContainText('元信息覆盖');
+
+    // 覆盖项表格：mock 里 glm-4.7-flash 有覆盖（归属方/上下文/能力）
+    const table = modal.locator('.mm-overrides-table');
+    await expect(table).toBeVisible();
+    await expect(table).toContainText('glm-4.7-flash');
+    await expect(table).toContainText('zhipu');
+    await expect(table.locator('tbody tr')).toHaveCount(1);
+    // 删除按钮挂在操作列（危险色），可点到确认弹窗
+    await expect(table.locator('.mm-act-btn.danger')).toHaveCount(1);
+
+    // 新增入口也在弹窗里
+    await expect(modal.getByRole('button', { name: '新增覆盖' })).toBeVisible();
+
+    // 关闭后回到目录，Tab 仍只有两个（目录 / 定价倍率）
+    await modal.getByRole('button', { name: '关闭' }).click();
+    await expect(modal).toHaveCount(0);
+    await expect(page.getByRole('tab')).toHaveCount(2);
     await expect(page.locator('.mm-layout')).toBeVisible();
+    expect(pageErrors, pageErrors.join('\n')).toEqual([]);
   });
 
   test('定价倍率 Tab 渲染倍率表格（旧 /pricing 已并入此处）', async ({ page, pageErrors }) => {

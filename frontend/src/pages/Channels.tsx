@@ -1,15 +1,15 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   Eye, EyeOff, ArrowLeftRight, MoreHorizontal, Search,
   Pencil, Gauge, Power, PowerOff, Loader2, MessageSquare, RotateCcw, Trash2,
   DollarSign, Cloud, Sparkles, Gem, BrainCircuit, Settings2, Plus,
-  Timer, AlertTriangle,
+  Timer, AlertTriangle, Users, KeyRound,
 } from 'lucide-react';
 import { api } from '../api';
 import { useListKeyboard } from '../hooks/useListKeyboard';
-import type { ChannelItem as ApiChannelItem } from '../types';
+import type { ChannelItem as ApiChannelItem, AccountSessionStatsItem } from '../types';
 import { useToast } from '../components/Toast';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ChatDebugger from '../components/ChatDebugger';
@@ -168,8 +168,8 @@ interface ChannelQuirksForm {
 }
 
 // 渠道类型选项 — 与后端 ChannelType 枚举对齐（snake_case）。
-// 不含 `account`：账号型渠道由「账号池」添加账号时自动创建，是内部容器，
-// 不提供手工新建入口（列表里也不展示，见 Channels 的 allChannels 过滤）。
+// 不含 `account`：账号池型供应商由「账号池」添加账号时自动创建，
+// 不提供手工新建入口（但会出现在统一列表里，形态列标为「账号池」）。
 const CHANNEL_TYPES = [
   { value: 'cloudflare', labelKey: 'Cloudflare Workers AI', isRaw: true },
   { value: 'openai_compatible', labelKey: 'OpenAI 兼容 (DeepSeek/OpenRouter/...)' },
@@ -246,6 +246,8 @@ function readLs<T>(key: string, fallback: T): T {
 
 type ChStateFilter = 'all' | 'on' | 'off';
 type ChTypeFilter = 'all' | 'cloudflare' | 'openai_compatible' | 'anthropic' | 'gemini' | 'zai';
+/** 形态筛选（供应商列表新增维度：API Key 型 / 账号池型） */
+type ChKindFilter = 'all' | 'key' | 'account';
 /** 排序档位（方向即档位语义，同 ModelManage 倍率升/降分开的做法取常用向） */
 type ChSortMode = 'default' | 'priority' | 'response' | 'balance' | 'name';
 /** 批量操作动作（对齐 ModelManage BatchAction） */
@@ -255,6 +257,11 @@ const CH_STATE_OPTIONS: Array<[ChStateFilter, string]> = [
   ['all', '全部'],
   ['on', '已启用'],
   ['off', '已禁用'],
+];
+const CH_KIND_OPTIONS: Array<[ChKindFilter, string]> = [
+  ['all', '全部形态'],
+  ['key', 'API Key'],
+  ['account', '账号池'],
 ];
 const CH_TYPE_OPTIONS: Array<[ChTypeFilter, string]> = [
   ['all', '全部类型'],
@@ -272,14 +279,18 @@ const CH_SORT_OPTIONS: Array<[ChSortMode, string]> = [
   ['name', '名称'],
 ];
 
-/** 可显隐列（select 勾选列与 actions 操作列锁定，不进面板、不参与拖序） */
-type ChColKey = 'id' | 'name' | 'type' | 'status' | 'models' | 'priority' | 'weight' | 'balance' | 'response' | 'testtime';
+/** 可显隐列（select 勾选列与 actions 操作列锁定，不进面板、不参与拖序）
+ *  kind / accounts 为 2026-11 IA 整合新增：形态（API Key / 账号池）与账号数。
+ *  旧存盘没有这两列时由公共层 sanitizeItems 按声明相对位置自动补回。 */
+type ChColKey = 'id' | 'name' | 'kind' | 'accounts' | 'type' | 'status' | 'models' | 'priority' | 'weight' | 'balance' | 'response' | 'testtime';
 /** 列声明顺序（面板顺序、colgroup 与表头同源） */
-const CH_COL_ORDER: ChColKey[] = ['id', 'name', 'type', 'status', 'models', 'priority', 'weight', 'balance', 'response', 'testtime'];
+const CH_COL_ORDER: ChColKey[] = ['id', 'name', 'kind', 'accounts', 'type', 'status', 'models', 'priority', 'weight', 'balance', 'response', 'testtime'];
 /** 列设置面板显示的列名（ID 固定英文不译） */
 const CH_COL_PANEL_LABEL: Record<ChColKey, string> = {
   id: 'ID',
   name: '名称',
+  kind: '形态',
+  accounts: '账号数',
   type: '类型',
   status: '状态',
   models: '模型',
@@ -294,6 +305,8 @@ const CH_COL_DEFAULT_W: Record<string, number> = {
   select: 32,
   id: 48,
   name: 170,
+  kind: 88,
+  accounts: 84,
   type: 140,
   status: 72,
   models: 200,
@@ -314,6 +327,8 @@ type ChAlign = 'left' | 'center' | 'right';
 const CH_COL_DEFAULT_ALIGN: Record<ChColKey, ChAlign> = {
   id: 'left',
   name: 'left',
+  kind: 'left',
+  accounts: 'left',
   type: 'left',
   status: 'left',
   models: 'left',
@@ -344,7 +359,7 @@ function readLsRaw<T>(key: string): T | null {
 }
 
 interface ChannelsProps {
-  /** 作为「渠道与账号池」双 Tab 的子页内嵌时隐藏自身标题区 */
+  /** 作为「供应商」页的子页内嵌时隐藏自身标题区 */
   embedded?: boolean;
 }
 
@@ -355,6 +370,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
   const [error, setError] = useState('');
   const addToast = useToast();
   const { t } = useTranslation();
+  const navigate = useNavigate();
 
   const [showModal, setShowModal] = useState(false);
   const [editChannel, setEditChannel] = useState<ChannelItem | null>(null);
@@ -479,11 +495,16 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
   const [pageSize, setPageSize] = usePageSize(LS_PSZ, PAGE_SIZES, 20, [LS_PAGE_SIZE]);
 
   // ── 筛选 / 排序 / 列显隐（对齐 ModelManage 的交互面，全部落 localStorage）──
-  const chFilters = getFilter<Record<string, string>>(LS_FILTERS, { state: 'all', type: 'all', sort: 'default', search: '' });
+  const chFilters = getFilter<Record<string, string>>(LS_FILTERS, { state: 'all', kind: 'all', type: 'all', sort: 'default', search: '' });
   const [search, setSearch] = useState<string>(chFilters.search || '');
   const [stateFilter, setStateFilter] = useState<ChStateFilter>(chFilters.state as ChStateFilter);
+  const [kindFilter, setKindFilter] = useState<ChKindFilter>(
+    chFilters.kind === 'key' || chFilters.kind === 'account' ? (chFilters.kind as ChKindFilter) : 'all',
+  );
   const [typeFilter, setTypeFilter] = useState<ChTypeFilter>(chFilters.type as ChTypeFilter);
   const [sortMode, setSortMode] = useState<ChSortMode>(chFilters.sort as ChSortMode);
+  /** 账号池型供应商的账号数（enabled/total），页面加载时并发拉一次；失败静默显示「—」 */
+  const [accountStats, setAccountStats] = useState<Record<string, AccountSessionStatsItem>>({});
   // 列配置已迁公共层（tableColumns v2：顺序/显隐/对齐/列宽统一记忆）。
   // 旧键一次性搬迁：ch-colcfg（数组：顺序+对齐）与 ch-cols（显隐表）合成 v1 形态
   // 喂公共层；ch-colw 列宽覆盖并进 v2；搬完删旧键。
@@ -637,7 +658,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
   // 筛选条件变化时把页码重置到 1（避免「第 3 页 + 新筛选」导致空页）
   useEffect(() => {
     setPage((prev) => (prev === 1 ? prev : 1));
-  }, [search, stateFilter, typeFilter, sortMode, pageSize]);
+  }, [search, stateFilter, kindFilter, typeFilter, sortMode, pageSize]);
 
   // 点击外部关闭"更多"菜单
   useEffect(() => {
@@ -651,12 +672,14 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     return () => document.removeEventListener('mousedown', handler);
   }, [moreOpen]);
 
-  // 过滤（搜索 + 状态 + 类型）+ 排序 —— 与模型管理页同管线，纯前端
+  // 过滤（搜索 + 状态 + 形态 + 类型）+ 排序 —— 与模型管理页同管线，纯前端
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const out = channels.filter((ch) => {
       if (stateFilter === 'on' && ch.status !== 'enabled') return false;
       if (stateFilter === 'off' && ch.status === 'enabled') return false;
+      if (kindFilter === 'account' && ch.channel_type !== 'account') return false;
+      if (kindFilter === 'key' && ch.channel_type === 'account') return false;
       if (typeFilter !== 'all' && ch.channel_type !== typeFilter) return false;
       if (!q) return true;
       return (
@@ -679,7 +702,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       });
     }
     return out;
-  }, [channels, search, stateFilter, typeFilter, sortMode]);
+  }, [channels, search, stateFilter, kindFilter, typeFilter, sortMode]);
 
   // 客户端分页（PAGE_SIZES 无 'all' 档，窄化为数值口径）
   const pageSizeNum = pageSize === 'all' ? filtered.length || 1 : pageSize;
@@ -696,8 +719,8 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
 
   // 筛选/排序/搜索落盘（对齐 ModelManage 的 localStorage 记忆）
   useEffect(() => {
-    setFilter(LS_FILTERS, { state: stateFilter, type: typeFilter, sort: sortMode, search });
-  }, [stateFilter, typeFilter, sortMode, search]);
+    setFilter(LS_FILTERS, { state: stateFilter, kind: kindFilter, type: typeFilter, sort: sortMode, search });
+  }, [stateFilter, kindFilter, typeFilter, sortMode, search]);
   // 每页条数落盘已收敛进 usePageSize（选档时写 LS_PSZ），此处不再重复写
 
   /** 列 key → 是否可见（tbody 的 ch-hidden 由此来；隐藏列 td 保留但不计入布局） */
@@ -863,10 +886,10 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       const n = selectedRows.length;
       addToast(
         batchAction === 'enable'
-          ? `${t('已启用')} ${n} ${t('个渠道')}`
+          ? `${t('已启用')} ${n} ${t('个供应商')}`
           : batchAction === 'disable'
-            ? `${t('已停用')} ${n} ${t('个渠道')}`
-            : `${t('已删除')} ${n} ${t('个渠道')}`,
+            ? `${t('已停用')} ${n} ${t('个供应商')}`
+            : `${t('已删除')} ${n} ${t('个供应商')}`,
         'success',
       );
       setBatchOpen(false);
@@ -874,7 +897,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       setBatchPassword('');
     } else {
       setBatchReport(
-        `${t('操作失败')} ${fail}/${selectedRows.length} ${t('个渠道')}${firstError ? `：${firstError}` : ''}`,
+        `${t('操作失败')} ${fail}/${selectedRows.length} ${t('个供应商')}${firstError ? `：${firstError}` : ''}`,
       );
     }
   };
@@ -883,15 +906,17 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
   // 全部测试：并发跑完再单条汇总（避免 N 条 Toast 刷屏，cc-haha PromptInputQueuedCommands 聚合模式）
   const handleTestAll = async (): Promise<void> => {
     setMoreOpen(false);
-    if (!channels.length) return;
+    // 账号池型没有可测的直连 Key（凭证在账号池页逐个测），只测 API Key 型
+    const testable = channels.filter((ch) => ch.channel_type !== 'account');
+    if (!testable.length) return;
     setTestingAll(true);
-    const results = await Promise.all(channels.map((ch) =>
+    const results = await Promise.all(testable.map((ch) =>
       api.testChannel(ch.id)
         .then((res) => ({ ok: !!(res as { data?: { success?: boolean } }).data?.success, name: ch.name }))
         .catch(() => ({ ok: false, name: ch.name })),
     ));
     const okCount = results.filter((r) => r.ok).length;
-    addToast(t('测试完成：{{ok}}/{{total}} 个渠道连通', { ok: okCount, total: results.length }), okCount === results.length ? 'success' : 'warning');
+    addToast(t('测试完成：{{ok}}/{{total}} 个供应商连通', { ok: okCount, total: results.length }), okCount === results.length ? 'success' : 'warning');
     setTestingAll(false);
     loadChannels();
   };
@@ -899,12 +924,12 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     setMoreOpen(false);
     const disabled = channels.filter((ch) => ch.status !== 'enabled');
     if (!disabled.length) {
-      addToast(t('没有已禁用的渠道'));
+      addToast(t('没有已禁用的供应商'));
       return;
     }
     setConfirmState({
-      title: t('删除所有已禁用渠道'),
-      message: t('确定删除全部 {{count}} 个已禁用渠道？', { count: disabled.length }),
+      title: t('删除所有已禁用供应商'),
+      message: t('确定删除全部 {{count}} 个已禁用供应商？', { count: disabled.length }),
       confirmText: t('删除'),
       danger: true,
       requirePassword: true,
@@ -915,8 +940,8 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
         const ok = results.filter(Boolean).length;
         addToast(
           ok === disabled.length
-            ? `${t('已删除')} ${ok} ${t('个渠道')}`
-            : `${t('已删除')} ${ok}/${disabled.length} ${t('个渠道（其余失败：密码错误或权限不足）')}`,
+            ? `${t('已删除')} ${ok} ${t('个供应商')}`
+            : `${t('已删除')} ${ok}/${disabled.length} ${t('个供应商（其余失败：密码错误或权限不足）')}`,
           ok === disabled.length ? 'success' : 'error',
         );
         loadChannels();
@@ -967,10 +992,9 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
             ? ch.balance_last_error
             : null,
       }));
-      // 账号型渠道不在这里落库：它是账号池（AccountSessions）的内部容器，
-      // 由「添加账号」自动创建。这里过滤掉，而不是在渲染层过滤，避免
-      // 「批量操作 / 统计 / 空态判断」各处都得记得排除一遍。
-      setChannels(items.filter((ch) => ch.channel_type !== 'account'));
+      // 统一供应商列表：账号池型不再隐藏（channel_type='account' 是账号池容器，
+      // 但它本身也是一条「供应商」，形态列 + 账号数列足以说明差异）。
+      setChannels(items);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -978,6 +1002,23 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       firstLoadRef.current = false;
     }
   };
+
+  /**
+   * 账号池型的账号数（账号数列）：`api.accountSessionStats()` 按渠道聚合。
+   * 与列表并行拉一次；接口失败静默降级（单元格显示「—」），不阻塞列表。
+   * 不在每次 loadChannels 里重拉：账号增删发生在「账号池」Tab，切回来
+   * 重新挂载时 AccountSessions 自己会拉新数据，这里只需页面级快照。
+   */
+  useEffect(() => {
+    api.accountSessionStats()
+      .then((res) => {
+        const list = res?.data?.channels ?? [];
+        const map: Record<string, AccountSessionStatsItem> = {};
+        for (const s of list) map[String(s.channel_id)] = s;
+        setAccountStats(map);
+      })
+      .catch(() => { /* 接口不可用时静默：列显示 — */ });
+  }, []);
 
   const openAdd = (): void => {
     setEditChannel(null);
@@ -1094,7 +1135,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       form.channel_type !== 'cloudflare' &&
       !form.base_url
     ) {
-      setError(t('非 Cloudflare 渠道需填写 Base URL'));
+      setError(t('非 Cloudflare 供应商需填写 Base URL'));
       return;
     }
     setSaving(true);
@@ -1105,7 +1146,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       const nextSecs = Number(form.balance_query_interval_secs) || 0;
       if (editChannel) {
         await api.updateChannel(editChannel.id, payload);
-        addToast(t('渠道更新成功'));
+        addToast(t('供应商更新成功'));
         await persistIntervalIfNeeded(
           editChannel.id,
           normalizeIntervalSecs(editChannel.balance_query_interval_secs) ?? 0,
@@ -1113,7 +1154,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
         );
       } else {
         const created = await api.addChannel(payload);
-        addToast(t('渠道添加成功'));
+        addToast(t('供应商添加成功'));
         // 新建渠道后端恒按「不参与巡检」起步（`to_channel` 硬置 None 是正确的
         // opt-in 默认），用户在下拉里选了非关闭档才补这刀
         const newId = created.data?.id;
@@ -1154,7 +1195,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
   const handleResetCircuit = (id: string | number): void => {
     setConfirmState({
       title: t('重置断路器'),
-      message: t('重置后将立即恢复向该渠道放行流量。若渠道仍存在故障，可能再次触发熔断。确定继续？'),
+      message: t('重置后将立即恢复向该供应商放行流量。若供应商仍存在故障，可能再次触发熔断。确定继续？'),
       confirmText: t('重置'),
       onConfirm: async () => {
         setError('');
@@ -1182,6 +1223,11 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     setChatChannel(null);
   };
 
+  /** 账号池型供应商下钻：切到「账号池」Tab 并按该供应商过滤（?provider=） */
+  const goManageAccounts = (ch: ChannelItem): void => {
+    navigate(`/channels?tab=accounts&provider=${encodeURIComponent(String(ch.id))}`);
+  };
+
   // PATCH 部分更新 — 仅传 status 字段，避免脱敏 api_key 覆盖真实密钥。
   // 停用直接影响生产流量 → 确认弹窗；启用方向直接执行。
   const handleToggle = (ch: ChannelItem): void => {
@@ -1191,7 +1237,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
       try {
         const newStatus = disabling ? 'disabled' : 'enabled';
         await api.patchChannel(ch.id, { status: newStatus });
-        addToast(disabling ? t('渠道已停用') : t('渠道已启用'));
+        addToast(disabling ? t('供应商已停用') : t('供应商已启用'));
         loadChannels();
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -1199,8 +1245,8 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
     };
     if (disabling) {
       setConfirmState({
-        title: t('停用渠道'),
-        message: t('停用后该渠道不再接收新请求。确定继续？'),
+        title: t('停用供应商'),
+        message: t('停用后该供应商不再接收新请求。确定继续？'),
         confirmText: t('停用'),
         danger: true,
         onConfirm: doToggle,
@@ -1212,8 +1258,8 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
 
   const handleDelete = (id: string | number): void => {
     setConfirmState({
-      title: t('删除渠道'),
-      message: t('确定删除此渠道？'),
+      title: t('删除供应商'),
+      message: t('确定删除此供应商？'),
       confirmText: t('删除'),
       danger: true,
       requirePassword: true,
@@ -1221,7 +1267,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
         setError('');
         try {
           await api.deleteChannel(id, password);
-          addToast(t('渠道已删除'));
+          addToast(t('供应商已删除'));
           loadChannels();
         } catch (err) {
           setError(err instanceof Error ? err.message : String(err));
@@ -1312,9 +1358,9 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
   /**
    * #32 PR3 周期余额巡检徽章（余额格右侧那条）。
    *
-   * **关闭态也要渲染**：不渲染就等于把「这条渠道不参与巡检」这个运维最需要的
-   * 信息藏掉，而它恰恰是默认态（新建渠道 opt-in 关闭）。账号型渠道不进这张表
-   * （loadChannels 已过滤），这里不需要再判一次。
+   * **关闭态也要渲染**：不渲染就等于把「这条供应商不参与巡检」这个运维最需要的
+   * 信息藏掉，而它恰恰是默认态（新建供应商 opt-in 关闭）。账号池型供应商
+   * 没有独立的余额巡检（凭证在账号池页），这里不渲染该徽标。
    *
    * 「上次查询」只报**自动**巡检：手动点余额格走 `handle_get_channel_balance`，
    * 它写回 balance/unit 但**不写** `balance_last_query_at`（巡检运行态，手点一次
@@ -1351,18 +1397,18 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
 
   return (
     <div>
-      {/* PageIntro 标题区（内嵌到「渠道与账号池」双 Tab 时由宿主提供） */}
+      {/* PageIntro 标题区（内嵌到「供应商」页时由宿主提供） */}
       {!embedded && (
         <div className="page-header">
-          <h1>{t('渠道管理')}</h1>
-          <p>{t('管理上游 AI 渠道（支持混用 Cloudflare + 第三方 OpenAI 兼容上游）')}</p>
+          <h1>{t('供应商列表')}</h1>
+          <p>{t('管理上游 AI 供应商（API Key 型 + 账号池型；支持混用 Cloudflare + 第三方 OpenAI 兼容上游）')}</p>
         </div>
       )}
 
       {error && <div className="error-message">{error}</div>}
 
       <Card
-        title={`${t('所有渠道')} (${channels.length})`}
+        title={`${t('所有供应商')} (${channels.length})`}
         actions={
           <div className="channels-toolbar">
             {/* 搜索框（本地即时过滤，无需回车） */}
@@ -1370,7 +1416,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
               <Search size={14} />
               <input
                 ref={searchRef}
-                placeholder={t('搜索渠道')}
+                placeholder={t('搜索供应商')}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 onKeyDown={(e) => {
@@ -1411,15 +1457,15 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
               </Button>
               {moreOpen && (
                 <div className="channels-more-menu">
-                  <button type="button" onClick={handleTestAll} disabled={testingAll}>{testingAll ? t('测试中…') : t('测试所有渠道')}</button>
-                  <button type="button" onClick={handleDeleteAllDisabled}>{t('删除所有已禁用渠道')}</button>
+                  <button type="button" onClick={handleTestAll} disabled={testingAll}>{testingAll ? t('测试中…') : t('测试所有供应商')}</button>
+                  <button type="button" onClick={handleDeleteAllDisabled}>{t('删除所有已禁用供应商')}</button>
                 </div>
               )}
             </div>
 
             <Button size="sm" onClick={openAdd} style={{ gap: 6 }}>
               <Plus size={13} />
-              {t('添加渠道')}
+              {t('添加供应商')}
             </Button>
           </div>
         }
@@ -1429,9 +1475,9 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
           <SkeletonTable columns={6} rows={5} />
         ) : channels.length === 0 ? (
           <EmptyState
-            message={t('暂无渠道')}
+            message={t('暂无供应商')}
             icon="🛰️"
-            action={<Button onClick={openAdd}>{t('添加第一个渠道')}</Button>}
+            action={<Button onClick={openAdd}>{t('添加第一个供应商')}</Button>}
           />
         ) : (
           <>
@@ -1444,6 +1490,19 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                     type="button"
                     className={`ch-seg-btn${stateFilter === v ? ' active' : ''}`}
                     onClick={() => setStateFilter(v)}
+                  >
+                    {t(label)}
+                  </button>
+                ))}
+              </div>
+              {/* 形态筛选（全部 / API Key / 账号池）：本地过滤，切供应商与账号池两态 */}
+              <div className="ch-seg" role="tablist" aria-label={t('形态筛选')}>
+                {CH_KIND_OPTIONS.map(([v, label]) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className={`ch-seg-btn${kindFilter === v ? ' active' : ''}`}
+                    onClick={() => setKindFilter(v)}
                   >
                     {t(label)}
                   </button>
@@ -1475,8 +1534,8 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
               </div>
               <span className="ch-filters-count">
                 {filtered.length === channels.length
-                  ? `${filtered.length} ${t('个渠道')}`
-                  : `${filtered.length} / ${channels.length} ${t('个渠道')}`}
+                  ? `${filtered.length} ${t('个供应商')}`
+                  : `${filtered.length} / ${channels.length} ${t('个供应商')}`}
               </span>
             </div>
 
@@ -1484,7 +1543,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
             {selected.size > 0 && (
               <div className="ch-batch-chip">
                 <span>
-                  {t('已选')} <strong>{selected.size}</strong> {t('个渠道')}
+                  {t('已选')} <strong>{selected.size}</strong> {t('个供应商')}
                 </span>
                 <button
                   type="button"
@@ -1587,6 +1646,21 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                               {ch.base_url || ch.account_id}
                             </div>
                           )}
+                        </td>
+                        {/* 形态（API Key / 账号池）：账号池型是登录态账号的凭证容器 */}
+                        <td className={`col-kind${colCls('kind')} ta-${colAlign.kind}`}>
+                          <span className={`ch-kind-badge ${ch.channel_type === 'account' ? 'is-account' : 'is-key'}`}>
+                            {ch.channel_type === 'account' ? <Users size={12} /> : <KeyRound size={12} />}
+                            {ch.channel_type === 'account' ? t('账号池') : t('API Key')}
+                          </span>
+                        </td>
+                        {/* 账号数（仅账号池型有值：enabled/total，来自 stats；失败降级 —） */}
+                        <td className={`col-accounts${colCls('accounts')} ta-${colAlign.accounts}`}>
+                          {(() => {
+                            if (ch.channel_type !== 'account') return '—';
+                            const s = accountStats[String(ch.id)];
+                            return s ? `${s.enabled}/${s.total}` : '—';
+                          })()}
                         </td>
                         <td className={`col-type${colCls('type')} ta-${colAlign.type}`}>
                           <span className="ch-type-badge">
@@ -1760,43 +1834,89 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                         </td>
                         <td className="col-actions">
                           <div className="ch-actions">
-                            <button
-                              type="button"
-                              className="ch-icon-btn"
-                              title={t('对话调试')}
-                              onClick={() => openChat(ch)}
-                            >
-                              <MessageSquare size={15} />
-                            </button>
-                            <button
-                              type="button"
-                              className="ch-icon-btn"
-                              title={t('测试连通性')}
-                              onClick={() => handleTest(ch.id)}
-                              disabled={testingId === ch.id}
-                            >
-                              {testingId === ch.id
-                                ? <Loader2 size={15} className="animate-spin" />
-                                : <Gauge size={15} />}
-                            </button>
-                            <button
-                              type="button"
-                              className={`ch-icon-btn ${ch.status === 'enabled' ? 'ch-danger-hover' : ''}`}
-                              title={ch.status === 'enabled' ? t('停用') : t('启用')}
-                              onClick={() => handleToggle(ch)}
-                            >
-                              {ch.status === 'enabled' ? <Power size={15} /> : <PowerOff size={15} />}
-                            </button>
-                            <div className="ch-row-menu">
-                              <button
-                                type="button"
-                                className="ch-icon-btn"
-                                title={t('更多操作')}
-                                onClick={(e) => openRowMenu(e, ch.id)}
-                              >
-                                <MoreHorizontal size={15} />
-                              </button>
-                            </div>
+                            {ch.channel_type === 'account' ? (
+                              <>
+                                {/* 账号池型：凭证在账号池页管理（管理账号下钻），
+                                    这里不提供「编辑 Key / 测试连通性」 */}
+                                <button
+                                  type="button"
+                                  className="ch-icon-btn"
+                                  title={t('管理账号')}
+                                  onClick={() => goManageAccounts(ch)}
+                                >
+                                  <Users size={15} />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ch-icon-btn"
+                                  title={t('查询余额')}
+                                  onClick={() => handleUpdateBalance(ch.id)}
+                                  disabled={updatingBalance.has(ch.id)}
+                                >
+                                  {updatingBalance.has(ch.id)
+                                    ? <Loader2 size={15} className="animate-spin" />
+                                    : <DollarSign size={15} />}
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`ch-icon-btn ${ch.status === 'enabled' ? 'ch-danger-hover' : ''}`}
+                                  title={ch.status === 'enabled' ? t('停用') : t('启用')}
+                                  onClick={() => handleToggle(ch)}
+                                >
+                                  {ch.status === 'enabled' ? <Power size={15} /> : <PowerOff size={15} />}
+                                </button>
+                                <div className="ch-row-menu">
+                                  <button
+                                    type="button"
+                                    className="ch-icon-btn ch-danger-hover"
+                                    title={t('删除供应商')}
+                                    onClick={() => handleDelete(ch.id)}
+                                  >
+                                    <Trash2 size={15} />
+                                  </button>
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  className="ch-icon-btn"
+                                  title={t('对话调试')}
+                                  onClick={() => openChat(ch)}
+                                >
+                                  <MessageSquare size={15} />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ch-icon-btn"
+                                  title={t('测试连通性')}
+                                  onClick={() => handleTest(ch.id)}
+                                  disabled={testingId === ch.id}
+                                >
+                                  {testingId === ch.id
+                                    ? <Loader2 size={15} className="animate-spin" />
+                                    : <Gauge size={15} />}
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`ch-icon-btn ${ch.status === 'enabled' ? 'ch-danger-hover' : ''}`}
+                                  title={ch.status === 'enabled' ? t('停用') : t('启用')}
+                                  onClick={() => handleToggle(ch)}
+                                >
+                                  {ch.status === 'enabled' ? <Power size={15} /> : <PowerOff size={15} />}
+                                </button>
+                                <div className="ch-row-menu">
+                                  <button
+                                    type="button"
+                                    className="ch-icon-btn"
+                                    title={t('更多操作')}
+                                    onClick={(e) => openRowMenu(e, ch.id)}
+                                  >
+                                    <MoreHorizontal size={15} />
+                                  </button>
+                                </div>
+                              </>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -1846,7 +1966,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
             <div className="ch-row-menu-sep" />
             <button type="button" onClick={() => { setRowMenuId(null); openEdit(ch); }}>
               <Pencil size={14} />
-              {t('编辑渠道')}
+              {t('编辑供应商')}
             </button>
             <div className="ch-row-menu-sep" />
             <button
@@ -1855,7 +1975,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
               onClick={() => { setRowMenuId(null); handleDelete(ch.id); }}
             >
               <Trash2 size={14} />
-              {t('删除渠道')}
+              {t('删除供应商')}
             </button>
           </div>
         );
@@ -1866,7 +1986,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
           <form className={`modal ${!editChannel && modalStep === 'pick' ? 'modal-wide' : 'modal-form'}`} onSubmit={(e) => { e.preventDefault(); void handleSave(); }}>
             <div className="modal-header">
               <h3>
-                {editChannel ? t('编辑渠道') : t('添加渠道')}
+                {editChannel ? t('编辑供应商') : t('添加供应商')}
                 {!editChannel && (
                   <span className="ch-wizard-step">
                     {modalStep === 'pick' ? t('第 1 步 / 2 · 选供应商') : t('第 2 步 / 2 · 填配置')}
@@ -1928,10 +2048,10 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                   </div>
                   <div className="ch-preset-skip">
                     <Button variant="outline" type="button" onClick={() => setModalStep('form')}>
-                      {t('自定义渠道（跳过预置）')}
+                      {t('自定义供应商（跳过预置）')}
                     </Button>
                     <span className="ch-preset-skip-hint">
-                      {t('账号型渠道（凭证放账号池）也走自定义，类型选 account')}
+                      {t('账号池型供应商（凭证放账号池）也走自定义，类型选 account')}
                     </span>
                   </div>
                 </div>
@@ -1959,7 +2079,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
                 autoFocus
               />
               <Select
-                label={t('渠道类型')}
+                label={t('供应商类型')}
                 value={form.channel_type}
                 onChange={(e) => {
                   const newType = e.target.value;
@@ -2073,7 +2193,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
               <div className="form-group">
                     <label>{t('模型映射')}</label>
                     <div className="form-hint" style={{ marginBottom: 8 }}>
-                      {t('用户请求的模型名 → 实际转发给上游的模型名。优先级：渠道级映射 > 全局映射 > 原名透传。')}
+                      {t('用户请求的模型名 → 实际转发给上游的模型名。优先级：供应商级映射 > 全局映射 > 原名透传。')}
                     </div>
                     <ModelMappingEditor
                       value={form.model_mapping}
@@ -2230,7 +2350,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
               <Button variant="outline" onClick={closeModal} disabled={saving}>{t('取消')}</Button>
               {!editChannel && modalStep === 'pick' ? (
                 <Button type="button" onClick={() => setModalStep('form')}>
-                  {t('自定义渠道')}
+                  {t('自定义供应商')}
                 </Button>
               ) : (
                 <Button type="submit" disabled={saving}>
@@ -2248,7 +2368,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3>
-                {t('批量操作')} · {t('已选')} {selectedRows.length} {t('个渠道')}
+                {t('批量操作')} · {t('已选')} {selectedRows.length} {t('个供应商')}
               </h3>
               <button className="modal-close" onClick={() => setBatchOpen(false)} disabled={batchRunning}>
                 &times;
@@ -2276,7 +2396,7 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
               </div>
               {batchAction === 'delete' && (
                 <>
-                  <p className="ch-dialog-note">{t('删除后渠道不可恢复，此操作需要删除密码确认。')}</p>
+                  <p className="ch-dialog-note">{t('删除后供应商不可恢复，此操作需要删除密码确认。')}</p>
                   <input
                     className="form-input"
                     type="password"

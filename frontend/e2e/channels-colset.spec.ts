@@ -43,7 +43,7 @@ function readColcfg(page: import('@playwright/test').Page): Promise<Array<{ key:
 }
 
 test.describe('渠道列设置面板', () => {
-  test('面板骨架：四列表头 + 十行，select/actions 不进面板', async ({ page, pageErrors }) => {
+  test('面板骨架：四列表头 + 十二行，select/actions 不进面板', async ({ page, pageErrors }) => {
     await loginAsAdmin(page);
     await page.goto('/channels');
     await openPanel(page);
@@ -55,13 +55,13 @@ test.describe('渠道列设置面板', () => {
     expect(headCells[2]).toBe('显示');
     expect(headCells[3]).toBe('对齐');
 
-    // 十行业务列，select / actions 不参与
+    // 十二行业务列（2026-11 IA：新增形态/账号数），select / actions 不参与
     const order = await domOrder(page);
-    expect(order).toHaveLength(10);
+    expect(order).toHaveLength(12);
     expect(order).not.toContain('select');
     expect(order).not.toContain('actions');
     expect(order).toEqual([
-      'id', 'name', 'type', 'status', 'models',
+      'id', 'name', 'kind', 'accounts', 'type', 'status', 'models',
       'priority', 'weight', 'balance', 'response', 'testtime',
     ]);
 
@@ -150,14 +150,14 @@ test.describe('渠道列设置面板', () => {
     if (stored !== null) {
       const items = (JSON.parse(stored) as { items?: Array<{ key: string; visible: boolean; align: string }> }).items ?? [];
       expect(items.map((c) => c.key)).toEqual([
-        'id', 'name', 'type', 'status', 'models',
+        'id', 'name', 'kind', 'accounts', 'type', 'status', 'models',
         'priority', 'weight', 'balance', 'response', 'testtime',
       ]);
       expect(items.every((c) => c.visible && c.align === 'left')).toBe(true);
     }
     // 行序回默认（DOM 顺序与读回一致）
     expect(await domOrder(page)).toEqual([
-      'id', 'name', 'type', 'status', 'models',
+      'id', 'name', 'kind', 'accounts', 'type', 'status', 'models',
       'priority', 'weight', 'balance', 'response', 'testtime',
     ]);
 

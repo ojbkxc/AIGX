@@ -722,7 +722,7 @@ export default function Prompts(): JSX.Element {
                   <span>{t('自动翻译英文提示词')}</span>
                 </label>
               </div>
-              <p className="prompts-source-hint">{t('翻译走 AIGX 自己的渠道（需 [agent] 配置模型），失败时保留原文；每日有翻译字符预算，超限请明日再试。')}</p>
+              <p className="prompts-source-hint">{t('翻译走 AIGX 自己的供应商（需 [agent] 配置模型），失败时保留原文；每日有翻译字符预算，超限请明日再试。')}</p>
               {agentReady === false && (
                 <p className="prompts-source-hint" style={{ color: '#c0392b' }}>
                   {t('自环翻译不可用：请先在配置中启用 [agent] 并设置模型，再勾选自动翻译。')}

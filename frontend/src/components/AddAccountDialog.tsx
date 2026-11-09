@@ -674,7 +674,7 @@ export default function AddAccountDialog({
     if (customNew && !dupAck) {
       const dup = findDuplicate();
       if (dup) {
-        setError(t('检测到同协议、同上游地址的已有账号（渠道「{{name}}」，{{n}} 个账号）——确认并入同一账号池请点上方「仍要新建」', { name: dup.channelName, n: dup.count }));
+        setError(t('检测到同协议、同上游地址的已有账号（账号池「{{name}}」，{{n}} 个账号）——确认并入同一账号池请点上方「仍要新建」', { name: dup.channelName, n: dup.count }));
         return;
       }
     }
@@ -1461,7 +1461,7 @@ export default function AddAccountDialog({
                         ))}
                       </Select>
                       <Input
-                        label={t('渠道名称（可选）')}
+                        label={t('账号池名称（可选）')}
                         placeholder={t('例如：我的中转')}
                         value={customName}
                         onChange={(e) => setCustomName(e.target.value)}
@@ -1567,7 +1567,7 @@ export default function AddAccountDialog({
                   {customNew && dupInfo ? (
                     <div className="add-dup-warn" role="alert">
                       <span>
-                        {t('已存在同协议、同上游地址的账号：渠道「{{name}}」（{{n}} 个账号）。本次添加会自动并入该账号池，不会重复建池。', { name: dupInfo.channelName, n: dupInfo.count })}
+                        {t('已存在同协议、同上游地址的账号：账号池「{{name}}」（{{n}} 个账号）。本次添加会自动并入该账号池，不会重复建池。', { name: dupInfo.channelName, n: dupInfo.count })}
                       </span>
                       {dupAck ? (
                         <span className="form-hint">{t('已确认并入，可继续提交')}</span>

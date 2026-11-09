@@ -141,7 +141,7 @@ export default function Diagnostics({ embedded = false }: { embedded?: boolean }
         <div className="page-header">
           <div>
             <h1>{t('系统诊断')}</h1>
-            <p>{t('渠道健康、用量概况与熔断器状态的一站式体检（与 Agent 运维共用同一套探测口径）')}</p>
+            <p>{t('供应商健康、用量概况与熔断器状态的一站式体检（与 Agent 运维共用同一套探测口径）')}</p>
           </div>
           <button
             className="btn btn-outline btn-sm"
@@ -177,7 +177,7 @@ export default function Diagnostics({ embedded = false }: { embedded?: boolean }
         <>
           {/* 体检摘要 */}
           <div className="dx-summary-grid">
-            <Card title={t('渠道统计')}>
+            <Card title={t('供应商统计')}>
               <div className="dx-stat-grid">
                 <div className="dx-stat">
                   <div className="dx-stat-value">{channels?.total ?? 0}</div>
@@ -273,7 +273,7 @@ export default function Diagnostics({ embedded = false }: { embedded?: boolean }
 
           {/* 渠道批量测活 */}
           <Card
-            title={t('渠道批量测活')}
+            title={t('供应商批量测活')}
             actions={
               <button
                 className="btn btn-primary btn-sm"
@@ -287,25 +287,25 @@ export default function Diagnostics({ embedded = false }: { embedded?: boolean }
             }
           >
             <p className="dx-note">
-              {t('对全部启用渠道并发执行轻量探测。只探测不修改：不写断路器、不改动渠道状态、不落库。')}
+              {t('对全部启用供应商并发执行轻量探测。只探测不修改：不写断路器、不改动供应商状态、不落库。')}
             </p>
             {!probes ? (
-              <EmptyState icon="🩺" message={t('点击开始测活查看各渠道存活状态')} />
+              <EmptyState icon="🩺" message={t('点击开始测活查看各供应商存活状态')} />
             ) : (
               <>
                 <div className="dx-probe-summary">
                   <span>
-                    {t('探测 {{n}} 个渠道，存活 {{alive}} 个')}（
+                    {t('探测 {{n}} 个供应商，存活 {{alive}} 个')}（
                     {t('截止 {{s}}s')}）
                   </span>
                 </div>
                 {probes.channels.length === 0 ? (
-                  <EmptyState message={t('没有启用的渠道可探测')} />
+                  <EmptyState message={t('没有启用的供应商可探测')} />
                 ) : (
                   <table className="dx-table">
                     <thead>
                       <tr>
-                        <th>{t('渠道')}</th>
+                        <th>{t('供应商')}</th>
                         <th style={{ width: 100 }}>{t('状态')}</th>
                         <th style={{ width: 90 }}>{t('延迟')}</th>
                         <th>{t('消息')}</th>
@@ -334,22 +334,22 @@ export default function Diagnostics({ embedded = false }: { embedded?: boolean }
           {/* 熔断器快照 */}
           <Card title={t('熔断器快照')}>
             <p className="dx-note">
-              {t('逐渠道断路器状态。从未失败的渠道没有条目（= 隐含闭合）。reset 请用渠道页的重置熔断按钮。')}
+              {t('逐供应商断路器状态。从未失败的供应商没有条目（= 隐含闭合）。reset 请用供应商页的重置熔断按钮。')}
             </p>
             {breakers && breakers.tracked === 0 ? (
-              <EmptyState icon="✅" message={t('全部渠道断路器均为闭合状态')} />
+              <EmptyState icon="✅" message={t('全部供应商断路器均为闭合状态')} />
             ) : (
               breakers && (
                 <>
                   <div className="dx-probe-summary">
                     <span>
-                      {t('跟踪 {{n}} 个渠道：熔断 {{o}} · 半开 {{h}}')}
+                      {t('跟踪 {{n}} 个供应商：熔断 {{o}} · 半开 {{h}}')}
                     </span>
                   </div>
                   <table className="dx-table">
                     <thead>
                       <tr>
-                        <th>{t('渠道')}</th>
+                        <th>{t('供应商')}</th>
                         <th style={{ width: 80 }}>{t('状态')}</th>
                         <th style={{ width: 90 }}>{t('失败次数')}</th>
                         <th>{t('失败类型')}</th>

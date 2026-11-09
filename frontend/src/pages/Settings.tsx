@@ -1,9 +1,10 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Monitor, Sun, Moon,
   SlidersHorizontal, Sparkles, Network, RotateCcw,
-  Timer, Gauge, CreditCard, Database, Bell, ShieldCheck, Download, User,
+  Timer, Gauge, CreditCard, Database, Bell, ShieldCheck, Download,
   MessageSquare, CalendarClock,
 } from 'lucide-react';
 import { api } from '../api';
@@ -35,6 +36,7 @@ import QueuePanel from '../components/QueuePanel';
 import AutoContinuePanel from '../components/AutoContinuePanel';
 import ModelMetadataPanel from '../components/ModelMetadataPanel';
 import DataManagement from '../components/DataManagement';
+import ScheduledTasks from './ScheduledTasks';
 import './Settings.css';
 
 interface LimitsForm {
@@ -105,10 +107,10 @@ type SettingsTab =
   | 'perf'
   | 'billing'
   | 'data'
+  | 'scheduled'
   | 'notify'
   | 'security'
-  | 'update'
-  | 'account';
+  | 'update';
 
 /** 计费分区子标签（易支付 / 用户分组） */
 type BillingSubTab = 'epay' | 'groups';
@@ -173,10 +175,10 @@ const RETRY_FIELDS: Array<{
   max?: number;
   placeholder: string;
 }> = [
-  { field: 'max_retries', label: '最大重试次数（渠道切换）', hint: '渠道级失败切换的最大额外尝试次数（0 = 只尝试首选渠道，最多 10）；保存后立即生效。', type: 'number', min: 0, max: 10, placeholder: '2' },
+  { field: 'max_retries', label: '最大重试次数（供应商切换）', hint: '供应商级失败切换的最大额外尝试次数（0 = 只尝试首选供应商，最多 10）；保存后立即生效。', type: 'number', min: 0, max: 10, placeholder: '2' },
   { field: 'retry_self_count', label: '同账号重试次数', hint: '账号池内同一账号原地重试的额外次数（0 = 失败即换号，最多 10）；保存后立即生效。换号次数在账号池「账号路由」里配置。', type: 'number', min: 0, max: 10, placeholder: '1' },
   { field: 'retry_interval_ms', label: '重试间隔 (毫秒)', hint: '账号池换号重试之间的等待时间，0 = 立即换号（保存后立即生效）。', type: 'number', min: 0, max: 10000, placeholder: '0' },
-  { field: 'retry_on_status', label: '直接换号/换渠道状态码（逗号分隔）', hint: '命中这些上游状态码时不做指数退避冷却（只给基础冷却）并直接换号，同时在渠道级重试中视为可重试；默认 402（余额不足）。', type: 'text', placeholder: '402' },
+  { field: 'retry_on_status', label: '直接换号/换供应商状态码（逗号分隔）', hint: '命中这些上游状态码时不做指数退避冷却（只给基础冷却）并直接换号，同时在供应商级重试中视为可重试；默认 402（余额不足）。', type: 'text', placeholder: '402' },
 ];
 
 /** 设置分类：左栏导航，对齐 Agent2API settings-page 的 CATEGORIES。 */
@@ -191,11 +193,14 @@ const SETTINGS_CATEGORIES: Array<{ key: SettingsTab; label: string; icon: typeof
   { key: 'perf', label: '限流与缓存', icon: Gauge },
   { key: 'billing', label: '计费', icon: CreditCard },
   { key: 'data', label: '数据', icon: Database },
+  { key: 'scheduled', label: '定时任务', icon: CalendarClock },
   { key: 'notify', label: '通知', icon: Bell },
   { key: 'security', label: '安全', icon: ShieldCheck },
   { key: 'update', label: '更新', icon: Download },
-  { key: 'account', label: '账户', icon: User },
 ];
+
+/** URL ?tab= 只认已注册分类，避免手改 URL 把设置页置空 */
+const VALID_SETTINGS_TABS = new Set<string>(SETTINGS_CATEGORIES.map((c) => c.key));
 
 export default function Settings() {
   const [limits, setLimits] = useState<LimitsForm>({
@@ -222,7 +227,23 @@ export default function Settings() {
 
   // 当前激活的配置分类：左侧导航（对齐 Agent2API 的 CATEGORIES），
   // 每类只渲染自己那块，不再靠子标签层层下钻。
-  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+  // Tab 状态走 URL ?tab=（旧 /scheduled-tasks 重定向到 ?tab=scheduled 后由 URL 驱动；
+  // billing 的子标签仍为内部 state，不进 URL）。
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState<SettingsTab>(() => {
+    const want = searchParams.get('tab');
+    return want && VALID_SETTINGS_TABS.has(want) ? (want as SettingsTab) : 'general';
+  });
+  useEffect(() => {
+    const want = searchParams.get('tab');
+    if (want && VALID_SETTINGS_TABS.has(want)) setActiveTab(want as SettingsTab);
+  }, [searchParams]);
+  const selectSettingsTab = (key: SettingsTab): void => {
+    setActiveTab(key);
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', key);
+    setSearchParams(next, { replace: true });
+  };
   // 计费分区子标签（易支付 / 用户分组）
   const [billingSub, setBillingSub] = useState<BillingSubTab>('epay');
 
@@ -255,31 +276,6 @@ export default function Settings() {
 
   // ── 通用确认弹窗（用于清空缓存等危险操作）──
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
-
-  // ── 账户安全（修改密码）──
-  const [oldPw, setOldPw] = useState('');
-  const [newPw, setNewPw] = useState('');
-  const [confirmPw, setConfirmPw] = useState('');
-  const [pwSaving, setPwSaving] = useState(false);
-  const [pwError, setPwError] = useState('');
-
-  const handleChangePassword = async (e?: FormEvent) => {
-    e?.preventDefault();
-    setPwError('');
-    if (!oldPw) { setPwError(t('请输入当前密码')); return; }
-    if (newPw.length < 6) { setPwError(t('新密码至少 6 位')); return; }
-    if (newPw !== confirmPw) { setPwError(t('两次输入的新密码不一致')); return; }
-    setPwSaving(true);
-    try {
-      await api.changePassword(oldPw, newPw);
-      addToast(t('密码已修改，下次登录请使用新密码'));
-      setOldPw(''); setNewPw(''); setConfirmPw('');
-    } catch (err) {
-      setPwError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setPwSaving(false);
-    }
-  };
 
   const selectTheme = (mode: ThemeMode) => {
     setTheme(mode);
@@ -565,7 +561,7 @@ export default function Settings() {
       .filter((v) => v.length > 0)
       .map((v) => Number(v));
     if (retryCodes.some((code) => !Number.isInteger(code) || code < 100 || code > 599)) {
-      setError(t('直接换号/换渠道状态码必须在 100-599 之间'));
+      setError(t('直接换号/换供应商状态码必须在 100-599 之间'));
       return;
     }
     const body: Record<string, unknown> = { ...payload, retry_on_status: retryCodes };
@@ -605,7 +601,7 @@ export default function Settings() {
                 type="button"
                 className={`settings-nav-item ${active ? 'active' : ''}`}
                 aria-current={active ? 'page' : undefined}
-                onClick={() => setActiveTab(c.key)}
+                onClick={() => selectSettingsTab(c.key)}
               >
                 <Icon size={15} />
                 <span>{t(c.label)}</span>
@@ -693,6 +689,52 @@ export default function Settings() {
               </div>
             </div>
           </div>
+
+          {/* 反馈与需求（原「账户」分类迁入；对照 Agent2API「设置 → 反馈与需求」：跳 GitHub issue 模板） */}
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-header">
+              <h2>{t('反馈与需求')}</h2>
+              <p className="card-subtitle">
+                {t('问题反馈、功能建议与提供商/模型支持请求都走 GitHub issue，便于跟踪进度。')}
+              </p>
+            </div>
+            <div className="card-body">
+              <div className="settings-actions" style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                <a
+                  className="btn btn-secondary"
+                  href={`${REPO_URL}/issues/new?template=bug_report.yml`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {t('问题反馈')}
+                </a>
+                <a
+                  className="btn btn-secondary"
+                  href={`${REPO_URL}/issues/new?template=feature_request.yml`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {t('功能建议')}
+                </a>
+                <a
+                  className="btn btn-secondary"
+                  href={`${REPO_URL}/issues/new?template=provider_request.yml`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {t('请求提供商/模型支持')}
+                </a>
+                <a
+                  className="btn btn-secondary"
+                  href={`${REPO_URL}/issues`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {t('查看已有 issue')}
+                </a>
+              </div>
+            </div>
+          </div>
         </>
       )}
 
@@ -733,7 +775,7 @@ export default function Settings() {
         <div className="card">
           <div className="card-header">
             <h2>{t('重试')}</h2>
-            <p className="card-subtitle">{t('上游失败后换渠道 / 换账号的策略。')}</p>
+            <p className="card-subtitle">{t('上游失败后换供应商 / 换账号的策略。')}</p>
           </div>
           <div className="card-body">
             <div className="settings-form">
@@ -1082,6 +1124,9 @@ export default function Settings() {
         </>
       )}
 
+      {/* 定时任务（原独立菜单 /scheduled-tasks 并入；embedded 隐藏自带 h1） */}
+      {activeTab === 'scheduled' && <ScheduledTasks embedded />}
+
       {activeTab === 'notify' && <Notify />}
 
       {activeTab === 'update' && <UpdatePanel />}
@@ -1092,88 +1137,6 @@ export default function Settings() {
           <SecurityPolicyPanel />
           <div style={{ marginTop: 16 }}><Security /></div>
           <div style={{ marginTop: 16 }}><IpManagement /></div>
-        </>
-      )}
-
-      {activeTab === 'account' && (
-        <>
-        <div className="card">
-          <div className="card-header">
-            <h2>{t('账户安全')}</h2>
-          </div>
-          <div className="card-body">
-            <form className="settings-form" onSubmit={(e) => void handleChangePassword(e)}>
-              <div className="form-group">
-                <label>{t('当前密码')}</label>
-                <input className="form-input" type="password" value={oldPw}
-                  onChange={(e) => setOldPw(e.target.value)} autoComplete="current-password" />
-              </div>
-              <div className="form-group">
-                <label>{t('新密码')}</label>
-                <input className="form-input" type="password" value={newPw}
-                  onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
-                <span className="form-hint">{t('至少 6 位，建议混合字母与数字')}</span>
-              </div>
-              <div className="form-group">
-                <label>{t('确认新密码')}</label>
-                <input className="form-input" type="password" value={confirmPw}
-                  onChange={(e) => setConfirmPw(e.target.value)} autoComplete="new-password" />
-              </div>
-              {pwError && <div className="error-message">{pwError}</div>}
-              <div className="settings-actions">
-                <button type="submit" className="btn btn-primary" disabled={pwSaving}>
-                  {pwSaving ? t('修改中...') : t('修改密码')}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-
-        {/* 反馈与需求（对照 Agent2API「设置 → 反馈与需求」：跳 GitHub issue 模板） */}
-        <div className="card" style={{ marginTop: 16 }}>
-          <div className="card-header">
-            <h2>{t('反馈与需求')}</h2>
-            <p className="card-subtitle">
-              {t('问题反馈、功能建议与提供商/模型支持请求都走 GitHub issue，便于跟踪进度。')}
-            </p>
-          </div>
-          <div className="card-body">
-            <div className="settings-actions" style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-              <a
-                className="btn btn-secondary"
-                href={`${REPO_URL}/issues/new?template=bug_report.yml`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {t('问题反馈')}
-              </a>
-              <a
-                className="btn btn-secondary"
-                href={`${REPO_URL}/issues/new?template=feature_request.yml`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {t('功能建议')}
-              </a>
-              <a
-                className="btn btn-secondary"
-                href={`${REPO_URL}/issues/new?template=provider_request.yml`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {t('请求提供商/模型支持')}
-              </a>
-              <a
-                className="btn btn-secondary"
-                href={`${REPO_URL}/issues`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {t('查看已有 issue')}
-              </a>
-            </div>
-          </div>
-        </div>
         </>
       )}
 

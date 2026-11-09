@@ -144,7 +144,7 @@ test.describe('全站冒烟', () => {
       .locator('.sidebar-aside')
       .filter({ visible: true })
       .first()
-      .getByText('渠道与账号池', { exact: false })
+      .getByText('供应商', { exact: false })
       .click();
     await expect(page).toHaveURL(/\/channels$/);
     await expectRendered(page);

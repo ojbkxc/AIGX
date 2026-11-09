@@ -392,7 +392,7 @@ export default function Routing(): JSX.Element {
         <div>
           <h1>{t('路由')}</h1>
           <p>
-            {t('渠道选路的策略、分层档案（全局 / 按模型 / 路由组）与预演；保存即热生效，无需重启。')}
+            {t('供应商选路的策略、分层档案（全局 / 按模型 / 路由组）与预演；保存即热生效，无需重启。')}
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
