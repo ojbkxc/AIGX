@@ -718,6 +718,8 @@ pub async fn handle_messages(
                 }
                 // T3：发给客户端的错误消息先脱敏（截断 + 凭据模式遮蔽），
                 // 日志/熔断侧保留原始消息（见 error_translate::sanitize_error_message）
+                // 原文（未脱敏）落服务端日志供排障；客户端只收脱敏版。
+                tracing::warn!("messages error (raw, ops): {e}");
                 return anthropic_error(
                     e.error_type(),
                     &crate::error_translate::sanitize_error_message(&e.to_string()),
@@ -962,6 +964,8 @@ pub async fn handle_messages(
                                 std::sync::atomic::Ordering::SeqCst,
                             );
                             // T3：发给客户端的错误消息先脱敏（日志侧保留原始消息）
+                            // 原文（未脱敏）落服务端日志供排障；客户端只收脱敏版。
+                            tracing::warn!("messages stream chunk error (raw, ops): {e}");
                             let safe_msg =
                                 crate::error_translate::sanitize_error_message(&e.to_string());
                             let err = serde_json::json!({
@@ -1397,6 +1401,8 @@ pub async fn handle_messages(
                 }
                 // T3：发给客户端的错误消息先脱敏（截断 + 凭据模式遮蔽），
                 // 日志/熔断侧保留原始消息（见 error_translate::sanitize_error_message）
+                // 原文（未脱敏）落服务端日志供排障；客户端只收脱敏版。
+                tracing::warn!("messages error (raw, ops): {e}");
                 return anthropic_error(
                     e.error_type(),
                     &crate::error_translate::sanitize_error_message(&e.to_string()),

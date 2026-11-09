@@ -1446,6 +1446,8 @@ pub async fn handle_test_channel(
     } else if ch.channel_type != crate::channel::ChannelType::Account {
         // 账号型渠道失败往往只是「当前无可用账号」（全部冷却/未添加），
         // 不应据此停用整条渠道——账号级冷却由账号池自行恢复
+        // 排障原文（未脱敏）留调用方日志；mark_unhealthy 落库前已 sanitize。
+        tracing::warn!("channel test failed for {id}: {}", result.message);
         state
             .channel_store
             .mark_unhealthy(&id, result.message.clone());
