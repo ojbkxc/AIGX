@@ -509,6 +509,8 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                 // ── #33 阶段2：渠道级悬空映射清理 ──
                 // 守卫1 白名单源 / 守卫2 删前快照 / 守卫3 单轮限量 / 守卫4 幂等 /
                 // 守卫5 留痕 / 守卫6 待修清单；判定全在 plan_channel_prune。
+                // 本轮时刻取一次复用：快照/日志/drift 报告同一 `at`，三者可精确互证。
+                let round_at = chrono::Utc::now().timestamp();
                 let prune_plan = crate::channel::plan_channel_prune(
                     prune_candidates,
                     crate::channel::CHANNEL_PRUNE_LIMIT,
@@ -525,11 +527,8 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                     &prune_plan.deletions,
                 );
                 // 守卫2+守卫5：删除明细落 KV 快照（可回填）+ 日志留痕，绝不静默删
-                if !pruned.is_empty() {
-                    let snapshot = crate::channel::build_prune_snapshot(
-                        &pruned,
-                        chrono::Utc::now().timestamp(),
-                    );
+                if crate::channel::should_persist_prune_snapshot(&pruned) {
+                    let snapshot = crate::channel::build_prune_snapshot(&pruned, round_at);
                     if let Err(e) = state
                         .scheduled_task_store
                         .put("catalog:prune:last", &snapshot)
@@ -537,9 +536,8 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                         tracing::warn!("[Tasks] 悬空映射清理快照写入失败：{e}");
                     }
                     tracing::info!(
-                        "[Tasks] 悬空映射清理：删除 {} 条（快照 catalog:prune:last，可据 restore 回填；触发轮次 at={}）",
-                        pruned.len(),
-                        chrono::Utc::now().timestamp()
+                        "[Tasks] 悬空映射清理：删除 {} 条（快照 catalog:prune:last，可据 restore 回填；触发轮次 at={round_at}）",
+                        pruned.len()
                     );
                 }
                 // 守卫6：待修清单（已删的「若本意保留请按正确大小写回填」+ 只报不删的）
@@ -584,7 +582,7 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                     .sum();
                 if n_drift > 0 {
                     let report = json!({
-                        "at": chrono::Utc::now().timestamp(),
+                        "at": round_at,
                         "channels": drift_channels,
                         "prune": {
                             "limit": crate::channel::CHANNEL_PRUNE_LIMIT,

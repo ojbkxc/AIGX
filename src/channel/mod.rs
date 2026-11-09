@@ -581,6 +581,11 @@ pub fn reconcile_channel_drift(ch: &Channel, discovered: &[String]) -> Option<se
 }
 
 /// #33 阶段2 单轮删除上限（守卫3）：超限只报告不删，防一次快照异常大面积清空。
+///
+/// **限量按 plan 时的快照判定**，`execute_channel_prune` 在写锁内**重算**实际删除；
+/// 二者间无 `.await`（同一轮同步段），但若有并发管理写把 `model_mapping` 改大，
+/// 实际删除理论上可越过上限（窗口极窄、未观测）。残余风险登记于此：超限时整轮清空
+/// `deletions`，判定与删除绑在同一轮内。
 pub const CHANNEL_PRUNE_LIMIT: usize = 50;
 
 /// #33 阶段2：单渠道清理候选（由 `modelRefresh` 对账段按与
@@ -717,6 +722,11 @@ pub fn build_prune_snapshot(deleted: &[PrunedMapping], at: i64) -> serde_json::V
         // 可直接灌回：{channel_id: {alias: target}}
         "restore": restore,
     })
+}
+
+/// 守卫4 落盘侧：**仅当本轮确有删除**才落快照（第 2 轮空 ⇒ 不写 `catalog:prune:last`，幂等）。
+pub fn should_persist_prune_snapshot(deleted: &[PrunedMapping]) -> bool {
+    !deleted.is_empty()
 }
 
 impl ChannelStore {
@@ -2211,8 +2221,8 @@ mod tests {
             ]);
             s.add(ch).unwrap();
 
-            // 一轮 = 对账(reconcile) → 组候选 → plan → execute，返回本轮实际删除数
-            let round = |store: &ChannelStore| -> usize {
+            // 一轮 = 对账(reconcile) → 组候选 → plan → execute，返回本轮实际删除明细
+            let round = |store: &ChannelStore| -> Vec<PrunedMapping> {
                 let ch = store.get("c1").unwrap();
                 let drift = reconcile_channel_drift(&ch, &ch.models);
                 let stale: Vec<(String, String)> = drift
@@ -2239,11 +2249,18 @@ mod tests {
                     }],
                     CHANNEL_PRUNE_LIMIT,
                 );
-                execute_channel_prune(store, &plan.deletions).len()
+                execute_channel_prune(store, &plan.deletions)
             };
 
-            assert_eq!(round(&s), 1, "第 1 轮应删 1 条（dead）");
-            assert_eq!(round(&s), 0, "守卫4：第 2 轮必须为 0（幂等）");
+            let first = round(&s);
+            assert_eq!(first.len(), 1, "第 1 轮应删 1 条（dead）");
+            assert!(should_persist_prune_snapshot(&first), "有删除 ⇒ 应落快照");
+            let second = round(&s);
+            assert!(second.is_empty(), "守卫4：第 2 轮必须为 0（幂等）");
+            assert!(
+                !should_persist_prune_snapshot(&second),
+                "守卫4：第 2 轮空 ⇒ 不写 catalog:prune:last"
+            );
         });
     }
 
@@ -2286,6 +2303,23 @@ mod tests {
         assert_eq!(restore["c1"]["a"], "t1");
         assert_eq!(restore["c1"]["b"], "t2");
         assert_eq!(restore["c2"]["x"], "");
+        // GAP-2 加固：真把 restore 灌回一个空 HashMap，应**逐字还原** c1 的原 model_mapping
+        let original_c1: HashMap<String, String> = HashMap::from([
+            ("a".to_string(), "t1".to_string()),
+            ("b".to_string(), "t2".to_string()),
+        ]);
+        let rebuilt_c1: HashMap<String, String> = restore["c1"]
+            .as_object()
+            .expect("c1 分组是对象")
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    value.as_str().expect("target 是字符串").to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(rebuilt_c1, original_c1, "restore 灌回必须等价于原映射");
         // 留痕字段（守卫5）：轮次 at + 上限 limit + 触发者
         assert_eq!(snap["at"], 123i64);
         assert_eq!(snap["limit"], CHANNEL_PRUNE_LIMIT as u64);
