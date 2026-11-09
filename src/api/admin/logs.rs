@@ -1316,6 +1316,32 @@ mod tests {
         assert!(msg.contains("boom"), "需携带失败原因：{msg}");
     }
 
+    /// G5 **接线**源锚（验证线 `60-batch2-verify.md` §12.6 报出的弱锚）：上面那条只测了纯函数
+    /// helper；若有人把 wrapper 里那段改成内联 200，helper 测试**仍绿** ⇒「测了 helper、没测接线」
+    /// 的假绿。本锚钉住 wrapper 体内的逐字接线（`logs.rs:602`，一行未折行）。
+    ///
+    /// 本机复算：`grep -c "Err(e) => return Err(purge_preaud…"`（模式尾部截断，防本注释自匹配）
+    /// = **1**（`logs.rs:602`）。needle 运行时拼接：本测试字面量就在被扫描文件里，写整串会自匹配。
+    ///
+    /// 变异判据（本机禁编译，**未在真 Rust 执行**；buggy/修复版并列取证）：
+    /// - 修复版（现状 `:602`）：`Err` 分支经 helper `purge_preaudit_failed_response(&e)` 返回 500。
+    /// - buggy 版：把该分支改成内联 `error_response(…, StatusCode::OK)`（200）⇒ 本锚 `count == 1`
+    ///   **直接红**；而上面那条 helper 测试因 helper 未变仍绿 —— 这正是弱锚的病灶。
+    #[test]
+    fn purge_wrapper_wires_preaudit_failure_to_500_helper() {
+        let src = include_str!("logs.rs");
+        let needle = [
+            "Err(e) => return Err(purge_",
+            "preaudit_failed_response(&e))",
+        ]
+        .concat();
+        assert_eq!(
+            src.matches(&needle).count(),
+            1,
+            "wrapper 的 fail-closed 接线必须恰好一处（grep 复算=1；见上方注释，一行形态）"
+        );
+    }
+
     /// 空窗口（`eligible == 0`）：**早退不写** `logs.purge`（防「零成本刷审计行」通道）。
     /// 反向变异：去掉 core 里的 `eligible == 0` 早退 ⇒ 会多落一条审计行 ⇒ 本用例必红。
     #[test]
