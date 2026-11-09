@@ -304,6 +304,14 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
             "/api/upgrade",
             "lead 裁定④：已废弃，与 /api/update 重复，转豁免不补工具",
         ),
+        (
+            "/api/users/check",
+            "账号存在性探测端点，以 IP 限流抑制批量枚举；工具化等于给 AI 开一条枚举通道，运维场景无正当用途（查用户请走 /api/users）",
+        ),
+        (
+            "/api/public/geo-lang",
+            "按调用方自身 IP 给出界面语言建议（登录页用），输入不可由参数指定；对 AI 无信息价值。若需按 IP 判地区，应另立显式 ip 入参的新端点，不复用本路由",
+        ),
     ];
 
 /// 已知缺口台账：真实存在、暂无工具、且**已逐条论证过为什么现在不做**。
@@ -410,13 +418,6 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
                 "/api/playground/transcriptions",
                 "/api/playground/tts",
                 "/api/assistant/chat",
-            ],
-        ),
-        (
-            "批 3·形状不合（handler 不吃 State / 返回裸 Json 而非 HandlerResult / 公开探测接口），要工具化得先改 handler",
-            &[
-                "/api/users/check",
-                "/api/public/geo-lang",
             ],
         ),
     ];
@@ -561,11 +562,16 @@ fn tool_covers_point_at_real_routes() {
 }
 
 /// D：豁免必须活着（否则是僵尸例外），且不与工具 covers 矛盾。
-/// 后半段沿用旧闸门的判据：豁免域的本意是「不提供该域的功能」，但「以该域为
-/// **数据源**」的工具不算提供功能——`aigx_openapi_search` 的 covers 是
-/// `/api/openapi.json`，它读 OpenAPI 文档去**发现**别的端点，而不是提供「读
-/// OpenAPI 文档」这个能力。所以矛盾判据是「cover 落在该域**之下**」（比该域更长
-/// 的子路径），而不是「等于该域」。
+///
+/// 矛盾判据（批3 B3-2 收紧）：「cover 落在该域内**或等于该域**」= `np.starts_with(prefix)`，
+/// **含相等**。旧判据 `np.starts_with(prefix) && np.len() > prefix.len()` 放过了 `np == prefix`，
+/// 使「整域豁免」与「该域根路径已有工具 covers」可同树共存且无人报警（见
+/// `57-agent-batch2-plan.md` §5.2）。
+///
+/// 事实更正（与 #47 同型）：旧注释声称此处为 `aigx_openapi_search` 读 `/api/openapi.json`
+/// 这个「数据源型 covers」开了 carve-out——但 `/api/openapi.json` **既不在 `EXEMPT_PREFIXES` 里，
+/// 也不是任何豁免前缀的子路径**，那条 carve-out **从未真正生效**（空转）。本次只收紧判据、
+/// **不加白名单**：`aigx_openapi_search`/`/api/openapi.json` 不受影响，因为本就不构成矛盾。
 #[test]
 fn exempt_prefixes_are_alive_and_not_covered() {
     let universe = gate_universe(&extract_real_routes());
@@ -585,8 +591,9 @@ fn exempt_prefixes_are_alive_and_not_covered() {
         for c in t.covers {
             let np = norm_route_path(c);
             for &(prefix, reason) in EXEMPT_PREFIXES {
+                // 收紧扣（B3-2）：去掉 `&& np.len() > prefix.len()`，`np == prefix` 现也判矛盾。
                 assert!(
-                        !(np.starts_with(prefix) && np.len() > prefix.len()),
+                        !np.starts_with(prefix),
                         "豁免域与 covers 矛盾：工具 {} 覆盖了 `{np}`，而 `{prefix}` 声明整域不给 AI 面（{reason}）",
                         t.name
                     );
