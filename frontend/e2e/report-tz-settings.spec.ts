@@ -20,9 +20,10 @@ import { test, expect } from './fixtures';
  *     rejection.rs:11-19），不是 400 JSON——前端数字输入框的产出若带小数，真实后端
  *     就是这个反应。
  *
- * ⚠️ 文档偏差备案（已报 lead）：50-report-tz-impl.md §3.1/§6.3 与坑 1 文案写「顺序坑 ⇒ 直接 400」，
- *    但 handler 实际把 `tz_migrate` 的 anyhow 错误映射成 500（logs.rs:720-728）。
- *    本 spec 与桩照**现码**走 500；若后端改成 400，此用例会红——那是修桩的信号，不是本用例的假红。
+ * ⚠️ 顺序坑状态码（#10 裁定）：端点返 **400**（client 前置违例）——与同类 range 检查 400、
+ *    坑 1 notice 文案「否则本端点直接 400」、50-report §3.1/§6.3 三处一致；原 handler 把
+ *    `tz_migrate` 的 anyhow 错误**一律**映射成 500 是实现漏映射（be-agent-d 单独一笔修，
+ *    `tz_migrate` 内部 `ensure!` 保留作纵深防御、存储故障路径仍 500）。
  *
  * 「不许桩自证」的分工：本 spec 断言的是**契约形状与状态机语义**（热生效、幂等短路、
  * needsMigration 判据、四条坑在场），桩的每一分支都按 handler 现码逐字段投影；handler 自身
@@ -235,9 +236,9 @@ test.describe('报表时区设置端点（#20 批3）', () => {
   test('顺序坑：offset_to ≠ 当前生效口径 ⇒ 报错且零写入（标记不动、快照不动）', async ({ page }) => {
     await page.request.put(GET_SETTINGS, { data: { timezone_offset: 5 } });
     const res = await page.request.post(MIGRATE, { data: { offset_to: 8 } });
-    // 现码口径：handler 把 tz_migrate 的 anyhow 错误映射成 500（logs.rs:720-728）；
-    // 50-doc §3.1/§6.3 与坑 1 文案写 400 的偏差已报 lead
-    expect(res.status()).toBe(500);
+    // #10 裁定：client 前置违例返 400（与同类 range 检查 400 / notice 文案一致）。
+    // 钉住状态码 = 防「静默回退 500」；error body 形状与文案逐字钉住。
+    expect(res.status()).toBe(400);
     expect(await res.json()).toEqual({
       success: false,
       error: 'Agg tz migrate failed: 目标偏移 8 与当前生效口径 5 不一致：请先在报表设置里保存偏移，再调迁移端点',

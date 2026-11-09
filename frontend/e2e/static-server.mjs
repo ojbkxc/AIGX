@@ -70,8 +70,8 @@ const CHAT_SETTINGS = { autoTitle: false, titleModel: '', titleChannel: '', titl
 // 初始态镜像「升级后的老库尚未操作」：快照=缺省 8、标记=null（老库从没记过口径）⇒
 // needsMigration 保守为 true。迁移窗口的 earliest 用三条存量聚合日（固定日期，恒早于
 // 任何「昨天」）⇒ 首次迁移 window_applied=true、rows_deleted=3；第二次调用走幂等短路。
-// ⚠️ 已知文档偏差（已报 lead）：50-report-tz-impl.md §3.1/§6.3 与坑 1 文案写「顺序坑 ⇒ 直接 400」，
-//    但 handler 实际把 `tz_migrate` 的 anyhow 错误映射成 500（logs.rs:720-728）；本桩照现码走 500。
+// 顺序坑（offset_to ≠ 当前快照）按**裁定后的契约**返 **400**（client 前置违例，与同类 range
+// 检查 400、以及坑 1 notice 文案「否则本端点直接 400」一致；#10 裁定，勿回退成 500）。
 // ⚠️ 非整数 body：axum `JsonDataError` ⇒ **422 + text/plain**（axum-0.7.9 rejection.rs:11-19，
 //    `(status, String).into_response()`），不是 400 JSON——前端数字输入框产出带小数时真实后端
 //    就是这个反应，桩照此建模（message 的 position 后缀省略，测试只钉前缀与状态码）。
@@ -982,8 +982,8 @@ function handle(req, res, p, bodyText) {
           );
         }
       }
-      // 第 0 步（顺序坑）：目标偏移必须等于当前生效口径；后端 ensure! 失败被 handler
-      // 映射成 500（logs.rs:720-728）⇒ 本桩照现码走 500
+      // 第 0 步（顺序坑）：目标偏移必须等于当前生效口径 ⇒ client 前置违例返 400
+      //（#10 裁定：与同类 range 检查 400、notice「否则本端点直接 400」一致；勿回退成 500）
       if (offsetTo !== reportTz.effOffset) {
         return sendJson(
           res,
@@ -991,7 +991,7 @@ function handle(req, res, p, bodyText) {
             success: false,
             error: `Agg tz migrate failed: 目标偏移 ${offsetTo} 与当前生效口径 ${reportTz.effOffset} 不一致：请先在报表设置里保存偏移，再调迁移端点`,
           },
-          500,
+          400,
         );
       }
       const today = reportDayKey(reportTz.effOffset);
