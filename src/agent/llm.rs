@@ -31,9 +31,15 @@ pub enum AgentLlmError {
         "no available channel for agent model {model}（该模型暂无可用渠道或账号：可能均被禁用或正在冷却中，请稍后重试或更换模型）"
     )]
     NoChannelAvailable { model: String },
-    /// 所有渠道均失败。
+    /// 所有渠道均失败（候选已用尽）。`recoverable` 表示失败原因属**暂时性**
+    /// （超时/传输/限流/5xx/账号冷却），等一会儿重试有机会成功；
+    /// false 表示确定性失败（模型不存在、参数错误等），重试无意义。
     #[error("all channels failed: {0}")]
     AllChannelsFailed(String),
+    /// 暂时性失败且已用尽重试轮次。与 [`AllChannelsFailed`] 区分，是为了让
+    /// 前端能给出「稍后重试即可」而不是「配置有问题」的建议。
+    #[error("all channels failed after {rounds} rounds: {last}")]
+    TransientExhausted { rounds: u32, last: String },
 }
 
 /// 把渠道快照 + bridge 绑定成一个候选，供自环 failover 循环使用。
@@ -204,6 +210,11 @@ pub async fn chat_once(
 
 /// [`chat_once`] 的多来源变体：`key_id` 决定请求日志的来源标签
 /// （agent 主循环="agent"，聊天自动标题="chat_title"），其余行为一致。
+///
+/// 外层带**时间维度重试**：单轮候选遍历（换渠道 failover）失败后，若失败原因
+/// 属暂时性（上游超时/传输中断/限流/5xx/账号冷却），等待后重跑整轮，而不是立刻
+/// 把错误抛给用户。运维上游的抖动往往几秒到几十秒自愈，直接报错会让用户以为
+/// 配置坏了。确定性失败（模型不存在/参数错误）不重试，立即返回。
 pub async fn chat_once_as(
     state: &AppState,
     config: &AgentConfig,
@@ -212,16 +223,119 @@ pub async fn chat_once_as(
     key_id: &str,
 ) -> Result<(ChatResponse, String, Option<String>), AgentLlmError> {
     let model = effective_model(state, config)?;
-    let candidates = resolve_candidates(state, config, &model)?;
+    let rounds = config
+        .transient_retry_rounds
+        .max(1)
+        .min(MAX_TRANSIENT_RETRY_ROUNDS);
+    let mut last_msg = String::new();
+    let mut last_recoverable = false;
+
+    for round in 1..=rounds {
+        // 每轮重新解析候选：冷却中的渠道会随冷却到期重新可用，
+        // 固定用第一轮的候选列表会白白错过刚恢复的渠道。
+        match resolve_candidates(state, config, &model) {
+            Ok(candidates) => {
+                match try_candidates(
+                    state,
+                    config,
+                    &model,
+                    &candidates,
+                    &messages,
+                    &tools,
+                    key_id,
+                )
+                .await
+                {
+                    Ok(v) => {
+                        if round > 1 {
+                            tracing::info!("agent llm recovered on retry round {round}/{rounds}");
+                        }
+                        return Ok(v);
+                    }
+                    Err(TryFailure {
+                        message,
+                        recoverable,
+                    }) => {
+                        last_msg = message;
+                        last_recoverable = recoverable;
+                        if !recoverable {
+                            return Err(AgentLlmError::AllChannelsFailed(last_msg));
+                        }
+                    }
+                }
+            }
+            Err(e @ AgentLlmError::NoChannelAvailable { .. }) => {
+                // 全渠道冷却也属暂时性：等冷却到期再试
+                last_msg = e.to_string();
+                last_recoverable = true;
+            }
+            Err(e) => return Err(e),
+        }
+
+        if round < rounds {
+            let wait = retry_backoff(config, round);
+            tracing::warn!(
+                "agent llm transient failure (round {round}/{rounds}): {last_msg}; retrying in {wait}ms"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+        }
+    }
+
+    if last_recoverable {
+        Err(AgentLlmError::TransientExhausted {
+            rounds,
+            last: last_msg,
+        })
+    } else {
+        Err(AgentLlmError::AllChannelsFailed(last_msg))
+    }
+}
+
+/// 暂时性重试的最大轮次上限（防止配置写大导致一次对话卡很久）。
+const MAX_TRANSIENT_RETRY_ROUNDS: u32 = 5;
+
+/// 第 `round` 轮失败后的等待时长（毫秒）。
+///
+/// 按轮次线性退避：`retry_interval_ms`（默认 0 → 兜底 1000ms）× 轮次，
+/// 上限 15s。运维场景上游抖动通常秒级恢复，线性退避够用且比指数退避更
+/// 早重试、体感更好。
+fn retry_backoff(config: &AgentConfig, round: u32) -> u64 {
+    let base = if config.retry_interval_ms > 0 {
+        config.retry_interval_ms
+    } else {
+        1000
+    };
+    (base * u64::from(round)).min(15_000)
+}
+
+/// 单轮候选遍历的结果：失败时附带「是否值得再试一轮」的判定。
+struct TryFailure {
+    message: String,
+    recoverable: bool,
+}
+
+/// 遍历一轮候选渠道（换渠道 failover），成功即返回。
+async fn try_candidates(
+    state: &AppState,
+    config: &AgentConfig,
+    model: &str,
+    candidates: &[Candidate],
+    messages: &[ChatMessage],
+    tools: &Option<Vec<serde_json::Value>>,
+    key_id: &str,
+) -> Result<(ChatResponse, String, Option<String>), TryFailure> {
     let request_id = format!("{key_id}-{}", uuid::Uuid::new_v4());
-    let ctx = BridgeContext::new(request_id.clone(), model.clone());
+    let ctx = BridgeContext::new(request_id.clone(), model.to_string());
 
     let mut last_error: Option<String> = None;
-    for cand in &candidates {
+    // 只要有一个候选的失败是「暂时性」的，整轮就值得重试；
+    // 全是确定性失败（模型不存在等）才不重试。
+    let mut any_recoverable = false;
+    for cand in candidates {
         if let Some(cid) = &cand.channel_id {
             state.channel_store.mark_used(cid);
         }
-        let upstream = resolve_upstream_model(&model, cand.channel.as_ref(), &state.model_mapper);
+        let upstream = resolve_upstream_model(model, cand.channel.as_ref(), &state.model_mapper);
         // 无工具时不得声明 tool_choice="auto"：严格的 OpenAI 兼容上游会在
         // 仅带 tool_choice 而缺 tools 时返回 400。纯文本自环（如提示词翻译）
         // 复用 chat_once 时 tools=None，必须同步置空，否则翻译会整体失败。
@@ -297,8 +411,12 @@ pub async fn chat_once_as(
                     Some(&msg),
                 );
                 if !crate::api::openai::is_retryable_bridge_error(&e) {
-                    // 4xx 客户端错误（上下文超限/参数错/模型不存在）——换渠道大概率同样失败
-                    return Err(AgentLlmError::AllChannelsFailed(msg));
+                    // 4xx 客户端错误（上下文超限/参数错/模型不存在）——换渠道大概率同样失败，
+                    // 且等一会儿也不会变好：立即返回，不做时间维度重试。
+                    return Err(TryFailure {
+                        message: msg,
+                        recoverable: false,
+                    });
                 }
                 if let Some(cid) = &cand.channel_id {
                     state.channel_store.mark_cooldown(cid, msg.clone(), 60);
@@ -307,13 +425,15 @@ pub async fn chat_once_as(
                     "agent llm failover: channel {:?} failed: {e}, trying next",
                     cand.channel_id
                 );
+                any_recoverable = true;
                 last_error = Some(msg);
             }
         }
     }
-    Err(AgentLlmError::AllChannelsFailed(
-        last_error.unwrap_or_else(|| "all channels failed".to_string()),
-    ))
+    Err(TryFailure {
+        message: last_error.unwrap_or_else(|| "all channels failed".to_string()),
+        recoverable: any_recoverable,
+    })
 }
 
 /// Agent 推理落请求日志（成功/失败都记，不扣费——运维自环不产生销售成本）。
@@ -468,5 +588,41 @@ mod tests {
             msg.contains("暂无可用渠道") && msg.contains("冷却"),
             "应说明原因与建议动作: {msg}"
         );
+    }
+
+    /// 退避时长：线性递增、有上限，且 `retry_interval_ms=0` 时用 1s 兜底。
+    ///
+    /// 钉住三条边界：①配置 0 不能退化成「无等待连续猛打上游」；②轮次越高等
+    /// 待越长（给上游恢复时间）；③有 15s 硬上限（避免一次对话卡太久）。
+    #[test]
+    fn retry_backoff_is_linear_capped_and_never_zero() {
+        let mut cfg = AgentConfig::default();
+        cfg.retry_interval_ms = 0;
+        assert_eq!(super::retry_backoff(&cfg, 1), 1000, "0 配置须兜底 1s");
+        assert_eq!(super::retry_backoff(&cfg, 2), 2000);
+        cfg.retry_interval_ms = 500;
+        assert_eq!(super::retry_backoff(&cfg, 3), 1500);
+        assert_eq!(super::retry_backoff(&cfg, 4), 2000);
+        // 上限：基数再大也不超过 15s
+        cfg.retry_interval_ms = 10_000;
+        assert_eq!(super::retry_backoff(&cfg, 5), 15_000, "须有上限");
+        assert!(super::retry_backoff(&cfg, 99) <= 15_000);
+    }
+
+    /// 暂时性耗尽与确定性失败的文案必须可区分：前者要让用户「稍后再试」，
+    /// 后者不该鼓励重试（重试也不会好）。
+    #[test]
+    fn transient_exhausted_message_is_distinct_and_actionable() {
+        let e = AgentLlmError::TransientExhausted {
+            rounds: 3,
+            last: "transport error".to_string(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("after 3 rounds"), "应报轮次: {msg}");
+        assert!(msg.contains("transport error"), "应带最后原因: {msg}");
+
+        let d = AgentLlmError::AllChannelsFailed("model not found".to_string()).to_string();
+        assert_ne!(msg, d, "两类失败文案不得相同");
+        assert!(!d.contains("rounds"), "确定性失败不该报重试轮次: {d}");
     }
 }

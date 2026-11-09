@@ -270,6 +270,11 @@ export default function Agent(): JSX.Element {
    */
   const describeAgentError = useCallback((raw: string): string => {
     const s = raw.toLowerCase();
+    // 暂时性失败已自动重试过若干轮才报到前端：优先给出「稍后再试」，
+    // 别让用户以为配置坏了（后端 TransientExhausted 变体）。
+    if (s.includes('failed after') && s.includes('rounds')) {
+      return t('上游服务暂时不可用，已自动重试多轮仍未恢复。请稍等片刻后再试，或更换其他模型。');
+    }
     if (s.includes('no available channel') || s.includes('no bridge available')) {
       return t('该模型当前没有可用渠道或账号（可能均被禁用或正在冷却中）。请稍后重试，或在「渠道管理」检查该模型的渠道/账号状态，或更换其他模型。');
     }

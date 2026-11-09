@@ -57,6 +57,10 @@ fn title_agent_config(model: String, channel: String) -> AgentConfig {
         reasoning_effort: None,
         system_prompt: String::new(),
         disabled_tools: Vec::new(),
+        // 标题生成是后台附加任务：失败静默、保留原标题即可，不值得为它
+        // 等整轮退避（用户不会等标题）。1 = 只跑一轮候选遍历，不重试。
+        transient_retry_rounds: 1,
+        retry_interval_ms: 0,
     }
 }
 

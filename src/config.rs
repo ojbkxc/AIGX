@@ -349,6 +349,18 @@ pub struct AgentConfig {
     /// 禁用的工具名列表（不下发给模型，也不会被执行）。
     #[serde(default)]
     pub disabled_tools: Vec<String>,
+    /// 暂时性失败的**整轮重试次数**（含首次，默认 3）。
+    ///
+    /// 运维自环的上游抖动（超时/传输中断/限流/5xx/账号冷却）往往几秒到几十秒
+    /// 自愈，单轮候选遍历用尽即报错会让用户误以为配置坏了。>1 时在整轮失败后
+    /// 等待并重新解析候选（冷却到期的渠道会重新入选）再试。上限 5 轮。
+    /// 确定性失败（模型不存在/参数错误）不受本项影响，立即返回。
+    #[serde(default = "default_transient_retry_rounds")]
+    pub transient_retry_rounds: u32,
+    /// 重试退避基数（毫秒）：第 N 轮失败后等待 `retry_interval_ms × N`，上限 15s。
+    /// 0 = 用兜底值 1000ms（不设 0 等待，避免把上游打爆）。
+    #[serde(default)]
+    pub retry_interval_ms: u64,
 }
 
 fn default_max_turns() -> usize {
@@ -363,6 +375,10 @@ fn default_max_history() -> usize {
     20
 }
 
+fn default_transient_retry_rounds() -> u32 {
+    3
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -375,6 +391,8 @@ impl Default for AgentConfig {
             reasoning_effort: None,
             system_prompt: String::new(),
             disabled_tools: Vec::new(),
+            transient_retry_rounds: default_transient_retry_rounds(),
+            retry_interval_ms: 0,
         }
     }
 }
