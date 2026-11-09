@@ -115,10 +115,8 @@ pub(crate) fn finish_reason_str(fr: &FinishReason) -> &'static str {
 /// 将 BridgeError 转换为 HTTP 响应
 pub(crate) fn bridge_error_response(e: crate::bridge::BridgeError) -> (StatusCode, Json<Value>) {
     let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    // T3：发给客户端的错误消息先脱敏（截断 + 凭据模式遮蔽）；
-    // 落库/熔断侧（mark_cooldown/mark_unhealthy 的 last_error）
-    // 自 #42 起亦经同一脱敏，库内不留原文
-    // （见 error_translate::sanitize_error_message）
+    // T3：发给客户端的错误消息先脱敏（截断 + 凭据模式遮蔽），
+    // 日志/熔断侧保留原始消息（见 error_translate::sanitize_error_message）
     openai_error_response(
         e.error_type(),
         &crate::error_translate::sanitize_error_message(&e.to_string()),

@@ -716,10 +716,8 @@ pub async fn handle_messages(
                             error: e.to_string(),
                         });
                 }
-                // T3：发给客户端的错误消息先脱敏（截断 + 凭据模式遮蔽）；
-                // 落库/熔断侧（mark_cooldown/mark_unhealthy 的 last_error）
-                // 自 #42 起亦经同一脱敏，库内不留原文
-                // （见 error_translate::sanitize_error_message）
+                // T3：发给客户端的错误消息先脱敏（截断 + 凭据模式遮蔽），
+                // 日志/熔断侧保留原始消息（见 error_translate::sanitize_error_message）
                 return anthropic_error(
                     e.error_type(),
                     &crate::error_translate::sanitize_error_message(&e.to_string()),
@@ -1397,10 +1395,8 @@ pub async fn handle_messages(
                             error: e.to_string(),
                         });
                 }
-                // T3：发给客户端的错误消息先脱敏（截断 + 凭据模式遮蔽）；
-                // 落库/熔断侧（mark_cooldown/mark_unhealthy 的 last_error）
-                // 自 #42 起亦经同一脱敏，库内不留原文
-                // （见 error_translate::sanitize_error_message）
+                // T3：发给客户端的错误消息先脱敏（截断 + 凭据模式遮蔽），
+                // 日志/熔断侧保留原始消息（见 error_translate::sanitize_error_message）
                 return anthropic_error(
                     e.error_type(),
                     &crate::error_translate::sanitize_error_message(&e.to_string()),
