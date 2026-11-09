@@ -1402,7 +1402,23 @@ pub struct ConfigManager {
 
 impl ConfigManager {
     /// 创建 ConfigManager。如果未指定路径，默认使用 ~/.aigx/config.toml。
+    ///
+    /// 两条分支都会应用 `AIGX_<SECTION>__<FIELD>` 环境变量覆盖（#41 修的就是
+    /// 「文件不存在」那条）：文件已存在时文件值打底、env 覆盖；首次启动时缺省值
+    /// 打底、env 覆盖，再把**覆盖后的结果**落盘。
     pub async fn new(path: Option<PathBuf>) -> Self {
+        Self::new_with(path, |key| std::env::var(key).ok()).await
+    }
+
+    /// [`new`](Self::new) 的可注入变体：`var` 决定某个环境变量读到什么（`None`＝没设）。
+    ///
+    /// 存在的理由是单测不能碰 `std::env::set_var`——那是全进程共享的状态，并行用例
+    /// 互相污染必出顺序依赖假红（与本仓 `daily_agg::date_key_at` 这类「纯变体只喂测试、
+    /// 生产不吃全局」的写法同构）。生产只走 [`new`](Self::new) 这一扇门。
+    ///
+    /// 参数取函数指针（而非泛型 `impl Fn`）：两扇门的真实入口传的是无捕获闭包，
+    /// 自动退化成指针；测试同样用 `match` 常量表，不需要捕获任何东西。
+    async fn new_with(path: Option<PathBuf>, var: fn(&str) -> Option<String>) -> Self {
         let path = path.unwrap_or_else(default_config_path);
         // 确保父目录存在
         if let Some(parent) = path.parent() {
@@ -1414,8 +1430,13 @@ impl ConfigManager {
 
         // 如果配置文件已存在则加载，否则创建默认配置
         if manager.path.exists() {
-            let _ = manager.load().await;
+            let _ = manager.load_with(var).await;
         } else {
+            // #41：这一支原先直接存 `AppConfig::default()`，整套 env 覆盖失效
+            // ⇒ 容器首次启动 / e2e 子进程带 `AIGX_SERVER__PORT` 起来照样监听 8080，
+            // 要到第二次启动（文件已存在，走 load）才生效。
+            let initial = apply_env_overrides_from(AppConfig::default(), var);
+            *manager.config.write().await = initial;
             let _ = manager.save().await;
         }
 
@@ -1424,11 +1445,16 @@ impl ConfigManager {
 
     /// 从磁盘加载配置
     pub async fn load(&self) -> AppConfig {
+        self.load_with(|key| std::env::var(key).ok()).await
+    }
+
+    /// [`load`](Self::load) 的可注入变体（同 [`new_with`](Self::new_with)，为单测而设）。
+    async fn load_with(&self, var: fn(&str) -> Option<String>) -> AppConfig {
         let content = tokio::fs::read_to_string(&self.path)
             .await
             .unwrap_or_default();
         let config: AppConfig = toml::from_str(&content).unwrap_or_default();
-        let config = apply_env_overrides(config);
+        let config = apply_env_overrides_from(config, var);
         let cfg = config.clone();
         *self.config.write().await = config;
         cfg
@@ -1540,31 +1566,43 @@ pub fn redact_url_credentials(raw: &str) -> String {
     }
 }
 
-/// 环境变量覆盖配置（容器部署用）。
+/// 环境变量覆盖配置（容器部署用）的纯函数实现：`var` 决定某个环境变量读到什么
+/// （`None`＝没设）。两扇门 [`ConfigManager::new`] 与 [`ConfigManager::load`]
+/// 各自把 `|key| std::env::var(key).ok()` 喂进来；单测走
+/// [`ConfigManager::new_with`] / [`ConfigManager::load_with`]，直接喂假表。
 ///
 /// 格式：`AIGX_<SECTION>__<FIELD>`，双下划线分隔 section 与 field，field 用小写。
 /// 例如 `AIGX_SERVER__HOST=0.0.0.0` 覆盖 `config.server.host`，
 /// `AIGX_SERVER__PORT=9527` 覆盖 `config.server.port`。
-/// 仅支持标量覆盖（String / 整数），在 config.toml 加载后应用。
-fn apply_env_overrides(mut config: AppConfig) -> AppConfig {
-    if let Ok(v) = std::env::var("AIGX_SERVER__HOST") {
+/// 仅支持标量覆盖（String / 整数）；非法值（非数字、越界、`n = 0` 这类）静默忽略，
+/// 保持文件值或缺省值——不报错也不打日志，与全仓 `AIGX_*` 口径一致。
+///
+/// 生效时机两条分支都覆盖（#41 之前只有第一条）：配置文件存在时跟在文件值之后，
+/// 首次启动时跟在 `AppConfig::default()` 之后，且**覆盖结果会被写进新生成的
+/// `config.toml`**。固有代价：之后即使撤掉该环境变量，文件里仍留着当初从 env 取到的
+/// 值，要改值得改文件或重设 env 再重启。接受这条代价的理由：管理面任意一次 PUT 保存
+/// 本来就会把内存（含 env 值）整体落盘（`api/admin/settings.rs` 各 PUT →
+/// `ConfigManager::update`），让首启生成的文件与运行期文件同形，比维持「env 不落盘」
+/// 的假象更诚实。
+fn apply_env_overrides_from(mut config: AppConfig, var: fn(&str) -> Option<String>) -> AppConfig {
+    if let Some(v) = var("AIGX_SERVER__HOST") {
         config.server.host = v;
     }
-    if let Ok(v) = std::env::var("AIGX_SERVER__PORT") {
+    if let Some(v) = var("AIGX_SERVER__PORT") {
         if let Ok(port) = v.parse() {
             config.server.port = port;
         }
     }
-    if let Ok(v) = std::env::var("AIGX_SERVER__DATA_DIR") {
+    if let Some(v) = var("AIGX_SERVER__DATA_DIR") {
         config.server.data_dir = v;
     }
-    if let Ok(v) = std::env::var("AIGX_CF_BINDING_URL") {
+    if let Some(v) = var("AIGX_CF_BINDING_URL") {
         config.cf_binding_url = v;
     }
-    if let Ok(v) = std::env::var("AIGX_SERVER_ADDRESS") {
+    if let Some(v) = var("AIGX_SERVER_ADDRESS") {
         config.server_address = v;
     }
-    if let Ok(v) = std::env::var("AIGX_USAGE__MAX_REQUEST_BODY_MB") {
+    if let Some(v) = var("AIGX_USAGE__MAX_REQUEST_BODY_MB") {
         if let Ok(n) = v.parse() {
             if n > 0 {
                 config.usage.max_request_body_mb = n;
@@ -1572,7 +1610,7 @@ fn apply_env_overrides(mut config: AppConfig) -> AppConfig {
         }
     }
     // 报表时区偏移（越界与非数字一律忽略，保持配置文件/缺省值）
-    if let Ok(v) = std::env::var("AIGX_REPORT__TIMEZONE_OFFSET") {
+    if let Some(v) = var("AIGX_REPORT__TIMEZONE_OFFSET") {
         if let Ok(n) = v.parse::<i32>() {
             if report_tz_offset_valid(n) {
                 config.report.timezone_offset = n;
@@ -1657,5 +1695,92 @@ mod tests {
         let merged = super::merge_cline_header_overrides(base, &overrides);
         assert_eq!(merged.len(), 1, "固定头不会被覆盖表写入");
         assert_eq!(merged[0].0, "x-title");
+    }
+
+    // ── #41：`AIGX_*` 环境变量覆盖的两条分支 ──────────────────────────
+    //
+    // 用假表（函数指针）而不是 `std::env::set_var`：后者是全进程共享状态，
+    // 并行用例互相污染必出顺序依赖假红。
+
+    /// 假环境表：只给 #41 关心的三个键，其余一律「没设」。
+    ///
+    /// 三个值各钉一条语义：端口＝正常覆盖生效；时区 `99`＝越界（合法区间
+    /// `-12..=14`）必须静默忽略；`max_request_body_mb = 0`＝非法必须静默忽略。
+    fn fake_env(key: &str) -> Option<String> {
+        match key {
+            "AIGX_SERVER__PORT" => Some("9527".to_string()),
+            "AIGX_REPORT__TIMEZONE_OFFSET" => Some("99".to_string()),
+            "AIGX_USAGE__MAX_REQUEST_BODY_MB" => Some("0".to_string()),
+            _ => None,
+        }
+    }
+
+    /// 首启（配置文件不存在）也必须应用 env 覆盖，并把**覆盖后的结果**落盘。
+    ///
+    /// 修前这一支直接存 `AppConfig::default()`，整套 `AIGX_*` 覆盖要等第二次
+    /// 启动（文件已存在，走 load）才生效——容器首启 / e2e 子进程带
+    /// `AIGX_SERVER__PORT` 起来照样监听 8080（qa-e2e 在 #34 集成测试首跑暴露）。
+    #[tokio::test]
+    async fn first_start_applies_env_overrides_and_persists_them() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let manager = super::ConfigManager::new_with(Some(path.clone()), fake_env).await;
+
+        let config = manager.get().await;
+        assert_eq!(config.server.port, 9527, "首启必须吃到 env 端口");
+        assert_eq!(
+            config.report.timezone_offset,
+            super::REPORT_TZ_DEFAULT_OFFSET,
+            "越界偏移要静默回落缺省"
+        );
+        assert_eq!(
+            config.usage.max_request_body_mb,
+            super::default_max_request_body_mb(),
+            "非法值（0）要静默回落缺省"
+        );
+
+        // 落盘的是覆盖后的结果（A1 语义）：端口进了文件，被拒的越界值没进。
+        let content = std::fs::read_to_string(&path).expect("首启必须生成配置文件");
+        assert!(
+            content.contains("port = 9527"),
+            "env 值要写进首启生成的 config.toml，实际内容：{content}"
+        );
+        assert!(
+            !content.contains("timezone_offset = 99"),
+            "被忽略的越界偏移不得落盘，实际内容：{content}"
+        );
+    }
+
+    /// 没有 env 时首启行为不变：仍生成文件、仍是缺省值。
+    #[tokio::test]
+    async fn first_start_without_env_keeps_defaults_and_creates_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let manager = super::ConfigManager::new_with(Some(path.clone()), |_| None).await;
+
+        assert!(path.exists(), "首启仍要生成默认配置文件");
+        let config = manager.get().await;
+        assert_eq!(config.server.port, super::default_port());
+        assert_eq!(
+            config.report.timezone_offset,
+            super::REPORT_TZ_DEFAULT_OFFSET
+        );
+    }
+
+    /// 另一条分支不能退化：文件值打底、env 覆盖，且**不重写**已有文件。
+    #[tokio::test]
+    async fn existing_config_still_lets_env_override_file_value() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\nport = 7777\n").unwrap();
+
+        let manager = super::ConfigManager::new_with(Some(path.clone()), fake_env).await;
+        assert_eq!(manager.get().await.server.port, 9527, "env 仍要覆盖文件值");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("port = 7777"),
+            "走 load 分支不得改写已存在的配置文件"
+        );
     }
 }
