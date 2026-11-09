@@ -331,10 +331,6 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
                 "/api/groups/{name}",
                 "/api/accounts/{id}",
                 "/api/network/accounts/{account_id}",
-                "/api/proxy-pool/update",
-                "/api/proxy-pool/remove",
-                "/api/proxy-pool/enable",
-                "/api/proxy-pool/sync-clash",
                 "/api/plugins/enable",
                 "/api/plugins/provider",
                 "/api/plugins/uninstall",
@@ -343,8 +339,6 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
                 "/api/checkin-center/schedules/remove",
                 "/api/checkin-center/records/mark-kept-active",
                 "/api/users/self",
-                "/api/admin/tickets/close",
-                "/api/admin/tickets/reply",
                 "/api/alerts/resolve",
             ],
         ),
@@ -502,7 +496,6 @@ const WRITE_SIDE_PENDING: &[(&str, &[&str])] = &[
             &[
                 "/api/accounts",
                 "/api/users",
-                "/api/proxy-pool",
             ],
         ),
         (
