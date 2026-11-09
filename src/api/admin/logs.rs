@@ -439,23 +439,57 @@ pub struct PurgeOutcome {
     pub matched: usize,
     /// 实际删除条数。
     pub removed: usize,
+    /// 窗口内**未被本次清理**的剩余条数（= 命中窗口总数 − 本次选中数）——因单次限量而留下，
+    /// 供调用方显式看到「没删完」（截断显式化）。
+    pub remaining: usize,
+}
+
+/// 硬前置的审计写入：**直接走 `audits.add` 拿 `Result`**。
+///
+/// 不能用 `LogStore::record_audit`——它是吞错形态（`if let Err(e){ warn }`、返回 `()`），
+/// 会让「先写 audit」退化成 best-effort（= 审计写失败仍照删的 fail-open）。
+fn write_purge_preaudit(
+    log_store: &crate::log::LogStore,
+    admin_id: &str,
+    target: PurgeTarget,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let mut entry = crate::log::AuditLog::new(admin_id, PURGE_AUDIT_ACTION, target.as_str());
+    entry.before = Some(serde_json::to_string(payload).unwrap_or_default());
+    log_store
+        .audits
+        .add(entry)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// `aigx_logs_purge` 的核心执行体：对 `log_store` 做 before+max 的定量清理。
 ///
-/// 入参是 `&LogStore` 而非 `&AppState`——单测可直接构造 `LogStore` 验证
-/// 「**pre-audit 存活**」（本约束的机制核心），无需构造整套 `AppState`。
-///
-/// 顺序**必须**是「先写 audit → 再删」：`record_audit` 落的这条记录 created_at
-/// 取当前时刻，而删除窗口是 `created_at < before`（调用方保证 `before <= now`）
-/// ⇒ 本记录不可能被本次清理选中。
+/// **fail-closed（#32 判据⑥）**：前置审计（`logs.purge`）**写失败 ⇒ 返回 `Err` 且一行不删**——
+/// 「先写 audit」是硬前置、非 best-effort（证据销毁操作「无痕即不动」）。
+/// audit 落库后本次删除窗 `created_at < before` 不含它（调用方保证 `before <= now`）⇒ 必然存活。
 pub fn purge_logs_before_core(
     log_store: &crate::log::LogStore,
     admin_id: &str,
     target: PurgeTarget,
     before: i64,
     max: usize,
-) -> PurgeOutcome {
+) -> Result<PurgeOutcome, String> {
+    purge_logs_before_core_with(log_store, target, before, max, |payload| {
+        write_purge_preaudit(log_store, admin_id, target, payload)
+    })
+}
+
+/// [`purge_logs_before_core`] 的可注入版本：`preaudit` 写前置审计，返回 `Err` 即**中止清理**。
+///
+/// 抽此 seam 是为了让单测**确定性地**注入「审计写失败」以验证 fail-closed（无需制造存储故障）。
+fn purge_logs_before_core_with(
+    log_store: &crate::log::LogStore,
+    target: PurgeTarget,
+    before: i64,
+    max: usize,
+    preaudit: impl FnOnce(&serde_json::Value) -> Result<(), String>,
+) -> Result<PurgeOutcome, String> {
     let rows: Vec<(i64, String)> = match target {
         PurgeTarget::Requests => log_store
             .requests
@@ -470,29 +504,27 @@ pub fn purge_logs_before_core(
             .map(|l| (l.created_at, l.id))
             .collect(),
     };
+    let eligible = rows.iter().filter(|(ts, _)| *ts < before).count();
     let ids = select_purge_ids(&rows, before, max);
-    // 先写 audit（工具身份 + 参数 + target 全部入 payload ⇒ 留痕可核）。
-    log_store.record_audit(
-        admin_id,
-        PURGE_AUDIT_ACTION,
-        target.as_str(),
-        Some(serde_json::json!({
-            "tool": "aigx_logs_purge",
-            "action": target.as_str(),
-            "before": before,
-            "max": max,
-            "matched": ids.len(),
-        })),
-        None,
-    );
+    let payload = serde_json::json!({
+        "tool": "aigx_logs_purge",
+        "action": target.as_str(),
+        "before": before,
+        "max": max,
+        "matched": ids.len(),
+    });
+    // 硬前置：先写 audit；写失败 ⇒ 直接返回，`delete_many` 一行都不跑（removed 恒 0）。
+    preaudit(&payload)?;
     let removed = match target {
         PurgeTarget::Requests => log_store.requests.delete_many(&ids),
         PurgeTarget::Audits => log_store.audits.delete_many(&ids),
     };
-    PurgeOutcome {
+    Ok(PurgeOutcome {
         matched: ids.len(),
         removed,
-    }
+        // ids.len() ≤ eligible（select 只会从窗口内取）⇒ 不会下溢。
+        remaining: eligible - ids.len(),
+    })
 }
 
 /// 清理窗口校验（纯函数）：`before` 必须 ≤ `now`（`==` 允许，严格 `>` 才拒），防「清空未来窗」。
@@ -509,6 +541,17 @@ pub fn purge_before_is_valid(before: i64, now: i64) -> bool {
 /// 截断另有覆盖，但含「封顶」的那一步此前无测）。
 pub fn purge_cap_max(max: usize) -> usize {
     max.clamp(1, PURGE_MAX_PER_CALL)
+}
+
+/// 单次限量的显式化（纯函数）：`(生效上限, 是否发生截断)`。
+///
+/// 截断语义（lead 裁定③）：**保留 clamp**（拒绝会挡住正当的大批量清理——可重复调用），
+/// 但**不静默**：调用方要能看出「请求值被调低、以及调到了多少」（输出 `requested_max` /
+/// `effective_max` / `truncated`）。`truncated` 仅在「请求值被调低」时为真（`0` 被抬到 `1`
+/// 不算截断）。
+pub fn purge_limit_plan(requested_max: usize) -> (usize, bool) {
+    let effective = purge_cap_max(requested_max);
+    (effective, requested_max > effective)
 }
 
 /// `aigx_logs_purge` 的鉴权 + 执行包装（工具执行体直调；**无独立 HTTP 路由**）。
@@ -528,23 +571,40 @@ pub async fn purge_logs_before(
             StatusCode::BAD_REQUEST,
         ));
     }
-    let max = purge_cap_max(max);
+    let requested_max = max;
+    let (max, truncated) = purge_limit_plan(requested_max);
     let admin_id = super::common::admin_id_from_session(state, headers).await;
-    let outcome = purge_logs_before_core(&state.log_store, &admin_id, target, before, max);
+    let outcome = match purge_logs_before_core(&state.log_store, &admin_id, target, before, max) {
+        Ok(o) => o,
+        Err(e) => {
+            // fail-closed：前置审计写失败 ⇒ 本次清理**未发生**（removed=0），如实回 500。
+            return Err(error_response(
+                &format!("前置审计写入失败，已拒绝清理（未删任何行）：{e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
+        }
+    };
     tracing::info!(
-        "logs purge: target={} before={} max={} matched={} removed={}",
+        "logs purge: target={} before={} requested_max={} effective_max={} truncated={} matched={} removed={} remaining={}",
         target.as_str(),
         before,
+        requested_max,
         max,
+        truncated,
         outcome.matched,
-        outcome.removed
+        outcome.removed,
+        outcome.remaining
     );
     Ok(serde_json::json!({
         "success": true,
         "data": {
             "target": target.as_str(),
             "before": before,
-            "max": max,
+            // 截断显式化：请求值 / 生效上限 / 是否被调低 / 窗口内剩余（未删完的条数）
+            "requested_max": requested_max,
+            "effective_max": max,
+            "truncated": truncated,
+            "remaining": outcome.remaining,
             "matched": outcome.matched,
             "removed": outcome.removed,
         }
@@ -1156,7 +1216,8 @@ mod tests {
         }
         // 只清 created_at < now-100 ⇒ 命中 old-1/old-2；new-1 与 pre-audit 都在窗外
         let before = now - 100;
-        let outcome = purge_logs_before_core(&store, "admin-1", PurgeTarget::Audits, before, 1000);
+        let outcome = purge_logs_before_core(&store, "admin-1", PurgeTarget::Audits, before, 1000)
+            .expect("purge 正常路径应成功");
         assert_eq!(outcome.matched, 2, "仅应命中两条旧审计");
         assert_eq!(outcome.removed, 2);
 
@@ -1194,6 +1255,31 @@ mod tests {
         }
     }
 
+    /// 判据⑥（#32 fail-closed）：前置审计写失败 ⇒ **拒绝清理**（零删、目标行仍在）并返回
+    /// 可辨「留痕失败导致中止」的错误。用可注入 seam 确定性模拟写失败（无需制造存储故障）。
+    ///
+    /// **反向变异**：把 core 里的 `preaudit(&payload)?;` 改成忽略其结果（best-effort）⇒ 本用例必红
+    /// （`res.expect_err` 拿不到 Err、且 `old-1` 已被删）。
+    #[test]
+    fn purge_refuses_to_delete_when_preaudit_write_fails() {
+        let store = test_log_store("failclosed");
+        let now = chrono::Utc::now().timestamp();
+        let mut a = crate::log::AuditLog::new("admin-x", "seed", "t");
+        a.id = "old-1".to_string();
+        a.created_at = now - 300; // 落在窗口内、本可被删
+        store.audits.add(a).expect("seed audit");
+
+        let res = purge_logs_before_core_with(&store, PurgeTarget::Audits, now - 100, 1000, |_| {
+            Err("注入的审计写失败".to_string())
+        });
+        let err = res.expect_err("审计写失败必须中止清理（fail-closed）");
+        assert!(err.contains("注入的审计写失败"), "错误需携带原因：{err}");
+        assert!(
+            store.audits.list().iter().any(|x| x.id == "old-1"),
+            "拒绝时不得删除任何行（fail-open 会把它删掉 ⇒ 反向变异可检出）"
+        );
+    }
+
     /// 清请求日志**绝不**触碰审计存储（证据隔离）；审计里的 logs.purge 留痕照旧落。
     #[test]
     fn purge_requests_never_touches_audit_store() {
@@ -1210,7 +1296,8 @@ mod tests {
         };
         store.requests.add(rl).expect("add reqlog");
 
-        purge_logs_before_core(&store, "admin-1", PurgeTarget::Requests, now - 100, 1000);
+        purge_logs_before_core(&store, "admin-1", PurgeTarget::Requests, now - 100, 1000)
+            .expect("purge 正常路径应成功");
 
         assert!(
             store
@@ -1250,6 +1337,57 @@ mod tests {
             "超上限 → 封顶"
         );
         assert_eq!(purge_cap_max(usize::MAX), PURGE_MAX_PER_CALL);
+    }
+
+    /// 截断显式化（lead 裁定③）：保留 clamp，但返回 `(生效上限, 是否截断)`；`0` 被抬到 `1`
+    /// **不算**截断（`truncated` 仅在请求值被**调低**时为真）。
+    #[test]
+    fn purge_limit_plan_reports_truncation_explicitly() {
+        assert_eq!(purge_limit_plan(0), (1, false), "0 抬高到 1，不算截断");
+        assert_eq!(purge_limit_plan(500), (500, false));
+        assert_eq!(
+            purge_limit_plan(PURGE_MAX_PER_CALL),
+            (PURGE_MAX_PER_CALL, false)
+        );
+        assert_eq!(
+            purge_limit_plan(PURGE_MAX_PER_CALL + 1),
+            (PURGE_MAX_PER_CALL, true),
+            "超上限 ⇒ 生效上限封顶且 truncated=true"
+        );
+        assert_eq!(purge_limit_plan(50_000), (PURGE_MAX_PER_CALL, true));
+    }
+
+    /// 截断显式化：限量导致「没删完」时，核心如实报 `remaining`（窗口内剩余条数）。
+    #[test]
+    fn purge_reports_remaining_when_limited() {
+        let store = test_log_store("remaining");
+        let now = chrono::Utc::now().timestamp();
+        for (id, age) in [
+            ("o1", 300),
+            ("o2", 280),
+            ("o3", 260),
+            ("o4", 240),
+            ("o5", 220),
+        ] {
+            let mut a = crate::log::AuditLog::new("admin-x", "seed", "t");
+            a.id = id.to_string();
+            a.created_at = now - age;
+            store.audits.add(a).expect("seed audit");
+        }
+        let o = purge_logs_before_core(&store, "admin-1", PurgeTarget::Audits, now - 100, 2)
+            .expect("purge 正常路径应成功");
+        assert_eq!(o.matched, 2, "限额 2");
+        assert_eq!(o.removed, 2);
+        assert_eq!(
+            o.remaining, 3,
+            "窗口内 5 条、删 2 ⇒ 剩 3（未删完需显式回报）"
+        );
+        let ids: Vec<String> = store.audits.list().into_iter().map(|a| a.id).collect();
+        assert!(
+            !ids.contains(&"o1".to_string()) && !ids.contains(&"o2".to_string()),
+            "最旧两条被删：{ids:?}"
+        );
+        assert!(ids.contains(&"o3".to_string()), "剩余的在库：{ids:?}");
     }
 
     // ── 顺序坑返 400（#10 裁定）与「存储故障仍 500」的守卫 ──────────────────
