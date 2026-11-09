@@ -279,7 +279,9 @@ export function TablePaginationFooter({
         <span className="tbl-jump">
           {t('跳至')}
           <input
-            className="form-input"
+            className="form-input tbl-jump-input"
+            type="text"
+            inputMode="numeric"
             value={jump}
             onChange={(e) => setJump(e.target.value.replace(/\D/g, ''))}
             onKeyDown={(e) => {

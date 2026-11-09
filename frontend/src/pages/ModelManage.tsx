@@ -24,7 +24,7 @@ import {
 import { api } from '../api';
 
 import { useToast } from '../components/Toast';
-import { Loading, EmptyState, Switch, Pagination, Tabs, Combobox, Tooltip } from '../components/ui';
+import { Loading, EmptyState, Switch, Tabs, Combobox, Tooltip } from '../components/ui';
 import ConfirmDialog, { type ConfirmState } from '../components/ConfirmDialog';
 import ModelTestDialog from '../components/ModelTestDialog';
 import RatioPanel from '../components/RatioPanel';
@@ -41,7 +41,7 @@ import {
 } from '../lib/tableColumns';
 import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
-import { usePageSize } from '../components/ui/TableShell';
+import { usePageSize, TablePaginationFooter } from '../components/ui/TableShell';
 import type { AliasEntry, ManageView, ManagedModel, ModelMetaOverride, ChannelItem } from '../types';
 import './ModelManage.css';
 
@@ -367,7 +367,6 @@ export default function ModelManage(): JSX.Element {
   // 分页（每页条数走公共 usePageSize，旧 aigx-mm-pagesize 一次性搬迁）
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = usePageSize(LS_PSZ, PAGE_SIZES, DEFAULT_PAGE_SIZE, [LS_PAGE_SIZE]);
-  const [jumpDraft, setJumpDraft] = useState('');
 
   // 批量选择（key = provider|id）
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -1373,12 +1372,6 @@ export default function ModelManage(): JSX.Element {
     });
   };
 
-  const submitJump = () => {
-    const n = Number(jumpDraft);
-    if (Number.isInteger(n) && n >= 1 && n <= totalPages) setPage(n);
-    setJumpDraft('');
-  };
-
   // ── 单元格渲染 ──
   const renderCell = (col: AnyCol, row: ManagedModel): JSX.Element | null => {
     const key = rowKey(row);
@@ -2225,55 +2218,17 @@ export default function ModelManage(): JSX.Element {
                   </table>
                 </div>
 
-                {/* 分页页脚（对齐 Agent2API TableFooter：总数 / 每页档位 / 跳页） */}
+                {/* 分页页脚：统一走公共 TablePaginationFooter（总数 / 每页档位 / 页码 / 跳页） */}
                 {!groupedMode && (
-                  <div className="mm-table-foot">
-                    <span className="mm-foot-info">
-                      {t('共')} {filtered.length} {t('条')}
-                      {filtered.length > 0 &&
-                        ` · ${t('当前第')} ${(currentPage - 1) * pageSizeNum + 1}–${Math.min(
-                          currentPage * pageSizeNum,
-                          filtered.length,
-                        )} ${t('条')}`}
-                    </span>
-                    <div className="mm-foot-right">
-                      <select
-                        className="form-input mm-pagesize"
-                        value={pageSize}
-                        onChange={(e) => {
-                          const n = Number(e.target.value);
-                          // 落盘由公共 usePageSize 统一处理（统一键 + 旧 aigx-mm-pagesize 搬迁）；
-                          // 曾在此额外写旧键属历史双写，已移除避免旧键复活。
-                          setPageSize(n);
-                          setPage(1);
-                        }}
-                        aria-label={t('每页条数')}
-                      >
-                        {PAGE_SIZES.map((n) => (
-                          <option key={n} value={n}>
-                            {n} / {t('页')}
-                          </option>
-                        ))}
-                      </select>
-                      <Pagination page={currentPage} totalPages={totalPages} onChange={setPage} />
-                      <span className="mm-jump">
-                        {t('跳至')}
-                        <input
-                          className="form-input"
-                          value={jumpDraft}
-                          onChange={(e) => setJumpDraft(e.target.value.replace(/\D/g, ''))}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') submitJump();
-                            if (e.key === 'Escape') setJumpDraft('');
-                          }}
-                          onBlur={submitJump}
-                          placeholder={String(currentPage)}
-                          aria-label={t('跳至页码')}
-                        />
-                        {t('页')}
-                      </span>
-                    </div>
-                  </div>
+                  <TablePaginationFooter
+                    total={filtered.length}
+                    page={currentPage}
+                    totalPages={totalPages}
+                    size={pageSize}
+                    sizes={PAGE_SIZES}
+                    onSizeChange={setPageSize}
+                    onPageChange={setPage}
+                  />
                 )}
               </>
             )}

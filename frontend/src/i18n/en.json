@@ -3292,5 +3292,10 @@
   "上游渠道鉴权失败（渠道密钥可能已失效）。请联系管理员检查该渠道的密钥配置。": "Upstream channel authentication failed (its key may have expired). Please contact the administrator to check the channel credential.",
   "上游渠道网络不可达（可能正在维护或存在网络异常）。请稍后重试，或更换其他模型。": "Upstream channel is unreachable (it may be under maintenance or there is a network issue). Try again later, or switch to another model.",
   "上游渠道限流，请稍后重试。": "Upstream channel is rate limiting. Please try again later.",
-  "上游服务暂时不可用，已自动重试多轮仍未恢复。请稍等片刻后再试，或更换其他模型。": "The upstream service is temporarily unavailable; automatic retries have not recovered it. Please try again in a moment, or switch to another model."
+  "上游服务暂时不可用，已自动重试多轮仍未恢复。请稍等片刻后再试，或更换其他模型。": "The upstream service is temporarily unavailable; automatic retries have not recovered it. Please try again in a moment, or switch to another model.",
+  "第": "Page",
+  "分页导航": "Pagination",
+  "末页": "Last page",
+  "首页": "First page",
+  "第 {{n}} 页": "Page {{n}}"
 }

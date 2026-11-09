@@ -1985,42 +1985,61 @@ code {
   display: flex;
   justify-content: center;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   margin-top: 16px;
   flex-wrap: wrap;
 }
 
-.pagination-page {
-  min-width: 30px;
-  height: 30px;
-  padding: 0 8px;
+/* 统一分页项：首页 / 上一页 / 数字页码 / 下一页 / 末页 共用 32×32 方形按钮 */
+.pagination-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: 8px;
   background: transparent;
   color: var(--text-main);
   font-size: 13px;
+  line-height: 1;
   cursor: pointer;
-  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  user-select: none;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
-.pagination-page:hover:not(:disabled) {
+.pagination-item:not(.is-active):hover:not(:disabled) {
   background: var(--hover-bg, rgba(0, 0, 0, 0.06));
+  border-color: var(--line-strong, var(--border-color));
 }
 
-.pagination-page.active {
-  background: var(--btn-primary-bg, #2f6fed);
-  border-color: var(--btn-primary-bg, #2f6fed);
-  color: #fff;
+.pagination-item:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+
+.pagination-item.is-active {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+  color: var(--accent-contrast, #fff);
+  font-weight: 600;
   cursor: default;
 }
 
-.pagination-page:disabled {
+.pagination-item:disabled {
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
 .pagination-ellipsis {
-  min-width: 22px;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
   color: var(--text-muted);
   font-size: 13px;
   user-select: none;
@@ -2038,6 +2057,116 @@ code {
   font-size: 12px;
   color: var(--text-muted);
   user-select: none;
+}
+
+/* ── 表格页脚（TablePaginationFooter：信息 + 每页档位 + 分页 + 跳页） ── */
+.tbl-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 4px 0;
+}
+
+.tbl-foot-info {
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.tbl-foot-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 页脚内的分页条去掉独立外边距，靠左对齐 */
+.tbl-foot-right .pagination-bar {
+  margin-top: 0;
+  justify-content: flex-start;
+  gap: 4px;
+}
+
+/* 每页条数下拉：去掉原生外观 + 自绘箭头，尺寸对齐 32px 分页按钮 */
+.tbl-pagesize {
+  width: auto;
+  min-width: 104px;
+  height: 32px;
+  padding: 0 28px 0 10px;
+  font-size: 13px;
+  border-radius: 8px;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  cursor: pointer;
+}
+
+/* 跳页：文案 + 数字输入 + 「页」三者垂直居中 */
+.tbl-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 32px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.tbl-jump-input {
+  width: 56px;
+  height: 32px;
+  padding: 0 6px;
+  text-align: center;
+  font-size: 13px;
+}
+
+.tbl-jump-input::-webkit-outer-spin-button,
+.tbl-jump-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.tbl-jump-input[type='number'] {
+  -moz-appearance: textfield;
+}
+
+@media (max-width: 720px) {
+  .tbl-foot {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 12px 0 0;
+  }
+
+  .tbl-foot-info {
+    text-align: center;
+  }
+
+  .tbl-foot-right {
+    justify-content: center;
+    gap: 6px;
+  }
+
+  .tbl-foot-right .pagination-bar {
+    justify-content: center;
+  }
+
+  /* 窄屏隐藏中间页码后只剩 5 个按钮，禁止内部再折行 */
+  .pagination-bar {
+    flex-wrap: nowrap;
+  }
+
+  /* 窄屏只保留「首页 / 上一页 / 当前页 / 下一页 / 末页」，
+     中间页码与省略号隐藏，避免箭头被折行挤断（GitHub / Stripe 同款做法）。
+     精确跳页仍可通过页脚「跳至 N 页」输入框完成。 */
+  .pagination-num:not(.is-active),
+  .pagination-ellipsis {
+    display: none;
+  }
 }
 
 /* ── 日志详情弹窗（参照 new-api DetailsDialog）────────────────── */

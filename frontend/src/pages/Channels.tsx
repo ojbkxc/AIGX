@@ -33,8 +33,8 @@ import {
 } from '../lib/tableColumns';
 import TableColumnSettings from '../components/ui/TableColumnSettings';
 import { useColumnResize } from '../components/ui/useColumnResize';
-import { usePageSize } from '../components/ui/TableShell';
-import { Button, Card, Input, EmptyState, Select, SkeletonTable, Pagination } from '../components/ui';
+import { usePageSize, TablePaginationFooter } from '../components/ui/TableShell';
+import { Button, Card, Input, EmptyState, Select, SkeletonTable } from '../components/ui';
 import './Channels.css';
 
 interface ChannelItem {
@@ -477,7 +477,6 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
   // 每页条数走公共 usePageSize（档位校验 + 旧 aigx-ch-pagesize 一次性搬迁）
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = usePageSize(LS_PSZ, PAGE_SIZES, 20, [LS_PAGE_SIZE]);
-  const [jumpDraft, setJumpDraft] = useState('');
 
   // ── 筛选 / 排序 / 列显隐（对齐 ModelManage 的交互面，全部落 localStorage）──
   const chFilters = getFilter<Record<string, string>>(LS_FILTERS, { state: 'all', type: 'all', sort: 'default', search: '' });
@@ -685,11 +684,6 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
   // 客户端分页（PAGE_SIZES 无 'all' 档，窄化为数值口径）
   const pageSizeNum = pageSize === 'all' ? filtered.length || 1 : pageSize;
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSizeNum));
-  const submitJump = (): void => {
-    const n = Number(jumpDraft);
-    if (Number.isFinite(n) && n >= 1 && n <= totalPages) setPage(Math.floor(n));
-    setJumpDraft('');
-  };
   const pageRows = useMemo(
     () => filtered.slice((page - 1) * pageSizeNum, (page - 1) * pageSizeNum + pageSizeNum),
     [filtered, page, pageSizeNum],
@@ -1812,52 +1806,16 @@ export default function Channels({ embedded = false }: ChannelsProps = {}): JSX.
               </table>
             </div>
 
-            {/* 分页（公共 Pagination 组件，与 Logs 页统一） */}
-            {/* 分页页脚：总数/区间 + 每页档位 + 跳页（对齐模型管理页脚） */}
-            <div className="ch-table-foot">
-              <span className="ch-foot-info">
-                {t('共')} {filtered.length} {t('条')}
-                {filtered.length > 0 &&
-                  ` · ${t('当前第')} ${(page - 1) * pageSizeNum + 1}–${Math.min(
-                    page * pageSizeNum,
-                    filtered.length,
-                  )} ${t('条')}`}
-              </span>
-              <div className="ch-foot-right">
-                <select
-                  className="form-input ch-pagesize"
-                  value={String(pageSize)}
-                  onChange={(e) => {
-                    setPageSize(Number(e.target.value));
-                    setPage(1);
-                  }}
-                  aria-label={t('每页条数')}
-                >
-                  {PAGE_SIZES.map((n) => (
-                    <option key={n} value={n}>
-                      {n} / {t('页')}
-                    </option>
-                  ))}
-                </select>
-                <Pagination page={page} totalPages={totalPages} onChange={(p) => setPage(p)} />
-                <span className="ch-jump">
-                  {t('跳至')}
-                  <input
-                    className="form-input"
-                    value={jumpDraft}
-                    onChange={(e) => setJumpDraft(e.target.value.replace(/\D/g, ''))}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') submitJump();
-                      if (e.key === 'Escape') setJumpDraft('');
-                    }}
-                    onBlur={submitJump}
-                    placeholder={String(page)}
-                    aria-label={t('跳至页码')}
-                  />
-                  {t('页')}
-                </span>
-              </div>
-            </div>
+            {/* 分页页脚：统一走公共 TablePaginationFooter（总数/区间 + 每页档位 + 页码 + 跳页） */}
+            <TablePaginationFooter
+              total={filtered.length}
+              page={page}
+              totalPages={totalPages}
+              size={pageSize}
+              sizes={PAGE_SIZES}
+              onSizeChange={setPageSize}
+              onPageChange={setPage}
+            />
           </>
         )}
       </Card>

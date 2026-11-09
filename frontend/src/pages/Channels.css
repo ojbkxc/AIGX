@@ -1325,59 +1325,13 @@ body.ch-colset-dragging {
   user-select: none;
 }
 
-/* 分页页脚 */
-.ch-table-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 8px 14px;
-  border-top: 1px solid var(--border-color);
-}
-
-.ch-foot-info {
-  font-size: 11.5px;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.ch-foot-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.ch-pagesize {
-  height: 28px;
-  font-size: 11.5px;
-  padding: 0 6px;
-}
-
-.ch-jump {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11.5px;
-  color: var(--text-muted);
-}
-
-.ch-jump .form-input {
-  width: 46px;
-  height: 28px;
-  padding: 0 6px;
-  font-size: 11.5px;
-  text-align: center;
-}
+/* 分页页脚已收敛到公共 TablePaginationFooter（App.css 的 .tbl-foot）。
+   原 .ch-table-foot / .ch-foot-* / .ch-pagesize / .ch-jump 自绘页脚已删除，
+   避免同一逻辑在页内与公共层各留一套（两套必然漂移）。 */
 
 @media (max-width: 767px) {
   .ch-filters {
     padding: 6px 10px 10px;
-  }
-
-  .ch-table-foot {
-    justify-content: center;
   }
 }
 
