@@ -506,6 +506,17 @@ fn purge_logs_before_core_with(
     };
     let eligible = rows.iter().filter(|(ts, _)| *ts < before).count();
     let ids = select_purge_ids(&rows, before, max);
+    // 空窗口：没有任何行会被删 ⇒ **不写** `logs.purge`（否则开出一条「零成本刷审计行」的通道）。
+    // 不变量「被删的行都有前置留痕」只在**确有删除**时才需要这条记录；且 agent 层已对本次工具
+    // 调用留痕（`runner.rs:274` 起——非 ReadOnly 一律 `record_agent_action`，HIGH 工具必录）⇒
+    // 空跑并非无痕，只是不重复落一条冗余的 `logs.purge`。
+    if eligible == 0 {
+        return Ok(PurgeOutcome {
+            matched: 0,
+            removed: 0,
+            remaining: 0,
+        });
+    }
     let payload = serde_json::json!({
         "tool": "aigx_logs_purge",
         "action": target.as_str(),
@@ -554,6 +565,17 @@ pub fn purge_limit_plan(requested_max: usize) -> (usize, bool) {
     (effective, requested_max > effective)
 }
 
+/// fail-closed 的 500 出口（纯函数，便于单测钉死「core `Err` ⇒ 500、**绝非** 200」）。
+///
+/// 抽出来是因包装器 `purge_logs_before` 需 `AppState` 无法直接单测；这里把「失败→响应」这段
+/// 唯一的决策点做成纯函数，谁能把它改成 200 就有测试变红（#32 复核 G5）。
+fn purge_preaudit_failed_response(err: &str) -> (StatusCode, Json<Value>) {
+    error_response(
+        &format!("前置审计写入失败，已拒绝清理（未删任何行）：{err}"),
+        StatusCode::INTERNAL_SERVER_ERROR,
+    )
+}
+
 /// `aigx_logs_purge` 的鉴权 + 执行包装（工具执行体直调；**无独立 HTTP 路由**）。
 ///
 /// 校验：`before` 必填且 `<= now`（防「清空未来窗」）；`max` 截断到硬上限。
@@ -576,13 +598,8 @@ pub async fn purge_logs_before(
     let admin_id = super::common::admin_id_from_session(state, headers).await;
     let outcome = match purge_logs_before_core(&state.log_store, &admin_id, target, before, max) {
         Ok(o) => o,
-        Err(e) => {
-            // fail-closed：前置审计写失败 ⇒ 本次清理**未发生**（removed=0），如实回 500。
-            return Err(error_response(
-                &format!("前置审计写入失败，已拒绝清理（未删任何行）：{e}"),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ));
-        }
+        // fail-closed：前置审计写失败 ⇒ 本次清理**未发生**（removed=0），如实回 500。
+        Err(e) => return Err(purge_preaudit_failed_response(&e)),
     };
     tracing::info!(
         "logs purge: target={} before={} requested_max={} effective_max={} truncated={} matched={} removed={} remaining={}",
@@ -1277,6 +1294,56 @@ mod tests {
         assert!(
             store.audits.list().iter().any(|x| x.id == "old-1"),
             "拒绝时不得删除任何行（fail-open 会把它删掉 ⇒ 反向变异可检出）"
+        );
+    }
+
+    /// 判据⑥ 包装器级出口（G5，#32 复核）：core `Err` ⇒ **500**（**绝非** 200）+ 文案表意
+    /// 「因留痕失败而中止」并携带失败原因。反向变异：把出口状态码改成 200 ⇒ 本用例必红。
+    #[test]
+    fn purge_wrapper_maps_preaudit_failure_to_500() {
+        let (status, body) = purge_preaudit_failed_response("boom");
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "core Err 必须回 500（改成 200 即红）"
+        );
+        assert_eq!(body.0["success"], serde_json::json!(false));
+        let msg = body.0["error"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("已拒绝清理"),
+            "文案需表意「因留痕失败而中止」：{msg}"
+        );
+        assert!(msg.contains("boom"), "需携带失败原因：{msg}");
+    }
+
+    /// 空窗口（`eligible == 0`）：**早退不写** `logs.purge`（防「零成本刷审计行」通道）。
+    /// 反向变异：去掉 core 里的 `eligible == 0` 早退 ⇒ 会多落一条审计行 ⇒ 本用例必红。
+    #[test]
+    fn purge_empty_window_writes_no_audit() {
+        let store = test_log_store("emptywin");
+        let now = chrono::Utc::now().timestamp();
+        // created_at = now ⇒ 不落入 before = now-100 的窗口
+        let mut a = crate::log::AuditLog::new("admin-x", "seed", "t");
+        a.id = "future-1".to_string();
+        a.created_at = now;
+        store.audits.add(a).expect("seed audit");
+        let before_len = store.audits.list().len();
+
+        let o = purge_logs_before_core(&store, "admin-1", PurgeTarget::Audits, now - 100, 1000)
+            .expect("空窗口应正常返回");
+        assert_eq!((o.matched, o.removed, o.remaining), (0, 0, 0));
+        assert_eq!(
+            store.audits.list().len(),
+            before_len,
+            "空窗口不得新增任何审计行（含 logs.purge）"
+        );
+        assert!(
+            !store
+                .audits
+                .list()
+                .iter()
+                .any(|x| x.action == PURGE_AUDIT_ACTION),
+            "空窗口不应落 logs.purge"
         );
     }
 
