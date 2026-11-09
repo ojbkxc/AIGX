@@ -495,6 +495,22 @@ pub fn purge_logs_before_core(
     }
 }
 
+/// 清理窗口校验（纯函数）：`before` 必须 ≤ `now`（`==` 允许，严格 `>` 才拒），防「清空未来窗」。
+///
+/// 抽成纯函数以便单测覆盖——本判定原先内联在需 `AppState` 的 `purge_logs_before` 里，删/改反
+/// 这个比较不会有红（#32 复核 G1）。
+pub fn purge_before_is_valid(before: i64, now: i64) -> bool {
+    before <= now
+}
+
+/// `max` 夹紧到 `1..=PURGE_MAX_PER_CALL`（「单次限量」的机器化落点）。
+///
+/// 同样抽成纯函数以补「封到硬上限」这一步的单测（#32 复核 G2；`select_purge_ids` 的 `max`
+/// 截断另有覆盖，但含「封顶」的那一步此前无测）。
+pub fn purge_cap_max(max: usize) -> usize {
+    max.clamp(1, PURGE_MAX_PER_CALL)
+}
+
 /// `aigx_logs_purge` 的鉴权 + 执行包装（工具执行体直调；**无独立 HTTP 路由**）。
 ///
 /// 校验：`before` 必填且 `<= now`（防「清空未来窗」）；`max` 截断到硬上限。
@@ -506,14 +522,13 @@ pub async fn purge_logs_before(
     max: usize,
 ) -> Result<Value, (StatusCode, Json<Value>)> {
     verify_admin(state, headers).await?;
-    let now = chrono::Utc::now().timestamp();
-    if before > now {
+    if !purge_before_is_valid(before, chrono::Utc::now().timestamp()) {
         return Err(error_response(
             "before 不得晚于当前时间（拒绝清空未来窗口）",
             StatusCode::BAD_REQUEST,
         ));
     }
-    let max = max.clamp(1, PURGE_MAX_PER_CALL);
+    let max = purge_cap_max(max);
     let admin_id = super::common::admin_id_from_session(state, headers).await;
     let outcome = purge_logs_before_core(&state.log_store, &admin_id, target, before, max);
     tracing::info!(
@@ -1209,6 +1224,32 @@ mod tests {
             store.audits.list().iter().any(|a| a.id == "aud-keep"),
             "清请求日志不得动审计证据"
         );
+    }
+
+    // ── G1/G2（#32 复核）：`before` 窗口守卫与 `max` 封顶的单测 ──────────────
+
+    /// G1：`before > now` 守卫——拒绝「清空未来窗」，`==` 边界放行。
+    #[test]
+    fn purge_before_guard_rejects_future_window() {
+        assert!(purge_before_is_valid(100, 100), "before == now 应放行");
+        assert!(purge_before_is_valid(99, 100), "过去窗口应放行");
+        assert!(!purge_before_is_valid(101, 100), "未来窗口必须拒绝");
+        assert!(!purge_before_is_valid(i64::MAX, 0));
+    }
+
+    /// G2：「单次限量」封顶——`max` 一律夹到 `1..=PURGE_MAX_PER_CALL`（含超上限封顶）。
+    #[test]
+    fn purge_cap_max_clamps_to_hard_ceiling() {
+        assert_eq!(purge_cap_max(0), 1, "0 → 下界 1");
+        assert_eq!(purge_cap_max(1), 1);
+        assert_eq!(purge_cap_max(500), 500, "区间内原样");
+        assert_eq!(purge_cap_max(PURGE_MAX_PER_CALL), PURGE_MAX_PER_CALL);
+        assert_eq!(
+            purge_cap_max(PURGE_MAX_PER_CALL + 1),
+            PURGE_MAX_PER_CALL,
+            "超上限 → 封顶"
+        );
+        assert_eq!(purge_cap_max(usize::MAX), PURGE_MAX_PER_CALL);
     }
 
     // ── 顺序坑返 400（#10 裁定）与「存储故障仍 500」的守卫 ──────────────────

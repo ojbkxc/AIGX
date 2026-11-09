@@ -309,6 +309,16 @@ mod tests {
                 "{name} 的 MCP 可见性与 risk 不符（高危必须不可见）"
             );
         }
+        // G3（#32 复核）裁定 A 反证：covers **数组级**不得含按 id 删证的路径
+        // （执行体层另有 `count(...)==0` 反证）。防「只往 covers 列表里加路径、不接 handler」
+        // 悄悄越过裁定 A。
+        let purge = find_tool("aigx_logs_purge").expect("aigx_logs_purge 未注册");
+        for forbidden in ["/api/logs/requests", "/api/logs/audits"] {
+            assert!(
+                !purge.covers.contains(&forbidden),
+                "裁定 A：{forbidden} 是按 id 选择性删证的路由，不得进 aigx_logs_purge 的 covers"
+            );
+        }
     }
 
     /// 「调」侧（执行体源锚定，防「列对了、执行体接错 handler」）：四条工具每个 action
