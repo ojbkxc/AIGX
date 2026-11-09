@@ -59,16 +59,25 @@ pub struct UpdateTokenRequest {
     pub status: Option<String>,
 }
 
-/// 构造 API Key JSON 响应（脱敏）。按字符切片，非 ASCII key 不会 panic。
-pub fn mask_token(k: &ApiKey) -> Value {
-    let chars: Vec<char> = k.key.chars().collect();
-    let masked_key = if chars.len() > 8 {
+/// 密钥字符串的**唯一**脱敏口径（首 4 + 末 4 + `...`；≤8 字符整体打码）。
+///
+/// `mask_token` 与工具输出边界（`agent::registry::w_plans` 的凭据出口）共用
+/// 本函数——同一口径两处各写一版正是本仓复发过的漂移形态。按字符切片，
+/// 非 ASCII key 不会 panic。
+pub fn mask_key_str(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() > 8 {
         let head: String = chars[..4].iter().collect();
         let tail: String = chars[chars.len() - 4..].iter().collect();
         format!("{head}{tail}...")
     } else {
         "****".to_string()
-    };
+    }
+}
+
+/// 构造 API Key JSON 响应（脱敏）。口径见 [`mask_key_str`]。
+pub fn mask_token(k: &ApiKey) -> Value {
+    let masked_key = mask_key_str(&k.key);
     json!({
         "id": k.id,
         "key": masked_key,

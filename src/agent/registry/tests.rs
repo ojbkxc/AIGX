@@ -329,10 +329,6 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
             &[
                 "/api/channels/{id}/patch",
                 "/api/groups/{name}",
-                "/api/plans/{id}",
-                "/api/plans/{id}/issue",
-                "/api/redemptions/{id}",
-                "/api/redemptions/batch",
                 "/api/models/meta/{model}",
                 "/api/models/custom",
                 "/api/models/custom/remove",
@@ -349,8 +345,6 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
                 "/api/plugins/provider",
                 "/api/plugins/uninstall",
                 "/api/scheduled-tasks/{id}",
-                "/api/tokens/{id}/reset_used",
-                "/api/tokens/{id}/rotate",
                 "/api/orders/{id}/complete",
                 "/api/checkin-center/schedules/remove",
                 "/api/checkin-center/records/mark-kept-active",
@@ -529,7 +523,6 @@ const WRITE_SIDE_PENDING: &[(&str, &[&str])] = &[
             "批 2·写侧资源族（单对象 create：列表工具只 owns GET，POST 侧无人）",
             &[
                 "/api/accounts",
-                "/api/plans",
                 "/api/users",
                 "/api/proxy-pool",
             ],
