@@ -537,6 +537,49 @@ pub struct ChannelStore {
 /// `AccountSessionStore::channel_may_serve` 只读两把锁 + 掩码比较）。
 pub type ChannelGate<'a> = &'a dyn Fn(&Channel) -> bool;
 
+/// 单渠道目录漂移对账（P2-6②，**只读**）：声明 vs 发现差异 + 悬空映射统计。
+///
+/// `discovered` = 本轮拉回的上游模型清单。有效清单（`alive`）＝`models` 非空用
+/// 白名单、空用本轮发现快照，`alive_source` 记判定依据。悬空判定与
+/// [`crate::model::prune_stale_channel_mappings`] 同口径（链式保护 + 空 target
+/// 坏条目 + 精确匹配）；`models` 与 `discovered` 皆空时返回 None（无判定依据）。
+///
+/// 返回 `Some` = 有漂移迹象（疑似下线 / 悬空映射），`None` = 无迹象。
+/// 第一阶段（lead 裁定）只报告不删；第二阶段等报告数字确认后由调用方改调
+/// [`ChannelStore::prune_stale_channel_mappings`]。
+pub fn reconcile_channel_drift(ch: &Channel, discovered: &[String]) -> Option<serde_json::Value> {
+    let (alive, alive_source): (Vec<String>, &'static str) = if !ch.models.is_empty() {
+        (ch.models.clone(), "whitelist")
+    } else {
+        (discovered.to_vec(), "discovered")
+    };
+    let stale_mappings = crate::model::prune_stale_channel_mappings(&ch.model_mapping, &alive);
+    // 声明了但上游本轮已不提供（疑似下线）；models 空 = 全支持，无下线概念
+    let declared_not_found: Vec<String> = if ch.models.is_empty() {
+        Vec::new()
+    } else {
+        ch.models
+            .iter()
+            .filter(|m| !discovered.contains(m))
+            .cloned()
+            .collect()
+    };
+    if declared_not_found.is_empty() && stale_mappings.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "id": ch.id,
+        "name": ch.name,
+        // 判定依据：whitelist = models 白名单 / discovered = 发现快照
+        "alive_source": alive_source,
+        "declared_not_found": declared_not_found,
+        "stale_mappings": stale_mappings
+            .iter()
+            .map(|(a, t)| serde_json::json!({ "alias": a, "target": t }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
 impl ChannelStore {
     pub fn new(store: Arc<FileStore>) -> Self {
         let s = Self {
@@ -1860,6 +1903,101 @@ mod tests {
                 .unwrap()
                 .is_empty());
         });
+    }
+
+    /// #33 阶段1 判据验证：chatglm 形态渠道（白名单 + 2 条白名单外 alias → 悬空 2 条）
+    #[test]
+    fn reconcile_channel_drift_chatglm_shape() {
+        let mut ch = sample("chatglm", 10, vec!["glm-4.7", "glm-4.5"]);
+        ch.model_mapping = HashMap::from([
+            (
+                "glm-4.7-flash".to_string(),
+                "glm-4.7-flash-20241105".to_string(),
+            ),
+            ("gpt-4o".to_string(), "gpt-4o-2024-08-06".to_string()),
+        ]);
+        let discovered = vec!["glm-4.7".to_string(), "glm-4.5".to_string()];
+        let drift = reconcile_channel_drift(&ch, &discovered).expect("有悬空映射应出报告");
+        assert_eq!(drift["alive_source"], "whitelist");
+        assert_eq!(
+            drift["declared_not_found"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(
+            drift["stale_mappings"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            2
+        );
+        // 两条悬空 alias 都在报告里（精确匹配判据）
+        let aliases: Vec<&str> = drift["stale_mappings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["alias"].as_str().unwrap())
+            .collect();
+        assert!(aliases.contains(&"glm-4.7-flash"));
+        assert!(aliases.contains(&"gpt-4o"));
+    }
+
+    /// #33 阶段1 判据验证：健康渠道（alias 在白名单）→ 无漂移迹象
+    #[test]
+    fn reconcile_channel_drift_healthy_channel_is_none() {
+        let mut ch = sample("ok", 10, vec!["m1"]);
+        ch.model_mapping = HashMap::from([("m1".to_string(), "m1-v2".to_string())]);
+        assert!(reconcile_channel_drift(&ch, &["m1".to_string()]).is_none());
+    }
+
+    /// #33 阶段1 判据验证：白名单收窄（models 有、discovered 没有）→ 疑似下线
+    #[test]
+    fn reconcile_channel_drift_declared_not_found() {
+        let ch = sample("shrink", 10, vec!["gone-model", "m1"]);
+        let discovered = vec!["m1".to_string()];
+        let drift = reconcile_channel_drift(&ch, &discovered).expect("有疑似下线应出报告");
+        assert_eq!(drift["alive_source"], "whitelist");
+        assert_eq!(
+            drift["declared_not_found"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            1
+        );
+        assert_eq!(
+            drift["stale_mappings"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            0
+        );
+    }
+
+    /// #33 阶段1 判据验证：models 空 → alive_source=discovered，快照外 alias 判悬空
+    #[test]
+    fn reconcile_channel_drift_discovered_source() {
+        let mut ch = sample("auto", 10, vec![]);
+        ch.model_mapping = HashMap::from([("m2".to_string(), "t1".to_string())]);
+        let discovered = vec!["m1".to_string()];
+        let drift = reconcile_channel_drift(&ch, &discovered).expect("快照外 alias 应判悬空");
+        assert_eq!(drift["alive_source"], "discovered");
+        assert_eq!(
+            drift["stale_mappings"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            1
+        );
+        // models 空 = 全支持：无「疑似下线」概念
+        assert_eq!(
+            drift["declared_not_found"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            0
+        );
     }
 
     /// #40 §1 粗筛：`coarse` 在候选构造阶段裁渠道；`None` 与既有选取逐字节等价。

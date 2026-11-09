@@ -452,39 +452,12 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                                 // 直接吃循环里 ch 的 model_mapping（无现取窗口，避免并发删改静默少报）；
                                 // 第一阶段（lead 裁定）：只报告不删；第二阶段等数字确认后改调
                                 // ChannelStore::prune_stale_channel_mappings 删除。
-                                let (alive, alive_source): (Vec<String>, &'static str) =
-                                    if !ch.models.is_empty() {
-                                        (ch.models.clone(), "whitelist")
-                                    } else {
-                                        (models.clone(), "discovered")
-                                    };
-                                let stale_mappings = crate::model::prune_stale_channel_mappings(
-                                    &ch.model_mapping,
-                                    &alive,
-                                );
-                                // 声明了但上游本轮已不提供（疑似下线）；models 空 = 全支持，无下线概念
-                                let declared_not_found: Vec<String> = if ch.models.is_empty() {
-                                    Vec::new()
-                                } else {
-                                    ch.models
-                                        .iter()
-                                        .filter(|m| !models.contains(m))
-                                        .cloned()
-                                        .collect()
-                                };
-                                // 有漂移迹象（疑似下线 / 悬空映射）才进报告
-                                if !declared_not_found.is_empty() || !stale_mappings.is_empty() {
-                                    drift_channels.push(json!({
-                                        "id": ch.id,
-                                        "name": ch.name,
-                                        // 判定依据：whitelist = models 白名单 / discovered = 发现快照
-                                        "alive_source": alive_source,
-                                        "declared_not_found": declared_not_found,
-                                        "stale_mappings": stale_mappings
-                                            .iter()
-                                            .map(|(a, t)| json!({ "alias": a, "target": t }))
-                                            .collect::<Vec<_>>(),
-                                    }));
+                                // 对账（P2-6②）：单渠道漂移判定（只读）——第一阶段（lead 裁定）
+                                // 只报告不删；第二阶段等报告数字确认后改调 prune_stale_channel_mappings
+                                if let Some(drift) =
+                                    crate::channel::reconcile_channel_drift(&ch, &models)
+                                {
+                                    drift_channels.push(drift);
                                 }
                                 let _ = state.channel_store.save_discovered_models(&ch.id, models);
                                 refreshed_channels += 1;
