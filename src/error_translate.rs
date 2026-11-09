@@ -220,8 +220,7 @@ const SANITIZE_MAX_CHARS: usize = 500;
 /// 词字符（ASCII 字母数字 / `-` / `_`）。
 ///
 /// 缺此检查时 `sk-` 的匹配从任意字节位置起，`risk-score`、`desk-top`、
-/// `task-42`、`disks-4` 这类普通连字符词里的 `sk-` 片段都会被误吞成 `***`
-/// （#45 的四例同形）。
+/// `task-42` 这类普通连字符词里的 `sk-` 片段都会被误吞成 `***`（#45 三例同形）。
 fn is_sk_front_boundary(bytes: &[u8], pos: usize) -> bool {
     pos == 0 || !is_sk_key_byte(bytes[pos - 1])
 }
@@ -239,7 +238,10 @@ fn is_sk_key_byte(b: u8) -> bool {
 ///
 /// 上游报错体可能回显其收到的认证凭据（如 "Invalid api key sk-xxx"、
 /// "Bearer xxx"），原样透传给付费客户端会泄露渠道侧密钥。本函数只拦
-/// "发给用户"的错误出口；日志/熔断侧保留原始消息以利排查。
+/// "发给用户"的错误出口。按本仓惯例，**日志侧不受本函数约束**（排障原文
+/// 由调用点自行落日志，如 failover 的 `tracing::warn!`）；但**落库 / 熔断侧
+/// 自 `#42` 起也走本函数**——`mark_cooldown` / `mark_unhealthy` 写入的
+/// `last_error` 库内不留原文，排障时别指望从库里取回改写前的字节。
 ///
 /// 处理（参照 rust-tunnel `sanitize_error_message` 的手动字节匹配实现，
 /// 不引入 regex 依赖）：
@@ -472,6 +474,35 @@ mod tests {
                 "二次脱敏改变了产物: {once}"
             );
         }
+    }
+
+    /// #45 `known_boundary`：裸 JWT（`eyJ…`）**刻意不拦**——当前行为是逐字符原样保留。
+    ///
+    /// 为何不扩：见 `_a2a-port-recon/55-sanitize-scope-analysis.md` §5（四台生产 454 条
+    /// 非空错误值 + 1488 行原始日志出现率 0；扩它会把所有 8+ 字符 base64url 串纳入吞并面）。
+    /// 加这条 pin 的目的：将来谁改了行为，这里**立刻变红**，不让「刻意不做」静默漂移。
+    #[test]
+    fn sanitize_known_boundary_naked_jwt_is_not_masked() {
+        let raw = "invalid token eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.SIGNATUREPART";
+        assert_eq!(sanitize_error_message(raw), raw);
+    }
+
+    /// #45 `known_boundary`：11 位手机号**刻意不拦**——当前行为是逐字符原样保留。
+    ///
+    /// 为何不扩：见 55 §5（出现率 0；手机号正则会吃订单号 / 时间戳）。
+    #[test]
+    fn sanitize_known_boundary_phone_number_is_not_masked() {
+        let raw = "login failed for 13812345678";
+        assert_eq!(sanitize_error_message(raw), raw);
+    }
+
+    /// #45 `known_boundary`：JSON `"access_token":"…"` 字段**刻意不拦**——当前行为是逐字符原样保留。
+    ///
+    /// 为何不扩：见 55 §5（出现率 0；该键名在真实文案里只见于「缺少 access_token」这类无值场景）。
+    #[test]
+    fn sanitize_known_boundary_access_token_field_is_not_masked() {
+        let raw = r#"{"error":{"access_token":"eyJhbGciOiJIUzI1NiJ9.SIG"}}"#;
+        assert_eq!(sanitize_error_message(raw), raw);
     }
 
     #[test]
