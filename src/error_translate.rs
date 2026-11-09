@@ -213,8 +213,27 @@ fn derive_azure_code(kind: Option<&str>) -> Option<String> {
     }
 }
 
-/// 发往客户端的错误消息截断上限（字节，回退到 UTF-8 字符边界）。
+/// 发往客户端的错误消息截断上限（**字节**，回退到 UTF-8 字符边界）。
 const SANITIZE_MAX_CHARS: usize = 500;
+
+/// `sk-` 的**前边界**判定：`s` 之前必须是词边界——`pos == 0`，或前一字节不是
+/// 词字符（ASCII 字母数字 / `-` / `_`）。
+///
+/// 缺此检查时 `sk-` 的匹配从任意字节位置起，`risk-score`、`desk-top`、
+/// `task-42`、`disks-4` 这类普通连字符词里的 `sk-` 片段都会被误吞成 `***`
+/// （#45 的四例同形）。
+fn is_sk_front_boundary(bytes: &[u8], pos: usize) -> bool {
+    pos == 0 || !is_sk_key_byte(bytes[pos - 1])
+}
+
+/// `sk-` 密钥段字符类：ASCII 字母数字、`-`、`_`。前边界判定复用同一集合。
+///
+/// 现代密钥多为多段格式（OpenAI `sk-proj-…`、Anthropic `sk-ant-api03-…`）。
+/// 旧的「只吞字母数字」会在第一个 `-`/`_` 就停，产出 `sk-***-<真密钥>`——看着
+/// 已脱敏、真秘密却完整跟在后面（#45 的假绿形态）。
+fn is_sk_key_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
 
 /// T3：脱敏发往客户端的上游错误消息。
 ///
@@ -224,13 +243,25 @@ const SANITIZE_MAX_CHARS: usize = 500;
 ///
 /// 处理（参照 rust-tunnel `sanitize_error_message` 的手动字节匹配实现，
 /// 不引入 regex 依赖）：
-/// 1. 截断到最多 500 字符（UTF-8 字符边界安全，手动回退到合法边界，
-///    不依赖尚未在 MSRV 稳定的 `floor_char_boundary`）
-/// 2. 脱敏两类模式（best-effort，非安全保证）：
-///    - `Bearer <token>`（大小写不敏感前缀）→ `Bearer ***`
-///    - `sk-` 后跟字母数字（≤67 字符）→ `sk-***`
+/// 1. 截断到最多 500 **字节**（UTF-8 字符边界安全，手动回退到合法边界，
+///    不依赖尚未在 MSRV 稳定的 `floor_char_boundary`；超限时追加 `...`）
+/// 2. 脱敏两类模式（best-effort，**非安全保证**）：
+///    - `Bearer <token>`：前缀大小写不敏感、**必须带尾随 ASCII 空格**，
+///      token 吞到下一个 ASCII 空白 → 统一写回 `Bearer ***`
+///    - `sk-<密钥段>`：要求**前边界**（`sk-` 前一字节不是 `[A-Za-z0-9_-]`）
+///      且 `sk-` 后首字符为 ASCII 字母数字，随后吞满连续的 `[A-Za-z0-9_-]`
+///      （覆盖 `sk-proj-…`/`sk-ant-api03-…` 多段密钥）→ `sk-***`
+/// 3. 其余逐 UTF-8 字符原样拷贝，状态码与诊断文案一律保留。
+///
+/// **已知边界（刻意不拦，登记于此，勿当漏修）**：裸 JWT（`eyJ…`）、11 位
+/// 手机号、JSON `"access_token":"…"`、`Bearer` 后无空格或跟 `\t`、`Cookie:`
+/// 头、URL 内嵌凭据（`https://user:pass@host`）、`sk-` 后首字符非字母数字、
+/// 无 `sk-` 前缀的高熵串（Azure 32-hex / Google `AIza…`）。判据见
+/// `_a2a-port-recon/55-sanitize-scope-analysis.md` §2.2：四台生产 454 条非空
+/// 错误值 + 1488 行原始日志里这些形态出现率为 0，扩它们会给数据面 5 条
+/// 客户端可见出口引入新掩码形状与误伤面。
 pub fn sanitize_error_message(body: &str) -> String {
-    // ── 截断：最多 500 字符，仅切在 UTF-8 边界上 ──
+    // ── 截断：最多 500 字节，仅切在 UTF-8 边界上 ──
     let end = if body.len() <= SANITIZE_MAX_CHARS {
         body.len()
     } else {
@@ -266,17 +297,26 @@ pub fn sanitize_error_message(body: &str) -> String {
             continue;
         }
 
-        // `sk-` 后跟字母数字（≤67 字符）
-        if pos + 3 <= n && bytes[pos] == b's' && bytes[pos + 1] == b'k' && bytes[pos + 2] == b'-' {
+        // `sk-` 后跟密钥段 → `sk-***`（#45：前边界锚 + 吞满多段）。
+        // 三个条件缺一不可，既防误伤又防假绿：
+        //   1. 前边界：`s` 前一个字节是词边界（`risk-score`/`desk-top`/`task-42` 不被吞）；
+        //   2. `sk-` 后首字符必须是 ASCII 字母数字（`sk- ` / `sk--` 不替换）；
+        //   3. 吞满其后连续的 `[A-Za-z0-9_-]`，不设长度上限——输入已截断到 ≤503 字节，
+        //      整段吞掉是唯一不泄尾段的选择（旧实现 65 上限 + 只吞 alnum ⇒ `sk-proj-…` 泄尾）。
+        if pos + 3 < n
+            && bytes[pos] == b's'
+            && bytes[pos + 1] == b'k'
+            && bytes[pos + 2] == b'-'
+            && is_sk_front_boundary(bytes, pos)
+            && bytes[pos + 3].is_ascii_alphanumeric()
+        {
             let mut key_end = pos + 3;
-            while key_end < n && bytes[key_end].is_ascii_alphanumeric() && key_end - pos <= 67 {
+            while key_end < n && is_sk_key_byte(bytes[key_end]) {
                 key_end += 1;
             }
-            if key_end > pos + 3 {
-                out.push_str("sk-***");
-                pos = key_end;
-                continue;
-            }
+            out.push_str("sk-***");
+            pos = key_end;
+            continue;
         }
 
         // 普通字符原样输出（按 UTF-8 字符步进，多字节安全）
@@ -352,6 +392,86 @@ mod tests {
             sanitize_error_message("desk- top corner"),
             "desk- top corner"
         );
+    }
+
+    /// #45：`sk-` 必须有**前边界锚**——词中的 `sk-` 片段不得被吞。
+    ///
+    /// 前三例（risk-score / desk-top / task-42）是旧实现的真实误伤（旧实现把
+    /// `sk-` 从词中吞起，产出 `risk-***` 等）；`disks-4` 本身**不含** `sk-` 子串
+    /// （d-i-s-k-**s**-4），旧实现亦不误伤，留作「不含 `sk-` 子串不得被改动」的反向 guard
+    /// （注：`_a2a-port-recon/55-sanitize-scope-analysis.md` §2.2-C 把 `disks-4` 列为误伤，与
+    /// 其自带的复刻矩阵结论矛盾——matrix.txt 那条自报「未误伤」，以实跑为准）。
+    #[test]
+    fn sanitize_sk_requires_word_boundary() {
+        // 四例误伤：`sk-` 前一字节是字母 ⇒ 非词边界 ⇒ 逐字符原样保留。
+        assert_eq!(
+            sanitize_error_message("risk-score is 0.5"),
+            "risk-score is 0.5"
+        );
+        assert_eq!(sanitize_error_message("desk-top corner"), "desk-top corner");
+        assert_eq!(
+            sanitize_error_message("task-42 was aborted"),
+            "task-42 was aborted"
+        );
+        assert_eq!(
+            sanitize_error_message("disks-4 were removed"),
+            "disks-4 were removed"
+        );
+        // 正例：词边界之后的 `sk-<key>` 仍必须被吞（串首 / 空格 / 分隔符都算边界）。
+        assert_eq!(
+            sanitize_error_message("sk-abc123 rejected"),
+            "sk-*** rejected"
+        );
+        assert_eq!(sanitize_error_message("key=sk-abc123"), "key=sk-***");
+        assert_eq!(
+            sanitize_error_message("Invalid api key sk-abc123XYZ"),
+            "Invalid api key sk-***"
+        );
+    }
+
+    /// #45：`sk-` 吞满多段密钥（含 `-`/`_`、不限 65 字符）——旧实现产出
+    /// `sk-***-<真密钥>` 的假绿，真秘密完整跟在后面。
+    #[test]
+    fn sanitize_sk_swallows_multisegment_and_long_keys() {
+        // OpenAI 新格式：旧实现只吞到第一个 `-`，留下 `-<SECRET>` 明文。
+        assert_eq!(
+            sanitize_error_message("invalid key sk-proj-AKIAREALSECRETVALUE_abcdef end"),
+            "invalid key sk-*** end"
+        );
+        // Anthropic 格式（多段 `-`）。
+        assert_eq!(
+            sanitize_error_message("x-api-key rejected sk-ant-api03-SECRETVALUE end"),
+            "x-api-key rejected sk-*** end"
+        );
+        // 下划线连接的密钥段。
+        assert_eq!(
+            sanitize_error_message("prefix sk-AKIAREAL_restoftoken"),
+            "prefix sk-***"
+        );
+        // 超 65 字符的长密钥必须整段吞掉（旧实现会泄尾段）。
+        let long = format!("key sk-{}", "E".repeat(200));
+        assert_eq!(sanitize_error_message(&long), "key sk-***");
+        // `sk-` 后首字符非字母数字（空格）⇒ 不替换。
+        assert_eq!(sanitize_error_message("sk- top"), "sk- top");
+    }
+
+    /// #45：脱敏**幂等**——掩码产物再过一次不变，这是「落库 + 出口双重
+    /// sanitize 是安全的」这一前提。
+    #[test]
+    fn sanitize_is_idempotent() {
+        for raw in [
+            "unauthorized Bearer tok123 end",
+            "invalid key sk-proj-SECRETVALUE end",
+            "risk-score is 0.5",
+            "上游返回 HTTP 500：服务暂时不可用",
+        ] {
+            let once = sanitize_error_message(raw);
+            assert_eq!(
+                sanitize_error_message(&once),
+                once,
+                "二次脱敏改变了产物: {once}"
+            );
+        }
     }
 
     #[test]

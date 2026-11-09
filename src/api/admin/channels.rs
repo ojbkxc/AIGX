@@ -228,11 +228,11 @@ pub fn mask_secret(secret: &str) -> String {
 /// 只处理新加的 `balance_last_error` 而放过已在库里的 `last_error`，等于换个键继续漏。
 ///
 /// 底下调的是 `error_translate::sanitize_error_message`（与数据面发给客户端的错误出口
-/// 同一函数），它只做三件事：截断到 500 字符、`Bearer <token>` → `Bearer ***`、
-/// `sk-<alnum>` → `sk-***`，**其余文本逐字符原样保留**。刻意不额外抹掉状态码与文案，
-/// 因为运维排障就靠 `last_error` 这句话——脱敏过度等于把可观测性拆了。
-/// 它的边界要如实登记：只拦这两类形态，**裸 JWT / 手机号 / `"access_token":"…"` 不在拦围内**
-/// （best-effort，非安全保证，与该函数既有文档一致）。
+/// 同一函数），它只做三件事：截断到 500 字节、`Bearer <token>` → `Bearer ***`、
+/// `sk-<密钥段>` → `sk-***`（前边界锚 + 吞满多段 `-`/`_`，见 #45），**其余文本逐字符原样保留**。
+/// 刻意不额外抹掉状态码与文案，因为运维排障就靠 `last_error` 这句话——脱敏过度等于把
+/// 可观测性拆了。它的边界要如实登记：只拦这两类形态，**裸 JWT / 手机号 /
+/// `"access_token":"…"` 不在拦围内**（best-effort，非安全保证）；完整清单见该函数 doc。
 fn mask_error_text(raw: Option<&str>) -> Option<String> {
     raw.map(crate::error_translate::sanitize_error_message)
 }
