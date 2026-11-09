@@ -9,8 +9,11 @@ axum 0.7 没有运行时枚举全部路由的 API，静态提取是唯一能拿�
   反向  文档 ⊆ 真实路由                   （文档不许虚构不存在的路由）
   附加  豁免条目必须真实存在、且不被写进文档（豁免不会腐烂成僵尸例外）
   附加  同路径的方法集合两侧一致           （只加 DELETE 忘写文档也会被抓）
-  附加  工具 covers ⊆ 真实路由             （#35 批3 B3-1：工具声明的覆盖不得指向
-                                          已删除/从未存在的路由；ghost covers）
+  附加  工具 covers ⊆ 管理面真实路由       （#35 批3 B3-1：工具声明的覆盖不得指向
+                                          已删/从未存在的路由，也不得指向数据面；
+                                          口径 = `gate_universe()`，与单测
+                                          `gate_universe` / `tool_covers_point_at_real_routes`
+                                          逐字同判据）
 
 任一越界 → 打印差异并 exit 1（CI 闸门）。这补上了单测
 `covers_all_real_admin_routes` 管不到的那一段：单测只保证「文档 ↔ 清单」
@@ -298,6 +301,21 @@ def extract_covers(root: Path) -> list[tuple[str, str]]:
     return out
 
 
+def gate_universe(real: dict[str, set[str]]) -> set[str]:
+    """闸门宇宙 = 管理面（与单测 `registry/tests.rs::gate_universe()` **同判据**）。
+
+    两处必须逐字同判据——本脚本是「cargo test 没跑时」的那道兜底闸，口径一旦
+    比单测宽/窄，就会互相打脸（比没有闸门更坏）。
+
+    范围（与单测逐条一致）：`/api*` ∪ `/swagger-ui*`。
+    不含数据面 `/v1/*`、`/chat/completions`、`/health`、`/livez`、`/readyz`、
+    `/metrics`、`/models*`、`/audio/*`、`/images/*`、`/embeddings`、`/rerank`、
+    `/responses`、`/auth/callback-*` 等（现网 35 条）——它们不是「AI 可运维的
+    管理面」。含 `/swagger-ui`（故指向它的 covers 合法，不会被误报为幽灵）。
+    """
+    return {p for p in real if p.startswith("/api") or p.startswith("/swagger-ui")}
+
+
 def collect(root: Path) -> dict:
     real = extract_repo(root)
     decl = extract_declared(root)
@@ -317,15 +335,18 @@ def collect(root: Path) -> dict:
         if real_api[p] != decl[p]
     }
 
-    # 工具 covers ⊆ 真实路由（不含 `/api` 前缀过滤——covers 里有 `/swagger-ui` 之类
-    # 非 /api 路径是合法的，比如未来 openapi 自描述工具）。判据与单测
-    # `tool_covers_point_at_real_routes` 一致：用 gate_universe 同源集合
-    # （真实路由全量，非 /api 子集）。
+    # 工具 covers ⊆ 真实路由（口径 = gate_universe，与单测
+    # `tool_covers_point_at_real_routes` 用的 `gate_universe` **逐字同判据**：
+    # `/api*` ∪ `/swagger-ui*`）。**不是**全量 `real`——后者含 35 条数据面/探针
+    # 路由，会让「covers 指向 /v1/chat/completions」这种非法覆盖逃过本闸门
+    # （而 cargo test 的 gate C 会红）。本闸门存在的意义正是「cargo test 没跑」
+    # 时兜底，口径不能比单测宽。
+    universe = gate_universe(real)
     tool_names = {n for n, _ in covers}
     ghost_covers = [
         {"tool": n, "cover": c}
         for n, c in covers
-        if norm_path(c) not in real
+        if norm_path(c) not in universe
     ]
     # 空集哨兵：covers 扫描面若塌成 0（registry 目录改名/解析口径分叉），
     # `ghost_covers` 会因为「空集 ⊆ 任何集合」而恒空 ⇒ 假绿。必须显式判失败。
