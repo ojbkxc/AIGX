@@ -333,7 +333,6 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
                 "/api/plans/{id}/issue",
                 "/api/redemptions/{id}",
                 "/api/redemptions/batch",
-                "/api/redemptions/redeem",
                 "/api/models/meta/{model}",
                 "/api/models/custom",
                 "/api/models/custom/remove",
@@ -362,7 +361,7 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
             ],
         ),
         (
-            "批 2·运维动作族（测活/刷新/清理/重建/终止；含上游真金与外发通知，逐条论证）",
+            "批 2·运维动作族（测活/刷新/清理/重建/终止；含上游真金，逐条论证）",
             &[
                 "/api/channels/chat_test",
                 "/api/channels/fetch_models",
@@ -372,11 +371,6 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
                 "/api/accounts/test",
                 "/api/proxy-pool/test",
                 "/api/proxy-pool/test-account",
-                "/api/notify/test-email",
-                "/api/notify/test-slack",
-                "/api/notify/test-webhook",
-                "/api/notify/test-telegram",
-                "/api/alerts/test",
                 "/api/logs/agg/rebuild",
                 "/api/logs/agg/tz-migrate",
                 "/api/logs/audits/clear",
@@ -395,13 +389,34 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
             ],
         ),
         (
-            "批 2·资金与账户安全族（钱/2FA 语义，定级需 lead 单独拍板，不在批1 讨论范围）",
+            "不给 AI 面·资金/权益不可逆族（出账/权益剥夺一旦发生即不可回退、且 AI 无对价判断依据；逐条判据见行内注释）",
             &[
+                // 判据1 不可逆出账：佣金余额划转
                 "/api/aff_transfer",
+                // 判据1：try_decrease_quota 全仓唯一调用点，扣款无原路退回机制
                 "/api/subscription/balance/pay",
+                // 判据3 错发无对价：admin 白绑 + 分组升级，已消耗不可追回
                 "/api/subscription/admin/bind",
+                // 判据2 权益剥夺：立即取消订阅，期间消耗不可追回（分组回退 best-effort）
                 "/api/subscription/admin/subscriptions/{id}/cancel",
+                // 判据2 + 影响域跨用户：剥夺他人二因子
                 "/api/users/{id}/2fa",
+                // 判据1 不可逆价值变更：verify_user 给调用者本人入账（等于 AI 自我增值通道）
+                "/api/redemptions/redeem",
+                // 判据4 影响域溢出：全库 KV upsert 覆盖，不可逆
+                "/api/backup/import",
+                // 判据4：同上（加密备份整体覆盖）
+                "/api/backup/import-encrypted",
+            ],
+        ),
+        (
+            "不给 AI 面·影响域溢出族（判据4：test-* 会真的向配置里的收件人/webhook 外发，AI 无「自测 vs 打扰真人」判断依据）",
+            &[
+                "/api/notify/test-email",
+                "/api/notify/test-slack",
+                "/api/notify/test-webhook",
+                "/api/notify/test-telegram",
+                "/api/alerts/test",
             ],
         ),
         (
@@ -411,8 +426,6 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
                 "/api/account-sessions/export",
                 "/api/backup/download",
                 "/api/backup/export-encrypted",
-                "/api/backup/import",
-                "/api/backup/import-encrypted",
                 "/api/logs/requests/export",
                 "/api/logs/runtime/export",
                 "/api/aff",
