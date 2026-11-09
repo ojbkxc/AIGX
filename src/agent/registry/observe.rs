@@ -614,7 +614,15 @@ pub(super) fn tools() -> Vec<ToolDef> {
                             admin::handle_get_zcode_captcha_pool(State(s.clone()), h.clone()).await
                         }
                         "zcodeCaptchaConfig" => {
-                            admin::handle_get_zcode_captcha_config(State(s.clone()), h.clone()).await
+                            // handler 的 Query 是必填实参（`CaptchaConfigQuery` 未 re-export，
+                            // 走模块全路径）；工具 schema 不暴露 account_id ⇒ 恒传 None =
+                            // 走 handler 文档的「省略时自动挑一个 zcode 账号」。
+                            admin::handle_get_zcode_captcha_config(
+                                State(s.clone()),
+                                h.clone(),
+                                Query(admin::zcode_captcha::CaptchaConfigQuery { account_id: None }),
+                            )
+                            .await
                         }
                         "networkConfig" => admin::health_check(State(s.clone()), h.clone()).await,
                         _ => return Err((-32602, format!("Invalid params: unknown config key {key}"))),
