@@ -428,6 +428,8 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                 let mut refreshed_channels = 0usize;
                 // 目录对账（P2-6②）：声明 vs 发现差异 + 渠道级悬空映射统计（只读）
                 let mut drift_channels: Vec<Value> = Vec::new();
+                // 阶段2：清理候选（与对账同口径组装；守卫判定全在 plan_channel_prune）
+                let mut prune_candidates: Vec<crate::channel::PruneCandidate> = Vec::new();
                 for ch in state.channel_store.list() {
                     if !ch.is_enabled()
                         || ch.channel_type != crate::channel::ChannelType::OpenaiCompatible
@@ -449,14 +451,43 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                             if !models.is_empty() {
                                 // 对账（P2-6②）：有效清单 = models 非空用白名单，空用本轮发现快照。
                                 // 必须先于 save_discovered_models（其 move 掉 models）。
-                                // 直接吃循环里 ch 的 model_mapping（无现取窗口，避免并发删改静默少报）；
-                                // 第一阶段（lead 裁定）：只报告不删；第二阶段等数字确认后改调
-                                // ChannelStore::prune_stale_channel_mappings 删除。
-                                // 对账（P2-6②）：单渠道漂移判定（只读）——第一阶段（lead 裁定）
-                                // 只报告不删；第二阶段等报告数字确认后改调 prune_stale_channel_mappings
+                                // 直接吃循环里 ch 的 model_mapping（无现取窗口，避免并发删改静默少报）。
+                                // 阶段2：对账同时组「清理候选」——`alive_source` 与 `alive` 与判定
+                                // 同口径；守卫判定（仅白名单源、单轮限量）在 plan_channel_prune。
                                 if let Some(drift) =
                                     crate::channel::reconcile_channel_drift(&ch, &models)
                                 {
+                                    let stale: Vec<(String, String)> = drift["stale_mappings"]
+                                        .as_array()
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|m| {
+                                                    Some((
+                                                        m["alias"].as_str()?.to_string(),
+                                                        m["target"].as_str()?.to_string(),
+                                                    ))
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+                                    if !stale.is_empty() {
+                                        let whitelist = !ch.models.is_empty();
+                                        prune_candidates.push(crate::channel::PruneCandidate {
+                                            channel_id: ch.id.clone(),
+                                            channel_name: ch.name.clone(),
+                                            alive_source: if whitelist {
+                                                "whitelist"
+                                            } else {
+                                                "discovered"
+                                            },
+                                            alive: if whitelist {
+                                                ch.models.clone()
+                                            } else {
+                                                models.clone()
+                                            },
+                                            stale_mappings: stale,
+                                        });
+                                    }
                                     drift_channels.push(drift);
                                 }
                                 let _ = state.channel_store.save_discovered_models(&ch.id, models);
@@ -473,6 +504,88 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                                 ch.name
                             );
                         }
+                    }
+                }
+                // ── #33 阶段2：渠道级悬空映射清理 ──
+                // 守卫1 白名单源 / 守卫2 删前快照 / 守卫3 单轮限量 / 守卫4 幂等 /
+                // 守卫5 留痕 / 守卫6 待修清单；判定全在 plan_channel_prune。
+                let prune_plan = crate::channel::plan_channel_prune(
+                    prune_candidates,
+                    crate::channel::CHANNEL_PRUNE_LIMIT,
+                );
+                if prune_plan.over_limit {
+                    tracing::warn!(
+                        "[Tasks] 悬空映射清理本轮超限量（{} 条 > 上限 {}），只报告不删",
+                        prune_plan.total_stale,
+                        crate::channel::CHANNEL_PRUNE_LIMIT
+                    );
+                }
+                let pruned = crate::channel::execute_channel_prune(
+                    &state.channel_store,
+                    &prune_plan.deletions,
+                );
+                // 守卫2+守卫5：删除明细落 KV 快照（可回填）+ 日志留痕，绝不静默删
+                if !pruned.is_empty() {
+                    let mut restore = serde_json::Map::new();
+                    let mut deleted: Vec<Value> = Vec::with_capacity(pruned.len());
+                    for item in &pruned {
+                        deleted.push(json!({
+                            "channel_id": item.channel_id,
+                            "channel_name": item.channel_name,
+                            "alias": item.alias,
+                            "target": item.target,
+                        }));
+                        restore
+                            .entry(item.channel_id.clone())
+                            .or_insert_with(|| json!({}))
+                            .as_object_mut()
+                            .expect("restore 分组值恒为对象")
+                            .insert(item.alias.clone(), json!(item.target));
+                    }
+                    let snapshot = json!({
+                        "at": chrono::Utc::now().timestamp(),
+                        "trigger": "scheduled_task:modelRefresh",
+                        "limit": crate::channel::CHANNEL_PRUNE_LIMIT,
+                        "deleted_count": pruned.len(),
+                        "deleted": deleted,
+                        // 可直接灌回：{channel_id: {alias: target}}
+                        "restore": restore,
+                    });
+                    if let Err(e) = state
+                        .scheduled_task_store
+                        .put("catalog:prune:last", &snapshot)
+                    {
+                        tracing::warn!("[Tasks] 悬空映射清理快照写入失败：{e}");
+                    }
+                    tracing::info!(
+                        "[Tasks] 悬空映射清理：删除 {} 条（快照 catalog:prune:last，可据 restore 回填；触发轮次 at={}）",
+                        pruned.len(),
+                        chrono::Utc::now().timestamp()
+                    );
+                }
+                // 守卫6：待修清单（已删的「若本意保留请按正确大小写回填」+ 只报不删的）
+                let mut pending_fix: Vec<Value> = Vec::new();
+                for item in &pruned {
+                    pending_fix.push(json!({
+                        "channel_id": item.channel_id,
+                        "channel_name": item.channel_name,
+                        "alive_source": "whitelist",
+                        "alias": item.alias,
+                        "target": item.target,
+                        "action": "deleted",
+                    }));
+                }
+                for candidate in &prune_plan.deferred {
+                    for (alias, target) in &candidate.stale_mappings {
+                        pending_fix.push(json!({
+                            "channel_id": candidate.channel_id,
+                            "channel_name": candidate.channel_name,
+                            "alive_source": candidate.alive_source,
+                            "alias": alias,
+                            "target": target,
+                            "action": "deferred",
+                            "reason": if prune_plan.over_limit { "over_limit" } else { "discovered_source" },
+                        }));
                     }
                 }
                 // 对账报告落 KV（catalog:drift:latest）——诊断页/健康页可读
@@ -494,6 +607,13 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                     let report = json!({
                         "at": chrono::Utc::now().timestamp(),
                         "channels": drift_channels,
+                        "prune": {
+                            "limit": crate::channel::CHANNEL_PRUNE_LIMIT,
+                            "over_limit": prune_plan.over_limit,
+                            "deleted_count": pruned.len(),
+                            "snapshot_key": "catalog:prune:last",
+                            "pending_fix": pending_fix,
+                        },
                     });
                     if let Err(e) = state
                         .scheduled_task_store
@@ -512,6 +632,14 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                     );
                     summary.push_str(&format!(
                         "，目录对账 {n_drift} 渠道有漂移迹象（{n_gone} 条疑似下线，{n_stale} 条悬空映射）"
+                    ));
+                }
+                if !pruned.is_empty() {
+                    summary.push_str(&format!("，悬空映射清理 {} 条", pruned.len()));
+                } else if prune_plan.over_limit {
+                    summary.push_str(&format!(
+                        "，悬空映射 {} 条超限量只报告",
+                        prune_plan.total_stale
                     ));
                 }
                 if !catalog_ok {

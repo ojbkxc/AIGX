@@ -580,6 +580,112 @@ pub fn reconcile_channel_drift(ch: &Channel, discovered: &[String]) -> Option<se
     }))
 }
 
+/// #33 阶段2 单轮删除上限（守卫3）：超限只报告不删，防一次快照异常大面积清空。
+pub const CHANNEL_PRUNE_LIMIT: usize = 50;
+
+/// #33 阶段2：单渠道清理候选（由 `modelRefresh` 对账段按与
+/// [`reconcile_channel_drift`] 同口径组装）。
+#[derive(Debug, Clone)]
+pub struct PruneCandidate {
+    pub channel_id: String,
+    pub channel_name: String,
+    /// 判定依据来源：`"whitelist"`（`models` 白名单，可删）/
+    /// `"discovered"`（上游快照，**只报不删**，见 [`plan_channel_prune`]）。
+    pub alive_source: &'static str,
+    /// 该渠道有效清单 `alive`，原样交给 [`ChannelStore::prune_stale_channel_mappings`]。
+    pub alive: Vec<String>,
+    /// 悬空映射明细 `(alias, target)`（与 `alive` 同口径算出）。
+    pub stale_mappings: Vec<(String, String)>,
+}
+
+/// #33 阶段2 清理计划（纯函数产出，无副作用）。
+#[derive(Debug, Default)]
+pub struct PrunePlan {
+    /// 本轮实际要删的渠道（仅 whitelist 源，且未超限量）。
+    pub deletions: Vec<PruneCandidate>,
+    /// 只报不删：discovered 源（永不删）+ 超限量被搁置的 whitelist 项。
+    pub deferred: Vec<PruneCandidate>,
+    /// 是否因超限量本轮不删。
+    pub over_limit: bool,
+    /// 计划删除总条数（= 全部 whitelist 源悬空条数，无论是否超限）。
+    pub total_stale: usize,
+}
+
+/// 一条**实际被删除**的映射（阶段2 执行结果；快照与「待修清单」据此生成）。
+#[derive(Debug, Clone)]
+pub struct PrunedMapping {
+    pub channel_id: String,
+    pub channel_name: String,
+    pub alias: String,
+    pub target: String,
+}
+
+/// #33 阶段2 清理计划：守卫1（仅白名单源）+ 守卫3（单轮限量）的唯一判定点。
+///
+/// - **守卫1**：`alive_source != "whitelist"` ⇒ **永不删**，进 `deferred`。
+///   理由：`discovered` 是上游快照，瞬时收窄（上游抖动/限流）会把仍有效的映射
+///   误判成「下线」，据此删除是**不可逆误伤**；`whitelist` 是人类声明的，语义稳定。
+/// - **守卫3**：可删总数 > `limit` ⇒ **全轮不删**（可删项全转入 `deferred`），
+///   置 `over_limit=true`——防一次快照异常导致大面积清空。
+///
+/// 悬空为空的候选直接忽略。
+pub fn plan_channel_prune(candidates: Vec<PruneCandidate>, limit: usize) -> PrunePlan {
+    let mut deletions: Vec<PruneCandidate> = Vec::new();
+    let mut deferred: Vec<PruneCandidate> = Vec::new();
+    for candidate in candidates {
+        if candidate.stale_mappings.is_empty() {
+            continue;
+        }
+        if candidate.alive_source == "whitelist" {
+            deletions.push(candidate);
+        } else {
+            deferred.push(candidate);
+        }
+    }
+    let total_stale: usize = deletions.iter().map(|c| c.stale_mappings.len()).sum();
+    let over_limit = total_stale > limit;
+    if over_limit {
+        deferred.append(&mut deletions);
+    }
+    PrunePlan {
+        deletions,
+        deferred,
+        over_limit,
+        total_stale,
+    }
+}
+
+/// 执行 [`PrunePlan::deletions`]（阶段性副作用唯一发生点）。逐渠道调
+/// [`ChannelStore::prune_stale_channel_mappings`]（其内部在写锁内重算），以**实际
+/// 重算结果**为准，保证「删除数 == 快照条数」。
+pub fn execute_channel_prune(
+    store: &ChannelStore,
+    deletions: &[PruneCandidate],
+) -> Vec<PrunedMapping> {
+    let mut removed: Vec<PrunedMapping> = Vec::new();
+    for candidate in deletions {
+        match store.prune_stale_channel_mappings(&candidate.channel_id, &candidate.alive) {
+            Ok(items) => {
+                for (alias, target) in items {
+                    removed.push(PrunedMapping {
+                        channel_id: candidate.channel_id.clone(),
+                        channel_name: candidate.channel_name.clone(),
+                        alias,
+                        target,
+                    });
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "[Prune] 渠道「{}」悬空映射清理失败：{error}",
+                    candidate.channel_name
+                );
+            }
+        }
+    }
+    removed
+}
+
 impl ChannelStore {
     pub fn new(store: Arc<FileStore>) -> Self {
         let s = Self {
@@ -1998,6 +2104,114 @@ mod tests {
                 .unwrap_or(0),
             0
         );
+    }
+
+    fn prune_candidate(src: &'static str, id: &str, n: usize) -> PruneCandidate {
+        PruneCandidate {
+            channel_id: id.to_string(),
+            channel_name: id.to_string(),
+            alive_source: src,
+            alive: vec!["m1".to_string()],
+            stale_mappings: (0..n).map(|i| (format!("a{i}"), "t".to_string())).collect(),
+        }
+    }
+
+    /// #33 阶段2 **守卫1**（变异取证锚点）：discovered 源候选**只报不删、永不删**。
+    ///
+    /// 变异取证：把 `plan_channel_prune` 的 `if candidate.alive_source == "whitelist"`
+    /// 改成恒真 ⇒ discovered 候选进 `deletions` ⇒ 本用例
+    /// `assert!(plan.deletions.is_empty())` 必失败（用例会红）。
+    #[test]
+    fn plan_channel_prune_discovered_source_is_never_deleted() {
+        let plan = plan_channel_prune(
+            vec![prune_candidate("discovered", "c1", 1)],
+            CHANNEL_PRUNE_LIMIT,
+        );
+        assert!(
+            plan.deletions.is_empty(),
+            "守卫1：discovered 源（快照）绝不能进删除计划"
+        );
+        assert_eq!(plan.deferred.len(), 1);
+        assert_eq!(plan.deferred[0].alive_source, "discovered");
+        // 对照：whitelist 源可删
+        let plan = plan_channel_prune(
+            vec![prune_candidate("whitelist", "c1", 1)],
+            CHANNEL_PRUNE_LIMIT,
+        );
+        assert_eq!(plan.deletions.len(), 1);
+        assert!(plan.deferred.is_empty());
+    }
+
+    /// #33 阶段2 **守卫3**（变异取证锚点）：可删总数 > limit ⇒ 全轮不删。
+    ///
+    /// 变异取证：把 `let over_limit = total_stale > limit;` 改成恒假 ⇒ 超限仍进
+    /// `deletions` ⇒ 本用例 `assert!(plan.deletions.is_empty())` 必失败（用例会红）。
+    #[test]
+    fn plan_channel_prune_over_limit_defers_all() {
+        // 恰好等于上限 → 放行删除
+        let plan = plan_channel_prune(vec![prune_candidate("whitelist", "c1", 2)], 2);
+        assert!(!plan.over_limit);
+        assert_eq!(plan.deletions.len(), 1);
+        // 超过上限 → 一条不删
+        let plan = plan_channel_prune(
+            vec![
+                prune_candidate("whitelist", "c1", 2),
+                prune_candidate("whitelist", "c2", 1),
+            ],
+            2,
+        );
+        assert!(plan.over_limit);
+        assert!(plan.deletions.is_empty(), "守卫3：超限量必须一条不删");
+        assert_eq!(plan.deferred.len(), 2);
+        assert_eq!(plan.total_stale, 3);
+    }
+
+    /// #33 阶段2 **守卫4**：轮级幂等——plan → execute 连跑两轮，第二轮删除数为 0。
+    #[test]
+    fn execute_channel_prune_is_idempotent_across_rounds() {
+        with_secret_dir("prune-idem", || {
+            let s = store();
+            let mut ch = sample("c1", 10, vec!["good-alias"]);
+            ch.model_mapping = HashMap::from([
+                ("dead".to_string(), "t1".to_string()),
+                ("good-alias".to_string(), "t2".to_string()),
+            ]);
+            s.add(ch).unwrap();
+
+            // 一轮 = 对账(reconcile) → 组候选 → plan → execute，返回本轮实际删除数
+            let round = |store: &ChannelStore| -> usize {
+                let ch = store.get("c1").unwrap();
+                let drift = reconcile_channel_drift(&ch, &ch.models);
+                let stale: Vec<(String, String)> = drift
+                    .as_ref()
+                    .and_then(|d| d["stale_mappings"].as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| {
+                                Some((
+                                    m["alias"].as_str()?.to_string(),
+                                    m["target"].as_str()?.to_string(),
+                                ))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let plan = plan_channel_prune(
+                    vec![PruneCandidate {
+                        channel_id: ch.id.clone(),
+                        channel_name: ch.name.clone(),
+                        alive_source: "whitelist",
+                        alive: ch.models.clone(),
+                        stale_mappings: stale,
+                    }],
+                    CHANNEL_PRUNE_LIMIT,
+                );
+                execute_channel_prune(store, &plan.deletions).len()
+            };
+
+            assert_eq!(round(&s), 1, "第 1 轮应删 1 条（dead）");
+            assert_eq!(round(&s), 0, "守卫4：第 2 轮必须为 0（幂等）");
+        });
     }
 
     /// #40 §1 粗筛：`coarse` 在候选构造阶段裁渠道；`None` 与既有选取逐字节等价。
