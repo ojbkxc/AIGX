@@ -63,7 +63,9 @@ pub(super) fn tools() -> Vec<ToolDef> {
         "高危写：按 key 修改一份全局热生效配置（写侧统一入口，**必须审批**）。key 取值与只读 aigx_config_view 对称；\
          value 是该 key 的完整配置对象（同对应管理端 PUT 的请求体）。\
          **安全控制面禁令**：ipFilter / routing 等安全控制面**不得用于解除自身访问限制**（禁止关闭 IP 过滤/黑白名单、\
-         禁止改路由以绕过已配置的访问约束）；这类配置会改变服务自身可达性与外部约束，只能用于落实运维意图。",
+         禁止改路由以绕过已配置的访问约束）；这类配置会改变服务自身可达性与外部约束，只能用于落实运维意图。\
+         **破坏性语义（必读）**：settings.replace_all=true 会**先清空全部自定义模型映射**；\
+         networkConfig.enabled=false 会**停全站数据面**。两处都会在工具结果里回显 effect 段。",
         HighRisk,
         "key",
         &[
@@ -116,7 +118,20 @@ pub(super) fn tools() -> Vec<ToolDef> {
                 match key.as_str() {
                     "settings" => {
                         let body: admin::settings::SettingsRequest = body_of("aigx_config_set", &value)?;
-                        out(admin::handle_update_settings(State(s.clone()), h.clone(), Json(body)).await)
+                        let replace_all = body.replace_all;
+                        let upserted = body.mappings.len();
+                        let res =
+                            admin::handle_update_settings(State(s.clone()), h.clone(), Json(body)).await;
+                        out(res.map(|Json(v)| {
+                            Json(with_effect(
+                                v,
+                                json!({
+                                    "replace_all": replace_all,
+                                    "cleared_all": replace_all,
+                                    "upserted": upserted,
+                                }),
+                            ))
+                        }))
                     }
                     "limits" => {
                         let body: admin::settings::LimitsRequest = body_of("aigx_config_set", &value)?;
@@ -205,14 +220,20 @@ pub(super) fn tools() -> Vec<ToolDef> {
                     "networkConfig" => {
                         let config_id = require_value_str(&value, "config_id")?;
                         let body: admin::network::NetworkConfigRequest = body_of("aigx_config_set", &value)?;
+                        let enabled = body.enabled;
                         let res = admin::update_network_config(
                             State(s.clone()),
                             h.clone(),
-                            Path(config_id),
+                            Path(config_id.clone()),
                             Json(body),
                         )
                         .await;
-                        out(res.map(|Json(v)| Json(serde_json::to_value(v).unwrap_or(Value::Null))))
+                        out(res.map(|Json(v)| {
+                            Json(with_effect(
+                                serde_json::to_value(v).unwrap_or(Value::Null),
+                                json!({ "enabled": enabled, "config_id_ignored": config_id }),
+                            ))
+                        }))
                     }
                     other => Err((
                         -32602,
@@ -319,6 +340,21 @@ fn body_of<T: DeserializeOwned>(tool: &str, value: &Value) -> Result<T, (i64, St
         .map_err(|e| (-32602, format!("Invalid value for tool {tool}: {e}")))
 }
 
+/// 在工具结果顶层注入 `effect` 段（破坏性操作的效果摘要）。
+///
+/// 本仓口径：破坏性操作的生效范围必须**显式回给调用方**——`handle_update_settings`
+/// 只回 `{"success":true,"data":null}`，清空了几条/写了哪几条调用方看不到；
+/// 这里按调用参数补一段效果摘要（不改 handler、不改 HTTP 契约，只在工具输出边界加）。
+fn with_effect(mut v: Value, effect: Value) -> Value {
+    if let Value::Object(map) = &mut v {
+        map.insert("effect".to_string(), effect);
+    } else {
+        // 非对象响应（理论上不会）：包一层，保证 effect 一定可见
+        v = json!({ "data": v, "effect": effect });
+    }
+    v
+}
+
 /// 取 `value` 里的必填非空字符串字段（缺失/非字符串/空白 → -32602）。
 fn require_value_str(value: &Value, field: &str) -> Result<String, (i64, String)> {
     value
@@ -353,7 +389,11 @@ fn config_set_schema() -> Value {
     ipFilter 额外支持 op=set/add-blacklist/add-whitelist/remove-blacklist/remove-whitelist；\
     routingProfiles 带 group_id 时对单组做 upsert（附 group）或删除（delete=true），否则写整份 profiles；\
     networkConfig 写的是**持久化**网络层配置（PUT /api/network/config/{config_id}），\
-    与只读 aigx_config_view.networkConfig（读的是网络层**生效**配置 data.config）**并非同一端点**，两者非互逆"
+    与只读 aigx_config_view.networkConfig（读的是网络层**生效**配置 data.config）**并非同一端点**，两者非互逆；\
+    settings.replace_all=true 会**先清空全部自定义模型映射**再写入本次 mappings（**缺 mappings 即等于清空**），\
+    只想增改单条就**不要**传 replace_all（默认 false = 逐条 upsert）；\
+    networkConfig 的 config_id **必填但当前被 handler 忽略**（该端点只有单份持久化配置，\
+    路由上的 {config_id} 是装饰性参数），enabled **必填**，且 **enabled=false 会停全站数据面**"
             }
         },
         "required": ["key", "value"]
@@ -438,6 +478,33 @@ mod tests {
                 .contains("并非同一端点"),
             "networkConfig 读写源不同必须写进 value 描述"
         );
+        // 破坏性语义（lead 独立扫 17 个请求体只命中两处）：必须写死进描述与工具描述，
+        // 防被当作无害开关。needle 运行时拼接，避免测试自身在扫描文本里自匹配。
+        let value_desc = config_set_schema()["properties"]["value"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        for needle in [
+            ["先清空全部", "自定义模型映射"].concat(),
+            ["缺 mappings", "即等于清空"].concat(),
+            ["config_id ", "**必填但当前被 handler 忽略**"].concat(),
+            ["enabled=false ", "会停全站数据面"].concat(),
+            ["并非同一端点", ""].concat(),
+        ] {
+            assert!(
+                value_desc.contains(&needle),
+                "value 描述缺少破坏性语义: {needle}"
+            );
+        }
+        for needle in [
+            ["settings.replace_all=true ", "会"].concat(),
+            ["networkConfig.enabled=false ", "会"].concat(),
+        ] {
+            assert!(
+                t.description.contains(&needle),
+                "工具描述缺少破坏性语义: {needle}"
+            );
+        }
         // 读侧对称：key enum 必须与只读 aigx_config_view 同名（本工具的 key 全部在该工具 intents 内）
         let view = find_tool("aigx_config_view").expect("aigx_config_view 未注册");
         let view_src = include_str!("observe.rs");
@@ -478,6 +545,21 @@ mod tests {
             .collect();
         assert_eq!(listed, CONFIG_SET_KEYS.to_vec(), "schema enum 与常量漂移");
         assert_eq!(CONFIG_SET_KEYS.len(), 26, "key 数变化需同步台账删行");
+    }
+
+    /// 「调」侧：破坏性效果摘要必须真的挂进结果（纯函数，免 AppState）。
+    #[test]
+    fn uc_with_effect_injects_summary() {
+        let v = with_effect(
+            json!({ "success": true, "data": null }),
+            json!({ "upserted": 2 }),
+        );
+        assert_eq!(v["effect"]["upserted"], json!(2), "effect 未注入");
+        assert_eq!(v["success"].as_bool(), Some(true), "原响应字段丢失");
+        assert!(v["data"].is_null());
+        // 非对象响应也保 effect 可见（包一层）
+        let v2 = with_effect(json!(5), json!({ "cleared_all": true }));
+        assert_eq!(v2["effect"]["cleared_all"].as_bool(), Some(true));
     }
 
     /// 「列 + 调」：ipFilter / routingProfiles 两个折叠 key 的子动作分派必须齐全
