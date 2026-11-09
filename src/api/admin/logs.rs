@@ -840,6 +840,24 @@ fn tz_migrate_notices(
     ]
 }
 
+/// 报表时区迁移的「顺序坑」前置判定（纯函数，便于单测钉死「顺序坑 ⇒ 400」而不构造 `AppState`）。
+///
+/// 迁移必须「先在「设置 → 报表」保存 `offset_to` 并生效，再调本端点」——重算用的口径必须与
+/// 运行期入口径同源，否则重启后配置回退、数据和运行期又错开。这是**调用方错误**（client
+/// error）⇒ 与同 handler 的入参越界检查同惯例，返回 400（`tz_migrate_notices` 的文案也正是
+/// 这么承诺的）。`LogStore::tz_migrate` 内部的 `ensure!` **保留**作纵深防御（存储故障仍 500）。
+fn tz_migrate_order_precheck(current: i32, offset_to: i32) -> Result<(), String> {
+    if current == offset_to {
+        Ok(())
+    } else {
+        // 文案与 `LogStore::tz_migrate` 的 ensure!（log/mod.rs）逐字一致——
+        // e2e（report-tz-settings.spec.ts）把 400 body 的这句钉死了，别改字。
+        Err(format!(
+            "目标偏移 {offset_to} 与当前生效口径 {current} 不一致：请先在报表设置里保存偏移，再调迁移端点"
+        ))
+    }
+}
+
 /// POST /api/logs/agg/tz-migrate — 报表时区迁移（#20，逃生门，写操作）。
 ///
 /// 与 `/api/logs/agg/rebuild` 的关系：rebuild 只按**当前**口径重算历史日，
@@ -872,6 +890,19 @@ pub async fn handle_agg_tz_migrate(
                 StatusCode::BAD_REQUEST,
             ));
         }
+    }
+    // 顺序坑（契约 50-report-tz-impl.md §120/224/239）：目标偏移必须已先保存并生效——
+    // 属调用方错误 ⇒ **400**（与本 handler 的越界检查同惯例；`tz_migrate_notices` 的文案
+    // 亦承诺「否则本端点直接 400」）。`tz_migrate` 内部的 `ensure!` 保留作纵深防御；
+    // 真·存储故障（earliest_day/delete_day_range/backfill_history/set_tz_marker）
+    // 仍走下面 map_err 的 **500**，不得一律改 400。
+    if let Err(msg) = tz_migrate_order_precheck(crate::config::report_tz_offset(), offset_to) {
+        // 状态码 400（client 前置违例），body 形状与存储故障路径同构（"Agg tz migrate failed: {msg}"），
+        // 供 e2e 桩逐字对齐（report-tz-settings.spec.ts 钉住了这句）。
+        return Err(error_response(
+            &format!("Agg tz migrate failed: {msg}"),
+            StatusCode::BAD_REQUEST,
+        ));
     }
     let report = state
         .log_store
@@ -1177,6 +1208,59 @@ mod tests {
         assert!(
             store.audits.list().iter().any(|a| a.id == "aud-keep"),
             "清请求日志不得动审计证据"
+        );
+    }
+
+    // ── 顺序坑返 400（#10 裁定）与「存储故障仍 500」的守卫 ──────────────────
+
+    /// 顺序坑（`offset_to` ≠ 当前生效口径）是**调用方错误** ⇒ 400 判定；文案与 e2e
+    /// 钉死的那句逐字一致（前缀 "Agg tz migrate failed: " 由 handler 补）。
+    #[test]
+    fn tz_migrate_order_pitfall_is_client_error() {
+        assert!(tz_migrate_order_precheck(8, 8).is_ok());
+        assert!(tz_migrate_order_precheck(0, 0).is_ok());
+        let msg = tz_migrate_order_precheck(5, 8).expect_err("offset_to≠当前口径必须报错");
+        assert_eq!(
+            msg, "目标偏移 8 与当前生效口径 5 不一致：请先在报表设置里保存偏移，再调迁移端点",
+            "400 文案必须与 e2e 桩 / log::LogStore::tz_migrate 的 ensure! 逐字对齐"
+        );
+    }
+
+    /// handler 侧接线 + 「存储故障仍 500」的静态守卫（不构造 `AppState`，故源锚定）：
+    /// ① 顺序坑前置**既定义又被 handler 调用**（不是没人调的纯函数）；② 顺序坑出口 body
+    /// 与存储路径同构（"Agg tz migrate failed: {msg}"）；③ 存储故障的 `map_err` 仍落
+    /// `INTERNAL_SERVER_ERROR`（不得一律改 400）；④ `log::LogStore::tz_migrate` 的 `ensure!`
+    /// 保留（纵深防御，且位于 earliest_day/写入之前 ⇒ 顺序坑**零写入**）。
+    #[test]
+    fn tz_migrate_order_precheck_wired_400_and_storage_faults_stay_500() {
+        let src = include_str!("logs.rs");
+        // ① 前置判定真的接进 handler（锚 handler 调用点，避开本测试自身的调用干扰）
+        let wired: String = [
+            "tz_migrate_order_precheck(crate::config::report_tz",
+            "_offset(), offset_to)",
+        ]
+        .concat();
+        assert!(
+            src.contains(&wired),
+            "tz_migrate_order_precheck 没接进 handler（只定义了个没人调的纯函数）"
+        );
+        // ② 顺序坑 400 出口（body 与存储路径同构）
+        let order_400: String = ["&format!(\"Agg tz migrate ", "failed: {msg}\")"].concat();
+        assert!(
+            src.contains(&order_400),
+            "顺序坑 400 出口需与存储路径同构（Agg tz migrate failed: …）"
+        );
+        // ③ 存储故障仍 500
+        let internal: String = ["StatusCode::INTERNAL", "_SERVER_ERROR"].concat();
+        assert!(
+            src.contains(&internal),
+            "存储故障必须仍走 INTERNAL_SERVER_ERROR（不得一律改 400）"
+        );
+        // ④ store 层 ensure! 保留（纵深防御；在写入之前 ⇒ 顺序坑零写入）
+        let store = include_str!("../../log/mod.rs");
+        assert!(
+            store.contains("与当前生效口径"),
+            "log::LogStore::tz_migrate 的 ensure! 被删了——纵深防御丢失"
         );
     }
 }
