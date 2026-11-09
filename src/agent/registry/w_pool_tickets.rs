@@ -19,10 +19,20 @@
 //!   `ticket_msg:*`，并把 `reply_status` 置 `REPLY_WAIT_USER`（`:228-232`）。
 //! - `admin::handle_admin_close_ticket`（`tickets.rs:294`）→ `:301` `ticket_store.close`
 //!   → `ticket/mod.rs:249-258` 写 `ticket:*`（`status=1`）。
-//! - 用户侧可见出口：`handle_user_list_tickets`（`tickets.rs:55`）在 `?id=` 时回
-//!   `data.message`（`tickets.rs:69-79`）—— 管理员回复即呈现给该工单的用户。
+//! - 用户侧可见出口（**因果证据**）：`handle_user_list_tickets`（`tickets.rs:55-88`）
+//!   在 `q.id` 非空时鉴权后取 `ticket_store.messages(&ticket.id)`，把 `message_json`
+//!   数组塞进 `data["message"]` 回给调用者（`tickets.rs:69-79`）⇒ 管理员（= AI 经审批后）
+//!   写入的文本会被**该工单的真实用户**读到。**注意这是 pull：用户主动轮询自己的工单时
+//!   才读到，不是推送**（无 webhook / 邮件 / 站内通知），不要把本条误读成「有外发通道」。
 //! - 全链**无** `notify`/`email`/`webhook`/`push`/站内通知行（`ticket/mod.rs` 内 0 命中；
 //!   `ticket_store` 的写入点仅 `tickets.rs` 各 handler + `users.rs:370` 删除）。
+//!   `tickets.rs` 内 `email` 仅作管理员列表的**只读查询过滤**（`:204` 字段、`:238-241` 用其
+//!   查用户），**零外发通道**。
+//!
+//! 该结论经 **lead 独立复核**（2026-11-09，tip `f992bbea`；重走两遍调用链、并另跑
+//! `grep -n "notify\|email\|mail\|webhook\|slack\|telegram\|push\|站内\|通知"
+//! src/api/admin/tickets.rs` 确认仅命中只读查询）⇒ 由「owner 主张」升级为
+//! **双人独立核到同一结论**；owner 原始取证时点为 2026-11-09（提交 `f0b51ec2` 前）。
 //!
 //! `handle_pool_test` / `handle_pool_test_account` **不在本工具**：57 §2 G3 与任务 #5 把探活族
 //! 归 `aigx_probe`（U-A，HIGH），本工具不重复覆盖其路由（同一路由两工具 owns 会让模型选错）。
