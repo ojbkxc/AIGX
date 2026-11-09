@@ -41,9 +41,13 @@ jobs:
       # 双向硬断言（见 tools/extract_routes.py 模块 docstring）：
       #   真实路由 ⊆ 文档 ∪ 豁免   （新路由未登记且未豁免 → 红）
       #   文档 ⊆ 真实路由           （文档虚构了不存在的路由 → 红）
+      #   工具 covers ⊆ 真实路由     （#35 批3 B3-1：工具声明的覆盖不得指向
+      #                              已删/从未存在的路由 → 幽灵 covers 红）
       # 补上单测 covers_all_real_admin_routes 管不到的那一段：单测只保证
       # 「文档 ↔ real_admin_routes() 清单」相等，管不到「清单 ↔ main.rs 真实
       # 路由」；两边一起漏登时断言仍绿，本闸门静态提取真实路由来兜底。
+      # 同理 covers ⊆ 真实路由 原先只有单测 tool_covers_point_at_real_routes
+      # 在盯，跳过 cargo test 就没人管（批1 的 /api/keys 幽灵即如此）。
       - name: "Gate: admin routes documented or explicitly exempt"
         run: python tools/extract_routes.py .
 

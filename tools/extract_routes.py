@@ -9,14 +9,20 @@ axum 0.7 没有运行时枚举全部路由的 API，静态提取是唯一能拿�
   反向  文档 ⊆ 真实路由                   （文档不许虚构不存在的路由）
   附加  豁免条目必须真实存在、且不被写进文档（豁免不会腐烂成僵尸例外）
   附加  同路径的方法集合两侧一致           （只加 DELETE 忘写文档也会被抓）
+  附加  工具 covers ⊆ 真实路由             （#35 批3 B3-1：工具声明的覆盖不得指向
+                                          已删除/从未存在的路由；ghost covers）
 
 任一越界 → 打印差异并 exit 1（CI 闸门）。这补上了单测
 `covers_all_real_admin_routes` 管不到的那一段：单测只保证「文档 ↔ 清单」
 相等，管不到「清单 ↔ main.rs 真实路由」——两边一起漏登时断言仍绿。
+同理，工具 covers 的「必须命中真实路由」原先只有单测
+`tool_covers_point_at_real_routes` 在盯，跳过 cargo test 就没人管（批1 的
+`/api/keys` 幽灵就是这么活下来的）；本脚本把它升级为 CI 硬闸门。
 
 提取范围：
   - src/main.rs      （含 admin_routes / epay / stripe / openai / anthropic 等 merge 进来的 router）
   - src/agent/api.rs （agent 域独立 router，main.rs 里 .merge(crate::agent::api::router())）
+  - src/agent/registry/*.rs （工具声明；仅 `mod.rs` / `tests.rs` 除外。见 extract_covers）
 
 用法：
   python tools/extract_routes.py [repo_root]            # 闸门模式（默认，越界 exit 1）
@@ -40,6 +46,12 @@ ROUTE_FILES = [
 ]
 
 OPENAPI_RS = "src/api/admin/openapi.rs"
+
+# 工具声明：`td(name, label, desc, risk, target_key, covers, schema, exec)`
+# —— 第 6 个实参（下标 5）是 `&["/api/..."]`。仅 registry 目录下的子模块，
+# 排除 `mod.rs`（`td` 定义处）与 `tests.rs`（闸门测试，不声明工具）。
+REGISTRY_DIR = "src/agent/registry"
+REGISTRY_SKIP = frozenset({"mod.rs", "tests.rs"})
 
 # 路径字面量：只认以 / 开头的
 PATH_RE = re.compile(r'"([^"\\]*)"')
@@ -250,10 +262,47 @@ def extract_exempt(root: Path) -> dict[str, str]:
     return out
 
 
+def extract_covers(root: Path) -> list[tuple[str, str]]:
+    """抽取工具声明的 covers：返回 [(tool_name, cover_path)]（逐条，不去重）。
+
+    口径与单测 `registry/tests.rs::covers_index()` 相同——**精确路径**命中，
+    不做前缀匹配（前缀式匹配正是旧闸门虚报覆盖率的病根）。
+
+    要点（B3-1 踩过的两个坑）：
+    - **单条数组**（`&["/api/tokens"]`）没有尾逗号，用「先切实参再抽字符串」
+      而不是「按逗号切数组」——后者会漏掉单条（实测漏 87 条）。
+    - `td` 只出现在 registry 子模块里，且第一个实参必然是 `"aigx_*"` 字面量；
+      以此过滤可天然跳过注释里出现的 `td(...)` 字样（如 stub 文件头注释）。
+
+    找不到 registry 目录时返回 []（调用方按「扫描面缺失」判失败，见 collect）。
+    """
+    reg = root / REGISTRY_DIR
+    out: list[tuple[str, str]] = []
+    if not reg.is_dir():
+        return out
+    for f in sorted(reg.glob("*.rs")):
+        if f.name in REGISTRY_SKIP:
+            continue
+        src = f.read_text(encoding="utf-8", errors="replace")
+        for m in re.finditer(r"(?<![A-Za-z0-9_])td\s*\(", src):
+            args, _ = split_args(src, m.end())
+            if len(args) < 8:
+                continue
+            nm = PATH_RE.search(args[0])
+            if not nm or not nm.group(1).startswith("aigx_"):
+                continue
+            name = nm.group(1)
+            for c in PATH_RE.findall(args[5]):
+                if c.startswith("/"):
+                    out.append((name, c))
+    return out
+
+
 def collect(root: Path) -> dict:
     real = extract_repo(root)
     decl = extract_declared(root)
     exempt = extract_exempt(root)
+    covers = extract_covers(root)
 
     real_api = {p: m for p, m in real.items() if p.startswith("/api")}
 
@@ -268,6 +317,21 @@ def collect(root: Path) -> dict:
         if real_api[p] != decl[p]
     }
 
+    # 工具 covers ⊆ 真实路由（不含 `/api` 前缀过滤——covers 里有 `/swagger-ui` 之类
+    # 非 /api 路径是合法的，比如未来 openapi 自描述工具）。判据与单测
+    # `tool_covers_point_at_real_routes` 一致：用 gate_universe 同源集合
+    # （真实路由全量，非 /api 子集）。
+    tool_names = {n for n, _ in covers}
+    ghost_covers = [
+        {"tool": n, "cover": c}
+        for n, c in covers
+        if norm_path(c) not in real
+    ]
+    # 空集哨兵：covers 扫描面若塌成 0（registry 目录改名/解析口径分叉），
+    # `ghost_covers` 会因为「空集 ⊆ 任何集合」而恒空 ⇒ 假绿。必须显式判失败。
+    # 量级地板取 50（现网 111 条工具），远低于实际值，只在口径崩坏时触发。
+    covers_scan_empty = len(tool_names) < 50
+
     return {
         "real_api_total": len(real_api),
         "declared_total": len(decl),
@@ -278,6 +342,10 @@ def collect(root: Path) -> dict:
         "exempt_documented": exempt_documented,
         "exempt_blank_reason": blank_reason,
         "method_mismatch": method_mismatch,
+        "tools_total": len(tool_names),
+        "covers_total": len(covers),
+        "ghost_covers": ghost_covers,
+        "covers_scan_empty": covers_scan_empty,
     }
 
 
@@ -305,19 +373,25 @@ def report_human(res: dict, out=sys.stdout) -> None:
     print(f"[F] 路径同、方法集不同: {len(res['method_mismatch'])}", file=out)
     for p, d in sorted(res["method_mismatch"].items()):
         print(f"    {p:60s} real={','.join(d['real'])} doc={','.join(d['doc'])}", file=out)
+    print(
+        f"[G] 工具 covers 幽灵（covers 指向不存在的路由）: {len(res['ghost_covers'])}"
+        f"   [工具 {res['tools_total']} 条 / covers {res['covers_total']} 条]",
+        file=out,
+    )
+    for g in res["ghost_covers"]:
+        print(f"    {g['tool']:36s} → covers {g['cover']}", file=out)
 
 
 def has_violation(res: dict) -> bool:
-    return any(
-        res[k]
-        for k in (
-            "undocumented_real",
-            "phantom_documented",
-            "stale_exempt",
-            "exempt_documented",
-            "exempt_blank_reason",
-            "method_mismatch",
-        )
+    return bool(
+        res["undocumented_real"]
+        or res["phantom_documented"]
+        or res["stale_exempt"]
+        or res["exempt_documented"]
+        or res["exempt_blank_reason"]
+        or res["method_mismatch"]
+        or res["ghost_covers"]
+        or res["covers_scan_empty"]
     )
 
 
@@ -355,17 +429,21 @@ def main() -> int:
         return 0
 
     if has_violation(res):
-        print(
-            "\nROUTE-GATE FAIL：真实路由 / 文档清单 / 豁免表 三方不一致（见上 A–F）。\n"
+        msg = (
+            "\nROUTE-GATE FAIL：真实路由 / 文档清单 / 豁免表 / 工具 covers 不一致（见上 A–G）。\n"
             "  修法：新路由 → 加进 openapi.rs 的 real_admin_routes() 与 paths_* 文档；\n"
             "        有意不自描述 → 加进 EXEMPT 并写明理由；\n"
-            "        文档写了不存在的路由 → 删掉文档条目。",
-            file=sys.stderr,
+            "        文档写了不存在的路由 → 删掉文档条目；\n"
+            "        [G] 工具 covers 指向不存在的路由 → covers 改指真实路由（或删该条 covers）。\n"
+            "        [G] 若工具数是 0（扫描面塌陷）→ 检查 src/agent/registry/ 是否还在、"
+            "td() 解析口径是否与 tests.rs::covers_index() 分叉。"
         )
+        print(msg, file=sys.stderr)
         return 1
 
     print(
-        "\nROUTE-GATE OK：真实 ⊆ 文档∪豁免 ✓；文档 ⊆ 真实 ✓；方法与豁免表一致 ✓"
+        "\nROUTE-GATE OK：真实 ⊆ 文档∪豁免 ✓；文档 ⊆ 真实 ✓；方法与豁免表一致 ✓；"
+        "工具 covers ⊆ 真实路由 ✓"
     )
     return 0
 
