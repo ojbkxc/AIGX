@@ -302,7 +302,9 @@ jobs:
           check("Cargo.lock(aigx)", m.group(1) if m else "MISSING")
 
           check("package.json", json.load(open('frontend/package.json'))['version'])
-          check("package-lock.json", json.load(open('frontend/package-lock.json'))['version'])
+          _pl = json.load(open('frontend/package-lock.json'))
+          check("package-lock.json", _pl['version'])
+          check('package-lock.json packages[""]', _pl['packages']['']['version'])
           check("static/version.json", json.load(open('static/version.json'))['version'])
 
           print(f"VERSION={version}")
