@@ -1,7 +1,8 @@
 //! 路由覆盖率闸门与注册表防漂移测试（#35 批2 拆模块：从 registry.rs 的 `mod tests` 机械切出，模块名仍为 `tests`）。
 //!
 //! 两处 `include_str!` 相对路径已随目录下沉修正：`../../main.rs`（= src/main.rs）、
-//! `../api.rs`（= src/agent/api.rs）、`../mod.rs`（锚定 `exec_tool`/`exec_user_tool` 所在文件）。
+//! `../api.rs`（= src/agent/api.rs）、`mod.rs`（同目录 `registry/mod.rs`，锚定
+//! `exec_tool`/`exec_user_tool` 所在文件；注意是本目录而非 `../`）。
 
 use super::*;
 
@@ -869,7 +870,7 @@ fn disabled_reject_blocks_direct_calls_with_runner_wording() {
 /// 这条立刻红，避免「判定函数还在、但没人调」这种约定安全退化的样子。
 #[test]
 fn exec_entries_are_structurally_gated() {
-    let src = include_str!("../mod.rs");
+    let src = include_str!("mod.rs");
     for entry in ["pub async fn exec_tool(", "pub async fn exec_user_tool("] {
         let at = src
             .find(entry)
