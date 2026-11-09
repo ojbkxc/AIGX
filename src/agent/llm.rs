@@ -225,8 +225,7 @@ pub async fn chat_once_as(
     let model = effective_model(state, config)?;
     let rounds = config
         .transient_retry_rounds
-        .max(1)
-        .min(MAX_TRANSIENT_RETRY_ROUNDS);
+        .clamp(1, MAX_TRANSIENT_RETRY_ROUNDS);
     let mut last_msg = String::new();
     let mut last_recoverable = false;
 
@@ -345,7 +344,7 @@ async fn try_candidates(
             .map(|_| serde_json::json!("auto"));
         let mut req = ChatFormat {
             model: upstream.clone(),
-            messages: messages.clone(),
+            messages: messages.to_vec(),
             tools: tools.clone(),
             max_tokens: None,
             temperature: None,
@@ -375,7 +374,7 @@ async fn try_candidates(
                     state,
                     key_id,
                     &request_id,
-                    &model,
+                    model,
                     &upstream,
                     cand.channel_id.as_deref(),
                     cand.channel.as_ref().map(|c| c.name.as_str()),
@@ -401,7 +400,7 @@ async fn try_candidates(
                     state,
                     key_id,
                     &request_id,
-                    &model,
+                    model,
                     &upstream,
                     cand.channel_id.as_deref(),
                     cand.channel.as_ref().map(|c| c.name.as_str()),
@@ -552,6 +551,7 @@ pub fn system_message(content: String) -> ChatMessage {
 #[cfg(test)]
 mod tests {
     use super::{effort_level, keep_global_candidate, AgentLlmError};
+    use crate::config::AgentConfig;
 
     #[test]
     fn effort_level_only_accepts_known_levels() {
@@ -596,11 +596,16 @@ mod tests {
     /// 待越长（给上游恢复时间）；③有 15s 硬上限（避免一次对话卡太久）。
     #[test]
     fn retry_backoff_is_linear_capped_and_never_zero() {
-        let mut cfg = AgentConfig::default();
-        cfg.retry_interval_ms = 0;
+        let cfg = AgentConfig {
+            retry_interval_ms: 0,
+            ..Default::default()
+        };
         assert_eq!(super::retry_backoff(&cfg, 1), 1000, "0 配置须兜底 1s");
         assert_eq!(super::retry_backoff(&cfg, 2), 2000);
-        cfg.retry_interval_ms = 500;
+        let mut cfg = AgentConfig {
+            retry_interval_ms: 500,
+            ..Default::default()
+        };
         assert_eq!(super::retry_backoff(&cfg, 3), 1500);
         assert_eq!(super::retry_backoff(&cfg, 4), 2000);
         // 上限：基数再大也不超过 15s
