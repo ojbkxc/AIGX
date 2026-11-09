@@ -312,19 +312,6 @@ const EXEMPT_PREFIXES: &[(&str, &str)] = &[
 /// 那样半年后没人记得某条为什么被豁免。
 const KNOWN_GAPS: &[(&str, &[&str])] = &[
         (
-            "批 2·写侧配置族（改完全局热生效，按批1定调②一律 HighRisk 进审批）",
-            &[
-                "/api/chat/settings",
-                "/api/zcode/captcha-pool",
-                "/api/network/config/{config_id}",
-                "/api/ip/blacklist",
-                "/api/ip/blacklist/{pattern}",
-                "/api/ip/whitelist",
-                "/api/ip/whitelist/{pattern}",
-                "/api/routing/profiles/group/{id}",
-            ],
-        ),
-        (
             "批 2·写侧资源族（单对象增删改；可逆且作用域受限的才逐条论证降 LowRisk）",
             &[
                 "/api/channels/{id}/patch",
@@ -426,12 +413,6 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
             ],
         ),
         (
-            "批 2·观测补漏（需具体账号 ID、账号缺席即 404 的窄视图，等批 2 一起定 enum 口径）",
-            &[
-                "/api/zcode/captcha/config",
-            ],
-        ),
-        (
             "批 3·形状不合（handler 不吃 State / 返回裸 Json 而非 HandlerResult / 公开探测接口），要工具化得先改 handler",
             &[
                 "/api/users/check",
@@ -446,35 +427,6 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
 /// 这也是 lead 裁定②（写侧 config 族一律 HighRisk 进审批）的机器化落点，
 /// 免得「哪些写侧要给、给什么级别」退化成口头知识。
 const WRITE_SIDE_PENDING: &[(&str, &[&str])] = &[
-        (
-            "批 2·写侧配置族（lead 裁定②：全局热生效的 config 一律 HighRisk 进审批；读侧已由 aigx_config_view 提供）",
-            &[
-                "/api/settings",
-                "/api/limits",
-                "/api/security/policy",
-                "/api/sanitize",
-                "/api/gateway/settings",
-                "/api/gateway/prompt",
-                "/api/update/settings",
-                "/api/logs/retention",
-                "/api/queue",
-                "/api/ratelimit/config",
-                "/api/ratios",
-                "/api/ip/filter",
-                "/api/notify/config",
-                "/api/cline-headers",
-                "/api/user-tools/policy",
-                "/api/routing",
-                "/api/routing/profiles",
-                "/api/alerts/rules",
-                "/api/pricing/sync-config",
-                "/api/pricing/exchange-rates",
-                "/api/models/metadata",
-                "/api/debug",
-                "/api/report/settings",
-                "/api/checkin-center/benefits/keepalive",
-            ],
-        ),
         (
             "不给 AI 面·证据销毁族（按显式 ids 定向销毁证据＝可挑着删对自己不利的几条 ⇒ 不给 AI 面、不补工具；只允许 before 时间窗 + 单次限量的 clear 语义）",
             &[
@@ -492,9 +444,12 @@ const WRITE_SIDE_PENDING: &[(&str, &[&str])] = &[
             ],
         ),
         (
-            "不给 AI 面·Agent 自身边界（lead 裁定①：只读给 aigx_agent_self_status，PUT /api/agent/settings 永不让 AI 改自己）",
+            "不给 AI 面·Agent 自身边界（lead 裁定①：只读给 aigx_agent_self_status，PUT /api/agent/settings 永不让 AI 改自己；`/api/user-tools/policy` 同族——改它=改 AI 自己的可执行面/权限边界，只读仍由 aigx_config_view 提供）",
             &[
                 "/api/agent/settings",
+                // lead 裁定（#34 U-C sub-decision 1）：终端用户工具 allowlist 属 AI 自身边界，
+                // 从「批 2·写侧配置族」移入本组（移动，不是补工具）
+                "/api/user-tools/policy",
             ],
         ),
     ];
