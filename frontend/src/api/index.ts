@@ -122,6 +122,8 @@ import type {
 } from '@/types/routing-profile';
 // 桌面导入来源类型（#22；独立文件理由同上）
 import type { DesktopSourceItem } from '@/types/desktop';
+// 报表时区设置类型（#20；独立文件理由同上：types/index.ts 正被 #13 并行编辑）
+import type { ReportSettingsItem, TzMigrateResult } from '@/types/report-tz';
 // 工具调用 / usage 帧适配层（#63；回灌层未定，形状变更只改适配层）
 import { extractToolCalls, extractUsage, type ToolCallWireMode } from '@/lib/toolCallAdapter';
 
@@ -859,6 +861,17 @@ export const api = {
     request<ApiResponse<ChatSettingsItem>>('GET', `${API_BASE}/chat/settings`),
   saveChatSettings: (data: Record<string, unknown>): Promise<ApiResponse<ChatSettingsItem>> =>
     request<ApiResponse<ChatSettingsItem>>('PUT', `${API_BASE}/chat/settings`, data),
+  /** 报表时区设置（/api/report/settings，#20 批3）：GET 响应 camelCase（六键），
+   *  PUT body snake_case（同 chat/agent 面；也收 camelCase 别名），缺省字段保持原值，
+   *  保存即热生效（后端写进程快照，无需重启）。越界 400。 */
+  getReportSettings: (): Promise<ApiResponse<ReportSettingsItem>> =>
+    request<ApiResponse<ReportSettingsItem>>('GET', `${API_BASE}/report/settings`),
+  saveReportSettings: (data: Record<string, unknown>): Promise<ApiResponse<ReportSettingsItem>> =>
+    request<ApiResponse<ReportSettingsItem>>('PUT', `${API_BASE}/report/settings`, data),
+  /** 存量聚合行重算（逃生门，写操作，幂等）：POST /api/logs/agg/tz-migrate。
+   *  offset_to 缺省＝当前生效口径（须与已保存一致，否则报错零写入）；offset_from 缺省 0。 */
+  migrateAggTimezone: (data: Record<string, unknown>): Promise<TzMigrateResult> =>
+    request<TzMigrateResult>('POST', `${API_BASE}/logs/agg/tz-migrate`, data),
   getGatewaySettings: (): Promise<ApiResponse<GatewaySettingsItem>> =>
     request<ApiResponse<GatewaySettingsItem>>('GET', `${API_BASE}/gateway/settings`),
   saveGatewaySettings: (data: Record<string, unknown>): Promise<ApiResponse<GatewaySettingsItem>> =>

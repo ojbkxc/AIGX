@@ -4,7 +4,7 @@ import {
   Monitor, Sun, Moon,
   SlidersHorizontal, Sparkles, Network, RotateCcw,
   Timer, Gauge, CreditCard, Database, Bell, ShieldCheck, Download, User,
-  MessageSquare,
+  MessageSquare, CalendarClock,
 } from 'lucide-react';
 import { api } from '../api';
 import { useToast } from '../components/Toast';
@@ -22,6 +22,7 @@ import LogRetention from './LogRetention';
 import UpdatePanel from '../components/UpdatePanel';
 import AgentSettingsPanel from '../components/AgentSettingsPanel';
 import ChatSettingsPanel from '../components/ChatSettingsPanel';
+import ReportSettingsPanel from '../components/ReportSettingsPanel';
 import GatewayPanel from '../components/GatewayPanel';
 import SanitizePanel from '../components/SanitizePanel';
 import ClineHeadersPanel from '../components/ClineHeadersPanel';
@@ -97,6 +98,7 @@ type SettingsTab =
   | 'general'
   | 'assistant'
   | 'chat'
+  | 'report'
   | 'gateway'
   | 'retry'
   | 'timeout'
@@ -182,6 +184,7 @@ const SETTINGS_CATEGORIES: Array<{ key: SettingsTab; label: string; icon: typeof
   { key: 'general', label: '通用', icon: SlidersHorizontal },
   { key: 'assistant', label: 'AI 助手', icon: Sparkles },
   { key: 'chat', label: '聊天', icon: MessageSquare },
+  { key: 'report', label: '报表', icon: CalendarClock },
   { key: 'gateway', label: '网关', icon: Network },
   { key: 'retry', label: '重试', icon: RotateCcw },
   { key: 'timeout', label: '超时', icon: Timer },
@@ -1067,6 +1070,7 @@ export default function Settings() {
       {activeTab === 'assistant' && <AgentSettingsPanel />}
 
       {activeTab === 'chat' && <ChatSettingsPanel />}
+      {activeTab === 'report' && <ReportSettingsPanel />}
 
       {activeTab === 'data' && (
         <>

@@ -54,6 +54,63 @@ const EMPTY_LIST = JSON.stringify({ success: true, data: [], total: 0, page: 1, 
 // GET 响应 camelCase；PUT body snake_case（后端 ChatConfig serde），桩内互映射。
 const CHAT_SETTINGS = { autoTitle: false, titleModel: '', titleChannel: '', titlePromptChars: 500 };
 
+// ── 报表时区设置（GET/PUT /api/report/settings + POST /api/logs/agg/tz-migrate，#20 批3）──
+// 三口径状态机，逐字段对齐真实产出方（对账基线 2026-11-09，tip `ee4ca78f` 实读）：
+//   · `report_settings_json`（src/api/admin/settings.rs:626-637）——GET/PUT 响应的六个键；
+//   · `handle_update_report_settings`（settings.rs:661-696）——PUT 保存即写进程快照＝热生效，
+//     且**不碰** storedOffset（存量重算不在本端点职责内，需管理员显式调迁移端点）；
+//   · `handle_agg_tz_migrate`（src/api/admin/logs.rs:695-750）+ `LogStore::tz_migrate`
+//     （src/log/mod.rs:1870-1900）——幂等短路（标记已等于目标偏移 ⇒ 不删不回填）、
+//     顺序坑（offset_to ≠ 当前快照 ⇒ 报错且零写入）、四条坑提示逐字回给调用方。
+// 初始态镜像「升级后的老库尚未操作」：快照=缺省 8、标记=null（老库从没记过口径）⇒
+// needsMigration 保守为 true。迁移窗口的 earliest 用三条存量聚合日（固定日期，恒早于
+// 任何「昨天」）⇒ 首次迁移 window_applied=true、rows_deleted=3；第二次调用走幂等短路。
+// ⚠️ 已知文档偏差（已报 lead）：50-report-tz-impl.md §3.1/§6.3 与坑 1 文案写「顺序坑 ⇒ 直接 400」，
+//    但 handler 实际把 `tz_migrate` 的 anyhow 错误映射成 500（logs.rs:720-728）；本桩照现码走 500。
+// ⚠️ 非整数 body：axum `JsonDataError` ⇒ **422 + text/plain**（axum-0.7.9 rejection.rs:11-19，
+//    `(status, String).into_response()`），不是 400 JSON——前端数字输入框产出带小数时真实后端
+//    就是这个反应，桩照此建模（message 的 position 后缀省略，测试只钉前缀与状态码）。
+const REPORT_TZ_SEED = { cfgOffset: 8, effOffset: 8, storedOffset: null };
+let reportTz = { ...REPORT_TZ_SEED };
+/** 存量聚合行样本日（迁移窗口的最早日判据；固定日期 ⇒ 断言确定） */
+const REPORT_AGG_DAYS = ['2025-10-01', '2025-10-15', '2025-10-31'];
+
+/** 报表日键（镜像 `daily_agg::date_key_at`：now 平移到目标偏移再取 UTC 日期） */
+const reportDayKey = (offset, backDays = 0) => {
+  const shifted = new Date(Date.now() + offset * 3600_000 - backDays * 86400_000);
+  return shifted.toISOString().slice(0, 10);
+};
+
+/** 报表设置响应的规范形状（镜像 settings.rs:626-637；effectiveOffset 读进程快照） */
+const reportSettingsJson = (cfgOffset, storedOffset) => ({
+  timezoneOffset: cfgOffset,
+  effectiveOffset: reportTz.effOffset,
+  storedOffset,
+  needsMigration: storedOffset !== reportTz.effOffset,
+  minOffset: -12,
+  maxOffset: 14,
+});
+
+/** serde_json 的 Unexpected 类型词与值展示（照 serde 的 unexpected.rs 逐型） */
+const serdeTypeDesc = (v) => {
+  if (typeof v === 'number') return `floating point \`${v}\``;
+  if (typeof v === 'string') return `string "${v}"`;
+  if (typeof v === 'boolean') return `boolean \`${v}\``;
+  if (Array.isArray(v)) return 'sequence';
+  return 'map';
+};
+
+/** 迁移响应的四条坑（逐字照抄 logs.rs:665-685 的 `tz_migrate_notices`） */
+const tzMigrateNotices = (offsetTo, effectiveFrom, windowTo, today) => {
+  const off = `${offsetTo >= 0 ? '+' : ''}${offsetTo}`;
+  return [
+    `顺序坑：目标偏移 UTC${off} 必须先在「设置 → 报表」保存并生效，否则本端点直接 400（重算用的口径必须与运行期写入口径同源，否则重启后配置回退、数据和运行期又错开）。`,
+    `分裂窗口：升级到本次调用之间，报表是新旧两套口径混排——新到日志已按 UTC${off} 归日，存量聚合行仍停在旧口径。本次重算区间 [${effectiveFrom}, ${windowTo}] 闭合该窗口。`,
+    `切换当日偏低、次日自愈：回填与迁移都不覆盖今天（${today} 归运行期记账），所以切换当日的报表只包含切换之后到达的请求。`,
+    `先删后算：区间 [${effectiveFrom}, ${windowTo}] 内的旧口径聚合行是**先删除再回填**的。回填自带 shrink 守卫（既有行计数更大就保留不动），不先删就会把旧口径的大值原样留下、等于没迁；若 data.backfill.skipped_shrink 非 0，说明区间外还有被守卫拦住的行，需人工核对明细是否已被 retention 裁过。`,
+  ];
+};
+
 // ── 统一模型管理视图（形状对齐 src/model/manage.rs 的 view_json）──
 // 给两条渠道来源 + 一条账号池来源，用于验证左栏分组、来源 chips、启停开关、
 // 「未定价」统计与搜索筛选。
@@ -853,6 +910,131 @@ function handle(req, res, p, bodyText) {
         return sendJson(res, { success: false, error: 'auto_title 开启时 title_prompt_chars 不能为 0' }, 400);
       }
       return sendJson(res, { success: true, data: CHAT_SETTINGS });
+    }
+
+    // ── 报表时区设置（#20 批3）──
+    // GET/PUT /api/report/settings：形状逐字段对齐 settings.rs 的 report_settings_json
+    // （:626-637）与 handle_update_report_settings（:661-696）；
+    // POST /api/logs/agg/tz-migrate：形状对齐 logs.rs:695-750 + log/mod.rs:1870-1900。
+    // 两处状态机语义：①PUT 保存即写快照（热生效），storedOffset 不动；
+    // ②tz-migrate 幂等短路（标记已等于目标偏移 ⇒ 不删不回填，notices/tzEffectiveFrom 与首次一致）。
+    // 非整数 body：axum JsonDataError ⇒ 422 + text/plain（不是 400 JSON，见上方状态机注释）。
+    if (p === '/api/report/settings' && req.method === 'GET') {
+      return sendJson(res, {
+        success: true,
+        data: reportSettingsJson(reportTz.cfgOffset, reportTz.storedOffset),
+      });
+    }
+    if (p === '/api/report/settings' && req.method === 'PUT') {
+      const body = JSON.parse(bodyText || '{}');
+      const raw = body.timezone_offset ?? body.timezoneOffset;
+      // null / 缺键 = 保持原值（与 Rust `Option<i32>` 的 serde 口径一致）
+      if (raw !== null && raw !== undefined) {
+        if (!Number.isInteger(raw)) {
+          res.writeHead(422, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end(
+            `Failed to deserialize the JSON body into the target type: invalid type: ${serdeTypeDesc(raw)}, expected i32`,
+          );
+        }
+        if (raw < -12 || raw > 14) {
+          return sendJson(
+            res,
+            { success: false, error: '报表时区偏移必须在 -12~14 之间（整数小时，UTC 偏移）' },
+            400,
+          );
+        }
+        // 保存即热生效：配置文件值与进程快照同时写（storedOffset 不动）
+        reportTz.cfgOffset = raw;
+        reportTz.effOffset = raw;
+      }
+      return sendJson(res, {
+        success: true,
+        data: reportSettingsJson(reportTz.cfgOffset, reportTz.storedOffset),
+      });
+    }
+    if (p === '/api/logs/agg/tz-migrate' && req.method === 'POST') {
+      const body = JSON.parse(bodyText || '{}');
+      const rawFrom = body.offset_from ?? body.offsetFrom;
+      const rawTo = body.offset_to ?? body.offsetTo;
+      // 缺省口径与后端一致：offset_to = 当前生效快照；offset_from = 0（生产现状 UTC+0）
+      const offsetFrom = rawFrom === null || rawFrom === undefined ? 0 : rawFrom;
+      const offsetTo = rawTo === null || rawTo === undefined ? reportTz.effOffset : rawTo;
+      for (const [v, label] of [
+        [offsetFrom, '旧口径 offset_from'],
+        [offsetTo, '新口径 offset_to'],
+      ]) {
+        if (!Number.isInteger(v)) {
+          res.writeHead(422, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end(
+            `Failed to deserialize the JSON body into the target type: invalid type: ${serdeTypeDesc(v)}, expected i32`,
+          );
+        }
+        if (v < -12 || v > 14) {
+          return sendJson(
+            res,
+            { success: false, error: `${label}=${v} 越界：必须在 -12~14 之间（整数小时，UTC 偏移）` },
+            400,
+          );
+        }
+      }
+      // 第 0 步（顺序坑）：目标偏移必须等于当前生效口径；后端 ensure! 失败被 handler
+      // 映射成 500（logs.rs:720-728）⇒ 本桩照现码走 500
+      if (offsetTo !== reportTz.effOffset) {
+        return sendJson(
+          res,
+          {
+            success: false,
+            error: `Agg tz migrate failed: 目标偏移 ${offsetTo} 与当前生效口径 ${reportTz.effOffset} 不一致：请先在报表设置里保存偏移，再调迁移端点`,
+          },
+          500,
+        );
+      }
+      const today = reportDayKey(reportTz.effOffset);
+      const windowTo = reportDayKey(reportTz.effOffset, 1);
+      const earliest = REPORT_AGG_DAYS.length > 0 ? REPORT_AGG_DAYS[0] : today;
+      const report = {
+        effective_from: earliest,
+        window_to: windowTo,
+        window_applied: false,
+        rows_deleted: 0,
+        backfill: { scanned: 0, days_written: 0, user_rows_written: 0, skipped_shrink: 0 },
+      };
+      // 幂等短路：标记已等于目标偏移（老库 null 时以调用方声明的旧口径兜底）⇒ 不删不回填
+      const stored = reportTz.storedOffset ?? offsetFrom;
+      if (stored === offsetTo) {
+        return sendJson(res, {
+          success: true,
+          data: report,
+          tzEffectiveFrom: report.effective_from,
+          today,
+          notices: tzMigrateNotices(offsetTo, report.effective_from, windowTo, today),
+        });
+      }
+      // 删窗口 [最早聚合日, 昨天]（先删后算）+ 回填 + 落标记
+      if (earliest <= windowTo) {
+        report.window_applied = true;
+        report.rows_deleted = REPORT_AGG_DAYS.length;
+      }
+      report.backfill = {
+        scanned: 128,
+        days_written: REPORT_AGG_DAYS.length,
+        user_rows_written: 6,
+        skipped_shrink: 0,
+      };
+      reportTz.storedOffset = offsetTo;
+      return sendJson(res, {
+        success: true,
+        data: report,
+        tzEffectiveFrom: report.effective_from,
+        today,
+        notices: tzMigrateNotices(offsetTo, report.effective_from, windowTo, today),
+      });
+    }
+
+    // E2E 状态复位：恢复报表时区桩预置态（写用例跨 project / 本地 reuseExistingServer 残留隔离）
+    if (p === '/api/__e2e/reset-report-tz' && req.method === 'POST') {
+      reportTz = { ...REPORT_TZ_SEED };
+      return sendJson(res, { success: true, data: null });
     }
 
     // #22：chat_test 后端双（两跳链路入口，此前该路径落到 EMPTY_LIST 兜底）
