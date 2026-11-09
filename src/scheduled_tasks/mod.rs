@@ -526,31 +526,10 @@ async fn run_backend(state: &AppState, task: &TaskDef, manual: bool) -> Result<S
                 );
                 // 守卫2+守卫5：删除明细落 KV 快照（可回填）+ 日志留痕，绝不静默删
                 if !pruned.is_empty() {
-                    let mut restore = serde_json::Map::new();
-                    let mut deleted: Vec<Value> = Vec::with_capacity(pruned.len());
-                    for item in &pruned {
-                        deleted.push(json!({
-                            "channel_id": item.channel_id,
-                            "channel_name": item.channel_name,
-                            "alias": item.alias,
-                            "target": item.target,
-                        }));
-                        restore
-                            .entry(item.channel_id.clone())
-                            .or_insert_with(|| json!({}))
-                            .as_object_mut()
-                            .expect("restore 分组值恒为对象")
-                            .insert(item.alias.clone(), json!(item.target));
-                    }
-                    let snapshot = json!({
-                        "at": chrono::Utc::now().timestamp(),
-                        "trigger": "scheduled_task:modelRefresh",
-                        "limit": crate::channel::CHANNEL_PRUNE_LIMIT,
-                        "deleted_count": pruned.len(),
-                        "deleted": deleted,
-                        // 可直接灌回：{channel_id: {alias: target}}
-                        "restore": restore,
-                    });
+                    let snapshot = crate::channel::build_prune_snapshot(
+                        &pruned,
+                        chrono::Utc::now().timestamp(),
+                    );
                     if let Err(e) = state
                         .scheduled_task_store
                         .put("catalog:prune:last", &snapshot)

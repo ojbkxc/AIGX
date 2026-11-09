@@ -686,6 +686,39 @@ pub fn execute_channel_prune(
     removed
 }
 
+/// 构造删除快照（守卫2：删前落 KV，且**逐条可回填**）。
+///
+/// `deleted` = **实际删除**明细（由 [`execute_channel_prune`] 返回）——快照条数与
+/// 删除数**逐条一致**（不以计划值为准，避免"计划与实删不符"）。`restore` 是
+/// `{channel_id: {alias: target}}` 形态，可直接灌回对应渠道的 `model_mapping`。
+pub fn build_prune_snapshot(deleted: &[PrunedMapping], at: i64) -> serde_json::Value {
+    let mut restore = serde_json::Map::new();
+    let mut items: Vec<serde_json::Value> = Vec::with_capacity(deleted.len());
+    for item in deleted {
+        items.push(serde_json::json!({
+            "channel_id": item.channel_id,
+            "channel_name": item.channel_name,
+            "alias": item.alias,
+            "target": item.target,
+        }));
+        restore
+            .entry(item.channel_id.clone())
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .expect("restore 分组值恒为对象")
+            .insert(item.alias.clone(), serde_json::json!(item.target));
+    }
+    serde_json::json!({
+        "at": at,
+        "trigger": "scheduled_task:modelRefresh",
+        "limit": CHANNEL_PRUNE_LIMIT,
+        "deleted_count": deleted.len(),
+        "deleted": items,
+        // 可直接灌回：{channel_id: {alias: target}}
+        "restore": restore,
+    })
+}
+
 impl ChannelStore {
     pub fn new(store: Arc<FileStore>) -> Self {
         let s = Self {
@@ -2212,6 +2245,51 @@ mod tests {
             assert_eq!(round(&s), 1, "第 1 轮应删 1 条（dead）");
             assert_eq!(round(&s), 0, "守卫4：第 2 轮必须为 0（幂等）");
         });
+    }
+
+    /// #33 阶段2 **守卫2**：快照逐条对齐 + 可回填（`restore` 灌回即还原）。
+    #[test]
+    fn build_prune_snapshot_is_verbatim_and_restorable() {
+        let deleted = vec![
+            PrunedMapping {
+                channel_id: "c1".to_string(),
+                channel_name: "ch1".to_string(),
+                alias: "a".to_string(),
+                target: "t1".to_string(),
+            },
+            PrunedMapping {
+                channel_id: "c1".to_string(),
+                channel_name: "ch1".to_string(),
+                alias: "b".to_string(),
+                target: "t2".to_string(),
+            },
+            PrunedMapping {
+                channel_id: "c2".to_string(),
+                channel_name: "ch2".to_string(),
+                alias: "x".to_string(),
+                target: String::new(),
+            },
+        ];
+        let snap = build_prune_snapshot(&deleted, 123);
+        // 删除数 == 快照条数（逐条）
+        assert_eq!(snap["deleted_count"], 3u64);
+        let arr = snap["deleted"].as_array().expect("deleted 是数组");
+        assert_eq!(arr.len(), deleted.len());
+        for (got, want) in arr.iter().zip(deleted.iter()) {
+            assert_eq!(got["channel_id"], want.channel_id);
+            assert_eq!(got["channel_name"], want.channel_name);
+            assert_eq!(got["alias"], want.alias);
+            assert_eq!(got["target"], want.target);
+        }
+        // 可回填：restore = {channel_id: {alias: target}}，灌回即还原原 model_mapping
+        let restore = snap["restore"].as_object().expect("restore 是对象");
+        assert_eq!(restore["c1"]["a"], "t1");
+        assert_eq!(restore["c1"]["b"], "t2");
+        assert_eq!(restore["c2"]["x"], "");
+        // 留痕字段（守卫5）：轮次 at + 上限 limit + 触发者
+        assert_eq!(snap["at"], 123i64);
+        assert_eq!(snap["limit"], CHANNEL_PRUNE_LIMIT as u64);
+        assert_eq!(snap["trigger"], "scheduled_task:modelRefresh");
     }
 
     /// #40 §1 粗筛：`coarse` 在候选构造阶段裁渠道；`None` 与既有选取逐字节等价。
