@@ -329,12 +329,6 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
             &[
                 "/api/channels/{id}/patch",
                 "/api/groups/{name}",
-                "/api/models/meta/{model}",
-                "/api/models/custom",
-                "/api/models/custom/remove",
-                "/api/models/alias/reasoning",
-                "/api/models/alias/state",
-                "/api/models/capabilities",
                 "/api/accounts/{id}",
                 "/api/network/accounts/{account_id}",
                 "/api/proxy-pool/update",
@@ -357,17 +351,8 @@ const KNOWN_GAPS: &[(&str, &[&str])] = &[
         (
             "批 2·运维动作族（测活/刷新/清理/重建/终止；含上游真金，逐条论证）",
             &[
-                "/api/channels/chat_test",
-                "/api/channels/fetch_models",
-                "/api/models/refresh",
-                "/api/models/metadata/refresh",
-                "/api/models/test",
-                "/api/accounts/test",
-                "/api/proxy-pool/test",
-                "/api/proxy-pool/test-account",
                 "/api/routing/preview",
                 "/api/pricing/estimate",
-                "/api/pricing/sync",
                 "/api/network/restart",
                 "/api/checkin-center/schedules/run",
                 "/api/checkin-center/benefits/run",
@@ -501,12 +486,6 @@ const WRITE_SIDE_PENDING: &[(&str, &[&str])] = &[
                 "/api/debug",
                 "/api/report/settings",
                 "/api/checkin-center/benefits/keepalive",
-            ],
-        ),
-        (
-            "批 2·运维动作族（清理/重算：删日志、清流量缓冲、刷新汇总——可逆性差，逐条论证）",
-            &[
-                "/api/usage/summary",
             ],
         ),
         (
